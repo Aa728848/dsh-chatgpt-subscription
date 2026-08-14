@@ -6,6 +6,23 @@
     "name": "eddyskywalker",
     "url": "https://www.npmjs.com/~eddyskywalker"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aa728848/dsh-chatgpt-subscription.git"
+  },
+  "homepage": "https://github.com/Aa728848/dsh-chatgpt-subscription#readme",
+  "bugs": {
+    "url": "https://github.com/Aa728848/dsh-chatgpt-subscription/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "chatgpt",
+    "codex",
+    "openai",
+    "provider"
+  ],
   "type": "module",
   "publishConfig": {
     "access": "public",

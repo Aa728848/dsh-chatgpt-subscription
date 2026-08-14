@@ -50,14 +50,35 @@
 
 ## 安装
 
+### 方式 1：通过 DSH CLI 安装（推荐）
+
+直接从 npm 安装已发布的插件包：
+
 ```powershell
-cd C:\absolute\path\to\dsh-chatgpt-subscription
-npm install
-npm run build
-dsh plugin --profile web add link:C:\absolute\path\to\dsh-chatgpt-subscription
+# 如果全局安装了 dsh
+dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
+
+# 或使用 npx 直接运行
+npx @deepseek-ai/dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 ```
 
-如果本机没有 `dsh` CLI，请通过提供同等插件管理能力的 DSH 桌面版安装此目录；不要手工修改 DSH 核心文件。
+### 方式 2：通过 DSH 插件市场安装
+
+1. 打开 DSH 界面中的 **插件市场** / **Plugin Market**；
+2. 搜索 `@eddyskywalker/dsh-chatgpt-subscription` 或 `dsh-chatgpt-subscription`；
+3. 点击 **安装**。
+
+### 方式 3：本地开发调试（源码软链接）
+
+如需进行二次开发或本地源码调试：
+
+```powershell
+git clone https://github.com/Aa728848/dsh-chatgpt-subscription.git
+cd dsh-chatgpt-subscription
+npm install
+npm run build
+npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chatgpt-subscription"
+```
 
 ## 使用
 
