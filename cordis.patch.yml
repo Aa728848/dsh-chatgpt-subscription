@@ -1,0 +1,6 @@
+# Add exactly one dual-face plugin row to the DSH web profile. The host half
+# mounts OAuth/status routes; package.json's dsh.client declaration loads the
+# browser half from exports["./client"].
+- insert:
+    - id: dsh-chatgpt-subscription
+      name: '@linxin666/dsh-chatgpt-subscription'

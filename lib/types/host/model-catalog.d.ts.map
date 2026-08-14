@@ -1,0 +1,1 @@
+{"version":3,"file":"model-catalog.d.ts","sourceRoot":"","sources":["../../../src/host/model-catalog.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,YAAY,EAAE,oBAAoB,EAAE,MAAM,sBAAsB,CAAA;AAE9E,eAAO,MAAM,WAAW,EAAG,eAAwB,CAAA;AACnD,eAAO,MAAM,aAAa,EAAG,uCAA4B,CAAA;AA8BzD,wBAAgB,eAAe,IAAI,YAAY,EAAE,CAOhD;AAED,wBAAgB,iBAAiB,CAAC,KAAK,EAAE,MAAM,GAAG,oBAAoB,CAiBrE"}

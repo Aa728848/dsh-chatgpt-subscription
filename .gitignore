@@ -1,0 +1,28 @@
+# Dependencies and build caches
+node_modules/
+coverage/
+.npm-cache/
+*.tsbuildinfo
+
+# Duplicate compiler output; runtime bundles remain in lib/
+lib/types/**/*.js
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Logs and package archives
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tgz
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
