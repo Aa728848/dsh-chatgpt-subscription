@@ -36,6 +36,29 @@ describe('Responses streaming', () => {
     })
   })
 
+  it('strips speculative sandbox controls that were hidden from the tool schema', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      {
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'function_call', id: 'fc_pwsh', call_id: 'call_pwsh', name: 'pwsh',
+          arguments: '{"command":"git status","description":"Show status","sandbox_permissions":"workspace-write","justification":""}',
+        },
+      },
+      { type: 'response.completed', response: {} },
+    ]), undefined, new Set(['pwsh'])))
+    const argumentsJson = '{"command":"git status","description":"Show status"}'
+    expect(chunks).toContainEqual({
+      type: 'block-end', index: 0,
+      block: { type: 'tool-call', id: 'call_pwsh', name: 'pwsh', arguments: argumentsJson },
+    })
+    expect(chunks.at(-1)).toMatchObject({
+      replayState: {
+        outputItems: [{ type: 'function_call', call_id: 'call_pwsh', name: 'pwsh', arguments: argumentsJson }],
+      },
+    })
+  })
+
   it('never emits a completed tool call for malformed JSON arguments', async () => {
     const emitted: StreamChunk[] = []
     await expect((async () => {

@@ -8,15 +8,24 @@ export interface ResponsesPayload extends Record<string, unknown> {
   store: false
 }
 
+export function hiddenSandboxControlToolNames(options: GenerateOptions): Set<string> {
+  const retryTools = recentSandboxRetryToolNames(options.messages)
+  return new Set(options.tools
+    ?.filter((tool) => hasSandboxControls(tool.parameters) && !retryTools.has(tool.name))
+    .map((tool) => tool.name) ?? [])
+}
+
 export async function buildResponsesPayload(
   options: GenerateOptions,
   attachments: Pick<AttachmentStore, 'readImage'>,
 ): Promise<ResponsesPayload> {
+  const sandboxRetryTools = recentSandboxRetryToolNames(options.messages)
   const instructions = [
     options.system?.trim(),
     ...options.messages
       .filter((message) => message.role === 'system')
       .map((message) => blocksToText(message.content).trim()),
+    sandboxToolInstruction(options.tools, sandboxRetryTools),
   ].filter((value): value is string => Boolean(value))
 
   const input: Array<Record<string, unknown>> = []
@@ -78,7 +87,7 @@ export async function buildResponsesPayload(
       type: 'function',
       name: tool.name,
       description: tool.description,
-      parameters: tool.parameters,
+      parameters: toolParametersForCodex(tool.parameters, sandboxRetryTools.has(tool.name)),
     }))
     payload.tool_choice = 'auto'
     payload.parallel_tool_calls = true
@@ -87,6 +96,72 @@ export async function buildResponsesPayload(
     payload.reasoning = { effort: options.reasoningEffort, summary: 'auto' }
   }
   return payload
+}
+
+function sandboxToolInstruction(
+  tools: GenerateOptions['tools'],
+  sandboxRetryTools: ReadonlySet<string>,
+): string | undefined {
+  if (!tools?.some((tool) => hasSandboxControls(tool.parameters))) return undefined
+  if (sandboxRetryTools.size === 0) {
+    return 'Tool sandbox rule: this is not a sandbox-escalation retry. Omit sandbox_permissions and justification from every tool call. First run the tool with the session\'s current access.'
+  }
+  return `Tool sandbox rule: sandbox_permissions and justification may only be used to retry the exact denied call for: ${[...sandboxRetryTools].join(', ')}. Omit both fields from every other tool call, and request a strictly wider mode with a non-empty justification sentence.`
+}
+
+function toolParametersForCodex(
+  parameters: Record<string, unknown>,
+  allowSandboxRetry: boolean,
+): Record<string, unknown> {
+  if (allowSandboxRetry || !hasSandboxControls(parameters)) return parameters
+  const cloned = structuredClone(parameters)
+  const properties = record(cloned.properties)
+  if (properties !== null) {
+    delete properties.sandbox_permissions
+    delete properties.justification
+  }
+  if (Array.isArray(cloned.required)) {
+    cloned.required = cloned.required.filter((name) => (
+      name !== 'sandbox_permissions' && name !== 'justification'
+    ))
+  }
+  return cloned
+}
+
+function hasSandboxControls(parameters: Record<string, unknown>): boolean {
+  const properties = record(parameters.properties)
+  return properties !== null
+    && ('sandbox_permissions' in properties || 'justification' in properties)
+}
+
+function recentSandboxRetryToolNames(messages: readonly Message[]): Set<string> {
+  const deniedCallIds = new Set<string>()
+  let assistant: Message | undefined
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.role === 'assistant') {
+      assistant = message
+      break
+    }
+    for (const block of message.content) {
+      if (block.type !== 'tool-result') continue
+      const output = blocksToText(block.content)
+      if (isSandboxDenial(output)) deniedCallIds.add(String(block.toolCallId))
+    }
+  }
+  const result = new Set<string>()
+  if (assistant === undefined || deniedCallIds.size === 0) return result
+  for (const block of assistant.content) {
+    if (block.type === 'tool-call' && deniedCallIds.has(String(block.id))) {
+      result.add(block.name)
+    }
+  }
+  return result
+}
+
+function isSandboxDenial(output: string): boolean {
+  return /\[sandbox:\s*file access denied\b/i.test(output)
+    || /\bsandbox\b.*\b(?:access denied|denied access|EPERM)\b/i.test(output)
 }
 
 function appendMissingToolCalls(
@@ -152,4 +227,10 @@ function replayOutputItems(message: Message): Array<Record<string, unknown>> | n
   return structuredClone(items.filter((item): item is Record<string, unknown> => (
     typeof item === 'object' && item !== null && !Array.isArray(item)
   )))
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
 }

@@ -86,8 +86,67 @@ describe('Responses payload mapping', () => {
       content: [{ type: 'input_text', text: 'Tool result for unavailable call call_orphan (error):\norphaned' }],
     })
   })
+
+  it('hides sandbox escalation controls until a tool has actually been denied', async () => {
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        { id: 'm1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Check status' }] },
+      ],
+      tools: [pwshTool()],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const parameters = payload.tools?.[0]?.parameters as Record<string, unknown>
+    const properties = parameters.properties as Record<string, unknown>
+    expect(properties).not.toHaveProperty('sandbox_permissions')
+    expect(properties).not.toHaveProperty('justification')
+    expect(parameters.required).toEqual(['command', 'description'])
+    expect(payload.instructions).toContain('this is not a sandbox-escalation retry')
+  })
+
+  it('exposes sandbox escalation controls only after the matching tool was denied', async () => {
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol' },
+          content: [{ type: 'tool-call', id: 'call_denied', name: 'pwsh', arguments: '{"command":"git status","description":"Show status"}' }],
+        },
+        {
+          id: 'm2', role: 'user', source: { kind: 'tool', callId: 'call_denied' },
+          content: [{
+            type: 'tool-result', toolCallId: 'call_denied', isError: true,
+            content: [{ type: 'text', text: '[sandbox: file access denied under read-only mode]' }],
+          }],
+        },
+      ],
+      tools: [pwshTool()],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const parameters = payload.tools?.[0]?.parameters as Record<string, unknown>
+    const properties = parameters.properties as Record<string, unknown>
+    expect(properties).toHaveProperty('sandbox_permissions')
+    expect(properties).toHaveProperty('justification')
+    expect(payload.instructions).toContain('retry the exact denied call for: pwsh')
+  })
 })
 
 function unusedAttachments() {
   return { readImage: async () => { throw new Error('unused') } }
+}
+
+function pwshTool() {
+  return {
+    name: 'pwsh',
+    description: 'Run PowerShell.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        description: { type: 'string' },
+        sandbox_permissions: { type: 'string', enum: ['workspace-write', 'danger-full-access'] },
+        justification: { type: 'string' },
+      },
+      required: ['command', 'description', 'sandbox_permissions', 'justification'],
+    },
+  }
 }

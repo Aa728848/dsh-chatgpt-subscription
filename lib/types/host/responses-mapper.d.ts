@@ -6,5 +6,6 @@ export interface ResponsesPayload extends Record<string, unknown> {
     stream: true;
     store: false;
 }
+export declare function hiddenSandboxControlToolNames(options: GenerateOptions): Set<string>;
 export declare function buildResponsesPayload(options: GenerateOptions, attachments: Pick<AttachmentStore, 'readImage'>): Promise<ResponsesPayload>;
 //# sourceMappingURL=responses-mapper.d.ts.map

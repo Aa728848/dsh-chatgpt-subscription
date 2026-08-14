@@ -9,7 +9,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL } from '../compat.ts'
 import { OAuthService } from './oauth-service.ts'
-import { buildResponsesPayload } from './responses-mapper.ts'
+import { buildResponsesPayload, hiddenSandboxControlToolNames } from './responses-mapper.ts'
 import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
@@ -35,10 +35,11 @@ export class ResponsesClient {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const payload = await buildResponsesPayload(options, this.attachments)
+    const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
     try {
       const response = await this.send(payload, sessionId, options.signal)
-      yield* parseResponsesStream(response, options.signal)
+      yield* parseResponsesStream(response, options.signal, hiddenSandboxControls)
     } finally {
       this.onGenerationFinished()
     }
@@ -89,7 +90,11 @@ interface ToolState {
   started: boolean
 }
 
-export async function* parseResponsesStream(response: Response, signal?: AbortSignal): AsyncIterable<StreamChunk> {
+export async function* parseResponsesStream(
+  response: Response,
+  signal?: AbortSignal,
+  hiddenSandboxControls: ReadonlySet<string> = new Set(),
+): AsyncIterable<StreamChunk> {
   if (response.body === null) throw new LlmError('Codex returned no response stream.', 'PROVIDER_ERROR')
   const reader = response.body.getReader()
   const abortReader = (): void => { void reader.cancel(signal?.reason).catch(() => undefined) }
@@ -250,12 +255,23 @@ export async function* parseResponsesStream(response: Response, signal?: AbortSi
   if (textIndex !== null) {
     yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
   }
+  for (const item of replayOutput) {
+    if (item.type === 'function_call'
+      && typeof item.name === 'string'
+      && hiddenSandboxControls.has(item.name)
+      && typeof item.arguments === 'string') {
+      item.arguments = stripSandboxControls(item.arguments)
+    }
+  }
   let validToolCount = 0
   const replayedToolCallIds = new Set(replayOutput.flatMap((item) => (
     item.type === 'function_call' && typeof item.call_id === 'string' ? [item.call_id] : []
   )))
   for (const tool of tools.values()) {
     if (!tool.started) continue
+    if (hiddenSandboxControls.has(tool.name)) {
+      tool.arguments = stripSandboxControls(tool.arguments)
+    }
     if (!isSafeJsonArguments(tool.arguments) || tool.name === '') {
       throw new LlmError(`Codex returned invalid JSON arguments for tool ${tool.name || '(unnamed)'}.`, 'INVALID_TOOL_ARGUMENTS')
     }
@@ -303,6 +319,24 @@ function isSafeJsonArguments(value: string): boolean {
     return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
   } catch {
     return false
+  }
+}
+
+function stripSandboxControls(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    const parsedRecord = record(parsed)
+    if (parsedRecord === null) return value
+    let changed = false
+    for (const name of ['sandbox_permissions', 'justification']) {
+      if (name in parsedRecord) {
+        delete parsedRecord[name]
+        changed = true
+      }
+    }
+    return changed ? JSON.stringify(parsedRecord) : value
+  } catch {
+    return value
   }
 }
 
