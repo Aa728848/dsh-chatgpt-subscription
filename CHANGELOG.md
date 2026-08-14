@@ -9,5 +9,6 @@
 - 新增 Wham usage 双 bucket/双窗口解析、缓存、节流、连接测试和可访问进度条。
 - 新增 OAuth、路由、DPAPI、Responses、额度与 Client 注册测试。
 - 修复 OAuth 失败详情被状态刷新清空、旧 keep-alive 回调连接复用，以及 refresh token 失效后重复尝试的问题；token exchange 现在显示脱敏错误标识。
+- 修复工具调用 replay 缺失时仍发送孤立 `function_call_output` 导致 Codex 返回 400；现在会补全调用配对，并安全处理被压缩历史中的孤立结果。
 
 这是首个 prerelease；没有稳定版升级承诺。ChatGPT backend compatibility 可能随上游变化。

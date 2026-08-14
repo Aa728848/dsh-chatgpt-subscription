@@ -36,4 +36,58 @@ describe('Responses payload mapping', () => {
     expect(payload.input).toContainEqual({ type: 'function_call_output', call_id: 'call_1', output: 'done' })
     expect(payload).toMatchObject({ stream: true, store: false, tool_choice: 'auto', reasoning: { effort: 'high', summary: 'auto' } })
   })
+
+  it('restores a tool call omitted by empty replay state before sending its result', async () => {
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol', replayState: { outputItems: [] } },
+          content: [{ type: 'tool-call', id: 'call_replayed', name: 'shell', arguments: '{"command":"pwd"}' }],
+        },
+        {
+          id: 'm2', role: 'user', source: { kind: 'tool', callId: 'call_replayed' },
+          content: [{ type: 'tool-result', toolCallId: 'call_replayed', content: [{ type: 'text', text: '/workspace' }] }],
+        },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload.input).toEqual([
+      { type: 'function_call', call_id: 'call_replayed', name: 'shell', arguments: '{"command":"pwd"}' },
+      { type: 'function_call_output', call_id: 'call_replayed', output: '/workspace' },
+    ])
+  })
+
+  it('does not duplicate replayed calls and degrades a genuinely orphaned result to text', async () => {
+    const replayedCall = { type: 'function_call', call_id: 'call_known', name: 'read_file', arguments: '{"path":"a"}' }
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol', replayState: { outputItems: [replayedCall] } },
+          content: [{ type: 'tool-call', id: 'call_known', name: 'read_file', arguments: '{"path":"a"}' }],
+        },
+        {
+          id: 'm2', role: 'user', source: { kind: 'tool', callId: 'call_known' },
+          content: [{ type: 'tool-result', toolCallId: 'call_known', content: [{ type: 'text', text: 'known' }] }],
+        },
+        {
+          id: 'm3', role: 'user', source: { kind: 'tool', callId: 'call_orphan' },
+          content: [{ type: 'tool-result', toolCallId: 'call_orphan', content: [{ type: 'text', text: 'orphaned' }], isError: true }],
+        },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload.input.filter((item) => item.type === 'function_call' && item.call_id === 'call_known')).toHaveLength(1)
+    expect(payload.input).toContainEqual({ type: 'function_call_output', call_id: 'call_known', output: 'known' })
+    expect(payload.input).not.toContainEqual(expect.objectContaining({ type: 'function_call_output', call_id: 'call_orphan' }))
+    expect(payload.input).toContainEqual({
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Tool result for unavailable call call_orphan (error):\norphaned' }],
+    })
+  })
 })
+
+function unusedAttachments() {
+  return { readImage: async () => { throw new Error('unused') } }
+}

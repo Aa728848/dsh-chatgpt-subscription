@@ -20,34 +20,48 @@ export async function buildResponsesPayload(
   ].filter((value): value is string => Boolean(value))
 
   const input: Array<Record<string, unknown>> = []
+  const knownToolCalls = new Set<string>()
   for (const message of options.messages) {
     if (message.role === 'system') continue
     const replayItems = replayOutputItems(message)
     if (message.role === 'assistant' && replayItems !== null) {
       input.push(...replayItems)
+      for (const item of replayItems) {
+        if (item.type === 'function_call' && typeof item.call_id === 'string') {
+          knownToolCalls.add(item.call_id)
+        }
+      }
+      if (!replayItems.some((item) => item.type === 'message')) {
+        const content = await mapContent(message, attachments, options.signal)
+        if (content.length > 0) input.push({ role: message.role, content })
+      }
+      appendMissingToolCalls(input, knownToolCalls, message)
       continue
     }
     const toolResult = message.content.find((block) => block.type === 'tool-result')
     if (toolResult?.type === 'tool-result') {
-      input.push({
-        type: 'function_call_output',
-        call_id: toolResult.toolCallId,
-        output: blocksToText(toolResult.content),
-      })
+      const callId = String(toolResult.toolCallId)
+      const output = blocksToText(toolResult.content)
+      if (knownToolCalls.has(callId)) {
+        input.push({ type: 'function_call_output', call_id: callId, output })
+      } else {
+        // A compacted or interrupted history can retain a tool result after its
+        // call was dropped. Preserve the useful result as text instead of
+        // sending an invalid orphan function_call_output that the API rejects.
+        input.push({
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: `Tool result for unavailable call ${callId}${toolResult.isError ? ' (error)' : ''}:\n${output}`,
+          }],
+        })
+      }
       continue
     }
     const content = await mapContent(message, attachments, options.signal)
     if (content.length > 0) input.push({ role: message.role, content })
     if (message.role === 'assistant') {
-      for (const block of message.content) {
-        if (block.type !== 'tool-call') continue
-        input.push({
-          type: 'function_call',
-          call_id: block.id,
-          name: block.name,
-          arguments: block.arguments,
-        })
-      }
+      appendMissingToolCalls(input, knownToolCalls, message)
     }
   }
 
@@ -73,6 +87,25 @@ export async function buildResponsesPayload(
     payload.reasoning = { effort: options.reasoningEffort, summary: 'auto' }
   }
   return payload
+}
+
+function appendMissingToolCalls(
+  input: Array<Record<string, unknown>>,
+  knownToolCalls: Set<string>,
+  message: Message,
+): void {
+  for (const block of message.content) {
+    if (block.type !== 'tool-call') continue
+    const callId = String(block.id)
+    if (knownToolCalls.has(callId)) continue
+    input.push({
+      type: 'function_call',
+      call_id: callId,
+      name: block.name,
+      arguments: block.arguments,
+    })
+    knownToolCalls.add(callId)
+  }
 }
 
 async function mapContent(

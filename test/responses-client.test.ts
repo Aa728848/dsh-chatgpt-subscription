@@ -22,6 +22,20 @@ describe('Responses streaming', () => {
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
   })
 
+  it('reconstructs replay data when the stream omits a completed output item', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc_partial', call_id: 'call_partial', name: 'shell', arguments: '' } },
+      { type: 'response.function_call_arguments.delta', item_id: 'fc_partial', output_index: 0, delta: '{"command":"pwd"}' },
+      { type: 'response.completed', response: {} },
+    ])))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      replayState: {
+        outputItems: [{ type: 'function_call', call_id: 'call_partial', name: 'shell', arguments: '{"command":"pwd"}' }],
+      },
+    })
+  })
+
   it('never emits a completed tool call for malformed JSON arguments', async () => {
     const emitted: StreamChunk[] = []
     await expect((async () => {

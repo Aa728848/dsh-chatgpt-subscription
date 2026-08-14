@@ -251,12 +251,24 @@ export async function* parseResponsesStream(response: Response, signal?: AbortSi
     yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
   }
   let validToolCount = 0
+  const replayedToolCallIds = new Set(replayOutput.flatMap((item) => (
+    item.type === 'function_call' && typeof item.call_id === 'string' ? [item.call_id] : []
+  )))
   for (const tool of tools.values()) {
     if (!tool.started) continue
     if (!isSafeJsonArguments(tool.arguments) || tool.name === '') {
       throw new LlmError(`Codex returned invalid JSON arguments for tool ${tool.name || '(unnamed)'}.`, 'INVALID_TOOL_ARGUMENTS')
     }
     validToolCount++
+    if (!replayedToolCallIds.has(tool.id)) {
+      replayOutput.push({
+        type: 'function_call',
+        call_id: tool.id,
+        name: tool.name,
+        arguments: tool.arguments,
+      })
+      replayedToolCallIds.add(tool.id)
+    }
     yield {
       type: 'block-end',
       index: tool.index,
