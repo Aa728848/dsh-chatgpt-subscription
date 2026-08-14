@@ -130,6 +130,84 @@ describe('Responses payload mapping', () => {
     expect(properties).toHaveProperty('justification')
     expect(payload.instructions).toContain('retry the exact denied call for: pwsh')
   })
+
+  it('adds Windows PowerShell guidance to run_code without mutating the DSH tool schema', async () => {
+    const tool = runCodeTool()
+    const originalParameters = structuredClone(tool.parameters)
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [], tools: [tool],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const mappedTool = (payload.tools as Array<Record<string, unknown>>)[0]
+    const parameters = mappedTool.parameters as Record<string, unknown>
+    const properties = parameters.properties as Record<string, Record<string, unknown>>
+
+    expect(mappedTool.description).toContain('strict JavaScript/TypeScript')
+    expect(properties.code.description).toContain('String.raw')
+    expect(properties.code.description).toContain('${...}')
+    expect(properties.code.description).toContain('backslashes')
+    expect(payload.instructions).toContain('run_code compatibility rule')
+    expect(payload.instructions).toContain('here-strings')
+    expect(tool.parameters).toEqual(originalParameters)
+  })
+
+  it.each([
+    'Legacy octal escape is not permitted in strict mode',
+    "Unexpected token ':' Expected '}'",
+    'Invalid or unexpected token near C:\\Users\\eddy',
+    'Unterminated template literal after $env:TEMP',
+  ])('adds a corrective hint for run_code parser errors: %s', async (error) => {
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol' },
+          content: [{ type: 'tool-call', id: 'call_run_code', name: 'run_code', arguments: '{"code":"..."}' }],
+        },
+        {
+          id: 'm2', role: 'user', source: { kind: 'tool', callId: 'call_run_code' },
+          content: [{
+            type: 'tool-result', toolCallId: 'call_run_code', isError: true,
+            content: [{ type: 'text', text: error }],
+          }],
+        },
+      ],
+      tools: [runCodeTool()],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const result = payload.input.find((item) => item.type === 'function_call_output')
+
+    expect(result?.output).toContain(error)
+    expect(result?.output).toContain('Compatibility hint: run_code failed while parsing')
+    expect(result?.output).toContain('String.raw does not prevent ${...} interpolation')
+  })
+
+  it('does not append the run_code hint to unrelated execution errors', async () => {
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol' },
+          content: [{ type: 'tool-call', id: 'call_run_code', name: 'run_code', arguments: '{"code":"..."}' }],
+        },
+        {
+          id: 'm2', role: 'user', source: { kind: 'tool', callId: 'call_run_code' },
+          content: [{
+            type: 'tool-result', toolCallId: 'call_run_code', isError: true,
+            content: [{ type: 'text', text: 'Nested pwsh command exited with code 1' }],
+          }],
+        },
+      ],
+      tools: [runCodeTool()],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+
+    expect(payload.input).toContainEqual({
+      type: 'function_call_output',
+      call_id: 'call_run_code',
+      output: 'Nested pwsh command exited with code 1',
+    })
+  })
 })
 
 function unusedAttachments() {
@@ -149,6 +227,21 @@ function pwshTool() {
         justification: { type: 'string' },
       },
       required: ['command', 'description', 'sandbox_permissions', 'justification'],
+    },
+  }
+}
+
+function runCodeTool() {
+  return {
+    name: 'run_code',
+    description: 'Execute a TypeScript program.',
+    parameters: {
+      type: 'object',
+      properties: {
+        code: { type: 'string', description: 'Body of an async TypeScript function.' },
+        description: { type: 'string' },
+      },
+      required: ['code', 'description'],
     },
   }
 }

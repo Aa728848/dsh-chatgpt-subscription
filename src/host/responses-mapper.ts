@@ -26,10 +26,11 @@ export async function buildResponsesPayload(
       .filter((message) => message.role === 'system')
       .map((message) => blocksToText(message.content).trim()),
     sandboxToolInstruction(options.tools, sandboxRetryTools),
+    runCodeInstruction(options.tools),
   ].filter((value): value is string => Boolean(value))
 
   const input: Array<Record<string, unknown>> = []
-  const knownToolCalls = new Set<string>()
+  const knownToolCalls = new Map<string, string | undefined>()
   for (const message of options.messages) {
     if (message.role === 'system') continue
     const replayItems = replayOutputItems(message)
@@ -37,7 +38,7 @@ export async function buildResponsesPayload(
       input.push(...replayItems)
       for (const item of replayItems) {
         if (item.type === 'function_call' && typeof item.call_id === 'string') {
-          knownToolCalls.add(item.call_id)
+          knownToolCalls.set(item.call_id, typeof item.name === 'string' ? item.name : undefined)
         }
       }
       if (!replayItems.some((item) => item.type === 'message')) {
@@ -50,8 +51,11 @@ export async function buildResponsesPayload(
     const toolResult = message.content.find((block) => block.type === 'tool-result')
     if (toolResult?.type === 'tool-result') {
       const callId = String(toolResult.toolCallId)
-      const output = blocksToText(toolResult.content)
+      const rawOutput = blocksToText(toolResult.content)
       if (knownToolCalls.has(callId)) {
+        const output = toolResult.isError && knownToolCalls.get(callId) === 'run_code'
+          ? runCodeErrorOutput(rawOutput)
+          : rawOutput
         input.push({ type: 'function_call_output', call_id: callId, output })
       } else {
         // A compacted or interrupted history can retain a tool result after its
@@ -61,7 +65,7 @@ export async function buildResponsesPayload(
           role: 'user',
           content: [{
             type: 'input_text',
-            text: `Tool result for unavailable call ${callId}${toolResult.isError ? ' (error)' : ''}:\n${output}`,
+            text: `Tool result for unavailable call ${callId}${toolResult.isError ? ' (error)' : ''}:\n${rawOutput}`,
           }],
         })
       }
@@ -86,8 +90,12 @@ export async function buildResponsesPayload(
     payload.tools = options.tools.map((tool) => ({
       type: 'function',
       name: tool.name,
-      description: tool.description,
-      parameters: toolParametersForCodex(tool.parameters, sandboxRetryTools.has(tool.name)),
+      description: toolDescriptionForCodex(tool.name, tool.description),
+      parameters: toolParametersForCodex(
+        tool.name,
+        tool.parameters,
+        sandboxRetryTools.has(tool.name),
+      ),
     }))
     payload.tool_choice = 'auto'
     payload.parallel_tool_calls = true
@@ -96,6 +104,16 @@ export async function buildResponsesPayload(
     payload.reasoning = { effort: options.reasoningEffort, summary: 'auto' }
   }
   return payload
+}
+
+function runCodeInstruction(tools: GenerateOptions['tools']): string | undefined {
+  if (!tools?.some((tool) => tool.name === 'run_code')) return undefined
+  return 'run_code compatibility rule: its code is parsed as strict JavaScript/TypeScript before execution. On Windows, do not embed PowerShell containing $, ${...}, backslashes, or here-strings in JavaScript template literals; String.raw does not disable ${...} interpolation. Prefer arrays of ordinary quoted strings joined with "\\n", escaping backslashes, or use a file-write tool for large scripts and then invoke pwsh.'
+}
+
+function toolDescriptionForCodex(name: string, description: string): string {
+  if (name !== 'run_code') return description
+  return `${description}\n\nCompatibility: code is strict JavaScript/TypeScript. When composing PowerShell, avoid JavaScript template literals containing $, \${...}, Windows backslashes, or PowerShell here-strings. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool before invoking pwsh.`
 }
 
 function sandboxToolInstruction(
@@ -110,20 +128,30 @@ function sandboxToolInstruction(
 }
 
 function toolParametersForCodex(
+  toolName: string,
   parameters: Record<string, unknown>,
   allowSandboxRetry: boolean,
 ): Record<string, unknown> {
-  if (allowSandboxRetry || !hasSandboxControls(parameters)) return parameters
+  const hideSandboxControls = !allowSandboxRetry && hasSandboxControls(parameters)
+  if (!hideSandboxControls && toolName !== 'run_code') return parameters
   const cloned = structuredClone(parameters)
   const properties = record(cloned.properties)
-  if (properties !== null) {
+  if (properties !== null && hideSandboxControls) {
     delete properties.sandbox_permissions
     delete properties.justification
   }
-  if (Array.isArray(cloned.required)) {
+  if (hideSandboxControls && Array.isArray(cloned.required)) {
     cloned.required = cloned.required.filter((name) => (
       name !== 'sandbox_permissions' && name !== 'justification'
     ))
+  }
+  if (toolName === 'run_code' && properties !== null) {
+    const code = record(properties.code)
+    if (code !== null) {
+      const current = typeof code.description === 'string' ? code.description.trim() : ''
+      const compatibility = 'Strict JavaScript/TypeScript source. For PowerShell on Windows, avoid JavaScript template literals containing $, ${...}, backslashes, or here-strings; String.raw still performs ${...} interpolation. Prefer ordinary quoted string arrays joined with "\\n" and escape backslashes, or write a script file with a dedicated file tool.'
+      code.description = current ? `${current}\n\n${compatibility}` : compatibility
+    }
   }
   return cloned
 }
@@ -166,7 +194,7 @@ function isSandboxDenial(output: string): boolean {
 
 function appendMissingToolCalls(
   input: Array<Record<string, unknown>>,
-  knownToolCalls: Set<string>,
+  knownToolCalls: Map<string, string | undefined>,
   message: Message,
 ): void {
   for (const block of message.content) {
@@ -179,8 +207,17 @@ function appendMissingToolCalls(
       name: block.name,
       arguments: block.arguments,
     })
-    knownToolCalls.add(callId)
+    knownToolCalls.set(callId, block.name)
   }
+}
+
+function runCodeErrorOutput(output: string): string {
+  if (!isRunCodeParserError(output)) return output
+  return `${output}\n\nCompatibility hint: run_code failed while parsing strict JavaScript/TypeScript, before the nested tool ran. Avoid JavaScript template literals for PowerShell containing $, \${...}, Windows backslashes, or here-strings; String.raw does not prevent \${...} interpolation. Build the script from ordinary quoted strings joined with "\\n" (escaping backslashes), or write a script file with a dedicated file tool and then invoke pwsh.`
+}
+
+function isRunCodeParserError(output: string): boolean {
+  return /(?:Legacy octal escape is not permitted in strict mode|Unexpected token|Invalid or unexpected token|Unterminated template|Expected ['"]?\}['"]?)/i.test(output)
 }
 
 async function mapContent(
