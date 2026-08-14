@@ -1,7 +1,11 @@
 {
-  "name": "@linxin666/dsh-chatgpt-subscription",
+  "name": "@eddyskywalker/dsh-chatgpt-subscription",
   "version": "0.1.0-alpha.0",
   "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
+  "author": {
+    "name": "eddyskywalker",
+    "url": "https://www.npmjs.com/~eddyskywalker"
+  },
   "type": "module",
   "publishConfig": {
     "access": "public",

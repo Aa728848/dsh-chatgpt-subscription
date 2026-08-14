@@ -1,4 +1,4 @@
-const STYLE_ID = '@linxin666/dsh-chatgpt-subscription/main'
+const STYLE_ID = '@eddyskywalker/dsh-chatgpt-subscription/main'
 
 const CSS = `
 .dsh-codex-page{box-sizing:border-box;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:20px;max-width:780px;min-width:0;padding:2px 0 30px}
@@ -50,7 +50,7 @@ const CSS = `
 export function installStyles(): () => void {
   if (document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`) !== null) return () => undefined
   const element = document.createElement('style')
-  element.dataset.plugin = '@linxin666/dsh-chatgpt-subscription'
+  element.dataset.plugin = '@eddyskywalker/dsh-chatgpt-subscription'
   element.dataset.pluginCss = STYLE_ID
   element.textContent = CSS
   document.head.appendChild(element)

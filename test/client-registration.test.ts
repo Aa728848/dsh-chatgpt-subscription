@@ -35,7 +35,7 @@ describe('client registration', () => {
       id: 'codex-subscription',
       label: 'Codex 订阅',
     })
-    expect(document.querySelector('style[data-plugin="@linxin666/dsh-chatgpt-subscription"]')).not.toBeNull()
+    expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()
   })
 })

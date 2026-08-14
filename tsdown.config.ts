@@ -1,6 +1,6 @@
 import type { UserConfig } from 'tsdown'
 
-const packageId = '@linxin666/dsh-chatgpt-subscription'
+const packageId = '@eddyskywalker/dsh-chatgpt-subscription'
 const clientExternals = [
   'react',
   'react/jsx-runtime',

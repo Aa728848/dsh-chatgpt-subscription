@@ -3,4 +3,4 @@
 # browser half from exports["./client"].
 - insert:
     - id: dsh-chatgpt-subscription
-      name: '@linxin666/dsh-chatgpt-subscription'
+      name: '@eddyskywalker/dsh-chatgpt-subscription'
