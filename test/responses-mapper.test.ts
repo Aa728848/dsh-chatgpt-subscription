@@ -95,7 +95,8 @@ describe('Responses payload mapping', () => {
       tools: [pwshTool()],
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    const parameters = payload.tools?.[0]?.parameters as Record<string, unknown>
+    const tools = payload.tools as Array<Record<string, unknown>> | undefined
+    const parameters = tools?.[0]?.parameters as Record<string, unknown>
     const properties = parameters.properties as Record<string, unknown>
     expect(properties).not.toHaveProperty('sandbox_permissions')
     expect(properties).not.toHaveProperty('justification')
@@ -122,7 +123,8 @@ describe('Responses payload mapping', () => {
       tools: [pwshTool()],
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    const parameters = payload.tools?.[0]?.parameters as Record<string, unknown>
+    const tools = payload.tools as Array<Record<string, unknown>> | undefined
+    const parameters = tools?.[0]?.parameters as Record<string, unknown>
     const properties = parameters.properties as Record<string, unknown>
     expect(properties).toHaveProperty('sandbox_permissions')
     expect(properties).toHaveProperty('justification')
