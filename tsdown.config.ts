@@ -21,12 +21,14 @@ const host: UserConfig = {
   target: 'es2024',
   dts: false,
   clean: false,
-  external: [
-    '@deepseek-ai/cordis',
-    '@deepseek-ai/dsh-host-webserver',
-    '@deepseek-ai/dsh-attachment',
-    '@deepseek-ai/dsh-llm',
-  ],
+  deps: {
+    neverBundle: [
+      '@deepseek-ai/cordis',
+      '@deepseek-ai/dsh-host-webserver',
+      '@deepseek-ai/dsh-attachment',
+      '@deepseek-ai/dsh-llm',
+    ],
+  },
 }
 
 const client: UserConfig = {
@@ -39,8 +41,10 @@ const client: UserConfig = {
   dts: false,
   sourcemap: true,
   clean: false,
-  external: clientExternals,
-  noExternal: (id: string) => clientExternals.includes(id) ? undefined : true,
+  deps: {
+    neverBundle: clientExternals,
+    alwaysBundle: (id: string) => clientExternals.includes(id) ? undefined : true,
+  },
   define: {
     'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
     'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),
