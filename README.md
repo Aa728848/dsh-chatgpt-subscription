@@ -1,6 +1,6 @@
 # DSH ChatGPT Subscription
 
-让 DSH（DeepSeek Host）通过 ChatGPT 订阅使用 Gpt 系列模型的插件。
+让 DSH（DeepSeek Harness）通过 ChatGPT 订阅使用 Gpt 系列模型的插件。
 
 插件注册 `codex-chatgpt` Provider（显示名 **“Codex（ChatGPT 订阅）”**），以当前 Windows 用户的 ChatGPT OAuth 登录态访问模型，并在设置页展示账号信息、连接状态与订阅额度。
 
@@ -45,7 +45,7 @@
 ## 环境要求
 
 - Windows（DPAPI 依赖当前 Windows 用户）；
-- 已安装 DSH，且具备 `dsh` CLI 或 DSH 桌面版的插件管理能力；
+- 已安装 DSH
 - Node.js 与 npm。
 
 ## 安装
