@@ -45,7 +45,7 @@
 ## 环境要求
 
 - Windows（DPAPI 依赖当前 Windows 用户）；
-- 已安装 DSH，且具备 `dsh` CLI 或 DSH 桌面版的插件管理能力；
+- 已安装 DSH
 - Node.js 与 npm。
 
 ## 安装
