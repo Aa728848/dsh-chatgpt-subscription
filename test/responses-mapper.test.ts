@@ -96,11 +96,16 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
     const tools = payload.tools as Array<Record<string, unknown>> | undefined
+    expect(tools?.[0]?.description).toContain('command execution is stateless')
     const parameters = tools?.[0]?.parameters as Record<string, unknown>
     const properties = parameters.properties as Record<string, unknown>
     expect(properties).not.toHaveProperty('sandbox_permissions')
     expect(properties).not.toHaveProperty('justification')
+    expect((properties.command as Record<string, unknown>).description).toContain('fresh process')
+    expect((properties.workdir as Record<string, unknown>).description).toContain('instead of embedding cd')
     expect(parameters.required).toEqual(['command', 'description'])
+    expect(payload.instructions).toContain('Command tool compatibility rule (pwsh)')
+    expect(payload.instructions).toContain('[auto-mode hard deny]')
     expect(payload.instructions).toContain('this is not a sandbox-escalation retry')
   })
 
@@ -128,7 +133,39 @@ describe('Responses payload mapping', () => {
     const properties = parameters.properties as Record<string, unknown>
     expect(properties).toHaveProperty('sandbox_permissions')
     expect(properties).toHaveProperty('justification')
+    expect((properties.sandbox_permissions as Record<string, unknown>).description).toContain('hard-deny')
     expect(payload.instructions).toContain('retry the exact denied call for: pwsh')
+  })
+
+  it.each([
+    '[auto-mode hard deny] dynamic deletion targeting the user home is not permitted',
+    'sandbox escalation to "workspace-write" is not strictly wider than this call\'s current "workspace-write" mode',
+  ])('does not expose sandbox escalation controls for non-retriable policy errors: %s', async (error) => {
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol' },
+          content: [{ type: 'tool-call', id: 'call_policy', name: 'pwsh', arguments: '{"command":"Remove-Item ...","description":"Clean files"}' }],
+        },
+        {
+          id: 'm2', role: 'user', source: { kind: 'tool', callId: 'call_policy' },
+          content: [{
+            type: 'tool-result', toolCallId: 'call_policy', isError: true,
+            content: [{ type: 'text', text: error }],
+          }],
+        },
+      ],
+      tools: [pwshTool()],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const tools = payload.tools as Array<Record<string, unknown>> | undefined
+    const parameters = tools?.[0]?.parameters as Record<string, unknown>
+    const properties = parameters.properties as Record<string, unknown>
+    expect(properties).not.toHaveProperty('sandbox_permissions')
+    expect(properties).not.toHaveProperty('justification')
+    expect(payload.instructions).toContain('this is not a sandbox-escalation retry')
+    expect(payload.instructions).toContain('policy denials as non-retriable')
   })
 
   it('adds Windows PowerShell guidance to run_code without mutating the DSH tool schema', async () => {
@@ -223,6 +260,9 @@ function pwshTool() {
       properties: {
         command: { type: 'string' },
         description: { type: 'string' },
+        workdir: { type: 'string' },
+        timeoutMs: { type: 'number' },
+        run_in_background: { type: 'boolean' },
         sandbox_permissions: { type: 'string', enum: ['workspace-write', 'danger-full-access'] },
         justification: { type: 'string' },
       },

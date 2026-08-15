@@ -26,6 +26,7 @@ export async function buildResponsesPayload(
       .filter((message) => message.role === 'system')
       .map((message) => blocksToText(message.content).trim()),
     sandboxToolInstruction(options.tools, sandboxRetryTools),
+    commandToolInstruction(options.tools),
     runCodeInstruction(options.tools),
   ].filter((value): value is string => Boolean(value))
 
@@ -112,8 +113,29 @@ function runCodeInstruction(tools: GenerateOptions['tools']): string | undefined
 }
 
 function toolDescriptionForCodex(name: string, description: string): string {
-  if (name !== 'run_code') return description
-  return `${description}\n\nCompatibility: code is strict JavaScript/TypeScript. When composing PowerShell, avoid JavaScript template literals containing $, \${...}, Windows backslashes, or PowerShell here-strings. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool before invoking pwsh.`
+  if (name === 'run_code') {
+    return `${description}\n\nCompatibility: code is strict JavaScript/TypeScript. When composing PowerShell, avoid JavaScript template literals containing $, \${...}, Windows backslashes, or PowerShell here-strings. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool before invoking pwsh.`
+  }
+  if (isCommandTool(name)) {
+    return `${description}\n\n${commandToolCompatibilityText(name)}`
+  }
+  return description
+}
+
+function commandToolInstruction(tools: GenerateOptions['tools']): string | undefined {
+  const names = tools
+    ?.filter((tool) => isCommandTool(tool.name))
+    .map((tool) => tool.name)
+  if (!names?.length) return undefined
+  return `Command tool compatibility rule (${[...new Set(names)].join(', ')}): each command call runs in a fresh process, so do not rely on cd, aliases, functions, or variables from previous calls; set workdir when the tool supports it. On Windows/pwsh, keep commands in native PowerShell syntax and native Windows paths. For deletion or move operations, first resolve and verify exact absolute target paths, then operate on those literal paths only; avoid dynamically deleting paths built from $HOME, wildcards, command substitution, or another shell's output. Treat [auto-mode hard deny] and similar policy denials as non-retriable; choose a safer non-destructive inspection or report the limitation instead of repeating the same command or adding sandbox escalation. If downloads fail with TLS credential or connection-closed errors, treat that as an environment/network failure and use local sources or report the limitation instead of cycling through equivalent download commands.`
+}
+
+function commandToolCompatibilityText(name: string): string {
+  const shell = name.toLowerCase()
+  const windows = shell === 'pwsh' || shell.includes('powershell')
+    ? ' Use native PowerShell syntax and native Windows paths; prefer workdir over cd because every call starts a fresh process.'
+    : ' Prefer workdir over cd because every call starts a fresh process.'
+  return `Compatibility: command execution is stateless between calls.${windows} For destructive operations, verify exact absolute targets first and use literal paths; policy hard-deny results require a safer command shape, not sandbox escalation.`
 }
 
 function sandboxToolInstruction(
@@ -133,7 +155,8 @@ function toolParametersForCodex(
   allowSandboxRetry: boolean,
 ): Record<string, unknown> {
   const hideSandboxControls = !allowSandboxRetry && hasSandboxControls(parameters)
-  if (!hideSandboxControls && toolName !== 'run_code') return parameters
+  const augmentCommandTool = isCommandTool(toolName)
+  if (!hideSandboxControls && toolName !== 'run_code' && !augmentCommandTool) return parameters
   const cloned = structuredClone(parameters)
   const properties = record(cloned.properties)
   if (properties !== null && hideSandboxControls) {
@@ -153,7 +176,31 @@ function toolParametersForCodex(
       code.description = current ? `${current}\n\n${compatibility}` : compatibility
     }
   }
+  if (augmentCommandTool && properties !== null) {
+    appendPropertyDescription(properties.command, 'Single command for a fresh process; do not rely on state from earlier calls.')
+    appendPropertyDescription(properties.workdir, 'Use a native absolute working directory instead of embedding cd in the command.')
+    appendPropertyDescription(properties.timeoutMs, 'Positive finite timeout in milliseconds for bounded commands.')
+    appendPropertyDescription(properties.run_in_background, 'Use only for long-running servers or watchers whose output will be checked later.')
+    appendPropertyDescription(properties.sandbox_permissions, 'Only set when retrying the exact previous sandbox-denied call; it does not bypass hard-deny policy results.')
+    appendPropertyDescription(properties.justification, 'Required only for an allowed sandbox retry; explain why the wider access is needed.')
+  }
   return cloned
+}
+
+function appendPropertyDescription(value: unknown, addition: string): void {
+  const property = record(value)
+  if (property === null) return
+  const current = typeof property.description === 'string' ? property.description.trim() : ''
+  if (current.includes(addition)) return
+  property.description = current ? `${current}\n\n${addition}` : addition
+}
+
+function isCommandTool(name: string): boolean {
+  const normalized = name.toLowerCase()
+  return normalized === 'pwsh'
+    || normalized === 'powershell'
+    || normalized === 'bash'
+    || normalized === 'shell'
 }
 
 function hasSandboxControls(parameters: Record<string, unknown>): boolean {
