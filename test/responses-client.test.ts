@@ -86,6 +86,24 @@ describe('Responses streaming', () => {
     expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: 'split' })
   })
 
+  it('throttles and truncates large reasoning streams before they reach the UI', async () => {
+    const events = Array.from({ length: 120 }, () => ({
+      type: 'response.reasoning_summary_text.delta',
+      delta: 'x'.repeat(200),
+    }))
+    const chunks = await collect(parseResponsesStream(sse([
+      ...events,
+      { type: 'response.completed', response: {} },
+    ])))
+    const deltas = chunks.filter((chunk) => chunk.type === 'reasoning-delta')
+    const end = chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'reasoning')
+
+    expect(deltas.length).toBeLessThan(40)
+    expect(end).toBeDefined()
+    expect(end?.type === 'block-end' && end.block.type === 'reasoning' ? end.block.text : '').toContain('Reasoning summary truncated')
+    expect(end?.type === 'block-end' && end.block.type === 'reasoning' ? end.block.text.length : 0).toBeLessThan(12_100)
+  })
+
   it('rejects provider failures, premature EOF, and cancellation', async () => {
     await expect(collect(parseResponsesStream(sse([{ type: 'response.failed', response: { error: { code: 'bad', message: 'failed upstream' } } }])))).rejects.toThrow('failed upstream')
     await expect(collect(parseResponsesStream(sse([{ type: 'response.output_text.delta', delta: 'partial' }])))).rejects.toMatchObject({ code: 'PROTOCOL_ERROR' })

@@ -16,6 +16,7 @@ export function apply(ctx: Context): void {
   const oauth = new OAuthService(store, { logger: ctx.logger })
   const usage = new UsageService(oauth)
   const responses = new ResponsesClient(oauth, ctx.attachments, {
+    localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
     onGenerationFinished: () => usage.invalidate(),
   })
   const adapter = new CodexChatGptAdapter(responses)
@@ -35,3 +36,7 @@ export { CodexChatGptAdapter } from './host/adapter.ts'
 export { ResponsesClient, parseResponsesStream } from './host/responses-client.ts'
 export { UsageService, mapCodexUsage } from './host/usage-service.ts'
 export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts'
+
+function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {
+  return `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`
+}

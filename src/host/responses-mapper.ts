@@ -1,4 +1,4 @@
-import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 
 export interface ResponsesPayload extends Record<string, unknown> {
@@ -6,6 +6,19 @@ export interface ResponsesPayload extends Record<string, unknown> {
   input: Array<Record<string, unknown>>
   stream: true
   store: false
+}
+
+type FetchLike = typeof fetch
+
+export interface LocalRawImageOptions {
+  baseUrl?: string
+  fetchFn?: FetchLike
+}
+
+interface LocalRawImageStats {
+  attempted: number
+  resolved: number
+  failed: number
 }
 
 export function hiddenSandboxControlToolNames(options: GenerateOptions): Set<string> {
@@ -17,10 +30,12 @@ export function hiddenSandboxControlToolNames(options: GenerateOptions): Set<str
 
 export async function buildResponsesPayload(
   options: GenerateOptions,
-  attachments: Pick<AttachmentStore, 'readImage'>,
+  attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
+  localRawImages: LocalRawImageOptions = {},
 ): Promise<ResponsesPayload> {
   const sandboxRetryTools = recentSandboxRetryToolNames(options.messages)
-  const instructions = [
+  const resolveLocalRawImages = supportsImageInput(options)
+  const instructionParts = [
     options.system?.trim(),
     ...options.messages
       .filter((message) => message.role === 'system')
@@ -32,6 +47,7 @@ export async function buildResponsesPayload(
 
   const input: Array<Record<string, unknown>> = []
   const knownToolCalls = new Map<string, string | undefined>()
+  const localImageStats: LocalRawImageStats = { attempted: 0, resolved: 0, failed: 0 }
   for (const message of options.messages) {
     if (message.role === 'system') continue
     const replayItems = replayOutputItems(message)
@@ -43,7 +59,7 @@ export async function buildResponsesPayload(
         }
       }
       if (!replayItems.some((item) => item.type === 'message')) {
-        const content = await mapContent(message, attachments, options.signal)
+        const content = await mapContent(message, attachments, options.signal, localRawImages, localImageStats, resolveLocalRawImages)
         if (content.length > 0) input.push({ role: message.role, content })
       }
       appendMissingToolCalls(input, knownToolCalls, message)
@@ -72,7 +88,7 @@ export async function buildResponsesPayload(
       }
       continue
     }
-    const content = await mapContent(message, attachments, options.signal)
+    const content = await mapContent(message, attachments, options.signal, localRawImages, localImageStats, resolveLocalRawImages)
     if (content.length > 0) input.push({ role: message.role, content })
     if (message.role === 'assistant') {
       appendMissingToolCalls(input, knownToolCalls, message)
@@ -86,6 +102,10 @@ export async function buildResponsesPayload(
     store: false,
     include: ['reasoning.encrypted_content'],
   }
+  const instructions = [
+    ...instructionParts,
+    localRawImageInstruction(localImageStats),
+  ].filter((value): value is string => Boolean(value))
   if (instructions.length > 0) payload.instructions = instructions.join('\n\n')
   if (options.tools?.length) {
     payload.tools = options.tools.map((tool) => ({
@@ -110,6 +130,15 @@ export async function buildResponsesPayload(
 function runCodeInstruction(tools: GenerateOptions['tools']): string | undefined {
   if (!tools?.some((tool) => tool.name === 'run_code')) return undefined
   return 'run_code compatibility rule: its code is parsed as strict JavaScript/TypeScript before execution. On Windows, do not embed PowerShell containing $, ${...}, backslashes, or here-strings in JavaScript template literals; String.raw does not disable ${...} interpolation. Prefer arrays of ordinary quoted strings joined with "\\n", escaping backslashes, or use a file-write tool for large scripts and then invoke pwsh.'
+}
+
+function localRawImageInstruction(stats: LocalRawImageStats): string | undefined {
+  if (stats.failed === 0) return undefined
+  return 'Image attachment rule: a user message contains a markdown image link to a local/raw session URL but no structured image attachment. That link is not accessible image bytes for the provider. Do not claim to see the image; ask the user to resend it as an actual image attachment if visual inspection is required.'
+}
+
+function supportsImageInput(options: GenerateOptions): boolean {
+  return options.provider === 'codex-chatgpt' && options.model.toLowerCase().startsWith('gpt-')
 }
 
 function toolDescriptionForCodex(name: string, description: string): string {
@@ -269,13 +298,20 @@ function isRunCodeParserError(output: string): boolean {
 
 async function mapContent(
   message: Message,
-  attachments: Pick<AttachmentStore, 'readImage'>,
+  attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
   signal: AbortSignal | undefined,
+  localRawImages: LocalRawImageOptions,
+  localImageStats: LocalRawImageStats,
+  resolveLocalRawImages: boolean,
 ): Promise<Array<Record<string, unknown>>> {
   const result: Array<Record<string, unknown>> = []
   for (const block of message.content) {
     if (block.type === 'text') {
-      result.push({ type: message.role === 'assistant' ? 'output_text' : 'input_text', text: block.text })
+      if (message.role === 'user') {
+        result.push(...await mapUserText(block.text, attachments, signal, localRawImages, localImageStats, resolveLocalRawImages))
+      } else {
+        result.push({ type: 'output_text', text: block.text })
+      }
     } else if (block.type === 'image') {
       if (message.role !== 'user') continue
       result.push({ type: 'input_image', image_url: await imageDataUrl(block.attachment, attachments, signal) })
@@ -284,13 +320,157 @@ async function mapContent(
   return result
 }
 
+async function mapUserText(
+  text: string,
+  attachments: Partial<Pick<AttachmentStore, 'imageLimits'>>,
+  signal: AbortSignal | undefined,
+  localRawImages: LocalRawImageOptions,
+  localImageStats: LocalRawImageStats,
+  resolveLocalRawImages: boolean,
+): Promise<Array<Record<string, unknown>>> {
+  const links = markdownImageLinks(text)
+  if (links.length === 0) return [{ type: 'input_text', text }]
+  if (!resolveLocalRawImages) {
+    localImageStats.failed += links.length
+    return [{ type: 'input_text', text }]
+  }
+  const result: Array<Record<string, unknown>> = []
+  let cursor = 0
+  for (const match of links) {
+    if (match.start > cursor) {
+      pushInputText(result, text.slice(cursor, match.start))
+    }
+    localImageStats.attempted++
+    const image = await localRawImageDataUrl(
+      match.url,
+      localRawImages,
+      attachments.imageLimits?.maxImageBytes,
+      signal,
+    )
+    if (image === null) {
+      localImageStats.failed++
+      pushInputText(result, text.slice(match.start, match.end))
+    } else {
+      localImageStats.resolved++
+      result.push({ type: 'input_image', image_url: image })
+    }
+    cursor = match.end
+  }
+  if (cursor < text.length) {
+    pushInputText(result, text.slice(cursor))
+  }
+  return result.length > 0 ? result : [{ type: 'input_text', text }]
+}
+
+function pushInputText(content: Array<Record<string, unknown>>, text: string): void {
+  if (text === '') return
+  const previous = content.at(-1)
+  if (previous?.type === 'input_text' && typeof previous.text === 'string') {
+    previous.text += text
+  } else {
+    content.push({ type: 'input_text', text })
+  }
+}
+
+function markdownImageLinks(text: string): Array<{ start: number; end: number; url: string }> {
+  const links: Array<{ start: number; end: number; url: string }> = []
+  const pattern = /!\[[^\]]*\]\(([^)\s]+)\)/gi
+  for (const match of text.matchAll(pattern)) {
+    const url = match[1]
+    if (match.index === undefined || !isLocalRawImageReference(url)) continue
+    links.push({ start: match.index, end: match.index + match[0].length, url })
+  }
+  return links
+}
+
+async function localRawImageDataUrl(
+  rawUrl: string,
+  options: LocalRawImageOptions,
+  maxBytes: number | undefined,
+  signal: AbortSignal | undefined,
+): Promise<string | null> {
+  const url = localRawImageUrl(rawUrl, options.baseUrl)
+  if (url === null) return null
+  let response: Response
+  try {
+    response = await (options.fetchFn ?? fetch)(url, { signal, redirect: 'error' })
+  } catch {
+    return null
+  }
+  if (!response.ok) return null
+  const contentLength = Number(response.headers.get('content-length') ?? NaN)
+  if (maxBytes !== undefined && Number.isFinite(contentLength) && contentLength > maxBytes) return null
+  let bytes: Uint8Array
+  try {
+    bytes = new Uint8Array(await response.arrayBuffer())
+  } catch {
+    return null
+  }
+  if (maxBytes !== undefined && bytes.byteLength > maxBytes) return null
+  const mediaType = supportedImageMediaType(response.headers.get('content-type')) ?? sniffImageMediaType(bytes)
+  if (mediaType === null) return null
+  return bytesToDataUrl(mediaType, bytes)
+}
+
+function localRawImageUrl(rawUrl: string, baseUrl: string | undefined): string | null {
+  if (!isLocalRawImageReference(rawUrl)) return null
+  try {
+    const url = rawUrl.startsWith('/')
+      ? (baseUrl === undefined ? null : new URL(rawUrl, baseUrl))
+      : new URL(rawUrl)
+    if (url === null || !isLoopbackHost(url.hostname)) return null
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+function isLocalRawImageReference(url: string): boolean {
+  return /(?:^|\/)raw\/sha256:[a-f0-9]{32,}/i.test(url)
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]' || hostname === '::1'
+}
+
+function supportedImageMediaType(value: string | null): ImageMediaType | null {
+  const mediaType = value?.split(';', 1)[0]?.trim().toLowerCase()
+  if (mediaType === 'image/png'
+    || mediaType === 'image/jpeg'
+    || mediaType === 'image/webp'
+    || mediaType === 'image/gif') {
+    return mediaType
+  }
+  return null
+}
+
+function sniffImageMediaType(bytes: Uint8Array): ImageMediaType | null {
+  if (bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (bytes.length >= 12
+    && ascii(bytes, 0, 4) === 'RIFF'
+    && ascii(bytes, 8, 12) === 'WEBP') return 'image/webp'
+  if (bytes.length >= 6 && (ascii(bytes, 0, 6) === 'GIF87a' || ascii(bytes, 0, 6) === 'GIF89a')) return 'image/gif'
+  return null
+}
+
+function ascii(bytes: Uint8Array, start: number, end: number): string {
+  return String.fromCharCode(...bytes.slice(start, end))
+}
+
 async function imageDataUrl(
   ref: ImageAttachmentRef,
   attachments: Pick<AttachmentStore, 'readImage'>,
   signal?: AbortSignal,
 ): Promise<string> {
   const stored = await attachments.readImage(ref, signal)
-  return `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`
+  return bytesToDataUrl(stored.ref.mediaType, stored.data)
+}
+
+function bytesToDataUrl(mediaType: ImageMediaType, data: Uint8Array): string {
+  return `data:${mediaType};base64,${Buffer.from(data).toString('base64')}`
 }
 
 function blocksToText(blocks: readonly ContentBlock[]): string {

@@ -9,14 +9,18 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL } from '../compat.ts'
 import { OAuthService } from './oauth-service.ts'
-import { buildResponsesPayload, hiddenSandboxControlToolNames } from './responses-mapper.ts'
+import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 type FetchLike = typeof fetch
+const MAX_VISIBLE_REASONING_CHARS = 12_000
+const REASONING_DELTA_FLUSH_CHARS = 768
+const REASONING_TRUNCATED_NOTICE = '\n\n[Reasoning summary truncated to keep the DSH web UI responsive.]'
 
 export interface ResponsesClientOptions {
   fetchFn?: FetchLike
+  localRawImages?: LocalRawImageOptions
   onGenerationFinished?: () => void
 }
 
@@ -26,15 +30,18 @@ export class ResponsesClient {
 
   constructor(
     private readonly oauth: OAuthService,
-    private readonly attachments: Pick<AttachmentStore, 'readImage'>,
+    private readonly attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
     options: ResponsesClientOptions = {},
   ) {
     this.fetchFn = options.fetchFn ?? fetch
+    this.localRawImages = options.localRawImages ?? {}
     this.onGenerationFinished = options.onGenerationFinished ?? (() => undefined)
   }
 
+  private readonly localRawImages: LocalRawImageOptions
+
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const payload = await buildResponsesPayload(options, this.attachments)
+    const payload = await buildResponsesPayload(options, this.attachments, this.localRawImages)
     const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
     try {
@@ -106,6 +113,8 @@ export async function* parseResponsesStream(
   let reasoningIndex: number | null = null
   let text = ''
   let reasoning = ''
+  let pendingReasoningDelta = ''
+  let reasoningTruncated = false
   let terminal: FinishReason | null = null
   let usage: TokenUsage | null = null
   let replayOutput: Array<Record<string, unknown>> = []
@@ -148,8 +157,16 @@ export async function* parseResponsesStream(
         reasoningIndex = nextIndex++
         yield { type: 'block-start', index: reasoningIndex, blockType: 'reasoning' }
       }
-      reasoning += delta
-      if (delta) yield { type: 'reasoning-delta', index: reasoningIndex, text: delta }
+      const visibleDelta = visibleReasoningDelta(delta, reasoning.length, reasoningTruncated)
+      reasoningTruncated ||= visibleDelta.truncated
+      if (visibleDelta.text !== '') {
+        reasoning += visibleDelta.text
+        pendingReasoningDelta += visibleDelta.text
+      }
+      if (pendingReasoningDelta.length >= REASONING_DELTA_FLUSH_CHARS) {
+        yield { type: 'reasoning-delta', index: reasoningIndex, text: pendingReasoningDelta }
+        pendingReasoningDelta = ''
+      }
       return
     }
     if (type === 'response.output_item.added' || type === 'response.output_item.done') {
@@ -250,6 +267,10 @@ export async function* parseResponsesStream(
   if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
   if (terminal === null) throw new LlmError('Codex stream ended before a terminal event.', 'PROTOCOL_ERROR')
   if (reasoningIndex !== null) {
+    if (pendingReasoningDelta !== '') {
+      yield { type: 'reasoning-delta', index: reasoningIndex, text: pendingReasoningDelta }
+      pendingReasoningDelta = ''
+    }
     yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoning } }
   }
   if (textIndex !== null) {
@@ -297,6 +318,18 @@ export async function* parseResponsesStream(
     reason: validToolCount > 0 ? { kind: 'tool-calls' } : terminal,
     replayState: { outputItems: replayOutput },
   }
+}
+
+function visibleReasoningDelta(
+  delta: string,
+  currentVisibleChars: number,
+  alreadyTruncated: boolean,
+): { text: string; truncated: boolean } {
+  if (delta === '' || alreadyTruncated) return { text: '', truncated: alreadyTruncated }
+  const remaining = MAX_VISIBLE_REASONING_CHARS - currentVisibleChars
+  if (remaining <= 0) return { text: REASONING_TRUNCATED_NOTICE, truncated: true }
+  if (delta.length <= remaining) return { text: delta, truncated: false }
+  return { text: `${delta.slice(0, remaining)}${REASONING_TRUNCATED_NOTICE}`, truncated: true }
 }
 
 function mapUsage(value: Record<string, unknown> | null): TokenUsage | null {

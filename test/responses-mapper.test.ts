@@ -58,6 +58,71 @@ describe('Responses payload mapping', () => {
     ])
   })
 
+  it('warns the model when a user message has only a local raw image markdown link', async () => {
+    const text = '请看这张图\n![图片](/describe-image/raw/sha256:fb8625f2d563722a61b6bc791d665d758bd083bbd0b96f7a4693a3d2a1159eda)'
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        { id: 'm1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+
+    expect(payload.instructions).toContain('markdown image link to a local/raw session URL')
+    expect(payload.instructions).toContain('Do not claim to see the image')
+    expect(payload.input).toContainEqual({
+      role: 'user',
+      content: [{ type: 'input_text', text }],
+    })
+  })
+
+  it('converts local raw markdown image links into provider image inputs when bytes are reachable', async () => {
+    const url = '/describe-image/raw/sha256:fb8625f2d563722a61b6bc791d665d758bd083bbd0b96f7a4693a3d2a1159eda'
+    const text = `请看这张图\n![图片](${url})\n描述一下`
+    const fetched: string[] = []
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        { id: 'm1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, imageAttachments(), {
+      baseUrl: 'http://127.0.0.1:3080',
+      fetchFn: async (input) => {
+        fetched.push(String(input))
+        return new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/png' } })
+      },
+    })
+
+    expect(fetched).toEqual(['http://127.0.0.1:3080/describe-image/raw/sha256:fb8625f2d563722a61b6bc791d665d758bd083bbd0b96f7a4693a3d2a1159eda'])
+    expect(payload.instructions ?? '').not.toContain('Do not claim to see the image')
+    expect(payload.input).toContainEqual({
+      role: 'user',
+      content: [
+        { type: 'input_text', text: '请看这张图\n' },
+        { type: 'input_image', image_url: 'data:image/png;base64,AQID' },
+        { type: 'input_text', text: '\n描述一下' },
+      ],
+    })
+  })
+
+  it('leaves local raw markdown image links as text outside the gpt multimodal route', async () => {
+    const text = '![图片](/describe-image/raw/sha256:fb8625f2d563722a61b6bc791d665d758bd083bbd0b96f7a4693a3d2a1159eda)'
+    const options = {
+      provider: 'other-provider', model: 'text-only', messages: [
+        { id: 'm1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, imageAttachments(), {
+      baseUrl: 'http://127.0.0.1:3080',
+      fetchFn: async () => { throw new Error('should not fetch for non-gpt routes') },
+    })
+
+    expect(payload.instructions).toContain('markdown image link to a local/raw session URL')
+    expect(payload.input).toContainEqual({
+      role: 'user',
+      content: [{ type: 'input_text', text }],
+    })
+  })
+
   it('does not duplicate replayed calls and degrades a genuinely orphaned result to text', async () => {
     const replayedCall = { type: 'function_call', call_id: 'call_known', name: 'read_file', arguments: '{"path":"a"}' }
     const options = {
@@ -249,6 +314,19 @@ describe('Responses payload mapping', () => {
 
 function unusedAttachments() {
   return { readImage: async () => { throw new Error('unused') } }
+}
+
+function imageAttachments() {
+  return {
+    imageLimits: {
+      maxImageBytes: 10_000,
+      maxImagesPerMessage: 10,
+      maxMessageImageBytes: 100_000,
+      maxImagePixels: 10_000_000,
+      mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+    },
+    readImage: async () => { throw new Error('unused') },
+  }
 }
 
 function pwshTool() {
