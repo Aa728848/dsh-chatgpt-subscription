@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a DSH plugin that exposes ChatGPT subscription-backed GPT models through the `codex-chatgpt` provider. Source lives in `src/`; generated package output lives in `lib/` and should be refreshed with the build rather than edited by hand.
+This repository is a DeepSeek Harness(DSH) plugin that exposes ChatGPT subscription-backed GPT models through the `codex-chatgpt` provider. Source lives in `src/`; generated package output lives in `lib/` and should be refreshed with the build rather than edited by hand.
 
 - `src/index.ts`: host plugin entry and service wiring.
 - `src/host/`: adapter, OAuth, token storage, quota routes, Responses mapping, and streaming.
