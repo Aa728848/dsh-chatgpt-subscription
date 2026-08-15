@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 - 2026-08-16
+
+- 优化过程详情折叠（Process folding）的初始化时机与节点匹配探测逻辑。
+- 增强客户端 DOM 观察与挂载测试用例覆盖。
+
 ## 0.1.1 - 2026-08-16
 
 - 新增执行过程详情与思考过程的可折叠展示机制（Collapsible process detail folding）。

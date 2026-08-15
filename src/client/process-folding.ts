@@ -5,11 +5,11 @@ const GROUP_HIDDEN_CLASS = 'dsh-codex-process-group-hidden'
 const USER_TOGGLED_ATTR = 'data-dsh-codex-process-user-toggled'
 const TITLE_ATTR = 'data-dsh-codex-process-title'
 const TITLE = 'Click to expand or collapse process details'
-const DEFAULT_AUTO_COLLAPSE_MS = 2500
+const DEFAULT_AUTO_COLLAPSE_MS = 350
 const MAX_PROCESS_LABELS_PER_ROW = 3
 const MAX_SCAN_ROOTS_PER_FRAME = 80
 const MAX_TEXT_SAMPLE = 20_000
-const PROCESS_CANDIDATE_SELECTOR = 'article,section,li,div,p,h1,h2,h3,h4,h5,h6,[role="listitem"]'
+const PROCESS_CANDIDATE_SELECTOR = 'article,section,li,div,p,span,button,h1,h2,h3,h4,h5,h6,[role="button"],[role="listitem"]'
 const PROCESS_PREFIX_PATTERN = '(?:上下文注入|Think|Search|Code|代码|Pwsh|PowerShell|Bash|Shell|Read|Glob|Grep|Web(?:\\s+Search)?|Tool|工具|思考)'
 const COMMAND_PATTERN = /(?:Code|代码|Pwsh|PowerShell|Bash|Shell|Read|Glob|Grep|Tool|工具)/i
 const SEARCH_PATTERN = /(?:Search|Web\s+Search|搜索)/i
@@ -82,7 +82,7 @@ export function installProcessFolding(options: ProcessFoldingOptions = {}): () =
     const head = rows[0]
     const title = titleForProcessRows(rows)
     const click = (event: MouseEvent) => {
-      if (isInteractiveTarget(event.target)) return
+      if (isInteractiveTarget(event.target, head)) return
       markUserToggled(head)
       setGroupCollapsed(head, !head.classList.contains(GROUP_COLLAPSED_CLASS))
     }
@@ -190,11 +190,16 @@ function cleanupGroup(head: HTMLElement, state: GroupState): void {
 
 function findProcessRows(root: Element): HTMLElement[] {
   const rows: HTMLElement[] = []
-  if (root instanceof HTMLElement && isProcessRow(root)) rows.push(root)
+  if (root instanceof HTMLElement && isProcessRow(root)) pushProcessRow(rows, root)
   for (const element of root.querySelectorAll(PROCESS_CANDIDATE_SELECTOR)) {
-    if (element instanceof HTMLElement && isProcessRow(element)) rows.push(element)
+    if (element instanceof HTMLElement && isProcessRow(element)) pushProcessRow(rows, element)
   }
   return rows
+}
+
+function pushProcessRow(rows: HTMLElement[], row: HTMLElement): void {
+  if (rows.some((existing) => existing.contains(row))) return
+  rows.push(row)
 }
 
 function isProcessRow(element: HTMLElement): boolean {
@@ -257,9 +262,11 @@ function nodeElement(node: Node): Element | null {
 }
 
 function shouldIgnore(element: HTMLElement): boolean {
-  return element.closest('textarea,input,select,button,a,[contenteditable="true"],script,style') !== null
+  return element.closest('textarea,input,select,a,[contenteditable="true"],script,style') !== null
 }
 
-function isInteractiveTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest('button,a,input,textarea,select,[role="button"],[contenteditable="true"]') !== null
+function isInteractiveTarget(target: EventTarget | null, groupHead: HTMLElement): boolean {
+  if (!(target instanceof Element)) return false
+  const interactive = target.closest('button,a,input,textarea,select,[role="button"],[contenteditable="true"]')
+  return interactive !== null && interactive !== groupHead
 }

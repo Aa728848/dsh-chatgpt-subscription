@@ -80,4 +80,30 @@ describe('process folding', () => {
 
     dispose()
   })
+
+  it('folds process rows rendered as disclosure buttons', async () => {
+    const dispose = installProcessFolding({ autoCollapseMs: 10 })
+    document.body.innerHTML = `
+      <main>
+        <button id="think" type="button"><span>Think · Planning project inspection steps</span></button>
+        <button id="code" type="button"><span># Code · Read project package metadata</span></button>
+        <button id="read" type="button"><span>Read · package.json</span></button>
+        <section id="answer"><h2>项目概览</h2></section>
+      </main>
+    `
+
+    await vi.runOnlyPendingTimersAsync()
+    const think = document.getElementById('think')
+    const code = document.getElementById('code')
+
+    expect(think?.classList.contains('dsh-codex-process-group-head')).toBe(true)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(think?.classList.contains('dsh-codex-process-group-collapsed')).toBe(true)
+    expect(code?.classList.contains('dsh-codex-process-group-hidden')).toBe(true)
+
+    think?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(think?.classList.contains('dsh-codex-process-group-collapsed')).toBe(false)
+
+    dispose()
+  })
 })
