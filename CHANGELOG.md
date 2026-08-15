@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2026-08-16
+
+- 新增执行过程详情与思考过程的可折叠展示机制（Collapsible process detail folding）。
+- 增强客户端与服务端 Responses 过程解析及 UI 交互。
+
 ## 0.1.0 - 2026-08-16
 
 - 首个正式版本发布。
