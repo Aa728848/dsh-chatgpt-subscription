@@ -6,15 +6,15 @@ const USER_TOGGLED_ATTR = 'data-dsh-codex-process-user-toggled'
 const TITLE_ATTR = 'data-dsh-codex-process-title'
 const TITLE = 'Click to expand or collapse process details'
 const DEFAULT_AUTO_COLLAPSE_MS = 2500
-const MAX_PROCESS_LABELS_PER_ROW = 1
+const MAX_PROCESS_LABELS_PER_ROW = 3
 const MAX_SCAN_ROOTS_PER_FRAME = 80
 const MAX_TEXT_SAMPLE = 20_000
-const PROCESS_CANDIDATE_SELECTOR = 'article,section,li,div,p,[role="listitem"]'
-const PROCESS_PREFIX_PATTERN = '(?:上下文注入|Think|Search|Pwsh|PowerShell|Bash|Shell|Read|Glob|Grep|Web(?:\\s+Search)?|Tool|工具|思考)'
-const COMMAND_PATTERN = /(?:Pwsh|PowerShell|Bash|Shell|Read|Glob|Grep|Tool|工具)/i
+const PROCESS_CANDIDATE_SELECTOR = 'article,section,li,div,p,h1,h2,h3,h4,h5,h6,[role="listitem"]'
+const PROCESS_PREFIX_PATTERN = '(?:上下文注入|Think|Search|Code|代码|Pwsh|PowerShell|Bash|Shell|Read|Glob|Grep|Web(?:\\s+Search)?|Tool|工具|思考)'
+const COMMAND_PATTERN = /(?:Code|代码|Pwsh|PowerShell|Bash|Shell|Read|Glob|Grep|Tool|工具)/i
 const SEARCH_PATTERN = /(?:Search|Web\s+Search|搜索)/i
-const PROCESS_PREFIX_RE = new RegExp(`^\\s*(?:[•●◦▪▫·-]\\s*)?${PROCESS_PREFIX_PATTERN}\\s*(?:[·:：-]|$)`, 'i')
-const PROCESS_LINE_RE = new RegExp(`(?:^|\\n)\\s*(?:[•●◦▪▫·-]\\s*)?${PROCESS_PREFIX_PATTERN}\\s*(?:[·:：-]|$)`, 'gi')
+const PROCESS_PREFIX_RE = new RegExp(`^\\s*(?:[•●◦▪▫·#-]\\s*)?${PROCESS_PREFIX_PATTERN}\\s*(?:[·:：-]|$)`, 'i')
+const PROCESS_LINE_RE = new RegExp(`(?:^|\\n)\\s*(?:[•●◦▪▫·#-]\\s*)?${PROCESS_PREFIX_PATTERN}\\s*(?:[·:：-]|$)`, 'gi')
 
 export interface ProcessFoldingOptions {
   autoCollapseMs?: number
@@ -33,7 +33,21 @@ interface PreviousGroupState {
 }
 
 export function installProcessFolding(options: ProcessFoldingOptions = {}): () => void {
-  if (typeof document === 'undefined' || document.body === null) return () => undefined
+  if (typeof document === 'undefined') return () => undefined
+  if (document.body === null) {
+    let dispose: () => void = () => undefined
+    let started = false
+    const start = () => {
+      if (started) return
+      started = true
+      dispose = installProcessFolding(options)
+    }
+    document.addEventListener('DOMContentLoaded', start, { once: true })
+    return () => {
+      document.removeEventListener('DOMContentLoaded', start)
+      dispose()
+    }
+  }
 
   const autoCollapseMs = options.autoCollapseMs ?? DEFAULT_AUTO_COLLAPSE_MS
   const groups = new Map<HTMLElement, GroupState>()
@@ -188,14 +202,19 @@ function isProcessRow(element: HTMLElement): boolean {
   const raw = (element.textContent ?? '').slice(0, MAX_TEXT_SAMPLE)
   const normalized = raw.replace(/\s+/g, ' ').trim()
   if (!PROCESS_PREFIX_RE.test(normalized)) return false
-  return processLabelCount(raw) <= MAX_PROCESS_LABELS_PER_ROW
+  const stats = processTextStats(raw)
+  if (stats.processLabels === 0 || stats.processLabels > MAX_PROCESS_LABELS_PER_ROW) return false
+  return !(element.children.length > 0 && stats.hasNonProcessLine)
 }
 
-function processLabelCount(text: string): number {
+function processTextStats(text: string): { processLabels: number; hasNonProcessLine: boolean } {
   PROCESS_LINE_RE.lastIndex = 0
-  let count = 0
-  while (PROCESS_LINE_RE.exec(text) !== null) count++
-  return count
+  let processLabels = 0
+  while (PROCESS_LINE_RE.exec(text) !== null) processLabels++
+  const hasNonProcessLine = text.split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .some((line) => line !== '' && !PROCESS_PREFIX_RE.test(line))
+  return { processLabels, hasNonProcessLine }
 }
 
 function setGroupCollapsed(head: HTMLElement, collapsed: boolean): void {
