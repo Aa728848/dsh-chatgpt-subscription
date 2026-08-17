@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.1.9 - 2026-08-17
+## 0.1.10 - 2026-08-17
 
 - 移除临时 Bash Prompt 兼容模块：由于上游 DSH `0.1.0-rc.7` 已经原生修复持久化 Bash 提示符不匹配与重置问题，现按照标记 `DSH_COMPAT_REMOVE(persistent-bash-prompt-mismatch)` 安全移除全部相关兼容代码与测试。保留子代理报告去重兼容模块 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)`。
+- 增强 Responses Mapper 对 DSH `0.1.0-rc.7` 中新版规范 `ReplayEnvelope` 嵌套结构（`response.outputItems`）的兼容解构支持。
 
 ## 0.1.8 - 2026-08-17
 
