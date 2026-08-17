@@ -5,7 +5,6 @@ import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
 import { installSubagentReportDedupCompat } from './host/subagent-report-scheduling-compat.ts'
-import { installBashPromptCompat } from './host/bash-prompt-scheduling-compat.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
@@ -28,10 +27,7 @@ export function apply(ctx: Context): void {
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     // DSH_COMPAT_REMOVE(subagent-report-settlement-dedup): remove with the isolated compat module.
     const disposeSubagentReportCompat = installSubagentReportDedupCompat(ctx)
-    // DSH_COMPAT_REMOVE(persistent-bash-prompt-mismatch): remove with the isolated compat module.
-    const disposeBashPromptCompat = installBashPromptCompat(ctx)
     return () => {
-      disposeBashPromptCompat()
       disposeSubagentReportCompat()
       disposeAdapter()
       disposeRoutes()

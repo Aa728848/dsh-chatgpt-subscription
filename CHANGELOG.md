@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.9 - 2026-08-17
+
+- 移除临时 Bash Prompt 兼容模块：由于上游 DSH `0.1.0-rc.7` 已经原生修复持久化 Bash 提示符不匹配与重置问题，现按照标记 `DSH_COMPAT_REMOVE(persistent-bash-prompt-mismatch)` 安全移除全部相关兼容代码与测试。保留子代理报告去重兼容模块 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)`。
+
 ## 0.1.8 - 2026-08-17
 
 - 修复 Cordis 插件依赖安全检查：使用 `ctx.inject(['terminals'], ...)` 作用域安全声明，解决在未加载 terminals 服务的 Profile 或非终端环境下直接访问 `ctx.terminals` 抛出 `cannot get property "terminals" without inject` 的启动崩溃问题。
