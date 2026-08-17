@@ -86,7 +86,7 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, imageAttachments(), {
       baseUrl: 'http://127.0.0.1:3080',
-      fetchFn: async (input) => {
+      fetchFn: async (input): Promise<Response> => {
         fetched.push(String(input))
         return new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/png' } })
       },
@@ -113,7 +113,7 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, imageAttachments(), {
       baseUrl: 'http://127.0.0.1:3080',
-      fetchFn: async () => { throw new Error('should not fetch for non-gpt routes') },
+      fetchFn: async (): Promise<Response> => { throw new Error('should not fetch for non-gpt routes') },
     })
 
     expect(payload.instructions).toContain('markdown image link to a local/raw session URL')
@@ -356,7 +356,7 @@ function imageAttachments() {
       maxImagesPerMessage: 10,
       maxMessageImageBytes: 100_000,
       maxImagePixels: 10_000_000,
-      mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+      mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const,
     },
     readImage: async () => { throw new Error('unused') },
   }

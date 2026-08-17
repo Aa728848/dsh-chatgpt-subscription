@@ -8,7 +8,7 @@ export interface ResponsesPayload extends Record<string, unknown> {
   store: false
 }
 
-type FetchLike = typeof fetch
+export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
 export interface LocalRawImageOptions {
   baseUrl?: string
