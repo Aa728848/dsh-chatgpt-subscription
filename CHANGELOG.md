@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7 - 2026-08-17
+
+- 临时兼容 DSH `0.1.0-rc.6` 持久化 Bash 提示符不匹配（70倍命令提速）：修补 PTY 会话在 `tool-bash-persistent` 设置 `__DSH_PERSISTENT_BASH_PROMPT__ ` 时的就绪判定，避免因底层硬编码 `dsh> ` 及 6 字符截断导致回退到 3.5 秒静默超时。代码统一标记为 `DSH_COMPAT_REMOVE(persistent-bash-prompt-mismatch)`，待 DSH 原生修复后可整体移除。
+
 ## 0.1.6 - 2026-08-17
 
 - 临时兼容 DSH `0.1.0-rc.6` 的子代理报告去重：当 `subagent-settled` 已携带与同一子代理排队 `subagent-report` 完全相同的最终内容时，删除重复报告，保留 settlement 通知；部分报告、不同内容和不同子代理不受影响。代码统一标记为 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)`，待 DSH 原生修复后可整体移除。
