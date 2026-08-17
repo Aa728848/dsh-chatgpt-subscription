@@ -40,6 +40,8 @@ export function defaultDpapiCredentialPath(): string {
 }
 
 export class WindowsDpapiTokenStore implements TokenStore {
+  readonly storage = { kind: 'windows-dpapi', encrypted: true } as const
+
   constructor(private readonly path = defaultDpapiCredentialPath()) {
     if (process.platform !== 'win32') throw new Error('Windows DPAPI storage requires Windows')
     if (dirname(path) === path) throw new Error('invalid DPAPI credential path')

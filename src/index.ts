@@ -6,13 +6,13 @@ import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
-import { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
+import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { UsageService } from './host/usage-service.ts'
 
 export const inject = ['webServer', 'llm', 'attachments']
 
 export function apply(ctx: Context): void {
-  const store = new WindowsDpapiTokenStore()
+  const store = createPlatformTokenStore()
   const oauth = new OAuthService(store, { logger: ctx.logger })
   const usage = new UsageService(oauth)
   const responses = new ResponsesClient(oauth, ctx.attachments, {
@@ -35,6 +35,9 @@ export { OAuthService } from './host/oauth-service.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { ResponsesClient, parseResponsesStream } from './host/responses-client.ts'
 export { UsageService, mapCodexUsage } from './host/usage-service.ts'
+export { createPlatformTokenStore } from './host/platform-token-store.ts'
+export { LinuxFileTokenStore } from './host/token-store-linux.ts'
+export { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
 export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts'
 
 function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {

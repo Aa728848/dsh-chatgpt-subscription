@@ -65,6 +65,7 @@ describe('OAuthService', () => {
     const status = await service.status()
     expect(status).toMatchObject({
       authenticated: true,
+      storage: { kind: 'memory', encrypted: false, available: true },
       account: {
         email: 'p***@example.com',
         planType: 'plus',
@@ -77,6 +78,30 @@ describe('OAuthService', () => {
     expect(serialized).not.toContain('acct-sensitive-4f21')
   })
 
+  it('marks credential storage unavailable when the store cannot be read', async () => {
+    const service = tracked(new OAuthService({
+      storage: { kind: 'linux-file', encrypted: false },
+      load: async () => { throw new Error('permissions') },
+      save: async () => undefined,
+      clear: async () => undefined,
+    }, { logger: silentLogger }))
+
+    expect(await service.status()).toMatchObject({
+      authenticated: false,
+      storage: { kind: 'linux-file', encrypted: false, available: false },
+      error: { code: 'storage-failed' },
+    })
+  })
+  it('fails before opening an OAuth callback when credential storage is unavailable', async () => {
+    const service = tracked(new OAuthService({
+      storage: { kind: 'linux-file', encrypted: false },
+      load: async () => { throw new Error('permissions') },
+      save: async () => undefined,
+      clear: async () => undefined,
+    }, { logger: silentLogger }))
+
+    await expect(service.startLogin()).rejects.toMatchObject({ code: 'storage-failed' })
+  })
   it('rejects an invalid state and never stores callback credentials', async () => {
     const store = new MemoryTokenStore()
     const fetchFn = vi.fn<NonNullable<OAuthServiceOptions['fetchFn']>>()

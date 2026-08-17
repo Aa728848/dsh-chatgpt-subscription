@@ -2,6 +2,10 @@ import type { TokenStore, StoredOAuthCredentials } from './token-store.ts';
 export declare function defaultDpapiCredentialPath(): string;
 export declare class WindowsDpapiTokenStore implements TokenStore {
     private readonly path;
+    readonly storage: {
+        readonly kind: "windows-dpapi";
+        readonly encrypted: true;
+    };
     constructor(path?: string);
     load(): Promise<StoredOAuthCredentials | null>;
     save(value: StoredOAuthCredentials): Promise<void>;

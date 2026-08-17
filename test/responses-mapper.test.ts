@@ -174,6 +174,24 @@ describe('Responses payload mapping', () => {
     expect(payload.instructions).toContain('this is not a sandbox-escalation retry')
   })
 
+  it.each([
+    ['bash', 'Use Bash syntax and native POSIX paths.', 'For bash, use native POSIX paths'],
+    ['sh', 'Use portable POSIX syntax and native POSIX paths', 'avoid Bash-only arrays'],
+  ])('adds Linux command guidance for %s without mutating its schema', async (name, descriptionText, instructionText) => {
+    const tool = commandTool(name)
+    const originalParameters = structuredClone(tool.parameters)
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [], tools: [tool],
+    } as unknown as GenerateOptions
+
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const mapped = (payload.tools as Array<Record<string, unknown>>)[0]!
+    expect(mapped.description).toContain(descriptionText)
+    expect(payload.instructions).toContain(`Command tool compatibility rule (${name})`)
+    expect(payload.instructions).toContain(instructionText)
+    expect(payload.instructions).not.toContain('native Windows paths')
+    expect(tool.parameters).toEqual(originalParameters)
+  })
   it('exposes sandbox escalation controls only after the matching tool was denied', async () => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
@@ -330,9 +348,13 @@ function imageAttachments() {
 }
 
 function pwshTool() {
+  return commandTool('pwsh', 'Run PowerShell.')
+}
+
+function commandTool(name: string, description = `Run ${name}.`) {
   return {
-    name: 'pwsh',
-    description: 'Run PowerShell.',
+    name,
+    description,
     parameters: {
       type: 'object',
       properties: {

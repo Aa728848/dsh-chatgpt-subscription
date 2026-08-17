@@ -9,8 +9,14 @@ export declare const zh: {
     readonly accountId: "账号 ID";
     readonly expires: "令牌到期";
     readonly storage: "凭据存储";
-    readonly storageValue: "Windows DPAPI（当前用户加密）";
-    readonly securityNotice: "令牌仅保存在 Host 端的 DPAPI 加密文件中，不会进入浏览器、settings.yaml 或日志。";
+    readonly storageWindows: "Windows DPAPI（当前用户加密）";
+    readonly storageLinuxFile: "Linux 用户私有文件（权限 0600）";
+    readonly storageMemory: "仅 Host 内存（不持久化）";
+    readonly storageUnavailable: "凭据存储不可用";
+    readonly securityWindows: "令牌 Windows CurrentUser DPAPI 加密。";
+    readonly securityLinuxFile: "令牌仅写入 Host 上当前 Linux 用户可读的 0600 文件。";
+    readonly securityMemory: "令牌仅保留在 Host 内存中，Host 退出后丢失。";
+    readonly securityUnavailable: "Host 无法安全访问凭据存储；请修复文件所有者或权限后重试。";
     readonly signIn: "使用 ChatGPT 登录";
     readonly signInAgain: "重新登录";
     readonly cancel: "取消登录";
@@ -60,8 +66,14 @@ export declare const dictionaries: {
         readonly accountId: "账号 ID";
         readonly expires: "令牌到期";
         readonly storage: "凭据存储";
-        readonly storageValue: "Windows DPAPI（当前用户加密）";
-        readonly securityNotice: "令牌仅保存在 Host 端的 DPAPI 加密文件中，不会进入浏览器、settings.yaml 或日志。";
+        readonly storageWindows: "Windows DPAPI（当前用户加密）";
+        readonly storageLinuxFile: "Linux 用户私有文件（权限 0600）";
+        readonly storageMemory: "仅 Host 内存（不持久化）";
+        readonly storageUnavailable: "凭据存储不可用";
+        readonly securityWindows: "令牌由 Host 使用 Windows CurrentUser DPAPI 加密，不会进入浏览器、settings.yaml 或日志。";
+        readonly securityLinuxFile: "令牌仅写入 Host 上当前 Linux 用户可读的 0600 文件，但不会额外加密；同 UID 进程、root、备份和磁盘快照仍可能读取。";
+        readonly securityMemory: "令牌仅保留在 Host 内存中，Host 退出后丢失。";
+        readonly securityUnavailable: "Host 无法安全访问凭据存储；请修复文件所有者或权限后重试。";
         readonly signIn: "使用 ChatGPT 登录";
         readonly signInAgain: "重新登录";
         readonly cancel: "取消登录";
@@ -98,6 +110,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"title" | "intro" | "account" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storage" | "storageValue" | "securityNotice" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "pending" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "quota" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "stale" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "exhausted" | "resets" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "exhausted" | "resets" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

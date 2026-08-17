@@ -6,7 +6,7 @@ This repository is a DeepSeek Harness(DSH) plugin that exposes ChatGPT subscript
 
 - `src/index.ts`: host plugin entry and service wiring.
 - `src/host/`: adapter, OAuth, token storage, quota routes, Responses mapping, and streaming.
-- `src/client/`: web settings UI, client API helpers, styles, and process folding behavior.
+- `src/client/`: web settings UI, client API helpers, and styles.
 - `src/shared/`: shared DTO/contracts.
 - `test/`: Vitest unit and jsdom tests.
 
@@ -45,4 +45,4 @@ Pull requests should include a short problem statement, implementation summary, 
 
 ## Security & Configuration Tips
 
-Keep OAuth tokens host-only. Do not log raw credentials, expose endpoint overrides, or weaken same-origin POST checks. Preserve Windows CurrentUser DPAPI storage and loopback-only local image fetching.
+Keep OAuth tokens host-only. Do not log raw credentials, expose endpoint overrides, or weaken same-origin POST checks. Preserve Windows CurrentUser DPAPI storage, Linux owner-only credential permissions, and loopback-only local image fetching.

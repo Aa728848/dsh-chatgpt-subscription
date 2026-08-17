@@ -129,7 +129,7 @@ export async function buildResponsesPayload(
 
 function runCodeInstruction(tools: GenerateOptions['tools']): string | undefined {
   if (!tools?.some((tool) => tool.name === 'run_code')) return undefined
-  return 'run_code compatibility rule: its code is parsed as strict JavaScript/TypeScript before execution. On Windows, do not embed PowerShell containing $, ${...}, backslashes, or here-strings in JavaScript template literals; String.raw does not disable ${...} interpolation. Prefer arrays of ordinary quoted strings joined with "\\n", escaping backslashes, or use a file-write tool for large scripts and then invoke pwsh.'
+  return 'run_code compatibility rule: its code is parsed as strict JavaScript/TypeScript before execution. Shell commands are nested string data: JavaScript template literals may consume ${...}, backticks, backslashes, and escape sequences before PowerShell, Bash, or POSIX sh sees them. On Windows, avoid embedding PowerShell containing $, ${...}, backslashes, or here-strings in template literals; String.raw does not disable ${...} interpolation. On Linux, prefer ordinary quoted strings or write a script file before invoking bash/sh, especially for commands containing backticks or ${...}. Prefer arrays of ordinary quoted strings joined with "\\n", escaping backslashes, or use a file-write tool for large scripts.'
 }
 
 function localRawImageInstruction(stats: LocalRawImageStats): string | undefined {
@@ -143,7 +143,7 @@ function supportsImageInput(options: GenerateOptions): boolean {
 
 function toolDescriptionForCodex(name: string, description: string): string {
   if (name === 'run_code') {
-    return `${description}\n\nCompatibility: code is strict JavaScript/TypeScript. When composing PowerShell, avoid JavaScript template literals containing $, \${...}, Windows backslashes, or PowerShell here-strings. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool before invoking pwsh.`
+    return `${description}\n\nCompatibility: code is strict JavaScript/TypeScript and nested shell commands are string data. Template literals may consume \${...}, backticks, backslashes, and escape sequences before PowerShell, Bash, or POSIX sh sees them. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool before invoking the shell.`
   }
   if (isCommandTool(name)) {
     return `${description}\n\n${commandToolCompatibilityText(name)}`
@@ -156,15 +156,30 @@ function commandToolInstruction(tools: GenerateOptions['tools']): string | undef
     ?.filter((tool) => isCommandTool(tool.name))
     .map((tool) => tool.name)
   if (!names?.length) return undefined
-  return `Command tool compatibility rule (${[...new Set(names)].join(', ')}): each command call runs in a fresh process, so do not rely on cd, aliases, functions, or variables from previous calls; set workdir when the tool supports it. On Windows/pwsh, keep commands in native PowerShell syntax and native Windows paths. For deletion or move operations, first resolve and verify exact absolute target paths, then operate on those literal paths only; avoid dynamically deleting paths built from $HOME, wildcards, command substitution, or another shell's output. Treat [auto-mode hard deny] and similar policy denials as non-retriable; choose a safer non-destructive inspection or report the limitation instead of repeating the same command or adding sandbox escalation. If downloads fail with TLS credential or connection-closed errors, treat that as an environment/network failure and use local sources or report the limitation instead of cycling through equivalent download commands.`
+  const uniqueNames = [...new Set(names)]
+  const normalized = uniqueNames.map((name) => name.toLowerCase())
+  const shellGuidance = [
+    normalized.some((name) => name === 'pwsh' || name.includes('powershell'))
+      ? 'For pwsh/PowerShell, use native PowerShell syntax and native Windows paths.'
+      : undefined,
+    normalized.includes('bash')
+      ? 'For bash, use native POSIX paths and Bash syntax in a fresh non-interactive process.'
+      : undefined,
+    normalized.some((name) => name === 'sh' || name === 'shell')
+      ? 'For sh/generic shell, prefer portable POSIX syntax and avoid Bash-only arrays, [[ ... ]], process substitution, and source.'
+      : undefined,
+  ].filter((value): value is string => value !== undefined).join(' ')
+  return `Command tool compatibility rule (${uniqueNames.join(', ')}): each command call runs in a fresh process, so do not rely on cd, aliases, functions, or variables from previous calls; set workdir when the tool supports it. ${shellGuidance} For deletion or move operations, first resolve and verify exact absolute target paths, then operate on those literal paths only; avoid dynamically deleting paths built from home-directory expansion, wildcards, command substitution, or another shell's output. Treat [auto-mode hard deny] and similar policy denials as non-retriable; choose a safer non-destructive inspection or report the limitation instead of repeating the same command or adding sandbox escalation. If downloads fail with TLS credential or connection-closed errors, treat that as an environment/network failure and use local sources or report the limitation instead of cycling through equivalent download commands.`
 }
 
 function commandToolCompatibilityText(name: string): string {
   const shell = name.toLowerCase()
-  const windows = shell === 'pwsh' || shell.includes('powershell')
-    ? ' Use native PowerShell syntax and native Windows paths; prefer workdir over cd because every call starts a fresh process.'
-    : ' Prefer workdir over cd because every call starts a fresh process.'
-  return `Compatibility: command execution is stateless between calls.${windows} For destructive operations, verify exact absolute targets first and use literal paths; policy hard-deny results require a safer command shape, not sandbox escalation.`
+  const syntax = shell === 'pwsh' || shell.includes('powershell')
+    ? ' Use native PowerShell syntax and native Windows paths.'
+    : shell === 'bash'
+      ? ' Use Bash syntax and native POSIX paths.'
+      : ' Use portable POSIX syntax and native POSIX paths; avoid Bash-only arrays, [[ ... ]], process substitution, and source.'
+  return `Compatibility: command execution is stateless between calls.${syntax} Prefer workdir over cd because every call starts a fresh process. For destructive operations, verify exact absolute targets first and use literal paths; policy hard-deny results require a safer command shape, not sandbox escalation.`
 }
 
 function sandboxToolInstruction(
@@ -201,7 +216,7 @@ function toolParametersForCodex(
     const code = record(properties.code)
     if (code !== null) {
       const current = typeof code.description === 'string' ? code.description.trim() : ''
-      const compatibility = 'Strict JavaScript/TypeScript source. For PowerShell on Windows, avoid JavaScript template literals containing $, ${...}, backslashes, or here-strings; String.raw still performs ${...} interpolation. Prefer ordinary quoted string arrays joined with "\\n" and escape backslashes, or write a script file with a dedicated file tool.'
+      const compatibility = 'Strict JavaScript/TypeScript source. Nested shell commands are string data: template literals may consume ${...}, backticks, backslashes, and escape sequences before PowerShell, Bash, or POSIX sh sees them; String.raw still performs ${...} interpolation. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool.'
       code.description = current ? `${current}\n\n${compatibility}` : compatibility
     }
   }
@@ -229,6 +244,7 @@ function isCommandTool(name: string): boolean {
   return normalized === 'pwsh'
     || normalized === 'powershell'
     || normalized === 'bash'
+    || normalized === 'sh'
     || normalized === 'shell'
 }
 
@@ -289,7 +305,7 @@ function appendMissingToolCalls(
 
 function runCodeErrorOutput(output: string): string {
   if (!isRunCodeParserError(output)) return output
-  return `${output}\n\nCompatibility hint: run_code failed while parsing strict JavaScript/TypeScript, before the nested tool ran. Avoid JavaScript template literals for PowerShell containing $, \${...}, Windows backslashes, or here-strings; String.raw does not prevent \${...} interpolation. Build the script from ordinary quoted strings joined with "\\n" (escaping backslashes), or write a script file with a dedicated file tool and then invoke pwsh.`
+  return `${output}\n\nCompatibility hint: run_code failed while parsing strict JavaScript/TypeScript, before the nested tool ran. Shell commands are nested string data; template literals can consume \${...}, backticks, backslashes, and escape sequences before PowerShell, Bash, or POSIX sh sees them, and String.raw does not prevent \${...} interpolation. Build the script from ordinary quoted strings joined with "\\n", or write a script file with a dedicated file tool and then invoke the shell.`
 }
 
 function isRunCodeParserError(output: string): boolean {

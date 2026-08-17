@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- 新增 Linux Host 支持：平台凭据存储选择、用户私有 `0600` TokenStore，以及 Bash/POSIX shell 工具调用兼容说明与测试。
+- 设置页现在根据 Host 返回值展示 Windows DPAPI 或 Linux 文件存储及其真实安全边界。
+- 移除与 Codex 订阅接入无关的执行过程详情折叠功能。
+
 ## 0.1.2 - 2026-08-16
 
 - 优化过程详情折叠（Process folding）的初始化时机与节点匹配探测逻辑。

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { PluginStatusDto, QuotaBucketDto, QuotaWindowDto } from '../shared/contracts.ts'
+import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto } from '../shared/contracts.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
 
@@ -165,15 +165,15 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           <InfoRow label={t('accountId')} value={account?.accountIdSuffix ?? '—'} />
           <InfoRow label={t('expires')} value={formatDate(account?.tokenExpiresAt)} />
         </> : null}
-        <InfoRow label={t('storage')} value={t('storageValue')} />
-        <p className="dsh-codex-notice">{t('securityNotice')}</p>
+        <InfoRow label={t('storage')} value={storageLabel(status?.storage, t)} />
+        <p className="dsh-codex-notice">{storageNotice(status?.storage, t)}</p>
         {status?.login.active ? <p className="dsh-codex-muted" role="status">{t('pending')}</p> : null}
         {popupBlocked ? <p className="dsh-codex-error">{t('popupBlocked')}</p> : null}
         {authUrl !== null ? <a className="dsh-codex-link" href={authUrl} target="_blank" rel="noreferrer">{t('continueLogin')}</a> : null}
         <div className="dsh-codex-actions">
           {status?.login.active
             ? <Button disabled={busy !== null} onClick={cancelLogin}>{t('cancel')}</Button>
-            : <Button primary disabled={busy !== null} onClick={startLogin}>{status?.authenticated ? t('signInAgain') : t('signIn')}</Button>}
+            : <Button primary disabled={busy !== null || status?.storage.available === false} onClick={startLogin}>{status?.authenticated ? t('signInAgain') : t('signIn')}</Button>}
           {status?.authenticated ? <>
             <Button disabled={busy !== null} onClick={refreshToken}>{t('refreshToken')}</Button>
             <Button disabled={busy !== null} onClick={logout}>{t('signOut')}</Button>
@@ -221,6 +221,22 @@ function Button({ primary = false, disabled, onClick, children }: { primary?: bo
 
 function InfoRow({ label, value }: { label: string; value: string }): React.JSX.Element {
   return <div className="dsh-codex-row"><span className="dsh-codex-label">{label}</span><span className="dsh-codex-value">{value}</span></div>
+}
+
+export function storageLabel(storage: CredentialStorageDto | undefined, t: Translate): string {
+  if (storage === undefined || !storage.available) return t('storageUnavailable')
+  if (storage.kind === 'windows-dpapi') return t('storageWindows')
+  if (storage.kind === 'linux-file') return t('storageLinuxFile')
+  if (storage.kind === 'memory') return t('storageMemory')
+  return t('storageUnavailable')
+}
+
+export function storageNotice(storage: CredentialStorageDto | undefined, t: Translate): string {
+  if (storage === undefined || !storage.available) return t('securityUnavailable')
+  if (storage.kind === 'windows-dpapi') return t('securityWindows')
+  if (storage.kind === 'linux-file') return t('securityLinuxFile')
+  if (storage.kind === 'memory') return t('securityMemory')
+  return t('securityUnavailable')
 }
 
 function QuotaBucket({ bucket, t }: { bucket: QuotaBucketDto; t: Translate }): React.JSX.Element {

@@ -5,13 +5,21 @@ export interface SanitizedAccountDto {
   tokenExpiresAt: number
 }
 
+export type CredentialStorageKind =
+  | 'windows-dpapi'
+  | 'linux-file'
+  | 'memory'
+
+export interface CredentialStorageDto {
+  kind: CredentialStorageKind
+  encrypted: boolean
+  available: boolean
+}
+
 export interface PluginStatusDto {
   authenticated: boolean
   account: SanitizedAccountDto | null
-  storage: {
-    kind: 'windows-dpapi'
-    encrypted: true
-  }
+  storage: CredentialStorageDto
   login: {
     active: boolean
     loginId: string | null

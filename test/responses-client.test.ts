@@ -36,6 +36,22 @@ describe('Responses streaming', () => {
     })
   })
 
+  it('streams Linux bash tool calls without changing their name or arguments', async () => {
+    const argumentsJson = '{"command":"pwd && uname -s","description":"Inspect Linux host"}'
+    const chunks = await collect(parseResponsesStream(sse([
+      {
+        type: 'response.output_item.done', output_index: 0,
+        item: { type: 'function_call', id: 'fc_bash', call_id: 'call_bash', name: 'bash', arguments: argumentsJson },
+      },
+      { type: 'response.completed', response: {} },
+    ])))
+
+    expect(chunks).toContainEqual({
+      type: 'block-end', index: 0,
+      block: { type: 'tool-call', id: 'call_bash', name: 'bash', arguments: argumentsJson },
+    })
+    expect(chunks.at(-1)).toMatchObject({ reason: { kind: 'tool-calls' } })
+  })
   it('strips speculative sandbox controls that were hidden from the tool schema', async () => {
     const chunks = await collect(parseResponsesStream(sse([
       {

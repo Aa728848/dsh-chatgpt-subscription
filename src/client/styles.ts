@@ -42,16 +42,9 @@ const CSS = `
 .dsh-codex-skeleton span{animation:dsh-codex-pulse 1.4s ease-in-out infinite;background:var(--dsw-alias-bg-layer-2);border-radius:5px;height:42px}
 .dsh-codex-skeleton span:nth-child(2){animation-delay:.12s}.dsh-codex-skeleton span:nth-child(3){animation-delay:.24s}
 .dsh-codex-sr{height:1px;margin:-1px;overflow:hidden;padding:0;position:absolute;width:1px;clip:rect(0 0 0 0);white-space:nowrap}
-.dsh-codex-process-group-head{border-radius:6px;cursor:pointer;transition:background-color .15s ease,opacity .15s ease}
-.dsh-codex-process-group-head:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2,rgba(127,127,127,.18)) 72%,transparent)}
-.dsh-codex-process-group-head:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
-.dsh-codex-process-group-head.dsh-codex-process-group-collapsed{align-items:center!important;color:transparent!important;display:flex!important;font-size:0!important;line-height:28px!important;max-height:28px!important;min-height:28px!important;overflow:hidden!important;opacity:.78}
-.dsh-codex-process-group-head.dsh-codex-process-group-collapsed>*{display:none!important}
-.dsh-codex-process-group-head.dsh-codex-process-group-collapsed::before{color:var(--dsw-alias-label-secondary);content:"▸ " attr(data-dsh-codex-process-title);display:block;font-size:13px;line-height:28px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsh-codex-process-group-hidden{display:none!important}
 @keyframes dsh-codex-pulse{0%,100%{opacity:.55}50%{opacity:1}}
 @media(max-width:560px){.dsh-codex-row{align-items:flex-start;flex-direction:column;gap:3px}.dsh-codex-value{text-align:left}.dsh-codex-actions{justify-content:flex-start}.dsh-codex-grouphead{align-items:flex-start;flex-direction:column;gap:0;padding:12px 0}.dsh-codex-meter-meta{align-items:flex-start;flex-direction:column;gap:2px}.dsh-codex-errorbar{align-items:flex-start;flex-direction:column}}
-@media(prefers-reduced-motion:reduce){.dsh-codex-meter>span,.dsh-codex-process-group-head{transition:none}.dsh-codex-skeleton span{animation:none}}
+@media(prefers-reduced-motion:reduce){.dsh-codex-meter>span{transition:none}.dsh-codex-skeleton span{animation:none}}
 `
 
 export function installStyles(): () => void {

@@ -90,7 +90,7 @@ export class OAuthService {
       return this.statusFromCredentials(credentials)
     } catch {
       return {
-        ...this.statusFromCredentials(null),
+        ...this.statusFromCredentials(null, false),
         error: publicError(new OAuthServiceError('storage-failed', 'Secure credential storage could not be read.')),
       }
     }
@@ -98,6 +98,9 @@ export class OAuthService {
 
   async startLogin(): Promise<LoginStartDto> {
     this.assertAvailable()
+    await this.store.load().catch(() => {
+      throw new OAuthServiceError('storage-failed', 'Secure credential storage is unavailable. Fix its ownership or permissions before signing in.')
+    })
     if (this.activeLogin !== null) {
       throw new OAuthServiceError('login-active', 'A ChatGPT sign-in is already in progress.')
     }
@@ -263,13 +266,13 @@ export class OAuthService {
     return stored
   }
 
-  private statusFromCredentials(credentials: StoredOAuthCredentials | null): OAuthStatusDto {
+  private statusFromCredentials(credentials: StoredOAuthCredentials | null, storageAvailable = true): OAuthStatusDto {
     const active = this.activeLogin
     if (credentials === null) {
       return {
         authenticated: false,
         account: null,
-        storage: { kind: 'windows-dpapi', encrypted: true },
+        storage: { ...this.store.storage, available: storageAvailable },
         login: {
           active: active !== null,
           loginId: active?.id ?? null,
@@ -287,7 +290,7 @@ export class OAuthService {
         accountIdSuffix: maskAccountId(credentials.accountId ?? identity.accountId),
         tokenExpiresAt: Math.floor(credentials.expiresAt / 1000),
       },
-      storage: { kind: 'windows-dpapi', encrypted: true },
+      storage: { ...this.store.storage, available: storageAvailable },
       login: {
         active: active !== null,
         loginId: active?.id ?? null,

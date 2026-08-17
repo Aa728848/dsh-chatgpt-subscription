@@ -1,3 +1,5 @@
+import type { CredentialStorageDto } from '../shared/contracts.ts'
+
 export interface StoredOAuthCredentials {
   accessToken: string
   refreshToken: string
@@ -9,6 +11,7 @@ export interface StoredOAuthCredentials {
 }
 
 export interface TokenStore {
+  readonly storage: Omit<CredentialStorageDto, 'available'>
   load(): Promise<StoredOAuthCredentials | null>
   save(value: StoredOAuthCredentials): Promise<void>
   clear(): Promise<void>
@@ -16,6 +19,7 @@ export interface TokenStore {
 
 /** Test seam and non-persistent development store. Never used by apply(). */
 export class MemoryTokenStore implements TokenStore {
+  readonly storage = { kind: 'memory', encrypted: false } as const
   private value: StoredOAuthCredentials | null = null
 
   async load(): Promise<StoredOAuthCredentials | null> {
