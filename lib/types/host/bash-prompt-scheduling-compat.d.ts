@@ -44,7 +44,7 @@ export declare function patchSessionOnData(target: {
 } | PtySessionLike): () => void;
 /**
  * Installs the persistent bash prompt compatibility patch onto registered and
- * future PTY backends.
+ * future PTY backends via Cordis scoped injection.
  */
 export declare function installBashPromptCompat(ctx: Context): () => void;
 export {};

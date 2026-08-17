@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8 - 2026-08-17
+
+- 修复 Cordis 插件依赖安全检查：使用 `ctx.inject(['terminals'], ...)` 作用域安全声明，解决在未加载 terminals 服务的 Profile 或非终端环境下直接访问 `ctx.terminals` 抛出 `cannot get property "terminals" without inject` 的启动崩溃问题。
+
 ## 0.1.7 - 2026-08-17
 
 - 临时兼容 DSH `0.1.0-rc.6` 持久化 Bash 提示符不匹配（70倍命令提速）：修补 PTY 会话在 `tool-bash-persistent` 设置 `__DSH_PERSISTENT_BASH_PROMPT__ ` 时的就绪判定，避免因底层硬编码 `dsh> ` 及 6 字符截断导致回退到 3.5 秒静默超时。代码统一标记为 `DSH_COMPAT_REMOVE(persistent-bash-prompt-mismatch)`，待 DSH 原生修复后可整体移除。

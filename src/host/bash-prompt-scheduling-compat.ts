@@ -136,35 +136,40 @@ interface TerminalsServiceLike {
 
 /**
  * Installs the persistent bash prompt compatibility patch onto registered and
- * future PTY backends.
+ * future PTY backends via Cordis scoped injection.
  */
 export function installBashPromptCompat(ctx: Context): () => void {
-  const disposers: Array<() => void> = []
+  // Use Cordis scoped inject to safely declare the 'terminals' dependency
+  // without failing when 'terminals' is absent in the host context.
+  const fiber = ctx.inject(['terminals'], (subCtx: Context) => {
+    const terminals = (subCtx as unknown as { terminals?: TerminalsServiceLike }).terminals
+    if (!terminals) return
 
-  const patchBackend = (backend: BackendLike | undefined): void => {
-    if (!backend) return
-    if (typeof backend.createSession === 'function') {
-      const originalCreate = backend.createSession
-      backend.createSession = function (terminal: unknown, config: unknown) {
-        const session = originalCreate.call(this, terminal, config)
-        if (session) {
-          patchSessionOnData(session)
+    const disposers: Array<() => void> = []
+
+    const patchBackend = (backend: BackendLike | undefined): void => {
+      if (!backend) return
+      if (typeof backend.createSession === 'function') {
+        const originalCreate = backend.createSession
+        backend.createSession = function (terminal: unknown, config: unknown) {
+          const session = originalCreate.call(this, terminal, config)
+          if (session) {
+            patchSessionOnData(session)
+          }
+          return session
         }
-        return session
+        disposers.push(() => {
+          if (backend.createSession) {
+            backend.createSession = originalCreate
+          }
+        })
       }
-      disposers.push(() => {
-        if (backend.createSession) {
-          backend.createSession = originalCreate
-        }
-      })
     }
-  }
 
-  // 1. Inspect existing terminals service if present
-  const terminals = (ctx as unknown as { terminals?: TerminalsServiceLike }).terminals
-  if (terminals?.backends) {
-    for (const backend of terminals.backends.values()) {
-      patchBackend(backend)
+    if (terminals.backends) {
+      for (const backend of terminals.backends.values()) {
+        patchBackend(backend)
+      }
     }
 
     if (typeof terminals.registerBackend === 'function') {
@@ -179,19 +184,27 @@ export function installBashPromptCompat(ctx: Context): () => void {
         }
       })
     }
-  }
+
+    subCtx.effect(() => () => {
+      while (disposers.length > 0) {
+        const dispose = disposers.pop()
+        try {
+          dispose?.()
+        } catch (error) {
+          subCtx.logger?.warn?.(
+            '[dsh-chatgpt-subscription] Could not remove bash prompt compatibility: ' +
+              (error instanceof Error ? error.message : String(error)),
+          )
+        }
+      }
+    }, 'dsh-chatgpt-subscription: bash prompt compatibility cleanup')
+  })
 
   return () => {
-    while (disposers.length > 0) {
-      const dispose = disposers.pop()
-      try {
-        dispose?.()
-      } catch (error) {
-        ctx.logger.warn(
-          '[dsh-chatgpt-subscription] Could not remove bash prompt compatibility: ' +
-            (error instanceof Error ? error.message : String(error)),
-        )
-      }
+    try {
+      fiber?.dispose?.()
+    } catch {
+      // Best-effort cleanup
     }
   }
 }

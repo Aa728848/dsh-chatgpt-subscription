@@ -131,7 +131,7 @@ describe('DSH persistent bash prompt mismatch compatibility', () => {
   })
 
   describe('installBashPromptCompat', () => {
-    it('patches existing and newly registered backends in ctx.terminals', () => {
+    it('patches existing and newly registered backends in ctx.terminals via scoped inject', () => {
       const session1 = createMockSession().session
       const session2 = createMockSession().session
 
@@ -146,12 +146,28 @@ describe('DSH persistent bash prompt mismatch compatibility', () => {
         return () => backendsMap.delete(b.type)
       })
 
-      const mockCtx = {
+      const cleanupCallbacks: Array<() => void> = []
+      const mockSubCtx = {
         logger: { warn: vi.fn() },
         terminals: {
           backends: backendsMap,
           registerBackend,
         },
+        effect: vi.fn((factory) => {
+          const disposer = factory()
+          if (typeof disposer === 'function') cleanupCallbacks.push(disposer)
+        }),
+      }
+
+      const fiberDispose = vi.fn(() => {
+        while (cleanupCallbacks.length > 0) cleanupCallbacks.pop()?.()
+      })
+
+      const mockCtx = {
+        inject: vi.fn((_deps, cb) => {
+          cb(mockSubCtx)
+          return { dispose: fiberDispose }
+        }),
       }
 
       const dispose = installBashPromptCompat(mockCtx as never)
@@ -166,13 +182,28 @@ describe('DSH persistent bash prompt mismatch compatibility', () => {
         type: 'custom-shell',
         createSession: vi.fn((_terminal?: unknown, _config?: unknown) => session2),
       }
-      mockCtx.terminals.registerBackend(newBackend)
+      mockSubCtx.terminals.registerBackend(newBackend)
 
       const created2 = newBackend.createSession({}, {})
       created2.onData('\x1b]133;D;0\x07__DSH_PERSISTENT_BASH_PROMPT__ ')
       expect(created2.promptTextSeen).toBe(true)
 
       dispose()
+      expect(fiberDispose).toHaveBeenCalled()
+    })
+
+    it('does not crash when terminals service is not loaded in host context', () => {
+      const mockCtx = {
+        inject: vi.fn((_deps, _cb) => {
+          // terminals not available in this profile, callback is not called
+          return { dispose: vi.fn() }
+        }),
+      }
+
+      expect(() => {
+        const dispose = installBashPromptCompat(mockCtx as never)
+        dispose()
+      }).not.toThrow()
     })
   })
 })
