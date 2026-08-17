@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 - 2026-08-17
 
+- 临时兼容 DSH `0.1.0-rc.6` 的子代理报告去重：当 `subagent-settled` 已携带与同一子代理排队 `subagent-report` 完全相同的最终内容时，删除重复报告，保留 settlement 通知；部分报告、不同内容和不同子代理不受影响。代码统一标记为 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)`，待 DSH 原生修复后可整体移除。
 - 新增 Linux Host 支持：平台凭据存储选择、用户私有 `0600` TokenStore，以及 Bash/POSIX shell 工具调用兼容说明与测试。
 - 设置页现在根据 Host 返回值展示 Windows DPAPI 或 Linux 文件存储及其真实安全边界。
 - 移除与 Codex 订阅接入无关的执行过程详情折叠功能。

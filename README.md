@@ -31,7 +31,8 @@
 - 固定 Codex Responses 地址，支持流式文本、reasoning summary、图片输入与工具调用/结果；
 - 原样转发 DSH 暴露的工具 schema；命令工具兼容 `pwsh` / `powershell`、`bash`、`sh` 与 `shell`，并按 PowerShell、Bash 或 POSIX sh 注入对应说明；
 - 429/5xx 由 DSH retry policy 接管；401 只强制刷新并重试一次，支持 `AbortSignal`；
-- Codex 与 Code review 多窗口额度，60 秒缓存、15 秒上游节流并遵守 `Retry-After`。
+- Codex 与 Code review 多窗口额度，60 秒缓存、15 秒上游节流并遵守 `Retry-After`；
+- 临时兼容 DSH `0.1.0-rc.6` 的子代理最终报告去重：若 settlement 已向父 Agent 提供同一子代理、完全相同的最终内容，则删除仍在 inbox 中的重复 report；部分报告、不同内容和不同子代理不受影响。兼容代码以 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)` 集中标记，待 DSH 原生修复后删除。
 
 **设置页**
 
@@ -159,3 +160,4 @@ npm pack --dry-run
 | DPAPI 读取失败 | 确认 DSH 以创建凭据时的同一 Windows 用户运行；必要时清理凭据后重新登录 |
 | Linux 凭据存储不可用 | 确认凭据属于当前用户且权限为 `0600`，父目录权限为 `0700`；修复权限或注销后重新登录 |
 | Linux 上工具调用语法错误 | 确认 DSH 暴露的是 `bash`、`sh` 或 `shell`，并使用相应的 Bash/POSIX 语法与 `/` 路径 |
+| 父 Agent 已收到子代理结果，但相同报告仍显示为排队消息 | 本插件为 DSH `0.1.0-rc.6` 提供临时 report/settlement 精确去重；升级或重载插件并新建会话后验证。若未来 DSH 已原生修复，可移除所有 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)` 标记代码 |

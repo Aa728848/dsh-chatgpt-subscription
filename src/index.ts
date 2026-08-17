@@ -2,14 +2,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-agent'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
+import { installSubagentReportDedupCompat } from './host/subagent-report-scheduling-compat.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { UsageService } from './host/usage-service.ts'
 
-export const inject = ['webServer', 'llm', 'attachments']
+export const inject = ['webServer', 'llm', 'attachments', 'agents']
 
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
@@ -23,7 +25,10 @@ export function apply(ctx: Context): void {
   ctx.effect(() => {
     const disposeRoutes = registerRoutes(ctx, oauth, usage)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
+    // DSH_COMPAT_REMOVE(subagent-report-settlement-dedup): remove with the isolated compat module.
+    const disposeSubagentReportCompat = installSubagentReportDedupCompat(ctx)
     return () => {
+      disposeSubagentReportCompat()
       disposeAdapter()
       disposeRoutes()
       oauth.dispose()
