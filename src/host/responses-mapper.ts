@@ -502,7 +502,12 @@ function replayOutputItems(message: Message): Array<Record<string, unknown>> | n
   if (message.source.kind !== 'model') return null
   const replay = message.source.replayState
   if (typeof replay !== 'object' || replay === null || Array.isArray(replay)) return null
-  const items = (replay as Record<string, unknown>).outputItems
+  const envelope = replay as Record<string, unknown>
+  const items = Array.isArray(envelope.outputItems)
+    ? envelope.outputItems
+    : Array.isArray(record(envelope.response)?.outputItems)
+      ? record(envelope.response)!.outputItems as unknown[]
+      : null
   if (!Array.isArray(items)) return null
   return structuredClone(items.filter((item): item is Record<string, unknown> => (
     typeof item === 'object' && item !== null && !Array.isArray(item)

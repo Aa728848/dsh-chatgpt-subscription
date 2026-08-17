@@ -152,6 +152,21 @@ describe('Responses payload mapping', () => {
     })
   })
 
+  it('correctly unpacks replayState wrapped in a ReplayEnvelope response object', async () => {
+    const replayedCall = { type: 'function_call', call_id: 'call_wrapped', name: 'read_file', arguments: '{"path":"b"}' }
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol', replayState: { response: { outputItems: [replayedCall] } } },
+          content: [{ type: 'tool-call', id: 'call_wrapped', name: 'read_file', arguments: '{"path":"b"}' }],
+        },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload.input.filter((item) => item.type === 'function_call' && item.call_id === 'call_wrapped')).toHaveLength(1)
+  })
+
   it('hides sandbox escalation controls until a tool has actually been denied', async () => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
