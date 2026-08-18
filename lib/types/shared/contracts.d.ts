@@ -66,6 +66,53 @@ export type LoginEventDto = {
     loginId: string;
     error: PublicErrorDto;
 };
+export interface ProviderAccountDto {
+    providerId: string;
+    accountId: string;
+    displayName: string | null;
+    email: string | null;
+    subscription: Record<string, unknown>;
+    quota: Record<string, unknown>;
+    refresh: Record<string, unknown>;
+    resources: Record<string, unknown>;
+    health: Record<string, unknown>;
+}
+export interface ProviderStatusDto {
+    providerId: string;
+    displayName: string;
+    capabilities: string[];
+    policy: string;
+    defaultAccountId: string | null;
+    accounts: ProviderAccountDto[];
+    source?: string;
+    diagnostics?: string[];
+    candidates?: Array<{
+        candidateId: string;
+        accountId?: string;
+        displayName?: string;
+        email?: string;
+        source?: string;
+        imported?: boolean;
+    }>;
+}
+export interface MultiProviderStatusDto {
+    csrfToken: string;
+    generatedAt: string;
+    providers: ProviderStatusDto[];
+    storage: CredentialStorageDto;
+}
+export interface ProviderAuthorizationDto {
+    status: string;
+    providerId?: string;
+    sessionId?: string;
+    authorizationUrl?: string;
+    instructions?: string;
+    browserOpened?: boolean;
+    inputRequired?: boolean;
+    authorizationCodeRequired?: boolean;
+    diagnostic?: string;
+    accounts?: ProviderAccountDto[];
+}
 export interface PublicErrorDto {
     code: 'bad-request' | 'csrf-rejected' | 'login-active' | 'login-cancelled' | 'login-expired' | 'oauth-callback-invalid' | 'oauth-token-exchange-failed' | 'not-authenticated' | 'refresh-failed' | 'storage-failed' | 'connection-failed' | 'quota-failed' | 'rate-limited' | 'internal';
     message: string;

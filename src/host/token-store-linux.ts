@@ -9,9 +9,9 @@ import { parseStoredCredentials } from './token-store.ts'
 const DIRECTORY_MODE = 0o700
 const FILE_MODE = 0o600
 
-export function defaultLinuxCredentialPath(): string {
+export function defaultLinuxCredentialPath(namespace: 'codex' | 'providers' = 'codex'): string {
   const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
-  return join(dshHome, 'storages', 'dsh-chatgpt-subscription', 'oauth.json')
+  return join(dshHome, 'storages', 'dsh-chatgpt-subscription', namespace === 'codex' ? 'oauth.json' : 'providers.json.secrets')
 }
 
 /**
@@ -22,11 +22,13 @@ export function defaultLinuxCredentialPath(): string {
 export class LinuxFileTokenStore implements TokenStore {
   readonly storage = { kind: 'linux-file', encrypted: false } as const
   private readonly noFollow = constants.O_NOFOLLOW
+  private readonly path: string
 
-  constructor(private readonly path = defaultLinuxCredentialPath()) {
+  constructor(path: string | undefined = undefined, namespace: 'codex' | 'providers' = 'codex') {
+    this.path = path ?? defaultLinuxCredentialPath(namespace)
     if (process.platform !== 'linux') throw new Error('Linux credential storage requires Linux')
     if (this.noFollow === undefined) throw new Error('Linux credential storage requires O_NOFOLLOW support')
-    if (dirname(path) === path) throw new Error('invalid Linux credential path')
+    if (dirname(this.path) === this.path) throw new Error('invalid Linux credential path')
   }
 
   async load(): Promise<StoredOAuthCredentials | null> {

@@ -3,6 +3,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { CodexSubscriptionSection } from './CodexSubscriptionSection.tsx'
+
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
 import { installStyles } from './styles.ts'
 
@@ -24,4 +25,5 @@ export function apply(ctx: ClientContext): void {
     label: 'Codex 订阅',
     locale: NS,
   }, CodexSubscriptionSection))
+
 }

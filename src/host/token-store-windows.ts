@@ -34,17 +34,19 @@ $path = $env:DSH_CODEX_TOKEN_PATH
 if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) }
 `
 
-export function defaultDpapiCredentialPath(): string {
+export function defaultDpapiCredentialPath(namespace: 'codex' | 'providers' = 'codex'): string {
   const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
-  return join(dshHome, 'storages', 'dsh-chatgpt-subscription', 'oauth.dpapi')
+  return join(dshHome, 'storages', 'dsh-chatgpt-subscription', namespace === 'codex' ? 'oauth.dpapi' : 'providers.dpapi')
 }
 
 export class WindowsDpapiTokenStore implements TokenStore {
   readonly storage = { kind: 'windows-dpapi', encrypted: true } as const
+  private readonly path: string
 
-  constructor(private readonly path = defaultDpapiCredentialPath()) {
+  constructor(path: string | undefined = undefined, namespace: 'codex' | 'providers' = 'codex') {
+    this.path = path ?? defaultDpapiCredentialPath(namespace)
     if (process.platform !== 'win32') throw new Error('Windows DPAPI storage requires Windows')
-    if (dirname(path) === path) throw new Error('invalid DPAPI credential path')
+    if (dirname(this.path) === this.path) throw new Error('invalid DPAPI credential path')
   }
 
   async load(): Promise<StoredOAuthCredentials | null> {

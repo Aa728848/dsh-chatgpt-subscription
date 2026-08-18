@@ -6,9 +6,12 @@ import type {
   PluginStatusDto,
   QuotaStatusDto,
   ConnectionTestDto,
+  MultiProviderStatusDto,
+  ProviderAuthorizationDto,
 } from '../shared/contracts.ts'
 
 export class SubscriptionApi {
+  private providerCsrfToken: string | null = null
   status(): Promise<PluginStatusDto> {
     return request<PluginStatusDto>(`${ROUTE_PREFIX}/status`)
   }
@@ -40,12 +43,62 @@ export class SubscriptionApi {
   events(loginId: string): EventSource {
     return new EventSource(`${ROUTE_PREFIX}/login/events?loginId=${encodeURIComponent(loginId)}`)
   }
+
+  async providers(): Promise<MultiProviderStatusDto> {
+    const status = await request<MultiProviderStatusDto>(`${ROUTE_PREFIX}/providers`)
+    this.providerCsrfToken = status.csrfToken
+    return status
+  }
+
+  scanProvider(providerId?: string): Promise<ProviderOperationDto> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/scan`, providerId ? { providerId } : {})
+  }
+
+  importProviderCandidate(providerId: string, candidateId: string): Promise<ProviderOperationDto> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/candidate/import`, { providerId, candidateId })
+  }
+
+  startProviderLogin(providerId: string): Promise<ProviderOperationDto<ProviderAuthorizationDto>> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/login/start`, { providerId })
+  }
+
+  pollProviderLogin(providerId: string, sessionId: string): Promise<ProviderOperationDto<ProviderAuthorizationDto>> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/login/poll`, { providerId, sessionId })
+  }
+
+  submitProviderCode(providerId: string, sessionId: string, code: string): Promise<ProviderOperationDto<ProviderAuthorizationDto>> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/login/code`, { providerId, sessionId, code })
+  }
+
+  cancelProviderLogin(providerId: string, sessionId: string): Promise<ProviderOperationDto<ProviderAuthorizationDto>> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/login/cancel`, { providerId, sessionId })
+  }
+
+  refreshProvider(providerId?: string): Promise<ProviderOperationDto> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/refresh`, providerId ? { providerId } : {})
+  }
+
+  removeProviderAccount(providerId: string, accountId: string): Promise<ProviderOperationDto> {
+    return this.providerPost(`${ROUTE_PREFIX}/providers/account/remove`, { providerId, accountId })
+  }
+
+
+  private async providerPost<T>(url: string, body: Record<string, unknown>): Promise<T> {
+    if (!this.providerCsrfToken) await this.providers()
+    return post<T>(url, body, { 'x-dsh-csrf-token': this.providerCsrfToken! })
+  }
 }
 
-async function post<T>(url: string, body: Record<string, unknown>): Promise<T> {
+export interface ProviderOperationDto<T = unknown> {
+  result: T
+  snapshot: MultiProviderStatusDto
+}
+
+
+async function post<T>(url: string, body: Record<string, unknown>, extraHeaders: Record<string, string> = {}): Promise<T> {
   return request<T>(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...extraHeaders },
     body: JSON.stringify(body),
   })
 }
