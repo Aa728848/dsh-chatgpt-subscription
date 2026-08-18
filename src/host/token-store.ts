@@ -8,8 +8,6 @@ export interface StoredOAuthCredentials {
   accountId?: string
   email?: string
   planType?: string
-  /** Provider-neutral payloads keyed by opaque credential reference. */
-  providerSecrets?: Record<string, unknown>
 }
 
 export interface TokenStore {
@@ -57,15 +55,5 @@ export function parseStoredCredentials(value: unknown): StoredOAuthCredentials {
     accountId: optional('accountId'),
     email: optional('email'),
     planType: optional('planType'),
-    providerSecrets: record.providerSecrets === undefined
-      ? undefined
-      : parseProviderSecrets(record.providerSecrets),
   }
-}
-
-function parseProviderSecrets(value: unknown): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('providerSecrets is invalid')
-  }
-  return structuredClone(value as Record<string, unknown>)
 }

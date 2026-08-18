@@ -1,7 +1,7 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
   "version": "0.1.10",
-  "description": "DSH OAuth and official-session provider plugin for Codex, Claude, Grok, Cursor, and Antigravity.",
+  "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
   "author": {
     "name": "eddyskywalker",
     "url": "https://www.npmjs.com/~eddyskywalker"
@@ -21,13 +21,7 @@
     "chatgpt",
     "codex",
     "openai",
-    "provider",
-    "claude",
-    "grok",
-    "cursor",
-    "antigravity",
-    "oauth",
-    "subscription"
+    "provider"
   ],
   "type": "module",
   "publishConfig": {
@@ -97,20 +91,17 @@
     "lib/index.js",
     "lib/client.js",
     "lib/client.js.map",
-    "lib/macos-keychain-helper.swift",
     "lib/types/**/*.d.ts",
     "lib/types/**/*.d.ts.map",
     "cordis.patch.yml",
     "README.md",
-    "THIRD_PARTY_NOTICES.md",
     "CHANGELOG.md"
   ],
   "license": "MIT",
   "scripts": {
-    "build": "tsc -b && tsdown && node -e \"require('node:fs').copyFileSync('vendor/dockyard/packages/vault/src/macos-keychain-helper.swift','lib/macos-keychain-helper.swift')\"",
+    "build": "tsc -b && tsdown",
     "prepack": "npm run build",
     "test": "vitest run",
-    "typecheck": "tsc -b --pretty false",
-    "test:providers": "node --test vendor/dockyard/tests/grok-supplemental.test.mjs vendor/dockyard/tests/native-transports.test.mjs vendor/dockyard/tests/runtime.test.mjs vendor/dockyard/tests/security.test.mjs"
+    "typecheck": "tsc -b --pretty false"
   }
 }

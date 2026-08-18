@@ -1,8 +1,8 @@
 # DSH ChatGPT Subscription
 
-让 DSH（DeepSeek Harness）通过官方 OAuth 或官方客户端会话使用订阅模型的多 Provider 插件。
+让 DSH（DeepSeek Harness）通过 ChatGPT 订阅使用 Gpt 系列模型的插件。
 
-插件保留原有 `codex-chatgpt` Provider（显示名 **“Codex（ChatGPT 订阅）”**），并新增 `claude`、`grok`、`cursor` 与 `antigravity` Provider。支持浏览器 OAuth、官方客户端/CLI 会话扫描、动态模型目录、原生流式传输和安全的 Host-only 凭据存储。支持 Windows 与 Linux。
+插件注册 `codex-chatgpt` Provider（显示名 **“Codex（ChatGPT 订阅）”**），以当前 Host 用户的 ChatGPT OAuth 登录态访问模型，并在设置页展示账号信息、连接状态与订阅额度。支持 Windows 与 Linux。
 
 ## 目录
 
@@ -26,14 +26,6 @@
 - Windows 使用 CurrentUser DPAPI 加密存储 token；Linux 使用当前用户独占的 `0600` 文件存储；明文不发送给 Client；
 - 设置页会明确显示当前存储类型，并在 Linux 上提示文件存储未额外加密。
 
-**多 Provider OAuth / 官方会话**
-
-- Claude：官方浏览器 OAuth、带 `state` 的手工回调/授权码、Claude CLI/官方会话扫描及 Anthropic Messages 原生流；
-- Grok：xAI 浏览器 OAuth、Grok CLI/本机会话扫描、实时模型缓存、Build credits 与原生流；
-- Cursor：`loginDeepControl` + `/auth/poll` 浏览器登录、Cursor 桌面/CLI 会话扫描、AvailableModels RPC 与原生 HTTP/2 流；
-- Antigravity：Google OAuth、官方客户端/CLI 会话扫描、实时目录/credits 与 Gemini SSE；浏览器 OAuth 需要配置 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` 和 `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET`；
-- 所有新增 Provider 都通过独立账号池管理，凭据以 opaque reference 关联，不进入浏览器状态或账号池 JSON。
-
 **模型接入**
 
 - 固定 Codex Responses 地址，支持流式文本、reasoning summary、图片输入与工具调用/结果；
@@ -51,7 +43,7 @@
 
 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.2`
 
-> Codex 目录只用于展示；账号实际可用的模型由 ChatGPT 套餐、workspace 策略与上游兼容状态决定。Claude 目录从当前 DSH 安装携带的 pi-ai Anthropic registry 读取；Grok、Cursor 与 Antigravity 优先使用对应官方 CLI、官方会话 API 或本地官方缓存提供的实时目录。目录为空时插件不会伪造模型。
+> 目录只用于展示；账号实际可用的模型由 ChatGPT 套餐、workspace 策略与上游兼容状态决定。
 
 ## 环境要求
 
@@ -104,32 +96,18 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 1. 重启 `dsh web`；
 2. 打开 **设置 → Codex 订阅**；
 3. 完成 ChatGPT 登录；
-4. 执行 **测试连接**；
-5. 打开 **设置 → 订阅 Provider**，扫描现有官方会话，或分别登录 Claude、Grok、Cursor、Antigravity。
+4. 执行 **测试连接**。
 
-DSH 模型选择器会保留 **“Codex（ChatGPT 订阅）”**；新增 Provider 在成功导入账号且实时目录返回模型后出现。
+DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。
 
 卸载前建议先在设置页点击 **“注销”**，它会删除当前平台的凭据和 Host 内存中的额度缓存。
 
 若 DSH 已异常退出，可在确认路径后手动处理凭据文件：
 
 - Windows：`%DSH_HOME%\storages\dsh-chatgpt-subscription\oauth.dpapi`，未设置 `DSH_HOME` 时为 `%USERPROFILE%\.dsh\storages\dsh-chatgpt-subscription\oauth.dpapi`；
-- Linux：`$DSH_HOME/storages/dsh-chatgpt-subscription/oauth.json`，未设置 `DSH_HOME` 时为 `~/.dsh/storages/dsh-chatgpt-subscription/oauth.json`；
-- 新增 Provider 的秘密凭据：Windows 为同目录 `providers.dpapi`，Linux 为 `providers.json.secrets`；账号池元数据为 `providers.json`，其中不包含原始 token。
+- Linux：`$DSH_HOME/storages/dsh-chatgpt-subscription/oauth.json`，未设置 `DSH_HOME` 时为 `~/.dsh/storages/dsh-chatgpt-subscription/oauth.json`。
 
 > Windows 文件只能由创建它的用户通过 DPAPI 解密。Linux 文件是未额外加密的 JSON，依赖目录 `0700` 和文件 `0600` 隔离；不要复制、打印或提交该文件。跨平台迁移需要重新登录。
-
-## Provider 兼容性与风险
-
-这里的“官方会话”仅表示读取或导入相应厂商客户端/CLI 创建的本地登录态，**不表示厂商认可、验证、赞助或支持本插件**。本项目与 Anthropic、xAI、Cursor、Google/OpenAI 均无隶属或合作关系。Claude、Grok、Cursor 与 Antigravity 的部分接口属于未公开或由客户端行为观察得到的协议，可能因上游版本、账号策略或服务条款变化而失效。
-
-- Claude 浏览器账号的“订阅有效”状态由成功保存并可刷新的 OAuth 凭据推导，并非 Anthropic 服务端订阅 introspection；浏览器状态没有实时额度数据，因此额度通常显示未知。Claude 模型目录来自当前 DSH 安装携带的 pi-ai Anthropic registry，而不是 Anthropic 实时模型接口。授权 scope 包含 `org:create_api_key`、推理、会话、MCP 与文件权限，属于高权限授权；请只在可信本机 Host 使用。`ANTHROPIC_API_KEY`、`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN` 及本地明文 credential 文件不会被静默当作本 Provider 的订阅账号。手工回调 URL/授权码只进入受限 POST body 和 Host 内存，不写入日志。
-- Cursor 接入使用 Cursor 托管端点和对客户端协议的观察实现，不应理解为 Cursor 验证的第三方集成。macOS 桌面数据库扫描会提取原始 access/refresh 凭据，因此当前默认关闭；只有宿主以后提供明确的知情同意开关时才允许启用。现有设置页扫描不会读取 `state.vscdb`。本插件不宣称 Windows/Linux 桌面会话兼容，这两个平台请使用浏览器登录或 `cursor-agent` CLI 会话。浏览器授权会话 10 分钟超时，终止性轮询错误会立即显示失败。Cursor 原生 Run 链路固定为文本输入、不向上游开放 DSH 工具，单次请求硬超时为 120 秒；Connect 单帧和未完成缓冲上限为 8 MiB、累计响应上限为 32 MiB，并拒绝压缩 frame。额度只有在客户端 status 返回窗口时才显示，否则为未知。
-- Antigravity 浏览器 OAuth 必须使用用户自行配置、且已允许对应 loopback redirect URI 的 Google OAuth client。Client secret 只允许进入 Host 环境，不能发送到浏览器、写入账号池状态或提交到仓库。
-- Antigravity 保留官方返回的完整 tier-suffixed model ID；不能把目录中的显示名当成可调用 ID。
-- Grok 使用客户端中观察到的 client ID 和较宽的 CLI scopes；这不表示该 client ID、模拟客户端请求头或 billing endpoint 是面向第三方的受支持公开合同。账号刷新并非插件直接调用 refresh-token grant：它会把所选 OAuth 账号写入临时 `GROK_HOME/auth.json`（文件模式 `0600`），调用 `grok models` 让官方 CLI 负责刷新/轮换，再安全回写并删除临时目录。Grok credits 读取固定调用 `https://cli-chat-proxy.grok.com/v1/billing?format=credits`；不可用时余额为未知。`XAI_API_KEY`/`GROK_API_KEY` 不会被当作订阅 OAuth 账号。
-- Grok/Claude/Cursor/Antigravity 的 endpoint override 不通过 Web 设置暴露；授权、身份、额度和原生生成固定发送到代码中审核过的官方 HTTPS 地址。
-- OAuth/官方会话接入可能受到 Provider 服务条款和账号风控约束；使用者应自行确认其账号和地区允许的用途。
 
 ## 安全边界
 
@@ -156,15 +134,6 @@ DSH 模型选择器会保留 **“Codex（ChatGPT 订阅）”**；新增 Provid
 | POST | `/token/refresh` | 刷新 token |
 | POST | `/quota/refresh` | 刷新额度 |
 | POST | `/connection/test` | 测试连接 |
-| GET | `/providers` | 查询 Claude/Grok/Cursor/Antigravity 公开账号状态 |
-| POST | `/providers/scan` | 扫描官方客户端/CLI 会话 |
-| POST | `/providers/candidate/import` | 将扫描到的官方会话安全导入账号池 |
-| POST | `/providers/login/start` | 发起指定 Provider OAuth |
-| POST | `/providers/login/poll` | 轮询官方登录状态 |
-| POST | `/providers/login/code` | 提交手工回调地址或授权码 |
-| POST | `/providers/login/cancel` | 取消指定 Provider 授权 |
-| POST | `/providers/refresh` | 刷新账号、额度和目录状态 |
-| POST | `/providers/account/remove` | 删除账号及对应安全凭据 |
 
 状态响应只包含脱敏 email、套餐、账号 ID 后四位、token 到期时间和额度 DTO。
 
@@ -177,7 +146,7 @@ npm run build
 npm pack --dry-run
 ```
 
-测试使用 mock OAuth、Responses SSE、Wham usage 和隔离的 Provider secret store，不需要真实订阅凭据。新增 Provider 的原生协议实现移植自 MIT License 的 Dockyard DSH（版权声明保留于 `vendor/dockyard/LICENSE`）。真实账号的端到端登录与生成应在独立 DSH profile 中人工验收，避免影响日常 profile。
+测试使用 mock OAuth、Responses SSE 和 Wham usage，不需要真实 ChatGPT 凭据。真实账号的端到端登录与生成应在独立 DSH profile 中人工验收，避免影响日常 profile。
 
 ## 故障排查
 

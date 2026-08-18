@@ -3,7 +3,6 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto } from '../shared/contracts.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
-import { ProviderSubscriptionsSection } from './ProviderSubscriptionsSection.tsx'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
 type BusyAction = 'login' | 'token' | 'quota' | 'test' | 'logout' | null
@@ -204,8 +203,6 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         {status?.quota.fetchedAt ? <p className="dsh-codex-timestamp">{t('updated')}: {formatDate(status.quota.fetchedAt)}</p> : null}
       </Section>
     </>}
-
-    <ProviderSubscriptionsSection embedded />
 
     <span className="dsh-codex-sr" aria-live="polite">{busy === null ? '' : busy}</span>
   </section>

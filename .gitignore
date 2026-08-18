@@ -2,8 +2,6 @@
 node_modules/
 coverage/
 .npm-cache/
-.npm-cache-review/
-.tmp-dockyard-dsh/
 *.tsbuildinfo
 
 # Duplicate compiler output; runtime bundles remain in lib/

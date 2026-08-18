@@ -5,9 +5,7 @@
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
-    "lib": [
-      "ES2024"
-    ],
+    "lib": ["ES2024"],
     "strict": true,
     "skipLibCheck": true,
     "isolatedModules": true,
@@ -20,9 +18,7 @@
     "emitDeclarationOnly": true,
     "rootDir": "src",
     "outDir": "lib/types",
-    "types": [
-      "node"
-    ]
+    "types": ["node"]
   },
   "include": [
     "src/index.ts",

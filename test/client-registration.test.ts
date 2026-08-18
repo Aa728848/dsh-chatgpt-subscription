@@ -15,9 +15,9 @@ describe('client registration', () => {
     expect(storageLabel(windows, t)).toContain('DPAPI')
     expect(storageNotice({ ...linux, available: false }, t)).toContain('无法安全访问')
   })
-  it('contributes one unified subscription settings section', () => {
+  it('contributes one top-level Codex subscription settings section', () => {
     let injectedSlot = ''
-    const registrations: Array<Record<string, unknown>> = []
+    let registration: Record<string, unknown> | null = null
     const disposers: Array<() => void> = []
     const ctx = {
       effect(factory: () => void | (() => void)) {
@@ -33,7 +33,7 @@ describe('client registration', () => {
           disposers.push(callback())
         },
         register(options: Record<string, unknown>) {
-          registrations.push(options)
+          registration = options
           return () => undefined
         },
       },
@@ -42,11 +42,11 @@ describe('client registration', () => {
     apply(ctx as never)
 
     expect(injectedSlot).toBe('settings.section')
-    expect(registrations).toEqual([expect.objectContaining({
+    expect(registration).toMatchObject({
       name: 'settings.section',
       id: 'codex-subscription',
       label: 'Codex 订阅',
-    })])
+    })
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()
   })

@@ -7,8 +7,6 @@ export interface StoredOAuthCredentials {
     accountId?: string;
     email?: string;
     planType?: string;
-    /** Provider-neutral payloads keyed by opaque credential reference. */
-    providerSecrets?: Record<string, unknown>;
 }
 export interface TokenStore {
     readonly storage: Omit<CredentialStorageDto, 'available'>;
