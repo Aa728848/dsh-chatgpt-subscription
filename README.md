@@ -171,4 +171,3 @@ npm pack --dry-run
 | DPAPI 读取失败 | 确认 DSH 以创建凭据时的同一 Windows 用户运行；必要时清理凭据后重新登录 |
 | Linux 凭据存储不可用 | 确认凭据属于当前用户且权限为 `0600`，父目录权限为 `0700`；修复权限或注销后重新登录 |
 | Linux 上工具调用语法错误 | 确认 DSH 暴露的是 `bash`、`sh` 或 `shell`，并使用相应的 Bash/POSIX 语法与 `/` 路径 |
-| 父 Agent 已收到子代理结果，但相同报告仍显示为排队消息 | 本插件为 DSH `0.1.0-rc.6` 提供临时 report/settlement 精确去重；升级或重载插件并新建会话后验证。若未来 DSH 已原生修复，可移除所有 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)` 标记代码 |
