@@ -6,6 +6,8 @@ import type {
   PluginStatusDto,
   QuotaStatusDto,
   ConnectionTestDto,
+  SubscriptionPreferencesDto,
+  SubscriptionPreferencesUpdateDto,
 } from '../shared/contracts.ts'
 
 export class SubscriptionApi {
@@ -37,12 +39,16 @@ export class SubscriptionApi {
     return post(`${ROUTE_PREFIX}/connection/test`, {})
   }
 
+  updatePreferences(patch: SubscriptionPreferencesUpdateDto): Promise<SubscriptionPreferencesDto> {
+    return post(`${ROUTE_PREFIX}/preferences/update`, patch)
+  }
+
   events(loginId: string): EventSource {
     return new EventSource(`${ROUTE_PREFIX}/login/events?loginId=${encodeURIComponent(loginId)}`)
   }
 }
 
-async function post<T>(url: string, body: Record<string, unknown>): Promise<T> {
+async function post<T>(url: string, body: object): Promise<T> {
   return request<T>(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

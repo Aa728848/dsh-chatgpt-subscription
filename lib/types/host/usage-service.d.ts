@@ -1,4 +1,4 @@
-import type { ConnectionTestDto, PublicErrorDto, QuotaBucketDto, QuotaStatusDto } from '../shared/contracts.ts';
+import type { ConnectionTestDto, PublicErrorDto, QuotaBucketDto, QuotaUsageDto, QuotaStatusDto } from '../shared/contracts.ts';
 import { OAuthService } from './oauth-service.ts';
 type FetchLike = typeof fetch;
 export interface UsageServiceOptions {
@@ -29,5 +29,6 @@ export declare class UsageServiceError extends Error {
     constructor(publicError: PublicErrorDto);
 }
 export declare function mapCodexUsage(value: unknown): QuotaBucketDto[];
+export declare function parseCodexUsage(value: unknown): QuotaUsageDto;
 export {};
 //# sourceMappingURL=usage-service.d.ts.map

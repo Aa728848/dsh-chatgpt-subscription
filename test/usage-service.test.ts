@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
-import { mapCodexUsage, UsageService } from '../src/host/usage-service.ts'
+import { mapCodexUsage, parseCodexUsage, UsageService } from '../src/host/usage-service.ts'
 
 describe('Codex usage mapping', () => {
   it('maps both buckets, clamps percentages, and rejects invalid windows', () => {
@@ -20,12 +20,45 @@ describe('Codex usage mapping', () => {
         id: 'codex', name: 'Codex', planType: 'pro',
         primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 2_000_000_000 },
         secondary: { usedPercent: 0, windowDurationMins: 10_080, resetsAt: null },
+        windows: [
+          { usedPercent: 100, windowDurationMins: 300, resetsAt: 2_000_000_000 },
+          { usedPercent: 0, windowDurationMins: 10_080, resetsAt: null },
+        ],
       },
       {
         id: 'code-review', name: 'Code review', planType: 'pro', primary: null,
         secondary: { usedPercent: 80, windowDurationMins: 60, resetsAt: null },
+        windows: [
+          { usedPercent: 80, windowDurationMins: 60, resetsAt: null },
+        ],
       },
     ])
+  })
+
+  it('maps additional limits, credits, spend control, and reset credits', () => {
+    const usage = parseCodexUsage({
+      plan_type: 'team',
+      rate_limit: { primary_window: { used_percent: 10 } },
+      additional_rate_limits: [
+        {
+          metered_feature: 'codex_spark',
+          limit_name: 'Spark',
+          rate_limit: { primary_window: { used_percent: 65, limit_window_seconds: 3600 } },
+        },
+      ],
+      credits: { has_credits: true, unlimited: false, balance: '12.50' },
+      spend_control: {
+        reached: true,
+        individual_limit: { limit: '100', used: '87', remaining_percent: 13, reset_at: 2_100_000_000 },
+      },
+      rate_limit_reset_credits: { available_count: 3 },
+    })
+    expect(usage.buckets.map((bucket) => bucket.id)).toEqual(['codex', 'spark'])
+    expect(usage.buckets[1]?.windows[0]?.usedPercent).toBe(65)
+    expect(usage.credits).toEqual({ hasCredits: true, unlimited: false, balance: '12.50' })
+    expect(usage.spendControlReached).toBe(true)
+    expect(usage.individualLimit).toMatchObject({ remainingPercent: 13, resetsAt: 2_100_000_000 })
+    expect(usage.resetCredits).toEqual({ availableCount: 3 })
   })
 
   it('caches for 60 seconds and throttles forced upstream refreshes', async () => {

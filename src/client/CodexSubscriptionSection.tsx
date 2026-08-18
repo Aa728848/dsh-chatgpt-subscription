@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto } from '../shared/contracts.ts'
+import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import { CODEX_MODEL_CATALOG } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
+import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
-type BusyAction = 'login' | 'token' | 'quota' | 'test' | 'logout' | null
+type BusyAction = 'login' | 'token' | 'quota' | 'test' | 'logout' | 'preferences' | null
 type Translate = Props['t']
-
-const MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.2']
 
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const apiRef = useRef(new SubscriptionApi())
@@ -124,6 +124,11 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setConnection({ latencyMs: result.latencyMs, checkedAt: result.checkedAt })
   })
 
+  const updatePreferences = async (patch: SubscriptionPreferencesUpdateDto): Promise<void> => run('preferences', async () => {
+    const preferences = await apiRef.current.updatePreferences(patch)
+    setStatus((current) => current === null ? current : { ...current, preferences })
+  })
+
   const logout = async (): Promise<void> => run('logout', async () => {
     await apiRef.current.logout()
     eventSourceRef.current?.close()
@@ -186,17 +191,47 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         <InfoRow label={t('connectionState')} value={connection === null ? t('untested') : t('connected')} />
         {connection !== null ? <InfoRow label={t('latency')} value={`${connection.latencyMs} ms · ${formatDate(connection.checkedAt)}`} /> : null}
         <div className="dsh-codex-models" aria-label={t('models')}>
-          {MODELS.map((model) => <code key={model}>{model}</code>)}
+          {CODEX_MODEL_CATALOG.map((model) => <code key={model.id} title={model.id}>{model.name}</code>)}
         </div>
         <div className="dsh-codex-actions">
           <Button disabled={!status?.authenticated || busy !== null} onClick={testConnection}>{busy === 'test' ? t('testing') : t('testConnection')}</Button>
         </div>
       </Section>
 
+      <Section title={t('enhancements')}>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('searchProvider')}</strong>
+            <p className="dsh-codex-muted">{t('searchProviderHint')}</p>
+          </div>
+          <div className="dsh-codex-segments" role="radiogroup" aria-label={t('searchProvider')}>
+            <label>
+              <input type="radio" name="dsh-codex-search-provider" checked={status?.preferences.searchProvider === 'dsh'} disabled={busy !== null} onChange={() => updatePreferences({ searchProvider: 'dsh' })} />
+              <span>{t('searchProviderDsh')}</span>
+            </label>
+            <label>
+              <input type="radio" name="dsh-codex-search-provider" checked={status?.preferences.searchProvider === 'codex'} disabled={busy !== null} onChange={() => updatePreferences({ searchProvider: 'codex' })} />
+              <span>{t('searchProviderCodex')}</span>
+            </label>
+          </div>
+        </div>
+        <label className="dsh-codex-check">
+          <input type="checkbox" checked={status?.preferences.quickQuotaVisible === true} disabled={busy !== null} onChange={(event) => updatePreferences({ quickQuotaVisible: event.currentTarget.checked })} />
+          <span>
+            <strong>{t('quickQuota')}</strong>
+            <small>{t('quickQuotaHint')}</small>
+          </span>
+        </label>
+      </Section>
+
       <Section title={t('quota')} aside={<Button disabled={!status?.authenticated || busy !== null} onClick={refreshQuota}>{busy === 'quota' ? t('refreshing') : t('refreshQuota')}</Button>}>
         <p className="dsh-codex-muted">{t('quotaIntro')}</p>
         {status?.quota.state === 'signed-out' ? <p className="dsh-codex-empty">{t('quotaSignedOut')}</p> : null}
         {status?.quota.buckets.map((bucket) => <QuotaBucket key={bucket.id} bucket={bucket} t={t} />)}
+        {status?.quota.credits !== null && status?.quota.credits !== undefined ? <QuotaFact label={t('credits')} value={status.quota.credits.unlimited ? t('unlimited') : status.quota.credits.balance ?? (status.quota.credits.hasCredits ? t('available') : t('unavailable'))} /> : null}
+        {status?.quota.individualLimit !== null && status?.quota.individualLimit !== undefined ? <QuotaFact label={t('monthlySpend')} value={individualLimitLabel(status.quota.individualLimit, t)} /> : null}
+        {status?.quota.resetCredits !== null && status?.quota.resetCredits !== undefined ? <QuotaFact label={t('resetCredits')} value={String(status.quota.resetCredits.availableCount)} /> : null}
+        {status?.quota.spendControlReached === true ? <p className="dsh-codex-warning" role="status">{t('spendControlReached')}</p> : null}
         {status?.quota.state === 'empty' ? <p className="dsh-codex-empty">{t('noQuota')}</p> : null}
         {status?.quota.stale ? <p className="dsh-codex-warning" role="status">{t('stale')}</p> : null}
         {status?.quota.error ? <p className="dsh-codex-error" role="alert">{status.quota.error.message}</p> : null}
@@ -240,11 +275,15 @@ export function storageNotice(storage: CredentialStorageDto | undefined, t: Tran
 }
 
 function QuotaBucket({ bucket, t }: { bucket: QuotaBucketDto; t: Translate }): React.JSX.Element {
+  const windows = quotaWindows(bucket)
   return <article className="dsh-codex-quota-card">
     <div className="dsh-codex-quota-title"><strong>{bucket.name}</strong>{bucket.planType ? <span>{bucket.planType}</span> : null}</div>
-    {bucket.primary ? <QuotaBar label={windowLabel(bucket.primary.windowDurationMins, t)} window={bucket.primary} t={t} /> : null}
-    {bucket.secondary ? <QuotaBar label={windowLabel(bucket.secondary.windowDurationMins, t)} window={bucket.secondary} t={t} /> : null}
+    {windows.map((window, index) => <QuotaBar key={`${window.windowDurationMins ?? 'x'}:${window.resetsAt ?? 'x'}:${index}`} label={windowLabel(window.windowDurationMins, t)} window={window} t={t} />)}
   </article>
+}
+
+function QuotaFact({ label, value }: { label: string; value: string }): React.JSX.Element {
+  return <div className="dsh-codex-quota-fact"><span>{label}</span><strong>{value}</strong></div>
 }
 
 export function QuotaBar({ label, window, t }: { label: string; window: QuotaWindowDto; t: Translate }): React.JSX.Element {
@@ -279,6 +318,16 @@ export function windowLabel(minutes: number | null, t: Translate): string {
 
 function formatPercent(value: number): string {
   return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)}%`
+}
+
+function individualLimitLabel(limit: NonNullable<PluginStatusDto['quota']['individualLimit']>, t: Translate): string {
+  const parts = [
+    limit.remainingPercent !== null ? `${formatPercent(limit.remainingPercent)} ${t('remaining')}` : null,
+    limit.limit !== null ? `${t('limit')}: ${limit.limit}` : null,
+    limit.used !== null ? `${t('used')}: ${limit.used}` : null,
+    limit.resetsAt !== null ? `${t('resets')}: ${formatReset(limit.resetsAt)}` : null,
+  ].filter((part): part is string => part !== null)
+  return parts.length > 0 ? parts.join(' · ') : t('unknown')
 }
 
 function formatDate(seconds: number | undefined): string {

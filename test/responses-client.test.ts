@@ -31,7 +31,9 @@ describe('Responses streaming', () => {
     expect(chunks.at(-1)).toMatchObject({
       type: 'finish',
       replayState: {
-        outputItems: [{ type: 'function_call', call_id: 'call_partial', name: 'shell', arguments: '{"command":"pwd"}' }],
+        response: {
+          outputItems: [{ type: 'function_call', call_id: 'call_partial', name: 'shell', arguments: '{"command":"pwd"}' }],
+        },
       },
     })
   })
@@ -70,7 +72,9 @@ describe('Responses streaming', () => {
     })
     expect(chunks.at(-1)).toMatchObject({
       replayState: {
-        outputItems: [{ type: 'function_call', call_id: 'call_pwsh', name: 'pwsh', arguments: argumentsJson }],
+        response: {
+          outputItems: [{ type: 'function_call', call_id: 'call_pwsh', name: 'pwsh', arguments: argumentsJson }],
+        },
       },
     })
   })

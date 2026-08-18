@@ -123,6 +123,28 @@ describe('Responses payload mapping', () => {
     })
   })
 
+  it('omits reasoning summary and image expansion for Codex Spark', async () => {
+    const text = '![图片](/describe-image/raw/sha256:fb8625f2d563722a61b6bc791d665d758bd083bbd0b96f7a4693a3d2a1159eda)'
+    const options = {
+      provider: 'codex-chatgpt',
+      model: 'gpt-5.3-codex-spark',
+      reasoningEffort: 'high',
+      messages: [
+        { id: 'm1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, imageAttachments(), {
+      baseUrl: 'http://127.0.0.1:3080',
+      fetchFn: async (): Promise<Response> => { throw new Error('should not fetch for spark') },
+    })
+
+    expect(payload.reasoning).toEqual({ effort: 'high' })
+    expect(payload.input).toContainEqual({
+      role: 'user',
+      content: [{ type: 'input_text', text }],
+    })
+  })
+
   it('does not duplicate replayed calls and degrades a genuinely orphaned result to text', async () => {
     const replayedCall = { type: 'function_call', call_id: 'call_known', name: 'read_file', arguments: '{"path":"a"}' }
     const options = {

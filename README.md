@@ -31,17 +31,27 @@
 - 固定 Codex Responses 地址，支持流式文本、reasoning summary、图片输入与工具调用/结果；
 - 原样转发 DSH 暴露的工具 schema；命令工具兼容 `pwsh` / `powershell`、`bash`、`sh` 与 `shell`，并按 PowerShell、Bash 或 POSIX sh 注入对应说明；
 - 429/5xx 由 DSH retry policy 接管；401 只强制刷新并重试一次，支持 `AbortSignal`；
-- Codex 与 Code review 多窗口额度，60 秒缓存、15 秒上游节流并遵守 `Retry-After`；
-- 临时兼容 DSH `0.1.0-rc.6` 的子代理最终报告去重：若 settlement 已向父 Agent 提供同一子代理、完全相同的最终内容，则删除仍在 inbox 中的重复 report；部分报告、不同内容和不同子代理不受影响。兼容代码以 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)` 集中标记，待 DSH 原生修复后删除。
+- Codex、Code review 及上游返回的额外窗口额度，支持 Credits、月度消费控制与 reset credits 展示；60 秒缓存、15 秒上游节流并遵守 `Retry-After`；
+- 提供 ChatGPT 订阅侧 Codex 搜索 provider，可在设置页切换 DSH 默认搜索或 Codex 订阅搜索；
+- 新增 `codex_image_generate` 工具，生成图片后通过 DSH 附件系统保存并在会话中渲染；
+- 可选 composer 快捷用量徽标，按当前 `codex-chatgpt` 模型显示最紧张窗口的剩余额度。
 
 **设置页**
 
-- 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态与额度；
+- 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 
 ## 模型目录
 
-`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.2`
+| 显示名 | 模型 slug |
+| --- | --- |
+| 5.6 Sol | `gpt-5.6-sol` |
+| 5.6 Terra | `gpt-5.6-terra` |
+| 5.6 Luna | `gpt-5.6-luna` |
+| 5.5 | `gpt-5.5` |
+| 5.4 | `gpt-5.4` |
+| 5.4 Mini | `gpt-5.4-mini` |
+| 5.3 Codex Spark | `gpt-5.3-codex-spark` |
 
 > 目录只用于展示；账号实际可用的模型由 ChatGPT 套餐、workspace 策略与上游兼容状态决定。
 
@@ -113,7 +123,7 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。
 
 - OAuth 回调固定为 `http://localhost:1455/auth/callback`，登录任务五分钟超时，同一时刻只允许一个；
 - OAuth token 只发送到 `https://auth.openai.com/oauth/token`；
-- 模型与额度地址分别固定为 `https://chatgpt.com/backend-api/codex/responses` 和 `https://chatgpt.com/backend-api/wham/usage`，没有 endpoint override；
+- 模型、图片、搜索与额度地址分别固定为 `https://chatgpt.com/backend-api/codex/responses`、`https://chatgpt.com/backend-api/codex/images/generations`、`https://chatgpt.com/backend-api/codex/alpha/search` 和 `https://chatgpt.com/backend-api/wham/usage`，没有 endpoint override；
 - Windows token bundle 使用 CurrentUser DPAPI；明文只经过 Host 内存和 PowerShell stdin/stdout；
 - Linux token bundle 原子写入当前用户私有文件并在读取时校验普通文件、所有者与 `0600` 权限，同时拒绝符号链接；该文件没有应用层加密，同 UID 进程、root、备份和磁盘快照仍可读取；
 - 两个平台的 token 都不会进入浏览器、`settings.yaml` 或日志；
@@ -134,6 +144,7 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。
 | POST | `/token/refresh` | 刷新 token |
 | POST | `/quota/refresh` | 刷新额度 |
 | POST | `/connection/test` | 测试连接 |
+| POST | `/preferences/update` | 更新搜索来源和 composer 快捷用量偏好 |
 
 状态响应只包含脱敏 email、套餐、账号 ID 后四位、token 到期时间和额度 DTO。
 

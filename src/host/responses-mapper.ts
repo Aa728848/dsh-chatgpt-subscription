@@ -1,5 +1,6 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary } from '../shared/model-catalog.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
   model: string
@@ -122,7 +123,9 @@ export async function buildResponsesPayload(
     payload.parallel_tool_calls = true
   }
   if (options.reasoningEffort !== undefined) {
-    payload.reasoning = { effort: options.reasoningEffort, summary: 'auto' }
+    payload.reasoning = codexModelSupportsReasoningSummary(options.model)
+      ? { effort: options.reasoningEffort, summary: 'auto' }
+      : { effort: options.reasoningEffort }
   }
   return payload
 }
@@ -138,7 +141,7 @@ function localRawImageInstruction(stats: LocalRawImageStats): string | undefined
 }
 
 function supportsImageInput(options: GenerateOptions): boolean {
-  return options.provider === 'codex-chatgpt' && options.model.toLowerCase().startsWith('gpt-')
+  return options.provider === 'codex-chatgpt' && codexModelSupportsImageInput(options.model)
 }
 
 function toolDescriptionForCodex(name: string, description: string): string {

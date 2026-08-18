@@ -20,24 +20,61 @@ export interface PluginStatusDto {
         expiresAt: number | null;
     };
     quota: QuotaStatusDto;
+    preferences: SubscriptionPreferencesDto;
     error?: PublicErrorDto;
 }
-export type OAuthStatusDto = Omit<PluginStatusDto, 'quota'>;
+export type OAuthStatusDto = Omit<PluginStatusDto, 'quota' | 'preferences'>;
+export type SearchProviderPreference = 'dsh' | 'codex';
+export interface SubscriptionPreferencesDto {
+    quickQuotaVisible: boolean;
+    searchProvider: SearchProviderPreference;
+    writable: boolean;
+}
+export interface SubscriptionPreferencesUpdateDto {
+    quickQuotaVisible?: boolean;
+    searchProvider?: SearchProviderPreference;
+}
 export interface QuotaWindowDto {
     usedPercent: number;
     windowDurationMins: number | null;
     resetsAt: number | null;
 }
 export interface QuotaBucketDto {
-    id: 'codex' | 'code-review';
+    id: string;
     name: string;
     planType: string | null;
     primary: QuotaWindowDto | null;
     secondary: QuotaWindowDto | null;
+    windows: QuotaWindowDto[];
+}
+export interface QuotaCreditDto {
+    hasCredits: boolean;
+    unlimited: boolean;
+    balance: string | null;
+}
+export interface QuotaIndividualLimitDto {
+    limit: string | null;
+    used: string | null;
+    remainingPercent: number | null;
+    resetsAt: number | null;
+}
+export interface QuotaResetCreditsDto {
+    availableCount: number;
+}
+export interface QuotaUsageDto {
+    buckets: QuotaBucketDto[];
+    credits: QuotaCreditDto | null;
+    individualLimit: QuotaIndividualLimitDto | null;
+    spendControlReached: boolean | null;
+    resetCredits: QuotaResetCreditsDto | null;
 }
 export interface QuotaStatusDto {
     state: 'signed-out' | 'empty' | 'ready' | 'stale' | 'error';
     buckets: QuotaBucketDto[];
+    credits: QuotaCreditDto | null;
+    individualLimit: QuotaIndividualLimitDto | null;
+    spendControlReached: boolean | null;
+    resetCredits: QuotaResetCreditsDto | null;
     fetchedAt: number | null;
     stale: boolean;
     error?: PublicErrorDto;
@@ -67,7 +104,7 @@ export type LoginEventDto = {
     error: PublicErrorDto;
 };
 export interface PublicErrorDto {
-    code: 'bad-request' | 'csrf-rejected' | 'login-active' | 'login-cancelled' | 'login-expired' | 'oauth-callback-invalid' | 'oauth-token-exchange-failed' | 'not-authenticated' | 'refresh-failed' | 'storage-failed' | 'connection-failed' | 'quota-failed' | 'rate-limited' | 'internal';
+    code: 'bad-request' | 'csrf-rejected' | 'login-active' | 'login-cancelled' | 'login-expired' | 'oauth-callback-invalid' | 'oauth-token-exchange-failed' | 'not-authenticated' | 'refresh-failed' | 'storage-failed' | 'connection-failed' | 'quota-failed' | 'preference-failed' | 'rate-limited' | 'internal';
     message: string;
 }
 export type ApiEnvelope<T> = {

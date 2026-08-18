@@ -316,7 +316,7 @@ export async function* parseResponsesStream(
   yield {
     type: 'finish',
     reason: validToolCount > 0 ? { kind: 'tool-calls' } : terminal,
-    replayState: { outputItems: replayOutput },
+    replayState: { response: { outputItems: replayOutput } },
   }
 }
 

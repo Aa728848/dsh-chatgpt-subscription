@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
+import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -16,8 +17,8 @@ describe('client registration', () => {
     expect(storageNotice({ ...linux, available: false }, t)).toContain('无法安全访问')
   })
   it('contributes one top-level Codex subscription settings section', () => {
-    let injectedSlot = ''
-    let registration: Record<string, unknown> | null = null
+    const injectedSlots: string[] = []
+    const registrations: Array<Record<string, unknown>> = []
     const disposers: Array<() => void> = []
     const ctx = {
       effect(factory: () => void | (() => void)) {
@@ -29,11 +30,11 @@ describe('client registration', () => {
       },
       slots: {
         inject(name: string, callback: () => () => void) {
-          injectedSlot = name
+          injectedSlots.push(name)
           disposers.push(callback())
         },
         register(options: Record<string, unknown>) {
-          registration = options
+          registrations.push(options)
           return () => undefined
         },
       },
@@ -41,11 +42,14 @@ describe('client registration', () => {
 
     apply(ctx as never)
 
-    expect(injectedSlot).toBe('settings.section')
-    expect(registration).toMatchObject({
+    expect(injectedSlots).toEqual(['settings.section', 'conversation.input.right', 'tool.call.toolview'])
+    expect(registrations.find((registration) => registration.name === 'settings.section')).toMatchObject({
       name: 'settings.section',
       id: 'codex-subscription',
       label: 'Codex 订阅',
+    })
+    expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
+      key: CODEX_IMAGE_TOOL_NAME,
     })
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()

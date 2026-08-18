@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.11 - 2026-08-18
+
+- 移除临时子代理报告去重兼容模块：按照标记 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)` 安全移除 `subagent-report-scheduling-compat` 模块、相关测试及插件中的 `agents` 依赖注入与挂钩清理逻辑。
+- 扩展 Codex usage 解析，支持 `additional_rate_limits`、Credits、月度消费控制与 reset credits，并在设置页展示。
+- 新增 ChatGPT 订阅侧 Codex 搜索 provider，可在设置页切换 DSH 默认搜索或 `codex-subscription` 搜索来源。
+- 新增 `codex_image_generate` 图片生成工具，使用 Codex 图片 endpoint 生成 PNG 并保存为 DSH 图片附件，同时提供会话内工具结果渲染。
+- 新增 composer 快捷用量徽标开关；当前会话选择 `codex-chatgpt` 模型时，可显示最紧张限额窗口的剩余额度。
+- 统一模型目录显示名与 Codex App 风格：`5.6 Sol`、`5.6 Terra`、`5.6 Luna`、`5.5`、`5.4`、`5.4 Mini`、`5.3 Codex Spark`，并为 Spark 避免发送不兼容的 `reasoning.summary`。
+
 ## 0.1.10 - 2026-08-17
 
 - 移除临时 Bash Prompt 兼容模块：由于上游 DSH `0.1.0-rc.7` 已经原生修复持久化 Bash 提示符不匹配与重置问题，现按照标记 `DSH_COMPAT_REMOVE(persistent-bash-prompt-mismatch)` 安全移除全部相关兼容代码与测试。保留子代理报告去重兼容模块 `DSH_COMPAT_REMOVE(subagent-report-settlement-dedup)`。

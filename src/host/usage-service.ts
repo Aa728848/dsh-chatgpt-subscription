@@ -7,6 +7,7 @@ import type {
   ConnectionTestDto,
   PublicErrorDto,
   QuotaBucketDto,
+  QuotaUsageDto,
   QuotaStatusDto,
   QuotaWindowDto,
 } from '../shared/contracts.ts'
@@ -17,9 +18,17 @@ import type { StoredOAuthCredentials } from './token-store.ts'
 type FetchLike = typeof fetch
 
 interface CacheEntry {
-  buckets: QuotaBucketDto[]
+  usage: QuotaUsageDto
   fetchedAt: number
   accountKey: string
+}
+
+const EMPTY_USAGE: QuotaUsageDto = {
+  buckets: [],
+  credits: null,
+  individualLimit: null,
+  spendControlReached: null,
+  resetCredits: null,
 }
 
 export interface UsageServiceOptions {
@@ -42,7 +51,7 @@ export class UsageService {
   }
 
   async status(authenticated: boolean, force = false): Promise<QuotaStatusDto> {
-    if (!authenticated) return { state: 'signed-out', buckets: [], fetchedAt: null, stale: false }
+    if (!authenticated) return { state: 'signed-out', ...EMPTY_USAGE, fetchedAt: null, stale: false }
     const now = this.now()
     let credentials: StoredOAuthCredentials
     try {
@@ -110,8 +119,8 @@ export class UsageService {
         return this.failure({ code: 'quota-failed', message: `Quota request failed (${response.status}).` })
       }
       const data = await response.json() as unknown
-      const buckets = mapCodexUsage(data)
-      this.cache = { buckets, fetchedAt: this.now(), accountKey }
+      const usage = parseCodexUsage(data)
+      this.cache = { usage, fetchedAt: this.now(), accountKey }
       this.invalidated = false
       return this.fromCache(false)
     } catch (error) {
@@ -129,10 +138,16 @@ export class UsageService {
   }
 
   private fromCache(stale: boolean, error?: PublicErrorDto): QuotaStatusDto {
-    if (this.cache === null) return { state: error ? 'error' : 'empty', buckets: [], fetchedAt: null, stale, ...(error ? { error } : {}) }
+    if (this.cache === null) return {
+      state: error ? 'error' : 'empty',
+      ...EMPTY_USAGE,
+      fetchedAt: null,
+      stale,
+      ...(error ? { error } : {}),
+    }
     return {
-      state: error ? 'stale' : this.cache.buckets.length > 0 ? 'ready' : 'empty',
-      buckets: structuredClone(this.cache.buckets),
+      state: error ? 'stale' : this.cache.usage.buckets.length > 0 ? 'ready' : 'empty',
+      ...structuredClone(this.cache.usage),
       fetchedAt: Math.floor(this.cache.fetchedAt / 1000),
       stale,
       ...(error ? { error } : {}),
@@ -151,18 +166,39 @@ export class UsageServiceError extends Error {
 }
 
 export function mapCodexUsage(value: unknown): QuotaBucketDto[] {
+  return parseCodexUsage(value).buckets
+}
+
+export function parseCodexUsage(value: unknown): QuotaUsageDto {
   const data = record(value)
-  if (data === null) return []
+  if (data === null) return structuredClone(EMPTY_USAGE)
   const planType = typeof data.plan_type === 'string' ? data.plan_type : null
-  const result: QuotaBucketDto[] = []
-  addBucket(result, 'codex', 'Codex', planType, data.rate_limit)
-  addBucket(result, 'code-review', 'Code review', planType, data.code_review_rate_limit)
-  return result
+  const buckets: QuotaBucketDto[] = []
+  const usedIds = new Set<string>()
+  addBucket(buckets, usedIds, 'codex', 'Codex', planType, data.rate_limit)
+  addBucket(buckets, usedIds, 'code-review', 'Code review', planType, data.code_review_rate_limit)
+  const additional = Array.isArray(data.additional_rate_limits) ? data.additional_rate_limits : []
+  for (const [index, value] of additional.entries()) {
+    const limit = record(value)
+    if (limit === null) continue
+    const idSource = text(limit.limit_name) ?? text(limit.metered_feature) ?? `additional-${index + 1}`
+    const id = uniqueId(slug(idSource), usedIds)
+    const name = readableLimitName(text(limit.limit_name) ?? text(limit.metered_feature) ?? idSource)
+    addBucket(buckets, usedIds, id, name, planType, limit.rate_limit)
+  }
+  return {
+    buckets,
+    credits: mapCredits(data.credits),
+    individualLimit: mapIndividualLimit(record(data.spend_control)?.individual_limit),
+    spendControlReached: boolean(record(data.spend_control)?.reached),
+    resetCredits: mapResetCredits(data.rate_limit_reset_credits),
+  }
 }
 
 function addBucket(
   result: QuotaBucketDto[],
-  id: QuotaBucketDto['id'],
+  usedIds: Set<string>,
+  id: string,
   name: string,
   planType: string | null,
   value: unknown,
@@ -172,7 +208,8 @@ function addBucket(
   const primary = mapWindow(source.primary_window)
   const secondary = mapWindow(source.secondary_window)
   if (primary === null && secondary === null) return
-  result.push({ id, name, planType, primary, secondary })
+  result.push({ id, name, planType, primary, secondary, windows: [primary, secondary].filter(isWindow) })
+  usedIds.add(id)
 }
 
 function mapWindow(value: unknown): QuotaWindowDto | null {
@@ -189,16 +226,103 @@ function mapWindow(value: unknown): QuotaWindowDto | null {
   }
 }
 
+function mapCredits(value: unknown): QuotaUsageDto['credits'] {
+  const data = record(value)
+  if (data === null) return null
+  const hasCredits = boolean(data.has_credits)
+  const unlimited = boolean(data.unlimited)
+  const balance = decimalText(data.balance)
+  if (hasCredits === null && unlimited === null && balance === null) return null
+  return {
+    hasCredits: hasCredits ?? (balance !== null || unlimited === true),
+    unlimited: unlimited ?? false,
+    balance,
+  }
+}
+
+function mapIndividualLimit(value: unknown): QuotaUsageDto['individualLimit'] {
+  const data = record(value)
+  if (data === null) return null
+  const remaining = numeric(data.remaining_percent)
+  const reset = numeric(data.reset_at)
+  const limit = decimalText(data.limit)
+  const used = decimalText(data.used)
+  if (remaining === undefined && reset === undefined && limit === null && used === null) return null
+  return {
+    limit,
+    used,
+    remainingPercent: remaining !== undefined ? Math.min(100, Math.max(0, remaining)) : null,
+    resetsAt: reset !== undefined && reset > 0 ? reset : null,
+  }
+}
+
+function mapResetCredits(value: unknown): QuotaUsageDto['resetCredits'] {
+  const data = record(value)
+  if (data === null) return null
+  const available = numeric(data.available_count)
+  if (available === undefined) return null
+  return { availableCount: Math.max(0, Math.floor(available)) }
+}
+
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
 }
 
+function boolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
+}
+
 function numeric(value: unknown): number | undefined {
   if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return undefined
   const number = Number(value)
   return Number.isFinite(number) ? number : undefined
+}
+
+function decimalText(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed !== '' ? trimmed : null
+}
+
+function text(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+}
+
+function slug(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
+  return normalized || 'additional'
+}
+
+function uniqueId(base: string, usedIds: Set<string>): string {
+  let candidate = base
+  let suffix = 2
+  while (usedIds.has(candidate)) {
+    candidate = `${base}-${suffix}`
+    suffix += 1
+  }
+  return candidate
+}
+
+function readableLimitName(value: string): string {
+  return value
+    .replace(/^codex[_-]/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, match => match.toUpperCase()) || 'Additional limit'
+}
+
+function isWindow(value: QuotaWindowDto | null): value is QuotaWindowDto {
+  return value !== null
 }
 
 function identityKey(credentials: StoredOAuthCredentials): string {

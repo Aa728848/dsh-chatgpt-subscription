@@ -5,8 +5,14 @@ describe('CodexChatGptAdapter', () => {
   it('advertises the provider, complete model catalog, modalities and bounded retry policy', async () => {
     const adapter = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never)
     expect(adapter.providerInfo(PROVIDER_ID)).toEqual({ id: 'codex-chatgpt', name: 'Codex（ChatGPT 订阅）' })
-    expect((await adapter.listModels()).map((model) => model.id)).toEqual([
-      'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.2',
+    expect(await adapter.listModels()).toMatchObject([
+      { id: 'gpt-5.6-sol', name: '5.6 Sol', inputModalities: ['text', 'image'] },
+      { id: 'gpt-5.6-terra', name: '5.6 Terra', inputModalities: ['text', 'image'] },
+      { id: 'gpt-5.6-luna', name: '5.6 Luna', inputModalities: ['text', 'image'] },
+      { id: 'gpt-5.5', name: '5.5', inputModalities: ['text', 'image'] },
+      { id: 'gpt-5.4', name: '5.4', inputModalities: ['text', 'image'] },
+      { id: 'gpt-5.4-mini', name: '5.4 Mini', inputModalities: ['text', 'image'] },
+      { id: 'gpt-5.3-codex-spark', name: '5.3 Codex Spark', inputModalities: ['text'] },
     ])
     for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
       const resolved = await adapter.resolveModel(PROVIDER_ID, model)
@@ -25,12 +31,17 @@ describe('CodexChatGptAdapter', () => {
       ['gpt-5.5', 'medium'],
       ['gpt-5.4', 'none'],
       ['gpt-5.4-mini', 'none'],
-      ['gpt-5.2', 'none'],
+      ['gpt-5.3-codex-spark', 'high'],
     ] as const) {
       const resolved = await adapter.resolveModel(PROVIDER_ID, model)
       expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(expectedStandardEfforts)
       expect(resolved.reasoning?.defaultEffort).toBe(defaultEffort)
     }
+    await expect(adapter.resolveModel(PROVIDER_ID, 'gpt-5.3-codex-spark')).resolves.toMatchObject({
+      name: '5.3 Codex Spark',
+      inputModalities: ['text'],
+      context: { contextWindow: 258_000 },
+    })
     expect(adapter.providerRetryPolicy()).toMatchObject({
       mode: 'normal', maxRetries: 2, retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'NETWORK'],
     })

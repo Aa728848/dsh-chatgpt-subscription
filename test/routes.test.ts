@@ -5,6 +5,7 @@ import { OAuthService } from '../src/host/oauth-service.ts'
 import { registerRoutes } from '../src/host/routes.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 import { UsageService } from '../src/host/usage-service.ts'
+import type { SubscriptionPreferenceStore } from '../src/host/preferences.ts'
 
 const servers: http.Server[] = []
 
@@ -39,7 +40,12 @@ describe('host routes', () => {
         rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18_000, reset_at: 2_000_000_000 } },
       }),
     })
-    registerRoutes(ctx as never, oauth, usage)
+    const preferences: SubscriptionPreferenceStore = {
+      status: () => ({ quickQuotaVisible: false, searchProvider: 'dsh', writable: true }),
+      update: async (patch) => ({ quickQuotaVisible: patch.quickQuotaVisible ?? false, searchProvider: patch.searchProvider ?? 'dsh', writable: true }),
+      watch: () => () => undefined,
+    }
+    registerRoutes(ctx as never, oauth, usage, preferences)
     const prefix = routes.find((route) => route.kind === 'prefix')!
     const { server, origin } = await serve(prefix.handler)
     servers.push(server)
@@ -53,6 +59,7 @@ describe('host routes', () => {
     expect(statusText).not.toContain('refresh-secret')
     expect(statusText).not.toContain('account-secret-1234')
     expect(statusText).toContain('"usedPercent":25')
+    expect(statusText).toContain('"quickQuotaVisible":false')
 
     const rejected = await fetch(`${origin}${ROUTE_PREFIX}/logout`, {
       method: 'POST',

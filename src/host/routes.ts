@@ -2,13 +2,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
-import type { ApiEnvelope, LoginEventDto, PublicErrorDto } from '../shared/contracts.ts'
+import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
+import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
-export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageService): () => void {
+export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageService, preferences: SubscriptionPreferenceStore): () => void {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/status`) {
@@ -16,6 +17,7 @@ export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageSe
       json(response, { ok: true, value: {
         ...oauthStatus,
         quota: await usage.status(oauthStatus.authenticated),
+        preferences: preferences.status(),
       } })
       return
     }
@@ -59,6 +61,7 @@ export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageSe
           json(response, { ok: true, value: {
             ...oauthStatus,
             quota: await usage.status(oauthStatus.authenticated),
+            preferences: preferences.status(),
           } })
           return
         }
@@ -71,12 +74,17 @@ export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageSe
         case `${ROUTE_PREFIX}/connection/test`:
           json(response, { ok: true, value: await usage.testConnection() })
           return
+        case `${ROUTE_PREFIX}/preferences/update`:
+          json(response, { ok: true, value: await preferences.update(readPreferencesUpdate(body)) })
+          return
         default:
           jsonError(response, 404, { code: 'bad-request', message: 'Route not found.' })
       }
     } catch (error) {
       const mapped = error instanceof UsageServiceError
         ? error.publicError
+        : error instanceof PreferenceError
+          ? { code: 'bad-request' as const, message: error.message }
         : publicError(error, error instanceof Error && error.message === 'missing loginId'
           ? 'bad-request'
           : error instanceof Error && error.message === 'not authenticated'
@@ -181,6 +189,19 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
 function field(value: Record<string, unknown>, name: string): string | null {
   const candidate = value[name]
   return typeof candidate === 'string' && candidate !== '' ? candidate : null
+}
+
+function readPreferencesUpdate(value: Record<string, unknown>): SubscriptionPreferencesUpdateDto {
+  const patch: SubscriptionPreferencesUpdateDto = {}
+  if ('quickQuotaVisible' in value) {
+    if (typeof value.quickQuotaVisible !== 'boolean') throw new PreferenceError('quickQuotaVisible must be a boolean.')
+    patch.quickQuotaVisible = value.quickQuotaVisible
+  }
+  if ('searchProvider' in value) {
+    if (value.searchProvider !== 'dsh' && value.searchProvider !== 'codex') throw new PreferenceError('searchProvider must be dsh or codex.')
+    patch.searchProvider = value.searchProvider
+  }
+  return patch
 }
 
 function json<T>(response: ServerResponse, envelope: ApiEnvelope<T>, status = 200): void {

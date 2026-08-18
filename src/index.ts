@@ -2,33 +2,50 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-llm'
-import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-web'
+import type {} from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
-import { installSubagentReportDedupCompat } from './host/subagent-report-scheduling-compat.ts'
+import { createCodexImageTool } from './host/codex-images.ts'
+import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
+import { registerPreferenceStore } from './host/preferences.ts'
 import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
+import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
 import { UsageService } from './host/usage-service.ts'
 
-export const inject = ['webServer', 'llm', 'attachments', 'agents']
+export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader']
 
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
   const oauth = new OAuthService(store, { logger: ctx.logger })
   const usage = new UsageService(oauth)
+  const preferences = registerPreferenceStore(ctx.settings)
   const responses = new ResponsesClient(oauth, ctx.attachments, {
     localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
     onGenerationFinished: () => usage.invalidate(),
   })
   const adapter = new CodexChatGptAdapter(responses)
   ctx.effect(() => {
-    const disposeRoutes = registerRoutes(ctx, oauth, usage)
+    const searchSwitcher = new SearchProviderSwitcher(ctx.loader)
+    const applySearchPreference = (searchProvider = preferences.status().searchProvider): void => {
+      void searchSwitcher.select(searchProvider).catch(error => {
+        ctx.logger.warn(`[dsh-chatgpt-subscription] Search provider preference could not be applied: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-    // DSH_COMPAT_REMOVE(subagent-report-settlement-dedup): remove with the isolated compat module.
-    const disposeSubagentReportCompat = installSubagentReportDedupCompat(ctx)
+    const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments))
+    const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth))
+    const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
+    applySearchPreference()
     return () => {
-      disposeSubagentReportCompat()
+      disposePreferenceWatch()
+      disposeSearchProvider()
+      disposeImageTool()
       disposeAdapter()
       disposeRoutes()
       oauth.dispose()
@@ -38,8 +55,10 @@ export function apply(ctx: Context): void {
 
 export { OAuthService } from './host/oauth-service.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
+export { createCodexImageTool } from './host/codex-images.ts'
+export { createCodexSearchProvider } from './host/codex-search.ts'
 export { ResponsesClient, parseResponsesStream } from './host/responses-client.ts'
-export { UsageService, mapCodexUsage } from './host/usage-service.ts'
+export { UsageService, mapCodexUsage, parseCodexUsage } from './host/usage-service.ts'
 export { createPlatformTokenStore } from './host/platform-token-store.ts'
 export { LinuxFileTokenStore } from './host/token-store-linux.ts'
 export { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
