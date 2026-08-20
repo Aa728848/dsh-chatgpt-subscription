@@ -39,7 +39,7 @@
 **设置页**
 
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
-- 当父 Agent 使用本插件的 `codex-chatgpt` 模型时，可选择新启动的内置子代理模型及思考深度；非 Codex 父 Agent 完全沿用 DSH 默认子代理继承设计；
+- 当父 Agent 使用本插件的 `codex-chatgpt` 模型时，子代理可选择 DSH 当前接入的任意 Provider/模型（如 DeepSeek V4 Flash）；思考深度来自所选模型公开能力，上下文在选定模型后展开配置；非 Codex 父 Agent完全沿用 DSH 默认子代理继承设计；
 - 5.6 Sol / Terra / Luna 默认使用 272K 有效上下文，可在设置中选择最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 

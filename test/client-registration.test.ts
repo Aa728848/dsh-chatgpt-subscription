@@ -21,14 +21,20 @@ describe('client registration', () => {
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/models')) return Response.json({ ok: true, value: {
+        providers: [{ id: 'codex-chatgpt', name: 'Codex', models: [{ id: 'gpt-5.6-sol', name: '5.6 Sol', contextWindow: 272_000, maxContextWindow: 1_000_000, reasoning: { efforts: [{ id: 'medium', name: 'medium' }], defaultEffort: 'medium' } }] }],
+        failures: [],
+      } })
       const body = init?.body === undefined ? null : JSON.parse(String(init.body)) as { contextWindowOverrides?: { 'gpt-5.6-sol'?: number } }
       const contextWindow = body?.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000
       const preferences = {
         quickQuotaVisible: false,
         searchProvider: 'dsh',
+        subagentProvider: 'codex-chatgpt',
         subagentModel: 'gpt-5.6-sol',
         subagentReasoningEffort: 'medium',
+        subagentContextWindow: 272_000,
         contextWindowOverrides: { 'gpt-5.6-sol': contextWindow, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
         writable: true,
       }
@@ -56,13 +62,13 @@ describe('client registration', () => {
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
-      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(3)
+      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(4)
       const save = container.querySelector<HTMLButtonElement>('button[data-model="gpt-5.6-sol"]')
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)
       await act(async () => save?.click())
-      expect(fetchMock).toHaveBeenCalledTimes(2)
-      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ contextWindowOverrides: { 'gpt-5.6-sol': 5 } })
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({ contextWindowOverrides: { 'gpt-5.6-sol': 5 } })
       expect(save?.disabled).toBe(true)
     } finally {
       await act(async () => root.unmount())

@@ -16,6 +16,7 @@ import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
+import { SubagentContextAdapter } from './host/subagent-context-adapter.ts'
 import { installSubagentModelPreference } from './host/subagent-model-preference.ts'
 import { UsageService } from './host/usage-service.ts'
 
@@ -40,6 +41,11 @@ export function apply(ctx: Context): void {
     }
     const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
+    const subagentContextAdapter = new SubagentContextAdapter(ctx.llm, () => {
+      const selected = preferences.status()
+      return { provider: selected.subagentProvider, model: selected.subagentModel, contextWindow: selected.subagentContextWindow }
+    })
+    const disposeSubagentContextAdapter = ctx.llm.registerAdapter([SubagentContextAdapter.provider], subagentContextAdapter)
     const disposeSubagentModelPreference = installSubagentModelPreference(ctx, preferences)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments))
     const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth))
@@ -50,6 +56,7 @@ export function apply(ctx: Context): void {
       disposeSubagentModelPreference()
       disposeSearchProvider()
       disposeImageTool()
+      disposeSubagentContextAdapter()
       disposeAdapter()
       disposeRoutes()
       oauth.dispose()

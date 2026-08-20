@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- 设置页新增内置子代理模型与思考深度选择，新启动的 spawn/fork 子代理可统一路由到指定的 ChatGPT 订阅模型和 reasoning effort；可选深度随模型能力联动。
+- 子代理设置扩展为 DSH 全部已接入 Provider/模型；思考深度使用所选模型的真实 reasoning effort 目录，上下文在选定模型后展开并作为子 Agent 的有效压缩预算。
 - 设置页新增 GPT-5.6 Sol / Terra / Luna 有效上下文窗口配置：默认 272K，可选最高 1M，并动态影响 DSH 的模型解析、压缩阈值与溢出判断。
 
 ## 0.1.12 - 2026-08-20

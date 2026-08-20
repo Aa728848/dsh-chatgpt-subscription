@@ -5,6 +5,7 @@ import type {
   LoginStartDto,
   PluginStatusDto,
   QuotaStatusDto,
+  SubagentModelCatalogDto,
   ConnectionTestDto,
   SubscriptionPreferencesDto,
   SubscriptionPreferencesUpdateDto,
@@ -13,6 +14,10 @@ import type {
 export class SubscriptionApi {
   status(): Promise<PluginStatusDto> {
     return request<PluginStatusDto>(`${ROUTE_PREFIX}/status`)
+  }
+
+  models(): Promise<SubagentModelCatalogDto> {
+    return request<SubagentModelCatalogDto>(`${ROUTE_PREFIX}/models`)
   }
 
   startLogin(): Promise<LoginStartDto> {

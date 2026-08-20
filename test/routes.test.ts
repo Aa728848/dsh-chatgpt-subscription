@@ -27,6 +27,25 @@ describe('host routes', () => {
     const oauth = new OAuthService(store, { logger: { info: () => undefined, warn: () => undefined } })
     const routes: Array<{ kind: string; path: string; handler: http.RequestListener }> = []
     const ctx = {
+      llm: {
+        listProviders: () => [
+          { id: 'codex-chatgpt', name: 'Codex' },
+          { id: 'deepseek-official', name: 'DeepSeek Official' },
+        ],
+        listModels: async (provider: string) => provider === 'codex-chatgpt'
+          ? [{ provider, id: 'gpt-5.6-sol', name: '5.6 Sol' }]
+          : [{ provider, id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+        resolveModelInfo: async (provider: string, model: string) => ({
+          provider,
+          id: model,
+          name: model,
+          context: { contextWindow: provider === 'codex-chatgpt' ? 272_000 : 128_000 },
+          reasoning: {
+            efforts: provider === 'codex-chatgpt' ? [{ id: 'medium', name: 'medium' }] : [{ id: 'high', name: 'high' }],
+            defaultEffort: provider === 'codex-chatgpt' ? 'medium' : 'high',
+          },
+        }),
+      },
       webServer: {
         register(route: { kind: string; path: string; handler: http.RequestListener }) {
           routes.push(route)
@@ -44,16 +63,20 @@ describe('host routes', () => {
       status: () => ({
         quickQuotaVisible: false,
         searchProvider: 'dsh',
+        subagentProvider: 'codex-chatgpt',
         subagentModel: 'gpt-5.6-sol',
         subagentReasoningEffort: 'medium',
+        subagentContextWindow: 272_000,
         contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
         writable: true,
       }),
       update: async (patch) => ({
         quickQuotaVisible: patch.quickQuotaVisible ?? false,
         searchProvider: patch.searchProvider ?? 'dsh',
+        subagentProvider: patch.subagentProvider ?? 'codex-chatgpt',
         subagentModel: patch.subagentModel ?? 'gpt-5.6-sol',
         subagentReasoningEffort: patch.subagentReasoningEffort ?? 'medium',
+        subagentContextWindow: patch.subagentContextWindow ?? 272_000,
         contextWindowOverrides: {
           'gpt-5.6-sol': patch.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000,
           'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
@@ -67,6 +90,13 @@ describe('host routes', () => {
     const prefix = routes.find((route) => route.kind === 'prefix')!
     const { server, origin } = await serve(prefix.handler)
     servers.push(server)
+
+    const modelsResponse = await fetch(`${origin}${ROUTE_PREFIX}/models`)
+    expect(modelsResponse.status).toBe(200)
+    await expect(modelsResponse.json()).resolves.toMatchObject({ value: { providers: [
+      { id: 'codex-chatgpt', models: [{ id: 'gpt-5.6-sol', contextWindow: 272_000, maxContextWindow: 1_000_000 }] },
+      { id: 'deepseek-official', models: [{ id: 'deepseek-v4-flash', contextWindow: 128_000, reasoning: { efforts: [{ id: 'high' }] } }] },
+    ] } })
 
     const statusResponse = await fetch(`${origin}${ROUTE_PREFIX}/status`)
     const statusText = await statusResponse.text()
@@ -91,13 +121,6 @@ describe('host routes', () => {
       ok: true,
       value: { subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'xhigh', contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } },
     })
-
-    const rejectedReasoning = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin },
-      body: JSON.stringify({ subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'max' }),
-    })
-    expect(rejectedReasoning.status).toBe(400)
 
     const rejectedContextModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',

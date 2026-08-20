@@ -41,11 +41,32 @@ export interface CodexContextWindowOverridesDto {
   'gpt-5.6-luna': number
 }
 
+export interface SubagentModelCatalogDto {
+  providers: Array<{
+    id: string
+    name: string
+    models: Array<{
+      id: string
+      name: string
+      description?: string
+      contextWindow?: number
+      maxContextWindow?: number
+      reasoning?: {
+        efforts: Array<{ id: string; name: string; description?: string }>
+        defaultEffort?: string
+      }
+    }>
+  }>
+  failures: Array<{ id: string; name: string; message: string }>
+}
+
 export interface SubscriptionPreferencesDto {
   quickQuotaVisible: boolean
   searchProvider: SearchProviderPreference
+  subagentProvider: string
   subagentModel: string
-  subagentReasoningEffort: string
+  subagentReasoningEffort: string | null
+  subagentContextWindow: number
   contextWindowOverrides: CodexContextWindowOverridesDto
   writable: boolean
 }
@@ -53,8 +74,10 @@ export interface SubscriptionPreferencesDto {
 export interface SubscriptionPreferencesUpdateDto {
   quickQuotaVisible?: boolean
   searchProvider?: SearchProviderPreference
+  subagentProvider?: string
   subagentModel?: string
-  subagentReasoningEffort?: string
+  subagentReasoningEffort?: string | null
+  subagentContextWindow?: number
   contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>
 }
 

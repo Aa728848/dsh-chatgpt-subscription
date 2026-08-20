@@ -42,10 +42,15 @@ export declare const zh: {
     readonly searchProviderHint: "选择 DSH Web 搜索工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 搜索来源。";
     readonly searchProviderDsh: "DSH 默认";
     readonly searchProviderCodex: "Codex 订阅";
+    readonly subagentProvider: "子代理 Provider";
+    readonly subagentProviderHint: "选择 DSH 当前已接入且可用的模型提供方。";
     readonly subagentModel: "子代理模型";
-    readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；非 Codex 父 Agent 沿用 DSH 默认子代理设计。";
+    readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；模型可来自任意已接入 Provider。";
     readonly subagentReasoningEffort: "子代理思考深度";
-    readonly subagentReasoningEffortHint: "仅随 Codex 父 Agent 的子代理请求生效；可选项会随所选模型变化。";
+    readonly subagentReasoningEffortHint: "选项来自所选模型实际公开的 reasoning effort 能力。";
+    readonly providerDefault: "使用 Provider 默认值";
+    readonly effectiveContextWindow: "有效上下文窗口";
+    readonly selectedModelContextHint: "选择模型后展开；该值仅用于子 Agent 的 DSH 上下文预算与压缩判断。";
     readonly reasoningNone: "无";
     readonly reasoningLow: "低";
     readonly reasoningMedium: "中";
@@ -145,10 +150,15 @@ export declare const dictionaries: {
         readonly searchProviderHint: "选择 DSH Web 搜索工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 搜索来源。";
         readonly searchProviderDsh: "DSH 默认";
         readonly searchProviderCodex: "Codex 订阅";
+        readonly subagentProvider: "子代理 Provider";
+        readonly subagentProviderHint: "选择 DSH 当前已接入且可用的模型提供方。";
         readonly subagentModel: "子代理模型";
-        readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；非 Codex 父 Agent 沿用 DSH 默认子代理设计。";
+        readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；模型可来自任意已接入 Provider。";
         readonly subagentReasoningEffort: "子代理思考深度";
-        readonly subagentReasoningEffortHint: "仅随 Codex 父 Agent 的子代理请求生效；可选项会随所选模型变化。";
+        readonly subagentReasoningEffortHint: "选项来自所选模型实际公开的 reasoning effort 能力。";
+        readonly providerDefault: "使用 Provider 默认值";
+        readonly effectiveContextWindow: "有效上下文窗口";
+        readonly selectedModelContextHint: "选择模型后展开；该值仅用于子 Agent 的 DSH 上下文预算与压缩判断。";
         readonly reasoningNone: "无";
         readonly reasoningLow: "低";
         readonly reasoningMedium: "中";
@@ -202,6 +212,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"tokens" | "title" | "intro" | "account" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storage" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "pending" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentModel" | "subagentModelHint" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quota" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "stale" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentProvider" | "subagentProviderHint" | "subagentModel" | "subagentModelHint" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "providerDefault" | "effectiveContextWindow" | "selectedModelContextHint" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map
