@@ -17,13 +17,15 @@ describe('subagent model preference', () => {
     }
     expect(installSubagentModelPreference(ctx as never, preferences as never)).toBe(dispose)
 
-    const base = { provider: 'deepseek', model: 'deepseek-chat', maxTokens: 8192 }
-    await expect(listener!({ agent: { session: { header: { origin: 'subagent' } } } } as never, async () => base)).resolves.toEqual({
-      ...base,
+    const codexBase = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', maxTokens: 8192 }
+    await expect(listener!({ agent: { session: { header: { origin: 'subagent' } } } } as never, async () => codexBase)).resolves.toEqual({
+      ...codexBase,
       provider: 'codex-chatgpt',
       model: 'gpt-5.6-luna',
       reasoningEffort: 'max',
     })
-    await expect(listener!({ agent: { session: { header: {} } } } as never, async () => base)).resolves.toBe(base)
+    const dshDefault = { provider: 'deepseek', model: 'deepseek-chat', maxTokens: 8192 }
+    await expect(listener!({ agent: { session: { header: { origin: 'subagent' } } } } as never, async () => dshDefault)).resolves.toBe(dshDefault)
+    await expect(listener!({ agent: { session: { header: {} } } } as never, async () => codexBase)).resolves.toBe(codexBase)
   })
 })

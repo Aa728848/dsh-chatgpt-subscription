@@ -43,9 +43,9 @@ export declare const zh: {
     readonly searchProviderDsh: "DSH 默认";
     readonly searchProviderCodex: "Codex 订阅";
     readonly subagentModel: "子代理模型";
-    readonly subagentModelHint: "新启动的内置子代理使用此 ChatGPT 订阅模型；父会话的模型选择不受影响。";
+    readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；非 Codex 父 Agent 沿用 DSH 默认子代理设计。";
     readonly subagentReasoningEffort: "子代理思考深度";
-    readonly subagentReasoningEffortHint: "控制子代理请求的 reasoning effort；可选项会随所选模型变化。";
+    readonly subagentReasoningEffortHint: "仅随 Codex 父 Agent 的子代理请求生效；可选项会随所选模型变化。";
     readonly reasoningNone: "无";
     readonly reasoningLow: "低";
     readonly reasoningMedium: "中";
@@ -146,9 +146,9 @@ export declare const dictionaries: {
         readonly searchProviderDsh: "DSH 默认";
         readonly searchProviderCodex: "Codex 订阅";
         readonly subagentModel: "子代理模型";
-        readonly subagentModelHint: "新启动的内置子代理使用此 ChatGPT 订阅模型；父会话的模型选择不受影响。";
+        readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；非 Codex 父 Agent 沿用 DSH 默认子代理设计。";
         readonly subagentReasoningEffort: "子代理思考深度";
-        readonly subagentReasoningEffortHint: "控制子代理请求的 reasoning effort；可选项会随所选模型变化。";
+        readonly subagentReasoningEffortHint: "仅随 Codex 父 Agent 的子代理请求生效；可选项会随所选模型变化。";
         readonly reasoningNone: "无";
         readonly reasoningLow: "低";
         readonly reasoningMedium: "中";
