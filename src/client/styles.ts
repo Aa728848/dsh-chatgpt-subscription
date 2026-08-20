@@ -42,6 +42,10 @@ const CSS = `
 .dsh-codex-capacity-control{align-items:center;display:flex;gap:7px}
 .dsh-codex-capacity-control input{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;text-align:right;width:90px}
 .dsh-codex-capacity-control small{color:var(--dsw-alias-label-tertiary);font-size:11px;width:42px}
+.dsh-codex-context-save{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit;font-size:12px;line-height:1;padding:8px 10px;white-space:nowrap}
+.dsh-codex-context-save:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-codex-context-save:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
+.dsh-codex-context-save:disabled{cursor:default;opacity:.45}
 .dsh-codex-check{align-items:flex-start;border-bottom:1px solid var(--dsw-alias-border-l2);cursor:pointer;display:flex;gap:10px;padding:12px 0}
 .dsh-codex-check input{flex:none;margin-top:2px}
 .dsh-codex-check small{color:var(--dsw-alias-label-secondary);display:block;font-size:12px;line-height:1.45;margin-top:2px}

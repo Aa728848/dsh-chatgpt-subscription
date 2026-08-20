@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
+import { describe, expect, it, vi } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
-import { parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
+import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 
@@ -13,6 +15,61 @@ describe('client registration', () => {
     expect(parseCapacity('1000001')).toBeNull()
     expect(parseCapacity('128.5K')).toBe(128_500)
     expect(parseCapacity('invalid')).toBeNull()
+  })
+
+  it('keeps context options rendered while typing a numeric draft', async () => {
+    const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = init?.body === undefined ? null : JSON.parse(String(init.body)) as { contextWindowOverrides?: { 'gpt-5.6-sol'?: number } }
+      const contextWindow = body?.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000
+      const preferences = {
+        quickQuotaVisible: false,
+        searchProvider: 'dsh',
+        subagentModel: 'gpt-5.6-sol',
+        subagentReasoningEffort: 'medium',
+        contextWindowOverrides: { 'gpt-5.6-sol': contextWindow, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        writable: true,
+      }
+      if (init?.method === 'POST') return Response.json({ ok: true, value: preferences })
+      return Response.json({ ok: true, value: {
+        authenticated: false,
+        account: null,
+        storage: { kind: 'memory', encrypted: false, available: true },
+        login: { active: false, loginId: null, expiresAt: null },
+        quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
+        preferences,
+      } })
+    })
+    globalThis.fetch = fetchMock as typeof fetch
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const t = ((key: keyof typeof zh) => zh[key]) as never
+    try {
+      await act(async () => root.render(createElement(CodexSubscriptionSection, { t } as never)))
+      const input = container.querySelector<HTMLInputElement>('input[aria-label="5.6 Sol 上下文窗口"]')
+      expect(input).not.toBeNull()
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
+        input!.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      expect(input?.value).toBe('5')
+      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(3)
+      const save = container.querySelector<HTMLButtonElement>('button[data-model="gpt-5.6-sol"]')
+      expect(save).not.toBeNull()
+      expect(save?.disabled).toBe(false)
+      await act(async () => save?.click())
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ contextWindowOverrides: { 'gpt-5.6-sol': 5 } })
+      expect(save?.disabled).toBe(true)
+    } finally {
+      await act(async () => root.unmount())
+      container.remove()
+      globalThis.fetch = originalFetch
+      globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment
+    }
   })
 
   it('presents the actual Host credential storage security boundary', () => {

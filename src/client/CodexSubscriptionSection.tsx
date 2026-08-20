@@ -261,14 +261,27 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <p className="dsh-codex-muted">{t('contextWindowsHint')}</p>
           </div>
           {CONFIGURABLE_CONTEXT_MODEL_IDS.map((model) => {
-            const fallback = status?.preferences.contextWindowOverrides[model] ?? resolveCodexCatalogEntry(model).contextWindow
-            return <label className="dsh-codex-context-row" key={model}>
-              <span>{resolveCodexCatalogEntry(model).name}</span>
+            const entry = resolveCodexCatalogEntry(model)
+            const fallback = status?.preferences.contextWindowOverrides[model] ?? entry.contextWindow
+            const draft = contextDrafts[model]
+            const parsedDraft = draft === undefined ? fallback : parseCapacity(draft)
+            const dirty = draft !== undefined && parsedDraft !== fallback
+            const inputId = `dsh-codex-context-${model}`
+            return <div className="dsh-codex-context-row" key={model}>
+              <label htmlFor={inputId}>{entry.name}</label>
               <span className="dsh-codex-capacity-control">
-                <input type="text" inputMode="numeric" value={contextDrafts[model] ?? formatCapacity(fallback)} disabled={busy !== null} aria-label={resolveCodexCatalogEntry(model).name + ' ' + t('contextWindow')} onChange={(event) => setContextDrafts((drafts) => ({ ...drafts, [model]: event.currentTarget.value }))} onBlur={() => void updateContextWindow(model)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+                <input id={inputId} type="text" inputMode="numeric" value={draft ?? formatCapacity(fallback)} disabled={busy !== null} aria-label={entry.name + ' ' + t('contextWindow')} onChange={(event) => {
+                  const value = event.currentTarget.value
+                  setContextDrafts((drafts) => ({ ...drafts, [model]: value }))
+                }} onKeyDown={(event) => {
+                  if (event.key !== 'Enter' || !dirty) return
+                  event.preventDefault()
+                  void updateContextWindow(model)
+                }} />
                 <small>{t('tokens')}</small>
+                <button className="dsh-codex-context-save" type="button" data-model={model} aria-label={entry.name + ' ' + t('saveContextWindow')} disabled={busy !== null || !dirty} onClick={() => void updateContextWindow(model)}>{t('save')}</button>
               </span>
-            </label>
+            </div>
           })}
         </div>
         <label className="dsh-codex-check">
