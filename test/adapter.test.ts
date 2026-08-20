@@ -51,6 +51,7 @@ describe('CodexChatGptAdapter', () => {
         quickQuotaVisible: false,
         searchProvider: 'dsh',
         subagentModel: 'gpt-5.6-luna',
+        subagentReasoningEffort: 'max',
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000, 'gpt-5.6-terra': 200_000, 'gpt-5.6-luna': 256_000 },
         writable: true,
       }),

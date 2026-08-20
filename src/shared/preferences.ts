@@ -6,6 +6,7 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   quickQuotaVisible: false,
   searchProvider: 'dsh',
   subagentModel: 'gpt-5.6-sol',
+  subagentReasoningEffort: 'medium',
   contextWindowOverrides: {
     'gpt-5.6-sol': 272_000,
     'gpt-5.6-terra': 272_000,

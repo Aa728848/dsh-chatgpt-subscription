@@ -44,6 +44,14 @@ export declare const zh: {
     readonly searchProviderCodex: "Codex 订阅";
     readonly subagentModel: "子代理模型";
     readonly subagentModelHint: "新启动的内置子代理使用此 ChatGPT 订阅模型；父会话的模型选择不受影响。";
+    readonly subagentReasoningEffort: "子代理思考深度";
+    readonly subagentReasoningEffortHint: "控制子代理请求的 reasoning effort；可选项会随所选模型变化。";
+    readonly reasoningNone: "无";
+    readonly reasoningLow: "低";
+    readonly reasoningMedium: "中";
+    readonly reasoningHigh: "高";
+    readonly reasoningXhigh: "超高";
+    readonly reasoningMax: "最大";
     readonly contextWindows: "GPT-5.6 上下文窗口";
     readonly contextWindowsHint: "默认 272K；可选启用最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 1M、512K 等容量。";
     readonly contextWindow: "上下文窗口";
@@ -137,6 +145,14 @@ export declare const dictionaries: {
         readonly searchProviderCodex: "Codex 订阅";
         readonly subagentModel: "子代理模型";
         readonly subagentModelHint: "新启动的内置子代理使用此 ChatGPT 订阅模型；父会话的模型选择不受影响。";
+        readonly subagentReasoningEffort: "子代理思考深度";
+        readonly subagentReasoningEffortHint: "控制子代理请求的 reasoning effort；可选项会随所选模型变化。";
+        readonly reasoningNone: "无";
+        readonly reasoningLow: "低";
+        readonly reasoningMedium: "中";
+        readonly reasoningHigh: "高";
+        readonly reasoningXhigh: "超高";
+        readonly reasoningMax: "最大";
         readonly contextWindows: "GPT-5.6 上下文窗口";
         readonly contextWindowsHint: "默认 272K；可选启用最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 1M、512K 等容量。";
         readonly contextWindow: "上下文窗口";
@@ -182,6 +198,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"tokens" | "title" | "intro" | "account" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storage" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "pending" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentModel" | "subagentModelHint" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "quickQuota" | "quickQuotaHint" | "quota" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "stale" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentModel" | "subagentModelHint" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

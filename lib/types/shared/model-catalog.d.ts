@@ -78,6 +78,12 @@ export declare const DEFAULT_CODEX_MODEL: {
 };
 export declare const CONFIGURABLE_CONTEXT_MODEL_IDS: readonly ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 export type ConfigurableContextModelId = typeof CONFIGURABLE_CONTEXT_MODEL_IDS[number];
+export declare const STANDARD_REASONING_EFFORTS: readonly ["none", "low", "medium", "high", "xhigh"];
+export declare const GPT_56_REASONING_EFFORTS: readonly ["none", "low", "medium", "high", "xhigh", "max"];
+export type CodexReasoningEffort = typeof GPT_56_REASONING_EFFORTS[number];
+export declare function reasoningEffortsForModel(model: string): readonly CodexReasoningEffort[];
+export declare function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort;
+export declare function modelSupportsReasoningEffort(model: string, effort: unknown): effort is CodexReasoningEffort;
 export declare function isCodexModelId(model: unknown): model is CodexModelId;
 export declare function isConfigurableContextModelId(model: unknown): model is ConfigurableContextModelId;
 export declare function resolveCodexCatalogEntry(model: string): CodexModelCatalogEntry;

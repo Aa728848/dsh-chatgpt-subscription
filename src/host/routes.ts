@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
+import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId, modelSupportsReasoningEffort, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
@@ -76,7 +76,7 @@ export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageSe
           json(response, { ok: true, value: await usage.testConnection() })
           return
         case `${ROUTE_PREFIX}/preferences/update`:
-          json(response, { ok: true, value: await preferences.update(readPreferencesUpdate(body)) })
+          json(response, { ok: true, value: await preferences.update(readPreferencesUpdate(body, preferences.status())) })
           return
         default:
           jsonError(response, 404, { code: 'bad-request', message: 'Route not found.' })
@@ -196,7 +196,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function readPreferencesUpdate(value: Record<string, unknown>): SubscriptionPreferencesUpdateDto {
+function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnType<SubscriptionPreferenceStore['status']>): SubscriptionPreferencesUpdateDto {
   const patch: SubscriptionPreferencesUpdateDto = {}
   if ('quickQuotaVisible' in value) {
     if (typeof value.quickQuotaVisible !== 'boolean') throw new PreferenceError('quickQuotaVisible must be a boolean.')
@@ -209,6 +209,15 @@ function readPreferencesUpdate(value: Record<string, unknown>): SubscriptionPref
   if ('subagentModel' in value) {
     if (!isCodexModelId(value.subagentModel)) throw new PreferenceError('subagentModel must be an available Codex model.')
     patch.subagentModel = value.subagentModel
+  }
+  const selectedSubagentModel = patch.subagentModel ?? current.subagentModel
+  if ('subagentReasoningEffort' in value) {
+    if (!modelSupportsReasoningEffort(selectedSubagentModel, value.subagentReasoningEffort)) {
+      throw new PreferenceError('subagentReasoningEffort must be supported by the selected subagent model.')
+    }
+    patch.subagentReasoningEffort = value.subagentReasoningEffort
+  } else if (patch.subagentModel !== undefined && !modelSupportsReasoningEffort(selectedSubagentModel, current.subagentReasoningEffort)) {
+    patch.subagentReasoningEffort = resolveCodexCatalogEntry(selectedSubagentModel).defaultReasoningEffort
   }
   if ('contextWindowOverrides' in value) {
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')

@@ -13,7 +13,7 @@ describe('subagent model preference', () => {
       },
     }
     const preferences = {
-      status: () => ({ subagentModel: 'gpt-5.6-luna' }),
+      status: () => ({ subagentModel: 'gpt-5.6-luna', subagentReasoningEffort: 'max' }),
     }
     expect(installSubagentModelPreference(ctx as never, preferences as never)).toBe(dispose)
 
@@ -22,6 +22,7 @@ describe('subagent model preference', () => {
       ...base,
       provider: 'codex-chatgpt',
       model: 'gpt-5.6-luna',
+      reasoningEffort: 'max',
     })
     await expect(listener!({ agent: { session: { header: {} } } } as never, async () => base)).resolves.toBe(base)
   })

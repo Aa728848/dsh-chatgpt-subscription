@@ -45,6 +45,7 @@ export interface SubscriptionPreferencesDto {
   quickQuotaVisible: boolean
   searchProvider: SearchProviderPreference
   subagentModel: string
+  subagentReasoningEffort: string
   contextWindowOverrides: CodexContextWindowOverridesDto
   writable: boolean
 }
@@ -53,6 +54,7 @@ export interface SubscriptionPreferencesUpdateDto {
   quickQuotaVisible?: boolean
   searchProvider?: SearchProviderPreference
   subagentModel?: string
+  subagentReasoningEffort?: string
   contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>
 }
 

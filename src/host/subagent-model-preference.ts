@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent'
 import { PROVIDER_ID } from './model-catalog.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
@@ -12,10 +12,12 @@ export function installSubagentModelPreference(ctx: Context, preferences: Subscr
   return ctx.on('agent/request', async (payload, next): Promise<LlmCallConfig> => {
     const resolved = await next()
     if (payload.agent.session.header.origin !== 'subagent') return resolved
+    const selection = preferences.status()
     return {
       ...resolved,
       provider: PROVIDER_ID,
-      model: preferences.status().subagentModel,
+      model: selection.subagentModel,
+      reasoningEffort: ReasoningEffortId(selection.subagentReasoningEffort),
     }
   })
 }

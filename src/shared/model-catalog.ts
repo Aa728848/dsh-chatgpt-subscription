@@ -90,6 +90,24 @@ export const CONFIGURABLE_CONTEXT_MODEL_IDS = [
 
 export type ConfigurableContextModelId = typeof CONFIGURABLE_CONTEXT_MODEL_IDS[number]
 
+export const STANDARD_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'] as const
+export const GPT_56_REASONING_EFFORTS = [...STANDARD_REASONING_EFFORTS, 'max'] as const
+export type CodexReasoningEffort = typeof GPT_56_REASONING_EFFORTS[number]
+
+export function reasoningEffortsForModel(model: string): readonly CodexReasoningEffort[] {
+  return resolveCodexCatalogEntry(model).reasoningProfile === 'gpt-5.6'
+    ? GPT_56_REASONING_EFFORTS
+    : STANDARD_REASONING_EFFORTS
+}
+
+export function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return typeof value === 'string' && GPT_56_REASONING_EFFORTS.some((effort) => effort === value)
+}
+
+export function modelSupportsReasoningEffort(model: string, effort: unknown): effort is CodexReasoningEffort {
+  return isCodexReasoningEffort(effort) && reasoningEffortsForModel(model).some((candidate) => candidate === effort)
+}
+
 export function isCodexModelId(model: unknown): model is CodexModelId {
   return typeof model === 'string' && CODEX_MODEL_CATALOG.some((entry) => entry.id === model)
 }

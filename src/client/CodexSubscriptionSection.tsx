@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
@@ -232,8 +232,27 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <strong>{t('subagentModel')}</strong>
             <p className="dsh-codex-muted">{t('subagentModelHint')}</p>
           </div>
-          <select className="dsh-codex-select" aria-label={t('subagentModel')} value={status?.preferences.subagentModel ?? CODEX_MODEL_CATALOG[0].id} disabled={busy !== null} onChange={(event) => void updatePreferences({ subagentModel: event.currentTarget.value })}>
+          <select className="dsh-codex-select" aria-label={t('subagentModel')} value={status?.preferences.subagentModel ?? CODEX_MODEL_CATALOG[0].id} disabled={busy !== null} onChange={(event) => {
+            const subagentModel = event.currentTarget.value
+            const currentEffort = status?.preferences.subagentReasoningEffort ?? resolveCodexCatalogEntry(subagentModel).defaultReasoningEffort
+            const supportedEfforts = reasoningEffortsForModel(subagentModel)
+            void updatePreferences({
+              subagentModel,
+              subagentReasoningEffort: supportedEfforts.includes(currentEffort as never)
+                ? currentEffort
+                : resolveCodexCatalogEntry(subagentModel).defaultReasoningEffort,
+            })
+          }}>
             {CODEX_MODEL_CATALOG.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+          </select>
+        </div>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('subagentReasoningEffort')}</strong>
+            <p className="dsh-codex-muted">{t('subagentReasoningEffortHint')}</p>
+          </div>
+          <select className="dsh-codex-select" aria-label={t('subagentReasoningEffort')} value={status?.preferences.subagentReasoningEffort ?? 'medium'} disabled={busy !== null} onChange={(event) => void updatePreferences({ subagentModel: status?.preferences.subagentModel ?? CODEX_MODEL_CATALOG[0].id, subagentReasoningEffort: event.currentTarget.value })}>
+            {reasoningEffortsForModel(status?.preferences.subagentModel ?? CODEX_MODEL_CATALOG[0].id).map((effort) => <option key={effort} value={effort}>{reasoningEffortLabel(effort, t)}</option>)}
           </select>
         </div>
         <div className="dsh-codex-context-settings">
@@ -353,6 +372,18 @@ export function windowLabel(minutes: number | null, t: Translate): string {
       ? [minutes / 60, 'hour']
       : [Math.round(minutes), 'minute']
   return `${new Intl.NumberFormat(undefined, { style: 'unit', unit, unitDisplay: 'long' }).format(value)} ${t('limitWindow')}`
+}
+
+function reasoningEffortLabel(effort: string, t: Translate): string {
+  const labels: Record<string, keyof typeof import('./locales.ts').zh> = {
+    none: 'reasoningNone',
+    low: 'reasoningLow',
+    medium: 'reasoningMedium',
+    high: 'reasoningHigh',
+    xhigh: 'reasoningXhigh',
+    max: 'reasoningMax',
+  }
+  return t(labels[effort] ?? 'unknown')
 }
 
 export function parseCapacity(value: string): number | null {

@@ -1,19 +1,11 @@
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
-import { CODEX_MODEL_CATALOG, isConfigurableContextModelId, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, isConfigurableContextModelId, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
 
 export const PROVIDER_ID = CODEX_CHATGPT_PROVIDER_ID
 export const PROVIDER_NAME = 'Codex（ChatGPT 订阅）' as const
-
-const STANDARD_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'] as const
-const GPT_56_REASONING_EFFORTS = [...STANDARD_REASONING_EFFORTS, 'max'] as const
-
-const MODEL_REASONING = {
-  standard: STANDARD_REASONING_EFFORTS,
-  'gpt-5.6': GPT_56_REASONING_EFFORTS,
-} as const satisfies Record<(typeof CODEX_MODEL_CATALOG)[number]['reasoningProfile'], readonly string[]>
 
 export function listCodexModels(): LlmModelInfo[] {
   return CODEX_MODEL_CATALOG.map((entry) => ({
@@ -29,7 +21,7 @@ export function resolveCodexModel(model: string, preferences?: SubscriptionPrefe
   const configuredContextWindow = isConfigurableContextModelId(model)
     ? preferences?.status().contextWindowOverrides[model]
     : undefined
-  const efforts = MODEL_REASONING[entry.reasoningProfile]
+  const efforts = reasoningEffortsForModel(model)
   return {
     provider: PROVIDER_ID,
     id: model,

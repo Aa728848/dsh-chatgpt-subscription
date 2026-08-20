@@ -29,6 +29,7 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
       z.const(SEARCH_PROVIDER_CODEX),
     ]).default(DEFAULT_PREFERENCES.searchProvider),
     subagentModel: z.string().default(DEFAULT_PREFERENCES.subagentModel),
+    subagentReasoningEffort: z.string().default(DEFAULT_PREFERENCES.subagentReasoningEffort),
     contextWindowOverrides: z.object({
       'gpt-5.6-sol': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-sol']),
       'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
@@ -53,6 +54,7 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
       normalized.searchProvider = patch.searchProvider
     }
     if (patch.subagentModel !== undefined) normalized.subagentModel = patch.subagentModel
+    if (patch.subagentReasoningEffort !== undefined) normalized.subagentReasoningEffort = patch.subagentReasoningEffort
     if (patch.contextWindowOverrides !== undefined) {
       normalized.contextWindowOverrides = {
         ...this.scope.get().contextWindowOverrides,

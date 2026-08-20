@@ -45,6 +45,7 @@ describe('host routes', () => {
         quickQuotaVisible: false,
         searchProvider: 'dsh',
         subagentModel: 'gpt-5.6-sol',
+        subagentReasoningEffort: 'medium',
         contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
         writable: true,
       }),
@@ -52,6 +53,7 @@ describe('host routes', () => {
         quickQuotaVisible: patch.quickQuotaVisible ?? false,
         searchProvider: patch.searchProvider ?? 'dsh',
         subagentModel: patch.subagentModel ?? 'gpt-5.6-sol',
+        subagentReasoningEffort: patch.subagentReasoningEffort ?? 'medium',
         contextWindowOverrides: {
           'gpt-5.6-sol': patch.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000,
           'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
@@ -77,17 +79,25 @@ describe('host routes', () => {
     expect(statusText).toContain('"usedPercent":25')
     expect(statusText).toContain('"quickQuotaVisible":false')
     expect(statusText).toContain('"subagentModel":"gpt-5.6-sol"')
+    expect(statusText).toContain('"subagentReasoningEffort":"medium"')
 
     const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin },
-      body: JSON.stringify({ subagentModel: 'gpt-5.4-mini', contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } }),
+      body: JSON.stringify({ subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'xhigh', contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } }),
     })
     expect(updatedPreferences.status).toBe(200)
     expect(await updatedPreferences.json()).toMatchObject({
       ok: true,
-      value: { subagentModel: 'gpt-5.4-mini', contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } },
+      value: { subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'xhigh', contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } },
     })
+
+    const rejectedReasoning = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'max' }),
+    })
+    expect(rejectedReasoning.status).toBe(400)
 
     const rejectedContextModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
