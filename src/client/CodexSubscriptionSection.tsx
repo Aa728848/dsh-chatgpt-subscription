@@ -261,6 +261,7 @@ function InfoRow({ label, value }: { label: string; value: string }): React.JSX.
 export function storageLabel(storage: CredentialStorageDto | undefined, t: Translate): string {
   if (storage === undefined || !storage.available) return t('storageUnavailable')
   if (storage.kind === 'windows-dpapi') return t('storageWindows')
+  if (storage.kind === 'macos-keychain') return t('storageMacKeychain')
   if (storage.kind === 'linux-file') return t('storageLinuxFile')
   if (storage.kind === 'memory') return t('storageMemory')
   return t('storageUnavailable')
@@ -269,6 +270,7 @@ export function storageLabel(storage: CredentialStorageDto | undefined, t: Trans
 export function storageNotice(storage: CredentialStorageDto | undefined, t: Translate): string {
   if (storage === undefined || !storage.available) return t('securityUnavailable')
   if (storage.kind === 'windows-dpapi') return t('securityWindows')
+  if (storage.kind === 'macos-keychain') return t('securityMacKeychain')
   if (storage.kind === 'linux-file') return t('securityLinuxFile')
   if (storage.kind === 'memory') return t('securityMemory')
   return t('securityUnavailable')

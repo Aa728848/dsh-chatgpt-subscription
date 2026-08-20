@@ -7,6 +7,7 @@ export interface SanitizedAccountDto {
 
 export type CredentialStorageKind =
   | 'windows-dpapi'
+  | 'macos-keychain'
   | 'linux-file'
   | 'memory'
 

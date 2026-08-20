@@ -10,10 +10,12 @@ export declare const zh: {
     readonly expires: "令牌到期";
     readonly storage: "凭据存储";
     readonly storageWindows: "Windows DPAPI（当前用户加密）";
+    readonly storageMacKeychain: "macOS 钥匙串（Keychain 加密）";
     readonly storageLinuxFile: "Linux 用户私有文件（权限 0600）";
     readonly storageMemory: "仅 Host 内存（不持久化）";
     readonly storageUnavailable: "凭据存储不可用";
     readonly securityWindows: "令牌由 Host 使用 Windows CurrentUser DPAPI 加密，不会进入浏览器、settings.yaml 或日志。";
+    readonly securityMacKeychain: "令牌由 Host 存入 macOS 登录钥匙串（Keychain），在本机加密保存，不会进入浏览器、settings.yaml 或日志。";
     readonly securityLinuxFile: "令牌仅写入 Host 上当前 Linux 用户可读的 0600 文件，但不会额外加密；同 UID 进程、root、备份和磁盘快照仍可能读取。";
     readonly securityMemory: "令牌仅保留在 Host 内存中，Host 退出后丢失。";
     readonly securityUnavailable: "Host 无法安全访问凭据存储；请修复文件所有者或权限后重试。";
@@ -94,10 +96,12 @@ export declare const dictionaries: {
         readonly expires: "令牌到期";
         readonly storage: "凭据存储";
         readonly storageWindows: "Windows DPAPI（当前用户加密）";
+        readonly storageMacKeychain: "macOS 钥匙串（Keychain 加密）";
         readonly storageLinuxFile: "Linux 用户私有文件（权限 0600）";
         readonly storageMemory: "仅 Host 内存（不持久化）";
         readonly storageUnavailable: "凭据存储不可用";
         readonly securityWindows: "令牌由 Host 使用 Windows CurrentUser DPAPI 加密，不会进入浏览器、settings.yaml 或日志。";
+        readonly securityMacKeychain: "令牌由 Host 存入 macOS 登录钥匙串（Keychain），在本机加密保存，不会进入浏览器、settings.yaml 或日志。";
         readonly securityLinuxFile: "令牌仅写入 Host 上当前 Linux 用户可读的 0600 文件，但不会额外加密；同 UID 进程、root、备份和磁盘快照仍可能读取。";
         readonly securityMemory: "令牌仅保留在 Host 内存中，Host 退出后丢失。";
         readonly securityUnavailable: "Host 无法安全访问凭据存储；请修复文件所有者或权限后重试。";
@@ -164,6 +168,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"pending" | "title" | "intro" | "account" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storage" | "storageWindows" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "quickQuota" | "quickQuotaHint" | "quota" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "stale" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

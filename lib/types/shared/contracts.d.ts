@@ -4,7 +4,7 @@ export interface SanitizedAccountDto {
     accountIdSuffix: string | null;
     tokenExpiresAt: number;
 }
-export type CredentialStorageKind = 'windows-dpapi' | 'linux-file' | 'memory';
+export type CredentialStorageKind = 'windows-dpapi' | 'macos-keychain' | 'linux-file' | 'memory';
 export interface CredentialStorageDto {
     kind: CredentialStorageKind;
     encrypted: boolean;

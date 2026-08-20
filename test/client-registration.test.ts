@@ -10,10 +10,13 @@ describe('client registration', () => {
     const t = ((key: keyof typeof zh) => zh[key]) as never
     const linux = { kind: 'linux-file', encrypted: false, available: true } as const
     const windows = { kind: 'windows-dpapi', encrypted: true, available: true } as const
+    const macos = { kind: 'macos-keychain', encrypted: true, available: true } as const
 
     expect(storageLabel(linux, t)).toContain('0600')
     expect(storageNotice(linux, t)).toContain('不会额外加密')
     expect(storageLabel(windows, t)).toContain('DPAPI')
+    expect(storageLabel(macos, t)).toContain('钥匙串')
+    expect(storageNotice(macos, t)).toContain('钥匙串')
     expect(storageNotice({ ...linux, available: false }, t)).toContain('无法安全访问')
   })
   it('contributes one top-level Codex subscription settings section', () => {
