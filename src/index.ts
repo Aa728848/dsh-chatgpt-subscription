@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
@@ -15,6 +16,7 @@ import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
+import { installSubagentModelPreference } from './host/subagent-model-preference.ts'
 import { UsageService } from './host/usage-service.ts'
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader']
@@ -28,7 +30,7 @@ export function apply(ctx: Context): void {
     localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
     onGenerationFinished: () => usage.invalidate(),
   })
-  const adapter = new CodexChatGptAdapter(responses)
+  const adapter = new CodexChatGptAdapter(responses, preferences)
   ctx.effect(() => {
     const searchSwitcher = new SearchProviderSwitcher(ctx.loader)
     const applySearchPreference = (searchProvider = preferences.status().searchProvider): void => {
@@ -38,12 +40,14 @@ export function apply(ctx: Context): void {
     }
     const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
+    const disposeSubagentModelPreference = installSubagentModelPreference(ctx, preferences)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments))
     const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth))
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
     applySearchPreference()
     return () => {
       disposePreferenceWatch()
+      disposeSubagentModelPreference()
       disposeSearchProvider()
       disposeImageTool()
       disposeAdapter()

@@ -1,5 +1,7 @@
 export type CodexModelModality = 'text' | 'image'
 
+export const GPT_56_MAX_CONTEXT_WINDOW = 1_000_000
+
 export interface CodexModelCatalogEntry {
   id: string
   name: string
@@ -79,6 +81,22 @@ export const CODEX_MODEL_CATALOG = [
 export type CodexModelId = typeof CODEX_MODEL_CATALOG[number]['id']
 
 export const DEFAULT_CODEX_MODEL = CODEX_MODEL_CATALOG[0]
+
+export const CONFIGURABLE_CONTEXT_MODEL_IDS = [
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+] as const satisfies readonly CodexModelId[]
+
+export type ConfigurableContextModelId = typeof CONFIGURABLE_CONTEXT_MODEL_IDS[number]
+
+export function isCodexModelId(model: unknown): model is CodexModelId {
+  return typeof model === 'string' && CODEX_MODEL_CATALOG.some((entry) => entry.id === model)
+}
+
+export function isConfigurableContextModelId(model: unknown): model is ConfigurableContextModelId {
+  return typeof model === 'string' && CONFIGURABLE_CONTEXT_MODEL_IDS.some((id) => id === model)
+}
 
 export function resolveCodexCatalogEntry(model: string): CodexModelCatalogEntry {
   return CODEX_MODEL_CATALOG.find((entry) => entry.id === model) ?? DEFAULT_CODEX_MODEL

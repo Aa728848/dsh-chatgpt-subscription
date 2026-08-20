@@ -1,5 +1,6 @@
 import { settingsNamespace, type SettingsProvider, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
+import { GPT_56_MAX_CONTEXT_WINDOW } from '../shared/model-catalog.ts'
 import {
   DEFAULT_PREFERENCES,
   PREFERENCES_NAMESPACE,
@@ -27,6 +28,12 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
       z.const(SEARCH_PROVIDER_DSH),
       z.const(SEARCH_PROVIDER_CODEX),
     ]).default(DEFAULT_PREFERENCES.searchProvider),
+    subagentModel: z.string().default(DEFAULT_PREFERENCES.subagentModel),
+    contextWindowOverrides: z.object({
+      'gpt-5.6-sol': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-sol']),
+      'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
+      'gpt-5.6-luna': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-luna']),
+    }).default(DEFAULT_PREFERENCES.contextWindowOverrides),
   }))
   return new SettingsPreferenceStore(scope)
 }
@@ -44,6 +51,13 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
     if (patch.searchProvider !== undefined) {
       if (!isSearchProviderPreference(patch.searchProvider)) throw new PreferenceError('Unsupported search provider preference.')
       normalized.searchProvider = patch.searchProvider
+    }
+    if (patch.subagentModel !== undefined) normalized.subagentModel = patch.subagentModel
+    if (patch.contextWindowOverrides !== undefined) {
+      normalized.contextWindowOverrides = {
+        ...this.scope.get().contextWindowOverrides,
+        ...patch.contextWindowOverrides,
+      }
     }
     await this.scope.update(normalized)
     return this.status()

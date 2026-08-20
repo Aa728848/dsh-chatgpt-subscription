@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
-import { storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
+import { parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 
 describe('client registration', () => {
+  it('parses context capacities within the GPT-5.6 provider limit', () => {
+    expect(parseCapacity('128K')).toBe(128_000)
+    expect(parseCapacity('256,000')).toBe(256_000)
+    expect(parseCapacity('1M')).toBe(1_000_000)
+    expect(parseCapacity('1000001')).toBeNull()
+    expect(parseCapacity('128.5K')).toBe(128_500)
+    expect(parseCapacity('invalid')).toBeNull()
+  })
+
   it('presents the actual Host credential storage security boundary', () => {
     const t = ((key: keyof typeof zh) => zh[key]) as never
     const linux = { kind: 'linux-file', encrypted: false, available: true } as const

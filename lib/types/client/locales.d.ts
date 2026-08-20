@@ -42,6 +42,13 @@ export declare const zh: {
     readonly searchProviderHint: "选择 DSH Web 搜索工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 搜索来源。";
     readonly searchProviderDsh: "DSH 默认";
     readonly searchProviderCodex: "Codex 订阅";
+    readonly subagentModel: "子代理模型";
+    readonly subagentModelHint: "新启动的内置子代理使用此 ChatGPT 订阅模型；父会话的模型选择不受影响。";
+    readonly contextWindows: "GPT-5.6 上下文窗口";
+    readonly contextWindowsHint: "默认 272K；可选启用最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 1M、512K 等容量。";
+    readonly contextWindow: "上下文窗口";
+    readonly contextWindowInvalid: "上下文窗口必须是 1 到 1M 的整数，可使用 K 或 M 后缀。";
+    readonly tokens: "tokens";
     readonly quickQuota: "在输入框旁显示快捷用量";
     readonly quickQuotaHint: "仅在当前会话选中 codex-chatgpt 模型时显示。";
     readonly quota: "用量与限额";
@@ -128,6 +135,13 @@ export declare const dictionaries: {
         readonly searchProviderHint: "选择 DSH Web 搜索工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 搜索来源。";
         readonly searchProviderDsh: "DSH 默认";
         readonly searchProviderCodex: "Codex 订阅";
+        readonly subagentModel: "子代理模型";
+        readonly subagentModelHint: "新启动的内置子代理使用此 ChatGPT 订阅模型；父会话的模型选择不受影响。";
+        readonly contextWindows: "GPT-5.6 上下文窗口";
+        readonly contextWindowsHint: "默认 272K；可选启用最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 1M、512K 等容量。";
+        readonly contextWindow: "上下文窗口";
+        readonly contextWindowInvalid: "上下文窗口必须是 1 到 1M 的整数，可使用 K 或 M 后缀。";
+        readonly tokens: "tokens";
         readonly quickQuota: "在输入框旁显示快捷用量";
         readonly quickQuotaHint: "仅在当前会话选中 codex-chatgpt 模型时显示。";
         readonly quota: "用量与限额";
@@ -168,6 +182,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"tokens" | "title" | "intro" | "account" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storage" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "pending" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentModel" | "subagentModelHint" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "quickQuota" | "quickQuotaHint" | "quota" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "stale" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

@@ -10,6 +10,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { listCodexModels, PROVIDER_ID, PROVIDER_NAME, resolveCodexModel } from './model-catalog.ts'
 import { ResponsesClient } from './responses-client.ts'
+import type { SubscriptionPreferenceStore } from './preferences.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({
   mode: 'normal',
@@ -19,7 +20,10 @@ const RETRY_POLICY = resolveRetryPolicy({
 }, 'dsh-chatgpt-subscription.retry')
 
 export class CodexChatGptAdapter extends LlmAdapter {
-  constructor(private readonly client: ResponsesClient) {
+  constructor(
+    private readonly client: ResponsesClient,
+    private readonly preferences?: SubscriptionPreferenceStore,
+  ) {
     super()
   }
 
@@ -36,7 +40,7 @@ export class CodexChatGptAdapter extends LlmAdapter {
   }
 
   async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return resolveCodexModel(model)
+    return resolveCodexModel(model, this.preferences)
   }
 
   stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

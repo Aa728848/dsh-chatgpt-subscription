@@ -41,8 +41,24 @@ describe('host routes', () => {
       }),
     })
     const preferences: SubscriptionPreferenceStore = {
-      status: () => ({ quickQuotaVisible: false, searchProvider: 'dsh', writable: true }),
-      update: async (patch) => ({ quickQuotaVisible: patch.quickQuotaVisible ?? false, searchProvider: patch.searchProvider ?? 'dsh', writable: true }),
+      status: () => ({
+        quickQuotaVisible: false,
+        searchProvider: 'dsh',
+        subagentModel: 'gpt-5.6-sol',
+        contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        writable: true,
+      }),
+      update: async (patch) => ({
+        quickQuotaVisible: patch.quickQuotaVisible ?? false,
+        searchProvider: patch.searchProvider ?? 'dsh',
+        subagentModel: patch.subagentModel ?? 'gpt-5.6-sol',
+        contextWindowOverrides: {
+          'gpt-5.6-sol': patch.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000,
+          'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
+          'gpt-5.6-luna': patch.contextWindowOverrides?.['gpt-5.6-luna'] ?? 272_000,
+        },
+        writable: true,
+      }),
       watch: () => () => undefined,
     }
     registerRoutes(ctx as never, oauth, usage, preferences)
@@ -60,6 +76,25 @@ describe('host routes', () => {
     expect(statusText).not.toContain('account-secret-1234')
     expect(statusText).toContain('"usedPercent":25')
     expect(statusText).toContain('"quickQuotaVisible":false')
+    expect(statusText).toContain('"subagentModel":"gpt-5.6-sol"')
+
+    const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ subagentModel: 'gpt-5.4-mini', contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } }),
+    })
+    expect(updatedPreferences.status).toBe(200)
+    expect(await updatedPreferences.json()).toMatchObject({
+      ok: true,
+      value: { subagentModel: 'gpt-5.4-mini', contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } },
+    })
+
+    const rejectedContextModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ contextWindowOverrides: { 'gpt-5.4': 128_000 } }),
+    })
+    expect(rejectedContextModel.status).toBe(400)
 
     const rejected = await fetch(`${origin}${ROUTE_PREFIX}/logout`, {
       method: 'POST',

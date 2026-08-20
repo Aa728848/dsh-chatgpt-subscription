@@ -12,6 +12,7 @@ export declare function QuotaBar({ label, window, t }: {
     t: Translate;
 }): React.JSX.Element;
 export declare function windowLabel(minutes: number | null, t: Translate): string;
+export declare function parseCapacity(value: string): number | null;
 export declare function formatReset(seconds: number): string;
 export {};
 //# sourceMappingURL=CodexSubscriptionSection.d.ts.map

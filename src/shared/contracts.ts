@@ -35,15 +35,25 @@ export type OAuthStatusDto = Omit<PluginStatusDto, 'quota' | 'preferences'>
 
 export type SearchProviderPreference = 'dsh' | 'codex'
 
+export interface CodexContextWindowOverridesDto {
+  'gpt-5.6-sol': number
+  'gpt-5.6-terra': number
+  'gpt-5.6-luna': number
+}
+
 export interface SubscriptionPreferencesDto {
   quickQuotaVisible: boolean
   searchProvider: SearchProviderPreference
+  subagentModel: string
+  contextWindowOverrides: CodexContextWindowOverridesDto
   writable: boolean
 }
 
 export interface SubscriptionPreferencesUpdateDto {
   quickQuotaVisible?: boolean
   searchProvider?: SearchProviderPreference
+  subagentModel?: string
+  contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>
 }
 
 export interface QuotaWindowDto {

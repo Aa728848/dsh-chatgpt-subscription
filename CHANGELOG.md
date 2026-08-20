@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- 设置页新增内置子代理模型选择，新启动的 spawn/fork 子代理可统一路由到指定的 ChatGPT 订阅模型。
+- 设置页新增 GPT-5.6 Sol / Terra / Luna 有效上下文窗口配置：默认 272K，可选最高 1M，并动态影响 DSH 的模型解析、压缩阈值与溢出判断。
+
 ## 0.1.12 - 2026-08-20
 
 - 适配 DSH `0.1.0-rc.8`：peerDependencies / devDependencies 中全部 DSH 包范围从 `^0.1.0-rc.6` 提升至 `^0.1.0-rc.8`，并重新生成 package-lock.json。已在本机 rc.8 依赖集上验证：typecheck、55 项测试与 tsdown 构建全部通过，插件代码无需改动。

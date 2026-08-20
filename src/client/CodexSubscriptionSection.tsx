@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { CODEX_MODEL_CATALOG } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
@@ -19,6 +19,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [authUrl, setAuthUrl] = useState<string | null>(null)
   const [popupBlocked, setPopupBlocked] = useState(false)
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
+  const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
@@ -129,6 +130,17 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setStatus((current) => current === null ? current : { ...current, preferences })
   })
 
+  const updateContextWindow = async (model: (typeof CONFIGURABLE_CONTEXT_MODEL_IDS)[number]): Promise<void> => {
+    const current = status?.preferences.contextWindowOverrides[model] ?? resolveCodexCatalogEntry(model).contextWindow
+    const parsed = parseCapacity(contextDrafts[model] ?? String(current))
+    if (parsed === null) {
+      setError(t('contextWindowInvalid'))
+      return
+    }
+    await updatePreferences({ contextWindowOverrides: { [model]: parsed } })
+    setContextDrafts((drafts) => ({ ...drafts, [model]: String(parsed) }))
+  }
+
   const logout = async (): Promise<void> => run('logout', async () => {
     await apiRef.current.logout()
     eventSourceRef.current?.close()
@@ -214,6 +226,31 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
               <span>{t('searchProviderCodex')}</span>
             </label>
           </div>
+        </div>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('subagentModel')}</strong>
+            <p className="dsh-codex-muted">{t('subagentModelHint')}</p>
+          </div>
+          <select className="dsh-codex-select" aria-label={t('subagentModel')} value={status?.preferences.subagentModel ?? CODEX_MODEL_CATALOG[0].id} disabled={busy !== null} onChange={(event) => void updatePreferences({ subagentModel: event.currentTarget.value })}>
+            {CODEX_MODEL_CATALOG.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+          </select>
+        </div>
+        <div className="dsh-codex-context-settings">
+          <div>
+            <strong>{t('contextWindows')}</strong>
+            <p className="dsh-codex-muted">{t('contextWindowsHint')}</p>
+          </div>
+          {CONFIGURABLE_CONTEXT_MODEL_IDS.map((model) => {
+            const fallback = status?.preferences.contextWindowOverrides[model] ?? resolveCodexCatalogEntry(model).contextWindow
+            return <label className="dsh-codex-context-row" key={model}>
+              <span>{resolveCodexCatalogEntry(model).name}</span>
+              <span className="dsh-codex-capacity-control">
+                <input type="text" inputMode="numeric" value={contextDrafts[model] ?? formatCapacity(fallback)} disabled={busy !== null} aria-label={resolveCodexCatalogEntry(model).name + ' ' + t('contextWindow')} onChange={(event) => setContextDrafts((drafts) => ({ ...drafts, [model]: event.currentTarget.value }))} onBlur={() => void updateContextWindow(model)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+                <small>{t('tokens')}</small>
+              </span>
+            </label>
+          })}
         </div>
         <label className="dsh-codex-check">
           <input type="checkbox" checked={status?.preferences.quickQuotaVisible === true} disabled={busy !== null} onChange={(event) => updatePreferences({ quickQuotaVisible: event.currentTarget.checked })} />
@@ -316,6 +353,20 @@ export function windowLabel(minutes: number | null, t: Translate): string {
       ? [minutes / 60, 'hour']
       : [Math.round(minutes), 'minute']
   return `${new Intl.NumberFormat(undefined, { style: 'unit', unit, unitDisplay: 'long' }).format(value)} ${t('limitWindow')}`
+}
+
+export function parseCapacity(value: string): number | null {
+  const normalized = value.trim().toLowerCase().replace(/[,_\s]/g, '')
+  const matched = normalized.match(/^(\d+(?:\.\d+)?)(k|m)?$/)
+  if (matched === null) return null
+  const multiplier = matched[2] === 'm' ? 1_000_000 : matched[2] === 'k' ? 1_000 : 1
+  const parsed = Number(matched[1]) * multiplier
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= GPT_56_MAX_CONTEXT_WINDOW ? parsed : null
+}
+
+function formatCapacity(value: number): string {
+  if (value % 1_000 === 0) return `${value / 1_000}K`
+  return String(value)
 }
 
 function formatPercent(value: number): string {

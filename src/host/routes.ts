@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
@@ -191,6 +192,10 @@ function field(value: Record<string, unknown>, name: string): string | null {
   return typeof candidate === 'string' && candidate !== '' ? candidate : null
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function readPreferencesUpdate(value: Record<string, unknown>): SubscriptionPreferencesUpdateDto {
   const patch: SubscriptionPreferencesUpdateDto = {}
   if ('quickQuotaVisible' in value) {
@@ -200,6 +205,22 @@ function readPreferencesUpdate(value: Record<string, unknown>): SubscriptionPref
   if ('searchProvider' in value) {
     if (value.searchProvider !== 'dsh' && value.searchProvider !== 'codex') throw new PreferenceError('searchProvider must be dsh or codex.')
     patch.searchProvider = value.searchProvider
+  }
+  if ('subagentModel' in value) {
+    if (!isCodexModelId(value.subagentModel)) throw new PreferenceError('subagentModel must be an available Codex model.')
+    patch.subagentModel = value.subagentModel
+  }
+  if ('contextWindowOverrides' in value) {
+    if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')
+    const overrides: NonNullable<SubscriptionPreferencesUpdateDto['contextWindowOverrides']> = {}
+    for (const [model, contextWindow] of Object.entries(value.contextWindowOverrides)) {
+      if (!isConfigurableContextModelId(model)) throw new PreferenceError('Only GPT-5.6 context windows can be changed.')
+      if (!Number.isSafeInteger(contextWindow) || (contextWindow as number) < 1 || (contextWindow as number) > GPT_56_MAX_CONTEXT_WINDOW) {
+        throw new PreferenceError(`contextWindowOverrides.${model} must be a positive integer no greater than the provider limit.`)
+      }
+      overrides[model] = contextWindow as number
+    }
+    patch.contextWindowOverrides = overrides
   }
   return patch
 }
