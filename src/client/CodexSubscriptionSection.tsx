@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SubagentModelCatalogDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
@@ -14,7 +14,6 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const apiRef = useRef(new SubscriptionApi())
   const eventSourceRef = useRef<EventSource | null>(null)
   const [status, setStatus] = useState<PluginStatusDto | null>(null)
-  const [modelCatalog, setModelCatalog] = useState<SubagentModelCatalogDto | null>(null)
   const [busy, setBusy] = useState<BusyAction>(null)
   const [error, setError] = useState<string | null>(null)
   const [authUrl, setAuthUrl] = useState<string | null>(null)
@@ -25,9 +24,8 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
     try {
-      const [next, models] = await Promise.all([apiRef.current.status(), apiRef.current.models()])
+      const next = await apiRef.current.status()
       setStatus(next)
-      setModelCatalog(models)
       if (next.error !== undefined) setError(next.error.message)
     } catch (cause) {
       if (!quiet) setError(messageOf(cause))
@@ -229,82 +227,6 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             </label>
           </div>
         </div>
-        {(() => {
-          const selectedProvider = modelCatalog?.providers.find((provider) => provider.id === status?.preferences.subagentProvider) ?? modelCatalog?.providers[0]
-          const selectedModel = selectedProvider?.models.find((model) => model.id === status?.preferences.subagentModel) ?? selectedProvider?.models[0]
-          const reasoning = selectedModel?.reasoning
-          const selectedEffort = status?.preferences.subagentReasoningEffort ?? reasoning?.defaultEffort ?? reasoning?.efforts[0]?.id ?? ''
-          const savedContext = status?.preferences.subagentContextWindow ?? selectedModel?.contextWindow
-          const contextDraft = contextDrafts.subagent
-          const parsedContextValue = contextDraft === undefined ? savedContext ?? null : parsePositiveCapacity(contextDraft)
-          const parsedContext = parsedContextValue !== null && (selectedModel?.maxContextWindow === undefined || parsedContextValue <= selectedModel.maxContextWindow)
-            ? parsedContextValue
-            : null
-          const contextDirty = contextDraft !== undefined && parsedContext !== savedContext
-          return <>
-            <div className="dsh-codex-pref-row">
-              <div>
-                <strong>{t('subagentProvider')}</strong>
-                <p className="dsh-codex-muted">{t('subagentProviderHint')}</p>
-              </div>
-              <select className="dsh-codex-select" aria-label={t('subagentProvider')} value={selectedProvider?.id ?? ''} disabled={busy !== null || selectedProvider === undefined} onChange={(event) => {
-                const provider = modelCatalog?.providers.find((entry) => entry.id === event.currentTarget.value)
-                const model = provider?.models[0]
-                if (provider === undefined || model === undefined) return
-                const effort = model.reasoning?.defaultEffort ?? model.reasoning?.efforts[0]?.id ?? null
-                void updatePreferences({ subagentProvider: provider.id, subagentModel: model.id, subagentReasoningEffort: effort, subagentContextWindow: model.contextWindow ?? 1 })
-                setContextDrafts((drafts) => ({ ...drafts, subagent: formatCapacity(model.contextWindow ?? 1) }))
-              }}>
-                {modelCatalog?.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
-              </select>
-            </div>
-            <div className="dsh-codex-pref-row">
-              <div>
-                <strong>{t('subagentModel')}</strong>
-                <p className="dsh-codex-muted">{t('subagentModelHint')}</p>
-              </div>
-              <select className="dsh-codex-select" aria-label={t('subagentModel')} value={selectedModel?.id ?? ''} disabled={busy !== null || selectedModel === undefined} onChange={(event) => {
-                const model = selectedProvider?.models.find((entry) => entry.id === event.currentTarget.value)
-                if (selectedProvider === undefined || model === undefined) return
-                const effort = model.reasoning?.defaultEffort ?? model.reasoning?.efforts[0]?.id ?? null
-                void updatePreferences({ subagentProvider: selectedProvider.id, subagentModel: model.id, subagentReasoningEffort: effort, subagentContextWindow: model.contextWindow ?? 1 })
-                setContextDrafts((drafts) => ({ ...drafts, subagent: formatCapacity(model.contextWindow ?? 1) }))
-              }}>
-                {selectedProvider?.models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
-              </select>
-            </div>
-            <div className="dsh-codex-pref-row">
-              <div>
-                <strong>{t('subagentReasoningEffort')}</strong>
-                <p className="dsh-codex-muted">{t('subagentReasoningEffortHint')}</p>
-              </div>
-              {reasoning !== undefined && reasoning.efforts.length > 0
-                ? <select className="dsh-codex-select" aria-label={t('subagentReasoningEffort')} value={selectedEffort} disabled={busy !== null} onChange={(event) => void updatePreferences({ subagentReasoningEffort: event.currentTarget.value })}>
-                    {reasoning.efforts.map((effort) => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
-                  </select>
-                : <span className="dsh-codex-muted">{t('providerDefault')}</span>}
-            </div>
-            {selectedModel?.contextWindow !== undefined ? <div className="dsh-codex-context-settings">
-              <div>
-                <strong>{selectedModel.name} · {t('contextWindow')}</strong>
-                <p className="dsh-codex-muted">{t('selectedModelContextHint')}</p>
-              </div>
-              <div className="dsh-codex-context-row">
-                <label htmlFor="dsh-subagent-context">{t('effectiveContextWindow')}</label>
-                <span className="dsh-codex-capacity-control">
-                  <input id="dsh-subagent-context" type="text" inputMode="numeric" value={contextDraft ?? formatCapacity(savedContext ?? selectedModel.contextWindow)} disabled={busy !== null} onChange={(event) => {
-                    const value = event.currentTarget.value
-                    setContextDrafts((drafts) => ({ ...drafts, subagent: value }))
-                  }} />
-                  <small>{t('tokens')}</small>
-                  <button className="dsh-codex-context-save" type="button" disabled={busy !== null || !contextDirty || parsedContext === null} onClick={() => {
-                    if (parsedContext !== null) void updatePreferences({ subagentContextWindow: parsedContext })
-                  }}>{t('save')}</button>
-                </span>
-              </div>
-            </div> : null}
-          </>
-        })()}
         <div className="dsh-codex-context-settings">
           <div>
             <strong>{t('contextWindows')}</strong>

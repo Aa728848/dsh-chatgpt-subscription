@@ -18,9 +18,10 @@ import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
 import { SubagentContextAdapter } from './host/subagent-context-adapter.ts'
 import { installSubagentModelPreference } from './host/subagent-model-preference.ts'
+import { installSubagentPolicy } from './host/subagent-policy.ts'
 import { UsageService } from './host/usage-service.ts'
 
-export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader']
+export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader', 'agents']
 
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
@@ -47,12 +48,14 @@ export function apply(ctx: Context): void {
     })
     const disposeSubagentContextAdapter = ctx.llm.registerAdapter([SubagentContextAdapter.provider], subagentContextAdapter)
     const disposeSubagentModelPreference = installSubagentModelPreference(ctx, preferences)
+    const disposeSubagentPolicy = installSubagentPolicy(ctx, preferences)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments))
     const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth))
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
     applySearchPreference()
     return () => {
       disposePreferenceWatch()
+      disposeSubagentPolicy()
       disposeSubagentModelPreference()
       disposeSearchProvider()
       disposeImageTool()

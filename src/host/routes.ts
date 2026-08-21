@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubagentModelCatalogDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { GPT_56_MAX_CONTEXT_WINDOW, isConfigurableContextModelId } from '../shared/model-catalog.ts'
+import { SUBAGENT_MAX_DEPTH_LIMIT } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
@@ -226,6 +227,14 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
   if ('subagentContextWindow' in value) {
     if (!Number.isSafeInteger(value.subagentContextWindow) || (value.subagentContextWindow as number) < 1) throw new PreferenceError('subagentContextWindow must be a positive integer.')
     patch.subagentContextWindow = value.subagentContextWindow as number
+  }
+  if ('subagentMaxDepth' in value) {
+    if (!Number.isSafeInteger(value.subagentMaxDepth) || (value.subagentMaxDepth as number) < 0 || (value.subagentMaxDepth as number) > SUBAGENT_MAX_DEPTH_LIMIT) throw new PreferenceError(`subagentMaxDepth must be an integer from 0 to ${SUBAGENT_MAX_DEPTH_LIMIT}.`)
+    patch.subagentMaxDepth = value.subagentMaxDepth as number
+  }
+  if ('subagentMaxAgents' in value) {
+    if (!Number.isSafeInteger(value.subagentMaxAgents) || (value.subagentMaxAgents as number) < 1) throw new PreferenceError('subagentMaxAgents must be a positive integer.')
+    patch.subagentMaxAgents = value.subagentMaxAgents as number
   }
   if ('contextWindowOverrides' in value) {
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')

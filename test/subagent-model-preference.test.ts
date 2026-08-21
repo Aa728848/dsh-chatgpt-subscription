@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { installSubagentModelPreference } from '../src/host/subagent-model-preference.ts'
 
 describe('subagent model preference', () => {
-  it('routes only delegated agents through the configured subscription model', async () => {
+  it('routes every delegated agent through the configured global model', async () => {
     let listener: ((payload: never, next: () => Promise<Record<string, unknown>>) => Promise<Record<string, unknown>>) | undefined
     const dispose = () => undefined
     const ctx = {
@@ -25,7 +25,12 @@ describe('subagent model preference', () => {
       reasoningEffort: 'high',
     })
     const dshDefault = { provider: 'deepseek', model: 'deepseek-chat', maxTokens: 8192 }
-    await expect(listener!({ agent: { session: { header: { origin: 'subagent' } } } } as never, async () => dshDefault)).resolves.toBe(dshDefault)
+    await expect(listener!({ agent: { session: { header: { origin: 'subagent' } } } } as never, async () => dshDefault)).resolves.toEqual({
+      ...dshDefault,
+      provider: 'dsh-subagent-model-override',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+    })
     await expect(listener!({ agent: { session: { header: {} } } } as never, async () => codexBase)).resolves.toBe(codexBase)
   })
 })

@@ -1,6 +1,6 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
   "author": {
     "name": "eddyskywalker",
@@ -74,6 +74,7 @@
     "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-settings": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-web": "^0.1.0-rc.8",
     "@deepseek-ai/schemastery": "^3.18.1",
@@ -95,6 +96,7 @@
     "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-settings": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-web": "^0.1.0-rc.8",
     "@deepseek-ai/schemastery": "^3.18.1",

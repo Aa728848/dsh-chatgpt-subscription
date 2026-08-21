@@ -63,6 +63,8 @@ export interface SubscriptionPreferencesDto {
     subagentModel: string;
     subagentReasoningEffort: string | null;
     subagentContextWindow: number;
+    subagentMaxDepth: number;
+    subagentMaxAgents: number;
     contextWindowOverrides: CodexContextWindowOverridesDto;
     writable: boolean;
 }
@@ -73,6 +75,8 @@ export interface SubscriptionPreferencesUpdateDto {
     subagentModel?: string;
     subagentReasoningEffort?: string | null;
     subagentContextWindow?: number;
+    subagentMaxDepth?: number;
+    subagentMaxAgents?: number;
     contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>;
 }
 export interface QuotaWindowDto {

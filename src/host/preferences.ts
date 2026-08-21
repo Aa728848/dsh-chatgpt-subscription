@@ -6,6 +6,7 @@ import {
   PREFERENCES_NAMESPACE,
   SEARCH_PROVIDER_CODEX,
   SEARCH_PROVIDER_DSH,
+  SUBAGENT_MAX_DEPTH_LIMIT,
   isSearchProviderPreference,
 } from '../shared/preferences.ts'
 import type {
@@ -32,6 +33,8 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
     subagentModel: z.string().default(DEFAULT_PREFERENCES.subagentModel),
     subagentReasoningEffort: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.subagentReasoningEffort),
     subagentContextWindow: z.number().step(1).min(1).default(DEFAULT_PREFERENCES.subagentContextWindow),
+    subagentMaxDepth: z.number().step(1).min(0).max(SUBAGENT_MAX_DEPTH_LIMIT).default(DEFAULT_PREFERENCES.subagentMaxDepth),
+    subagentMaxAgents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_PREFERENCES.subagentMaxAgents),
     contextWindowOverrides: z.object({
       'gpt-5.6-sol': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-sol']),
       'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
@@ -59,6 +62,8 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
     if (patch.subagentModel !== undefined) normalized.subagentModel = patch.subagentModel
     if (patch.subagentReasoningEffort !== undefined) normalized.subagentReasoningEffort = patch.subagentReasoningEffort
     if (patch.subagentContextWindow !== undefined) normalized.subagentContextWindow = patch.subagentContextWindow
+    if (patch.subagentMaxDepth !== undefined) normalized.subagentMaxDepth = patch.subagentMaxDepth
+    if (patch.subagentMaxAgents !== undefined) normalized.subagentMaxAgents = patch.subagentMaxAgents
     if (patch.contextWindowOverrides !== undefined) {
       normalized.contextWindowOverrides = {
         ...this.scope.get().contextWindowOverrides,

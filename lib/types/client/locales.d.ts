@@ -38,6 +38,18 @@ export declare const zh: {
     readonly latency: "最近延迟";
     readonly models: "可用模型";
     readonly enhancements: "增强功能";
+    readonly subagentSettingsNav: "子代理";
+    readonly subagentSettingsTitle: "子代理设置";
+    readonly subagentSettingsIntro: "全局配置 DSH 内置子代理。模型、思考深度、上下文预算和运行限制适用于所有父 Agent，不受父 Agent 当前 Provider 或模型影响。";
+    readonly subagentModelGroup: "模型与上下文";
+    readonly subagentLimitsGroup: "运行限制";
+    readonly subagentMaxDepth: "最大嵌套深度";
+    readonly subagentMaxDepthHint: "限制从顶层 Agent 开始的子代理层级（0–3）；0 禁止创建子代理，1 仅允许直接子代理。";
+    readonly subagentMaxAgents: "子代理数量上限";
+    readonly subagentMaxAgentsHint: "限制每个父 Agent 子树中同时处于活动或启动中的子代理总数。";
+    readonly subagentLimitsNotice: "限制会立即应用于新的委派，不会中断已经运行的子代理。数量上限统计当前父 Agent 的全部活动后代。";
+    readonly levels: "层";
+    readonly agents: "个";
     readonly searchProvider: "搜索来源";
     readonly searchProviderHint: "选择 DSH Web 搜索工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 搜索来源。";
     readonly searchProviderDsh: "DSH 默认";
@@ -45,7 +57,7 @@ export declare const zh: {
     readonly subagentProvider: "子代理 Provider";
     readonly subagentProviderHint: "选择 DSH 当前已接入且可用的模型提供方。";
     readonly subagentModel: "子代理模型";
-    readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；模型可来自任意已接入 Provider。";
+    readonly subagentModelHint: "全局应用于所有 DSH 内置子代理；模型可来自任意已接入 Provider。";
     readonly subagentReasoningEffort: "子代理思考深度";
     readonly subagentReasoningEffortHint: "选项来自所选模型实际公开的 reasoning effort 能力。";
     readonly providerDefault: "使用 Provider 默认值";
@@ -146,6 +158,18 @@ export declare const dictionaries: {
         readonly latency: "最近延迟";
         readonly models: "可用模型";
         readonly enhancements: "增强功能";
+        readonly subagentSettingsNav: "子代理";
+        readonly subagentSettingsTitle: "子代理设置";
+        readonly subagentSettingsIntro: "全局配置 DSH 内置子代理。模型、思考深度、上下文预算和运行限制适用于所有父 Agent，不受父 Agent 当前 Provider 或模型影响。";
+        readonly subagentModelGroup: "模型与上下文";
+        readonly subagentLimitsGroup: "运行限制";
+        readonly subagentMaxDepth: "最大嵌套深度";
+        readonly subagentMaxDepthHint: "限制从顶层 Agent 开始的子代理层级（0–3）；0 禁止创建子代理，1 仅允许直接子代理。";
+        readonly subagentMaxAgents: "子代理数量上限";
+        readonly subagentMaxAgentsHint: "限制每个父 Agent 子树中同时处于活动或启动中的子代理总数。";
+        readonly subagentLimitsNotice: "限制会立即应用于新的委派，不会中断已经运行的子代理。数量上限统计当前父 Agent 的全部活动后代。";
+        readonly levels: "层";
+        readonly agents: "个";
         readonly searchProvider: "搜索来源";
         readonly searchProviderHint: "选择 DSH Web 搜索工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 搜索来源。";
         readonly searchProviderDsh: "DSH 默认";
@@ -153,7 +177,7 @@ export declare const dictionaries: {
         readonly subagentProvider: "子代理 Provider";
         readonly subagentProviderHint: "选择 DSH 当前已接入且可用的模型提供方。";
         readonly subagentModel: "子代理模型";
-        readonly subagentModelHint: "仅当父 Agent 使用 Codex 订阅模型时生效；模型可来自任意已接入 Provider。";
+        readonly subagentModelHint: "全局应用于所有 DSH 内置子代理；模型可来自任意已接入 Provider。";
         readonly subagentReasoningEffort: "子代理思考深度";
         readonly subagentReasoningEffortHint: "选项来自所选模型实际公开的 reasoning effort 能力。";
         readonly providerDefault: "使用 Provider 默认值";
@@ -212,6 +236,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentProvider" | "subagentProviderHint" | "subagentModel" | "subagentModelHint" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "providerDefault" | "effectiveContextWindow" | "selectedModelContextHint" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"tokens" | "title" | "intro" | "account" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storage" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "pending" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "subagentSettingsNav" | "subagentSettingsTitle" | "subagentSettingsIntro" | "subagentModelGroup" | "subagentLimitsGroup" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentMaxAgents" | "subagentMaxAgentsHint" | "subagentLimitsNotice" | "levels" | "agents" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentProvider" | "subagentProviderHint" | "subagentModel" | "subagentModelHint" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "providerDefault" | "effectiveContextWindow" | "selectedModelContextHint" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quota" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "stale" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

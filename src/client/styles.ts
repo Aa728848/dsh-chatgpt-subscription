@@ -41,6 +41,7 @@ const CSS = `
 .dsh-codex-context-row{align-items:center;display:flex;font-size:12px;gap:14px;justify-content:space-between}
 .dsh-codex-capacity-control{align-items:center;display:flex;gap:7px}
 .dsh-codex-capacity-control input{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;text-align:right;width:90px}
+.dsh-codex-capacity-control input[type=number]{width:110px}
 .dsh-codex-capacity-control small{color:var(--dsw-alias-label-tertiary);font-size:11px;width:42px}
 .dsh-codex-context-save{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit;font-size:12px;line-height:1;padding:8px 10px;white-space:nowrap}
 .dsh-codex-context-save:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}

@@ -39,7 +39,8 @@
 **设置页**
 
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
-- 当父 Agent 使用本插件的 `codex-chatgpt` 模型时，子代理可选择 DSH 当前接入的任意 Provider/模型（如 DeepSeek V4 Flash）；思考深度来自所选模型公开能力，上下文在选定模型后展开配置；非 Codex 父 Agent完全沿用 DSH 默认子代理继承设计；
+- 独立的“子代理”设置页可全局选择 DSH 当前接入的任意 Provider/模型（如 DeepSeek V4 Flash）；思考深度来自所选模型公开能力，上下文在选定模型后展开配置，并适用于所有 DSH 内置子代理，不受父 Agent 当前 Provider/模型影响；
+- 可全局设置 0–3 的最大嵌套深度与每个父 Agent 子树的活动子代理数量上限；限制即时作用于新委派，不中断已运行的子代理；
 - 5.6 Sol / Terra / Luna 默认使用 272K 有效上下文，可在设置中选择最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 
@@ -110,7 +111,7 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 3. 完成 ChatGPT 登录；
 4. 执行 **测试连接**。
 
-DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。在同一设置页的“增强功能”中，还可配置新子代理模型和 GPT-5.6 系列的有效上下文窗口。子代理模型设置适用于 DSH 内置的 spawn/fork 子代理（其会话标记为 `origin: subagent`）；外部 ACP/Codex CLI 等 provider-managed 子代理不经过本插件路由。
+DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。GPT-5.6 系列的有效上下文窗口仍在“Codex 订阅 → 增强功能”中配置；子代理模型、思考深度、子代理上下文、最大嵌套深度和数量上限则统一位于独立的 **“子代理”** 设置页。模型路由适用于会话标记为 `origin: subagent` 的 DSH 内置子代理；运行限制在内置 spawn/fork 及已启用的原生子代理委派工具入口统一执行。
 
 卸载前建议先在设置页点击 **“注销”**，它会删除当前平台的凭据和 Host 内存中的额度缓存。
 

@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
+import { SubagentSettingsSection, parseNonNegativeInteger, parsePositiveInteger } from '../src/client/SubagentSettingsSection.tsx'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 
@@ -15,6 +16,16 @@ describe('client registration', () => {
     expect(parseCapacity('1000001')).toBeNull()
     expect(parseCapacity('128.5K')).toBe(128_500)
     expect(parseCapacity('invalid')).toBeNull()
+  })
+
+  it('validates subagent limits as safe integers', () => {
+    expect(parseNonNegativeInteger('0')).toBe(0)
+    expect(parseNonNegativeInteger('3')).toBe(3)
+    expect(parseNonNegativeInteger('-1')).toBeNull()
+    expect(parseNonNegativeInteger('4')).toBe(4)
+    expect(parsePositiveInteger('8')).toBe(8)
+    expect(parsePositiveInteger('0')).toBeNull()
+    expect(parsePositiveInteger('1.5')).toBeNull()
   })
 
   it('keeps context options rendered while typing a numeric draft', async () => {
@@ -35,6 +46,8 @@ describe('client registration', () => {
         subagentModel: 'gpt-5.6-sol',
         subagentReasoningEffort: 'medium',
         subagentContextWindow: 272_000,
+        subagentMaxDepth: 3,
+        subagentMaxAgents: 8,
         contextWindowOverrides: { 'gpt-5.6-sol': contextWindow, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
         writable: true,
       }
@@ -62,13 +75,13 @@ describe('client registration', () => {
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
-      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(4)
+      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(3)
       const save = container.querySelector<HTMLButtonElement>('button[data-model="gpt-5.6-sol"]')
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)
       await act(async () => save?.click())
-      expect(fetchMock).toHaveBeenCalledTimes(3)
-      expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({ contextWindowOverrides: { 'gpt-5.6-sol': 5 } })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ contextWindowOverrides: { 'gpt-5.6-sol': 5 } })
       expect(save?.disabled).toBe(true)
     } finally {
       await act(async () => root.unmount())
@@ -91,7 +104,54 @@ describe('client registration', () => {
     expect(storageNotice(macos, t)).toContain('钥匙串')
     expect(storageNotice({ ...linux, available: false }, t)).toContain('无法安全访问')
   })
-  it('contributes one top-level Codex subscription settings section', () => {
+  it('renders global subagent model and limit controls on their own page', async () => {
+    const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/models')) return Response.json({ ok: true, value: {
+        providers: [{ id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'V4 Flash', contextWindow: 128_000, reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } }] }],
+        failures: [],
+      } })
+      return Response.json({ ok: true, value: {
+        authenticated: false,
+        account: null,
+        storage: { kind: 'memory', encrypted: false, available: true },
+        login: { active: false, loginId: null, expiresAt: null },
+        quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
+        preferences: {
+          quickQuotaVisible: false,
+          searchProvider: 'dsh',
+          subagentProvider: 'deepseek-official',
+          subagentModel: 'deepseek-v4-flash',
+          subagentReasoningEffort: 'high',
+          subagentContextWindow: 128_000,
+          subagentMaxDepth: 3,
+          subagentMaxAgents: 8,
+          contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+          writable: true,
+        },
+      } })
+    }) as typeof fetch
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const t = ((key: keyof typeof zh) => zh[key]) as never
+    try {
+      await act(async () => root.render(createElement(SubagentSettingsSection, { t } as never)))
+      expect(container.querySelector('#dsh-subagent-title')?.textContent).toBe('子代理设置')
+      expect(container.querySelector<HTMLSelectElement>('select[aria-label="子代理 Provider"]')?.value).toBe('deepseek-official')
+      expect(container.querySelector<HTMLInputElement>('#dsh-subagent-depth')?.value).toBe('3')
+      expect(container.querySelector<HTMLInputElement>('#dsh-subagent-agents')?.value).toBe('8')
+    } finally {
+      await act(async () => root.unmount())
+      container.remove()
+      globalThis.fetch = originalFetch
+      globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment
+    }
+  })
+
+  it('contributes separate top-level Subagents and Codex settings sections', () => {
     const injectedSlots: string[] = []
     const registrations: Array<Record<string, unknown>> = []
     const disposers: Array<() => void> = []
@@ -102,6 +162,7 @@ describe('client registration', () => {
       },
       locale: {
         register() { return () => undefined },
+        bind() { return (key: keyof typeof zh) => zh[key] },
       },
       slots: {
         inject(name: string, callback: () => () => void) {
@@ -117,12 +178,11 @@ describe('client registration', () => {
 
     apply(ctx as never)
 
-    expect(injectedSlots).toEqual(['settings.section', 'conversation.input.right', 'tool.call.toolview'])
-    expect(registrations.find((registration) => registration.name === 'settings.section')).toMatchObject({
-      name: 'settings.section',
-      id: 'codex-subscription',
-      label: 'Codex 订阅',
-    })
+    expect(injectedSlots).toEqual(['settings.section', 'settings.section', 'conversation.input.right', 'tool.call.toolview'])
+    expect(registrations.filter((registration) => registration.name === 'settings.section')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'settings.section', id: 'subagents', order: 30 }),
+      expect.objectContaining({ name: 'settings.section', id: 'codex-subscription', order: 45 }),
+    ]))
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
       key: CODEX_IMAGE_TOOL_NAME,
     })
