@@ -63,4 +63,17 @@ describe('CodexChatGptAdapter', () => {
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.6-sol')).resolves.toMatchObject({ context: { contextWindow: 1_000_000 } })
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.4')).resolves.toMatchObject({ context: { contextWindow: 272_000 } })
   })
+
+  it('binds one model-resolution generation to its eventual stream via prepareCall', async () => {
+    const client = { stream: () => { throw new Error('unused') } } as never
+    const adapter = new CodexChatGptAdapter(client)
+    const prepared = await adapter.prepareCall(PROVIDER_ID, 'gpt-5.6-luna')
+    expect(prepared.model).toMatchObject({
+      provider: 'codex-chatgpt',
+      id: 'gpt-5.6-luna',
+      inputModalities: ['text', 'image'],
+      reasoning: { defaultEffort: 'medium' },
+    })
+    expect(typeof prepared.stream).toBe('function')
+  })
 })

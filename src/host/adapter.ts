@@ -5,6 +5,7 @@ import {
   type LlmModelInfo,
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
+  type PreparedAdapterCall,
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
@@ -39,8 +40,15 @@ export class CodexChatGptAdapter extends LlmAdapter {
     return listCodexModels()
   }
 
-  async resolveModel(_provider: string, model: string): Promise<LlmResolvedModelInfo> {
+  async resolveModel(_provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     return resolveCodexModel(model, this.preferences)
+  }
+
+  async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    return {
+      model: await this.resolveModel(provider, model, signal),
+      stream: (options) => this.stream(options),
+    }
   }
 
   stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
