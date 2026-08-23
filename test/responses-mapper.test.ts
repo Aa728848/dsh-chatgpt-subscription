@@ -58,6 +58,68 @@ describe('Responses payload mapping', () => {
     ])
   })
 
+  it('normalizes overlong replayed call ids and preserves matching outputs without collisions', async () => {
+    const sharedPrefix = 'call_' + 'a'.repeat(77)
+    const longCallIds = [`${sharedPrefix}x`, `${sharedPrefix}y`]
+    const messages = longCallIds.flatMap((callId, index) => [
+      {
+        id: `assistant-${index}`, role: 'assistant',
+        source: {
+          kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol',
+          replayState: {
+            response: {
+              outputItems: [{ type: 'function_call', call_id: callId, name: 'read_file', arguments: '{}' }],
+            },
+          },
+        },
+        content: [{ type: 'tool-call', id: callId, name: 'read_file', arguments: '{}' }],
+      },
+      {
+        id: `result-${index}`, role: 'user', source: { kind: 'tool', callId },
+        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `result-${index}` }] }],
+      },
+    ])
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages,
+    } as unknown as GenerateOptions
+
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const calls = payload.input.filter((item) => item.type === 'function_call')
+    const outputs = payload.input.filter((item) => item.type === 'function_call_output')
+    const normalizedIds = calls.map((item) => String(item.call_id))
+
+    expect(normalizedIds).toHaveLength(2)
+    expect(new Set(normalizedIds).size).toBe(2)
+    expect(normalizedIds.every((callId) => callId.length <= 64)).toBe(true)
+    expect(normalizedIds.every((callId) => /^dsh_[a-f0-9]{60}$/.test(callId))).toBe(true)
+    expect(outputs.map((item) => item.call_id)).toEqual(normalizedIds)
+  })
+
+  it('normalizes an overlong tool call restored from empty replay state', async () => {
+    const longCallId = 'call_' + 'z'.repeat(78)
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: { kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol', replayState: { outputItems: [] } },
+          content: [{ type: 'tool-call', id: longCallId, name: 'shell', arguments: '{"command":"pwd"}' }],
+        },
+        {
+          id: 'm2', role: 'user', source: { kind: 'tool', callId: longCallId },
+          content: [{ type: 'tool-result', toolCallId: longCallId, content: [{ type: 'text', text: '/workspace' }] }],
+        },
+      ],
+    } as unknown as GenerateOptions
+
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const call = payload.input.find((item) => item.type === 'function_call')
+    const output = payload.input.find((item) => item.type === 'function_call_output')
+
+    expect(call?.call_id).toMatch(/^dsh_[a-f0-9]{60}$/)
+    expect(String(call?.call_id)).toHaveLength(64)
+    expect(output?.call_id).toBe(call?.call_id)
+  })
+
   it('warns the model when a user message has only a local raw image markdown link', async () => {
     const text = '请看这张图\n![图片](/describe-image/raw/sha256:fb8625f2d563722a61b6bc791d665d758bd083bbd0b96f7a4693a3d2a1159eda)'
     const options = {

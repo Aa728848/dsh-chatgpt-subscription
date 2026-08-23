@@ -1,5 +1,6 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { createHash } from 'node:crypto'
 import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary } from '../shared/model-catalog.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
@@ -29,6 +30,42 @@ export function hiddenSandboxControlToolNames(options: GenerateOptions): Set<str
     .map((tool) => tool.name) ?? [])
 }
 
+function createCallIdNormalizer(): (value: unknown) => string {
+  const normalizedByOriginal = new Map<string, string>()
+  const originalByNormalized = new Map<string, string>()
+
+  return (value) => {
+    const original = String(value)
+    const existing = normalizedByOriginal.get(original)
+    if (existing !== undefined) return existing
+
+    const claim = (candidate: string): boolean => {
+      const owner = originalByNormalized.get(candidate)
+      if (owner !== undefined && owner !== original) return false
+      normalizedByOriginal.set(original, candidate)
+      originalByNormalized.set(candidate, original)
+      return true
+    }
+
+    if (original.length <= 64 && claim(original)) return original
+    for (let attempt = 0; ; attempt++) {
+      const material = attempt === 0 ? original : `${original}\0${attempt}`
+      const candidate = `dsh_${createHash('sha256').update(material).digest('hex').slice(0, 60)}`
+      if (claim(candidate)) return candidate
+    }
+  }
+}
+
+function normalizeReplayCallIds(
+  items: Array<Record<string, unknown>> | null,
+  normalizeCallId: (value: unknown) => string,
+): Array<Record<string, unknown>> | null {
+  if (items === null) return null
+  return items.map((item) => typeof item.call_id === 'string'
+    ? { ...item, call_id: normalizeCallId(item.call_id) }
+    : item)
+}
+
 export async function buildResponsesPayload(
   options: GenerateOptions,
   attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
@@ -36,6 +73,7 @@ export async function buildResponsesPayload(
 ): Promise<ResponsesPayload> {
   const sandboxRetryTools = recentSandboxRetryToolNames(options.messages)
   const resolveLocalRawImages = supportsImageInput(options)
+  const normalizeCallId = createCallIdNormalizer()
   const instructionParts = [
     options.system?.trim(),
     ...options.messages
@@ -51,7 +89,7 @@ export async function buildResponsesPayload(
   const localImageStats: LocalRawImageStats = { attempted: 0, resolved: 0, failed: 0 }
   for (const message of options.messages) {
     if (message.role === 'system') continue
-    const replayItems = replayOutputItems(message)
+    const replayItems = normalizeReplayCallIds(replayOutputItems(message), normalizeCallId)
     if (message.role === 'assistant' && replayItems !== null) {
       input.push(...replayItems)
       for (const item of replayItems) {
@@ -63,12 +101,13 @@ export async function buildResponsesPayload(
         const content = await mapContent(message, attachments, options.signal, localRawImages, localImageStats, resolveLocalRawImages)
         if (content.length > 0) input.push({ role: message.role, content })
       }
-      appendMissingToolCalls(input, knownToolCalls, message)
+      appendMissingToolCalls(input, knownToolCalls, message, normalizeCallId)
       continue
     }
     const toolResult = message.content.find((block) => block.type === 'tool-result')
     if (toolResult?.type === 'tool-result') {
-      const callId = String(toolResult.toolCallId)
+      const originalCallId = String(toolResult.toolCallId)
+      const callId = normalizeCallId(originalCallId)
       const rawOutput = blocksToText(toolResult.content)
       if (knownToolCalls.has(callId)) {
         const output = toolResult.isError && knownToolCalls.get(callId) === 'run_code'
@@ -83,7 +122,7 @@ export async function buildResponsesPayload(
           role: 'user',
           content: [{
             type: 'input_text',
-            text: `Tool result for unavailable call ${callId}${toolResult.isError ? ' (error)' : ''}:\n${rawOutput}`,
+            text: `Tool result for unavailable call ${originalCallId}${toolResult.isError ? ' (error)' : ''}:\n${rawOutput}`,
           }],
         })
       }
@@ -92,7 +131,7 @@ export async function buildResponsesPayload(
     const content = await mapContent(message, attachments, options.signal, localRawImages, localImageStats, resolveLocalRawImages)
     if (content.length > 0) input.push({ role: message.role, content })
     if (message.role === 'assistant') {
-      appendMissingToolCalls(input, knownToolCalls, message)
+      appendMissingToolCalls(input, knownToolCalls, message, normalizeCallId)
     }
   }
 
@@ -291,10 +330,11 @@ function appendMissingToolCalls(
   input: Array<Record<string, unknown>>,
   knownToolCalls: Map<string, string | undefined>,
   message: Message,
+  normalizeCallId: (value: unknown) => string,
 ): void {
   for (const block of message.content) {
     if (block.type !== 'tool-call') continue
-    const callId = String(block.id)
+    const callId = normalizeCallId(block.id)
     if (knownToolCalls.has(callId)) continue
     input.push({
       type: 'function_call',
