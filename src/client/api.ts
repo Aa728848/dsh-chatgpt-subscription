@@ -40,6 +40,10 @@ export class SubscriptionApi {
     return post(`${ROUTE_PREFIX}/quota/refresh`, {})
   }
 
+  useResetCredit(): Promise<QuotaStatusDto> {
+    return post(`${ROUTE_PREFIX}/quota/reset-credit/use`, {})
+  }
+
   testConnection(): Promise<ConnectionTestDto> {
     return post(`${ROUTE_PREFIX}/connection/test`, {})
   }

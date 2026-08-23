@@ -97,6 +97,11 @@ export declare const zh: {
     readonly credits: "Credits";
     readonly monthlySpend: "月度消费控制";
     readonly resetCredits: "重置次数";
+    readonly resetCreditExpires: "到期时间";
+    readonly useResetCredit: "使用重置卡";
+    readonly usingResetCredit: "使用中…";
+    readonly useResetCreditConfirm: "使用后会立即消耗 1 次重置机会，并重置符合条件的 Codex 额度窗口。确定继续吗？";
+    readonly resetCreditUsed: "重置卡已使用，用量数据已刷新。";
     readonly spendControlReached: "已触发月度消费控制，新的订阅调用可能被限制。";
     readonly limit: "上限";
     readonly exhausted: "额度已用尽";
@@ -217,6 +222,11 @@ export declare const dictionaries: {
         readonly credits: "Credits";
         readonly monthlySpend: "月度消费控制";
         readonly resetCredits: "重置次数";
+        readonly resetCreditExpires: "到期时间";
+        readonly useResetCredit: "使用重置卡";
+        readonly usingResetCredit: "使用中…";
+        readonly useResetCreditConfirm: "使用后会立即消耗 1 次重置机会，并重置符合条件的 Codex 额度窗口。确定继续吗？";
+        readonly resetCreditUsed: "重置卡已使用，用量数据已刷新。";
         readonly spendControlReached: "已触发月度消费控制，新的订阅调用可能被限制。";
         readonly limit: "上限";
         readonly exhausted: "额度已用尽";
@@ -236,6 +246,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"tokens" | "title" | "intro" | "account" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storage" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "pending" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "subagentSettingsNav" | "subagentSettingsTitle" | "subagentSettingsIntro" | "subagentModelGroup" | "subagentLimitsGroup" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentMaxAgents" | "subagentMaxAgentsHint" | "subagentLimitsNotice" | "levels" | "agents" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentProvider" | "subagentProviderHint" | "subagentModel" | "subagentModelHint" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "providerDefault" | "effectiveContextWindow" | "selectedModelContextHint" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quota" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "stale" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "enhancements" | "subagentSettingsNav" | "subagentSettingsTitle" | "subagentSettingsIntro" | "subagentModelGroup" | "subagentLimitsGroup" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentMaxAgents" | "subagentMaxAgentsHint" | "subagentLimitsNotice" | "levels" | "agents" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "subagentProvider" | "subagentProviderHint" | "subagentModel" | "subagentModelHint" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "providerDefault" | "effectiveContextWindow" | "selectedModelContextHint" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

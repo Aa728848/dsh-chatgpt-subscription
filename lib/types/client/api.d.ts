@@ -11,6 +11,7 @@ export declare class SubscriptionApi {
     }>;
     refresh(): Promise<PluginStatusDto>;
     refreshQuota(): Promise<QuotaStatusDto>;
+    useResetCredit(): Promise<QuotaStatusDto>;
     testConnection(): Promise<ConnectionTestDto>;
     updatePreferences(patch: SubscriptionPreferencesUpdateDto): Promise<SubscriptionPreferencesDto>;
     events(loginId: string): EventSource;

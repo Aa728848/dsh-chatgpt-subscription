@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import {
+  CODEX_RESET_CREDITS_CONSUME_URL,
+  CODEX_RESET_CREDITS_URL,
   CODEX_USAGE_URL,
   QUOTA_CACHE_MS,
   QUOTA_MIN_UPSTREAM_INTERVAL_MS,
@@ -44,6 +47,7 @@ export class UsageService {
   private blockedUntil = 0
   private invalidated = false
   private inFlight: Promise<QuotaStatusDto> | null = null
+  private resetConsumeInFlight: Promise<QuotaStatusDto> | null = null
 
   constructor(private readonly oauth: OAuthService, options: UsageServiceOptions = {}) {
     this.fetchFn = options.fetchFn ?? fetch
@@ -87,6 +91,73 @@ export class UsageService {
     this.invalidated = false
   }
 
+  async consumeResetCredit(): Promise<QuotaStatusDto> {
+    if (this.resetConsumeInFlight !== null) return this.resetConsumeInFlight
+    this.resetConsumeInFlight = this.consumeResetCreditUpstream().finally(() => {
+      this.resetConsumeInFlight = null
+    })
+    return this.resetConsumeInFlight
+  }
+
+  private async consumeResetCreditUpstream(): Promise<QuotaStatusDto> {
+    let credentials: StoredOAuthCredentials
+    try {
+      credentials = await this.oauth.credentials()
+      let creditsResponse = await this.fetchResetCredits(credentials)
+      if (creditsResponse.status === 401) {
+        await creditsResponse.body?.cancel().catch(() => undefined)
+        credentials = await this.oauth.credentials(true)
+        creditsResponse = await this.fetchResetCredits(credentials)
+      }
+      if (!creditsResponse.ok) {
+        const status = creditsResponse.status
+        await creditsResponse.body?.cancel().catch(() => undefined)
+        throw new UsageServiceError({
+          code: status === 429 ? 'rate-limited' : 'quota-failed',
+          message: status === 429 ? 'Reset credit request was rate limited.' : `Reset credit request failed (${status}).`,
+        })
+      }
+      const resetCredits = parseResetCredits(await creditsResponse.json() as unknown)
+      const creditId = resetCredits.availableCreditIds[0]
+      if (creditId === undefined) {
+        throw new UsageServiceError({ code: 'bad-request', message: 'No reset credits are currently available.' })
+      }
+      const redeemRequestId = randomUUID()
+      let consumeResponse = await this.fetchFn(CODEX_RESET_CREDITS_CONSUME_URL, {
+        method: 'POST',
+        headers: { ...codexHeaders(credentials), accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({ credit_id: creditId, redeem_request_id: redeemRequestId }),
+      })
+      if (consumeResponse.status === 401) {
+        await consumeResponse.body?.cancel().catch(() => undefined)
+        credentials = await this.oauth.credentials(true)
+        consumeResponse = await this.fetchFn(CODEX_RESET_CREDITS_CONSUME_URL, {
+          method: 'POST',
+          headers: { ...codexHeaders(credentials), accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ credit_id: creditId, redeem_request_id: redeemRequestId }),
+        })
+      }
+      if (!consumeResponse.ok) {
+        const status = consumeResponse.status
+        await consumeResponse.body?.cancel().catch(() => undefined)
+        throw new UsageServiceError({
+          code: status === 429 ? 'rate-limited' : 'quota-failed',
+          message: status === 429 ? 'Using the reset credit was rate limited.' : `Using the reset credit failed (${status}).`,
+        })
+      }
+      await consumeResponse.body?.cancel().catch(() => undefined)
+      this.clear()
+      const refreshed = await this.refreshUpstream(credentials, identityKey(credentials))
+      if (refreshed.error !== undefined) {
+        throw new UsageServiceError({ code: 'quota-failed', message: 'The reset credit was used, but usage could not be refreshed.' })
+      }
+      return refreshed
+    } catch (error) {
+      if (error instanceof UsageServiceError) throw error
+      throw new UsageServiceError({ code: 'quota-failed', message: 'The reset credit could not be used.' })
+    }
+  }
+
   async testConnection(): Promise<ConnectionTestDto> {
     const started = this.now()
     const result = await this.status(true, true)
@@ -120,6 +191,15 @@ export class UsageService {
       }
       const data = await response.json() as unknown
       const usage = parseCodexUsage(data)
+      if ((usage.resetCredits?.availableCount ?? 0) > 0) {
+        const resetResponse = await this.fetchResetCredits(credentials).catch(() => null)
+        if (resetResponse?.ok === true) {
+          const reset = parseResetCredits(await resetResponse.json() as unknown)
+          usage.resetCredits = { availableCount: reset.availableCount, expiresAt: reset.expiresAt }
+        } else {
+          await resetResponse?.body?.cancel().catch(() => undefined)
+        }
+      }
       this.cache = { usage, fetchedAt: this.now(), accountKey }
       this.invalidated = false
       return this.fromCache(false)
@@ -133,6 +213,12 @@ export class UsageService {
 
   private fetch(credentials: Awaited<ReturnType<OAuthService['credentials']>>): Promise<Response> {
     return this.fetchFn(CODEX_USAGE_URL, {
+      headers: { ...codexHeaders(credentials), accept: 'application/json' },
+    })
+  }
+
+  private fetchResetCredits(credentials: StoredOAuthCredentials): Promise<Response> {
+    return this.fetchFn(CODEX_RESET_CREDITS_URL, {
       headers: { ...codexHeaders(credentials), accept: 'application/json' },
     })
   }
@@ -261,7 +347,36 @@ function mapResetCredits(value: unknown): QuotaUsageDto['resetCredits'] {
   if (data === null) return null
   const available = numeric(data.available_count)
   if (available === undefined) return null
-  return { availableCount: Math.max(0, Math.floor(available)) }
+  return { availableCount: Math.max(0, Math.floor(available)), expiresAt: null }
+}
+
+export function parseResetCredits(value: unknown): { availableCount: number; expiresAt: number | null; availableCreditIds: string[] } {
+  const data = record(value)
+  if (data === null) return { availableCount: 0, expiresAt: null, availableCreditIds: [] }
+  const credits = Array.isArray(data.credits) ? data.credits : []
+  const available = credits
+    .map(record)
+    .filter((credit): credit is Record<string, unknown> => credit !== null && credit.status === 'available')
+    .map((credit) => ({
+      id: text(credit.id),
+      expiresAt: timestamp(credit.expires_at),
+    }))
+    .filter((credit): credit is { id: string; expiresAt: number | null } => credit.id !== null)
+    .sort((left, right) => (left.expiresAt ?? Number.MAX_SAFE_INTEGER) - (right.expiresAt ?? Number.MAX_SAFE_INTEGER))
+  const reported = numeric(data.available_count)
+  return {
+    availableCount: reported === undefined ? available.length : Math.max(0, Math.floor(reported)),
+    expiresAt: available.map(credit => credit.expiresAt).find((expiresAt): expiresAt is number => expiresAt !== null) ?? null,
+    availableCreditIds: available.map(credit => credit.id),
+  }
+}
+
+function timestamp(value: unknown): number | null {
+  const numericValue = numeric(value)
+  if (numericValue !== undefined && numericValue > 0) return numericValue > 10_000_000_000 ? Math.floor(numericValue / 1000) : Math.floor(numericValue)
+  if (typeof value !== 'string') return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
 }
 
 function record(value: unknown): Record<string, unknown> | null {

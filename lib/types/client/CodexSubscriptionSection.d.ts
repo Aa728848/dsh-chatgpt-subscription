@@ -1,11 +1,18 @@
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
-import type { CredentialStorageDto, QuotaWindowDto } from '../shared/contracts.ts';
+import type { CredentialStorageDto, PluginStatusDto, QuotaWindowDto } from '../shared/contracts.ts';
 import { NS } from './locales.ts';
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>;
+type BusyAction = 'login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences' | null;
 type Translate = Props['t'];
 export declare function CodexSubscriptionSection({ t }: Props): React.JSX.Element;
 export declare function storageLabel(storage: CredentialStorageDto | undefined, t: Translate): string;
 export declare function storageNotice(storage: CredentialStorageDto | undefined, t: Translate): string;
+export declare function ResetCreditsFact({ resetCredits, busy, onUse, t }: {
+    resetCredits: NonNullable<PluginStatusDto['quota']['resetCredits']>;
+    busy: BusyAction;
+    onUse: () => Promise<void>;
+    t: Translate;
+}): React.JSX.Element;
 export declare function QuotaBar({ label, window, t }: {
     label: string;
     window: QuotaWindowDto;

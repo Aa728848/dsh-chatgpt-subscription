@@ -21,6 +21,8 @@ export declare const CODEX_RESPONSES_URL: "https://chatgpt.com/backend-api/codex
 export declare const CODEX_IMAGE_GENERATION_URL: "https://chatgpt.com/backend-api/codex/images/generations";
 export declare const CODEX_SEARCH_URL: "https://chatgpt.com/backend-api/codex/alpha/search";
 export declare const CODEX_USAGE_URL: "https://chatgpt.com/backend-api/wham/usage";
+export declare const CODEX_RESET_CREDITS_URL: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+export declare const CODEX_RESET_CREDITS_CONSUME_URL: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 export declare const CODEX_ORIGINATOR: "opencode";
 export declare const CODEX_ENHANCED_ORIGINATOR: "pi";
 export declare const CODEX_IMAGE_TOOL_NAME: "codex_image_generate";

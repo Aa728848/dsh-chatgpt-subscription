@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { formatReset, QuotaBar, windowLabel } from '../src/client/CodexSubscriptionSection.tsx'
+import { formatReset, QuotaBar, ResetCreditsFact, windowLabel } from '../src/client/CodexSubscriptionSection.tsx'
 import { zh } from '../src/client/locales.ts'
 
 const t = ((key: keyof typeof zh) => zh[key]) as never
@@ -22,6 +22,22 @@ describe('quota UI', () => {
     expect(html).toContain(`dsh-codex-meter-${level}`)
     expect(html).toContain(`${100 - usedPercent}% 剩余`)
     if (usedPercent === 100) expect(html).toContain('额度已用尽')
+  })
+
+  it('shows reset credit expiry and enables use only when a credit is available', () => {
+    const expiresAt = Date.parse('2030-01-01T02:00:00Z') / 1000
+    const available = renderToStaticMarkup(<ResetCreditsFact resetCredits={{ availableCount: 1, expiresAt }} busy={null} onUse={async () => undefined} t={t} />)
+    expect(available).toContain('到期时间')
+    expect(available).toContain('2030')
+    expect(available).toContain('使用重置卡')
+    expect(available).not.toContain('disabled=""')
+
+    const empty = renderToStaticMarkup(<ResetCreditsFact resetCredits={{ availableCount: 0, expiresAt: null }} busy={null} onUse={async () => undefined} t={t} />)
+    expect(empty).toContain('disabled=""')
+    expect(empty).toContain('未知')
+
+    const legacy = renderToStaticMarkup(<ResetCreditsFact resetCredits={{ availableCount: 1 } as never} busy={null} onUse={async () => undefined} t={t} />)
+    expect(legacy).toContain('未知')
   })
 
   it('derives window labels and shows absolute plus relative reset time', () => {

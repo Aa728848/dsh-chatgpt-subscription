@@ -14,13 +14,17 @@ export declare class UsageService {
     private blockedUntil;
     private invalidated;
     private inFlight;
+    private resetConsumeInFlight;
     constructor(oauth: OAuthService, options?: UsageServiceOptions);
     status(authenticated: boolean, force?: boolean): Promise<QuotaStatusDto>;
     invalidate(): void;
     clear(): void;
+    consumeResetCredit(): Promise<QuotaStatusDto>;
+    private consumeResetCreditUpstream;
     testConnection(): Promise<ConnectionTestDto>;
     private refreshUpstream;
     private fetch;
+    private fetchResetCredits;
     private fromCache;
     private failure;
 }
@@ -30,5 +34,10 @@ export declare class UsageServiceError extends Error {
 }
 export declare function mapCodexUsage(value: unknown): QuotaBucketDto[];
 export declare function parseCodexUsage(value: unknown): QuotaUsageDto;
+export declare function parseResetCredits(value: unknown): {
+    availableCount: number;
+    expiresAt: number | null;
+    availableCreditIds: string[];
+};
 export {};
 //# sourceMappingURL=usage-service.d.ts.map

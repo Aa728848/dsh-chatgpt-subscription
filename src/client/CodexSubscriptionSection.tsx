@@ -7,7 +7,7 @@ import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
-type BusyAction = 'login' | 'token' | 'quota' | 'test' | 'logout' | 'preferences' | null
+type BusyAction = 'login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences' | null
 type Translate = Props['t']
 
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
@@ -18,6 +18,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [authUrl, setAuthUrl] = useState<string | null>(null)
   const [popupBlocked, setPopupBlocked] = useState(false)
+  const [resetCreditNotice, setResetCreditNotice] = useState<string | null>(null)
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
 
@@ -120,6 +121,15 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setStatus((current) => current === null ? current : { ...current, quota })
   })
 
+  const useResetCredit = async (): Promise<void> => {
+    if (!window.confirm(t('useResetCreditConfirm'))) return
+    await run('reset-credit', async () => {
+      const quota = await apiRef.current.useResetCredit()
+      setStatus((current) => current === null ? current : { ...current, quota })
+      setResetCreditNotice(t('resetCreditUsed'))
+    })
+  }
+
   const testConnection = async (): Promise<void> => run('test', async () => {
     const result = await apiRef.current.testConnection()
     setConnection({ latencyMs: result.latencyMs, checkedAt: result.checkedAt })
@@ -153,6 +163,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const run = async (action: Exclude<BusyAction, null>, task: () => Promise<void>): Promise<void> => {
     setBusy(action)
     setError(null)
+    setResetCreditNotice(null)
     try {
       await task()
     } catch (cause) {
@@ -271,7 +282,8 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         {status?.quota.buckets.map((bucket) => <QuotaBucket key={bucket.id} bucket={bucket} t={t} />)}
         {status?.quota.credits !== null && status?.quota.credits !== undefined ? <QuotaFact label={t('credits')} value={status.quota.credits.unlimited ? t('unlimited') : status.quota.credits.balance ?? (status.quota.credits.hasCredits ? t('available') : t('unavailable'))} /> : null}
         {status?.quota.individualLimit !== null && status?.quota.individualLimit !== undefined ? <QuotaFact label={t('monthlySpend')} value={individualLimitLabel(status.quota.individualLimit, t)} /> : null}
-        {status?.quota.resetCredits !== null && status?.quota.resetCredits !== undefined ? <QuotaFact label={t('resetCredits')} value={String(status.quota.resetCredits.availableCount)} /> : null}
+        {status?.quota.resetCredits !== null && status?.quota.resetCredits !== undefined ? <ResetCreditsFact resetCredits={status.quota.resetCredits} busy={busy} onUse={useResetCredit} t={t} /> : null}
+        {resetCreditNotice !== null ? <p className="dsh-codex-success" role="status">{resetCreditNotice}</p> : null}
         {status?.quota.spendControlReached === true ? <p className="dsh-codex-warning" role="status">{t('spendControlReached')}</p> : null}
         {status?.quota.state === 'empty' ? <p className="dsh-codex-empty">{t('noQuota')}</p> : null}
         {status?.quota.stale ? <p className="dsh-codex-warning" role="status">{t('stale')}</p> : null}
@@ -327,6 +339,18 @@ function QuotaBucket({ bucket, t }: { bucket: QuotaBucketDto; t: Translate }): R
 
 function QuotaFact({ label, value }: { label: string; value: string }): React.JSX.Element {
   return <div className="dsh-codex-quota-fact"><span>{label}</span><strong>{value}</strong></div>
+}
+
+export function ResetCreditsFact({ resetCredits, busy, onUse, t }: { resetCredits: NonNullable<PluginStatusDto['quota']['resetCredits']>; busy: BusyAction; onUse: () => Promise<void>; t: Translate }): React.JSX.Element {
+  const available = resetCredits.availableCount > 0
+  return <div className="dsh-codex-reset-credits">
+    <div className="dsh-codex-reset-credits-info">
+      <span>{t('resetCredits')}</span>
+      <strong>{resetCredits.availableCount}</strong>
+      <small>{t('resetCreditExpires')}: {resetCredits.expiresAt == null ? t('unknown') : formatReset(resetCredits.expiresAt)}</small>
+    </div>
+    <Button primary disabled={!available || busy !== null} onClick={onUse}>{busy === 'reset-credit' ? t('usingResetCredit') : t('useResetCredit')}</Button>
+  </div>
 }
 
 export function QuotaBar({ label, window, t }: { label: string; window: QuotaWindowDto; t: Translate }): React.JSX.Element {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
-import { mapCodexUsage, parseCodexUsage, UsageService } from '../src/host/usage-service.ts'
+import { mapCodexUsage, parseCodexUsage, parseResetCredits, UsageService } from '../src/host/usage-service.ts'
 
 describe('Codex usage mapping', () => {
   it('maps both buckets, clamps percentages, and rejects invalid windows', () => {
@@ -58,7 +58,43 @@ describe('Codex usage mapping', () => {
     expect(usage.credits).toEqual({ hasCredits: true, unlimited: false, balance: '12.50' })
     expect(usage.spendControlReached).toBe(true)
     expect(usage.individualLimit).toMatchObject({ remainingPercent: 13, resetsAt: 2_100_000_000 })
-    expect(usage.resetCredits).toEqual({ availableCount: 3 })
+    expect(usage.resetCredits).toEqual({ availableCount: 3, expiresAt: null })
+  })
+
+  it('maps available reset credits and selects the earliest expiry first', () => {
+    expect(parseResetCredits({
+      available_count: 2,
+      credits: [
+        { id: 'later', status: 'available', expires_at: '2030-02-01T00:00:00Z' },
+        { id: 'redeemed', status: 'redeemed', expires_at: '2029-01-01T00:00:00Z' },
+        { id: 'sooner', status: 'available', expires_at: '2030-01-01T00:00:00Z' },
+      ],
+    })).toEqual({
+      availableCount: 2,
+      expiresAt: Date.parse('2030-01-01T00:00:00Z') / 1000,
+      availableCreditIds: ['sooner', 'later'],
+    })
+  })
+
+  it('lists, consumes, and refreshes after using one reset credit', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'a', refreshToken: 'r', accountId: 'account-1', expiresAt: Date.now() + 3_600_000 })
+    const oauth = new OAuthService(store)
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(Response.json({ available_count: 1, credits: [{ id: 'credit-1', status: 'available', expires_at: '2030-01-01T00:00:00Z' }] }))
+      .mockResolvedValueOnce(Response.json({ code: 'reset', windows_reset: 1 }))
+      .mockResolvedValueOnce(Response.json({ rate_limit: { primary_window: { used_percent: 0 } }, rate_limit_reset_credits: { available_count: 0 } }))
+    const service = new UsageService(oauth, { fetchFn: fetchFn as typeof fetch })
+    const result = await service.consumeResetCredit()
+    expect(result.buckets[0]?.primary?.usedPercent).toBe(0)
+    expect(result.resetCredits).toEqual({ availableCount: 0, expiresAt: null })
+    const [consumeUrl, consumeInit] = fetchFn.mock.calls[1] as unknown as [string, RequestInit]
+    expect(consumeUrl).toContain('/rate-limit-reset-credits/consume')
+    expect(consumeInit.method).toBe('POST')
+    expect((consumeInit.headers as Record<string, string>)['chatgpt-account-id']).toBe('account-1')
+    expect(JSON.parse(String(consumeInit.body))).toMatchObject({ credit_id: 'credit-1' })
+    expect(JSON.parse(String(consumeInit.body)).redeem_request_id).toMatch(/^[0-9a-f-]{36}$/)
+    oauth.dispose()
   })
 
   it('caches for 60 seconds and throttles forced upstream refreshes', async () => {

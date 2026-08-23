@@ -78,6 +78,12 @@ export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageSe
           json(response, { ok: true, value: await usage.status(true, true) })
           return
         }
+        case `${ROUTE_PREFIX}/quota/reset-credit/use`: {
+          const oauthStatus = await oauth.status()
+          if (!oauthStatus.authenticated) throw new Error('not authenticated')
+          json(response, { ok: true, value: await usage.consumeResetCredit() })
+          return
+        }
         case `${ROUTE_PREFIX}/connection/test`:
           json(response, { ok: true, value: await usage.testConnection() })
           return

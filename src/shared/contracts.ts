@@ -115,6 +115,8 @@ export interface QuotaIndividualLimitDto {
 
 export interface QuotaResetCreditsDto {
   availableCount: number
+  /** Earliest expiration among currently available reset credits, as Unix seconds. */
+  expiresAt: number | null
 }
 
 export interface QuotaUsageDto {
