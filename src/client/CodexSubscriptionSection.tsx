@@ -254,6 +254,21 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             </label>
           </div>
         </div>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('outputVerbosity')}</strong>
+            <p className="dsh-codex-muted">{t('outputVerbosityHint')}</p>
+          </div>
+          <select className="dsh-codex-select" aria-label={t('outputVerbosity')} value={status?.preferences.outputVerbosity ?? ''} disabled={busy !== null} onChange={(event) => {
+            const value = event.currentTarget.value
+            void updatePreferences({ outputVerbosity: value === '' ? null : value as 'low' | 'medium' | 'high' })
+          }}>
+            <option value="">{t('providerDefault')}</option>
+            <option value="low">{t('verbosityLow')}</option>
+            <option value="medium">{t('verbosityMedium')}</option>
+            <option value="high">{t('verbosityHigh')}</option>
+          </select>
+        </div>
         <div className="dsh-codex-context-settings">
           <div>
             <strong>{t('contextWindows')}</strong>

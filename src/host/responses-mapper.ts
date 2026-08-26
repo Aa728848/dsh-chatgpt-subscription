@@ -2,6 +2,7 @@ import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deeps
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { createHash } from 'node:crypto'
 import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary } from '../shared/model-catalog.ts'
+import type { CodexOutputVerbosity } from '../shared/contracts.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
   model: string
@@ -70,6 +71,7 @@ export async function buildResponsesPayload(
   options: GenerateOptions,
   attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
   localRawImages: LocalRawImageOptions = {},
+  outputVerbosity: CodexOutputVerbosity | null = null,
 ): Promise<ResponsesPayload> {
   const sandboxRetryTools = recentSandboxRetryToolNames(options.messages)
   const resolveLocalRawImages = supportsImageInput(options)
@@ -161,6 +163,7 @@ export async function buildResponsesPayload(
     payload.tool_choice = 'auto'
     payload.parallel_tool_calls = true
   }
+  if (outputVerbosity !== null) payload.text = { verbosity: outputVerbosity }
   if (options.reasoningEffort !== undefined) {
     payload.reasoning = codexModelSupportsReasoningSummary(options.model)
       ? { effort: options.reasoningEffort, summary: 'auto' }

@@ -218,6 +218,10 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     if (typeof value.quickQuotaVisible !== 'boolean') throw new PreferenceError('quickQuotaVisible must be a boolean.')
     patch.quickQuotaVisible = value.quickQuotaVisible
   }
+  if ('outputVerbosity' in value) {
+    if (value.outputVerbosity !== null && value.outputVerbosity !== 'low' && value.outputVerbosity !== 'medium' && value.outputVerbosity !== 'high') throw new PreferenceError('outputVerbosity must be null, low, medium, or high.')
+    patch.outputVerbosity = value.outputVerbosity
+  }
   if ('searchProvider' in value) {
     if (value.searchProvider !== 'dsh' && value.searchProvider !== 'codex') throw new PreferenceError('searchProvider must be dsh or codex.')
     patch.searchProvider = value.searchProvider

@@ -49,6 +49,7 @@ describe('CodexChatGptAdapter', () => {
     const configured = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never, {
       status: () => ({
         quickQuotaVisible: false,
+        outputVerbosity: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         subagentProvider: 'codex-chatgpt',

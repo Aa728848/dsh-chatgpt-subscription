@@ -37,6 +37,18 @@ describe('Responses payload mapping', () => {
     expect(payload).toMatchObject({ stream: true, store: false, tool_choice: 'auto', reasoning: { effort: 'high', summary: 'auto' } })
   })
 
+  it('maps the configured output verbosity to the Responses text control', async () => {
+    const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments(), {}, 'high')
+    expect(payload.text).toEqual({ verbosity: 'high' })
+  })
+
+  it('uses the provider default when output verbosity is not configured', async () => {
+    const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload).not.toHaveProperty('text')
+  })
+
   it('restores a tool call omitted by empty replay state before sending its result', async () => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [

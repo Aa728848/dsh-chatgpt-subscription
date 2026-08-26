@@ -12,6 +12,7 @@ import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import type { CodexOutputVerbosity } from '../shared/contracts.ts'
 
 type FetchLike = typeof fetch
 const MAX_VISIBLE_REASONING_CHARS = 12_000
@@ -22,11 +23,13 @@ export interface ResponsesClientOptions {
   fetchFn?: FetchLike
   localRawImages?: LocalRawImageOptions
   onGenerationFinished?: () => void
+  outputVerbosity?: () => CodexOutputVerbosity | null
 }
 
 export class ResponsesClient {
   private readonly fetchFn: FetchLike
   private readonly onGenerationFinished: () => void
+  private readonly outputVerbosity: () => CodexOutputVerbosity | null
 
   constructor(
     private readonly oauth: OAuthService,
@@ -36,12 +39,13 @@ export class ResponsesClient {
     this.fetchFn = options.fetchFn ?? fetch
     this.localRawImages = options.localRawImages ?? {}
     this.onGenerationFinished = options.onGenerationFinished ?? (() => undefined)
+    this.outputVerbosity = options.outputVerbosity ?? (() => null)
   }
 
   private readonly localRawImages: LocalRawImageOptions
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const payload = await buildResponsesPayload(options, this.attachments, this.localRawImages)
+    const payload = await buildResponsesPayload(options, this.attachments, this.localRawImages, this.outputVerbosity())
     const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
     try {

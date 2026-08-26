@@ -41,6 +41,7 @@ describe('client registration', () => {
       const contextWindow = body?.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000
       const preferences = {
         quickQuotaVisible: false,
+        outputVerbosity: null,
         searchProvider: 'dsh',
         subagentProvider: 'codex-chatgpt',
         subagentModel: 'gpt-5.6-sol',
@@ -124,6 +125,7 @@ describe('client registration', () => {
         quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
         preferences: {
           quickQuotaVisible: false,
+          outputVerbosity: null,
           visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
           searchProvider: 'dsh',
           subagentProvider: 'deepseek-official',

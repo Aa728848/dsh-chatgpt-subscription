@@ -34,6 +34,7 @@ export interface PluginStatusDto {
 export type OAuthStatusDto = Omit<PluginStatusDto, 'quota' | 'preferences'>
 
 export type SearchProviderPreference = 'dsh' | 'codex'
+export type CodexOutputVerbosity = 'low' | 'medium' | 'high'
 
 export interface CodexContextWindowOverridesDto {
   'gpt-5.6-sol': number
@@ -62,6 +63,7 @@ export interface SubagentModelCatalogDto {
 
 export interface SubscriptionPreferencesDto {
   quickQuotaVisible: boolean
+  outputVerbosity: CodexOutputVerbosity | null
   visibleModelIds: string[]
   searchProvider: SearchProviderPreference
   subagentProvider: string
@@ -76,6 +78,7 @@ export interface SubscriptionPreferencesDto {
 
 export interface SubscriptionPreferencesUpdateDto {
   quickQuotaVisible?: boolean
+  outputVerbosity?: CodexOutputVerbosity | null
   visibleModelIds?: string[]
   searchProvider?: SearchProviderPreference
   subagentProvider?: string
