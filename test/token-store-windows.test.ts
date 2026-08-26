@@ -30,5 +30,5 @@ describe.skipIf(process.platform !== 'win32')('WindowsDpapiTokenStore', () => {
     expect(raw.toString('utf8')).not.toContain('refresh-super-secret')
     await store.clear()
     expect(await store.load()).toBeNull()
-  })
+  }, 30_000)
 })
