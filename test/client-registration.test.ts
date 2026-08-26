@@ -70,6 +70,9 @@ describe('client registration', () => {
       await act(async () => root.render(createElement(CodexSubscriptionSection, { t } as never)))
       const input = container.querySelector<HTMLInputElement>('input[aria-label="5.6 Sol 上下文窗口"]')
       expect(input).not.toBeNull()
+      const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsh-codex-models input[type="checkbox"]')
+      expect(modelChecks).toHaveLength(7)
+      expect(Array.from(modelChecks).filter(model => model.checked)).toHaveLength(3)
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
         input!.dispatchEvent(new Event('input', { bubbles: true }))
@@ -121,6 +124,7 @@ describe('client registration', () => {
         quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
         preferences: {
           quickQuotaVisible: false,
+          visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
           searchProvider: 'dsh',
           subagentProvider: 'deepseek-official',
           subagentModel: 'deepseek-v4-flash',

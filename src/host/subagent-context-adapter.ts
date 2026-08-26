@@ -20,8 +20,9 @@ export class SubagentContextAdapter extends LlmAdapter {
   }
 
   async listModels(): Promise<readonly LlmModelInfo[]> {
-    const selected = this.selection()
-    return [{ provider: SubagentContextAdapter.provider, id: selected.model, name: selected.model }]
+    // This route is internal to delegated Agents. An empty advisory catalog keeps
+    // it routable while preventing the main conversation picker from exposing it.
+    return []
   }
 
   async resolveModel(_provider: string, _model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {

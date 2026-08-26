@@ -58,6 +58,7 @@ export interface SubagentModelCatalogDto {
 }
 export interface SubscriptionPreferencesDto {
     quickQuotaVisible: boolean;
+    visibleModelIds: string[];
     searchProvider: SearchProviderPreference;
     subagentProvider: string;
     subagentModel: string;
@@ -70,6 +71,7 @@ export interface SubscriptionPreferencesDto {
 }
 export interface SubscriptionPreferencesUpdateDto {
     quickQuotaVisible?: boolean;
+    visibleModelIds?: string[];
     searchProvider?: SearchProviderPreference;
     subagentProvider?: string;
     subagentModel?: string;

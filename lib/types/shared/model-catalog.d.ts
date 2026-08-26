@@ -67,6 +67,7 @@ export declare const CODEX_MODEL_CATALOG: readonly [{
     readonly supportsReasoningSummary: false;
 }];
 export type CodexModelId = typeof CODEX_MODEL_CATALOG[number]['id'];
+export declare const DEFAULT_VISIBLE_CODEX_MODEL_IDS: readonly ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 export declare const DEFAULT_CODEX_MODEL: {
     readonly id: "gpt-5.6-sol";
     readonly name: "5.6 Sol";

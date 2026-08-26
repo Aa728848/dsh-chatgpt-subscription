@@ -1,6 +1,6 @@
 import { settingsNamespace, type SettingsProvider, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { GPT_56_MAX_CONTEXT_WINDOW } from '../shared/model-catalog.ts'
+import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId } from '../shared/model-catalog.ts'
 import {
   DEFAULT_PREFERENCES,
   PREFERENCES_NAMESPACE,
@@ -25,6 +25,7 @@ type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
 export function registerPreferenceStore(settings: SettingsProvider): SubscriptionPreferenceStore {
   const scope = settings.register(settingsNamespace(PREFERENCES_NAMESPACE), z.object({
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
+    visibleModelIds: z.array(z.string()).default(DEFAULT_PREFERENCES.visibleModelIds),
     searchProvider: z.union([
       z.const(SEARCH_PROVIDER_DSH),
       z.const(SEARCH_PROVIDER_CODEX),
@@ -54,6 +55,10 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
   async update(patch: SubscriptionPreferencesUpdateDto): Promise<SubscriptionPreferencesDto> {
     const normalized: SubscriptionPreferencesUpdateDto = {}
     if (patch.quickQuotaVisible !== undefined) normalized.quickQuotaVisible = patch.quickQuotaVisible
+    if (patch.visibleModelIds !== undefined) {
+      if (patch.visibleModelIds.length === 0 || !patch.visibleModelIds.every(isCodexModelId)) throw new PreferenceError('At least one supported Codex model must be visible.')
+      normalized.visibleModelIds = [...new Set(patch.visibleModelIds)]
+    }
     if (patch.searchProvider !== undefined) {
       if (!isSearchProviderPreference(patch.searchProvider)) throw new PreferenceError('Unsupported search provider preference.')
       normalized.searchProvider = patch.searchProvider

@@ -49,6 +49,7 @@ describe('CodexChatGptAdapter', () => {
     const configured = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never, {
       status: () => ({
         quickQuotaVisible: false,
+        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         subagentProvider: 'codex-chatgpt',
         subagentModel: 'gpt-5.6-luna',
@@ -60,6 +61,12 @@ describe('CodexChatGptAdapter', () => {
         writable: true,
       }),
     } as never)
+    await expect(configured.listModels()).resolves.toHaveLength(3)
+    await expect(configured.listModels()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'gpt-5.6-sol' }),
+      expect.objectContaining({ id: 'gpt-5.6-terra' }),
+      expect.objectContaining({ id: 'gpt-5.6-luna' }),
+    ]))
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.6-sol')).resolves.toMatchObject({ context: { contextWindow: 1_000_000 } })
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.4')).resolves.toMatchObject({ context: { contextWindow: 272_000 } })
   })

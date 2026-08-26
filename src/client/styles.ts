@@ -24,8 +24,14 @@ const CSS = `
 .dsh-codex-success{color:var(--dsw-alias-label-success,#2e9b62)}
 .dsh-codex-errorbar{align-items:center;background:color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 9%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 28%,transparent);border-radius:7px;color:var(--dsw-alias-label-danger,#d94b4b);display:flex;font-size:13px;gap:12px;justify-content:space-between;padding:10px 12px}
 .dsh-codex-link{color:var(--dsw-alias-label-link,#3278d4);display:inline-block;font-size:13px;margin-top:8px}
-.dsh-codex-models{display:flex;flex-wrap:wrap;gap:6px;padding-top:12px}
-.dsh-codex-models code{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;padding:4px 6px}
+.dsh-codex-models-hint{padding-top:10px}
+.dsh-codex-models{display:flex;flex-wrap:wrap;gap:7px;padding-top:8px}
+.dsh-codex-models label{cursor:pointer;display:block;position:relative}
+.dsh-codex-models input{position:absolute;opacity:0;pointer-events:none}
+.dsh-codex-models span{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;padding:5px 8px}
+.dsh-codex-models input:checked+span{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 14%,var(--dsw-alias-bg-layer-2));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 55%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary)}
+.dsh-codex-models input:focus-visible+span{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
+.dsh-codex-models input:disabled+span{cursor:default;opacity:.5}
 .dsh-codex-pref-row{align-items:center;border-bottom:1px solid var(--dsw-alias-border-l2);display:flex;gap:16px;justify-content:space-between;min-height:58px;padding:10px 0}
 .dsh-codex-pref-row strong,.dsh-codex-check strong{display:block;font-size:13px;font-weight:600;line-height:1.35}
 .dsh-codex-segments{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;flex:none;gap:2px;padding:2px}

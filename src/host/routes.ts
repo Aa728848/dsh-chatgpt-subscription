@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubagentModelCatalogDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { GPT_56_MAX_CONTEXT_WINDOW, isConfigurableContextModelId } from '../shared/model-catalog.ts'
+import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
 import { SUBAGENT_MAX_DEPTH_LIMIT } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
@@ -210,6 +210,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnType<SubscriptionPreferenceStore['status']>): SubscriptionPreferencesUpdateDto {
   const patch: SubscriptionPreferencesUpdateDto = {}
+  if ('visibleModelIds' in value) {
+    if (!Array.isArray(value.visibleModelIds) || value.visibleModelIds.length === 0 || !value.visibleModelIds.every(isCodexModelId)) throw new PreferenceError('visibleModelIds must contain at least one supported Codex model.')
+    patch.visibleModelIds = [...new Set(value.visibleModelIds)]
+  }
   if ('quickQuotaVisible' in value) {
     if (typeof value.quickQuotaVisible !== 'boolean') throw new PreferenceError('quickQuotaVisible must be a boolean.')
     patch.quickQuotaVisible = value.quickQuotaVisible

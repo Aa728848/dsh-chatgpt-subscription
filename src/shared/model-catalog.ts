@@ -80,6 +80,12 @@ export const CODEX_MODEL_CATALOG = [
 
 export type CodexModelId = typeof CODEX_MODEL_CATALOG[number]['id']
 
+export const DEFAULT_VISIBLE_CODEX_MODEL_IDS = [
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+] as const satisfies readonly CodexModelId[]
+
 export const DEFAULT_CODEX_MODEL = CODEX_MODEL_CATALOG[0]
 
 export const CONFIGURABLE_CONTEXT_MODEL_IDS = [

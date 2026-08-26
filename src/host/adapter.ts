@@ -37,7 +37,7 @@ export class CodexChatGptAdapter extends LlmAdapter {
   }
 
   async listModels(): Promise<readonly LlmModelInfo[]> {
-    return listCodexModels()
+    return listCodexModels(this.preferences)
   }
 
   async resolveModel(_provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {

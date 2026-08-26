@@ -15,6 +15,7 @@ describe('SubagentContextAdapter', () => {
     const adapter = new SubagentContextAdapter(llm as never, () => ({
       provider: 'deepseek-official', model: 'deepseek-v4-flash', contextWindow: 96_000,
     }))
+    await expect(adapter.listModels(SubagentContextAdapter.provider)).resolves.toEqual([])
     await expect(adapter.resolveModel(SubagentContextAdapter.provider, 'deepseek-v4-flash')).resolves.toMatchObject({
       provider: SubagentContextAdapter.provider,
       id: 'deepseek-v4-flash',

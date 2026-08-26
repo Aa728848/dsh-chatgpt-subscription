@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
@@ -140,6 +140,13 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setStatus((current) => current === null ? current : { ...current, preferences })
   })
 
+  const toggleVisibleModel = async (modelId: string, checked: boolean): Promise<void> => {
+    const current = status?.preferences.visibleModelIds ?? [...DEFAULT_VISIBLE_CODEX_MODEL_IDS]
+    const visibleModelIds = checked ? [...current, modelId] : current.filter(id => id !== modelId)
+    if (visibleModelIds.length === 0) return
+    await updatePreferences({ visibleModelIds })
+  }
+
   const updateContextWindow = async (model: (typeof CONFIGURABLE_CONTEXT_MODEL_IDS)[number]): Promise<void> => {
     const current = status?.preferences.contextWindowOverrides[model] ?? resolveCodexCatalogEntry(model).contextWindow
     const parsed = parseCapacity(contextDrafts[model] ?? String(current))
@@ -174,6 +181,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   }
 
   const account = status?.account
+  const visibleModelIds = status?.preferences.visibleModelIds ?? DEFAULT_VISIBLE_CODEX_MODEL_IDS
   return <section className="dsh-codex-page" aria-labelledby="dsh-codex-title">
     <header>
       <h2 id="dsh-codex-title" className="dsh-codex-title">{t('title')}</h2>
@@ -213,8 +221,16 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         <InfoRow label={t('provider')} value="Codex（ChatGPT 订阅） · codex-chatgpt" />
         <InfoRow label={t('connectionState')} value={connection === null ? t('untested') : t('connected')} />
         {connection !== null ? <InfoRow label={t('latency')} value={`${connection.latencyMs} ms · ${formatDate(connection.checkedAt)}`} /> : null}
+        <p className="dsh-codex-muted dsh-codex-models-hint">{t('modelsHint')}</p>
         <div className="dsh-codex-models" aria-label={t('models')}>
-          {CODEX_MODEL_CATALOG.map((model) => <code key={model.id} title={model.id}>{model.name}</code>)}
+          {CODEX_MODEL_CATALOG.map((model) => {
+            const checked = visibleModelIds.some(id => id === model.id)
+            const lastVisible = checked && visibleModelIds.length === 1
+            return <label key={model.id} title={model.id}>
+              <input type="checkbox" checked={checked} disabled={busy !== null || lastVisible} onChange={(event) => void toggleVisibleModel(model.id, event.currentTarget.checked)} />
+              <span>{model.name}</span>
+            </label>
+          })}
         </div>
         <div className="dsh-codex-actions">
           <Button disabled={!status?.authenticated || busy !== null} onClick={testConnection}>{busy === 'test' ? t('testing') : t('testConnection')}</Button>

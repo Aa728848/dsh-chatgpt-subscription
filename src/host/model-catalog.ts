@@ -7,8 +7,9 @@ import type { SubscriptionPreferenceStore } from './preferences.ts'
 export const PROVIDER_ID = CODEX_CHATGPT_PROVIDER_ID
 export const PROVIDER_NAME = 'Codex（ChatGPT 订阅）' as const
 
-export function listCodexModels(): LlmModelInfo[] {
-  return CODEX_MODEL_CATALOG.map((entry) => ({
+export function listCodexModels(preferences?: SubscriptionPreferenceStore): LlmModelInfo[] {
+  const visible = new Set(preferences?.status().visibleModelIds ?? CODEX_MODEL_CATALOG.map(entry => entry.id))
+  return CODEX_MODEL_CATALOG.filter(entry => visible.has(entry.id)).map((entry) => ({
     provider: PROVIDER_ID,
     id: entry.id,
     name: entry.name,

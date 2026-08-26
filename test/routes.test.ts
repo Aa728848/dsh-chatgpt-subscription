@@ -62,6 +62,7 @@ describe('host routes', () => {
     const preferences: SubscriptionPreferenceStore = {
       status: () => ({
         quickQuotaVisible: false,
+        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         subagentProvider: 'codex-chatgpt',
         subagentModel: 'gpt-5.6-sol',
@@ -74,6 +75,7 @@ describe('host routes', () => {
       }),
       update: async (patch) => ({
         quickQuotaVisible: patch.quickQuotaVisible ?? false,
+        visibleModelIds: patch.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: patch.searchProvider ?? 'dsh',
         subagentProvider: patch.subagentProvider ?? 'codex-chatgpt',
         subagentModel: patch.subagentModel ?? 'gpt-5.6-sol',
@@ -118,12 +120,12 @@ describe('host routes', () => {
     const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin },
-      body: JSON.stringify({ subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'xhigh', subagentMaxDepth: 2, subagentMaxAgents: 12, contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } }),
+      body: JSON.stringify({ visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'], subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'xhigh', subagentMaxDepth: 2, subagentMaxAgents: 12, contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } }),
     })
     expect(updatedPreferences.status).toBe(200)
     expect(await updatedPreferences.json()).toMatchObject({
       ok: true,
-      value: { subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'xhigh', subagentMaxDepth: 2, subagentMaxAgents: 12, contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } },
+      value: { visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'], subagentModel: 'gpt-5.4-mini', subagentReasoningEffort: 'xhigh', subagentMaxDepth: 2, subagentMaxAgents: 12, contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } },
     })
 
     const rejectedSubagentLimit = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
