@@ -9,6 +9,7 @@ export interface ResponsesClientOptions {
     localRawImages?: LocalRawImageOptions;
     onGenerationFinished?: () => void;
     outputVerbosity?: () => CodexOutputVerbosity | null;
+    fastMode?: () => boolean;
 }
 export declare class ResponsesClient {
     private readonly oauth;
@@ -16,6 +17,7 @@ export declare class ResponsesClient {
     private readonly fetchFn;
     private readonly onGenerationFinished;
     private readonly outputVerbosity;
+    private readonly fastMode;
     constructor(oauth: OAuthService, attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>, options?: ResponsesClientOptions);
     private readonly localRawImages;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;

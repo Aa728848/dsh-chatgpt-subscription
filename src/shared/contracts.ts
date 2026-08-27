@@ -63,6 +63,7 @@ export interface SubagentModelCatalogDto {
 
 export interface SubscriptionPreferencesDto {
   quickQuotaVisible: boolean
+  fastMode: boolean
   outputVerbosity: CodexOutputVerbosity | null
   visibleModelIds: string[]
   searchProvider: SearchProviderPreference
@@ -78,6 +79,7 @@ export interface SubscriptionPreferencesDto {
 
 export interface SubscriptionPreferencesUpdateDto {
   quickQuotaVisible?: boolean
+  fastMode?: boolean
   outputVerbosity?: CodexOutputVerbosity | null
   visibleModelIds?: string[]
   searchProvider?: SearchProviderPreference

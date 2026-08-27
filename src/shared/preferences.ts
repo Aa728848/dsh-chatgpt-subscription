@@ -6,6 +6,7 @@ export const SUBAGENT_MAX_DEPTH_LIMIT = 3
 
 export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> = {
   quickQuotaVisible: false,
+  fastMode: false,
   outputVerbosity: null,
   visibleModelIds: [...DEFAULT_VISIBLE_CODEX_MODEL_IDS],
   searchProvider: 'dsh',

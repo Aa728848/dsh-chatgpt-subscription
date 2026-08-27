@@ -169,6 +169,25 @@ describe('Responses streaming', () => {
     expect(responseFetch).not.toHaveBeenCalled()
     oauth.dispose()
   })
+
+  it('sends service_tier priority when fastMode option returns true', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'test-token', refreshToken: 'refresh', expiresAt: Date.now() + 3_600_000 })
+    const oauth = new OAuthService(store, { fetchFn: vi.fn() as typeof fetch })
+    const responseFetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      expect(body.service_tier).toBe('priority')
+      return sse([{ type: 'response.completed', response: { usage: { input_tokens: 0, output_tokens: 0 } } }])
+    })
+    const client = new ResponsesClient(
+      oauth,
+      { readImage: async () => { throw new Error('unused') } },
+      { fetchFn: responseFetch as typeof fetch, fastMode: () => true },
+    )
+    await collect(client.stream({ provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions))
+    expect(responseFetch).toHaveBeenCalledTimes(1)
+    oauth.dispose()
+  })
 })
 
 function sse(events: unknown[]): Response {

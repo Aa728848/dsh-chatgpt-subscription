@@ -24,12 +24,14 @@ export interface ResponsesClientOptions {
   localRawImages?: LocalRawImageOptions
   onGenerationFinished?: () => void
   outputVerbosity?: () => CodexOutputVerbosity | null
+  fastMode?: () => boolean
 }
 
 export class ResponsesClient {
   private readonly fetchFn: FetchLike
   private readonly onGenerationFinished: () => void
   private readonly outputVerbosity: () => CodexOutputVerbosity | null
+  private readonly fastMode: () => boolean
 
   constructor(
     private readonly oauth: OAuthService,
@@ -40,12 +42,19 @@ export class ResponsesClient {
     this.localRawImages = options.localRawImages ?? {}
     this.onGenerationFinished = options.onGenerationFinished ?? (() => undefined)
     this.outputVerbosity = options.outputVerbosity ?? (() => null)
+    this.fastMode = options.fastMode ?? (() => false)
   }
 
   private readonly localRawImages: LocalRawImageOptions
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const payload = await buildResponsesPayload(options, this.attachments, this.localRawImages, this.outputVerbosity())
+    const payload = await buildResponsesPayload(
+      options,
+      this.attachments,
+      this.localRawImages,
+      this.outputVerbosity(),
+      this.fastMode(),
+    )
     const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
     try {

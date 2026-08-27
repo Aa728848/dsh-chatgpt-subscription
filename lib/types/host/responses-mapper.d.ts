@@ -6,6 +6,7 @@ export interface ResponsesPayload extends Record<string, unknown> {
     input: Array<Record<string, unknown>>;
     stream: true;
     store: false;
+    service_tier?: string;
 }
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export interface LocalRawImageOptions {
@@ -13,5 +14,5 @@ export interface LocalRawImageOptions {
     fetchFn?: FetchLike;
 }
 export declare function hiddenSandboxControlToolNames(options: GenerateOptions): Set<string>;
-export declare function buildResponsesPayload(options: GenerateOptions, attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>, localRawImages?: LocalRawImageOptions, outputVerbosity?: CodexOutputVerbosity | null): Promise<ResponsesPayload>;
+export declare function buildResponsesPayload(options: GenerateOptions, attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>, localRawImages?: LocalRawImageOptions, outputVerbosity?: CodexOutputVerbosity | null, fastMode?: boolean): Promise<ResponsesPayload>;
 //# sourceMappingURL=responses-mapper.d.ts.map

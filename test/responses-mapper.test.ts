@@ -43,6 +43,18 @@ describe('Responses payload mapping', () => {
     expect(payload.text).toEqual({ verbosity: 'high' })
   })
 
+  it('sets service_tier to priority when fast mode is enabled', async () => {
+    const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments(), {}, null, true)
+    expect(payload.service_tier).toBe('priority')
+  })
+
+  it('omits service_tier when fast mode is disabled', async () => {
+    const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments(), {}, null, false)
+    expect(payload).not.toHaveProperty('service_tier')
+  })
+
   it('uses the provider default when output verbosity is not configured', async () => {
     const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())

@@ -32,6 +32,7 @@ export function apply(ctx: Context): void {
     localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
     onGenerationFinished: () => usage.invalidate(),
     outputVerbosity: () => preferences.status().outputVerbosity,
+    fastMode: () => preferences.status().fastMode,
   })
   const adapter = new CodexChatGptAdapter(responses, preferences)
   ctx.effect(() => {

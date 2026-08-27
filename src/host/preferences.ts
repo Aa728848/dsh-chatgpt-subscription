@@ -26,6 +26,7 @@ type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
 export function registerPreferenceStore(settings: SettingsProvider): SubscriptionPreferenceStore {
   const scope = settings.register(settingsNamespace(PREFERENCES_NAMESPACE), z.object({
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
+    fastMode: z.boolean().default(DEFAULT_PREFERENCES.fastMode),
     outputVerbosity: z.union([z.const('low'), z.const('medium'), z.const('high'), z.const(null)]).default(DEFAULT_PREFERENCES.outputVerbosity),
     visibleModelIds: z.array(z.string()).default(DEFAULT_PREFERENCES.visibleModelIds),
     searchProvider: z.union([
@@ -57,6 +58,7 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
   async update(patch: SubscriptionPreferencesUpdateDto): Promise<SubscriptionPreferencesDto> {
     const normalized: SubscriptionPreferencesUpdateDto = {}
     if (patch.quickQuotaVisible !== undefined) normalized.quickQuotaVisible = patch.quickQuotaVisible
+    if (patch.fastMode !== undefined) normalized.fastMode = patch.fastMode
     if (patch.outputVerbosity !== undefined) {
       if (patch.outputVerbosity !== null && !isCodexOutputVerbosity(patch.outputVerbosity)) throw new PreferenceError('Unsupported output verbosity preference.')
       normalized.outputVerbosity = patch.outputVerbosity

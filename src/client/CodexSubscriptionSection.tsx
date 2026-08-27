@@ -299,6 +299,13 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           })}
         </div>
         <label className="dsh-codex-check">
+          <input type="checkbox" checked={status?.preferences.fastMode === true} disabled={busy !== null} onChange={(event) => updatePreferences({ fastMode: event.currentTarget.checked })} />
+          <span>
+            <strong>{t('fastMode')}</strong>
+            <small>{t('fastModeHint')}</small>
+          </span>
+        </label>
+        <label className="dsh-codex-check">
           <input type="checkbox" checked={status?.preferences.quickQuotaVisible === true} disabled={busy !== null} onChange={(event) => updatePreferences({ quickQuotaVisible: event.currentTarget.checked })} />
           <span>
             <strong>{t('quickQuota')}</strong>

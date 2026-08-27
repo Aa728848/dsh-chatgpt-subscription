@@ -9,6 +9,7 @@ export interface ResponsesPayload extends Record<string, unknown> {
   input: Array<Record<string, unknown>>
   stream: true
   store: false
+  service_tier?: string
 }
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -72,6 +73,7 @@ export async function buildResponsesPayload(
   attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
   localRawImages: LocalRawImageOptions = {},
   outputVerbosity: CodexOutputVerbosity | null = null,
+  fastMode: boolean = false,
 ): Promise<ResponsesPayload> {
   const sandboxRetryTools = recentSandboxRetryToolNames(options.messages)
   const resolveLocalRawImages = supportsImageInput(options)
@@ -164,6 +166,7 @@ export async function buildResponsesPayload(
     payload.parallel_tool_calls = true
   }
   if (outputVerbosity !== null) payload.text = { verbosity: outputVerbosity }
+  if (fastMode) payload.service_tier = 'priority'
   if (options.reasoningEffort !== undefined) {
     payload.reasoning = codexModelSupportsReasoningSummary(options.model)
       ? { effort: options.reasoningEffort, summary: 'auto' }

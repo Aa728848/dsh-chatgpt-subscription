@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.28 - 2026-08-28
 
-（暂无内容）
+- 新增支持 1.5x 倍速快速模式（Fast Mode / Priority Service Tier）：在设置页「增强功能」中提供开关，开启后向 Codex 后端请求自动注入 `service_tier: 'priority'`，以约 2x–2.5x 额度消耗换取约 1.5 倍的 Token 生成速度。
+- 修复偏好设置更新白名单校验，支持持久化保存 `fastMode` 配置。
 
 ## 0.1.21 - 2026-08-22
 
