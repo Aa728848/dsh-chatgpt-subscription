@@ -83,6 +83,7 @@ export async function buildResponsesPayload(
     ...options.messages
       .filter((message) => message.role === 'system')
       .map((message) => blocksToText(message.content).trim()),
+    progressExplanationInstruction(options.tools),
     sandboxToolInstruction(options.tools, sandboxRetryTools),
     commandToolInstruction(options.tools),
     runCodeInstruction(options.tools),
@@ -173,6 +174,11 @@ export async function buildResponsesPayload(
       : { effort: options.reasoningEffort }
   }
   return payload
+}
+
+function progressExplanationInstruction(tools: GenerateOptions['tools']): string | undefined {
+  if (!tools?.length) return undefined
+  return 'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'
 }
 
 function runCodeInstruction(tools: GenerateOptions['tools']): string | undefined {

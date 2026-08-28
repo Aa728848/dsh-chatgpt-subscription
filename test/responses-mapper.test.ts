@@ -24,7 +24,8 @@ describe('Responses payload mapping', () => {
     const payload = await buildResponsesPayload(options, {
       readImage: async (ref) => ({ ref, data: new Uint8Array([1, 2, 3]) }),
     })
-    expect(payload.instructions).toBe('Be precise.')
+    expect(payload.instructions).toContain('Be precise.')
+    expect(payload.instructions).toContain('Progress and tool execution rule')
     expect(payload.input).toContainEqual({
       role: 'user',
       content: [
@@ -35,6 +36,22 @@ describe('Responses payload mapping', () => {
     expect(payload.input).toContainEqual({ type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"a"}' })
     expect(payload.input).toContainEqual({ type: 'function_call_output', call_id: 'call_1', output: 'done' })
     expect(payload).toMatchObject({ stream: true, store: false, tool_choice: 'auto', reasoning: { effort: 'high', summary: 'auto' } })
+  })
+
+  it('injects progress and tool execution rule when tools are present, omits when absent', async () => {
+    const withoutTools = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', system: 'System prompt only.', messages: [] } as unknown as GenerateOptions
+    const payloadWithoutTools = await buildResponsesPayload(withoutTools, unusedAttachments())
+    expect(payloadWithoutTools.instructions).toBe('System prompt only.')
+
+    const withTools = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', system: 'System prompt.',
+      tools: [{ name: 'read_file', description: 'Read', parameters: { type: 'object' } }],
+      messages: [],
+    } as unknown as GenerateOptions
+    const payloadWithTools = await buildResponsesPayload(withTools, unusedAttachments())
+    expect(payloadWithTools.instructions).toContain('System prompt.')
+    expect(payloadWithTools.instructions).toContain('Progress and tool execution rule')
+    expect(payloadWithTools.instructions).toContain('output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call')
   })
 
   it('maps the configured output verbosity to the Responses text control', async () => {

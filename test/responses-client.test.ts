@@ -188,6 +188,24 @@ describe('Responses streaming', () => {
     expect(responseFetch).toHaveBeenCalledTimes(1)
     oauth.dispose()
   })
+
+  it('correctly handles interleaved progress text followed by a tool call in the same turn', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.output_text.delta', delta: '我会按刚才的优先级执行：先修改文件...' },
+      { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'fc_edit', call_id: 'call_edit', name: 'edit_file', arguments: '' } },
+      { type: 'response.function_call_arguments.delta', item_id: 'fc_edit', output_index: 1, delta: '{"path":"src/index.ts"}' },
+      { type: 'response.function_call_arguments.done', item_id: 'fc_edit', output_index: 1, arguments: '{"path":"src/index.ts"}' },
+      { type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', id: 'fc_edit', call_id: 'call_edit', name: 'edit_file', arguments: '{"path":"src/index.ts"}' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 20, output_tokens: 30 } } },
+    ])))
+
+    expect(chunks).toContainEqual({ type: 'block-start', index: 0, blockType: 'text' })
+    expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: '我会按刚才的优先级执行：先修改文件...' })
+    expect(chunks).toContainEqual({ type: 'block-end', index: 0, block: { type: 'text', text: '我会按刚才的优先级执行：先修改文件...' } })
+    expect(chunks).toContainEqual({ type: 'block-start', index: 1, blockType: 'tool-call' })
+    expect(chunks).toContainEqual({ type: 'block-end', index: 1, block: { type: 'tool-call', id: 'call_edit', name: 'edit_file', arguments: '{"path":"src/index.ts"}' } })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+  })
 })
 
 function sse(events: unknown[]): Response {
