@@ -31,6 +31,9 @@ describe('client registration', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': contextWindow, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        subagentReasoningEffort: null,
+        subagentContextWindow: null,
+        subagentMaxDepth: null,
         writable: true,
       }
       if (init?.method === 'POST') return Response.json({ ok: true, value: preferences })
@@ -55,12 +58,20 @@ describe('client registration', () => {
       const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsh-codex-models input[type="checkbox"]')
       expect(modelChecks).toHaveLength(7)
       expect(Array.from(modelChecks).filter(model => model.checked)).toHaveLength(3)
+
+      const subagentEffortSelect = container.querySelector<HTMLSelectElement>('select[aria-label="子代理默认思考深度"]')
+      expect(subagentEffortSelect).not.toBeNull()
+      const subagentDepthSelect = container.querySelector<HTMLSelectElement>('select[aria-label="子代理最大嵌套深度"]')
+      expect(subagentDepthSelect).not.toBeNull()
+      const subagentContextInput = container.querySelector<HTMLInputElement>('input[aria-label="子代理上下文预算"]')
+      expect(subagentContextInput).not.toBeNull()
+
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
-      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(3)
+      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(4)
       const save = container.querySelector<HTMLButtonElement>('button[data-model="gpt-5.6-sol"]')
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)

@@ -38,6 +38,9 @@ export interface SubscriptionPreferencesDto {
     visibleModelIds: string[];
     searchProvider: SearchProviderPreference;
     contextWindowOverrides: CodexContextWindowOverridesDto;
+    subagentReasoningEffort: string | null;
+    subagentContextWindow: number | null;
+    subagentMaxDepth: number | null;
     writable: boolean;
 }
 export interface SubscriptionPreferencesUpdateDto {
@@ -47,6 +50,9 @@ export interface SubscriptionPreferencesUpdateDto {
     visibleModelIds?: string[];
     searchProvider?: SearchProviderPreference;
     contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>;
+    subagentReasoningEffort?: string | null;
+    subagentContextWindow?: number | null;
+    subagentMaxDepth?: number | null;
 }
 export interface QuotaWindowDto {
     usedPercent: number;

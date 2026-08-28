@@ -21,6 +21,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [resetCreditNotice, setResetCreditNotice] = useState<string | null>(null)
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
+  const [subagentContextDraft, setSubagentContextDraft] = useState<string | null>(null)
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
@@ -158,6 +159,22 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setContextDrafts((drafts) => ({ ...drafts, [model]: String(parsed) }))
   }
 
+  const updateSubagentContextWindow = async (): Promise<void> => {
+    const draft = subagentContextDraft?.trim()
+    if (!draft) {
+      await updatePreferences({ subagentContextWindow: null })
+      setSubagentContextDraft(null)
+      return
+    }
+    const parsed = parseCapacity(draft)
+    if (parsed === null) {
+      setError(t('contextWindowInvalid'))
+      return
+    }
+    await updatePreferences({ subagentContextWindow: parsed })
+    setSubagentContextDraft(String(parsed))
+  }
+
   const logout = async (): Promise<void> => run('logout', async () => {
     await apiRef.current.logout()
     eventSourceRef.current?.close()
@@ -268,6 +285,78 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <option value="medium">{t('verbosityMedium')}</option>
             <option value="high">{t('verbosityHigh')}</option>
           </select>
+        </div>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('subagentReasoningEffort')}</strong>
+            <p className="dsh-codex-muted">{t('subagentReasoningEffortHint')}</p>
+          </div>
+          <select className="dsh-codex-select" aria-label={t('subagentReasoningEffort')} value={status?.preferences.subagentReasoningEffort ?? ''} disabled={busy !== null} onChange={(event) => {
+            const value = event.currentTarget.value
+            void updatePreferences({ subagentReasoningEffort: value === '' ? null : value })
+          }}>
+            <option value="">{t('providerDefault')}</option>
+            <option value="none">{reasoningEffortLabel('none', t)}</option>
+            <option value="low">{reasoningEffortLabel('low', t)}</option>
+            <option value="medium">{reasoningEffortLabel('medium', t)}</option>
+            <option value="high">{reasoningEffortLabel('high', t)}</option>
+            <option value="xhigh">{reasoningEffortLabel('xhigh', t)}</option>
+            <option value="max">{reasoningEffortLabel('max', t)}</option>
+          </select>
+        </div>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('subagentMaxDepth')}</strong>
+            <p className="dsh-codex-muted">{t('subagentMaxDepthHint')}</p>
+          </div>
+          <select className="dsh-codex-select" aria-label={t('subagentMaxDepth')} value={status?.preferences.subagentMaxDepth === null || status?.preferences.subagentMaxDepth === undefined ? '' : String(status.preferences.subagentMaxDepth)} disabled={busy !== null} onChange={(event) => {
+            const value = event.currentTarget.value
+            void updatePreferences({ subagentMaxDepth: value === '' ? null : Number(value) })
+          }}>
+            <option value="">{t('providerDefault')}</option>
+            <option value="0">0 ({t('subagentDisabled')})</option>
+            <option value="1">1 {t('levels')}</option>
+            <option value="2">2 {t('levels')}</option>
+            <option value="3">3 {t('levels')}</option>
+          </select>
+        </div>
+        <div className="dsh-codex-context-settings">
+          <div>
+            <strong>{t('subagentContextWindow')}</strong>
+            <p className="dsh-codex-muted">{t('subagentContextWindowHint')}</p>
+          </div>
+          <div className="dsh-codex-context-row">
+            <label htmlFor="dsh-codex-subagent-context">{t('subagentContextWindow')}</label>
+            <span className="dsh-codex-capacity-control">
+              <input
+                id="dsh-codex-subagent-context"
+                type="text"
+                inputMode="numeric"
+                placeholder={t('providerDefault')}
+                value={subagentContextDraft ?? (status?.preferences.subagentContextWindow ? formatCapacity(status.preferences.subagentContextWindow) : '')}
+                disabled={busy !== null}
+                aria-label={t('subagentContextWindow')}
+                onChange={(event) => {
+                  setSubagentContextDraft(event.currentTarget.value)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  void updateSubagentContextWindow()
+                }}
+              />
+              <small>{t('tokens')}</small>
+              <button
+                className="dsh-codex-context-save"
+                type="button"
+                aria-label={t('save') + ' ' + t('subagentContextWindow')}
+                disabled={busy !== null || subagentContextDraft === null}
+                onClick={() => void updateSubagentContextWindow()}
+              >
+                {t('save')}
+              </button>
+            </span>
+          </div>
         </div>
         <div className="dsh-codex-context-settings">
           <div>

@@ -67,6 +67,9 @@ describe('host routes', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        subagentReasoningEffort: null,
+        subagentContextWindow: null,
+        subagentMaxDepth: null,
         writable: true,
       }),
       update: async (patch) => ({
@@ -80,6 +83,9 @@ describe('host routes', () => {
           'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
           'gpt-5.6-luna': patch.contextWindowOverrides?.['gpt-5.6-luna'] ?? 272_000,
         },
+        subagentReasoningEffort: patch.subagentReasoningEffort !== undefined ? patch.subagentReasoningEffort : null,
+        subagentContextWindow: patch.subagentContextWindow !== undefined ? patch.subagentContextWindow : null,
+        subagentMaxDepth: patch.subagentMaxDepth !== undefined ? patch.subagentMaxDepth : null,
         writable: true,
       }),
       watch: () => () => undefined,
@@ -103,13 +109,43 @@ describe('host routes', () => {
     const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin },
-      body: JSON.stringify({ fastMode: true, outputVerbosity: 'high', visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'], contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } }),
+      body: JSON.stringify({
+        fastMode: true,
+        outputVerbosity: 'high',
+        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
+        contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
+        subagentReasoningEffort: 'high',
+        subagentContextWindow: 128_000,
+        subagentMaxDepth: 2,
+      }),
     })
     expect(updatedPreferences.status).toBe(200)
     expect(await updatedPreferences.json()).toMatchObject({
       ok: true,
-      value: { fastMode: true, outputVerbosity: 'high', visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'], contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 } },
+      value: {
+        fastMode: true,
+        outputVerbosity: 'high',
+        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
+        contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
+        subagentReasoningEffort: 'high',
+        subagentContextWindow: 128_000,
+        subagentMaxDepth: 2,
+      },
     })
+
+    const rejectedMaxDepth = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ subagentMaxDepth: 4 }),
+    })
+    expect(rejectedMaxDepth.status).toBe(400)
+
+    const rejectedSubagentContext = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ subagentContextWindow: -1 }),
+    })
+    expect(rejectedSubagentContext.status).toBe(400)
 
     const rejectedContextModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',

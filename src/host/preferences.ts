@@ -6,6 +6,7 @@ import {
   PREFERENCES_NAMESPACE,
   SEARCH_PROVIDER_CODEX,
   SEARCH_PROVIDER_DSH,
+  SUBAGENT_MAX_DEPTH_LIMIT,
   isCodexOutputVerbosity,
   isSearchProviderPreference,
 } from '../shared/preferences.ts'
@@ -37,6 +38,9 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
       'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
       'gpt-5.6-luna': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-luna']),
     }).default(DEFAULT_PREFERENCES.contextWindowOverrides),
+    subagentReasoningEffort: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.subagentReasoningEffort),
+    subagentContextWindow: z.union([z.number().step(1).min(1), z.const(null)]).default(DEFAULT_PREFERENCES.subagentContextWindow),
+    subagentMaxDepth: z.union([z.number().step(1).min(0).max(SUBAGENT_MAX_DEPTH_LIMIT), z.const(null)]).default(DEFAULT_PREFERENCES.subagentMaxDepth),
   }))
   return new SettingsPreferenceStore(scope)
 }
@@ -69,6 +73,15 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
         ...this.scope.get().contextWindowOverrides,
         ...patch.contextWindowOverrides,
       }
+    }
+    if (patch.subagentReasoningEffort !== undefined) {
+      normalized.subagentReasoningEffort = patch.subagentReasoningEffort
+    }
+    if (patch.subagentContextWindow !== undefined) {
+      normalized.subagentContextWindow = patch.subagentContextWindow
+    }
+    if (patch.subagentMaxDepth !== undefined) {
+      normalized.subagentMaxDepth = patch.subagentMaxDepth
     }
     await this.scope.update(normalized)
     return this.status()

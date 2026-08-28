@@ -54,6 +54,9 @@ describe('CodexChatGptAdapter', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000, 'gpt-5.6-terra': 200_000, 'gpt-5.6-luna': 256_000 },
+        subagentReasoningEffort: 'xhigh',
+        subagentContextWindow: 128_000,
+        subagentMaxDepth: 2,
         writable: true,
       }),
     } as never)
@@ -63,8 +66,14 @@ describe('CodexChatGptAdapter', () => {
       expect.objectContaining({ id: 'gpt-5.6-terra' }),
       expect.objectContaining({ id: 'gpt-5.6-luna' }),
     ]))
-    await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.6-sol')).resolves.toMatchObject({ context: { contextWindow: 1_000_000 } })
-    await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.4')).resolves.toMatchObject({ context: { contextWindow: 272_000 } })
+    await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.6-sol')).resolves.toMatchObject({
+      context: { contextWindow: 1_000_000 },
+      reasoning: { defaultEffort: 'xhigh' },
+    })
+    await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.4')).resolves.toMatchObject({
+      context: { contextWindow: 272_000 },
+      reasoning: { defaultEffort: 'xhigh' },
+    })
   })
 
   it('binds one model-resolution generation to its eventual stream via prepareCall', async () => {

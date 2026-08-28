@@ -19,10 +19,15 @@ export function listCodexModels(preferences?: SubscriptionPreferenceStore): LlmM
 
 export function resolveCodexModel(model: string, preferences?: SubscriptionPreferenceStore): LlmResolvedModelInfo {
   const entry = resolveCodexCatalogEntry(model)
+  const status = preferences?.status()
   const configuredContextWindow = isConfigurableContextModelId(model)
-    ? preferences?.status().contextWindowOverrides[model]
+    ? status?.contextWindowOverrides[model]
     : undefined
   const efforts = reasoningEffortsForModel(model)
+  const customEffort = status?.subagentReasoningEffort
+  const effectiveDefaultEffort = customEffort && (efforts as readonly string[]).includes(customEffort)
+    ? customEffort
+    : entry.defaultReasoningEffort
   return {
     provider: PROVIDER_ID,
     id: model,
@@ -35,7 +40,7 @@ export function resolveCodexModel(model: string, preferences?: SubscriptionPrefe
         id: ReasoningEffortId(effort),
         name: effort,
       })),
-      defaultEffort: ReasoningEffortId(entry.defaultReasoningEffort),
+      defaultEffort: ReasoningEffortId(effectiveDefaultEffort),
     },
   }
 }
