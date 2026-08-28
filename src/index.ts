@@ -5,7 +5,6 @@ import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-settings'
-import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
@@ -16,12 +15,9 @@ import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
-import { SubagentContextAdapter } from './host/subagent-context-adapter.ts'
-import { installSubagentModelPreference } from './host/subagent-model-preference.ts'
-import { installSubagentPolicy } from './host/subagent-policy.ts'
 import { UsageService } from './host/usage-service.ts'
 
-export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader', 'agents']
+export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader']
 
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
@@ -44,24 +40,14 @@ export function apply(ctx: Context): void {
     }
     const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-    const subagentContextAdapter = new SubagentContextAdapter(ctx.llm, () => {
-      const selected = preferences.status()
-      return { provider: selected.subagentProvider, model: selected.subagentModel, contextWindow: selected.subagentContextWindow }
-    })
-    const disposeSubagentContextAdapter = ctx.llm.registerAdapter([SubagentContextAdapter.provider], subagentContextAdapter)
-    const disposeSubagentModelPreference = installSubagentModelPreference(ctx, preferences)
-    const disposeSubagentPolicy = installSubagentPolicy(ctx, preferences)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments))
     const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth))
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
     applySearchPreference()
     return () => {
       disposePreferenceWatch()
-      disposeSubagentPolicy()
-      disposeSubagentModelPreference()
       disposeSearchProvider()
       disposeImageTool()
-      disposeSubagentContextAdapter()
       disposeAdapter()
       disposeRoutes()
       oauth.dispose()

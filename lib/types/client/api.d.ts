@@ -1,7 +1,6 @@
-import type { LoginEventDto, LoginStartDto, PluginStatusDto, QuotaStatusDto, SubagentModelCatalogDto, ConnectionTestDto, SubscriptionPreferencesDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts';
+import type { LoginEventDto, LoginStartDto, PluginStatusDto, QuotaStatusDto, ConnectionTestDto, SubscriptionPreferencesDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts';
 export declare class SubscriptionApi {
     status(): Promise<PluginStatusDto>;
-    models(): Promise<SubagentModelCatalogDto>;
     startLogin(): Promise<LoginStartDto>;
     cancelLogin(loginId: string): Promise<{
         cancelled: boolean;

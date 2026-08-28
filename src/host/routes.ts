@@ -2,23 +2,17 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
-import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubagentModelCatalogDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
-import { SUBAGENT_MAX_DEPTH_LIMIT } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
-import { SubagentContextAdapter } from './subagent-context-adapter.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
 export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageService, preferences: SubscriptionPreferenceStore): () => void {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
-    if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/models`) {
-      json(response, { ok: true, value: await subagentModelCatalog(ctx) })
-      return
-    }
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/status`) {
       const oauthStatus = await oauth.status()
       json(response, { ok: true, value: {
@@ -230,30 +224,6 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     if (value.searchProvider !== 'dsh' && value.searchProvider !== 'codex') throw new PreferenceError('searchProvider must be dsh or codex.')
     patch.searchProvider = value.searchProvider
   }
-  if ('subagentProvider' in value) {
-    if (typeof value.subagentProvider !== 'string' || value.subagentProvider === '') throw new PreferenceError('subagentProvider must be a non-empty string.')
-    patch.subagentProvider = value.subagentProvider
-  }
-  if ('subagentModel' in value) {
-    if (typeof value.subagentModel !== 'string' || value.subagentModel === '') throw new PreferenceError('subagentModel must be a non-empty string.')
-    patch.subagentModel = value.subagentModel
-  }
-  if ('subagentReasoningEffort' in value) {
-    if (value.subagentReasoningEffort !== null && (typeof value.subagentReasoningEffort !== 'string' || value.subagentReasoningEffort === '')) throw new PreferenceError('subagentReasoningEffort must be null or a non-empty string.')
-    patch.subagentReasoningEffort = value.subagentReasoningEffort
-  }
-  if ('subagentContextWindow' in value) {
-    if (!Number.isSafeInteger(value.subagentContextWindow) || (value.subagentContextWindow as number) < 1) throw new PreferenceError('subagentContextWindow must be a positive integer.')
-    patch.subagentContextWindow = value.subagentContextWindow as number
-  }
-  if ('subagentMaxDepth' in value) {
-    if (!Number.isSafeInteger(value.subagentMaxDepth) || (value.subagentMaxDepth as number) < 0 || (value.subagentMaxDepth as number) > SUBAGENT_MAX_DEPTH_LIMIT) throw new PreferenceError(`subagentMaxDepth must be an integer from 0 to ${SUBAGENT_MAX_DEPTH_LIMIT}.`)
-    patch.subagentMaxDepth = value.subagentMaxDepth as number
-  }
-  if ('subagentMaxAgents' in value) {
-    if (!Number.isSafeInteger(value.subagentMaxAgents) || (value.subagentMaxAgents as number) < 1) throw new PreferenceError('subagentMaxAgents must be a positive integer.')
-    patch.subagentMaxAgents = value.subagentMaxAgents as number
-  }
   if ('contextWindowOverrides' in value) {
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')
     const overrides: NonNullable<SubscriptionPreferencesUpdateDto['contextWindowOverrides']> = {}
@@ -267,55 +237,6 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     patch.contextWindowOverrides = overrides
   }
   return patch
-}
-
-
-async function subagentModelCatalog(ctx: Context): Promise<SubagentModelCatalogDto> {
-  const results = await Promise.all(ctx.llm.listProviders().filter(provider => provider.id !== SubagentContextAdapter.provider).map(async (provider) => {
-    try {
-      const models = await ctx.llm.listModels(provider.id)
-      return {
-        kind: 'provider' as const,
-        provider: {
-          id: provider.id,
-          name: provider.name,
-          models: await Promise.all(models.map(async (model) => {
-            const resolved = await ctx.llm.resolveModelInfo(provider.id, model.id)
-            return {
-              id: model.id,
-              name: model.name,
-              ...(model.description === undefined ? {} : { description: model.description }),
-              ...(resolved.context === undefined ? {} : {
-                contextWindow: resolved.context.contextWindow,
-                maxContextWindow: provider.id === 'codex-chatgpt' && isConfigurableContextModelId(model.id)
-                  ? GPT_56_MAX_CONTEXT_WINDOW
-                  : resolved.context.contextWindow,
-              }),
-              ...(resolved.reasoning === undefined ? {} : {
-                reasoning: {
-                  efforts: resolved.reasoning.efforts.map((effort) => ({
-                    id: effort.id,
-                    name: effort.name,
-                    ...(effort.description === undefined ? {} : { description: effort.description }),
-                  })),
-                  ...(resolved.reasoning.defaultEffort === undefined ? {} : { defaultEffort: resolved.reasoning.defaultEffort }),
-                },
-              }),
-            }
-          })),
-        },
-      }
-    } catch (error) {
-      return {
-        kind: 'failure' as const,
-        failure: { id: provider.id, name: provider.name, message: error instanceof Error ? error.message : String(error) },
-      }
-    }
-  }))
-  return {
-    providers: results.filter((result): result is Extract<typeof result, { kind: 'provider' }> => result.kind === 'provider').map(result => result.provider),
-    failures: results.filter((result): result is Extract<typeof result, { kind: 'failure' }> => result.kind === 'failure').map(result => result.failure),
-  }
 }
 
 function json<T>(response: ServerResponse, envelope: ApiEnvelope<T>, status = 200): void {
