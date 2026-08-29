@@ -84,7 +84,6 @@ function sendSearch(
       input: query,
       commands: {
         search_query: [{ q: query }],
-        response_length: 'short',
       },
       settings: {
         allowed_callers: ['direct'],
