@@ -7,11 +7,18 @@ import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId
 import { SUBAGENT_MAX_DEPTH_LIMIT } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
+import type { ProxyManager } from './proxy-manager.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
-export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageService, preferences: SubscriptionPreferenceStore): () => void {
+export function registerRoutes(
+  ctx: Context,
+  oauth: OAuthService,
+  usage: UsageService,
+  preferences: SubscriptionPreferenceStore,
+  proxyManager?: ProxyManager,
+): () => void {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/status`) {
@@ -22,6 +29,8 @@ export function registerRoutes(ctx: Context, oauth: OAuthService, usage: UsageSe
         quota: await usage.status(oauthStatus.authenticated),
         preferences: preferences.status(),
         allProviders,
+        detectedProxy: proxyManager?.getSystemProxy() ?? null,
+        activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
       } })
       return
     }
@@ -261,6 +270,18 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
       efforts[key] = effort
     }
     patch.subagentModelEfforts = efforts
+  }
+  if ('proxyMode' in value) {
+    if (value.proxyMode !== 'auto' && value.proxyMode !== 'custom' && value.proxyMode !== 'direct') {
+      throw new PreferenceError('proxyMode must be auto, custom, or direct.')
+    }
+    patch.proxyMode = value.proxyMode
+  }
+  if ('customProxyUrl' in value) {
+    if (value.customProxyUrl !== null && typeof value.customProxyUrl !== 'string') {
+      throw new PreferenceError('customProxyUrl must be a string or null.')
+    }
+    patch.customProxyUrl = value.customProxyUrl
   }
   return patch
 }

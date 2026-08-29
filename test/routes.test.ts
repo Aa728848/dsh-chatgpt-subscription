@@ -71,6 +71,8 @@ describe('host routes', () => {
         subagentContextWindow: null,
         subagentMaxDepth: null,
         subagentModelEfforts: {},
+        proxyMode: 'auto',
+        customProxyUrl: null,
         writable: true,
       }),
       update: async (patch) => ({
@@ -88,6 +90,8 @@ describe('host routes', () => {
         subagentContextWindow: patch.subagentContextWindow !== undefined ? patch.subagentContextWindow : null,
         subagentMaxDepth: patch.subagentMaxDepth !== undefined ? patch.subagentMaxDepth : null,
         subagentModelEfforts: patch.subagentModelEfforts !== undefined ? patch.subagentModelEfforts : {},
+        proxyMode: patch.proxyMode !== undefined ? patch.proxyMode : 'auto',
+        customProxyUrl: patch.customProxyUrl !== undefined ? patch.customProxyUrl : null,
         writable: true,
       }),
       watch: () => () => undefined,
@@ -124,6 +128,8 @@ describe('host routes', () => {
           'kimi-coding/k3': 'high',
           'deepseek-official/deepseek-chat': 'medium',
         },
+        proxyMode: 'custom',
+        customProxyUrl: 'http://127.0.0.1:8888',
       }),
     })
     expect(updatedPreferences.status).toBe(200)
@@ -137,6 +143,8 @@ describe('host routes', () => {
         subagentReasoningEffort: 'high',
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
+        proxyMode: 'custom',
+        customProxyUrl: 'http://127.0.0.1:8888',
         subagentModelEfforts: {
           'kimi-coding/k3': 'high',
           'deepseek-official/deepseek-chat': 'medium',

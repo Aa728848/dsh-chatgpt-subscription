@@ -45,7 +45,7 @@ export function apply(ctx: Context): void {
         ctx.logger.warn(`[dsh-chatgpt-subscription] Search provider preference could not be applied: ${error instanceof Error ? error.message : String(error)}`)
       })
     }
-    const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences)
+    const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences, proxyManager)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))

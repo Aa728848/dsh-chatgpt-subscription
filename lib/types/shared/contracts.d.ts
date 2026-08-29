@@ -22,6 +22,8 @@ export interface PluginStatusDto {
     quota: QuotaStatusDto;
     preferences: SubscriptionPreferencesDto;
     allProviders?: ProviderCatalogGroupDto[];
+    detectedProxy?: string | null;
+    activeProxy?: string | null;
     error?: PublicErrorDto;
 }
 export type OAuthStatusDto = Omit<PluginStatusDto, 'quota' | 'preferences'>;

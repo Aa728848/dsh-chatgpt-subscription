@@ -252,27 +252,64 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           </div>
           <div className="dsh-codex-segments" role="radiogroup" aria-label={t('proxyMode')}>
             <label>
-              <input type="radio" name="dsh-codex-proxy-mode" checked={(status?.preferences.proxyMode ?? 'auto') === 'auto'} disabled={busy !== null} onChange={() => updatePreferences({ proxyMode: 'auto' })} />
+              <input
+                type="radio"
+                name="dsh-codex-proxy-mode"
+                checked={(status?.preferences.proxyMode ?? 'auto') === 'auto'}
+                disabled={busy !== null}
+                onChange={() => {
+                  setStatus(current => current ? { ...current, preferences: { ...current.preferences, proxyMode: 'auto' } } : current)
+                  void updatePreferences({ proxyMode: 'auto' })
+                }}
+              />
               <span>{t('proxyModeAuto')}</span>
             </label>
             <label>
-              <input type="radio" name="dsh-codex-proxy-mode" checked={status?.preferences.proxyMode === 'custom'} disabled={busy !== null} onChange={() => updatePreferences({ proxyMode: 'custom' })} />
+              <input
+                type="radio"
+                name="dsh-codex-proxy-mode"
+                checked={status?.preferences.proxyMode === 'custom'}
+                disabled={busy !== null}
+                onChange={() => {
+                  setStatus(current => current ? { ...current, preferences: { ...current.preferences, proxyMode: 'custom' } } : current)
+                  void updatePreferences({ proxyMode: 'custom' })
+                }}
+              />
               <span>{t('proxyModeCustom')}</span>
             </label>
             <label>
-              <input type="radio" name="dsh-codex-proxy-mode" checked={status?.preferences.proxyMode === 'direct'} disabled={busy !== null} onChange={() => updatePreferences({ proxyMode: 'direct' })} />
+              <input
+                type="radio"
+                name="dsh-codex-proxy-mode"
+                checked={status?.preferences.proxyMode === 'direct'}
+                disabled={busy !== null}
+                onChange={() => {
+                  setStatus(current => current ? { ...current, preferences: { ...current.preferences, proxyMode: 'direct' } } : current)
+                  void updatePreferences({ proxyMode: 'direct' })
+                }}
+              />
               <span>{t('proxyModeDirect')}</span>
             </label>
           </div>
         </div>
+
+        {(status?.preferences.proxyMode ?? 'auto') === 'auto' ? <div className="dsh-codex-proxy-status">
+          {status?.detectedProxy ? <>
+            <span>{t('proxyDetected')}:</span>
+            <code className="dsh-codex-proxy-tag">{status.detectedProxy}</code>
+            <span className="dsh-codex-success">{t('proxyDetectedEffective')}</span>
+          </> : <span className="dsh-codex-muted">{t('proxyNoneDetected')}</span>}
+        </div> : null}
+
+        {status?.preferences.proxyMode === 'direct' ? <p className="dsh-codex-muted" style={{ margin: '8px 0 0' }}>{t('proxyDirectHint')}</p> : null}
+
         {status?.preferences.proxyMode === 'custom' ? <div className="dsh-codex-context-settings">
           <div>
             <strong>{t('customProxyUrl')}</strong>
             <p className="dsh-codex-muted">{t('customProxyUrlHint')}</p>
           </div>
           <div className="dsh-codex-context-row">
-            <label htmlFor="dsh-codex-custom-proxy">{t('customProxyUrl')}</label>
-            <span className="dsh-codex-capacity-control">
+            <span className="dsh-codex-proxy-control">
               <input
                 id="dsh-codex-custom-proxy"
                 type="text"
