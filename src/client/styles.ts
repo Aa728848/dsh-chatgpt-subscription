@@ -37,11 +37,12 @@ const CSS = `
 .dsh-codex-segments{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;display:inline-flex;flex-wrap:nowrap;gap:3px;padding:3px}
 .dsh-codex-segments label{cursor:pointer;display:block;margin:0}
 .dsh-codex-segments input{position:absolute;opacity:0;pointer-events:none}
-.dsh-codex-segments span{border:1px solid transparent;border-radius:6px;color:var(--dsw-alias-label-secondary);display:block;font-size:12px;font-weight:500;line-height:1.2;padding:6px 12px;transition:all .15s ease;user-select:none;white-space:nowrap}
-.dsh-codex-segments label:hover span{color:var(--dsw-alias-label-primary)}
-.dsh-codex-segments input:checked+span{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 22%,var(--dsw-alias-bg-layer-2));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 60%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.15)}
-.dsh-codex-segments input:focus-visible+span{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
-.dsh-codex-segments input:disabled+span{cursor:default;opacity:.5}
+.dsh-codex-segments span,.dsh-codex-segments button{border:1px solid transparent;border-radius:6px;color:var(--dsw-alias-label-secondary);display:block;font:inherit;font-size:12px;font-weight:500;line-height:1.2;padding:6px 12px;transition:all .15s ease;user-select:none;white-space:nowrap}
+.dsh-codex-segments button{background:transparent;cursor:pointer}
+.dsh-codex-segments label:hover span,.dsh-codex-segments button:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.dsh-codex-segments input:checked+span,.dsh-codex-segments button.active,.dsh-codex-segments button[aria-pressed=true]{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 22%,var(--dsw-alias-bg-layer-2));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 60%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.dsh-codex-segments input:focus-visible+span,.dsh-codex-segments button:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
+.dsh-codex-segments input:disabled+span,.dsh-codex-segments button:disabled{cursor:default;opacity:.5}
 .dsh-codex-select,.dsh-codex-capacity-control input{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;padding:7px 9px}
 .dsh-codex-select{max-width:210px;min-width:150px}
 .dsh-codex-context-settings{border-bottom:1px solid var(--dsw-alias-border-l2);display:grid;gap:10px;padding:12px 0}

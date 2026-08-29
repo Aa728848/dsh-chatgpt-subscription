@@ -188,7 +188,11 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   }
 
   const account = status?.account
-  const visibleModelIds = status?.preferences.visibleModelIds ?? DEFAULT_VISIBLE_CODEX_MODEL_IDS
+  const preferences = status?.preferences
+  const quota = status?.quota
+  const storage = status?.storage
+  const login = status?.login
+  const visibleModelIds = preferences?.visibleModelIds ?? DEFAULT_VISIBLE_CODEX_MODEL_IDS
   return <section className="dsh-codex-page" aria-labelledby="dsh-codex-title">
     <header>
       <h2 id="dsh-codex-title" className="dsh-codex-title">{t('title')}</h2>
@@ -208,15 +212,15 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           <InfoRow label={t('accountId')} value={account?.accountIdSuffix ?? '—'} />
           <InfoRow label={t('expires')} value={formatDate(account?.tokenExpiresAt)} />
         </> : null}
-        <InfoRow label={t('storage')} value={storageLabel(status?.storage, t)} />
-        <p className="dsh-codex-notice">{storageNotice(status?.storage, t)}</p>
-        {status?.login.active ? <p className="dsh-codex-muted" role="status">{t('pending')}</p> : null}
+        <InfoRow label={t('storage')} value={storageLabel(storage, t)} />
+        <p className="dsh-codex-notice">{storageNotice(storage, t)}</p>
+        {login?.active ? <p className="dsh-codex-muted" role="status">{t('pending')}</p> : null}
         {popupBlocked ? <p className="dsh-codex-error">{t('popupBlocked')}</p> : null}
         {authUrl !== null ? <a className="dsh-codex-link" href={authUrl} target="_blank" rel="noreferrer">{t('continueLogin')}</a> : null}
         <div className="dsh-codex-actions">
-          {status?.login.active
+          {login?.active
             ? <Button disabled={busy !== null} onClick={cancelLogin}>{t('cancel')}</Button>
-            : <Button primary disabled={busy !== null || status?.storage.available === false} onClick={startLogin}>{status?.authenticated ? t('signInAgain') : t('signIn')}</Button>}
+            : <Button primary disabled={busy !== null || storage?.available === false} onClick={startLogin}>{status?.authenticated ? t('signInAgain') : t('signIn')}</Button>}
           {status?.authenticated ? <>
             <Button disabled={busy !== null} onClick={refreshToken}>{t('refreshToken')}</Button>
             <Button disabled={busy !== null} onClick={logout}>{t('signOut')}</Button>
@@ -253,7 +257,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           <select
             className="dsh-codex-select"
             aria-label={t('proxyMode')}
-            value={status?.preferences.proxyMode ?? 'auto'}
+            value={preferences?.proxyMode ?? 'auto'}
             disabled={busy !== null}
             onChange={(event) => {
               const mode = event.currentTarget.value as 'auto' | 'custom' | 'direct'
@@ -267,7 +271,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           </select>
         </div>
 
-        {(status?.preferences.proxyMode ?? 'auto') === 'auto' ? <div className="dsh-codex-proxy-status">
+        {(preferences?.proxyMode ?? 'auto') === 'auto' ? <div className="dsh-codex-proxy-status">
           {status?.detectedProxy ? <>
             <span>{t('proxyDetected')}:</span>
             <code className="dsh-codex-proxy-tag">{status.detectedProxy}</code>
@@ -275,9 +279,9 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           </> : <span className="dsh-codex-muted">{t('proxyNoneDetected')}</span>}
         </div> : null}
 
-        {status?.preferences.proxyMode === 'direct' ? <p className="dsh-codex-muted" style={{ margin: '8px 0 0' }}>{t('proxyDirectHint')}</p> : null}
+        {preferences?.proxyMode === 'direct' ? <p className="dsh-codex-muted" style={{ margin: '8px 0 0' }}>{t('proxyDirectHint')}</p> : null}
 
-        {status?.preferences.proxyMode === 'custom' ? <div className="dsh-codex-context-settings">
+        {preferences?.proxyMode === 'custom' ? <div className="dsh-codex-context-settings">
           <div>
             <strong>{t('customProxyUrl')}</strong>
             <p className="dsh-codex-muted">{t('customProxyUrlHint')}</p>
@@ -288,7 +292,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
                 id="dsh-codex-custom-proxy"
                 type="text"
                 placeholder={t('customProxyUrlPlaceholder')}
-                value={customProxyDraft ?? (status?.preferences.customProxyUrl ?? '')}
+                value={customProxyDraft ?? (preferences?.customProxyUrl ?? '')}
                 disabled={busy !== null}
                 aria-label={t('customProxyUrl')}
                 onChange={(event) => {
@@ -320,15 +324,25 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <strong>{t('searchProvider')}</strong>
             <p className="dsh-codex-muted">{t('searchProviderHint')}</p>
           </div>
-          <div className="dsh-codex-segments" role="radiogroup" aria-label={t('searchProvider')}>
-            <label>
-              <input type="radio" name="dsh-codex-search-provider" checked={status?.preferences.searchProvider === 'dsh'} disabled={busy !== null} onChange={() => updatePreferences({ searchProvider: 'dsh' })} />
-              <span>{t('searchProviderDsh')}</span>
-            </label>
-            <label>
-              <input type="radio" name="dsh-codex-search-provider" checked={status?.preferences.searchProvider === 'codex'} disabled={busy !== null} onChange={() => updatePreferences({ searchProvider: 'codex' })} />
-              <span>{t('searchProviderCodex')}</span>
-            </label>
+          <div className="dsh-codex-segments" role="group" aria-label={t('searchProvider')}>
+            <button
+              type="button"
+              className={preferences?.searchProvider === 'dsh' ? 'active' : ''}
+              aria-pressed={preferences?.searchProvider === 'dsh'}
+              disabled={busy !== null}
+              onClick={() => void updatePreferences({ searchProvider: 'dsh' })}
+            >
+              {t('searchProviderDsh')}
+            </button>
+            <button
+              type="button"
+              className={preferences?.searchProvider === 'codex' ? 'active' : ''}
+              aria-pressed={preferences?.searchProvider === 'codex'}
+              disabled={busy !== null}
+              onClick={() => void updatePreferences({ searchProvider: 'codex' })}
+            >
+              {t('searchProviderCodex')}
+            </button>
           </div>
         </div>
         <div className="dsh-codex-pref-row">
@@ -336,7 +350,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <strong>{t('outputVerbosity')}</strong>
             <p className="dsh-codex-muted">{t('outputVerbosityHint')}</p>
           </div>
-          <select className="dsh-codex-select" aria-label={t('outputVerbosity')} value={status?.preferences.outputVerbosity ?? ''} disabled={busy !== null} onChange={(event) => {
+          <select className="dsh-codex-select" aria-label={t('outputVerbosity')} value={preferences?.outputVerbosity ?? ''} disabled={busy !== null} onChange={(event) => {
             const value = event.currentTarget.value
             void updatePreferences({ outputVerbosity: value === '' ? null : value as 'low' | 'medium' | 'high' })
           }}>
@@ -353,7 +367,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           </div>
           {CONFIGURABLE_CONTEXT_MODEL_IDS.map((model) => {
             const entry = resolveCodexCatalogEntry(model)
-            const fallback = status?.preferences.contextWindowOverrides[model] ?? entry.contextWindow
+            const fallback = preferences?.contextWindowOverrides?.[model] ?? entry.contextWindow
             const draft = contextDrafts[model]
             const parsedDraft = draft === undefined ? fallback : parseCapacity(draft)
             const dirty = draft !== undefined && parsedDraft !== fallback
@@ -376,14 +390,14 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           })}
         </div>
         <label className="dsh-codex-check">
-          <input type="checkbox" checked={status?.preferences.fastMode === true} disabled={busy !== null} onChange={(event) => updatePreferences({ fastMode: event.currentTarget.checked })} />
+          <input type="checkbox" checked={preferences?.fastMode === true} disabled={busy !== null} onChange={(event) => updatePreferences({ fastMode: event.currentTarget.checked })} />
           <span>
             <strong>{t('fastMode')}</strong>
             <small>{t('fastModeHint')}</small>
           </span>
         </label>
         <label className="dsh-codex-check">
-          <input type="checkbox" checked={status?.preferences.quickQuotaVisible === true} disabled={busy !== null} onChange={(event) => updatePreferences({ quickQuotaVisible: event.currentTarget.checked })} />
+          <input type="checkbox" checked={preferences?.quickQuotaVisible === true} disabled={busy !== null} onChange={(event) => updatePreferences({ quickQuotaVisible: event.currentTarget.checked })} />
           <span>
             <strong>{t('quickQuota')}</strong>
             <small>{t('quickQuotaHint')}</small>
@@ -393,17 +407,17 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
 
       <Section title={t('quota')} aside={<Button disabled={!status?.authenticated || busy !== null} onClick={refreshQuota}>{busy === 'quota' ? t('refreshing') : t('refreshQuota')}</Button>}>
         <p className="dsh-codex-muted">{t('quotaIntro')}</p>
-        {status?.quota.state === 'signed-out' ? <p className="dsh-codex-empty">{t('quotaSignedOut')}</p> : null}
-        {status?.quota.buckets.map((bucket) => <QuotaBucket key={bucket.id} bucket={bucket} t={t} />)}
-        {status?.quota.credits !== null && status?.quota.credits !== undefined ? <QuotaFact label={t('credits')} value={status.quota.credits.unlimited ? t('unlimited') : status.quota.credits.balance ?? (status.quota.credits.hasCredits ? t('available') : t('unavailable'))} /> : null}
-        {status?.quota.individualLimit !== null && status?.quota.individualLimit !== undefined ? <QuotaFact label={t('monthlySpend')} value={individualLimitLabel(status.quota.individualLimit, t)} /> : null}
-        {status?.quota.resetCredits !== null && status?.quota.resetCredits !== undefined ? <ResetCreditsFact resetCredits={status.quota.resetCredits} busy={busy} onUse={useResetCredit} t={t} /> : null}
+        {quota?.state === 'signed-out' || !status?.authenticated ? <p className="dsh-codex-empty">{t('quotaSignedOut')}</p> : null}
+        {quota?.buckets?.map((bucket) => <QuotaBucket key={bucket.id} bucket={bucket} t={t} />)}
+        {quota?.credits !== null && quota?.credits !== undefined ? <QuotaFact label={t('credits')} value={quota.credits.unlimited ? t('unlimited') : quota.credits.balance ?? (quota.credits.hasCredits ? t('available') : t('unavailable'))} /> : null}
+        {quota?.individualLimit !== null && quota?.individualLimit !== undefined ? <QuotaFact label={t('monthlySpend')} value={individualLimitLabel(quota.individualLimit, t)} /> : null}
+        {quota?.resetCredits !== null && quota?.resetCredits !== undefined ? <ResetCreditsFact resetCredits={quota.resetCredits} busy={busy} onUse={useResetCredit} t={t} /> : null}
         {resetCreditNotice !== null ? <p className="dsh-codex-success" role="status">{resetCreditNotice}</p> : null}
-        {status?.quota.spendControlReached === true ? <p className="dsh-codex-warning" role="status">{t('spendControlReached')}</p> : null}
-        {status?.quota.state === 'empty' ? <p className="dsh-codex-empty">{t('noQuota')}</p> : null}
-        {status?.quota.stale ? <p className="dsh-codex-warning" role="status">{t('stale')}</p> : null}
-        {status?.quota.error ? <p className="dsh-codex-error" role="alert">{status.quota.error.message}</p> : null}
-        {status?.quota.fetchedAt ? <p className="dsh-codex-timestamp">{t('updated')}: {formatDate(status.quota.fetchedAt)}</p> : null}
+        {quota?.spendControlReached === true ? <p className="dsh-codex-warning" role="status">{t('spendControlReached')}</p> : null}
+        {quota?.state === 'empty' ? <p className="dsh-codex-empty">{t('noQuota')}</p> : null}
+        {quota?.stale ? <p className="dsh-codex-warning" role="status">{t('stale')}</p> : null}
+        {quota?.error ? <p className="dsh-codex-error" role="alert">{quota.error.message}</p> : null}
+        {quota?.fetchedAt ? <p className="dsh-codex-timestamp">{t('updated')}: {formatDate(quota.fetchedAt)}</p> : null}
       </Section>
     </>}
 
