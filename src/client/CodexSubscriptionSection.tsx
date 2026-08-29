@@ -321,32 +321,6 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
       <Section title={t('enhancements')}>
         <div className="dsh-codex-pref-row">
           <div>
-            <strong>{t('searchProvider')}</strong>
-            <p className="dsh-codex-muted">{t('searchProviderHint')}</p>
-          </div>
-          <div className="dsh-codex-segments" role="group" aria-label={t('searchProvider')}>
-            <button
-              type="button"
-              className={preferences?.searchProvider === 'dsh' ? 'active' : ''}
-              aria-pressed={preferences?.searchProvider === 'dsh'}
-              disabled={busy !== null}
-              onClick={() => void updatePreferences({ searchProvider: 'dsh' })}
-            >
-              {t('searchProviderDsh')}
-            </button>
-            <button
-              type="button"
-              className={preferences?.searchProvider === 'codex' ? 'active' : ''}
-              aria-pressed={preferences?.searchProvider === 'codex'}
-              disabled={busy !== null}
-              onClick={() => void updatePreferences({ searchProvider: 'codex' })}
-            >
-              {t('searchProviderCodex')}
-            </button>
-          </div>
-        </div>
-        <div className="dsh-codex-pref-row">
-          <div>
             <strong>{t('outputVerbosity')}</strong>
             <p className="dsh-codex-muted">{t('outputVerbosityHint')}</p>
           </div>

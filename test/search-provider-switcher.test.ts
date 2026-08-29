@@ -1,26 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
-import { CODEX_SEARCH_PROVIDER_ID } from '../src/compat.ts'
-import { SearchProviderSwitcher } from '../src/host/search-provider-switcher.ts'
+import { restoreDefaultWebProviders } from '../src/host/search-provider-switcher.ts'
 
-describe('SearchProviderSwitcher', () => {
-  it('restores the original provider when leaving Codex search', async () => {
-    const entry = fakeWebEntry({ searchProvider: 'deepseek-official', fetchProvider: 'local' })
-    const switcher = new SearchProviderSwitcher({ entries: () => [entry] as never })
+describe('restoreDefaultWebProviders', () => {
+  it('cleans up codex-subscription search and fetch configs', async () => {
+    const entry = fakeWebEntry({ searchProvider: 'codex-subscription', fetchProvider: 'codex-subscription', extra: 'kept' })
+    await restoreDefaultWebProviders({ entries: () => [entry] as never })
 
-    await switcher.select('codex')
-    await switcher.select('dsh')
-
-    expect(entry.update).toHaveBeenNthCalledWith(1, { config: { searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_SEARCH_PROVIDER_ID } }, true)
-    expect(entry.update).toHaveBeenNthCalledWith(2, { config: { searchProvider: 'deepseek-official', fetchProvider: 'local' } }, true)
+    expect(entry.update).toHaveBeenCalledWith({ config: { extra: 'kept' } }, true)
   })
 
-  it('unsets Codex search and fetch when it was already the persisted provider at startup', async () => {
-    const entry = fakeWebEntry({ searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_SEARCH_PROVIDER_ID })
-    const switcher = new SearchProviderSwitcher({ entries: () => [entry] as never })
+  it('leaves other configs untouched', async () => {
+    const entry = fakeWebEntry({ searchProvider: 'deepseek-official', fetchProvider: 'http' })
+    await restoreDefaultWebProviders({ entries: () => [entry] as never })
 
-    await switcher.select('dsh')
-
-    expect(entry.update).toHaveBeenCalledWith({ config: {} }, true)
+    expect(entry.update).not.toHaveBeenCalled()
   })
 })
 
