@@ -70,6 +70,7 @@ describe('host routes', () => {
         subagentReasoningEffort: null,
         subagentContextWindow: null,
         subagentMaxDepth: null,
+        subagentModelEfforts: {},
         writable: true,
       }),
       update: async (patch) => ({
@@ -86,6 +87,7 @@ describe('host routes', () => {
         subagentReasoningEffort: patch.subagentReasoningEffort !== undefined ? patch.subagentReasoningEffort : null,
         subagentContextWindow: patch.subagentContextWindow !== undefined ? patch.subagentContextWindow : null,
         subagentMaxDepth: patch.subagentMaxDepth !== undefined ? patch.subagentMaxDepth : null,
+        subagentModelEfforts: patch.subagentModelEfforts !== undefined ? patch.subagentModelEfforts : {},
         writable: true,
       }),
       watch: () => () => undefined,
@@ -105,6 +107,7 @@ describe('host routes', () => {
     expect(statusText).not.toContain('account-secret-1234')
     expect(statusText).toContain('"usedPercent":25')
     expect(statusText).toContain('"quickQuotaVisible":false')
+    expect(statusText).toContain('"allProviders"')
 
     const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
@@ -117,6 +120,10 @@ describe('host routes', () => {
         subagentReasoningEffort: 'high',
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
+        subagentModelEfforts: {
+          'kimi-coding/k3': 'high',
+          'deepseek-official/deepseek-chat': 'medium',
+        },
       }),
     })
     expect(updatedPreferences.status).toBe(200)
@@ -130,6 +137,10 @@ describe('host routes', () => {
         subagentReasoningEffort: 'high',
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
+        subagentModelEfforts: {
+          'kimi-coding/k3': 'high',
+          'deepseek-official/deepseek-chat': 'medium',
+        },
       },
     })
 

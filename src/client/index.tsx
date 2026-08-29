@@ -10,6 +10,7 @@ import { CODEX_IMAGE_TOOL_NAME } from '../compat.ts'
 import { CodexComposerQuota } from './CodexComposerQuota.tsx'
 import { CodexImageToolView, type ImageLoader } from './CodexImageToolView.tsx'
 import { CodexSubscriptionSection } from './CodexSubscriptionSection.tsx'
+import { EnhancedSubagentModelSelectionCard } from './EnhancedSubagentModelSelectionCard.tsx'
 import { SubscriptionApi } from './api.ts'
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
 import { installStyles } from './styles.ts'
@@ -57,6 +58,13 @@ export function apply(ctx: ClientContext): void {
       loadImage: imageLoader(ctx, sessionId),
     }),
   }, CodexImageToolView))
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'subagents',
+    order: 10,
+    label: () => t('subagentEnhancements'),
+    locale: NS,
+  }, EnhancedSubagentModelSelectionCard))
 }
 
 function imageLoader(ctx: ClientContext, sessionId: string): ImageLoader {

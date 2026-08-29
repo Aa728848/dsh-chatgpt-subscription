@@ -38,6 +38,16 @@ export declare const zh: {
     readonly latency: "最近延迟";
     readonly models: "可用模型";
     readonly modelsHint: "勾选后模型才会显示在对话页的模型选择列表中；至少保留一个。";
+    readonly proxySettings: "网络代理";
+    readonly proxyMode: "代理模式";
+    readonly proxyModeHint: "配置访问 OpenAI / ChatGPT 服务的网络代理；支持自动读取操作系统代理。";
+    readonly proxyModeAuto: "系统代理（自动检测）";
+    readonly proxyModeCustom: "自定义代理";
+    readonly proxyModeDirect: "直连（禁用代理）";
+    readonly customProxyUrl: "自定义代理地址";
+    readonly customProxyUrlHint: "支持 HTTP/HTTPS/SOCKS5 代理地址，例如 http://127.0.0.1:7890";
+    readonly customProxyUrlPlaceholder: "例如: http://127.0.0.1:7890";
+    readonly saveProxyUrl: "保存代理地址";
     readonly enhancements: "增强功能";
     readonly fastMode: "快速模式（1.5x 速度）";
     readonly fastModeHint: "提升 Token 生成速度至约 1.5 倍；将以约 2x–2.5x 速度消耗 Codex 订阅额度。";
@@ -54,10 +64,16 @@ export declare const zh: {
     readonly subagentEnhancements: "子代理偏好";
     readonly subagentReasoningEffort: "子代理默认思考深度";
     readonly subagentReasoningEffortHint: "当主 Agent 派发子代理且未显式指定推理深度时，使用此默认值。";
+    readonly allSubagentReasoning: "全供应商模型思考深度管理";
+    readonly allSubagentReasoningHint: "为系统内所有已接入供应商（Codex、DeepSeek、Kimi 等）的模型配置默认思考强度。";
+    readonly subagentModelSelectionChoose: "开启后，Agent 可以从下方授权模型中为每个 Subagent 选择提供方、模型和推理强度。";
+    readonly subagentModelSelectionAllowed: "Agent 可选择的模型与默认思考强度";
+    readonly discard: "放弃修改";
+    readonly saving: "保存中…";
     readonly subagentContextWindow: "子代理上下文预算";
     readonly subagentContextWindowHint: "限制子代理运行时的最大上下文 Token 数（例如 128K、256K）；留空跟随模型主设置。";
     readonly subagentMaxDepth: "子代理最大嵌套深度";
-    readonly subagentMaxDepthHint: "限制 Codex 子代理的递归层级（0–3）；0 禁止创建子代理。";
+    readonly subagentMaxDepthHint: "限制子代理的递归层级（0–3）；0 禁止创建子代理。";
     readonly subagentDisabled: "已禁用";
     readonly levels: "层";
     readonly reasoningNone: "无";
@@ -118,6 +134,7 @@ export declare const zh: {
     readonly retry: "重试";
     readonly unknown: "未知";
 };
+export declare function reasoningEffortLabel(effort: string, t: (key: LocaleKey) => string): string;
 export declare const en: Record<keyof typeof zh, string>;
 export type LocaleKey = keyof typeof zh;
 export declare const dictionaries: {
@@ -160,6 +177,16 @@ export declare const dictionaries: {
         readonly latency: "最近延迟";
         readonly models: "可用模型";
         readonly modelsHint: "勾选后模型才会显示在对话页的模型选择列表中；至少保留一个。";
+        readonly proxySettings: "网络代理";
+        readonly proxyMode: "代理模式";
+        readonly proxyModeHint: "配置访问 OpenAI / ChatGPT 服务的网络代理；支持自动读取操作系统代理。";
+        readonly proxyModeAuto: "系统代理（自动检测）";
+        readonly proxyModeCustom: "自定义代理";
+        readonly proxyModeDirect: "直连（禁用代理）";
+        readonly customProxyUrl: "自定义代理地址";
+        readonly customProxyUrlHint: "支持 HTTP/HTTPS/SOCKS5 代理地址，例如 http://127.0.0.1:7890";
+        readonly customProxyUrlPlaceholder: "例如: http://127.0.0.1:7890";
+        readonly saveProxyUrl: "保存代理地址";
         readonly enhancements: "增强功能";
         readonly fastMode: "快速模式（1.5x 速度）";
         readonly fastModeHint: "提升 Token 生成速度至约 1.5 倍；将以约 2x–2.5x 速度消耗 Codex 订阅额度。";
@@ -176,10 +203,16 @@ export declare const dictionaries: {
         readonly subagentEnhancements: "子代理偏好";
         readonly subagentReasoningEffort: "子代理默认思考深度";
         readonly subagentReasoningEffortHint: "当主 Agent 派发子代理且未显式指定推理深度时，使用此默认值。";
+        readonly allSubagentReasoning: "全供应商模型思考深度管理";
+        readonly allSubagentReasoningHint: "为系统内所有已接入供应商（Codex、DeepSeek、Kimi 等）的模型配置默认思考强度。";
+        readonly subagentModelSelectionChoose: "开启后，Agent 可以从下方授权模型中为每个 Subagent 选择提供方、模型和推理强度。";
+        readonly subagentModelSelectionAllowed: "Agent 可选择的模型与默认思考强度";
+        readonly discard: "放弃修改";
+        readonly saving: "保存中…";
         readonly subagentContextWindow: "子代理上下文预算";
         readonly subagentContextWindowHint: "限制子代理运行时的最大上下文 Token 数（例如 128K、256K）；留空跟随模型主设置。";
         readonly subagentMaxDepth: "子代理最大嵌套深度";
-        readonly subagentMaxDepthHint: "限制 Codex 子代理的递归层级（0–3）；0 禁止创建子代理。";
+        readonly subagentMaxDepthHint: "限制子代理的递归层级（0–3）；0 禁止创建子代理。";
         readonly subagentDisabled: "已禁用";
         readonly levels: "层";
         readonly reasoningNone: "无";
@@ -240,6 +273,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "subagentEnhancements" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "subagentContextWindow" | "subagentContextWindowHint" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentDisabled" | "levels" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "proxySettings" | "proxyMode" | "proxyModeHint" | "proxyModeAuto" | "proxyModeCustom" | "proxyModeDirect" | "customProxyUrl" | "customProxyUrlHint" | "customProxyUrlPlaceholder" | "saveProxyUrl" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "subagentEnhancements" | "subagentReasoningEffort" | "subagentReasoningEffortHint" | "allSubagentReasoning" | "allSubagentReasoningHint" | "subagentModelSelectionChoose" | "subagentModelSelectionAllowed" | "discard" | "saving" | "subagentContextWindow" | "subagentContextWindowHint" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentDisabled" | "levels" | "reasoningNone" | "reasoningLow" | "reasoningMedium" | "reasoningHigh" | "reasoningXhigh" | "reasoningMax" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

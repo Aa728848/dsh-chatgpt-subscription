@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 export declare const inject: string[];
 export declare function apply(ctx: Context): void;
+export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts';
 export { OAuthService } from './host/oauth-service.ts';
 export { CodexChatGptAdapter } from './host/adapter.ts';
 export { createCodexImageTool } from './host/codex-images.ts';

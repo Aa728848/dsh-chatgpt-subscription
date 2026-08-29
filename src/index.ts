@@ -10,6 +10,7 @@ import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
+import { ProxyManager } from './host/proxy-manager.ts'
 import { registerPreferenceStore } from './host/preferences.ts'
 import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
@@ -21,10 +22,16 @@ export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'setti
 
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
-  const oauth = new OAuthService(store, { logger: ctx.logger })
-  const usage = new UsageService(oauth)
   const preferences = registerPreferenceStore(ctx.settings)
+  const proxyManager = new ProxyManager({
+    getPreferences: () => preferences.status(),
+    logger: ctx.logger,
+  })
+  const proxyFetch = proxyManager.createFetch()
+  const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger })
+  const usage = new UsageService(oauth, { fetchFn: proxyFetch })
   const responses = new ResponsesClient(oauth, ctx.attachments, {
+    fetchFn: proxyFetch,
     localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
     onGenerationFinished: () => usage.invalidate(),
     outputVerbosity: () => preferences.status().outputVerbosity,
@@ -40,21 +47,61 @@ export function apply(ctx: Context): void {
     }
     const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-    const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments))
-    const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth))
+    const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
+    const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
     applySearchPreference()
+
+    // Transparently inject reasoning effort overrides for any registered provider/model
+    const origResolveCallConfig = ctx.llm.resolveCallConfig?.bind(ctx.llm)
+    const origResolveModelInfo = ctx.llm.resolveModelInfo?.bind(ctx.llm)
+    if (origResolveCallConfig) {
+      ctx.llm.resolveCallConfig = async (options, signal) => {
+        const status = preferences.status()
+        const modelKey = `${options.provider}/${options.model}`
+        const customEffort = status.subagentModelEfforts?.[modelKey]
+          ?? (options.provider === PROVIDER_ID ? status.subagentReasoningEffort : undefined)
+        if (options.reasoningEffort === undefined && customEffort) {
+          options = { ...options, reasoningEffort: customEffort as never }
+        }
+        return origResolveCallConfig(options, signal)
+      }
+    }
+    if (origResolveModelInfo) {
+      ctx.llm.resolveModelInfo = async (provider, model) => {
+        const info = await origResolveModelInfo(provider, model)
+        const status = preferences.status()
+        const modelKey = `${provider}/${model}`
+        const customEffort = status.subagentModelEfforts?.[modelKey]
+          ?? (provider === PROVIDER_ID ? status.subagentReasoningEffort : undefined)
+        if (customEffort && info?.reasoning && (info.reasoning.efforts as readonly { id: string }[]).some(e => e.id === customEffort)) {
+          return {
+            ...info,
+            reasoning: {
+              ...info.reasoning,
+              defaultEffort: customEffort as never,
+            },
+          }
+        }
+        return info
+      }
+    }
+
     return () => {
+      if (origResolveCallConfig) ctx.llm.resolveCallConfig = origResolveCallConfig
+      if (origResolveModelInfo) ctx.llm.resolveModelInfo = origResolveModelInfo
       disposePreferenceWatch()
       disposeSearchProvider()
       disposeImageTool()
       disposeAdapter()
       disposeRoutes()
       oauth.dispose()
+      proxyManager.dispose()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
 
+export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts'
 export { OAuthService } from './host/oauth-service.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'

@@ -22,6 +22,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [subagentContextDraft, setSubagentContextDraft] = useState<string | null>(null)
+  const [customProxyDraft, setCustomProxyDraft] = useState<string | null>(null)
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
@@ -175,6 +176,12 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setSubagentContextDraft(String(parsed))
   }
 
+  const updateCustomProxyUrl = async (): Promise<void> => {
+    const draft = customProxyDraft?.trim()
+    await updatePreferences({ customProxyUrl: draft ? draft : null })
+    setCustomProxyDraft(null)
+  }
+
   const logout = async (): Promise<void> => run('logout', async () => {
     await apiRef.current.logout()
     eventSourceRef.current?.close()
@@ -252,6 +259,65 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         <div className="dsh-codex-actions">
           <Button disabled={!status?.authenticated || busy !== null} onClick={testConnection}>{busy === 'test' ? t('testing') : t('testConnection')}</Button>
         </div>
+      </Section>
+
+      <Section title={t('proxySettings')}>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('proxyMode')}</strong>
+            <p className="dsh-codex-muted">{t('proxyModeHint')}</p>
+          </div>
+          <div className="dsh-codex-segments" role="radiogroup" aria-label={t('proxyMode')}>
+            <label>
+              <input type="radio" name="dsh-codex-proxy-mode" checked={(status?.preferences.proxyMode ?? 'auto') === 'auto'} disabled={busy !== null} onChange={() => updatePreferences({ proxyMode: 'auto' })} />
+              <span>{t('proxyModeAuto')}</span>
+            </label>
+            <label>
+              <input type="radio" name="dsh-codex-proxy-mode" checked={status?.preferences.proxyMode === 'custom'} disabled={busy !== null} onChange={() => updatePreferences({ proxyMode: 'custom' })} />
+              <span>{t('proxyModeCustom')}</span>
+            </label>
+            <label>
+              <input type="radio" name="dsh-codex-proxy-mode" checked={status?.preferences.proxyMode === 'direct'} disabled={busy !== null} onChange={() => updatePreferences({ proxyMode: 'direct' })} />
+              <span>{t('proxyModeDirect')}</span>
+            </label>
+          </div>
+        </div>
+        {status?.preferences.proxyMode === 'custom' ? <div className="dsh-codex-context-settings">
+          <div>
+            <strong>{t('customProxyUrl')}</strong>
+            <p className="dsh-codex-muted">{t('customProxyUrlHint')}</p>
+          </div>
+          <div className="dsh-codex-context-row">
+            <label htmlFor="dsh-codex-custom-proxy">{t('customProxyUrl')}</label>
+            <span className="dsh-codex-capacity-control">
+              <input
+                id="dsh-codex-custom-proxy"
+                type="text"
+                placeholder={t('customProxyUrlPlaceholder')}
+                value={customProxyDraft ?? (status?.preferences.customProxyUrl ?? '')}
+                disabled={busy !== null}
+                aria-label={t('customProxyUrl')}
+                onChange={(event) => {
+                  setCustomProxyDraft(event.currentTarget.value)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  void updateCustomProxyUrl()
+                }}
+              />
+              <button
+                className="dsh-codex-context-save"
+                type="button"
+                aria-label={t('saveProxyUrl')}
+                disabled={busy !== null || customProxyDraft === null}
+                onClick={() => void updateCustomProxyUrl()}
+              >
+                {t('save')}
+              </button>
+            </span>
+          </div>
+        </div> : null}
       </Section>
 
       <Section title={t('enhancements')}>
@@ -358,6 +424,47 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             </span>
           </div>
         </div>
+        {status?.allProviders?.filter(p => p.id !== 'codex-chatgpt' && p.models.some(m => m.reasoningEfforts.length > 0)).map((provider) => (
+          <div className="dsh-codex-context-settings" key={provider.id}>
+            <div>
+              <strong>{provider.name} {t('subagentEnhancements')}</strong>
+              <p className="dsh-codex-muted">{t('allSubagentReasoningHint')}</p>
+            </div>
+            {provider.models.filter(m => m.reasoningEfforts.length > 0).map((model) => {
+              const modelKey = `${provider.id}/${model.id}`
+              const currentEffort = status?.preferences.subagentModelEfforts?.[modelKey] ?? ''
+              return (
+                <div className="dsh-codex-pref-row" key={modelKey}>
+                  <div>
+                    <span>{model.name}</span>
+                    <small className="dsh-codex-muted" style={{ display: 'block', fontSize: 11 }}>{modelKey}</small>
+                  </div>
+                  <select
+                    className="dsh-codex-select"
+                    aria-label={`${model.name} ${t('subagentReasoningEffort')}`}
+                    value={currentEffort}
+                    disabled={busy !== null}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value
+                      void updatePreferences({
+                        subagentModelEfforts: {
+                          [modelKey]: value === '' ? null : value,
+                        },
+                      })
+                    }}
+                  >
+                    <option value="">{t('providerDefault')}</option>
+                    {model.reasoningEfforts.map((effort) => (
+                      <option key={effort} value={effort}>
+                        {reasoningEffortLabel(effort, t)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )
+            })}
+          </div>
+        ))}
         <div className="dsh-codex-context-settings">
           <div>
             <strong>{t('contextWindows')}</strong>

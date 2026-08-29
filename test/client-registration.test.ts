@@ -128,10 +128,13 @@ describe('client registration', () => {
 
     apply(ctx as never)
 
-    expect(injectedSlots).toEqual(['settings.section', 'conversation.input.right', 'tool.call.toolview'])
+    expect(injectedSlots).toEqual(['settings.section', 'conversation.input.right', 'tool.call.toolview', 'settings.plugins.tab'])
     expect(registrations.filter((registration) => registration.name === 'settings.section')).toEqual([
       expect.objectContaining({ name: 'settings.section', id: 'codex-subscription', order: 45 }),
     ])
+    expect(registrations.find((registration) => registration.name === 'settings.plugins.tab')).toMatchObject({
+      id: 'subagents',
+    })
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
       key: CODEX_IMAGE_TOOL_NAME,
     })

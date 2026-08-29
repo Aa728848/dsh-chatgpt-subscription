@@ -122,5 +122,8 @@
     "prepack": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "undici": "^8.10.0"
   }
 }
