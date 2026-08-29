@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
@@ -140,6 +140,11 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     const preferences = await apiRef.current.updatePreferences(patch)
     setStatus((current) => current === null ? current : { ...current, preferences })
   })
+
+  const selectSearchProvider = (provider: SearchProviderPreference): void => {
+    setStatus(current => current ? { ...current, preferences: { ...current.preferences, searchProvider: provider } } : current)
+    void updatePreferences({ searchProvider: provider })
+  }
 
   const toggleVisibleModel = async (modelId: string, checked: boolean): Promise<void> => {
     const current = status?.preferences.visibleModelIds ?? [...DEFAULT_VISIBLE_CODEX_MODEL_IDS]
@@ -330,7 +335,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
               className={preferences?.searchProvider === 'dsh' ? 'active' : ''}
               aria-pressed={preferences?.searchProvider === 'dsh'}
               disabled={busy !== null}
-              onClick={() => void updatePreferences({ searchProvider: 'dsh' })}
+              onClick={() => selectSearchProvider('dsh')}
             >
               {t('searchProviderDsh')}
             </button>
@@ -339,7 +344,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
               className={preferences?.searchProvider === 'codex' ? 'active' : ''}
               aria-pressed={preferences?.searchProvider === 'codex'}
               disabled={busy !== null}
-              onClick={() => void updatePreferences({ searchProvider: 'codex' })}
+              onClick={() => selectSearchProvider('codex')}
             >
               {t('searchProviderCodex')}
             </button>
