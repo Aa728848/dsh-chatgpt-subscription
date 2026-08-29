@@ -25,7 +25,7 @@ describe('Responses payload mapping', () => {
       readImage: async (ref) => ({ ref, data: new Uint8Array([1, 2, 3]) }),
     })
     expect(payload.instructions).toContain('Be precise.')
-    expect(payload.instructions).toContain('Progress and tool execution rule')
+    expect(payload.instructions).toContain('Tool execution and progress reporting rule')
     expect(payload.input).toContainEqual({
       role: 'user',
       content: [
@@ -50,8 +50,8 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payloadWithTools = await buildResponsesPayload(withTools, unusedAttachments())
     expect(payloadWithTools.instructions).toContain('System prompt.')
-    expect(payloadWithTools.instructions).toContain('Progress and tool execution rule')
-    expect(payloadWithTools.instructions).toContain('output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call')
+    expect(payloadWithTools.instructions).toContain('Tool execution and progress reporting rule')
+    expect(payloadWithTools.instructions).toContain('express your step-by-step reasoning, intent, and progress remarks strictly within your thinking/reasoning process')
   })
 
   it('maps the configured output verbosity to the Responses text control', async () => {
