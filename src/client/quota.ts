@@ -17,9 +17,13 @@ export function selectQuotaForModel(quota: QuotaStatusDto | undefined, modelId: 
   if (bucket === undefined) return null
   const windows = quotaWindows(bucket)
   if (windows.length === 0) return null
-  const window = windows.reduce((tightest, candidate) => (
-    candidate.usedPercent > tightest.usedPercent ? candidate : tightest
-  ), windows[0]!)
+  // 优先选取 5h 等短周期额度（按 windowDurationMins 升序排序），没有短周期时选取周额度
+  const sorted = [...windows].sort((a, b) => {
+    const durA = a.windowDurationMins ?? Infinity
+    const durB = b.windowDurationMins ?? Infinity
+    return durA - durB
+  })
+  const window = sorted[0]!
   return {
     bucket,
     window,

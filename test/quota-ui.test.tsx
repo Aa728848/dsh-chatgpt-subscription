@@ -2,6 +2,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { formatReset, QuotaBar, ResetCreditsFact, windowLabel } from '../src/client/CodexSubscriptionSection.tsx'
+import { selectQuotaForModel } from '../src/client/quota.ts'
 import { zh } from '../src/client/locales.ts'
 
 const t = ((key: keyof typeof zh) => zh[key]) as never
@@ -49,5 +50,62 @@ describe('quota UI', () => {
     expect(reset).toContain('2030')
     expect(reset).toMatch(/[（(].*2.*[）)]/)
     vi.useRealTimers()
+  })
+
+  it('selects 5h window when available even if weekly window is more used', () => {
+    const quota = {
+      state: 'ready' as const,
+      stale: false,
+      fetchedAt: Date.now(),
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      resetCredits: null,
+      buckets: [
+        {
+          id: 'codex',
+          name: 'Codex',
+          planType: 'plus',
+          primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: null }, // 5h window
+          secondary: { usedPercent: 75, windowDurationMins: 10080, resetsAt: null }, // weekly window
+          windows: [
+            { usedPercent: 10, windowDurationMins: 300, resetsAt: null },
+            { usedPercent: 75, windowDurationMins: 10080, resetsAt: null },
+          ],
+        },
+      ],
+    }
+
+    const selected = selectQuotaForModel(quota, 'gpt-5.6-sol')
+    expect(selected).not.toBeNull()
+    expect(selected?.window.windowDurationMins).toBe(300)
+    expect(selected?.remainingPercent).toBe(90)
+  })
+
+  it('falls back to weekly window if 5h window is not present', () => {
+    const quota = {
+      state: 'ready' as const,
+      stale: false,
+      fetchedAt: Date.now(),
+      credits: null,
+      individualLimit: null,
+      spendControlReached: null,
+      resetCredits: null,
+      buckets: [
+        {
+          id: 'codex',
+          name: 'Codex',
+          planType: 'plus',
+          primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: null },
+          secondary: null,
+          windows: [{ usedPercent: 40, windowDurationMins: 10080, resetsAt: null }],
+        },
+      ],
+    }
+
+    const selected = selectQuotaForModel(quota, 'gpt-5.6-sol')
+    expect(selected).not.toBeNull()
+    expect(selected?.window.windowDurationMins).toBe(10080)
+    expect(selected?.remainingPercent).toBe(60)
   })
 })
