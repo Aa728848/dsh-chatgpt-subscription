@@ -178,7 +178,7 @@ export async function buildResponsesPayload(
 
 function progressExplanationInstruction(tools: GenerateOptions['tools']): string | undefined {
   if (!tools?.length) return undefined
-  return 'Tool execution and progress reporting rule: when executing multi-step tasks or invoking tools, express your step-by-step reasoning, intent, and progress remarks strictly within your thinking/reasoning process rather than the main response text. Do not emit conversational transitional text in the main body before tool calls. Only emit the final comprehensive report and summary in the main response text in the final turn after all tool calls have settled.'
+  return 'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'
 }
 
 function runCodeInstruction(tools: GenerateOptions['tools']): string | undefined {
