@@ -27,6 +27,7 @@ export interface PluginStatusDto {
     error?: PublicErrorDto;
 }
 export type OAuthStatusDto = Omit<PluginStatusDto, 'quota' | 'preferences'>;
+export type SearchProviderPreference = 'dsh' | 'codex';
 export type CodexOutputVerbosity = 'low' | 'medium' | 'high';
 export interface CodexContextWindowOverridesDto {
     'gpt-5.6-sol': number;
@@ -49,6 +50,7 @@ export interface SubscriptionPreferencesDto {
     fastMode: boolean;
     outputVerbosity: CodexOutputVerbosity | null;
     visibleModelIds: string[];
+    searchProvider: SearchProviderPreference;
     contextWindowOverrides: CodexContextWindowOverridesDto;
     subagentReasoningEffort: string | null;
     subagentContextWindow: number | null;
@@ -63,6 +65,7 @@ export interface SubscriptionPreferencesUpdateDto {
     fastMode?: boolean;
     outputVerbosity?: CodexOutputVerbosity | null;
     visibleModelIds?: string[];
+    searchProvider?: SearchProviderPreference;
     contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>;
     subagentReasoningEffort?: string | null;
     subagentContextWindow?: number | null;

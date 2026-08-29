@@ -232,6 +232,10 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     if (value.outputVerbosity !== null && value.outputVerbosity !== 'low' && value.outputVerbosity !== 'medium' && value.outputVerbosity !== 'high') throw new PreferenceError('outputVerbosity must be null, low, medium, or high.')
     patch.outputVerbosity = value.outputVerbosity
   }
+  if ('searchProvider' in value) {
+    if (value.searchProvider !== 'dsh' && value.searchProvider !== 'codex') throw new PreferenceError('searchProvider must be dsh or codex.')
+    patch.searchProvider = value.searchProvider
+  }
   if ('contextWindowOverrides' in value) {
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')
     const overrides: NonNullable<SubscriptionPreferencesUpdateDto['contextWindowOverrides']> = {}

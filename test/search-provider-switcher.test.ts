@@ -1,19 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
-import { restoreDefaultWebProviders } from '../src/host/search-provider-switcher.ts'
+import { CODEX_FETCH_PROVIDER_ID, CODEX_SEARCH_PROVIDER_ID } from '../src/compat.ts'
+import { SearchProviderSwitcher } from '../src/host/search-provider-switcher.ts'
 
-describe('restoreDefaultWebProviders', () => {
-  it('cleans up codex-subscription search and fetch configs', async () => {
-    const entry = fakeWebEntry({ searchProvider: 'codex-subscription', fetchProvider: 'codex-subscription', extra: 'kept' })
-    await restoreDefaultWebProviders({ entries: () => [entry] as never })
-
-    expect(entry.update).toHaveBeenCalledWith({ config: { extra: 'kept' } }, true)
-  })
-
-  it('leaves other configs untouched', async () => {
+describe('SearchProviderSwitcher', () => {
+  it('switches both search and fetch providers when selecting Codex', async () => {
     const entry = fakeWebEntry({ searchProvider: 'deepseek-official', fetchProvider: 'http' })
-    await restoreDefaultWebProviders({ entries: () => [entry] as never })
+    const switcher = new SearchProviderSwitcher({ entries: () => [entry] as never })
 
-    expect(entry.update).not.toHaveBeenCalled()
+    await switcher.select('codex')
+    expect(entry.update).toHaveBeenCalledWith({ config: { searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_FETCH_PROVIDER_ID } }, true)
+
+    await switcher.select('dsh')
+    expect(entry.update).toHaveBeenCalledWith({ config: { searchProvider: 'deepseek-official', fetchProvider: 'http' } }, true)
   })
 })
 
