@@ -469,17 +469,17 @@ export function ResetCreditsFact({ resetCredits, busy, onUse, t }: { resetCredit
 }
 
 export function QuotaBar({ label, window, t }: { label: string; window: QuotaWindowDto; t: Translate }): React.JSX.Element {
-  const percent = window.usedPercent
+  const percent = typeof window?.usedPercent === 'number' && Number.isFinite(window.usedPercent) ? window.usedPercent : 0
   const level = percent >= 95 ? 'danger' : percent >= 80 ? 'warning' : 'normal'
   const remaining = Math.max(0, 100 - percent)
   return <div className="dsh-codex-meter-wrap">
     <div className="dsh-codex-meter-label"><span>{label}</span><strong>{formatPercent(percent)}</strong></div>
     <div className={`dsh-codex-meter dsh-codex-meter-${level}`} role="progressbar" aria-label={`${label}: ${formatPercent(percent)} ${t('used')}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
-      <span style={{ width: `${percent}%` }} />
+      <span style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
     </div>
     <div className="dsh-codex-meter-meta">
       <span>{percent >= 100 ? `${t('exhausted')} · ${formatPercent(remaining)} ${t('remaining')}` : `${formatPercent(percent)} ${t('used')} · ${formatPercent(remaining)} ${t('remaining')}`}</span>
-      <span>{window.resetsAt === null ? '—' : `${t('resets')}: ${formatReset(window.resetsAt)}`}</span>
+      <span>{window?.resetsAt == null ? '—' : `${t('resets')}: ${formatReset(window.resetsAt)}`}</span>
     </div>
   </div>
 }
@@ -488,14 +488,18 @@ function Skeleton({ label }: { label: string }): React.JSX.Element {
   return <div className="dsh-codex-skeleton" role="status" aria-label={label}><span /><span /></div>
 }
 
-export function windowLabel(minutes: number | null, t: Translate): string {
-  if (minutes === null) return t('limitWindow')
+export function windowLabel(minutes: number | null | undefined, t: Translate): string {
+  if (minutes === null || minutes === undefined || typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0) return t('limitWindow')
   const [value, unit]: [number, Intl.NumberFormatOptions['unit']] = minutes >= 1440 && minutes % 1440 === 0
     ? [minutes / 1440, 'day']
     : minutes >= 60 && minutes % 60 === 0
       ? [minutes / 60, 'hour']
       : [Math.round(minutes), 'minute']
-  return `${new Intl.NumberFormat(undefined, { style: 'unit', unit, unitDisplay: 'long' }).format(value)} ${t('limitWindow')}`
+  try {
+    return `${new Intl.NumberFormat(undefined, { style: 'unit', unit, unitDisplay: 'long' }).format(value)} ${t('limitWindow')}`
+  } catch {
+    return `${value} ${t('limitWindow')}`
+  }
 }
 
 function reasoningEffortLabel(effort: string, t: Translate): string {
@@ -529,35 +533,51 @@ function formatCapacity(value: number): string {
   return String(value)
 }
 
-function formatPercent(value: number): string {
-  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)}%`
+function formatPercent(value: number | undefined | null): string {
+  if (value === undefined || value === null || typeof value !== 'number' || !Number.isFinite(value)) return '0%'
+  try {
+    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)}%`
+  } catch {
+    return `${value}%`
+  }
 }
 
 function individualLimitLabel(limit: NonNullable<PluginStatusDto['quota']['individualLimit']>, t: Translate): string {
   const parts = [
-    limit.remainingPercent !== null ? `${formatPercent(limit.remainingPercent)} ${t('remaining')}` : null,
-    limit.limit !== null ? `${t('limit')}: ${limit.limit}` : null,
-    limit.used !== null ? `${t('used')}: ${limit.used}` : null,
-    limit.resetsAt !== null ? `${t('resets')}: ${formatReset(limit.resetsAt)}` : null,
+    limit.remainingPercent !== null && limit.remainingPercent !== undefined ? `${formatPercent(limit.remainingPercent)} ${t('remaining')}` : null,
+    limit.limit !== null && limit.limit !== undefined ? `${t('limit')}: ${limit.limit}` : null,
+    limit.used !== null && limit.used !== undefined ? `${t('used')}: ${limit.used}` : null,
+    limit.resetsAt !== null && limit.resetsAt !== undefined ? `${t('resets')}: ${formatReset(limit.resetsAt)}` : null,
   ].filter((part): part is string => part !== null)
   return parts.length > 0 ? parts.join(' · ') : t('unknown')
 }
 
-function formatDate(seconds: number | undefined): string {
-  if (seconds === undefined) return '—'
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(seconds * 1000)
+function formatDate(seconds: number | undefined | null): string {
+  if (seconds === undefined || seconds === null || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return '—'
+  const ms = seconds > 10_000_000_000 ? seconds : seconds * 1000
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(ms)
+  } catch {
+    return '—'
+  }
 }
 
-export function formatReset(seconds: number): string {
+export function formatReset(seconds: number | undefined | null): string {
+  if (seconds === undefined || seconds === null || typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return '—'
+  const ms = seconds > 10_000_000_000 ? seconds : seconds * 1000
   const absolute = formatDate(seconds)
-  const diff = seconds * 1000 - Date.now()
+  const diff = ms - Date.now()
   const abs = Math.abs(diff)
   const [amount, unit]: [number, Intl.RelativeTimeFormatUnit] = abs >= 86_400_000
     ? [Math.round(diff / 86_400_000), 'day']
     : abs >= 3_600_000
       ? [Math.round(diff / 3_600_000), 'hour']
       : [Math.round(diff / 60_000), 'minute']
-  return `${absolute} (${new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(amount, unit)})`
+  try {
+    return `${absolute} (${new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(amount, unit)})`
+  } catch {
+    return absolute
+  }
 }
 
 function messageOf(error: unknown): string {

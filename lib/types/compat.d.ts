@@ -28,6 +28,7 @@ export declare const CODEX_ENHANCED_ORIGINATOR: "pi";
 export declare const CODEX_IMAGE_TOOL_NAME: "codex_image_generate";
 export declare const CODEX_IMAGE_MODEL: "gpt-image-2";
 export declare const CODEX_SEARCH_PROVIDER_ID: "codex-subscription";
+export declare const CODEX_FETCH_PROVIDER_ID: "codex-subscription";
 export declare const QUOTA_CACHE_MS = 60000;
 export declare const QUOTA_MIN_UPSTREAM_INTERVAL_MS = 15000;
 export declare const OAUTH_AUTHORIZE_URL: "https://auth.openai.com/oauth/authorize";

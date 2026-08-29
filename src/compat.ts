@@ -29,6 +29,7 @@ export const CODEX_ENHANCED_ORIGINATOR = 'pi' as const
 export const CODEX_IMAGE_TOOL_NAME = 'codex_image_generate' as const
 export const CODEX_IMAGE_MODEL = 'gpt-image-2' as const
 export const CODEX_SEARCH_PROVIDER_ID = 'codex-subscription' as const
+export const CODEX_FETCH_PROVIDER_ID = 'codex-subscription' as const
 export const QUOTA_CACHE_MS = 60_000
 export const QUOTA_MIN_UPSTREAM_INTERVAL_MS = 15_000
 

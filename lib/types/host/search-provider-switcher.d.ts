@@ -5,7 +5,8 @@ interface LoaderLike {
 }
 export declare class SearchProviderSwitcher {
     private readonly loader;
-    private originalProvider;
+    private originalSearchProvider;
+    private originalFetchProvider;
     private initialized;
     constructor(loader: LoaderLike);
     select(preference: SearchProviderPreference): Promise<void>;

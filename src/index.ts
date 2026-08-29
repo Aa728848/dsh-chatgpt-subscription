@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
+import { createCodexFetchProvider } from './host/codex-fetch.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
@@ -23,22 +24,24 @@ export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'setti
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
-  const proxyManager = new ProxyManager({
-    getPreferences: () => preferences.status(),
-    logger: ctx.logger,
-  })
-  const proxyFetch = proxyManager.createFetch()
-  const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger })
-  const usage = new UsageService(oauth, { fetchFn: proxyFetch })
-  const responses = new ResponsesClient(oauth, ctx.attachments, {
-    fetchFn: proxyFetch,
-    localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
-    onGenerationFinished: () => usage.invalidate(),
-    outputVerbosity: () => preferences.status().outputVerbosity,
-    fastMode: () => preferences.status().fastMode,
-  })
-  const adapter = new CodexChatGptAdapter(responses, preferences)
+
   ctx.effect(() => {
+    const proxyManager = new ProxyManager({
+      getPreferences: () => preferences.status(),
+      logger: ctx.logger,
+    })
+    const proxyFetch = proxyManager.createFetch()
+    const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger })
+    const usage = new UsageService(oauth, { fetchFn: proxyFetch })
+    const responses = new ResponsesClient(oauth, ctx.attachments, {
+      fetchFn: proxyFetch,
+      localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
+      onGenerationFinished: () => usage.invalidate(),
+      outputVerbosity: () => preferences.status().outputVerbosity,
+      fastMode: () => preferences.status().fastMode,
+    })
+    const adapter = new CodexChatGptAdapter(responses, preferences)
+
     const searchSwitcher = new SearchProviderSwitcher(ctx.loader)
     const applySearchPreference = (searchProvider = preferences.status().searchProvider): void => {
       void searchSwitcher.select(searchProvider).catch(error => {
@@ -49,6 +52,7 @@ export function apply(ctx: Context): void {
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
+    const disposeFetchProvider = ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
     applySearchPreference()
 
@@ -91,6 +95,7 @@ export function apply(ctx: Context): void {
       if (origResolveCallConfig) ctx.llm.resolveCallConfig = origResolveCallConfig
       if (origResolveModelInfo) ctx.llm.resolveModelInfo = origResolveModelInfo
       disposePreferenceWatch()
+      disposeFetchProvider()
       disposeSearchProvider()
       disposeImageTool()
       disposeAdapter()
@@ -106,6 +111,7 @@ export { OAuthService } from './host/oauth-service.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'
 export { createCodexSearchProvider } from './host/codex-search.ts'
+export { createCodexFetchProvider } from './host/codex-fetch.ts'
 export { ResponsesClient, parseResponsesStream } from './host/responses-client.ts'
 export { UsageService, mapCodexUsage, parseCodexUsage } from './host/usage-service.ts'
 export { createPlatformTokenStore } from './host/platform-token-store.ts'

@@ -4,18 +4,18 @@ import { SearchProviderSwitcher } from '../src/host/search-provider-switcher.ts'
 
 describe('SearchProviderSwitcher', () => {
   it('restores the original provider when leaving Codex search', async () => {
-    const entry = fakeWebEntry({ searchProvider: 'deepseek-official' })
+    const entry = fakeWebEntry({ searchProvider: 'deepseek-official', fetchProvider: 'local' })
     const switcher = new SearchProviderSwitcher({ entries: () => [entry] as never })
 
     await switcher.select('codex')
     await switcher.select('dsh')
 
-    expect(entry.update).toHaveBeenNthCalledWith(1, { config: { searchProvider: CODEX_SEARCH_PROVIDER_ID } }, true)
-    expect(entry.update).toHaveBeenNthCalledWith(2, { config: { searchProvider: 'deepseek-official' } }, true)
+    expect(entry.update).toHaveBeenNthCalledWith(1, { config: { searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_SEARCH_PROVIDER_ID } }, true)
+    expect(entry.update).toHaveBeenNthCalledWith(2, { config: { searchProvider: 'deepseek-official', fetchProvider: 'local' } }, true)
   })
 
-  it('unsets Codex search when it was already the persisted provider at startup', async () => {
-    const entry = fakeWebEntry({ searchProvider: CODEX_SEARCH_PROVIDER_ID })
+  it('unsets Codex search and fetch when it was already the persisted provider at startup', async () => {
+    const entry = fakeWebEntry({ searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_SEARCH_PROVIDER_ID })
     const switcher = new SearchProviderSwitcher({ entries: () => [entry] as never })
 
     await switcher.select('dsh')
