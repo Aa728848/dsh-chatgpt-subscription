@@ -51,8 +51,19 @@ export function apply(ctx: Context): void {
     const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences, proxyManager)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
-    const disposeSearchProvider = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
-    const disposeFetchProvider = ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
+    
+    // Bind search and fetch providers dynamically to ctx.web so they survive loader reloads
+    let disposeWebProviders = () => {}
+    const registerWebProviders = () => {
+      disposeWebProviders()
+      if (ctx.web) {
+        const d1 = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
+        const d2 = ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
+        disposeWebProviders = () => { d1(); d2() }
+      }
+    }
+    registerWebProviders()
+
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
     applySearchPreference()
 
@@ -95,8 +106,7 @@ export function apply(ctx: Context): void {
       if (origResolveCallConfig) ctx.llm.resolveCallConfig = origResolveCallConfig
       if (origResolveModelInfo) ctx.llm.resolveModelInfo = origResolveModelInfo
       disposePreferenceWatch()
-      disposeFetchProvider()
-      disposeSearchProvider()
+      disposeWebProviders()
       disposeImageTool()
       disposeAdapter()
       disposeRoutes()
