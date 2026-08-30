@@ -1,4 +1,4 @@
-﻿import { type SettingsProvider, type SettingsScope } from '@deepseek-ai/dsh-settings'
+import { type SettingsProvider, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import * as SettingsModule from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId } from '../shared/model-catalog.ts'
