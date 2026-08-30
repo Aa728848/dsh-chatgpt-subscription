@@ -39,10 +39,8 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
       'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
       'gpt-5.6-luna': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-luna']),
     }).default(DEFAULT_PREFERENCES.contextWindowOverrides),
-    subagentReasoningEffort: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.subagentReasoningEffort),
     subagentContextWindow: z.union([z.number().step(1).min(1), z.const(null)]).default(DEFAULT_PREFERENCES.subagentContextWindow),
     subagentMaxDepth: z.union([z.number().step(1).min(0).max(SUBAGENT_MAX_DEPTH_LIMIT), z.const(null)]).default(DEFAULT_PREFERENCES.subagentMaxDepth),
-    subagentModelEfforts: z.dict(z.union([z.string(), z.const(null)])).default(DEFAULT_PREFERENCES.subagentModelEfforts),
     proxyMode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]).default(DEFAULT_PREFERENCES.proxyMode),
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
   }))
@@ -78,20 +76,11 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
         ...patch.contextWindowOverrides,
       }
     }
-    if (patch.subagentReasoningEffort !== undefined) {
-      normalized.subagentReasoningEffort = patch.subagentReasoningEffort
-    }
     if (patch.subagentContextWindow !== undefined) {
       normalized.subagentContextWindow = patch.subagentContextWindow
     }
     if (patch.subagentMaxDepth !== undefined) {
       normalized.subagentMaxDepth = patch.subagentMaxDepth
-    }
-    if (patch.subagentModelEfforts !== undefined) {
-      normalized.subagentModelEfforts = {
-        ...this.scope.get().subagentModelEfforts,
-        ...patch.subagentModelEfforts,
-      }
     }
     if (patch.proxyMode !== undefined) {
       if (!isProxyMode(patch.proxyMode)) throw new PreferenceError('Unsupported proxy mode preference.')

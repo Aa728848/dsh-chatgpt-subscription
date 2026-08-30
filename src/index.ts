@@ -68,44 +68,7 @@ export function apply(ctx: Context): void {
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
     applySearchPreference()
 
-    // Transparently inject reasoning effort overrides for any registered provider/model
-    const origResolveCallConfig = ctx.llm.resolveCallConfig?.bind(ctx.llm)
-    const origResolveModelInfo = ctx.llm.resolveModelInfo?.bind(ctx.llm)
-    if (origResolveCallConfig) {
-      ctx.llm.resolveCallConfig = async (options, signal) => {
-        const status = preferences.status()
-        const modelKey = `${options.provider}/${options.model}`
-        const customEffort = status.subagentModelEfforts?.[modelKey]
-          ?? (options.provider === PROVIDER_ID ? status.subagentReasoningEffort : undefined)
-        if (options.reasoningEffort === undefined && customEffort) {
-          options = { ...options, reasoningEffort: customEffort as never }
-        }
-        return origResolveCallConfig(options, signal)
-      }
-    }
-    if (origResolveModelInfo) {
-      ctx.llm.resolveModelInfo = async (provider, model) => {
-        const info = await origResolveModelInfo(provider, model)
-        const status = preferences.status()
-        const modelKey = `${provider}/${model}`
-        const customEffort = status.subagentModelEfforts?.[modelKey]
-          ?? (provider === PROVIDER_ID ? status.subagentReasoningEffort : undefined)
-        if (customEffort && info?.reasoning && (info.reasoning.efforts as readonly { id: string }[]).some(e => e.id === customEffort)) {
-          return {
-            ...info,
-            reasoning: {
-              ...info.reasoning,
-              defaultEffort: customEffort as never,
-            },
-          }
-        }
-        return info
-      }
-    }
-
     return () => {
-      if (origResolveCallConfig) ctx.llm.resolveCallConfig = origResolveCallConfig
-      if (origResolveModelInfo) ctx.llm.resolveModelInfo = origResolveModelInfo
       disposePreferenceWatch()
       disposeWebProviders()
       disposeImageTool()

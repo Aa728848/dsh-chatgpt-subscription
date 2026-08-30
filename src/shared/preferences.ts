@@ -15,10 +15,8 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
     'gpt-5.6-terra': 272_000,
     'gpt-5.6-luna': 272_000,
   },
-  subagentReasoningEffort: null,
   subagentContextWindow: null,
   subagentMaxDepth: null,
-  subagentModelEfforts: {},
   proxyMode: 'auto',
   customProxyUrl: null,
 }

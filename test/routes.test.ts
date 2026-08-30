@@ -67,10 +67,8 @@ describe('host routes', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
-        subagentReasoningEffort: null,
         subagentContextWindow: null,
         subagentMaxDepth: null,
-        subagentModelEfforts: {},
         proxyMode: 'auto',
         customProxyUrl: null,
         writable: true,
@@ -86,10 +84,8 @@ describe('host routes', () => {
           'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
           'gpt-5.6-luna': patch.contextWindowOverrides?.['gpt-5.6-luna'] ?? 272_000,
         },
-        subagentReasoningEffort: patch.subagentReasoningEffort !== undefined ? patch.subagentReasoningEffort : null,
         subagentContextWindow: patch.subagentContextWindow !== undefined ? patch.subagentContextWindow : null,
         subagentMaxDepth: patch.subagentMaxDepth !== undefined ? patch.subagentMaxDepth : null,
-        subagentModelEfforts: patch.subagentModelEfforts !== undefined ? patch.subagentModelEfforts : {},
         proxyMode: patch.proxyMode !== undefined ? patch.proxyMode : 'auto',
         customProxyUrl: patch.customProxyUrl !== undefined ? patch.customProxyUrl : null,
         writable: true,
@@ -111,7 +107,7 @@ describe('host routes', () => {
     expect(statusText).not.toContain('account-secret-1234')
     expect(statusText).toContain('"usedPercent":25')
     expect(statusText).toContain('"quickQuotaVisible":false')
-    expect(statusText).toContain('"allProviders"')
+    expect(statusText).not.toContain('"allProviders"')
 
     const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
@@ -121,13 +117,8 @@ describe('host routes', () => {
         outputVerbosity: 'high',
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
-        subagentReasoningEffort: 'high',
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
-        subagentModelEfforts: {
-          'kimi-coding/k3': 'high',
-          'deepseek-official/deepseek-chat': 'medium',
-        },
         proxyMode: 'custom',
         customProxyUrl: 'http://127.0.0.1:8888',
       }),
@@ -140,15 +131,10 @@ describe('host routes', () => {
         outputVerbosity: 'high',
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
-        subagentReasoningEffort: 'high',
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
         proxyMode: 'custom',
         customProxyUrl: 'http://127.0.0.1:8888',
-        subagentModelEfforts: {
-          'kimi-coding/k3': 'high',
-          'deepseek-official/deepseek-chat': 'medium',
-        },
       },
     })
 

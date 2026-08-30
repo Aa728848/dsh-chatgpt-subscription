@@ -21,7 +21,6 @@ export interface PluginStatusDto {
     };
     quota: QuotaStatusDto;
     preferences: SubscriptionPreferencesDto;
-    allProviders?: ProviderCatalogGroupDto[];
     detectedProxy?: string | null;
     activeProxy?: string | null;
     error?: PublicErrorDto;
@@ -34,16 +33,6 @@ export interface CodexContextWindowOverridesDto {
     'gpt-5.6-terra': number;
     'gpt-5.6-luna': number;
 }
-export interface ProviderCatalogModelDto {
-    id: string;
-    name: string;
-    reasoningEfforts: string[];
-}
-export interface ProviderCatalogGroupDto {
-    id: string;
-    name: string;
-    models: ProviderCatalogModelDto[];
-}
 export type ProxyMode = 'auto' | 'custom' | 'direct';
 export interface SubscriptionPreferencesDto {
     quickQuotaVisible: boolean;
@@ -52,10 +41,8 @@ export interface SubscriptionPreferencesDto {
     visibleModelIds: string[];
     searchProvider: SearchProviderPreference;
     contextWindowOverrides: CodexContextWindowOverridesDto;
-    subagentReasoningEffort: string | null;
     subagentContextWindow: number | null;
     subagentMaxDepth: number | null;
-    subagentModelEfforts: Record<string, string | null>;
     proxyMode: ProxyMode;
     customProxyUrl: string | null;
     writable: boolean;
@@ -67,10 +54,8 @@ export interface SubscriptionPreferencesUpdateDto {
     visibleModelIds?: string[];
     searchProvider?: SearchProviderPreference;
     contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>;
-    subagentReasoningEffort?: string | null;
     subagentContextWindow?: number | null;
     subagentMaxDepth?: number | null;
-    subagentModelEfforts?: Record<string, string | null>;
     proxyMode?: ProxyMode;
     customProxyUrl?: string | null;
 }

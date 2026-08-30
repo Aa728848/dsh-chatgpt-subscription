@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
-import type { ApiEnvelope, LoginEventDto, ProviderCatalogGroupDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
 import { SUBAGENT_MAX_DEPTH_LIMIT } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
@@ -23,12 +23,10 @@ export function registerRoutes(
     const url = new URL(request.url ?? '/', 'http://dsh.local')
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/status`) {
       const oauthStatus = await oauth.status()
-      const allProviders = await listAllProviderGroups(ctx)
       json(response, { ok: true, value: {
         ...oauthStatus,
         quota: await usage.status(oauthStatus.authenticated),
         preferences: preferences.status(),
-        allProviders,
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
       } })
@@ -248,10 +246,6 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     }
     patch.contextWindowOverrides = overrides
   }
-  if ('subagentReasoningEffort' in value) {
-    if (value.subagentReasoningEffort !== null && (typeof value.subagentReasoningEffort !== 'string' || value.subagentReasoningEffort === '')) throw new PreferenceError('subagentReasoningEffort must be null or a non-empty string.')
-    patch.subagentReasoningEffort = value.subagentReasoningEffort
-  }
   if ('subagentContextWindow' in value) {
     if (value.subagentContextWindow !== null && (!Number.isSafeInteger(value.subagentContextWindow) || (value.subagentContextWindow as number) < 1)) throw new PreferenceError('subagentContextWindow must be null or a positive integer.')
     patch.subagentContextWindow = value.subagentContextWindow as number | null
@@ -261,15 +255,6 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
       throw new PreferenceError(`subagentMaxDepth must be null or an integer from 0 to ${SUBAGENT_MAX_DEPTH_LIMIT}.`)
     }
     patch.subagentMaxDepth = value.subagentMaxDepth as number | null
-  }
-  if ('subagentModelEfforts' in value) {
-    if (!isRecord(value.subagentModelEfforts)) throw new PreferenceError('subagentModelEfforts must be an object.')
-    const efforts: Record<string, string | null> = {}
-    for (const [key, effort] of Object.entries(value.subagentModelEfforts)) {
-      if (effort !== null && (typeof effort !== 'string' || effort === '')) throw new PreferenceError(`subagentModelEfforts.${key} must be a non-empty string or null.`)
-      efforts[key] = effort
-    }
-    patch.subagentModelEfforts = efforts
   }
   if ('proxyMode' in value) {
     if (value.proxyMode !== 'auto' && value.proxyMode !== 'custom' && value.proxyMode !== 'direct') {
@@ -284,48 +269,6 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     patch.customProxyUrl = value.customProxyUrl
   }
   return patch
-}
-
-async function listAllProviderGroups(ctx: Context): Promise<ProviderCatalogGroupDto[]> {
-  try {
-    const providers = ctx.llm?.listProviders?.() ?? []
-    const groups: ProviderCatalogGroupDto[] = []
-    for (const provider of providers) {
-      try {
-        const models = await ctx.llm?.listModels?.(provider.id) ?? []
-        const modelEntries = []
-        for (const model of models) {
-          try {
-            const resolved = await ctx.llm?.resolveModelInfo?.(provider.id, model.id)
-            const efforts = resolved?.reasoning?.efforts?.map(e => String(e.id)) ?? []
-            modelEntries.push({
-              id: model.id,
-              name: model.name ?? model.id,
-              reasoningEfforts: efforts,
-            })
-          } catch {
-            modelEntries.push({
-              id: model.id,
-              name: model.name ?? model.id,
-              reasoningEfforts: [],
-            })
-          }
-        }
-        if (modelEntries.length > 0) {
-          groups.push({
-            id: provider.id,
-            name: provider.name ?? provider.id,
-            models: modelEntries,
-          })
-        }
-      } catch {
-        // Skip provider if failed
-      }
-    }
-    return groups
-  } catch {
-    return []
-  }
 }
 
 function json<T>(response: ServerResponse, envelope: ApiEnvelope<T>, status = 200): void {

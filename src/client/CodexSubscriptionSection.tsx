@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
@@ -21,6 +21,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [resetCreditNotice, setResetCreditNotice] = useState<string | null>(null)
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
+  const [subagentContextDraft, setSubagentContextDraft] = useState<string | null>(null)
   const [customProxyDraft, setCustomProxyDraft] = useState<string | null>(null)
 
   const load = useCallback(async (quiet = false) => {
@@ -162,6 +163,22 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     }
     await updatePreferences({ contextWindowOverrides: { [model]: parsed } })
     setContextDrafts((drafts) => ({ ...drafts, [model]: String(parsed) }))
+  }
+
+  const updateSubagentContextWindow = async (): Promise<void> => {
+    const draft = subagentContextDraft?.trim()
+    if (draft === undefined || draft === '') {
+      await updatePreferences({ subagentContextWindow: null })
+      setSubagentContextDraft(null)
+      return
+    }
+    const parsed = parsePositiveCapacity(draft)
+    if (parsed === null) {
+      setError(t('contextWindowInvalid'))
+      return
+    }
+    await updatePreferences({ subagentContextWindow: parsed })
+    setSubagentContextDraft(null)
   }
 
   const updateCustomProxyUrl = async (): Promise<void> => {
@@ -365,6 +382,66 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <option value="high">{t('verbosityHigh')}</option>
           </select>
         </div>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('subagentMaxDepth')}</strong>
+            <p className="dsh-codex-muted">{t('subagentMaxDepthHint')}</p>
+          </div>
+          <select
+            className="dsh-codex-select"
+            aria-label={t('subagentMaxDepth')}
+            value={preferences?.subagentMaxDepth === null || preferences?.subagentMaxDepth === undefined ? '' : String(preferences.subagentMaxDepth)}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const value = event.currentTarget.value
+              void updatePreferences({ subagentMaxDepth: value === '' ? null : Number(value) })
+            }}
+          >
+            <option value="">{t('providerDefault')}</option>
+            <option value="0">0 ({t('subagentDisabled')})</option>
+            <option value="1">1 {t('levels')}</option>
+            <option value="2">2 {t('levels')}</option>
+            <option value="3">3 {t('levels')}</option>
+          </select>
+        </div>
+        <div className="dsh-codex-context-settings">
+          <div>
+            <strong>{t('subagentContextWindow')}</strong>
+            <p className="dsh-codex-muted">{t('subagentContextWindowHint')}</p>
+          </div>
+          <div className="dsh-codex-context-row">
+            <label htmlFor="dsh-codex-subagent-context">{t('subagentContextWindow')}</label>
+            <span className="dsh-codex-capacity-control">
+              <input
+                id="dsh-codex-subagent-context"
+                type="text"
+                inputMode="numeric"
+                placeholder={t('providerDefault')}
+                value={subagentContextDraft ?? (preferences?.subagentContextWindow ? formatCapacity(preferences.subagentContextWindow) : '')}
+                disabled={busy !== null}
+                aria-label={t('subagentContextWindow')}
+                onChange={(event) => {
+                  setSubagentContextDraft(event.currentTarget.value)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  void updateSubagentContextWindow()
+                }}
+              />
+              <small>{t('tokens')}</small>
+              <button
+                className="dsh-codex-context-save"
+                type="button"
+                aria-label={t('save') + ' ' + t('subagentContextWindow')}
+                disabled={busy !== null || subagentContextDraft === null}
+                onClick={() => void updateSubagentContextWindow()}
+              >
+                {t('save')}
+              </button>
+            </span>
+          </div>
+        </div>
         <div className="dsh-codex-context-settings">
           <div>
             <strong>{t('contextWindows')}</strong>
@@ -519,18 +596,6 @@ export function windowLabel(minutes: number | null | undefined, t: Translate): s
   } catch {
     return `${value} ${t('limitWindow')}`
   }
-}
-
-function reasoningEffortLabel(effort: string, t: Translate): string {
-  const labels: Record<string, keyof typeof import('./locales.ts').zh> = {
-    none: 'reasoningNone',
-    low: 'reasoningLow',
-    medium: 'reasoningMedium',
-    high: 'reasoningHigh',
-    xhigh: 'reasoningXhigh',
-    max: 'reasoningMax',
-  }
-  return t(labels[effort] ?? 'unknown')
 }
 
 export function parsePositiveCapacity(value: string): number | null {

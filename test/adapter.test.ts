@@ -54,9 +54,10 @@ describe('CodexChatGptAdapter', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000, 'gpt-5.6-terra': 200_000, 'gpt-5.6-luna': 256_000 },
-        subagentReasoningEffort: 'xhigh',
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
+        proxyMode: 'auto',
+        customProxyUrl: null,
         writable: true,
       }),
     } as never)
@@ -68,11 +69,11 @@ describe('CodexChatGptAdapter', () => {
     ]))
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.6-sol')).resolves.toMatchObject({
       context: { contextWindow: 1_000_000 },
-      reasoning: { defaultEffort: 'xhigh' },
+      reasoning: { defaultEffort: 'medium' },
     })
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.4')).resolves.toMatchObject({
       context: { contextWindow: 272_000 },
-      reasoning: { defaultEffort: 'xhigh' },
+      reasoning: { defaultEffort: 'none' },
     })
   })
 

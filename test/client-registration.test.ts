@@ -31,7 +31,6 @@ describe('client registration', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': contextWindow, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
-        subagentReasoningEffort: null,
         subagentContextWindow: null,
         subagentMaxDepth: null,
         writable: true,
@@ -57,12 +56,17 @@ describe('client registration', () => {
       expect(input).not.toBeNull()
       const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsh-codex-models input[type="checkbox"]')
       expect(modelChecks).toHaveLength(7)
+      const subagentDepthSelect = container.querySelector<HTMLSelectElement>('select[aria-label="子代理最大嵌套深度"]')
+      expect(subagentDepthSelect).not.toBeNull()
+      const subagentContextInput = container.querySelector<HTMLInputElement>('input[aria-label="子代理上下文预算"]')
+      expect(subagentContextInput).not.toBeNull()
+
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
-      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(3)
+      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(4)
       const save = container.querySelector<HTMLButtonElement>('button[data-model="gpt-5.6-sol"]')
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)
@@ -119,13 +123,10 @@ describe('client registration', () => {
 
     apply(ctx as never)
 
-    expect(injectedSlots).toEqual(['settings.section', 'conversation.input.right', 'tool.call.toolview', 'settings.plugins.tab'])
+    expect(injectedSlots).toEqual(['settings.section', 'conversation.input.right', 'tool.call.toolview'])
     expect(registrations.filter((registration) => registration.name === 'settings.section')).toEqual([
       expect.objectContaining({ name: 'settings.section', id: 'codex-subscription', order: 45 }),
     ])
-    expect(registrations.find((registration) => registration.name === 'settings.plugins.tab')).toMatchObject({
-      id: 'subagents',
-    })
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
       key: CODEX_IMAGE_TOOL_NAME,
     })
