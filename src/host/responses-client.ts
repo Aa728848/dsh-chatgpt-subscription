@@ -1,5 +1,12 @@
+import * as LlmModule from '@deepseek-ai/dsh-llm'
+
+const toToolCallId = (id: string): any => {
+  const mod = LlmModule as unknown as Record<string, Function>
+  const brander = mod.ToolCallId ?? mod.CallId ?? ((x: string) => x)
+  return brander(id)
+}
+
 import {
-  CallId,
   LlmError,
   ProviderRequestId,
   type FinishReason,
@@ -196,7 +203,7 @@ export async function* parseResponsesStream(
         yield {
           type: 'tool-call-delta',
           index: tool.index,
-          id: CallId(tool.id),
+          id: toToolCallId(tool.id),
           name: tool.name || undefined,
           argumentsDelta: initial,
         }
@@ -217,7 +224,7 @@ export async function* parseResponsesStream(
       yield {
         type: 'tool-call-delta',
         index: tool.index,
-        id: CallId(tool.id),
+        id: toToolCallId(tool.id),
         name: tool.name || undefined,
         argumentsDelta: delta,
       }
@@ -322,7 +329,7 @@ export async function* parseResponsesStream(
     yield {
       type: 'block-end',
       index: tool.index,
-      block: { type: 'tool-call', id: CallId(tool.id), name: tool.name, arguments: tool.arguments },
+      block: { type: 'tool-call', id: toToolCallId(tool.id), name: tool.name, arguments: tool.arguments },
     }
   }
   if (usage !== null) yield { type: 'usage', usage }
