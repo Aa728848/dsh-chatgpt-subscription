@@ -1,4 +1,4 @@
-import { type SettingsProvider, type SettingsScope } from '@deepseek-ai/dsh-settings'
+﻿import { type SettingsProvider, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import * as SettingsModule from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId } from '../shared/model-catalog.ts'
@@ -26,11 +26,10 @@ export interface SubscriptionPreferenceStore {
 type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
 
 export function registerPreferenceStore(settings: SettingsProvider): SubscriptionPreferenceStore {
-  const registerFn = settings.register as (ns: unknown, schema: unknown) => SettingsScope<PreferenceSettings>
   const ns = ((SettingsModule as unknown as Record<string, unknown>).settingsNamespace
     ? ((SettingsModule as unknown as Record<string, Function>).settingsNamespace)(PREFERENCES_NAMESPACE)
     : PREFERENCES_NAMESPACE) as unknown
-  const scope = registerFn(ns, z.object({
+  const scope = (settings.register as Function).call(settings, ns, z.object({
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
     fastMode: z.boolean().default(DEFAULT_PREFERENCES.fastMode),
     outputVerbosity: z.union([z.const('low'), z.const('medium'), z.const('high'), z.const(null)]).default(DEFAULT_PREFERENCES.outputVerbosity),
@@ -95,7 +94,6 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
       if (patch.customProxyUrl !== null) {
         const trimmed = patch.customProxyUrl.trim()
         if (trimmed.length > 0 && !/^https?:\/\//i.test(trimmed) && !/^socks5?:\/\//i.test(trimmed)) {
-          // If the user entered just host:port (e.g. 127.0.0.1:7890), normalize to http://127.0.0.1:7890
           normalized.customProxyUrl = `http://${trimmed}`
         } else {
           normalized.customProxyUrl = trimmed.length === 0 ? null : trimmed
