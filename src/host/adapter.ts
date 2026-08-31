@@ -36,6 +36,10 @@ export class CodexChatGptAdapter extends LlmAdapter {
     return RETRY_POLICY
   }
 
+  imageRequestPricing(_provider?: string, _model?: string): undefined {
+    return undefined
+  }
+
   async listModels(): Promise<readonly LlmModelInfo[]> {
     return listCodexModels(this.preferences)
   }

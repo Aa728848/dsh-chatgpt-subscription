@@ -8,6 +8,7 @@ export declare class CodexChatGptAdapter extends LlmAdapter {
     constructor(client: ResponsesClient, preferences?: SubscriptionPreferenceStore | undefined);
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(): ResolvedRetryPolicy;
+    imageRequestPricing(_provider?: string, _model?: string): undefined;
     listModels(): Promise<readonly LlmModelInfo[]>;
     resolveModel(_provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;
