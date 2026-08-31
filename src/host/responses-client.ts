@@ -251,7 +251,16 @@ export async function* parseResponsesStream(
     }
     if (type === 'response.failed' || type === 'error') {
       const error = record(event.error) ?? record(record(event.response)?.error)
-      throw new LlmError(string(error?.message) ?? 'Codex generation failed.', string(error?.code) ?? 'PROVIDER_ERROR')
+      const message = string(error?.message) ?? 'Codex generation failed.'
+      const rawCode = string(error?.code)?.toLowerCase()
+      const isOverload = message.toLowerCase().includes('overload')
+        || message.toLowerCase().includes('server error')
+        || rawCode === 'server_error'
+        || rawCode === 'service_unavailable'
+        || rawCode === 'internal_error'
+      const isRateLimit = message.toLowerCase().includes('rate limit') || rawCode === 'rate_limit'
+      const code = isRateLimit ? 'RATE_LIMIT' : (isOverload ? 'SERVER_ERROR' : (string(error?.code)?.toUpperCase() ?? 'PROVIDER_ERROR'))
+      throw new LlmError(message, code)
     }
   }
 

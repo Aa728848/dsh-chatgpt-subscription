@@ -206,6 +206,19 @@ describe('Responses streaming', () => {
     expect(chunks).toContainEqual({ type: 'block-end', index: 1, block: { type: 'tool-call', id: 'call_edit', name: 'edit_file', arguments: '{"path":"src/index.ts"}' } })
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
   })
+
+  it('maps server overloaded error stream events to SERVER_ERROR code', async () => {
+    await expect((async () => {
+      for await (const chunk of parseResponsesStream(sse([
+        { type: 'response.failed', response: { error: { message: 'Our servers are currently overloaded. Please try again later.' } } },
+      ]))) {
+        expect(chunk).toBeDefined()
+      }
+    })()).rejects.toMatchObject({
+      code: 'SERVER_ERROR',
+      message: expect.stringContaining('overloaded'),
+    })
+  })
 })
 
 function sse(events: unknown[]): Response {

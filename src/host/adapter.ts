@@ -15,9 +15,9 @@ import type { SubscriptionPreferenceStore } from './preferences.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({
   mode: 'normal',
-  maxRetries: 2,
-  retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'NETWORK'],
-  backoff: { initialDelayMs: 1_000, maxDelayMs: 10_000, jitterRatio: 0.15 },
+  maxRetries: 3,
+  retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'SERVER', 'NETWORK', 'TIMEOUT', 'TRANSPORT'],
+  backoff: { initialDelayMs: 1_500, maxDelayMs: 15_000, jitterRatio: 0.2 },
 }, 'dsh-chatgpt-subscription.retry')
 
 export class CodexChatGptAdapter extends LlmAdapter {
