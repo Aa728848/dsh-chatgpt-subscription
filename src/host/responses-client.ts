@@ -148,9 +148,9 @@ export async function* parseResponsesStream(
     if (tool === undefined) {
       tool = {
         index: nextIndex++,
-        id: string(item?.call_id) ?? string(event.call_id) ?? `call_${key}`,
+        id: acceptIdentity(`call_${key}`, item?.call_id ?? event.call_id),
         itemId,
-        name: string(item?.name) ?? string(event.name) ?? '',
+        name: acceptIdentity('', item?.name ?? event.name),
         arguments: '',
         started: false,
       }
@@ -194,8 +194,8 @@ export async function* parseResponsesStream(
       if (item !== null && type === 'response.output_item.done') replayOutput.push(structuredClone(item))
       if (string(item?.type) !== 'function_call') return
       const tool = toolFor(event, item ?? undefined)
-      tool.id = string(item?.call_id) ?? tool.id
-      tool.name = string(item?.name) ?? tool.name
+      tool.id = acceptIdentity(tool.id, item?.call_id)
+      tool.name = acceptIdentity(tool.name, item?.name)
       const initial = string(item?.arguments) ?? ''
       if (!tool.started) {
         tool.started = true
@@ -215,6 +215,8 @@ export async function* parseResponsesStream(
     }
     if (type === 'response.function_call_arguments.delta') {
       const tool = toolFor(event)
+      tool.id = acceptIdentity(tool.id, event.call_id)
+      tool.name = acceptIdentity(tool.name, event.name)
       const delta = string(event.delta) ?? ''
       if (!tool.started) {
         tool.started = true
@@ -232,6 +234,8 @@ export async function* parseResponsesStream(
     }
     if (type === 'response.function_call_arguments.done') {
       const tool = toolFor(event)
+      tool.id = acceptIdentity(tool.id, event.call_id)
+      tool.name = acceptIdentity(tool.name, event.name)
       const finalArguments = string(event.arguments)
       if (finalArguments !== undefined) tool.arguments = finalArguments
       return
@@ -430,3 +434,8 @@ function number(value: unknown): number | undefined {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : undefined
 }
+
+function acceptIdentity(current: string, incoming: unknown): string {
+  return typeof incoming === 'string' && incoming.length > 0 ? incoming : current
+}
+

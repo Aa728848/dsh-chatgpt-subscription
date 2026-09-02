@@ -207,6 +207,22 @@ describe('Responses streaming', () => {
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
   })
 
+  it('preserves established tool identity across empty or null delta events', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'read_file', arguments: '' } },
+      { type: 'response.function_call_arguments.delta', item_id: 'fc_1', output_index: 0, delta: '{"path":' },
+      { type: 'response.function_call_arguments.delta', item_id: 'fc_1', output_index: 0, call_id: '', name: null, delta: '"src/index.ts"}' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'fc_1', call_id: null, name: '', arguments: '{"path":"src/index.ts"}' } },
+      { type: 'response.completed', response: {} },
+    ])))
+
+    expect(chunks).toContainEqual({
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: 'call_1', name: 'read_file', arguments: '{"path":"src/index.ts"}' },
+    })
+  })
+
   it('maps server overloaded error stream events to SERVER_ERROR code', async () => {
     await expect((async () => {
       for await (const chunk of parseResponsesStream(sse([
@@ -220,6 +236,7 @@ describe('Responses streaming', () => {
     })
   })
 })
+
 
 function sse(events: unknown[]): Response {
   return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
