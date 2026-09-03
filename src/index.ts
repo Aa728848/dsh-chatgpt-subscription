@@ -18,12 +18,43 @@ import { registerRoutes } from './host/routes.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
 import { UsageService } from './host/usage-service.ts'
+import { AntigravityAdapter } from './host/antigravity/adapter.ts'
+import { registerAntigravityRoutes } from './host/antigravity/routes.ts'
+import {
+  FileCredentialStore,
+  FileModelSettingsStore,
+  registerAntigravityPreferenceStore,
+  credentialPath,
+  modelSettingsPath,
+} from './host/antigravity/token-store.ts'
+import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID } from './host/antigravity/types.ts'
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader']
 
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
+
+  // 挂载 Antigravity 独立 Provider 与 Web 路由
+  const antigravityStore = new FileCredentialStore()
+  const antigravityModelSettings = new FileModelSettingsStore()
+  const antigravityPreferences = registerAntigravityPreferenceStore(ctx.settings, antigravityModelSettings)
+  const antigravityAdapter = new AntigravityAdapter(antigravityStore, antigravityModelSettings, antigravityPreferences)
+
+  ctx.effect(() => {
+    const disposeAntigravityAdapter = ctx.llm.registerAdapter([ANTIGRAVITY_PROVIDER_ID], antigravityAdapter)
+    const disposeAntigravityRoutes = registerAntigravityRoutes(
+      ctx,
+      antigravityStore,
+      antigravityModelSettings,
+      antigravityPreferences,
+    )
+
+    return () => {
+      disposeAntigravityRoutes()
+      disposeAntigravityAdapter()
+    }
+  }, 'dsh-antigravity: adapter, routes, and lifecycle')
 
   ctx.effect(() => {
     const proxyManager = new ProxyManager({
@@ -93,6 +124,16 @@ export { MacKeychainTokenStore } from './host/token-store-macos.ts'
 export { LinuxFileTokenStore } from './host/token-store-linux.ts'
 export { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
 export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts'
+
+export { AntigravityAdapter } from './host/antigravity/adapter.ts'
+export {
+  FileCredentialStore,
+  FileModelSettingsStore,
+  credentialPath,
+  modelSettingsPath,
+} from './host/antigravity/token-store.ts'
+export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts'
+export { fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
 
 function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {
   return `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`

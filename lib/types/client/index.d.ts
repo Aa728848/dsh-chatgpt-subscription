@@ -3,6 +3,7 @@ import { type LocaleKey } from './locales.ts';
 declare module '@deepseek-ai/dsh-client-ui-slots' {
     interface LocaleNamespaceMap {
         'dsh-chatgpt-subscription': LocaleKey;
+        'dsh-antigravity': any;
     }
 }
 export declare const inject: string[];

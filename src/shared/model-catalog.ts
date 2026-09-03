@@ -10,6 +10,7 @@ export interface CodexModelCatalogEntry {
   defaultReasoningEffort: string
   reasoningProfile: 'standard' | 'gpt-5.6'
   supportsReasoningSummary: boolean
+  fallbackModelId?: string
 }
 
 export const CODEX_MODEL_CATALOG = [
@@ -21,6 +22,7 @@ export const CODEX_MODEL_CATALOG = [
     defaultReasoningEffort: 'medium',
     reasoningProfile: 'gpt-5.6',
     supportsReasoningSummary: true,
+    fallbackModelId: 'gpt-5.6-terra',
   },
   {
     id: 'gpt-5.6-terra',
@@ -30,6 +32,7 @@ export const CODEX_MODEL_CATALOG = [
     defaultReasoningEffort: 'medium',
     reasoningProfile: 'gpt-5.6',
     supportsReasoningSummary: true,
+    fallbackModelId: 'gpt-5.5',
   },
   {
     id: 'gpt-5.6-luna',
@@ -39,6 +42,7 @@ export const CODEX_MODEL_CATALOG = [
     defaultReasoningEffort: 'medium',
     reasoningProfile: 'gpt-5.6',
     supportsReasoningSummary: true,
+    fallbackModelId: 'gpt-5.5',
   },
   {
     id: 'gpt-5.5',
@@ -57,6 +61,7 @@ export const CODEX_MODEL_CATALOG = [
     defaultReasoningEffort: 'none',
     reasoningProfile: 'standard',
     supportsReasoningSummary: true,
+    fallbackModelId: 'gpt-5.4-mini',
   },
   {
     id: 'gpt-5.4-mini',
@@ -132,4 +137,10 @@ export function codexModelSupportsImageInput(model: string): boolean {
 
 export function codexModelSupportsReasoningSummary(model: string): boolean {
   return resolveCodexCatalogEntry(model).supportsReasoningSummary
+}
+
+export function resolveCodexFallbackModel(model: string): CodexModelCatalogEntry | undefined {
+  const entry = resolveCodexCatalogEntry(model)
+  if (!entry.fallbackModelId) return undefined
+  return CODEX_MODEL_CATALOG.find((cand) => cand.id === entry.fallbackModelId)
 }

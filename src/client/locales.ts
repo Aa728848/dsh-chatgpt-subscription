@@ -1,8 +1,8 @@
 export const NS = 'dsh-chatgpt-subscription' as const
 
 export const zh = {
-  title: 'Codex 订阅',
-  intro: '使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的 Codex 模型。',
+  title: 'ChatGPT',
+  intro: '使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的模型。',
   account: '账号',
   signedOut: '尚未登录',
   signedIn: '已登录',
@@ -64,7 +64,7 @@ export const zh = {
   searchProvider: '搜索与抓取来源',
   searchProviderHint: '选择 DSH 联网工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 来源（自动走代理隧道）。',
   searchProviderDsh: 'DSH 默认',
-  searchProviderCodex: 'Codex 订阅（代理隧道）',
+  searchProviderCodex: 'ChatGPT（代理隧道）',
   providerDefault: '使用 Provider 默认值',
   subagentEnhancements: '子代理设置',
   subagentContextWindow: '子代理上下文预算',
@@ -127,8 +127,8 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
-  title: 'Codex subscription',
-  intro: 'Sign in with ChatGPT to use Codex models available to your subscription in DSH.',
+  title: 'ChatGPT',
+  intro: 'Sign in with ChatGPT to use models available to your subscription in DSH.',
   account: 'Account',
   signedOut: 'Not signed in',
   signedIn: 'Signed in',
@@ -190,7 +190,7 @@ export const en: Record<keyof typeof zh, string> = {
   searchProvider: 'Search & Fetch provider',
   searchProviderHint: 'Choose whether DSH web tools use the default provider or the Codex proxy-backed source from this ChatGPT subscription.',
   searchProviderDsh: 'DSH default',
-  searchProviderCodex: 'Codex subscription (Proxy tunnel)',
+  searchProviderCodex: 'ChatGPT (Proxy tunnel)',
   providerDefault: 'Use provider default',
   subagentEnhancements: 'Subagent settings',
   subagentContextWindow: 'Subagent context window budget',

@@ -1,7 +1,7 @@
 export declare const NS: "dsh-chatgpt-subscription";
 export declare const zh: {
-    readonly title: "Codex 订阅";
-    readonly intro: "使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的 Codex 模型。";
+    readonly title: "ChatGPT";
+    readonly intro: "使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的模型。";
     readonly account: "账号";
     readonly signedOut: "尚未登录";
     readonly signedIn: "已登录";
@@ -63,7 +63,7 @@ export declare const zh: {
     readonly searchProvider: "搜索与抓取来源";
     readonly searchProviderHint: "选择 DSH 联网工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 来源（自动走代理隧道）。";
     readonly searchProviderDsh: "DSH 默认";
-    readonly searchProviderCodex: "Codex 订阅（代理隧道）";
+    readonly searchProviderCodex: "ChatGPT（代理隧道）";
     readonly providerDefault: "使用 Provider 默认值";
     readonly subagentEnhancements: "子代理设置";
     readonly subagentContextWindow: "子代理上下文预算";
@@ -128,8 +128,8 @@ export declare const en: Record<keyof typeof zh, string>;
 export type LocaleKey = keyof typeof zh;
 export declare const dictionaries: {
     zh: {
-        readonly title: "Codex 订阅";
-        readonly intro: "使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的 Codex 模型。";
+        readonly title: "ChatGPT";
+        readonly intro: "使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的模型。";
         readonly account: "账号";
         readonly signedOut: "尚未登录";
         readonly signedIn: "已登录";
@@ -191,7 +191,7 @@ export declare const dictionaries: {
         readonly searchProvider: "搜索与抓取来源";
         readonly searchProviderHint: "选择 DSH 联网工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 来源（自动走代理隧道）。";
         readonly searchProviderDsh: "DSH 默认";
-        readonly searchProviderCodex: "Codex 订阅（代理隧道）";
+        readonly searchProviderCodex: "ChatGPT（代理隧道）";
         readonly providerDefault: "使用 Provider 默认值";
         readonly subagentEnhancements: "子代理设置";
         readonly subagentContextWindow: "子代理上下文预算";
@@ -252,6 +252,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "proxySettings" | "proxyMode" | "proxyModeHint" | "proxyModeAuto" | "proxyModeCustom" | "proxyModeDirect" | "customProxyUrl" | "customProxyUrlHint" | "customProxyUrlPlaceholder" | "saveProxyUrl" | "proxyDetected" | "proxyDetectedEffective" | "proxyNoneDetected" | "proxyDirectHint" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "subagentEnhancements" | "subagentContextWindow" | "subagentContextWindowHint" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentDisabled" | "levels" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"title" | "image" | "cancel" | "quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "proxySettings" | "proxyMode" | "proxyModeHint" | "proxyModeAuto" | "proxyModeCustom" | "proxyModeDirect" | "customProxyUrl" | "customProxyUrlHint" | "customProxyUrlPlaceholder" | "saveProxyUrl" | "proxyDetected" | "proxyDetectedEffective" | "proxyNoneDetected" | "proxyDirectHint" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "subagentEnhancements" | "subagentContextWindow" | "subagentContextWindowHint" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentDisabled" | "levels" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

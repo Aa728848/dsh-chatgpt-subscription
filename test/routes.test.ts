@@ -109,6 +109,10 @@ describe('host routes', () => {
     expect(statusText).toContain('"quickQuotaVisible":false')
     expect(statusText).not.toContain('"allProviders"')
 
+    const mermaidResponse = await fetch(`${origin}${ROUTE_PREFIX}/mermaid.min.js`)
+    expect(mermaidResponse.status).toBe(200)
+    expect(mermaidResponse.headers.get('content-type')).toContain('application/javascript')
+
     const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin },

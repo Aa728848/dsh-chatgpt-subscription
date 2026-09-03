@@ -8,6 +8,7 @@ export interface CodexModelCatalogEntry {
     defaultReasoningEffort: string;
     reasoningProfile: 'standard' | 'gpt-5.6';
     supportsReasoningSummary: boolean;
+    fallbackModelId?: string;
 }
 export declare const CODEX_MODEL_CATALOG: readonly [{
     readonly id: "gpt-5.6-sol";
@@ -17,6 +18,7 @@ export declare const CODEX_MODEL_CATALOG: readonly [{
     readonly defaultReasoningEffort: "medium";
     readonly reasoningProfile: "gpt-5.6";
     readonly supportsReasoningSummary: true;
+    readonly fallbackModelId: "gpt-5.6-terra";
 }, {
     readonly id: "gpt-5.6-terra";
     readonly name: "5.6 Terra";
@@ -25,6 +27,7 @@ export declare const CODEX_MODEL_CATALOG: readonly [{
     readonly defaultReasoningEffort: "medium";
     readonly reasoningProfile: "gpt-5.6";
     readonly supportsReasoningSummary: true;
+    readonly fallbackModelId: "gpt-5.5";
 }, {
     readonly id: "gpt-5.6-luna";
     readonly name: "5.6 Luna";
@@ -33,6 +36,7 @@ export declare const CODEX_MODEL_CATALOG: readonly [{
     readonly defaultReasoningEffort: "medium";
     readonly reasoningProfile: "gpt-5.6";
     readonly supportsReasoningSummary: true;
+    readonly fallbackModelId: "gpt-5.5";
 }, {
     readonly id: "gpt-5.5";
     readonly name: "5.5";
@@ -49,6 +53,7 @@ export declare const CODEX_MODEL_CATALOG: readonly [{
     readonly defaultReasoningEffort: "none";
     readonly reasoningProfile: "standard";
     readonly supportsReasoningSummary: true;
+    readonly fallbackModelId: "gpt-5.4-mini";
 }, {
     readonly id: "gpt-5.4-mini";
     readonly name: "5.4 Mini";
@@ -76,6 +81,7 @@ export declare const DEFAULT_CODEX_MODEL: {
     readonly defaultReasoningEffort: "medium";
     readonly reasoningProfile: "gpt-5.6";
     readonly supportsReasoningSummary: true;
+    readonly fallbackModelId: "gpt-5.6-terra";
 };
 export declare const CONFIGURABLE_CONTEXT_MODEL_IDS: readonly ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 export type ConfigurableContextModelId = typeof CONFIGURABLE_CONTEXT_MODEL_IDS[number];
@@ -90,4 +96,5 @@ export declare function isConfigurableContextModelId(model: unknown): model is C
 export declare function resolveCodexCatalogEntry(model: string): CodexModelCatalogEntry;
 export declare function codexModelSupportsImageInput(model: string): boolean;
 export declare function codexModelSupportsReasoningSummary(model: string): boolean;
+export declare function resolveCodexFallbackModel(model: string): CodexModelCatalogEntry | undefined;
 //# sourceMappingURL=model-catalog.d.ts.map

@@ -14,4 +14,8 @@ export { MacKeychainTokenStore } from './host/token-store-macos.ts';
 export { LinuxFileTokenStore } from './host/token-store-linux.ts';
 export { WindowsDpapiTokenStore } from './host/token-store-windows.ts';
 export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts';
+export { AntigravityAdapter } from './host/antigravity/adapter.ts';
+export { FileCredentialStore, FileModelSettingsStore, credentialPath, modelSettingsPath, } from './host/antigravity/token-store.ts';
+export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts';
+export { fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts';
 //# sourceMappingURL=index.d.ts.map

@@ -15,6 +15,8 @@ import {
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL } from '../compat.ts'
+import { resolveCodexFallbackModel } from '../shared/model-catalog.ts'
+import { wrapStreamWithWatchdog } from './common/idle-watchdog.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
@@ -55,18 +57,44 @@ export class ResponsesClient {
   private readonly localRawImages: LocalRawImageOptions
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const payload = await buildResponsesPayload(
-      options,
-      this.attachments,
-      this.localRawImages,
-      this.outputVerbosity(),
-      this.fastMode(),
-    )
     const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
+    let currentModel = options.model
+    let attemptOptions = options
+    let response: Response | undefined
+
+    while (true) {
+      const payload = await buildResponsesPayload(
+        attemptOptions,
+        this.attachments,
+        this.localRawImages,
+        this.outputVerbosity(),
+        this.fastMode(),
+      )
+      try {
+        response = await this.send(payload, sessionId, options.signal)
+        break
+      } catch (error) {
+        if (error instanceof LlmError && (error.code === 'NOT_FOUND' || (error as unknown as { status?: number }).status === 404)) {
+          const fallback = resolveCodexFallbackModel(currentModel)
+          if (fallback && fallback.id !== currentModel) {
+            currentModel = fallback.id
+            attemptOptions = { ...attemptOptions, model: fallback.id }
+            continue
+          }
+        }
+        throw error
+      }
+    }
+
     try {
-      const response = await this.send(payload, sessionId, options.signal)
-      yield* parseResponsesStream(response, options.signal, hiddenSandboxControls)
+      yield* wrapStreamWithWatchdog(
+        (watchdogSignal) => parseResponsesStream(response!, watchdogSignal, hiddenSandboxControls),
+        options.signal,
+        300_000,
+        'LLM_STREAM_IDLE_TIMEOUT',
+        'Codex',
+      )
     } finally {
       this.onGenerationFinished()
     }
@@ -415,6 +443,7 @@ async function responseError(response: Response): Promise<LlmError> {
     ...(response.status === 429 ? { providerRetryAfterMs: retryAfterMs(response.headers) } : {}),
   }
   if (response.status === 401) return new LlmError('ChatGPT sign-in has expired. Sign in again.', 'AUTH', options)
+  if (response.status === 404) return new LlmError(`Codex model or resource not found (${response.status})${detail ? `: ${detail}` : '.'}`, 'NOT_FOUND', options)
   if (response.status === 429) return new LlmError('Codex rate limit reached.', 'RATE_LIMIT', options)
   if (response.status >= 500) return new LlmError(`Codex service error (${response.status}).`, 'SERVER_ERROR', options)
   return new LlmError(`Codex request failed (${response.status})${detail ? `: ${detail}` : '.'}`, 'PROVIDER_ERROR', options)

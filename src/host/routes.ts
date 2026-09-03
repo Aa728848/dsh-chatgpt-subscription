@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
@@ -30,6 +32,21 @@ export function registerRoutes(
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
       } })
+      return
+    }
+    if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/mermaid.min.js`) {
+      try {
+        const requireFn = createRequire(import.meta.url)
+        const mermaidPath = requireFn.resolve('mermaid/dist/mermaid.min.js')
+        response.writeHead(200, {
+          'Content-Type': 'application/javascript; charset=utf-8',
+          'Cache-Control': 'public, max-age=86400',
+        })
+        fs.createReadStream(mermaidPath).pipe(response)
+      } catch {
+        response.writeHead(404, { 'Content-Type': 'text/plain' })
+        response.end('Not found')
+      }
       return
     }
     if (request.method !== 'POST') {

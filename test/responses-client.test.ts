@@ -235,6 +235,41 @@ describe('Responses streaming', () => {
       message: expect.stringContaining('overloaded'),
     })
   })
+
+  it('falls back to candidate model when original model returns 404', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const oauth = new OAuthService(store)
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      calls.push({ url: String(url), body })
+      if (body.model === 'gpt-5.6-sol') {
+        return new Response('model not found', { status: 404 })
+      }
+      return sse([
+        { type: 'response.output_text.delta', delta: 'fallback hello' },
+        { type: 'response.completed', response: {} },
+      ])
+    })
+
+    const client = new ResponsesClient(oauth, { readImage: async () => Buffer.from('') }, { fetchFn })
+    const chunks = await collect(client.stream({
+      provider: 'codex-chatgpt',
+      model: 'gpt-5.6-sol',
+      messages: [],
+    } as unknown as GenerateOptions))
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0].body.model).toBe('gpt-5.6-sol')
+    expect(calls[1].body.model).toBe('gpt-5.6-terra')
+    expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: 'fallback hello' })
+  })
 })
 
 
