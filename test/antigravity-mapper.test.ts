@@ -62,6 +62,54 @@ describe('Antigravity Mapper', () => {
 
     const tools = reqData.tools as Array<{ functionDeclarations: Array<{ name: string }> }>
     expect(tools[0].functionDeclarations[0].name).toBe('get_weather')
+
+    const genConfig = reqData.generationConfig as Record<string, unknown>
+    expect(genConfig.thinkingConfig).toEqual({
+      thinkingLevel: 'HIGH',
+      includeThoughts: true,
+    })
+  })
+
+  it('configures thinkingConfig correctly across Gemini 3.x and Gemini 2.5 models', () => {
+    const options: GenerateOptions = {
+      provider: 'antigravity',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    } as unknown as GenerateOptions
+
+    // Gemini 3.8 Flash (medium effort)
+    const m38 = MODELS.find((m) => m.id === 'gemini-3.8-flash')!
+    const req38 = buildRequest(options, m38, 'p1', 'gemini-3.8-flash-tiered', 'medium')
+    expect((req38.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { thinkingLevel: 'MEDIUM', includeThoughts: true },
+    })
+
+    // Gemini 3.6 Flash (low effort)
+    const m36 = MODELS.find((m) => m.id === 'gemini-3.6-flash')!
+    const req36 = buildRequest(options, m36, 'p1', 'gemini-3.6-flash-low', 'low')
+    expect((req36.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: true },
+    })
+
+    // Gemini 3.7 Flash (off / none)
+    const m37 = MODELS.find((m) => m.id === 'gemini-3.7-flash')!
+    const req37Off = buildRequest(options, m37, 'p1', 'gemini-3.7-flash-tiered', 'off')
+    expect((req37Off.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { thinkingLevel: 'MINIMAL', includeThoughts: false },
+    })
+
+    // Gemini 2.5 Pro (high effort)
+    const m25p = MODELS.find((m) => m.id === 'gemini-2.5-pro')!
+    const req25p = buildRequest(options, m25p, 'p1', 'gemini-2.5-pro', 'high')
+    expect((req25p.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { thinkingBudget: 32768, includeThoughts: true },
+    })
+
+    // Gemini 2.5 Flash (off effort)
+    const m25f = MODELS.find((m) => m.id === 'gemini-2.5-flash')!
+    const req25f = buildRequest(options, m25f, 'p1', 'gemini-2.5-flash', 'off')
+    expect((req25f.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
+    })
   })
 
   it('parses SSE text, thinking reasoning, and tool calls', () => {

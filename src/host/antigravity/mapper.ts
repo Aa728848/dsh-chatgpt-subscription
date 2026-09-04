@@ -301,10 +301,36 @@ export function buildRequest(
 
   const generationConfig: Record<string, unknown> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
-  if (runtimeModel === 'gemini-3.8-flash-tiered' || runtimeModel === 'gemini-3.7-flash-tiered') {
-    const selected = effort || 'off'
-    generationConfig.thinkingConfig = {
-      thinkingLevel: selected === 'high' || selected === 'xhigh' ? 'HIGH' : selected === 'medium' ? 'MEDIUM' : 'LOW',
+
+  const isGemini = model.id.startsWith('gemini-') || runtimeModel.startsWith('gemini-')
+  if (isGemini) {
+    const selected = (effort || 'medium').toLowerCase()
+    const isOff = selected === 'off' || selected === 'none'
+    const isGemini3 = model.id.includes('3.') || runtimeModel.includes('3.') || model.id === 'gemini-3-flash' || runtimeModel === 'gemini-3-flash'
+
+    if (isGemini3) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: isOff
+          ? 'MINIMAL'
+          : selected === 'high' || selected === 'xhigh'
+            ? 'HIGH'
+            : selected === 'medium'
+              ? 'MEDIUM'
+              : 'LOW',
+        includeThoughts: !isOff,
+      }
+    } else {
+      const budget = isOff
+        ? 0
+        : selected === 'high' || selected === 'xhigh'
+          ? 32768
+          : selected === 'medium'
+            ? 16384
+            : 4096
+      generationConfig.thinkingConfig = {
+        thinkingBudget: budget,
+        includeThoughts: !isOff,
+      }
     }
   }
 
@@ -389,7 +415,7 @@ export function processStreamLine(line: string, state: StreamState): StreamChunk
   for (const part of parts) {
     if (!isRecord(part)) continue
     if (part.text !== undefined && typeof part.text === 'string') {
-      const isThinking = part.thought === true
+      const isThinking = Boolean(part.thought)
       const blockType = isThinking ? 'reasoning' : 'text'
       if (!state.currentBlock || state.currentBlock.type !== blockType) {
         closeCurrentBlock()

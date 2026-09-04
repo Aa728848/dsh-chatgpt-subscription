@@ -10,7 +10,10 @@ import type { SubscriptionPreferenceStore } from '../src/host/preferences.ts'
 const servers: http.Server[] = []
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))))
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
+    server.closeAllConnections?.()
+    server.close(() => resolve())
+  })))
 })
 
 describe('host routes', () => {
@@ -114,6 +117,7 @@ describe('host routes', () => {
     const mermaidResponse = await fetch(`${origin}${ROUTE_PREFIX}/mermaid.min.js`)
     expect(mermaidResponse.status).toBe(200)
     expect(mermaidResponse.headers.get('content-type')).toContain('application/javascript')
+    expect((await mermaidResponse.text()).length).toBeGreaterThan(0)
 
     const updatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
