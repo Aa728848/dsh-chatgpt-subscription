@@ -7,6 +7,7 @@ export declare const PROJECT_CACHE_TTL_MS: number;
 export declare const MODEL_CACHE_TTL_MS: number;
 export declare const OAUTH_CALLBACK_TIMEOUT_MS: number;
 export declare const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+export declare const DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export declare const ENDPOINT_FALLBACKS: string[];
 export declare const REDIRECT_PATH = "/oauth-callback";
 export declare const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";

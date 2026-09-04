@@ -268,7 +268,7 @@ export async function fetchAccountQuota(
 
   cachedQuota = {
     projectId,
-    endpoint: summaryResult?.endpoint || DEFAULT_ENDPOINT,
+    endpoint: summaryResult?.endpoint || ENDPOINT_FALLBACKS[0],
     planLabel,
     productTier: currentTier,
     paidTier,

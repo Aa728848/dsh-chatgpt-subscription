@@ -302,38 +302,50 @@ export function buildRequest(
   const generationConfig: Record<string, unknown> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
 
-  const isGemini = model.id.startsWith('gemini-') || runtimeModel.startsWith('gemini-')
-  if (isGemini) {
+  // Gemini 只在 thinkingConfig.includeThoughts 为 true 时才返回 thought 部分，否则模型照常思考
+  // （usageMetadata.thoughtsTokenCount 照常计入）但流里没有可渲染的思维链。
+  // 1. tiered 运行时：思考档位由 effort 决定，同时必须请求返回思考内容 includeThoughts。
+  // 2. 带档位后缀的 gemini 运行时：档位已在模型名里，只需请求返回思考内容 includeThoughts。
+  // 3. Gemini 2.5 系列：采用 thinkingBudget 控制思考预算与 includeThoughts。
+  // 4. Claude 运行时依赖 anthropic-beta interleaved-thinking 头，非思考模型均不发送 thinkingConfig。
+  const isTiered = runtimeModel === 'gemini-3.8-flash-tiered' || runtimeModel === 'gemini-3.7-flash-tiered'
+  const isSuffixed = /^gemini-.+(?:-(?:extra-)?low|-medium|-high|-xhigh)$/.test(runtimeModel)
+  const isGemini25 = runtimeModel.startsWith('gemini-2.5-') || model.id.startsWith('gemini-2.5-')
+
+  if (isTiered) {
     const selected = (effort || 'medium').toLowerCase()
     const isOff = selected === 'off' || selected === 'none'
-    const isGemini3 = model.id.includes('3.') || runtimeModel.includes('3.') || model.id === 'gemini-3-flash' || runtimeModel === 'gemini-3-flash'
-
-    if (isGemini3) {
-      generationConfig.thinkingConfig = {
-        thinkingLevel: isOff
-          ? 'MINIMAL'
-          : selected === 'high' || selected === 'xhigh'
-            ? 'HIGH'
-            : selected === 'medium'
-              ? 'MEDIUM'
-              : 'LOW',
-        includeThoughts: !isOff,
-      }
-    } else {
-      const budget = isOff
-        ? 0
+    generationConfig.thinkingConfig = {
+      thinkingLevel: isOff
+        ? 'MINIMAL'
         : selected === 'high' || selected === 'xhigh'
-          ? 32768
+          ? 'HIGH'
           : selected === 'medium'
-            ? 16384
-            : 4096
-      generationConfig.thinkingConfig = {
-        thinkingBudget: budget,
-        includeThoughts: !isOff,
-      }
+            ? 'MEDIUM'
+            : 'LOW',
+      includeThoughts: !isOff,
+    }
+  } else if (isSuffixed) {
+    const selected = (effort || 'medium').toLowerCase()
+    const isOff = selected === 'off' || selected === 'none'
+    generationConfig.thinkingConfig = {
+      includeThoughts: !isOff,
+    }
+  } else if (isGemini25) {
+    const selected = (effort || 'medium').toLowerCase()
+    const isOff = selected === 'off' || selected === 'none'
+    const budget = isOff
+      ? 0
+      : selected === 'high' || selected === 'xhigh'
+        ? 32768
+        : selected === 'medium'
+          ? 16384
+          : 4096
+    generationConfig.thinkingConfig = {
+      thinkingBudget: budget,
+      includeThoughts: !isOff,
     }
   }
-
   const maxAllowed = getMaxOutputTokens(model.id, runtimeModel)
   generationConfig.maxOutputTokens =
     options.maxTokens !== undefined ? Math.min(options.maxTokens, maxAllowed) : maxAllowed

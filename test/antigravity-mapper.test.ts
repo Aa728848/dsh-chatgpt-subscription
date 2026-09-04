@@ -83,11 +83,11 @@ describe('Antigravity Mapper', () => {
       thinkingConfig: { thinkingLevel: 'MEDIUM', includeThoughts: true },
     })
 
-    // Gemini 3.6 Flash (low effort)
+    // Gemini 3.6 Flash (low effort) - 档位在模型名中，思考配置只补 includeThoughts
     const m36 = MODELS.find((m) => m.id === 'gemini-3.6-flash')!
     const req36 = buildRequest(options, m36, 'p1', 'gemini-3.6-flash-low', 'low')
     expect((req36.request as Record<string, unknown>).generationConfig).toMatchObject({
-      thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: true },
+      thinkingConfig: { includeThoughts: true },
     })
 
     // Gemini 3.7 Flash (off / none)
@@ -110,6 +110,32 @@ describe('Antigravity Mapper', () => {
     expect((req25f.request as Record<string, unknown>).generationConfig).toMatchObject({
       thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
     })
+  })
+
+  it('requests thought summaries for thinking gemini runtimes only', () => {
+    const options = {
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello AI' }] }],
+    } as unknown as GenerateOptions
+
+    // tiered 运行时：思考档位来自 effort，同时必须请求返回思考内容
+    const tiered = buildRequest(options, testModel, 'p', 'gemini-3.7-flash-tiered', 'high')
+    expect((tiered.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { thinkingLevel: 'HIGH', includeThoughts: true },
+    })
+
+    // 档位后缀运行时：档位在模型名里，只补 includeThoughts
+    const suffixed = buildRequest(options, testModel, 'p', 'gemini-3.6-flash-high', 'medium')
+    expect((suffixed.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { includeThoughts: true },
+    })
+
+    // 非思考运行时不携带 thinkingConfig
+    for (const runtime of ['gemini-3-flash', 'claude-sonnet-4-6', 'gpt-oss-120b-medium']) {
+      const request = buildRequest(options, testModel, 'p', runtime, 'high')
+      expect((request.request as Record<string, unknown>).generationConfig).not.toHaveProperty('thinkingConfig')
+    }
   })
 
   it('parses SSE text, thinking reasoning, and tool calls', () => {
