@@ -37,6 +37,7 @@ export type OAuthStatusDto = Omit<PluginStatusDto, 'quota' | 'preferences'>
 
 export type SearchProviderPreference = 'dsh' | 'codex'
 export type CodexOutputVerbosity = 'low' | 'medium' | 'high'
+export type CodexReasoningSummary = 'auto' | 'concise' | 'detailed' | 'none'
 
 export interface CodexContextWindowOverridesDto {
   'gpt-5.6-sol': number
@@ -50,6 +51,7 @@ export interface SubscriptionPreferencesDto {
   quickQuotaVisible: boolean
   fastMode: boolean
   outputVerbosity: CodexOutputVerbosity | null
+  reasoningSummary: CodexReasoningSummary | null
   visibleModelIds: string[]
   searchProvider: SearchProviderPreference
   contextWindowOverrides: CodexContextWindowOverridesDto
@@ -64,6 +66,7 @@ export interface SubscriptionPreferencesUpdateDto {
   quickQuotaVisible?: boolean
   fastMode?: boolean
   outputVerbosity?: CodexOutputVerbosity | null
+  reasoningSummary?: CodexReasoningSummary | null
   visibleModelIds?: string[]
   searchProvider?: SearchProviderPreference
   contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>

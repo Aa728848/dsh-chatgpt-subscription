@@ -60,6 +60,12 @@ export declare const zh: {
     readonly verbosityLow: "低（保持回答简洁）";
     readonly verbosityMedium: "中（兼顾细节与简洁）";
     readonly verbosityHigh: "高（在回答中包含更多细节）";
+    readonly reasoningSummary: "推理摘要";
+    readonly reasoningSummaryHint: "选择 ChatGPT 总结其推理的方式；不影响思考深度。";
+    readonly summaryAuto: "自动（让模型选择摘要详细程度）";
+    readonly summaryConcise: "简洁（显示简要推理摘要）";
+    readonly summaryDetailed: "详细（显示更详细的推理摘要）";
+    readonly summaryNone: "无（不显示推理摘要）";
     readonly searchProvider: "搜索与抓取来源";
     readonly searchProviderHint: "选择 DSH 联网工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 来源（自动走代理隧道）。";
     readonly searchProviderDsh: "DSH 默认";
@@ -188,6 +194,12 @@ export declare const dictionaries: {
         readonly verbosityLow: "低（保持回答简洁）";
         readonly verbosityMedium: "中（兼顾细节与简洁）";
         readonly verbosityHigh: "高（在回答中包含更多细节）";
+        readonly reasoningSummary: "推理摘要";
+        readonly reasoningSummaryHint: "选择 ChatGPT 总结其推理的方式；不影响思考深度。";
+        readonly summaryAuto: "自动（让模型选择摘要详细程度）";
+        readonly summaryConcise: "简洁（显示简要推理摘要）";
+        readonly summaryDetailed: "详细（显示更详细的推理摘要）";
+        readonly summaryNone: "无（不显示推理摘要）";
         readonly searchProvider: "搜索与抓取来源";
         readonly searchProviderHint: "选择 DSH 联网工具使用默认来源，或改用当前 ChatGPT 订阅的 Codex 来源（自动走代理隧道）。";
         readonly searchProviderDsh: "DSH 默认";
@@ -252,6 +264,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"title" | "image" | "cancel" | "quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "proxySettings" | "proxyMode" | "proxyModeHint" | "proxyModeAuto" | "proxyModeCustom" | "proxyModeDirect" | "customProxyUrl" | "customProxyUrlHint" | "customProxyUrlPlaceholder" | "saveProxyUrl" | "proxyDetected" | "proxyDetectedEffective" | "proxyNoneDetected" | "proxyDirectHint" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "subagentEnhancements" | "subagentContextWindow" | "subagentContextWindowHint" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentDisabled" | "levels" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "proxySettings" | "proxyMode" | "proxyModeHint" | "proxyModeAuto" | "proxyModeCustom" | "proxyModeDirect" | "customProxyUrl" | "customProxyUrlHint" | "customProxyUrlPlaceholder" | "saveProxyUrl" | "proxyDetected" | "proxyDetectedEffective" | "proxyNoneDetected" | "proxyDirectHint" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "reasoningSummary" | "reasoningSummaryHint" | "summaryAuto" | "summaryConcise" | "summaryDetailed" | "summaryNone" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "subagentEnhancements" | "subagentContextWindow" | "subagentContextWindowHint" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentDisabled" | "levels" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

@@ -21,7 +21,7 @@ import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import type { CodexOutputVerbosity } from '../shared/contracts.ts'
+import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
 type FetchLike = typeof fetch
 const MAX_VISIBLE_REASONING_CHARS = 12_000
@@ -34,6 +34,7 @@ export interface ResponsesClientOptions {
   onGenerationFinished?: () => void
   outputVerbosity?: () => CodexOutputVerbosity | null
   fastMode?: () => boolean
+  reasoningSummary?: () => CodexReasoningSummary | null
 }
 
 export class ResponsesClient {
@@ -41,6 +42,7 @@ export class ResponsesClient {
   private readonly onGenerationFinished: () => void
   private readonly outputVerbosity: () => CodexOutputVerbosity | null
   private readonly fastMode: () => boolean
+  private readonly reasoningSummary: () => CodexReasoningSummary | null
 
   constructor(
     private readonly oauth: OAuthService,
@@ -52,6 +54,7 @@ export class ResponsesClient {
     this.onGenerationFinished = options.onGenerationFinished ?? (() => undefined)
     this.outputVerbosity = options.outputVerbosity ?? (() => null)
     this.fastMode = options.fastMode ?? (() => false)
+    this.reasoningSummary = options.reasoningSummary ?? (() => null)
   }
 
   private readonly localRawImages: LocalRawImageOptions
@@ -70,6 +73,7 @@ export class ResponsesClient {
         this.localRawImages,
         this.outputVerbosity(),
         this.fastMode(),
+        this.reasoningSummary(),
       )
       try {
         response = await this.send(payload, sessionId, options.signal)

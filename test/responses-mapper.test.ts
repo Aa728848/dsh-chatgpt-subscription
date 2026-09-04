@@ -78,6 +78,27 @@ describe('Responses payload mapping', () => {
     expect(payload).not.toHaveProperty('text')
   })
 
+  it('maps the configured reasoning summary to the Responses payload', async () => {
+    const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', reasoningEffort: 'high', messages: [] } as unknown as GenerateOptions
+    const payloadConcise = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'concise')
+    expect(payloadConcise.reasoning).toEqual({ effort: 'high', summary: 'concise' })
+
+    const payloadNone = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'none')
+    expect(payloadNone.reasoning).toEqual({ effort: 'high', summary: 'none' })
+
+    const payloadDetailed = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'detailed')
+    expect(payloadDetailed.reasoning).toEqual({ effort: 'high', summary: 'detailed' })
+
+    const payloadDefault = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, null)
+    expect(payloadDefault.reasoning).toEqual({ effort: 'high', summary: 'auto' })
+  })
+
+  it('omits summary on reasoning models that do not support reasoning summaries', async () => {
+    const options = { provider: 'codex-chatgpt', model: 'gpt-5.3-codex-spark', reasoningEffort: 'high', messages: [] } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'concise')
+    expect(payload.reasoning).toEqual({ effort: 'high' })
+  })
+
   it('restores a tool call omitted by empty replay state before sending its result', async () => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [

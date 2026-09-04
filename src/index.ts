@@ -70,6 +70,7 @@ export function apply(ctx: Context): void {
       onGenerationFinished: () => usage.invalidate(),
       outputVerbosity: () => preferences.status().outputVerbosity,
       fastMode: () => preferences.status().fastMode,
+      reasoningSummary: () => preferences.status().reasoningSummary,
     })
     const adapter = new CodexChatGptAdapter(responses, preferences)
 

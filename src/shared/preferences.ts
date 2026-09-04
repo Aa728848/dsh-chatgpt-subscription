@@ -1,5 +1,5 @@
 import { DEFAULT_VISIBLE_CODEX_MODEL_IDS } from './model-catalog.ts'
-import type { CodexOutputVerbosity, ProxyMode, SearchProviderPreference, SubscriptionPreferencesDto } from './contracts.ts'
+import type { CodexOutputVerbosity, CodexReasoningSummary, ProxyMode, SearchProviderPreference, SubscriptionPreferencesDto } from './contracts.ts'
 
 export const PREFERENCES_NAMESPACE = 'dsh-chatgpt-subscription'
 export const SUBAGENT_MAX_DEPTH_LIMIT = 3
@@ -8,6 +8,7 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   quickQuotaVisible: false,
   fastMode: false,
   outputVerbosity: null,
+  reasoningSummary: null,
   visibleModelIds: [...DEFAULT_VISIBLE_CODEX_MODEL_IDS],
   searchProvider: 'dsh',
   contextWindowOverrides: {
@@ -30,6 +31,10 @@ export function isSearchProviderPreference(value: unknown): value is SearchProvi
 
 export function isCodexOutputVerbosity(value: unknown): value is CodexOutputVerbosity {
   return value === 'low' || value === 'medium' || value === 'high'
+}
+
+export function isCodexReasoningSummary(value: unknown): value is CodexReasoningSummary {
+  return value === 'auto' || value === 'concise' || value === 'detailed' || value === 'none'
 }
 
 export function isProxyMode(value: unknown): value is ProxyMode {

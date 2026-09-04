@@ -9,6 +9,7 @@ import {
   SEARCH_PROVIDER_DSH,
   SUBAGENT_MAX_DEPTH_LIMIT,
   isCodexOutputVerbosity,
+  isCodexReasoningSummary,
   isProxyMode,
   isSearchProviderPreference,
 } from '../shared/preferences.ts'
@@ -33,6 +34,7 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
     fastMode: z.boolean().default(DEFAULT_PREFERENCES.fastMode),
     outputVerbosity: z.union([z.const('low'), z.const('medium'), z.const('high'), z.const(null)]).default(DEFAULT_PREFERENCES.outputVerbosity),
+    reasoningSummary: z.union([z.const('auto'), z.const('concise'), z.const('detailed'), z.const('none'), z.const(null)]).default(DEFAULT_PREFERENCES.reasoningSummary),
     visibleModelIds: z.array(z.string()).default(DEFAULT_PREFERENCES.visibleModelIds),
     searchProvider: z.union([
       z.const(SEARCH_PROVIDER_DSH),
@@ -65,6 +67,10 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
     if (patch.outputVerbosity !== undefined) {
       if (patch.outputVerbosity !== null && !isCodexOutputVerbosity(patch.outputVerbosity)) throw new PreferenceError('Unsupported output verbosity preference.')
       normalized.outputVerbosity = patch.outputVerbosity
+    }
+    if (patch.reasoningSummary !== undefined) {
+      if (patch.reasoningSummary !== null && !isCodexReasoningSummary(patch.reasoningSummary)) throw new PreferenceError('Unsupported reasoning summary preference.')
+      normalized.reasoningSummary = patch.reasoningSummary
     }
     if (patch.visibleModelIds !== undefined) {
       if (patch.visibleModelIds.length === 0 || !patch.visibleModelIds.every(isCodexModelId)) throw new PreferenceError('At least one supported Codex model must be visible.')

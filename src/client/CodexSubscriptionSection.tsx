@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { CodexReasoningSummary, CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
@@ -380,6 +380,22 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <option value="low">{t('verbosityLow')}</option>
             <option value="medium">{t('verbosityMedium')}</option>
             <option value="high">{t('verbosityHigh')}</option>
+          </select>
+        </div>
+        <div className="dsh-codex-pref-row">
+          <div>
+            <strong>{t('reasoningSummary')}</strong>
+            <p className="dsh-codex-muted">{t('reasoningSummaryHint')}</p>
+          </div>
+          <select className="dsh-codex-select" aria-label={t('reasoningSummary')} value={preferences?.reasoningSummary ?? ''} disabled={busy !== null} onChange={(event) => {
+            const value = event.currentTarget.value
+            void updatePreferences({ reasoningSummary: value === '' ? null : value as CodexReasoningSummary })
+          }}>
+            <option value="">{t('providerDefault')}</option>
+            <option value="auto">{t('summaryAuto')}</option>
+            <option value="concise">{t('summaryConcise')}</option>
+            <option value="detailed">{t('summaryDetailed')}</option>
+            <option value="none">{t('summaryNone')}</option>
           </select>
         </div>
         <div className="dsh-codex-pref-row">

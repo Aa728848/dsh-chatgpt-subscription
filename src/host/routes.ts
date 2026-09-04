@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
-import { SUBAGENT_MAX_DEPTH_LIMIT } from '../shared/preferences.ts'
+import { SUBAGENT_MAX_DEPTH_LIMIT, isCodexReasoningSummary } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import type { ProxyManager } from './proxy-manager.ts'
@@ -246,6 +246,10 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
   if ('outputVerbosity' in value) {
     if (value.outputVerbosity !== null && value.outputVerbosity !== 'low' && value.outputVerbosity !== 'medium' && value.outputVerbosity !== 'high') throw new PreferenceError('outputVerbosity must be null, low, medium, or high.')
     patch.outputVerbosity = value.outputVerbosity
+  }
+  if ('reasoningSummary' in value) {
+    if (value.reasoningSummary !== null && !isCodexReasoningSummary(value.reasoningSummary)) throw new PreferenceError('reasoningSummary must be null, auto, concise, detailed, or none.')
+    patch.reasoningSummary = value.reasoningSummary
   }
   if ('searchProvider' in value) {
     if (value.searchProvider !== 'dsh' && value.searchProvider !== 'codex') throw new PreferenceError('searchProvider must be dsh or codex.')

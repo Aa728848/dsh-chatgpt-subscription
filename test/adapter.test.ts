@@ -52,6 +52,7 @@ describe('CodexChatGptAdapter', () => {
         quickQuotaVisible: false,
         fastMode: false,
         outputVerbosity: null,
+        reasoningSummary: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000, 'gpt-5.6-terra': 200_000, 'gpt-5.6-luna': 256_000 },

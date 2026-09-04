@@ -64,6 +64,7 @@ describe('host routes', () => {
         quickQuotaVisible: false,
         fastMode: false,
         outputVerbosity: null,
+        reasoningSummary: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
@@ -77,6 +78,7 @@ describe('host routes', () => {
         quickQuotaVisible: patch.quickQuotaVisible ?? false,
         fastMode: patch.fastMode ?? false,
         outputVerbosity: patch.outputVerbosity ?? null,
+        reasoningSummary: patch.reasoningSummary !== undefined ? patch.reasoningSummary : null,
         visibleModelIds: patch.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: patch.searchProvider ?? 'dsh',
         contextWindowOverrides: {
@@ -119,6 +121,7 @@ describe('host routes', () => {
       body: JSON.stringify({
         fastMode: true,
         outputVerbosity: 'high',
+        reasoningSummary: 'concise',
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
         subagentContextWindow: 128_000,
@@ -133,6 +136,7 @@ describe('host routes', () => {
       value: {
         fastMode: true,
         outputVerbosity: 'high',
+        reasoningSummary: 'concise',
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
         subagentContextWindow: 128_000,
@@ -141,6 +145,13 @@ describe('host routes', () => {
         customProxyUrl: 'http://127.0.0.1:8888',
       },
     })
+
+    const rejectedReasoningSummary = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ reasoningSummary: 'super-long' }),
+    })
+    expect(rejectedReasoningSummary.status).toBe(400)
 
     const rejectedMaxDepth = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',

@@ -2,7 +2,7 @@ import { type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { OAuthService } from './oauth-service.ts';
 import { type LocalRawImageOptions } from './responses-mapper.ts';
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
-import type { CodexOutputVerbosity } from '../shared/contracts.ts';
+import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts';
 type FetchLike = typeof fetch;
 export interface ResponsesClientOptions {
     fetchFn?: FetchLike;
@@ -10,6 +10,7 @@ export interface ResponsesClientOptions {
     onGenerationFinished?: () => void;
     outputVerbosity?: () => CodexOutputVerbosity | null;
     fastMode?: () => boolean;
+    reasoningSummary?: () => CodexReasoningSummary | null;
 }
 export declare class ResponsesClient {
     private readonly oauth;
@@ -18,6 +19,7 @@ export declare class ResponsesClient {
     private readonly onGenerationFinished;
     private readonly outputVerbosity;
     private readonly fastMode;
+    private readonly reasoningSummary;
     constructor(oauth: OAuthService, attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>, options?: ResponsesClientOptions);
     private readonly localRawImages;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;

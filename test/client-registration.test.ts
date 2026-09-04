@@ -28,6 +28,7 @@ describe('client registration', () => {
         quickQuotaVisible: false,
         fastMode: false,
         outputVerbosity: null,
+        reasoningSummary: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': contextWindow, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
