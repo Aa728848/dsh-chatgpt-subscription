@@ -9,9 +9,12 @@ export const MODEL_CACHE_TTL_MS = 30 * 60 * 1000
 export const OAUTH_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000
 
 export const DEFAULT_ENDPOINT = 'https://cloudcode-pa.googleapis.com'
+// 官方 Antigravity 客户端的调用顺序是 daily 在前、prod 兜底。生产端点对流式生成间歇性返回
+// 429，且不回传 thought 部分（思维链）、配额摘要也是冻结快照；daily 端点三类数据都正常。
+export const DAILY_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com'
 export const ENDPOINT_FALLBACKS = [
+  DAILY_ENDPOINT,
   DEFAULT_ENDPOINT,
-  'https://daily-cloudcode-pa.sandbox.googleapis.com',
 ]
 
 export const REDIRECT_PATH = '/oauth-callback'

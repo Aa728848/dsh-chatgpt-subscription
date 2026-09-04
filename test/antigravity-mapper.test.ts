@@ -64,6 +64,32 @@ describe('Antigravity Mapper', () => {
     expect(tools[0].functionDeclarations[0].name).toBe('get_weather')
   })
 
+  it('requests thought summaries for thinking gemini runtimes only', () => {
+    const options = {
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello AI' }] }],
+    } as unknown as GenerateOptions
+
+    // tiered 运行时：思考档位来自 effort，同时必须请求返回思考内容
+    const tiered = buildRequest(options, testModel, 'p', 'gemini-3.7-flash-tiered', 'high')
+    expect((tiered.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { thinkingLevel: 'HIGH', includeThoughts: true },
+    })
+
+    // 档位后缀运行时：档位在模型名里，只补 includeThoughts
+    const suffixed = buildRequest(options, testModel, 'p', 'gemini-3.6-flash-high', 'medium')
+    expect((suffixed.request as Record<string, unknown>).generationConfig).toMatchObject({
+      thinkingConfig: { includeThoughts: true },
+    })
+
+    // 非思考运行时不携带 thinkingConfig
+    for (const runtime of ['gemini-3-flash', 'gemini-2.5-pro', 'claude-sonnet-4-6', 'gpt-oss-120b-medium']) {
+      const request = buildRequest(options, testModel, 'p', runtime, 'high')
+      expect((request.request as Record<string, unknown>).generationConfig).not.toHaveProperty('thinkingConfig')
+    }
+  })
+
   it('parses SSE text, thinking reasoning, and tool calls', () => {
     const state = createStreamState()
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseCatalogModels, parseQuotaSummary } from '../src/host/antigravity/client.ts'
+import { DEFAULT_ENDPOINT, DAILY_ENDPOINT, ENDPOINT_FALLBACKS } from '../src/host/antigravity/types.ts'
 
 describe('Antigravity Quota & Catalog Parser', () => {
   it('parses quota groups and buckets with remaining fraction clamping', () => {
@@ -72,5 +73,13 @@ describe('Antigravity Quota & Catalog Parser', () => {
     expect(catalog).toHaveLength(2)
     expect(catalog.map((m) => m.id)).toEqual(['gemini-3.7-flash', 'claude-opus-4-6'])
     expect(catalog[0].name).toBe('Gemini 3.7 Flash')
+  })
+
+  it('queries the daily endpoint first, matching the official Antigravity call chain', () => {
+    // 生产端点对流式生成间歇性 429、不回传 thought 部分、配额摘要是冻结快照；
+    // daily 端点三类数据都正常，官方客户端即以 daily 为首选。
+    expect(ENDPOINT_FALLBACKS[0]).toBe(DAILY_ENDPOINT)
+    expect(ENDPOINT_FALLBACKS).toContain(DEFAULT_ENDPOINT)
+    expect(ENDPOINT_FALLBACKS.indexOf(DAILY_ENDPOINT)).toBeLessThan(ENDPOINT_FALLBACKS.indexOf(DEFAULT_ENDPOINT))
   })
 })

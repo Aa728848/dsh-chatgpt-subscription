@@ -301,11 +301,18 @@ export function buildRequest(
 
   const generationConfig: Record<string, unknown> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
+  // Gemini 只在 thinkingConfig.includeThoughts 为 true 时才返回 thought 部分，否则模型照常思考
+  // （usageMetadata.thoughtsTokenCount 照常计入）但流里没有可渲染的思维链。tiered 运行时的思考
+  // 档位由 effort 决定；其余带档位后缀的 gemini 运行时档位已在模型名里，只需请求返回思考内容。
+  // Claude 运行时依赖 anthropic-beta interleaved-thinking 头，不发送 thinkingConfig。
   if (runtimeModel === 'gemini-3.8-flash-tiered' || runtimeModel === 'gemini-3.7-flash-tiered') {
     const selected = effort || 'off'
     generationConfig.thinkingConfig = {
       thinkingLevel: selected === 'high' || selected === 'xhigh' ? 'HIGH' : selected === 'medium' ? 'MEDIUM' : 'LOW',
+      includeThoughts: true,
     }
+  } else if (/^gemini-.+(?:-tiered|-(?:extra-)?low|-medium|-high|-xhigh)$/.test(runtimeModel)) {
+    generationConfig.thinkingConfig = { includeThoughts: true }
   }
 
   const maxAllowed = getMaxOutputTokens(model.id, runtimeModel)
