@@ -118,6 +118,8 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 
 DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 GPT-5.6 系列的有效上下文窗口仍在“Codex 订阅 → 增强功能”中配置；子代理模型、思考深度、子代理上下文、最大嵌套深度和数量上限则统一位于独立的 **“子代理”** 设置页。模型路由适用于会话标记为 `origin: subagent` 的 DSH 内置子代理；运行限制在内置 spawn/fork 及已启用的原生子代理委派工具入口统一执行。
 
+**设置 → Codex 订阅 → 网络代理** 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。
+
 卸载前建议先在设置页点击 **“注销”**，它会删除当前平台的凭据和 Host 内存中的额度缓存。
 
 若 DSH 已异常退出，可在确认路径后手动处理凭据文件：

@@ -35,26 +35,9 @@ export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
 
-  // 挂载 Antigravity 独立 Provider 与 Web 路由
   const antigravityStore = new FileCredentialStore()
   const antigravityModelSettings = new FileModelSettingsStore()
   const antigravityPreferences = registerAntigravityPreferenceStore(ctx.settings, antigravityModelSettings)
-  const antigravityAdapter = new AntigravityAdapter(antigravityStore, antigravityModelSettings, antigravityPreferences)
-
-  ctx.effect(() => {
-    const disposeAntigravityAdapter = ctx.llm.registerAdapter([ANTIGRAVITY_PROVIDER_ID], antigravityAdapter)
-    const disposeAntigravityRoutes = registerAntigravityRoutes(
-      ctx,
-      antigravityStore,
-      antigravityModelSettings,
-      antigravityPreferences,
-    )
-
-    return () => {
-      disposeAntigravityRoutes()
-      disposeAntigravityAdapter()
-    }
-  }, 'dsh-antigravity: adapter, routes, and lifecycle')
 
   ctx.effect(() => {
     const proxyManager = new ProxyManager({
@@ -62,6 +45,20 @@ export function apply(ctx: Context): void {
       logger: ctx.logger,
     })
     const proxyFetch = proxyManager.createFetch()
+    const antigravityAdapter = new AntigravityAdapter(
+      antigravityStore,
+      antigravityModelSettings,
+      antigravityPreferences,
+      { fetchFn: proxyFetch },
+    )
+    const disposeAntigravityAdapter = ctx.llm.registerAdapter([ANTIGRAVITY_PROVIDER_ID], antigravityAdapter)
+    const disposeAntigravityRoutes = registerAntigravityRoutes(
+      ctx,
+      antigravityStore,
+      antigravityModelSettings,
+      antigravityPreferences,
+      proxyFetch,
+    )
     const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger })
     const usage = new UsageService(oauth, { fetchFn: proxyFetch })
     const responses = new ResponsesClient(oauth, ctx.attachments, {
@@ -106,6 +103,8 @@ export function apply(ctx: Context): void {
       disposeImageTool()
       disposeAdapter()
       disposeRoutes()
+      disposeAntigravityRoutes()
+      disposeAntigravityAdapter()
       oauth.dispose()
       proxyManager.dispose()
     }

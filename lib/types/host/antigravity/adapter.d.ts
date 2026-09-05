@@ -4,7 +4,10 @@ export declare class AntigravityAdapter extends LlmAdapter {
     private readonly store;
     private readonly modelSettings;
     private readonly preferences?;
-    constructor(store?: FileCredentialStore, modelSettings?: FileModelSettingsStore, preferences?: AntigravityPreferenceStore | undefined);
+    private readonly options;
+    constructor(store?: FileCredentialStore, modelSettings?: FileModelSettingsStore, preferences?: AntigravityPreferenceStore | undefined, options?: {
+        fetchFn?: typeof fetch;
+    });
     providerInfo(provider: string): LlmProviderInfo;
     listModels(provider?: string): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;

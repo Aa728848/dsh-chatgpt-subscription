@@ -74,6 +74,7 @@ export function registerAntigravityRoutes(
   store: FileCredentialStore,
   modelSettings: FileModelSettingsStore,
   preferences?: AntigravityPreferenceStore,
+  fetchFn: typeof fetch = fetch,
 ): () => void {
   return ctx.webServer.register({
     kind: 'prefix',
@@ -91,7 +92,7 @@ export function registerAntigravityRoutes(
 
         if (path === 'login') {
           if (request.method !== 'POST') return sendMethodNotAllowed(response)
-          const value = await beginWebLogin(store)
+          const value = await beginWebLogin(store, fetchFn)
           return sendJson(response, 200, { ok: true, value })
         }
 
@@ -103,7 +104,7 @@ export function registerAntigravityRoutes(
 
         if (path === 'quota') {
           if (request.method !== 'GET' && request.method !== 'POST') return sendMethodNotAllowed(response)
-          const quota = await fetchAccountQuota(store, modelSettings)
+          const quota = await fetchAccountQuota(store, modelSettings, fetchFn)
           const status = await getAntigravityWebStatus(store, modelSettings, preferences)
           return sendJson(response, 200, { ok: true, value: { ...status, quota } })
         }

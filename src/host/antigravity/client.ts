@@ -84,10 +84,10 @@ function extractProjectId(data: unknown): string | undefined {
   return undefined
 }
 
-export async function listCloudAICompanionProjects(token: string): Promise<string | undefined> {
+export async function listCloudAICompanionProjects(token: string, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
   for (const endpoint of endpointCandidates()) {
     try {
-      const response = await fetch(`${endpoint}/v1internal:listCloudAICompanionProjects`, {
+      const response = await fetchFn(`${endpoint}/v1internal:listCloudAICompanionProjects`, {
         method: 'POST',
         headers: antigravityHeaders(token),
         body: JSON.stringify({}),
@@ -102,7 +102,7 @@ export async function listCloudAICompanionProjects(token: string): Promise<strin
   return undefined
 }
 
-export async function loadCodeAssist(token: string): Promise<string | undefined> {
+export async function loadCodeAssist(token: string, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
   const cached = projectCache.get(token)
   if (cached && cached.expiresAt > Date.now()) {
     return cached.projectId
@@ -118,7 +118,7 @@ export async function loadCodeAssist(token: string): Promise<string | undefined>
 
   for (const endpoint of endpointCandidates()) {
     try {
-      const response = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+      const response = await fetchFn(`${endpoint}/v1internal:loadCodeAssist`, {
         method: 'POST',
         headers: antigravityHeaders(token),
         body,
@@ -130,7 +130,7 @@ export async function loadCodeAssist(token: string): Promise<string | undefined>
         projectCache.set(token, { projectId: project, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS })
         return project
       }
-      const listProj = await listCloudAICompanionProjects(token)
+      const listProj = await listCloudAICompanionProjects(token, fetchFn)
       if (listProj) {
         projectCache.set(token, { projectId: listProj, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS })
         return listProj
@@ -146,10 +146,11 @@ export async function postJson(
   path: string,
   token: string,
   body: Record<string, unknown>,
+  fetchFn: typeof fetch = fetch,
 ): Promise<{ endpoint: string; status: number; data: unknown }> {
   for (const endpoint of endpointCandidates()) {
     try {
-      const response = await fetch(`${endpoint}${path}`, {
+      const response = await fetchFn(`${endpoint}${path}`, {
         method: 'POST',
         headers: jsonHeaders(token),
         body: JSON.stringify(body),
@@ -238,8 +239,9 @@ export function parseCatalogModels(data: unknown): AntigravityCatalogModel[] {
 export async function fetchAccountQuota(
   store = new FileCredentialStore(),
   modelSettings?: FileModelSettingsStore,
+  fetchFn: typeof fetch = fetch,
 ): Promise<AntigravityAccountQuota> {
-  const { token, projectId: credentialProjectId } = await ensureApiKey(store)
+  const { token, projectId: credentialProjectId } = await ensureApiKey(store, fetchFn)
 
   const [assistResult, summaryResult] = await Promise.all([
     postJson('/v1internal:loadCodeAssist', token, {
@@ -248,14 +250,14 @@ export async function fetchAccountQuota(
         platform: 'PLATFORM_UNSPECIFIED',
         pluginType: 'GEMINI',
       },
-    }).catch(() => null),
-    postJson('/v1internal:retrieveUserQuotaSummary', token, {}).catch(() => null),
+    }, fetchFn).catch(() => null),
+    postJson('/v1internal:retrieveUserQuotaSummary', token, {}, fetchFn).catch(() => null),
   ])
 
   const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined
   const projectId = credentialProjectId || discoveredProject || 'antigravity-default'
 
-  const modelsCall = await postJson('/v1internal:fetchAvailableModels', token, { project: projectId }).catch(() => null)
+  const modelsCall = await postJson('/v1internal:fetchAvailableModels', token, { project: projectId }, fetchFn).catch(() => null)
   const modelsData = modelsCall?.data
 
   const { groups, description } = summaryResult ? parseQuotaSummary(summaryResult.data) : { groups: [] }

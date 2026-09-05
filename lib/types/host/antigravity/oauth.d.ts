@@ -18,7 +18,7 @@ export declare function generatePKCE(): {
     challenge: string;
 };
 export declare function openBrowser(url: string): void;
-export declare function getUserEmail(token: string): Promise<string | undefined>;
+export declare function getUserEmail(token: string, fetchFn?: typeof fetch): Promise<string | undefined>;
 export declare function startCallbackServer(expectedState: string): Promise<{
     server: Server;
     waitForCode: () => Promise<{
@@ -26,13 +26,13 @@ export declare function startCallbackServer(expectedState: string): Promise<{
         state: string;
     }>;
 }>;
-export declare function exchangeOAuthCode(code: string, verifier: string, callbackUrl: string): Promise<AntigravityCredentials>;
-export declare function beginWebLogin(store: FileCredentialStore): Promise<WebLoginFlowState>;
+export declare function exchangeOAuthCode(code: string, verifier: string, callbackUrl: string, fetchFn?: typeof fetch): Promise<AntigravityCredentials>;
+export declare function beginWebLogin(store: FileCredentialStore, fetchFn?: typeof fetch): Promise<WebLoginFlowState>;
 export declare function getWebLoginStatus(): WebLoginFlowState;
-export declare function refreshAntigravityToken(credentials: AntigravityCredentials): Promise<AntigravityCredentials>;
-export declare function ensureApiKey(store: FileCredentialStore): Promise<{
+export declare function refreshAntigravityToken(credentials: AntigravityCredentials, fetchFn?: typeof fetch): Promise<AntigravityCredentials>;
+export declare function ensureApiKey(store: FileCredentialStore, fetchFn?: typeof fetch): Promise<{
     token: string;
     projectId?: string;
 }>;
-export declare function loginAndSave(store: FileCredentialStore, signal?: AbortSignal, onUrl?: (url: string) => void): Promise<AntigravityCredentials>;
+export declare function loginAndSave(store: FileCredentialStore, signal?: AbortSignal, onUrl?: (url: string) => void, fetchFn?: typeof fetch): Promise<AntigravityCredentials>;
 //# sourceMappingURL=oauth.d.ts.map

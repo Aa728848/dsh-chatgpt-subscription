@@ -96,9 +96,9 @@ export function openBrowser(url: string): void {
   }
 }
 
-export async function getUserEmail(token: string): Promise<string | undefined> {
+export async function getUserEmail(token: string, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
   try {
-    const response = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+    const response = await fetchFn('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!response.ok) return undefined
@@ -191,8 +191,9 @@ export async function exchangeOAuthCode(
   code: string,
   verifier: string,
   callbackUrl: string,
+  fetchFn: typeof fetch = fetch,
 ): Promise<AntigravityCredentials> {
-  const tokenResponse = await fetch(TOKEN_URL, {
+  const tokenResponse = await fetchFn(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -219,8 +220,8 @@ export async function exchangeOAuthCode(
   }
 
   const [email, discoveredProject] = await Promise.all([
-    getUserEmail(accessToken),
-    loadCodeAssist(accessToken).catch(() => undefined),
+    getUserEmail(accessToken, fetchFn),
+    loadCodeAssist(accessToken, fetchFn).catch(() => undefined),
   ])
 
   return {
@@ -235,7 +236,7 @@ export async function exchangeOAuthCode(
   }
 }
 
-export async function beginWebLogin(store: FileCredentialStore): Promise<WebLoginFlowState> {
+export async function beginWebLogin(store: FileCredentialStore, fetchFn: typeof fetch = fetch): Promise<WebLoginFlowState> {
   if (webLoginFlow.status === 'pending') {
     return { ...webLoginFlow }
   }
@@ -268,7 +269,7 @@ export async function beginWebLogin(store: FileCredentialStore): Promise<WebLogi
     try {
       const { code, state: returnedState } = await waitForCode()
       if (returnedState !== state) throw new Error('OAuth state mismatch')
-      const credentials = await exchangeOAuthCode(code, verifier, callbackUrl)
+      const credentials = await exchangeOAuthCode(code, verifier, callbackUrl, fetchFn)
       await store.write(credentials)
       webLoginFlow.status = 'complete'
       webLoginFlow.email = credentials.email
@@ -289,11 +290,14 @@ export function getWebLoginStatus(): WebLoginFlowState {
   return { ...webLoginFlow }
 }
 
-export async function refreshAntigravityToken(credentials: AntigravityCredentials): Promise<AntigravityCredentials> {
+export async function refreshAntigravityToken(
+  credentials: AntigravityCredentials,
+  fetchFn: typeof fetch = fetch,
+): Promise<AntigravityCredentials> {
   const refreshToken = credentials.refresh || credentials.refresh_token
   if (!refreshToken) throw new Error('Missing Antigravity refresh token.')
 
-  const response = await fetch(TOKEN_URL, {
+  const response = await fetchFn(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -324,7 +328,10 @@ export async function refreshAntigravityToken(credentials: AntigravityCredential
   }
 }
 
-export async function ensureApiKey(store: FileCredentialStore): Promise<{ token: string; projectId?: string }> {
+export async function ensureApiKey(
+  store: FileCredentialStore,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ token: string; projectId?: string }> {
   let credentials = await store.read()
   if (!credentials) {
     throw new Error('Not logged into Antigravity. Please log in from Settings > Antigravity.')
@@ -334,7 +341,7 @@ export async function ensureApiKey(store: FileCredentialStore): Promise<{ token:
   const token = credentials.access || credentials.access_token
 
   if (!token || expires <= Date.now() + 60_000) {
-    credentials = await refreshAntigravityToken(credentials)
+    credentials = await refreshAntigravityToken(credentials, fetchFn)
     await store.write(credentials)
   }
 
@@ -348,6 +355,7 @@ export async function loginAndSave(
   store: FileCredentialStore,
   signal?: AbortSignal,
   onUrl?: (url: string) => void,
+  fetchFn: typeof fetch = fetch,
 ): Promise<AntigravityCredentials> {
   const { verifier, challenge } = generatePKCE()
   const state = base64Url(randomBytes(32))
@@ -374,7 +382,7 @@ export async function loginAndSave(
     const { code, state: returnedState } = await waitForCode()
     if (returnedState !== state) throw new Error('OAuth state mismatch')
 
-    const credentials = await exchangeOAuthCode(code, verifier, callbackUrl)
+    const credentials = await exchangeOAuthCode(code, verifier, callbackUrl, fetchFn)
     await store.write(credentials)
     return credentials
   } finally {

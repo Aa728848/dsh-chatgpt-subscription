@@ -29,6 +29,7 @@ export class AntigravityAdapter extends LlmAdapter {
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
     private readonly preferences?: AntigravityPreferenceStore,
+    private readonly options: { fetchFn?: typeof fetch } = {},
   ) {
     super()
   }
@@ -128,7 +129,8 @@ export class AntigravityAdapter extends LlmAdapter {
     model: AntigravityModelDef,
     signal: AbortSignal,
   ): AsyncIterable<StreamChunk> {
-    const { token, projectId: defaultProj } = await ensureApiKey(this.store)
+    const fetchFn = this.options.fetchFn ?? fetch
+    const { token, projectId: defaultProj } = await ensureApiKey(this.store, fetchFn)
     const projectId = defaultProj || 'antigravity-default'
 
     const effort = String(options.reasoningEffort || 'medium').toLowerCase()
@@ -154,7 +156,7 @@ export class AntigravityAdapter extends LlmAdapter {
 
       for (const endpoint of endpointCandidates()) {
         try {
-          response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+          response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
             method: 'POST',
             headers,
             body,
