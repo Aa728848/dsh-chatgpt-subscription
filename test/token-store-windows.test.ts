@@ -28,6 +28,10 @@ describe.skipIf(process.platform !== 'win32')('WindowsDpapiTokenStore', () => {
     const raw = await readFile(path)
     expect(raw.toString('utf8')).not.toContain('access-super-secret')
     expect(raw.toString('utf8')).not.toContain('refresh-super-secret')
+    const refreshed = { ...credentials, accessToken: 'refreshed-access-secret', refreshToken: 'rotated-refresh-secret' }
+    await store.save(refreshed)
+    expect(await store.load()).toEqual(refreshed)
+    expect((await readFile(path)).toString('utf8')).not.toContain('rotated-refresh-secret')
     await store.clear()
     expect(await store.load()).toBeNull()
   }, 30_000)

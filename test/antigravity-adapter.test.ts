@@ -1,12 +1,78 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/antigravity/token-store.ts'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 
 import os from 'node:os'
 import path from 'node:path'
 
 describe('AntigravityAdapter', () => {
+  it('preserves Gemini thinking and final usage through a complete tool execution round trip', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.7-flash'], catalogModels: [], defaultReasoningEffort: 'low' })
+    const preferences = {
+      status: () => ({ enabledModelIds: ['gemini-3.7-flash'], catalogModels: [], defaultReasoningEffort: 'high' as const }),
+      update: vi.fn(),
+    }
+    const adapter = new AntigravityAdapter(store, modelSettings, preferences)
+    const captured: any[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      captured.push(JSON.parse(String(init?.body)))
+      const first = captured.length === 1
+      const frames = [
+        { response: { candidates: [{ content: { parts: [{ thought: true, text: first ? '先检查代码' : '根据执行结果继续思考' }] } }] } },
+        { response: { candidates: [{ content: { parts: [{ text: '', thoughtSignature: 'thinking-state' }] } }] } },
+        { response: { candidates: [{ content: { parts: first ? [
+          { functionCall: { id: 'run-1', name: 'run_code', args: { code: 'print(1)' } }, thoughtSignature: 'call-state' },
+        ] : [{ text: '执行结果是 1。' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 2 } } },
+        { response: { usageMetadata: { cachedContentTokenCount: 80, candidatesTokenCount: 12, thoughtsTokenCount: 8, totalTokenCount: 120 } } },
+      ]
+      const bytes = new TextEncoder().encode(frames.map((frame) => `data: ${JSON.stringify(frame)}\r\n\r\n`).join(''))
+      return new Response(new ReadableStream({ start(controller) {
+        for (let offset = 0; offset < bytes.length; offset += 7) controller.enqueue(bytes.slice(offset, offset + 7))
+        controller.close()
+      } }))
+    }) as typeof fetch
+    try {
+      const options = {
+        provider: 'antigravity', model: 'gemini-3.7-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'Run the code' }] }],
+        tools: [{ name: 'run_code', parameters: { type: 'object', properties: { code: { type: 'string' } } } }],
+      } as unknown as GenerateOptions
+      const first = new BlockAssembler()
+      const firstChunks: StreamChunk[] = []
+      for await (const chunk of adapter.stream(options)) { first.push(chunk); firstChunks.push(chunk) }
+      expect(first.finish).toEqual({ kind: 'tool-calls' })
+      expect(firstChunks.filter((chunk) => chunk.type === 'usage')).toHaveLength(1)
+      expect(firstChunks[firstChunks.length - 1].type).toBe('finish')
+      expect(first.usage).toEqual({ inputTokens: 20, cacheReadTokens: 80, outputTokens: 20, reasoningTokens: 8 })
+      const call = first.blocks().find((block) => block.type === 'tool-call')!
+      const assistant = createAssistantMessage({ content: first.blocks(), source: {
+        provider: 'antigravity', model: options.model, replayState: first.replayState,
+      } })
+      const nextOptions = { ...options, messages: [...options.messages, assistant, {
+        role: 'user', content: [{ type: 'tool-result', toolCallId: call.id, content: [{ type: 'text', text: '1' }] }],
+      }] } as unknown as GenerateOptions
+      const second = new BlockAssembler()
+      for await (const chunk of adapter.stream(nextOptions)) second.push(chunk)
+      expect(second.blocks()).toContainEqual({ type: 'reasoning', text: '根据执行结果继续思考' })
+      expect(second.blocks()).toContainEqual({ type: 'text', text: '执行结果是 1。' })
+      expect(second.usage).toEqual(first.usage)
+      expect(captured[1].request.contents[1].parts).toEqual([
+        { thought: true, text: '先检查代码' },
+        { text: '', thoughtSignature: 'thinking-state' },
+        { functionCall: { name: 'run_code', args: { code: 'print(1)' } }, thoughtSignature: 'call-state' },
+      ])
+      expect(captured[1].request.contents[2].parts[0].functionResponse).toEqual({ name: 'run_code', response: { output: '1' } })
+      for (const body of captured) expect(body.request.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH', includeThoughts: true })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('reports provider info and lists enabled models including gemini-3.8-flash', async () => {
     const store = new FileCredentialStore(path.join(os.tmpdir(), `test-cred-${Date.now()}.json`))
     const modelSettings = new FileModelSettingsStore(path.join(os.tmpdir(), `test-models-${Date.now()}.json`))

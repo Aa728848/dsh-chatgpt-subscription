@@ -108,7 +108,7 @@ export class AntigravityAdapter extends LlmAdapter {
       maxTokens: 65536,
     }
 
-    const settings = await this.modelSettings.read()
+    const settings = this.preferences ? this.preferences.status() : await this.modelSettings.read()
     const effectiveEffort = options.reasoningEffort || settings.defaultReasoningEffort || undefined
     const effectiveOptions: GenerateOptions = effectiveEffort
       ? { ...options, reasoningEffort: effectiveEffort as any }
@@ -145,10 +145,7 @@ export class AntigravityAdapter extends LlmAdapter {
     }
 
     let response: Response | undefined
-    let chosenRuntime = candidates[0]
-
     for (const runtimeModel of candidates) {
-      chosenRuntime = runtimeModel
       const body = JSON.stringify(buildRequest(options, model, projectId, runtimeModel, effort))
       const headers = {
         ...antigravityHeaders(token),
@@ -210,9 +207,11 @@ export class AntigravityAdapter extends LlmAdapter {
           if (!trimmed) continue
           const chunks = processStreamLine(trimmed, state)
           for (const chunk of chunks) yield chunk
+          if (state.finished) return
         }
       }
 
+      buffer += decoder.decode()
       if (buffer.trim()) {
         const chunks = processStreamLine(buffer.trim(), state)
         for (const chunk of chunks) yield chunk

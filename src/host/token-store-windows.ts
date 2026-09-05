@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
-import type { TokenStore, StoredOAuthCredentials } from './token-store.ts'
+import type { CredentialStore, TokenStore, StoredOAuthCredentials } from './token-store.ts'
 import { parseStoredCredentials } from './token-store.ts'
 
 const PROTECT_SCRIPT = String.raw`
@@ -14,8 +14,16 @@ $cipher = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, [Securit
 $directory = [IO.Path]::GetDirectoryName($path)
 [IO.Directory]::CreateDirectory($directory) | Out-Null
 $temporary = $path + '.tmp-' + [Guid]::NewGuid().ToString('N')
-[IO.File]::WriteAllBytes($temporary, $cipher)
-if ([IO.File]::Exists($path)) { [IO.File]::Replace($temporary, $path, $null) } else { [IO.File]::Move($temporary, $path) }
+try {
+  [IO.File]::WriteAllBytes($temporary, $cipher)
+  if ([IO.File]::Exists($path)) {
+    [IO.File]::Replace($temporary, $path, [System.Management.Automation.Language.NullString]::Value)
+  } else {
+    [IO.File]::Move($temporary, $path)
+  }
+} finally {
+  if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+}
 `
 
 const UNPROTECT_SCRIPT = String.raw`
@@ -39,26 +47,26 @@ export function defaultDpapiCredentialPath(): string {
   return join(dshHome, 'storages', 'dsh-chatgpt-subscription', 'oauth.dpapi')
 }
 
-export class WindowsDpapiTokenStore implements TokenStore {
+export class WindowsDpapiCredentialStore<T> implements CredentialStore<T> {
   readonly storage = { kind: 'windows-dpapi', encrypted: true } as const
 
-  constructor(private readonly path = defaultDpapiCredentialPath()) {
+  constructor(private readonly path: string, private readonly parse: (value: unknown) => T) {
     if (process.platform !== 'win32') throw new Error('Windows DPAPI storage requires Windows')
     if (dirname(path) === path) throw new Error('invalid DPAPI credential path')
   }
 
-  async load(): Promise<StoredOAuthCredentials | null> {
+  async load(): Promise<T | null> {
     const result = await runPowerShell(UNPROTECT_SCRIPT, this.path, '')
     if (result.code === 3) return null
     if (result.code !== 0) throw new Error('DPAPI credential read failed')
     try {
-      return parseStoredCredentials(JSON.parse(result.stdout) as unknown)
+      return this.parse(JSON.parse(result.stdout) as unknown)
     } catch {
       throw new Error('DPAPI credential payload is invalid')
     }
   }
 
-  async save(value: StoredOAuthCredentials): Promise<void> {
+  async save(value: T): Promise<void> {
     const result = await runPowerShell(PROTECT_SCRIPT, this.path, JSON.stringify(value))
     if (result.code !== 0) throw new Error('DPAPI credential write failed')
   }
@@ -66,6 +74,12 @@ export class WindowsDpapiTokenStore implements TokenStore {
   async clear(): Promise<void> {
     const result = await runPowerShell(CLEAR_SCRIPT, this.path, '')
     if (result.code !== 0) throw new Error('DPAPI credential deletion failed')
+  }
+}
+
+export class WindowsDpapiTokenStore extends WindowsDpapiCredentialStore<StoredOAuthCredentials> implements TokenStore {
+  constructor(path = defaultDpapiCredentialPath()) {
+    super(path, parseStoredCredentials)
   }
 }
 

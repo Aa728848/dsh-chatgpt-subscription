@@ -1,10 +1,12 @@
-import type {
-  ContentBlock,
-  FinishReason,
-  GenerateOptions,
-  Message,
-  StreamChunk,
-  TokenUsage,
+import {
+  CallId,
+  LlmError,
+  type ContentBlock,
+  type FinishReason,
+  type GenerateOptions,
+  type Message,
+  type StreamChunk,
+  type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import {
   ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
@@ -109,16 +111,31 @@ function toolResultText(blocks: unknown): string {
 
 function replayBlockFor(message: Message, index: number): Record<string, unknown> | undefined {
   const source = message.source
-  if (!source || source.kind !== 'model') return undefined
+  if (!source || source.kind !== 'model' || source.provider !== PROVIDER_ID) return undefined
   const state = source.replayState
   if (!isRecord(state)) return undefined
+  if (Array.isArray(state.blocks)) return state.blocks[index] as Record<string, unknown>
   const resp = isRecord(state.response) ? (state.response as Record<string, unknown>) : undefined
   if (resp) {
     if (Array.isArray(resp.outputItems)) return resp.outputItems[index] as Record<string, unknown>
     if (Array.isArray(resp.blocks)) return resp.blocks[index] as Record<string, unknown>
   }
-  if (Array.isArray(state.blocks)) return state.blocks[index] as Record<string, unknown>
   return undefined
+}
+
+function thoughtSignature(part: Record<string, unknown> | undefined): string | undefined {
+  return asString(part?.thoughtSignature) || asString(part?.thought_signature) ||
+    asString(part?.thinkingSignature) || asString(part?.textSignature)
+}
+
+function replayPart(part: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...part }
+  const signature = thoughtSignature(part)
+  delete copy.thought_signature
+  delete copy.thinkingSignature
+  if (signature) copy.thoughtSignature = signature
+  if (typeof copy.text === 'string') copy.text = sanitizeText(copy.text)
+  return copy
 }
 
 function assistantParts(
@@ -134,32 +151,34 @@ function assistantParts(
     const block = (message.content[index] as unknown) as Record<string, unknown>
     if (!isRecord(block)) continue
     const replay = replayBlockFor(message, index)
+    const originalParts = Array.isArray(replay?.parts) ? replay.parts.filter(isRecord) : []
+    // Preserve signed part boundaries, including empty signature-only parts.
+    if ((block.type === 'text' || block.type === 'reasoning') && originalParts.length > 0 &&
+      originalParts.every((part) => !part.functionCall) &&
+      originalParts.map((part) => asString(part.text) || '').join('') === sanitizeText(String(block.text || ''))) {
+      parts.push(...originalParts.map(replayPart))
+      continue
+    }
     if (block.type === 'text' && String(block.text || '').trim()) {
-      parts.push({ text: sanitizeText(String(block.text)) })
+      const sig = thoughtSignature(replay) || thoughtSignature(block)
+      parts.push({ text: sanitizeText(String(block.text)), ...(sig ? { thoughtSignature: sig } : {}) })
     } else if (block.type === 'reasoning' && String(block.text || '').trim()) {
-      const sig = asString(replay?.thinkingSignature) || asString(replay?.thought_signature) || asString(block.thought_signature)
-      if (sig) {
-        parts.push({
-          thought: true,
-          text: sanitizeText(String(block.text)),
-          thought_signature: sig,
-          thoughtSignature: sig,
-        })
-      } else {
-        parts.push({ text: sanitizeText(String(block.text)) })
-      }
+      const sig = thoughtSignature(replay) || thoughtSignature(block)
+      parts.push({
+        thought: true,
+        text: sanitizeText(String(block.text)),
+        ...(sig ? { thoughtSignature: sig } : {}),
+      })
     } else if (block.type === 'tool-call') {
       const toolId = String(block.id || '')
       const toolName = String(block.name || '')
       toolNames.set(toolId, toolName)
 
       // 提取 thought_signature，若历史缺失则自动回退至 Google 官方 bypass 标记
-      const sig =
-        asString(replay?.thought_signature) ||
-        asString(replay?.thoughtSignature) ||
-        asString(block.thought_signature) ||
-        asString(block.thoughtSignature) ||
-        'skip_thought_signature_validator'
+      const originalCall = originalParts.find((part) => isRecord(part.functionCall))
+      const sig = thoughtSignature(originalCall) || thoughtSignature(replay) || thoughtSignature(block)
+      // Native parallel calls may be unsigned. Only legacy/imported history needs the bypass.
+      const effectiveSignature = sig || (originalCall ? undefined : 'skip_thought_signature_validator')
 
       parts.push({
         functionCall: {
@@ -169,9 +188,9 @@ function assistantParts(
             ? { id: sanitizeToolCallId(toolId, toolName) }
             : {}),
         },
-        thought_signature: sig,
-        thoughtSignature: sig,
+        ...(effectiveSignature ? { thoughtSignature: effectiveSignature } : {}),
       })
+      parts.push(...originalParts.filter((part) => !part.functionCall).map(replayPart))
     }
   }
   return parts
@@ -305,12 +324,14 @@ export function buildRequest(
   // Gemini 只在 thinkingConfig.includeThoughts 为 true 时才返回 thought 部分，否则模型照常思考
   // （usageMetadata.thoughtsTokenCount 照常计入）但流里没有可渲染的思维链。
   // 1. tiered 运行时：思考档位由 effort 决定，同时必须请求返回思考内容 includeThoughts。
-  // 2. 带档位后缀的 gemini 运行时：档位已在模型名里，只需请求返回思考内容 includeThoughts。
+  // 2. 带档位后缀、agent 别名及 Gemini 3 运行时：补 includeThoughts，保留路由选择的档位。
   // 3. Gemini 2.5 系列：采用 thinkingBudget 控制思考预算与 includeThoughts。
   // 4. Claude 运行时依赖 anthropic-beta interleaved-thinking 头，非思考模型均不发送 thinkingConfig。
   const isTiered = runtimeModel === 'gemini-3.8-flash-tiered' || runtimeModel === 'gemini-3.7-flash-tiered'
   const isSuffixed = /^gemini-.+(?:-(?:extra-)?low|-medium|-high|-xhigh)$/.test(runtimeModel)
   const isGemini25 = runtimeModel.startsWith('gemini-2.5-') || model.id.startsWith('gemini-2.5-')
+  const isGemini3 = /^gemini-3[.-]/.test(runtimeModel) && !runtimeModel.includes('image')
+  const isGeminiAgent = runtimeModel === 'gemini-pro-agent' || runtimeModel === 'gemini-3-flash-agent'
 
   if (isTiered) {
     const selected = (effort || 'medium').toLowerCase()
@@ -325,7 +346,7 @@ export function buildRequest(
             : 'LOW',
       includeThoughts: !isOff,
     }
-  } else if (isSuffixed) {
+  } else if (isSuffixed || isGemini3 || isGeminiAgent) {
     const selected = (effort || 'medium').toLowerCase()
     const isOff = selected === 'off' || selected === 'none'
     generationConfig.thinkingConfig = {
@@ -375,10 +396,14 @@ export function buildRequest(
 
 export interface StreamState {
   blocks: ContentBlock[]
-  replayBlocks: Array<Record<string, unknown>>
-  currentBlock: { type: 'text' | 'reasoning'; text: string; thinkingSignature?: unknown; textSignature?: unknown } | null
+  replayBlocks: Array<{ parts: Array<Record<string, unknown>> }>
+  currentBlock: { index: number; type: 'text' | 'reasoning'; text: string } | null
   hasContent: boolean
   hasToolCall: boolean
+  usageMetadata: Record<string, number> | null
+  finishReason?: string
+  done: boolean
+  finished: boolean
 }
 
 export function createStreamState(): StreamState {
@@ -388,163 +413,162 @@ export function createStreamState(): StreamState {
     currentBlock: null,
     hasContent: false,
     hasToolCall: false,
+    usageMetadata: null,
+    done: false,
+    finished: false,
+  }
+}
+
+function closeCurrentBlock(state: StreamState): StreamChunk[] {
+  if (!state.currentBlock) return []
+  const { index, type, text } = state.currentBlock
+  const block: ContentBlock = { type, text }
+  state.blocks[index] = block
+  state.currentBlock = null
+  return [{ type: 'block-end', index, block }]
+}
+
+const USAGE_FIELDS = [
+  'promptTokenCount', 'cachedContentTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount', 'totalTokenCount',
+] as const
+
+function collectUsage(value: unknown, state: StreamState): void {
+  if (!isRecord(value)) return
+  for (const key of USAGE_FIELDS) {
+    const count = value[key]
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) continue
+    state.usageMetadata ??= {}
+    // SSE frames contain cumulative snapshots, sometimes with only changed fields.
+    state.usageMetadata[key] = count
+  }
+}
+
+function tokenUsage(u: Record<string, number>): TokenUsage {
+  const prompt = u.promptTokenCount ?? 0
+  const cache = Math.min(prompt, u.cachedContentTokenCount ?? 0)
+  const thoughts = u.thoughtsTokenCount ?? 0
+  const explicitOutput = (u.candidatesTokenCount ?? 0) + thoughts
+  const totalOutput = u.totalTokenCount !== undefined && u.promptTokenCount !== undefined
+    ? Math.max(0, u.totalTokenCount - prompt)
+    : 0
+  return {
+    // DSH counts cached and uncached input separately; output includes reasoning.
+    inputTokens: prompt - cache,
+    outputTokens: Math.max(explicitOutput, totalOutput),
+    ...(cache > 0 ? { cacheReadTokens: cache } : {}),
+    ...(u.thoughtsTokenCount !== undefined ? { reasoningTokens: thoughts } : {}),
   }
 }
 
 export function processStreamLine(line: string, state: StreamState): StreamChunk[] {
-  if (!line.startsWith('data:')) return []
+  if (state.finished || !line.startsWith('data:')) return []
   const json = line.slice(5).trim()
-  if (!json || json === '[DONE]') return []
+  if (json === '[DONE]') {
+    state.done = true
+    return closeStream(state)
+  }
+  if (!json) return []
   const chunk = safeJsonParse(json)
   if (!isRecord(chunk)) return []
 
   const responseData = isRecord(chunk.response) ? (chunk.response as Record<string, unknown>) : chunk
   const candidates = Array.isArray(responseData.candidates) ? responseData.candidates : []
-  const candidate = candidates[0] as Record<string, unknown> | undefined
+  const candidate = isRecord(candidates[0]) ? candidates[0] : undefined
   const content = isRecord(candidate?.content) ? (candidate!.content as Record<string, unknown>) : undefined
   const parts = Array.isArray(content?.parts) ? content!.parts : []
   const out: StreamChunk[] = []
 
-  const closeCurrentBlock = () => {
-    if (!state.currentBlock) return
-    const index = state.blocks.length - 1
-    if (state.currentBlock.type === 'text') {
-      out.push({
-        type: 'block-end',
-        index,
-        block: { type: 'text', text: state.currentBlock.text },
-      })
-    } else {
-      out.push({
-        type: 'block-end',
-        index,
-        block: { type: 'reasoning', text: state.currentBlock.text },
-      })
-    }
-    state.currentBlock = null
-  }
-
   for (const part of parts) {
     if (!isRecord(part)) continue
-    if (part.text !== undefined && typeof part.text === 'string') {
+    if (typeof part.text === 'string' && part.text !== '') {
       const isThinking = Boolean(part.thought)
       const blockType = isThinking ? 'reasoning' : 'text'
       if (!state.currentBlock || state.currentBlock.type !== blockType) {
-        closeCurrentBlock()
-        state.currentBlock = { type: blockType, text: '' }
+        out.push(...closeCurrentBlock(state))
         const index = state.blocks.length
-        state.blocks.push({ type: blockType, text: '' } as ContentBlock)
-        state.replayBlocks.push({ type: blockType })
+        state.currentBlock = { index, type: blockType, text: '' }
+        state.blocks.push({ type: blockType, text: '' })
+        state.replayBlocks.push({ parts: [] })
         out.push({ type: 'block-start', index, blockType })
       }
 
       const delta = sanitizeText(part.text)
       state.currentBlock.text += delta
       state.hasContent = true
-      if (isThinking && part.thoughtSignature) {
-        state.currentBlock.thinkingSignature = part.thoughtSignature
-        state.replayBlocks[state.blocks.length - 1].thinkingSignature = part.thoughtSignature
-      } else if (!isThinking && part.thoughtSignature) {
-        state.currentBlock.textSignature = part.thoughtSignature
-        state.replayBlocks[state.blocks.length - 1].textSignature = part.thoughtSignature
-      }
+      state.replayBlocks[state.currentBlock.index].parts.push(replayPart(part))
 
       out.push({
         type: isThinking ? 'reasoning-delta' : 'text-delta',
-        index: state.blocks.length - 1,
+        index: state.currentBlock.index,
         text: delta,
       })
+    } else if (!isRecord(part.functionCall) && thoughtSignature(part)) {
+      // A signature can arrive on its own after the visible text, including after STOP.
+      // Keep it as its own wire part instead of moving it onto a different signed part.
+      if (state.replayBlocks.length === 0) {
+        const type = part.thought ? 'reasoning' : 'text'
+        state.blocks.push({ type, text: '' })
+        state.replayBlocks.push({ parts: [] })
+        out.push({ type: 'block-start', index: 0, blockType: type })
+        out.push({ type: 'block-end', index: 0, block: { type, text: '' } })
+      }
+      state.replayBlocks[state.replayBlocks.length - 1].parts.push(replayPart(part))
     }
 
     if (isRecord(part.functionCall)) {
-      closeCurrentBlock()
+      out.push(...closeCurrentBlock(state))
       const fc = part.functionCall as Record<string, unknown>
       const toolName = asString(fc.name) || ''
       const toolId = sanitizeToolCallId(asString(fc.id) || '', toolName)
       const argsText = JSON.stringify(isRecord(fc.args) ? fc.args : {})
       const index = state.blocks.length
 
-      const sig =
-        asString(part.thought_signature) ||
-        asString(part.thoughtSignature) ||
-        asString(part.thinkingSignature) ||
-        asString(fc.thought_signature) ||
-        asString(fc.thoughtSignature) ||
-        state.currentBlock?.thinkingSignature
-
       const block: ContentBlock = {
         type: 'tool-call',
-        id: toolId as any,
+        id: CallId(toolId),
         name: toolName,
         arguments: argsText,
-        ...(sig ? { thought_signature: sig, thoughtSignature: sig } : {}),
-      } as any
+      }
       state.blocks.push(block)
-      state.replayBlocks.push({
-        type: 'tool-call',
-        ...(sig ? { thought_signature: sig, thoughtSignature: sig } : {}),
-      })
+      const sig = thoughtSignature(part) || thoughtSignature(fc)
+      state.replayBlocks.push({ parts: [{ ...replayPart(part), ...(sig ? { thoughtSignature: sig } : {}) }] })
       state.hasContent = true
       state.hasToolCall = true
       out.push({ type: 'block-start', index, blockType: 'tool-call' })
-      out.push({ type: 'tool-call-delta', index, id: toolId as any, name: toolName, argumentsDelta: argsText })
+      out.push({ type: 'tool-call-delta', index, id: CallId(toolId), name: toolName, argumentsDelta: argsText })
       out.push({ type: 'block-end', index, block })
     }
   }
 
-  // 用量更新（不关闭当前文本块）
-  if (responseData.usageMetadata && isRecord(responseData.usageMetadata)) {
-    const u = responseData.usageMetadata as Record<string, number>
-    const usage: TokenUsage = {
-      inputTokens: Math.max(0, (u.promptTokenCount || 0) - (u.cachedContentTokenCount || 0)),
-      outputTokens: (u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0),
-      ...(u.cachedContentTokenCount ? { cacheReadTokens: u.cachedContentTokenCount } : {}),
-    }
-    out.push({ type: 'usage', usage })
-  }
+  collectUsage(chunk.usageMetadata, state)
+  if (responseData !== chunk) collectUsage(responseData.usageMetadata, state)
 
-  // 结束处理
-  const finishReason = candidate?.finishReason
+  const finishReason = asString(candidate?.finishReason) || asString(responseData.finishReason)
   if (finishReason) {
-    closeCurrentBlock()
-    const reason: FinishReason = state.hasToolCall
-      ? { kind: 'tool-calls' }
-      : finishReason === 'MAX_TOKENS'
-        ? { kind: 'max-tokens' }
-        : { kind: 'stop' }
-    out.push({
-      type: 'finish',
-      reason,
-      replayState: {
-        response: {
-          outputItems: state.replayBlocks,
-          blocks: state.replayBlocks,
-        },
-      },
-    })
+    state.finishReason = finishReason
+    out.push(...closeCurrentBlock(state))
   }
 
   return out
 }
 
 export function closeStream(state: StreamState): StreamChunk[] {
-  const out: StreamChunk[] = []
-  if (state.currentBlock) {
-    const index = state.blocks.length - 1
-    if (state.currentBlock.type === 'text') {
-      out.push({
-        type: 'block-end',
-        index,
-        block: { type: 'text', text: state.currentBlock.text },
-      })
-    } else {
-      out.push({
-        type: 'block-end',
-        index,
-        block: { type: 'reasoning', text: state.currentBlock.text },
-      })
-    }
-    state.currentBlock = null
+  if (state.finished) return []
+  if (!state.finishReason && !state.done) {
+    throw new LlmError('Antigravity stream ended before its terminal response', 'PROVIDER_ERROR')
   }
+  state.finished = true
+  const out = closeCurrentBlock(state)
+  if (state.usageMetadata) out.push({ type: 'usage', usage: tokenUsage(state.usageMetadata) })
+  const reason: FinishReason = state.finishReason === 'MAX_TOKENS'
+    ? { kind: 'max-tokens' }
+    : state.hasToolCall
+      ? { kind: 'tool-calls' }
+      : { kind: 'stop' }
+  out.push({
+    type: 'finish',
+    reason,
+    replayState: { response: { provider: PROVIDER_ID }, blocks: state.replayBlocks },
+  })
   return out
 }

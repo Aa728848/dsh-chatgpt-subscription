@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildRequest,
+  closeStream,
   convertTools,
   createStreamState,
   processStreamLine,
@@ -132,7 +133,7 @@ describe('Antigravity Mapper', () => {
     })
 
     // 非思考运行时不携带 thinkingConfig
-    for (const runtime of ['gemini-3-flash', 'claude-sonnet-4-6', 'gpt-oss-120b-medium']) {
+    for (const runtime of ['claude-sonnet-4-6', 'gpt-oss-120b-medium']) {
       const request = buildRequest(options, testModel, 'p', runtime, 'high')
       expect((request.request as Record<string, unknown>).generationConfig).not.toHaveProperty('thinkingConfig')
     }
@@ -163,7 +164,7 @@ describe('Antigravity Mapper', () => {
 
     // 4. 完成与用量
     const line4 = 'data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20}}'
-    const chunks4 = processStreamLine(line4, state)
+    const chunks4 = [...processStreamLine(line4, state), ...closeStream(state)]
     expect(chunks4).toContainEqual({ type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } })
     expect(chunks4.some((c) => c.type === 'finish')).toBe(true)
   })
@@ -202,7 +203,7 @@ describe('Antigravity Mapper', () => {
     const contentsA = (reqA.request as Record<string, unknown>).contents as Array<any>
     const assistantPartA = contentsA[0].parts[0]
     expect(assistantPartA.functionCall.name).toBe('default_api:run_code')
-    expect(assistantPartA.thought_signature).toBe('skip_thought_signature_validator')
+    expect(assistantPartA.thoughtSignature).toBe('skip_thought_signature_validator')
 
     // 场景 B: 携带真实签名的 tool-call，优先原样保留
     const optionsWithSig: GenerateOptions = {
@@ -238,6 +239,6 @@ describe('Antigravity Mapper', () => {
     const contentsB = (reqB.request as Record<string, unknown>).contents as Array<any>
     const assistantPartB = contentsB[0].parts[0]
     expect(assistantPartB.functionCall.name).toBe('default_api:run_code')
-    expect(assistantPartB.thought_signature).toBe('real_google_sig_123')
+    expect(assistantPartB.thoughtSignature).toBe('real_google_sig_123')
   })
 })

@@ -2,10 +2,16 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { SettingsProvider, SettingsScope } from '@deepseek-ai/dsh-settings'
 import * as SettingsModule from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { MODELS } from './types.ts'
+import type { CredentialStore } from '../token-store.ts'
+import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
+import { MacKeychainCredentialStore } from '../token-store-macos.ts'
+import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
 
 export const ANTIGRAVITY_PREFERENCES_NAMESPACE = 'dsh-antigravity'
 
@@ -116,39 +122,131 @@ export function modelSettingsPath(): string {
   return path.join(dshHomeDir(), 'storages', 'antigravity-models.json')
 }
 
+export function parseAntigravityCredentials(value: unknown): AntigravityCredentials {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Antigravity credential payload is invalid')
+  }
+  const record = value as Record<string, unknown>
+  const credentials: AntigravityCredentials = {}
+  for (const key of ['access', 'access_token', 'refresh', 'refresh_token', 'email', 'projectId'] as const) {
+    if (record[key] === undefined) continue
+    if (typeof record[key] !== 'string') throw new Error('Antigravity credential payload is invalid')
+    credentials[key] = record[key]
+  }
+  for (const key of ['expires', 'expires_at'] as const) {
+    if (record[key] === undefined) continue
+    if (typeof record[key] !== 'number' || !Number.isFinite(record[key])) {
+      throw new Error('Antigravity credential expiry is invalid')
+    }
+    credentials[key] = record[key]
+  }
+  if (!(credentials.access || credentials.access_token || credentials.refresh || credentials.refresh_token)) {
+    throw new Error('Antigravity credential tokens are missing')
+  }
+  return credentials
+}
+
+function credentialAccount(filePath: string): string {
+  return createHash('sha256').update(path.resolve(filePath)).digest('hex')
+}
+
+function createCredentialBackend(filePath: string): CredentialStore<AntigravityCredentials> {
+  if (process.platform === 'win32') {
+    return new WindowsDpapiCredentialStore(`${filePath}.dpapi`, parseAntigravityCredentials)
+  }
+  if (process.platform === 'darwin') {
+    return new MacKeychainCredentialStore('dsh-antigravity', credentialAccount(filePath), parseAntigravityCredentials)
+  }
+  if (process.platform === 'linux') {
+    return new SecretServiceCredentialStore('dsh-antigravity', credentialAccount(filePath), parseAntigravityCredentials)
+  }
+  throw new Error('Antigravity encrypted credential storage requires Windows, macOS, or Linux.')
+}
+
+// Web login, quota requests and CLI-compatible store instances share migration ordering.
+const credentialOperations = new Map<string, Promise<void>>()
+
+/** Keeps the public API; filePath identifies the legacy JSON that is migrated on first use. */
 export class FileCredentialStore {
-  constructor(private readonly filePath = credentialPath()) {}
+  constructor(
+    private readonly filePath = credentialPath(),
+    private readonly backend: CredentialStore<AntigravityCredentials> = createCredentialBackend(filePath),
+  ) {}
 
   path(): string {
-    return this.filePath
+    if (process.platform === 'win32') return `${this.filePath}.dpapi`
+    const kind = process.platform === 'darwin' ? 'Keychain' : 'Secret Service'
+    return `${kind}: dsh-antigravity/${credentialAccount(this.filePath)}`
   }
 
-  async read(): Promise<AntigravityCredentials | null> {
-    try {
-      const content = await fsPromises.readFile(this.filePath, 'utf8')
-      const parsed = JSON.parse(content) as unknown
-      if (typeof parsed === 'object' && parsed !== null && ('access_token' in parsed || 'access' in parsed)) {
-        return parsed as AntigravityCredentials
-      }
-      return null
-    } catch {
-      return null
-    }
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const key = path.resolve(this.filePath)
+    const result = (credentialOperations.get(key) || Promise.resolve()).then(operation)
+    const settled = result.then(() => undefined, () => undefined)
+    credentialOperations.set(key, settled)
+    void settled.then(() => {
+      if (credentialOperations.get(key) === settled) credentialOperations.delete(key)
+    })
+    return result
   }
 
-  async write(credentials: AntigravityCredentials): Promise<void> {
-    await fsPromises.mkdir(path.dirname(this.filePath), { recursive: true })
-    const tmp = `${this.filePath}.tmp.${Date.now()}`
-    await fsPromises.writeFile(tmp, JSON.stringify(credentials, null, 2), 'utf8')
-    await fsPromises.rename(tmp, this.filePath)
-  }
-
-  async delete(): Promise<void> {
+  private async removeLegacy(): Promise<void> {
     try {
       await fsPromises.unlink(this.filePath)
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error('Antigravity legacy credential removal failed')
+      }
     }
+  }
+
+  private async saveVerified(credentials: AntigravityCredentials): Promise<void> {
+    await this.backend.save(credentials)
+    const restored = await this.backend.load()
+    if (!isDeepStrictEqual(restored, credentials)) throw new Error('Antigravity encrypted credential verification failed')
+    await this.removeLegacy()
+  }
+
+  read(): Promise<AntigravityCredentials | null> {
+    return this.serialize(async () => {
+      // A damaged/locked secure store must never fall back to stale plaintext tokens.
+      const current = await this.backend.load()
+      if (current !== null) {
+        await this.removeLegacy()
+        return current
+      }
+      let legacy: string
+      try {
+        const stats = await fsPromises.lstat(this.filePath)
+        if (!stats.isFile() || stats.isSymbolicLink()) throw new Error('Invalid credential file')
+        if (process.getuid && stats.uid !== process.getuid()) throw new Error('Invalid credential owner')
+        if (process.platform !== 'win32') await fsPromises.chmod(this.filePath, 0o600)
+        legacy = await fsPromises.readFile(this.filePath, 'utf8')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw new Error('Antigravity legacy credential read failed')
+      }
+      let credentials: AntigravityCredentials
+      try {
+        credentials = parseAntigravityCredentials(JSON.parse(legacy) as unknown)
+      } catch {
+        throw new Error('Antigravity legacy credential payload is invalid')
+      }
+      await this.saveVerified(credentials)
+      return credentials
+    })
+  }
+
+  write(credentials: AntigravityCredentials): Promise<void> {
+    return this.serialize(() => this.saveVerified(parseAntigravityCredentials(credentials)))
+  }
+
+  delete(): Promise<void> {
+    return this.serialize(async () => {
+      // Remove the migration source first so a failed logout cannot resurrect it.
+      await this.removeLegacy()
+      await this.backend.clear()
+    })
   }
 }
 

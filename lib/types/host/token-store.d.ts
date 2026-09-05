@@ -8,11 +8,13 @@ export interface StoredOAuthCredentials {
     email?: string;
     planType?: string;
 }
-export interface TokenStore {
-    readonly storage: Omit<CredentialStorageDto, 'available'>;
-    load(): Promise<StoredOAuthCredentials | null>;
-    save(value: StoredOAuthCredentials): Promise<void>;
+export interface CredentialStore<T> {
+    load(): Promise<T | null>;
+    save(value: T): Promise<void>;
     clear(): Promise<void>;
+}
+export interface TokenStore extends CredentialStore<StoredOAuthCredentials> {
+    readonly storage: Omit<CredentialStorageDto, 'available'>;
 }
 /** Test seam and non-persistent development store. Never used by apply(). */
 export declare class MemoryTokenStore implements TokenStore {
