@@ -162,7 +162,9 @@ export class AntigravityAdapter extends LlmAdapter {
             body,
             signal,
           })
-          if (response.ok) break
+          // Invalid payloads cannot be repaired by changing endpoints or models.
+          // Keep the first 400 response and its diagnostic body intact.
+          if (response.ok || response.status === 400) break
           // 若遇 404 表明该模型在当前架构下未登记，直接跳出尝试下一个降级模型
           if (response.status === 404) break
           // 若遇 429 限流或 5xx 错误，不提前中断，继续尝试下一个备用端点 (如 daily sandbox)
@@ -171,7 +173,7 @@ export class AntigravityAdapter extends LlmAdapter {
         }
       }
 
-      if (response && response.ok) break
+      if (response && (response.ok || response.status === 400)) break
     }
 
     if (!response || !response.ok) {

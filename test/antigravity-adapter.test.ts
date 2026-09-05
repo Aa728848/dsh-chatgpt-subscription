@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 describe('AntigravityAdapter', () => {
-  it('preserves Gemini thinking and final usage through a complete tool execution round trip', async () => {
+  it.each(['gemini-3.7-flash', 'gemini-3.8-flash'])('preserves %s IDs, thinking and usage through a complete tool execution round trip', async (modelId) => {
     const store = new FileCredentialStore()
     vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
     const modelSettings = new FileModelSettingsStore()
@@ -38,7 +38,7 @@ describe('AntigravityAdapter', () => {
     }) as typeof fetch
     try {
       const options = {
-        provider: 'antigravity', model: 'gemini-3.7-flash',
+        provider: 'antigravity', model: modelId,
         messages: [{ role: 'user', content: [{ type: 'text', text: 'Run the code' }] }],
         tools: [{ name: 'run_code', parameters: { type: 'object', properties: { code: { type: 'string' } } } }],
       } as unknown as GenerateOptions
@@ -64,9 +64,9 @@ describe('AntigravityAdapter', () => {
       expect(captured[1].request.contents[1].parts).toEqual([
         { thought: true, text: '先检查代码' },
         { text: '', thoughtSignature: 'thinking-state' },
-        { functionCall: { name: 'run_code', args: { code: 'print(1)' } }, thoughtSignature: 'call-state' },
+        { functionCall: { id: 'run-1', name: 'run_code', args: { code: 'print(1)' } }, thoughtSignature: 'call-state' },
       ])
-      expect(captured[1].request.contents[2].parts[0].functionResponse).toEqual({ name: 'run_code', response: { output: '1' } })
+      expect(captured[1].request.contents[2].parts[0].functionResponse).toEqual({ id: 'run-1', name: 'run_code', response: { output: '1' } })
       for (const body of captured) expect(body.request.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH', includeThoughts: true })
     } finally {
       globalThis.fetch = originalFetch
@@ -161,6 +161,29 @@ describe('AntigravityAdapter', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it.each([
+    JSON.stringify({ error: { code: 400, status: 'INVALID_ARGUMENT', message: 'Unknown name "propertyNames" at parameters.properties[3].value' } }),
+    'Invalid JSON payload received: unsupported thinkingLevel',
+  ])('preserves a 400 diagnostic without trying a different endpoint or model: %s', async (errorBody) => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const fetchFn = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(errorBody, { status: 400 }))
+      .mockImplementation(async () => new Response('fallback model not found', { status: 404 }))
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn })
+    const run = async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'antigravity', model: 'gemini-3.8-flash', messages: [],
+      } as GenerateOptions)) { /* Drain the request. */ }
+    }
+    await expect(run()).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR', failure: { status: 400 }, message: `Antigravity API error (400): ${errorBody}`,
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   it('handles 404 fallback routing when primary runtime candidate fails', async () => {

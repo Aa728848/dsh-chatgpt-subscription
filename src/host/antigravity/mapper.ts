@@ -17,6 +17,7 @@ import {
   TOOL_CALLING_MODE,
   type AntigravityModelDef,
 } from './types.ts'
+import { toAntigravityToolSchema } from './tool-schema.ts'
 
 let toolCallCounter = 0
 
@@ -138,11 +139,16 @@ function replayPart(part: Record<string, unknown>): Record<string, unknown> {
   return copy
 }
 
+interface ToolCallReference {
+  name: string
+  id?: string
+}
+
 function assistantParts(
   message: Message,
   model: AntigravityModelDef,
   runtimeModel: string,
-  toolNames: Map<string, string>,
+  toolCalls: Map<string, ToolCallReference>,
 ): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = []
   if (!Array.isArray(message.content)) return parts
@@ -172,10 +178,16 @@ function assistantParts(
     } else if (block.type === 'tool-call') {
       const toolId = String(block.id || '')
       const toolName = String(block.name || '')
-      toolNames.set(toolId, toolName)
 
       // 提取 thought_signature，若历史缺失则自动回退至 Google 官方 bypass 标记
       const originalCall = originalParts.find((part) => isRecord(part.functionCall))
+      const originalFunctionCall = isRecord(originalCall?.functionCall) ? originalCall.functionCall : undefined
+      // Wire IDs are opaque. Old sessions may have a sanitized DSH ID, so keep
+      // the original ID separately and use it for both the call and its result.
+      const wireId = asString(originalFunctionCall?.id) || (toolCallIdNeeded(model.id, runtimeModel)
+        ? sanitizeToolCallId(toolId, toolName)
+        : originalCall ? undefined : toolId || undefined)
+      toolCalls.set(toolId, { name: toolName, id: wireId })
       const sig = thoughtSignature(originalCall) || thoughtSignature(replay) || thoughtSignature(block)
       // Native parallel calls may be unsigned. Only legacy/imported history needs the bypass.
       const effectiveSignature = sig || (originalCall ? undefined : 'skip_thought_signature_validator')
@@ -184,9 +196,7 @@ function assistantParts(
         functionCall: {
           name: toolName,
           args: parseArguments(block.arguments),
-          ...(toolCallIdNeeded(model.id, runtimeModel)
-            ? { id: sanitizeToolCallId(toolId, toolName) }
-            : {}),
+          ...(wireId ? { id: wireId } : {}),
         },
         ...(effectiveSignature ? { thoughtSignature: effectiveSignature } : {}),
       })
@@ -199,20 +209,22 @@ function assistantParts(
 function pushToolResult(
   contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>,
   result: Record<string, unknown>,
-  toolNames: Map<string, string>,
+  toolCalls: Map<string, ToolCallReference>,
   model: AntigravityModelDef,
   runtimeModel: string,
 ): void {
   const toolCallId = String(result.toolCallId || '')
-  const toolName = toolNames.get(toolCallId) || 'unknown'
+  const call = toolCalls.get(toolCallId)
+  const toolName = call?.name || 'unknown'
+  const wireId = call?.id || (toolCallIdNeeded(model.id, runtimeModel)
+    ? sanitizeToolCallId(toolCallId, toolName)
+    : undefined)
   const responseText = toolResultText(result.content) || (result.isError ? 'Tool failed' : '')
   const part = {
     functionResponse: {
       name: toolName,
       response: result.isError ? { error: responseText } : { output: responseText },
-      ...(toolCallIdNeeded(model.id, runtimeModel)
-        ? { id: sanitizeToolCallId(toolCallId, toolName) }
-        : {}),
+      ...(wireId ? { id: wireId } : {}),
     },
   }
 
@@ -230,12 +242,12 @@ export function convertMessages(
   runtimeModel: string,
 ): Array<{ role: string; parts: Array<Record<string, unknown>> }> {
   const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = []
-  const toolNames = new Map<string, string>()
+  const toolCalls = new Map<string, ToolCallReference>()
 
   for (const message of options.messages) {
     const role = (message as unknown as { role?: string }).role || (message.source?.kind === 'model' ? 'assistant' : 'user')
     if (role === 'assistant' || message.source?.kind === 'model') {
-      const parts = assistantParts(message, model, runtimeModel, toolNames)
+      const parts = assistantParts(message, model, runtimeModel, toolCalls)
       if (parts.length) contents.push({ role: GEMINI_ROLE.model, parts })
       continue
     }
@@ -250,7 +262,7 @@ export function convertMessages(
     if (userParts.length) contents.push({ role: GEMINI_ROLE.user, parts: userParts })
     for (const b of content) {
       if (isRecord(b) && b.type === 'tool-result') {
-        pushToolResult(contents, b, toolNames, model, runtimeModel)
+        pushToolResult(contents, b, toolCalls, model, runtimeModel)
       }
     }
   }
@@ -258,22 +270,7 @@ export function convertMessages(
 }
 
 export function stripMetaSchema(schema: unknown): unknown {
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return schema
-  const omit = new Set([
-    '$schema',
-    '$id',
-    '$anchor',
-    '$dynamicAnchor',
-    '$vocabulary',
-    '$comment',
-    '$defs',
-    'definitions',
-  ])
-  const out: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
-    if (!omit.has(k)) out[k] = stripMetaSchema(v)
-  }
-  return out
+  return toAntigravityToolSchema(schema)
 }
 
 export function convertTools(
@@ -336,14 +333,14 @@ export function buildRequest(
   if (isTiered) {
     const selected = (effort || 'medium').toLowerCase()
     const isOff = selected === 'off' || selected === 'none'
+    // Gemini 3.7/3.8 support LOW, MEDIUM and HIGH, but cannot disable thinking.
+    // Legacy off/none requests use LOW and suppress the thought summary.
     generationConfig.thinkingConfig = {
-      thinkingLevel: isOff
-        ? 'MINIMAL'
-        : selected === 'high' || selected === 'xhigh'
-          ? 'HIGH'
-          : selected === 'medium'
-            ? 'MEDIUM'
-            : 'LOW',
+      thinkingLevel: selected === 'high' || selected === 'xhigh'
+        ? 'HIGH'
+        : selected === 'medium'
+          ? 'MEDIUM'
+          : 'LOW',
       includeThoughts: !isOff,
     }
   } else if (isSuffixed || isGemini3 || isGeminiAgent) {
@@ -519,7 +516,7 @@ export function processStreamLine(line: string, state: StreamState): StreamChunk
       out.push(...closeCurrentBlock(state))
       const fc = part.functionCall as Record<string, unknown>
       const toolName = asString(fc.name) || ''
-      const toolId = sanitizeToolCallId(asString(fc.id) || '', toolName)
+      const toolId = asString(fc.id) || sanitizeToolCallId('', toolName)
       const argsText = JSON.stringify(isRecord(fc.args) ? fc.args : {})
       const index = state.blocks.length
 

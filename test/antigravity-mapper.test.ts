@@ -95,7 +95,7 @@ describe('Antigravity Mapper', () => {
     const m37 = MODELS.find((m) => m.id === 'gemini-3.7-flash')!
     const req37Off = buildRequest(options, m37, 'p1', 'gemini-3.7-flash-tiered', 'off')
     expect((req37Off.request as Record<string, unknown>).generationConfig).toMatchObject({
-      thinkingConfig: { thinkingLevel: 'MINIMAL', includeThoughts: false },
+      thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: false },
     })
 
     // Gemini 2.5 Pro (high effort)
@@ -111,6 +111,19 @@ describe('Antigravity Mapper', () => {
     expect((req25f.request as Record<string, unknown>).generationConfig).toMatchObject({
       thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
     })
+  })
+
+  it.each(['gemini-3.8-flash', 'gemini-3.7-flash'])('uses supported thinking levels for %s, including legacy efforts', (modelId) => {
+    const model = MODELS.find((entry) => entry.id === modelId)!
+    const options = { provider: 'antigravity', model: modelId, messages: [] } as GenerateOptions
+    const efforts = [
+      ['off', 'LOW', false], ['none', 'LOW', false], ['minimal', 'LOW', true],
+      ['low', 'LOW', true], ['medium', 'MEDIUM', true], ['high', 'HIGH', true], ['xhigh', 'HIGH', true],
+    ] as const
+    for (const [effort, thinkingLevel, includeThoughts] of efforts) {
+      const request = buildRequest(options, model, 'project', `${modelId}-tiered`, effort)
+      expect((request.request as any).generationConfig.thinkingConfig).toEqual({ thinkingLevel, includeThoughts })
+    }
   })
 
   it('requests thought summaries for thinking gemini runtimes only', () => {
@@ -203,6 +216,8 @@ describe('Antigravity Mapper', () => {
     const contentsA = (reqA.request as Record<string, unknown>).contents as Array<any>
     const assistantPartA = contentsA[0].parts[0]
     expect(assistantPartA.functionCall.name).toBe('default_api:run_code')
+    expect(assistantPartA.functionCall.id).toBe('call-1')
+    expect(contentsA[1].parts[0].functionResponse.id).toBe('call-1')
     expect(assistantPartA.thoughtSignature).toBe('skip_thought_signature_validator')
 
     // 场景 B: 携带真实签名的 tool-call，优先原样保留
@@ -239,6 +254,8 @@ describe('Antigravity Mapper', () => {
     const contentsB = (reqB.request as Record<string, unknown>).contents as Array<any>
     const assistantPartB = contentsB[0].parts[0]
     expect(assistantPartB.functionCall.name).toBe('default_api:run_code')
+    expect(assistantPartB.functionCall.id).toBe('call-2')
+    expect(contentsB[1].parts[0].functionResponse.id).toBe('call-2')
     expect(assistantPartB.thoughtSignature).toBe('real_google_sig_123')
   })
 })

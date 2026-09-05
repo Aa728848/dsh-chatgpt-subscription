@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BlockAssembler, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, CallId, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { buildRequest, closeStream, createStreamState, processStreamLine } from '../src/host/antigravity/mapper.ts'
 import { MODELS, ROUTING } from '../src/host/antigravity/types.ts'
 
@@ -88,9 +88,74 @@ describe('Antigravity final usage and thought replay', () => {
     expect(requestParts(assembler)).toEqual([
       { thought: true, text: 'I will inspect the code.' },
       { text: '', thoughtSignature: 'reasoning-signature' },
-      { functionCall: { name: 'run_code', args: { code: 'print(1)' } }, thoughtSignature: 'tool-signature' },
-      { functionCall: { name: 'read_file', args: { path: 'src/main.ts' } } },
+      { functionCall: { id: 'call-one', name: 'run_code', args: { code: 'print(1)' } }, thoughtSignature: 'tool-signature' },
+      { functionCall: { id: 'call-two', name: 'read_file', args: { path: 'src/main.ts' } } },
     ])
+  })
+
+  it.each(['gemini-3.8-flash', 'gemini-3.7-flash'])('preserves opaque parallel call IDs and matches reordered results for %s', (modelId) => {
+    const ids = ['call/1', 'call:1', `provider:${'x'.repeat(80)}`]
+    const state = createStreamState()
+    const chunks = processStreamLine(line({ candidates: [{ content: { parts: ids.map((id, index) => ({
+      functionCall: { id, name: 'run_code', args: { code: `print(${index})` } },
+      ...(index === 0 ? { thoughtSignature: 'original-signature' } : {}),
+    })) }, finishReason: 'STOP' }] }), state)
+    const assembler = assemble([...chunks, ...closeStream(state)])
+    const calls = assembler.blocks().filter((block) => block.type === 'tool-call')
+    expect(calls.map((call) => call.id)).toEqual(ids)
+    const assistant = createAssistantMessage({ content: assembler.blocks(), source: {
+      provider: 'antigravity', model: modelId, replayState: assembler.replayState,
+    } })
+    const request = buildRequest({ provider: 'antigravity', model: modelId, messages: [assistant, {
+      role: 'user', content: [...calls].reverse().map((call) => ({
+        type: 'tool-result', toolCallId: call.id, content: [{ type: 'text', text: `result for ${call.id}` }],
+      })),
+    }] } as unknown as GenerateOptions, MODELS.find((entry) => entry.id === modelId)!, 'project', `${modelId}-tiered`)
+    const contents = (request.request as any).contents
+    expect(contents[0].parts.map((part: any) => part.functionCall.id)).toEqual(ids)
+    expect(contents[1].parts.map((part: any) => part.functionResponse)).toEqual([...ids].reverse().map((id) => ({
+      id, name: 'run_code', response: { output: `result for ${id}` },
+    })))
+    expect(contents[0].parts[0].thoughtSignature).toBe('original-signature')
+  })
+
+  it('recovers the original wire ID from older replay state with a sanitized local ID', () => {
+    const assistant = createAssistantMessage({
+      content: [{ type: 'tool-call', id: CallId('old_call_1'), name: 'run_code', arguments: '{}' }],
+      source: { provider: 'antigravity', model: model.id, replayState: { blocks: [{ parts: [{
+        functionCall: { id: 'old/call:1', name: 'run_code', args: {} }, thoughtSignature: 'old-signature',
+      }] }] } },
+    })
+    const request = buildRequest({ provider: 'antigravity', model: model.id, messages: [assistant, {
+      role: 'user', content: [{ type: 'tool-result', toolCallId: 'old_call_1', content: [{ type: 'text', text: 'ok' }] }],
+    }] } as unknown as GenerateOptions, model, 'project', 'gemini-3.7-flash-tiered')
+    const contents = (request.request as any).contents
+    expect(contents[0].parts[0]).toEqual({
+      functionCall: { id: 'old/call:1', name: 'run_code', args: {} }, thoughtSignature: 'old-signature',
+    })
+    expect(contents[1].parts[0].functionResponse.id).toBe('old/call:1')
+  })
+
+  it('keeps synthetic local IDs off the wire when Gemini did not supply an ID', () => {
+    const state = createStreamState()
+    const chunks = processStreamLine(line({ candidates: [{ content: { parts: [
+      { functionCall: { name: 'run_code', args: {} }, thoughtSignature: 'signed-without-id' },
+      { functionCall: { name: 'run_code', args: {} } },
+    ] }, finishReason: 'STOP' }] }), state)
+    const assembler = assemble([...chunks, ...closeStream(state)])
+    const calls = assembler.blocks().filter((block) => block.type === 'tool-call')
+    expect(new Set(calls.map((call) => call.id)).size).toBe(2)
+    const assistant = createAssistantMessage({ content: assembler.blocks(), source: {
+      provider: 'antigravity', model: model.id, replayState: assembler.replayState,
+    } })
+    const request = buildRequest({ provider: 'antigravity', model: model.id, messages: [assistant, {
+      role: 'user', content: calls.map((call) => ({
+        type: 'tool-result', toolCallId: call.id, content: [{ type: 'text', text: 'ok' }],
+      })),
+    }] } as unknown as GenerateOptions, model, 'project', 'gemini-3.7-flash-tiered')
+    const contents = (request.request as any).contents
+    for (const part of contents[0].parts) expect(part.functionCall).not.toHaveProperty('id')
+    for (const part of contents[1].parts) expect(part.functionResponse).not.toHaveProperty('id')
   })
 
   it('preserves a final text signature arriving after STOP without adding visible text', () => {
