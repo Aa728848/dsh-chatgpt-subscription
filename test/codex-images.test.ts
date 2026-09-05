@@ -18,7 +18,7 @@ describe('Codex image tool', () => {
       accountId: 'account-id',
     })
     const oauth = new OAuthService(store)
-    const fetchFn = vi.fn(async () => Response.json({ data: [{ b64_json: PNG_1X1 }] }))
+    const fetchFn = vi.fn<typeof fetch>(async () => Response.json({ data: [{ b64_json: PNG_1X1 }] }))
     const saveImage = vi.fn(async (input: SaveImageAttachment): Promise<ImageAttachmentRef> => ({
       attachmentId: 'image-1' as ImageAttachmentRef['attachmentId'],
       mediaType: input.mediaType,
