@@ -259,7 +259,7 @@ describe('Responses streaming', () => {
       ])
     })
 
-    const client = new ResponsesClient(oauth, { readImage: async () => Buffer.from('') }, { fetchFn })
+    const client = new ResponsesClient(oauth, { readImage: async () => { throw new Error('unused') } }, { fetchFn })
     const chunks = await collect(client.stream({
       provider: 'codex-chatgpt',
       model: 'gpt-5.6-sol',

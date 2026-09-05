@@ -100,8 +100,8 @@ describe('CodexChatGptAdapter', () => {
       'low', 'medium', 'high', 'xhigh', 'max',
     ])
     preferences.contextWindowOverrides['gpt-6-astra'] = 872_000
-    expect((await adapter.resolveModel(PROVIDER_ID, 'gpt-6-astra')).context.contextWindow).toBe(872_000)
-    expect(prepared.model.context.contextWindow).toBe(272_000)
+    expect((await adapter.resolveModel(PROVIDER_ID, 'gpt-6-astra')).context?.contextWindow).toBe(872_000)
+    expect(prepared.model.context?.contextWindow).toBe(272_000)
     preferences = { ...preferences, visibleModelIds: ['gpt-5.6-sol'] }
     expect(await adapter.listModels()).toHaveLength(1)
   })

@@ -125,7 +125,7 @@
     "build": "tsc -b && tsdown",
     "prepack": "npm run build",
     "test": "vitest run",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false && tsc -p test/tsconfig.json --pretty false"
   },
   "dependencies": {
     "mermaid": "^11.17.2",

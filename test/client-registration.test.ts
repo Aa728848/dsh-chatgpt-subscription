@@ -7,6 +7,11 @@ import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } 
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 
+declare global {
+  // eslint-disable-next-line no-var
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined
+}
+
 describe('client registration', () => {
   it('parses context capacities within the GPT-5.6 provider limit', () => {
     expect(parseCapacity('128K')).toBe(128_000)

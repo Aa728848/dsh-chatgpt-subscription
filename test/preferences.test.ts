@@ -9,7 +9,7 @@ type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
 function createPreferenceStore(initial: unknown = {}) {
   return registerPreferenceStore({
     register(_namespace: unknown, schema: z<PreferenceSettings>) {
-      let value = schema(initial)
+      let value = schema(initial as never)
       return {
         get: () => value,
         update: async (patch: Partial<PreferenceSettings>) => { value = schema({ ...value, ...patch }) },

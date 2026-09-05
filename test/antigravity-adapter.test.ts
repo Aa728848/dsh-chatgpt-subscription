@@ -90,7 +90,7 @@ describe('AntigravityAdapter', () => {
 
     const g38 = models.find((m) => m.id === 'gemini-3.8-flash')!
     expect(g38.name).toBe('Gemini 3.8 Flash')
-    expect(g38.reasoningEfforts).toEqual(['low', 'medium', 'high'])
+    expect((g38 as unknown as { reasoningEfforts?: string[] }).reasoningEfforts).toEqual(['low', 'medium', 'high'])
   })
 
   it('resolves model correctly with reasoning efforts and context window overrides', async () => {
@@ -110,12 +110,12 @@ describe('AntigravityAdapter', () => {
     const resolved = await adapter.resolveModel('antigravity', 'gemini-3.8-flash')
     expect(resolved.id).toBe('gemini-3.8-flash')
     expect(resolved.name).toBe('Gemini 3.8 Flash')
-    expect(resolved.context.contextWindow).toBe(524288) // 覆盖生效
+    expect(resolved.context?.contextWindow).toBe(524288) // 覆盖生效
     expect(resolved.reasoning?.efforts.map((e) => e.name)).toEqual(['low', 'medium', 'high'])
     expect(resolved.reasoning?.defaultEffort).toBe('medium')
 
     const list = await adapter.listModels('antigravity')
-    expect(list[0].context.contextWindow).toBe(524288)
+    expect((list[0] as unknown as { context?: { contextWindow?: number } }).context?.contextWindow).toBe(524288)
   })
 
   it('uses defaultReasoningEffort when options.reasoningEffort is not specified', async () => {

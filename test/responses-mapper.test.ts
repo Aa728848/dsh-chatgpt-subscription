@@ -518,6 +518,7 @@ function imageAttachments() {
       maxImagesPerMessage: 10,
       maxMessageImageBytes: 100_000,
       maxImagePixels: 10_000_000,
+      maxImageDimension: 4096,
       mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const,
     },
     readImage: async () => { throw new Error('unused') },
