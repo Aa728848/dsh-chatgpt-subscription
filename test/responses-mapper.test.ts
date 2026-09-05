@@ -3,9 +3,9 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { buildResponsesPayload } from '../src/host/responses-mapper.ts'
 
 describe('Responses payload mapping', () => {
-  it('maps system, images, tool calls and tool results without provider URLs', async () => {
+  it.each(['gpt-5.6-sol', 'gpt-6-astra'])('maps system, images, tool calls and tool results for %s without provider URLs', async (model) => {
     const options = {
-      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', system: 'Be precise.',
+      provider: 'codex-chatgpt', model, system: 'Be precise.',
       reasoningEffort: 'high',
       tools: [{ name: 'read_file', description: 'Read one file', parameters: { type: 'object' } }],
       messages: [
@@ -52,6 +52,22 @@ describe('Responses payload mapping', () => {
     expect(payloadWithTools.instructions).toContain('System prompt.')
     expect(payloadWithTools.instructions).toContain('Progress and tool execution rule')
     expect(payloadWithTools.instructions).toContain('output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call')
+  })
+
+  it.each([
+    ['low', 'low'], ['medium', 'medium'], ['high', 'high'],
+    ['xhigh', 'xhigh'], ['max', 'max'],
+    ['none', 'low'], ['minimal', 'low'],
+  ])('maps Astra reasoning %s to %s without unsupported sampling controls', async (requested, expected) => {
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-6-astra', reasoningEffort: requested,
+      temperature: 0.7, top_p: 0.9, top_logprobs: 5, messages: [],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload).toMatchObject({ model: 'gpt-6-astra', reasoning: { effort: expected, summary: 'auto' } })
+    expect(payload).not.toHaveProperty('temperature')
+    expect(payload).not.toHaveProperty('top_p')
+    expect(payload).not.toHaveProperty('top_logprobs')
   })
 
   it('maps the configured output verbosity to the Responses text control', async () => {

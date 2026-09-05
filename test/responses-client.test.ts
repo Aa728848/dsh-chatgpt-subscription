@@ -132,7 +132,7 @@ describe('Responses streaming', () => {
     await expect(collect(parseResponsesStream(sse([]), controller.signal))).rejects.toMatchObject({ name: 'AbortError' })
   })
 
-  it('uses the fixed backend, refreshes once on 401, and sends required headers', async () => {
+  it.each(['gpt-5.6-sol', 'gpt-6-astra'])('uses the fixed backend, refreshes once on 401, and preserves %s', async (model) => {
     const store = new MemoryTokenStore()
     await store.save({ accessToken: 'old', refreshToken: 'refresh', accountId: 'acct', expiresAt: Date.now() + 3_600_000 })
     const tokenFetch = vi.fn(async () => Response.json({ access_token: 'fresh', refresh_token: 'refresh', expires_in: 3600 }))
@@ -141,11 +141,12 @@ describe('Responses streaming', () => {
       .mockResolvedValueOnce(new Response('', { status: 401 }))
       .mockResolvedValueOnce(sse([{ type: 'response.completed', response: { usage: { input_tokens: 0, output_tokens: 0 } } }]))
     const client = new ResponsesClient(oauth, { readImage: async () => { throw new Error('unused') } }, { fetchFn: responseFetch as typeof fetch })
-    await collect(client.stream({ provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [], sessionId: 'session-a' } as unknown as GenerateOptions))
+    await collect(client.stream({ provider: 'codex-chatgpt', model, messages: [], sessionId: 'session-a' } as unknown as GenerateOptions))
     expect(responseFetch).toHaveBeenCalledTimes(2)
     expect(tokenFetch).toHaveBeenCalledTimes(1)
     expect(responseFetch.mock.calls[0]?.[0]).toBe(CODEX_RESPONSES_URL)
     const second = responseFetch.mock.calls[1]?.[1] as RequestInit
+    expect(JSON.parse(String(second.body)).model).toBe(model)
     expect(second.headers).toMatchObject({ authorization: 'Bearer fresh', 'chatgpt-account-id': 'acct', originator: 'opencode' })
     expect((second.headers as Record<string, string>)['session-id']).toMatch(/^dsh-[a-f0-9]{32}$/)
     expect((second.headers as Record<string, string>)['user-agent']).toContain('dsh-chatgpt-subscription/0.1.0-alpha.0')

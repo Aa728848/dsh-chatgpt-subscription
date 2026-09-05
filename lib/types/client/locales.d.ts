@@ -78,10 +78,10 @@ export declare const zh: {
     readonly subagentMaxDepthHint: "限制子代理的递归层级（0–3）；0 禁止创建子代理。";
     readonly subagentDisabled: "已禁用";
     readonly levels: "层";
-    readonly contextWindows: "GPT-5.6 上下文窗口";
-    readonly contextWindowsHint: "默认 272K；可选启用最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 1M、512K 等容量。";
+    readonly contextWindows: "模型上下文窗口";
+    readonly contextWindowsHint: "默认 272K；6 Astra 最高 872K，GPT-5.6 最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 872K、512K 等容量。";
     readonly contextWindow: "上下文窗口";
-    readonly contextWindowInvalid: "上下文窗口必须是 1 到 1M 的整数，可使用 K 或 M 后缀。";
+    readonly contextWindowInvalid: "上下文窗口必须是正整数，且不能超过模型上限（6 Astra 为 872K，GPT-5.6 为 1M）；可使用 K 或 M 后缀。";
     readonly saveContextWindow: "保存上下文窗口";
     readonly save: "保存";
     readonly tokens: "tokens";
@@ -212,10 +212,10 @@ export declare const dictionaries: {
         readonly subagentMaxDepthHint: "限制子代理的递归层级（0–3）；0 禁止创建子代理。";
         readonly subagentDisabled: "已禁用";
         readonly levels: "层";
-        readonly contextWindows: "GPT-5.6 上下文窗口";
-        readonly contextWindowsHint: "默认 272K；可选启用最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 1M、512K 等容量。";
+        readonly contextWindows: "模型上下文窗口";
+        readonly contextWindowsHint: "默认 272K；6 Astra 最高 872K，GPT-5.6 最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 872K、512K 等容量。";
         readonly contextWindow: "上下文窗口";
-        readonly contextWindowInvalid: "上下文窗口必须是 1 到 1M 的整数，可使用 K 或 M 后缀。";
+        readonly contextWindowInvalid: "上下文窗口必须是正整数，且不能超过模型上限（6 Astra 为 872K，GPT-5.6 为 1M）；可使用 K 或 M 后缀。";
         readonly saveContextWindow: "保存上下文窗口";
         readonly save: "保存";
         readonly tokens: "tokens";

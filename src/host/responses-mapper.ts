@@ -170,9 +170,12 @@ export async function buildResponsesPayload(
   if (outputVerbosity !== null) payload.text = { verbosity: outputVerbosity }
   if (fastMode) payload.service_tier = 'priority'
   if (options.reasoningEffort !== undefined) {
+    const effort = options.model === 'gpt-6-astra' && ['none', 'minimal'].includes(options.reasoningEffort)
+      ? 'low'
+      : options.reasoningEffort
     payload.reasoning = codexModelSupportsReasoningSummary(options.model)
-      ? { effort: options.reasoningEffort, summary: reasoningSummary ?? 'auto' }
-      : { effort: options.reasoningEffort }
+      ? { effort, summary: reasoningSummary ?? 'auto' }
+      : { effort }
   }
   return payload
 }

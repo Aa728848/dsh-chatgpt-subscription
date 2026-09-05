@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CodexChatGptAdapter, PROVIDER_ID } from '../src/host/adapter.ts'
+import { DEFAULT_PREFERENCES } from '../src/shared/preferences.ts'
 
 describe('CodexChatGptAdapter', () => {
   it('advertises the provider, complete model catalog, modalities and bounded retry policy', async () => {
@@ -7,6 +8,7 @@ describe('CodexChatGptAdapter', () => {
     expect(adapter.providerInfo(PROVIDER_ID)).toEqual({ id: 'codex-chatgpt', name: 'Codex（ChatGPT 订阅）' })
     expect(await adapter.listModels()).toMatchObject([
       { id: 'gpt-5.6-sol', name: '5.6 Sol', inputModalities: ['text', 'image'] },
+      { id: 'gpt-6-astra', name: '6 Astra', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.6-terra', name: '5.6 Terra', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.6-luna', name: '5.6 Luna', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.5', name: '5.5', inputModalities: ['text', 'image'] },
@@ -77,6 +79,31 @@ describe('CodexChatGptAdapter', () => {
       context: { contextWindow: 272_000 },
       reasoning: { defaultEffort: 'none' },
     })
+  })
+
+  it('exposes Astra by default with subscription capabilities and its configured context', async () => {
+    let preferences = structuredClone({ ...DEFAULT_PREFERENCES, writable: true })
+    const adapter = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never, {
+      status: () => preferences,
+    } as never)
+    expect(await adapter.listModels()).toContainEqual({
+      provider: PROVIDER_ID, id: 'gpt-6-astra', name: '6 Astra', inputModalities: ['text', 'image'],
+    })
+    const prepared = await adapter.prepareCall(PROVIDER_ID, 'gpt-6-astra')
+    expect(prepared.model).toMatchObject({
+      id: 'gpt-6-astra',
+      inputModalities: ['text', 'image'],
+      context: { contextWindow: 272_000 },
+      reasoning: { defaultEffort: 'medium' },
+    })
+    expect(prepared.model.reasoning?.efforts.map(effort => effort.id)).toEqual([
+      'low', 'medium', 'high', 'xhigh', 'max',
+    ])
+    preferences.contextWindowOverrides['gpt-6-astra'] = 872_000
+    expect((await adapter.resolveModel(PROVIDER_ID, 'gpt-6-astra')).context.contextWindow).toBe(872_000)
+    expect(prepared.model.context.contextWindow).toBe(272_000)
+    preferences = { ...preferences, visibleModelIds: ['gpt-5.6-sol'] }
+    expect(await adapter.listModels()).toHaveLength(1)
   })
 
   it('binds one model-resolution generation to its eventual stream via prepareCall', async () => {

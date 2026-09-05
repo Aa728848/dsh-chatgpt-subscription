@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CodexReasoningSummary, CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
@@ -156,7 +156,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
 
   const updateContextWindow = async (model: (typeof CONFIGURABLE_CONTEXT_MODEL_IDS)[number]): Promise<void> => {
     const current = status?.preferences.contextWindowOverrides[model] ?? resolveCodexCatalogEntry(model).contextWindow
-    const parsed = parseCapacity(contextDrafts[model] ?? String(current))
+    const parsed = parseCapacity(contextDrafts[model] ?? String(current), contextWindowLimitForModel(model))
     if (parsed === null) {
       setError(t('contextWindowInvalid'))
       return
@@ -467,7 +467,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             const entry = resolveCodexCatalogEntry(model)
             const fallback = preferences?.contextWindowOverrides?.[model] ?? entry.contextWindow
             const draft = contextDrafts[model]
-            const parsedDraft = draft === undefined ? fallback : parseCapacity(draft)
+            const parsedDraft = draft === undefined ? fallback : parseCapacity(draft, contextWindowLimitForModel(model))
             const dirty = draft !== undefined && parsedDraft !== fallback
             const inputId = `dsh-codex-context-${model}`
             return <div className="dsh-codex-context-row" key={model}>
@@ -623,9 +623,9 @@ export function parsePositiveCapacity(value: string): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null
 }
 
-export function parseCapacity(value: string): number | null {
+export function parseCapacity(value: string, maxContextWindow = GPT_56_MAX_CONTEXT_WINDOW): number | null {
   const parsed = parsePositiveCapacity(value)
-  return parsed !== null && parsed <= GPT_56_MAX_CONTEXT_WINDOW ? parsed : null
+  return parsed !== null && parsed <= maxContextWindow ? parsed : null
 }
 
 function formatCapacity(value: number): string {

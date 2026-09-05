@@ -20,7 +20,7 @@ export declare function QuotaBar({ label, window, t }: {
 }): React.JSX.Element;
 export declare function windowLabel(minutes: number | null | undefined, t: Translate): string;
 export declare function parsePositiveCapacity(value: string): number | null;
-export declare function parseCapacity(value: string): number | null;
+export declare function parseCapacity(value: string, maxContextWindow?: number): number | null;
 export declare function formatReset(seconds: number | undefined | null): string;
 export {};
 //# sourceMappingURL=CodexSubscriptionSection.d.ts.map

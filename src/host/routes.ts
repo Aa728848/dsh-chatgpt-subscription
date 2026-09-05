@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { GPT_56_MAX_CONTEXT_WINDOW, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
+import { contextWindowLimitForModel, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
 import { SUBAGENT_MAX_DEPTH_LIMIT, isCodexReasoningSummary } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
@@ -259,8 +259,8 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')
     const overrides: NonNullable<SubscriptionPreferencesUpdateDto['contextWindowOverrides']> = {}
     for (const [model, contextWindow] of Object.entries(value.contextWindowOverrides)) {
-      if (!isConfigurableContextModelId(model)) throw new PreferenceError('Only GPT-5.6 context windows can be changed.')
-      if (!Number.isSafeInteger(contextWindow) || (contextWindow as number) < 1 || (contextWindow as number) > GPT_56_MAX_CONTEXT_WINDOW) {
+      if (!isConfigurableContextModelId(model)) throw new PreferenceError('This model does not support a configurable context window.')
+      if (!Number.isSafeInteger(contextWindow) || (contextWindow as number) < 1 || (contextWindow as number) > contextWindowLimitForModel(model)) {
         throw new PreferenceError(`contextWindowOverrides.${model} must be a positive integer no greater than the provider limit.`)
       }
       overrides[model] = contextWindow as number

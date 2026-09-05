@@ -12,6 +12,7 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   visibleModelIds: [...DEFAULT_VISIBLE_CODEX_MODEL_IDS],
   searchProvider: 'dsh',
   contextWindowOverrides: {
+    'gpt-6-astra': 272_000,
     'gpt-5.6-sol': 272_000,
     'gpt-5.6-terra': 272_000,
     'gpt-5.6-luna': 272_000,

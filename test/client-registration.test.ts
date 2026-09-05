@@ -17,21 +17,30 @@ describe('client registration', () => {
     expect(parseCapacity('invalid')).toBeNull()
   })
 
-  it('keeps context options rendered while typing a numeric draft', async () => {
+  it('enforces the Astra subscription context limit', () => {
+    expect(parseCapacity('872K', 872_000)).toBe(872_000)
+    expect(parseCapacity('872001', 872_000)).toBeNull()
+    expect(parseCapacity('1M', 872_000)).toBeNull()
+  })
+
+  it.each([
+    ['gpt-5.6-sol', '5.6 Sol'],
+    ['gpt-6-astra', '6 Astra'],
+  ] as const)('keeps %s context options rendered while typing a numeric draft', async (model, modelName) => {
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const body = init?.body === undefined ? null : JSON.parse(String(init.body)) as { contextWindowOverrides?: { 'gpt-5.6-sol'?: number } }
-      const contextWindow = body?.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000
+      const body = init?.body === undefined ? null : JSON.parse(String(init.body)) as { contextWindowOverrides?: Record<string, number>; visibleModelIds?: string[] }
+      const contextWindow = body?.contextWindowOverrides?.[model] ?? 272_000
       const preferences = {
         quickQuotaVisible: false,
         fastMode: false,
         outputVerbosity: null,
         reasoningSummary: null,
-        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+        visibleModelIds: body?.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
-        contextWindowOverrides: { 'gpt-5.6-sol': contextWindow, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        contextWindowOverrides: { 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000, [model]: contextWindow },
         subagentContextWindow: null,
         subagentMaxDepth: null,
         writable: true,
@@ -53,10 +62,10 @@ describe('client registration', () => {
     const t = ((key: keyof typeof zh) => zh[key]) as never
     try {
       await act(async () => root.render(createElement(CodexSubscriptionSection, { t } as never)))
-      const input = container.querySelector<HTMLInputElement>('input[aria-label="5.6 Sol 上下文窗口"]')
+      const input = container.querySelector<HTMLInputElement>(`input[aria-label="${modelName} 上下文窗口"]`)
       expect(input).not.toBeNull()
       const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsh-codex-models input[type="checkbox"]')
-      expect(modelChecks).toHaveLength(7)
+      expect(modelChecks).toHaveLength(8)
       const subagentDepthSelect = container.querySelector<HTMLSelectElement>('select[aria-label="子代理最大嵌套深度"]')
       expect(subagentDepthSelect).not.toBeNull()
       const subagentContextInput = container.querySelector<HTMLInputElement>('input[aria-label="子代理上下文预算"]')
@@ -67,14 +76,31 @@ describe('client registration', () => {
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
-      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(4)
-      const save = container.querySelector<HTMLButtonElement>('button[data-model="gpt-5.6-sol"]')
+      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(5)
+      const save = container.querySelector<HTMLButtonElement>(`button[data-model="${model}"]`)
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)
       await act(async () => save?.click())
       expect(fetchMock).toHaveBeenCalledTimes(2)
-      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ contextWindowOverrides: { 'gpt-5.6-sol': 5 } })
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ contextWindowOverrides: { [model]: 5 } })
       expect(save?.disabled).toBe(true)
+      if (model === 'gpt-6-astra') {
+        await act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '1M')
+          input!.dispatchEvent(new Event('input', { bubbles: true }))
+        })
+        await act(async () => save?.click())
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(container.textContent).toContain(zh.contextWindowInvalid)
+
+        const astraCheck = container.querySelector<HTMLInputElement>('label[title="gpt-6-astra"] input')
+        expect(astraCheck?.checked).toBe(false)
+        await act(async () => astraCheck?.click())
+        expect(astraCheck?.checked).toBe(true)
+        expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
+          visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra'],
+        })
+      }
     } finally {
       await act(async () => root.unmount())
       container.remove()

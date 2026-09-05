@@ -70,7 +70,7 @@ describe('host routes', () => {
         reasoningSummary: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
-        contextWindowOverrides: { 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        contextWindowOverrides: { 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
         subagentContextWindow: null,
         subagentMaxDepth: null,
         proxyMode: 'auto',
@@ -85,6 +85,7 @@ describe('host routes', () => {
         visibleModelIds: patch.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: patch.searchProvider ?? 'dsh',
         contextWindowOverrides: {
+          'gpt-6-astra': patch.contextWindowOverrides?.['gpt-6-astra'] ?? 272_000,
           'gpt-5.6-sol': patch.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000,
           'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
           'gpt-5.6-luna': patch.contextWindowOverrides?.['gpt-5.6-luna'] ?? 272_000,
@@ -126,8 +127,8 @@ describe('host routes', () => {
         fastMode: true,
         outputVerbosity: 'high',
         reasoningSummary: 'concise',
-        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
-        contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
+        visibleModelIds: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.4-mini'],
+        contextWindowOverrides: { 'gpt-6-astra': 872_000, 'gpt-5.6-sol': 1_000_000 },
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
         proxyMode: 'custom',
@@ -141,8 +142,8 @@ describe('host routes', () => {
         fastMode: true,
         outputVerbosity: 'high',
         reasoningSummary: 'concise',
-        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.4-mini'],
-        contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000 },
+        visibleModelIds: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.4-mini'],
+        contextWindowOverrides: { 'gpt-6-astra': 872_000, 'gpt-5.6-sol': 1_000_000 },
         subagentContextWindow: 128_000,
         subagentMaxDepth: 2,
         proxyMode: 'custom',
@@ -177,6 +178,15 @@ describe('host routes', () => {
       body: JSON.stringify({ contextWindowOverrides: { 'gpt-5.4': 128_000 } }),
     })
     expect(rejectedContextModel.status).toBe(400)
+
+    for (const contextWindow of [0, 1.5, 872_001, 1_000_000]) {
+      const rejectedAstraContext = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin },
+        body: JSON.stringify({ contextWindowOverrides: { 'gpt-6-astra': contextWindow } }),
+      })
+      expect(rejectedAstraContext.status).toBe(400)
+    }
 
     const rejected = await fetch(`${origin}${ROUTE_PREFIX}/logout`, {
       method: 'POST',
