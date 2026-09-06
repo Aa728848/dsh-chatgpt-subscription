@@ -76,4 +76,13 @@ describe('Package Integrity & BOM Checks', () => {
       }
     }
   })
+
+  it('ensures built lib/index.js does not statically import CallId from @deepseek-ai/dsh-llm', () => {
+    const libIndexPath = path.join(ROOT_DIR, 'lib', 'index.js')
+    if (fs.existsSync(libIndexPath)) {
+      const content = fs.readFileSync(libIndexPath, 'utf8')
+      const topImports = content.slice(0, 2000)
+      expect(topImports).not.toMatch(/import\s*\{[^}]*\bCallId\b[^}]*\}\s*from\s*["']@deepseek-ai\/dsh-llm["']/)
+    }
+  })
 })

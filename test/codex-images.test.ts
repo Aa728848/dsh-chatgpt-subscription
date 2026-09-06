@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { toToolCallId } from '../src/host/common/brand-compat.ts'
 import { CODEX_IMAGE_GENERATION_URL, CODEX_IMAGE_MODEL, CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { createCodexImageTool } from '../src/host/codex-images.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
@@ -41,8 +41,8 @@ describe('Codex image tool', () => {
     const signal = new AbortController().signal
 
     const value = await tool.execute({ prompt: 'draw a small blue square' }, {
-      callId: CallId('call-image'),
-      rootCallId: CallId('call-image'),
+      callId: toToolCallId('call-image'),
+      rootCallId: toToolCallId('call-image'),
       name: CODEX_IMAGE_TOOL_NAME,
       arguments: { prompt: 'draw a small blue square' },
       signal,

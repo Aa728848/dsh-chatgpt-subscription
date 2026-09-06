@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { BlockAssembler, CallId, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { toToolCallId } from '../src/host/common/brand-compat.ts'
 import { buildRequest, closeStream, createStreamState, processStreamLine } from '../src/host/antigravity/mapper.ts'
 import { MODELS, ROUTING } from '../src/host/antigravity/types.ts'
 
@@ -121,7 +122,7 @@ describe('Antigravity final usage and thought replay', () => {
 
   it('recovers the original wire ID from older replay state with a sanitized local ID', () => {
     const assistant = createAssistantMessage({
-      content: [{ type: 'tool-call', id: CallId('old_call_1'), name: 'run_code', arguments: '{}' }],
+      content: [{ type: 'tool-call', id: toToolCallId('old_call_1'), name: 'run_code', arguments: '{}' }],
       source: { provider: 'antigravity', model: model.id, replayState: { blocks: [{ parts: [{
         functionCall: { id: 'old/call:1', name: 'run_code', args: {} }, thoughtSignature: 'old-signature',
       }] }] } },

@@ -1,5 +1,4 @@
 import {
-  CallId,
   LlmError,
   type ContentBlock,
   type FinishReason,
@@ -8,6 +7,7 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import { toToolCallId } from '../common/brand-compat.ts'
 import {
   ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
   ANTIGRAVITY_SYSTEM_INSTRUCTION,
@@ -522,7 +522,7 @@ export function processStreamLine(line: string, state: StreamState): StreamChunk
 
       const block: ContentBlock = {
         type: 'tool-call',
-        id: CallId(toolId),
+        id: toToolCallId(toolId),
         name: toolName,
         arguments: argsText,
       }
@@ -532,7 +532,7 @@ export function processStreamLine(line: string, state: StreamState): StreamChunk
       state.hasContent = true
       state.hasToolCall = true
       out.push({ type: 'block-start', index, blockType: 'tool-call' })
-      out.push({ type: 'tool-call-delta', index, id: CallId(toolId), name: toolName, argumentsDelta: argsText })
+      out.push({ type: 'tool-call-delta', index, id: toToolCallId(toolId), name: toolName, argumentsDelta: argsText })
       out.push({ type: 'block-end', index, block })
     }
   }
