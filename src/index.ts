@@ -29,7 +29,7 @@ import {
 } from './host/antigravity/token-store.ts'
 import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID } from './host/antigravity/types.ts'
 
-export const inject = ['webServer', 'llm', 'attachments', 'tools', 'web', 'settings', 'loader']
+export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
 
 export function apply(ctx: Context): void {
   const store = createPlatformTokenStore()
@@ -82,24 +82,17 @@ export function apply(ctx: Context): void {
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
 
-    // Bind search and fetch providers dynamically to ctx.web so they survive loader reloads
-    let disposeWebProviders = () => {}
-    const registerWebProviders = () => {
-      disposeWebProviders()
-      if (ctx.web) {
-        const d1 = ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
-        const d2 = ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
-        disposeWebProviders = () => { d1(); d2() }
-      }
-    }
-    registerWebProviders()
+    // Rebind providers when web reloads without resetting the saved default provider selection.
+    ctx.inject(['web'], ctx => {
+      ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
+      ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
+      applySearchPreference()
+    })
 
     const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
-    applySearchPreference()
 
     return () => {
       disposePreferenceWatch()
-      disposeWebProviders()
       disposeImageTool()
       disposeAdapter()
       disposeRoutes()

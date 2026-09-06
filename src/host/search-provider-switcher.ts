@@ -45,7 +45,7 @@ export class SearchProviderSwitcher {
     } else {
       nextConfig.fetchProvider = nextFetch
     }
-    await entry.update({ config: nextConfig }, true)
+    await entry.update({ config: nextConfig })
   }
 
   private findWebEntry(): Entry | null {

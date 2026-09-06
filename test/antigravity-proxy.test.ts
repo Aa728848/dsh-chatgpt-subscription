@@ -58,6 +58,7 @@ async function mountPlugin() {
   const settings = new Map<string, { get: () => SettingsValue; update: (patch: SettingsValue) => Promise<void> }>()
   const ctx = {
     effect: (setup: () => () => void) => disposers.push(setup()),
+    inject: (_deps: string[], setup: (ctx: Context) => void): void => setup(ctx as unknown as Context),
     settings: {
       register(namespace: string, schema: z<SettingsValue>) {
         let value = schema(namespace === PREFERENCES_NAMESPACE
