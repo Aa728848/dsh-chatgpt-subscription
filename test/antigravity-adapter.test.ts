@@ -118,6 +118,68 @@ describe('AntigravityAdapter', () => {
     expect((list[0] as unknown as { context?: { contextWindow?: number } }).context?.contextWindow).toBe(524288)
   })
 
+  it('sanitizes defaultEffort for models like gemini-3.1-pro whose efforts do not include medium', async () => {
+    const store = new FileCredentialStore()
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({
+      enabledModelIds: ['gemini-3.1-pro'],
+      catalogModels: [],
+      // defaultReasoningEffort 未指定，按以往逻辑会 fallback 到 medium
+    })
+
+    const adapter = new AntigravityAdapter(store, modelSettings)
+    const resolved = await adapter.resolveModel('antigravity', 'gemini-3.1-pro')
+    expect(resolved.id).toBe('gemini-3.1-pro')
+    const efforts = resolved.reasoning?.efforts.map((e) => e.name) ?? []
+    expect(efforts).toEqual(['low', 'high'])
+    // defaultEffort 必须包含在 efforts 中，绝不能是 'medium'
+    expect(efforts).toContain(resolved.reasoning?.defaultEffort)
+    expect(resolved.reasoning?.defaultEffort).toBe('low')
+  })
+
+  it('honors configured defaultReasoningEffort when supported by model, and falls back safely when not supported', async () => {
+    const store = new FileCredentialStore()
+    const modelSettings = new FileModelSettingsStore()
+
+    // 1. 用户配置 high，gemini-3.1-pro 支持 high
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({
+      enabledModelIds: ['gemini-3.1-pro'],
+      catalogModels: [],
+      defaultReasoningEffort: 'high',
+    })
+    const adapter1 = new AntigravityAdapter(store, modelSettings)
+    const resolved1 = await adapter1.resolveModel('antigravity', 'gemini-3.1-pro')
+    expect(resolved1.reasoning?.defaultEffort).toBe('high')
+
+    // 2. 用户配置 medium，gemini-3.1-pro 不支持 medium，安全兜底到 low
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({
+      enabledModelIds: ['gemini-3.1-pro'],
+      catalogModels: [],
+      defaultReasoningEffort: 'medium',
+    })
+    const adapter2 = new AntigravityAdapter(store, modelSettings)
+    const resolved2 = await adapter2.resolveModel('antigravity', 'gemini-3.1-pro')
+    expect(resolved2.reasoning?.defaultEffort).toBe('low')
+  })
+
+  it('verifies that all MODELS pass official dsh-llm reasoning metadata validation', async () => {
+    const store = new FileCredentialStore()
+    const modelSettings = new FileModelSettingsStore()
+    const adapter = new AntigravityAdapter(store, modelSettings)
+
+    const list = await adapter.listModels('antigravity')
+    for (const item of list) {
+      const resolved = await adapter.resolveModel('antigravity', item.id)
+      if (resolved.reasoning) {
+        expect(resolved.reasoning.efforts.length).toBeGreaterThan(0)
+        const seen = new Set(resolved.reasoning.efforts.map((e) => e.id))
+        if (resolved.reasoning.defaultEffort !== undefined) {
+          expect(seen.has(resolved.reasoning.defaultEffort)).toBe(true)
+        }
+      }
+    }
+  })
+
   it('uses defaultReasoningEffort when options.reasoningEffort is not specified', async () => {
     const store = new FileCredentialStore()
     const modelSettings = new FileModelSettingsStore()

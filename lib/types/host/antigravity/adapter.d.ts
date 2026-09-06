@@ -1,5 +1,6 @@
-import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm';
+import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { FileCredentialStore, FileModelSettingsStore, type AntigravityPreferenceStore } from './token-store.ts';
+export declare function resolveDefaultReasoningEffort(efforts: readonly string[], configuredEffort?: string | null): ReasoningEffortId | undefined;
 export declare class AntigravityAdapter extends LlmAdapter {
     private readonly store;
     private readonly modelSettings;
@@ -9,6 +10,8 @@ export declare class AntigravityAdapter extends LlmAdapter {
         fetchFn?: typeof fetch;
     });
     providerInfo(provider: string): LlmProviderInfo;
+    providerRetryPolicy(): undefined;
+    imageRequestPricing(_provider?: string, _model?: string): undefined;
     listModels(provider?: string): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;

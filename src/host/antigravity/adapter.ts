@@ -24,6 +24,25 @@ import { antigravityHeaders, endpointCandidates } from './client.ts'
 import { buildRequest, closeStream, createStreamState, processStreamLine } from './mapper.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 
+export function resolveDefaultReasoningEffort(
+  efforts: readonly string[],
+  configuredEffort?: string | null,
+): ReasoningEffortId | undefined {
+  if (configuredEffort && efforts.includes(configuredEffort)) {
+    return ReasoningEffortId(configuredEffort)
+  }
+  if (efforts.includes('medium')) {
+    return ReasoningEffortId('medium')
+  }
+  if (efforts.includes('low')) {
+    return ReasoningEffortId('low')
+  }
+  if (efforts.length > 0) {
+    return ReasoningEffortId(efforts[0])
+  }
+  return undefined
+}
+
 export class AntigravityAdapter extends LlmAdapter {
   constructor(
     private readonly store = new FileCredentialStore(),
@@ -36,6 +55,14 @@ export class AntigravityAdapter extends LlmAdapter {
 
   providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: PROVIDER_NAME }
+  }
+
+  providerRetryPolicy(): undefined {
+    return undefined
+  }
+
+  imageRequestPricing(_provider?: string, _model?: string): undefined {
+    return undefined
   }
 
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
@@ -70,7 +97,7 @@ export class AntigravityAdapter extends LlmAdapter {
     const overrides = settings.contextWindowOverrides || {}
 
     const efforts = model.reasoningEfforts || ['low', 'medium', 'high']
-    const defaultEffort = settings.defaultReasoningEffort || 'medium'
+    const defaultEffortId = resolveDefaultReasoningEffort(efforts, settings.defaultReasoningEffort)
 
     return {
       provider,
@@ -86,7 +113,7 @@ export class AntigravityAdapter extends LlmAdapter {
                 id: ReasoningEffortId(effort),
                 name: effort,
               })),
-              defaultEffort: ReasoningEffortId(defaultEffort),
+              ...(defaultEffortId ? { defaultEffort: defaultEffortId } : {}),
             },
           }
         : {}),

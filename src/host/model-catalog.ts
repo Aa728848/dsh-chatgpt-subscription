@@ -24,6 +24,9 @@ export function resolveCodexModel(model: string, preferences?: SubscriptionPrefe
     ? status?.contextWindowOverrides[model]
     : undefined
   const efforts = reasoningEffortsForModel(model)
+  const defaultEffort = efforts.includes(entry.defaultReasoningEffort as any)
+    ? entry.defaultReasoningEffort
+    : efforts[0]
   return {
     provider: PROVIDER_ID,
     id: model,
@@ -36,7 +39,7 @@ export function resolveCodexModel(model: string, preferences?: SubscriptionPrefe
         id: ReasoningEffortId(effort),
         name: effort,
       })),
-      defaultEffort: ReasoningEffortId(entry.defaultReasoningEffort),
+      ...(defaultEffort ? { defaultEffort: ReasoningEffortId(defaultEffort) } : {}),
     },
   }
 }
