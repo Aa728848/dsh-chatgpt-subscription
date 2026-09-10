@@ -277,6 +277,21 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     }
     patch.subagentMaxDepth = value.subagentMaxDepth as number | null
   }
+  if ('teamModelRules' in value) {
+    if (!Array.isArray(value.teamModelRules)) throw new PreferenceError('teamModelRules must be an array.')
+    patch.teamModelRules = value.teamModelRules.map((rule) => {
+      if (!isRecord(rule) || typeof rule.pattern !== 'string' || typeof rule.model !== 'string') {
+        throw new PreferenceError('Each teamModelRule must have a string pattern and model.')
+      }
+      return {
+        id: typeof rule.id === 'string' && rule.id ? rule.id : `rule_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        pattern: rule.pattern.trim(),
+        model: rule.model.trim(),
+        reasoningEffort: typeof rule.reasoningEffort === 'string' ? rule.reasoningEffort : null,
+        description: typeof rule.description === 'string' ? rule.description.trim() : undefined,
+      }
+    })
+  }
   if ('proxyMode' in value) {
     if (value.proxyMode !== 'auto' && value.proxyMode !== 'custom' && value.proxyMode !== 'direct') {
       throw new PreferenceError('proxyMode must be auto, custom, or direct.')

@@ -48,6 +48,13 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
     }).default(DEFAULT_PREFERENCES.contextWindowOverrides),
     subagentContextWindow: z.union([z.number().step(1).min(1), z.const(null)]).default(DEFAULT_PREFERENCES.subagentContextWindow),
     subagentMaxDepth: z.union([z.number().step(1).min(0).max(SUBAGENT_MAX_DEPTH_LIMIT), z.const(null)]).default(DEFAULT_PREFERENCES.subagentMaxDepth),
+    teamModelRules: z.array(z.object({
+      id: z.string(),
+      pattern: z.string(),
+      model: z.string(),
+      reasoningEffort: z.union([z.string(), z.const(null)]).default(null),
+      description: z.union([z.string(), z.const(null)]).default(null),
+    })).default(DEFAULT_PREFERENCES.teamModelRules as any),
     proxyMode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]).default(DEFAULT_PREFERENCES.proxyMode),
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
   }))
@@ -92,6 +99,11 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
     }
     if (patch.subagentMaxDepth !== undefined) {
       normalized.subagentMaxDepth = patch.subagentMaxDepth
+    }
+    if (patch.teamModelRules !== undefined) {
+      normalized.teamModelRules = Array.isArray(patch.teamModelRules)
+        ? patch.teamModelRules.filter((r) => r && typeof r.pattern === 'string' && typeof r.model === 'string')
+        : []
     }
     if (patch.proxyMode !== undefined) {
       if (!isProxyMode(patch.proxyMode)) throw new PreferenceError('Unsupported proxy mode preference.')

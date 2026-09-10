@@ -1,4 +1,7 @@
 import { execSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 import { ProxyAgent, fetch as undiciFetch } from 'undici'
 import type { ProxyMode, SubscriptionPreferencesDto } from '../shared/contracts.ts'
 
@@ -89,8 +92,23 @@ export function parseEnvProxy(env: Record<string, string | undefined> = process.
     env.ALL_PROXY ||
     env.all_proxy
 
-  if (!proxy || !proxy.trim()) return null
-  return normalizeProxyUrl(proxy)
+  if (proxy && proxy.trim()) return normalizeProxyUrl(proxy)
+
+  try {
+    const dshHome = env.DSH_HOME || path.join(os.homedir(), '.dsh')
+    const envFile = path.join(dshHome, '.env')
+    if (fs.existsSync(envFile)) {
+      const content = fs.readFileSync(envFile, 'utf8')
+      const match = content.match(/^(?:export\s+)?(?:HTTPS_PROXY|https_proxy|HTTP_PROXY|http_proxy|ALL_PROXY|all_proxy)\s*=\s*["']?([^"'\r\n]+)["']?/m)
+      if (match && match[1]?.trim()) {
+        return normalizeProxyUrl(match[1].trim())
+      }
+    }
+  } catch {
+    // best-effort fallback
+  }
+
+  return null
 }
 
 export function detectSystemProxy(platform: NodeJS.Platform = process.platform, env: Record<string, string | undefined> = process.env): string | null {

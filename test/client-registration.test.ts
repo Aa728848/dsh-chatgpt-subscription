@@ -176,4 +176,30 @@ describe('client registration', () => {
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()
   })
+
+  it('safely mounts in a real Cordis Context with strict inject checks', async () => {
+    const { Context } = await import('@deepseek-ai/cordis')
+    const rootCtx = new Context()
+    rootCtx.provide('slots', {
+      inject: () => () => undefined,
+      register: () => () => undefined,
+    })
+    rootCtx.provide('locale', {
+      register: () => () => undefined,
+      bind: () => (key: string) => key,
+    })
+    rootCtx.provide('modelDirectories', {
+      directoryFor: () => ({ store: {}, load: async () => {} }),
+    })
+    rootCtx.provide('conversation', {
+      resolveImage: async () => '',
+    })
+
+    expect(() => {
+      rootCtx.plugin({
+        inject: ['slots', 'locale', 'modelDirectories', 'conversation'],
+        apply,
+      })
+    }).not.toThrow()
+  })
 })

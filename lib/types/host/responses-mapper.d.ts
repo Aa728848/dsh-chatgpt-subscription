@@ -1,6 +1,7 @@
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts';
+import '../compat.ts';
 export interface ResponsesPayload extends Record<string, unknown> {
     model: string;
     input: Array<Record<string, unknown>>;

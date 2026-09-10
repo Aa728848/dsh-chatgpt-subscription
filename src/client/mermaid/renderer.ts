@@ -82,7 +82,7 @@ function openZoomModal(svgHtml: string): void {
       <button type="button" class="dsh-mermaid-modal-btn" data-action="zoom-out" title="缩小">− 缩小</button>
       <button type="button" class="dsh-mermaid-modal-btn" data-action="zoom-in" title="放大">+ 放大</button>
       <button type="button" class="dsh-mermaid-modal-btn" data-action="reset" title="重置">⟳ 重置</button>
-      <button type="button" class="dsh-mermaid-modal-btn" data-action="close" title="关闭">✕ 关闭</button>
+      <button type="button" class="dsh-mermaid-modal-btn" data-action="close" title="关闭">关闭</button>
     </div>
     <div class="dsh-mermaid-modal-stage">
       <div class="dsh-mermaid-zoom-container">${svgHtml}</div>

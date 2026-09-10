@@ -3,6 +3,7 @@ import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-ll
 import { createHash } from 'node:crypto'
 import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
+import '../compat.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
   model: string
@@ -390,6 +391,17 @@ async function mapContent(
     } else if (block.type === 'image') {
       if (message.role !== 'user') continue
       result.push({ type: 'input_image', image_url: await imageDataUrl(block.attachment, attachments, signal) })
+    } else if (block.type === 'file') {
+      const file = (block as unknown as { attachment?: Record<string, unknown> }).attachment ?? {}
+      const name = typeof file.name === 'string' ? file.name : typeof file.filename === 'string' ? file.filename : 'unnamed'
+      const size = typeof file.byteSize === 'number' ? ` (${file.byteSize} bytes)` : ''
+      const savedPath = typeof file.savedPath === 'string' ? ` path: ${file.savedPath}` : ''
+      const fileText = `[File attachment: ${name}${size}${savedPath}]`
+      if (message.role === 'user') {
+        pushInputText(result, fileText)
+      } else {
+        result.push({ type: 'output_text', text: fileText })
+      }
     }
   }
   return result
@@ -552,6 +564,13 @@ function blocksToText(blocks: readonly ContentBlock[]): string {
   return blocks.map((block) => {
     if (block.type === 'text' || block.type === 'reasoning') return block.text
     if (block.type === 'image') return `[image: ${block.attachment.name ?? block.attachment.attachmentId}]`
+    if (block.type === 'file') {
+      const file = (block as unknown as { attachment?: Record<string, unknown> }).attachment ?? {}
+      const name = typeof file.name === 'string' ? file.name : typeof file.filename === 'string' ? file.filename : 'unnamed'
+      const size = typeof file.byteSize === 'number' ? ` (${file.byteSize} bytes)` : ''
+      const savedPath = typeof file.savedPath === 'string' ? ` path: ${file.savedPath}` : ''
+      return `[file: ${name}${size}${savedPath}]`
+    }
     if (block.type === 'tool-result') return blocksToText(block.content)
     return ''
   }).filter(Boolean).join('\n')

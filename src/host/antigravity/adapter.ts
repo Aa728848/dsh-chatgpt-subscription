@@ -23,6 +23,7 @@ import { ensureApiKey } from './oauth.ts'
 import { antigravityHeaders, endpointCandidates } from './client.ts'
 import { buildRequest, closeStream, createStreamState, processStreamLine } from './mapper.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import '../../compat.ts'
 
 export function resolveDefaultReasoningEffort(
   efforts: readonly string[],
@@ -106,6 +107,7 @@ export class AntigravityAdapter extends LlmAdapter {
       inputModalities: model.inputModalities,
       context: { contextWindow: overrides[model.id] || model.contextWindow },
       defaultMaxTokens: model.maxTokens,
+      systemPromptUpdate: 'in-history',
       ...(model.reasoningEfforts
         ? {
             reasoning: {

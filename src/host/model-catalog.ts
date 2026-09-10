@@ -34,6 +34,7 @@ export function resolveCodexModel(model: string, preferences?: SubscriptionPrefe
     inputModalities: [...entry.inputModalities],
     context: { contextWindow: configuredContextWindow ?? entry.contextWindow },
     defaultMaxTokens: 32_768,
+    systemPromptUpdate: 'in-history',
     reasoning: {
       efforts: efforts.map((effort) => ({
         id: ReasoningEffortId(effort),

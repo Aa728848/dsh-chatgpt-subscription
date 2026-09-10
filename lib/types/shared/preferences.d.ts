@@ -8,4 +8,6 @@ export declare function isSearchProviderPreference(value: unknown): value is Sea
 export declare function isCodexOutputVerbosity(value: unknown): value is CodexOutputVerbosity;
 export declare function isCodexReasoningSummary(value: unknown): value is CodexReasoningSummary;
 export declare function isProxyMode(value: unknown): value is ProxyMode;
+export declare function matchTeamPattern(pattern: string, target: string): boolean;
+export declare function resolveTeamModelRule(targetNameOrRole: string, rules: readonly import('./contracts.ts').TeamModelRule[]): import('./contracts.ts').TeamModelRule | undefined;
 //# sourceMappingURL=preferences.d.ts.map

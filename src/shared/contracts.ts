@@ -48,6 +48,14 @@ export interface CodexContextWindowOverridesDto {
 
 export type ProxyMode = 'auto' | 'custom' | 'direct'
 
+export interface TeamModelRule {
+  id: string
+  pattern: string
+  model: string
+  reasoningEffort?: string | null
+  description?: string | null
+}
+
 export interface SubscriptionPreferencesDto {
   quickQuotaVisible: boolean
   fastMode: boolean
@@ -58,6 +66,7 @@ export interface SubscriptionPreferencesDto {
   contextWindowOverrides: CodexContextWindowOverridesDto
   subagentContextWindow: number | null
   subagentMaxDepth: number | null
+  teamModelRules: TeamModelRule[]
   proxyMode: ProxyMode
   customProxyUrl: string | null
   writable: boolean
@@ -73,6 +82,7 @@ export interface SubscriptionPreferencesUpdateDto {
   contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>
   subagentContextWindow?: number | null
   subagentMaxDepth?: number | null
+  teamModelRules?: TeamModelRule[]
   proxyMode?: ProxyMode
   customProxyUrl?: string | null
 }
