@@ -17,5 +17,5 @@ export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts';
 export { AntigravityAdapter } from './host/antigravity/adapter.ts';
 export { FileCredentialStore, FileModelSettingsStore, credentialPath, modelSettingsPath, } from './host/antigravity/token-store.ts';
 export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts';
-export { fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts';
+export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts';
 //# sourceMappingURL=index.d.ts.map

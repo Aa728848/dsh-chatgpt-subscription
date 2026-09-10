@@ -22,12 +22,23 @@ try {
     console.log(`Removed Antigravity credentials from ${store.path()}`)
     process.exit(0)
   }
-  const credentials = await loginAndSave(store, controller.signal, (url) => {
-    console.log('Open the following URL in your browser to sign in:')
-    console.log(url)
-  })
+  const credentials = await loginAndSave(
+    store,
+    controller.signal,
+    (url) => {
+      console.log('Open the following URL in your browser to sign in:')
+      console.log(url)
+    },
+    fetch,
+    (stage) => {
+      console.log(`[Antigravity] ${stage}`)
+    },
+  )
   const suffix = credentials.email ? ` for ${credentials.email}` : ''
   console.log(`Antigravity login complete${suffix}.`)
+  if (credentials.projectId) {
+    console.log(`Discovered project: ${credentials.projectId}`)
+  }
   console.log(`Credentials saved to ${store.path()}`)
 } catch (error) {
   const detail = error instanceof Error ? error.message : String(error)

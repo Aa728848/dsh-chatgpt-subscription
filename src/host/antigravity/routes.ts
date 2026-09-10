@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FileCredentialStore, FileModelSettingsStore, type AntigravityPreferenceStore } from './token-store.ts'
 import { beginWebLogin, getWebLoginStatus } from './oauth.ts'
-import { fetchAccountQuota, getCachedQuota } from './client.ts'
+import { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './client.ts'
 import { MODELS } from './types.ts'
 import type { AntigravityModelOption, AntigravityWebStatus } from '../../shared/antigravity-contracts.ts'
 
@@ -86,6 +86,12 @@ export function registerAntigravityRoutes(
       try {
         if (path === 'status' || path === '') {
           if (request.method !== 'GET') return sendMethodNotAllowed(response)
+          const credentials = await store.read()
+          const authenticated = !!(credentials?.access || credentials?.access_token)
+          const cached = getCachedQuota()
+          if (authenticated && (!cached || Date.now() - (cached.fetchedAt || 0) > 120_000)) {
+            await fetchAccountQuota(store, modelSettings, fetchFn).catch(() => undefined)
+          }
           const value = await getAntigravityWebStatus(store, modelSettings, preferences)
           return sendJson(response, 200, { ok: true, value })
         }
@@ -104,7 +110,7 @@ export function registerAntigravityRoutes(
 
         if (path === 'quota') {
           if (request.method !== 'GET' && request.method !== 'POST') return sendMethodNotAllowed(response)
-          const quota = await fetchAccountQuota(store, modelSettings, fetchFn)
+          const quota = await fetchAccountQuota(store, modelSettings, fetchFn, true)
           const status = await getAntigravityWebStatus(store, modelSettings, preferences)
           return sendJson(response, 200, { ok: true, value: { ...status, quota } })
         }
@@ -144,6 +150,7 @@ export function registerAntigravityRoutes(
         if (path === 'logout') {
           if (request.method !== 'POST') return sendMethodNotAllowed(response)
           await store.delete()
+          clearCachedQuota()
           const value = await getAntigravityWebStatus(store, modelSettings)
           return sendJson(response, 200, { ok: true, value })
         }

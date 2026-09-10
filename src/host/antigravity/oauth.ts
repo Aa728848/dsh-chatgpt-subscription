@@ -6,13 +6,20 @@ import {
   AUTH_URL,
   DEFAULT_CLIENT_ID,
   DEFAULT_CLIENT_SECRET,
+  FREE_TIER_ID,
   OAUTH_CALLBACK_TIMEOUT_MS,
   REDIRECT_PATH,
   SCOPES,
   TOKEN_URL,
 } from './types.ts'
 import { FileCredentialStore, type AntigravityCredentials } from './token-store.ts'
-import { loadCodeAssist } from './client.ts'
+import {
+  listCloudAICompanionProjects,
+  loadCodeAssist,
+  loadCodeAssistDetail,
+  onboardUser,
+  type LoadCodeAssistDetailResult,
+} from './client.ts'
 
 export interface WebLoginFlowState {
   status: 'idle' | 'pending' | 'complete' | 'error'
@@ -21,6 +28,8 @@ export interface WebLoginFlowState {
   completedAt?: number
   email?: string
   error?: string
+  validationUrl?: string
+  progress?: string
 }
 
 let webLoginFlow: WebLoginFlowState = { status: 'idle' }
@@ -187,11 +196,68 @@ export function startCallbackServer(expectedState: string): Promise<{
   })
 }
 
+export function extractGoogleValidationUrl(text: string): string | undefined {
+  const match = /https:\/\/[^\s"'><]+/i.exec(text)
+  return match ? match[0] : undefined
+}
+
+export function assertFreeTierEligible(payload: LoadCodeAssistDetailResult): void {
+  const isAllowed = payload.allowedTiers?.some((tier) => tier.id === FREE_TIER_ID) === true
+  if (isAllowed) return
+
+  const ineligibility = payload.ineligibleTiers?.find((c) => c.tierId === FREE_TIER_ID)
+  if (!ineligibility?.reasonMessage) return
+
+  const validation = ineligibility.validationUrl ? `\nValidation URL: ${ineligibility.validationUrl}` : ''
+  const err = new Error(`${ineligibility.reasonMessage}${validation}`)
+  if (ineligibility.validationUrl) {
+    (err as unknown as { validationUrl?: string }).validationUrl = ineligibility.validationUrl
+  }
+  throw err
+}
+
+export async function discoverAntigravityProject(
+  token: string,
+  fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
+  onProgress?: (stage: string) => void,
+): Promise<string | undefined> {
+  onProgress?.('正在检查 Cloud Code Assist 账号状态...')
+  const initial = await loadCodeAssistDetail(token, fetchFn, signal)
+  if (!initial) {
+    throw new Error('无法连接到 Cloud Code Assist 服务，请检查网络连接')
+  }
+
+  assertFreeTierEligible(initial)
+
+  const canOnboard = initial.allowedTiers?.some((tier) => tier.id === FREE_TIER_ID) === true
+  if (canOnboard && !initial.currentTier) {
+    onProgress?.('正在为新账号开通 Antigravity 免费额度...')
+    await onboardUser(token, fetchFn, signal)
+    onProgress?.('正在获取专属项目 (Project ID)...')
+    const refreshed = await loadCodeAssistDetail(token, fetchFn, signal)
+    if (refreshed?.projectId) {
+      return refreshed.projectId
+    }
+  } else if (initial.projectId) {
+    return initial.projectId
+  }
+
+  const fallback = await listCloudAICompanionProjects(token, fetchFn)
+  if (fallback) {
+    return fallback
+  }
+
+  return initial.projectId
+}
+
 export async function exchangeOAuthCode(
   code: string,
   verifier: string,
   callbackUrl: string,
   fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
+  onProgress?: (stage: string) => void,
 ): Promise<AntigravityCredentials> {
   const tokenResponse = await fetchFn(TOKEN_URL, {
     method: 'POST',
@@ -204,6 +270,7 @@ export async function exchangeOAuthCode(
       redirect_uri: callbackUrl,
       code_verifier: verifier,
     }).toString(),
+    signal,
   })
 
   if (!tokenResponse.ok) {
@@ -221,7 +288,7 @@ export async function exchangeOAuthCode(
 
   const [email, discoveredProject] = await Promise.all([
     getUserEmail(accessToken, fetchFn),
-    loadCodeAssist(accessToken, fetchFn).catch(() => undefined),
+    discoverAntigravityProject(accessToken, fetchFn, signal, onProgress),
   ])
 
   return {
@@ -236,7 +303,11 @@ export async function exchangeOAuthCode(
   }
 }
 
-export async function beginWebLogin(store: FileCredentialStore, fetchFn: typeof fetch = fetch): Promise<WebLoginFlowState> {
+export async function beginWebLogin(
+  store: FileCredentialStore,
+  fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<WebLoginFlowState> {
   if (webLoginFlow.status === 'pending') {
     return { ...webLoginFlow }
   }
@@ -262,21 +333,38 @@ export async function beginWebLogin(store: FileCredentialStore, fetchFn: typeof 
     status: 'pending',
     authUrl,
     startedAt: Date.now(),
+    progress: '等待浏览器授权...',
     error: undefined,
+    validationUrl: undefined,
   }
 
   void (async () => {
     try {
       const { code, state: returnedState } = await waitForCode()
       if (returnedState !== state) throw new Error('OAuth state mismatch')
-      const credentials = await exchangeOAuthCode(code, verifier, callbackUrl, fetchFn)
+      const credentials = await exchangeOAuthCode(
+        code,
+        verifier,
+        callbackUrl,
+        fetchFn,
+        signal,
+        (stage) => {
+          webLoginFlow.progress = stage
+        },
+      )
       await store.write(credentials)
       webLoginFlow.status = 'complete'
       webLoginFlow.email = credentials.email
       webLoginFlow.completedAt = Date.now()
+      webLoginFlow.progress = '授权成功'
     } catch (error) {
       webLoginFlow.status = 'error'
-      webLoginFlow.error = error instanceof Error ? error.message : String(error)
+      const errText = error instanceof Error ? error.message : String(error)
+      webLoginFlow.error = errText
+      const validationUrl = (error as { validationUrl?: string })?.validationUrl || extractGoogleValidationUrl(errText)
+      if (validationUrl) {
+        webLoginFlow.validationUrl = validationUrl
+      }
       webLoginFlow.completedAt = Date.now()
     } finally {
       server.close()
@@ -325,6 +413,7 @@ export async function refreshAntigravityToken(
     access_token: accessToken,
     expires: Date.now() + expiresIn * 1000 - 5 * 60 * 1000,
     expires_at: Date.now() + expiresIn * 1000 - 5 * 60 * 1000,
+    projectId: credentials.projectId,
   }
 }
 
@@ -356,6 +445,7 @@ export async function loginAndSave(
   signal?: AbortSignal,
   onUrl?: (url: string) => void,
   fetchFn: typeof fetch = fetch,
+  onProgress?: (stage: string) => void,
 ): Promise<AntigravityCredentials> {
   const { verifier, challenge } = generatePKCE()
   const state = base64Url(randomBytes(32))
@@ -382,7 +472,7 @@ export async function loginAndSave(
     const { code, state: returnedState } = await waitForCode()
     if (returnedState !== state) throw new Error('OAuth state mismatch')
 
-    const credentials = await exchangeOAuthCode(code, verifier, callbackUrl, fetchFn)
+    const credentials = await exchangeOAuthCode(code, verifier, callbackUrl, fetchFn, signal, onProgress)
     await store.write(credentials)
     return credentials
   } finally {

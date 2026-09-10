@@ -65,6 +65,8 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [validationUrl, setValidationUrl] = useState<string | null>(null)
+  const [loginProgress, setLoginProgress] = useState<string | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
 
@@ -76,10 +78,18 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
   }, [onModelChange, loadModelDirectory])
 
   const loadStatus = useCallback(async (quiet = false) => {
-    if (!quiet) setError(null)
+    if (!quiet) {
+      setError(null)
+      setValidationUrl(null)
+    }
     try {
       const data = await fetchApi<AntigravityWebStatus>('/status')
       setStatus(data)
+      if (data.authenticated && (!data.quota || data.quota.groups.length === 0)) {
+        void fetchApi<AntigravityWebStatus>('/quota', { method: 'POST' })
+          .then((updated) => setStatus(updated))
+          .catch(() => undefined)
+      }
       // 初始化输入草稿
       const drafts: Record<string, string> = {}
       for (const m of data.models) {
@@ -111,22 +121,37 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('login')
       setError(null)
+      setValidationUrl(null)
+      setLoginProgress(null)
       const flow = await fetchApi<{ authUrl?: string; status?: string }>('/login', { method: 'POST' })
       if (flow.authUrl) {
         window.open(flow.authUrl, '_blank')
       }
       const pollTimer = setInterval(async () => {
         try {
-          const pollStatus = await fetchApi<{ status: string }>('/login/status')
+          const pollStatus = await fetchApi<{
+            status: string
+            error?: string
+            validationUrl?: string
+            progress?: string
+          }>('/login/status')
+          if (pollStatus.progress) {
+            setLoginProgress(pollStatus.progress)
+          }
           if (pollStatus.status === 'complete') {
             clearInterval(pollTimer)
             setBusy(null)
+            setLoginProgress(null)
             await loadStatus()
             notifyChange()
           } else if (pollStatus.status === 'error') {
             clearInterval(pollTimer)
             setBusy(null)
-            setError(t.loginFailed)
+            setLoginProgress(null)
+            setError(pollStatus.error || t.loginFailed)
+            if (pollStatus.validationUrl) {
+              setValidationUrl(pollStatus.validationUrl)
+            }
           }
         } catch {
           // ignore
@@ -136,9 +161,11 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
       setTimeout(() => {
         clearInterval(pollTimer)
         setBusy(null)
+        setLoginProgress(null)
       }, 5 * 60 * 1000)
     } catch (err) {
       setBusy(null)
+      setLoginProgress(null)
       setError(err instanceof Error ? err.message : String(err))
     }
   }
@@ -296,12 +323,12 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         <div className="dsha-actions">
           {!status?.authenticated ? (
             <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={handleLogin}>
-              {busy === 'login' ? t.signingIn : t.signIn}
+              {busy === 'login' ? (loginProgress || t.signingIn) : t.signIn}
             </button>
           ) : (
             <>
               <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={handleLogin}>
-                {t.signInAgain}
+                {busy === 'login' ? (loginProgress || t.signingIn) : t.signInAgain}
               </button>
               <button className="dsha-btn" disabled={busy !== null} onClick={handleRefreshQuota}>
                 {busy === 'quota' ? t.refreshingQuota : t.refreshToken}
@@ -439,7 +466,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         {!status?.authenticated ? (
           <div className="dsha-empty">{t.signedOut}</div>
         ) : groups.length === 0 ? (
-          <div className="dsha-empty">暂无配额数据，点击右上角刷新用量。</div>
+          <div className="dsha-empty">{busy === 'quota' ? t.refreshingQuota : '正在获取配额用量数据...'}</div>
         ) : (
           groups.map((group, gIdx) => (
             <div key={gIdx} className="dsha-quota-card">
@@ -480,7 +507,24 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         )}
       </section>
 
-      {error && <div className="dsha-error">{error}</div>}
+      {error && (
+        <div className="dsha-error">
+          <div>{error}</div>
+          {validationUrl && (
+            <div style={{ marginTop: '8px' }}>
+              <a
+                href={validationUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="dsha-btn dsha-btn-primary"
+                style={{ display: 'inline-block', textDecoration: 'none', padding: '4px 10px', fontSize: '12px' }}
+              >
+                前往 Google 完成账号验证
+              </a>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

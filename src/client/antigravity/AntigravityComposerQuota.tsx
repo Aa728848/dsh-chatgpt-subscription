@@ -89,7 +89,16 @@ export function AntigravityComposerQuota({ directory, loadModelDirectory }: Prop
       const data = refresh
         ? await fetchApi<AntigravityWebStatus>('/quota', { method: 'POST' })
         : await fetchApi<AntigravityWebStatus>('/status')
-      if (mountedRef.current) setStatus(data)
+      if (mountedRef.current) {
+        setStatus(data)
+        if (data.authenticated && (!data.quota || data.quota.groups.length === 0) && !refresh) {
+          void fetchApi<AntigravityWebStatus>('/quota', { method: 'POST' })
+            .then((updated) => {
+              if (mountedRef.current) setStatus(updated)
+            })
+            .catch(() => undefined)
+        }
+      }
     } catch {
       // best-effort
     } finally {

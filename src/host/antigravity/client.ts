@@ -1,9 +1,14 @@
 import {
+  DEFAULT_ANTIGRAVITY_CL,
+  DEFAULT_ANTIGRAVITY_VERSION,
   DEFAULT_ENDPOINT,
   DISCOVERY_TIMEOUT_MS,
   ENDPOINT_FALLBACKS,
-  PROJECT_CACHE_TTL_MS,
+  FREE_TIER_ID,
   MODELS,
+  ONBOARD_POLL_INTERVAL_MS,
+  ONBOARD_TIMEOUT_MS,
+  PROJECT_CACHE_TTL_MS,
 } from './types.ts'
 import {
   FileCredentialStore,
@@ -17,14 +22,18 @@ import type {
 } from '../../shared/antigravity-contracts.ts'
 
 const projectCache = new Map<string, { projectId: string; expiresAt: number }>()
+export const ANTIGRAVITY_QUOTA_CACHE_TTL_MS = 2 * 60 * 1000
 let cachedQuota: AntigravityAccountQuota | undefined
+let quotaFetchInFlight: Promise<AntigravityAccountQuota> | null = null
 
 const PLATFORM = process.platform === 'darwin' ? 'MACOS' : process.platform === 'win32' ? 'WINDOWS' : 'LINUX'
 
 export function defaultUserAgent(): string {
-  const os = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux'
-  const arch = process.arch === 'x64' ? 'amd64' : process.arch
-  return `antigravity/1.15.8 ${os}/${arch}`
+  const version = process.env.DSH_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION
+  const cl = process.env.DSH_ANTIGRAVITY_CL || DEFAULT_ANTIGRAVITY_CL
+  const os = process.env.DSH_ANTIGRAVITY_OS || 'darwin'
+  const arch = process.env.DSH_ANTIGRAVITY_ARCH || 'arm64'
+  return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`
 }
 
 export function antigravityHeaders(token: string): Record<string, string> {
@@ -84,6 +93,154 @@ function extractProjectId(data: unknown): string | undefined {
   return undefined
 }
 
+export interface AntigravityTierInfo {
+  id?: string
+  name?: string
+  description?: string
+}
+
+export interface AntigravityIneligibleTier {
+  tierId?: string
+  reasonMessage?: string
+  validationUrl?: string
+}
+
+export interface LoadCodeAssistDetailResult {
+  currentTier?: AntigravityTierInfo | null
+  paidTier?: AntigravityTierInfo | null
+  allowedTiers?: AntigravityTierInfo[]
+  ineligibleTiers?: AntigravityIneligibleTier[]
+  projectId?: string
+  raw?: Record<string, unknown>
+}
+
+export async function loadCodeAssistDetail(
+  token: string,
+  fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<LoadCodeAssistDetailResult | undefined> {
+  const metadata = {
+    ideType: 'ANTIGRAVITY',
+    platform: 'PLATFORM_UNSPECIFIED',
+    pluginType: 'GEMINI',
+  }
+
+  for (const endpoint of endpointCandidates()) {
+    try {
+      const response = await fetchFn(`${endpoint}/v1internal:loadCodeAssist`, {
+        method: 'POST',
+        headers: jsonHeaders(token),
+        body: JSON.stringify({ metadata }),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(DISCOVERY_TIMEOUT_MS)]) : AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+      })
+      if (!response.ok) continue
+      const data = (await response.json()) as Record<string, unknown>
+      const projectId = extractProjectId(data)
+
+      const allowedTiers: AntigravityTierInfo[] = Array.isArray(data.allowedTiers)
+        ? (data.allowedTiers as AntigravityTierInfo[])
+        : []
+      const ineligibleTiers: AntigravityIneligibleTier[] = Array.isArray(data.ineligibleTiers)
+        ? (data.ineligibleTiers as AntigravityIneligibleTier[])
+        : []
+
+      return {
+        currentTier: (data.currentTier as AntigravityTierInfo) || null,
+        paidTier: (data.paidTier as AntigravityTierInfo) || null,
+        allowedTiers,
+        ineligibleTiers,
+        projectId,
+        raw: data,
+      }
+    } catch {
+      // try next
+    }
+  }
+  return undefined
+}
+
+export async function onboardUser(
+  token: string,
+  fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<void> {
+  const deadline = Date.now() + ONBOARD_TIMEOUT_MS
+  const body = JSON.stringify({
+    tierId: FREE_TIER_ID,
+    metadata: { ideType: 'ANTIGRAVITY' },
+  })
+
+  for (const endpoint of endpointCandidates()) {
+    try {
+      const remainingTime = Math.max(1_000, deadline - Date.now())
+      const timeoutSignal = AbortSignal.timeout(remainingTime)
+      const callSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+
+      const response = await fetchFn(`${endpoint}/v1internal:onboardUser`, {
+        method: 'POST',
+        headers: jsonHeaders(token),
+        body,
+        signal: callSignal,
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '')
+        throw new Error(`onboardUser failed: ${response.status} ${response.statusText}: ${errorText}`)
+      }
+
+      let operation = (await response.json()) as {
+        name?: string
+        done?: boolean
+        error?: { code?: number; message?: string }
+        response?: unknown
+      }
+
+      while (true) {
+        if (operation.done === true) {
+          if (operation.error) {
+            const msg = operation.error.message || `Error code ${operation.error.code}`
+            throw new Error(`OnboardUser operation failed: ${msg}`)
+          }
+          return
+        }
+
+        const waitMs = Math.min(ONBOARD_POLL_INTERVAL_MS, Math.max(100, deadline - Date.now()))
+        if (Date.now() >= deadline) {
+          throw new Error(`onboardUser timed out after ${ONBOARD_TIMEOUT_MS}ms`)
+        }
+        await new Promise((r) => setTimeout(r, waitMs))
+        if (signal?.aborted) throw new Error('OAuth login cancelled')
+
+        const operationName = operation.name || ''
+        if (!operationName) {
+          throw new Error('onboardUser returned an operation without a name')
+        }
+
+        const pollTime = Math.max(1_000, deadline - Date.now())
+        const pollTimeoutSignal = AbortSignal.timeout(pollTime)
+        const pollSignal = signal ? AbortSignal.any([signal, pollTimeoutSignal]) : pollTimeoutSignal
+
+        const pollResp = await fetchFn(`${endpoint}/v1internal/${operationName}`, {
+          method: 'GET',
+          headers: jsonHeaders(token),
+          signal: pollSignal,
+        })
+
+        if (!pollResp.ok) {
+          const pollErr = await pollResp.text().catch(() => '')
+          throw new Error(`onboardUser operation poll failed: ${pollResp.status}: ${pollErr}`)
+        }
+
+        operation = (await pollResp.json()) as typeof operation
+      }
+    } catch (err) {
+      if (Date.now() >= deadline || signal?.aborted) {
+        throw err
+      }
+    }
+  }
+}
+
 export async function listCloudAICompanionProjects(token: string, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
   for (const endpoint of endpointCandidates()) {
     try {
@@ -108,37 +265,18 @@ export async function loadCodeAssist(token: string, fetchFn: typeof fetch = fetc
     return cached.projectId
   }
 
-  const body = JSON.stringify({
-    metadata: {
-      ideType: 'ANTIGRAVITY',
-      platform: 'PLATFORM_UNSPECIFIED',
-      pluginType: 'GEMINI',
-    },
-  })
-
-  for (const endpoint of endpointCandidates()) {
-    try {
-      const response = await fetchFn(`${endpoint}/v1internal:loadCodeAssist`, {
-        method: 'POST',
-        headers: antigravityHeaders(token),
-        body,
-        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-      })
-      if (!response.ok) continue
-      const project = extractProjectId(await response.json())
-      if (project) {
-        projectCache.set(token, { projectId: project, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS })
-        return project
-      }
-      const listProj = await listCloudAICompanionProjects(token, fetchFn)
-      if (listProj) {
-        projectCache.set(token, { projectId: listProj, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS })
-        return listProj
-      }
-    } catch {
-      // try next
-    }
+  const detail = await loadCodeAssistDetail(token, fetchFn)
+  if (detail?.projectId) {
+    projectCache.set(token, { projectId: detail.projectId, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS })
+    return detail.projectId
   }
+
+  const listProj = await listCloudAICompanionProjects(token, fetchFn)
+  if (listProj) {
+    projectCache.set(token, { projectId: listProj, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS })
+    return listProj
+  }
+
   return undefined
 }
 
@@ -240,60 +378,81 @@ export async function fetchAccountQuota(
   store = new FileCredentialStore(),
   modelSettings?: FileModelSettingsStore,
   fetchFn: typeof fetch = fetch,
+  force = false,
 ): Promise<AntigravityAccountQuota> {
-  const { token, projectId: credentialProjectId } = await ensureApiKey(store, fetchFn)
-
-  const [assistResult, summaryResult] = await Promise.all([
-    postJson('/v1internal:loadCodeAssist', token, {
-      metadata: {
-        ideType: 'ANTIGRAVITY',
-        platform: 'PLATFORM_UNSPECIFIED',
-        pluginType: 'GEMINI',
-      },
-    }, fetchFn).catch(() => null),
-    postJson('/v1internal:retrieveUserQuotaSummary', token, {}, fetchFn).catch(() => null),
-  ])
-
-  const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined
-  const projectId = credentialProjectId || discoveredProject || 'antigravity-default'
-
-  const modelsCall = await postJson('/v1internal:fetchAvailableModels', token, { project: projectId }, fetchFn).catch(() => null)
-  const modelsData = modelsCall?.data
-
-  const { groups, description } = summaryResult ? parseQuotaSummary(summaryResult.data) : { groups: [] }
-  const catalogModels = modelsData ? parseCatalogModels(modelsData) : []
-
-  const assistData = (assistResult?.data as Record<string, unknown>) || {}
-  const currentTier = assistData.currentTier as { id?: string; name?: string; description?: string } | undefined
-  const paidTier = assistData.paidTier as { id?: string; name?: string; description?: string } | undefined
-  const planLabel = paidTier?.name || currentTier?.name || undefined
-
-  cachedQuota = {
-    projectId,
-    endpoint: summaryResult?.endpoint || ENDPOINT_FALLBACKS[0],
-    planLabel,
-    productTier: currentTier,
-    paidTier,
-    groups,
-    groupDescription: description,
-    models: catalogModels.map((m) => ({ modelId: m.id, displayName: m.name, description: m.description })),
-    catalogModels,
-    fetchedAt: Date.now(),
+  if (!force && cachedQuota && Date.now() - (cachedQuota.fetchedAt || 0) < ANTIGRAVITY_QUOTA_CACHE_TTL_MS) {
+    return cachedQuota
+  }
+  if (quotaFetchInFlight) {
+    return quotaFetchInFlight
   }
 
-  if (modelSettings && catalogModels.length > 0) {
-    const current = await modelSettings.read()
-    const isFirstTime = current.catalogModels.length === 0 && current.enabledModelIds.length === 0
-    const catalogIds = new Set(catalogModels.map((m) => m.id))
-    const mergedEnabled = isFirstTime
-      ? catalogModels.map((m) => m.id)
-      : current.enabledModelIds.filter((id) => catalogIds.has(id))
-    await modelSettings.setCatalogModels(catalogModels, { enabledModelIds: mergedEnabled })
-  }
+  quotaFetchInFlight = (async () => {
+    try {
+      const { token, projectId: credentialProjectId } = await ensureApiKey(store, fetchFn)
 
-  return cachedQuota
+      const [assistResult, summaryResult] = await Promise.all([
+        postJson('/v1internal:loadCodeAssist', token, {
+          metadata: {
+            ideType: 'ANTIGRAVITY',
+            platform: 'PLATFORM_UNSPECIFIED',
+            pluginType: 'GEMINI',
+          },
+        }, fetchFn).catch(() => null),
+        postJson('/v1internal:retrieveUserQuotaSummary', token, {}, fetchFn).catch(() => null),
+      ])
+
+      const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined
+      const projectId = credentialProjectId || discoveredProject || 'antigravity-default'
+
+      const modelsCall = await postJson('/v1internal:fetchAvailableModels', token, { project: projectId }, fetchFn).catch(() => null)
+      const modelsData = modelsCall?.data
+
+      const { groups, description } = summaryResult ? parseQuotaSummary(summaryResult.data) : { groups: [] }
+      const catalogModels = modelsData ? parseCatalogModels(modelsData) : []
+
+      const assistData = (assistResult?.data as Record<string, unknown>) || {}
+      const currentTier = assistData.currentTier as { id?: string; name?: string; description?: string } | undefined
+      const paidTier = assistData.paidTier as { id?: string; name?: string; description?: string } | undefined
+      const planLabel = paidTier?.name || currentTier?.name || undefined
+
+      cachedQuota = {
+        projectId,
+        endpoint: summaryResult?.endpoint || ENDPOINT_FALLBACKS[0],
+        planLabel,
+        productTier: currentTier,
+        paidTier,
+        groups,
+        groupDescription: description,
+        models: catalogModels.map((m) => ({ modelId: m.id, displayName: m.name, description: m.description })),
+        catalogModels,
+        fetchedAt: Date.now(),
+      }
+
+      if (modelSettings && catalogModels.length > 0) {
+        const current = await modelSettings.read()
+        const isFirstTime = current.catalogModels.length === 0 && current.enabledModelIds.length === 0
+        const catalogIds = new Set(catalogModels.map((m) => m.id))
+        const mergedEnabled = isFirstTime
+          ? catalogModels.map((m) => m.id)
+          : current.enabledModelIds.filter((id) => catalogIds.has(id))
+        await modelSettings.setCatalogModels(catalogModels, { enabledModelIds: mergedEnabled })
+      }
+
+      return cachedQuota
+    } finally {
+      quotaFetchInFlight = null
+    }
+  })()
+
+  return quotaFetchInFlight
 }
 
 export function getCachedQuota(): AntigravityAccountQuota | undefined {
   return cachedQuota
+}
+
+export function clearCachedQuota(): void {
+  cachedQuota = undefined
+  quotaFetchInFlight = null
 }

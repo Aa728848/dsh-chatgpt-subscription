@@ -126,7 +126,7 @@ export {
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
 export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts'
-export { fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
+export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
 
 function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {
   return `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`

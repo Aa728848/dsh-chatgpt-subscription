@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest'
-import { parseCatalogModels, parseQuotaSummary } from '../src/host/antigravity/client.ts'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  clearCachedQuota,
+  fetchAccountQuota,
+  getCachedQuota,
+  parseCatalogModels,
+  parseQuotaSummary,
+} from '../src/host/antigravity/client.ts'
+import { FileCredentialStore } from '../src/host/antigravity/token-store.ts'
 import { DEFAULT_ENDPOINT, DAILY_ENDPOINT, ENDPOINT_FALLBACKS } from '../src/host/antigravity/types.ts'
 
 describe('Antigravity Quota & Catalog Parser', () => {
@@ -81,5 +88,108 @@ describe('Antigravity Quota & Catalog Parser', () => {
     expect(ENDPOINT_FALLBACKS[0]).toBe(DAILY_ENDPOINT)
     expect(ENDPOINT_FALLBACKS).toContain(DEFAULT_ENDPOINT)
     expect(ENDPOINT_FALLBACKS.indexOf(DAILY_ENDPOINT)).toBeLessThan(ENDPOINT_FALLBACKS.indexOf(DEFAULT_ENDPOINT))
+  })
+})
+
+describe('Antigravity Quota Cache & Concurrency', () => {
+  beforeEach(() => {
+    clearCachedQuota()
+  })
+
+  function createMockStore() {
+    return {
+      read: vi.fn(async () => ({
+        access_token: 'token-quota-test',
+        refresh_token: 'refresh-quota-test',
+        expires_at: Date.now() + 3600_000,
+        projectId: 'quota-proj-1',
+      })),
+      write: vi.fn(async () => {}),
+      clear: vi.fn(async () => {}),
+    } as unknown as FileCredentialStore
+  }
+
+  it('reuses cached quota within TTL when force is false', async () => {
+    let callCount = 0
+    const fakeFetch = vi.fn(async (url: string) => {
+      callCount++
+      if (url.includes('/v1internal:retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({ groups: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes('/v1internal:fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: 'quota-proj-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+
+    const store = createMockStore()
+    const first = await fetchAccountQuota(store, undefined, fakeFetch, false)
+    expect(first.projectId).toBe('quota-proj-1')
+    expect(callCount).toBeGreaterThan(0)
+    const initialCalls = callCount
+
+    // 第二次调用，force=false，命中 2 分钟缓存
+    const second = await fetchAccountQuota(store, undefined, fakeFetch, false)
+    expect(second).toBe(first)
+    expect(callCount).toBe(initialCalls) // 没有任何新网络调用
+  })
+
+  it('bypasses cache when force is true', async () => {
+    let callCount = 0
+    const fakeFetch = vi.fn(async (url: string) => {
+      callCount++
+      if (url.includes('/v1internal:retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({ groups: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes('/v1internal:fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: 'quota-proj-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+
+    const store = createMockStore()
+    await fetchAccountQuota(store, undefined, fakeFetch, false)
+    const initialCalls = callCount
+
+    // 传入 force=true 强制刷新
+    await fetchAccountQuota(store, undefined, fakeFetch, true)
+    expect(callCount).toBeGreaterThan(initialCalls)
+  })
+
+  it('deduplicates concurrent quota fetch calls via in-flight promise', async () => {
+    let summaryRequests = 0
+    const fakeFetch = vi.fn(async (url: string) => {
+      if (url.includes('/v1internal:retrieveUserQuotaSummary')) {
+        summaryRequests++
+        // 模拟异步请求耗时
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return new Response(JSON.stringify({ groups: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+
+    const store = createMockStore()
+    const [res1, res2, res3] = await Promise.all([
+      fetchAccountQuota(store, undefined, fakeFetch, false),
+      fetchAccountQuota(store, undefined, fakeFetch, false),
+      fetchAccountQuota(store, undefined, fakeFetch, false),
+    ])
+
+    expect(res1).toBe(res2)
+    expect(res2).toBe(res3)
+    expect(summaryRequests).toBe(1)
+  })
+
+  it('clears cached quota on clearCachedQuota call', async () => {
+    const fakeFetch = vi.fn(async () => {
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+
+    const store = createMockStore()
+    await fetchAccountQuota(store, undefined, fakeFetch, false)
+    expect(getCachedQuota()).toBeDefined()
+
+    clearCachedQuota()
+    expect(getCachedQuota()).toBeUndefined()
   })
 })
