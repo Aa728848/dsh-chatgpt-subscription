@@ -71,8 +71,6 @@ describe('host routes', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
-        subagentContextWindow: null,
-        subagentMaxDepth: null,
         proxyMode: 'auto',
         customProxyUrl: null,
         writable: true,
@@ -90,8 +88,6 @@ describe('host routes', () => {
           'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
           'gpt-5.6-luna': patch.contextWindowOverrides?.['gpt-5.6-luna'] ?? 272_000,
         },
-        subagentContextWindow: patch.subagentContextWindow !== undefined ? patch.subagentContextWindow : null,
-        subagentMaxDepth: patch.subagentMaxDepth !== undefined ? patch.subagentMaxDepth : null,
         proxyMode: patch.proxyMode !== undefined ? patch.proxyMode : 'auto',
         customProxyUrl: patch.customProxyUrl !== undefined ? patch.customProxyUrl : null,
         writable: true,
@@ -129,8 +125,6 @@ describe('host routes', () => {
         reasoningSummary: 'concise',
         visibleModelIds: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.4-mini'],
         contextWindowOverrides: { 'gpt-6-astra': 872_000, 'gpt-5.6-sol': 1_000_000 },
-        subagentContextWindow: 128_000,
-        subagentMaxDepth: 2,
         proxyMode: 'custom',
         customProxyUrl: 'http://127.0.0.1:8888',
       }),
@@ -144,8 +138,6 @@ describe('host routes', () => {
         reasoningSummary: 'concise',
         visibleModelIds: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.4-mini'],
         contextWindowOverrides: { 'gpt-6-astra': 872_000, 'gpt-5.6-sol': 1_000_000 },
-        subagentContextWindow: 128_000,
-        subagentMaxDepth: 2,
         proxyMode: 'custom',
         customProxyUrl: 'http://127.0.0.1:8888',
       },
@@ -157,20 +149,6 @@ describe('host routes', () => {
       body: JSON.stringify({ reasoningSummary: 'super-long' }),
     })
     expect(rejectedReasoningSummary.status).toBe(400)
-
-    const rejectedMaxDepth = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin },
-      body: JSON.stringify({ subagentMaxDepth: 4 }),
-    })
-    expect(rejectedMaxDepth.status).toBe(400)
-
-    const rejectedSubagentContext = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin },
-      body: JSON.stringify({ subagentContextWindow: -1 }),
-    })
-    expect(rejectedSubagentContext.status).toBe(400)
 
     const rejectedContextModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',

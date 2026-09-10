@@ -71,13 +71,6 @@ export declare const zh: {
     readonly searchProviderDsh: "DSH 默认";
     readonly searchProviderCodex: "ChatGPT（代理隧道）";
     readonly providerDefault: "使用 Provider 默认值";
-    readonly subagentEnhancements: "子代理设置";
-    readonly subagentContextWindow: "子代理上下文预算";
-    readonly subagentContextWindowHint: "限制子代理运行时的最大上下文 Token 数（例如 128K、256K）；留空跟随模型主设置。";
-    readonly subagentMaxDepth: "子代理最大嵌套深度";
-    readonly subagentMaxDepthHint: "限制子代理的递归层级（0–3）；0 禁止创建子代理。";
-    readonly subagentDisabled: "已禁用";
-    readonly levels: "层";
     readonly contextWindows: "模型上下文窗口";
     readonly contextWindowsHint: "默认 272K；6 Astra 最高 872K，GPT-5.6 最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 872K、512K 等容量。";
     readonly contextWindow: "上下文窗口";
@@ -205,13 +198,6 @@ export declare const dictionaries: {
         readonly searchProviderDsh: "DSH 默认";
         readonly searchProviderCodex: "ChatGPT（代理隧道）";
         readonly providerDefault: "使用 Provider 默认值";
-        readonly subagentEnhancements: "子代理设置";
-        readonly subagentContextWindow: "子代理上下文预算";
-        readonly subagentContextWindowHint: "限制子代理运行时的最大上下文 Token 数（例如 128K、256K）；留空跟随模型主设置。";
-        readonly subagentMaxDepth: "子代理最大嵌套深度";
-        readonly subagentMaxDepthHint: "限制子代理的递归层级（0–3）；0 禁止创建子代理。";
-        readonly subagentDisabled: "已禁用";
-        readonly levels: "层";
         readonly contextWindows: "模型上下文窗口";
         readonly contextWindowsHint: "默认 272K；6 Astra 最高 872K，GPT-5.6 最高 1M。该值用于 DSH 的压缩与溢出判断，可输入 872K、512K 等容量。";
         readonly contextWindow: "上下文窗口";
@@ -264,6 +250,6 @@ export declare const dictionaries: {
         readonly retry: "重试";
         readonly unknown: "未知";
     };
-    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "proxySettings" | "proxyMode" | "proxyModeHint" | "proxyModeAuto" | "proxyModeCustom" | "proxyModeDirect" | "customProxyUrl" | "customProxyUrlHint" | "customProxyUrlPlaceholder" | "saveProxyUrl" | "proxyDetected" | "proxyDetectedEffective" | "proxyNoneDetected" | "proxyDirectHint" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "reasoningSummary" | "reasoningSummaryHint" | "summaryAuto" | "summaryConcise" | "summaryDetailed" | "summaryNone" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "subagentEnhancements" | "subagentContextWindow" | "subagentContextWindowHint" | "subagentMaxDepth" | "subagentMaxDepthHint" | "subagentDisabled" | "levels" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
+    en: Record<"quota" | "account" | "storage" | "stale" | "pending" | "tokens" | "title" | "intro" | "signedOut" | "signedIn" | "plan" | "accountId" | "expires" | "storageWindows" | "storageMacKeychain" | "storageLinuxFile" | "storageMemory" | "storageUnavailable" | "securityWindows" | "securityMacKeychain" | "securityLinuxFile" | "securityMemory" | "securityUnavailable" | "signIn" | "signInAgain" | "cancel" | "signOut" | "refreshToken" | "popupBlocked" | "continueLogin" | "loading" | "connection" | "provider" | "connectionState" | "connected" | "untested" | "testConnection" | "testing" | "latency" | "models" | "modelsHint" | "proxySettings" | "proxyMode" | "proxyModeHint" | "proxyModeAuto" | "proxyModeCustom" | "proxyModeDirect" | "customProxyUrl" | "customProxyUrlHint" | "customProxyUrlPlaceholder" | "saveProxyUrl" | "proxyDetected" | "proxyDetectedEffective" | "proxyNoneDetected" | "proxyDirectHint" | "enhancements" | "fastMode" | "fastModeHint" | "outputVerbosity" | "outputVerbosityHint" | "verbosityLow" | "verbosityMedium" | "verbosityHigh" | "reasoningSummary" | "reasoningSummaryHint" | "summaryAuto" | "summaryConcise" | "summaryDetailed" | "summaryNone" | "searchProvider" | "searchProviderHint" | "searchProviderDsh" | "searchProviderCodex" | "providerDefault" | "contextWindows" | "contextWindowsHint" | "contextWindow" | "contextWindowInvalid" | "saveContextWindow" | "save" | "quickQuota" | "quickQuotaHint" | "quotaIntro" | "refreshQuota" | "refreshing" | "noQuota" | "quotaSignedOut" | "updated" | "primary" | "secondary" | "limitWindow" | "used" | "remaining" | "available" | "unavailable" | "unlimited" | "credits" | "monthlySpend" | "resetCredits" | "resetCreditExpires" | "useResetCredit" | "usingResetCredit" | "useResetCreditConfirm" | "resetCreditUsed" | "spendControlReached" | "limit" | "exhausted" | "resets" | "quickQuotaLabel" | "quickQuotaLoading" | "imageToolRunning" | "imageToolDone" | "imageToolFailed" | "image" | "openImage" | "openNamedImage" | "imageLoading" | "imageLoadFailed" | "imagePreviewClose" | "imagePreviewOpenOriginal" | "retry" | "unknown", string>;
 };
 //# sourceMappingURL=locales.d.ts.map

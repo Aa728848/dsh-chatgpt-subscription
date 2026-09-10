@@ -46,8 +46,6 @@ describe('client registration', () => {
         visibleModelIds: body?.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000, [model]: contextWindow },
-        subagentContextWindow: null,
-        subagentMaxDepth: null,
         writable: true,
       }
       if (init?.method === 'POST') return Response.json({ ok: true, value: preferences })
@@ -71,17 +69,13 @@ describe('client registration', () => {
       expect(input).not.toBeNull()
       const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsh-codex-models input[type="checkbox"]')
       expect(modelChecks).toHaveLength(8)
-      const subagentDepthSelect = container.querySelector<HTMLSelectElement>('select[aria-label="子代理最大嵌套深度"]')
-      expect(subagentDepthSelect).not.toBeNull()
-      const subagentContextInput = container.querySelector<HTMLInputElement>('input[aria-label="子代理上下文预算"]')
-      expect(subagentContextInput).not.toBeNull()
-
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
-      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(5)
+      // 每个可配置上下文窗口的模型一行（子代理上下文预算控件已随死设置移除）
+      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(4)
       const save = container.querySelector<HTMLButtonElement>(`button[data-model="${model}"]`)
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)

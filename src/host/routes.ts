@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { contextWindowLimitForModel, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
-import { SUBAGENT_MAX_DEPTH_LIMIT, isCodexReasoningSummary } from '../shared/preferences.ts'
+import { isCodexReasoningSummary } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import type { ProxyManager } from './proxy-manager.ts'
@@ -266,16 +266,6 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
       overrides[model] = contextWindow as number
     }
     patch.contextWindowOverrides = overrides
-  }
-  if ('subagentContextWindow' in value) {
-    if (value.subagentContextWindow !== null && (!Number.isSafeInteger(value.subagentContextWindow) || (value.subagentContextWindow as number) < 1)) throw new PreferenceError('subagentContextWindow must be null or a positive integer.')
-    patch.subagentContextWindow = value.subagentContextWindow as number | null
-  }
-  if ('subagentMaxDepth' in value) {
-    if (value.subagentMaxDepth !== null && (!Number.isSafeInteger(value.subagentMaxDepth) || (value.subagentMaxDepth as number) < 0 || (value.subagentMaxDepth as number) > SUBAGENT_MAX_DEPTH_LIMIT)) {
-      throw new PreferenceError(`subagentMaxDepth must be null or an integer from 0 to ${SUBAGENT_MAX_DEPTH_LIMIT}.`)
-    }
-    patch.subagentMaxDepth = value.subagentMaxDepth as number | null
   }
   if ('proxyMode' in value) {
     if (value.proxyMode !== 'auto' && value.proxyMode !== 'custom' && value.proxyMode !== 'direct') {

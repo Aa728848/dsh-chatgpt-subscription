@@ -7,7 +7,6 @@ import {
   PREFERENCES_NAMESPACE,
   SEARCH_PROVIDER_CODEX,
   SEARCH_PROVIDER_DSH,
-  SUBAGENT_MAX_DEPTH_LIMIT,
   isCodexOutputVerbosity,
   isCodexReasoningSummary,
   isProxyMode,
@@ -46,8 +45,6 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
       'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
       'gpt-5.6-luna': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-luna']),
     }).default(DEFAULT_PREFERENCES.contextWindowOverrides),
-    subagentContextWindow: z.union([z.number().step(1).min(1), z.const(null)]).default(DEFAULT_PREFERENCES.subagentContextWindow),
-    subagentMaxDepth: z.union([z.number().step(1).min(0).max(SUBAGENT_MAX_DEPTH_LIMIT), z.const(null)]).default(DEFAULT_PREFERENCES.subagentMaxDepth),
     proxyMode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]).default(DEFAULT_PREFERENCES.proxyMode),
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
   }))
@@ -86,12 +83,6 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
         ...this.scope.get().contextWindowOverrides,
         ...patch.contextWindowOverrides,
       }
-    }
-    if (patch.subagentContextWindow !== undefined) {
-      normalized.subagentContextWindow = patch.subagentContextWindow
-    }
-    if (patch.subagentMaxDepth !== undefined) {
-      normalized.subagentMaxDepth = patch.subagentMaxDepth
     }
     if (patch.proxyMode !== undefined) {
       if (!isProxyMode(patch.proxyMode)) throw new PreferenceError('Unsupported proxy mode preference.')

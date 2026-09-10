@@ -44,8 +44,6 @@ export interface SubscriptionPreferencesDto {
     visibleModelIds: string[];
     searchProvider: SearchProviderPreference;
     contextWindowOverrides: CodexContextWindowOverridesDto;
-    subagentContextWindow: number | null;
-    subagentMaxDepth: number | null;
     proxyMode: ProxyMode;
     customProxyUrl: string | null;
     writable: boolean;
@@ -58,8 +56,6 @@ export interface SubscriptionPreferencesUpdateDto {
     visibleModelIds?: string[];
     searchProvider?: SearchProviderPreference;
     contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>;
-    subagentContextWindow?: number | null;
-    subagentMaxDepth?: number | null;
     proxyMode?: ProxyMode;
     customProxyUrl?: string | null;
 }

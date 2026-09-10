@@ -58,8 +58,6 @@ describe('CodexChatGptAdapter', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
         contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000, 'gpt-5.6-terra': 200_000, 'gpt-5.6-luna': 256_000 },
-        subagentContextWindow: 128_000,
-        subagentMaxDepth: 2,
         proxyMode: 'auto',
         customProxyUrl: null,
         writable: true,

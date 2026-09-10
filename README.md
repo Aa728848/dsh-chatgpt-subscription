@@ -39,8 +39,8 @@
 **设置页**
 
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
-- 独立的“子代理”设置页可全局选择 DSH 当前接入的任意 Provider/模型（如 DeepSeek V4 Flash）；思考深度来自所选模型公开能力，上下文在选定模型后展开配置，并适用于所有 DSH 内置子代理，不受父 Agent 当前 Provider/模型影响；
-- 可全局设置 0–3 的最大嵌套深度与每个父 Agent 子树的活动子代理数量上限；限制即时作用于新委派，不中断已运行的子代理；
+- 子代理的模型与思考深度沿用 DSH 自身设置：**设置 → Subagent** 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 `agent-default-model` 设置提供；
+- 最大嵌套深度是 DSH 子代理工具的装配配置（preset 中 `tool-subagent` 的 `maxDepth`，默认 3；`provider-managed` 表示把预算交给进程外提供方），不在本插件设置内；
 - 6 Astra 与 5.6 Sol / Terra / Luna 默认使用 272K 有效上下文；订阅侧 6 Astra 可配置最高 872K，5.6 系列最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 
@@ -116,7 +116,7 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 3. 完成 ChatGPT 登录；
 4. 执行 **测试连接**。
 
-DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 GPT-5.6 系列的有效上下文窗口仍在“Codex 订阅 → 增强功能”中配置；子代理模型、思考深度、子代理上下文、最大嵌套深度和数量上限则统一位于独立的 **“子代理”** 设置页。模型路由适用于会话标记为 `origin: subagent` 的 DSH 内置子代理；运行限制在内置 spawn/fork 及已启用的原生子代理委派工具入口统一执行。
+DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（**设置 → Subagent** 卡片授权的模型清单，以及 `agent-default-model` 的默认路由）；最大嵌套深度由 DSH preset 中 `tool-subagent` 的 `maxDepth` 决定。
 
 **设置 → Codex 订阅 → 网络代理** 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。
 
