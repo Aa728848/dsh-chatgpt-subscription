@@ -37,6 +37,8 @@ export declare const zh: {
     quotaDesc: string;
     refreshQuota: string;
     refreshingQuota: string;
+    quotaEmpty: string;
+    googleValidation: string;
     resetPrefix: string;
     resetUnavailable: string;
     resetNow: string;
@@ -86,6 +88,8 @@ export declare const en: {
     quotaDesc: string;
     refreshQuota: string;
     refreshingQuota: string;
+    quotaEmpty: string;
+    googleValidation: string;
     resetPrefix: string;
     resetUnavailable: string;
     resetNow: string;
@@ -136,6 +140,8 @@ export declare const dictionaries: {
         quotaDesc: string;
         refreshQuota: string;
         refreshingQuota: string;
+        quotaEmpty: string;
+        googleValidation: string;
         resetPrefix: string;
         resetUnavailable: string;
         resetNow: string;
@@ -185,6 +191,8 @@ export declare const dictionaries: {
         quotaDesc: string;
         refreshQuota: string;
         refreshingQuota: string;
+        quotaEmpty: string;
+        googleValidation: string;
         resetPrefix: string;
         resetUnavailable: string;
         resetNow: string;
@@ -234,6 +242,8 @@ export declare const dictionaries: {
         quotaDesc: string;
         refreshQuota: string;
         refreshingQuota: string;
+        quotaEmpty: string;
+        googleValidation: string;
         resetPrefix: string;
         resetUnavailable: string;
         resetNow: string;
@@ -283,6 +293,8 @@ export declare const dictionaries: {
         quotaDesc: string;
         refreshQuota: string;
         refreshingQuota: string;
+        quotaEmpty: string;
+        googleValidation: string;
         resetPrefix: string;
         resetUnavailable: string;
         resetNow: string;

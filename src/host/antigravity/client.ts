@@ -25,14 +25,17 @@ const projectCache = new Map<string, { projectId: string; expiresAt: number }>()
 export const ANTIGRAVITY_QUOTA_CACHE_TTL_MS = 2 * 60 * 1000
 let cachedQuota: AntigravityAccountQuota | undefined
 let quotaFetchInFlight: Promise<AntigravityAccountQuota> | null = null
+/** Bumped by every cache clear so an in-flight fetch cannot publish stale state. */
+let quotaCacheEpoch = 0
 
 const PLATFORM = process.platform === 'darwin' ? 'MACOS' : process.platform === 'win32' ? 'WINDOWS' : 'LINUX'
 
 export function defaultUserAgent(): string {
   const version = process.env.DSH_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION
   const cl = process.env.DSH_ANTIGRAVITY_CL || DEFAULT_ANTIGRAVITY_CL
-  const os = process.env.DSH_ANTIGRAVITY_OS || 'darwin'
-  const arch = process.env.DSH_ANTIGRAVITY_ARCH || 'arm64'
+  const os = process.env.DSH_ANTIGRAVITY_OS
+    || (process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux')
+  const arch = process.env.DSH_ANTIGRAVITY_ARCH || (process.arch === 'x64' ? 'amd64' : process.arch)
   return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`
 }
 
@@ -169,6 +172,7 @@ export async function onboardUser(
     tierId: FREE_TIER_ID,
     metadata: { ideType: 'ANTIGRAVITY' },
   })
+  let lastError: unknown
 
   for (const endpoint of endpointCandidates()) {
     try {
@@ -234,11 +238,16 @@ export async function onboardUser(
         operation = (await pollResp.json()) as typeof operation
       }
     } catch (err) {
+      lastError = err
       if (Date.now() >= deadline || signal?.aborted) {
         throw err
       }
     }
   }
+
+  // Every candidate failed before the deadline: report the last failure instead of
+  // letting the caller treat onboarding as complete.
+  throw lastError instanceof Error ? lastError : new Error('onboardUser failed on every endpoint')
 }
 
 export async function listCloudAICompanionProjects(token: string, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
@@ -387,65 +396,78 @@ export async function fetchAccountQuota(
     return quotaFetchInFlight
   }
 
-  quotaFetchInFlight = (async () => {
-    try {
-      const { token, projectId: credentialProjectId } = await ensureApiKey(store, fetchFn)
+  const epoch = quotaCacheEpoch
+  const request = (async (): Promise<AntigravityAccountQuota> => {
+    const { token, projectId: credentialProjectId } = await ensureApiKey(store, fetchFn)
 
-      const [assistResult, summaryResult] = await Promise.all([
-        postJson('/v1internal:loadCodeAssist', token, {
-          metadata: {
-            ideType: 'ANTIGRAVITY',
-            platform: 'PLATFORM_UNSPECIFIED',
-            pluginType: 'GEMINI',
-          },
-        }, fetchFn).catch(() => null),
-        postJson('/v1internal:retrieveUserQuotaSummary', token, {}, fetchFn).catch(() => null),
-      ])
+    const [assistResult, summaryResult] = await Promise.all([
+      postJson('/v1internal:loadCodeAssist', token, {
+        metadata: {
+          ideType: 'ANTIGRAVITY',
+          platform: 'PLATFORM_UNSPECIFIED',
+          pluginType: 'GEMINI',
+        },
+      }, fetchFn).catch(() => null),
+      postJson('/v1internal:retrieveUserQuotaSummary', token, {}, fetchFn).catch(() => null),
+    ])
 
-      const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined
-      const projectId = credentialProjectId || discoveredProject || 'antigravity-default'
+    const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined
+    const projectId = credentialProjectId || discoveredProject || 'antigravity-default'
 
-      const modelsCall = await postJson('/v1internal:fetchAvailableModels', token, { project: projectId }, fetchFn).catch(() => null)
-      const modelsData = modelsCall?.data
+    const modelsCall = await postJson('/v1internal:fetchAvailableModels', token, { project: projectId }, fetchFn).catch(() => null)
+    const modelsData = modelsCall?.data
 
-      const { groups, description } = summaryResult ? parseQuotaSummary(summaryResult.data) : { groups: [] }
-      const catalogModels = modelsData ? parseCatalogModels(modelsData) : []
+    const { groups, description } = summaryResult ? parseQuotaSummary(summaryResult.data) : { groups: [] }
+    const catalogModels = modelsData ? parseCatalogModels(modelsData) : []
 
-      const assistData = (assistResult?.data as Record<string, unknown>) || {}
-      const currentTier = assistData.currentTier as { id?: string; name?: string; description?: string } | undefined
-      const paidTier = assistData.paidTier as { id?: string; name?: string; description?: string } | undefined
-      const planLabel = paidTier?.name || currentTier?.name || undefined
+    const assistData = (assistResult?.data as Record<string, unknown>) || {}
+    const currentTier = assistData.currentTier as { id?: string; name?: string; description?: string } | undefined
+    const paidTier = assistData.paidTier as { id?: string; name?: string; description?: string } | undefined
+    const planLabel = paidTier?.name || currentTier?.name || undefined
 
-      cachedQuota = {
-        projectId,
-        endpoint: summaryResult?.endpoint || ENDPOINT_FALLBACKS[0],
-        planLabel,
-        productTier: currentTier,
-        paidTier,
-        groups,
-        groupDescription: description,
-        models: catalogModels.map((m) => ({ modelId: m.id, displayName: m.name, description: m.description })),
-        catalogModels,
-        fetchedAt: Date.now(),
-      }
-
-      if (modelSettings && catalogModels.length > 0) {
-        const current = await modelSettings.read()
-        const isFirstTime = current.catalogModels.length === 0 && current.enabledModelIds.length === 0
-        const catalogIds = new Set(catalogModels.map((m) => m.id))
-        const mergedEnabled = isFirstTime
-          ? catalogModels.map((m) => m.id)
-          : current.enabledModelIds.filter((id) => catalogIds.has(id))
-        await modelSettings.setCatalogModels(catalogModels, { enabledModelIds: mergedEnabled })
-      }
-
-      return cachedQuota
-    } finally {
-      quotaFetchInFlight = null
+    const snapshot: AntigravityAccountQuota = {
+      projectId,
+      endpoint: summaryResult?.endpoint || ENDPOINT_FALLBACKS[0],
+      planLabel,
+      productTier: currentTier,
+      paidTier,
+      groups,
+      groupDescription: description,
+      models: catalogModels.map((m) => ({ modelId: m.id, displayName: m.name, description: m.description })),
+      catalogModels,
+      fetchedAt: Date.now(),
     }
+
+    if (epoch !== quotaCacheEpoch) {
+      // A logout cleared the cache while this fetch was in flight: answer the
+      // caller, but publish nothing and leave the signed-out account's catalog
+      // settings untouched.
+      return snapshot
+    }
+
+    cachedQuota = snapshot
+
+    if (modelSettings && catalogModels.length > 0) {
+      const current = await modelSettings.read()
+      const isFirstTime = current.catalogModels.length === 0 && current.enabledModelIds.length === 0
+      const catalogIds = new Set(catalogModels.map((m) => m.id))
+      const mergedEnabled = isFirstTime
+        ? catalogModels.map((m) => m.id)
+        : current.enabledModelIds.filter((id) => catalogIds.has(id))
+      await modelSettings.setCatalogModels(catalogModels, { enabledModelIds: mergedEnabled })
+    }
+
+    return snapshot
   })()
 
-  return quotaFetchInFlight
+  quotaFetchInFlight = request
+  try {
+    return await request
+  } finally {
+    // Only the owner of this slot clears it: a clear-then-refetch must not lose
+    // the newer in-flight request.
+    if (quotaFetchInFlight === request) quotaFetchInFlight = null
+  }
 }
 
 export function getCachedQuota(): AntigravityAccountQuota | undefined {
@@ -453,6 +475,7 @@ export function getCachedQuota(): AntigravityAccountQuota | undefined {
 }
 
 export function clearCachedQuota(): void {
+  quotaCacheEpoch += 1
   cachedQuota = undefined
   quotaFetchInFlight = null
 }

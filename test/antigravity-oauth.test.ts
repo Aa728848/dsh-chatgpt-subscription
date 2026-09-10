@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   defaultUserAgent,
+  endpointCandidates,
   loadCodeAssistDetail,
   onboardUser,
 } from '../src/host/antigravity/client.ts'
@@ -23,19 +24,34 @@ describe('Antigravity OAuth & Client Onboarding', () => {
     expect(ua).toContain(`antigravity/hub/${DEFAULT_ANTIGRAVITY_VERSION}`)
     expect(ua).toContain(`cl=${DEFAULT_ANTIGRAVITY_CL}`)
     expect(ua).toContain('aidev_client')
+    // 默认 UA 描述真实运行平台，而不是冒充官方客户端的 darwin/arm64
+    const expectedOs = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux'
+    const expectedArch = process.arch === 'x64' ? 'amd64' : process.arch
+    expect(ua).toContain(`os_type=${expectedOs}`)
+    expect(ua).toContain(`arch=${expectedArch}`)
 
-    const prevVersion = process.env.DSH_ANTIGRAVITY_VERSION
-    const prevCl = process.env.DSH_ANTIGRAVITY_CL
+    const previous = {
+      version: process.env.DSH_ANTIGRAVITY_VERSION,
+      cl: process.env.DSH_ANTIGRAVITY_CL,
+      os: process.env.DSH_ANTIGRAVITY_OS,
+      arch: process.env.DSH_ANTIGRAVITY_ARCH,
+    }
+    const restore = (key: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     try {
       process.env.DSH_ANTIGRAVITY_VERSION = '2.9.1'
       process.env.DSH_ANTIGRAVITY_CL = '123456789'
+      process.env.DSH_ANTIGRAVITY_OS = 'darwin'
+      process.env.DSH_ANTIGRAVITY_ARCH = 'arm64'
       const customUa = defaultUserAgent()
       expect(customUa).toBe('antigravity/hub/2.9.1 (aidev_client; os_type=darwin; arch=arm64; cl=123456789)')
     } finally {
-      if (prevVersion === undefined) delete process.env.DSH_ANTIGRAVITY_VERSION
-      else process.env.DSH_ANTIGRAVITY_VERSION = prevVersion
-      if (prevCl === undefined) delete process.env.DSH_ANTIGRAVITY_CL
-      else process.env.DSH_ANTIGRAVITY_CL = prevCl
+      restore('DSH_ANTIGRAVITY_VERSION', previous.version)
+      restore('DSH_ANTIGRAVITY_CL', previous.cl)
+      restore('DSH_ANTIGRAVITY_OS', previous.os)
+      restore('DSH_ANTIGRAVITY_ARCH', previous.arch)
     }
   })
 
@@ -123,6 +139,13 @@ describe('Antigravity OAuth & Client Onboarding', () => {
     expect(pollCount).toBe(1)
     expect(progressLogs).toContain('正在为新账号开通 Antigravity 免费额度...')
     expect(progressLogs).toContain('正在获取专属项目 (Project ID)...')
+  })
+
+  it('surfaces the last failure when every onboarding endpoint fails', async () => {
+    const fakeFetch = vi.fn(async () => new Response('boom', { status: 500 })) as unknown as typeof fetch
+
+    await expect(onboardUser('token-fail', fakeFetch)).rejects.toThrow(/onboardUser failed/)
+    expect(fakeFetch).toHaveBeenCalledTimes(endpointCandidates().length) // 每个候选端点都尝试过一次
   })
 
   it('intercepts Google account validation and extracts validationUrl', async () => {

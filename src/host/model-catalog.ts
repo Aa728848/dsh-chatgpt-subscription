@@ -34,7 +34,11 @@ export function resolveCodexModel(model: string, preferences?: SubscriptionPrefe
     inputModalities: [...entry.inputModalities],
     context: { contextWindow: configuredContextWindow ?? entry.contextWindow },
     defaultMaxTokens: 32_768,
-    systemPromptUpdate: 'in-history',
+    // No `systemPromptUpdate: 'in-history'`: the Responses wire carries the system
+    // prompt in the top-level `instructions` slot, never inside `input`, so this
+    // route cannot read a later system message as the effective prompt. Declaring
+    // it would make DSH append every later prompt while the earlier ones stayed
+    // effective, and the mapper would have to drop them again.
     reasoning: {
       efforts: efforts.map((effort) => ({
         id: ReasoningEffortId(effort),

@@ -3,7 +3,6 @@ import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-ll
 import { createHash } from 'node:crypto'
 import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
-import '../compat.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
   model: string
@@ -82,9 +81,7 @@ export async function buildResponsesPayload(
   const normalizeCallId = createCallIdNormalizer()
   const instructionParts = [
     options.system?.trim(),
-    ...options.messages
-      .filter((message) => message.role === 'system')
-      .map((message) => blocksToText(message.content).trim()),
+    latestSystemPrompt(options.messages),
     progressExplanationInstruction(options.tools),
     sandboxToolInstruction(options.tools, sandboxRetryTools),
     commandToolInstruction(options.tools),
@@ -372,6 +369,22 @@ function isRunCodeParserError(output: string): boolean {
   return /(?:Legacy octal escape is not permitted in strict mode|Unexpected token|Invalid or unexpected token|Unterminated template|Expected ['"]?\}['"]?)/i.test(output)
 }
 
+/**
+ * The effective system prompt of a loop-built request. DSH keeps an earlier
+ * `system` node as cached history whenever the rendered prompt changes, so only
+ * the newest non-empty node is the complete prompt; concatenating every node
+ * would resend superseded instructions.
+ */
+function latestSystemPrompt(messages: readonly Message[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message === undefined || message.role !== 'system') continue
+    const text = blocksToText(message.content).trim()
+    if (text) return text
+  }
+  return undefined
+}
+
 async function mapContent(
   message: Message,
   attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
@@ -391,17 +404,6 @@ async function mapContent(
     } else if (block.type === 'image') {
       if (message.role !== 'user') continue
       result.push({ type: 'input_image', image_url: await imageDataUrl(block.attachment, attachments, signal) })
-    } else if (block.type === 'file') {
-      const file = (block as unknown as { attachment?: Record<string, unknown> }).attachment ?? {}
-      const name = typeof file.name === 'string' ? file.name : typeof file.filename === 'string' ? file.filename : 'unnamed'
-      const size = typeof file.byteSize === 'number' ? ` (${file.byteSize} bytes)` : ''
-      const savedPath = typeof file.savedPath === 'string' ? ` path: ${file.savedPath}` : ''
-      const fileText = `[File attachment: ${name}${size}${savedPath}]`
-      if (message.role === 'user') {
-        pushInputText(result, fileText)
-      } else {
-        result.push({ type: 'output_text', text: fileText })
-      }
     }
   }
   return result
@@ -564,13 +566,6 @@ function blocksToText(blocks: readonly ContentBlock[]): string {
   return blocks.map((block) => {
     if (block.type === 'text' || block.type === 'reasoning') return block.text
     if (block.type === 'image') return `[image: ${block.attachment.name ?? block.attachment.attachmentId}]`
-    if (block.type === 'file') {
-      const file = (block as unknown as { attachment?: Record<string, unknown> }).attachment ?? {}
-      const name = typeof file.name === 'string' ? file.name : typeof file.filename === 'string' ? file.filename : 'unnamed'
-      const size = typeof file.byteSize === 'number' ? ` (${file.byteSize} bytes)` : ''
-      const savedPath = typeof file.savedPath === 'string' ? ` path: ${file.savedPath}` : ''
-      return `[file: ${name}${size}${savedPath}]`
-    }
     if (block.type === 'tool-result') return blocksToText(block.content)
     return ''
   }).filter(Boolean).join('\n')

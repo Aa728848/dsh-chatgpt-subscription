@@ -180,6 +180,41 @@ describe('Antigravity Quota Cache & Concurrency', () => {
     expect(summaryRequests).toBe(1)
   })
 
+  it('does not republish a fetch that a logout cleared while it was in flight', async () => {
+    let releaseSummary: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      releaseSummary = resolve
+    })
+
+    const fakeFetch = vi.fn(async (url: string) => {
+      if (url.includes('/v1internal:retrieveUserQuotaSummary')) {
+        await gate
+        return new Response(JSON.stringify({ groups: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.includes('/v1internal:fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: { 'gemini-3.8-flash': { displayName: 'Gemini 3.8 Flash' } } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: 'quota-proj-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+
+    const modelSettings = {
+      read: vi.fn(async () => ({ catalogModels: [], enabledModelIds: [], contextWindowOverrides: {}, defaultReasoningEffort: null })),
+      setCatalogModels: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof fetchAccountQuota>[1]
+
+    const store = createMockStore()
+    const pending = fetchAccountQuota(store, modelSettings, fakeFetch, false)
+    // 让请求走到被 gate 卡住的配额摘要调用，再模拟登出
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    clearCachedQuota()
+    releaseSummary?.()
+
+    const snapshot = await pending
+    expect(snapshot.projectId).toBe('quota-proj-1') // 调用方仍拿到自己的结果
+    expect(getCachedQuota()).toBeUndefined() // 但缓存没有被登出后的旧账号重新填充
+    expect(modelSettings?.setCatalogModels).not.toHaveBeenCalled()
+  })
+
   it('clears cached quota on clearCachedQuota call', async () => {
     const fakeFetch = vi.fn(async () => {
       return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } })

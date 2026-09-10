@@ -83,7 +83,19 @@ export function parseMacOsScutilProxy(stdout: string): string | null {
   return null
 }
 
-export function parseEnvProxy(env: Record<string, string | undefined> = process.env): string | null {
+export interface ParseEnvProxyOptions {
+  /**
+   * `$DSH_HOME/.env` consulted after the process environment; `null` disables
+   * the file fallback so a caller (or a test) never reads configuration behind
+   * the injected environment's back.
+   */
+  envFile?: string | null
+}
+
+export function parseEnvProxy(
+  env: Record<string, string | undefined> = process.env,
+  options: ParseEnvProxyOptions = {},
+): string | null {
   const proxy =
     env.HTTPS_PROXY ||
     env.https_proxy ||
@@ -93,10 +105,11 @@ export function parseEnvProxy(env: Record<string, string | undefined> = process.
     env.all_proxy
 
   if (proxy && proxy.trim()) return normalizeProxyUrl(proxy)
+  if (options.envFile === null) return null
 
   try {
     const dshHome = env.DSH_HOME || path.join(os.homedir(), '.dsh')
-    const envFile = path.join(dshHome, '.env')
+    const envFile = options.envFile ?? path.join(dshHome, '.env')
     if (fs.existsSync(envFile)) {
       const content = fs.readFileSync(envFile, 'utf8')
       const match = content.match(/^(?:export\s+)?(?:HTTPS_PROXY|https_proxy|HTTP_PROXY|http_proxy|ALL_PROXY|all_proxy)\s*=\s*["']?([^"'\r\n]+)["']?/m)

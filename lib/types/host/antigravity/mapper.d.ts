@@ -1,5 +1,4 @@
 import { type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
-import '../../compat.ts';
 import { type AntigravityModelDef } from './types.ts';
 export declare function sanitizeToolCallId(id: string, fallbackName: string): string;
 export declare function convertMessages(options: GenerateOptions, model: AntigravityModelDef, runtimeModel: string): Array<{

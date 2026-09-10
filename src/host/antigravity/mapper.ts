@@ -7,7 +7,6 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import '../../compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
   ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
@@ -94,12 +93,6 @@ function contentToUserParts(content: unknown): Array<Record<string, unknown>> {
     } else if (isRecord(block) && block.type === 'image') {
       const img = imageBlockToPart(block)
       if (img) parts.push(img)
-    } else if (isRecord(block) && block.type === 'file') {
-      const file = isRecord(block.attachment) ? block.attachment : block
-      const name = asString(file.name) || asString(file.filename) || 'unnamed'
-      const size = typeof file.byteSize === 'number' ? ` (${file.byteSize} bytes)` : ''
-      const savedPath = asString(file.savedPath) ? ` path: ${asString(file.savedPath)}` : ''
-      parts.push({ text: sanitizeText(`[File attachment: ${name}${size}${savedPath}]`) })
     }
   }
   return parts
@@ -111,12 +104,6 @@ function toolResultText(blocks: unknown): string {
     .map((block) => {
       if (!isRecord(block)) return ''
       if (block.type === 'text' && typeof block.text === 'string') return sanitizeText(block.text)
-      if (block.type === 'file') {
-        const file = isRecord(block.attachment) ? block.attachment : block
-        const name = asString(file.name) || asString(file.filename) || 'unnamed'
-        const size = typeof file.byteSize === 'number' ? ` (${file.byteSize} bytes)` : ''
-        return sanitizeText(`[file: ${name}${size}]`)
-      }
       if (block.type === 'tool-result') return toolResultText(block.content)
       return ''
     })
@@ -266,7 +253,7 @@ export function convertMessages(
     }
 
     const content = Array.isArray(message.content) ? message.content : []
-    const nonResult = content.filter((b) => !isRecord(b) || (b as Record<string, unknown>).type !== 'tool-result')
+    const nonResult = content.filter((b) => !isRecord(b) || b.type !== 'tool-result')
     const userParts = contentToUserParts(nonResult)
     if (role === 'system') {
       if (userParts.length) contents.push({ role: GEMINI_ROLE.user, parts: userParts })
@@ -274,7 +261,7 @@ export function convertMessages(
     }
     if (userParts.length) contents.push({ role: GEMINI_ROLE.user, parts: userParts })
     for (const b of content) {
-      if (isRecord(b) && (b as Record<string, unknown>).type === 'tool-result') {
+      if (isRecord(b) && b.type === 'tool-result') {
         pushToolResult(contents, b, toolCalls, model, runtimeModel)
       }
     }

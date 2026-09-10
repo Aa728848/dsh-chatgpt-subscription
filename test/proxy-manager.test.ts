@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ProxyManager,
   normalizeProxyUrl,
@@ -136,8 +139,50 @@ describe('Environment Variable Proxy Parser', () => {
   })
 
   it('returns null when no proxy variables are set', () => {
-    expect(parseEnvProxy({})).toBeNull()
-    expect(parseEnvProxy({ HTTPS_PROXY: '   ' })).toBeNull()
+    // envFile: null keeps this assertion independent of the machine's $DSH_HOME/.env
+    expect(parseEnvProxy({}, { envFile: null })).toBeNull()
+    expect(parseEnvProxy({ HTTPS_PROXY: '   ' }, { envFile: null })).toBeNull()
+  })
+})
+
+describe('$DSH_HOME/.env Proxy Fallback', () => {
+  const dirs: string[] = []
+
+  function envFileWith(content: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-proxy-'))
+    dirs.push(dir)
+    const file = path.join(dir, '.env')
+    fs.writeFileSync(file, content, 'utf8')
+    return file
+  }
+
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads a plain assignment from the injected env file', () => {
+    const envFile = envFileWith('OPENAI_API_KEY=secret\nHTTPS_PROXY=http://127.0.0.1:7890\n')
+    expect(parseEnvProxy({}, { envFile })).toBe('http://127.0.0.1:7890')
+  })
+
+  it('accepts export prefixes and quoted values', () => {
+    expect(parseEnvProxy({}, { envFile: envFileWith('export https_proxy="127.0.0.1:7890"\n') })).toBe('http://127.0.0.1:7890')
+    expect(parseEnvProxy({}, { envFile: envFileWith("all_proxy='socks5://127.0.0.1:1080'\n") })).toBe('socks5://127.0.0.1:1080')
+  })
+
+  it('ignores commented lines and returns null for an empty assignment', () => {
+    expect(parseEnvProxy({}, { envFile: envFileWith('# HTTPS_PROXY=http://127.0.0.1:7890\n') })).toBeNull()
+    expect(parseEnvProxy({}, { envFile: envFileWith('HTTPS_PROXY=\n') })).toBeNull()
+  })
+
+  it('returns null for a missing file and never reads one when disabled', () => {
+    expect(parseEnvProxy({}, { envFile: path.join(os.tmpdir(), 'dsh-proxy-missing', '.env') })).toBeNull()
+    expect(parseEnvProxy({ DSH_HOME: os.tmpdir() }, { envFile: null })).toBeNull()
+  })
+
+  it('prefers the process environment over the file', () => {
+    const envFile = envFileWith('HTTPS_PROXY=http://127.0.0.1:7890\n')
+    expect(parseEnvProxy({ HTTPS_PROXY: 'http://127.0.0.1:9999' }, { envFile })).toBe('http://127.0.0.1:9999')
   })
 })
 

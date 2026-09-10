@@ -3,7 +3,15 @@ export type FetchLike = typeof fetch;
 export declare function normalizeProxyUrl(rawUrl: string): string;
 export declare function parseWindowsProxyRegistry(stdout: string): string | null;
 export declare function parseMacOsScutilProxy(stdout: string): string | null;
-export declare function parseEnvProxy(env?: Record<string, string | undefined>): string | null;
+export interface ParseEnvProxyOptions {
+    /**
+     * `$DSH_HOME/.env` consulted after the process environment; `null` disables
+     * the file fallback so a caller (or a test) never reads configuration behind
+     * the injected environment's back.
+     */
+    envFile?: string | null;
+}
+export declare function parseEnvProxy(env?: Record<string, string | undefined>, options?: ParseEnvProxyOptions): string | null;
 export declare function detectSystemProxy(platform?: NodeJS.Platform, env?: Record<string, string | undefined>): string | null;
 export interface ProxyFetchOptions {
     getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>;

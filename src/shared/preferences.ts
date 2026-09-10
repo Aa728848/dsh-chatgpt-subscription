@@ -19,7 +19,6 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   },
   subagentContextWindow: null,
   subagentMaxDepth: null,
-  teamModelRules: [],
   proxyMode: 'auto',
   customProxyUrl: null,
 }
@@ -41,34 +40,4 @@ export function isCodexReasoningSummary(value: unknown): value is CodexReasoning
 
 export function isProxyMode(value: unknown): value is ProxyMode {
   return value === 'auto' || value === 'custom' || value === 'direct'
-}
-
-export function matchTeamPattern(pattern: string, target: string): boolean {
-  const p = pattern.trim().toLowerCase()
-  const t = target.trim().toLowerCase()
-  if (!p || !t) return false
-  if (p === '*' || p === t) return true
-  if (p.startsWith('*') && p.endsWith('*') && p.length > 2) {
-    return t.includes(p.slice(1, -1))
-  }
-  if (p.startsWith('*')) {
-    return t.endsWith(p.slice(1))
-  }
-  if (p.endsWith('*')) {
-    return t.startsWith(p.slice(0, -1))
-  }
-  return t.includes(p)
-}
-
-export function resolveTeamModelRule(
-  targetNameOrRole: string,
-  rules: readonly import('./contracts.ts').TeamModelRule[],
-): import('./contracts.ts').TeamModelRule | undefined {
-  if (!targetNameOrRole || !Array.isArray(rules)) return undefined
-  for (const rule of rules) {
-    if (rule.pattern && rule.model && matchTeamPattern(rule.pattern, targetNameOrRole)) {
-      return rule
-    }
-  }
-  return undefined
 }

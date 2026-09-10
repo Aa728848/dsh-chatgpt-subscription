@@ -23,7 +23,6 @@ import { ensureApiKey } from './oauth.ts'
 import { antigravityHeaders, endpointCandidates } from './client.ts'
 import { buildRequest, closeStream, createStreamState, processStreamLine } from './mapper.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
-import '../../compat.ts'
 
 export function resolveDefaultReasoningEffort(
   efforts: readonly string[],
@@ -107,7 +106,9 @@ export class AntigravityAdapter extends LlmAdapter {
       inputModalities: model.inputModalities,
       context: { contextWindow: overrides[model.id] || model.contextWindow },
       defaultMaxTokens: model.maxTokens,
-      systemPromptUpdate: 'in-history',
+      // No `systemPromptUpdate: 'in-history'`: this route transports the system
+      // prompt out of band (a fixed `systemInstruction` plus a user turn), so it
+      // cannot read a later system message as the effective prompt.
       ...(model.reasoningEfforts
         ? {
             reasoning: {

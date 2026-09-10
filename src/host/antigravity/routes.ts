@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FileCredentialStore, FileModelSettingsStore, type AntigravityPreferenceStore } from './token-store.ts'
 import { beginWebLogin, getWebLoginStatus } from './oauth.ts'
-import { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './client.ts'
+import { ANTIGRAVITY_QUOTA_CACHE_TTL_MS, clearCachedQuota, fetchAccountQuota, getCachedQuota } from './client.ts'
 import { MODELS } from './types.ts'
 import type { AntigravityModelOption, AntigravityWebStatus } from '../../shared/antigravity-contracts.ts'
 
@@ -89,7 +89,7 @@ export function registerAntigravityRoutes(
           const credentials = await store.read()
           const authenticated = !!(credentials?.access || credentials?.access_token)
           const cached = getCachedQuota()
-          if (authenticated && (!cached || Date.now() - (cached.fetchedAt || 0) > 120_000)) {
+          if (authenticated && (!cached || Date.now() - (cached.fetchedAt || 0) > ANTIGRAVITY_QUOTA_CACHE_TTL_MS)) {
             await fetchAccountQuota(store, modelSettings, fetchFn).catch(() => undefined)
           }
           const value = await getAntigravityWebStatus(store, modelSettings, preferences)

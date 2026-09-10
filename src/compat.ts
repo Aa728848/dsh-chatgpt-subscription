@@ -35,15 +35,3 @@ export const QUOTA_MIN_UPSTREAM_INTERVAL_MS = 15_000
 
 export const OAUTH_AUTHORIZE_URL = `${CHATGPT_OAUTH_ISSUER}/oauth/authorize` as const
 export const OAUTH_TOKEN_URL = `${CHATGPT_OAUTH_ISSUER}/oauth/token` as const
-
-declare module '@deepseek-ai/dsh-llm' {
-  interface LlmResolvedModelInfo {
-    systemPromptUpdate?: 'in-history'
-  }
-  interface ContentBlockMap {
-    file: {
-      type: 'file'
-      attachment: Record<string, unknown>
-    }
-  }
-}

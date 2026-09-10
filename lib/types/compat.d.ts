@@ -33,15 +33,4 @@ export declare const QUOTA_CACHE_MS = 60000;
 export declare const QUOTA_MIN_UPSTREAM_INTERVAL_MS = 15000;
 export declare const OAUTH_AUTHORIZE_URL: "https://auth.openai.com/oauth/authorize";
 export declare const OAUTH_TOKEN_URL: "https://auth.openai.com/oauth/token";
-declare module '@deepseek-ai/dsh-llm' {
-    interface LlmResolvedModelInfo {
-        systemPromptUpdate?: 'in-history';
-    }
-    interface ContentBlockMap {
-        file: {
-            type: 'file';
-            attachment: Record<string, unknown>;
-        };
-    }
-}
 //# sourceMappingURL=compat.d.ts.map

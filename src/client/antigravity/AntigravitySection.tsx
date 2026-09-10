@@ -83,13 +83,10 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
       setValidationUrl(null)
     }
     try {
+      // The host refreshes a stale quota cache while serving /status, so a second
+      // client-side POST /quota here would double every upstream fetch.
       const data = await fetchApi<AntigravityWebStatus>('/status')
       setStatus(data)
-      if (data.authenticated && (!data.quota || data.quota.groups.length === 0)) {
-        void fetchApi<AntigravityWebStatus>('/quota', { method: 'POST' })
-          .then((updated) => setStatus(updated))
-          .catch(() => undefined)
-      }
       // 初始化输入草稿
       const drafts: Record<string, string> = {}
       for (const m of data.models) {
@@ -466,7 +463,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         {!status?.authenticated ? (
           <div className="dsha-empty">{t.signedOut}</div>
         ) : groups.length === 0 ? (
-          <div className="dsha-empty">{busy === 'quota' ? t.refreshingQuota : '正在获取配额用量数据...'}</div>
+          <div className="dsha-empty">{busy === 'quota' ? t.refreshingQuota : t.quotaEmpty}</div>
         ) : (
           groups.map((group, gIdx) => (
             <div key={gIdx} className="dsha-quota-card">
@@ -519,7 +516,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
                 className="dsha-btn dsha-btn-primary"
                 style={{ display: 'inline-block', textDecoration: 'none', padding: '4px 10px', fontSize: '12px' }}
               >
-                前往 Google 完成账号验证
+                {t.googleValidation}
               </a>
             </div>
           )}

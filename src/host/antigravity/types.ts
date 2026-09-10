@@ -9,9 +9,8 @@ export const MODEL_CACHE_TTL_MS = 30 * 60 * 1000
 export const OAUTH_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000
 
 export const DEFAULT_ENDPOINT = 'https://cloudcode-pa.googleapis.com'
-// 官方 Antigravity 客户端的调用顺序是 daily 在前、sandbox/prod 兜底。
+// 官方 Antigravity 客户端的调用顺序是 daily 在前、prod 兜底。
 export const DAILY_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com'
-export const SANDBOX_ENDPOINT = 'https://daily-cloudcode-pa.sandbox.googleapis.com'
 export const ENDPOINT_FALLBACKS = [
   DAILY_ENDPOINT,
   DEFAULT_ENDPOINT,
@@ -23,7 +22,6 @@ export const ONBOARD_POLL_INTERVAL_MS = 1_000
 
 export const DEFAULT_ANTIGRAVITY_VERSION = '2.8.0'
 export const DEFAULT_ANTIGRAVITY_CL = '963137146'
-
 
 export const REDIRECT_PATH = '/oauth-callback'
 export const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
