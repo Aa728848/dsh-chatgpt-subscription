@@ -1,7 +1,27 @@
 import type { Context } from '@deepseek-ai/cordis';
+import z from '@deepseek-ai/schemastery';
+/** Optional deployment configuration for this plugin. */
+export interface Config {
+    /**
+     * Whether the Subagent model allowlist also governs the route a delegation
+     * that selects no model would inherit from its parent. Default `true`; set
+     * `false` to leave inherited routes to the built-in delegation tool.
+     */
+    subagentModelAuthorization?: boolean;
+    /** Delegation tool names the authorization guard recognizes (default `subagent`). */
+    subagentModelTools?: string[];
+    /**
+     * `session` (default) enforces the allowlist a Session recorded, matching the
+     * delegation tool's snapshot; `preference` also enforces the current Settings
+     * card allowlist for Sessions that recorded none.
+     */
+    subagentModelScope?: 'session' | 'preference';
+}
+export declare const Config: z<Config>;
 export declare const inject: string[];
-export declare function apply(ctx: Context): void;
+export declare function apply(ctx: Context, pluginConfig?: Config): void;
 export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts';
+export { SUBAGENT_MODEL_SELECTION_NAMESPACE, SUBAGENT_POLICY_EVENT, authorizedRoutesFor, createSubagentAuthorization, delegationDenialReason, installSubagentModelAuthorization, normalizeDelegationToolNames, parseAllowedRoutes, policyRoutesOf, subagentModelSelectionPreference, unauthorizedRouteReason, validateAuthorizationScope, validateDelegationToolNames, } from './host/subagent-model-authorization.ts';
 export { OAuthService } from './host/oauth-service.ts';
 export { CodexChatGptAdapter } from './host/adapter.ts';
 export { createCodexImageTool } from './host/codex-images.ts';

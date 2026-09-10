@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-llm'
@@ -28,16 +29,65 @@ import {
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
 import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID } from './host/antigravity/types.ts'
+import {
+  installSubagentModelAuthorization,
+  normalizeDelegationToolNames,
+  validateDelegationToolNames,
+  type SessionsResolver,
+} from './host/subagent-model-authorization.ts'
+
+/** Optional deployment configuration for this plugin. */
+export interface Config {
+  /**
+   * Whether the Subagent model allowlist also governs the route a delegation
+   * that selects no model would inherit from its parent. Default `true`; set
+   * `false` to leave inherited routes to the built-in delegation tool.
+   */
+  subagentModelAuthorization?: boolean
+  /** Delegation tool names the authorization guard recognizes (default `subagent`). */
+  subagentModelTools?: string[]
+  /**
+   * `session` (default) enforces the allowlist a Session recorded, matching the
+   * delegation tool's snapshot; `preference` also enforces the current Settings
+   * card allowlist for Sessions that recorded none.
+   */
+  subagentModelScope?: 'session' | 'preference'
+}
+
+export const Config: z<Config> = z.object({
+  subagentModelAuthorization: z.boolean().default(true),
+  subagentModelTools: z.array(z.string()).default([]),
+  subagentModelScope: z.union([z.const('session'), z.const('preference')]).default('session'),
+})
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
 
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
 
   const antigravityStore = new FileCredentialStore()
   const antigravityModelSettings = new FileModelSettingsStore()
   const antigravityPreferences = registerAntigravityPreferenceStore(ctx.settings, antigravityModelSettings)
+
+  // The allowlist a Session recorded outranks the current settings document,
+  // because the built-in delegation tool snapshot it when the Session started.
+  const delegationToolNames = normalizeDelegationToolNames(pluginConfig.subagentModelTools)
+  if (pluginConfig.subagentModelAuthorization !== false) {
+    ctx.inject(['sessions'], scoped => {
+      const sessions = scoped.get('sessions') as SessionsResolver | undefined
+      if (sessions === undefined) return
+      scoped.effect(() => {
+        // A tools service without the guard extension keeps the built-in
+        // delegation behavior instead of failing this plugin's load.
+        if (typeof scoped.tools?.guard !== 'function') return () => undefined
+        return installSubagentModelAuthorization(scoped, sessions, {
+          toolNames: delegationToolNames,
+          scope: pluginConfig.subagentModelScope ?? 'session',
+        })
+      }, 'dsh-chatgpt-subscription: subagent model authorization')
+    })
+  }
 
   ctx.effect(() => {
     const proxyManager = new ProxyManager({
@@ -105,6 +155,21 @@ export function apply(ctx: Context): void {
 }
 
 export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts'
+export {
+  SUBAGENT_MODEL_SELECTION_NAMESPACE,
+  SUBAGENT_POLICY_EVENT,
+  authorizedRoutesFor,
+  createSubagentAuthorization,
+  delegationDenialReason,
+  installSubagentModelAuthorization,
+  normalizeDelegationToolNames,
+  parseAllowedRoutes,
+  policyRoutesOf,
+  subagentModelSelectionPreference,
+  unauthorizedRouteReason,
+  validateAuthorizationScope,
+  validateDelegationToolNames,
+} from './host/subagent-model-authorization.ts'
 export { OAuthService } from './host/oauth-service.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'

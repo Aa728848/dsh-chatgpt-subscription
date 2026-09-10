@@ -56,9 +56,16 @@ async function mountPlugin() {
   const adapters = new Map<string, LlmAdapter>()
   const routes: Route[] = []
   const settings = new Map<string, { get: () => SettingsValue; update: (patch: SettingsValue) => Promise<void> }>()
+  const services = () => ctx as unknown as Record<string, unknown>
+  const scoped = () => new Proxy(ctx as unknown as Context, {
+    get: (target, key) => key === 'get' ? (name: string) => services()[name] : Reflect.get(target, key),
+  })
   const ctx = {
     effect: (setup: () => () => void) => disposers.push(setup()),
-    inject: (_deps: string[], setup: (ctx: Context) => void): void => setup(ctx as unknown as Context),
+    // Cordis hands the injection callback a scoped context whose services are
+    // readable as properties and through `get`; this double mirrors both.
+    inject: (_deps: string[], setup: (ctx: Context) => void): void => setup(scoped()),
+    get: (name: string) => services()[name],
     settings: {
       register(namespace: string, schema: z<SettingsValue>) {
         let value = schema(namespace === PREFERENCES_NAMESPACE

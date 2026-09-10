@@ -11,6 +11,7 @@
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [使用](#使用)
+- [子代理模型授权](#子代理模型授权0215-起)
 - [升级、降级与卸载](#升级降级与卸载)
 - [安全边界](#安全边界)
 - [插件路由](#插件路由)
@@ -131,6 +132,27 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 G
 - Linux：`$DSH_HOME/storages/dsh-chatgpt-subscription/oauth.json`，未设置 `DSH_HOME` 时为 `~/.dsh/storages/dsh-chatgpt-subscription/oauth.json`。
 
 > Windows 文件只能由创建它的用户通过 DPAPI 解密。macOS 凭据由登录钥匙串在本机加密保存。Linux 文件是未额外加密的 JSON，依赖目录 `0700` 和文件 `0600` 隔离；不要复制、打印或提交该文件。跨平台迁移需要重新登录。
+
+## 子代理模型授权（0.2.15 起）
+
+DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允许列表（会话日志事件 `subagent/model-selection-policy`）。DSH 内置委派工具只拒绝**模型显式填写**且不在列表内的路由；调用里不写 `provider`/`model` 时，子代理会继承父级模型，于是白名单之外的主模型（例如 `deepseek-official/deepseek-flash`）仍会被子代理使用。
+
+插件在 Host 工具注册表上补一个单调守卫（`ctx.tools.guard`），在委派执行前判定生效路由：
+
+- 调用会话（或最近的、记录了策略的祖先会话）带有允许列表时，生效路由必须落在列表内；
+- 不写路由的委派按“继承父级模型”判定，因此父级模型不在列表内时会被拒绝；
+- 拒绝结果里会列出全部已授权路由（例如 `antigravity/gemini-3.8-flash`），模型照此重试即可；`list_subagent_models` 仍只展示已授权路由；
+- 未记录允许列表的会话（例如恢复的旧会话、未启用该设置的会话）保持 DSH 原有行为。
+
+配置项（插件行 `config`，全部可省略）：
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `subagentModelAuthorization` | `true` | 是否启用上述授权守卫；设为 `false` 回到 DSH 原有行为 |
+| `subagentModelTools` | `['subagent']` | 需要授权的委派工具名；preset 里自定义了 `toolName` 时在此列出 |
+| `subagentModelScope` | `session` | `session` 只约束记录了允许列表的会话；`preference` 额外用当前设置卡列表约束未记录的会话 |
+
+改动只在设置卡片里保存过的勾选生效：设置改动只影响之后新建的会话（DSH 的会话快照语义），已运行的会话继续使用它自己记录的那份列表。
 
 ## 安全边界
 
