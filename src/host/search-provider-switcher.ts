@@ -7,6 +7,21 @@ interface LoaderLike {
   entries(): Iterable<Entry>
 }
 
+/** What one selection asks for on top of the settings preference. */
+export interface WebProviderSelectionOptions {
+  /**
+   * Whether this plugin's fetch provider must serve the `web_fetch` tool.
+   *
+   * DSH's built-in provider resolves and pins every destination before it
+   * connects and routes through a proxy only when the process environment names
+   * one, so an OS-level proxy plus the fake-ip DNS that usually comes with it
+   * fails every fetch with `WEB_BLOCKED_URL`. Selecting this plugin's provider
+   * hands the origin's resolution to the configured proxy — the same
+   * proxied-hop semantics DSH applies to a URL it routes through a proxy.
+   */
+  readonly pluginFetch?: boolean
+}
+
 export class SearchProviderSwitcher {
   private originalSearchProvider: string | undefined
   private originalFetchProvider: string | undefined
@@ -14,7 +29,7 @@ export class SearchProviderSwitcher {
 
   constructor(private readonly loader: LoaderLike) {}
 
-  async select(preference: SearchProviderPreference): Promise<void> {
+  async select(preference: SearchProviderPreference, options: WebProviderSelectionOptions = {}): Promise<void> {
     const entry = this.findWebEntry()
     if (entry === null) return
     const config = currentConfig(entry)
@@ -27,11 +42,11 @@ export class SearchProviderSwitcher {
         : undefined
       this.initialized = true
     }
-    const selected = preference === SEARCH_PROVIDER_CODEX
-      ? CODEX_SEARCH_PROVIDER_ID
-      : undefined
-    const nextSearch = selected ?? this.originalSearchProvider
-    const nextFetch = selected ? CODEX_FETCH_PROVIDER_ID : this.originalFetchProvider
+    const codexSelected = preference === SEARCH_PROVIDER_CODEX
+    const nextSearch = codexSelected ? CODEX_SEARCH_PROVIDER_ID : this.originalSearchProvider
+    const nextFetch = codexSelected || options.pluginFetch === true
+      ? CODEX_FETCH_PROVIDER_ID
+      : this.originalFetchProvider
 
     if (config.searchProvider === nextSearch && config.fetchProvider === nextFetch) return
     const nextConfig = { ...config }

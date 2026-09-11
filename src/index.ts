@@ -18,6 +18,7 @@ import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
+import type { SubscriptionPreferencesDto } from './shared/contracts.ts'
 import { UsageService } from './host/usage-service.ts'
 import { AntigravityAdapter } from './host/antigravity/adapter.ts'
 import { registerAntigravityRoutes } from './host/antigravity/routes.ts'
@@ -122,9 +123,19 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const adapter = new CodexChatGptAdapter(responses, preferences)
 
     const searchSwitcher = new SearchProviderSwitcher(ctx.loader)
-    const applySearchPreference = (searchProvider = preferences.status().searchProvider): void => {
-      void searchSwitcher.select(searchProvider).catch(error => {
-        ctx.logger.warn(`[dsh-chatgpt-subscription] Search provider preference could not be applied: ${error instanceof Error ? error.message : String(error)}`)
+    // DSH's built-in fetch provider resolves and pins the addresses this machine's resolver
+    // returns, and it proxies only when the process environment names a proxy — the OS proxy this
+    // plugin reads is invisible to it. On a machine whose proxy tool answers DNS with its own
+    // fake-ip range (Clash/Mihomo's 198.18.0.0/15, the usual companion of a system proxy) that
+    // combination fails every `web_fetch` with WEB_BLOCKED_URL before the proxy is ever consulted.
+    // While this plugin has a proxy to route through, its own provider serves the tool instead:
+    // the proxy resolves the origin, exactly like a hop DSH routes through a proxy, and the
+    // provider still refuses non-public addresses a URL states outright. With no proxy configured
+    // the built-in provider keeps the tool, resolution pinning and all.
+    const applyWebProviders = (current: SubscriptionPreferencesDto = preferences.status()): void => {
+      const pluginFetch = proxyManager.resolveActiveProxyUrl() !== null
+      void searchSwitcher.select(current.searchProvider, { pluginFetch }).catch(error => {
+        ctx.logger.warn(`[dsh-chatgpt-subscription] Web provider selection could not be applied: ${error instanceof Error ? error.message : String(error)}`)
       })
     }
 
@@ -136,10 +147,12 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     ctx.inject(['web'], ctx => {
       ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
       ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
-      applySearchPreference()
+      applyWebProviders()
     })
 
-    const disposePreferenceWatch = preferences.watch(next => applySearchPreference(next.searchProvider))
+    // Any preference can change the selection: the search picker chooses the search backend, and
+    // the proxy settings decide whether this plugin's provider is the one that can reach the web.
+    const disposePreferenceWatch = preferences.watch(next => applyWebProviders(next))
 
     return () => {
       disposePreferenceWatch()

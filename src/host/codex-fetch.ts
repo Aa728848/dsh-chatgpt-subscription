@@ -1,12 +1,21 @@
 import { WebError, type WebFetchProvider, type WebFetchRequest, type WebFetchResult } from '@deepseek-ai/dsh-web'
 import { CODEX_FETCH_PROVIDER_ID } from '../compat.ts'
+import { assertPublicFetchTarget, isIpLiteral, lookupHostAddresses } from './fetch-address-policy.ts'
 
 type FetchLike = typeof fetch
+
+/** Resolves a hostname to every address this machine's resolver returns. */
+export type HostAddressResolver = (hostname: string) => Promise<readonly string[]>
 
 export interface CodexFetchProviderOptions {
   fetchFn?: FetchLike
   maxResponseBytes?: number
   maxBodyChars?: number
+  /**
+   * Address lookup behind the destination policy. Overridden only by focused
+   * tests; the policy itself is what every request goes through.
+   */
+  resolveHostAddresses?: HostAddressResolver
 }
 
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024 // 2MB
@@ -18,6 +27,7 @@ export function createCodexFetchProvider(
   const fetchFn = options.fetchFn ?? fetch
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES
   const maxBodyChars = options.maxBodyChars ?? DEFAULT_MAX_BODY_CHARS
+  const resolveHostAddresses = options.resolveHostAddresses ?? lookupHostAddresses
 
   return {
     id: CODEX_FETCH_PROVIDER_ID,
@@ -34,6 +44,16 @@ export function createCodexFetchProvider(
       if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
         throw new WebError(`unsupported URL scheme "${parsedUrl.protocol}" (only http and https are allowed)`, 'WEB_INVALID_URL')
       }
+
+      // Hold the destination to the same policy the built-in provider applies before it connects,
+      // minus the resolution-and-pinning step that a proxy's fake-ip DNS makes impossible (see
+      // ./fetch-address-policy.ts). A stated address needs no resolution; a name is resolved here
+      // only to refuse one this machine maps into private space, and an unresolvable name is left
+      // to the proxy that resolves the origin.
+      assertPublicFetchTarget(
+        parsedUrl.hostname,
+        isIpLiteral(parsedUrl.hostname) ? [] : await resolveHostAddresses(parsedUrl.hostname),
+      )
 
       let response: Response
       try {
