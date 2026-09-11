@@ -149,6 +149,9 @@ export function detectSystemProxy(platform: NodeJS.Platform = process.platform, 
   return parseEnvProxy(env)
 }
 
+/** Called with the proxy URL the first time detection reports one after a `null`. */
+export type SystemProxyListener = (proxyUrl: string) => void
+
 export interface ProxyFetchOptions {
   getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>
   baseFetch?: FetchLike
@@ -164,6 +167,8 @@ export class ProxyManager {
 
   private cachedSystemProxy: string | null = null
   private lastSystemProxyCheck = 0
+  private detected = false
+  private readonly proxyListeners = new Set<SystemProxyListener>()
   private readonly agents = new Map<string, ProxyAgent>()
 
   constructor(options: ProxyFetchOptions) {
@@ -178,14 +183,44 @@ export class ProxyManager {
     if (!force && now - this.lastSystemProxyCheck < SYSTEM_PROXY_CACHE_TTL_MS) {
       return this.cachedSystemProxy
     }
+    const previous = this.cachedSystemProxy
+    const hadDetected = this.detected
     this.lastSystemProxyCheck = now
+    this.detected = true
     try {
       this.cachedSystemProxy = this.systemProxyDetector()
     } catch (error) {
       this.cachedSystemProxy = null
       this.logger?.warn?.(`[dsh-chatgpt-subscription] Failed to detect system proxy: ${error instanceof Error ? error.message : String(error)}`)
     }
+    // Only the transition to a KNOWN proxy is announced. An absent proxy and a failed detection
+    // both read as `null`, so a listener acting on `null` would tear down a working route over one
+    // transient registry or `scutil` failure; the first detection is the caller's own result.
+    if (hadDetected && previous === null && this.cachedSystemProxy !== null) {
+      for (const listener of [...this.proxyListeners]) {
+        try {
+          listener(this.cachedSystemProxy)
+        } catch {
+          // An observing listener must never break detection for the request that triggered it.
+        }
+      }
+    }
     return this.cachedSystemProxy
+  }
+
+  /**
+   * Observe the system proxy becoming known.
+   *
+   * A proxy that appears after startup — or a first detection that failed — otherwise leaves every
+   * consumer on the decision it made at load, because `null` reads the same for "no proxy" and for
+   * "detection failed".
+   *
+   * @param listener - called with the detected proxy URL; a throw from it is ignored.
+   * @returns the disposer that stops observing.
+   */
+  onSystemProxyDetected(listener: SystemProxyListener): () => void {
+    this.proxyListeners.add(listener)
+    return () => { this.proxyListeners.delete(listener) }
   }
 
   resolveActiveProxyUrl(): string | null {
@@ -236,6 +271,7 @@ export class ProxyManager {
   }
 
   dispose(): void {
+    this.proxyListeners.clear()
     for (const agent of this.agents.values()) {
       void agent.destroy().catch(() => undefined)
     }

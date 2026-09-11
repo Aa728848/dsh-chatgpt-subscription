@@ -229,4 +229,65 @@ describe('ProxyManager', () => {
 
     manager.dispose()
   })
+
+  it('announces the system proxy only once a later detection finds one', () => {
+    let detected: string | null = null
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }),
+      systemProxyDetector: () => detected,
+    })
+    const seen: string[] = []
+    const stop = manager.onSystemProxyDetected(proxy => seen.push(proxy))
+
+    // A detection that finds nothing is indistinguishable from one that failed, so it announces
+    // nothing and no consumer tears down the route it already chose.
+    expect(manager.getSystemProxy()).toBeNull()
+    expect(seen).toEqual([])
+
+    detected = 'http://127.0.0.1:7890'
+    expect(manager.getSystemProxy(true)).toBe('http://127.0.0.1:7890')
+    expect(seen).toEqual(['http://127.0.0.1:7890'])
+
+    // The same proxy on every later detection is not news: consumers already acted on it.
+    expect(manager.getSystemProxy(true)).toBe('http://127.0.0.1:7890')
+    expect(seen).toEqual(['http://127.0.0.1:7890'])
+
+    stop()
+    detected = null
+    manager.getSystemProxy(true)
+    detected = 'http://127.0.0.1:9999'
+    manager.getSystemProxy(true)
+    expect(seen).toEqual(['http://127.0.0.1:7890'])
+
+    manager.dispose()
+  })
+
+  it('never announces the first detection, which is the caller\'s own result', () => {
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }),
+      systemProxyDetector: () => 'http://127.0.0.1:7890',
+    })
+    const seen: string[] = []
+    manager.onSystemProxyDetected(proxy => seen.push(proxy))
+
+    expect(manager.getSystemProxy()).toBe('http://127.0.0.1:7890')
+    expect(seen).toEqual([])
+
+    manager.dispose()
+  })
+
+  it('keeps detecting when an observing listener throws', () => {
+    let detected: string | null = null
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }),
+      systemProxyDetector: () => detected,
+    })
+    manager.getSystemProxy()
+    manager.onSystemProxyDetected(() => { throw new Error('listener exploded') })
+    detected = 'http://127.0.0.1:7890'
+
+    expect(manager.getSystemProxy(true)).toBe('http://127.0.0.1:7890')
+
+    manager.dispose()
+  })
 })

@@ -154,7 +154,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // the proxy settings decide whether this plugin's provider is the one that can reach the web.
     const disposePreferenceWatch = preferences.watch(next => applyWebProviders(next))
 
+    // A proxy that only becomes known after startup — the tool that provides it wasn't running yet,
+    // or the first detection failed — must re-select too, or the built-in provider keeps the tool
+    // for the rest of the process and every fetch it cannot reach fails.
+    const disposeProxyWatch = proxyManager.onSystemProxyDetected(() => {
+      applyWebProviders()
+    })
+
     return () => {
+      disposeProxyWatch()
       disposePreferenceWatch()
       disposeImageTool()
       disposeAdapter()

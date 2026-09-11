@@ -13,6 +13,8 @@ export interface ParseEnvProxyOptions {
 }
 export declare function parseEnvProxy(env?: Record<string, string | undefined>, options?: ParseEnvProxyOptions): string | null;
 export declare function detectSystemProxy(platform?: NodeJS.Platform, env?: Record<string, string | undefined>): string | null;
+/** Called with the proxy URL the first time detection reports one after a `null`. */
+export type SystemProxyListener = (proxyUrl: string) => void;
 export interface ProxyFetchOptions {
     getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>;
     baseFetch?: FetchLike;
@@ -26,9 +28,22 @@ export declare class ProxyManager {
     private readonly logger?;
     private cachedSystemProxy;
     private lastSystemProxyCheck;
+    private detected;
+    private readonly proxyListeners;
     private readonly agents;
     constructor(options: ProxyFetchOptions);
     getSystemProxy(force?: boolean): string | null;
+    /**
+     * Observe the system proxy becoming known.
+     *
+     * A proxy that appears after startup — or a first detection that failed — otherwise leaves every
+     * consumer on the decision it made at load, because `null` reads the same for "no proxy" and for
+     * "detection failed".
+     *
+     * @param listener - called with the detected proxy URL; a throw from it is ignored.
+     * @returns the disposer that stops observing.
+     */
+    onSystemProxyDetected(listener: SystemProxyListener): () => void;
     resolveActiveProxyUrl(): string | null;
     private getOrCreateAgent;
     createFetch(): FetchLike;
