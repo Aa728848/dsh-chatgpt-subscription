@@ -33,6 +33,34 @@ async function mountSwitcher() {
 }
 
 describe('SearchProviderSwitcher', () => {
+  it('repairs a configured entry whose running fiber still uses the previous provider', async () => {
+    const { ctx, switcher, providers } = await mountSwitcher()
+    try {
+      const entry = ctx.loader.resolve('web')
+      entry.options.config = { searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_FETCH_PROVIDER_ID }
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe('http')
+      await switcher.select('codex')
+      await providers.await()
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
+      const update = vi.spyOn(entry.fiber!, 'update')
+      await switcher.select('codex')
+      expect(update).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('serializes rapid selections and ignores queued work after disposal', async () => {
+    const { ctx, switcher, providers } = await mountSwitcher()
+    try {
+      await Promise.all([switcher.select('codex'), switcher.select('dsh'), switcher.select('codex')])
+      await providers.await()
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
+      const pending = switcher.select('dsh')
+      switcher.dispose()
+      await pending
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('switches both search and fetch providers when selecting Codex', async () => {
     const { ctx, switcher, providers } = await mountSwitcher()
     try {

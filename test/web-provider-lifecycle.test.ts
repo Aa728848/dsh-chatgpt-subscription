@@ -5,6 +5,7 @@ import { WebError, WebRuntime } from '@deepseek-ai/dsh-web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CODEX_FETCH_PROVIDER_ID } from '../src/compat.ts'
 import * as plugin from '../src/index.ts'
+import { SearchProviderSwitcher } from '../src/host/search-provider-switcher.ts'
 import * as platformStore from '../src/host/platform-token-store.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 import { PREFERENCES_NAMESPACE } from '../src/shared/preferences.ts'
@@ -20,6 +21,7 @@ afterEach(() => {
 interface MountOptions {
   readonly searchProvider: 'dsh' | 'codex'
   readonly proxyMode: 'auto' | 'custom' | 'direct'
+  readonly ready?: { onReady(listener: () => void): () => void }
 }
 
 /**
@@ -40,6 +42,7 @@ async function mountPlugin(options: MountOptions) {
   const fetchFn = vi.fn(async () => new Response('plugin page', { headers: { 'content-type': 'text/plain' } }))
   vi.stubGlobal('fetch', fetchFn)
   const ctx = new Context()
+  if (options.ready) ctx.provide('appReady', options.ready)
   ctx.provide('webServer', { host: '127.0.0.1', port: 3000, register: () => () => undefined })
   ctx.provide('llm', { registerAdapter: () => () => undefined })
   ctx.provide('attachments', {})
@@ -68,6 +71,31 @@ async function mountPlugin(options: MountOptions) {
 }
 
 describe('web provider lifecycle', () => {
+  it('reconciles the running provider after launcher readiness without toggling preferences', async () => {
+    let ready: (() => void) | undefined
+    const unwatch = vi.fn()
+    const { ctx } = await mountPlugin({ searchProvider: 'codex', proxyMode: 'direct', ready: {
+      onReady: listener => { ready = listener; return unwatch },
+    } })
+    try {
+      await vi.waitFor(async () => expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe('plugin page'))
+      const entry = ctx.loader.resolve('web')
+      const desired = entry.options.config
+      // Reproduce the observed startup split: desired options, stale runtime.
+      const paused = vi.spyOn(SearchProviderSwitcher.prototype, 'select').mockResolvedValue()
+      await entry.fiber!.update({ searchProvider: 'deepseek-official', fetchProvider: 'http' }, true)
+      entry.options.config = desired
+      await vi.waitFor(async () => {
+        expect(ctx.web).toBeDefined()
+        await expect(ctx.web.fetch({ url: 'https://example.com' })).rejects.toMatchObject({ code: 'WEB_BLOCKED_URL' })
+      })
+      paused.mockRestore()
+      ready!()
+      await vi.waitFor(async () => expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe('plugin page'))
+    } finally { await ctx.fiber.dispose() }
+    expect(unwatch).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['dsh', 'codex'] as const)('keeps fetch switching across web reloads with %s initially selected', async (initial) => {
     const { ctx, store } = await mountPlugin({ searchProvider: initial, proxyMode: 'direct' })
     try {

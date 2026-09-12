@@ -22,6 +22,10 @@ export class SearchProviderSwitcher {
   private originalSearchProvider: string | undefined
   private originalFetchProvider: string | undefined
   private initialized = false
+  private pending: Promise<void> = Promise.resolve()
+  private disposed = false
+
+  dispose(): void { this.disposed = true }
   private state: SearchProviderSwitcherStatus['state'] = 'idle'
 
   constructor(private readonly loader: LoaderLike) {}
@@ -36,13 +40,25 @@ export class SearchProviderSwitcher {
     }
   }
 
-  async select(preference: SearchProviderPreference, options: WebProviderSelectionOptions = {}): Promise<void> {
+  select(preference: SearchProviderPreference, options: WebProviderSelectionOptions = {}): Promise<void> {
+    const selection = { ...options }
+    const task = this.pending.then(() => this.applySelection(preference, selection))
+    this.pending = task.catch(() => undefined)
+    return task
+  }
+
+  private async applySelection(preference: SearchProviderPreference, options: WebProviderSelectionOptions): Promise<void> {
+    if (this.disposed) return
     const entry = this.findWebEntry()
     if (entry === null) {
       this.state = 'missing'
       return
     }
+    // Do not update a service while its initial mount is still settling.
+    await entry.fiber?.await()
+    if (this.disposed) return
     const config = currentConfig(entry)
+    const running = entry.fiber?.config as Record<string, unknown> | undefined
     if (!this.initialized) {
       this.originalSearchProvider = typeof config.searchProvider === 'string' && config.searchProvider !== CODEX_SEARCH_PROVIDER_ID
         ? config.searchProvider : undefined
@@ -53,7 +69,9 @@ export class SearchProviderSwitcher {
     const codexSelected = preference === SEARCH_PROVIDER_CODEX
     const nextSearch = codexSelected ? CODEX_SEARCH_PROVIDER_ID : this.originalSearchProvider
     const nextFetch = codexSelected || options.pluginFetch === true ? CODEX_FETCH_PROVIDER_ID : this.originalFetchProvider
-    if (config.searchProvider === nextSearch && config.fetchProvider === nextFetch) return
+    const configured = config.searchProvider === nextSearch && config.fetchProvider === nextFetch
+    const applied = running === undefined || (running.searchProvider === nextSearch && running.fetchProvider === nextFetch)
+    if (configured && applied) return
     const nextConfig = { ...config }
     if (nextSearch === undefined) delete nextConfig.searchProvider
     else nextConfig.searchProvider = nextSearch
@@ -61,7 +79,12 @@ export class SearchProviderSwitcher {
     else nextConfig.fetchProvider = nextFetch
     this.state = 'applying'
     try {
-      await entry.update({ config: nextConfig })
+      if (configured && entry.fiber) {
+        // Entry.update skips equal options; explicitly reconcile the stale runtime.
+        await entry.fiber.update(nextConfig, true)
+      } else {
+        await entry.update({ config: nextConfig })
+      }
       this.state = 'applied'
     } catch (error) {
       this.state = 'failed'

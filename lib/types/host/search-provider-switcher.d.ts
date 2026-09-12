@@ -17,10 +17,14 @@ export declare class SearchProviderSwitcher {
     private originalSearchProvider;
     private originalFetchProvider;
     private initialized;
+    private pending;
+    private disposed;
+    dispose(): void;
     private state;
     constructor(loader: LoaderLike);
     status(): SearchProviderSwitcherStatus;
     select(preference: SearchProviderPreference, options?: WebProviderSelectionOptions): Promise<void>;
+    private applySelection;
     private findWebEntry;
 }
 export {};
