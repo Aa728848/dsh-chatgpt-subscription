@@ -10,6 +10,7 @@ import { isCodexReasoningSummary } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import type { ProxyManager } from './proxy-manager.ts'
+import type { SearchProviderSwitcher } from './search-provider-switcher.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
@@ -20,6 +21,7 @@ export function registerRoutes(
   usage: UsageService,
   preferences: SubscriptionPreferenceStore,
   proxyManager?: ProxyManager,
+  searchSwitcher?: SearchProviderSwitcher,
 ): () => void {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
@@ -31,6 +33,7 @@ export function registerRoutes(
         preferences: preferences.status(),
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
+        switcher: searchSwitcher?.status() ?? null,
       } })
       return
     }

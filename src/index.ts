@@ -139,7 +139,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       })
     }
 
-    const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences, proxyManager)
+    const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences, proxyManager, searchSwitcher)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
 
@@ -196,6 +196,7 @@ export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'
 export { createCodexSearchProvider } from './host/codex-search.ts'
 export { createCodexFetchProvider } from './host/codex-fetch.ts'
+export { SearchProviderSwitcher, type SearchProviderSwitcherStatus } from './host/search-provider-switcher.ts'
 export { ResponsesClient, parseResponsesStream } from './host/responses-client.ts'
 export { UsageService, mapCodexUsage, parseCodexUsage } from './host/usage-service.ts'
 export { createPlatformTokenStore } from './host/platform-token-store.ts'

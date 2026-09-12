@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import { WebRuntime } from '@deepseek-ai/dsh-web'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { CODEX_FETCH_PROVIDER_ID, CODEX_SEARCH_PROVIDER_ID } from '../src/compat.ts'
 import { SearchProviderSwitcher } from '../src/host/search-provider-switcher.ts'
 
@@ -66,5 +66,37 @@ describe('SearchProviderSwitcher', () => {
     } finally {
       await ctx.fiber.dispose()
     }
+  })
+
+  it('reports configuration without inventing defaults or exposing raw errors', async () => {
+    const ctx = new Context()
+    await ctx.plugin(Loader).await()
+    ctx.loader.builtins.web = WebRuntime
+    await ctx.loader.root.update([{ id: 'web', name: 'cordis:web', config: {} }])
+    const switcher = new SearchProviderSwitcher(ctx.loader)
+    try {
+      await switcher.select('codex')
+      expect(switcher.status()).toEqual({ state: 'applied', configuredSearchProvider: CODEX_SEARCH_PROVIDER_ID, configuredFetchProvider: CODEX_FETCH_PROVIDER_ID })
+      await switcher.select('dsh')
+      expect(switcher.status()).toEqual({ state: 'applied', configuredSearchProvider: null, configuredFetchProvider: null })
+      expect(ctx.loader.resolve('web').options.config).toEqual({})
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('redacts configuration and exceptions when an update fails', async () => {
+    const { ctx, switcher } = await mountSwitcher()
+    try {
+      const entry = ctx.loader.resolve('web')
+      entry.options.config = { fetchProvider: 'https://user:secret@example.com/private', secret: 'hidden' }
+      vi.spyOn(entry, 'update').mockRejectedValue(new Error('credential-secret'))
+      await expect(switcher.select('codex')).rejects.toThrow('credential-secret')
+      expect(switcher.status()).toEqual({ state: 'failed', configuredSearchProvider: null, configuredFetchProvider: null })
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('reports a missing Web entry without exposing unrelated configuration', async () => {
+    const switcher = new SearchProviderSwitcher({ entries: () => [] })
+    await switcher.select('codex')
+    expect(switcher.status()).toEqual({ state: 'missing', configuredSearchProvider: null, configuredFetchProvider: null })
   })
 })

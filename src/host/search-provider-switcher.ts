@@ -7,66 +7,71 @@ interface LoaderLike {
   entries(): Iterable<Entry>
 }
 
-/** What one selection asks for on top of the settings preference. */
 export interface WebProviderSelectionOptions {
-  /**
-   * Whether this plugin's fetch provider must serve the `web_fetch` tool.
-   *
-   * DSH's built-in provider resolves and pins every destination before it
-   * connects and routes through a proxy only when the process environment names
-   * one, so an OS-level proxy plus the fake-ip DNS that usually comes with it
-   * fails every fetch with `WEB_BLOCKED_URL`. Selecting this plugin's provider
-   * hands the origin's resolution to the configured proxy — the same
-   * proxied-hop semantics DSH applies to a URL it routes through a proxy.
-   */
   readonly pluginFetch?: boolean
+}
+
+/** Configuration diagnostics, not proof that an in-flight tool uses this service. */
+export interface SearchProviderSwitcherStatus {
+  readonly state: 'idle' | 'applying' | 'applied' | 'missing' | 'failed'
+  readonly configuredSearchProvider: string | null
+  readonly configuredFetchProvider: string | null
 }
 
 export class SearchProviderSwitcher {
   private originalSearchProvider: string | undefined
   private originalFetchProvider: string | undefined
   private initialized = false
+  private state: SearchProviderSwitcherStatus['state'] = 'idle'
 
   constructor(private readonly loader: LoaderLike) {}
 
+  status(): SearchProviderSwitcherStatus {
+    const entry = this.findWebEntry()
+    const config = entry ? currentConfig(entry) : {}
+    return {
+      state: this.state,
+      configuredSearchProvider: providerId(config.searchProvider),
+      configuredFetchProvider: providerId(config.fetchProvider),
+    }
+  }
+
   async select(preference: SearchProviderPreference, options: WebProviderSelectionOptions = {}): Promise<void> {
     const entry = this.findWebEntry()
-    if (entry === null) return
+    if (entry === null) {
+      this.state = 'missing'
+      return
+    }
     const config = currentConfig(entry)
     if (!this.initialized) {
       this.originalSearchProvider = typeof config.searchProvider === 'string' && config.searchProvider !== CODEX_SEARCH_PROVIDER_ID
-        ? config.searchProvider
-        : undefined
+        ? config.searchProvider : undefined
       this.originalFetchProvider = typeof config.fetchProvider === 'string' && config.fetchProvider !== CODEX_FETCH_PROVIDER_ID
-        ? config.fetchProvider
-        : undefined
+        ? config.fetchProvider : undefined
       this.initialized = true
     }
     const codexSelected = preference === SEARCH_PROVIDER_CODEX
     const nextSearch = codexSelected ? CODEX_SEARCH_PROVIDER_ID : this.originalSearchProvider
-    const nextFetch = codexSelected || options.pluginFetch === true
-      ? CODEX_FETCH_PROVIDER_ID
-      : this.originalFetchProvider
-
+    const nextFetch = codexSelected || options.pluginFetch === true ? CODEX_FETCH_PROVIDER_ID : this.originalFetchProvider
     if (config.searchProvider === nextSearch && config.fetchProvider === nextFetch) return
     const nextConfig = { ...config }
-    if (nextSearch === undefined) {
-      delete nextConfig.searchProvider
-    } else {
-      nextConfig.searchProvider = nextSearch
+    if (nextSearch === undefined) delete nextConfig.searchProvider
+    else nextConfig.searchProvider = nextSearch
+    if (nextFetch === undefined) delete nextConfig.fetchProvider
+    else nextConfig.fetchProvider = nextFetch
+    this.state = 'applying'
+    try {
+      await entry.update({ config: nextConfig })
+      this.state = 'applied'
+    } catch (error) {
+      this.state = 'failed'
+      throw error
     }
-    if (nextFetch === undefined) {
-      delete nextConfig.fetchProvider
-    } else {
-      nextConfig.fetchProvider = nextFetch
-    }
-    await entry.update({ config: nextConfig })
   }
 
   private findWebEntry(): Entry | null {
     for (const entry of this.loader.entries()) {
-      if (entry.options.id === 'web') return entry
-      if (entry.options.name === '@deepseek-ai/dsh-web') return entry
+      if (entry.options.id === 'web' || entry.options.name === '@deepseek-ai/dsh-web') return entry
     }
     return null
   }
@@ -74,7 +79,10 @@ export class SearchProviderSwitcher {
 
 function currentConfig(entry: Entry): Record<string, unknown> {
   const config = entry.options.config
-  return typeof config === 'object' && config !== null && !Array.isArray(config)
-    ? config as Record<string, unknown>
-    : {}
+  return typeof config === 'object' && config !== null && !Array.isArray(config) ? config as Record<string, unknown> : {}
+}
+
+/** Never include paths, credentials, or arbitrary configuration in public diagnostics. */
+function providerId(value: unknown): string | null {
+  return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(value) ? value : null
 }
