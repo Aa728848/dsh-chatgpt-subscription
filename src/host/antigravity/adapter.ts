@@ -25,6 +25,7 @@ import {
   buildRequest,
   closeStream,
   createStreamState,
+  offloadOldestRequestImages,
   processStreamLine,
   resolveRequestImages,
   type AttachmentImageReader,
@@ -185,13 +186,14 @@ export class AntigravityAdapter extends LlmAdapter {
 
     // DSH delivers pasted images as durable `{ type: 'image', attachment }`
     // blocks because this route declares image input, and only bytes can become
-    // Gemini `inlineData`. Read them once, up front: every runtime-model and
-    // endpoint candidate below reuses the same resolution.
-    const images = await resolveRequestImages(options, this.options.attachments, signal)
+    // Gemini `inlineData`. Bound the payload first, then read it once, up front:
+    // every runtime-model and endpoint candidate below reuses both results.
+    const requestOptions = offloadOldestRequestImages(options)
+    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
 
     let response: Response | undefined
     for (const runtimeModel of candidates) {
-      const body = JSON.stringify(buildRequest(options, model, projectId, runtimeModel, effort, images))
+      const body = JSON.stringify(buildRequest(requestOptions, model, projectId, runtimeModel, effort, images))
       const headers = {
         ...antigravityHeaders(token),
         ...(model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {}),

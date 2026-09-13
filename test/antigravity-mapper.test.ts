@@ -4,6 +4,8 @@ import {
   closeStream,
   convertTools,
   createStreamState,
+  MAX_REQUEST_IMAGE_BYTES,
+  offloadOldestRequestImages,
   processStreamLine,
   resolveRequestImages,
   stripMetaSchema,
@@ -362,6 +364,45 @@ describe('Antigravity image attachments', () => {
 
     expect(parts).toEqual([{ inlineData: { mimeType: 'image/png', data: BASE64 } }])
     expect(attachments.readImage).not.toHaveBeenCalled()
+  })
+
+  it('leaves a request that already fits the inline image budget untouched', () => {
+    const options = requestWith([{ type: 'text', text: 'look' }, { type: 'image', attachment: REF }])
+
+    expect(offloadOldestRequestImages(options)).toBe(options)
+    expect(MAX_REQUEST_IMAGE_BYTES).toBeGreaterThan(REF.bytes)
+  })
+
+  it('omits the oldest images once one request would exceed the inline image budget', async () => {
+    // 6 MiB of raw bytes is 8 MiB of base64, so three of them are 24 MiB against
+    // a 12 MiB budget: the two oldest go, the newest stays.
+    const raw = 6 * 1024 * 1024
+    const sized = (id: string) => ({
+      attachmentId: id, mediaType: 'image/png', bytes: raw, width: 1, height: 1,
+    } as unknown as ImageAttachmentRef)
+    const oldest = sized('sha256:oldest')
+    const middle = sized('sha256:middle')
+    const newest = sized('sha256:newest')
+    const options = {
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash',
+      messages: [
+        { role: 'user', content: [{ type: 'image', attachment: oldest }] },
+        { role: 'user', content: [{ type: 'image', attachment: middle }] },
+        { role: 'user', content: [{ type: 'text', text: 'and this one?' }, { type: 'image', attachment: newest }] },
+      ],
+    } as unknown as GenerateOptions
+    const attachments = { readImage: vi.fn(async (value: ImageAttachmentRef) => ({ ref: value, data: PNG_BYTES })) }
+
+    const bounded = offloadOldestRequestImages(options)
+    const parts = requestParts(bounded, await resolveRequestImages(bounded, attachments))
+
+    expect(parts.filter((part) => 'inlineData' in part)).toHaveLength(1)
+    expect(parts.filter((part) => typeof part.text === 'string' && part.text.includes('image omitted'))).toHaveLength(2)
+    // The omitted images are never read, and durable history keeps its blocks.
+    expect(attachments.readImage).toHaveBeenCalledTimes(1)
+    expect(attachments.readImage.mock.calls[0]?.[0]).toBe(newest)
+    expect(options.messages[0]?.content[0]).toEqual({ type: 'image', attachment: oldest })
   })
 
   it('marks an unresolved attachment image even when no resolution was supplied', () => {

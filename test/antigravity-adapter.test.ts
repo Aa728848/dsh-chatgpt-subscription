@@ -399,6 +399,57 @@ describe('AntigravityAdapter', () => {
     }
   })
 
+  it('omits the oldest image once one request exceeds the inline image budget', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [], defaultReasoningEffort: 'low' })
+
+    // Two 6 MiB images are 16 MiB of base64 against a 12 MiB budget.
+    const raw = 6 * 1024 * 1024
+    const sized = (id: string) => ({
+      attachmentId: id, mediaType: 'image/png', bytes: raw, width: 1, height: 1,
+    } as unknown as Parameters<AttachmentStore['readImage']>[0])
+    const oldest = sized('sha256:oldest')
+    const newest = sized('sha256:newest')
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+    const readImage = vi.fn(async (value: Parameters<AttachmentStore['readImage']>[0]) => ({ ref: value, data: png }))
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage } })
+
+    const captured: any[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      captured.push(JSON.parse(String(init?.body)))
+      const frame = { response: { candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 } } }
+      const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\r\n\r\n`)
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } }))
+    }) as typeof fetch
+
+    try {
+      const options = {
+        provider: 'antigravity',
+        model: 'gemini-3.8-flash',
+        messages: [
+          { role: 'user', content: [{ type: 'image', attachment: oldest }] },
+          { role: 'user', content: [{ type: 'image', attachment: newest }] },
+        ],
+      } as unknown as GenerateOptions
+      for await (const chunk of adapter.stream(options)) { void chunk }
+
+      // Only the surviving image is read...
+      expect(readImage).toHaveBeenCalledTimes(1)
+      expect(readImage.mock.calls[0]?.[0]).toBe(newest)
+      // ...the omitted one still tells the model an image existed...
+      expect(captured[0].request.contents[0].parts[0].text).toContain('image omitted')
+      // ...and the newest one still travels as inline bytes.
+      expect(captured[0].request.contents[1].parts).toEqual([
+        { inlineData: { mimeType: 'image/png', data: Buffer.from(png).toString('base64') } },
+      ])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('reuses one image resolution across every runtime-model candidate', async () => {
     const store = new FileCredentialStore()
     vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })

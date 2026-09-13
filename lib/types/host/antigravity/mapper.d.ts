@@ -15,6 +15,26 @@ export type ResolvedRequestImage = {
 /** Resolved images keyed by durable attachment id; consumed by one request build. */
 export type ResolvedRequestImages = ReadonlyMap<string, ResolvedRequestImage>;
 /**
+ * Base64 image payload one Antigravity request may carry. Google caps a request
+ * carrying inline data at 20 MB, and the same body also holds the system
+ * instruction, the conversation text, and the tool declarations.
+ */
+export declare const MAX_REQUEST_IMAGE_BYTES: number;
+/**
+ * Replace the oldest inline images with a text placeholder once one request
+ * would carry more than {@link MAX_REQUEST_IMAGE_BYTES} of base64 image data.
+ *
+ * Without this bound an image-heavy session keeps growing the request body until
+ * Google rejects it, and the images that made it fail are the ones the model
+ * needed least. The oldest occurrences go first, exactly as DSH's own providers
+ * order them, and the placeholder tells the model the image is missing instead
+ * of letting it answer as though the picture were simply blank.
+ *
+ * @param options - the request about to be built; durable history stays untouched.
+ * @returns the original options when they already fit, otherwise shallow copies.
+ */
+export declare function offloadOldestRequestImages(options: GenerateOptions): GenerateOptions;
+/**
  * Read every durable `{ type: 'image', attachment }` block one request carries.
  *
  * This provider declares image input, so DSH hands those blocks to the adapter
