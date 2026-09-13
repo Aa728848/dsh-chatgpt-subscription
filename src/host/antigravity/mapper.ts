@@ -206,6 +206,12 @@ function toolResultText(blocks: unknown): string {
       if (!isRecord(block)) return ''
       if (block.type === 'text' && typeof block.text === 'string') return sanitizeText(block.text)
       if (block.type === 'tool-result') return toolResultText(block.content)
+      // A tool-result image is named, not inlined. DSH's own multi-provider
+      // adapter flattens a tool result to text and drops non-text blocks outright
+      // (llm-pi-ai context.ts), so naming the image already keeps more of the loss
+      // visible than the reference route does; sending it as
+      // functionResponse.parts would be inventing wire support this endpoint
+      // cannot be verified against locally.
       if (block.type === 'image') {
         const label = attachmentLabel(block)
         return label ? `[image: ${label}]` : '[image]'
