@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/antigravity/token-store.ts'
 import { BlockAssembler, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 import os from 'node:os'
 import path from 'node:path'
@@ -347,6 +348,103 @@ describe('AntigravityAdapter', () => {
       expect(fetchCalls[1].model).toBe('gemini-3.8-flash-tiered')
       expect(fetchCalls[2].model).toBe('gemini-3.7-flash-tiered')
       expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: 'Hello from 3.7 fallback' })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it.each(['gemini-3.8-flash', 'claude-opus-4-6'])('carries a pasted image on the %s route as inlineData instead of dropping it', async (modelId) => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [], defaultReasoningEffort: 'low' })
+
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+    const attachment = {
+      attachmentId: 'sha256:0123456789abcdef',
+      mediaType: 'image/png',
+      bytes: png.length,
+      width: 1,
+      height: 1,
+      name: 'shot.png',
+    } as unknown as Parameters<AttachmentStore['readImage']>[0]
+    const readImage = vi.fn(async () => ({ ref: attachment, data: png }))
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage } })
+
+    const captured: any[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      captured.push(JSON.parse(String(init?.body)))
+      const frame = { response: { candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 } } }
+      const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\r\n\r\n`)
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } }))
+    }) as typeof fetch
+
+    try {
+      const options = {
+        provider: 'antigravity',
+        model: modelId,
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', attachment }] }],
+      } as unknown as GenerateOptions
+      for await (const chunk of adapter.stream(options)) { void chunk }
+
+      expect(readImage).toHaveBeenCalledTimes(1)
+      expect(captured).toHaveLength(1)
+      expect(captured[0].request.contents[0].parts).toEqual([
+        { text: 'look' },
+        { inlineData: { mimeType: 'image/png', data: Buffer.from(png).toString('base64') } },
+      ])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('reuses one image resolution across every runtime-model candidate', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [], defaultReasoningEffort: 'low' })
+
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+    const attachment = {
+      attachmentId: 'sha256:0123456789abcdef',
+      mediaType: 'image/png',
+      bytes: png.length,
+      width: 1,
+      height: 1,
+      name: 'shot.png',
+    } as unknown as Parameters<AttachmentStore['readImage']>[0]
+    const readImage = vi.fn(async () => ({ ref: attachment, data: png }))
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage } })
+
+    const captured: any[] = []
+    const originalFetch = globalThis.fetch
+    let attempt = 0
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      captured.push(JSON.parse(String(init?.body)))
+      attempt += 1
+      // Rate-limit the first attempt so the adapter walks its candidate chain.
+      if (attempt === 1) return new Response('{"error":{"code":429,"message":"RESOURCE_EXHAUSTED"}}', { status: 429 })
+      const frame = { response: { candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 } } }
+      const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\r\n\r\n`)
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } }))
+    }) as typeof fetch
+
+    try {
+      const options = {
+        provider: 'antigravity',
+        model: 'gemini-3.8-flash',
+        messages: [{ role: 'user', content: [{ type: 'image', attachment }] }],
+      } as unknown as GenerateOptions
+      for await (const chunk of adapter.stream(options)) { void chunk }
+
+      expect(captured.length).toBeGreaterThan(1)
+      expect(readImage).toHaveBeenCalledTimes(1)
+      for (const body of captured) {
+        expect(body.request.contents[0].parts).toEqual([
+          { inlineData: { mimeType: 'image/png', data: Buffer.from(png).toString('base64') } },
+        ])
+      }
     } finally {
       globalThis.fetch = originalFetch
     }

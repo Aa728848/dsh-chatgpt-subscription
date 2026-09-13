@@ -7,6 +7,7 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
   ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
@@ -63,7 +64,99 @@ function parseArguments(raw: unknown): Record<string, unknown> {
   return isRecord(parsed) ? parsed : {}
 }
 
-function imageBlockToPart(block: Record<string, unknown>): { inlineData: { mimeType: string; data: string } } | undefined {
+/** Attachment seam this route needs: verified bytes for one durable image. */
+export type AttachmentImageReader = Pick<AttachmentStore, 'readImage'>
+
+/** One durable user image resolved for an in-flight request, or proven unreadable. */
+export type ResolvedRequestImage =
+  | { readonly kind: 'inline'; readonly mediaType: string; readonly data: string }
+  | { readonly kind: 'unavailable' }
+
+/** Resolved images keyed by durable attachment id; consumed by one request build. */
+export type ResolvedRequestImages = ReadonlyMap<string, ResolvedRequestImage>
+
+const NO_RESOLVED_IMAGES: ResolvedRequestImages = new Map()
+
+function attachmentOf(block: Record<string, unknown>): ImageAttachmentRef | undefined {
+  const attachment = block.attachment
+  if (!isRecord(attachment)) return undefined
+  return typeof attachment.attachmentId === 'string' ? attachment as unknown as ImageAttachmentRef : undefined
+}
+
+function attachmentLabel(block: Record<string, unknown>): string | undefined {
+  const attachment = isRecord(block.attachment) ? block.attachment : undefined
+  return asString(attachment?.name) || asString(attachment?.attachmentId)
+}
+
+function collectImageRefs(content: unknown, refs: Map<string, ImageAttachmentRef>): void {
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== 'image') continue
+    const attachment = attachmentOf(block)
+    if (attachment) refs.set(attachment.attachmentId, attachment)
+  }
+}
+
+function isAbort(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true || (error instanceof Error && error.name === 'AbortError')
+}
+
+/**
+ * Read every durable `{ type: 'image', attachment }` block one request carries.
+ *
+ * This provider declares image input, so DSH hands those blocks to the adapter
+ * unchanged instead of projecting them to text, and Gemini can only receive them
+ * as `inlineData` bytes. An image that cannot be read resolves to
+ * `unavailable` rather than disappearing: `contentToUserParts` then leaves the
+ * model a text marker, because a turn that silently loses its image is far
+ * harder to diagnose than one that says so.
+ *
+ * @param options - the exact request about to be built.
+ * @param attachments - durable attachment store; absent when the host wired none.
+ * @param signal - cancellation, forwarded to every attachment read.
+ * @returns one resolution per distinct attachment id, empty when there is no image.
+ */
+export async function resolveRequestImages(
+  options: GenerateOptions,
+  attachments: AttachmentImageReader | undefined,
+  signal?: AbortSignal,
+): Promise<ResolvedRequestImages> {
+  const refs = new Map<string, ImageAttachmentRef>()
+  for (const message of options.messages) collectImageRefs(message.content, refs)
+  if (refs.size === 0) return NO_RESOLVED_IMAGES
+
+  const resolved = new Map<string, ResolvedRequestImage>()
+  await Promise.all([...refs].map(async ([attachmentId, ref]) => {
+    if (!attachments) {
+      resolved.set(attachmentId, { kind: 'unavailable' })
+      return
+    }
+    try {
+      const stored = await attachments.readImage(ref, signal)
+      resolved.set(attachmentId, {
+        kind: 'inline',
+        mediaType: stored.ref.mediaType,
+        data: Buffer.from(stored.data).toString('base64'),
+      })
+    } catch (error) {
+      // Cancellation is the caller's own decision and must not become model text.
+      if (isAbort(error, signal)) throw error
+      resolved.set(attachmentId, { kind: 'unavailable' })
+    }
+  }))
+  return resolved
+}
+
+function unavailableImageText(block: Record<string, unknown>): string {
+  const label = attachmentLabel(block)
+  const subject = label ? `${label} could not be read` : 'the image could not be read'
+  return `[image unavailable: ${subject}; ask the user to attach it again if the image is needed]`
+}
+
+function imageBlockToPart(
+  block: Record<string, unknown>,
+  images: ResolvedRequestImages,
+): { inlineData: { mimeType: string; data: string } } | undefined {
   let data = asString(block.data) || asString(block.base64)
   const source = isRecord(block.source) ? block.source : undefined
   if (!data && source) data = asString(source.data) || asString(source.base64)
@@ -80,10 +173,17 @@ function imageBlockToPart(block: Record<string, unknown>): { inlineData: { mimeT
       data = match[2] || ''
     }
   }
-  return data ? { inlineData: { mimeType, data } } : undefined
+  if (data) return { inlineData: { mimeType, data } }
+
+  const attachment = attachmentOf(block)
+  const resolved = attachment ? images.get(attachment.attachmentId) : undefined
+  // The media type comes from the verified reference, not from the block.
+  return resolved?.kind === 'inline'
+    ? { inlineData: { mimeType: resolved.mediaType, data: resolved.data } }
+    : undefined
 }
 
-function contentToUserParts(content: unknown): Array<Record<string, unknown>> {
+function contentToUserParts(content: unknown, images: ResolvedRequestImages): Array<Record<string, unknown>> {
   if (typeof content === 'string') return [{ text: sanitizeText(content) }]
   if (!Array.isArray(content)) return []
   const parts: Array<Record<string, unknown>> = []
@@ -91,8 +191,9 @@ function contentToUserParts(content: unknown): Array<Record<string, unknown>> {
     if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') {
       parts.push({ text: sanitizeText(block.text) })
     } else if (isRecord(block) && block.type === 'image') {
-      const img = imageBlockToPart(block)
-      if (img) parts.push(img)
+      const img = imageBlockToPart(block, images)
+      // An image part is never dropped silently.
+      parts.push(img ?? { text: unavailableImageText(block) })
     }
   }
   return parts
@@ -105,6 +206,10 @@ function toolResultText(blocks: unknown): string {
       if (!isRecord(block)) return ''
       if (block.type === 'text' && typeof block.text === 'string') return sanitizeText(block.text)
       if (block.type === 'tool-result') return toolResultText(block.content)
+      if (block.type === 'image') {
+        const label = attachmentLabel(block)
+        return label ? `[image: ${label}]` : '[image]'
+      }
       return ''
     })
     .join('')
@@ -240,6 +345,7 @@ export function convertMessages(
   options: GenerateOptions,
   model: AntigravityModelDef,
   runtimeModel: string,
+  images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
 ): Array<{ role: string; parts: Array<Record<string, unknown>> }> {
   const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = []
   const toolCalls = new Map<string, ToolCallReference>()
@@ -254,7 +360,7 @@ export function convertMessages(
 
     const content = Array.isArray(message.content) ? message.content : []
     const nonResult = content.filter((b) => !isRecord(b) || b.type !== 'tool-result')
-    const userParts = contentToUserParts(nonResult)
+    const userParts = contentToUserParts(nonResult, images)
     if (role === 'system') {
       if (userParts.length) contents.push({ role: GEMINI_ROLE.user, parts: userParts })
       continue
@@ -301,9 +407,10 @@ export function buildRequest(
   projectId: string,
   runtimeModel: string,
   effort?: string,
+  images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
 ): Record<string, unknown> {
   const request: Record<string, unknown> = {
-    contents: convertMessages(options, model, runtimeModel),
+    contents: convertMessages(options, model, runtimeModel, images),
     systemInstruction: {
       role: GEMINI_ROLE.user,
       parts: [

@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildRequest,
   closeStream,
   convertTools,
   createStreamState,
   processStreamLine,
+  resolveRequestImages,
   stripMetaSchema,
 } from '../src/host/antigravity/mapper.ts'
 import {
@@ -13,6 +14,7 @@ import {
   MODELS,
 } from '../src/host/antigravity/types.ts'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 describe('Antigravity Mapper', () => {
   const testModel = MODELS.find((m) => m.id === 'gemini-3.7-flash')!
@@ -258,4 +260,134 @@ describe('Antigravity Mapper', () => {
     expect(contentsB[1].parts[0].functionResponse.id).toBe('call-2')
     expect(assistantPartB.thoughtSignature).toBe('real_google_sig_123')
   })
+
+describe('Antigravity image attachments', () => {
+  const model = MODELS.find((m) => m.id === 'gemini-3.8-flash')!
+  const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const BASE64 = Buffer.from(PNG_BYTES).toString('base64')
+  const REF = {
+    attachmentId: 'sha256:0123456789abcdef',
+    mediaType: 'image/png',
+    bytes: PNG_BYTES.length,
+    width: 1,
+    height: 1,
+    name: 'shot.png',
+  } as unknown as ImageAttachmentRef
+
+  function requestWith(blocks: unknown[]): GenerateOptions {
+    return {
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash',
+      messages: [{ role: 'user', content: blocks }],
+    } as unknown as GenerateOptions
+  }
+
+  function readerReturning(data: Uint8Array) {
+    return { readImage: vi.fn(async (_ref: ImageAttachmentRef, _signal?: AbortSignal) => ({ ref: REF, data })) }
+  }
+
+  function requestParts(options: GenerateOptions, images: Awaited<ReturnType<typeof resolveRequestImages>>) {
+    const request = buildRequest(options, model, 'test-proj', model.id, 'medium', images)
+    const contents = (request.request as Record<string, unknown>).contents as Array<{ parts: Array<any> }>
+    return contents.flatMap((entry) => entry.parts)
+  }
+
+  it('sends a durable DSH attachment block as Gemini inlineData', async () => {
+    const attachments = readerReturning(PNG_BYTES)
+    const options = requestWith([{ type: 'text', text: 'what is in this image?' }, { type: 'image', attachment: REF }])
+
+    const parts = requestParts(options, await resolveRequestImages(options, attachments))
+
+    expect(parts).toEqual([
+      { text: 'what is in this image?' },
+      { inlineData: { mimeType: 'image/png', data: BASE64 } },
+    ])
+    expect(attachments.readImage).toHaveBeenCalledTimes(1)
+    expect(attachments.readImage.mock.calls[0]?.[0]).toBe(REF)
+  })
+
+  it('reads a shared attachment once across messages', async () => {
+    const attachments = readerReturning(PNG_BYTES)
+    const options = {
+      provider: 'antigravity',
+      model: 'gemini-3.8-flash',
+      messages: [
+        { role: 'user', content: [{ type: 'image', attachment: REF }] },
+        { role: 'user', content: [{ type: 'text', text: 'and now?' }, { type: 'image', attachment: REF }] },
+      ],
+    } as unknown as GenerateOptions
+
+    const parts = requestParts(options, await resolveRequestImages(options, attachments))
+
+    expect(attachments.readImage).toHaveBeenCalledTimes(1)
+    expect(parts.filter((part) => 'inlineData' in part)).toHaveLength(2)
+  })
+
+  it('keeps an unreadable image visible as text instead of dropping it', async () => {
+    const attachments = { readImage: vi.fn(async () => { throw new Error('attachment store unavailable') }) }
+    const options = requestWith([{ type: 'text', text: 'look' }, { type: 'image', attachment: REF }])
+
+    const parts = requestParts(options, await resolveRequestImages(options, attachments))
+
+    expect(parts.some((part) => 'inlineData' in part)).toBe(false)
+    expect(parts[1]).toEqual({
+      text: '[image unavailable: shot.png could not be read; ask the user to attach it again if the image is needed]',
+    })
+  })
+
+  it('reports an image the host cannot resolve without any attachment service', async () => {
+    const options = requestWith([{ type: 'image', attachment: REF }])
+
+    const parts = requestParts(options, await resolveRequestImages(options, undefined))
+
+    expect(parts).toEqual([{
+      text: '[image unavailable: shot.png could not be read; ask the user to attach it again if the image is needed]',
+    }])
+  })
+
+  it('propagates cancellation instead of reporting it as model text', async () => {
+    const abort = new Error('aborted')
+    abort.name = 'AbortError'
+    const attachments = { readImage: vi.fn(async () => { throw abort }) }
+    const options = requestWith([{ type: 'image', attachment: REF }])
+
+    await expect(resolveRequestImages(options, attachments)).rejects.toBe(abort)
+  })
+
+  it('still maps legacy inline image blocks and leaves the attachment store untouched', async () => {
+    const attachments = readerReturning(PNG_BYTES)
+    const options = requestWith([{ type: 'image', mediaType: 'image/png', data: BASE64 }])
+
+    const parts = requestParts(options, await resolveRequestImages(options, attachments))
+
+    expect(parts).toEqual([{ inlineData: { mimeType: 'image/png', data: BASE64 } }])
+    expect(attachments.readImage).not.toHaveBeenCalled()
+  })
+
+  it('marks an unresolved attachment image even when no resolution was supplied', () => {
+    const options = requestWith([{ type: 'text', text: 'look' }, { type: 'image', attachment: REF }])
+
+    // The default argument keeps direct buildRequest callers honest: a block the
+    // mapper cannot turn into bytes still reaches the model as visible text.
+    const request = buildRequest(options, model, 'test-proj', model.id, 'medium')
+    const contents = (request.request as Record<string, unknown>).contents as Array<{ parts: Array<any> }>
+    expect(contents[0].parts).toEqual([
+      { text: 'look' },
+      { text: '[image unavailable: shot.png could not be read; ask the user to attach it again if the image is needed]' },
+    ])
+  })
+
+  it('names an image returned inside a tool result', () => {
+    const options = requestWith([{
+      type: 'tool-result',
+      toolCallId: 'call-1',
+      content: [{ type: 'image', attachment: REF }],
+    }])
+
+    const request = buildRequest(options, model, 'test-proj', model.id, 'medium')
+    const contents = (request.request as Record<string, unknown>).contents as Array<{ parts: Array<any> }>
+    expect(contents[0].parts[0].functionResponse.response).toEqual({ output: '[image: shot.png]' })
+  })
 })
+})
+

@@ -1,5 +1,6 @@
 import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { FileCredentialStore, FileModelSettingsStore, type AntigravityPreferenceStore } from './token-store.ts';
+import { type AttachmentImageReader } from './mapper.ts';
 export declare function resolveDefaultReasoningEffort(efforts: readonly string[], configuredEffort?: string | null): ReasoningEffortId | undefined;
 export declare class AntigravityAdapter extends LlmAdapter {
     private readonly store;
@@ -8,6 +9,7 @@ export declare class AntigravityAdapter extends LlmAdapter {
     private readonly options;
     constructor(store?: FileCredentialStore, modelSettings?: FileModelSettingsStore, preferences?: AntigravityPreferenceStore | undefined, options?: {
         fetchFn?: typeof fetch;
+        attachments?: AttachmentImageReader;
     });
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(): undefined;

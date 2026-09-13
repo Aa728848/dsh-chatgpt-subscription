@@ -100,7 +100,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       antigravityStore,
       antigravityModelSettings,
       antigravityPreferences,
-      { fetchFn: proxyFetch },
+      // The route declares image input, so DSH hands it durable image blocks
+      // that only the attachment service can turn into wire bytes.
+      { fetchFn: proxyFetch, attachments: ctx.attachments },
     )
     const disposeAntigravityAdapter = ctx.llm.registerAdapter([ANTIGRAVITY_PROVIDER_ID], antigravityAdapter)
     const disposeAntigravityRoutes = registerAntigravityRoutes(

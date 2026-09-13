@@ -7,6 +7,10 @@
 - 代理偏好在运行时变化（例如系统代理 ↔ 直连）会重新选择抓取后端；选择 ChatGPT 搜索来源时同时切换搜索与抓取的行为保持不变。
 - `ProxyManager` 新增系统代理探测的观察点（`onSystemProxyDetected`）：只在「从未知变为已知代理」时通知——探测失败与「本机没有代理」都读作 `null`，因此不会因为一次 `reg query` / `scutil` 抖动就把已经可用的路由拆掉。插件据此在代理迟于 DSH 出现时自动重新选择抓取后端，否则内置 provider 会一直占到进程结束。
 - 新增 `test/fetch-address-policy.test.ts`（地址分类、fake-ip 识别、私网解析拒绝、解析失败放行），并扩充 `test/codex-fetch.test.ts`、`test/search-provider-switcher.test.ts`、`test/web-provider-lifecycle.test.ts` 覆盖抓取 provider 的拒绝路径与后端切换。
+- 修复 Antigravity 线路静默丢弃用户上传图片的问题（issue #5）：本插件把 `gemini-*` / `claude-*` 都声明为支持图片输入，DSH 因此不把图片投影成文本，而是以 `{ type: 'image', attachment }` 的形式原样交给适配器；但 `mapper.ts` 只认内联 `data` / `base64` / `source.*`，`contentToUserParts()` 又用 `if (img) parts.push(img)` 静默跳过，于是发给 Google 的 `streamGenerateContent` 请求里只剩下文本，模型只能回答「没有收到图片」。现在 `AntigravityAdapter` 接入 `ctx.attachments`，在组装请求前把附件解析为 Gemini `inlineData`（媒体类型取自已校验的附件引用），同一附件在多条消息中只读取一次。
+- 读不出字节的图片不再静默消失：降级为 `[image unavailable: …]` 文本让模型能说明图片没读到；取消（AbortSignal）仍向上抛出，不会变成模型可见的文本。工具结果中的图片同样以 `[image: 名称]` 保留，与 Codex 线路一致。
+- 新增 8 条 `test/antigravity-mapper.test.ts` 用例（内联映射、跨消息去重、读取失败降级、无附件服务降级、取消传播、旧内联格式、工具结果图片标记，以及不传解析结果时默认参数仍不静默丢弃）与 3 条 `test/antigravity-adapter.test.ts` 端到端用例：`gemini-3.8-flash` 与 `claude-opus-4-6` 各断言一次真实请求体中的 `inlineData`（两个 provider 共用同一 mapper），另一条用 429 逼出候选链，断言每个 runtime model 候选都带着图片、且附件只读一次。新增 `test/antigravity-image-wire.test.ts` 做线级验证：不 mock `fetch`，改为在 127.0.0.1 上起回环服务器并把 `DSH_ANTIGRAVITY_ENDPOINT` 指向它，读取真正离开进程的请求体，断言 `contents[0].parts` 是 `[text, inlineData]`。把这三组用例跑在回退后的修复前源码上，共 12 条失败（其中线级用例显示 socket 上只剩文本），因此它们是货真价实的回归用例。
+- 修正 `test/subagent-model-authorization.test.ts` 的守卫类型：Host 工具注册表登记的是单参数 `ToolGuard`（`@deepseek-ai/dsh-tools`），测试却按插件内部的三参数 `DelegationGuard` 别名调用，导致 `npm run typecheck` 长期以 TS2554 失败。模拟注册表改为按真实契约取类型后，仓库自带的 `npm run typecheck` 恢复通过。
 
 ## 0.2.15 - 2026-09-11
 

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import type { ToolGuard } from '@deepseek-ai/dsh-tools'
 import {
   type AllowedModelRoute,
   type AuthorizationAgent,
-  type DelegationGuard,
   type PolicySession,
   type SessionsResolver,
   type SubagentModelSelectionPreference,
@@ -204,10 +204,10 @@ describe('subagent model authorization', () => {
   })
 
   it('registers one monotonic guard on the Host tool registry', () => {
-    const registered: DelegationGuard[] = []
+    const registered: ToolGuard[] = []
     let disposed = 0
     const ctx = {
-      tools: { guard: (guard: DelegationGuard) => { registered.push(guard); return () => { disposed += 1 } } },
+      tools: { guard: (guard: ToolGuard) => { registered.push(guard); return () => { disposed += 1 } } },
       get: (name: string) => name === 'settings' ? SETTINGS : undefined,
     }
     const dispose = installSubagentModelAuthorization(
