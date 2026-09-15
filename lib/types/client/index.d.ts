@@ -5,6 +5,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         'dsh-chatgpt-subscription': LocaleKey;
         'dsh-antigravity': any;
         'dsh-command-code': any;
+        'dsh-kimi-code': any;
     }
 }
 export declare const inject: string[];

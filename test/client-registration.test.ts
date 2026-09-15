@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
+import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 
@@ -122,7 +123,7 @@ describe('client registration', () => {
     expect(storageNotice({ ...linux, available: false }, t)).toContain('无法安全访问')
   })
 
-  it('contributes top-level Codex settings section, composer quota, and image toolview', () => {
+  it('contributes the tabbed subscription hub, composer quotas, and image toolview', () => {
     const injectedSlots: string[] = []
     const registrations: Array<Record<string, unknown>> = []
     const disposers: Array<() => void> = []
@@ -151,28 +152,93 @@ describe('client registration', () => {
 
     expect(injectedSlots).toEqual([
       'settings.section',
-      'settings.section',
-      'settings.section',
+      'conversation.input.right',
       'conversation.input.right',
       'conversation.input.right',
       'conversation.input.right',
       'tool.call.toolview',
     ])
+    // All subscription providers live behind one tabbed settings page.
     expect(registrations.filter((registration) => registration.name === 'settings.section')).toEqual([
-      expect.objectContaining({ name: 'settings.section', id: 'codex-subscription', order: 45 }),
-      expect.objectContaining({ name: 'settings.section', id: 'antigravity', order: 46 }),
-      expect.objectContaining({ name: 'settings.section', id: 'command-code', order: 47 }),
+      expect.objectContaining({ name: 'settings.section', id: 'subscription-hub', order: 45 }),
     ])
     expect(registrations.filter((registration) => registration.name === 'conversation.input.right')).toEqual([
       expect.objectContaining({ name: 'conversation.input.right', id: 'codex-subscription-quota', order: 35 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'antigravity-quota', order: 36 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'command-code-quota', order: 37 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'kimi-code-quota', order: 38 }),
     ])
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
       key: CODEX_IMAGE_TOOL_NAME,
     })
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()
+  })
+
+  it('hosts every subscription provider behind tabs in one settings page', async () => {
+    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code'] as const
+    const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith('/antigravity/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api')) {
+        return Response.json({ ok: true, value: { authenticated: false, account: null, quota: null, models: [], defaultReasoningEffort: '' } })
+      }
+      return Response.json({ ok: true, value: {
+        authenticated: false,
+        account: null,
+        storage: { kind: 'memory', encrypted: false, available: true },
+        login: { active: false, loginId: null, expiresAt: null },
+        quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
+        preferences: {
+          quickQuotaVisible: false,
+          fastMode: false,
+          outputVerbosity: null,
+          reasoningSummary: null,
+          visibleModelIds: ['gpt-5.6-sol'],
+          searchProvider: 'dsh',
+          contextWindowOverrides: {},
+          writable: true,
+        },
+      } })
+    })
+    globalThis.fetch = fetchMock as typeof fetch
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const t = ((key: keyof typeof zh) => zh[key]) as never
+    try {
+      await act(async () => root.render(createElement(ProviderHubSection, { t, close: () => undefined } as never)))
+      const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      expect(tabs.map((tab) => tab.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code'])
+      expect(tabs[0]?.getAttribute('aria-selected')).toBe('true')
+      // The ChatGPT provider panel mounts by default; the other providers stay unmounted.
+      expect(container.querySelector('#dsh-codex-title')).not.toBeNull()
+      expect(container.querySelector('.dsha-page')).toBeNull()
+
+      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status']] as const) {
+        const id: string = TAB_IDS[index]
+        fetchMock.mockClear()
+        await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-' + id)?.click() })
+        expect(container.querySelector('#dsh-codex-title')).toBeNull()
+        expect(container.querySelector('#dsh-hub-panel-' + id + ' .dsha-page')).not.toBeNull()
+        expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith(apiPrefix))).toBe(true)
+        expect(container.querySelector<HTMLButtonElement>('#dsh-hub-tab-' + id)?.getAttribute('aria-selected')).toBe('true')
+      }
+
+      // Arrow keys move the active tab per the tablist pattern.
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('#dsh-hub-tab-kimi-code')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+      })
+      expect(container.querySelector<HTMLButtonElement>('#dsh-hub-tab-chatgpt')?.getAttribute('aria-selected')).toBe('true')
+      expect(container.querySelector('#dsh-codex-title')).not.toBeNull()
+    } finally {
+      await act(async () => root.unmount())
+      container.remove()
+      globalThis.fetch = originalFetch
+      globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment
+    }
   })
 
   it('safely mounts in a real Cordis Context with strict inject checks', async () => {

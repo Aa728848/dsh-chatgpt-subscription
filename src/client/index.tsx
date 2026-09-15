@@ -9,17 +9,18 @@ import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
 import { CODEX_IMAGE_TOOL_NAME } from '../compat.ts'
 import { CodexComposerQuota } from './CodexComposerQuota.tsx'
 import { CodexImageToolView, type ImageLoader } from './CodexImageToolView.tsx'
-import { CodexSubscriptionSection } from './CodexSubscriptionSection.tsx'
+import { ProviderHubSection } from './ProviderHubSection.tsx'
 import { SubscriptionApi } from './api.ts'
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
 import { installStyles } from './styles.ts'
-import { AntigravitySection } from './antigravity/AntigravitySection.tsx'
 import { installAntigravityStyles } from './antigravity/styles.ts'
 import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from './antigravity/locales.ts'
 import { AntigravityComposerQuota } from './antigravity/AntigravityComposerQuota.tsx'
-import { CommandCodeSection } from './command-code/CommandCodeSection.tsx'
 import { CommandCodeComposerQuota } from './command-code/CommandCodeComposerQuota.tsx'
 import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from './command-code/locales.ts'
+import { KimiCodeComposerQuota } from './kimi-code/KimiCodeComposerQuota.tsx'
+import { dictionaries as kimiCodeDicts, NS_KIMI_CODE } from './kimi-code/locales.ts'
+import { installKimiCodeStyles } from './kimi-code/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -27,6 +28,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-chatgpt-subscription': LocaleKey
     'dsh-antigravity': any
     'dsh-command-code': any
+    'dsh-kimi-code': any
   }
 }
 
@@ -41,16 +43,14 @@ export function apply(ctx: ClientContext): void {
     return () => {}
   }, 'dsh-antigravity: styles')
   ctx.effect(() => ctx.locale.register(NS_COMMAND_CODE, commandCodeDicts), 'dsh-command-code: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS_KIMI_CODE, kimiCodeDicts), 'dsh-kimi-code: dictionaries')
+  ctx.effect(() => {
+    installKimiCodeStyles()
+    return () => {}
+  }, 'dsh-kimi-code: styles')
   ctx.effect(() => setupMermaidObserver(), 'dsh-mermaid: observer')
 
   const t = ctx.locale.bind(NS)
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'codex-subscription',
-    order: 45,
-    label: () => t('title'),
-    locale: NS,
-  }, CodexSubscriptionSection))
 
   const handleModelDirectoryReload = () => {
     try {
@@ -65,31 +65,21 @@ export function apply(ctx: ClientContext): void {
     }
   }
 
-  const AntigravitySectionWrapper: React.FC = () => {
-    return <AntigravitySection onModelChange={handleModelDirectoryReload} />
+  // One sidebar entry hosts every subscription provider behind tabs instead
+  // of registering a separate settings page per provider.
+  const ProviderHubSectionWrapper: React.FC<React.ComponentProps<typeof ProviderHubSection>> = (props) => {
+    // The hub reuses the refresh callback contract so a model toggle in any
+    // provider tab repaints the conversation model picker.
+    return <ProviderHubSection {...props} onModelChange={handleModelDirectoryReload} />
   }
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
-    id: 'antigravity',
-    order: 46,
-    label: () => 'Antigravity',
-    locale: NS_ANTIGRAVITY,
-  }, AntigravitySectionWrapper))
-
-  const CommandCodeSectionWrapper: React.FC = () => {
-    // The settings card reuses the Antigravity section's refresh callback
-    // contract so a model toggle repaints the conversation model picker.
-    return <CommandCodeSection onModelChange={handleModelDirectoryReload} />
-  }
-
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'command-code',
-    order: 47,
-    label: () => 'Command Code',
-    locale: NS_COMMAND_CODE,
-  }, CommandCodeSectionWrapper))
+    id: 'subscription-hub',
+    order: 45,
+    label: () => t('hubTitle'),
+    locale: NS,
+  }, ProviderHubSectionWrapper))
 
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right',
@@ -137,6 +127,21 @@ export function apply(ctx: ClientContext): void {
       }
     },
   }, CommandCodeComposerQuota))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'kimi-code-quota',
+    order: 38,
+    locale: NS_KIMI_CODE,
+    inject: (sessionId) => {
+      const directory = ctx.modelDirectories.directoryFor(sessionId)
+      return {
+        directory: directory.store,
+        loadModelDirectory: () => {
+          void directory.load().catch(() => undefined)
+        },
+      }
+    },
+  }, KimiCodeComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

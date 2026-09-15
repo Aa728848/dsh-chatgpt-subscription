@@ -2,6 +2,7 @@ export const NS = 'dsh-chatgpt-subscription' as const
 
 export const zh = {
   title: 'ChatGPT',
+  hubTitle: '订阅服务',
   intro: '使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的模型。',
   account: '账号',
   signedOut: '尚未登录',
@@ -127,6 +128,7 @@ export const zh = {
 
 export const en: Record<keyof typeof zh, string> = {
   title: 'ChatGPT',
+  hubTitle: 'Subscriptions',
   intro: 'Sign in with ChatGPT to use models available to your subscription in DSH.',
   account: 'Account',
   signedOut: 'Not signed in',

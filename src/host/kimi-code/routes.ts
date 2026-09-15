@@ -1,0 +1,368 @@
+import type { Context } from '@deepseek-ai/cordis'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import {
+  FALLBACK_MODELS,
+  PROVIDER_ID,
+  PROVIDER_NAME,
+  QUOTA_CACHE_TTL_MS,
+  codingBaseUrl,
+  oauthHost,
+} from './types.ts'
+import {
+  FileCredentialStore,
+  FileModelSettingsStore,
+  resolveRegion,
+  type KimiCodeCatalogModel,
+  type KimiCodeModelSettings,
+  type KimiCodePreferenceStore,
+} from './token-store.ts'
+import {
+  accountFromCredentials,
+  buildModelOptions,
+  clearCachedCatalog,
+  clearCachedQuota,
+  fetchAccountQuota,
+  getCachedQuota,
+  loadProviderModels,
+  testConnection,
+} from './client.ts'
+import { getCacheStats, preserveThinkingEnabled } from './mapper.ts'
+import { beginWebLogin, getWebLoginStatus, isRefreshTokenRejected, resetWebLogin } from './oauth.ts'
+import {
+  KIMI_CODE_REASONING_EFFORTS,
+  type KimiCodeAccount,
+  type KimiCodeCacheStatsDto,
+  type KimiCodeReasoningEffort,
+  type KimiCodeRegion,
+  type KimiCodeWebStatus,
+} from '../../shared/kimi-code-contracts.ts'
+
+/** Membership test for one posted reasoning level; the set is registry-wide, not per model. */
+function isKimiCodeEffort(value: unknown): value is KimiCodeReasoningEffort {
+  return typeof value === 'string' && (KIMI_CODE_REASONING_EFFORTS as readonly string[]).includes(value)
+}
+
+function isRegion(value: unknown): value is KimiCodeRegion {
+  return value === 'mainland-cn' || value === 'global'
+}
+
+const MAX_BODY_BYTES = 64 * 1024
+const ROUTE_PREFIX = '/kimi-code/api'
+
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
+  response.writeHead(status, { 'Content-Type': 'application/json' })
+  response.end(JSON.stringify(body))
+}
+
+function sendMethodNotAllowed(response: ServerResponse): void {
+  sendJson(response, 405, { ok: false, error: 'Method Not Allowed' })
+}
+
+function isSameOriginMutation(request: IncomingMessage): boolean {
+  const host = request.headers.host
+  const origin = request.headers.origin
+  if (typeof host !== 'string' || host === '' || typeof origin !== 'string' || origin === '') return false
+  try {
+    const parsed = new URL(origin)
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && parsed.host.toLowerCase() === host.toLowerCase()
+  } catch {
+    return false
+  }
+}
+
+async function readRequestJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    request.on('data', (chunk: Buffer) => {
+      total += chunk.length
+      if (total > MAX_BODY_BYTES) {
+        reject(new Error('Request body too large'))
+        request.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    request.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      try {
+        resolve(raw === '' ? {} : JSON.parse(raw) as Record<string, unknown>)
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error('Malformed JSON request'))
+      }
+    })
+    request.on('error', reject)
+  })
+}
+
+function fallbackCatalog(): KimiCodeCatalogModel[] {
+  return FALLBACK_MODELS.map((model) => ({
+    id: model.id,
+    name: model.name,
+    contextWindow: model.contextWindow,
+  }))
+}
+
+/**
+ * The selection the card should show.
+ *
+ * A stored list that still equals the shipped default has never been edited, so
+ * it cannot know about models the live catalog has since added; treating it as
+ * "everything currently offered" keeps a first run from hiding the whole
+ * catalog behind an unedited default. Any explicit edit is honoured exactly.
+ */
+export function resolveEnabledModelIds(
+  stored: readonly string[],
+  catalog: readonly KimiCodeCatalogModel[],
+): string[] {
+  const catalogIds = catalog.map((model) => model.id)
+  const shippedDefaults = new Set(FALLBACK_MODELS.map((model) => model.id))
+  const isUntouchedDefault = stored.length > 0
+    && stored.length === shippedDefaults.size
+    && stored.every((id) => shippedDefaults.has(id))
+  if (stored.length === 0 || isUntouchedDefault) return catalogIds
+  const known = new Set(catalogIds)
+  const kept = stored.filter((id) => known.has(id))
+  // A stored list whose every entry left the catalog would empty the picker;
+  // offering the catalog again is the recoverable answer.
+  return kept.length === 0 ? catalogIds : kept
+}
+
+export interface KimiCodeStatusOptions {
+  fetchFn?: typeof fetch
+  /** Whether this plugin currently owns the provider route; re-read on every status. */
+  serving?: boolean | (() => boolean)
+  /** Diagnostic when another plugin owns the provider route; re-read on every status. */
+  conflict?: string | null | (() => string | null)
+}
+
+function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
+  return typeof value === 'function' ? (value as () => T)() : value ?? fallback
+}
+
+/** Everything the settings card renders: account, quota, and the model catalog. */
+export async function getKimiCodeWebStatus(
+  store: FileCredentialStore,
+  modelSettings: FileModelSettingsStore,
+  preferences?: KimiCodePreferenceStore,
+  options: KimiCodeStatusOptions = {},
+): Promise<KimiCodeWebStatus> {
+  const credentials = await store.read()
+  const settings: KimiCodeModelSettings = preferences ? preferences.status() : await modelSettings.read()
+  const region = credentials?.region ?? await resolveRegion()
+
+  const live = await loadProviderModels({
+    fetchFn: options.fetchFn,
+    store,
+    region,
+    accessToken: credentials?.accessToken,
+  }).catch(() => [])
+  const catalog = live.length > 0 ? live : fallbackCatalog()
+  const enabledModelIds = resolveEnabledModelIds(settings.enabledModelIds, catalog)
+  const models = buildModelOptions(catalog, enabledModelIds, settings.contextWindowOverrides)
+  const quota = getCachedQuota()
+
+  // The quota snapshot is the richest source, but on a first load (or when the
+  // usage call is failing) the account is still known from the credential's own
+  // token claims — so the card shows who is signed in rather than a blank row.
+  const account: KimiCodeAccount | null = quota?.account
+    ?? (credentials === null ? null : accountFromCredentials(credentials))
+
+  return {
+    authenticated: credentials !== null,
+    hasCredentials: credentials !== null,
+    storagePath: store.path(),
+    region,
+    oauthHost: credentials?.oauthHost ?? oauthHost(region),
+    codingBaseUrl: credentials?.baseUrl ?? codingBaseUrl(region),
+    account,
+    quota,
+    lastFetchedAt: quota?.fetchedAt ?? null,
+    credentialsRejected: credentials !== null && isRefreshTokenRejected(credentials.refreshToken),
+    cache: cacheStatsOrNull(),
+    preserveThinking: preserveThinkingEnabled(),
+    models,
+    contextWindowOverrides: settings.contextWindowOverrides,
+    defaultReasoningEffort: settings.defaultReasoningEffort,
+    loginRegion: region,
+    serving: readOption(options.serving, true),
+    conflict: readOption(options.conflict, null),
+  }
+}
+
+/** Rolling cache totals, or null while no request has reported usage yet. */
+function cacheStatsOrNull(): KimiCodeCacheStatsDto | null {
+  const stats = getCacheStats()
+  return stats.requests === 0 ? null : stats
+}
+
+/** Register the Kimi Code settings routes under `/kimi-code/api`. */
+export function registerKimiCodeRoutes(
+  ctx: Context,
+  store: FileCredentialStore,
+  modelSettings: FileModelSettingsStore,
+  preferences?: KimiCodePreferenceStore,
+  options: KimiCodeStatusOptions = {},
+): () => void {
+  const fetchFn = options.fetchFn ?? fetch
+
+  return ctx.webServer.register({
+    kind: 'prefix',
+    path: ROUTE_PREFIX,
+    handler: async (request: IncomingMessage, response: ServerResponse) => {
+      const url = new URL(request.url || '/', 'http://dsh.local')
+      const path = url.pathname.replace(/^\/kimi-code\/api\/?/, '')
+      const method = request.method ?? 'GET'
+
+      try {
+        if (path === '' || path === 'status') {
+          if (method !== 'GET') return sendMethodNotAllowed(response)
+          const credentials = await store.read()
+          const cached = getCachedQuota()
+          // A failed background refresh must not fail the status call, but it
+          // must not vanish either: the reason travels with the status so the
+          // card can show why the quota is missing instead of an empty panel.
+          let quotaError: string | null = null
+          if (credentials !== null && (cached === null || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
+            try {
+              await fetchAccountQuota(store, { fetchFn })
+            } catch (error) {
+              quotaError = error instanceof Error ? error.message : String(error)
+            }
+          }
+          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value: { ...value, quotaError } })
+        }
+
+        if (path === 'login') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const body = await readRequestJson(request)
+          const requested = isRegion(body.region) ? body.region : undefined
+          const value = await beginWebLogin(store, { fetchFn, region: requested })
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'login/status') {
+          if (method !== 'GET') return sendMethodNotAllowed(response)
+          return sendJson(response, 200, { ok: true, value: getWebLoginStatus() })
+        }
+
+        if (path === 'login/cancel') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          resetWebLogin()
+          return sendJson(response, 200, { ok: true, value: getWebLoginStatus() })
+        }
+
+        if (path === 'connection/test') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const credentials = await store.read()
+          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'Not signed in.' })
+          const { account, latencyMs } = await testConnection(store, { fetchFn })
+          // A reachable service with no usable account still means the request
+          // did not authenticate, so the verdict is "not connected".
+          return sendJson(response, 200, {
+            ok: true,
+            value: { connected: account !== null, latencyMs, account },
+          })
+        }
+
+        if (path === 'quota') {
+          if (method !== 'GET' && method !== 'POST') return sendMethodNotAllowed(response)
+          if (method === 'POST' && !isSameOriginMutation(request)) {
+            return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          }
+          const credentials = await store.read()
+          if (credentials === null) {
+            return sendJson(response, 400, { ok: false, error: 'Not signed in to Kimi Code.' })
+          }
+          // An explicit refresh must report the real outcome: swallowing the
+          // failure produced a 200 that looked like success while the panel
+          // stayed empty, which is exactly the wrong thing to show a user who
+          // just pressed the button.
+          try {
+            const quota = await fetchAccountQuota(store, { fetchFn, force: true })
+            if (quota === null) {
+              return sendJson(response, 502, { ok: false, error: 'Kimi Code returned no usage data. The subscription may not include the coding quota.' })
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            return sendJson(response, 502, { ok: false, error: message })
+          }
+          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value: { ...value, quotaError: null } })
+        }
+
+        if (path === 'models' || path === 'settings') {
+          if (method === 'GET') {
+            const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+            return sendJson(response, 200, { ok: true, value })
+          }
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const body = await readRequestJson(request)
+          const patch: Parameters<KimiCodePreferenceStore['update']>[0] = {}
+          if (Array.isArray(body.enabledModelIds)) {
+            patch.enabledModelIds = body.enabledModelIds.filter((id): id is string => typeof id === 'string')
+          }
+          if (typeof body.contextWindowOverrides === 'object' && body.contextWindowOverrides !== null) {
+            const overrides: Record<string, number> = {}
+            for (const [key, raw] of Object.entries(body.contextWindowOverrides as Record<string, unknown>)) {
+              if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
+            }
+            patch.contextWindowOverrides = overrides
+          }
+          if (body.defaultReasoningEffort !== undefined) {
+            const effort = body.defaultReasoningEffort
+            if (effort === null || isKimiCodeEffort(effort)) {
+              patch.defaultReasoningEffort = effort
+            }
+          }
+          if (preferences) await preferences.update(patch)
+          else await modelSettings.updateSettings(patch)
+          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'catalog/refresh') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          clearCachedCatalog()
+          const credentials = await store.read()
+          if (credentials !== null) {
+            await loadProviderModels({
+              fetchFn,
+              store,
+              region: credentials.region,
+              accessToken: credentials.accessToken,
+              force: true,
+            }).catch(() => undefined)
+          }
+          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'logout') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          resetWebLogin()
+          await store.delete()
+          clearCachedQuota()
+          clearCachedCatalog()
+          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        return sendJson(response, 404, { ok: false, error: 'not-found' })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return sendJson(response, 500, { ok: false, error: message })
+      }
+    },
+  })
+}
+
+export { PROVIDER_ID, PROVIDER_NAME }

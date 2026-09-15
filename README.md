@@ -11,6 +11,7 @@
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [使用](#使用)
+- [Kimi Code 线路](#kimi-code-线路)
 - [Command Code 线路](#command-code-线路)
 - [子代理模型授权](#子代理模型授权0215-起)
 - [升级、降级与卸载](#升级降级与卸载)
@@ -48,7 +49,20 @@
 - **模型能力逐模型查表**（`src/host/command-code/model-catalog.ts`，转录自官方 CLI 的模型注册表）：是否接受图片输入、支持哪些思考档位由该表决定，未知模型回落纯文本。图片能力不能靠厂商/模型名前缀推断——`deepseek/deepseek-v4.1-flash` 与 `deepseek/deepseek-v4-flash-vision-exp` 支持图片而 `deepseek/deepseek-v4-flash`、`deepseek/deepseek-v4-pro` 不支持，`z-ai/glm-5.3-flash` 支持而 `zai-org/GLM-5.3` 不支持；
 - 额度与用量来自账户 API 的账单/用量线路，任一条失败不影响其余；
 - **瞬时失败按 DSH retry policy 有界重试**：`command-code` 路由显式声明 `normal` 策略（最多 3 次，1.5s 起指数退避、15s 上限、0.2 抖动），覆盖 `RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`。上游模型供应商临时不可用（502/503/504/500，典型响应体是 `{"error":{"type":"server_error"}}`）被归类为 `SERVER` 并自动重试，429 会带上上游的 `Retry-After` 让退避按对方的节奏走；401/403 与 `ABORTED` 明确不重试；
-- 模型勾选（含线路标签）、思考深度、上下文窗口覆盖与额度在「设置 → Command Code」卡片集中配置，输入框右侧另有额度胶囊。
+- 模型勾选（含线路标签）、思考深度、上下文窗口覆盖与额度在「设置 → 订阅服务 → Command Code」标签页中配置，输入框右侧另有额度胶囊。
+
+**Kimi Code 线路**
+
+- 注册 `kimi-code` Provider，接入 Moonshot 的 **Kimi Code 订阅**（`https://www.kimi.com/code`）。它与 Moonshot 开放平台（pay-as-you-go）是两套互不通用的系统：订阅的模型接口是 `https://api.kimi.com/coding/v1`，凭据只来自订阅 OAuth；把开放平台的 key 或 base URL 用在这里会被判为 `401 Invalid Authentication`；
+- 登录用 **RFC 8628 设备码流程**（`auth.kimi.com`）：设置页点「设备码登录」后直接展示用户码与一次性链接（浏览器会自动打开），装好后无需回调端口、无浏览器环境也能手工完成；`slow_down` 会按 RFC 调宽轮询间隔，设备码过期会自动重新申请而不是直接失败；
+- 访问令牌到期前按 `max(300s, expires_in×0.5)` 自动续期，同进程并发调用共用一次刷新；被拒的 refresh token 进入冷却并提示重新登录；
+- **瞬时失败按错误类别重试**（`src/host/kimi-code/adapter.ts`）。上游模型供应商临时不可用（典型是 502 `{"error":{"message":"Upstream model provider is temporarily unavailable. Please try again in a moment.","type":"server_error"}}`）、真正的 429 背压（`too many requests` / `engine is currently overloaded`）、连接失败与流停滞都会走有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动），并遵守上游的 `Retry-After`；而**配额耗尽型的 429、403 的账号额度上限、401 里的套餐权限不足、400 请求格式错误都不重试**——服务把这些含义压进同一个状态码，因此分类读响应正文而不只看状态码，重试无望时直接给出可操作的提示（换模型 / 降上下文 / 等窗口重置 / 重新登录）；
+- 模型目录为订阅侧的四款模型：`k3`（1M 上下文，需 Allegretto+；Moderato 上限 256K，故默认按 256K 计算，可用上下文覆盖升到 1M）、`k3-256k`、`kimi-for-coding`（K2.8 Preview）、`kimi-for-coding-highspeed`（约 6× 速度、3× 额度），运行时以 `GET /v1/models` 为准；
+- **K3 行为按其官方文档实现**：思考档位只发 \`low\` / \`high\` / \`max\`（其余写法收敛映射，未知档位不发送），关闭思考发 \`thinking:{type:"disabled"}\`，开启时发 \`thinking:{type,effort,keep:"all"}\`；**开启思考时每条 assistant 消息都回传 \`reasoning_content\`**（无推理则回传空串——服务要求的是空值而非省略，否则 400）；不发送 \`temperature\`（采样参数按模型固定，显式值会报错）；工具调用 id 截断到 64 字符；\`stop\` 按上限裁剪为最多 5 条、每条 ≤32 字节，超长整条丢弃（截断的停止串会在错误位置终止生成）；
+- **K3 的长思考不会被截断**：输出上限跟随上下文窗口（保留 4096 余量），因为 \`reasoning_content\` 计入输出，固定 32K 会把 \`max\` 档的长推理中途截断并返回 \`length\`；调用方已知 prompt 规模时上限会被下调到放得下，未知时不做猜测；
+- **请求体超 2 MB 本地即拒绝**：该端点最常见的 400 是 \`total message size N exceeds limit 2097152\`，官方文案不给建议，这里直接按真实序列化体积拦截并提示压缩会话或检查大工具结果；
+- **缓存是自动的，且无法手动干预**：Kimi 按请求内容哈希命中前缀缓存，实测 \`prompt_cache_key\` 与 Anthropic \`cache_control\` 标记**均被忽略**（设与不设、同 key 与异 key 命中的是同一缓存），设备 id 与协议切换也不影响；TTL 实测在 300–1800 秒之间，按 256 token 对齐，\`/messages\` 与 \`/chat/completions\` **共享同一缓存**。真正决定命中率的是**内容稳定性**：同一会话内 \`system\` 或工具列表一旦变化会使整个前缀缓存失效（实测归零），因此应保持工具集合稳定、把新增内容追加在末尾。卡片会显示滚动命中率，方便验证效果；
+- 额度卡片区分 **5 小时 / 7 天 / 月度（会员共享池）/ 月度（Kimi Code 池）** 四个窗口并显示重置时间，另可显示加油包余额；设置页为「设置 → 订阅服务 → Kimi Code」标签页，对话输入框右侧有该线路的额度胶囊。
 
 **设置页**
 
@@ -186,6 +200,17 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 改动只在设置卡片里保存过的勾选生效：设置改动只影响之后新建的会话（DSH 的会话快照语义），已运行的会话继续使用它自己记录的那份列表。
 
+### Kimi Code
+
+1. 重启 `dsh web`；
+2. 打开 **设置 → Kimi Code**；
+3. 点击 **设备码登录**，在弹出的浏览器页面确认授权（页面已预填用户码；也可手工复制用户码到 `verification_uri`）；
+4. 登录完成后按需勾选模型、设置默认思考档位与上下文窗口。
+
+`kimi-code` 会像其他 Provider 一样出现在 DSH 模型选择器中。**上下文窗口**默认取模型目录值，可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `256K` / `200000` 等写法）——注意 `k3` 的 1M 上下文需要 Allegretto 及以上套餐，因此默认按 256K 计算，升级后再在此覆盖为 1M。**默认思考档位**只提供 `low` / `high` / `max` 三档与「关闭思考」（服务对这三档以外的取值直接报 400）；切换模型或切换档位都会使上下文缓存失效，建议在同一会话内保持一致。
+
+**区域**：默认使用中国大陆主机（`auth.kimi.com` / `api.kimi.com`）。国际账号可设置 `DSH_KIMI_CODE_OAUTH_HOST=https://auth.kimi.ai` 与 `DSH_KIMI_CODE_BASE_URL=https://api.kimi.ai/coding` 后重新登录；环境变量同时会钉住区域，设置页会显示当前解析到的主机。
+
 ## Command Code 线路
 
 插件注册 `command-code` Provider，对接 Command Code 的两套接口：
@@ -299,3 +324,10 @@ npm pack --dry-run
 | Claude 模型报格式错误 | 该 API 只接受把 `claude-*` 发到 `/messages`；请使用插件自动选择的线路，不要手工把 Claude 模型指向 OpenAI 端点 |
 | Command Code 额度显示为空 | 账户 API 的账单/用量线路可能只对部分套餐开放；空态是解析不出有界额度时的正常表现，可点「刷新用量」重试 |
 | Command Code 报 502 `Upstream model provider is temporarily unavailable` | 这是上游模型供应商的瞬时故障，不是账号或 API Key 的问题：插件会按 DSH retry policy 自动重试（最多 3 次）；连续失败即换用同一账号下的其他模型，或稍后再试 |
+| Kimi Code 登录后立即失效 | 设备码只有几分钟有效期；重新点「设备码登录」即可。若刷新令牌被拒，卡片会明确提示重新登录（插件不会反复重试被拒的令牌） |
+| Kimi Code 返回 401 `does not have access to k3` / `supports only … up to … context` | 这是**套餐权限**而非凭据问题：`k3` 需 Moderato 及以上、其 1M 上下文需 Allegretto 及以上。换用 `kimi-for-coding` 或 `k3-256k`，或把该模型的上下文覆盖降到 256K |
+| Kimi Code 返回 403 `reached your … usage limit` | 账号额度用尽（5 小时 / 7 天 / 月度共享池）。卡片会显示各窗口的重置时间；共享池耗尽时即使 Kimi Code 池还有余额也会被拒 |
+| Kimi Code 报 502 `Upstream model provider is temporarily unavailable` | 上游模型供应商的瞬时故障，与账号、模型、凭据都无关：插件会按 DSH retry policy 自动重试（最多 3 次，并遵守上游 `Retry-After`）；连续失败可稍后再试或换用同账号下其他模型 |
+| Kimi Code 报 429 `engine is currently overloaded` | 服务容量问题（工作日 14:00–17:00 高峰更常见），会自动退避重试；若响应里带 `error.type = exceeded_current_quota_error` 则属于配额耗尽，插件不会重试而是提示补充额度 |
+| Kimi Code 额度显示为空 | 卡片会同时给出失败原因（`/v1/usages` 的 401/403/5xx 文案），按提示处理后点「刷新用量」重试；确认用的是订阅账号——开放平台的 key 在这里不会被接受 |
+| Kimi Code 账号一栏为空 | 账号身份取自 OAuth token 自身的 JWT 声明（订阅侧没有账号资料接口），重新登录一次即可写入；若该栏为空但显示「已登录」，点「测试连接」可确认凭据是否仍被接受 |

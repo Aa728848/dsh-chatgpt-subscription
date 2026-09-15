@@ -43,6 +43,12 @@ export { FileCredentialStore as CommandCodeCredentialStore, FileModelSettingsSto
 export { beginWebLogin as startCommandCodeLogin, getWebLoginStatus as getCommandCodeLoginStatus, saveApiKey as saveCommandCodeApiKey, } from './host/command-code/oauth.ts';
 export { getCommandCodeWebStatus, registerCommandCodeRoutes } from './host/command-code/routes.ts';
 export { fetchAccountQuota as fetchCommandCodeQuota, clearCachedQuota as clearCommandCodeQuota, getCachedQuota as getCommandCodeQuota, loadProviderModels as loadCommandCodeModels, } from './host/command-code/client.ts';
+export { KimiCodeAdapter, classifyKimiFailure, KIMI_CODE_RETRY_POLICY_CONFIG } from './host/kimi-code/adapter.ts';
+export { FileCredentialStore as KimiCodeCredentialStore, FileModelSettingsStore as KimiCodeModelSettingsStore, credentialPath as kimiCodeCredentialPath, modelSettingsPath as kimiCodeModelSettingsPath, registerKimiCodePreferenceStore, resolveRegion as resolveKimiCodeRegion, } from './host/kimi-code/token-store.ts';
+export { beginWebLogin as beginKimiCodeLogin, ensureAccessToken as ensureKimiCodeAccessToken, getWebLoginStatus as getKimiCodeLoginStatus, refreshAccessToken as refreshKimiCodeToken, requestDeviceAuthorization as requestKimiCodeDeviceAuthorization, } from './host/kimi-code/oauth.ts';
+export { fetchAccountQuota as fetchKimiCodeQuota, fetchUserInfo as fetchKimiCodeUserInfo, loadProviderModels as loadKimiCodeModels, clearCachedQuota as clearKimiCodeQuota, getCachedQuota as getKimiCodeQuota, } from './host/kimi-code/client.ts';
+export { getKimiCodeWebStatus, registerKimiCodeRoutes } from './host/kimi-code/routes.ts';
+export { KIMI_CODE_MODELS, kimiCodeModelDef, } from './host/kimi-code/model-catalog.ts';
 export { FileCredentialStore, FileModelSettingsStore, credentialPath, modelSettingsPath, } from './host/antigravity/token-store.ts';
 export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts';
 export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts';

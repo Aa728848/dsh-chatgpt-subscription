@@ -38,6 +38,14 @@ import {
   registerCommandCodePreferenceStore,
 } from './host/command-code/token-store.ts'
 import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/command-code/types.ts'
+import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
+import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
+import {
+  FileCredentialStore as KimiCodeCredentialStore,
+  FileModelSettingsStore as KimiCodeModelSettingsStore,
+  registerKimiCodePreferenceStore,
+} from './host/kimi-code/token-store.ts'
+import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
   installSubagentModelAuthorization,
@@ -91,6 +99,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const commandCodeStore = new CommandCodeCredentialStore()
   const commandCodeModelSettings = new CommandCodeModelSettingsStore()
   const commandCodePreferences = registerCommandCodePreferenceStore(ctx.settings, commandCodeModelSettings)
+
+  const kimiCodeStore = new KimiCodeCredentialStore()
+  const kimiCodeModelSettings = new KimiCodeModelSettingsStore()
+  const kimiCodePreferences = registerKimiCodePreferenceStore(ctx.settings, kimiCodeModelSettings)
 
   // The allowlist a Session recorded outranks the current settings document,
   // because the built-in delegation tool snapshot it when the Session started.
@@ -173,6 +185,39 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     )
     let commandCodeRegistration: AdapterRegistrationHandle | undefined
     let commandCodeConflict: string | null = null
+    // The Kimi Code route is contended the same way: another adapter family
+    // may already own the id, so it is claimed when free and reported when not.
+    const kimiCodeAdapter = new KimiCodeAdapter(
+      kimiCodeStore,
+      kimiCodeModelSettings,
+      kimiCodePreferences,
+      { fetchFn: proxyFetch, attachments: ctx.attachments },
+    )
+    let kimiCodeRegistration: AdapterRegistrationHandle | undefined
+    let kimiCodeConflict: string | null = null
+    const claimKimiCodeRoute = (): void => {
+      if (kimiCodeRegistration !== undefined) return
+      try {
+        kimiCodeRegistration = ctx.llm.registerAdapter([KIMI_CODE_PROVIDER_ID], kimiCodeAdapter)
+        if (kimiCodeConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] ${KIMI_CODE_PROVIDER_NAME} route "${KIMI_CODE_PROVIDER_ID}" is now served by this plugin`)
+        }
+        kimiCodeConflict = null
+      } catch (error) {
+        kimiCodeConflict = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(
+          `[dsh-chatgpt-subscription] provider route "${KIMI_CODE_PROVIDER_ID}" is already owned by another adapter; `
+          + `${KIMI_CODE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${kimiCodeConflict})`,
+        )
+      }
+    }
+    claimKimiCodeRoute()
+    const kimiCodeRouteWatch = typeof ctx.on === 'function'
+      ? ctx.on('llm/adapters-updated', () => {
+          claimKimiCodeRoute()
+        })
+      : undefined
+
     const claimCommandCodeRoute = (): void => {
       if (commandCodeRegistration !== undefined) return
       try {
@@ -197,6 +242,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           claimCommandCodeRoute()
         })
       : undefined
+
+    const disposeKimiCodeRoutes = registerKimiCodeRoutes(
+      ctx,
+      kimiCodeStore,
+      kimiCodeModelSettings,
+      kimiCodePreferences,
+      {
+        fetchFn: proxyFetch,
+        serving: () => kimiCodeRegistration !== undefined,
+        conflict: () => kimiCodeConflict,
+      },
+    )
 
     const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger })
     const usage = new UsageService(oauth, { fetchFn: proxyFetch })
@@ -269,6 +326,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(commandCodeRouteWatch)
       commandCodeRegistration?.()
       commandCodeRegistration = undefined
+      disposeKimiCodeRoutes()
+      releaseHandle(kimiCodeRouteWatch)
+      kimiCodeRegistration?.()
+      kimiCodeRegistration = undefined
       oauth.dispose()
       proxyManager.dispose()
     }
@@ -349,6 +410,34 @@ export {
   getCachedQuota as getCommandCodeQuota,
   loadProviderModels as loadCommandCodeModels,
 } from './host/command-code/client.ts'
+export { KimiCodeAdapter, classifyKimiFailure, KIMI_CODE_RETRY_POLICY_CONFIG } from './host/kimi-code/adapter.ts'
+export {
+  FileCredentialStore as KimiCodeCredentialStore,
+  FileModelSettingsStore as KimiCodeModelSettingsStore,
+  credentialPath as kimiCodeCredentialPath,
+  modelSettingsPath as kimiCodeModelSettingsPath,
+  registerKimiCodePreferenceStore,
+  resolveRegion as resolveKimiCodeRegion,
+} from './host/kimi-code/token-store.ts'
+export {
+  beginWebLogin as beginKimiCodeLogin,
+  ensureAccessToken as ensureKimiCodeAccessToken,
+  getWebLoginStatus as getKimiCodeLoginStatus,
+  refreshAccessToken as refreshKimiCodeToken,
+  requestDeviceAuthorization as requestKimiCodeDeviceAuthorization,
+} from './host/kimi-code/oauth.ts'
+export {
+  fetchAccountQuota as fetchKimiCodeQuota,
+  fetchUserInfo as fetchKimiCodeUserInfo,
+  loadProviderModels as loadKimiCodeModels,
+  clearCachedQuota as clearKimiCodeQuota,
+  getCachedQuota as getKimiCodeQuota,
+} from './host/kimi-code/client.ts'
+export { getKimiCodeWebStatus, registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
+export {
+  KIMI_CODE_MODELS,
+  kimiCodeModelDef,
+} from './host/kimi-code/model-catalog.ts'
 export {
   FileCredentialStore,
   FileModelSettingsStore,
