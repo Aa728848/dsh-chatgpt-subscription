@@ -213,8 +213,12 @@ describe('loadProviderModels', () => {
       contextWindow: 1_048_576,
       reasoningEfforts: ['low', 'high', 'max'],
       defaultReasoningEffort: 'high',
-      inputModalities: ['text', 'image'],
+      // The listing's own capability tags decide the modalities, video
+      // included: this route declares it as a real modality, so the service's
+      // answer is carried through rather than narrowed to text/image.
+      inputModalities: ['text', 'image', 'video'],
     })
+    expect(models[0]?.supportsVideo).toBe(true)
   })
 
   it('returns nothing rather than throwing when the credential cannot be read', async () => {

@@ -205,8 +205,12 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
       ? efforts.validEfforts.filter((entry): entry is string => typeof entry === 'string')
       : undefined
 
-  const modalities: Array<'text' | 'image'> = ['text']
+  const modalities: Array<'text' | 'image' | 'video'> = ['text']
   if (record.supports_image_in === true || record.supportsImageIn === true) modalities.push('image')
+  // The live listing uses the same capability tag the official CLI's model
+  // table declares, so a model that gains video acceptance server-side starts
+  // working here without a plugin release.
+  if (record.supports_video_in === true || record.supportsVideoIn === true) modalities.push('video')
 
   const protocol = asString(record.protocol)
   return {
@@ -289,7 +293,7 @@ export function reasoningEffortsForEntry(modelId: string, catalog: readonly Kimi
 }
 
 /** Input modalities for one model, from the catalog when it declares them. */
-export function inputModalitiesForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): Array<'text' | 'image'> {
+export function inputModalitiesForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): Array<'text' | 'image' | 'video'> {
   const entry = catalog.find((model) => model.id === modelId)
   if (entry?.inputModalities !== undefined) return [...entry.inputModalities]
   return inputModalitiesFor(modelId)
@@ -324,6 +328,9 @@ export function buildModelOptions(
       description: model.description ?? kimiCodeModelDef(model.id)?.description ?? null,
       supportsVideo: model.supportsVideo ?? (kimiCodeModelDef(model.id)?.inputModalities.includes('video') ?? false),
       minimumPlan: model.minimumPlan ?? kimiCodeModelDef(model.id)?.minimumPlan ?? null,
+      // Live listing first, then the static registry, so a fallback catalog
+      // (offline, or before the first refresh) still reports the capability.
+      supportsDynamicTools: model.supportsDynamicTools ?? kimiCodeModelDef(model.id)?.supportsDynamicTools === true,
     }
   })
 }

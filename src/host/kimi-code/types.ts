@@ -179,11 +179,11 @@ export function reasoningEffortsFor(modelId: string): string[] {
  * while a false "images accepted" sends bytes to an endpoint that rejects the
  * whole request.
  */
-export function inputModalitiesFor(modelId: string): Array<'text' | 'image'> {
-  // The registry also tracks video, which DSH has no modality for; a video-
-  // capable model is exposed as accepting text and images, never as video.
-  const declared = kimiCodeModelDef(modelId)?.inputModalities ?? ['text']
-  return declared.filter((modality): modality is 'text' | 'image' => modality === 'text' || modality === 'image')
+export function inputModalitiesFor(modelId: string): Array<'text' | 'image' | 'video'> {
+  // Video is a real modality on this route: this plugin widens DSH's
+  // ModelModalityMap (see modalities.ts), so a video-capable model declares it
+  // and DSH's own capability gates act on it rather than on a guess.
+  return [...(kimiCodeModelDef(modelId)?.inputModalities ?? ['text'])]
 }
 
 /**

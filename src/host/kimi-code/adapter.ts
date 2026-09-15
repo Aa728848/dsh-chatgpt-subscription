@@ -31,6 +31,7 @@ import {
   type KimiCodeCatalogModel,
   type KimiCodePreferenceStore,
 } from './token-store.ts'
+import { kimiCodeModelDef } from './model-catalog.ts'
 import {
   buildModelOptions,
   clearCachedCatalog,
@@ -48,10 +49,14 @@ import {
   createStreamState,
   estimatedInputTokens,
   offloadOldestRequestImages,
+  offloadOldestRequestVideos,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
+  requestHasVideo,
   resolveRequestImages,
+  resolveRequestVideos,
   type AttachmentImageReader,
+  type AttachmentVideoReader,
   type KimiCodeStreamState,
 } from './mapper.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
@@ -279,6 +284,14 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
 export interface KimiCodeAdapterOptions {
   fetchFn?: typeof fetch
   attachments?: AttachmentImageReader
+  /**
+   * Video reader seam.
+   *
+   * DSH's attachment service stores images only, so a deployment that produces
+   * video references injects the reader here. Absent, video occurrences degrade
+   * to an explicit text placeholder rather than silently vanishing.
+   */
+  videos?: AttachmentVideoReader
   /** Live catalog loader seam; defaults to the managed `/models` call. */
   loadCatalog?: () => Promise<KimiCodeCatalogModel[]>
 }
@@ -322,6 +335,9 @@ export class KimiCodeAdapter extends LlmAdapter {
       id: model.id,
       name: model.name,
       contextWindow: model.contextWindow,
+      inputModalities: [...(kimiCodeModelDef(model.id)?.inputModalities ?? ['text'])],
+      supportsVideo: kimiCodeModelDef(model.id)?.inputModalities.includes('video') ?? false,
+      supportsDynamicTools: kimiCodeModelDef(model.id)?.supportsDynamicTools ?? false,
     }))
   }
 
@@ -346,6 +362,9 @@ export class KimiCodeAdapter extends LlmAdapter {
       provider: prov,
       id: model.id,
       name: model.name ?? model.id,
+      // Video rides through the real modality channel, so DSH's own capability
+      // gates (image admission, read_image, subagent delegation) see exactly
+      // what this model accepts instead of a hardcoded guess.
       inputModalities: inputModalitiesForEntry(model.id, catalog),
     }))
   }
@@ -428,27 +447,42 @@ export class KimiCodeAdapter extends LlmAdapter {
     const catalog = await this.catalog().catch(() => [])
     const wire: KimiCodeWire = wireForCatalogEntry(options.model, catalog)
 
+    const entry = catalog.find((model) => model.id === options.model)
+
     // DSH delivers pasted images as durable references because this route
     // declares image input; both wires need bytes, so resolve them once up
-    // front and reuse the result for the single request below.
-    const requestOptions = offloadOldestRequestImages(options)
-    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    // front and reuse the result for the single request below. Video travels
+    // the same path and is dropped oldest-first against its own, far larger
+    // budget, because one clip dwarfs the whole image allowance.
+    const requestOptions = offloadOldestRequestVideos(offloadOldestRequestImages(options))
+    const [images, videos] = await Promise.all([
+      resolveRequestImages(requestOptions, this.options.attachments, signal),
+      resolveRequestVideos(requestOptions, this.options.videos, signal),
+    ])
+    const media = {
+      videos,
+      videoAccepted: inputModalitiesForEntry(options.model, catalog).includes('video'),
+      messageTools: entry?.supportsDynamicTools === true,
+    }
 
     const settings = await this.settings()
     const contextWindow = this.contextWindowFor(
       options.model,
-      catalog.find((model) => model.id === options.model),
+      entry,
       settings.contextWindowOverrides,
     )
     // A hand-built request states its own cap; an unstated one tracks the window
     // so long reasoning is not cut off at a fixed ceiling, and either way the
     // cap is reduced when the caller already knows the prompt will not fit.
+    // A request carrying video is measured against the larger ceiling, so the
+    // caller is told about an oversized body rather than about a limit sized
+    // for text alone.
     const requestedMax = options.maxTokens ?? maxOutputTokensFor(options.model, contextWindow)
     const boundedOptions: GenerateOptions = {
       ...requestOptions,
       maxTokens: clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions)),
     }
-    const built = buildRequest(boundedOptions, wire, images)
+    const built = buildRequest(boundedOptions, wire, images, undefined, media)
     assertRequestBodyFits(built)
     const body = JSON.stringify(built)
 

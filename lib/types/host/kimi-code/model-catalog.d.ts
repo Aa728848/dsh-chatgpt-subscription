@@ -41,6 +41,20 @@ export interface KimiCodeCatalogModel {
     contextPlan: string | null;
     /** One-line description from the official table. */
     description: string;
+    /**
+     * Whether the model accepts message-level tool declarations.
+     *
+     * Taken from the capability list the official client ships in its own managed
+     * model table, which is more specific than the wire documentation (that names
+     * K3 alone, because it describes the K3 request schema):
+     *
+     * - k3, k3-256k, kimi-for-coding -> declared;
+     * - kimi-for-coding-highspeed   -> NOT declared.
+     *
+     * The live `/v1/models` listing remains authoritative when it speaks: its own
+     * `supports_dynamic_tools` overrides this flag, including to turn it off.
+     */
+    supportsDynamicTools: boolean;
     /** Relative quota cost of this model against the cheapest one. */
     quotaMultiplier: number;
     /** How fast the model emits output. */

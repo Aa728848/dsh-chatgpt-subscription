@@ -52,8 +52,8 @@ export declare const zh: {
     readonly unselectAll: "全不选";
     readonly wireAnthropic: "Anthropic";
     readonly wireOpenai: "OpenAI";
-    readonly capVideo: "视频输入（服务支持；DSH 目前只能发送图片）";
-    readonly capDynamicTools: "动态工具加载（K3）：可在会话中途以 system 消息注入额外工具定义";
+    readonly capVideo: "视频输入（k3 / kimi-for-coding 支持；控制器可发送 video_url 内容块）";
+    readonly capDynamicTools: "动态工具加载（仅 K3）：可在会话中途以无 content 的 system 消息注入完整工具定义，保持顶层 tools 稳定以保护前缀缓存";
     readonly capPlan: "需要套餐：{plan}";
     readonly speedRegular: "标准";
     readonly speedHighspeed: "高速 (约 6×)";
@@ -156,8 +156,8 @@ export declare const en: {
     readonly unselectAll: "Deselect all";
     readonly wireAnthropic: "Anthropic";
     readonly wireOpenai: "OpenAI";
-    readonly capVideo: "Video input (the service accepts it; DSH can send images only)";
-    readonly capDynamicTools: "Dynamically loaded tools (K3): extra tool definitions can be injected mid-session as a system message";
+    readonly capVideo: "Video input (k3 / kimi-for-coding accept it; the controller can send video_url parts)";
+    readonly capDynamicTools: "Dynamically loaded tools (K3 only): full tool definitions injected mid-session as a content-less system message, keeping the top-level tools array stable for the prefix cache";
     readonly capPlan: "Requires plan: {plan}";
     readonly speedRegular: "Regular";
     readonly speedHighspeed: "HighSpeed (~6x)";
@@ -261,8 +261,8 @@ export declare const dictionaries: {
         readonly unselectAll: "全不选";
         readonly wireAnthropic: "Anthropic";
         readonly wireOpenai: "OpenAI";
-        readonly capVideo: "视频输入（服务支持；DSH 目前只能发送图片）";
-        readonly capDynamicTools: "动态工具加载（K3）：可在会话中途以 system 消息注入额外工具定义";
+        readonly capVideo: "视频输入（k3 / kimi-for-coding 支持；控制器可发送 video_url 内容块）";
+        readonly capDynamicTools: "动态工具加载（仅 K3）：可在会话中途以无 content 的 system 消息注入完整工具定义，保持顶层 tools 稳定以保护前缀缓存";
         readonly capPlan: "需要套餐：{plan}";
         readonly speedRegular: "标准";
         readonly speedHighspeed: "高速 (约 6×)";
@@ -365,8 +365,8 @@ export declare const dictionaries: {
         readonly unselectAll: "全不选";
         readonly wireAnthropic: "Anthropic";
         readonly wireOpenai: "OpenAI";
-        readonly capVideo: "视频输入（服务支持；DSH 目前只能发送图片）";
-        readonly capDynamicTools: "动态工具加载（K3）：可在会话中途以 system 消息注入额外工具定义";
+        readonly capVideo: "视频输入（k3 / kimi-for-coding 支持；控制器可发送 video_url 内容块）";
+        readonly capDynamicTools: "动态工具加载（仅 K3）：可在会话中途以无 content 的 system 消息注入完整工具定义，保持顶层 tools 稳定以保护前缀缓存";
         readonly capPlan: "需要套餐：{plan}";
         readonly speedRegular: "标准";
         readonly speedHighspeed: "高速 (约 6×)";
@@ -469,8 +469,8 @@ export declare const dictionaries: {
         readonly unselectAll: "Deselect all";
         readonly wireAnthropic: "Anthropic";
         readonly wireOpenai: "OpenAI";
-        readonly capVideo: "Video input (the service accepts it; DSH can send images only)";
-        readonly capDynamicTools: "Dynamically loaded tools (K3): extra tool definitions can be injected mid-session as a system message";
+        readonly capVideo: "Video input (k3 / kimi-for-coding accept it; the controller can send video_url parts)";
+        readonly capDynamicTools: "Dynamically loaded tools (K3 only): full tool definitions injected mid-session as a content-less system message, keeping the top-level tools array stable for the prefix cache";
         readonly capPlan: "Requires plan: {plan}";
         readonly speedRegular: "Regular";
         readonly speedHighspeed: "HighSpeed (~6x)";
@@ -573,8 +573,8 @@ export declare const dictionaries: {
         readonly unselectAll: "Deselect all";
         readonly wireAnthropic: "Anthropic";
         readonly wireOpenai: "OpenAI";
-        readonly capVideo: "Video input (the service accepts it; DSH can send images only)";
-        readonly capDynamicTools: "Dynamically loaded tools (K3): extra tool definitions can be injected mid-session as a system message";
+        readonly capVideo: "Video input (k3 / kimi-for-coding accept it; the controller can send video_url parts)";
+        readonly capDynamicTools: "Dynamically loaded tools (K3 only): full tool definitions injected mid-session as a content-less system message, keeping the top-level tools array stable for the prefix cache";
         readonly capPlan: "Requires plan: {plan}";
         readonly speedRegular: "Regular";
         readonly speedHighspeed: "HighSpeed (~6x)";

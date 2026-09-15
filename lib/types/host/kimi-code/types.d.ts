@@ -133,7 +133,7 @@ export declare function reasoningEffortsFor(modelId: string): string[];
  * while a false "images accepted" sends bytes to an endpoint that rejects the
  * whole request.
  */
-export declare function inputModalitiesFor(modelId: string): Array<'text' | 'image'>;
+export declare function inputModalitiesFor(modelId: string): Array<'text' | 'image' | 'video'>;
 /**
  * Room a request must leave below its context window.
  *

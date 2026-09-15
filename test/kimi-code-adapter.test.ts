@@ -262,7 +262,8 @@ describe('KimiCodeAdapter catalog and models', () => {
     })
     const resolved = await adapter.resolveModel('kimi-code', 'k3')
     expect(resolved.context).toEqual({ contextWindow: 1_048_576 })
-    expect(resolved.inputModalities).toEqual(['text', 'image'])
+    // Video is a declared modality on this route, not display-only metadata.
+    expect(resolved.inputModalities).toEqual(['text', 'image', 'video'])
     expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['low', 'high', 'max'])
     expect(resolved.reasoning?.defaultEffort).toBe('max')
   })

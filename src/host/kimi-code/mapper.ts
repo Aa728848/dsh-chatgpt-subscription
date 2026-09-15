@@ -40,6 +40,14 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import { createHash } from 'node:crypto'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { maxOutputTokensFor } from './types.ts'
+import {
+  base64LengthOf,
+  isVideoMediaType,
+  videoBlockLabel,
+  videoDataUrl,
+  videoOmissionText,
+  type VideoAttachmentRef,
+} from './modalities.ts'
 import type { KimiCodeReasoningEffort, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -62,8 +70,20 @@ function sanitizeText(text: string): string {
   return text.replace(/\0/g, '')
 }
 
+/**
+ * Whether one failure is a cancellation rather than a real read failure.
+ *
+ * The name check is deliberately structural rather than `instanceof Error`:
+ * DSH's own `LlmError` is not an Error subclass, so an `instanceof` test fails
+ * on precisely the errors the harness itself throws when a caller cancels. A
+ * misjudged abort would be converted into a model-visible placeholder, turning
+ * a cancelled read into a wrong answer instead of a cancelled turn.
+ */
 function isAbort(error: unknown, signal?: AbortSignal): boolean {
-  return signal?.aborted === true || (error instanceof Error && error.name === 'AbortError')
+  if (signal?.aborted === true) return true
+  if (typeof error !== 'object' || error === null) return false
+  const name = (error as { name?: unknown }).name
+  return name === 'AbortError'
 }
 
 /**
@@ -204,6 +224,27 @@ export const MAX_REQUEST_IMAGE_BYTES = 1_500_000
 /** Message-body ceiling the service documents for one request. */
 export const MAX_MESSAGE_BODY_BYTES = 2_097_152
 
+/**
+ * Body ceiling once a request carries video.
+ *
+ * The 2 MB figure above is the documented limit for text and images, and it is
+ * far too small for video: a single frame-sequence clip dwarfs it. Kimi's own
+ * video guidance carries a separate, much larger request budget, so the ceiling
+ * is raised only for a request that actually attaches video. A text-only or
+ * image-only request keeps the tighter guard, because catching that 400 locally
+ * is the whole reason it exists.
+ */
+export const MAX_VIDEO_MESSAGE_BODY_BYTES = 64 * 1024 * 1024
+
+/**
+ * Base64 video budget for one request.
+ *
+ * Deliberately below {@link MAX_VIDEO_MESSAGE_BODY_BYTES} so the surrounding
+ * JSON envelope, tool schemas and text still fit; the oldest clips are dropped
+ * first once the total would exceed it.
+ */
+export const MAX_REQUEST_VIDEO_BYTES = 48 * 1024 * 1024
+
 const OMITTED_IMAGE_TEXT =
   '[image omitted to keep the request within its size limit; older images are omitted first. '
   + 'If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]'
@@ -321,6 +362,185 @@ export async function resolveRequestImages(
   return resolved
 }
 
+/**
+ * One durable video resolved for an in-flight request, or proven unreadable.
+ *
+ * The shape mirrors {@link ResolvedRequestImage} so the two media kinds travel
+ * the same path and differ only in the wire part each produces.
+ */
+export type ResolvedRequestVideo =
+  | { readonly kind: 'inline'; readonly mediaType: string; readonly data: string }
+  | { readonly kind: 'unavailable' }
+
+/** Resolved videos keyed by attachment id; consumed by one request build. */
+export type ResolvedRequestVideos = ReadonlyMap<string, ResolvedRequestVideo>
+
+const NO_RESOLVED_VIDEOS: ResolvedRequestVideos = new Map()
+
+/**
+ * Attachment seam for video bytes.
+ *
+ * DSH's own attachment service stores images only, so a video reference can
+ * only exist if some producer in this deployment created it. Rather than
+ * pretend otherwise, the reader is an injected seam: absent means every video
+ * resolves to `unavailable` and the model is told the clip is missing, which is
+ * strictly better than silently sending a request with no video at all.
+ */
+export type AttachmentVideoReader = {
+  readVideo(ref: VideoAttachmentRef, signal?: AbortSignal): Promise<{ data: Uint8Array; mediaType: string }>
+}
+
+function videoAttachmentOf(block: Record<string, unknown>): VideoAttachmentRef | undefined {
+  const attachment = block.attachment
+  if (!isRecord(attachment)) return undefined
+  if (typeof attachment.attachmentId !== 'string') return undefined
+  return attachment as unknown as VideoAttachmentRef
+}
+
+function collectVideoRefs(content: unknown, refs: Map<string, VideoAttachmentRef>): void {
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== 'video') continue
+    const attachment = videoAttachmentOf(block)
+    if (attachment) refs.set(attachment.attachmentId, attachment)
+  }
+}
+
+/** Base64 length of one video occurrence, or undefined when it states none. */
+function requestVideoBytes(block: Record<string, unknown>): number | undefined {
+  const inline = asString(block.data) || asString(block.base64)
+  if (inline) return inline.length
+  const attachment = videoAttachmentOf(block)
+  return attachment === undefined ? undefined : base64LengthOf(attachment.bytes)
+}
+
+function collectRequestVideoBytes(content: unknown, lengths: number[]): void {
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== 'video') continue
+    const bytes = requestVideoBytes(block)
+    if (bytes !== undefined) lengths.push(bytes)
+  }
+}
+
+const OMITTED_VIDEO_TEXT =
+  '[video omitted to keep the request within its size limit; older videos are omitted first. '
+  + 'If this clip is still needed, attach a shorter excerpt or ask the user to describe it.]'
+
+/**
+ * Drop the oldest videos once one request would carry more than
+ * {@link MAX_REQUEST_VIDEO_BYTES} of base64 video data, replacing each with a
+ * text placeholder. Durable history is untouched; only the request about to be
+ * sent changes. Images are left alone — they have their own, much smaller
+ * budget and their own offload pass.
+ */
+export function offloadOldestRequestVideos(options: GenerateOptions): GenerateOptions {
+  const lengths: number[] = []
+  for (const message of options.messages) collectRequestVideoBytes(message.content, lengths)
+  const excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - MAX_REQUEST_VIDEO_BYTES
+  if (excess <= 0) return options
+
+  let omitted = 0
+  let freed = 0
+  for (const bytes of lengths) {
+    if (freed >= excess) break
+    freed += bytes
+    omitted += 1
+  }
+
+  const remaining = { count: omitted }
+  const messages = options.messages.map((message) => {
+    if (remaining.count === 0 || !Array.isArray(message.content)) return message
+    let replaced = false
+    const content = message.content.map((block) => {
+      if (remaining.count === 0 || !isRecord(block) || block.type !== 'video') return block
+      if (requestVideoBytes(block) === undefined) return block
+      remaining.count -= 1
+      replaced = true
+      return { type: 'text', text: OMITTED_VIDEO_TEXT } as ContentBlock
+    })
+    return replaced ? { ...message, content } : message
+  })
+  return { ...options, messages }
+}
+
+/**
+ * Read every durable `{ type: 'video', attachment }` block one request carries.
+ * An unreadable clip resolves to `unavailable` rather than disappearing, so the
+ * model is told the video is missing instead of answering about a blank.
+ */
+export async function resolveRequestVideos(
+  options: GenerateOptions,
+  attachments: AttachmentVideoReader | undefined,
+  signal?: AbortSignal,
+): Promise<ResolvedRequestVideos> {
+  const refs = new Map<string, VideoAttachmentRef>()
+  for (const message of options.messages) collectVideoRefs(message.content, refs)
+  if (refs.size === 0) return NO_RESOLVED_VIDEOS
+
+  const resolved = new Map<string, ResolvedRequestVideo>()
+  await Promise.all([...refs].map(async ([attachmentId, ref]) => {
+    if (!attachments) {
+      resolved.set(attachmentId, { kind: 'unavailable' })
+      return
+    }
+    try {
+      const stored = await attachments.readVideo(ref, signal)
+      resolved.set(attachmentId, {
+        kind: 'inline',
+        mediaType: stored.mediaType,
+        data: Buffer.from(stored.data).toString('base64'),
+      })
+    } catch (error) {
+      if (isAbort(error, signal)) throw error
+      resolved.set(attachmentId, { kind: 'unavailable' })
+    }
+  }))
+  return resolved
+}
+
+/** True when the request carries any video occurrence at all. */
+export function requestHasVideo(options: GenerateOptions): boolean {
+  return options.messages.some((message) => Array.isArray(message.content)
+    && message.content.some((block) => isRecord(block) && block.type === 'video'))
+}
+
+/**
+ * Resolve one video block for the wire, or explain why it cannot be sent.
+ * @param block - the durable video occurrence.
+ * @param videos - videos read for this request.
+ * @param videoAccepted - whether the selected model declares video input.
+ */
+function videoBlockToInline(
+  block: Record<string, unknown>,
+  videos: ResolvedRequestVideos,
+  videoAccepted: boolean,
+): { inline: { mediaType: string; data: string } } | { omission: string } {
+  const label = videoBlockLabel(block as { attachment?: { name?: string; attachmentId?: string } })
+  if (!videoAccepted) return { omission: videoOmissionText('unsupported-model', label) }
+
+  let data = asString(block.data) || asString(block.base64)
+  let mediaType = asString(block.mediaType) || asString(block.mimeType)
+  if (data?.startsWith('data:')) {
+    const matched = data.match(/^data:([^;,]+);base64,(.*)$/s)
+    if (matched) {
+      mediaType = matched[1] || mediaType
+      data = matched[2] || ''
+    }
+  }
+  if (!data || mediaType === undefined || mediaType === '') {
+    const attachment = videoAttachmentOf(block)
+    const resolved = attachment ? videos.get(attachment.attachmentId) : undefined
+    if (resolved?.kind !== 'inline') return { omission: videoOmissionText('unreadable', label) }
+    return isVideoMediaType(resolved.mediaType)
+      ? { inline: { mediaType: resolved.mediaType, data: resolved.data } }
+      : { omission: videoOmissionText('unsupported-container', label) }
+  }
+  return isVideoMediaType(mediaType)
+    ? { inline: { mediaType, data } }
+    : { omission: videoOmissionText('unsupported-container', label) }
+}
+
 function unavailableImageText(block: Record<string, unknown>): string {
   const label = attachmentLabel(block)
   const subject = label ? `${label} could not be read` : 'the image could not be read'
@@ -355,6 +575,24 @@ function imageBlockToInline(block: Record<string, unknown>, images: ResolvedRequ
   const resolved = attachment ? images.get(attachment.attachmentId) : undefined
   // The media type comes from the verified reference, not from the block.
   return resolved?.kind === 'inline' ? { mediaType: resolved.mediaType, data: resolved.data } : undefined
+}
+
+/**
+ * Media a single request build may carry.
+ *
+ * Passed as one object so adding a media kind never grows a positional
+ * signature the existing callers already bind.
+ */
+export interface RequestMediaOptions {
+  /** Videos read for this request; absent means none are readable. */
+  videos?: ResolvedRequestVideos
+  /** Whether the selected model declares video input. */
+  videoAccepted?: boolean
+  /**
+   * Whether the selected model accepts message-level tool declarations
+   * (`messages[].tools`), Kimi's `dynamically_loaded_tools` capability.
+   */
+  messageTools?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +643,14 @@ function isToolResultMessage(message: Message): boolean {
   return message.source?.kind === 'tool'
 }
 
+/**
+ * Concatenated system-prompt text.
+ *
+ * Every system message's text is folded into the single leading system message,
+ * so a `system` message used as a tool-declaration carrier must stay
+ * content-less: adding text to it would both move that text to the front of the
+ * request and give the declaration a `content` field the service forbids.
+ */
 function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
@@ -441,15 +687,77 @@ function reasoningText(message: Message): string {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamically loaded tools
+// ---------------------------------------------------------------------------
+
+/**
+ * One complete tool definition, in the shape the function-calling wire wants.
+ *
+ * The service rejects a bare tool name: a message-level declaration must carry
+ * the same name/description/parameters triple the top-level list carries, so
+ * the caller cannot pass a reference and let the model guess.
+ */
+export interface DynamicToolDeclaration {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+}
+
+/**
+ * A tool declaration that belongs to a message rather than the request.
+ *
+ * DSH has no message-level tool field, so the producer sets this symbol on a
+ * system-role {@link Message} to ask for one. A symbol is used rather than a
+ * string key because every other reader of a message — the session log, the
+ * transcript UI, another adapter — must not start seeing a field it cannot
+ * honor; the property is invisible to them and only this mapper looks for it.
+ */
+export const MESSAGE_TOOLS = Symbol.for('dsh-chatgpt-subscription.kimi-code.messageTools')
+
+/** Attach message-level tool declarations to one system message. */
+export function withMessageTools<T extends Message>(message: T, tools: readonly DynamicToolDeclaration[]): T {
+  Object.defineProperty(message, MESSAGE_TOOLS, {
+    value: [...tools],
+    enumerable: false,
+    configurable: true,
+    writable: false,
+  })
+  return message
+}
+
+/** Message-level tool declarations one message carries, when any. */
+export function messageToolsOf(message: Message): readonly DynamicToolDeclaration[] | undefined {
+  const value = (message as unknown as Record<PropertyKey, unknown>)[MESSAGE_TOOLS]
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  return value as readonly DynamicToolDeclaration[]
+}
+
+/** One declaration in the wire shape Kimi documents for `messages[].tools`. */
+function openAIDynamicTool(tool: DynamicToolDeclaration): OpenAIMessage {
+  return {
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: stripMetaSchema(tool.parameters),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI Chat Completions request
 // ---------------------------------------------------------------------------
 
 type OpenAIMessage = Record<string, unknown>
 
-function openAIUserContent(message: Message, images: ResolvedRequestImages): string | OpenAIMessage[] {
+function openAIUserContent(
+  message: Message,
+  images: ResolvedRequestImages,
+  media: RequestMediaOptions = {},
+): string | OpenAIMessage[] {
   if (!Array.isArray(message.content)) return ''
   const parts: OpenAIMessage[] = []
-  let hasImage = false
+  let hasRichPart = false
   for (const block of message.content) {
     if (!isRecord(block)) continue
     if (block.type === 'text' && typeof block.text === 'string') {
@@ -458,14 +766,31 @@ function openAIUserContent(message: Message, images: ResolvedRequestImages): str
     } else if (block.type === 'image') {
       const inline = imageBlockToInline(block, images)
       if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
-        hasImage = true
+        hasRichPart = true
         parts.push({ type: 'image_url', image_url: { url: `data:${inline.mediaType};base64,${inline.data}` } })
       } else {
         parts.push({ type: 'text', text: unavailableImageText(block) })
       }
+    } else if (block.type === 'video') {
+      // The OpenAI-compatible surface carries video as a sibling of image_url.
+      // A clip the selected model or protocol cannot take degrades to the
+      // ordinary text fallback, so the turn still runs and the model learns why
+      // the video is absent instead of answering about an empty message.
+      const outcome = media.videoAccepted === true
+        ? videoBlockToInline(block, media.videos ?? NO_RESOLVED_VIDEOS, true)
+        : { omission: videoOmissionText('unsupported-model', videoBlockLabel(block as { attachment?: { name?: string; attachmentId?: string } })) }
+      if ('inline' in outcome) {
+        hasRichPart = true
+        parts.push({
+          type: 'video_url',
+          video_url: { url: videoDataUrl(outcome.inline.mediaType, outcome.inline.data) },
+        })
+      } else {
+        parts.push({ type: 'text', text: outcome.omission })
+      }
     }
   }
-  if (!hasImage) return parts.map((part) => (typeof part.text === 'string' ? part.text : '')).join('')
+  if (!hasRichPart) return parts.map((part) => (typeof part.text === 'string' ? part.text : '')).join('')
   return parts
 }
 
@@ -512,11 +837,81 @@ export function estimatedInputTokens(options: GenerateOptions): number | undefin
   return Math.ceil(characters / 4)
 }
 
+/** Why one declaration could not be put on the wire, as the model sees it. */
+function declarationNotice(model: string, count: number, reason: 'capability' | 'content'): string {
+  return reason === 'capability'
+    ? `[${count} dynamically loaded tool(s) were not sent: model "${model}" does not declare the dynamically_loaded_tools capability.]`
+    : `[${count} dynamically loaded tool(s) were not sent: a tool declaration must be a content-less system message, and this one also carries text. Resend the declaration on its own system message.]`
+}
+
+/**
+ * One declaration, anchored to the history position it was produced at.
+ *
+ * `beforeIndex` counts non-system messages, which is exactly the index space of
+ * the filtered history the request is built from.
+ */
+interface DeclarationSlot {
+  beforeIndex: number
+  entries: OpenAIMessage[]
+}
+
+/**
+ * Project every message-level tool declaration at its own history position.
+ *
+ * Position is the entire point of this feature. Kimi's prompt cache is a prefix
+ * match, so a declaration is only cache-safe when it keeps the place it was
+ * first sent: appending leaves everything before it cached, whereas emitting
+ * the same declaration earlier — closer to the front — rewrites the prefix and
+ * invalidates the cached conversation. Hoisting every declaration to the top of
+ * the request would therefore defeat the one property the feature exists for,
+ * and would additionally re-declare tools the conversation had long moved past.
+ *
+ * A declaration on a system message that also carries text cannot be sent as
+ * one message: the service's dynamic-tool schema is `additionalProperties:
+ * false` with no `content` field. The text is preserved and the declaration is
+ * replaced by a notice, because losing the tools is recoverable while losing
+ * system text silently changes what the model was told.
+ */
+function declarationSlots(
+  options: GenerateOptions,
+  media: RequestMediaOptions,
+): DeclarationSlot[] {
+  const slots: DeclarationSlot[] = []
+  let beforeIndex = 0
+  for (const message of options.messages) {
+    if (message.role !== 'system') {
+      beforeIndex += 1
+      continue
+    }
+    const declarations = messageToolsOf(message)
+    if (declarations === undefined) continue
+    const text = textOf(message.content)
+    if (text !== '') {
+      slots.push({
+        beforeIndex,
+        entries: [
+          { role: 'system', content: text },
+          { role: 'system', content: declarationNotice(options.model, declarations.length, 'content') },
+        ],
+      })
+      continue
+    }
+    slots.push({
+      beforeIndex,
+      entries: media.messageTools === true
+        ? [{ role: 'system', tools: declarations.map(openAIDynamicTool) }]
+        : [{ role: 'system', content: declarationNotice(options.model, declarations.length, 'capability') }],
+    })
+  }
+  return slots
+}
+
 /** Build one `/chat/completions` body. */
 export function buildOpenAIRequest(
   options: GenerateOptions,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   preserveThinking: boolean = preserveThinkingEnabled(),
+  media: RequestMediaOptions = {},
 ): Record<string, unknown> {
   const effort = mapReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
   // Thinking is on unless the caller explicitly disabled it: the models reason
@@ -528,7 +923,26 @@ export function buildOpenAIRequest(
   const system = leadingSystemText(options)
   if (system !== undefined) messages.push({ role: 'system', content: system })
 
+  // Dynamically loaded tools: complete definitions carried by content-less
+  // system messages, emitted at the position they occupy in the history. A
+  // declaration is only cache-safe if it keeps that position, so they are
+  // interleaved with the conversation rather than gathered at the front.
+  const slots = declarationSlots(options, media)
+  let slotIndex = 0
+  let nonSystemIndex = 0
+  const flushSlots = (upTo: number): void => {
+    while (slotIndex < slots.length && slots[slotIndex]!.beforeIndex <= upTo) {
+      messages.push(...slots[slotIndex]!.entries)
+      slotIndex += 1
+    }
+  }
+  // A declaration that precedes every conversation message belongs at the head,
+  // after the assembled system prompt.
+  flushSlots(0)
+
   for (const message of nonSystemMessages(options)) {
+    flushSlots(nonSystemIndex)
+    nonSystemIndex += 1
     if (isToolResultMessage(message)) {
       const block = message.content[0]
       const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
@@ -552,10 +966,13 @@ export function buildOpenAIRequest(
       messages.push(entry)
       continue
     }
-    const content = openAIUserContent(message, images)
+    const content = openAIUserContent(message, images, media)
     if (typeof content === 'string' && content === '') continue
     messages.push({ role: 'user', content })
   }
+  // A declaration produced after the final conversation message is a trailing
+  // append, which is the cache-preserving case this feature is built for.
+  flushSlots(nonSystemIndex)
 
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
   const body: Record<string, unknown> = {
@@ -633,6 +1050,15 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
   const blocks: AnthropicBlock[] = []
   for (const block of message.content) {
     if (!isRecord(block)) continue
+    // A video part on this protocol is not documented, and an unverified field
+    // must never be sent: the block degrades to text that says so.
+    if (block.type === 'video') {
+      blocks.push({
+        type: 'text',
+        text: videoOmissionText('unsupported-wire', videoBlockLabel(block as { attachment?: { name?: string; attachmentId?: string } })),
+      })
+      continue
+    }
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
       if (text !== '') blocks.push({ type: 'text', text })
@@ -705,7 +1131,11 @@ function mergeAnthropicMessages(entries: Array<{ role: 'user' | 'assistant'; con
 export function buildAnthropicRequest(
   options: GenerateOptions,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
+  _media: RequestMediaOptions = {},
 ): Record<string, unknown> {
+  // Message-level tool declarations are an OpenAI-surface feature that this
+  // protocol does not document, so none is emitted here; the video handling
+  // lives in anthropicUserContent.
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message)) {
@@ -761,10 +1191,11 @@ export function buildRequest(
   wire: KimiCodeWire,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   preserveThinking: boolean = preserveThinkingEnabled(),
+  media: RequestMediaOptions = {},
 ): Record<string, unknown> {
   return wire === 'anthropic'
-    ? buildAnthropicRequest(options, images)
-    : buildOpenAIRequest(options, images, preserveThinking)
+    ? buildAnthropicRequest(options, images, media)
+    : buildOpenAIRequest(options, images, preserveThinking, media)
 }
 
 /**
@@ -778,11 +1209,16 @@ export function buildRequest(
  */
 export function assertRequestBodyFits(body: Record<string, unknown>): void {
   const bytes = Buffer.byteLength(JSON.stringify(body), 'utf8')
-  if (bytes <= MAX_MESSAGE_BODY_BYTES) return
+  // Video raises the ceiling: the 2 MB figure is the documented text/image
+  // limit, and a clip the caller deliberately attached must not be measured
+  // against a guard sized for a conversation without one.
+  const carriesVideo = JSON.stringify(body).includes('"video_url"')
+  const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : MAX_MESSAGE_BODY_BYTES
+  if (bytes <= limit) return
   throw new LlmError(
     `Kimi Code rejected the request before sending: the serialized body is ${bytes} bytes, above the `
-    + `${MAX_MESSAGE_BODY_BYTES}-byte limit the service enforces. Compact the conversation or start a new `
-    + 'session, and check for large tool results or attached images.',
+    + `${limit}-byte limit this route enforces. Compact the conversation or start a new `
+    + 'session, and check for large tool results or attached media.',
     'PROVIDER_ERROR',
   )
 }

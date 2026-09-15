@@ -2,7 +2,7 @@ import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type LlmModelInfo,
 import { PROVIDER_ID, reasoningEffortsFor } from './types.ts';
 import { FileCredentialStore, FileModelSettingsStore, type KimiCodeCatalogModel, type KimiCodePreferenceStore } from './token-store.ts';
 import { buildModelOptions, clearCachedCatalog } from './client.ts';
-import { type AttachmentImageReader } from './mapper.ts';
+import { type AttachmentImageReader, type AttachmentVideoReader } from './mapper.ts';
 /**
  * Transient-failure retry policy for the `kimi-code` route.
  *
@@ -75,6 +75,14 @@ export declare function classifyKimiFailure(status: number, bodyText: string): K
 export interface KimiCodeAdapterOptions {
     fetchFn?: typeof fetch;
     attachments?: AttachmentImageReader;
+    /**
+     * Video reader seam.
+     *
+     * DSH's attachment service stores images only, so a deployment that produces
+     * video references injects the reader here. Absent, video occurrences degrade
+     * to an explicit text placeholder rather than silently vanishing.
+     */
+    videos?: AttachmentVideoReader;
     /** Live catalog loader seam; defaults to the managed `/models` call. */
     loadCatalog?: () => Promise<KimiCodeCatalogModel[]>;
 }

@@ -62,7 +62,7 @@ export interface KimiCodeCatalogModel {
   contextWindow?: number
   reasoningEfforts?: string[]
   defaultReasoningEffort?: string
-  inputModalities?: Array<'text' | 'image'>
+  inputModalities?: Array<'text' | 'image' | 'video'>
   protocol?: 'openai' | 'anthropic'
   /** Whether the model also accepts video input (reported; DSH cannot send it). */
   supportsVideo?: boolean

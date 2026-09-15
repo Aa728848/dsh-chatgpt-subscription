@@ -53,7 +53,7 @@ export declare function wireForCatalogEntry(modelId: string, catalog: readonly K
 /** Thinking levels for one model, from the catalog when it declares them. */
 export declare function reasoningEffortsForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): string[];
 /** Input modalities for one model, from the catalog when it declares them. */
-export declare function inputModalitiesForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): Array<'text' | 'image'>;
+export declare function inputModalitiesForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): Array<'text' | 'image' | 'video'>;
 /** Build the picker entries the settings card renders. */
 export declare function buildModelOptions(catalog: readonly KimiCodeCatalogModel[], enabledModelIds: readonly string[], contextWindowOverrides: Record<string, number>): KimiCodeModelOption[];
 export declare function getCachedQuota(): KimiCodeAccountQuota | null;

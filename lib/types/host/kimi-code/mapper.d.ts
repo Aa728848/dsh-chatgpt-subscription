@@ -26,8 +26,9 @@
  *
  * See https://www.kimi.com/code/docs/en/kimi-code/error-reference.html
  */
-import { type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
+import { type ContentBlock, type GenerateOptions, type Message, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
+import { type VideoAttachmentRef } from './modalities.ts';
 import type { KimiCodeReasoningEffort, KimiCodeWire } from '../../shared/kimi-code-contracts.ts';
 /**
  * Kimi caps a tool-call id at 64 characters and rejects a longer one.
@@ -104,6 +105,25 @@ export declare const MAX_REQUEST_IMAGE_BYTES = 1500000;
 /** Message-body ceiling the service documents for one request. */
 export declare const MAX_MESSAGE_BODY_BYTES = 2097152;
 /**
+ * Body ceiling once a request carries video.
+ *
+ * The 2 MB figure above is the documented limit for text and images, and it is
+ * far too small for video: a single frame-sequence clip dwarfs it. Kimi's own
+ * video guidance carries a separate, much larger request budget, so the ceiling
+ * is raised only for a request that actually attaches video. A text-only or
+ * image-only request keeps the tighter guard, because catching that 400 locally
+ * is the whole reason it exists.
+ */
+export declare const MAX_VIDEO_MESSAGE_BODY_BYTES: number;
+/**
+ * Base64 video budget for one request.
+ *
+ * Deliberately below {@link MAX_VIDEO_MESSAGE_BODY_BYTES} so the surrounding
+ * JSON envelope, tool schemas and text still fit; the oldest clips are dropped
+ * first once the total would exceed it.
+ */
+export declare const MAX_REQUEST_VIDEO_BYTES: number;
+/**
  * Replace the oldest inline images with a text placeholder once one request
  * would carry more than {@link MAX_REQUEST_IMAGE_BYTES} of base64 image data.
  * Durable history is untouched; only the request about to be sent changes.
@@ -115,8 +135,97 @@ export declare function offloadOldestRequestImages(options: GenerateOptions): Ge
  * the model is told the picture is missing instead of answering about a blank.
  */
 export declare function resolveRequestImages(options: GenerateOptions, attachments: AttachmentImageReader | undefined, signal?: AbortSignal): Promise<ResolvedRequestImages>;
+/**
+ * One durable video resolved for an in-flight request, or proven unreadable.
+ *
+ * The shape mirrors {@link ResolvedRequestImage} so the two media kinds travel
+ * the same path and differ only in the wire part each produces.
+ */
+export type ResolvedRequestVideo = {
+    readonly kind: 'inline';
+    readonly mediaType: string;
+    readonly data: string;
+} | {
+    readonly kind: 'unavailable';
+};
+/** Resolved videos keyed by attachment id; consumed by one request build. */
+export type ResolvedRequestVideos = ReadonlyMap<string, ResolvedRequestVideo>;
+/**
+ * Attachment seam for video bytes.
+ *
+ * DSH's own attachment service stores images only, so a video reference can
+ * only exist if some producer in this deployment created it. Rather than
+ * pretend otherwise, the reader is an injected seam: absent means every video
+ * resolves to `unavailable` and the model is told the clip is missing, which is
+ * strictly better than silently sending a request with no video at all.
+ */
+export type AttachmentVideoReader = {
+    readVideo(ref: VideoAttachmentRef, signal?: AbortSignal): Promise<{
+        data: Uint8Array;
+        mediaType: string;
+    }>;
+};
+/**
+ * Drop the oldest videos once one request would carry more than
+ * {@link MAX_REQUEST_VIDEO_BYTES} of base64 video data, replacing each with a
+ * text placeholder. Durable history is untouched; only the request about to be
+ * sent changes. Images are left alone — they have their own, much smaller
+ * budget and their own offload pass.
+ */
+export declare function offloadOldestRequestVideos(options: GenerateOptions): GenerateOptions;
+/**
+ * Read every durable `{ type: 'video', attachment }` block one request carries.
+ * An unreadable clip resolves to `unavailable` rather than disappearing, so the
+ * model is told the video is missing instead of answering about a blank.
+ */
+export declare function resolveRequestVideos(options: GenerateOptions, attachments: AttachmentVideoReader | undefined, signal?: AbortSignal): Promise<ResolvedRequestVideos>;
+/** True when the request carries any video occurrence at all. */
+export declare function requestHasVideo(options: GenerateOptions): boolean;
+/**
+ * Media a single request build may carry.
+ *
+ * Passed as one object so adding a media kind never grows a positional
+ * signature the existing callers already bind.
+ */
+export interface RequestMediaOptions {
+    /** Videos read for this request; absent means none are readable. */
+    videos?: ResolvedRequestVideos;
+    /** Whether the selected model declares video input. */
+    videoAccepted?: boolean;
+    /**
+     * Whether the selected model accepts message-level tool declarations
+     * (`messages[].tools`), Kimi's `dynamically_loaded_tools` capability.
+     */
+    messageTools?: boolean;
+}
 /** Drop the JSON-Schema keywords provider gateways reject or ignore. */
 export declare function stripMetaSchema(schema: unknown): Record<string, unknown>;
+/**
+ * One complete tool definition, in the shape the function-calling wire wants.
+ *
+ * The service rejects a bare tool name: a message-level declaration must carry
+ * the same name/description/parameters triple the top-level list carries, so
+ * the caller cannot pass a reference and let the model guess.
+ */
+export interface DynamicToolDeclaration {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+}
+/**
+ * A tool declaration that belongs to a message rather than the request.
+ *
+ * DSH has no message-level tool field, so the producer sets this symbol on a
+ * system-role {@link Message} to ask for one. A symbol is used rather than a
+ * string key because every other reader of a message — the session log, the
+ * transcript UI, another adapter — must not start seeing a field it cannot
+ * honor; the property is invisible to them and only this mapper looks for it.
+ */
+export declare const MESSAGE_TOOLS: unique symbol;
+/** Attach message-level tool declarations to one system message. */
+export declare function withMessageTools<T extends Message>(message: T, tools: readonly DynamicToolDeclaration[]): T;
+/** Message-level tool declarations one message carries, when any. */
+export declare function messageToolsOf(message: Message): readonly DynamicToolDeclaration[] | undefined;
 /**
  * Rough prompt size for one request, in tokens.
  *
@@ -128,7 +237,7 @@ export declare function stripMetaSchema(schema: unknown): Record<string, unknown
  */
 export declare function estimatedInputTokens(options: GenerateOptions): number | undefined;
 /** Build one `/chat/completions` body. */
-export declare function buildOpenAIRequest(options: GenerateOptions, images?: ResolvedRequestImages, preserveThinking?: boolean): Record<string, unknown>;
+export declare function buildOpenAIRequest(options: GenerateOptions, images?: ResolvedRequestImages, preserveThinking?: boolean, media?: RequestMediaOptions): Record<string, unknown>;
 /**
  * Stable identifier for the conversation this request belongs to.
  *
@@ -138,9 +247,9 @@ export declare function buildOpenAIRequest(options: GenerateOptions, images?: Re
  */
 export declare function promptCacheKey(options: GenerateOptions): string | undefined;
 /** Build one `/v1/messages` body. */
-export declare function buildAnthropicRequest(options: GenerateOptions, images?: ResolvedRequestImages): Record<string, unknown>;
+export declare function buildAnthropicRequest(options: GenerateOptions, images?: ResolvedRequestImages, _media?: RequestMediaOptions): Record<string, unknown>;
 /** Build the body for whichever endpoint serves `wire`. */
-export declare function buildRequest(options: GenerateOptions, wire: KimiCodeWire, images?: ResolvedRequestImages, preserveThinking?: boolean): Record<string, unknown>;
+export declare function buildRequest(options: GenerateOptions, wire: KimiCodeWire, images?: ResolvedRequestImages, preserveThinking?: boolean, media?: RequestMediaOptions): Record<string, unknown>;
 /**
  * Reject a request the service would answer with its 2 MB body 400.
  *

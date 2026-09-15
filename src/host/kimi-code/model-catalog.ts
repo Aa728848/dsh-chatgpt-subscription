@@ -43,6 +43,20 @@ export interface KimiCodeCatalogModel {
   contextPlan: string | null
   /** One-line description from the official table. */
   description: string
+  /**
+   * Whether the model accepts message-level tool declarations.
+   *
+   * Taken from the capability list the official client ships in its own managed
+   * model table, which is more specific than the wire documentation (that names
+   * K3 alone, because it describes the K3 request schema):
+   *
+   * - k3, k3-256k, kimi-for-coding -> declared;
+   * - kimi-for-coding-highspeed   -> NOT declared.
+   *
+   * The live `/v1/models` listing remains authoritative when it speaks: its own
+   * `supports_dynamic_tools` overrides this flag, including to turn it off.
+   */
+  supportsDynamicTools: boolean
   /** Relative quota cost of this model against the cheapest one. */
   quotaMultiplier: number
   /** How fast the model emits output. */
@@ -70,6 +84,7 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     minimumPlan: 'Moderato',
     contextPlan: 'Allegretto',
     description: 'The most capable flagship coding model: 2.8T parameters, 1M context window. The 1M context consumes about twice the quota of k3-256k.',
+    supportsDynamicTools: true,
     quotaMultiplier: 2,
     speed: 'regular',
   },
@@ -86,6 +101,7 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     minimumPlan: 'Moderato',
     contextPlan: null,
     description: 'The 256K context version of K3, available to every Moderato member and above. Costs about half the quota of k3 with 1M context, and does not accept video input.',
+    supportsDynamicTools: true,
     quotaMultiplier: 1,
     speed: 'regular',
   },
@@ -102,6 +118,7 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     minimumPlan: null,
     contextPlan: null,
     description: 'Performance close to K3 with more efficient thinking, and up to 1M context on every plan. Good at code completion and routine development tasks.',
+    supportsDynamicTools: true,
     quotaMultiplier: 1,
     speed: 'regular',
   },
@@ -121,6 +138,7 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     minimumPlan: 'Allegretto',
     contextPlan: null,
     description: 'The high-speed version of K2.7 Code with the same coding ability and roughly 5-6x faster output, at 3x quota usage. Requires the Allegretto plan or above.',
+    supportsDynamicTools: false,
     quotaMultiplier: 3,
     speed: 'highspeed',
   },

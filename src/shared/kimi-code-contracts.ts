@@ -65,6 +65,16 @@ export interface KimiCodeModelOption {
   description: string | null
   /** Whether the model accepts video input as well as images. */
   supportsVideo: boolean
+  /**
+   * Whether the model accepts message-level tool declarations
+   * (`messages[].tools`), Kimi's `dynamically_loaded_tools` capability.
+   *
+   * The card shows it because it is the one K3 feature that changes how a
+   * client should be shaped rather than what it may send: a session that
+   * progressively discloses tools keeps its top-level list stable, which is
+   * what protects the prefix cache.
+   */
+  supportsDynamicTools: boolean
   /** Subscription tier the model needs, when it is not open to every member. */
   minimumPlan: string | null
 }
