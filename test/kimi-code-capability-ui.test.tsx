@@ -58,7 +58,9 @@ describe('Kimi capability table', () => {
     // Counted inside the body only: the column headers reuse two of these
     // labels, so a whole-document count would over-report them.
     const body = html.slice(html.indexOf('<tbody>'))
-    expect((body.match(/>视频</g) ?? [])).toHaveLength(1)
+    // The tag carries an asterisk pointing at the footnote, because the model
+    // accepts video while this build has no path that can actually send one.
+    expect((body.match(/>视频\*</g) ?? [])).toHaveLength(1)
     expect((body.match(/>仅图片</g) ?? [])).toHaveLength(1)
     expect((body.match(/>动态工具</g) ?? [])).toHaveLength(1)
     expect((body.match(/>—</g) ?? [])).toHaveLength(1)
@@ -72,6 +74,15 @@ describe('Kimi capability table', () => {
     expect(title).toContain('k3')
     expect(title).toContain('Moderato')
     expect(title).toContain('high')
+  })
+
+  it('discloses that video has no delivery path in this build', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model()]} />)
+    expect(html).toContain('dsha-cap-footnote')
+    expect(html).toContain('尚无视频上传入口')
+    // An images-only model must not drag the footnote in with it.
+    const none = renderToStaticMarkup(<KimiModelCapabilities models={[model({ supportsVideo: false })]} />)
+    expect(none).not.toContain('dsha-cap-footnote')
   })
 
   it('renders an empty notes cell rather than the word null', () => {

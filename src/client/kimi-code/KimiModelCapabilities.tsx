@@ -58,6 +58,9 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
           })}
         </tbody>
       </table>
+      {models.some((model) => model.supportsVideo) && (
+        <p className="dsha-muted dsha-cap-footnote">{t.capVideoFootnote}</p>
+      )}
     </div>
   )
 }

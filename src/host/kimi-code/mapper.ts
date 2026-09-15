@@ -656,6 +656,12 @@ function leadingSystemText(options: GenerateOptions): string | undefined {
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
   for (const message of options.messages) {
     if (message.role !== 'system') continue
+    // A declaration carrier holds its text at its own position instead
+    // (declarationSlots re-emits it there), so folding it here as well would
+    // send the same system text twice: wasted tokens, and the second copy sits
+    // at a position that can disturb the very cache prefix the declarations
+    // exist to protect.
+    if (messageToolsOf(message) !== undefined) continue
     const text = textOf(message.content)
     if (text !== '') parts.push(text)
   }
@@ -714,11 +720,38 @@ export interface DynamicToolDeclaration {
  */
 export const MESSAGE_TOOLS = Symbol.for('dsh-chatgpt-subscription.kimi-code.messageTools')
 
-/** Attach message-level tool declarations to one system message. */
+/**
+ * Serializable key the declaration travels under.
+ *
+ * A symbol alone is not enough: the session log persists messages through
+ * JSON, which drops symbol-keyed properties, so a restored session would lose
+ * every declaration and the model would believe it had tools the request no
+ * longer carries. The declaration is therefore stored under a plain string key
+ * AND the symbol, so in-process readers keep the exempt-from-`Object.keys`
+ * behaviour while a round trip through persistence still reconstructs it.
+ */
+export const MESSAGE_TOOLS_KEY = 'kimiCodeMessageTools'
+
+/**
+ * Attach message-level tool declarations to one system message.
+ *
+ * The property is non-enumerable so ordinary readers of a message - the session
+ * log, the transcript UI, a sibling adapter - never see a field they cannot
+ * honour, but JSON persistence still serializes it because it is a real own
+ * string-keyed property.
+ */
 export function withMessageTools<T extends Message>(message: T, tools: readonly DynamicToolDeclaration[]): T {
+  const copy = [...tools]
   Object.defineProperty(message, MESSAGE_TOOLS, {
-    value: [...tools],
+    value: copy,
     enumerable: false,
+    configurable: true,
+    writable: false,
+  })
+  Object.defineProperty(message, MESSAGE_TOOLS_KEY, {
+    // Enumerable is required here: this is the copy persistence round-trips.
+    value: copy,
+    enumerable: true,
     configurable: true,
     writable: false,
   })
@@ -727,9 +760,26 @@ export function withMessageTools<T extends Message>(message: T, tools: readonly 
 
 /** Message-level tool declarations one message carries, when any. */
 export function messageToolsOf(message: Message): readonly DynamicToolDeclaration[] | undefined {
-  const value = (message as unknown as Record<PropertyKey, unknown>)[MESSAGE_TOOLS]
-  if (!Array.isArray(value) || value.length === 0) return undefined
-  return value as readonly DynamicToolDeclaration[]
+  const record = message as unknown as Record<PropertyKey, unknown>
+  for (const key of [MESSAGE_TOOLS, MESSAGE_TOOLS_KEY] as const) {
+    const value = record[key]
+    if (Array.isArray(value) && value.length > 0) return value as readonly DynamicToolDeclaration[]
+  }
+  return undefined
+}
+
+/**
+ * Re-attach declarations after a message has been through JSON.
+ *
+ * Persistence keeps the declarations but necessarily loses the symbol, so a
+ * restored message exposes them only under {@link MESSAGE_TOOLS_KEY}. This
+ * restores the symbol too, which is what makes a declaration survive a resumed
+ * session instead of silently disappearing.
+ */
+export function rehydrateMessageTools<T extends Message>(message: T): T {
+  const declarations = messageToolsOf(message)
+  if (declarations !== undefined) withMessageTools(message, declarations)
+  return message
 }
 
 /** One declaration in the wire shape Kimi documents for `messages[].tools`. */
@@ -838,7 +888,14 @@ export function estimatedInputTokens(options: GenerateOptions): number | undefin
 }
 
 /** Why one declaration could not be put on the wire, as the model sees it. */
-function declarationNotice(model: string, count: number, reason: 'capability' | 'content'): string {
+function declarationNotice(
+  model: string,
+  count: number,
+  reason: 'capability' | 'content' | 'wire',
+): string {
+  if (reason === 'wire') {
+    return `[${count} dynamically loaded tool(s) were not sent: model "${model}" is served over the Anthropic Messages protocol, which does not document message-level tool declarations. Do not call those tools.]`
+  }
   return reason === 'capability'
     ? `[${count} dynamically loaded tool(s) were not sent: model "${model}" does not declare the dynamically_loaded_tools capability.]`
     : `[${count} dynamically loaded tool(s) were not sent: a tool declaration must be a content-less system message, and this one also carries text. Resend the declaration on its own system message.]`
@@ -1133,9 +1190,14 @@ export function buildAnthropicRequest(
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   _media: RequestMediaOptions = {},
 ): Record<string, unknown> {
-  // Message-level tool declarations are an OpenAI-surface feature that this
-  // protocol does not document, so none is emitted here; the video handling
-  // lives in anthropicUserContent.
+  // Message-level tool declarations are an OpenAI-surface feature this protocol
+  // does not document, so none is emitted. The count is still reported in the
+  // system prompt: without that, a model switched onto this wire would try to
+  // call tools it can no longer see, and nothing in the request would say why.
+  const unsentDeclarations = options.messages.reduce(
+    (total, message) => total + (message.role === 'system' ? (messageToolsOf(message)?.length ?? 0) : 0),
+    0,
+  )
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message)) {
@@ -1150,7 +1212,10 @@ export function buildAnthropicRequest(
     })
   }
 
-  const system = leadingSystemText(options)
+  const leading = leadingSystemText(options)
+  const system = unsentDeclarations === 0
+    ? leading
+    : [leading, declarationNotice(options.model, unsentDeclarations, 'wire')].filter((part) => part !== undefined).join('\n\n')
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
   const effort = mapReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
   const budget = thinkingBudgetFor(effort, maxTokens)
@@ -1207,12 +1272,17 @@ export function buildRequest(
  * sent at all. The measured size is the real serialized body, so it accounts
  * for tool schemas and inlined images the caller cannot easily estimate.
  */
-export function assertRequestBodyFits(body: Record<string, unknown>): void {
-  const bytes = Buffer.byteLength(JSON.stringify(body), 'utf8')
+export function assertRequestBodyFits(body: Record<string, unknown>, carriesVideo = false): void {
+  const serialized = JSON.stringify(body)
+  const bytes = Buffer.byteLength(serialized, 'utf8')
   // Video raises the ceiling: the 2 MB figure is the documented text/image
   // limit, and a clip the caller deliberately attached must not be measured
   // against a guard sized for a conversation without one.
-  const carriesVideo = JSON.stringify(body).includes('"video_url"')
+  //
+  // Callers state this rather than the body being inspected for it: sniffing
+  // the serialized JSON for a "video_url" substring both paid for a second
+  // full serialization of a body that can reach tens of megabytes and let user
+  // text containing that literal widen the text/image guard.
   const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : MAX_MESSAGE_BODY_BYTES
   if (bytes <= limit) return
   throw new LlmError(

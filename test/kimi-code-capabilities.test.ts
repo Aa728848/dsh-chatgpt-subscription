@@ -240,8 +240,11 @@ describe('request body budget', () => {
   })
 
   it('allows a body carrying video to exceed the text limit', () => {
+    // The caller states that the request carries video rather than the guard
+    // sniffing the serialized JSON for it.
     const body = { model: 'k3', messages: [{ role: 'user', content: [{ type: 'video_url', video_url: { url: 'data:video/mp4;base64,' + 'A'.repeat(3_000_000) } }] }] }
-    expect(() => assertRequestBodyFits(body)).not.toThrow()
+    expect(() => assertRequestBodyFits(body, true)).not.toThrow()
+    expect(() => assertRequestBodyFits(body, false)).toThrow(/2097152-byte limit/)
   })
 })
 

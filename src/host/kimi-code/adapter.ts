@@ -35,6 +35,7 @@ import { kimiCodeModelDef } from './model-catalog.ts'
 import {
   buildModelOptions,
   clearCachedCatalog,
+  dynamicToolsForEntry,
   inputModalitiesForEntry,
   loadProviderModels,
   modelRequestHeaders,
@@ -224,9 +225,13 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       }
     }
     if (status === 403) {
-      const isLimit = matchesAny(detail, ACCOUNT_LIMIT_PATTERNS) || detail !== ''
+      // Every 403 on this route is an account-level refusal, so the code is the
+      // same either way; the matched-limit test only selects which sentence the
+      // user reads. The previous form branched to one value and read as though
+      // the two cases were meant to differ.
+      const isLimit = matchesAny(detail, ACCOUNT_LIMIT_PATTERNS)
       return {
-        code: isLimit ? 'PROVIDER_ERROR' : 'PROVIDER_ERROR',
+        code: 'PROVIDER_ERROR',
         retryable: false,
         message: `${PROVIDER_NAME} blocked the request on an account limit (403): ${detail || 'the account limit was reached'}. The quota refreshes on its own schedule — check the Kimi Code card in Settings for the reset time.`,
       }
@@ -337,7 +342,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       contextWindow: model.contextWindow,
       inputModalities: [...(kimiCodeModelDef(model.id)?.inputModalities ?? ['text'])],
       supportsVideo: kimiCodeModelDef(model.id)?.inputModalities.includes('video') ?? false,
-      supportsDynamicTools: kimiCodeModelDef(model.id)?.supportsDynamicTools ?? false,
+      supportsDynamicTools: kimiCodeModelDef(model.id)?.supportsDynamicTools === true,
     }))
   }
 
@@ -462,7 +467,8 @@ export class KimiCodeAdapter extends LlmAdapter {
     const media = {
       videos,
       videoAccepted: inputModalitiesForEntry(options.model, catalog).includes('video'),
-      messageTools: entry?.supportsDynamicTools === true,
+      // Same resolver the settings card uses, so UI and wire cannot disagree.
+      messageTools: dynamicToolsForEntry(options.model, catalog),
     }
 
     const settings = await this.settings()
@@ -483,7 +489,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       maxTokens: clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions)),
     }
     const built = buildRequest(boundedOptions, wire, images, undefined, media)
-    assertRequestBodyFits(built)
+    assertRequestBodyFits(built, requestHasVideo(requestOptions))
     const body = JSON.stringify(built)
 
     const region = credentials.region ?? await resolveRegion()

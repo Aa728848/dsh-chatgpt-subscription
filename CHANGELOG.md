@@ -70,6 +70,17 @@
 - 声明所在 system 消息**同时带有文本**时不再静默丢弃：服务的动态工具 schema 没有 `content` 字段，两者无法合成一条消息，因此现在保留文本（另发一条），并把声明替换为明确的说明消息，而不是让工具无声消失。
 - **按官方 CLI 的能力表逐模型修正两项能力**（依据 `managed:kimi-code` 托管模型表里每个模型的 `capabilities` 列表）：`k3` = image_in + video_in + dynamically_loaded_tools；`k3-256k` = image_in + **dynamically_loaded_tools**（无 video）；`kimi-for-coding` = image_in + video_in + **dynamically_loaded_tools**；`kimi-for-coding-highspeed` = image_in + video_in（**无** dynamically_loaded_tools）。修正了先前把 `dynamically_loaded_tools` 当成「K3 独有」的推导错误——官方线文档只提 K3 是因为它描述的是 K3 的请求 schema，而 CLI 自己的能力表把它也标给了 K2.8 Preview。
 - 修正能力判定与官方表格的一致性（已对照 https://www.kimi.com/code/docs/en/kimi-code/models.html 逐项核对）：`k3` 与 `kimi-for-coding` 为「Image, video」、`k3-256k` 为「Image only」，与内置表一致；`kimi-for-coding-highspeed` 官方标为 K2.7 Code HighSpeed，「Thinking: ON」且无可选档位，故其固有档位仍按官方标注为 `high`。
+- **修复审查发现的问题**（视频与动态工具）：
+  - **live 目录现在真的能关掉能力**：`parseCatalogModel` 原先把 `supports_dynamic_tools === true` 之外的一切都当作「字段缺席」，于是服务端显式返回 `false` 时会回退到内置表、照样显示支持——与 `model-catalog.ts` 注释里「live 列表权威、包括可以关掉」的承诺自相矛盾。现按三态解析（`true` / `false` / 缺席），显式 `false` 穿透回退。
+  - **卡片与请求路径统一到一个解析入口** `dynamicToolsForEntry()`：此前卡片会回退内置表而请求路径 (`entry?.supportsDynamicTools === true`) 不会，导致在线但 `/models` 未返回该字段时 **UI 显示支持、实际请求却降级为「模型不支持」**，且行为随网络状态翻转；离线反而正常。现在两处共用同一函数。
+  - **声明不再随持久化丢失**：`withMessageTools` 原先把声明只挂在 `Symbol` 上且 `enumerable: false`，而 DSH 会话历史经 JSON 持久化必然丢掉符号键——会话恢复后声明会静默消失，模型会「以为自己有工具但请求里没有」。现在同时写入一个普通字符串键 `kimiCodeMessageTools`（可被 JSON 序列化，但仍非枚举，兄弟线路照样看不见），并新增 `rehydrateMessageTools()` 供恢复后重新挂上符号。
+  - **不再重复发送 system 文本**：`leadingSystemText` 折叠所有 system 文本到请求开头，而声明槽位又会在原位置重发一次，同一段文本出现两遍（浪费 token，且第二次位置可能扰动本想保护的缓存前缀）。现在 `leadingSystemText` 跳过带声明的消息，文本只在声明位置出现一次。
+  - **Anthropic 线路不再静默吞掉声明**：该协议不支持消息级声明，原本直接丢弃且无任何提示，模型可能调用从未声明的工具。现在把未发送数量写进 `system` 提示。
+  - **请求体守卫不再二次序列化、也不再被用户文本欺骗**：原先用 `JSON.stringify(body).includes('"video_url"')` 判断是否带视频——body 可达数十 MB 却被序列化两次，且用户消息里只要出现该字面量就会把 2 MB 守卫放宽到 64 MB。现由调用方显式传 `carriesVideo`（复用已有的 `requestHasVideo`）。
+  - **不再超前宣称视频能力**：模型确实接受视频，但本插件与 DSH 的附件服务都没有视频生产者/读取者（`videos` 读取器从未在 `src/index.ts` 注入），实际永远走 `unreadable` 占位。能力表因此把标签标为「视频*」并加脚注说明当前版本没有上传入口、不会发出视频内容块，避免 UI 承诺与实际可达路径不符。
+  - 清理 `classifyKimiFailure` 中 `isLimit ? 'PROVIDER_ERROR' : 'PROVIDER_ERROR'` 的死三元（两分支同值，读起来像意图未实现）。
+  - 新增 `test/kimi-code-review-fixes.test.ts`（11 条）逐条钉住上述缺陷：显式 `false` 生效、三态回退边界、文本只出现一次、Anthropic 提示、守卫不被文本欺骗、声明经 JSON 往返后仍可发送；`test/kimi-code-capability-ui.test.tsx` 增加脚注相关 1 条。
+
 - **重排模型能力展示**：此前把能力说明当成长句塞在模型名那一列，把名称列撑开、右侧描述错位。现改为独立的四列表格（模型 / 多模态 / 动态工具 / 说明）：能力只显示短标签（视频 / 仅图片 / 动态工具 / —），逐模型的协议、默认思考档位与所需套餐移入悬停提示；表格自身不再附带任何解释段落。表格抽成可测组件 `KimiModelCapabilities`（`src/client/kimi-code/KimiModelCapabilities.tsx`），新增 `test/kimi-code-capability-ui.test.tsx`（5 条）钉住列数、每模型一行、长句不得进入单元格、悬停内容，以及说明为空时不渲染 `null`。该表也**不再依赖 `description` 是否存在**——实时目录条目缺描述时整个表格（含能力）仍渲染。
 - 澄清并测试这两项能力的**跨模型隔离**：机制本身有三重隔离——符号载体**不可枚举**（其他线路的序列化器看不到它）、映射器只在 `messageTools === true` 时输出、且声明只存在于 Kimi 的 OpenAI 线路映射中。新增 `test/kimi-code-capability-isolation.test.ts`（6 条）：Command Code 各模型仍不含 video（证明模块增强是**纯类型、不产生运行时值**）、Kimi 四个模型 id 的 video 与 dynamically_loaded_tools 与官方能力表**逐项**一致（并断言两者并非同一集合：HighSpeed 有 video 却无动态工具）、视频块不会出现在兄弟线路的请求体里、同一段历史里的声明也不会被兄弟线路带出去。
 - 另记录一个**证据取舍**：公共 `models.dev` 目录虽声明了 `dynamically_loaded_tools` 字段，但 Moonshot 自家四个条目均未标注，故本插件**不采信该目录**，改以官方 CLI 托管模型表的 `capabilities` 为准；运行时仍以实时 `/v1/models` 的 `supports_dynamic_tools` / `supports_video_in` 覆盖内置表。

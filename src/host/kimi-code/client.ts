@@ -224,8 +224,12 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
     inputModalities: modalities,
     protocol: protocol === 'anthropic' ? 'anthropic' : 'openai',
     ...(record.supports_video_in === true || record.supportsVideoIn === true ? { supportsVideo: true } : {}),
-    ...(record.supports_dynamic_tools === true || record.supportsDynamicTools === true
-      ? { supportsDynamicTools: true }
+    // Three-state on purpose: the listing may assert true, assert false, or say
+    // nothing at all. Collapsing false into "absent" would make an explicit
+    // denial indistinguishable from silence, and the static fallback would then
+    // re-enable a capability the service just turned off.
+    ...(typeof (record.supports_dynamic_tools ?? record.supportsDynamicTools) === 'boolean'
+      ? { supportsDynamicTools: (record.supports_dynamic_tools ?? record.supportsDynamicTools) as boolean }
       : {}),
   }
 }
@@ -293,6 +297,26 @@ export function reasoningEffortsForEntry(modelId: string, catalog: readonly Kimi
 }
 
 /** Input modalities for one model, from the catalog when it declares them. */
+/**
+ * Whether one model accepts message-level tool declarations.
+ *
+ * THE single resolution point for `dynamically_loaded_tools`: the settings card
+ * and the request builder must never disagree, because the failure mode is a UI
+ * that promises a capability the sent request silently drops. Precedence is the
+ * live listing (including an explicit false), then the shipped registry.
+ *
+ * @param modelId - exact model id.
+ * @param catalog - live catalog, possibly empty when offline.
+ */
+export function dynamicToolsForEntry(
+  modelId: string,
+  catalog: readonly KimiCodeCatalogModel[],
+): boolean {
+  const entry = catalog.find((model) => model.id === modelId)
+  if (entry?.supportsDynamicTools !== undefined) return entry.supportsDynamicTools
+  return kimiCodeModelDef(modelId)?.supportsDynamicTools === true
+}
+
 export function inputModalitiesForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): Array<'text' | 'image' | 'video'> {
   const entry = catalog.find((model) => model.id === modelId)
   if (entry?.inputModalities !== undefined) return [...entry.inputModalities]
@@ -328,9 +352,9 @@ export function buildModelOptions(
       description: model.description ?? kimiCodeModelDef(model.id)?.description ?? null,
       supportsVideo: model.supportsVideo ?? (kimiCodeModelDef(model.id)?.inputModalities.includes('video') ?? false),
       minimumPlan: model.minimumPlan ?? kimiCodeModelDef(model.id)?.minimumPlan ?? null,
-      // Live listing first, then the static registry, so a fallback catalog
-      // (offline, or before the first refresh) still reports the capability.
-      supportsDynamicTools: model.supportsDynamicTools ?? kimiCodeModelDef(model.id)?.supportsDynamicTools === true,
+      // Resolved through the shared helper so the card cannot drift from what
+      // the request builder will actually do with the same catalog.
+      supportsDynamicTools: dynamicToolsForEntry(model.id, catalog),
     }
   })
 }
