@@ -40,6 +40,9 @@ import {
 import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/command-code/types.ts'
 import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
 import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
+import { createKimiVideoTool } from './host/kimi-code/video-tool.ts'
+import { readVideoBytes } from './host/kimi-code/video-store.ts'
+import type { VideoAttachmentRef } from './host/kimi-code/modalities.ts'
 import {
   FileCredentialStore as KimiCodeCredentialStore,
   FileModelSettingsStore as KimiCodeModelSettingsStore,
@@ -187,11 +190,21 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     let commandCodeConflict: string | null = null
     // The Kimi Code route is contended the same way: another adapter family
     // may already own the id, so it is claimed when free and reported when not.
+    // The video reader this route needs: DSH's attachment service is image-only,
+    // so videos are ingested by this plugin's own tool and stored locally. The
+    // reader verifies each reference against the stored bytes before handing
+    // them over, and both call sites share one object so behaviour cannot drift.
+    const kimiVideos = {
+      readVideo: async (ref: VideoAttachmentRef) => ({
+        data: await readVideoBytes(ref),
+        mediaType: ref.mediaType,
+      }),
+    }
     const kimiCodeAdapter = new KimiCodeAdapter(
       kimiCodeStore,
       kimiCodeModelSettings,
       kimiCodePreferences,
-      { fetchFn: proxyFetch, attachments: ctx.attachments },
+      { fetchFn: proxyFetch, attachments: ctx.attachments, videos: kimiVideos },
     )
     let kimiCodeRegistration: AdapterRegistrationHandle | undefined
     let kimiCodeConflict: string | null = null
@@ -287,6 +300,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences, proxyManager, searchSwitcher)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
+    // The video ingress for the Kimi route. Registered here because the tool
+    // needs the plugin context to resolve the calling session's route before it
+    // agrees to attach anything.
+    const disposeVideoTool = ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetch }))
 
     // Rebind providers when web reloads without resetting the saved default provider selection.
     ctx.inject(['web'], ctx => {
@@ -318,6 +335,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeProxyWatch()
       disposePreferenceWatch()
       disposeImageTool()
+    disposeVideoTool()
       disposeAdapter()
       disposeRoutes()
       disposeAntigravityRoutes()

@@ -70,6 +70,13 @@
 - 声明所在 system 消息**同时带有文本**时不再静默丢弃：服务的动态工具 schema 没有 `content` 字段，两者无法合成一条消息，因此现在保留文本（另发一条），并把声明替换为明确的说明消息，而不是让工具无声消失。
 - **按官方 CLI 的能力表逐模型修正两项能力**（依据 `managed:kimi-code` 托管模型表里每个模型的 `capabilities` 列表）：`k3` = image_in + video_in + dynamically_loaded_tools；`k3-256k` = image_in + **dynamically_loaded_tools**（无 video）；`kimi-for-coding` = image_in + video_in + **dynamically_loaded_tools**；`kimi-for-coding-highspeed` = image_in + video_in（**无** dynamically_loaded_tools）。修正了先前把 `dynamically_loaded_tools` 当成「K3 独有」的推导错误——官方线文档只提 K3 是因为它描述的是 K3 的请求 schema，而 CLI 自己的能力表把它也标给了 K2.8 Preview。
 - 修正能力判定与官方表格的一致性（已对照 https://www.kimi.com/code/docs/en/kimi-code/models.html 逐项核对）：`k3` 与 `kimi-for-coding` 为「Image, video」、`k3-256k` 为「Image only」，与内置表一致；`kimi-for-coding-highspeed` 官方标为 K2.7 Code HighSpeed，「Thinking: ON」且无可选档位，故其固有档位仍按官方标注为 `high`。
+- **视频输入打通了入口**：此前只有一条没有生产者的 mapper 路径（能力表也只能标注「无上传入口」）。现在新增两件东西，让视频端到端可达：
+  - `kimi_attach_video` 工具（`src/host/kimi-code/video-tool.ts`）：接受**本地绝对路径**或 **http(s) 链接**，把视频字节交给插件的视频存储，再以 `exec.deferContext()` 注入一条 plugin 来源的 user 消息（与本插件已有的图片工具同一机制，**不需要改动 DSH**）。可选 `question` 参数让模型在同一轮就视频作答。
+  - 视频本地存储（`src/host/kimi-code/video-store.ts`）：DSH 的附件服务只存图片，因此本线路自带存储。标识取字节 sha256（重复挂载同一文件幂等），读取时**重新校验摘要**，被篡改或截断的对象会被拒绝而不是当成原文件发出去。
+  - **尺寸上限取官方依据**：官方视频集成把本地文件编码为 `data:video/...;base64,...` 并限制该载荷约 **50 MB**（且明确说这是其客户端上限、非 Kimi API 上限），VS Code 端文件选择器限 **20 MB**。前者描述的是「这个 wire 上模型接受什么」，故上限设为略低于它的 **30 MB 原始字节**（base64 增长 4/3，所以编码后正好落在 40 MB，留在 50 MB 之下）。
+  - **两个安全/正确性闸门**：URL 来源在发起请求**之前**套用与搜索抓取 provider 相同的公网地址策略（否则该工具会成为一个 SSRF 原语——测试里有一条专门证明策略缺失时用例会失败）；且只有当**当前会话路由到 `kimi-code` 且所选模型声明了 video** 时才允许挂载，否则明确拒绝并给出补救（换 k3 / kimi-for-coding），绝不会把别的适配器没有处理分支的块注入进去。
+  - 能力表脚注相应改为「视频需先用 kimi_attach_video 挂载；直接粘贴仍只支持图片」。
+  - 新增 `test/kimi-code-video-tool.test.ts`（17 条：容器识别、内容寻址与幂等、超限/空文件/类型拒绝、摘要失配与文件缺失、相对路径/未知扩展名/非视频模型/错误 provider 的拒绝、私网 URL 拒绝且**不发出请求**）与 `test/kimi-code-video-e2e.test.ts`（3 条：从落盘文件解析出字节并确认线上是真实 base64 内容、字节缺失时降级为可读文本、无视频请求不受影响）。
 - **修复审查发现的问题**（视频与动态工具）：
   - **live 目录现在真的能关掉能力**：`parseCatalogModel` 原先把 `supports_dynamic_tools === true` 之外的一切都当作「字段缺席」，于是服务端显式返回 `false` 时会回退到内置表、照样显示支持——与 `model-catalog.ts` 注释里「live 列表权威、包括可以关掉」的承诺自相矛盾。现按三态解析（`true` / `false` / 缺席），显式 `false` 穿透回退。
   - **卡片与请求路径统一到一个解析入口** `dynamicToolsForEntry()`：此前卡片会回退内置表而请求路径 (`entry?.supportsDynamicTools === true`) 不会，导致在线但 `/models` 未返回该字段时 **UI 显示支持、实际请求却降级为「模型不支持」**，且行为随网络状态翻转；离线反而正常。现在两处共用同一函数。

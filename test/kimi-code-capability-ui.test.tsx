@@ -79,7 +79,7 @@ describe('Kimi capability table', () => {
   it('discloses that video has no delivery path in this build', () => {
     const html = renderToStaticMarkup(<KimiModelCapabilities models={[model()]} />)
     expect(html).toContain('dsha-cap-footnote')
-    expect(html).toContain('尚无视频上传入口')
+    expect(html).toContain('kimi_attach_video')
     // An images-only model must not drag the footnote in with it.
     const none = renderToStaticMarkup(<KimiModelCapabilities models={[model({ supportsVideo: false })]} />)
     expect(none).not.toContain('dsha-cap-footnote')
