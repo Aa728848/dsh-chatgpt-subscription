@@ -36,6 +36,14 @@ import {
   validateDelegationToolNames,
   type SessionsResolver,
 } from './host/subagent-model-authorization.ts'
+import {
+  createFileRelayProbeSink,
+  installRelayProbe,
+  relayProbeEnabled,
+  relayProbeEnvFile,
+  relayProbeLogPath,
+  type RelayProbeContext,
+} from './host/relay-probe.ts'
 
 /** Optional deployment configuration for this plugin. */
 export interface Config {
@@ -88,6 +96,22 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         })
       }, 'dsh-chatgpt-subscription: subagent model authorization')
     })
+  }
+
+  // One read-only diagnostic probe, inert unless the deployment enables it.
+  // It answers "what did the parent side do with the child's completion
+  // message" from durable session events plus the live Agent snapshot. See
+  // src/host/relay-probe.ts; it writes metadata only, to one log file.
+  const probeEnvFile = relayProbeEnvFile()
+  if (relayProbeEnabled(process.env, { envFile: probeEnvFile })) {
+    const probePath = relayProbeLogPath(process.env, { envFile: probeEnvFile })
+    ctx.effect(() => {
+      ctx.logger.info(`[dsh-chatgpt-subscription] relay probe writing to ${probePath}`)
+      return installRelayProbe(ctx as unknown as RelayProbeContext, {
+        sink: createFileRelayProbeSink({ path: probePath }),
+        path: probePath,
+      })
+    }, 'dsh-chatgpt-subscription: relay probe')
   }
 
   ctx.effect(() => {
@@ -185,6 +209,29 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
 
+export {
+  RELAY_PROBE_ENV,
+  RELAY_PROBE_FILE_ENV,
+  RELAY_PROBE_FILE_NAME,
+  RELAY_PROBE_MAX_BYTES,
+  RELAY_SOURCE_KINDS,
+  RelayProbe,
+  createFileRelayProbeSink,
+  installRelayProbe,
+  relayProbeEnabled,
+  relayProbeEnvFile,
+  relayProbeEnvValue,
+  relayProbeLogPath,
+} from './host/relay-probe.ts'
+export type {
+  AgentsLookup,
+  ProbeAgent,
+  ProbeEvent,
+  ProbeSession,
+  RelayProbeContext,
+  RelayProbeOptions,
+  RelayProbeSink,
+} from './host/relay-probe.ts'
 export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts'
 export {
   SUBAGENT_MODEL_SELECTION_NAMESPACE,

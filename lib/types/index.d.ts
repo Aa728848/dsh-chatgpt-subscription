@@ -20,6 +20,8 @@ export interface Config {
 export declare const Config: z<Config>;
 export declare const inject: string[];
 export declare function apply(ctx: Context, pluginConfig?: Config): void;
+export { RELAY_PROBE_ENV, RELAY_PROBE_FILE_ENV, RELAY_PROBE_FILE_NAME, RELAY_PROBE_MAX_BYTES, RELAY_SOURCE_KINDS, RelayProbe, createFileRelayProbeSink, installRelayProbe, relayProbeEnabled, relayProbeEnvFile, relayProbeEnvValue, relayProbeLogPath, } from './host/relay-probe.ts';
+export type { AgentsLookup, ProbeAgent, ProbeEvent, ProbeSession, RelayProbeContext, RelayProbeOptions, RelayProbeSink, } from './host/relay-probe.ts';
 export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts';
 export { SUBAGENT_MODEL_SELECTION_NAMESPACE, SUBAGENT_POLICY_EVENT, authorizedRoutesFor, createSubagentAuthorization, delegationDenialReason, installSubagentModelAuthorization, normalizeDelegationToolNames, parseAllowedRoutes, policyRoutesOf, subagentModelSelectionPreference, unauthorizedRouteReason, validateAuthorizationScope, validateDelegationToolNames, } from './host/subagent-model-authorization.ts';
 export { OAuthService } from './host/oauth-service.ts';

@@ -185,6 +185,24 @@ export async function* parseResponsesStream(
     return tool
   }
 
+  /**
+   * Adopt the complete answer text when the backend carries it only in terminal
+   * events instead of `response.output_text.delta`. Deltas own the text when they
+   * arrive: this is a no-op once a text block started, so a normally streamed
+   * response never doubles its answer.
+   * @param full - the complete text the terminal event carries.
+   * @returns the chunks that make it a visible text block, or none.
+   */
+  const adoptText = (full: string): StreamChunk[] => {
+    if (textIndex !== null || full === '') return []
+    textIndex = nextIndex++
+    text = full
+    return [
+      { type: 'block-start', index: textIndex, blockType: 'text' },
+      { type: 'text-delta', index: textIndex, text: full },
+    ]
+  }
+
   const consume = async function* (event: Record<string, unknown>): AsyncIterable<StreamChunk> {
     const type = string(event.type)
     if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
@@ -195,6 +213,18 @@ export async function* parseResponsesStream(
       }
       text += delta
       if (delta) yield { type: 'text-delta', index: textIndex, text: delta }
+      return
+    }
+    if (type === 'response.output_text.done') {
+      yield* adoptText(string(event.text) ?? '')
+      return
+    }
+    if (type === 'response.content_part.done') {
+      const part = record(event.part)
+      const partType = string(part?.type)
+      if (partType === 'output_text' || partType === 'refusal') {
+        yield* adoptText(string(part?.text) ?? '')
+      }
       return
     }
     if (type === 'response.reasoning_summary_text.delta') {
@@ -218,7 +248,10 @@ export async function* parseResponsesStream(
     if (type === 'response.output_item.added' || type === 'response.output_item.done') {
       const item = record(event.item)
       if (item !== null && type === 'response.output_item.done') replayOutput.push(structuredClone(item))
-      if (string(item?.type) !== 'function_call') return
+      if (string(item?.type) !== 'function_call') {
+        if (type === 'response.output_item.done') yield* adoptText(messageItemText(item))
+        return
+      }
       const tool = toolFor(event, item ?? undefined)
       tool.id = acceptIdentity(tool.id, item?.call_id)
       tool.name = acceptIdentity(tool.name, item?.name)
@@ -273,6 +306,7 @@ export async function* parseResponsesStream(
       if (Array.isArray(output)) {
         replayOutput = output.filter((item): item is Record<string, unknown> => record(item) !== null)
           .map((item) => structuredClone(item))
+        for (const item of output) yield* adoptText(messageItemText(record(item)))
       }
       terminal = type === 'response.incomplete'
         ? { kind: 'max-tokens' }
@@ -445,6 +479,24 @@ async function responseError(response: Response): Promise<LlmError> {
   if (response.status === 429) return new LlmError('Codex rate limit reached.', 'RATE_LIMIT', options)
   if (response.status >= 500) return new LlmError(`Codex service error (${response.status}).`, 'SERVER_ERROR', options)
   return new LlmError(`Codex request failed (${response.status})${detail ? `: ${detail}` : '.'}`, 'PROVIDER_ERROR', options)
+}
+
+/**
+ * Concatenated assistant text a non-delta `message` output item carries, which
+ * the terminal events repeat. Empty for every other item type.
+ * @param item - one \`output\` item from a Response.
+ * @returns the item's output text, or an empty string.
+ */
+function messageItemText(item: Record<string, unknown> | null): string {
+  if (item === null || string(item.type) !== 'message' || !Array.isArray(item.content)) return ''
+  let text = ''
+  for (const part of item.content) {
+    const value = record(part)
+    const kind = string(value?.type)
+    if (kind !== 'output_text' && kind !== 'refusal') continue
+    text += string(value?.text) ?? ''
+  }
+  return text
 }
 
 function record(value: unknown): Record<string, unknown> | null {
