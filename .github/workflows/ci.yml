@@ -19,6 +19,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      # The bundle tests import lib/index.js, which is generated and no longer
+      # committed, so the build has to land before the suite runs.
       - run: npm run build
+      - run: npm test
       - run: npm pack --dry-run

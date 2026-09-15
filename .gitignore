@@ -4,8 +4,10 @@ coverage/
 .npm-cache/
 *.tsbuildinfo
 
-# Duplicate compiler output; runtime bundles remain in lib/
-lib/types/**/*.js
+# Generated package output (bundles, declarations, source maps). Rebuilt by
+# `npm run build`, and by the publish flow's prepack hook. CI builds before it
+# tests so the bundle tests run against fresh output rather than a committed copy.
+lib/
 
 # Local configuration and credentials
 .env
