@@ -7,6 +7,7 @@ import type {
 } from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_REASONING_EFFORTS } from '../../shared/kimi-code-contracts.ts'
 import { zh } from './locales.ts'
+import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
 
 const API = '/kimi-code/api'
 
@@ -538,20 +539,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
             {t.unselectAll}
           </button>
         </div>
-        {status?.models.some((model) => model.supportsVideo || model.supportsDynamicTools || model.description) && (
-          <div className="dsha-context-settings">
-            {status.models.map((model: KimiCodeModelOption) => (
-              <div key={model.id} className="dsha-context-row">
-                <span title={model.id}>
-                  {model.name}
-                  {model.supportsVideo && <span className="dsha-model-meta">{t.capVideo}</span>}
-                  {model.supportsDynamicTools && <span className="dsha-model-meta">{t.capDynamicTools}</span>}
-                </span>
-                <span className="dsha-model-meta">{model.description ?? ''}</span>
-              </div>
-            ))}
-          </div>
-        )}
+        {status !== null && status.models.length > 0 && <KimiModelCapabilities models={status.models} />}
       </section>
 
       <section className="dsha-group">

@@ -73,6 +73,16 @@ const BASE = `
 .dsha-link:hover{text-decoration:underline}
 .dsha-model-meta{color:var(--dsw-alias-label-tertiary);font-size:11px;margin-left:5px}
 .dsha-badge{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.14));border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-tertiary);font-size:10px;padding:2px 6px}
+.dsha-cap-table{border-bottom:0.5px solid var(--dsw-alias-border-l2);padding:12px 0}
+.dsha-cap-table table{border-collapse:collapse;font-size:11px;width:100%}
+.dsha-cap-table th{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500;padding:0 10px 6px 0;text-align:left;white-space:nowrap}
+.dsha-cap-table th:last-child,.dsha-cap-table td:last-child{padding-right:0}
+.dsha-cap-table td{border-top:0.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);padding:8px 10px 8px 0;vertical-align:top}
+.dsha-cap-table td:first-child{color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap}
+.dsha-cap-table td:nth-child(2),.dsha-cap-table td:nth-child(3){white-space:nowrap}
+.dsha-cap-on{color:var(--dsw-alias-label-primary);font-weight:500}
+.dsha-cap-off{color:var(--dsw-alias-label-tertiary)}
+.dsha-cap-notes{line-height:1.5;min-width:200px}
 `
 
 /** Kimi-specific rules layered on top of the shared control styles. */
