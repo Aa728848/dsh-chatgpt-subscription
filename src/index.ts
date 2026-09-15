@@ -30,6 +30,15 @@ import {
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
 import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID } from './host/antigravity/types.ts'
+import { CommandCodeAdapter } from './host/command-code/adapter.ts'
+import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
+import {
+  FileCredentialStore as CommandCodeCredentialStore,
+  FileModelSettingsStore as CommandCodeModelSettingsStore,
+  registerCommandCodePreferenceStore,
+} from './host/command-code/token-store.ts'
+import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/command-code/types.ts'
+import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
   installSubagentModelAuthorization,
   normalizeDelegationToolNames,
@@ -78,6 +87,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const antigravityStore = new FileCredentialStore()
   const antigravityModelSettings = new FileModelSettingsStore()
   const antigravityPreferences = registerAntigravityPreferenceStore(ctx.settings, antigravityModelSettings)
+
+  const commandCodeStore = new CommandCodeCredentialStore()
+  const commandCodeModelSettings = new CommandCodeModelSettingsStore()
+  const commandCodePreferences = registerCommandCodePreferenceStore(ctx.settings, commandCodeModelSettings)
 
   // The allowlist a Session recorded outranks the current settings document,
   // because the built-in delegation tool snapshot it when the Session started.
@@ -136,6 +149,55 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       antigravityPreferences,
       proxyFetch,
     )
+    const disposeCommandCodeRoutes = registerCommandCodeRoutes(
+      ctx,
+      commandCodeStore,
+      commandCodeModelSettings,
+      commandCodePreferences,
+      {
+        fetchFn: proxyFetch,
+        serving: () => commandCodeRegistration !== undefined,
+        conflict: () => commandCodeConflict,
+      },
+    )
+    // The Command Code route is contended: another adapter family (the generic
+    // pi-ai provider, configured with this same endpoint) may already own the id.
+    // Registration is all-or-nothing and DSH rejects a duplicate route, so this
+    // module takes the route when it is free, reports the conflict when it is
+    // not, and claims it as soon as the owner releases it.
+    const commandCodeAdapter = new CommandCodeAdapter(
+      commandCodeStore,
+      commandCodeModelSettings,
+      commandCodePreferences,
+      { fetchFn: proxyFetch, attachments: ctx.attachments },
+    )
+    let commandCodeRegistration: AdapterRegistrationHandle | undefined
+    let commandCodeConflict: string | null = null
+    const claimCommandCodeRoute = (): void => {
+      if (commandCodeRegistration !== undefined) return
+      try {
+        commandCodeRegistration = ctx.llm.registerAdapter([COMMAND_CODE_PROVIDER_ID], commandCodeAdapter)
+        if (commandCodeConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] ${COMMAND_CODE_PROVIDER_NAME} route "${COMMAND_CODE_PROVIDER_ID}" is now served by this plugin`)
+        }
+        commandCodeConflict = null
+      } catch (error) {
+        commandCodeConflict = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(
+          `[dsh-chatgpt-subscription] provider route "${COMMAND_CODE_PROVIDER_ID}" is already owned by another adapter; `
+          + `${COMMAND_CODE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${commandCodeConflict})`,
+        )
+      }
+    }
+    claimCommandCodeRoute()
+    // A composition without the event seam (or a reduced test context) still
+    // serves the route; only the automatic claim on release is unavailable.
+    const commandCodeRouteWatch = typeof ctx.on === 'function'
+      ? ctx.on('llm/adapters-updated', () => {
+          claimCommandCodeRoute()
+        })
+      : undefined
+
     const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger })
     const usage = new UsageService(oauth, { fetchFn: proxyFetch })
     const responses = new ResponsesClient(oauth, ctx.attachments, {
@@ -203,6 +265,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeRoutes()
       disposeAntigravityRoutes()
       disposeAntigravityAdapter()
+      disposeCommandCodeRoutes()
+      releaseHandle(commandCodeRouteWatch)
+      commandCodeRegistration?.()
+      commandCodeRegistration = undefined
       oauth.dispose()
       proxyManager.dispose()
     }
@@ -263,6 +329,26 @@ export { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
 export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts'
 
 export { AntigravityAdapter } from './host/antigravity/adapter.ts'
+export { CommandCodeAdapter } from './host/command-code/adapter.ts'
+export {
+  FileCredentialStore as CommandCodeCredentialStore,
+  FileModelSettingsStore as CommandCodeModelSettingsStore,
+  credentialPath as commandCodeCredentialPath,
+  modelSettingsPath as commandCodeModelSettingsPath,
+  registerCommandCodePreferenceStore,
+} from './host/command-code/token-store.ts'
+export {
+  beginWebLogin as startCommandCodeLogin,
+  getWebLoginStatus as getCommandCodeLoginStatus,
+  saveApiKey as saveCommandCodeApiKey,
+} from './host/command-code/oauth.ts'
+export { getCommandCodeWebStatus, registerCommandCodeRoutes } from './host/command-code/routes.ts'
+export {
+  fetchAccountQuota as fetchCommandCodeQuota,
+  clearCachedQuota as clearCommandCodeQuota,
+  getCachedQuota as getCommandCodeQuota,
+  loadProviderModels as loadCommandCodeModels,
+} from './host/command-code/client.ts'
 export {
   FileCredentialStore,
   FileModelSettingsStore,
@@ -271,6 +357,16 @@ export {
 } from './host/antigravity/token-store.ts'
 export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts'
 export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
+
+/** Cordis event handles are either a disposer function or a disposable object. */
+function releaseHandle(handle: unknown): void {
+  if (typeof handle === 'function') {
+    (handle as () => void)()
+    return
+  }
+  const disposable = handle as { dispose?: () => void } | null | undefined
+  disposable?.dispose?.()
+}
 
 function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {
   return `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`

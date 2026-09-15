@@ -17,12 +17,16 @@ import { AntigravitySection } from './antigravity/AntigravitySection.tsx'
 import { installAntigravityStyles } from './antigravity/styles.ts'
 import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from './antigravity/locales.ts'
 import { AntigravityComposerQuota } from './antigravity/AntigravityComposerQuota.tsx'
+import { CommandCodeSection } from './command-code/CommandCodeSection.tsx'
+import { CommandCodeComposerQuota } from './command-code/CommandCodeComposerQuota.tsx'
+import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from './command-code/locales.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     'dsh-chatgpt-subscription': LocaleKey
     'dsh-antigravity': any
+    'dsh-command-code': any
   }
 }
 
@@ -36,6 +40,7 @@ export function apply(ctx: ClientContext): void {
     installAntigravityStyles()
     return () => {}
   }, 'dsh-antigravity: styles')
+  ctx.effect(() => ctx.locale.register(NS_COMMAND_CODE, commandCodeDicts), 'dsh-command-code: dictionaries')
   ctx.effect(() => setupMermaidObserver(), 'dsh-mermaid: observer')
 
   const t = ctx.locale.bind(NS)
@@ -47,20 +52,21 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
   }, CodexSubscriptionSection))
 
-  const AntigravitySectionWrapper: React.FC = () => {
-    const handleModelChange = () => {
-      try {
-        const conv = ctx.conversation as unknown as { activeSessionId?: string; currentSessionId?: string; activeId?: string }
-        const activeSessionId = conv?.activeSessionId || conv?.currentSessionId || conv?.activeId
-        if (activeSessionId && ctx.modelDirectories) {
-          const dir = ctx.modelDirectories.directoryFor(activeSessionId as any)
-          void dir?.load?.().catch?.(() => undefined)
-        }
-      } catch {
-        // best-effort
+  const handleModelDirectoryReload = () => {
+    try {
+      const conv = ctx.conversation as unknown as { activeSessionId?: string; currentSessionId?: string; activeId?: string }
+      const activeSessionId = conv?.activeSessionId || conv?.currentSessionId || conv?.activeId
+      if (activeSessionId && ctx.modelDirectories) {
+        const dir = ctx.modelDirectories.directoryFor(activeSessionId as any)
+        void dir?.load?.().catch?.(() => undefined)
       }
+    } catch {
+      // best-effort
     }
-    return <AntigravitySection onModelChange={handleModelChange} />
+  }
+
+  const AntigravitySectionWrapper: React.FC = () => {
+    return <AntigravitySection onModelChange={handleModelDirectoryReload} />
   }
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -70,6 +76,21 @@ export function apply(ctx: ClientContext): void {
     label: () => 'Antigravity',
     locale: NS_ANTIGRAVITY,
   }, AntigravitySectionWrapper))
+
+  const CommandCodeSectionWrapper: React.FC = () => {
+    // The settings card reuses the Antigravity section's refresh callback
+    // contract so a model toggle repaints the conversation model picker.
+    return <CommandCodeSection onModelChange={handleModelDirectoryReload} />
+  }
+
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'command-code',
+    order: 47,
+    label: () => 'Command Code',
+    locale: NS_COMMAND_CODE,
+  }, CommandCodeSectionWrapper))
+
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right',
     id: 'codex-subscription-quota',
@@ -101,6 +122,21 @@ export function apply(ctx: ClientContext): void {
       }
     },
   }, AntigravityComposerQuota))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'command-code-quota',
+    order: 37,
+    locale: NS_COMMAND_CODE,
+    inject: (sessionId) => {
+      const directory = ctx.modelDirectories.directoryFor(sessionId)
+      return {
+        directory: directory.store,
+        loadModelDirectory: () => {
+          void directory.load().catch(() => undefined)
+        },
+      }
+    },
+  }, CommandCodeComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

@@ -11,6 +11,7 @@
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [使用](#使用)
+- [Command Code 线路](#command-code-线路)
 - [子代理模型授权](#子代理模型授权0215-起)
 - [升级、降级与卸载](#升级降级与卸载)
 - [安全边界](#安全边界)
@@ -37,6 +38,17 @@
 - 提供 ChatGPT 订阅侧 Codex 搜索 provider，可在设置页切换 DSH 默认搜索或 Codex 订阅搜索；
 - 新增 `codex_image_generate` 工具，生成图片后通过 DSH 附件系统保存并在会话中渲染；
 - 可选 composer 快捷用量徽标，按当前 `codex-chatgpt` 模型显示最紧张窗口的剩余额度。
+
+
+**Command Code 线路**
+
+- 注册 `command-code` Provider，使用 Command Code 的 Provider API 与账户 API；模型 id 决定线路：`claude-*` 走 Anthropic Messages（`/provider/v1/messages`），其余模型走 OpenAI Chat Completions（`/provider/v1/chat/completions`），因为该 API 会拒绝把模型发到格式不符的端点；
+- 浏览器登录复刻官方 CLI 的回环回调契约（`127.0.0.1:5959` 起顺延，`/callback` 接受 Studio 页面的跨域 POST），也可在设置页手动粘贴 API Key；两条路径都先用 `/alpha/whoami` 验证再加密保存；
+- 模型目录取自公开的 `/provider/v1/models`，每个模型的 `context_length` 作为默认上下文窗口，可逐模型覆盖；
+- **模型能力逐模型查表**（`src/host/command-code/model-catalog.ts`，转录自官方 CLI 的模型注册表）：是否接受图片输入、支持哪些思考档位由该表决定，未知模型回落纯文本。图片能力不能靠厂商/模型名前缀推断——`deepseek/deepseek-v4.1-flash` 与 `deepseek/deepseek-v4-flash-vision-exp` 支持图片而 `deepseek/deepseek-v4-flash`、`deepseek/deepseek-v4-pro` 不支持，`z-ai/glm-5.3-flash` 支持而 `zai-org/GLM-5.3` 不支持；
+- 额度与用量来自账户 API 的账单/用量线路，任一条失败不影响其余；
+- **瞬时失败按 DSH retry policy 有界重试**：`command-code` 路由显式声明 `normal` 策略（最多 3 次，1.5s 起指数退避、15s 上限、0.2 抖动），覆盖 `RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`。上游模型供应商临时不可用（502/503/504/500，典型响应体是 `{"error":{"type":"server_error"}}`）被归类为 `SERVER` 并自动重试，429 会带上上游的 `Retry-After` 让退避按对方的节奏走；401/403 与 `ABORTED` 明确不重试；
+- 模型勾选（含线路标签）、思考深度、上下文窗口覆盖与额度在「设置 → Command Code」卡片集中配置，输入框右侧另有额度胶囊。
 
 **设置页**
 
@@ -122,6 +134,23 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 G
 
 **设置 → Codex 订阅 → 网络代理** 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。
 
+### Command Code
+
+1. 重启 `dsh web`；
+2. 打开 **设置 → Command Code**；
+3. 点击 **浏览器登录**（或把 Command Code Studio 里创建的 API Key 粘到「手动填写 API Key」里保存）；
+4. 登录完成后按需勾选模型、设置上下文窗口与默认思考深度。
+
+`command-code` 会像其他 Provider 一样出现在 DSH 模型选择器中。线路按模型 id 自动选择：`claude-*` 走 Anthropic Messages，其余走 OpenAI Chat Completions；设置卡片的模型标签会显示每个模型对应的线路。
+
+**路由归属**：DSH 的 `registerAdapter` 对重复 Provider 是 all-or-nothing 并抛 `DUPLICATE_ADAPTER`，因此若 `command-code` 已被别的适配器占用（典型情况是内置 `llm-pi-ai` 用同一端点声明过同名 Provider），本插件不会加载失败，而是在卡片上显示“模型路由已被其他 Provider 占用”；从占用方的配置里移除该 Provider 后，插件会在下一次路由变更事件时自动接管，无需重启 DSH。
+
+**上下文窗口**默认取 Command Code 模型目录的 `context_length`，可在卡片中逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `512K` / `200000` 等写法）。**默认思考深度**逐模型生效：下拉里列出的档位可按模型能力选用（`minimal` / `low` / `medium` / `high` / `xhigh` / `max`），实际发给上游前会按当前模型声明的档位取值——模型不声明该档位时不发送。对 Anthropic 线路映射为 `thinking` 预算（`minimal` 1K / `low` 2K / `medium` 8K / `high` 16K / `xhigh` 24K / `max` 32K），预算放不下时该请求不启用 thinking；对 OpenAI 线路映射为 `reasoning_effort`。
+
+**额度**来自 `/alpha/billing/credits`、`/alpha/billing/subscriptions` 与 `/alpha/usage/summary`，三条线路相互独立容错，页面可见时最多每 60 秒刷新一次；解析不出有界额度时显示空态而不是 0%。
+
+额度卡片展示：**套餐名**（由订阅返回的机器 id 查表得出，表在 `src/host/command-code/plans.ts`，按最长前缀匹配）、**订阅状态与续费日期**、**滚动窗口用量**（`windowLimits` 的 `fiveHour` / `weekly`，按官方 CLI 同款标签 `5-hour` / `Weekly` 显示，并各自带重置倒计时），以及**余额明细**（月度额度 / 已购额度 / 赠送额度，另附合计）。服务只回报数字不回报名称的字段一律补上可读标签——窗口按 key 命名，余额按池命名，实在没有名字的兜底为 `Extra allowance` 并注明来源，不会渲染成 `meter-1` 这类无意义编号。
+
 **搜索与抓取来源** 切换 DSH 的搜索后端；网页抓取后端在有可用代理时自动改用本插件。选择 ChatGPT 来源后，网页由本插件在 Host 抓取，并使用上述网络代理设置；纯 TUN 模式可使用直连，流量由虚拟网卡接管。来源切换即时生效，DSH web 服务重载后会重新注册插件后端，并保留切回 DSH 默认来源所需的配置。
 
 **网页抓取后端（web_fetch）** DSH 内置抓取 provider 会先解析域名、校验并固定解析结果，而且只在进程环境变量里读到代理时才走代理——系统代理对它不可见。代理工具（Clash/Mihomo 等）常把域名解析成自己的 fake-ip 地址（默认 `198.18.0.0/15`），于是内置 provider 直接以 `WEB_BLOCKED_URL`（resolves to a non-public IP address）拒绝，代理根本没被用上。因此只要插件配置了可用代理（**网络代理** 选系统代理且检测到，或填写自定义代理），`web_fetch` 就改用本插件的 provider：由代理解析源站，与 DSH 对“走代理的请求”采用的语义一致；未配置代理时仍由 DSH 内置 provider 抓取，保留其解析与固定策略。若在纯 TUN 模式下把代理设为**直连**，内置 provider 会重新接管，此时可改回系统代理让插件接管抓取。代理如果在 DSH 启动之后才可用（代理工具后启动，或首次探测失败），插件会在下一次探测到代理时重新选择抓取后端，不必重启或改设置。
@@ -156,6 +185,50 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | `subagentModelScope` | `session` | `session` 只约束记录了允许列表的会话；`preference` 额外用当前设置卡列表约束未记录的会话 |
 
 改动只在设置卡片里保存过的勾选生效：设置改动只影响之后新建的会话（DSH 的会话快照语义），已运行的会话继续使用它自己记录的那份列表。
+
+## Command Code 线路
+
+插件注册 `command-code` Provider，对接 Command Code 的两套接口：
+
+| 用途 | 地址 |
+| --- | --- |
+| 模型生成（Anthropic 格式） | `https://api.commandcode.ai/provider/v1/messages` |
+| 模型生成（OpenAI 格式） | `https://api.commandcode.ai/provider/v1/chat/completions` |
+| 模型目录（公开） | `https://api.commandcode.ai/provider/v1/models` |
+| 账号信息 | `https://api.commandcode.ai/alpha/whoami` |
+| 额度与用量 | `/alpha/billing/credits`、`/alpha/billing/subscriptions`、`/alpha/usage/summary` |
+| 浏览器登录页 | `https://commandcode.ai/studio/auth/cli` |
+
+模型 id 决定线路（`claude-*` 为 Anthropic），这也决定了请求体形态：Anthropic 线路的系统提示词放在顶层 `system`、工具用 `input_schema`、工具结果用 `tool_result` 内容块；OpenAI 线路的系统提示词是 `messages[0]`、工具用 `function.parameters`、工具结果用 `role: "tool"`。两条线路都只把 DSH 交付的可见文本、图片与工具调用发出去——reasoning 块不会被回放，因为这里的上游都不接受缺少签名的思考块。
+
+**模型能力表**（`src/host/command-code/model-catalog.ts`）逐模型声明 `inputModalities`、`reasoningEfforts`、`contextWindow` 与可选的输出上限，内容转录自官方 CLI 的模型注册表——公开的 `/provider/v1/models` 只有 id、名称与 `context_length`，既不说模态也不说思考档位，而族级前缀推断在同一厂商内部就会出错（见上）。模型不在表内时按纯文本、无思考档位处理：DSH 会把图片转成一条可见的占位文本让用户改选模型，而反过来把图片发给不接受它的端点会让整个请求失败。
+
+图片以 base64 内联（OpenAI 线路 `image_url` 的 `data:` URL，Anthropic 线路 `image` 块的 `base64` source）；单次请求的图片负载超过 12 MiB 时按最旧优先替换为本插件同款占位文案。读不出字节的图片降级为可见说明文本，不会被静默丢弃。
+
+**失败分类与重试**：`command-code` 路由在注册时携带一份显式的 `normal` retry policy（`maxRetries: 3`、`initialDelayMs: 1500`、`maxDelayMs: 15000`、`jitterRatio: 0.2`），可重试码为 `RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`——与 `codex-chatgpt` 路由同源，只是未包含该路由的历史码 `SERVER_ERROR`/`NETWORK`。分类规则：HTTP 5xx（含上游 502）→ `SERVER`；连接层失败（fetch 抛错）→ `TRANSPORT`；429 → `RATE_LIMIT` 并附 `Retry-After`（上限 10 分钟）；401/403 → `INVALID_CREDENTIAL`（换 Key，不重试）；流式空闲超时由看门狗转成 `TIMEOUT`。策略由 DSH 的 `dsh-llm-retry` 插件在 `agent/request-error` 上执行，每次重试都会写入 `llm/retry` 会话事件。
+
+**凭据存储**：API Key 使用与 Antigravity 相同的系统凭据存储——Windows 是 CurrentUser DPAPI（`$DSH_HOME/storages/command-code-credentials.json.dpapi`），macOS 是登录钥匙串，Linux 是 Secret Service（服务名 `dsh-command-code`，账号键按旧凭据文件绝对路径生成）。旧版明文 JSON 只作为迁移来源，读取后加密回写、校验并删除；注销会同时清理两者。凭据只存在于 Host 内存与系统凭据存储中，不会进入浏览器、`settings.yaml` 或日志。
+
+**浏览器登录的回环服务器**只在 `127.0.0.1` 上监听 5959 起的空闲端口，只接受与该次登录 `state` 匹配的回调，10 KB 请求体上限，5 分钟超时；回调成功后浏览器标签页会跳到 `/callback/complete` 上的人工可读页面。登录成功后 Studio 页面回传的 API Key 会先经 `/alpha/whoami` 验证，验证失败的 Key 不会被保存。
+
+### 插件路由（Command Code）
+
+所有路由都以 `/command-code/api` 为前缀：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/status` | 账号（脱敏）、额度、模型目录与路由归属 |
+| POST | `/login` | 开始浏览器登录，返回登录页地址 |
+| GET | `/login/status` | 查询登录进度 |
+| POST | `/login/apikey` | 校验并保存手动填写的 API Key |
+| POST | `/logout` | 注销并清理凭据与缓存 |
+| GET / POST | `/quota` | 强制刷新额度（POST）或读取当前状态（GET） |
+| GET / POST | `/models` | 读取或更新勾选的模型与上下文窗口 |
+| POST | `/settings` | 更新默认思考深度与上下文窗口覆盖 |
+| POST | `/catalog/refresh` | 强制刷新模型目录 |
+| POST | `/connection/test` | 用已存凭据调用 `/alpha/whoami` 测试连接 |
+
+与 `codex-chatgpt` 线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
 
 ## 安全边界
 
@@ -220,3 +293,9 @@ npm pack --dry-run
 | DPAPI 读取失败 | 确认 DSH 以创建凭据时的同一 Windows 用户运行；必要时清理凭据后重新登录 |
 | Linux 凭据存储不可用 | 确认凭据属于当前用户且权限为 `0600`，父目录权限为 `0700`；修复权限或注销后重新登录 |
 | Linux 上工具调用语法错误 | 确认 DSH 暴露的是 `bash`、`sh` 或 `shell`，并使用相应的 Bash/POSIX 语法与 `/` 路径 |
+| `command-code` 模型不出现在选择器里 | 卡片上若显示“模型路由已被其他 Provider 占用”，从占用方（常见是 `llm-pi-ai` 的 `command-code` 条目）移除该 Provider，插件会在下一次路由变更时自动接管；否则检查是否勾选了模型 |
+| Command Code 登录失败 | 确认 5959–5968 端口未被占用；无浏览器环境改用手动填写 API Key；`state` 校验失败时重开一次登录 |
+| Command Code 返回 401 | 设置页重新登录或重新粘贴 API Key；插件不会保存无法通过 `/alpha/whoami` 的 Key |
+| Claude 模型报格式错误 | 该 API 只接受把 `claude-*` 发到 `/messages`；请使用插件自动选择的线路，不要手工把 Claude 模型指向 OpenAI 端点 |
+| Command Code 额度显示为空 | 账户 API 的账单/用量线路可能只对部分套餐开放；空态是解析不出有界额度时的正常表现，可点「刷新用量」重试 |
+| Command Code 报 502 `Upstream model provider is temporarily unavailable` | 这是上游模型供应商的瞬时故障，不是账号或 API Key 的问题：插件会按 DSH retry policy 自动重试（最多 3 次）；连续失败即换用同一账号下的其他模型，或稍后再试 |

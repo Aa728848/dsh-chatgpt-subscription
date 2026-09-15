@@ -152,6 +152,8 @@ describe('client registration', () => {
     expect(injectedSlots).toEqual([
       'settings.section',
       'settings.section',
+      'settings.section',
+      'conversation.input.right',
       'conversation.input.right',
       'conversation.input.right',
       'tool.call.toolview',
@@ -159,10 +161,12 @@ describe('client registration', () => {
     expect(registrations.filter((registration) => registration.name === 'settings.section')).toEqual([
       expect.objectContaining({ name: 'settings.section', id: 'codex-subscription', order: 45 }),
       expect.objectContaining({ name: 'settings.section', id: 'antigravity', order: 46 }),
+      expect.objectContaining({ name: 'settings.section', id: 'command-code', order: 47 }),
     ])
     expect(registrations.filter((registration) => registration.name === 'conversation.input.right')).toEqual([
       expect.objectContaining({ name: 'conversation.input.right', id: 'codex-subscription-quota', order: 35 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'antigravity-quota', order: 36 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'command-code-quota', order: 37 }),
     ])
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
       key: CODEX_IMAGE_TOOL_NAME,
