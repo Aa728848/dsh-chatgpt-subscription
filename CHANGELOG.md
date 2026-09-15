@@ -79,7 +79,10 @@
   - **请求体守卫不再二次序列化、也不再被用户文本欺骗**：原先用 `JSON.stringify(body).includes('"video_url"')` 判断是否带视频——body 可达数十 MB 却被序列化两次，且用户消息里只要出现该字面量就会把 2 MB 守卫放宽到 64 MB。现由调用方显式传 `carriesVideo`（复用已有的 `requestHasVideo`）。
   - **不再超前宣称视频能力**：模型确实接受视频，但本插件与 DSH 的附件服务都没有视频生产者/读取者（`videos` 读取器从未在 `src/index.ts` 注入），实际永远走 `unreadable` 占位。能力表因此把标签标为「视频*」并加脚注说明当前版本没有上传入口、不会发出视频内容块，避免 UI 承诺与实际可达路径不符。
   - 清理 `classifyKimiFailure` 中 `isLimit ? 'PROVIDER_ERROR' : 'PROVIDER_ERROR'` 的死三元（两分支同值，读起来像意图未实现）。
-  - 新增 `test/kimi-code-review-fixes.test.ts`（11 条）逐条钉住上述缺陷：显式 `false` 生效、三态回退边界、文本只出现一次、Anthropic 提示、守卫不被文本欺骗、声明经 JSON 往返后仍可发送；`test/kimi-code-capability-ui.test.tsx` 增加脚注相关 1 条。
+  - **修复上一轮修复引入的回归**：`leadingSystemText` 是两条 wire 共用的，跳过声明载体后，只有 OpenAI 路径会在载体原位置重发文本；Anthropic 路径因此**整段丢失载体文本**（只剩工具数量提示），恰好违反 `declarationSlots` 注释里「丢掉 system 文本会静默改变模型收到的信息」这条原则。现在 Anthropic 路径会把载体文本拼回 `system`（排在 notice 之前），并加了 2 条回归用例——其中顺序断言特意先 `>= 0` 再比较，否则文本缺失时 `indexOf` 返回 -1 会让断言**空过**。
+  - 顺手清理审查指出的三处小瑕疵：`classifyKimiFailure` 中删掉三元后遗留的未引用 `isLimit`（改为真正参与文案选择的 `limitReached`）；`client.ts` 里错位堆在 `dynamicToolsForEntry` 上方的「Input modalities」注释归位；`withMessageTools` 的注释原先一边说「非枚举所以其他读者看不到」一边字符串键副本是 `enumerable: true`，改为明确写清两个副本可见性不同及其原因。
+  - `assertRequestBodyFits` 现在**返回**它序列化出的 body，供适配器直接复用：此前带视频时同一个数十 MB 的 body 会被 `JSON.stringify` 两次。
+  - 新增 `test/kimi-code-review-fixes.test.ts`逐条钉住上述缺陷：显式 `false` 生效、三态回退边界、文本只出现一次、Anthropic 提示、守卫不被文本欺骗、声明经 JSON 往返后仍可发送；`test/kimi-code-capability-ui.test.tsx` 增加脚注相关 1 条。
 
 - **重排模型能力展示**：此前把能力说明当成长句塞在模型名那一列，把名称列撑开、右侧描述错位。现改为独立的四列表格（模型 / 多模态 / 动态工具 / 说明）：能力只显示短标签（视频 / 仅图片 / 动态工具 / —），逐模型的协议、默认思考档位与所需套餐移入悬停提示；表格自身不再附带任何解释段落。表格抽成可测组件 `KimiModelCapabilities`（`src/client/kimi-code/KimiModelCapabilities.tsx`），新增 `test/kimi-code-capability-ui.test.tsx`（5 条）钉住列数、每模型一行、长句不得进入单元格、悬停内容，以及说明为空时不渲染 `null`。该表也**不再依赖 `description` 是否存在**——实时目录条目缺描述时整个表格（含能力）仍渲染。
 - 澄清并测试这两项能力的**跨模型隔离**：机制本身有三重隔离——符号载体**不可枚举**（其他线路的序列化器看不到它）、映射器只在 `messageTools === true` 时输出、且声明只存在于 Kimi 的 OpenAI 线路映射中。新增 `test/kimi-code-capability-isolation.test.ts`（6 条）：Command Code 各模型仍不含 video（证明模块增强是**纯类型、不产生运行时值**）、Kimi 四个模型 id 的 video 与 dynamically_loaded_tools 与官方能力表**逐项**一致（并断言两者并非同一集合：HighSpeed 有 video 却无动态工具）、视频块不会出现在兄弟线路的请求体里、同一段历史里的声明也不会被兄弟线路带出去。

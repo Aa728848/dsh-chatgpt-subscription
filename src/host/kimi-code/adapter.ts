@@ -229,11 +229,13 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       // same either way; the matched-limit test only selects which sentence the
       // user reads. The previous form branched to one value and read as though
       // the two cases were meant to differ.
-      const isLimit = matchesAny(detail, ACCOUNT_LIMIT_PATTERNS)
+      // Every 403 here is an account-level refusal, so the sentence shown is the
+      // only thing that varies; the code is the same either way.
+      const limitReached = matchesAny(detail, ACCOUNT_LIMIT_PATTERNS)
       return {
         code: 'PROVIDER_ERROR',
         retryable: false,
-        message: `${PROVIDER_NAME} blocked the request on an account limit (403): ${detail || 'the account limit was reached'}. The quota refreshes on its own schedule — check the Kimi Code card in Settings for the reset time.`,
+        message: `${PROVIDER_NAME} blocked the request on an account limit (403): ${detail || (limitReached ? 'the account limit was reached' : 'the account refused the request')}. The quota refreshes on its own schedule — check the Kimi Code card in Settings for the reset time.`,
       }
     }
     return {
@@ -489,8 +491,9 @@ export class KimiCodeAdapter extends LlmAdapter {
       maxTokens: clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions)),
     }
     const built = buildRequest(boundedOptions, wire, images, undefined, media)
-    assertRequestBodyFits(built, requestHasVideo(requestOptions))
-    const body = JSON.stringify(built)
+    // The guard returns the serialized body it measured, so the multi-megabyte
+    // string is built once instead of twice.
+    const body = assertRequestBodyFits(built, requestHasVideo(requestOptions))
 
     const region = credentials.region ?? await resolveRegion()
     const base = (credentials.baseUrl ?? codingBaseUrl(region)).replace(/\/+$/, '')

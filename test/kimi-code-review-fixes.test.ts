@@ -87,6 +87,32 @@ describe('the Anthropic wire reports declarations it cannot carry', () => {
     expect(String(body.system)).toContain('Anthropic')
   })
 
+  it('keeps carrier text that only the OpenAI path would otherwise re-emit', () => {
+    // Regression: leadingSystemText skips declaration carriers on BOTH wires,
+    // but only the OpenAI path re-emits the text at the carrier slot. This wire
+    // then lost the text entirely, silently changing what the model was told.
+    const body = buildAnthropicRequest(options({
+      messages: [declaration('search_docs', 'CARRIER_INSTRUCTION')],
+    }))
+    expect(String(body.system)).toContain('CARRIER_INSTRUCTION')
+    // ...and it must not be duplicated either.
+    expect((JSON.stringify(body).match(/CARRIER_INSTRUCTION/g) ?? [])).toHaveLength(1)
+  })
+
+  it('orders the notice after the preserved carrier text', () => {
+    const body = buildAnthropicRequest(options({
+      messages: [declaration('search_docs', 'CARRIER_INSTRUCTION')],
+    }))
+    const system = String(body.system)
+    const textAt = system.indexOf('CARRIER_INSTRUCTION')
+    const noticeAt = system.indexOf('were not sent')
+    // Guard against the vacuous case: a missing text has index -1, which would
+    // satisfy the ordering comparison on its own.
+    expect(textAt).toBeGreaterThanOrEqual(0)
+    expect(noticeAt).toBeGreaterThanOrEqual(0)
+    expect(textAt).toBeLessThan(noticeAt)
+  })
+
   it('leaves the system prompt alone when there are no declarations', () => {
     const body = buildAnthropicRequest(options())
     expect(JSON.stringify(body)).not.toContain('were not sent')

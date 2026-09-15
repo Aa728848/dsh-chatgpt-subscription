@@ -735,10 +735,16 @@ export const MESSAGE_TOOLS_KEY = 'kimiCodeMessageTools'
 /**
  * Attach message-level tool declarations to one system message.
  *
- * The property is non-enumerable so ordinary readers of a message - the session
- * log, the transcript UI, a sibling adapter - never see a field they cannot
- * honour, but JSON persistence still serializes it because it is a real own
- * string-keyed property.
+ * Two copies are written deliberately, and they differ in visibility:
+ *
+ * - the SYMBOL copy is non-enumerable, so a reader that inspects a message the
+ *   ordinary way (the transcript UI, a sibling adapter) sees nothing new and
+ *   cannot mistake an unhandled field for something it must act on;
+ * - the STRING-KEYED copy is enumerable, because JSON persistence only
+ *   serializes enumerable string keys and a declaration that vanishes on
+ *   session resume is worse than one that is visible. Readers that do walk the
+ *   keys will see `kimiCodeMessageTools`; the convention is that only this
+ *   route's mapper interprets it.
  */
 export function withMessageTools<T extends Message>(message: T, tools: readonly DynamicToolDeclaration[]): T {
   const copy = [...tools]
@@ -1194,10 +1200,21 @@ export function buildAnthropicRequest(
   // does not document, so none is emitted. The count is still reported in the
   // system prompt: without that, a model switched onto this wire would try to
   // call tools it can no longer see, and nothing in the request would say why.
-  const unsentDeclarations = options.messages.reduce(
-    (total, message) => total + (message.role === 'system' ? (messageToolsOf(message)?.length ?? 0) : 0),
+  const carriers = options.messages.filter(
+    (message) => message.role === 'system' && messageToolsOf(message) !== undefined,
+  )
+  const unsentDeclarations = carriers.reduce(
+    (total, message) => total + (messageToolsOf(message)?.length ?? 0),
     0,
   )
+  // `leadingSystemText` skips declaration carriers on both wires, because the
+  // OpenAI path re-emits their text at the carrier's own position. This wire has
+  // no such slot, so the text is collected here instead: dropping it would
+  // silently change what the model was told, which is the one outcome the
+  // declaration handling exists to avoid.
+  const carrierText = carriers
+    .map((message) => textOf(message.content))
+    .filter((text) => text !== '')
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message)) {
@@ -1213,9 +1230,12 @@ export function buildAnthropicRequest(
   }
 
   const leading = leadingSystemText(options)
-  const system = unsentDeclarations === 0
-    ? leading
-    : [leading, declarationNotice(options.model, unsentDeclarations, 'wire')].filter((part) => part !== undefined).join('\n\n')
+  const systemParts = [
+    leading,
+    ...carrierText,
+    ...(unsentDeclarations === 0 ? [] : [declarationNotice(options.model, unsentDeclarations, 'wire')]),
+  ].filter((part): part is string => part !== undefined && part !== '')
+  const system = systemParts.length === 0 ? undefined : systemParts.join('\n\n')
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
   const effort = mapReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
   const budget = thinkingBudgetFor(effort, maxTokens)
@@ -1271,8 +1291,11 @@ export function buildRequest(
  * remedy (DSH's compaction), and a request that cannot succeed should not be
  * sent at all. The measured size is the real serialized body, so it accounts
  * for tool schemas and inlined images the caller cannot easily estimate.
+ *
+ * @returns the serialized body, so a caller that is about to send it does not
+ * serialize a body of up to tens of megabytes a second time.
  */
-export function assertRequestBodyFits(body: Record<string, unknown>, carriesVideo = false): void {
+export function assertRequestBodyFits(body: Record<string, unknown>, carriesVideo = false): string {
   const serialized = JSON.stringify(body)
   const bytes = Buffer.byteLength(serialized, 'utf8')
   // Video raises the ceiling: the 2 MB figure is the documented text/image
@@ -1284,7 +1307,7 @@ export function assertRequestBodyFits(body: Record<string, unknown>, carriesVide
   // full serialization of a body that can reach tens of megabytes and let user
   // text containing that literal widen the text/image guard.
   const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : MAX_MESSAGE_BODY_BYTES
-  if (bytes <= limit) return
+  if (bytes <= limit) return serialized
   throw new LlmError(
     `Kimi Code rejected the request before sending: the serialized body is ${bytes} bytes, above the `
     + `${limit}-byte limit this route enforces. Compact the conversation or start a new `

@@ -296,7 +296,6 @@ export function reasoningEffortsForEntry(modelId: string, catalog: readonly Kimi
   return reasoningEffortsFor(modelId)
 }
 
-/** Input modalities for one model, from the catalog when it declares them. */
 /**
  * Whether one model accepts message-level tool declarations.
  *
@@ -317,6 +316,7 @@ export function dynamicToolsForEntry(
   return kimiCodeModelDef(modelId)?.supportsDynamicTools === true
 }
 
+/** Input modalities for one model, from the catalog when it declares them. */
 export function inputModalitiesForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): Array<'text' | 'image' | 'video'> {
   const entry = catalog.find((model) => model.id === modelId)
   if (entry?.inputModalities !== undefined) return [...entry.inputModalities]
