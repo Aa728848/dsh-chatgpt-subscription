@@ -47,7 +47,6 @@ function extensionFor(mediaType: string): string {
     'video/webm': '.webm',
     'video/quicktime': '.mov',
     'video/x-msvideo': '.avi',
-    'video/x-matroska': '.mkv',
     'video/mpeg': '.mpeg',
     'video/mpg': '.mpg',
     'video/x-flv': '.flv',
@@ -63,7 +62,6 @@ const EXTENSION_MEDIA_TYPES: Record<string, string> = {
   '.webm': 'video/webm',
   '.mov': 'video/quicktime',
   '.avi': 'video/x-msvideo',
-  '.mkv': 'video/x-matroska',
   '.mpeg': 'video/mpeg',
   '.mpg': 'video/mpg',
   '.flv': 'video/x-flv',
@@ -83,15 +81,18 @@ export function mediaTypeForPath(filePath: string): string | undefined {
 }
 
 /**
- * Whether the service documents this container.
+ * Whether this route will actually send this container.
  *
- * Matroska (.mkv) is accepted by the third-party integrations but is not in
- * the vision guide's list, so it is stored and reported but the request mapper
- * still decides whether to send it; keeping both facts separate means a future
- * documentation change is a one-line edit here.
+ * The ingress accepts exactly what the mapper can put on the wire, so a file
+ * is either accepted and sent or refused with a reason. An earlier revision
+ * also stored Matroska (.mkv), which some third-party integrations accept but
+ * the vision guide does not list; that produced a video reported as "attached"
+ * which the mapper then silently downgraded to a placeholder. Accepting only
+ * {@link KIMI_VIDEO_MEDIA_TYPES} keeps the tool's promise and the wire's
+ * behaviour the same thing.
  */
 export function isStorableVideoType(mediaType: string): boolean {
-  return Object.values(EXTENSION_MEDIA_TYPES).includes(mediaType) || KIMI_VIDEO_MEDIA_TYPES.includes(mediaType)
+  return KIMI_VIDEO_MEDIA_TYPES.includes(mediaType)
 }
 
 /** Raised when an ingest cannot produce a usable reference. */
@@ -152,12 +153,65 @@ export async function saveVideo(input: {
     await fs.rename(tmp, target)
   }
 
+  // Pruning is best-effort and happens only on write, so a slow or failed
+  // prune can never delay or break the attachment that triggered it.
+  void pruneVideoStore().catch(() => undefined)
+
   return {
     attachmentId,
     mediaType: input.declaredType,
     bytes: input.data.byteLength,
     name: input.name,
   }
+}
+
+/**
+ * Total bytes the store may occupy before it prunes itself.
+ *
+ * Videos are content-addressed and re-attaching an identical file costs nothing,
+ * but nothing ever removed an old clip, so the directory only grew. The budget
+ * is deliberately generous (a few large clips) and enforced only on write, so a
+ * prune never runs during a read of the clip about to be sent.
+ */
+export const VIDEO_STORE_BUDGET_BYTES = 512 * 1024 * 1024
+
+/**
+ * Drop the least recently used objects until the store fits its budget.
+ *
+ * Recency is the object's mtime, which writing refreshes, so a clip that was
+ * just re-attached is not the one evicted. Failure is swallowed: a store that
+ * cannot be pruned must not fail the attachment the caller asked for.
+ */
+export async function pruneVideoStore(budgetBytes = VIDEO_STORE_BUDGET_BYTES): Promise<number> {
+  const dir = videoStoreDir()
+  let entries: Array<{ path: string; size: number; atime: number }>
+  try {
+    const names = await fs.readdir(dir)
+    entries = []
+    for (const name of names) {
+      if (name.includes('.tmp.')) {
+        // A crashed write left a partial file behind; it is never referenced.
+        await fs.rm(path.join(dir, name), { force: true }).catch(() => undefined)
+        continue
+      }
+      const stats = await fs.stat(path.join(dir, name)).catch(() => undefined)
+      if (stats === undefined || !stats.isFile()) continue
+      entries.push({ path: path.join(dir, name), size: stats.size, atime: stats.mtimeMs })
+    }
+  } catch {
+    return 0
+  }
+  let total = entries.reduce((sum, entry) => sum + entry.size, 0)
+  if (total <= budgetBytes) return 0
+  entries.sort((a, b) => a.atime - b.atime)
+  let removed = 0
+  for (const entry of entries) {
+    if (total <= budgetBytes) break
+    await fs.rm(entry.path, { force: true }).catch(() => undefined)
+    total -= entry.size
+    removed += 1
+  }
+  return removed
 }
 
 /** Path of the stored object for a reference, or undefined when it is gone. */

@@ -335,7 +335,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeProxyWatch()
       disposePreferenceWatch()
       disposeImageTool()
-    disposeVideoTool()
+      disposeVideoTool()
       disposeAdapter()
       disposeRoutes()
       disposeAntigravityRoutes()

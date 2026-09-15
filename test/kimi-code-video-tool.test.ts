@@ -86,6 +86,31 @@ describe('video store', () => {
     })).rejects.toThrow(/above the/)
   })
 
+  it('refuses Matroska, which this route can store but never send', async () => {
+    // The ingress accepts exactly what the mapper will put on the wire; storing
+    // mkv would have reported "attached" and then sent a placeholder.
+    const type = mediaTypeForPath('/a/b.mkv')
+    expect(type).toBeUndefined()
+    await expect(saveVideo({ data: MP4, declaredType: 'video/x-matroska', name: 'b.mkv' }))
+      .rejects.toThrow(/unsupported video type/)
+  })
+
+  it('prunes the oldest objects once the store exceeds its budget', async () => {
+    const { pruneVideoStore } = await import('../src/host/kimi-code/video-store.ts')
+    // Three distinct payloads, each padded to be a real size, under a budget
+    // that only fits one.
+    const big = (seed: number): Uint8Array => new Uint8Array(4096).fill(seed)
+    const a = await saveVideo({ data: big(1), declaredType: 'video/mp4', name: 'a.mp4' })
+    const b = await saveVideo({ data: big(2), declaredType: 'video/mp4', name: 'b.mp4' })
+    const c = await saveVideo({ data: big(3), declaredType: 'video/mp4', name: 'c.mp4' })
+    const removed = await pruneVideoStore(4096)
+    expect(removed).toBeGreaterThan(0)
+    // The most recently written survives; the earliest is gone.
+    await expect(readVideoBytes(c)).resolves.toBeDefined()
+    await expect(readVideoBytes(a)).rejects.toThrow()
+    void b
+  })
+
   it('refuses a reference it did not issue', async () => {
     await expect(readVideoBytes({ attachmentId: 'not-a-digest', mediaType: 'video/mp4', bytes: 1 }))
       .rejects.toThrow(/not one this store issued/)

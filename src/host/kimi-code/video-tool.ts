@@ -17,12 +17,11 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { lookup } from 'node:dns/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { HarnessError, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { assertPublicFetchTarget } from '../fetch-address-policy.ts'
+import { assertPublicFetchTarget, lookupHostAddresses } from '../fetch-address-policy.ts'
 import { MAX_VIDEO_FILE_BYTES, mediaTypeForPath, saveVideo, VideoIngestError } from './video-store.ts'
 
 export const KIMI_VIDEO_TOOL_NAME = 'kimi_attach_video'
@@ -107,7 +106,7 @@ async function readLocalFile(input: string): Promise<{ data: Uint8Array; name: s
   const type = mediaTypeForPath(input)
   if (type === undefined) {
     throw new HarnessError(
-      `unsupported video extension "${path.extname(input)}"; supported: .mp4 .m4v .webm .mov .avi .mkv .mpeg .mpg .flv .wmv .3gp`,
+      `unsupported video extension "${path.extname(input)}"; supported: .mp4 .m4v .webm .mov .avi .mpeg .mpg .flv .wmv .3gp`,
       'KIMI_VIDEO_TYPE_UNSUPPORTED',
     )
   }
@@ -138,9 +137,9 @@ async function fetchRemoteVideo(
       'KIMI_VIDEO_URL_INVALID',
     )
   }
-  const addresses = await lookup(parsed.hostname, { all: true })
-    .then((entries) => entries.map((entry) => entry.address))
-    .catch(() => [] as string[])
+  // The shared resolver is reused rather than a local lookup, so a change to
+  // how this deployment resolves names reaches every consumer at once.
+  const addresses = await lookupHostAddresses(parsed.hostname).catch(() => [] as readonly string[])
   // Throws WebError WEB_BLOCKED_URL for a private destination, including a
   // name this machine resolves into private space.
   assertPublicFetchTarget(parsed.hostname, addresses)

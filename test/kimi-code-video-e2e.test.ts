@@ -1,16 +1,30 @@
 /**
- * End-to-end test for the video path: the tool ingests a file, and the block it
- * injects must survive request assembly to reach the wire.
+ * Tests for the video path from a stored file to the serialized request.
  *
- * The pieces were each tested in isolation, but the risk they share lives in
- * the seam: DSH's request pipeline projects images and files, and this block is
- * neither, so it has to pass through untouched for the feature to work at all.
+ * SCOPE, stated honestly: this is NOT an end-to-end test of the DSH service.
+ * It covers the request-mapping stage — stored bytes resolved, then serialized
+ * into a `video_url` part — plus the installed runtime's own content helpers
+ * (the image predicate every request passes through, and the token estimator
+ * that prices the message).
+ *
+ * What stays unverified is the DSH loop around a video block: session
+ * persistence, compaction, and transcript rendering. Those consume
+ * `Message.content` and this block type is not theirs. The installed
+ * `@deepseek-ai/dsh-llm` (0.1.1-rc.2 — note the checkout in this workspace is
+ * 0.1.5-rc.1, so it is NOT what runs here) projects images only and has no file
+ * projection at all, which is what the assertions below pin. Confirming the
+ * loop itself needs an on-install check: attach a video, end the session,
+ * resume it, and verify the model still receives the clip.
  */
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { buildOpenAIRequest, resolveRequestVideos, offloadOldestRequestVideos } from '../src/host/kimi-code/mapper.ts'
+// The barrel of the INSTALLED runtime exports the image helpers; the token
+// estimator is reached through the meter's public class. Both are the code a
+// request actually runs against, not the workspace checkout.
+import { contentHasImage, projectImagesForTextModel } from '@deepseek-ai/dsh-llm'
+import { buildOpenAIRequest, estimatedInputTokens, resolveRequestVideos, offloadOldestRequestVideos } from '../src/host/kimi-code/mapper.ts'
 import { readVideoBytes, saveVideo } from '../src/host/kimi-code/video-store.ts'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 
@@ -69,6 +83,54 @@ describe('video reaches the wire from a stored file', () => {
     const parts = (body.messages as Array<Record<string, unknown>>)[0]?.content
     expect(typeof parts).toBe('string')
     expect(String(parts)).toContain('could not be read')
+  })
+
+  it('survives the image projection the installed runtime applies', async () => {
+    // The installed runtime projects images out for a text-only model before
+    // dispatch. A video must not be mistaken for an image, or the projection
+    // would replace the clip with a placeholder.
+    const ref = await saveVideo({ data: MP4, declaredType: 'video/mp4', name: 'demo.mp4' })
+    const message = { role: 'user', content: [{ type: 'video', attachment: ref }] } as unknown as Message
+
+    expect(contentHasImage(message.content)).toBe(false)
+    const afterImages = projectImagesForTextModel([message])
+    expect(afterImages[0]).toBe(message)
+    // ...and the block still carries its reference unchanged.
+    const block = (afterImages[0]!.content[0]) as unknown as { type: string; attachment: { attachmentId: string } }
+    expect(block.type).toBe('video')
+    expect(block.attachment.attachmentId).toBe(ref.attachmentId)
+  })
+
+  it('leaves the output cap alone for a request it cannot measure', async () => {
+    // The route's prompt estimate counts text only, so a video-only request
+    // measures as empty and reports "no estimate" rather than zero. That is the
+    // safe direction: the caller leaves the output cap at the model's own
+    // maximum instead of clamping it against a prompt size it never saw. What
+    // matters here is that the unknown block is tolerated, not priced.
+    const ref = await saveVideo({ data: MP4, declaredType: 'video/mp4', name: 'demo.mp4' })
+    const request = {
+      model: 'k3',
+      messages: [{ role: 'user', content: [{ type: 'video', attachment: ref }] } as unknown as Message],
+    } as GenerateOptions
+    expect(() => estimatedInputTokens(request)).not.toThrow()
+    expect(estimatedInputTokens(request)).toBeUndefined()
+  })
+
+  it('downgrades a video to text for a model that cannot take one', async () => {
+    // The other half of the gate: a session that switches to an image-only
+    // model must still send a coherent request.
+    const ref = await saveVideo({ data: MP4, declaredType: 'video/mp4', name: 'demo.mp4' })
+    const request = {
+      model: 'k3-256k',
+      messages: [{ role: 'user', content: [{ type: 'video', attachment: ref }] } as unknown as Message],
+    } as GenerateOptions
+    const videos = await resolveRequestVideos(request, {
+      readVideo: async (videoRef) => ({ data: await readVideoBytes(videoRef), mediaType: videoRef.mediaType }),
+    })
+    const body = buildOpenAIRequest(request, new Map(), true, { videos, videoAccepted: false })
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toContain('video_url')
+    expect(serialized).toContain('does not accept video input')
   })
 
   it('leaves a video-free request untouched', async () => {

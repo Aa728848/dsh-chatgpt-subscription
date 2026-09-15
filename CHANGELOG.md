@@ -70,6 +70,11 @@
 - 声明所在 system 消息**同时带有文本**时不再静默丢弃：服务的动态工具 schema 没有 `content` 字段，两者无法合成一条消息，因此现在保留文本（另发一条），并把声明替换为明确的说明消息，而不是让工具无声消失。
 - **按官方 CLI 的能力表逐模型修正两项能力**（依据 `managed:kimi-code` 托管模型表里每个模型的 `capabilities` 列表）：`k3` = image_in + video_in + dynamically_loaded_tools；`k3-256k` = image_in + **dynamically_loaded_tools**（无 video）；`kimi-for-coding` = image_in + video_in + **dynamically_loaded_tools**；`kimi-for-coding-highspeed` = image_in + video_in（**无** dynamically_loaded_tools）。修正了先前把 `dynamically_loaded_tools` 当成「K3 独有」的推导错误——官方线文档只提 K3 是因为它描述的是 K3 的请求 schema，而 CLI 自己的能力表把它也标给了 K2.8 Preview。
 - 修正能力判定与官方表格的一致性（已对照 https://www.kimi.com/code/docs/en/kimi-code/models.html 逐项核对）：`k3` 与 `kimi-for-coding` 为「Image, video」、`k3-256k` 为「Image only」，与内置表一致；`kimi-for-coding-highspeed` 官方标为 K2.7 Code HighSpeed，「Thinking: ON」且无可选档位，故其固有档位仍按官方标注为 `high`。
+- 按第二轮审计修正视频入口的几处问题：
+  - **`.mkv` 能存不能发**：入口白名单收 `.mkv`（存为 `video/x-matroska`）而 mapper 的 `isVideoMediaType` 不含它，导致用户挂载 mkv 会收到「Attached video ✅」，模型却只拿到 `unsupported-container` 占位文本。现在入口**只接受 mapper 真能发出的容器**（即 `KIMI_VIDEO_MEDIA_TYPES`），mkv 在入口即被拒绝并说明——入口承诺与线上行为从此是同一件事。
+  - **`e2e` 注释的覆盖声称超出实际**：该测试直调 `buildOpenAIRequest`，从不经过 DSH 真实管道。注释已改为如实说明「覆盖请求映射阶段 + 安装版运行时的内容助手」，并明确列出**未**覆盖的部分（会话持久化 / compaction / transcript），要求装机实测。过程中还发现一个值得记录的事实：本仓库**安装版 `@deepseek-ai/dsh-llm` 是 0.1.1-rc.2**（根 barrel 只导出 `contentHasImage` / `projectImagesForTextModel`，**完全没有** file 投影），而工作区 checkout 是 0.1.5-rc.1——两者不是同一份代码，断言已改为针对实际运行的那份。
+  - **视频存储新增回收**：内容寻址让重复挂载免费，但此前没有任何清理，目录只会增长。现在写入时按 mtime 做 LRU 回收（预算 512 MB，best-effort、失败不影响挂载），并顺带清理崩溃写入残留的 `.tmp.*` 文件。
+  - 顺带修掉两处小瑕疵：`video-tool.ts` 自己写的 DNS `lookup` 改为复用 `fetch-address-policy.ts` 已有的 `lookupHostAddresses`（避免语义漂移）；`index.ts` 中 `disposeVideoTool()` 的缩进与相邻一致。
 - **视频输入打通了入口**：此前只有一条没有生产者的 mapper 路径（能力表也只能标注「无上传入口」）。现在新增两件东西，让视频端到端可达：
   - `kimi_attach_video` 工具（`src/host/kimi-code/video-tool.ts`）：接受**本地绝对路径**或 **http(s) 链接**，把视频字节交给插件的视频存储，再以 `exec.deferContext()` 注入一条 plugin 来源的 user 消息（与本插件已有的图片工具同一机制，**不需要改动 DSH**）。可选 `question` 参数让模型在同一轮就视频作答。
   - 视频本地存储（`src/host/kimi-code/video-store.ts`）：DSH 的附件服务只存图片，因此本线路自带存储。标识取字节 sha256（重复挂载同一文件幂等），读取时**重新校验摘要**，被篡改或截断的对象会被拒绝而不是当成原文件发出去。
