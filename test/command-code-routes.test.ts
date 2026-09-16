@@ -307,7 +307,14 @@ describe('Command Code settings routes', () => {
     expect(value.hasCredentials).toBe(false)
     expect(value.serving).toBe(true)
     expect((value.models as unknown[]).length).toBe(3)
-    expect(value.storagePath).toContain('cc-cred')
+    // `path()` is platform-dependent by design: Windows reports the DPAPI file
+    // it wrote, while macOS/Linux report a keyring locator
+    // (`Keychain|Secret Service: <provider>/<sha256>`) whose account name is a
+    // hash of the file path — so the temp filename appears on Windows only.
+    // Assert the platform-neutral contract instead: the status route reports
+    // exactly the locator its own store exposes.
+    expect(value.storagePath).toBe(store.path())
+    expect(value.storagePath as string).not.toBe('')
   })
 
   it('reports the stored account when credentials exist', async () => {
