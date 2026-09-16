@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **子代理必须写明模型**：授权守卫不再只拒绝「写明且不在白名单内」的路由，而是要求带有允许列表的会话里每次委派都成对给出 `provider` + `model`。此前不写路由的调用会让子代理继承父级模型（设置卡白名单形同虚设，子代理总是跑在主模型上）；现在缺省与只写一半都会被拒绝，拒绝理由里给出全部已授权路由并提示先用 `list_subagent_models` 查询。只读取公开接口（`ctx.tools.guard` + 会话日志 + 设置文档），不修改 DSH 本体。
+- 授权相关拒绝文案拆分为「未指定路由」「只指定一半」「路由不在列表内」三种，`delegationDenialReason` 不再回退到父级 `options` 判定继承路由；新增/改写 `test/subagent-model-authorization.test.ts` 用例覆盖这三种拒绝，以及未记录策略与非托管工具名保持放行。
+- 确认 `run_code`（代码模式）无法绕过该守卫：程序里通过 SDK 调用的 `tools["subagent"]` 走的是同一套 `prepare → guard → dispatch` 调度流水线，守卫在调度入口拦截，拒绝理由以 `ToolCallError` 抛回程序。新增 `test/subagent-model-authorization-ptc.test.ts`（3 条）用真实 `ToolRuntime`（code 模式）+ 假 `CodeRuntime` 驱动绑定函数，覆盖「已授权放行 / 缺省拒绝 / 越权拒绝」；这是实测而非假设（先看 DSH 源码确认嵌套子调用确实复用同一调度器，再用用例锁定行为）。
+
 - 新增 Kimi Code（Kimi For Coding 订阅）线路：注册 `kimi-code` Provider，把 Moonshot 的 Kimi Code 订阅作为本插件第四条线路接入 DSH。Kimi Code 与 Moonshot 开放平台（pay-as-you-go）是**两套互不通用的系统**：订阅走 `https://api.kimi.com/coding/v1`、凭据来自 `auth.kimi.com` 的 OAuth；开放平台的 key 与 base URL 在订阅端会被判为 `401 Invalid Authentication`，插件据此把两者严格分开。
 - OAuth 采用 RFC 8628 设备码流程（`src/host/kimi-code/oauth.ts`），复刻官方 CLI 的协议细节：`POST /api/oauth/device_authorization` 只带 `client_id`（公共客户端，**无 client secret、无 PKCE、无 scope**），`POST /api/oauth/token` 轮询用 `grant_type=urn:ietf:params:oauth:grant-type:device_code`；令牌响应字段（`access_token` / `refresh_token` / `expires_in` / `scope` / `token_type`）与官方实现逐字段对应。`slow_down` 按 RFC 把轮询间隔永久 `+5s`；`authorization_pending` 继续等待；`expired_token` **不当作失败**，而是像官方 CLI 一样重新申请设备码（用户授权慢了仍能登入）；`access_denied` 单独分类。设置卡展示用户码、一次性链接与到期时间，可复制用户码、可取消。
 - 令牌自动续期：阈值取 `max(300s, expires_in × 0.5)`（与官方一致），同一进程内并发调用**共用一次刷新请求**（避免订阅侧并发轮换同一 refresh token）；被拒的 refresh token 记入进程级 tombstone 并进入 5 分钟冷却，之后直接提示重新登录而不是反复打扰服务端。

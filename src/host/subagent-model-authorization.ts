@@ -3,15 +3,17 @@
  *
  * The `subagent-model-selection` preference is sampled into each Session as a
  * durable route allowlist, but the built-in delegation tool only rejects an
- * explicit route outside that list: a call that selects no route lets the child
- * inherit the parent's model, so a DeepSeek parent could spawn DeepSeek
- * children even though the allowlist authorizes only other models.
+ * explicit route outside that list: a call that omits `provider` or `model`
+ * silently falls back to the configured child defaults or to the parent's own
+ * route, so a DeepSeek parent could spawn DeepSeek children even though the
+ * allowlist authorizes only other models.
  *
  * This guard closes that gap from the plugin plane. Whenever the calling
  * Session (or the nearest ancestor that recorded one) carries an allowlist,
- * a delegation whose effective child route the list does not authorize is
- * denied before the child starts, with the authorized routes in the reason so
- * the model can retry and pick one of them.
+ * every delegation must name an authorized `provider` and `model`; a call that
+ * names neither, names only half of the pair, or names a route outside the list
+ * is denied before the child starts, with the authorized routes in the reason so
+ * the model can call `list_subagent_models` and retry with one of them.
  * @module dsh-chatgpt-subscription/subagent-model-authorization
  */
 
@@ -208,6 +210,43 @@ function routesInclude(
   return allowed.some(route => route.provider === provider && route.model === model)
 }
 
+/** The authorized routes rendered for one denial reason. */
+function authorizedRoutesText(allowed: readonly AllowedModelRoute[]): string {
+  return allowed.map(entry => `${entry.provider}/${entry.model}`).join(', ')
+}
+
+/**
+ * Build the denial reason for a delegation that named no explicit route.
+ * A policy-carrying Session requires the model to choose, so the reason names
+ * every authorized route and the discovery tool that lists them.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function missingRouteReason(allowed: readonly AllowedModelRoute[]): string {
+  return 'subagent model selection: this Session requires an explicit child model — this call named neither '
+    + `provider nor model, and an omitted pair never falls back to a default or to the parent's route. `
+    + `Call list_subagent_models and pass ${authorizedRoutesText(allowed)} with an optional reasoning_effort.`
+}
+
+/**
+ * Build the denial reason for a half-specified route. The built-in delegation
+ * tool completes such a pair from its own configuration, so this reason names
+ * the missing field as well as the authorized routes.
+ * @param missing - The half of the pair the call omitted.
+ * @param supplied - The half the call did provide.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function partialRouteReason(
+  missing: 'provider' | 'model',
+  supplied: string,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  return `subagent model selection: this Session requires an explicit child model — this call supplied only `
+    + `${missing === 'provider' ? 'model' : 'provider'} "${supplied}" and ${missing} must be named together with it. `
+    + `Call list_subagent_models and pass ${authorizedRoutesText(allowed)} with an optional reasoning_effort.`
+}
+
 /**
  * Build the denial reason for a delegation that would run on an unauthorized
  * route. The reason names the authorized routes so the next call can select one.
@@ -229,9 +268,8 @@ export function unauthorizedRouteReason(
   const origin = explicit
     ? 'the model this call selected is not on the Session allowlist'
     : 'the route this call would inherit from the parent is not on the Session allowlist'
-  const routes = allowed.map(entry => `${entry.provider}/${entry.model}`).join(', ')
   return `subagent model selection: ${origin} (${route}). `
-    + `Provide an authorized provider and model — ${routes} — `
+    + `Provide an authorized provider and model — ${authorizedRoutesText(allowed)} — `
     + 'using list_subagent_models to inspect their reasoning efforts.'
 }
 
@@ -280,21 +318,18 @@ export function delegationDenialReason(
   const request = asRecord(args) ?? {}
   const requestedProvider = asString(request['provider'])
   const requestedModel = asString(request['model'])
-  const explicit = requestedProvider !== undefined || requestedModel !== undefined
-  // A call that names no route inherits the parent's provider and model, so
-  // both fall back there. A call that names only one of them is still undecided
-  // here: the built-in tool completes that pair from its own configuration, and
-  // guessing the missing half from the parent route would deny a compliant call.
-  const implicit = requestedProvider === undefined && requestedModel === undefined
-  const provider = implicit ? asString(agent?.options?.provider) : requestedProvider
-  const model = implicit ? asString(agent?.options?.model) : requestedModel
-  if (provider === undefined || model === undefined) {
-    // An incompletely resolvable route stays with the built-in tool, which owns
-    // the configured defaults and the provider-owned route baseline.
-    return undefined
+  // The route is explicit only when the model named a complete pair. A call that
+  // omits either half would let the built-in tool fall back to the configured
+  // child defaults or to the parent route, which is exactly the unauthorized
+  // route this guard exists to stop, so neither case reaches the parent route.
+  if (requestedProvider === undefined) {
+    return requestedModel === undefined
+      ? missingRouteReason(allowed)
+      : partialRouteReason('provider', requestedModel, allowed)
   }
-  if (routesInclude(allowed, provider, model)) return undefined
-  return unauthorizedRouteReason(provider, model, allowed, explicit)
+  if (requestedModel === undefined) return partialRouteReason('model', requestedProvider, allowed)
+  if (routesInclude(allowed, requestedProvider, requestedModel)) return undefined
+  return unauthorizedRouteReason(requestedProvider, requestedModel, allowed, true)
 }
 
 /** Runtime inputs the guard closes over. */

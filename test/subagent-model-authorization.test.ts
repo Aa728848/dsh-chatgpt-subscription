@@ -120,23 +120,58 @@ describe('subagent model authorization', () => {
     expect(reason).toContain('antigravity/gemini-3.8-flash, antigravity/claude-opus-4-6')
   })
 
-  it('denies the inherited parent route when the parent model is not authorized', () => {
-    const reason = delegationDenialReason(recordingAgent([GEMINI, OPUS]), 'subagent', {}, PREFERENCE, NO_SESSIONS)
-    expect(reason).toContain('inherit from the parent')
-    expect(reason).toContain('deepseek-official/deepseek-flash')
+  it('requires an explicit route even when the parent model is authorized', () => {
+    const reason = delegationDenialReason(
+      recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' }),
+      'subagent',
+      {},
+      PREFERENCE,
+      NO_SESSIONS,
+    )
+    expect(reason).toContain('requires an explicit child model')
+    expect(reason).toContain('list_subagent_models')
+    expect(reason).toContain('antigravity/gemini-3.8-flash, antigravity/claude-opus-4-6')
+  })
+
+  it('denies a half-specified route and names the missing field', () => {
+    const agent = recordingAgent([GEMINI, OPUS])
+    const missingProvider = delegationDenialReason(
+      agent, 'subagent', { model: 'gemini-3.8-flash' }, PREFERENCE, NO_SESSIONS,
+    )
+    expect(missingProvider).toContain('requires an explicit child model')
+    expect(missingProvider).toContain('model "gemini-3.8-flash"')
+    expect(missingProvider).toContain('provider must be named together')
+
+    const missingModel = delegationDenialReason(
+      agent, 'subagent', { provider: 'antigravity' }, PREFERENCE, NO_SESSIONS,
+    )
+    expect(missingModel).toContain('provider "antigravity"')
+    expect(missingModel).toContain('model must be named together')
+
+    // Empty strings are not a named pair either: they cannot be authorized.
+    expect(delegationDenialReason(agent, 'subagent', { provider: '', model: '' }, PREFERENCE, NO_SESSIONS))
+      .toContain('not on the Session allowlist')
   })
 
   it('stays out of the way for authorized routes, other tools, and disabled authorization', () => {
     const agent = recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' })
-    expect(delegationDenialReason(agent, 'subagent', {}, PREFERENCE, NO_SESSIONS)).toBeUndefined()
+    expect(delegationDenialReason(agent, 'subagent', {
+      provider: 'antigravity', model: 'gemini-3.8-flash',
+    }, PREFERENCE, NO_SESSIONS)).toBeUndefined()
     expect(delegationDenialReason(agent, 'subagent', { provider: 'antigravity', model: 'claude-opus-4-6' },
       PREFERENCE, NO_SESSIONS)).toBeUndefined()
     expect(delegationDenialReason(agent, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS)).toBeUndefined()
     expect(delegationDenialReason(agent, 'subagent', {}, { enabled: false, allowedModels: [GEMINI] },
       NO_SESSIONS)).toBeUndefined()
-    expect(delegationDenialReason(agent, 'subagent', {}, { enabled: true, allowedModels: [] },
-      NO_SESSIONS)).toBeUndefined()
-    expect(delegationDenialReason(agent, 'subagent', {}, undefined, NO_SESSIONS)).toBeUndefined()
+  })
+
+  it('keeps a recorded policy authoritative when the settings service is absent', () => {
+    const agent = recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' })
+    expect(delegationDenialReason(agent, 'subagent', {}, undefined, NO_SESSIONS))
+      .toContain('requires an explicit child model')
+    expect(delegationDenialReason(agent, 'subagent', {
+      provider: 'antigravity', model: 'gemini-3.8-flash',
+    }, undefined, NO_SESSIONS)).toBeUndefined()
   })
 
   it('leaves a Session that recorded no policy on the built-in behavior', () => {
@@ -150,24 +185,31 @@ describe('subagent model authorization', () => {
   it('governs an unrecorded Session only under preference scope', () => {
     const agent: AuthorizationAgent = { options: DEEPSEEK_OPTIONS }
     expect(delegationDenialReason(agent, 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'preference'))
-      .toContain('deepseek-official/deepseek-flash')
+      .toContain('requires an explicit child model')
     expect(delegationDenialReason(agent, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' },
       PREFERENCE, NO_SESSIONS, ['subagent'], 'preference')).toBeUndefined()
   })
 
-  it('leaves an incompletely resolvable route to the delegation tool', () => {
+  it('denies an explicit route that is not registered rather than resolving it locally', () => {
     const agent = recordingAgent([GEMINI, OPUS])
-    expect(delegationDenialReason(agent, 'subagent', { provider: 'not-registered' }, PREFERENCE, NO_SESSIONS))
-      .toBeUndefined()
-    expect(delegationDenialReason(agent, 'subagent', { model: 'some-model' }, PREFERENCE, NO_SESSIONS))
-      .toBeUndefined()
+    expect(delegationDenialReason(agent, 'subagent', { provider: 'not-registered', model: 'some-model' },
+      PREFERENCE, NO_SESSIONS)).toContain('is not on the Session allowlist')
+    expect(delegationDenialReason(agent, 'subagent', { provider: 'not-registered', model: 'gemini-3.8-flash' },
+      PREFERENCE, NO_SESSIONS)).toContain('is not on the Session allowlist')
     expect(unauthorizedRouteReason(undefined, undefined, [GEMINI], false)).toContain('the inherited route')
   })
 
   it('prefers the recorded Session policy over the current preference', () => {
     const agent = recordingAgent([GEMINI], { provider: 'antigravity', model: 'claude-opus-4-6' })
-    expect(delegationDenialReason(agent, 'subagent', {}, PREFERENCE, NO_SESSIONS))
-      .toContain('antigravity/claude-opus-4-6')
+    // OPUS is authorized by the current preference only, and the Session
+    // recorded GEMINI alone, so the recorded list decides both the verdict and
+    // the routes the denial names.
+    expect(delegationDenialReason(agent, 'subagent', {
+      provider: 'antigravity', model: 'claude-opus-4-6',
+    }, PREFERENCE, NO_SESSIONS)).toContain('antigravity/gemini-3.8-flash')
+    expect(delegationDenialReason(agent, 'subagent', {
+      provider: 'antigravity', model: 'claude-opus-4-6',
+    }, PREFERENCE, NO_SESSIONS)).not.toContain('claude-opus-4-6 with')
   })
 
   it('binds the guard to the Session policy, the preference, and the configured names', () => {
@@ -180,14 +222,16 @@ describe('subagent model authorization', () => {
     expect(authorize(unrecorded, 'subagent', {})).toBeUndefined()
     expect(authorize(unrecorded, 'delegate', {})).toBeUndefined()
     expect(authorize(recordingAgent([GEMINI, OPUS]), 'delegate', {}))
-      .toContain('deepseek-official/deepseek-flash')
+      .toContain('requires an explicit child model')
     const permissive = createSubagentAuthorization({
       settings: SETTINGS as never,
       sessions: NO_SESSIONS,
       toolNames: ['subagent'],
       scope: 'preference',
     })
-    expect(permissive(unrecorded, 'subagent', {})).toContain('deepseek-official/deepseek-flash')
+    expect(permissive(unrecorded, 'subagent', {})).toContain('requires an explicit child model')
+    expect(permissive(unrecorded, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' }))
+      .toBeUndefined()
   })
 
   it('normalizes and validates delegation names and scope at the configuration boundary', () => {
@@ -218,10 +262,18 @@ describe('subagent model authorization', () => {
     expect(registered).toHaveLength(1)
     const guard = registered[0]!
     const exec = { name: 'subagent', arguments: {}, agent: recordingAgent([GEMINI, OPUS]), signal: new AbortController().signal }
-    expect(guard(exec as never)).toContain('deepseek-official/deepseek-flash')
+    expect(guard(exec as never)).toContain('requires an explicit child model')
     expect(guard({ ...exec, name: 'read' } as never)).toBeUndefined()
-    expect(guard({ ...exec, agent: { options: { provider: 'antigravity', model: 'gemini-3.8-flash' } } } as never))
-      .toBeUndefined()
+    // An agent without a recorded policy stays on the built-in behavior under
+    // session scope, even when its own route would be authorized.
+    expect(guard({
+      ...exec,
+      agent: { options: { provider: 'antigravity', model: 'gemini-3.8-flash' } },
+    } as never)).toBeUndefined()
+    expect(guard({
+      ...exec,
+      arguments: { provider: 'antigravity', model: 'gemini-3.8-flash' },
+    } as never)).toBeUndefined()
     dispose()
     expect(disposed).toBe(1)
     expect(() => installSubagentModelAuthorization(ctx as never, registry({}), { toolNames: [] }))
