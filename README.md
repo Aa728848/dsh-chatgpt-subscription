@@ -14,6 +14,7 @@
 - [Kimi Code 线路](#kimi-code-线路)
 - [Command Code 线路](#command-code-线路)
 - [子代理模型授权](#子代理模型授权0215-起)
+- [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [升级、降级与卸载](#升级降级与卸载)
 - [安全边界](#安全边界)
 - [插件路由](#插件路由)
@@ -180,6 +181,29 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 G
 - Linux：`$DSH_HOME/storages/dsh-chatgpt-subscription/oauth.json`，未设置 `DSH_HOME` 时为 `~/.dsh/storages/dsh-chatgpt-subscription/oauth.json`。
 
 > Windows 文件只能由创建它的用户通过 DPAPI 解密。macOS 凭据由登录钥匙串在本机加密保存。Linux 文件是未额外加密的 JSON，依赖目录 `0700` 和文件 `0600` 隔离；不要复制、打印或提交该文件。跨平台迁移需要重新登录。
+
+## 随包分发的 Agent Preset
+
+插件自带一个 **调度模式** agent preset（id `dispatch`），随 npm 安装一起分发：启动时会把它从包内 `presets/dispatch/` 同步到 DSH 的 preset 发现根目录 `<dshHome>/.agent-presets/`，因此任何装了本插件的机器都能在新建会话时直接选到它，不需要手工拷贝文件。
+
+同步在每个 profile 启动时执行一次（幂等）：
+
+- 目标树与包内副本逐字节相同时跳过，有差异时整体重写，并把包内已删除的多余文件清理掉；
+- 只处理本包自己的 preset id（`BUNDLED_PRESET_IDS`），**绝不改动用户手写的 preset 或其它插件的 preset**；
+- 包内已不再随附的旧 id 会从目标根目录移除（retire）；
+- 同步失败（例如 home 只读）只记一条 warn，不会导致插件加载失败——preset 是便利项，不是本插件提供的核心能力。
+
+> 路径解析不写死相对路径：`src/host/preset-sync.ts` 从模块位置向上查找最近的 `package.json` 作为包根，因此 `src/` 布局、打包后的 `lib/` 布局，以及通过 pnpm symlink / Windows junction 安装都能正确解析。注意 `fs.cpSync({ recursive: true })` 在 Node 22 + Windows 上遇到含非 ASCII 的源路径会直接崩进程（nodejs/node#54476），所以复制是逐条目实现的。
+
+### 配置项
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `syncAgentPresets` | `true` | 启动时是否把包内 preset 同步到 `<dshHome>/.agent-presets`；设为 `false` 则完全不写用户目录 |
+
+### 手动安装（可选）
+
+不想让插件写 home 目录时，可把 `syncAgentPresets` 设为 `false`，再自行拷贝包内的 `presets/dispatch/` 到 `<dshHome>/.agent-presets/dispatch/`。
 
 ## 子代理模型授权（0.2.15 起，0.3.2 起强制指定模型）
 

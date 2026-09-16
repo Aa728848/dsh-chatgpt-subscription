@@ -39,7 +39,8 @@
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./presets/*": "./presets/*"
   },
   "dsh": {
     "bundle": {
@@ -116,6 +117,7 @@
     "lib/types/**/*.d.ts",
     "lib/types/**/*.d.ts.map",
     "bin",
+    "presets",
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md"

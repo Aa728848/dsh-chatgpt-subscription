@@ -57,6 +57,13 @@ import {
   type SessionsResolver,
 } from './host/subagent-model-authorization.ts'
 import {
+  BUNDLED_PRESET_IDS,
+  bundledPresetsRoot,
+  presetTargetRoot,
+  syncPresetTrees,
+} from './host/preset-sync.ts'
+import { dshHomeDir } from './host/antigravity/token-store.ts'
+import {
   createFileRelayProbeSink,
   installRelayProbe,
   relayProbeEnabled,
@@ -67,6 +74,14 @@ import {
 
 /** Optional deployment configuration for this plugin. */
 export interface Config {
+  /**
+   * Whether to sync this package's bundled agent presets into the
+   * harness-home preset root (`<dshHome>/.agent-presets`) at startup, making
+   * them selectable for new sessions on any machine that installs the plugin.
+   * Default `true`. Only the preset ids this package ships are ever written
+   * or retired; presets the user authored are never touched.
+   */
+  syncAgentPresets?: boolean
   /**
    * Whether the Subagent model allowlist also governs the route a delegation
    * that selects no model would inherit from its parent. Default `true`; set
@@ -84,6 +99,7 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
+  syncAgentPresets: z.boolean().default(true),
   subagentModelAuthorization: z.boolean().default(true),
   subagentModelTools: z.array(z.string()).default([]),
   subagentModelScope: z.union([z.const('session'), z.const('preference')]).default('session'),
@@ -92,6 +108,29 @@ export const Config: z<Config> = z.object({
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
 
 export function apply(ctx: Context, pluginConfig: Config = {}): void {
+  // Ship the bundled agent presets: DSH discovers presets from the harness-home
+  // root, so an npm install only makes them selectable once they are copied
+  // there. Idempotent, and scoped to the ids this package owns.
+  if (pluginConfig.syncAgentPresets !== false) {
+    ctx.effect(() => {
+      try {
+        const target = presetTargetRoot(dshHomeDir())
+        const result = syncPresetTrees(bundledPresetsRoot(), target, [...BUNDLED_PRESET_IDS])
+        for (const { id, error } of result.failed) {
+          ctx.logger.warn(`[dsh-chatgpt-subscription] agent preset "${id}" sync failed: ${error}`)
+        }
+        if (result.synced.length > 0) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] agent presets synced into ${target}: ${result.synced.join(', ')}`)
+        }
+      } catch (error) {
+        // A read-only home or a locked directory must not fail plugin load:
+        // the preset is a convenience, not a capability this plugin provides.
+        ctx.logger.warn(`[dsh-chatgpt-subscription] agent preset sync skipped: ${String(error)}`)
+      }
+      return () => undefined
+    }, 'dsh-chatgpt-subscription: agent preset sync')
+  }
+
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **调度模式 Agent Preset 随包分发**：新增 `presets/dispatch/`（基于 PTC 模式的编排 preset：R0 复杂度分诊 → L2 任务的澄清访谈 → 规划 → 派发 → 审查 → 验收；子代理必须显式指定模型且落在「子代理」设置白名单内；选择不可用时按 DSH 默认行为降级）与 `src/host/preset-sync.ts`。DSH 只能从配置根、内置 `agent-presets` 包的 `presets/`、以及 `<dshHome>/.agent-presets` 发现 preset，插件包无法自行注册根目录，因此采用「包内随附 + 启动时同步到 home」的方式（与 `@linxin666/dsh-liangshen` 同一机制）。同步幂等、只处理本包自己的 id、绝不触碰用户手写的 preset，失败只记 warn 不阻断插件加载；新增 `config.syncAgentPresets`（默认 `true`）可关闭。包根通过向上查找最近的 `package.json` 定位，兼容 `src/` 与打包后的 `lib/` 两种布局（写死 `../presets/` 在两种布局下会解析到不同目录）；复制逐条目实现，规避 Node 22 + Windows 上 `fs.cpSync` 遇到非 ASCII 路径直接崩进程的问题（nodejs/node#54476）。新增 `test/preset-sync.test.ts`（8 条）覆盖首次同步、幂等跳过、内容变更重写与多余文件清理、不触碰非本插件目录、retire 与保留、源目录缺失。`package.json` 的 `files` 增加 `presets`、`exports` 增加 `./presets/*`，`npm pack --dry-run` 确认三个 preset 文件随包发布。
+
 - **子代理必须写明模型**：授权守卫不再只拒绝「写明且不在白名单内」的路由，而是要求带有允许列表的会话里每次委派都成对给出 `provider` + `model`。此前不写路由的调用会让子代理继承父级模型（设置卡白名单形同虚设，子代理总是跑在主模型上）；现在缺省与只写一半都会被拒绝，拒绝理由里给出全部已授权路由并提示先用 `list_subagent_models` 查询。只读取公开接口（`ctx.tools.guard` + 会话日志 + 设置文档），不修改 DSH 本体。
 - 授权相关拒绝文案拆分为「未指定路由」「只指定一半」「路由不在列表内」三种，`delegationDenialReason` 不再回退到父级 `options` 判定继承路由；新增/改写 `test/subagent-model-authorization.test.ts` 用例覆盖这三种拒绝，以及未记录策略与非托管工具名保持放行。
 - 确认 `run_code`（代码模式）无法绕过该守卫：程序里通过 SDK 调用的 `tools["subagent"]` 走的是同一套 `prepare → guard → dispatch` 调度流水线，守卫在调度入口拦截，拒绝理由以 `ToolCallError` 抛回程序。新增 `test/subagent-model-authorization-ptc.test.ts`（3 条）用真实 `ToolRuntime`（code 模式）+ 假 `CodeRuntime` 驱动绑定函数，覆盖「已授权放行 / 缺省拒绝 / 越权拒绝」；这是实测而非假设（先看 DSH 源码确认嵌套子调用确实复用同一调度器，再用用例锁定行为）。
