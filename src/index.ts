@@ -51,8 +51,10 @@ import {
 import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
+  DEFAULT_SUBAGENT_INHERIT_TOOLS,
   installSubagentModelAuthorization,
   normalizeDelegationToolNames,
+  normalizeInheritToolNames,
   validateDelegationToolNames,
   type SessionsResolver,
 } from './host/subagent-model-authorization.ts'
@@ -62,6 +64,12 @@ import {
   presetTargetRoot,
   syncPresetTrees,
 } from './host/preset-sync.ts'
+import {
+  auditChildRoutes,
+  auditedRoutesOf,
+  type AuditedSessions,
+} from './host/subagent-route-audit.ts'
+import type { SubagentRouteAuditDto } from './shared/contracts.ts'
 import { dshHomeDir } from './host/antigravity/token-store.ts'
 import {
   createFileRelayProbeSink,
@@ -91,6 +99,14 @@ export interface Config {
   /** Delegation tool names the authorization guard recognizes (default `subagent`). */
   subagentModelTools?: string[]
   /**
+   * Delegation tools that always run their child on the calling agent's route
+   * and therefore expose no `provider`/`model` (default `['subagent_fork']`).
+   * An allowlist-carrying Session then still denies the call when the inherited
+   * route is not authorized, instead of silently running an unauthorized child.
+   * Set `[]` to leave these tools on the built-in behavior.
+   */
+  subagentModelInheritTools?: string[]
+  /**
    * `session` (default) enforces the allowlist a Session recorded, matching the
    * delegation tool's snapshot; `preference` also enforces the current Settings
    * card allowlist for Sessions that recorded none.
@@ -102,6 +118,7 @@ export const Config: z<Config> = z.object({
   syncAgentPresets: z.boolean().default(true),
   subagentModelAuthorization: z.boolean().default(true),
   subagentModelTools: z.array(z.string()).default([]),
+  subagentModelInheritTools: z.array(z.string()).default(DEFAULT_SUBAGENT_INHERIT_TOOLS as unknown as string[]),
   subagentModelScope: z.union([z.const('session'), z.const('preference')]).default('session'),
 })
 
@@ -149,6 +166,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // The allowlist a Session recorded outranks the current settings document,
   // because the built-in delegation tool snapshot it when the Session started.
   const delegationToolNames = normalizeDelegationToolNames(pluginConfig.subagentModelTools)
+  const delegationInheritNames = normalizeInheritToolNames(pluginConfig.subagentModelInheritTools)
   if (pluginConfig.subagentModelAuthorization !== false) {
     ctx.inject(['sessions'], scoped => {
       const sessions = scoped.get('sessions') as SessionsResolver | undefined
@@ -159,6 +177,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         if (typeof scoped.tools?.guard !== 'function') return () => undefined
         return installSubagentModelAuthorization(scoped, sessions, {
           toolNames: delegationToolNames,
+          inheritToolNames: delegationInheritNames,
           scope: pluginConfig.subagentModelScope ?? 'session',
         })
       }, 'dsh-chatgpt-subscription: subagent model authorization')
@@ -336,7 +355,33 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       })
     }
 
-    const disposeRoutes = registerRoutes(ctx, oauth, usage, preferences, proxyManager, searchSwitcher)
+    // The guard above stops an unauthorized route before a child starts, but it
+    // only sees a model-authored tool call. A fork inherits its route by design,
+    // and ralph/workflow/any plugin can start a child with no delegation tool at
+    // all, so those children are invisible to it. This reader reconstructs what
+    // actually ran from durable session facts and reports it; it never blocks.
+    const readRouteAudit = (sessionId: string): Promise<SubagentRouteAuditDto> => {
+      const sessions = ctx.get('sessions') as unknown as AuditedSessions
+      const target = sessions.get(sessionId)
+      if (target === undefined) throw new Error(`Unknown session "${sessionId}".`)
+      const allowed = auditedRoutesOf(target)
+      return Promise.resolve({
+        sessionId,
+        allowedModels: (allowed ?? []).map(route => ({ provider: route.provider, model: route.model })),
+        violations: auditChildRoutes(target, sessions, allowed).map(violation => ({
+          childId: violation.finding.childId,
+          parentId: violation.finding.parentId ?? null,
+          provider: violation.finding.provider ?? null,
+          label: violation.finding.label ?? null,
+          routeProvider: violation.route.provider ?? null,
+          routeModel: violation.route.model ?? null,
+          sameAsParent: violation.sameAsParent,
+        })),
+      })
+    }
+
+    const disposeRoutes = registerRoutes(
+      ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     // The video ingress for the Kimi route. Registered here because the tool
@@ -418,20 +463,42 @@ export type {
 } from './host/relay-probe.ts'
 export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts'
 export {
+  DEFAULT_SUBAGENT_INHERIT_TOOLS,
   SUBAGENT_MODEL_SELECTION_NAMESPACE,
   SUBAGENT_POLICY_EVENT,
   authorizedRoutesFor,
   createSubagentAuthorization,
   delegationDenialReason,
+  delegationModeOf,
+  inheritOverrideReason,
+  inheritRouteDenialReason,
+  inheritedRouteOf,
   installSubagentModelAuthorization,
   normalizeDelegationToolNames,
+  normalizeInheritToolNames,
   parseAllowedRoutes,
   policyRoutesOf,
   subagentModelSelectionPreference,
   unauthorizedRouteReason,
   validateAuthorizationScope,
   validateDelegationToolNames,
+  validateInheritToolNames,
 } from './host/subagent-model-authorization.ts'
+export {
+  auditChildRoutes,
+  auditedRoutesOf,
+  childRoutesOf,
+  effectiveRouteOf,
+  readChildDescriptor,
+  violationText,
+} from './host/subagent-route-audit.ts'
+export type {
+  AuditedRoute,
+  AuditedSession,
+  AuditedSessions,
+  ChildRouteFinding,
+  RouteViolation,
+} from './host/subagent-route-audit.ts'
 export { OAuthService } from './host/oauth-service.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'

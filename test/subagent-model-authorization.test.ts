@@ -6,17 +6,24 @@ import {
   type PolicySession,
   type SessionsResolver,
   type SubagentModelSelectionPreference,
+  DEFAULT_SUBAGENT_INHERIT_TOOLS,
   authorizedRoutesFor,
   createSubagentAuthorization,
   delegationDenialReason,
+  delegationModeOf,
+  inheritOverrideReason,
+  inheritRouteDenialReason,
+  inheritedRouteOf,
   installSubagentModelAuthorization,
   normalizeDelegationToolNames,
+  normalizeInheritToolNames,
   parseAllowedRoutes,
   policyRoutesOf,
   subagentModelSelectionPreference,
   unauthorizedRouteReason,
   validateAuthorizationScope,
   validateDelegationToolNames,
+  validateInheritToolNames,
 } from '../src/host/subagent-model-authorization.ts'
 
 const GEMINI: AllowedModelRoute = { provider: 'antigravity', model: 'gemini-3.8-flash' }
@@ -35,6 +42,20 @@ function session(
     eventAt(seq: number) {
       return events[seq] as { type?: unknown; data?: unknown } | undefined
     },
+  }
+}
+
+/** A session double whose request header names the route the next request uses. */
+function routedSession(
+  routes: readonly AllowedModelRoute[],
+  config: { provider?: string; model?: string; reasoningEffort?: string },
+  header: { origin?: unknown; parentSession?: unknown } = {},
+): PolicySession {
+  const events = [policyEvent(routes)]
+  return {
+    header,
+    eventAt: (seq: number) => events[seq] as { type?: unknown; data?: unknown } | undefined,
+    requestHeader: () => ({ config }),
   }
 }
 
@@ -160,6 +181,8 @@ describe('subagent model authorization', () => {
     }, PREFERENCE, NO_SESSIONS)).toBeUndefined()
     expect(delegationDenialReason(agent, 'subagent', { provider: 'antigravity', model: 'claude-opus-4-6' },
       PREFERENCE, NO_SESSIONS)).toBeUndefined()
+    // `subagent_fork` is not an explicit-route tool, so a plain name list still
+    // leaves it alone; inherit mode is configured separately.
     expect(delegationDenialReason(agent, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS)).toBeUndefined()
     expect(delegationDenialReason(agent, 'subagent', {}, { enabled: false, allowedModels: [GEMINI] },
       NO_SESSIONS)).toBeUndefined()
@@ -232,6 +255,124 @@ describe('subagent model authorization', () => {
     expect(permissive(unrecorded, 'subagent', {})).toContain('requires an explicit child model')
     expect(permissive(unrecorded, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' }))
       .toBeUndefined()
+  })
+
+  it('resolves each tool name to the mode the guard enforces on it', () => {
+    expect(delegationModeOf([{ name: 'subagent', mode: 'explicit' }], 'subagent')).toBe('explicit')
+    expect(delegationModeOf([{ name: 'subagent_fork', mode: 'inherit' }], 'subagent_fork')).toBe('inherit')
+    expect(delegationModeOf([{ name: 'subagent', mode: 'explicit' }], 'read')).toBeUndefined()
+    // Precedence is first-match, so a name listed in both lists is not ambiguous
+    // inside the decision function; the installer rejects that configuration.
+    expect(delegationModeOf([
+      { name: 'x', mode: 'explicit' }, { name: 'x', mode: 'inherit' },
+    ], 'x')).toBe('explicit')
+  })
+
+  it('reads the inherited route from the request header, falling back only when it says nothing', () => {
+    expect(inheritedRouteOf({ session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }))
+      .toEqual({ provider: 'kimi-code', model: 'k3', reasoningEffort: undefined })
+    // The header is authoritative: stale creation options must not win after a
+    // mid-session model switch.
+    expect(inheritedRouteOf({
+      options: { provider: 'antigravity', model: 'gemini-3.8-flash' },
+      session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }),
+    })).toMatchObject({ provider: 'kimi-code', model: 'k3' })
+    // A header naming no route leaves the declared options in charge.
+    expect(inheritedRouteOf({
+      options: { provider: 'antigravity', model: 'gemini-3.8-flash' },
+      session: routedSession([GEMINI], {}),
+    })).toMatchObject({ provider: 'antigravity', model: 'gemini-3.8-flash' })
+    expect(inheritedRouteOf({ options: DEEPSEEK_OPTIONS }))
+      .toMatchObject({ provider: 'deepseek-official', model: 'deepseek-flash' })
+    expect(inheritedRouteOf(undefined)).toEqual({ provider: undefined, model: undefined })
+    // An unavailable fold degrades to the declared options rather than throwing.
+    expect(inheritedRouteOf({
+      options: DEEPSEEK_OPTIONS,
+      session: { header: {}, requestHeader() { throw new Error('fold unavailable') } },
+    })).toMatchObject({ provider: 'deepseek-official', model: 'deepseek-flash' })
+  })
+
+  it('denies an inherit-mode delegation whose inherited route is not authorized', () => {
+    const agent = { session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }
+    const reason = delegationDenialReason(
+      agent, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS,
+      ['subagent'], 'session', ['subagent_fork'],
+    )
+    expect(reason).toContain('subagent_fork')
+    expect(reason).toContain('"kimi-code/k3"')
+    // The Session recorded GEMINI alone, so that — not the wider preference —
+    // is the list the denial must name.
+    expect(reason).toContain('antigravity/gemini-3.8-flash')
+  })
+
+  it('allows an inherit-mode delegation when the inherited route is authorized', () => {
+    const agent = { session: routedSession([GEMINI], { provider: 'antigravity', model: 'gemini-3.8-flash' }) }
+    expect(delegationDenialReason(
+      agent, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS,
+      ['subagent'], 'session', ['subagent_fork'],
+    )).toBeUndefined()
+  })
+
+  it('denies an inherit-mode delegation that tries to name a route it cannot accept', () => {
+    // The inherited route IS authorized, so only the override can deny this call:
+    // that proves the override check runs before the route check.
+    const agent = { session: routedSession([GEMINI], { provider: 'antigravity', model: 'gemini-3.8-flash' }) }
+    const reason = delegationDenialReason(
+      agent, 'subagent_fork', { provider: 'antigravity', model: 'claude-opus-4-6' },
+      PREFERENCE, NO_SESSIONS, ['subagent'], 'session', ['subagent_fork'],
+    )
+    expect(reason).toContain('accepts no')
+    expect(reason).toContain('antigravity/claude-opus-4-6')
+  })
+
+  it('leaves inherit mode inert without a recorded allowlist', () => {
+    const agent = { session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }
+    expect(delegationDenialReason(
+      { options: DEEPSEEK_OPTIONS }, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS,
+      ['subagent'], 'session', ['subagent_fork'],
+    )).toBeUndefined()
+    // A disabled preference suspends it everywhere, exactly like explicit mode.
+    expect(delegationDenialReason(
+      agent, 'subagent_fork', {}, { enabled: false, allowedModels: [GEMINI] }, NO_SESSIONS,
+      ['subagent'], 'session', ['subagent_fork'],
+    )).toBeUndefined()
+  })
+
+  it('renders inherit-mode reasons without a route and without a named pair', () => {
+    expect(inheritRouteDenialReason('subagent_fork', undefined, undefined, [GEMINI]))
+      .toContain("the calling agent's route")
+    expect(inheritRouteDenialReason('subagent_fork', 'a', 'b', [GEMINI], 'high')).toContain('(high)')
+    // Option A's remedy must be reachable: fork is denied because the SESSION's
+    // route is unauthorized, so the refusal has to say the tool returns once the
+    // session moves to an authorized model — otherwise the model has no way out.
+    const denied = inheritRouteDenialReason('subagent_fork', 'kimi-code', 'k3', [GEMINI])
+    expect(denied).toContain('unavailable for now')
+    expect(denied).toContain('works again')
+    expect(denied).toContain('antigravity/gemini-3.8-flash')
+    expect(inheritOverrideReason('subagent_fork', 'a', 'b')).toContain('"a/b"')
+  })
+
+  it('installs inherit names and rejects a tool listed in both modes', () => {
+    const registered: ToolGuard[] = []
+    const ctx = {
+      tools: { guard: (guard: ToolGuard) => { registered.push(guard); return () => undefined } },
+      get: () => undefined,
+    }
+    installSubagentModelAuthorization(ctx as never, registry({}), {
+      toolNames: ['subagent'],
+      inheritToolNames: ['subagent_fork'],
+    })
+    expect(registered).toHaveLength(1)
+    expect(() => installSubagentModelAuthorization(ctx as never, registry({}), {
+      toolNames: ['subagent', 'subagent_fork'],
+      inheritToolNames: ['subagent_fork'],
+    })).toThrow(/both an explicit and an inherit tool/)
+    // Emptiness is a legal opt-out here, unlike the explicit list.
+    expect(validateInheritToolNames([])).toEqual([])
+    expect(() => { validateInheritToolNames([' fork']) }).toThrow(/non-empty trimmed string/)
+    expect(normalizeInheritToolNames(undefined)).toEqual([...DEFAULT_SUBAGENT_INHERIT_TOOLS])
+    expect(normalizeInheritToolNames([])).toEqual([])
+    expect(normalizeInheritToolNames([' subagent_fork ', 'subagent_fork'])).toEqual(['subagent_fork'])
   })
 
   it('normalizes and validates delegation names and scope at the configuration boundary', () => {

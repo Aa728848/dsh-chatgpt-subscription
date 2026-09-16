@@ -31,6 +31,36 @@ export const SUBAGENT_POLICY_EVENT = 'subagent/model-selection-policy'
 /** Delegation tools whose child routes this guard authorizes. */
 export const DEFAULT_DELEGATION_TOOLS: readonly string[] = ['subagent']
 
+/**
+ * Delegation tools that start their child on the caller's own route by design.
+ * `subagent_fork` is the shipped one: it omits `modelSelectionSettings`, so it
+ * exposes no route parameters and seeds the child from the parent's own
+ * conversation — a child on any other route would discard the inherited prefix
+ * and its cache. Inherit mode is what keeps that design honest: the fork still
+ * cannot choose, but an allowlist-carrying Session now refuses to let it run on
+ * a route the user did not authorize.
+ */
+export const DEFAULT_SUBAGENT_INHERIT_TOOLS: readonly string[] = ['subagent_fork']
+
+/**
+ * How one delegation tool resolves the child route this guard authorizes.
+ *
+ * `explicit` — the tool exposes `provider`/`model`, so the call must name the
+ * pair and that pair must be on the allowlist.
+ * `inherit` — the tool declares no route parameters and starts the child on the
+ * caller's own route (the fork backend, whose whole value is reusing the
+ * parent's conversation and its cache). The guard then forbids a route override
+ * and checks the effective inherited route against the same allowlist, because
+ * "the tool cannot choose" is not the same as "the choice is authorized".
+ */
+export type DelegationToolMode = 'explicit' | 'inherit'
+
+/** One delegation tool name paired with the mode the guard enforces on it. */
+export interface DelegationToolPolicy {
+  readonly name: string
+  readonly mode: DelegationToolMode
+}
+
 /** One exact provider/model route the user authorized for children. */
 export interface AllowedModelRoute {
   readonly provider: string
@@ -50,6 +80,12 @@ export interface PolicySession {
     readonly origin?: unknown
     readonly parentSession?: unknown
   }
+  /**
+   * The request header in force after the log's last header snapshot — the
+   * route the NEXT request uses. Read only by `inherit` mode, and optional so
+   * a minimal durable record still satisfies this interface.
+   */
+  requestHeader?(): { readonly config?: { readonly provider?: unknown; readonly model?: unknown } } | undefined
 }
 
 /** Session lookup the guard walks from the calling agent to its ancestors. */
@@ -67,6 +103,13 @@ export interface AuthorizationAgent {
 export interface DelegationArguments {
   readonly provider?: unknown
   readonly model?: unknown
+}
+
+/** The route an inherit-mode child would run on, as far as it can be resolved. */
+export interface InheritedRoute {
+  readonly provider?: string
+  readonly model?: string
+  readonly reasoningEffort?: string
 }
 
 /**
@@ -201,6 +244,43 @@ export function subagentModelSelectionPreference(
   }
 }
 
+/**
+ * Read the route an inherit-mode child would run on: the calling agent's own
+ * effective request route. This mirrors the delegation seam's
+ * `parentAgentOptionsForDelegation`, where the latest request header owns
+ * provider/model after request-time model selection and the creation options
+ * remain the fallback before the first request. `AuthorizationAgent.options` is
+ * deliberately NOT a fallback while a header exists — after a mid-session model
+ * switch the creation options are stale, and trusting them would authorize the
+ * route the session no longer uses.
+ * @param agent - Calling agent.
+ * @returns the inherited route fields, each absent when its source did not supply it.
+ */
+export function inheritedRouteOf(agent: AuthorizationAgent | undefined): InheritedRoute {
+  const session = agent?.session
+  let header: { readonly config?: { readonly provider?: unknown; readonly model?: unknown; readonly reasoningEffort?: unknown } } | undefined
+  try {
+    header = session?.requestHeader?.()
+  } catch {
+    // A session whose fold is unavailable leaves the declared options in charge,
+    // exactly as the delegation seam falls back when no header exists yet.
+    header = undefined
+  }
+  if (header?.config !== undefined) {
+    // The header is authoritative only when it actually names a route. A header
+    // carrying neither field says nothing, so the creation options still decide.
+    const provider = asString(header.config.provider)
+    const model = asString(header.config.model)
+    if (provider !== undefined || model !== undefined) {
+      return { provider, model, reasoningEffort: asString(header.config.reasoningEffort) }
+    }
+  }
+  return {
+    provider: asString(agent?.options?.provider),
+    model: asString(agent?.options?.model),
+  }
+}
+
 /** Whether an exact route is authorized by a allowlist. */
 function routesInclude(
   allowed: readonly AllowedModelRoute[],
@@ -273,6 +353,49 @@ export function unauthorizedRouteReason(
     + 'using list_subagent_models to inspect their reasoning efforts.'
 }
 
+/**
+ * Build the denial reason for an inherit-mode delegation that named a route.
+ * The fork backend accepts no route parameters, so a named pair is not a
+ * partial override the backend would ignore — it is a request to change the
+ * route, which is exactly what an inherit-mode tool exists to prevent.
+ * @param toolName - the tool the model called.
+ * @param provider - the provider the call named.
+ * @param model - the model the call named.
+ * @returns the corrective reason handed back to the model.
+ */
+export function inheritOverrideReason(toolName: string, provider: string, model: string): string {
+  return `subagent model selection: "${toolName}" always runs on the calling agent's own route and accepts no `
+    + `provider/model. This call named "${provider}/${model}". Remove those fields, or delegate through a tool `
+    + `that supports explicit child model selection.`
+}
+
+/**
+ * Build the denial reason for an inherit-mode delegation whose inherited route
+ * is outside the allowlist. Unlike the explicit case this is not something the
+ * call can fix by naming a route, so the reason points at the tool that can.
+ * @param toolName - the tool the model called.
+ * @param provider - the parent route the child would inherit, when known.
+ * @param model - the parent model the child would inherit, when known.
+ * @param allowed - Routes the calling Session authorizes.
+ * @param reasoningEffort - the inherited effort, when the header recorded one.
+ * @returns the corrective reason handed back to the model.
+ */
+export function inheritRouteDenialReason(
+  toolName: string,
+  provider: string | undefined,
+  model: string | undefined,
+  allowed: readonly AllowedModelRoute[],
+  reasoningEffort?: string,
+): string {
+  const route = provider === undefined || model === undefined
+    ? 'the calling agent\'s route'
+    : `"${provider}/${model}"${reasoningEffort === undefined ? '' : ` (${reasoningEffort})`}`
+  return `subagent model selection: "${toolName}" keeps its child on ${route}, which this Session's allowlist `
+    + `does not authorize, so it is unavailable for now. Its child cannot be re-routed, so either delegate `
+    + `through a tool that exposes provider and model — passing one of ${authorizedRoutesText(allowed)} — or `
+    + `continue on an authorized model for this session, after which ${toolName} works again.`
+}
+
 /** Which Session's recorded allowlist a delegation must respect. */
 export type AuthorizationScope =
   /**
@@ -289,14 +412,33 @@ export type AuthorizationScope =
   | 'preference'
 
 /**
+ * Resolve one tool's enforcement mode from the configured policies. An
+ * unconfigured name is `undefined`: the guard does not police it, which is how
+ * the plain-name configuration keeps its existing meaning.
+ * @param policies - Configured tool policies in precedence order.
+ * @param toolName - Tool being dispatched.
+ * @returns the first matching mode, or undefined when the guard ignores the tool.
+ */
+export function delegationModeOf(
+  policies: readonly DelegationToolPolicy[],
+  toolName: string,
+): DelegationToolMode | undefined {
+  for (const policy of policies) {
+    if (policy.name === toolName) return policy.mode
+  }
+  return undefined
+}
+
+/**
  * Decide whether one delegation call may start its child.
  * @param agent - Calling agent.
  * @param toolName - Tool being dispatched.
  * @param args - Parsed tool arguments.
  * @param preference - Current Host preference, when the settings service exists.
  * @param sessions - Session registry used for ancestor lookup.
- * @param toolNames - Delegation tool names this guard authorizes.
+ * @param toolNames - Delegation tool names this guard authorizes (explicit mode).
  * @param scope - Whether an unrecorded Session falls back to the preference.
+ * @param inheritToolNames - Delegation tools that start a child on the caller's own route.
  * @returns a denial reason, or undefined to leave the call untouched.
  */
 export function delegationDenialReason(
@@ -307,8 +449,16 @@ export function delegationDenialReason(
   sessions: SessionsResolver,
   toolNames: readonly string[] = DEFAULT_DELEGATION_TOOLS,
   scope: AuthorizationScope = 'session',
+  inheritToolNames: readonly string[] = [],
 ): string | undefined {
-  if (!toolNames.includes(toolName)) return undefined
+  const mode = delegationModeOf(
+    [
+      ...toolNames.map(name => ({ name, mode: 'explicit' as const })),
+      ...inheritToolNames.map(name => ({ name, mode: 'inherit' as const })),
+    ],
+    toolName,
+  )
+  if (mode === undefined) return undefined
   // An explicit "off" in the Host document suspends enforcement everywhere,
   // matching the preference the Settings card owns.
   if (preference !== undefined && !preference.enabled) return undefined
@@ -318,6 +468,20 @@ export function delegationDenialReason(
   const request = asRecord(args) ?? {}
   const requestedProvider = asString(request['provider'])
   const requestedModel = asString(request['model'])
+  if (mode === 'inherit') {
+    // An inherit-mode tool has no route parameters, so a named pair can only be
+    // an attempt to re-route the child away from the route the tool exists to
+    // preserve. Check it before the inherited route: it is the more precise
+    // diagnostic, and it holds even when the inherited route is authorized.
+    if (requestedProvider !== undefined && requestedModel !== undefined) {
+      return inheritOverrideReason(toolName, requestedProvider, requestedModel)
+    }
+    const inherited = inheritedRouteOf(agent)
+    if (inherited.provider !== undefined && inherited.model !== undefined
+      && routesInclude(allowed, inherited.provider, inherited.model)) return undefined
+    return inheritRouteDenialReason(
+      toolName, inherited.provider, inherited.model, allowed, inherited.reasoningEffort)
+  }
   // The route is explicit only when the model named a complete pair. A call that
   // omits either half would let the built-in tool fall back to the configured
   // child defaults or to the parent route, which is exactly the unauthorized
@@ -338,8 +502,10 @@ export interface SubagentAuthorizationOptions {
   readonly settings?: SettingsProvider
   /** Session registry used for ancestor lookup. */
   readonly sessions: SessionsResolver
-  /** Exact delegation tool names this guard authorizes. */
+  /** Exact delegation tool names this guard authorizes (explicit route selection). */
   readonly toolNames: readonly string[]
+  /** Delegation tools that run their child on the caller's own route. */
+  readonly inheritToolNames?: readonly string[]
   /** Whether an unrecorded Session falls back to the current preference. */
   readonly scope?: AuthorizationScope
 }
@@ -369,6 +535,7 @@ export function createSubagentAuthorization(
     options.sessions,
     options.toolNames,
     options.scope ?? 'session',
+    options.inheritToolNames ?? [],
   )
 }
 
@@ -378,6 +545,37 @@ export function normalizeDelegationToolNames(value: unknown): string[] {
     ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
     : []
   return [...new Set(names.length === 0 ? [...DEFAULT_DELEGATION_TOOLS] : names.map(name => name.trim()))]
+}
+
+/**
+ * Normalize the configured inherit-mode names. Unlike
+ * {@link normalizeDelegationToolNames}, an empty array is a deliberate opt-out
+ * (`[]`) rather than a request for the default, and `undefined` selects the
+ * shipped default.
+ * @param value - Candidate configuration value.
+ * @returns the exact inherit-mode names this guard enforces.
+ */
+export function normalizeInheritToolNames(value: unknown): string[] {
+  if (value === undefined) return [...DEFAULT_SUBAGENT_INHERIT_TOOLS]
+  const names = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+  return [...new Set(names.map(name => name.trim()))]
+}
+
+/**
+ * Validate the configured inherit-mode names. Emptiness is legal here — it
+ * disables inherit enforcement — but a malformed entry is not.
+ * @param toolNames - Candidate inherit-mode delegation tool names.
+ * @returns the exact names this guard enforces in inherit mode.
+ */
+export function validateInheritToolNames(toolNames: readonly string[]): string[] {
+  for (const name of toolNames) {
+    if (name.length === 0 || name !== name.trim()) {
+      throw new Error(`dsh-chatgpt-subscription: subagentModelInheritTools entry "${name}" must be a non-empty trimmed string`)
+    }
+  }
+  return [...toolNames]
 }
 
 /**
@@ -399,8 +597,10 @@ export function validateDelegationToolNames(toolNames: readonly string[]): strin
 
 /** Configuration accepted by {@link installSubagentModelAuthorization}. */
 export interface SubagentModelAuthorizationConfig {
-  /** Delegation tool names the guard authorizes. */
+  /** Delegation tool names the guard authorizes (explicit route selection). */
   readonly toolNames?: readonly string[]
+  /** Delegation tools that run their child on the caller's own route. */
+  readonly inheritToolNames?: readonly string[]
   /** Whether an unrecorded Session falls back to the current preference. */
   readonly scope?: AuthorizationScope
 }
@@ -418,9 +618,16 @@ export function installSubagentModelAuthorization(
   config: SubagentModelAuthorizationConfig = {},
 ): () => void {
   const toolNames = validateDelegationToolNames(config.toolNames ?? [...DEFAULT_DELEGATION_TOOLS])
+  const inheritToolNames = validateInheritToolNames(config.inheritToolNames ?? [])
+  if (inheritToolNames.some(name => toolNames.includes(name))) {
+    throw new Error(
+      'dsh-chatgpt-subscription: a delegation tool cannot be both an explicit and an inherit tool '
+      + `(${inheritToolNames.filter(name => toolNames.includes(name)).join(', ')})`,
+    )
+  }
   const scope = validateAuthorizationScope(config.scope ?? 'session')
   const settings = (ctx as unknown as { get?(name: string): unknown }).get?.('settings') as SettingsProvider | undefined
-  const authorize = createSubagentAuthorization({ settings, sessions, toolNames, scope })
+  const authorize = createSubagentAuthorization({ settings, sessions, toolNames, inheritToolNames, scope })
   return ctx.tools.guard(exec =>
     authorize(exec.agent as AuthorizationAgent | undefined, exec.name, exec.arguments))
 }

@@ -145,6 +145,26 @@ export type LoginEventDto =
   | { type: 'cancelled'; loginId: string }
   | { type: 'failed'; loginId: string; error: PublicErrorDto }
 
+/** One child that ran on a route the governing allowlist did not authorize. */
+export interface SubagentRouteViolationDto {
+  childId: string
+  parentId: string | null
+  provider: string | null
+  label: string | null
+  routeProvider: string | null
+  routeModel: string | null
+  /** Whether the child's route equals its parent's current route. */
+  sameAsParent: boolean
+}
+
+/** Advisory audit of child routes for one parent session. */
+export interface SubagentRouteAuditDto {
+  sessionId: string
+  /** Exact authorized routes the audit compared against. */
+  allowedModels: { provider: string; model: string }[]
+  violations: SubagentRouteViolationDto[]
+}
+
 export interface PublicErrorDto {
   code:
     | 'bad-request'
@@ -161,6 +181,7 @@ export interface PublicErrorDto {
     | 'quota-failed'
     | 'preference-failed'
     | 'rate-limited'
+    | 'route-audit-failed'
     | 'internal'
   message: string
 }

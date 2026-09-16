@@ -4,7 +4,13 @@ import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
-import type { ApiEnvelope, LoginEventDto, PublicErrorDto, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type {
+  ApiEnvelope,
+  LoginEventDto,
+  PublicErrorDto,
+  SubagentRouteAuditDto,
+  SubscriptionPreferencesUpdateDto,
+} from '../shared/contracts.ts'
 import { contextWindowLimitForModel, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
 import { isCodexReasoningSummary } from '../shared/preferences.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
@@ -15,6 +21,9 @@ import { UsageService, UsageServiceError } from './usage-service.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
+/** Read-only audit provider the optional route serves. */
+export type RouteAuditReader = (sessionId: string) => Promise<SubagentRouteAuditDto>
+
 export function registerRoutes(
   ctx: Context,
   oauth: OAuthService,
@@ -22,6 +31,7 @@ export function registerRoutes(
   preferences: SubscriptionPreferenceStore,
   proxyManager?: ProxyManager,
   searchSwitcher?: SearchProviderSwitcher,
+  routeAudit?: RouteAuditReader,
 ): () => void {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
@@ -35,6 +45,26 @@ export function registerRoutes(
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
         switcher: searchSwitcher?.status() ?? null,
       } })
+      return
+    }
+    if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/subagent-route-audit`) {
+      const sessionId = url.searchParams.get('sessionId')
+      if (sessionId === null || sessionId.length === 0) {
+        jsonError(response, 400, { code: 'bad-request', message: 'A sessionId query parameter is required.' })
+        return
+      }
+      if (routeAudit === undefined) {
+        jsonError(response, 404, { code: 'route-audit-failed', message: 'Subagent route audit is not installed.' })
+        return
+      }
+      try {
+        json(response, { ok: true, value: await routeAudit(sessionId) })
+      } catch (error) {
+        jsonError(response, 500, publicError(
+          error instanceof Error ? error : new Error('The route audit failed.'),
+          'route-audit-failed',
+        ))
+      }
       return
     }
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/mermaid.min.js`) {
