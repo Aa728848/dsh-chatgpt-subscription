@@ -6,6 +6,9 @@ import {
   BUNDLED_PRESET_IDS,
   bundledPresetsRoot,
   presetTargetRoot,
+  reconcilePackageNames,
+  resolvesFromHere,
+  rewritePresetFile,
   syncPresetTrees,
 } from '../src/host/preset-sync.ts'
 
@@ -114,5 +117,69 @@ describe('syncPresetTrees', () => {
     const result = syncPresetTrees(join(tempDir(), 'absent'), target)
     expect(result).toEqual({ synced: [], current: [], failed: [], retired: [] })
     expect(existsSync(target)).toBe(false)
+  })
+
+  it('writes rewritten text, converges, and rewrites back when the installation changes', () => {
+    const source = sourceTree({ 'alpha/agent.cordis.yml': 'row: bundled\n', 'alpha/preset.yml': 'name: A\n' })
+    const target = join(tempDir(), '.agent-presets')
+    const rename = (_rel: string, content: string): string => content.replace('bundled', 'current')
+
+    expect(syncPresetTrees(source, target, [], rename).synced).toEqual(['alpha'])
+    expect(readFileSync(join(target, 'alpha', 'agent.cordis.yml'), 'utf8')).toBe('row: current\n')
+
+    // The rewritten target is what the next run expects, so it is not a difference.
+    expect(syncPresetTrees(source, target, [], rename)).toMatchObject({ synced: [], current: ['alpha'] })
+
+    // An installation that no longer applies the rewrite brings the target back.
+    expect(syncPresetTrees(source, target, [], (_rel, content) => content).synced).toEqual(['alpha'])
+    expect(readFileSync(join(target, 'alpha', 'agent.cordis.yml'), 'utf8')).toBe('row: bundled\n')
+  })
+
+  it('offers only the extensions a package name can appear in', () => {
+    const source = sourceTree({ 'alpha/notes.txt': 'bundled\n', 'alpha/agent.cordis.yml': 'bundled\n' })
+    const target = join(tempDir(), '.agent-presets')
+    const seen: string[] = []
+    syncPresetTrees(source, target, [], (rel, content) => {
+      seen.push(rel)
+      return content
+    })
+    expect(seen).toEqual(['agent.cordis.yml'])
+  })
+})
+
+describe('package name reconciliation', () => {
+  /** The row the dispatch preset carries, naming the package as it was up to harness 0.1.5. */
+  const BUNDLED_ROW = "      name: '@deepseek-ai/dsh-workflow-worker-thread'\n"
+  const RENAMED = '@deepseek-ai/dsh-workflow-worker-thread'
+  const CURRENT = '@deepseek-ai/dsh-workflow-ptc'
+
+  it('keeps the bundled spelling while the installation still ships it', () => {
+    expect(reconcilePackageNames(BUNDLED_ROW, name => name === RENAMED)).toBe(BUNDLED_ROW)
+  })
+
+  it('rewrites to the spelling a renamed installation ships', () => {
+    expect(reconcilePackageNames(BUNDLED_ROW, name => name === CURRENT))
+      .toBe("      name: '@deepseek-ai/dsh-workflow-ptc'\n")
+  })
+
+  it('keeps the bundled spelling when neither spelling resolves', () => {
+    expect(reconcilePackageNames(BUNDLED_ROW, () => false)).toBe(BUNDLED_ROW)
+  })
+
+  it('leaves text naming no renamed package alone', () => {
+    expect(reconcilePackageNames('name: A\n', () => false)).toBe('name: A\n')
+  })
+
+  it('leaves text with no renamed package alone on the default rewrite', () => {
+    expect(rewritePresetFile('dispatch/agent.cordis.yml', 'name: A\n')).toBe('name: A\n')
+  })
+
+  it('reports an uninstalled specifier as unresolvable', () => {
+    expect(resolvesFromHere('@deepseek-ai/dsh-not-a-published-package')).toBe(false)
+  })
+
+  it('ships the row the harness renamed, under its pre-0.1.6 name', () => {
+    const bundled = readFileSync(join(bundledPresetsRoot(), 'dispatch', 'agent.cordis.yml'), 'utf8')
+    expect(bundled).toContain(`name: '${RENAMED}'`)
   })
 })
