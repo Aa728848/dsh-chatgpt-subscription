@@ -313,8 +313,8 @@
     # `workflow-worker-thread` is this row's name up to harness 0.1.5; 0.1.6
     # renamed the package to `workflow-ptc`. The plugin rewrites this line to
     # whichever spelling the running installation ships (src/host/preset-sync.ts).
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
       config:
         provider: spawn
 
