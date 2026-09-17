@@ -99,7 +99,7 @@
 - Windows 或 Linux；
   - Windows：系统需提供 Windows PowerShell，以使用 CurrentUser DPAPI；
   - Linux：Host 用户必须拥有可写的 `~/.dsh`（或 `$DSH_HOME`），凭据文件会强制使用 `0600`、目录使用 `0700`；
-- 已安装 DSH：peer 范围覆盖 0.1.1-rc.2 及以后的 0.1.x（含 0.1.5-rc.2 与 0.1.6-alpha）。构建与测试以 **0.1.5-rc.2** 为基线（npm 上 `@deepseek-ai/dsh` 的 `latest`，也就是用户实际在跑的版本）；0.1.6 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见下）；
+- 已安装 DSH：peer 范围覆盖 0.1.2-alpha.5 及以后的 0.1.x（含 0.1.5-rc.2 与 0.1.6-alpha）。构建与测试以 **0.1.5-rc.2** 为基线（npm 上 `@deepseek-ai/dsh` 的 `latest`，也就是用户实际在跑的版本）。0.1.1-rc.2 不再声明支持——它既没有 preset 用到的 `present` 工具，`mode` 枚举那时也还写作 `code`；0.1.6 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见下）；
 - Node.js 与 npm。
 
 ## 安装

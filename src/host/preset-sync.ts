@@ -52,6 +52,25 @@ const RENAMED_PACKAGES: ReadonlyMap<string, string> = new Map([
 ])
 
 /**
+ * Packages whose row some supported harness generation does not ship at all.
+ *
+ * An enabled row naming a package the installation cannot resolve makes the
+ * whole preset unresolvable — the roster reports it broken, which is worse than
+ * a missing row because a broken preset can be neither selected nor copied. The
+ * roster skips a `disabled` row in that check, so the sync disables a row whose
+ * package is absent, and the next boot that ships the package re-enables it.
+ *
+ * The set is deliberately explicit rather than "every row that fails to
+ * resolve": a resolver that fails on a working installation would then strip
+ * the preset down to nothing, a quieter failure than the one it fixes.
+ */
+const OPTIONALLY_ABSENT_PACKAGES: readonly string[] = [
+  // Published from harness 0.1.5-alpha.2; the shipped `ptc` preset gained this
+  // row in 0.1.5-rc.1, the shape this preset was written against.
+  '@deepseek-ai/dsh-tool-present',
+]
+
+/**
  * Whether a bare specifier resolves from this module in the running
  * installation. A harness whose Node build exposes no `import.meta.resolve`
  * answers `false` for everything, which leaves every bundled spelling in place.
@@ -89,12 +108,67 @@ export function reconcilePackageNames(content: string, resolves: (specifier: str
   return out
 }
 
+/** Leading spaces of one line — the indentation its YAML keys share. */
+function indentationOf(line: string): number {
+  return line.length - line.trimStart().length
+}
+
+/** The package a row line mounts, when the line is a row's `name:` key. */
+function rowPackageName(line: string): string | undefined {
+  return /^\s*name:\s*'([^']+)'\s*$/.exec(line)?.[1]
+}
+
+/** Whether the row whose `name:` key sits at `index` already declares `disabled`. */
+function rowDeclaresDisabled(lines: readonly string[], index: number): boolean {
+  const indent = indentationOf(lines[index] ?? '')
+  // The row's own keys sit at the name key's indentation: a deeper line belongs
+  // to a nested value, a shallower one starts the next row.
+  for (const line of lines.slice(index + 1)) {
+    if (line.trim() === '') continue
+    const own = indentationOf(line)
+    if (own < indent) return false
+    if (own === indent && line.trimStart().startsWith('disabled:')) return true
+  }
+  return false
+}
+
+/**
+ * Disable every row whose package this installation does not ship.
+ * @param content - preset file text.
+ * @param resolves - whether a bare specifier resolves in this installation.
+ * @returns the text to write, equal to `content` when no row is affected.
+ */
+function disableRowsForAbsentPackages(content: string, resolves: (specifier: string) => boolean): string {
+  const lines = content.split('\n')
+  const out: string[] = []
+  for (const [index, line] of lines.entries()) {
+    out.push(line)
+    const specifier = rowPackageName(line)
+    if (specifier === undefined || !OPTIONALLY_ABSENT_PACKAGES.includes(specifier)) continue
+    if (resolves(specifier) || rowDeclaresDisabled(lines, index)) continue
+    out.push(`${' '.repeat(indentationOf(line))}disabled: true`)
+  }
+  return out.join('\n')
+}
+
+/**
+ * Reconcile one bundled preset file with the packages this installation ships:
+ * a renamed package takes the spelling it carries, and a row it cannot mount is
+ * disabled rather than left to mark the whole preset unresolvable.
+ * @param content - bundled preset file text.
+ * @param resolves - whether a bare specifier resolves in this installation.
+ * @returns the text to write.
+ */
+export function reconcilePreset(content: string, resolves: (specifier: string) => boolean): string {
+  return disableRowsForAbsentPackages(reconcilePackageNames(content, resolves), resolves)
+}
+
 /** One preset file's text, rewritten for the running installation. */
 export type PresetFileRewrite = (relativePath: string, content: string) => string
 
-/** Rewrite bundled preset text to the package spellings this installation ships. */
+/** Rewrite bundled preset text for the packages this installation ships. */
 export const rewritePresetFile: PresetFileRewrite = (_relativePath, content) =>
-  reconcilePackageNames(content, resolvesFromHere)
+  reconcilePreset(content, resolvesFromHere)
 
 /** One sync run's outcome, grouped for diagnostics. */
 export interface PresetSyncResult {

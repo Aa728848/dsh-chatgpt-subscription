@@ -359,5 +359,8 @@
   config:
     mode: ptc
 
+# `present` ships from harness 0.1.5-alpha.2. On an earlier installation the
+# sync disables this row rather than leave the whole preset unresolvable, and
+# re-enables it once the harness ships the package (src/host/preset-sync.ts).
 - id: present
   name: '@deepseek-ai/dsh-tool-present'
