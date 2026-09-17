@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.6 - 2026-09-17
+
 - **修生成图片不显示**：`CodexImageToolView` 通过 `conversation.resolveImage` 取图，而该服务在 harness 0.1.2 就改名成了 `uiConversation.imageUrl`，此后所有版本的生成图片都渲染不出来（代码里是 `as unknown as` 强转，编译期查不出来）。现在按可用性依次取 `uiConversation.imageUrl`、`conversation.resolveImage`，都不可用时返回失败的 Promise，卡片显示既有的「图片加载失败」文案。
 - **兼容 harness 0.1.6 的改名**：DSH 0.1.6 把 workflow 引擎的包名从 `@deepseek-ai/dsh-workflow-worker-thread` 改成 `@deepseek-ai/dsh-workflow-ptc`，而 preset 行名指向不存在的包会让整个 preset 被判为 broken、既不可选也不可复制。`src/host/preset-sync.ts` 现在在同步时探测当前安装能解析哪个名字（`import.meta.resolve`）：旧名仍在就保留，否则把行里的包名改写成新名；两个都不能解析时不改写（改名只会掩盖试过哪个）。同一份 preset 因此在 0.1.5 与 0.1.6 上都能挂载。新增 `reconcilePackageNames` / `resolvesFromHere` / `rewritePresetFile` 与 9 条用例，覆盖「改写后的目标树仍然幂等」「安装换代后改回来」「只处理 `.yml` / `.yaml`」。
 - **开发与测试基线移到 harness 0.1.5-rc.2**（npm 上 `@deepseek-ai/dsh` 的 `latest`，也就是用户实际在跑的版本）：此前 `package-lock.json` 把整棵依赖树钉在 0.1.1-rc.2，测试从来没跑在用户运行的版本上——「生成图片不显示」这条就是这样漏掉的。重新生成锁文件后 dsh 全家族（27 个包）落在 0.1.5-rc.2，`peerDependencies` 相应补上 `^0.1.6-alpha.1`。peer 与 dev 从此分工明确：peer 声明支持的世代，dev 只声明构建与测试所对的那一版。
