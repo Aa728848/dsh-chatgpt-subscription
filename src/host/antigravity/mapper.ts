@@ -91,9 +91,16 @@ function attachmentLabel(block: Record<string, unknown>): string | undefined {
 function collectImageRefs(content: unknown, refs: Map<string, ImageAttachmentRef>): void {
   if (!Array.isArray(content)) return
   for (const block of content) {
-    if (!isRecord(block) || block.type !== 'image') continue
-    const attachment = attachmentOf(block)
-    if (attachment) refs.set(attachment.attachmentId, attachment)
+    if (!isRecord(block)) continue
+    if (block.type === 'image') {
+      const attachment = attachmentOf(block)
+      if (attachment) refs.set(attachment.attachmentId, attachment)
+      continue
+    }
+    // Tool results nest their own content, and a screenshot or a read_image
+    // result carries its pixels there. Stopping at the top level made every
+    // tool-produced image unresolvable before it could reach the wire.
+    if (block.type === 'tool-result') collectImageRefs(block.content, refs)
   }
 }
 
@@ -284,6 +291,29 @@ function contentToUserParts(content: unknown, images: ResolvedRequestImages): Ar
   return parts
 }
 
+/**
+ * Image parts for one tool result, flattened the same way so a nested
+ * `tool-result` cannot hide one. Gemini's `functionResponse` has nowhere to put
+ * an image, so these become `inlineData` siblings on the same user content.
+ */
+function toolResultImageParts(
+  blocks: unknown,
+  images: ResolvedRequestImages,
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(blocks)) return []
+  const parts: Array<Record<string, unknown>> = []
+  for (const block of blocks) {
+    if (!isRecord(block)) continue
+    if (block.type === 'image') {
+      // Never dropped silently: an unreadable image says so.
+      parts.push(imageBlockToPart(block, images) ?? { text: unavailableImageText(block) })
+      continue
+    }
+    if (block.type === 'tool-result') parts.push(...toolResultImageParts(block.content, images))
+  }
+  return parts
+}
+
 function toolResultText(blocks: unknown): string {
   if (!Array.isArray(blocks)) return ''
   return blocks
@@ -408,6 +438,7 @@ function pushToolResult(
   toolCalls: Map<string, ToolCallReference>,
   model: AntigravityModelDef,
   runtimeModel: string,
+  images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
 ): void {
   const toolCallId = String(result.toolCallId || '')
   const call = toolCalls.get(toolCallId)
@@ -424,11 +455,15 @@ function pushToolResult(
     },
   }
 
+  // Gemini allows one user content to mix `functionResponse` and `inlineData`
+  // parts, which is the only place a tool-produced image can travel on this
+  // wire. With no images the parts array is byte-for-byte what it was before.
+  const extraParts = toolResultImageParts(result.content, images)
   const last = contents[contents.length - 1]
   if (last?.role === GEMINI_ROLE.user && last.parts.some((entry) => 'functionResponse' in entry)) {
-    last.parts.push(part)
+    last.parts.push(part, ...extraParts)
   } else {
-    contents.push({ role: GEMINI_ROLE.user, parts: [part] })
+    contents.push({ role: GEMINI_ROLE.user, parts: [part, ...extraParts] })
   }
 }
 
@@ -459,7 +494,7 @@ export function convertMessages(
     if (userParts.length) contents.push({ role: GEMINI_ROLE.user, parts: userParts })
     for (const b of content) {
       if (isRecord(b) && b.type === 'tool-result') {
-        pushToolResult(contents, b, toolCalls, model, runtimeModel)
+        pushToolResult(contents, b, toolCalls, model, runtimeModel, images)
       }
     }
   }
