@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
-import { SettingsProvider, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { WebError, WebRuntime } from '@deepseek-ai/dsh-web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CODEX_FETCH_PROVIDER_ID } from '../src/compat.ts'
@@ -10,7 +10,7 @@ import * as platformStore from '../src/host/platform-token-store.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 import { PREFERENCES_NAMESPACE } from '../src/shared/preferences.ts'
 
-const namespace = settingsNamespace(PREFERENCES_NAMESPACE)
+const namespace = PREFERENCES_NAMESPACE as SettingsNamespace
 
 afterEach(() => {
   vi.restoreAllMocks()

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
 import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -24,8 +24,8 @@ import {
  * nested path is covered rather than assuming it.
  */
 
-/** Code-mode spelling accepted by this DSH line ('code'; newer checkouts use 'ptc'). */
-const CODE_MODE = 'code' as unknown as 'native'
+/** Tool-presentation mode that routes direct calls through `run_code`. */
+const CODE_MODE = 'ptc' as const
 
 const GEMINI: AllowedModelRoute = { provider: 'antigravity', model: 'gemini-3.8-flash' }
 const DEEPSEEK_OPTIONS = { provider: 'deepseek-official', model: 'deepseek-flash' }
@@ -123,7 +123,7 @@ function runCode(
   }
   return ctx.tools.execute({
     signal: new AbortController().signal,
-    callId: CallId('code-call-1'),
+    callId: ToolCallId('code-call-1'),
     name: RUN_CODE_NAME,
     arguments: { code: 'program', description: 'Run the guard test program' },
     agent,
