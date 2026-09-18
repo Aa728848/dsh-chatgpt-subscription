@@ -62,6 +62,7 @@ import {
   BUNDLED_PRESET_IDS,
   bundledPresetsRoot,
   presetTargetRoot,
+  rewritePresetFile,
   syncPresetTrees,
 } from './host/preset-sync.ts'
 import {
@@ -132,7 +133,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     ctx.effect(() => {
       try {
         const target = presetTargetRoot(dshHomeDir())
-        const result = syncPresetTrees(bundledPresetsRoot(), target, [...BUNDLED_PRESET_IDS])
+        const result = syncPresetTrees(bundledPresetsRoot(), target, [...BUNDLED_PRESET_IDS], rewritePresetFile)
         for (const { id, error } of result.failed) {
           ctx.logger.warn(`[dsh-chatgpt-subscription] agent preset "${id}" sync failed: ${error}`)
         }

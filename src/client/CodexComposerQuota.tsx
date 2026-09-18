@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
@@ -7,6 +6,7 @@ import type { PluginStatusDto } from '../shared/contracts.ts'
 import { SubscriptionApi } from './api.ts'
 import { NS } from './locales.ts'
 import { selectQuotaForModel } from './quota.ts'
+import type { SnapshotStore } from './store.ts'
 
 type Props = PropsRuntime<'conversation.input.right'> & PropsLocale<typeof NS> & {
   api: SubscriptionApi

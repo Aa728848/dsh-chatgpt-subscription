@@ -71,7 +71,7 @@
 
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
 - 子代理的模型与思考深度沿用 DSH 自身设置：**设置 → Subagent** 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 `agent-default-model` 设置提供；
-- 最大嵌套深度是 DSH 子代理工具的装配配置（preset 中 `tool-subagent` 的 `maxDepth`，默认 3；`provider-managed` 表示把预算交给进程外提供方），不在本插件设置内；
+- 最大嵌套深度不在本插件设置内，由 DSH 侧决定：0.1.5 及以前是 preset 中 `tool-subagent` 行的 `maxDepth`（默认 3），0.1.6 起改由 `subagent` 服务的设置项提供（默认 1）；`provider-managed` 表示把预算交给进程外提供方；
 - 6 Astra 与 5.6 Sol / Terra / Luna 默认使用 272K 有效上下文；订阅侧 6 Astra 可配置最高 872K，5.6 系列最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 
@@ -99,7 +99,7 @@
 - Windows 或 Linux；
   - Windows：系统需提供 Windows PowerShell，以使用 CurrentUser DPAPI；
   - Linux：Host 用户必须拥有可写的 `~/.dsh`（或 `$DSH_HOME`），凭据文件会强制使用 `0600`、目录使用 `0700`；
-- 已安装 DSH；
+- 已安装 DSH：peer 范围覆盖 0.1.2-alpha.5 及以后的 0.1.x（含 0.1.5-rc.2 与 0.1.6-alpha）。构建与测试以 **0.1.5-rc.2** 为基线（npm 上 `@deepseek-ai/dsh` 的 `latest`，也就是用户实际在跑的版本）。0.1.1-rc.2 不再声明支持——它既没有 preset 用到的 `present` 工具，`mode` 枚举那时也还写作 `code`；0.1.6 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见下）；
 - Node.js 与 npm。
 
 ## 安装
@@ -117,11 +117,13 @@ dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 npx @deepseek-ai/dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 ```
 
-### 方式 2：通过 DSH 插件市场安装
+### 方式 2：在 DSH 界面里安装
 
-1. 打开 DSH 界面中的 **插件市场** / **Plugin Market**；
-2. 搜索 `@eddyskywalker/dsh-chatgpt-subscription` 或 `dsh-chatgpt-subscription`；
-3. 点击 **安装**。
+DSH 没有插件市场；Web 界面的 **Plugins** 页提供按包名安装的入口（底层与 `dsh plugin add` 相同）：
+
+1. 打开侧栏的 **Plugins** 页；
+2. 在添加插件的输入框里填 `@eddyskywalker/dsh-chatgpt-subscription` 并安装；
+3. 重启 `dsh web`。
 
 ### 方式 3：本地开发调试（源码软链接）
 
@@ -147,7 +149,7 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 3. 完成 ChatGPT 登录；
 4. 执行 **测试连接**。
 
-DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（**设置 → Subagent** 卡片授权的模型清单，以及 `agent-default-model` 的默认路由）；最大嵌套深度由 DSH preset 中 `tool-subagent` 的 `maxDepth` 决定。
+DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（Subagent 卡片授权的模型清单，以及 `agent-default-model` 的默认路由；该卡片 0.1.5 及以前在「设置」页，0.1.6 起在 **Plugins** 页）；最大嵌套深度由 DSH 侧决定（0.1.5 及以前取 preset 中 `tool-subagent` 的 `maxDepth`，默认 3；0.1.6 起取 `subagent` 服务的设置，默认 1）。
 
 **设置 → Codex 订阅 → 网络代理** 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。
 
@@ -189,6 +191,7 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 G
 同步在每个 profile 启动时执行一次（幂等）：
 
 - 目标树与包内副本逐字节相同时跳过，有差异时整体重写，并把包内已删除的多余文件清理掉；
+- **行里的包名按运行环境改写**：preset 要挂载 `@deepseek-ai/dsh-workflow-worker-thread`，而 harness 0.1.6 把它改名成了 `@deepseek-ai/dsh-workflow-ptc`，指向不存在的包会让整个 preset 被判为 broken、既不可选也不可复制。同步时用 `import.meta.resolve` 探测当前安装能解析哪个名字（旧名仍在就保留，否则改写成新名；两个都不可用时不改写，因为改名只会掩盖试过哪个），所以同一份 preset 在 0.1.5 与 0.1.6 上都能挂载；
 - 只处理本包自己的 preset id（`BUNDLED_PRESET_IDS`），**绝不改动用户手写的 preset 或其它插件的 preset**；
 - 包内已不再随附的旧 id 会从目标根目录移除（retire）；
 - 同步失败（例如 home 只读）只记一条 warn，不会导致插件加载失败——preset 是便利项，不是本插件提供的核心能力。

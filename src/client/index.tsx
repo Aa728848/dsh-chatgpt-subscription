@@ -1,10 +1,12 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
 import { CODEX_IMAGE_TOOL_NAME } from '../compat.ts'
 import { CodexComposerQuota } from './CodexComposerQuota.tsx'
@@ -87,7 +89,7 @@ export function apply(ctx: ClientContext): void {
     order: 35,
     locale: NS,
     inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId)
+      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
       return {
         api: new SubscriptionApi(),
         directory: directory.store,
@@ -103,7 +105,7 @@ export function apply(ctx: ClientContext): void {
     order: 36,
     locale: NS_ANTIGRAVITY,
     inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId)
+      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
       return {
         directory: directory.store,
         loadModelDirectory: () => {
@@ -118,7 +120,7 @@ export function apply(ctx: ClientContext): void {
     order: 37,
     locale: NS_COMMAND_CODE,
     inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId)
+      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
       return {
         directory: directory.store,
         loadModelDirectory: () => {
@@ -133,7 +135,7 @@ export function apply(ctx: ClientContext): void {
     order: 38,
     locale: NS_KIMI_CODE,
     inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId)
+      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
       return {
         directory: directory.store,
         loadModelDirectory: () => {
@@ -152,9 +154,20 @@ export function apply(ctx: ClientContext): void {
   }, CodexImageToolView))
 }
 
+type ImageUrlResolver = (sessionId: string, attachment: ImageAttachmentRef) => Promise<string>
+
+/**
+ * Resolve one session-authorized image URL.
+ *
+ * Harness 0.1.2 moved this from `resolveImage` on `conversation` to `imageUrl`
+ * on `uiConversation`, so both shapes stay supported.
+ */
 function imageLoader(ctx: ClientContext, sessionId: string): ImageLoader {
-  const conversation = ctx.conversation as unknown as {
-    resolveImage(sessionId: string, attachment: ImageAttachmentRef): Promise<string>
-  }
-  return (attachment) => conversation.resolveImage(sessionId, attachment)
+  const current = ctx.get('uiConversation') as unknown as { imageUrl?: ImageUrlResolver } | undefined
+  const currentResolve = current?.imageUrl?.bind(current)
+  if (currentResolve !== undefined) return (attachment) => currentResolve(sessionId, attachment)
+  const legacy = ctx.get('conversation') as unknown as { resolveImage?: ImageUrlResolver } | undefined
+  const legacyResolve = legacy?.resolveImage?.bind(legacy)
+  if (legacyResolve !== undefined) return (attachment) => legacyResolve(sessionId, attachment)
+  return () => Promise.reject(new Error('no client service resolves an image URL'))
 }

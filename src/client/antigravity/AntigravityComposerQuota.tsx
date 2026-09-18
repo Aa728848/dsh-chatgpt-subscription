@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AntigravityQuotaGroup, AntigravityModelBucket, AntigravityWebStatus } from '../../shared/antigravity-contracts.ts'
+import type { SnapshotStore } from '../store.ts'
 import { NS_ANTIGRAVITY } from './locales.ts'
 
 const API = '/antigravity/api'

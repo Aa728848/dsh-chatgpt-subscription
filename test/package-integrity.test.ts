@@ -64,15 +64,25 @@ describe('Package Integrity & BOM Checks', () => {
     expect(filesWithBom, 'No project files should contain UTF-8 BOM').toEqual([])
   })
 
-  it('ensures peerDependencies and devDependencies match for @deepseek-ai packages', () => {
+  it('ensures every @deepseek-ai devDependency range is one its peerDependency also declares', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'))
     const peerDeps = pkg.peerDependencies || {}
     const devDeps = pkg.devDependencies || {}
 
+    const rangesOf = (spec: string): string[] => spec.split('||').map((part) => part.trim())
     const dshPeerKeys = Object.keys(peerDeps).filter((k) => k.startsWith('@deepseek-ai/'))
     for (const key of dshPeerKeys) {
-      if (devDeps[key]) {
-        expect(devDeps[key], `devDependency ${key} must match peerDependency ${key}`).toBe(peerDeps[key])
+      if (!devDeps[key]) continue
+      // The peer range declares every harness generation this plugin supports;
+      // the dev range is the one it builds and tests against, so it must be a
+      // subset rather than an equal — claiming a generation without exercising
+      // it is what this checks against.
+      const peerRanges = new Set(rangesOf(peerDeps[key]))
+      for (const devRange of rangesOf(devDeps[key])) {
+        expect(
+          peerRanges.has(devRange),
+          `devDependency ${key} range ${devRange} must appear in peerDependency ${key}`,
+        ).toBe(true)
       }
     }
   })
