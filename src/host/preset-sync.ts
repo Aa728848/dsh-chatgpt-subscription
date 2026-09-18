@@ -101,9 +101,11 @@ export function resolvesFromHere(specifier: string): boolean {
 export function reconcilePackageNames(content: string, resolves: (specifier: string) => boolean): string {
   let out = content
   for (const [renamed, current] of RENAMED_PACKAGES) {
-    if (!out.includes(renamed)) continue
-    if (resolves(renamed) || !resolves(current)) continue
-    out = out.split(renamed).join(current)
+    if (out.includes(renamed) && !resolves(renamed) && resolves(current)) {
+      out = out.split(renamed).join(current)
+    } else if (out.includes(current) && !resolves(current) && resolves(renamed)) {
+      out = out.split(current).join(renamed)
+    }
   }
   return out
 }

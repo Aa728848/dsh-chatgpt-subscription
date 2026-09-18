@@ -163,6 +163,12 @@ describe('package name reconciliation', () => {
       .toBe("      name: '@deepseek-ai/dsh-workflow-ptc'\n")
   })
 
+  it('rewrites the newer spelling back to the pre-0.1.6 name on an older installation', () => {
+    const modernRow = "      name: '@deepseek-ai/dsh-workflow-ptc'\n"
+    expect(reconcilePackageNames(modernRow, name => name === RENAMED))
+      .toBe(BUNDLED_ROW)
+  })
+
   it('keeps the bundled spelling when neither spelling resolves', () => {
     expect(reconcilePackageNames(BUNDLED_ROW, () => false)).toBe(BUNDLED_ROW)
   })
