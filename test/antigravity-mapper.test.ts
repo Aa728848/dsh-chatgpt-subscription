@@ -66,6 +66,10 @@ describe('Antigravity Mapper', () => {
     expect(sysInst.parts.some((p) => p.text.includes(ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION))).toBe(true)
     expect(sysInst.parts.some((p) => p.text.includes(ANTIGRAVITY_PROGRESS_INSTRUCTION))).toBe(true)
     expect(sysInst.parts.some((p) => p.text.includes('Custom developer instructions'))).toBe(true)
+    // The progress rule must come after the caller system prompt so it is the
+    // most recent instruction the model sees.
+    expect(sysInst.parts.findIndex((p) => p.text.includes(ANTIGRAVITY_PROGRESS_INSTRUCTION)))
+      .toBeGreaterThan(sysInst.parts.findIndex((p) => p.text.includes('Custom developer instructions')))
 
     const tools = reqData.tools as Array<{ functionDeclarations: Array<{ name: string }> }>
     expect(tools[0].functionDeclarations[0].name).toBe('get_weather')
