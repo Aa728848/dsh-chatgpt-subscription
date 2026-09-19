@@ -307,6 +307,7 @@ export async function beginWebLogin(
   store: FileCredentialStore,
   fetchFn: typeof fetch = fetch,
   signal?: AbortSignal,
+  onSave?: (credentials: AntigravityCredentials) => Promise<unknown>,
 ): Promise<WebLoginFlowState> {
   if (webLoginFlow.status === 'pending') {
     return { ...webLoginFlow }
@@ -353,6 +354,9 @@ export async function beginWebLogin(
         },
       )
       await store.write(credentials)
+      if (onSave) {
+        await onSave(credentials).catch(() => undefined)
+      }
       webLoginFlow.status = 'complete'
       webLoginFlow.email = credentials.email
       webLoginFlow.completedAt = Date.now()

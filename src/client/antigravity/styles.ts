@@ -62,6 +62,20 @@ export function installAntigravityStyles(): void {
 .dsha-composer-quota strong{color:var(--dsw-alias-label-primary);font-size:11px;font-weight:650}
 .dsha-composer-quota[data-level=warning] strong{color:var(--dsw-alias-label-warning,#d58a24)}
 .dsha-composer-quota[data-level=danger] strong{color:var(--dsw-alias-label-danger,#d94b4b)}
+.dsha-accounts-list{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+.dsha-account-card{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;transition:border-color .15s ease}
+.dsha-account-card.active{border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 60%,var(--dsw-alias-border-l2))}
+.dsha-account-header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.dsha-account-identity{display:flex;align-items:center;gap:8px;min-width:0}
+.dsha-account-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsha-badges{display:flex;align-items:center;gap:6px}
+.dsha-badge{font-size:11px;line-height:1;padding:3px 7px;border-radius:4px;font-weight:550;white-space:nowrap}
+.dsha-badge.primary{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 18%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-button-info-fill,#397ee8);border:0.5px solid color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 40%,transparent)}
+.dsha-badge.active{background:color-mix(in srgb,var(--dsw-alias-label-success,#10b981) 18%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-success,#10b981);border:0.5px solid color-mix(in srgb,var(--dsw-alias-label-success,#10b981) 40%,transparent)}
+.dsha-badge.cooldown{background:color-mix(in srgb,var(--dsw-alias-label-warning,#d58a24) 18%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-warning,#d58a24);border:0.5px solid color-mix(in srgb,var(--dsw-alias-label-warning,#d58a24) 40%,transparent)}
+.dsha-account-details{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dsha-account-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.dsha-account-actions .dsha-btn{padding:5px 10px;font-size:12px}
 `
   document.head.append(style)
 }

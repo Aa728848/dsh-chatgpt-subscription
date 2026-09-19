@@ -29,6 +29,7 @@ import {
   credentialPath,
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
+import { AccountPoolStore } from './host/antigravity/account-pool.ts'
 import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID } from './host/antigravity/types.ts'
 import { CommandCodeAdapter } from './host/command-code/adapter.ts'
 import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
@@ -153,6 +154,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const preferences = registerPreferenceStore(ctx.settings)
 
   const antigravityStore = new FileCredentialStore()
+  const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)
   const antigravityModelSettings = new FileModelSettingsStore()
   const antigravityPreferences = registerAntigravityPreferenceStore(ctx.settings, antigravityModelSettings)
 
@@ -214,6 +216,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       // The route declares image input, so DSH hands it durable image blocks
       // that only the attachment service can turn into wire bytes.
       { fetchFn: proxyFetch, attachments: ctx.attachments },
+      antigravityAccountPool,
     )
     let antigravityRegistration: AdapterRegistrationHandle | undefined
     let antigravityConflict: string | null = null
@@ -245,6 +248,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       antigravityModelSettings,
       antigravityPreferences,
       proxyFetch,
+      antigravityAccountPool,
     )
     const disposeCommandCodeRoutes = registerCommandCodeRoutes(
       ctx,

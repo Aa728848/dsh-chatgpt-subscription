@@ -39,6 +39,21 @@ export interface AntigravityAccountQuota {
   fetchedAt: number
 }
 
+export type AccountRotationStrategy = 'sequential' | 'round-robin'
+
+export interface AntigravityAccountSummaryDto {
+  id: string
+  alias: string
+  email?: string
+  projectId?: string
+  planLabel?: string
+  isPrimary: boolean
+  lastUsedAt?: number
+  cooldownUntil?: number
+  cooldownReason?: string
+  expiresAt?: number
+}
+
 export interface AntigravityWebStatus {
   enabled?: boolean
   authenticated: boolean
@@ -52,6 +67,9 @@ export interface AntigravityWebStatus {
   models: AntigravityModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort?: 'low' | 'medium' | 'high' | null
+  accounts?: AntigravityAccountSummaryDto[]
+  activeAccountId?: string
+  rotationStrategy?: AccountRotationStrategy
 }
 
 export interface AntigravitySettingsUpdateDto {

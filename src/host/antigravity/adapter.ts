@@ -51,14 +51,20 @@ export function resolveDefaultReasoningEffort(
   return undefined
 }
 
+import { AccountPoolStore } from './account-pool.ts'
+
 export class AntigravityAdapter extends LlmAdapter {
+  private readonly accountPool: AccountPoolStore
+
   constructor(
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
     private readonly preferences?: AntigravityPreferenceStore,
     private readonly options: { fetchFn?: typeof fetch; attachments?: AttachmentImageReader } = {},
+    accountPool?: AccountPoolStore,
   ) {
     super()
+    this.accountPool = accountPool ?? new AccountPoolStore(undefined, undefined, store)
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -169,9 +175,6 @@ export class AntigravityAdapter extends LlmAdapter {
     signal: AbortSignal,
   ): AsyncIterable<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const { token, projectId: defaultProj } = await ensureApiKey(this.store, fetchFn)
-    const projectId = defaultProj || 'antigravity-default'
-
     const effort = String(options.reasoningEffort || 'medium').toLowerCase()
     const routing = ROUTING[model.id]
     const initialRuntime = routing?.routing[effort] || routing?.defaultRequestId || model.id
@@ -185,41 +188,68 @@ export class AntigravityAdapter extends LlmAdapter {
       }
     }
 
-    // DSH delivers pasted images as durable `{ type: 'image', attachment }`
-    // blocks because this route declares image input, and only bytes can become
-    // Gemini `inlineData`. Bound the payload first, then read it once, up front:
-    // every runtime-model and endpoint candidate below reuses both results.
     const requestOptions = offloadOldestRequestImages(options)
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
 
+    const triedAccountIds = new Set<string>()
     let response: Response | undefined
-    for (const runtimeModel of candidates) {
-      const body = JSON.stringify(buildRequest(requestOptions, model, projectId, runtimeModel, effort, images))
-      const headers = {
-        ...antigravityHeaders(token),
-        ...(model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {}),
-      }
 
-      for (const endpoint of endpointCandidates()) {
-        try {
-          response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-            method: 'POST',
-            headers,
-            body,
-            signal,
-          })
-          // Invalid payloads cannot be repaired by changing endpoints or models.
-          // Keep the first 400 response and its diagnostic body intact.
-          if (response.ok || response.status === 400) break
-          // 若遇 404 表明该模型在当前架构下未登记，直接跳出尝试下一个降级模型
-          if (response.status === 404) break
-          // 若遇 429 限流或 5xx 错误，不提前中断，继续尝试下一个备用端点 (如 daily sandbox)
-        } catch (err) {
-          if (signal.aborted) throw new LlmError('Antigravity request aborted', 'ABORTED', { cause: err })
+    while (true) {
+      let eff: { account: { id: string }; token: string; projectId?: string }
+      try {
+        eff = await this.accountPool.getEffectiveAccount(triedAccountIds, fetchFn)
+      } catch (poolErr) {
+        const poolData = await this.accountPool.read().catch(() => null)
+        if (!poolData || poolData.accounts.length === 0) {
+          const { token, projectId: defaultProj } = await ensureApiKey(this.store, fetchFn)
+          eff = { account: { id: 'legacy' }, token, projectId: defaultProj }
+        } else {
+          throw poolErr
         }
       }
 
-      if (response && (response.ok || response.status === 400)) break
+      const { account, token, projectId: defaultProj } = eff
+      const projectId = defaultProj || 'antigravity-default'
+      triedAccountIds.add(account.id)
+
+      for (const runtimeModel of candidates) {
+        const body = JSON.stringify(buildRequest(requestOptions, model, projectId, runtimeModel, effort, images))
+        const headers = {
+          ...antigravityHeaders(token),
+          ...(model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {}),
+        }
+
+        for (const endpoint of endpointCandidates()) {
+          try {
+            response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+              method: 'POST',
+              headers,
+              body,
+              signal,
+            })
+            if (response.ok || response.status === 400) break
+            if (response.status === 404) break
+          } catch (err) {
+            if (signal.aborted) throw new LlmError('Antigravity request aborted', 'ABORTED', { cause: err })
+          }
+        }
+
+        if (response && (response.ok || response.status === 400)) break
+      }
+
+      if (response && response.status === 429) {
+        const retryAfterHeader = response.headers.get('retry-after')
+        const retryAfterSec = retryAfterHeader ? Number(retryAfterHeader) : NaN
+        const cooldownMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 15 * 60 * 1000
+        await this.accountPool.markCooldown(account.id, cooldownMs, '429 Rate Limit')
+
+        const hasNext = await this.accountPool.hasAnotherAvailableAccount(triedAccountIds)
+        if (hasNext) {
+          continue
+        }
+      }
+
+      break
     }
 
     if (!response || !response.ok) {
