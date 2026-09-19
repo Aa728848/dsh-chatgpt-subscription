@@ -2,18 +2,15 @@
 
 ## Unreleased
 
-## 0.3.6 - 2026-09-17
-
-- **修 preset 在部分 harness 上被判 broken**（有人反馈「装了却选不到」）：dispatch preset 有一行挂载 `@deepseek-ai/dsh-tool-present`，而该包从 harness 0.1.5-alpha.2 才发布，更早的安装上这一行无法解析——roster 会把整个 preset 判为 `broken`，而 broken 的 preset 既不可选也不可复制（文件其实已经同步进 `<dshHome>/.agent-presets/`，失败发生在挂载判定那一层）。现在同步时按当前安装调和：行里的包名对当前安装不提供的，就给该行补一个 `disabled: true`（roster 会跳过 disabled 行；harness 升级到提供该包的版本后，下次启动自动恢复启用）。候选写成显式清单（目前只有 `dsh-tool-present` 一项），而不是「凡是解析不到的行都禁用」——解析器整体失灵时那样会把 preset 掏空，故障比它修掉的更隐蔽。新增 5 条用例，拿真实 preset 跑四种包集，按 roster 自己的规则断言没有挂不上的行。
-- **peer 下限抬到 `^0.1.2-alpha.5`**：0.1.1-rc.2 既没有 preset 需要的 `present` 工具，`agent-tool-presentation` 的 `mode` 枚举那时也还写作 `code`（0.1.2-rc.1 起才是 `ptc`），preset 在那里同样挂不上。当初把 0.1.1-rc.2 圈进范围的 `@deepseek-ai/dsh-client-runtime` 已在 0.1.2 停发，抬下限不损失真实支持。
-- `presets/dispatch/agent.cordis.yml` 补上缺失的结尾换行——`.editorconfig` 要求 `insert_final_newline`，它是仓库里唯一违反该约定的文件。
-- **修生成图片不显示**：`CodexImageToolView` 通过 `conversation.resolveImage` 取图，而该服务在 harness 0.1.2 就改名成了 `uiConversation.imageUrl`，此后所有版本的生成图片都渲染不出来（代码里是 `as unknown as` 强转，编译期查不出来）。现在按可用性依次取 `uiConversation.imageUrl`、`conversation.resolveImage`，都不可用时返回失败的 Promise，卡片显示既有的「图片加载失败」文案。
-- **兼容 harness 0.1.6 的改名**：DSH 0.1.6 把 workflow 引擎的包名从 `@deepseek-ai/dsh-workflow-worker-thread` 改成 `@deepseek-ai/dsh-workflow-ptc`，而 preset 行名指向不存在的包会让整个 preset 被判为 broken、既不可选也不可复制。`src/host/preset-sync.ts` 现在在同步时探测当前安装能解析哪个名字（`import.meta.resolve`）：旧名仍在就保留，否则把行里的包名改写成新名；两个都不能解析时不改写（改名只会掩盖试过哪个）。同一份 preset 因此在 0.1.5 与 0.1.6 上都能挂载。新增 `reconcilePackageNames` / `resolvesFromHere` / `rewritePresetFile` 与 9 条用例，覆盖「改写后的目标树仍然幂等」「安装换代后改回来」「只处理 `.yml` / `.yaml`」。
-- **开发与测试基线移到 harness 0.1.5-rc.2**（npm 上 `@deepseek-ai/dsh` 的 `latest`，也就是用户实际在跑的版本）：此前 `package-lock.json` 把整棵依赖树钉在 0.1.1-rc.2，测试从来没跑在用户运行的版本上——「生成图片不显示」这条就是这样漏掉的。重新生成锁文件后 dsh 全家族（27 个包）落在 0.1.5-rc.2，`peerDependencies` 相应补上 `^0.1.6-alpha.1`。peer 与 dev 从此分工明确：peer 声明支持的世代，dev 只声明构建与测试所对的那一版。
-  - 客户端类型换到 0.1.2 之后的新家：`@deepseek-ai/dsh-client-runtime` 自 0.1.2 起不再发布。`ClientContext` 改从 `@deepseek-ai/cordis` 取，`ctx.slots` 的声明改由 `@deepseek-ai/dsh-client-ui-renderer/client` 提供（新增该依赖），`SnapshotStore` 改为在 `src/client/store.ts` 声明共用结构（只用 `getSnapshot` / `subscribe` 两个成员），`package.json` 的 peer、dev 与 `dsh.client.inject` 移除该包。客户端产物仍然只 `require` `react` / `react/jsx-runtime`。
-  - 测试跟随三处 API 改名：`mode: 'code'` → `'ptc'`（`ToolRuntime` 的装配枚举）、`CallId` → `ToolCallId`（现由 `@deepseek-ai/dsh-llm/brand` 导出）、`settingsNamespace()` → 直接用 `PREFERENCES_NAMESPACE`（该函数已从 `@deepseek-ai/dsh-settings` 移除）。
-- `test/package-integrity.test.ts` 的不变量由「peer 与 dev 逐字相同」改为「dev 的每一段范围都必须出现在对应 peer 的范围里」。原写法要求两处完全一致，而 peer 现在要覆盖两个世代、dev 只能对其中一个编译，subset 才是这条检查真正要表达的事。
-- 修 README 里与实际不符的说明：`maxDepth` 默认值（0.1.5 及以前取 preset 行、默认 3；0.1.6 起取 `subagent` 服务设置、默认 1）、不存在的「DSH 插件市场」安装路径、Subagent 卡片的位置，以及构建与测试所对的基线版本。
+- **修复工具结果内嵌图像到不了模型**（command-code / antigravity / kimi-code 三条线路）：三条线路的 mapper 此前都以「只看消息顶层 content」为前提，因此带图的工具结果（截图类工具、`read_image`）在模型侧全部失明——收集阶段看不到 `tool-result` 内部的图像块，压平阶段又把整条工具结果降级成 `[image: 名字]` 文本，像素从来没有上车的机会。更危险的是模型不知道自己瞎了，会凭空编造图片内容作答。用户在聊天框直接粘贴的顶层图片不受影响，这正是问题看起来像「模型不支持视觉」的原因。
+  - 三个 `collectImageRefs` 改为递归进入 `tool-result` 的嵌套 content（`continue` 式，不对块顺序做假设）；DSH 本体 `dsh-llm` 的对应函数同样递归，此处属实现遗漏。
+  - **command-code 的 Anthropic 路径**：`tool_result.content` 在带图时改为块数组（原生 `text` + `image.base64`），无图时仍返回纯字符串，逐字节不变。
+  - **command-code / kimi-code 的 OpenAI 路径**：`role: "tool"` 消息装不下图像，因此扫描**整段连续 tool 消息**收集全部图像，在段末统一追加**一条** `role: "user"` 消息挂 `image_url`。不逐条插入是硬约束：parallel tool calls 会产生连续的 tool 段，把 user 消息插进段中间会被严格上游拒绝（`tool_calls` 未被连续应答）。kimi 变体的 `declarationSlots` 语义逐语句保持等价，无 slot 漂移。
+  - **antigravity（Gemini）**：`functionResponse` 装不下图像，图像以 `inlineData` part 追加到同一条 user content 的 parts 数组（Gemini 允许同一 content 混合二者）；无图时 parts 数组与改前完全一致。
+  - 图像读不到（附件缺失或 media type 不支持）时降级为明确的 `[image unavailable: …]` 文本块，绝不静默丢弃。
+  - 行为不变性：11 类无图场景 × 5 条 wire 共 55 份请求体与改前**逐字节一致**（差分验证 0 处差异），只有真正带图的结果才改变行为。
+  - 新增 `test/tool-result-images.test.ts`（16 条，映射层）与 `test/tool-result-images-wire.test.ts`（4 条，从桩传输读回实际发出的请求体）；两者在未修复源码上分别有 9 条与 2 条失败，可证明其有效性。
+  - 已知限制：`offloadOldestRequestImages` 的字节统计仍未递归 `tool-result`（`collectRequestImageBytes` 只扫顶层）。这是有意保持的最小改动——若只让统计递归而替换逻辑仍只处理顶层块，会造成「计数按递归、替换按顶层」的新不一致。后果是工具结果内嵌图像的 base64 体积不计入 `MAX_REQUEST_IMAGE_BYTES` 预算，极端情况下可能发出偏大的请求；修复方向是让统计与替换同时递归，作为独立改动处理。
 
 - **调度模式 Agent Preset 随包分发**：新增 `presets/dispatch/`（基于 PTC 模式的编排 preset：R0 复杂度分诊 → L2 任务的澄清访谈 → 规划 → 派发 → 审查 → 验收；子代理必须显式指定模型且落在「子代理」设置白名单内；选择不可用时按 DSH 默认行为降级）与 `src/host/preset-sync.ts`。DSH 只能从配置根、内置 `agent-presets` 包的 `presets/`、以及 `<dshHome>/.agent-presets` 发现 preset，插件包无法自行注册根目录，因此采用「包内随附 + 启动时同步到 home」的方式（与 `@linxin666/dsh-liangshen` 同一机制）。同步幂等、只处理本包自己的 id、绝不触碰用户手写的 preset，失败只记 warn 不阻断插件加载；新增 `config.syncAgentPresets`（默认 `true`）可关闭。包根通过向上查找最近的 `package.json` 定位，兼容 `src/` 与打包后的 `lib/` 两种布局（写死 `../presets/` 在两种布局下会解析到不同目录）；复制逐条目实现，规避 Node 22 + Windows 上 `fs.cpSync` 遇到非 ASCII 路径直接崩进程的问题（nodejs/node#54476）。新增 `test/preset-sync.test.ts`（8 条）覆盖首次同步、幂等跳过、内容变更重写与多余文件清理、不触碰非本插件目录、retire 与保留、源目录缺失。`package.json` 的 `files` 增加 `presets`、`exports` 增加 `./presets/*`，`npm pack --dry-run` 确认三个 preset 文件随包发布。
 

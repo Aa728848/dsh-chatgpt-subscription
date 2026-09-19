@@ -96,9 +96,16 @@ function attachmentLabel(block: Record<string, unknown>): string | undefined {
 function collectImageRefs(content: unknown, refs: Map<string, ImageAttachmentRef>): void {
   if (!Array.isArray(content)) return
   for (const block of content) {
-    if (!isRecord(block) || block.type !== 'image') continue
-    const attachment = attachmentOf(block)
-    if (attachment) refs.set(attachment.attachmentId, attachment)
+    if (!isRecord(block)) continue
+    if (block.type === 'image') {
+      const attachment = attachmentOf(block)
+      if (attachment) refs.set(attachment.attachmentId, attachment)
+      continue
+    }
+    // Tool results nest their own content, and a screenshot or a read_image
+    // result carries its pixels there. Stopping at the top level made every
+    // tool-produced image unresolvable before it could reach the wire.
+    if (block.type === 'tool-result') collectImageRefs(block.content, refs)
   }
 }
 
@@ -260,6 +267,76 @@ function toolResultText(blocks: unknown): string {
     .join('')
 }
 
+/**
+ * Anthropic `tool_result` content for one tool result, or `undefined` when the
+ * result carries no image. Returning `undefined` is what keeps a plain tool
+ * result a byte-identical string on the wire: the image-less path never changes
+ * shape, so only results that actually hold pixels take the block-array form.
+ */
+function toolResultBlocks(
+  blocks: unknown,
+  images: ResolvedRequestImages,
+): AnthropicBlock[] | undefined {
+  if (!Array.isArray(blocks)) return undefined
+  const out: AnthropicBlock[] = []
+  let hasImage = false
+  for (const block of blocks) {
+    if (!isRecord(block)) continue
+    if (block.type === 'text' && typeof block.text === 'string') {
+      out.push({ type: 'text', text: sanitizeText(block.text) })
+      continue
+    }
+    if (block.type === 'image') {
+      hasImage = true
+      const inline = imageBlockToInline(block, images)
+      if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
+        out.push({ type: 'image', source: { type: 'base64', media_type: inline.mediaType, data: inline.data } })
+      } else {
+        out.push({ type: 'text', text: unavailableImageText(block) })
+      }
+      continue
+    }
+    if (block.type === 'tool-result') {
+      const nested = toolResultBlocks(block.content, images)
+      if (nested) {
+        hasImage = true
+        out.push(...nested)
+      }
+    }
+  }
+  if (!hasImage) return undefined
+  // Anthropic requires at least one block; keep the shape conservative.
+  if (out[0]?.type !== 'text') out.unshift({ type: 'text', text: '' })
+  return out
+}
+
+/**
+ * OpenAI `image_url` blocks for one tool result. A `role: "tool"` message can
+ * only carry text, so these ride on a `user` message appended after the run of
+ * tool messages rather than inside it.
+ */
+function toolResultImageBlocks(
+  blocks: unknown,
+  images: ResolvedRequestImages,
+): OpenAIMessage[] {
+  if (!Array.isArray(blocks)) return []
+  const out: OpenAIMessage[] = []
+  for (const block of blocks) {
+    if (!isRecord(block)) continue
+    if (block.type === 'image') {
+      const inline = imageBlockToInline(block, images)
+      if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
+        out.push({ type: 'image_url', image_url: { url: `data:${inline.mediaType};base64,${inline.data}` } })
+      } else {
+        out.push({ type: 'text', text: unavailableImageText(block) })
+      }
+      continue
+    }
+    if (block.type === 'tool-result') out.push(...toolResultImageBlocks(block.content, images))
+  }
+  return out
+}
+
 function toolCallArguments(raw: unknown): string {
   if (typeof raw === 'string') return raw
   if (raw === undefined || raw === null) return '{}'
@@ -361,11 +438,25 @@ export function buildOpenAIRequest(
   const system = leadingSystemText(options)
   if (system !== undefined) messages.push({ role: 'system', content: system })
 
-  for (const message of nonSystemMessages(options)) {
+  const conversation = nonSystemMessages(options)
+  for (let index = 0; index < conversation.length; index++) {
+    const message = conversation[index]!
     if (isToolResultMessage(message)) {
-      const block = message.content[0]
-      const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
-      messages.push({ role: 'tool', tool_call_id: callId, content: toolResultText(message.content) })
+      // Parallel tool calls emit several consecutive `role: "tool"` messages, and
+      // a strict upstream rejects a `user` message wedged between them. So the
+      // whole run is scanned, every image in it is collected, and a single `user`
+      // message carrying them is appended once the run ends.
+      const imageBlocks: OpenAIMessage[] = []
+      while (index < conversation.length && isToolResultMessage(conversation[index]!)) {
+        const current = conversation[index]!
+        const block = current.content[0]
+        const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
+        messages.push({ role: 'tool', tool_call_id: callId, content: toolResultText(current.content) })
+        imageBlocks.push(...toolResultImageBlocks(current.content, images))
+        index += 1
+      }
+      index -= 1
+      if (imageBlocks.length > 0) messages.push({ role: 'user', content: imageBlocks })
       continue
     }
     if (message.role === 'assistant') {
@@ -430,10 +521,13 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
       }
     } else if (block.type === 'tool-result') {
       const callId = typeof block.toolCallId === 'string' ? block.toolCallId : ''
+      // A tool result with an image becomes the block-array form Anthropic
+      // natively supports; one without stays exactly the string it was.
+      const resultBlocks = toolResultBlocks(block.content, images)
       blocks.push({
         type: 'tool_result',
         tool_use_id: callId,
-        content: toolResultText(block.content),
+        content: resultBlocks ?? toolResultText(block.content),
         ...(block.isError === true ? { is_error: true } : {}),
       })
     }
