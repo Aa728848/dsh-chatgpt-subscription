@@ -27,6 +27,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -71,21 +72,80 @@ const OPTIONALLY_ABSENT_PACKAGES: readonly string[] = [
 ]
 
 /**
+ * Harness home directory, matching the host's resolution.
+ */
+function dshHomeDir(): string {
+  return process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+}
+
+/**
+ * Candidate directories where the running harness or profile packages reside.
+ */
+function candidatePackageRoots(): string[] {
+  const roots = new Set<string>()
+  const home = dshHomeDir()
+  const profilesDir = join(home, 'profiles')
+  if (existsSync(profilesDir)) {
+    roots.add(profilesDir)
+    try {
+      for (const entry of readdirSync(profilesDir)) {
+        const full = join(profilesDir, entry)
+        try {
+          if (statSync(full).isDirectory()) roots.add(full)
+        } catch {}
+      }
+    } catch {}
+  }
+  try {
+    const cwd = process.cwd()
+    if (cwd) roots.add(cwd)
+  } catch {}
+  try {
+    roots.add(packageRoot())
+  } catch {}
+  return [...roots]
+}
+
+/**
+ * Whether a package is installed in any candidate node_modules tree.
+ * Matches DSH agent-presets' own discovery check.
+ */
+export function packageInstalled(
+  specifier: string,
+  roots: readonly string[] = candidatePackageRoots(),
+): boolean {
+  const pkg = specifier.split('/').slice(0, specifier.startsWith('@') ? 2 : 1).join('/')
+  for (const root of roots) {
+    let dir = root
+    for (;;) {
+      if (existsSync(join(dir, 'node_modules', pkg, 'package.json'))) return true
+      const parent = dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+  }
+  return false
+}
+
+/**
  * Whether a bare specifier resolves from this module in the running
  * installation. A harness whose Node build exposes no `import.meta.resolve`
- * answers `false` for everything, which leaves every bundled spelling in place.
+ * or whose plugin is executed from outside the profile tree falls through to
+ * checking candidate `node_modules` trees across the running harness home.
  * @param specifier - bare package specifier.
  * @returns whether the specifier resolves.
  */
 export function resolvesFromHere(specifier: string): boolean {
   const resolve = (import.meta as { resolve?: (specifier: string) => unknown }).resolve
-  if (resolve === undefined) return false
-  try {
-    resolve(specifier)
-    return true
-  } catch {
-    return false
+  if (resolve !== undefined) {
+    try {
+      resolve(specifier)
+      return true
+    } catch {
+      // Fall through to checking installed packages across the running harness home
+    }
   }
+  return packageInstalled(specifier)
 }
 
 /**

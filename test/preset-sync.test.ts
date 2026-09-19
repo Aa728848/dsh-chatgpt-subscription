@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   BUNDLED_PRESET_IDS,
   bundledPresetsRoot,
+  packageInstalled,
   presetTargetRoot,
   reconcilePackageNames,
   reconcilePreset,
@@ -183,6 +184,16 @@ describe('package name reconciliation', () => {
 
   it('reports an uninstalled specifier as unresolvable', () => {
     expect(resolvesFromHere('@deepseek-ai/dsh-not-a-published-package')).toBe(false)
+  })
+
+  it('detects packages installed across candidate root node_modules', () => {
+    const root = tempDir()
+    const pkgDir = join(root, 'node_modules', '@deepseek-ai', 'dsh-sample-pkg')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), '{}')
+
+    expect(packageInstalled('@deepseek-ai/dsh-sample-pkg', [root])).toBe(true)
+    expect(packageInstalled('@deepseek-ai/dsh-missing-pkg', [root])).toBe(false)
   })
 
   it('ships the row the harness renamed, under its pre-0.1.6 name', () => {
