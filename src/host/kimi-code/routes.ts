@@ -115,18 +115,17 @@ function fallbackCatalog(): KimiCodeCatalogModel[] {
 export function resolveEnabledModelIds(
   stored: readonly string[],
   catalog: readonly KimiCodeCatalogModel[],
+  enabled = true,
 ): string[] {
+  if (!enabled) return []
   const catalogIds = catalog.map((model) => model.id)
   const shippedDefaults = new Set(FALLBACK_MODELS.map((model) => model.id))
   const isUntouchedDefault = stored.length > 0
     && stored.length === shippedDefaults.size
     && stored.every((id) => shippedDefaults.has(id))
-  if (stored.length === 0 || isUntouchedDefault) return catalogIds
+  if (isUntouchedDefault) return catalogIds
   const known = new Set(catalogIds)
-  const kept = stored.filter((id) => known.has(id))
-  // A stored list whose every entry left the catalog would empty the picker;
-  // offering the catalog again is the recoverable answer.
-  return kept.length === 0 ? catalogIds : kept
+  return stored.filter((id) => known.has(id))
 }
 
 export interface KimiCodeStatusOptions {
@@ -159,7 +158,8 @@ export async function getKimiCodeWebStatus(
     accessToken: credentials?.accessToken,
   }).catch(() => [])
   const catalog = live.length > 0 ? live : fallbackCatalog()
-  const enabledModelIds = resolveEnabledModelIds(settings.enabledModelIds, catalog)
+  const enabled = settings.enabled !== false
+  const enabledModelIds = resolveEnabledModelIds(settings.enabledModelIds, catalog, enabled)
   const models = buildModelOptions(catalog, enabledModelIds, settings.contextWindowOverrides)
   const quota = getCachedQuota()
 
@@ -170,6 +170,7 @@ export async function getKimiCodeWebStatus(
     ?? (credentials === null ? null : accountFromCredentials(credentials))
 
   return {
+    enabled,
     authenticated: credentials !== null,
     hasCredentials: credentials !== null,
     storagePath: store.path(),
@@ -305,6 +306,9 @@ export function registerKimiCodeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const body = await readRequestJson(request)
           const patch: Parameters<KimiCodePreferenceStore['update']>[0] = {}
+          if (typeof body.enabled === 'boolean') {
+            patch.enabled = body.enabled
+          }
           if (Array.isArray(body.enabledModelIds)) {
             patch.enabledModelIds = body.enabledModelIds.filter((id): id is string => typeof id === 'string')
           }

@@ -194,14 +194,25 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     }
   }
 
+  const toggleEnabled = async (enabled: boolean) => {
+    try {
+      const updated = await fetchApi<AntigravityWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      })
+      setStatus(updated)
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const toggleModel = async (modelId: string, checked: boolean) => {
     if (!status) return
     const currentEnabled = status.models.filter((m) => m.enabled).map((m) => m.id)
     const nextEnabled = checked
       ? [...new Set([...currentEnabled, modelId])]
       : currentEnabled.filter((id) => id !== modelId)
-
-    if (nextEnabled.length === 0) return // 至少保留一个
 
     try {
       const updated = await fetchApi<AntigravityWebStatus>('/models', {
@@ -217,7 +228,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
 
   const setAllModels = async (selectAll: boolean) => {
     if (!status) return
-    const nextEnabled = selectAll ? status.models.map((m) => m.id) : [status.models[0].id]
+    const nextEnabled = selectAll ? status.models.map((m) => m.id) : []
     try {
       const updated = await fetchApi<AntigravityWebStatus>('/models', {
         method: 'POST',
@@ -343,6 +354,15 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         <div className="dsha-grouphead">
           <h3>{t.connection}</h3>
         </div>
+        <div className="dsha-row" style={{ marginBottom: 12 }}>
+          <span className="dsha-label" style={{ fontWeight: 600 }}>{t.enableProvider}</span>
+          <input
+            type="checkbox"
+            checked={status?.enabled !== false}
+            disabled={busy !== null}
+            onChange={(e) => void toggleEnabled(e.currentTarget.checked)}
+          />
+        </div>
         <div className="dsha-row">
           <span className="dsha-label">{t.provider}</span>
           <span className="dsha-value">{t.providerValue}</span>
@@ -358,13 +378,12 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         <div className="dsha-models" aria-label="Antigravity Models">
           {status?.models.map((model) => {
             const checked = model.enabled
-            const lastVisible = checked && visibleCount === 1
             return (
               <label key={model.id} title={model.id}>
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={busy !== null || lastVisible}
+                  disabled={busy !== null}
                   onChange={(e) => void toggleModel(model.id, e.currentTarget.checked)}
                 />
                 <span>{model.name}</span>

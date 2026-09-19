@@ -40,6 +40,7 @@ export interface AntigravityAccountQuota {
 }
 
 export interface AntigravityWebStatus {
+  enabled?: boolean
   authenticated: boolean
   email?: string
   projectId?: string
@@ -54,6 +55,7 @@ export interface AntigravityWebStatus {
 }
 
 export interface AntigravitySettingsUpdateDto {
+  enabled?: boolean
   enabledModelIds?: string[]
   contextWindowOverrides?: Record<string, number>
   defaultReasoningEffort?: 'low' | 'medium' | 'high' | null

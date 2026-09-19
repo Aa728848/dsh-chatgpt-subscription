@@ -54,6 +54,7 @@ export interface CommandCodeCatalogModel {
 }
 
 export interface CommandCodeModelSettings {
+  enabled?: boolean
   enabledModelIds: string[]
   catalogModels: CommandCodeCatalogModel[]
   contextWindowOverrides: Record<string, number>
@@ -63,6 +64,7 @@ export interface CommandCodeModelSettings {
 export interface CommandCodePreferenceStore {
   status(): CommandCodeModelSettings
   update(patch: {
+    enabled?: boolean
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: CommandCodeReasoningEffort | null
@@ -83,6 +85,7 @@ export function registerCommandCodePreferenceStore(
   if (!settings) {
     return {
       status: () => ({
+        enabled: true,
         enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
         catalogModels: [],
         contextWindowOverrides: {},
@@ -97,6 +100,7 @@ export function registerCommandCodePreferenceStore(
     : COMMAND_CODE_PREFERENCES_NAMESPACE) as unknown
 
   const scope = (settings.register as Function).call(settings, ns, z.object({
+    enabled: z.boolean().default(true),
     enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
     contextWindowOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z
@@ -106,6 +110,7 @@ export function registerCommandCodePreferenceStore(
       ])
       .default(null),
   })) as SettingsScope<{
+    enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: CommandCodeReasoningEffort | null
@@ -115,6 +120,7 @@ export function registerCommandCodePreferenceStore(
     status: () => {
       const value = scope.get()
       return {
+        enabled: value.enabled !== false,
         enabledModelIds: value.enabledModelIds,
         catalogModels: [],
         contextWindowOverrides: value.contextWindowOverrides,
@@ -124,6 +130,7 @@ export function registerCommandCodePreferenceStore(
     update: async (patch) => {
       const current = scope.get()
       const normalized = {
+        enabled: patch.enabled !== undefined ? patch.enabled : (current.enabled !== false),
         enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
         contextWindowOverrides: patch.contextWindowOverrides
           ? { ...current.contextWindowOverrides, ...patch.contextWindowOverrides }
@@ -318,12 +325,14 @@ export class FileModelSettingsStore {
         const defaultReasoningEffort = isReasoningEffort(record.defaultReasoningEffort)
           ? record.defaultReasoningEffort
           : null
-        return { enabledModelIds, catalogModels, contextWindowOverrides, defaultReasoningEffort }
+        const enabled = record.enabled !== false
+        return { enabled, enabledModelIds, catalogModels, contextWindowOverrides, defaultReasoningEffort }
       }
     } catch {
       // A missing or unreadable settings file falls back to the shipped defaults.
     }
     return {
+      enabled: true,
       enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
       catalogModels: [],
       contextWindowOverrides: {},
@@ -339,6 +348,7 @@ export class FileModelSettingsStore {
   }
 
   async updateSettings(patch: {
+    enabled?: boolean
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: CommandCodeReasoningEffort | null
@@ -346,6 +356,7 @@ export class FileModelSettingsStore {
     const current = await this.read()
     const next: CommandCodeModelSettings = {
       ...current,
+      ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.enabledModelIds !== undefined ? { enabledModelIds: patch.enabledModelIds } : {}),
       ...(patch.contextWindowOverrides !== undefined
         ? { contextWindowOverrides: { ...current.contextWindowOverrides, ...patch.contextWindowOverrides } }

@@ -116,4 +116,22 @@ describe('CodexChatGptAdapter', () => {
     })
     expect(typeof prepared.stream).toBe('function')
   })
+
+  it('returns empty model list when disabled or visibleModelIds is empty', async () => {
+    const disabledPrefs = {
+      status: () => ({ ...DEFAULT_PREFERENCES, enabled: false, writable: true }),
+      update: async () => ({ ...DEFAULT_PREFERENCES, enabled: false, writable: true }),
+      watch: () => () => undefined,
+    }
+    const disabledAdapter = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never, disabledPrefs as never)
+    expect(await disabledAdapter.listModels()).toEqual([])
+
+    const emptyModelsPrefs = {
+      status: () => ({ ...DEFAULT_PREFERENCES, visibleModelIds: [], writable: true }),
+      update: async () => ({ ...DEFAULT_PREFERENCES, visibleModelIds: [], writable: true }),
+      watch: () => () => undefined,
+    }
+    const emptyAdapter = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never, emptyModelsPrefs as never)
+    expect(await emptyAdapter.listModels()).toEqual([])
+  })
 })

@@ -30,6 +30,7 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
     ? ((SettingsModule as unknown as Record<string, Function>).settingsNamespace)(PREFERENCES_NAMESPACE)
     : PREFERENCES_NAMESPACE) as unknown
   const scope = (settings.register as Function).call(settings, ns, z.object({
+    enabled: z.boolean().default(DEFAULT_PREFERENCES.enabled ?? true),
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
     fastMode: z.boolean().default(DEFAULT_PREFERENCES.fastMode),
     outputVerbosity: z.union([z.const('low'), z.const('medium'), z.const('high'), z.const(null)]).default(DEFAULT_PREFERENCES.outputVerbosity),

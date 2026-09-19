@@ -16,10 +16,11 @@ const CATALOG = [
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 1_000_000 },
 ]
 
-function buildAdapter(overrides: { enabledModelIds?: string[]; contextWindowOverrides?: Record<string, number>; defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'max' | null } = {}) {
+function buildAdapter(overrides: { enabled?: boolean; enabledModelIds?: string[]; contextWindowOverrides?: Record<string, number>; defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'max' | null } = {}) {
   const store = new FileCredentialStore(tmp('cc-cred'))
   const modelSettings = new FileModelSettingsStore(tmp('cc-models'))
   vi.spyOn(modelSettings, 'read').mockResolvedValue({
+    enabled: overrides.enabled !== false,
     enabledModelIds: overrides.enabledModelIds ?? CATALOG.map((model) => model.id),
     catalogModels: [],
     contextWindowOverrides: overrides.contextWindowOverrides ?? {},
@@ -359,5 +360,13 @@ describe('CommandCodeAdapter streaming', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('returns empty model list when disabled or enabledModelIds is empty', async () => {
+    const { adapter: disabledAdapter } = buildAdapter({ enabled: false, enabledModelIds: ['deepseek/deepseek-v4.1-flash'] })
+    expect(await disabledAdapter.listModels()).toEqual([])
+
+    const { adapter: emptyAdapter } = buildAdapter({ enabled: true, enabledModelIds: [] })
+    expect(await emptyAdapter.listModels()).toEqual([])
   })
 })

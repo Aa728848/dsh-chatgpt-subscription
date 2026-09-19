@@ -36,6 +36,7 @@ const CATALOG = [
 ]
 
 async function buildAdapter(options: {
+  enabled?: boolean
   enabledModelIds?: string[]
   contextWindowOverrides?: Record<string, number>
   defaultReasoningEffort?: 'low' | 'high' | 'max' | 'none' | null
@@ -46,6 +47,7 @@ async function buildAdapter(options: {
   vi.spyOn(store, 'write').mockResolvedValue(undefined)
   const modelSettings = new FileModelSettingsStore(tmp('kc-models'))
   vi.spyOn(modelSettings, 'read').mockResolvedValue({
+    enabled: options.enabled !== false,
     enabledModelIds: options.enabledModelIds ?? CATALOG.map((model) => model.id),
     catalogModels: [],
     contextWindowOverrides: options.contextWindowOverrides ?? {},
@@ -253,6 +255,14 @@ describe('KimiCodeAdapter catalog and models', () => {
     expect(models).toHaveLength(1)
     expect(models[0]).toMatchObject({ provider: 'kimi-code', id: 'k3', name: 'K3' })
     expect(adapter.providerInfo('kimi-code')).toEqual({ id: 'kimi-code', name: 'Kimi Code' })
+  })
+
+  it('returns empty model list when disabled or enabledModelIds is empty', async () => {
+    const { adapter: disabledAdapter } = await buildAdapter({ enabled: false, enabledModelIds: ['k3'] })
+    expect(await disabledAdapter.listModels('kimi-code')).toEqual([])
+
+    const { adapter: emptyAdapter } = await buildAdapter({ enabled: true, enabledModelIds: [] })
+    expect(await emptyAdapter.listModels('kimi-code')).toEqual([])
   })
 
   it('resolves a model with its context override and configured thinking level', async () => {

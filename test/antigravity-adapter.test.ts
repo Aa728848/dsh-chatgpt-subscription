@@ -500,4 +500,23 @@ describe('AntigravityAdapter', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('returns empty model list when disabled or enabledModelIds is empty', async () => {
+    const store = new FileCredentialStore()
+    const modelSettings = new FileModelSettingsStore()
+
+    const disabledPrefs = {
+      status: () => ({ enabled: false, enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] }),
+      update: vi.fn(),
+    }
+    const disabledAdapter = new AntigravityAdapter(store, modelSettings, disabledPrefs as never)
+    expect(await disabledAdapter.listModels()).toEqual([])
+
+    const emptyPrefs = {
+      status: () => ({ enabled: true, enabledModelIds: [], catalogModels: [] }),
+      update: vi.fn(),
+    }
+    const emptyAdapter = new AntigravityAdapter(store, modelSettings, emptyPrefs as never)
+    expect(await emptyAdapter.listModels()).toEqual([])
+  })
 })

@@ -268,18 +268,29 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     }
   }
 
+  const toggleEnabled = async (enabled: boolean) => {
+    try {
+      const updated = await fetchApi<CommandCodeWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      })
+      setStatus(updated)
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const toggleModel = (modelId: string, checked: boolean) => {
     if (!status) return
     const current = status.models.filter((model) => model.enabled).map((model) => model.id)
     const next = checked ? [...new Set([...current, modelId])] : current.filter((id) => id !== modelId)
-    // The route refuses an empty selection; DSH would have no model to offer.
-    if (next.length === 0) return
     void applyEnabled(next)
   }
 
   const setAllModels = (selectAll: boolean) => {
     if (!status || status.models.length === 0) return
-    void applyEnabled(selectAll ? status.models.map((model) => model.id) : [status.models[0]!.id])
+    void applyEnabled(selectAll ? status.models.map((model) => model.id) : [])
   }
 
   const handleUpdateEffort = async (effort: CommandCodeReasoningEffort | null) => {
@@ -430,6 +441,15 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
         <div className="dsha-grouphead">
           <h3>{t.connection}</h3>
         </div>
+        <div className="dsha-row" style={{ marginBottom: 12 }}>
+          <span className="dsha-label" style={{ fontWeight: 600 }}>{t.enableProvider}</span>
+          <input
+            type="checkbox"
+            checked={status?.enabled !== false}
+            disabled={busy !== null}
+            onChange={(e) => void toggleEnabled(e.currentTarget.checked)}
+          />
+        </div>
         <div className="dsha-row">
           <span className="dsha-label">{t.provider}</span>
           <span className="dsha-value">{t.providerValue}</span>
@@ -456,13 +476,12 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
         <div className="dsha-models" aria-label="Command Code Models">
           {status?.models.map((model: CommandCodeModelOption) => {
-            const lastVisible = model.enabled && visibleCount === 1
             return (
               <label key={model.id} title={`${model.id} · ${model.wire === 'anthropic' ? t.wireAnthropic : t.wireOpenai}`}>
                 <input
                   type="checkbox"
                   checked={model.enabled}
-                  disabled={busy !== null || lastVisible}
+                  disabled={busy !== null}
                   onChange={(event) => toggleModel(model.id, event.currentTarget.checked)}
                 />
                 <span>{model.name}</span>

@@ -210,15 +210,16 @@ describe('Command Code model options', () => {
     const catalog = parseProviderModels(CATALOG)
     const shipped = FALLBACK_MODELS.map((model) => model.id)
     expect(resolveEnabledModelIds(shipped, catalog)).toEqual(catalog.map((model) => model.id))
-    expect(resolveEnabledModelIds([], catalog)).toEqual(catalog.map((model) => model.id))
+    // An explicit empty selection disables all models
+    expect(resolveEnabledModelIds([], catalog)).toEqual([])
   })
 
   it('honours an explicit selection and drops entries the catalog no longer serves', () => {
     const catalog = parseProviderModels(CATALOG)
     expect(resolveEnabledModelIds(['claude-sonnet-4-6'], catalog)).toEqual(['claude-sonnet-4-6'])
     expect(resolveEnabledModelIds(['claude-sonnet-4-6', 'gone'], catalog)).toEqual(['claude-sonnet-4-6'])
-    // A selection whose every entry disappeared would empty the picker.
-    expect(resolveEnabledModelIds(['gone'], catalog)).toEqual(catalog.map((model) => model.id))
+    expect(resolveEnabledModelIds(['gone'], catalog)).toEqual([])
+    expect(resolveEnabledModelIds(['claude-sonnet-4-6'], catalog, false)).toEqual([])
   })
 })
 

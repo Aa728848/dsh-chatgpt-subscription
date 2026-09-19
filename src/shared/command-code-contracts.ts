@@ -100,6 +100,7 @@ export interface CommandCodeAccountQuota {
 
 /** Everything the settings card and the composer badge render. */
 export interface CommandCodeWebStatus {
+  enabled?: boolean
   authenticated: boolean
   hasCredentials: boolean
   storagePath: string
@@ -118,6 +119,7 @@ export interface CommandCodeWebStatus {
 
 /** Patch accepted by the models/settings routes. */
 export interface CommandCodeSettingsUpdateDto {
+  enabled?: boolean
   enabledModelIds?: string[]
   contextWindowOverrides?: Record<string, number>
   defaultReasoningEffort?: CommandCodeReasoningEffort | null

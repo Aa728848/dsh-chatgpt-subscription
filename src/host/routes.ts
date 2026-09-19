@@ -264,8 +264,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnType<SubscriptionPreferenceStore['status']>): SubscriptionPreferencesUpdateDto {
   const patch: SubscriptionPreferencesUpdateDto = {}
+  if ('enabled' in value) {
+    if (typeof value.enabled !== 'boolean') throw new PreferenceError('enabled must be a boolean.')
+    patch.enabled = value.enabled
+  }
   if ('visibleModelIds' in value) {
-    if (!Array.isArray(value.visibleModelIds) || value.visibleModelIds.length === 0 || !value.visibleModelIds.every(isCodexModelId)) throw new PreferenceError('visibleModelIds must contain at least one supported Codex model.')
+    if (!Array.isArray(value.visibleModelIds) || !value.visibleModelIds.every(isCodexModelId)) throw new PreferenceError('visibleModelIds must be an array of supported Codex models.')
     patch.visibleModelIds = [...new Set(value.visibleModelIds)]
   }
   if ('quickQuotaVisible' in value) {

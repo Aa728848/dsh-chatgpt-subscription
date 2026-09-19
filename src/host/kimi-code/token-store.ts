@@ -82,6 +82,7 @@ export interface KimiCodeCatalogModel {
 }
 
 export interface KimiCodeModelSettings {
+  enabled?: boolean
   enabledModelIds: string[]
   catalogModels: KimiCodeCatalogModel[]
   contextWindowOverrides: Record<string, number>
@@ -91,6 +92,7 @@ export interface KimiCodeModelSettings {
 export interface KimiCodePreferenceStore {
   status(): KimiCodeModelSettings
   update(patch: {
+    enabled?: boolean
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: KimiCodeReasoningEffort | null
@@ -111,6 +113,7 @@ export function registerKimiCodePreferenceStore(
   if (!settings) {
     return {
       status: () => ({
+        enabled: true,
         enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
         catalogModels: [],
         contextWindowOverrides: {},
@@ -125,6 +128,7 @@ export function registerKimiCodePreferenceStore(
     : KIMI_CODE_PREFERENCES_NAMESPACE) as unknown
 
   const scope = (settings.register as Function).call(settings, ns, z.object({
+    enabled: z.boolean().default(true),
     enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
     contextWindowOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z
@@ -134,6 +138,7 @@ export function registerKimiCodePreferenceStore(
       ])
       .default(null),
   })) as SettingsScope<{
+    enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: KimiCodeReasoningEffort | null
@@ -143,6 +148,7 @@ export function registerKimiCodePreferenceStore(
     status: () => {
       const value = scope.get()
       return {
+        enabled: value.enabled !== false,
         enabledModelIds: value.enabledModelIds,
         catalogModels: [],
         contextWindowOverrides: value.contextWindowOverrides,
@@ -152,6 +158,7 @@ export function registerKimiCodePreferenceStore(
     update: async (patch) => {
       const current = scope.get()
       const normalized = {
+        enabled: patch.enabled !== undefined ? patch.enabled : (current.enabled !== false),
         enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
         contextWindowOverrides: patch.contextWindowOverrides
           ? { ...current.contextWindowOverrides, ...patch.contextWindowOverrides }
@@ -391,12 +398,14 @@ export class FileModelSettingsStore {
         const defaultReasoningEffort = isReasoningEffort(record.defaultReasoningEffort)
           ? record.defaultReasoningEffort
           : null
-        return { enabledModelIds, catalogModels, contextWindowOverrides, defaultReasoningEffort }
+        const enabled = record.enabled !== false
+        return { enabled, enabledModelIds, catalogModels, contextWindowOverrides, defaultReasoningEffort }
       }
     } catch {
       // A missing or unreadable settings file falls back to the shipped defaults.
     }
     return {
+      enabled: true,
       enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
       catalogModels: [],
       contextWindowOverrides: {},
@@ -412,6 +421,7 @@ export class FileModelSettingsStore {
   }
 
   async updateSettings(patch: {
+    enabled?: boolean
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: KimiCodeReasoningEffort | null
@@ -419,6 +429,7 @@ export class FileModelSettingsStore {
     const current = await this.read()
     const next: KimiCodeModelSettings = {
       ...current,
+      ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.enabledModelIds !== undefined ? { enabledModelIds: patch.enabledModelIds } : {}),
       ...(patch.contextWindowOverrides !== undefined
         ? { contextWindowOverrides: { ...current.contextWindowOverrides, ...patch.contextWindowOverrides } }

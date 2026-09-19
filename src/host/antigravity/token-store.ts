@@ -33,6 +33,7 @@ export interface AntigravityCatalogModel {
 }
 
 export interface AntigravityModelSettings {
+  enabled?: boolean
   enabledModelIds: string[]
   catalogModels: AntigravityCatalogModel[]
   contextWindowOverrides?: Record<string, number>
@@ -42,6 +43,7 @@ export interface AntigravityModelSettings {
 export interface AntigravityPreferenceStore {
   status(): AntigravityModelSettings
   update(patch: {
+    enabled?: boolean
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: 'low' | 'medium' | 'high' | null
@@ -55,6 +57,7 @@ export function registerAntigravityPreferenceStore(
   if (!settings) {
     return {
       status: () => ({
+        enabled: true,
         enabledModelIds: MODELS.map((m) => m.id),
         catalogModels: [],
         contextWindowOverrides: {},
@@ -69,10 +72,12 @@ export function registerAntigravityPreferenceStore(
     : ANTIGRAVITY_PREFERENCES_NAMESPACE) as unknown
 
   const scope = (settings.register as Function).call(settings, ns, z.object({
+    enabled: z.boolean().default(true),
     enabledModelIds: z.array(z.string()).default(MODELS.map((m) => m.id)),
     contextWindowOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z.union([z.const('low'), z.const('medium'), z.const('high'), z.const(null)]).default(null),
   })) as SettingsScope<{
+    enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: 'low' | 'medium' | 'high' | null
@@ -82,6 +87,7 @@ export function registerAntigravityPreferenceStore(
     status: () => {
       const val = scope.get()
       return {
+        enabled: val.enabled !== false,
         enabledModelIds: val.enabledModelIds,
         catalogModels: [],
         contextWindowOverrides: val.contextWindowOverrides,
@@ -91,6 +97,7 @@ export function registerAntigravityPreferenceStore(
     update: async (patch) => {
       const current = scope.get()
       const normalized = {
+        enabled: patch.enabled !== undefined ? patch.enabled : (current.enabled !== false),
         enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
         contextWindowOverrides: patch.contextWindowOverrides
           ? { ...current.contextWindowOverrides, ...patch.contextWindowOverrides }
@@ -279,8 +286,10 @@ export class FileModelSettingsStore {
           record.defaultReasoningEffort === 'high'
             ? record.defaultReasoningEffort
             : null
+        const enabled = record.enabled !== false
 
         return {
+          enabled,
           enabledModelIds,
           catalogModels,
           contextWindowOverrides,
@@ -291,6 +300,7 @@ export class FileModelSettingsStore {
       // ignore
     }
     return {
+      enabled: true,
       enabledModelIds: MODELS.map((m) => m.id),
       catalogModels: [],
       contextWindowOverrides: {},
@@ -306,6 +316,7 @@ export class FileModelSettingsStore {
   }
 
   async updateSettings(patch: {
+    enabled?: boolean
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: 'low' | 'medium' | 'high' | null
@@ -313,6 +324,7 @@ export class FileModelSettingsStore {
     const current = await this.read()
     const next: AntigravityModelSettings = {
       ...current,
+      ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.enabledModelIds !== undefined ? { enabledModelIds: patch.enabledModelIds } : {}),
       ...(patch.contextWindowOverrides !== undefined
         ? {

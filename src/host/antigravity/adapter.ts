@@ -76,6 +76,7 @@ export class AntigravityAdapter extends LlmAdapter {
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
     const prov = provider || PROVIDER_ID
     const settings = this.preferences ? this.preferences.status() : await this.modelSettings.read()
+    if (settings.enabled === false) return []
     const enabledSet = new Set(settings.enabledModelIds)
     const available = MODELS.filter((m) => enabledSet.has(m.id))
     const overrides = settings.contextWindowOverrides || {}

@@ -215,7 +215,30 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       // that only the attachment service can turn into wire bytes.
       { fetchFn: proxyFetch, attachments: ctx.attachments },
     )
-    const disposeAntigravityAdapter = ctx.llm.registerAdapter([ANTIGRAVITY_PROVIDER_ID], antigravityAdapter)
+    let antigravityRegistration: AdapterRegistrationHandle | undefined
+    let antigravityConflict: string | null = null
+    const claimAntigravityRoute = (): void => {
+      if (antigravityRegistration !== undefined) return
+      try {
+        antigravityRegistration = ctx.llm.registerAdapter([ANTIGRAVITY_PROVIDER_ID], antigravityAdapter)
+        if (antigravityConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] Antigravity route "${ANTIGRAVITY_PROVIDER_ID}" is now served by this plugin`)
+        }
+        antigravityConflict = null
+      } catch (error) {
+        antigravityConflict = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(
+          `[dsh-chatgpt-subscription] provider route "${ANTIGRAVITY_PROVIDER_ID}" is already owned by another adapter; `
+          + `Antigravity models keep being served by that one until its configuration is removed (${antigravityConflict})`,
+        )
+      }
+    }
+    claimAntigravityRoute()
+    const antigravityRouteWatch = typeof ctx.on === 'function'
+      ? ctx.on('llm/adapters-updated', () => {
+          claimAntigravityRoute()
+        })
+      : undefined
     const disposeAntigravityRoutes = registerAntigravityRoutes(
       ctx,
       antigravityStore,
@@ -424,7 +447,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeAdapter()
       disposeRoutes()
       disposeAntigravityRoutes()
-      disposeAntigravityAdapter()
+      releaseHandle(antigravityRouteWatch)
+      antigravityRegistration?.()
+      antigravityRegistration = undefined
       disposeCommandCodeRoutes()
       releaseHandle(commandCodeRouteWatch)
       commandCodeRegistration?.()

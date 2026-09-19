@@ -4,6 +4,7 @@ import type { CodexOutputVerbosity, CodexReasoningSummary, ProxyMode, SearchProv
 export const PREFERENCES_NAMESPACE = 'dsh-chatgpt-subscription'
 
 export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> = {
+  enabled: true,
   quickQuotaVisible: false,
   fastMode: false,
   outputVerbosity: null,

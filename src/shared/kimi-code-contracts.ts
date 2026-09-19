@@ -138,6 +138,7 @@ export interface KimiCodeAccountQuota {
 
 /** Everything the settings card and the composer badge render. */
 export interface KimiCodeWebStatus {
+  enabled?: boolean
   authenticated: boolean
   hasCredentials: boolean
   storagePath: string
@@ -189,6 +190,7 @@ export interface KimiCodeCacheStatsDto {
 
 /** Patch accepted by the models/settings routes. */
 export interface KimiCodeSettingsUpdateDto {
+  enabled?: boolean
   enabledModelIds?: string[]
   contextWindowOverrides?: Record<string, number>
   defaultReasoningEffort?: KimiCodeReasoningEffort | null

@@ -149,7 +149,11 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const toggleVisibleModel = async (modelId: string, checked: boolean): Promise<void> => {
     const current = status?.preferences.visibleModelIds ?? [...DEFAULT_VISIBLE_CODEX_MODEL_IDS]
     const visibleModelIds = checked ? [...current, modelId] : current.filter(id => id !== modelId)
-    if (visibleModelIds.length === 0) return
+    await updatePreferences({ visibleModelIds })
+  }
+
+  const setAllVisibleModels = async (selectAll: boolean): Promise<void> => {
+    const visibleModelIds = selectAll ? CODEX_MODEL_CATALOG.map(m => m.id) : []
     await updatePreferences({ visibleModelIds })
   }
 
@@ -234,6 +238,17 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
       </Section>
 
       <Section title={t('connection')}>
+        <div className="dsh-codex-pref-row" style={{ marginBottom: 12 }}>
+          <div>
+            <strong>{t('enableProvider')}</strong>
+          </div>
+          <input
+            type="checkbox"
+            checked={preferences?.enabled ?? true}
+            disabled={busy !== null}
+            onChange={(event) => updatePreferences({ enabled: event.currentTarget.checked })}
+          />
+        </div>
         <InfoRow label={t('provider')} value="Codex（ChatGPT 订阅） · codex-chatgpt" />
         <InfoRow label={t('connectionState')} value={connection === null ? t('untested') : t('connected')} />
         {connection !== null ? <InfoRow label={t('latency')} value={`${connection.latencyMs} ms · ${formatDate(connection.checkedAt)}`} /> : null}
@@ -241,12 +256,15 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         <div className="dsh-codex-models" aria-label={t('models')}>
           {CODEX_MODEL_CATALOG.map((model) => {
             const checked = visibleModelIds.some(id => id === model.id)
-            const lastVisible = checked && visibleModelIds.length === 1
             return <label key={model.id} title={model.id}>
-              <input type="checkbox" checked={checked} disabled={busy !== null || lastVisible} onChange={(event) => void toggleVisibleModel(model.id, event.currentTarget.checked)} />
+              <input type="checkbox" checked={checked} disabled={busy !== null} onChange={(event) => void toggleVisibleModel(model.id, event.currentTarget.checked)} />
               <span>{model.name}</span>
             </label>
           })}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, marginBottom: 12 }}>
+          <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(true)}>{t('selectAll')}</Button>
+          <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(false)}>{t('unselectAll')}</Button>
         </div>
         <div className="dsh-codex-actions">
           <Button disabled={!status?.authenticated || busy !== null} onClick={testConnection}>{busy === 'test' ? t('testing') : t('testConnection')}</Button>

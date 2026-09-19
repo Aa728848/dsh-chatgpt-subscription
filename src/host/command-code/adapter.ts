@@ -142,9 +142,10 @@ export class CommandCodeAdapter extends LlmAdapter {
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
     const prov = provider || PROVIDER_ID
     const settings = await this.settings()
+    if (settings.enabled === false) return []
     const catalog = await this.catalog()
     const enabled = new Set(settings.enabledModelIds)
-    const available = enabled.size === 0 ? catalog : catalog.filter((model) => enabled.has(model.id))
+    const available = catalog.filter((model) => enabled.has(model.id))
 
     return available.map((model) => ({
       provider: prov,

@@ -49,6 +49,7 @@ export interface CodexContextWindowOverridesDto {
 export type ProxyMode = 'auto' | 'custom' | 'direct'
 
 export interface SubscriptionPreferencesDto {
+  enabled?: boolean
   quickQuotaVisible: boolean
   fastMode: boolean
   outputVerbosity: CodexOutputVerbosity | null
@@ -62,6 +63,7 @@ export interface SubscriptionPreferencesDto {
 }
 
 export interface SubscriptionPreferencesUpdateDto {
+  enabled?: boolean
   quickQuotaVisible?: boolean
   fastMode?: boolean
   outputVerbosity?: CodexOutputVerbosity | null

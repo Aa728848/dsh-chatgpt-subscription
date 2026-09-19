@@ -56,6 +56,7 @@ export async function getAntigravityWebStatus(
   }))
 
   return {
+    enabled: settings.enabled !== false,
     authenticated: !!(credentials?.access || credentials?.access_token),
     email: credentials?.email,
     projectId: credentials?.projectId,
@@ -134,7 +135,7 @@ export function registerAntigravityRoutes(
           }
           if (request.method === 'POST') {
             const body = await readRequestJson(request)
-            if (Array.isArray(body.enabledModelIds) || body.contextWindowOverrides || body.defaultReasoningEffort !== undefined) {
+            if (Array.isArray(body.enabledModelIds) || body.enabled !== undefined || body.contextWindowOverrides || body.defaultReasoningEffort !== undefined) {
               if (preferences) {
                 await preferences.update(body)
               } else {
