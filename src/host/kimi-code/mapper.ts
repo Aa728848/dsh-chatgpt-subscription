@@ -672,12 +672,154 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
   return options.messages.filter((message) => message.role !== 'system')
 }
 
-/** Drop the JSON-Schema keywords provider gateways reject or ignore. */
-export function stripMetaSchema(schema: unknown): Record<string, unknown> {
+function cloneJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(cloneJsonValue)
+  if (isRecord(value)) {
+    const res: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) {
+      res[k] = cloneJsonValue(v)
+    }
+    return res
+  }
+  return value
+}
+
+function resolveLocalJsonPointer(root: Record<string, unknown>, ref: string): { found: true; value: unknown } | { found: false } {
+  if (ref === '#') return { found: true, value: root }
+  let current: unknown = root
+  for (const rawPart of ref.slice(2).split('/')) {
+    const part = rawPart.replaceAll('~1', '/').replaceAll('~0', '~')
+    if (isRecord(current)) {
+      if (!Object.prototype.hasOwnProperty.call(current, part)) return { found: false }
+      current = current[part]
+    } else if (Array.isArray(current)) {
+      const idx = Number(part)
+      if (!/^(0|[1-9]\d*)$/.test(part) || idx >= current.length) return { found: false }
+      current = current[idx]
+    } else {
+      return { found: false }
+    }
+  }
+  return { found: true, value: current }
+}
+
+function derefNode(node: unknown, root: Record<string, unknown>, visited: Set<string>): unknown {
+  if (Array.isArray(node)) return node.map((item) => derefNode(item, root, visited))
+  if (isRecord(node)) {
+    if (typeof node['$ref'] === 'string' && (node['$ref'] === '#' || node['$ref'].startsWith('#/'))) {
+      const ref = node['$ref']
+      if (visited.has(ref)) return node
+      const resolved = resolveLocalJsonPointer(root, ref)
+      if (resolved.found) {
+        visited.add(ref)
+        const inlined = derefNode(resolved.value, root, visited)
+        visited.delete(ref)
+        if (isRecord(inlined)) {
+          const merged: Record<string, unknown> = { ...inlined }
+          for (const [k, v] of Object.entries(node)) {
+            if (k === '$ref') continue
+            merged[k] = derefNode(v, root, visited)
+          }
+          return merged
+        }
+        return inlined
+      }
+      return node
+    }
+    const res: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(node)) {
+      res[k] = derefNode(v, root, visited)
+    }
+    return res
+  }
+  return node
+}
+
+function hasUnresolvedDefinitionRef(node: unknown, bucketKey: string): boolean {
+  if (Array.isArray(node)) return node.some((child) => hasUnresolvedDefinitionRef(child, bucketKey))
+  if (isRecord(node)) {
+    const ref = node['$ref']
+    if (typeof ref === 'string' && ref.startsWith(`#/${bucketKey}/`)) return true
+    for (const [k, v] of Object.entries(node)) {
+      if (k === bucketKey) continue
+      if (hasUnresolvedDefinitionRef(v, bucketKey)) return true
+    }
+  }
+  return false
+}
+
+function inferValueType(val: unknown): string | undefined {
+  if (val === null) return 'null'
+  if (Array.isArray(val)) return 'array'
+  switch (typeof val) {
+    case 'string': return 'string'
+    case 'number': return Number.isInteger(val) ? 'integer' : 'number'
+    case 'boolean': return 'boolean'
+    case 'object': return 'object'
+    default: return undefined
+  }
+}
+
+function inferTypeFromValues(values: unknown[]): string | undefined {
+  const types = new Set<string>()
+  for (const v of values) {
+    const t = inferValueType(v)
+    if (t) types.add(t)
+  }
+  if (types.has('number') && types.has('integer')) types.delete('integer')
+  if (types.size === 1) return types.values().next().value
+  return undefined
+}
+
+function normalizeSchemaProperties(node: unknown): void {
+  if (!isRecord(node)) return
+
+  if (isRecord(node.properties)) {
+    for (const propSchema of Object.values(node.properties)) {
+      if (isRecord(propSchema)) {
+        if (!propSchema.type && !propSchema.$ref) {
+          if (Array.isArray(propSchema.enum) && propSchema.enum.length > 0) {
+            propSchema.type = inferTypeFromValues(propSchema.enum) ?? 'string'
+          } else if (propSchema.const !== undefined) {
+            propSchema.type = inferValueType(propSchema.const) ?? 'string'
+          } else if (isRecord(propSchema.properties)) {
+            propSchema.type = 'object'
+          } else if (propSchema.items) {
+            propSchema.type = 'array'
+          }
+        }
+        normalizeSchemaProperties(propSchema)
+      }
+    }
+  }
+  if (isRecord(node.items)) {
+    normalizeSchemaProperties(node.items)
+  } else if (Array.isArray(node.items)) {
+    for (const item of node.items) normalizeSchemaProperties(item)
+  }
+}
+
+/**
+ * Normalizes tool parameter schemas for Kimi by stripping meta keywords ($schema),
+ * inlining definitions ($defs/definitions/$ref), and ensuring property types for enums/consts.
+ */
+export function normalizeKimiToolSchema(schema: unknown): Record<string, unknown> {
   if (!isRecord(schema)) return { type: 'object', properties: {} }
-  const copy: Record<string, unknown> = { ...schema }
-  delete copy.$schema
-  return copy
+  const cloned = cloneJsonValue(schema) as Record<string, unknown>
+  delete cloned.$schema
+
+  const visited = new Set<string>()
+  const dereffed = derefNode(cloned, cloned, visited) as Record<string, unknown>
+  if (!hasUnresolvedDefinitionRef(dereffed, '$defs')) delete dereffed.$defs
+  if (!hasUnresolvedDefinitionRef(dereffed, 'definitions')) delete dereffed.definitions
+
+  normalizeSchemaProperties(dereffed)
+  return dereffed
+}
+
+/** Drop the JSON-Schema keywords provider gateways reject or ignore, and normalize properties. */
+export function stripMetaSchema(schema: unknown): Record<string, unknown> {
+  return normalizeKimiToolSchema(schema)
 }
 
 /** Concatenated reasoning text one assistant message carries, when it has any. */
@@ -1014,9 +1156,16 @@ export function buildOpenAIRequest(
     }
     if (message.role === 'assistant') {
       const { content, toolCalls, reasoning } = openAIAssistantContent(message)
-      // An assistant turn with neither text nor calls carries nothing on this wire.
-      if (content === '' && toolCalls.length === 0) continue
-      const entry: OpenAIMessage = { role: 'assistant', content }
+      // An assistant turn with neither text, nor calls, nor reasoning carries nothing on this wire.
+      if (content === '' && toolCalls.length === 0 && reasoning === '') continue
+      const entry: OpenAIMessage = { role: 'assistant' }
+      // Per Moonshot / Kimi Code official provider conventions (see kosong/kimi.ts & agent-core-v2 trait):
+      // When an assistant message has tool_calls and no text content, the `content` field is omitted,
+      // matching the model's wire output and preventing tokenizer/KV prefix misalignment.
+      // On plain text turns (toolCalls.length === 0), content is always sent (even if empty string '').
+      if (content !== '' || toolCalls.length === 0) {
+        entry.content = content
+      }
       if (toolCalls.length > 0) entry.tool_calls = toolCalls
       // Preserved Thinking (`thinking.keep = "all"`, the official default) requires
       // `reasoning_content` on every assistant message that lacks it, including
@@ -1088,11 +1237,14 @@ export function buildOpenAIRequest(
 /**
  * Stable identifier for the conversation this request belongs to.
  *
- * Derived from the first user turn rather than a fresh value per request, so it
- * stays identical across the steps of one session and changes when a new
- * conversation starts.
+ * Prioritizes the session identifier (GenerateOptions.sessionId) if present,
+ * ensuring the cache key stays strictly constant across turns, context compactions,
+ * and multimodal message changes. Falls back to hashing the first user message text.
  */
 export function promptCacheKey(options: GenerateOptions): string | undefined {
+  if (typeof options.sessionId === 'string' && options.sessionId.trim() !== '') {
+    return `dsh-${options.sessionId.trim()}`
+  }
   for (const message of options.messages) {
     if (message.role !== 'user') continue
     const text = textOf(message.content)

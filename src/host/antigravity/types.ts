@@ -53,6 +53,9 @@ export const ANTIGRAVITY_SYSTEM_INSTRUCTION =
 export const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
   'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists, or thinking/personality preambles in the final response. Output only the final response.'
 
+export const ANTIGRAVITY_PROGRESS_INSTRUCTION =
+  'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'
+
 export const GEMINI_ROLE = {
   user: 'user',
   model: 'model',

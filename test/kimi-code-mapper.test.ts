@@ -8,6 +8,7 @@ import {
   createStreamState,
   mapReasoningEffort,
   processAnthropicStreamLine,
+  normalizeKimiToolSchema,
   processOpenAIStreamLine,
   promptCacheKey,
   thinkingBudgetFor,
@@ -81,9 +82,10 @@ describe('buildOpenAIRequest', () => {
     expect(body.stream_options).toEqual({ include_usage: true })
   })
 
-  it('replays reasoning_content on an assistant turn that also calls a tool', () => {
+  it('replays reasoning_content on an assistant turn that also calls a tool, omitting empty content', () => {
     // The service answers 400 "thinking is enabled but reasoning_content is
     // missing in assistant tool call message" without this field.
+    // When text is empty, the content field is omitted per official Kimi provider conventions.
     const body = buildOpenAIRequest(options({
       messages: [
         { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
@@ -99,6 +101,25 @@ describe('buildOpenAIRequest', () => {
     const assistant = (body.messages as Array<Record<string, unknown>>).find((entry) => entry.role === 'assistant')
     expect(assistant?.reasoning_content).toBe('I should read the file first.')
     expect(Array.isArray(assistant?.tool_calls)).toBe(true)
+    expect(assistant).not.toHaveProperty('content')
+  })
+
+  it('preserves an assistant turn that has only reasoning content', () => {
+    const body = buildOpenAIRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'think' }] } as Message,
+        {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', text: 'pondering deeply' },
+          ],
+        } as Message,
+      ],
+    }))
+    const assistant = (body.messages as Array<Record<string, unknown>>).find((entry) => entry.role === 'assistant')
+    expect(assistant).toBeDefined()
+    expect(assistant?.reasoning_content).toBe('pondering deeply')
+    expect(assistant?.content).toBe('')
   })
 
   it('replays reasoning_content on a plain assistant turn too', () => {
@@ -142,6 +163,31 @@ describe('buildOpenAIRequest', () => {
       type: 'function',
       function: { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: {} } },
     }])
+  })
+
+  it('normalizes tool schema with $defs, $ref and property type inference', () => {
+    const rawSchema = {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      $defs: {
+        Color: { enum: ['red', 'blue'] },
+      },
+      type: 'object',
+      properties: {
+        color: { $ref: '#/$defs/Color' },
+      },
+    }
+    const normalized = normalizeKimiToolSchema(rawSchema)
+    expect(normalized).toEqual({
+      type: 'object',
+      properties: {
+        color: {
+          enum: ['red', 'blue'],
+          type: 'string',
+        },
+      },
+    })
+    expect(normalized.$defs).toBeUndefined()
+    expect(normalized.$schema).toBeUndefined()
   })
 })
 
@@ -190,8 +236,17 @@ describe('clampToolCallId', () => {
 })
 
 describe('promptCacheKey', () => {
-  it('returns nothing for a conversation with no user turn', () => {
+  it('returns nothing for a conversation with no user turn and no sessionId', () => {
     expect(promptCacheKey({ model: 'k3', messages: [] } as unknown as GenerateOptions)).toBeUndefined()
+  })
+
+  it('prioritizes sessionId when present to maintain sticky routing', () => {
+    expect(promptCacheKey({ model: 'k3', sessionId: 'sess-abc-123' as never, messages: [] } as unknown as GenerateOptions)).toBe('dsh-sess-abc-123')
+    expect(promptCacheKey({
+      model: 'k3',
+      sessionId: 'sess-abc-123' as never,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] } as Message],
+    } as unknown as GenerateOptions)).toBe('dsh-sess-abc-123')
   })
 })
 
