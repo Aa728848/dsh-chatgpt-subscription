@@ -143,10 +143,22 @@ export class AccountPoolStore {
 
   read(): Promise<AntigravityPoolData> {
     return this.serialize(async () => {
-      const current = await this.backend.load()
-      if (current !== null) return current
+      let current: AntigravityPoolData | null = null
+      try {
+        current = await this.backend.load()
+      } catch {
+        // Corrupt file recovery
+      }
 
-      // Migrate from single legacy credential if available
+      if (current !== null && Array.isArray(current.accounts) && current.accounts.length > 0) {
+        return current
+      }
+
+      // Surface the pre-existing single credential as the primary account. This
+      // read stays side-effect free on purpose: every caller that changes the
+      // pool writes it back immediately afterwards, so persisting the migration
+      // here only bought one extra encrypted round trip and made a getter write
+      // to disk.
       try {
         const legacy = await this.legacyStore.read()
         if (legacy && (legacy.access || legacy.access_token || legacy.refresh || legacy.refresh_token)) {
@@ -159,20 +171,18 @@ export class AccountPoolStore {
             addedAt: Date.now(),
             isPrimary: true,
           }
-          const migrated: AntigravityPoolData = {
+          return {
             version: 1,
             activeAccountId: 'acc_primary',
-            rotationStrategy: 'sequential',
+            rotationStrategy: current?.rotationStrategy || 'sequential',
             accounts: [defaultAccount],
           }
-          await this.saveVerified(migrated)
-          return migrated
         }
       } catch {
         // ignore migration failures
       }
 
-      return {
+      return current || {
         version: 1,
         rotationStrategy: 'sequential',
         accounts: [],

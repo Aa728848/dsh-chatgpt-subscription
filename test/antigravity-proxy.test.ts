@@ -219,7 +219,11 @@ describe('Antigravity shared proxy settings', () => {
     await new Promise<void>((resolve, reject) => {
       http.get(callback, (response) => { response.resume(); response.on('end', resolve) }).on('error', reject)
     })
-    await vi.waitFor(() => expect(getWebLoginStatus().status).toBe('complete'))
+    // Completing a login now also persists the account into the encrypted
+    // credential pool, so the flow ends on secure-storage writes rather than on
+    // the (mocked) single-credential store alone. A bounded wait still fails a
+    // flow that never finishes; it just tolerates the DPAPI round trips.
+    await vi.waitFor(() => expect(getWebLoginStatus().status).toBe('complete'), { timeout: 10_000, interval: 50 })
     expect(plugin.credentials()).toMatchObject({ access: 'login-access', refresh: 'login-refresh', email: 'test@example.test', projectId: 'login-project' })
     expect(proxyFetch).toHaveBeenCalledTimes(6)
     expectSharedDispatcher()

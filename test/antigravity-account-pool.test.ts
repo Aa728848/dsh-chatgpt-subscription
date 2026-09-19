@@ -46,11 +46,16 @@ describe('AccountPoolStore', () => {
 
   it('migrates existing legacy credential as primary account on first load', async () => {
     vi.spyOn(legacyStore, 'read').mockResolvedValue(cred1)
+    const save = vi.spyOn(memoryBackend, 'save')
     const data = await poolStore.read()
     expect(data.accounts).toHaveLength(1)
     expect(data.accounts[0]!.email).toBe('acc1@gmail.com')
     expect(data.accounts[0]!.isPrimary).toBe(true)
     expect(data.activeAccountId).toBe('acc_primary')
+    // Reading must not persist the migration: the callers that change the pool
+    // write it back themselves, and a getter that silently rewrites encrypted
+    // storage is what let a test run overwrite live credentials.
+    expect(save).not.toHaveBeenCalled()
   })
 
   it('supports adding multiple accounts, setting primary and deleting accounts', async () => {

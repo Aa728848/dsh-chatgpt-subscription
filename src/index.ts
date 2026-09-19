@@ -598,6 +598,7 @@ export {
   credentialPath,
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
+export { AccountPoolStore } from './host/antigravity/account-pool.ts'
 export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts'
 export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
 

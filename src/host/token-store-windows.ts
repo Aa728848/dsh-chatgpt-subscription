@@ -6,6 +6,9 @@ import { parseStoredCredentials } from './token-store.ts'
 
 const PROTECT_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Security
 $path = $env:DSH_CODEX_TOKEN_PATH
 $plain = [Console]::In.ReadToEnd()
@@ -28,6 +31,9 @@ try {
 
 const UNPROTECT_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Security
 $path = $env:DSH_CODEX_TOKEN_PATH
 if (-not [IO.File]::Exists($path)) { exit 3 }
