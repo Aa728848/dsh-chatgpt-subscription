@@ -45,4 +45,14 @@ describe('subscription preferences', () => {
     await expect(store.update({ contextWindowOverrides: { 'gpt-6-astra': 1_000_000 } })).rejects.toThrow()
     expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(272_000)
   })
+
+  it('allows disabling provider and setting visibleModelIds to empty array', async () => {
+    const store = createPreferenceStore()
+    expect(store.status().enabled).toBe(true)
+    const updated = await store.update({ enabled: false, visibleModelIds: [] })
+    expect(updated.enabled).toBe(false)
+    expect(updated.visibleModelIds).toEqual([])
+    expect(store.status().enabled).toBe(false)
+    expect(store.status().visibleModelIds).toEqual([])
+  })
 })

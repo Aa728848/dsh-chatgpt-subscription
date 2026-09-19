@@ -282,6 +282,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   }
 
   const toggleEnabled = async (enabled: boolean) => {
+    setStatus((prev) => prev ? { ...prev, enabled } : prev)
     try {
       const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
         method: 'POST',
@@ -291,6 +292,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      void loadStatus(true)
     }
   }
 

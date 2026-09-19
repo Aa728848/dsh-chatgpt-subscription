@@ -61,6 +61,7 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
 
   async update(patch: SubscriptionPreferencesUpdateDto): Promise<SubscriptionPreferencesDto> {
     const normalized: SubscriptionPreferencesUpdateDto = {}
+    if (patch.enabled !== undefined) normalized.enabled = patch.enabled
     if (patch.quickQuotaVisible !== undefined) normalized.quickQuotaVisible = patch.quickQuotaVisible
     if (patch.fastMode !== undefined) normalized.fastMode = patch.fastMode
     if (patch.outputVerbosity !== undefined) {
@@ -72,7 +73,7 @@ class SettingsPreferenceStore implements SubscriptionPreferenceStore {
       normalized.reasoningSummary = patch.reasoningSummary
     }
     if (patch.visibleModelIds !== undefined) {
-      if (patch.visibleModelIds.length === 0 || !patch.visibleModelIds.every(isCodexModelId)) throw new PreferenceError('At least one supported Codex model must be visible.')
+      if (!patch.visibleModelIds.every(isCodexModelId)) throw new PreferenceError('Unsupported Codex model.')
       normalized.visibleModelIds = [...new Set(patch.visibleModelIds)]
     }
     if (patch.searchProvider !== undefined) {

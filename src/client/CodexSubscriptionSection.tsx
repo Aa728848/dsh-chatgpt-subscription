@@ -246,7 +246,11 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             type="checkbox"
             checked={preferences?.enabled ?? true}
             disabled={busy !== null}
-            onChange={(event) => updatePreferences({ enabled: event.currentTarget.checked })}
+            onChange={(event) => {
+              const enabled = event.currentTarget.checked
+              setStatus((cur) => cur === null ? cur : { ...cur, preferences: { ...cur.preferences, enabled } })
+              void updatePreferences({ enabled })
+            }}
           />
         </div>
         <InfoRow label={t('provider')} value="Codex（ChatGPT 订阅） · codex-chatgpt" />

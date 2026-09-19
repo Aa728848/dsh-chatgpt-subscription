@@ -269,6 +269,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
   }
 
   const toggleEnabled = async (enabled: boolean) => {
+    setStatus((prev) => prev ? { ...prev, enabled } : prev)
     try {
       const updated = await fetchApi<CommandCodeWebStatus>('/settings', {
         method: 'POST',
@@ -278,6 +279,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      void loadStatus(true)
     }
   }
 

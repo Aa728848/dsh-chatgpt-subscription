@@ -265,6 +265,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
   }
 
   const toggleEnabled = async (enabled: boolean) => {
+    setStatus((prev) => prev ? { ...prev, enabled } : prev)
     try {
       const updated = await fetchApi<AntigravityWebStatus>('/settings', {
         method: 'POST',
@@ -274,6 +275,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      void loadStatus(true)
     }
   }
 
