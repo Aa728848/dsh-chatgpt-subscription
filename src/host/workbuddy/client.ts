@@ -1,3 +1,4 @@
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   WorkBuddyAccount,
   WorkBuddyAccountQuota,
@@ -117,14 +118,25 @@ export async function refreshCredentials(
   })
 
   const text = await response.text().catch(() => '')
+  // A refresh the service refused is permanent for this account: the pool
+  // records it and routes to another one, while a transport failure stays
+  // transient and must leave the account in place.
   if (!response.ok) {
-    throw new Error(`${PROVIDER_NAME} token refresh failed (${response.status})${text ? `: ${text.slice(0, 200)}` : ''}`)
+    const detail = text.slice(0, 200)
+    throw new LlmError(
+      `${PROVIDER_NAME} token refresh failed (${response.status})${detail ? `: ${detail}` : ''}`,
+      response.status === 401 || response.status === 403 ? 'INVALID_CREDENTIAL' : 'TRANSPORT',
+      { status: response.status },
+    )
   }
 
   const payload = asRecord(JSON.parse(text) as unknown)
   const data = asRecord(payload?.data)
   if (payload === undefined || payload.code !== 0 || data === undefined) {
-    throw new Error(`${PROVIDER_NAME} token refresh was rejected: ${asString(payload?.msg) ?? 'no detail'}`)
+    throw new LlmError(
+      `${PROVIDER_NAME} token refresh was rejected: ${asString(payload?.msg) ?? 'no detail'}`,
+      'INVALID_CREDENTIAL',
+    )
   }
 
   const accessToken = asString(data.accessToken)

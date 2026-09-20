@@ -22,6 +22,7 @@ import {
 } from '../src/host/workbuddy/routes.ts'
 import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/workbuddy/token-store.ts'
+import { WorkBuddyAccountPool, parseWorkBuddyPoolData } from '../src/host/workbuddy/account-pool.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS, FALLBACK_MODELS } from '../src/host/workbuddy/model-catalog.ts'
 import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
 
@@ -40,6 +41,16 @@ async function makeAuthDir(options: { domain?: string; expiresAt?: number } = {}
     },
   }), 'utf8')
   return dir
+}
+
+/** In-memory pool storage, so a test never touches the encrypted platform store. */
+function makePoolBackend(): any {
+  let data: unknown = null
+  return {
+    async load() { return data === null ? null : parseWorkBuddyPoolData(JSON.parse(JSON.stringify(data))) },
+    async save(value: unknown) { data = JSON.parse(JSON.stringify(value)) },
+    async clear() { data = null },
+  }
 }
 
 async function makeSettings(): Promise<FileModelSettingsStore> {
@@ -604,6 +615,72 @@ describe('WorkBuddy routes', () => {
     expect(payload.value.account.id).toBe('intl:intl-user')
     expect(payload.value.account.region).toBe('intl')
     expect((await settings.read()).selectedAccountId).toBe('intl:intl-user')
+  })
+
+  it('reports the account pool slice and applies a rotation strategy', async () => {
+    const dir = await makeAuthDir()
+    const store = new FileCredentialStore(dir)
+    const handlers: any[] = []
+    const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+    await pool.addAccount({
+      accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'u1',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+    registerWorkBuddyRoutes(makeContext(handlers), store, await makeSettings(), undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+      accountPool: pool,
+    })
+
+    const status = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/status'), status)
+    const value = JSON.parse(status.captured.body).value
+    // The card renders the shared pool slice rather than a single account.
+    expect(value.rotationStrategy).toBe('sequential')
+    expect(value.accounts).toHaveLength(1)
+    expect(value.accounts[0]).toMatchObject({ id: 'cn:u1', removable: true, region: 'cn' })
+    // Nothing secret may cross this boundary.
+    expect(JSON.stringify(value)).not.toContain('at-1')
+
+    const strategy = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/strategy', { strategy: 'sticky' }, 'http://127.0.0.1:43120'),
+      strategy,
+    )
+    expect(strategy.captured.status).toBe(200)
+    expect(JSON.parse(strategy.captured.body).value.rotationStrategy).toBe('sticky')
+  })
+
+  it('refuses to delete a desktop account and only hides it', async () => {
+    const dir = await makeAuthDir()
+    await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({
+      account: { uid: 'desktop-user' },
+      auth: { accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+    }), 'utf8')
+    const store = new FileCredentialStore(dir)
+    const handlers: any[] = []
+    const settings = await makeSettings()
+    const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+    await pool.syncDesktopAccounts()
+    registerWorkBuddyRoutes(makeContext(handlers), store, settings, undefined, { accountPool: pool })
+
+    const accountId = (await pool.listAccounts())[0]!.id
+    const denied = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'delete', accountId }, 'http://127.0.0.1:43120'),
+      denied,
+    )
+    expect(denied.captured.status).toBe(400)
+
+    // Hiding is the supported action, and the IDE's file is left alone.
+    const hidden = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'hide', accountId }, 'http://127.0.0.1:43120'),
+      hidden,
+    )
+    expect(hidden.captured.status).toBe(200)
+    expect((await settings.read()).hiddenAccountIds).toEqual([accountId])
+    expect(await fs.readFile(path.join(dir, 'workbuddy-desktop.info'), 'utf8')).toContain('at')
   })
 
   it('rejects an account id that is not present on this machine', async () => {

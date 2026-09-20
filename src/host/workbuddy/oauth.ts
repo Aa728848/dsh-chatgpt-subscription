@@ -180,10 +180,23 @@ export async function pollLogin(
   return parseLoginCredential(payload, attempt)
 }
 
+/** Where a completed sign-in is written; the default is this line's own store. */
+export interface WorkBuddyLoginOptions {
+  /**
+   * Persist the completed credential.
+   *
+   * The account pool owns routing, so it is what a completed sign-in must reach;
+   * the default writes to the credential store alone, which is what a caller
+   * running without a pool needs.
+   */
+  onSave?: (credentials: WorkBuddyCredentials) => Promise<unknown>
+}
+
 export async function beginWebLogin(
   store: FileCredentialStore,
   region: WorkBuddyRegion,
   fetchFn: typeof fetch = fetch,
+  options: WorkBuddyLoginOptions = {},
 ): Promise<WorkBuddyLoginFlowState> {
   resetWebLogin()
   const active = new AbortController()
@@ -203,7 +216,8 @@ export async function beginWebLogin(
           flow = { ...flow, progress: `等待浏览器授权…（${Math.floor((Date.now() - startedAt) / 1000)} 秒）` }
           continue
         }
-        await store.addManaged(credentials)
+        if (options.onSave !== undefined) await options.onSave(credentials)
+        else await store.addManaged(credentials)
         const accountId = `${credentials.region}:${credentials.uid || credentials.uin || credentials.nickname || credentials.domain}`
         flow = { status: 'complete', region: credentials.region, accountId, startedAt, completedAt: Date.now(), progress: '授权完成' }
         return

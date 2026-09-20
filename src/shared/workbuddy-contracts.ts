@@ -3,6 +3,8 @@
  * card. Everything here is public: no credential ever crosses this boundary.
  */
 
+import type { AccountPoolStatusDto, PoolAccountSummaryDto } from './account-pool-contracts.ts'
+
 /**
  * Which deployment region an account belongs to.
  *
@@ -86,6 +88,27 @@ export interface WorkBuddyAccount {
   hidden: boolean
 }
 
+/** One WorkBuddy account as the shared pool card renders it. Never carries a token. */
+export interface WorkBuddyAccountSummaryDto extends PoolAccountSummaryDto {
+  region: WorkBuddyRegion
+  /** Which store owns the credential; only managed accounts may be deleted. */
+  source: 'desktop' | 'managed'
+  /** Whether the card may offer Delete for this account. */
+  removable: boolean
+  nickname?: string
+  /** Tencent UIN, masked by the card rather than shown in full. */
+  uin?: string
+  /** IDE file a desktop account was adopted from. */
+  sourceFile?: string
+  /**
+   * Whether the plugin currently routes to this account.
+   *
+   * Distinct from the pool's `activeAccountId`: a hidden account keeps its
+   * place in the pool but is not offered for routing while hidden.
+   */
+  hidden?: boolean
+}
+
 /** One point-in-time quota snapshot for the signed-in WorkBuddy account. */
 export interface WorkBuddyAccountQuota {
   account: WorkBuddyAccount
@@ -111,7 +134,7 @@ export interface WorkBuddyAccountQuota {
 }
 
 /** Everything the settings card and the composer badge render. */
-export interface WorkBuddyWebStatus {
+export interface WorkBuddyWebStatus extends Partial<AccountPoolStatusDto> {
   enabled?: boolean
   authenticated: boolean
   hasCredentials: boolean
@@ -133,6 +156,8 @@ export interface WorkBuddyWebStatus {
   serving: boolean
   /** Diagnostic when the route is owned by a different adapter family. */
   conflict: string | null
+  /** Pool summaries the shared account card renders; empty without a pool. */
+  accounts?: WorkBuddyAccountSummaryDto[]
 }
 
 /** Patch accepted by the models/settings route. */

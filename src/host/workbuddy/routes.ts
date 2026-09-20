@@ -42,6 +42,7 @@ import type {
 } from '../../shared/workbuddy-contracts.ts'
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { beginWebLogin, getWebLoginStatus, resetWebLogin } from './oauth.ts'
+import type { WorkBuddyAccountPool } from './account-pool.ts'
 
 /** Membership test for one posted reasoning level; the set is catalog-wide. */
 function isWorkBuddyReasoningEffort(value: unknown): value is (typeof WORKBUDDY_REASONING_EFFORTS)[number] {
@@ -156,6 +157,8 @@ export interface WorkBuddyStatusOptions {
   serving?: boolean | (() => boolean)
   /** Diagnostic when another plugin owns the provider route; re-read on every status. */
   conflict?: string | null | (() => string | null)
+  /** Multi-account pool this line schedules through; absent keeps the single-account card. */
+  accountPool?: WorkBuddyAccountPool
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -190,6 +193,17 @@ export async function getWorkBuddyWebStatus(
   const models = buildModelOptions(catalog, available, enabledModelIds, settings.contextWindowOverrides)
   const quota = getCachedQuota()
 
+  // The pool slice the shared account card renders. Read through the pool when
+  // this line has one, so cooldowns and per-account auth state are reported; a
+  // caller running without it gets an empty list and the legacy card.
+  const poolData = options.accountPool === undefined
+    ? null
+    : await options.accountPool.read().catch(() => null)
+  const poolAccounts = options.accountPool === undefined
+    ? []
+    : await options.accountPool.listAccounts().catch(() => [])
+  const hiddenIds = new Set(settings.hiddenAccountIds)
+
   return {
     enabled,
     authenticated: credentials !== null,
@@ -206,6 +220,9 @@ export async function getWorkBuddyWebStatus(
     managedStoragePath: store.managedPath(),
     serving: readOption(options.serving, true),
     conflict: readOption(options.conflict, null),
+    accounts: poolAccounts.map((account) => ({ ...account, hidden: hiddenIds.has(account.id) })),
+    activeAccountId: poolData?.activeAccountId,
+    rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
   }
 }
 
@@ -269,7 +286,10 @@ export function registerWorkBuddyRoutes(
           const body = await readRequestJson(request)
           const region = body.region === 'intl' ? 'intl' : body.region === 'cn' ? 'cn' : undefined
           if (region === undefined) return sendJson(response, 400, { ok: false, error: 'A login region (cn or intl) is required.' })
-          const value = await beginWebLogin(store, region, fetchFn)
+          const pool = options.accountPool
+          const value = await beginWebLogin(store, region, fetchFn, pool === undefined
+            ? {}
+            : { onSave: async (credentials) => { await store.addManaged(credentials); await pool.addAccount(credentials) } })
           return sendJson(response, 200, { ok: true, value })
         }
 
@@ -286,6 +306,64 @@ export function registerWorkBuddyRoutes(
           const accountId = typeof body.accountId === 'string' ? body.accountId : ''
           if (accountId === '') return sendJson(response, 400, { ok: false, error: 'An account id is required.' })
           const settings = preferences ? preferences.status() : await modelSettings.read()
+          const pool = options.accountPool
+
+          // Pool-level actions first: they are addressed by pool account id and
+          // act on scheduling state rather than on the credential itself.
+          if (action === 'set-primary') {
+            if (pool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+            await pool.setPrimary(accountId)
+            // The pool decides routing, but the model catalog, quota and
+            // connection routes read their credential through the store's
+            // pinned selection, so the two must name the same account.
+            const pin = { selectedAccountId: accountId }
+            if (preferences) await preferences.update(pin)
+            else await modelSettings.updateSettings(pin)
+            store.invalidate()
+            clearCachedQuota()
+            clearCachedCatalog()
+            const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+            return sendJson(response, 200, { ok: true, value })
+          }
+          if (action === 'set-alias') {
+            if (pool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+            const alias = typeof body.alias === 'string' ? body.alias.trim() : ''
+            if (alias === '') return sendJson(response, 400, { ok: false, error: 'An alias is required.' })
+            await pool.setAlias(accountId, alias)
+            const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+            return sendJson(response, 200, { ok: true, value })
+          }
+          if (action === 'clear-cooldown') {
+            if (pool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+            await pool.clearCooldown(accountId)
+            const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+            return sendJson(response, 200, { ok: true, value })
+          }
+          if (action === 'clear-auth-failure') {
+            if (pool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+            await pool.clearAuthFailed(accountId)
+            const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+            return sendJson(response, 200, { ok: true, value })
+          }
+          if (action === 'relogin') {
+            if (pool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+            // A dead account is restored by signing in again, so the recorded
+            // failure is cleared only once the new credential has landed: the
+            // flow's own completion writes it through the pool.
+            const target = (await pool.listAccounts()).find((account) => account.id === accountId)
+            if (target === undefined) return sendJson(response, 404, { ok: false, error: 'The account was not found.' })
+            const value = await beginWebLogin(store, target.region, fetchFn, {
+              onSave: async (credentials) => {
+                // The pool is the routing table; the store stays the read path
+                // the status, quota and connection routes already use.
+                await store.addManaged(credentials)
+                await pool.addAccount(credentials)
+                await pool.clearAuthFailed(accountId).catch(() => undefined)
+              },
+            })
+            return sendJson(response, 200, { ok: true, value })
+          }
+
           const accounts = await store.list()
           const target = accounts.find((candidate) => accountFromCredentials(candidate).id === accountId)
           if (target === undefined) return sendJson(response, 404, { ok: false, error: 'The account was not found.' })
@@ -295,6 +373,15 @@ export function registerWorkBuddyRoutes(
               return sendJson(response, 400, { ok: false, error: 'Desktop accounts cannot be deleted by this plugin; hide the account instead.' })
             }
             await store.deleteManaged(accountId)
+            // The pool is the routing table; a credential removed from the
+            // store must leave it too, or the next request would pick a
+            // row whose credential no longer exists.
+            if (pool !== undefined) {
+              await pool.read()
+                .then((data) => data.accounts.some((account) => account.id === accountId))
+                .then((present) => (present ? pool.deleteAccount(accountId) : undefined))
+                .catch(() => undefined)
+            }
           } else if (action === 'hide') {
             if (target.source !== 'desktop') return sendJson(response, 400, { ok: false, error: 'Managed accounts should be deleted, not hidden.' })
             hiddenAccountIds = [...new Set([...hiddenAccountIds, accountId])]
@@ -439,6 +526,21 @@ export function registerWorkBuddyRoutes(
           const credentials = await store.ensureFresh(stored, (current) => refreshCredentials(current, { fetchFn }))
           clearCachedCatalog()
           await loadConfigCatalog(credentials, { fetchFn, force: true }).catch(() => undefined)
+          const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'accounts/strategy') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const pool = options.accountPool
+          if (pool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+          const body = await readRequestJson(request)
+          const strategy = body.strategy
+          if (strategy !== 'sequential' && strategy !== 'round-robin' && strategy !== 'sticky') {
+            return sendJson(response, 400, { ok: false, error: 'Unsupported rotation strategy.' })
+          }
+          await pool.setStrategy(strategy)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
           return sendJson(response, 200, { ok: true, value })
         }

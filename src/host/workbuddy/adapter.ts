@@ -51,6 +51,7 @@ import {
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import type { WorkBuddyCredentials } from './token-store.ts'
+import type { WorkBuddyAccountPool } from './account-pool.ts'
 
 /**
  * Transient-failure retry policy for the `workbuddy` route.
@@ -92,14 +93,27 @@ export function resolveDefaultReasoningEffort(
   return undefined
 }
 
+/** Cooldown a 429 imposes when the service names no reset instant. */
+export const POOL_COOLDOWN_MS = 5 * 60 * 1000
+
 export interface WorkBuddyAdapterOptions {
   fetchFn?: typeof fetch
   attachments?: AttachmentImageReader
   /** Live catalog loader seam; defaults to the gateway `/v3/config` call. */
   loadCatalog?: (credentials: WorkBuddyCredentials) => Promise<WorkBuddyModelEntry[]>
+  /**
+   * Multi-account pool this adapter rotates through.
+   *
+   * Absent leaves the line on its single-credential path, which is what the
+   * headless tests and any caller that predates the pool use.
+   */
+  accountPool?: WorkBuddyAccountPool
 }
 
 export class WorkBuddyAdapter extends LlmAdapter {
+  /** Null keeps the pre-pool single-credential path. */
+  private readonly accountPool: WorkBuddyAccountPool | null
+
   constructor(
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
@@ -107,6 +121,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
     private readonly options: WorkBuddyAdapterOptions = {},
   ) {
     super()
+    this.accountPool = options.accountPool ?? null
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -273,48 +288,97 @@ export class WorkBuddyAdapter extends LlmAdapter {
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const settings = await this.settings()
-    const stored = await this.credentials(settings)
-    if (stored === null) {
-      throw new LlmError(
-        `Not signed in to ${PROVIDER_NAME}. Sign in with the CodeBuddy desktop client; `
-        + 'this route reads its credential from the local auth directory.',
-        'MISSING_CREDENTIAL',
-      )
-    }
-    // The refresh token rotates, so an expired token is renewed through the
-    // store's shared path rather than here; a concurrent call reuses the same
-    // refresh instead of invalidating it.
-    const credentials = await this.store.ensureFresh(stored, (current) => refreshCredentials(current, { fetchFn }))
-
     const requestOptions = offloadOldestRequestImages(options)
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
     const body = JSON.stringify(buildChatRequest(requestOptions, images))
-    const headers = workBuddyHeaders(credentials, { accept: 'text/event-stream' })
 
-    let response: Response
-    try {
-      response = await fetchFn(`${credentials.backend}${CHAT_PATH}`, {
-        method: 'POST',
-        headers,
-        body,
-        // The idle watchdog owns the deadline: it resets while tokens flow, so a
-        // long but active generation is not cut off by a wall-clock cap.
-        signal,
-      })
-    } catch (error) {
-      if (signal.aborted) throw new LlmError('WorkBuddy request aborted', 'ABORTED', { cause: error })
-      throw new LlmError(
-        `WorkBuddy request failed: ${error instanceof Error ? error.message : String(error)}`,
-        'TRANSPORT',
-        { cause: error },
-      )
-    }
+    const pool = this.accountPool
+    const tried = new Set<string>()
+    let response: Response | undefined
 
-    if (!response.ok) {
+    // Account rotation. With no pool this runs exactly once and keeps the
+    // single-credential behaviour; with one, an account that is rate limited
+    // or no longer authenticating steps out of this request while another
+    // account serves the same body. The credential's own backend is used every
+    // time, so one pool may hold accounts from both regions.
+    while (true) {
+      let credentials: WorkBuddyCredentials
+      let accountId: string | undefined
+
+      if (pool === null) {
+        const settings = await this.settings()
+        const stored = await this.credentials(settings)
+        if (stored === null) {
+          throw new LlmError(
+            `Not signed in to ${PROVIDER_NAME}. Sign in with the CodeBuddy desktop client; `
+            + 'this route reads its credential from the local auth directory.',
+            'MISSING_CREDENTIAL',
+          )
+        }
+        // The refresh token rotates, so an expired token is renewed through the
+        // store's shared path rather than here; a concurrent call reuses the same
+        // refresh instead of invalidating it.
+        credentials = await this.store.ensureFresh(stored, (current) => refreshCredentials(current, { fetchFn }))
+      } else {
+        let effective: { account: { id: string }; credentials: WorkBuddyCredentials }
+        try {
+          effective = await pool.getEffectiveCredential(tried, fetchFn)
+        } catch (error) {
+          // The pool's own verdict (an exhausted rotation) is already typed; a
+          // plain error means no account is signed in at all.
+          if (error instanceof LlmError) throw error
+          throw new LlmError(
+            error instanceof Error ? error.message : `Not signed in to ${PROVIDER_NAME}.`,
+            'MISSING_CREDENTIAL',
+            { cause: error },
+          )
+        }
+        accountId = effective.account.id
+        tried.add(accountId)
+        credentials = effective.credentials
+      }
+
+      try {
+        response = await fetchFn(`${credentials.backend}${CHAT_PATH}`, {
+          method: 'POST',
+          headers: workBuddyHeaders(credentials, { accept: 'text/event-stream' }),
+          body,
+          // The idle watchdog owns the deadline: it resets while tokens flow, so a
+          // long but active generation is not cut off by a wall-clock cap.
+          signal,
+        })
+      } catch (error) {
+        if (signal.aborted) throw new LlmError('WorkBuddy request aborted', 'ABORTED', { cause: error })
+        throw new LlmError(
+          `WorkBuddy request failed: ${error instanceof Error ? error.message : String(error)}`,
+          'TRANSPORT',
+          { cause: error },
+        )
+      }
+
+      if (response.ok) break
+
       const detail = (await response.text().catch(() => '')).slice(0, 600)
-      throw classifyFailure(response.status, detail, response.headers)
+      const failure = classifyFailure(response.status, detail, response.headers)
+
+      if (pool !== null && accountId !== undefined) {
+        const after = retryAfterMs(response.headers)
+        if (failure.code === 'RATE_LIMIT') {
+          await pool.markCooldown(accountId, after ?? POOL_COOLDOWN_MS, `${PROVIDER_NAME} 429`)
+            .catch(() => undefined)
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+        } else if (failure.code === 'INVALID_CREDENTIAL') {
+          // A dead credential is that account's problem alone: keep the account
+          // (signing in again restores it) and take it out of rotation.
+          await pool.markAuthFailed(accountId, failure.message).catch(() => undefined)
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+        }
+      }
+
+      throw failure
     }
+
+    if (response === undefined) throw new LlmError('WorkBuddy produced no response', 'PROVIDER_ERROR')
 
     if (response.body === null) throw new LlmError('WorkBuddy returned an empty response body', 'PROVIDER_ERROR')
 

@@ -19,6 +19,13 @@ export interface AccountPoolSectionProps<
   /** Overrides the login button text while a sign-in flow is running. */
   loginBusyLabel?: string
   onLogin(): void
+  /**
+   * Replaces the single header button with the provider's own entry points.
+   *
+   * WorkBuddy signs in against two regional deployments, so one "add account"
+   * button cannot express it; every other line keeps the default button.
+   */
+  renderLoginActions?(): ReactNode
   onSetPrimary(accountId: string): void
   onDelete(accountId: string): void
   onClearCooldown(accountId: string): void
@@ -27,6 +34,13 @@ export interface AccountPoolSectionProps<
   onSetStrategy(strategy: AccountRotationStrategy): void
   /** Provider-specific detail rows, rendered before the shared ones. */
   renderDetails?(account: TAccount): ReactNode
+  /**
+   * Provider-specific per-account buttons, rendered before the shared ones.
+   *
+   * Used by a line that adopts accounts it does not own: hiding or restoring
+   * an externally-managed account replaces the delete it must never offer.
+   */
+  renderAccountActions?(account: TAccount): ReactNode
   /** Value shown beside the storage label; defaults to a generic description. */
   storageValue?: string
   /** Extra controls inside the group, after the account list. */
@@ -78,9 +92,11 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
             </span>
           )}
         </h3>
-        <button className="dsha-btn dsha-btn-primary" disabled={props.busy !== null} onClick={props.onLogin}>
-          {props.loginBusyLabel || t.addAccount}
-        </button>
+        {props.renderLoginActions !== undefined ? props.renderLoginActions() : (
+          <button className="dsha-btn dsha-btn-primary" disabled={props.busy !== null} onClick={props.onLogin}>
+            {props.loginBusyLabel || t.addAccount}
+          </button>
+        )}
       </div>
 
       {accounts.length > 1 && (
@@ -132,6 +148,7 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
                     </div>
                   </div>
                   <div className="dsha-account-actions">
+                    {props.renderAccountActions?.(account)}
                     {!account.isPrimary && (
                       <button
                         className="dsha-btn"
@@ -159,13 +176,17 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
                         {t.relogin}
                       </button>
                     )}
-                    <button
-                      className="dsha-btn"
-                      disabled={props.busy !== null}
-                      onClick={() => props.onDelete(account.id)}
-                    >
-                      {t.deleteAccount}
-                    </button>
+                    {/* An account this plugin does not own must never be
+                        destroyed from here; its line supplies the action. */}
+                    {account.removable !== false && (
+                      <button
+                        className="dsha-btn"
+                        disabled={props.busy !== null}
+                        onClick={() => props.onDelete(account.id)}
+                      >
+                        {t.deleteAccount}
+                      </button>
+                    )}
                   </div>
                 </div>
 

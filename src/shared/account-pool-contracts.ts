@@ -40,6 +40,14 @@ export interface PoolAccountSummaryDto {
   authFailedReason?: string
   /** Unix milliseconds the stored access token expires, when the provider has one. */
   expiresAt?: number
+  /**
+   * Whether the card may offer to delete this account.
+   *
+   * Absent means deletable, which is what every account this plugin signed in
+   * is. A provider that adopts accounts it does not own sets this to false so
+   * the card offers its own action instead of destroying someone else's file.
+   */
+  removable?: boolean
 }
 
 /** The pool slice every provider status DTO carries. */

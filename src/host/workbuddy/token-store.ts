@@ -514,6 +514,35 @@ export class FileCredentialStore {
     return [...distinct.values()]
   }
 
+  /**
+   * Desktop credentials only, best first.
+   *
+   * The account pool adopts these so the IDE's own sign-ins take part in
+   * scheduling. Unlike {@link list} this never mixes in managed accounts:
+   * only the desktop set is re-adopted when the IDE changes its directory.
+   */
+  async discoverDesktopCredentials(): Promise<WorkBuddyCredentials[]> {
+    return scanCredentials(this.dir)
+  }
+
+  /**
+   * Re-read one desktop credential file.
+   *
+   * A pooled desktop account must serve the IDE's current token rather than
+   * the copy taken when it was adopted, because the IDE rotates that token on
+   * its own schedule. Returns null when the file is gone or unreadable.
+   */
+  async readDesktopFile(filePath: string): Promise<WorkBuddyCredentials | null> {
+    try {
+      const stats = await fs.stat(filePath)
+      if (!stats.isFile()) return null
+      const raw = await fs.readFile(filePath, 'utf8')
+      return parseCredentialFile(JSON.parse(raw) as unknown, filePath, stats.mtimeMs)
+    } catch {
+      return null
+    }
+  }
+
   async addManaged(credentials: WorkBuddyCredentials): Promise<void> {
     await this.managed.add(credentials)
     this.invalidate()

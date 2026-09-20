@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   WorkBuddyAccount,
   WorkBuddyModelOption,
@@ -7,6 +7,10 @@ import type {
 } from '../../shared/workbuddy-contracts.ts'
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { zh } from './locales.ts'
+import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { accountPoolZh, type AccountPoolLabels } from '../common/account-pool-labels.ts'
+import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
+import type { WorkBuddyAccountSummaryDto } from '../../shared/workbuddy-contracts.ts'
 
 /**
  * Display label per reasoning level. The locale dictionary only accepts flat
@@ -142,6 +146,82 @@ export function displayFile(file?: string | null): string {
   return parts[parts.length - 1] || file
 }
 
+/** One selectable default reasoning level, with the models that declare it. */
+export interface ReasoningEffortChoice {
+  value: WorkBuddyReasoningEffort
+  /** Model names that accept this level, in catalog order. */
+  models: string[]
+}
+
+/**
+ * Reasoning levels the default-effort control may offer.
+ *
+ * The levels come from what this account's models actually declare — never from
+ * the shipped enum alone. The setting is one global default applied to whichever
+ * model a conversation uses, so the list is their union; each entry carries the
+ * models behind it, and a level only some models accept is labelled as such.
+ * Order follows {@link WORKBUDDY_REASONING_EFFORTS}, which is the escalating
+ * order the upstream ladder uses.
+ */
+export function reasoningEffortChoices(models: WorkBuddyModelOption[]): ReasoningEffortChoice[] {
+  const declared = new Map<string, string[]>()
+  for (const model of models) {
+    for (const effort of model.reasoningEfforts ?? []) {
+      const names = declared.get(effort)
+      if (names === undefined) declared.set(effort, [model.name])
+      else names.push(model.name)
+    }
+  }
+  return WORKBUDDY_REASONING_EFFORTS
+    .filter((effort) => declared.has(effort))
+    .map((effort) => ({ value: effort, models: declared.get(effort)! }))
+}
+
+/**
+ * Whether a saved default is unusable for every model on this account.
+ *
+ * The adapter drops a level the chosen model does not accept instead of sending
+ * it, so a value that no model declares silently does nothing. Reporting it is
+ * what keeps that from looking like the setting was applied.
+ */
+export function unsupportedReasoningEffort(
+  configured: WorkBuddyReasoningEffort | null | undefined,
+  models: WorkBuddyModelOption[],
+): WorkBuddyReasoningEffort | null {
+  if (configured === null || configured === undefined) return null
+  const supported = models.some((model) => (model.reasoningEfforts ?? []).includes(configured))
+  return supported ? null : configured
+}
+
+/** Defend against a response that omits the arrays the card renders. */
+function normalizeStatus(data: WorkBuddyWebStatus): WorkBuddyWebStatus {
+  return {
+    ...data,
+    models: Array.isArray(data?.models) ? data.models : [],
+    contextWindowOverrides: data?.contextWindowOverrides ?? {},
+    accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+  }
+}
+
+/**
+ * The shared card's label set, taken from this tab's dictionary.
+ *
+ * Wording is the shared one so the five provider tabs cannot drift apart; the
+ * couple of WorkBuddy-specific words are supplied here.
+ */
+function accountPoolLabels(t: typeof zh): AccountPoolLabels {
+  return {
+    ...accountPoolZh,
+    accountPool: t.accounts,
+    noAccounts: t.noAccounts,
+    storage: t.storage,
+    storageNotice: t.storageNotice,
+    deleteAccount: t.deleteAccount,
+    email: t.nickname,
+    accountId: t.uid,
+  }
+}
+
 export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): React.ReactElement {
   const [status, setStatus] = useState<WorkBuddyWebStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -166,17 +246,28 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
     loadModelDirectory?.()
   }, [onModelChange, loadModelDirectory])
 
+  // The level list follows the models this account actually declares, so the
+  // control cannot offer a level none of them accepts.
+  const effortChoices = useMemo(
+    () => reasoningEffortChoices(status?.models ?? []),
+    [status?.models],
+  )
+  const allModels = status?.models ?? []
+  // The pool summaries the shared card renders; the legacy single-account view
+  // below stays for a caller whose host has no pool installed.
+  const poolAccounts = useMemo<WorkBuddyAccountSummaryDto[]>(
+    () => (Array.isArray(status?.accounts) ? status.accounts : []),
+    [status?.accounts],
+  )
+  const strayEffort = unsupportedReasoningEffort(status?.defaultReasoningEffort, allModels)
+
   const loadStatus = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
     try {
       const data = await fetchApi<WorkBuddyWebStatus>('/status')
-      // A response without the expected arrays must still render, so the model
-      // list is normalized rather than trusted.
-      const normalized: WorkBuddyWebStatus = {
-        ...data,
-        models: Array.isArray(data?.models) ? data.models : [],
-        contextWindowOverrides: data?.contextWindowOverrides ?? {},
-      }
+      // A response without the expected arrays must still render, so they are
+      // normalized rather than trusted.
+      const normalized = normalizeStatus(data)
       setStatus(normalized)
       setStatusFailed(false)
       const drafts: Record<string, string> = {}
@@ -301,17 +392,19 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
     }
   }
 
-  const handleAccountAction = async (account: WorkBuddyAccount) => {
-    const action = account.removable ? 'delete' : account.hidden ? 'restore' : 'hide'
-    if (action === 'delete' && !window.confirm(t.deleteConfirm)) return
+  /**
+   * One account action, whether it is a pool action (`set-primary`, `hide`) or a
+   * credential action (`delete`). The host route dispatches on `action`.
+   */
+  const handlePoolAction = async (action: string, accountId: string) => {
     try {
-      setBusy(`account-action:${account.id}`)
+      setBusy(`${action}:${accountId}`)
       setError(null)
       const updated = await fetchApi<WorkBuddyWebStatus>('/accounts/action', {
         method: 'POST',
-        body: JSON.stringify({ action, accountId: account.id }),
+        body: JSON.stringify({ action, accountId }),
       })
-      setStatus(updated)
+      setStatus(normalizeStatus(updated))
       await loadAccounts()
       notifyChange()
     } catch (err) {
@@ -321,18 +414,21 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
     }
   }
 
-  const handleSelectAccount = async (accountId: string) => {
+  const handleDeleteAccount = async (accountId: string) => {
+    if (!window.confirm(t.deleteConfirm)) return
+    await handlePoolAction('delete', accountId)
+  }
+
+  const handleSetStrategy = async (strategy: AccountRotationStrategy) => {
     try {
-      setBusy(`account:${accountId}`)
+      setBusy('strategy')
       setError(null)
-      setConnection(null)
-      const updated = await fetchApi<WorkBuddyWebStatus>('/settings', {
+      const updated = await fetchApi<WorkBuddyWebStatus>('/accounts/strategy', {
         method: 'POST',
-        body: JSON.stringify({ selectedAccountId: accountId }),
+        body: JSON.stringify({ strategy }),
       })
-      setStatus(updated)
+      setStatus(normalizeStatus(updated))
       await loadAccounts()
-      notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -577,76 +673,59 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         <p className="dsha-notice">{t.storageNotice}</p>
       </section>
 
-      {accounts !== null && (
-        <section className="dsha-group">
-          <div className="dsha-grouphead">
-            <h3>{t.accounts}</h3>
-            <div className="dsha-account-add-actions">
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('cn')}>
-                {busy === 'login:cn' ? t.authorizing : t.addCnAccount}
-              </button>
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('intl')}>
-                {busy === 'login:intl' ? t.authorizing : t.addIntlAccount}
-              </button>
-            </div>
+      <AccountPoolSection<WorkBuddyAccountSummaryDto>
+        accounts={poolAccounts}
+        activeAccountId={status?.activeAccountId}
+        rotationStrategy={status?.rotationStrategy ?? 'sequential'}
+        labels={accountPoolLabels(t)}
+        busy={busy}
+        onLogin={() => void handleAddAccount('cn')}
+        onSetPrimary={(id) => void handlePoolAction('set-primary', id)}
+        onDelete={(id) => void handleDeleteAccount(id)}
+        onClearCooldown={(id) => void handlePoolAction('clear-cooldown', id)}
+        onRelogin={(id) => void handlePoolAction('relogin', id)}
+        onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
+        storageValue={status?.managedStoragePath}
+        renderLoginActions={() => (
+          <div className="dsha-account-add-actions">
+            <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('cn')}>
+              {busy === 'login:cn' ? t.authorizing : t.addCnAccount}
+            </button>
+            <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('intl')}>
+              {busy === 'login:intl' ? t.authorizing : t.addIntlAccount}
+            </button>
           </div>
-          <p className="dsha-muted">{t.accountsHint}</p>
-          {loginProgress && <p className="dsha-notice">{loginProgress}</p>}
-          {(['cn', 'intl'] as const).map((region) => {
-            const regionAccounts = accounts.accounts.filter((candidate) => candidate.region === region)
-            if (regionAccounts.length === 0) return null
-            return (
-              <div key={region} className="dsha-account-region">
-                <h4>{region === 'intl' ? t.regionIntl : t.regionCn}</h4>
-                <div className="dsha-accounts-list">
-                  {regionAccounts.map((candidate) => {
-                    const isActive = candidate.id === account?.id
-                    return (
-                      <div
-                        key={candidate.id}
-                        className={`dsha-account-card${isActive ? ' active' : ''}${candidate.hidden ? ' hidden' : ''}`}
-                      >
-                        <button
-                          type="button"
-                          className="dshwb-account-select"
-                          disabled={busy !== null || isActive || candidate.hidden}
-                          aria-pressed={isActive}
-                          onClick={() => void handleSelectAccount(candidate.id)}
-                        >
-                          <div className="dsha-account-header">
-                            <div className="dsha-account-identity">
-                              <span className="dsha-account-title">{candidate.nickname || candidate.uid || '—'}</span>
-                            </div>
-                            <div className="dsha-badges">
-                              <span className="dsha-badge primary">{candidate.source === 'managed' ? t.pluginAccount : t.desktopAccount}</span>
-                              {candidate.hidden && <span className="dsha-badge cooldown">{t.hiddenAccount}</span>}
-                              {isActive && <span className="dsha-badge active">{t.selectedAccount}</span>}
-                            </div>
-                          </div>
-                          <div className="dsha-account-details">
-                            <span className="dshwb-mono">{candidate.source === 'managed' ? t.encryptedStorage : displayFile(candidate.sourceFile)}</span>
-                            {candidate.expiresAt !== null && <span>{formatDate(candidate.expiresAt)}</span>}
-                          </div>
-                        </button>
-                        <div className="dsha-account-actions">
-                          <button
-                            type="button"
-                            className="dsha-btn"
-                            disabled={busy !== null}
-                            onClick={() => void handleAccountAction(candidate)}
-                          >
-                            {candidate.removable ? t.deleteAccount : candidate.hidden ? t.restoreAccount : t.hideAccount}
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )
-          })}
-        </section>
-      )}
+        )}
+        renderAccountActions={(candidate) => (
+          // Only an account this plugin owns may be deleted; a desktop account
+          // is the IDE's, so the card offers hide/restore for it instead.
+          candidate.removable ? null : (
+            <>
+              {candidate.hidden === true && (
+                <button className="dsha-btn" disabled={busy !== null} onClick={() => void handlePoolAction('restore', candidate.id)}>
+                  {t.restoreAccount}
+                </button>
+              )}
+              {candidate.hidden !== true && (
+                <button className="dsha-btn" disabled={busy !== null} onClick={() => void handlePoolAction('hide', candidate.id)}>
+                  {t.hideAccount}
+                </button>
+              )}
+            </>
+          )
+        )}
+        renderDetails={(candidate) => (
+          <>
+            <span>{t.region}: {candidate.region === 'intl' ? t.regionIntl : t.regionCn}</span>
+            {candidate.uin ? <span>{t.uin}: {maskUin(candidate.uin)}</span> : null}
+            <span className="dshwb-mono">
+              {candidate.source === 'managed' ? t.encryptedStorage : displayFile(candidate.sourceFile)}
+            </span>
+            {candidate.hidden === true ? <span>{t.hiddenAccount}</span> : null}
+          </>
+        )}
+      />
+      {loginProgress ? <p className="dsha-notice">{loginProgress}</p> : null}
 
       <section className="dsha-group">
         <div className="dsha-grouphead">
@@ -739,6 +818,7 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
           <div>
             <strong>{t.defaultReasoningEffort}</strong>
             <p className="dsha-muted">{t.defaultReasoningEffortHint}</p>
+            {strayEffort !== null ? <p className="dsha-muted">{t.defaultEffortKept}</p> : null}
           </div>
           <select
             className="dsha-select"
@@ -751,11 +831,23 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
             }}
           >
             <option value="">{t.defaultEffortAuto}</option>
-            {WORKBUDDY_REASONING_EFFORTS.map((effort) => (
-              <option key={effort} value={effort}>{EFFORT_LABELS[effort]}</option>
+            {/* A saved level no model declares is kept selectable so opening
+                the card does not silently rewrite the stored value. */}
+            {strayEffort !== null ? (
+              <option value={strayEffort}>{`${EFFORT_LABELS[strayEffort]} (${t.effortUnsupported})`}</option>
+            ) : null}
+            {effortChoices.map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {choice.models.length === allModels.length
+                  ? EFFORT_LABELS[choice.value]
+                  : `${EFFORT_LABELS[choice.value]} (${choice.models.length}/${allModels.length})`}
+              </option>
             ))}
           </select>
         </div>
+        {effortChoices.length === 0 ? (
+          <p className="dsha-muted">{t.noReasoningModels}</p>
+        ) : null}
       </section>
 
       <section className="dsha-group">

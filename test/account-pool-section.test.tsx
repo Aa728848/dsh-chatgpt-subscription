@@ -121,6 +121,28 @@ describe('AccountPoolSection', () => {
     const html = render({ busy: 'login' })
     expect(html).toContain('disabled=""')
   })
+  it('never offers Delete for an account the plugin does not own', () => {
+    // WorkBuddy adopts the CodeBuddy desktop client's own accounts. Deleting
+    // one would strand the IDE's session, so the card must not offer it and the
+    // provider supplies its own action instead.
+    const foreign = render({ accounts: [account({ removable: false })] })
+    expect(foreign).not.toContain(accountPoolZh.deleteAccount)
+
+    const owned = render({ accounts: [account()] })
+    expect(owned).toContain(accountPoolZh.deleteAccount)
+  })
+
+  it('renders provider-supplied account actions and login entry points', () => {
+    const html = render({
+      accounts: [account({ removable: false })],
+      renderAccountActions: () => <button className="dsha-btn">隐藏</button>,
+      renderLoginActions: () => <button className="dsha-btn dsha-btn-primary">添加国区账号</button>,
+    })
+    expect(html).toContain('隐藏')
+    expect(html).toContain('添加国区账号')
+    // A provider that renders its own entry points replaces the generic one.
+    expect(html).not.toContain(accountPoolZh.addAccount)
+  })
 
   it('formats labels, dates and cooldown minutes the same way in both locales', () => {
     expect(formatPoolLabel(accountPoolZh.accountCount, { count: 3 })).toBe('已登录 3 个账号')

@@ -84,6 +84,15 @@ export interface AccountPoolHooks<
   createAccount(input: PoolAccountInput<TCredentials, TAccount>): TAccount
   /** Identity two credentials share when they are the same upstream account. */
   dedupeKey?(credentials: TCredentials): string | undefined
+  /**
+   * Stable id to store a new account under, instead of a generated one.
+   *
+   * A provider that already keys its accounts by a public, non-secret identity
+   * (one that its stored settings also reference) returns that key here. Doing
+   * so keeps every id the settings card sends back — a pinned account, a hidden
+   * account — meaningful to the pool without a translation layer or a migration.
+   */
+  accountId?(credentials: TCredentials): string | undefined
   /** Alias for an account whose credentials name nothing the user would recognize. */
   defaultAlias(credentials: TCredentials, position: number): string
   /** Unix milliseconds the access token expires; absent for a non-expiring key. */
@@ -121,6 +130,15 @@ export interface AccountPoolHooks<
   allUnavailableMessage?(count: number, waitMinutes: number): string
   /** Accounts this pool accepts; defaults to {@link DEFAULT_MAX_POOL_ACCOUNTS}. */
   maxAccounts?: number
+  /**
+   * Account the user pinned in settings, or null/absent for automatic choice.
+   *
+   * When set and the account is eligible, it is chosen ahead of the rotation
+   * strategy; when it is ineligible the automatic choice takes over rather than
+   * failing the request, because a pinned account that is cooling down must not
+   * take the line offline.
+   */
+  preferAccountId?(): string | null
   /** Test seam; production builds the platform backend from the paths above. */
   backend?: CredentialStore<PoolData<TAccount>>
 }
@@ -280,7 +298,9 @@ export class AccountPoolCore<
     }
 
     const existing = existingIndex >= 0 ? data.accounts[existingIndex] : undefined
-    const id = existing === undefined ? `acc_${randomBytes(6).toString('hex')}` : existing.id
+    const id = existing === undefined
+      ? (this.hooks.accountId?.(credentials) ?? `acc_${randomBytes(6).toString('hex')}`)
+      : existing.id
     const isPrimary = data.accounts.length === 0 || existing?.isPrimary === true
     const created = this.hooks.createAccount({
       id,
@@ -470,8 +490,16 @@ export class AccountPoolCore<
       )
     }
 
+    // A pinned account wins while it is eligible; otherwise the strategy below
+    // decides, so a pinned account that is cooling down degrades to automatic
+    // selection instead of failing the turn.
+    const pinned = this.hooks.preferAccountId?.() ?? null
+    const pinnedAccount = pinned === null ? undefined : eligible.find((account) => account.id === pinned)
+
     let selected: TAccount
-    if (data.rotationStrategy === 'round-robin') {
+    if (pinnedAccount !== undefined) {
+      selected = pinnedAccount
+    } else if (data.rotationStrategy === 'round-robin') {
       // Least recently used first, so a burst spreads over the whole pool.
       selected = [...eligible].sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0))[0]!
     } else if (data.rotationStrategy === 'sticky') {

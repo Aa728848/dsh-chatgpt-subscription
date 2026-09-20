@@ -54,6 +54,7 @@ import {
 } from './host/kimi-code/token-store.ts'
 import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
 import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
+import { WorkBuddyAccountPool } from './host/workbuddy/account-pool.ts'
 import { registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
 import {
   FileCredentialStore as WorkBuddyCredentialStore,
@@ -186,6 +187,21 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const workBuddyStore = new WorkBuddyCredentialStore()
   const workBuddyModelSettings = new WorkBuddyModelSettingsStore()
   const workBuddyPreferences = registerWorkBuddyPreferenceStore(ctx.settings, workBuddyModelSettings)
+  // WorkBuddy is the line that adopts accounts it does not own: the IDE's own
+  // sign-ins join the pool beside the ones added here, so both take part in
+  // rotation, 429 cooldowns and account-level auth failures like every other
+  // line. The settings selection is read on each pick, because the card can
+  // pin or hide an account while the adapter is serving requests.
+  const workBuddyAccountPool = new WorkBuddyAccountPool({
+    store: workBuddyStore,
+    selection: () => {
+      const current = workBuddyPreferences.status()
+      return {
+        selectedAccountId: current.selectedAccountId,
+        hiddenAccountIds: current.hiddenAccountIds,
+      }
+    },
+  })
 
   // The allowlist a Session recorded outranks the current settings document,
   // because the built-in delegation tool snapshot it when the Session started.
@@ -386,7 +402,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       workBuddyStore,
       workBuddyModelSettings,
       workBuddyPreferences,
-      { fetchFn: proxyFetch, attachments: ctx.attachments },
+      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: workBuddyAccountPool },
     )
     let workBuddyRegistration: AdapterRegistrationHandle | undefined
     let workBuddyConflict: string | null = null
@@ -422,8 +438,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         fetchFn: proxyFetch,
         serving: () => workBuddyRegistration !== undefined,
         conflict: () => workBuddyConflict,
+        accountPool: workBuddyAccountPool,
       },
     )
+
+    // The IDE can sign in or out on its own; adopting whatever its directory
+    // currently holds keeps the pool in step without a manual rescan.
+    void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
 
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as

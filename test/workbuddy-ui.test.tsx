@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { selectBadgeFacts } from '../src/client/workbuddy/WorkBuddyComposerQuota.tsx'
-import { displayFile, formatCapacity, maskUin, parsePositiveCapacity } from '../src/client/workbuddy/WorkBuddySection.tsx'
+import {
+  displayFile,
+  formatCapacity,
+  maskUin,
+  parsePositiveCapacity,
+  reasoningEffortChoices,
+  unsupportedReasoningEffort,
+} from '../src/client/workbuddy/WorkBuddySection.tsx'
+import type { WorkBuddyModelOption } from '../src/shared/workbuddy-contracts.ts'
 import type { WorkBuddyWebStatus } from '../src/shared/workbuddy-contracts.ts'
 
 function statusWith(quota: WorkBuddyWebStatus['quota']): WorkBuddyWebStatus {
@@ -29,6 +37,19 @@ const account = {
   enterpriseId: null, region: 'cn' as const, backend: 'https://copilot.tencent.com',
   domain: 'copilot.tencent.com', expiresAt: null, sourceFile: '/tmp/a.info',
   source: 'desktop' as const, removable: false, hidden: false,
+}
+
+/** One catalog row with only the fields the effort helpers read. */
+function model(overrides: Partial<WorkBuddyModelOption> & { id: string; name: string }): WorkBuddyModelOption {
+  return {
+    enabled: true,
+    defaultContextWindow: 128_000,
+    contextWindow: 128_000,
+    defaultMaxTokens: 32_768,
+    supportsImage: false,
+    regions: ['cn'],
+    ...overrides,
+  } as WorkBuddyModelOption
 }
 
 describe('WorkBuddy settings card helpers', () => {
@@ -60,6 +81,32 @@ describe('WorkBuddy settings card helpers', () => {
       .toBe('workbuddy-desktop.info')
     expect(displayFile('/home/me/.local/share/auth/x.info')).toBe('x.info')
     expect(displayFile(null)).toBe('—')
+  })
+  it('offers only the reasoning levels the account models declare', () => {
+    const choices = reasoningEffortChoices([
+      model({ id: 'a', name: 'Alpha', reasoningEfforts: ['low', 'high'] }),
+      model({ id: 'b', name: 'Beta', reasoningEfforts: ['high', 'max'] }),
+    ])
+    // Union, in escalating order, never the shipped enum verbatim.
+    expect(choices.map((choice) => choice.value)).toEqual(['low', 'high', 'max'])
+    expect(choices.map((choice) => choice.models)).toEqual([['Alpha'], ['Alpha', 'Beta'], ['Beta']])
+  })
+
+  it('offers nothing when no model declares a reasoning level', () => {
+    // A text-only account must not be shown six levels that do nothing.
+    expect(reasoningEffortChoices([
+      model({ id: 'a', name: 'Alpha', reasoningEfforts: [] }),
+      model({ id: 'b', name: 'Beta' }),
+    ])).toEqual([])
+  })
+
+  it('flags a saved default that no current model supports', () => {
+    const models = [model({ id: 'a', name: 'Alpha', reasoningEfforts: ['low'] })]
+    expect(unsupportedReasoningEffort('max', models)).toBe('max')
+    expect(unsupportedReasoningEffort('low', models)).toBeNull()
+    // Automatic selection is always valid: the adapter resolves it per model.
+    expect(unsupportedReasoningEffort(null, models)).toBeNull()
+    expect(unsupportedReasoningEffort(undefined, models)).toBeNull()
   })
 })
 
