@@ -32,10 +32,21 @@ interface Props {
   loadModelDirectory?: () => void
 }
 
-interface AccountsPayload {
-  authDirectory: string
-  managedStoragePath?: string
-  accounts: WorkBuddyAccount[]
+/**
+ * The shared card's label set.
+ *
+ * Only the three labels WorkBuddy genuinely words differently are taken from
+ * this tab's dictionary; everything else is the shared set, so the five
+ * provider tabs cannot drift apart in wording.
+ */
+function accountPoolLabels(t: typeof zh): AccountPoolLabels {
+  return {
+    ...accountPoolZh,
+    noAccounts: t.noAccounts,
+    storageNotice: t.storageNotice,
+    // A WorkBuddy identity reads as a nickname, not an e-mail address.
+    email: t.nickname,
+  }
 }
 
 interface LoginPollStatus {
@@ -203,25 +214,6 @@ function normalizeStatus(data: WorkBuddyWebStatus): WorkBuddyWebStatus {
   }
 }
 
-/**
- * The shared card's label set, taken from this tab's dictionary.
- *
- * Wording is the shared one so the five provider tabs cannot drift apart; the
- * couple of WorkBuddy-specific words are supplied here.
- */
-function accountPoolLabels(t: typeof zh): AccountPoolLabels {
-  return {
-    ...accountPoolZh,
-    accountPool: t.accounts,
-    noAccounts: t.noAccounts,
-    storage: t.storage,
-    storageNotice: t.storageNotice,
-    deleteAccount: t.deleteAccount,
-    email: t.nickname,
-    accountId: t.uid,
-  }
-}
-
 export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): React.ReactElement {
   const [status, setStatus] = useState<WorkBuddyWebStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -232,7 +224,6 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
   // claims a credential problem when the real cause is an unreachable route.
   const [statusFailed, setStatusFailed] = useState(false)
   const [connection, setConnection] = useState<ConnectionPayload | null>(null)
-  const [accounts, setAccounts] = useState<AccountsPayload | null>(null)
   const [loginProgress, setLoginProgress] = useState<string | null>(null)
   const loginIntervalRef = useRef<number | null>(null)
   const loginTimeoutRef = useRef<number | null>(null)
@@ -283,29 +274,10 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
     }
   }, [])
 
-  const loadAccounts = useCallback(async () => {
-    try {
-      const payload = await fetchApi<AccountsPayload>('/accounts')
-      // Defend against a response without the expected list: the account list
-      // is supplementary, and a malformed payload must not take down the card.
-      setAccounts({
-        authDirectory: payload?.authDirectory ?? '',
-        managedStoragePath: payload?.managedStoragePath,
-        accounts: Array.isArray(payload?.accounts) ? payload.accounts : [],
-      })
-    } catch {
-      // The status call already reports whether a credential exists at all.
-    }
-  }, [])
-
   useEffect(() => {
     void loadStatus()
-    void loadAccounts()
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void loadStatus(true)
-        void loadAccounts()
-      }
+      if (document.visibilityState === 'visible') void loadStatus(true)
     }
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
@@ -313,15 +285,14 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       if (loginIntervalRef.current !== null) window.clearInterval(loginIntervalRef.current)
       if (loginTimeoutRef.current !== null) window.clearTimeout(loginTimeoutRef.current)
     }
-  }, [loadStatus, loadAccounts])
+  }, [loadStatus])
 
   const handleRescan = async () => {
     try {
       setBusy('rescan')
       setError(null)
       const updated = await fetchApi<WorkBuddyWebStatus>('/rescan', { method: 'POST' })
-      setStatus(updated)
-      await loadAccounts()
+      setStatus(normalizeStatus(updated))
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -361,7 +332,6 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
                 })
               }
               await loadStatus()
-              await loadAccounts()
               notifyChange()
             } else if (poll.status === 'error') {
               window.clearInterval(timer)
@@ -405,7 +375,6 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         body: JSON.stringify({ action, accountId }),
       })
       setStatus(normalizeStatus(updated))
-      await loadAccounts()
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -428,7 +397,6 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         body: JSON.stringify({ strategy }),
       })
       setStatus(normalizeStatus(updated))
-      await loadAccounts()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -592,7 +560,6 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
   }
 
   const quota = status?.quota
-  const account = status?.account
   const authenticated = status?.authenticated === true
   // A failed status read is not "no credential": showing the credential hint
   // here would send the user chasing a problem that does not exist.
@@ -600,79 +567,6 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
 
   return (
     <div className="dsha-page">
-      <section className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>{authenticated ? t.account : t.signedOut}</h3>
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleRescan()}>
-            {busy === 'rescan' ? t.rescanning : t.rescan}
-          </button>
-        </div>
-
-        {unreachable ? (
-          <>
-            <div className="dsha-empty">{t.routeUnreachable}</div>
-            <p className="dsha-notice">{t.routeUnreachableHint}</p>
-          </>
-        ) : !authenticated ? (
-          <>
-            <div className="dsha-empty">{t.notFoundTitle}</div>
-            <p className="dsha-notice">{t.notFoundHint}</p>
-          </>
-        ) : (
-          <>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.nickname}</span>
-              <span className="dsha-value">{account?.nickname || '—'}</span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.uid}</span>
-              <span className="dsha-value dshwb-mono">{account?.uid || '—'}</span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.uin}</span>
-              <span className="dsha-value dshwb-mono">{maskUin(account?.uin)}</span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.region}</span>
-              <span className="dsha-value">
-                {account?.region === 'intl' ? t.regionIntl : t.regionCn}
-                {account?.accountType ? ` · ${account.accountType}` : ''}
-              </span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.domain}</span>
-              <span className="dsha-value dshwb-mono">{account?.domain || '—'}</span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.backend}</span>
-              <span className="dsha-value dshwb-mono">{account?.backend || '—'}</span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.tokenExpires}</span>
-              <span className="dsha-value">
-                {account?.expiresAt === null || account?.expiresAt === undefined
-                  ? '—'
-                  : account.expiresAt <= Date.now()
-                    ? t.tokenExpired
-                    : formatDate(account.expiresAt)}
-              </span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.sourceFile}</span>
-              <span className="dsha-value dshwb-mono" title={account?.sourceFile ?? status?.managedStoragePath ?? ''}>
-                {account?.source === 'managed' ? t.encryptedStorage : displayFile(account?.sourceFile)}
-              </span>
-            </div>
-          </>
-        )}
-
-        <div className="dsha-row">
-          <span className="dsha-label">{t.authDirectory}</span>
-          <span className="dsha-value dshwb-mono">{status?.authDirectory || '—'}</span>
-        </div>
-        <p className="dsha-notice">{t.storageNotice}</p>
-      </section>
-
       <AccountPoolSection<WorkBuddyAccountSummaryDto>
         accounts={poolAccounts}
         activeAccountId={status?.activeAccountId}
@@ -688,10 +582,10 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         storageValue={status?.managedStoragePath}
         renderLoginActions={() => (
           <div className="dsha-account-add-actions">
-            <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('cn')}>
+            <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={() => void handleAddAccount('cn')}>
               {busy === 'login:cn' ? t.authorizing : t.addCnAccount}
             </button>
-            <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('intl')}>
+            <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={() => void handleAddAccount('intl')}>
               {busy === 'login:intl' ? t.authorizing : t.addIntlAccount}
             </button>
           </div>
@@ -716,16 +610,45 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         )}
         renderDetails={(candidate) => (
           <>
-            <span>{t.region}: {candidate.region === 'intl' ? t.regionIntl : t.regionCn}</span>
             {candidate.uin ? <span>{t.uin}: {maskUin(candidate.uin)}</span> : null}
+            {candidate.accountType ? <span>{t.accountType}: {candidate.accountType}</span> : null}
+            <span>
+              {t.region}: {candidate.region === 'intl' ? t.regionIntl : t.regionCn}
+            </span>
+            {candidate.domain ? (
+              <span className="dshwb-mono" title={`${candidate.domain} · ${candidate.backend ?? ''}`}>
+                {candidate.domain}
+              </span>
+            ) : null}
             <span className="dshwb-mono">
               {candidate.source === 'managed' ? t.encryptedStorage : displayFile(candidate.sourceFile)}
             </span>
             {candidate.hidden === true ? <span>{t.hiddenAccount}</span> : null}
           </>
         )}
-      />
-      {loginProgress ? <p className="dsha-notice">{loginProgress}</p> : null}
+      >
+        {/* The shared empty state already covers "no account signed in"; only
+            an unreachable route needs a panel of its own, because it must not
+            read as a credential problem. */}
+        {unreachable ? (
+          <>
+            <div className="dsha-empty">{t.routeUnreachable}</div>
+            <p className="dsha-notice">{t.routeUnreachableHint}</p>
+          </>
+        ) : null}
+        {loginProgress ? <p className="dsha-notice">{loginProgress}</p> : null}
+        <div className="dsha-row" style={{ marginTop: 12 }}>
+          <span className="dsha-label">{t.authDirectory}</span>
+          <span className="dsha-value dshwb-mono" title={status?.authDirectory || ''}>
+            {status?.authDirectory || '—'}
+          </span>
+        </div>
+        <div className="dsha-actions">
+          <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleRescan()}>
+            {busy === 'rescan' ? t.rescanning : t.rescan}
+          </button>
+        </div>
+      </AccountPoolSection>
 
       <section className="dsha-group">
         <div className="dsha-grouphead">
@@ -780,25 +703,29 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         </div>
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
         <div className="dsha-models" aria-label="WorkBuddy Models">
-          {status?.models.map((model: WorkBuddyModelOption) => (
-            <label key={model.id} title={model.description ?? model.id}>
-              <input
-                type="checkbox"
-                checked={model.enabled}
-                disabled={busy !== null}
-                onChange={(event) => void toggleModel(model.id, event.currentTarget.checked)}
-              />
-              <span className="dshwb-model">
+          {status?.models.map((model: WorkBuddyModelOption) => {
+            // The pill shows only the model name, as every sibling tab does;
+            // the capability facts ride the tooltip instead of a second line.
+            const facts = [
+              model.id,
+              formatCapacity(model.contextWindow),
+              model.supportsImage ? t.imageSupport : t.textOnly,
+              ...(model.reasoningEfforts && model.reasoningEfforts.length > 0
+                ? [model.reasoningEfforts.join('/')]
+                : []),
+            ]
+            return (
+              <label key={model.id} title={facts.join(' · ')}>
+                <input
+                  type="checkbox"
+                  checked={model.enabled}
+                  disabled={busy !== null}
+                  onChange={(event) => void toggleModel(model.id, event.currentTarget.checked)}
+                />
                 <span>{model.name}</span>
-                <span className="dshwb-model-meta">
-                  {formatCapacity(model.contextWindow)}
-                  {' · '}
-                  {model.supportsImage ? t.imageSupport : t.textOnly}
-                  {model.reasoningEfforts && model.reasoningEfforts.length > 0 ? ` · ${model.reasoningEfforts.join('/')}` : ''}
-                </span>
-              </span>
-            </label>
-          ))}
+              </label>
+            )
+          })}
         </div>
         <div className="dsha-actions">
           <button className="dsha-btn" disabled={busy !== null} onClick={() => void setAllModels(true)}>

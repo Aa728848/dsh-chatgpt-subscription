@@ -191,7 +191,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
         provider: prov,
         id: model.id,
         name: model.name,
-        description: model.description || undefined,
+        // No `description`: the other four routes advertise a name only, and a
+        // description here made the shared composer model picker show a second
+        // capability line for this route alone.
         inputModalities: model.supportsImage ? ['text', 'image'] as const : ['text'] as const,
       }))
   }

@@ -182,6 +182,25 @@ describe('WorkBuddy adapter catalog', () => {
     expect(kimi.inputModalities).toEqual(['text'])
   })
 
+  it('advertises a model name only, like the other four routes', async () => {
+    // A `description` here made the shared composer model picker append a
+    // second capability line for this route alone; the settings card never
+    // showed it either, so the two entries disagreed about the same model.
+    const adapter = new WorkBuddyAdapter(
+      await makeStore(),
+      new FileModelSettingsStore(path.join(os.tmpdir(), `wb-desc-${Date.now()}.json`)),
+      undefined,
+      {
+        loadCatalog: async () => [
+          { ...CATALOG[0]!, description: '1M context · image · low/high/max' },
+        ],
+      },
+    )
+    const [glm] = await adapter.listModels()
+    expect(glm?.name).toBe('GLM-5.3')
+    expect(glm === undefined || 'description' in glm).toBe(false)
+  })
+
   it('resolves the catalog context window and reasoning ladder', async () => {
     const adapter = makeAdapter(await makeStore())
     const resolved = await adapter.resolveModel('workbuddy', 'glm-5.3')

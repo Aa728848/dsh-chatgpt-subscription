@@ -233,6 +233,11 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
         ...(account.nickname === undefined ? {} : { nickname: account.nickname }),
         ...(account.uin === undefined ? {} : { uin: account.uin }),
         ...(account.sourceFile === undefined ? {} : { sourceFile: account.sourceFile }),
+        // Identity facts the shared card shows per account, so WorkBuddy needs
+        // no separate identity panel of its own.
+        ...(account.credentials.domain === '' ? {} : { domain: account.credentials.domain }),
+        ...(account.credentials.backend === '' ? {} : { backend: account.credentials.backend }),
+        ...(account.credentials.accountType === undefined ? {} : { accountType: account.credentials.accountType }),
         ...(account.credentials.expiresAt > 0 ? {} : { expiresAt: undefined }),
       }),
       // The account the user pinned in settings outranks the rotation strategy.

@@ -161,6 +161,12 @@ export interface WorkBuddyAccountSummaryDto extends PoolAccountSummaryDto {
   uin?: string
   /** IDE file a desktop account was adopted from. */
   sourceFile?: string
+  /** Auth domain recorded in the credential, e.g. `copilot.tencent.com`. */
+  domain?: string
+  /** Backend base URL the account's region resolves to. */
+  backend?: string
+  /** Account kind the client reports, e.g. `personal`. */
+  accountType?: string
   /**
    * Whether the plugin currently routes to this account.
    *
