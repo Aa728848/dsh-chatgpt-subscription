@@ -27,17 +27,20 @@
  * shipped default selection excludes them anyway. The adapter's failure message
  * names this case so a user knows to pick another model rather than to retry.
  *
- * `reasoningEfforts` carries the ladder a model accepts. The gateway publishes
- * it in two shapes, and reading them the same way was a real bug: a model whose
- * entry only says `{ effort: 'high' }` (no `supportedEfforts`) accepts the whole
- * ladder and merely DEFAULTS to `high`. Measured on `deepseek-v4.1-flash`, every
- * level from `minimal` to `max` answers 200. Such a model therefore gets the
- * shared ladder with `effort` as its default, rather than a one-entry ladder
- * that would reject the caller's explicit choice.
+ * `reasoningEfforts` carries the ladder a model accepts, transcribed from the
+ * gateway's own declaration. `/v3/config` uses two shapes and they were once
+ * conflated, in opposite directions: a lone `{ effort: 'high' }` (no
+ * `supportedEfforts`) first became a one-entry ladder, which rejected a
+ * caller's explicit `low`; widening it to every level this route can name then
+ * advertised `minimal`/`xhigh` on a model that has three. Such a model accepts
+ * exactly `low`/`high`/`max` (measured on `deepseek-v4.1-flash`), the same
+ * three the gateway declares explicitly for `glm-5.3-flash` and
+ * `kimi-k2.8-preview`, and routes any other value into the nearest of them.
  */
 
 import type { WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
 import { DEFAULT_CONTEXT_WINDOW, FALLBACK_MAX_TOKENS } from './types.ts'
+import { convergeWorkBuddyEffort } from '../../shared/workbuddy-contracts.ts'
 
 export interface WorkBuddyModelEntry {
   id: string
@@ -110,7 +113,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['intl'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '响应快，适合简单任务',
@@ -123,7 +126,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['intl'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '速度与质量兼顾，日常工作首选',
@@ -136,7 +139,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 72000,
     regions: ['intl'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '高质量输出，胜任复杂任务',
@@ -279,7 +282,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 48000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '',
@@ -292,7 +295,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 64000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '',
@@ -318,7 +321,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 48000,
     regions: ['cn'],
     supportsImage: false,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '',
@@ -344,7 +347,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '',
@@ -370,7 +373,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['intl'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。',
@@ -383,7 +386,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。',
@@ -409,7 +412,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '',
@@ -422,7 +425,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['intl', 'cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '多模态模型，适合日常任务',
@@ -435,7 +438,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '',
@@ -448,7 +451,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['cn'],
     supportsImage: false,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '',
@@ -461,7 +464,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 128000,
     regions: ['intl', 'cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: 'DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态',
@@ -474,7 +477,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 128000,
     regions: ['intl'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: 'DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态',
@@ -487,7 +490,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 128000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '',
@@ -500,7 +503,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 50000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '',
@@ -513,7 +516,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 32000,
     regions: ['cn'],
     supportsImage: false,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '',
@@ -565,7 +568,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 64000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '混元思考模型，具有增强的推理能力',
@@ -591,7 +594,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 64000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '原生多模态，擅长代码、智能体任务',
@@ -604,7 +607,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 48000,
     regions: ['cn'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '',
@@ -617,7 +620,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 48000,
     regions: ['cn'],
     supportsImage: false,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '',
@@ -630,7 +633,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxTokens: 65536,
     regions: ['intl'],
     supportsImage: true,
-    reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
     canDisableThinking: false,
     description: '能力均衡，适合日常使用',
@@ -666,7 +669,19 @@ export function resolveWorkBuddyModel(
   id: string,
   catalog: readonly WorkBuddyModelEntry[] = FALLBACK_MODELS,
 ): WorkBuddyModelEntry {
-  return catalog.find((model) => model.id === id) ?? {
+  const found = catalog.find((model) => model.id === id)
+  if (found !== undefined) {
+    // Normalize on read rather than editing the transcribed table: the gateway
+    // names a default from a wider vocabulary than the ladder it publishes for
+    // the same model (`medium` for entries that expose only `low`/`high`/`max`).
+    // Left as-is, that value is dropped by the level-resolution step, no
+    // `reasoning_effort` is sent, and the model returns empty reasoning.
+    const ladder = found.reasoningEfforts
+    const declared = found.defaultReasoningEffort
+    if (declared === null || ladder.includes(declared)) return found
+    return { ...found, defaultReasoningEffort: convergeWorkBuddyEffort(declared, ladder) }
+  }
+  return {
     id,
     name: id,
     contextWindow: DEFAULT_CONTEXT_WINDOW,

@@ -345,8 +345,31 @@ describe('WorkBuddy fallback catalog', () => {
   it('records the per-model reasoning ladder and image support', () => {
     expect(resolveWorkBuddyModel('glm-5.3').reasoningEfforts).toEqual(['low', 'high', 'max'])
     expect(resolveWorkBuddyModel('gpt-6-astra').reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    // A model the gateway describes with only `{ effort }` accepts the standard
+    // three, not every level this route can name: shipping the wide set put
+    // `minimal`/`xhigh` in DSH's picker on models that have neither.
+    expect(resolveWorkBuddyModel('deepseek-v4.1-flash').reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(resolveWorkBuddyModel('deepseek-v4.1-flash').defaultReasoningEffort).toBe('high')
     expect(resolveWorkBuddyModel('glm-5.3').supportsImage).toBe(true)
     expect(resolveWorkBuddyModel('kimi-k2-thinking').supportsImage).toBe(false)
+  })
+
+  it('resolves every model default onto a level its own ladder exposes', () => {
+    // The transcribed table keeps the gateway's own `effort` value verbatim
+    // (`medium` for a dozen entries that expose only low/high/max), and the
+    // gateway itself routes such a value onto the nearest rung. Resolution is
+    // the choke point that guarantees what reaches a request is a real level:
+    // a default outside the ladder would otherwise be dropped, leaving the
+    // request with no `reasoning_effort` and the model with empty reasoning.
+    const violations = FALLBACK_MODELS
+      .map((model) => resolveWorkBuddyModel(model.id))
+      .filter((model) => model.defaultReasoningEffort !== null
+        && !model.reasoningEfforts.includes(model.defaultReasoningEffort))
+    expect(violations).toEqual([])
+    // The transcribed value is what the gateway declared; convergence is what
+    // turns it into a level the request can carry.
+    expect(FALLBACK_MODELS.find((m) => m.id === 'minimax-m3')!.defaultReasoningEffort).toBe('medium')
+    expect(resolveWorkBuddyModel('minimax-m3').defaultReasoningEffort).toBe('high')
   })
 
   it('filters the catalog by region, since a wrong-region call is a 400', () => {

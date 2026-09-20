@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.4.0 - 2026-09-20
+## Unreleased
+
+- **新增 WorkBuddy 线路**（`workbuddy-subscription` Provider），接入腾讯 WorkBuddy / CodeBuddy 订阅，成为本插件的第五条线路。该 ID 与用户自定义 OpenAI 兼容 Provider 常用的 `workbuddy` 分开，因此二者可同时安装和选择。既可直接复用 CodeBuddy 桌面端登录态，也可按国区/国际区通过官方浏览器授权添加账号；后者存入 Windows DPAPI / macOS Keychain / Linux Secret Service。插件托管账号可删除，桌面账号只能隐藏/恢复且绝不删除原凭据文件。
+  - **凭据来源**：扫描桌面端的 `*.info` 凭据文件（`CODEBUDDY_AUTH_DIR` 可覆盖，与官方工具链一致）。目录里通常混着当前凭据与若干带时间戳的历史快照，选取顺序是**规范文件名优先，其余按 token 剩余有效期取最长**——只按 mtime 选会选到过期快照（开发过程中确实选到过）。扫描失败的单个文件被跳过而不是让整次扫描失败；`/status` 每次都重扫，避免缓存掩盖刚登录的凭据。
+  - **续期回写**：token 临近过期时调 `/v2/plugin/auth/token/refresh`，并把新 token **原子写回原文件**（只改 `auth` 块，保留桌面端自己的字段），以免桌面端掉线。同进程并发调用**共用一次刷新**——refresh token 会轮换，两次并发刷新会互相作废。写回失败不影响本次请求。
+  - **两条上游硬约束**（实测）：该端点是 OpenAI 兼容的 `POST /v2/chat/completions`，但**只支持流式**（`stream:false` → 400 `code 11101`），且**首条消息必须是 system**（国际区否则 400 `code 11128`）。请求构造器因此始终发 `stream:true`，并在调用方没给系统提示时补一条中性提示，手搓的一次性请求也不会踩到这条规则。
+  - **区域是凭据属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。设置页按**国区 / 国际区**分组账号，历史快照按账号去重；所选账号持久化，并统一控制模型目录、额度、连接测试和实际对话。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，所以模型选择器**按当前账号区域过滤**。
+  - **模型目录取自网关的 `/v3/config`**（官方 CLI 启动时读的就是它），而不是靠模型名猜测：每个模型的真实上下文上限、输出上限、是否接受图片、可用思考档位都由它给出，并带 30 分钟缓存与手动刷新。`/v1/models` 在这条线路上是 404，所以内置表只作为离线兜底。
+  - **内置兜底表是从真实 `/v3/config` 转录的，不是手写猜测**。早期手写版本按厂商宣传页推断，两个方向都错了——`glm-5.3` 与 `kimi-k3` 实际都是 1M，而非 200K/256K。目录同时区分**默认服务长度**与**模型上限**（如 `deepseek-v4.1-flash` 默认 300K、最大 1M）；本线路不发显式长度参数，因此 DSH 的压缩与溢出判断按默认服务长度计算，不会越过后端实际接受的窗口。
+  - **逐模型实测了目录的可用性**：国际区 21/21 可调用，国区 29 个里有 7 个（`glm-5.0`、`glm-4.7`、`glm-4.6`、`glm-4.6v`、`kimi-k2-thinking`、`hy4-preview-x`、`minimax-m2.5`）由网关列出却返回 400 `code 11102`——网关会列出**当前套餐无权调用**的模型。这些条目被保留（门控是按账号而非按模型，付费套餐可能可用），且默认勾选集合已排除它们；`11102` 的失败文案同时说明「区域不支持」与「套餐不包含」两种情况，因为两者的处理方式相同（换模型）。四个默认勾选模型（`glm-5.3` / `deepseek-v4.1-flash` / `hy4-preview` / `kimi-k2.6`）已在两个区都验证可调用。
+  - **档位别名按区解析不同**（`fast-model` 在国际区是独立模型、在国区落到 `deepseek-v4.1-flash`），因此别名条目只在其真实生效的区上声明，不做跨区共享。
+  - **实机测试中发现并修复两个真实缺陷**（以 `deepseek-v4.1-flash` 为样本，两个区各 26 项断言全绿）：
+    - **思考档位没有回落到模型目录的默认值**：上游在请求不带 `reasoning_effort` 时返回**空的 `reasoning_content`**（实测同一提示：不带字段 0 字符，带字段 130–215 字符），而 `stream()` 此前只回落到用户的全局偏好、不看模型自己的目录默认值，于是 `deepseek-v4.1-flash`（目录默认 `high`）的思考被静默丢弃。现在回落顺序是「调用方显式指定 → 用户配置 → 目录为该模型声明的默认档」，与官方 CLI 行为一致。
+    - **把目录里的单个 `effort` 字段误当成完整档位表**：网关有两种写法，`{supportedEfforts:[...], defaultEffort:'x'}` 是显式档位表，而 `{effort:'x'}` 只是**默认值**。此前把后者读成「只有 x 可用」，导致调用方显式传的 `low`/`max` 被判为不支持而被静默替换成默认档。实测 `deepseek-v4.1-flash` 这类模型接受 `low`/`high`/`max` 三档，其余取值由上游收敛到最近的档位，因此这类模型拿到的是这三档而非全量档位表，同时保留 `effort` 作为默认值；显式声明的档位表仍然原样采信（跨区合并时显式表优先于推断表）。
+  - 顺带把测试环境的隔离补齐：测试只隔离了 `DSH_HOME`，而 WorkBuddy 读的是 CodeBuddy 桌面端的凭据目录，因此默认构造的 store 会扫到开发者真实登录的账号；现在测试同样把 `CODEBUDDY_AUTH_DIR` 指向私有空目录。
+  - **思考档位逐模型**取目录声明值，并优先使用目录给出的默认档（与官方 CLI 一致）；用户配置的档位若不在该模型集合内会被忽略而不是发出去（上游对不支持的档位返回 `code 11150`）。
+  - **失败分类**：上游 5xx 与 `code 11134` → `SERVER`（有界退避，最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；额度耗尽（429 / `code 6004` / `code 14003`，6004 的正文带重置时刻）→ `RATE_LIMIT` 并遵守 `Retry-After`；401/403、跨区模型（11102）、不可用图片（11133/11135）、历史形状错误（11128）都不重试，并给出可操作提示。
+  - **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛错而不是把半截文本当成完整回答。
+  - 额度来自 `/billing/meter/get-user-resource`（套餐名、本周期已用/上限、剩余额度、重置时间）。设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有额度胶囊；卡片列出目录中所有可用账号并标明区域，`UIN` 脱敏显示。
+  - **请求身份统一使用 CLI UA**（`CLI/2.63.2 CodeBuddy/2.63.2`）：实测 `CodeBuddyIDE` 被 `/v3/config` 以 400 `code 12403` 拒绝，国际区对话端点也直接返回 401，因此不做按端点切换。
+  - 路由挂在 `/workbuddy/api`（`status` / `accounts` / `accounts/login` / `accounts/login/status` / `accounts/action` / `rescan` / `quota` / `models` / `settings` / `catalog/refresh` / `connection/test`），修改状态的路由同样只接受同源 JSON POST。
+  - **与另外四条线路对齐：接入共享号池内核**。此前 WorkBuddy 只有「单账号 + 手动选择」，没有调度策略、429 冷却换号与账号级失效恢复，是五条线路里唯一没走 `AccountPoolCore`（`src/host/common/account-pool.ts`）的一条。现在它与其他线路共用同一套内核与同一张设置卡片（`src/client/common/AccountPoolSection.tsx`）：顺序耗尽 / 轮询调度 / 粘性会话三种策略、429 按 `Retry-After` 冷却并自动换号、401/403 把该账号标记为需重新登录并换号（账号保留，重新登录即恢复）、每账号 `lastUsedAt` 与冷却倒计时、账号备注、设为主账号、清除冷却、重新登录。
+    - **桌面账号是「别人家的账号」**：从 CodeBuddy 桌面端扫描到的凭据会加入号池参与调度，但它们归 IDE 所有。为此号池拒绝删除桌面账号（`deleteAccount` 直接报错），卡片只在 `removable !== false` 时才渲染删除按钮，桌面账号改为「隐藏 / 恢复」——隐藏只影响本插件的调度，绝不改动 IDE 的凭据文件（有测试锁定文件仍含原 token）。
+    - **桌面账号续期必须回写 IDE 文件**：refresh token 会轮换，若只写进插件的加密存储，IDE 手里就只剩一个已被用掉的 token，用户会被桌面端登出。因此桌面账号刷新后先原子写回其 `*.info` 再入库；同时避免二次刷新（`getEffectiveAccount` 已刷过就不再刷，否则两次兑换会互相作废）。
+    - **账号 id 与既有设置保持一致**：号池新增 `accountId` 钩子，WorkBuddy 用它返回 `${region}:${identity}` 这个既有公开键，而不是内核默认生成的随机 `acc_xxx`。这样老用户已存下的 `selectedAccountId` / `hiddenAccountIds` 无需迁移即可继续生效。
+    - 卡片新增两个可选插槽：`renderLoginActions`（WorkBuddy 需要国区/国际区两个登录入口，单按钮表达不了）与 `renderAccountActions`（桌面账号的隐藏/恢复）；`PoolAccountSummaryDto` 新增可选 `removable`（缺省即可删除）。两者对另外四条线路完全向后兼容——既有号池测试全部保持通过。
+    - 新增 `test/workbuddy-account-pool.test.ts`（14 条）与卡片/路由回归：身份与快照去重、桌面账号不可删除、隐藏不动文件、固定账号与冷却回退、轮询调度、429 换号、401 标记失效并换号、桌面 token 回写；共享卡片新增 2 条锁定「非本插件账号不出现删除按钮」。
+  - **思考档位下拉跟随模型**：设置页此前固定渲染全部 6 档，即使当前账号的模型一个都不支持。现在选项由该账号模型**实际声明的档位**并集推导（仅部分模型支持的档位会标注，如 `High (2/5)`），没有任何模型声明档位时给出说明而不是空列表；已保存但当前无模型支持的档位会被保留并标注，不会在打开页面时被静默改写。
+  - **修正「全部返回 200 即等于全部支持」的误判**：`/v3/config` 对多数模型只报单个 `effort` 默认值（如 `deepseek-v4.1-flash` 的 `{"effort":"high"}`），此前据此推断成完整 6 档，于是 DSH 模型选择器里出现了该模型并不具备的 `minimal`/`xhigh`。逐档实测确认这类模型接受的就是 `low`/`high`/`max`——与网关为 `glm-5.3-flash`、`kimi-k2.8-preview` **显式声明**的档位完全一致，其余取值由上游收敛到最近的档位而非作为独立档位生效——因此内置兜底表与解析逻辑同步收敛为这三档（`WORKBUDDY_STANDARD_EFFORTS`）。**收紧档位后又修掉它带出的一个反向缺陷**：目录给的**默认档**也可能落在档位表之外——`minimax-m3`、`kimi-k3`、国区 `glm-5.3` 等 12 个条目都报 `medium` 却只有三档。这种「默认档不在表内」的值会被档位解析判为不支持而丢弃，于是请求不带 `reasoning_effort`，上游返回**空的 `reasoning_content`**（实测 `minimax-m3`：不带字段三次全为 0 字符，带 `medium` 为 282–659 字符）。现在默认档会收敛到表内最近的档位（`convergeWorkBuddyEffort`，平局向上取，与 kimi-code 线路 `medium`→`high` 的既有映射一致），并在 `resolveWorkBuddyModel` 这个唯一读取口统一归一化，离线兜底表同样覆盖。
+  - **合并前代码审查发现并修复的问题**（同源校验、缓存与凭据续期一致性、流式解码）：`/quota` 的 POST 与其它写路由一样校验同源；`/connection/test` 与 `/catalog/refresh` 先 `ensureFresh` 续期过期 token，不再对有效账号误报 401；`loadConfigCatalog` 不再把另一区域的缓存快照当成当前区域的结果（那会让模型选择器整个空掉，而不是回落到内置表）；续期回写保留原凭据文件的权限位并清理临时文件；流式请求不再附加 300s 墙钟超时（空闲超时由共享看门狗负责，长回答不会被掐断）；无参工具调用同样置 `hasToolCall` 并在首个 delta 带上工具名，否则整轮会被当成普通 stop、工具永不执行；流中错误帧抛错而不是当成干净的停止；路由销毁时终止未完成的浏览器登录轮询。每条修复都有对应回归测试。
+- 新增 **157 条单测**：`test/workbuddy-mapper.test.ts`（28 条：system-first 注入与折叠、并行工具结果分组、图片预算按最旧省略、读不出的图片降级为可见文本、SSE 文本/思考/工具调用解码、usage 缓存 token 拆分、`[DONE]` 终止与截断流拒绝）、`test/workbuddy-adapter.test.ts`（30 条：错误分类、区域过滤、目录能力声明、流式端到端、续期后重发、截断流、重试策略取值，以及**思考档位回落到目录默认值**与**显式档位不被覆盖**两条回归）、`test/workbuddy-routes.test.ts`（43 条：`/v3/config` 解析、请求头身份、续期合并、billing 解析与多套餐求和、状态与同源校验、跨源拒绝、方法/子路径兜底、**响应不含 token**，以及**单个 `effort` 字段不等于完整档位表**的回归）、`test/workbuddy-store.test.ts`（28 条：区域推断、凭据解析与选取顺序、扫描容错、续期回写与并发共用、设置存储、目录窗口与能力断言）、`test/workbuddy-oauth.test.ts`（4 条：state 握手、pending 哨兵 11217、凭据解析与托管入库）、`test/workbuddy-ui.test.tsx`（8 条：容量解析与格式化、UIN 脱敏、凭据路径只显文件名、额度胶囊选取与告警分级）。
+- 已用真实订阅凭据对**源码与构建产物**分别验证，并在真实 DSH 中装载运行：`/workbuddy/api/status` 在 `dsh web` 下返回 21 个国际区模型、`serving=true` 无路由冲突、真实额度，且响应不含任何 token 字段；把插件注册进 DSH 真实的 `LlmRuntime` 后，`listModels` / `prepareCall` / `stream` 与助手消息组装全部走通；`deepseek-v4.1-flash` 的文本、图片理解（两张不同颜色图片给出不同答案）、工具调用与工具结果回传、12.6k token 长提示、多轮记忆，在两个区共 52 项断言全绿。
+
+## 0.5.0 - 2026-09-20
 
 - **四条线路全部支持多账号与号池调度**（把 Antigravity 已有的账号管理推广到 ChatGPT / Command Code / Kimi Code，落实设计文档 `docs/design-multi-account-pool.md` 的 P0–P4）：
   - **共享号池内核** `src/host/common/account-pool.ts`：加密存储（Windows DPAPI / macOS Keychain / Linux Secret Service）、按文件串行化的读改写、旧版单凭据的零副作用投影、顺序耗尽 / 轮询调度 / 粘性会话三种策略、429 冷却、账号级认证失效状态、刷新失败自动换号。Antigravity 线路改为复用该内核（`AccountPoolStore` 保留原 API 与池文件格式），四条线路的池规则从此只有一处实现。
@@ -22,35 +55,6 @@
   - 同一条提示现在带上底层原因（如 `(DPAPI credential write failed)`），不再是无信息文案。
   - 新增 2 条测试：内核"记账写失败仍能取到凭据、冷却写入仍报错"，配额服务"错误文案包含底层原因"。
   - 新增 54 条测试：`account-pool-core`（11）、`account-pool-section`（9）、`codex-account-pool`（12，含 429/401 轮换与并发刷新单飞）、`command-code-account-pool`（8，含路由动作与单 Key 回退）、`kimi-code-account-pool`（11，含跨区域、套餐型 429 不冷却、刷新失败换号）、`antigravity-section-pool`（3，锁定 Antigravity Tab 已改用共享卡片），外加 `isolated-home` 哨兵 1 条。
-- **新增 WorkBuddy 线路**（`workbuddy-subscription` Provider），接入腾讯 WorkBuddy / CodeBuddy 订阅，成为本插件的第五条线路。该 ID 与用户自定义 OpenAI 兼容 Provider 常用的 `workbuddy` 分开，因此二者可同时安装和选择。既可直接复用 CodeBuddy 桌面端登录态，也可按国区/国际区通过官方浏览器授权添加账号；后者存入 Windows DPAPI / macOS Keychain / Linux Secret Service。插件托管账号可删除，桌面账号只能隐藏/恢复且绝不删除原凭据文件。
-  - **凭据来源**：扫描桌面端的 `*.info` 凭据文件（`CODEBUDDY_AUTH_DIR` 可覆盖，与官方工具链一致）。目录里通常混着当前凭据与若干带时间戳的历史快照，选取顺序是**规范文件名优先，其余按 token 剩余有效期取最长**——只按 mtime 选会选到过期快照（开发过程中确实选到过）。扫描失败的单个文件被跳过而不是让整次扫描失败；`/status` 每次都重扫，避免缓存掩盖刚登录的凭据。
-  - **续期回写**：token 临近过期时调 `/v2/plugin/auth/token/refresh`，并把新 token **原子写回原文件**（只改 `auth` 块，保留桌面端自己的字段），以免桌面端掉线。同进程并发调用**共用一次刷新**——refresh token 会轮换，两次并发刷新会互相作废。写回失败不影响本次请求。
-  - **两条上游硬约束**（实测）：该端点是 OpenAI 兼容的 `POST /v2/chat/completions`，但**只支持流式**（`stream:false` → 400 `code 11101`），且**首条消息必须是 system**（国际区否则 400 `code 11128`）。请求构造器因此始终发 `stream:true`，并在调用方没给系统提示时补一条中性提示，手搓的一次性请求也不会踩到这条规则。
-  - **区域是凭据属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。设置页按**国区 / 国际区**分组账号，历史快照按账号去重；所选账号持久化，并统一控制模型目录、额度、连接测试和实际对话。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，所以模型选择器**按当前账号区域过滤**。
-  - **模型目录取自网关的 `/v3/config`**（官方 CLI 启动时读的就是它），而不是靠模型名猜测：每个模型的真实上下文上限、输出上限、是否接受图片、可用思考档位都由它给出，并带 30 分钟缓存与手动刷新。`/v1/models` 在这条线路上是 404，所以内置表只作为离线兜底。
-  - **内置兜底表是从真实 `/v3/config` 转录的，不是手写猜测**。早期手写版本按厂商宣传页推断，两个方向都错了——`glm-5.3` 与 `kimi-k3` 实际都是 1M，而非 200K/256K。目录同时区分**默认服务长度**与**模型上限**（如 `deepseek-v4.1-flash` 默认 300K、最大 1M）；本线路不发显式长度参数，因此 DSH 的压缩与溢出判断按默认服务长度计算，不会越过后端实际接受的窗口。
-  - **逐模型实测了目录的可用性**：国际区 21/21 可调用，国区 29 个里有 7 个（`glm-5.0`、`glm-4.7`、`glm-4.6`、`glm-4.6v`、`kimi-k2-thinking`、`hy4-preview-x`、`minimax-m2.5`）由网关列出却返回 400 `code 11102`——网关会列出**当前套餐无权调用**的模型。这些条目被保留（门控是按账号而非按模型，付费套餐可能可用），且默认勾选集合已排除它们；`11102` 的失败文案同时说明「区域不支持」与「套餐不包含」两种情况，因为两者的处理方式相同（换模型）。四个默认勾选模型（`glm-5.3` / `deepseek-v4.1-flash` / `hy4-preview` / `kimi-k2.6`）已在两个区都验证可调用。
-  - **档位别名按区解析不同**（`fast-model` 在国际区是独立模型、在国区落到 `deepseek-v4.1-flash`），因此别名条目只在其真实生效的区上声明，不做跨区共享。
-  - **实机测试中发现并修复两个真实缺陷**（以 `deepseek-v4.1-flash` 为样本，两个区各 26 项断言全绿）：
-    - **思考档位没有回落到模型目录的默认值**：上游在请求不带 `reasoning_effort` 时返回**空的 `reasoning_content`**（实测同一提示：不带字段 0 字符，带字段 130–215 字符），而 `stream()` 此前只回落到用户的全局偏好、不看模型自己的目录默认值，于是 `deepseek-v4.1-flash`（目录默认 `high`）的思考被静默丢弃。现在回落顺序是「调用方显式指定 → 用户配置 → 目录为该模型声明的默认档」，与官方 CLI 行为一致。
-    - **把目录里的单个 `effort` 字段误当成完整档位表**：网关有两种写法，`{supportedEfforts:[...], defaultEffort:'x'}` 是显式档位表，而 `{effort:'x'}` 只是**默认值**。此前把后者读成「只有 x 可用」，导致调用方显式传的 `low`/`max` 被判为不支持而被静默替换成默认档。实测 `deepseek-v4.1-flash` 从 `minimal` 到 `max` 全部返回 200，因此这类模型现在拿到共享档位表，同时保留 `effort` 作为默认值；显式声明的档位表仍然原样采信（跨区合并时显式表优先于推断表）。
-  - 顺带把测试环境的隔离补齐：测试只隔离了 `DSH_HOME`，而 WorkBuddy 读的是 CodeBuddy 桌面端的凭据目录，因此默认构造的 store 会扫到开发者真实登录的账号；现在测试同样把 `CODEBUDDY_AUTH_DIR` 指向私有空目录。
-  - **思考档位逐模型**取目录声明值，并优先使用目录给出的默认档（与官方 CLI 一致）；用户配置的档位若不在该模型集合内会被忽略而不是发出去（上游对不支持的档位返回 `code 11150`）。
-  - **失败分类**：上游 5xx 与 `code 11134` → `SERVER`（有界退避，最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；额度耗尽（429 / `code 6004` / `code 14003`，6004 的正文带重置时刻）→ `RATE_LIMIT` 并遵守 `Retry-After`；401/403、跨区模型（11102）、不可用图片（11133/11135）、历史形状错误（11128）都不重试，并给出可操作提示。
-  - **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛错而不是把半截文本当成完整回答。
-  - 额度来自 `/billing/meter/get-user-resource`（套餐名、本周期已用/上限、剩余额度、重置时间）。设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有额度胶囊；卡片列出目录中所有可用账号并标明区域，`UIN` 脱敏显示。
-  - **请求身份统一使用 CLI UA**（`CLI/2.63.2 CodeBuddy/2.63.2`）：实测 `CodeBuddyIDE` 被 `/v3/config` 以 400 `code 12403` 拒绝，国际区对话端点也直接返回 401，因此不做按端点切换。
-  - 路由挂在 `/workbuddy/api`（`status` / `accounts` / `accounts/login` / `accounts/login/status` / `accounts/action` / `rescan` / `quota` / `models` / `settings` / `catalog/refresh` / `connection/test`），修改状态的路由同样只接受同源 JSON POST。
-  - **与另外四条线路对齐：接入共享号池内核**。此前 WorkBuddy 只有「单账号 + 手动选择」，没有调度策略、429 冷却换号与账号级失效恢复，是五条线路里唯一没走 `AccountPoolCore`（`src/host/common/account-pool.ts`）的一条。现在它与其他线路共用同一套内核与同一张设置卡片（`src/client/common/AccountPoolSection.tsx`）：顺序耗尽 / 轮询调度 / 粘性会话三种策略、429 按 `Retry-After` 冷却并自动换号、401/403 把该账号标记为需重新登录并换号（账号保留，重新登录即恢复）、每账号 `lastUsedAt` 与冷却倒计时、账号备注、设为主账号、清除冷却、重新登录。
-    - **桌面账号是「别人家的账号」**：从 CodeBuddy 桌面端扫描到的凭据会加入号池参与调度，但它们归 IDE 所有。为此号池拒绝删除桌面账号（`deleteAccount` 直接报错），卡片只在 `removable !== false` 时才渲染删除按钮，桌面账号改为「隐藏 / 恢复」——隐藏只影响本插件的调度，绝不改动 IDE 的凭据文件（有测试锁定文件仍含原 token）。
-    - **桌面账号续期必须回写 IDE 文件**：refresh token 会轮换，若只写进插件的加密存储，IDE 手里就只剩一个已被用掉的 token，用户会被桌面端登出。因此桌面账号刷新后先原子写回其 `*.info` 再入库；同时避免二次刷新（`getEffectiveAccount` 已刷过就不再刷，否则两次兑换会互相作废）。
-    - **账号 id 与既有设置保持一致**：号池新增 `accountId` 钩子，WorkBuddy 用它返回 `${region}:${identity}` 这个既有公开键，而不是内核默认生成的随机 `acc_xxx`。这样老用户已存下的 `selectedAccountId` / `hiddenAccountIds` 无需迁移即可继续生效。
-    - 卡片新增两个可选插槽：`renderLoginActions`（WorkBuddy 需要国区/国际区两个登录入口，单按钮表达不了）与 `renderAccountActions`（桌面账号的隐藏/恢复）；`PoolAccountSummaryDto` 新增可选 `removable`（缺省即可删除）。两者对另外四条线路完全向后兼容——既有号池测试全部保持通过。
-    - 新增 `test/workbuddy-account-pool.test.ts`（14 条）与卡片/路由回归：身份与快照去重、桌面账号不可删除、隐藏不动文件、固定账号与冷却回退、轮询调度、429 换号、401 标记失效并换号、桌面 token 回写；共享卡片新增 2 条锁定「非本插件账号不出现删除按钮」。
-  - **思考档位下拉跟随模型**：设置页此前固定渲染全部 6 档，即使当前账号的模型一个都不支持。现在选项由该账号模型**实际声明的档位**并集推导（仅部分模型支持的档位会标注，如 `High (2/5)`），没有任何模型声明档位时给出说明而不是空列表；已保存但当前无模型支持的档位会被保留并标注，不会在打开页面时被静默改写。
-  - **合并前代码审查发现并修复的问题**（同源校验、缓存与凭据续期一致性、流式解码）：`/quota` 的 POST 与其它写路由一样校验同源；`/connection/test` 与 `/catalog/refresh` 先 `ensureFresh` 续期过期 token，不再对有效账号误报 401；`loadConfigCatalog` 不再把另一区域的缓存快照当成当前区域的结果（那会让模型选择器整个空掉，而不是回落到内置表）；续期回写保留原凭据文件的权限位并清理临时文件；流式请求不再附加 300s 墙钟超时（空闲超时由共享看门狗负责，长回答不会被掐断）；无参工具调用同样置 `hasToolCall` 并在首个 delta 带上工具名，否则整轮会被当成普通 stop、工具永不执行；流中错误帧抛错而不是当成干净的停止；路由销毁时终止未完成的浏览器登录轮询。每条修复都有对应回归测试。
-- 新增 **157 条单测**：`test/workbuddy-mapper.test.ts`（28 条：system-first 注入与折叠、并行工具结果分组、图片预算按最旧省略、读不出的图片降级为可见文本、SSE 文本/思考/工具调用解码、usage 缓存 token 拆分、`[DONE]` 终止与截断流拒绝）、`test/workbuddy-adapter.test.ts`（30 条：错误分类、区域过滤、目录能力声明、流式端到端、续期后重发、截断流、重试策略取值，以及**思考档位回落到目录默认值**与**显式档位不被覆盖**两条回归）、`test/workbuddy-routes.test.ts`（43 条：`/v3/config` 解析、请求头身份、续期合并、billing 解析与多套餐求和、状态与同源校验、跨源拒绝、方法/子路径兜底、**响应不含 token**，以及**单个 `effort` 字段不等于完整档位表**的回归）、`test/workbuddy-store.test.ts`（28 条：区域推断、凭据解析与选取顺序、扫描容错、续期回写与并发共用、设置存储、目录窗口与能力断言）、`test/workbuddy-oauth.test.ts`（4 条：state 握手、pending 哨兵 11217、凭据解析与托管入库）、`test/workbuddy-ui.test.tsx`（8 条：容量解析与格式化、UIN 脱敏、凭据路径只显文件名、额度胶囊选取与告警分级）。
-- 已用真实订阅凭据对**源码与构建产物**分别验证，并在真实 DSH 中装载运行：`/workbuddy/api/status` 在 `dsh web` 下返回 21 个国际区模型、`serving=true` 无路由冲突、真实额度，且响应不含任何 token 字段；把插件注册进 DSH 真实的 `LlmRuntime` 后，`listModels` / `prepareCall` / `stream` 与助手消息组装全部走通；`deepseek-v4.1-flash` 的文本、图片理解（两张不同颜色图片给出不同答案）、工具调用与工具结果回传、12.6k token 长提示、多轮记忆，在两个区共 52 项断言全绿。
 
 ## 0.3.9 - 2026-09-19
 

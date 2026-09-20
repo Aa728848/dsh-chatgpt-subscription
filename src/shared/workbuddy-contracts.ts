@@ -15,12 +15,73 @@ import type { AccountPoolStatusDto, PoolAccountSummaryDto } from './account-pool
  */
 export type WorkBuddyRegion = 'cn' | 'intl'
 
-/** Reasoning levels this route exposes. The upstream accepts the standard ladder. */
+/**
+ * Reasoning levels this route can name.
+ *
+ * Deliberately the widest set any model declares, so a saved default is not
+ * discarded merely because the model that suggested it is no longer selected.
+ * The settings card renders the subset the account's models actually declare.
+ */
 export type WorkBuddyReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-/** Every level, in escalating order; the settings card renders exactly these. */
+/** Every level this route can name, in escalating order (the card's sort key). */
 export const WORKBUDDY_REASONING_EFFORTS: readonly WorkBuddyReasoningEffort[] =
   ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/**
+ * Ladder of a WorkBuddy model that leaves the level choice to the gateway.
+ *
+ * `/v3/config` publishes a model's ladder in two shapes: an explicit
+ * `supportedEfforts` list, or a lone `{ effort }` field that names only the
+ * DEFAULT. Conflating them was a real bug — the lone field first became a
+ * one-entry ladder, which rejected an explicit `low`; widening it to every
+ * level this route can name then advertised `minimal`/`xhigh` on a model that
+ * has three. Measured against the live gateway, such a model accepts exactly
+ * `low`/`high`/`max` — the same three `glm-5.3-flash` and
+ * `kimi-k2.8-preview` declare explicitly — and every other value is routed
+ * into the nearest of them rather than honoured as a level of its own.
+ */
+export const WORKBUDDY_STANDARD_EFFORTS: readonly WorkBuddyReasoningEffort[] =
+  ['low', 'high', 'max']
+
+/**
+ * Snap a level onto the nearest rung a model's ladder actually exposes.
+ *
+ * The gateway names a default from a wider vocabulary than the ladder it
+ * publishes for the same model: an effort-only entry (minimax-m3, kimi-k3,
+ * `glm-5.3` in the cn region) reports `effort: 'medium'` while exposing only
+ * `low`/`high`/`max`. Letting that value through is not cosmetic — a default
+ * outside the ladder is discarded by the level-resolution step, the request
+ * then carries no `reasoning_effort`, and the model returns an EMPTY
+ * `reasoning_content` (measured on minimax-m3: 0 characters across three
+ * samples, versus 282-659 with the field). Ties resolve upward, which is the
+ * mapping the sibling Kimi line documents for `medium`. A ladder that names
+ * no level (a text-only model) yields nothing to converge to.
+ */
+export function convergeWorkBuddyEffort(
+  effort: string,
+  ladder: readonly string[],
+): WorkBuddyReasoningEffort | null {
+  if (ladder.length === 0) return null
+  const rank = (value: string): number => {
+    const index = WORKBUDDY_REASONING_EFFORTS.indexOf(value.trim().toLowerCase() as WorkBuddyReasoningEffort)
+    // An unrecognised level is placed at the middle rung rather than at an
+    // extreme, so it can never silently pick the cheapest or the most costly.
+    return index === -1 ? WORKBUDDY_REASONING_EFFORTS.indexOf('high') : index
+  }
+  const target = rank(effort)
+  let best = ladder[0]!
+  for (const candidate of ladder) {
+    const distance = Math.abs(rank(candidate) - target)
+    const bestDistance = Math.abs(rank(best) - target)
+    if (distance < bestDistance || (distance === bestDistance && rank(candidate) > rank(best))) {
+      best = candidate
+    }
+  }
+  // The ladder is the model's own declaration, so a hit is always a nameable
+  // level; the cast only records what the caller's data already guarantees.
+  return best as WorkBuddyReasoningEffort
+}
 
 /** One model offered by the WorkBuddy subscription. */
 export interface WorkBuddyModelOption {

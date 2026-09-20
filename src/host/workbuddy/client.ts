@@ -29,7 +29,10 @@ import {
 } from './types.ts'
 import { FileCredentialStore, workBuddyAccountId, type WorkBuddyCredentials } from './token-store.ts'
 import type { WorkBuddyModelEntry } from './model-catalog.ts'
-import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
+import {
+  convergeWorkBuddyEffort,
+  WORKBUDDY_STANDARD_EFFORTS,
+} from '../../shared/workbuddy-contracts.ts'
 
 export interface WorkBuddyRequestOptions {
   fetchFn?: typeof fetch
@@ -211,18 +214,28 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
     // The gateway publishes the reasoning ladder in two shapes:
     //   { supportedEfforts: [...], defaultEffort: 'x' }  -> an explicit ladder
     //   { effort: 'x' }                                  -> a DEFAULT only
-    // The second shape must not be read as a one-entry ladder. Measured on
-    // `deepseek-v4.1-flash`, which reports `effort: 'high'`, every level from
-    // `minimal` to `max` is accepted; treating that field as the whole ladder
-    // silently rejected a caller's explicit choice. Such a model therefore gets
-    // the shared ladder while `effort` remains its default.
+    // The second shape is neither a one-entry ladder nor a licence to offer
+    // every level this route can name. Measured against the live gateway on
+    // `deepseek-v4.1-flash`, which reports exactly `effort: 'high'`, such a
+    // model accepts `low`/`high`/`max` and routes anything else into the
+    // nearest of them; advertising the wider set put levels in DSH's picker
+    // that the model does not have.
     const declared = Array.isArray(reasoning.supportedEfforts)
       ? reasoning.supportedEfforts.filter((effort): effort is string => typeof effort === 'string')
       : []
     const single = asString(reasoning.effort)
     const efforts = declared.length > 0
       ? declared
-      : (single === undefined ? [] : [...WORKBUDDY_REASONING_EFFORTS])
+      : (single === undefined ? [] : [...WORKBUDDY_STANDARD_EFFORTS])
+    // The gateway may name a default the ladder does not contain (measured: an
+    // effort-only model exposes `low`/`high`/`max` while defaulting to
+    // `medium`). Sending that verbatim would leave the card unable to show the
+    // level the request actually carries, so it converges onto the nearest rung
+    // — the same routing the upstream applies to such a value.
+    const declaredDefault = asString(reasoning.defaultEffort) ?? single ?? null
+    const modelDefault = declaredDefault === null || efforts.includes(declaredDefault)
+      ? declaredDefault
+      : convergeWorkBuddyEffort(declaredDefault, efforts)
 
     // The gateway reports the length it serves by default separately from the
     // maximum the model allows. This route requests no explicit length, so the
@@ -239,10 +252,11 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
       regions: [region],
       supportsImage: record.supportsImages === true,
       reasoningEfforts: efforts,
-      defaultReasoningEffort: asString(reasoning.defaultEffort) ?? single ?? null,
+      defaultReasoningEffort: modelDefault,
       canDisableThinking: reasoning.canDisableThinking === true,
       description: asString(record.descriptionZh) ?? asString(record.descriptionEn) ?? '',
-    })  }
+    })
+  }
   return models
 }
 

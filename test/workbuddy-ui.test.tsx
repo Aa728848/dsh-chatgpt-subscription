@@ -12,6 +12,8 @@ import {
 import type { WorkBuddyModelOption } from '../src/shared/workbuddy-contracts.ts'
 import type { WorkBuddyWebStatus } from '../src/shared/workbuddy-contracts.ts'
 
+import { convergeWorkBuddyEffort } from '../src/shared/workbuddy-contracts.ts'
+
 function statusWith(quota: WorkBuddyWebStatus['quota']): WorkBuddyWebStatus {
   return {
     authenticated: true,
@@ -93,11 +95,26 @@ describe('WorkBuddy settings card helpers', () => {
   })
 
   it('offers nothing when no model declares a reasoning level', () => {
-    // A text-only account must not be shown six levels that do nothing.
+    // A text-only account must not be shown levels that do nothing.
     expect(reasoningEffortChoices([
       model({ id: 'a', name: 'Alpha', reasoningEfforts: [] }),
       model({ id: 'b', name: 'Beta' }),
     ])).toEqual([])
+  })
+
+  it('converges an off-ladder level onto the nearest rung the model exposes', () => {
+    // The gateway names defaults from a wider vocabulary than the ladder it
+    // publishes, so `medium` has to land on a level the request can carry.
+    // Ties resolve upward, matching the sibling Kimi line's documented mapping.
+    const ladder = ['low', 'high', 'max']
+    expect(convergeWorkBuddyEffort('medium', ladder)).toBe('high')
+    expect(convergeWorkBuddyEffort('minimal', ladder)).toBe('low')
+    expect(convergeWorkBuddyEffort('xhigh', ladder)).toBe('max')
+    expect(convergeWorkBuddyEffort('high', ladder)).toBe('high')
+    // A narrow ladder has only itself to offer, and a text-only model has none.
+    expect(convergeWorkBuddyEffort('medium', ['high'])).toBe('high')
+    expect(convergeWorkBuddyEffort('medium', ['low'])).toBe('low')
+    expect(convergeWorkBuddyEffort('medium', [])).toBeNull()
   })
 
   it('flags a saved default that no current model supports', () => {

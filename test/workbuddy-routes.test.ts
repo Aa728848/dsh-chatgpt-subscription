@@ -95,6 +95,17 @@ const CONFIG = {
         reasoning: { effort: 'high' },
       },
       {
+        // Reports a default its own ladder does not contain, exactly as the
+        // live gateway does for minimax-m3 / kimi-k3 / cn glm-5.3.
+        id: 'minimax-m3',
+        name: 'MiniMax-M3',
+        maxAllowedSize: 200_000,
+        maxOutputTokens: 32_000,
+        supportsImages: false,
+        supportsReasoning: true,
+        reasoning: { effort: 'medium' },
+      },
+      {
         id: 'kimi-k2-thinking',
         name: 'Kimi-K2-Thinking',
         maxAllowedSize: 164_000,
@@ -131,17 +142,21 @@ describe('WorkBuddy config catalog parsing', () => {
     expect(deepseek.maxContextWindow).toBe(1_000_000)
   })
 
-  it('treats a lone `effort` field as a DEFAULT, not as the whole ladder', () => {
-    // Regression: `{ effort: 'high' }` used to become a one-entry ladder, so a
-    // caller's explicit `low` was rejected as unsupported and silently replaced
-    // by the default. Measured on `deepseek-v4.1-flash`, which reports exactly
-    // that shape, every level from `minimal` to `max` is accepted.
+  it('treats a lone `effort` field as a DEFAULT over the standard ladder', () => {
+    // Regression, both directions. `{ effort: 'high' }` first became a one-entry
+    // ladder, so a caller's explicit `low` was rejected as unsupported and
+    // silently replaced by the default; widening it instead to every level this
+    // route can name then put `minimal`/`xhigh` in DSH's picker on a model that
+    // has neither. Measured on `deepseek-v4.1-flash`, which reports exactly this
+    // shape, the model accepts `low`/`high`/`max` and routes every other value
+    // into the nearest of them.
     const models = parseConfigModels(CONFIG, 'cn')
     const deepseek = models.find((m) => m.id === 'deepseek-v4.1-flash')!
-    expect(deepseek.reasoningEfforts).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    expect(deepseek.reasoningEfforts).toEqual(['low', 'high', 'max'])
     expect(deepseek.defaultReasoningEffort).toBe('high')
     // The same shape on a text-only model behaves identically.
     const kimi = models.find((m) => m.id === 'kimi-k2-thinking')!
+    expect(kimi.reasoningEfforts).toEqual(['low', 'high', 'max'])
     expect(kimi.defaultReasoningEffort).toBe('high')
     expect(kimi.supportsImage).toBe(false)
   })
@@ -151,6 +166,22 @@ describe('WorkBuddy config catalog parsing', () => {
     const glm = models.find((m) => m.id === 'glm-5.3')!
     // A `supportedEfforts` list is authoritative and must not be widened.
     expect(glm.reasoningEfforts).toEqual(['low', 'high', 'max'])
+  })
+
+  it('converges a declared default the model ladder does not contain', () => {
+    // Regression: the gateway names a default from a wider vocabulary than the
+    // ladder it publishes. `minimax-m3` reports `effort: 'medium'` while
+    // exposing only low/high/max. Left unconverged, the level-resolution step
+    // drops it, no `reasoning_effort` is sent, and the model answers with an
+    // EMPTY `reasoning_content` (measured: 0 characters over three samples,
+    // versus 282-659 with the field).
+    const models = parseConfigModels(CONFIG, 'cn')
+    const medium = models.find((m) => m.id === 'minimax-m3')!
+    expect(medium.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(medium.defaultReasoningEffort).toBe('high')
+    // A default the ladder does contain is left exactly as declared.
+    const glm = models.find((m) => m.id === 'glm-5.3')!
+    expect(glm.defaultReasoningEffort).toBe('high')
   })
 
   it('skips image-generation tools and entries with no context window', () => {

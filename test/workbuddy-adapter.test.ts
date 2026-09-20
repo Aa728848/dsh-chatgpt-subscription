@@ -442,6 +442,36 @@ describe('WorkBuddy reasoning effort on the wire', () => {
     expect((await capture('glm-5.3', { reasoningEffort: 'max' })).reasoning_effort).toBe('max')
   })
 
+  it('sends a converged level when the catalog default is off-ladder', async () => {
+    // End-to-end guard for the whole chain: the gateway declares `medium` for a
+    // model that exposes only low/high/max. Without convergence the level-
+    // resolution step drops the default, the request carries no
+    // `reasoning_effort`, and the model answers with empty reasoning (measured
+    // on minimax-m3: 0 characters versus 282-659 with the field).
+    let body: Record<string, unknown> | null = null
+    const adapter = new WorkBuddyAdapter(
+      await makeStore(),
+      new FileModelSettingsStore(path.join(os.tmpdir(), `wb-effort-${Date.now()}.json`)),
+      undefined,
+      {
+        fetchFn: (async (url: any, init: any) => {
+          if (String(url).includes('/v2/chat/completions')) body = JSON.parse(String(init.body))
+          return sseResponse('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        }) as unknown as typeof fetch,
+        loadCatalog: async () => [{
+          ...CATALOG[0]!, id: 'off-ladder', reasoningEfforts: ['low', 'high', 'max'], defaultReasoningEffort: 'medium',
+        }],
+      },
+    )
+    const options = {
+      provider: 'workbuddy',
+      model: 'off-ladder',
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }],
+    } as unknown as GenerateOptions
+    for await (const _chunk of adapter.stream(options)) { /* drain */ }
+    expect(body!.reasoning_effort).toBe('high')
+  })
+
   it('sends no effort for a model that declares none', async () => {
     const store = await makeStore()
     const adapter = new WorkBuddyAdapter(
