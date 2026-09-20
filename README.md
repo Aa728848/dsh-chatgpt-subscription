@@ -13,6 +13,7 @@
 - [使用](#使用)
 - [Kimi Code 线路](#kimi-code-线路)
 - [Command Code 线路](#command-code-线路)
+- [WorkBuddy 线路](#workbuddy-线路)
 - [子代理模型授权](#子代理模型授权0215-起)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [升级、降级与卸载](#升级降级与卸载)
@@ -67,8 +68,20 @@
 - **`dynamically_loaded_tools`（仅 K3）已实现**：K3 接受**消息级工具声明**（`messages[].tools`），可在会话中途用「无 `content` 字段的 system 消息」注入完整工具定义。官方把「保持顶层 `tools` 字节稳定」列为该特性的目的之一——中途修改/删除已发出的声明会使缓存从该点起失效，而在末尾追加不影响已缓存前缀，所以这是提升缓存命中的正道。声明按请求重发（服务端不保留），且仅在模型声明该能力时发送；
 - 额度卡片区分 **5 小时 / 7 天 / 月度（会员共享池）/ 月度（Kimi Code 池）** 四个窗口并显示重置时间，另可显示加油包余额；设置页为「设置 → 订阅服务 → Kimi Code」标签页，对话输入框右侧有该线路的额度胶囊。
 
-**设置页**
+**WorkBuddy 线路**
 
+- 注册 `workbuddy` Provider，接入腾讯 **WorkBuddy / CodeBuddy 订阅**。与其它线路不同，它**不保存自己的凭据**：直接读取 CodeBuddy 桌面端已登录的 `*.info` 凭据文件，因此桌面上登录过就能直接用；token 只留在 Host 进程内，不进入浏览器；
+- **续期后原子写回**原凭据文件（只改 `auth` 块），以免桌面端掉线；同一进程内的并发调用**共用一次刷新**，因为 refresh token 会轮换，两次并发刷新会互相作废；
+- 上游是 OpenAI 兼容的 `POST {backend}/v2/chat/completions`，但有两条硬约束：**只支持流式**（`stream:false` → 400 `code 11101`），且**首条消息必须是 system**（否则国际区返回 400 `code 11128`）。因此请求构造器始终发送 `stream:true`，并在调用方没给系统提示时补一条中性的，避免手搓的一次性请求踩到这条规则；
+- **区域是凭据属性，不是请求属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，因此模型选择器**按账号区域过滤**；
+- **模型目录取自网关自己的 `/v3/config`**（官方 CLI 启动时读的就是它）：每个模型的真实上下文上限、输出上限、是否接受图片、以及可用的思考档位都在这里，不做任何按模型名猜测。`/v1/models` 在这条线路上是 404，所以此前只能靠内置表——现在内置表只作为离线兜底，且是**从真实 `/v3/config` 转录**的（早期手写版本把 `glm-5.3`、`kimi-k3` 的窗口猜成 200K/256K，实际都是 1M）；
+- 目录同时区分**默认服务的上下文长度**与**模型上限**（如 `deepseek-v4.1-flash` 默认 300K、最大 1M）。本线路不发送显式长度参数，所以 DSH 的压缩与溢出判断按**默认服务长度**计算，不会让请求越过后端实际接受的窗口；
+- 思考档位**逐模型**取目录声明值，且优先使用目录给出的默认档（与官方 CLI 一致）；用户配置的档位若不在该模型声明的集合内会被忽略而不是发出去（上游对不支持的档位返回 `code 11150`）；
+- **瞬时失败按错误类别重试**（`src/host/workbuddy/adapter.ts`）。上游 5xx 与 `code 11134` 归为 `SERVER` 并走有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；额度耗尽（429 / `code 6004` / `code 14003`，其中 6004 的正文带重置时刻）归为 `RATE_LIMIT` 并遵守 `Retry-After`；而 401/403、跨区模型、不可用图片、历史形状错误都**不重试**，并给出可操作的提示（换模型 / 换图片 / 重新登录桌面端）；
+- **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛出错误而不是把半截文本当成完整回答；
+- 额度来自 `/billing/meter/get-user-resource`，卡片展示套餐名、本周期已用/上限、剩余额度与重置时间；设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有该线路的额度胶囊。
+
+**设置页**
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
 - 子代理的模型与思考深度沿用 DSH 自身设置：**设置 → Subagent** 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 `agent-default-model` 设置提供；
 - 最大嵌套深度不在本插件设置内，由 DSH 侧决定：0.1.5 及以前是 preset 中 `tool-subagent` 行的 `maxDepth`（默认 3），0.1.6 起改由 `subagent` 服务的设置项提供（默认 1）；`provider-managed` 表示把预算交给进程外提供方；
@@ -288,9 +301,56 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 与 `codex-chatgpt` 线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
 
+## WorkBuddy 线路
+
+1. 先在 **CodeBuddy 桌面端**登录（插件复用它的登录态，不另做登录流程）；
+2. 重启 `dsh web`；
+3. 打开 **设置 → WorkBuddy**，确认卡片已识别到凭据（未识别到时点「重新扫描」）；
+4. 按需勾选模型、设置默认思考深度与上下文窗口。
+
+`workbuddy` 会像其他 Provider 一样出现在 DSH 模型选择器中。**上下文窗口**默认取网关 `/v3/config` 声明的**默认服务长度**，可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `300K` / `200000` 等写法）；**默认思考深度**逐模型生效，且模型的可用档位来自目录声明——档位不在该模型集合内时不会被发送。
+
+**凭据目录**按平台解析，可用 `CODEBUDDY_AUTH_DIR` 覆盖（与官方工具链一致）：
+
+| 平台 | 默认目录 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth` |
+| macOS | `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth` |
+| Linux | `$XDG_DATA_HOME/CodeBuddyExtension/Data/Public/auth`（默认 `~/.local/share`） |
+
+目录里通常同时存在当前凭据与若干带时间戳的历史快照。插件**优先取 `workbuddy-desktop.info` / `codebuddy-desktop.info` 这类规范文件名**，其余按 token 剩余有效期取最长的一个——只按文件 mtime 选会选到过期快照。卡片会列出目录里所有可用凭据，标明各自区域。
+
+**上游接口**：
+
+| 用途 | 路径（前缀为区域后端） |
+| --- | --- |
+| 模型生成 | `POST /v2/chat/completions`（仅流式） |
+| 模型目录 | `GET /v3/config` |
+| 令牌续期 | `POST /v2/plugin/auth/token/refresh` |
+| 额度 | `POST /billing/meter/get-user-resource` |
+
+两区后端分别是 `https://copilot.tencent.com`（国区）与 `https://www.workbuddy.ai` / `https://www.codebuddy.ai`（国际区）。**请求身份统一使用 CLI UA**（`CLI/2.63.2 CodeBuddy/2.63.2`）：实测 `CodeBuddyIDE` 被 `/v3/config` 以 400 `code 12403` 拒绝，国际区对话端点也直接返回 401，因此不做按端点切换。
+
+### 插件路由（WorkBuddy）
+所有路由都以 `/workbuddy/api` 为前缀：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/status` | 账号、额度、模型目录与路由归属（每次都重扫凭据目录） |
+| GET | `/accounts` | 列出凭据目录中所有可用账号（不含 token） |
+| POST | `/rescan` | 清缓存并重扫凭据目录 |
+| GET / POST | `/quota` | 强制刷新额度（POST）或读取当前状态（GET） |
+| GET / POST | `/models`、`/settings` | 读取或更新勾选模型、上下文窗口与默认思考深度 |
+| POST | `/catalog/refresh` | 强制刷新网关模型目录 |
+| POST | `/connection/test` | 用已识别凭据向上游发一次最小请求测试连接 |
+
+与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
+
 ## 安全边界
 
 Antigravity 的 access token / refresh token 使用独立的系统凭据存储：Windows 使用 CurrentUser DPAPI（`$DSH_HOME/storages/antigravity-oauth.json.dpapi`），macOS 使用登录钥匙串，Linux 使用 Secret Service。macOS / Linux 的服务名为 `dsh-antigravity`，账号键按旧凭据文件的绝对路径生成，隔离不同的 `DSH_HOME`。
+
+**WorkBuddy 线路不保存任何凭据**：它读取的是 CodeBuddy 桌面端自己的登录态文件，token 只存在于 Host 进程内存中，从不进入浏览器（`/workbuddy/api` 的所有响应都不含 `accessToken` / `refreshToken`，仅有测试锁定这一点）。唯一的写入是把续期后的 token **原子写回原文件**，且只改 `auth` 块、保留桌面端自己的其余字段——目的是不让桌面端掉线。该写入失败不影响本次请求。
 
 升级后首次访问 Antigravity 凭据时，会读取旧 `storages/antigravity-oauth.json`，加密保存并读回校验；成功后删除旧 JSON，通常无需重新登录。失败会保留旧文件并报告错误，不会回退到明文存储。注销同时清理旧文件和新凭据。Linux 需要 `secret-tool`（libsecret 工具包）及可用、已解锁的 Secret Service 钥匙环；无桌面服务的主机也需要配置该服务。系统凭据存储保护落盘数据，不防御当前用户下已获权限的进程。
 

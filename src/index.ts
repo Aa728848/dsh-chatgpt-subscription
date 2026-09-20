@@ -53,6 +53,14 @@ import {
   registerKimiCodePreferenceStore,
 } from './host/kimi-code/token-store.ts'
 import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
+import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
+import { registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
+import {
+  FileCredentialStore as WorkBuddyCredentialStore,
+  FileModelSettingsStore as WorkBuddyModelSettingsStore,
+  registerWorkBuddyPreferenceStore,
+} from './host/workbuddy/token-store.ts'
+import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
@@ -174,6 +182,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const kimiCodeAccountPool = new KimiCodeAccountPool({ store: kimiCodeStore })
   const kimiCodeModelSettings = new KimiCodeModelSettingsStore()
   const kimiCodePreferences = registerKimiCodePreferenceStore(ctx.settings, kimiCodeModelSettings)
+
+  const workBuddyStore = new WorkBuddyCredentialStore()
+  const workBuddyModelSettings = new WorkBuddyModelSettingsStore()
+  const workBuddyPreferences = registerWorkBuddyPreferenceStore(ctx.settings, workBuddyModelSettings)
 
   // The allowlist a Session recorded outranks the current settings document,
   // because the built-in delegation tool snapshot it when the Session started.
@@ -367,6 +379,52 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       kimiCodeAccountPool,
     )
 
+    // WorkBuddy is the CodeBuddy subscription: this plugin reads the desktop
+    // client's own credential files, so the route is claimed like the others
+    // (when free) and reported when another adapter family already owns the id.
+    const workBuddyAdapter = new WorkBuddyAdapter(
+      workBuddyStore,
+      workBuddyModelSettings,
+      workBuddyPreferences,
+      { fetchFn: proxyFetch, attachments: ctx.attachments },
+    )
+    let workBuddyRegistration: AdapterRegistrationHandle | undefined
+    let workBuddyConflict: string | null = null
+    const claimWorkBuddyRoute = (): void => {
+      if (workBuddyRegistration !== undefined) return
+      try {
+        workBuddyRegistration = ctx.llm.registerAdapter([WORKBUDDY_PROVIDER_ID], workBuddyAdapter)
+        if (workBuddyConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] ${WORKBUDDY_PROVIDER_NAME} route "${WORKBUDDY_PROVIDER_ID}" is now served by this plugin`)
+        }
+        workBuddyConflict = null
+      } catch (error) {
+        workBuddyConflict = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(
+          `[dsh-chatgpt-subscription] provider route "${WORKBUDDY_PROVIDER_ID}" is already owned by another adapter; `
+          + `${WORKBUDDY_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${workBuddyConflict})`,
+        )
+      }
+    }
+    claimWorkBuddyRoute()
+    const workBuddyRouteWatch = typeof ctx.on === 'function'
+      ? ctx.on('llm/adapters-updated', () => {
+          claimWorkBuddyRoute()
+        })
+      : undefined
+
+    const disposeWorkBuddyRoutes = registerWorkBuddyRoutes(
+      ctx,
+      workBuddyStore,
+      workBuddyModelSettings,
+      workBuddyPreferences,
+      {
+        fetchFn: proxyFetch,
+        serving: () => workBuddyRegistration !== undefined,
+        conflict: () => workBuddyConflict,
+      },
+    )
+
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -483,6 +541,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(kimiCodeRouteWatch)
       kimiCodeRegistration?.()
       kimiCodeRegistration = undefined
+      disposeWorkBuddyRoutes()
+      releaseHandle(workBuddyRouteWatch)
+      workBuddyRegistration?.()
+      workBuddyRegistration = undefined
       oauth.dispose()
       proxyManager.dispose()
     }
@@ -626,6 +688,33 @@ export {
   getCachedQuota as getKimiCodeQuota,
 } from './host/kimi-code/client.ts'
 export { getKimiCodeWebStatus, registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
+export { WorkBuddyAdapter, classifyFailure as classifyWorkBuddyFailure } from './host/workbuddy/adapter.ts'
+export {
+  FileCredentialStore as WorkBuddyCredentialStore,
+  FileModelSettingsStore as WorkBuddyModelSettingsStore,
+  codeBuddyAuthDir,
+  modelSettingsPath as workBuddyModelSettingsPath,
+  parseCredentialFile as parseWorkBuddyCredential,
+  registerWorkBuddyPreferenceStore,
+  scanCredentials as scanWorkBuddyCredentials,
+} from './host/workbuddy/token-store.ts'
+export {
+  fetchAccountQuota as fetchWorkBuddyQuota,
+  clearCachedQuota as clearWorkBuddyQuota,
+  getCachedQuota as getWorkBuddyQuota,
+  clearCachedCatalog as clearWorkBuddyCatalog,
+  loadConfigCatalog as loadWorkBuddyModels,
+  parseConfigModels as parseWorkBuddyConfigModels,
+  refreshCredentials as refreshWorkBuddyCredentials,
+  parseBilling as parseWorkBuddyBilling,
+} from './host/workbuddy/client.ts'
+export { getWorkBuddyWebStatus, registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
+export {
+  FALLBACK_MODELS as WORKBUDDY_MODELS,
+  WORKBUDDY_MODEL_IDS,
+  resolveWorkBuddyModel,
+  modelsForRegion as workBuddyModelsForRegion,
+} from './host/workbuddy/model-catalog.ts'
 export {
   KimiCodeAccountPool,
   kimiCodePoolPath,

@@ -1,0 +1,410 @@
+import {
+  LlmAdapter,
+  LlmError,
+  ReasoningEffortId,
+  resolveRetryPolicy,
+  type GenerateOptions,
+  type LlmModelInfo,
+  type LlmProviderInfo,
+  type LlmResolvedModelInfo,
+  type PreparedAdapterCall,
+  type ResolvedRetryPolicy,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-attachment'
+import {
+  CHAT_PATH,
+  CHAT_TIMEOUT_MS,
+  DEFAULT_CONTEXT_WINDOW,
+  PROVIDER_ID,
+  PROVIDER_NAME,
+  STREAM_IDLE_TIMEOUT_CODE,
+  STREAM_IDLE_TIMEOUT_MS,
+} from './types.ts'
+import {
+  FileCredentialStore,
+  FileModelSettingsStore,
+  type WorkBuddyModelSettings,
+  type WorkBuddyPreferenceStore,
+} from './token-store.ts'
+import {
+  FALLBACK_MODELS,
+  defaultContextWindowFor,
+  maxOutputTokensFor,
+  modelsForRegion,
+  resolveWorkBuddyModel,
+  workBuddyModelSupportsImage,
+  workBuddyReasoningEfforts,
+  type WorkBuddyModelEntry,
+} from './model-catalog.ts'
+import { loadConfigCatalog, workBuddyHeaders, refreshCredentials } from './client.ts'
+import {
+  assertStreamComplete,
+  buildChatRequest,
+  closeStream,
+  createStreamState,
+  offloadOldestRequestImages,
+  processStreamLine,
+  resolveRequestImages,
+  type AttachmentImageReader,
+} from './mapper.ts'
+import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { retryAfterMs } from '../wire-auth.ts'
+import type { WorkBuddyCredentials } from './token-store.ts'
+
+/**
+ * Transient-failure retry policy for the `workbuddy` route.
+ *
+ * The subscription proxies to several upstream vendors, so a call can fail with
+ * an upstream 5xx while the account stays perfectly usable. Those are
+ * classified as `SERVER` and given bounded backoff. Deliberately outside the
+ * set: `INVALID_CREDENTIAL` (a rejected token fails identically every attempt)
+ * and `ABORTED` (the caller already cancelled).
+ */
+const RETRY_POLICY = resolveRetryPolicy({
+  mode: 'normal',
+  maxRetries: 3,
+  retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+  backoff: { initialDelayMs: 1_500, maxDelayMs: 15_000, jitterRatio: 0.2 },
+}, 'dsh-chatgpt-subscription.workbuddy.retry')
+
+/**
+ * Effort this route materializes when the caller names none.
+ *
+ * Preference order: the user's configured level when the model accepts it,
+ * otherwise the level the gateway's own catalog declares for that model (the
+ * same default the official CLI applies), otherwise nothing — which leaves the
+ * provider's own default in charge. A configured level the model does not
+ * accept is ignored rather than sent, since the endpoint rejects an unsupported
+ * level with `code 11150`.
+ */
+export function resolveDefaultReasoningEffort(
+  efforts: readonly string[],
+  configuredEffort?: string | null,
+  modelDefaultEffort?: string | null,
+): ReasoningEffortId | undefined {
+  if (configuredEffort && efforts.includes(configuredEffort)) {
+    return ReasoningEffortId(configuredEffort)
+  }
+  if (modelDefaultEffort && efforts.includes(modelDefaultEffort)) {
+    return ReasoningEffortId(modelDefaultEffort)
+  }
+  return undefined
+}
+
+export interface WorkBuddyAdapterOptions {
+  fetchFn?: typeof fetch
+  attachments?: AttachmentImageReader
+  /** Live catalog loader seam; defaults to the gateway `/v3/config` call. */
+  loadCatalog?: (credentials: WorkBuddyCredentials) => Promise<WorkBuddyModelEntry[]>
+}
+
+export class WorkBuddyAdapter extends LlmAdapter {
+  constructor(
+    private readonly store = new FileCredentialStore(),
+    private readonly modelSettings = new FileModelSettingsStore(),
+    private readonly preferences?: WorkBuddyPreferenceStore,
+    private readonly options: WorkBuddyAdapterOptions = {},
+  ) {
+    super()
+  }
+
+  providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: PROVIDER_NAME }
+  }
+
+  providerRetryPolicy(): ResolvedRetryPolicy {
+    return RETRY_POLICY
+  }
+
+  imageRequestPricing(): undefined {
+    return undefined
+  }
+
+  private settings(): Promise<WorkBuddyModelSettings> {
+    return this.preferences ? Promise.resolve(this.preferences.status()) : this.modelSettings.read()
+  }
+
+  /**
+   * Catalog for the picker: the live gateway listing when reachable, the
+   * shipped table otherwise.
+   *
+   * The gateway is the authority on capabilities, so its answer replaces the
+   * fallback rather than merging with it — a model whose context window changed
+   * upstream must not keep a stale local value.
+   */
+  private async catalog(credentials: WorkBuddyCredentials): Promise<readonly WorkBuddyModelEntry[]> {
+    const load = this.options.loadCatalog
+      ?? ((current: WorkBuddyCredentials) => loadConfigCatalog(current, { fetchFn: this.options.fetchFn }))
+    const live = await load(credentials).catch(() => [])
+    return live.length > 0 ? live : FALLBACK_MODELS
+  }
+
+  /**
+   * Models the picker may offer.
+   *
+   * The catalog is filtered by the account's own region: asking a region for a
+   * model it does not serve answers 400 `code 11102`, so offering one would
+   * hand the user a model that cannot work.
+   */
+  async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
+    const prov = provider || PROVIDER_ID
+    const settings = await this.settings()
+    if (settings.enabled === false) return []
+    const credentials = await this.store.read()
+    if (credentials === null) return []
+
+    const catalog = await this.catalog(credentials)
+    const available = modelsForRegion(credentials.region, catalog)
+    const enabled = new Set(settings.enabledModelIds)
+
+    return available
+      .filter((model) => enabled.has(model.id))
+      .map((model) => ({
+        provider: prov,
+        id: model.id,
+        name: model.name,
+        description: model.description || undefined,
+        inputModalities: model.supportsImage ? ['text', 'image'] as const : ['text'] as const,
+      }))
+  }
+
+  async resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    if (signal?.aborted) throw new LlmError('WorkBuddy model resolution aborted', 'ABORTED')
+    const settings = await this.settings()
+    const credentials = await this.store.read()
+    const catalog = credentials === null ? FALLBACK_MODELS : await this.catalog(credentials)
+    const entry = resolveWorkBuddyModel(modelId, catalog)
+    const efforts = workBuddyReasoningEfforts(modelId, catalog)
+    const defaultEffortId = resolveDefaultReasoningEffort(
+      efforts,
+      settings.defaultReasoningEffort,
+      entry.defaultReasoningEffort,
+    )
+    const override = settings.contextWindowOverrides[modelId]
+    const contextWindow = typeof override === 'number' && Number.isFinite(override) && override > 0
+      ? override
+      : defaultContextWindowFor(modelId, catalog)
+
+    return {
+      provider,
+      id: modelId,
+      name: entry.id === modelId ? entry.name : modelId,
+      inputModalities: entry.supportsImage ? ['text', 'image'] : ['text'],
+      context: { contextWindow: contextWindow || DEFAULT_CONTEXT_WINDOW },
+      defaultMaxTokens: maxOutputTokensFor(modelId, catalog),
+      // No `systemPromptUpdate: 'in-history'`: the wire carries the system
+      // prompt as the mandatory first message, never inside the history, so this
+      // route cannot read a later system message as the effective prompt.
+      ...(efforts.length === 0
+        ? {}
+        : {
+            reasoning: {
+              efforts: efforts.map((effort) => ({ id: ReasoningEffortId(effort), name: effort })),
+              ...(defaultEffortId === undefined ? {} : { defaultEffort: defaultEffortId }),
+            },
+          }),
+    }
+  }
+
+  async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    return {
+      model: await this.resolveModel(provider, model, signal),
+      stream: (options) => this.stream(options),
+    }
+  }
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const settings = await this.settings()
+    const configured = settings.defaultReasoningEffort
+    const effort = options.reasoningEffort ?? configured ?? undefined
+    const effectiveOptions: GenerateOptions = effort === undefined || effort === null
+      ? options
+      : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
+
+    yield* wrapStreamWithWatchdog(
+      (watchdogSignal) => this.requestStream(effectiveOptions, watchdogSignal),
+      options.signal,
+      STREAM_IDLE_TIMEOUT_MS,
+      STREAM_IDLE_TIMEOUT_CODE,
+      PROVIDER_NAME,
+    )
+  }
+
+  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+    const fetchFn = this.options.fetchFn ?? fetch
+    const stored = await this.store.read()
+    if (stored === null) {
+      throw new LlmError(
+        `Not signed in to ${PROVIDER_NAME}. Sign in with the CodeBuddy desktop client; `
+        + 'this route reads its credential from the local auth directory.',
+        'MISSING_CREDENTIAL',
+      )
+    }
+    // The refresh token rotates, so an expired token is renewed through the
+    // store's shared path rather than here; a concurrent call reuses the same
+    // refresh instead of invalidating it.
+    const credentials = await this.store.ensureFresh(stored, (current) => refreshCredentials(current, { fetchFn }))
+
+    const requestOptions = offloadOldestRequestImages(options)
+    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    const body = JSON.stringify(buildChatRequest(requestOptions, images))
+    const headers = workBuddyHeaders(credentials, { accept: 'text/event-stream' })
+
+    let response: Response
+    try {
+      response = await fetchFn(`${credentials.backend}${CHAT_PATH}`, {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(CHAT_TIMEOUT_MS)]),
+      })
+    } catch (error) {
+      if (signal.aborted) throw new LlmError('WorkBuddy request aborted', 'ABORTED', { cause: error })
+      throw new LlmError(
+        `WorkBuddy request failed: ${error instanceof Error ? error.message : String(error)}`,
+        'TRANSPORT',
+        { cause: error },
+      )
+    }
+
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 600)
+      throw classifyFailure(response.status, detail, response.headers)
+    }
+
+    if (response.body === null) throw new LlmError('WorkBuddy returned an empty response body', 'PROVIDER_ERROR')
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    const state = createStreamState()
+    let buffer = ''
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          for (const chunk of processStreamLine(line, state)) yield chunk
+          if (state.finished) return
+        }
+      }
+
+      buffer += decoder.decode()
+      if (buffer.trim() !== '') {
+        for (const line of buffer.split('\n')) {
+          for (const chunk of processStreamLine(line, state)) yield chunk
+        }
+      }
+      if (state.finished) return
+
+      // A connection that ends without a terminal event is a truncated stream,
+      // not a completed answer; the watchdog turns a stalled one into an abort.
+      assertStreamComplete(state)
+      for (const chunk of closeStream(state)) yield chunk
+    } finally {
+      void reader.cancel().catch(() => undefined)
+    }
+  }
+}
+
+/**
+ * Map one failed HTTP response onto a DSH failure.
+ *
+ * The subscription reports its own conditions inside a JSON `code` while the
+ * status line stays generic, so the body is read for the specific cases the
+ * status alone cannot express — notably the quota signal, whose message carries
+ * the instant the allowance resets.
+ */
+export function classifyFailure(
+  status: number,
+  detail: string,
+  headers?: Headers,
+): LlmError {
+  const code = readErrorCode(detail)
+
+  if (status === 401 || status === 403) {
+    return new LlmError(
+      `${PROVIDER_NAME} rejected the stored credential (${status}). `
+      + `Sign in again with the CodeBuddy desktop client.${detail ? ` ${detail}` : ''}`,
+      'INVALID_CREDENTIAL',
+      { status },
+    )
+  }
+
+  // Quota exhaustion and rate limiting both arrive as 429, and the body says
+  // which; either way the account cannot serve this request right now, so the
+  // failure is retryable under the bounded policy with the reset instant the
+  // service reported.
+  if (status === 429 || code === 6004 || code === 14003) {
+    const after = headers ? retryAfterMs(headers) : undefined
+    return new LlmError(
+      `${PROVIDER_NAME} rate limit or plan quota reached. Check the quota card in Settings > WorkBuddy.`
+      + `${detail ? ` ${detail}` : ''}`,
+      'RATE_LIMIT',
+      { status: status === 429 ? 429 : undefined, ...(after === undefined ? {} : { providerRetryAfterMs: after }) },
+    )
+  }
+
+  // `code 11102` covers two measured conditions that share one code: the model
+  // is not served in this account's region, or the account's plan is not
+  // entitled to it. Retrying cannot help either way, and the fix is the same —
+  // pick a different model — so both are reported together rather than guessed
+  // apart.
+  if (code === 11102) {
+    return new LlmError(
+      `${PROVIDER_NAME} does not serve this model for the signed-in account: it is either `
+      + `unavailable in the account's region or not included in its plan. `
+      + `Pick a different model in Settings > WorkBuddy.${detail ? ` ${detail}` : ''}`,
+      'PROVIDER_ERROR',
+      { status },
+    )
+  }
+
+  // An unreadable or unsupported image is a request problem, not a transient
+  // one; the caller must drop or replace the attachment.
+  if (code === 11135 || code === 11133) {
+    return new LlmError(
+      `${PROVIDER_NAME} rejected the request parameters (${code}). `
+      + `An image may be unsupported by this model or unreadable.${detail ? ` ${detail}` : ''}`,
+      'PROVIDER_ERROR',
+      { status },
+    )
+  }
+
+  if (code === 11128) {
+    return new LlmError(
+      `${PROVIDER_NAME} rejected the message history: the conversation must open with a system prompt.`
+      + `${detail ? ` ${detail}` : ''}`,
+      'PROVIDER_ERROR',
+      { status },
+    )
+  }
+
+  if (status >= 500 || code === 11134) {
+    return new LlmError(
+      `${PROVIDER_NAME} upstream server error (${status}): ${detail || 'No response'}`,
+      'SERVER',
+      { status },
+    )
+  }
+
+  return new LlmError(
+    `${PROVIDER_NAME} API error (${status}): ${detail || 'No response'}`,
+    'PROVIDER_ERROR',
+    { status },
+  )
+}
+
+/** Read the subscription's own numeric error code out of a response body. */
+export function readErrorCode(detail: string): number | null {
+  const matched = /"code"\s*:\s*(\d+)/.exec(detail)
+  if (matched === null) return null
+  const parsed = Number(matched[1])
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+export { PROVIDER_ID, PROVIDER_NAME }

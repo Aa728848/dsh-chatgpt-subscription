@@ -24,6 +24,9 @@ import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from './command-cod
 import { KimiCodeComposerQuota } from './kimi-code/KimiCodeComposerQuota.tsx'
 import { dictionaries as kimiCodeDicts, NS_KIMI_CODE } from './kimi-code/locales.ts'
 import { installKimiCodeStyles } from './kimi-code/styles.ts'
+import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
+import { dictionaries as workBuddyDicts, NS_WORKBUDDY } from './workbuddy/locales.ts'
+import { installWorkBuddyStyles } from './workbuddy/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -32,6 +35,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-antigravity': any
     'dsh-command-code': any
     'dsh-kimi-code': any
+    'dsh-workbuddy': any
   }
 }
 
@@ -51,6 +55,11 @@ export function apply(ctx: ClientContext): void {
     installKimiCodeStyles()
     return () => {}
   }, 'dsh-kimi-code: styles')
+  ctx.effect(() => ctx.locale.register(NS_WORKBUDDY, workBuddyDicts), 'dsh-workbuddy: dictionaries')
+  ctx.effect(() => {
+    installWorkBuddyStyles()
+    return () => {}
+  }, 'dsh-workbuddy: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -151,6 +160,21 @@ export function apply(ctx: ClientContext): void {
       }
     },
   }, KimiCodeComposerQuota))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'workbuddy-quota',
+    order: 39,
+    locale: NS_WORKBUDDY,
+    inject: (sessionId) => {
+      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
+      return {
+        directory: directory.store,
+        loadModelDirectory: () => {
+          void directory.load().catch(() => undefined)
+        },
+      }
+    },
+  }, WorkBuddyComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,
