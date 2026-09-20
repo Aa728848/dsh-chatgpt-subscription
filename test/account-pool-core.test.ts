@@ -299,7 +299,7 @@ describe('AccountPoolCore', () => {
 
   it('reports a provider description of where credentials live', () => {
     const pool = build()
-    expect(pool.path()).toMatch(/toy-pool\.json/)
+    expect(pool.path()).toMatch(/toy-pool\.json\.dpapi$|^Keychain: dsh-toy-pool\/|^Secret Service: dsh-toy-pool\//)
   })
 
   it('deletes an account, promoting the next one and clearing the mirror when empty', async () => {
