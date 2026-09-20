@@ -21,6 +21,7 @@ import {
   fetchAccountQuota,
   getCachedQuota,
   loadConfigCatalog,
+  refreshCredentials,
   workBuddyHeaders,
 } from './client.ts'
 import {
@@ -40,7 +41,7 @@ import type {
   WorkBuddyWebStatus,
 } from '../../shared/workbuddy-contracts.ts'
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
-import { beginWebLogin, getWebLoginStatus } from './oauth.ts'
+import { beginWebLogin, getWebLoginStatus, resetWebLogin } from './oauth.ts'
 
 /** Membership test for one posted reasoning level; the set is catalog-wide. */
 function isWorkBuddyReasoningEffort(value: unknown): value is (typeof WORKBUDDY_REASONING_EFFORTS)[number] {
@@ -218,7 +219,7 @@ export function registerWorkBuddyRoutes(
 ): () => void {
   const fetchFn = options.fetchFn ?? fetch
 
-  return ctx.webServer.register({
+  const disposeRoutes = ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
     handler: async (request: IncomingMessage, response: ServerResponse) => {
@@ -315,6 +316,13 @@ export function registerWorkBuddyRoutes(
 
         if (path === 'quota') {
           if (method !== 'GET' && method !== 'POST') return sendMethodNotAllowed(response)
+          // A POST forces an upstream allowance read and can rotate the stored
+          // refresh token, so it carries the same same-origin requirement as
+          // every other mutating route. A same-origin GET sends no Origin header
+          // and therefore stays open, matching the other provider lines.
+          if (method === 'POST' && !isSameOriginMutation(request)) {
+            return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          }
           const settings = preferences ? preferences.status() : await modelSettings.read()
           await fetchAccountQuota(store, fetchFn, true, settings.selectedAccountId, settings.hiddenAccountIds)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
@@ -325,8 +333,11 @@ export function registerWorkBuddyRoutes(
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const settings = preferences ? preferences.status() : await modelSettings.read()
-          const credentials = await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
-          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'The selected CodeBuddy account was not found.' })
+          const stored = await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
+          if (stored === null) return sendJson(response, 400, { ok: false, error: 'The selected CodeBuddy account was not found.' })
+          // A stored token can be past its expiry; probing with it would report
+          // a false 401 for an account whose refresh token is still good.
+          const credentials = await store.ensureFresh(stored, (current) => refreshCredentials(current, { fetchFn }))
 
           const model = modelsForRegion(credentials.region)[0]?.id
           if (model === undefined) {
@@ -423,8 +434,9 @@ export function registerWorkBuddyRoutes(
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const settings = preferences ? preferences.status() : await modelSettings.read()
-          const credentials = await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
-          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'The selected CodeBuddy account was not found.' })
+          const stored = await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
+          if (stored === null) return sendJson(response, 400, { ok: false, error: 'The selected CodeBuddy account was not found.' })
+          const credentials = await store.ensureFresh(stored, (current) => refreshCredentials(current, { fetchFn }))
           clearCachedCatalog()
           await loadConfigCatalog(credentials, { fetchFn, force: true }).catch(() => undefined)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
@@ -450,6 +462,12 @@ export function registerWorkBuddyRoutes(
       }
     },
   })
+  // A browser login polls the gateway for up to five minutes; it must not
+  // outlive the routes and the card that reported it.
+  return () => {
+    resetWebLogin()
+    disposeRoutes()
+  }
 }
 
 export {

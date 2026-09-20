@@ -581,9 +581,24 @@ export class FileCredentialStore {
       if (credentials.refreshToken !== '') parsed.auth.refreshToken = credentials.refreshToken
       parsed.auth.expiresAt = credentials.expiresAt
       parsed.auth.lastRefreshTime = Date.now()
+      // The IDE keeps this file private. A temporary created with the process
+      // umask and renamed over it would widen its permissions on POSIX, so the
+      // original mode is carried over onto the replacement.
+      const sourceMode = process.platform === 'win32'
+        ? undefined
+        : (await fs.stat(credentials.sourceFile)).mode & 0o777
       const tmp = `${credentials.sourceFile}.tmp.${process.pid}`
-      await fs.writeFile(tmp, JSON.stringify(parsed, null, 2), 'utf8')
-      await fs.rename(tmp, credentials.sourceFile)
+      try {
+        await fs.writeFile(tmp, JSON.stringify(parsed, null, 2), {
+          encoding: 'utf8',
+          ...(sourceMode === undefined ? {} : { mode: sourceMode }),
+        })
+        await fs.rename(tmp, credentials.sourceFile)
+      } finally {
+        // The temporary holds the same tokens, so a failed rename must not
+        // leave it behind next to the IDE's file.
+        await fs.unlink(tmp).catch(() => undefined)
+      }
       // The write changed the file, so the cached mtime must follow it or the
       // very next read would consider the cache stale and rescan.
       const stats = await fs.stat(credentials.sourceFile)

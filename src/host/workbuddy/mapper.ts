@@ -559,6 +559,16 @@ export function processStreamLine(line: string, state: WorkBuddyStreamState): St
   if (!isRecord(chunk)) return []
   const out: StreamChunk[] = []
 
+  // A failure can arrive as an SSE frame rather than an HTTP status; without
+  // this the severed reply would be flushed as a clean stop.
+  const errorPayload = isRecord(chunk.error) ? chunk.error : undefined
+  if (errorPayload !== undefined) {
+    throw new LlmError(
+      `WorkBuddy stream error: ${asString(errorPayload.message) ?? 'unknown error'}`,
+      'PROVIDER_ERROR',
+    )
+  }
+
   const usage = isRecord(chunk.usage) ? chunk.usage : undefined
   if (usage) {
     state.sawUsage = true
@@ -643,13 +653,19 @@ function applyToolDelta(entry: Record<string, unknown>, state: WorkBuddyStreamSt
   }
 
   const argsDelta = asString(fn.arguments) ?? ''
+  if (argsDelta !== '') call.arguments += argsDelta
+
+  // The turn is a tool use as soon as the call starts, not only once an
+  // argument arrives: a no-argument tool would otherwise leave `hasToolCall`
+  // false and settle as a plain stop, so the runner never executes it. The
+  // name and id also have to reach the caller on the opening delta.
   if (!call.started) {
     call.started = true
+    state.hasToolCall = true
+    state.hasContent = true
     out.push({ type: 'block-start', index: call.blockIndex, blockType: 'tool-call' })
   }
-  if (argsDelta !== '') {
-    call.arguments += argsDelta
-    state.hasToolCall = true
+  if (argsDelta !== '' || out.length > 0) {
     out.push({
       type: 'tool-call-delta',
       index: call.blockIndex,

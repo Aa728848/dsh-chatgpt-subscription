@@ -237,6 +237,24 @@ describe('WorkBuddy credential refresh bookkeeping', () => {
     expect(onDisk.auth.refreshToken).toBe('rotated')
     // Account bookkeeping the plugin does not own is preserved.
     expect(onDisk.account.uid).toBe('uid-1')
+    // The replacement temporary holds the same tokens, so it must be gone.
+    expect((await fs.readdir(dir)).filter((name) => name.includes('.tmp.'))).toEqual([])
+  })
+  it('keeps the credential file private when a refresh is written back', async () => {
+    if (process.platform === 'win32') return
+    const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile({ expiresAt: Date.now() - 1000 }) })
+    const file = path.join(dir, 'workbuddy-desktop.info')
+    await fs.chmod(file, 0o600)
+    const store = new FileCredentialStore(dir)
+    const stale = (await store.read())!
+    await store.ensureFresh(stale, async (current) => ({
+      ...current,
+      accessToken: 'refreshed',
+      expiresAt: Date.now() + 3_600_000,
+    }))
+    // The replacement is renamed over the IDE's own file, so it must carry the
+    // original mode rather than the process umask.
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
   })
 
   it('shares one refresh between concurrent callers', async () => {

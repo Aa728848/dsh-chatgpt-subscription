@@ -263,6 +263,26 @@ describe('WorkBuddy stream decoding', () => {
     const end = out.find((c: any) => c.type === 'block-end') as any
     expect(end.block).toMatchObject({ type: 'tool-call', name: 'read_file', arguments: '{"path":"a"}' })
   })
+  it('opens a no-argument tool call as a tool use with its name on the first delta', () => {
+    const state = createStreamState()
+    const out = [
+      ...processStreamLine(frame({ tool_calls: [{ index: 0, id: 'call_9', function: { name: 'list_files', arguments: '' } }] }), state),
+      ...processStreamLine('data: [DONE]', state),
+    ]
+    // The name must reach the caller even though no argument ever arrives.
+    expect(out.find((c: any) => c.type === 'tool-call-delta')).toMatchObject({ name: 'list_files', argumentsDelta: '' })
+    expect(state.hasToolCall).toBe(true)
+    // A no-argument tool is still a tool use, not a plain stop: otherwise the
+    // runner never executes it.
+    expect((out.find((c: any) => c.type === 'finish') as any).reason).toEqual({ kind: 'tool-calls' })
+    const end = out.filter((c: any) => c.type === 'block-end').pop() as any
+    expect(end.block).toMatchObject({ type: 'tool-call', name: 'list_files', arguments: '{}' })
+  })
+
+  it('surfaces a mid-stream error frame instead of flushing a clean stop', () => {
+    const state = createStreamState()
+    expect(() => processStreamLine('data: {"error":{"message":"upstream vendor failed"}}', state)).toThrow(LlmError)
+  })
 
   it('reads usage with cached tokens subtracted out of the prompt count', () => {
     const state = createStreamState()

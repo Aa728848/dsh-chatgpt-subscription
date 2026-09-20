@@ -288,6 +288,23 @@ describe('WorkBuddy adapter streaming', () => {
     expect(chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')).toBe('pong')
     expect(chunks.find((c) => c.type === 'finish')).toMatchObject({ reason: { kind: 'stop' } })
   })
+  it('leaves the stream deadline to the idle watchdog, not a wall-clock cap', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    const store = await makeStore()
+    const fetchFn = (async () => sseResponse('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')) as unknown as typeof fetch
+    const adapter = makeAdapter(store, fetchFn)
+    const options = {
+      provider: 'workbuddy',
+      model: 'glm-5.3',
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }],
+    } as unknown as GenerateOptions
+
+    for await (const _chunk of adapter.stream(options)) { /* drain */ }
+
+    // A hard 300s deadline would cut off a long but actively streaming turn;
+    // the watchdog renews its own timer as long as chunks arrive.
+    expect(timeoutSpy.mock.calls.map(([ms]) => ms)).not.toContain(300_000)
+  })
 
   it('refreshes an expired token before the call and writes it back', async () => {
     const store = await makeStore({ expiresAt: Date.now() - 1000 })

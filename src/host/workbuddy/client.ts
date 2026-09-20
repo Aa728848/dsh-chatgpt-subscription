@@ -283,15 +283,21 @@ export async function loadConfigCatalog(
     return cachedCatalog.models
   }
   if (catalogInFlight && catalogInFlightRegion === credentials.region) return catalogInFlight
+  // A snapshot read for the other region must never stand in: its entries
+  // declare only the region they came from, so the caller's region filter drops
+  // every one of them and the picker ends up offering nothing instead of
+  // falling back to the shipped table.
+  const sameRegionCache = (): WorkBuddyModelEntry[] =>
+    cachedCatalog?.region === credentials.region ? cachedCatalog.models : []
   const request = fetchConfigCatalog(credentials, options)
     .then((models) => {
       if (models.length > 0) {
         cachedCatalog = { region: credentials.region, models, fetchedAt: Date.now() }
         return models
       }
-      return cachedCatalog?.models ?? []
+      return sameRegionCache()
     })
-    .catch(() => cachedCatalog?.models ?? [])
+    .catch(() => sameRegionCache())
   catalogInFlight = request
   catalogInFlightRegion = credentials.region
   try {

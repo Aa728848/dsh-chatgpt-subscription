@@ -9,6 +9,7 @@ import {
   fetchAccountQuota,
   parseBilling,
   parseConfigModels,
+  loadConfigCatalog,
   parseCycleTime,
   refreshCredentials,
   workBuddyHeaders,
@@ -19,6 +20,7 @@ import {
   registerWorkBuddyRoutes,
   resolveEnabledModelIds,
 } from '../src/host/workbuddy/routes.ts'
+import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/workbuddy/token-store.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS, FALLBACK_MODELS } from '../src/host/workbuddy/model-catalog.ts'
 import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
@@ -462,6 +464,106 @@ describe('WorkBuddy routes', () => {
     const res = makeResponse()
     await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/settings', {}, 'https://evil.example'), res)
     expect(res.captured.status).toBe(403)
+  })
+  it('rejects a cross-origin quota refresh but still serves a same-origin one', async () => {
+    const dir = await makeAuthDir()
+    const handlers: any[] = []
+    const fetchFn = (async (url: any) => {
+      const target = String(url)
+      if (target.includes('/billing/meter/get-user-resource')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { Response: { Data: { Accounts: [{ PackageName: 'Free', CapacitySize: 100, CapacityRemain: 90 }] } } },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify(CONFIG), { status: 200 })
+    }) as unknown as typeof fetch
+    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings(), undefined, { fetchFn })
+
+    // A POST forces an upstream read and can rotate the refresh token, so it is
+    // gated exactly like the other mutations.
+    const denied = makeResponse()
+    await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/quota', {}, 'https://evil.example'), denied)
+    expect(denied.captured.status).toBe(403)
+
+    const allowed = makeResponse()
+    await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/quota', {}, 'http://127.0.0.1:43120'), allowed)
+    expect(allowed.captured.status).toBe(200)
+    expect(JSON.parse(allowed.captured.body).ok).toBe(true)
+  })
+
+  it('never serves one region the catalog snapshot read for another', async () => {
+    const offline = (async () => { throw new Error('offline') }) as unknown as typeof fetch
+    const online = (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch
+    const credentials = (region: 'cn' | 'intl'): WorkBuddyCredentials => ({
+      accessToken: 't',
+      refreshToken: 'r',
+      expiresAt: Date.now() + 3_600_000,
+      region,
+      domain: region === 'intl' ? 'www.workbuddy.ai' : 'copilot.tencent.com',
+      backend: region === 'intl' ? 'https://www.workbuddy.ai' : 'https://copilot.tencent.com',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'desktop',
+    })
+
+    const cn = await loadConfigCatalog(credentials('cn'), { fetchFn: online })
+    expect(cn.length).toBeGreaterThan(0)
+    // The same region still reuses its own snapshot when the gateway is down.
+    expect(await loadConfigCatalog(credentials('cn'), { fetchFn: offline })).toEqual(cn)
+
+    // The other region must not inherit it: those entries declare only `cn`, so
+    // the picker would filter every model out instead of using the shipped table.
+    expect(await loadConfigCatalog(credentials('intl'), { fetchFn: offline })).toEqual([])
+  })
+  it('renews an expired token before the connection probe', async () => {
+    const dir = await makeAuthDir({ expiresAt: Date.now() - 1000 })
+    const handlers: any[] = []
+    const urls: string[] = []
+    const fetchFn = (async (url: any, init: any) => {
+      urls.push(String(url))
+      if (String(url).includes('/v2/plugin/auth/token/refresh')) {
+        return new Response(JSON.stringify({ code: 0, data: { accessToken: 'fresh-token', expiresIn: 3600 } }), { status: 200 })
+      }
+      expect(init.headers.authorization).toBe('Bearer fresh-token')
+      return new Response('', { status: 200 })
+    }) as unknown as typeof fetch
+    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings(), undefined, { fetchFn })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'), res)
+    expect(res.captured.status).toBe(200)
+    expect(JSON.parse(res.captured.body).value.connected).toBe(true)
+    expect(urls[0]).toContain('/v2/plugin/auth/token/refresh')
+  })
+
+  it('stops an in-flight browser login when the routes are disposed', async () => {
+    vi.useFakeTimers()
+    try {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-login-'))
+      temporaryDirs.push(dir)
+      const handlers: any[] = []
+      const fetchFn = (async (url: any) => {
+        if (String(url).includes('/auth/state')) {
+          return new Response(JSON.stringify({ code: 0, data: { state: 's', authUrl: 'https://copilot.tencent.com/login' } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ code: 11217, msg: 'login ing...' }), { status: 200 })
+      }) as unknown as typeof fetch
+      const dispose = registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings(), undefined, { fetchFn })
+
+      const started = makeResponse()
+      await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/accounts/login', { region: 'cn' }, 'http://127.0.0.1:43120'), started)
+      expect(JSON.parse(started.captured.body).value.status).toBe('pending')
+
+      dispose()
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      const status = makeResponse()
+      await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts/login/status'), status)
+      expect(JSON.parse(status.captured.body).value.status).toBe('idle')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('accepts a same-origin settings update and persists it', async () => {

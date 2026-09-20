@@ -14,7 +14,6 @@ import {
 import type {} from '@deepseek-ai/dsh-attachment'
 import {
   CHAT_PATH,
-  CHAT_TIMEOUT_MS,
   DEFAULT_CONTEXT_WINDOW,
   PROVIDER_ID,
   PROVIDER_NAME,
@@ -299,7 +298,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
         method: 'POST',
         headers,
         body,
-        signal: AbortSignal.any([signal, AbortSignal.timeout(CHAT_TIMEOUT_MS)]),
+        // The idle watchdog owns the deadline: it resets while tokens flow, so a
+        // long but active generation is not cut off by a wall-clock cap.
+        signal,
       })
     } catch (error) {
       if (signal.aborted) throw new LlmError('WorkBuddy request aborted', 'ABORTED', { cause: error })
