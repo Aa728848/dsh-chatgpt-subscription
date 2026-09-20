@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { SettingsProvider, SettingsScope } from '@deepseek-ai/dsh-settings'
 import * as SettingsModule from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
@@ -8,6 +10,10 @@ import type { WorkBuddyReasoningEffort, WorkBuddyRegion } from '../../shared/wor
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { dshHomeDir } from '../antigravity/token-store.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS } from './model-catalog.ts'
+import type { CredentialStore } from '../token-store.ts'
+import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
+import { MacKeychainCredentialStore } from '../token-store-macos.ts'
+import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
 import {
   DEFAULT_DOMAIN,
   backendForDomain,
@@ -54,6 +60,8 @@ export interface WorkBuddyCredentials {
   sourceFile: string
   /** File modification time when it was read, so a stale cache is detectable. */
   sourceMtimeMs: number
+  /** Which store owns the secret; only managed credentials may be deleted. */
+  source: 'desktop' | 'managed'
 }
 
 export interface WorkBuddyModelSettings {
@@ -61,6 +69,10 @@ export interface WorkBuddyModelSettings {
   enabledModelIds: string[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: WorkBuddyReasoningEffort | null
+  /** Stable account key selected by the user; null keeps automatic selection. */
+  selectedAccountId: string | null
+  /** Desktop accounts hidden from this plugin without deleting CodeBuddy files. */
+  hiddenAccountIds: string[]
 }
 
 export interface WorkBuddyPreferenceStore {
@@ -70,6 +82,8 @@ export interface WorkBuddyPreferenceStore {
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: WorkBuddyReasoningEffort | null
+    selectedAccountId?: string | null
+    hiddenAccountIds?: string[]
   }): Promise<WorkBuddyModelSettings>
 }
 
@@ -91,6 +105,8 @@ export function registerWorkBuddyPreferenceStore(
         enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
         contextWindowOverrides: {},
         defaultReasoningEffort: null,
+        selectedAccountId: null,
+        hiddenAccountIds: [],
       }),
       update: async (patch) => fallbackStore.updateSettings(patch),
     }
@@ -110,11 +126,15 @@ export function registerWorkBuddyPreferenceStore(
         z.const(null),
       ])
       .default(null),
+    selectedAccountId: z.union([z.string(), z.const(null)]).default(null),
+    hiddenAccountIds: z.array(z.string()).default([]),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: WorkBuddyReasoningEffort | null
+    selectedAccountId: string | null
+    hiddenAccountIds: string[]
   }>
 
   return {
@@ -125,6 +145,8 @@ export function registerWorkBuddyPreferenceStore(
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
         defaultReasoningEffort: value.defaultReasoningEffort,
+        selectedAccountId: value.selectedAccountId,
+        hiddenAccountIds: value.hiddenAccountIds,
       }
     },
     update: async (patch) => {
@@ -138,6 +160,10 @@ export function registerWorkBuddyPreferenceStore(
         defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
           ? patch.defaultReasoningEffort
           : current.defaultReasoningEffort,
+        selectedAccountId: patch.selectedAccountId !== undefined
+          ? patch.selectedAccountId
+          : current.selectedAccountId,
+        hiddenAccountIds: patch.hiddenAccountIds ?? current.hiddenAccountIds,
       }
       await scope.update(normalized)
       void fallbackStore.updateSettings(patch).catch(() => undefined)
@@ -171,6 +197,11 @@ export function codeBuddyAuthDir(): string {
 /** Plugin settings file, used when no settings service is present. */
 export function modelSettingsPath(): string {
   return path.join(dshHomeDir(), 'storages', 'workbuddy-models.json')
+}
+
+/** Encrypted account pool for credentials added through this plugin. */
+export function managedCredentialsPath(): string {
+  return path.join(dshHomeDir(), 'storages', 'workbuddy-accounts.json')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -219,6 +250,7 @@ export function parseCredentialFile(value: unknown, sourceFile: string, sourceMt
     enterpriseId: readString(account, 'enterpriseId'),
     sourceFile,
     sourceMtimeMs,
+    source: 'desktop',
   }
 }
 
@@ -226,6 +258,45 @@ export function parseCredentialFile(value: unknown, sourceFile: string, sourceMt
 export function isExpired(credentials: WorkBuddyCredentials, now = Date.now()): boolean {
   if (!Number.isFinite(credentials.expiresAt) || credentials.expiresAt <= 0) return false
   return now >= credentials.expiresAt - 60_000
+}
+
+/**
+ * Stable public key for selecting an account without exposing a token or tying
+ * the preference to a timestamped snapshot filename.
+ */
+export function workBuddyAccountId(credentials: Pick<WorkBuddyCredentials, 'region' | 'uid' | 'uin' | 'nickname' | 'domain'>): string {
+  const identity = credentials.uid || credentials.uin || credentials.nickname || credentials.domain
+  return `${credentials.region}:${identity}`
+}
+
+/** Strict parser for credentials owned by the plugin's encrypted pool. */
+export function parseManagedCredentials(value: unknown): WorkBuddyCredentials[] {
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.accounts)) {
+    throw new Error('WorkBuddy managed credential pool is invalid')
+  }
+  return value.accounts.map((item) => {
+    if (!isRecord(item)) throw new Error('WorkBuddy managed account is invalid')
+    const accessToken = readString(item, 'accessToken')
+    if (accessToken === undefined) throw new Error('WorkBuddy managed account has no access token')
+    const domain = readString(item, 'domain') ?? DEFAULT_DOMAIN
+    const expiresAt = typeof item.expiresAt === 'number' && Number.isFinite(item.expiresAt) ? item.expiresAt : 0
+    return {
+      accessToken,
+      refreshToken: readString(item, 'refreshToken') ?? '',
+      expiresAt,
+      region: regionForDomain(domain),
+      domain,
+      backend: backendForDomain(domain),
+      uid: readString(item, 'uid'),
+      nickname: readString(item, 'nickname'),
+      uin: readString(item, 'uin'),
+      accountType: readString(item, 'accountType'),
+      enterpriseId: readString(item, 'enterpriseId'),
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'managed',
+    }
+  })
 }
 
 /**
@@ -282,6 +353,77 @@ export async function scanCredentials(dir = codeBuddyAuthDir()): Promise<WorkBud
   })
 }
 
+function managedCredentialAccount(filePath: string): string {
+  return createHash('sha256').update(path.resolve(filePath)).digest('hex')
+}
+
+function createManagedCredentialBackend(filePath: string): CredentialStore<{ version: 1; accounts: WorkBuddyCredentials[] }> {
+  const parse = (value: unknown) => ({ version: 1 as const, accounts: parseManagedCredentials(value) })
+  if (process.platform === 'win32') return new WindowsDpapiCredentialStore(`${filePath}.dpapi`, parse)
+  if (process.platform === 'darwin') return new MacKeychainCredentialStore('dsh-workbuddy-accounts', managedCredentialAccount(filePath), parse)
+  if (process.platform === 'linux') return new SecretServiceCredentialStore('dsh-workbuddy-accounts', managedCredentialAccount(filePath), parse)
+  throw new Error('WorkBuddy encrypted account storage requires Windows, macOS, or Linux.')
+}
+
+const managedOperations = new Map<string, Promise<void>>()
+
+/** Encrypted credentials added through the WorkBuddy settings page. */
+export class ManagedCredentialStore {
+  constructor(
+    private readonly filePath = managedCredentialsPath(),
+    private readonly backend: CredentialStore<{ version: 1; accounts: WorkBuddyCredentials[] }> = createManagedCredentialBackend(filePath),
+  ) {}
+
+  path(): string {
+    if (process.platform === 'win32') return `${this.filePath}.dpapi`
+    const kind = process.platform === 'darwin' ? 'Keychain' : 'Secret Service'
+    return `${kind}: dsh-workbuddy-accounts/${managedCredentialAccount(this.filePath)}`
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const key = path.resolve(this.filePath)
+    const result = (managedOperations.get(key) || Promise.resolve()).then(operation)
+    const settled = result.then(() => undefined, () => undefined)
+    managedOperations.set(key, settled)
+    void settled.then(() => {
+      if (managedOperations.get(key) === settled) managedOperations.delete(key)
+    })
+    return result
+  }
+
+  async list(): Promise<WorkBuddyCredentials[]> {
+    return this.serialize(async () => (await this.backend.load())?.accounts ?? [])
+  }
+
+  async add(credentials: WorkBuddyCredentials): Promise<void> {
+    return this.serialize(async () => {
+      const current = (await this.backend.load())?.accounts ?? []
+      const normalized: WorkBuddyCredentials = { ...credentials, source: 'managed', sourceFile: '', sourceMtimeMs: 0 }
+      const id = workBuddyAccountId(normalized)
+      const accounts = [...current.filter((candidate) => workBuddyAccountId(candidate) !== id), normalized]
+      const payload = { version: 1 as const, accounts }
+      await this.backend.save(payload)
+      const restored = await this.backend.load()
+      if (!isDeepStrictEqual(restored, payload)) throw new Error('WorkBuddy encrypted account verification failed')
+    })
+  }
+
+  async update(credentials: WorkBuddyCredentials): Promise<void> {
+    return this.add(credentials)
+  }
+
+  async delete(accountId: string): Promise<boolean> {
+    return this.serialize(async () => {
+      const current = (await this.backend.load())?.accounts ?? []
+      const accounts = current.filter((candidate) => workBuddyAccountId(candidate) !== accountId)
+      if (accounts.length === current.length) return false
+      if (accounts.length === 0) await this.backend.clear()
+      else await this.backend.save({ version: 1, accounts })
+      return true
+    })
+  }
+}
+
 /**
  * Credential store backed by the CodeBuddy desktop client's own auth files.
  *
@@ -293,13 +435,14 @@ export async function scanCredentials(dir = codeBuddyAuthDir()): Promise<WorkBud
 export class FileCredentialStore {
   private cached: WorkBuddyCredentials | null = null
   private scannedAt = 0
-  /** Serializes refresh/write-back so two concurrent calls cannot interleave. */
-  private refreshInFlight: Promise<WorkBuddyCredentials> | null = null
+  /** Serializes refresh/write-back per account; different accounts never share a token. */
+  private readonly refreshInFlight = new Map<string, Promise<WorkBuddyCredentials>>()
 
   constructor(
     private readonly dir = codeBuddyAuthDir(),
     /** How long a scan result is reused before the directory is re-read. */
     private readonly cacheTtlMs = 15_000,
+    private readonly managed = new ManagedCredentialStore(),
   ) {}
 
   /** Directory this store scans. */
@@ -312,22 +455,36 @@ export class FileCredentialStore {
     return this.dir
   }
 
-  /** Read the preferred credential, or `null` when none is usable. */
-  async read(options: { force?: boolean } = {}): Promise<WorkBuddyCredentials | null> {
-    const fresh = this.cached !== null
+  managedPath(): string {
+    return this.managed.path()
+  }
+
+  /** Read the selected credential, or the best visible candidate in automatic mode. */
+  async read(options: { force?: boolean; accountId?: string | null; hiddenAccountIds?: readonly string[] } = {}): Promise<WorkBuddyCredentials | null> {
+    const requested = options.accountId ?? null
+    const hidden = new Set(options.hiddenAccountIds ?? [])
+    const cachedMatches = this.cached !== null
+      && !hidden.has(workBuddyAccountId(this.cached))
+      && (requested === null || workBuddyAccountId(this.cached) === requested)
+    const fresh = cachedMatches
       && !options.force
       && Date.now() - this.scannedAt < this.cacheTtlMs
-      && await this.isStillCurrent(this.cached)
+      && await this.isStillCurrent(this.cached!)
     if (fresh) return this.cached
 
-    const candidates = await scanCredentials(this.dir)
+    const candidates = await this.list()
     this.scannedAt = Date.now()
-    this.cached = candidates[0] ?? null
+    this.cached = requested === null
+      ? (candidates.find((candidate) => !hidden.has(workBuddyAccountId(candidate))) ?? null)
+      : (hidden.has(requested) ? null : candidates.find((candidate) => workBuddyAccountId(candidate) === requested) ?? null)
     return this.cached
   }
 
   /** Whether a cached credential's source file is unchanged on disk. */
   private async isStillCurrent(credentials: WorkBuddyCredentials): Promise<boolean> {
+    // Managed credentials have no source file; their encrypted pool is updated
+    // through this store and invalidates the cache after every add/delete.
+    if (credentials.source === 'managed') return true
     try {
       const stats = await fs.stat(credentials.sourceFile)
       return stats.mtimeMs === credentials.sourceMtimeMs
@@ -336,9 +493,36 @@ export class FileCredentialStore {
     }
   }
 
-  /** All usable credentials, best candidate first; the card lists them. */
+  /**
+   * All distinct usable accounts, best credential first.
+   *
+   * The desktop directory keeps historical snapshots. They are credentials for
+   * the same account, not additional account choices, so only the first (best)
+   * candidate for each stable account id is exposed.
+   */
   async list(): Promise<WorkBuddyCredentials[]> {
-    return scanCredentials(this.dir)
+    const distinct = new Map<string, WorkBuddyCredentials>()
+    // Plugin-managed credentials win when the same account also appears in the
+    // desktop directory: only the plugin-owned copy may be deleted.
+    for (const candidate of await this.managed.list()) {
+      distinct.set(workBuddyAccountId(candidate), candidate)
+    }
+    for (const candidate of await scanCredentials(this.dir)) {
+      const id = workBuddyAccountId(candidate)
+      if (!distinct.has(id)) distinct.set(id, candidate)
+    }
+    return [...distinct.values()]
+  }
+
+  async addManaged(credentials: WorkBuddyCredentials): Promise<void> {
+    await this.managed.add(credentials)
+    this.invalidate()
+  }
+
+  async deleteManaged(accountId: string): Promise<boolean> {
+    const removed = await this.managed.delete(accountId)
+    if (removed) this.invalidate()
+    return removed
   }
 
   /** Forget the cached scan; the next read re-reads the directory. */
@@ -359,19 +543,24 @@ export class FileCredentialStore {
     refresh: (current: WorkBuddyCredentials) => Promise<WorkBuddyCredentials>,
   ): Promise<WorkBuddyCredentials> {
     if (!isExpired(credentials)) return credentials
-    if (this.refreshInFlight !== null) return this.refreshInFlight
+    const accountId = workBuddyAccountId(credentials)
+    const pending = this.refreshInFlight.get(accountId)
+    if (pending !== undefined) return pending
     const operation = (async () => {
       const refreshed = await refresh(credentials)
-      await this.writeBack(refreshed)
-      this.cached = refreshed
-      this.scannedAt = Date.now()
+      if (credentials.source === 'managed') await this.managed.update(refreshed)
+      else await this.writeBack(refreshed)
+      if (this.cached !== null && workBuddyAccountId(this.cached) === accountId) {
+        this.cached = refreshed
+        this.scannedAt = Date.now()
+      }
       return refreshed
     })()
-    this.refreshInFlight = operation
+    this.refreshInFlight.set(accountId, operation)
     try {
       return await operation
     } finally {
-      if (this.refreshInFlight === operation) this.refreshInFlight = null
+      if (this.refreshInFlight.get(accountId) === operation) this.refreshInFlight.delete(accountId)
     }
   }
 
@@ -436,6 +625,12 @@ export class FileModelSettingsStore {
           enabledModelIds,
           contextWindowOverrides,
           defaultReasoningEffort,
+          selectedAccountId: typeof parsed.selectedAccountId === 'string' && parsed.selectedAccountId !== ''
+            ? parsed.selectedAccountId
+            : null,
+          hiddenAccountIds: Array.isArray(parsed.hiddenAccountIds)
+            ? parsed.hiddenAccountIds.filter((id): id is string => typeof id === 'string')
+            : [],
         }
       }
     } catch {
@@ -446,6 +641,8 @@ export class FileModelSettingsStore {
       enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
       contextWindowOverrides: {},
       defaultReasoningEffort: null,
+      selectedAccountId: null,
+      hiddenAccountIds: [],
     }
   }
 
@@ -461,6 +658,8 @@ export class FileModelSettingsStore {
     enabledModelIds?: string[]
     contextWindowOverrides?: Record<string, number>
     defaultReasoningEffort?: WorkBuddyReasoningEffort | null
+    selectedAccountId?: string | null
+    hiddenAccountIds?: string[]
   }): Promise<WorkBuddyModelSettings> {
     const current = await this.read()
     const next: WorkBuddyModelSettings = {
@@ -472,6 +671,12 @@ export class FileModelSettingsStore {
         : {}),
       ...(patch.defaultReasoningEffort !== undefined
         ? { defaultReasoningEffort: patch.defaultReasoningEffort }
+        : {}),
+      ...(patch.selectedAccountId !== undefined
+        ? { selectedAccountId: patch.selectedAccountId }
+        : {}),
+      ...(patch.hiddenAccountIds !== undefined
+        ? { hiddenAccountIds: patch.hiddenAccountIds }
         : {}),
     }
     await this.write(next)

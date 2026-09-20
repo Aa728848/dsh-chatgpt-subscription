@@ -10,21 +10,25 @@ function statusWith(quota: WorkBuddyWebStatus['quota']): WorkBuddyWebStatus {
     hasCredentials: true,
     authDirectory: '/tmp/auth',
     storagePath: '/tmp/models.json',
+    managedStoragePath: '/tmp/accounts.dpapi',
     account: null,
     quota,
     lastFetchedAt: null,
     models: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
+    selectedAccountId: null,
     serving: true,
     conflict: null,
   }
 }
 
 const account = {
+  id: 'cn:u1',
   uid: 'u1', nickname: 'tester', uin: '100000000001', accountType: 'personal',
   enterpriseId: null, region: 'cn' as const, backend: 'https://copilot.tencent.com',
   domain: 'copilot.tencent.com', expiresAt: null, sourceFile: '/tmp/a.info',
+  source: 'desktop' as const, removable: false, hidden: false,
 }
 
 describe('WorkBuddy settings card helpers', () => {

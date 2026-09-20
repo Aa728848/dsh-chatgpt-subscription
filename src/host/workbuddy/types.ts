@@ -14,7 +14,9 @@
 
 import type { WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
 
-export const PROVIDER_ID = 'workbuddy'
+// Use an id distinct from the common `workbuddy` name used by user-defined
+// OpenAI-compatible routes. Installing this plugin must not hide a custom API.
+export const PROVIDER_ID = 'workbuddy-subscription'
 export const PROVIDER_NAME = 'WorkBuddy（CodeBuddy 订阅）'
 
 /** Domestic backend. */
@@ -47,6 +49,13 @@ export const CONFIG_PATH = '/v3/config'
 export const REFRESH_PATH = '/v2/plugin/auth/token/refresh'
 /** Billing/allowance surface; answers the per-package credit picture. */
 export const BILLING_PATH = '/billing/meter/get-user-resource'
+/** Browser authorization state and credential-poll surfaces used by the CLI. */
+export const LOGIN_STATE_PATH = '/v2/plugin/auth/state'
+export const LOGIN_TOKEN_PATH = '/v2/plugin/auth/token'
+export const LOGIN_PLATFORM = 'cli'
+export const LOGIN_PENDING_CODE = 11217
+export const LOGIN_POLL_INTERVAL_MS = 1_500
+export const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 
 /**
  * User-Agent every request carries.

@@ -40,6 +40,7 @@ import type {
   WorkBuddyWebStatus,
 } from '../../shared/workbuddy-contracts.ts'
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
+import { beginWebLogin, getWebLoginStatus } from './oauth.ts'
 
 /** Membership test for one posted reasoning level; the set is catalog-wide. */
 function isWorkBuddyReasoningEffort(value: unknown): value is (typeof WORKBUDDY_REASONING_EFFORTS)[number] {
@@ -167,8 +168,8 @@ export async function getWorkBuddyWebStatus(
   preferences?: WorkBuddyPreferenceStore,
   options: WorkBuddyStatusOptions = {},
 ): Promise<WorkBuddyWebStatus> {
-  const credentials = await store.read()
   const settings: WorkBuddyModelSettings = preferences ? preferences.status() : await modelSettings.read()
+  const credentials = await store.read({ accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
   const enabled = settings.enabled !== false
 
   // The gateway's own catalog is the authority on capabilities; without a
@@ -200,6 +201,8 @@ export async function getWorkBuddyWebStatus(
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort,
+    selectedAccountId: settings.selectedAccountId,
+    managedStoragePath: store.managedPath(),
     serving: readOption(options.serving, true),
     conflict: readOption(options.conflict, null),
   }
@@ -228,11 +231,14 @@ export function registerWorkBuddyRoutes(
           if (method !== 'GET') return sendMethodNotAllowed(response)
           // A cached scan can hide a credential the user just created, so the
           // status read always re-reads the directory.
-          await store.read({ force: true }).catch(() => null)
-          const credentials = await store.read()
+          const settings = preferences ? preferences.status() : await modelSettings.read()
+          await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds }).catch(() => null)
+          const credentials = await store.read({ accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
           const cached = getCachedQuota()
-          if (credentials !== null && (cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
-            await fetchAccountQuota(store, fetchFn).catch(() => undefined)
+          const quotaMatches = cached?.account.id === (credentials === null ? undefined : accountFromCredentials(credentials).id)
+          if (credentials !== null && (!quotaMatches || cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
+            if (!quotaMatches) clearCachedQuota()
+            await fetchAccountQuota(store, fetchFn, false, settings.selectedAccountId, settings.hiddenAccountIds).catch(() => undefined)
           }
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
           return sendJson(response, 200, { ok: true, value })
@@ -240,19 +246,77 @@ export function registerWorkBuddyRoutes(
 
         if (path === 'accounts') {
           if (method !== 'GET') return sendMethodNotAllowed(response)
+          const settings = preferences ? preferences.status() : await modelSettings.read()
+          const hidden = new Set(settings.hiddenAccountIds)
           const accounts = await store.list()
           return sendJson(response, 200, {
             ok: true,
             value: {
               authDirectory: store.directory(),
-              accounts: accounts.map(accountFromCredentials),
+              managedStoragePath: store.managedPath(),
+              accounts: accounts.map((credentials) => {
+                const account = accountFromCredentials(credentials)
+                return { ...account, hidden: hidden.has(account.id) }
+              }),
             },
           })
         }
 
+        if (path === 'accounts/login') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const body = await readRequestJson(request)
+          const region = body.region === 'intl' ? 'intl' : body.region === 'cn' ? 'cn' : undefined
+          if (region === undefined) return sendJson(response, 400, { ok: false, error: 'A login region (cn or intl) is required.' })
+          const value = await beginWebLogin(store, region, fetchFn)
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'accounts/login/status') {
+          if (method !== 'GET') return sendMethodNotAllowed(response)
+          return sendJson(response, 200, { ok: true, value: getWebLoginStatus() })
+        }
+
+        if (path === 'accounts/action') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const body = await readRequestJson(request)
+          const action = typeof body.action === 'string' ? body.action : ''
+          const accountId = typeof body.accountId === 'string' ? body.accountId : ''
+          if (accountId === '') return sendJson(response, 400, { ok: false, error: 'An account id is required.' })
+          const settings = preferences ? preferences.status() : await modelSettings.read()
+          const accounts = await store.list()
+          const target = accounts.find((candidate) => accountFromCredentials(candidate).id === accountId)
+          if (target === undefined) return sendJson(response, 404, { ok: false, error: 'The account was not found.' })
+          let hiddenAccountIds = settings.hiddenAccountIds
+          if (action === 'delete') {
+            if (target.source !== 'managed') {
+              return sendJson(response, 400, { ok: false, error: 'Desktop accounts cannot be deleted by this plugin; hide the account instead.' })
+            }
+            await store.deleteManaged(accountId)
+          } else if (action === 'hide') {
+            if (target.source !== 'desktop') return sendJson(response, 400, { ok: false, error: 'Managed accounts should be deleted, not hidden.' })
+            hiddenAccountIds = [...new Set([...hiddenAccountIds, accountId])]
+          } else if (action === 'restore') {
+            hiddenAccountIds = hiddenAccountIds.filter((id) => id !== accountId)
+          } else {
+            return sendJson(response, 400, { ok: false, error: 'Unsupported account action.' })
+          }
+          const nextSelected = settings.selectedAccountId === accountId ? null : settings.selectedAccountId
+          const patch = { hiddenAccountIds, selectedAccountId: nextSelected }
+          if (preferences) await preferences.update(patch)
+          else await modelSettings.updateSettings(patch)
+          store.invalidate()
+          clearCachedQuota()
+          clearCachedCatalog()
+          const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value })
+        }
+
         if (path === 'quota') {
           if (method !== 'GET' && method !== 'POST') return sendMethodNotAllowed(response)
-          await fetchAccountQuota(store, fetchFn, true)
+          const settings = preferences ? preferences.status() : await modelSettings.read()
+          await fetchAccountQuota(store, fetchFn, true, settings.selectedAccountId, settings.hiddenAccountIds)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
           return sendJson(response, 200, { ok: true, value })
         }
@@ -260,8 +324,9 @@ export function registerWorkBuddyRoutes(
         if (path === 'connection/test') {
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const credentials = await store.read({ force: true })
-          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'No CodeBuddy credential found.' })
+          const settings = preferences ? preferences.status() : await modelSettings.read()
+          const credentials = await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
+          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'The selected CodeBuddy account was not found.' })
 
           const model = modelsForRegion(credentials.region)[0]?.id
           if (model === undefined) {
@@ -331,6 +396,23 @@ export function registerWorkBuddyRoutes(
               patch.defaultReasoningEffort = effort
             }
           }
+          if (body.selectedAccountId !== undefined) {
+            const selected = body.selectedAccountId
+            if (selected === null || typeof selected === 'string') {
+              if (selected !== null) {
+                const settings = preferences ? preferences.status() : await modelSettings.read()
+                const accounts = await store.list()
+                if (settings.hiddenAccountIds.includes(selected)
+                  || !accounts.some((candidate) => accountFromCredentials(candidate).id === selected)) {
+                  return sendJson(response, 400, { ok: false, error: 'The selected CodeBuddy account was not found.' })
+                }
+              }
+              patch.selectedAccountId = selected
+              store.invalidate()
+              clearCachedQuota()
+              clearCachedCatalog()
+            }
+          }
           if (preferences) await preferences.update(patch)
           else await modelSettings.updateSettings(patch)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
@@ -340,8 +422,9 @@ export function registerWorkBuddyRoutes(
         if (path === 'catalog/refresh') {
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const credentials = await store.read({ force: true })
-          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'No CodeBuddy credential found.' })
+          const settings = preferences ? preferences.status() : await modelSettings.read()
+          const credentials = await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
+          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'The selected CodeBuddy account was not found.' })
           clearCachedCatalog()
           await loadConfigCatalog(credentials, { fetchFn, force: true }).catch(() => undefined)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
@@ -354,7 +437,8 @@ export function registerWorkBuddyRoutes(
           store.invalidate()
           clearCachedQuota()
           clearCachedCatalog()
-          await store.read({ force: true }).catch(() => null)
+          const settings = preferences ? preferences.status() : await modelSettings.read()
+          await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds }).catch(() => null)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
           return sendJson(response, 200, { ok: true, value })
         }

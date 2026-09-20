@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   WorkBuddyAccount,
   WorkBuddyModelOption,
@@ -30,7 +30,17 @@ interface Props {
 
 interface AccountsPayload {
   authDirectory: string
+  managedStoragePath?: string
   accounts: WorkBuddyAccount[]
+}
+
+interface LoginPollStatus {
+  status: 'idle' | 'pending' | 'complete' | 'error'
+  region?: 'cn' | 'intl'
+  authUrl?: string
+  progress?: string
+  accountId?: string
+  error?: string
 }
 
 interface ConnectionPayload {
@@ -41,6 +51,16 @@ interface ConnectionPayload {
   checkedAt: number
 }
 
+/**
+ * Call one settings route and unwrap its `{ ok, value }` envelope.
+ *
+ * The response body is read as text first, because a route that is not mounted
+ * answers with an empty body — and `res.json()` on that throws a bare
+ * "Unexpected end of JSON input" that says nothing about what actually failed.
+ * That is exactly what happens when the client bundle is newer than the Host
+ * process (a stale Host has no route to answer), so the error is reported as
+ * such instead of as a credential problem.
+ */
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     ...options,
@@ -49,8 +69,23 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
       ...options?.headers,
     },
   })
-  const json = (await res.json()) as { ok: boolean; value?: T; error?: string }
-  if (!res.ok || !json.ok) {
+  const text = await res.text()
+  if (text.trim() === '') {
+    throw new Error(
+      `The WorkBuddy settings route did not answer (HTTP ${res.status} ${res.statusText || 'no body'}). `
+      + 'The plugin loaded in the browser may be newer than the one running in the Host — '
+      + 'restart DSH so both halves come from the same build.',
+    )
+  }
+  let json: { ok?: boolean; value?: T; error?: string }
+  try {
+    json = JSON.parse(text) as { ok?: boolean; value?: T; error?: string }
+  } catch {
+    throw new Error(
+      `The WorkBuddy settings route returned a non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`,
+    )
+  }
+  if (!res.ok || json.ok !== true) {
     throw new Error(json.error || `HTTP ${res.status}`)
   }
   return json.value as T
@@ -112,8 +147,15 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Whether the last `/status` call failed. A failed status read leaves
+  // `status` null, which must NOT be rendered as "no credential found": that
+  // claims a credential problem when the real cause is an unreachable route.
+  const [statusFailed, setStatusFailed] = useState(false)
   const [connection, setConnection] = useState<ConnectionPayload | null>(null)
   const [accounts, setAccounts] = useState<AccountsPayload | null>(null)
+  const [loginProgress, setLoginProgress] = useState<string | null>(null)
+  const loginIntervalRef = useRef<number | null>(null)
+  const loginTimeoutRef = useRef<number | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
 
@@ -136,12 +178,14 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         contextWindowOverrides: data?.contextWindowOverrides ?? {},
       }
       setStatus(normalized)
+      setStatusFailed(false)
       const drafts: Record<string, string> = {}
       for (const model of normalized.models) {
         drafts[model.id] = formatCapacity(normalized.contextWindowOverrides[model.id] || model.defaultContextWindow)
       }
       setContextDrafts(drafts)
     } catch (err) {
+      setStatusFailed(true)
       if (!quiet) setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
@@ -155,6 +199,7 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       // is supplementary, and a malformed payload must not take down the card.
       setAccounts({
         authDirectory: payload?.authDirectory ?? '',
+        managedStoragePath: payload?.managedStoragePath,
         accounts: Array.isArray(payload?.accounts) ? payload.accounts : [],
       })
     } catch {
@@ -172,7 +217,11 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       }
     }
     document.addEventListener('visibilitychange', refreshWhenVisible)
-    return () => document.removeEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+      if (loginIntervalRef.current !== null) window.clearInterval(loginIntervalRef.current)
+      if (loginTimeoutRef.current !== null) window.clearTimeout(loginTimeoutRef.current)
+    }
   }, [loadStatus, loadAccounts])
 
   const handleRescan = async () => {
@@ -180,6 +229,107 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       setBusy('rescan')
       setError(null)
       const updated = await fetchApi<WorkBuddyWebStatus>('/rescan', { method: 'POST' })
+      setStatus(updated)
+      await loadAccounts()
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleAddAccount = async (region: 'cn' | 'intl') => {
+    try {
+      setBusy(`login:${region}`)
+      setError(null)
+      setLoginProgress(t.loginWaiting)
+      const flow = await fetchApi<LoginPollStatus>('/accounts/login', {
+        method: 'POST',
+        body: JSON.stringify({ region }),
+      })
+      if (flow.authUrl) window.open(flow.authUrl, '_blank', 'noopener,noreferrer')
+      if (loginIntervalRef.current !== null) window.clearInterval(loginIntervalRef.current)
+      if (loginTimeoutRef.current !== null) window.clearTimeout(loginTimeoutRef.current)
+      const timer = window.setInterval(() => {
+        void (async () => {
+          try {
+            const poll = await fetchApi<LoginPollStatus>('/accounts/login/status')
+            if (poll.progress) setLoginProgress(poll.progress)
+            if (poll.status === 'complete') {
+              window.clearInterval(timer)
+              loginIntervalRef.current = null
+              if (loginTimeoutRef.current !== null) window.clearTimeout(loginTimeoutRef.current)
+              loginTimeoutRef.current = null
+              setBusy(null)
+              setLoginProgress(null)
+              if (poll.accountId) {
+                await fetchApi<WorkBuddyWebStatus>('/settings', {
+                  method: 'POST',
+                  body: JSON.stringify({ selectedAccountId: poll.accountId }),
+                })
+              }
+              await loadStatus()
+              await loadAccounts()
+              notifyChange()
+            } else if (poll.status === 'error') {
+              window.clearInterval(timer)
+              loginIntervalRef.current = null
+              if (loginTimeoutRef.current !== null) window.clearTimeout(loginTimeoutRef.current)
+              loginTimeoutRef.current = null
+              setBusy(null)
+              setLoginProgress(null)
+              setError(poll.error || t.loginFailed)
+            }
+          } catch {
+            // Transient polling failure; the next interval retries.
+          }
+        })()
+      }, 1500)
+      loginIntervalRef.current = timer
+      loginTimeoutRef.current = window.setTimeout(() => {
+        window.clearInterval(timer)
+        loginIntervalRef.current = null
+        loginTimeoutRef.current = null
+        setBusy(null)
+        setLoginProgress(null)
+      }, 5 * 60 * 1000)
+    } catch (err) {
+      setBusy(null)
+      setLoginProgress(null)
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const handleAccountAction = async (account: WorkBuddyAccount) => {
+    const action = account.removable ? 'delete' : account.hidden ? 'restore' : 'hide'
+    if (action === 'delete' && !window.confirm(t.deleteConfirm)) return
+    try {
+      setBusy(`account-action:${account.id}`)
+      setError(null)
+      const updated = await fetchApi<WorkBuddyWebStatus>('/accounts/action', {
+        method: 'POST',
+        body: JSON.stringify({ action, accountId: account.id }),
+      })
+      setStatus(updated)
+      await loadAccounts()
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleSelectAccount = async (accountId: string) => {
+    try {
+      setBusy(`account:${accountId}`)
+      setError(null)
+      setConnection(null)
+      const updated = await fetchApi<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ selectedAccountId: accountId }),
+      })
       setStatus(updated)
       await loadAccounts()
       notifyChange()
@@ -348,6 +498,9 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
   const quota = status?.quota
   const account = status?.account
   const authenticated = status?.authenticated === true
+  // A failed status read is not "no credential": showing the credential hint
+  // here would send the user chasing a problem that does not exist.
+  const unreachable = statusFailed && status === null
 
   return (
     <div className="dsha-page">
@@ -359,7 +512,12 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
           </button>
         </div>
 
-        {!authenticated ? (
+        {unreachable ? (
+          <>
+            <div className="dsha-empty">{t.routeUnreachable}</div>
+            <p className="dsha-notice">{t.routeUnreachableHint}</p>
+          </>
+        ) : !authenticated ? (
           <>
             <div className="dsha-empty">{t.notFoundTitle}</div>
             <p className="dsha-notice">{t.notFoundHint}</p>
@@ -405,8 +563,8 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
             </div>
             <div className="dsha-row">
               <span className="dsha-label">{t.sourceFile}</span>
-              <span className="dsha-value dshwb-mono" title={account?.sourceFile ?? ''}>
-                {displayFile(account?.sourceFile)}
+              <span className="dsha-value dshwb-mono" title={account?.sourceFile ?? status?.managedStoragePath ?? ''}>
+                {account?.source === 'managed' ? t.encryptedStorage : displayFile(account?.sourceFile)}
               </span>
             </div>
           </>
@@ -419,36 +577,74 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         <p className="dsha-notice">{t.storageNotice}</p>
       </section>
 
-      {accounts !== null && (accounts.accounts?.length ?? 0) > 1 && (
+      {accounts !== null && (
         <section className="dsha-group">
           <div className="dsha-grouphead">
             <h3>{t.accounts}</h3>
+            <div className="dsha-account-add-actions">
+              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('cn')}>
+                {busy === 'login:cn' ? t.authorizing : t.addCnAccount}
+              </button>
+              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleAddAccount('intl')}>
+                {busy === 'login:intl' ? t.authorizing : t.addIntlAccount}
+              </button>
+            </div>
           </div>
           <p className="dsha-muted">{t.accountsHint}</p>
-          <div className="dsha-accounts-list">
-            {accounts.accounts.map((candidate) => {
-              const isActive = candidate.sourceFile === account?.sourceFile
-              return (
-                <div key={candidate.sourceFile ?? candidate.uid ?? Math.random()} className={`dsha-account-card${isActive ? ' active' : ''}`}>
-                  <div className="dsha-account-header">
-                    <div className="dsha-account-identity">
-                      <span className="dsha-account-title">{candidate.nickname || candidate.uid || '—'}</span>
-                    </div>
-                    <div className="dsha-badges">
-                      <span className="dsha-badge primary">
-                        {candidate.region === 'intl' ? t.regionIntl : t.regionCn}
-                      </span>
-                      {isActive && <span className="dsha-badge active">{t.signedIn}</span>}
-                    </div>
-                  </div>
-                  <div className="dsha-account-details">
-                    <span className="dshwb-mono">{displayFile(candidate.sourceFile)}</span>
-                    {candidate.expiresAt !== null && <span>{formatDate(candidate.expiresAt)}</span>}
-                  </div>
+          {loginProgress && <p className="dsha-notice">{loginProgress}</p>}
+          {(['cn', 'intl'] as const).map((region) => {
+            const regionAccounts = accounts.accounts.filter((candidate) => candidate.region === region)
+            if (regionAccounts.length === 0) return null
+            return (
+              <div key={region} className="dsha-account-region">
+                <h4>{region === 'intl' ? t.regionIntl : t.regionCn}</h4>
+                <div className="dsha-accounts-list">
+                  {regionAccounts.map((candidate) => {
+                    const isActive = candidate.id === account?.id
+                    return (
+                      <div
+                        key={candidate.id}
+                        className={`dsha-account-card${isActive ? ' active' : ''}${candidate.hidden ? ' hidden' : ''}`}
+                      >
+                        <button
+                          type="button"
+                          className="dshwb-account-select"
+                          disabled={busy !== null || isActive || candidate.hidden}
+                          aria-pressed={isActive}
+                          onClick={() => void handleSelectAccount(candidate.id)}
+                        >
+                          <div className="dsha-account-header">
+                            <div className="dsha-account-identity">
+                              <span className="dsha-account-title">{candidate.nickname || candidate.uid || '—'}</span>
+                            </div>
+                            <div className="dsha-badges">
+                              <span className="dsha-badge primary">{candidate.source === 'managed' ? t.pluginAccount : t.desktopAccount}</span>
+                              {candidate.hidden && <span className="dsha-badge cooldown">{t.hiddenAccount}</span>}
+                              {isActive && <span className="dsha-badge active">{t.selectedAccount}</span>}
+                            </div>
+                          </div>
+                          <div className="dsha-account-details">
+                            <span className="dshwb-mono">{candidate.source === 'managed' ? t.encryptedStorage : displayFile(candidate.sourceFile)}</span>
+                            {candidate.expiresAt !== null && <span>{formatDate(candidate.expiresAt)}</span>}
+                          </div>
+                        </button>
+                        <div className="dsha-account-actions">
+                          <button
+                            type="button"
+                            className="dsha-btn"
+                            disabled={busy !== null}
+                            onClick={() => void handleAccountAction(candidate)}
+                          >
+                            {candidate.removable ? t.deleteAccount : candidate.hidden ? t.restoreAccount : t.hideAccount}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
-              )
-            })}
-          </div>
+              </div>
+            )
+          })}
         </section>
       )}
 

@@ -59,6 +59,8 @@ export interface WorkBuddyMeter {
 
 /** Account identity read from the local CodeBuddy credential file. */
 export interface WorkBuddyAccount {
+  /** Stable, non-secret selection key derived from region + account identity. */
+  id: string
   uid: string | null
   nickname: string | null
   /** Tencent UIN, masked by the card rather than sent in full. */
@@ -74,8 +76,14 @@ export interface WorkBuddyAccount {
   domain: string
   /** Unix milliseconds the access token expires. */
   expiresAt: number | null
-  /** File the credential was read from; shown so a user can tell accounts apart. */
+  /** File the credential was read from; null for plugin-managed accounts. */
   sourceFile: string | null
+  /** Desktop credentials are external; managed credentials belong to this plugin. */
+  source: 'desktop' | 'managed'
+  /** Managed credentials may be deleted; desktop credentials may only be hidden. */
+  removable: boolean
+  /** Hidden desktop accounts do not participate in automatic selection. */
+  hidden: boolean
 }
 
 /** One point-in-time quota snapshot for the signed-in WorkBuddy account. */
@@ -117,6 +125,10 @@ export interface WorkBuddyWebStatus {
   models: WorkBuddyModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: WorkBuddyReasoningEffort | null
+  /** Account selected for model discovery and all requests; null means automatic. */
+  selectedAccountId: string | null
+  /** Encrypted storage used for accounts added from this plugin. */
+  managedStoragePath: string
   /** Route the plugin currently serves; false when another plugin owns it. */
   serving: boolean
   /** Diagnostic when the route is owned by a different adapter family. */
@@ -129,6 +141,7 @@ export interface WorkBuddySettingsUpdateDto {
   enabledModelIds?: string[]
   contextWindowOverrides?: Record<string, number>
   defaultReasoningEffort?: WorkBuddyReasoningEffort | null
+  selectedAccountId?: string | null
 }
 
 /** Result of a connection test against the upstream chat endpoint. */

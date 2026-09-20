@@ -26,7 +26,7 @@ import {
   isIntlDomain,
   refreshSourceForDomain,
 } from './types.ts'
-import { FileCredentialStore, type WorkBuddyCredentials } from './token-store.ts'
+import { FileCredentialStore, workBuddyAccountId, type WorkBuddyCredentials } from './token-store.ts'
 import type { WorkBuddyModelEntry } from './model-catalog.ts'
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 
@@ -150,6 +150,7 @@ export async function refreshCredentials(
 /** Public account facts for the settings card. */
 export function accountFromCredentials(credentials: WorkBuddyCredentials): WorkBuddyAccount {
   return {
+    id: workBuddyAccountId(credentials),
     uid: credentials.uid ?? null,
     nickname: credentials.nickname ?? null,
     uin: credentials.uin ?? null,
@@ -159,7 +160,10 @@ export function accountFromCredentials(credentials: WorkBuddyCredentials): WorkB
     backend: credentials.backend,
     domain: credentials.domain,
     expiresAt: credentials.expiresAt > 0 ? credentials.expiresAt : null,
-    sourceFile: credentials.sourceFile,
+    sourceFile: credentials.sourceFile || null,
+    source: credentials.source,
+    removable: credentials.source === 'managed',
+    hidden: false,
   }
 }
 
@@ -232,6 +236,7 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
 
 let cachedCatalog: { region: WorkBuddyCredentials['region']; models: WorkBuddyModelEntry[]; fetchedAt: number } | undefined
 let catalogInFlight: Promise<WorkBuddyModelEntry[]> | null = null
+let catalogInFlightRegion: WorkBuddyCredentials['region'] | null = null
 const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000
 
 export function getCachedCatalog(): WorkBuddyModelEntry[] {
@@ -241,6 +246,7 @@ export function getCachedCatalog(): WorkBuddyModelEntry[] {
 export function clearCachedCatalog(): void {
   cachedCatalog = undefined
   catalogInFlight = null
+  catalogInFlightRegion = null
 }
 
 /**
@@ -276,7 +282,7 @@ export async function loadConfigCatalog(
     && Date.now() - cachedCatalog.fetchedAt < CATALOG_CACHE_TTL_MS) {
     return cachedCatalog.models
   }
-  if (catalogInFlight) return catalogInFlight
+  if (catalogInFlight && catalogInFlightRegion === credentials.region) return catalogInFlight
   const request = fetchConfigCatalog(credentials, options)
     .then((models) => {
       if (models.length > 0) {
@@ -287,10 +293,14 @@ export async function loadConfigCatalog(
     })
     .catch(() => cachedCatalog?.models ?? [])
   catalogInFlight = request
+  catalogInFlightRegion = credentials.region
   try {
     return await request
   } finally {
-    if (catalogInFlight === request) catalogInFlight = null
+    if (catalogInFlight === request) {
+      catalogInFlight = null
+      catalogInFlightRegion = null
+    }
   }
 }
 
@@ -425,6 +435,7 @@ export function billingMeters(billing: ParsedBilling): WorkBuddyMeter[] {
 
 let cachedQuota: WorkBuddyAccountQuota | undefined
 let quotaInFlight: Promise<WorkBuddyAccountQuota> | null = null
+let quotaInFlightAccountId: string | null = null
 let quotaCacheEpoch = 0
 
 export function getCachedQuota(): WorkBuddyAccountQuota | undefined {
@@ -435,6 +446,7 @@ export function clearCachedQuota(): void {
   quotaCacheEpoch += 1
   cachedQuota = undefined
   quotaInFlight = null
+  quotaInFlightAccountId = null
 }
 
 /**
@@ -447,18 +459,27 @@ export async function fetchAccountQuota(
   store = new FileCredentialStore(),
   fetchFn: typeof fetch = fetch,
   force = false,
+  accountId: string | null = null,
+  hiddenAccountIds: readonly string[] = [],
 ): Promise<WorkBuddyAccountQuota> {
-  if (!force && cachedQuota && Date.now() - (cachedQuota.fetchedAt || 0) < QUOTA_CACHE_TTL_MS) {
+  const credentials = await store.read({ accountId, hiddenAccountIds })
+  if (credentials === null) throw new Error(`Not signed in to ${PROVIDER_NAME}.`)
+  const requestedAccountId = workBuddyAccountId(credentials)
+  if (!force
+    && cachedQuota
+    && cachedQuota.account.id === requestedAccountId
+    && Date.now() - (cachedQuota.fetchedAt || 0) < QUOTA_CACHE_TTL_MS) {
     return cachedQuota
   }
-  if (quotaInFlight) return quotaInFlight
+  // A poll already serving another account must not be reused after a switch.
+  if (quotaInFlight && quotaInFlightAccountId === requestedAccountId) return quotaInFlight
 
   const epoch = quotaCacheEpoch
   const request = (async (): Promise<WorkBuddyAccountQuota> => {
-    const credentials = await store.read()
-    if (credentials === null) throw new Error(`Not signed in to ${PROVIDER_NAME}.`)
+    const current = await store.read({ accountId: requestedAccountId, hiddenAccountIds })
+    if (current === null) throw new Error(`Not signed in to ${PROVIDER_NAME}.`)
 
-    const fresh = await store.ensureFresh(credentials, (current) => refreshCredentials(current, { fetchFn }))
+    const fresh = await store.ensureFresh(current, (candidate) => refreshCredentials(candidate, { fetchFn }))
 
     const response = await fetchFn(`${fresh.backend}${BILLING_PATH}`, {
       method: 'POST',
@@ -498,10 +519,14 @@ export async function fetchAccountQuota(
   })()
 
   quotaInFlight = request
+  quotaInFlightAccountId = requestedAccountId
   try {
     return await request
   } finally {
-    if (quotaInFlight === request) quotaInFlight = null
+    if (quotaInFlight === request) {
+      quotaInFlight = null
+      quotaInFlightAccountId = null
+    }
   }
 }
 

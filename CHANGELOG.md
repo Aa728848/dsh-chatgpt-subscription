@@ -22,11 +22,11 @@
   - 同一条提示现在带上底层原因（如 `(DPAPI credential write failed)`），不再是无信息文案。
   - 新增 2 条测试：内核"记账写失败仍能取到凭据、冷却写入仍报错"，配额服务"错误文案包含底层原因"。
   - 新增 54 条测试：`account-pool-core`（11）、`account-pool-section`（9）、`codex-account-pool`（12，含 429/401 轮换与并发刷新单飞）、`command-code-account-pool`（8，含路由动作与单 Key 回退）、`kimi-code-account-pool`（11，含跨区域、套餐型 429 不冷却、刷新失败换号）、`antigravity-section-pool`（3，锁定 Antigravity Tab 已改用共享卡片），外加 `isolated-home` 哨兵 1 条。
-- **新增 WorkBuddy 线路**（`workbuddy` Provider），接入腾讯 WorkBuddy / CodeBuddy 订阅，成为本插件的第五条线路。与其它线路不同，它**不保存自己的凭据**，而是直接复用 CodeBuddy 桌面端的登录态，因此桌面上登录过就能直接用。
+- **新增 WorkBuddy 线路**（`workbuddy-subscription` Provider），接入腾讯 WorkBuddy / CodeBuddy 订阅，成为本插件的第五条线路。该 ID 与用户自定义 OpenAI 兼容 Provider 常用的 `workbuddy` 分开，因此二者可同时安装和选择。既可直接复用 CodeBuddy 桌面端登录态，也可按国区/国际区通过官方浏览器授权添加账号；后者存入 Windows DPAPI / macOS Keychain / Linux Secret Service。插件托管账号可删除，桌面账号只能隐藏/恢复且绝不删除原凭据文件。
   - **凭据来源**：扫描桌面端的 `*.info` 凭据文件（`CODEBUDDY_AUTH_DIR` 可覆盖，与官方工具链一致）。目录里通常混着当前凭据与若干带时间戳的历史快照，选取顺序是**规范文件名优先，其余按 token 剩余有效期取最长**——只按 mtime 选会选到过期快照（开发过程中确实选到过）。扫描失败的单个文件被跳过而不是让整次扫描失败；`/status` 每次都重扫，避免缓存掩盖刚登录的凭据。
   - **续期回写**：token 临近过期时调 `/v2/plugin/auth/token/refresh`，并把新 token **原子写回原文件**（只改 `auth` 块，保留桌面端自己的字段），以免桌面端掉线。同进程并发调用**共用一次刷新**——refresh token 会轮换，两次并发刷新会互相作废。写回失败不影响本次请求。
   - **两条上游硬约束**（实测）：该端点是 OpenAI 兼容的 `POST /v2/chat/completions`，但**只支持流式**（`stream:false` → 400 `code 11101`），且**首条消息必须是 system**（国际区否则 400 `code 11128`）。请求构造器因此始终发 `stream:true`，并在调用方没给系统提示时补一条中性提示，手搓的一次性请求也不会踩到这条规则。
-  - **区域是凭据属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，所以模型选择器**按账号区域过滤**。
+  - **区域是凭据属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。设置页按**国区 / 国际区**分组账号，历史快照按账号去重；所选账号持久化，并统一控制模型目录、额度、连接测试和实际对话。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，所以模型选择器**按当前账号区域过滤**。
   - **模型目录取自网关的 `/v3/config`**（官方 CLI 启动时读的就是它），而不是靠模型名猜测：每个模型的真实上下文上限、输出上限、是否接受图片、可用思考档位都由它给出，并带 30 分钟缓存与手动刷新。`/v1/models` 在这条线路上是 404，所以内置表只作为离线兜底。
   - **内置兜底表是从真实 `/v3/config` 转录的，不是手写猜测**。早期手写版本按厂商宣传页推断，两个方向都错了——`glm-5.3` 与 `kimi-k3` 实际都是 1M，而非 200K/256K。目录同时区分**默认服务长度**与**模型上限**（如 `deepseek-v4.1-flash` 默认 300K、最大 1M）；本线路不发显式长度参数，因此 DSH 的压缩与溢出判断按默认服务长度计算，不会越过后端实际接受的窗口。
   - **逐模型实测了目录的可用性**：国际区 21/21 可调用，国区 29 个里有 7 个（`glm-5.0`、`glm-4.7`、`glm-4.6`、`glm-4.6v`、`kimi-k2-thinking`、`hy4-preview-x`、`minimax-m2.5`）由网关列出却返回 400 `code 11102`——网关会列出**当前套餐无权调用**的模型。这些条目被保留（门控是按账号而非按模型，付费套餐可能可用），且默认勾选集合已排除它们；`11102` 的失败文案同时说明「区域不支持」与「套餐不包含」两种情况，因为两者的处理方式相同（换模型）。四个默认勾选模型（`glm-5.3` / `deepseek-v4.1-flash` / `hy4-preview` / `kimi-k2.6`）已在两个区都验证可调用。
@@ -40,7 +40,7 @@
   - **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛错而不是把半截文本当成完整回答。
   - 额度来自 `/billing/meter/get-user-resource`（套餐名、本周期已用/上限、剩余额度、重置时间）。设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有额度胶囊；卡片列出目录中所有可用账号并标明区域，`UIN` 脱敏显示。
   - **请求身份统一使用 CLI UA**（`CLI/2.63.2 CodeBuddy/2.63.2`）：实测 `CodeBuddyIDE` 被 `/v3/config` 以 400 `code 12403` 拒绝，国际区对话端点也直接返回 401，因此不做按端点切换。
-  - 路由挂在 `/workbuddy/api`（`status` / `accounts` / `rescan` / `quota` / `models` / `settings` / `catalog/refresh` / `connection/test`），修改状态的路由同样只接受同源 JSON POST。
+  - 路由挂在 `/workbuddy/api`（`status` / `accounts` / `accounts/login` / `accounts/login/status` / `accounts/action` / `rescan` / `quota` / `models` / `settings` / `catalog/refresh` / `connection/test`），修改状态的路由同样只接受同源 JSON POST。
 - 新增 **115 条单测**：`test/workbuddy-mapper.test.ts`（26 条：system-first 注入与折叠、并行工具结果分组、图片预算按最旧省略、读不出的图片降级为可见文本、SSE 文本/思考/工具调用解码、usage 缓存 token 拆分、`[DONE]` 终止与截断流拒绝）、`test/workbuddy-adapter.test.ts`（28 条：错误分类、区域过滤、目录能力声明、流式端到端、续期后重发、截断流、重试策略取值，以及**思考档位回落到目录默认值**与**显式档位不被覆盖**两条回归）、`test/workbuddy-routes.test.ts`（36 条：`/v3/config` 解析、请求头身份、续期合并、billing 解析与多套餐求和、状态与同源校验、跨源拒绝、方法/子路径兜底、**响应不含 token**，以及**单个 `effort` 字段不等于完整档位表**的回归）、`test/workbuddy-store.test.ts`（24 条：区域推断、凭据解析与选取顺序、扫描容错、续期回写与并发共用、设置存储、目录窗口与能力断言）、`test/workbuddy-ui.test.tsx`（10 条：容量解析与格式化、UIN 脱敏、额度胶囊选取与告警分级）。
 - 已用真实订阅凭据对**源码与构建产物**分别验证，并在真实 DSH 中装载运行：`/workbuddy/api/status` 在 `dsh web` 下返回 21 个国际区模型、`serving=true` 无路由冲突、真实额度，且响应不含任何 token 字段；把插件注册进 DSH 真实的 `LlmRuntime` 后，`listModels` / `prepareCall` / `stream` 与助手消息组装全部走通；`deepseek-v4.1-flash` 的文本、图片理解（两张不同颜色图片给出不同答案）、工具调用与工具结果回传、12.6k token 长提示、多轮记忆，在两个区共 52 项断言全绿。
 

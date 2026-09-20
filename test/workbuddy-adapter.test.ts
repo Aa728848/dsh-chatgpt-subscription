@@ -150,6 +150,12 @@ describe('WorkBuddy failure classification', () => {
 })
 
 describe('WorkBuddy adapter catalog', () => {
+  it('uses the subscription-specific provider id so a custom workbuddy API can coexist', async () => {
+    const adapter = makeOpenAdapter(await makeStore())
+    expect(adapter.providerInfo('workbuddy-subscription').id).toBe('workbuddy-subscription')
+    expect((await adapter.listModels())[0]?.provider).toBe('workbuddy-subscription')
+  })
+
   it('offers only the models the account region serves', async () => {
     const cn = makeOpenAdapter(await makeStore({ domain: 'copilot.tencent.com' }))
     const cnIds = (await cn.listModels()).map((m) => m.id)
@@ -160,6 +166,11 @@ describe('WorkBuddy adapter catalog', () => {
     // Asking a region for a model it does not serve answers 400 code 11102, so
     // offering one would hand the user a model that cannot work.
     expect(intlIds).not.toContain('kimi-k2-thinking')
+  })
+
+  it('expands the untouched shipped default to every available model', async () => {
+    const adapter = makeAdapter(await makeStore())
+    expect((await adapter.listModels()).map((model) => model.id)).toEqual(['glm-5.3', 'kimi-k2-thinking'])
   })
 
   it('declares image input only for models the catalog says accept it', async () => {

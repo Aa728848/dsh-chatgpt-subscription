@@ -38,6 +38,7 @@ import {
   type WorkBuddyModelEntry,
 } from './model-catalog.ts'
 import { loadConfigCatalog, workBuddyHeaders, refreshCredentials } from './client.ts'
+import { resolveEnabledModelIds } from './routes.ts'
 import {
   assertStreamComplete,
   buildChatRequest,
@@ -125,6 +126,14 @@ export class WorkBuddyAdapter extends LlmAdapter {
     return this.preferences ? Promise.resolve(this.preferences.status()) : this.modelSettings.read()
   }
 
+  private async credentials(settings?: WorkBuddyModelSettings): Promise<WorkBuddyCredentials | null> {
+    const current = settings ?? await this.settings()
+    return this.store.read({
+      accountId: current.selectedAccountId,
+      hiddenAccountIds: current.hiddenAccountIds,
+    })
+  }
+
   /**
    * Catalog for the picker: the live gateway listing when reachable, the
    * shipped table otherwise.
@@ -151,12 +160,16 @@ export class WorkBuddyAdapter extends LlmAdapter {
     const prov = provider || PROVIDER_ID
     const settings = await this.settings()
     if (settings.enabled === false) return []
-    const credentials = await this.store.read()
+    const credentials = await this.credentials(settings)
     if (credentials === null) return []
 
     const catalog = await this.catalog(credentials)
     const available = modelsForRegion(credentials.region, catalog)
-    const enabled = new Set(settings.enabledModelIds)
+    const enabled = new Set(resolveEnabledModelIds(
+      settings.enabledModelIds,
+      available.map((model) => model.id),
+      true,
+    ))
 
     return available
       .filter((model) => enabled.has(model.id))
@@ -172,7 +185,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
   async resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     if (signal?.aborted) throw new LlmError('WorkBuddy model resolution aborted', 'ABORTED')
     const settings = await this.settings()
-    const credentials = await this.store.read()
+    const credentials = await this.credentials(settings)
     const catalog = credentials === null ? FALLBACK_MODELS : await this.catalog(credentials)
     const entry = resolveWorkBuddyModel(modelId, catalog)
     const efforts = workBuddyReasoningEfforts(modelId, catalog)
@@ -246,7 +259,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
    */
   private async effortFor(options: GenerateOptions): Promise<string | undefined> {
     const settings = await this.settings()
-    const credentials = await this.store.read()
+    const credentials = await this.credentials(settings)
     const catalog = credentials === null ? FALLBACK_MODELS : await this.catalog(credentials)
     const efforts = workBuddyReasoningEfforts(options.model, catalog)
     if (efforts.length === 0) return undefined
@@ -261,7 +274,8 @@ export class WorkBuddyAdapter extends LlmAdapter {
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const stored = await this.store.read()
+    const settings = await this.settings()
+    const stored = await this.credentials(settings)
     if (stored === null) {
       throw new LlmError(
         `Not signed in to ${PROVIDER_NAME}. Sign in with the CodeBuddy desktop client; `

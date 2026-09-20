@@ -181,7 +181,7 @@ describe('WorkBuddy token refresh', () => {
     const credentials = {
       accessToken: 'old', refreshToken: 'old-refresh', expiresAt: 1,
       region: 'cn' as const, domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com',
-      uid: 'u1', sourceFile: '/tmp/a.info', sourceMtimeMs: 0,
+      uid: 'u1', sourceFile: '/tmp/a.info', sourceMtimeMs: 0, source: 'desktop' as const,
     }
     const fetchFn = (async () => new Response(JSON.stringify({
       code: 0,
@@ -200,7 +200,7 @@ describe('WorkBuddy token refresh', () => {
     const credentials = {
       accessToken: 'old', refreshToken: 'r', expiresAt: 1,
       region: 'cn' as const, domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com',
-      sourceFile: '/tmp/a.info', sourceMtimeMs: 0,
+      sourceFile: '/tmp/a.info', sourceMtimeMs: 0, source: 'desktop' as const,
     }
     const fetchFn = (async () => new Response(JSON.stringify({ code: 40001, msg: 'invalid refresh token' }), { status: 200 })) as unknown as typeof fetch
     await expect(refreshCredentials(credentials, { fetchFn })).rejects.toThrow(/invalid refresh token/)
@@ -481,6 +481,43 @@ describe('WorkBuddy routes', () => {
     expect((await settings.read()).defaultReasoningEffort).toBe('max')
   })
 
+  it('persists a selected regional account and returns its model catalog', async () => {
+    const dir = await makeAuthDir()
+    await fs.writeFile(path.join(dir, 'intl.info'), JSON.stringify({
+      account: { uid: 'intl-user', nickname: 'international' },
+      auth: { accessToken: 'intl-token', expiresAt: Date.now() + 2_000_000, domain: 'www.workbuddy.ai' },
+    }), 'utf8')
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { selectedAccountId: 'intl:intl-user' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(200)
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.account.id).toBe('intl:intl-user')
+    expect(payload.value.account.region).toBe('intl')
+    expect((await settings.read()).selectedAccountId).toBe('intl:intl-user')
+  })
+
+  it('rejects an account id that is not present on this machine', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings)
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { selectedAccountId: 'intl:missing' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(400)
+    expect((await settings.read()).selectedAccountId).toBeNull()
+  })
+
   it('ignores an unknown reasoning level instead of storing it', async () => {
     const dir = await makeAuthDir()
     const settings = await makeSettings()
@@ -528,7 +565,45 @@ describe('WorkBuddy routes', () => {
     expect(res.captured.status).toBe(200)
     const payload = JSON.parse(res.captured.body)
     expect(payload.value.accounts).toHaveLength(2)
+    expect(payload.value.accounts.map((account: any) => account.id)).toEqual(['cn:uid-1', 'intl:uid-2'])
     expect(res.captured.body).not.toContain('token')
+  })
+
+  it('hides and restores a desktop account without deleting its source file', async () => {
+    const dir = await makeAuthDir()
+    const source = path.join(dir, 'workbuddy-desktop.info')
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings)
+    const hide = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'hide', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
+      hide,
+    )
+    expect(hide.captured.status).toBe(200)
+    expect((await settings.read()).hiddenAccountIds).toContain('cn:uid-1')
+    expect(await fs.stat(source)).toBeTruthy()
+    const restore = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'restore', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
+      restore,
+    )
+    expect(restore.captured.status).toBe(200)
+    expect((await settings.read()).hiddenAccountIds).toEqual([])
+    expect(await fs.stat(source)).toBeTruthy()
+  })
+
+  it('refuses to delete a desktop-owned credential', async () => {
+    const dir = await makeAuthDir()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings())
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'delete', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(400)
+    expect(res.captured.body).toContain('cannot be deleted')
   })
 
   it('refuses a connection test without a credential', async () => {

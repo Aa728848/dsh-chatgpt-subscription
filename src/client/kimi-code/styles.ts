@@ -29,7 +29,7 @@ const BASE = `
 .dsha-models{display:flex;flex-wrap:wrap;gap:7px;padding-top:8px}
 .dsha-models label{cursor:pointer;display:block;position:relative}
 .dsha-models input{position:absolute;opacity:0;pointer-events:none}
-.dsha-models span{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;padding:5px 8px;transition:all .15s ease}
+.dsha-models>label>span{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;padding:5px 8px;transition:all .15s ease}
 .dsha-models input:checked+span{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 14%,var(--dsw-alias-bg-layer-2));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 55%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary);font-weight:600}
 .dsha-models input:disabled+span{cursor:default;opacity:.5}
 .dsha-pref-row{align-items:center;border-bottom:0.5px solid var(--dsw-alias-border-l2);display:flex;gap:16px;justify-content:space-between;min-height:58px;padding:10px 0}

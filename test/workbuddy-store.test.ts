@@ -5,9 +5,11 @@ import path from 'node:path'
 import {
   FileCredentialStore,
   FileModelSettingsStore,
+  ManagedCredentialStore,
   isExpired,
   parseCredentialFile,
   scanCredentials,
+  workBuddyAccountId,
 } from '../src/host/workbuddy/token-store.ts'
 import { FALLBACK_MODELS, modelsForRegion, resolveWorkBuddyModel } from '../src/host/workbuddy/model-catalog.ts'
 import { backendForDomain, isIntlDomain, regionForDomain, refreshSourceForDomain } from '../src/host/workbuddy/types.ts'
@@ -158,6 +160,60 @@ describe('WorkBuddy credential scanning', () => {
     const store = new FileCredentialStore(dir)
     expect(await store.read()).toBeNull()
   })
+
+  it('deduplicates snapshots and selects a requested China or international account', async () => {
+    const dir = await makeAuthDir({
+      'cn-live.info': credentialFile({ accessToken: 'cn-live', uid: 'cn-user', domain: 'copilot.tencent.com', expiresAt: Date.now() + 5_000_000 }),
+      'cn-old.info': credentialFile({ accessToken: 'cn-old', uid: 'cn-user', domain: 'copilot.tencent.com', expiresAt: Date.now() + 1_000_000 }),
+      'intl-live.info': credentialFile({ accessToken: 'intl-live', uid: 'intl-user', domain: 'www.workbuddy.ai', expiresAt: Date.now() + 4_000_000 }),
+    })
+    const store = new FileCredentialStore(dir)
+    const accounts = await store.list()
+    expect(accounts).toHaveLength(2)
+    expect(accounts.map(workBuddyAccountId)).toEqual(['cn:cn-user', 'intl:intl-user'])
+    expect((await store.read({ accountId: 'intl:intl-user' }))?.accessToken).toBe('intl-live')
+    expect(await store.read({ accountId: 'intl:missing' })).toBeNull()
+  })
+})
+
+describe('WorkBuddy managed credential store', () => {
+  it('adds, replaces, and deletes credentials through the encrypted backend contract', async () => {
+    let value: any = null
+    const backend = {
+      load: async () => value === null ? null : structuredClone(value),
+      save: async (next: any) => { value = structuredClone(next) },
+      clear: async () => { value = null },
+    }
+    const managed = new ManagedCredentialStore(path.join(os.tmpdir(), `wb-managed-${Date.now()}.json`), backend)
+    const first = parseCredentialFile(credentialFile({ uid: 'managed-user', accessToken: 'first' }), '/tmp/a.info', 1)
+    first.source = 'managed'
+    first.sourceFile = ''
+    await managed.add(first)
+    expect((await managed.list())[0]?.accessToken).toBe('first')
+    await managed.add({ ...first, accessToken: 'second' })
+    expect(await managed.list()).toHaveLength(1)
+    expect((await managed.list())[0]?.accessToken).toBe('second')
+    expect(await managed.delete('cn:managed-user')).toBe(true)
+    expect(await managed.list()).toEqual([])
+  })
+
+  it('reuses a cached managed account instead of statting an empty source path', async () => {
+    let value: any = null
+    const backend = {
+      load: async () => value === null ? null : structuredClone(value),
+      save: async (next: any) => { value = structuredClone(next) },
+      clear: async () => { value = null },
+    }
+    const managed = new ManagedCredentialStore(path.join(os.tmpdir(), `wb-cache-${Date.now()}.json`), backend)
+    const credential = parseCredentialFile(credentialFile({ uid: 'cache-user' }), '/tmp/a.info', 1)
+    await managed.add({ ...credential, source: 'managed', sourceFile: '' })
+    const store = new FileCredentialStore(await makeAuthDir({}), 60_000, managed)
+    const first = await store.read({ accountId: 'cn:cache-user' })
+    await managed.delete('cn:cache-user')
+    const cached = await store.read({ accountId: 'cn:cache-user' })
+    expect(first?.uid).toBe('cache-user')
+    expect(cached?.uid).toBe('cache-user')
+  })
 })
 
 describe('WorkBuddy credential refresh bookkeeping', () => {
@@ -229,6 +285,7 @@ describe('WorkBuddy model settings store', () => {
     const settings = await store.read()
     expect(settings.enabled).toBe(true)
     expect(settings.defaultReasoningEffort).toBeNull()
+    expect(settings.selectedAccountId).toBeNull()
     expect(settings.enabledModelIds.length).toBeGreaterThan(0)
   })
 

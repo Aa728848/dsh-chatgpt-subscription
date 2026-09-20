@@ -70,10 +70,10 @@
 
 **WorkBuddy 线路**
 
-- 注册 `workbuddy` Provider，接入腾讯 **WorkBuddy / CodeBuddy 订阅**。与其它线路不同，它**不保存自己的凭据**：直接读取 CodeBuddy 桌面端已登录的 `*.info` 凭据文件，因此桌面上登录过就能直接用；token 只留在 Host 进程内，不进入浏览器；
+- 注册 `workbuddy-subscription` Provider，接入腾讯 **WorkBuddy / CodeBuddy 订阅**。该 ID 特意与用户常用的自定义 OpenAI 兼容线路 `workbuddy` 分开，安装插件不会覆盖或隐藏原有自定义 API。可直接扫描 CodeBuddy 桌面端已登录的 `*.info` 凭据，也可从设置页选择国区/国际区并通过官方浏览器授权添加账号；插件添加的凭据保存在系统加密存储中（Windows DPAPI / macOS Keychain / Linux Secret Service），token 只留在 Host 进程内，不进入浏览器；
 - **续期后原子写回**原凭据文件（只改 `auth` 块），以免桌面端掉线；同一进程内的并发调用**共用一次刷新**，因为 refresh token 会轮换，两次并发刷新会互相作废；
 - 上游是 OpenAI 兼容的 `POST {backend}/v2/chat/completions`，但有两条硬约束：**只支持流式**（`stream:false` → 400 `code 11101`），且**首条消息必须是 system**（否则国际区返回 400 `code 11128`）。因此请求构造器始终发送 `stream:true`，并在调用方没给系统提示时补一条中性的，避免手搓的一次性请求踩到这条规则；
-- **区域是凭据属性，不是请求属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，因此模型选择器**按账号区域过滤**；
+- **区域是凭据属性，不是请求属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。设置页会把账号按**国区 / 国际区**分组并允许选择；切换后，模型目录、额度和后续对话都使用该账号。历史凭据快照按账号身份自动去重。插件托管账号可真正删除；桌面扫描账号只能从本插件隐藏/恢复，永不删除 CodeBuddy 的原文件。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，因此模型选择器**按当前账号区域过滤**；
 - **模型目录取自网关自己的 `/v3/config`**（官方 CLI 启动时读的就是它）：每个模型的真实上下文上限、输出上限、是否接受图片、以及可用的思考档位都在这里，不做任何按模型名猜测。`/v1/models` 在这条线路上是 404，所以此前只能靠内置表——现在内置表只作为离线兜底，且是**从真实 `/v3/config` 转录**的（早期手写版本把 `glm-5.3`、`kimi-k3` 的窗口猜成 200K/256K，实际都是 1M）；
 - 目录同时区分**默认服务的上下文长度**与**模型上限**（如 `deepseek-v4.1-flash` 默认 300K、最大 1M）。本线路不发送显式长度参数，所以 DSH 的压缩与溢出判断按**默认服务长度**计算，不会让请求越过后端实际接受的窗口；
 - 思考档位**逐模型**取目录声明的档位表，回落顺序为「调用方显式指定 → 用户配置的默认档 → 目录为该模型声明的默认档」。最后一档不能省：上游在请求不带 `reasoning_effort` 时返回**空的 `reasoning_content`**（实测同一提示：不带字段 0 字符，带字段 130–215 字符），不发送就等于静默丢弃模型的思考。目录里的单个 `effort` 字段是**默认值**而不是完整档位表（实测 `deepseek-v4.1-flash` 从 `minimal` 到 `max` 全部接受），因此这类模型使用共享档位表；显式声明了 `supportedEfforts` 的模型则原样采信。不在该模型档位集合内的取值会被忽略而不是发出去（上游对不支持的档位返回 `code 11150`）；
@@ -303,12 +303,12 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 ## WorkBuddy 线路
 
-1. 先在 **CodeBuddy 桌面端**登录（插件复用它的登录态，不另做登录流程）；
-2. 重启 `dsh web`；
-3. 打开 **设置 → WorkBuddy**，确认卡片已识别到凭据（未识别到时点「重新扫描」）；
-4. 按需勾选模型、设置默认思考深度与上下文窗口。
+1. 重启 DSH，让 Host 加载本插件；
+2. 打开 **设置 → WorkBuddy**；
+3. 二选一：登录 CodeBuddy 桌面端后点「重新扫描」，或直接点「添加国区账号 / 添加国际区账号」并在官方页面完成浏览器授权；
+4. 在国区/国际区分组中选择账号，再按需勾选模型、设置默认思考深度与上下文窗口。
 
-`workbuddy` 会像其他 Provider 一样出现在 DSH 模型选择器中。**上下文窗口**默认取网关 `/v3/config` 声明的**默认服务长度**，可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `300K` / `200000` 等写法）；**默认思考深度**逐模型生效，且模型的可用档位来自目录声明——档位不在该模型集合内时不会被发送。
+`workbuddy-subscription` 会像其他 Provider 一样出现在 DSH 模型选择器中，并可与名为 `workbuddy` 的自定义 API 同时存在。**上下文窗口**默认取网关 `/v3/config` 声明的**默认服务长度**，可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `300K` / `200000` 等写法）；**默认思考深度**逐模型生效，且模型的可用档位来自目录声明——档位不在该模型集合内时不会被发送。
 
 **凭据目录**按平台解析，可用 `CODEBUDDY_AUTH_DIR` 覆盖（与官方工具链一致）：
 
@@ -326,6 +326,7 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | --- | --- |
 | 模型生成 | `POST /v2/chat/completions`（仅流式） |
 | 模型目录 | `GET /v3/config` |
+| 浏览器授权 | `POST /v2/plugin/auth/state` + `GET /v2/plugin/auth/token` |
 | 令牌续期 | `POST /v2/plugin/auth/token/refresh` |
 | 额度 | `POST /billing/meter/get-user-resource` |
 
@@ -337,7 +338,10 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/status` | 账号、额度、模型目录与路由归属（每次都重扫凭据目录） |
-| GET | `/accounts` | 列出凭据目录中所有可用账号（不含 token） |
+| GET | `/accounts` | 列出桌面扫描及插件托管账号（不含 token） |
+| POST | `/accounts/login` | 按国区/国际区启动官方浏览器授权 |
+| GET | `/accounts/login/status` | 读取授权轮询状态（不含 token） |
+| POST | `/accounts/action` | 删除插件托管账号，或隐藏/恢复桌面账号 |
 | POST | `/rescan` | 清缓存并重扫凭据目录 |
 | GET / POST | `/quota` | 强制刷新额度（POST）或读取当前状态（GET） |
 | GET / POST | `/models`、`/settings` | 读取或更新勾选模型、上下文窗口与默认思考深度 |
@@ -350,7 +354,7 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 Antigravity 的 access token / refresh token 使用独立的系统凭据存储：Windows 使用 CurrentUser DPAPI（`$DSH_HOME/storages/antigravity-oauth.json.dpapi`），macOS 使用登录钥匙串，Linux 使用 Secret Service。macOS / Linux 的服务名为 `dsh-antigravity`，账号键按旧凭据文件的绝对路径生成，隔离不同的 `DSH_HOME`。
 
-**WorkBuddy 线路不保存任何凭据**：它读取的是 CodeBuddy 桌面端自己的登录态文件，token 只存在于 Host 进程内存中，从不进入浏览器（`/workbuddy/api` 的所有响应都不含 `accessToken` / `refreshToken`，仅有测试锁定这一点）。唯一的写入是把续期后的 token **原子写回原文件**，且只改 `auth` 块、保留桌面端自己的其余字段——目的是不让桌面端掉线。该写入失败不影响本次请求。
+**WorkBuddy token 仅在 Host 内处理，从不进入浏览器**（`/workbuddy/api` 响应不含 `accessToken` / `refreshToken`，有测试锁定）。桌面扫描账号仍使用 CodeBuddy 自己的登录态文件：续期只原子写回其 `auth` 块；从本插件删除时只隐藏/恢复，绝不删除原文件。通过浏览器授权添加的账号归本插件所有，保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/workbuddy-accounts.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；这类账号可在设置页真正删除。
 
 升级后首次访问 Antigravity 凭据时，会读取旧 `storages/antigravity-oauth.json`，加密保存并读回校验；成功后删除旧 JSON，通常无需重新登录。失败会保留旧文件并报告错误，不会回退到明文存储。注销同时清理旧文件和新凭据。Linux 需要 `secret-tool`（libsecret 工具包）及可用、已解锁的 Secret Service 钥匙环；无桌面服务的主机也需要配置该服务。系统凭据存储保护落盘数据，不防御当前用户下已获权限的进程。
 

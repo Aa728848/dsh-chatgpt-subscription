@@ -75,7 +75,7 @@ export function WorkBuddyComposerQuota({ directory, loadModelDirectory }: Props)
   const [loading, setLoading] = useState(false)
   const mountedRef = useRef(false)
   const selected = modelState.current
-  const isWorkBuddy = selected?.provider === 'workbuddy'
+  const isWorkBuddy = selected?.provider === 'workbuddy-subscription'
 
   useEffect(() => {
     loadModelDirectory()
