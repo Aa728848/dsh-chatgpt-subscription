@@ -215,12 +215,10 @@ export class WorkBuddyAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const settings = await this.settings()
-    const configured = settings.defaultReasoningEffort
-    const effort = options.reasoningEffort ?? configured ?? undefined
-    const effectiveOptions: GenerateOptions = effort === undefined || effort === null
+    const effort = await this.effortFor(options)
+    const effectiveOptions: GenerateOptions = effort === undefined
       ? options
-      : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
+      : { ...options, reasoningEffort: ReasoningEffortId(effort) }
 
     yield* wrapStreamWithWatchdog(
       (watchdogSignal) => this.requestStream(effectiveOptions, watchdogSignal),
@@ -229,6 +227,36 @@ export class WorkBuddyAdapter extends LlmAdapter {
       STREAM_IDLE_TIMEOUT_CODE,
       PROVIDER_NAME,
     )
+  }
+
+  /**
+   * Effort this request should carry, or `undefined` to send none.
+   *
+   * Order: the caller's explicit choice, then the user's configured level, then
+   * the level the gateway catalog declares for this model. The last step
+   * matters because the endpoint returns an **empty `reasoning_content`** when
+   * no `reasoning_effort` is present, even for a reasoning-only model: measured
+   * on `deepseek-v4.1-flash`, the same prompt yields 0 reasoning characters
+   * with no field and 130-215 with one. Omitting it therefore silently drops
+   * the model's thinking instead of letting the provider pick, so the catalog's
+   * own default (which is what the official CLI sends) is materialized here.
+   *
+   * A candidate the model does not accept is discarded rather than sent, since
+   * the endpoint rejects an unsupported level with `code 11150`.
+   */
+  private async effortFor(options: GenerateOptions): Promise<string | undefined> {
+    const settings = await this.settings()
+    const credentials = await this.store.read()
+    const catalog = credentials === null ? FALLBACK_MODELS : await this.catalog(credentials)
+    const efforts = workBuddyReasoningEfforts(options.model, catalog)
+    if (efforts.length === 0) return undefined
+
+    const candidates = [
+      options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort),
+      settings.defaultReasoningEffort ?? undefined,
+      resolveWorkBuddyModel(options.model, catalog).defaultReasoningEffort ?? undefined,
+    ]
+    return candidates.find((candidate): candidate is string => candidate !== undefined && efforts.includes(candidate))
   }
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {

@@ -18,6 +18,16 @@ beforeEach(() => {
   process.env.DSH_HOME = home
 })
 
+// The WorkBuddy route reads credentials from the CodeBuddy desktop client's own
+// auth directory rather than from `$DSH_HOME`, so isolating the harness home is
+// not enough for it: a store constructed without an explicit directory would
+// otherwise scan the developer's real signed-in account. Point it at a private
+// empty directory too. Tests that need credentials always pass their own
+// directory explicitly, so nothing depends on the platform default here.
+const codeBuddyAuth = mkdtempSync(path.join(os.tmpdir(), 'dsh-test-codebuddy-auth-'))
+process.env.CODEBUDDY_AUTH_DIR = codeBuddyAuth
+
 afterAll(() => {
   rmSync(home, { recursive: true, force: true })
+  rmSync(codeBuddyAuth, { recursive: true, force: true })
 })

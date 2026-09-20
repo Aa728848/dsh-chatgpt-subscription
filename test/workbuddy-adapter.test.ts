@@ -363,6 +363,118 @@ describe('WorkBuddy adapter retry policy', () => {
   })
 })
 
+describe('WorkBuddy reasoning effort on the wire', () => {
+  /**
+   * Capture the body one `stream()` call sends.
+   *
+   * The upstream returns an EMPTY `reasoning_content` when the request carries
+   * no `reasoning_effort` (measured on `deepseek-v4.1-flash`: 0 characters with
+   * no field, 130-215 with one), so whether the field goes out is the thing
+   * that decides whether the model's thinking survives.
+   */
+  async function capture(model: string, extra: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    let body: Record<string, unknown> | null = null
+    const store = await makeStore()
+    const adapter = new WorkBuddyAdapter(
+      store,
+      new FileModelSettingsStore(path.join(os.tmpdir(), `wb-effort-${Date.now()}-${Math.random()}.json`)),
+      undefined,
+      {
+        fetchFn: (async (url: any, init: any) => {
+          if (String(url).includes('/v2/chat/completions')) body = JSON.parse(String(init.body))
+          return sseResponse('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        }) as unknown as typeof fetch,
+        loadCatalog: async () => CATALOG,
+      },
+    )
+    const options = {
+      provider: 'workbuddy',
+      model,
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }],
+      ...extra,
+    } as unknown as GenerateOptions
+    for await (const _chunk of adapter.stream(options)) { /* drain */ }
+    if (body === null) throw new Error('the adapter sent no chat request')
+    return body
+  }
+
+  it('materializes the catalog default when the caller names no effort', async () => {
+    // Regression: `stream()` used to consult only the user's global preference,
+    // so a model whose catalog default is `high` sent no effort at all and the
+    // endpoint answered with empty reasoning_content.
+    const body = await capture('glm-5.3')
+    expect(body.reasoning_effort).toBe('high')
+  })
+
+  it('lets an explicit caller effort win over the catalog default', async () => {
+    // Regression: a model whose gateway entry carries only `{ effort: 'high' }`
+    // was given a one-entry ladder, so an explicit `low` was rejected as
+    // unsupported and silently replaced by the default.
+    expect((await capture('glm-5.3', { reasoningEffort: 'low' })).reasoning_effort).toBe('low')
+    expect((await capture('glm-5.3', { reasoningEffort: 'max' })).reasoning_effort).toBe('max')
+  })
+
+  it('sends no effort for a model that declares none', async () => {
+    const store = await makeStore()
+    const adapter = new WorkBuddyAdapter(
+      store,
+      new FileModelSettingsStore(path.join(os.tmpdir(), `wb-effort-${Date.now()}.json`)),
+      undefined,
+      {
+        fetchFn: (async (url: any, init: any) => {
+          const body = JSON.parse(String(init.body))
+          expect(body.reasoning_effort).toBeUndefined()
+          return sseResponse('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        }) as unknown as typeof fetch,
+        loadCatalog: async () => [{ ...CATALOG[0]!, id: 'plain', reasoningEfforts: [], defaultReasoningEffort: null }],
+      },
+    )
+    const options = {
+      provider: 'workbuddy',
+      model: 'plain',
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }],
+    } as unknown as GenerateOptions
+    for await (const _chunk of adapter.stream(options)) { /* drain */ }
+  })
+
+  it('ignores a configured level the model does not accept', async () => {
+    // The endpoint rejects an unsupported level with code 11150, so a value the
+    // model's ladder excludes must never be forwarded.
+    const store = await makeStore()
+    const preferences = {
+      status: () => ({
+        enabled: true,
+        enabledModelIds: CATALOG.map((m) => m.id),
+        contextWindowOverrides: {},
+        defaultReasoningEffort: 'xhigh',
+      }),
+      update: async () => { throw new Error('not used') },
+    }
+    let body: Record<string, unknown> | null = null
+    const adapter = new WorkBuddyAdapter(
+      store,
+      new FileModelSettingsStore(path.join(os.tmpdir(), `wb-effort-${Date.now()}.json`)),
+      preferences as any,
+      {
+        fetchFn: (async (url: any, init: any) => {
+          if (String(url).includes('/v2/chat/completions')) body = JSON.parse(String(init.body))
+          return sseResponse('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        }) as unknown as typeof fetch,
+        // This model accepts low/high/max only.
+        loadCatalog: async () => CATALOG,
+      },
+    )
+    const options = {
+      provider: 'workbuddy',
+      model: 'glm-5.3',
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }],
+    } as unknown as GenerateOptions
+    for await (const _chunk of adapter.stream(options)) { /* drain */ }
+    // `xhigh` is outside this model's ladder, so the catalog default is used.
+    expect(body!.reasoning_effort).toBe('high')
+  })
+})
+
 describe('WorkBuddy stream state helper parity', () => {
   it('matches the adapter pipeline on a reasoning-then-text turn', () => {
     const state = createStreamState()

@@ -28,6 +28,7 @@ import {
 } from './types.ts'
 import { FileCredentialStore, type WorkBuddyCredentials } from './token-store.ts'
 import type { WorkBuddyModelEntry } from './model-catalog.ts'
+import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 
 export interface WorkBuddyRequestOptions {
   fetchFn?: typeof fetch
@@ -191,11 +192,21 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
     if (maxContextWindow === undefined) continue
 
     const reasoning = asRecord(record.reasoning) ?? {}
-    const supported = Array.isArray(reasoning.supportedEfforts)
+    // The gateway publishes the reasoning ladder in two shapes:
+    //   { supportedEfforts: [...], defaultEffort: 'x' }  -> an explicit ladder
+    //   { effort: 'x' }                                  -> a DEFAULT only
+    // The second shape must not be read as a one-entry ladder. Measured on
+    // `deepseek-v4.1-flash`, which reports `effort: 'high'`, every level from
+    // `minimal` to `max` is accepted; treating that field as the whole ladder
+    // silently rejected a caller's explicit choice. Such a model therefore gets
+    // the shared ladder while `effort` remains its default.
+    const declared = Array.isArray(reasoning.supportedEfforts)
       ? reasoning.supportedEfforts.filter((effort): effort is string => typeof effort === 'string')
       : []
     const single = asString(reasoning.effort)
-    const efforts = supported.length > 0 ? supported : (single === undefined ? [] : [single])
+    const efforts = declared.length > 0
+      ? declared
+      : (single === undefined ? [] : [...WORKBUDDY_REASONING_EFFORTS])
 
     // The gateway reports the length it serves by default separately from the
     // maximum the model allows. This route requests no explicit length, so the
@@ -215,8 +226,7 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
       defaultReasoningEffort: asString(reasoning.defaultEffort) ?? single ?? null,
       canDisableThinking: reasoning.canDisableThinking === true,
       description: asString(record.descriptionZh) ?? asString(record.descriptionEn) ?? '',
-    })
-  }
+    })  }
   return models
 }
 

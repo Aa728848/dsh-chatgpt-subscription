@@ -118,12 +118,26 @@ describe('WorkBuddy config catalog parsing', () => {
     expect(deepseek.maxContextWindow).toBe(1_000_000)
   })
 
-  it('accepts a single `effort` field as a one-entry ladder', () => {
-    const models = parseConfigModels(CONFIG, 'intl')
+  it('treats a lone `effort` field as a DEFAULT, not as the whole ladder', () => {
+    // Regression: `{ effort: 'high' }` used to become a one-entry ladder, so a
+    // caller's explicit `low` was rejected as unsupported and silently replaced
+    // by the default. Measured on `deepseek-v4.1-flash`, which reports exactly
+    // that shape, every level from `minimal` to `max` is accepted.
+    const models = parseConfigModels(CONFIG, 'cn')
+    const deepseek = models.find((m) => m.id === 'deepseek-v4.1-flash')!
+    expect(deepseek.reasoningEfforts).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    expect(deepseek.defaultReasoningEffort).toBe('high')
+    // The same shape on a text-only model behaves identically.
     const kimi = models.find((m) => m.id === 'kimi-k2-thinking')!
-    expect(kimi.reasoningEfforts).toEqual(['high'])
     expect(kimi.defaultReasoningEffort).toBe('high')
     expect(kimi.supportsImage).toBe(false)
+  })
+
+  it('keeps a declared ladder exactly as the gateway states it', () => {
+    const models = parseConfigModels(CONFIG, 'cn')
+    const glm = models.find((m) => m.id === 'glm-5.3')!
+    // A `supportedEfforts` list is authoritative and must not be widened.
+    expect(glm.reasoningEfforts).toEqual(['low', 'high', 'max'])
   })
 
   it('skips image-generation tools and entries with no context window', () => {
