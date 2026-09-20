@@ -1,6 +1,11 @@
+import { accountPoolEn, accountPoolZh } from '../common/account-pool-labels.ts'
+
 export const NS_COMMAND_CODE = 'dsh-command-code'
 
 export const zh = {
+  // The account-management card is shared with every other provider tab, so its
+  // labels come from one place instead of drifting per provider.
+  ...accountPoolZh,
   title: 'Command Code',
   pageDesc: '登录 Command Code，管理可用模型、上下文窗口与额度。',
   account: '账号',
@@ -68,7 +73,8 @@ export const zh = {
   tokens: 'tokens',
 } as const
 
-export const en = {
+export const en: Record<keyof typeof zh, string> = {
+  ...accountPoolEn,
   title: 'Command Code',
   pageDesc: 'Sign in to Command Code and manage models, context windows, and quota.',
   account: 'Account',

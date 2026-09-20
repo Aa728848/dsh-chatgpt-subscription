@@ -39,19 +39,14 @@ export interface AntigravityAccountQuota {
   fetchedAt: number
 }
 
-export type AccountRotationStrategy = 'sequential' | 'round-robin'
+import type { AccountRotationStrategy, PoolAccountSummaryDto } from './account-pool-contracts.ts'
 
-export interface AntigravityAccountSummaryDto {
-  id: string
-  alias: string
-  email?: string
+export type { AccountRotationStrategy }
+
+/** One pooled Antigravity account as the settings card renders it. */
+export interface AntigravityAccountSummaryDto extends PoolAccountSummaryDto {
   projectId?: string
   planLabel?: string
-  isPrimary: boolean
-  lastUsedAt?: number
-  cooldownUntil?: number
-  cooldownReason?: string
-  expiresAt?: number
 }
 
 export interface AntigravityWebStatus {

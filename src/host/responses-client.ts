@@ -11,6 +11,7 @@ import {
 import { CODEX_RESPONSES_URL } from '../compat.ts'
 import { resolveCodexFallbackModel } from '../shared/model-catalog.ts'
 import { wrapStreamWithWatchdog } from './common/idle-watchdog.ts'
+import type { CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
@@ -19,6 +20,8 @@ import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/cont
 
 type FetchLike = typeof fetch
 const MAX_VISIBLE_REASONING_CHARS = 12_000
+/** Cooldown a rotated account takes when the provider states no retry delay. */
+const DEFAULT_POOL_COOLDOWN_MS = 15 * 60_000
 const REASONING_DELTA_FLUSH_CHARS = 768
 const REASONING_TRUNCATED_NOTICE = '\n\n[Reasoning summary truncated to keep the DSH web UI responsive.]'
 
@@ -29,6 +32,8 @@ export interface ResponsesClientOptions {
   outputVerbosity?: () => CodexOutputVerbosity | null
   fastMode?: () => boolean
   reasoningSummary?: () => CodexReasoningSummary | null
+  /** Account pool to rotate over; without one the single stored credential is used. */
+  accountPool?: CodexAccountPool
 }
 
 export class ResponsesClient {
@@ -37,6 +42,7 @@ export class ResponsesClient {
   private readonly outputVerbosity: () => CodexOutputVerbosity | null
   private readonly fastMode: () => boolean
   private readonly reasoningSummary: () => CodexReasoningSummary | null
+  private readonly accountPool: CodexAccountPool | null
 
   constructor(
     private readonly oauth: OAuthService,
@@ -49,6 +55,7 @@ export class ResponsesClient {
     this.outputVerbosity = options.outputVerbosity ?? (() => null)
     this.fastMode = options.fastMode ?? (() => false)
     this.reasoningSummary = options.reasoningSummary ?? (() => null)
+    this.accountPool = options.accountPool ?? null
   }
 
   private readonly localRawImages: LocalRawImageOptions
@@ -99,6 +106,7 @@ export class ResponsesClient {
   }
 
   private async send(payload: Record<string, unknown>, sessionId: string, signal?: AbortSignal): Promise<Response> {
+    if (this.accountPool !== null) return this.sendWithPool(payload, sessionId, signal)
     let credentials = await this.oauth.credentials()
     let response = await this.request(payload, credentials, sessionId, signal)
     if (response.status === 401) {
@@ -108,6 +116,53 @@ export class ResponsesClient {
     }
     if (!response.ok) throw await responseError(response)
     return response
+  }
+
+  /**
+   * Send one payload with account rotation.
+   *
+   * The pool picks the account — skipping cooling, quota-exhausted and failed
+   * ones — and has already refreshed a token that was about to expire. A 429
+   * cools that account down and retries the identical payload on the next
+   * eligible account; a 401 forces exactly one refresh, and an account whose
+   * refresh is rejected leaves the rotation instead of invalidating the others.
+   * The payload is account-independent, so it is never rebuilt between attempts.
+   */
+  private async sendWithPool(payload: Record<string, unknown>, sessionId: string, signal?: AbortSignal): Promise<Response> {
+    const pool = this.accountPool!
+    const tried = new Set<string>()
+    while (true) {
+      const { account, credentials } = await pool.getEffectiveAccount(tried, this.fetchFn)
+      tried.add(account.id)
+
+      let response = await this.request(payload, credentials, sessionId, signal)
+      if (response.status === 401) {
+        await response.body?.cancel().catch(() => undefined)
+        try {
+          const refreshed = await pool.refreshAccountNow(account.id)
+          response = await this.request(payload, refreshed, sessionId, signal)
+        } catch (error) {
+          await pool.markAuthFailed(
+            account.id,
+            error instanceof Error ? error.message : 'ChatGPT sign-in expired.',
+          ).catch(() => undefined)
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+          throw new LlmError('ChatGPT sign-in has expired. Sign in again.', 'AUTH', { status: 401, cause: error })
+        }
+      }
+      if (response.status === 429) {
+        const after = retryAfterMs(response.headers)
+        await response.body?.cancel().catch(() => undefined)
+        await pool.markCooldown(account.id, after ?? DEFAULT_POOL_COOLDOWN_MS, 'Codex 429').catch(() => undefined)
+        if (await pool.hasAnotherAvailableAccount(tried)) continue
+        throw new LlmError('Codex rate limit reached.', 'RATE_LIMIT', {
+          status: 429,
+          ...(after === undefined ? {} : { providerRetryAfterMs: after }),
+        })
+      }
+      if (!response.ok) throw await responseError(response)
+      return response
+    }
   }
 
   private async request(

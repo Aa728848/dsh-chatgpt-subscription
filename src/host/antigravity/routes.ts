@@ -136,12 +136,16 @@ export function registerAntigravityRoutes(
               await accountPool.setAlias(body.accountId, body.alias)
             } else if (action === 'delete' && typeof body.accountId === 'string') {
               await accountPool.deleteAccount(body.accountId)
-            } else if (action === 'strategy' && (body.strategy === 'sequential' || body.strategy === 'round-robin')) {
+            } else if (action === 'strategy'
+              && (body.strategy === 'sequential' || body.strategy === 'round-robin' || body.strategy === 'sticky')) {
               await accountPool.setStrategy(body.strategy)
             } else if (action === 'clear-cooldown' && typeof body.accountId === 'string') {
               await accountPool.clearCooldown(body.accountId)
             }
 
+            // The quota shown belongs to the account that was active a moment
+            // ago; an account change must not display it for the new one.
+            clearCachedQuota()
             const value = await getAntigravityWebStatus(store, modelSettings, preferences, accountPool)
             return sendJson(response, 200, { ok: true, value })
           }

@@ -118,6 +118,21 @@ describe('Codex usage mapping', () => {
     oauth.dispose()
   })
 
+  it('names the underlying credential failure instead of a bare "could not be refreshed"', async () => {
+    const now = 1_000_000
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
+    const oauth = new OAuthService(store, { now: () => now })
+    vi.spyOn(oauth, 'credentials').mockRejectedValue(new Error('DPAPI credential write failed'))
+    const service = new UsageService(oauth, { fetchFn: (async () => Response.json({})) as unknown as typeof fetch, now: () => now })
+
+    const result = await service.status(true)
+    expect(result.state).toBe('error')
+    // The card shows this verbatim, so the provider's own reason has to be in it.
+    expect(result.error?.message).toBe('ChatGPT credentials could not be refreshed. (DPAPI credential write failed)')
+    oauth.dispose()
+  })
+
   it('keeps old data and honors Retry-After after a 429', async () => {
     let now = 5_000_000
     const store = new MemoryTokenStore()

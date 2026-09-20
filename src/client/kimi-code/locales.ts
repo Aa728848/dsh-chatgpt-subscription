@@ -1,6 +1,10 @@
+import { accountPoolEn, accountPoolZh } from '../common/account-pool-labels.ts'
+
 export const NS_KIMI_CODE = 'dsh-kimi-code'
 
 export const zh = {
+  // The account-management card is shared with every other provider tab.
+  ...accountPoolZh,
   title: 'Kimi Code',
   pageDesc: '登录 Kimi Code 订阅，管理模型、思考档位、上下文窗口与额度。',
   account: '账号',
@@ -113,7 +117,8 @@ export const zh = {
   tokens: 'tokens',
 } as const
 
-export const en = {
+export const en: Record<keyof typeof zh, string> = {
+  ...accountPoolEn,
   title: 'Kimi Code',
   pageDesc: 'Sign in to the Kimi Code subscription and manage models, thinking level, context windows, and quota.',
   account: 'Account',

@@ -1,6 +1,10 @@
 export const NS_ANTIGRAVITY = 'dsh-antigravity'
 
+import { accountPoolEn, accountPoolZh } from '../common/account-pool-labels.ts'
+
 export const zh = {
+  // The account-management card is shared with every other provider tab.
+  ...accountPoolZh,
   title: 'Antigravity',
   pageDesc: '登录 Google Antigravity / Cloud Code Assist，并查看当前账号的共享额度。',
   account: '已登录',
@@ -17,6 +21,7 @@ export const zh = {
   rotationStrategy: '调度策略',
   strategySequential: '顺序耗尽（当前优先，遇限流自动切号）',
   strategyRoundRobin: '轮询调度（按账号循环均匀分摊）',
+  strategySticky: '会话粘性（保持当前账号直到被限流）',
   noAccounts: '暂无账号，点击「添加账号」完成登录授权。',
   plan: '套餐',
   accountId: '账号 ID',
@@ -65,7 +70,8 @@ export const zh = {
   tokens: 'tokens',
 }
 
-export const en = {
+export const en: Record<keyof typeof zh, string> = {
+  ...accountPoolEn,
   title: 'Antigravity',
   pageDesc: 'Sign in to Google Antigravity / Cloud Code Assist and view shared quotas.',
   account: 'Signed in',
@@ -82,6 +88,7 @@ export const en = {
   rotationStrategy: 'Scheduling Strategy',
   strategySequential: 'Sequential Drain (Primary first, failover on 429)',
   strategyRoundRobin: 'Round-Robin (Evenly rotate across accounts)',
+  strategySticky: 'Sticky session (hold the current account until it is limited)',
   noAccounts: 'No accounts yet. Click "Add Account" to authorize.',
   plan: 'Plan',
   accountId: 'Account ID',

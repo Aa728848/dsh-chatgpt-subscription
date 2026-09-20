@@ -43,6 +43,9 @@ export class UsageService {
   private readonly fetchFn: FetchLike
   private readonly now: () => number
   private cache: CacheEntry | null = null
+  // One snapshot per account identity, kept so the pool can skip an account
+  // whose window is already spent without spending a request to rediscover it.
+  private readonly snapshots = new Map<string, { usage: QuotaUsageDto; fetchedAt: number }>()
   private lastUpstreamAt = 0
   private blockedUntil = 0
   private invalidated = false
@@ -60,8 +63,15 @@ export class UsageService {
     let credentials: StoredOAuthCredentials
     try {
       credentials = await this.oauth.credentials()
-    } catch {
-      return this.failure({ code: 'quota-failed', message: 'ChatGPT credentials could not be refreshed.' })
+    } catch (error) {
+      // "Could not be refreshed" alone sent people looking at their token; the
+      // provider's own reason (a rejected refresh, an unwritable store, a
+      // missing sign-in) is what makes the card actionable.
+      const reason = error instanceof Error && error.message !== '' ? ` (${error.message})` : ''
+      return this.failure({
+        code: 'quota-failed',
+        message: `ChatGPT credentials could not be refreshed.${reason}`,
+      })
     }
     const accountKey = identityKey(credentials)
     if (this.cache !== null && this.cache.accountKey !== accountKey) this.clear()
@@ -85,10 +95,48 @@ export class UsageService {
     this.invalidated = true
   }
 
+  /**
+   * When one credential's Codex window reopens, from the last snapshot.
+   *
+   * Undefined means nothing is known or nothing is spent (the account stays
+   * routable). A spent window with no stated reset blocks for the default
+   * cooldown rather than forever, so a missing upstream field cannot strand an
+   * account permanently.
+   */
+  blockedUntilFor(credentials: StoredOAuthCredentials, now: number): number | undefined {
+    const snapshot = this.snapshots.get(identityKey(credentials))
+    if (snapshot === undefined) return undefined
+    let reopen: number | undefined
+    for (const bucket of snapshot.usage.buckets) {
+      if (bucket.id !== 'codex') continue
+      for (const window of bucket.windows) {
+        if (window.usedPercent < 100) continue
+        const reopenAt = window.resetsAt === null ? now + QUOTA_MIN_UPSTREAM_INTERVAL_MS : window.resetsAt * 1000
+        reopen = reopen === undefined ? reopenAt : Math.max(reopen, reopenAt)
+      }
+    }
+    return reopen !== undefined && reopen > now ? reopen : undefined
+  }
+
+  /** Remember the newest snapshot for one account, bounded to the accounts in use. */
+  private rememberSnapshot(accountKey: string, usage: QuotaUsageDto, fetchedAt: number): void {
+    this.snapshots.set(accountKey, { usage, fetchedAt })
+    while (this.snapshots.size > 20) {
+      const oldest = [...this.snapshots.entries()].sort((left, right) => left[1].fetchedAt - right[1].fetchedAt)[0]
+      if (oldest === undefined) break
+      this.snapshots.delete(oldest[0])
+    }
+  }
+
   clear(): void {
     this.cache = null
     this.blockedUntil = 0
     this.invalidated = false
+  }
+
+  /** Drop the remembered snapshot of one account, after its window is known to have reset. */
+  forgetSnapshot(credentials: StoredOAuthCredentials): void {
+    this.snapshots.delete(identityKey(credentials))
   }
 
   async consumeResetCredit(): Promise<QuotaStatusDto> {
@@ -201,6 +249,7 @@ export class UsageService {
         }
       }
       this.cache = { usage, fetchedAt: this.now(), accountKey }
+      this.rememberSnapshot(accountKey, usage, this.cache.fetchedAt)
       this.invalidated = false
       return this.fromCache(false)
     } catch (error) {

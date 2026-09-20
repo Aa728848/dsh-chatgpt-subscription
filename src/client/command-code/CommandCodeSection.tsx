@@ -18,6 +18,8 @@ const EFFORT_LABELS: Record<CommandCodeReasoningEffort, string> = {
   xhigh: 'X-High',
   max: 'Max',
 }
+import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
 
 const API = '/command-code/api'
@@ -196,11 +198,18 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     }
   }
 
-  const handleLogout = async () => {
+  /** One account-level action on the shared pool card. */
+  const handleAccountAction = async (
+    action: 'set-primary' | 'delete' | 'clear-cooldown',
+    accountId: string,
+  ) => {
     try {
-      setBusy('logout')
+      setBusy(`${action}-${accountId}`)
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/logout', { method: 'POST' })
+      const updated = await fetchApi<CommandCodeWebStatus>('/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ action, accountId }),
+      })
       setStatus(updated)
       notifyChange()
     } catch (err) {
@@ -208,6 +217,44 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     } finally {
       setBusy(null)
     }
+  }
+
+  const handleSetStrategy = async (strategy: AccountRotationStrategy) => {
+    try {
+      setBusy('strategy')
+      setError(null)
+      const updated = await fetchApi<CommandCodeWebStatus>('/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'strategy', strategy }),
+      })
+      setStatus(updated)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Re-authorize one key.
+   *
+   * Nothing is deleted: the failure marker is cleared and the ordinary sign-in
+   * flow runs again, so the account keeps its alias and place in the rotation.
+   */
+  const handleRelogin = (accountId: string) => {
+    void (async () => {
+      try {
+        const updated = await fetchApi<CommandCodeWebStatus>('/accounts', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'relogin', accountId }),
+        })
+        setStatus(updated)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+        return
+      }
+      await handleLogin()
+    })()
   }
 
   const handleRefreshQuota = async () => {
@@ -346,77 +393,28 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
 
   return (
     <div className="dsha-page">
-      <section className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>{status?.authenticated ? t.account : t.signedOut}</h3>
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{status?.authenticated ? t.signedIn : t.signedOut}</span>
-          <span className="dsha-value">{account?.email || account?.userName || '—'}</span>
-        </div>
-        {status?.authenticated && (
+      <AccountPoolSection
+        accounts={status?.accounts ?? []}
+        activeAccountId={status?.activeAccountId}
+        rotationStrategy={status?.rotationStrategy ?? 'sequential'}
+        busy={busy}
+        labels={t}
+        loginBusyLabel={busy === 'login' ? (loginProgress || t.signingIn) : undefined}
+        onLogin={() => void handleLogin()}
+        onSetPrimary={(accountId) => void handleAccountAction('set-primary', accountId)}
+        onDelete={(accountId) => void handleAccountAction('delete', accountId)}
+        onClearCooldown={(accountId) => void handleAccountAction('clear-cooldown', accountId)}
+        onRelogin={(accountId) => handleRelogin(accountId)}
+        onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
+        storageValue={status?.storagePath || '—'}
+        renderDetails={(entry) => (
           <>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.plan}</span>
-              <span className="dsha-value">{quota?.planName || account?.planLabel || t.planUnknown}</span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.keyName}</span>
-              <span className="dsha-value">{account?.keyName || '—'}</span>
-            </div>
-            {quota?.subscriptionStatus && (
-              <div className="dsha-row">
-                <span className="dsha-label">{t.subscription}</span>
-                <span className="dsha-value">
-                  {quota.subscriptionStatus}
-                  {quota.periodEndsAt !== null ? ` · ${t.renews} ${formatDate(quota.periodEndsAt)}` : ''}
-                </span>
-              </div>
-            )}
-            {account?.organizationName && (
-              <div className="dsha-row">
-                <span className="dsha-label">{t.organization}</span>
-                <span className="dsha-value">{account.organizationName}</span>
-              </div>
-            )}
-            <div className="dsha-row">
-              <span className="dsha-label">{t.authenticatedAt}</span>
-              <span className="dsha-value">{formatDate(account?.authenticatedAt)}</span>
-            </div>
+            {entry.keyName && <span>{t.keyName}: {entry.keyName}</span>}
+            {entry.planLabel && <span>{t.plan}: {entry.planLabel}</span>}
           </>
         )}
-        <div className="dsha-row">
-          <span className="dsha-label">{t.storage}</span>
-          <span className="dsha-value">{status?.storagePath || '—'}</span>
-        </div>
-        <p className="dsha-notice">{t.storageNotice}</p>
-
-        <div className="dsha-actions">
-          {!status?.authenticated ? (
-            <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={() => void handleLogin()}>
-              {busy === 'login' ? (loginProgress || t.signingIn) : t.signIn}
-            </button>
-          ) : (
-            <>
-              <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={() => void handleLogin()}>
-                {busy === 'login' ? (loginProgress || t.signingIn) : t.signInAgain}
-              </button>
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleRefreshQuota()}>
-                {busy === 'quota' ? t.refreshingQuota : t.refreshQuota}
-              </button>
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleLogout()}>
-                {t.signOut}
-              </button>
-            </>
-          )}
-        </div>
-      </section>
-
-      <section className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>{t.apiKeySection}</h3>
-        </div>
-        <p className="dsha-muted">{t.apiKeyHint}</p>
+      >
+        <p className="dsha-muted" style={{ paddingTop: 12 }}>{t.apiKeyHint}</p>
         <div className="dsha-capacity-control">
           <input
             type="password"
@@ -437,7 +435,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
             {busy === 'apikey' ? t.apiKeySaving : t.apiKeySave}
           </button>
         </div>
-      </section>
+      </AccountPoolSection>
 
       <section className="dsha-group">
         <div className="dsha-grouphead">

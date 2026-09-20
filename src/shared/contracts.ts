@@ -1,3 +1,5 @@
+import type { AccountRotationStrategy, PoolAccountSummaryDto } from './account-pool-contracts.ts'
+
 export interface SanitizedAccountDto {
   email: string | null
   planType: string | null
@@ -28,6 +30,11 @@ export interface PluginStatusDto {
   }
   quota: QuotaStatusDto
   preferences: SubscriptionPreferencesDto
+  /** Signed-in accounts; empty or absent when no pool is installed. */
+  accounts?: PoolAccountSummaryDto[]
+  /** Account the next request would use. */
+  activeAccountId?: string
+  rotationStrategy?: AccountRotationStrategy
   detectedProxy?: string | null
   activeProxy?: string | null
   error?: PublicErrorDto

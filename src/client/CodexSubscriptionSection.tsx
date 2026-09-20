@@ -3,11 +3,14 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type { CodexReasoningSummary, CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
+import { AccountPoolSection, type AccountPoolLabels } from './common/AccountPoolSection.tsx'
+import type { AccountRotationStrategy } from '../shared/account-pool-contracts.ts'
 import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
-type BusyAction = 'login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences' | null
+type BusyAction = 'login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences'
+  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | null
 type Translate = Props['t']
 
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
@@ -174,6 +177,60 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setCustomProxyDraft(null)
   }
 
+  /**
+   * The shared card takes a label object while this tab translates by key, so
+   * every pool label is resolved through the tab's own translator and follows
+   * whichever locale is active.
+   */
+  const poolLabels: AccountPoolLabels = (() => {
+    const keys: Array<keyof AccountPoolLabels> = [
+      'accountPool', 'addAccount', 'accountCount', 'primaryAccount', 'activeAccount',
+      'setPrimary', 'deleteAccount', 'cooling', 'cooldownLeft', 'clearCooldown',
+      'needsRelogin', 'relogin', 'rotationStrategy', 'strategySequential',
+      'strategyRoundRobin', 'strategySticky', 'noAccounts', 'storage', 'storageNotice',
+      'email', 'expires', 'lastUsed', 'accountId',
+    ]
+    const labels = {} as AccountPoolLabels
+    for (const key of keys) labels[key] = t(key as Parameters<Translate>[0])
+    return labels
+  })()
+
+  const accountAction = async (
+    action: 'set-primary' | 'delete' | 'clear-cooldown',
+    accountId: string,
+  ): Promise<void> => {
+    await run(action, async () => {
+      const next = await apiRef.current.accountAction(action, { accountId })
+      setStatus(next)
+    })
+  }
+
+  const setRotationStrategy = async (strategy: AccountRotationStrategy): Promise<void> => {
+    await run('strategy', async () => {
+      const next = await apiRef.current.accountAction('strategy', { strategy })
+      setStatus(next)
+    })
+  }
+
+  /**
+   * Re-authorize one account.
+   *
+   * The failure marker is cleared first and nothing is deleted: the account
+   * keeps its alias and place in the rotation.
+   */
+  const relogin = (accountId: string): void => {
+    void (async () => {
+      try {
+        const next = await apiRef.current.accountAction('relogin', { accountId })
+        setStatus(next)
+      } catch (cause) {
+        setError(messageOf(cause))
+        return
+      }
+      await startLogin()
+    })()
+  }
+
   const logout = async (): Promise<void> => run('logout', async () => {
     await apiRef.current.logout()
     eventSourceRef.current?.close()
@@ -202,7 +259,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const storage = status?.storage
   const login = status?.login
   const visibleModelIds = preferences?.visibleModelIds ?? DEFAULT_VISIBLE_CODEX_MODEL_IDS
-  return <section className="dsh-codex-page" aria-labelledby="dsh-codex-title">
+  return <section className="dsha-page" aria-labelledby="dsh-codex-title">
     <header>
       <h2 id="dsh-codex-title" className="dsh-codex-title">{t('title')}</h2>
       <p className="dsh-codex-intro">{t('intro')}</p>
@@ -214,31 +271,39 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     </div> : null}
 
     {status === null && error === null ? <Skeleton label={t('loading')} /> : <>
-      <Section title={t('account')}>
-        <InfoRow label={status?.authenticated ? t('signedIn') : t('signedOut')} value={account?.email ?? '—'} />
-        {status?.authenticated ? <>
-          <InfoRow label={t('plan')} value={account?.planType ?? t('unknown')} />
-          <InfoRow label={t('accountId')} value={account?.accountIdSuffix ?? '—'} />
-          <InfoRow label={t('expires')} value={formatDate(account?.tokenExpiresAt)} />
-        </> : null}
-        <InfoRow label={t('storage')} value={storageLabel(storage, t)} />
-        <p className="dsh-codex-notice">{storageNotice(storage, t)}</p>
-        {login?.active ? <p className="dsh-codex-muted" role="status">{t('pending')}</p> : null}
+      <AccountPoolSection
+        accounts={status?.accounts ?? []}
+        activeAccountId={status?.activeAccountId}
+        rotationStrategy={status?.rotationStrategy ?? 'sequential'}
+        busy={busy}
+        labels={poolLabels}
+        loginBusyLabel={login?.active ? t('pending') : undefined}
+        onLogin={() => void startLogin()}
+        onSetPrimary={(accountId) => void accountAction('set-primary', accountId)}
+        onDelete={(accountId) => void accountAction('delete', accountId)}
+        onClearCooldown={(accountId) => void accountAction('clear-cooldown', accountId)}
+        onRelogin={(accountId) => relogin(accountId)}
+        onSetStrategy={(strategy) => void setRotationStrategy(strategy)}
+        storageValue={storageLabel(storage, t)}
+        renderDetails={(entry) => (
+          <>
+            {entry.planLabel && <span>{t('plan')}: {entry.planLabel}</span>}
+            {entry.email && <span>{t('email')}: {entry.email}</span>}
+          </>
+        )}
+      >
+        <p className="dsha-notice">{storageNotice(storage, t)}</p>
+        {login?.active ? <p className="dsha-muted" role="status">{t('pending')}</p> : null}
         {popupBlocked ? <p className="dsh-codex-error">{t('popupBlocked')}</p> : null}
         {authUrl !== null ? <a className="dsh-codex-link" href={authUrl} target="_blank" rel="noreferrer">{t('continueLogin')}</a> : null}
-        <div className="dsh-codex-actions">
-          {login?.active
-            ? <Button disabled={busy !== null} onClick={cancelLogin}>{t('cancel')}</Button>
-            : <Button primary disabled={busy !== null || storage?.available === false} onClick={startLogin}>{status?.authenticated ? t('signInAgain') : t('signIn')}</Button>}
-          {status?.authenticated ? <>
-            <Button disabled={busy !== null} onClick={refreshToken}>{t('refreshToken')}</Button>
-            <Button disabled={busy !== null} onClick={logout}>{t('signOut')}</Button>
-          </> : null}
+        <div className="dsha-actions">
+          {login?.active ? <Button disabled={busy !== null} onClick={cancelLogin}>{t('cancel')}</Button> : null}
+          {status?.authenticated ? <Button disabled={busy !== null} onClick={refreshToken}>{t('refreshToken')}</Button> : null}
         </div>
-      </Section>
+      </AccountPoolSection>
 
       <Section title={t('connection')}>
-        <div className="dsh-codex-pref-row" style={{ marginBottom: 12 }}>
+        <div className="dsha-pref-row" style={{ marginBottom: 12 }}>
           <div>
             <strong>{t('enableProvider')}</strong>
           </div>
@@ -256,8 +321,8 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         <InfoRow label={t('provider')} value="Codex（ChatGPT 订阅） · codex-chatgpt" />
         <InfoRow label={t('connectionState')} value={connection === null ? t('untested') : t('connected')} />
         {connection !== null ? <InfoRow label={t('latency')} value={`${connection.latencyMs} ms · ${formatDate(connection.checkedAt)}`} /> : null}
-        <p className="dsh-codex-muted dsh-codex-models-hint">{t('modelsHint')}</p>
-        <div className="dsh-codex-models" aria-label={t('models')}>
+        <p className="dsha-muted dsha-models-hint">{t('modelsHint')}</p>
+        <div className="dsha-models" aria-label={t('models')}>
           {CODEX_MODEL_CATALOG.map((model) => {
             const checked = visibleModelIds.some(id => id === model.id)
             return <label key={model.id} title={model.id}>
@@ -270,19 +335,19 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(true)}>{t('selectAll')}</Button>
           <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(false)}>{t('unselectAll')}</Button>
         </div>
-        <div className="dsh-codex-actions">
+        <div className="dsha-actions">
           <Button disabled={!status?.authenticated || busy !== null} onClick={testConnection}>{busy === 'test' ? t('testing') : t('testConnection')}</Button>
         </div>
       </Section>
 
       <Section title={t('proxySettings')}>
-        <div className="dsh-codex-pref-row">
+        <div className="dsha-pref-row">
           <div>
             <strong>{t('proxyMode')}</strong>
-            <p className="dsh-codex-muted">{t('proxyModeHint')}</p>
+            <p className="dsha-muted">{t('proxyModeHint')}</p>
           </div>
           <select
-            className="dsh-codex-select"
+            className="dsha-select"
             aria-label={t('proxyMode')}
             value={preferences?.proxyMode ?? 'auto'}
             disabled={busy !== null}
@@ -303,17 +368,17 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <span>{t('proxyDetected')}:</span>
             <code className="dsh-codex-proxy-tag">{status.detectedProxy}</code>
             <span className="dsh-codex-success">{t('proxyDetectedEffective')}</span>
-          </> : <span className="dsh-codex-muted">{t('proxyNoneDetected')}</span>}
+          </> : <span className="dsha-muted">{t('proxyNoneDetected')}</span>}
         </div> : null}
 
-        {preferences?.proxyMode === 'direct' ? <p className="dsh-codex-muted" style={{ margin: '8px 0 0' }}>{t('proxyDirectHint')}</p> : null}
+        {preferences?.proxyMode === 'direct' ? <p className="dsha-muted" style={{ margin: '8px 0 0' }}>{t('proxyDirectHint')}</p> : null}
 
-        {preferences?.proxyMode === 'custom' ? <div className="dsh-codex-context-settings">
+        {preferences?.proxyMode === 'custom' ? <div className="dsha-context-settings">
           <div>
             <strong>{t('customProxyUrl')}</strong>
-            <p className="dsh-codex-muted">{t('customProxyUrlHint')}</p>
+            <p className="dsha-muted">{t('customProxyUrlHint')}</p>
           </div>
-          <div className="dsh-codex-context-row">
+          <div className="dsha-context-row">
             <span className="dsh-codex-proxy-control">
               <input
                 id="dsh-codex-custom-proxy"
@@ -332,7 +397,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
                 }}
               />
               <button
-                className="dsh-codex-context-save"
+                className="dsha-context-save"
                 type="button"
                 aria-label={t('saveProxyUrl')}
                 disabled={busy !== null || customProxyDraft === null}
@@ -346,10 +411,10 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
       </Section>
 
       <Section title={t('enhancements')}>
-        <div className="dsh-codex-pref-row">
+        <div className="dsha-pref-row">
           <div>
             <strong>{t('searchProvider')}</strong>
-            <p className="dsh-codex-muted">{t('searchProviderHint')}</p>
+            <p className="dsha-muted">{t('searchProviderHint')}</p>
           </div>
           <div className="dsh-codex-segments" role="group" aria-label={t('searchProvider')}>
             <button
@@ -372,12 +437,12 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             </button>
           </div>
         </div>
-        <div className="dsh-codex-pref-row">
+        <div className="dsha-pref-row">
           <div>
             <strong>{t('outputVerbosity')}</strong>
-            <p className="dsh-codex-muted">{t('outputVerbosityHint')}</p>
+            <p className="dsha-muted">{t('outputVerbosityHint')}</p>
           </div>
-          <select className="dsh-codex-select" aria-label={t('outputVerbosity')} value={preferences?.outputVerbosity ?? ''} disabled={busy !== null} onChange={(event) => {
+          <select className="dsha-select" aria-label={t('outputVerbosity')} value={preferences?.outputVerbosity ?? ''} disabled={busy !== null} onChange={(event) => {
             const value = event.currentTarget.value
             void updatePreferences({ outputVerbosity: value === '' ? null : value as 'low' | 'medium' | 'high' })
           }}>
@@ -387,12 +452,12 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <option value="high">{t('verbosityHigh')}</option>
           </select>
         </div>
-        <div className="dsh-codex-pref-row">
+        <div className="dsha-pref-row">
           <div>
             <strong>{t('reasoningSummary')}</strong>
-            <p className="dsh-codex-muted">{t('reasoningSummaryHint')}</p>
+            <p className="dsha-muted">{t('reasoningSummaryHint')}</p>
           </div>
-          <select className="dsh-codex-select" aria-label={t('reasoningSummary')} value={preferences?.reasoningSummary ?? ''} disabled={busy !== null} onChange={(event) => {
+          <select className="dsha-select" aria-label={t('reasoningSummary')} value={preferences?.reasoningSummary ?? ''} disabled={busy !== null} onChange={(event) => {
             const value = event.currentTarget.value
             void updatePreferences({ reasoningSummary: value === '' ? null : value as CodexReasoningSummary })
           }}>
@@ -403,10 +468,10 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <option value="none">{t('summaryNone')}</option>
           </select>
         </div>
-        <div className="dsh-codex-context-settings">
+        <div className="dsha-context-settings">
           <div>
             <strong>{t('contextWindows')}</strong>
-            <p className="dsh-codex-muted">{t('contextWindowsHint')}</p>
+            <p className="dsha-muted">{t('contextWindowsHint')}</p>
           </div>
           {CONFIGURABLE_CONTEXT_MODEL_IDS.map((model) => {
             const entry = resolveCodexCatalogEntry(model)
@@ -415,9 +480,9 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             const parsedDraft = draft === undefined ? fallback : parseCapacity(draft, contextWindowLimitForModel(model))
             const dirty = draft !== undefined && parsedDraft !== fallback
             const inputId = `dsh-codex-context-${model}`
-            return <div className="dsh-codex-context-row" key={model}>
+            return <div className="dsha-context-row" key={model}>
               <label htmlFor={inputId}>{entry.name}</label>
-              <span className="dsh-codex-capacity-control">
+              <span className="dsha-capacity-control">
                 <input id={inputId} type="text" inputMode="numeric" value={draft ?? formatCapacity(fallback)} disabled={busy !== null} aria-label={entry.name + ' ' + t('contextWindow')} onChange={(event) => {
                   const value = event.currentTarget.value
                   setContextDrafts((drafts) => ({ ...drafts, [model]: value }))
@@ -427,7 +492,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
                   void updateContextWindow(model)
                 }} />
                 <small>{t('tokens')}</small>
-                <button className="dsh-codex-context-save" type="button" data-model={model} aria-label={entry.name + ' ' + t('saveContextWindow')} disabled={busy !== null || !dirty} onClick={() => void updateContextWindow(model)}>{t('save')}</button>
+                <button className="dsha-context-save" type="button" data-model={model} aria-label={entry.name + ' ' + t('saveContextWindow')} disabled={busy !== null || !dirty} onClick={() => void updateContextWindow(model)}>{t('save')}</button>
               </span>
             </div>
           })}
@@ -449,7 +514,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
       </Section>
 
       <Section title={t('quota')} aside={<Button disabled={!status?.authenticated || busy !== null} onClick={refreshQuota}>{busy === 'quota' ? t('refreshing') : t('refreshQuota')}</Button>}>
-        <p className="dsh-codex-muted">{t('quotaIntro')}</p>
+        <p className="dsha-muted">{t('quotaIntro')}</p>
         {quota?.state === 'signed-out' || !status?.authenticated ? <p className="dsh-codex-empty">{t('quotaSignedOut')}</p> : null}
         {quota?.buckets?.map((bucket) => <QuotaBucket key={bucket.id} bucket={bucket} t={t} />)}
         {quota?.credits !== null && quota?.credits !== undefined ? <QuotaFact label={t('credits')} value={quota.credits.unlimited ? t('unlimited') : quota.credits.balance ?? (quota.credits.hasCredits ? t('available') : t('unavailable'))} /> : null}
@@ -469,18 +534,18 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
 }
 
 function Section({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }): React.JSX.Element {
-  return <section className="dsh-codex-group">
-    <div className="dsh-codex-grouphead"><h3>{title}</h3>{aside}</div>
+  return <section className="dsha-group">
+    <div className="dsha-grouphead"><h3>{title}</h3>{aside}</div>
     {children}
   </section>
 }
 
 function Button({ primary = false, disabled, onClick, children }: { primary?: boolean; disabled?: boolean; onClick: () => void | Promise<void>; children: React.ReactNode }): React.JSX.Element {
-  return <button className={`dsh-codex-button${primary ? ' dsh-codex-button-primary' : ''}`} type="button" disabled={disabled} onClick={() => void onClick()}>{children}</button>
+  return <button className={`dsha-btn${primary ? ' dsha-btn-primary' : ''}`} type="button" disabled={disabled} onClick={() => void onClick()}>{children}</button>
 }
 
 function InfoRow({ label, value }: { label: string; value: string }): React.JSX.Element {
-  return <div className="dsh-codex-row"><span className="dsh-codex-label">{label}</span><span className="dsh-codex-value">{value}</span></div>
+  return <div className="dsha-row"><span className="dsha-label">{label}</span><span className="dsha-value">{value}</span></div>
 }
 
 export function storageLabel(storage: CredentialStorageDto | undefined, t: Translate): string {

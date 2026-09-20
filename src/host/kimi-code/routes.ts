@@ -13,16 +13,18 @@ import {
   FileModelSettingsStore,
   resolveRegion,
   type KimiCodeCatalogModel,
+  type KimiCodeCredentials,
   type KimiCodeModelSettings,
   type KimiCodePreferenceStore,
 } from './token-store.ts'
+import { KimiCodeAccountPool } from './account-pool.ts'
 import {
   accountFromCredentials,
   buildModelOptions,
   clearCachedCatalog,
   clearCachedQuota,
   fetchAccountQuota,
-  getCachedQuota,
+  getCachedQuotaFor,
   loadProviderModels,
   testConnection,
 } from './client.ts'
@@ -134,6 +136,13 @@ export interface KimiCodeStatusOptions {
   serving?: boolean | (() => boolean)
   /** Diagnostic when another plugin owns the provider route; re-read on every status. */
   conflict?: string | null | (() => string | null)
+  /**
+   * Account pool to report on.
+   *
+   * Only the plugin entry installs one, because it owns the pool's storage; a
+   * caller that passes none keeps the single-account behavior.
+   */
+  accountPool?: KimiCodeAccountPool
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -146,41 +155,62 @@ export async function getKimiCodeWebStatus(
   modelSettings: FileModelSettingsStore,
   preferences?: KimiCodePreferenceStore,
   options: KimiCodeStatusOptions = {},
+  accountPool: KimiCodeAccountPool | undefined = options.accountPool,
 ): Promise<KimiCodeWebStatus> {
   const credentials = await store.read()
   const settings: KimiCodeModelSettings = preferences ? preferences.status() : await modelSettings.read()
-  const region = credentials?.region ?? await resolveRegion()
+
+  // A pool that cannot be read must not fail the whole card: the connection
+  // section is still worth rendering, just with an empty account list.
+  const poolData = accountPool === undefined ? null : await accountPool.read().catch(() => null)
+  const accounts = accountPool === undefined ? [] : await accountPool.listAccounts().catch(() => [])
+  const activeAccount = accounts.find((entry) => entry.id === poolData?.activeAccountId)
+    ?? accounts.find((entry) => entry.isPrimary)
+    ?? accounts[0]
+  const activePoolAccount = poolData === null
+    ? undefined
+    : (poolData.accounts.find((entry) => entry.id === poolData.activeAccountId)
+      ?? poolData.accounts.find((entry) => entry.isPrimary)
+      ?? poolData.accounts[0])
+  // A pool may hold accounts from more than one region, so everything host-level
+  // follows the account that would actually serve the next request.
+  const active = activePoolAccount?.credentials ?? credentials
+  const region = active?.region ?? await resolveRegion()
 
   const live = await loadProviderModels({
     fetchFn: options.fetchFn,
     store,
     region,
-    accessToken: credentials?.accessToken,
+    accessToken: active?.accessToken,
   }).catch(() => [])
   const catalog = live.length > 0 ? live : fallbackCatalog()
   const enabled = settings.enabled !== false
   const enabledModelIds = resolveEnabledModelIds(settings.enabledModelIds, catalog, enabled)
   const models = buildModelOptions(catalog, enabledModelIds, settings.contextWindowOverrides)
-  const quota = getCachedQuota()
+  // Only a snapshot that belongs to the displayed account may be rendered.
+  const quota = getCachedQuotaFor(activeAccount?.id ?? null)
 
   // The quota snapshot is the richest source, but on a first load (or when the
   // usage call is failing) the account is still known from the credential's own
   // token claims — so the card shows who is signed in rather than a blank row.
   const account: KimiCodeAccount | null = quota?.account
-    ?? (credentials === null ? null : accountFromCredentials(credentials))
+    ?? (active === null || active === undefined ? null : accountFromCredentials(active))
 
   return {
     enabled,
-    authenticated: credentials !== null,
-    hasCredentials: credentials !== null,
+    authenticated: accounts.length > 0 || credentials !== null,
+    hasCredentials: accounts.length > 0 || credentials !== null,
     storagePath: store.path(),
     region,
-    oauthHost: credentials?.oauthHost ?? oauthHost(region),
-    codingBaseUrl: credentials?.baseUrl ?? codingBaseUrl(region),
+    oauthHost: active?.oauthHost ?? oauthHost(region),
+    codingBaseUrl: active?.baseUrl ?? codingBaseUrl(region),
+    accounts,
+    ...(poolData?.activeAccountId === undefined ? {} : { activeAccountId: poolData.activeAccountId }),
+    rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
     account,
     quota,
     lastFetchedAt: quota?.fetchedAt ?? null,
-    credentialsRejected: credentials !== null && isRefreshTokenRejected(credentials.refreshToken),
+    credentialsRejected: active !== null && active !== undefined && isRefreshTokenRejected(active.refreshToken),
     cache: cacheStatsOrNull(),
     preserveThinking: preserveThinkingEnabled(),
     models,
@@ -205,8 +235,28 @@ export function registerKimiCodeRoutes(
   modelSettings: FileModelSettingsStore,
   preferences?: KimiCodePreferenceStore,
   options: KimiCodeStatusOptions = {},
+  accountPool: KimiCodeAccountPool | undefined = options.accountPool,
 ): () => void {
   const fetchFn = options.fetchFn ?? fetch
+  const readStatus = (): Promise<KimiCodeWebStatus> =>
+    getKimiCodeWebStatus(store, modelSettings, preferences, options, accountPool)
+  /**
+   * The account that would serve the next request, or undefined without a pool.
+   *
+   * Quota and connection probes belong to one account's token; with a pool that
+   * is the active account, not whatever the single-credential file holds.
+   */
+  const activeAccount = async (): Promise<{ id: string | undefined; credentials: KimiCodeCredentials | undefined }> => {
+    if (accountPool === undefined) {
+      const credentials = await store.read()
+      return { id: undefined, credentials: credentials ?? undefined }
+    }
+    const data = await accountPool.read().catch(() => null)
+    const target = data?.activeAccountId === undefined
+      ? (data?.accounts.find((account) => account.isPrimary) ?? data?.accounts[0])
+      : data.accounts.find((account) => account.id === data.activeAccountId)
+    return { id: target?.id, credentials: target?.credentials }
+  }
 
   return ctx.webServer.register({
     kind: 'prefix',
@@ -219,20 +269,26 @@ export function registerKimiCodeRoutes(
       try {
         if (path === '' || path === 'status') {
           if (method !== 'GET') return sendMethodNotAllowed(response)
-          const credentials = await store.read()
-          const cached = getCachedQuota()
+          const poolActive = await activeAccount()
+          const cached = getCachedQuotaFor(poolActive.id ?? null)
           // A failed background refresh must not fail the status call, but it
           // must not vanish either: the reason travels with the status so the
           // card can show why the quota is missing instead of an empty panel.
           let quotaError: string | null = null
-          if (credentials !== null && (cached === null || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
+          if (poolActive.credentials !== undefined
+            && (cached === null || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
             try {
-              await fetchAccountQuota(store, { fetchFn })
+              await fetchAccountQuota(store, {
+                fetchFn,
+                ...(accountPool === undefined
+                  ? {}
+                  : { credentials: poolActive.credentials, accountId: poolActive.id }),
+              })
             } catch (error) {
               quotaError = error instanceof Error ? error.message : String(error)
             }
           }
-          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value: { ...value, quotaError } })
         }
 
@@ -241,7 +297,11 @@ export function registerKimiCodeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const body = await readRequestJson(request)
           const requested = isRegion(body.region) ? body.region : undefined
-          const value = await beginWebLogin(store, { fetchFn, region: requested })
+          const value = await beginWebLogin(store, {
+            fetchFn,
+            region: requested,
+            ...(accountPool === undefined ? {} : { onSave: (credentials) => accountPool.addAccount(credentials) }),
+          })
           return sendJson(response, 200, { ok: true, value })
         }
 
@@ -260,9 +320,14 @@ export function registerKimiCodeRoutes(
         if (path === 'connection/test') {
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const credentials = await store.read()
-          if (credentials === null) return sendJson(response, 400, { ok: false, error: 'Not signed in.' })
-          const { account, latencyMs } = await testConnection(store, { fetchFn })
+          const poolActive = await activeAccount()
+          if (poolActive.credentials === undefined) return sendJson(response, 400, { ok: false, error: 'Not signed in.' })
+          const { account, latencyMs } = await testConnection(store, {
+            fetchFn,
+            ...(accountPool === undefined
+              ? {}
+              : { credentials: poolActive.credentials, accountId: poolActive.id }),
+          })
           // A reachable service with no usable account still means the request
           // did not authenticate, so the verdict is "not connected".
           return sendJson(response, 200, {
@@ -276,8 +341,8 @@ export function registerKimiCodeRoutes(
           if (method === 'POST' && !isSameOriginMutation(request)) {
             return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           }
-          const credentials = await store.read()
-          if (credentials === null) {
+          const quotaActive = await activeAccount()
+          if (quotaActive.credentials === undefined) {
             return sendJson(response, 400, { ok: false, error: 'Not signed in to Kimi Code.' })
           }
           // An explicit refresh must report the real outcome: swallowing the
@@ -285,7 +350,13 @@ export function registerKimiCodeRoutes(
           // stayed empty, which is exactly the wrong thing to show a user who
           // just pressed the button.
           try {
-            const quota = await fetchAccountQuota(store, { fetchFn, force: true })
+            const quota = await fetchAccountQuota(store, {
+              fetchFn,
+              force: true,
+              ...(accountPool === undefined
+                ? {}
+                : { credentials: quotaActive.credentials, accountId: quotaActive.id }),
+            })
             if (quota === null) {
               return sendJson(response, 502, { ok: false, error: 'Kimi Code returned no usage data. The subscription may not include the coding quota.' })
             }
@@ -293,13 +364,13 @@ export function registerKimiCodeRoutes(
             const message = error instanceof Error ? error.message : String(error)
             return sendJson(response, 502, { ok: false, error: message })
           }
-          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value: { ...value, quotaError: null } })
         }
 
         if (path === 'models' || path === 'settings') {
           if (method === 'GET') {
-            const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+            const value = await readStatus()
             return sendJson(response, 200, { ok: true, value })
           }
           if (method !== 'POST') return sendMethodNotAllowed(response)
@@ -327,7 +398,7 @@ export function registerKimiCodeRoutes(
           }
           if (preferences) await preferences.update(patch)
           else await modelSettings.updateSettings(patch)
-          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 
@@ -335,17 +406,58 @@ export function registerKimiCodeRoutes(
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           clearCachedCatalog()
-          const credentials = await store.read()
-          if (credentials !== null) {
+          // The catalog is per account: refreshing it must ask the active
+          // account's region and token, not the single-credential file's.
+          const catalogActive = await activeAccount()
+          if (catalogActive.credentials !== undefined) {
             await loadProviderModels({
               fetchFn,
               store,
-              region: credentials.region,
-              accessToken: credentials.accessToken,
+              region: catalogActive.credentials.region,
+              accessToken: catalogActive.credentials.accessToken,
               force: true,
             }).catch(() => undefined)
           }
-          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'accounts') {
+          if (method === 'GET') {
+            const data = accountPool === undefined ? null : await accountPool.read().catch(() => null)
+            const accounts = accountPool === undefined ? [] : await accountPool.listAccounts().catch(() => [])
+            return sendJson(response, 200, { ok: true, value: {
+              accounts,
+              ...(data?.activeAccountId === undefined ? {} : { activeAccountId: data.activeAccountId }),
+              rotationStrategy: data?.rotationStrategy ?? 'sequential',
+            } })
+          }
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          if (accountPool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+          const body = await readRequestJson(request)
+          const action = typeof body.action === 'string' ? body.action : ''
+          const accountId = typeof body.accountId === 'string' ? body.accountId : undefined
+          if (action === 'set-primary' && accountId !== undefined) {
+            await accountPool.setPrimary(accountId)
+          } else if (action === 'set-alias' && accountId !== undefined && typeof body.alias === 'string') {
+            await accountPool.setAlias(accountId, body.alias)
+          } else if (action === 'delete' && accountId !== undefined) {
+            await accountPool.deleteAccount(accountId)
+          } else if (action === 'clear-cooldown' && accountId !== undefined) {
+            await accountPool.clearCooldown(accountId)
+          } else if (action === 'strategy'
+            && (body.strategy === 'sequential' || body.strategy === 'round-robin' || body.strategy === 'sticky')) {
+            await accountPool.setStrategy(body.strategy)
+          } else if (action === 'relogin' && accountId !== undefined) {
+            // Re-signing in is what restores an account whose refresh token was
+            // rejected, so the marker is cleared and nothing is deleted.
+            await accountPool.clearAuthFailed(accountId)
+          }
+          // The quota and catalog belong to the account that just changed.
+          clearCachedQuota()
+          clearCachedCatalog()
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 
@@ -353,10 +465,25 @@ export function registerKimiCodeRoutes(
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           resetWebLogin()
-          await store.delete()
+          if (accountPool === undefined) {
+            await store.delete()
+          } else {
+            // Without an explicit account, the one that would serve the next
+            // request goes and the pool promotes another; that is what the
+            // card's single sign-out button means once a pool exists.
+            const body = await readRequestJson(request).catch(() => ({} as Record<string, unknown>))
+            const data = await accountPool.read().catch(() => null)
+            const target = typeof body.accountId === 'string'
+              ? body.accountId
+              : (data?.activeAccountId
+                ?? data?.accounts.find((account) => account.isPrimary)?.id
+                ?? data?.accounts[0]?.id)
+            if (target === undefined) await store.delete()
+            else await accountPool.deleteAccount(target)
+          }
           clearCachedQuota()
           clearCachedCatalog()
-          const value = await getKimiCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 

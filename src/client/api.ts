@@ -23,8 +23,19 @@ export class SubscriptionApi {
     return post(`${ROUTE_PREFIX}/login/cancel`, { loginId })
   }
 
-  logout(): Promise<{ authenticated: false }> {
-    return post(`${ROUTE_PREFIX}/logout`, {})
+  /** Sign out one pooled account; without an id, the active one. */
+  logout(accountId?: string): Promise<{ authenticated: false }> {
+    return post(`${ROUTE_PREFIX}/logout`, accountId === undefined ? {} : { accountId })
+  }
+
+  /**
+   * One account-pool action, returning the refreshed status.
+   *
+   * The host answers with the same envelope the status route uses, so the card
+   * never has to guess what the pool looks like after a change.
+   */
+  accountAction(action: 'set-primary' | 'set-alias' | 'delete' | 'clear-cooldown' | 'strategy' | 'relogin', body: { accountId?: string; alias?: string; strategy?: string } = {}): Promise<PluginStatusDto> {
+    return post<PluginStatusDto>(`${ROUTE_PREFIX}/accounts`, { action, ...body })
   }
 
   refresh(): Promise<PluginStatusDto> {

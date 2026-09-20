@@ -681,18 +681,51 @@ export async function verifyApiKey(
   return parseWhoami(payload, { authenticatedAt: Date.now() })
 }
 
-let cachedQuota: CommandCodeAccountQuota | undefined
+/**
+ * Quota cache entry stored per account.
+ * Switching accounts can never display the previous account's quota.
+ */
+interface QuotaCacheEntry {
+  accountId?: string
+  quota: CommandCodeAccountQuota
+  fetchedAt: number
+}
+
+let cachedQuotaEntry: QuotaCacheEntry | undefined
 let quotaInFlight: Promise<CommandCodeAccountQuota> | null = null
+let quotaInFlightAccountId: string | undefined
 let quotaCacheEpoch = 0
 
+/**
+ * Returns the quota snapshot for the most recently requested account.
+ * Kept with a no-argument signature for backward compatibility.
+ */
 export function getCachedQuota(): CommandCodeAccountQuota | undefined {
-  return cachedQuota
+  return cachedQuotaEntry?.quota
+}
+
+/**
+ * The cached snapshot only when it belongs to this account.
+ *
+ * Passing no account keeps the pre-pool behavior of returning whatever was
+ * fetched last.
+ */
+export function getCachedQuotaFor(accountId?: string | null): CommandCodeAccountQuota | undefined {
+  if (accountId === undefined || accountId === null) return cachedQuotaEntry?.quota
+  return cachedQuotaEntry?.accountId === accountId ? cachedQuotaEntry.quota : undefined
 }
 
 export function clearCachedQuota(): void {
   quotaCacheEpoch += 1
-  cachedQuota = undefined
+  cachedQuotaEntry = undefined
   quotaInFlight = null
+  quotaInFlightAccountId = undefined
+}
+
+export interface FetchAccountQuotaOptions {
+  fetchFn?: typeof fetch
+  force?: boolean
+  accountId?: string
 }
 
 /**
@@ -702,14 +735,23 @@ export function clearCachedQuota(): void {
  * worth showing when the usage route is down.
  */
 export async function fetchAccountQuota(
-  store = new FileCredentialStore(),
-  fetchFn: typeof fetch = fetch,
+  store: Pick<FileCredentialStore, 'read'> = new FileCredentialStore(),
+  fetchFnOrOptions: typeof fetch | FetchAccountQuotaOptions = fetch,
   force = false,
+  accountId?: string,
 ): Promise<CommandCodeAccountQuota> {
-  if (!force && cachedQuota && Date.now() - (cachedQuota.fetchedAt || 0) < QUOTA_CACHE_TTL_MS) {
-    return cachedQuota
+  const isOptionsObj = typeof fetchFnOrOptions === 'object' && fetchFnOrOptions !== null
+  const fetchFn = typeof fetchFnOrOptions === 'function' ? fetchFnOrOptions : (fetchFnOrOptions?.fetchFn ?? fetch)
+  const effectiveForce = isOptionsObj ? (fetchFnOrOptions.force ?? force) : force
+  const effectiveAccountId = isOptionsObj ? (fetchFnOrOptions.accountId ?? accountId) : accountId
+
+  const sameAccount = effectiveAccountId === undefined || cachedQuotaEntry?.accountId === effectiveAccountId
+  if (!effectiveForce && sameAccount && cachedQuotaEntry && Date.now() - cachedQuotaEntry.fetchedAt < QUOTA_CACHE_TTL_MS) {
+    return cachedQuotaEntry.quota
   }
-  if (quotaInFlight) return quotaInFlight
+  const inFlightMatches = quotaInFlight !== null
+    && (effectiveAccountId === undefined || quotaInFlightAccountId === effectiveAccountId)
+  if (inFlightMatches) return quotaInFlight!
 
   const epoch = quotaCacheEpoch
   const request = (async (): Promise<CommandCodeAccountQuota> => {
@@ -777,15 +819,23 @@ export async function fetchAccountQuota(
     }
 
     if (epoch !== quotaCacheEpoch) return snapshot
-    cachedQuota = snapshot
+    cachedQuotaEntry = {
+      accountId: effectiveAccountId,
+      quota: snapshot,
+      fetchedAt: snapshot.fetchedAt,
+    }
     return snapshot
   })()
 
   quotaInFlight = request
+  quotaInFlightAccountId = effectiveAccountId
   try {
     return await request
   } finally {
-    if (quotaInFlight === request) quotaInFlight = null
+    if (quotaInFlight === request) {
+      quotaInFlight = null
+      quotaInFlightAccountId = undefined
+    }
   }
 }
 

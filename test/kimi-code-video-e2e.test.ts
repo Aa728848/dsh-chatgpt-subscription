@@ -32,6 +32,8 @@ const MP4 = new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0
 
 let home: string
 let work: string
+// The shared setup owns DSH_HOME for the whole file; this file only borrows it.
+const setupHome = process.env.DSH_HOME
 
 beforeEach(async () => {
   home = await mkdtemp(path.join(tmpdir(), 'kimi-video-e2e-'))
@@ -40,7 +42,10 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  delete process.env.DSH_HOME
+  // Restore the shared setup's home rather than clearing it, so nothing that
+  // runs later in this process can fall back to the developer's real profile.
+  if (setupHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = setupHome
   await rm(home, { recursive: true, force: true })
   await rm(work, { recursive: true, force: true })
 })

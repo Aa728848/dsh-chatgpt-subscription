@@ -16,6 +16,7 @@ import { SubscriptionApi } from './api.ts'
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
 import { installStyles } from './styles.ts'
 import { installAntigravityStyles } from './antigravity/styles.ts'
+import { installPoolStyles } from './common/styles.ts'
 import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from './antigravity/locales.ts'
 import { AntigravityComposerQuota } from './antigravity/AntigravityComposerQuota.tsx'
 import { CommandCodeComposerQuota } from './command-code/CommandCodeComposerQuota.tsx'
@@ -50,6 +51,12 @@ export function apply(ctx: ClientContext): void {
     installKimiCodeStyles()
     return () => {}
   }, 'dsh-kimi-code: styles')
+  // Badge variants the shared account-pool card adds on top of each provider's
+  // own stylesheet; additive, so it never restyles an existing tab.
+  ctx.effect(() => {
+    installPoolStyles()
+    return () => {}
+  }, 'dsh-chatgpt-subscription: pool styles')
   ctx.effect(() => setupMermaidObserver(), 'dsh-mermaid: observer')
 
   const t = ctx.locale.bind(NS)

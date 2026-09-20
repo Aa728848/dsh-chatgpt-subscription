@@ -364,13 +364,22 @@ export function buildModelOptions(
 // ---------------------------------------------------------------------------
 
 let quotaCache: KimiCodeAccountQuota | null = null
+// Which account the cached snapshot belongs to; see QuotaFetchOptions.accountId.
+let quotaAccountId: string | undefined
 
 export function getCachedQuota(): KimiCodeAccountQuota | null {
   return quotaCache
 }
 
+/** The cached snapshot only when it belongs to this account. */
+export function getCachedQuotaFor(accountId?: string | null): KimiCodeAccountQuota | null {
+  if (accountId === undefined || accountId === null) return quotaCache
+  return quotaAccountId === accountId ? quotaCache : null
+}
+
 export function clearCachedQuota(): void {
   quotaCache = null
+  quotaAccountId = undefined
 }
 
 /**
@@ -637,6 +646,20 @@ export interface QuotaFetchOptions {
   signal?: AbortSignal
   /** Bypass the local cache and read the service again. */
   force?: boolean
+  /**
+   * Credentials to read usage for.
+   *
+   * A pool supplies the active account's credential here; without it the single
+   * stored account is refreshed and used.
+   */
+  credentials?: KimiCodeCredentials
+  /**
+   * Account the snapshot belongs to.
+   *
+   * With a pool the card must never render one account's quota under another
+   * account's name, so a snapshot is only reused for the same id.
+   */
+  accountId?: string
 }
 
 /**
@@ -651,14 +674,18 @@ export async function fetchAccountQuota(
   store: FileCredentialStore,
   options: QuotaFetchOptions = {},
 ): Promise<KimiCodeAccountQuota | null> {
-  if (options.force !== true && quotaCache !== null && Date.now() - quotaCache.fetchedAt < QUOTA_CACHE_TTL_MS) {
+  const sameAccount = options.accountId === undefined || quotaAccountId === options.accountId
+  if (options.force !== true && sameAccount && quotaCache !== null && Date.now() - quotaCache.fetchedAt < QUOTA_CACHE_TTL_MS) {
     return quotaCache
   }
 
   const fetchFn = options.fetchFn ?? fetch
+  // Pooled callers pass the active account's credential: the pool owns refresh
+  // and write-back, so this path must not touch the single-credential file.
+  const pooled = options.credentials !== undefined
   let credentials: KimiCodeCredentials
   try {
-    credentials = await ensureAccessToken(store, { fetchFn, signal: options.signal })
+    credentials = options.credentials ?? await ensureAccessToken(store, { fetchFn, signal: options.signal })
   } catch (error) {
     throw error
   }
@@ -687,12 +714,18 @@ export async function fetchAccountQuota(
 
   // `/usages` no longer names the plan, so `/me` supplies it; both are folded
   // in and whatever is learned is written back for the status fallback to read.
-  const profile = await fetchProfile(store, { fetchFn, signal: options.signal })
+  const profile = await fetchProfile(store, {
+    fetchFn,
+    signal: options.signal,
+    ...(options.credentials === undefined ? {} : { credentials: options.credentials }),
+  })
   const account = accountFromCredentials(credentials, payload, profile ?? undefined)
   const learned: Partial<KimiCodeCredentials> = {}
   if (account.planName !== null && account.planName !== credentials.planName) learned.planName = account.planName
   if (account.nickname !== null && account.nickname !== credentials.nickname) learned.nickname = account.nickname
-  if (Object.keys(learned).length > 0) {
+  // Only the single-account path writes back: with a pool the account record is
+  // the pool's to update, and the mirror belongs to whichever account is primary.
+  if (!pooled && Object.keys(learned).length > 0) {
     void store.write({ ...credentials, ...learned }).catch(() => undefined)
   }
 
@@ -705,6 +738,7 @@ export async function fetchAccountQuota(
     sources: [openAIUrl(USAGES_PATH, credentials.region)],
   }
   quotaCache = snapshot
+  quotaAccountId = options.accountId
   return snapshot
 }
 
@@ -762,7 +796,7 @@ export async function fetchProfile(
   const fetchFn = options.fetchFn ?? fetch
   let credentials: KimiCodeCredentials
   try {
-    credentials = await ensureAccessToken(store, { fetchFn, signal: options.signal })
+    credentials = options.credentials ?? await ensureAccessToken(store, { fetchFn, signal: options.signal })
   } catch {
     return null
   }

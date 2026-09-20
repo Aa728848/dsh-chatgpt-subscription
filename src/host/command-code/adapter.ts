@@ -27,12 +27,14 @@ import {
   resolveApiEnv,
   wireForModel,
 } from './types.ts'
+import type { CommandCodeApiEnv } from '../../shared/command-code-contracts.ts'
 import {
   FileCredentialStore,
   FileModelSettingsStore,
   type CommandCodeCatalogModel,
   type CommandCodePreferenceStore,
 } from './token-store.ts'
+import { CommandCodeAccountPool } from './account-pool.ts'
 import { commandCodeHeaders, loadProviderModels } from './client.ts'
 import {
   assertStreamComplete,
@@ -87,14 +89,29 @@ export interface CommandCodeAdapterOptions {
   loadCatalog?: () => Promise<CommandCodeCatalogModel[]>
 }
 
+/** Cooldown one rate-limited key takes when the provider states no delay. */
+const POOL_COOLDOWN_MS = 15 * 60_000
+
 export class CommandCodeAdapter extends LlmAdapter {
+  /**
+   * Rotation pool, or null for the single stored key.
+   *
+   * The pool is only ever installed by the plugin entry, which owns its storage.
+   * An adapter built without one must keep reading the one credential file and
+   * must not create pool state on its own: that state outlives the process and
+   * would leak cooldowns between unrelated runs.
+   */
+  private readonly accountPool: CommandCodeAccountPool | null
+
   constructor(
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
     private readonly preferences?: CommandCodePreferenceStore,
     private readonly options: CommandCodeAdapterOptions = {},
+    accountPool?: CommandCodeAccountPool,
   ) {
     super()
+    this.accountPool = accountPool ?? null
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -206,85 +223,135 @@ export class CommandCodeAdapter extends LlmAdapter {
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const credentials = await this.store.read()
-    if (credentials === null) {
-      throw new LlmError(
-        `Not signed in to ${PROVIDER_NAME}. Sign in from Settings > Command Code, or paste an API key there.`,
-        'MISSING_CREDENTIAL',
-      )
-    }
 
     const wire = wireForModel(options.model)
     // DSH delivers pasted images as durable references because this route
     // declares image input; both wires need bytes, so resolve them once up
-    // front and reuse the result for the single request below.
+    // front and reuse the result for every attempt below.
     const requestOptions = offloadOldestRequestImages(options)
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
     const body = JSON.stringify(buildRequest(requestOptions, wire, images))
 
-    const endpoint = `${providerUrl(credentials.apiEnv ?? resolveApiEnv())}${wire === 'anthropic' ? '/messages' : '/chat/completions'}`
-    const headers = wire === 'anthropic'
-      ? {
-          ...commandCodeHeaders(credentials.apiKey),
-          'user-agent': PLUGIN_USER_AGENT,
-          accept: 'text/event-stream',
-          'anthropic-version': '2023-06-01',
-        }
-      : {
-          ...commandCodeHeaders(credentials.apiKey),
-          'user-agent': PLUGIN_USER_AGENT,
-          accept: 'text/event-stream',
-        }
+    // Account rotation. The payload is key-independent, so it is built once and
+    // replayed unchanged while another key in the pool can still serve it: a
+    // rate-limited or rejected key ends its part of the turn, not the turn.
+    const pool = this.accountPool
+    const tried = new Set<string>()
+    let response: Response | undefined
+    let detail = ''
+    let accountId: string | undefined
 
-    let response: Response
-    try {
-      response = await fetchFn(endpoint, { method: 'POST', headers, body, signal })
-    } catch (error) {
-      if (signal.aborted) throw new LlmError('Command Code request aborted', 'ABORTED', { cause: error })
-      // A connection that never produced a response is a transport failure, not
-      // a verdict from the provider: the same request is eligible for the
-      // bounded backoff above instead of failing the turn outright.
-      throw new LlmError(
-        `Command Code request failed: ${error instanceof Error ? error.message : String(error)}`,
-        'TRANSPORT',
-        { cause: error },
-      )
-    }
+    while (true) {
+      let apiKey: string
+      let apiEnv: CommandCodeApiEnv
+      if (pool === null) {
+        const credentials = await this.store.read()
+        if (credentials === null) {
+          throw new LlmError(
+            `Not signed in to ${PROVIDER_NAME}. Sign in from Settings > Command Code, or paste an API key there.`,
+            'MISSING_CREDENTIAL',
+          )
+        }
+        apiKey = credentials.apiKey
+        apiEnv = credentials.apiEnv ?? resolveApiEnv()
+      } else {
+        const effective = await pool.getEffectiveCredential(tried, fetchFn)
+        accountId = effective.account.id
+        tried.add(accountId)
+        apiKey = effective.credentials.apiKey
+        apiEnv = effective.apiEnv
+      }
 
-    if (!response.ok) {
-      const detail = (await response.text().catch(() => '')).slice(0, 600)
-      if (response.status === 401 || response.status === 403) {
+      const endpoint = `${providerUrl(apiEnv)}${wire === 'anthropic' ? '/messages' : '/chat/completions'}`
+      const headers = wire === 'anthropic'
+        ? {
+            ...commandCodeHeaders(apiKey),
+            'user-agent': PLUGIN_USER_AGENT,
+            accept: 'text/event-stream',
+            'anthropic-version': '2023-06-01',
+          }
+        : {
+            ...commandCodeHeaders(apiKey),
+            'user-agent': PLUGIN_USER_AGENT,
+            accept: 'text/event-stream',
+          }
+
+      try {
+        response = await fetchFn(endpoint, { method: 'POST', headers, body, signal })
+      } catch (error) {
+        if (signal.aborted) throw new LlmError('Command Code request aborted', 'ABORTED', { cause: error })
+        // A connection that never produced a response is a transport failure, not
+        // a verdict from the provider: the same request is eligible for the
+        // bounded backoff above instead of failing the turn outright.
         throw new LlmError(
-          `${PROVIDER_NAME} rejected the stored API key (${response.status}). Sign in again from Settings > Command Code.${detail ? ` ${detail}` : ''}`,
-          'INVALID_CREDENTIAL',
-          { status: response.status },
+          `Command Code request failed: ${error instanceof Error ? error.message : String(error)}`,
+          'TRANSPORT',
+          { cause: error },
         )
       }
+
+      if (response.ok) break
+      // The body is read here rather than later: a retried attempt needs the
+      // detail of the attempt that actually failed.
+      detail = (await response.text().catch(() => '')).slice(0, 600)
+      // Without a pool there is nothing to rotate to; the classification below
+      // reports the failure exactly as it did before the pool existed.
+      if (pool === null || accountId === undefined) break
+
+      if (response.status === 401 || response.status === 403) {
+        // A rejected key is a permanent verdict for that account alone: keep the
+        // account (signing in again restores it) but take it out of rotation.
+        await pool.markAuthFailed(
+          accountId,
+          `${PROVIDER_NAME} rejected the stored API key (${response.status}).`,
+          'invalid',
+        ).catch(() => undefined)
+        if (await pool.hasAnotherAvailableAccount(tried)) continue
+        break
+      }
       if (response.status === 429) {
+        const after = retryAfterMs(response.headers)
+        await pool.markCooldown(accountId, after ?? POOL_COOLDOWN_MS, `${PROVIDER_NAME} 429`).catch(() => undefined)
+        if (await pool.hasAnotherAvailableAccount(tried)) continue
+        break
+      }
+      break
+    }
+
+    if (response === undefined || !response.ok) {
+      const status = response?.status ?? 500
+      if (status === 401 || status === 403) {
+        throw new LlmError(
+          `${PROVIDER_NAME} rejected the stored API key (${status}). Sign in again from Settings > Command Code.${detail ? ` ${detail}` : ''}`,
+          'INVALID_CREDENTIAL',
+          { status },
+        )
+      }
+      if (status === 429) {
         // A provider-requested delay is honored verbatim by the DSH retry
         // policy; omitting it leaves the bounded local backoff in charge.
-        const after = retryAfterMs(response.headers)
+        const after = response === undefined ? undefined : retryAfterMs(response.headers)
         throw new LlmError(
           `${PROVIDER_NAME} rate limit or plan quota reached (429). Check the quota card in Settings > Command Code.${detail ? ` ${detail}` : ''}`,
           'RATE_LIMIT',
           { status: 429, ...(after === undefined ? {} : { providerRetryAfterMs: after }) },
         )
       }
-      if (response.status >= 500) {
+      if (status >= 500) {
         // The API fronts several upstream model providers, so a 502/503/504
         // ("Upstream model provider is temporarily unavailable") says nothing
         // about this request or this credential: it is a transient server-side
         // failure and is retried under the bounded policy above.
         throw new LlmError(
-          `${PROVIDER_NAME} upstream server error (${response.status}): ${detail || 'No response'}`,
+          `${PROVIDER_NAME} upstream server error (${status}): ${detail || 'No response'}`,
           'SERVER',
-          { status: response.status },
+          { status },
         )
       }
       throw new LlmError(
-        `${PROVIDER_NAME} API error (${response.status}): ${detail || 'No response'}`,
+        `${PROVIDER_NAME} API error (${status}): ${detail || 'No response'}`,
         'PROVIDER_ERROR',
-        { status: response.status },
+        { status },
       )
     }
 

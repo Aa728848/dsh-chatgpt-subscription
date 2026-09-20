@@ -68,7 +68,7 @@ describe('client registration', () => {
       await act(async () => root.render(createElement(CodexSubscriptionSection, { t } as never)))
       const input = container.querySelector<HTMLInputElement>(`input[aria-label="${modelName} 上下文窗口"]`)
       expect(input).not.toBeNull()
-      const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsh-codex-models input[type="checkbox"]')
+      const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsha-models input[type="checkbox"]')
       expect(modelChecks).toHaveLength(8)
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
@@ -76,7 +76,7 @@ describe('client registration', () => {
       })
       expect(input?.value).toBe('5')
       // 每个可配置上下文窗口的模型一行（子代理上下文预算控件已随死设置移除）
-      expect(container.querySelectorAll('.dsh-codex-context-row')).toHaveLength(4)
+      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(4)
       const save = container.querySelector<HTMLButtonElement>(`button[data-model="${model}"]`)
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)
@@ -215,7 +215,10 @@ describe('client registration', () => {
       expect(tabs[0]?.getAttribute('aria-selected')).toBe('true')
       // The ChatGPT provider panel mounts by default; the other providers stay unmounted.
       expect(container.querySelector('#dsh-codex-title')).not.toBeNull()
-      expect(container.querySelector('.dsha-page')).toBeNull()
+      // Every tab, ChatGPT included, renders the same shared settings layout and
+      // the same account-management card.
+      expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-page')).not.toBeNull()
+      expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-grouphead')?.textContent).toContain(zh.accountPool)
 
       for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status']] as const) {
         const id: string = TAB_IDS[index]

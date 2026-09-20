@@ -3,6 +3,11 @@
  * card. Everything here is public: no credential ever crosses this boundary.
  */
 
+import type {
+  AccountRotationStrategy,
+  PoolAccountSummaryDto,
+} from './account-pool-contracts.ts'
+
 /** Deployment of the Command Code API a credential was issued against. */
 export type CommandCodeApiEnv = 'prod' | 'staging' | 'local'
 
@@ -111,10 +116,24 @@ export interface CommandCodeWebStatus {
   models: CommandCodeModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: CommandCodeReasoningEffort | null
+  /** Signed-in keys; empty or absent when no pool is installed. */
+  accounts?: CommandCodeAccountSummaryDto[]
+  /** Account the next request would use. */
+  activeAccountId?: string
+  rotationStrategy?: AccountRotationStrategy
   /** Route the plugin currently serves; false when another plugin owns it. */
   serving: boolean
   /** Diagnostic when the route is owned by a different adapter family. */
   conflict: string | null
+}
+
+/** One pooled key as the settings card renders it; never carries the key itself. */
+export interface CommandCodeAccountSummaryDto extends PoolAccountSummaryDto {
+  userName?: string
+  keyName?: string
+  organizationName?: string
+  planId?: string
+  userId?: string
 }
 
 /** Patch accepted by the models/settings routes. */

@@ -625,6 +625,8 @@ async function runDeviceLogin(options: {
   region: KimiCodeRegion
   signal: AbortSignal
   open: (url: string) => void
+  /** Called with the validated credential so a pool can keep every sign-in. */
+  onSave?: (credentials: KimiCodeCredentials) => Promise<unknown>
 }): Promise<KimiCodeCredentials> {
   const deadline = Date.now() + LOGIN_TIMEOUT_MS
 
@@ -679,6 +681,7 @@ async function runDeviceLogin(options: {
           ...(identity.email === undefined ? {} : { email: identity.email }),
         }
         await options.store.write(credentials)
+        if (options.onSave) await options.onSave(credentials).catch(() => undefined)
         await persistRegion(options.region)
         return credentials
       }
@@ -708,7 +711,13 @@ async function runDeviceLogin(options: {
  */
 export async function beginWebLogin(
   store: FileCredentialStore,
-  options: { fetchFn?: typeof fetch; openBrowser?: (url: string) => void; region?: KimiCodeRegion } = {},
+  options: {
+    fetchFn?: typeof fetch
+    openBrowser?: (url: string) => void
+    region?: KimiCodeRegion
+    /** Called with the validated credential so a pool can keep every sign-in. */
+    onSave?: (credentials: KimiCodeCredentials) => Promise<unknown>
+  } = {},
 ): Promise<KimiCodeLoginFlowStatus> {
   if (webLoginFlow.status === 'pending') return { ...webLoginFlow }
 
@@ -721,7 +730,14 @@ export async function beginWebLogin(
 
   void (async () => {
     try {
-      await runDeviceLogin({ store, fetchFn, region, signal: controller.signal, open })
+      await runDeviceLogin({
+        store,
+        fetchFn,
+        region,
+        signal: controller.signal,
+        open,
+        ...(options.onSave === undefined ? {} : { onSave: options.onSave }),
+      })
       webLoginFlow = { ...webLoginFlow, status: 'complete', completedAt: Date.now(), progress: 'Signed in' }
       resetRefreshRejections()
     } catch (error) {

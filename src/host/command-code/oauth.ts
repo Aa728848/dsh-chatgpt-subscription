@@ -424,7 +424,13 @@ export function createAuthServer(
  */
 export async function beginWebLogin(
   store: FileCredentialStore,
-  options: { fetchFn?: typeof fetch; openBrowser?: (url: string) => void; timeoutMs?: number } = {},
+  options: {
+    fetchFn?: typeof fetch
+    openBrowser?: (url: string) => void
+    timeoutMs?: number
+    /** Called with the validated credential so a pool can keep every sign-in. */
+    onSave?: (credentials: CommandCodeCredentials) => Promise<unknown>
+  } = {},
 ): Promise<CommandCodeLoginFlowState> {
   if (webLoginFlow.status === 'pending') return { ...webLoginFlow }
 
@@ -464,6 +470,7 @@ export async function beginWebLogin(
         authenticatedAt: Date.now(),
       }
       await store.write(stored)
+      if (options.onSave) await options.onSave(stored).catch(() => undefined)
       webLoginFlow = {
         status: 'complete',
         authUrl,
@@ -504,12 +511,12 @@ export async function beginWebLogin(
 export async function saveApiKey(
   store: FileCredentialStore,
   apiKey: string,
-  options: { fetchFn?: typeof fetch } = {},
+  options: { fetchFn?: typeof fetch; onSave?: (credentials: CommandCodeCredentials) => Promise<unknown> } = {},
 ): Promise<CommandCodeAccount> {
   const trimmed = apiKey.trim()
   if (trimmed === '') throw new Error('The API key is empty.')
   const account = await verifyApiKey(trimmed, { fetchFn: options.fetchFn })
-  await store.write({
+  const stored: CommandCodeCredentials = {
     apiKey: trimmed,
     userId: account.userId ?? undefined,
     userName: account.userName ?? undefined,
@@ -519,7 +526,9 @@ export async function saveApiKey(
     planLabel: account.planLabel ?? undefined,
     planId: account.planId ?? undefined,
     authenticatedAt: Date.now(),
-  })
+  }
+  await store.write(stored)
+  if (options.onSave) await options.onSave(stored).catch(() => undefined)
   return account
 }
 

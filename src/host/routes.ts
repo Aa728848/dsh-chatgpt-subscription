@@ -13,6 +13,7 @@ import type {
 } from '../shared/contracts.ts'
 import { contextWindowLimitForModel, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
 import { isCodexReasoningSummary } from '../shared/preferences.ts'
+import type { CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import type { ProxyManager } from './proxy-manager.ts'
@@ -32,6 +33,7 @@ export function registerRoutes(
   proxyManager?: ProxyManager,
   searchSwitcher?: SearchProviderSwitcher,
   routeAudit?: RouteAuditReader,
+  accountPool?: CodexAccountPool,
 ): () => void {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
@@ -112,8 +114,40 @@ export function registerRoutes(
           json(response, { ok: true, value: { cancelled: true } })
           return
         }
+        case `${ROUTE_PREFIX}/accounts`: {
+          if (accountPool === undefined) throw new Error('The ChatGPT account pool is not installed.')
+          const action = field(body, 'action')
+          const accountId = field(body, 'accountId')
+          const alias = field(body, 'alias')
+          if (action === 'set-primary' && accountId !== null) {
+            await accountPool.setPrimary(accountId)
+          } else if (action === 'set-alias' && accountId !== null && alias !== null) {
+            await accountPool.setAlias(accountId, alias)
+          } else if (action === 'delete' && accountId !== null) {
+            await accountPool.deleteAccount(accountId)
+          } else if (action === 'clear-cooldown' && accountId !== null) {
+            await accountPool.clearCooldown(accountId)
+          } else if (action === 'strategy'
+            && (body.strategy === 'sequential' || body.strategy === 'round-robin' || body.strategy === 'sticky')) {
+            await accountPool.setStrategy(body.strategy)
+          } else if (action === 'relogin' && accountId !== null) {
+            // Nothing is deleted: the account keeps its alias and position, and
+            // signing into it again clears the failure marker.
+            await accountPool.clearAuthFailed(accountId)
+          }
+          const afterAction = await oauth.status()
+          json(response, { ok: true, value: {
+            ...afterAction,
+            quota: await usage.status(afterAction.authenticated),
+            preferences: preferences.status(),
+          } })
+          return
+        }
         case `${ROUTE_PREFIX}/logout`:
-          await oauth.logout()
+          // An explicit accountId removes that pooled account; without one the
+          // account that would serve the next request goes, and the pool
+          // promotes another, which is what the single button means to a user.
+          await oauth.logout(field(body, 'accountId') ?? undefined)
           usage.clear()
           json(response, { ok: true, value: { authenticated: false } })
           return

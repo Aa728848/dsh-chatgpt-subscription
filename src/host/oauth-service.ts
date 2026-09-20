@@ -15,7 +15,9 @@ import type {
   OAuthStatusDto,
   PublicErrorDto,
 } from '../shared/contracts.ts'
+import type { AccountRotationStrategy, PoolAccountSummaryDto } from '../shared/account-pool-contracts.ts'
 import { OAuthCallbackServer } from './callback-server.ts'
+import type { CodexAccountPool } from './codex-account-pool.ts'
 import type { StoredOAuthCredentials, TokenStore } from './token-store.ts'
 
 type FetchLike = typeof fetch
@@ -48,7 +50,12 @@ interface ActiveLogin {
 }
 
 export class OAuthServiceError extends Error {
-  constructor(readonly code: PublicErrorDto['code'], message: string) {
+  constructor(
+    readonly code: PublicErrorDto['code'],
+    message: string,
+    /** Token-endpoint status when the failure came from a response. */
+    readonly status?: number,
+  ) {
     super(message)
     this.name = 'OAuthServiceError'
   }
@@ -61,6 +68,14 @@ export interface OAuthServiceOptions {
   logger?: Pick<Console, 'info' | 'warn'>
   /** Test seam; production always uses the five-minute compatibility default. */
   loginTimeoutMs?: number
+  /**
+   * Account pool this service drives.
+   *
+   * With a pool the service signs accounts in and refreshes them per account
+   * while the pool decides which one serves a request; without one it keeps
+   * serving the single stored credential exactly as before.
+   */
+  pool?: CodexAccountPool
 }
 
 export class OAuthService {
@@ -75,6 +90,10 @@ export class OAuthService {
   private refreshPromise: Promise<StoredOAuthCredentials> | null = null
   private lastLoginError: PublicErrorDto | undefined
   private disposed = false
+  private readonly pool: CodexAccountPool | null
+  // Per-identity single flight: a rotating refresh token must never be redeemed
+  // twice concurrently, and two requests can hit the same account at once.
+  private readonly refreshInFlight = new Map<string, Promise<StoredOAuthCredentials>>()
 
   constructor(private readonly store: TokenStore, options: OAuthServiceOptions = {}) {
     this.fetchFn = options.fetchFn ?? fetch
@@ -82,17 +101,46 @@ export class OAuthService {
     this.random = options.random ?? randomBytes
     this.logger = options.logger ?? console
     this.loginTimeoutMs = options.loginTimeoutMs ?? OAUTH_LOGIN_TIMEOUT_MS
+    this.pool = options.pool ?? null
+    // The pool refreshes one account at a time through this service, because the
+    // refresh token rotates and only one writer may redeem it.
+    this.pool?.setRefresher(this)
   }
 
   async status(): Promise<OAuthStatusDto> {
+    const poolStatus = await this.readPoolStatus()
     try {
       const credentials = await this.store.load()
-      return this.statusFromCredentials(credentials)
+      return this.statusFromCredentials(credentials, true, poolStatus)
     } catch {
       return {
-        ...this.statusFromCredentials(null, false),
+        ...this.statusFromCredentials(null, false, poolStatus),
         error: publicError(new OAuthServiceError('storage-failed', 'Secure credential storage could not be read.')),
       }
+    }
+  }
+
+  /**
+   * The pool slice of the status DTO.
+   *
+   * A pool that cannot be read is reported as empty rather than failing the
+   * whole status call: the card must still render the connection section.
+   */
+  private async readPoolStatus(): Promise<{
+    accounts: PoolAccountSummaryDto[]
+    activeAccountId?: string
+    rotationStrategy: AccountRotationStrategy
+  }> {
+    const pool = this.pool
+    if (pool === null) return { accounts: [], rotationStrategy: 'sequential' }
+    const [accounts, data] = await Promise.all([
+      pool.listAccounts().catch(() => []),
+      pool.read().catch(() => null),
+    ])
+    return {
+      accounts,
+      ...(data?.activeAccountId === undefined ? {} : { activeAccountId: data.activeAccountId }),
+      rotationStrategy: data?.rotationStrategy ?? 'sequential',
     }
   }
 
@@ -160,14 +208,38 @@ export class OAuthService {
 
   async refresh(): Promise<OAuthStatusDto> {
     this.assertAvailable()
+    if (this.pool !== null) {
+      // Refresh the account that would serve the next request.
+      const { account, credentials } = await this.pool.getEffectiveAccount(undefined, this.fetchFn)
+      await this.refreshAccount(credentials)
+        .then((refreshed) => this.pool!.updateAccountCredentials(account.id, refreshed))
+      return this.status()
+    }
     const stored = await this.loadAuthenticated()
     await this.refreshCredentials(stored)
     return this.status()
   }
 
-  async logout(): Promise<void> {
+  /**
+   * Sign out.
+   *
+   * @param accountId - pooled account to remove; omit to remove the account
+   *   that would serve the next request (the pool promotes another one), which
+   *   is what a single "sign out" button means to a pool user.
+   */
+  async logout(accountId?: string): Promise<void> {
     if (this.activeLogin !== null) {
       this.cancelActive(new OAuthServiceError('login-cancelled', 'ChatGPT sign-in was cancelled.'), 'cancelled')
+    }
+    if (this.pool !== null) {
+      const data = await this.pool.read().catch(() => null)
+      const target = accountId
+        ?? data?.activeAccountId
+        ?? data?.accounts.find((account) => account.isPrimary)?.id
+      if (target !== undefined) await this.pool.deleteAccount(target)
+      this.lastLoginError = undefined
+      this.logger.info('[dsh-chatgpt-subscription] OAuth credentials cleared')
+      return
     }
     await this.store.clear().catch(() => {
       throw new OAuthServiceError('storage-failed', 'Secure credentials could not be deleted.')
@@ -177,6 +249,14 @@ export class OAuthService {
   }
 
   async credentials(forceRefresh = false): Promise<StoredOAuthCredentials> {
+    if (this.pool !== null) {
+      // The pool owns selection, cooldowns and the proactive refresh.
+      const { account, credentials } = await this.pool.getEffectiveAccount(undefined, this.fetchFn)
+      if (!forceRefresh) return credentials
+      const refreshed = await this.refreshAccount(credentials, this.fetchFn)
+      await this.pool.updateAccountCredentials(account.id, refreshed)
+      return refreshed
+    }
     const stored = await this.loadAuthenticated()
     if (forceRefresh || stored.expiresAt - this.now() <= TOKEN_REFRESH_MARGIN_MS) {
       return this.refreshCredentials(stored)
@@ -215,6 +295,15 @@ export class OAuthService {
     }
     const tokens = await response.json() as OAuthTokenResponse
     const credentials = credentialsFromTokenResponse(tokens, this.now())
+    if (this.pool !== null) {
+      // The pool stores every account and mirrors only the primary one into the
+      // single-credential store, so signing in a second account cannot displace
+      // the first from the pre-pool location.
+      await this.pool.addAccount(credentials).catch(() => {
+        throw new OAuthServiceError('storage-failed', 'ChatGPT credentials could not be saved securely.')
+      })
+      return
+    }
     await this.store.save(credentials).catch(() => {
       throw new OAuthServiceError('storage-failed', 'ChatGPT credentials could not be saved securely.')
     })
@@ -228,8 +317,38 @@ export class OAuthService {
     return this.refreshPromise
   }
 
-  private async performRefresh(stored: StoredOAuthCredentials): Promise<StoredOAuthCredentials> {
-    const response = await this.fetchFn(OAUTH_TOKEN_URL, {
+  /**
+   * Refresh one account's tokens on behalf of the pool.
+   *
+   * Deliberately different from the single-credential path: a rejected refresh
+   * token must NOT wipe the whole credential store (other pooled accounts are
+   * unaffected), and the write-back belongs to the pool, which owns the account
+   * record. Concurrent calls for one identity share a single redemption, since
+   * the refresh token rotates.
+   */
+  async refreshAccount(
+    credentials: StoredOAuthCredentials,
+    fetchFn: FetchLike = this.fetchFn,
+  ): Promise<StoredOAuthCredentials> {
+    const key = refreshKey(credentials)
+    const existing = this.refreshInFlight.get(key)
+    if (existing !== undefined) return existing
+    let task: Promise<StoredOAuthCredentials>
+    task = this.performRefresh(credentials, { clearOnReject: false, fetchFn, persist: false }).finally(() => {
+      if (this.refreshInFlight.get(key) === task) this.refreshInFlight.delete(key)
+    })
+    this.refreshInFlight.set(key, task)
+    return task
+  }
+
+  private async performRefresh(
+    stored: StoredOAuthCredentials,
+    options: { clearOnReject?: boolean; fetchFn?: FetchLike; persist?: boolean } = {},
+  ): Promise<StoredOAuthCredentials> {
+    const fetchFn = options.fetchFn ?? this.fetchFn
+    const clearOnReject = options.clearOnReject ?? true
+    const persist = options.persist ?? true
+    const response = await fetchFn(OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -242,18 +361,24 @@ export class OAuthService {
     })
     if (!response.ok) {
       const detail = await oauthErrorIdentifier(response)
-      if (response.status === 400 || response.status === 401) {
+      if (clearOnReject && (response.status === 400 || response.status === 401)) {
         await this.store.clear().catch(() => {
           throw new OAuthServiceError('storage-failed', 'Expired ChatGPT credentials could not be deleted securely.')
         })
       }
-      throw new OAuthServiceError('refresh-failed', `ChatGPT token refresh failed (${response.status}${detail === null ? '' : `, ${detail}`}). Sign in again.`)
+      throw new OAuthServiceError(
+        'refresh-failed',
+        `ChatGPT token refresh failed (${response.status}${detail === null ? '' : `, ${detail}`}). Sign in again.`,
+        response.status,
+      )
     }
     const tokens = await response.json() as OAuthTokenResponse
     const fresh = credentialsFromTokenResponse(tokens, this.now(), stored)
-    await this.store.save(fresh).catch(() => {
-      throw new OAuthServiceError('storage-failed', 'Refreshed credentials could not be saved securely.')
-    })
+    if (persist) {
+      await this.store.save(fresh).catch(() => {
+        throw new OAuthServiceError('storage-failed', 'Refreshed credentials could not be saved securely.')
+      })
+    }
     this.logger.info('[dsh-chatgpt-subscription] OAuth credentials refreshed')
     return fresh
   }
@@ -266,12 +391,20 @@ export class OAuthService {
     return stored
   }
 
-  private statusFromCredentials(credentials: StoredOAuthCredentials | null, storageAvailable = true): OAuthStatusDto {
+  private statusFromCredentials(
+    credentials: StoredOAuthCredentials | null,
+    storageAvailable = true,
+    poolStatus: { accounts: PoolAccountSummaryDto[]; activeAccountId?: string; rotationStrategy: AccountRotationStrategy } = {
+      accounts: [],
+      rotationStrategy: 'sequential',
+    },
+  ): OAuthStatusDto {
     const active = this.activeLogin
     if (credentials === null) {
       return {
-        authenticated: false,
+        authenticated: poolStatus.accounts.length > 0,
         account: null,
+        ...poolStatus,
         storage: { ...this.store.storage, available: storageAvailable },
         login: {
           active: active !== null,
@@ -290,6 +423,7 @@ export class OAuthService {
         accountIdSuffix: maskAccountId(credentials.accountId ?? identity.accountId),
         tokenExpiresAt: Math.floor(credentials.expiresAt / 1000),
       },
+      ...poolStatus,
       storage: { ...this.store.storage, available: storageAvailable },
       login: {
         active: active !== null,
@@ -423,6 +557,11 @@ function extractIdentity(credentials: Pick<StoredOAuthCredentials, 'accessToken'
       ?? stringClaim(nested?.organizations?.[0]?.id)
   }
   return result
+}
+
+/** Identity one refresh is keyed by, so a rotation is never redeemed twice. */
+function refreshKey(credentials: StoredOAuthCredentials): string {
+  return credentials.accountId ?? credentials.email ?? credentials.refreshToken
 }
 
 function stringClaim(value: unknown): string | undefined {

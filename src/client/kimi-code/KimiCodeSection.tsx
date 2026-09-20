@@ -6,6 +6,8 @@ import type {
   KimiCodeWebStatus,
 } from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_REASONING_EFFORTS } from '../../shared/kimi-code-contracts.ts'
+import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
 import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
 
@@ -199,11 +201,18 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     }
   }
 
-  const handleLogout = async () => {
+  /** One account-level action on the shared pool card. */
+  const handleAccountAction = async (
+    action: 'set-primary' | 'delete' | 'clear-cooldown',
+    accountId: string,
+  ) => {
     try {
-      setBusy('logout')
+      setBusy(`${action}-${accountId}`)
       setError(null)
-      const updated = await fetchApi<KimiCodeWebStatus>('/logout', { method: 'POST' })
+      const updated = await fetchApi<KimiCodeWebStatus>('/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ action, accountId }),
+      })
       setStatus(updated)
       setFlow({ status: 'idle' })
       notifyChange()
@@ -212,6 +221,44 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     } finally {
       setBusy(null)
     }
+  }
+
+  const handleSetStrategy = async (strategy: AccountRotationStrategy) => {
+    try {
+      setBusy('strategy')
+      setError(null)
+      const updated = await fetchApi<KimiCodeWebStatus>('/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'strategy', strategy }),
+      })
+      setStatus(updated)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Re-authorize one account.
+   *
+   * Nothing is deleted: the failure marker is cleared and the device-code flow
+   * runs again, so the account keeps its alias and place in the rotation.
+   */
+  const handleRelogin = (accountId: string) => {
+    void (async () => {
+      try {
+        const updated = await fetchApi<KimiCodeWebStatus>('/accounts', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'relogin', accountId }),
+        })
+        setStatus(updated)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+        return
+      }
+      await handleLogin()
+    })()
   }
 
   const handleRefreshQuota = async () => {
@@ -360,47 +407,30 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
 
   return (
     <div className="dsha-page">
-      <section className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>{status?.authenticated ? t.account : t.signedOut}</h3>
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{status?.authenticated ? t.signedIn : t.signedOut}</span>
-          <span className="dsha-value">{account?.nickname || account?.email || account?.userId || '—'}</span>
-        </div>
-        {status?.authenticated && (
+      <AccountPoolSection
+        accounts={status?.accounts ?? []}
+        activeAccountId={status?.activeAccountId}
+        rotationStrategy={status?.rotationStrategy ?? 'sequential'}
+        busy={busy}
+        labels={t}
+        loginBusyLabel={loginPending ? t.waitingAuthorization : busy === 'login' ? t.requestingCode : undefined}
+        onLogin={() => void handleLogin()}
+        onSetPrimary={(accountId) => void handleAccountAction('set-primary', accountId)}
+        onDelete={(accountId) => void handleAccountAction('delete', accountId)}
+        onClearCooldown={(accountId) => void handleAccountAction('clear-cooldown', accountId)}
+        onRelogin={(accountId) => handleRelogin(accountId)}
+        onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
+        storageValue={status?.storagePath || '—'}
+        renderDetails={(entry) => (
           <>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.plan}</span>
-              <span className="dsha-value">{quota?.planName || account?.planName || t.planUnknown}</span>
-            </div>
-            {account?.email && (
-              <div className="dsha-row">
-                <span className="dsha-label">{t.email}</span>
-                <span className="dsha-value">{account.email}</span>
-              </div>
+            {entry.planName && <span>{t.plan}: {entry.planName}</span>}
+            {entry.region && (
+              <span>{t.region}: {entry.region === 'global' ? t.regionGlobal : t.regionMainland}</span>
             )}
-            <div className="dsha-row">
-              <span className="dsha-label">{t.region}</span>
-              <span className="dsha-value">
-                {status.region === 'global' ? t.regionGlobal : t.regionMainland}
-              </span>
-            </div>
-            <div className="dsha-row">
-              <span className="dsha-label">{t.authenticatedAt}</span>
-              <span className="dsha-value">{formatDate(account?.authenticatedAt)}</span>
-            </div>
+            {entry.email && <span>{t.email}: {entry.email}</span>}
           </>
         )}
-        <div className="dsha-row">
-          <span className="dsha-label">{t.storage}</span>
-          <span className="dsha-value">{status?.storagePath || '—'}</span>
-        </div>
-        <p className="dsha-notice">{t.storageNotice}</p>
-        {status?.credentialsRejected && (
-          <p className="dsha-notice">{t.refreshRejected}</p>
-        )}
-
+      >
         {loginPending && (
           <div className="dsha-device-box">
             <strong>{t.deviceCodeSection}</strong>
@@ -444,35 +474,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
             </div>
           </div>
         )}
-
-        <div className="dsha-actions">
-          {!status?.authenticated ? (
-            <button
-              className="dsha-btn dsha-btn-primary"
-              disabled={busy !== null || loginPending}
-              onClick={() => void handleLogin()}
-            >
-              {loginPending ? t.waitingAuthorization : busy === 'login' ? t.requestingCode : t.signIn}
-            </button>
-          ) : (
-            <>
-              <button
-                className="dsha-btn dsha-btn-primary"
-                disabled={busy !== null || loginPending}
-                onClick={() => void handleLogin()}
-              >
-                {loginPending ? t.waitingAuthorization : t.signInAgain}
-              </button>
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleRefreshQuota()}>
-                {busy === 'quota' ? t.refreshingQuota : t.refreshQuota}
-              </button>
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleLogout()}>
-                {t.signOut}
-              </button>
-            </>
-          )}
-        </div>
-      </section>
+      </AccountPoolSection>
 
       <section className="dsha-group">
         <div className="dsha-grouphead">

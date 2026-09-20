@@ -1,24 +1,20 @@
-import fsPromises from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
-import { createHash, randomBytes } from 'node:crypto'
-import { isDeepStrictEqual } from 'node:util'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { createHash } from 'node:crypto'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
+import { AccountPoolCore, normalizeRotationStrategy, type AccountPoolHooks } from '../common/account-pool.ts'
+import { dshHomeDir } from '../common/home.ts'
 import {
   FileCredentialStore,
-  credentialPath as singleCredentialPath,
-  dshHomeDir,
   parseAntigravityCredentials,
   type AntigravityCredentials,
 } from './token-store.ts'
 import { refreshAntigravityToken } from './oauth.ts'
 import type {
-  AccountRotationStrategy,
   AntigravityAccountSummaryDto,
+  AccountRotationStrategy,
 } from '../../shared/antigravity-contracts.ts'
 
 export interface AntigravityPoolAccount {
@@ -51,8 +47,7 @@ export function parseAntigravityPoolData(value: unknown): AntigravityPoolData {
     throw new Error('Antigravity pool payload is invalid')
   }
   const record = value as Record<string, unknown>
-  const strategy: AccountRotationStrategy =
-    record.rotationStrategy === 'round-robin' ? 'round-robin' : 'sequential'
+  const strategy: AccountRotationStrategy = normalizeRotationStrategy(record.rotationStrategy)
   const activeAccountId = typeof record.activeAccountId === 'string' ? record.activeAccountId : undefined
   const rawAccounts = Array.isArray(record.accounts) ? record.accounts : []
   const accounts: AntigravityPoolAccount[] = []
@@ -106,288 +101,161 @@ function createPoolCredentialBackend(filePath: string): CredentialStore<Antigrav
   throw new Error('Antigravity pool encrypted storage requires Windows, macOS, or Linux.')
 }
 
-const poolOperations = new Map<string, Promise<void>>()
-
+/**
+ * Antigravity's account pool.
+ *
+ * The storage, eligibility, rotation and cooldown rules live in the shared
+ * {@link AccountPoolCore}; this facade keeps the provider-shaped API the routes
+ * and the adapter were written against, including the credential projection
+ * (`token` / `projectId`) that predates the shared core.
+ */
 export class AccountPoolStore {
+  private readonly core: AccountPoolCore<
+    AntigravityCredentials,
+    AntigravityPoolAccount,
+    AntigravityAccountSummaryDto
+  >
+  private readonly legacyStore: FileCredentialStore
+
   constructor(
-    private readonly filePath = poolPath(),
-    private readonly backend: CredentialStore<AntigravityPoolData> = createPoolCredentialBackend(filePath),
-    private readonly legacyStore = new FileCredentialStore(),
-  ) {}
-
-  path(): string {
-    if (process.platform === 'win32') return `${this.filePath}.dpapi`
-    const kind = process.platform === 'darwin' ? 'Keychain' : 'Secret Service'
-    return `${kind}: dsh-antigravity-pool/${poolCredentialAccount(this.filePath)}`
-  }
-
-  private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const key = path.resolve(this.filePath)
-    const result = (poolOperations.get(key) || Promise.resolve()).then(operation)
-    const settled = result.then(() => undefined, () => undefined)
-    poolOperations.set(key, settled)
-    void settled.then(() => {
-      if (poolOperations.get(key) === settled) poolOperations.delete(key)
-    })
-    return result
-  }
-
-  private async saveVerified(data: AntigravityPoolData): Promise<void> {
-    const normalized = parseAntigravityPoolData(data)
-    await this.backend.save(normalized)
-    const restored = await this.backend.load()
-    if (!isDeepStrictEqual(restored, normalized)) {
-      throw new Error('Antigravity pool encrypted verification failed')
+    filePath = poolPath(),
+    backend: CredentialStore<AntigravityPoolData> = createPoolCredentialBackend(filePath),
+    legacyStore = new FileCredentialStore(),
+  ) {
+    this.legacyStore = legacyStore
+    const hooks: AccountPoolHooks<
+      AntigravityCredentials,
+      AntigravityPoolAccount,
+      AntigravityAccountSummaryDto
+    > = {
+      providerId: 'antigravity',
+      displayName: 'Antigravity',
+      poolFile: filePath,
+      keychainService: 'dsh-antigravity-pool',
+      parsePoolData: parseAntigravityPoolData,
+      dedupeKey: (credentials) => credentials.email,
+      defaultAlias: (credentials, position) => credentials.email ?? `账号 ${position}`,
+      createAccount: ({ id, alias, credentials, addedAt, isPrimary }) => ({
+        id,
+        alias,
+        credentials,
+        addedAt,
+        isPrimary,
+        ...(credentials.email === undefined ? {} : { email: credentials.email }),
+        ...(credentials.projectId === undefined ? {} : { projectId: credentials.projectId }),
+      }),
+      expiresAt: (credentials) => credentials.expires ?? credentials.expires_at,
+      // The access token is also refreshed when it is missing entirely.
+      needsRefresh: (credentials, now) => {
+        const token = credentials.access ?? credentials.access_token
+        const expires = credentials.expires ?? credentials.expires_at ?? 0
+        return !token || expires <= now + 60_000
+      },
+      refresh: (credentials, fetchFn) => refreshAntigravityToken(credentials, fetchFn),
+      // The pre-pool single credential stays usable as the primary account.
+      legacyAccount: async () => {
+        const legacy = await this.legacyStore.read()
+        if (!legacy || !(legacy.access || legacy.access_token || legacy.refresh || legacy.refresh_token)) {
+          return null
+        }
+        return {
+          id: 'acc_primary',
+          alias: legacy.email || '主账号',
+          credentials: legacy,
+          addedAt: Date.now(),
+          isPrimary: true,
+          ...(legacy.email === undefined ? {} : { email: legacy.email }),
+          ...(legacy.projectId === undefined ? {} : { projectId: legacy.projectId }),
+        }
+      },
+      mirrorPrimary: async (credentials) => {
+        if (credentials === null) {
+          await this.legacyStore.delete()
+          return
+        }
+        await this.legacyStore.write(credentials)
+      },
+      extendSummary: (account, base) => {
+        // A refresh can discover the project id after the account was pooled, so
+        // the credential is the fallback the card reads.
+        const projectId = account.projectId ?? account.credentials.projectId
+        const email = account.email ?? account.credentials.email
+        return {
+          ...base,
+          ...(projectId === undefined ? {} : { projectId }),
+          ...(email === undefined ? {} : { email }),
+          ...(account.planLabel === undefined ? {} : { planLabel: account.planLabel }),
+        }
+      },
+      emptyMessage: '未登录 Antigravity 账号，请在「设置 → Antigravity」中添加并登录账号。',
+      allUnavailableMessage: (count, waitMinutes) =>
+        `全部 ${count} 个 Antigravity 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMinutes} 分钟后解除冷却。`,
+      backend,
     }
+    this.core = new AccountPoolCore(hooks)
+  }
+
+  /** Human description of where this pool's credentials live. */
+  path(): string {
+    return this.core.path()
   }
 
   read(): Promise<AntigravityPoolData> {
-    return this.serialize(async () => {
-      let current: AntigravityPoolData | null = null
-      try {
-        current = await this.backend.load()
-      } catch {
-        // Corrupt file recovery
-      }
-
-      if (current !== null && Array.isArray(current.accounts) && current.accounts.length > 0) {
-        return current
-      }
-
-      // Surface the pre-existing single credential as the primary account. This
-      // read stays side-effect free on purpose: every caller that changes the
-      // pool writes it back immediately afterwards, so persisting the migration
-      // here only bought one extra encrypted round trip and made a getter write
-      // to disk.
-      try {
-        const legacy = await this.legacyStore.read()
-        if (legacy && (legacy.access || legacy.access_token || legacy.refresh || legacy.refresh_token)) {
-          const defaultAccount: AntigravityPoolAccount = {
-            id: 'acc_primary',
-            alias: legacy.email || '主账号',
-            email: legacy.email,
-            projectId: legacy.projectId,
-            credentials: legacy,
-            addedAt: Date.now(),
-            isPrimary: true,
-          }
-          return {
-            version: 1,
-            activeAccountId: 'acc_primary',
-            rotationStrategy: current?.rotationStrategy || 'sequential',
-            accounts: [defaultAccount],
-          }
-        }
-      } catch {
-        // ignore migration failures
-      }
-
-      return current || {
-        version: 1,
-        rotationStrategy: 'sequential',
-        accounts: [],
-      }
-    })
+    return this.core.read()
   }
 
   write(data: AntigravityPoolData): Promise<void> {
-    return this.serialize(() => this.saveVerified(parseAntigravityPoolData(data)))
+    return this.core.write(data)
   }
 
-  async listAccounts(): Promise<AntigravityAccountSummaryDto[]> {
-    const data = await this.read()
-    const now = Date.now()
-    return data.accounts.map((acc) => {
-      const expires = acc.credentials.expires || acc.credentials.expires_at
-      return {
-        id: acc.id,
-        alias: acc.alias,
-        email: acc.email,
-        projectId: acc.projectId,
-        planLabel: acc.planLabel,
-        isPrimary: acc.isPrimary === true,
-        lastUsedAt: acc.lastUsedAt,
-        cooldownUntil: acc.cooldownUntil && acc.cooldownUntil > now ? acc.cooldownUntil : undefined,
-        cooldownReason: acc.cooldownUntil && acc.cooldownUntil > now ? acc.cooldownReason : undefined,
-        expiresAt: expires,
-      }
-    })
+  listAccounts(): Promise<AntigravityAccountSummaryDto[]> {
+    return this.core.listAccounts()
   }
 
-  async addAccount(credentials: AntigravityCredentials, alias?: string): Promise<AntigravityPoolAccount> {
-    const data = await this.read()
-    const email = credentials.email
-    const existingIndex = email ? data.accounts.findIndex((a) => a.email === email) : -1
-    const id = existingIndex >= 0 ? data.accounts[existingIndex]!.id : `acc_${randomBytes(6).toString('hex')}`
-    const isPrimary = data.accounts.length === 0 || (existingIndex >= 0 && data.accounts[existingIndex]!.isPrimary)
-
-    const account: AntigravityPoolAccount = {
-      id,
-      alias: alias?.trim() || email || `账号 ${data.accounts.length + 1}`,
-      email,
-      projectId: credentials.projectId,
-      credentials,
-      addedAt: Date.now(),
-      isPrimary: !!isPrimary,
-    }
-
-    if (existingIndex >= 0) {
-      data.accounts[existingIndex] = {
-        ...data.accounts[existingIndex]!,
-        ...account,
-        isPrimary: data.accounts[existingIndex]!.isPrimary,
-      }
-    } else {
-      data.accounts.push(account)
-    }
-
-    if (!data.activeAccountId || account.isPrimary) {
-      data.activeAccountId = account.id
-    }
-
-    await this.write(data)
-    // Also keep legacy store synced for backward compatibility
-    if (account.isPrimary) {
-      void this.legacyStore.write(credentials).catch(() => undefined)
-    }
-    return account
+  addAccount(credentials: AntigravityCredentials, alias?: string): Promise<AntigravityPoolAccount> {
+    return this.core.addAccount(credentials, alias)
   }
 
-  async setPrimary(accountId: string): Promise<void> {
-    const data = await this.read()
-    for (const a of data.accounts) {
-      a.isPrimary = a.id === accountId
-    }
-    const primary = data.accounts.find((a) => a.isPrimary)
-    if (primary) {
-      data.activeAccountId = primary.id
-      void this.legacyStore.write(primary.credentials).catch(() => undefined)
-    }
-    await this.write(data)
+  setPrimary(accountId: string): Promise<void> {
+    return this.core.setPrimary(accountId)
   }
 
-  async setAlias(accountId: string, alias: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((a) => a.id === accountId)
-    if (target && alias.trim()) {
-      target.alias = alias.trim()
-      await this.write(data)
-    }
+  setAlias(accountId: string, alias: string): Promise<void> {
+    return this.core.setAlias(accountId, alias)
   }
 
-  async deleteAccount(accountId: string): Promise<void> {
-    const data = await this.read()
-    const wasPrimary = data.accounts.find((a) => a.id === accountId)?.isPrimary
-    data.accounts = data.accounts.filter((a) => a.id !== accountId)
-    if (wasPrimary && data.accounts.length > 0) {
-      data.accounts[0]!.isPrimary = true
-      void this.legacyStore.write(data.accounts[0]!.credentials).catch(() => undefined)
-    } else if (data.accounts.length === 0) {
-      void this.legacyStore.delete().catch(() => undefined)
-    }
-    if (data.activeAccountId === accountId) {
-      data.activeAccountId = data.accounts.find((a) => a.isPrimary)?.id ?? data.accounts[0]?.id
-    }
-    await this.write(data)
+  deleteAccount(accountId: string): Promise<void> {
+    return this.core.deleteAccount(accountId)
   }
 
-  async setStrategy(strategy: AccountRotationStrategy): Promise<void> {
-    const data = await this.read()
-    data.rotationStrategy = strategy
-    await this.write(data)
+  setStrategy(strategy: AccountRotationStrategy): Promise<void> {
+    return this.core.setStrategy(strategy)
   }
 
-  async markCooldown(accountId: string, durationMs: number, reason: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((a) => a.id === accountId)
-    if (target) {
-      target.cooldownUntil = Date.now() + Math.max(10_000, durationMs)
-      target.cooldownReason = reason
-      await this.write(data)
-    }
+  markCooldown(accountId: string, durationMs: number, reason: string): Promise<void> {
+    return this.core.markCooldown(accountId, durationMs, reason)
   }
 
-  async clearCooldown(accountId: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((a) => a.id === accountId)
-    if (target) {
-      target.cooldownUntil = undefined
-      target.cooldownReason = undefined
-      await this.write(data)
-    }
+  clearCooldown(accountId: string): Promise<void> {
+    return this.core.clearCooldown(accountId)
   }
 
-  async hasAnotherAvailableAccount(triedAccountIds: ReadonlySet<string>): Promise<boolean> {
-    const data = await this.read()
-    const now = Date.now()
-    return data.accounts.some(
-      (a) => !triedAccountIds.has(a.id) && (!a.cooldownUntil || a.cooldownUntil <= now),
-    )
+  hasAnotherAvailableAccount(triedAccountIds: ReadonlySet<string>): Promise<boolean> {
+    return this.core.hasAnotherAvailableAccount(triedAccountIds)
   }
 
+  /**
+   * Pick the account for the next request, with the credential projection the
+   * Antigravity adapter consumes.
+   */
   async getEffectiveAccount(
     excludeIds?: ReadonlySet<string>,
     fetchFn: typeof fetch = fetch,
   ): Promise<{ account: AntigravityPoolAccount; token: string; projectId?: string }> {
-    const data = await this.read()
-    if (data.accounts.length === 0) {
-      throw new Error('未登录 Antigravity 账号，请在「设置 → Antigravity」中添加并登录账号。')
-    }
-
-    const now = Date.now()
-    const eligible = data.accounts.filter(
-      (a) => (!excludeIds || !excludeIds.has(a.id)) && (!a.cooldownUntil || a.cooldownUntil <= now),
-    )
-
-    if (eligible.length === 0) {
-      let shortest = Infinity
-      for (const a of data.accounts) {
-        if (a.cooldownUntil && a.cooldownUntil > now) {
-          shortest = Math.min(shortest, a.cooldownUntil - now)
-        }
-      }
-      const waitMins = Number.isFinite(shortest) ? Math.ceil(shortest / 60000) : 15
-      throw new LlmError(
-        `全部 ${data.accounts.length} 个 Antigravity 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMins} 分钟后解除冷却。`,
-        'RATE_LIMIT',
-        { status: 429 },
-      )
-    }
-
-    let selected: AntigravityPoolAccount
-    if (data.rotationStrategy === 'round-robin') {
-      // Sort by least recently used
-      selected = [...eligible].sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0))[0]!
-    } else {
-      // Sequential: prefer primary account first, then first available
-      selected = eligible.find((a) => a.isPrimary) || eligible[0]!
-    }
-
-    // Refresh token if needed
-    const creds = selected.credentials
-    const expires = creds.expires || creds.expires_at || 0
-    let token = creds.access || creds.access_token
-
-    if (!token || expires <= now + 60_000) {
-      const refreshed = await refreshAntigravityToken(creds, fetchFn)
-      selected.credentials = refreshed
-      selected.projectId = refreshed.projectId || selected.projectId
-      // Write back refreshed credentials
-      const idx = data.accounts.findIndex((a) => a.id === selected.id)
-      if (idx >= 0) data.accounts[idx] = selected
-      if (selected.isPrimary) {
-        void this.legacyStore.write(refreshed).catch(() => undefined)
-      }
-    }
-
-    selected.lastUsedAt = now
-    data.activeAccountId = selected.id
-    await this.write(data)
-
-    return {
-      account: selected,
-      token: (selected.credentials.access || selected.credentials.access_token)!,
-      projectId: selected.projectId || selected.credentials.projectId,
-    }
+    const { account, credentials } = await this.core.getEffectiveAccount(excludeIds, fetchFn)
+    const token = credentials.access || credentials.access_token
+    if (!token) throw new Error('Antigravity 选中账号缺少访问令牌，请重新登录该账号。')
+    const projectId = account.projectId || credentials.projectId
+    return { account, token, ...(projectId === undefined ? {} : { projectId }) }
   }
 }

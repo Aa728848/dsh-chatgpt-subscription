@@ -8,6 +8,7 @@ import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
+import { CodexAccountPool } from './host/codex-account-pool.ts'
 import { createCodexFetchProvider } from './host/codex-fetch.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
@@ -32,6 +33,7 @@ import {
 import { AccountPoolStore } from './host/antigravity/account-pool.ts'
 import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID } from './host/antigravity/types.ts'
 import { CommandCodeAdapter } from './host/command-code/adapter.ts'
+import { CommandCodeAccountPool } from './host/command-code/account-pool.ts'
 import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
 import {
   FileCredentialStore as CommandCodeCredentialStore,
@@ -40,6 +42,7 @@ import {
 } from './host/command-code/token-store.ts'
 import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/command-code/types.ts'
 import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
+import { KimiCodeAccountPool } from './host/kimi-code/account-pool.ts'
 import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
 import { createKimiVideoTool } from './host/kimi-code/video-tool.ts'
 import { readVideoBytes } from './host/kimi-code/video-store.ts'
@@ -159,10 +162,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const antigravityPreferences = registerAntigravityPreferenceStore(ctx.settings, antigravityModelSettings)
 
   const commandCodeStore = new CommandCodeCredentialStore()
+  // One credential per Command Code key, with the pre-pool file projected as the
+  // primary account so an existing install needs no migration.
+  const commandCodeAccountPool = new CommandCodeAccountPool({ store: commandCodeStore })
   const commandCodeModelSettings = new CommandCodeModelSettingsStore()
   const commandCodePreferences = registerCommandCodePreferenceStore(ctx.settings, commandCodeModelSettings)
 
   const kimiCodeStore = new KimiCodeCredentialStore()
+  // One credential per signed-in Kimi Code account, with the pre-pool file
+  // projected as the primary account so an existing install needs no migration.
+  const kimiCodeAccountPool = new KimiCodeAccountPool({ store: kimiCodeStore })
   const kimiCodeModelSettings = new KimiCodeModelSettingsStore()
   const kimiCodePreferences = registerKimiCodePreferenceStore(ctx.settings, kimiCodeModelSettings)
 
@@ -260,6 +269,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         serving: () => commandCodeRegistration !== undefined,
         conflict: () => commandCodeConflict,
       },
+      commandCodeAccountPool,
     )
     // The Command Code route is contended: another adapter family (the generic
     // pi-ai provider, configured with this same endpoint) may already own the id.
@@ -271,6 +281,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       commandCodeModelSettings,
       commandCodePreferences,
       { fetchFn: proxyFetch, attachments: ctx.attachments },
+      commandCodeAccountPool,
     )
     let commandCodeRegistration: AdapterRegistrationHandle | undefined
     let commandCodeConflict: string | null = null
@@ -291,6 +302,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       kimiCodeModelSettings,
       kimiCodePreferences,
       { fetchFn: proxyFetch, attachments: ctx.attachments, videos: kimiVideos },
+      kimiCodeAccountPool,
     )
     let kimiCodeRegistration: AdapterRegistrationHandle | undefined
     let kimiCodeConflict: string | null = null
@@ -352,12 +364,21 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         serving: () => kimiCodeRegistration !== undefined,
         conflict: () => kimiCodeConflict,
       },
+      kimiCodeAccountPool,
     )
 
-    const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger })
+    // The ChatGPT account pool. Its mirror store is the same platform store the
+    // plugin used before the pool existed, so a pre-pool sign-in is projected as
+    // the primary account and nothing has to be migrated up front.
+    const codexAccountPool = new CodexAccountPool({ store })
+    const oauth = new OAuthService(store, { fetchFn: proxyFetch, logger: ctx.logger, pool: codexAccountPool })
     const usage = new UsageService(oauth, { fetchFn: proxyFetch })
+    // A pooled account whose last known Codex window is spent is skipped before
+    // a request is spent on it, instead of rediscovering the same 429 each time.
+    codexAccountPool.setQuotaBlockedUntil((account, now) => usage.blockedUntilFor(account.credentials, now))
     const responses = new ResponsesClient(oauth, ctx.attachments, {
       fetchFn: proxyFetch,
+      accountPool: codexAccountPool,
       localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
       onGenerationFinished: () => usage.invalidate(),
       outputVerbosity: () => preferences.status().outputVerbosity,
@@ -409,7 +430,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     }
 
     const disposeRoutes = registerRoutes(
-      ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit)
+      ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     // The video ingress for the Kimi route. Registered here because the tool
@@ -530,6 +551,15 @@ export type {
   RouteViolation,
 } from './host/subagent-route-audit.ts'
 export { OAuthService } from './host/oauth-service.ts'
+export {
+  CodexAccountPool,
+  codexPoolPath,
+  parseCodexPoolData,
+  type CodexPoolAccount,
+  type CodexTokenRefresher,
+} from './host/codex-account-pool.ts'
+export { AccountPoolCore, normalizeRotationStrategy } from './host/common/account-pool.ts'
+export { dshHomeDir } from './host/common/home.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'
 export { createCodexSearchProvider } from './host/codex-search.ts'
@@ -544,6 +574,14 @@ export { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
 export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts'
 
 export { AntigravityAdapter } from './host/antigravity/adapter.ts'
+export {
+  CommandCodeAccountPool,
+  commandCodePoolPath,
+  commandCodeAccountKey,
+  parseCommandCodePoolData,
+  type CommandCodePoolAccount,
+  type CommandCodeAccountSummaryDto,
+} from './host/command-code/account-pool.ts'
 export { CommandCodeAdapter } from './host/command-code/adapter.ts'
 export {
   FileCredentialStore as CommandCodeCredentialStore,
@@ -588,6 +626,12 @@ export {
   getCachedQuota as getKimiCodeQuota,
 } from './host/kimi-code/client.ts'
 export { getKimiCodeWebStatus, registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
+export {
+  KimiCodeAccountPool,
+  kimiCodePoolPath,
+  parseKimiCodePoolData,
+  type KimiCodePoolAccount,
+} from './host/kimi-code/account-pool.ts'
 export {
   KIMI_CODE_MODELS,
   kimiCodeModelDef,

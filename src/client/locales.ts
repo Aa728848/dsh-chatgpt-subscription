@@ -1,6 +1,11 @@
 export const NS = 'dsh-chatgpt-subscription' as const
 
+import { accountPoolEn, accountPoolZh } from './common/account-pool-labels.ts'
+
 export const zh = {
+  // The account-management card is shared with every other provider tab, so its
+  // labels live in one place and are translated through this tab's dictionary.
+  ...accountPoolZh,
   title: 'ChatGPT',
   hubTitle: '订阅服务',
   intro: '使用 ChatGPT 账号登录，在 DSH 中使用订阅可用的模型。',
@@ -130,6 +135,7 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
+  ...accountPoolEn,
   title: 'ChatGPT',
   hubTitle: 'Subscriptions',
   intro: 'Sign in with ChatGPT to use models available to your subscription in DSH.',

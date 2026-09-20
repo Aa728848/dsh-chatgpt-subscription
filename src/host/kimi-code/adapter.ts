@@ -29,6 +29,7 @@ import {
   FileModelSettingsStore,
   resolveRegion,
   type KimiCodeCatalogModel,
+  type KimiCodeCredentials,
   type KimiCodePreferenceStore,
 } from './token-store.ts'
 import { kimiCodeModelDef } from './model-catalog.ts'
@@ -61,6 +62,7 @@ import {
   type KimiCodeStreamState,
 } from './mapper.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { KimiCodeAccountPool } from './account-pool.ts'
 import { ensureAccessToken, KimiCodeUnauthorizedError } from './oauth.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import type { KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
@@ -303,14 +305,28 @@ export interface KimiCodeAdapterOptions {
   loadCatalog?: () => Promise<KimiCodeCatalogModel[]>
 }
 
+/** Cooldown one rate-limited account takes when the provider states no delay. */
+const POOL_COOLDOWN_MS = 15 * 60_000
+
 export class KimiCodeAdapter extends LlmAdapter {
+  /**
+   * Rotation pool, or null for the single stored credential.
+   *
+   * Only the plugin entry installs one, because it owns the pool's storage; an
+   * adapter built without one must keep working off the one credential file and
+   * must not create pool state of its own.
+   */
+  private readonly accountPool: KimiCodeAccountPool | null
+
   constructor(
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
     private readonly preferences?: KimiCodePreferenceStore,
     private readonly options: KimiCodeAdapterOptions = {},
+    accountPool?: KimiCodeAccountPool,
   ) {
     super()
+    this.accountPool = accountPool ?? null
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -436,21 +452,6 @@ export class KimiCodeAdapter extends LlmAdapter {
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    let credentials
-    try {
-      // A token near expiry is rotated here; a rejected refresh token surfaces
-      // as an unauthorized error, which is not retried.
-      credentials = await ensureAccessToken(this.store, { fetchFn, signal })
-    } catch (error) {
-      if (error instanceof KimiCodeUnauthorizedError) {
-        throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
-      }
-      throw new LlmError(
-        `Kimi Code credential could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
-        'MISSING_CREDENTIAL',
-        { cause: error },
-      )
-    }
 
     const catalog = await this.catalog().catch(() => [])
     const wire: KimiCodeWire = wireForCatalogEntry(options.model, catalog)
@@ -496,32 +497,96 @@ export class KimiCodeAdapter extends LlmAdapter {
     // string is built once instead of twice.
     const body = assertRequestBodyFits(built, requestHasVideo(requestOptions))
 
-    const region = credentials.region ?? await resolveRegion()
-    const base = (credentials.baseUrl ?? codingBaseUrl(region)).replace(/\/+$/, '')
-    const endpoint = wire === 'anthropic'
-      ? `${base}/v1/messages?beta=true`
-      : `${base}/v1/chat/completions`
-    const headers = await modelRequestHeaders(credentials.accessToken, wire)
+    const pool = this.accountPool
+    const tried = new Set<string>()
+    let response: Response | undefined
 
-    let response: Response
-    try {
-      response = await fetchFn(endpoint, { method: 'POST', headers, body, signal })
-    } catch (error) {
-      if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED', { cause: error })
-      // A connection that never produced a response is a transport failure, not
-      // a verdict from the provider: the same request is eligible for the
-      // bounded backoff above instead of failing the turn outright.
-      throw new LlmError(
-        `Kimi Code request failed: ${error instanceof Error ? error.message : String(error)}`,
-        'TRANSPORT',
-        { cause: error },
-      )
-    }
+    // Account rotation. Without a pool this runs exactly once and keeps the
+    // original credential preparation and error mapping; with one, an account
+    // that is rate limited, out of quota or no longer authenticating steps out
+    // of the rotation while another account serves the same payload.
+    while (true) {
+      let apiCredentials: KimiCodeCredentials
+      let accountId: string | undefined
+      if (pool === null) {
+        try {
+          // A token near expiry is rotated here; a rejected refresh token
+          // surfaces as an unauthorized error, which is not retried.
+          apiCredentials = await ensureAccessToken(this.store, { fetchFn, signal })
+        } catch (error) {
+          if (error instanceof KimiCodeUnauthorizedError) {
+            throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
+          }
+          throw new LlmError(
+            `Kimi Code credential could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
+            'MISSING_CREDENTIAL',
+            { cause: error },
+          )
+        }
+      } else {
+        let effective: { account: { id: string }; credentials: KimiCodeCredentials }
+        try {
+          effective = await pool.getEffectiveCredential(tried, fetchFn)
+        } catch (error) {
+          // The pool's own verdict (an exhausted rotation) is already typed; a
+          // plain error means no account is signed in at all.
+          if (error instanceof LlmError) throw error
+          throw new LlmError(
+            error instanceof Error ? error.message : 'Kimi Code credential could not be prepared.',
+            'MISSING_CREDENTIAL',
+            { cause: error },
+          )
+        }
+        accountId = effective.account.id
+        tried.add(accountId)
+        apiCredentials = effective.credentials
+      }
 
-    if (!response.ok) {
+      // Every attempt uses the credential's own region and hosts: one pool may
+      // legitimately hold accounts issued in different regions.
+      const region = apiCredentials.region ?? await resolveRegion()
+      const base = (apiCredentials.baseUrl ?? codingBaseUrl(region)).replace(/\/+$/, '')
+      const endpoint = wire === 'anthropic'
+        ? `${base}/v1/messages?beta=true`
+        : `${base}/v1/chat/completions`
+      const headers = await modelRequestHeaders(apiCredentials.accessToken, wire)
+
+      try {
+        response = await fetchFn(endpoint, { method: 'POST', headers, body, signal })
+      } catch (error) {
+        if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED', { cause: error })
+        // A connection that never produced a response is a transport failure, not
+        // a verdict from the provider: the same request is eligible for the
+        // bounded backoff above instead of failing the turn outright.
+        throw new LlmError(
+          `Kimi Code request failed: ${error instanceof Error ? error.message : String(error)}`,
+          'TRANSPORT',
+          { cause: error },
+        )
+      }
+
+      if (response.ok) break
+
       const detail = (await response.text().catch(() => '')).slice(0, 2_000)
       const failure = classifyKimiFailure(response.status, detail)
       const after = response.status === 429 ? retryAfterMs(response.headers) : undefined
+
+      if (pool !== null && accountId !== undefined) {
+        // A plan-scoped 429 is a property of the request, not of the account:
+        // rotating cannot help, and cooling every account after one such request
+        // would take the whole pool offline.
+        const planScoped = response.status === 429 && matchesAny(detail, ENTITLEMENT_PATTERNS)
+        if (response.status === 429 && !planScoped) {
+          await pool.markCooldown(accountId, after ?? POOL_COOLDOWN_MS, `${PROVIDER_NAME} 429`).catch(() => undefined)
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+        } else if (failure.code === 'INVALID_CREDENTIAL') {
+          // A dead refresh token is that account's problem alone: keep the
+          // account (signing in again restores it) and take it out of rotation.
+          await pool.markAuthFailed(accountId, failure.message).catch(() => undefined)
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+        }
+      }
+
       throw new LlmError(failure.message, failure.code, {
         status: response.status,
         ...(after === undefined ? {} : { providerRetryAfterMs: after }),

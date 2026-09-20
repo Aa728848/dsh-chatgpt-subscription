@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 - 2026-09-20
+
+- **四条线路全部支持多账号与号池调度**（把 Antigravity 已有的账号管理推广到 ChatGPT / Command Code / Kimi Code，落实设计文档 `docs/design-multi-account-pool.md` 的 P0–P4）：
+  - **共享号池内核** `src/host/common/account-pool.ts`：加密存储（Windows DPAPI / macOS Keychain / Linux Secret Service）、按文件串行化的读改写、旧版单凭据的零副作用投影、顺序耗尽 / 轮询调度 / 粘性会话三种策略、429 冷却、账号级认证失效状态、刷新失败自动换号。Antigravity 线路改为复用该内核（`AccountPoolStore` 保留原 API 与池文件格式），四条线路的池规则从此只有一处实现。
+  - **ChatGPT 号池**（`storages/codex-pool.json`）：按 `chatgpt_account_id` 去重；单账号 OAuth 升级为多账号，`ResponsesClient` 在建立响应前轮换账号，429 冷却换号、401 强制刷新一次后把该账号标记为需重新登录（不再清空整个凭据库）、刷新令牌轮换按账号单飞写入，避免并发重复兑换。
+  - **Command Code 号池**（`storages/command-code-pool.json`）：API Key 永久有效故无刷新；按 user id + key name 去重；401/403 标记该 Key 失效并换号，429 冷却换号；浏览器登录与手工粘贴 Key 两条路径都写入池。
+  - **Kimi Code 号池**（`storages/kimi-code-pool.json`）：按账号刷新（刷新令牌轮换写回池），凭据自带 region / oauthHost / baseUrl，因此**跨区域账号可混池**且每次请求都用该账号自己的主机与区域。
+  - **429 语义按线路区分**：Kimi 的「套餐不含此模型」型 429 属请求属性，既不冷却也不换号——否则一次这样的请求会把整个号池打成冷却；真正的限流/额度型 429 才冷却并接力下一账号。Command Code / ChatGPT 的 429 一律视为账号配额。
+  - **账号级失效而非删除**：刷新令牌被拒绝时该账号进入 `expired` 状态并退出轮换，但保留别名与排序；界面提供「重新登录」原地复活（清标记 + 重走登录流程），不再靠"删除再添加"。
+  - **ChatGPT 配额感知路由**：已缓存的 Codex 窗口若已用尽且未到重置时间，该账号在发请求前就被跳过，而不是每次都用一次 429 重新发现；用量快照按账号分键存放，切换账号不会串显别人的配额。
+  - **排序策略与粘性会话**：新增 `sticky`（保持当前账号直到其被限流），对上游前缀缓存更友好；顺序耗尽与轮询语义保持与 Antigravity 一致。
+  - **设置页 UI 统一**：抽出共享账号卡片 `src/client/common/AccountPoolSection.tsx`（主账号 / 当前使用 / 冷却倒计时 / 需重新登录徽章、设备码面板与粘贴 Key 作为插槽），**四个 Tab 全部改用它渲染账号管理**（Antigravity 原本自己手写的那份 JSX 已删除，其项目/邮箱/到期/上次调用行改由 `renderDetails` 提供），并共用同一套 `dsha-*` 分组样式；ChatGPT Tab 顺带从旧的 `dsh-codex-*` 样式换到同一套设计系统，账号管理、连接、模型、增强、上下文窗口、配额的分组顺序四路由一致。
+  - **Antigravity 顺带对齐**：调度策略补上 `sticky`（原只有顺序耗尽/轮询），账号动作后清空配额缓存，避免切换账号后显示上一个账号的用量。
+  - **测试隔离加固**（代码审查发现的可疑点，经复现判定为误报，但仍加固）：共享 setup 现在**每个测试前重新断言** `DSH_HOME`，两个视频用例改为"恢复原值"而不是 `delete process.env.DSH_HOME`，并新增 `test/isolated-home.test.ts` 作为哨兵。真实用户目录在全程未被测试写入（原报告把 live 应用自身每次 Antigravity 请求都会回写池文件 `lastUsedAt` 的现象误判为测试泄漏）。
+  - 三个线路的 `en` 字典补上 `: Record<keyof typeof zh, string>`，漏译从此在 `tsc` 阶段就被拦住。
+  - **向后兼容**：老用户升级后池文件不存在时，读路径把原有单凭据投影为主账号（`acc_primary`），界面显示「已登录 1 个账号」，无需重新授权、无需迁移脚本。
+- **修「取号记账写失败被误报成凭据不可用」**（实机 sighting：ChatGPT 卡片显示 "ChatGPT credentials could not be refreshed."，但账号已登录、令牌 6.5 天后才到期、按 60 秒刷新余量根本不需要刷新）：
+  - 根因：`getEffectiveAccount` 选中账号后会把 `lastUsedAt`/`activeAccountId` 写回池文件，这是**记账**；该写入一旦失败（DPAPI 助手进程卡住、目标文件被占用导致 replace 失败等），异常一路冒泡到 `usage-service` 64-67 行的通用 catch，被换成"凭据无法刷新"——于是凭据明明可用，配额卡片却报错且只显示上次快照。用真实池内容在干净进程里复现可证数据与逻辑本身无误（`write=ok`、`getEffectiveAccount=ok`），故障来自运行进程内的那一次写入。
+  - 记账写入改为 best-effort（失败不再阻断取号）；**表达用户意图的写入仍然严格失败**：新增/删除账号、设主账号、冷却、标记失效照旧抛出，避免"冷却没写成功却把限流账号放回轮换"。
+  - 同一条提示现在带上底层原因（如 `(DPAPI credential write failed)`），不再是无信息文案。
+  - 新增 2 条测试：内核"记账写失败仍能取到凭据、冷却写入仍报错"，配额服务"错误文案包含底层原因"。
+  - 新增 54 条测试：`account-pool-core`（11）、`account-pool-section`（9）、`codex-account-pool`（12，含 429/401 轮换与并发刷新单飞）、`command-code-account-pool`（8，含路由动作与单 Key 回退）、`kimi-code-account-pool`（11，含跨区域、套餐型 429 不冷却、刷新失败换号）、`antigravity-section-pool`（3，锁定 Antigravity Tab 已改用共享卡片），外加 `isolated-home` 哨兵 1 条。
+
 ## 0.3.9 - 2026-09-19
 
 - **修复工具结果内嵌图像到不了模型**（command-code / antigravity / kimi-code 三条线路，合入 PR #7）：三条线路的 mapper 此前都以「只看消息顶层 content」为前提，因此带图的工具结果（截图类工具、`read_image`）在模型侧全部失明——收集阶段看不到 `tool-result` 内部的图像块，压平阶段又把整条工具结果降级成 `[image: 名字]` 文本，像素从来没有上车的机会。更危险的是模型不知道自己瞎了，会凭空编造图片内容作答。用户在聊天框直接粘贴的顶层图片不受影响，这正是问题看起来像「模型不支持视觉」的原因。

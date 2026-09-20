@@ -8,6 +8,8 @@
  * https://api.kimi.com/coding/v1.
  */
 
+import type { AccountRotationStrategy, PoolAccountSummaryDto } from './account-pool-contracts.ts'
+
 /** Region a Kimi Code account belongs to; decides which hosts the client uses. */
 export type KimiCodeRegion = 'mainland-cn' | 'global'
 
@@ -164,6 +166,11 @@ export interface KimiCodeWebStatus {
   models: KimiCodeModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: KimiCodeReasoningEffort | null
+  /** Signed-in accounts; empty or absent when no pool is installed. */
+  accounts?: KimiCodeAccountSummaryDto[]
+  /** Account the next request would use. */
+  activeAccountId?: string
+  rotationStrategy?: AccountRotationStrategy
   /** Region used for the next login flow. */
   loginRegion: KimiCodeRegion
   /** Route the plugin currently serves; false when another plugin owns it. */
@@ -194,6 +201,15 @@ export interface KimiCodeSettingsUpdateDto {
   enabledModelIds?: string[]
   contextWindowOverrides?: Record<string, number>
   defaultReasoningEffort?: KimiCodeReasoningEffort | null
+}
+
+/** One pooled Kimi Code account as the settings card renders it; never carries a token. */
+export interface KimiCodeAccountSummaryDto extends PoolAccountSummaryDto {
+  nickname?: string
+  userId?: string
+  planName?: string
+  /** Region the credential was issued in; a pool may hold several. */
+  region?: KimiCodeRegion
 }
 
 /** Live state of the device-code login flow the card polls. */

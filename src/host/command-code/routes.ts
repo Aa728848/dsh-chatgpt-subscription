@@ -8,13 +8,14 @@ import {
   type CommandCodeModelSettings,
   type CommandCodePreferenceStore,
 } from './token-store.ts'
+import { CommandCodeAccountPool } from './account-pool.ts'
 import {
   buildModelOptions,
   clearCachedCatalog,
   clearCachedQuota,
   fetchAccountQuota,
   getCachedCatalog,
-  getCachedQuota,
+  getCachedQuotaFor,
   loadProviderModels,
   parseWhoami,
   verifyApiKey,
@@ -118,6 +119,14 @@ export interface CommandCodeStatusOptions {
   serving?: boolean | (() => boolean)
   /** Diagnostic when another plugin owns the provider route; re-read on every status. */
   conflict?: string | null | (() => string | null)
+  /**
+   * Account pool instance used for multi-account management.
+   *
+   * Only the plugin entry installs one, because it owns the pool's storage. A
+   * caller that passes none keeps the single-key behavior, and no code path
+   * invents pool state that would outlive the process.
+   */
+  accountPool?: CommandCodeAccountPool
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -130,25 +139,62 @@ export async function getCommandCodeWebStatus(
   modelSettings: FileModelSettingsStore,
   preferences?: CommandCodePreferenceStore,
   options: CommandCodeStatusOptions = {},
+  accountPool: CommandCodeAccountPool | undefined = options.accountPool,
 ): Promise<CommandCodeWebStatus> {
   const credentials = await store.read()
   const settings: CommandCodeModelSettings = preferences ? preferences.status() : await modelSettings.read()
-  const apiEnv = credentials?.apiEnv ?? resolveApiEnv()
 
+  // A pool that cannot be read must not fail the whole card: the connection
+  // section is still worth rendering, just with an empty account list.
+  const poolData = accountPool === undefined ? null : await accountPool.read().catch(() => null)
+  const accounts = accountPool === undefined ? [] : await accountPool.listAccounts().catch(() => [])
+  const activeAccount = accounts.find((entry) => entry.id === poolData?.activeAccountId)
+    ?? accounts.find((entry) => entry.isPrimary)
+    ?? accounts[0]
+  const activePoolAccount = poolData === null
+    ? undefined
+    : (poolData.accounts.find((entry) => entry.id === poolData.activeAccountId)
+      ?? poolData.accounts.find((entry) => entry.isPrimary)
+      ?? poolData.accounts[0])
+
+  // The catalog and the key belong to the active account, not to whichever
+  // credential happens to sit in the pre-pool mirror file.
+  const apiEnv = activePoolAccount?.credentials.apiEnv ?? credentials?.apiEnv ?? resolveApiEnv()
   const live = await loadProviderModels({ fetchFn: options.fetchFn, apiEnv })
   const catalog = live.length > 0 ? live : fallbackCatalog()
   const enabled = settings.enabled !== false
   const enabledModelIds = resolveEnabledModelIds(settings.enabledModelIds, catalog, enabled)
   const models = buildModelOptions(catalog, enabledModelIds, settings.contextWindowOverrides)
-  const quota = getCachedQuota()
+  // Only a snapshot that belongs to the displayed account may be rendered.
+  const quota = getCachedQuotaFor(activeAccount?.id ?? null)
+
+  const activeAccountView = activePoolAccount === undefined
+    ? null
+    : {
+        userId: activePoolAccount.userId ?? activePoolAccount.credentials.userId ?? null,
+        userName: activePoolAccount.userName ?? activePoolAccount.credentials.userName ?? null,
+        email: activePoolAccount.email ?? activePoolAccount.credentials.email ?? null,
+        organizationName: activePoolAccount.organizationName ?? activePoolAccount.credentials.organizationName ?? null,
+        keyName: activePoolAccount.keyName ?? activePoolAccount.credentials.keyName ?? null,
+        // The stored id is a machine id; show the name the service would.
+        planLabel: commandCodePlanLabel(activePoolAccount.credentials.planId ?? activePoolAccount.planId)
+          ?? activePoolAccount.credentials.planLabel
+          ?? activePoolAccount.planLabel
+          ?? null,
+        planId: activePoolAccount.credentials.planId ?? activePoolAccount.planId ?? null,
+        authenticatedAt: activePoolAccount.credentials.authenticatedAt ?? null,
+      }
 
   return {
     enabled,
-    authenticated: credentials !== null,
-    hasCredentials: credentials !== null,
+    authenticated: accounts.length > 0 || credentials !== null,
+    hasCredentials: accounts.length > 0 || credentials !== null,
     storagePath: store.path(),
     apiEnv,
-    account: quota?.account ?? (credentials === null
+    accounts,
+    ...(poolData?.activeAccountId === undefined ? {} : { activeAccountId: poolData.activeAccountId }),
+    rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
+    account: quota?.account ?? activeAccountView ?? (credentials === null
       ? null
       : {
           userId: credentials.userId ?? null,
@@ -156,7 +202,6 @@ export async function getCommandCodeWebStatus(
           email: credentials.email ?? null,
           organizationName: credentials.organizationName ?? null,
           keyName: credentials.keyName ?? null,
-          // The stored id is a machine id; show the name the service would.
           planLabel: commandCodePlanLabel(credentials.planId) ?? credentials.planLabel ?? null,
           planId: credentials.planId ?? null,
           authenticatedAt: credentials.authenticatedAt ?? null,
@@ -178,8 +223,33 @@ export function registerCommandCodeRoutes(
   modelSettings: FileModelSettingsStore,
   preferences?: CommandCodePreferenceStore,
   options: CommandCodeStatusOptions = {},
+  accountPool: CommandCodeAccountPool | undefined = options.accountPool,
 ): () => void {
   const fetchFn = options.fetchFn ?? fetch
+  const readStatus = (): Promise<CommandCodeWebStatus> =>
+    getCommandCodeWebStatus(store, modelSettings, preferences, options, accountPool)
+  /**
+   * Read the credential of the account that would serve the next request.
+   *
+   * Quota belongs to a key, not to the file the plugin cached a key in: with a
+   * pool the active account is the one whose usage the card renders.
+   */
+  const quotaStore = {
+    read: async () => {
+      if (accountPool === undefined) return store.read()
+      const data = await accountPool.read().catch(() => null)
+      const target = data?.activeAccountId === undefined
+        ? (data?.accounts.find((account) => account.isPrimary) ?? data?.accounts[0])
+        : data.accounts.find((account) => account.id === data.activeAccountId)
+      return target?.credentials ?? store.read()
+    },
+  }
+  const activeAccountId = async (): Promise<string | undefined> => {
+    const data = accountPool === undefined ? null : await accountPool.read().catch(() => null)
+    return data?.activeAccountId
+      ?? data?.accounts.find((account) => account.isPrimary)?.id
+      ?? data?.accounts[0]?.id
+  }
 
   return ctx.webServer.register({
     kind: 'prefix',
@@ -193,18 +263,23 @@ export function registerCommandCodeRoutes(
         if (path === '' || path === 'status') {
           if (method !== 'GET') return sendMethodNotAllowed(response)
           const credentials = await store.read()
-          const cached = getCachedQuota()
-          if (credentials !== null && (cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
-            await fetchAccountQuota(store, fetchFn).catch(() => undefined)
+          const targetId = await activeAccountId()
+          const cached = getCachedQuotaFor(targetId)
+          if ((credentials !== null || targetId !== undefined)
+            && (cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
+            await fetchAccountQuota(quotaStore, fetchFn, false, targetId).catch(() => undefined)
           }
-          const value = await getCommandCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 
         if (path === 'login') {
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const value = await beginWebLogin(store, { fetchFn })
+          const value = await beginWebLogin(store, {
+            fetchFn,
+            ...(accountPool === undefined ? {} : { onSave: (credentials) => accountPool.addAccount(credentials) }),
+          })
           return sendJson(response, 200, { ok: true, value })
         }
 
@@ -218,9 +293,12 @@ export function registerCommandCodeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const body = await readRequestJson(request)
           const apiKey = typeof body.apiKey === 'string' ? body.apiKey : ''
-          const account = await saveApiKey(store, apiKey, { fetchFn })
+          const account = await saveApiKey(store, apiKey, {
+            fetchFn,
+            ...(accountPool === undefined ? {} : { onSave: (credentials) => accountPool.addAccount(credentials) }),
+          })
           clearCachedQuota()
-          const value = await getCommandCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value: { ...value, account } })
         }
 
@@ -251,14 +329,14 @@ export function registerCommandCodeRoutes(
 
         if (path === 'quota') {
           if (method !== 'GET' && method !== 'POST') return sendMethodNotAllowed(response)
-          await fetchAccountQuota(store, fetchFn, true)
-          const value = await getCommandCodeWebStatus(store, modelSettings, preferences, options)
+          await fetchAccountQuota(quotaStore, fetchFn, true, await activeAccountId())
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 
         if (path === 'models' || path === 'settings') {
           if (method === 'GET') {
-            const value = await getCommandCodeWebStatus(store, modelSettings, preferences, options)
+            const value = await readStatus()
             return sendJson(response, 200, { ok: true, value })
           }
           if (method !== 'POST') return sendMethodNotAllowed(response)
@@ -286,7 +364,7 @@ export function registerCommandCodeRoutes(
           }
           if (preferences) await preferences.update(patch)
           else await modelSettings.updateSettings(patch)
-          const value = await getCommandCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 
@@ -295,17 +373,71 @@ export function registerCommandCodeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           clearCachedCatalog()
           await loadProviderModels({ fetchFn, force: true, apiEnv: resolveApiEnv() })
-          const value = await getCommandCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'accounts') {
+          if (method === 'GET') {
+            const data = accountPool === undefined ? null : await accountPool.read().catch(() => null)
+            const accounts = accountPool === undefined ? [] : await accountPool.listAccounts().catch(() => [])
+            return sendJson(response, 200, { ok: true, value: {
+              accounts,
+              ...(data?.activeAccountId === undefined ? {} : { activeAccountId: data.activeAccountId }),
+              rotationStrategy: data?.rotationStrategy ?? 'sequential',
+            } })
+          }
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          if (accountPool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+          const body = await readRequestJson(request)
+          const action = typeof body.action === 'string' ? body.action : ''
+          const accountId = typeof body.accountId === 'string' ? body.accountId : undefined
+          if (action === 'set-primary' && accountId !== undefined) {
+            await accountPool.setPrimary(accountId)
+          } else if (action === 'set-alias' && accountId !== undefined && typeof body.alias === 'string') {
+            await accountPool.setAlias(accountId, body.alias)
+          } else if (action === 'delete' && accountId !== undefined) {
+            await accountPool.deleteAccount(accountId)
+          } else if (action === 'clear-cooldown' && accountId !== undefined) {
+            await accountPool.clearCooldown(accountId)
+          } else if (action === 'strategy'
+            && (body.strategy === 'sequential' || body.strategy === 'round-robin' || body.strategy === 'sticky')) {
+            await accountPool.setStrategy(body.strategy)
+          } else if (action === 'relogin' && accountId !== undefined) {
+            // Re-signing in is what restores a rejected key, so nothing is
+            // deleted: the account keeps its alias and place in the rotation.
+            await accountPool.clearAuthFailed(accountId)
+          }
+          // Quota and catalog belong to the account that just changed.
+          clearCachedQuota()
+          clearCachedCatalog()
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 
         if (path === 'logout') {
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          await store.delete()
+          if (accountPool === undefined) {
+            await store.delete()
+          } else {
+            // Without an explicit account, the one that would serve the next
+            // request goes and the pool promotes another; that is what the card's
+            // single sign-out button means once a pool exists.
+            const body = await readRequestJson(request).catch(() => ({} as Record<string, unknown>))
+            const data = await accountPool.read().catch(() => null)
+            const target = typeof body.accountId === 'string'
+              ? body.accountId
+              : (data?.activeAccountId
+                ?? data?.accounts.find((account) => account.isPrimary)?.id
+                ?? data?.accounts[0]?.id)
+            if (target === undefined) await store.delete()
+            else await accountPool.deleteAccount(target)
+          }
           clearCachedQuota()
           clearCachedCatalog()
-          const value = await getCommandCodeWebStatus(store, modelSettings, preferences, options)
+          const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }
 

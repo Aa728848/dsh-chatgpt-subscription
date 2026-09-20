@@ -4,6 +4,7 @@ import type {
   AntigravityModelOption,
   AntigravityWebStatus,
 } from '../../shared/antigravity-contracts.ts'
+import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { zh } from './locales.ts'
 
 const API = '/antigravity/api'
@@ -369,116 +370,28 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
 
   return (
     <div className="dsha-page">
-      {/* 1. 账号管理分组 */}
-      <section className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>
-            {t.accountPool}
-            {status?.accounts && status.accounts.length > 0 && (
-              <span className="dsha-muted" style={{ fontWeight: 400, marginLeft: 8 }}>
-                （已登录 {status.accounts.length} 个账号）
-              </span>
-            )}
-          </h3>
-          <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={handleLogin}>
-            {busy === 'login' ? (loginProgress || t.signingIn) : t.addAccount}
-          </button>
-        </div>
-
-        {/* 调度策略选择 */}
-        {status?.accounts && status.accounts.length > 1 && (
-          <div className="dsha-pref-row">
-            <div>
-              <strong>{t.rotationStrategy}</strong>
-              <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>
-                {status.rotationStrategy === 'round-robin' ? t.strategyRoundRobin : t.strategySequential}
-              </p>
-            </div>
-            <select
-              className="dsha-select"
-              value={status.rotationStrategy || 'sequential'}
-              disabled={busy !== null}
-              onChange={(e) => void handleSetStrategy(e.target.value as AccountRotationStrategy)}
-            >
-              <option value="sequential">顺序耗尽</option>
-              <option value="round-robin">轮询调度</option>
-            </select>
-          </div>
+      {/* 1. 账号管理分组：与其余三条线路共用同一张账号卡片 */}
+      <AccountPoolSection
+        accounts={status?.accounts ?? []}
+        activeAccountId={status?.activeAccountId}
+        rotationStrategy={status?.rotationStrategy ?? 'sequential'}
+        busy={busy}
+        labels={t}
+        loginBusyLabel={busy === 'login' ? (loginProgress || t.signingIn) : undefined}
+        onLogin={() => void handleLogin()}
+        onSetPrimary={(accountId) => void handleSetPrimary(accountId)}
+        onDelete={(accountId) => void handleDeleteAccount(accountId)}
+        onClearCooldown={(accountId) => void handleClearCooldown(accountId)}
+        onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
+        renderDetails={(account) => (
+          <>
+            <span>{t.accountId}: {account.projectId || 'antigravity-default'}</span>
+            {account.email && <span>{t.email}: {account.email}</span>}
+            {account.expiresAt && <span>{t.expires}: {formatDate(account.expiresAt)}</span>}
+            {account.lastUsedAt && <span>{t.lastUsed}: {formatDate(account.lastUsedAt)}</span>}
+          </>
         )}
-
-        {/* 账号卡片列表 */}
-        {(!status?.accounts || status.accounts.length === 0) ? (
-          <div className="dsha-empty">{t.noAccounts}</div>
-        ) : (
-          <div className="dsha-accounts-list">
-            {status.accounts.map((acc) => {
-              const isCurrentActive = acc.id === status.activeAccountId
-              const isCooling = typeof acc.cooldownUntil === 'number' && acc.cooldownUntil > Date.now()
-              const cooldownLeftSec = isCooling ? Math.ceil((acc.cooldownUntil! - Date.now()) / 1000) : 0
-              const cooldownLeftMin = Math.ceil(cooldownLeftSec / 60)
-
-              return (
-                <div key={acc.id} className={`dsha-account-card ${isCurrentActive ? 'active' : ''}`}>
-                  <div className="dsha-account-header">
-                    <div className="dsha-account-identity">
-                      <span className="dsha-account-title">{acc.alias || acc.email || acc.id}</span>
-                      <div className="dsha-badges">
-                        {acc.isPrimary && <span className="dsha-badge primary">{t.primaryAccount}</span>}
-                        {isCurrentActive && <span className="dsha-badge active">{t.activeAccount}</span>}
-                        {isCooling && (
-                          <span className="dsha-badge cooldown">
-                            {t.cooling}（剩 {cooldownLeftMin} 分）
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="dsha-account-actions">
-                      {!acc.isPrimary && (
-                        <button
-                          className="dsha-btn"
-                          disabled={busy !== null}
-                          onClick={() => void handleSetPrimary(acc.id)}
-                        >
-                          {t.setPrimary}
-                        </button>
-                      )}
-                      {isCooling && (
-                        <button
-                          className="dsha-btn"
-                          disabled={busy !== null}
-                          onClick={() => void handleClearCooldown(acc.id)}
-                        >
-                          {t.clearCooldown}
-                        </button>
-                      )}
-                      <button
-                        className="dsha-btn"
-                        disabled={busy !== null}
-                        onClick={() => void handleDeleteAccount(acc.id)}
-                      >
-                        {t.deleteAccount}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="dsha-account-details">
-                    <span>{t.accountId}: {acc.projectId || 'antigravity-default'}</span>
-                    {acc.email && <span>邮箱: {acc.email}</span>}
-                    {acc.expiresAt && <span>令牌到期: {formatDate(acc.expiresAt)}</span>}
-                    {acc.lastUsedAt && <span>上次调用: {formatDate(acc.lastUsedAt)}</span>}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
-
-        <div className="dsha-row" style={{ marginTop: 12 }}>
-          <span className="dsha-label">{t.storage}</span>
-          <span className="dsha-value">本地安全存储 (JSON/DPAPI)</span>
-        </div>
-        <p className="dsha-notice">{t.storageNotice}</p>
-      </section>
+      />
 
       {/* 2. 连接与模型胶囊标签选择器 */}
       <section className="dsha-group">
