@@ -195,9 +195,11 @@ export class AccountPoolCore<
    *
    * Compared against a previously observed value to detect an account change
    * without decrypting the pool file. Every mutating write advances it, because
-   * which account a request resolves to depends on more than membership: the
-   * rotation strategy reads `isPrimary`, `activeAccountId` and `lastUsedAt`,
-   * so a 429 cooldown that moves the active account moves the answer too.
+   * which account a request resolves to depends on more than membership:
+   * eligibility reads `authStatus` and `cooldownUntil`, and the rotation
+   * strategy reads `isPrimary`, `activeAccountId` and `lastUsedAt`. All of
+   * those are written through {@link write}, so bumping it there covers every
+   * one of them without having to enumerate them per mutator.
    * Over-invalidating only costs one credential read, while under-invalidating
    * would report one account's usage under another account's name.
    */
