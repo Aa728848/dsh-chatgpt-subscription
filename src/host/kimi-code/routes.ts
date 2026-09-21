@@ -28,7 +28,7 @@ import {
   loadProviderModels,
   testConnection,
 } from './client.ts'
-import { getCacheStats, preserveThinkingEnabled } from './mapper.ts'
+import { getCacheStats, getLastDriftCause, preserveThinkingEnabled } from './mapper.ts'
 import { beginWebLogin, getWebLoginStatus, isRefreshTokenRejected, resetWebLogin } from './oauth.ts'
 import {
   KIMI_CODE_REASONING_EFFORTS,
@@ -225,7 +225,8 @@ export async function getKimiCodeWebStatus(
 /** Rolling cache totals, or null while no request has reported usage yet. */
 function cacheStatsOrNull(): KimiCodeCacheStatsDto | null {
   const stats = getCacheStats()
-  return stats.requests === 0 ? null : stats
+  if (stats.requests === 0) return null
+  return { ...stats, lastDrift: getLastDriftCause() }
 }
 
 /** Register the Kimi Code settings routes under `/kimi-code/api`. */

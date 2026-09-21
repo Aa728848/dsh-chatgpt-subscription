@@ -11,6 +11,8 @@ import {
   normalizeKimiToolSchema,
   processOpenAIStreamLine,
   promptCacheKey,
+  buildRequest,
+  getLastDriftCause,
   thinkingBudgetFor,
 } from '../src/host/kimi-code/mapper.ts'
 
@@ -143,15 +145,30 @@ describe('buildOpenAIRequest', () => {
   })
 
   it('carries a stable prompt cache key that identifies the conversation', () => {
-    const first = buildOpenAIRequest(options())
-    const second = buildOpenAIRequest(options())
+    const sessionId = 'sess-stable-key'
+    const first = buildOpenAIRequest(options({ sessionId: sessionId as never }))
+    const second = buildOpenAIRequest(options({ sessionId: sessionId as never }))
     expect(first.prompt_cache_key).toBeTruthy()
     expect(first.prompt_cache_key).toBe(second.prompt_cache_key)
     // A different conversation must not reuse the key.
-    const other = buildOpenAIRequest(options({
-      messages: [{ role: 'user', content: [{ type: 'text', text: 'Different question' }] } as Message],
-    }))
+    const other = buildOpenAIRequest(options({ sessionId: 'sess-other' as never }))
     expect(other.prompt_cache_key).not.toBe(first.prompt_cache_key)
+  })
+
+  it('keeps the cache key constant when compaction rewrites the first user message', () => {
+    // The whole point of keying on the session (never message content): a
+    // compaction that replaces the opening user turn must not re-route the
+    // session onto a cold cache entry.
+    const sessionId = 'sess-compaction'
+    const before = buildOpenAIRequest(options({
+      sessionId: sessionId as never,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Original opening request' }] } as Message],
+    }))
+    const after = buildOpenAIRequest(options({
+      sessionId: sessionId as never,
+      messages: [{ role: 'user', content: [{ type: 'text', text: '<compacted-summary>...checkpoint...</compacted-summary>' }] } as Message],
+    }))
+    expect(after.prompt_cache_key).toBe(before.prompt_cache_key)
   })
 
   it('declares tools in the OpenAI function shape', () => {
@@ -247,6 +264,24 @@ describe('promptCacheKey', () => {
       sessionId: 'sess-abc-123' as never,
       messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] } as Message],
     } as unknown as GenerateOptions)).toBe('dsh-sess-abc-123')
+  })
+
+  it('never derives the key from message content, so a rewritten first message cannot drift it', () => {
+    // Without a sessionId there is no key at all — a content-derived fallback
+    // would change the moment compaction edits that message, silently re-routing
+    // the conversation onto a cold cache entry.
+    expect(promptCacheKey({
+      model: 'k3',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] } as Message],
+    } as unknown as GenerateOptions)).toBeUndefined()
+    expect(promptCacheKey({
+      model: 'k3',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'A completely different opening' }] } as Message],
+    } as unknown as GenerateOptions)).toBeUndefined()
+  })
+
+  it('trims a sessionId with surrounding whitespace to the same key', () => {
+    expect(promptCacheKey({ model: 'k3', sessionId: '  sess-padded  ' as never, messages: [] } as unknown as GenerateOptions)).toBe('dsh-sess-padded')
   })
 })
 
@@ -353,5 +388,39 @@ describe('Anthropic stream parsing', () => {
     state.finishReason = 'tool_use'
     const chunks = closeStream(state)
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+  })
+})
+
+describe('prefix stability tracking', () => {
+  it('attributes a system-prompt change to the system-prompt cause', () => {
+    buildRequest(options({ sessionId: 'sess-drift' as never, system: 'You are helpful.' } as never), 'openai')
+    buildRequest(options({ sessionId: 'sess-drift' as never, system: 'You are a different assistant.' } as never), 'openai')
+    expect(getLastDriftCause()).toBe('system-prompt')
+  })
+
+  it('reports stable when the prefix-breaking inputs are unchanged', () => {
+    const same = { sessionId: 'sess-stable' as never, system: 'constant head' } as never
+    buildRequest(options(same), 'openai')
+    buildRequest(options(same), 'openai')
+    expect(getLastDriftCause()).toBe('stable')
+  })
+
+  it('attributes a tool-list change to the tools cause', () => {
+    const base = { sessionId: 'sess-tools' as never, system: 'head' }
+    buildRequest(options({ ...base, tools: [{ name: 'read', description: 'r', parameters: { type: 'object' } }] } as never), 'openai')
+    buildRequest(options({ ...base, tools: [{ name: 'write', description: 'w', parameters: { type: 'object' } }] } as never), 'openai')
+    expect(getLastDriftCause()).toBe('tools')
+  })
+
+  it('flags a session with no identity as cold-key so a miss is explained', () => {
+    buildRequest(options({ sessionId: 'sess-seed' as never } as never), 'openai')
+    buildRequest(options({ messages: [{ role: 'user', content: [{ type: 'text', text: 'no identity' }] } as Message] }), 'openai')
+    expect(getLastDriftCause()).toBe('cold-key')
+  })
+
+  it('flags a changed sessionId as a cache-key switch', () => {
+    buildRequest(options({ sessionId: 'sess-one' as never, system: 'h' } as never), 'openai')
+    buildRequest(options({ sessionId: 'sess-two' as never, system: 'h' } as never), 'openai')
+    expect(getLastDriftCause()).toBe('cache-key')
   })
 })

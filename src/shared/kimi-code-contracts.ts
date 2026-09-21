@@ -193,6 +193,14 @@ export interface KimiCodeCacheStatsDto {
   outputTokens: number
   /** Cached / (cached + fresh); null until a request reports usage. */
   hitRatio: number | null
+  /**
+   * Why the most recent request's prefix broke, when it did.
+   *
+   * Surfaces the diagnostic half of the hit ratio: `'stable'` means the prefix
+   * should have held (so a miss implicates content below the head or the
+   * service), while the other values name the input that invalidated the cache.
+   */
+  lastDrift?: 'first-request' | 'stable' | 'system-prompt' | 'tools' | 'cache-key' | 'cold-key'
 }
 
 /** Patch accepted by the models/settings routes. */

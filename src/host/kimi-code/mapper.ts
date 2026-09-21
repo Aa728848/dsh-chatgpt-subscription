@@ -37,7 +37,6 @@ import {
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { createHash } from 'node:crypto'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { maxOutputTokensFor } from './types.ts'
 import {
@@ -727,6 +726,16 @@ function isToolResultMessage(message: Message): boolean {
  * so a `system` message used as a tool-declaration carrier must stay
  * content-less: adding text to it would both move that text to the front of the
  * request and give the declaration a `content` field the service forbids.
+ *
+ * Cache-stability invariant: the system prompt is the head of the prefix the
+ * service caches, so this function must be a pure, order-stable fold of its
+ * inputs. `options.system` always leads and message text follows in history
+ * order — never re-sorted, never re-dated, never decorated with per-turn
+ * metadata. Any value that changes turn-over-turn belongs in a trailing user
+ * message (where the harness's time/snapshot injectors already put it), not in
+ * this head, because one changed byte here invalidates the whole cached prefix
+ * and collapses the hit rate. `trackPrefixStability` fingerprints this exact
+ * string so a drift is attributed rather than silent.
  */
 function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
@@ -1333,19 +1342,18 @@ export function buildOpenAIRequest(
 /**
  * Stable identifier for the conversation this request belongs to.
  *
- * Prioritizes the session identifier (GenerateOptions.sessionId) if present,
- * ensuring the cache key stays strictly constant across turns, context compactions,
- * and multimodal message changes. Falls back to hashing the first user message text.
+ * The key is derived from the session identifier alone — never from message
+ * content. The official agent keys its cache on the conversation (its
+ * sessionId) so the key survives context compaction and multimodal churn
+ * byte-for-byte. Deriving it from the first user message (as a fallback once
+ * did) produces a key that CHANGES the moment compaction rewrites that first
+ * message, silently re-routing the whole session to a cold cache entry and
+ * collapsing the hit rate. A session that has no identity yet sends no key at
+ * all rather than a key that will drift.
  */
 export function promptCacheKey(options: GenerateOptions): string | undefined {
   if (typeof options.sessionId === 'string' && options.sessionId.trim() !== '') {
     return `dsh-${options.sessionId.trim()}`
-  }
-  for (const message of options.messages) {
-    if (message.role !== 'user') continue
-    const text = textOf(message.content)
-    if (text === '') continue
-    return `dsh-${createHash('sha256').update(text).digest('hex').slice(0, 32)}`
   }
   return undefined
 }
@@ -1529,6 +1537,10 @@ export function buildRequest(
   preserveThinking: boolean = preserveThinkingEnabled(),
   media: RequestMediaOptions = {},
 ): Record<string, unknown> {
+  // Fingerprint the prefix-breaking inputs before building, so the cause is
+  // recorded even if the build below throws (an oversized body is itself a turn
+  // that never reached the warm cache).
+  recordDriftCause(trackPrefixStability(options))
   return wire === 'anthropic'
     ? buildAnthropicRequest(options, images, media)
     : buildOpenAIRequest(options, images, preserveThinking, media)
@@ -1952,6 +1964,99 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
   }
 
   return out
+}
+
+/**
+ * A short, stable fingerprint of one prefix-breaking input.
+ *
+ * The prefix cache is invalidated as a whole whenever the system prompt or the
+ * tool list changes, so these are hashed (not stored verbatim) and compared
+ * request-over-request. A 32-bit FNV-1a keeps this dependency-free; collisions
+ * only ever produce a missed *diagnostic*, never a wrong request.
+ */
+function fingerprint(text: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16)
+}
+
+/**
+ * The prefix-breaking inputs of the previous request, kept so a cache miss can
+ * be attributed to the change that caused it rather than guessed at.
+ *
+ * kimi-code's own agent tracks exactly this pair (its `systemPromptHash` /
+ * `toolsHash` telemetry) for the same reason: a bare hit ratio cannot say
+ * *why* a turn went cold, but a diff of the stability inputs can.
+ */
+export interface PrefixStabilitySnapshot {
+  systemPromptHash: string | null
+  toolsHash: string | null
+  cacheKey: string | null
+}
+
+let lastPrefixSnapshot: PrefixStabilitySnapshot = {
+  systemPromptHash: null,
+  toolsHash: null,
+  cacheKey: null,
+}
+
+/**
+ * Which stability input changed relative to the previous request, if any.
+ *
+ * `'stable'` means the prefix should have held; a miss then points at the
+ * service or at content below the head. Anything else names the input that
+ * broke the prefix. `'cold-key'` means no cache key was sent, so the request
+ * could not be routed to the warm entry at all.
+ */
+export type PrefixDriftCause =
+  | 'first-request'
+  | 'stable'
+  | 'system-prompt'
+  | 'tools'
+  | 'cache-key'
+  | 'cold-key'
+
+/**
+ * Fingerprint the current request's stability inputs and diff them against the
+ * last request. Called once per request build; the result is read back when the
+ * stream reports usage so a low-or-zero cache read can be explained.
+ */
+export function trackPrefixStability(options: GenerateOptions): PrefixDriftCause {
+  const systemText = leadingSystemText(options) ?? ''
+  const systemPromptHash = systemText === '' ? null : fingerprint(systemText)
+  const tools = options.tools ?? []
+  const toolsHash = tools.length === 0
+    ? null
+    : fingerprint(JSON.stringify(tools.map((tool) => [tool.name, tool.description ?? '', tool.parameters ?? {}])))
+  const cacheKey = promptCacheKey(options) ?? null
+
+  const previous = lastPrefixSnapshot
+  lastPrefixSnapshot = { systemPromptHash, toolsHash, cacheKey }
+
+  if (previous.systemPromptHash === null && previous.toolsHash === null && previous.cacheKey === null) {
+    return 'first-request'
+  }
+  if (cacheKey === null) return 'cold-key'
+  if (previous.cacheKey !== cacheKey) return 'cache-key'
+  if (previous.systemPromptHash !== systemPromptHash) return 'system-prompt'
+  if (previous.toolsHash !== toolsHash) return 'tools'
+  return 'stable'
+}
+
+/** Last recorded drift cause, for the status surface. */
+let lastDriftCause: PrefixDriftCause = 'first-request'
+
+/** Record the cause computed for the in-flight request. */
+export function recordDriftCause(cause: PrefixDriftCause): void {
+  lastDriftCause = cause
+}
+
+/** The cause attributed to the most recent request. */
+export function getLastDriftCause(): PrefixDriftCause {
+  return lastDriftCause
 }
 
 /**

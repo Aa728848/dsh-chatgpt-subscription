@@ -88,6 +88,22 @@ const EFFORT_LABEL: Record<KimiCodeReasoningEffort, string> = {
   none: zh.effortNone,
 }
 
+/** Human label for the last request's prefix-drift cause. */
+function driftLabel(
+  cause: NonNullable<NonNullable<KimiCodeWebStatus['cache']>['lastDrift']>,
+  t: typeof zh,
+): string {
+  switch (cause) {
+    case 'first-request': return t.cacheDriftFirst
+    case 'stable': return t.cacheDriftStable
+    case 'system-prompt': return t.cacheDriftSystemPrompt
+    case 'tools': return t.cacheDriftTools
+    case 'cache-key': return t.cacheDriftCacheKey
+    case 'cold-key': return t.cacheDriftColdKey
+    default: return String(cause)
+  }
+}
+
 export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): React.ReactElement {
   const [status, setStatus] = useState<KimiCodeWebStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -520,6 +536,43 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
             {busy === 'connection' ? t.testingConnection : t.testConnection}
           </button>
         </div>
+      </section>
+
+      <section className="dsha-group">
+        <div className="dsha-grouphead">
+          <h3>{t.cacheSection}</h3>
+        </div>
+        <p className="dsha-muted">{t.cacheDesc}</p>
+        {status?.cache == null ? (
+          <div className="dsha-empty">{t.cacheEmpty}</div>
+        ) : (
+          <div className="dsha-quota-card">
+            <div className="dsha-meter-wrap">
+              <div className="dsha-meter-label">
+                <span>{t.cacheHitRatio}</span>
+                <strong>
+                  {status.cache.hitRatio === null ? '—' : `${(status.cache.hitRatio * 100).toFixed(1)}%`}
+                </strong>
+              </div>
+              <div className={`dsha-meter ${(status.cache.hitRatio ?? 0) >= 0.9 ? 'dsha-meter-green' : 'dsha-meter-cyan'}`}>
+                <span style={{ width: `${Math.round((status.cache.hitRatio ?? 0) * 100)}%` }} />
+              </div>
+              <div className="dsha-meter-meta">
+                <span>{t.cacheCached}: {status.cache.cachedTokens.toLocaleString()}</span>
+                <span>{t.cacheFresh}: {status.cache.freshTokens.toLocaleString()}</span>
+                <span>{t.cacheOutput}: {status.cache.outputTokens.toLocaleString()}</span>
+                <span>{t.cacheRequests}: {status.cache.requests}</span>
+              </div>
+            </div>
+            {status.cache.lastDrift !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.cacheDrift}</span>
+                <span className="dsha-value">{driftLabel(status.cache.lastDrift, t)}</span>
+              </div>
+            )}
+            <p className="dsha-muted">{t.cacheHint}</p>
+          </div>
+        )}
       </section>
 
       <section className="dsha-group">
