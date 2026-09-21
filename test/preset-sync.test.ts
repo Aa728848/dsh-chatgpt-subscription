@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   BUNDLED_PRESET_IDS,
@@ -164,9 +164,23 @@ describe('candidate package roots', () => {
     expect(packageInstalled('@deepseek-ai/dsh-missing-pkg', candidatePackageRoots(entry))).toBe(false)
   })
 
-  it('tolerates an absent or dangling entry script', () => {
-    expect(() => candidatePackageRoots(undefined)).not.toThrow()
-    expect(() => candidatePackageRoots(join(tempDir(), 'gone'))).not.toThrow()
+  it('treats an empty entry script as no entry at all', () => {
+    // `undefined` is the parameter's own default, so it re-reads
+    // `process.argv[1]` and never exercises the absent case; an empty string is
+    // what a process with no entry script actually passes.
+    const absent = candidatePackageRoots('')
+    const entry = join(tempDir(), 'harness', 'bin', 'dsh')
+    const withEntry = candidatePackageRoots(entry)
+
+    expect(withEntry).toContain(dirname(entry))
+    expect(withEntry).toHaveLength(absent.length + 1)
+  })
+
+  it('tolerates a dangling entry script', () => {
+    const gone = join(tempDir(), 'gone', 'bin', 'dsh')
+    // realpath fails, so the absolute dirname is used as the candidate root
+    // rather than the whole probe being abandoned.
+    expect(candidatePackageRoots(gone)).toContain(dirname(gone))
   })
 })
 
