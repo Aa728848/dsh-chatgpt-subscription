@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   BUNDLED_PRESET_IDS,
   bundledPresetsRoot,
+  candidatePackageRoots,
   packageInstalled,
   presetTargetRoot,
   reconcilePackageNames,
@@ -146,6 +147,26 @@ describe('syncPresetTrees', () => {
       return content
     })
     expect(seen).toEqual(['agent.cordis.yml'])
+  })
+})
+
+describe('candidate package roots', () => {
+  it('reaches the harness packages beside the CLI entry script', () => {
+    const root = tempDir()
+    const entry = join(root, 'harness', 'bin', 'dsh')
+    mkdirSync(join(entry, '..'), { recursive: true })
+    writeFileSync(entry, '#!/usr/bin/env node\n')
+    const pkgDir = join(root, 'harness', 'node_modules', '@deepseek-ai', 'dsh-sample-pkg')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), '{}')
+
+    expect(packageInstalled('@deepseek-ai/dsh-sample-pkg', candidatePackageRoots(entry))).toBe(true)
+    expect(packageInstalled('@deepseek-ai/dsh-missing-pkg', candidatePackageRoots(entry))).toBe(false)
+  })
+
+  it('tolerates an absent or dangling entry script', () => {
+    expect(() => candidatePackageRoots(undefined)).not.toThrow()
+    expect(() => candidatePackageRoots(join(tempDir(), 'gone'))).not.toThrow()
   })
 })
 
