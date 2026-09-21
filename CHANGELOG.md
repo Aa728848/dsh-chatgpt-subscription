@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **修「模型选择器打开要等好几秒，且第二次打开一样慢」**：`kimi-code` 的 `loadProviderModels()` 把 `ensureAccessToken()` 放在 30 分钟目录缓存的判断**之前**，而取 token 要读凭据存储——Windows 上那是一次经由 `spawn("powershell.exe")` 的 DPAPI 解密。DSH 在构建模型选择器的目录时会对**每个 Provider 的每个模型**调一次 `resolveModel`，本线路的 `resolveModel` 每次都会调 `catalog()`，于是**一个模型一次进程启动**。实测（Windows / Node 24）：裸启动 `powershell.exe` 约 190–200 ms，4 个模型的目录解析 808 ms，第二次构建仍是 835 ms——缓存从未生效。修复后同一测量为 3 ms、0 次启动。
+  - **`loadProviderModels()` 的缓存检查提前到取 token 之前**，token-free 的调用按 `region` 匹配（`region` 因此单独记进缓存条目，不再只存在于 `${region}:${token尾8位}` 这个合成 key 里）。不同区域不会互相命中；显式传了 `accessToken` 的调用方仍按 token 精确匹配，因为换账号可能看到不同清单。
+  - **`UsageService.status()` 同样把 60 秒快照的判断提前到 `oauth.credentials()` 之前**：设置卡片每 60 秒轮询 `/status`（外加 `visibilitychange`），此前每次轮询都要先读一次凭据，因此**每次轮询一次进程启动**，与快照是否新鲜无关。快照本就按账号分键，且账号切换会 `clear()`，所以提前返回不会报出别的账号的用量；取到凭据后发现账号变了的那条判断保留。
+  - 新增 9 条回归测试：目录 6 条（热缓存零凭据读取、多模型解析只读一次、`force` 仍重新拉取、跨区域不互相命中、带 token 的调用方仍能命中、无 store 返回空）、配额 3 条（热快照零凭据读取、过期后仍重新读取、未登录不返回缓存快照）。用例断言的是**凭据读取次数**而非墙钟时间，因此锁定的是调用顺序本身。
+
 - **修「0.1.6 上 dispatch 预设挂载失败」**：harness 0.1.6 把 workflow 引擎的包名从 `@deepseek-ai/dsh-workflow-worker-thread` 改成 `@deepseek-ai/dsh-workflow-ptc`，preset-sync 靠探测当前安装能解析哪个拼写来改写预设行；但探测根只看 profile 目录、cwd 与插件自身目录，而标准装法下 harness 是全局 npm 安装、插件在 profile 的 pnpm 树里，Node 从插件位置解析不到 harness 嵌套的 `node_modules`——两个拼写都"解析不到"时按设计不改写，旧名字原样同步进 `~/.dsh/.agent-presets`，预设挂载即报 `names a plugin that cannot be resolved`。0.1.5 上无需改写，故障完全隐形。`candidatePackageRoots` 新增 harness CLI 入口脚本（`process.argv[1]`，经 realpath 解 bin shim 与相对路径）所在目录作为候选根：它必然位于 harness 安装树内，向上走即达 harness 自带包。改写仍是双向的，0.1.5 行为不变（旧名可解析故保留）。新增 2 条用例：入口脚本旁的 harness 包可达、入口缺失或悬空不抛错。
 - **修复 ChatGPT 线路的网页搜索不可用**（实机 sighting：对话里执行「网页搜索」直接报 `Error: ChatGPT subscription credentials are required for Codex search.`，连本仓库自己的检索也一起失败）：
   - **根因是「取号」与「取凭据」两件事被合并成了一条路径**。ChatGPT 号池为了在 429 之前就跳过已用尽的账号，会在按账号缓存到「Codex 窗口已用尽」时把该账号移出轮换（`account-pool-core.getEffectiveAccount` → `isEligible`）。而 OAuth 服务的 `credentials()` 过去**只有这一条路径**，于是 `codex-search` / `codex-fetch` / `codex-images` 和配额卡片全都拿不到凭据。实测确认：窗口打满时 `oauth.credentials()` 抛 `LlmError(RATE_LIMIT)`，而**同一个 token 直接打 `/alpha/search` 却能正常返回结果**——搜索并不计入 Codex 限流窗口，被挡住的只是调度，不是凭据。

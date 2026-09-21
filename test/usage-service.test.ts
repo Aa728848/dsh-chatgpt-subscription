@@ -169,4 +169,66 @@ describe('Codex usage mapping', () => {
     expect(credentials).toHaveBeenCalledWith(false, { purpose: 'tool' })
     oauth.dispose()
   })
+
+  it('answers a warm snapshot without reading credentials again', async () => {
+    // Regression: credentials were acquired BEFORE the 60 s cache was consulted.
+    // Reading them is a DPAPI unprotect through a spawned powershell.exe on
+    // Windows (~200 ms), and the settings card polls this on a 60 s timer, so
+    // every poll paid a process launch even when nothing had changed.
+    let now = 1_000_000
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
+    const oauth = new OAuthService(store, { now: () => now })
+    const credentials = vi.spyOn(oauth, 'credentials')
+    const fetchFn = vi.fn(async () => Response.json({
+      rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 3_600 } },
+    }))
+    const service = new UsageService(oauth, { fetchFn: fetchFn as typeof fetch, now: () => now })
+
+    expect((await service.status(true)).state).toBe('ready')
+    const readsAfterFirst = credentials.mock.calls.length
+    expect(readsAfterFirst).toBeGreaterThan(0)
+
+    now += 5_000
+    expect((await service.status(true)).state).toBe('ready')
+    expect(credentials.mock.calls.length).toBe(readsAfterFirst)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    oauth.dispose()
+  })
+
+  it('still reads credentials once the cached snapshot expires', async () => {
+    let now = 1_000_000
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
+    const oauth = new OAuthService(store, { now: () => now })
+    const credentials = vi.spyOn(oauth, 'credentials')
+    const fetchFn = vi.fn(async () => Response.json({
+      rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 3_600 } },
+    }))
+    const service = new UsageService(oauth, { fetchFn: fetchFn as typeof fetch, now: () => now })
+
+    await service.status(true)
+    const readsAfterFirst = credentials.mock.calls.length
+
+    now += 61_000
+    await service.status(true)
+    expect(credentials.mock.calls.length).toBeGreaterThan(readsAfterFirst)
+    oauth.dispose()
+  })
+
+  it('does not report a cached snapshot to a signed-out caller', async () => {
+    const now = 1_000_000
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
+    const oauth = new OAuthService(store, { now: () => now })
+    const service = new UsageService(oauth, {
+      fetchFn: (async () => Response.json({ rate_limit: { primary_window: { used_percent: 10 } } })) as unknown as typeof fetch,
+      now: () => now,
+    })
+
+    expect((await service.status(true)).state).toBe('ready')
+    // The signed-out branch is decided before any cache lookup.
+    expect((await service.status(false)).state).toBe('signed-out')
+    oauth.dispose()
+  })
 })
