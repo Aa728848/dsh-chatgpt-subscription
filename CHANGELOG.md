@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **修「0.1.6 上 dispatch 预设挂载失败」**：harness 0.1.6 把 workflow 引擎的包名从 `@deepseek-ai/dsh-workflow-worker-thread` 改成 `@deepseek-ai/dsh-workflow-ptc`，preset-sync 靠探测当前安装能解析哪个拼写来改写预设行；但探测根只看 profile 目录、cwd 与插件自身目录，而标准装法下 harness 是全局 npm 安装、插件在 profile 的 pnpm 树里，Node 从插件位置解析不到 harness 嵌套的 `node_modules`——两个拼写都"解析不到"时按设计不改写，旧名字原样同步进 `~/.dsh/.agent-presets`，预设挂载即报 `names a plugin that cannot be resolved`。0.1.5 上无需改写，故障完全隐形。`candidatePackageRoots` 新增 harness CLI 入口脚本（`process.argv[1]`，经 realpath 解 bin shim 与相对路径）所在目录作为候选根：它必然位于 harness 安装树内，向上走即达 harness 自带包。改写仍是双向的，0.1.5 行为不变（旧名可解析故保留）。新增 2 条用例：入口脚本旁的 harness 包可达、入口缺失或悬空不抛错。
 - **新增 WorkBuddy 线路**（`workbuddy-subscription` Provider），接入腾讯 WorkBuddy / CodeBuddy 订阅，成为本插件的第五条线路。该 ID 与用户自定义 OpenAI 兼容 Provider 常用的 `workbuddy` 分开，因此二者可同时安装和选择。既可直接复用 CodeBuddy 桌面端登录态，也可按国区/国际区通过官方浏览器授权添加账号；后者存入 Windows DPAPI / macOS Keychain / Linux Secret Service。插件托管账号可删除，桌面账号只能隐藏/恢复且绝不删除原凭据文件。
   - **凭据来源**：扫描桌面端的 `*.info` 凭据文件（`CODEBUDDY_AUTH_DIR` 可覆盖，与官方工具链一致）。目录里通常混着当前凭据与若干带时间戳的历史快照，选取顺序是**规范文件名优先，其余按 token 剩余有效期取最长**——只按 mtime 选会选到过期快照（开发过程中确实选到过）。扫描失败的单个文件被跳过而不是让整次扫描失败；`/status` 每次都重扫，避免缓存掩盖刚登录的凭据。
   - **续期回写**：token 临近过期时调 `/v2/plugin/auth/token/refresh`，并把新 token **原子写回原文件**（只改 `auth` 块，保留桌面端自己的字段），以免桌面端掉线。同进程并发调用**共用一次刷新**——refresh token 会轮换，两次并发刷新会互相作废。写回失败不影响本次请求。

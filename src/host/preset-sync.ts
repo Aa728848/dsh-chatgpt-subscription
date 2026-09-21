@@ -26,9 +26,9 @@
  * @module dsh-chatgpt-subscription/preset-sync
  */
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** The preset directory this package ships. */
@@ -79,10 +79,37 @@ function dshHomeDir(): string {
 }
 
 /**
- * Candidate directories where the running harness or profile packages reside.
+ * The harness entry script's directory, when this process is the harness.
+ *
+ * The harness keeps its own packages in the `node_modules` tree of its
+ * installation — a global npm prefix, an npx cache, or a checkout — which no
+ * profile directory, cwd, or plugin package root necessarily reaches: the
+ * plugin lives in the profile's own dependency tree, and Node resolution from
+ * here never crosses into the harness's. The CLI entry script always sits
+ * inside that tree, so its directory is the one candidate guaranteed to reach
+ * the packages the harness ships. Symlinks are resolved because an npm bin
+ * shim may point into the tree from outside it.
+ * @param entryScript - `process.argv[1]` of the running harness.
+ * @returns the entry script's real directory, or `undefined` when there is none.
  */
-function candidatePackageRoots(): string[] {
+function harnessEntryDir(entryScript: string | undefined): string | undefined {
+  if (!entryScript) return undefined
+  const absolute = resolve(entryScript)
+  try {
+    return dirname(realpathSync(absolute))
+  } catch {
+    return dirname(absolute)
+  }
+}
+
+/**
+ * Candidate directories where the running harness or profile packages reside.
+ * @param entryScript - harness CLI entry script, defaults to this process's.
+ */
+export function candidatePackageRoots(entryScript: string | undefined = process.argv[1]): string[] {
   const roots = new Set<string>()
+  const entryDir = harnessEntryDir(entryScript)
+  if (entryDir !== undefined) roots.add(entryDir)
   const home = dshHomeDir()
   const profilesDir = join(home, 'profiles')
   if (existsSync(profilesDir)) {
