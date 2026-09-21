@@ -5,6 +5,7 @@ import type {
   WorkBuddyMeter,
 } from '../../shared/workbuddy-contracts.ts'
 import {
+  ACCOUNT_PATH,
   BILLING_PATH,
   CLIENT_PRODUCT,
   CLIENT_USER_AGENT,
@@ -28,6 +29,7 @@ import {
   refreshSourceForDomain,
 } from './types.ts'
 import { FileCredentialStore, workBuddyAccountId, type WorkBuddyCredentials } from './token-store.ts'
+import type { WorkBuddyTokenIdentity } from './identity.ts'
 import type { WorkBuddyModelEntry } from './model-catalog.ts'
 import {
   convergeWorkBuddyEffort,
@@ -179,6 +181,55 @@ export function accountFromCredentials(credentials: WorkBuddyCredentials): WorkB
     source: credentials.source,
     removable: credentials.source === 'managed',
     hidden: false,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Account identity
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the signed-in account for a credential.
+ *
+ * The browser-authorization token response states the access token and the
+ * refresh token but **not** which account they belong to, so a login that
+ * relied on it alone could only key the account by the display name it also
+ * did not have — which is where the duplicate row and the `账号 1` label came
+ * from. The official client reads the account from this same endpoint right
+ * after polling the token; measured live, it returns the uid, the nickname,
+ * the UIN and the enterprise id for a valid bearer.
+ *
+ * A failure is not fatal to the sign-in: the token is usable, so the caller
+ * keeps the credential it has and lets the token's own claims fill in what
+ * they can.
+ */
+export async function fetchAccountIdentity(
+  credentials: WorkBuddyCredentials,
+  options: WorkBuddyRequestOptions = {},
+): Promise<WorkBuddyTokenIdentity | null> {
+  const fetchFn = options.fetchFn ?? fetch
+  try {
+    const response = await fetchFn(`${credentials.backend}${ACCOUNT_PATH}`, {
+      headers: workBuddyHeaders(credentials),
+      signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
+    })
+    if (!response.ok) return null
+    const payload = asRecord(JSON.parse(await response.text()) as unknown)
+    if (payload === undefined || payload.code !== 0) return null
+    const account = asRecord(payload.data)
+    if (account === undefined) return null
+    const identity: WorkBuddyTokenIdentity = {}
+    const uid = asString(account.uid)
+    if (uid !== undefined) identity.uid = uid
+    const nickname = asString(account.nickname)
+    if (nickname !== undefined) identity.nickname = nickname
+    const uin = asString(account.uin)
+    if (uin !== undefined) identity.uin = uin
+    const enterpriseId = asString(account.enterpriseId)
+    if (enterpriseId !== undefined) identity.enterpriseId = enterpriseId
+    return identity
+  } catch {
+    return null
   }
 }
 

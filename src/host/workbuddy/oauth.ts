@@ -15,7 +15,9 @@ import {
   backendForDomain,
   regionForDomain,
 } from './types.ts'
-import { FileCredentialStore, type WorkBuddyCredentials } from './token-store.ts'
+import { FileCredentialStore, workBuddyAccountId, type WorkBuddyCredentials } from './token-store.ts'
+import { withResolvedIdentity, type WorkBuddyTokenIdentity } from './identity.ts'
+import { fetchAccountIdentity } from './client.ts'
 import type { WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
 
 export type WorkBuddyLoginStatus = 'idle' | 'pending' | 'complete' | 'error'
@@ -190,6 +192,42 @@ export interface WorkBuddyLoginOptions {
    * running without a pool needs.
    */
   onSave?: (credentials: WorkBuddyCredentials) => Promise<unknown>
+  /**
+   * Resolve the signed-in account's identity before it is saved.
+   *
+   * The token response does not say which account it belongs to, so the default
+   * reads it from the account endpoint; a test can replace this, and a caller
+   * that already knows the identity can skip the extra request.
+   */
+  resolveIdentity?: (credentials: WorkBuddyCredentials) => Promise<WorkBuddyTokenIdentity | null>
+}
+
+/**
+ * Settle the identity of a completed sign-in.
+ *
+ * Both sources are applied, in the order that keeps them from disagreeing: the
+ * token's own claims first, because they are what the credential store keys on,
+ * then the account record for anything the claims did not state. Reading the
+ * account is best-effort — a deployment that will not answer the extra request
+ * must still be able to complete a sign-in.
+ */
+async function resolveLoginIdentity(
+  credentials: WorkBuddyCredentials,
+  resolve: WorkBuddyLoginOptions['resolveIdentity'],
+  fetchFn: typeof fetch,
+  signal?: AbortSignal,
+): Promise<WorkBuddyCredentials> {
+  const resolved = withResolvedIdentity(credentials)
+  const identity = await (resolve ?? ((current) => fetchAccountIdentity(current, { fetchFn, ...(signal === undefined ? {} : { signal }) })))(resolved)
+    .catch(() => null)
+  if (identity === null) return resolved
+  return withResolvedIdentity({
+    ...resolved,
+    ...(identity.uid === undefined ? {} : { uid: identity.uid }),
+    ...(identity.nickname === undefined ? {} : { nickname: identity.nickname }),
+    ...(identity.uin === undefined ? {} : { uin: identity.uin }),
+    ...(identity.enterpriseId === undefined ? {} : { enterpriseId: identity.enterpriseId }),
+  })
 }
 
 export async function beginWebLogin(
@@ -216,10 +254,14 @@ export async function beginWebLogin(
           flow = { ...flow, progress: `等待浏览器授权…（${Math.floor((Date.now() - startedAt) / 1000)} 秒）` }
           continue
         }
-        if (options.onSave !== undefined) await options.onSave(credentials)
-        else await store.addManaged(credentials)
-        const accountId = `${credentials.region}:${credentials.uid || credentials.uin || credentials.nickname || credentials.domain}`
-        flow = { status: 'complete', region: credentials.region, accountId, startedAt, completedAt: Date.now(), progress: '授权完成' }
+        // The identity is settled before anything is persisted, so the id the
+        // card pins and the id the credential store computes are the same one:
+        // saving first and correcting later is what left the same account
+        // stored under both its name and its uid.
+        const resolved = await resolveLoginIdentity(credentials, options.resolveIdentity, fetchFn, active.signal)
+        if (options.onSave !== undefined) await options.onSave(resolved)
+        else await store.addManaged(resolved)
+        flow = { status: 'complete', region: resolved.region, accountId: workBuddyAccountId(resolved), startedAt, completedAt: Date.now(), progress: '授权完成' }
         return
       }
       flow = { status: 'error', region, startedAt, completedAt: Date.now(), error: '登录超时，请重新添加账号。' }

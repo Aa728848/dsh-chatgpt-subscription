@@ -10,6 +10,7 @@ import type { WorkBuddyReasoningEffort, WorkBuddyRegion } from '../../shared/wor
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { dshHomeDir } from '../antigravity/token-store.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS } from './model-catalog.ts'
+import { withResolvedIdentity } from './identity.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
@@ -236,7 +237,13 @@ export function parseCredentialFile(value: unknown, sourceFile: string, sourceMt
   const expiresAtRaw = auth.expiresAt
   const expiresAt = typeof expiresAtRaw === 'number' && Number.isFinite(expiresAtRaw) ? expiresAtRaw : 0
 
-  return {
+  // The file carries the identity the IDE recorded, but a file written before
+  // the plugin's own uid heal — or one whose `account` block the IDE left
+  // partly empty — would otherwise key the account by its display name. The
+  // token's own `sub` is authoritative, so it is applied here once, at the
+  // single choke point every read path (scan, desktop re-read, pool adoption)
+  // goes through.
+  return withResolvedIdentity({
     accessToken,
     refreshToken: readString(auth, 'refreshToken') ?? '',
     expiresAt,
@@ -251,7 +258,7 @@ export function parseCredentialFile(value: unknown, sourceFile: string, sourceMt
     sourceFile,
     sourceMtimeMs,
     source: 'desktop',
-  }
+  })
 }
 
 /** Whether a credential is at or near expiry; refreshed a minute early. */
@@ -263,10 +270,56 @@ export function isExpired(credentials: WorkBuddyCredentials, now = Date.now()): 
 /**
  * Stable public key for selecting an account without exposing a token or tying
  * the preference to a timestamped snapshot filename.
+ *
+ * The chain is uid → uin → nickname → domain, and the reason it is safe is
+ * **ordering**: {@link withResolvedIdentity} settles a credential's uid from
+ * its own token before any id is derived, so a real sign-in and the IDE's file
+ * for the same account both reach the uid branch and agree. The nickname rung
+ * is only reached by a token whose claims cannot be read at all, and keeping it
+ * there is what stops two such accounts in one region from collapsing onto the
+ * shared deployment key below it.
+ *
+ * A nickname must therefore never be the *first* rung: that is what split one
+ * account into two pool rows, because the browser-login response states the
+ * display name while the IDE's file states the uid. Likewise the uid must be
+ * settled *before* the id is minted, which is why the heal runs inside the
+ * credential parsers and the pool's own account creation.
  */
-export function workBuddyAccountId(credentials: Pick<WorkBuddyCredentials, 'region' | 'uid' | 'uin' | 'nickname' | 'domain'>): string {
+export function workBuddyAccountId(
+  credentials: Pick<WorkBuddyCredentials, 'region' | 'uid' | 'uin' | 'nickname' | 'domain'>,
+): string {
   const identity = credentials.uid || credentials.uin || credentials.nickname || credentials.domain
   return `${credentials.region}:${identity}`
+}
+
+/**
+ * Every key one credential may have been addressable under.
+ *
+ * A settings document written before the identity fix pinned and hid accounts
+ * by the old chain (`uid → uin → nickname → domain`), so an account that only
+ * had a nickname stored was addressed as `region:<nickname>`. The heal moves
+ * that account to its uid, and without this alias the stored pointer would
+ * silently stop matching — a pinned account would fall back to automatic
+ * routing and a hidden one would reappear. Callers therefore accept either
+ * spelling; only the current one is ever written.
+ */
+export function workBuddyAccountIdAliases(
+  credentials: Pick<WorkBuddyCredentials, 'region' | 'uid' | 'uin' | 'nickname' | 'domain'>,
+): string[] {
+  const current = workBuddyAccountId(credentials)
+  // Every key the chain could mint for this credential, enumerated from the
+  // identity facts themselves rather than recomputed from one healed record:
+  // healing a uid is exactly what changed which rung was used, so an account
+  // addressed by its nickname before must still be found under that key.
+  const candidates = [
+    credentials.uid === undefined ? undefined : credentials.uid,
+    credentials.uin === undefined ? undefined : credentials.uin,
+    credentials.nickname === undefined ? undefined : credentials.nickname,
+    credentials.domain,
+  ]
+  return [...new Set([current, ...candidates
+    .filter((identity): identity is string => identity !== undefined)
+    .map((identity) => `${credentials.region}:${identity}`)])]
 }
 
 /** Strict parser for credentials owned by the plugin's encrypted pool. */
@@ -280,7 +333,10 @@ export function parseManagedCredentials(value: unknown): WorkBuddyCredentials[] 
     if (accessToken === undefined) throw new Error('WorkBuddy managed account has no access token')
     const domain = readString(item, 'domain') ?? DEFAULT_DOMAIN
     const expiresAt = typeof item.expiresAt === 'number' && Number.isFinite(item.expiresAt) ? item.expiresAt : 0
-    return {
+    // Same heal as the desktop path: a row written before the login response's
+    // identity was resolved holds a display name where the uid belongs, and its
+    // own token still states the real one.
+    return withResolvedIdentity({
       accessToken,
       refreshToken: readString(item, 'refreshToken') ?? '',
       expiresAt,
@@ -295,7 +351,7 @@ export function parseManagedCredentials(value: unknown): WorkBuddyCredentials[] 
       sourceFile: '',
       sourceMtimeMs: 0,
       source: 'managed',
-    }
+    })
   })
 }
 
@@ -392,15 +448,31 @@ export class ManagedCredentialStore {
   }
 
   async list(): Promise<WorkBuddyCredentials[]> {
-    return this.serialize(async () => (await this.backend.load())?.accounts ?? [])
+    return this.serialize(async () => {
+      const accounts = (await this.backend.load())?.accounts ?? []
+      // Healed on read rather than only by the encrypted backend's own parser,
+      // so a row stored before the identity fix is re-keyed whichever backend
+      // loaded it, and so the heal is not a side effect of platform choice.
+      return accounts.map((credentials) => withResolvedIdentity(credentials))
+    })
   }
 
   async add(credentials: WorkBuddyCredentials): Promise<void> {
     return this.serialize(async () => {
       const current = (await this.backend.load())?.accounts ?? []
-      const normalized: WorkBuddyCredentials = { ...credentials, source: 'managed', sourceFile: '', sourceMtimeMs: 0 }
+      // A login response states the display name but not the uid, so the
+      // identity is settled here before the row is keyed: otherwise signing in
+      // to an account the plugin already owns would store a second copy under
+      // the name-only key instead of replacing the one it has.
+      const normalized: WorkBuddyCredentials = withResolvedIdentity({ ...credentials, source: 'managed', sourceFile: '', sourceMtimeMs: 0 })
       const id = workBuddyAccountId(normalized)
-      const accounts = [...current.filter((candidate) => workBuddyAccountId(candidate) !== id), normalized]
+      // The stored rows are healed before they are compared, not just the
+      // incoming one: a row the old code keyed by display name would otherwise
+      // not match the healed id and a second copy of one account would remain.
+      const accounts = [
+        ...current.map((candidate) => withResolvedIdentity(candidate)).filter((candidate) => workBuddyAccountId(candidate) !== id),
+        normalized,
+      ]
       const payload = { version: 1 as const, accounts }
       await this.backend.save(payload)
       const restored = await this.backend.load()
@@ -415,7 +487,9 @@ export class ManagedCredentialStore {
   async delete(accountId: string): Promise<boolean> {
     return this.serialize(async () => {
       const current = (await this.backend.load())?.accounts ?? []
-      const accounts = current.filter((candidate) => workBuddyAccountId(candidate) !== accountId)
+      const accounts = current
+        .map((candidate) => withResolvedIdentity(candidate))
+        .filter((candidate) => workBuddyAccountId(candidate) !== accountId)
       if (accounts.length === current.length) return false
       if (accounts.length === 0) await this.backend.clear()
       else await this.backend.save({ version: 1, accounts })
@@ -474,9 +548,15 @@ export class FileCredentialStore {
 
     const candidates = await this.list()
     this.scannedAt = Date.now()
+    // A stored selection may predate the identity fix, so a request is matched
+    // against every key its account has been addressable under.
+    const matches = (candidate: WorkBuddyCredentials): boolean =>
+      workBuddyAccountIdAliases(candidate).includes(requested ?? '')
+    const isHidden = (candidate: WorkBuddyCredentials): boolean =>
+      workBuddyAccountIdAliases(candidate).some((id) => hidden.has(id))
     this.cached = requested === null
-      ? (candidates.find((candidate) => !hidden.has(workBuddyAccountId(candidate))) ?? null)
-      : (hidden.has(requested) ? null : candidates.find((candidate) => workBuddyAccountId(candidate) === requested) ?? null)
+      ? (candidates.find((candidate) => !isHidden(candidate)) ?? null)
+      : (candidates.find((candidate) => matches(candidate) && !isHidden(candidate)) ?? null)
     return this.cached
   }
 

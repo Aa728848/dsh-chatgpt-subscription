@@ -29,6 +29,13 @@ import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts
 
 const temporaryDirs: string[] = []
 
+/** Build an unsigned JWT-shaped token carrying the claims under test. */
+function jwtToken(claims: Record<string, unknown>): string {
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8')
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode(claims)}.signature`
+}
+
 async function makeAuthDir(options: { domain?: string; expiresAt?: number } = {}): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-routes-'))
   temporaryDirs.push(dir)
@@ -580,6 +587,59 @@ describe('WorkBuddy routes', () => {
     expect(urls[0]).toContain('/v2/plugin/auth/token/refresh')
   })
 
+  it('saves a browser login under the same id the disk scan produces', async () => {
+    // Symptom 1 end to end: a browser login for an account the IDE already
+    // holds must not create a second account. The token response states only
+    // the display name; the id has to come from the account the token names.
+    vi.useFakeTimers()
+    try {
+      const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-login-dedupe-'))
+      temporaryDirs.push(dir)
+      await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({
+        account: { uid: uuid, nickname: '快跑', uin: '330101607075' },
+        auth: { accessToken: 'file-token', refreshToken: 'file-rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+      }), 'utf8')
+
+      const settings = await makeSettings()
+      const store = createWorkBuddyStore(dir)
+      const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+      const handlers: any[] = []
+      const fetchFn = (async (url: any) => {
+        if (String(url).includes('/auth/state')) {
+          return new Response(JSON.stringify({ code: 0, data: { state: 's', authUrl: 'https://copilot.tencent.com/login?state=s' } }), { status: 200 })
+        }
+        if (String(url).includes('/v2/plugin/account')) {
+          return new Response(JSON.stringify({ code: 0, data: { uid: uuid, nickname: '快跑', uin: '330101607075' } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { accessToken: jwtToken({ sub: uuid, nickname: '快跑' }), refreshToken: 'login-rt', expiresIn: 3600, domain: 'copilot.tencent.com' },
+        }), { status: 200 })
+      }) as unknown as typeof fetch
+
+      registerWorkBuddyRoutes(makeContext(handlers), store, settings, undefined, { fetchFn, accountPool: pool })
+      await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/status'), makeResponse())
+      const started = makeResponse()
+      await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/accounts/login', { region: 'cn' }, 'http://127.0.0.1:43120'), started)
+      await vi.advanceTimersByTimeAsync(1_600)
+
+      const status = makeResponse()
+      await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts/login/status'), status)
+      const flow = JSON.parse(status.captured.body).value
+      expect(flow.status).toBe('complete')
+      expect(flow.accountId).toBe(`cn:${uuid}`)
+
+      // The pool holds the single account the card must render.
+      const accounts = await pool.listAccounts()
+      expect(accounts.map((account) => account.id)).toEqual([`cn:${uuid}`])
+      expect(accounts[0]!.alias).not.toBe('账号 1')
+      expect(accounts[0]!.uin).toBe('330101607075')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('stops an in-flight browser login when the routes are disposed', async () => {
     vi.useFakeTimers()
     try {
@@ -802,6 +862,29 @@ describe('WorkBuddy routes', () => {
     expect(restore.captured.status).toBe(200)
     expect((await settings.read()).hiddenAccountIds).toEqual([])
     expect(await fs.stat(source)).toBeTruthy()
+  })
+
+  it('reports an account hidden under the pre-fix name-derived key as hidden', async () => {
+    // The account's file states only its display name, so the old code hid it
+    // as `cn:tester`. The heal moves it to its uid; the card must still show
+    // it as hidden rather than silently restoring it into the rotation.
+    const uuid = 'uid-from-token'
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-route-hide-'))
+    temporaryDirs.push(dir)
+    await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({
+      account: { nickname: 'tester', uin: '100000000001' },
+      auth: { accessToken: jwtToken({ sub: uuid, nickname: 'tester' }), refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+    }), 'utf8')
+    const settings = await makeSettings()
+    await settings.updateSettings({ hiddenAccountIds: ['cn:tester'] })
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings)
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts'), res)
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.accounts).toHaveLength(1)
+    expect(payload.value.accounts[0].id).toBe(`cn:${uuid}`)
+    expect(payload.value.accounts[0].hidden).toBe(true)
   })
 
   it('refuses to delete a desktop-owned credential', async () => {

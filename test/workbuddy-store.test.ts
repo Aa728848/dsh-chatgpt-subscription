@@ -17,6 +17,13 @@ import { backendForDomain, isIntlDomain, regionForDomain, refreshSourceForDomain
 
 const temporaryDirs: string[] = []
 
+/** Build an unsigned JWT-shaped token carrying the claims under test. */
+function jwtToken(claims: Record<string, unknown>): string {
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8')
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode(claims)}.signature`
+}
+
 async function makeAuthDir(files: Record<string, unknown | string>): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-auth-'))
   temporaryDirs.push(dir)
@@ -196,6 +203,77 @@ describe('WorkBuddy managed credential store', () => {
     expect((await managed.list())[0]?.accessToken).toBe('second')
     expect(await managed.delete('cn:managed-user')).toBe(true)
     expect(await managed.list()).toEqual([])
+  })
+
+  it('keys a login-only credential and the IDE file for one account to the same id', async () => {
+    // The reported defect: browser login returns a display name with no uid,
+    // while the IDE's own file for the same account carries the uuid. Keying
+    // the login on the name produced a second account row for one account.
+    const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+    const dir = await makeAuthDir({
+      'workbuddy-desktop.info': {
+        account: { uid: uuid, nickname: '快跑', uin: '330101607075' },
+        auth: { accessToken: 'file-token', domain: 'copilot.tencent.com', expiresAt: Date.now() + 3_600_000 },
+      },
+    })
+    let value: any = null
+    const backend = {
+      load: async () => value === null ? null : structuredClone(value),
+      save: async (next: any) => { value = structuredClone(next) },
+      clear: async () => { value = null },
+    }
+    const managed = new ManagedCredentialStore(path.join(os.tmpdir(), `wb-dedupe-${Date.now()}.json`), backend)
+    // Exactly what the login path hands over: a token whose claims name the
+    // account, and the display name the response did carry.
+    await managed.add({
+      accessToken: jwtToken({ sub: uuid, preferred_username: '快跑' }),
+      refreshToken: 'login-refresh',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'cn',
+      domain: 'copilot.tencent.com',
+      backend: 'https://copilot.tencent.com',
+      nickname: '快跑',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'managed',
+    })
+    const store = new FileCredentialStore(dir, 60_000, managed)
+    const accounts = await store.list()
+    // One account, keyed by the uuid both paths agree on.
+    expect(accounts).toHaveLength(1)
+    expect(accounts.map(workBuddyAccountId)).toEqual([`cn:${uuid}`])
+  })
+
+  it('recovers the uid of a managed row stored under a display name', async () => {
+    // A row written by the old name-fallback still holds the real uid in its
+    // own token, which is what lets the heal re-key it without re-login.
+    const uuid = '1fb74d2b-3883-43b2-a3a3-417e04e49531'
+    let value: any = {
+      version: 1,
+      accounts: [{
+        accessToken: jwtToken({ sub: uuid, preferred_username: 'cchen2422@gmail.com' }),
+        refreshToken: 'refresh',
+        expiresAt: Date.now() + 3_600_000,
+        region: 'intl',
+        domain: 'www.workbuddy.ai',
+        backend: 'https://www.workbuddy.ai',
+        uid: 'cchen2422@gmail.com',
+        nickname: 'cchen2422@gmail.com',
+        sourceFile: '',
+        sourceMtimeMs: 0,
+        source: 'managed',
+      }],
+    }
+    const backend = {
+      load: async () => structuredClone(value),
+      save: async (next: any) => { value = structuredClone(next) },
+      clear: async () => { value = null },
+    }
+    const managed = new ManagedCredentialStore(path.join(os.tmpdir(), `wb-heal-${Date.now()}.json`), backend)
+    const healed = (await managed.list())[0]!
+    expect(healed.uid).toBe(uuid)
+    expect(healed.nickname).toBe('cchen2422@gmail.com')
+    expect(workBuddyAccountId(healed)).toBe(`intl:${uuid}`)
   })
 
   it('reuses a cached managed account instead of statting an empty source path', async () => {

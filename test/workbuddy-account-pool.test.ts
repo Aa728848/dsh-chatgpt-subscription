@@ -22,6 +22,13 @@ import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts
 
 const temporaryDirs: string[] = []
 
+/** Build an unsigned JWT-shaped token carrying the claims under test. */
+function jwtToken(claims: Record<string, unknown>): string {
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8')
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode(claims)}.signature`
+}
+
 afterEach(async () => {
   clearCachedQuota()
   clearCachedCatalog()
@@ -141,6 +148,133 @@ describe('WorkBuddy pool adoption and identity', () => {
     const accounts = await pool.syncDesktopAccounts()
     // One account, not one per snapshot file.
     expect(accounts).toHaveLength(1)
+  })
+
+  it('adopts a login and the IDE file for one account as a single account', async () => {
+    // Symptom 1: the same account added by browser login and found by the disk
+    // scan must not become two pool rows. The login response states only the
+    // display name, so without the token-derived uid the two paths disagree.
+    const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+    const dir = await makeAuthDir({
+      'workbuddy-desktop.info': {
+        account: { uid: uuid, nickname: '快跑', uin: '330101607075' },
+        auth: { accessToken: jwtToken({ sub: uuid, nickname: '快跑', uin: '330101607075' }), refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+      },
+    })
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store)
+
+    // What the browser-login path persists: a token whose claims carry the uid,
+    // plus the display name the response returned. No uid field.
+    await pool.addAccount({
+      accessToken: jwtToken({ sub: uuid, nickname: '快跑', uin: '330101607075' }),
+      refreshToken: 'login-rt',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'cn',
+      domain: 'copilot.tencent.com',
+      backend: 'https://copilot.tencent.com',
+      uid: undefined,
+      nickname: '快跑',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'managed',
+    } as never)
+
+    const accounts = await pool.syncDesktopAccounts()
+    expect(accounts).toHaveLength(1)
+    expect(accounts[0]!.id).toBe(`cn:${uuid}`)
+  })
+
+  it('labels an account by a fact its owner can recognize, not its uuid', async () => {
+    // Symptom 2 was an account displayed as "账号 1" with no real information.
+    // A uuid is only marginally better than a position, so a credential that
+    // states the Tencent UIN — the number a user can check on their own account
+    // page — is labelled with that instead.
+    const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+    const dir = await makeAuthDir({})
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store)
+
+    const added = await pool.addAccount({
+      accessToken: jwtToken({ sub: uuid, uin: '330101607075' }),
+      refreshToken: 'rt',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'cn',
+      domain: 'copilot.tencent.com',
+      backend: 'https://copilot.tencent.com',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'managed',
+    })
+
+    expect(added.alias).toBe('330101607075')
+    expect(added.alias).not.toBe('账号 1')
+    expect(added.uin).toBe('330101607075')
+    expect(added.id).toBe(`cn:${uuid}`)
+  })
+
+  it('collapses two stored rows that the identity heal re-keys onto one account', async () => {
+    const uuid = '1fb74d2b-3883-43b2-a3a3-417e04e49531'
+    const token = jwtToken({ sub: uuid, preferred_username: 'cchen2422@gmail.com' })
+    const parsed = parseWorkBuddyPoolData({
+      version: 1,
+      activeAccountId: 'intl:cchen2422@gmail.com',
+      accounts: [
+        {
+          id: 'intl:cchen2422@gmail.com', alias: 'cchen2422@gmail.com', addedAt: 1, isPrimary: true, source: 'managed',
+          credentials: { accessToken: token, refreshToken: 'rt', domain: 'www.workbuddy.ai', expiresAt: Date.now() + 3_600_000, nickname: 'cchen2422@gmail.com' },
+        },
+        {
+          // The desktop row is the one that carries the UIN, while the managed
+          // login row carries the identity — so the merge has to keep both.
+          id: `intl:${uuid}`, alias: 'desktop copy', addedAt: 2, source: 'desktop', uin: '450701882909',
+          credentials: { accessToken: token, refreshToken: 'rt2', domain: 'www.workbuddy.ai', expiresAt: Date.now() + 3_600_000, uid: uuid, uin: '450701882909' },
+        },
+      ],
+    })
+    // One account, and the primary flag plus the stored pointer survive.
+    expect(parsed.accounts).toHaveLength(1)
+    expect(parsed.accounts[0]!.id).toBe(`intl:${uuid}`)
+    expect(parsed.accounts[0]!.isPrimary).toBe(true)
+    expect(parsed.activeAccountId).toBe(`intl:${uuid}`)
+    // The discarded row was the only one carrying the UIN the card renders, so
+    // the merge must not silently drop a display fact the user can recognize.
+    expect(parsed.accounts[0]!.uin).toBe('450701882909')
+  })
+
+  it('still honors a pin and a hide stored under the pre-fix name-derived key', async () => {
+    // An account that only had a nickname was addressable as region:<name>
+    // before the fix. Settings written then still name it that way, and the
+    // heal must not turn a pinned or hidden account back into an automatic one.
+    const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+    const token = jwtToken({ sub: uuid, nickname: '快跑' })
+    // The file states only the display name; the uid is in the token. That is
+    // exactly the account the old code addressed as `cn:快跑`.
+    const dir = await makeAuthDir({
+      'workbuddy-desktop.info': {
+        account: { nickname: '快跑' },
+        auth: { accessToken: token, refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+      },
+    })
+    const store = createWorkBuddyStore(dir)
+
+    // Hidden: the old key must still take it out of rotation.
+    const hidden = makePool(store, { selection: () => ({ selectedAccountId: null, hiddenAccountIds: ['cn:快跑'] }) })
+    await hidden.pool.syncDesktopAccounts()
+    await expect(hidden.pool.getEffectiveAccount()).rejects.toThrow(LlmError)
+
+    // Pinned: the old key must still select it ahead of the strategy. The other
+    // account is added first so it is the primary one — ignoring the legacy pin
+    // would therefore route there, making the assertion discriminating.
+    const pinned = makePool(store, { selection: () => ({ selectedAccountId: 'cn:快跑', hiddenAccountIds: [] }) })
+    await pinned.pool.addAccount({
+      accessToken: token, refreshToken: 'rt2', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'other-user',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+    await pinned.pool.syncDesktopAccounts()
+    const { account } = await pinned.pool.getEffectiveAccount()
+    expect(account.id).toBe(`cn:${uuid}`)
   })
 
   it('is idempotent when the directory is rescanned', async () => {

@@ -14,6 +14,13 @@ const attempt = {
   domain: 'www.workbuddy.ai',
 }
 
+/** Build an unsigned JWT-shaped token carrying the claims under test. */
+function jwt(claims: Record<string, unknown>): string {
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8')
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode(claims)}.signature`
+}
+
 afterEach(() => {
   resetWebLogin()
   vi.useRealTimers()
@@ -53,25 +60,88 @@ describe('WorkBuddy browser authorization', () => {
   it('persists the completed credential in the managed store', async () => {
     vi.useFakeTimers()
     const addManaged = vi.fn(async () => undefined)
-    let polls = 0
+    const urls: string[] = []
     const fetchFn = (async (url: string) => {
+      urls.push(String(url))
       if (String(url).includes('/auth/state')) {
         return new Response(JSON.stringify({ code: 0, data: { state: 's', authUrl: 'https://copilot.tencent.com/login?state=s' } }))
       }
-      polls += 1
+      if (String(url).includes('/v2/plugin/account')) {
+        return new Response(JSON.stringify({ code: 0, data: { uid: 'cn-user', nickname: 'cn', uin: '10001' } }))
+      }
       return new Response(JSON.stringify({
         code: 0,
         data: {
           accessToken: 'access', refreshToken: 'refresh', expiresIn: 3600,
-          uid: 'cn-user', nickname: 'cn', domain: 'copilot.tencent.com',
+          domain: 'copilot.tencent.com',
         },
       }))
     }) as unknown as typeof fetch
     const flow = await beginWebLogin({ addManaged } as any, 'cn', fetchFn)
     expect(flow.status).toBe('pending')
     await vi.advanceTimersByTimeAsync(1_600)
-    expect(polls).toBe(1)
+    expect(urls.filter((url) => url.includes('/auth/token'))).toHaveLength(1)
     expect(addManaged).toHaveBeenCalledOnce()
     expect(getWebLoginStatus()).toMatchObject({ status: 'complete', accountId: 'cn:cn-user' })
+  })
+
+  it('identifies the signed-in account from its token, not its display name', async () => {
+    vi.useFakeTimers()
+    // The shape a real login returns: a token and a display name, no uid. The
+    // file the IDE holds for this same account carries the uuid, so keying on
+    // the e-mail would store a second copy of one account.
+    const addManaged = vi.fn(async (_credentials: any) => undefined)
+    const accessToken = jwt({ sub: '1fb74d2b-3883-43b2-a3a3-417e04e49531', preferred_username: 'cchen2422@gmail.com' })
+    const fetchFn = (async (url: string) => {
+      if (String(url).includes('/auth/state')) {
+        return new Response(JSON.stringify({ code: 0, data: { state: 's', authUrl: 'https://www.workbuddy.ai/login?state=s' } }))
+      }
+      if (String(url).includes('/v2/plugin/account')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { uid: '1fb74d2b-3883-43b2-a3a3-417e04e49531', nickname: 'cchen2422@gmail.com', uin: '450701882909' },
+        }))
+      }
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { accessToken, refreshToken: 'refresh', expiresIn: 3600, nickname: 'cchen2422@gmail.com', domain: 'www.workbuddy.ai' },
+      }))
+    }) as unknown as typeof fetch
+
+    await beginWebLogin({ addManaged } as any, 'intl', fetchFn)
+    await vi.advanceTimersByTimeAsync(1_600)
+
+    const saved = addManaged.mock.calls[0]![0] as any
+    expect(saved.uid).toBe('1fb74d2b-3883-43b2-a3a3-417e04e49531')
+    expect(saved.nickname).toBe('cchen2422@gmail.com')
+    // The id must be the same one the IDE's own file produces for this account.
+    expect(getWebLoginStatus()).toMatchObject({ status: 'complete', accountId: 'intl:1fb74d2b-3883-43b2-a3a3-417e04e49531' })
+  })
+
+  it('keeps the display name as the nickname when the token has no nickname claim', async () => {
+    vi.useFakeTimers()
+    const addManaged = vi.fn(async (_credentials: any) => undefined)
+    const fetchFn = (async (url: string) => {
+      if (String(url).includes('/auth/state')) {
+        return new Response(JSON.stringify({ code: 0, data: { state: 's', authUrl: 'https://www.workbuddy.ai/login?state=s' } }))
+      }
+      if (String(url).includes('/v2/plugin/account')) return new Response('', { status: 500 })
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          accessToken: jwt({ sub: 'uuid-1' }), refreshToken: 'refresh', expiresIn: 3600,
+          nickname: 'Someone', domain: 'www.workbuddy.ai',
+        },
+      }))
+    }) as unknown as typeof fetch
+
+    await beginWebLogin({ addManaged } as any, 'intl', fetchFn)
+    await vi.advanceTimersByTimeAsync(1_600)
+
+    // An unreachable account endpoint must not fail the sign-in.
+    const saved = addManaged.mock.calls[0]![0] as any
+    expect(saved.uid).toBe('uuid-1')
+    expect(saved.nickname).toBe('Someone')
+    expect(getWebLoginStatus()).toMatchObject({ status: 'complete', accountId: 'intl:uuid-1' })
   })
 })

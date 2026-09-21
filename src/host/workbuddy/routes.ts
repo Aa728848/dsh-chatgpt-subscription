@@ -11,6 +11,7 @@ import {
 import {
   FileCredentialStore,
   FileModelSettingsStore,
+  workBuddyAccountIdAliases,
   type WorkBuddyModelSettings,
   type WorkBuddyPreferenceStore,
 } from './token-store.ts'
@@ -36,6 +37,7 @@ import {
   type WorkBuddyModelEntry,
 } from './model-catalog.ts'
 import type {
+  WorkBuddyAccountSummaryDto,
   WorkBuddyConnectionDto,
   WorkBuddyModelOption,
   WorkBuddyWebStatus,
@@ -203,6 +205,18 @@ export async function getWorkBuddyWebStatus(
     ? []
     : await options.accountPool.listAccounts().catch(() => [])
   const hiddenIds = new Set(settings.hiddenAccountIds)
+  // A hide can predate the identity fix, when the account was addressed by its
+  // display name; matching only the current id would render it as restored.
+  // The summary exposes the id rather than the uid, so the id is checked
+  // alongside the aliases the card's own fields can enumerate.
+  const isHidden = (account: WorkBuddyAccountSummaryDto): boolean =>
+    hiddenIds.has(account.id)
+    || workBuddyAccountIdAliases({
+      region: account.region,
+      ...(account.uin === undefined ? {} : { uin: account.uin }),
+      ...(account.nickname === undefined ? {} : { nickname: account.nickname }),
+      domain: account.domain ?? '',
+    }).some((id) => hiddenIds.has(id))
 
   return {
     enabled,
@@ -220,7 +234,7 @@ export async function getWorkBuddyWebStatus(
     managedStoragePath: store.managedPath(),
     serving: readOption(options.serving, true),
     conflict: readOption(options.conflict, null),
-    accounts: poolAccounts.map((account) => ({ ...account, hidden: hiddenIds.has(account.id) })),
+    accounts: poolAccounts.map((account) => ({ ...account, hidden: isHidden(account) })),
     activeAccountId: poolData?.activeAccountId,
     rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
   }
@@ -274,7 +288,10 @@ export function registerWorkBuddyRoutes(
               managedStoragePath: store.managedPath(),
               accounts: accounts.map((credentials) => {
                 const account = accountFromCredentials(credentials)
-                return { ...account, hidden: hidden.has(account.id) }
+                // Matched through every key the account has been addressable
+                // under, so a hide stored before the identity fix still reads
+                // as hidden rather than as a restored account.
+                return { ...account, hidden: workBuddyAccountIdAliases(credentials).some((id) => hidden.has(id)) }
               }),
             },
           })

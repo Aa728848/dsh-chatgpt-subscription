@@ -49,6 +49,15 @@ export const CONFIG_PATH = '/v3/config'
 export const REFRESH_PATH = '/v2/plugin/auth/token/refresh'
 /** Billing/allowance surface; answers the per-package credit picture. */
 export const BILLING_PATH = '/billing/meter/get-user-resource'
+/**
+ * Current-account surface.
+ *
+ * The browser-authorization token response carries only the `auth` block, so
+ * the signed-in account's uid / nickname / UIN come from here — the same
+ * endpoint the official client reads its account from. Measured live on both
+ * deployments: it answers with the full account record for a valid bearer.
+ */
+export const ACCOUNT_PATH = '/v2/plugin/account'
 /** Browser authorization state and credential-poll surfaces used by the CLI. */
 export const LOGIN_STATE_PATH = '/v2/plugin/auth/state'
 export const LOGIN_TOKEN_PATH = '/v2/plugin/auth/token'

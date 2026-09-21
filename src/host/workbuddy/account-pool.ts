@@ -29,9 +29,11 @@ import {
   FileCredentialStore,
   isExpired,
   workBuddyAccountId,
+  workBuddyAccountIdAliases,
   type WorkBuddyCredentials,
 } from './token-store.ts'
 import { refreshCredentials } from './client.ts'
+import { hasStableIdentity, withResolvedIdentity } from './identity.ts'
 import { PROVIDER_ID, PROVIDER_NAME, regionForDomain } from './types.ts'
 import type {
   WorkBuddyAccountSummaryDto,
@@ -73,16 +75,29 @@ export function parseWorkBuddyPoolData(value: unknown): PoolData<WorkBuddyPoolAc
     throw new Error('WorkBuddy pool payload is invalid')
   }
   const record = value as Record<string, unknown>
-  const accounts: WorkBuddyPoolAccount[] = []
+  /** Stored id → healed id, so a persisted pointer can follow the heal. */
+  const heal = new Map<string, string>()
+  const parsedRows: WorkBuddyPoolAccount[] = []
   for (const item of Array.isArray(record.accounts) ? record.accounts : []) {
     if (typeof item !== 'object' || item === null) continue
     const raw = item as Record<string, unknown>
     if (typeof raw.id !== 'string') continue
-    const credentials = parsePoolCredential(raw.credentials)
-    if (credentials === null) continue
+    const parsed = parsePoolCredential(raw.credentials)
+    if (parsed === null) continue
+    // Healing a stored row's identity is what lets the id be re-derived from
+    // it: a row written by the old name-fallback holds the display name where
+    // its own token states the uid, and re-keying it is how a duplicate pair
+    // collapses back into one account.
+    const credentials = withResolvedIdentity(parsed)
+    // Re-key only when the credential names its own account. One that states no
+    // identity at all has nothing to derive a better key from, and replacing a
+    // stored key with the domain-derived fallback would both lose the row's
+    // address and merge unrelated accounts on the same deployment.
+    const id = hasStableIdentity(credentials) ? workBuddyAccountId(credentials) : raw.id
+    heal.set(raw.id, id)
     const account: WorkBuddyPoolAccount = {
-      id: raw.id,
-      alias: typeof raw.alias === 'string' ? raw.alias : defaultAliasFor(credentials, accounts.length + 1),
+      id,
+      alias: typeof raw.alias === 'string' ? raw.alias : defaultAliasFor(credentials, parsedRows.length + 1),
       credentials,
       addedAt: typeof raw.addedAt === 'number' ? raw.addedAt : Date.now(),
       isPrimary: raw.isPrimary === true,
@@ -100,14 +115,54 @@ export function parseWorkBuddyPoolData(value: unknown): PoolData<WorkBuddyPoolAc
     if (typeof raw.cooldownReason === 'string') account.cooldownReason = raw.cooldownReason
     if (raw.authStatus === 'expired' || raw.authStatus === 'invalid') account.authStatus = raw.authStatus
     if (typeof raw.authFailedReason === 'string') account.authFailedReason = raw.authFailedReason
-    accounts.push(account)
+    parsedRows.push(account)
   }
+
+  // Re-keying can make two stored rows name the same account — precisely the
+  // duplicate this heal exists to remove — so the healed id, not the stored
+  // one, decides what is distinct. The credential store reports a managed row
+  // ahead of a desktop row for one account, so that same precedence is applied
+  // here rather than letting the file order decide, and the routing state the
+  // discarded row carried is folded into the winner.
+  const collapsed = new Map<string, WorkBuddyPoolAccount>()
+  for (const account of parsedRows) {
+    const existing = collapsed.get(account.id)
+    if (existing === undefined) {
+      collapsed.set(account.id, account)
+      continue
+    }
+    const winner = existing.source !== 'managed' && account.source === 'managed' ? account : existing
+    const loser = winner === existing ? account : existing
+    winner.isPrimary = winner.isPrimary || loser.isPrimary === true
+    winner.addedAt = Math.min(winner.addedAt, loser.addedAt)
+    winner.lastUsedAt ??= loser.lastUsedAt
+    if (winner.cooldownUntil === undefined) {
+      winner.cooldownUntil = loser.cooldownUntil
+      winner.cooldownReason = loser.cooldownReason
+    }
+    if (winner.authStatus === undefined) {
+      winner.authStatus = loser.authStatus
+      winner.authFailedReason = loser.authFailedReason
+    }
+    // The discarded row can be the only one that carried a fact the card
+    // renders — the IDE file states the UIN and the file path while a login
+    // response states neither — so those display fields are folded across too.
+    winner.nickname ??= loser.nickname
+    winner.uin ??= loser.uin
+    winner.sourceFile ??= loser.sourceFile
+    collapsed.set(account.id, winner)
+  }
+
   const result: PoolData<WorkBuddyPoolAccount> = {
     version: 1,
     rotationStrategy: normalizeRotationStrategy(record.rotationStrategy),
-    accounts,
+    accounts: [...collapsed.values()],
   }
-  if (typeof record.activeAccountId === 'string') result.activeAccountId = record.activeAccountId
+  // A stored pointer names the row's old id; it has to follow the heal or the
+  // settings document would address an account the pool no longer has.
+  if (typeof record.activeAccountId === 'string') {
+    result.activeAccountId = heal.get(record.activeAccountId) ?? record.activeAccountId
+  }
   return result
 }
 
@@ -145,8 +200,18 @@ function backendFromDomain(domain: string): string {
   return `https://www.${value.split('.').slice(-2).join('.')}`
 }
 
+/**
+ * The name a freshly adopted account is labelled with.
+ *
+ * The human-recognizable facts come first: the display name, then the Tencent
+ * UIN a user can actually check against their own account page. A uid is a
+ * uuid, so it is offered only as a last resort — and only when it is real,
+ * which is what the identity heal guarantees before this runs. A positional
+ * label is reachable only for a credential that states no identity at all,
+ * which is the case that used to be reported as "the account shows 账号 1".
+ */
 function defaultAliasFor(credentials: WorkBuddyCredentials, position: number): string {
-  return credentials.nickname || credentials.uid || credentials.uin || `账号 ${position}`
+  return credentials.nickname || credentials.uin || credentials.uid || `账号 ${position}`
 }
 
 export interface WorkBuddyAccountPoolOptions {
@@ -179,6 +244,14 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
 > {
   private readonly store: FileCredentialStore
   private readonly options_selection: WorkBuddyAccountPoolOptions['selection']
+  /**
+   * Older settings key → the id the account has now.
+   *
+   * A pin or a hide written before the identity fix names its account by the
+   * old name-derived key. Kept in step by {@link read}, which every routing
+   * decision goes through, so the mapping is never stale when it is consulted.
+   */
+  private readonly legacyIds = new Map<string, string>()
 
   constructor(options: WorkBuddyAccountPoolOptions = {}) {
     const store = options.store ?? new FileCredentialStore()
@@ -241,7 +314,10 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
         ...(account.credentials.expiresAt > 0 ? {} : { expiresAt: undefined }),
       }),
       // The account the user pinned in settings outranks the rotation strategy.
-      preferAccountId: () => options.selection?.().selectedAccountId ?? null,
+      // A pin written before the identity fix names the account by its old
+      // name-derived key, so it is matched against every key the account has
+      // been addressable under rather than being silently ignored.
+      preferAccountId: () => this.resolveSelectionId(options.selection?.().selectedAccountId ?? null),
       emptyMessage: `Not signed in to ${PROVIDER_NAME}. Sign in with the CodeBuddy desktop client, or add an account from Settings > WorkBuddy.`,
       ...(options.backend === undefined ? {} : { backend: options.backend }),
       ...(options.maxAccounts === undefined ? {} : { maxAccounts: options.maxAccounts }),
@@ -249,6 +325,31 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
     super(hooks)
     this.store = store
     this.options_selection = options.selection
+  }
+
+  /**
+   * Read the pool, refreshing the legacy-key index on the way.
+   *
+   * Every routing decision goes through this method before it consults the
+   * settings selection, so building the index here is what keeps a pin written
+   * before the identity fix resolvable when {@link resolveSelectionId} is asked
+   * for it.
+   */
+  override async read(): Promise<PoolData<WorkBuddyPoolAccount>> {
+    const data = await super.read()
+    this.legacyIds.clear()
+    for (const account of data.accounts) {
+      for (const alias of workBuddyAccountIdAliases(account.credentials)) {
+        if (alias !== account.id) this.legacyIds.set(alias, account.id)
+      }
+    }
+    return data
+  }
+
+  /** Map a settings key from before the identity fix onto the account's real id. */
+  private resolveSelectionId(id: string | null): string | null {
+    if (id === null) return null
+    return this.legacyIds.get(id) ?? id
   }
 
   /**
@@ -318,13 +419,31 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
     now: number,
     triedAccountIds?: ReadonlySet<string>,
   ): boolean {
+    // Matched through every key the account has been addressable under: a
+    // settings document written before the identity fix hid this account by the
+    // name-derived key, and comparing only the current id would let a hidden
+    // account quietly rejoin the rotation.
     const hidden = this.selection().hiddenAccountIds
-    if (hidden.includes(account.id)) return false
+    if (workBuddyAccountIdAliases(account.credentials).some((id) => hidden.includes(id))) return false
     return super.isEligible(account, now, triedAccountIds)
   }
 
   private selection(): { selectedAccountId: string | null; hiddenAccountIds: readonly string[] } {
     return this.options_selection?.() ?? { selectedAccountId: null, hiddenAccountIds: [] }
+  }
+
+  /**
+   * Add or re-authorize one account, settling its identity first.
+   *
+   * A completed browser sign-in states the display name but not always the uid,
+   * while the IDE's own file for the same account states the uid. Passing the
+   * raw response through would key the login under the name and the file under
+   * the uid, so the pool would hold the same account twice — the duplicate this
+   * fix exists to remove. Resolving from the credential's own token before the
+   * dedupe key is computed is what makes the two paths agree.
+   */
+  override async addAccount(credentials: WorkBuddyCredentials, alias?: string): Promise<WorkBuddyPoolAccount> {
+    return super.addAccount(withResolvedIdentity(credentials), alias)
   }
 
   /**
