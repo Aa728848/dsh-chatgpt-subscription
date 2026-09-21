@@ -150,9 +150,18 @@ export function createCodexImageTool(
 
 async function imageCredentials(oauth: OAuthService, force = false): Promise<StoredOAuthCredentials> {
   try {
-    return await oauth.credentials(force)
+    // A tool purpose: image generation is not metered against the Codex
+    // rate-limit window, so an account cooling down after a chat 429 still
+    // serves it. Asking as a request made a spent chat window disable the
+    // image tool with a "credentials are required" message.
+    return await oauth.credentials(force, { purpose: 'tool' })
   } catch (error) {
-    throw new HarnessError('ChatGPT subscription credentials are required for Codex image generation.', 'CODEX_IMAGE_CREDENTIAL_MISSING', { cause: error })
+    const reason = error instanceof Error && error.message !== '' ? ` (${error.message})` : ''
+    throw new HarnessError(
+      `ChatGPT subscription credentials are required for Codex image generation.${reason}`,
+      'CODEX_IMAGE_CREDENTIAL_MISSING',
+      { cause: error },
+    )
   }
 }
 

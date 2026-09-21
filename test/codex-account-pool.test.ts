@@ -5,6 +5,7 @@ import { CodexAccountPool, parseCodexPoolData } from '../src/host/codex-account-
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { ResponsesClient } from '../src/host/responses-client.ts'
 import { MemoryTokenStore, type StoredOAuthCredentials } from '../src/host/token-store.ts'
+import { UsageService } from '../src/host/usage-service.ts'
 
 /** Mirrors the platform backends: JSON on disk, and the parse hook on read. */
 class MemoryBackend {
@@ -283,6 +284,56 @@ describe('Codex pool request paths', () => {
     expect(right.accessToken).toBe('rotated')
     await pool.updateAccountCredentials(account.id, left)
     expect((await pool.read()).accounts[0]!.credentials.accessToken).toBe('rotated')
+    oauth.dispose()
+  })
+
+  // Regression, end to end with real pool wiring: the live bug was a spent Codex
+  // window making `oauth.credentials()` throw, which turned every web search into
+  // "ChatGPT subscription credentials are required" — and the quota card that
+  // exists to explain the spent window into "credentials could not be refreshed".
+  it('serves tools and the quota card from an account whose Codex window is spent', async () => {
+    const { pool } = harness()
+    const account = await pool.addAccount(credential(1))
+    const oauth = new OAuthService(new MemoryTokenStore(), { pool })
+
+    // Cache exactly the verdict the upstream reports for a spent window.
+    const usageFetch = vi.fn(async () => Response.json({
+      rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 604_800, reset_at: Math.floor(Date.now() / 1000) + 3600 } },
+    }))
+    const usage = new UsageService(oauth, { fetchFn: usageFetch as unknown as typeof fetch })
+    pool.setQuotaBlockedUntil((entry, now) => usage.blockedUntilFor(entry.credentials, now))
+
+    const primed = await usage.status(true, true)
+    expect(primed.buckets[0]?.windows[0]?.usedPercent).toBe(100)
+    expect(usage.blockedUntilFor(account.credentials, Date.now())).toBeGreaterThan(Date.now())
+
+    // The chat path is still gated — that is the point of the quota verdict.
+    await expect(oauth.credentials()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+
+    // A tool purpose is not, and it gets the very same credential.
+    const tool = await oauth.credentials(false, { purpose: 'tool' })
+    expect(tool.accessToken).toBe('access-1')
+
+    // The card keeps reporting the real usage instead of a credential error.
+    expect((await usage.status(true, true)).state).toBe('ready')
+
+    oauth.dispose()
+  })
+
+  it('does not make a tool refresh rotate the conversational account', async () => {
+    const { pool } = harness()
+    const first = await pool.addAccount(credential(1))
+    const second = await pool.addAccount(credential(2))
+    await pool.setPrimary(first.id)
+    const oauth = new OAuthService(new MemoryTokenStore(), { pool })
+
+    // Serve one request so the active account is the primary, then read a
+    // credential for a tool: the tool must not re-point the conversation.
+    await pool.getEffectiveAccount()
+    expect((await pool.read()).activeAccountId).toBe(first.id)
+    await oauth.credentials(false, { purpose: 'tool' })
+    expect((await pool.read()).activeAccountId).toBe(first.id)
+    expect((await pool.read()).accounts.find((entry) => entry.id === second.id)?.lastUsedAt).toBeUndefined()
     oauth.dispose()
   })
 })

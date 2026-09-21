@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import { WebError, type WebSearchProvider, type WebSearchRequest, type WebSearchResult, type WebSearchSource } from '@deepseek-ai/dsh-web'
 import {
   CODEX_ENHANCED_ORIGINATOR,
@@ -56,10 +57,48 @@ export function createCodexSearchProvider(
 
 async function searchCredentials(oauth: OAuthService, force = false): Promise<StoredOAuthCredentials> {
   try {
-    return await oauth.credentials(force)
+    // A tool purpose, not a request purpose: search is not metered against the
+    // Codex rate-limit window, so an account cooling down after a chat 429 must
+    // still serve it. Asking as a request let one spent window fail every search
+    // with a sign-in message the user did not need.
+    return await oauth.credentials(force, { purpose: 'tool' })
   } catch (error) {
-    throw new WebError('ChatGPT subscription credentials are required for Codex search.', 'WEB_PROVIDER_CREDENTIAL_MISSING', { cause: error })
+    throw credentialError(error)
   }
+}
+
+/**
+ * Map a credential failure onto the right web error.
+ *
+ * The old single mapping called every failure "credentials are required", so
+ * an unavailable account sent the user hunting for a sign-in problem they did
+ * not have. The provider's own code is preserved and the reason is carried
+ * through, because the two failures need opposite actions: refill the quota
+ * versus sign in again.
+ */
+function credentialError(error: unknown): WebError {
+  const reason = error instanceof Error && error.message !== '' ? error.message : ''
+  if (error instanceof LlmError && error.code === 'RATE_LIMIT') {
+    return new WebError(
+      reason === '' ? 'Codex search is rate limited.' : `Codex search is rate limited. ${reason}`,
+      'WEB_PROVIDER_RATE_LIMITED',
+      { cause: error },
+    )
+  }
+  if (error instanceof LlmError && (error.code === 'AUTH' || error.code === 'INVALID_CREDENTIAL')) {
+    return new WebError(
+      reason === '' ? 'Sign in with ChatGPT to use Codex search.' : `Sign in with ChatGPT to use Codex search. ${reason}`,
+      'WEB_PROVIDER_CREDENTIAL_MISSING',
+      { cause: error },
+    )
+  }
+  return new WebError(
+    reason === ''
+      ? 'ChatGPT subscription credentials are required for Codex search.'
+      : `ChatGPT subscription credentials are required for Codex search. (${reason})`,
+    'WEB_PROVIDER_CREDENTIAL_MISSING',
+    { cause: error },
+  )
 }
 
 function sendSearch(

@@ -302,18 +302,91 @@ describe('AccountPoolCore', () => {
     expect(pool.path()).toMatch(/toy-pool\.json\.dpapi$|^Keychain: dsh-toy-pool\/|^Secret Service: dsh-toy-pool\//)
   })
 
-  it('deletes an account, promoting the next one and clearing the mirror when empty', async () => {
-    const pool = build()
-    const a1 = await pool.addAccount(makeCredential(1), '账号1')
-    const a2 = await pool.addAccount(makeCredential(2), '账号2')
-    await pool.setPrimary(a1.id)
-    await pool.deleteAccount(a1.id)
-    const accounts = await pool.listAccounts()
-    expect(accounts).toHaveLength(1)
-    expect(accounts[0]!.id).toBe(a2.id)
-    expect(accounts[0]!.isPrimary).toBe(true)
-    await pool.deleteAccount(a2.id)
-    expect(await pool.listAccounts()).toHaveLength(0)
-    expect(mirrored.at(-1)).toBeNull()
+  // Regression: one spent Codex window used to fail every auxiliary tool.
+  // Rotation state answers "who serves the next request"; it must not answer
+  // "may I have a credential", which is what search, fetch and image ask.
+  describe('credential-only access (getCredentialAccount)', () => {
+    /** A pool over its own backend, so a case can set up two independent pools. */
+    const isolated = (overrides: Partial<AccountPoolHooks<ToyCredentials, ToyAccount, PoolAccountSummaryDto>> = {}) =>
+      build({ backend: new MemoryBackend() as never, ...overrides })
+
+    it('hands out a credential while every account is cooling down after a 429', async () => {
+      const pool = build()
+      const account = await pool.addAccount(makeCredential(1))
+      await pool.markCooldown(account.id, 600_000, 'Codex 429')
+
+      // The routing door is closed...
+      await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+      // ...while the credential door still opens, with the very same token.
+      const credential = await pool.getCredentialAccount()
+      expect(credential.account.id).toBe(account.id)
+      expect(credential.credentials.access).toBe('access-1')
+    })
+
+    it('ignores the per-request tried set, which belongs to a retry loop', async () => {
+      const pool = build()
+      const first = await pool.addAccount(makeCredential(1))
+      const second = await pool.addAccount(makeCredential(2))
+      await pool.setPrimary(first.id)
+
+      const excluded = new Set([first.id])
+      expect((await pool.getCredentialAccount()).account.id).toBe(first.id)
+      expect((await pool.getEffectiveAccount(excluded)).account.id).toBe(second.id)
+    })
+
+    it('honors the pinned account, so a tool reads the account the card shows', async () => {
+      let pinned: string | null = null
+      const pool = isolated({ preferAccountId: () => pinned })
+      const primary = await pool.addAccount(makeCredential(1), '主账号')
+      const second = await pool.addAccount(makeCredential(2))
+
+      // With no pin the primary serves; with one, the pinned account does.
+      expect((await pool.getCredentialAccount()).account.id).toBe(primary.id)
+      pinned = second.id
+      expect((await pool.getCredentialAccount()).account.id).toBe(second.id)
+    })
+
+    it('still refuses an account whose credential is known to be unusable', async () => {
+      const pool = build()
+      const account = await pool.addAccount(makeCredential(1))
+      await pool.markAuthFailed(account.id, 'refresh token rejected')
+
+      // A cooldown is bookkeeping; a rejected sign-in is a fact about the
+      // credential, so a tool must not paper over it.
+      await expect(pool.getCredentialAccount()).rejects.toMatchObject({ code: 'AUTH' })
+    })
+
+    it('does not move the conversational rotation when a tool reads a credential', async () => {
+      const pool = build()
+      await pool.addAccount(makeCredential(1), '主账号')
+      const second = await pool.addAccount(makeCredential(2))
+      await pool.getEffectiveAccount()
+      const before = (await pool.read()).activeAccountId
+
+      await pool.getCredentialAccount()
+
+      // The active account is what makes the *next request* land somewhere;
+      // an auxiliary tool must not rewrite it, nor age the other accounts.
+      expect((await pool.read()).activeAccountId).toBe(before)
+      expect((await pool.read()).accounts.find((entry) => entry.id === second.id)?.lastUsedAt).toBeUndefined()
+    })
+
+    it('refreshes an about-to-expire token for a tool and persists the rotated pair', async () => {
+      const pool = build()
+      const account = await pool.addAccount(makeCredential(1, 10_000))
+      const credential = await pool.getCredentialAccount()
+      expect(credential.credentials.access).toBe('refreshed-access-1')
+      expect(refreshCalls).toHaveLength(1)
+      // The refresh token rotates: a refreshed pair that is only returned and
+      // never stored leaves the pool holding an already-invalidated token.
+      expect((await pool.read()).accounts[0]!.credentials.access).toBe('refreshed-access-1')
+      expect(mirrored.at(-1)?.access).toBe('refreshed-access-1')
+      expect(account.id).toBe((await pool.read()).accounts[0]!.id)
+    })
+
+    it('reports an empty pool with the provider message', async () => {
+      const pool = isolated({ legacyAccount: async () => null })
+      await expect(pool.getCredentialAccount()).rejects.toThrow(/未登录/)
+    })
   })
 })

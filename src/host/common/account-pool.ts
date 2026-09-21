@@ -454,6 +454,120 @@ export class AccountPoolCore<
   }
 
   /**
+   * Read one account's credential for work that is *not* a metered model
+   * request, without letting rotation state stand in the way.
+   *
+   * There are two different questions, and conflating them broke both:
+   *
+   * - "which account should serve this request?" — a routing decision, answered
+   *   by {@link getEffectiveAccount} through cooldowns, auth status and the
+   *   rotation strategy.
+   * - "may I have a usable ChatGPT credential?" — a credential question, asked
+   *   by the web search, web fetch and image tools.
+   *
+   * A spent Codex rate-limit window says nothing about the other ChatGPT
+   * endpoints: search, fetch and image generation are not metered against it and
+   * keep working with the very same token. Routing those tools through
+   * {@link getEffectiveAccount} made one exhausted window fail all of them —
+   * and reported it as "credentials are required", which sent people looking for
+   * a sign-in problem they did not have.
+   *
+   * A credential that is *known* to be unusable is still refused (a rejected
+   * refresh token, an account the upstream already rejected at sign-in); only
+   * cooldowns — which are rotation bookkeeping — are ignored.
+   *
+   * @param fetchFn - fetch used if the credential is close to expiry.
+   */
+  async getCredentialAccount(fetchFn: typeof fetch = fetch): Promise<{ account: TAccount; credentials: TCredentials }> {
+    const data = await this.read()
+    if (data.accounts.length === 0) {
+      throw new Error(this.hooks.emptyMessage ?? `未登录 ${this.hooks.displayName} 账号，请先在设置页添加账号。`)
+    }
+
+    const now = Date.now()
+    const usable = data.accounts.filter((account) => this.isCredentialUsable(account))
+    if (usable.length === 0) {
+      throw new LlmError(
+        `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均需要重新登录。`,
+        'AUTH',
+        { status: 401 },
+      )
+    }
+
+    const selected = this.selectAccount(usable, data)
+    if (this.shouldRefreshCredential(selected, now) && this.hooks.refresh) {
+      // The refresh token rotates, so a refreshed pair must be persisted before
+      // it is used: dropping it here would leave the store holding a token the
+      // upstream has already invalidated, and the next sign-in check would fail.
+      const refreshed = await this.hooks.refresh(selected.credentials, fetchFn)
+      await this.updateAccountCredentials(selected.id, refreshed)
+      return { account: selected, credentials: refreshed }
+    }
+    // Deliberately no lastUsedAt / activeAccountId write: reading a credential
+    // for an auxiliary tool must not move the conversational rotation.
+    return { account: selected, credentials: selected.credentials }
+  }
+
+  /** Whether one account's credential must be refreshed before it is handed out. */
+  private shouldRefreshCredential(account: TAccount, now: number): boolean {
+    if (this.hooks.needsRefresh) return this.hooks.needsRefresh(account.credentials, now)
+    const expires = this.hooks.expiresAt?.(account.credentials)
+    return expires !== undefined && expires <= now + POOL_REFRESH_MARGIN_MS
+  }
+
+  /**
+   * Whether an account's stored credential is known to be unusable.
+   *
+   * Rotation bookkeeping — cooldowns, the tried set — is deliberately absent:
+   * those describe routing, not the credential.
+   */
+  protected isCredentialUsable(account: TAccount): boolean {
+    if (account.authStatus !== undefined && account.authStatus !== 'ok') return false
+    if (this.hooks.authRejectedReason?.(account.credentials)) return false
+    return true
+  }
+
+  /** The account a rotation strategy picks out of an already-eligible set. */
+  private selectAccount(eligible: TAccount[], data: PoolData<TAccount>): TAccount {
+    // A pinned account wins while it is eligible; otherwise the strategy below
+    // decides, so a pinned account that is cooling down degrades to automatic
+    // selection instead of failing the turn.
+    const pinned = this.hooks.preferAccountId?.() ?? null
+    const pinnedAccount = pinned === null ? undefined : eligible.find((account) => account.id === pinned)
+    if (pinnedAccount !== undefined) return pinnedAccount
+    if (data.rotationStrategy === 'round-robin') {
+      // Least recently used first, so a burst spreads over the whole pool.
+      return [...eligible].sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0))[0]!
+    }
+    if (data.rotationStrategy === 'sticky') {
+      // Keep the account that served the previous request while it is eligible —
+      // this is what protects an upstream prefix cache across a conversation.
+      return eligible.find((account) => account.id === data.activeAccountId)
+        || eligible.find((account) => account.isPrimary)
+        || eligible[0]!
+    }
+    // Sequential: prefer the primary account, then the first eligible one.
+    return eligible.find((account) => account.isPrimary) || eligible[0]!
+  }
+
+  /** The error every-account-unavailable raises, including the shortest wait. */
+  private allUnavailableError(data: PoolData<TAccount>, now: number): LlmError {
+    let shortest = Infinity
+    for (const account of data.accounts) {
+      if (account.cooldownUntil !== undefined && account.cooldownUntil > now) {
+        shortest = Math.min(shortest, account.cooldownUntil - now)
+      }
+    }
+    const waitMinutes = Number.isFinite(shortest) ? Math.ceil(shortest / 60_000) : 15
+    return new LlmError(
+      this.hooks.allUnavailableMessage?.(data.accounts.length, waitMinutes)
+        ?? `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMinutes} 分钟后解除冷却。`,
+      'RATE_LIMIT',
+      { status: 429 },
+    )
+  }
+
+  /**
    * Pick the account for the next request, refreshing its credential when it is
    * about to expire.
    *
@@ -473,54 +587,11 @@ export class AccountPoolCore<
 
     const now = Date.now()
     const eligible = data.accounts.filter((account) => this.isEligible(account, now, excludeIds))
+    if (eligible.length === 0) throw this.allUnavailableError(data, now)
 
-    if (eligible.length === 0) {
-      let shortest = Infinity
-      for (const account of data.accounts) {
-        if (account.cooldownUntil !== undefined && account.cooldownUntil > now) {
-          shortest = Math.min(shortest, account.cooldownUntil - now)
-        }
-      }
-      const waitMinutes = Number.isFinite(shortest) ? Math.ceil(shortest / 60_000) : 15
-      throw new LlmError(
-        this.hooks.allUnavailableMessage?.(data.accounts.length, waitMinutes)
-          ?? `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMinutes} 分钟后解除冷却。`,
-        'RATE_LIMIT',
-        { status: 429 },
-      )
-    }
+    const selected = this.selectAccount(eligible, data)
 
-    // A pinned account wins while it is eligible; otherwise the strategy below
-    // decides, so a pinned account that is cooling down degrades to automatic
-    // selection instead of failing the turn.
-    const pinned = this.hooks.preferAccountId?.() ?? null
-    const pinnedAccount = pinned === null ? undefined : eligible.find((account) => account.id === pinned)
-
-    let selected: TAccount
-    if (pinnedAccount !== undefined) {
-      selected = pinnedAccount
-    } else if (data.rotationStrategy === 'round-robin') {
-      // Least recently used first, so a burst spreads over the whole pool.
-      selected = [...eligible].sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0))[0]!
-    } else if (data.rotationStrategy === 'sticky') {
-      // Keep the account that served the previous request while it is eligible —
-      // this is what protects an upstream prefix cache across a conversation.
-      selected = eligible.find((account) => account.id === data.activeAccountId)
-        || eligible.find((account) => account.isPrimary)
-        || eligible[0]!
-    } else {
-      // Sequential: prefer the primary account, then the first eligible one.
-      selected = eligible.find((account) => account.isPrimary) || eligible[0]!
-    }
-
-    const shouldRefresh = this.hooks.needsRefresh
-      ? this.hooks.needsRefresh(selected.credentials, now)
-      : (() => {
-          const expires = this.hooks.expiresAt?.(selected.credentials)
-          return expires !== undefined && expires <= now + POOL_REFRESH_MARGIN_MS
-        })()
-
-    if (shouldRefresh && this.hooks.refresh) {
+    if (this.shouldRefreshCredential(selected, now) && this.hooks.refresh) {
       let refreshed: TCredentials
       try {
         refreshed = await this.hooks.refresh(selected.credentials, fetchFn)

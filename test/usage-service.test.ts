@@ -152,4 +152,21 @@ describe('Codex usage mapping', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2)
     oauth.dispose()
   })
+
+  it('reads its credential as a tool, so a Codex quota cooldown does not blank the card', async () => {
+    // Regression: the card used the request-purpose credential, so the moment a
+    // window filled up the card replaced real usage with "credentials could not
+    // be refreshed" — the one view that explains the window stopped working.
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'a', refreshToken: 'r', accountId: 'account-1', expiresAt: Date.now() + 3_600_000 })
+    const oauth = new OAuthService(store)
+    const credentials = vi.spyOn(oauth, 'credentials')
+    const service = new UsageService(oauth, {
+      fetchFn: (async () => Response.json({ rate_limit: { primary_window: { used_percent: 100 } } })) as unknown as typeof fetch,
+    })
+
+    expect((await service.status(true, true)).state).toBe('ready')
+    expect(credentials).toHaveBeenCalledWith(false, { purpose: 'tool' })
+    oauth.dispose()
+  })
 })

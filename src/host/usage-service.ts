@@ -20,6 +20,16 @@ import type { StoredOAuthCredentials } from './token-store.ts'
 
 type FetchLike = typeof fetch
 
+/**
+ * The quota card reads the same account the conversation uses, but it must keep
+ * reading it while that account is cooling down — otherwise the card that exists
+ * to explain a spent window is the first thing the spent window breaks.
+ *
+ * Every credential this service asks for is therefore a `'tool'` read: not a
+ * metered model request, so rotation cooldowns do not apply.
+ */
+const USAGE_CREDENTIAL_ACCESS = { purpose: 'tool' } as const
+
 interface CacheEntry {
   usage: QuotaUsageDto
   fetchedAt: number
@@ -62,7 +72,7 @@ export class UsageService {
     const now = this.now()
     let credentials: StoredOAuthCredentials
     try {
-      credentials = await this.oauth.credentials()
+      credentials = await this.oauth.credentials(false, USAGE_CREDENTIAL_ACCESS)
     } catch (error) {
       // "Could not be refreshed" alone sent people looking at their token; the
       // provider's own reason (a rejected refresh, an unwritable store, a
@@ -150,11 +160,11 @@ export class UsageService {
   private async consumeResetCreditUpstream(): Promise<QuotaStatusDto> {
     let credentials: StoredOAuthCredentials
     try {
-      credentials = await this.oauth.credentials()
+      credentials = await this.oauth.credentials(false, USAGE_CREDENTIAL_ACCESS)
       let creditsResponse = await this.fetchResetCredits(credentials)
       if (creditsResponse.status === 401) {
         await creditsResponse.body?.cancel().catch(() => undefined)
-        credentials = await this.oauth.credentials(true)
+        credentials = await this.oauth.credentials(true, USAGE_CREDENTIAL_ACCESS)
         creditsResponse = await this.fetchResetCredits(credentials)
       }
       if (!creditsResponse.ok) {
@@ -178,7 +188,7 @@ export class UsageService {
       })
       if (consumeResponse.status === 401) {
         await consumeResponse.body?.cancel().catch(() => undefined)
-        credentials = await this.oauth.credentials(true)
+        credentials = await this.oauth.credentials(true, USAGE_CREDENTIAL_ACCESS)
         consumeResponse = await this.fetchFn(CODEX_RESET_CREDITS_CONSUME_URL, {
           method: 'POST',
           headers: { ...codexHeaders(credentials), accept: 'application/json', 'content-type': 'application/json' },
@@ -223,7 +233,7 @@ export class UsageService {
       let response = await this.fetch(credentials)
       if (response.status === 401) {
         await response.body?.cancel().catch(() => undefined)
-        credentials = await this.oauth.credentials(true)
+        credentials = await this.oauth.credentials(true, USAGE_CREDENTIAL_ACCESS)
         accountKey = identityKey(credentials)
         response = await this.fetch(credentials)
       }

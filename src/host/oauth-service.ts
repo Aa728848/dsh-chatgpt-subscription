@@ -61,6 +61,25 @@ export class OAuthServiceError extends Error {
   }
 }
 
+/**
+ * How the credential will be used, which decides who may serve it.
+ *
+ * `'request'` (default) is a metered model request: rotation, cooldowns and the
+ * pool's cached-quota verdict all apply.
+ *
+ * `'tool'` is a ChatGPT call that is *not* metered against the Codex
+ * rate-limit window — web search, web fetch, image generation. It reads the
+ * account already serving the conversation and ignores cooldowns, because a
+ * spent Codex window must not take those tools offline; they keep working with
+ * the very same access token.
+ */
+export type CredentialPurpose = 'request' | 'tool'
+
+export interface CredentialAccess {
+  /** Defaults to `'request'`. */
+  purpose?: CredentialPurpose
+}
+
 export interface OAuthServiceOptions {
   fetchFn?: FetchLike
   now?: () => number
@@ -248,9 +267,30 @@ export class OAuthService {
     this.logger.info('[dsh-chatgpt-subscription] OAuth credentials cleared')
   }
 
-  async credentials(forceRefresh = false): Promise<StoredOAuthCredentials> {
+  /**
+   * The credential to use next.
+   *
+   * @param forceRefresh - refresh even a token that is not close to expiry,
+   *   which is how a 401 discovered mid-request recovers.
+   * @param access - who is asking. A `'tool'` caller (web search, fetch, image
+   *   generation) bypasses the pool's rotation state: an account cooling down
+   *   after a Codex 429 still holds a working token for those endpoints, and
+   *   refusing it there turned "your Codex window is spent" into a bogus
+   *   "credentials are required" on every web search.
+   */
+  async credentials(forceRefresh = false, access: CredentialAccess = {}): Promise<StoredOAuthCredentials> {
     if (this.pool !== null) {
-      // The pool owns selection, cooldowns and the proactive refresh.
+      // The pool owns selection, cooldowns and the proactive refresh. A tool
+      // call still goes through the pool — it knows how to refresh an account's
+      // rotated token — but through the credential-only door, and it refreshes
+      // the account it picked rather than rotating to another one.
+      if (access.purpose === 'tool') {
+        const { account, credentials } = await this.pool.getCredentialAccount(this.fetchFn)
+        if (!forceRefresh) return credentials
+        const refreshed = await this.refreshAccount(credentials, this.fetchFn)
+        await this.pool.updateAccountCredentials(account.id, refreshed)
+        return refreshed
+      }
       const { account, credentials } = await this.pool.getEffectiveAccount(undefined, this.fetchFn)
       if (!forceRefresh) return credentials
       const refreshed = await this.refreshAccount(credentials, this.fetchFn)
