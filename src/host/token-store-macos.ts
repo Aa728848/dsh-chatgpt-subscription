@@ -26,8 +26,7 @@ export class MacKeychainCredentialStore<T> implements CredentialStore<T> {
     if (result.code === 44) return null
     if (result.code !== 0) throw new Error('Keychain credential read failed')
     try {
-      const payload = result.stdout.replace(/\r?\n$/, '')
-      return this.parse(JSON.parse(payload) as unknown)
+      return this.parse(parseSecurityPayload(result.stdout))
     } catch {
       throw new Error('Keychain credential payload is invalid')
     }
@@ -42,6 +41,20 @@ export class MacKeychainCredentialStore<T> implements CredentialStore<T> {
     const result = await runSecurity(['delete-generic-password', '-a', this.account, '-s', this.service])
     if (result.code !== 0 && result.code !== 44) throw new Error('Keychain credential deletion failed')
   }
+}
+
+/**
+ * `security find-generic-password -w` normally prints the stored password as
+ * text, but macOS prints the underlying bytes as hexadecimal when the payload
+ * contains characters it does not consider safely printable. Credential pools
+ * can contain localized account names, so accept both representations.
+ */
+export function parseSecurityPayload(stdout: string): unknown {
+  let payload = stdout.replace(/\r?\n$/, '')
+  if (/^[0-9a-fA-F]+$/.test(payload) && payload.length % 2 === 0) {
+    payload = Buffer.from(payload, 'hex').toString('utf8')
+  }
+  return JSON.parse(payload) as unknown
 }
 
 export class MacKeychainTokenStore extends MacKeychainCredentialStore<StoredOAuthCredentials> implements TokenStore {

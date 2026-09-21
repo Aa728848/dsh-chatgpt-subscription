@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
-import { MacKeychainTokenStore } from '../src/host/token-store-macos.ts'
+import { MacKeychainCredentialStore, MacKeychainTokenStore, parseSecurityPayload } from '../src/host/token-store-macos.ts'
 
 const clearedServices: Array<[string, string]> = []
 
@@ -29,6 +29,28 @@ describe.skipIf(process.platform !== 'darwin')('MacKeychainTokenStore', () => {
     expect(await store.load()).toEqual(credentials)
     await store.clear()
     expect(await store.load()).toBeNull()
+  })
+
+  it('round-trips localized credential fields through the login Keychain', async () => {
+    const service = `dsh-localized-test-${randomUUID()}`
+    const account = `account-${randomUUID()}`
+    clearedServices.push([service, account])
+    const store = new MacKeychainCredentialStore(service, account, (value) => value as { nickname: string })
+    const credentials = { nickname: '刘栗佐 Lizuo Liu' }
+
+    await store.save(credentials)
+    expect(await store.load()).toEqual(credentials)
+  })
+})
+
+describe('parseSecurityPayload', () => {
+  it('parses the normal text representation', () => {
+    expect(parseSecurityPayload('{"nickname":"Lizuo"}\n')).toEqual({ nickname: 'Lizuo' })
+  })
+
+  it('decodes the hexadecimal representation used for localized values', () => {
+    const json = JSON.stringify({ nickname: '刘栗佐 Lizuo Liu' })
+    expect(parseSecurityPayload(Buffer.from(json, 'utf8').toString('hex'))).toEqual({ nickname: '刘栗佐 Lizuo Liu' })
   })
 })
 
