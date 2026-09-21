@@ -70,6 +70,18 @@ export class UsageService {
   async status(authenticated: boolean, force = false): Promise<QuotaStatusDto> {
     if (!authenticated) return { state: 'signed-out', ...EMPTY_USAGE, fetchedAt: null, stale: false }
     const now = this.now()
+
+    // A warm, un-invalidated snapshot is answerable without reading the
+    // credential store. Reading it costs a DPAPI unprotect through a spawned
+    // `powershell.exe` on Windows (~200 ms), and the settings card polls this
+    // route on a 60 s timer, so acquiring credentials first made every poll pay
+    // that launch even when nothing had changed. The snapshot is already keyed
+    // per account, and any account switch clears it, so serving it here cannot
+    // report another account's quota.
+    if (!force && !this.invalidated && this.cache !== null && now - this.cache.fetchedAt < QUOTA_CACHE_MS) {
+      return this.fromCache(false)
+    }
+
     let credentials: StoredOAuthCredentials
     try {
       credentials = await this.oauth.credentials(false, USAGE_CREDENTIAL_ACCESS)

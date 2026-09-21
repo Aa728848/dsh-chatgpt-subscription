@@ -171,6 +171,13 @@ interface CatalogCache {
   fetchedAt: number
   models: KimiCodeCatalogModel[]
   key: string
+  /**
+   * Region the listing was fetched for.
+   *
+   * Kept separately from {@link key} so a token-free caller can match the cache
+   * without acquiring a token first.
+   */
+  region: KimiCodeRegion
 }
 
 let catalogCache: CatalogCache | null = null
@@ -240,6 +247,15 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
  * The live listing is authoritative — it is what tells the plugin which models
  * the account's tier actually unlocks — so it is cached for half an hour and
  * re-read on demand from the settings card.
+ *
+ * The cache is consulted BEFORE a token is acquired whenever the caller does not
+ * already hold one. That order is load-bearing: acquiring a token reads the
+ * credential store, and on Windows that is a DPAPI unprotect through a spawned
+ * `powershell.exe` (~200 ms). The harness resolves every model of every
+ * provider when it builds the picker's catalog, and each resolution calls in
+ * here, so acquiring first turned one catalog into one process launch per
+ * model. A caller that passes `accessToken` still keys the cache on the token,
+ * because a different account can see a different listing.
  */
 export async function loadProviderModels(options: {
   fetchFn?: typeof fetch
@@ -251,6 +267,18 @@ export async function loadProviderModels(options: {
 } = {}): Promise<KimiCodeCatalogModel[]> {
   const region = options.region ?? await resolveRegion()
   let accessToken = options.accessToken
+
+  // Serve a warm cache without touching the credential store. Only a caller
+  // that already named a token can be keyed precisely; a token-free caller is
+  // keyed on the region, which still cannot serve another region's listing.
+  if (options.force !== true && catalogCache !== null
+    && (accessToken === undefined
+      ? catalogCache.region === region
+      : catalogCache.key === `${region}:${accessToken.slice(-8)}`)
+    && Date.now() - catalogCache.fetchedAt < CATALOG_CACHE_TTL_MS) {
+    return catalogCache.models
+  }
+
   if (accessToken === undefined) {
     if (options.store === undefined) return []
     try {
@@ -278,7 +306,7 @@ export async function loadProviderModels(options: {
   if (!Array.isArray(data)) throw new Error('Kimi Code model listing was not in the documented shape.')
 
   const models = data.map(parseCatalogModel).filter((model): model is KimiCodeCatalogModel => model !== undefined)
-  catalogCache = { fetchedAt: Date.now(), models, key: cacheKey }
+  catalogCache = { fetchedAt: Date.now(), models, key: cacheKey, region }
   return models
 }
 
