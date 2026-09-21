@@ -21,7 +21,8 @@ import {
   resolveEnabledModelIds,
 } from '../src/host/workbuddy/routes.ts'
 import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
-import { FileCredentialStore, FileModelSettingsStore } from '../src/host/workbuddy/token-store.ts'
+import { FileModelSettingsStore } from '../src/host/workbuddy/token-store.ts'
+import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { WorkBuddyAccountPool, parseWorkBuddyPoolData } from '../src/host/workbuddy/account-pool.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS, FALLBACK_MODELS } from '../src/host/workbuddy/model-catalog.ts'
 import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
@@ -333,7 +334,7 @@ describe('WorkBuddy billing parsing', () => {
 describe('WorkBuddy quota fetch', () => {
   it('reads the allowance through the credential store', async () => {
     const dir = await makeAuthDir()
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const fetchFn = (async (url: any) => {
       expect(String(url)).toBe('https://copilot.tencent.com/billing/meter/get-user-resource')
       return new Response(JSON.stringify({
@@ -351,12 +352,12 @@ describe('WorkBuddy quota fetch', () => {
   it('refuses to report a quota without a credential', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
     temporaryDirs.push(dir)
-    await expect(fetchAccountQuota(new FileCredentialStore(dir), fetch, true)).rejects.toThrow(/Not signed in/)
+    await expect(fetchAccountQuota(createWorkBuddyStore(dir), fetch, true)).rejects.toThrow(/Not signed in/)
   })
 
   it('surfaces a billing rejection rather than reporting an empty allowance', async () => {
     const dir = await makeAuthDir()
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const fetchFn = (async () => new Response(JSON.stringify({ code: 12403, msg: 'check ua' }), { status: 200 })) as unknown as typeof fetch
     await expect(fetchAccountQuota(store, fetchFn, true)).rejects.toThrow(/check ua/)
   })
@@ -393,7 +394,7 @@ describe('WorkBuddy web status', () => {
   it('renders an unauthenticated card with a usable catalog and no credential leak', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
     temporaryDirs.push(dir)
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const status = await getWorkBuddyWebStatus(store, await makeSettings())
     expect(status.authenticated).toBe(false)
     expect(status.account).toBeNull()
@@ -404,7 +405,7 @@ describe('WorkBuddy web status', () => {
 
   it('reports the account and a region-filtered catalog when signed in', async () => {
     const dir = await makeAuthDir({ domain: 'copilot.tencent.com' })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const fetchFn = (async (url: any) => {
       if (String(url).includes('/v3/config')) {
         return new Response(JSON.stringify(CONFIG), { status: 200 })
@@ -425,7 +426,7 @@ describe('WorkBuddy web status', () => {
 
   it('never exposes a token or refresh token in the payload', async () => {
     const dir = await makeAuthDir()
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const status = await getWorkBuddyWebStatus(store, await makeSettings(), undefined, { fetchFn: (async () => new Response('{}', { status: 500 })) as unknown as typeof fetch })
     const serialized = JSON.stringify(status)
     expect(serialized).not.toContain('token-abc')
@@ -434,7 +435,7 @@ describe('WorkBuddy web status', () => {
 
   it('falls back to the shipped catalog when the gateway is unreachable', async () => {
     const dir = await makeAuthDir()
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const fetchFn = (async () => { throw new Error('offline') }) as unknown as typeof fetch
     const status = await getWorkBuddyWebStatus(store, await makeSettings(), undefined, { fetchFn })
     expect(status.models.length).toBeGreaterThan(0)
@@ -484,7 +485,7 @@ function makeContext(handlers: any[]): any {
 describe('WorkBuddy routes', () => {
   it('registers under /workbuddy/api and serves status', async () => {
     const dir = await makeAuthDir()
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const handlers: any[] = []
     registerWorkBuddyRoutes(makeContext(handlers), store, await makeSettings(), undefined, {
       fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
@@ -502,7 +503,7 @@ describe('WorkBuddy routes', () => {
   it('rejects a cross-origin mutation', async () => {
     const dir = await makeAuthDir()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings())
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
     const res = makeResponse()
     await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/settings', {}, 'https://evil.example'), res)
     expect(res.captured.status).toBe(403)
@@ -520,7 +521,7 @@ describe('WorkBuddy routes', () => {
       }
       return new Response(JSON.stringify(CONFIG), { status: 200 })
     }) as unknown as typeof fetch
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings(), undefined, { fetchFn })
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, { fetchFn })
 
     // A POST forces an upstream read and can rotate the refresh token, so it is
     // gated exactly like the other mutations.
@@ -570,7 +571,7 @@ describe('WorkBuddy routes', () => {
       expect(init.headers.authorization).toBe('Bearer fresh-token')
       return new Response('', { status: 200 })
     }) as unknown as typeof fetch
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings(), undefined, { fetchFn })
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, { fetchFn })
 
     const res = makeResponse()
     await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'), res)
@@ -591,7 +592,7 @@ describe('WorkBuddy routes', () => {
         }
         return new Response(JSON.stringify({ code: 11217, msg: 'login ing...' }), { status: 200 })
       }) as unknown as typeof fetch
-      const dispose = registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings(), undefined, { fetchFn })
+      const dispose = registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, { fetchFn })
 
       const started = makeResponse()
       await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/accounts/login', { region: 'cn' }, 'http://127.0.0.1:43120'), started)
@@ -612,7 +613,7 @@ describe('WorkBuddy routes', () => {
     const dir = await makeAuthDir()
     const settings = await makeSettings()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings, undefined, {
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, undefined, {
       fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
     })
     const res = makeResponse()
@@ -633,7 +634,7 @@ describe('WorkBuddy routes', () => {
     }), 'utf8')
     const settings = await makeSettings()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings, undefined, {
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, undefined, {
       fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
     })
     const res = makeResponse()
@@ -650,7 +651,7 @@ describe('WorkBuddy routes', () => {
 
   it('reports the account pool slice and applies a rotation strategy', async () => {
     const dir = await makeAuthDir()
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const handlers: any[] = []
     const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
     await pool.addAccount({
@@ -688,7 +689,7 @@ describe('WorkBuddy routes', () => {
       account: { uid: 'desktop-user' },
       auth: { accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
     }), 'utf8')
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const handlers: any[] = []
     const settings = await makeSettings()
     const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
@@ -718,7 +719,7 @@ describe('WorkBuddy routes', () => {
     const dir = await makeAuthDir()
     const settings = await makeSettings()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings)
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings)
     const res = makeResponse()
     await handlers[0]!.handler(
       makeRequest('POST', '/workbuddy/api/settings', { selectedAccountId: 'intl:missing' }, 'http://127.0.0.1:43120'),
@@ -732,7 +733,7 @@ describe('WorkBuddy routes', () => {
     const dir = await makeAuthDir()
     const settings = await makeSettings()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings, undefined, {
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, undefined, {
       fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
     })
     const res = makeResponse()
@@ -747,7 +748,7 @@ describe('WorkBuddy routes', () => {
   it('rejects a method that does not belong to the route', async () => {
     const dir = await makeAuthDir()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings())
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
     const res = makeResponse()
     await handlers[0]!.handler(makeRequest('DELETE', '/workbuddy/api/status'), res)
     expect(res.captured.status).toBe(405)
@@ -756,7 +757,7 @@ describe('WorkBuddy routes', () => {
   it('answers not-found for an unknown subpath', async () => {
     const dir = await makeAuthDir()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings())
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
     const res = makeResponse()
     await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/nope'), res)
     expect(res.captured.status).toBe(404)
@@ -769,7 +770,7 @@ describe('WorkBuddy routes', () => {
       auth: { accessToken: 'other-token', expiresAt: Date.now() + 1_000_000, domain: 'www.workbuddy.ai' },
     }), 'utf8')
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings())
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
     const res = makeResponse()
     await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts'), res)
     expect(res.captured.status).toBe(200)
@@ -784,7 +785,7 @@ describe('WorkBuddy routes', () => {
     const source = path.join(dir, 'workbuddy-desktop.info')
     const settings = await makeSettings()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), settings)
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings)
     const hide = makeResponse()
     await handlers[0]!.handler(
       makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'hide', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
@@ -806,7 +807,7 @@ describe('WorkBuddy routes', () => {
   it('refuses to delete a desktop-owned credential', async () => {
     const dir = await makeAuthDir()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings())
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
     const res = makeResponse()
     await handlers[0]!.handler(
       makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'delete', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
@@ -820,7 +821,7 @@ describe('WorkBuddy routes', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
     temporaryDirs.push(dir)
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings())
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
     const res = makeResponse()
     await handlers[0]!.handler(
       makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'),
@@ -833,7 +834,7 @@ describe('WorkBuddy routes', () => {
     const dir = await makeAuthDir()
     const seen: string[] = []
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), new FileCredentialStore(dir), await makeSettings(), undefined, {
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, {
       fetchFn: (async (url: any, init: any) => {
         seen.push(String(url))
         if (String(url).includes('/v3/config')) return new Response(JSON.stringify(CONFIG), { status: 200 })

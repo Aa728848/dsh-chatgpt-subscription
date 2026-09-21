@@ -11,6 +11,7 @@ import {
   scanCredentials,
   workBuddyAccountId,
 } from '../src/host/workbuddy/token-store.ts'
+import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { FALLBACK_MODELS, modelsForRegion, resolveWorkBuddyModel } from '../src/host/workbuddy/model-catalog.ts'
 import { backendForDomain, isIntlDomain, regionForDomain, refreshSourceForDomain } from '../src/host/workbuddy/types.ts'
 
@@ -144,7 +145,7 @@ describe('WorkBuddy credential scanning', () => {
 
   it('caches a scan but re-reads when forced', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile({ accessToken: 'first' }) })
-    const store = new FileCredentialStore(dir, 60_000)
+    const store = createWorkBuddyStore(dir, 60_000)
     expect((await store.read())?.accessToken).toBe('first')
 
     await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify(credentialFile({ accessToken: 'second' })), 'utf8')
@@ -157,7 +158,7 @@ describe('WorkBuddy credential scanning', () => {
 
   it('reports no credential for an empty directory', async () => {
     const dir = await makeAuthDir({})
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     expect(await store.read()).toBeNull()
   })
 
@@ -167,7 +168,7 @@ describe('WorkBuddy credential scanning', () => {
       'cn-old.info': credentialFile({ accessToken: 'cn-old', uid: 'cn-user', domain: 'copilot.tencent.com', expiresAt: Date.now() + 1_000_000 }),
       'intl-live.info': credentialFile({ accessToken: 'intl-live', uid: 'intl-user', domain: 'www.workbuddy.ai', expiresAt: Date.now() + 4_000_000 }),
     })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const accounts = await store.list()
     expect(accounts).toHaveLength(2)
     expect(accounts.map(workBuddyAccountId)).toEqual(['cn:cn-user', 'intl:intl-user'])
@@ -219,7 +220,7 @@ describe('WorkBuddy managed credential store', () => {
 describe('WorkBuddy credential refresh bookkeeping', () => {
   it('refreshes once and writes the token back to the IDE file', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile({ expiresAt: Date.now() - 1000 }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const stale = (await store.read())!
 
     let calls = 0
@@ -245,7 +246,7 @@ describe('WorkBuddy credential refresh bookkeeping', () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile({ expiresAt: Date.now() - 1000 }) })
     const file = path.join(dir, 'workbuddy-desktop.info')
     await fs.chmod(file, 0o600)
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const stale = (await store.read())!
     await store.ensureFresh(stale, async (current) => ({
       ...current,
@@ -259,7 +260,7 @@ describe('WorkBuddy credential refresh bookkeeping', () => {
 
   it('shares one refresh between concurrent callers', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile({ expiresAt: Date.now() - 1000 }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const stale = (await store.read())!
 
     let calls = 0
@@ -280,7 +281,7 @@ describe('WorkBuddy credential refresh bookkeeping', () => {
 
   it('does not refresh a credential that is still valid', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile({ expiresAt: Date.now() + 3_600_000 }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const current = (await store.read())!
     let calls = 0
     await store.ensureFresh(current, async (c) => { calls += 1; return c })
@@ -289,7 +290,7 @@ describe('WorkBuddy credential refresh bookkeeping', () => {
 
   it('survives an unwritable credential file', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile() })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const current = (await store.read())!
     // A locked or read-only profile must not fail the in-flight request.
     await expect(store.writeBack({ ...current, sourceFile: path.join(dir, 'nope', 'x.info') })).resolves.toBeUndefined()

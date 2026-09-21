@@ -3,6 +3,7 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { WorkBuddyAdapter, classifyFailure, readErrorCode } from '../src/host/workbuddy/adapter.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/workbuddy/token-store.ts'
+import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { createStreamState, processStreamLine, closeStream } from '../src/host/workbuddy/mapper.ts'
 import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
 import fs from 'node:fs/promises'
@@ -37,7 +38,7 @@ async function makeStore(options: { domain?: string; expiresAt?: number } = {}):
       domain: options.domain ?? 'copilot.tencent.com',
     },
   }), 'utf8')
-  return new FileCredentialStore(dir)
+  return createWorkBuddyStore(dir)
 }
 
 function makeAdapter(store: FileCredentialStore, fetchFn?: typeof fetch): WorkBuddyAdapter {
@@ -249,7 +250,7 @@ describe('WorkBuddy adapter catalog', () => {
   it('returns no models before a credential exists', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
     temporaryDirs.push(dir)
-    const adapter = makeAdapter(new FileCredentialStore(dir))
+    const adapter = makeAdapter(createWorkBuddyStore(dir))
     expect(await adapter.listModels()).toEqual([])
   })
 })
@@ -258,7 +259,7 @@ describe('WorkBuddy adapter streaming', () => {
   it('refuses to call the endpoint without a credential', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
     temporaryDirs.push(dir)
-    const adapter = makeAdapter(new FileCredentialStore(dir))
+    const adapter = makeAdapter(createWorkBuddyStore(dir))
     const options = {
       provider: 'workbuddy',
       model: 'glm-5.3',
@@ -395,7 +396,7 @@ describe('WorkBuddy adapter streaming', () => {
 
 describe('WorkBuddy adapter retry policy', () => {
   it('retries transient failures but not a rejected credential', () => {
-    const policy = makeAdapter(new FileCredentialStore()).providerRetryPolicy()
+    const policy = makeAdapter(createWorkBuddyStore()).providerRetryPolicy()
     // The resolved policy is a discriminated union; `retryableCodes` exists only
     // on the bounded `normal` mode this route declares.
     expect(policy.mode).toBe('normal')

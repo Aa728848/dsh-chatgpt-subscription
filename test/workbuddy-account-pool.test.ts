@@ -16,6 +16,7 @@ import {
   workBuddyAccountId,
   type WorkBuddyCredentials,
 } from '../src/host/workbuddy/token-store.ts'
+import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/workbuddy/client.ts'
 import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
 
@@ -116,7 +117,7 @@ describe('WorkBuddy pool document parsing', () => {
 describe('WorkBuddy pool adoption and identity', () => {
   it('adopts desktop accounts under their public account id', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': desktopFile({ uid: 'u1' }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store)
 
     const accounts = await pool.syncDesktopAccounts()
@@ -135,7 +136,7 @@ describe('WorkBuddy pool adoption and identity', () => {
       'workbuddy-desktop-20260101.info': desktopFile({ uid: 'u1', expiresAt: 1 }),
       'workbuddy-desktop-20260102.info': desktopFile({ uid: 'u1', expiresAt: 2 }),
     })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store)
     const accounts = await pool.syncDesktopAccounts()
     // One account, not one per snapshot file.
@@ -144,7 +145,7 @@ describe('WorkBuddy pool adoption and identity', () => {
 
   it('is idempotent when the directory is rescanned', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': desktopFile({ uid: 'u1' }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store)
     await pool.syncDesktopAccounts()
     const second = await pool.syncDesktopAccounts()
@@ -153,7 +154,7 @@ describe('WorkBuddy pool adoption and identity', () => {
 
   it('refuses to delete a desktop account but deletes a managed one', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': desktopFile({ uid: 'u1' }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store)
     const [desktop] = await pool.syncDesktopAccounts()
 
@@ -171,7 +172,7 @@ describe('WorkBuddy pool adoption and identity', () => {
 
   it('never touches the IDE credential file when a desktop account is hidden', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': desktopFile({ uid: 'u1' }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store, {
       selection: () => ({ selectedAccountId: null, hiddenAccountIds: ['cn:u1'] }),
     })
@@ -193,7 +194,7 @@ describe('WorkBuddy pool scheduling', () => {
 
   it('honors a pinned account while it is eligible', async () => {
     const dir = await makeAuthDir({})
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store, {
       selection: () => ({ selectedAccountId: 'cn:u2', hiddenAccountIds: [] }),
     })
@@ -206,7 +207,7 @@ describe('WorkBuddy pool scheduling', () => {
 
   it('falls back to automatic choice when the pinned account is cooling down', async () => {
     const dir = await makeAuthDir({})
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store, {
       selection: () => ({ selectedAccountId: 'cn:u2', hiddenAccountIds: [] }),
     })
@@ -221,7 +222,7 @@ describe('WorkBuddy pool scheduling', () => {
 
   it('rotates to another account after a 429 instead of failing the turn', async () => {
     const dir = await makeAuthDir({})
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store)
     await pool.addAccount(credential(1))
     await pool.addAccount(credential(2))
@@ -235,7 +236,7 @@ describe('WorkBuddy pool scheduling', () => {
 
   it('spreads requests over the pool under round-robin', async () => {
     const dir = await makeAuthDir({})
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store)
     await pool.addAccount(credential(1))
     await pool.addAccount(credential(2))
@@ -273,7 +274,7 @@ describe('WorkBuddy adapter rotation', () => {
 
   it('retries the same body on another account when the first is rate limited', async () => {
     const dir = await makeAuthDir({})
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store, { selection: () => ({ selectedAccountId: 'cn:u1', hiddenAccountIds: [] }) })
     await pool.addAccount({
       accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3_600_000, region: 'cn',
@@ -308,7 +309,7 @@ describe('WorkBuddy adapter rotation', () => {
 
   it('marks a rejected credential for re-login and rotates to the other account', async () => {
     const dir = await makeAuthDir({})
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store, { selection: () => ({ selectedAccountId: 'cn:u1', hiddenAccountIds: [] }) })
     for (const n of [1, 2]) {
       await pool.addAccount({
@@ -335,7 +336,7 @@ describe('WorkBuddy adapter rotation', () => {
 
   it('writes a rotated desktop token back to the IDE file so the IDE is not signed out', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': desktopFile({ uid: 'u1', expiresAt: Date.now() - 1000 }) })
-    const store = new FileCredentialStore(dir)
+    const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store)
     await pool.syncDesktopAccounts()
 
