@@ -320,6 +320,45 @@ describe('Codex pool request paths', () => {
     oauth.dispose()
   })
 
+  // Regression with real pool wiring: the cheap "warm snapshot" early return in
+  // UsageService.status() sat above the account guard, so switching the primary
+  // account inside the 60 s quota window kept reporting the previous account's
+  // quota — a card that names account B while showing account A's usage.
+  it('reports the newly pinned account quota instead of the previous account cache', async () => {
+    const { pool } = harness()
+    const first = await pool.addAccount(credential(1))
+    const second = await pool.addAccount(credential(2))
+    await pool.setPrimary(first.id)
+    const oauth = new OAuthService(new MemoryTokenStore(), { pool })
+
+    // Answer each account with a distinct used_percent, keyed on the account
+    // header the request actually carried, so the assertion is about which
+    // account's quota was served — not about how many requests were made.
+    const usedPercentForAccount = new Map([['acct-1', 10], ['acct-2', 99]])
+    const usageFetch = vi.fn(async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+      const header = init?.headers?.['chatgpt-account-id'] ?? ''
+      return Response.json({
+        rate_limit: { primary_window: { used_percent: usedPercentForAccount.get(header) ?? -1, limit_window_seconds: 3_600 } },
+      })
+    })
+    const usage = new UsageService(oauth, {
+      fetchFn: usageFetch as unknown as typeof fetch,
+      now: () => Date.now(),
+    })
+
+    const before = await usage.status(true)
+    expect(before.buckets[0]?.primary?.usedPercent).toBe(10)
+
+    // The user pins the other account; the settings card re-polls immediately,
+    // well inside the 60 s quota window.
+    await pool.setPrimary(second.id)
+    const after = await usage.status(true)
+
+    expect(after.buckets[0]?.primary?.usedPercent).toBe(99)
+    expect(usageFetch).toHaveBeenCalledTimes(2)
+    oauth.dispose()
+  })
+
   it('does not make a tool refresh rotate the conversational account', async () => {
     const { pool } = harness()
     const first = await pool.addAccount(credential(1))

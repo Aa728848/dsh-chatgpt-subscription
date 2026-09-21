@@ -59,6 +59,14 @@ export class UsageService {
   private lastUpstreamAt = 0
   private blockedUntil = 0
   private invalidated = false
+  /**
+   * Serving identity observed when {@link cache} was written.
+   *
+   * A warm snapshot may only be served while this still matches, which is what
+   * keeps the cheap early return below from reporting one account's quota under
+   * another account's name.
+   */
+  private cacheIdentityRevision: number | null = null
   private inFlight: Promise<QuotaStatusDto> | null = null
   private resetConsumeInFlight: Promise<QuotaStatusDto> | null = null
 
@@ -75,10 +83,19 @@ export class UsageService {
     // credential store. Reading it costs a DPAPI unprotect through a spawned
     // `powershell.exe` on Windows (~200 ms), and the settings card polls this
     // route on a 60 s timer, so acquiring credentials first made every poll pay
-    // that launch even when nothing had changed. The snapshot is already keyed
-    // per account, and any account switch clears it, so serving it here cannot
-    // report another account's quota.
-    if (!force && !this.invalidated && this.cache !== null && now - this.cache.fetchedAt < QUOTA_CACHE_MS) {
+    // that launch even when nothing had changed.
+    //
+    // The guard that makes this safe is the identity revision: it is compared
+    // against the revision observed when the snapshot was written, so any write
+    // that can move which account serves a request (a sign-in, a delete, a pin,
+    // a rotation, a refresh) falls through to the credential read below. That
+    // check has to happen BEFORE the early return, because the account key that
+    // used to guard this cache is only known from the credential we are trying
+    // to avoid reading — without it, switching accounts inside the 60 s window
+    // served the previous account's quota.
+    if (!force && !this.invalidated && this.cache !== null
+      && now - this.cache.fetchedAt < QUOTA_CACHE_MS
+      && this.cacheIdentityRevision === this.oauth.currentIdentityRevision()) {
       return this.fromCache(false)
     }
 
@@ -152,6 +169,7 @@ export class UsageService {
 
   clear(): void {
     this.cache = null
+    this.cacheIdentityRevision = null
     this.blockedUntil = 0
     this.invalidated = false
   }
@@ -271,6 +289,9 @@ export class UsageService {
         }
       }
       this.cache = { usage, fetchedAt: this.now(), accountKey }
+      // Recorded as late as possible so a credential rotation that happened
+      // while this request was in flight is still captured.
+      this.cacheIdentityRevision = this.oauth.currentIdentityRevision()
       this.rememberSnapshot(accountKey, usage, this.cache.fetchedAt)
       this.invalidated = false
       return this.fromCache(false)

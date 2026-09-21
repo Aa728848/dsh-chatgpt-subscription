@@ -231,4 +231,33 @@ describe('Codex usage mapping', () => {
     expect((await service.status(false)).state).toBe('signed-out')
     oauth.dispose()
   })
+
+  it('does not serve a warm snapshot across a sign-out', async () => {
+    // Regression: the early return for a warm snapshot sat ABOVE the account
+    // guard, so any credential change inside the 60 s window kept answering
+    // with the pre-change quota. Signing out is the most visible case.
+    let now = 1_000_000
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
+    const oauth = new OAuthService(store, { now: () => now })
+    const credentials = vi.spyOn(oauth, 'credentials')
+    const fetchFn = vi.fn(async () => Response.json({
+      rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 3_600 } },
+    }))
+    const service = new UsageService(oauth, { fetchFn: fetchFn as typeof fetch, now: () => now })
+
+    expect((await service.status(true)).state).toBe('ready')
+    const readsAfterFirst = credentials.mock.calls.length
+
+    await oauth.logout()
+    now += 5_000
+    const after = await service.status(true)
+
+    // The credential read happened again, and the stale snapshot is reported as
+    // stale rather than as fresh data for an account that is gone.
+    expect(credentials.mock.calls.length).toBeGreaterThan(readsAfterFirst)
+    expect(after.state).not.toBe('ready')
+    expect(after.error).toBeDefined()
+    oauth.dispose()
+  })
 })

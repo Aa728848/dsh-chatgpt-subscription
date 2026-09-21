@@ -110,6 +110,14 @@ export class OAuthService {
   private lastLoginError: PublicErrorDto | undefined
   private disposed = false
   private readonly pool: CodexAccountPool | null
+  /**
+   * Bumped whenever this process writes credentials.
+   *
+   * Combined with the pool's own revision by {@link currentIdentityRevision} so
+   * a caller can tell whether the account behind the credentials may have moved
+   * without paying for a credential read to find out.
+   */
+  private credentialRevision = 0
   // Per-identity single flight: a rotating refresh token must never be redeemed
   // twice concurrently, and two requests can hit the same account at once.
   private readonly refreshInFlight = new Map<string, Promise<StoredOAuthCredentials>>()
@@ -263,8 +271,28 @@ export class OAuthService {
     await this.store.clear().catch(() => {
       throw new OAuthServiceError('storage-failed', 'Secure credentials could not be deleted.')
     })
+    this.credentialRevision += 1
     this.lastLoginError = undefined
     this.logger.info('[dsh-chatgpt-subscription] OAuth credentials cleared')
+  }
+
+  /**
+   * A cheap, in-memory verdict on whether the serving account may have changed.
+   *
+   * Reading a credential is expensive — on Windows it is a DPAPI unprotect
+   * through a spawned `powershell.exe` (~200 ms) — so a per-account cache must
+   * not have to read one just to learn that it is still the same account.
+   * Comparing this value against a previously observed one costs nothing, and
+   * any path that can move which account serves a request bumps it: a pool
+   * write (sign-in, delete, pin, rotation) or a credential write in this
+   * process (sign-in, logout, token refresh).
+   *
+   * It is deliberately conservative: a spurious change costs one credential
+   * read, while a missed change would report one account's data under another
+   * account's name.
+   */
+  currentIdentityRevision(): number {
+    return (this.pool?.currentIdentityRevision() ?? 0) + this.credentialRevision
   }
 
   /**
@@ -347,6 +375,7 @@ export class OAuthService {
     await this.store.save(credentials).catch(() => {
       throw new OAuthServiceError('storage-failed', 'ChatGPT credentials could not be saved securely.')
     })
+    this.credentialRevision += 1
   }
 
   private refreshCredentials(stored: StoredOAuthCredentials): Promise<StoredOAuthCredentials> {
@@ -405,6 +434,7 @@ export class OAuthService {
         await this.store.clear().catch(() => {
           throw new OAuthServiceError('storage-failed', 'Expired ChatGPT credentials could not be deleted securely.')
         })
+        this.credentialRevision += 1
       }
       throw new OAuthServiceError(
         'refresh-failed',
@@ -418,6 +448,7 @@ export class OAuthService {
       await this.store.save(fresh).catch(() => {
         throw new OAuthServiceError('storage-failed', 'Refreshed credentials could not be saved securely.')
       })
+      this.credentialRevision += 1
     }
     this.logger.info('[dsh-chatgpt-subscription] OAuth credentials refreshed')
     return fresh

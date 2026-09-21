@@ -173,11 +173,36 @@ export class AccountPoolCore<
   protected readonly hooks: AccountPoolHooks<TCredentials, TAccount, TSummary>
   private readonly filePath: string
   private readonly backend: CredentialStore<PoolData<TAccount>>
+  /**
+   * Bumped by every write that can move which account serves a request.
+   *
+   * Reading it costs nothing — unlike {@link read}, which decrypts the pool file
+   * (a DPAPI unprotect through a spawned `powershell.exe` on Windows, ~200 ms).
+   * A cache that must not report one account's data under another account's name
+   * can therefore invalidate on identity change without paying a credential read
+   * to discover it.
+   */
+  private identityRevision = 0
 
   constructor(hooks: AccountPoolHooks<TCredentials, TAccount, TSummary>) {
     this.hooks = hooks
     this.filePath = hooks.poolFile
     this.backend = hooks.backend ?? createPoolBackend(hooks)
+  }
+
+  /**
+   * A cheap, in-memory revision of the pool's serving identity.
+   *
+   * Compared against a previously observed value to detect an account change
+   * without decrypting the pool file. Every mutating write advances it, because
+   * which account a request resolves to depends on more than membership: the
+   * rotation strategy reads `isPrimary`, `activeAccountId` and `lastUsedAt`,
+   * so a 429 cooldown that moves the active account moves the answer too.
+   * Over-invalidating only costs one credential read, while under-invalidating
+   * would report one account's usage under another account's name.
+   */
+  currentIdentityRevision(): number {
+    return this.identityRevision
   }
 
   /** Human description of where this pool's credentials live. */
@@ -252,6 +277,12 @@ export class AccountPoolCore<
   }
 
   write(data: PoolData<TAccount>): Promise<void> {
+    // Advance the cheap identity revision here rather than in each mutator:
+    // every path that can move which account serves a request goes through this
+    // method, and forgetting one would let a per-account cache outlive its
+    // account. It is bumped before the await so a write that fails still
+    // invalidates: a spurious credential read is cheap, a stale quota card is not.
+    this.identityRevision += 1
     return this.serialize(() => this.saveVerified(this.hooks.parsePoolData(data)))
   }
 
