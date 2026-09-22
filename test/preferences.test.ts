@@ -2,6 +2,10 @@ import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type z from '@deepseek-ai/schemastery'
 import { describe, expect, it } from 'vitest'
 import { registerPreferenceStore } from '../src/host/preferences.ts'
+import { registerAntigravityPreferenceStore } from '../src/host/antigravity/token-store.ts'
+import { registerCommandCodePreferenceStore } from '../src/host/command-code/token-store.ts'
+import { registerKimiCodePreferenceStore } from '../src/host/kimi-code/token-store.ts'
+import { registerWorkBuddyPreferenceStore } from '../src/host/workbuddy/token-store.ts'
 import type { SubscriptionPreferencesDto } from '../src/shared/contracts.ts'
 
 type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
@@ -54,5 +58,45 @@ describe('subscription preferences', () => {
     expect(updated.visibleModelIds).toEqual([])
     expect(store.status().enabled).toBe(false)
     expect(store.status().visibleModelIds).toEqual([])
+  })
+
+  it('gracefully falls back to in-memory store when settings is undefined or lacks register', async () => {
+    const storeUndef = registerPreferenceStore(undefined)
+    expect(storeUndef.status().enabled).toBe(true)
+    expect(storeUndef.status().visibleModelIds).toContain('gpt-6-astra')
+
+    const storeNoRegister = registerPreferenceStore({} as SettingsProvider)
+    expect(storeNoRegister.status().enabled).toBe(true)
+    expect(storeNoRegister.status().fastMode).toBe(false)
+
+    let watchedFastMode: boolean | undefined
+    const unwatch = storeNoRegister.watch((next) => {
+      watchedFastMode = next.fastMode
+    })
+
+    const updated = await storeNoRegister.update({ fastMode: true })
+    expect(updated.fastMode).toBe(true)
+    expect(storeNoRegister.status().fastMode).toBe(true)
+    expect(watchedFastMode).toBe(true)
+
+    unwatch()
+
+    await expect(storeNoRegister.update({ contextWindowOverrides: { 'gpt-6-astra': 1_000_000 } })).rejects.toThrow()
+  })
+
+  it('gracefully falls back for all provider preference stores when settings lacks register', () => {
+    const emptySettings = {} as SettingsProvider
+
+    const antigravity = registerAntigravityPreferenceStore(emptySettings)
+    expect(antigravity.status().enabled).toBe(true)
+
+    const commandCode = registerCommandCodePreferenceStore(emptySettings)
+    expect(commandCode.status().enabled).toBe(true)
+
+    const kimiCode = registerKimiCodePreferenceStore(emptySettings)
+    expect(kimiCode.status().enabled).toBe(true)
+
+    const workBuddy = registerWorkBuddyPreferenceStore(emptySettings)
+    expect(workBuddy.status().enabled).toBe(true)
   })
 })

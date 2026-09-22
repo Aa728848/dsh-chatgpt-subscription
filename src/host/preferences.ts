@@ -25,11 +25,8 @@ export interface SubscriptionPreferenceStore {
 
 type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
 
-export function registerPreferenceStore(settings: SettingsProvider): SubscriptionPreferenceStore {
-  const ns = ((SettingsModule as unknown as Record<string, unknown>).settingsNamespace
-    ? ((SettingsModule as unknown as Record<string, Function>).settingsNamespace)(PREFERENCES_NAMESPACE)
-    : PREFERENCES_NAMESPACE) as unknown
-  const scope = (settings.register as Function).call(settings, ns, z.object({
+export function registerPreferenceStore(settings?: SettingsProvider): SubscriptionPreferenceStore {
+  const schema = z.object({
     enabled: z.boolean().default(DEFAULT_PREFERENCES.enabled ?? true),
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
     fastMode: z.boolean().default(DEFAULT_PREFERENCES.fastMode),
@@ -48,8 +45,36 @@ export function registerPreferenceStore(settings: SettingsProvider): Subscriptio
     }).default(DEFAULT_PREFERENCES.contextWindowOverrides),
     proxyMode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]).default(DEFAULT_PREFERENCES.proxyMode),
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
-  }))
+  })
+
+  if (!settings || typeof (settings as unknown as Record<string, unknown>).register !== 'function') {
+    return new SettingsPreferenceStore(createInMemoryScope(schema))
+  }
+
+  const ns = ((SettingsModule as unknown as Record<string, unknown>).settingsNamespace
+    ? ((SettingsModule as unknown as Record<string, Function>).settingsNamespace)(PREFERENCES_NAMESPACE)
+    : PREFERENCES_NAMESPACE) as unknown
+  const scope = (settings.register as Function).call(settings, ns, schema)
   return new SettingsPreferenceStore(scope)
+}
+
+function createInMemoryScope(schema: z<PreferenceSettings>): SettingsScope<PreferenceSettings> {
+  let value = schema({} as never)
+  const listeners = new Set<(next: PreferenceSettings, prev: PreferenceSettings) => void>()
+  return {
+    get: () => value,
+    update: async (patch: Partial<PreferenceSettings>) => {
+      const prev = value
+      value = schema({ ...value, ...patch })
+      for (const fn of listeners) fn(value, prev)
+    },
+    watch: (cb: (next: PreferenceSettings, prev: PreferenceSettings) => void) => {
+      listeners.add(cb)
+      return () => {
+        listeners.delete(cb)
+      }
+    },
+  } as unknown as SettingsScope<PreferenceSettings>
 }
 
 class SettingsPreferenceStore implements SubscriptionPreferenceStore {

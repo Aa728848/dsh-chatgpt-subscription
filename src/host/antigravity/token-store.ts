@@ -54,7 +54,7 @@ export function registerAntigravityPreferenceStore(
   settings?: SettingsProvider,
   fallbackStore = new FileModelSettingsStore(),
 ): AntigravityPreferenceStore {
-  if (!settings) {
+  if (!settings || typeof (settings as unknown as Record<string, unknown>).register !== 'function') {
     return {
       status: () => ({
         enabled: true,
