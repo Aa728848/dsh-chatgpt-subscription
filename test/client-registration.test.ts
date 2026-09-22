@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
 import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
-import { apply } from '../src/client/index.tsx'
+import { apply, inject } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 
 declare global {
@@ -263,12 +263,95 @@ describe('client registration', () => {
     rootCtx.provide('conversation', {
       resolveImage: async () => '',
     })
+    rootCtx.provide('sessions', {} as any)
+    rootCtx.provide('remote', { session: {} } as any)
+    rootCtx.provide('remote.session', {} as any)
 
     expect(() => {
       rootCtx.plugin({
-        inject: ['slots', 'locale', 'modelDirectories', 'conversation'],
+        inject,
         apply,
       })
+    }).not.toThrow()
+  })
+
+  it('allows accessing remote.session through client context inject', async () => {
+    const { Context } = await import('@deepseek-ai/cordis')
+    const rootCtx = new Context()
+    rootCtx.provide('slots', {
+      inject: () => () => undefined,
+      register: () => () => undefined,
+    })
+    rootCtx.provide('locale', {
+      register: () => () => undefined,
+      bind: () => (key: string) => key,
+    })
+    rootCtx.provide('modelDirectories', {
+      directoryFor: () => ({ store: {}, load: async () => {} }),
+    })
+    rootCtx.provide('conversation', {
+      resolveImage: async () => '',
+    })
+    rootCtx.provide('sessions', {} as any)
+    rootCtx.provide('remote', { session: {} } as any)
+    rootCtx.provide('remote.session', {} as any)
+
+    let capturedCtx: any
+    await rootCtx.plugin({
+      inject,
+      apply(ctx) {
+        capturedCtx = ctx
+      },
+    })
+
+    expect(capturedCtx.remote.session).toBeDefined()
+    expect(capturedCtx.sessions).toBeDefined()
+  })
+
+  it('allows modelDirectories.directoryFor to access remote.session without throwing', async () => {
+    const { Context, Service } = await import('@deepseek-ai/cordis')
+    const rootCtx = new Context()
+    rootCtx.provide('slots', {
+      inject: () => () => undefined,
+      register: () => () => undefined,
+    })
+    rootCtx.provide('locale', {
+      register: () => () => undefined,
+      bind: () => (key: string) => key,
+    })
+    rootCtx.provide('conversation', {
+      resolveImage: async () => '',
+    })
+    rootCtx.provide('sessions', {
+      scope: () => ({}),
+      binding: () => ({ session: { projections: { faceOf: () => ({}) } } }),
+      subagentAddress: () => undefined,
+    } as any)
+    rootCtx.provide('remote', { session: { modelCatalog: async () => ({}) } } as any)
+    rootCtx.provide('remote.session', { modelCatalog: async () => ({}) } as any)
+
+    class MockModelDirectoryResolver extends Service {
+      constructor(ctx: any) {
+        super(ctx, 'modelDirectories')
+      }
+      directoryFor(sessionId: string) {
+        const session = (this.ctx as any).remote.session
+        return { session, store: {}, load: async () => {} }
+      }
+    }
+    new MockModelDirectoryResolver(rootCtx)
+
+    let capturedCtx: any
+    await rootCtx.plugin({
+      inject,
+      apply(ctx) {
+        capturedCtx = ctx
+      },
+    })
+
+    expect(() => {
+      const dir = capturedCtx.modelDirectories.directoryFor('test-session')
+      expect(dir.session).toBeDefined()
     }).not.toThrow()
   })
 })

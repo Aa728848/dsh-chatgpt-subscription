@@ -39,7 +39,15 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-export const inject = ['slots', 'locale', 'modelDirectories', 'conversation']
+export const inject = [
+  'slots',
+  'locale',
+  'modelDirectories',
+  'conversation',
+  'sessions',
+  'remote',
+  'remote.session',
+]
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, dictionaries), 'dsh-chatgpt-subscription: dictionaries')
