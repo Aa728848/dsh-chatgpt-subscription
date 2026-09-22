@@ -7,7 +7,7 @@
  * pin the exact request shape rather than just the presence of a field.
  */
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import {
   MESSAGE_TOOLS,
   assertRequestBodyFits,

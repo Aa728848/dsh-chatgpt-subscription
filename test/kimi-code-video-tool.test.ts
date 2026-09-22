@@ -10,6 +10,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PLUGIN_MESSAGE_SOURCE_KIND } from '../src/host/common/llm-compat.ts'
 import {
   MAX_VIDEO_FILE_BYTES,
   mediaTypeForPath,
@@ -178,6 +179,17 @@ describe('the attach tool', () => {
     expect(deferred).toHaveLength(1)
     const content = (deferred[0] as { content: Array<{ type: string }> }).content
     expect(content[0]?.type).toBe('video')
+    // The clip reaches the next request only through this injected message, so
+    // its provenance is asserted too: the harness MessageSourceMap has no
+    // catch-all kind, and this package declares its own.
+    expect(deferred[0]).toMatchObject({
+      role: 'user',
+      source: {
+        kind: PLUGIN_MESSAGE_SOURCE_KIND,
+        form: 'notice',
+        summary: 'Attached video demo.mp4 for the next request.',
+      },
+    })
   })
 
   it('carries the question alongside the video', async () => {

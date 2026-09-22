@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
-import { BlockAssembler, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createAssistantMessage, createToolResultMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CommandCodeAdapter } from '../src/host/command-code/adapter.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/command-code/token-store.ts'
 import { clearCachedCatalog } from '../src/host/command-code/client.ts'
@@ -252,6 +252,22 @@ describe('CommandCodeAdapter streaming', () => {
         { role: 'assistant', content: '', tool_calls: [{ id: toolCall.id, type: 'function', function: { name: 'run_code', arguments: '{"code":"1"}' } }] },
         { role: 'tool', tool_call_id: toolCall.id, content: '1' },
       ])
+
+      // The same history as harness 0.1.7 delivers it: the result is its own
+      // `role: 'tool'` message, which the adapter normalizes before any mapper
+      // reads it. Both generations must build the same body.
+      const third = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        ...options,
+        messages: [...options.messages, assistant, createToolResultMessage({
+          callId: toolCall.id,
+          content: [{ type: 'text', text: '1' }],
+          isError: false,
+        })],
+      })) third.push(chunk)
+
+      expect(third.blocks()).toEqual(second.blocks())
+      expect(bodies[2]!.messages).toEqual(bodies[1]!.messages)
     } finally {
       globalThis.fetch = originalFetch
     }

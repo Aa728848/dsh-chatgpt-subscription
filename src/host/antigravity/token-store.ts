@@ -4,10 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import type { SettingsProvider, SettingsScope } from '@deepseek-ai/dsh-settings'
-import * as SettingsModule from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { MODELS } from './types.ts'
+import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
@@ -51,27 +50,31 @@ export interface AntigravityPreferenceStore {
 }
 
 export function registerAntigravityPreferenceStore(
-  settings?: SettingsProvider,
+  settings?: unknown,
   fallbackStore = new FileModelSettingsStore(),
 ): AntigravityPreferenceStore {
-  if (!settings || typeof (settings as unknown as Record<string, unknown>).register !== 'function') {
+  if (!hasRegister(settings)) {
+    // With no settings namespace to persist in, the JSON file beside the
+    // credentials is the store. It is read once here, so a selection saved by an
+    // earlier run is still the selection on the next boot.
+    let snapshot: AntigravityModelSettings = {
+      enabled: true,
+      enabledModelIds: MODELS.map((m) => m.id),
+      catalogModels: [],
+      contextWindowOverrides: {},
+      defaultReasoningEffort: null,
+    }
+    void fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
     return {
-      status: () => ({
-        enabled: true,
-        enabledModelIds: MODELS.map((m) => m.id),
-        catalogModels: [],
-        contextWindowOverrides: {},
-        defaultReasoningEffort: null,
-      }),
-      update: async (patch) => fallbackStore.updateSettings(patch),
+      status: () => snapshot,
+      update: async (patch) => {
+        snapshot = await fallbackStore.updateSettings(patch)
+        return snapshot
+      },
     }
   }
 
-  const ns = ((SettingsModule as unknown as Record<string, unknown>).settingsNamespace
-    ? ((SettingsModule as unknown as Record<string, Function>).settingsNamespace)(ANTIGRAVITY_PREFERENCES_NAMESPACE)
-    : ANTIGRAVITY_PREFERENCES_NAMESPACE) as unknown
-
-  const scope = (settings.register as Function).call(settings, ns, z.object({
+  const scope = settings.register(resolveSettingsNamespace(ANTIGRAVITY_PREFERENCES_NAMESPACE), z.object({
     enabled: z.boolean().default(true),
     enabledModelIds: z.array(z.string()).default(MODELS.map((m) => m.id)),
     contextWindowOverrides: z.dict(z.number()).default({}),

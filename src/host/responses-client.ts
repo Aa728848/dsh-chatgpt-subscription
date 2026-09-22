@@ -14,6 +14,7 @@ import { wrapStreamWithWatchdog } from './common/idle-watchdog.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
+import { normalizeGenerateOptions } from './common/llm-compat.ts'
 import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
@@ -60,7 +61,8 @@ export class ResponsesClient {
 
   private readonly localRawImages: LocalRawImageOptions
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(rawOptions: GenerateOptions): AsyncIterable<StreamChunk> {
+    const options = normalizeGenerateOptions(rawOptions)
     const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
     let currentModel = options.model

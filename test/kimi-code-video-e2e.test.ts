@@ -23,10 +23,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 // The barrel of the INSTALLED runtime exports the image helpers; the token
 // estimator is reached through the meter's public class. Both are the code a
 // request actually runs against, not the workspace checkout.
-import { contentHasImage, projectImagesForTextModel } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, createUserMessage, projectImagesForTextModel } from '@deepseek-ai/dsh-llm'
 import { buildOpenAIRequest, estimatedInputTokens, resolveRequestVideos, offloadOldestRequestVideos } from '../src/host/kimi-code/mapper.ts'
 import { readVideoBytes, saveVideo } from '../src/host/kimi-code/video-store.ts'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { PLUGIN_MESSAGE_SOURCE_KIND } from '../src/host/common/llm-compat.ts'
+import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 
 const MP4 = new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32])
 
@@ -95,7 +96,22 @@ describe('video reaches the wire from a stored file', () => {
     // dispatch. A video must not be mistaken for an image, or the projection
     // would replace the clip with a placeholder.
     const ref = await saveVideo({ data: MP4, declaredType: 'video/mp4', name: 'demo.mp4' })
-    const message = { role: 'user', content: [{ type: 'video', attachment: ref }] } as unknown as Message
+    // Exactly the message the tool injects via deferContext, built by the same
+    // harness helper: the projection reads harness messages, not the mapper's
+    // normalized view.
+    const message = createUserMessage({
+      content: [{ type: 'video', attachment: ref }],
+      source: {
+        kind: PLUGIN_MESSAGE_SOURCE_KIND,
+        form: 'notice',
+        summary: 'Attached video demo.mp4 for the next request.',
+      },
+    })
+    expect(message.source).toEqual({
+      kind: PLUGIN_MESSAGE_SOURCE_KIND,
+      form: 'notice',
+      summary: 'Attached video demo.mp4 for the next request.',
+    })
 
     expect(contentHasImage(message.content)).toBe(false)
     const afterImages = projectImagesForTextModel([message])

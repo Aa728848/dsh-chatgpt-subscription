@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
+import { PLUGIN_MESSAGE_SOURCE_KIND, normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import {
   IMPLICIT_SYSTEM_PROMPT,
   MAX_REQUEST_IMAGE_BYTES,
@@ -19,7 +22,9 @@ function userMessage(content: any[]): Message {
 }
 
 function systemMessage(text: string): Message {
-  return { id: 'm0', role: 'system', content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'test' } } as unknown as Message
+  // The harness MessageSourceMap has no catch-all `plugin` kind any more; this
+  // package declares its own, and a system contribution declares no form.
+  return { id: 'm0', role: 'system', content: [{ type: 'text', text }], source: { kind: PLUGIN_MESSAGE_SOURCE_KIND } } as unknown as Message
 }
 
 function baseOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
@@ -118,6 +123,28 @@ describe('WorkBuddy request mapping', () => {
     const messages = body.messages as Array<Record<string, unknown>>
     const tool = messages.find((m) => m.role === 'tool')!
     expect(String(tool.content)).toContain('[image: shot.png]')
+  })
+
+  it('groups the parallel results a 0.1.7 harness delivers as tool-role messages the same way', () => {
+    // The harness now sends one `role: 'tool'` message per result; the adapter
+    // normalizes each into the user-role tool result this mapper reads.
+    const messages = normalizeGenerateOptions({
+      provider: 'workbuddy',
+      model: 'glm-5.3',
+      messages: [
+        createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }),
+        createToolResultMessage({ callId: ToolCallId('call_1'), content: [{ type: 'text', text: 'first' }], isError: false }),
+        createToolResultMessage({ callId: ToolCallId('call_2'), content: [{ type: 'text', text: 'second' }], isError: false }),
+      ],
+    }).messages
+
+    const body = buildChatRequest(baseOptions({ messages }))
+    const wire = body.messages as Array<Record<string, unknown>>
+    expect(wire.map((m) => m.role)).toEqual(['system', 'user', 'tool', 'tool'])
+    expect(wire.filter((m) => m.role === 'tool')).toEqual([
+      { role: 'tool', tool_call_id: 'call_1', content: 'first' },
+      { role: 'tool', tool_call_id: 'call_2', content: 'second' },
+    ])
   })
 
   it('drops an assistant turn that carries neither text nor tool calls', () => {

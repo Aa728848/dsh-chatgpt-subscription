@@ -1,6 +1,7 @@
-import { type SettingsProvider, type SettingsScope } from '@deepseek-ai/dsh-settings'
-import * as SettingsModule from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
+import { FilePreferencesStore, preferencesPath } from './common/file-preferences.ts'
+import { readLegacyPreferences } from './common/legacy-preferences.ts'
+import { hasRegister, resolveSettingsNamespace, type SettingsScope } from './common/settings-compat.ts'
 import { GPT_56_MAX_CONTEXT_WINDOW, GPT_6_ASTRA_MAX_CONTEXT_WINDOW, isCodexModelId } from '../shared/model-catalog.ts'
 import {
   DEFAULT_PREFERENCES,
@@ -23,9 +24,25 @@ export interface SubscriptionPreferenceStore {
   watch(callback: (next: SubscriptionPreferencesDto, prev: SubscriptionPreferencesDto) => void | Promise<void>): () => void
 }
 
+/**
+ * {@link SubscriptionPreferenceStore} plus the one-shot load of the
+ * plugin-owned fallback file. A store bound to a settings namespace has nothing
+ * to load, so its `hydrate` resolves immediately.
+ */
+export interface PreferenceStoreHandle extends SubscriptionPreferenceStore {
+  /** Read the fallback document once; later reads are no-ops. */
+  hydrate(): Promise<void>
+}
+
 type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
 
-export function registerPreferenceStore(settings?: SettingsProvider): SubscriptionPreferenceStore {
+/**
+ * Bind the preferences to the settings namespace when the harness still offers
+ * the register seam, and to the plugin-owned JSON document when it does not
+ * (harness 0.1.7 replaced the seam with Config-field forms).
+ * @param settings - Live `ctx.settings` service of either harness generation.
+ */
+export function registerPreferenceStore(settings?: unknown): PreferenceStoreHandle {
   const schema = z.object({
     enabled: z.boolean().default(DEFAULT_PREFERENCES.enabled ?? true),
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
@@ -47,38 +64,34 @@ export function registerPreferenceStore(settings?: SettingsProvider): Subscripti
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
   })
 
-  if (!settings || typeof (settings as unknown as Record<string, unknown>).register !== 'function') {
-    return new SettingsPreferenceStore(createInMemoryScope(schema))
+  // Harness 0.1.7 replaced the register seam, so the plugin owns the storage:
+  // a JSON document under the harness home that survives a restart, seeded from
+  // the settings document earlier releases wrote this namespace into.
+  if (!hasRegister(settings)) {
+    const fileStore = new FilePreferencesStore<PreferenceSettings>(schema, preferencesPath(), readLegacyPreferences)
+    return new SettingsPreferenceStore(fileStore, () => fileStore.hydrate())
   }
 
-  const ns = ((SettingsModule as unknown as Record<string, unknown>).settingsNamespace
-    ? ((SettingsModule as unknown as Record<string, Function>).settingsNamespace)(PREFERENCES_NAMESPACE)
-    : PREFERENCES_NAMESPACE) as unknown
-  const scope = (settings.register as Function).call(settings, ns, schema)
+  const scope = settings.register(
+    resolveSettingsNamespace(PREFERENCES_NAMESPACE),
+    schema,
+  ) as SettingsScope<PreferenceSettings>
   return new SettingsPreferenceStore(scope)
 }
 
-function createInMemoryScope(schema: z<PreferenceSettings>): SettingsScope<PreferenceSettings> {
-  let value = schema({} as never)
-  const listeners = new Set<(next: PreferenceSettings, prev: PreferenceSettings) => void>()
-  return {
-    get: () => value,
-    update: async (patch: Partial<PreferenceSettings>) => {
-      const prev = value
-      value = schema({ ...value, ...patch })
-      for (const fn of listeners) fn(value, prev)
-    },
-    watch: (cb: (next: PreferenceSettings, prev: PreferenceSettings) => void) => {
-      listeners.add(cb)
-      return () => {
-        listeners.delete(cb)
-      }
-    },
-  } as unknown as SettingsScope<PreferenceSettings>
-}
+class SettingsPreferenceStore implements PreferenceStoreHandle {
+  /**
+   * @param scope - Namespace scope, or the plugin-owned file store standing in for one.
+   * @param load - One-shot load of that file store; absent for a settings scope.
+   */
+  constructor(
+    private readonly scope: SettingsScope<PreferenceSettings>,
+    private readonly load: () => Promise<void> = async () => undefined,
+  ) {}
 
-class SettingsPreferenceStore implements SubscriptionPreferenceStore {
-  constructor(private readonly scope: SettingsScope<PreferenceSettings>) {}
+  hydrate(): Promise<void> {
+    return this.load()
+  }
 
   status(): SubscriptionPreferencesDto {
     return withWritable(this.scope.get())

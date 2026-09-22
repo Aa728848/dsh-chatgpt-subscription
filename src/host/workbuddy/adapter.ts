@@ -48,6 +48,7 @@ import {
   resolveRequestImages,
   type AttachmentImageReader,
 } from './mapper.ts'
+import { normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import type { WorkBuddyCredentials } from './token-store.ts'
@@ -290,7 +291,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const requestOptions = offloadOldestRequestImages(options)
+    const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
     const body = JSON.stringify(buildChatRequest(requestOptions, images))
 

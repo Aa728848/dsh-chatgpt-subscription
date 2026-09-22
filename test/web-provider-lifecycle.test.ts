@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { WebError, WebRuntime } from '@deepseek-ai/dsh-web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CODEX_FETCH_PROVIDER_ID } from '../src/compat.ts'
@@ -24,19 +24,62 @@ interface MountOptions {
   readonly ready?: { onReady(listener: () => void): () => void }
 }
 
+/** One registered settings namespace, the shape `registerPreferenceStore` binds to. */
+interface MemoryScope {
+  get(): Record<string, unknown>
+  update(patch: Record<string, unknown>): Promise<void>
+  watch(callback: (next: Record<string, unknown>, prev: Record<string, unknown>) => void | Promise<void>): () => void
+}
+
+/** Schema a register-based harness validates a namespace document with. */
+type MemorySchema = (value: unknown) => Record<string, unknown>
+
+/**
+ * The settings service of the generation this plugin still supports: registering
+ * a namespace hands back a scope it reads and watches.
+ *
+ * Harness 0.1.7 replaced that seam with `SettingsForms`, so the service no longer
+ * exists to borrow: a plain double keeps these tests about the web provider
+ * lifecycle. Its namespaced `update` is the old service's own method, which is
+ * how the cases below drive one preference change.
+ */
+function memorySettings(initial: Record<string, unknown>) {
+  const scopes = new Map<unknown, MemoryScope>()
+  return {
+    register(registered: unknown, schema: MemorySchema): MemoryScope {
+      let value = schema(initial)
+      const listeners = new Set<(next: Record<string, unknown>, prev: Record<string, unknown>) => void | Promise<void>>()
+      const scope: MemoryScope = {
+        get: () => value,
+        update: async (patch) => {
+          const prev = value
+          value = schema({ ...value, ...patch })
+          for (const listener of listeners) await listener(value, prev)
+        },
+        watch: (callback) => {
+          listeners.add(callback)
+          return () => { listeners.delete(callback) }
+        },
+      }
+      scopes.set(registered, scope)
+      return scope
+    },
+    async update(registered: unknown, patch: Record<string, unknown>): Promise<void> {
+      await scopes.get(registered)!.update(patch)
+    },
+  }
+}
+
 /**
  * Mount the plugin over a loader whose built-in fetch provider refuses every
  * request the way DSH does on a proxied machine, and report the config the
  * plugin resolved for the `web` entry.
  */
 async function mountPlugin(options: MountOptions) {
-  class MemorySettings extends SettingsProvider {
-    readonly writable = true
-    protected async load() {
-      return { [namespace]: { searchProvider: options.searchProvider, proxyMode: options.proxyMode } }
-    }
-    protected async persist() {}
-  }
+  const settings = memorySettings({
+    searchProvider: options.searchProvider,
+    proxyMode: options.proxyMode,
+  })
 
   const store = vi.spyOn(platformStore, 'createPlatformTokenStore').mockReturnValue(new MemoryTokenStore())
   const fetchFn = vi.fn(async () => new Response('plugin page', { headers: { 'content-type': 'text/plain' } }))
@@ -47,8 +90,8 @@ async function mountPlugin(options: MountOptions) {
   ctx.provide('llm', { registerAdapter: () => () => undefined })
   ctx.provide('attachments', {})
   ctx.provide('tools', { register: () => () => undefined })
+  ctx.provide('settings', settings)
   await ctx.plugin(Loader).await()
-  await ctx.plugin(MemorySettings).await()
   ctx.loader.builtins.web = WebRuntime
   await ctx.loader.root.update([{
     id: 'web', name: 'cordis:web',

@@ -1,6 +1,7 @@
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { HarnessError, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
+import { PLUGIN_MESSAGE_SOURCE_KIND } from './common/llm-compat.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   CODEX_ENHANCED_ORIGINATOR,
@@ -136,8 +137,7 @@ export function createCodexImageTool(
         exec.deferContext(createUserMessage({
           content: [{ type: 'image', attachment: image }],
           source: {
-            kind: 'plugin',
-            plugin: 'dsh-chatgpt-subscription',
+            kind: PLUGIN_MESSAGE_SOURCE_KIND,
             form: 'notice',
             summary: 'Generated image from Codex image tool.',
           },

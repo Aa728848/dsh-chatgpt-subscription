@@ -18,9 +18,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import * as SettingsModule from '@deepseek-ai/dsh-settings'
+import { hasRegister, type SettingsService } from './common/settings-compat.ts'
 
 /** DSH settings namespace owned by the Subagent settings card. */
 export const SUBAGENT_MODEL_SELECTION_NAMESPACE = 'subagent-model-selection'
@@ -213,24 +212,22 @@ export function authorizedRoutesFor(
 /**
  * Read the Host preference that owns the allowlist. Values in the stored
  * document are untrusted JSON, so every field is narrowed before use.
- * @param settings - Live settings service, when composed.
+ * @param settings - Live settings service, when composed and when it still
+ * exposes the register seam (harness 0.1.7 replaced it with forms).
  * @returns the resolved preference, or undefined without a settings service.
  */
 export function subagentModelSelectionPreference(
-  settings: SettingsProvider | undefined,
+  settings: SettingsService | undefined,
 ): SubagentModelSelectionPreference | undefined {
-  if (settings === undefined) return undefined
-  const register = (settings as unknown as Record<string, unknown>)['register']
-  if (typeof register !== 'function') return undefined
+  if (!hasRegister(settings)) return undefined
   try {
-    const scope = (register as (ns: string, schema: unknown) => { get(): unknown })
-      .call(settings, SUBAGENT_MODEL_SELECTION_NAMESPACE, z.object({
-        enabled: z.boolean().default(false),
-        allowedModels: z.array(z.object({
-          provider: z.string().min(1).required(),
-          model: z.string().min(1).required(),
-        })).default([]),
-      }))
+    const scope = settings.register(SUBAGENT_MODEL_SELECTION_NAMESPACE, z.object({
+      enabled: z.boolean().default(false),
+      allowedModels: z.array(z.object({
+        provider: z.string().min(1).required(),
+        model: z.string().min(1).required(),
+      })).default([]),
+    }))
     const value = asRecord(scope.get())
     if (value === undefined) return undefined
     return {
@@ -499,7 +496,7 @@ export function delegationDenialReason(
 /** Runtime inputs the guard closes over. */
 export interface SubagentAuthorizationOptions {
   /** Live settings service, when composed; absent leaves recorded policies in charge. */
-  readonly settings?: SettingsProvider
+  readonly settings?: SettingsService
   /** Session registry used for ancestor lookup. */
   readonly sessions: SessionsResolver
   /** Exact delegation tool names this guard authorizes (explicit route selection). */
@@ -626,7 +623,9 @@ export function installSubagentModelAuthorization(
     )
   }
   const scope = validateAuthorizationScope(config.scope ?? 'session')
-  const settings = (ctx as unknown as { get?(name: string): unknown }).get?.('settings') as SettingsProvider | undefined
+  // A 0.1.7 `SettingsForms` service has no register seam; the preference read
+  // below checks for it and leaves recorded policies in charge when it is gone.
+  const settings = (ctx as unknown as { get?(name: string): unknown }).get?.('settings') as SettingsService | undefined
   const authorize = createSubagentAuthorization({ settings, sessions, toolNames, inheritToolNames, scope })
   return ctx.tools.guard(exec =>
     authorize(exec.agent as AuthorizationAgent | undefined, exec.name, exec.arguments))

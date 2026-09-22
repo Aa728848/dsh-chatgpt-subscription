@@ -1,10 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions as HarnessGenerateOptions } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { ResponsesClient, parseResponsesStream } from '../src/host/responses-client.ts'
 import { buildResponsesPayload } from '../src/host/responses-mapper.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 import { reasoningEffortsForModel, resolveCodexFallbackModel } from '../src/shared/model-catalog.ts'
+import {
+  PLUGIN_MESSAGE_SOURCE_KIND,
+  normalizeGenerateOptions,
+} from '../src/host/common/llm-compat.ts'
+import type { GenerateOptions, StreamChunk } from '../src/host/common/llm-compat.ts'
 
 /**
  * Reproduction for "Astra does not react after a background subagent finishes".
@@ -63,6 +70,54 @@ describe('Codex route: settlement notice reaches the wire', () => {
     expect(serialized).toContain('Background subagent session-child-1 finished')
     expect(payload.input).toContainEqual({ type: 'reasoning', id: 'rs_1', encrypted_content: 'enc-1' })
     expect(payload.input).toContainEqual({ type: 'function_call', call_id: 'call_1', name: 'subagent', arguments: '{"prompt":"x"}' })
+    const last = payload.input.at(-1) as { role?: string; content?: unknown }
+    expect(last.role).toBe('user')
+    expect(JSON.stringify(last.content)).toContain('Background subagent session-child-1 finished')
+  })
+
+  it('maps the tool-role result and the plugin notice the 0.1.7 harness delivers instead', async () => {
+    // Harness 0.1.7 delivers the tool result as a first-class `role: 'tool'`
+    // message and marks plugin-injected content with this package's own source
+    // kind. The adapter normalizes that at the boundary, so the mapper must
+    // reach the same wire items as the legacy shape above.
+    const options = normalizeGenerateOptions({
+      provider: 'codex-chatgpt',
+      model: 'gpt-6-astra',
+      messages: [
+        createUserMessage({ content: [{ type: 'text', text: 'delegate this' }], source: { kind: 'user' } }),
+        createAssistantMessage({
+          content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'subagent', arguments: '{"prompt":"x"}' }],
+          source: {
+            provider: 'codex-chatgpt',
+            model: 'gpt-6-astra',
+            replayState: {
+              response: {
+                outputItems: [
+                  { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc-1' },
+                  { type: 'function_call', call_id: 'call_1', name: 'subagent', arguments: '{"prompt":"x"}' },
+                ],
+              },
+            },
+          },
+        }),
+        createToolResultMessage({
+          callId: ToolCallId('call_1'),
+          content: [{ type: 'text', text: 'started background subagent session-child-1' }],
+          isError: false,
+        }),
+        createUserMessage({
+          content: [{ type: 'text', text: NOTICE }],
+          source: { kind: PLUGIN_MESSAGE_SOURCE_KIND, form: 'notice', summary: 'child settled' },
+        }),
+      ],
+    })
+
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload.input).toContainEqual({ type: 'reasoning', id: 'rs_1', encrypted_content: 'enc-1' })
+    expect(payload.input).toContainEqual({ type: 'function_call', call_id: 'call_1', name: 'subagent', arguments: '{"prompt":"x"}' })
+    expect(payload.input).toContainEqual({
+      type: 'function_call_output', call_id: 'call_1', output: 'started background subagent session-child-1',
+    })
     const last = payload.input.at(-1) as { role?: string; content?: unknown }
     expect(last.role).toBe('user')
     expect(JSON.stringify(last.content)).toContain('Background subagent session-child-1 finished')
@@ -135,9 +190,11 @@ describe('Codex route: Sol and Astra share one content path', () => {
         { readImage: async () => { throw new Error('unused') } },
         { fetchFn: responseFetch as unknown as typeof fetch },
       )
+      // `stream` is the adapter boundary: it takes the harness request and
+      // normalizes it before any mapper sees it.
       const chunks = await collect(client.stream({
         provider: 'codex-chatgpt', model, messages: [], sessionId: 'session-a',
-      } as unknown as GenerateOptions))
+      } as unknown as HarnessGenerateOptions))
       expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: answer })
       const sentInit = responseFetch.mock.calls[0]?.[1]
       const sent = JSON.parse(String(sentInit?.body)) as Record<string, unknown>

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../src/host/common/brand-compat.ts'
+import { PLUGIN_MESSAGE_SOURCE_KIND } from '../src/host/common/llm-compat.ts'
 import { CODEX_IMAGE_GENERATION_URL, CODEX_IMAGE_MODEL, CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { createCodexImageTool } from '../src/host/codex-images.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
@@ -39,6 +40,7 @@ describe('Codex image tool', () => {
     } as unknown as AttachmentStore
     const tool = createCodexImageTool(oauth, attachments, { fetchFn: fetchFn as typeof fetch })
     const signal = new AbortController().signal
+    const deferred: unknown[] = []
 
     const value = await tool.execute({ prompt: 'draw a small blue square' }, {
       callId: toToolCallId('call-image'),
@@ -46,8 +48,11 @@ describe('Codex image tool', () => {
       name: CODEX_IMAGE_TOOL_NAME,
       arguments: { prompt: 'draw a small blue square' },
       signal,
+      // A nested call is the only one that injects the generated image into the
+      // next request, which is the branch asserted below.
+      parent: Symbol('parent') as never,
       token: Symbol('tool') as never,
-      deferContext: vi.fn(),
+      deferContext: (message: unknown) => { deferred.push(message) },
       concludeTurn: vi.fn(),
     })
 
@@ -72,6 +77,19 @@ describe('Codex image tool', () => {
     expect(tool.output.render({ prompt: 'draw a small blue square' }, value as never)).toContainEqual({
       type: 'image',
       attachment: expect.objectContaining({ attachmentId: 'image-1' }),
+    })
+    // The generated image only reaches the next request through the injected
+    // message, so its provenance and content are asserted here: the harness
+    // MessageSourceMap has no catch-all kind, and this package declares its own.
+    expect(deferred).toHaveLength(1)
+    expect(deferred[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'image', attachment: expect.objectContaining({ attachmentId: 'image-1' }) }],
+      source: {
+        kind: PLUGIN_MESSAGE_SOURCE_KIND,
+        form: 'notice',
+        summary: 'Generated image from Codex image tool.',
+      },
     })
     oauth.dispose()
   })

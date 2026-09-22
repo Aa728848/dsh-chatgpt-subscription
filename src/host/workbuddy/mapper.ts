@@ -19,12 +19,13 @@
 import {
   LlmError,
   type ContentBlock,
+  type OutboundContentBlock,
   type FinishReason,
   type GenerateOptions,
   type Message,
   type StreamChunk,
   type TokenUsage,
-} from '@deepseek-ai/dsh-llm'
+} from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { maxOutputTokensFor } from './model-catalog.ts'
@@ -470,7 +471,7 @@ interface PendingToolCall {
 }
 
 export interface WorkBuddyStreamState {
-  blocks: ContentBlock[]
+  blocks: OutboundContentBlock[]
   current: { index: number; type: 'text' | 'reasoning'; text: string } | null
   /** wire tool index -> accumulating call. */
   toolCalls: Map<number, PendingToolCall>
@@ -509,7 +510,7 @@ export function createStreamState(): WorkBuddyStreamState {
 function closeCurrent(state: WorkBuddyStreamState): StreamChunk[] {
   if (state.current === null) return []
   const { index, type, text } = state.current
-  const block: ContentBlock = { type, text }
+  const block: OutboundContentBlock = { type, text }
   state.blocks[index] = block
   state.current = null
   return [{ type: 'block-end', index, block }]
@@ -518,7 +519,7 @@ function closeCurrent(state: WorkBuddyStreamState): StreamChunk[] {
 function closeToolCalls(state: WorkBuddyStreamState): StreamChunk[] {
   const out: StreamChunk[] = []
   for (const [wireIndex, call] of [...state.toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
-    const block: ContentBlock = {
+    const block: OutboundContentBlock = {
       type: 'tool-call',
       id: toToolCallId(call.id),
       name: call.name,

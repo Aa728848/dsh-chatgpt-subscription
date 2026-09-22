@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
-import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
-import type { CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
+import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
+import type { PtcRunRequest, PtcRunResult, PtcRunSpec } from '@deepseek-ai/dsh-ptc-runtime'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
@@ -31,15 +31,24 @@ const GEMINI: AllowedModelRoute = { provider: 'antigravity', model: 'gemini-3.8-
 const DEEPSEEK_OPTIONS = { provider: 'deepseek-official', model: 'deepseek-flash' }
 const NO_SESSIONS: SessionsResolver = { get: () => undefined }
 
-/** Scriptable code runtime whose `run` drives the bound tool functions. */
-class FakeRuntime extends CodeRuntime {
+/**
+ * Scriptable PTC runtime whose `run` drives the bound tool functions. The
+ * resolver supplies the directory and deadline every `PtcRunSpec` requires;
+ * the run itself only has to expose the `tools` binding namespace to the
+ * program under test.
+ */
+class FakeRuntime extends PtcRuntime {
   readonly language = 'typescript'
   readonly isolation = 'fake'
-  behavior: (request: CodeRunRequest) => Promise<CodeRunResult> =
+  behavior: (spec: PtcRunSpec) => Promise<PtcRunResult> =
     () => Promise.resolve({ logs: [] })
 
-  run(request: CodeRunRequest): Promise<CodeRunResult> {
-    return this.behavior(request)
+  resolve(request: PtcRunRequest): PtcRunSpec {
+    return { ...request, cwd: request.cwd ?? process.cwd(), timeoutMs: request.timeoutMs ?? null }
+  }
+
+  run(spec: PtcRunSpec): Promise<PtcRunResult> {
+    return this.behavior(spec)
   }
 }
 
@@ -68,17 +77,16 @@ function recordingAgent(routes: readonly AllowedModelRoute[]): Agent {
 }
 
 /**
- * Mount the real tool runtime in code mode plus the fake code runtime. The mode
- * that collapses direct calls into `run_code` is named `code` in the published
- * DSH line this package targets and `ptc` in the newer checkout, so the test
- * reads the accepted name from the runtime rather than pinning one spelling.
+ * Mount the real tool runtime in PTC mode plus the fake PTC runtime. The mode
+ * that collapses direct calls into `run_code` is `ptc` in this harness line,
+ * and mounted here through `ctx.ptcRuntime`.
  */
 async function setup(): Promise<{ ctx: Context; runtime: FakeRuntime }> {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime, { mode: CODE_MODE })
   await ctx.plugin(FakeRuntime)
-  return { ctx, runtime: ctx.codeRuntime as FakeRuntime }
+  return { ctx, runtime: ctx.ptcRuntime as FakeRuntime }
 }
 
 /** Register the delegation tool the program is allowed to call. */

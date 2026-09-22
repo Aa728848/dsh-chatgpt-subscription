@@ -30,12 +30,13 @@
 import {
   LlmError,
   type ContentBlock,
+  type OutboundContentBlock,
   type FinishReason,
   type GenerateOptions,
   type Message,
   type StreamChunk,
   type TokenUsage,
-} from '@deepseek-ai/dsh-llm'
+} from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { maxOutputTokensFor } from './types.ts'
@@ -1594,7 +1595,7 @@ interface PendingToolCall {
 
 export interface KimiCodeStreamState {
   wire: KimiCodeWire
-  blocks: ContentBlock[]
+  blocks: OutboundContentBlock[]
   current: { index: number; type: 'text' | 'reasoning'; text: string } | null
   /** wire tool index -> accumulating call (OpenAI route). */
   toolCalls: Map<number, PendingToolCall>
@@ -1644,7 +1645,7 @@ function numberOr(value: unknown, fallback: number): number {
 function closeCurrent(state: KimiCodeStreamState): StreamChunk[] {
   if (state.current === null) return []
   const { index, type, text } = state.current
-  const block: ContentBlock = { type, text }
+  const block: OutboundContentBlock = { type, text }
   state.blocks[index] = block
   state.current = null
   return [{ type: 'block-end', index, block }]
@@ -1653,7 +1654,7 @@ function closeCurrent(state: KimiCodeStreamState): StreamChunk[] {
 function closeToolCalls(state: KimiCodeStreamState): StreamChunk[] {
   const out: StreamChunk[] = []
   for (const [wireIndex, call] of [...state.toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
-    const block: ContentBlock = {
+    const block: OutboundContentBlock = {
       type: 'tool-call',
       id: toToolCallId(clampToolCallId(call.id)),
       name: call.name,
@@ -1923,7 +1924,7 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
     const pending = state.toolCalls.get(contentIndex)
     if (pending !== undefined) {
       state.toolCalls.delete(contentIndex)
-      const block: ContentBlock = {
+      const block: OutboundContentBlock = {
         type: 'tool-call',
         id: toToolCallId(clampToolCallId(pending.id)),
         name: pending.name,

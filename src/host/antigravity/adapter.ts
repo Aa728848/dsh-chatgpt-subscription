@@ -30,6 +30,7 @@ import {
   resolveRequestImages,
   type AttachmentImageReader,
 } from './mapper.ts'
+import { normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 
 export function resolveDefaultReasoningEffort(
@@ -188,7 +189,7 @@ export class AntigravityAdapter extends LlmAdapter {
       }
     }
 
-    const requestOptions = offloadOldestRequestImages(options)
+    const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
 
     const triedAccountIds = new Set<string>()

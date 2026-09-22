@@ -85,6 +85,12 @@ export class SearchProviderSwitcher {
       } else {
         await entry.update({ config: nextConfig })
       }
+      // Cordis restarts an entry behind its update waterfall, and neither
+      // `Fiber.update` (void since cordis 4.0.3) nor the loader's `Entry.update`
+      // resolves once the replacement service is live. Callers that read
+      // `ctx.web` right after a selection would otherwise race the restart, so
+      // the wait is what makes `applied` mean the new providers are mounted.
+      await entry.fiber?.await()
       this.state = 'applied'
     } catch (error) {
       this.state = 'failed'

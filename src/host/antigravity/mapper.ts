@@ -1,12 +1,13 @@
 import {
   LlmError,
   type ContentBlock,
+  type OutboundContentBlock,
   type FinishReason,
   type GenerateOptions,
   type Message,
   type StreamChunk,
   type TokenUsage,
-} from '@deepseek-ai/dsh-llm'
+} from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
@@ -635,7 +636,7 @@ export function buildRequest(
 }
 
 export interface StreamState {
-  blocks: ContentBlock[]
+  blocks: OutboundContentBlock[]
   replayBlocks: Array<{ parts: Array<Record<string, unknown>> }>
   currentBlock: { index: number; type: 'text' | 'reasoning'; text: string } | null
   hasContent: boolean
@@ -662,7 +663,7 @@ export function createStreamState(): StreamState {
 function closeCurrentBlock(state: StreamState): StreamChunk[] {
   if (!state.currentBlock) return []
   const { index, type, text } = state.currentBlock
-  const block: ContentBlock = { type, text }
+  const block: OutboundContentBlock = { type, text }
   state.blocks[index] = block
   state.currentBlock = null
   return [{ type: 'block-end', index, block }]

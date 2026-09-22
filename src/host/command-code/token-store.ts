@@ -2,13 +2,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import type { SettingsProvider, SettingsScope } from '@deepseek-ai/dsh-settings'
-import * as SettingsModule from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import type { CommandCodeApiEnv, CommandCodeReasoningEffort } from '../../shared/command-code-contracts.ts'
 import { COMMAND_CODE_REASONING_EFFORTS } from '../../shared/command-code-contracts.ts'
 import { FALLBACK_MODELS, PROVIDER_ID, resolveApiEnv } from './types.ts'
 import type { CredentialStore } from '../token-store.ts'
+import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
@@ -74,32 +73,36 @@ export interface CommandCodePreferenceStore {
 const DEFAULT_ENABLED_MODEL_IDS = FALLBACK_MODELS.map((model) => model.id)
 
 /**
- * Bind the model selection to the DSH settings document, which is what the
- * settings service can persist durably; the JSON file beside it remains the
- * store used when the plugin runs without a settings provider (headless tests).
+ * Bind the model selection to the DSH settings document when the harness still
+ * offers one, and to the JSON file beside it otherwise: a harness without the
+ * register seam (0.1.7, and a headless test) reads that file back on boot.
  */
 export function registerCommandCodePreferenceStore(
-  settings?: SettingsProvider,
+  settings?: unknown,
   fallbackStore = new FileModelSettingsStore(),
 ): CommandCodePreferenceStore {
-  if (!settings || typeof (settings as unknown as Record<string, unknown>).register !== 'function') {
+  if (!hasRegister(settings)) {
+    // With no settings namespace to persist in, the JSON file beside the
+    // credentials is the store. It is read once here, so a selection saved by an
+    // earlier run is still the selection on the next boot.
+    let snapshot: CommandCodeModelSettings = {
+      enabled: true,
+      enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
+      catalogModels: [],
+      contextWindowOverrides: {},
+      defaultReasoningEffort: null,
+    }
+    void fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
     return {
-      status: () => ({
-        enabled: true,
-        enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
-        catalogModels: [],
-        contextWindowOverrides: {},
-        defaultReasoningEffort: null,
-      }),
-      update: async (patch) => fallbackStore.updateSettings(patch),
+      status: () => snapshot,
+      update: async (patch) => {
+        snapshot = await fallbackStore.updateSettings(patch)
+        return snapshot
+      },
     }
   }
 
-  const ns = ((SettingsModule as unknown as Record<string, unknown>).settingsNamespace
-    ? ((SettingsModule as unknown as Record<string, Function>).settingsNamespace)(COMMAND_CODE_PREFERENCES_NAMESPACE)
-    : COMMAND_CODE_PREFERENCES_NAMESPACE) as unknown
-
-  const scope = (settings.register as Function).call(settings, ns, z.object({
+  const scope = settings.register(resolveSettingsNamespace(COMMAND_CODE_PREFERENCES_NAMESPACE), z.object({
     enabled: z.boolean().default(true),
     enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
     contextWindowOverrides: z.dict(z.number()).default({}),

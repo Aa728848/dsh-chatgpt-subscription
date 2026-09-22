@@ -20,6 +20,7 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { HarnessError, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
+import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertPublicFetchTarget, lookupHostAddresses } from '../fetch-address-policy.ts'
 import { MAX_VIDEO_FILE_BYTES, mediaTypeForPath, saveVideo, VideoIngestError } from './video-store.ts'
@@ -255,8 +256,7 @@ export function createKimiVideoTool(ctx: Context, options: KimiVideoToolOptions 
           ...(question === '' ? [] : [{ type: 'text' as const, text: question }]),
         ],
         source: {
-          kind: 'plugin',
-          plugin: 'dsh-chatgpt-subscription',
+          kind: PLUGIN_MESSAGE_SOURCE_KIND,
           form: 'notice',
           summary: `Attached video ${loaded.name} for the next request.`,
         },

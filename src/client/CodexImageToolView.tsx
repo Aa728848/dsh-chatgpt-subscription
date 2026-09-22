@@ -71,7 +71,15 @@ function promptFromBlock(block: Props['block']): string | null {
   }
 }
 
-function imageBlocks(blocks: readonly ContentBlock[]): ImageAttachmentRef[] {
+/** Pre-0.1.7 tool-result block: a harness that still carries one nests its content here. */
+interface LegacyToolResultBlock {
+  type: 'tool-result'
+  content: readonly ContentBlock[]
+}
+
+type ToolViewBlock = ContentBlock | LegacyToolResultBlock
+
+function imageBlocks(blocks: readonly ToolViewBlock[]): ImageAttachmentRef[] {
   const result: ImageAttachmentRef[] = []
   for (const block of blocks) {
     if (block.type === 'image') result.push(block.attachment)
@@ -80,7 +88,7 @@ function imageBlocks(blocks: readonly ContentBlock[]): ImageAttachmentRef[] {
   return result
 }
 
-function textSummary(blocks: readonly ContentBlock[]): string | null {
+function textSummary(blocks: readonly ToolViewBlock[]): string | null {
   const text = blocks
     .map((block) => block.type === 'text' || block.type === 'reasoning' ? block.text : '')
     .filter(Boolean)

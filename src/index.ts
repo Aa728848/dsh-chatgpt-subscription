@@ -71,20 +71,14 @@ import {
   validateDelegationToolNames,
   type SessionsResolver,
 } from './host/subagent-model-authorization.ts'
-import {
-  BUNDLED_PRESET_IDS,
-  bundledPresetsRoot,
-  presetTargetRoot,
-  rewritePresetFile,
-  syncPresetTrees,
-} from './host/preset-sync.ts'
+import { installBundledPresets } from './host/preset-sync.ts'
+import { installDispatchPreset } from './host/agent-preset.ts'
 import {
   auditChildRoutes,
   auditedRoutesOf,
   type AuditedSessions,
 } from './host/subagent-route-audit.ts'
 import type { SubagentRouteAuditDto } from './shared/contracts.ts'
-import { dshHomeDir } from './host/antigravity/token-store.ts'
 import {
   createFileRelayProbeSink,
   installRelayProbe,
@@ -139,31 +133,22 @@ export const Config: z<Config> = z.object({
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
 
 export function apply(ctx: Context, pluginConfig: Config = {}): void {
-  // Ship the bundled agent presets: DSH discovers presets from the harness-home
-  // root, so an npm install only makes them selectable once they are copied
-  // there. Idempotent, and scoped to the ids this package owns.
+  // Ship the bundled agent presets. Harness 0.1.7 registers presets from a
+  // plugin row instead of reading the harness-home root, so the runtime
+  // declaration is preferred and the home copy stays the mechanism for every
+  // generation before it — or the fallback when the declaration is unavailable.
   if (pluginConfig.syncAgentPresets !== false) {
-    ctx.effect(() => {
-      try {
-        const target = presetTargetRoot(dshHomeDir())
-        const result = syncPresetTrees(bundledPresetsRoot(), target, [...BUNDLED_PRESET_IDS], rewritePresetFile)
-        for (const { id, error } of result.failed) {
-          ctx.logger.warn(`[dsh-chatgpt-subscription] agent preset "${id}" sync failed: ${error}`)
-        }
-        if (result.synced.length > 0) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] agent presets synced into ${target}: ${result.synced.join(', ')}`)
-        }
-      } catch (error) {
-        // A read-only home or a locked directory must not fail plugin load:
-        // the preset is a convenience, not a capability this plugin provides.
-        ctx.logger.warn(`[dsh-chatgpt-subscription] agent preset sync skipped: ${String(error)}`)
-      }
-      return () => undefined
-    }, 'dsh-chatgpt-subscription: agent preset sync')
+    ctx.effect(
+      () => installBundledPresets(ctx, installDispatchPreset(ctx)),
+      'dsh-chatgpt-subscription: agent preset sync',
+    )
   }
 
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
+  // The fallback document is read off the plugin-load path: the store reports
+  // the shipped defaults until the file lands, and a read failure is harmless.
+  void preferences.hydrate().catch(() => undefined)
 
   const antigravityStore = new FileCredentialStore()
   const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)

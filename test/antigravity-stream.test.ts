@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { BlockAssembler, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
+import type { GenerateOptions, StreamChunk } from '../src/host/common/llm-compat.ts'
 import { toToolCallId } from '../src/host/common/brand-compat.ts'
 import { buildRequest, closeStream, createStreamState, processStreamLine } from '../src/host/antigravity/mapper.ts'
 import { MODELS, ROUTING } from '../src/host/antigravity/types.ts'
@@ -19,9 +21,11 @@ function requestParts(assembler: BlockAssembler): Array<Record<string, unknown>>
     content: assembler.blocks(),
     source: { provider: 'antigravity', model: model.id, replayState: assembler.replayState },
   })
-  const request = buildRequest({
+  // The harness hands the adapter a request; the adapter normalizes it once
+  // before any mapper sees it, so a mapper test enters the same way.
+  const request = buildRequest(normalizeGenerateOptions({
     provider: 'antigravity', model: model.id, messages: [message],
-  } as GenerateOptions, model, 'project', 'gemini-3.7-flash-tiered', 'high')
+  }), model, 'project', 'gemini-3.7-flash-tiered', 'high')
   return (request.request as { contents: Array<{ parts: Array<Record<string, unknown>> }> }).contents[0].parts
 }
 
@@ -170,7 +174,7 @@ describe('Antigravity final usage and thought replay', () => {
   })
 
   it('replays old per-block signatures and keeps unsigned reasoning distinct from answer text', () => {
-    const options = {
+    const options = normalizeGenerateOptions({
       provider: 'antigravity', model: model.id,
       messages: [createAssistantMessage({
         content: [{ type: 'reasoning', text: 'Plan' }, { type: 'reasoning', text: 'Next' }, { type: 'text', text: 'Answer' }],
@@ -178,7 +182,7 @@ describe('Antigravity final usage and thought replay', () => {
           response: { outputItems: [{ thinkingSignature: 'old-signature' }, {}, { textSignature: 'text-signature' }] },
         } },
       })],
-    } as GenerateOptions
+    })
     const request = buildRequest(options, model, 'project', 'gemini-3.7-flash-tiered')
     expect((request.request as any).contents[0].parts).toEqual([
       { thought: true, text: 'Plan', thoughtSignature: 'old-signature' },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
 import { buildRequest, stripMetaSchema } from '../src/host/antigravity/mapper.ts'
 import { MODELS } from '../src/host/antigravity/types.ts'
 

@@ -16,7 +16,10 @@ import {
   ANTIGRAVITY_SYSTEM_INSTRUCTION,
   MODELS,
 } from '../src/host/antigravity/types.ts'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
+import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
+import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 describe('Antigravity Mapper', () => {
@@ -288,6 +291,37 @@ describe('Antigravity Mapper', () => {
     expect(assistantPartB.functionCall.id).toBe('call-2')
     expect(contentsB[1].parts[0].functionResponse.id).toBe('call-2')
     expect(assistantPartB.thoughtSignature).toBe('real_google_sig_123')
+  })
+
+  it('pairs a 0.1.7 tool-role result with the assistant tool call that asked for it', () => {
+    // The harness delivers the result as its own `role: 'tool'` message; the
+    // adapter normalizes it, and the mapper still has to find the call it
+    // answers to name the functionResponse and carry the wire id.
+    const options = normalizeGenerateOptions({
+      provider: 'antigravity',
+      model: 'gemini-3.7-flash',
+      messages: [
+        createAssistantMessage({
+          content: [{ type: 'tool-call', id: ToolCallId('call-1'), name: 'default_api:run_code', arguments: '{"code":"print(1)"}' }],
+          source: { provider: 'antigravity', model: 'gemini-3.7-flash' },
+        }),
+        createToolResultMessage({
+          callId: ToolCallId('call-1'),
+          content: [{ type: 'text', text: '1' }],
+          isError: false,
+        }),
+      ],
+    })
+
+    const request = buildRequest(options, testModel, 'test-proj', 'gemini-3.7-flash-tiered', 'high')
+    const contents = (request.request as Record<string, unknown>).contents as Array<any>
+    expect(contents[0].parts[0].functionCall.id).toBe('call-1')
+    expect(contents[0].parts[0].thoughtSignature).toBe('skip_thought_signature_validator')
+    expect(contents[1].parts[0].functionResponse).toEqual({
+      name: 'default_api:run_code',
+      response: { output: '1' },
+      id: 'call-1',
+    })
   })
 
 describe('Antigravity image attachments', () => {

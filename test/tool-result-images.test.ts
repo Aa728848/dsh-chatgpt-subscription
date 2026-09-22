@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
+import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 import {
@@ -107,6 +110,30 @@ function agOptions(messages: Message[]): GenerateOptions {
   return { provider: 'antigravity', model: 'gemini-3.7-flash', messages } as unknown as GenerateOptions
 }
 
+/**
+ * The same exchange as {@link toolResultMessages}, in the shape harness 0.1.7
+ * delivers: the tool result is its own `role: 'tool'` message, normalized at the
+ * adapter boundary before any mapper reads it.
+ * @param content - raw result blocks the tool returned.
+ */
+function currentGenerationMessages(content: readonly unknown[]): Message[] {
+  return normalizeGenerateOptions({
+    provider: 'command-code',
+    model: 'deepseek/deepseek-v4.1-flash',
+    messages: [
+      createAssistantMessage({
+        content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'get_window_state', arguments: '{}' }],
+        source: { provider: 'p', model: 'm' },
+      }),
+      createToolResultMessage({
+        callId: ToolCallId('call_1'),
+        content: content as never,
+        isError: false,
+      }),
+    ],
+  }).messages
+}
+
 const agModel = AG_MODELS.find((m) => m.id === 'gemini-3.7-flash')!
 
 /** The single `tool_result` block a body carries, wherever it landed. */
@@ -140,6 +167,22 @@ describe.each([
       { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', attachment: ATTACHMENT }] } as unknown as Message,
     ]), reader())
     expect([...images.keys()]).toEqual(['sha256:tool-result-shot'])
+  })
+
+  it('collects the same nested attachment from a 0.1.7 tool-role result message', async () => {
+    const messages = currentGenerationMessages([
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', attachment: ATTACHMENT },
+    ])
+    // The harness delivered one `role: 'tool'` message; the mappers read the
+    // user-role tool result the adapter normalized it into.
+    const images = await resolve(makeOptions(messages), reader())
+    expect([...images.keys()]).toEqual(['sha256:tool-result-shot'])
+    expect(images.get('sha256:tool-result-shot')).toEqual({
+      kind: 'inline',
+      mediaType: 'image/png',
+      data: PNG_BASE64,
+    })
   })
 })
 
@@ -223,6 +266,27 @@ describe('command-code tool-result images', () => {
     const openai = ccOpenAI(options, images).messages as Array<Record<string, unknown>>
     expect(JSON.stringify(openai[openai.length - 1]!.content)).toContain('screenshot.png could not be read')
   })
+
+  it('maps a 0.1.7 tool-role result message onto the same two wires', async () => {
+    const options = ccOptions(currentGenerationMessages([
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', attachment: ATTACHMENT },
+    ]))
+    const images = await ccResolve(options, reader())
+    const toolResult = toolResultBlock(ccAnthropic(options, images))
+    expect(toolResult.tool_use_id).toBe('call_1')
+    expect(toolResult.content).toEqual([
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_BASE64 } },
+    ])
+
+    const wire = ccOpenAI(options, images).messages as Array<Record<string, unknown>>
+    expect(wire.map((m) => m.role)).toEqual(['assistant', 'tool', 'user'])
+    expect(wire[1]).toEqual({ role: 'tool', tool_call_id: 'call_1', content: 'screenshot taken[image: screenshot.png]' })
+    expect(wire[2]!.content).toEqual([
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_BASE64}` } },
+    ])
+  })
 })
 
 describe('antigravity tool-result images', () => {
@@ -247,6 +311,23 @@ describe('antigravity tool-result images', () => {
     expect(parts).toHaveLength(1)
     expect(parts[0]).toHaveProperty('functionResponse')
     expect(JSON.stringify(parts[0])).not.toContain('inlineData')
+  })
+
+  it('maps a 0.1.7 tool-role result message onto the same functionResponse turn', async () => {
+    const options = agOptions(currentGenerationMessages([
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', attachment: ATTACHMENT },
+    ]))
+    const images = await agResolve(options, reader())
+    const body = agRequest(options, agModel, 'project', 'gemini-3.7-flash', undefined, images)
+    const contents = ((body.request as Record<string, unknown>).contents) as Array<Record<string, unknown>>
+    const turn = contents[contents.length - 1]!
+    const parts = turn.parts as Array<Record<string, unknown>>
+
+    expect(turn.role).toBe('user')
+    expect(parts).toHaveLength(2)
+    expect(parts[0]).toHaveProperty('functionResponse')
+    expect(parts[1]).toEqual({ inlineData: { mimeType: 'image/png', data: PNG_BASE64 } })
   })
 })
 
@@ -310,5 +391,25 @@ describe('kimi-code tool-result images', () => {
     expect(openai.map((m) => m.role)).toEqual(['assistant', 'tool'])
     const toolResult = toolResultBlock(kimiAnthropic(options))
     expect(toolResult.content).toBe('exit code 0')
+  })
+
+  it('maps a 0.1.7 tool-role result message onto the same two wires', async () => {
+    const options = kimiOptions(currentGenerationMessages([
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', attachment: ATTACHMENT },
+    ]))
+    const images = await kimiResolve(options, reader())
+    const toolResult = toolResultBlock(kimiAnthropic(options, images))
+    expect(toolResult.content).toEqual([
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_BASE64 } },
+    ])
+
+    const wire = kimiOpenAI(options, images, false, {}).messages as Array<Record<string, unknown>>
+    expect(wire.map((m) => m.role)).toEqual(['assistant', 'tool', 'user'])
+    expect(wire[1]!.content).toBe('screenshot taken[image: screenshot.png]')
+    expect(wire[2]!.content).toEqual([
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_BASE64}` } },
+    ])
   })
 })

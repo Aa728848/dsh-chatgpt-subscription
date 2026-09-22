@@ -8,7 +8,7 @@
  * that has no case for it.
  */
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import { buildRequest as buildCommandCodeRequest } from '../src/host/command-code/mapper.ts'
 import { buildRequest as buildKimiCodeRequest } from '../src/host/kimi-code/mapper.ts'
 import { inputModalitiesFor as commandCodeModalities } from '../src/host/command-code/types.ts'

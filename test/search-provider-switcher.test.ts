@@ -29,18 +29,30 @@ async function mountSwitcher() {
     }
   })
   await providers.await()
-  return { ctx, switcher: new SearchProviderSwitcher(ctx.loader), providers }
+  /**
+   * Settle the restart a selection triggered.
+   *
+   * The loader runs an entry restart behind its `internal/update` waterfall and
+   * `Entry.update()` does not await it, so `select()` resolves while the `web`
+   * service is disposed and the injected providers come back a tick later. This
+   * is the same wait `SearchProviderSwitcher` performs before it applies a
+   * selection, and it leaves every assertion below reading a live runtime.
+   */
+  const settled = async (): Promise<void> => {
+    await ctx.loader.resolve('web').fiber?.await()
+  }
+  return { ctx, switcher: new SearchProviderSwitcher(ctx.loader), settled }
 }
 
 describe('SearchProviderSwitcher', () => {
   it('repairs a configured entry whose running fiber still uses the previous provider', async () => {
-    const { ctx, switcher, providers } = await mountSwitcher()
+    const { ctx, switcher, settled } = await mountSwitcher()
     try {
       const entry = ctx.loader.resolve('web')
       entry.options.config = { searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_FETCH_PROVIDER_ID }
       expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe('http')
       await switcher.select('codex')
-      await providers.await()
+      await settled()
       expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
       const update = vi.spyOn(entry.fiber!, 'update')
       await switcher.select('codex')
@@ -49,10 +61,10 @@ describe('SearchProviderSwitcher', () => {
   })
 
   it('serializes rapid selections and ignores queued work after disposal', async () => {
-    const { ctx, switcher, providers } = await mountSwitcher()
+    const { ctx, switcher, settled } = await mountSwitcher()
     try {
       await Promise.all([switcher.select('codex'), switcher.select('dsh'), switcher.select('codex')])
-      await providers.await()
+      await settled()
       expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
       const pending = switcher.select('dsh')
       switcher.dispose()
@@ -62,11 +74,11 @@ describe('SearchProviderSwitcher', () => {
   })
 
   it('switches both search and fetch providers when selecting Codex', async () => {
-    const { ctx, switcher, providers } = await mountSwitcher()
+    const { ctx, switcher, settled } = await mountSwitcher()
     try {
       for (const preference of ['codex', 'dsh', 'codex'] as const) {
         await switcher.select(preference)
-        await providers.await()
+        await settled()
         expect(ctx.loader.resolve('web').options).toMatchObject({ id: 'web', name: 'cordis:web' })
         expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content)
           .toBe(preference === 'codex' ? CODEX_FETCH_PROVIDER_ID : 'http')
@@ -79,16 +91,16 @@ describe('SearchProviderSwitcher', () => {
   })
 
   it('hands the fetch tool to this plugin while a proxy makes the built-in provider unusable', async () => {
-    const { ctx, switcher, providers } = await mountSwitcher()
+    const { ctx, switcher, settled } = await mountSwitcher()
     try {
       await switcher.select('dsh', { pluginFetch: true })
-      await providers.await()
+      await settled()
       expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
       expect((await ctx.web.search({ query: 'example' })).sources[0].title).toBe('deepseek-official')
 
       // Losing the proxy returns the tool to the built-in provider without disturbing search.
       await switcher.select('dsh', { pluginFetch: false })
-      await providers.await()
+      await settled()
       expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe('http')
       expect((await ctx.web.search({ query: 'example' })).sources[0].title).toBe('deepseek-official')
     } finally {

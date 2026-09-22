@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
+import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import { buildResponsesPayload } from '../src/host/responses-mapper.ts'
 
 describe('Responses payload mapping', () => {
@@ -36,6 +39,32 @@ describe('Responses payload mapping', () => {
     expect(payload.input).toContainEqual({ type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"a"}' })
     expect(payload.input).toContainEqual({ type: 'function_call_output', call_id: 'call_1', output: 'done' })
     expect(payload).toMatchObject({ stream: true, store: false, tool_choice: 'auto', reasoning: { effort: 'high', summary: 'auto' } })
+  })
+
+  it('maps the tool-role result message 0.1.7 delivers to the same function_call_output item', async () => {
+    // The harness now sends the result as its own `role: 'tool'` message; the
+    // adapter normalizes it, and this route still has to answer the call.
+    const options = normalizeGenerateOptions({
+      provider: 'codex-chatgpt',
+      model: 'gpt-5.6-sol',
+      messages: [
+        createAssistantMessage({
+          content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'read_file', arguments: '{"path":"a"}' }],
+          source: { provider: 'codex-chatgpt', model: 'gpt-5.6-sol' },
+        }),
+        createToolResultMessage({
+          callId: ToolCallId('call_1'),
+          content: [{ type: 'text', text: 'done' }],
+          isError: false,
+        }),
+      ],
+    })
+
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload.input).toEqual([
+      { type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"a"}' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'done' },
+    ])
   })
 
   it('injects progress and tool execution rule when tools are present, omits when absent', async () => {

@@ -48,6 +48,7 @@ import {
   type AttachmentImageReader,
   type CommandCodeStreamState,
 } from './mapper.ts'
+import { normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 
@@ -228,7 +229,7 @@ export class CommandCodeAdapter extends LlmAdapter {
     // DSH delivers pasted images as durable references because this route
     // declares image input; both wires need bytes, so resolve them once up
     // front and reuse the result for every attempt below.
-    const requestOptions = offloadOldestRequestImages(options)
+    const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
     const body = JSON.stringify(buildRequest(requestOptions, wire, images))
 

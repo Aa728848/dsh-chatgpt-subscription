@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/antigravity/token-store.ts'
-import { BlockAssembler, createAssistantMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createAssistantMessage, createToolResultMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 import os from 'node:os'
@@ -69,6 +69,22 @@ describe('AntigravityAdapter', () => {
       ])
       expect(captured[1].request.contents[2].parts[0].functionResponse).toEqual({ id: 'run-1', name: 'run_code', response: { output: '1' } })
       for (const body of captured) expect(body.request.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH', includeThoughts: true })
+
+      // The same history as harness 0.1.7 delivers it: the result is its own
+      // `role: 'tool'` message, which the adapter normalizes before any mapper
+      // reads it. Both generations must build the same request.
+      const currentOptions = {
+        ...options,
+        messages: [...options.messages, assistant, createToolResultMessage({
+          callId: call.id,
+          content: [{ type: 'text', text: '1' }],
+          isError: false,
+        })],
+      }
+      const third = new BlockAssembler()
+      for await (const chunk of adapter.stream(currentOptions)) third.push(chunk)
+      expect(third.blocks()).toEqual(second.blocks())
+      expect(captured[2].request.contents).toEqual(captured[1].request.contents)
     } finally {
       globalThis.fetch = originalFetch
     }

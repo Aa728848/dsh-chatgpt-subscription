@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import type { GenerateOptions, StreamChunk } from '../src/host/common/llm-compat.ts'
+import { PLUGIN_MESSAGE_SOURCE_KIND, normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import {
   assertStreamComplete,
   buildAnthropicRequest,
@@ -24,7 +27,9 @@ function options(overrides: Record<string, unknown> = {}): GenerateOptions {
     provider: 'command-code',
     model: 'deepseek/deepseek-v4.1-flash',
     messages: [
-      { role: 'system', source: { kind: 'plugin', plugin: 'test' }, content: [{ type: 'text', text: 'You are DSH.' }] },
+      // The harness MessageSourceMap has no catch-all `plugin` kind any more;
+      // this package declares its own, and this contribution declares no form.
+      { role: 'system', source: { kind: PLUGIN_MESSAGE_SOURCE_KIND }, content: [{ type: 'text', text: 'You are DSH.' }] },
       { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] },
     ],
     ...overrides,
@@ -127,6 +132,40 @@ describe('Command Code request mapping', () => {
         { type: 'tool_result', tool_use_id: 'toolu_1', content: 'contents' },
         { type: 'text', text: 'and now?' },
       ] },
+    ])
+  })
+
+  it('projects a 0.1.7 tool-role result message identically on both wires', () => {
+    // The harness now delivers the result as its own `role: 'tool'` message and
+    // the adapter normalizes it; both generations must reach this same body.
+    const messages = normalizeGenerateOptions({
+      provider: 'command-code',
+      model: 'deepseek/deepseek-v4.1-flash',
+      messages: [
+        createAssistantMessage({
+          content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'read_file', arguments: '{"path":"a"}' }],
+          source: { provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash' },
+        }),
+        createToolResultMessage({
+          callId: ToolCallId('call_1'),
+          content: [{ type: 'text', text: 'contents' }],
+          isError: false,
+        }),
+      ],
+    }).messages
+
+    const openai = buildOpenAIRequest({ provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash', messages }) as unknown as GenerateOptions
+    expect(openai.messages).toEqual([
+      { role: 'assistant', content: '', tool_calls: [
+        { id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a"}' } },
+      ] },
+      { role: 'tool', tool_call_id: 'call_1', content: 'contents' },
+    ])
+
+    const anthropic = buildAnthropicRequest({ provider: 'command-code', model: 'claude-sonnet-4-6', messages }) as unknown as GenerateOptions
+    expect(anthropic.messages).toEqual([
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'read_file', input: { path: 'a' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'contents' }] },
     ])
   })
 

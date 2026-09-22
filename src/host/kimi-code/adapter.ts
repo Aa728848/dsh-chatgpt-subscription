@@ -61,6 +61,7 @@ import {
   type AttachmentVideoReader,
   type KimiCodeStreamState,
 } from './mapper.ts'
+import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { KimiCodeAccountPool } from './account-pool.ts'
 import { ensureAccessToken, KimiCodeUnauthorizedError } from './oauth.ts'
@@ -463,7 +464,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     // front and reuse the result for the single request below. Video travels
     // the same path and is dropped oldest-first against its own, far larger
     // budget, because one clip dwarfs the whole image allowance.
-    const requestOptions = offloadOldestRequestVideos(offloadOldestRequestImages(options))
+    const requestOptions = offloadOldestRequestVideos(offloadOldestRequestImages(normalizeGenerateOptions(options)))
     const [images, videos] = await Promise.all([
       resolveRequestImages(requestOptions, this.options.attachments, signal),
       resolveRequestVideos(requestOptions, this.options.videos, signal),
@@ -488,7 +489,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     // caller is told about an oversized body rather than about a limit sized
     // for text alone.
     const requestedMax = options.maxTokens ?? maxOutputTokensFor(options.model, contextWindow)
-    const boundedOptions: GenerateOptions = {
+    const boundedOptions: NormalizedGenerateOptions = {
       ...requestOptions,
       maxTokens: clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions)),
     }

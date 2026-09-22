@@ -1,5 +1,6 @@
 /**
- * Sync this plugin's bundled agent presets into the harness-home preset root.
+ * Get this plugin's bundled agent presets in front of the running harness:
+ * either declared at runtime, or copied into the harness-home preset root.
  *
  * DSH discovers agent presets only from configured roots, the shipped
  * `agent-presets` package's own `presets/` directory, and
@@ -23,6 +24,14 @@
  * does not ship makes the whole preset unresolvable. Text naming a package the
  * harness renamed is therefore reconciled with the installation before it is
  * compared or written.
+ *
+ * Harness 0.1.7 stopped reading that root and takes presets from a plugin row
+ * instead, which this package declares at runtime
+ * (`src/host/agent-preset.ts`, because shipping the row itself would break the
+ * generations that do not have it). {@link installBundledPresets} is the one
+ * entry point for both mechanisms: it copies the tree only when that runtime
+ * declaration was unavailable, so a harness that reads no discovery root is
+ * never written to.
  * @module dsh-chatgpt-subscription/preset-sync
  */
 
@@ -30,6 +39,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpat
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { PresetHost, PresetInstall } from './agent-preset.ts'
 
 /** The preset directory this package ships. */
 export const BUNDLED_PRESET_IDS: readonly string[] = ['dispatch']
@@ -499,4 +509,35 @@ export function syncPresetTrees(
     }
   }
   return result
+}
+
+/**
+ * Make this package's bundled agent presets available on the running harness.
+ *
+ * The harness-home copy is the mechanism for every generation before 0.1.7,
+ * and the fallback for one whose runtime declaration is missing or unusable.
+ * It is skipped entirely when the declaration already took the presets: a
+ * harness that registers presets from a plugin row reads no discovery root, so
+ * the copy would write files nothing reads.
+ * @param host - plugin context: the effect seam and the logger.
+ * @param install - what the runtime declaration attempt reported.
+ * @returns the effect body's disposer, for `ctx.effect`.
+ */
+export function installBundledPresets(host: PresetHost, install: PresetInstall): () => void {
+  if (install === 'registered') return () => undefined
+  try {
+    const target = presetTargetRoot(dshHomeDir())
+    const result = syncPresetTrees(bundledPresetsRoot(), target, [...BUNDLED_PRESET_IDS], rewritePresetFile)
+    for (const { id, error } of result.failed) {
+      host.logger.warn(`[dsh-chatgpt-subscription] agent preset "${id}" sync failed: ${error}`)
+    }
+    if (result.synced.length > 0) {
+      host.logger.info(`[dsh-chatgpt-subscription] agent presets synced into ${target}: ${result.synced.join(', ')}`)
+    }
+  } catch (error) {
+    // A read-only home or a locked directory must not fail plugin load:
+    // the preset is a convenience, not a capability this plugin provides.
+    host.logger.warn(`[dsh-chatgpt-subscription] agent preset sync skipped: ${String(error)}`)
+  }
+  return () => undefined
 }

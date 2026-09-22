@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import {
   buildAnthropicRequest,
   buildOpenAIRequest,

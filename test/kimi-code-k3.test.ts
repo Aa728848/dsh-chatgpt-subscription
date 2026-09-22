@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import {
   MAX_MESSAGE_BODY_BYTES,
   MAX_STOP_SEQUENCE_BYTES,

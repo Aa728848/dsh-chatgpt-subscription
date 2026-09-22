@@ -85,6 +85,7 @@
 
 **设置页**
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
+- **偏好落盘位置随 harness 生成**：有 `settings.register` 的一代（≤0.1.6）仍写进 harness 的设置文档；0.1.7 起该 API 被 `SettingsForms` 取代，偏好改由插件自己持久化到 `<dshHome>/storages/dsh-chatgpt-subscription-preferences.json`（0600、原子写；读取失败或校验不过就回落默认值；**首次运行会从旧设置文档里本插件的段一次性迁移**），五条线路的模型开关同样从各自既有的 `storages/*-models.json` 水合，因此重启后不会像被重置；
 - 子代理的模型与思考深度沿用 DSH 自身设置：**设置 → Subagent** 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 `agent-default-model` 设置提供；
 - 最大嵌套深度不在本插件设置内，由 DSH 侧决定：0.1.5 及以前是 preset 中 `tool-subagent` 行的 `maxDepth`（默认 3），0.1.6 起改由 `subagent` 服务的设置项提供（默认 1）；`provider-managed` 表示把预算交给进程外提供方；
 - 6 Astra 与 5.6 Sol / Terra / Luna 默认使用 272K 有效上下文；订阅侧 6 Astra 可配置最高 872K，5.6 系列最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
@@ -114,7 +115,7 @@
 - Windows 或 Linux；
   - Windows：系统需提供 Windows PowerShell，以使用 CurrentUser DPAPI；
   - Linux：Host 用户必须拥有可写的 `~/.dsh`（或 `$DSH_HOME`），凭据文件会强制使用 `0600`、目录使用 `0700`；
-- 已安装 DSH：peer 范围覆盖 0.1.2-alpha.5 及以后的 0.1.x（含 0.1.5-rc.2 与 0.1.6-alpha）。构建与测试以 **0.1.5-rc.2** 为基线（npm 上 `@deepseek-ai/dsh` 的 `latest`，也就是用户实际在跑的版本）。0.1.1-rc.2 不再声明支持——它既没有 preset 用到的 `present` 工具，`mode` 枚举那时也还写作 `code`；0.1.6 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见下）；
+- 已安装 DSH：peer 范围覆盖 0.1.2-alpha.5 及以后的 0.1.x（含 0.1.5-rc.2、0.1.6-alpha 与 0.1.7-alpha.1）。构建与测试以 **0.1.7-alpha.1**（npm 上 `@deepseek-ai/dsh` 的 `alpha`）为基线，旧版行为由版本兼容层保留：0.1.7 重写了会话消息模型（工具结果由 `tool-result` 内容块改为 `role: "tool"` 消息）、删除了 `settings.register`（偏好改由插件自有存储落盘）、并让 agent preset 不再从 `~/.dsh/.agent-presets` 读取，插件在请求边界、设置服务与 preset 注册三处同时适配，因此同一份代码可装在 0.1.2-alpha.5 以来的各代上。0.1.1-rc.2 不再声明支持——它既没有 preset 用到的 `present` 工具，`mode` 枚举那时也还写作 `code`；0.1.6 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见下）；
 - Node.js 与 npm。
 
 ## 安装
@@ -201,7 +202,9 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 G
 
 ## 随包分发的 Agent Preset
 
-插件自带一个 **调度模式** agent preset（id `dispatch`），随 npm 安装一起分发：启动时会把它从包内 `presets/dispatch/` 同步到 DSH 的 preset 发现根目录 `<dshHome>/.agent-presets/`，因此任何装了本插件的机器都能在新建会话时直接选到它，不需要手工拷贝文件。
+插件自带一个 **调度模式** agent preset（id `dispatch`），随 npm 安装一起分发：0.1.7 起 harness 不再从发现根目录读取 preset，插件改为**运行时注册**（`src/host/agent-preset.ts`：探测 `@deepseek-ai/dsh-agent-preset` 能否解析、`agentPresets` 服务是否在场，然后在 `presets/dispatch/preset.yml` 与 `agent.cordis.yml` 转录出的定义上调用 `register()`，注册失败只记 warn）；0.1.6 及以前仍按老办法把包内 `presets/dispatch/` 同步到 `<dshHome>/.agent-presets/`。两条路都让装了本插件的机器在新建会话时直接选到它，不需要手工拷贝文件。
+
+> 为什么不用静态声明行：0.1.7 的 preset 声明要写进 bundle patch，而 `assertEntriesLoaded` 会把「无 fiber 且未 disabled」的条目判为启动失败——`@deepseek-ai/dsh-agent-preset` 在 ≤0.1.6 上并不存在，静态声明会让那些机器直接开不了机。声明行也不能按运行环境条件化，所以选择运行时注册 + 能力探测。
 
 同步在每个 profile 启动时执行一次（幂等）：
 

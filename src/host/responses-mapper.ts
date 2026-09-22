@@ -1,5 +1,5 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
-import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, Message } from './common/llm-compat.ts'
 import { createHash } from 'node:crypto'
 import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
@@ -572,8 +572,8 @@ function blocksToText(blocks: readonly ContentBlock[]): string {
 }
 
 function replayOutputItems(message: Message): Array<Record<string, unknown>> | null {
-  if (message.source.kind !== 'model') return null
-  const replay = message.source.replayState
+  if (message.source?.kind !== 'model') return null
+  const replay = message.source?.replayState
   if (typeof replay !== 'object' || replay === null || Array.isArray(replay)) return null
   const envelope = replay as Record<string, unknown>
   const items = Array.isArray(envelope.outputItems)
