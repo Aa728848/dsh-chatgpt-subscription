@@ -9,6 +9,11 @@ This repository is a DeepSeek Harness(DSH) plugin that exposes ChatGPT subscript
 - `src/client/`: web settings UI, client API helpers, and styles.
 - `src/shared/`: shared DTO/contracts.
 - `test/`: Vitest unit and jsdom tests.
+- `.dsh/skills/dsh-harness-upgrade/`: maintenance skill for harness upgrades — the compatibility seams, the upgrade procedure, the verification recipe, and per-release notes under `references/`. Not published with the package.
+
+## Harness Compatibility
+
+One code base supports every 0.1.x harness generation (peer range in `package.json`), because users are spread across npm's `latest`, `next`, and `alpha` tags. Never simplify a provider path by assuming the newest generation's shape. Every harness delta is bridged at a boundary listed in `.dsh/skills/dsh-harness-upgrade/SKILL.md`, which also records the dual-baseline verification recipe; read it before changing anything version-sensitive.
 
 ## Build, Test, and Development Commands
 
