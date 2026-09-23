@@ -167,6 +167,7 @@ export function registerAntigravityRoutes(
           } else {
             await modelSettings.updateSettings(body)
           }
+          if (body.enabledModelIds !== undefined || body.enabled !== undefined) ctx.emit?.('llm/adapters-updated')
           const value = await getAntigravityWebStatus(store, modelSettings, preferences, accountPool)
           return sendJson(response, 200, { ok: true, value })
         }
@@ -184,6 +185,7 @@ export function registerAntigravityRoutes(
               } else {
                 await modelSettings.updateSettings(body)
               }
+              if (body.enabledModelIds !== undefined || body.enabled !== undefined) ctx.emit?.('llm/adapters-updated')
             }
             const status = await getAntigravityWebStatus(store, modelSettings, preferences, accountPool)
             return sendJson(response, 200, { ok: true, value: status })

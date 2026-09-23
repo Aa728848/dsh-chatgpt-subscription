@@ -673,7 +673,8 @@ describe('WorkBuddy routes', () => {
     const dir = await makeAuthDir()
     const settings = await makeSettings()
     const handlers: any[] = []
-    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, undefined, {
+    const emit = vi.fn()
+    registerWorkBuddyRoutes({ ...makeContext(handlers), emit }, createWorkBuddyStore(dir), settings, undefined, {
       fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
     })
     const res = makeResponse()
@@ -684,6 +685,7 @@ describe('WorkBuddy routes', () => {
     expect(res.captured.status).toBe(200)
     expect((await settings.read()).enabledModelIds).toEqual(['glm-5.3'])
     expect((await settings.read()).defaultReasoningEffort).toBe('max')
+    expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
   })
 
   it('persists a selected regional account and returns its model catalog', async () => {

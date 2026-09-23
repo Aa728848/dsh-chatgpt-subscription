@@ -334,7 +334,8 @@ describe('Command Code settings routes', () => {
     const update = vi.fn(async (patch: unknown) => patch)
     const preferences = { status: () => ({ enabledModelIds: [], catalogModels: [], contextWindowOverrides: {}, defaultReasoningEffort: null }), update }
     const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
-    const ctx = { webServer: { register(route: { handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) { routes.push(route); return () => undefined } } } as unknown as Context
+    const emit = vi.fn()
+    const ctx = { emit, webServer: { register(route: { handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) { routes.push(route); return () => undefined } } } as unknown as Context
     registerCommandCodeRoutes(ctx, store, modelSettings, preferences as never)
     const { response, captured } = fakeExchange()
     await routes[0]!.handler(
@@ -343,6 +344,7 @@ describe('Command Code settings routes', () => {
     )
     expect(captured.status).toBe(200)
     expect(update).toHaveBeenCalledWith({ enabledModelIds: ['claude-sonnet-4-6'], contextWindowOverrides: { 'claude-sonnet-4-6': 400_000 } })
+    expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
   })
 
   it('rejects a cross-origin mutation and an unsupported method', async () => {

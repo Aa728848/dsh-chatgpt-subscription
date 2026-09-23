@@ -221,6 +221,16 @@ describe('Kimi Code settings routes', () => {
     expect(captured.status).toBe(400)
   })
 
+  it('invalidates the model catalog after a successful model toggle', async () => {
+    const emit = vi.fn()
+    const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    registerKimiCodeRoutes({ emit, webServer: { register(route: typeof routes[number]) { routes.push(route); return () => undefined } } } as unknown as Context, store, modelSettings, undefined, { fetchFn: fetchMock as unknown as typeof fetch })
+    const { response, captured } = fakeExchange()
+    await routes[0]!.handler(fakeRequest({ url: '/kimi-code/api/models', method: 'POST', body: { enabledModelIds: ['k3'] } }), response)
+    expect(captured.status).toBe(200)
+    expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
+  })
+
   it('reports the catalog and honours the enabled selection', async () => {
     vi.spyOn(store, 'read').mockResolvedValue(credential() as never)
     vi.spyOn(store, 'write').mockResolvedValue(undefined)

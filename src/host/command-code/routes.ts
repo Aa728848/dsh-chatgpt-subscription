@@ -364,6 +364,7 @@ export function registerCommandCodeRoutes(
           }
           if (preferences) await preferences.update(patch)
           else await modelSettings.updateSettings(patch)
+          if (patch.enabledModelIds !== undefined || patch.enabled !== undefined) ctx.emit?.('llm/adapters-updated')
           const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
         }

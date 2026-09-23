@@ -175,9 +175,13 @@ export function registerRoutes(
         case `${ROUTE_PREFIX}/connection/test`:
           json(response, { ok: true, value: await usage.testConnection() })
           return
-        case `${ROUTE_PREFIX}/preferences/update`:
-          json(response, { ok: true, value: await preferences.update(readPreferencesUpdate(body, preferences.status())) })
+        case `${ROUTE_PREFIX}/preferences/update`: {
+          const patch = readPreferencesUpdate(body, preferences.status())
+          const value = await preferences.update(patch)
+          if (patch.visibleModelIds !== undefined || patch.enabled !== undefined) ctx.emit?.('llm/adapters-updated')
+          json(response, { ok: true, value })
           return
+        }
         default:
           jsonError(response, 404, { code: 'bad-request', message: 'Route not found.' })
       }

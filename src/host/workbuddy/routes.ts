@@ -530,6 +530,7 @@ export function registerWorkBuddyRoutes(
           }
           if (preferences) await preferences.update(patch)
           else await modelSettings.updateSettings(patch)
+          if (patch.enabledModelIds !== undefined || patch.enabled !== undefined || patch.selectedAccountId !== undefined) ctx.emit?.('llm/adapters-updated')
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
           return sendJson(response, 200, { ok: true, value })
         }

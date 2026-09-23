@@ -1,5 +1,5 @@
 import http from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ROUTE_PREFIX } from '../src/compat.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { registerRoutes } from '../src/host/routes.ts'
@@ -29,7 +29,9 @@ describe('host routes', () => {
     })
     const oauth = new OAuthService(store, { logger: { info: () => undefined, warn: () => undefined } })
     const routes: Array<{ kind: string; path: string; handler: http.RequestListener }> = []
+    const emit = vi.fn()
     const ctx = {
+      emit,
       llm: {
         listProviders: () => [
           { id: 'codex-chatgpt', name: 'Codex' },
@@ -144,6 +146,16 @@ describe('host routes', () => {
         customProxyUrl: 'http://127.0.0.1:8888',
       },
     })
+
+    expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
+    emit.mockClear()
+    const unrelatedPreferences = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ fastMode: false }),
+    })
+    expect(unrelatedPreferences.status).toBe(200)
+    expect(emit).not.toHaveBeenCalled()
 
     const rejectedReasoningSummary = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
