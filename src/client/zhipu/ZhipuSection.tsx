@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import type {
   ZhipuAccountSummaryDto,
-  ZhipuLoginFlowStatus,
   ZhipuModelOption,
   ZhipuReasoningEffort,
   ZhipuRegion,
@@ -104,8 +103,6 @@ export function ZhipuSection({ onModelChange, loadModelDirectory }: Props): Reac
   const [savingModel, setSavingModel] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [region, setRegion] = useState<ZhipuRegion>('intl')
-  const [flow, setFlow] = useState<ZhipuLoginFlowStatus | null>(null)
-  const [loginCode, setLoginCode] = useState('')
 
   const t = zh
 
@@ -139,79 +136,6 @@ export function ZhipuSection({ onModelChange, loadModelDirectory }: Props): Reac
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
   }, [loadStatus])
-
-  // The browser grant runs on the host and is polled here, exactly like the
-  // Kimi device-code flow: the card cannot observe a browser it does not control.
-  useEffect(() => {
-    if (flow?.status !== 'pending') return
-    const timer = window.setInterval(() => {
-      void (async () => {
-        try {
-          const poll = await fetchApi<ZhipuLoginFlowStatus>('/login/status')
-          setFlow(poll)
-          if (poll.status === 'complete') {
-            setLoginCode('')
-            await loadStatus()
-            notifyChange()
-          } else if (poll.status === 'error') {
-            setError(poll.error || t.signInFailed)
-          }
-        } catch {
-          // A failed poll is transient; the next tick retries.
-        }
-      })()
-    }, 2000)
-    return () => window.clearInterval(timer)
-  }, [flow?.status, loadStatus, notifyChange, t.signInFailed])
-
-  /** Start the host-side browser sign-in; the host opens the browser itself. */
-  const handleBrowserSignIn = async () => {
-    try {
-      setBusy('login')
-      setError(null)
-      setLoginCode('')
-      const next = await fetchApi<ZhipuLoginFlowStatus>('/login', {
-        method: 'POST',
-        body: JSON.stringify({ region: 'intl' }),
-      })
-      setFlow(next)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const handleCancelSignIn = async () => {
-    try {
-      await fetchApi<ZhipuLoginFlowStatus>('/login/cancel', { method: 'POST' })
-      setFlow({ status: 'idle' })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  /**
-   * Finish a pending attempt with a code pasted from the browser.
-   *
-   * The recovery path for a browser that cannot reach this machine's loopback
-   * port: the redirect fails, but the address bar still holds the code.
-   */
-  const handleSubmitCode = async () => {
-    try {
-      setBusy('login-code')
-      setError(null)
-      const next = await fetchApi<ZhipuLoginFlowStatus>('/login/code', {
-        method: 'POST',
-        body: JSON.stringify({ code: loginCode }),
-      })
-      setFlow(next)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(null)
-    }
-  }
 
   /**
    * Save one pasted key.
@@ -465,8 +389,11 @@ export function ZhipuSection({ onModelChange, loadModelDirectory }: Props): Reac
         rotationStrategy={status?.rotationStrategy ?? 'sequential'}
         busy={busy}
         labels={t}
-        onLogin={() => void handleBrowserSignIn()}
-        loginBusyLabel={flow?.status === 'pending' ? t.signInWaiting : undefined}
+        // Adding an account here is pasting a key rather than a browser flow,
+        // so the card's own button focuses the key input the children render.
+        onLogin={() => {
+          document.querySelector<HTMLInputElement>(`.dsha-page input[type=password]`)?.focus()
+        }}
         onSetPrimary={(accountId) => void handleAccountAction('set-primary', accountId)}
         onDelete={(accountId) => void handleAccountAction('delete', accountId)}
         onClearCooldown={(accountId) => void handleAccountAction('clear-cooldown', accountId)}
@@ -481,58 +408,6 @@ export function ZhipuSection({ onModelChange, loadModelDirectory }: Props): Reac
         )}
       >
         <p className="dsha-muted" style={{ paddingTop: 12 }}>{t.addKeyHint}</p>
-
-        {/*
-          The browser grant is the account-adding path the console itself uses,
-          so it leads; the key field below stays as the recovery path and as the
-          only one the China console has.
-        */}
-        <div className="dshzp-login">
-          <button
-            type="button"
-            className="dsha-btn dsha-btn-primary"
-            disabled={busy !== null || flow?.status === 'pending'}
-            onClick={() => void handleBrowserSignIn()}
-          >
-            {flow?.status === 'pending' ? t.signInWaiting : t.signIn}
-          </button>
-          {flow?.status === 'pending' && (
-            <button type="button" className="dsha-btn" onClick={() => void handleCancelSignIn()}>
-              {t.signInCancel}
-            </button>
-          )}
-          <span className="dsha-muted">{t.signInRegionHint}</span>
-        </div>
-
-        {flow?.status === 'pending' && flow.authUrl !== undefined && (
-          <div className="dsha-device-box">
-            <strong>{t.signIn}</strong>
-            <p className="dsha-muted">{t.signInHint}</p>
-            <p className="dshzp-mono" style={{ wordBreak: 'break-all' }}>{flow.authUrl}</p>
-            <p className="dsha-muted">{t.signInCompleteHint}</p>
-            <div className="dshzp-keyrow">
-              <input
-                type="text"
-                aria-label={t.codePlaceholder}
-                placeholder={t.codePlaceholder}
-                value={loginCode}
-                onChange={(event) => setLoginCode(event.currentTarget.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && loginCode.trim() !== '') void handleSubmitCode()
-                }}
-              />
-              <button
-                type="button"
-                className="dsha-context-save"
-                disabled={busy !== null || loginCode.trim() === ''}
-                onClick={() => void handleSubmitCode()}
-              >
-                {busy === 'login-code' ? t.codeSubmitting : t.codeSubmit}
-              </button>
-            </div>
-          </div>
-        )}
-
         <div className="dsha-capacity-control dshzp-keyrow">
           <select
             className="dsha-select"

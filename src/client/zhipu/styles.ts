@@ -18,8 +18,6 @@ export function installZhipuStyles(): void {
 .dshzp-keyrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .dshzp-keyrow .dsha-select{min-width:190px}
 .dshzp-keyrow input[type=password]{flex:1 1 260px;min-width:200px}
-.dshzp-keyrow input[type=text]{flex:1 1 320px;min-width:220px}
-.dshzp-login{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
 `
   document.head.append(style)
 }

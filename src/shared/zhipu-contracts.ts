@@ -194,30 +194,6 @@ export interface ZhipuWebStatus extends Partial<AccountPoolStatusDto> {
   quotaError: string | null
 }
 
-/**
- * Live state of the browser sign-in flow the card polls.
- *
- * The browser is not something the card controls, so — exactly like the Kimi
- * device-code flow — the attempt runs on the host and the card follows it here.
- * `authUrl` is always rendered, even when the host also opened a browser, so a
- * failed launch is recoverable by hand.
- */
-export interface ZhipuLoginFlowStatus {
-  status: 'idle' | 'pending' | 'complete' | 'error'
-  /** Authorization page the browser must open for this attempt. */
-  authUrl?: string
-  /** Deployment the sign-in targets; this flow mints international keys only. */
-  region?: ZhipuRegion
-  startedAt?: number
-  completedAt?: number
-  /** Human-readable stage, for the pending state. */
-  progress?: string
-  /** Email the account reported, once the flow completes. */
-  email?: string
-  /** Why the attempt failed: a denominator error, or the verification verdict. */
-  error?: string
-}
-
 /** Patch accepted by the models/settings route. */
 export interface ZhipuSettingsUpdateDto {
   enabled?: boolean

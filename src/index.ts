@@ -858,21 +858,7 @@ export {
   registerZhipuRoutes,
   resolveEnabledModelIds as resolveZhipuEnabledModelIds,
   buildModelOptions as buildZhipuModelOptions,
-  getWebLoginStatus as getZhipuWebLoginStatus,
 } from './host/zhipu/routes.ts'
-export {
-  beginWebLogin as beginZhipuWebLogin,
-  buildAuthorizeUrl as buildZhipuAuthorizeUrl,
-  defaultOAuthEndpoints as zhipuOAuthEndpoints,
-  exchangeAuthorizationCode as exchangeZhipuAuthorizationCode,
-  extractAuthorizationCode as extractZhipuAuthorizationCode,
-  getWebLoginStatus as getZhipuLoginStatus,
-  mintApiKey as mintZhipuApiKey,
-  resetWebLogin as resetZhipuWebLogin,
-  submitLoginCode as submitZhipuLoginCode,
-  type ZaiAuthorization,
-  type ZaiOAuthEndpoints,
-} from './host/zhipu/oauth.ts'
 export {
   FALLBACK_MODELS as ZHIPU_MODELS,
   ZHIPU_MODELS as ZHIPU_MODEL_TABLE,
@@ -893,9 +879,6 @@ export {
   QUOTA_PATH as ZHIPU_QUOTA_PATH,
   REGION_BASE_URLS as ZHIPU_REGION_BASE_URLS,
   SUBSCRIPTION_PATH as ZHIPU_SUBSCRIPTION_PATH,
-  ZAI_OAUTH as ZHIPU_ZAI_OAUTH,
-  ZAI_OAUTH_CALLBACK_PATH as ZHIPU_ZAI_OAUTH_CALLBACK_PATH,
-  ZAI_OAUTH_CALLBACK_PORT as ZHIPU_ZAI_OAUTH_CALLBACK_PORT,
   apiBaseForRegion as zhipuApiBaseForRegion,
   normalizeRegion as normalizeZhipuRegion,
   regionForBaseUrl as zhipuRegionForBaseUrl,

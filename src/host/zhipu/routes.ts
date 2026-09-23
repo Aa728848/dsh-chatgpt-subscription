@@ -43,16 +43,9 @@ import {
 import type {
   ZhipuAccountSummaryDto,
   ZhipuConnectionDto,
-  ZhipuLoginFlowStatus,
   ZhipuModelOption,
   ZhipuWebStatus,
 } from '../../shared/zhipu-contracts.ts'
-import {
-  beginWebLogin,
-  getWebLoginStatus,
-  resetWebLogin,
-  submitLoginCode,
-} from './oauth.ts'
 import { ZHIPU_REASONING_EFFORTS } from '../../shared/zhipu-contracts.ts'
 import type { ZhipuAccountPool } from './account-pool.ts'
 import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
@@ -173,17 +166,6 @@ export interface ZhipuStatusOptions {
   conflict?: string | null | (() => string | null)
   /** Multi-account pool this line schedules through; absent keeps the single-account card. */
   accountPool?: ZhipuAccountPool
-  /**
-   * Whether the browser sign-in is offered.
-   *
-   * The console's authorization endpoints are first-party rather than a
-   * published contract, so an operator can turn the browser path off and leave
-   * only the key-paste path; the routes then answer with the reason instead of
-   * starting an attempt that cannot finish.
-   */
-  oauthEnabled?: boolean
-  /** Loopback port the browser callback binds; a test seam. */
-  oauthPort?: number
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -343,71 +325,6 @@ export function registerZhipuRoutes(
           clearCachedQuota()
           const value = await readStatus()
           return sendJson(response, 200, { ok: true, value })
-        }
-
-        /**
-         * Browser sign-in (ZCode's own "Coding Plan" authorization).
-         *
-         * The console mints a durable `id.secret` key from the browser grant
-         * and the host verifies it against the Coding Plan surface before it is
-         * kept, so this is a convenience in front of the paste-a-key path
-         * rather than a second kind of credential: what lands in the pool is
-         * the same key the user could have created by hand.
-         *
-         * It only mints keys on the international deployment. The China
-         * console has no equivalent public authorization, so a `cn` request is
-         * refused here with a message saying so instead of leaving the card
-         * waiting on a flow that cannot work.
-         */
-        if (path === 'login') {
-          if (method !== 'POST') return sendMethodNotAllowed(response)
-          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          if (options.oauthEnabled === false) {
-            return sendJson(response, 400, { ok: false, error: 'Browser sign-in is disabled for this deployment.' })
-          }
-          const body = await readRequestJson(request)
-          if (normalizeRegion(body.region) === 'cn') {
-            return sendJson(response, 400, {
-              ok: false,
-              error: 'The China console has no browser sign-in; paste a GLM Coding Plan API key from open.bigmodel.cn instead.',
-            })
-          }
-          const pool = options.accountPool
-          const value = await beginWebLogin(store, {
-            fetchFn,
-            ...(options.oauthPort === undefined ? {} : { port: options.oauthPort }),
-            ...(pool === undefined ? {} : { onSave: (credentials) => pool.addAccount(credentials) }),
-          })
-          return sendJson(response, 200, { ok: true, value })
-        }
-
-        if (path === 'login/status') {
-          if (method !== 'GET') return sendMethodNotAllowed(response)
-          const value: ZhipuLoginFlowStatus = getWebLoginStatus()
-          // The catalog cache was populated from whichever account served
-          // before; a completed sign-in may have added another one, so the card's
-          // poll is what drops it rather than leaving a stale listing behind.
-          if (value.status === 'complete') clearCachedCatalog()
-          return sendJson(response, 200, { ok: true, value })
-        }
-
-        if (path === 'login/code') {
-          if (method !== 'POST') return sendMethodNotAllowed(response)
-          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const body = await readRequestJson(request)
-          const code = typeof body.code === 'string' ? body.code : ''
-          try {
-            return sendJson(response, 200, { ok: true, value: submitLoginCode(code) })
-          } catch (error) {
-            return sendJson(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
-          }
-        }
-
-        if (path === 'login/cancel') {
-          if (method !== 'POST') return sendMethodNotAllowed(response)
-          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          resetWebLogin()
-          return sendJson(response, 200, { ok: true, value: getWebLoginStatus() })
         }
 
         if (path === 'accounts/remove') {
@@ -617,7 +534,6 @@ export {
   PROVIDER_NAME,
   DEFAULT_CONTEXT_WINDOW,
   getCachedQuota,
-  getWebLoginStatus,
   zhipuKeyHint,
   parseCatalogModels,
   type ZhipuCredentials,

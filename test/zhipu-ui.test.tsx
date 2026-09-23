@@ -141,56 +141,6 @@ describe('zhipu settings card', () => {
     expect(options).toContain(zh.regionCn)
   })
 
-  it('offers the browser sign-in and keeps the key field as the fallback path', async () => {
-    const node = await mountSection(status())
-    const buttons = [...node.querySelectorAll('button')].map((button) => button.textContent)
-    // The browser grant leads; the key field stays available for the China
-    // console, which has no equivalent authorization.
-    expect(buttons).toContain(zh.signIn)
-    expect(node.querySelector('input[type=password]')).not.toBeNull()
-    expect(node.textContent).toContain(zh.signInRegionHint)
-  })
-
-  it('renders the authorization URL and the paste-a-code field while a sign-in is pending', async () => {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = true
-    const originalFetch = globalThis.fetch
-    const calls: string[] = []
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input)
-      calls.push(url)
-      if (url.endsWith('/login')) {
-        return Response.json({
-          ok: true,
-          value: {
-            status: 'pending',
-            authUrl: 'https://chat.z.ai/api/oauth/authorize?client_id=c&state=s',
-            progress: 'Waiting for browser authorization...',
-          },
-        })
-      }
-      return Response.json({ ok: true, value: status() })
-    }) as typeof fetch
-
-    const container = document.createElement('div')
-    document.body.appendChild(container)
-    const root = createRoot(container)
-    await act(async () => root!.render(createElement(ZhipuSection, {})))
-    const signIn = [...container.querySelectorAll('button')].find((button) => button.textContent === zh.signIn)!
-    await act(async () => {
-      signIn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
-    })
-    await act(async () => { await Promise.resolve() })
-
-    expect(calls.some((url) => url.endsWith('/login'))).toBe(true)
-    expect(container.textContent).toContain('chat.z.ai/api/oauth/authorize')
-    expect(container.querySelector('input[type=text]')).not.toBeNull()
-    expect(container.textContent).toContain(zh.signInCancel)
-
-    await act(async () => root.unmount())
-    container.remove()
-    globalThis.fetch = originalFetch
-  })
-
   it('renders one checkbox per catalog model with its capability tooltip', async () => {
     const node = await mountSection(status())
     const labels = [...node.querySelectorAll('.dsha-models label')]
