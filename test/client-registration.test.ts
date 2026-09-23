@@ -23,7 +23,7 @@ describe('client registration', () => {
     expect(parseCapacity('invalid')).toBeNull()
   })
 
-  it('enforces the Astra subscription context limit', () => {
+  it('enforces the GPT-6 family subscription context limit', () => {
     expect(parseCapacity('872K', 872_000)).toBe(872_000)
     expect(parseCapacity('872001', 872_000)).toBeNull()
     expect(parseCapacity('1M', 872_000)).toBeNull()
@@ -32,13 +32,15 @@ describe('client registration', () => {
   it.each([
     ['gpt-5.6-sol', '5.6 Sol'],
     ['gpt-6-astra', '6 Astra'],
+    ['gpt-6-sol', '6 Sol'],
+    ['gpt-6-luna', '6 Luna'],
   ] as const)('keeps %s context options rendered while typing a numeric draft', async (model, modelName) => {
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const body = init?.body === undefined ? null : JSON.parse(String(init.body)) as { contextWindowOverrides?: Record<string, number>; visibleModelIds?: string[] }
-      const contextWindow = body?.contextWindowOverrides?.[model] ?? 272_000
+      const contextWindow = body?.contextWindowOverrides?.[model] ?? (model.startsWith('gpt-6-') ? 384_000 : 272_000)
       const preferences = {
         quickQuotaVisible: false,
         fastMode: false,
@@ -46,7 +48,7 @@ describe('client registration', () => {
         reasoningSummary: null,
         visibleModelIds: body?.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
-        contextWindowOverrides: { 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000, [model]: contextWindow },
+        contextWindowOverrides: { 'gpt-6-astra': 384_000, 'gpt-6-sol': 384_000, 'gpt-6-luna': 384_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000, [model]: contextWindow },
         writable: true,
       }
       if (init?.method === 'POST') return Response.json({ ok: true, value: preferences })
@@ -69,14 +71,14 @@ describe('client registration', () => {
       const input = container.querySelector<HTMLInputElement>(`input[aria-label="${modelName} 上下文窗口"]`)
       expect(input).not.toBeNull()
       const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsha-models input[type="checkbox"]')
-      expect(modelChecks).toHaveLength(8)
+      expect(modelChecks).toHaveLength(10)
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
       // 每个可配置上下文窗口的模型一行（子代理上下文预算控件已随死设置移除）
-      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(4)
+      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(6)
       const save = container.querySelector<HTMLButtonElement>(`button[data-model="${model}"]`)
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)

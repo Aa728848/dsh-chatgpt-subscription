@@ -2,7 +2,7 @@ import z from '@deepseek-ai/schemastery'
 import { FilePreferencesStore, preferencesPath } from './common/file-preferences.ts'
 import { readLegacyPreferences } from './common/legacy-preferences.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from './common/settings-compat.ts'
-import { GPT_56_MAX_CONTEXT_WINDOW, GPT_6_ASTRA_MAX_CONTEXT_WINDOW, isCodexModelId } from '../shared/model-catalog.ts'
+import { GPT_56_MAX_CONTEXT_WINDOW, GPT_6_MAX_CONTEXT_WINDOW, isCodexModelId } from '../shared/model-catalog.ts'
 import {
   DEFAULT_PREFERENCES,
   PREFERENCES_NAMESPACE,
@@ -55,7 +55,9 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
       z.const(SEARCH_PROVIDER_CODEX),
     ]).default(DEFAULT_PREFERENCES.searchProvider),
     contextWindowOverrides: z.object({
-      'gpt-6-astra': z.number().step(1).min(1).max(GPT_6_ASTRA_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-6-astra']),
+      'gpt-6-astra': z.number().step(1).min(1).max(GPT_6_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-6-astra']),
+      'gpt-6-sol': z.number().step(1).min(1).max(GPT_6_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-6-sol']),
+      'gpt-6-luna': z.number().step(1).min(1).max(GPT_6_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-6-luna']),
       'gpt-5.6-sol': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-sol']),
       'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
       'gpt-5.6-luna': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-luna']),

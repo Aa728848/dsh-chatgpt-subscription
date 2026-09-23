@@ -42,7 +42,7 @@ describe('host routes', () => {
           provider,
           id: model,
           name: model,
-          context: { contextWindow: provider === 'codex-chatgpt' ? 272_000 : 128_000 },
+          context: { contextWindow: provider === 'codex-chatgpt' ? 384_000 : 128_000 },
           reasoning: {
             efforts: provider === 'codex-chatgpt' ? [{ id: 'medium', name: 'medium' }] : [{ id: 'high', name: 'high' }],
             defaultEffort: provider === 'codex-chatgpt' ? 'medium' : 'high',
@@ -70,7 +70,7 @@ describe('host routes', () => {
         reasoningSummary: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
-        contextWindowOverrides: { 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        contextWindowOverrides: { 'gpt-6-astra': 384_000, 'gpt-6-sol': 384_000, 'gpt-6-luna': 384_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
         proxyMode: 'auto',
         customProxyUrl: null,
         writable: true,
@@ -83,7 +83,9 @@ describe('host routes', () => {
         visibleModelIds: patch.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: patch.searchProvider ?? 'dsh',
         contextWindowOverrides: {
-          'gpt-6-astra': patch.contextWindowOverrides?.['gpt-6-astra'] ?? 272_000,
+          'gpt-6-astra': patch.contextWindowOverrides?.['gpt-6-astra'] ?? 384_000,
+          'gpt-6-sol': patch.contextWindowOverrides?.['gpt-6-sol'] ?? 384_000,
+          'gpt-6-luna': patch.contextWindowOverrides?.['gpt-6-luna'] ?? 384_000,
           'gpt-5.6-sol': patch.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000,
           'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
           'gpt-5.6-luna': patch.contextWindowOverrides?.['gpt-5.6-luna'] ?? 272_000,

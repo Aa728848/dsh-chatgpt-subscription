@@ -1,7 +1,7 @@
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
-import { CODEX_MODEL_CATALOG, isConfigurableContextModelId, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, codexModelMaxTokens, isConfigurableContextModelId, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
 
 export const PROVIDER_ID = CODEX_CHATGPT_PROVIDER_ID
@@ -35,7 +35,7 @@ export function resolveCodexModel(model: string, preferences?: SubscriptionPrefe
     name: entry.id === model ? entry.name : model,
     inputModalities: [...entry.inputModalities],
     context: { contextWindow: configuredContextWindow ?? entry.contextWindow },
-    defaultMaxTokens: 32_768,
+    defaultMaxTokens: codexModelMaxTokens(model),
     // No `systemPromptUpdate: 'in-history'`: the Responses wire carries the system
     // prompt in the top-level `instructions` slot, never inside `input`, so this
     // route cannot read a later system message as the effective prompt. Declaring

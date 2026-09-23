@@ -9,6 +9,8 @@ describe('CodexChatGptAdapter', () => {
     expect(await adapter.listModels()).toMatchObject([
       { id: 'gpt-5.6-sol', name: '5.6 Sol', inputModalities: ['text', 'image'] },
       { id: 'gpt-6-astra', name: '6 Astra', inputModalities: ['text', 'image'] },
+      { id: 'gpt-6-sol', name: '6 Sol', inputModalities: ['text', 'image'] },
+      { id: 'gpt-6-luna', name: '6 Luna', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.6-terra', name: '5.6 Terra', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.6-luna', name: '5.6 Luna', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.5', name: '5.5', inputModalities: ['text', 'image'] },
@@ -21,6 +23,7 @@ describe('CodexChatGptAdapter', () => {
       expect(resolved).toMatchObject({
         inputModalities: ['text', 'image'],
         context: { contextWindow: 272_000 },
+        defaultMaxTokens: 32_768,
         reasoning: { defaultEffort: 'medium' },
       })
       expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual([
@@ -43,6 +46,7 @@ describe('CodexChatGptAdapter', () => {
       name: '5.3 Codex Spark',
       inputModalities: ['text'],
       context: { contextWindow: 258_000 },
+      defaultMaxTokens: 32_768,
     })
     expect(adapter.providerRetryPolicy()).toMatchObject({
       mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'SERVER', 'NETWORK', 'TIMEOUT', 'TRANSPORT'],
@@ -71,35 +75,42 @@ describe('CodexChatGptAdapter', () => {
     ]))
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.6-sol')).resolves.toMatchObject({
       context: { contextWindow: 1_000_000 },
+      defaultMaxTokens: 32_768,
       reasoning: { defaultEffort: 'medium' },
     })
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.4')).resolves.toMatchObject({
       context: { contextWindow: 272_000 },
+      defaultMaxTokens: 32_768,
       reasoning: { defaultEffort: 'none' },
     })
   })
 
-  it('exposes Astra by default with subscription capabilities and its configured context', async () => {
+  it('exposes the GPT-6 family by default with subscription capabilities and its configured context', async () => {
     let preferences = structuredClone({ ...DEFAULT_PREFERENCES, writable: true })
     const adapter = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never, {
       status: () => preferences,
     } as never)
-    expect(await adapter.listModels()).toContainEqual({
-      provider: PROVIDER_ID, id: 'gpt-6-astra', name: '6 Astra', inputModalities: ['text', 'image'],
-    })
-    const prepared = await adapter.prepareCall(PROVIDER_ID, 'gpt-6-astra')
-    expect(prepared.model).toMatchObject({
-      id: 'gpt-6-astra',
-      inputModalities: ['text', 'image'],
-      context: { contextWindow: 272_000 },
-      reasoning: { defaultEffort: 'medium' },
-    })
-    expect(prepared.model.reasoning?.efforts.map(effort => effort.id)).toEqual([
-      'low', 'medium', 'high', 'xhigh', 'max',
-    ])
-    preferences.contextWindowOverrides['gpt-6-astra'] = 872_000
-    expect((await adapter.resolveModel(PROVIDER_ID, 'gpt-6-astra')).context?.contextWindow).toBe(872_000)
-    expect(prepared.model.context?.contextWindow).toBe(272_000)
+    for (const [model, name] of [['gpt-6-astra', '6 Astra'], ['gpt-6-sol', '6 Sol'], ['gpt-6-luna', '6 Luna']] as const) {
+      expect(await adapter.listModels()).toContainEqual({
+        provider: PROVIDER_ID, id: model, name, inputModalities: ['text', 'image'],
+      })
+      const prepared = await adapter.prepareCall(PROVIDER_ID, model)
+      expect(prepared.model).toMatchObject({
+        id: model,
+        inputModalities: ['text', 'image'],
+        context: { contextWindow: 384_000 },
+        defaultMaxTokens: 128_000,
+        reasoning: { defaultEffort: 'medium' },
+      })
+      expect(prepared.model.reasoning?.efforts.map(effort => effort.id)).toEqual([
+        'low', 'medium', 'high', 'xhigh', 'max',
+      ])
+      preferences.contextWindowOverrides[model] = 872_000
+      expect((await adapter.resolveModel(PROVIDER_ID, model)).context?.contextWindow).toBe(872_000)
+      // The prepared call keeps the generation it was bound to.
+      expect(prepared.model.context?.contextWindow).toBe(384_000)
+      preferences.contextWindowOverrides[model] = 384_000
+    }
     preferences = { ...preferences, visibleModelIds: ['gpt-5.6-sol'] }
     expect(await adapter.listModels()).toHaveLength(1)
   })

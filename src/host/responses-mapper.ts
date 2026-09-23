@@ -1,7 +1,7 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from './common/llm-compat.ts'
 import { createHash } from 'node:crypto'
-import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary } from '../shared/model-catalog.ts'
+import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexWireReasoningEffort } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
@@ -168,9 +168,7 @@ export async function buildResponsesPayload(
   if (outputVerbosity !== null) payload.text = { verbosity: outputVerbosity }
   if (fastMode) payload.service_tier = 'priority'
   if (options.reasoningEffort !== undefined) {
-    const effort = options.model === 'gpt-6-astra' && ['none', 'minimal'].includes(options.reasoningEffort)
-      ? 'low'
-      : options.reasoningEffort
+    const effort = codexWireReasoningEffort(options.model, options.reasoningEffort)
     payload.reasoning = codexModelSupportsReasoningSummary(options.model)
       ? { effort, summary: reasoningSummary ?? 'auto' }
       : { effort }

@@ -48,6 +48,8 @@ export type CodexReasoningSummary = 'auto' | 'concise' | 'detailed' | 'none'
 
 export interface CodexContextWindowOverridesDto {
   'gpt-6-astra': number
+  'gpt-6-sol': number
+  'gpt-6-luna': number
   'gpt-5.6-sol': number
   'gpt-5.6-terra': number
   'gpt-5.6-luna': number

@@ -88,15 +88,18 @@
 - **偏好落盘位置随 harness 生成**：有 `settings.register` 的一代（≤0.1.6）仍写进 harness 的设置文档；0.1.7 起该 API 被 `SettingsForms` 取代，偏好改由插件自己持久化到 `<dshHome>/storages/dsh-chatgpt-subscription-preferences.json`（0600、原子写；读取失败或校验不过就回落默认值；**首次运行会从旧设置文档里本插件的段一次性迁移**），五条线路的模型开关同样从各自既有的 `storages/*-models.json` 水合，因此重启后不会像被重置；
 - 子代理的模型与思考深度沿用 DSH 自身设置：**设置 → Subagent** 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 `agent-default-model` 设置提供；
 - 最大嵌套深度不在本插件设置内，由 DSH 侧决定：0.1.5 及以前是 preset 中 `tool-subagent` 行的 `maxDepth`（默认 3），0.1.6 起改由 `subagent` 服务的设置项提供（默认 1）；`provider-managed` 表示把预算交给进程外提供方；
-- 6 Astra 与 5.6 Sol / Terra / Luna 默认使用 272K 有效上下文；订阅侧 6 Astra 可配置最高 872K，5.6 系列最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
+- GPT-6 系列（6 Astra / 6 Sol / 6 Luna）默认使用 384K 有效上下文，可配置最高 872K；5.6 Sol / Terra / Luna 保持 272K，最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
+- 单次输出上限按模型区分：GPT-6 系列为 128K（官方对 6 Astra / 6 Sol / 6 Luna 均标 128K），更早的模型保持 32768；调用方未显式指定时生效，Responses 报文本身不发送输出长度参数。
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 
 ## 模型目录
 
 | 显示名 | 模型 slug |
 | --- | --- |
-| 5.6 Sol | `gpt-5.6-sol` |
 | 6 Astra | `gpt-6-astra` |
+| 6 Sol | `gpt-6-sol` |
+| 6 Luna | `gpt-6-luna` |
+| 5.6 Sol | `gpt-5.6-sol` |
 | 5.6 Terra | `gpt-5.6-terra` |
 | 5.6 Luna | `gpt-5.6-luna` |
 | 5.5 | `gpt-5.5` |
@@ -106,9 +109,9 @@
 
 > 目录只用于展示；账号实际可用的模型由 ChatGPT 套餐、workspace 策略与上游兼容状态决定。
 
-6 Astra 支持文本、图片输入和工具调用，默认思考档位为 `medium`，可选 `low`、`medium`、`high`、`xhigh`、`max`。从旧会话带入的 `none` / `minimal` 会按 [OpenAI 官方迁移说明](https://developers.openai.com/api/docs/guides/latest-model) 转为 `low`。订阅侧 872K 上下文上限依据 2026-09-05 的 Codex 模型目录；[Codex Ultra](https://learn.chatgpt.com/zh-Hans/docs/models) 涉及客户端的子代理编排，本插件不将它作为 Responses 思考参数暴露。
+GPT-6 系列（6 Astra / 6 Sol / 6 Luna）支持文本、图片输入和工具调用，默认思考档位为 `medium`，可选 `low`、`medium`、`high`、`xhigh`、`max`。从旧会话带入的 `none` / `minimal` 会按 [OpenAI 官方迁移说明](https://developers.openai.com/api/docs/guides/latest-model) 转为 `low`。三个模型的默认 384K 与上限 872K 均取自 2026-09-23 的 Codex 模型目录（`gpt-6-sol` / `gpt-6-luna` 于 2026-09-22 发布，能力与 `gpt-6-astra` 一致；目录里的 `context_window` 是 272K，本插件把默认有效上下文提高到 384K，仍低于 872K 上限）；[Codex Ultra](https://learn.chatgpt.com/zh-Hans/docs/models) 涉及客户端的子代理编排，本插件不将它作为 Responses 思考参数暴露。
 
-新配置默认显示 6 Astra；已有配置保留原来的模型勾选，可在 **设置 → Codex 订阅 → 可用模型** 中勾选 **6 Astra**。
+新配置默认显示 GPT-6 系列与 GPT-5.6 系列；已有配置保留原来的模型勾选，可在 **设置 → Codex 订阅 → 可用模型** 中勾选 **6 Sol** / **6 Luna**。
 
 ## 环境要求
 
@@ -165,7 +168,7 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 3. 完成 ChatGPT 登录；
 4. 执行 **测试连接**。
 
-DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。6 Astra 与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（Subagent 卡片授权的模型清单，以及 `agent-default-model` 的默认路由；该卡片 0.1.5 及以前在「设置」页，0.1.6 起在 **Plugins** 页）；最大嵌套深度由 DSH 侧决定（0.1.5 及以前取 preset 中 `tool-subagent` 的 `maxDepth`，默认 3；0.1.6 起取 `subagent` 服务的设置，默认 1）。
+DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。GPT-6 系列与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（Subagent 卡片授权的模型清单，以及 `agent-default-model` 的默认路由；该卡片 0.1.5 及以前在「设置」页，0.1.6 起在 **Plugins** 页）；最大嵌套深度由 DSH 侧决定（0.1.5 及以前取 preset 中 `tool-subagent` 的 `maxDepth`，默认 3；0.1.6 起取 `subagent` 服务的设置，默认 1）。
 
 **设置 → Codex 订阅 → 网络代理** 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。
 

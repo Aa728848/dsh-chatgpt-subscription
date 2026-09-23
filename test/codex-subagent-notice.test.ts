@@ -204,15 +204,20 @@ describe('Codex route: Sol and Astra share one content path', () => {
   )
 })
 
-describe('Codex route: Astra has no graceful degradation where Sol does', () => {
-  it('resolves a fallback model for Sol but none for Astra', () => {
+describe('Codex route: the GPT-6 family has no graceful degradation where Sol does', () => {
+  it('resolves a fallback model for Sol but none for any GPT-6 model', () => {
     expect(resolveCodexFallbackModel('gpt-5.6-sol')?.id).toBe('gpt-5.6-terra')
     expect(resolveCodexFallbackModel('gpt-6-astra')).toBeUndefined()
+    expect(resolveCodexFallbackModel('gpt-6-sol')).toBeUndefined()
+    expect(resolveCodexFallbackModel('gpt-6-luna')).toBeUndefined()
   })
 
-  it('offers Sol the none/minimal tiers Astra cannot take', () => {
+  it('offers Sol the none/minimal tiers the GPT-6 family cannot take', () => {
     expect(reasoningEffortsForModel('gpt-5.6-sol')).toContain('none')
-    expect(reasoningEffortsForModel('gpt-6-astra')).not.toContain('none')
+    for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']) {
+      expect(reasoningEffortsForModel(model)).not.toContain('none')
+      expect(reasoningEffortsForModel(model)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    }
   })
 })
 

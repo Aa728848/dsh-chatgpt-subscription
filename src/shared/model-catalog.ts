@@ -1,8 +1,15 @@
 export type CodexModelModality = 'text' | 'image'
 
 export const GPT_56_MAX_CONTEXT_WINDOW = 1_000_000
-// Codex subscription limit from the model catalog; the public API has a different limit.
-export const GPT_6_ASTRA_MAX_CONTEXT_WINDOW = 872_000
+// Codex subscription limits from the model catalog; the public API advertises 1.05M
+// for these families instead.
+export const GPT_6_MAX_CONTEXT_WINDOW = 872_000
+/** Effective context the GPT-6 family starts at, before any user override. */
+export const GPT_6_DEFAULT_CONTEXT_WINDOW = 384_000
+/** Output cap of the GPT-6 family; the vendor declares 128K for all three. */
+export const GPT_6_MAX_TOKENS = 128_000
+/** Output cap for the models predating the GPT-6 family. */
+export const CODEX_DEFAULT_MAX_TOKENS = 32_768
 
 export interface CodexModelCatalogEntry {
   id: string
@@ -10,8 +17,10 @@ export interface CodexModelCatalogEntry {
   contextWindow: number
   inputModalities: readonly CodexModelModality[]
   defaultReasoningEffort: string
-  reasoningProfile: 'standard' | 'gpt-5.6' | 'gpt-6-astra'
+  reasoningProfile: 'standard' | 'gpt-5.6' | 'gpt-6'
   supportsReasoningSummary: boolean
+  /** Output cap when the caller omits one; falls back to {@link CODEX_DEFAULT_MAX_TOKENS}. */
+  maxTokens?: number
   fallbackModelId?: string
 }
 
@@ -29,11 +38,32 @@ export const CODEX_MODEL_CATALOG = [
   {
     id: 'gpt-6-astra',
     name: '6 Astra',
-    contextWindow: 272_000,
+    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
     inputModalities: ['text', 'image'],
     defaultReasoningEffort: 'medium',
-    reasoningProfile: 'gpt-6-astra',
+    reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
+    maxTokens: GPT_6_MAX_TOKENS,
+  },
+  {
+    id: 'gpt-6-sol',
+    name: '6 Sol',
+    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    inputModalities: ['text', 'image'],
+    defaultReasoningEffort: 'medium',
+    reasoningProfile: 'gpt-6',
+    supportsReasoningSummary: true,
+    maxTokens: GPT_6_MAX_TOKENS,
+  },
+  {
+    id: 'gpt-6-luna',
+    name: '6 Luna',
+    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    inputModalities: ['text', 'image'],
+    defaultReasoningEffort: 'medium',
+    reasoningProfile: 'gpt-6',
+    supportsReasoningSummary: true,
+    maxTokens: GPT_6_MAX_TOKENS,
   },
   {
     id: 'gpt-5.6-terra',
@@ -97,8 +127,10 @@ export const CODEX_MODEL_CATALOG = [
 export type CodexModelId = typeof CODEX_MODEL_CATALOG[number]['id']
 
 export const DEFAULT_VISIBLE_CODEX_MODEL_IDS = [
-  'gpt-5.6-sol',
   'gpt-6-astra',
+  'gpt-6-sol',
+  'gpt-6-luna',
+  'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
 ] as const satisfies readonly CodexModelId[]
@@ -107,6 +139,8 @@ export const DEFAULT_CODEX_MODEL = CODEX_MODEL_CATALOG[0]
 
 export const CONFIGURABLE_CONTEXT_MODEL_IDS = [
   'gpt-6-astra',
+  'gpt-6-sol',
+  'gpt-6-luna',
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
@@ -117,12 +151,12 @@ export type ConfigurableContextModelId = typeof CONFIGURABLE_CONTEXT_MODEL_IDS[n
 export const STANDARD_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'] as const
 export const GPT_56_REASONING_EFFORTS = [...STANDARD_REASONING_EFFORTS, 'max'] as const
 // Ultra in Codex also controls subagent orchestration; expose the Responses efforts here.
-export const GPT_6_ASTRA_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export const GPT_6_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export type CodexReasoningEffort = typeof GPT_56_REASONING_EFFORTS[number]
 
 export function reasoningEffortsForModel(model: string): readonly CodexReasoningEffort[] {
   const profile = resolveCodexCatalogEntry(model).reasoningProfile
-  if (profile === 'gpt-6-astra') return GPT_6_ASTRA_REASONING_EFFORTS
+  if (profile === 'gpt-6') return GPT_6_REASONING_EFFORTS
   return profile === 'gpt-5.6'
     ? GPT_56_REASONING_EFFORTS
     : STANDARD_REASONING_EFFORTS
@@ -145,7 +179,9 @@ export function isConfigurableContextModelId(model: unknown): model is Configura
 }
 
 export function contextWindowLimitForModel(model: ConfigurableContextModelId): number {
-  return model === 'gpt-6-astra' ? GPT_6_ASTRA_MAX_CONTEXT_WINDOW : GPT_56_MAX_CONTEXT_WINDOW
+  return resolveCodexCatalogEntry(model).reasoningProfile === 'gpt-6'
+    ? GPT_6_MAX_CONTEXT_WINDOW
+    : GPT_56_MAX_CONTEXT_WINDOW
 }
 
 export function resolveCodexCatalogEntry(model: string): CodexModelCatalogEntry {
@@ -158,6 +194,22 @@ export function codexModelSupportsImageInput(model: string): boolean {
 
 export function codexModelSupportsReasoningSummary(model: string): boolean {
   return resolveCodexCatalogEntry(model).supportsReasoningSummary
+}
+
+/** Per-request output cap for one model, or the pre-GPT-6 default when it declares none. */
+export function codexModelMaxTokens(model: string): number {
+  return resolveCodexCatalogEntry(model).maxTokens ?? CODEX_DEFAULT_MAX_TOKENS
+}
+
+/**
+ * The effort the Responses wire accepts for one model. The GPT-6 family dropped
+ * `none`/`minimal`, so a request that still carries one — a session started on an
+ * older model, or the `none` default of a model this route no longer offers — is
+ * sent as `low` instead of being rejected.
+ */
+export function codexWireReasoningEffort(model: string, effort: string): string {
+  if (resolveCodexCatalogEntry(model).reasoningProfile !== 'gpt-6') return effort
+  return effort === 'none' || effort === 'minimal' ? 'low' : effort
 }
 
 export function resolveCodexFallbackModel(model: string): CodexModelCatalogEntry | undefined {

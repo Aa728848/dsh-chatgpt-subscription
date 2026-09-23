@@ -55,14 +55,14 @@ function createPreferenceStore(initial: unknown = {}) {
 }
 
 describe('subscription preferences', () => {
-  it('fills Astra defaults in older settings and preserves saved model choices and contexts', async () => {
+  it('fills GPT-6 defaults in older settings and preserves saved model choices and contexts', async () => {
     const store = createPreferenceStore({
       visibleModelIds: ['gpt-5.6-sol'],
       contextWindowOverrides: { 'gpt-5.6-sol': 512_000 },
     })
     expect(store.status()).toMatchObject({
       visibleModelIds: ['gpt-5.6-sol'],
-      contextWindowOverrides: { 'gpt-6-astra': 272_000, 'gpt-5.6-sol': 512_000 },
+      contextWindowOverrides: { 'gpt-6-astra': 384_000, 'gpt-6-sol': 384_000, 'gpt-6-luna': 384_000, 'gpt-5.6-sol': 512_000 },
     })
     expect(await store.update({
       visibleModelIds: ['gpt-6-astra', 'gpt-5.6-sol'],
@@ -73,12 +73,12 @@ describe('subscription preferences', () => {
     })
   })
 
-  it('includes Astra for new settings and rejects an oversized persisted or updated context', async () => {
+  it('includes the GPT-6 family for new settings and rejects an oversized persisted or updated context', async () => {
     const store = createPreferenceStore()
     expect(store.status().visibleModelIds).toContain('gpt-6-astra')
     expect(() => createPreferenceStore({ contextWindowOverrides: { 'gpt-6-astra': 872_001 } })).toThrow()
     await expect(store.update({ contextWindowOverrides: { 'gpt-6-astra': 1_000_000 } })).rejects.toThrow()
-    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(272_000)
+    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(384_000)
   })
 
   it('allows disabling provider and setting visibleModelIds to empty array', async () => {
@@ -127,7 +127,7 @@ describe('subscription preferences', () => {
     const store = registerPreferenceStore(undefined)
     await store.hydrate()
     await expect(store.update({ contextWindowOverrides: { 'gpt-6-astra': 1_000_000 } })).rejects.toThrow()
-    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(272_000)
+    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(384_000)
   })
 
   it('falls back to the shipped defaults for a corrupt or invalid fallback document', async () => {
@@ -140,7 +140,7 @@ describe('subscription preferences', () => {
     await fsp.writeFile(preferencesPath(), JSON.stringify({ contextWindowOverrides: { 'gpt-6-astra': 872_001 } }), 'utf8')
     const rejected = registerPreferenceStore(undefined)
     await rejected.hydrate()
-    expect(rejected.status().contextWindowOverrides['gpt-6-astra']).toBe(272_000)
+    expect(rejected.status().contextWindowOverrides['gpt-6-astra']).toBe(384_000)
     expect(rejected.status().visibleModelIds).toContain('gpt-6-astra')
   })
 

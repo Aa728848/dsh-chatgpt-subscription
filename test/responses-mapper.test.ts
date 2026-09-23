@@ -6,7 +6,7 @@ import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import { buildResponsesPayload } from '../src/host/responses-mapper.ts'
 
 describe('Responses payload mapping', () => {
-  it.each(['gpt-5.6-sol', 'gpt-6-astra'])('maps system, images, tool calls and tool results for %s without provider URLs', async (model) => {
+  it.each(['gpt-5.6-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'])('maps system, images, tool calls and tool results for %s without provider URLs', async (model) => {
     const options = {
       provider: 'codex-chatgpt', model, system: 'Be precise.',
       reasoningEffort: 'high',
@@ -87,16 +87,26 @@ describe('Responses payload mapping', () => {
     ['low', 'low'], ['medium', 'medium'], ['high', 'high'],
     ['xhigh', 'xhigh'], ['max', 'max'],
     ['none', 'low'], ['minimal', 'low'],
-  ])('maps Astra reasoning %s to %s without unsupported sampling controls', async (requested, expected) => {
+  ])('maps GPT-6 reasoning %s to %s without unsupported sampling controls', async (requested, expected) => {
+    for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']) {
+      const options = {
+        provider: 'codex-chatgpt', model, reasoningEffort: requested,
+        temperature: 0.7, top_p: 0.9, top_logprobs: 5, messages: [],
+      } as unknown as GenerateOptions
+      const payload = await buildResponsesPayload(options, unusedAttachments())
+      expect(payload).toMatchObject({ model, reasoning: { effort: expected, summary: 'auto' } })
+      expect(payload).not.toHaveProperty('temperature')
+      expect(payload).not.toHaveProperty('top_p')
+      expect(payload).not.toHaveProperty('top_logprobs')
+    }
+  })
+
+  it.each(['gpt-5.6-sol', 'gpt-5.5'])('leaves %s reasoning efforts untouched by the GPT-6 clamp', async (model) => {
     const options = {
-      provider: 'codex-chatgpt', model: 'gpt-6-astra', reasoningEffort: requested,
-      temperature: 0.7, top_p: 0.9, top_logprobs: 5, messages: [],
+      provider: 'codex-chatgpt', model, reasoningEffort: 'none', messages: [],
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    expect(payload).toMatchObject({ model: 'gpt-6-astra', reasoning: { effort: expected, summary: 'auto' } })
-    expect(payload).not.toHaveProperty('temperature')
-    expect(payload).not.toHaveProperty('top_p')
-    expect(payload).not.toHaveProperty('top_logprobs')
+    expect(payload).toMatchObject({ model, reasoning: { effort: 'none' } })
   })
 
   it('maps the configured output verbosity to the Responses text control', async () => {
