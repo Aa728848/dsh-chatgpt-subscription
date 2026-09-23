@@ -38,10 +38,12 @@ import {
 } from './model-catalog.ts'
 import type {
   WorkBuddyAccountSummaryDto,
+  WorkBuddyCheckinSettings,
   WorkBuddyConnectionDto,
   WorkBuddyModelOption,
   WorkBuddyWebStatus,
 } from '../../shared/workbuddy-contracts.ts'
+import type { WorkBuddyCheckinService } from './checkin.ts'
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { beginWebLogin, getWebLoginStatus, resetWebLogin } from './oauth.ts'
 import type { WorkBuddyAccountPool } from './account-pool.ts'
@@ -162,6 +164,8 @@ export interface WorkBuddyStatusOptions {
   conflict?: string | null | (() => string | null)
   /** Multi-account pool this line schedules through; absent keeps the single-account card. */
   accountPool?: WorkBuddyAccountPool
+  /** Daily check-in scheduler; absent leaves the card's check-in row empty. */
+  checkin?: Pick<WorkBuddyCheckinService, 'tick' | 'summary'>
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -219,6 +223,12 @@ export async function getWorkBuddyWebStatus(
       domain: account.domain ?? '',
     }).some((id) => hiddenIds.has(id))
 
+  // The summary is local state only, but a broken state file must not take
+  // the whole status payload down with it.
+  const checkin = options.checkin === undefined
+    ? null
+    : await options.checkin.summary().catch(() => null)
+
   return {
     enabled,
     authenticated: credentials !== null,
@@ -238,6 +248,7 @@ export async function getWorkBuddyWebStatus(
     accounts: poolAccounts.map((account) => ({ ...account, hidden: isHidden(account) })),
     activeAccountId: poolData?.activeAccountId,
     rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
+    checkin,
   }
 }
 
@@ -515,6 +526,10 @@ export function registerWorkBuddyRoutes(
               patch.defaultReasoningEffort = effort
             }
           }
+          if (typeof body.checkin === 'object' && body.checkin !== null) {
+            const raw = body.checkin as Record<string, unknown>
+            if (typeof raw.enabled === 'boolean') patch.checkin = { enabled: raw.enabled }
+          }
           if (body.selectedAccountId !== undefined) {
             const selected = body.selectedAccountId
             if (selected === null || typeof selected === 'string') {
@@ -563,6 +578,18 @@ export function registerWorkBuddyRoutes(
             return sendJson(response, 400, { ok: false, error: 'Unsupported rotation strategy.' })
           }
           await pool.setStrategy(strategy)
+          const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'checkin/now') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const service = options.checkin
+          if (service === undefined) return sendJson(response, 400, { ok: false, error: 'Check-in is not installed.' })
+          // The manual pass ignores the window, the toggle and the retry cap,
+          // but still skips accounts already signed in today.
+          await service.tick(true)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
           return sendJson(response, 200, { ok: true, value })
         }

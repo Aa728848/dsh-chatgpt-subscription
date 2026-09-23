@@ -17,6 +17,13 @@
   - **超时的伤害不止那一条用例**：超时后仍在飞的请求不会被取消，它们会落进**下一个用例**的 fetch mock，把那个用例也判失败。实测抓到的调用序列是「配额那一组各出现两次 + 前一个用例遗留的 4 次 `streamGenerateContent`」，在断言上就表现为 `expected to be called 4 times, but got 8 times`。这正是「检查一下是不是问题」值得做的原因——它看起来像随机抖动，实际是一条会扩散的失败。
   - **修法**：`vitest.config.ts` 的 `testTimeout` 由 15s 提到 **60s**（约为实测最慢值的 4 倍：健康运行绝不会触发，仍能抓住真正卡死的用例），并把 `maxWorkers` 限到 **4** 作为第二道保险。**成本为零**：这些用例受子进程延迟而非 CPU 约束，4 个 worker 实测 ~51s，15 个 worker ~54s。
   - **验证**：`npm test` **连续 5 轮、每轮 1213 条全通过**；为确认主因，另在**默认 15 worker** 下只改超时复跑 **11 轮**，同样全通过——说明超时余量是主因，worker 上限是针对「外部负载（CI、同机并行任务）重新引入超时、而超时又会串扰邻居」这一放大路径的兜底。修复前：15 worker 下 4–5 条失败、4 worker 下 1/3 概率失败；修复后 0 条。
+- **WorkBuddy 每日自动签到**（参考 workbuddy2api 的 `daily_checkin.py` 移植并适配到插件进程内）：
+  - 新增 `src/host/workbuddy/checkin.ts`：国区账号（含桌面收编与已隐藏账号）在 Host 启动时签到一轮，之后每 10 分钟幂等补检（当日已签零请求）；先查 `checkin-activity-status` 幂等预查再调 `daily-checkin`，活动无权益当天不再重试，失败当天最多自动重试 3 次；token 续期复用凭据存储现有的过期续期+回写机制（桌面账号原子写回 IDE 的 *.info）。国际区账号不参与。（初版曾做「散列分时窗口」，试用后按用户反馈简化为启动即签，窗口配置已移除。）
+  - 状态持久化到 `storages/workbuddy-checkin.json`（tmp+rename 原子写），同日重启免费；签到是进程内调度，**DSH 未运行的当天不签到**。
+  - 偏好：`dsh-workbuddy` 命名空间与文件存储双轨新增 `checkin: { enabled }`。
+  - 路由：`/workbuddy/api/status` 附带签到汇总（今日 x/y、失败数、上次运行时间，聚合无账号标识）；新增 `POST /workbuddy/api/checkin/now` 手动补签（同源校验，忽略窗口与重试上限但仍跳过当日已签账号）；`/settings` 接受 `checkin` 补丁。
+  - 设置页新增「每日签到」区块：开关、「今日已签 x/y」总状态与「立即签到」按钮；中英文案。
+  - **验证**：`npm run typecheck`、`npm run build` 通过；`npm test` 全绿。新增 `test/workbuddy-checkin.test.ts`：首次 tick 即签、之后零请求、开关关闭不动/手动补签强制、国际区跳过、已签不重复请求、无权益当天不重试、失败 3 次封顶且手动可重试、过期 token 先续期再签到并回写桌面文件、多账号全签、同日状态文件去重、状态路由汇总/旧 Host 返回 null、手动路由同源与方法门禁、设置补丁持久化与旧版窗口字段兼容。
 
 - **模型上下文窗口跟随模型开关，并支持恢复默认**（用户报告：「本项目提供的供应商模型是可以开关显示的，但是配置同页面的配置上下文不行，能不能开启什么模型再调整什么模型的上下文，增加支持恢复默认的选项」）。
   - **上下文窗口只列已勾选启用的模型**：五个标签页统一——ChatGPT 页按 `visibleModelIds`，Antigravity / Command Code / Kimi Code / WorkBuddy 按 `model.enabled`；一个都没勾选时显示空态提示。四页新增 `contextDraftsFor(status)` 并让所有播种路径（`/status`、目录刷新、以及**模型开关请求返回后**）都走它，否则刚勾选的模型会渲染成空输入框（此前上下文区与开关无关，草稿总是先于行存在）。
