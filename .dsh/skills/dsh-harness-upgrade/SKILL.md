@@ -136,10 +136,14 @@ next upgrade starts by reading the newest file in `references/`.
 
 ## 7. Current state
 
-- Tested baseline: **0.1.7-alpha.1** (`devDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded run: typecheck + build clean, **1099 tests passed**
-  (85 files, 1 skipped); old generation (clean-room 0.1.5-rc.3): source typecheck
-  clean, **1096 tests passed, 0 failures**, one generation-bound test file unable
-  to load.
-- What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md`.
+- Tested baseline: **0.1.7-rc.1** (`devDependencies`); peer support 0.1.2-alpha.5
+  onwards. Latest recorded run: forced typecheck + build clean, **1256 tests passed**
+  (96 files passed, 1 skipped file, 7 skipped tests); old generation (clean-room
+  0.1.5-rc.3): source typecheck clean, **1253 tests passed, 0 failures**, one
+  generation-bound test file unable to load (`@deepseek-ai/dsh-ptc-runtime`).
+- What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
+  two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
+  covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
+  is `tool.call.toolview`'s new stage union, and that file also records the
+  `dsh-client-ui-chat` type blind spot that hides this seam from `tsc`.
 - Harness checkout used for every claim above: `C:\Users\A\Documents\deepseek-harness`.

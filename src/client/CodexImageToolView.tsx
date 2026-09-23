@@ -56,7 +56,7 @@ function GeneratedImage({ attachment, load, label, t }: {
 }
 
 function promptFromBlock(block: Props['block']): string | null {
-  const raw = 'kind' in block ? block.call?.argsRaw : block.argsRaw
+  const raw = 'kind' in block ? block.call?.argsRaw : dispatchedArgsRaw(block)
   if (typeof raw !== 'string' || raw.trim() === '') return null
   try {
     const value = JSON.parse(raw) as unknown
@@ -69,6 +69,17 @@ function promptFromBlock(block: Props['block']): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Arguments of a dispatched call that has no result yet.
+ *
+ * Harness 0.1.7-rc.1 dispatches a view as soon as its call starts *preparing*,
+ * before the arguments exist, so the preparing shape carries no `argsRaw` at
+ * all. Older generations only ever sent the dispatched shape.
+ */
+function dispatchedArgsRaw(block: Props['block']): string | undefined {
+  return 'argsRaw' in block ? block.argsRaw : undefined
 }
 
 /** Pre-0.1.7 tool-result block: a harness that still carries one nests its content here. */
