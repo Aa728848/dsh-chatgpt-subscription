@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **GLM 线路支持浏览器登录（ZCode 的「编程套餐」授权），不再只能手填 API Key**。此前这条线路只有「粘贴 Key」一条添加路径，而 Kimi Code 有设备码登录；原因是智谱 / Z.ai 官方只对第三方开放 API Key。现在按社区已落地的做法复刻 ZCode 自己的第一方授权：在 `chat.z.ai` 完成授权 → 用 code 换短期 OAuth token → 业务接口在该账号上**创建或复用一把 Coding Plan Key** → 用订阅侧模型目录验证后入库。
+  - **落盘形态不变**：铸造出来的就是普通 `id.secret` Coding Plan Key，因此验证（先读一次订阅侧模型目录，不通过不落盘）、多账号号池、额度卡片、适配器全部沿用既有路径——本线路没有第二种凭据形态，也没有第二套刷新逻辑（该 Key 不过期）。这正是这条路径能在本插件里成立的原因，也是它与 Kimi 设备码登录的结构差异：Kimi 拿到的是需要刷新的 access/refresh token，这里拿到的是一把长期 Key。
+  - **新增 `src/host/zhipu/oauth.ts`**：回环回调（`127.0.0.1:54548/callback`）、authorization code 交换、按平台 `code`/`success` 信封解包（token 端点 `code 0`、业务端点 `code 200` 两种约定都接受，因为只看 HTTP 200 会把拒绝读成成功）、默认组织/项目解析、同名 Key find-or-create、以及始终经 `/copy` 读取 secret（列表会把 secret 打码，创建响应里的内联 secret 在不同账号状态下不可靠）。
+  - **端口回退不是可有可无**：控制台的 redirect URI 来自授权请求本身而非预先注册，所以首选端口不可用只是重试。实测本机 `54548` 位于 Windows 保留端口段、绑定报 **`EACCES`**（不是常见的 `EADDRINUSE`）——只处理后者会让登录在这类机器上直接失败，两者都回退到临时端口。
+  - **浏览器连不上本机也能登录**：卡片在 `pending` 期间始终展示授权地址，并提供输入框接受**完整回调地址或裸 code**（`extractAuthorizationCode` 按 URL 解析判定，避免把整条 URL 当成 code 提交后拿到一个无从解释的 400）。这与 Kimi 的设备码在无浏览器环境下的可恢复性对齐。
+  - **不碰别人的 Key**：铸造的 Key 名为 `dsh-chatgpt-subscription`（非 ZCode 自己的 `zcode-api-key`），同名则复用，**从不删除账号上的任何 Key**，重复登录是幂等的。
+  - **只支持国际区**：国区控制台没有对应的公开授权，`POST /zhipu/api/login` 对 `region: cn` 明确拒绝并提示改用手填 Key——而不是让卡片停在一个永远不会完成的流程上。
+  - **第一方私有契约按可回滚处理**：端点与 client id 收在 `src/host/zhipu/types.ts` 的 `ZAI_OAUTH` 里集中评审，且逐个可用 `DSH_ZAI_OAUTH_*` 环境变量覆盖。
+  - 路由新增 `POST /login`、`GET /login/status`、`POST /login/code`、`POST /login/cancel`（均同源校验；`login` 可用 `oauthEnabled` 部署级关闭）。卡片上「添加账号」改为触发浏览器登录，手填 Key 保留为回退路径与国区唯一路径；中英文案同步。
+  - **验证**：`npm run typecheck` 与 `npm run build` 均 0 错误；`npx vitest run` **97 个文件通过 / 1 跳过，1280 条通过 / 7 跳过、0 失败**（较本次改动前的 1256 条 +24：`test/zhipu-oauth.test.ts` 新增 22 条、`test/zhipu-ui.test.tsx` 新增 2 条）。`zhipu-oauth` 覆盖：授权 URL 构造（含「不发 PKCE」这一与官方请求一致的必要条件）、code 提取的两种形态、完整铸造序列与顺序、同名 Key 复用不产生第二个 Key、信封拒绝文案透出、无组织/项目与读不到 secret 的具名失败、粘贴 code 完成登录并落盘为国际区凭据、失败时**不落任何凭据**、首选端口不可用时改用临时端口、**真实回环回调**（含伪造 state 被拒且不终止尝试）、以及四条路由的同源/国区/无进行中流程等分支；`zhipu-ui` 覆盖待授权态下授权地址与粘贴框的渲染。测试用可注入的 `endpoints` + `port: 0` 全程离线，不依赖真实 Z.ai 账号或 54548 端口。
+
 - **支持 DSH 0.1.7-rc.1**（本机 harness 仓库与 `dsh --version` 都已是它，npm 上 `next` 也是它）。这一版**不需要任何行为改动**——alpha.1 桥接过的会话消息模型与设置 API 在 rc.1 一字未改，`dsh-llm`、`dsh-settings`、`dsh-web`、`dsh-attachment`、`dsh-timeout`、`dsh-host-webserver` 与四个 client 包在该窗口内**只有版本号变化**（窗口本身 318 个提交 / 911 个文件，绝大多数与本插件无关）。动作落在基线、一处契约漂移和依赖清单上。
   - **dev 基线升到 `0.1.7-rc.1`，peer 范围加入 `^0.1.7-rc.1`**。需要说清的是：这个 peer 子句是**为可读性**，不是解封——`^0.1.7-alpha.1` 本来就覆盖 `0.1.7-rc.1`（同一个 `0.1.7` 元组，预发布比较器在元组内匹配），已用 `semver.satisfies` 对全部 dsh peer 逐条验证。rc.1 新增的**启动期 peer 兼容性预检**（`packages/boot/app-boot/src/plugin-compatibility.ts`：不满足即把该行 `disabled` 并写 stderr，读不到 peer 元数据也一律拒绝）对本插件因此是**空集**。
   - **`tool.call.toolview` 的入参从单一 `block` 变成三态联合**（`packages/client/ui-tool/.../contract/slots.ts` 的 `ToolCallPhaseProps`：`preparing` / `start` / `result`），`RunningToolCall` 相应拆成 `PreparingToolCall`（**根本没有 `argsRaw`**）与 `StartedToolCall`。`ToolCallTree` 对**每个阶段**都调用已注册的 keyed 视图，所以图片卡确实会拿到 `preparing` 的 block；`CodexImageToolView` 原先直接读 `block.argsRaw`，在 `preparing` 上读的是不存在的属性。**这不是用户可见的故障**（读到 `undefined` 后照常渲染「正在生成图片」，只是少了提示词摘要），属接缝处的契约漂移；现改为只在声明了该字段的分支读取（`dispatchedArgsRaw`，用 `'argsRaw' in block` 判定），旧代走的正是原来那条分支，**由构造保证而非版本判断**。

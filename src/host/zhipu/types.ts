@@ -85,6 +85,60 @@ export const DEFAULT_CONTEXT_WINDOW = 128_000
  */
 export const PLUGIN_USER_AGENT = 'dsh-chatgpt-subscription (+https://github.com/Aa728848/dsh-chatgpt-subscription)'
 
+/**
+ * Browser sign-in (ZCode's own "Coding Plan" authorization) endpoints.
+ *
+ * The Coding Plan is bought on a web console, and the console's own client
+ * signs in with the browser rather than asking the user to mint a key by hand:
+ * an authorization-code grant against `chat.z.ai`, a JSON token exchange on
+ * the ZCode host, and then a business-API sequence that mints a durable
+ * `id.secret` key. Only the two `api.z.ai`/console hosts below take part —
+ * the resulting key is an ordinary Coding Plan key, so every existing path
+ * (verification, the pool, quota) keeps working unchanged.
+ *
+ * These are first-party endpoints, not a published third-party contract: the
+ * client id belongs to ZCode's own web client, so any of them may move without
+ * notice. They live here, next to the other provider-host facts, so a change is
+ * one reviewed edit — and every one of them can be overridden by an environment
+ * variable for a rollback or a private deployment.
+ *
+ * @see https://zcode.z.ai/cn/docs/configuration
+ */
+export const ZAI_OAUTH = {
+  /** Public client id of ZCode's own web sign-in. */
+  clientId: process.env.DSH_ZAI_OAUTH_CLIENT_ID?.trim() || 'client_P8X5CMWmlaRO9gyO-KSqtg',
+  /** Authorization page the browser is sent to. */
+  authorizeUrl: process.env.DSH_ZAI_OAUTH_AUTHORIZE_URL?.trim() || 'https://chat.z.ai/api/oauth/authorize',
+  /** JSON token endpoint that trades the authorization code for a short-lived token. */
+  tokenUrl: process.env.DSH_ZAI_OAUTH_TOKEN_URL?.trim() || 'https://zcode.z.ai/api/v1/oauth/token',
+  /** Business host the durable key is minted on. */
+  bizBase: process.env.DSH_ZAI_BIZ_BASE?.trim() || 'https://api.z.ai',
+  /** Business-login endpoint: exchanges the OAuth token for a biz session token. */
+  businessLoginUrl: process.env.DSH_ZAI_BUSINESS_LOGIN_URL?.trim() || 'https://api.z.ai/api/auth/z/login',
+  /**
+   * Name of the key this plugin creates on the account.
+   *
+   * Distinct from ZCode's own key name so signing in here never rotates or
+   * deletes the key the official client provisioned.
+   */
+  keyName: process.env.DSH_ZAI_OAUTH_KEY_NAME?.trim() || 'dsh-chatgpt-subscription',
+} as const
+
+/** Loopback port the browser callback is received on; overridable for a busy host. */
+export const ZAI_OAUTH_CALLBACK_PORT = ((): number => {
+  const configured = Number(process.env.DSH_ZAI_OAUTH_CALLBACK_PORT)
+  return Number.isInteger(configured) && configured > 0 && configured <= 65535 ? configured : 54548
+})()
+
+/** Path the console redirects to on the loopback listener. */
+export const ZAI_OAUTH_CALLBACK_PATH = '/callback'
+
+/** How long a browser sign-in may stay pending before it is abandoned. */
+export const ZAI_OAUTH_TIMEOUT_MS = 5 * 60 * 1000
+
+/** Banner sizes and request timeout for the OAuth calls. */
+export const ZAI_OAUTH_REQUEST_TIMEOUT_MS = 30_000
+
 /** Reasoning levels the Coding Plan accepts for its GLM-5.x models. */
 export const CODING_EFFORTS = ['low', 'high', 'max'] as const
 

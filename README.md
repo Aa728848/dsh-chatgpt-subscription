@@ -88,7 +88,8 @@
 
 - 注册 `zhipu-coding-plan` Provider，接入**智谱 / Z.ai 的 GLM Coding Plan 订阅**。该 ID 特意与用户常用的自定义 OpenAI 兼容线路 `zai` / `zhipu` 分开，安装插件不会覆盖或隐藏原有自定义 API；
 - **订阅接口与开放平台是两套东西**：Coding Plan 的模型接口是 OpenAI 兼容的 `{base}/api/coding/paas/v4`，**不是** 通用付费的 `/api/paas/v4`——把开放平台的 Key 或后者当 base URL 用会被判为鉴权失败。国区（`open.bigmodel.cn`）与国际区（`api.z.ai`）的 Key **互不通用**，因此区域是**凭据属性**：添加时显式选择，卡片逐条标注，模型请求走该账号自己的 host；
-- **添加 Key 前先验证**：`POST /zhipu/api/accounts/add` 先用该 Key 读一次部署自己的模型目录，未通过就不落盘，并直接告出「Key 大概来自哪个控制台」——这是这个产品最常见的一次配错。整个登录只花一次上游读（验证用的目录会被缓存）；
+- **支持浏览器登录（ZCode 的「编程套餐」授权）**：卡片上的「添加账号 / 浏览器登录」走 ZCode 自己的第一方授权——在 `chat.z.ai` 完成授权 → 用 code 换短期 token → 业务接口在该账号上**创建（或复用同名的）一把 Coding Plan Key** → 用订阅侧模型目录验证后入库（`src/host/zhipu/oauth.ts`）。因此落盘的仍是**普通 Coding Plan Key**，验证、号池、额度、适配器全都沿用既有路径，不存在第二种凭据形态。要点：① 回环回调固定 `127.0.0.1:54548/callback`（端口被占用、或被 Windows 的保留端口段判 `EACCES` 时自动改用临时端口，回调地址随授权请求一起提交，所以换端口不影响）；② 浏览器连不上本机时，可把**地址栏里的完整回调地址或 code** 粘贴回卡片完成登录；③ Key 名固定为 `dsh-chatgpt-subscription`，**同名复用它自己的 Key**，绝不触碰 ZCode 客户端自己创建的 Key，也绝不会删除账号上的任何 Key；④ **只支持国际区（`api.z.ai`）**——国区控制台没有对应的公开授权，请求国区会被明确拒绝并提示改用手填 Key；⑤ 这些端点属第一方、非公开契约，全部可用 `DSH_ZAI_OAUTH_*` 环境变量覆盖（见下）；
+- **添加 Key 前先验证**：手填路径 `POST /zhipu/api/accounts/add` 与浏览器登录一样，先用 Key 读一次部署自己的模型目录，未通过就不落盘，并直接告出「Key 大概来自哪个控制台」——这是这个产品最常见的一次配错。整个登录只花一次上游读（验证用的目录会被缓存）；
 - **多账号号池，与另外四条线路同源**：走共享内核 `AccountPoolCore`（`src/host/common/account-pool.ts`）并复用同一张设置卡片（`src/client/common/AccountPoolCard`），因此具备**顺序耗尽 / 轮询调度 / 粘性会话**三种策略、429 冷却换号、账号级失效（保留账号、重新添加即恢复）、设为主账号、账号备注与清除冷却。账号 id 是 **Key 摘要 + 区域**，别名只显示「区域 + Key 后四位」，明文 Key 既不进别名也不进 id，更不会出现在卡片上（有测试锁定）；
 - **模型能力逐模型查表**（`src/host/zhipu/model-catalog.ts`）：是否接受图片、有哪些思考档位、能否关闭思考都由该表决定，运行时以订阅侧 `GET /models` 为准（只覆盖上下文窗口，能力不被上游列表改写）。图片能力不能按族名推断——**`glm-5.3-flash` 接受图片而 `glm-5.3` 不接受**；档位也不能——`glm-5.3` 有三档而 `glm-5.2` 只有两档，`glm-4.7` / `glm-4.5-air` 这类 toggle 模型根本不收 `reasoning_effort`；
 - **思考档位只发上游认的值**：上游对 GLM-5.x 只接受 `low` / `high` / `max`，其余取值**直接报错**（不是被忽略）。DSH 的档位词表比这宽，因此每个取值都先收敛到该模型自己的档位表再发出；收敛按**两套词表统一排序**，`minimal` 这类「比 low 更省」的档位会落到 `low` 而不是被当成未知值弹到中间档——否则用户选了最省的一档反而会换来 `high`，既不符合意图又更费额度。关闭思考的值本线路一律不发：GLM-5.3 / GLM-5.3-FLASH / GLM-4.7 把 `thinking.type: "disabled"` 判为错误，省略该字段就是它们的 `enabled` 默认；
@@ -404,6 +405,8 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 两区 host 分别是 `https://open.bigmodel.cn`（国区）与 `https://api.z.ai`（国际区）。请求只带本插件自己的 UA，不冒充官方客户端。
 
+**浏览器登录（ZCode 第一方授权，仅国际区）**：`chat.z.ai/api/oauth/authorize` → `zcode.z.ai/api/v1/oauth/token` → 业务接口（`api.z.ai/api/auth/z/login`、`/api/biz/customer/getCustomerInfo`、`/api/biz/v1/organization/{org}/projects/{proj}/api_keys` 与其 `/copy/{key}`）。这几条是**第一方私有契约**，可能随时变动，因此每个端点与 client id 都可用环境变量覆盖：`DSH_ZAI_OAUTH_CLIENT_ID` / `DSH_ZAI_OAUTH_AUTHORIZE_URL` / `DSH_ZAI_OAUTH_TOKEN_URL` / `DSH_ZAI_BIZ_BASE` / `DSH_ZAI_BUSINESS_LOGIN_URL` / `DSH_ZAI_OAUTH_KEY_NAME` / `DSH_ZAI_OAUTH_CALLBACK_PORT`。
+
 ### 插件路由（GLM Coding Plan）
 
 所有路由都以 `/zhipu/api` 为前缀：
@@ -412,6 +415,10 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | --- | --- | --- |
 | GET | `/status` | 账号、额度、模型目录与路由归属 |
 | POST | `/accounts/add` | 验证并保存一个 API Key（可选 `alias`） |
+| POST | `/login` | 开始浏览器登录（ZCode 第一方授权），返回待轮询的流程状态 |
+| GET | `/login/status` | 查询登录进度（`idle` / `pending` / `complete` / `error`，含授权地址与失败原因） |
+| POST | `/login/code` | 用手工粘贴的回调地址或授权码完成登录（浏览器连不上本机时的回退路径） |
+| POST | `/login/cancel` | 取消当前登录尝试 |
 | POST | `/accounts/remove` | 删除当前账号（单凭据模式） |
 | POST | `/accounts/action` | 号池动作：`set-primary` / `set-alias` / `delete` / `clear-cooldown` / `clear-auth-failure` / `strategy` |
 | GET / POST | `/quota` | 强制刷新额度（POST）或读取当前状态（GET） |
@@ -503,6 +510,9 @@ npm pack --dry-run
 | Kimi Code 报 429 `engine is currently overloaded` | 服务容量问题（工作日 14:00–17:00 高峰更常见），会自动退避重试；若响应里带 `error.type = exceeded_current_quota_error` 则属于配额耗尽，插件不会重试而是提示补充额度 |
 | Kimi Code 额度显示为空 | 卡片会同时给出失败原因（`/v1/usages` 的 401/403/5xx 文案），按提示处理后点「刷新用量」重试；确认用的是订阅账号——开放平台的 key 在这里不会被接受 |
 | Kimi Code 账号一栏为空 | 账号身份取自 OAuth token 自身的 JWT 声明，套餐名取自 `/me`（`/usages` 自 2026-09 起不再返回 `user_level_name`）。重新登录或点「刷新用量」即可写入；若仍为空但显示「已登录」，点「测试连接」可确认凭据是否仍被接受 |
+| GLM 浏览器登录卡在「等待浏览器授权」 | 授权页在浏览器里完成后会跳回 `127.0.0.1:54548/callback`。若浏览器不在本机（远程桌面 / 容器 / 防火墙拦截），把**地址栏里的完整地址或 code** 粘到卡片下方输入框提交即可；点「取消登录」可放弃本次尝试 |
+| GLM 浏览器登录报「no organization/project」/「cannot use the GLM Coding Plan」 | 前者说明该账号在 Z.ai 上没有可用的组织/项目（先在官网控制台完成开通）；后者是**铸造出的 Key 未通过订阅侧验证**，通常是该账号没有生效的 Coding Plan——插件此时不会保存任何凭据 |
+| GLM 想用国区账号但卡片提示「国区没有浏览器登录」 | 国区控制台（`open.bigmodel.cn`）没有对应的公开授权流程，请用「API Keys」页创建 Key 后在下方手填；两区 Key 互不通用 |
 | GLM 添加 Key 报「rejected the API key」 | Key 与所选**区域**不匹配，或它不是 Coding Plan 的 Key。错误文案会指明应来自哪个控制台（`api.z.ai` 或 `open.bigmodel.cn`）：换区域重试，并确认订阅生效；开放平台按量付费的 Key 在订阅接口上不被接受 |
 | GLM 报 `code 1311`（套餐不含该模型） / `code 1309`（套餐已过期） | 这两个都是账号权益问题而非瞬时故障，插件不会重试：前者换一个模型，后者去官网续费。两者与「额度窗口用尽」共用 429 状态码，插件按响应正文的 `code` 区分处理 |
 | GLM 报 `code 1214`（参数被拒） | 多为该模型不支持的思考档位或不可读的图片：`glm-5.3` 不接受图片（用 `glm-5.3-flash`），档位只有 `low` / `high` / `max`。卡片只会列出该模型真正声明过的能力 |
