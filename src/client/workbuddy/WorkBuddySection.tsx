@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   WorkBuddyAccount,
+  WorkBuddyCheckinSettings,
   WorkBuddyModelOption,
   WorkBuddyReasoningEffort,
   WorkBuddyWebStatus,
@@ -438,6 +439,35 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
     }
   }
 
+  const handleCheckinNow = async () => {
+    try {
+      setBusy('checkin')
+      setError(null)
+      const updated = await fetchApi<WorkBuddyWebStatus>('/checkin/now', { method: 'POST' })
+      setStatus(normalizeStatus(updated))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleCheckinPatch = async (checkin: Partial<WorkBuddyCheckinSettings>) => {
+    try {
+      setBusy('checkin')
+      setError(null)
+      const updated = await fetchApi<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ checkin }),
+      })
+      setStatus(normalizeStatus(updated))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const toggleEnabled = async (enabled: boolean) => {
     try {
       setBusy('enabled')
@@ -705,6 +735,39 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
           </button>
         </div>
       </AccountPoolSection>
+
+      {status?.checkin != null ? (
+        <section className="dsha-group">
+          <div className="dsha-grouphead">
+            <h3>{t.dailyCheckin}</h3>
+          </div>
+          <p className="dsha-muted">{t.checkinHint}</p>
+          <div className="dsha-row" style={{ marginBottom: 8 }}>
+            <span className="dsha-label" style={{ fontWeight: 600 }}>{t.checkinAuto}</span>
+            <input
+              type="checkbox"
+              checked={status.checkin.enabled}
+              disabled={busy !== null}
+              onChange={(event) => void handleCheckinPatch({ enabled: event.currentTarget.checked })}
+            />
+          </div>
+          <div className="dsha-row">
+            <span className="dsha-label">{t.dailyCheckin}</span>
+            <span className="dsha-value">
+              {t.checkinToday.replace('{done}', String(status.checkin.doneToday)).replace('{total}', String(status.checkin.totalAccounts))}
+              {status.checkin.failedToday > 0
+                ? ` · ${t.checkinFailed.replace('{count}', String(status.checkin.failedToday))}`
+                : ''}
+              {` · ${status.checkin.lastRunAt === null ? t.checkinNever : t.checkinLastRun.replace('{time}', new Date(status.checkin.lastRunAt).toLocaleString())}`}
+            </span>
+          </div>
+          <div className="dsha-actions">
+            <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleCheckinNow()}>
+              {busy === 'checkin' ? t.checkinRunning : t.checkinNow}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="dsha-group">
         <div className="dsha-grouphead">

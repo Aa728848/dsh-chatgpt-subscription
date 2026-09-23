@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **WorkBuddy 每日自动签到**（参考 workbuddy2api 的 `daily_checkin.py` 移植并适配到插件进程内）：
+  - 新增 `src/host/workbuddy/checkin.ts`：国区账号（含桌面收编与已隐藏账号）在 Host 启动时签到一轮，之后每 10 分钟幂等补检（当日已签零请求）；先查 `checkin-activity-status` 幂等预查再调 `daily-checkin`，活动无权益当天不再重试，失败当天最多自动重试 3 次；token 续期复用凭据存储现有的过期续期+回写机制（桌面账号原子写回 IDE 的 *.info）。国际区账号不参与。（初版曾做「散列分时窗口」，试用后按用户反馈简化为启动即签，窗口配置已移除。）
+  - 状态持久化到 `storages/workbuddy-checkin.json`（tmp+rename 原子写），同日重启免费；签到是进程内调度，**DSH 未运行的当天不签到**。
+  - 偏好：`dsh-workbuddy` 命名空间与文件存储双轨新增 `checkin: { enabled }`。
+  - 路由：`/workbuddy/api/status` 附带签到汇总（今日 x/y、失败数、上次运行时间，聚合无账号标识）；新增 `POST /workbuddy/api/checkin/now` 手动补签（同源校验，忽略窗口与重试上限但仍跳过当日已签账号）；`/settings` 接受 `checkin` 补丁。
+  - 设置页新增「每日签到」区块：开关、「今日已签 x/y」总状态与「立即签到」按钮；中英文案。
+  - **验证**：`npm run typecheck`、`npm run build` 通过；`npm test` 全绿。新增 `test/workbuddy-checkin.test.ts`：首次 tick 即签、之后零请求、开关关闭不动/手动补签强制、国际区跳过、已签不重复请求、无权益当天不重试、失败 3 次封顶且手动可重试、过期 token 先续期再签到并回写桌面文件、多账号全签、同日状态文件去重、状态路由汇总/旧 Host 返回 null、手动路由同源与方法门禁、设置补丁持久化与旧版窗口字段兼容。
+
 - **模型上下文窗口跟随模型开关，并支持恢复默认**（用户报告：「本项目提供的供应商模型是可以开关显示的，但是配置同页面的配置上下文不行，能不能开启什么模型再调整什么模型的上下文，增加支持恢复默认的选项」）。
   - **上下文窗口只列已勾选启用的模型**：五个标签页统一——ChatGPT 页按 `visibleModelIds`，Antigravity / Command Code / Kimi Code / WorkBuddy 按 `model.enabled`；一个都没勾选时显示空态提示。四页新增 `contextDraftsFor(status)` 并让所有播种路径（`/status`、目录刷新、以及**模型开关请求返回后**）都走它，否则刚勾选的模型会渲染成空输入框（此前上下文区与开关无关，草稿总是先于行存在）。
   - **ChatGPT 页放开到全部模型**：原先只有 `CONFIGURABLE_CONTEXT_MODEL_IDS` 里写死的 6 个模型（恰好等于默认可见的 6 个）能配上下文，勾上 5.5 / 5.4 / 5.4 Mini / 5.3 Codex Spark 后没有对应输入框。现在 `CONFIGURABLE_CONTEXT_MODEL_IDS`、`ConfigurableContextModelId`、`isConfigurableContextModelId` 全部删除，改用既有的 `isCodexModelId`：偏好 schema 按 `CODEX_MODEL_CATALOG` 生成、路由接受任意目录模型、`src/host/model-catalog.ts` 去掉「只有那几个模型才读覆盖值」的守卫。可调上限沿用家族规则（GPT-6 系 872K，其余 1M），与 5.6 系列此前的规则一致。

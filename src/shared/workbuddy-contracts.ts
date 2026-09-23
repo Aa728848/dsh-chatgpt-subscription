@@ -105,6 +105,36 @@ export interface WorkBuddyModelOption {
   description?: string
 }
 
+/**
+ * Daily check-in preference for the CN-region billing activity.
+ *
+ * The activity is CN-only: the international deployment answers no check-in
+ * surface, so the scheduler skips those accounts outright. There is no window
+ * to configure: the first tick after the host starts is the daily run.
+ */
+export interface WorkBuddyCheckinSettings {
+  /** Whether the in-process scheduler signs eligible accounts in. */
+  enabled: boolean
+}
+
+/**
+ * Aggregate check-in state the settings card renders.
+ *
+ * Deliberately account-less: the card shows one line ("checked in x/y today"),
+ * not a per-account breakdown, so no account identity crosses here either.
+ */
+export interface WorkBuddyCheckinSummary {
+  enabled: boolean
+  /** CN-region accounts eligible for the check-in activity. */
+  totalAccounts: number
+  /** Accounts confirmed signed in today (already signed, or signed by a run). */
+  doneToday: number
+  /** Accounts that exhausted today's retry cap without signing in. */
+  failedToday: number
+  /** Unix milliseconds the scheduler last ran, automatic or manual. */
+  lastRunAt: number | null
+}
+
 /** One credit allowance reported by the billing service. */
 export interface WorkBuddyMeter {
   id: string
@@ -225,6 +255,8 @@ export interface WorkBuddyWebStatus extends Partial<AccountPoolStatusDto> {
   conflict: string | null
   /** Pool summaries the shared account card renders; empty without a pool. */
   accounts?: WorkBuddyAccountSummaryDto[]
+  /** Aggregate daily check-in state; absent when the host predates check-in. */
+  checkin?: WorkBuddyCheckinSummary | null
 }
 
 /** Patch accepted by the models/settings route. */
@@ -235,6 +267,8 @@ export interface WorkBuddySettingsUpdateDto {
   contextWindowOverrides?: Record<string, number | null>
   defaultReasoningEffort?: WorkBuddyReasoningEffort | null
   selectedAccountId?: string | null
+  /** Partial check-in update; omitted fields keep their stored value. */
+  checkin?: Partial<WorkBuddyCheckinSettings>
 }
 
 /** Result of a connection test against the upstream chat endpoint. */

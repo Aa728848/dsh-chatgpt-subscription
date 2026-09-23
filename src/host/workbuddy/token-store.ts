@@ -4,7 +4,7 @@ import os from 'node:os'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import z from '@deepseek-ai/schemastery'
-import type { WorkBuddyReasoningEffort, WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
+import type { WorkBuddyCheckinSettings, WorkBuddyReasoningEffort, WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { dshHomeDir } from '../antigravity/token-store.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
@@ -74,6 +74,8 @@ export interface WorkBuddyModelSettings {
   selectedAccountId: string | null
   /** Desktop accounts hidden from this plugin without deleting CodeBuddy files. */
   hiddenAccountIds: string[]
+  /** Daily check-in scheduler preferences. */
+  checkin: WorkBuddyCheckinSettings
 }
 
 export interface WorkBuddyPreferenceStore {
@@ -86,10 +88,25 @@ export interface WorkBuddyPreferenceStore {
     defaultReasoningEffort?: WorkBuddyReasoningEffort | null
     selectedAccountId?: string | null
     hiddenAccountIds?: string[]
+    checkin?: Partial<WorkBuddyCheckinSettings>
   }): Promise<WorkBuddyModelSettings>
 }
 
 const DEFAULT_ENABLED_MODEL_IDS = [...DEFAULT_VISIBLE_MODEL_IDS]
+
+/** Shipped check-in default: on. */
+export const DEFAULT_CHECKIN_SETTINGS: WorkBuddyCheckinSettings = { enabled: true }
+
+/**
+ * Narrow an unknown stored/patched value into valid check-in settings.
+ *
+ * Documents written while the window was still configurable may carry
+ * startHour/endHour; those keys are inert now and dropped on the next write.
+ */
+export function normalizeCheckinSettings(value: unknown): WorkBuddyCheckinSettings {
+  if (!isRecord(value)) return { ...DEFAULT_CHECKIN_SETTINGS }
+  return { enabled: value.enabled !== false }
+}
 
 /**
  * Bind the model selection to the DSH settings document when the harness still
@@ -111,6 +128,7 @@ export function registerWorkBuddyPreferenceStore(
       defaultReasoningEffort: null,
       selectedAccountId: null,
       hiddenAccountIds: [],
+      checkin: { ...DEFAULT_CHECKIN_SETTINGS },
     }
     void fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
     return {
@@ -134,6 +152,9 @@ export function registerWorkBuddyPreferenceStore(
       .default(null),
     selectedAccountId: z.union([z.string(), z.const(null)]).default(null),
     hiddenAccountIds: z.array(z.string()).default([]),
+    checkin: z.object({
+      enabled: z.boolean().default(true),
+    }).default({ enabled: true }),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
@@ -141,6 +162,7 @@ export function registerWorkBuddyPreferenceStore(
     defaultReasoningEffort: WorkBuddyReasoningEffort | null
     selectedAccountId: string | null
     hiddenAccountIds: string[]
+    checkin: WorkBuddyCheckinSettings
   }>
 
   return {
@@ -153,6 +175,7 @@ export function registerWorkBuddyPreferenceStore(
         defaultReasoningEffort: value.defaultReasoningEffort,
         selectedAccountId: value.selectedAccountId,
         hiddenAccountIds: value.hiddenAccountIds,
+        checkin: normalizeCheckinSettings(value.checkin),
       }
     },
     update: async (patch) => {
@@ -170,6 +193,9 @@ export function registerWorkBuddyPreferenceStore(
           ? patch.selectedAccountId
           : current.selectedAccountId,
         hiddenAccountIds: patch.hiddenAccountIds ?? current.hiddenAccountIds,
+        checkin: patch.checkin !== undefined
+          ? normalizeCheckinSettings({ ...normalizeCheckinSettings(current.checkin), ...patch.checkin })
+          : normalizeCheckinSettings(current.checkin),
       }
       await scope.update(normalized)
       void fallbackStore.updateSettings(patch).catch(() => undefined)
@@ -760,6 +786,7 @@ export class FileModelSettingsStore {
           hiddenAccountIds: Array.isArray(parsed.hiddenAccountIds)
             ? parsed.hiddenAccountIds.filter((id): id is string => typeof id === 'string')
             : [],
+          checkin: normalizeCheckinSettings(parsed.checkin),
         }
       }
     } catch {
@@ -772,6 +799,7 @@ export class FileModelSettingsStore {
       defaultReasoningEffort: null,
       selectedAccountId: null,
       hiddenAccountIds: [],
+      checkin: { ...DEFAULT_CHECKIN_SETTINGS },
     }
   }
 
@@ -790,6 +818,7 @@ export class FileModelSettingsStore {
     defaultReasoningEffort?: WorkBuddyReasoningEffort | null
     selectedAccountId?: string | null
     hiddenAccountIds?: string[]
+    checkin?: Partial<WorkBuddyCheckinSettings>
   }): Promise<WorkBuddyModelSettings> {
     const current = await this.read()
     const next: WorkBuddyModelSettings = {
@@ -807,6 +836,9 @@ export class FileModelSettingsStore {
         : {}),
       ...(patch.hiddenAccountIds !== undefined
         ? { hiddenAccountIds: patch.hiddenAccountIds }
+        : {}),
+      ...(patch.checkin !== undefined
+        ? { checkin: normalizeCheckinSettings({ ...current.checkin, ...patch.checkin }) }
         : {}),
     }
     await this.write(next)

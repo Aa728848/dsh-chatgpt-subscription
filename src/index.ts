@@ -62,6 +62,7 @@ import {
   registerWorkBuddyPreferenceStore,
 } from './host/workbuddy/token-store.ts'
 import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
+import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
@@ -414,6 +415,23 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         })
       : undefined
 
+    // The daily check-in scheduler (CN billing activity). The host owns the
+    // interval; a day the process never runs is a day nothing signs in.
+    const workBuddyCheckin = new WorkBuddyCheckinService(workBuddyStore, {
+      fetchFn: proxyFetch,
+      settings: () => workBuddyPreferences.status().checkin,
+      logger: ctx.logger,
+    })
+    const checkinTick = (): void => {
+      void workBuddyCheckin.tick().catch((error) => {
+        ctx.logger.warn(`[dsh-chatgpt-subscription] WorkBuddy check-in tick failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    const checkinTimer = setInterval(checkinTick, CHECKIN_TICK_MS)
+    // The startup pass is the daily run; the day state makes a same-day
+    // restart free, and the interval covers a process that survives midnight.
+    checkinTick()
+
     const disposeWorkBuddyRoutes = registerWorkBuddyRoutes(
       ctx,
       workBuddyStore,
@@ -424,6 +442,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         serving: () => workBuddyRegistration !== undefined,
         conflict: () => workBuddyConflict,
         accountPool: workBuddyAccountPool,
+        checkin: workBuddyCheckin,
       },
     )
 
@@ -547,6 +566,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(kimiCodeRouteWatch)
       kimiCodeRegistration?.()
       kimiCodeRegistration = undefined
+      clearInterval(checkinTimer)
       disposeWorkBuddyRoutes()
       releaseHandle(workBuddyRouteWatch)
       workBuddyRegistration?.()
@@ -715,6 +735,7 @@ export {
   parseBilling as parseWorkBuddyBilling,
 } from './host/workbuddy/client.ts'
 export { getWorkBuddyWebStatus, registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
+export { WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 export {
   FALLBACK_MODELS as WORKBUDDY_MODELS,
   WORKBUDDY_MODEL_IDS,

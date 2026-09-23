@@ -83,6 +83,15 @@ export const zh = {
   loading: '加载中...',
   credits: 'credits',
   composerLabel: '额度',
+  dailyCheckin: '每日签到',
+  checkinHint: '仅国区账号参与；DSH 启动时自动签到一次，运行期间每 10 分钟补检，进程关闭的当天不会签到。',
+  checkinAuto: '自动签到',
+  checkinToday: '今日已签 {done}/{total}',
+  checkinFailed: '{count} 个失败',
+  checkinLastRun: '上次运行：{time}',
+  checkinNever: '尚未运行',
+  checkinNow: '立即签到',
+  checkinRunning: '签到中…',
 } as const
 
 export const en = {
@@ -168,6 +177,15 @@ export const en = {
   loading: 'Loading...',
   credits: 'credits',
   composerLabel: 'Quota',
+  dailyCheckin: 'Daily check-in',
+  checkinHint: 'CN-region accounts only. The host signs in once at startup and re-checks every 10 minutes while running; a day the process never runs is not signed.',
+  checkinAuto: 'Auto check-in',
+  checkinToday: 'Checked in today {done}/{total}',
+  checkinFailed: '{count} failed',
+  checkinLastRun: 'Last run: {time}',
+  checkinNever: 'Never run',
+  checkinNow: 'Check in now',
+  checkinRunning: 'Checking in…',
 } as const
 
 export const dictionaries = {

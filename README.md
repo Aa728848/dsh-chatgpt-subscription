@@ -344,8 +344,12 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | 浏览器授权 | `POST /v2/plugin/auth/state` + `GET /v2/plugin/auth/token` |
 | 令牌续期 | `POST /v2/plugin/auth/token/refresh` |
 | 额度 | `POST /billing/meter/get-user-resource` |
+| 签到状态 | `POST /billing/meter/checkin-activity-status`（仅国区） |
+| 每日签到 | `POST /billing/meter/daily-checkin`（仅国区） |
 
 两区后端分别是 `https://copilot.tencent.com`（国区）与 `https://www.workbuddy.ai` / `https://www.codebuddy.ai`（国际区）。**请求身份统一使用 CLI UA**（`CLI/2.63.2 CodeBuddy/2.63.2`）：实测 `CodeBuddyIDE` 被 `/v3/config` 以 400 `code 12403` 拒绝，国际区对话端点也直接返回 401，因此不做按端点切换。
+
+**每日自动签到**（仅国区；语义与 workbuddy2api 的 `daily_checkin.py` 对齐）：DSH 启动时自动签到一轮，运行期间每 10 分钟幂等补检（当日已签的账号不再发请求）；签到前先查签到状态，token 过期会自动续期并回写（桌面账号写回 CodeBuddy 自己的凭据文件）。失败当天最多自动重试 3 次，活动无权益的账号当天不再打扰；国际区账号不参与（国际后端没有签到活动）。**DSH 没开机的当天不会签到**——插件不是常驻服务。设置页「每日签到」区块可开关自动签到、查看「今日已签 x/y」并手动「立即签到」。签到状态存在 `storages/workbuddy-checkin.json`，token 不出 Host。
 
 ### 插件路由（WorkBuddy）
 所有路由都以 `/workbuddy/api` 为前缀：
@@ -362,6 +366,7 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | GET / POST | `/models`、`/settings` | 读取或更新勾选模型、上下文窗口与默认思考深度 |
 | POST | `/catalog/refresh` | 强制刷新网关模型目录 |
 | POST | `/connection/test` | 用已识别凭据向上游发一次最小请求测试连接 |
+| POST | `/checkin/now` | 立即执行一轮每日签到（忽略时间窗，当日已签的账号仍跳过） |
 
 与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
 
