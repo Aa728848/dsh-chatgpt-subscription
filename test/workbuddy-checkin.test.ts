@@ -251,6 +251,7 @@ describe('WorkBuddy check-in routes', () => {
     enabled: true,
     totalAccounts: 2,
     doneToday: 1,
+    skippedToday: 0,
     failedToday: 0,
     lastRunAt: 1700000000000,
   }

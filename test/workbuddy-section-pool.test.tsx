@@ -45,6 +45,15 @@ const ACCOUNTS = [
   },
 ]
 
+const CHECKIN = {
+  enabled: true,
+  totalAccounts: 2,
+  doneToday: 1,
+  skippedToday: 0,
+  failedToday: 0,
+  lastRunAt: Date.parse('2026-03-01T09:30:00'),
+}
+
 function statusPayload(overrides: Record<string, unknown> = {}) {
   return {
     authenticated: true,
@@ -184,6 +193,68 @@ describe('WorkBuddy settings card', () => {
     expect(accountGroup.textContent).toContain(zh.noAccounts)
     // Its login entry points stay reachable while signed out.
     expect(accountGroup.textContent).toContain(zh.addCnAccount)
+  })
+
+  it('renders the daily check-in summary, including accounts with no activity', async () => {
+    await render({
+      checkin: {
+        enabled: true,
+        totalAccounts: 3,
+        doneToday: 1,
+        skippedToday: 1,
+        failedToday: 1,
+        lastRunAt: Date.parse('2026-03-01T09:30:00'),
+      },
+    })
+
+    const groups = [...container.querySelectorAll('.dsha-group')]
+    const checkin = groups.find((group) => group.querySelector('h3')?.textContent === zh.dailyCheckin)!
+    expect(checkin).toBeDefined()
+    // The signed-in count must not absorb the account whose activity is simply
+    // inactive, which is what the card used to report as a sign-in.
+    expect(checkin.textContent).toContain(zh.checkinToday.replace('{done}', '1').replace('{total}', '3'))
+    expect(checkin.textContent).toContain(zh.checkinSkipped.replace('{count}', '1'))
+    expect(checkin.textContent).toContain(zh.checkinFailed.replace('{count}', '1'))
+    expect(checkin.textContent).not.toContain(zh.checkinNever)
+  })
+
+  it('omits the check-in row for a host that predates the scheduler', async () => {
+    await render({ checkin: null })
+    const headings = [...container.querySelectorAll('.dsha-grouphead h3')].map((node) => node.textContent)
+    expect(headings).not.toContain(zh.dailyCheckin)
+  })
+
+  it('persists the check-in toggle through the settings route', async () => {
+    const calls: Array<{ url: string; body: unknown }> = []
+    globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), body: init?.body === undefined ? undefined : JSON.parse(String(init.body)) })
+      return Response.json({ ok: true, value: statusPayload({ checkin: CHECKIN }) })
+    }) as typeof fetch
+    await act(async () => root.render(createElement(WorkBuddySection, {})))
+
+    const toggle = [...container.querySelectorAll<HTMLInputElement>('input[type=checkbox]')]
+      .find((input) => input.closest('.dsha-row')?.textContent?.includes(zh.checkinAuto))!
+    expect(toggle.checked).toBe(true)
+    // A real click: React's input value tracking suppresses onChange when the
+    // checked property is assigned directly before dispatching the event.
+    await act(async () => { toggle.click() })
+
+    const patch = calls.find((call) => call.url === '/workbuddy/api/settings')
+    expect(patch?.body).toEqual({ checkin: { enabled: false } })
+  })
+
+  it('runs a manual check-in through the same-origin route', async () => {
+    const urls: string[] = []
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      urls.push(String(url))
+      return Response.json({ ok: true, value: statusPayload({ checkin: CHECKIN }) })
+    }) as typeof fetch
+    await act(async () => root.render(createElement(WorkBuddySection, {})))
+
+    const button = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((candidate) => candidate.textContent === zh.checkinNow)!
+    await act(async () => { button.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(urls).toContain('/workbuddy/api/checkin/now')
   })
 
   it('promotes another account through the provider accounts route', async () => {

@@ -23,6 +23,14 @@
   - 偏好：`dsh-workbuddy` 命名空间与文件存储双轨新增 `checkin: { enabled }`。
   - 路由：`/workbuddy/api/status` 附带签到汇总（今日 x/y、失败数、上次运行时间，聚合无账号标识）；新增 `POST /workbuddy/api/checkin/now` 手动补签（同源校验，忽略窗口与重试上限但仍跳过当日已签账号）；`/settings` 接受 `checkin` 补丁。
   - 设置页新增「每日签到」区块：开关、「今日已签 x/y」总状态与「立即签到」按钮；中英文案。
+  - **合并后修复（评审发现）**：
+    - **关掉开关后重启仍会签到一次**。偏好 store 在无 register seam 的 harness（0.1.7 的 `SettingsForms`，即当前实际安装的形态）上异步预热，`status()` 在落盘文档读回之前一直返回出厂默认值；而 Host 构造完调度器立刻 tick，于是「已关闭」的账号每次重启都被签一次。`WorkBuddyPreferenceStore` 新增 `ready()`，调度器在每轮开头 await 它（memoize，只等一次）。
+    - **活动未开启的账号当天被永久放弃**。原先 `active === false` 记 `done = true`，而 Host 通常在活动开放前启动，这一条就吃掉了当天唯一的机会——补检也救不回来。现在 `inactive` 与 `done` 分开记录，未开启的账号每小时复查一次（`CHECKIN_INACTIVE_RECHECK_MS`），手动补签不受该节流限制。
+    - **「今日已签 x/y」把「无签到活动」算成已签**。汇总新增 `skippedToday`，卡片单独显示「无活动 z」，不再把没签到说成签到。
+    - **自动 tick 进行中点击「立即签到」被静默吞掉**。原 `tick()` 直接 join 在飞的 promise，手动「忽略开关与重试上限」的语义随之丢失；改为串行队列，手动请求在飞行中的那轮结束后补跑一轮。自动 tick 仍合并（重复的自动轮没有意义）。
+    - **`lastRunAt` 未落盘**，重启后卡片立刻显示「尚未运行」；现在随状态文件持久化（`version: 2`，v1 文档仍可读）。
+    - **上游字段容错**：签到状态按蛇形/驼峰双拼写读取，并把 `0/1`、`"true"` 一并归一（对齐参考实现的 `normalize_checkin_status`）；`daily-checkin` 返回「已签到」类软失败改判为成功，不再无谓消耗当天重试次数；401 触发一次强制续期重试（`ensureFresh` 只看本地过期时间，服务端提前吊销的 token 原本每次都要烧掉一次尝试）。
+  - **验证（合并后复跑）**：`npm run typecheck`、`tsc -p test/tsconfig.json`、`npm run build` 均 0 错误；`npm test` **95 文件通过 / 1 跳过，1250 通过 / 7 跳过、0 失败**（连续复跑一致）。新增 `test/workbuddy-checkin-review-fixes.test.ts`（19 条）逐条锁定上述修复——**该文件在未修复的源码上跑是 18 条里失败 11 条**，确认它真的覆盖这些路径，而不是只描述期望；`test/workbuddy-section-pool.test.tsx` 新增 4 条覆盖设置页区块（汇总含「无活动」、旧 Host 不渲染该区块、开关补丁落盘、手动签走对路由）。
   - **验证**：`npm run typecheck`、`npm run build` 通过；`npm test` 全绿。新增 `test/workbuddy-checkin.test.ts`：首次 tick 即签、之后零请求、开关关闭不动/手动补签强制、国际区跳过、已签不重复请求、无权益当天不重试、失败 3 次封顶且手动可重试、过期 token 先续期再签到并回写桌面文件、多账号全签、同日状态文件去重、状态路由汇总/旧 Host 返回 null、手动路由同源与方法门禁、设置补丁持久化与旧版窗口字段兼容。
 
 - **模型上下文窗口跟随模型开关，并支持恢复默认**（用户报告：「本项目提供的供应商模型是可以开关显示的，但是配置同页面的配置上下文不行，能不能开启什么模型再调整什么模型的上下文，增加支持恢复默认的选项」）。

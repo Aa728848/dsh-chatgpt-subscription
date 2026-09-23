@@ -440,6 +440,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const workBuddyCheckin = new WorkBuddyCheckinService(workBuddyStore, {
       fetchFn: proxyFetch,
       settings: () => workBuddyPreferences.status().checkin,
+      // The preference store may still be warming up on a harness without the
+      // register seam; without this the startup pass reads shipped defaults and
+      // signs in even though the user had switched check-in off.
+      ready: () => workBuddyPreferences.ready(),
       logger: ctx.logger,
     })
     const checkinTick = (): void => {

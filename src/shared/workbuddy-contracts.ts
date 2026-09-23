@@ -129,6 +129,14 @@ export interface WorkBuddyCheckinSummary {
   totalAccounts: number
   /** Accounts confirmed signed in today (already signed, or signed by a run). */
   doneToday: number
+  /**
+   * Accounts whose activity reported no entitlement today.
+   *
+   * Kept apart from {@link doneToday} because "the activity is inactive" is not
+   * "you are checked in": counting them together let the card claim a sign-in
+   * that never happened.
+   */
+  skippedToday: number
   /** Accounts that exhausted today's retry cap without signing in. */
   failedToday: number
   /** Unix milliseconds the scheduler last ran, automatic or manual. */

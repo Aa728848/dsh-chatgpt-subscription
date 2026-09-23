@@ -79,6 +79,16 @@ export interface WorkBuddyModelSettings {
 }
 
 export interface WorkBuddyPreferenceStore {
+  /**
+   * Resolve once the store has read whatever it was going to read.
+   *
+   * The file-backed store warms up asynchronously, so `status()` answers from
+   * shipped defaults until that read settles. A caller that acts on a
+   * preference at startup — the check-in scheduler signing in on boot — must
+   * await this first, or it acts on the default instead of the user's choice.
+   * A register-backed store reads synchronously and resolves immediately.
+   */
+  ready(): Promise<void>
   status(): WorkBuddyModelSettings
   update(patch: {
     enabled?: boolean
@@ -130,8 +140,11 @@ export function registerWorkBuddyPreferenceStore(
       hiddenAccountIds: [],
       checkin: { ...DEFAULT_CHECKIN_SETTINGS },
     }
-    void fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
+    // The warmup promise is kept so a startup caller can await it instead of
+    // racing it; `status()` still answers immediately from the defaults.
+    const warmed = fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
     return {
+      ready: () => warmed,
       status: () => snapshot,
       update: async (patch) => {
         snapshot = await fallbackStore.updateSettings(patch)
@@ -166,6 +179,9 @@ export function registerWorkBuddyPreferenceStore(
   }>
 
   return {
+    // The register-backed scope reads synchronously, so there is nothing to
+    // wait for; the seam exists so callers need not know which store they hold.
+    ready: async () => undefined,
     status: () => {
       const value = scope.get()
       return {

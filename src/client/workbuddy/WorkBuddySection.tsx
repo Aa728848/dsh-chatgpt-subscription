@@ -755,6 +755,9 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
             <span className="dsha-label">{t.dailyCheckin}</span>
             <span className="dsha-value">
               {t.checkinToday.replace('{done}', String(status.checkin.doneToday)).replace('{total}', String(status.checkin.totalAccounts))}
+              {status.checkin.skippedToday > 0
+                ? ` · ${t.checkinSkipped.replace('{count}', String(status.checkin.skippedToday))}`
+                : ''}
               {status.checkin.failedToday > 0
                 ? ` · ${t.checkinFailed.replace('{count}', String(status.checkin.failedToday))}`
                 : ''}
