@@ -1,6 +1,6 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
-  "version": "0.8.0",
+  "version": "0.8.0-alpha.0",
   "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
   "author": {
     "name": "eddyskywalker",
@@ -26,7 +26,7 @@
   "type": "module",
   "publishConfig": {
     "access": "public",
-    "tag": "latest"
+    "tag": "alpha"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

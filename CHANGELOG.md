@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.8.0-alpha.0 - 2026-09-23
+
+- **本次先发 alpha 预发布版**：0.8.0 的正式版尚未定稿，因此只发到 `alpha` 标签（`npm i @eddyskywalker/dsh-chatgpt-subscription@alpha`），`latest` 仍指向 0.7.0——不主动指定 `@alpha` 的安装与升级行为不变。以下改动就是这一版 alpha 的内容。
+
 - **新增 GPT-6 Sol / Luna（`gpt-6-sol`、`gpt-6-luna`）**：这两个模型随 [2026-09-22 的 GPT-6 Sol / Luna 发布](https://community.openai.com/t/announcing-gpt-6-sol-and-gpt-6-luna/1399925) 进入 Codex 模型目录，与 `gpt-6-astra` 同属 GPT-6 系列。
   - **能力按本机真实目录核对，不按族名猜**：三条 GPT-6 条目都支持文本 + 图片输入、默认思考档位 `medium`、订阅侧上下文上限 872K（`~/.codex/models_cache.json`，`client_version` 0.155.0，`fetched_at` 2026-09-23；`gpt-6-sol` 的 `supported_reasoning_levels` 多一个 `ultra`，与 Astra 一样属于客户端的子代理编排，仍不作为 Responses 思考参数暴露）。`gpt-6-luna` 没有 `ultra`。
   - **把「Astra 专属」的硬编码改成「GPT-6 系列」**：目录条目的 `reasoningProfile` 由 `'gpt-6-astra'` 改为 `'gpt-6'`，`GPT_6_ASTRA_MAX_CONTEXT_WINDOW` → `GPT_6_MAX_CONTEXT_WINDOW`、`GPT_6_ASTRA_REASONING_EFFORTS` → `GPT_6_REASONING_EFFORTS`，`contextWindowLimitForModel` 与 `reasoningEffortsForModel` 改为按 profile 判定而不是按模型 id 比较。上一版为新模型加能力时要逐处补 `|| model === 'gpt-6-xxx'`，这次三个模型共用一条规则。

@@ -136,6 +136,13 @@ dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 npx @deepseek-ai/dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 ```
 
+**版本阶段**：`latest` 目前是 0.7.0；0.8.0 的正式版尚未定稿，先以 `0.8.0-alpha.0` 发到 `alpha` 标签，因此上面两条命令装到的仍是 0.7.0。要试用 alpha，需显式带上标签或版本号：
+
+```sh
+dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription@alpha
+npm install @eddyskywalker/dsh-chatgpt-subscription@0.8.0-alpha.0
+```
+
 ### 方式 2：在 DSH 界面里安装
 
 DSH 没有插件市场；Web 界面的 **Plugins** 页提供按包名安装的入口（底层与 `dsh plugin add` 相同）：
