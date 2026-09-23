@@ -62,6 +62,15 @@ import {
   registerWorkBuddyPreferenceStore,
 } from './host/workbuddy/token-store.ts'
 import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
+import { ZhipuAdapter } from './host/zhipu/adapter.ts'
+import { ZhipuAccountPool } from './host/zhipu/account-pool.ts'
+import { registerZhipuRoutes } from './host/zhipu/routes.ts'
+import {
+  FileCredentialStore as ZhipuCredentialStore,
+  FileModelSettingsStore as ZhipuModelSettingsStore,
+  registerZhipuPreferenceStore,
+} from './host/zhipu/token-store.ts'
+import { PROVIDER_ID as ZHIPU_PROVIDER_ID, PROVIDER_NAME as ZHIPU_PROVIDER_NAME } from './host/zhipu/types.ts'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
@@ -186,6 +195,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         hiddenAccountIds: current.hiddenAccountIds,
       }
     },
+  })
+
+  const zhipuStore = new ZhipuCredentialStore()
+  const zhipuModelSettings = new ZhipuModelSettingsStore()
+  const zhipuPreferences = registerZhipuPreferenceStore(ctx.settings, zhipuModelSettings)
+  // The pool is the routing table and the single-credential store is its
+  // mirrored primary, so a pre-pool key needs no migration. The card's pinned
+  // account is read on each pick, because it can change while the adapter serves.
+  const zhipuAccountPool = new ZhipuAccountPool({
+    store: zhipuStore,
+    preferAccountId: () => zhipuPreferences.status().selectedAccountId,
   })
 
   // The allowlist a Session recorded outranks the current settings document,
@@ -427,6 +447,53 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       },
     )
 
+    // The GLM Coding Plan route is contended the same way: another adapter
+    // family (a user's own `zai`/`zhipu` OpenAI-compatible entry) may already
+    // own the id, so it is claimed when free and reported when not.
+    const zhipuAdapter = new ZhipuAdapter(
+      zhipuStore,
+      zhipuModelSettings,
+      zhipuPreferences,
+      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: zhipuAccountPool },
+    )
+    let zhipuRegistration: AdapterRegistrationHandle | undefined
+    let zhipuConflict: string | null = null
+    const claimZhipuRoute = (): void => {
+      if (zhipuRegistration !== undefined) return
+      try {
+        zhipuRegistration = ctx.llm.registerAdapter([ZHIPU_PROVIDER_ID], zhipuAdapter)
+        if (zhipuConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] ${ZHIPU_PROVIDER_NAME} route "${ZHIPU_PROVIDER_ID}" is now served by this plugin`)
+        }
+        zhipuConflict = null
+      } catch (error) {
+        zhipuConflict = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(
+          `[dsh-chatgpt-subscription] provider route "${ZHIPU_PROVIDER_ID}" is already owned by another adapter; `
+          + `${ZHIPU_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${zhipuConflict})`,
+        )
+      }
+    }
+    claimZhipuRoute()
+    const zhipuRouteWatch = typeof ctx.on === 'function'
+      ? ctx.on('llm/adapters-updated', () => {
+          claimZhipuRoute()
+        })
+      : undefined
+
+    const disposeZhipuRoutes = registerZhipuRoutes(
+      ctx,
+      zhipuStore,
+      zhipuModelSettings,
+      zhipuPreferences,
+      {
+        fetchFn: proxyFetch,
+        serving: () => zhipuRegistration !== undefined,
+        conflict: () => zhipuConflict,
+        accountPool: zhipuAccountPool,
+      },
+    )
+
     // The IDE can sign in or out on its own; adopting whatever its directory
     // currently holds keeps the pool in step without a manual rescan.
     void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
@@ -551,6 +618,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(workBuddyRouteWatch)
       workBuddyRegistration?.()
       workBuddyRegistration = undefined
+      disposeZhipuRoutes()
+      releaseHandle(zhipuRouteWatch)
+      zhipuRegistration?.()
+      zhipuRegistration = undefined
       oauth.dispose()
       proxyManager.dispose()
     }
@@ -721,6 +792,72 @@ export {
   resolveWorkBuddyModel,
   modelsForRegion as workBuddyModelsForRegion,
 } from './host/workbuddy/model-catalog.ts'
+export { ZhipuAdapter, classifyFailure as classifyZhipuFailure, resolveDefaultReasoningEffort as resolveZhipuDefaultEffort } from './host/zhipu/adapter.ts'
+export {
+  ZhipuAccountPool,
+  zhipuPoolPath,
+  parseZhipuPoolData,
+  type ZhipuPoolAccount,
+} from './host/zhipu/account-pool.ts'
+export {
+  FileCredentialStore as ZhipuCredentialStore,
+  FileModelSettingsStore as ZhipuModelSettingsStore,
+  credentialPath as zhipuCredentialPath,
+  modelSettingsPath as zhipuModelSettingsPath,
+  parseZhipuCredentials,
+  registerZhipuPreferenceStore,
+  zhipuAccountKey,
+  zhipuKeyHint,
+  type ZhipuCredentials,
+  type ZhipuModelSettings,
+  type ZhipuPreferenceStore,
+} from './host/zhipu/token-store.ts'
+export {
+  accountFromCredentials as zhipuAccountFromCredentials,
+  clearCachedCatalog as clearZhipuCatalog,
+  clearCachedQuota as clearZhipuQuota,
+  fetchAccountQuota as fetchZhipuQuota,
+  getCachedQuota as getZhipuQuota,
+  loadCatalog as loadZhipuCatalog,
+  parseCatalogModels as parseZhipuCatalogModels,
+  parsePlan as parseZhipuPlan,
+  parseQuotaLimits as parseZhipuQuotaLimits,
+  quotaMeters as zhipuQuotaMeters,
+  quotaWindows as zhipuQuotaWindows,
+  verifyApiKey as verifyZhipuApiKey,
+  windowLabel as zhipuWindowLabel,
+  windowMinutesOf as zhipuWindowMinutes,
+} from './host/zhipu/client.ts'
+export {
+  getZhipuWebStatus,
+  registerZhipuRoutes,
+  resolveEnabledModelIds as resolveZhipuEnabledModelIds,
+  buildModelOptions as buildZhipuModelOptions,
+} from './host/zhipu/routes.ts'
+export {
+  FALLBACK_MODELS as ZHIPU_MODELS,
+  ZHIPU_MODELS as ZHIPU_MODEL_TABLE,
+  DEFAULT_VISIBLE_MODEL_IDS as ZHIPU_DEFAULT_VISIBLE_MODELS,
+  defaultContextWindowFor as zhipuDefaultContextWindow,
+  maxOutputTokensFor as zhipuMaxOutputTokens,
+  modelsForRegion as zhipuModelsForRegion,
+  resolveZhipuModel,
+  zhipuModelSupportsImage,
+  zhipuReasoningEfforts,
+  type ZhipuModelEntry,
+} from './host/zhipu/model-catalog.ts'
+export {
+  CHAT_PATH as ZHIPU_CHAT_PATH,
+  MODELS_PATH as ZHIPU_MODELS_PATH,
+  PROVIDER_ID as ZHIPU_PROVIDER_ID,
+  PROVIDER_NAME as ZHIPU_PROVIDER_NAME,
+  QUOTA_PATH as ZHIPU_QUOTA_PATH,
+  REGION_BASE_URLS as ZHIPU_REGION_BASE_URLS,
+  SUBSCRIPTION_PATH as ZHIPU_SUBSCRIPTION_PATH,
+  apiBaseForRegion as zhipuApiBaseForRegion,
+  normalizeRegion as normalizeZhipuRegion,
+  regionForBaseUrl as zhipuRegionForBaseUrl,
+} from './host/zhipu/types.ts'
 export {
   KimiCodeAccountPool,
   kimiCodePoolPath,

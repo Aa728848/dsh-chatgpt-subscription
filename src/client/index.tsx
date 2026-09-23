@@ -27,6 +27,9 @@ import { installKimiCodeStyles } from './kimi-code/styles.ts'
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
+import { ZhipuComposerQuota } from './zhipu/ZhipuComposerQuota.tsx'
+import { dictionaries as zhipuDicts, NS_ZHIPU } from './zhipu/locales.ts'
+import { installZhipuStyles } from './zhipu/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -36,6 +39,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-command-code': any
     'dsh-kimi-code': any
     'dsh-workbuddy': any
+    'dsh-zhipu': any
   }
 }
 
@@ -68,6 +72,11 @@ export function apply(ctx: ClientContext): void {
     installWorkBuddyStyles()
     return () => {}
   }, 'dsh-workbuddy: styles')
+  ctx.effect(() => ctx.locale.register(NS_ZHIPU, zhipuDicts), 'dsh-zhipu: dictionaries')
+  ctx.effect(() => {
+    installZhipuStyles()
+    return () => {}
+  }, 'dsh-zhipu: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -183,6 +192,21 @@ export function apply(ctx: ClientContext): void {
       }
     },
   }, WorkBuddyComposerQuota))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'zhipu-quota',
+    order: 40,
+    locale: NS_ZHIPU,
+    inject: (sessionId) => {
+      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
+      return {
+        directory: directory.store,
+        loadModelDirectory: () => {
+          void directory.load().catch(() => undefined)
+        },
+      }
+    },
+  }, ZhipuComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

@@ -14,6 +14,7 @@
 - [Kimi Code 线路](#kimi-code-线路)
 - [Command Code 线路](#command-code-线路)
 - [WorkBuddy 线路](#workbuddy-线路)
+- [GLM（智谱 Coding Plan）线路](#glm智谱-coding-plan线路)
 - [子代理模型授权](#子代理模型授权0215-起)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [升级、降级与卸载](#升级降级与卸载)
@@ -82,6 +83,18 @@
 - **瞬时失败按错误类别重试**（`src/host/workbuddy/adapter.ts`）。上游 5xx 与 `code 11134` 归为 `SERVER` 并走有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；额度耗尽（429 / `code 6004` / `code 14003`，其中 6004 的正文带重置时刻）归为 `RATE_LIMIT` 并遵守 `Retry-After`；而 401/403、跨区模型、不可用图片、历史形状错误都**不重试**，并给出可操作的提示（换模型 / 换图片 / 重新登录桌面端）；
 - **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛出错误而不是把半截文本当成完整回答；
 - 额度来自 `/billing/meter/get-user-resource`，卡片展示套餐名、本周期已用/上限、剩余额度与重置时间；设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有该线路的额度胶囊。
+
+**GLM（智谱 Coding Plan）线路**
+
+- 注册 `zhipu-coding-plan` Provider，接入**智谱 / Z.ai 的 GLM Coding Plan 订阅**。该 ID 特意与用户常用的自定义 OpenAI 兼容线路 `zai` / `zhipu` 分开，安装插件不会覆盖或隐藏原有自定义 API；
+- **订阅接口与开放平台是两套东西**：Coding Plan 的模型接口是 OpenAI 兼容的 `{base}/api/coding/paas/v4`，**不是** 通用付费的 `/api/paas/v4`——把开放平台的 Key 或后者当 base URL 用会被判为鉴权失败。国区（`open.bigmodel.cn`）与国际区（`api.z.ai`）的 Key **互不通用**，因此区域是**凭据属性**：添加时显式选择，卡片逐条标注，模型请求走该账号自己的 host；
+- **添加 Key 前先验证**：`POST /zhipu/api/accounts/add` 先用该 Key 读一次部署自己的模型目录，未通过就不落盘，并直接告出「Key 大概来自哪个控制台」——这是这个产品最常见的一次配错。整个登录只花一次上游读（验证用的目录会被缓存）；
+- **多账号号池，与另外四条线路同源**：走共享内核 `AccountPoolCore`（`src/host/common/account-pool.ts`）并复用同一张设置卡片（`src/client/common/AccountPoolCard`），因此具备**顺序耗尽 / 轮询调度 / 粘性会话**三种策略、429 冷却换号、账号级失效（保留账号、重新添加即恢复）、设为主账号、账号备注与清除冷却。账号 id 是 **Key 摘要 + 区域**，别名只显示「区域 + Key 后四位」，明文 Key 既不进别名也不进 id，更不会出现在卡片上（有测试锁定）；
+- **模型能力逐模型查表**（`src/host/zhipu/model-catalog.ts`）：是否接受图片、有哪些思考档位、能否关闭思考都由该表决定，运行时以订阅侧 `GET /models` 为准（只覆盖上下文窗口，能力不被上游列表改写）。图片能力不能按族名推断——**`glm-5.3-flash` 接受图片而 `glm-5.3` 不接受**；档位也不能——`glm-5.3` 有三档而 `glm-5.2` 只有两档，`glm-4.7` / `glm-4.5-air` 这类 toggle 模型根本不收 `reasoning_effort`；
+- **思考档位只发上游认的值**：上游对 GLM-5.x 只接受 `low` / `high` / `max`，其余取值**直接报错**（不是被忽略）。DSH 的档位词表比这宽，因此每个取值都先收敛到该模型自己的档位表再发出；收敛按**两套词表统一排序**，`minimal` 这类「比 low 更省」的档位会落到 `low` 而不是被当成未知值弹到中间档——否则用户选了最省的一档反而会换来 `high`，既不符合意图又更费额度。关闭思考的值本线路一律不发：GLM-5.3 / GLM-5.3-FLASH / GLM-4.7 把 `thinking.type: "disabled"` 判为错误，省略该字段就是它们的 `enabled` 默认；
+- **额度来自订阅自己的监控接口**：`{base}/api/monitor/usage/quota/limit` 给 5 小时与每周两个额度窗口（外加月度 MCP 工具调用次数），`{base}/api/biz/subscription/list` 给套餐名。这两个接口的鉴权用的是**不带 `Bearer` 前缀的裸 Key**（实测：带前缀判 401，裸 Key 通过），与模型接口的 `Bearer` 形式不同，因此两条 header 各自成函数。窗口按上游的 `unit`/`number` 描述换算成分钟后再命名，兼容 `TOKENS_LIMIT` 与新版 `CREDIT_LIMIT` 两种拼写；
+- **瞬时失败按错误类别重试**（`src/host/zhipu/adapter.ts`）：上游 5xx、`code 1230/1234` 与服务过载归为可重试并走有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动），429 会带上上游 `Retry-After`。而 **401/403 与 `code 1000/1003/1001`（Key 失效）、`code 1311`（套餐不含该模型）、`code 1309`（套餐已过期）明确不重试**——它们与「额度窗口用尽」同样是 429，但只有后者值得重试，因此分类读响应正文的 `code` 而不只看状态码，并给出可操作的提示（换模型 / 续费 / 重新添加 Key）；
+- 模型勾选、思考深度、上下文窗口覆盖与额度在「设置 → 订阅服务 → GLM」标签页中配置，输入框右侧另有额度胶囊（取**最紧的那个窗口**，因为 5 小时窗口和每周窗口会各自先耗尽）。
 
 **设置页**
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
@@ -365,11 +378,51 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
 
+## GLM（智谱 Coding Plan）线路
+
+1. 在你要用的平台上订阅 **GLM Coding Plan**，并在对应控制台创建 API Key：[Z.ai](https://z.ai/manage-apikey/apikey-list)（国际区）或 [智谱开放平台](https://open.bigmodel.cn/)（国区）；
+2. 重启 DSH，让 Host 加载本插件；
+3. 打开 **设置 → 订阅服务 → GLM**；
+4. 在「添加账号」里**先选区域**（国际区 / 国区），粘贴 Key 后点「保存并验证」——验证不通过就不会写入，并会提示 Key 应来自哪个控制台；
+5. 按需勾选模型、设置默认思考深度与上下文窗口。
+
+`zhipu-coding-plan` 会像其他 Provider 一样出现在 DSH 模型选择器中，并可与名为 `zai` / `zhipu` 的自定义 API 同时存在。**上下文窗口**默认取该模型官方声明的窗口（GLM-5.x 系列为 1M），可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `512K` / `200000` 等写法）；**默认思考深度**只对该模型声明了档位时生效，选项为上游真正接受的 `low` / `high` / `max`。
+
+**上游接口**（前缀 `{base}` 为该账号区域的 host）：
+
+| 用途 | 路径 | 鉴权 |
+| --- | --- | --- |
+| 模型生成 | `POST {base}/api/coding/paas/v4/chat/completions` | `Authorization: Bearer <Key>` |
+| 模型目录（也是添加 Key 时的验证接口） | `GET {base}/api/coding/paas/v4/models` | `Authorization: Bearer <Key>` |
+| 额度窗口 | `GET {base}/api/monitor/usage/quota/limit` | `Authorization: <Key>`（**无 `Bearer`**） |
+| 套餐信息 | `GET {base}/api/biz/subscription/list` | `Authorization: <Key>`（**无 `Bearer`**） |
+
+两区 host 分别是 `https://open.bigmodel.cn`（国区）与 `https://api.z.ai`（国际区）。请求只带本插件自己的 UA，不冒充官方客户端。
+
+### 插件路由（GLM Coding Plan）
+
+所有路由都以 `/zhipu/api` 为前缀：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/status` | 账号、额度、模型目录与路由归属 |
+| POST | `/accounts/add` | 验证并保存一个 API Key（可选 `alias`） |
+| POST | `/accounts/remove` | 删除当前账号（单凭据模式） |
+| POST | `/accounts/action` | 号池动作：`set-primary` / `set-alias` / `delete` / `clear-cooldown` / `clear-auth-failure` / `strategy` |
+| GET / POST | `/quota` | 强制刷新额度（POST）或读取当前状态（GET） |
+| GET / POST | `/models`、`/settings` | 读取或更新勾选模型、上下文窗口、默认思考深度与选中账号 |
+| POST | `/catalog/refresh` | 强制刷新模型目录 |
+| POST | `/connection/test` | 向上游对话接口发一次最小流式请求测试连接 |
+
+与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`；响应里永远不含 API Key（只含 Key 后四位）。
+
 ## 安全边界
 
 Antigravity 的 access token / refresh token 使用独立的系统凭据存储：Windows 使用 CurrentUser DPAPI（`$DSH_HOME/storages/antigravity-oauth.json.dpapi`），macOS 使用登录钥匙串，Linux 使用 Secret Service。macOS / Linux 的服务名为 `dsh-antigravity`，账号键按旧凭据文件的绝对路径生成，隔离不同的 `DSH_HOME`。
 
 **WorkBuddy token 仅在 Host 内处理，从不进入浏览器**（`/workbuddy/api` 响应不含 `accessToken` / `refreshToken`，有测试锁定）。桌面扫描账号仍使用 CodeBuddy 自己的登录态文件：续期只原子写回其 `auth` 块；从本插件删除时只隐藏/恢复，绝不删除原文件。通过浏览器授权添加的账号归本插件所有，保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/workbuddy-accounts.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；这类账号可在设置页真正删除。
+
+**GLM Coding Plan 的 API Key 同样只在 Host 内处理，从不进入浏览器**（`/zhipu/api` 响应只含后四位提示，不含 Key 本身，有测试锁定）。它保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/zhipu-credentials.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；号池另用一份同样加密的文件 `$DSH_HOME/storages/zhipu-pool.json`，账号 id 与别名都只是 Key 的摘要与后四位。
 
 升级后首次访问 Antigravity 凭据时，会读取旧 `storages/antigravity-oauth.json`，加密保存并读回校验；成功后删除旧 JSON，通常无需重新登录。失败会保留旧文件并报告错误，不会回退到明文存储。注销同时清理旧文件和新凭据。Linux 需要 `secret-tool`（libsecret 工具包）及可用、已解锁的 Secret Service 钥匙环；无桌面服务的主机也需要配置该服务。系统凭据存储保护落盘数据，不防御当前用户下已获权限的进程。
 
@@ -415,6 +468,8 @@ npm run build
 npm pack --dry-run
 ```
 
+`vitest.config.ts` 把 `testTimeout` 设为 60s、`maxWorkers` 限到 4 是有原因的，改回去会让套件重新变得不稳定：多条目测真的会 spawn `powershell.exe` 跑 Windows DPAPI 凭据存储，隔离测量最慢的一条要 12–14s。超时余量不够时不只是那一条失败——**超时后仍在飞的请求会落进下一个用例的 fetch mock**，把邻居也判失败（表现为 `expected to be called 4 times, but got 8 times`）。限并发不增加耗时：这些用例受子进程延迟约束，4 个 worker 约 51s，15 个约 54s。
+
 测试使用 mock OAuth、Responses SSE 和 Wham usage，不需要真实 ChatGPT 凭据。真实账号的端到端登录与生成应在独立 DSH profile 中人工验收，避免影响日常 profile。
 
 ## 故障排查
@@ -443,4 +498,9 @@ npm pack --dry-run
 | Kimi Code 报 429 `engine is currently overloaded` | 服务容量问题（工作日 14:00–17:00 高峰更常见），会自动退避重试；若响应里带 `error.type = exceeded_current_quota_error` 则属于配额耗尽，插件不会重试而是提示补充额度 |
 | Kimi Code 额度显示为空 | 卡片会同时给出失败原因（`/v1/usages` 的 401/403/5xx 文案），按提示处理后点「刷新用量」重试；确认用的是订阅账号——开放平台的 key 在这里不会被接受 |
 | Kimi Code 账号一栏为空 | 账号身份取自 OAuth token 自身的 JWT 声明，套餐名取自 `/me`（`/usages` 自 2026-09 起不再返回 `user_level_name`）。重新登录或点「刷新用量」即可写入；若仍为空但显示「已登录」，点「测试连接」可确认凭据是否仍被接受 |
+| GLM 添加 Key 报「rejected the API key」 | Key 与所选**区域**不匹配，或它不是 Coding Plan 的 Key。错误文案会指明应来自哪个控制台（`api.z.ai` 或 `open.bigmodel.cn`）：换区域重试，并确认订阅生效；开放平台按量付费的 Key 在订阅接口上不被接受 |
+| GLM 报 `code 1311`（套餐不含该模型） / `code 1309`（套餐已过期） | 这两个都是账号权益问题而非瞬时故障，插件不会重试：前者换一个模型，后者去官网续费。两者与「额度窗口用尽」共用 429 状态码，插件按响应正文的 `code` 区分处理 |
+| GLM 报 `code 1214`（参数被拒） | 多为该模型不支持的思考档位或不可读的图片：`glm-5.3` 不接受图片（用 `glm-5.3-flash`），档位只有 `low` / `high` / `max`。卡片只会列出该模型真正声明过的能力 |
+| GLM 额度显示为空或「该账号没有可用的配额数据」 | 监控接口可用但该账号没有生效的套餐；确认订阅已开通，再点「刷新用量」。卡片会同时显示接口本身的失败原因（如 401 / 5xx 文案） |
+| GLM 模型不出现在选择器里 | 卡片上若显示「模型路由已被其他 Provider 占用」，从占用方（自定义的 `zai` / `zhipu` 线路）移除该 Provider，插件会在下一次路由变更时自动接管；否则检查是否勾选了模型 |
 | Kimi Code 发送视频却没有画面 | `k3-256k` 不支持视频，切到 `k3` 或 `kimi-for-coding`；容器须在白名单内（mp4/mpeg/mov/avi/x-flv/mpg/webm/wmv/3gpp）；若该模型走的是 Anthropic 线路，视频会降级为文字（该协议没有文档化的视频块）。以上情况模型都会收到明确的文字说明，据此向你说明而不是凭空回答 |
