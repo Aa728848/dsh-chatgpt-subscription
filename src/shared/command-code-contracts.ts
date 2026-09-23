@@ -140,7 +140,8 @@ export interface CommandCodeAccountSummaryDto extends PoolAccountSummaryDto {
 export interface CommandCodeSettingsUpdateDto {
   enabled?: boolean
   enabledModelIds?: string[]
-  contextWindowOverrides?: Record<string, number>
+  /** A number sets an override for that model; `null` restores the catalog default. */
+  contextWindowOverrides?: Record<string, number | null>
   defaultReasoningEffort?: CommandCodeReasoningEffort | null
 }
 

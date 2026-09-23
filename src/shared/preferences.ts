@@ -1,4 +1,4 @@
-import { DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_6_DEFAULT_CONTEXT_WINDOW } from './model-catalog.ts'
+import { DEFAULT_VISIBLE_CODEX_MODEL_IDS } from './model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary, ProxyMode, SearchProviderPreference, SubscriptionPreferencesDto } from './contracts.ts'
 
 export const PREFERENCES_NAMESPACE = 'dsh-chatgpt-subscription'
@@ -11,14 +11,9 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   reasoningSummary: null,
   visibleModelIds: [...DEFAULT_VISIBLE_CODEX_MODEL_IDS],
   searchProvider: 'dsh',
-  contextWindowOverrides: {
-    'gpt-6-astra': GPT_6_DEFAULT_CONTEXT_WINDOW,
-    'gpt-6-sol': GPT_6_DEFAULT_CONTEXT_WINDOW,
-    'gpt-6-luna': GPT_6_DEFAULT_CONTEXT_WINDOW,
-    'gpt-5.6-sol': 272_000,
-    'gpt-5.6-terra': 272_000,
-    'gpt-5.6-luna': 272_000,
-  },
+  // Empty until the user overrides one: an absent key means "use the catalog
+  // default", so a restored default stores nothing at all.
+  contextWindowOverrides: {},
   proxyMode: 'auto',
   customProxyUrl: null,
 }

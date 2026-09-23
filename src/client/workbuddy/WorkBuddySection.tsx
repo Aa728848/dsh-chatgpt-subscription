@@ -122,6 +122,19 @@ export function formatCapacity(value: number): string {
   return String(value)
 }
 
+/**
+ * Seed one draft per model from a status payload. Also run after a model
+ * toggle: a model that was just enabled has no draft yet, and the context
+ * window section only renders enabled models.
+ */
+function contextDraftsFor(status: WorkBuddyWebStatus): Record<string, string> {
+  const drafts: Record<string, string> = {}
+  for (const model of status.models) {
+    drafts[model.id] = formatCapacity(status.contextWindowOverrides[model.id] || model.defaultContextWindow)
+  }
+  return drafts
+}
+
 function formatDate(ms?: number | null): string {
   if (ms === undefined || ms === null || ms <= 0) return '—'
   try {
@@ -261,11 +274,7 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       const normalized = normalizeStatus(data)
       setStatus(normalized)
       setStatusFailed(false)
-      const drafts: Record<string, string> = {}
-      for (const model of normalized.models) {
-        drafts[model.id] = formatCapacity(normalized.contextWindowOverrides[model.id] || model.defaultContextWindow)
-      }
-      setContextDrafts(drafts)
+      setContextDrafts(contextDraftsFor(normalized))
     } catch (err) {
       setStatusFailed(true)
       if (!quiet) setError(err instanceof Error ? err.message : String(err))
@@ -459,7 +468,11 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         method: 'POST',
         body: JSON.stringify({ enabledModelIds: next }),
       })
-      setStatus(updated)
+      const normalized = normalizeStatus(updated)
+      setStatus(normalized)
+      // A model that was just checked has no draft yet; the context window
+      // section only renders enabled models.
+      setContextDrafts(contextDraftsFor(normalized))
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -477,7 +490,9 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         method: 'POST',
         body: JSON.stringify({ enabledModelIds: enabled ? status.models.map((model) => model.id) : [] }),
       })
-      setStatus(updated)
+      const normalized = normalizeStatus(updated)
+      setStatus(normalized)
+      setContextDrafts(contextDraftsFor(normalized))
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -508,17 +523,9 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       setBusy('catalog')
       setError(null)
       const updated = await fetchApi<WorkBuddyWebStatus>('/catalog/refresh', { method: 'POST' })
-      const normalized: WorkBuddyWebStatus = {
-        ...updated,
-        models: Array.isArray(updated?.models) ? updated.models : [],
-        contextWindowOverrides: updated?.contextWindowOverrides ?? {},
-      }
+      const normalized = normalizeStatus(updated)
       setStatus(normalized)
-      const drafts: Record<string, string> = {}
-      for (const model of normalized.models) {
-        drafts[model.id] = formatCapacity(normalized.contextWindowOverrides[model.id] || model.defaultContextWindow)
-      }
-      setContextDrafts(drafts)
+      setContextDrafts(contextDraftsFor(normalized))
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -550,6 +557,55 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       setSavingModel(null)
     }
   }
+
+  /** Clear one override; the row falls back to the catalog length. */
+  const handleResetContextWindow = async (modelId: string) => {
+    try {
+      setSavingModel(modelId)
+      setError(null)
+      const updated = normalizeStatus(await fetchApi<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ contextWindowOverrides: { [modelId]: null } }),
+      }))
+      setStatus(updated)
+      setContextDrafts((prev) => {
+        const model = updated.models.find((candidate) => candidate.id === modelId)
+        return model === undefined ? prev : { ...prev, [modelId]: formatCapacity(model.defaultContextWindow) }
+      })
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSavingModel(null)
+    }
+  }
+
+  /** Clear every stored override, including models the picker no longer shows. */
+  const handleResetAllContextWindows = async () => {
+    const models = Object.keys(status?.contextWindowOverrides ?? {})
+    if (models.length === 0) return
+    if (!window.confirm(t.contextWindowResetAllConfirm)) return
+    try {
+      setBusy('context')
+      setError(null)
+      const updated = normalizeStatus(await fetchApi<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ contextWindowOverrides: Object.fromEntries(models.map((model) => [model, null])) }),
+      }))
+      setStatus(updated)
+      setContextDrafts(contextDraftsFor(updated))
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // Only checked models get a context row; the batch restore still covers every
+  // stored override, including one left behind by a model the user unchecked.
+  const contextModels = status?.models.filter((model) => model.enabled) ?? []
+  const overrideCount = Object.keys(status?.contextWindowOverrides ?? {}).length
 
   if (loading) {
     return (
@@ -783,7 +839,10 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
         </div>
         <p className="dsha-muted">{t.contextWindowHint}</p>
         <div className="dsha-context-settings">
-          {status?.models.map((model: WorkBuddyModelOption) => (
+          {contextModels.length === 0 && (
+            <p className="dsha-muted">{t.contextWindowNoneEnabled}</p>
+          )}
+          {contextModels.map((model: WorkBuddyModelOption) => (
             <div key={model.id} className="dsha-context-row">
               <span title={model.id}>{model.name}</span>
               <div className="dsha-capacity-control">
@@ -805,9 +864,27 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
                 >
                   {savingModel === model.id ? t.saving : t.save}
                 </button>
+                <button
+                  type="button"
+                  className="dsha-context-save dsha-context-reset"
+                  aria-label={`${model.name} ${t.contextWindowReset}`}
+                  disabled={savingModel === model.id || status?.contextWindowOverrides[model.id] === undefined}
+                  onClick={() => void handleResetContextWindow(model.id)}
+                >
+                  {t.contextWindowReset}
+                </button>
               </div>
             </div>
           ))}
+          <div className="dsha-actions">
+            <button
+              className="dsha-btn"
+              disabled={busy !== null || overrideCount === 0}
+              onClick={() => void handleResetAllContextWindows()}
+            >
+              {t.contextWindowResetAll}
+            </button>
+          </div>
         </div>
       </section>
 

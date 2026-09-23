@@ -231,7 +231,8 @@ export interface WorkBuddyWebStatus extends Partial<AccountPoolStatusDto> {
 export interface WorkBuddySettingsUpdateDto {
   enabled?: boolean
   enabledModelIds?: string[]
-  contextWindowOverrides?: Record<string, number>
+  /** A number sets an override for that model; `null` restores the catalog default. */
+  contextWindowOverrides?: Record<string, number | null>
   defaultReasoningEffort?: WorkBuddyReasoningEffort | null
   selectedAccountId?: string | null
 }

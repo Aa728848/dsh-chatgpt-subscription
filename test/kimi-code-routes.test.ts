@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { registerKimiCodeRoutes } from '../src/host/kimi-code/routes.ts'
-import { FileCredentialStore, FileModelSettingsStore } from '../src/host/kimi-code/token-store.ts'
+import { FileCredentialStore, FileModelSettingsStore, registerKimiCodePreferenceStore } from '../src/host/kimi-code/token-store.ts'
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/kimi-code/client.ts'
 import { resetRefreshRejections } from '../src/host/kimi-code/oauth.ts'
 
@@ -239,5 +240,91 @@ describe('Kimi Code settings routes', () => {
     const value = (captured.body as { value: { models: Array<{ id: string; enabled: boolean; contextWindow: number }> } }).value
     expect(value.models.map((model) => model.id)).toEqual(['k3', 'kimi-for-coding'])
     expect(value.models.every((model) => model.enabled)).toBe(true)
+  })
+
+  it('clears a stored context window override when the card posts null', async () => {
+    vi.spyOn(store, 'read').mockResolvedValue(credential() as never)
+    vi.spyOn(store, 'write').mockResolvedValue(undefined)
+    await modelSettings.updateSettings({ contextWindowOverrides: { k3: 100_000 } })
+
+    const { response, captured } = fakeExchange()
+    await handler(
+      fakeRequest({ url: '/kimi-code/api/models', method: 'POST', body: { contextWindowOverrides: { k3: null } } }),
+      response,
+    )
+
+    expect(captured.status).toBe(200)
+    expect((await modelSettings.read()).contextWindowOverrides).toEqual({})
+    const value = (captured.body as { value: { contextWindowOverrides: Record<string, number>; models: Array<{ id: string; contextWindow: number }> } }).value
+    expect(value.contextWindowOverrides).toEqual({})
+    // Back to the catalog window rather than the deleted override.
+    expect(value.models.find((model) => model.id === 'k3')!.contextWindow).toBe(262_144)
+  })
+
+  it('writes one override and deletes another in the same patch', async () => {
+    vi.spyOn(store, 'read').mockResolvedValue(credential() as never)
+    vi.spyOn(store, 'write').mockResolvedValue(undefined)
+    await modelSettings.updateSettings({ contextWindowOverrides: { k3: 100_000, 'kimi-for-coding': 900_000 } })
+
+    const { response, captured } = fakeExchange()
+    await handler(
+      fakeRequest({
+        url: '/kimi-code/api/settings',
+        method: 'POST',
+        body: { contextWindowOverrides: { k3: null, 'kimi-for-coding': 500_000 } },
+      }),
+      response,
+    )
+
+    expect(captured.status).toBe(200)
+    expect((await modelSettings.read()).contextWindowOverrides).toEqual({ 'kimi-for-coding': 500_000 })
+    const value = (captured.body as { value: { contextWindowOverrides: Record<string, number>; models: Array<{ id: string; contextWindow: number }> } }).value
+    expect(value.contextWindowOverrides).toEqual({ 'kimi-for-coding': 500_000 })
+    expect(value.models.find((model) => model.id === 'k3')!.contextWindow).toBe(262_144)
+    expect(value.models.find((model) => model.id === 'kimi-for-coding')!.contextWindow).toBe(500_000)
+  })
+
+  it('deletes through the settings namespace without persisting a null', async () => {
+    vi.spyOn(store, 'read').mockResolvedValue(credential() as never)
+    vi.spyOn(store, 'write').mockResolvedValue(undefined)
+    // A harness with the register seam stores into the schema-validated
+    // namespace, which only accepts numbers.
+    let value: Record<string, unknown> = { contextWindowOverrides: { k3: 100_000 } }
+    const preferences = registerKimiCodePreferenceStore({
+      register(_namespace: unknown, schema: (input: unknown) => Record<string, unknown>) {
+        value = schema(value)
+        return {
+          get: () => value,
+          update: async (patch: object) => { value = schema({ ...value, ...patch }) },
+        }
+      },
+    }, modelSettings)
+    const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    registerKimiCodeRoutes(
+      { webServer: { register(route: typeof routes[number]) { routes.push(route); return () => undefined } } } as unknown as Context,
+      store,
+      modelSettings,
+      preferences,
+      { fetchFn: fetchMock as unknown as typeof fetch },
+    )
+
+    const { response, captured } = fakeExchange()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: '/kimi-code/api/models',
+        method: 'POST',
+        body: { contextWindowOverrides: { k3: null, 'kimi-for-coding': 500_000 } },
+      }),
+      response,
+    )
+
+    expect(captured.status).toBe(200)
+    expect(preferences.status().contextWindowOverrides).toEqual({ 'kimi-for-coding': 500_000 })
+    // The fallback document is written in the background; it must merge the
+    // same way, so the deleted key cannot survive on disk as a null.
+    await vi.waitFor(async () => {
+      const written = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as { contextWindowOverrides: unknown }
+      expect(written.contextWindowOverrides).toEqual({ 'kimi-for-coding': 500_000 })
+    })
   })
 })

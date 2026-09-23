@@ -8,6 +8,7 @@ import type { WorkBuddyReasoningEffort, WorkBuddyRegion } from '../../shared/wor
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { dshHomeDir } from '../antigravity/token-store.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
+import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS } from './model-catalog.ts'
 import { withResolvedIdentity } from './identity.ts'
 import type { CredentialStore } from '../token-store.ts'
@@ -80,7 +81,8 @@ export interface WorkBuddyPreferenceStore {
   update(patch: {
     enabled?: boolean
     enabledModelIds?: string[]
-    contextWindowOverrides?: Record<string, number>
+    /** `null` deletes one override and falls back to the catalog default. */
+    contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: WorkBuddyReasoningEffort | null
     selectedAccountId?: string | null
     hiddenAccountIds?: string[]
@@ -159,7 +161,7 @@ export function registerWorkBuddyPreferenceStore(
         enabled: patch.enabled !== undefined ? patch.enabled : (current.enabled !== false),
         enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
         contextWindowOverrides: patch.contextWindowOverrides
-          ? { ...current.contextWindowOverrides, ...patch.contextWindowOverrides }
+          ? mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides)
           : current.contextWindowOverrides,
         defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
           ? patch.defaultReasoningEffort
@@ -783,7 +785,8 @@ export class FileModelSettingsStore {
   async updateSettings(patch: {
     enabled?: boolean
     enabledModelIds?: string[]
-    contextWindowOverrides?: Record<string, number>
+    /** `null` deletes one override and falls back to the catalog default. */
+    contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: WorkBuddyReasoningEffort | null
     selectedAccountId?: string | null
     hiddenAccountIds?: string[]
@@ -794,7 +797,7 @@ export class FileModelSettingsStore {
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.enabledModelIds !== undefined ? { enabledModelIds: patch.enabledModelIds } : {}),
       ...(patch.contextWindowOverrides !== undefined
-        ? { contextWindowOverrides: { ...current.contextWindowOverrides, ...patch.contextWindowOverrides } }
+        ? { contextWindowOverrides: mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides) }
         : {}),
       ...(patch.defaultReasoningEffort !== undefined
         ? { defaultReasoningEffort: patch.defaultReasoningEffort }

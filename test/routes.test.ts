@@ -64,6 +64,15 @@ describe('host routes', () => {
         rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18_000, reset_at: 2_000_000_000 } },
       }),
     })
+    // One mutable override map, so a patch that clears a key is observable.
+    const overrides: Record<string, number> = {
+      'gpt-6-astra': 384_000,
+      'gpt-6-sol': 384_000,
+      'gpt-6-luna': 384_000,
+      'gpt-5.6-sol': 272_000,
+      'gpt-5.6-terra': 272_000,
+      'gpt-5.6-luna': 272_000,
+    }
     const preferences: SubscriptionPreferenceStore = {
       status: () => ({
         quickQuotaVisible: false,
@@ -72,30 +81,31 @@ describe('host routes', () => {
         reasoningSummary: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
-        contextWindowOverrides: { 'gpt-6-astra': 384_000, 'gpt-6-sol': 384_000, 'gpt-6-luna': 384_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000 },
+        contextWindowOverrides: { ...overrides },
         proxyMode: 'auto',
         customProxyUrl: null,
         writable: true,
       }),
-      update: async (patch) => ({
-        quickQuotaVisible: patch.quickQuotaVisible ?? false,
-        fastMode: patch.fastMode ?? false,
-        outputVerbosity: patch.outputVerbosity ?? null,
-        reasoningSummary: patch.reasoningSummary !== undefined ? patch.reasoningSummary : null,
-        visibleModelIds: patch.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
-        searchProvider: patch.searchProvider ?? 'dsh',
-        contextWindowOverrides: {
-          'gpt-6-astra': patch.contextWindowOverrides?.['gpt-6-astra'] ?? 384_000,
-          'gpt-6-sol': patch.contextWindowOverrides?.['gpt-6-sol'] ?? 384_000,
-          'gpt-6-luna': patch.contextWindowOverrides?.['gpt-6-luna'] ?? 384_000,
-          'gpt-5.6-sol': patch.contextWindowOverrides?.['gpt-5.6-sol'] ?? 272_000,
-          'gpt-5.6-terra': patch.contextWindowOverrides?.['gpt-5.6-terra'] ?? 272_000,
-          'gpt-5.6-luna': patch.contextWindowOverrides?.['gpt-5.6-luna'] ?? 272_000,
-        },
-        proxyMode: patch.proxyMode !== undefined ? patch.proxyMode : 'auto',
-        customProxyUrl: patch.customProxyUrl !== undefined ? patch.customProxyUrl : null,
-        writable: true,
-      }),
+      update: async (patch) => {
+        if (patch.contextWindowOverrides !== undefined) {
+          for (const [model, value] of Object.entries(patch.contextWindowOverrides)) {
+            if (value === null) delete overrides[model]
+            else overrides[model] = value
+          }
+        }
+        return {
+          quickQuotaVisible: patch.quickQuotaVisible ?? false,
+          fastMode: patch.fastMode ?? false,
+          outputVerbosity: patch.outputVerbosity ?? null,
+          reasoningSummary: patch.reasoningSummary !== undefined ? patch.reasoningSummary : null,
+          visibleModelIds: patch.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+          searchProvider: patch.searchProvider ?? 'dsh',
+          contextWindowOverrides: { ...overrides },
+          proxyMode: patch.proxyMode !== undefined ? patch.proxyMode : 'auto',
+          customProxyUrl: patch.customProxyUrl !== undefined ? patch.customProxyUrl : null,
+          writable: true,
+        }
+      },
       watch: () => () => undefined,
     }
     registerRoutes(ctx as never, oauth, usage, preferences)
@@ -164,12 +174,37 @@ describe('host routes', () => {
     })
     expect(rejectedReasoningSummary.status).toBe(400)
 
-    const rejectedContextModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+    // Every catalog model is configurable now, not only the default-visible six.
+    emit.mockClear()
+    const updatedLegacyModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin },
       body: JSON.stringify({ contextWindowOverrides: { 'gpt-5.4': 128_000 } }),
     })
+    expect(updatedLegacyModel.status).toBe(200)
+    expect((await updatedLegacyModel.json()).value.contextWindowOverrides['gpt-5.4']).toBe(128_000)
+    // The resolved context window is part of the cached model directory.
+    expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
+
+    const rejectedContextModel = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ contextWindowOverrides: { 'gpt-9-unknown': 128_000 } }),
+    })
     expect(rejectedContextModel.status).toBe(400)
+
+    // null clears one override back to the catalog default and leaves the rest.
+    emit.mockClear()
+    const clearedContext = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ contextWindowOverrides: { 'gpt-5.4': null } }),
+    })
+    expect(clearedContext.status).toBe(200)
+    const clearedOverrides = (await clearedContext.json()).value.contextWindowOverrides
+    expect(clearedOverrides['gpt-5.4']).toBeUndefined()
+    expect(clearedOverrides['gpt-6-sol']).toBe(384_000)
+    expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
 
     for (const contextWindow of [0, 1.5, 872_001, 1_000_000]) {
       const rejectedAstraContext = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {

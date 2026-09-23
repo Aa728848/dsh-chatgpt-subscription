@@ -44,6 +44,8 @@ const BASE = `
 .dsha-context-save{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit;font-size:12px;line-height:1;padding:8px 10px;white-space:nowrap}
 .dsha-context-save:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dsha-context-save:disabled{cursor:default;opacity:.45}
+.dsha-context-reset{color:var(--dsw-alias-label-secondary)}
+.dsha-context-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .dsha-quota-card{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;margin-top:12px;padding:12px}
 .dsha-quota-title{align-items:center;display:flex;font-size:13px;gap:8px;justify-content:space-between;color:var(--dsw-alias-label-primary);font-weight:650}
 .dsha-quota-title span{color:var(--dsw-alias-label-tertiary);font-size:11px;text-transform:uppercase}

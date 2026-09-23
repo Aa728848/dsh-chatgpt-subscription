@@ -1,8 +1,9 @@
 import z from '@deepseek-ai/schemastery'
 import { FilePreferencesStore, preferencesPath } from './common/file-preferences.ts'
 import { readLegacyPreferences } from './common/legacy-preferences.ts'
+import { mergeContextWindowOverrides } from './common/context-window-overrides.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from './common/settings-compat.ts'
-import { GPT_56_MAX_CONTEXT_WINDOW, GPT_6_MAX_CONTEXT_WINDOW, isCodexModelId } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
 import {
   DEFAULT_PREFERENCES,
   PREFERENCES_NAMESPACE,
@@ -43,6 +44,14 @@ type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
  * @param settings - Live `ctx.settings` service of either harness generation.
  */
 export function registerPreferenceStore(settings?: unknown): PreferenceStoreHandle {
+  // Every catalog model is configurable, and no key carries a default: an
+  // absent key is what "no override, use the catalog value" looks like, so a
+  // restored default must be able to leave nothing behind.
+  const contextWindowOverrides = z.object(Object.fromEntries(CODEX_MODEL_CATALOG.map((entry) => [
+    entry.id,
+    z.number().step(1).min(1).max(contextWindowLimitForModel(entry.id)),
+  ]))).default({})
+
   const schema = z.object({
     enabled: z.boolean().default(DEFAULT_PREFERENCES.enabled ?? true),
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
@@ -54,14 +63,7 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
       z.const(SEARCH_PROVIDER_DSH),
       z.const(SEARCH_PROVIDER_CODEX),
     ]).default(DEFAULT_PREFERENCES.searchProvider),
-    contextWindowOverrides: z.object({
-      'gpt-6-astra': z.number().step(1).min(1).max(GPT_6_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-6-astra']),
-      'gpt-6-sol': z.number().step(1).min(1).max(GPT_6_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-6-sol']),
-      'gpt-6-luna': z.number().step(1).min(1).max(GPT_6_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-6-luna']),
-      'gpt-5.6-sol': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-sol']),
-      'gpt-5.6-terra': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-terra']),
-      'gpt-5.6-luna': z.number().step(1).min(1).max(GPT_56_MAX_CONTEXT_WINDOW).default(DEFAULT_PREFERENCES.contextWindowOverrides['gpt-5.6-luna']),
-    }).default(DEFAULT_PREFERENCES.contextWindowOverrides),
+    contextWindowOverrides,
     proxyMode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]).default(DEFAULT_PREFERENCES.proxyMode),
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
   })
@@ -121,10 +123,10 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
       normalized.searchProvider = patch.searchProvider
     }
     if (patch.contextWindowOverrides !== undefined) {
-      normalized.contextWindowOverrides = {
-        ...this.scope.get().contextWindowOverrides,
-        ...patch.contextWindowOverrides,
-      }
+      normalized.contextWindowOverrides = mergeContextWindowOverrides(
+        this.scope.get().contextWindowOverrides,
+        patch.contextWindowOverrides,
+      )
     }
     if (patch.proxyMode !== undefined) {
       if (!isProxyMode(patch.proxyMode)) throw new PreferenceError('Unsupported proxy mode preference.')

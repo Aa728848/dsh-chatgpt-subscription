@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **模型上下文窗口跟随模型开关，并支持恢复默认**（用户报告：「本项目提供的供应商模型是可以开关显示的，但是配置同页面的配置上下文不行，能不能开启什么模型再调整什么模型的上下文，增加支持恢复默认的选项」）。
+  - **上下文窗口只列已勾选启用的模型**：五个标签页统一——ChatGPT 页按 `visibleModelIds`，Antigravity / Command Code / Kimi Code / WorkBuddy 按 `model.enabled`；一个都没勾选时显示空态提示。四页新增 `contextDraftsFor(status)` 并让所有播种路径（`/status`、目录刷新、以及**模型开关请求返回后**）都走它，否则刚勾选的模型会渲染成空输入框（此前上下文区与开关无关，草稿总是先于行存在）。
+  - **ChatGPT 页放开到全部模型**：原先只有 `CONFIGURABLE_CONTEXT_MODEL_IDS` 里写死的 6 个模型（恰好等于默认可见的 6 个）能配上下文，勾上 5.5 / 5.4 / 5.4 Mini / 5.3 Codex Spark 后没有对应输入框。现在 `CONFIGURABLE_CONTEXT_MODEL_IDS`、`ConfigurableContextModelId`、`isConfigurableContextModelId` 全部删除，改用既有的 `isCodexModelId`：偏好 schema 按 `CODEX_MODEL_CATALOG` 生成、路由接受任意目录模型、`src/host/model-catalog.ts` 去掉「只有那几个模型才读覆盖值」的守卫。可调上限沿用家族规则（GPT-6 系 872K，其余 1M），与 5.6 系列此前的规则一致。
+  - **`null` = 恢复默认**：请求体里的 `contextWindowOverrides: { "<模型 id>": null }` 表示删除该覆盖值、退回目录默认。五个 provider 的路由与 store 合并统一改走 `src/host/common/context-window-overrides.ts`——此前散落的 `{ ...current, ...patch }` 合并会把 `null` 静默吞掉（等于没有删除路径），Antigravity 的路由更是原样透传，一旦有 `null` 就会写进 JSON 文档。持久化类型仍是 `Record<string, number>`，`null` 只在归一化阶段存在，不会落到 settings 命名空间或落盘文件里。
+  - **存储里区分「没有覆盖」与「覆盖成默认值」**：ChatGPT 偏好 schema 不再给每个键加 `.default()`，`DEFAULT_PREFERENCES.contextWindowOverrides` 变为 `{}`，读取时由 `resolveCodexCatalogEntry(model).contextWindow` 兜底；已实测 schemastery 对缺键保持缺失、对未知键保留。老配置里存过的键与数值一律不动，用户可见数值不变。
+  - **每行「恢复默认」+ 每页「全部恢复默认」**：单行按钮在该模型没有覆盖值时禁用；批量按钮先 `window.confirm`，再把该页**所有**已存覆盖值一起清掉——包括已经被取消勾选的模型，避免隐藏的旧覆盖值残留。
+  - **改上下文窗口也会刷新适配器目录**：`POST /preferences/update` 原先只在 `visibleModelIds` / `enabled` 变化时发 `llm/adapters-updated`，而上下文窗口属于 harness 缓存的模型信息，改完在活动会话里不生效；现在带上下文窗口的补丁同样会发（另外四页的 adapter 每次请求读设置，无需改动）。
+  - **验证**：`npm run typecheck` 与 `npm run build` 通过；`npm test` **90 个文件通过 / 1 跳过，1146 条通过 / 7 跳过、0 失败**。新增 4 个客户端测试文件（`test/antigravity-context-window.test.tsx` 7 条、`test/command-code-context-window.test.tsx` 6 条、`test/workbuddy-context-window.test.tsx` 7 条）锁定「只列已启用模型、刚勾选即有目录默认值、单行与批量恢复都发 `null`」；`test/client-registration.test.ts` 原有 4 条正则用例改为「行数跟随勾选」并新增 3 条（未勾选无行、勾选后出现且带目录默认值、单行/批量恢复的请求体与 `window.confirm`）；`test/routes.test.ts` 改为接受 `gpt-5.4` 覆盖值，并新增未知模型 400、`null` 删除只影响单个键、上下文补丁触发 `llm/adapters-updated` 三类断言；`test/preferences.test.ts` 新增「恢复默认后该键消失」与「任意目录模型都能设覆盖值」；`test/adapter.test.ts` 与四个 provider 的 store / route 用例补齐删除路径。另新增 `test/codex-context-window.test.ts` 做端到端串验：真实路由 + 真实落盘偏好文档 + 真实适配器解析——设覆盖值后 `resolveModel` 与文档同步变化，恢复默认后**文档里该键消失**（而不是存回默认数值），未知模型与越界值仍 400；把路由里的 `null` 分支去掉后该用例立即失败，确认它真的覆盖了这条路径。
+
 ## 0.8.0-alpha.0 - 2026-09-23
 
 - **本次先发 alpha 预发布版**：0.8.0 的正式版尚未定稿，因此只发到 `alpha` 标签（`npm i @eddyskywalker/dsh-chatgpt-subscription@alpha`），`latest` 仍指向 0.7.0——不主动指定 `@alpha` 的安装与升级行为不变。以下改动就是这一版 alpha 的内容。

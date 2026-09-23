@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from 'node:util'
 import z from '@deepseek-ai/schemastery'
 import { MODELS } from './types.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
+import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
@@ -44,7 +45,8 @@ export interface AntigravityPreferenceStore {
   update(patch: {
     enabled?: boolean
     enabledModelIds?: string[]
-    contextWindowOverrides?: Record<string, number>
+    /** `null` deletes one override and falls back to the catalog default. */
+    contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: 'low' | 'medium' | 'high' | null
   }): Promise<AntigravityModelSettings>
 }
@@ -103,7 +105,7 @@ export function registerAntigravityPreferenceStore(
         enabled: patch.enabled !== undefined ? patch.enabled : (current.enabled !== false),
         enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
         contextWindowOverrides: patch.contextWindowOverrides
-          ? { ...current.contextWindowOverrides, ...patch.contextWindowOverrides }
+          ? mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides)
           : current.contextWindowOverrides,
         defaultReasoningEffort:
           patch.defaultReasoningEffort !== undefined
@@ -321,7 +323,8 @@ export class FileModelSettingsStore {
   async updateSettings(patch: {
     enabled?: boolean
     enabledModelIds?: string[]
-    contextWindowOverrides?: Record<string, number>
+    /** `null` deletes one override and falls back to the catalog default. */
+    contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: 'low' | 'medium' | 'high' | null
   }): Promise<AntigravityModelSettings> {
     const current = await this.read()
@@ -331,10 +334,10 @@ export class FileModelSettingsStore {
       ...(patch.enabledModelIds !== undefined ? { enabledModelIds: patch.enabledModelIds } : {}),
       ...(patch.contextWindowOverrides !== undefined
         ? {
-            contextWindowOverrides: {
-              ...(current.contextWindowOverrides || {}),
-              ...patch.contextWindowOverrides,
-            },
+            contextWindowOverrides: mergeContextWindowOverrides(
+              current.contextWindowOverrides || {},
+              patch.contextWindowOverrides,
+            ),
           }
         : {}),
       ...(patch.defaultReasoningEffort !== undefined

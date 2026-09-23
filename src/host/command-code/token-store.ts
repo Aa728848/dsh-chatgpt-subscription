@@ -8,6 +8,7 @@ import { COMMAND_CODE_REASONING_EFFORTS } from '../../shared/command-code-contra
 import { FALLBACK_MODELS, PROVIDER_ID, resolveApiEnv } from './types.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
+import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
@@ -65,7 +66,8 @@ export interface CommandCodePreferenceStore {
   update(patch: {
     enabled?: boolean
     enabledModelIds?: string[]
-    contextWindowOverrides?: Record<string, number>
+    /** `null` deletes one override and falls back to the catalog default. */
+    contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: CommandCodeReasoningEffort | null
   }): Promise<CommandCodeModelSettings>
 }
@@ -136,7 +138,7 @@ export function registerCommandCodePreferenceStore(
         enabled: patch.enabled !== undefined ? patch.enabled : (current.enabled !== false),
         enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
         contextWindowOverrides: patch.contextWindowOverrides
-          ? { ...current.contextWindowOverrides, ...patch.contextWindowOverrides }
+          ? mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides)
           : current.contextWindowOverrides,
         defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
           ? patch.defaultReasoningEffort
@@ -353,7 +355,8 @@ export class FileModelSettingsStore {
   async updateSettings(patch: {
     enabled?: boolean
     enabledModelIds?: string[]
-    contextWindowOverrides?: Record<string, number>
+    /** `null` deletes one override and falls back to the catalog default. */
+    contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: CommandCodeReasoningEffort | null
   }): Promise<CommandCodeModelSettings> {
     const current = await this.read()
@@ -362,7 +365,7 @@ export class FileModelSettingsStore {
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.enabledModelIds !== undefined ? { enabledModelIds: patch.enabledModelIds } : {}),
       ...(patch.contextWindowOverrides !== undefined
-        ? { contextWindowOverrides: { ...current.contextWindowOverrides, ...patch.contextWindowOverrides } }
+        ? { contextWindowOverrides: mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides) }
         : {}),
       ...(patch.defaultReasoningEffort !== undefined
         ? { defaultReasoningEffort: patch.defaultReasoningEffort }

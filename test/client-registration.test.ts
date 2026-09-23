@@ -3,6 +3,7 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
+import { CODEX_MODEL_CATALOG } from '../src/shared/model-catalog.ts'
 import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
 import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
 import { apply, inject } from '../src/client/index.tsx'
@@ -29,56 +30,93 @@ describe('client registration', () => {
     expect(parseCapacity('1M', 872_000)).toBeNull()
   })
 
-  it.each([
-    ['gpt-5.6-sol', '5.6 Sol'],
-    ['gpt-6-astra', '6 Astra'],
-    ['gpt-6-sol', '6 Sol'],
-    ['gpt-6-luna', '6 Luna'],
-  ] as const)('keeps %s context options rendered while typing a numeric draft', async (model, modelName) => {
-    const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
-    globalThis.IS_REACT_ACT_ENVIRONMENT = true
-    const originalFetch = globalThis.fetch
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const body = init?.body === undefined ? null : JSON.parse(String(init.body)) as { contextWindowOverrides?: Record<string, number>; visibleModelIds?: string[] }
-      const contextWindow = body?.contextWindowOverrides?.[model] ?? (model.startsWith('gpt-6-') ? 384_000 : 272_000)
-      const preferences = {
-        quickQuotaVisible: false,
-        fastMode: false,
-        outputVerbosity: null,
-        reasoningSummary: null,
-        visibleModelIds: body?.visibleModelIds ?? ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
-        searchProvider: 'dsh',
-        contextWindowOverrides: { 'gpt-6-astra': 384_000, 'gpt-6-sol': 384_000, 'gpt-6-luna': 384_000, 'gpt-5.6-sol': 272_000, 'gpt-5.6-terra': 272_000, 'gpt-5.6-luna': 272_000, [model]: contextWindow },
-        writable: true,
+  /**
+   * Mount the ChatGPT tab over a fake host that applies preference patches the
+   * way the real route does: a `null` override deletes that model's key.
+   */
+  async function mountCodexSection(options: {
+    visibleModelIds: string[]
+    contextWindowOverrides?: Record<string, number>
+  }): Promise<{ container: HTMLElement; fetchMock: ReturnType<typeof vi.fn>; teardown: () => Promise<void> }> {
+    const preferences = {
+      visibleModelIds: [...options.visibleModelIds],
+      contextWindowOverrides: { ...(options.contextWindowOverrides ?? {}) },
+    }
+    const payload = (): Record<string, unknown> => ({
+      quickQuotaVisible: false,
+      fastMode: false,
+      outputVerbosity: null,
+      reasoningSummary: null,
+      visibleModelIds: preferences.visibleModelIds,
+      searchProvider: 'dsh',
+      contextWindowOverrides: preferences.contextWindowOverrides,
+      proxyMode: 'auto',
+      customProxyUrl: null,
+      writable: true,
+    })
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        const patch = JSON.parse(String(init.body)) as {
+          visibleModelIds?: string[]
+          contextWindowOverrides?: Record<string, number | null>
+        }
+        if (patch.visibleModelIds !== undefined) preferences.visibleModelIds = patch.visibleModelIds
+        for (const [model, value] of Object.entries(patch.contextWindowOverrides ?? {})) {
+          if (value === null) delete preferences.contextWindowOverrides[model]
+          else preferences.contextWindowOverrides[model] = value
+        }
+        return Response.json({ ok: true, value: payload() })
       }
-      if (init?.method === 'POST') return Response.json({ ok: true, value: preferences })
       return Response.json({ ok: true, value: {
         authenticated: false,
         account: null,
         storage: { kind: 'memory', encrypted: false, available: true },
         login: { active: false, loginId: null, expiresAt: null },
         quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
-        preferences,
+        preferences: payload(),
       } })
     })
+    const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
+    const originalFetch = globalThis.fetch
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
     globalThis.fetch = fetchMock as typeof fetch
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
     const t = ((key: keyof typeof zh) => zh[key]) as never
+    await act(async () => root.render(createElement(CodexSubscriptionSection, { t } as never)))
+    return {
+      container,
+      fetchMock,
+      teardown: async () => {
+        await act(async () => root.unmount())
+        container.remove()
+        globalThis.fetch = originalFetch
+        globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment
+      },
+    }
+  }
+
+  it.each([
+    ['gpt-5.6-sol', '5.6 Sol'],
+    ['gpt-6-astra', '6 Astra'],
+    ['gpt-6-sol', '6 Sol'],
+    ['gpt-6-luna', '6 Luna'],
+  ] as const)('keeps %s context options rendered while typing a numeric draft', async (model, modelName) => {
+    const harness = await mountCodexSection({ visibleModelIds: CODEX_MODEL_CATALOG.map((entry) => entry.id) })
     try {
-      await act(async () => root.render(createElement(CodexSubscriptionSection, { t } as never)))
+      const { container, fetchMock } = harness
       const input = container.querySelector<HTMLInputElement>(`input[aria-label="${modelName} 上下文窗口"]`)
       expect(input).not.toBeNull()
       const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsha-models input[type="checkbox"]')
       expect(modelChecks).toHaveLength(10)
+      // One row per checked model, so checking everything shows the whole catalog.
+      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(10)
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
         input!.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input?.value).toBe('5')
-      // 每个可配置上下文窗口的模型一行（子代理上下文预算控件已随死设置移除）
-      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(6)
       const save = container.querySelector<HTMLButtonElement>(`button[data-model="${model}"]`)
       expect(save).not.toBeNull()
       expect(save?.disabled).toBe(false)
@@ -94,20 +132,81 @@ describe('client registration', () => {
         await act(async () => save?.click())
         expect(fetchMock).toHaveBeenCalledTimes(2)
         expect(container.textContent).toContain(zh.contextWindowInvalid)
-
-        const astraCheck = container.querySelector<HTMLInputElement>('label[title="gpt-6-astra"] input')
-        expect(astraCheck?.checked).toBe(false)
-        await act(async () => astraCheck?.click())
-        expect(astraCheck?.checked).toBe(true)
-        expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
-          visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra'],
-        })
       }
     } finally {
-      await act(async () => root.unmount())
-      container.remove()
-      globalThis.fetch = originalFetch
-      globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment
+      await harness.teardown()
+    }
+  })
+
+  it('lists a context row only for the models checked under Available models', async () => {
+    const harness = await mountCodexSection({ visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra'] })
+    try {
+      const { container, fetchMock } = harness
+      expect([...container.querySelectorAll('.dsha-context-row label')].map((label) => label.textContent)).toEqual(['5.6 Sol', '5.6 Terra'])
+      expect(container.querySelector('input[aria-label="6 Astra 上下文窗口"]')).toBeNull()
+      // Nothing is overridden yet, so there is nothing to restore.
+      expect(container.querySelector<HTMLButtonElement>('.dsha-context-settings .dsha-actions button')?.disabled).toBe(true)
+
+      const astraCheck = container.querySelector<HTMLInputElement>('label[title="gpt-6-astra"] input')
+      expect(astraCheck?.checked).toBe(false)
+      await act(async () => astraCheck?.click())
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+        visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'],
+      })
+      // The freshly checked model gets a row showing its catalog value, not an empty box.
+      expect(container.querySelector<HTMLInputElement>('input[aria-label="6 Astra 上下文窗口"]')?.value).toBe('384K')
+      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(3)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  it('restores one modified model context window to its default', async () => {
+    const harness = await mountCodexSection({
+      visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+      contextWindowOverrides: { 'gpt-5.6-sol': 500_000 },
+    })
+    try {
+      const { container, fetchMock } = harness
+      expect(container.querySelector<HTMLInputElement>('input[aria-label="5.6 Sol 上下文窗口"]')?.value).toBe('500K')
+      const modified = container.querySelector<HTMLButtonElement>('button[data-reset-model="gpt-5.6-sol"]')
+      const untouched = container.querySelector<HTMLButtonElement>('button[data-reset-model="gpt-5.6-terra"]')
+      expect(modified?.className).toContain('dsha-context-reset')
+      expect(modified?.disabled).toBe(false)
+      expect(untouched?.disabled).toBe(true)
+
+      await act(async () => modified?.click())
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ contextWindowOverrides: { 'gpt-5.6-sol': null } })
+      expect(container.querySelector<HTMLInputElement>('input[aria-label="5.6 Sol 上下文窗口"]')?.value).toBe('272K')
+      expect(container.querySelector<HTMLButtonElement>('button[data-reset-model="gpt-5.6-sol"]')?.disabled).toBe(true)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  it('restores every modified context window at once', async () => {
+    const confirmMock = vi.fn(() => true)
+    const originalConfirm = window.confirm
+    window.confirm = confirmMock
+    // The second override belongs to a model that is not checked, and is cleared too.
+    const harness = await mountCodexSection({
+      visibleModelIds: ['gpt-5.6-sol'],
+      contextWindowOverrides: { 'gpt-5.6-sol': 500_000, 'gpt-5.4': 300_000 },
+    })
+    try {
+      const { container, fetchMock } = harness
+      const resetAll = container.querySelector<HTMLButtonElement>('.dsha-context-settings .dsha-actions button')
+      expect(resetAll?.textContent).toBe(zh.contextWindowResetAll)
+      expect(resetAll?.disabled).toBe(false)
+      await act(async () => resetAll?.click())
+      expect(confirmMock).toHaveBeenCalledWith(zh.contextWindowResetAllConfirm)
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+        contextWindowOverrides: { 'gpt-5.6-sol': null, 'gpt-5.4': null },
+      })
+      expect(resetAll?.disabled).toBe(true)
+    } finally {
+      await harness.teardown()
+      window.confirm = originalConfirm
     }
   })
 

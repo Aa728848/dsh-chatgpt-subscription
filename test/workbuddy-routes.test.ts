@@ -21,7 +21,7 @@ import {
   resolveEnabledModelIds,
 } from '../src/host/workbuddy/routes.ts'
 import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
-import { FileModelSettingsStore } from '../src/host/workbuddy/token-store.ts'
+import { FileModelSettingsStore, registerWorkBuddyPreferenceStore } from '../src/host/workbuddy/token-store.ts'
 import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { WorkBuddyAccountPool, parseWorkBuddyPoolData } from '../src/host/workbuddy/account-pool.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS, FALLBACK_MODELS } from '../src/host/workbuddy/model-catalog.ts'
@@ -686,6 +686,100 @@ describe('WorkBuddy routes', () => {
     expect((await settings.read()).enabledModelIds).toEqual(['glm-5.3'])
     expect((await settings.read()).defaultReasoningEffort).toBe('max')
     expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
+  })
+
+  it('clears a stored context window override when the card posts null', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    await settings.updateSettings({ contextWindowOverrides: { 'glm-5.3': 500_000 } })
+    const handlers: any[] = []
+    registerWorkBuddyRoutes({ ...makeContext(handlers), emit: vi.fn() }, createWorkBuddyStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { contextWindowOverrides: { 'glm-5.3': null } }, 'http://127.0.0.1:43120'),
+      res,
+    )
+
+    expect(res.captured.status).toBe(200)
+    expect((await settings.read()).contextWindowOverrides).toEqual({})
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.contextWindowOverrides).toEqual({})
+    // Back to the catalog window rather than the deleted override.
+    const glm = payload.value.models.find((model: any) => model.id === 'glm-5.3')
+    expect(glm.contextWindow).toBe(glm.defaultContextWindow)
+  })
+
+  it('writes one override and deletes another in the same patch', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    await settings.updateSettings({ contextWindowOverrides: { 'glm-5.3': 500_000, 'deepseek-v4.1-flash': 900_000 } })
+    const handlers: any[] = []
+    registerWorkBuddyRoutes({ ...makeContext(handlers), emit: vi.fn() }, createWorkBuddyStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest(
+        'POST',
+        '/workbuddy/api/settings',
+        { contextWindowOverrides: { 'glm-5.3': null, 'deepseek-v4.1-flash': 600_000 } },
+        'http://127.0.0.1:43120',
+      ),
+      res,
+    )
+
+    expect(res.captured.status).toBe(200)
+    expect((await settings.read()).contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    const glm = payload.value.models.find((model: any) => model.id === 'glm-5.3')
+    expect(glm.contextWindow).toBe(glm.defaultContextWindow)
+    expect(payload.value.models.find((model: any) => model.id === 'deepseek-v4.1-flash').contextWindow).toBe(600_000)
+  })
+
+  it('deletes through the settings namespace without persisting a null', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    // A harness with the register seam stores into the schema-validated
+    // namespace, which only accepts numbers.
+    let value: Record<string, unknown> = { contextWindowOverrides: { 'glm-5.3': 500_000 } }
+    const preferences = registerWorkBuddyPreferenceStore({
+      register(_namespace: unknown, schema: (input: unknown) => Record<string, unknown>) {
+        value = schema(value)
+        return {
+          get: () => value,
+          update: async (patch: object) => { value = schema({ ...value, ...patch }) },
+        }
+      },
+    }, settings)
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, preferences, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest(
+        'POST',
+        '/workbuddy/api/models',
+        { contextWindowOverrides: { 'glm-5.3': null, 'deepseek-v4.1-flash': 600_000 } },
+        'http://127.0.0.1:43120',
+      ),
+      res,
+    )
+
+    expect(res.captured.status).toBe(200)
+    expect(preferences.status().contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    // The fallback document is written in the background; it must merge the
+    // same way, so the deleted key cannot survive on disk as a null.
+    await vi.waitFor(async () => {
+      const written = JSON.parse(await fs.readFile(settings.path(), 'utf8')) as { contextWindowOverrides: unknown }
+      expect(written.contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    })
   })
 
   it('persists a selected regional account and returns its model catalog', async () => {

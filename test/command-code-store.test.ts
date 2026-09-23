@@ -79,6 +79,12 @@ describe('Command Code model settings file', () => {
     expect(merged.contextWindowOverrides).toEqual({ 'claude-sonnet-4-6': 400_000, x: 5_000 })
     expect(merged.defaultReasoningEffort).toBe('low')
 
+    // `null` is the restore-default patch: it deletes the key on disk rather
+    // than storing a null the card would have to special-case.
+    const cleared = await store.updateSettings({ contextWindowOverrides: { 'claude-sonnet-4-6': null, 'x': 8_000 } })
+    expect(cleared.contextWindowOverrides).toEqual({ x: 8_000 })
+    expect((await store.read()).contextWindowOverrides).toEqual({ x: 8_000 })
+
     const cataloged = await store.setCatalogModels([{ id: 'a' }], { enabledModelIds: ['a'] })
     expect(cataloged.enabledModelIds).toEqual(['a'])
     expect(cataloged.catalogModels).toEqual([{ id: 'a' }])

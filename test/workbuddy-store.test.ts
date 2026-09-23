@@ -395,6 +395,12 @@ describe('WorkBuddy model settings store', () => {
     expect(settings.enabledModelIds).toEqual(['glm-5.3'])
     expect(settings.defaultReasoningEffort).toBe('high')
     expect(settings.contextWindowOverrides).toEqual({ 'glm-5.3': 500_000, 'kimi-k3': 300_000 })
+
+    // `null` is the restore-default patch: it deletes the key on disk rather
+    // than storing a null the card would have to special-case.
+    const restored = await store.updateSettings({ contextWindowOverrides: { 'glm-5.3': null, 'kimi-k3': 400_000 } })
+    expect(restored.contextWindowOverrides).toEqual({ 'kimi-k3': 400_000 })
+    expect((await store.read()).contextWindowOverrides).toEqual({ 'kimi-k3': 400_000 })
   })
 
   it('ignores an unknown reasoning level on disk', async () => {

@@ -11,7 +11,7 @@ import type {
   SubagentRouteAuditDto,
   SubscriptionPreferencesUpdateDto,
 } from '../shared/contracts.ts'
-import { contextWindowLimitForModel, isCodexModelId, isConfigurableContextModelId } from '../shared/model-catalog.ts'
+import { contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
 import { isCodexReasoningSummary } from '../shared/preferences.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
@@ -178,7 +178,11 @@ export function registerRoutes(
         case `${ROUTE_PREFIX}/preferences/update`: {
           const patch = readPreferencesUpdate(body, preferences.status())
           const value = await preferences.update(patch)
-          if (patch.visibleModelIds !== undefined || patch.enabled !== undefined) ctx.emit?.('llm/adapters-updated')
+          // A context window is part of the resolved model info the harness
+          // caches, so changing one has to invalidate the adapter directory too.
+          if (patch.visibleModelIds !== undefined || patch.enabled !== undefined || patch.contextWindowOverrides !== undefined) {
+            ctx.emit?.('llm/adapters-updated')
+          }
           json(response, { ok: true, value })
           return
         }
@@ -334,9 +338,13 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')
     const overrides: NonNullable<SubscriptionPreferencesUpdateDto['contextWindowOverrides']> = {}
     for (const [model, contextWindow] of Object.entries(value.contextWindowOverrides)) {
-      if (!isConfigurableContextModelId(model)) throw new PreferenceError('This model does not support a configurable context window.')
+      if (!isCodexModelId(model)) throw new PreferenceError('Unknown Codex model for a context window override.')
+      if (contextWindow === null) {
+        overrides[model] = null
+        continue
+      }
       if (!Number.isSafeInteger(contextWindow) || (contextWindow as number) < 1 || (contextWindow as number) > contextWindowLimitForModel(model)) {
-        throw new PreferenceError(`contextWindowOverrides.${model} must be a positive integer no greater than the provider limit.`)
+        throw new PreferenceError(`contextWindowOverrides.${model} must be a positive integer no greater than the provider limit, or null to restore the default.`)
       }
       overrides[model] = contextWindow as number
     }

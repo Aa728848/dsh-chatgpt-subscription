@@ -1,7 +1,7 @@
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
-import { CODEX_MODEL_CATALOG, codexModelMaxTokens, isConfigurableContextModelId, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, codexModelMaxTokens, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
 
 export const PROVIDER_ID = CODEX_CHATGPT_PROVIDER_ID
@@ -22,9 +22,9 @@ export function listCodexModels(preferences?: SubscriptionPreferenceStore): LlmM
 export function resolveCodexModel(model: string, preferences?: SubscriptionPreferenceStore): LlmResolvedModelInfo {
   const entry = resolveCodexCatalogEntry(model)
   const status = preferences?.status()
-  const configuredContextWindow = isConfigurableContextModelId(model)
-    ? status?.contextWindowOverrides[model]
-    : undefined
+  // Any catalog model may carry an override; a model without one falls back to
+  // the value its catalog entry declares.
+  const configuredContextWindow = status?.contextWindowOverrides[model]
   const efforts = reasoningEffortsForModel(model)
   const defaultEffort = efforts.includes(entry.defaultReasoningEffort as any)
     ? entry.defaultReasoningEffort

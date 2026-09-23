@@ -61,7 +61,7 @@ describe('CodexChatGptAdapter', () => {
         reasoningSummary: null,
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         searchProvider: 'dsh',
-        contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000, 'gpt-5.6-terra': 200_000, 'gpt-5.6-luna': 256_000 },
+        contextWindowOverrides: { 'gpt-5.6-sol': 1_000_000, 'gpt-5.6-terra': 200_000, 'gpt-5.6-luna': 256_000, 'gpt-5.4': 400_000 },
         proxyMode: 'auto',
         customProxyUrl: null,
         writable: true,
@@ -78,10 +78,15 @@ describe('CodexChatGptAdapter', () => {
       defaultMaxTokens: 32_768,
       reasoning: { defaultEffort: 'medium' },
     })
+    // A model outside the default-visible set carries an override too; one with
+    // none still resolves to its catalog context window.
     await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.4')).resolves.toMatchObject({
-      context: { contextWindow: 272_000 },
+      context: { contextWindow: 400_000 },
       defaultMaxTokens: 32_768,
       reasoning: { defaultEffort: 'none' },
+    })
+    await expect(configured.resolveModel(PROVIDER_ID, 'gpt-5.3-codex-spark')).resolves.toMatchObject({
+      context: { contextWindow: 258_000 },
     })
   })
 

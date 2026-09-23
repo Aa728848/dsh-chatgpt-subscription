@@ -137,17 +137,6 @@ export const DEFAULT_VISIBLE_CODEX_MODEL_IDS = [
 
 export const DEFAULT_CODEX_MODEL = CODEX_MODEL_CATALOG[0]
 
-export const CONFIGURABLE_CONTEXT_MODEL_IDS = [
-  'gpt-6-astra',
-  'gpt-6-sol',
-  'gpt-6-luna',
-  'gpt-5.6-sol',
-  'gpt-5.6-terra',
-  'gpt-5.6-luna',
-] as const satisfies readonly CodexModelId[]
-
-export type ConfigurableContextModelId = typeof CONFIGURABLE_CONTEXT_MODEL_IDS[number]
-
 export const STANDARD_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'] as const
 export const GPT_56_REASONING_EFFORTS = [...STANDARD_REASONING_EFFORTS, 'max'] as const
 // Ultra in Codex also controls subagent orchestration; expose the Responses efforts here.
@@ -174,11 +163,12 @@ export function isCodexModelId(model: unknown): model is CodexModelId {
   return typeof model === 'string' && CODEX_MODEL_CATALOG.some((entry) => entry.id === model)
 }
 
-export function isConfigurableContextModelId(model: unknown): model is ConfigurableContextModelId {
-  return typeof model === 'string' && CONFIGURABLE_CONTEXT_MODEL_IDS.some((id) => id === model)
-}
-
-export function contextWindowLimitForModel(model: ConfigurableContextModelId): number {
+/**
+ * Upper bound for one model's context window override. The Codex subscription
+ * caps the whole GPT-6 family at 872K and everything older at 1M, so a model's
+ * catalog default is where the number starts, not where it has to stay.
+ */
+export function contextWindowLimitForModel(model: CodexModelId): number {
   return resolveCodexCatalogEntry(model).reasoningProfile === 'gpt-6'
     ? GPT_6_MAX_CONTEXT_WINDOW
     : GPT_56_MAX_CONTEXT_WINDOW

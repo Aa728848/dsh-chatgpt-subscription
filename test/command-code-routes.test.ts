@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -16,7 +17,7 @@ import {
   verifyApiKey,
 } from '../src/host/command-code/client.ts'
 import { resolveEnabledModelIds, getCommandCodeWebStatus, registerCommandCodeRoutes } from '../src/host/command-code/routes.ts'
-import { FileCredentialStore, FileModelSettingsStore } from '../src/host/command-code/token-store.ts'
+import { FileCredentialStore, FileModelSettingsStore, registerCommandCodePreferenceStore } from '../src/host/command-code/token-store.ts'
 import {
   FALLBACK_MODELS,
   inputModalitiesFor,
@@ -425,5 +426,83 @@ describe('Command Code settings routes', () => {
     const claude = status.models.find((model) => model.id === 'claude-sonnet-4-6')!
     expect(claude).toMatchObject({ enabled: true, contextWindow: 300_000, defaultContextWindow: 1_000_000 })
     expect(status.models.every((model) => model.id === 'claude-sonnet-4-6' || !model.enabled)).toBe(true)
+  })
+
+  it('clears a stored context window override when the card posts null', async () => {
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'k' })
+    await modelSettings.updateSettings({ contextWindowOverrides: { 'claude-sonnet-4-6': 400_000 } })
+
+    const { response, captured } = fakeExchange()
+    await handler(
+      fakeRequest({ url: '/command-code/api/models', method: 'POST', body: { contextWindowOverrides: { 'claude-sonnet-4-6': null } } }),
+      response,
+    )
+
+    expect(captured.status).toBe(200)
+    expect((await modelSettings.read()).contextWindowOverrides).toEqual({})
+    const value = (captured.body as { value: { contextWindowOverrides: Record<string, number>; models: Array<{ id: string; contextWindow: number }> } }).value
+    expect(value.contextWindowOverrides).toEqual({})
+    // Back to the catalog window rather than the deleted override.
+    expect(value.models.find((model) => model.id === 'claude-sonnet-4-6')!.contextWindow).toBe(1_000_000)
+  })
+
+  it('writes one override and deletes another in the same patch', async () => {
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'k' })
+    await modelSettings.updateSettings({ contextWindowOverrides: { 'claude-sonnet-4-6': 400_000, 'gpt-5.6-sol': 900_000 } })
+
+    const { response, captured } = fakeExchange()
+    await handler(
+      fakeRequest({
+        url: '/command-code/api/settings',
+        method: 'POST',
+        body: { contextWindowOverrides: { 'claude-sonnet-4-6': null, 'gpt-5.6-sol': 600_000 } },
+      }),
+      response,
+    )
+
+    expect(captured.status).toBe(200)
+    expect((await modelSettings.read()).contextWindowOverrides).toEqual({ 'gpt-5.6-sol': 600_000 })
+    const value = (captured.body as { value: { contextWindowOverrides: Record<string, number>; models: Array<{ id: string; contextWindow: number }> } }).value
+    expect(value.contextWindowOverrides).toEqual({ 'gpt-5.6-sol': 600_000 })
+    expect(value.models.find((model) => model.id === 'claude-sonnet-4-6')!.contextWindow).toBe(1_000_000)
+    expect(value.models.find((model) => model.id === 'gpt-5.6-sol')!.contextWindow).toBe(600_000)
+  })
+
+  it('deletes through the settings namespace without persisting a null', async () => {
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'k' })
+    // A harness with the register seam stores into the schema-validated
+    // namespace, which only accepts numbers.
+    let value: Record<string, unknown> = { contextWindowOverrides: { 'claude-sonnet-4-6': 400_000 } }
+    const preferences = registerCommandCodePreferenceStore({
+      register(_namespace: unknown, schema: (input: unknown) => Record<string, unknown>) {
+        value = schema(value)
+        return {
+          get: () => value,
+          update: async (patch: object) => { value = schema({ ...value, ...patch }) },
+        }
+      },
+    }, modelSettings)
+    const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    const ctx = { webServer: { register(route: typeof routes[number]) { routes.push(route); return () => undefined } } } as unknown as Context
+    registerCommandCodeRoutes(ctx, store, modelSettings, preferences)
+
+    const { response, captured } = fakeExchange()
+    await routes[0]!.handler(
+      fakeRequest({
+        url: '/command-code/api/models',
+        method: 'POST',
+        body: { contextWindowOverrides: { 'claude-sonnet-4-6': null, 'gpt-5.6-sol': 600_000 } },
+      }),
+      response,
+    )
+
+    expect(captured.status).toBe(200)
+    expect(preferences.status().contextWindowOverrides).toEqual({ 'gpt-5.6-sol': 600_000 })
+    // The fallback document is written in the background; it must merge the
+    // same way, so the deleted key cannot survive on disk as a null.
+    await vi.waitFor(async () => {
+      const written = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as { contextWindowOverrides: unknown }
+      expect(written.contextWindowOverrides).toEqual({ 'gpt-5.6-sol': 600_000 })
+    })
   })
 })

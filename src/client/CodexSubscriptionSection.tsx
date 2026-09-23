@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CodexReasoningSummary, CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
-import { CODEX_MODEL_CATALOG, CONFIGURABLE_CONTEXT_MODEL_IDS, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { AccountPoolSection, type AccountPoolLabels } from './common/AccountPoolSection.tsx'
 import type { AccountRotationStrategy } from '../shared/account-pool-contracts.ts'
@@ -160,7 +161,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     await updatePreferences({ visibleModelIds })
   }
 
-  const updateContextWindow = async (model: (typeof CONFIGURABLE_CONTEXT_MODEL_IDS)[number]): Promise<void> => {
+  const updateContextWindow = async (model: CodexModelId): Promise<void> => {
     const current = status?.preferences.contextWindowOverrides[model] ?? resolveCodexCatalogEntry(model).contextWindow
     const parsed = parseCapacity(contextDrafts[model] ?? String(current), contextWindowLimitForModel(model))
     if (parsed === null) {
@@ -169,6 +170,21 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     }
     await updatePreferences({ contextWindowOverrides: { [model]: parsed } })
     setContextDrafts((drafts) => ({ ...drafts, [model]: String(parsed) }))
+  }
+
+  /** Drop one model's override; the row falls back to the catalog value. */
+  const resetContextWindow = async (model: CodexModelId): Promise<void> => {
+    await updatePreferences({ contextWindowOverrides: { [model]: null } })
+    setContextDrafts((drafts) => ({ ...drafts, [model]: formatCapacity(resolveCodexCatalogEntry(model).contextWindow) }))
+  }
+
+  /** Clear every stored override, including models the picker no longer shows. */
+  const resetAllContextWindows = async (): Promise<void> => {
+    const models = Object.keys(status?.preferences.contextWindowOverrides ?? {})
+    if (models.length === 0) return
+    if (!window.confirm(t('contextWindowResetAllConfirm'))) return
+    await updatePreferences({ contextWindowOverrides: Object.fromEntries(models.map((model) => [model, null])) })
+    setContextDrafts({})
   }
 
   const updateCustomProxyUrl = async (): Promise<void> => {
@@ -259,6 +275,9 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const storage = status?.storage
   const login = status?.login
   const visibleModelIds = preferences?.visibleModelIds ?? DEFAULT_VISIBLE_CODEX_MODEL_IDS
+  // Only checked models get a context row, in catalog order.
+  const contextModels = CODEX_MODEL_CATALOG.filter((entry) => visibleModelIds.some((id) => id === entry.id))
+  const overrideCount = Object.keys(preferences?.contextWindowOverrides ?? {}).length
   return <section className="dsha-page" aria-labelledby="dsh-codex-title">
     <header>
       <h2 id="dsh-codex-title" className="dsh-codex-title">{t('title')}</h2>
@@ -473,12 +492,14 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             <strong>{t('contextWindows')}</strong>
             <p className="dsha-muted">{t('contextWindowsHint')}</p>
           </div>
-          {CONFIGURABLE_CONTEXT_MODEL_IDS.map((model) => {
-            const entry = resolveCodexCatalogEntry(model)
+          {contextModels.length === 0 ? <p className="dsha-muted">{t('contextWindowsNoneEnabled')}</p> : null}
+          {contextModels.map((entry) => {
+            const model = entry.id
             const fallback = preferences?.contextWindowOverrides?.[model] ?? entry.contextWindow
             const draft = contextDrafts[model]
             const parsedDraft = draft === undefined ? fallback : parseCapacity(draft, contextWindowLimitForModel(model))
             const dirty = draft !== undefined && parsedDraft !== fallback
+            const overridden = preferences?.contextWindowOverrides?.[model] !== undefined
             const inputId = `dsh-codex-context-${model}`
             return <div className="dsha-context-row" key={model}>
               <label htmlFor={inputId}>{entry.name}</label>
@@ -493,9 +514,13 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
                 }} />
                 <small>{t('tokens')}</small>
                 <button className="dsha-context-save" type="button" data-model={model} aria-label={entry.name + ' ' + t('saveContextWindow')} disabled={busy !== null || !dirty} onClick={() => void updateContextWindow(model)}>{t('save')}</button>
+                <button className="dsha-context-save dsha-context-reset" type="button" data-reset-model={model} aria-label={entry.name + ' ' + t('contextWindowReset')} disabled={busy !== null || !overridden} onClick={() => void resetContextWindow(model)}>{t('contextWindowReset')}</button>
               </span>
             </div>
           })}
+          <div className="dsha-actions">
+            <Button disabled={busy !== null || overrideCount === 0} onClick={resetAllContextWindows}>{t('contextWindowResetAll')}</Button>
+          </div>
         </div>
         <label className="dsh-codex-check">
           <input type="checkbox" checked={preferences?.fastMode === true} disabled={busy !== null} onChange={(event) => updatePreferences({ fastMode: event.currentTarget.checked })} />

@@ -55,14 +55,16 @@ function createPreferenceStore(initial: unknown = {}) {
 }
 
 describe('subscription preferences', () => {
-  it('fills GPT-6 defaults in older settings and preserves saved model choices and contexts', async () => {
+  it('keeps the saved model choices and context overrides without seeding new keys', async () => {
     const store = createPreferenceStore({
       visibleModelIds: ['gpt-5.6-sol'],
       contextWindowOverrides: { 'gpt-5.6-sol': 512_000 },
     })
+    // An absent key is what "no override" looks like now, so an older document
+    // keeps exactly the overrides it already had.
     expect(store.status()).toMatchObject({
       visibleModelIds: ['gpt-5.6-sol'],
-      contextWindowOverrides: { 'gpt-6-astra': 384_000, 'gpt-6-sol': 384_000, 'gpt-6-luna': 384_000, 'gpt-5.6-sol': 512_000 },
+      contextWindowOverrides: { 'gpt-5.6-sol': 512_000 },
     })
     expect(await store.update({
       visibleModelIds: ['gpt-6-astra', 'gpt-5.6-sol'],
@@ -73,12 +75,32 @@ describe('subscription preferences', () => {
     })
   })
 
+  it('clears one override back to the absent state a restored default leaves behind', async () => {
+    const store = createPreferenceStore({ contextWindowOverrides: { 'gpt-6-astra': 512_000 } })
+    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(512_000)
+    const cleared = await store.update({ contextWindowOverrides: { 'gpt-6-astra': null } })
+    expect(cleared.contextWindowOverrides).toEqual({})
+    // Clearing one key leaves the others alone.
+    const mixed = await store.update({ contextWindowOverrides: { 'gpt-5.6-sol': 300_000, 'gpt-6-sol': 400_000 } })
+    expect(mixed.contextWindowOverrides).toEqual({ 'gpt-5.6-sol': 300_000, 'gpt-6-sol': 400_000 })
+    const partial = await store.update({ contextWindowOverrides: { 'gpt-5.6-sol': null, 'gpt-6-luna': 500_000 } })
+    expect(partial.contextWindowOverrides).toEqual({ 'gpt-6-sol': 400_000, 'gpt-6-luna': 500_000 })
+  })
+
+  it('accepts an override for every catalog model, not just the default-visible ones', async () => {
+    const store = createPreferenceStore()
+    expect(await store.update({ contextWindowOverrides: { 'gpt-5.4': 900_000, 'gpt-5.3-codex-spark': 200_000 } })).toMatchObject({
+      contextWindowOverrides: { 'gpt-5.4': 900_000, 'gpt-5.3-codex-spark': 200_000 },
+    })
+  })
+
   it('includes the GPT-6 family for new settings and rejects an oversized persisted or updated context', async () => {
     const store = createPreferenceStore()
     expect(store.status().visibleModelIds).toContain('gpt-6-astra')
     expect(() => createPreferenceStore({ contextWindowOverrides: { 'gpt-6-astra': 872_001 } })).toThrow()
     await expect(store.update({ contextWindowOverrides: { 'gpt-6-astra': 1_000_000 } })).rejects.toThrow()
-    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(384_000)
+    // A rejected patch leaves nothing behind: no override, not the catalog value.
+    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBeUndefined()
   })
 
   it('allows disabling provider and setting visibleModelIds to empty array', async () => {
@@ -127,7 +149,7 @@ describe('subscription preferences', () => {
     const store = registerPreferenceStore(undefined)
     await store.hydrate()
     await expect(store.update({ contextWindowOverrides: { 'gpt-6-astra': 1_000_000 } })).rejects.toThrow()
-    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(384_000)
+    expect(store.status().contextWindowOverrides['gpt-6-astra']).toBeUndefined()
   })
 
   it('falls back to the shipped defaults for a corrupt or invalid fallback document', async () => {
@@ -140,7 +162,7 @@ describe('subscription preferences', () => {
     await fsp.writeFile(preferencesPath(), JSON.stringify({ contextWindowOverrides: { 'gpt-6-astra': 872_001 } }), 'utf8')
     const rejected = registerPreferenceStore(undefined)
     await rejected.hydrate()
-    expect(rejected.status().contextWindowOverrides['gpt-6-astra']).toBe(384_000)
+    expect(rejected.status().contextWindowOverrides).toEqual({})
     expect(rejected.status().visibleModelIds).toContain('gpt-6-astra')
   })
 

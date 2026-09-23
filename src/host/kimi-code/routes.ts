@@ -18,6 +18,7 @@ import {
   type KimiCodePreferenceStore,
 } from './token-store.ts'
 import { KimiCodeAccountPool } from './account-pool.ts'
+import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import {
   accountFromCredentials,
   buildModelOptions,
@@ -385,9 +386,12 @@ export function registerKimiCodeRoutes(
             patch.enabledModelIds = body.enabledModelIds.filter((id): id is string => typeof id === 'string')
           }
           if (typeof body.contextWindowOverrides === 'object' && body.contextWindowOverrides !== null) {
-            const overrides: Record<string, number> = {}
+            const overrides: ContextWindowOverridePatch = {}
             for (const [key, raw] of Object.entries(body.contextWindowOverrides as Record<string, unknown>)) {
-              if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
+              // `null` is the card's "restore the catalog default": it has to
+              // survive normalization so the store can delete the key.
+              if (raw === null) overrides[key] = null
+              else if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
             }
             patch.contextWindowOverrides = overrides
           }

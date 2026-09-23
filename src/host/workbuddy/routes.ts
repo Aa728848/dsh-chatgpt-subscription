@@ -45,6 +45,7 @@ import type {
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { beginWebLogin, getWebLoginStatus, resetWebLogin } from './oauth.ts'
 import type { WorkBuddyAccountPool } from './account-pool.ts'
+import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 
 /** Membership test for one posted reasoning level; the set is catalog-wide. */
 function isWorkBuddyReasoningEffort(value: unknown): value is (typeof WORKBUDDY_REASONING_EFFORTS)[number] {
@@ -499,9 +500,12 @@ export function registerWorkBuddyRoutes(
             patch.enabledModelIds = body.enabledModelIds.filter((id): id is string => typeof id === 'string')
           }
           if (typeof body.contextWindowOverrides === 'object' && body.contextWindowOverrides !== null) {
-            const overrides: Record<string, number> = {}
+            const overrides: ContextWindowOverridePatch = {}
             for (const [key, raw] of Object.entries(body.contextWindowOverrides as Record<string, unknown>)) {
-              if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
+              // `null` is the card's "restore the catalog default": it has to
+              // survive normalization so the store can delete the key.
+              if (raw === null) overrides[key] = null
+              else if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
             }
             patch.contextWindowOverrides = overrides
           }

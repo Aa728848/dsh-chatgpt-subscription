@@ -46,14 +46,11 @@ export type SearchProviderPreference = 'dsh' | 'codex'
 export type CodexOutputVerbosity = 'low' | 'medium' | 'high'
 export type CodexReasoningSummary = 'auto' | 'concise' | 'detailed' | 'none'
 
-export interface CodexContextWindowOverridesDto {
-  'gpt-6-astra': number
-  'gpt-6-sol': number
-  'gpt-6-luna': number
-  'gpt-5.6-sol': number
-  'gpt-5.6-terra': number
-  'gpt-5.6-luna': number
-}
+/** Persisted context window overrides, keyed by Codex model id. A model absent here uses its catalog default. */
+export type CodexContextWindowOverridesDto = Record<string, number>
+
+/** An override patch: a number sets one, `null` clears it back to the catalog default. */
+export type CodexContextWindowOverridesUpdateDto = Record<string, number | null>
 
 export type ProxyMode = 'auto' | 'custom' | 'direct'
 
@@ -79,7 +76,7 @@ export interface SubscriptionPreferencesUpdateDto {
   reasoningSummary?: CodexReasoningSummary | null
   visibleModelIds?: string[]
   searchProvider?: SearchProviderPreference
-  contextWindowOverrides?: Partial<CodexContextWindowOverridesDto>
+  contextWindowOverrides?: CodexContextWindowOverridesUpdateDto
   proxyMode?: ProxyMode
   customProxyUrl?: string | null
 }
