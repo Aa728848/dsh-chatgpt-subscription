@@ -5,12 +5,29 @@ import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { registerKimiCodeRoutes } from '../src/host/kimi-code/routes.ts'
-import { FileCredentialStore, FileModelSettingsStore, registerKimiCodePreferenceStore } from '../src/host/kimi-code/token-store.ts'
+import { FileCredentialStore, FileModelSettingsStore, registerKimiCodePreferenceStore, type KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/kimi-code/client.ts'
 import { resetRefreshRejections } from '../src/host/kimi-code/oauth.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+}
+
+/**
+ * In-memory encrypted backend for the stored credential.
+ *
+ * The platform backends are not interchangeable under CI: Windows DPAPI and the
+ * macOS Keychain both work headlessly, but the Linux Secret Service needs
+ * `secret-tool` and an unlocked keyring that `ubuntu-latest` does not have, so
+ * its `load()` rejects. Without this, the routes that read the store for real —
+ * the model toggle below is the one — failed on the host keyring being absent
+ * rather than on route behaviour.
+ */
+class MemoryCredentialBackend {
+  private data: KimiCodeCredentials | null = null
+  async load() { return this.data === null ? null : JSON.parse(JSON.stringify(this.data)) as KimiCodeCredentials }
+  async save(data: KimiCodeCredentials) { this.data = JSON.parse(JSON.stringify(data)) as KimiCodeCredentials }
+  async clear() { this.data = null }
 }
 
 function jwt(payload: Record<string, unknown>): string {
@@ -98,7 +115,7 @@ describe('Kimi Code settings routes', () => {
     clearCachedCatalog()
     clearCachedQuota()
     resetRefreshRejections()
-    store = new FileCredentialStore(tmp('kc-cred'))
+    store = new FileCredentialStore(tmp('kc-cred'), new MemoryCredentialBackend())
     modelSettings = new FileModelSettingsStore(tmp('kc-models'))
     const routes: Array<{ path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
     const ctx = {
