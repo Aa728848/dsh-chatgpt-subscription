@@ -28,6 +28,7 @@ import type {
   KimiCodeUsageWindow,
   KimiCodeWire,
 } from '../../shared/kimi-code-contracts.ts'
+import { rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
 /** Endpoint suffixes on the coding API base. */
 export const MODELS_PATH = '/models'
@@ -181,9 +182,13 @@ interface CatalogCache {
 }
 
 let catalogCache: CatalogCache | null = null
+// Set once per process: the persisted snapshot was consulted, so a failed read
+// must not re-read the file on every cache miss.
+let catalogSnapshotLoaded = false
 
 export function clearCachedCatalog(): void {
   catalogCache = null
+  catalogSnapshotLoaded = false
 }
 
 export function getCachedCatalog(): KimiCodeCatalogModel[] {
@@ -257,7 +262,7 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
  * model. A caller that passes `accessToken` still keys the cache on the token,
  * because a different account can see a different listing.
  */
-export async function loadProviderModels(options: {
+export function loadProviderModels(options: {
   fetchFn?: typeof fetch
   store?: FileCredentialStore
   accessToken?: string
@@ -265,18 +270,57 @@ export async function loadProviderModels(options: {
   signal?: AbortSignal
   force?: boolean
 } = {}): Promise<KimiCodeCatalogModel[]> {
+  return options.force === true ? refreshProviderModels(options) : cachedOrRevalidate(options)
+}
+
+async function cachedOrRevalidate(options: {
+  fetchFn?: typeof fetch
+  store?: FileCredentialStore
+  accessToken?: string
+  region?: KimiCodeRegion
+  signal?: AbortSignal
+}): Promise<KimiCodeCatalogModel[]> {
   const region = options.region ?? await resolveRegion()
   let accessToken = options.accessToken
 
   // Serve a warm cache without touching the credential store. Only a caller
   // that already named a token can be keyed precisely; a token-free caller is
   // keyed on the region, which still cannot serve another region's listing.
-  if (options.force !== true && catalogCache !== null
+  if (catalogCache !== null
     && (accessToken === undefined
       ? catalogCache.region === region
       : catalogCache.key === `${region}:${accessToken.slice(-8)}`)
     && Date.now() - catalogCache.fetchedAt < CATALOG_CACHE_TTL_MS) {
     return catalogCache.models
+  }
+
+  // Stale-while-revalidate: an expired snapshot answers now and the refresh
+  // runs behind it. A rehydrated snapshot is stale by definition, so the same
+  // applies on the first call after a restart — the persisted listing is
+  // served immediately instead of waiting on the network (and on the
+  // credential store a live fetch would need first).
+  const warm = catalogCache !== null
+    && (accessToken === undefined
+      ? catalogCache.region === region
+      : catalogCache.key === `${region}:${accessToken.slice(-8)}`)
+  if (warm) {
+    void refreshProviderModels(options).catch(() => undefined)
+    return catalogCache!.models
+  }
+  if (!catalogSnapshotLoaded) {
+    catalogSnapshotLoaded = true
+    const rehydratedAt = await rehydrateCatalogCache(
+      'kimi-code',
+      parsePersistedCatalogModels,
+      (fetchedAt, models) => {
+        catalogCache = { fetchedAt, models, key: `${region}:persisted`, region }
+      },
+      catalogCache?.fetchedAt ?? 0,
+    )
+    if (rehydratedAt > 0) {
+      void refreshProviderModels(options).catch(() => undefined)
+      return catalogCache!.models
+    }
   }
 
   if (accessToken === undefined) {
@@ -289,10 +333,42 @@ export async function loadProviderModels(options: {
   }
 
   const cacheKey = `${region}:${accessToken.slice(-8)}`
-  if (options.force !== true && catalogCache !== null
+  if (catalogCache !== null
     && catalogCache.key === cacheKey
     && Date.now() - catalogCache.fetchedAt < CATALOG_CACHE_TTL_MS) {
     return catalogCache.models
+  }
+  return refreshProviderModels({ ...options, accessToken, region })
+}
+
+/** One in-flight, single-flighted fetch of the live listing. */
+function refreshProviderModels(options: {
+  fetchFn?: typeof fetch
+  store?: FileCredentialStore
+  accessToken?: string
+  region?: KimiCodeRegion
+  signal?: AbortSignal
+}): Promise<KimiCodeCatalogModel[]> {
+  return performListing(options)
+}
+
+async function performListing(options: {
+  fetchFn?: typeof fetch
+  store?: FileCredentialStore
+  accessToken?: string
+  region?: KimiCodeRegion
+  signal?: AbortSignal
+}): Promise<KimiCodeCatalogModel[]> {
+  const region = options.region ?? await resolveRegion()
+  let accessToken = options.accessToken
+
+  if (accessToken === undefined) {
+    if (options.store === undefined) return []
+    try {
+      accessToken = (await ensureAccessToken(options.store, { fetchFn: options.fetchFn, signal: options.signal })).accessToken
+    } catch {
+      return []
+    }
   }
 
   const response = await (options.fetchFn ?? fetch)(openAIUrl(MODELS_PATH, region), {
@@ -306,8 +382,31 @@ export async function loadProviderModels(options: {
   if (!Array.isArray(data)) throw new Error('Kimi Code model listing was not in the documented shape.')
 
   const models = data.map(parseCatalogModel).filter((model): model is KimiCodeCatalogModel => model !== undefined)
-  catalogCache = { fetchedAt: Date.now(), models, key: cacheKey, region }
+  catalogCache = { fetchedAt: Date.now(), models, key: cacheKeyOf(region, accessToken), region }
+  void writeCatalogSnapshot('kimi-code', models, catalogCache.fetchedAt)
   return models
+}
+
+function cacheKeyOf(region: KimiCodeRegion, accessToken: string): string {
+  return `${region}:${accessToken.slice(-8)}`
+}
+
+/** Shape check for a persisted snapshot.
+ *
+ * Entries are already in the parsed catalog shape, so they are accepted as
+ * they are: routing them through `parseCatalogModel` again would drop every
+ * one (that parser reads the raw listing's `context_length`, not the parsed
+ * entry's `contextWindow`). Only the identity field is checked.
+ */
+function parsePersistedCatalogModels(value: unknown): KimiCodeCatalogModel[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const models = value.filter((entry): entry is KimiCodeCatalogModel =>
+    typeof entry === 'object' && entry !== null
+    && typeof (entry as Record<string, unknown>).id === 'string'
+    && ((entry as Record<string, unknown>).id as string) !== ''
+    && typeof (entry as Record<string, unknown>).contextWindow === 'number'
+    && ((entry as Record<string, unknown>).contextWindow as number) > 0)
+  return models.length > 0 ? models : undefined
 }
 
 /** Choose the wire dialect for one model, from the live catalog when it says. */

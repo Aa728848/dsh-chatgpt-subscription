@@ -14,13 +14,15 @@
  * call with zero reads.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
   clearCachedCatalog,
   loadProviderModels,
 } from '../src/host/kimi-code/client.ts'
+import { catalogSnapshotPath } from '../src/host/common/catalog-snapshot.ts'
 import { FileCredentialStore } from '../src/host/kimi-code/token-store.ts'
 import type { KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 
@@ -64,10 +66,20 @@ function countedStore() {
   return { store, reads: () => read.mock.calls.length }
 }
 
-afterEach(() => {
+beforeEach(async () => {
+  // Other files in the same run share this file's private home; a snapshot a
+  // previous file's test wrote must never stand in here either.
+  await fs.rm(catalogSnapshotPath('kimi-code'), { force: true })
+})
+
+afterEach(async () => {
   clearCachedCatalog()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  // The persisted snapshot is part of the cache now: one test's listing must
+  // never stand in for the next, exactly like a process restart would not see
+  // it. Without this the no-store case would rehydrate the previous snapshot.
+  await fs.rm(catalogSnapshotPath('kimi-code'), { force: true })
 })
 
 describe('Kimi Code catalog caching', () => {
