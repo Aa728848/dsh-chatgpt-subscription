@@ -23,7 +23,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-const { catalogSnapshotPath, readCatalogSnapshot, writeCatalogSnapshot, rehydrateCatalogCache } = await import(
+const { catalogSnapshotName, catalogSnapshotPath, readCatalogSnapshot, writeCatalogSnapshot, rehydrateCatalogCache } = await import(
   '../src/host/common/catalog-snapshot.ts'
 )
 const commandCode = await import('../src/host/command-code/client.ts')
@@ -102,7 +102,7 @@ describe('command-code persisted catalog', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
     // The snapshot write inside loadProviderModels is fire-and-forget.
     await vi.waitFor(async () => {
-      expect((await readCatalogSnapshot('command-code', countModels))?.fetchedAt).toBeGreaterThan(0)
+      expect((await readCatalogSnapshot(catalogSnapshotName('command-code', 'prod'), countModels))?.fetchedAt).toBeGreaterThan(0)
     })
 
     // Simulate the next process: the in-memory cache starts cold again.
@@ -150,7 +150,7 @@ describe('kimi-code persisted catalog', () => {
     expect(first.map((m) => m.id)).toEqual(['k3', 'kimi-for-coding'])
     // The snapshot write inside loadProviderModels is fire-and-forget.
     await vi.waitFor(async () => {
-      expect((await readCatalogSnapshot('kimi-code', countModels))?.fetchedAt).toBeGreaterThan(0)
+      expect((await readCatalogSnapshot(catalogSnapshotName('kimi-code', 'global'), countModels))?.fetchedAt).toBeGreaterThan(0)
     })
 
     // Simulate the next process: no store to acquire a token from, yet the
@@ -165,6 +165,23 @@ describe('kimi-code persisted catalog', () => {
   it('returns nothing when no snapshot exists and no store is available', async () => {
     const fetchFn = vi.fn(async () => new Response('{}', { status: 500 }))
     expect(await kimi.loadProviderModels({ fetchFn, region: 'global' })).toEqual([])
+  })
+
+  it('never serves one region a snapshot fetched for another', async () => {
+    // A snapshot that exists only under the mainland-cn scope. The global
+    // caller must not be answered by it: the regions are different services,
+    // so a cn model id and context window are not a global model. Serving it
+    // also skipped the credential read that would have named the real account.
+    await writeRaw(catalogSnapshotName('kimi-code', 'mainland-cn'), {
+      fetchedAt: Date.now(),
+      models: [{ id: 'cn-only', contextWindow: 262_144 }],
+    })
+    const fetchFn = vi.fn(async () => new Response('{}', { status: 500 }))
+    expect(await kimi.loadProviderModels({ fetchFn, region: 'global' })).toEqual([])
+    // ...while its own region still rehydrates it.
+    kimi.clearCachedCatalog()
+    const sameRegion = await kimi.loadProviderModels({ fetchFn, region: 'mainland-cn' })
+    expect(sameRegion.map((m) => m.id)).toEqual(['cn-only'])
   })
 })
 
@@ -190,7 +207,7 @@ describe('workbuddy persisted catalog', () => {
     expect(first.map((m) => m.id)).toEqual(['wb-1'])
     // The snapshot write inside loadConfigCatalog is fire-and-forget.
     await vi.waitFor(async () => {
-      expect((await readCatalogSnapshot('workbuddy', countModels))?.fetchedAt).toBeGreaterThan(0)
+      expect((await readCatalogSnapshot(catalogSnapshotName('workbuddy', 'intl'), countModels))?.fetchedAt).toBeGreaterThan(0)
     })
 
     workbuddy.clearCachedCatalog()
@@ -200,14 +217,32 @@ describe('workbuddy persisted catalog', () => {
   })
 
   it('never serves one region a snapshot fetched for another', async () => {
-    await writeRaw('workbuddy', {
+    // A snapshot written under the *cn* scope, which the intl caller must not
+    // even look at: it falls back rather than offering cn-only models.
+    await writeRaw(catalogSnapshotName('workbuddy', 'cn'), {
       fetchedAt: Date.now(),
       models: [{ id: 'cn-only', name: 'CN', region: 'cn', contextWindow: 1 }],
     })
     const fetchFn = vi.fn(async () => new Response('{}', { status: 500 }))
     const result = await workbuddy.loadConfigCatalog(credentials, { fetchFn })
-    // The intl caller must not be answered by the cn snapshot: it falls back.
     expect(result).toEqual([])
+  })
+})
+
+describe('catalogSnapshotName', () => {
+  it('keeps each scope in its own file under storages', () => {
+    expect(catalogSnapshotName('kimi-code', 'global')).not.toBe(catalogSnapshotName('kimi-code', 'mainland-cn'))
+    expect(catalogSnapshotName('command-code', 'prod')).not.toBe(catalogSnapshotName('command-code', 'staging'))
+    expect(catalogSnapshotName('workbuddy', 'intl')).not.toBe(catalogSnapshotName('workbuddy', 'cn'))
+  })
+
+  it('folds a scope that could not be a file name into one that is', () => {
+    // A scope is never a path fragment: separators and traversal are folded,
+    // so no scope can write outside `storages`.
+    expect(catalogSnapshotName('kimi-code', '../evil')).toBe('kimi-code-evil')
+    expect(catalogSnapshotName('kimi-code', 'a/b')).toBe('kimi-code-a_b')
+    const path1 = catalogSnapshotPath(catalogSnapshotName('kimi-code', '../evil'))
+    expect(path.basename(path1)).toBe('kimi-code-evil-catalog.json')
   })
 })
 

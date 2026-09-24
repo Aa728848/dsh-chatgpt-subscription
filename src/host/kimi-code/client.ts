@@ -28,7 +28,7 @@ import type {
   KimiCodeUsageWindow,
   KimiCodeWire,
 } from '../../shared/kimi-code-contracts.ts'
-import { rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
+import { catalogSnapshotName, rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
 /** Endpoint suffixes on the coding API base. */
 export const MODELS_PATH = '/models'
@@ -182,13 +182,19 @@ interface CatalogCache {
 }
 
 let catalogCache: CatalogCache | null = null
-// Set once per process: the persisted snapshot was consulted, so a failed read
-// must not re-read the file on every cache miss.
-let catalogSnapshotLoaded = false
+/**
+ * Snapshot scopes already consulted in this process.
+ *
+ * One entry per region rather than a single flag: the persisted file is scoped
+ * to the region it was fetched for (see `catalogSnapshotName`), so each region
+ * consults its own file once, and a scope that has no snapshot is not re-read on
+ * every cache miss.
+ */
+const catalogSnapshotScopesLoaded = new Set<KimiCodeRegion>()
 
 export function clearCachedCatalog(): void {
   catalogCache = null
-  catalogSnapshotLoaded = false
+  catalogSnapshotScopesLoaded.clear()
 }
 
 export function getCachedCatalog(): KimiCodeCatalogModel[] {
@@ -307,10 +313,16 @@ async function cachedOrRevalidate(options: {
     void refreshProviderModels(options).catch(() => undefined)
     return catalogCache!.models
   }
-  if (!catalogSnapshotLoaded) {
-    catalogSnapshotLoaded = true
+  if (!catalogSnapshotScopesLoaded.has(region)) {
+    catalogSnapshotScopesLoaded.add(region)
+    // The snapshot is scoped to the region it was fetched for, and the cache
+    // entry it produces is keyed on this caller's own region rather than on a
+    // token that was never read. Reading the shared file here is what put one
+    // region's models and context windows behind another region's credential:
+    // a mainland-cn listing answered a global caller because the snapshot was
+    // written and read under one name.
     const rehydratedAt = await rehydrateCatalogCache(
-      'kimi-code',
+      catalogSnapshotName('kimi-code', region),
       parsePersistedCatalogModels,
       (fetchedAt, models) => {
         catalogCache = { fetchedAt, models, key: `${region}:persisted`, region }
@@ -318,7 +330,7 @@ async function cachedOrRevalidate(options: {
       catalogCache?.fetchedAt ?? 0,
     )
     if (rehydratedAt > 0) {
-      void refreshProviderModels(options).catch(() => undefined)
+      void refreshProviderModels({ ...options, region }).catch(() => undefined)
       return catalogCache!.models
     }
   }
@@ -383,7 +395,7 @@ async function performListing(options: {
 
   const models = data.map(parseCatalogModel).filter((model): model is KimiCodeCatalogModel => model !== undefined)
   catalogCache = { fetchedAt: Date.now(), models, key: cacheKeyOf(region, accessToken), region }
-  void writeCatalogSnapshot('kimi-code', models, catalogCache.fetchedAt)
+  void writeCatalogSnapshot(catalogSnapshotName('kimi-code', region), models, catalogCache.fetchedAt)
   return models
 }
 

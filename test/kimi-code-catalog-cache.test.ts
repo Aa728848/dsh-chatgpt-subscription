@@ -22,7 +22,7 @@ import {
   clearCachedCatalog,
   loadProviderModels,
 } from '../src/host/kimi-code/client.ts'
-import { catalogSnapshotPath } from '../src/host/common/catalog-snapshot.ts'
+import { catalogSnapshotName, catalogSnapshotPath } from '../src/host/common/catalog-snapshot.ts'
 import { FileCredentialStore } from '../src/host/kimi-code/token-store.ts'
 import type { KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 
@@ -66,10 +66,15 @@ function countedStore() {
   return { store, reads: () => read.mock.calls.length }
 }
 
+/** The snapshot file this file's tests write: scoped to their region. */
+function snapshotFile(): string {
+  return catalogSnapshotPath(catalogSnapshotName('kimi-code', 'mainland-cn'))
+}
+
 beforeEach(async () => {
   // Other files in the same run share this file's private home; a snapshot a
   // previous file's test wrote must never stand in here either.
-  await fs.rm(catalogSnapshotPath('kimi-code'), { force: true })
+  await fs.rm(snapshotFile(), { force: true })
 })
 
 afterEach(async () => {
@@ -84,7 +89,7 @@ afterEach(async () => {
   // to settle first — otherwise it lands after this cleanup and recreates the
   // file the next test is asserting is absent.
   await new Promise((resolve) => setTimeout(resolve, 20))
-  await fs.rm(catalogSnapshotPath('kimi-code'), { force: true })
+  await fs.rm(snapshotFile(), { force: true })
 })
 
 describe('Kimi Code catalog caching', () => {

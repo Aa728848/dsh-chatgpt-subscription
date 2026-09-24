@@ -26,6 +26,29 @@ export function catalogSnapshotPath(name: string): string {
 }
 
 /**
+ * Snapshot name for one catalog *and* one credential scope.
+ *
+ * A persisted snapshot answers before any credential is read — that is the whole
+ * point of it — so the file itself has to carry the scope it was fetched under.
+ * Otherwise the first call after a restart, for any account, is answered by
+ * whatever listing some other scope happened to persist last: a Kimi listing
+ * fetched for the mainland-cn endpoint would answer a global caller with models
+ * and context windows that region does not serve, and a Command Code listing
+ * fetched against one API environment would answer the other.
+ *
+ * The scope is part of the file name rather than of the payload because a caller
+ * that cannot name the account — the harness resolves this catalog with no token
+ * at all — still has to find the snapshot its own scope owns.
+ *
+ * Everything outside `[a-z0-9]` is folded to `_`, so no scope can escape the
+ * `storages` directory.
+ */
+export function catalogSnapshotName(base: string, scope: string): string {
+  const normalized = scope.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  return normalized === '' ? base : `${base}-${normalized}`
+}
+
+/**
  * Read the persisted snapshot for one catalog.
  *
  * Shape errors and unreadable files both return `undefined` — the caller keeps

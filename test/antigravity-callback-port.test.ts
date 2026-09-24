@@ -17,6 +17,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import http, { createServer } from 'node:http'
+import { DEFAULT_CALLBACK_PORT } from '../src/host/antigravity/port-constants.ts'
 
 const { startCallbackServer, resolveCallbackPort, redirectUri, callbackPort } = await import(
   '../src/host/antigravity/oauth.ts'
@@ -144,5 +145,63 @@ describe('redirect URI and callback server agreement', () => {
     const uri = new URL(redirectUri())
     expect(Number(uri.port)).toBe(callbackPort())
     expect(uri.pathname).toBe('/oauth-callback')
+  })
+
+  it('probes on the host the listener binds, and skips a port free only elsewhere', async () => {
+    // 127.0.0.1 and ::1 are different bind addresses. The listener binds
+    // `localhost`, so a port free on the IPv4 loopback but taken on `::1`
+    // must be skipped: probing 127.0.0.1 would call it usable and the real
+    // listen would then fail with the EADDRINUSE/EACCES this probe exists to
+    // avoid.
+    const blocker = createServer()
+    const bound = await new Promise<number>((resolve, reject) => {
+      blocker.once('error', reject)
+      blocker.listen(DEFAULT_CALLBACK_PORT, '::1', () => {
+        const address = blocker.address()
+        resolve(address !== null && typeof address === 'object' ? address.port : 0)
+      })
+    })
+    if (bound !== DEFAULT_CALLBACK_PORT) {
+      // No IPv6 loopback on this machine: the behavior under test cannot be
+      // set up, and the other cases already cover the probe.
+      await close(blocker)
+      return
+    }
+    try {
+      // Probing the IPv4 literal would wrongly accept the blocked default.
+      expect(await resolveCallbackPort(2, '127.0.0.1')).toBe(DEFAULT_CALLBACK_PORT)
+      // Probing the host the listener actually uses skips it.
+      expect(await resolveCallbackPort(2, '::1')).toBe(DEFAULT_CALLBACK_PORT + 1)
+    } finally {
+      await close(blocker)
+    }
+  })
+
+  it('brackets an IPv6 callback host in the redirect URI', () => {
+    // `http://::1:51121/oauth-callback` is not a parseable URL, so the
+    // provider could never receive a usable redirect URI.
+    const uri = new URL(redirectUri(51121, '::1'))
+    expect(uri.hostname).toBe('[::1]')
+    expect(uri.port).toBe('51121')
+    expect(uri.pathname).toBe('/oauth-callback')
+  })
+
+  it('binds the listener on the configured callback host', async () => {
+    process.env.DSH_ANTIGRAVITY_CALLBACK_HOST = '::1'
+    try {
+      const { server, callbackUrl, waitForCode } = await startCallbackServer('state-v6')
+      try {
+        const address = server.address()
+        const port = address !== null && typeof address === 'object' ? address.port : 0
+        // The URI carries the port the listener really bound, bracketed.
+        expect(new URL(callbackUrl).hostname).toBe('[::1]')
+        expect(Number(new URL(callbackUrl).port)).toBe(port)
+      } finally {
+        server.close()
+        void waitForCode().catch(() => undefined)
+      }
+    } finally {
+      delete process.env.DSH_ANTIGRAVITY_CALLBACK_HOST
+    }
   })
 })
