@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { isSameOriginMutation } from '../common/same-origin.ts'
+import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FALLBACK_MODELS, PROVIDER_ID, PROVIDER_NAME, QUOTA_CACHE_TTL_MS, resolveApiEnv } from './types.ts'
 import {
@@ -240,6 +241,10 @@ export function registerCommandCodeRoutes(
       ?? data?.accounts[0]?.id
   }
 
+  // One per registration: a background refresh belongs to the line this route
+  // serves, and the flag it reports must not leak between instances.
+  const quotaRefresh = new QuotaRefresh()
+
   return ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -253,13 +258,19 @@ export function registerCommandCodeRoutes(
           if (method !== 'GET') return sendMethodNotAllowed(response)
           const credentials = await store.read()
           const targetId = await activeAccountId()
+          // `getCachedQuotaFor` is account-keyed, so an absent value means either
+          // "nothing yet" or "another account's snapshot" — both must be fetched
+          // before the card renders. Only an aged snapshot of the same account
+          // may answer now and refresh behind it.
           const cached = getCachedQuotaFor(targetId)
           if ((credentials !== null || targetId !== undefined)
             && (cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
-            await fetchAccountQuota(quotaStore, fetchFn, false, targetId).catch(() => undefined)
+            const refresh = (): Promise<unknown> => fetchAccountQuota(quotaStore, fetchFn, false, targetId)
+            if (cached === undefined) await quotaRefresh.run(refresh)
+            else quotaRefresh.start(refresh)
           }
           const value = await readStatus()
-          return sendJson(response, 200, { ok: true, value })
+          return sendJson(response, 200, { ok: true, value: { ...value, quotaRefreshing: quotaRefresh.refreshing } })
         }
 
         if (path === 'login') {

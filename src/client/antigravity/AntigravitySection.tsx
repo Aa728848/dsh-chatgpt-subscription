@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   AccountRotationStrategy,
   AntigravityModelOption,
   AntigravityWebStatus,
 } from '../../shared/antigravity-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import { zh } from './locales.ts'
 
 const API = '/antigravity/api'
@@ -88,6 +89,9 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
 
+  /** Follow-up poll owed while the host refreshes the quota behind an answer. */
+  const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
+
   const t = zh
 
   const notifyChange = useCallback(() => {
@@ -106,6 +110,10 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
       const data = await fetchApi<AntigravityWebStatus>('/status')
       setStatus(data)
       setContextDrafts(contextDraftsFor(data))
+      // An answer that refreshed the quota behind itself is followed up shortly,
+      // so the fresh numbers land without waiting for the next poll.
+      quotaFollowUp.current ??= createQuotaFollowUp()
+      quotaFollowUp.current.observe(data.quotaRefreshing === true, () => { void loadStatus(true) })
     } catch (err) {
       if (!quiet) setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -123,6 +131,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     return () => {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
+      quotaFollowUp.current?.cancel()
     }
   }, [loadStatus])
 

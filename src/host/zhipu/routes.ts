@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { isSameOriginMutation } from '../common/same-origin.ts'
+import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   CHAT_PATH,
@@ -233,6 +234,10 @@ export function registerZhipuRoutes(
   const readStatus = (quotaError: string | null = null): Promise<ZhipuWebStatus> =>
     getZhipuWebStatus(store, modelSettings, preferences, options, quotaError)
 
+  // One per registration: a background refresh belongs to the line this route
+  // serves, and the flag it reports must not leak between instances.
+  const quotaRefresh = new QuotaRefresh()
+
   return ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -250,20 +255,23 @@ export function registerZhipuRoutes(
           const stale = cached === undefined
             || cached.account.id !== accountId
             || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS
-          let quotaError: string | null = null
-          // The status route refreshes a stale quota cache; a failure is
-          // reported alongside the status rather than failing the whole read, so
-          // the card can show why the meters are missing.
+          const accountMatches = cached !== undefined && cached.account.id === accountId
+          // A failure is reported alongside the status rather than failing the
+          // whole read, so the card can show why the meters are missing. A
+          // snapshot of the same account that has merely aged answers now and
+          // refreshes behind it; a missing or other-account snapshot is fetched
+          // first, because the card has nothing correct to render without it.
           if (credentials !== null && stale) {
-            if (cached !== undefined && cached.account.id !== accountId) clearCachedQuota()
-            try {
-              await fetchAccountQuota(credentials, { fetchFn })
-            } catch (error) {
-              quotaError = error instanceof Error ? error.message : String(error)
-            }
+            if (!accountMatches) clearCachedQuota()
+            const refresh = (): Promise<unknown> => fetchAccountQuota(credentials, { fetchFn })
+            if (accountMatches) quotaRefresh.start(refresh)
+            else await quotaRefresh.run(refresh)
           }
-          const value = await readStatus(quotaError)
-          return sendJson(response, 200, { ok: true, value })
+          const value = await readStatus(quotaRefresh.lastError())
+          return sendJson(response, 200, {
+            ok: true,
+            value: { ...value, quotaRefreshing: quotaRefresh.refreshing },
+          })
         }
 
         /**

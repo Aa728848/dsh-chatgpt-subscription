@@ -10,6 +10,7 @@ import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts
 import { zh } from './locales.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { accountPoolZh, type AccountPoolLabels } from '../common/account-pool-labels.ts'
+import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import type { WorkBuddyAccountSummaryDto } from '../../shared/workbuddy-contracts.ts'
 
@@ -241,6 +242,8 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
   const [loginProgress, setLoginProgress] = useState<string | null>(null)
   const loginIntervalRef = useRef<number | null>(null)
   const loginTimeoutRef = useRef<number | null>(null)
+  /** Follow-up poll owed while the host refreshes the quota behind an answer. */
+  const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
 
@@ -276,6 +279,10 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
       setStatus(normalized)
       setStatusFailed(false)
       setContextDrafts(contextDraftsFor(normalized))
+      // An answer that refreshed the quota behind itself is followed up shortly,
+      // so the fresh numbers land without waiting for the next poll.
+      quotaFollowUp.current ??= createQuotaFollowUp()
+      quotaFollowUp.current.observe(data.quotaRefreshing === true, () => { void loadStatus(true) })
     } catch (err) {
       setStatusFailed(true)
       if (!quiet) setError(err instanceof Error ? err.message : String(err))
@@ -292,6 +299,7 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
       document.removeEventListener('visibilitychange', refreshWhenVisible)
+      quotaFollowUp.current?.cancel()
       if (loginIntervalRef.current !== null) window.clearInterval(loginIntervalRef.current)
       if (loginTimeoutRef.current !== null) window.clearTimeout(loginTimeoutRef.current)
     }

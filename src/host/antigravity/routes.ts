@@ -5,6 +5,7 @@ import { AccountPoolStore } from './account-pool.ts'
 import { beginWebLogin, getWebLoginStatus } from './oauth.ts'
 import { ANTIGRAVITY_QUOTA_CACHE_TTL_MS, clearCachedQuota, fetchAccountQuota, getCachedQuota } from './client.ts'
 import { MODELS } from './types.ts'
+import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { AntigravityModelOption, AntigravityWebStatus } from '../../shared/antigravity-contracts.ts'
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -87,6 +88,9 @@ export function registerAntigravityRoutes(
   fetchFn: typeof fetch = fetch,
   accountPool = new AccountPoolStore(undefined, undefined, store),
 ): () => void {
+  // One per registration: a background refresh belongs to the line this route
+  // serves, and the flag it reports must not leak between instances.
+  const quotaRefresh = new QuotaRefresh()
   return ctx.webServer.register({
     kind: 'prefix',
     path: '/antigravity/api',
@@ -100,11 +104,16 @@ export function registerAntigravityRoutes(
           const credentials = await store.read()
           const authenticated = !!(credentials?.access || credentials?.access_token)
           const cached = getCachedQuota()
+          // A snapshot that exists answers now and refreshes behind it; only a
+          // missing one is worth waiting for, because the card has nothing to
+          // render without it.
           if (authenticated && (!cached || Date.now() - (cached.fetchedAt || 0) > ANTIGRAVITY_QUOTA_CACHE_TTL_MS)) {
-            await fetchAccountQuota(store, modelSettings, fetchFn).catch(() => undefined)
+            const refresh = (): Promise<unknown> => fetchAccountQuota(store, modelSettings, fetchFn)
+            if (cached === undefined) await quotaRefresh.run(refresh)
+            else quotaRefresh.start(refresh)
           }
           const value = await getAntigravityWebStatus(store, modelSettings, preferences, accountPool)
-          return sendJson(response, 200, { ok: true, value })
+          return sendJson(response, 200, { ok: true, value: { ...value, quotaRefreshing: quotaRefresh.refreshing } })
         }
 
         if (path === 'login' || path === 'accounts/login') {

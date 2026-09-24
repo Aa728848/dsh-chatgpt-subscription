@@ -49,6 +49,16 @@ export interface UsageServiceOptions {
   now?: () => number
 }
 
+/** How one status read may treat a snapshot that has aged past its TTL. */
+export interface UsageStatusOptions {
+  /**
+   * Answer from an existing snapshot and refresh behind it, instead of waiting
+   * for the upstream request. A caller that must not show aged numbers — or has
+   * no snapshot to show — leaves this off.
+   */
+  backgroundRefresh?: boolean
+}
+
 export class UsageService {
   private readonly fetchFn: FetchLike
   private readonly now: () => number
@@ -75,7 +85,7 @@ export class UsageService {
     this.now = options.now ?? Date.now
   }
 
-  async status(authenticated: boolean, force = false): Promise<QuotaStatusDto> {
+  async status(authenticated: boolean, force = false, options: UsageStatusOptions = {}): Promise<QuotaStatusDto> {
     if (!authenticated) return { state: 'signed-out', ...EMPTY_USAGE, fetchedAt: null, stale: false }
     const now = this.now()
 
@@ -123,11 +133,40 @@ export class UsageService {
     if (now < this.blockedUntil) {
       return this.failure({ code: 'rate-limited', message: 'Quota refresh is temporarily rate limited.' })
     }
+    // A stale snapshot that exists answers now, with the refresh running behind
+    // it. Waiting on the upstream request here is what made every tab open after
+    // the TTL take 1-3 s, while the card only ever needed a value it already
+    // had; the client asks again shortly so the refreshed snapshot still lands
+    // in the UI.
+    if (options.backgroundRefresh === true && this.cache !== null) {
+      this.startBackgroundRefresh(credentials, accountKey)
+      return this.fromCache(true)
+    }
     if (this.inFlight !== null) return this.inFlight
     this.inFlight = this.refreshUpstream(credentials, accountKey).finally(() => {
       this.inFlight = null
     })
     return this.inFlight
+  }
+
+  /** Whether a quota refresh is running, so a caller can ask again when it lands. */
+  get refreshing(): boolean {
+    return this.inFlight !== null
+  }
+
+  /**
+   * Refresh behind an answer that has already been given.
+   *
+   * The rejection is absorbed here: this refresh has no caller to receive it,
+   * and {@link fromCache} keeps serving the snapshot it failed to replace.
+   */
+  private startBackgroundRefresh(credentials: StoredOAuthCredentials, accountKey: string): void {
+    if (this.inFlight !== null) return
+    const task = this.refreshUpstream(credentials, accountKey).finally(() => {
+      if (this.inFlight === task) this.inFlight = null
+    })
+    this.inFlight = task
+    void task.catch(() => undefined)
   }
 
   invalidate(): void {

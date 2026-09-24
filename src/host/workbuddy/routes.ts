@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { isSameOriginMutation } from '../common/same-origin.ts'
+import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   CHAT_PATH,
@@ -249,6 +250,9 @@ export function registerWorkBuddyRoutes(
   options: WorkBuddyStatusOptions = {},
 ): () => void {
   const fetchFn = options.fetchFn ?? fetch
+  // One per registration: a background refresh belongs to the line this route
+  // serves, and the flag it reports must not leak between instances.
+  const quotaRefresh = new QuotaRefresh()
 
   const disposeRoutes = ctx.webServer.register({
     kind: 'prefix',
@@ -268,12 +272,18 @@ export function registerWorkBuddyRoutes(
           const credentials = await store.read({ accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
           const cached = getCachedQuota()
           const quotaMatches = cached?.account.id === (credentials === null ? undefined : accountFromCredentials(credentials).id)
+          // A snapshot that belongs to another account (or none at all) must be
+          // fetched before the card renders; an aged snapshot of the same
+          // account answers now and refreshes behind it.
           if (credentials !== null && (!quotaMatches || cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
             if (!quotaMatches) clearCachedQuota()
-            await fetchAccountQuota(store, fetchFn, false, settings.selectedAccountId, settings.hiddenAccountIds).catch(() => undefined)
+            const refresh = (): Promise<unknown> =>
+              fetchAccountQuota(store, fetchFn, false, settings.selectedAccountId, settings.hiddenAccountIds)
+            if (cached === undefined || !quotaMatches) await quotaRefresh.run(refresh)
+            else quotaRefresh.start(refresh)
           }
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
-          return sendJson(response, 200, { ok: true, value })
+          return sendJson(response, 200, { ok: true, value: { ...value, quotaRefreshing: quotaRefresh.refreshing } })
         }
 
         if (path === 'accounts') {

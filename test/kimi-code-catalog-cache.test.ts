@@ -79,6 +79,11 @@ afterEach(async () => {
   // The persisted snapshot is part of the cache now: one test's listing must
   // never stand in for the next, exactly like a process restart would not see
   // it. Without this the no-store case would rehydrate the previous snapshot.
+  //
+  // The write itself is fire-and-forget on the fetch path, so a pending one has
+  // to settle first — otherwise it lands after this cleanup and recreates the
+  // file the next test is asserting is absent.
+  await new Promise((resolve) => setTimeout(resolve, 20))
   await fs.rm(catalogSnapshotPath('kimi-code'), { force: true })
 })
 

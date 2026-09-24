@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isSameOriginMutation } from '../common/same-origin.ts'
+import { QuotaRefresh } from '../common/quota-refresh.ts'
 import {
   FALLBACK_MODELS,
   PROVIDER_ID,
@@ -248,6 +249,10 @@ export function registerKimiCodeRoutes(
     return { id: target?.id, credentials: target?.credentials }
   }
 
+  // One per registration: a background refresh belongs to the line this route
+  // serves, and the flag it reports must not leak between instances.
+  const quotaRefresh = new QuotaRefresh()
+
   return ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -261,25 +266,32 @@ export function registerKimiCodeRoutes(
           if (method !== 'GET') return sendMethodNotAllowed(response)
           const poolActive = await activeAccount()
           const cached = getCachedQuotaFor(poolActive.id ?? null)
-          // A failed background refresh must not fail the status call, but it
-          // must not vanish either: the reason travels with the status so the
-          // card can show why the quota is missing instead of an empty panel.
-          let quotaError: string | null = null
+          // A failed refresh must not fail the status call, but it must not
+          // vanish either: the reason travels with the status so the card can
+          // show why the quota is missing instead of an empty panel. A snapshot
+          // that exists answers now and refreshes behind it; only a missing one
+          // is worth waiting for, because the card has nothing to render without
+          // it.
           if (poolActive.credentials !== undefined
             && (cached === null || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
-            try {
-              await fetchAccountQuota(store, {
-                fetchFn,
-                ...(accountPool === undefined
-                  ? {}
-                  : { credentials: poolActive.credentials, accountId: poolActive.id }),
-              })
-            } catch (error) {
-              quotaError = error instanceof Error ? error.message : String(error)
-            }
+            const refresh = (): Promise<unknown> => fetchAccountQuota(store, {
+              fetchFn,
+              ...(accountPool === undefined
+                ? {}
+                : { credentials: poolActive.credentials, accountId: poolActive.id }),
+            })
+            if (cached === null) await quotaRefresh.run(refresh)
+            else quotaRefresh.start(refresh)
           }
           const value = await readStatus()
-          return sendJson(response, 200, { ok: true, value: { ...value, quotaError } })
+          return sendJson(response, 200, {
+            ok: true,
+            value: {
+              ...value,
+              quotaError: quotaRefresh.lastError(),
+              quotaRefreshing: quotaRefresh.refreshing,
+            },
+          })
         }
 
         if (path === 'login') {

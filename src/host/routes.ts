@@ -40,9 +40,15 @@ export function registerRoutes(
     const url = new URL(request.url ?? '/', 'http://dsh.local')
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/status`) {
       const oauthStatus = await oauth.status()
+      // The card answers from an existing snapshot and refreshes behind it, so
+      // opening a tab never waits on the upstream quota request;
+      // `quotaRefreshing` is what tells the client to ask again when that
+      // refresh lands.
+      const quota = await usage.status(oauthStatus.authenticated, false, { backgroundRefresh: true })
       json(response, { ok: true, value: {
         ...oauthStatus,
-        quota: await usage.status(oauthStatus.authenticated),
+        quota,
+        quotaRefreshing: usage.refreshing,
         preferences: preferences.status(),
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
