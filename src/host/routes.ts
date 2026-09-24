@@ -14,6 +14,7 @@ import type {
 import { contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
 import { isCodexReasoningSummary } from '../shared/preferences.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
+import { isSameOriginMutation } from './common/same-origin.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import type { ProxyManager } from './proxy-manager.ts'
@@ -260,19 +261,6 @@ export function registerRoutes(
   ]
   return () => {
     for (const dispose of disposers) dispose()
-  }
-}
-
-function isSameOriginMutation(request: IncomingMessage): boolean {
-  const host = request.headers.host
-  const origin = request.headers.origin
-  if (typeof host !== 'string' || host === '' || typeof origin !== 'string' || origin === '') return false
-  try {
-    const parsed = new URL(origin)
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && parsed.host.toLowerCase() === host.toLowerCase()
-  } catch {
-    return false
   }
 }
 

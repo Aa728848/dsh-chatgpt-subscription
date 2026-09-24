@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { isSameOriginMutation } from '../common/same-origin.ts'
 import {
   FALLBACK_MODELS,
   PROVIDER_ID,
@@ -59,19 +60,6 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
 
 function sendMethodNotAllowed(response: ServerResponse): void {
   sendJson(response, 405, { ok: false, error: 'Method Not Allowed' })
-}
-
-function isSameOriginMutation(request: IncomingMessage): boolean {
-  const host = request.headers.host
-  const origin = request.headers.origin
-  if (typeof host !== 'string' || host === '' || typeof origin !== 'string' || origin === '') return false
-  try {
-    const parsed = new URL(origin)
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && parsed.host.toLowerCase() === host.toLowerCase()
-  } catch {
-    return false
-  }
 }
 
 async function readRequestJson(request: IncomingMessage): Promise<Record<string, unknown>> {
