@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **发版修正：`latest` 不再停在 0.7.0**。用户反馈「更新了一下，从 0.8 又变成 0.7 了」——npm 上 `latest` 一直是 **0.7.0**，而 `0.8.0-alpha.0` 到 `0.8.2` 全部落在 `alpha` 标签下，`npm install` 与 `dsh plugin add` 不带标签时解析的正是 `latest`，所以从 0.8 升级会退回 0.7。根因是 `package.json` 里的 `publishConfig.tag: "alpha"`：它让**每一次**发布都进 `alpha`，`latest` 因此自 0.7.0 之后再没动过。
+  - **修法一：把已发布的 0.8.2 提升为 `latest`**（`npm dist-tag add @eddyskywalker/dsh-chatgpt-subscription@0.8.2 latest`）——不重新发版。提升前逐文件核对了 npm 上的 0.8.2 与本地源码的干净构建（`rm -rf lib && npm run build` 后 `npm pack`）：`lib/index.js`、`lib/client.js`、`lib/client.js.map` **逐字节相同**，其余声明文件一致，因此提升 0.8.2 等于发布当前源码。0.8.2 里比干净构建多出 `lib/types/host/compaction-patch.d.ts{,.map}` 两个**孤立**声明文件（仓库里没有对应源码、也没有任何代码引用，是发布当时 `lib/` 的增量残留），运行时不受影响；这类残留正是下面那条「发版前清空 `lib/`」的原因。
+  - **修法二：删掉 `publishConfig.tag`（保留 `access: public`）**，让稳定版按 npm 默认进 `latest`。这不是把预发布也推向 `latest`：npm 11 起对预发布版本**强制要求显式 `--tag`**（`You must specify a tag using --tag when publishing a prerelease version.`，见 npm 的 `lib/commands/publish.js`），所以下一次 alpha 必须写明 `npm publish --tag alpha`，不会静默盖掉 `latest`。
+  - **顺带清掉遗留的 `next` 标签**：它从首次发布起就指向 `0.1.0-alpha.0`，与任何在用版本都不对应。
+  - **验证**：`npm view @eddyskywalker/dsh-chatgpt-subscription dist-tags` 现在为 `latest: 0.8.2`（`alpha` 仍是 0.8.2）；在空目录里执行一次真实的 `npm install @eddyskywalker/dsh-chatgpt-subscription`，装到的是 0.8.2 且 `lib/index.js` 就位。
+
 - **支持 DSH 0.1.7-rc.1**（本机 harness 仓库与 `dsh --version` 都已是它，npm 上 `next` 也是它）。这一版**不需要任何行为改动**——alpha.1 桥接过的会话消息模型与设置 API 在 rc.1 一字未改，`dsh-llm`、`dsh-settings`、`dsh-web`、`dsh-attachment`、`dsh-timeout`、`dsh-host-webserver` 与四个 client 包在该窗口内**只有版本号变化**（窗口本身 318 个提交 / 911 个文件，绝大多数与本插件无关）。动作落在基线、一处契约漂移和依赖清单上。
   - **dev 基线升到 `0.1.7-rc.1`，peer 范围加入 `^0.1.7-rc.1`**。需要说清的是：这个 peer 子句是**为可读性**，不是解封——`^0.1.7-alpha.1` 本来就覆盖 `0.1.7-rc.1`（同一个 `0.1.7` 元组，预发布比较器在元组内匹配），已用 `semver.satisfies` 对全部 dsh peer 逐条验证。rc.1 新增的**启动期 peer 兼容性预检**（`packages/boot/app-boot/src/plugin-compatibility.ts`：不满足即把该行 `disabled` 并写 stderr，读不到 peer 元数据也一律拒绝）对本插件因此是**空集**。
   - **`tool.call.toolview` 的入参从单一 `block` 变成三态联合**（`packages/client/ui-tool/.../contract/slots.ts` 的 `ToolCallPhaseProps`：`preparing` / `start` / `result`），`RunningToolCall` 相应拆成 `PreparingToolCall`（**根本没有 `argsRaw`**）与 `StartedToolCall`。`ToolCallTree` 对**每个阶段**都调用已注册的 keyed 视图，所以图片卡确实会拿到 `preparing` 的 block；`CodexImageToolView` 原先直接读 `block.argsRaw`，在 `preparing` 上读的是不存在的属性。**这不是用户可见的故障**（读到 `undefined` 后照常渲染「正在生成图片」，只是少了提示词摘要），属接缝处的契约漂移；现改为只在声明了该字段的分支读取（`dispatchedArgsRaw`，用 `'argsRaw' in block` 判定），旧代走的正是原来那条分支，**由构造保证而非版本判断**。

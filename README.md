@@ -149,7 +149,7 @@ dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 npx @deepseek-ai/dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 ```
 
-**版本阶段**：`latest` 目前是 0.7.0；0.8.0 的正式版尚未定稿，先以 `0.8.0-alpha.0` 发到 `alpha` 标签，因此上面两条命令装到的仍是 0.7.0。要试用 alpha，需显式带上标签或版本号：
+**版本阶段**：`latest` 现在是 **0.8.2**，上面两条命令装到的就是它。（此前 0.8.0-alpha.0 至 0.8.2 都只发在 `alpha` 标签下，`latest` 一直停在 0.7.0，于是升级时版本会从 0.8 退回 0.7。）预发布版仍只进 `alpha`，需要显式带上标签或版本号：
 
 ```sh
 dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription@alpha

@@ -25,8 +25,7 @@
   ],
   "type": "module",
   "publishConfig": {
-    "access": "public",
-    "tag": "alpha"
+    "access": "public"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

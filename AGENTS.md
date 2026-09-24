@@ -34,6 +34,12 @@ Builds declarations and bundles `lib/index.js` plus `lib/client.js`.
 
 Use `npm pack --dry-run` when changing package metadata, exports, or published files.
 
+## Releasing
+
+`publishConfig` carries no `tag` on purpose: a stable version goes to `latest` — the tag `npm install` and `dsh plugin add` resolve — the moment it is published. Publish a prerelease with an explicit `--tag alpha`; npm 11 and later refuse a prerelease published without one, so leaving the field out cannot push a prerelease onto `latest`.
+
+`lib/` is incremental and keeps the declaration files of sources that have since been deleted, so a build that did not start from an empty `lib/` can leak stray files into the published package. Before publishing, or before promoting an already-published version with `npm dist-tag add <name>@<version> latest`, compare that version against a clean build of the current source: `rm -rf lib && npm run build`, `npm pack`, then diff the two extracted trees.
+
 ## Coding Style & Naming Conventions
 
 Use strict TypeScript and ESM imports. Keep changes small and consistent with nearby code. Prefer descriptive camelCase for functions and variables, PascalCase for React components and classes, and kebab-style names only for package/plugin identifiers. There is no separate lint command; `tsc` and tests are the main enforcement tools.
