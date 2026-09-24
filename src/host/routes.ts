@@ -14,6 +14,7 @@ import type {
 import { contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
 import { isCodexReasoningSummary } from '../shared/preferences.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
+import { isSameOriginMutation } from './common/same-origin.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import type { ProxyManager } from './proxy-manager.ts'
@@ -39,9 +40,15 @@ export function registerRoutes(
     const url = new URL(request.url ?? '/', 'http://dsh.local')
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/status`) {
       const oauthStatus = await oauth.status()
+      // The card answers from an existing snapshot and refreshes behind it, so
+      // opening a tab never waits on the upstream quota request;
+      // `quotaRefreshing` is what tells the client to ask again when that
+      // refresh lands.
+      const quota = await usage.status(oauthStatus.authenticated, false, { backgroundRefresh: true })
       json(response, { ok: true, value: {
         ...oauthStatus,
-        quota: await usage.status(oauthStatus.authenticated),
+        quota,
+        quotaRefreshing: usage.refreshing,
         preferences: preferences.status(),
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
@@ -260,19 +267,6 @@ export function registerRoutes(
   ]
   return () => {
     for (const dispose of disposers) dispose()
-  }
-}
-
-function isSameOriginMutation(request: IncomingMessage): boolean {
-  const host = request.headers.host
-  const origin = request.headers.origin
-  if (typeof host !== 'string' || host === '' || typeof origin !== 'string' || origin === '') return false
-  try {
-    const parsed = new URL(origin)
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && parsed.host.toLowerCase() === host.toLowerCase()
-  } catch {
-    return false
   }
 }
 

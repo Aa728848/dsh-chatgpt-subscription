@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   ZhipuAccountSummaryDto,
   ZhipuModelOption,
@@ -7,6 +7,7 @@ import type {
   ZhipuWebStatus,
 } from '../../shared/zhipu-contracts.ts'
 import { ZHIPU_REASONING_EFFORTS } from '../../shared/zhipu-contracts.ts'
+import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 
 /**
  * Display label per reasoning level. The locale dictionary only accepts flat
@@ -104,6 +105,9 @@ export function ZhipuSection({ onModelChange, loadModelDirectory }: Props): Reac
   const [apiKey, setApiKey] = useState('')
   const [region, setRegion] = useState<ZhipuRegion>('intl')
 
+  /** Follow-up poll owed while the host refreshes the quota behind an answer. */
+  const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
+
   const t = zh
 
   const notifyChange = useCallback(() => {
@@ -117,6 +121,10 @@ export function ZhipuSection({ onModelChange, loadModelDirectory }: Props): Reac
       const data = await fetchApi<ZhipuWebStatus>('/status')
       setStatus(data)
       setContextDrafts(contextDraftsFor(data))
+      // An answer that refreshed the quota behind itself is followed up shortly,
+      // so the fresh numbers land without waiting for the next poll.
+      quotaFollowUp.current ??= createQuotaFollowUp()
+      quotaFollowUp.current.observe(data.quotaRefreshing === true, () => { void loadStatus(true) })
     } catch (err) {
       if (!quiet) setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -134,6 +142,7 @@ export function ZhipuSection({ onModelChange, loadModelDirectory }: Props): Reac
     return () => {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
+      quotaFollowUp.current?.cancel()
     }
   }, [loadStatus])
 

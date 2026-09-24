@@ -1,6 +1,7 @@
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { CredentialReadCache, fileCredentialIdentity } from './common/credential-read-cache.ts'
 import type { CredentialStore, TokenStore, StoredOAuthCredentials } from './token-store.ts'
 import { parseStoredCredentials } from './token-store.ts'
 
@@ -55,6 +56,14 @@ export function defaultDpapiCredentialPath(): string {
 
 export class WindowsDpapiCredentialStore<T> implements CredentialStore<T> {
   readonly storage = { kind: 'windows-dpapi', encrypted: true } as const
+  /**
+   * Decrypted snapshot, validated against the file's own mtime and size.
+   *
+   * Every uncached read is a spawned `powershell.exe` (~200 ms), and one
+   * settings request reads several credentials, so the snapshot is what keeps a
+   * tab switch from costing seconds.
+   */
+  private readonly cache = new CredentialReadCache<T>(() => fileCredentialIdentity(this.path))
 
   constructor(private readonly path: string, private readonly parse: (value: unknown) => T) {
     if (process.platform !== 'win32') throw new Error('Windows DPAPI storage requires Windows')
@@ -62,24 +71,30 @@ export class WindowsDpapiCredentialStore<T> implements CredentialStore<T> {
   }
 
   async load(): Promise<T | null> {
-    const result = await runPowerShell(UNPROTECT_SCRIPT, this.path, '')
-    if (result.code === 3) return null
-    if (result.code !== 0) throw new Error('DPAPI credential read failed')
-    try {
-      return this.parse(JSON.parse(result.stdout) as unknown)
-    } catch {
-      throw new Error('DPAPI credential payload is invalid')
-    }
+    return this.cache.load(async () => {
+      const result = await runPowerShell(UNPROTECT_SCRIPT, this.path, '')
+      if (result.code === 3) return null
+      if (result.code !== 0) throw new Error('DPAPI credential read failed')
+      try {
+        return this.parse(JSON.parse(result.stdout) as unknown)
+      } catch {
+        throw new Error('DPAPI credential payload is invalid')
+      }
+    })
   }
 
   async save(value: T): Promise<void> {
     const result = await runPowerShell(PROTECT_SCRIPT, this.path, JSON.stringify(value))
     if (result.code !== 0) throw new Error('DPAPI credential write failed')
+    // The snapshot is dropped rather than replaced: the pools verify a write by
+    // reading it back, and that read must consult the encrypted file.
+    this.cache.invalidate()
   }
 
   async clear(): Promise<void> {
     const result = await runPowerShell(CLEAR_SCRIPT, this.path, '')
     if (result.code !== 0) throw new Error('DPAPI credential deletion failed')
+    this.cache.invalidate()
   }
 }
 

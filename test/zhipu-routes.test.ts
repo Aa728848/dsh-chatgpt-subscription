@@ -27,6 +27,7 @@ import {
   createZhipuCredentialStore,
   createZhipuPool,
   makeZhipuFetch,
+  sampleCredentials,
   zhipuSettingsFile,
 } from './support/zhipu-fixtures.ts'
 
@@ -159,6 +160,46 @@ describe('zhipu settings routes', () => {
     expect(value.serving).toBe(true)
     expect((value.models as unknown[]).length).toBe(ZHIPU_MODELS.length)
     expect(value.storagePath).toBe(store.path())
+  })
+
+  it('answers an aged quota snapshot without waiting for the refresh', async () => {
+    // A registration whose store already holds a key, so the status route takes
+    // the quota path at all.
+    const credentialed = await createZhipuCredentialStore({ credentials: sampleCredentials() })
+    const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    registerZhipuRoutes({
+      webServer: { register(route: { handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) { routes.push(route); return () => undefined } },
+    } as unknown as Context, credentialed, modelSettings)
+    const status = routes[0]!.handler
+
+    // First read has no snapshot, so it fetches and owes no follow-up.
+    const first = fakeExchange()
+    await status(fakeRequest({ url: '/zhipu/api/status' }), first.response)
+    const firstValue = (first.captured.body as { value: Record<string, unknown> }).value
+    expect(firstValue.quotaRefreshing).toBe(false)
+    expect(typeof firstValue.lastFetchedAt).toBe('number')
+
+    // Age the snapshot past its TTL and make the upstream request hang. An answer
+    // that arrives at all therefore came from the snapshot: a route that waited
+    // for the refresh would never respond. The response must also say a refresh
+    // is running, which is what makes the client ask again.
+    const cached = getCachedQuota()
+    expect(cached).toBeDefined()
+    cached!.fetchedAt = Date.now() - 10 * 60 * 1000
+    installResponder((() => new Promise<Response>(() => {})) as unknown as (url: string) => Response)
+
+    const second = fakeExchange()
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const answered = await Promise.race([
+      status(fakeRequest({ url: '/zhipu/api/status' }), second.response).then(() => true),
+      new Promise<boolean>((resolve) => { timeout = setTimeout(() => resolve(false), 2_000) }),
+    ])
+    clearTimeout(timeout)
+    expect(answered).toBe(true)
+    const secondValue = (second.captured.body as { value: Record<string, unknown> }).value
+    expect(secondValue.quotaRefreshing).toBe(true)
+    // The answer carried the aged snapshot, not a refreshed one.
+    expect(secondValue.lastFetchedAt).toBe(cached!.fetchedAt)
   })
 
   it('verifies a pasted key before persisting it, and rejects a key the host refuses', async () => {

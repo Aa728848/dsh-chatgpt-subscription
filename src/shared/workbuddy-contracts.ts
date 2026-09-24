@@ -250,6 +250,14 @@ export interface WorkBuddyWebStatus extends Partial<AccountPoolStatusDto> {
   account: WorkBuddyAccount | null
   quota: WorkBuddyAccountQuota | null
   lastFetchedAt: number | null
+  /**
+   * Whether a quota refresh is running behind this answer.
+   *
+   * The card renders the snapshot it already had instead of waiting on the
+   * upstream request; when this is true the client asks again shortly so the
+   * refreshed snapshot reaches the UI.
+   */
+  quotaRefreshing?: boolean
   models: WorkBuddyModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: WorkBuddyReasoningEffort | null

@@ -12,6 +12,7 @@ import {
   SCOPES,
   TOKEN_URL,
 } from './types.ts'
+import { DEFAULT_CALLBACK_PORT, CALLBACK_PORT_ATTEMPTS } from './port-constants.ts'
 import { FileCredentialStore, type AntigravityCredentials } from './token-store.ts'
 import {
   listCloudAICompanionProjects,
@@ -44,7 +45,39 @@ export function callbackPort(): number {
   if (Number.isInteger(configured) && configured > 0 && configured <= 65535) {
     return configured
   }
-  return 51121
+  return DEFAULT_CALLBACK_PORT
+}
+
+/**
+ * First usable loopback port for the callback listener.
+ *
+ * Windows (Hyper-V/WinNAT) dynamically reserves TCP port ranges that change on
+ * every reboot, and the CLI's default port can land inside one — `listen` then
+ * fails with `EACCES: permission denied ::1:51121` and browser authorization
+ * never opens. A fixed port therefore cannot be relied on; the Google redirect
+ * URI carries whatever port this returns, so any free loopback port works. A
+ * configured `DSH_ANTIGRAVITY_CALLBACK_PORT` still wins — callers who set it
+ * accept that the port must be usable.
+ */
+export async function resolveCallbackPort(attempts = CALLBACK_PORT_ATTEMPTS): Promise<number> {
+  if (antigravityEnv('CALLBACK_PORT') !== undefined) return callbackPort()
+  for (let offset = 0; offset < attempts; offset += 1) {
+    if (await isPortUsable(DEFAULT_CALLBACK_PORT + offset)) return DEFAULT_CALLBACK_PORT + offset
+  }
+  throw new Error(
+    `No usable local port for the Antigravity sign-in callback `
+    + `(tried ${attempts} ports from ${DEFAULT_CALLBACK_PORT}). `
+    + 'A Windows excluded-port range may cover them; set DSH_ANTIGRAVITY_CALLBACK_PORT to a free port.',
+  )
+}
+
+function isPortUsable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => resolve(false))
+    probe.once('listening', () => probe.close(() => resolve(true)))
+    probe.listen(port, '127.0.0.1')
+  })
 }
 
 export function resolveCallbackHost(raw = antigravityEnv('CALLBACK_HOST')): string {
@@ -53,9 +86,8 @@ export function resolveCallbackHost(raw = antigravityEnv('CALLBACK_HOST')): stri
   return 'localhost'
 }
 
-export function redirectUri(): string {
+export function redirectUri(port = callbackPort()): string {
   const host = resolveCallbackHost()
-  const port = callbackPort()
   const path = REDIRECT_PATH.startsWith('/') ? REDIRECT_PATH : `/${REDIRECT_PATH}`
   return `http://${host}:${port}${path}`
 }
@@ -118,10 +150,16 @@ export async function getUserEmail(token: string, fetchFn: typeof fetch = fetch)
   }
 }
 
-export function startCallbackServer(expectedState: string): Promise<{
+export async function startCallbackServer(expectedState: string): Promise<{
   server: Server
   waitForCode: () => Promise<{ code: string; state: string }>
+  /** The redirect URI the provider receives: the probed port, not the default. */
+  callbackUrl: string
 }> {
+  // The port is probed before the listener starts, and the redirect URI the
+  // provider receives carries the probed port — a reserved default cannot be
+  // assumed usable on Windows (see resolveCallbackPort).
+  const port = await resolveCallbackPort()
   return new Promise((resolve, reject) => {
     let settled = false
     let timeout: NodeJS.Timeout | undefined
@@ -140,7 +178,7 @@ export function startCallbackServer(expectedState: string): Promise<{
       fn()
     }
 
-    const callbackUrl = redirectUri()
+    const callbackUrl = redirectUri(port)
     const server = createServer((request, response) => {
       if (request.method !== 'GET' && request.method !== 'HEAD') {
         response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' })
@@ -186,12 +224,12 @@ export function startCallbackServer(expectedState: string): Promise<{
     })
 
     server.on('error', reject)
-    server.listen(callbackPort(), resolveCallbackHost(), () => {
+    server.listen(port, resolveCallbackHost(), () => {
       timeout = setTimeout(() => {
         finish(() => rejectCode(new Error('OAuth callback timed out waiting for browser login')))
         server.close()
       }, OAUTH_CALLBACK_TIMEOUT_MS)
-      resolve({ server, waitForCode: () => codePromise })
+      resolve({ server, waitForCode: () => codePromise, callbackUrl })
     })
   })
 }
@@ -315,8 +353,7 @@ export async function beginWebLogin(
 
   const { verifier, challenge } = generatePKCE()
   const state = base64Url(randomBytes(32))
-  const { server, waitForCode } = await startCallbackServer(state)
-  const callbackUrl = redirectUri()
+  const { server, waitForCode, callbackUrl } = await startCallbackServer(state)
   const authParams = new URLSearchParams({
     client_id: clientId(),
     response_type: 'code',
@@ -453,8 +490,7 @@ export async function loginAndSave(
 ): Promise<AntigravityCredentials> {
   const { verifier, challenge } = generatePKCE()
   const state = base64Url(randomBytes(32))
-  const { server, waitForCode } = await startCallbackServer(state)
-  const callbackUrl = redirectUri()
+  const { server, waitForCode, callbackUrl } = await startCallbackServer(state)
   const authParams = new URLSearchParams({
     client_id: clientId(),
     response_type: 'code',

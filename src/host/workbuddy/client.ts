@@ -35,6 +35,7 @@ import {
   convergeWorkBuddyEffort,
   WORKBUDDY_STANDARD_EFFORTS,
 } from '../../shared/workbuddy-contracts.ts'
+import { rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
 export interface WorkBuddyRequestOptions {
   fetchFn?: typeof fetch
@@ -315,6 +316,9 @@ let cachedCatalog: { region: WorkBuddyCredentials['region']; models: WorkBuddyMo
 let catalogInFlight: Promise<WorkBuddyModelEntry[]> | null = null
 let catalogInFlightRegion: WorkBuddyCredentials['region'] | null = null
 const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000
+// Set once per process: the persisted snapshot was consulted, so a failed read
+// must not re-read the file on every cache miss.
+let catalogSnapshotLoaded = false
 
 export function getCachedCatalog(): WorkBuddyModelEntry[] {
   return cachedCatalog?.models ?? []
@@ -324,6 +328,7 @@ export function clearCachedCatalog(): void {
   cachedCatalog = undefined
   catalogInFlight = null
   catalogInFlightRegion = null
+  catalogSnapshotLoaded = false
 }
 
 /**
@@ -348,28 +353,84 @@ export async function fetchConfigCatalog(
   return parseConfigModels(await response.json(), credentials.region)
 }
 
-/** Cached catalog with a TTL; a failed refresh keeps the previous snapshot. */
+/** Cached catalog with a TTL; a failed refresh keeps the previous snapshot.
+ *
+ * On the first cache miss of a process the persisted snapshot is rehydrated
+ * first, so a restart serves the previous listing without waiting on the
+ * network. An expired snapshot still answers immediately (stale) while a
+ * refresh runs in the background — the catalog is not fast-moving data, and
+ * waiting on an unreachable gateway turned a restart into the full discovery
+ * timeout on every model resolution.
+ */
 export async function loadConfigCatalog(
   credentials: WorkBuddyCredentials,
   options: WorkBuddyRequestOptions & { force?: boolean } = {},
 ): Promise<WorkBuddyModelEntry[]> {
-  if (!options.force
-    && cachedCatalog !== undefined
+  if (options.force === true) return refreshConfigCatalog(credentials, options)
+  if (cachedCatalog !== undefined
     && cachedCatalog.region === credentials.region
     && Date.now() - cachedCatalog.fetchedAt < CATALOG_CACHE_TTL_MS) {
     return cachedCatalog.models
   }
-  if (catalogInFlight && catalogInFlightRegion === credentials.region) return catalogInFlight
   // A snapshot read for the other region must never stand in: its entries
   // declare only the region they came from, so the caller's region filter drops
   // every one of them and the picker ends up offering nothing instead of
   // falling back to the shipped table.
+  if (cachedCatalog !== undefined && cachedCatalog.region === credentials.region) {
+    void refreshConfigCatalog(credentials, options).catch(() => undefined)
+    return cachedCatalog.models
+  }
+  if (!catalogSnapshotLoaded) {
+    catalogSnapshotLoaded = true
+    // Only a snapshot whose entries declare the caller's region may be
+    // rehydrated: entries carry only the region they came from, so a cn
+    // snapshot would make the picker offer nothing to an intl account
+    // instead of falling back to the shipped table.
+    const rehydratedAt = await rehydrateCatalogCache(
+      'workbuddy',
+      (value) => {
+        if (!Array.isArray(value)) return undefined
+        const models: WorkBuddyModelEntry[] = []
+        for (const entry of value) {
+          if (typeof entry !== 'object' || entry === null) continue
+          const record = entry as Record<string, unknown>
+          if (typeof record.id !== 'string' || record.id === '') continue
+          // Parsed entries carry `regions: [region]` (an array), not a scalar
+          // `region` field; both spellings are accepted so a snapshot written
+          // by either shape stands in.
+          const regions = Array.isArray(record.regions) ? record.regions : [record.region]
+          if (!regions.includes(credentials.region)) continue
+          models.push(entry as WorkBuddyModelEntry)
+        }
+        return models.length > 0 ? models : undefined
+      },
+      (fetchedAt, models) => {
+        cachedCatalog = { region: credentials.region, models, fetchedAt }
+      },
+      0,
+    )
+    if (rehydratedAt > 0) {
+      void refreshConfigCatalog(credentials, options).catch(() => undefined)
+      return cachedCatalog!.models
+    }
+  }
+  return refreshConfigCatalog(credentials, options)
+}
+
+/** One in-flight, single-flighted fetch of the live catalog. */
+function refreshConfigCatalog(
+  credentials: WorkBuddyCredentials,
+  options: WorkBuddyRequestOptions = {},
+): Promise<WorkBuddyModelEntry[]> {
+  if (catalogInFlight && catalogInFlightRegion === credentials.region) return catalogInFlight
   const sameRegionCache = (): WorkBuddyModelEntry[] =>
     cachedCatalog?.region === credentials.region ? cachedCatalog.models : []
   const request = fetchConfigCatalog(credentials, options)
     .then((models) => {
       if (models.length > 0) {
-        cachedCatalog = { region: credentials.region, models, fetchedAt: Date.now() }
+        const fetchedAt = Date.now()
+        cachedCatalog = { region: credentials.region, models, fetchedAt }
+        void writeCatalogSnapshot('workbuddy', models, fetchedAt)
         return models
       }
       return sameRegionCache()
@@ -377,14 +438,12 @@ export async function loadConfigCatalog(
     .catch(() => sameRegionCache())
   catalogInFlight = request
   catalogInFlightRegion = credentials.region
-  try {
-    return await request
-  } finally {
+  return request.finally(() => {
     if (catalogInFlight === request) {
       catalogInFlight = null
       catalogInFlightRegion = null
     }
-  }
+  })
 }
 
 // ---------------------------------------------------------------------------

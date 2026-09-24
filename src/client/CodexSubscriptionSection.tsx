@@ -5,6 +5,7 @@ import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEX
 import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { AccountPoolSection, type AccountPoolLabels } from './common/AccountPoolSection.tsx'
+import { createQuotaFollowUp, type QuotaFollowUp } from './common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../shared/account-pool-contracts.ts'
 import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
@@ -17,6 +18,8 @@ type Translate = Props['t']
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const apiRef = useRef(new SubscriptionApi())
   const eventSourceRef = useRef<EventSource | null>(null)
+  /** Follow-up poll owed while the host refreshes the quota behind an answer. */
+  const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
   const [status, setStatus] = useState<PluginStatusDto | null>(null)
   const [busy, setBusy] = useState<BusyAction>(null)
   const [error, setError] = useState<string | null>(null)
@@ -33,6 +36,10 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
       const next = await apiRef.current.status()
       setStatus(next)
       if (next.error !== undefined) setError(next.error.message)
+      // An answer that refreshed the quota behind itself is followed up shortly,
+      // so the fresh numbers land without waiting for the next poll.
+      quotaFollowUp.current ??= createQuotaFollowUp()
+      quotaFollowUp.current.observe(next.quotaRefreshing === true, () => { void load(true) })
     } catch (cause) {
       if (!quiet) setError(messageOf(cause))
     }
@@ -48,6 +55,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     return () => {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
+      quotaFollowUp.current?.cancel()
       eventSourceRef.current?.close()
     }
   }, [load])

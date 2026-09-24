@@ -31,6 +31,7 @@ import type {
   CommandCodeMeter,
   CommandCodeUsageWindow,
 } from '../../shared/command-code-contracts.ts'
+import { rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
 const CLI_VERSION = '1.0.0'
 
@@ -556,6 +557,9 @@ function extractUnlimited(payload: unknown): boolean {
 
 let cachedCatalog: { models: CommandCodeCatalogModel[]; fetchedAt: number } | undefined
 let catalogInFlight: Promise<CommandCodeCatalogModel[]> | null = null
+// Set once per process: the persisted snapshot was consulted, so a failed read
+// must not re-read the file on every cache miss.
+let catalogSnapshotLoaded = false
 
 /** Parse the public `/provider/v1/models` payload. */
 export function parseProviderModels(payload: unknown): CommandCodeCatalogModel[] {
@@ -595,26 +599,70 @@ export async function fetchProviderModels(
   return parseProviderModels(await response.json())
 }
 
-/** Cached catalog with a TTL; a failed refresh keeps the previous snapshot. */
+/** Cached catalog with a TTL; a failed refresh keeps the previous snapshot.
+ *
+ * On the first cache miss of a process the persisted snapshot is rehydrated
+ * first, so a restart serves the previous listing without waiting on the
+ * network. An expired snapshot still answers immediately (stale) while a
+ * refresh runs in the background — the catalog is not fast-moving data, and
+ * waiting on an unreachable endpoint turned a restart into the full discovery
+ * timeout on every model resolution.
+ */
 export async function loadProviderModels(
   options: CommandCodeRequestOptions & { force?: boolean } = {},
 ): Promise<CommandCodeCatalogModel[]> {
-  if (!options.force && cachedCatalog && Date.now() - cachedCatalog.fetchedAt < CATALOG_CACHE_TTL_MS) {
-    return cachedCatalog.models
+  if (options.force === true) return refreshProviderModels(options)
+  const current = cachedCatalog
+  if (current !== undefined && Date.now() - current.fetchedAt < CATALOG_CACHE_TTL_MS) {
+    return current.models
   }
+  if (catalogInFlight) return catalogInFlight
+  // Stale-while-revalidate: an expired snapshot answers now and the refresh
+  // runs behind it. `catalogInFlight` is not set for this path, so the next
+  // caller may re-enter and share the same refresh promise below.
+  if (current !== undefined) {
+    void refreshProviderModels(options).catch(() => undefined)
+    return current.models
+  }
+  if (!catalogSnapshotLoaded) {
+    catalogSnapshotLoaded = true
+    const rehydratedAt = await rehydrateCatalogCache(
+      'command-code',
+      parseProviderModels,
+      (fetchedAt, models) => {
+        cachedCatalog = { models, fetchedAt }
+      },
+      0,
+    )
+    const warm = cachedCatalog
+    if (rehydratedAt > 0 && warm !== undefined) {
+      // A rehydrated snapshot is stale by definition: refresh behind the answer.
+      void refreshProviderModels(options).catch(() => undefined)
+      return warm.models
+    }
+  }
+  return refreshProviderModels(options)
+}
+
+/** One in-flight, single-flighted fetch of the live catalog. */
+function refreshProviderModels(
+  options: CommandCodeRequestOptions & { force?: boolean } = {},
+): Promise<CommandCodeCatalogModel[]> {
   if (catalogInFlight) return catalogInFlight
   const request = fetchProviderModels(options)
     .then((models) => {
-      if (models.length > 0) cachedCatalog = { models, fetchedAt: Date.now() }
+      if (models.length > 0) {
+        const fetchedAt = Date.now()
+        cachedCatalog = { models, fetchedAt }
+        void writeCatalogSnapshot('command-code', models, fetchedAt)
+      }
       return models.length > 0 ? models : cachedCatalog?.models ?? []
     })
     .catch(() => cachedCatalog?.models ?? [])
   catalogInFlight = request
-  try {
-    return await request
-  } finally {
+  return request.finally(() => {
     if (catalogInFlight === request) catalogInFlight = null
-  }
+  })
 }
 
 export function getCachedCatalog(): CommandCodeCatalogModel[] {
@@ -624,6 +672,7 @@ export function getCachedCatalog(): CommandCodeCatalogModel[] {
 export function clearCachedCatalog(): void {
   cachedCatalog = undefined
   catalogInFlight = null
+  catalogSnapshotLoaded = false
 }
 
 /** Effective context window: a saved override wins over the catalog value. */

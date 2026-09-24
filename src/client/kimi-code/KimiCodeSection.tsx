@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   KimiCodeLoginFlowStatus,
   KimiCodeModelOption,
@@ -7,6 +7,7 @@ import type {
 } from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_REASONING_EFFORTS } from '../../shared/kimi-code-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
 import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
@@ -130,6 +131,9 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   // success, which is indistinguishable from a click that never registered.
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null)
 
+  /** Follow-up poll owed while the host refreshes the quota behind an answer. */
+  const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
+
   const t = zh
 
   const notifyChange = useCallback(() => {
@@ -143,6 +147,10 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       const data = await fetchApi<KimiCodeWebStatus>('/status')
       setStatus(data)
       setContextDrafts(contextDraftsFor(data))
+      // An answer that refreshed the quota behind itself is followed up shortly,
+      // so the fresh numbers land without waiting for the next poll.
+      quotaFollowUp.current ??= createQuotaFollowUp()
+      quotaFollowUp.current.observe(data.quotaRefreshing === true, () => { void loadStatus(true) })
     } catch (err) {
       if (!quiet) setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -160,6 +168,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     return () => {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
+      quotaFollowUp.current?.cancel()
     }
   }, [loadStatus])
 
