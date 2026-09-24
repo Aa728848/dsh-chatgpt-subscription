@@ -1,9 +1,19 @@
 import { spawn } from 'node:child_process'
+import { CredentialReadCache, keyringCredentialIdentity } from './common/credential-read-cache.ts'
 import type { CredentialStore, TokenStore, StoredOAuthCredentials } from './token-store.ts'
 import { parseStoredCredentials } from './token-store.ts'
 
 const DEFAULT_SERVICE = 'dsh-chatgpt-subscription'
 const DEFAULT_ACCOUNT = 'oauth'
+
+/**
+ * How long one keychain read may stand in for the stored value.
+ *
+ * A keychain has no mtime to compare, so this is the price of not spawning
+ * `security` on every read; it is far below the 60 s polling interval of the
+ * surfaces that read these credentials.
+ */
+const KEYRING_READ_CACHE_TTL_MS = 15_000
 
 /**
  * macOS credential storage backed by the login Keychain through the built-in
@@ -12,6 +22,17 @@ const DEFAULT_ACCOUNT = 'oauth'
  */
 export class MacKeychainCredentialStore<T> implements CredentialStore<T> {
   readonly storage = { kind: 'macos-keychain', encrypted: true } as const
+  /**
+   * Snapshot of the last keychain read.
+   *
+   * A keychain lookup spawns `security`, and one settings request performs
+   * several of them. There is no file to compare against, so the snapshot is
+   * keyed on a short time bucket instead — see
+   * {@link keyringCredentialIdentity}.
+   */
+  private readonly cache = new CredentialReadCache<T>(
+    () => keyringCredentialIdentity(KEYRING_READ_CACHE_TTL_MS),
+  )
 
   constructor(
     private readonly service: string,
@@ -22,24 +43,28 @@ export class MacKeychainCredentialStore<T> implements CredentialStore<T> {
   }
 
   async load(): Promise<T | null> {
-    const result = await runSecurity(['find-generic-password', '-a', this.account, '-s', this.service, '-w'])
-    if (result.code === 44) return null
-    if (result.code !== 0) throw new Error('Keychain credential read failed')
-    try {
-      return this.parse(parseSecurityPayload(result.stdout))
-    } catch {
-      throw new Error('Keychain credential payload is invalid')
-    }
+    return this.cache.load(async () => {
+      const result = await runSecurity(['find-generic-password', '-a', this.account, '-s', this.service, '-w'])
+      if (result.code === 44) return null
+      if (result.code !== 0) throw new Error('Keychain credential read failed')
+      try {
+        return this.parse(parseSecurityPayload(result.stdout))
+      } catch {
+        throw new Error('Keychain credential payload is invalid')
+      }
+    })
   }
 
   async save(value: T): Promise<void> {
     const result = await runSecurity(['add-generic-password', '-a', this.account, '-s', this.service, '-w', JSON.stringify(value), '-U'])
     if (result.code !== 0) throw new Error('Keychain credential write failed')
+    this.cache.invalidate()
   }
 
   async clear(): Promise<void> {
     const result = await runSecurity(['delete-generic-password', '-a', this.account, '-s', this.service])
     if (result.code !== 0 && result.code !== 44) throw new Error('Keychain credential deletion failed')
+    this.cache.invalidate()
   }
 }
 
