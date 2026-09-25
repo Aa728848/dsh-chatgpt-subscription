@@ -596,7 +596,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     ctx.inject(['web'], ctx => {
       ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
       ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
-      applyWebProviders()
+      // Registering a provider is safe here; selecting one is not. A selection
+      // rewrites the `web` entry's config, which restarts it and unloads every
+      // entry that injects `web`. The profile composes as one loader update and
+      // the host audits that composition the moment it settles, so a restart
+      // started from this callback is read mid-unload and reported as
+      // "N entries did not activate", naming `web` and its consumers at
+      // `fiber state 5` (UNLOADING). Defer past that audit; readiness and every
+      // later preference or proxy change still reconcile the selection.
+      setTimeout(applyWebProviders, 0)
     })
 
     // Any preference can change the selection: the search picker chooses the search backend, and
