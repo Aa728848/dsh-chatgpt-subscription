@@ -43,6 +43,14 @@
  * machine. When it is missing, the fidelity assertions are SKIPPED and say so in
  * their own test name — never quietly turned into a pass. Set
  * `DSH_CLAUDE_REFERENCE_ROOT` to a checkout of the harness to run them.
+ *
+ * Assertions 1 and 2 are snapshot-only and are gated as whole tests. Assertion 3
+ * is the one that survives without it, and in weakened form: with no baseline to
+ * be "extra" TO, all it can still say is that each declared curated id names a
+ * real row. Everything snapshot-reading inside the always-running tests is gated
+ * at the point of use, because an ungated read does not fail to check anything —
+ * it FAILS. That is how this file broke CI on a machine with no harness checkout
+ * while passing on the author's, where the snapshot exists.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -265,29 +273,51 @@ describe('claude model catalog / reference snapshot presence', () => {
     // exactly the declared curated ids. The upper half is what catches an
     // invented or typo'd id — before the curated list existed, the row count
     // alone did that, and a count that is merely "at least 14" would not.
-    const snapshotIds = (referenceEntries ?? []).map((entry) => entry.id)
-    const snapshotIdSet = new Set(snapshotIds)
-    const extraIds = CLAUDE_MODEL_IDS.filter((id) => !snapshotIdSet.has(id))
-    const curatedIdSet = new Set(LOCALLY_CURATED_MODEL_IDS)
-
     // No duplicate ids, curated ids included: two rows for one id would make
-    // every lookup below silently depend on which row came first.
+    // every lookup below silently depend on which row came first. This holds on
+    // every machine, so it is asserted unconditionally.
     expect(new Set(CLAUDE_MODEL_IDS).size).toBe(CLAUDE_MODEL_IDS.length)
-    for (const id of extraIds) {
-      expect(
-        curatedIdSet.has(id),
-        `${id} is in CLAUDE_MODELS but not in the reference snapshot and not declared on `
-        + 'LOCALLY_CURATED_MODEL_IDS. A row the snapshot does not carry is unchecked by the '
-        + 'fidelity test: add its id to that list only after justifying its values from a '
-        + 'documented source, or remove the row.',
-      ).toBe(true)
-    }
-    for (const id of LOCALLY_CURATED_MODEL_IDS) {
-      expect(
-        extraIds,
-        `${id} is declared locally curated but the snapshot DOES carry it, so the row can be `
-        + 'transcribed and locked like every other one. Remove it from the curated list.',
-      ).toContain(id)
+
+    // "Extra" is only a MEANINGFUL word next to the snapshot. Without it there is
+    // no baseline to be extra TO: `referenceEntries ?? []` would make every one of
+    // the transcribed rows look unaccounted for and fail the check below, which is
+    // exactly what this file did on CI — where the harness checkout that carries
+    // the snapshot does not exist — while passing locally, where it does. The
+    // snapshotless machine keeps the subset of these checks that still mean
+    // something (see the `else` branch); it does not get to pretend it verified
+    // anything about the extras.
+    if (hasReference) {
+      const snapshotIdSet = new Set((referenceEntries as ReferenceEntry[]).map((entry) => entry.id))
+      const extraIds = CLAUDE_MODEL_IDS.filter((id) => !snapshotIdSet.has(id))
+      const curatedIdSet = new Set(LOCALLY_CURATED_MODEL_IDS)
+
+      for (const id of extraIds) {
+        expect(
+          curatedIdSet.has(id),
+          `${id} is in CLAUDE_MODELS but not in the reference snapshot and not declared on `
+          + 'LOCALLY_CURATED_MODEL_IDS. A row the snapshot does not carry is unchecked by the '
+          + 'fidelity test: add its id to that list only after justifying its values from a '
+          + 'documented source, or remove the row.',
+        ).toBe(true)
+      }
+      for (const id of LOCALLY_CURATED_MODEL_IDS) {
+        expect(
+          extraIds,
+          `${id} is declared locally curated but the snapshot DOES carry it, so the row can be `
+          + 'transcribed and locked like every other one. Remove it from the curated list.',
+        ).toContain(id)
+      }
+    } else {
+      // Snapshotless: the curated ids must still be REAL rows, and every row on
+      // the curated list must be one the table carries. That is weaker than the
+      // check above — it cannot tell a transcribed row from an invented one —
+      // so it does not claim to replace it.
+      for (const id of LOCALLY_CURATED_MODEL_IDS) {
+        expect(
+          CLAUDE_MODEL_IDS,
+          `${id} is declared locally curated but the table does not carry it.`,
+        ).toContain(id)
+      }
     }
 
     // With the snapshot present, the length relation is exact: snapshot rows
@@ -305,13 +335,14 @@ describe('claude model catalog / reference snapshot presence', () => {
 // ---------------------------------------------------------------------------
 
 describe('claude model catalog / transcription fidelity', () => {
-  // A plain `it`, not `itWithReference`: this block now holds checks that must
-  // run on a machine with no snapshot too (`itWithReference` reports as SKIPPED
-  // there, which would make them false-passes exactly where they matter — every
-  // check that does not need the snapshot to be MEANINGFUL lives here). The
-  // checks that read the snapshot itself are gated individually with
-  // `hasReference` and say so in their own name.
-  it(
+  // `itWithReference`, because every assertion below reads the snapshot: with no
+  // snapshot this test dereferenced null and failed, which is how it broke CI.
+  // A SKIPPED line is the honest report here — this claim cannot be checked
+  // without the reference, and a machine that lacks it must not read as a pass.
+  //
+  // The checks in this describe block that do NOT need the snapshot are plain
+  // `it`s and gate their own snapshot reads with `hasReference`.
+  itWithReference(
     'matches the reference snapshot field by field — this proves the TRANSCRIPTION is faithful, NOT that the server serves these models',
     () => {
       const entries = referenceEntries as ReferenceEntry[]
@@ -372,14 +403,14 @@ describe('claude model catalog / transcription fidelity', () => {
 
     // These pairs are what makes "nothing is inferred from the name" checkable:
     // same family, different ladder or different thinking form.
-    const byId = new Map((referenceEntries ?? []).map((entry) => [entry.id, entry]))
-    expect(byId.get('claude-sonnet-4-5')).not.toBe(byId.get('claude-sonnet-4-6'))
-
-    // When the snapshot is present, the snapshot itself says the same thing, so
-    // the disagreement above is a fact about the family and not a typo in one
-    // row of this table.
+    //
+    // Guarded, because BOTH lookups miss on a machine with no snapshot: the
+    // comparison then degenerates to `undefined !== undefined` and fails while
+    // asserting nothing. The snapshot-reading half below says the same thing
+    // with real data.
     if (hasReference) {
       const byId = new Map((referenceEntries as ReferenceEntry[]).map((entry) => [entry.id, entry]))
+      expect(byId.get('claude-sonnet-4-5')).not.toBe(byId.get('claude-sonnet-4-6'))
       expect(referenceThinkingMode(byId.get('claude-sonnet-4-5') as ReferenceEntry)).toBe('budget')
       expect(referenceThinkingMode(byId.get('claude-sonnet-4-6') as ReferenceEntry)).toBe('adaptive')
     }
@@ -548,9 +579,13 @@ describe('claude model catalog / locally curated rows', () => {
     expect(new Set(LOCALLY_CURATED_MODEL_IDS).size).toBe(LOCALLY_CURATED_MODEL_IDS.length)
     // No curated id may secretly duplicate a transcribed row: the snapshot is the
     // stronger source, so such a row should just be checked like every other one.
-    const snapshotIdSet = new Set((referenceEntries ?? []).map((entry) => entry.id))
-    for (const id of LOCALLY_CURATED_MODEL_IDS) {
-      expect(snapshotIdSet.has(id)).toBe(false)
+    // Guarded — without the snapshot this set is empty and the loop would pass
+    // while asserting nothing about duplication.
+    if (hasReference) {
+      const snapshotIdSet = new Set((referenceEntries as ReferenceEntry[]).map((entry) => entry.id))
+      for (const id of LOCALLY_CURATED_MODEL_IDS) {
+        expect(snapshotIdSet.has(id)).toBe(false)
+      }
     }
   })
 })
