@@ -554,6 +554,7 @@ npm pack --dry-run
 | Kimi Code 报 502 `Upstream model provider is temporarily unavailable` | 上游模型供应商的瞬时故障，与账号、模型、凭据都无关：插件会按 DSH retry policy 自动重试（最多 3 次，并遵守上游 `Retry-After`）；连续失败可稍后再试或换用同账号下其他模型 |
 | Kimi Code 报 429 `engine is currently overloaded` | 服务容量问题（工作日 14:00–17:00 高峰更常见），会自动退避重试；若响应里带 `error.type = exceeded_current_quota_error` 则属于配额耗尽，插件不会重试而是提示补充额度 |
 | Kimi Code 额度显示为空 | 卡片会同时给出失败原因（`/v1/usages` 的 401/403/5xx 文案），按提示处理后点「刷新用量」重试；确认用的是订阅账号——开放平台的 key 在这里不会被接受 |
+| Kimi Code 报「rejected the stored credential (401). Sign in again…」但发消息却是好的 | 这是**过期 access token**，不是被拒的账号：Kimi 的 access token 只有 **15 分钟**，而设置卡片过去会把号池里存着的那个 token 直接拿去查用量，因此只要 15 分钟内没走过一次 Kimi 请求，卡片就必然拿到 401。现在卡片会先刷新再请求（401 还会触发一次强制续期），因此**不必重新登录**；若卡片仍提示重新登录，才是真的刷新令牌被拒，按提示处理即可 |
 | Kimi Code 账号一栏为空 | 账号身份取自 OAuth token 自身的 JWT 声明，套餐名取自 `/me`（`/usages` 自 2026-09 起不再返回 `user_level_name`）。重新登录或点「刷新用量」即可写入；若仍为空但显示「已登录」，点「测试连接」可确认凭据是否仍被接受 |
 | Claude 相关接口返回 403 | 403 现在是**同源校验**的结果（修改状态的路由只接受同源 JSON POST）。若出现在浏览器里，检查是否从其它来源发起了请求；插件已不再有任何"确认后才能用"的门禁 |
 | 授权后粘贴授权码报「请把 # 后面的部分一起复制」 | 手动流程需要 `<授权码>#<state>` **整段**。只粘贴授权码是不被接受的：用流程自己的 state 顶上会架空 state 参数、把粘贴框变成登录 CSRF 的入口，因此插件宁可报错也不猜 |

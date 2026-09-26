@@ -161,6 +161,59 @@ describe('testConnection', () => {
     await expect(testConnection(store, { fetchFn: fetchMock })).rejects.toThrow(/401|sign in/i)
   })
 
+  it('renews once through its own store before calling a 401 a dead credential', async () => {
+    // A token that expired while the machine slept, or one another holder
+    // rotated, still looks fine locally; the service's 401 is the only signal.
+    const store = new FileCredentialStore(tmp('kc-conn401-renew'))
+    const stored = creds({
+      accessToken: 'at-stale',
+      refreshToken: 'rt-still-good',
+      expiresAt: Date.now() + 3_600_000,
+    })
+    vi.spyOn(store, 'read').mockResolvedValue(stored)
+    const write = vi.spyOn(store, 'write').mockResolvedValue(undefined)
+
+    const authorizations: Array<string | undefined> = []
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes('/oauth/')) {
+        return Response.json({
+          access_token: 'at-renewed',
+          refresh_token: 'rt-renewed',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        })
+      }
+      const authorization = (init?.headers as Record<string, string>).authorization
+      authorizations.push(authorization)
+      if (authorization === 'Bearer at-stale') return new Response('nope', { status: 401 })
+      return Response.json({ usages: {}, user: { nickname: 'who' } })
+    }) as unknown as typeof fetch
+
+    const result = await testConnection(store, { fetchFn: fetchMock })
+    expect(result.account).not.toBeNull()
+    // It retried with the renewed token, and the rotated pair was persisted.
+    expect(authorizations).toContain('Bearer at-renewed')
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({ refreshToken: 'rt-renewed' }))
+  })
+
+  it('does not spend a credential another holder already rotated', async () => {
+    // The store now carries a different refresh token, so the refused one is
+    // history: renewing again would rotate a token the upstream never rejected.
+    const store = new FileCredentialStore(tmp('kc-conn401-rotated'))
+    vi.spyOn(store, 'read').mockResolvedValue(creds({ accessToken: 'at-someone-else', refreshToken: 'rt-other' }))
+
+    const fetchMock = vi.fn(async (url: unknown) => {
+      if (String(url).includes('/oauth/')) throw new Error('must not refresh')
+      return new Response('nope', { status: 401 })
+    }) as unknown as typeof fetch
+
+    await expect(fetchAccountQuota(store, {
+      fetchFn: fetchMock,
+      force: true,
+      credentials: creds({ accessToken: 'at-stale', refreshToken: 'rt-refused' }),
+    })).rejects.toThrow(/401|sign in/i)
+  })
+
   it('still returns the local identity when the service is briefly unavailable', async () => {
     const store = new FileCredentialStore(tmp('kc-conn500'))
     vi.spyOn(store, 'read').mockResolvedValue(creds({ accessToken: jwt({ user_id: 'u_8' }), refreshToken: jwt({}) }))

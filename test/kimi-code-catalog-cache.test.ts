@@ -167,4 +167,63 @@ describe('Kimi Code catalog caching', () => {
     expect(await loadProviderModels({ fetchFn, region: 'mainland-cn' })).toEqual([])
     expect(fetchFn).not.toHaveBeenCalled()
   })
+
+  it('takes the pool credential instead of refreshing the mirror it mirrors', async () => {
+    // The single-credential file is a copy of one pooled account. Refreshing
+    // that copy rotates the refresh token the pool is about to present, which is
+    // how an account ended up rejected until the next sign-in.
+    const { store, reads } = countedStore()
+    const fetchFn = vi.fn(async () => listingResponse())
+    let supplied = 0
+
+    await loadProviderModels({
+      store,
+      fetchFn,
+      region: 'mainland-cn',
+      credentialProvider: async () => {
+        supplied += 1
+        return 'at-from-pool'
+      },
+    })
+
+    expect(supplied).toBe(1)
+    // The mirror was never touched, so no refresh could have been spent on it.
+    expect(reads()).toBe(0)
+  })
+
+  it('remembers the pool credential so a later token-free call does not fall back to the mirror', async () => {
+    const { store, reads } = countedStore()
+    const fetchFn = vi.fn(async () => listingResponse())
+
+    await loadProviderModels({
+      store,
+      fetchFn,
+      region: 'mainland-cn',
+      credentialProvider: async () => 'at-from-pool',
+    })
+    const readsAfterListing = reads()
+
+    // A stale listing revalidates in the background; that second call must use
+    // the credential the cache already holds rather than the mirror.
+    await loadProviderModels({ store, fetchFn, region: 'mainland-cn' })
+    expect(reads()).toBe(readsAfterListing)
+  })
+
+  it('clears the remembered pool credential with the cache', async () => {
+    const { store, reads } = countedStore()
+    const fetchFn = vi.fn(async () => listingResponse())
+
+    await loadProviderModels({
+      store,
+      fetchFn,
+      region: 'mainland-cn',
+      credentialProvider: async () => 'at-from-pool',
+    })
+    clearCachedCatalog()
+
+    // With the cache gone the mirror is the only single-credential source left,
+    // and it is consulted again rather than answered from a dropped listing.
+    await loadProviderModels({ store, fetchFn, region: 'mainland-cn' })
+    expect(reads()).toBeGreaterThan(0)
+  })
 })

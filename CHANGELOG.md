@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **修复 Kimi Code 设置卡片「过一段时间就报 `rejected the stored credential (401)`」**：这不是登录态过期，而是**卡片拿着一个已经过期的 access token 去查用量**，并把服务端的 401 读成了「凭据被拒绝」。
+  - **根因一：卡片从不刷新号池凭据**。`/status`、`/quota`、`/connection/test` 都把号池里的 credentials 原样交给 `fetchAccountQuota`，而它只在**没有**传入凭据时才会刷新——号池的刷新只发生在模型请求路径上（`getEffectiveAccount`）。Kimi 的 access token 只有 **900 秒**（实测本机凭据 `exp - iat = 900`），于是「15 分钟没发过 Kimi 消息」＝「打开设置页必现 401」。实测本机两份存储：镜像里的 token 有效，号池里的 access token 已过期——正是这一条。
+  - **根因二：同一枚轮换 refresh token 被两条路径各自刷新**。单凭据文件是号池主账号的**镜像**，但目录加载会绕过号池去刷它（`loadProviderModels` → `ensureAccessToken(store)`，且 stale-while-revalidate 会在后台再刷一次）。Kimi 的 refresh token 轮换后旧的即作废，于是镜像先刷成功就把号池那份变成死令牌；适配器下次刷新拿到 `invalid_grant`，账号被标 `authStatus=expired` 移出轮换，而进程内的「已拒绝」墓碑只在**重新登录**时清除——必须重新登录才能恢复。官方 CLI 正是为同一问题加了跨进程文件锁。
+  - **修法**：号池新增 `getFreshCredential(accountId)`（按 id 取凭据、到期前刷新、写回池并镜像）与 `renewCredential(accountId)`（**无条件**续期）；`AccountPoolCore` 两者共用一条 `credentialFor` 路径，失败分类与 `getEffectiveAccount` 一致（refresh 被判死刑才标记账号）。卡片三条路径全部改走它。
+  - **401 现在会先续期再判定**：`fetchAccountQuota` 收到 401 时用一次强制续期再重试一次，只有**第二次** 401 才是「重新登录」。单账号路径只在存储里仍是**同一枚** refresh token 时才续期——已被别人轮换过的令牌不再花掉。续期后的凭据会用于随后的 `/me` 与落盘，避免刚换到的新 token 立刻被旧 token 覆盖。
+  - **目录加载不再碰镜像**：`loadProviderModels` 新增 `credentialProvider` 接缝，适配器与路由在装了号池时传入号池的活跃凭据；带池时**完全不再回退**到单凭据文件，没有活跃账号时宁可返回空目录也不去轮换镜像里的令牌。无池部署行为不变（自刷新仍是它唯一的凭据来源）。
+  - **验证**：`tsc` 三个项目 0 错误；`npm test` **110 文件 / 1582 项通过、0 失败**（新增 9 条）。把源码 stash 回修复前，其中 6 条失败，确认断言不是空转。
+
 - **移除 Claude 线路的「合规告知 + 确认门禁」**：设置卡片顶部那段必须显式接受的告知、`/claude/api/consent` 路由、以及**主机侧门禁**全部删除。
   - **为什么必须整体删除而不是只删界面**：那条门禁不是纯 UI——它决定**适配器是否注册**，未接受时 `login`/`adopt`/`accounts`/`quota`/`connection/test`/`catalog/refresh`/`settings`(POST)/`login/input` 一律 403。**只删告知框会留下门禁、却再没有地方能确认它，等于把这条线路锁死。** 现在 `claimClaudeRoute` **无条件注册**（保留原有的路由争用处理：`try/catch` + `claudeConflict` 上报 + `llm/adapters-updated` 重新认领）。
   - **风险事实不变，只是不再要求点击**：Anthropic 现行条款仍明确不允许第三方应用提供 Claude.ai 登录、也不允许代用户经 Free/Pro/Max 凭据转发请求，本插件**仍未获任何授权或认可**。README 保留了如实说明，并写明「此前版本有确认步骤，现已移除；移除的只是那一步交互，不改变上述事实」。

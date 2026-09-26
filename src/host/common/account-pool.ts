@@ -541,6 +541,98 @@ export class AccountPoolCore<
     return { account: selected, credentials: selected.credentials }
   }
 
+  /**
+   * Refresh one named account's credential for a caller that is not a metered
+   * model request.
+   *
+   * The settings card is what this exists for. It addresses an account by id
+   * rather than taking a rotation slot, and it used to hand the stored
+   * credential to the provider unchanged; with a 15-minute access token that
+   * meant a card opened more than a quarter of an hour after the last model
+   * request sent an expired bearer to the usage endpoint and was answered with
+   * 401 — "sign in again" for a credential that a plain refresh would have
+   * renewed.
+   *
+   * Rotation bookkeeping is deliberately ignored, matching
+   * {@link getCredentialAccount}: a cooldown or a pinned account describes
+   * routing, not whether the credential can be read. A credential the provider
+   * has already declared unusable is still refused, because refreshing it
+   * cannot succeed.
+   *
+   * @param accountId - the pool account to read, or undefined for the primary.
+   * @param fetchFn - fetch used by the provider's token refresh.
+   */
+  async getFreshCredential(accountId?: string, fetchFn: typeof fetch = fetch): Promise<TCredentials> {
+    return this.credentialFor(accountId, fetchFn, false)
+  }
+
+  /**
+   * Renew one account's credential unconditionally.
+   *
+   * This is the answer to a 401 that the local clock did not predict: an access
+   * token can be revoked upstream or rotated by another holder while it still
+   * looks unexpired, and only the service's own refusal says so. Renewing it is
+   * what separates that from a credential that genuinely needs a new sign-in.
+   */
+  async renewCredential(accountId?: string, fetchFn: typeof fetch = fetch): Promise<TCredentials> {
+    return this.credentialFor(accountId, fetchFn, true)
+  }
+
+  /**
+   * Resolve, and if needed renew, one account's credential.
+   *
+   * With no id the account that would serve the next request is used — the
+   * active one, then the primary, then the first — because a caller that does
+   * not name an account (the catalog loader) still has to present the
+   * credential that is actually in play.
+   */
+  private async credentialFor(
+    accountId: string | undefined,
+    fetchFn: typeof fetch,
+    force: boolean,
+  ): Promise<TCredentials> {
+    const data = await this.read()
+    const target = accountId === undefined
+      ? (data.accounts.find((account) => account.id === data.activeAccountId)
+        ?? data.accounts.find((account) => account.isPrimary)
+        ?? data.accounts[0])
+      : data.accounts.find((account) => account.id === accountId)
+    if (target === undefined) {
+      throw new LlmError(this.hooks.emptyMessage ?? `未登录 ${this.hooks.displayName} 账号，请先在设置页添加账号。`, 'AUTH')
+    }
+    if (!this.isCredentialUsable(target)) {
+      throw new LlmError(
+        `${this.hooks.displayName} 账号的凭据已被拒绝，需要重新登录。`,
+        'AUTH',
+        { status: 401 },
+      )
+    }
+    if (!force && (!this.shouldRefreshCredential(target, Date.now()) || !this.hooks.refresh)) {
+      return target.credentials
+    }
+    if (!this.hooks.refresh) return target.credentials
+
+    let refreshed: TCredentials
+    try {
+      refreshed = await this.hooks.refresh(target.credentials, fetchFn)
+    } catch (error) {
+      // Same policy as a metered request: a refresh the provider calls final is
+      // that account's problem, and the card should say so rather than keep
+      // presenting a credential the upstream has already refused.
+      const status = this.hooks.refreshFailureStatus?.(error)
+      if (status !== undefined) {
+        await this.markAuthFailed(target.id, error instanceof Error ? error.message : String(error), status)
+          .catch(() => undefined)
+      }
+      throw error
+    }
+    // The refresh token rotates, so the rotated pair is persisted before it is
+    // used: dropping it here would leave the pool holding a token the upstream
+    // has already invalidated.
+    await this.updateAccountCredentials(target.id, refreshed)
+    return refreshed
+  }
+
   /** Whether one account's credential must be refreshed before it is handed out. */
   private shouldRefreshCredential(account: TAccount, now: number): boolean {
     if (this.hooks.needsRefresh) return this.hooks.needsRefresh(account.credentials, now)

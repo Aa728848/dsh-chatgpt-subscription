@@ -15,6 +15,7 @@ import {
   type KimiCodeCredentials,
 } from '../src/host/kimi-code/token-store.ts'
 import {
+  KimiCodeUnauthorizedError,
   ensureAccessToken,
   isRefreshTokenRejected,
   resetRefreshRejections,
@@ -213,6 +214,58 @@ describe('KimiCodeAccountPool', () => {
     await expect(pool.getEffectiveCredential()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
   })
 
+  it('renews an account credential on demand and mirrors it into the single store', async () => {
+    // The settings card asks for a credential by account id, outside any model
+    // request. It used to be handed the stored value, so an access token that
+    // expired between requests made the card report a 401.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    const account = await pool.addAccount(credential(1, { expiresAt: Date.now() + 1_000 }))
+
+    const tokenFetch = vi.fn(async () => Response.json({
+      access_token: 'at-renewed',
+      refresh_token: 'rt-renewed',
+      expires_in: 15 * 60,
+      token_type: 'Bearer',
+    }))
+    const renewed = await pool.getFreshCredential(account.id, tokenFetch as unknown as typeof fetch)
+
+    expect(tokenFetch).toHaveBeenCalledTimes(1)
+    expect(renewed.accessToken).toBe('at-renewed')
+    // The rotated pair is persisted, and the primary mirror follows it.
+    expect((await pool.read()).accounts[0]!.credentials.refreshToken).toBe('rt-renewed')
+    expect((await mirror.read())?.refreshToken).toBe('rt-renewed')
+  })
+
+  it('forces a renewal even when the stored token still looks unexpired', async () => {
+    // A 401 from the service is the only evidence that a live-looking token was
+    // revoked, so the renewal behind it cannot be gated on the local clock.
+    const { pool } = harness()
+    const account = await pool.addAccount(credential(1, { expiresAt: Date.now() + 3_600_000 }))
+
+    const tokenFetch = vi.fn(async () => Response.json({
+      access_token: 'at-forced',
+      refresh_token: 'rt-forced',
+      expires_in: 3_600,
+      token_type: 'Bearer',
+    }))
+    const renewed = await pool.renewCredential(account.id, tokenFetch as unknown as typeof fetch)
+    expect(renewed.accessToken).toBe('at-forced')
+    expect(tokenFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('marks an account whose forced renewal is refused', async () => {
+    const { pool } = harness()
+    const account = await pool.addAccount(credential(1, { expiresAt: Date.now() + 1_000 }))
+    const tokenFetch = vi.fn(async () => Response.json({ error: 'invalid_grant' }, { status: 400 }))
+
+    await expect(pool.renewCredential(account.id, tokenFetch as unknown as typeof fetch))
+      .rejects.toBeInstanceOf(KimiCodeUnauthorizedError)
+
+    const marked = (await pool.listAccounts()).find((entry) => entry.id === account.id)
+    expect(marked?.authStatus).toBe('expired')
+  })
+
   it('reports a signed-out pool with the wording the route used before the pool', async () => {
     const { pool } = harness()
     await expect(pool.getEffectiveCredential()).rejects.toThrow(/Not signed in to Kimi Code/)
@@ -284,6 +337,48 @@ describe('Kimi Code pool routes', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('refreshes the pooled credential before the card asks the service for usage', async () => {
+    // The credential below is still "valid" locally, so only the refresh proves
+    // the card is not presenting the stored access token as-is. That is the bug
+    // that made a 15-minute-old token look like a rejected account.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1, { expiresAt: Date.now() + 1_000 }))
+    await pool.addAccount(credential(1, { expiresAt: Date.now() + 1_000 }))
+    const store = new FileCredentialStore(tmp('kc-route-refresh'), new CredentialBackend() as never)
+    const modelSettings = modelSettingsStore()
+
+    const authorizations: string[] = []
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes('/oauth/') || String(url).includes('auth.kimi.com')) {
+        return Response.json({
+          access_token: 'at-renewed',
+          refresh_token: 'rt-renewed',
+          expires_in: 900,
+          token_type: 'Bearer',
+        })
+      }
+      authorizations.push((init?.headers as Record<string, string>).authorization)
+      if (String(url).includes('/usages')) return Response.json({ usages: {} })
+      return Response.json({ data: [] })
+    })
+
+    const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    const ctx = { webServer: { register(route: { handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) { routes.push(route); return () => undefined } } } as unknown as Context
+    registerKimiCodeRoutes(ctx, store, modelSettings, undefined, { fetchFn: fetchImpl as unknown as typeof fetch }, pool)
+
+    const { response, captured } = fakeExchange()
+    await routes[0]!.handler(fakeRequest({ url: '/kimi-code/api/status' }), response)
+
+    expect(captured.status).toBe(200)
+    // Every service call the card made carried the renewed token, not the one
+    // the pool happened to have stored.
+    expect(authorizations.length).toBeGreaterThan(0)
+    expect(new Set(authorizations)).toEqual(new Set(['Bearer at-renewed']))
+    // And the rotated pair was written back into the pool and its mirror.
+    expect((await pool.read()).accounts[0]!.credentials.refreshToken).toBe('rt-renewed')
+    expect((await mirror.read())?.refreshToken).toBe('rt-renewed')
   })
 })
 

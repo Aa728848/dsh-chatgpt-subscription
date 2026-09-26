@@ -66,7 +66,7 @@ import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { KimiCodeAccountPool } from './account-pool.ts'
 import { ensureAccessToken, KimiCodeUnauthorizedError } from './oauth.ts'
 import { retryAfterMs } from '../wire-auth.ts'
-import type { KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
+import type { KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
 
 /**
  * Transient-failure retry policy for the `kimi-code` route.
@@ -351,8 +351,19 @@ export class KimiCodeAdapter extends LlmAdapter {
    * shipped fallback otherwise, narrowed by the user's enabled selection.
    */
   private async catalog(): Promise<KimiCodeCatalogModel[]> {
+    const pool = this.accountPool
     const load = this.options.loadCatalog
-      ?? (() => loadProviderModels({ fetchFn: this.options.fetchFn, store: this.store }))
+      ?? (() => loadProviderModels({
+        fetchFn: this.options.fetchFn,
+        store: this.store,
+        // With a pool the single-credential file is only a mirror of one pooled
+        // account, and a refresh rotates the refresh token. Reading the mirror
+        // here would spend the token the pool is about to present, so the pool
+        // is asked instead.
+        ...(pool === null
+          ? {}
+          : { credentialProvider: (_region: KimiCodeRegion) => pool.getFreshCredential(undefined, this.options.fetchFn ?? fetch).then((c) => c.accessToken) }),
+      }))
     const live = await load().catch(() => [])
     if (live.length > 0) return live
     return FALLBACK_MODELS.map((model) => ({
