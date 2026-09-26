@@ -1230,6 +1230,229 @@ describe('SSE state machine', () => {
   })
 })
 
+describe('The finish chunk survives DSH\'s lossless-JSON check', () => {
+  /**
+   * The harness validates EVERY stream chunk as lossless JSON before the
+   * session log accepts it, and throws "Assistant stream chunk must be
+   * losslessly JSON-serializable" - failing the caller's whole turn - over a
+   * single value JSON cannot carry. This is a transcription of those rules, so
+   * the assertions below fail for the same reason the harness would, rather
+   * than for a hand-written property that could drift from it.
+   *
+   * Its own `snapshotJsonValue`/`isJsonValue` live in the harness's internal
+   * JSON-value module, which no published entry point re-exports, so the rules
+   * are restated here. The cases that matter are the ones JSON.parse produces:
+   * `undefined` (a parse miss or a reserved slot), `-0`, and out-of-range
+   * literals that parse to a non-finite number.
+   */
+  function losslessJsonReason(value: unknown): string | undefined {
+    const ancestors = new Set<object>()
+    const walk = (current: unknown, path: string): string | undefined => {
+      if (current === null) return undefined
+      switch (typeof current) {
+        case 'string':
+        case 'boolean':
+          return undefined
+        case 'number':
+          if (!Number.isFinite(current)) return `${path}: ${String(current)} is not a finite JSON number`
+          if (Object.is(current, -0)) return `${path}: negative zero is not preserved by a JSON round trip`
+          return undefined
+        case 'object':
+          break
+        default:
+          return `${path}: ${typeof current} is not a JSON value`
+      }
+      const object = current as object
+      if (ancestors.has(object)) return `${path}: circular reference`
+      ancestors.add(object)
+      if (Array.isArray(object)) {
+        // A hole and an explicit undefined both fail; JSON has no notion of one.
+        for (let index = 0; index < object.length; index += 1) {
+          if (!Object.prototype.hasOwnProperty.call(object, index)) return `${path}[${index}]: array hole`
+          const reason = walk(object[index], `${path}[${index}]`)
+          if (reason !== undefined) return reason
+        }
+        ancestors.delete(object)
+        return undefined
+      }
+      for (const key of Object.keys(object)) {
+        const reason = walk((object as Record<string, unknown>)[key], `${path}.${key}`)
+        if (reason !== undefined) return reason
+      }
+      ancestors.delete(object)
+      return undefined
+    }
+    return walk(value, 'finish')
+  }
+
+  function finishOf(lines: readonly string[]): Record<string, unknown> {
+    const state = createStreamState()
+    const chunks = [...feed(lines, state), ...closeStream(state)]
+    const finish = chunks.find((chunk) => chunk.type === 'finish')
+    if (finish === undefined || finish.type !== 'finish') throw new Error('no finish chunk')
+    return finish as unknown as Record<string, unknown>
+  }
+
+  /**
+   * The replay envelope's block entries, read with the whole `finish` chunk
+   * narrowed first: `ReplayEnvelope.blocks` is `readonly unknown[] | undefined`,
+   * so reading it needs the chunk in hand rather than a cast on the field.
+   */
+  function replayBlocksOf(finish: Record<string, unknown>): unknown[] {
+    const state = finish.replayState as { blocks?: readonly unknown[] } | undefined
+    return [...(state?.blocks ?? [])]
+  }
+
+  /**
+   * A stream whose blocks cover every kind that writes a replay slot.
+   *
+   * Deliberately WITHOUT message_stop: the caller closes the stream itself, so a
+   * test can still mutate state between the last block and the terminal chunk.
+   * (A real stream ends with message_stop, which closes the stream in-line and
+   * makes a later closeStream a documented no-op.)
+   */
+  const everyBlockKind = (toolInput: string): string[] => [
+    ...eventLines(messageStart()),
+    ...eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    ...eventLines({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'an answer' } }),
+    ...eventLines({ type: 'content_block_stop', index: 0 }),
+    ...eventLines({ type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: '' } }),
+    ...eventLines({ type: 'content_block_delta', index: 1, delta: { type: 'thinking_delta', thinking: 'weighing' } }),
+    ...eventLines({ type: 'content_block_delta', index: 1, delta: { type: 'signature_delta', signature: 'sig-1' } }),
+    ...eventLines({ type: 'content_block_stop', index: 1 }),
+    ...eventLines({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'toolu_01', name: 'Read', input: {} } }),
+    ...eventLines({ type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: toolInput } }),
+    ...eventLines({ type: 'content_block_stop', index: 2 }),
+    ...eventLines({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 42 } }),
+  ]
+
+  it('emits a finish chunk that is lossless JSON for every block kind', () => {
+    // The regression: the text and tool-call branches used to reserve their
+    // replay slot with `undefined`, so ANY answer containing text or a tool call
+    // failed the caller's turn. Reproduced on this machine as 6 of 6 affected
+    // turns across 5 sessions.
+    const finish = finishOf(everyBlockKind('{"file_path":"a"}'))
+    expect(losslessJsonReason(finish)).toBeUndefined()
+    expect(finish.replayState).toEqual({
+      response: { provider: PROVIDER_ID },
+      // Index-aligned with the emitted blocks, in the order they opened.
+      blocks: [
+        null, // text: no verbatim wire block to replay
+        { type: 'thinking', thinking: 'weighing', signature: 'sig-1' },
+        { type: 'tool_use', id: 'toolu_01', name: 'Read', input: { file_path: 'a' } },
+      ],
+    })
+  })
+
+  it('reserves a replay slot with null, never undefined', () => {
+    // Asserted on the state as well as the chunk, because the slot is reserved
+    // at content_block_start - long before closeStream runs the guard.
+    const state = createStreamState()
+    feed([
+      ...eventLines(messageStart()),
+      ...eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      ...eventLines({ type: 'content_block_stop', index: 0 }),
+      ...eventLines({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_02', name: 'Read', input: {} } }),
+    ], state)
+    expect(Object.keys(state.replayBlocks).length).toBe(2)
+    expect(state.replayBlocks[0]).toBeNull()
+    expect(state.replayBlocks[1]).toBeNull()
+    for (const slot of state.replayBlocks) expect(slot === undefined).toBe(false)
+  })
+
+  it('turns a tool call with no arguments and an unparseable one into a JSON-safe empty input', () => {
+    // safeJsonParse returns undefined for a missing or malformed fragment; that
+    // used to be written straight into `input`.
+    for (const raw of ['', '{not json', '{"a":1,"b":']) {
+      const finish = finishOf(everyBlockKind(raw))
+      expect(losslessJsonReason(finish)).toBeUndefined()
+      expect(replayBlocksOf(finish)[2]).toEqual({ type: 'tool_use', id: 'toolu_01', name: 'Read', input: {} })
+    }
+  })
+
+  it('keeps a parsed tool input that JSON.parse accepts but a JSON round trip does not preserve', () => {
+    // JSON.parse is not a safe source: it accepts -0 and out-of-range literals,
+    // so a model emitting {"n":-0} or {"n":1e999} used to reach the harness as a
+    // negative zero or an Infinity and reject the chunk.
+    const finish = finishOf(everyBlockKind('{"neg":-0,"big":1e999,"ok":1}'))
+    expect(losslessJsonReason(finish)).toBeUndefined()
+    const blocks = replayBlocksOf(finish)
+    expect(blocks[2]).toEqual({ type: 'tool_use', id: 'toolu_01', name: 'Read', input: { neg: 0, ok: 1 } })
+    // `-0` is normalized, not merely tolerated: it must read back as +0.
+    const input = (blocks[2] as { input: Record<string, number> }).input
+    expect(Object.is(input.neg, -0)).toBe(false)
+    expect(input.neg).toBe(0)
+  })
+
+  it('still replays a signed thinking block verbatim, and reads a null slot as "nothing to replay"', () => {
+    // The guard must not cost replay fidelity: this is the property the tool
+    // loop depends on, and a null slot must read back exactly as undefined did.
+    // Exercised through buildClaudeRequestBody (the real read path), because a
+    // null that leaked into the wire body would be a 400.
+    const blocks = [
+      { type: 'text', text: 'an answer' },
+      { type: 'reasoning', text: 'weighing' },
+      { type: 'tool-call', id: 'toolu_01', name: 'Read', arguments: '{"file_path":"a"}' },
+    ]
+    const finish = finishOf(everyBlockKind('{"file_path":"a"}'))
+    const assistant = createAssistantMessage({
+      content: blocks as HarnessContentBlock[],
+      source: { provider: PROVIDER_ID, model: 'claude-sonnet-4-6', replayState: finish.replayState },
+    })
+    const body = buildClaudeRequestBody(options({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] },
+        assistant,
+      ],
+    }) as unknown as GenerateOptions)
+    const messages = messagesOf(body)
+    // The signed thinking block comes back byte-for-byte, in the position its
+    // replay slot occupies (DSH index 1, after the text block)...
+    expect(messages[1]!.content[1]).toEqual({ type: 'thinking', thinking: 'weighing', signature: 'sig-1' })
+    // ...the text block whose slot is null is rebuilt from the DSH block, with
+    // no null leaking into the request...
+    expect(messages[1]!.content[0]).toEqual({ type: 'text', text: 'an answer' })
+    // ...and the tool call is rebuilt from its DSH block with its parsed input.
+    expect(messages[1]!.content[2]).toEqual({ type: 'tool_use', id: 'toolu_01', name: 'Read', input: { file_path: 'a' } })
+    expect(JSON.stringify(messages[1])).not.toContain('null')
+  })
+
+  it('does not let a future uninitialized slot cost the caller the whole turn', () => {
+    // The guard's reason to exist: a block type added later that forgets to
+    // reserve its slot degrades to a dropped replay entry, not a failed turn.
+    const state = createStreamState()
+    feed(everyBlockKind('{"file_path":"a"}'), state)
+    // Simulate the future mistake BEFORE the terminal chunk is built: a slot
+    // exactly where a producer forgot to write one (and a non-finite number,
+    // which is the other shape a JSON round trip does not preserve).
+    state.replayBlocks[2] = undefined as never
+    const finish = closeStream(state).find((chunk) => chunk.type === 'finish')
+    if (finish === undefined || finish.type !== 'finish') throw new Error('no finish chunk')
+    expect(losslessJsonReason(finish)).toBeUndefined()
+    const blocks = replayBlocksOf(finish)
+    expect(blocks[2]).toBeNull()
+    // The other entries keep their content.
+    expect(blocks[1]).toEqual({ type: 'thinking', thinking: 'weighing', signature: 'sig-1' })
+  })
+
+  it('is idempotent: message_stop already emitted the terminal chunk', () => {
+    // Pinned because the tests above rely on it: a real stream ends with
+    // message_stop, and the adapter's own closing call must not add a second
+    // finish (or a second replay envelope the harness would reject).
+    const state = createStreamState()
+    const chunks = feed([
+      ...eventLines(messageStart()),
+      ...eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      ...eventLines({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done' } }),
+      ...eventLines({ type: 'content_block_stop', index: 0 }),
+      ...eventLines({ type: 'message_stop' }),
+    ], state)
+    expect(chunks.filter((chunk) => chunk.type === 'finish')).toHaveLength(1)
+    expect(closeStream(state)).toEqual([])
+  })
+})
+
 describe('Usage mapping', () => {
   it('keeps the cache counters separate from inputTokens, because the three are disjoint', () => {
     const state = createStreamState()
