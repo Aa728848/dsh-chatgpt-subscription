@@ -219,6 +219,14 @@
  *
  * A future reader who notices the shared `supportsTemperature: false` and
  * "fixes" item 2 to 'mid-convo' has reintroduced exactly that bug.
+ *
+ * One more field on that row comes from neither source: its `minCliVersion`
+ * floor is the number upstream itself states when it refuses the model
+ * (`claude_code_version_too_old`, "version 2.1.280 or newer is required"). That
+ * is a stronger witness than a documentation page — the server said it — and it
+ * is recorded here so a claim below it is refused locally, before the request is
+ * sent, instead of as an upstream 400 that names neither the model nor the number
+ * the user has to reach.
  */
 
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './types.ts'
@@ -268,6 +276,25 @@ export interface ClaudeModelEntry {
    * at all): sending `{ type: 'disabled' }` is not a supported request.
    */
   canDisableThinking: boolean
+  /**
+   * Lowest reported client version upstream serves this model to, when known.
+   *
+   * ABSENT MEANS "NO KNOWN FLOOR", WHICH IS NOT THE SAME AS "NO FLOOR". Upstream
+   * enforces a minimum reported client version per model and answers a claim
+   * below it with HTTP 400 / `claude_code_version_too_old`
+   * ({@link ERROR_CODE_CLIENT_VERSION_TOO_OLD} in types.ts, whose doc comment
+   * states the invariant that ties this field to `CLAUDE_CLI_VERSION`). Most
+   * rows here predate any reason to record a number, and a floor that is guessed
+   * is worse than one that is absent in both directions: too low and the request
+   * still reaches the server and is refused there, too high and this line
+   * refuses a model the user could actually call. So the field is set ONLY where
+   * a floor has been observed, and a reader must never read its absence as
+   * evidence that a model accepts any client version.
+   *
+   * The value is a dotted numeric version compared by
+   * `compareDottedVersions` / `meetsDottedVersionFloor` in types.ts.
+   */
+  minCliVersion?: string
 }
 
 /**
@@ -491,6 +518,19 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     // thinking field or thinking: { type: 'adaptive' }. So "can this model be
     // told to stop thinking" is documented NO, not unknown.
     canDisableThinking: false,
+    // OBSERVED, not inferred: this model is refused with
+    // claude_code_version_too_old whose text names "version 2.1.280 or newer"
+    // as the requirement, so the floor is a number upstream stated rather than a
+    // guess about how new a model is. It is the reason CLAUDE_CLI_VERSION had to
+    // move off 2.1.251, and the reason the field exists at all: with the floor
+    // recorded here, a version that is too low is refused LOCALLY, before the
+    // request is sent, instead of as an opaque upstream 400 that names neither
+    // the model nor the number the user has to reach.
+    //
+    // This is the ONLY row in the table carrying a floor. Do not spread the
+    // value to its neighbours and do not invent floors for them: see the
+    // interface doc comment for why an absent floor is the honest value.
+    minCliVersion: '2.1.280',
   },
 ] as const) as readonly ClaudeModelEntry[]
 
@@ -609,4 +649,24 @@ export function claudeModelSupportsTemperature(modelId: string, catalog?: readon
 /** Whether thinking can be turned off for one model. */
 export function claudeModelCanDisableThinking(modelId: string, catalog?: readonly ClaudeModelEntry[]): boolean {
   return resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS).canDisableThinking
+}
+
+/**
+ * Lowest reported client version upstream serves one model to, when known.
+ *
+ * `undefined` means "no known floor" — NOT "no floor" — so a caller must treat it
+ * as "nothing to check" rather than as "any version is fine". The distinction
+ * matters because the caller is a pre-flight refusal: an absent floor must let
+ * the request through (refusing it would invent a restriction nobody recorded),
+ * while a present floor must block a claim below it.
+ *
+ * Unlike the other per-model lookups this one does NOT resolve through the
+ * conservative stub for an unknown id. The stub describes capabilities this line
+ * assumes; a version floor is a fact about the server that this line either has
+ * or has not observed, and manufacturing one for an unknown id would refuse a
+ * model nobody has evidence against.
+ */
+export function claudeMinCliVersionFor(modelId: string, catalog?: readonly ClaudeModelEntry[]): string | undefined {
+  const rows = catalog ?? CLAUDE_MODELS
+  return rows.find((model) => model.id === modelId)?.minCliVersion
 }

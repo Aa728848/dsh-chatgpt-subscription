@@ -102,20 +102,38 @@ export const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
 export const ANTHROPIC_VERSION = '2023-06-01'
 
 /**
- * Baseline client version this route reports to the subscription gateway.
+ * Client version this route CLAIMS to be on the subscription gateway.
  *
- * Upstream enforces a *minimum reported client version* on the subscription
- * path: a value below the floor is refused with HTTP 400 and an error body whose
- * code is `claude_code_version_too_old`. That is a hard stop for every request
- * rather than a per-request failure, so it cannot be a compile-time literal that
- * only moves when this package is republished — a user whose installed baseline
- * has aged past the server's floor has to be able to raise it without waiting
- * for a release.
+ * Upstream enforces a *minimum reported client version* per model on the
+ * subscription path: the version travels in the `user-agent` header (built by
+ * `claudeUserAgent` in client.ts) and a claim below the floor is refused with
+ * HTTP 400 and an error body whose code is `claude_code_version_too_old`. That
+ * is a hard stop for the whole request rather than a per-request failure, and the
+ * number in the refusal is OUR OWN claim echoed back — so the user is told their
+ * client is too old without being told which model demanded more, which is
+ * exactly how it misleads people into signing in again.
  *
- * Read the effective value with {@link claudeCliVersion}, pin one with
- * {@link setClaudeCliVersion}.
+ * THE INVARIANT THIS CONSTANT CARRIES. It must be at or above the highest
+ * `minCliVersion` that any shipped model in `model-catalog.ts` declares. A
+ * default below a shipped model's floor is a model this package advertises in
+ * its own picker and then cannot call at all, which is the bug this comment now
+ * records: `2.1.251` shipped while `claude-opus-5-5` — also shipped, and the
+ * row the default picker leads with — requires `2.1.280`. The matching
+ * regression lock lives in `test/claude-model-catalog.test.ts` and fails
+ * loudly, naming both versions, when a future model's floor is added without
+ * raising this value.
+ *
+ * The value is a REAL published `@anthropic-ai/claude-code` release, not a
+ * number chosen merely to clear a floor: claiming a version that does not exist
+ * trades a clear refusal for an unpredictable one. Note that npm's `stable`
+ * dist-tag can itself sit below a model's floor, so `latest` is the tag to read.
+ *
+ * It is still not a literal that only moves when this package is republished: a
+ * user whose installed baseline has aged past the server's floor has to be able
+ * to raise it without waiting for a release. Read the effective value with
+ * {@link claudeCliVersion}, pin one with {@link setClaudeCliVersion}.
  */
-export const CLAUDE_CLI_VERSION = '2.1.251'
+export const CLAUDE_CLI_VERSION = '2.1.283'
 
 /**
  * Loopback callback port the subscription flow defaults to.
@@ -256,6 +274,71 @@ export function claudeCliVersion(): string {
 export function setClaudeCliVersion(value: string | null): void {
   const normalized = (value ?? '').trim()
   cliVersionOverride = normalized === '' ? null : normalized
+}
+
+/**
+ * Compare two dotted numeric versions, e.g. `'2.1.283'` against `'2.1.280'`.
+ *
+ * This exists so a version FLOOR can be checked before a request is sent. The
+ * comparison is deliberately small and TOTAL rather than a SemVer parser: the
+ * only strings it ever sees are this line's own reported version (a pin, the
+ * `DSH_CLAUDE_CLI_VERSION` override, or the shipped default) and the floors
+ * recorded in the model catalog, and it must not throw on any of them — a
+ * comparison that can throw would turn a misconfigured version into a crash
+ * instead of the precise pre-flight refusal it was added to produce.
+ *
+ * Total means: a missing segment compares as 0 (`'2.1'` equals `'2.1.0'`), and a
+ * segment that is not a run of decimal digits compares as 0 rather than as NaN
+ * (`'abc'` equals `'0.0.0'`, and so does `''`). Leading zeros are exact rather
+ * than octal, and an optional leading `v` is tolerated because that is how a
+ * release is often written down.
+ *
+ * @returns a negative number, 0, or a positive number — the sign is the whole
+ *   contract, so callers compare against 0 rather than against ±1.
+ */
+export function compareDottedVersions(left: string, right: string): number {
+  const a = versionSegments(left)
+  const b = versionSegments(right)
+  const length = Math.max(a.length, b.length)
+  for (let index = 0; index < length; index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+/**
+ * Whether one reported version clears a floor.
+ *
+ * An absent floor (`undefined`) means "no known floor" rather than "no floor",
+ * so it never blocks a request: refusing a model because nobody recorded a
+ * number would be this line inventing a restriction upstream never stated.
+ * A MALFORMED version on either side, on the other hand, is refused — that is
+ * the conservative direction, since the check exists to stop an unknown claim
+ * from reaching a server that has already refused one.
+ */
+export function meetsDottedVersionFloor(version: string, floor?: string): boolean {
+  if (floor === undefined || floor.trim() === '') return true
+  if (!isDottedVersion(version)) return false
+  return compareDottedVersions(version, floor) >= 0
+}
+
+/** Whether a string is a run of dot-separated decimal segments (an optional leading `v`). */
+function isDottedVersion(value: string): boolean {
+  const trimmed = value.trim().replace(/^v/i, '')
+  return /^\d+(\.\d+)*$/.test(trimmed)
+}
+
+/** Numeric segments of a dotted version; a non-numeric or absent segment is 0. */
+function versionSegments(value: string): number[] {
+  const trimmed = value.trim().replace(/^v/i, '')
+  if (trimmed === '') return [0]
+  return trimmed.split('.').map((segment) => {
+    const digits = /^\d+$/.test(segment.trim()) ? segment.trim() : ''
+    if (digits === '') return 0
+    const parsed = Number.parseInt(digits, 10)
+    return Number.isFinite(parsed) ? parsed : 0
+  })
 }
 
 /**

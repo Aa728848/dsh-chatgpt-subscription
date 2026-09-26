@@ -81,7 +81,11 @@
  * A reported-client-version rejection is a REQUEST problem even though it
  * arrives as a 400 that mentions the client: it must NOT sign the user out, and
  * it has a real remedy (raise the reported version), so it is handled
- * explicitly with that remedy in the message.
+ * explicitly with that remedy in the message. Where the catalog records a
+ * model's floor, the same verdict is produced LOCALLY before the request is sent
+ * ({@link assertClaudeCliVersionMeetsFloor}), so the ordinary case never spends
+ * a request to be told the same thing less precisely; the upstream branch above
+ * stays for a claim that is too low for a floor this table has not learned yet.
  *
  * ---------------------------------------------------------------------------
  * 5. ASSUMPTIONS AND JUDGEMENT CALLS
@@ -135,6 +139,8 @@ import {
   PROVIDER_NAME,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
+  claudeCliVersion,
+  meetsDottedVersionFloor,
 } from './types.ts'
 import {
   FileCredentialStore,
@@ -147,6 +153,7 @@ import {
 import {
   DEFAULT_VISIBLE_MODEL_IDS,
   FALLBACK_MODELS,
+  claudeMinCliVersionFor,
   claudeModelSupportsImage,
   claudeReasoningEfforts,
   defaultContextWindowFor,
@@ -229,6 +236,61 @@ const MAX_COOLDOWN_MS = 5 * 60 * 60 * 1000
 
 /** What the user is told when this line has no credential to call with. */
 const MISSING_CREDENTIAL_MESSAGE = 'Not signed in to ' + PROVIDER_NAME + '. Sign in from Settings > Claude.'
+
+/**
+ * Refuse one model locally, before the request is sent, when the version this
+ * route reports is below the floor that model declares.
+ *
+ * WHY THIS EXISTS. Upstream validates the reported client version — the
+ * `user-agent` built by client.ts's `claudeUserAgent` — against a per-model
+ * minimum and answers a claim below it with an HTTP 400 whose code is
+ * `claude_code_version_too_old`. That refusal is correct but nearly unusable as
+ * a diagnosis: the version in its text is OUR OWN claim echoed back, the model
+ * is only identifiable from the request that was just consumed, and the number
+ * the user has to reach is buried in prose. The predictable consequence was the
+ * reported bug — a user reading "your client is too old" about a model this
+ * package advertises, whose remedy the text never names, and whose wording reads
+ * like a credential problem often enough that people sign in again for nothing.
+ *
+ * The catalog now records the floor per model (`minCliVersion`), so the same
+ * verdict can be produced HERE, at zero cost, naming the model, the version in
+ * force, the version required, and the remedy. The upstream refusal is left in
+ * place exactly as it was — this is an addition to the path, not a replacement,
+ * because a claim that clears every floor this table knows can still be too low
+ * for something the table has not learned yet, and `toLlmError` still handles
+ * that case with the same remedy.
+ *
+ * WHAT IT MUST NOT DO. It must not disable a model for anyone who never picks it:
+ * the check runs on the REQUEST path, against the model actually being called, so
+ * a floor for one row cannot remove another row from the picker. It must not be a
+ * credential error either — nothing is wrong with the stored sign-in, and the
+ * message says so outright, because signing in again is the wrong move and the
+ * upstream text invites it.
+ *
+ * Called with the model the request is about to name, and with the catalog that
+ * request resolved against, so a floor added for a live-only id is honoured too.
+ */
+export function assertClaudeCliVersionMeetsFloor(
+  modelId: string,
+  catalog: readonly ClaudeModelEntry[] = FALLBACK_MODELS,
+): void {
+  const floor = claudeMinCliVersionFor(modelId, catalog)
+  // "No known floor" is not "no floor": an absent value is the table declining to
+  // assert a restriction, so it lets the request through unchanged.
+  if (floor === undefined) return
+  const effective = claudeCliVersion()
+  if (meetsDottedVersionFloor(effective, floor)) return
+
+  throw new LlmError(
+    PROVIDER_NAME + ' will not serve ' + modelId + ' to a client reporting version '
+    + effective + ': upstream requires ' + floor + ' or newer for this model, and a lower '
+    + 'claim is refused with ' + ERROR_CODE_CLIENT_VERSION_TOO_OLD + '. This was caught locally, '
+    + 'before the request was sent. Raise the reported version with the DSH_CLAUDE_CLI_VERSION '
+    + 'environment variable, or with a setClaudeCliVersion pin, then retry. The stored sign-in '
+    + 'is still valid — this is not a credential problem and signing in again will not change it.',
+    'PROVIDER_ERROR',
+  )
+}
 
 /**
  * The pool surface this adapter uses, stated structurally.
@@ -358,6 +420,26 @@ export class ClaudeAdapter extends LlmAdapter {
       ?? ((current: ClaudeCredentials) => loadCatalog(current, { fetchFn: this.options.fetchFn }))
     const live = await load(credentials).catch(() => [])
     return live.length > 0 ? live : FALLBACK_MODELS
+  }
+
+  /**
+   * The catalog a REQUEST should be validated against.
+   *
+   * The same two branches {@link resolveModel} takes, in the same order, because
+   * the live listing is authoritative for which ids exist and a floor recorded
+   * for a live-only id would otherwise be skipped. An absent credential is not an
+   * error here: with no account there is nothing to list and the shipped table is
+   * the only answer available, which is exactly what the preview path already
+   * assumes. A credential that cannot be read degrades to the shipped table for
+   * the same reason — the floor check must not be the thing that turns a listing
+   * failure into a failed request.
+   */
+  private async catalogForRequest(): Promise<readonly ClaudeModelEntry[]> {
+    const record = await this.primaryAccount(await this.settings()).catch(() => null)
+    if (record === null) return FALLBACK_MODELS
+    // `catalog` already absorbs a failed listing and answers with the shipped
+    // table, so there is no second fallback to write here.
+    return this.catalog(record.credentials)
   }
 
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
@@ -555,6 +637,12 @@ export class ClaudeAdapter extends LlmAdapter {
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
     // One table for both directions of this request — see module note 2.
     const toolNames = claudeToolNames(requestOptions.tools)
+    // The version floor is checked here, BEFORE the credential is resolved and
+    // before any request is built: no account rotation and no retry can change a
+    // verdict about a client version, so spending a request to learn it would
+    // only produce the opaque upstream 400 this replaces. See the function's own
+    // doc comment for what it is careful NOT to do.
+    assertClaudeCliVersionMeetsFloor(requestOptions.model, await this.catalogForRequest())
     const effort = requestOptions.reasoningEffort === undefined || requestOptions.reasoningEffort === null
       ? undefined
       : String(requestOptions.reasoningEffort)

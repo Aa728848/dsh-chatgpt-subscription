@@ -54,6 +54,7 @@ import {
   CLAUDE_MODEL_IDS,
   DEFAULT_VISIBLE_MODEL_IDS,
   FALLBACK_MODELS,
+  claudeMinCliVersionFor,
   claudeModelCanDisableThinking,
   claudeModelSupportsImage,
   claudeModelSupportsTemperature,
@@ -64,7 +65,16 @@ import {
   resolveClaudeModel,
   type ClaudeModelEntry,
 } from '../src/host/claude/model-catalog.ts'
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from '../src/host/claude/types.ts'
+import { assertClaudeCliVersionMeetsFloor } from '../src/host/claude/adapter.ts'
+import {
+  CLAUDE_CLI_VERSION,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  claudeCliVersion,
+  compareDottedVersions,
+  meetsDottedVersionFloor,
+  setClaudeCliVersion,
+} from '../src/host/claude/types.ts'
 
 /**
  * Where the reference snapshot lives.
@@ -652,6 +662,108 @@ describe('claude model catalog / lookups', () => {
       expect(CLAUDE_MODEL_IDS).toContain(id)
     }
     expect(new Set(DEFAULT_VISIBLE_MODEL_IDS).size).toBe(DEFAULT_VISIBLE_MODEL_IDS.length)
+  })
+
+  it('keeps the shipped client version at or above every model\'s declared floor — the invariant that would have caught the Opus 5.5 bug', () => {
+    // THE REGRESSION LOCK FOR THIS WHOLE BUG.
+    //
+    // Upstream refuses a request whose reported client version is below the
+    // model's own floor. The reported version is CLAUDE_CLI_VERSION (or a pin, or
+    // DSH_CLAUDE_CLI_VERSION) and the floors are the catalog's minCliVersion
+    // values, so a default BELOW a floor a shipped row declares is a model this
+    // package offers in its own picker and then cannot call at all. That is what
+    // shipped: a 2.1.251 default beside claude-opus-5-5's 2.1.280 floor, for the
+    // very model the default picker leads with.
+    //
+    // Written over EVERY row rather than over the one known floor, because the
+    // failure this guards against is a FUTURE row arriving with a higher floor
+    // and nobody raising the default to match. Asserted against the shipped
+    // constant and not against claudeCliVersion(), which a pin or an environment
+    // variable can move — the default is the thing that ships to everyone.
+    const floors = CLAUDE_MODELS
+      .filter((model) => model.minCliVersion !== undefined)
+      .map((model) => ({ id: model.id, floor: model.minCliVersion as string }))
+
+    // Guard the premise: if the table ever loses every floor, this test would
+    // pass while checking nothing, and the next model added would be unchecked.
+    expect(
+      floors.length,
+      'no row in CLAUDE_MODELS declares a minCliVersion, so this invariant checks nothing',
+    ).toBeGreaterThan(0)
+
+    for (const { id, floor } of floors) {
+      expect(
+        compareDottedVersions(CLAUDE_CLI_VERSION, floor),
+        'CLAUDE_CLI_VERSION is ' + CLAUDE_CLI_VERSION + ' but ' + id + ' requires '
+        + floor + ' or newer. Raise CLAUDE_CLI_VERSION in src/host/claude/types.ts to at least '
+        + floor + ' — a published @anthropic-ai/claude-code release — or lower ' + id + "'s "
+        + 'minCliVersion if the floor itself was recorded wrongly. Shipping the current pair '
+        + 'advertises a model that every request for it will refuse with '
+        + 'claude_code_version_too_old.',
+      ).toBeGreaterThanOrEqual(0)
+    }
+
+    // The same statement through the helper the adapter's pre-flight uses, so the
+    // two cannot disagree about whether the shipped default clears a floor.
+    expect(meetsDottedVersionFloor(CLAUDE_CLI_VERSION, '2.1.280')).toBe(true)
+
+    // And the recorded floor really is the shipped row's own field, reached the
+    // way the adapter reaches it.
+    expect(claudeMinCliVersionFor('claude-opus-5-5')).toBe('2.1.280')
+  })
+
+  it('refuses locally, naming both versions, when the effective version is lowered below a floor', () => {
+    // The pre-flight half of the same invariant: a version that IS too low must
+    // be stopped here rather than sent and refused upstream. The pin is used to
+    // simulate it, and cleared in a finally block so no later test in this file —
+    // or in any other file sharing this process — inherits a lowered version.
+    try {
+      setClaudeCliVersion('2.1.251')
+      expect(claudeCliVersion()).toBe('2.1.251')
+
+      // Below the floor: refused, and the refusal lives on the request path so a
+      // model nothing is being asked for is untouched.
+      expect(() => assertClaudeCliVersionMeetsFloor('claude-opus-5-5')).toThrow(/claude_code_version_too_old|2.1.280/)
+
+      // At the floor and above it: allowed. 'At the floor' is the boundary a
+      // strictly-greater comparison would get wrong.
+      for (const version of ['2.1.280', '2.1.283', '2.2.0']) {
+        setClaudeCliVersion(version)
+        expect(() => assertClaudeCliVersionMeetsFloor('claude-opus-5-5')).not.toThrow()
+      }
+
+      // No floor recorded -> nothing to check -> the request is untouched. This is
+      // "no known floor", not "no floor".
+      setClaudeCliVersion('1.0.0')
+      expect(claudeMinCliVersionFor('claude-opus-5')).toBeUndefined()
+      expect(() => assertClaudeCliVersionMeetsFloor('claude-opus-5')).not.toThrow()
+      expect(() => assertClaudeCliVersionMeetsFloor('claude-does-not-exist')).not.toThrow()
+    } finally {
+      setClaudeCliVersion(null)
+    }
+    expect(claudeCliVersion()).toBe(CLAUDE_CLI_VERSION)
+  })
+
+  it('compares dotted versions totally, so a malformed claim refuses instead of throwing', () => {
+    expect(compareDottedVersions('2.1.283', '2.1.280')).toBeGreaterThan(0)
+    expect(compareDottedVersions('2.1.280', '2.1.280')).toBe(0)
+    expect(compareDottedVersions('2.1.279', '2.1.280')).toBeLessThan(0)
+    // A missing segment is 0, not NaN.
+    expect(compareDottedVersions('2.1', '2.1.0')).toBe(0)
+    expect(compareDottedVersions('2.0', '2.1.280')).toBeLessThan(0)
+    // Numeric, not lexicographic: '2.1.9' is OLDER than '2.1.10'.
+    expect(compareDottedVersions('2.1.9', '2.1.10')).toBeLessThan(0)
+    // Nothing here may throw, however malformed the input.
+    for (const [left, right] of [['', ''], ['abc', '2.1.280'], ['2.x.1', '2.1.280'], ['...', '.'], ['v2.1.283', '2.1.280']]) {
+      expect(() => compareDottedVersions(left as string, right as string)).not.toThrow()
+    }
+    expect(compareDottedVersions('abc', '0.0.0')).toBe(0)
+    expect(meetsDottedVersionFloor('2.1.283', undefined)).toBe(true)
+    expect(meetsDottedVersionFloor('2.1.283', '')).toBe(true)
+    // A claim this line cannot parse is refused against a real floor: the check
+    // exists to stop an unknown claim from reaching a server that already refused
+    // one, so failing open would defeat it.
+    expect(meetsDottedVersionFloor('not-a-version', '2.1.280')).toBe(false)
   })
 
   it('leads the default picker with the newest flagship', () => {

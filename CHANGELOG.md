@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **修复用户实测缺陷：选择 Claude Opus 5.5 必然失败（`claude_code_version_too_old`）**。上游原文：`Claude Code 2.1.251 does not support this model; version 2.1.280 or newer is required.` 那个 **2.1.251 是本插件自己申报的版本号**被服务端回显——本插件发布 `claude-opus-5-5`（该模型要求客户端 ≥ 2.1.280），却仍申报 2.1.251，两个数字自相矛盾，因此对该模型的每次请求都白花一个往返后被拒。**这是本插件引入的缺陷，与用户环境无关。**
+  - **根因不只是"数字写旧了"**：加模型与抬版本之间没有任何强制关系，所以同类缺陷会反复出现。修法分两层。
+  - **① 修正值与记录门槛**：`CLAUDE_CLI_VERSION` 由 `2.1.251` 改为 `2.1.283`（npm `latest` 的真实已发布版本，且 ≥ 2.1.280）。能力表新增可选字段 `minCliVersion`，**仅**给 `claude-opus-5-5` 填 `2.1.280`；其余 14 行**一律不填**，接口注释写明「缺省 = 未知门槛，不等于没有门槛」——不臆造无依据的数字。注：上游 npm `stable` tag 本身是 `2.1.274`，**低于该模型要求**，这正是 [anthropics/claude-code#96130](https://github.com/anthropics/claude-code/issues/96130) 报的坑。
+  - **② 本地预检，不再让上游报错**：新增 `assertClaudeCliVersionMeetsFloor()`，在 `requestStream()` **解析凭据之前、发起 fetch 之前**比较「生效版本 vs 该模型门槛」，低于则抛 `PROVIDER_ERROR`（**明确不是凭据错误**——错误文案直接写明「你的登录态仍然有效，重新登录不会改变它」，因为上游原文会误导用户去重新登录）。未记录门槛的模型行为不变；上游 400 分支保留，用于应对「本表尚未知的门槛」。
+  - **③ 加了会咬人的不变量锁**：测试断言「**申报的默认版本 ≥ 每一个模型的 `minCliVersion`**」，对**全表**遍历、且针对**申报常量本身**（不受 pin/环境变量影响），失败信息会同时点出两个版本号与修法。**我独立做了变异验证**：把 Opus 5.5 的门槛临时改成 `2.1.300`，测试立刻失败并输出 `CLAUDE_CLI_VERSION is 2.1.283 but claude-opus-5-5 requires 2.1.300 or newer…expected -17 to be greater than or equal to 0`；恢复后 22 项全绿。这条锁从此让「加了高门槛模型却忘抬版本」无法通过 CI。
+  - **排查过程中发现的另一件事**：npm 上 `0.9.0` 与 `0.9.2` **均已发布**，而**已发布的 0.9.2 仍然带着 `2.1.251` 且不含预检**（我拉了 tarball 核对）。同时 DSH web profile 通过软链接指向本仓库，而仓库的 `lib/` **是旧的**——所以运行中的插件确实跑的是有缺陷的构建。本次已重新 `npm run build`，构建产物现为 `2.1.283` + 预检（`lib` 由 .gitignore 覆盖，不入库）。
+  - **验证**：三个 tsconfig 均 **0 错误**；`npm test` **110 文件 / 1587 项通过、0 失败**；`npm run build` 成功。
+  - **临时可用的旁路**（无需等新版本）：启动 DSH 前设 `DSH_CLAUDE_CLI_VERSION=2.1.283`。优先级为 pin > 环境变量 > 申报默认值。
+
+
 - **修复 Kimi Code 设置卡片「过一段时间就报 `rejected the stored credential (401)`」**：这不是登录态过期，而是**卡片拿着一个已经过期的 access token 去查用量**，并把服务端的 401 读成了「凭据被拒绝」。
   - **根因一：卡片从不刷新号池凭据**。`/status`、`/quota`、`/connection/test` 都把号池里的 credentials 原样交给 `fetchAccountQuota`，而它只在**没有**传入凭据时才会刷新——号池的刷新只发生在模型请求路径上（`getEffectiveAccount`）。Kimi 的 access token 只有 **900 秒**（实测本机凭据 `exp - iat = 900`），于是「15 分钟没发过 Kimi 消息」＝「打开设置页必现 401」。实测本机两份存储：镜像里的 token 有效，号池里的 access token 已过期——正是这一条。
   - **根因二：同一枚轮换 refresh token 被两条路径各自刷新**。单凭据文件是号池主账号的**镜像**，但目录加载会绕过号池去刷它（`loadProviderModels` → `ensureAccessToken(store)`，且 stale-while-revalidate 会在后台再刷一次）。Kimi 的 refresh token 轮换后旧的即作废，于是镜像先刷成功就把号池那份变成死令牌；适配器下次刷新拿到 `invalid_grant`，账号被标 `authStatus=expired` 移出轮换，而进程内的「已拒绝」墓碑只在**重新登录**时清除——必须重新登录才能恢复。官方 CLI 正是为同一问题加了跨进程文件锁。

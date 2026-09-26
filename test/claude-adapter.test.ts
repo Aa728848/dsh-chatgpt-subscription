@@ -17,6 +17,11 @@
  *      independently built tables would dispatch a call to the wrong tool.
  *   5. A CLIENT-VERSION REJECTION IS NOT A CREDENTIAL FAILURE. It must not sign
  *      the user out.
+ *   6. A VERSION BELOW A MODEL'S FLOOR IS REFUSED LOCALLY, BEFORE THE REQUEST.
+ *      Upstream answers it with an opaque 400 about a version that is our own
+ *      claim echoed back, which reads like a credential problem; the catalog
+ *      records the floor, so the same verdict is produced here, naming the model,
+ *      both versions and the remedy, with no request spent.
  *
  * Everything runs against an injected fetch and an in-memory encrypted
  * credential backend. No test here touches the network or a platform credential
@@ -30,6 +35,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ClaudeAdapter,
+  assertClaudeCliVersionMeetsFloor,
   codeForFailure,
   cooldownMsFor,
   resolveDefaultReasoningEffort,
@@ -42,8 +48,19 @@ import {
   type ClaudeCredentialDocument,
   type ClaudeCredentials,
 } from '../src/host/claude/token-store.ts'
-import { FALLBACK_MODELS, DEFAULT_VISIBLE_MODEL_IDS } from '../src/host/claude/model-catalog.ts'
-import { API_BASE, MESSAGES_PATH, PROVIDER_ID } from '../src/host/claude/types.ts'
+import {
+  FALLBACK_MODELS,
+  DEFAULT_VISIBLE_MODEL_IDS,
+  type ClaudeModelEntry,
+} from '../src/host/claude/model-catalog.ts'
+import {
+  API_BASE,
+  CLAUDE_CLI_VERSION,
+  MESSAGES_PATH,
+  PROVIDER_ID,
+  claudeCliVersion,
+  setClaudeCliVersion,
+} from '../src/host/claude/types.ts'
 import { classifyFailure } from '../src/host/claude/client.ts'
 import type { CredentialStore } from '../src/host/token-store.ts'
 
@@ -439,6 +456,103 @@ describe('claude adapter failure codes', () => {
     expect(error.message).toContain('claude_code_version_too_old')
     expect(error.message).toContain('DSH_CLAUDE_CLI_VERSION')
     expect(calls).toHaveLength(1)
+  })
+
+  it('refuses a model whose floor the reported version misses — locally, as PROVIDER_ERROR, naming both versions and the remedy', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+
+    try {
+      // Simulates the pinned/environment version being too old — the state the
+      // shipped 2.1.251 default was in for claude-opus-5-5.
+      setClaudeCliVersion('2.1.251')
+      const error = await failureOf(adapter.stream(options('claude-opus-5-5'))) as { code: string; message: string }
+
+      // The whole point: no request is spent, and the user is told what to do.
+      expect(calls).toHaveLength(0)
+
+      // NOT a credential error. The upstream text invites a re-sign-in, which
+      // cannot change a client version; the local refusal must not repeat that.
+      expect(error.code).toBe('PROVIDER_ERROR')
+      expect(error.code).not.toBe('INVALID_CREDENTIAL')
+      // Every fact the user needs, in the message itself.
+      expect(error.message).toContain('claude-opus-5-5')
+      expect(error.message).toContain('2.1.251')
+      expect(error.message).toContain('2.1.280')
+      expect(error.message).toContain('DSH_CLAUDE_CLI_VERSION')
+      expect(error.message).toContain('setClaudeCliVersion')
+      // ...including that the stored sign-in is fine, which is the sentence the
+      // upstream wording lacks.
+      expect(error.message).toMatch(/sign(-| )?in is still valid|stored sign-in is still valid/)
+      expect(error.message).toContain('not a credential problem')
+
+      // A model this table records no floor for is untouched by the check.
+      const fine = recordingFetch(() => answerResponse('ok'))
+      await drain(makeAdapter(store, settings, fine.fn).stream(options('claude-opus-5')))
+      expect(fine.calls).toHaveLength(1)
+
+      // And raising the version clears the same model on the same adapter.
+      setClaudeCliVersion('2.1.283')
+      const raised = recordingFetch(() => answerResponse('ok'))
+      await drain(makeAdapter(store, settings, raised.fn).stream(options('claude-opus-5-5')))
+      expect(raised.calls).toHaveLength(1)
+      expect(raised.calls[0]!.headers['user-agent']).toBe('claude-cli/2.1.283 (external, cli)')
+    } finally {
+      // No test may inherit a lowered version.
+      setClaudeCliVersion(null)
+    }
+    expect(claudeCliVersion()).toBe(CLAUDE_CLI_VERSION)
+
+    // The rule is also stated directly, so a reordering of the request path that
+    // dropped the call would still be caught here.
+    try {
+      setClaudeCliVersion('2.1.279')
+      expect(() => assertClaudeCliVersionMeetsFloor('claude-opus-5-5')).toThrow(/2.1.280/)
+      setClaudeCliVersion('2.1.280')
+      expect(() => assertClaudeCliVersionMeetsFloor('claude-opus-5-5')).not.toThrow()
+    } finally {
+      setClaudeCliVersion(null)
+    }
+  })
+
+  it('honours a floor carried by a live-only catalog entry the shipped table does not have', async () => {
+    const { store, settings } = await mount()
+    // The check reads the catalog the REQUEST resolves against, not the frozen
+    // table alone: a floor recorded for an id only the account's live listing
+    // carries must be enforced too.
+    const liveCatalog: ClaudeModelEntry[] = [{
+      id: 'claude-live-only-9',
+      name: 'Claude Live Only 9',
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      supportsImage: true,
+      supportsTemperature: true,
+      thinkingMode: 'adaptive',
+      reasoningEfforts: ['low', 'high'],
+      canDisableThinking: true,
+      minCliVersion: '2.1.282',
+    }]
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = new ClaudeAdapter(store, settings, undefined, {
+      fetchFn: fn,
+      loadCatalog: async () => liveCatalog as never[],
+    })
+
+    try {
+      setClaudeCliVersion('2.1.280')
+      const error = await failureOf(adapter.stream(options('claude-live-only-9'))) as { code: string; message: string }
+      expect(error.code).toBe('PROVIDER_ERROR')
+      expect(error.message).toContain('claude-live-only-9')
+      expect(error.message).toContain('2.1.282')
+      expect(calls).toHaveLength(0)
+
+      setClaudeCliVersion('2.1.283')
+      await drain(adapter.stream(options('claude-live-only-9')))
+      expect(calls).toHaveLength(1)
+    } finally {
+      setClaudeCliVersion(null)
+    }
   })
 
   it('maps a live 401 and a live 529 from the real request path', async () => {
