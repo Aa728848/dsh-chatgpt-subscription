@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **移除 Claude 线路的「合规告知 + 确认门禁」**：设置卡片顶部那段必须显式接受的告知、`/claude/api/consent` 路由、以及**主机侧门禁**全部删除。
+  - **为什么必须整体删除而不是只删界面**：那条门禁不是纯 UI——它决定**适配器是否注册**，未接受时 `login`/`adopt`/`accounts`/`quota`/`connection/test`/`catalog/refresh`/`settings`(POST)/`login/input` 一律 403。**只删告知框会留下门禁、却再没有地方能确认它，等于把这条线路锁死。** 现在 `claimClaudeRoute` **无条件注册**（保留原有的路由争用处理：`try/catch` + `claudeConflict` 上报 + `llm/adapters-updated` 重新认领）。
+  - **风险事实不变，只是不再要求点击**：Anthropic 现行条款仍明确不允许第三方应用提供 Claude.ai 登录、也不允许代用户经 Free/Pro/Max 凭据转发请求，本插件**仍未获任何授权或认可**。README 保留了如实说明，并写明「此前版本有确认步骤，现已移除；移除的只是那一步交互，不改变上述事实」。
+  - **用户已有数据必须继续可读**——这是本次最需要小心的点，因为**已确认过的用户磁盘上确实写有 `consent` 键**（实测本机 `~/.dsh/storages/claude-models.json` 含 `{accepted:true, acceptedAt:..., version:"1"}`）。已加测试锁定：含旧 `consent` 键的设置文档**仍能正常解析、其余字段完好**，两条读取路径（手写文件回退解析器、命名空间 schema）都覆盖。手写解析器本就逐字段显式读取、不拒绝未知键，因此无需修改，但现在有测试固定这一行为。
+  - **一处纠正**：实现中途曾误以为「zod 默认剥离未知键」。实测本仓库使用的 `@deepseek-ai/schemastery` **会保留**未知键于 scope 值内，只是 `registerClaudePreferenceStore.status()` 按已知字段重建对象，因此陈旧键不会逃逸到状态响应、卡片或路由；文件回退路径则在下一次保存时丢弃它。**结果与预期一致，机制与当初描述不同**，已按实测记录。
+  - **验证**：`tsc` 三个项目**均 0 错误**；`npm test` **110 文件 / 1573 项通过、0 失败**（删除 1 个只测该特性的测试文件 367 行，新增 5 条把「不再有门禁」钉死的用例）；其中一条端到端用例证明一个从前被拦下的 settings POST 在**完全没有确认状态**时成功，并校验落盘键集合不含 `consent`。源码中仅剩 2 处 `consent` 字样，属于 **antigravity 线路自己的 OAuth `prompt:'consent'` 参数**，与本次无关、按边界未动。
+- **新增模型 Claude Opus 5.5（`claude-opus-5-5`）**，规格取自 Anthropic 官方文档（2026-09-22 发布）：1M 上下文 / 128K 输出 / 支持图片输入 / 档位 `low`–`max`。
+  - **它不能关闭思考**：官方文档明确 `thinking:{type:"disabled"}` 与 `{type:"enabled",budget_tokens:N}` **都返回 400**，只能省略 `thinking` 或发 `{type:"adaptive"}`。因此能力表标记为**不可关闭思考**，并有测试固定。
+  - **它的默认档位是 `medium`**（其它带 effort 的模型默认 `high`），因此**没有被归入 `mid-convo` 分支**——该分支会强制发送 `output_config.effort='high'`，对 Opus 5.5 等于**静默抬高一档、增加开销**。代码注释记录了这条推理，测试另有断言把 `mid-convo` 集合钉死为原有的两个 id，使「再加一个强制档位模型」必须是一次经过审视的改动。
+  - **不受影响的破坏性变更**：官方同时列出「不支持强制工具调用（`tool_choice` 为 `any`/`tool` 返回 400）」。已核实**本仓库 mapper 从不发送 `tool_choice`**，因此不受影响（此为查证结果，非假定）。
+  - **保真锁没有被削弱**：原测试硬断言「恰好 14 行且 id 与参照快照完全相等」，而本机快照（`@earendil-works/pi-ai@0.85.1`）**早于 Opus 5.5**。改法是：快照内每条仍逐字段比对（强度不变）；id 相等改为**同相对顺序的子序列匹配**；超出快照的 id 必须出现在测试内显式的 `LOCALLY_CURATED_MODEL_IDS` 清单上，并有**反向断言**（表里任何超出快照的 id 若不在清单上即失败），从而**臆造或拼错的 id 无法蒙混**。`DEFAULT_VISIBLE_MODEL_IDS` 现以 `claude-opus-5-5` 开头。
+  - **变异验证**：臆造 id、转录字段漂移、转录行乱序、把第三个模型标成 `mid-convo`、以及新增一条未登记的 id —— 五种篡改**均会导致测试失败**。
+  - **未联网核实的项**：模型行本身的字段值来自官方文档（非实测）；服务端的 actual effort 默认与 400 行为**未在真实账号上验证**。
+
+
+- **GLM（智谱 Coding Plan）线路被 Claude（订阅）线路取代**：移除 provider `zhipu-coding-plan` 的全部实现（`src/host/zhipu/`、`src/client/zhipu/`、`src/shared/zhipu-contracts.ts` 与三个 zhipu 测试文件），新增 provider `claude-subscription`，以 **Claude Pro / Max 订阅的 OAuth 登录态**访问 Anthropic Messages 接口（不使用 API Key、不按量计费）。设置页第六个标签由 **GLM** 换成 **Claude**。
+  - ⚠️ **合规前提，且已在 UI 上如实告知**：Anthropic 现行条款写明 *"Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users"*，并声明保留不经预告的执法权；已有开源项目被下架、有账号因此被限制。本插件**未获 Anthropic 任何授权或认可**，且**告知不改变条款效力**——风险由使用者承担。卡片文案据实措辞，并明确写出「未经授权」而非暗示合规。
+  - **门禁在 Host 侧强制，不是界面上的一个勾**：未接受时 `login` / `adopt` / `accounts` / `quota` / `connection/test` / `catalog/refresh` / settings POST / `login/input` **一律 403**，且**不读取本机 Claude Code 凭据、不注册适配器**（模型不出现在选择器里）；只有 `GET /status` 与 consent 接口开放，否则用户看不到也无法接受那段告知。撤销接受会**注销适配器**、中止在飞登录、停止额度轮询，但**保留已存凭据而使其不可用**（不静默删除用户数据）。以上每一条都有测试。
+  - **协议事实的出处是"本机可复核的引用"，不是自评**：OAuth 端点、client_id、鉴权头、Claude Code 身份块、工具名归一化表、模型能力表，全部取自本机随 harness 安装的 `@earendil-works/pi-ai@0.85.1`（lockfile integrity `b9bcce47…`，harness checkout `477b4f4205` = `dsh-v0.1.7-rc.2`）的 `dist/` 产物，均在代码注释与测试中带行号引用。**没有发出过任何真实 OAuth 或 Messages 请求**：本机无 Claude 凭据、无 Claude Code 安装，因此真实可用性**未经验证**（见下）。
+  - **本实现不照抄参照实现的一处安全缺陷**：参照实现把 PKCE verifier 直接当作 OAuth `state`（`dist/auth/oauth/anthropic.js:209` 的 `state: verifier`），会把本应保密的 verifier 写进授权 URL、地址栏、浏览器历史与剪贴板。本线路是两次**独立**随机抽样，并有测试断言授权 URL 中不出现原始 verifier（该测试先从真实的兑换请求里取出 verifier，因此否定断言不是空转）。
+  - **思考形态有四类，顺序决定成败**：`mid-convo`（`compat.supportsMidConvoEffort === true`，**排在最前且无条件**）→ `{type:'adaptive', block_binding:{prefix_mismatch_behavior:'drop_block'}}` **外加** `output_config.effort`；`adaptive` → `{type:'adaptive'}`；`budget` → `{type:'enabled', budget_tokens}`；`none` → 不发。**`claude-fable-5-1` 与 `claude-opus-5` 同时带 `forceAdaptiveThinking`**，因此把它们当成普通 `adaptive` 会**静默丢掉 `block_binding` 与 `output_config`**——看起来完全正确，而参照实现自己的注释写明该缺失会导致**持续 400**。这条缺陷是在实现过程中被独立核对发现并修正的，并补了反向对照（改回旧值即失败），因为它原本连"保真锁"一起锁错了。
+  - **预算算术按参照实现转录**（`MIN_ANSWER_TOKENS = 1024`、`DEFAULT_THINKING_BUDGETS`、`clampReasoning` 把 `xhigh`/`max` 夹到 `high`、以及 caller 侧与 wire 侧两道钳制），并测试了两个陷阱：`undefined` 的输出上限**不得**被当成 0（否则思考预算吞掉整个响应上限、回答没有余量），以及传入的必须是**已解析**的上限。
+  - **思考块带签名则原样回放**（`redacted_thinking` 同样回放），**无签名则丢弃**——这是思考模式下多轮工具调用的前提；有真正的多轮集成测试（`thinking → tool_use → tool_result → 续轮`），不是手搭 fixture。工具名出站按 Claude Code 规范大小写归一化、入站按大小写无关匹配回原名；**归一化后碰撞则放弃归一化**，避免把结果投给错误的工具。
+  - **两条登录路径是两个流程**：授权码与签发它的 `redirect_uri` 绑定，因此模式在流程开始时确定、中途切换即作废重发。默认**手动粘贴**（授权页把码显示在屏幕上），loopback 为可选并绑定 `127.0.0.1`。**一次授权只兑换一次**（compare-and-set：浏览器回调与粘贴同时到达时只有一方兑换，另一方得 409；已结算得 410 且不兑换）；**错误的 state 只拒绝那一个请求**，不终止合法登录。刷新是**单飞**的，否则到期瞬间一批请求会各自轮换刷新令牌全部作废。
+  - **账号身份是两层，令牌绝不作键**：不可变的 `internalId` 是唯一路由键；`identityKeys`（uuid / email / 派生 seed）只增不换，同一账号再次登录**合并**而非产生幽灵账号。**唯一例外的限制被如实写明并有测试**：服务端既无 uuid 也无 email 时无法自动识别同一账号，卡片会标注并提供**手动合并**——不伪造稳定 id。
+  - **收编本机 Claude Code 登录是可选且默认关闭的只读操作**：开启前只探测文件是否存在（不读内容），开启后才读取；得到的是**快照，永不由本插件刷新**——Claude Code 刷新同一枚轮换令牌，两个进程各自刷新会互相作废，而进程内单飞**解决不了跨进程竞态**，因此"永不刷新"是唯一正确答案而非优化。**绝不写入或删除 Claude Code 的任何文件**；managed 与 adopted 冲突时合并为一条且 managed 胜出，**adopted 标记不得残留**（残留会让该账号永远不再刷新）。
+  - **额度两套单位，分别换算且有交叉锁**：`/api/oauth/usage` 的 `utilization` 是**已用百分比 0–100**，而 `anthropic-ratelimit-unified-*-utilization` 响应头是**分数 0–1**、重置时间是 **epoch 秒**（与 body 的 ISO 字符串不同）。**`utilization: 0` 是「尚未使用」的正常态，不是额度耗尽**；两套单位不会被混淆（有测试证明同一状态的两种表达得到相同结果）。键集随账号类型变化且含会漂移的开关代号，因此只读已知键、**缺失不当作 0**。
+  - **换号两条硬约束**：只在**凭据失败**或**账号级限流**时换号——全局限流 / 过载 / 5xx **绝不换号**（其它账号共享同一全局限制）；**一旦已有输出产出就绝不换号**（否则重复文本或重复工具调用），改为直接报错。最多 3 次。
+  - **`xhigh` 原样透传，不做收敛**：`ReasoningEffortId` 在 dsh-llm 中是无约束 brand（`brandString(id)`，注释明写 no validation），本仓库已有四条线路使用 `xhigh`。写一张多余的收敛表会把用户选的档位静默降级——这条曾一度被误判为"harness 词表不支持"，经读定义后纠正。
+  - **移除是纯代码移除，不动用户数据**：`storages/zhipu-*.json` 与 `dsh-zhipu` 设置命名空间**原样留在磁盘、不再被读取**（不删除、不迁移、不加提示）。**兄弟线路不受影响**：`command-code` 与 `workbuddy` 目录中的 `zai-org/GLM-5.3`、`glm-5.3` 等是它们各自上游的**真实模型名**，全部保留（约 42 处，有命令核对数量未变）。
+  - **旧会话的恢复行为**：选择仍指向已删除 provider 的旧会话，发送时会被 harness 以 `session/model-unavailable`（"Select an available model before sending a message."）拒绝——这是 harness 内建行为，**不新增桥接**。恢复方式就是在模型选择器里另选一个模型。本机已核实无默认模型指向该 provider。
+  - **验证**：`tsc -p tsconfig.host.json` / `tsconfig.client.json` / `test/tsconfig.json` 三个项目**均 0 错误**；`npm test` **全绿**，无回归；`npm run build` 成功；`pnpm-lock.yaml` / `pnpm-workspace.yaml` **无 diff**（未改依赖）。新增约 11 个源文件与 12 个测试文件、约 260 项测试。
+  - **未经核实的项（必须如实记录）**：(1) **真实订阅端到端从未执行**——登录、令牌刷新、多轮工具调用、图片、额度读取、取消登录均未在真实账号上跑过，因此该线路应被视为**未经端到端验证**；(2) `/api/oauth/usage` 的确切键集与限流行为来自二手来源，整个 pnpm 树中不存在；(3) Claude Code 凭据文件的确切布局来自二手来源，且本机不存在该文件，收编路径只能靠 fixture 构造性验证；(4) macOS 钥匙串服务名未核实且明确列为非目标。以上各项均在代码注释中标注为来源等级，不冒充为本机事实。
+  - **回滚**：本条替代 `0.8.5`。如需退回带 GLM 线路的版本，安装 `@eddyskywalker/dsh-chatgpt-subscription@0.8.5` 即可；该版本的 GLM 凭据与设置仍在本机磁盘上，可直接复用。
+
+
 - **修复 issue #18：在 DSH Desktop 0.1.7-rc.2 启用本插件时报 `fiber state 5`、导致三条 web 行「未激活」**。报错原文是 `dsh: warning: 3 entries did not activate`，点名 `web`、`web-search-deepseek`、`web-fetch-http`，且**只有装了本插件才会出现**。根因是**启用路径上的启动时序**，不是本插件把 `web` 弄坏了。
   - **`fiber state 5` 是 `UNLOADING`**（`FiberState`：0 PENDING / 1 LOADING / 2 ACTIVE / 3 FAILED / 4 DISPOSED / 5 UNLOADING）。harness 的 `inactiveEntries()`（`packages/boot/app-boot/src/index.ts:857`）把任何非 ACTIVE / PENDING / FAILED 的行渲染成 `fiber state N`；「未激活」是它对**卸载中**这一瞬态的措辞，不是加载失败。
   - **为什么是这三行**：`web-search-deepseek` 与 `web-fetch-http` 都 `inject: ['web']`，所以 `web` 一旦重启，它们必然跟着卸载。它们是**被牵连**的，不是各自出错的。

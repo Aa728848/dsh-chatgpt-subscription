@@ -22,7 +22,6 @@ import { AccountPoolStore as AntigravityPool } from '../src/host/antigravity/acc
 import { antigravityHeaders, endpointCandidates } from '../src/host/antigravity/client.ts'
 import { buildRequest } from '../src/host/antigravity/mapper.ts'
 import { MODELS } from '../src/host/antigravity/types.ts'
-import { FileCredentialStore as ZhipuStore, credentialPath as zhipuCredentialPath } from '../src/host/zhipu/token-store.ts'
 import { WorkBuddyAccountPool } from '../src/host/workbuddy/account-pool.ts'
 import { workBuddyHeaders, refreshCredentials } from '../src/host/workbuddy/client.ts'
 
@@ -262,37 +261,6 @@ async function antigravityProbeModel(): Promise<string> {
   return 'gemini-3.1-pro-high'
 }
 
-async function probeZhipu(): Promise<void> {
-  if (!existsSync(`${zhipuCredentialPath()}.dpapi`)) {
-    note('zhipu:mcp', 'no-credentials', `no stored GLM credential at ${zhipuCredentialPath()}`)
-    return
-  }
-  const credentials = await new ZhipuStore().read()
-  if (!credentials) {
-    note('zhipu:mcp', 'no-credentials', 'store present but empty')
-    return
-  }
-  const base = credentials.apiBase
-  for (const tool of ['web_search_prime', 'web_reader']) {
-    const url = `${base}/api/mcp/${tool}/mcp`
-    try {
-      const { status, text } = await post(url, {
-        authorization: `Bearer ${credentials.apiKey}`,
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-      }, {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'dsh-probe', version: '0.0.1' } },
-      })
-      note(`zhipu:mcp ${url}`, status === 200 ? 'ok' : 'rejected', `http=${status} body=${snippet(text)}`, status)
-    } catch (error) {
-      note(`zhipu:mcp ${url}`, 'error', error instanceof Error ? error.message : String(error))
-    }
-  }
-}
-
 async function probeWorkBuddy(): Promise<void> {
   let credentials
   try {
@@ -340,7 +308,6 @@ test('probe sibling search channels', async () => {
 
   if (wanted('kimi')) await probeKimi()
   if (wanted('antigravity')) await probeAntigravity()
-  if (wanted('zhipu')) await probeZhipu()
   if (wanted('workbuddy')) await probeWorkBuddy()
 
   proxy.dispose()

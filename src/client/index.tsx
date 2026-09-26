@@ -19,6 +19,9 @@ import { installAntigravityStyles } from './antigravity/styles.ts'
 import { installPoolStyles } from './common/styles.ts'
 import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from './antigravity/locales.ts'
 import { AntigravityComposerQuota } from './antigravity/AntigravityComposerQuota.tsx'
+import { ClaudeComposerQuota } from './claude/ClaudeComposerQuota.tsx'
+import { dictionaries as claudeDicts, NS_CLAUDE } from './claude/locales.ts'
+import { installClaudeStyles } from './claude/styles.ts'
 import { CommandCodeComposerQuota } from './command-code/CommandCodeComposerQuota.tsx'
 import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from './command-code/locales.ts'
 import { KimiCodeComposerQuota } from './kimi-code/KimiCodeComposerQuota.tsx'
@@ -27,19 +30,16 @@ import { installKimiCodeStyles } from './kimi-code/styles.ts'
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
-import { ZhipuComposerQuota } from './zhipu/ZhipuComposerQuota.tsx'
-import { dictionaries as zhipuDicts, NS_ZHIPU } from './zhipu/locales.ts'
-import { installZhipuStyles } from './zhipu/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     'dsh-chatgpt-subscription': LocaleKey
     'dsh-antigravity': any
+    'dsh-claude': any
     'dsh-command-code': any
     'dsh-kimi-code': any
     'dsh-workbuddy': any
-    'dsh-zhipu': any
   }
 }
 
@@ -61,6 +61,11 @@ export function apply(ctx: ClientContext): void {
     installAntigravityStyles()
     return () => {}
   }, 'dsh-antigravity: styles')
+  ctx.effect(() => ctx.locale.register(NS_CLAUDE, claudeDicts), 'dsh-claude: dictionaries')
+  ctx.effect(() => {
+    installClaudeStyles()
+    return () => {}
+  }, 'dsh-claude: styles')
   ctx.effect(() => ctx.locale.register(NS_COMMAND_CODE, commandCodeDicts), 'dsh-command-code: dictionaries')
   ctx.effect(() => ctx.locale.register(NS_KIMI_CODE, kimiCodeDicts), 'dsh-kimi-code: dictionaries')
   ctx.effect(() => {
@@ -72,11 +77,6 @@ export function apply(ctx: ClientContext): void {
     installWorkBuddyStyles()
     return () => {}
   }, 'dsh-workbuddy: styles')
-  ctx.effect(() => ctx.locale.register(NS_ZHIPU, zhipuDicts), 'dsh-zhipu: dictionaries')
-  ctx.effect(() => {
-    installZhipuStyles()
-    return () => {}
-  }, 'dsh-zhipu: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -194,9 +194,9 @@ export function apply(ctx: ClientContext): void {
   }, WorkBuddyComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right',
-    id: 'zhipu-quota',
-    order: 40,
-    locale: NS_ZHIPU,
+    id: 'claude-quota',
+    order: 41,
+    locale: NS_CLAUDE,
     inject: (sessionId) => {
       const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
       return {
@@ -206,7 +206,7 @@ export function apply(ctx: ClientContext): void {
         },
       }
     },
-  }, ZhipuComposerQuota))
+  }, ClaudeComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,
