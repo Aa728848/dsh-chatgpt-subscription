@@ -224,6 +224,66 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
+/**
+ * Copy a value into the subset of JSON that survives a round trip, or
+ * `undefined` when it has no place there.
+ *
+ * WHY THIS EXISTS. A finish chunk's replayState is persisted through DSH's
+ * session log, which validates every stream chunk as LOSSLESS JSON and rejects
+ * the whole chunk - failing the caller's turn with "Assistant stream chunk must
+ * be losslessly JSON-serializable" - over a single value JSON cannot carry.
+ * `undefined` is the one this file's own idioms produce: a reserved slot, or a
+ * parse miss. But JSON.parse is not a safe source either: it accepts `-0` and
+ * out-of-range literals, so a model that emits `{"n":-0}` or `{"n":1e999}`
+ * hands us a negative zero or an Infinity that the round trip does not preserve.
+ *
+ * The rules mirror the harness's: strings, booleans and null pass; a finite
+ * number passes with -0 normalized to 0; an array becomes a dense array (a hole
+ * or an undefined member is not JSON); a plain object keeps only its enumerable
+ * string keys, dropping any whose value has no JSON form; anything else
+ * (function, symbol, bigint, undefined) has none.
+ *
+ * @param value - candidate value.
+ * @param seen - recursion guard for the current path, so a cycle resolves to
+ *   `undefined` rather than overflowing the stack.
+ * @returns the JSON-safe copy, or `undefined` for a value with no JSON form.
+ *   The caller decides whether that becomes `null` (an array slot) or a dropped
+ *   key (an object field).
+ */
+function jsonSafeValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (value === null) return null
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return value
+    case 'number':
+      if (!Number.isFinite(value)) return undefined
+      // JSON has no negative zero: it round-trips as 0, so normalize it here
+      // rather than let the harness reject the chunk.
+      return Object.is(value, -0) ? 0 : value
+    case 'object':
+      break
+    default:
+      // function, symbol, bigint, undefined
+      return undefined
+  }
+  if (seen.has(value)) return undefined
+  seen.add(value)
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => jsonSafeValue(item, seen) ?? null)
+    }
+    const record: Record<string, unknown> = {}
+    for (const key of Object.keys(value)) {
+      const child = jsonSafeValue((value as Record<string, unknown>)[key], seen)
+      if (child !== undefined) record[key] = child
+    }
+    return record
+  } finally {
+    seen.delete(value)
+  }
+}
+
 /** Strip a NUL that would truncate the string inside a JSON encoder. */
 function sanitizeText(text: string): string {
   return text.replace(/\0/g, '')
@@ -1434,8 +1494,17 @@ export interface ClaudeStreamState {
   toolCalls: Map<number, PendingToolCall>
   /** Anthropic content index -> a buffered thinking block. */
   pending: Map<number, PendingThinking>
-  /** Anthropic content index -> the wire block that produced the emitted block. */
-  replayBlocks: unknown[]
+  /**
+   * Anthropic content index -> the wire block that produced the emitted block.
+   *
+   * A slot is `null` - never `undefined` - when a block has no verbatim wire
+   * form to replay. That is not cosmetic: this array goes into the finish
+   * chunk's replayState, DSH validates every stream chunk as lossless JSON, and
+   * `undefined` is not a JSON value, so a hole here costs the caller the WHOLE
+   * turn ("Assistant stream chunk must be losslessly JSON-serializable") rather
+   * than one replay entry. See {@link jsonSafeValue}.
+   */
+  replayBlocks: (Record<string, unknown> | null)[]
   /** Tool-name translation the response side maps back through. */
   toolNames: ClaudeToolNames | undefined
   sawMessageStart: boolean
@@ -1503,7 +1572,10 @@ function closeTextBlock(state: ClaudeStreamState, contentIndex: number): StreamC
   const block: ContentBlock = { type: 'text', text: open.text }
   state.blocks[open.index] = block
   // The text was streamed as it arrived, so it is already what the caller saw.
-  state.replayBlocks[open.index] = undefined
+  // `null`, not `undefined`: this slot reaches the finish chunk's replayState,
+  // and an undefined array slot is not lossless JSON - DSH drops the entire
+  // chunk and the caller's turn fails. See ClaudeStreamState.replayBlocks.
+  state.replayBlocks[open.index] = null
   state.hasContent = true
   return [{ type: 'block-end', index: open.index, block }]
 }
@@ -1550,11 +1622,17 @@ function closeToolCall(state: ClaudeStreamState, contentIndex: number): StreamCh
   // name: the caller's spelling came from a translation that exists only while
   // that tool is offered, so a replay routed through the caller's name would
   // rename the call whenever the tool is not offered on the replaying request.
+  //
+  // `input` goes through jsonSafeValue because a parse miss yields undefined and
+  // a parsed document can still hold what JSON.parse accepts but lossless JSON
+  // does not: the wire's `-0` and its out-of-range literals (`1e999` parses to
+  // Infinity, which re-serializes as null). Either one makes the whole finish
+  // chunk unserializable. See ClaudeStreamState.replayBlocks.
   state.replayBlocks[pending.index] = {
     type: 'tool_use',
     id: pending.id,
     name: pending.wireName,
-    input: parsed,
+    input: jsonSafeValue(parsed) ?? {},
   }
   state.hasToolCall = true
   state.hasContent = true
@@ -1659,7 +1737,15 @@ export function closeStream(state: ClaudeStreamState): StreamChunk[] {
   out.push({
     type: 'finish',
     reason: finishReasonFor(state),
-    replayState: { response: { provider: PROVIDER_ID }, blocks: state.replayBlocks },
+    replayState: {
+      response: { provider: PROVIDER_ID },
+      // Runs through jsonSafeValue on the way out as well as at the point each
+      // slot is filled, so a future slot this file forgets to initialize costs
+      // one replay entry - not the caller's whole turn. A `null` entry means
+      // "no verbatim wire block here", which is exactly how the request builder
+      // reads it back (replayBlockFor returns undefined for a non-record).
+      blocks: state.replayBlocks.map((block) => jsonSafeValue(block) ?? null),
+    },
   })
   return out
 }
@@ -1752,7 +1838,10 @@ export function processStreamLine(line: string, state: ClaudeStreamState): Strea
       const pending: PendingToolCall = { index, id, name, wireName, arguments: seedInput }
       state.toolCalls.set(contentIndex, pending)
       state.blocks.push({ type: 'tool-call', id: toToolCallId(id), name, arguments: seedInput })
-      state.replayBlocks[index] = undefined
+      // Reserved until content_block_stop fills it in (see closeToolCall). It
+      // must still be a JSON value: DSH rejects the whole finish chunk over one
+      // undefined slot. See ClaudeStreamState.replayBlocks.
+      state.replayBlocks[index] = null
       out.push({ type: 'block-start', index, blockType: 'tool-call' })
       out.push({ type: 'tool-call-delta', index, id: toToolCallId(id), name, argumentsDelta: seedInput })
       return out

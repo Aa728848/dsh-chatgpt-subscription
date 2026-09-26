@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **修复用户实测缺陷：Claude 线路凡是有内容的回复必定失败（`Assistant stream chunk must be losslessly JSON-serializable`）**。现象是**每一轮**只要模型输出了文字/思考/工具调用，整轮就以这个错误告终，UI 显示"本轮运行失败"；而传输失败、凭据失败这类**没有内容**的轮次反而正常，所以看起来像偶发。**这是本插件引入的缺陷，与用户环境无关。**
+  - **根因：`claude/mapper.ts` 把 `undefined` 写进了 finish 块的 `replayState.blocks`**。DSH 在会话日志接受每个 stream chunk 之前会做**无损 JSON 校验**，只要包含 JSON 无法承载的值（`undefined`、函数、symbol、非有限数、`-0`、数组空洞等）就**整块拒收**——代价是用户**整轮**对话，而不是一条元数据。三处写坏值：
+    - `closeTextBlock`：`state.replayBlocks[open.index] = undefined`（预留给文本块；文本本来就靠 DSH 自己持有的 block 回放，无需逐字条目）；
+    - `content_block_start` 的 `tool_use` 分支：`state.replayBlocks[index] = undefined`（先占位、等 `content_block_stop` 填入）；
+    - `closeToolCall`：`input: parsed`，而 `safeJsonParse` 在**缺参数或 JSON 解析失败**时返回 `undefined`。
+  - **`JSON.parse` 本身也不是安全来源**（这一条超出了原始报告）：它接受线上真会出现的 `-0` 与越界字面量，`{"n":-0}` 解析出负零、`{"n":1e999}` 解析出 `Infinity`，两者都不能无损往返。所以只把 `undefined` 换成 `null` 并不够。
+  - **修法（四件事）**：① 两处占位改写成 `null`（合法的 JSON 值，语义正是"此处无逐字条目"）；② 新增 `jsonSafeValue()`，把值收敛进可无损往返的子集——有限数字通过、`-0` 归一为 `0`、数组变稠密、普通对象只保留可枚举字符串键并丢弃无 JSON 形式的字段（函数/symbol/bigint/undefined）、带环则判为无形式；③ `input` 经 `jsonSafeValue(parsed) ?? {}` 规范化；④ `closeStream` 出口再整体过一遍 `jsonSafeValue`，**未来若有新槽位忘记初始化，代价是一条回放条目而不是用户整轮**。
+  - **类型收紧，让同类缺陷编不过**：`ClaudeStreamState.replayBlocks` 由 `unknown[]` 改为 `(Record<string, unknown> | null)[]`。原先那两处 `= undefined` 从此是**编译错误**——这是本次唯一能在编译期拦截该类缺陷的手段。
+  - **回放语义不变**：读取端 `replayBlockFor` 用 `isRecord(entry) ? entry : undefined`，对它而言 `null` 与 `undefined` **无法区分**，因此带签名的 thinking 块依旧逐字回放（这是多轮工具调用的前提），文本块照旧由 DSH 自己的 block 重建。已用 `buildClaudeRequestBody`（真实读取路径，而非内部函数）专门断言这一点。
+  - **独立变异验证（不只是"跑绿了"）**：把三处一起还原成原缺陷 → 新增测试 **5 条失败**；只还原出口守卫（三处仍是 `null`）→ **恰好 1 条**（守卫那条）失败，证明它防的是"未来漏写"而非重复覆盖；全部修复 → 7 条全绿。三次篡改均被捕获。
+  - **验证**：`npx tsc -b --force`（host + client）与 `npx tsc -p test/tsconfig.json`（测试树）**均 0 错误**；`npm run build` 成功；`test/claude-mapper.test.ts` **70 项通过**（原 63 + 新 7）；全量 `npx vitest run` **1599 通过 / 3 失败 / 9 跳过**，3 个失败全部是 `test/web-provider-lifecycle.test.ts` 的 `URL hostname "example.com" resolves to a non-public IP address`——**与本次改动无关**：本机 DNS 把公网域名解析到 `198.18.0.0/15`（透明代理的 fake-IP），该文件在**未改动的干净工作树上单跑同样 3 失败**（已用 `git stash` 实证）。
+  - **未验证项（如实说明）**：本次**没有向真实 Anthropic 端点发过请求**。结论依托两点：一是缺陷链在本地用**真实插件代码 + 从 `app.asar` 抽出的 DSH 真实校验函数**复现（修复前 8 种流式形态 7 种被拒，修复后 8/8 通过），二是用用户会话日志里**两次真实失败轮次**的原始数据回放，修复后 `2/2` 产出被接受的 chunk。
+  - **影响面**：只有 `claude-subscription` 线路受影响（`antigravity` 的 `replayBlocks` 只经 `push()` 写入、从不留空位，实测无此问题）；该文件其余适配器未受影响。
+
 - **修复用户实测缺陷：调度模式一旦进入 R8 兜底就"卡死"，任务已经成功完成，下一个任务仍不再派发子代理**。
   - **根因不是状态泄漏，而是提示词缺了两件事**。全仓库检索确认：插件**没有任何**失败计数器、熔断标志或持久化状态（`src/` 里出现"连续失败"字样的唯一位置就是 R8 那句话本身），委派守卫 `subagent-model-authorization` 是**纯函数**（读设置/会话快照→判定→返回理由或 `undefined`），DSH 内核的子代理失败也是**一次性**的（失败即 `throw` 成 `isError`，不重试、不入状态）。所以"兜底状态"只存在于**对话历史**里：旧 R8 把「子代理连续失败」列为无阈值、无失效条件、无解除规则的许可，模型写下"进入兜底"之后，后续每轮都会把它当成仍然成立的既有结论——R0 要求每次重新分诊，R8 没有对应要求，R6 的"不通过就重新派发"也没有兜底之后的**恢复**路径。
   - **修法：把兜底从"会话级口头结论"改成"任务级、有阈值、可解除"的规则**，四条同批落地：① R8 首句明确**任务级、非会话级**，只覆盖触发它的那一个任务；② 触发条件收紧为「同一任务书按 R6 **重新派发两次**仍不通过」（R6 同步补上这个上限），取代不可判定的"连续失败"；③ 新增**解除规则**——下一个任务一律回到 R0 重新分诊，条件已解除就必须恢复派发，不得沿用或预设兜底；④ 新增两条反模式（把一次兜底沿用成整个会话默认；拿工具硬拒当当兜底理由而不修触发条件），并针对两类**会话内不会自愈**的硬拒绝给出修条件路径（`active child limit` → 等子代理结算；`subagent model selection` → 按错误里列出的授权路由写明 `provider`/`model`）。
