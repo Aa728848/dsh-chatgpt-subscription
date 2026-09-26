@@ -144,6 +144,36 @@
  * block may be replayed at all arrives at the END of the block, so a signed
  * block cannot be recognized before then, and a reasoning block that cannot be
  * replayed is not content the caller should be told it received.
+ *
+ * ---------------------------------------------------------------------------
+ * 7. PROMPT CACHING IS ON BY DEFAULT, AND IT IS THE REQUEST THAT TURNS IT ON
+ * ---------------------------------------------------------------------------
+ *
+ * Anthropic's prompt cache is REQUEST-DRIVEN: the server caches a prefix only
+ * where the request puts an explicit cache_control breakpoint, and a request
+ * with no breakpoint gets no cache_read_input_tokens back no matter how
+ * identical its bytes are turn over turn. Emitting the breakpoints is therefore
+ * this module's job, and it is the DEFAULT: ClaudeRequestOptions.cacheControl
+ * is true unless a caller explicitly states false. The reference implementation
+ * this line is transcribed from resolves the same way (its resolveCacheRetention
+ * defaults to 'short'; only an explicit 'none' skips caching), and the
+ * asymmetry is deliberate - a caller that says NOTHING must still get caching,
+ * because an opt-in flag that one call site forgets to pass is exactly how this
+ * request stopped carrying breakpoints in the first place.
+ *
+ * Three sites are marked, which is three of the four breakpoints the wire
+ * accepts (see MAX_CACHE_BREAKPOINTS): the LAST system block, the last block of
+ * the LAST user message, and the last tool. The first covers the identity block
+ * and the caller's prompt; the second is what actually caches CONVERSATION
+ * HISTORY across turns, since it sits at the end of everything the next turn
+ * will resend; the third keeps the tool table inside the cached prefix instead
+ * of behind the first message breakpoint.
+ *
+ * Where the marking happens matters as much as that it happens: the message
+ * breakpoint goes on the FINAL merged list, after mergeClaudeMessages has
+ * folded consecutive same-role turns together. Marking the pre-merge list can
+ * land the breakpoint on a block the merge then moves back, which leaves a
+ * marker in the request that caches nothing the next turn can reuse.
  */
 
 import {
@@ -227,6 +257,27 @@ export const CLAUDE_CODE_IDENTITY_TEXT = "You are Claude Code, Anthropic's offic
 
 /** Answer room the budget clamp always leaves below the response ceiling. */
 export const MIN_ANSWER_TOKENS = 1024
+
+/**
+ * Cache breakpoints one Messages request may carry.
+ *
+ * TRANSCRIBED from the wire's own limit and the reference implementation's
+ * reading of it. This module marks at most three (see the module doc), so the
+ * budget is never the binding constraint - the constant exists so a test can
+ * assert that against the REAL number rather than a magic three.
+ */
+export const MAX_CACHE_BREAKPOINTS = 4
+
+/**
+ * Block types the wire accepts a cache_control marker on.
+ *
+ * A marker on any other block is a request the server rejects, so the last
+ * block of the last user message is marked only when its type is one of these
+ * (TRANSCRIBED from the reference, which guards on exactly this set). The
+ * absence of thinking blocks is not an oversight: they only ever appear in
+ * ASSISTANT turns, and this module never marks an assistant block.
+ */
+const CACHE_MARKABLE_BLOCK_TYPES: ReadonlySet<string> = new Set(['text', 'image', 'tool_result'])
 
 /**
  * Thinking budget one level asks for, before any clamp.
@@ -903,24 +954,119 @@ export function leadingSystemText(options: GenerateOptions): string | undefined 
  * The system array for one request: identity first, always.
  *
  * The identity block is not conditional on anything (see the module doc). The
- * optional ephemeral cache marker is opt-in and goes on the LAST block, which
- * is the Anthropic-recommended shape: a breakpoint at the end of the prompt
- * caches everything above it, so marking the user block also covers the
- * identity block, while marking the identity block alone would cache nothing
- * that changes.
+ * ephemeral cache marker goes on the LAST block and is ON BY DEFAULT, which is
+ * the Anthropic-recommended shape: a breakpoint at the end of the prompt caches
+ * everything above it, so marking the user block also covers the identity
+ * block, while marking the identity block alone would cache nothing that
+ * changes.
+ *
+ * @param cacheControl - false is the opt-OUT; the default requests caching.
  */
 export function buildClaudeSystemBlocks(
   options: GenerateOptions,
-  systemCacheControl: boolean = false,
+  cacheControl: boolean = true,
 ): AnthropicBlock[] {
   const blocks: AnthropicBlock[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }]
   const userText = leadingSystemText(options)
   if (userText !== undefined) blocks.push({ type: 'text', text: userText })
-  if (systemCacheControl) {
+  if (cacheControl) {
     const last = blocks[blocks.length - 1] as AnthropicBlock
     last.cache_control = { type: 'ephemeral' }
   }
   return blocks
+}
+
+/**
+ * The last block worth a cache breakpoint on the message list, if any.
+ *
+ * TRANSCRIBED from the reference, which marks the last block of the last USER
+ * message and nothing else. Two guards come with it, and both are load-bearing:
+ * the last message must be a user turn (a history ending on an assistant turn -
+ * a prefill-shaped request - gets no message breakpoint rather than a marker
+ * somewhere it was not asked for), and the block must be one the wire accepts a
+ * marker on. An unmarkable block yields NO breakpoint rather than one moved
+ * onto an earlier turn: an unmasked request is merely uncached, while a marker
+ * on a block type the wire rejects fails the whole turn.
+ */
+function lastCacheableUserBlock(messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>): AnthropicBlock | undefined {
+  const lastMessage = messages[messages.length - 1]
+  if (lastMessage === undefined || lastMessage.role !== 'user') return undefined
+  const block = lastMessage.content[lastMessage.content.length - 1]
+  if (block === undefined) return undefined
+  return CACHE_MARKABLE_BLOCK_TYPES.has(String(block.type)) ? block : undefined
+}
+
+/**
+ * Put the cache breakpoints on one built body, and report how many landed.
+ *
+ * Split out from the builder so the marking runs against the FINAL shape - the
+ * merged message list and the full tool array - rather than against the
+ * intermediate one (see the module doc's section 7). An assistant turn after
+ * the last user turn (a truncated history, or a request that appends an
+ * assistant preamble) leaves that turn's tail unmarked; marking it would put
+ * the marker below the assistant content and cache a prefix the next request
+ * does not resend.
+ *
+ * @param body - the built body, mutated in place: it was created by this module
+ *   and has not been handed to a caller yet.
+ * @returns the number of breakpoints written.
+ */
+function markClaudeCacheBreakpoints(body: Record<string, unknown>): number {
+  let marked = 0
+
+  const system = body.system
+  if (Array.isArray(system)) {
+    const last = system[system.length - 1] as AnthropicBlock | undefined
+    if (last !== undefined) {
+      last.cache_control = { type: 'ephemeral' }
+      marked += 1
+    }
+  }
+
+  const messages = body.messages as Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> | undefined
+  if (Array.isArray(messages)) {
+    const target = lastCacheableUserBlock(messages)
+    if (target !== undefined) {
+      target.cache_control = { type: 'ephemeral' }
+      marked += 1
+    }
+  }
+
+  const tools = body.tools
+  if (Array.isArray(tools) && tools.length > 0) {
+    const last = tools[tools.length - 1] as AnthropicBlock | undefined
+    if (last !== undefined) {
+      last.cache_control = { type: 'ephemeral' }
+      marked += 1
+    }
+  }
+
+  return marked
+}
+
+/**
+ * How many cache_control markers one built body carries.
+ *
+ * Walks the finished body rather than counting calls to the marker: the number
+ * the wire enforces is the number of markers IN THE BYTES, so a test that
+ * counts its own marking calls could pass while the body carried a fourth
+ * breakpoint from somewhere else. Used by the tests only.
+ */
+export function countClaudeCacheBreakpoints(body: unknown): number {
+  let count = 0
+  // A marker's own value is { type: 'ephemeral' } and holds no nested markers,
+  // so a plain walk cannot double-count one.
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry)
+      return
+    }
+    if (!isRecord(value)) return
+    if (value.cache_control !== undefined) count += 1
+    for (const entry of Object.values(value)) visit(entry)
+  }
+  visit(body)
+  return count
 }
 
 /** One tool definition in the wire shape. */
@@ -1141,10 +1287,14 @@ function mergeClaudeMessages(entries: Array<{ role: 'user' | 'assistant'; conten
 /** Options this builder reads beyond GenerateOptions. */
 export interface ClaudeRequestOptions {
   /**
-   * Put an ephemeral cache breakpoint on the last system block. Default false,
-   * so the marker is opt-in.
+   * Emit prompt-cache breakpoints. Default TRUE: caching is what a caller that
+   * states nothing gets (see the module doc). Pass false only to opt out.
+   *
+   * When on, breakpoints go on the last system block, the last block of the
+   * last user message, and the last tool - at most
+   * {@link MAX_CACHE_BREAKPOINTS} in total.
    */
-  systemCacheControl?: boolean
+  cacheControl?: boolean
   /**
    * Tool-name translation to use. Pass the same value to createStreamState so
    * the response side maps back through the identical table.
@@ -1162,7 +1312,8 @@ export interface ClaudeRequestOptions {
  *
  * @param options - request options carrying the normalized conversation.
  * @param images - images read for this request by resolveRequestImages.
- * @param request - cache and translation options.
+ * @param request - cache and translation options. Caching is the DEFAULT and
+ *   is skipped only when request.cacheControl is explicitly false.
  */
 export function buildClaudeRequestBody(
   options: GenerateOptions,
@@ -1206,11 +1357,13 @@ export function buildClaudeRequestBody(
   const thinkingEnabled = thinking !== undefined && thinking.type !== 'disabled'
   const temperatureAllowed = claudeModelSupportsTemperature(options.model) && !thinkingEnabled
 
-  return {
+  const caching = request.cacheControl !== false
+
+  const body: Record<string, unknown> = {
     model: options.model,
     max_tokens: maxTokens,
     stream: true,
-    system: buildClaudeSystemBlocks(options, request.systemCacheControl === true),
+    system: buildClaudeSystemBlocks(options, caching),
     messages: mergeClaudeMessages(entries),
     ...(options.tools !== undefined && options.tools.length > 0
       ? { tools: options.tools.map((tool) => wireTool(tool, names)) }
@@ -1224,6 +1377,11 @@ export function buildClaudeRequestBody(
     // request to stop.
     ...(options.stop !== undefined && options.stop.length > 0 ? { stop_sequences: [...options.stop] } : {}),
   }
+
+  // The breakpoints go on the FINISHED body: the message marker needs the MERGED
+  // list, and the tool marker the full array (see the module doc's section 7).
+  if (caching) markClaudeCacheBreakpoints(body)
+  return body
 }
 
 // ---------------------------------------------------------------------------

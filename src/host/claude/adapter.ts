@@ -610,6 +610,16 @@ export class ClaudeAdapter extends LlmAdapter {
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
       toolNames,
+      // TRUE, and stated here rather than left to the builder's default, because
+      // the default is not the mechanism that keeps this working: caching is
+      // REQUEST-DRIVEN (Anthropic caches a prefix only where the request puts a
+      // cache_control breakpoint), so a request sent without breakpoints bills
+      // every turn as fresh input and returns no cache_read_input_tokens. This
+      // call site is the one that forgot to ask, which is why the route showed no
+      // cache hits at all; writing the intent down here means a future edit that
+      // changes the builder's default cannot silently turn caching back off for
+      // this provider. See the mapper's section 7 for where the breakpoints go.
+      cacheControl: true,
     }))
     try {
       return await fetchFn(API_BASE + MESSAGES_PATH, {

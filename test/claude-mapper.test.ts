@@ -21,7 +21,12 @@
  *   6. the usage counters are DISJOINT - input_tokens excludes the cache
  *      counters - so summing them double-counts every cached turn;
  *   7. the stream is LINE-oriented (event: / data: pairs), and a stream that
- *      ends without message_stop is a severed reply, not a completed answer.
+ *      ends without message_stop is a severed reply, not a completed answer;
+ *   8. the request carries cache_control breakpoints BY DEFAULT, on the last
+ *      system block, the last block of the last user message and the last tool,
+ *      and never more than the wire's limit of four. The server caches nothing
+ *      without a breakpoint, so an opt-in marker that the adapter forgets to
+ *      turn on is exactly the bug these tests now lock out.
  *
  * Everything runs offline against fixtures written down here. Nothing in this
  * file touches the network or a credential.
@@ -44,11 +49,13 @@ import {
   assertStreamComplete,
   buildClaudeRequestBody,
   buildClaudeSystemBlocks,
+  MAX_CACHE_BREAKPOINTS,
   canonicalClaudeToolName,
   clampReasoning,
   clampThinkingBudgetToAnswerRoom,
   claudeOriginalToolName,
   claudeThinking,
+  countClaudeCacheBreakpoints,
   claudeToolNames,
   claudeWireToolName,
   claudeRequestThinks,
@@ -149,7 +156,13 @@ describe('Claude request body', () => {
     expect(built.stream).toBe(true)
     expect(built.thinking).toBeUndefined()
     expect(built.output_config).toBeUndefined()
-    expect(messagesOf(built)).toEqual([{ role: 'user', content: [{ type: 'text', text: 'hello' }] }])
+    // The tail block carries the cache marker because caching is now the DEFAULT
+    // for every request built here. The full shape is still asserted on purpose:
+    // this is the request the adapter posts, and a marker on the wrong block is
+    // as much a bug as no marker at all.
+    expect(messagesOf(built)).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }] },
+    ])
     expect(claudeThinkingMode('claude-unknown-x')).toBe('none')
   })
 
@@ -177,10 +190,13 @@ describe('Claude request body', () => {
         },
       }],
     })
+    // The LAST tool is marked (it is the only one), so the tool table sits
+    // inside the cached prefix.
     expect(built.tools).toEqual([{
       name: 'run_code',
       description: 'run',
       input_schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+      cache_control: { type: 'ephemeral' },
     }])
   })
 
@@ -198,7 +214,9 @@ describe('The Claude Code identity block', () => {
     }) as unknown as GenerateOptions)
     const system = systemBlocksOf(built)
     expect(system).toHaveLength(1)
-    expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT })
+    // With no caller prompt the identity block IS the last block, so the default
+    // breakpoint lands on it.
+    expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT, cache_control: { type: 'ephemeral' } })
     expect(system[0]!.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.")
   })
 
@@ -207,7 +225,7 @@ describe('The Claude Code identity block', () => {
     const system = systemBlocksOf(built)
     expect(system).toHaveLength(2)
     expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT })
-    expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.' })
+    expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral' } })
   })
 
   it('folds a one-shot system header and role:system messages into block 1 without a system role on the wire', () => {
@@ -228,22 +246,188 @@ describe('The Claude Code identity block', () => {
     expect(leadingSystemText(options({ messages: [] }) as unknown as GenerateOptions)).toBeUndefined()
   })
 
-  it('places the opt-in ephemeral cache marker on the LAST system block only', () => {
-    // Default is off: the plain builder must not put a marker anywhere.
-    expect(JSON.stringify(body())).not.toContain('cache_control')
-    expect(JSON.stringify(buildClaudeRequestBody(options(), undefined, { systemCacheControl: false }))).not.toContain('cache_control')
-
-    const on = buildClaudeRequestBody(options(), undefined, { systemCacheControl: true })
+  it('places the ephemeral cache marker on the LAST system block, by default', () => {
+    // THE REGRESSION THIS FILE EXISTS FOR. This assertion used to read "the
+    // default is off: the plain builder must not put a marker anywhere", which
+    // encoded the bug: with no marker on the wire the server caches nothing, so
+    // every turn was billed as fresh input and cache_read_input_tokens never
+    // appeared. The default is now ON, and only an explicit false opts out.
+    const on = body()
     const system = systemBlocksOf(on)
     // The marker goes on the LAST block, so it also covers the identity block
     // above it; marking the identity block alone would cache what never changes.
     expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT })
-    expect(system[1]!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral' } })
+
+    // The opt-OUT is what removes it.
+    expect(JSON.stringify(buildClaudeRequestBody(options(), undefined, { cacheControl: false }))).not.toContain('cache_control')
 
     // With no caller prompt there is only the identity block, and it is last.
-    const solo = buildClaudeSystemBlocks(options({ system: undefined, messages: [] }) as unknown as GenerateOptions, true)
+    const solo = buildClaudeSystemBlocks(options({ system: undefined, messages: [] }) as unknown as GenerateOptions)
     expect(solo).toHaveLength(1)
     expect(solo[0]!.cache_control).toEqual({ type: 'ephemeral' })
+    const soloOff = buildClaudeSystemBlocks(options({ system: undefined, messages: [] }) as unknown as GenerateOptions, false)
+    expect(soloOff[0]!.cache_control).toBeUndefined()
+  })
+})
+
+describe('Prompt-cache breakpoints', () => {
+  const TOOLS = [
+    { name: 'read', description: 'read a file', parameters: { type: 'object', properties: { path: { type: 'string' } } } },
+    { name: 'bash', description: 'run a command', parameters: { type: 'object', properties: { command: { type: 'string' } } } },
+  ]
+
+  /** A conversation deep enough that the prefix is worth caching. */
+  function busyMessages(): unknown[] {
+    const messages: unknown[] = [
+      { role: 'system', source: { kind: PLUGIN_MESSAGE_SOURCE_KIND }, content: [{ type: 'text', text: 'You are DSH.' }] },
+    ]
+    for (let turn = 0; turn < 6; turn++) {
+      messages.push({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'question ' + turn }] })
+      messages.push({
+        role: 'assistant',
+        source: { kind: 'model', provider: PROVIDER_ID, model: 'claude-opus-5-5' },
+        content: [{ type: 'text', text: 'answer ' + turn }],
+      })
+    }
+    messages.push({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'and now?' }] })
+    return messages
+  }
+
+  it('marks all three sites on a DEFAULT request, with no option stated', () => {
+    // No third argument at all: this is the plain call the adapter makes, and it
+    // is the request shape that showed no cache hits before the fix.
+    const built = buildClaudeRequestBody(options({
+      model: 'claude-opus-5-5',
+      tools: TOOLS,
+    }) as unknown as GenerateOptions)
+
+    // (1) the LAST system block — the head of the cached prefix.
+    const system = systemBlocksOf(built)
+    expect(system).toHaveLength(2)
+    expect(system[0]!.cache_control).toBeUndefined()
+    expect(system[1]!.cache_control).toEqual({ type: 'ephemeral' })
+
+    // (2) the last block of the LAST user message — what caches history.
+    const messages = messagesOf(built)
+    const lastUser = messages[messages.length - 1]!
+    expect(lastUser.role).toBe('user')
+    expect(lastUser.content[lastUser.content.length - 1]!.cache_control).toEqual({ type: 'ephemeral' })
+
+    // (3) the last tool — the tool table stays inside the prefix.
+    const tools = built.tools as Array<Record<string, unknown>>
+    expect(tools).toHaveLength(2)
+    expect(tools[0]!.cache_control).toBeUndefined()
+    expect(tools[1]!.cache_control).toEqual({ type: 'ephemeral' })
+
+    // Three sites, three markers, one each.
+    expect(countClaudeCacheBreakpoints(built)).toBe(3)
+  })
+
+  it('marks the tool_result block of a tool-using turn — the turn caching matters most', () => {
+    // The shape the loop actually sends after a tool call: assistant turn with a
+    // tool_use, then a USER turn whose only block is that call's tool_result.
+    const built = buildClaudeRequestBody(options({
+      model: 'claude-opus-5-5',
+      tools: TOOLS,
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'list the files' }] },
+        {
+          role: 'assistant',
+          source: { kind: 'model', provider: PROVIDER_ID, model: 'claude-opus-5-5' },
+          content: [
+            { type: 'text', text: 'Listing now.' },
+            { type: 'tool-call', id: 'toolu_01', name: 'bash', arguments: '{"command":"ls"}' },
+          ],
+        },
+        {
+          role: 'tool',
+          source: { kind: 'tool' },
+          toolCallId: 'toolu_01',
+          content: [{ type: 'text', text: 'a.txt' }],
+        },
+      ],
+    }) as unknown as GenerateOptions)
+
+    const messages = messagesOf(built)
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user'])
+    const toolResult = messages[2]!.content[0]!
+    expect(toolResult.type).toBe('tool_result')
+    expect(toolResult.cache_control).toEqual({ type: 'ephemeral' })
+    // The text turn BEFORE it is not marked: there is one message breakpoint.
+    expect(messages[0]!.content[0]!.cache_control).toBeUndefined()
+  })
+
+  it('marks the block that SURVIVES the same-role merge, not the one it swallowed', () => {
+    // Two user turns in a row (an injected notice then the real turn) merge into
+    // one. Marking before the merge would put the marker on the notice, which is
+    // not the tail of the merged turn and therefore caches the wrong prefix.
+    const built = buildClaudeRequestBody(options({
+      model: 'claude-opus-5-5',
+      messages: [
+        { role: 'user', source: { kind: PLUGIN_MESSAGE_SOURCE_KIND }, content: [{ type: 'text', text: 'context notice' }] },
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'the real turn' }] },
+      ],
+    }) as unknown as GenerateOptions)
+
+    const messages = messagesOf(built)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.content).toEqual([
+      { type: 'text', text: 'context notice' },
+      { type: 'text', text: 'the real turn', cache_control: { type: 'ephemeral' } },
+    ])
+  })
+
+  it('never exceeds the wire limit of 4 breakpoints on a busy conversation with images', () => {
+    const images: ResolvedRequestImages = new Map([['att-1', { kind: 'inline', mediaType: 'image/png', data: 'AAAA' }]])
+    const built = buildClaudeRequestBody(options({
+      model: 'claude-opus-5-5',
+      tools: TOOLS,
+      messages: [
+        ...busyMessages(),
+        {
+          role: 'user',
+          source: { kind: 'user' },
+          content: [
+            { type: 'text', text: 'what is in this?' },
+            { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 3, name: 'shot.png' } },
+          ],
+        },
+      ],
+    }) as unknown as GenerateOptions, images)
+
+    // The raw wire limit, not a magic three: marking one site twice would pass a
+    // "<= 3" assertion written by hand.
+    expect(countClaudeCacheBreakpoints(built)).toBeLessThanOrEqual(MAX_CACHE_BREAKPOINTS)
+    expect(MAX_CACHE_BREAKPOINTS).toBe(4)
+    // Exactly the three intended sites, and the image is the marked tail of the
+    // final user turn.
+    expect(countClaudeCacheBreakpoints(built)).toBe(3)
+    const messages = messagesOf(built)
+    const lastBlock = messages[messages.length - 1]!.content.at(-1)!
+    expect(lastBlock.type).toBe('image')
+    expect(lastBlock.cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('leaves the request uncached with no marker anywhere when a caller opts out', () => {
+    const built = buildClaudeRequestBody(options({ model: 'claude-opus-5-5', tools: TOOLS }) as unknown as GenerateOptions, undefined, { cacheControl: false })
+    expect(countClaudeCacheBreakpoints(built)).toBe(0)
+    expect(JSON.stringify(built)).not.toContain('cache_control')
+  })
+
+  it('marks nothing on the message list when the history ends on an assistant turn', () => {
+    const built = buildClaudeRequestBody(options({
+      model: 'claude-opus-5-5',
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', source: { kind: 'model', provider: PROVIDER_ID, model: 'claude-opus-5-5' }, content: [{ type: 'text', text: 'partial' }] },
+      ],
+    }) as unknown as GenerateOptions)
+    const messages = messagesOf(built)
+    expect(messages[messages.length - 1]!.role).toBe('assistant')
+    expect(messages[0]!.content[0]!.cache_control).toBeUndefined()
+    // The system breakpoint is still there: it is independent of the message one.
+    expect(countClaudeCacheBreakpoints(built)).toBe(1)
   })
 })
 
@@ -518,7 +702,10 @@ describe('Message projection', () => {
     }) as unknown as GenerateOptions)
     expect(messagesOf(built)).toEqual([
       { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.txt' } }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'contents' }] },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'contents', cache_control: { type: 'ephemeral' } }],
+      },
     ])
   })
 
@@ -540,7 +727,8 @@ describe('Message projection', () => {
     expect(messages[0]!.content).toEqual([
       { type: 'tool_result', tool_use_id: 'a', content: 'boom', is_error: true },
       { type: 'tool_result', tool_use_id: 'b', content: 'fine' },
-      { type: 'text', text: 'and now?' },
+      // The marker sits on the tail of the MERGED turn, which is the text turn.
+      { type: 'text', text: 'and now?', cache_control: { type: 'ephemeral' } },
     ])
   })
 })
@@ -618,7 +806,9 @@ describe('Thinking-block replay across a tool loop', () => {
     expect(messages[1]!.content[1]).toEqual({ type: 'text', text: 'Listing now.' })
     // The tool call goes back out in the CANONICAL spelling with its parsed input.
     expect(messages[1]!.content[2]).toEqual({ type: 'tool_use', id: 'toolu_01', name: 'Bash', input: { command: 'ls' } })
-    expect(messages[2]!.content).toEqual([{ type: 'tool_result', tool_use_id: 'toolu_01', content: 'a.txt b.txt' }])
+    expect(messages[2]!.content).toEqual([
+      { type: 'tool_result', tool_use_id: 'toolu_01', content: 'a.txt b.txt', cache_control: { type: 'ephemeral' } },
+    ])
     // And thinking is still requested for the continued generation.
     expect(thinkingOf(second)).toEqual({ type: 'adaptive', display: 'summarized' })
     expect(outputConfigOf(second)).toEqual({ effort: 'high' })
@@ -826,6 +1016,7 @@ describe('Request images', () => {
         { type: 'text', text: 'screenshot follows' },
         { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
       ],
+      cache_control: { type: 'ephemeral' },
     })
   })
 
@@ -1067,6 +1258,30 @@ describe('Usage mapping', () => {
     expect(usage.usage.outputTokens).toBe(42)
   })
 
+  it('reports the cache counters on the Opus 5.5 path — the request that asks for caching, and the answer that confirms it', () => {
+    // The whole user-visible bug in one test: the REQUEST must ask for caching
+    // (breakpoints) and the RESPONSE must then be able to report the counters.
+    // Either half missing reads as "no cache hits at all" in the UI.
+    const built = buildClaudeRequestBody(options({ model: 'claude-opus-5-5' }) as unknown as GenerateOptions)
+    expect(countClaudeCacheBreakpoints(built)).toBeGreaterThan(0)
+
+    const chunks = feed([
+      ...eventLines(messageStart({
+        input_tokens: 900,
+        cache_creation_input_tokens: 12_000,
+        cache_read_input_tokens: 40_000,
+        output_tokens: 5,
+      })),
+      ...eventLines({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 30 } }),
+      ...eventLines({ type: 'message_stop' }),
+    ], createStreamState())
+    const usage = chunks.find((chunk) => chunk.type === 'usage')
+    if (usage === undefined || usage.type !== 'usage') throw new Error('no usage chunk')
+    expect(usage.usage.cacheReadTokens).toBe(40_000)
+    expect(usage.usage.cacheWriteTokens).toBe(12_000)
+    expect(usage.usage.inputTokens).toBe(900)
+  })
+
   it('omits the cache keys entirely when the stream reports none', () => {
     const state = createStreamState()
     const chunks = feed([
@@ -1132,7 +1347,7 @@ describe('The four modes as complete bodies', () => {
     expect(built.output_config).toEqual({ effort: 'medium' })
     expect('temperature' in built).toBe(false)
     expect((built.tools as Array<Record<string, unknown>>)[0]).toEqual({
-      name: 'Bash', description: 'run', input_schema: { type: 'object' },
+      name: 'Bash', description: 'run', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral' },
     })
   })
 

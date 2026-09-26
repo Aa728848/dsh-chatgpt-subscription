@@ -22,6 +22,11 @@
  *      claim echoed back, which reads like a credential problem; the catalog
  *      records the floor, so the same verdict is produced here, naming the model,
  *      both versions and the remedy, with no request spent.
+ *   7. THE POSTED BODY ASKS FOR PROMPT CACHING. The server caches a prefix only
+ *      where the request carries a cache_control breakpoint, so a request sent
+ *      without one bills every turn as fresh input; this is the call site that
+ *      used to send none, and the test reads the REAL posted bytes so the
+ *      builder's own default cannot stand in for the adapter's intent.
  *
  * Everything runs against an injected fetch and an in-memory encrypted
  * credential backend. No test here touches the network or a platform credential
@@ -377,6 +382,35 @@ describe('claude adapter request path', () => {
     expect(typeof calls[0]!.body.max_tokens).toBe('number')
     expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')).toBe('hello there')
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('posts prompt-cache breakpoints on a DEFAULT request, without any caller opting in', async () => {
+    // THE REGRESSION THE USER REPORTED. Anthropic caches a prefix only where the
+    // request carries an explicit cache_control breakpoint, and this call site
+    // used to send none: the server then had nothing to cache against, every turn
+    // was billed as fresh input, and cache_read_input_tokens never appeared. The
+    // breakpoints are asserted on the REAL posted bytes, not on the builder, so a
+    // future edit that drops the option here cannot pass.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', {
+      tools: [
+        { name: 'read', description: 'read a file', parameters: { type: 'object', properties: {} } },
+        { name: 'bash', description: 'run a command', parameters: { type: 'object', properties: {} } },
+      ],
+    } as Partial<GenerateOptions>)))
+
+    const body = calls[0]!.body
+    const system = body.system as Array<Record<string, unknown>>
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    const tools = body.tools as Array<Record<string, unknown>>
+
+    // The last system block, the last block of the last user message, the last tool.
+    expect(system.at(-1)!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(messages.at(-1)!.content.at(-1)!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(tools.at(-1)!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(JSON.stringify(body).match(/"cache_control"/g)).toHaveLength(3)
   })
 
   it('omits the claude-code beta for a haiku model, from the real model id', async () => {
