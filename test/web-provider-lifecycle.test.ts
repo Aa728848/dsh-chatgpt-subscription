@@ -113,7 +113,70 @@ async function mountPlugin(options: MountOptions) {
   }
 }
 
+/**
+ * Mount the plugin the way a profile does: every row — `web`, the built-in
+ * fetch provider, and this plugin — composes in ONE loader update, so the
+ * caller's `loader.await()` is the instant the host audits that composition.
+ */
+async function mountProfileComposition(searchProvider: 'dsh' | 'codex') {
+  const settings = memorySettings({ searchProvider, proxyMode: 'auto' })
+  vi.spyOn(platformStore, 'createPlatformTokenStore').mockReturnValue(new MemoryTokenStore())
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('plugin page')))
+
+  const ctx = new Context()
+  ctx.provide('webServer', { host: '127.0.0.1', port: 3000, register: () => () => undefined })
+  ctx.provide('llm', { registerAdapter: () => () => undefined })
+  ctx.provide('attachments', {})
+  ctx.provide('tools', { register: () => () => undefined })
+  ctx.provide('settings', settings)
+  await ctx.plugin(Loader).await()
+  ctx.loader.builtins.web = WebRuntime
+  ctx.loader.builtins.nativeFetch = {
+    name: 'native-fetch',
+    inject: ['web'],
+    apply(inner: any) {
+      inner.web.registerFetchProvider({
+        id: 'http', available: () => true,
+        fetch: async ({ url }: { url: string }) => ({ url, statusCode: 200, body: { kind: 'text', content: 'http' }, truncated: false }),
+      })
+    },
+  }
+  ctx.loader.builtins.subscription = plugin
+
+  await ctx.loader.root.update([
+    { id: 'web', name: 'cordis:web', config: { searchProvider: 'deepseek-official', fetchProvider: 'http' } },
+    { id: 'web-fetch-http', name: 'cordis:nativeFetch' },
+    { id: 'dsh-chatgpt-subscription', name: 'cordis:subscription' },
+  ])
+  return ctx
+}
+
 describe('web provider lifecycle', () => {
+  // Issue #18: composing the profile started the provider selection, whose `web`
+  // restart unloads `web` and every entry that injects it. The host audits the
+  // composition as soon as it settles, read `web` and its consumers at
+  // `fiber state 5` (UNLOADING), and reported "3 entries did not activate".
+  it('leaves the composition settled before the first provider selection starts', async () => {
+    vi.stubEnv('HTTPS_PROXY', 'http://127.0.0.1:9')
+    const select = vi.spyOn(SearchProviderSwitcher.prototype, 'select')
+    const ctx = await mountProfileComposition('codex')
+    try {
+      // `loader.await()` is the composition's settle point and the host reads the
+      // tree synchronously straight after it, so nothing may be in flight here.
+      await ctx.loader.await()
+      expect(select).not.toHaveBeenCalled()
+
+      // The selection still lands, and still reconciles the running provider.
+      await vi.waitFor(() => expect(select).toHaveBeenCalled())
+      await vi.waitFor(() => expect(ctx.loader.resolve('web').options.config).toMatchObject({
+        fetchProvider: CODEX_FETCH_PROVIDER_ID,
+      }))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+
   it('reconciles the running provider after launcher readiness without toggling preferences', async () => {
     let ready: (() => void) | undefined
     const unwatch = vi.fn()

@@ -67,12 +67,21 @@ keeps generations comparable. Each seam has one file:
 New baseline, in the repo:
 
 ```bash
-npm run typecheck && npm run build && npx vitest run && npm ci --dry-run && npm pack --dry-run
+npx tsc -b --force --pretty false && npx tsc -p test/tsconfig.json --pretty false
+npm run build && npx vitest run && npm ci --dry-run && npm pack --dry-run
 ```
+
+`tsc -b` alone is not a check: it replays `lib/*.tsbuildinfo` and returns in
+seconds on a stale build (3.2s on this repo, rc.2 round). **`--force` is the only
+meaningful typecheck**, and it has to cover the shipped host + client code
+(`-b`) and the test tree (`-p test/tsconfig.json`) separately.
 
 `npm ci --dry-run` proves `package.json` and `package-lock.json` are in sync, which
 is what CI's `npm ci` needs. `npm pack --dry-run` proves the published file set is
-still intact.
+still intact. Moving a baseline usually needs the lockfile **regenerated**, not
+incrementally updated — an rc.2-era `dsh-attachment` pins a sibling
+`@deepseek-ai/dsh-brand` peer exactly, and `npm install` then dies with
+`ERESOLVE` rather than moving that sibling.
 
 Old generation, in a **clean room** — a downgraded tree does not reproduce a
 generation's dependency closure and produces fake failures:
@@ -90,7 +99,18 @@ npx tsc -b --pretty false             # the shipped host + client code
 npx vitest run
 ```
 
-Record the numbers from both runs in the CHANGELOG entry.
+Run a **third** room for the previous baseline when the round claims "no
+behavioural change": pinning the previous generation on the same source and
+getting identical file/test counts is direct evidence, where "the suite passed"
+alone is not. Pin it **exactly** — `^0.1.7-rc.1` still installs `0.1.7-rc.2`, so a
+caret range silently duplicates the baseline room. Any manifest edit in a room
+must keep the dev/peer invariant `test/package-integrity.test.ts` enforces
+(§6), and the room must keep every real runtime dependency: the clean-room copy
+carries `lib/`, so pruning something like `mermaid` "because only a renderer test
+uses it" makes `test/routes.test.ts` fail with a 404 that says nothing about the
+plugin.
+
+Record the numbers from all three runs in the CHANGELOG entry.
 
 ## 5. Recording a round
 
@@ -130,20 +150,48 @@ next upgrade starts by reading the newest file in `references/`.
   service's own `static inject`) showed callers need only what they read, so the
   patch was harmless but was not the fix. Probe rather than reason from the stack
   trace, and say which of the two the change actually is.
+- **`tsc -b` without `--force` is not a check.** It replays `lib/*.tsbuildinfo`
+  and returns in seconds on a build made against the previous generation, so a
+  baseline bump can look green without ever compiling against the new types. The
+  rc.2 round hit this: `npm run typecheck` finished in 3.2s, and the forced run
+  was the only real one.
+- **The dev/peer invariant is machine-enforced, not a convention.**
+  `test/package-integrity.test.ts` splits each peer range on `||` and asserts
+  every `devDependencies` range appears in it **verbatim**. Bumping
+  `devDependencies` without adding the matching `||` clause to the peer union
+  fails the suite — so that clause is required, even when the previous clause
+  already covers the new version semantically.
+- **A clean room must pin exactly and must not prune runtime dependencies.**
+  `^0.1.7-rc.1` installs `0.1.7-rc.2`, so a "previous baseline" room built from a
+  caret range is a duplicate of the baseline room and its agreeing numbers prove
+  nothing. And since the room carries `lib/`, deleting a real runtime dependency
+  (e.g. `mermaid`) to speed the install makes `test/routes.test.ts` fail with a
+  404 — a script artifact that reads exactly like a plugin regression.
 - **Old generations are the requirement, not the fallback.** Anyone reading a diff
   that "simplifies" a mapper by assuming the new shape has broken the plugin for
   most users.
 
 ## 7. Current state
 
-- Tested baseline: **0.1.7-rc.1** (`devDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded run: forced typecheck + build clean, **1256 tests passed**
-  (96 files passed, 1 skipped file, 7 skipped tests); old generation (clean-room
-  0.1.5-rc.3): source typecheck clean, **1253 tests passed, 0 failures**, one
-  generation-bound test file unable to load (`@deepseek-ai/dsh-ptc-runtime`).
+- Tested baseline: **0.1.7-rc.2** (`devDependencies`); peer support 0.1.2-alpha.5
+  onwards. Latest recorded run: forced typecheck + build clean, **1315 tests passed**
+  (103 files passed, 1 skipped file, 7 skipped tests); the previous-baseline room
+  (clean-room, exact `0.1.7-rc.1`) is **byte-identical in outcome — 1315 passed, 0
+  failures**; old generation (clean-room 0.1.5-rc.3): source typecheck clean,
+  **1312 tests passed, 0 failures**, one generation-bound test file unable to load
+  (`@deepseek-ai/dsh-ptc-runtime`).
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
   covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
   is `tool.call.toolview`'s new stage union, and that file also records the
   `dsh-client-ui-chat` type blind spot that hides this seam from `tsc`.
+  `references/0.1.7-rc.2.md` covers rc.2: again **no behavioural change needed**, and
+  this time with the identical-outcome rc.1 room as evidence. Its live items are two
+  changes that are deliberately **not** bridged — the harness now projects new
+  `tool-addition`/`tool-removal` blocks per route (`projectToolUpdates` strips them
+  for a route that declares no `toolUpdate`, which is every route here), and GUI
+  model selection now requires catalog membership (`modelAvailable` in
+  `session-controller`, which makes an offline model change fail on the three routes
+  whose catalog is remote). Two new capabilities exist and are unadopted:
+  `toolUpdate` and the `shell.quota-notice` / `ACCOUNT_QUOTA` surface.
 - Harness checkout used for every claim above: `C:\Users\A\Documents\deepseek-harness`.

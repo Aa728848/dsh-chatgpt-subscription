@@ -14,7 +14,7 @@
 - [Kimi Code 线路](#kimi-code-线路)
 - [Command Code 线路](#command-code-线路)
 - [WorkBuddy 线路](#workbuddy-线路)
-- [GLM（智谱 Coding Plan）线路](#glm智谱-coding-plan线路)
+- [Claude（订阅）线路](#claude订阅线路)
 - [子代理模型授权](#子代理模型授权0215-起)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [升级、降级与卸载](#升级降级与卸载)
@@ -84,17 +84,23 @@
 - **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛出错误而不是把半截文本当成完整回答；
 - 额度来自 `/billing/meter/get-user-resource`，卡片展示套餐名、本周期已用/上限、剩余额度与重置时间；设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有该线路的额度胶囊。
 
-**GLM（智谱 Coding Plan）线路**
+**Claude（订阅）线路**
 
-- 注册 `zhipu-coding-plan` Provider，接入**智谱 / Z.ai 的 GLM Coding Plan 订阅**。该 ID 特意与用户常用的自定义 OpenAI 兼容线路 `zai` / `zhipu` 分开，安装插件不会覆盖或隐藏原有自定义 API；
-- **订阅接口与开放平台是两套东西**：Coding Plan 的模型接口是 OpenAI 兼容的 `{base}/api/coding/paas/v4`，**不是** 通用付费的 `/api/paas/v4`——把开放平台的 Key 或后者当 base URL 用会被判为鉴权失败。国区（`open.bigmodel.cn`）与国际区（`api.z.ai`）的 Key **互不通用**，因此区域是**凭据属性**：添加时显式选择，卡片逐条标注，模型请求走该账号自己的 host；
-- **添加 Key 前先验证**：`POST /zhipu/api/accounts/add` 先用该 Key 读一次部署自己的模型目录，未通过就不落盘，并直接告出「Key 大概来自哪个控制台」——这是这个产品最常见的一次配错。整个登录只花一次上游读（验证用的目录会被缓存）；
-- **多账号号池，与另外四条线路同源**：走共享内核 `AccountPoolCore`（`src/host/common/account-pool.ts`）并复用同一张设置卡片（`src/client/common/AccountPoolCard`），因此具备**顺序耗尽 / 轮询调度 / 粘性会话**三种策略、429 冷却换号、账号级失效（保留账号、重新添加即恢复）、设为主账号、账号备注与清除冷却。账号 id 是 **Key 摘要 + 区域**，别名只显示「区域 + Key 后四位」，明文 Key 既不进别名也不进 id，更不会出现在卡片上（有测试锁定）；
-- **模型能力逐模型查表**（`src/host/zhipu/model-catalog.ts`）：是否接受图片、有哪些思考档位、能否关闭思考都由该表决定，运行时以订阅侧 `GET /models` 为准（只覆盖上下文窗口，能力不被上游列表改写）。图片能力不能按族名推断——**`glm-5.3-flash` 接受图片而 `glm-5.3` 不接受**；档位也不能——`glm-5.3` 有三档而 `glm-5.2` 只有两档，`glm-4.7` / `glm-4.5-air` 这类 toggle 模型根本不收 `reasoning_effort`；
-- **思考档位只发上游认的值**：上游对 GLM-5.x 只接受 `low` / `high` / `max`，其余取值**直接报错**（不是被忽略）。DSH 的档位词表比这宽，因此每个取值都先收敛到该模型自己的档位表再发出；收敛按**两套词表统一排序**，`minimal` 这类「比 low 更省」的档位会落到 `low` 而不是被当成未知值弹到中间档——否则用户选了最省的一档反而会换来 `high`，既不符合意图又更费额度。关闭思考的值本线路一律不发：GLM-5.3 / GLM-5.3-FLASH / GLM-4.7 把 `thinking.type: "disabled"` 判为错误，省略该字段就是它们的 `enabled` 默认；
-- **额度来自订阅自己的监控接口**：`{base}/api/monitor/usage/quota/limit` 给 5 小时与每周两个额度窗口（外加月度 MCP 工具调用次数），`{base}/api/biz/subscription/list` 给套餐名。这两个接口的鉴权用的是**不带 `Bearer` 前缀的裸 Key**（实测：带前缀判 401，裸 Key 通过），与模型接口的 `Bearer` 形式不同，因此两条 header 各自成函数。窗口按上游的 `unit`/`number` 描述换算成分钟后再命名，兼容 `TOKENS_LIMIT` 与新版 `CREDIT_LIMIT` 两种拼写；
-- **瞬时失败按错误类别重试**（`src/host/zhipu/adapter.ts`）：上游 5xx、`code 1230/1234` 与服务过载归为可重试并走有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动），429 会带上上游 `Retry-After`。而 **401/403 与 `code 1000/1003/1001`（Key 失效）、`code 1311`（套餐不含该模型）、`code 1309`（套餐已过期）明确不重试**——它们与「额度窗口用尽」同样是 429，但只有后者值得重试，因此分类读响应正文的 `code` 而不只看状态码，并给出可操作的提示（换模型 / 续费 / 重新添加 Key）；
-- 模型勾选、思考深度、上下文窗口覆盖与额度在「设置 → 订阅服务 → GLM」标签页中配置，输入框右侧另有额度胶囊（取**最紧的那个窗口**，因为 5 小时窗口和每周窗口会各自先耗尽）。
+- 注册 `claude-subscription` Provider，以 **Claude Pro / Max 订阅的 OAuth 登录态**访问 Claude 模型（Anthropic Messages 接口），**不使用 API Key、也不按量计费**；
+- ⚠️ **风险须知（插件不设确认步骤，但事实不变）**：Anthropic 现行条款明确写明**不允许第三方应用提供 Claude.ai 登录、也不允许代用户经 Free / Pro / Max 凭据转发请求**，并保留不经预告的执法权；已有开源项目被下架、有账号因此被限制。**本插件未获 Anthropic 任何授权或认可**，使用风险由使用者自行承担。此前版本在卡片上设有确认步骤与配套主机门禁，两者均已移除；移除的只是那一步交互，**不改变上述事实**；
+- **这不是抄一个 token 就能用**：订阅令牌要求请求**完整模仿 Claude Code 的身份**，否则会被服务端拒绝或分类判别——`Authorization: Bearer` 且 **`x-api-key` 必须缺省**、`user-agent: claude-cli/<版本>`、`x-app: cli`、`anthropic-beta` 至少含 `oauth-2025-04-20` 与 `claude-code-20250219`、`system` 的**首个块必须是 Claude Code 身份声明**。这些都在代码里显式实现并有测试锁定；
+- **OAuth 用 PKCE，且 state 与 verifier 独立生成**。这一点特意**不照抄参照实现**：本机参照实现把 PKCE verifier 直接当作 OAuth `state`（`state: verifier`），那会把本应保密的 verifier 写进授权 URL、地址栏、浏览器历史乃至剪贴板。本线路是两次独立随机抽样，并有测试断言授权 URL 中**不出现原始 verifier**；
+- **两条登录路径，模式在流程开始时确定且不可中途切换**：默认是**手动粘贴**（授权页把码显示在屏幕上，粘贴 `<code>#<state>`；也容错接受整条重定向 URL）。可选 loopback 回调，绑定 `127.0.0.1` 并顺序探测可用端口（Windows 的保留端口段会让固定端口绑定失败）。端口探测失败**降级为手动**而不是报错。切换模式等于作废当前流程并重新发起——授权码与签发它的那次请求的 `redirect_uri` 绑定，这是该流程最常见的失败；
+- **一次授权只兑换一次**：浏览器回调与手动粘贴可能同时到达，用 compare-and-set 保证只有一方发起兑换（另一方得到「正在处理中」，已结算的流程得到 410 且**不做任何兑换**）。错误的 `state` **只拒绝那一个请求**，不会终止正在进行的合法登录。回调服务器只绑 loopback、只应答 `/callback`、只接受本机来源；
+- **刷新是单飞的**：并发请求共享同一次刷新。否则到期瞬间的一批请求会各自轮换刷新令牌，除第一个之外全部作废（上游会给出终局判定）。刷新令牌轮换后**先读回校验再落盘**；
+- **模型能力逐模型查表**（`src/host/claude/model-catalog.ts`），**不从模型名推断**。该表转录自本机随 harness 安装的参照目录，**只证明抄录忠实，不证明服务端提供这些模型**——服务端自己的 `GET /v1/models` 才是权威，且它**只覆盖上下文窗口**，能力字段不被改写；
+- **思考形态有四类，顺序决定成败**（`thinkingMode`）：`mid-convo` → `{type:'adaptive', block_binding:{prefix_mismatch_behavior:'drop_block'}}` 外加 `output_config.effort`；`adaptive` → `{type:'adaptive'}`；`budget` → `{type:'enabled', budget_tokens}`（预算算术按参照实现转录，思考预算计入 `max_tokens`，**必须为回答留出至少 1024 token**）；`none` → 不发思考字段。**`mid-convo` 排在最前且无条件**——`claude-fable-5-1` 与 `claude-opus-5` 同时带 `forceAdaptiveThinking`，把它们当成普通 `adaptive` 会**静默丢掉 `block_binding` 与 `output_config`**，而参照实现自己的注释写明该缺失会导致**持续 400**；
+- **思考块带签名则原样回放**（这是思考模式下多轮工具调用的前提；`redacted_thinking` 同样回放），**无签名则丢弃**。工具名在出站时按 Claude Code 规范大小写归一化、入站时按大小写无关匹配回用户工具名；若两个工具归一化后碰撞，则**放弃归一化**原样发送，避免把结果投给错误的工具；
+- **多账号号池，与其它线路同源**：走共享内核 `AccountPoolCore` 并复用同一张设置卡片，具备顺序耗尽 / 轮询调度 / 粘性会话、429 冷却换号、账号级失效保留、设为主账号与备注。**账号身份是两层**：不可变的 `internalId` 是唯一路由键，`identityKeys`（uuid / email / 派生 seed）是**只增不换**的别名集，同一账号再次登录会**合并**而不是产生幽灵账号。**唯一例外的诚实说明**：当服务端既没返回 uuid 也没返回 email 时无法自动识别同一账号，卡片会把该账号标注出来并提供**手动合并**；
+- **可选择性收编本机已有的 Claude Code 登录（默认关闭）**：开启前只做一次「文件是否存在」的探测，**不读取内容**；只有你显式开启后才读取。收编得到的是一份**快照**，**永不由本插件刷新**——Claude Code 刷新的是同一枚轮换令牌，两个进程各自刷新会互相作废，而进程内的单飞解决不了跨进程竞态。快照过期后卡片会提示你**回 Claude Code 重新登录后再收编**，并且**绝不会写入或删除 Claude Code 的任何文件**；
+- **额度面有两个来源、两套单位**：主来源 `GET /api/oauth/usage` 的 `utilization` 是**已用百分比 0–100**；而 `/v1/messages` 响应头 `anthropic-ratelimit-unified-5h-utilization` 是**分数 0–1**、重置时间是 **epoch 秒**。两套单位分别换算并有交叉测试证明它们描述同一状态。**`utilization: 0` 表示「尚未使用」，是正常状态，不是额度耗尽**；两者都不会混淆。有真实流量时以响应头为准以降低查询频率，但卡片仍会按 `QUOTA_FULL_REFRESH_MS` 做一次完整读取；
+- **换号的两条硬约束**：只在**凭据失败**或**账号级限流**时换号——全局限流、过载与 5xx **绝不换号**（其它账号共享同一全局限制）。**一旦已有输出产出就绝不换号**（否则会重复文本或重复工具调用），改为直接报错。换号最多 3 次；
+- 模型勾选、思考深度、上下文窗口覆盖与额度在「设置 → 订阅服务 → Claude」标签页中配置，输入框右侧另有额度胶囊（取**剩余最紧的那个窗口**）。
 
 **设置页**
 - 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
@@ -383,43 +389,91 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
 
-## GLM（智谱 Coding Plan）线路
+## Claude（订阅）线路
 
-1. 在你要用的平台上订阅 **GLM Coding Plan**，并在对应控制台创建 API Key：[Z.ai](https://z.ai/manage-apikey/apikey-list)（国际区）或 [智谱开放平台](https://open.bigmodel.cn/)（国区）；
+### 风险须知（请先读）
+
+本线路以 **Claude Pro / Max 订阅登录**访问模型。Anthropic 现行条款写明**不允许第三方应用提供 Claude.ai
+登录、也不允许代用户经 Free / Pro / Max 凭据转发请求**，并保留不经预告的执法权；**本插件未获 Anthropic
+任何授权或认可**，你的账号**可能因此被限制、暂停或终止**。
+
+此前版本在设置卡片上设有一个必须显式接受的确认步骤，并配套一条主机侧门禁；**该步骤与门禁均已移除**，
+现在打开卡片即可直接使用。移除的只是那一步交互——上面这段事实、以及由此产生的风险，都不因移除而改变。
+是否使用请自行判断并承担后果。
+
+### 登录
+
+1. 订阅 **Claude Pro 或 Max**，并确保你能在浏览器里登录 claude.ai；
 2. 重启 DSH，让 Host 加载本插件；
-3. 打开 **设置 → 订阅服务 → GLM**；
-4. 在「添加账号」里**先选区域**（国际区 / 国区），粘贴 Key 后点「保存并验证」——验证不通过就不会写入，并会提示 Key 应来自哪个控制台；
+3. 打开 **设置 → 订阅服务 → Claude**；
+4. 点「登录 Claude 订阅」。默认走**手动粘贴**：浏览器打开授权页后会把授权码显示在屏幕上，把
+   `<授权码>#<state>` 整段复制粘贴回来即可（也接受直接粘贴整条重定向 URL）。若使用 loopback 回调模式，
+   本机一个可用端口会被自动探测并绑定 `127.0.0.1`；
 5. 按需勾选模型、设置默认思考深度与上下文窗口。
 
-`zhipu-coding-plan` 会像其他 Provider 一样出现在 DSH 模型选择器中，并可与名为 `zai` / `zhipu` 的自定义 API 同时存在。**上下文窗口**默认取该模型官方声明的窗口（GLM-5.x 系列为 1M），可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `512K` / `200000` 等写法）；**默认思考深度**只对该模型声明了档位时生效，选项为上游真正接受的 `low` / `high` / `max`。
+`claude-subscription` 会像其他 Provider 一样出现在 DSH 模型选择器中。**上下文窗口**默认取内置能力表声明的窗口，
+可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `512K` / `200000` 等写法）；**默认思考深度**只对声明了
+档位的模型生效。**档位原样透传**（`ReasoningEffortId` 在 harness 里是无约束 brand，本仓库多条线路都直接使用
+`xhigh`），不做任何收敛，以免把用户选的档位静默降级。
 
-**上游接口**（前缀 `{base}` 为该账号区域的 host）：
+**模型表**共 15 条：14 条转录自本机随 harness 安装的参照目录，另加 1 条**本地新增**的 **Claude Opus 5.5**
+（`claude-opus-5-5`，官方 2026-09-22 发布，1M 上下文 / 128K 输出 / 支持图片，档位 `low`–`max`）。
+它有一条**与其它模型不同的硬约束**：**思考永远开启、不能关闭**——官方文档明确 `thinking:{type:"disabled"}`
+与 `{type:"enabled",budget_tokens:N}` **都会返回 400**，因此能力表把它标为不可关闭思考，档位表是控制思考深度的
+唯一手段。它的**默认档位是 `medium`**（其余带 effort 的模型默认 `high`），这一点被刻意保留：本仓库有两类模型走
+「强制 effort」分支，若把 Opus 5.5 一并归入，就会**静默把每次请求抬高一档、花更多钱**，因此它走的是普通 adaptive
+分支。
+
+它还有一条**版本门槛**：上游要求申报的客户端版本 **≥ 2.1.280** 才为该模型提供服务。能力表用 `minCliVersion`
+记录这一点（**只有这一行有门槛**，其余 14 行缺省——缺省表示「未知」而不是「无门槛」，不臆造数字）。插件申报的
+默认版本为 **2.1.283**，并且**在发出请求之前就本地校验**「申报版本 vs 该模型门槛」，不满足时直接给出模型、当前
+版本与要求版本，**而不是白花一个往返让上游返回 400**。测试另有一条不变量：**申报的默认版本必须 ≥ 表中每个模型的
+门槛**——这条锁让「加了高门槛模型却忘了抬版本」无法通过 CI。
+
+### 收编本机已有的 Claude Code 登录（可选，默认关闭）
+
+如果你本机已经登录过 Claude Code，可以点「收编本机登录」把它作为一条账号导入，省去再次登录。
+两点必须清楚：
+
+- 开启前插件只探测**文件是否存在**，不读取内容；只有你显式开启后才读取；
+- 导入的是**快照**，**本插件永不再刷新它**。Claude Code 刷新的是同一枚轮换令牌，两个进程各自刷新会互相
+  作废，进程内的单飞机制解决不了跨进程竞态。快照过期后请**回 Claude Code 重新登录，再收编一次**；
+- 本插件**绝不写入或删除** Claude Code 的任何文件；「停止收编」只移除插件这边的记录。
+
+### 上游接口
 
 | 用途 | 路径 | 鉴权 |
 | --- | --- | --- |
-| 模型生成 | `POST {base}/api/coding/paas/v4/chat/completions` | `Authorization: Bearer <Key>` |
-| 模型目录（也是添加 Key 时的验证接口） | `GET {base}/api/coding/paas/v4/models` | `Authorization: Bearer <Key>` |
-| 额度窗口 | `GET {base}/api/monitor/usage/quota/limit` | `Authorization: <Key>`（**无 `Bearer`**） |
-| 套餐信息 | `GET {base}/api/biz/subscription/list` | `Authorization: <Key>`（**无 `Bearer`**） |
+| 模型生成 | `POST https://api.anthropic.com/v1/messages?beta=true` | `Authorization: Bearer <access token>`，**且 `x-api-key` 必须缺省** |
+| 模型目录 | `GET https://api.anthropic.com/v1/models` | 同上 |
+| 订阅额度 | `GET https://api.anthropic.com/api/oauth/usage` | 同上，另带 `user-agent: claude-code/<版本>` |
+| 授权 / 令牌 | `https://claude.ai/oauth/authorize`、`https://platform.claude.com/v1/oauth/token` | PKCE S256（端点可用环境变量覆盖） |
 
-两区 host 分别是 `https://open.bigmodel.cn`（国区）与 `https://api.z.ai`（国际区）。请求只带本插件自己的 UA，不冒充官方客户端。
+请求带有 Claude Code 身份头（`user-agent`、`x-app`、`anthropic-beta`），并在 `system` 首块声明 Claude Code 身份。
+这是订阅令牌被服务端接受的前提，已在代码与测试中显式锁定。
 
-### 插件路由（GLM Coding Plan）
+### 插件路由（Claude 订阅）
 
-所有路由都以 `/zhipu/api` 为前缀：
+所有路由都以 `/claude/api` 为前缀：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/status` | 账号、额度、模型目录与路由归属 |
-| POST | `/accounts/add` | 验证并保存一个 API Key（可选 `alias`） |
-| POST | `/accounts/remove` | 删除当前账号（单凭据模式） |
-| POST | `/accounts/action` | 号池动作：`set-primary` / `set-alias` / `delete` / `clear-cooldown` / `clear-auth-failure` / `strategy` |
-| GET / POST | `/quota` | 强制刷新额度（POST）或读取当前状态（GET） |
+| GET | `/status` | 账号、额度、模型目录、登录流程与路由归属 |
+| POST | `/login` | 开始 OAuth 登录，立即返回流程状态（不阻塞） |
+| GET | `/login/status` | 轮询登录流程状态（客户端每 2 秒一次，无 SSE） |
+| POST | `/login/cancel` | 取消登录并释放回调端口 |
+| POST | `/login/input` | 提交手动粘贴的授权码 / 重定向 URL |
+| POST | `/adopt` | 收编本机 Claude Code 登录（只读，作快照入池） |
+| POST | `/adopt/disable` | 停止收编（不触碰 Claude Code 的文件） |
+| GET / POST | `/quota` | 读取或强制刷新额度；失败以 `quotaError` 呈现而非请求失败 |
 | GET / POST | `/models`、`/settings` | 读取或更新勾选模型、上下文窗口、默认思考深度与选中账号 |
 | POST | `/catalog/refresh` | 强制刷新模型目录 |
-| POST | `/connection/test` | 向上游对话接口发一次最小流式请求测试连接 |
+| POST | `/connection/test` | 向上游发一次最小请求测试连接 |
+| POST | `/accounts` | 号池动作：`set-primary` / `set-alias` / `delete` / `clear-cooldown` / `clear-auth-failed` / `strategy` |
+| POST | `/logout` | 注销（号池感知） |
 
-与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`；响应里永远不含 API Key（只含 Key 后四位）。
+与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。**响应里永远不含
+access token / refresh token / 授权码 / PKCE verifier**（有测试锁定）。
 
 ## 安全边界
 
@@ -427,7 +481,11 @@ Antigravity 的 access token / refresh token 使用独立的系统凭据存储�
 
 **WorkBuddy token 仅在 Host 内处理，从不进入浏览器**（`/workbuddy/api` 响应不含 `accessToken` / `refreshToken`，有测试锁定）。桌面扫描账号仍使用 CodeBuddy 自己的登录态文件：续期只原子写回其 `auth` 块；从本插件删除时只隐藏/恢复，绝不删除原文件。通过浏览器授权添加的账号归本插件所有，保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/workbuddy-accounts.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；这类账号可在设置页真正删除。
 
-**GLM Coding Plan 的 API Key 同样只在 Host 内处理，从不进入浏览器**（`/zhipu/api` 响应只含后四位提示，不含 Key 本身，有测试锁定）。它保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/zhipu-credentials.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；号池另用一份同样加密的文件 `$DSH_HOME/storages/zhipu-pool.json`，账号 id 与别名都只是 Key 的摘要与后四位。
+**Claude 订阅的 access token / refresh token 同样只在 Host 内处理，从不进入浏览器**（`/claude/api` 的响应只含非机密事实，有测试锁定）。它保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/claude-credentials.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；号池另用一份同样加密的文件 `$DSH_HOME/storages/claude-pool.json`。凭据文档是**多账号**结构，账号身份由不可变的 `internalId` 与只增不换的别名集共同表达，**任何路由键都不是令牌或其摘要**（令牌会轮换，用它做键会产生幽灵账号）。每次写入都**先读回校验再落盘**，校验失败会抛错且不破坏既有数据。
+
+**收编（adopt）是只读的**：本插件从不创建、修改、移动或删除 Claude Code 的任何文件；它只读取。收编得到的快照**永不由本插件刷新**（原因见上文）。
+
+macOS 钥匙串服务名为 `Claude Code-credentials`（**未核实**，本仓库不读取它：一份第三方指南与真实客户端对该名称说法不一致，因此它被明确列为非目标）。
 
 升级后首次访问 Antigravity 凭据时，会读取旧 `storages/antigravity-oauth.json`，加密保存并读回校验；成功后删除旧 JSON，通常无需重新登录。失败会保留旧文件并报告错误，不会回退到明文存储。注销同时清理旧文件和新凭据。Linux 需要 `secret-tool`（libsecret 工具包）及可用、已解锁的 Secret Service 钥匙环；无桌面服务的主机也需要配置该服务。系统凭据存储保护落盘数据，不防御当前用户下已获权限的进程。
 
@@ -502,10 +560,15 @@ npm pack --dry-run
 | Kimi Code 报 502 `Upstream model provider is temporarily unavailable` | 上游模型供应商的瞬时故障，与账号、模型、凭据都无关：插件会按 DSH retry policy 自动重试（最多 3 次，并遵守上游 `Retry-After`）；连续失败可稍后再试或换用同账号下其他模型 |
 | Kimi Code 报 429 `engine is currently overloaded` | 服务容量问题（工作日 14:00–17:00 高峰更常见），会自动退避重试；若响应里带 `error.type = exceeded_current_quota_error` 则属于配额耗尽，插件不会重试而是提示补充额度 |
 | Kimi Code 额度显示为空 | 卡片会同时给出失败原因（`/v1/usages` 的 401/403/5xx 文案），按提示处理后点「刷新用量」重试；确认用的是订阅账号——开放平台的 key 在这里不会被接受 |
+| Kimi Code 报「rejected the stored credential (401). Sign in again…」但发消息却是好的 | 这是**过期 access token**，不是被拒的账号：Kimi 的 access token 只有 **15 分钟**，而设置卡片过去会把号池里存着的那个 token 直接拿去查用量，因此只要 15 分钟内没走过一次 Kimi 请求，卡片就必然拿到 401。现在卡片会先刷新再请求（401 还会触发一次强制续期），因此**不必重新登录**；若卡片仍提示重新登录，才是真的刷新令牌被拒，按提示处理即可 |
 | Kimi Code 账号一栏为空 | 账号身份取自 OAuth token 自身的 JWT 声明，套餐名取自 `/me`（`/usages` 自 2026-09 起不再返回 `user_level_name`）。重新登录或点「刷新用量」即可写入；若仍为空但显示「已登录」，点「测试连接」可确认凭据是否仍被接受 |
-| GLM 添加 Key 报「rejected the API key」 | Key 与所选**区域**不匹配，或它不是 Coding Plan 的 Key。错误文案会指明应来自哪个控制台（`api.z.ai` 或 `open.bigmodel.cn`）：换区域重试，并确认订阅生效；开放平台按量付费的 Key 在订阅接口上不被接受 |
-| GLM 报 `code 1311`（套餐不含该模型） / `code 1309`（套餐已过期） | 这两个都是账号权益问题而非瞬时故障，插件不会重试：前者换一个模型，后者去官网续费。两者与「额度窗口用尽」共用 429 状态码，插件按响应正文的 `code` 区分处理 |
-| GLM 报 `code 1214`（参数被拒） | 多为该模型不支持的思考档位或不可读的图片：`glm-5.3` 不接受图片（用 `glm-5.3-flash`），档位只有 `low` / `high` / `max`。卡片只会列出该模型真正声明过的能力 |
-| GLM 额度显示为空或「该账号没有可用的配额数据」 | 监控接口可用但该账号没有生效的套餐；确认订阅已开通，再点「刷新用量」。卡片会同时显示接口本身的失败原因（如 401 / 5xx 文案） |
-| GLM 模型不出现在选择器里 | 卡片上若显示「模型路由已被其他 Provider 占用」，从占用方（自定义的 `zai` / `zhipu` 线路）移除该 Provider，插件会在下一次路由变更时自动接管；否则检查是否勾选了模型 |
+| Claude 相关接口返回 403 | 403 现在是**同源校验**的结果（修改状态的路由只接受同源 JSON POST）。若出现在浏览器里，检查是否从其它来源发起了请求；插件已不再有任何"确认后才能用"的门禁 |
+| 授权后粘贴授权码报「请把 # 后面的部分一起复制」 | 手动流程需要 `<授权码>#<state>` **整段**。只粘贴授权码是不被接受的：用流程自己的 state 顶上会架空 state 参数、把粘贴框变成登录 CSRF 的入口，因此插件宁可报错也不猜 |
+| loopback 回调收不到 / 端口绑定失败 | 端口探测失败会自动**降级为手动粘贴**（卡片会说明原因），照提示粘贴授权码即可。另：若浏览器把 `localhost` 解析到 `::1`，依赖浏览器的跨地址族回退可达本机 v4 监听，这是**假定**而非实测 |
+| 选择某个模型报 `claude_code_version_too_old`（例如 Opus 5.5 要求 2.1.280+） | 上游会校验本插件**申报的**客户端版本，新模型有各自的最低版本要求。插件现在会**在发出请求之前**本地拦下并告知模型、当前版本与要求版本（归类为**请求问题而非凭据问题**，**不会把你登出**——重新登录也不会有帮助）。用 `DSH_CLAUDE_CLI_VERSION` 抬高申报版本即可；已发布版本 ≥2.1.283 时 Opus 5.5 可直接使用 |
+| 模型请求报持续 400 / 「You're out of extra usage」 | 可能是身份或版本门槛：订阅令牌要求 Claude Code 身份头与 `system` 首块，且服务端会校验你申报的客户端版本。此类错误被归类为**请求问题而非凭据问题**，不会把你登出 |
+| 额度显示为空 / 某项显示「—」 | 额度接口的键集随账号类型变化，未提供的窗口会显示为未知而**不会伪造 0**。注意 **`utilization` 是已用百分比，0% 表示尚未使用（正常态）**，不是额度耗尽；真正的耗尽会以 429 与响应头状态呈现。接口被限流时卡片保留上次成功快照并标注时间 |
+| 收编后提示「本机 Claude Code 登录已过期」 | 这是设计如此：收编的是**快照**，插件永不刷新它（Claude Code 刷新同一枚轮换令牌，两个进程各自刷新会互相作废）。回 Claude Code 重新登录后**再收编一次**即可 |
+| 账号被标为「无法识别账号身份」 | 服务端这个账号既没返回 uuid 也没返回 email，插件无法在再次登录时自动认出它。用卡片上的**手动合并**把它并入既有账号；这是已知限制，插件不会用假 id 掩盖它 |
+| 模型不出现在选择器里 | 依次检查：卡片是否显示「模型路由已被其他 Provider 占用」（另一适配器持有该 id 时本插件会如实报告冲突而非抛错）；以及模型是否已勾选 |
 | Kimi Code 发送视频却没有画面 | `k3-256k` 不支持视频，切到 `k3` 或 `kimi-for-coding`；容器须在白名单内（mp4/mpeg/mov/avi/x-flv/mpg/webm/wmv/3gpp）；若该模型走的是 Anthropic 线路，视频会降级为文字（该协议没有文档化的视频块）。以上情况模型都会收到明确的文字说明，据此向你说明而不是凭空回答 |

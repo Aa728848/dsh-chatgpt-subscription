@@ -62,15 +62,15 @@ import {
   registerWorkBuddyPreferenceStore,
 } from './host/workbuddy/token-store.ts'
 import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
-import { ZhipuAdapter } from './host/zhipu/adapter.ts'
-import { ZhipuAccountPool } from './host/zhipu/account-pool.ts'
-import { registerZhipuRoutes } from './host/zhipu/routes.ts'
+import { ClaudeAdapter } from './host/claude/adapter.ts'
+import { ClaudeAccountPool } from './host/claude/account-pool.ts'
+import { registerClaudeRoutes } from './host/claude/routes.ts'
 import {
-  FileCredentialStore as ZhipuCredentialStore,
-  FileModelSettingsStore as ZhipuModelSettingsStore,
-  registerZhipuPreferenceStore,
-} from './host/zhipu/token-store.ts'
-import { PROVIDER_ID as ZHIPU_PROVIDER_ID, PROVIDER_NAME as ZHIPU_PROVIDER_NAME } from './host/zhipu/types.ts'
+  FileCredentialStore as ClaudeCredentialStore,
+  FileModelSettingsStore as ClaudeModelSettingsStore,
+  registerClaudePreferenceStore,
+} from './host/claude/token-store.ts'
+import { PROVIDER_ID as CLAUDE_PROVIDER_ID, PROVIDER_NAME as CLAUDE_PROVIDER_NAME } from './host/claude/types.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
@@ -198,15 +198,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     },
   })
 
-  const zhipuStore = new ZhipuCredentialStore()
-  const zhipuModelSettings = new ZhipuModelSettingsStore()
-  const zhipuPreferences = registerZhipuPreferenceStore(ctx.settings, zhipuModelSettings)
-  // The pool is the routing table and the single-credential store is its
-  // mirrored primary, so a pre-pool key needs no migration. The card's pinned
-  // account is read on each pick, because it can change while the adapter serves.
-  const zhipuAccountPool = new ZhipuAccountPool({
-    store: zhipuStore,
-    preferAccountId: () => zhipuPreferences.status().selectedAccountId,
+  const claudeStore = new ClaudeCredentialStore()
+  const claudeModelSettings = new ClaudeModelSettingsStore()
+  const claudePreferences = registerClaudePreferenceStore(ctx.settings, claudeModelSettings)
+  // The pool is the routing table and the credential document is its mirrored
+  // primary, so a pre-pool sign-in needs no migration. The card's pinned account
+  // is read on each pick, because it can change while the adapter serves.
+  const claudeAccountPool = new ClaudeAccountPool({
+    store: claudeStore,
+    preferAccountId: () => claudePreferences.status().selectedAccountId,
   })
 
   // The allowlist a Session recorded outranks the current settings document,
@@ -470,50 +470,54 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       },
     )
 
-    // The GLM Coding Plan route is contended the same way: another adapter
-    // family (a user's own `zai`/`zhipu` OpenAI-compatible entry) may already
-    // own the id, so it is claimed when free and reported when not.
-    const zhipuAdapter = new ZhipuAdapter(
-      zhipuStore,
-      zhipuModelSettings,
-      zhipuPreferences,
-      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: zhipuAccountPool },
+    // The Claude subscription route is contended the same way as the sibling
+    // lines: another adapter family may already own the provider id, so it is
+    // claimed when free and reported when not.
+    const claudeAdapter = new ClaudeAdapter(
+      claudeStore,
+      claudeModelSettings,
+      claudePreferences,
+      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: claudeAccountPool },
     )
-    let zhipuRegistration: AdapterRegistrationHandle | undefined
-    let zhipuConflict: string | null = null
-    const claimZhipuRoute = (): void => {
-      if (zhipuRegistration !== undefined) return
+    let claudeRegistration: AdapterRegistrationHandle | undefined
+    let claudeConflict: string | null = null
+    // Registered unconditionally: there is no acknowledgement, flag or other
+    // prior state that can hold this line back. The only thing that can keep the
+    // route unclaimed is another adapter family already owning the id, and that
+    // is reported rather than hidden — see the 'catch' below.
+    const claimClaudeRoute = (): void => {
+      if (claudeRegistration !== undefined) return
       try {
-        zhipuRegistration = ctx.llm.registerAdapter([ZHIPU_PROVIDER_ID], zhipuAdapter)
-        if (zhipuConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] ${ZHIPU_PROVIDER_NAME} route "${ZHIPU_PROVIDER_ID}" is now served by this plugin`)
+        claudeRegistration = ctx.llm.registerAdapter([CLAUDE_PROVIDER_ID], claudeAdapter)
+        if (claudeConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] ${CLAUDE_PROVIDER_NAME} route "${CLAUDE_PROVIDER_ID}" is now served by this plugin`)
         }
-        zhipuConflict = null
+        claudeConflict = null
       } catch (error) {
-        zhipuConflict = error instanceof Error ? error.message : String(error)
+        claudeConflict = error instanceof Error ? error.message : String(error)
         ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${ZHIPU_PROVIDER_ID}" is already owned by another adapter; `
-          + `${ZHIPU_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${zhipuConflict})`,
+          `[dsh-chatgpt-subscription] provider route "${CLAUDE_PROVIDER_ID}" is already owned by another adapter; `
+          + `${CLAUDE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${claudeConflict})`,
         )
       }
     }
-    claimZhipuRoute()
-    const zhipuRouteWatch = typeof ctx.on === 'function'
+    claimClaudeRoute()
+    const claudeRouteWatch = typeof ctx.on === 'function'
       ? ctx.on('llm/adapters-updated', () => {
-          claimZhipuRoute()
+          claimClaudeRoute()
         })
       : undefined
 
-    const disposeZhipuRoutes = registerZhipuRoutes(
+    const disposeClaudeRoutes = registerClaudeRoutes(
       ctx,
-      zhipuStore,
-      zhipuModelSettings,
-      zhipuPreferences,
+      claudeStore,
+      claudeModelSettings,
+      claudePreferences,
       {
         fetchFn: proxyFetch,
-        serving: () => zhipuRegistration !== undefined,
-        conflict: () => zhipuConflict,
-        accountPool: zhipuAccountPool,
+        serving: () => claudeRegistration !== undefined,
+        conflict: () => claudeConflict,
+        accountPool: claudeAccountPool,
       },
     )
 
@@ -596,7 +600,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     ctx.inject(['web'], ctx => {
       ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
       ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
-      applyWebProviders()
+      // Registering a provider is safe here; selecting one is not. A selection
+      // rewrites the `web` entry's config, which restarts it and unloads every
+      // entry that injects `web`. The profile composes as one loader update and
+      // the host audits that composition the moment it settles, so a restart
+      // started from this callback is read mid-unload and reported as
+      // "N entries did not activate", naming `web` and its consumers at
+      // `fiber state 5` (UNLOADING). Defer past that audit; readiness and every
+      // later preference or proxy change still reconcile the selection.
+      setTimeout(applyWebProviders, 0)
     })
 
     // Any preference can change the selection: the search picker chooses the search backend, and
@@ -642,10 +654,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(workBuddyRouteWatch)
       workBuddyRegistration?.()
       workBuddyRegistration = undefined
-      disposeZhipuRoutes()
-      releaseHandle(zhipuRouteWatch)
-      zhipuRegistration?.()
-      zhipuRegistration = undefined
+      disposeClaudeRoutes()
+      releaseHandle(claudeRouteWatch)
+      claudeRegistration?.()
+      claudeRegistration = undefined
       oauth.dispose()
       proxyManager.dispose()
     }
@@ -817,72 +829,102 @@ export {
   resolveWorkBuddyModel,
   modelsForRegion as workBuddyModelsForRegion,
 } from './host/workbuddy/model-catalog.ts'
-export { ZhipuAdapter, classifyFailure as classifyZhipuFailure, resolveDefaultReasoningEffort as resolveZhipuDefaultEffort } from './host/zhipu/adapter.ts'
 export {
-  ZhipuAccountPool,
-  zhipuPoolPath,
-  parseZhipuPoolData,
-  type ZhipuPoolAccount,
-} from './host/zhipu/account-pool.ts'
+  ClaudeAdapter,
+  codeForFailure as claudeCodeForFailure,
+  toLlmError as claudeToLlmError,
+} from './host/claude/adapter.ts'
 export {
-  FileCredentialStore as ZhipuCredentialStore,
-  FileModelSettingsStore as ZhipuModelSettingsStore,
-  credentialPath as zhipuCredentialPath,
-  modelSettingsPath as zhipuModelSettingsPath,
-  parseZhipuCredentials,
-  registerZhipuPreferenceStore,
-  zhipuAccountKey,
-  zhipuKeyHint,
-  type ZhipuCredentials,
-  type ZhipuModelSettings,
-  type ZhipuPreferenceStore,
-} from './host/zhipu/token-store.ts'
+  ClaudeAccountPool,
+  claudePoolPath,
+  parseClaudePoolData,
+  adoptedPoolAccountKey,
+  isAdoptedPoolCredential,
+  type ClaudePoolAccount,
+  type ClaudeAccountSummaryDto,
+} from './host/claude/account-pool.ts'
 export {
-  accountFromCredentials as zhipuAccountFromCredentials,
-  clearCachedCatalog as clearZhipuCatalog,
-  clearCachedQuota as clearZhipuQuota,
-  fetchAccountQuota as fetchZhipuQuota,
-  getCachedQuota as getZhipuQuota,
-  loadCatalog as loadZhipuCatalog,
-  parseCatalogModels as parseZhipuCatalogModels,
-  parsePlan as parseZhipuPlan,
-  parseQuotaLimits as parseZhipuQuotaLimits,
-  quotaMeters as zhipuQuotaMeters,
-  quotaWindows as zhipuQuotaWindows,
-  verifyApiKey as verifyZhipuApiKey,
-  windowLabel as zhipuWindowLabel,
-  windowMinutesOf as zhipuWindowMinutes,
-} from './host/zhipu/client.ts'
+  FileCredentialStore as ClaudeCredentialStore,
+  FileModelSettingsStore as ClaudeModelSettingsStore,
+  credentialPath as claudeCredentialPath,
+  modelSettingsPath as claudeModelSettingsPath,
+  parseClaudeCredentials,
+  parseClaudeCredentialDocument,
+  registerClaudePreferenceStore,
+  type ClaudeCredentials,
+  type ClaudeModelSettings,
+  type ClaudePreferenceStore,
+} from './host/claude/token-store.ts'
 export {
-  getZhipuWebStatus,
-  registerZhipuRoutes,
-  resolveEnabledModelIds as resolveZhipuEnabledModelIds,
-  buildModelOptions as buildZhipuModelOptions,
-} from './host/zhipu/routes.ts'
+  beginLogin as beginClaudeLogin,
+  cancelLogin as cancelClaudeLogin,
+  ensureAccessToken as ensureClaudeAccessToken,
+  getLoginStatus as getClaudeLoginStatus,
+  refreshAccessToken as refreshClaudeToken,
+  resolveLoginInput as resolveClaudeLoginInput,
+  submitLoginInput as submitClaudeLoginInput,
+} from './host/claude/oauth.ts'
 export {
-  FALLBACK_MODELS as ZHIPU_MODELS,
-  ZHIPU_MODELS as ZHIPU_MODEL_TABLE,
-  DEFAULT_VISIBLE_MODEL_IDS as ZHIPU_DEFAULT_VISIBLE_MODELS,
-  defaultContextWindowFor as zhipuDefaultContextWindow,
-  maxOutputTokensFor as zhipuMaxOutputTokens,
-  modelsForRegion as zhipuModelsForRegion,
-  resolveZhipuModel,
-  zhipuModelSupportsImage,
-  zhipuReasoningEfforts,
-  type ZhipuModelEntry,
-} from './host/zhipu/model-catalog.ts'
+  claudeCodeCredentialPaths,
+  claudeCodeCredentialPresence,
+  isAdoptedClaudeCredential,
+  isAdoptedCredentialExpired,
+  readClaudeCodeCredentials,
+  ADOPTED_CREDENTIAL_EXPIRED_HINT as CLAUDE_ADOPTED_CREDENTIAL_EXPIRED_HINT,
+} from './host/claude/adopt.ts'
 export {
-  CHAT_PATH as ZHIPU_CHAT_PATH,
-  MODELS_PATH as ZHIPU_MODELS_PATH,
-  PROVIDER_ID as ZHIPU_PROVIDER_ID,
-  PROVIDER_NAME as ZHIPU_PROVIDER_NAME,
-  QUOTA_PATH as ZHIPU_QUOTA_PATH,
-  REGION_BASE_URLS as ZHIPU_REGION_BASE_URLS,
-  SUBSCRIPTION_PATH as ZHIPU_SUBSCRIPTION_PATH,
-  apiBaseForRegion as zhipuApiBaseForRegion,
-  normalizeRegion as normalizeZhipuRegion,
-  regionForBaseUrl as zhipuRegionForBaseUrl,
-} from './host/zhipu/types.ts'
+  clearCachedCatalog as clearClaudeCatalog,
+  clearCachedQuota as clearClaudeQuota,
+  classifyFailure as classifyClaudeFailure,
+  fetchAccountQuota as fetchClaudeQuota,
+  getCachedQuota as getClaudeQuota,
+  loadCatalog as loadClaudeCatalog,
+  parseUsagePayload as parseClaudeUsagePayload,
+  probeConnection as probeClaudeConnection,
+} from './host/claude/client.ts'
+export {
+  getClaudeWebStatus,
+  registerClaudeRoutes,
+  ROUTE_PREFIX as CLAUDE_ROUTE_PREFIX,
+  buildClaudeModelOptions as buildClaudeModelOptions,
+  resolveEnabledModelIds as resolveClaudeEnabledModelIds,
+} from './host/claude/routes.ts'
+export {
+  CLAUDE_MODELS,
+  CLAUDE_MODEL_IDS,
+  DEFAULT_VISIBLE_MODEL_IDS as CLAUDE_DEFAULT_VISIBLE_MODELS,
+  FALLBACK_MODELS as CLAUDE_FALLBACK_MODELS,
+  claudeModelCanDisableThinking,
+  claudeModelSupportsImage,
+  claudeModelSupportsTemperature,
+  claudeReasoningEfforts,
+  claudeThinkingMode,
+  defaultContextWindowFor as claudeDefaultContextWindow,
+  maxOutputTokensFor as claudeMaxOutputTokens,
+  resolveClaudeModel,
+  type ClaudeModelEntry,
+} from './host/claude/model-catalog.ts'
+export {
+  API_BASE as CLAUDE_API_BASE,
+  MESSAGES_PATH as CLAUDE_MESSAGES_PATH,
+  PROVIDER_ID as CLAUDE_PROVIDER_ID,
+  PROVIDER_NAME as CLAUDE_PROVIDER_NAME,
+  QUOTA_CACHE_TTL_MS as CLAUDE_QUOTA_CACHE_TTL_MS,
+  claudeCliVersion,
+  setClaudeCliVersion,
+} from './host/claude/types.ts'
+export {
+  CLAUDE_REASONING_EFFORTS,
+  isClaudeReasoningEffort,
+  type ClaudeAccountQuota,
+  type ClaudeConnectionDto,
+  type ClaudeLoginFlowDto,
+  type ClaudeModelOption,
+  type ClaudeQuotaWindow,
+  type ClaudeReasoningEffort,
+  type ClaudeSettingsUpdateDto,
+  type ClaudeWebStatus,
+} from './shared/claude-contracts.ts'
 export {
   KimiCodeAccountPool,
   kimiCodePoolPath,

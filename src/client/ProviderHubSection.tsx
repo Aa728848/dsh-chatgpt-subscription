@@ -4,16 +4,16 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import { CodexSubscriptionSection } from './CodexSubscriptionSection.tsx'
 import { AntigravitySection } from './antigravity/AntigravitySection.tsx'
 import { CommandCodeSection } from './command-code/CommandCodeSection.tsx'
+import { ClaudeSection } from './claude/ClaudeSection.tsx'
 import { KimiCodeSection } from './kimi-code/KimiCodeSection.tsx'
 import { WorkBuddySection } from './workbuddy/WorkBuddySection.tsx'
-import { ZhipuSection } from './zhipu/ZhipuSection.tsx'
 import { NS } from './locales.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS> & {
   onModelChange?: () => void
 }
 
-type HubTabId = 'chatgpt' | 'antigravity' | 'command-code' | 'kimi-code' | 'workbuddy' | 'zhipu'
+type HubTabId = 'chatgpt' | 'antigravity' | 'claude' | 'command-code' | 'kimi-code' | 'workbuddy'
 
 // Brand names stay literal: the former standalone sidebar entries used the
 // same hardcoded labels, and every provider section except ChatGPT is
@@ -24,7 +24,7 @@ const HUB_TABS: ReadonlyArray<{ id: HubTabId; label: string }> = [
   { id: 'command-code', label: 'Command Code' },
   { id: 'kimi-code', label: 'Kimi Code' },
   { id: 'workbuddy', label: 'WorkBuddy' },
-  { id: 'zhipu', label: 'GLM' },
+  { id: 'claude', label: 'Claude' },
 ]
 
 /**
@@ -71,7 +71,7 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
       {active === 'command-code' ? <CommandCodeSection onModelChange={onModelChange} /> : null}
       {active === 'kimi-code' ? <KimiCodeSection onModelChange={onModelChange} /> : null}
       {active === 'workbuddy' ? <WorkBuddySection onModelChange={onModelChange} /> : null}
-      {active === 'zhipu' ? <ZhipuSection onModelChange={onModelChange} /> : null}
+      {active === 'claude' ? <ClaudeSection onModelChange={onModelChange} /> : null}
     </div>
   </section>
 }

@@ -163,14 +163,25 @@ export async function getKimiCodeWebStatus(
       ?? poolData.accounts.find((entry) => entry.isPrimary)
       ?? poolData.accounts[0])
   // A pool may hold accounts from more than one region, so everything host-level
-  // follows the account that would actually serve the next request.
-  const active = activePoolAccount?.credentials ?? credentials
+  // follows the account that would actually serve the next request. Its
+  // credential is renewed here as well: a card path that presents the stored
+  // access token unchanged reports an expired token as a rejected one, which is
+  // what sent users to sign in again for no reason.
+  const poolCredential = accountPool === undefined || activePoolAccount === undefined
+    ? undefined
+    : await accountPool
+      .getFreshCredential(activePoolAccount.id, options.fetchFn ?? fetch)
+      .catch(() => undefined)
+  const active = poolCredential ?? activePoolAccount?.credentials ?? credentials
   const region = active?.region ?? await resolveRegion()
 
   const live = await loadProviderModels({
     fetchFn: options.fetchFn,
     store,
     region,
+    // Always supplied, so the loader never falls back to the single-credential
+    // mirror: that file is a copy of one pooled account, and refreshing it
+    // rotates the very refresh token the pool is about to present.
     accessToken: active?.accessToken,
   }).catch(() => [])
   const catalog = live.length > 0 ? live : fallbackCatalog()
@@ -249,6 +260,41 @@ export function registerKimiCodeRoutes(
     return { id: target?.id, credentials: target?.credentials }
   }
 
+  /** Renewal seam for the quota fetch, bound to one pool account. */
+  const renewFor = (accountId: string | undefined) => {
+    const pool = accountPool
+    if (pool === undefined || accountId === undefined) return undefined
+    // Unconditional: the service refused this token, so a local expiry check is
+    // not evidence that it is still good.
+    return (_credentials: KimiCodeCredentials) => pool.renewCredential(accountId, fetchFn)
+  }
+
+  /**
+   * The credential the active account should be used with right now.
+   *
+   * Every card path goes through the pool here. A pool owns both the rotation
+   * and the write-back, so handing out {@link activeAccount}'s stored value
+   * meant the card kept presenting an access token that expired fifteen minutes
+   * after the last model request, and read the 401 it earned as a credential the
+   * user had to replace by signing in again.
+   *
+   * Without a pool there is no rotation to consult: the single-credential store
+   * renews itself while the quota is fetched.
+   */
+  const effectiveCredentials = async (
+    target: { id: string | undefined; credentials: KimiCodeCredentials | undefined },
+  ): Promise<KimiCodeCredentials | undefined> => {
+    if (accountPool === undefined) return target.credentials
+    if (target.id === undefined) return target.credentials
+    try {
+      return await accountPool.getFreshCredential(target.id, fetchFn)
+    } catch {
+      // Routed status must still render the account list and the stored
+      // identity; the request the credential was for reports the real reason.
+      return target.credentials
+    }
+  }
+
   // One per registration: a background refresh belongs to the line this route
   // serves, and the flag it reports must not leak between instances.
   const quotaRefresh = new QuotaRefresh()
@@ -274,12 +320,15 @@ export function registerKimiCodeRoutes(
           // it.
           if (poolActive.credentials !== undefined
             && (cached === null || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
-            const refresh = (): Promise<unknown> => fetchAccountQuota(store, {
-              fetchFn,
-              ...(accountPool === undefined
-                ? {}
-                : { credentials: poolActive.credentials, accountId: poolActive.id }),
-            })
+            const refresh = async (): Promise<unknown> => {
+              const credentials = await effectiveCredentials(poolActive)
+              return fetchAccountQuota(store, {
+                fetchFn,
+                ...(accountPool === undefined
+                  ? {}
+                  : { credentials, accountId: poolActive.id, renewFn: renewFor(poolActive.id) }),
+              })
+            }
             if (cached === null) await quotaRefresh.run(refresh)
             else quotaRefresh.start(refresh)
           }
@@ -328,7 +377,11 @@ export function registerKimiCodeRoutes(
             fetchFn,
             ...(accountPool === undefined
               ? {}
-              : { credentials: poolActive.credentials, accountId: poolActive.id }),
+              : {
+                  credentials: await effectiveCredentials(poolActive),
+                  accountId: poolActive.id,
+                  renewFn: renewFor(poolActive.id),
+                }),
           })
           // A reachable service with no usable account still means the request
           // did not authenticate, so the verdict is "not connected".
@@ -357,7 +410,11 @@ export function registerKimiCodeRoutes(
               force: true,
               ...(accountPool === undefined
                 ? {}
-                : { credentials: quotaActive.credentials, accountId: quotaActive.id }),
+                : {
+                    credentials: await effectiveCredentials(quotaActive),
+                    accountId: quotaActive.id,
+                    renewFn: renewFor(quotaActive.id),
+                  }),
             })
             if (quota === null) {
               return sendJson(response, 502, { ok: false, error: 'Kimi Code returned no usage data. The subscription may not include the coding quota.' })
@@ -420,7 +477,7 @@ export function registerKimiCodeRoutes(
               fetchFn,
               store,
               region: catalogActive.credentials.region,
-              accessToken: catalogActive.credentials.accessToken,
+              accessToken: (await effectiveCredentials(catalogActive))?.accessToken,
               force: true,
             }).catch(() => undefined)
           }

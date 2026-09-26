@@ -377,6 +377,70 @@ describe('the effect body both mechanisms are wired through', () => {
   })
 })
 
+describe('the persona block the declaration transcribes', () => {
+  /**
+   * Dedent the YAML `prefix: |` block scalar of a preset row into the text the
+   * runtime mounts. Four of the six rows of `agent.cordis.yml` are not pinned by
+   * any assertion, so a rule edit that reaches only one of the two copies (the
+   * YAML the legacy sync deploys, the declaration 0.1.7 registers) ships a
+   * divergent preset with every test still green. This reads the shipped file
+   * instead of a hand-copied fixture, so it cannot drift from it.
+   */
+  function personaBlockOf(yml: string): string {
+    const lines = yml.split('\n')
+    const start = lines.findIndex(line => line.trim() === 'prefix: |')
+    if (start < 0) throw new Error('agent.cordis.yml carries no "prefix: |" block')
+    const block: string[] = []
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim() === '') { block.push(''); continue }
+      if (!line.startsWith('      ')) break
+      block.push(line.slice(6))
+    }
+    return block.join('\n').replace(/\n+$/, '')
+  }
+
+  /** The `persona` row's inline prefix from the runtime declaration. */
+  function declaredPrefix(): string {
+    const found = allRows().find(row => row.id === 'persona')
+    const config = found?.config as { prefix?: unknown } | undefined
+    if (typeof config?.prefix !== 'string') throw new Error('the declaration carries no persona prefix')
+    return config.prefix.replace(/\n+$/, '')
+  }
+
+  it('keeps the YAML and the declaration byte-identical, and non-empty', () => {
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    const fromYaml = personaBlockOf(yml)
+    expect(fromYaml.length).toBeGreaterThan(1000)
+    expect(fromYaml).toBe(declaredPrefix())
+  })
+
+  it('scopes the fallback to one task and restores delegation on the next', () => {
+    // The regression the field report is about: an agent that fell back once
+    // kept refusing to delegate on every later task. Both copies must say that
+    // fallback is task-scoped, that it is entered only after evidence, and that
+    // the next task re-runs the triage regardless of it.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    const committed = [personaBlockOf(yml), declaredPrefix()]
+    for (const persona of committed) {
+      expect(persona).toContain('## R8 · 兜底')
+      expect(persona).toContain('兜底是任务级、非会话级')
+      expect(persona).toContain('只覆盖触发它的那一个任务')
+      expect(persona).toContain('下一个任务开始一律回到 R0 重新分诊')
+      expect(persona).toContain('同一任务书按 R6 重新派发两次仍不通过')
+      // The anti-patterns that made the stale fallback self-reinforcing.
+      expect(persona).toContain('把一次兜底沿用成整个会话的默认')
+      expect(persona).toContain('拿工具硬拒当当兜底理由而不去修触发条件')
+      // The condition-fix guidance for the two hard rejections seen in the field.
+      expect(persona).toContain('active child limit')
+      expect(persona).toContain('subagent model selection')
+      // The old unbounded wording, which let the model declare an open-ended
+      // session-wide fallback, must be gone from both copies.
+      expect(persona).not.toContain('子代理连续失败')
+      expect(persona).not.toContain('只有这些情况你才亲自执行')
+    }
+  })
+})
+
 describe('the bundled files the declaration transcribes', () => {
   it('still ships the preset the declaration stands in for', () => {
     expect(existsSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'))).toBe(true)

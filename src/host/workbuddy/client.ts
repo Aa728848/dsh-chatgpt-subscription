@@ -35,7 +35,7 @@ import {
   convergeWorkBuddyEffort,
   WORKBUDDY_STANDARD_EFFORTS,
 } from '../../shared/workbuddy-contracts.ts'
-import { rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
+import { catalogSnapshotName, rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
 export interface WorkBuddyRequestOptions {
   fetchFn?: typeof fetch
@@ -316,9 +316,15 @@ let cachedCatalog: { region: WorkBuddyCredentials['region']; models: WorkBuddyMo
 let catalogInFlight: Promise<WorkBuddyModelEntry[]> | null = null
 let catalogInFlightRegion: WorkBuddyCredentials['region'] | null = null
 const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000
-// Set once per process: the persisted snapshot was consulted, so a failed read
-// must not re-read the file on every cache miss.
-let catalogSnapshotLoaded = false
+/**
+ * Snapshot scopes already consulted in this process.
+ *
+ * One entry per region rather than a single flag: the persisted file is scoped
+ * to the region it was fetched for (see `catalogSnapshotName`), so each region
+ * consults its own file once, and a scope with no snapshot is not re-read on
+ * every cache miss.
+ */
+const catalogSnapshotScopesLoaded = new Set<WorkBuddyCredentials['region']>()
 
 export function getCachedCatalog(): WorkBuddyModelEntry[] {
   return cachedCatalog?.models ?? []
@@ -328,7 +334,7 @@ export function clearCachedCatalog(): void {
   cachedCatalog = undefined
   catalogInFlight = null
   catalogInFlightRegion = null
-  catalogSnapshotLoaded = false
+  catalogSnapshotScopesLoaded.clear()
 }
 
 /**
@@ -380,14 +386,14 @@ export async function loadConfigCatalog(
     void refreshConfigCatalog(credentials, options).catch(() => undefined)
     return cachedCatalog.models
   }
-  if (!catalogSnapshotLoaded) {
-    catalogSnapshotLoaded = true
-    // Only a snapshot whose entries declare the caller's region may be
-    // rehydrated: entries carry only the region they came from, so a cn
-    // snapshot would make the picker offer nothing to an intl account
-    // instead of falling back to the shipped table.
+  // The snapshot is scoped to the region it was fetched for: entries declare
+  // only the region they came from, so a cn snapshot read by an intl account
+  // would leave the picker offering nothing instead of falling back to the
+  // shipped table.
+  if (!catalogSnapshotScopesLoaded.has(credentials.region)) {
+    catalogSnapshotScopesLoaded.add(credentials.region)
     const rehydratedAt = await rehydrateCatalogCache(
-      'workbuddy',
+      catalogSnapshotName('workbuddy', credentials.region),
       (value) => {
         if (!Array.isArray(value)) return undefined
         const models: WorkBuddyModelEntry[] = []
@@ -430,7 +436,7 @@ function refreshConfigCatalog(
       if (models.length > 0) {
         const fetchedAt = Date.now()
         cachedCatalog = { region: credentials.region, models, fetchedAt }
-        void writeCatalogSnapshot('workbuddy', models, fetchedAt)
+        void writeCatalogSnapshot(catalogSnapshotName('workbuddy', credentials.region), models, fetchedAt)
         return models
       }
       return sameRegionCache()

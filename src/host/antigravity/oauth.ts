@@ -59,24 +59,36 @@ export function callbackPort(): number {
  * configured `DSH_ANTIGRAVITY_CALLBACK_PORT` still wins — callers who set it
  * accept that the port must be usable.
  */
-export async function resolveCallbackPort(attempts = CALLBACK_PORT_ATTEMPTS): Promise<number> {
+export async function resolveCallbackPort(
+  attempts = CALLBACK_PORT_ATTEMPTS,
+  host = resolveCallbackHost(),
+): Promise<number> {
   if (antigravityEnv('CALLBACK_PORT') !== undefined) return callbackPort()
   for (let offset = 0; offset < attempts; offset += 1) {
-    if (await isPortUsable(DEFAULT_CALLBACK_PORT + offset)) return DEFAULT_CALLBACK_PORT + offset
+    if (await isPortUsable(DEFAULT_CALLBACK_PORT + offset, host)) return DEFAULT_CALLBACK_PORT + offset
   }
   throw new Error(
     `No usable local port for the Antigravity sign-in callback `
-    + `(tried ${attempts} ports from ${DEFAULT_CALLBACK_PORT}). `
+    + `(tried ${attempts} ports from ${DEFAULT_CALLBACK_PORT} on ${host}). `
     + 'A Windows excluded-port range may cover them; set DSH_ANTIGRAVITY_CALLBACK_PORT to a free port.',
   )
 }
 
-function isPortUsable(port: number): Promise<boolean> {
+/**
+ * Whether one port can be bound on the interface the listener will use.
+ *
+ * The probe binds the same host `startCallbackServer` binds rather than a fixed
+ * loopback literal. A port free on `127.0.0.1` can still fail on the address the
+ * listener actually takes — a listener holding only the IPv6 loopback, or a
+ * Windows exclusion covering that stack — and a probe that disagrees with the
+ * bind reintroduces the `EACCES` this function exists to avoid.
+ */
+function isPortUsable(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
     const probe = createServer()
     probe.once('error', () => resolve(false))
     probe.once('listening', () => probe.close(() => resolve(true)))
-    probe.listen(port, '127.0.0.1')
+    probe.listen(port, host)
   })
 }
 
@@ -86,10 +98,13 @@ export function resolveCallbackHost(raw = antigravityEnv('CALLBACK_HOST')): stri
   return 'localhost'
 }
 
-export function redirectUri(port = callbackPort()): string {
-  const host = resolveCallbackHost()
+export function redirectUri(port = callbackPort(), host = resolveCallbackHost()): string {
   const path = REDIRECT_PATH.startsWith('/') ? REDIRECT_PATH : `/${REDIRECT_PATH}`
-  return `http://${host}:${port}${path}`
+  // An IPv6 literal has to be bracketed in a URL authority: `http://::1:51121`
+  // is not a parseable URL at all, so the provider (and this plugin's own
+  // callback parser) rejects it and the sign-in flow never starts.
+  const authority = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  return `http://${authority}:${port}${path}`
 }
 
 export function clientId(): string {
@@ -156,10 +171,12 @@ export async function startCallbackServer(expectedState: string): Promise<{
   /** The redirect URI the provider receives: the probed port, not the default. */
   callbackUrl: string
 }> {
-  // The port is probed before the listener starts, and the redirect URI the
-  // provider receives carries the probed port — a reserved default cannot be
-  // assumed usable on Windows (see resolveCallbackPort).
-  const port = await resolveCallbackPort()
+  // The port is probed before the listener starts, and on the very host the
+  // listener will bind, so a port that is free for this interface is the one
+  // the redirect URI carries — a reserved default cannot be assumed usable on
+  // Windows (see resolveCallbackPort).
+  const host = resolveCallbackHost()
+  const port = await resolveCallbackPort(CALLBACK_PORT_ATTEMPTS, host)
   return new Promise((resolve, reject) => {
     let settled = false
     let timeout: NodeJS.Timeout | undefined
@@ -178,7 +195,7 @@ export async function startCallbackServer(expectedState: string): Promise<{
       fn()
     }
 
-    const callbackUrl = redirectUri(port)
+    const callbackUrl = redirectUri(port, host)
     const server = createServer((request, response) => {
       if (request.method !== 'GET' && request.method !== 'HEAD') {
         response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' })
@@ -224,7 +241,7 @@ export async function startCallbackServer(expectedState: string): Promise<{
     })
 
     server.on('error', reject)
-    server.listen(port, resolveCallbackHost(), () => {
+    server.listen(port, host, () => {
       timeout = setTimeout(() => {
         finish(() => rejectCode(new Error('OAuth callback timed out waiting for browser login')))
         server.close()

@@ -28,7 +28,7 @@ import type {
   KimiCodeUsageWindow,
   KimiCodeWire,
 } from '../../shared/kimi-code-contracts.ts'
-import { rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
+import { catalogSnapshotName, rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
 /** Endpoint suffixes on the coding API base. */
 export const MODELS_PATH = '/models'
@@ -182,13 +182,22 @@ interface CatalogCache {
 }
 
 let catalogCache: CatalogCache | null = null
-// Set once per process: the persisted snapshot was consulted, so a failed read
-// must not re-read the file on every cache miss.
-let catalogSnapshotLoaded = false
+/**
+ * Snapshot scopes already consulted in this process.
+ *
+ * One entry per region rather than a single flag: the persisted file is scoped
+ * to the region it was fetched for (see `catalogSnapshotName`), so each region
+ * consults its own file once, and a scope that has no snapshot is not re-read on
+ * every cache miss.
+ */
+const catalogSnapshotScopesLoaded = new Set<KimiCodeRegion>()
 
 export function clearCachedCatalog(): void {
   catalogCache = null
-  catalogSnapshotLoaded = false
+  catalogSnapshotScopesLoaded.clear()
+  // The remembered credential belongs to the listing being dropped: a forced
+  // refresh or a test must not answer from a token the cache no longer holds.
+  catalogActiveRegions.clear()
 }
 
 export function getCachedCatalog(): KimiCodeCatalogModel[] {
@@ -269,6 +278,16 @@ export function loadProviderModels(options: {
   region?: KimiCodeRegion
   signal?: AbortSignal
   force?: boolean
+  /**
+   * Read the active credential from the account pool.
+   *
+   * Every refresh rotates the refresh token and invalidates the previous one.
+   * The single-credential file is a *copy* of the pool's primary account, so
+   * refreshing that copy spends the token the pool will present on the next
+   * model request — the account then reads as rejected until a new sign-in.
+   * Supplying this keeps the loader on the one credential authority.
+   */
+  credentialProvider?: (region: KimiCodeRegion) => Promise<string | undefined>
 } = {}): Promise<KimiCodeCatalogModel[]> {
   return options.force === true ? refreshProviderModels(options) : cachedOrRevalidate(options)
 }
@@ -279,6 +298,7 @@ async function cachedOrRevalidate(options: {
   accessToken?: string
   region?: KimiCodeRegion
   signal?: AbortSignal
+  credentialProvider?: (region: KimiCodeRegion) => Promise<string | undefined>
 }): Promise<KimiCodeCatalogModel[]> {
   const region = options.region ?? await resolveRegion()
   let accessToken = options.accessToken
@@ -307,10 +327,16 @@ async function cachedOrRevalidate(options: {
     void refreshProviderModels(options).catch(() => undefined)
     return catalogCache!.models
   }
-  if (!catalogSnapshotLoaded) {
-    catalogSnapshotLoaded = true
+  if (!catalogSnapshotScopesLoaded.has(region)) {
+    catalogSnapshotScopesLoaded.add(region)
+    // The snapshot is scoped to the region it was fetched for, and the cache
+    // entry it produces is keyed on this caller's own region rather than on a
+    // token that was never read. Reading the shared file here is what put one
+    // region's models and context windows behind another region's credential:
+    // a mainland-cn listing answered a global caller because the snapshot was
+    // written and read under one name.
     const rehydratedAt = await rehydrateCatalogCache(
-      'kimi-code',
+      catalogSnapshotName('kimi-code', region),
       parsePersistedCatalogModels,
       (fetchedAt, models) => {
         catalogCache = { fetchedAt, models, key: `${region}:persisted`, region }
@@ -318,18 +344,34 @@ async function cachedOrRevalidate(options: {
       catalogCache?.fetchedAt ?? 0,
     )
     if (rehydratedAt > 0) {
-      void refreshProviderModels(options).catch(() => undefined)
+      void refreshProviderModels({ ...options, region }).catch(() => undefined)
       return catalogCache!.models
     }
   }
 
   if (accessToken === undefined) {
     if (options.store === undefined) return []
-    try {
-      accessToken = (await ensureAccessToken(options.store, { fetchFn: options.fetchFn, signal: options.signal })).accessToken
-    } catch {
-      return []
+    // A token already held for this region — the pool's active account, read by
+    // the caller — is preferred over decrypting the single-credential mirror.
+    // Every refresh rotates the refresh token and invalidates the old one, so
+    // the mirror must not be refreshed on its own while a pool serves the line:
+    // it holds a copy of the same token, and rotating that copy would kill the
+    // one the pool will present on the next model request.
+    accessToken = catalogAccessToken(region)
+    // A pool credential beats the mirror: the mirror is a copy of one pool
+    // account, and refreshing it would invalidate the token the pool is about
+    // to use.
+    if (accessToken === undefined && options.credentialProvider !== undefined) {
+      accessToken = await options.credentialProvider(region).catch(() => undefined)
     }
+    if (accessToken === undefined && options.credentialProvider === undefined) {
+      try {
+        accessToken = (await ensureAccessToken(options.store, { fetchFn: options.fetchFn, signal: options.signal })).accessToken
+      } catch {
+        return []
+      }
+    }
+    if (accessToken === undefined) return []
   }
 
   const cacheKey = `${region}:${accessToken.slice(-8)}`
@@ -348,6 +390,7 @@ function refreshProviderModels(options: {
   accessToken?: string
   region?: KimiCodeRegion
   signal?: AbortSignal
+  credentialProvider?: (region: KimiCodeRegion) => Promise<string | undefined>
 }): Promise<KimiCodeCatalogModel[]> {
   return performListing(options)
 }
@@ -358,17 +401,28 @@ async function performListing(options: {
   accessToken?: string
   region?: KimiCodeRegion
   signal?: AbortSignal
+  credentialProvider?: (region: KimiCodeRegion) => Promise<string | undefined>
 }): Promise<KimiCodeCatalogModel[]> {
   const region = options.region ?? await resolveRegion()
   let accessToken = options.accessToken
 
   if (accessToken === undefined) {
     if (options.store === undefined) return []
-    try {
-      accessToken = (await ensureAccessToken(options.store, { fetchFn: options.fetchFn, signal: options.signal })).accessToken
-    } catch {
-      return []
+    // Same rule as the cache path: a region token the caller already holds is
+    // the credential that will serve the next request, so the mirror is only
+    // read when there is none.
+    accessToken = catalogAccessToken(region)
+    if (accessToken === undefined && options.credentialProvider !== undefined) {
+      accessToken = await options.credentialProvider(region).catch(() => undefined)
     }
+    if (accessToken === undefined && options.credentialProvider === undefined) {
+      try {
+        accessToken = (await ensureAccessToken(options.store, { fetchFn: options.fetchFn, signal: options.signal })).accessToken
+      } catch {
+        return []
+      }
+    }
+    if (accessToken === undefined) return []
   }
 
   const response = await (options.fetchFn ?? fetch)(openAIUrl(MODELS_PATH, region), {
@@ -382,13 +436,47 @@ async function performListing(options: {
   if (!Array.isArray(data)) throw new Error('Kimi Code model listing was not in the documented shape.')
 
   const models = data.map(parseCatalogModel).filter((model): model is KimiCodeCatalogModel => model !== undefined)
+  // The listing is cached, not just its models: a later token-free caller for
+  // this region can present the same credential instead of decrypting the
+  // mirror, which is a second copy of the same rotating refresh token.
+  rememberCatalogCredential(region, accessToken)
   catalogCache = { fetchedAt: Date.now(), models, key: cacheKeyOf(region, accessToken), region }
-  void writeCatalogSnapshot('kimi-code', models, catalogCache.fetchedAt)
+  void writeCatalogSnapshot(catalogSnapshotName('kimi-code', region), models, catalogCache.fetchedAt)
   return models
 }
 
 function cacheKeyOf(region: KimiCodeRegion, accessToken: string): string {
   return `${region}:${accessToken.slice(-8)}`
+}
+
+/**
+ * Region whose active account is already carried by the catalog cache.
+ *
+ * The settings card reads the card and the catalog with the pool's active
+ * credential but calls the loader without one, so without this the loader would
+ * fall back to the single-credential mirror — a second copy of the same
+ * rotating refresh token. Refreshing that copy invalidates the token the pool
+ * will present on the next model request, and the account then reads as
+ * rejected until a new sign-in.
+ */
+const catalogActiveRegions = new Map<KimiCodeRegion, string>()
+
+/**
+ * Record which credential the last listing used, so a token-free caller for the
+ * same region can reuse it instead of decrypting the mirror.
+ */
+export function rememberCatalogCredential(region: KimiCodeRegion, accessToken: string): void {
+  catalogActiveRegions.set(region, accessToken)
+}
+
+/** The token the cache already holds for this region, if any. */
+function catalogAccessToken(region: KimiCodeRegion): string | undefined {
+  return catalogActiveRegions.get(region)
+}
+
+/** Test seam: forget which credential the cached listings were fetched with. */
+export function clearCatalogCredentials(): void {
+  catalogActiveRegions.clear()
 }
 
 /** Shape check for a persisted snapshot.
@@ -787,6 +875,17 @@ export interface QuotaFetchOptions {
    * account's name, so a snapshot is only reused for the same id.
    */
   accountId?: string
+  /**
+   * Refresh this credential and hand back the replacement, or undefined when
+   * the caller has no way to renew it.
+   *
+   * A usage call that answers 401 is the only signal that an access token
+   * stopped being accepted; rotation bookkeeping cannot see it, because the
+   * token still looks unexpired locally. The caller that owns the credential —
+   * the pool — supplies the write-back here, so the one retry happens where the
+   * rotated refresh token can actually be persisted.
+   */
+  renewFn?: (credentials: KimiCodeCredentials) => Promise<KimiCodeCredentials | undefined>
 }
 
 /**
@@ -817,10 +916,25 @@ export async function fetchAccountQuota(
     throw error
   }
 
-  const response = await fetchFn(openAIUrl(USAGES_PATH, credentials.region), {
-    headers: await kimiCodeHeaders(credentials.accessToken, 'openai'),
-    signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
-  })
+  const requestUsage = async (credentials: KimiCodeCredentials): Promise<Response> =>
+    fetchFn(openAIUrl(USAGES_PATH, credentials.region), {
+      headers: await kimiCodeHeaders(credentials.accessToken, 'openai'),
+      signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
+    })
+
+  let response = await requestUsage(credentials)
+
+  if (response.status === 401) {
+    // A 401 is not automatically a dead account: an access token can be
+    // revoked upstream, or read back stale by a process that refreshed it.
+    // One forced renewal decides between the two, and only a second 401 means
+    // the credential itself is gone.
+    const renewed = await forceRenew(store, credentials, options, fetchFn)
+    if (renewed !== undefined) {
+      credentials = renewed
+      response = await requestUsage(credentials)
+    }
+  }
 
   if (response.status === 401) {
     // A rejected credential must be distinguishable from a transient outage:
@@ -844,7 +958,9 @@ export async function fetchAccountQuota(
   const profile = await fetchProfile(store, {
     fetchFn,
     signal: options.signal,
-    ...(options.credentials === undefined ? {} : { credentials: options.credentials }),
+    // The credential the usage call finally succeeded with, so a renewal made
+    // above is not immediately undone by asking with the refused token.
+    ...(options.credentials === undefined ? {} : { credentials }),
   })
   const account = accountFromCredentials(credentials, payload, profile ?? undefined)
   const learned: Partial<KimiCodeCredentials> = {}
@@ -867,6 +983,38 @@ export async function fetchAccountQuota(
   quotaCache = snapshot
   quotaAccountId = options.accountId
   return snapshot
+}
+
+/**
+ * Renew an access token once after the usage endpoint refused it.
+ *
+ * A pool supplies {@link QuotaFetchOptions.renewFn}, because only the pool can
+ * persist the rotated refresh token. Without one the single-credential store
+ * renews itself — but only when it still holds the very token that was refused:
+ * a store already carrying a different pair was rotated by someone else, and
+ * refreshing it again would spend a token the upstream has not rejected.
+ */
+async function forceRenew(
+  store: FileCredentialStore,
+  refused: KimiCodeCredentials,
+  options: QuotaFetchOptions,
+  fetchFn: typeof fetch,
+): Promise<KimiCodeCredentials | undefined> {
+  if (options.renewFn !== undefined) {
+    try {
+      return await options.renewFn(refused)
+    } catch {
+      return undefined
+    }
+  }
+  if (options.credentials !== undefined) return undefined
+  const stored = await store.read().catch(() => null)
+  if (stored === null || stored.refreshToken !== refused.refreshToken) return undefined
+  try {
+    return await ensureAccessToken(store, { fetchFn, signal: options.signal, force: true })
+  } catch {
+    return undefined
+  }
 }
 
 /**

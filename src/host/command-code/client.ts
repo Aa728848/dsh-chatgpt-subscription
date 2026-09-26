@@ -31,7 +31,7 @@ import type {
   CommandCodeMeter,
   CommandCodeUsageWindow,
 } from '../../shared/command-code-contracts.ts'
-import { rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
+import { catalogSnapshotName, rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
 const CLI_VERSION = '1.0.0'
 
@@ -557,9 +557,15 @@ function extractUnlimited(payload: unknown): boolean {
 
 let cachedCatalog: { models: CommandCodeCatalogModel[]; fetchedAt: number } | undefined
 let catalogInFlight: Promise<CommandCodeCatalogModel[]> | null = null
-// Set once per process: the persisted snapshot was consulted, so a failed read
-// must not re-read the file on every cache miss.
-let catalogSnapshotLoaded = false
+/**
+ * Snapshot scopes already consulted in this process.
+ *
+ * One entry per API environment rather than a single flag: the persisted file is
+ * scoped to the environment it was fetched for (see `catalogSnapshotName`), so
+ * each environment consults its own file once, and a scope with no snapshot is
+ * not re-read on every cache miss.
+ */
+const catalogSnapshotScopesLoaded = new Set<CommandCodeApiEnv>()
 
 /** Parse the public `/provider/v1/models` payload. */
 export function parseProviderModels(payload: unknown): CommandCodeCatalogModel[] {
@@ -624,10 +630,15 @@ export async function loadProviderModels(
     void refreshProviderModels(options).catch(() => undefined)
     return current.models
   }
-  if (!catalogSnapshotLoaded) {
-    catalogSnapshotLoaded = true
+  // The snapshot is scoped to the API environment it was fetched for: the two
+  // environments are different services, so a listing fetched against one must
+  // never answer the other before the caller's own endpoint is resolved.
+  const { apiEnv } = options
+  const scope = apiEnv ?? resolveApiEnv()
+  if (!catalogSnapshotScopesLoaded.has(scope)) {
+    catalogSnapshotScopesLoaded.add(scope)
     const rehydratedAt = await rehydrateCatalogCache(
-      'command-code',
+      catalogSnapshotName('command-code', scope),
       parseProviderModels,
       (fetchedAt, models) => {
         cachedCatalog = { models, fetchedAt }
@@ -654,7 +665,7 @@ function refreshProviderModels(
       if (models.length > 0) {
         const fetchedAt = Date.now()
         cachedCatalog = { models, fetchedAt }
-        void writeCatalogSnapshot('command-code', models, fetchedAt)
+        void writeCatalogSnapshot(catalogSnapshotName('command-code', options.apiEnv ?? resolveApiEnv()), models, fetchedAt)
       }
       return models.length > 0 ? models : cachedCatalog?.models ?? []
     })
@@ -672,7 +683,7 @@ export function getCachedCatalog(): CommandCodeCatalogModel[] {
 export function clearCachedCatalog(): void {
   cachedCatalog = undefined
   catalogInFlight = null
-  catalogSnapshotLoaded = false
+  catalogSnapshotScopesLoaded.clear()
 }
 
 /** Effective context window: a saved override wins over the catalog value. */

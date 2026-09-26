@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ZhipuWebStatus } from '../../shared/zhipu-contracts.ts'
+import type { ClaudeWebStatus } from '../../shared/claude-contracts.ts'
 import type { SnapshotStore } from '../store.ts'
-import { NS_ZHIPU } from './locales.ts'
+import { NS_CLAUDE } from './locales.ts'
 
-const API = '/zhipu/api'
+const API = '/claude/api'
 
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
@@ -23,7 +23,7 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 type Props = PropsRuntime<'conversation.input.right'> &
-  PropsLocale<typeof NS_ZHIPU> & {
+  PropsLocale<typeof NS_CLAUDE> & {
     directory: SnapshotStore<ModelDirectoryState>
     loadModelDirectory: () => void
   }
@@ -37,43 +37,54 @@ interface BadgeFacts {
 /**
  * Pick the most meaningful number for the badge.
  *
- * A Coding Plan is bounded by two windows at once, and the one closer to
- * exhaustion is what the user needs to see: the 5-hour window can be spent
- * while the weekly one has room, and the reverse. So the tightest *remaining*
- * fraction wins, and its window names the tooltip.
+ * A subscription is bounded by several windows at once — a 5-hour one and a
+ * weekly one, and sometimes a per-model weekly one as well. They are not
+ * interchangeable: the short window can be spent while the long one has room and
+ * the reverse, so the TIGHTEST *remaining* percentage is what the badge shows
+ * and its own label names the tooltip. Choosing "the shortest window" instead
+ * would be a guess about which one runs out first, and the payload already
+ * answers that.
+ *
+ * NOTE ON DIRECTION: the wire reports `usedPercent`, which is PERCENT USED, so
+ * remaining is 100 - used. A window at 0% used is the normal empty state and
+ * grades as 'normal', not as an error.
  */
-export function selectBadgeFacts(status: ZhipuWebStatus | null): BadgeFacts | null {
+export function selectBadgeFacts(status: ClaudeWebStatus | null): BadgeFacts | null {
   const quota = status?.quota
   if (quota === null || quota === undefined) {
-    return { text: '—', tooltip: 'GLM Coding Plan quota unavailable — click to refresh', level: 'normal' }
+    return { text: '—', tooltip: '[Claude] quota unavailable — click to refresh', level: 'normal' }
   }
 
   let tightest: { label: string; remaining: number } | null = null
   for (const window of quota.windows) {
-    if (window.remainingFraction === null) continue
-    if (tightest === null || window.remainingFraction < tightest.remaining) {
-      tightest = { label: window.label, remaining: window.remainingFraction }
+    // A null is "the source stated nothing" — skipped rather than read as a
+    // fully-spent window, which would be a fabricated alarm.
+    const remaining = window.remainingPercent
+      ?? (window.usedPercent === null ? null : 100 - window.usedPercent)
+    if (remaining === null) continue
+    if (tightest === null || remaining < tightest.remaining) {
+      tightest = { label: window.label, remaining }
     }
   }
   if (tightest === null) {
-    return { text: '—', tooltip: 'GLM Coding Plan quota unavailable — click to refresh', level: 'normal' }
+    return { text: '—', tooltip: '[Claude] quota unavailable — click to refresh', level: 'normal' }
   }
 
-  const remaining = Math.round(tightest.remaining * 100)
+  const remaining = Math.round(tightest.remaining)
   return {
     text: `${remaining}%`,
-    tooltip: `[GLM Coding Plan] ${tightest.label}: ${remaining}% left`,
+    tooltip: `[Claude] ${tightest.label}: ${remaining}% left`,
     level: remaining <= 5 ? 'danger' : remaining <= 20 ? 'warning' : 'normal',
   }
 }
 
-export function ZhipuComposerQuota({ directory, loadModelDirectory }: Props): React.JSX.Element | null {
+export function ClaudeComposerQuota({ directory, loadModelDirectory }: Props): React.JSX.Element | null {
   const modelState = useStore(directory)
-  const [status, setStatus] = useState<ZhipuWebStatus | null>(null)
+  const [status, setStatus] = useState<ClaudeWebStatus | null>(null)
   const [loading, setLoading] = useState(false)
   const mountedRef = useRef(false)
   const selected = modelState.current
-  const isZhipu = selected?.provider === 'zhipu-coding-plan'
+  const isClaude = selected?.provider === 'claude-subscription'
 
   useEffect(() => {
     loadModelDirectory()
@@ -94,8 +105,8 @@ export function ZhipuComposerQuota({ directory, loadModelDirectory }: Props): Re
       // explicit click asks for the forced refresh, so a poll never doubles the
       // upstream request count.
       const data = refresh
-        ? await fetchApi<ZhipuWebStatus>('/quota', { method: 'POST' })
-        : await fetchApi<ZhipuWebStatus>('/status')
+        ? await fetchApi<ClaudeWebStatus>('/quota', { method: 'POST' })
+        : await fetchApi<ClaudeWebStatus>('/status')
       if (mountedRef.current) setStatus(data)
     } catch {
       // best-effort: the settings card reports the actionable error
@@ -105,7 +116,7 @@ export function ZhipuComposerQuota({ directory, loadModelDirectory }: Props): Re
   }, [])
 
   useEffect(() => {
-    if (!isZhipu) return
+    if (!isClaude) return
     void fetchStatus(false)
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void fetchStatus(false)
@@ -113,11 +124,13 @@ export function ZhipuComposerQuota({ directory, loadModelDirectory }: Props): Re
     return () => {
       window.clearInterval(timer)
     }
-  }, [fetchStatus, isZhipu])
+  }, [fetchStatus, isClaude])
 
   const facts = useMemo(() => selectBadgeFacts(status), [status])
 
-  if (!isZhipu || !status?.authenticated || facts === null) return null
+  // Inert unless the conversation is actually on this provider: the badge is one
+  // per line and six of them must never be visible at once.
+  if (!isClaude || !status?.authenticated || facts === null) return null
 
   return (
     <span
