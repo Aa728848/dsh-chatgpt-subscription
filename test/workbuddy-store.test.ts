@@ -152,14 +152,25 @@ describe('WorkBuddy credential scanning', () => {
 
   it('caches a scan but re-reads when forced', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': credentialFile({ accessToken: 'first' }) })
+    const file = path.join(dir, 'workbuddy-desktop.info')
     const store = createWorkBuddyStore(dir, 60_000)
     expect((await store.read())?.accessToken).toBe('first')
 
-    await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify(credentialFile({ accessToken: 'second' })), 'utf8')
+    // The change detector compares mtimes, and a filesystem timestamp is coarse:
+    // two writes inside one tick are recorded with the SAME value, so a rewrite
+    // that lands in the same tick as the scan is invisible to it. Measured on
+    // Windows, that is 2 writes in 3 at sub-millisecond spacing, which is why
+    // this assertion used to fail intermittently in CI. The rewrite therefore
+    // states its modification time explicitly instead of racing the clock - the
+    // behaviour under test (a file the store can SEE changed is rescanned without
+    // `force`) is unchanged.
+    const scannedAt = (await fs.stat(file)).mtimeMs
+    await fs.writeFile(file, JSON.stringify(credentialFile({ accessToken: 'second' })), 'utf8')
+    await fs.utimes(file, new Date(scannedAt + 5_000), new Date(scannedAt + 5_000))
     // The cached read notices the file changed and rescans on its own.
     expect((await store.read())?.accessToken).toBe('second')
 
-    await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify(credentialFile({ accessToken: 'third' })), 'utf8')
+    await fs.writeFile(file, JSON.stringify(credentialFile({ accessToken: 'third' })), 'utf8')
     expect((await store.read({ force: true }))?.accessToken).toBe('third')
   })
 

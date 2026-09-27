@@ -271,7 +271,9 @@ function jsonSafeValue(value: unknown, seen: WeakSet<object> = new WeakSet()): u
   seen.add(value)
   try {
     if (Array.isArray(value)) {
-      return value.map((item) => jsonSafeValue(item, seen) ?? null)
+      // Array.from, not .map: .map SKIPS holes and leaves them holes, which is
+      // exactly the "dense array" promise below not being kept.
+      return Array.from(value, (item) => jsonSafeValue(item, seen) ?? null)
     }
     const record: Record<string, unknown> = {}
     for (const key of Object.keys(value)) {
@@ -1744,7 +1746,13 @@ export function closeStream(state: ClaudeStreamState): StreamChunk[] {
       // one replay entry - not the caller's whole turn. A `null` entry means
       // "no verbatim wire block here", which is exactly how the request builder
       // reads it back (replayBlockFor returns undefined for a non-record).
-      blocks: state.replayBlocks.map((block) => jsonSafeValue(block) ?? null),
+      //
+      // Array.from, NOT .map: a slot no writer ever touched is a HOLE, and .map
+      // skips holes while preserving their emptiness - the result would still
+      // fail DSH's lossless-JSON check, so the guard would miss the one case it
+      // exists for. Array.from reads every index, turning a hole into a real
+      // `null` like any other uninitialized slot.
+      blocks: Array.from(state.replayBlocks, (block) => jsonSafeValue(block) ?? null),
     },
   })
   return out

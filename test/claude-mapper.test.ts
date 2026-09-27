@@ -1436,6 +1436,40 @@ describe('The finish chunk survives DSH\'s lossless-JSON check', () => {
     expect(blocks[1]).toEqual({ type: 'thinking', thinking: 'weighing', signature: 'sig-1' })
   })
 
+  it('densifies a real forgotten slot, not just an explicitly undefined one', () => {
+    // The test above assigns `undefined`, which is the SHAPE the bug happened
+    // to take. What a producer that "forgets to write a slot" actually leaves is
+    // a HOLE, and the two are not the same value: index 2 below is never
+    // touched, so the array is sparse. This matters because
+    // Array.prototype.map - which the guard originally used - SKIPS holes and
+    // leaves them holes, so the emitted envelope would still be a sparse array
+    // and DSH would reject the whole turn. Verified against the harness's real
+    // snapshotJsonValue: a hole is rejected, an explicit undefined slot is not.
+    const state = createStreamState()
+    feed([
+      ...eventLines(messageStart()),
+      ...eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      ...eventLines({ type: 'content_block_stop', index: 0 }),
+    ], state)
+    // A block that opened at index 1 and never reserved its replay slot: a hole.
+    state.replayBlocks[2] = null
+    expect(Object.prototype.hasOwnProperty.call(state.replayBlocks, 1)).toBe(false)
+
+    const finish = closeStream(state).find((chunk) => chunk.type === 'finish')
+    if (finish === undefined || finish.type !== 'finish') throw new Error('no finish chunk')
+    expect(losslessJsonReason(finish)).toBeUndefined()
+    const blocks = replayBlocksOf(finish)
+    // Every index is OWN, so a JSON round trip keeps the positions aligned with
+    // the emitted blocks instead of collapsing them.
+    for (let index = 0; index < blocks.length; index += 1) {
+      expect(Object.prototype.hasOwnProperty.call(blocks, index)).toBe(true)
+    }
+    expect(finish.replayState).toEqual({
+      response: { provider: PROVIDER_ID },
+      blocks: [null, null, null],
+    })
+  })
+
   it('is idempotent: message_stop already emitted the terminal chunk', () => {
     // Pinned because the tests above rely on it: a real stream ends with
     // message_stop, and the adapter's own closing call must not add a second
