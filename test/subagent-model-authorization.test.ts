@@ -352,6 +352,49 @@ describe('subagent model authorization', () => {
     expect(inheritOverrideReason('subagent_fork', 'a', 'b')).toContain('"a/b"')
   })
 
+  it('policies spawn_teammate as an inherit tool, never as an explicit one', () => {
+    // The Agent Teams runtime starts every teammate with no agentOptions, so the
+    // tool exposes no route parameters. Treating it as explicit would deny every
+    // creation with "name provider and model" — an instruction the model cannot
+    // follow, because the schema has no such fields.
+    expect(DEFAULT_SUBAGENT_INHERIT_TOOLS).toContain('spawn_teammate')
+    expect(DEFAULT_SUBAGENT_INHERIT_TOOLS).not.toContain('subagent')
+    expect(normalizeInheritToolNames(undefined)).toContain('spawn_teammate')
+
+    const unauthorized = { session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }
+    const reason = delegationDenialReason(
+      unauthorized, 'spawn_teammate', {}, PREFERENCE, NO_SESSIONS,
+      ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )
+    // The denial must be the inherit one — it names the tool and routes the
+    // model at tools it can actually re-route, not at unfillable fields.
+    expect(reason).toContain('spawn_teammate')
+    expect(reason).toContain('"kimi-code/k3"')
+    expect(reason).toContain('antigravity/gemini-3.8-flash')
+    expect(reason).not.toContain('requires an explicit child model')
+
+    // An authorized Lead route lets the teammate through untouched.
+    const authorized = { session: routedSession([GEMINI], { provider: 'antigravity', model: 'gemini-3.8-flash' }) }
+    expect(delegationDenialReason(
+      authorized, 'spawn_teammate', {}, PREFERENCE, NO_SESSIONS,
+      ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toBeUndefined()
+
+    // A named route is meaningless on a tool with no route fields: denying it is
+    // the override branch, which is the only thing that can still deny a call
+    // whose inherited route is already authorized.
+    expect(delegationDenialReason(
+      authorized, 'spawn_teammate', { provider: 'antigravity', model: 'claude-opus-4-6' },
+      PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toContain('accepts no')
+
+    // Opting out of the default restores the untouched behavior.
+    expect(delegationDenialReason(
+      unauthorized, 'spawn_teammate', {}, PREFERENCE, NO_SESSIONS,
+      ['subagent'], 'session', [],
+    )).toBeUndefined()
+  })
+
   it('installs inherit names and rejects a tool listed in both modes', () => {
     const registered: ToolGuard[] = []
     const ctx = {

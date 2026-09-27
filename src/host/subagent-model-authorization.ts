@@ -38,8 +38,15 @@ export const DEFAULT_DELEGATION_TOOLS: readonly string[] = ['subagent']
  * and its cache. Inherit mode is what keeps that design honest: the fork still
  * cannot choose, but an allowlist-carrying Session now refuses to let it run on
  * a route the user did not authorize.
+ *
+ * `spawn_teammate` is the second, for the same reason at one remove. The Agent
+ * Teams runtime registers it in the calling agent's own scope, and it creates
+ * every child through `ctx.subagents.startContinuable` with no `agentOptions`
+ * at all: a teammate inherits the Lead's route and the tool exposes no route
+ * parameters. Policing it as an explicit tool would deny every creation with a
+ * reason the model cannot act on, so it sits here beside the fork.
  */
-export const DEFAULT_SUBAGENT_INHERIT_TOOLS: readonly string[] = ['subagent_fork']
+export const DEFAULT_SUBAGENT_INHERIT_TOOLS: readonly string[] = ['subagent_fork', 'spawn_teammate']
 
 /**
  * How one delegation tool resolves the child route this guard authorizes.

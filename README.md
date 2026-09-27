@@ -245,6 +245,43 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。GPT-6 系列�
 
 > 路径解析不写死相对路径：`src/host/preset-sync.ts` 从模块位置向上查找最近的 `package.json` 作为包根，因此 `src/` 布局、打包后的 `lib/` 布局，以及通过 pnpm symlink / Windows junction 安装都能正确解析。注意 `fs.cpSync({ recursive: true })` 在 Node 22 + Windows 上遇到含非 ASCII 的源路径会直接崩进程（nodejs/node#54476），所以复制是逐条目实现的。
 
+### 协作模式自适应（teammate / subagent）
+
+DSH 的 Agent Teams（bundle `@deepseek-ai/dsh-experimental-agent-team-profile`）会在**每个会话自己的作用域**里注册一套与内置**同名**的协调工具。工具注册表按作用域链解析、**近的层遮蔽远的层**，所以一旦该 bundle 被组合进来，会话里的 `send_message`、`list_agents`、`interrupt_agent` 就都换成了 teammate 版：
+
+- `list_agents()` 只列 Team 成员（Lead 自己显示为 `lead`），**看不到 `subagent` 派出去的子代理**；
+- `send_message` 的 `target` 只接受成员名，把子代理的 session id 传进去会抛 `active teammate "…" not found`（实测）；
+- 于是「派得出去、回访不了」——`subagent` 的孩子只能等完成通知，无法追问。
+
+`dispatch` preset 现在**每个任务开始时先侦测一次协作模式**（persona 的 R0.5），再按模式选择协调词汇（R-T）：
+
+| 侦测为 | 判据 | 协调词汇 | 派发 |
+|---|---|---|---|
+| teammate | `spawn_teammate` / `wait_agent` 存在 | `list_agents()`、`send_message({ target: <成员名> })`、`wait_agent()`、`team_task_*` | `spawn_teammate`（无路由参数，继承主代理路由）或 `subagent`（按 R2 显式路由） |
+| subagent | 二者都不存在 | `list_agents()`、`send_message({ agent_id })`、`interrupt_agent` | `subagent` / `subagent_fork` |
+
+两种模式下 R0 分诊、R1 职责边界、R3 自治、R6 验收都照常执行；**模型路由守卫（`subagentModelAuthorization`）不变**——它默认把 `spawn_teammate` 与 `subagent_fork` 同为 **inherit 模式**（见下），校验的是成员实际继承到的路由，而不是要求它给出并不存在的路由参数。
+
+> **不要**把 `spawn_teammate` 加进 `subagentModelTools`。该列表是 **explicit** 模式：要求每次调用成对给出 `provider` + `model`，而 `spawn_teammate` 的参数里根本没有这两个字段（DSH 设计如此：成员一律继承 Lead 的路由），结果是每一次 teammate 创建都会被硬拒，且模型无法通过补参数自救。它的正确归属是 `subagentModelInheritTools`（默认已包含）。
+
+### 已知上游限制：teammate 不能选模型
+
+`spawn_teammate` 目前**无法**指定 `provider`/`model`，这不是插件的问题，而是 Agent Teams 有意不做 per-teammate 路由。三层都已核对：
+
+| 层 | 能否带路由 | 证据 |
+|---|---|---|
+| 工具入参 | ❌ | `spawn_teammate` 的 schema 只有 `name`/`description`/`prompt`/`context` |
+| Team 服务 | ❌ | `SpawnTeammateRequest.provider` 是 **subagent 后端名**（`spawn`/`fork`），不是 LLM provider；且无 `model` 字段 |
+| 底层 API | ✅ | `ContinuableStartSpec.request` 可带 `agentOptions`（含 provider/model/reasoningEffort），但 Team 服务构造 request 时**只放 prompt 与 parent**，整个省略 |
+
+因此成员必然跑在 Lead 自己的路由上——这正是守卫把它归 inherit 模式的原因，也是**不应**把它加进 explicit 的 `subagentModelTools` 的原因。
+
+**插件侧无法绕过**，四条路都已验证死：pre-execute 明确排除输入改写（参数已被记录与呈现，`PreToolDecision` 只有 allow/deny/cancel/ask）；`agentTeams` 服务在内部丢弃后包装不到；注册自定义 subagent provider 也拿不到路由（`agentOptions` 在 continuation manager 就已解析完，provider 只返回 `seed`）；唯一能改子会话路由的 `selectForNextRequest` 只作用于「下一个请求」，而 teammate 创建后立刻开跑，抢不进去。
+
+**上游正路**：在 `packages/experimental/agent-team/src/roster.ts` 构造 `startContinuable` 的 `request` 处补上 `agentOptions`，并给 `SpawnTeammateRequest` 加字段、给工具 schema 加参数、创建前接 `assertAllowedModelSelection`。**该改动落地后**，`spawn_teammate` 就应从 `subagentModelInheritTools` 移到 `subagentModelTools`（explicit）——否则它会变成「能选模型却没人管」。
+
+> 实践提醒：inherit 模式校验的是**当前会话路由**。若当前会话跑在允许清单之外的路由上（例如默认模型与勾选清单不是同一条），teammate 与 `subagent_fork` 都会被拒绝——拒绝文案会指出恢复路径（改用显式路由的 `subagent`，或先把会话切到清单内的模型）。`subagent` 的显式路由不受影响。
+
 ### 配置项
 
 | 字段 | 默认 | 含义 |
@@ -266,6 +303,8 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 - **子代理永远和主代理同一个模型**的历史行为由此消失：模型必须先用 `list_subagent_models` 查出已授权路由，再按拒绝理由里列出的路由（例如 `antigravity/gemini-3.8-flash`）重试；该工具也只展示已授权路由；
 - 未记录允许列表的会话（例如恢复的旧会话、未启用该设置的会话）保持 DSH 原有行为（继承父级模型）。
 
+**inherit 模式（`subagentModelInheritTools`，默认 `['subagent_fork', 'spawn_teammate']`）**：有些委派工具**按设计**就没有路由参数，子代理必然跑在调用者自己的路由上——`subagent_fork`（复用对话与 KV Cache）与 Agent Teams 的 `spawn_teammate`（成员一律继承 Lead 的路由）都是这一类。「工具不能选」不等于「这个选择被授权」，所以守卫改为校验它**实际继承到的路由**：允许清单内有该路由就放行，没有就拒绝，并说明该工具无法改路由、要么改用能显式指定路由的 `subagent`、要么先把本会话切到清单内的模型。设为 `[]` 可关闭 inherit 模式的全部校验。
+
 守卫装在 DSH 工具注册表的调度入口上，因此 **`run_code`（代码模式 / PTC）里通过 SDK 调用的 `tools["subagent"]` 同样被拦截**：该子调用走的是与直接调用相同的 `prepare → guard → dispatch` 流水线，拒绝理由以 `ToolCallError` 抛回程序。也就是说模型无法靠把委派写进代码里绕过白名单（`test/subagent-model-authorization-ptc.test.ts` 用真实 `ToolRuntime` + 假 code runtime 验证了放行、缺省拒绝与越权拒绝三条路径）。
 
 配置项（插件行 `config`，全部可省略）：
@@ -273,7 +312,8 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `subagentModelAuthorization` | `true` | 是否启用上述授权守卫；设为 `false` 回到 DSH 原有行为 |
-| `subagentModelTools` | `['subagent']` | 需要授权的委派工具名；preset 里自定义了 `toolName` 时在此列出 |
+| `subagentModelTools` | `['subagent']` | 需要授权的委派工具名（explicit：必须成对给出 `provider`+`model`）；preset 里自定义了 `toolName` 时在此列出 |
+| `subagentModelInheritTools` | `['subagent_fork', 'spawn_teammate']` | 按设计继承调用者路由的委派工具（校验实际继承到的路由）；设 `[]` 关闭 |
 | `subagentModelScope` | `session` | `session` 只约束记录了允许列表的会话；`preference` 额外用当前设置卡列表约束未记录的会话 |
 
 改动只在设置卡片里保存过的勾选生效：设置改动只影响之后新建的会话（DSH 的会话快照语义），已运行的会话继续使用它自己记录的那份列表。

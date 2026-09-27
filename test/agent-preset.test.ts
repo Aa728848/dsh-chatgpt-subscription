@@ -439,6 +439,46 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).not.toContain('只有这些情况你才亲自执行')
     }
   })
+
+  it('adapts to the collaboration mode the session actually offers', () => {
+    // Agent Teams replaces the coordination tools with same-named teammates
+    // versions inside the agent's own scope, where they shadow the built-in
+    // ones. A dispatched subagent then cannot be reached: \`list_agents\` hides
+    // it and \`send_message\` resolves only member names. Both copies must tell
+    // the model to detect which mode is live rather than assume one.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    const committed = [personaBlockOf(yml), declaredPrefix()]
+    for (const persona of committed) {
+      // Detection is its own numbered rule and runs before planning.
+      expect(persona).toContain('## R0.5 · 协作模式侦测')
+      expect(persona).toContain('spawn_teammate')
+      expect(persona).toContain('wait_agent')
+      // The mode boundary is stated as reachability, not as capability: the
+      // model must not read a failed follow-up as a subagent bug.
+      expect(persona).toContain('派完能不能追问')
+      // The teammate branch keeps subagent-mode delegation intact.
+      expect(persona).toContain('## R-T · teammate 模式')
+      expect(persona).toContain('spawn_teammate 没有 provider/model')
+      // And the routing rule it must NOT invent a route for.
+      expect(persona).toContain('不要为它写 route 行')
+      // The role-identification paragraph covers teammates too.
+      expect(persona).toContain('说明你是子代理或 teammate')
+      expect(persona).not.toContain('说明你是子代理：R0、R-G')
+    }
+  })
+
+  it('names the two coordination vocabularies without conflating them', () => {
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      // The teammate vocabulary is stated explicitly...
+      expect(persona).toContain('team_task_*')
+      expect(persona).toContain('target: <成员名>')
+      // ...and the subagent session id is explicitly ruled out as a target.
+      expect(persona).toContain('不要把子代理 session id 交给 send_message')
+      // Detection stays anchored to the two tools that only Agent Teams adds.
+      expect(persona).toContain('spawn_teammate 与 wait_agent 是否存在')
+    }
+  })
 })
 
 describe('the bundled files the declaration transcribes', () => {
