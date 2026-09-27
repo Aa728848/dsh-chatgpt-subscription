@@ -1,4 +1,5 @@
-const STYLE_ID = '@eddyskywalker/dsh-chatgpt-subscription/main'
+const PLUGIN_ID = '@eddyskywalker/dsh-chatgpt-subscription'
+const STYLE_ID = `${PLUGIN_ID}/main`
 
 const CSS = `
 .dsh-codex-page{box-sizing:border-box;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:20px;max-width:780px;min-width:0;padding:2px 0 30px}
@@ -108,12 +109,36 @@ const CSS = `
 @media(prefers-reduced-motion:reduce){.dsh-codex-meter>span{transition:none}.dsh-codex-skeleton span{animation:none}}
 `
 
+/**
+ * Install the ChatGPT tab's stylesheet as a document-owned, never-removed
+ * `<style>` element.
+ *
+ * The other client stylesheets this plugin installs are additive: their
+ * installers no-op when the element already exists and their disposers do
+ * nothing, so a restart can never take the styles away. This one used to
+ * create *and remove* its element, and the dedupe handoff was racy: on a
+ * plugin fiber restart (config change, dependency reload, HMR) the new fiber
+ * ran `apply()` before the old fiber's async unload removed the element —
+ * dedupe saw the old tag, returned a no-op disposer, and the old unload then
+ * deleted the only copy. Every later restart kept returning the no-op, so the
+ * stylesheet never came back and the settings page rendered unstyled.
+ *
+ * Fix: treat the tag as owned by the document rather than by one fiber —
+ * create it when missing, refresh `textContent` when a rebuilt bundle ships
+ * different CSS (HMR), and return a no-op disposer unconditionally, matching
+ * the additive installers.
+ */
 export function installStyles(): () => void {
-  if (document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`) !== null) return () => undefined
+  if (typeof document === 'undefined') return () => undefined
+  const existing = document.querySelector<HTMLStyleElement>(`style[data-plugin-css="${STYLE_ID}"]`)
+  if (existing !== null) {
+    if (existing.textContent !== CSS) existing.textContent = CSS
+    return () => undefined
+  }
   const element = document.createElement('style')
-  element.dataset.plugin = '@eddyskywalker/dsh-chatgpt-subscription'
+  element.dataset.plugin = PLUGIN_ID
   element.dataset.pluginCss = STYLE_ID
   element.textContent = CSS
   document.head.appendChild(element)
-  return () => element.remove()
+  return () => undefined
 }
