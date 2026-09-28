@@ -259,9 +259,11 @@ describe('client registration', () => {
       'conversation.input.right',
       'conversation.input.right',
       'conversation.input.right',
+      'conversation.input.right',
       'tool.call.toolview',
     ])
-    // All subscription providers live behind one tabbed settings page.
+    // Every provider, MiniMax Code included, lives behind one tabbed settings
+    // page, so the hub is the only settings.section entry registered.
     expect(registrations.filter((registration) => registration.name === 'settings.section')).toEqual([
       expect.objectContaining({ name: 'settings.section', id: 'subscription-hub', order: 45 }),
     ])
@@ -271,6 +273,7 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'command-code-quota', order: 37 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'kimi-code-quota', order: 38 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'workbuddy-quota', order: 39 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'minimax-code-quota', order: 40 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'claude-quota', order: 41 }),
     ])
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
@@ -281,12 +284,23 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind tabs in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'claude'] as const
+    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'claude'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      // MiniMax Code reads its own frozen route prefix, and its card treats a
+      // missing quota as "this line exposes no usage endpoint".
+      if (url.startsWith('/api/dsh-chatgpt-subscription/minimax-code')) {
+        return Response.json({ ok: true, value: {
+          authenticated: false,
+          account: null,
+          region: 'cn',
+          storage: { kind: 'minimax-native', path: '/tmp/minimax-auth.json' },
+          models: ['MiniMax-M2'],
+        } })
+      }
       if (url.startsWith('/antigravity/api') || url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api') || url.startsWith('/workbuddy/api')) {
         return Response.json({ ok: true, value: {
           authenticated: false,
@@ -326,7 +340,7 @@ describe('client registration', () => {
     try {
       await act(async () => root.render(createElement(ProviderHubSection, { t, close: () => undefined } as never)))
       const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
-      expect(tabs.map((tab) => tab.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'Claude'])
+      expect(tabs.map((tab) => tab.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'Claude'])
       expect(container.querySelector('#dsh-hub-tab-claude')?.textContent).toBe('Claude')
       expect(tabs[0]?.getAttribute('aria-selected')).toBe('true')
       // The ChatGPT provider panel mounts by default; the other providers stay unmounted.
@@ -336,7 +350,7 @@ describe('client registration', () => {
       expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-page')).not.toBeNull()
       expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-grouphead')?.textContent).toContain(zh.accountPool)
 
-      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/claude/api/status']] as const) {
+      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/api/dsh-chatgpt-subscription/minimax-code/status'], [6, '/claude/api/status']] as const) {
         const id: string = TAB_IDS[index]
         fetchMock.mockClear()
         await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-' + id)?.click() })

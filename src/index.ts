@@ -53,6 +53,10 @@ import {
   registerKimiCodePreferenceStore,
 } from './host/kimi-code/token-store.ts'
 import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
+import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
+import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
+import { MinimaxCodeCredentialStore } from './host/minimax-code/token-store.ts'
+import { PROVIDER_ID as MINIMAX_CODE_PROVIDER_ID, PROVIDER_NAME as MINIMAX_CODE_PROVIDER_NAME } from './host/minimax-code/types.ts'
 import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
 import { WorkBuddyAccountPool } from './host/workbuddy/account-pool.ts'
 import { registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
@@ -178,6 +182,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const kimiCodeAccountPool = new KimiCodeAccountPool({ store: kimiCodeStore })
   const kimiCodeModelSettings = new KimiCodeModelSettingsStore()
   const kimiCodePreferences = registerKimiCodePreferenceStore(ctx.settings, kimiCodeModelSettings)
+
+  // MiniMax Code owns its own credential file and keeps it fresh, so this line
+  // reads and renews that file rather than keeping a second one of its own.
+  const minimaxCodeStore = new MinimaxCodeCredentialStore()
 
   const workBuddyStore = new WorkBuddyCredentialStore()
   const workBuddyModelSettings = new WorkBuddyModelSettingsStore()
@@ -400,6 +408,42 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       },
       kimiCodeAccountPool,
     )
+
+    // MiniMax Code is contended the same way as the sibling lines: another
+    // adapter family may already own the provider id, so it is claimed when free
+    // and reported when not.
+    const minimaxCodeAdapter = new MinimaxCodeAdapter(
+      minimaxCodeStore,
+      { fetchFn: proxyFetch, attachments: ctx.attachments },
+    )
+    let minimaxCodeRegistration: AdapterRegistrationHandle | undefined
+    let minimaxCodeConflict: string | null = null
+    const claimMinimaxCodeRoute = (): void => {
+      if (minimaxCodeRegistration !== undefined) return
+      try {
+        minimaxCodeRegistration = ctx.llm.registerAdapter([MINIMAX_CODE_PROVIDER_ID], minimaxCodeAdapter)
+        if (minimaxCodeConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] ${MINIMAX_CODE_PROVIDER_NAME} route "${MINIMAX_CODE_PROVIDER_ID}" is now served by this plugin`)
+        }
+        minimaxCodeConflict = null
+      } catch (error) {
+        minimaxCodeConflict = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(
+          `[dsh-chatgpt-subscription] provider route "${MINIMAX_CODE_PROVIDER_ID}" is already owned by another adapter; `
+          + `${MINIMAX_CODE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${minimaxCodeConflict})`,
+        )
+      }
+    }
+    claimMinimaxCodeRoute()
+    // A composition without the event seam (or a reduced test context) still
+    // serves the route; only the automatic claim on release is unavailable.
+    const minimaxCodeRouteWatch = typeof ctx.on === 'function'
+      ? ctx.on('llm/adapters-updated', () => {
+          claimMinimaxCodeRoute()
+        })
+      : undefined
+
+    const disposeMinimaxCodeRoutes = registerMinimaxCodeRoutes(ctx, minimaxCodeStore, { fetchFn: proxyFetch })
 
     // WorkBuddy is the CodeBuddy subscription: this plugin reads the desktop
     // client's own credential files, so the route is claimed like the others
@@ -649,6 +693,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(kimiCodeRouteWatch)
       kimiCodeRegistration?.()
       kimiCodeRegistration = undefined
+      disposeMinimaxCodeRoutes()
+      releaseHandle(minimaxCodeRouteWatch)
+      minimaxCodeRegistration?.()
+      minimaxCodeRegistration = undefined
       clearInterval(checkinTimer)
       disposeWorkBuddyRoutes()
       releaseHandle(workBuddyRouteWatch)
@@ -944,6 +992,98 @@ export {
 export { AccountPoolStore } from './host/antigravity/account-pool.ts'
 export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts'
 export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
+
+// --- MiniMax Code -----------------------------------------------------------------
+export { MinimaxCodeAdapter, classifyMinimaxFailure, MINIMAX_CODE_RETRY_POLICY_CONFIG } from './host/minimax-code/adapter.ts'
+export {
+  MinimaxCodeCredentialStore,
+  authJsonPath as minimaxCodeAuthJsonPath,
+  authStateJsonPath as minimaxCodeAuthStateJsonPath,
+  credentialIsFresh as minimaxCodeCredentialIsFresh,
+  minimaxHomeDir as minimaxCodeHomeDir,
+  parseMinimaxCodeCredentials,
+  pluginCredentialPath as minimaxCodePluginCredentialPath,
+  type MinimaxCodeCredentialSource,
+  type MinimaxCodeCredentials,
+} from './host/minimax-code/token-store.ts'
+export {
+  accountFromCredentials as minimaxCodeAccountFromCredentials,
+  beginWebLogin as beginMinimaxCodeLogin,
+  cancelWebLogin as cancelMinimaxCodeLogin,
+  ensureAccessToken as ensureMinimaxCodeAccessToken,
+  getWebLogin as getMinimaxCodeLogin,
+  isRefreshTokenRejected as isMinimaxCodeRefreshTokenRejected,
+  pollWebLogin as pollMinimaxCodeLogin,
+  refreshAccessToken as refreshMinimaxCodeToken,
+  requestDeviceAuthorization as requestMinimaxCodeDeviceAuthorization,
+  resetWebLogins as resetMinimaxCodeLogins,
+  revokeToken as revokeMinimaxCodeToken,
+  createPkcePair as createMinimaxCodePkcePair,
+  type DeviceAuthorization as MinimaxCodeDeviceAuthorization,
+  type MinimaxToken,
+} from './host/minimax-code/oauth.ts'
+export {
+  PROBE_MODEL as MINIMAX_CODE_PROBE_MODEL,
+  catalogSize as minimaxCodeCatalogSize,
+  createMessage as createMinimaxCodeMessage,
+  describeCredentials as describeMinimaxCodeCredentials,
+  listModelIds as listMinimaxCodeModelIds,
+  modelRequestHeaders as minimaxCodeModelRequestHeaders,
+  parseAnthropicUsage as parseMinimaxCodeUsage,
+  testConnection as testMinimaxCodeConnection,
+  summarizeFailureBody as summarizeMinimaxCodeFailureBody,
+  type MinimaxProbeResult,
+  type MinimaxUsage,
+} from './host/minimax-code/client.ts'
+export {
+  MINIMAX_CODE_MODELS,
+  effortForModel as minimaxCodeEffortForModel,
+  isThinkingDisabledEffort,
+  minimaxCodeModelDef,
+  minimaxCodeModelIds,
+  minimaxCodeModelName,
+  type MinimaxCodeCatalogModel,
+  type MinimaxCodeThinkingMode,
+} from './host/minimax-code/model-catalog.ts'
+export {
+  assertRequestBodyFits as assertMinimaxCodeBodyFits,
+  assertStreamComplete as assertMinimaxCodeStreamComplete,
+  buildMinimaxRequest,
+  clampOutputToContext as clampMinimaxCodeOutputToContext,
+  closeMinimaxStream,
+  createStreamState as createMinimaxCodeStreamState,
+  maxOutputTokensFor as minimaxCodeMaxOutputTokens,
+  processMinimaxStreamLine,
+  thinkingFieldFor as minimaxCodeThinkingField,
+  type MinimaxStreamState,
+} from './host/minimax-code/mapper.ts'
+export {
+  getMinimaxCodeWebStatus,
+  registerMinimaxCodeRoutes,
+  subPathOf as minimaxCodeSubPathOf,
+} from './host/minimax-code/routes.ts'
+export {
+  AGENT_LLM_PREFIX as MINIMAX_CODE_AGENT_LLM_PREFIX,
+  MESSAGES_PATH as MINIMAX_CODE_MESSAGES_PATH,
+  REGION_HOSTS as MINIMAX_CODE_REGION_HOSTS,
+  accountHost as minimaxCodeAccountHost,
+  agentBaseUrl as minimaxCodeAgentBaseUrl,
+  isMinimaxCodeReasoningEffort,
+  messagesUrl as minimaxCodeMessagesUrl,
+  redactToken as redactMinimaxCodeToken,
+} from './host/minimax-code/types.ts'
+export {
+  MINIMAX_CODE_PROVIDER_ID,
+  MINIMAX_CODE_PROVIDER_NAME,
+  MINIMAX_CODE_ROUTE_PREFIX,
+  type MinimaxCodeAccount,
+  type MinimaxCodeCredentialStorage,
+  type MinimaxCodeQuota,
+  type MinimaxCodeReasoningEffort,
+  type MinimaxCodeRegion,
+  type MinimaxCodeWebLogin,
+  type MinimaxCodeWebStatus,
+} from './shared/minimax-code-contracts.ts'
 
 /** Cordis event handles are either a disposer function or a disposable object. */
 function releaseHandle(handle: unknown): void {
