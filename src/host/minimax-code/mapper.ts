@@ -434,9 +434,9 @@ export function buildMinimaxRequest(
     // service only answers with one when the request asks for it. Without this
     // field the endpoint replies 200 `application/json` with a single complete
     // message, which carries no `data:` line, no `message_stop` and no
-    // `stop_reason` — so `assertStreamComplete` reported a perfectly good answer
+    // `stop_reason` — so `assertStreamComplete` reports a perfectly good answer
     // as a truncated stream ("stream ended before its terminal event") and every
-    // turn on this line failed. The sibling lines that consume SSE request it in
+    // turn on this line fails. The sibling lines that consume SSE request it in
     // their own builders for the same reason (kimi-code/mapper.ts,
     // claude/mapper.ts).
     stream: true,

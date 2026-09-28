@@ -11,7 +11,7 @@ import { getMinimaxCodeWebStatus, registerMinimaxCodeRoutes, resetLatestLogin, s
 import { MinimaxCodeCredentialStore, authJsonPath, credentialIsFresh, parseMinimaxCodeCredentials } from '../src/host/minimax-code/token-store.ts'
 import { MinimaxCodeAdapter } from '../src/host/minimax-code/adapter.ts'
 import { MINIMAX_CODE_MODELS, minimaxCodeModelIds } from '../src/host/minimax-code/model-catalog.ts'
-import { buildMinimaxRequest, createStreamState, processMinimaxStreamLine } from '../src/host/minimax-code/mapper.ts'
+import { buildMinimaxRequest } from '../src/host/minimax-code/mapper.ts'
 import { resetRefreshRejections } from '../src/host/minimax-code/oauth.ts'
 import { redactToken } from '../src/host/minimax-code/types.ts'
 
@@ -233,21 +233,12 @@ describe('MiniMax Code line', () => {
   })
 
   describe('the request asks for the stream the adapter parses', () => {
-    // This is the gap that let a total failure of the line through review: the
-    // tests here fed the adapter a hand-written SSE body and never checked that
-    // the request actually asked for one. The service answers 200
-    // `application/json` (a single message, no `data:` line, no `message_stop`)
-    // when `stream` is absent, and the parser then reports a complete answer as a
-    // truncated stream.
-    it('sets stream: true on every Messages body', () => {
-      const body = buildMinimaxRequest({
-        model: 'MiniMax-M3',
-        messages: [{ role: 'user', content: 'hi' }],
-      } as never)
-      expect(body.stream).toBe(true)
-    })
-
-    it('still sets it for a request carrying tools, system text and thinking', () => {
+    // The stream flag itself, and the parser's verdicts on a real stream versus a
+    // non-SSE body, are covered by test/minimax-code-mapper.test.ts. What is
+    // asserted here is the shape that file does not build: the flag has to survive
+    // the branches that add system text, tools and thinking, because losing it on
+    // exactly those requests is what would break tool-calling turns silently.
+    it('keeps stream: true on a body carrying system text, tools and thinking', () => {
       const body = buildMinimaxRequest({
         model: 'MiniMax-M3',
         messages: [
@@ -260,36 +251,6 @@ describe('MiniMax Code line', () => {
       expect(body.stream).toBe(true)
       expect(body.tools).toBeDefined()
       expect(body.system).toBe('be brief')
-    })
-
-    it('does not accept a body with no terminal event as a finished stream', () => {
-      // What the adapter sees when the request did not ask for a stream: a single
-      // JSON message body, so no `data:` line and no `message_stop`. Feeding the
-      // parser a non-terminal line must leave the stream unfinished, which is what
-      // turned a complete answer into "stream ended before its terminal event".
-      const state = createStreamState()
-      processMinimaxStreamLine('data: ' + JSON.stringify({
-        type: 'message',
-        content: [{ type: 'text', text: 'hi' }],
-      }), state)
-      expect(state.done).toBe(false)
-    })
-
-    it('accepts the terminal sequence a real stream ends with', () => {
-      // The positive control for the assertion above: with `stream: true` the
-      // service sends this sequence and the parser must call the stream complete.
-      const state = createStreamState()
-      for (const event of [
-        { type: 'message_start', message: { usage: { input_tokens: 1 } } },
-        { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
-        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
-        { type: 'content_block_stop', index: 0 },
-        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
-        { type: 'message_stop' },
-      ]) {
-        processMinimaxStreamLine('data: ' + JSON.stringify(event), state)
-      }
-      expect(state.done).toBe(true)
     })
   })
 
