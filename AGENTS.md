@@ -13,7 +13,7 @@ This repository is a DeepSeek Harness(DSH) plugin that exposes ChatGPT subscript
 
 ## Harness Compatibility
 
-One code base supports every 0.1.x harness generation (peer range in `package.json`), because users are spread across npm's `latest`, `next`, and `alpha` tags. Never simplify a provider path by assuming the newest generation's shape. Every harness delta is bridged at a boundary listed in `.dsh/skills/dsh-harness-upgrade/SKILL.md`, which also records the dual-baseline verification recipe; read it before changing anything version-sensitive.
+One code base supports every harness generation from 0.1.2-alpha.5 through 0.2.0-rc.1 (peer range in `package.json`), because users are spread across npm's `latest`, `next`, and `alpha` tags. Never simplify a provider path by assuming the newest generation's shape. Every harness delta is bridged at a boundary listed in `.dsh/skills/dsh-harness-upgrade/SKILL.md`, which also records the dual-baseline verification recipe; read it before changing anything version-sensitive.
 
 ## Build, Test, and Development Commands
 

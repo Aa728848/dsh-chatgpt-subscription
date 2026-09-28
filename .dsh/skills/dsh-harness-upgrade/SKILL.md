@@ -5,7 +5,8 @@ description: Use when the DSH harness this plugin supports moves to a new releas
 
 # Keeping this plugin working across DSH generations
 
-This plugin ships **one code base for every 0.1.x harness generation**. Users are
+This plugin ships **one code base for every supported harness generation**
+(0.1.2-alpha.5 through 0.2.0-rc.1 today). Users are
 spread across `latest` / `next` / `alpha`, so a new harness release never licenses
 dropping an old one: every breaking change gets bridged at a boundary, and both
 generations keep passing tests. This skill is the procedure, the seams, and the
@@ -173,12 +174,14 @@ next upgrade starts by reading the newest file in `references/`.
 
 ## 7. Current state
 
-- Tested baseline: **0.1.7-rc.2** (`devDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded run: forced typecheck + build clean, **1315 tests passed**
-  (103 files passed, 1 skipped file, 7 skipped tests); the previous-baseline room
-  (clean-room, exact `0.1.7-rc.1`) is **byte-identical in outcome — 1315 passed, 0
-  failures**; old generation (clean-room 0.1.5-rc.3): source typecheck clean,
-  **1312 tests passed, 0 failures**, one generation-bound test file unable to load
+- Tested baseline: **0.2.0-rc.1** (`devDependencies`); peer support 0.1.2-alpha.5
+  onwards. Latest recorded run: forced typecheck + build clean, **1685 tests passed**
+  (116 files passed, 1 failed, 1 skipped file, 7 skipped tests — the failed file is
+  the known Windows-only `antigravity-callback-port` set, 6 tests); the
+  previous-baseline room (clean-room, `^0.1.7-rc.2` resolving exactly to
+  0.1.7-rc.2) is **identical in outcome — 1685 passed, same 6 known failures**;
+  old generation (clean-room 0.1.5-rc.3): source typecheck clean, **1682 tests
+  passed, same 6 known failures**, one generation-bound test file unable to load
   (`@deepseek-ai/dsh-ptc-runtime`).
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
@@ -194,4 +197,9 @@ next upgrade starts by reading the newest file in `references/`.
   `session-controller`, which makes an offline model change fail on the three routes
   whose catalog is remote). Two new capabilities exist and are unadopted:
   `toolUpdate` and the `shell.quota-notice` / `ACCOUNT_QUOTA` surface.
+  `references/0.2.0-rc.1.md` covers 0.2.0-rc.1: **no behavioural change needed**
+  despite the major-looking version — every imported package is a version bump or an
+  internal/additive delta, both slot contracts are byte-identical across the tags,
+  and the identical-outcome rc.2 room is the evidence. The rc.2 live items are
+  untouched by 0.2.0-rc.1 and remain as recorded there.
 - Harness checkout used for every claim above: `C:\Users\A\Documents\deepseek-harness`.
