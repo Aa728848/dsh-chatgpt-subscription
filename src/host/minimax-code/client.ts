@@ -302,10 +302,24 @@ const QUOTA_TIMEOUT_MS = 8_000
  * Only a live call can settle which candidate serves this subscription, so the
  * winner is remembered and probed first from then on.
  */
-let quotaHostInForce: string | null = null
-let quotaSnapshot: { at: number; value: MinimaxCodeQuota | null } | null = null
+/**
+ * Why a usage snapshot is absent, when the reason is worth stating on the card.
+ *
+ * - `credential-not-accepted` — the endpoint answered, and refused THIS line's
+ *   credential because it needs a platform API key. Measured: every candidate
+ *   host answers HTTP 200 with `base_resp.status_code: 1004` for an
+ *   `mcode-public` (MiniMax Code) token, under every auth shape tried.
+ * - `unreachable` — no candidate host produced a usable answer at all.
+ */
+export type MinimaxCodeQuotaUnavailable = 'credential-not-accepted' | 'unreachable'
 
-/** Forget the cached usage snapshot (a sign-out, a test). */
+let quotaHostInForce: string | null = null
+let quotaSnapshot: { at: number; value: MinimaxCodeQuota | null; reason: MinimaxCodeQuotaUnavailable | null } | null = null
+
+/** How long a refused credential is remembered before asking again. */
+const QUOTA_REJECTED_CACHE_MS = 30 * 60_000
+
+/** Forget the cached usage snapshot (a sign-out, a sign-in, a test). */
 export function clearCachedQuota(): void {
   quotaSnapshot = null
   quotaHostInForce = null
@@ -314,6 +328,11 @@ export function clearCachedQuota(): void {
 /** The last usage snapshot without touching the network. */
 export function getCachedQuota(): MinimaxCodeQuota | null {
   return quotaSnapshot?.value ?? null
+}
+
+/** Why the last read produced no snapshot, or null when it produced one. */
+export function getQuotaUnavailable(): MinimaxCodeQuotaUnavailable | null {
+  return quotaSnapshot?.reason ?? null
 }
 
 function optionalNumber(value: unknown): number | undefined {
@@ -461,7 +480,12 @@ export async function fetchTokenPlanQuota(
   const fetchFn = options.fetchFn ?? fetch
   const now = Date.now()
   if (options.force !== true && quotaSnapshot !== null) {
-    const ttl = quotaSnapshot.value === null ? QUOTA_FAILURE_CACHE_MS : QUOTA_CACHE_MS
+    // A refused credential is not worth re-asking on the success cadence: the
+    // verdict is about the KIND of credential this line holds, so it will not
+    // change by trying again in a minute.
+    const ttl = quotaSnapshot.reason === 'credential-not-accepted'
+      ? QUOTA_REJECTED_CACHE_MS
+      : quotaSnapshot.value === null ? QUOTA_FAILURE_CACHE_MS : QUOTA_CACHE_MS
     if (now - quotaSnapshot.at < ttl) return quotaSnapshot.value
   }
   const candidates = quotaHostCandidates(credentials.region)
@@ -469,6 +493,7 @@ export async function fetchTokenPlanQuota(
     ? candidates
     : [quotaHostInForce, ...candidates.filter((host) => host !== quotaHostInForce)]
   let value: MinimaxCodeQuota | null = null
+  let reason: MinimaxCodeQuotaUnavailable | null = null
   for (const host of ordered) {
     try {
       const response = await fetchFn(tokenPlanRemainsUrl(host), {
@@ -478,17 +503,28 @@ export async function fetchTokenPlanQuota(
       })
       if (!response.ok) continue
       const payload: unknown = await response.json().catch(() => undefined)
+      // The platform endpoint answers HTTP 200 even when it REFUSES the caller,
+      // putting the verdict in `base_resp`. Treating `ok` as success would keep
+      // walking the remaining candidates for a verdict that is identical on every
+      // host, and would leave the card unable to say why nothing was shown.
+      const base = asRecord(asRecord(payload)?.base_resp)
+      if (numberOr(base?.status_code, 0) !== 0) {
+        reason = 'credential-not-accepted'
+        break
+      }
       const parsed = parseTokenPlanQuota(payload)
       if (parsed === null) continue
       quotaHostInForce = host
       value = parsed
+      reason = null
       break
     } catch {
       // An unreachable or wrong host is simply not the right candidate; the next
       // one is tried and a total failure leaves the card degraded.
     }
   }
-  quotaSnapshot = { at: Date.now(), value }
+  if (value === null && reason === null) reason = 'unreachable'
+  quotaSnapshot = { at: Date.now(), value, reason }
   return value
 }
 

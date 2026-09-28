@@ -919,11 +919,18 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
         </div>
         {quota === undefined
           ? (
-            // The contract makes quota optional, and the usage read is allowed to
-            // fail — the endpoint is undocumented and which host serves it is
-            // unmeasured — so the section explains itself rather than rendering an
-            // empty meter.
-            <p className="dsha-notice dshm-quota-note">{t('quotaUnavailable')}</p>
+            // The contract makes quota optional and the usage read is allowed to
+            // fail, so the section explains itself rather than rendering an empty
+            // meter. The host separates the refusal worth acting on (this
+            // sign-in's credential type cannot read usage at all) from an endpoint
+            // that merely did not answer, and each gets its own sentence.
+            <p className="dsha-notice dshm-quota-note">
+              {status?.quotaUnavailable === 'credential-not-accepted'
+                ? t('quotaNeedsApiKey')
+                : status?.quotaUnavailable === 'unreachable'
+                  ? t('quotaUnreachable')
+                  : t('quotaUnavailable')}
+            </p>
           )
           : (
             <div className="dsha-quota-card">

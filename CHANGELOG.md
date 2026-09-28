@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **实测确认：MiniMax Code 的登录态读不到用量，卡片改为说明真实原因（用户在国内、配额条未出现）**。上一轮接上的 `/v1/token_plan/remains` 在生产凭据下**读不出来**，本轮用本机真实凭据（国内区）把它查清了：
+  - **端点确实存在**：`api.minimax.cn` / `api.minimaxi.com` / `api.minimax.io` 三个主机都返回 JSON，**不是 404**。
+  - **但它只接受平台 API 密钥**：本线路持有的 `mcode-public`（MiniMax Code）登录态在**四种认证写法**下全部被拒——`Authorization: Bearer`、原始令牌、`x-api-key`、以及两者同时携带——而且**是 HTTP 200 + `base_resp.status_code: 1004`**（`"login fail: Please carry the API secret key in the 'Authorization' field"`）。**关键教训**：只看 `response.ok` 会把这次拒绝当成成功。
+  - **官方 CLI 能用是因为它的 OAuth 是「平台」登录**（`account.minimax.io` / `account.minimaxi.com`），与本线路的 `account.minimax.cn` mcode 登录是**两套不同的身份**；`mmx quota show` 的凭据分流（OAuth → 配额端点）只对平台 OAuth 成立。
+  - **mavis 后端没有用量路径**：探测了 `agent.minimax.cn/mavis/api/v1/` 下的 `token_plan/remains`、`usage`、`quota`、`user/quota`、`user/usage`、`account/quota`、`coding_plan/remains`、`subscription` 等，**全部 404**（而 `llm/v1/token_plan/remains` 返回的是 JSON 404，说明该前缀存在但无此路由）。
+  - **因此重构为「诚实的失败」**：新增 `quotaUnavailable` 状态字段与 `credential-not-accepted` / `unreachable` 两种原因，卡片区分显示——前者直接告诉用户"该登录态读不到用量、请在控制台或 MiniMax Code 应用查看"，不再含糊地说"暂无数据"。三个行为修正：① **识别 `base_resp` 拒绝后只试一台就停**（这个结论与主机无关，试遍候选纯属浪费）；② 此类拒绝**记住 30 分钟**（不是成功的 60 秒——重新登录会清掉快照，因为那是新凭据）；③ 失败原因不再被误当作"主机不对"。
+  - **新增 2 条测试**（共 19 条）：`base_resp` 拒绝被识别为 `credential-not-accepted` 且只发一台；`unreachable` 与前者区分。
+  - **验证**：`npm run typecheck` 0 错误、`npm run build` 成功、测试 **1684 passed / 7 skipped**，仍只剩 6 条既有的 Windows Antigravity 回调端口失败。
+
 - **MiniMax Code 接上用量的配额条（用户追问「用量和配额查不到吗」）**。原卡片断言「MiniMax Code 未提供用量查询端点」，**这句话是错的**，会把读者挡在一个确实存在的东西之外。端点不在 API 文档里——文档只说"用量显示在控制台的用量条上"——它存在于**官方 CLI 的源码**中：`mmx quota show`（"Display Token Plan usage and remaining quotas"）读 `GET {baseUrl}/v1/token_plan/remains`，且**凭据分流**是 OAuth 令牌走配额端点、只有 `sk-api-` 密钥才走 `/account/query_balance`——前者正是本线路实现的那套 RFC 8628 + PKCE。现已接入：
   - **两个窗口分开显示**：返回的每个 `model_remains` 行同时带 5 小时滚动窗口与每周窗口，卡片渲染两根条，各自显示剩余百分比、重置时刻与"已用/总量"。
   - **照抄官方实现的三处细节，缺一处就会显示错数**：① **`*_usage_count` 的语义是模糊的**——官方注释写明老响应把该字段当「剩余」、新响应当「已用」，必须用显式百分比消歧（偏差 >1% 时干脆放弃计数、只显示百分比），照抄否则**进度条会反过来**（红绿验证：改成朴素读法后 3 条测试失败，750 vs 250）；② **周窗口带显示倍率** `weekly_boost_permille`（渲染值 = 百分比 × 倍率/1000，可超过 100%，所以上限取 200 而非 100），5 小时窗口没有这个字段；③ `status: 3` 通常是「不限量」，但**两个总量都为 0 时**它表示「当前套餐不含该模型」——渲染成不限量会凭空许诺额度，这种行直接跳过。

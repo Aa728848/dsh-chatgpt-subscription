@@ -7,6 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   clearCachedQuota,
   fetchTokenPlanQuota,
+  getQuotaUnavailable,
   parseTokenPlanQuota,
   resolveQuotaCounts,
 } from '../src/host/minimax-code/client.ts'
@@ -200,6 +201,38 @@ describe('MiniMax Token Plan quota fetch', () => {
     expect(calls).toBe(1)
     await fetchTokenPlanQuota(credential(), { fetchFn, force: true })
     expect(calls).toBe(2)
+  })
+
+  it('recognises the platform refusing this line credential type', async () => {
+    // Measured against the live endpoint: /v1/token_plan/remains answers HTTP 200
+    // and puts the verdict in base_resp. Every candidate host says the same thing
+    // for an mcode token, so treating ok as success would walk the whole list for
+    // an answer that cannot differ, and would leave the card unable to say why.
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      calls += 1
+      return Response.json({
+        base_resp: {
+          status_code: 1004,
+          status_msg: "login fail: Please carry the API secret key in the 'Authorization' field of the request header",
+        },
+      })
+    }) as unknown as typeof fetch
+
+    expect(await fetchTokenPlanQuota(credential('cn'), { fetchFn })).toBeNull()
+    expect(getQuotaUnavailable()).toBe('credential-not-accepted')
+    // One host, not both: the verdict is about the credential, not the host.
+    expect(calls).toBe(1)
+
+    // And it is not re-probed on the success cadence.
+    await fetchTokenPlanQuota(credential('cn'), { fetchFn })
+    expect(calls).toBe(1)
+  })
+
+  it('reports an unreachable endpoint differently from a refused credential', async () => {
+    const fetchFn = vi.fn(async () => { throw new Error('offline') }) as unknown as typeof fetch
+    expect(await fetchTokenPlanQuota(credential('global'), { fetchFn })).toBeNull()
+    expect(getQuotaUnavailable()).toBe('unreachable')
   })
 
   it('remembers a total failure for longer than a success, so a wrong host is not retried every poll', async () => {

@@ -141,8 +141,17 @@ export interface MinimaxCodeWebStatus {
   contextWindowOverrides: Record<string, number>
   /** 未指定时的全局思考档位；null 表示各模型用自己的默认档位。 */
   defaultReasoningEffort: MinimaxCodeReasoningEffort | null
-  /** 无配额接口时为 undefined，UI 应优雅降级。 */
+  /** 无可用用量快照时为 undefined，UI 应优雅降级。 */
   quota?: MinimaxCodeQuota
+  /**
+   * 用量快照缺失、且原因值得告诉用户时给出。
+   *
+   * - `credential-not-accepted`：端点应答了，但**拒绝本线路持有的凭据类型**——
+   *   `/v1/token_plan/remains` 只接受平台 API 密钥，MiniMax Code 的
+   *   `mcode-public` 登录态在四种认证写法下都被拒（`base_resp.status_code: 1004`）。
+   * - `unreachable`：没有任何候选主机给出可用应答。
+   */
+  quotaUnavailable?: 'credential-not-accepted' | 'unreachable'
   /** 本插件是否正在服务该 Provider 路由；被别的适配器占用时为 false。 */
   serving: boolean
   /** 路由被别的适配器占用时的诊断文案。 */

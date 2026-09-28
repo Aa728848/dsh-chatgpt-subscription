@@ -64,7 +64,13 @@ import {
   MinimaxCodeAccessDeniedError,
   MinimaxCodeUnauthorizedError,
 } from './oauth.ts'
-import { fetchTokenPlanQuota, getCachedQuota, testConnection } from './client.ts'
+import {
+  clearCachedQuota,
+  fetchTokenPlanQuota,
+  getCachedQuota,
+  getQuotaUnavailable,
+  testConnection,
+} from './client.ts'
 
 /** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
 const MAX_BODY_BYTES = 64 * 1024
@@ -215,6 +221,8 @@ export async function getMinimaxCodeWebStatus(
   // Read once: the value is used for both the presence test and the payload, and
   // calling it twice could straddle a background refresh and disagree with itself.
   const quota = getCachedQuota()
+  // Only meaningful while no snapshot exists: once one does, the card renders it.
+  const quotaUnavailable = quota === null ? getQuotaUnavailable() : null
   return {
     ...pool,
     serving,
@@ -249,6 +257,7 @@ export async function getMinimaxCodeWebStatus(
     // timeout in the middle of every poll. The registered route refreshes the
     // snapshot in the background and `/quota` forces one on demand.
     ...(quota === null ? {} : { quota }),
+    ...(quotaUnavailable === null ? {} : { quotaUnavailable }),
   }
 }
 
@@ -396,6 +405,10 @@ export function registerMinimaxCodeRoutes(
             : { onSave: async (credentials: MinimaxCodeCredentials) => { await accountPool.addAccount(credentials) } }),
         })
         if (outcome.status !== 'pending') latestLogin = null
+        // A completed sign-in is a new credential, and the usage snapshot is
+        // cached against the OLD one: a remembered "this credential cannot read
+        // usage" must not outlive the credential it was about.
+        if (outcome.status === 'authenticated') clearCachedQuota()
         return sendJson(response, 200, {
           ok: true,
           status: outcome.status,
