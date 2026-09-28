@@ -9,6 +9,23 @@ afterEach(() => {
   for (const tag of [...tags()]) tag.remove()
 })
 
+describe('provider hub tab strip', () => {
+  it('lets the hub tab strip wrap so every provider tab stays reachable', () => {
+    installStyles()
+    const css = tags()[0]!.textContent ?? ''
+    // Seven tabs exceed a narrow settings pane; without wrapping the strip
+    // overflows and the trailing tabs cannot be clicked at all.
+    expect(css).toContain('.dsh-hub-tabs{align-self:flex-start;flex-wrap:wrap;max-width:100%}')
+  })
+
+  it('keeps the shared segments rule single-line for the ChatGPT search group', () => {
+    installStyles()
+    const css = tags()[0]!.textContent ?? ''
+    const segments = /\.dsh-codex-segments\{[^}]*\}/.exec(css)?.[0] ?? ''
+    expect(segments).toContain('flex-wrap:nowrap')
+  })
+})
+
 describe('client stylesheet installation', () => {
   it('creates exactly one marked stylesheet element', () => {
     expect(installStyles()).toBeTypeOf('function')

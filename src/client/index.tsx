@@ -27,6 +27,9 @@ import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from './command-cod
 import { KimiCodeComposerQuota } from './kimi-code/KimiCodeComposerQuota.tsx'
 import { dictionaries as kimiCodeDicts, NS_KIMI_CODE } from './kimi-code/locales.ts'
 import { installKimiCodeStyles } from './kimi-code/styles.ts'
+import { MinimaxCodeComposerQuota } from './minimax-code/MinimaxCodeComposerQuota.tsx'
+import { dictionaries as minimaxCodeDicts, NS_MINIMAX_CODE, type MinimaxCodeLocaleKey } from './minimax-code/locales.ts'
+import { installMinimaxCodeStyles } from './minimax-code/styles.ts'
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
@@ -39,6 +42,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-claude': any
     'dsh-command-code': any
     'dsh-kimi-code': any
+    'dsh-minimax-code': MinimaxCodeLocaleKey
     'dsh-workbuddy': any
   }
 }
@@ -72,6 +76,11 @@ export function apply(ctx: ClientContext): void {
     installKimiCodeStyles()
     return () => {}
   }, 'dsh-kimi-code: styles')
+  ctx.effect(() => ctx.locale.register(NS_MINIMAX_CODE, minimaxCodeDicts), 'dsh-minimax-code: dictionaries')
+  ctx.effect(() => {
+    installMinimaxCodeStyles()
+    return () => {}
+  }, 'dsh-minimax-code: styles')
   ctx.effect(() => ctx.locale.register(NS_WORKBUDDY, workBuddyDicts), 'dsh-workbuddy: dictionaries')
   ctx.effect(() => {
     installWorkBuddyStyles()
@@ -192,6 +201,21 @@ export function apply(ctx: ClientContext): void {
       }
     },
   }, WorkBuddyComposerQuota))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'minimax-code-quota',
+    order: 40,
+    locale: NS_MINIMAX_CODE,
+    inject: (sessionId) => {
+      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
+      return {
+        directory: directory.store,
+        loadModelDirectory: () => {
+          void directory.load().catch(() => undefined)
+        },
+      }
+    },
+  }, MinimaxCodeComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right',
     id: 'claude-quota',
