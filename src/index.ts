@@ -111,6 +111,11 @@ import {
   relayProbeLogPath,
   type RelayProbeContext,
 } from './host/relay-probe.ts'
+import {
+  installReasoningCollapseGuard,
+  type GuardOptions,
+  type ReasoningCollapseContext,
+} from './host/reasoning-collapse-guard/index.ts'
 
 /** Optional deployment configuration for this plugin. */
 export interface Config {
@@ -144,6 +149,11 @@ export interface Config {
    * card allowlist for Sessions that recorded none.
    */
   subagentModelScope?: 'session' | 'preference'
+  /**
+   * Reasoning-collapse guard tuning. Omit the key (or set it to `false`) to
+   * leave the built-in behaviour alone; the shipped defaults apply otherwise.
+   */
+  reasoningCollapseGuard?: GuardOptions | false
 }
 
 export const Config: z<Config> = z.object({
@@ -152,6 +162,10 @@ export const Config: z<Config> = z.object({
   subagentModelTools: z.array(z.string()).default([]),
   subagentModelInheritTools: z.array(z.string()).default(DEFAULT_SUBAGENT_INHERIT_TOOLS as unknown as string[]),
   subagentModelScope: z.union([z.const('session'), z.const('preference')]).default('session'),
+  // A free-form object is validated by the guard's own fail-loud resolver rather
+  // than by a nested schema here, so one rule describes the numbers for both
+  // the shipped defaults and a deployment's overrides. `false` opts out.
+  reasoningCollapseGuard: z.union([z.object({}), z.const(false)]).default({}),
 })
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
@@ -257,6 +271,23 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         })
       }, 'dsh-chatgpt-subscription: subagent model authorization')
     })
+  }
+
+  // Stop a reasoning stream that degenerates into repetition before it burns
+  // the output budget, then let the turn resume on a fresh step. The guard wraps
+  // the `llm/stream` seam, whose signature is identical on every harness
+  // generation this plugin supports, and is inert when that seam is missing.
+  // Configured to `false` it is never installed at all.
+  if (pluginConfig.reasoningCollapseGuard !== false) {
+    const guardOptions: GuardOptions = pluginConfig.reasoningCollapseGuard ?? {}
+    ctx.effect(() => {
+      const dispose = installReasoningCollapseGuard(ctx as unknown as ReasoningCollapseContext, guardOptions)
+      if (dispose === undefined) {
+        ctx.logger.warn('[dsh-chatgpt-subscription] reasoning-collapse guard skipped: this harness exposes no llm/stream seam')
+        return () => undefined
+      }
+      return dispose
+    }, 'dsh-chatgpt-subscription: reasoning collapse guard')
   }
 
   // One read-only diagnostic probe, inert unless the deployment enables it.
@@ -794,6 +825,22 @@ export type {
   RelayProbeOptions,
   RelayProbeSink,
 } from './host/relay-probe.ts'
+export {
+  DEFAULT_GUARD_OPTIONS,
+  RESUME_HINT,
+  RESUME_HINT_STRICT,
+  collapseScore,
+  installReasoningCollapseGuard,
+  resolveGuardOptions,
+} from './host/reasoning-collapse-guard/index.ts'
+export type {
+  GuardAgentLike,
+  GuardChunk,
+  GuardOptions,
+  GuardStreamOptions,
+  ReasoningCollapseContext,
+  ResolvedGuardOptions,
+} from './host/reasoning-collapse-guard/index.ts'
 export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts'
 export {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,

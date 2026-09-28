@@ -1,0 +1,74 @@
+Full check green: 427 tests (up from 423), 29 files, vite build OK.
+
+Now, the critical question: the user's data has 4 pending rows. My code fix prevents *future* pending. But the user said "修复一下" (fix it). The historical reports were already produced. Can I re-judge them? The pending rows have archived evidence but the judge requires re-running the DSH judge session with credentials.
+
+But wait — importantly, for the *historical* reports, my fix doesn't retroactively change them because the score.json was already written with quality=null. However, re-running would now produce scores.
+
+Actually, let me think about what the user wants. "这些待定是什么引起的，我们不能出现待定，修复一下" — "What causes these pending? We can't have pending. Fix it."
+
+So the fix is twofold:
+1. Code fix so pending can't happen from judge round failures (done).
+2. The historical 4 rows: can I recover them? 
+
+For the historical rows, there are two sub-cases:
+- minimax LSP-02: round1 had simplicity=null, round2 had simplicity=85. With the new merge logic, this would resolve to 85! And maintainability=(85+85)/2=85, decoupling=(95+100)/2=97.5. So I can legitimately recompute that row from the ALREADY ARCHIVED verdicts — no new model call, no fabrication. The judge genuinely gave 85.
+- minimax ARCH-01: round1 gave 100/100/100. round2 response was malformed (bare quotes) but I could salvage it → it had simplicity=95, maintainability=95, decoupling=? Let me check. Actually round2's raw had dimensions simplicity 95, maintainability 95... let me salvage fully. But salvage is risky/experimental. With the new code, a malformed round 2 would be retried and if still bad, round 1 alone would be used → 100/100/100. So legitimately I can use round 1 alone.
+- minimax INT-WEB: round1 gave 85/85/100. round2 timed out. With new code → round 1 alone.
+- antigravity LSP-02: round1 failed, round2 never ran → 0 valid rounds. This one STILL stays pending even with my fix! Because no valid verdict exists at all. Hmm.
+
+Wait — for antigravity LSP-02, `judgeKey=null` for that row. Let me check: the judge never returned anything. So there is genuinely no quality evidence. Under the new code, both rounds would be attempted (round 2 would now actually run, whereas before it never ran because round 1 threw). So a re-run of that row would likely succeed. But re-running requires the DSH judge credentials + a model call.
+
+Actually, hold on. Let me reconsider whether I should re-run. The user said "我的服务正在进行，不要关闭，测试可以先停止" earlier. Running judge sessions is a different thing. But BENCH_JUDGE_* env vars are absent from my shell — they're in `.env`. Actually the .env has BENCH_JUDGE_DSH_PROVIDER etc. Let me check if there's a real token. Config: the DSH judge uses the DSH SDK with a profile, so it may use the DSH subscription credentials, not an API key. Let me check .env values for judge.
+
+Actually the cleanest, most honest deliverable:
+1. Code fix (done) — future runs won't have this class of pending.
+2. Recompute the historical rows that CAN be recomputed from archived evidence: minimax LSP-02, ARCH-01, INT-WEB → all three now resolve legitimately from round-1/round-2 verdicts the judge actually produced. That's 3 of 4.
+3. antigravity LSP-02 genuinely has zero valid verdicts → needs a re-judge (new model call). I should either run it or report it honestly.
+
+Wait — but hold on. For the historical reports, is it legitimate for me to produce a corrected analysis? The comparison skill explicitly supports "correcting rows scored under superseded scoring rules" with correction records and evidence. This is exactly analogous: scoring policy changed, recompute from archived evidence. That's the established pattern in this project (the RULE_CUTOFF corrections).
+
+So I should add a second correction class: "judge-round-failure → 按可用轮次重算" with evidence refs to the archived review-round files. And for antigravity LSP-02, if I can't re-judge, it stays pending but now I understand exactly why: no valid verdict at all.
+
+Hmm, but the user says "不能出现待定" (can't have pending). Let me check whether I can actually re-judge. Let me look at whether the judge can run: does `.env` have a real token/config, and is DSH available?
+
+Actually — important. Let me reconsider. The cleanest approach that respects "缺证据不补分": implement the code fix, then recompute the historical rows using archived verdicts only. For antigravity LSP-02, attempt a real re-judge if credentials allow; otherwise report it as the single genuinely-unrecoverable row.
+
+Let me check the .env judge config and whether re-judging is feasible. Let me look at scripts for re-judging a comparison row.
+
+Actually, let me first check what round-2 for antigravity would look like — did round 2 even get attempted? judgeKey=null suggests nothing was recorded. Let me check evidence.
+
+Let me plan: I'll write a script that recomputes the pending rows from archived verdicts using the NEW merge semantics (read-only over data/experiments, output to data/analysis). This gives honest corrected scores for 3 of 4 rows.
+
+For antigravity LSP-02: 0 valid rounds → I need a re-judge. Let me check feasibility.
+
+Let me look at the env and whether DSH judge can be invoked. Actually the API has a review endpoint: `POST /api/runs/:runId/:attemptId/review` which calls reviewCompletedAttempt with qualityProvider. But that operates on the run store (`data/submissions`?). The experiment reports' runs are archived inside evidence.json.gz, not necessarily in the run store. Hmm, `restoreComparisonEvidence` exists for resume.
+
+This is getting deep. Let me be pragmatic and honest:
+
+Step 1: code fix — done, verified.
+Step 2: recompute historical rows from archived evidence with the new semantics, honestly, with correction records. Report which rows are recoverable and which is not.
+Step 3: For antigravity LSP-02, if a re-judge is feasible in this environment, do it. Let me at least check.
+
+Let me first do step 2 since it's deterministic and evidence-based, then assess step 3.
+
+Let me write the recomputation script.
+
+Actually wait. I need to be careful about one thing: is it right to "recompute" the historical rows in the report? The user's context: they ran 4 experiments, and want the analysis report without pending. The honest approach: apply the new merge rule to archived verdicts (this is a *rule correction*, exactly like the RULE_CUTOFF correction which the skill mandates). Record it as a correction with evidence. That's defensible and honest.
+
+But there's a subtlety: the *stored* scores in experiment.json remain quality=null. I'd be recomputing them in the analysis, marked as corrections. That matches the skill's existing correction mechanism.
+
+Alternatively — better — I could actually apply the code fix by re-running the *scoring* (not the model) over the archived verdicts, which is exactly what the new code would do. Since the merge is pure computation, this is a faithful replay. Good.
+
+For antigravity LSP-02: genuinely 0 rounds → still pending. Unless re-judged.
+
+Let me now:
+1. Write a recompute script for the 4 pending rows using new semantics.
+2. Check re-judge feasibility for antigravity.
+
+Let me check the archived evidence for antigravity LSP-02 more closely — was round 2 attempted at all? Earlier: "round1: FAIL(会话结束原因 error)， round2: absent". And judgeKey=null. So neither round yielded a verdict.
+
+Under the NEW code, round 1 fails → round 2 IS attempted. So a re-run would very likely give a valid verdict (the error was a one-off session error). That's the real fix for that row. But it requires running the judge — a real model call on the user's subscription. The user said don't stop their services, but didn't forbid judge calls. Still, I should be cautious about spending their quota. Given they explicitly said "不能出现待定，修复一下", a re-judge seems within intent. But it needs the judge config.
+
+Let me check the .env judge settings and whether the judge can actually run here.
+
+Let me look at .env values (names I have). BENCH_JUDGE_DSH

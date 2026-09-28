@@ -1,0 +1,72 @@
+er WOULD fix maid-atelier's jolt too. And phoebe-atelier's hero card blur (`backdrop-filter: blur(2.5px) saturate(0.94)`, no !important) too. And claude's `backdrop-filter: blur(10px)` (needs check for !important).
+
+   Hmm, but that changes those skins' look (they intentionally added a blur). But the defect is exactly that blur: it's the same containing-block mechanism causing the same jolt. The issue says "with any skin-center visual active" — so fixing it for all is right. And the acceptance criterion 1 explicitly permits `none` (it says "non-none"). Actually let me re-read: "no rule in the injected neutralizer may set a non-none backdrop-filter / -webkit-backdrop-filter / transform / filter / contain / perspective on `[data-composer-card]`". Yes — `none` is explicitly fine, `blur(...)` is not.
+
+   This is also consistent with the wallpaper-exclusive precedent (doubled-attribute `backdrop-filter: none !important`) — that skin already had to do exactly this manually to release the card's blur; and now the runtime does it centrally, which is the fix direction.
+
+   And criterion 2: "A test proving the frost still exists and still follows --dsh-input-card-blur (so the setting is not silently dead)". My follower element carries `blur(var(--dsh-input-card-blur, 10px))`.
+
+   Now what does the follower element look like? Requirements:
+   - fixed, so it's viewport-anchored; not an ancestor of the card content.
+   - positioned/sized to the card's border box, updated on scroll/resize/mutation.
+   - behind the card (z-index below card) but above the backdrop art. The card's fill is translucent `var(--dsw-specific-input-major)`, so a blurred layer behind it shows through.
+   - pointer-events none, aria-hidden.
+
+   z-index: The card's own stacking: card is inside `.composerSeat` which has z-index: 7 in active phase, position: sticky → creates a stacking context. So the card paints in the seat's stacking context at z-index 7. My follower is a child of body with a z-index. If the follower has z-index < 7 it will paint below the seat — good, that's what we want (frost behind the card). But it must paint above the backdrop art (body background / decoration layers at z-index -2/-1, and skin's own backdrops).
+
+   Hmm, careful: the seat has `z-index: 7` and position sticky. The seat's background gradient is neutralized (background: none) while backdrop active. So the seat paints nothing. The card inside paints its translucent fill. So a fixed layer at z-index say 0..6 would paint above the page root background but below the seat/card. But is z-index 6 high enough to be above the skin's backdrop art? Skin backgrounds are body background (painted at the root, below all positioned content) and decoration layers at z-index -2 (background) and -1 (blur veil). Also the wallpaper media layer z-index -3/-2. All negative → below z-index 0 and above.
+
+   Wait, but negative z-index elements paint above the canvas background but below in-flow content. A fixed element with z-index: 0 or auto paints above them. But careful: card's *own* fill — the card is opaque-ish? `--dsw-specific-input-major: var(--dsw-static-neutral-bluish-00)` — that's an opaque color! In light mode it's `--dsw-static-neutral-bluish-00` (probably #FFFFFF). Hmm — then the card fill is opaque and a blurred layer behind it would be invisible!
+
+   Let me check: in the current implementation, the card's backdrop-filter blurs what's behind it, and the card's background is `var(--dsw-specific-input-major)`. If that were fully opaque, the blur would be invisible and the whole "frosted input card" would do nothing visible. The skins override it though (whale-maid sets `background-color: #ffffffd1 !important`). And the skin center's own "Input card blur" hint says "Blurs only the area behind the input card while backdrop art is visible".
+
+   Let me check the actual alpha of `--dsw-static-neutral-bluish-00`. Let me grep the theme.
+
+   Actually — the key question: with the current shipped code, is the frost visible? The `backdrop-filter` blurs the backdrop, then the element's translucent background is composited over the blurred backdrop. If the background were opaque, you'd see nothing. The users report the frosted look works, and skins override the fill with translucent values. For the *stock* fill, if it's opaque, the frost is invisible anyway — so my under-layer is equally invisible there, and no regression.
+
+   But for skins with translucent fill (whale-maid #ffffffd1 = 82% opaque), an under-layer at the same position shows the blur through the 18% transparency. Visually: current = blur applied to what's behind, then 82% white on top. New = a separate layer blurs what's behind, then the card composites 82% white over the already-blurred result. Actually these are equivalent-ish visually! Because the backdrop-filter on the card blurs everything behind the card (the whole backdrop region under the card), then paints its own background over it. An under-layer with backdrop-filter that exactly covers the card's border box does the same blur of the same region, then the card paints its fill over it. The *only* difference is the border radius: the card's backdrop-filter respects the card's border-radius clipping (backdrop-filter is clipped to the border box + border-radius), while a fixed follower div with position:fixed and no border-radius would blur a full rectangle including the rounded corners. So the follower must copy the card's computed border-radius (and use the same box). That's why I planned to copy border-radius.
+
+   Hmm, but there's another subtlety: backdrop-filter samples the "backdrop root". A fixed-position element's backdrop is the page backdrop; the card's backdrop-filter samples what's painted behind the card *including* stuff painted between? Since the card is above the follower, the follower's backdrop = everything painted below it = the backdrop art. Same as the card's backdrop minus... hmm, actually the card's backdrop would include the follower itself if the follower is behind it and within the card's area. If both had backdrop-filter (card and follower), the card's blur would sample the follower's blurred output. We remove the card's blur, so no nesting.
+
+   One more: the follower at z-index e.g. 6, but the card paints with the seat's z-index 7 context. Hmm, but the seat's stacking context at z-index 7: everything inside the seat paints at z-index 7 in the root stacking context. The follower at z-index 6 paints below the whole seat subtree — including all the card's content. Good: frost behind card, card content above.
+
+   Hmm, but wait — does the follower paint above the *skin's decoration layers*? decoration-layers.ts: background z-index -2, ambient 30, top 40, bottom 40, sidebar 40, foreground 41. Ambient/top/bottom/foreground are ABOVE 7 — that's by design (skin chrome paints over the composer). So a follower at z-index 6 is below those, same as the card. Fine — the frost sits exactly where the card sits in the stack, minus the card itself.
+
+   But what about the page's own content? E.g. the transcript above the card: the transcript is in the scrollport, painted in the normal flow (z-index auto). A fixed follower with z-index 6 would paint *above* the transcript, but it's exactly over the card's area, and the card is drawn on top of it — so no visible difference. Except: the card's area with rounded corners, where the follower's blurred region would show at the corners over the transcript if the follower isn't rounded... but the transcript is occluded by the seat's gradient... which is neutralized in scenes. Hmm. In a scene, the transcript text can scroll right up to the card's top edge (the seat gradient is removed). If the follower blurs a rectangle that extends to the card's square corners, the corners would blur the text behind them.
+
+   That's why copying border-radius is essential. With border-radius copied, the follower's blurred region matches the card's rounded rect. Then the corner areas outside the radius are not blurred. Fine.
+
+   Also: since the follower is exactly behind the card and the card's fill is drawn over it, the follower's blur is only visible where the card's fill is translucent. Good.
+
+   Now, hmm, one important question: does the follower need to be *behind the card* in DOM/paint order at all, or could it just be anywhere below? It must be below the card but above the backdrop art.
+
+   Let me reconsider an important simplification: could the follower just be the existing `background.ts` blur element? No — that's a full-viewport blur of the whole backdrop, controlled by a different setting (`backgroundBlurEmpty/Content`) and mutually exclusive with wallpaper. Not the same thing.
+
+   Alternative: could the frost layer be the *card's own* `::before`? Already owned by skins. `::after`? Owned. So no.
+
+   OK. Another consideration: is a fixed follower robust across scroll? The card is `position: sticky` inside a scrolling container, so it moves relative to the viewport only during overscroll/rubber-banding. Using ResizeObserver + rAF loop with getBoundingClientRect to sync position. Cost: a getBoundingClientRect per frame during scroll. Better: measure on scroll events (passive, rAF-coalesced), resize, and mutations. The shell-rendering.ts pattern uses MutationObserver + ResizeObserver + rAF. I can reuse a similar approach in the same module... but wait: backdrop-scene.ts is my write scope and it's where the neutralizer lives. The follower is activated by the same `data-dsh-backdrop-active` + `data-dsh-conversation-content` gate. Hmm — should the follower live in backdrop-scene.ts or shell-rendering.ts? Both are in my write scope. The gate attributes are owned by backdrop-scene.ts (the module that sets them). Keeping the frost follower in backdrop-scene.ts keeps the fact in one owner: the module comment there describes the frost. I'll put it in backdrop-scene.ts.
+
+   Now: how does the follower know when to be active? The gate is the same as the old CSS rule: `html[data-dsh-backdrop-active][data-dsh-conversation-content]`. The element is created by ensureSceneNeutralizer... but the marker changes over time (conversation content appears/disappears). Options:
+   (a) Keep the element always present (while backdrop active) and drive its visibility purely by CSS using the same selector `html[data-dsh-backdrop-active][data-dsh-conversation-content] [data-dsh-composer-frost]`? But the follower is a child of body, so a selector like `html[data-dsh-backdrop-active][data-dsh-conversation-content] [data-dsh-composer-frost] { opacity: 1 }` works for the height/position. Hmm, but the element needs to be sized/positioned regardless. We can keep the inline size/position always updated while mounted, and toggle `display`/`visibility` via CSS keyed on the html attributes. That keeps the "gated" semantics in CSS exactly as before, and the JS only tracks geometry.
+
+   That's clean: 
+   - CSS in the neutralizer: `html[data-dsh-backdrop-active][data-dsh-conversation-content] [data-dsh-composer-frost] { display: block; }` and base `[data-dsh-composer-frost] { display: none; ... }`.
+   - JS: a small controller that mounts the element on scene activation and removes on teardown, plus geometry sync.
+
+   Hmm, but simpler and more testable: keep the same structure as existing code (a module that installs a style + an element). Let me think about lifecycle:
+   - `syncMarker(doc, sources)`: when active → ensureSceneNeutralizer(doc), startContentObserver(doc), and also `startFrostFollower(doc)`. When inactive → stopContentObserver, `stopFrostFollower(doc)`.
+
+   The follower teardown should remove the element and observers.
+
+   But hold on. Do I even need JS geometry tracking? Alternative CSS-only approach: since the follower must exactly track the card's box, and the card is a descendant of the seat... could the follower be positioned with CSS `anchor()`? Not used anywhere in the repo, and no anchor-name on the card (would need a runtime rule adding `anchor-name` to the card — that's a rule on the card but not a containing-block property, so allowed). Hmm, `anchor-name` on the card + `position-anchor` on the body-level follower. Chromium supports CSS anchor positioning since 125. But adding `anchor-name` to the card adds a custom ident... is it safe? It doesn't create a containing block or stacking context. It's a new CSS feature; the repo has zero usage; jsdom won't support it (tests must be static CSS assertions, fine). But the risk: `anchor-name` might interact with skins? Low. However, I cannot verify in a real browser here. The Lead said real-browser verification is impossible. A JS rect-tracking approach is verifiable statically (the code path is unit-testable in jsdom with mocked getBoundingClientRect) and uses no new CSS platform features. I'll go with JS tracking — safer, consistent with the repo's existing patterns (shell-rendering.ts syncHeight does exactly `composer.getBoundingClientRect()` + ResizeObserver).
+
+   Now, an important detail: the follower must be `position: fixed` with left/top/width/height in viewport coordinates taken from `getBoundingClientRect()`. That's exactly ShellRenderingAdapter.syncHeight's technique.
+
+   Edge case: card rect width/height 0 (hero hidden, or settling phase) → hide.
+
+   Also: what about the card's `border-radius`? Copy `getComputedStyle(card).borderRadius`. In jsdom, getComputedStyle returns '' or '0px' etc. Guard with try/catch.
+
+   How often to sync? Use:
+   - ResizeObserver on the card (size changes: draft growth).
+   - MutationObserver on body (childList) → coalesced rAF re-measure (position changes from streaming, pane switches).
+   - scroll listener on window (passive) + the conversation scrollport scroll → position changes when the sticky seat moves? Actually with `position: sticky`, the seat stays fixed relative to the scrollport, so while scrolling normally the card's viewport position is constant. But during scroll bubble/rubb

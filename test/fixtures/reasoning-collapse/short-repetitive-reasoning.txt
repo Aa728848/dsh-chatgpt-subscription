@@ -1,0 +1,7 @@
+The region reset selector in the file is:
+
+`body[data-orca-sidebar-wide] [data-dsh-surface="sidebar"] > :first-child:has( > nav) [class*="regionArea"]`
+
+My expected string: `pane + ':has( > nav) [class*="regionArea"]'` where pane = `body[data-orca-sidebar-wide] [data-dsh-surface="sidebar"]`. So expected = `body[data-orca-sidebar-wide] [data-dsh-surface="sidebar"]:has( > nav) [class*="regionArea"]` — missing `> :first-child`. Fix: pane + ' > :first-child:has( > nav) [class*="regionArea"]'.
+
+Let me check the actual file line 745: `body[data-orca-sidebar-wide] [data-dsh-surface="sidebar"] > :first-child:has( > nav) [class*="regionArea"] {`. Yes. Fix the expected string.
