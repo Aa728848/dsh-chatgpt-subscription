@@ -876,6 +876,16 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
     const usage = isRecord(event.usage) ? event.usage : undefined
     if (usage !== undefined) {
       state.sawUsage = true
+      // Measured on this endpoint: message_start carries a zero-filled usage
+      // stub and the REAL counters arrive here, in the terminal delta - input
+      // as the UNCACHED portion only (input_tokens + cache_read_input_tokens
+      // is the full prompt, which is already DSH's disjoint accounting), with
+      // cache_read_input_tokens present only when a breakpoint actually hit.
+      // The fallbacks keep a delta that omits a counter from erasing the value
+      // message_start already gave, which is the Anthropic-public-API shape.
+      state.inputTokens = numberOr(usage.input_tokens, state.inputTokens)
+      state.cacheReadTokens = numberOr(usage.cache_read_input_tokens, state.cacheReadTokens)
+      state.cacheWriteTokens = numberOr(usage.cache_creation_input_tokens, state.cacheWriteTokens)
       state.outputTokens = numberOr(usage.output_tokens, state.outputTokens)
     }
     return out

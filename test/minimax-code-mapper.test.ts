@@ -152,4 +152,50 @@ describe('minimax stream completeness', () => {
     expect(streamHasContent(state)).toBe(true)
     expect(() => assertStreamComplete(state)).toThrow(/stream ended before its terminal event/)
   })
+
+  it('reads the real usage counters from the terminal message_delta', () => {
+    // Measured on the live endpoint: message_start carries a zero-filled usage
+    // stub; the actual input and cache counters arrive only in message_delta,
+    // with input_tokens already net of the cached portion.
+    const state = createStreamState()
+    const events = [
+      line({ type: 'message_start', message: { usage: { input_tokens: 0, output_tokens: 0 } } }),
+      line({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+      line({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } }),
+      line({ type: 'content_block_stop', index: 0 }),
+      line({
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { input_tokens: 75, output_tokens: 33, cache_read_input_tokens: 6656 },
+      }),
+      line({ type: 'message_stop' }),
+    ]
+    const chunks = events.flatMap((entry) => processMinimaxStreamLine(entry, state))
+
+    expect(() => assertStreamComplete(state)).not.toThrow()
+    expect(chunks).toContainEqual({
+      type: 'usage',
+      usage: { inputTokens: 75, outputTokens: 33, cacheReadTokens: 6656 },
+    })
+  })
+
+  it('keeps the message_start counters when a delta omits them', () => {
+    const state = createStreamState()
+    const events = [
+      line({
+        type: 'message_start',
+        message: { usage: { input_tokens: 12, output_tokens: 0, cache_read_input_tokens: 4 } },
+      }),
+      line({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+      line({ type: 'content_block_stop', index: 0 }),
+      line({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } }),
+      line({ type: 'message_stop' }),
+    ]
+    const chunks = events.flatMap((entry) => processMinimaxStreamLine(entry, state))
+
+    expect(chunks).toContainEqual({
+      type: 'usage',
+      usage: { inputTokens: 12, outputTokens: 3, cacheReadTokens: 4 },
+    })
+  })
 })
