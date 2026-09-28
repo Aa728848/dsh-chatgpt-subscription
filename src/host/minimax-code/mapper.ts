@@ -34,6 +34,34 @@
  * describes thinking as a state ("none-thinking / thinking") and, for M3.1, as an
  * \`effort\` level, so the field is emitted in that vocabulary and nowhere else. No
  * other undocumented field is ever sent.
+ *
+ * UNRESOLVED, AND DELIBERATELY NOT ACTED ON: prompt caching.
+ *
+ * No `cache_control` marker is ever sent, yet this file reads the two cache
+ * counters out of `usage` (see the message_start branch) - so the route is
+ * prepared to report cache hits it never asks for. MiniMax documents two
+ * different mechanisms, and they are not interchangeable:
+ *
+ * - an AUTOMATIC cache on its native API, which needs no marker at all; and
+ * - an EXPLICIT cache on its Anthropic-compatible API, where the
+ *   `cache_control` breakpoints are what create the cache at all
+ *   (`tools` -> `system` -> `messages`, per the "Explicit Prompt Caching
+ *   (Anthropic API)" page of the MiniMax docs).
+ *
+ * This line speaks the Anthropic dialect, so the explicit mechanism may well be
+ * the one that applies - but the subscription endpoint is NOT the public API
+ * (`<base>/mavis/api/v1/llm/v1/messages` vs `api.minimax.io/anthropic`), and its
+ * caching behaviour has never been measured here. Adding a marker is not free
+ * either: `system` is a plain string on this line, so a system-level breakpoint
+ * means changing that field into an array of blocks, and a marker on a block the
+ * wire does not accept can fail the whole request - the same class of total
+ * failure the missing `stream: true` caused.
+ *
+ * So the marker stays out until one live request settles it: send a body with
+ * and without a breakpoint and compare `cache_read_input_tokens`. The shape to
+ * copy once that is measured is the Claude line's, which marks only a block the
+ * wire accepts and states the intent at the call site because caching there is
+ * request-driven (`claude/mapper.ts`, `claude/adapter.ts`).
  */
 
 import {
