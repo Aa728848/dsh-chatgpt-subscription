@@ -449,6 +449,34 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
     }
   }
 
+  /** Flip the check-in scheduler's own switch, through the same settings route. */
+  const handleCheckinToggle = async (enabled: boolean): Promise<void> => {
+    try {
+      setBusy('checkin')
+      setError(null)
+      const updated = await post<MinimaxCodeWebStatus>('/settings', { checkin: { enabled } })
+      setStatus(updated)
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Run one check-in pass now: the toggle and the retry cap are bypassed. */
+  const handleCheckinNow = async (): Promise<void> => {
+    try {
+      setBusy('checkin')
+      setError(null)
+      const updated = await post<MinimaxCodeWebStatus>('/checkin/now')
+      setStatus(updated)
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const toggleModel = (modelId: string, checked: boolean): void => {
     if (status === null) return
     const current = status.models.filter((model) => model.enabled).map((model) => model.id)
@@ -613,6 +641,48 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
           onSetStrategy={(strategy) => void poolSetStrategy(strategy)}
         />
       )}
+
+      {status?.checkin != null ? (
+        <section className="dsha-group">
+          <div className="dsha-grouphead">
+            <h3>{t('dailyCheckin')}</h3>
+          </div>
+          <p className="dsha-muted">{t('checkinHint')}</p>
+          <div className="dsha-row" style={{ marginBottom: 8 }}>
+            <span className="dsha-label" style={{ fontWeight: 600 }}>{t('checkinAuto')}</span>
+            <input
+              type="checkbox"
+              checked={status.checkin.enabled}
+              disabled={busy !== null}
+              onChange={(event) => void handleCheckinToggle(event.currentTarget.checked)}
+            />
+          </div>
+          <div className="dsha-row">
+            <span className="dsha-label">{t('dailyCheckin')}</span>
+            <span className="dsha-value">
+              {t('checkinToday').replace('{done}', String(status.checkin.doneToday)).replace('{total}', String(status.checkin.totalAccounts))}
+              {status.checkin.skippedToday > 0
+                ? ` · ${t('checkinSkipped').replace('{count}', String(status.checkin.skippedToday))}`
+                : ''}
+              {status.checkin.failedToday > 0
+                ? ` · ${t('checkinFailed').replace('{count}', String(status.checkin.failedToday))}`
+                : ''}
+              {status.checkin.streakDays !== undefined
+                ? ` · ${t('checkinStreak').replace('{days}', String(status.checkin.streakDays))}`
+                : ''}
+              {status.checkin.claimedPoints !== undefined
+                ? ` · ${t('checkinClaimed').replace('{points}', String(status.checkin.claimedPoints))}`
+                : ''}
+              {` · ${status.checkin.lastRunAt === null ? t('checkinNever') : t('checkinLastRun').replace('{time}', formatDate(status.checkin.lastRunAt))}`}
+            </span>
+          </div>
+          <div className="dsha-actions">
+            <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleCheckinNow()}>
+              {busy === 'checkin' ? t('checkinRunning') : t('checkinNow')}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="dsha-group">
         <div className="dsha-grouphead">

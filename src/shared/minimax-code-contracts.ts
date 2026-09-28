@@ -126,6 +126,42 @@ export interface MinimaxCodeModelOption {
   description: string | null
 }
 
+/**
+ * 每日签到偏好。
+ *
+ * 签到面同时覆盖 cn 与 global 两个区域（官方 CLI 的 public-gateway 对两个
+ * region 各有源站），因此这里不像 workbuddy 那样只限国区：账号自己的
+ * region 决定走哪个源站。没有可配置的窗口：宿主启动后的第一次 tick
+ * 就是当天签到。
+ */
+export interface MinimaxCodeCheckinSettings {
+  /** 是否由进程内调度器自动签到。 */
+  enabled: boolean
+}
+
+/**
+ * 设置卡片渲染的签到聚合。
+ *
+ * 有意不带账号身份：卡片只显示一行「今日已签 x/y」，不做逐账号明细。
+ */
+export interface MinimaxCodeCheckinSummary {
+  enabled: boolean
+  /** 参与签到的账号数（号池中当前可选的账号）。 */
+  totalAccounts: number
+  /** 今日已确认签到的账号数（本已签过，或由某次运行签成）。 */
+  doneToday: number
+  /** 今日签到面报告不可签的账号数（当日格非「可领」状态，按小时复查）。 */
+  skippedToday: number
+  /** 今日重试次数耗尽仍未签成的账号数。 */
+  failedToday: number
+  /** 调度器上次运行时刻（Unix 毫秒），自动或手动。 */
+  lastRunAt: number | null
+  /** 已签到账号当前连续签到天数的最大值；今天还没人签时缺省。 */
+  streakDays?: number
+  /** 最近一次运行实际领到的积分；本轮没人新签时缺省。 */
+  claimedPoints?: number
+}
+
 export interface MinimaxCodeWebStatus {
   /** 线路总开关；关闭时适配器不暴露任何模型。 */
   enabled: boolean
@@ -180,5 +216,7 @@ export interface MinimaxCodeWebStatus {
   rotationStrategy?: AccountRotationStrategy
   /** 本进程是否装载了号池。false 时卡片按单凭据模式渲染。 */
   poolInstalled?: boolean
+  /** 每日签到聚合；未装载签到调度器时为 null。 */
+  checkin?: MinimaxCodeCheckinSummary | null
 }
 

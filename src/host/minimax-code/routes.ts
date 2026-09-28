@@ -71,6 +71,7 @@ import {
   getQuotaUnavailable,
   testConnection,
 } from './client.ts'
+import type { MinimaxCodeCheckinService } from './checkin.ts'
 
 /** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
 const MAX_BODY_BYTES = 64 * 1024
@@ -185,6 +186,8 @@ export interface MinimaxCodeStatusOptions {
    * empty account list that looks like a bug.
    */
   accountPool?: MinimaxCodeAccountPool
+  /** Daily check-in scheduler; absent leaves the card's check-in row empty. */
+  checkin?: Pick<MinimaxCodeCheckinService, 'tick' | 'summary'>
 }
 
 /** Read one status option, which the caller may supply as a live predicate. */
@@ -223,6 +226,11 @@ export async function getMinimaxCodeWebStatus(
   const quota = getCachedQuota()
   // Only meaningful while no snapshot exists: once one does, the card renders it.
   const quotaUnavailable = quota === null ? getQuotaUnavailable() : null
+  // The summary is local state only, but a broken state file must not take the
+  // whole status payload down with it.
+  const checkin = options.checkin === undefined
+    ? null
+    : await options.checkin.summary().catch(() => null)
   return {
     ...pool,
     serving,
@@ -258,6 +266,7 @@ export async function getMinimaxCodeWebStatus(
     // snapshot in the background and `/quota` forces one on demand.
     ...(quota === null ? {} : { quota }),
     ...(quotaUnavailable === null ? {} : { quotaUnavailable }),
+    checkin,
   }
 }
 
@@ -360,6 +369,10 @@ export function registerMinimaxCodeRoutes(
             patch.defaultReasoningEffort = effort
           }
         }
+        if (typeof body.checkin === 'object' && body.checkin !== null) {
+          const raw = body.checkin as Record<string, unknown>
+          if (typeof raw.enabled === 'boolean') patch.checkin = { enabled: raw.enabled }
+        }
         await settings.update(patch)
         // DSH rebuilds the model picker on this event. Only the two fields that
         // change which models exist are worth waking it for; a window override or
@@ -368,6 +381,18 @@ export function registerMinimaxCodeRoutes(
         if (patch.enabled !== undefined || patch.enabledModelIds !== undefined) {
           ctx.emit?.('llm/adapters-updated')
         }
+        const value = await getMinimaxCodeWebStatus(store, options, settings)
+        return sendJson(response, 200, { ok: true, value })
+      }
+
+      if (path === 'checkin/now') {
+        if (method !== 'POST') return sendMethodNotAllowed(response)
+        if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
+        const service = options.checkin
+        if (service === undefined) return sendJson(response, 400, { ok: false, error: 'Check-in is not installed.' })
+        // The manual pass ignores the toggle and the retry cap, but still
+        // respects an account already signed in today.
+        await service.tick(true)
         const value = await getMinimaxCodeWebStatus(store, options, settings)
         return sendJson(response, 200, { ok: true, value })
       }

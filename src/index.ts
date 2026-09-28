@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { createRequire } from 'node:module'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -81,6 +82,10 @@ import {
 } from './host/claude/token-store.ts'
 import { PROVIDER_ID as CLAUDE_PROVIDER_ID, PROVIDER_NAME as CLAUDE_PROVIDER_NAME } from './host/claude/types.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
+import {
+  CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
+  MinimaxCodeCheckinService,
+} from './host/minimax-code/checkin.ts'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
@@ -461,11 +466,41 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         })
       : undefined
 
+    // The daily check-in scheduler (official-client recipe; both regions).
+    // Same host-owned cadence as the workbuddy line: the startup pass is the
+    // daily run, the interval covers a process that survives midnight.
+    let minimaxCodeAppVersion: string | undefined
+    try {
+      const requireFn = createRequire(import.meta.url)
+      const manifest = requireFn('../package.json') as { version?: unknown }
+      if (typeof manifest.version === 'string') minimaxCodeAppVersion = manifest.version
+    } catch {
+      minimaxCodeAppVersion = undefined
+    }
+    const minimaxCodeCheckin = new MinimaxCodeCheckinService(minimaxCodeAccountPool, {
+      fetchFn: proxyFetch,
+      settings: () => minimaxCodePreferences.status().checkin ?? { enabled: true },
+      // The preference store may still be warming up on a harness without the
+      // register seam; without this the startup pass reads shipped defaults and
+      // signs in even though the user had switched check-in off.
+      ready: () => minimaxCodePreferences.ready(),
+      ...(minimaxCodeAppVersion === undefined ? {} : { appVersion: minimaxCodeAppVersion }),
+      logger: ctx.logger,
+    })
+    const minimaxCodeCheckinTick = (): void => {
+      void minimaxCodeCheckin.tick().catch((error) => {
+        ctx.logger.warn(`[dsh-chatgpt-subscription] MiniMax Code check-in tick failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    const minimaxCodeCheckinTimer = setInterval(minimaxCodeCheckinTick, MINIMAX_CODE_CHECKIN_TICK_MS)
+    minimaxCodeCheckinTick()
+
     const disposeMinimaxCodeRoutes = registerMinimaxCodeRoutes(ctx, minimaxCodeStore, {
       fetchFn: proxyFetch,
       serving: () => minimaxCodeRegistration !== undefined,
       conflict: () => minimaxCodeConflict,
       accountPool: minimaxCodeAccountPool,
+      checkin: minimaxCodeCheckin,
     }, minimaxCodeModelSettings, minimaxCodePreferences)
 
     // WorkBuddy is the CodeBuddy subscription: this plugin reads the desktop
@@ -720,6 +755,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(minimaxCodeRouteWatch)
       minimaxCodeRegistration?.()
       minimaxCodeRegistration = undefined
+      clearInterval(minimaxCodeCheckinTimer)
       clearInterval(checkinTimer)
       disposeWorkBuddyRoutes()
       releaseHandle(workBuddyRouteWatch)
@@ -894,6 +930,7 @@ export {
 } from './host/workbuddy/client.ts'
 export { getWorkBuddyWebStatus, registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
 export { WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
+export { MinimaxCodeCheckinService } from './host/minimax-code/checkin.ts'
 export {
   FALLBACK_MODELS as WORKBUDDY_MODELS,
   WORKBUDDY_MODEL_IDS,

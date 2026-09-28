@@ -503,6 +503,8 @@ export interface MinimaxCodeModelSettings {
   contextWindowOverrides: Record<string, number>
   /** Level used when a conversation picks none; null means the model's own. */
   defaultReasoningEffort: MinimaxCodeReasoningEffort | null
+  /** Daily check-in scheduler switch. Absent means enabled. */
+  checkin?: { enabled: boolean }
 }
 
 /**
@@ -518,6 +520,7 @@ export interface MinimaxCodeSettingsPatch {
   enabledModelIds?: string[]
   contextWindowOverrides?: ContextWindowOverridePatch
   defaultReasoningEffort?: MinimaxCodeReasoningEffort | null
+  checkin?: { enabled: boolean }
 }
 
 /**
@@ -529,6 +532,14 @@ export interface MinimaxCodeSettingsPatch {
  * path for a value that changes at human speed.
  */
 export interface MinimaxCodePreferenceStore {
+  /**
+   * The file-backed store warms up asynchronously, so `status()` answers from
+   * shipped defaults until that read settles. A caller that acts on a
+   * preference at startup — the check-in scheduler signing in on boot — must
+   * await this first, or it acts on the default instead of the user's choice.
+   * A register-backed store reads synchronously and resolves immediately.
+   */
+  ready(): Promise<void>
   status(): MinimaxCodeModelSettings
   update(patch: MinimaxCodeSettingsPatch): Promise<MinimaxCodeModelSettings>
 }
@@ -586,7 +597,21 @@ function parseMinimaxCodeModelSettings(value: unknown): MinimaxCodeModelSettings
     enabledModelIds,
     contextWindowOverrides,
     defaultReasoningEffort: isReasoningEffort(record.defaultReasoningEffort) ? record.defaultReasoningEffort : null,
+    checkin: parseCheckinSettings(record.checkin),
   }
+}
+
+/**
+ * Normalize the check-in half of the settings document.
+ *
+ * Absent means enabled, matching the sibling lines' scheduler default: a user
+ * who never opened the card gets the same behaviour a fresh workbuddy install
+ * has, and only an explicit `false` parks the scheduler.
+ */
+function parseCheckinSettings(value: unknown): { enabled: boolean } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return { enabled: true }
+  const enabled = (value as Record<string, unknown>).enabled
+  return { enabled: enabled !== false }
 }
 
 /**
@@ -610,6 +635,9 @@ export function mergeMinimaxCodeSettings(
     defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
       ? patch.defaultReasoningEffort
       : current.defaultReasoningEffort,
+    checkin: patch.checkin !== undefined
+      ? { enabled: patch.checkin.enabled !== false }
+      : current.checkin ?? { enabled: true },
   }
 }
 
@@ -694,8 +722,11 @@ export function registerMinimaxCodePreferenceStore(
     // awaited so that a caller wiring the plugin at startup is not blocked on a
     // disk read, and `status()` answers from the shipped defaults until it lands.
     let snapshot: MinimaxCodeModelSettings = defaultMinimaxCodeSettings()
-    void fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
+    // The warmup promise is kept so a startup caller can await it instead of
+    // racing it; `status()` still answers immediately from the defaults.
+    const warmed = fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
     return {
+      ready: () => warmed,
       status: () => snapshot,
       update: async (patch) => {
         snapshot = await fallbackStore.updateSettings(patch)
@@ -714,14 +745,21 @@ export function registerMinimaxCodePreferenceStore(
         z.const(null),
       ])
       .default(null),
+    checkin: z.object({
+      enabled: z.boolean().default(true),
+    }).default({ enabled: true }),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: MinimaxCodeReasoningEffort | null
+    checkin: { enabled: boolean }
   }>
 
   return {
+    // The register-backed scope reads synchronously, so there is nothing to
+    // wait for; the seam exists so callers need not know which store they hold.
+    ready: async () => undefined,
     status: () => {
       const value = scope.get()
       return {
@@ -729,6 +767,7 @@ export function registerMinimaxCodePreferenceStore(
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
         defaultReasoningEffort: value.defaultReasoningEffort,
+        checkin: { enabled: value.checkin?.enabled !== false },
       }
     },
     update: async (patch) => {
@@ -741,6 +780,7 @@ export function registerMinimaxCodePreferenceStore(
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
         defaultReasoningEffort: value.defaultReasoningEffort,
+        checkin: { enabled: value.checkin?.enabled !== false },
       }, patch)
       await scope.update(normalized)
       // Mirror into the file as well, so a later run on a harness that dropped
