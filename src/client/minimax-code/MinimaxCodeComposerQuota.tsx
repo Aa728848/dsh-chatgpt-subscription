@@ -24,9 +24,10 @@ interface BadgeFacts {
 /**
  * Pick the badge facts for one status answer, or nothing at all.
  *
- * Quota is optional in the frozen contract and MiniMax Code exposes no usage
- * endpoint, so a status without quota means the badge has nothing to say: it is
- * not rendered, rather than showing a placeholder that would read as a broken
+ * Quota is optional in the contract, and the usage read is allowed to fail (the
+ * endpoint is undocumented and which host serves this subscription is
+ * unmeasured), so a status without quota means the badge has nothing to say: it
+ * is not rendered, rather than showing a placeholder that would read as a broken
  * meter. Callers must treat null as "hide the badge".
  */
 export function selectBadgeFacts(status: MinimaxCodeWebStatus | null): BadgeFacts | null {
@@ -70,9 +71,11 @@ export function MinimaxCodeComposerQuota({ t, directory, loadModelDirectory }: P
     if (!mountedRef.current) return
     setLoading(true)
     try {
-      // This line has no separate quota route: /status carries the optional
-      // quota snapshot, and a status without one is a normal answer.
-      const data = await get<MinimaxCodeWebStatus>('/status')
+      // \`/quota\` rather than \`/status\`: it answers with the same payload, but it also
+      // refreshes the snapshot (subject to the host-side TTL), whereas \`/status\` only
+      // ever reports the cached one. The badge is the one place a stale number is
+      // visible at a glance, so it asks for the fresher read.
+      const data = await get<MinimaxCodeWebStatus>('/quota')
       if (mountedRef.current) setStatus(data)
     } catch {
       // best-effort: the settings card reports the actionable error
@@ -81,18 +84,22 @@ export function MinimaxCodeComposerQuota({ t, directory, loadModelDirectory }: P
     }
   }, [])
 
-  // One status read per selection, with no polling interval.
+  // Poll while the line is selected, like every sibling badge.
   //
-  // The sibling badges poll because their quota moves: a window is spent down and
-  // the number must follow it. This line publishes no quota at all (the frozen
-  // contract makes the field optional and no usage endpoint was measured for this
-  // subscription), so a repeating read could not change what the badge shows —
-  // `selectBadgeFacts` returns null and the badge renders nothing either way. A
-  // 60-second timer here would be N-sessions-per-minute of dead traffic to a
-  // /status route that reads a credential file, for no visible effect.
+  // Ticking matters again now that the usage snapshot exists: a Token Plan window
+  // is spent down as turns run, so a number read once at selection silently goes
+  // stale. The host side bounds the cost — the snapshot is cached there and the
+  // read is only redone once the TTL has expired — so this is not one upstream
+  // request per tick.
   useEffect(() => {
     if (!isMinimaxCode) return
     void fetchStatus()
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void fetchStatus()
+    }, 60_000)
+    return () => {
+      window.clearInterval(timer)
+    }
   }, [fetchStatus, isMinimaxCode])
 
   const facts = useMemo(() => selectBadgeFacts(status), [status])

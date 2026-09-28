@@ -62,6 +62,50 @@ export const REGION_HOSTS: Record<MinimaxCodeRegion, { account: string; agent: s
   },
 }
 
+/**
+ * Path of the Token Plan usage endpoint.
+ *
+ * Found in the official MiniMax CLI rather than in the API docs: `mmx quota show`
+ * ("Display Token Plan usage and remaining quotas") reads
+ * `GET {baseUrl}/v1/token_plan/remains` with an OAuth credential. MiniMax's own
+ * documentation only ever points at the console usage bar, which is presumably
+ * why this line concluded no endpoint existed.
+ */
+export const TOKEN_PLAN_REMAINS_PATH = '/v1/token_plan/remains'
+
+/**
+ * Candidate hosts for the usage endpoint, most likely first.
+ *
+ * The two sources disagree about the China TLD and neither has been measured
+ * against THIS subscription: the credential is issued by the `.minimax.cn`
+ * account host this line already uses, while the official CLI's REGIONS table
+ * puts China on `https://api.minimaxi.com`. The global host is agreed
+ * (`api.minimax.io` by both). So the candidates are tried in order and the first
+ * that answers is remembered, which keeps the uncertainty in one place rather
+ * than hardcoding a guess into every request.
+ */
+export const QUOTA_HOST_CANDIDATES: Record<MinimaxCodeRegion, readonly string[]> = {
+  cn: ['https://api.minimax.cn', 'https://api.minimaxi.com'],
+  global: ['https://api.minimax.io'],
+}
+
+/**
+ * Hosts to try for one region, in order.
+ *
+ * `DSH_MINIMAX_CODE_QUOTA_HOST` pins a single host for a deployment that has
+ * measured the right one (a proxy, or a region whose host is not listed here).
+ */
+export function quotaHostCandidates(region: MinimaxCodeRegion): string[] {
+  const override = (process.env.DSH_MINIMAX_CODE_QUOTA_HOST || '').trim()
+  if (override !== '') return [override.replace(/\/+$/, '')]
+  return [...QUOTA_HOST_CANDIDATES[region]]
+}
+
+/** Fully qualified usage URL for one host. */
+export function tokenPlanRemainsUrl(host: string): string {
+  return host.replace(/\/+$/, '') + TOKEN_PLAN_REMAINS_PATH
+}
+
 /** Device authorization endpoint (RFC 8628 section 3.1). */
 export const DEVICE_CODE_PATH = '/oauth2/device/code'
 /** Token endpoint, shared by the device-code grant and the refresh grant. */

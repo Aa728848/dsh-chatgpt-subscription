@@ -62,10 +62,37 @@ export interface MinimaxCodeWebLogin {
   expiresInSec: number
 }
 
+/**
+ * 一个配额窗口。
+ *
+ * Token Plan 同时给两个窗口：5 小时滚动窗口与每周窗口。两者都要单独呈现，
+ * 因为周窗口还带一个显示倍率（服务端返回 percentage 与 boost 两个值，渲染值
+ * 是两者相乘），而把两个窗口合成一个数字会让用户无法判断是哪一边快用完了。
+ */
+export interface MinimaxCodeQuotaWindow {
+  /** 稳定标识，由客户端本地化成窗口名；不要在这里放展示文案。 */
+  key: 'interval' | 'weekly'
+  /** 剩余百分比（周窗口已乘上 boost）。服务端未给出时为 null。 */
+  remainingPercent: number | null
+  /** 已用百分比；由剩余百分比取反得到。 */
+  usedPercent?: number
+  /** 已用/总量；仅当服务端计数与其百分比自洽时才有值（见 host 侧消歧说明）。 */
+  used?: number
+  total?: number
+  /** 该窗口重置的绝对时刻（Unix 毫秒）。 */
+  resetsAtMs?: number
+  /** 服务端把该窗口标为不限量。 */
+  unlimited?: boolean
+}
+
 export interface MinimaxCodeQuota {
   label: string
   usedPercent?: number
   resetsAtMs?: number
+  /** 每个窗口的明细；服务端只给了一个数字时缺省。 */
+  windows?: MinimaxCodeQuotaWindow[]
+  /** 本快照读取时刻（Unix 毫秒），便于卡片判断数据新旧。 */
+  fetchedAtMs?: number
 }
 
 /** 一条模型行的思考形态；取值与 host 目录里的 MinimaxCodeThinkingMode 一致。 */

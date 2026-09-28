@@ -31,6 +31,7 @@ import { isSameOriginMutation } from '../common/same-origin.ts'
 import {
   MINIMAX_CODE_PROVIDER_ID,
   MINIMAX_CODE_ROUTE_PREFIX,
+  type MinimaxCodeQuota,
   type MinimaxCodeReasoningEffort,
   type MinimaxCodeRegion,
   type MinimaxCodeWebLogin,
@@ -63,7 +64,7 @@ import {
   MinimaxCodeAccessDeniedError,
   MinimaxCodeUnauthorizedError,
 } from './oauth.ts'
-import { testConnection } from './client.ts'
+import { fetchTokenPlanQuota, getCachedQuota, testConnection } from './client.ts'
 
 /** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
 const MAX_BODY_BYTES = 64 * 1024
@@ -211,6 +212,9 @@ export async function getMinimaxCodeWebStatus(
   // degrades to an empty list instead of failing the whole card: the connection
   // section is still worth rendering.
   const pool = await minimaxCodePoolStatus(options.accountPool)
+  // Read once: the value is used for both the presence test and the payload, and
+  // calling it twice could straddle a background refresh and disagree with itself.
+  const quota = getCachedQuota()
   return {
     ...pool,
     serving,
@@ -240,16 +244,11 @@ export async function getMinimaxCodeWebStatus(
     // sign-out that would destroy it, and with no credential at all there is no
     // ownership to report.
     ownedByPlugin: credentials !== null && source === 'file',
-    // quota is absent because this line has not wired it up yet, NOT because none
-    // exists: the official MiniMax CLI (`mmx quota show`, "Display Token Plan usage
-    // and remaining quotas") reads `GET {apiHost}/v1/token_plan/remains` with an
-    // OAuth credential — the same RFC 8628 + PKCE flow this line implements — and
-    // gets back per-model `model_remains` rows with 5-hour and weekly windows. What
-    // has never been verified here is whether THIS subscription's credential is
-    // accepted by that host (the CLI's API hosts differ from this line's agent
-    // hosts), and no credential exists on the machine this was written on. The
-    // contract defines the field as optional, so the card degrades to "not
-    // available" until someone measures it.
+    // The last usage snapshot, read WITHOUT touching the network: this function is
+    // polled by the card, and a usage read that failed would otherwise put a
+    // timeout in the middle of every poll. The registered route refreshes the
+    // snapshot in the background and `/quota` forces one on demand.
+    ...(quota === null ? {} : { quota }),
   }
 }
 
@@ -273,6 +272,19 @@ export function registerMinimaxCodeRoutes(
     readStatus: () => getMinimaxCodeWebStatus(store, options, settings),
   })
 
+  /**
+   * Refresh the Token Plan usage snapshot, returning the fresh value.
+   *
+   * Only a real composition refreshes: `options.fetchFn` being supplied is the
+   * marker, so a test that registers these routes without one never reaches the
+   * network, and the status route reads the snapshot through the cache instead.
+   */
+  const refreshQuota = async (force: boolean): Promise<MinimaxCodeQuota | null> => {
+    const credentials = await store.read().catch(() => null)
+    if (credentials === null) return null
+    return await fetchTokenPlanQuota(credentials, { fetchFn, force }).catch(() => null)
+  }
+
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const path = subPathOf(request.url ?? '/')
     const method = request.method ?? 'GET'
@@ -282,6 +294,23 @@ export function registerMinimaxCodeRoutes(
 
       if (path === '' || path === 'status') {
         if (method !== 'GET') return sendMethodNotAllowed(response)
+        // Refresh usage BEHIND the answer rather than inside it. Awaiting here would
+        // put a network timeout in the middle of a poll whenever the usage host is
+        // unreachable, and the card is polled; the snapshot it already had is
+        // rendered now and the refreshed one arrives on the next poll (or at once
+        // from `/quota`).
+        if (options.fetchFn !== undefined) void refreshQuota(false)
+        const value = await getMinimaxCodeWebStatus(store, options, settings)
+        return sendJson(response, 200, { ok: true, value })
+      }
+
+      if (path === 'quota') {
+        if (method !== 'GET' && method !== 'POST') return sendMethodNotAllowed(response)
+        if (method === 'POST' && !isSameOriginMutation(request)) return sendCrossOrigin(response)
+        // A failed usage read is not a failed request: the contract makes `quota`
+        // optional, so the card renders "no data" exactly as it does before the
+        // first snapshot, and nothing about the connection half is affected.
+        await refreshQuota(method === 'POST')
         const value = await getMinimaxCodeWebStatus(store, options, settings)
         return sendJson(response, 200, { ok: true, value })
       }

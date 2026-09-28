@@ -22,6 +22,8 @@ import {
   MESSAGES_PATH,
   agentBaseUrl,
   messagesUrl,
+  quotaHostCandidates,
+  tokenPlanRemainsUrl,
   MINIMAX_CODE_BUILD_ENV,
   USER_AGENT,
   redactToken,
@@ -32,7 +34,12 @@ import {
 } from './token-store.ts'
 import { accountFromCredentials, ensureAccessToken, MinimaxCodeUnauthorizedError } from './oauth.ts'
 import { MINIMAX_CODE_MODELS, minimaxCodeModelIds } from './model-catalog.ts'
-import type { MinimaxCodeAccount, MinimaxCodeRegion } from '../../shared/minimax-code-contracts.ts'
+import type {
+  MinimaxCodeAccount,
+  MinimaxCodeQuota,
+  MinimaxCodeQuotaWindow,
+  MinimaxCodeRegion,
+} from '../../shared/minimax-code-contracts.ts'
 
 /** Timeout for the connection probe and any other one-shot call. */
 const PROBE_TIMEOUT_MS = 30_000
@@ -258,6 +265,231 @@ export async function createMessage(
       error: error instanceof Error ? error.message : String(error),
     }
   }
+}
+
+/**
+ * Headers for the Token Plan usage read.
+ *
+ * NOT {@link modelRequestHeaders}: that set asks for `text/event-stream` because
+ * the Messages route streams, and this route answers one JSON document. The
+ * credential is still the same bearer token.
+ */
+export function quotaRequestHeaders(accessToken: string): Record<string, string> {
+  return {
+    authorization: 'Bearer ' + accessToken,
+    accept: 'application/json',
+    'user-agent': USER_AGENT,
+  }
+}
+
+/** How long a successful usage snapshot is reused. */
+const QUOTA_CACHE_MS = 60_000
+/**
+ * How long a FAILED usage read is remembered.
+ *
+ * Deliberately longer than the success TTL: a region whose correct host is not
+ * first in the candidate list would otherwise pay a full failed probe on every
+ * poll, and the card polls this route. The failure is cached, so the card keeps
+ * showing "not available" and the network stays quiet.
+ */
+const QUOTA_FAILURE_CACHE_MS = 10 * 60_000
+/** Local timeout for one usage read. */
+const QUOTA_TIMEOUT_MS = 8_000
+
+/**
+ * The host that last answered.
+ *
+ * Only a live call can settle which candidate serves this subscription, so the
+ * winner is remembered and probed first from then on.
+ */
+let quotaHostInForce: string | null = null
+let quotaSnapshot: { at: number; value: MinimaxCodeQuota | null } | null = null
+
+/** Forget the cached usage snapshot (a sign-out, a test). */
+export function clearCachedQuota(): void {
+  quotaSnapshot = null
+  quotaHostInForce = null
+}
+
+/** The last usage snapshot without touching the network. */
+export function getCachedQuota(): MinimaxCodeQuota | null {
+  return quotaSnapshot?.value ?? null
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * Resolve the ambiguous `*_usage_count` fields.
+ *
+ * TRANSCRIBED from the official CLI (`src/utils/quota.ts`), because the ambiguity
+ * is real and reading the field naively inverts the bar: older responses report
+ * it as a REMAINING count while newer ones report it as a CONSUMED count. When the
+ * server also returns an explicit remaining percentage, that percentage selects
+ * whichever reading agrees with it; when the counts agree with neither, this
+ * returns undefined and the window falls back to the percentage alone rather than
+ * inventing a number.
+ */
+export function resolveQuotaCounts(
+  reportedCount: number,
+  total: number,
+  remainingPercent: number | undefined,
+): { used: number; remaining: number; total: number } | undefined {
+  if (!Number.isFinite(reportedCount) || !Number.isFinite(total) || total <= 0
+    || reportedCount < 0 || reportedCount > total) {
+    return undefined
+  }
+  let remaining = reportedCount
+  if (remainingPercent !== undefined && Number.isFinite(remainingPercent)) {
+    const asRemaining = (reportedCount / total) * 100
+    const asUsed = ((total - reportedCount) / total) * 100
+    const closest = Math.min(Math.abs(asRemaining - remainingPercent), Math.abs(asUsed - remainingPercent))
+    if (closest > 1) return undefined
+    if (Math.abs(asUsed - remainingPercent) < Math.abs(asRemaining - remainingPercent)) {
+      remaining = total - reportedCount
+    }
+  }
+  return { used: total - remaining, remaining, total }
+}
+
+/** The display multiplier the weekly window carries and the chat window does not. */
+function quotaBoostFactor(permille: unknown): number {
+  return typeof permille === 'number' && Number.isFinite(permille) && permille > 0 ? permille / 1000 : 1
+}
+
+function quotaWindow(input: {
+  key: MinimaxCodeQuotaWindow['key']
+  reportedCount: number
+  total: number
+  percent: number | undefined
+  resetsAtMs: number | undefined
+  boost: number
+  unlimited: boolean
+}): MinimaxCodeQuotaWindow {
+  const resets = input.resetsAtMs === undefined ? {} : { resetsAtMs: input.resetsAtMs }
+  if (input.unlimited) return { key: input.key, remainingPercent: null, unlimited: true, ...resets }
+  // The service caps a boosted weekly window above 100%, so the ceiling here is
+  // 200 rather than 100; clamping at 100 would understate a boosted plan.
+  const remainingPercent = input.percent === undefined
+    ? (input.total > 0 ? Math.min(200, (input.reportedCount / input.total) * 100 * input.boost) : null)
+    : Math.min(200, input.percent * input.boost)
+  const counts = resolveQuotaCounts(input.reportedCount, input.total, input.percent)
+  return {
+    key: input.key,
+    remainingPercent,
+    ...(counts === undefined ? {} : { used: counts.used, total: counts.total }),
+    ...(remainingPercent === null ? {} : { usedPercent: Math.max(0, 100 - remainingPercent) }),
+    ...resets,
+  }
+}
+
+/**
+ * Map one `/v1/token_plan/remains` document onto the card's quota shape.
+ *
+ * Returns null when nothing usable is present, which the contract defines as the
+ * card's graceful degradation.
+ */
+export function parseTokenPlanQuota(payload: unknown, now: number = Date.now()): MinimaxCodeQuota | null {
+  const rows = asRecord(payload)?.model_remains
+  if (!Array.isArray(rows)) return null
+  const entries: Array<{ name: string; windows: MinimaxCodeQuotaWindow[] }> = []
+  for (const raw of rows) {
+    const row = asRecord(raw)
+    if (row === undefined) continue
+    const name = typeof row.model_name === 'string' && row.model_name !== '' ? row.model_name : 'quota'
+    const intervalTotal = numberOr(row.current_interval_total_count, 0)
+    const weeklyTotal = numberOr(row.current_weekly_total_count, 0)
+    const intervalStatus = numberOr(row.current_interval_status, 0)
+    const weeklyStatus = numberOr(row.current_weekly_status, 0)
+    // Status 3 means "unlimited" — EXCEPT when both totals are zero, where the
+    // service reuses it for a model with no quota bucket in the current plan.
+    // Rendering that as an unlimited bar would promise quota the user does not
+    // have. (The official CLI calls this case out explicitly.)
+    if (intervalTotal === 0 && weeklyTotal === 0 && intervalStatus === 3 && weeklyStatus === 3) continue
+    entries.push({
+      name,
+      windows: [
+        quotaWindow({
+          key: 'interval',
+          reportedCount: numberOr(row.current_interval_usage_count, 0),
+          total: intervalTotal,
+          percent: optionalNumber(row.current_interval_remaining_percent),
+          resetsAtMs: optionalNumber(row.end_time),
+          boost: 1,
+          unlimited: intervalStatus === 3,
+        }),
+        quotaWindow({
+          key: 'weekly',
+          reportedCount: numberOr(row.current_weekly_usage_count, 0),
+          total: weeklyTotal,
+          percent: optionalNumber(row.current_weekly_remaining_percent),
+          resetsAtMs: optionalNumber(row.weekly_end_time),
+          boost: quotaBoostFactor(row.weekly_boost_permille),
+          unlimited: weeklyStatus === 3,
+        }),
+      ],
+    })
+  }
+  if (entries.length === 0) return null
+  // `general` is the bucket that covers chat and coding. The others (video, …) are
+  // separate resources whose numbers would make a single headline bar meaningless.
+  const primary = entries.find((entry) => entry.name === 'general') ?? entries[0]!
+  const head = primary.windows[0]!
+  return {
+    label: 'Token Plan',
+    ...(head.usedPercent === undefined ? {} : { usedPercent: head.usedPercent }),
+    ...(head.resetsAtMs === undefined ? {} : { resetsAtMs: head.resetsAtMs }),
+    windows: primary.windows,
+    fetchedAtMs: now,
+  }
+}
+
+/**
+ * Read the Token Plan usage snapshot.
+ *
+ * The endpoint is undocumented (it was found in the official CLI, not in MiniMax's
+ * API docs), and which host serves THIS subscription has never been measured, so
+ * the candidates are tried in order and the winner is remembered. Any failure
+ * yields null: the contract makes `quota` optional precisely so a usage read can
+ * never break the connection half of the card.
+ */
+export async function fetchTokenPlanQuota(
+  credentials: MinimaxCodeCredentials,
+  options: { fetchFn?: typeof fetch; signal?: AbortSignal; force?: boolean } = {},
+): Promise<MinimaxCodeQuota | null> {
+  const fetchFn = options.fetchFn ?? fetch
+  const now = Date.now()
+  if (options.force !== true && quotaSnapshot !== null) {
+    const ttl = quotaSnapshot.value === null ? QUOTA_FAILURE_CACHE_MS : QUOTA_CACHE_MS
+    if (now - quotaSnapshot.at < ttl) return quotaSnapshot.value
+  }
+  const candidates = quotaHostCandidates(credentials.region)
+  const ordered = quotaHostInForce === null
+    ? candidates
+    : [quotaHostInForce, ...candidates.filter((host) => host !== quotaHostInForce)]
+  let value: MinimaxCodeQuota | null = null
+  for (const host of ordered) {
+    try {
+      const response = await fetchFn(tokenPlanRemainsUrl(host), {
+        method: 'GET',
+        headers: quotaRequestHeaders(credentials.accessToken),
+        signal: withTimeout(options.signal, QUOTA_TIMEOUT_MS),
+      })
+      if (!response.ok) continue
+      const payload: unknown = await response.json().catch(() => undefined)
+      const parsed = parseTokenPlanQuota(payload)
+      if (parsed === null) continue
+      quotaHostInForce = host
+      value = parsed
+      break
+    } catch {
+      // An unreachable or wrong host is simply not the right candidate; the next
+      // one is tried and a total failure leaves the card degraded.
+    }
+  }
+  quotaSnapshot = { at: Date.now(), value }
+  return value
 }
 
 /**

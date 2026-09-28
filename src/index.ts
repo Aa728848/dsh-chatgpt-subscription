@@ -1070,6 +1070,12 @@ export {
   parseAnthropicUsage as parseMinimaxCodeUsage,
   testConnection as testMinimaxCodeConnection,
   summarizeFailureBody as summarizeMinimaxCodeFailureBody,
+  clearCachedQuota as clearMinimaxCodeQuota,
+  fetchTokenPlanQuota as fetchMinimaxCodeQuota,
+  getCachedQuota as getMinimaxCodeQuota,
+  parseTokenPlanQuota as parseMinimaxCodeQuota,
+  quotaRequestHeaders as minimaxCodeQuotaRequestHeaders,
+  resolveQuotaCounts as resolveMinimaxCodeQuotaCounts,
   type MinimaxProbeResult,
   type MinimaxUsage,
 } from './host/minimax-code/client.ts'
@@ -1110,6 +1116,8 @@ export {
   accountHost as minimaxCodeAccountHost,
   agentBaseUrl as minimaxCodeAgentBaseUrl,
   isMinimaxCodeReasoningEffort,
+  quotaHostCandidates as minimaxCodeQuotaHostCandidates,
+  tokenPlanRemainsUrl as minimaxCodeTokenPlanRemainsUrl,
   messagesUrl as minimaxCodeMessagesUrl,
   redactToken as redactMinimaxCodeToken,
 } from './host/minimax-code/types.ts'

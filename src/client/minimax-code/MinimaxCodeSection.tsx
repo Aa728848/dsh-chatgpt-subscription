@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   MINIMAX_CODE_PROVIDER_ID,
   MINIMAX_CODE_PROVIDER_NAME,
@@ -10,6 +10,7 @@ import {
 import {
   MINIMAX_CODE_REASONING_EFFORTS,
   type MinimaxCodeModelOption,
+  type MinimaxCodeQuotaWindow,
   type MinimaxCodeReasoningEffort,
 } from '../../shared/minimax-code-contracts.ts'
 import { AccountPoolSection, type AccountPoolLabels } from '../common/AccountPoolSection.tsx'
@@ -271,6 +272,32 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
     }
   }, [loginId, loadStatus, onModelChange, t])
 
+  /**
+   * Fetch the usage snapshot once, the first time the card sees a signed-in
+   * account without one.
+   *
+   * The status route refreshes usage BEHIND its answer, so it never blocks on a
+   * network read; that means the very first paint has no snapshot. Asking here
+   * fills the section immediately instead of leaving it empty for a whole poll
+   * interval. A failure is silent on purpose: the section already explains that no
+   * usage is available, and a usage read must never surface as an error banner.
+   */
+  // Declared here rather than beside the render values because the effect below
+  // needs it and hooks must all run before the loading early-return.
+  const authenticated = status?.authenticated === true
+  const quotaRequested = useRef(false)
+  useEffect(() => {
+    if (quotaRequested.current || !authenticated || status?.quota !== undefined) return
+    quotaRequested.current = true
+    void (async () => {
+      try {
+        setStatus(await post<MinimaxCodeWebStatus>('/quota'))
+      } catch {
+        // Silent by design - see above.
+      }
+    })()
+  }, [authenticated, status?.quota])
+
   const handleLogin = async (): Promise<void> => {
     try {
       setBusy('login')
@@ -502,6 +529,19 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
     }
   }
 
+  /** Force one usage read through `/quota` and render the fresh status. */
+  const handleRefreshQuota = async (): Promise<void> => {
+    try {
+      setBusy('quota')
+      setError(null)
+      setStatus(await post<MinimaxCodeWebStatus>('/quota'))
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const handleTestConnection = async (): Promise<void> => {
     try {
       setBusy('test')
@@ -532,7 +572,6 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
     )
   }
 
-  const authenticated = status?.authenticated === true
   const account = status?.account
   const quota = status?.quota
   const models = status?.models ?? []
@@ -542,6 +581,18 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
   // not offered to a conversation, so a capacity for it would be dead settings.
   const contextModels = status?.models.filter((model) => model.enabled) ?? []
   const overrideCount = Object.keys(status?.contextWindowOverrides ?? {}).length
+  // One row per quota window. The host reports both the 5-hour and the weekly
+  // window; the single-figure fallback keeps a host that only reports one -
+  // or a snapshot cached from an older build - renderable instead of blank.
+  const quotaWindows: MinimaxCodeQuotaWindow[] = quota?.windows
+    ?? (quota === undefined || quota.usedPercent === undefined
+      ? []
+      : [{
+          key: 'interval',
+          remainingPercent: Math.max(0, 100 - quota.usedPercent),
+          usedPercent: quota.usedPercent,
+          ...(quota.resetsAtMs === undefined ? {} : { resetsAtMs: quota.resetsAtMs }),
+        }])
 
   return (
     <div className="dsha-page">
@@ -858,12 +909,20 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
       <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t('quotaSection')}</h3>
+          <button
+            className="dsha-btn"
+            disabled={busy !== null || !authenticated}
+            onClick={() => void handleRefreshQuota()}
+          >
+            {busy === 'quota' ? t('quotaRefreshing') : t('quotaRefresh')}
+          </button>
         </div>
         {quota === undefined
           ? (
-            // The frozen contract makes quota optional and this line exposes no
-            // usage endpoint, so the section says so instead of rendering an
-            // empty meter or failing.
+            // The contract makes quota optional, and the usage read is allowed to
+            // fail — the endpoint is undocumented and which host serves it is
+            // unmeasured — so the section explains itself rather than rendering an
+            // empty meter.
             <p className="dsha-notice dshm-quota-note">{t('quotaUnavailable')}</p>
           )
           : (
@@ -874,22 +933,42 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
                   <span>{t('quotaUsed').replace('{percent}', String(Math.round(quota.usedPercent)))}</span>
                 )}
               </div>
-              {quota.usedPercent !== undefined && (
-                <div className="dsha-meter-wrap">
-                  <div className="dsha-meter-label">
-                    <span>{quota.label}</span>
-                    <strong>{t('quotaRemaining').replace('{percent}', String(Math.max(0, Math.round(100 - quota.usedPercent))))}</strong>
-                  </div>
-                  <div className={`dsha-meter ${100 - quota.usedPercent <= 10 ? 'dsha-meter-cyan' : 'dsha-meter-green'}`}>
-                    <span style={{ width: `${Math.min(100, Math.max(0, Math.round(100 - quota.usedPercent)))}%` }} />
-                  </div>
-                  {quota.resetsAtMs !== undefined && (
-                    <div className="dsha-meter-meta">
-                      <span>{t('quotaReset').replace('{time}', formatDate(quota.resetsAtMs))}</span>
+              {quotaWindows.map((window) => {
+                // `remainingPercent` is null for a window the service reports as
+                // unlimited and for one it gave no usable figures for; the two are
+                // labelled differently because only the first is good news.
+                const remaining = window.remainingPercent
+                const label = window.key === 'weekly' ? t('quotaWindowWeekly') : t('quotaWindowInterval')
+                return (
+                  <div className="dsha-meter-wrap" key={window.key}>
+                    <div className="dsha-meter-label">
+                      <span>{label}</span>
+                      <strong>
+                        {window.unlimited === true
+                          ? t('quotaUnlimited')
+                          : remaining === null
+                            ? t('unknown')
+                            : t('quotaRemaining').replace('{percent}', String(Math.max(0, Math.round(remaining))))}
+                      </strong>
                     </div>
-                  )}
-                </div>
-              )}
+                    <div className={`dsha-meter ${(remaining ?? 100) <= 10 ? 'dsha-meter-cyan' : 'dsha-meter-green'}`}>
+                      <span style={{ width: `${Math.min(100, Math.max(0, Math.round(remaining ?? 100)))}%` }} />
+                    </div>
+                    <div className="dsha-meter-meta">
+                      {window.used !== undefined && window.total !== undefined && (
+                        <span>
+                          {t('quotaCounts')
+                            .replace('{used}', window.used.toLocaleString())
+                            .replace('{total}', window.total.toLocaleString())}
+                        </span>
+                      )}
+                      {window.resetsAtMs !== undefined && (
+                        <span>{t('quotaReset').replace('{time}', formatDate(window.resetsAtMs))}</span>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
       </section>
