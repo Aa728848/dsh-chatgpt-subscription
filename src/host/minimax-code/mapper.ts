@@ -425,6 +425,11 @@ export function buildMinimaxRequest(
   return {
     model: options.model,
     max_tokens: maxTokens,
+    // Without this the service answers with one JSON message body instead of an
+    // event stream, and the SSE reader in the adapter reports the complete answer
+    // as a stream that ended before its terminal event. Every sibling line that
+    // consumes SSE asks for it here for the same reason.
+    stream: true,
     messages: mergeAnthropicMessages(entries),
     ...(system === undefined ? {} : { system }),
     // Thinking and an explicit temperature are mutually exclusive on this
