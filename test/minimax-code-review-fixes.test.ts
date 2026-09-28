@@ -176,7 +176,11 @@ describe('MiniMax Code line', () => {
       expect(status.serving).toBe(false)
       expect(status.conflict).toBe('another adapter owns it')
       expect(status.ownedByPlugin).toBe(false)
-      expect(status.models).toEqual(minimaxCodeModelIds())
+      // `models` is the card's render model (id + enabled + effective window),
+      // not a bare id list: this is the settings surface every sibling line has.
+      expect(status.models.map((model) => model.id)).toEqual(minimaxCodeModelIds())
+      expect(status.models.every((model) => model.enabled)).toBe(true)
+      expect(status.enabled).toBe(true)
     })
 
     it('does not revoke or delete a sign-in the desktop app owns', async () => {

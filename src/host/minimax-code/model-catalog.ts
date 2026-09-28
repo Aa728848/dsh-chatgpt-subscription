@@ -12,7 +12,13 @@
  * inferred from another provider's catalog.
  */
 
-import type { MinimaxCodeReasoningEffort } from '../../shared/minimax-code-contracts.ts'
+import type {
+  MinimaxCodeModelOption,
+  MinimaxCodeReasoningEffort,
+  MinimaxCodeThinkingModeDto,
+} from '../../shared/minimax-code-contracts.ts'
+import { DEFAULT_CONTEXT_WINDOW } from './types.ts'
+import { maxOutputTokensFor } from './mapper.ts'
 
 /**
  * How one model's thinking behaves.
@@ -202,4 +208,99 @@ export function effortForModel(
   const normalized = requested.trim().toLowerCase()
   const match = model.reasoningEfforts.find((effort) => effort === normalized)
   return match ?? model.defaultReasoningEffort
+}
+
+// ---------------------------------------------------------------------------
+// Settings view of the catalog
+// ---------------------------------------------------------------------------
+
+/**
+ * Smallest context window an override may name.
+ *
+ * Exported because the settings route validates POSTed overrides against the
+ * same number this reader uses: if they drifted, the route would accept a value
+ * the reader then treats as absent, and the card would show a saved override
+ * that silently does nothing.
+ */
+export const MIN_CONTEXT_WINDOW = 1_000
+
+/**
+ * The effective context window for one model.
+ *
+ * One reader for both the status card and the request path, because the two
+ * disagreeing is the exact failure this override can cause: the card would show
+ * a window the request builder then ignored, and the user would see a request
+ * clamped to the catalog's number with nothing on screen explaining why.
+ *
+ * A non-positive or sub-minimum override is treated as absent rather than
+ * clamped: the route never stores one (it validates them), so seeing one means
+ * the document was hand-edited, and inventing a window from it would size every
+ * request on that model against a number the user never chose.
+ */
+export function contextWindowForModel(
+  modelId: string,
+  contextWindowOverrides: Record<string, number> | undefined,
+): number {
+  const fallback = minimaxCodeModelDef(modelId)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+  const override = contextWindowOverrides?.[modelId]
+  if (typeof override === 'number' && Number.isFinite(override) && override >= MIN_CONTEXT_WINDOW) {
+    return Math.floor(override)
+  }
+  return fallback
+}
+
+/**
+ * The catalog ids the user's stored selection actually resolves to.
+ *
+ * A stored list that still equals the shipped default has never been edited, so
+ * it cannot know about models a later release added; treating it as "everything
+ * the catalog currently offers" is what keeps a first run from hiding a new
+ * model behind an unedited default. Any explicit edit is honoured exactly, and
+ * an id the catalog no longer serves is dropped so the picker cannot offer a
+ * model this build has no entry for.
+ */
+export function resolveMinimaxCodeEnabledModelIds(
+  stored: readonly string[],
+  enabled = true,
+): string[] {
+  if (!enabled) return []
+  const catalogIds = minimaxCodeModelIds()
+  const shipped = new Set(catalogIds)
+  const isUntouchedDefault = stored.length === shipped.size && stored.every((id) => shipped.has(id))
+  if (isUntouchedDefault) return catalogIds
+  return stored.filter((id) => shipped.has(id))
+}
+
+/**
+ * The settings-card rows for the whole shipped catalog.
+ *
+ * Every model is present, enabled or not: the card toggles rows, so a disabled
+ * model has to be rendered to be re-enabled. `contextWindow` is the effective
+ * window and `defaultContextWindow` the catalog's own number, which is what lets
+ * the card show a modified row as modified.
+ */
+export function buildMinimaxCodeModelOptions(
+  storedEnabledModelIds: readonly string[],
+  contextWindowOverrides: Record<string, number>,
+  enabled = true,
+): MinimaxCodeModelOption[] {
+  const enabledIds = new Set(resolveMinimaxCodeEnabledModelIds(storedEnabledModelIds, enabled))
+  return MINIMAX_CODE_MODELS.map((model) => {
+    const contextWindow = contextWindowForModel(model.id, contextWindowOverrides)
+    return {
+      id: model.id,
+      name: model.name,
+      enabled: enabledIds.has(model.id),
+      defaultContextWindow: model.contextWindow,
+      contextWindow,
+      // Sized against the effective window, not the catalog's: an override that
+      // shrank the window has to shrink the cap with it, or the request asks for
+      // more output than the window it was measured against can hold.
+      defaultMaxTokens: maxOutputTokensFor(model.id, contextWindow),
+      reasoningEfforts: [...model.reasoningEfforts],
+      defaultReasoningEffort: model.defaultReasoningEffort,
+      thinking: model.thinking as MinimaxCodeThinkingModeDto,
+      description: model.description,
+    }
+  })
 }

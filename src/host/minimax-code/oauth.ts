@@ -639,7 +639,25 @@ export async function ensureAccessToken(
 export async function pollWebLogin(
   store: MinimaxCodeCredentialStore,
   loginId: string,
-  options: { fetchFn?: typeof fetch; signal?: AbortSignal } = {},
+  options: {
+    fetchFn?: typeof fetch
+    signal?: AbortSignal
+    /**
+     * Called with the credential a completed sign-in produced, after it has been
+     * persisted.
+     *
+     * The single-credential store cannot express a second account, so without this
+     * a sign-in started from the card would never join the pool: the pool would
+     * keep serving its existing accounts, and the user's new sign-in would exist
+     * only as the mirror file. The pool installs this hook and adds the credential
+     * as its own account.
+     *
+     * A failure here must not fail the sign-in: the credential is already durable,
+     * and the pool is a routing convenience on top of it. The caller receives the
+     * authenticated verdict either way.
+     */
+    onSave?: (credentials: MinimaxCodeCredentials) => Promise<void>
+  } = {},
 ): Promise<{ status: 'pending' | 'authenticated' | 'expired' | 'denied'; account?: MinimaxCodeAccount }> {
   pruneLoginSessions()
   const session = loginSessions.get(loginId)
@@ -692,6 +710,12 @@ export async function pollWebLogin(
     seenAt: Date.now(),
   }
   await store.write(credentials)
+  // Hand the credential to the pool before the session is forgotten, so the new
+  // account is routable the moment the card re-reads the status. A pool failure is
+  // swallowed deliberately: the sign-in itself succeeded.
+  if (options.onSave !== undefined) {
+    await options.onSave(credentials).catch(() => undefined)
+  }
   loginSessions.delete(loginId)
   session.consumed = true
   return { status: 'authenticated', account: accountFromCredentials(credentials) }

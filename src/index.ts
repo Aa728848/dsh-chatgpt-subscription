@@ -54,8 +54,13 @@ import {
 } from './host/kimi-code/token-store.ts'
 import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
 import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
+import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
 import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
-import { MinimaxCodeCredentialStore } from './host/minimax-code/token-store.ts'
+import {
+  MinimaxCodeCredentialStore,
+  MinimaxCodeModelSettingsStore,
+  registerMinimaxCodePreferenceStore,
+} from './host/minimax-code/token-store.ts'
 import { PROVIDER_ID as MINIMAX_CODE_PROVIDER_ID, PROVIDER_NAME as MINIMAX_CODE_PROVIDER_NAME } from './host/minimax-code/types.ts'
 import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
 import { WorkBuddyAccountPool } from './host/workbuddy/account-pool.ts'
@@ -186,6 +191,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // MiniMax Code owns its own credential file and keeps it fresh, so this line
   // reads and renews that file rather than keeping a second one of its own.
   const minimaxCodeStore = new MinimaxCodeCredentialStore()
+  // The model selection is registered when the harness still has that seam and
+  // mirrored into the JSON file beside it otherwise. The card's routes and the
+  // adapter are handed the same store, so a toggle in the card is what the next
+  // model pick and the next request both see.
+  const minimaxCodeModelSettings = new MinimaxCodeModelSettingsStore()
+  const minimaxCodePreferences = registerMinimaxCodePreferenceStore(ctx.settings, minimaxCodeModelSettings)
+  // The account pool. This is the second line that pools a credential it does not
+  // own (WorkBuddy was the first): MiniMax Code's own `auth.json` is adopted and
+  // renewed in place but never deleted, which is what lets a user who is already
+  // signed in to the desktop app rotate between accounts without signing in twice.
+  const minimaxCodeAccountPool = new MinimaxCodeAccountPool({ store: minimaxCodeStore })
 
   const workBuddyStore = new WorkBuddyCredentialStore()
   const workBuddyModelSettings = new WorkBuddyModelSettingsStore()
@@ -414,7 +430,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // and reported when not.
     const minimaxCodeAdapter = new MinimaxCodeAdapter(
       minimaxCodeStore,
-      { fetchFn: proxyFetch, attachments: ctx.attachments },
+      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: minimaxCodeAccountPool },
+      minimaxCodeModelSettings,
+      minimaxCodePreferences,
     )
     let minimaxCodeRegistration: AdapterRegistrationHandle | undefined
     let minimaxCodeConflict: string | null = null
@@ -447,7 +465,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       fetchFn: proxyFetch,
       serving: () => minimaxCodeRegistration !== undefined,
       conflict: () => minimaxCodeConflict,
-    })
+      accountPool: minimaxCodeAccountPool,
+    }, minimaxCodeModelSettings, minimaxCodePreferences)
 
     // WorkBuddy is the CodeBuddy subscription: this plugin reads the desktop
     // client's own credential files, so the route is claimed like the others
@@ -1000,15 +1019,30 @@ export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/anti
 // --- MiniMax Code -----------------------------------------------------------------
 export { MinimaxCodeAdapter, classifyMinimaxFailure, MINIMAX_CODE_RETRY_POLICY_CONFIG } from './host/minimax-code/adapter.ts'
 export {
+  MinimaxCodeAccountPool,
+  minimaxCodePoolPath,
+  minimaxCodePoolIdentity,
+  minimaxCodePoolStatus,
+  parseMinimaxCodePoolData,
+  createMinimaxCodeAccountsHandler,
+  type MinimaxCodePoolAccount,
+  type MinimaxCodeAccountSummaryDto,
+} from './host/minimax-code/account-pool.ts'
+export {
   MinimaxCodeCredentialStore,
+  MinimaxCodeModelSettingsStore,
   authJsonPath as minimaxCodeAuthJsonPath,
   authStateJsonPath as minimaxCodeAuthStateJsonPath,
   credentialIsFresh as minimaxCodeCredentialIsFresh,
   minimaxHomeDir as minimaxCodeHomeDir,
+  modelSettingsPath as minimaxCodeModelSettingsPath,
   parseMinimaxCodeCredentials,
   pluginCredentialPath as minimaxCodePluginCredentialPath,
+  registerMinimaxCodePreferenceStore,
   type MinimaxCodeCredentialSource,
   type MinimaxCodeCredentials,
+  type MinimaxCodeModelSettings,
+  type MinimaxCodePreferenceStore,
 } from './host/minimax-code/token-store.ts'
 export {
   accountFromCredentials as minimaxCodeAccountFromCredentials,
@@ -1041,11 +1075,14 @@ export {
 } from './host/minimax-code/client.ts'
 export {
   MINIMAX_CODE_MODELS,
+  buildMinimaxCodeModelOptions,
+  contextWindowForModel,
   effortForModel as minimaxCodeEffortForModel,
   isThinkingDisabledEffort,
   minimaxCodeModelDef,
   minimaxCodeModelIds,
   minimaxCodeModelName,
+  resolveMinimaxCodeEnabledModelIds,
   type MinimaxCodeCatalogModel,
   type MinimaxCodeThinkingMode,
 } from './host/minimax-code/model-catalog.ts'
@@ -1079,12 +1116,15 @@ export {
 export {
   MINIMAX_CODE_PROVIDER_ID,
   MINIMAX_CODE_PROVIDER_NAME,
+  MINIMAX_CODE_REASONING_EFFORTS,
   MINIMAX_CODE_ROUTE_PREFIX,
   type MinimaxCodeAccount,
   type MinimaxCodeCredentialStorage,
+  type MinimaxCodeModelOption,
   type MinimaxCodeQuota,
   type MinimaxCodeReasoningEffort,
   type MinimaxCodeRegion,
+  type MinimaxCodeThinkingModeDto,
   type MinimaxCodeWebLogin,
   type MinimaxCodeWebStatus,
 } from './shared/minimax-code-contracts.ts'

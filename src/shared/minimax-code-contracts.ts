@@ -5,6 +5,11 @@
  * 本文件由调度者冻结：类型名与常量名不得更改，可追加。
  */
 
+import type {
+  AccountRotationStrategy,
+  PoolAccountSummaryDto,
+} from './account-pool-contracts.ts'
+
 export const MINIMAX_CODE_PROVIDER_ID = 'minimax-code'
 export const MINIMAX_CODE_PROVIDER_NAME = 'MiniMax Code（编程订阅）'
 
@@ -13,6 +18,17 @@ export type MinimaxCodeRegion = 'cn' | 'global'
 
 /** M3.1 的思考档位；M2.7 恒定开启，M3 为开关二态。 */
 export type MinimaxCodeReasoningEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+/**
+ * 全线共用的思考档位，按从小到大的顺序排列。
+ *
+ * 设置卡片只渲染这一份列表：档位是线路级的词汇表（`isMinimaxCodeReasoningEffort`
+ * 就是按它校验的），而不是单个模型的能力表。某个模型实际接受哪些档位由
+ * `MinimaxCodeModelOption.reasoningEfforts` 单独给出——把两者合成一份会让卡片
+ * 在给一个只认 `default` 的模型显示 `max` 时无从判断是模型不支持还是文案没写。
+ */
+export const MINIMAX_CODE_REASONING_EFFORTS: readonly MinimaxCodeReasoningEffort[] =
+  ['default', 'low', 'medium', 'high', 'xhigh', 'max']
 
 /**
  * 路由前缀（host 暴露、client 消费）。
@@ -52,15 +68,52 @@ export interface MinimaxCodeQuota {
   resetsAtMs?: number
 }
 
+/** 一条模型行的思考形态；取值与 host 目录里的 MinimaxCodeThinkingMode 一致。 */
+export type MinimaxCodeThinkingModeDto = 'always-on' | 'toggle' | 'forced-effort'
+
+/**
+ * 设置卡片渲染的一行模型。
+ *
+ * 硬编码目录（host 的 `MINIMAX_CODE_MODELS`）带的是「模型是什么」，这里带的是
+ * 「这个安装当前怎么用它」：启用与否、生效的上下文窗口、请求缺省输出上限。
+ * 两者分开是因为前者随代码发布、后者随用户设置变化；把设置混进目录会让一份
+ * 用户数据看起来像一条已发布的目录项。
+ */
+export interface MinimaxCodeModelOption {
+  id: string
+  name: string
+  /** 是否由 DSH 提供给会话模型选择器。 */
+  enabled: boolean
+  /** 目录声明的默认上下文窗口。 */
+  defaultContextWindow: number
+  /** 生效窗口：有覆盖值时用覆盖值，否则等于 `defaultContextWindow`。 */
+  contextWindow: number
+  /** 调用方不指定时，本线路请求的输出上限。 */
+  defaultMaxTokens: number
+  /** 本模型接受的思考档位；没有可选档位时缺省。 */
+  reasoningEfforts?: string[]
+  /** 会话未指定档位时使用的档位。 */
+  defaultReasoningEffort?: string
+  /** 思考形态：恒定开启 / 开关二态 / 强制带档位。 */
+  thinking: MinimaxCodeThinkingModeDto
+  description: string | null
+}
+
 export interface MinimaxCodeWebStatus {
+  /** 线路总开关；关闭时适配器不暴露任何模型。 */
+  enabled: boolean
   authenticated: boolean
   providerId: typeof MINIMAX_CODE_PROVIDER_ID
   region: MinimaxCodeRegion
   storage: MinimaxCodeCredentialStorage
   account?: MinimaxCodeAccount
   login?: MinimaxCodeWebLogin
-  /** 硬编码目录里的模型 id 列表（远端 /v1/models 不可用）。 */
-  models: readonly string[]
+  /** 硬编码目录渲染成的模型行（远端 `/v1/models` 不可用）。 */
+  models: MinimaxCodeModelOption[]
+  /** 每条被覆盖的模型当前保存的上下文窗口；未被覆盖的模型不出现。 */
+  contextWindowOverrides: Record<string, number>
+  /** 未指定时的全局思考档位；null 表示各模型用自己的默认档位。 */
+  defaultReasoningEffort: MinimaxCodeReasoningEffort | null
   /** 无配额接口时为 undefined，UI 应优雅降级。 */
   quota?: MinimaxCodeQuota
   /** 本插件是否正在服务该 Provider 路由；被别的适配器占用时为 false。 */
@@ -77,4 +130,19 @@ export interface MinimaxCodeWebStatus {
    * 没有效果的按钮。
    */
   ownedByPlugin: boolean
+  /**
+   * 号池里的账号，供设置卡片的「账号管理」渲染。
+   *
+   * 与其余各线路同构（复用同一个共享卡片与同一份 DTO）：每条元素只带非机密的
+   * 展示信息，令牌永远不过这条边界。桌面端自有账号在其中会被标为
+   * `removable: false`——它归 MiniMax Code 所有，本插件只读与续期。
+   */
+  accounts?: PoolAccountSummaryDto[]
+  /** 下一个请求会使用的账号。 */
+  activeAccountId?: string
+  /** 号池调度策略；无号池时缺省为顺序耗尽。 */
+  rotationStrategy?: AccountRotationStrategy
+  /** 本进程是否装载了号池。false 时卡片按单凭据模式渲染。 */
+  poolInstalled?: boolean
 }
+

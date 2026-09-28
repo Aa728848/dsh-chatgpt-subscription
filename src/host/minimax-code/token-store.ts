@@ -33,9 +33,15 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import z from '@deepseek-ai/schemastery'
 import { dshHomeDir } from '../common/home.ts'
 import { MINIMAX_CODE_BUILD_ENV, MINIMAX_CODE_CLIENT_ID, REFRESH_MARGIN_MS } from './types.ts'
-import type { MinimaxCodeRegion } from '../../shared/minimax-code-contracts.ts'
+import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
+import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
+import { MINIMAX_CODE_REASONING_EFFORTS } from '../../shared/minimax-code-contracts.ts'
+import type { MinimaxCodeReasoningEffort, MinimaxCodeRegion } from '../../shared/minimax-code-contracts.ts'
+import { minimaxCodeModelIds } from './model-catalog.ts'
 
 /** Where the credential and the token came from. */
 export type MinimaxCodeCredentialSource = 'minimax-native' | 'file'
@@ -465,5 +471,283 @@ export class MinimaxCodeCredentialStore {
     return serialize(pluginCredentialPath(), async () => {
       await fs.rm(pluginCredentialPath(), { force: true })
     })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Model settings
+// ---------------------------------------------------------------------------
+
+/** Namespace the model selection is registered under on a register-capable harness. */
+export const MINIMAX_CODE_PREFERENCES_NAMESPACE = 'dsh-minimax-code'
+
+/** Runtime membership test for one stored effort value. */
+function isReasoningEffort(value: unknown): value is MinimaxCodeReasoningEffort {
+  return typeof value === 'string' && (MINIMAX_CODE_REASONING_EFFORTS as readonly string[]).includes(value)
+}
+
+/**
+ * The model-selection half of this line's settings.
+ *
+ * The catalog (`MINIMAX_CODE_MODELS`) is deliberately not stored here. A shipped
+ * catalog changes with the code, so persisting a copy of it would leave a user
+ * whose file is a release behind reading a model list the build no longer serves;
+ * only the user's own choices live in this document.
+ */
+export interface MinimaxCodeModelSettings {
+  /** Line-wide switch. Absent means enabled: this line shipped enabled. */
+  enabled?: boolean
+  /** Catalog ids DSH offers in the conversation model picker. */
+  enabledModelIds: string[]
+  /** Per-model context window, replacing the catalog's own number. */
+  contextWindowOverrides: Record<string, number>
+  /** Level used when a conversation picks none; null means the model's own. */
+  defaultReasoningEffort: MinimaxCodeReasoningEffort | null
+}
+
+/**
+ * One settings patch.
+ *
+ * `contextWindowOverrides` is a patch rather than the whole map because `null`
+ * has to survive as a value: it is the settings card's "restore the catalog
+ * default" and deletes exactly one key. A full replacement could not express
+ * that without the caller first reading the document it wants to edit.
+ */
+export interface MinimaxCodeSettingsPatch {
+  enabled?: boolean
+  enabledModelIds?: string[]
+  contextWindowOverrides?: ContextWindowOverridePatch
+  defaultReasoningEffort?: MinimaxCodeReasoningEffort | null
+}
+
+/**
+ * The seam the routes and the adapter share.
+ *
+ * `status()` is synchronous on purpose: it is read on every model-picker query
+ * and on every settings-card poll, and both callers only need a snapshot. A
+ * promise-shaped reader here would make each of them await a file read on a hot
+ * path for a value that changes at human speed.
+ */
+export interface MinimaxCodePreferenceStore {
+  status(): MinimaxCodeModelSettings
+  update(patch: MinimaxCodeSettingsPatch): Promise<MinimaxCodeModelSettings>
+}
+
+/** Every catalog id, in catalog order: the shipped selection and the parse fallback. */
+const DEFAULT_ENABLED_MODEL_IDS: string[] = minimaxCodeModelIds()
+
+/** The settings a fresh install has: everything on, nothing overridden. */
+function defaultMinimaxCodeSettings(): MinimaxCodeModelSettings {
+  return {
+    enabled: true,
+    enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
+    contextWindowOverrides: {},
+    defaultReasoningEffort: null,
+  }
+}
+
+/** Path of the settings file used when no settings service is present. */
+export function modelSettingsPath(): string {
+  return path.join(dshHomeDir(), 'storages', 'minimax-code-models.json')
+}
+
+/**
+ * Normalize one parsed settings document.
+ *
+ * Nothing here throws. The file is read on boot and on every status poll, and a
+ * hand-edited or downgraded document must degrade to a usable selection instead
+ * of making the whole line unusable; every branch that cannot be trusted falls
+ * back to the value the catalog itself declares.
+ */
+function parseMinimaxCodeModelSettings(value: unknown): MinimaxCodeModelSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return defaultMinimaxCodeSettings()
+  const record = value as Record<string, unknown>
+  const enabledModelIds = Array.isArray(record.enabledModelIds)
+    ? record.enabledModelIds.filter((id): id is string => typeof id === 'string')
+    : [...DEFAULT_ENABLED_MODEL_IDS]
+  const contextWindowOverrides: Record<string, number> = {}
+  if (typeof record.contextWindowOverrides === 'object' && record.contextWindowOverrides !== null) {
+    for (const [modelId, raw] of Object.entries(record.contextWindowOverrides as Record<string, unknown>)) {
+      // A non-positive or non-finite window is dropped rather than clamped to
+      // some minimum. It would size every request on that model against a
+      // window the catalog never declared, and the route's own validation
+      // refuses those values, so reaching here means the file was hand-edited.
+      // Falling back to the catalog default is the honest repair.
+      if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+        contextWindowOverrides[modelId] = Math.floor(raw)
+      }
+    }
+  }
+  return {
+    // Only an explicit false disables the line: an absent key is the shipped
+    // state, and reading it as "off" would hide every model from a user who
+    // never touched the switch.
+    enabled: record.enabled !== false,
+    enabledModelIds,
+    contextWindowOverrides,
+    defaultReasoningEffort: isReasoningEffort(record.defaultReasoningEffort) ? record.defaultReasoningEffort : null,
+  }
+}
+
+/**
+ * Apply one patch to one settings document.
+ *
+ * The merge lives outside both stores because the register-backed store has to
+ * normalize the scope's value through the same rules the file store applies; two
+ * copies of this logic is how the two storage paths drift apart the first time
+ * one of them learns a new field.
+ */
+export function mergeMinimaxCodeSettings(
+  current: MinimaxCodeModelSettings,
+  patch: MinimaxCodeSettingsPatch,
+): MinimaxCodeModelSettings {
+  return {
+    enabled: patch.enabled !== undefined ? patch.enabled : current.enabled !== false,
+    enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
+    contextWindowOverrides: patch.contextWindowOverrides !== undefined
+      ? mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides)
+      : current.contextWindowOverrides,
+    defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
+      ? patch.defaultReasoningEffort
+      : current.defaultReasoningEffort,
+  }
+}
+
+/**
+ * The settings file beside the credentials.
+ *
+ * This is what a harness without the register seam (0.1.7, and a headless host)
+ * reads back on boot, so it is the store that has to survive a crash: the write
+ * is a temporary sibling plus `rename`, and the document just written is read
+ * back and compared before the write is reported as done. Without the read-back
+ * a partial write, or a filesystem that dropped the rename, would report a
+ * selection the next boot does not agree with — the card would show a model
+ * grid the adapter never applies.
+ */
+export class MinimaxCodeModelSettingsStore {
+  // Declared and assigned explicitly rather than as a constructor parameter
+  // property: Node's type-stripping loader rejects a parameter property, and
+  // this package is imported directly by tooling that runs TypeScript as-is.
+  private readonly filePath: string
+
+  constructor(filePath: string = modelSettingsPath()) {
+    this.filePath = filePath
+  }
+
+  path(): string {
+    return this.filePath
+  }
+
+  async read(): Promise<MinimaxCodeModelSettings> {
+    try {
+      return parseMinimaxCodeModelSettings(JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown)
+    } catch {
+      // A missing or unreadable settings file falls back to the shipped defaults.
+      return defaultMinimaxCodeSettings()
+    }
+  }
+
+  async write(settings: MinimaxCodeModelSettings): Promise<void> {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true })
+    const temporary = this.filePath + '.tmp.' + Date.now()
+    // The trailing newline matches what the sibling lines' files look like on
+    // disk; only the parsed value is compared below, so it never affects the
+    // verification.
+    await fs.writeFile(temporary, JSON.stringify(settings, null, 2) + '\n', 'utf8')
+    await fs.rename(temporary, this.filePath)
+    const restored = parseMinimaxCodeModelSettings(JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown)
+    if (!isDeepStrictEqual(restored, settings)) {
+      throw new Error('MiniMax Code model settings write failed; the stored selection does not match what was written')
+    }
+  }
+
+  /**
+   * Read-modify-write under the same per-path lock the credential writes use.
+   *
+   * Without it two patches landing together each read the same document and the
+   * second write silently discards the first — a lost model selection, with no
+   * error anywhere. The lock is shared with the credential paths because it is
+   * keyed by resolved path, and the two never name the same file.
+   */
+  updateSettings(patch: MinimaxCodeSettingsPatch): Promise<MinimaxCodeModelSettings> {
+    return serialize(this.filePath, async () => {
+      const next = mergeMinimaxCodeSettings(await this.read(), patch)
+      await this.write(next)
+      return next
+    })
+  }
+}
+
+/**
+ * Bind the model selection to the DSH settings document when the harness still
+ * offers one, and to the JSON file beside it otherwise: a harness without the
+ * register seam (0.1.7, and a headless host) reads that file back on boot.
+ */
+export function registerMinimaxCodePreferenceStore(
+  settings?: unknown,
+  fallbackStore: MinimaxCodeModelSettingsStore = new MinimaxCodeModelSettingsStore(),
+): MinimaxCodePreferenceStore {
+  if (!hasRegister(settings)) {
+    // With no settings namespace to persist in, the JSON file beside the
+    // credentials is the store. It is read once here, so a selection saved by an
+    // earlier run is still the selection on the next boot; the read is not
+    // awaited so that a caller wiring the plugin at startup is not blocked on a
+    // disk read, and `status()` answers from the shipped defaults until it lands.
+    let snapshot: MinimaxCodeModelSettings = defaultMinimaxCodeSettings()
+    void fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
+    return {
+      status: () => snapshot,
+      update: async (patch) => {
+        snapshot = await fallbackStore.updateSettings(patch)
+        return snapshot
+      },
+    }
+  }
+
+  const scope = settings.register(resolveSettingsNamespace(MINIMAX_CODE_PREFERENCES_NAMESPACE), z.object({
+    enabled: z.boolean().default(true),
+    enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
+    contextWindowOverrides: z.dict(z.number()).default({}),
+    defaultReasoningEffort: z
+      .union([
+        ...MINIMAX_CODE_REASONING_EFFORTS.map((effort) => z.const(effort)),
+        z.const(null),
+      ])
+      .default(null),
+  })) as SettingsScope<{
+    enabled: boolean
+    enabledModelIds: string[]
+    contextWindowOverrides: Record<string, number>
+    defaultReasoningEffort: MinimaxCodeReasoningEffort | null
+  }>
+
+  return {
+    status: () => {
+      const value = scope.get()
+      return {
+        enabled: value.enabled !== false,
+        enabledModelIds: value.enabledModelIds,
+        contextWindowOverrides: value.contextWindowOverrides,
+        defaultReasoningEffort: value.defaultReasoningEffort,
+      }
+    },
+    update: async (patch) => {
+      // Read once: two reads of a live scope could straddle a write from another
+      // subscriber, and merging against the second while persisting the first is
+      // exactly the lost update this store exists to avoid.
+      const value = scope.get()
+      const normalized = mergeMinimaxCodeSettings({
+        enabled: value.enabled !== false,
+        enabledModelIds: value.enabledModelIds,
+        contextWindowOverrides: value.contextWindowOverrides,
+        defaultReasoningEffort: value.defaultReasoningEffort,
+      }, patch)
+      await scope.update(normalized)
+      // Mirror into the file as well, so a later run on a harness that dropped
+      // the register seam still finds the selection the user made. The mirror is
+      // best effort: the registered document is the store that just succeeded.
+      void fallbackStore.updateSettings(patch).catch(() => undefined)
+      return normalized
+    },
   }
 }

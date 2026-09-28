@@ -293,13 +293,38 @@ describe('client registration', () => {
       // MiniMax Code mounts under its own `/minimax-code/api` prefix like every
       // sibling line, and its card treats a missing quota as "this line exposes
       // no usage endpoint".
+      if (url.startsWith('/minimax-code/api/accounts')) {
+        return Response.json({ ok: true, value: {
+          accounts: [{
+            id: 'acc_1',
+            alias: 'mini@example.com',
+            isPrimary: true,
+            email: 'mini@example.com',
+            removable: false,
+          }],
+          activeAccountId: 'acc_1',
+          rotationStrategy: 'sequential',
+        } })
+      }
       if (url.startsWith('/minimax-code/api')) {
         return Response.json({ ok: true, value: {
+          enabled: true,
           authenticated: false,
           account: null,
           region: 'cn',
           storage: { kind: 'minimax-native', path: '/tmp/minimax-auth.json' },
-          models: ['MiniMax-M2'],
+          models: [{
+            id: 'MiniMax-M3',
+            name: 'MiniMax M3',
+            enabled: true,
+            defaultContextWindow: 200_000,
+            contextWindow: 200_000,
+            defaultMaxTokens: 128_000,
+            thinking: 'toggle',
+            description: 'flagship',
+          }],
+          contextWindowOverrides: {},
+          defaultReasoningEffort: null,
           serving: true,
           conflict: null,
           ownedByPlugin: false,

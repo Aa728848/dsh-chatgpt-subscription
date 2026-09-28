@@ -7,11 +7,109 @@ import {
   type MinimaxCodeWebLogin,
   type MinimaxCodeWebStatus,
 } from '../../shared/minimax-code-contracts.ts'
+import {
+  MINIMAX_CODE_REASONING_EFFORTS,
+  type MinimaxCodeModelOption,
+  type MinimaxCodeReasoningEffort,
+} from '../../shared/minimax-code-contracts.ts'
+import { AccountPoolSection, type AccountPoolLabels } from '../common/AccountPoolSection.tsx'
+import type {
+  AccountPoolStatusDto,
+  AccountRotationStrategy,
+} from '../../shared/account-pool-contracts.ts'
 import { get, messageOf, post } from './api.ts'
 import { zh } from './locales.ts'
 
+/** The pool slice the status card renders, absent when the line has no pool. */
+type MinimaxCodePoolStatus = Pick<AccountPoolStatusDto, 'accounts' | 'rotationStrategy'> & {
+  activeAccountId?: string
+}
+
+/**
+ * The shared pool card's labels, resolved through this card's dictionary.
+ *
+ * The sibling tabs hand the shared card their raw `zh` object, which works because
+ * they render `zh` directly. This card renders through a translate function
+ * instead, so the same label set is assembled here by looking each key up. It is
+ * derived from the shared ZH label object's own keys, so a label added to the
+ * shared card cannot be silently missed — the `satisfies` below turns that into a
+ * compile error.
+ */
+function accountPoolLabelsFor(t: (key: keyof typeof zh) => string): AccountPoolLabels {
+  return {
+    accountPool: t('accountPool'),
+    addAccount: t('addAccount'),
+    accountCount: t('accountCount'),
+    primaryAccount: t('primaryAccount'),
+    activeAccount: t('activeAccount'),
+    setPrimary: t('setPrimary'),
+    deleteAccount: t('deleteAccount'),
+    cooling: t('cooling'),
+    cooldownLeft: t('cooldownLeft'),
+    clearCooldown: t('clearCooldown'),
+    needsRelogin: t('needsRelogin'),
+    relogin: t('relogin'),
+    rotationStrategy: t('rotationStrategy'),
+    strategySequential: t('strategySequential'),
+    strategyRoundRobin: t('strategyRoundRobin'),
+    strategySticky: t('strategySticky'),
+    noAccounts: t('noAccounts'),
+    storage: t('storage'),
+    storageNotice: t('storageNotice'),
+    email: t('email'),
+    expires: t('expiresAt'),
+    lastUsed: t('lastUsed'),
+    accountId: t('accountId'),
+  }
+}
+
 /** Device-code poll cadence. The host owns the real expiry. */
 const LOGIN_POLL_INTERVAL_MS = 2_000
+
+/**
+ * Parse "1M", "512K", "200000" into a positive integer token count.
+ *
+ * Every provider card carries its own copy of this pair rather than importing one
+ * from a shared module; the value is user input in a free-text field and a bad
+ * parse silently corrupts the overflow judgement, so it stays next to the only
+ * field that produces it.
+ */
+export function parsePositiveCapacity(value: string): number | null {
+  const normalized = value.trim().toLowerCase().replace(/[,_\s]/g, '')
+  const matched = normalized.match(/^(\d+(?:\.\d+)?)(k|m)?$/)
+  if (matched === null) return null
+  const multiplier = matched[2] === 'm' ? 1_000_000 : matched[2] === 'k' ? 1_000 : 1
+  const parsed = Number(matched[1]) * multiplier
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null
+}
+
+/** Render a token capacity the way the capacity field seeds itself. */
+export function formatCapacity(value: number): string {
+  if (value >= 1_000_000 && value % 100_000 === 0) return `${value / 1_000_000}M`
+  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`
+  return String(value)
+}
+
+/**
+ * Seed one draft per model from a status payload.
+ *
+ * Run after a model toggle too: a model that was just enabled has no draft yet,
+ * and the context-window section only renders enabled models.
+ */
+function contextDraftsFor(status: MinimaxCodeWebStatus): Record<string, string> {
+  const drafts: Record<string, string> = {}
+  for (const model of status.models) {
+    drafts[model.id] = formatCapacity(status.contextWindowOverrides[model.id] || model.defaultContextWindow)
+  }
+  return drafts
+}
+
+/** Human label per thinking mode, so the card states what the model does. */
+function thinkingLabel(mode: MinimaxCodeModelOption['thinking'], t: Translate): string {
+  if (mode === 'always-on') return t('thinkingAlwaysOn')
+  if (mode === 'forced-effort') return t('thinkingForced')
+  return t('thinkingToggle')
+}
 
 /** `/login/poll` answer, exactly as the frozen route table defines it. */
 interface LoginPollResult {
@@ -103,11 +201,20 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
   // Result of an explicit connection test. The button used to end silently on
   // success, which is indistinguishable from a click that never registered.
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null)
+  // Free-text context-window drafts, keyed by model id, so a half-typed value
+  // does not round-trip to the host on every keystroke.
+  const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
+  const [savingModel, setSavingModel] = useState<string | null>(null)
+  // The pool slice, read beside the status. Absent until the first read answers,
+  // and absent for a host that has no pool installed at all.
+  const [pool, setPool] = useState<MinimaxCodePoolStatus | undefined>(undefined)
 
   const loadStatus = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
     try {
-      setStatus(await get<MinimaxCodeWebStatus>('/status'))
+      const next = await get<MinimaxCodeWebStatus>('/status')
+      setStatus(next)
+      setContextDrafts(contextDraftsFor(next))
     } catch (cause) {
       if (!quiet) setError(messageOf(cause))
     } finally {
@@ -117,8 +224,12 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
 
   useEffect(() => {
     void loadStatus()
+    void loadPool()
     const refreshWhenVisible = (): void => {
-      if (document.visibilityState === 'visible') void loadStatus(true)
+      if (document.visibilityState === 'visible') {
+        void loadStatus(true)
+        void loadPool()
+      }
     }
     document.addEventListener('visibilitychange', refreshWhenVisible)
     const timer = window.setInterval(refreshWhenVisible, 60_000)
@@ -230,6 +341,167 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
     }
   }
 
+  /**
+   * Apply one model-selection patch through `/models`.
+   *
+   * The host owns the selection and answers with the whole fresh status, so the
+   * card never guesses which ids ended up enabled.
+   */
+  /** Re-read the pool slice, which lives beside the status on its own route. */
+  const loadPool = useCallback(async (): Promise<void> => {
+    try {
+      const next = await get<MinimaxCodePoolStatus>('/accounts')
+      setPool(next)
+    } catch {
+      // A host without a pool answers with an error here; the section simply does
+      // not render rather than reporting a failure the user cannot act on.
+      setPool(undefined)
+    }
+  }, [])
+
+  /** Run one account action, then re-read both the pool and the status. */
+  const poolAction = async (action: string, accountId: string): Promise<void> => {
+    try {
+      setBusy(action)
+      setError(null)
+      await post('/accounts', { action, accountId })
+      await loadPool()
+      await loadStatus(true)
+      onModelChange?.()
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const poolSetStrategy = async (strategy: AccountRotationStrategy): Promise<void> => {
+    try {
+      setBusy('strategy')
+      setError(null)
+      await post('/accounts', { action: 'strategy', strategy })
+      await loadPool()
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const applyEnabled = async (enabledModelIds: string[]): Promise<void> => {
+    try {
+      setError(null)
+      const updated = await post<MinimaxCodeWebStatus>('/models', { enabledModelIds })
+      setStatus(updated)
+      // A model that was just checked has no draft yet; the context-window
+      // section only renders enabled models.
+      setContextDrafts(contextDraftsFor(updated))
+      onModelChange?.()
+    } catch (cause) {
+      setError(messageOf(cause))
+    }
+  }
+
+  /**
+   * Flip the line's own switch.
+   *
+   * Optimistic on purpose: the checkbox is the one control whose state the user
+   * is looking straight at, and a failed round trip re-reads the truth below
+   * rather than leaving the box in a state the host never accepted.
+   */
+  const toggleEnabled = async (enabled: boolean): Promise<void> => {
+    setStatus((prev) => (prev === null ? prev : { ...prev, enabled }))
+    try {
+      setError(null)
+      const updated = await post<MinimaxCodeWebStatus>('/settings', { enabled })
+      setStatus(updated)
+      onModelChange?.()
+    } catch (cause) {
+      setError(messageOf(cause))
+      await loadStatus(true)
+    }
+  }
+
+  const toggleModel = (modelId: string, checked: boolean): void => {
+    if (status === null) return
+    const current = status.models.filter((model) => model.enabled).map((model) => model.id)
+    const next = checked ? [...new Set([...current, modelId])] : current.filter((id) => id !== modelId)
+    void applyEnabled(next)
+  }
+
+  const setAllModels = (selectAll: boolean): void => {
+    if (status === null || status.models.length === 0) return
+    void applyEnabled(selectAll ? status.models.map((model) => model.id) : [])
+  }
+
+  const handleUpdateEffort = async (effort: MinimaxCodeReasoningEffort | null): Promise<void> => {
+    try {
+      setError(null)
+      const updated = await post<MinimaxCodeWebStatus>('/settings', { defaultReasoningEffort: effort })
+      setStatus(updated)
+      onModelChange?.()
+    } catch (cause) {
+      setError(messageOf(cause))
+    }
+  }
+
+  const handleSaveContextWindow = async (modelId: string): Promise<void> => {
+    const raw = contextDrafts[modelId] ?? ''
+    const parsed = parsePositiveCapacity(raw)
+    if (parsed === null) {
+      setError(t('invalidCapacity').replace('{value}', raw))
+      return
+    }
+    try {
+      setSavingModel(modelId)
+      setError(null)
+      const updated = await post<MinimaxCodeWebStatus>('/settings', { contextWindowOverrides: { [modelId]: parsed } })
+      setStatus(updated)
+      setContextDrafts((prev) => ({ ...prev, [modelId]: formatCapacity(parsed) }))
+      onModelChange?.()
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setSavingModel(null)
+    }
+  }
+
+  const handleResetContextWindow = async (modelId: string): Promise<void> => {
+    try {
+      setSavingModel(modelId)
+      setError(null)
+      // `null` is the wire spelling of "drop this override": the host deletes the
+      // key so the catalog default applies again.
+      const updated = await post<MinimaxCodeWebStatus>('/settings', { contextWindowOverrides: { [modelId]: null } })
+      setStatus(updated)
+      const model = updated.models.find((entry) => entry.id === modelId)
+      if (model !== undefined) {
+        setContextDrafts((prev) => ({ ...prev, [modelId]: formatCapacity(model.defaultContextWindow) }))
+      }
+      onModelChange?.()
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setSavingModel(null)
+    }
+  }
+
+  const handleResetAllContextWindows = async (): Promise<void> => {
+    const ids = Object.keys(status?.contextWindowOverrides ?? {})
+    if (ids.length === 0) return
+    try {
+      setError(null)
+      const updated = await post<MinimaxCodeWebStatus>('/settings', {
+        contextWindowOverrides: Object.fromEntries(ids.map((id) => [id, null])),
+      })
+      setStatus(updated)
+      setContextDrafts(contextDraftsFor(updated))
+      onModelChange?.()
+    } catch (cause) {
+      setError(messageOf(cause))
+    }
+  }
+
   const handleTestConnection = async (): Promise<void> => {
     try {
       setBusy('test')
@@ -266,10 +538,30 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
   const models = status?.models ?? []
   const hours = remainingHours(account?.expiresAtMs)
   const storage = status?.storage
+  // Only enabled models have a context window to override: an unchecked model is
+  // not offered to a conversation, so a capacity for it would be dead settings.
+  const contextModels = status?.models.filter((model) => model.enabled) ?? []
+  const overrideCount = Object.keys(status?.contextWindowOverrides ?? {}).length
 
   return (
     <div className="dsha-page">
       <p className="dsha-muted">{t('pageDesc')}</p>
+
+      {pool !== undefined && (
+        <AccountPoolSection
+          labels={accountPoolLabelsFor(t)}
+          accounts={pool.accounts}
+          rotationStrategy={pool.rotationStrategy}
+          {...(pool.activeAccountId === undefined ? {} : { activeAccountId: pool.activeAccountId })}
+          busy={busy}
+          storageValue={storageLabel(status?.storage, t)}
+          onLogin={() => void handleLogin()}
+          onSetPrimary={(accountId) => void poolAction('set-primary', accountId)}
+          onDelete={(accountId) => void poolAction('delete', accountId)}
+          onClearCooldown={(accountId) => void poolAction('clear-cooldown', accountId)}
+          onSetStrategy={(strategy) => void poolSetStrategy(strategy)}
+        />
+      )}
 
       <section className="dsha-group">
         <div className="dsha-grouphead">
@@ -394,6 +686,18 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
         <div className="dsha-grouphead">
           <h3>{t('connection')}</h3>
         </div>
+        {/* The line's own switch, first in the group like every sibling card: it is
+            the control that decides whether any of the models below are offered. */}
+        <div className="dsha-row" style={{ marginBottom: 12 }}>
+          <span className="dsha-label" style={{ fontWeight: 600 }}>{t('enableProvider')}</span>
+          <input
+            type="checkbox"
+            aria-label={t('enableProvider')}
+            checked={status?.enabled !== false}
+            disabled={busy !== null}
+            onChange={(event) => void toggleEnabled(event.currentTarget.checked)}
+          />
+        </div>
         <div className="dsha-row">
           <span className="dsha-label">{t('provider')}</span>
           <span className="dsha-value">{`${MINIMAX_CODE_PROVIDER_NAME} · ${MINIMAX_CODE_PROVIDER_ID}`}</span>
@@ -431,10 +735,124 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
         {models.length === 0
           ? <div className="dsha-empty">{t('modelsUnavailable')}</div>
           : (
-            <div className="dshm-model-list">
-              {models.map((modelId) => <code key={modelId}>{modelId}</code>)}
-            </div>
+            <>
+              <div className="dsha-models" aria-label={t('modelsSection')}>
+                {models.map((model: MinimaxCodeModelOption) => {
+                  // The tooltip carries what the row cannot: the exact wire id,
+                  // how thinking behaves, and the input the model accepts.
+                  const facts = [
+                    model.id,
+                    thinkingLabel(model.thinking, t),
+                    ...(model.description === null || model.description === '' ? [] : [model.description]),
+                  ]
+                  return (
+                    <label key={model.id} title={facts.join(' · ')}>
+                      <input
+                        type="checkbox"
+                        checked={model.enabled}
+                        disabled={busy !== null}
+                        onChange={(event) => toggleModel(model.id, event.currentTarget.checked)}
+                      />
+                      <span>{model.name}</span>
+                    </label>
+                  )
+                })}
+              </div>
+              <div className="dsha-actions">
+                <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(true)}>
+                  {t('selectAll')}
+                </button>
+                <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(false)}>
+                  {t('unselectAll')}
+                </button>
+              </div>
+            </>
           )}
+      </section>
+
+      <section className="dsha-group">
+        <div className="dsha-grouphead">
+          <h3>{t('enhanced')}</h3>
+        </div>
+        <div className="dsha-pref-row">
+          <div>
+            <strong>{t('defaultReasoningEffort')}</strong>
+            <p className="dsha-muted">{t('defaultReasoningEffortHint')}</p>
+          </div>
+          <select
+            className="dsha-select"
+            aria-label={t('defaultReasoningEffort')}
+            value={status?.defaultReasoningEffort ?? ''}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const value = event.currentTarget.value
+              void handleUpdateEffort(value === '' ? null : (value as MinimaxCodeReasoningEffort))
+            }}
+          >
+            <option value="">{t('defaultEffortAuto')}</option>
+            {MINIMAX_CODE_REASONING_EFFORTS.map((effort) => (
+              <option key={effort} value={effort}>{effort}</option>
+            ))}
+          </select>
+        </div>
+      </section>
+
+      <section className="dsha-group">
+        <div className="dsha-grouphead">
+          <h3>{t('contextWindowSection')}</h3>
+        </div>
+        <p className="dsha-muted">{t('contextWindowHint')}</p>
+        <div className="dsha-context-settings">
+          {contextModels.length === 0 && <p className="dsha-muted">{t('contextWindowNoneEnabled')}</p>}
+          {contextModels.map((model: MinimaxCodeModelOption) => (
+            <div key={model.id} className="dsha-context-row">
+              <span title={model.id}>
+                {model.name}
+                {model.defaultContextWindow < model.contextWindow && (
+                  <span className="dsha-model-meta">{formatCapacity(model.contextWindow)}</span>
+                )}
+              </span>
+              <div className="dsha-capacity-control">
+                <input
+                  type="text"
+                  aria-label={model.name + ' ' + t('contextWindowSection')}
+                  value={contextDrafts[model.id] ?? ''}
+                  onChange={(event) => setContextDrafts({ ...contextDrafts, [model.id]: event.currentTarget.value })}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void handleSaveContextWindow(model.id)
+                  }}
+                />
+                <small>{t('tokens')}</small>
+                <button
+                  type="button"
+                  className="dsha-context-save"
+                  disabled={savingModel === model.id}
+                  onClick={() => void handleSaveContextWindow(model.id)}
+                >
+                  {savingModel === model.id ? t('saving') : t('save')}
+                </button>
+                <button
+                  type="button"
+                  className="dsha-context-save dsha-context-reset"
+                  aria-label={model.name + ' ' + t('contextWindowReset')}
+                  disabled={savingModel === model.id || status?.contextWindowOverrides[model.id] === undefined}
+                  onClick={() => void handleResetContextWindow(model.id)}
+                >
+                  {t('contextWindowReset')}
+                </button>
+              </div>
+            </div>
+          ))}
+          <div className="dsha-actions">
+            <button
+              className="dsha-btn"
+              disabled={busy !== null || overrideCount === 0}
+              onClick={() => void handleResetAllContextWindows()}
+            >
+              {t('contextWindowResetAll')}
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="dsha-group">

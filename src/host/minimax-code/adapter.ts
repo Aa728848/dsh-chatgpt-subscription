@@ -36,10 +36,20 @@ import {
   messagesUrl,
   redactToken,
 } from './types.ts'
-import { MINIMAX_CODE_MODELS, minimaxCodeModelDef } from './model-catalog.ts'
+import {
+  MINIMAX_CODE_MODELS,
+  contextWindowForModel,
+  isThinkingDisabledEffort,
+  minimaxCodeModelDef,
+  resolveMinimaxCodeEnabledModelIds,
+} from './model-catalog.ts'
+import type { MinimaxCodeReasoningEffort } from '../../shared/minimax-code-contracts.ts'
 import {
   MinimaxCodeCredentialStore,
+  MinimaxCodeModelSettingsStore,
   type MinimaxCodeCredentials,
+  type MinimaxCodeModelSettings,
+  type MinimaxCodePreferenceStore,
 } from './token-store.ts'
 import {
   MinimaxCodeUnauthorizedError,
@@ -60,6 +70,7 @@ import {
   resolveRequestImages,
   type AttachmentImageReader,
 } from './mapper.ts'
+import type { MinimaxCodeAccountPool } from './account-pool.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
@@ -194,6 +205,17 @@ export interface MinimaxCodeAdapterOptions {
   fetchFn?: typeof fetch
   /** Attachment seam: verified bytes for one durable image. */
   attachments?: AttachmentImageReader
+  /**
+   * The account pool, when this process installed one.
+   *
+   * With a pool the adapter rotates between accounts and lets a 429 cool one
+   * account down instead of taking the whole line offline; without one it keeps
+   * the single-credential behaviour it had before, reading and renewing the one
+   * stored credential. Both postures are supported because the pool is optional
+   * in a composition (a headless host, a test), and a missing pool must not make
+   * the route unusable.
+   */
+  accountPool?: MinimaxCodeAccountPool
 }
 
 /** The reasoning levels one model advertises, from the hardcoded directory. */
@@ -206,10 +228,25 @@ function modalitiesForModel(modelId: string): Array<'text' | 'image' | 'video'> 
   return [...(minimaxCodeModelDef(modelId)?.inputModalities ?? ['text'])]
 }
 
-/** Configured effort when the model lists it, else nothing. */
-function resolveDefaultEffort(efforts: readonly string[], configured: string | null | undefined): string | undefined {
-  if (configured === null || configured === undefined) return undefined
-  return efforts.includes(configured) ? configured : undefined
+/**
+ * The level to advertise as this route's default for one model.
+ *
+ * The order is what makes the setting mean something. The user's global choice
+ * wins when the model lists it; when it does not (the global level is `max` and
+ * the model only offers `default`), the model's own documented default is used
+ * instead — advertising a level the model refuses would make DSH materialize a
+ * request the service then rejects. A line-wide "off" is honoured only where the
+ * model can actually be switched off: `always-on` models have no way to disable
+ * thinking, so the picker must not offer a state the wire cannot express.
+ */
+function resolveDefaultEffort(
+  model: { reasoningEfforts: readonly string[]; defaultReasoningEffort: string; thinking: string },
+  globalEffort: MinimaxCodeReasoningEffort | null | undefined,
+): string | undefined {
+  const efforts = model.reasoningEfforts
+  if (globalEffort === null || globalEffort === undefined) return undefined
+  if (model.thinking !== 'always-on' && isThinkingDisabledEffort(globalEffort)) return 'none'
+  return efforts.includes(globalEffort) ? globalEffort : undefined
 }
 
 export class MinimaxCodeAdapter extends LlmAdapter {
@@ -218,15 +255,94 @@ export class MinimaxCodeAdapter extends LlmAdapter {
   // outright, and this package is imported directly by tooling that runs
   // TypeScript as-is.
   private readonly store: MinimaxCodeCredentialStore
+  /**
+   * The JSON file fallback for the model selection.
+   *
+   * Every sibling line has one, and it is not dead weight even where a settings
+   * service exists: it is what a later run on a harness that dropped the register
+   * seam reads back.
+   */
+  private readonly modelSettings: MinimaxCodeModelSettingsStore
+  /**
+   * Registered model settings, when the harness still offers the register seam.
+   *
+   * Optional because the adapter is also constructed by tooling and tests that
+   * have no settings service; {@link settings} then reads the file directly, so
+   * both shapes answer the same three questions.
+   */
+  private readonly preferences: MinimaxCodePreferenceStore | undefined
   private readonly options: MinimaxCodeAdapterOptions
 
   constructor(
     store: MinimaxCodeCredentialStore = new MinimaxCodeCredentialStore(),
     options: MinimaxCodeAdapterOptions = {},
+    modelSettings: MinimaxCodeModelSettingsStore = new MinimaxCodeModelSettingsStore(),
+    preferences?: MinimaxCodePreferenceStore,
   ) {
     super()
     this.store = store
     this.options = options
+    this.modelSettings = modelSettings
+    this.preferences = preferences
+  }
+
+  /**
+   * The current model selection.
+   *
+   * Synchronous on the register seam (the scope reads from memory) and a single
+   * file read otherwise. The loop over models that consults it runs on every
+   * model-picker query, so this is deliberately not memoized: a cached snapshot
+   * would keep serving a model the user disabled in the card until the process
+   * restarted, which is the complaint this whole settings surface exists to fix.
+   */
+  private settings(): Promise<MinimaxCodeModelSettings> {
+    return this.preferences ? Promise.resolve(this.preferences.status()) : this.modelSettings.read()
+  }
+
+  /**
+   * The credential one request should present, and the pool account behind it.
+   *
+   * With a pool, the pool picks the account (rotation, cooldown, stickiness) and
+   * owns the refresh, so this must not read the single-credential file: that file
+   * mirrors one pooled account, and presenting it would silently pin every request
+   * to whichever account was mirrored last.
+   *
+   * Without a pool the previous behaviour is kept exactly, including the
+   * read-only-first refresh policy.
+   */
+  private async acquireCredential(
+    fetchFn: typeof fetch,
+    signal: AbortSignal | undefined,
+  ): Promise<{ credentials: MinimaxCodeCredentials; accountId: string | undefined }> {
+    const pool = this.options.accountPool
+    if (pool !== undefined) {
+      const effective = await pool.getEffectiveCredential(undefined, fetchFn)
+      return { credentials: effective.credentials, accountId: effective.account.id }
+    }
+    return { credentials: await ensureAccessToken(this.store, { fetchFn, signal }), accountId: undefined }
+  }
+
+  /**
+   * Renew the credential the service just refused.
+   *
+   * With a pool, the account that failed is the one renewed, so the rotation lands
+   * on that account's own record instead of the single-credential file; without a
+   * pool the store's own forced refresh is what ran before the pool existed.
+   */
+  private async renewCredential(
+    accountId: string | undefined,
+    fetchFn: typeof fetch,
+    signal: AbortSignal | undefined,
+    refused: string,
+  ): Promise<MinimaxCodeCredentials> {
+    const pool = this.options.accountPool
+    if (pool !== undefined) {
+      if (accountId === undefined) {
+        throw new Error('the refused credential does not belong to a pooled account ' + redactToken(refused))
+      }
+      return await pool.renewCredential(accountId, fetchFn)
+    }
+    return await ensureAccessToken(this.store, { fetchFn, signal, force: true })
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -242,33 +358,55 @@ export class MinimaxCodeAdapter extends LlmAdapter {
   }
 
   /**
-   * The hardcoded directory, narrowed to the ids the subscription serves.
+   * The hardcoded directory, narrowed to what the user enabled it to serve.
    *
    * Nothing is fetched: the listing route is unavailable on this endpoint, so a
    * "live catalog" would be a request that can only ever fail.
+   *
+   * The line-wide switch is honoured before the selection is even resolved, so
+   * turning the card's switch off exposes no model at all — including the ones
+   * the user left ticked, which is what "off" has to mean if it is to mean
+   * anything.
    */
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
     const prov = provider || PROVIDER_ID
-    return MINIMAX_CODE_MODELS.map((model) => ({
-      provider: prov,
-      id: model.id,
-      name: model.name,
-      inputModalities: [...model.inputModalities],
-    }))
+    const settings = await this.settings()
+    if (settings.enabled === false) return []
+    const enabled = new Set(resolveMinimaxCodeEnabledModelIds(settings.enabledModelIds, true))
+    return MINIMAX_CODE_MODELS
+      .filter((model) => enabled.has(model.id))
+      .map((model) => ({
+        provider: prov,
+        id: model.id,
+        name: model.name,
+        inputModalities: [...model.inputModalities],
+      }))
   }
 
+  /**
+   * One model's resolved metadata, read through the current selection.
+   *
+   * The effective context window is the override when one is saved, and the
+   * output cap is sized against that same number — a window the card shows and a
+   * cap the request path computes from a different one is precisely the drift
+   * this single resolver exists to prevent.
+   */
   async resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     if (signal?.aborted === true) throw new LlmError('MiniMax Code model resolution aborted', 'ABORTED')
+    const settings = await this.settings()
     const entry = minimaxCodeModelDef(modelId)
     const efforts = effortsForModel(modelId)
-    const defaultEffort = resolveDefaultEffort(efforts, entry?.defaultReasoningEffort)
+    const contextWindow = contextWindowForModel(modelId, settings.contextWindowOverrides)
+    const defaultEffort = entry === undefined
+      ? undefined
+      : resolveDefaultEffort(entry, settings.defaultReasoningEffort)
     return {
       provider,
       id: modelId,
       name: entry?.name ?? modelId,
       inputModalities: modalitiesForModel(modelId),
-      context: { contextWindow: entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW },
-      defaultMaxTokens: maxOutputTokensFor(modelId),
+      context: { contextWindow },
+      defaultMaxTokens: maxOutputTokensFor(modelId, contextWindow),
       ...(efforts.length === 0
         ? {}
         : {
@@ -287,9 +425,26 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     }
   }
 
-  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(options, watchdogSignal),
+  /**
+   * One request, with the line's default reasoning effort materialized.
+   *
+   * A caller that states an effort is passed through untouched: DSH materializes
+   * {@link resolveModel}'s default into the options for a picker-driven turn, so
+   * a value arriving here is a deliberate choice and must not be replaced. Only
+   * an unstated one is filled in, and only when the user actually configured a
+   * global level — the shipped default is "say nothing", because the model has
+   * its own and restating it in every body is a chance to disagree with it.
+   */
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const settings = await this.settings()
+    const configured = settings.defaultReasoningEffort
+    const effort = options.reasoningEffort ?? (configured === null ? undefined : configured)
+    const effectiveOptions: GenerateOptions = effort === undefined || effort === null
+      ? options
+      : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
+
+    yield* wrapStreamWithWatchdog(
+      (watchdogSignal) => this.requestStream(effectiveOptions, watchdogSignal),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -299,8 +454,13 @@ export class MinimaxCodeAdapter extends LlmAdapter {
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
+    const settings = await this.settings()
     const entry = minimaxCodeModelDef(options.model)
-    const contextWindow = entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+    // The same reader the card and resolveModel use, so an overridden window is
+    // the one the request is actually sized against. Reading the catalog here
+    // would make the override a display-only setting: the user would see a larger
+    // window on the card while every request kept being clamped to the old one.
+    const contextWindow = contextWindowForModel(options.model, settings.contextWindowOverrides)
 
     // DSH delivers pasted images as durable references because this route declares
     // image input; the bytes are resolved once here and reused for the one request
@@ -323,8 +483,14 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     const body = assertRequestBodyFits(built)
 
     let credentials: MinimaxCodeCredentials
+    // The pool account this request is being served by, when there is a pool. It
+    // is what makes the 401 recovery below renew the account that actually failed
+    // rather than whatever the single-credential file happens to hold.
+    let accountId: string | undefined
     try {
-      credentials = await ensureAccessToken(this.store, { fetchFn, signal })
+      const selection = await this.acquireCredential(fetchFn, signal)
+      credentials = selection.credentials
+      accountId = selection.accountId
     } catch (error) {
       if (error instanceof MinimaxCodeUnauthorizedError) {
         throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
@@ -369,7 +535,7 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       await response.text().catch(() => '')
       const refused = credentials.accessToken
       try {
-        credentials = await ensureAccessToken(this.store, { fetchFn, signal, force: true })
+        credentials = await this.renewCredential(accountId, fetchFn, signal, refused)
       } catch (error) {
         // The refresh itself failed: that verdict is the one to report, because it
         // names why the credential can no longer be renewed.

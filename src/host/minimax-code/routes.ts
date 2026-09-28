@@ -17,6 +17,12 @@
  * Mounting: the routes are registered under BOTH the contract prefix and the
  * sibling-line convention, because the two disagree in this repository and the
  * client half must not be able to miss them for that reason alone.
+ *
+ * \`/models\` and \`/settings\` are the model-settings half every sibling line has and
+ * this one shipped without. They are two names for one route because the sibling
+ * cards disagree about which to call: kimi-code and claude call it \`/models\`,
+ * workbuddy and command-code call it \`/settings\`. Serving both costs one string
+ * comparison and removes a client-side special case.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -25,12 +31,27 @@ import { isSameOriginMutation } from '../common/same-origin.ts'
 import {
   MINIMAX_CODE_PROVIDER_ID,
   MINIMAX_CODE_ROUTE_PREFIX,
+  type MinimaxCodeReasoningEffort,
   type MinimaxCodeRegion,
   type MinimaxCodeWebLogin,
   type MinimaxCodeWebStatus,
 } from '../../shared/minimax-code-contracts.ts'
-import { PROVIDER_ID, isRegion } from './types.ts'
-import { MinimaxCodeCredentialStore } from './token-store.ts'
+import { PROVIDER_ID, isMinimaxCodeReasoningEffort, isRegion } from './types.ts'
+import { MIN_CONTEXT_WINDOW, buildMinimaxCodeModelOptions } from './model-catalog.ts'
+import {
+  createMinimaxCodeAccountsHandler,
+  minimaxCodePoolStatus,
+  type MinimaxCodeAccountPool,
+} from './account-pool.ts'
+import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
+import {
+  MinimaxCodeCredentialStore,
+  MinimaxCodeModelSettingsStore,
+  type MinimaxCodeCredentials,
+  type MinimaxCodeModelSettings,
+  type MinimaxCodePreferenceStore,
+  type MinimaxCodeSettingsPatch,
+} from './token-store.ts'
 import {
   accountFromCredentials,
   beginWebLogin,
@@ -42,7 +63,7 @@ import {
   MinimaxCodeAccessDeniedError,
   MinimaxCodeUnauthorizedError,
 } from './oauth.ts'
-import { listModelIds, testConnection } from './client.ts'
+import { testConnection } from './client.ts'
 
 /** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
 const MAX_BODY_BYTES = 64 * 1024
@@ -97,12 +118,66 @@ export function subPathOf(requestUrl: string): string {
   return pathname.replace(/^\/+/, '')
 }
 
+/**
+ * The stored selection, however this deployment persists it.
+ *
+ * The routes accept either shape so a composition that still has the register
+ * settings seam and one that only has the file both work: the caller passes
+ * whichever it wired, and nothing in this file needs to know which it got. The
+ * patch type is the store's own, deliberately, so a field added to the settings
+ * document cannot become one this route accepts but the stores silently drop.
+ */
+export interface MinimaxCodeSettingsSource {
+  /** Current selection: a value on the register seam, a read on the file store. */
+  status(): Promise<MinimaxCodeModelSettings> | MinimaxCodeModelSettings
+  update(patch: MinimaxCodeSettingsPatch): Promise<MinimaxCodeModelSettings>
+}
+
+/**
+ * Default source: the JSON file beside the credentials.
+ *
+ * Wrapped rather than used directly because the file store reads
+ * asynchronously while a registered scope reads from memory; this collapses the
+ * two into the one promise-shaped call the routes make. */
+function fileSettingsSource(store: MinimaxCodeModelSettingsStore): MinimaxCodeSettingsSource {
+  return {
+    status: () => store.read(),
+    update: (patch) => store.updateSettings(patch),
+  }
+}
+
+/** The registered store, if this deployment has one. */
+function registeredSettingsSource(preferences: MinimaxCodePreferenceStore): MinimaxCodeSettingsSource {
+  return {
+    status: () => preferences.status(),
+    update: (patch) => preferences.update(patch),
+  }
+}
+
 export interface MinimaxCodeStatusOptions {
   fetchFn?: typeof fetch
   /** Whether this plugin currently owns the provider route; re-read on every status. */
   serving?: boolean | (() => boolean)
   /** Diagnostic when another plugin owns the provider route; re-read on every status. */
   conflict?: string | null | (() => string | null)
+  /**
+   * Where the model selection lives.
+   *
+   * Omitted, the routes read the default settings file, which is what a caller
+   * that only wants the connection half of the card gets. The plugin entry
+   * supplies the same store the adapter was built with, so the card and the
+   * request path can never read two different selections.
+   */
+  settings?: MinimaxCodeSettingsSource
+  /**
+   * The account pool, when this process installed one.
+   *
+   * Omitting it is a supported posture: the line then behaves as the
+   * single-credential route it was before the pool existed, and the status
+   * reports `poolInstalled: false` so the card can say so rather than render an
+   * empty account list that looks like a bug.
+   */
+  accountPool?: MinimaxCodeAccountPool
 }
 
 /** Read one status option, which the caller may supply as a live predicate. */
@@ -114,7 +189,10 @@ function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
 export async function getMinimaxCodeWebStatus(
   store: MinimaxCodeCredentialStore,
   options: MinimaxCodeStatusOptions = {},
+  settingsSource?: MinimaxCodeSettingsSource,
 ): Promise<MinimaxCodeWebStatus> {
+  const settings = await (settingsSource ?? options.settings
+    ?? fileSettingsSource(new MinimaxCodeModelSettingsStore())).status()
   // One pass over the credential files, not three: this route is polled by the
   // settings card, and the targeted accessors would each re-read and re-parse the
   // native document (one file read plus one JSON parse per probed region).
@@ -125,9 +203,19 @@ export async function getMinimaxCodeWebStatus(
   // owns the id, and why not when another adapter family does.
   const serving = readOption(options.serving, true)
   const conflict = readOption(options.conflict, null)
+  // The card renders the whole shipped catalog and greys out what is disabled,
+  // so `models` carries every entry with its own `enabled` flag rather than the
+  // enabled subset: a filtered list could not show a model to re-enable it.
+  const enabled = settings.enabled !== false
+  // The pool slice is read through its own helper so a missing or unreadable pool
+  // degrades to an empty list instead of failing the whole card: the connection
+  // section is still worth rendering.
+  const pool = await minimaxCodePoolStatus(options.accountPool)
   return {
+    ...pool,
     serving,
     conflict,
+    enabled,
     authenticated: credentials !== null,
     providerId: PROVIDER_ID,
     region,
@@ -136,9 +224,16 @@ export async function getMinimaxCodeWebStatus(
     storage: { kind: source, path },
     ...(credentials === null ? {} : { account: accountFromCredentials(credentials) }),
     ...(latestLogin === null ? {} : { login: latestLogin }),
-    // The hardcoded directory. Nothing here calls /v1/models, which is unavailable
-    // on this endpoint (503 direct_route_not_configured).
-    models: listModelIds(),
+    // The hardcoded directory, rendered through the current selection. Nothing
+    // here calls /v1/models, which is unavailable on this endpoint (503
+    // direct_route_not_configured).
+    models: buildMinimaxCodeModelOptions(
+      settings.enabledModelIds,
+      settings.contextWindowOverrides,
+      enabled,
+    ),
+    contextWindowOverrides: settings.contextWindowOverrides,
+    defaultReasoningEffort: settings.defaultReasoningEffort,
     // True only for a credential in force that this plugin itself wrote, and may
     // therefore revoke and delete. A native `~/.minimax/auth` sign-in is reused
     // and renewed in place, but the desktop app owns it: the card must offer no
@@ -155,17 +250,80 @@ export function registerMinimaxCodeRoutes(
   ctx: Context,
   store: MinimaxCodeCredentialStore = new MinimaxCodeCredentialStore(),
   options: MinimaxCodeStatusOptions = {},
+  modelSettings: MinimaxCodeModelSettingsStore = new MinimaxCodeModelSettingsStore(),
+  preferences?: MinimaxCodePreferenceStore,
 ): () => void {
   const fetchFn = options.fetchFn ?? fetch
+  // The registered scope when the harness still has one, the JSON file beside the
+  // credentials otherwise. Both are handed to getMinimaxCodeWebStatus explicitly
+  // so the status the card renders and the store a POST writes are the same one.
+  const settings: MinimaxCodeSettingsSource = options.settings
+    ?? (preferences === undefined ? fileSettingsSource(modelSettings) : registeredSettingsSource(preferences))
+  // The account half, as one handler the parent dispatches to. It shares this
+  // file's status reader, so a POST answers with the same payload a GET would,
+  // and the card re-renders in one round trip.
+  const accountsHandler = createMinimaxCodeAccountsHandler(options.accountPool, {
+    readStatus: () => getMinimaxCodeWebStatus(store, options, settings),
+  })
 
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const path = subPathOf(request.url ?? '/')
     const method = request.method ?? 'GET'
 
     try {
+      if (path === 'accounts') return accountsHandler(request, response)
+
       if (path === '' || path === 'status') {
         if (method !== 'GET') return sendMethodNotAllowed(response)
-        const value = await getMinimaxCodeWebStatus(store, options)
+        const value = await getMinimaxCodeWebStatus(store, options, settings)
+        return sendJson(response, 200, { ok: true, value })
+      }
+
+      if (path === 'models' || path === 'settings') {
+        if (method === 'GET') {
+          const value = await getMinimaxCodeWebStatus(store, options, settings)
+          return sendJson(response, 200, { ok: true, value })
+        }
+        if (method !== 'POST') return sendMethodNotAllowed(response)
+        if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
+        const body = await readRequestJson(request)
+        const patch: MinimaxCodeSettingsPatch = {}
+        if (typeof body.enabled === 'boolean') {
+          patch.enabled = body.enabled
+        }
+        if (Array.isArray(body.enabledModelIds)) {
+          patch.enabledModelIds = body.enabledModelIds.filter((id): id is string => typeof id === 'string')
+        }
+        if (typeof body.contextWindowOverrides === 'object' && body.contextWindowOverrides !== null) {
+          const overrides: ContextWindowOverridePatch = {}
+          for (const [key, raw] of Object.entries(body.contextWindowOverrides as Record<string, unknown>)) {
+            // `null` is the card's "restore the catalog default" and has to
+            // survive normalization so the store can delete exactly that key. A
+            // bad number is dropped rather than corrected: the route cannot know
+            // which window the user meant, and a value under MIN_CONTEXT_WINDOW
+            // is refused by the merge anyway.
+            if (raw === null) overrides[key] = null
+            else if (typeof raw === 'number' && Number.isFinite(raw) && raw >= MIN_CONTEXT_WINDOW) {
+              overrides[key] = Math.floor(raw)
+            }
+          }
+          patch.contextWindowOverrides = overrides
+        }
+        if (body.defaultReasoningEffort !== undefined) {
+          const effort = body.defaultReasoningEffort
+          if (effort === null || isMinimaxCodeReasoningEffort(effort)) {
+            patch.defaultReasoningEffort = effort
+          }
+        }
+        await settings.update(patch)
+        // DSH rebuilds the model picker on this event. Only the two fields that
+        // change which models exist are worth waking it for; a window override or
+        // an effort change alters no picker entry, and emitting for them would
+        // make every keystroke in the card's window field rebuild the list.
+        if (patch.enabled !== undefined || patch.enabledModelIds !== undefined) {
+          ctx.emit?.('llm/adapters-updated')
+        }
+        const value = await getMinimaxCodeWebStatus(store, options, settings)
         return sendJson(response, 200, { ok: true, value })
       }
 
@@ -190,7 +348,17 @@ export function registerMinimaxCodeRoutes(
         if (loginId === '') {
           return sendJson(response, 400, { ok: false, error: 'loginId is required.' })
         }
-        const outcome = await pollWebLogin(store, loginId, { fetchFn })
+        // A sign-in started from this card is a new account, so it joins the pool
+        // as its own row. Without this the pool would keep serving the accounts it
+        // already had and the new session would exist only as the mirror file —
+        // which is exactly the "multi-account sign-in is not wired" gap.
+        const accountPool = options.accountPool
+        const outcome = await pollWebLogin(store, loginId, {
+          fetchFn,
+          ...(accountPool === undefined
+            ? {}
+            : { onSave: async (credentials: MinimaxCodeCredentials) => { await accountPool.addAccount(credentials) } }),
+        })
         if (outcome.status !== 'pending') latestLogin = null
         return sendJson(response, 200, {
           ok: true,
