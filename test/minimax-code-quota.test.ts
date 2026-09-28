@@ -162,23 +162,23 @@ describe('MiniMax Token Plan quota fetch', () => {
     const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       tried.push(url)
-      // The first candidate for cn is agent.minimax.cn; refuse it so the fallback
+      // The first candidate for cn is api.minimax.cn; refuse it so the fallback
       // has to be used.
-      return url.includes('agent.minimax.cn')
+      return url.includes('api.minimax.cn')
         ? new Response('nope', { status: 404 })
         : Response.json(payload([row()]))
     }) as unknown as typeof fetch
 
     const quota = await fetchTokenPlanQuota(credential('cn'), { fetchFn })
     expect(quota).not.toBeNull()
-    expect(tried[0]).toContain('agent.minimax.cn')
-    expect(tried[1]).toContain('agent.minimaxi.com')
+    expect(tried[0]).toContain('api.minimax.cn')
+    expect(tried[1]).toContain('api.minimaxi.com')
 
     // The winner is probed first from now on: a forced read must not walk the
     // candidates again.
     tried.length = 0
     await fetchTokenPlanQuota(credential('cn'), { fetchFn, force: true })
-    expect(tried).toEqual([tokenPlanRemainsUrl('https://agent.minimaxi.com')])
+    expect(tried).toEqual([tokenPlanRemainsUrl('https://api.minimaxi.com')])
   })
 
   it('does NOT send the official client attribution headers unless opted in', async () => {
@@ -219,9 +219,25 @@ describe('MiniMax Token Plan quota fetch', () => {
       return Response.json(payload([row()]))
     }) as unknown as typeof fetch
     await fetchTokenPlanQuota(credential('global'), { fetchFn })
-    expect(seen[0]!.url).toBe('https://agent.minimax.io/v1/api/openplatform/coding_plan/remains')
+    expect(seen[0]!.url).toBe('https://api.minimax.io/v1/api/openplatform/coding_plan/remains')
     expect(seen[0]!.headers.authorization).toBe('Bearer at-quota')
     expect(seen[0]!.headers.accept).toBe('application/json')
+  })
+
+  // The usage path is served by the API hosts, not by the agent hosts this line
+  // posts Messages to. Measured against a live cn credential: api.minimax.cn
+  // answers this path with the real model_remains document, while both agent
+  // origins answer 404 for it. Naming the host family in a test is what keeps the
+  // next edit from reintroducing the guess that produced this line.
+  it('asks the API hosts for usage, never the agent hosts', () => {
+    for (const region of ['cn', 'global'] as const) {
+      for (const host of quotaHostCandidates(region)) {
+        expect(new URL(host).host).toMatch(/^api\./)
+      }
+    }
+    expect(quotaHostCandidates('cn')[0]).toBe('https://api.minimax.cn')
+    expect(tokenPlanRemainsUrl('https://api.minimax.cn'))
+      .toBe('https://api.minimax.cn/v1/api/openplatform/coding_plan/remains')
   })
 
   it('caches a success and re-reads only once the TTL has passed', async () => {

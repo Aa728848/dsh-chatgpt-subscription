@@ -71,10 +71,12 @@ export const REGION_HOSTS: Record<MinimaxCodeRegion, { account: string; agent: s
  *   platform API key (or the platform OAuth the `mmx` CLI holds), and it answers
  *   an `mcode-public` sign-in with HTTP 200 + `base_resp.status_code: 1004`
  *   ("Please carry the API secret key") under every auth shape.
- * - `/v1/api/openplatform/coding_plan/remains` on the agent/matrix hosts is what
- *   the OFFICIAL MiniMax Code client uses for exactly this credential
+ * - `/v1/api/openplatform/coding_plan/remains` is what the OFFICIAL MiniMax Code
+ *   client uses for exactly this credential
  *   (`packages/tui/src/account/matrix-account-client.ts`, which reads it as the
- *   Token Plan quota).
+ *   Token Plan quota). It is served by the API hosts — see
+ *   {@link QUOTA_HOST_CANDIDATES} for the measured origin — not by the agent hosts
+ *   this line posts Messages to.
  *
  * So the path below is the second one. See the note on
  * {@link QUOTA_CLIENT_ATTRIBUTION} for the one caveat that comes with it.
@@ -84,16 +86,30 @@ export const TOKEN_PLAN_REMAINS_PATH = '/v1/api/openplatform/coding_plan/remains
 /**
  * Candidate hosts for the usage endpoint, most likely first.
  *
- * The official client's own matrix origins are `agent.minimaxi.com` for China and
- * `agent.minimax.io` for the rest; this line already talks to `agent.minimax.cn`
- * for Messages and that host is measured for THIS subscription, so it is tried
- * first and the official one is the fallback. The winner is remembered, which
- * keeps the remaining uncertainty in one place instead of spreading a guess
- * through every request.
+ * MEASURED, not inferred. The path below (`/v1/api/openplatform/coding_plan/remains`)
+ * lives on the API hosts, and this list previously carried the AGENT hosts because
+ * the Messages endpoint they serve is the one this line already talks to. That was
+ * the wrong surface for usage: an earlier revision measured only what a 404 "looked
+ * like" and not where the path actually serves, so both `agent.*` origins answered
+ * `404 page not found` for it — and, on the two of them that answer the request at
+ * all, an HTML chat-shell page rather than JSON. Either way no usable document was
+ * produced, every candidate was exhausted, and the card degraded to "the usage
+ * endpoint did not answer".
+ *
+ * The correct hosts, probed directly with a live `mcode-public` cn credential:
+ * `api.minimax.cn` answers HTTP 200 with `base_resp.status_code: 0` and the full
+ * `model_remains` document. The global pairing mirrors the region split already
+ * used above (cn vs io); `api.minimax.io` is NOT one of them — measured, it
+ * answers this path with HTTP 401 even for a credential its cn sibling accepts, so
+ * listing it would spend a probe to learn nothing. `api.minimaxi.com` is kept as
+ * the measured fallback because it serves the same document.
+ *
+ * The winner is still remembered, which keeps any remaining uncertainty in one
+ * place instead of spreading a guess through every request.
  */
 export const QUOTA_HOST_CANDIDATES: Record<MinimaxCodeRegion, readonly string[]> = {
-  cn: ['https://agent.minimax.cn', 'https://agent.minimaxi.com'],
-  global: ['https://agent.minimax.io'],
+  cn: ['https://api.minimax.cn', 'https://api.minimaxi.com'],
+  global: ['https://api.minimax.io'],
 }
 
 /**
