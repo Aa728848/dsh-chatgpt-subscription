@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **找到并接上 mcode 自己的用量端点（用户要求「在我们这查看」）**。上一轮打的 `/v1/token_plan/remains` 是**平台**端点（只认平台 API 密钥），所以必然被拒。真正的端点在**官方客户端源码**里：`packages/tui/src/account/matrix-account-client.ts` 用 `GET https://agent.minimaxi.com/v1/api/openplatform/coding_plan/remains`（国际 `agent.minimax.io`）——**路径与平台端点完全不同**。现已改为该路径，主机按「本线路自己的 `agent.minimax.cn` 优先、官方主机兜底」探测并记住命中者。
+  - ⚠️ **该请求带四个「官方客户端标识头」**：`yy` / `x-timestamp` / `x-signature` / `User-Agent: MiniMaxCode`。官方源码的注释自己写明这些字面量是「把请求标记为来自 MiniMax 第一方客户端」（同时注明它们并非凭据、也非安全边界，鉴权仍是 Bearer 令牌）。本插件 `types.ts` 已明确决定**不伪造官方客户端身份**，因此**默认一律不发**这些头——宁可拿到一个拒绝让卡片如实说明，也不冒充官方应用；确实要数字的用户可设 `DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION=1` 显式选择该取舍。新增测试锁定该默认：未开启时四个头一个都不出现、`user-agent` 不是 `MiniMaxCode`；开启后恰好出现该组。
+  - **诚实失败的三条保留**：`base_resp` 非 0 视为凭据被拒、只试一台就停、记住 30 分钟；其它失败按 `unreachable` 区分、记住 10 分钟；`/status` 只读缓存、绝不在轮询里发网络请求。
+  - **验证**：`npm run typecheck` 0 错误、`npm run build` 成功、测试 **1685 passed / 7 skipped**（配额测试 20 条），仍只剩 6 条既有的 Windows Antigravity 回调端口失败。⚠️ **端到端仍未验证**：探测当下本机凭据文件已被登出清掉，所以「默认不带标识头能否通过」还需用户重新登录后实测。
+
 - **实测确认：MiniMax Code 的登录态读不到用量，卡片改为说明真实原因（用户在国内、配额条未出现）**。上一轮接上的 `/v1/token_plan/remains` 在生产凭据下**读不出来**，本轮用本机真实凭据（国内区）把它查清了：
   - **端点确实存在**：`api.minimax.cn` / `api.minimaxi.com` / `api.minimax.io` 三个主机都返回 JSON，**不是 404**。
   - **但它只接受平台 API 密钥**：本线路持有的 `mcode-public`（MiniMax Code）登录态在**四种认证写法**下全部被拒——`Authorization: Bearer`、原始令牌、`x-api-key`、以及两者同时携带——而且**是 HTTP 200 + `base_resp.status_code: 1004`**（`"login fail: Please carry the API secret key in the 'Authorization' field"`）。**关键教训**：只看 `response.ok` 会把这次拒绝当成成功。

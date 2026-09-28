@@ -63,30 +63,60 @@ export const REGION_HOSTS: Record<MinimaxCodeRegion, { account: string; agent: s
 }
 
 /**
- * Path of the Token Plan usage endpoint.
+ * Path of the Token Plan usage endpoint for THIS kind of credential.
  *
- * Found in the official MiniMax CLI rather than in the API docs: `mmx quota show`
- * ("Display Token Plan usage and remaining quotas") reads
- * `GET {baseUrl}/v1/token_plan/remains` with an OAuth credential. MiniMax's own
- * documentation only ever points at the console usage bar, which is presumably
- * why this line concluded no endpoint existed.
+ * TWO DIFFERENT ENDPOINTS EXIST, and the first one tried here was the wrong one:
+ *
+ * - `/v1/token_plan/remains` on the API hosts is the PLATFORM route. It takes a
+ *   platform API key (or the platform OAuth the `mmx` CLI holds), and it answers
+ *   an `mcode-public` sign-in with HTTP 200 + `base_resp.status_code: 1004`
+ *   ("Please carry the API secret key") under every auth shape.
+ * - `/v1/api/openplatform/coding_plan/remains` on the agent/matrix hosts is what
+ *   the OFFICIAL MiniMax Code client uses for exactly this credential
+ *   (`packages/tui/src/account/matrix-account-client.ts`, which reads it as the
+ *   Token Plan quota).
+ *
+ * So the path below is the second one. See the note on
+ * {@link QUOTA_CLIENT_ATTRIBUTION} for the one caveat that comes with it.
  */
-export const TOKEN_PLAN_REMAINS_PATH = '/v1/token_plan/remains'
+export const TOKEN_PLAN_REMAINS_PATH = '/v1/api/openplatform/coding_plan/remains'
 
 /**
  * Candidate hosts for the usage endpoint, most likely first.
  *
- * The two sources disagree about the China TLD and neither has been measured
- * against THIS subscription: the credential is issued by the `.minimax.cn`
- * account host this line already uses, while the official CLI's REGIONS table
- * puts China on `https://api.minimaxi.com`. The global host is agreed
- * (`api.minimax.io` by both). So the candidates are tried in order and the first
- * that answers is remembered, which keeps the uncertainty in one place rather
- * than hardcoding a guess into every request.
+ * The official client's own matrix origins are `agent.minimaxi.com` for China and
+ * `agent.minimax.io` for the rest; this line already talks to `agent.minimax.cn`
+ * for Messages and that host is measured for THIS subscription, so it is tried
+ * first and the official one is the fallback. The winner is remembered, which
+ * keeps the remaining uncertainty in one place instead of spreading a guess
+ * through every request.
  */
 export const QUOTA_HOST_CANDIDATES: Record<MinimaxCodeRegion, readonly string[]> = {
-  cn: ['https://api.minimax.cn', 'https://api.minimaxi.com'],
-  global: ['https://api.minimax.io'],
+  cn: ['https://agent.minimax.cn', 'https://agent.minimaxi.com'],
+  global: ['https://agent.minimax.io'],
+}
+
+/**
+ * Whether this line may send the official client's attribution headers.
+ *
+ * The official client sends `yy` / `x-timestamp` / `x-signature` on this request.
+ * Its own comment calls them what they are: literals that "tag a request as coming
+ * from a first-party MiniMax client". MiniMax's code also says they are "not
+ * credentials or a security boundary" (authorization is the bearer token), but
+ * tagging a request as first-party is precisely what this package's
+ * `types.ts` product-token note refuses to do — and the same note records that
+ * claiming to be the official app is grounds for suspension.
+ *
+ * So the default is NO: the read goes out honestly, and if the service insists on
+ * the tag the result is a refusal the card reports rather than a forged identity.
+ * `DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION=1` opts in for a user who has read that
+ * trade and wants the numbers anyway.
+ */
+export const QUOTA_CLIENT_ATTRIBUTION = false
+
+/** Whether the caller opted in to sending the first-party attribution headers. */
+export function quotaAttributionEnabled(): boolean {
+  return (process.env.DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION || '').trim() === '1'
 }
 
 /**

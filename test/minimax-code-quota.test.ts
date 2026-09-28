@@ -162,23 +162,54 @@ describe('MiniMax Token Plan quota fetch', () => {
     const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       tried.push(url)
-      // The first candidate for cn is api.minimax.cn; refuse it so the fallback
+      // The first candidate for cn is agent.minimax.cn; refuse it so the fallback
       // has to be used.
-      return url.includes('api.minimax.cn')
+      return url.includes('agent.minimax.cn')
         ? new Response('nope', { status: 404 })
         : Response.json(payload([row()]))
     }) as unknown as typeof fetch
 
     const quota = await fetchTokenPlanQuota(credential('cn'), { fetchFn })
     expect(quota).not.toBeNull()
-    expect(tried[0]).toContain('api.minimax.cn')
-    expect(tried[1]).toContain('api.minimaxi.com')
+    expect(tried[0]).toContain('agent.minimax.cn')
+    expect(tried[1]).toContain('agent.minimaxi.com')
 
     // The winner is probed first from now on: a forced read must not walk the
     // candidates again.
     tried.length = 0
     await fetchTokenPlanQuota(credential('cn'), { fetchFn, force: true })
-    expect(tried).toEqual([tokenPlanRemainsUrl('https://api.minimaxi.com')])
+    expect(tried).toEqual([tokenPlanRemainsUrl('https://agent.minimaxi.com')])
+  })
+
+  it('does NOT send the official client attribution headers unless opted in', async () => {
+    // These literals tag a request as first-party MiniMax. The package refuses to
+    // forge that by default (see the product-token note in types.ts), so the
+    // default request must carry none of them.
+    const seen: Array<Record<string, string>> = []
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push((init?.headers ?? {}) as Record<string, string>)
+      return Response.json(payload([row()]))
+    }) as unknown as typeof fetch
+
+    await fetchTokenPlanQuota(credential('global'), { fetchFn, force: true })
+    expect(seen[0]!.yy).toBeUndefined()
+    expect(seen[0]!['x-signature']).toBeUndefined()
+    expect(seen[0]!['x-timestamp']).toBeUndefined()
+    expect(seen[0]!['user-agent']).not.toBe('MiniMaxCode')
+
+    // Opting in sends exactly that set - and nothing else changes.
+    process.env.DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION = '1'
+    try {
+      await fetchTokenPlanQuota(credential('global'), { fetchFn, force: true })
+      const opted = seen[1]!
+      expect(opted['user-agent']).toBe('MiniMaxCode')
+      expect(opted.yy).toMatch(/^[0-9a-f]{32}$/)
+      expect(opted['x-timestamp']).toMatch(/^\d+$/)
+      expect(opted['x-signature']).toMatch(/^[0-9a-f]{32}$/)
+      expect(opted.authorization).toBe('Bearer at-quota')
+    } finally {
+      delete process.env.DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION
+    }
   })
 
   it('sends the bearer token and asks for JSON, not the streaming accept', async () => {
@@ -188,7 +219,7 @@ describe('MiniMax Token Plan quota fetch', () => {
       return Response.json(payload([row()]))
     }) as unknown as typeof fetch
     await fetchTokenPlanQuota(credential('global'), { fetchFn })
-    expect(seen[0]!.url).toBe('https://api.minimax.io/v1/token_plan/remains')
+    expect(seen[0]!.url).toBe('https://agent.minimax.io/v1/api/openplatform/coding_plan/remains')
     expect(seen[0]!.headers.authorization).toBe('Bearer at-quota')
     expect(seen[0]!.headers.accept).toBe('application/json')
   })
@@ -204,7 +235,7 @@ describe('MiniMax Token Plan quota fetch', () => {
   })
 
   it('recognises the platform refusing this line credential type', async () => {
-    // Measured against the live endpoint: /v1/token_plan/remains answers HTTP 200
+    // Measured against the live PLATFORM endpoint (/v1/token_plan/remains): HTTP 200
     // and puts the verdict in base_resp. Every candidate host says the same thing
     // for an mcode token, so treating ok as success would walk the whole list for
     // an answer that cannot differ, and would leave the card unable to say why.

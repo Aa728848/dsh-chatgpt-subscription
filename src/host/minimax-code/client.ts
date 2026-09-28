@@ -16,14 +16,17 @@
  * directory is hardcoded in ./model-catalog.ts instead.
  */
 
+import { createHash } from 'node:crypto'
 import {
   ANTHROPIC_VERSION,
   DEFAULT_DEVICE_INTERVAL_SECONDS,
   MESSAGES_PATH,
   agentBaseUrl,
   messagesUrl,
+  quotaAttributionEnabled,
   quotaHostCandidates,
   tokenPlanRemainsUrl,
+  TOKEN_PLAN_REMAINS_PATH,
   MINIMAX_CODE_BUILD_ENV,
   USER_AGENT,
   redactToken,
@@ -274,13 +277,42 @@ export async function createMessage(
  * the Messages route streams, and this route answers one JSON document. The
  * credential is still the same bearer token.
  */
-export function quotaRequestHeaders(accessToken: string): Record<string, string> {
-  return {
+export function quotaRequestHeaders(
+  accessToken: string,
+  pathWithSearch: string,
+  requestTime: number = Date.now(),
+): Record<string, string> {
+  const headers: Record<string, string> = {
     authorization: 'Bearer ' + accessToken,
     accept: 'application/json',
     'user-agent': USER_AGENT,
   }
+  // OFF by default. See {@link QUOTA_CLIENT_ATTRIBUTION}: these literals tag the
+  // request as coming from a first-party MiniMax client, which is exactly what
+  // this package's product-token note refuses to do. A user who has read that
+  // trade may opt in to get the numbers.
+  if (quotaAttributionEnabled()) {
+    const second = Math.floor(requestTime / 1_000)
+    const md5 = (value: string): string => createHash('md5').update(value).digest('hex')
+    headers['content-type'] = 'application/json'
+    headers['user-agent'] = 'MiniMaxCode'
+    headers.yy = md5(encodeURIComponent(pathWithSearch) + '_{}' + md5(String(requestTime)) + 'ooui')
+    headers['x-timestamp'] = String(second)
+    headers['x-signature'] = md5(String(second) + FIRST_PARTY_ATTRIBUTION_SECRET)
+  }
+  return headers
 }
+
+/**
+ * The literal the official client folds into `x-signature`.
+ *
+ * Kept as its own constant, and used ONLY when
+ * {@link quotaAttributionEnabled} is true, so that the impersonation surface is a
+ * single greppable line rather than something woven through the request path.
+ * Treat it as a wire constant: the official source notes that changing it needs a
+ * coordinated server-side rollout.
+ */
+const FIRST_PARTY_ATTRIBUTION_SECRET = 'I*7Cf%WZ#S&%1RlZJ&C2'
 
 /** How long a successful usage snapshot is reused. */
 const QUOTA_CACHE_MS = 60_000
@@ -496,9 +528,10 @@ export async function fetchTokenPlanQuota(
   let reason: MinimaxCodeQuotaUnavailable | null = null
   for (const host of ordered) {
     try {
+      const remainsPath = TOKEN_PLAN_REMAINS_PATH
       const response = await fetchFn(tokenPlanRemainsUrl(host), {
         method: 'GET',
-        headers: quotaRequestHeaders(credentials.accessToken),
+        headers: quotaRequestHeaders(credentials.accessToken, remainsPath),
         signal: withTimeout(options.signal, QUOTA_TIMEOUT_MS),
       })
       if (!response.ok) continue
