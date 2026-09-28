@@ -430,6 +430,16 @@ export function buildMinimaxRequest(
   return {
     model: options.model,
     max_tokens: maxTokens,
+    // REQUIRED. The adapter reads every response body as an SSE stream, and the
+    // service only answers with one when the request asks for it. Without this
+    // field the endpoint replies 200 `application/json` with a single complete
+    // message, which carries no `data:` line, no `message_stop` and no
+    // `stop_reason` — so `assertStreamComplete` reported a perfectly good answer
+    // as a truncated stream ("stream ended before its terminal event") and every
+    // turn on this line failed. The sibling lines that consume SSE request it in
+    // their own builders for the same reason (kimi-code/mapper.ts,
+    // claude/mapper.ts).
+    stream: true,
     messages: mergeAnthropicMessages(entries),
     ...(system === undefined ? {} : { system }),
     // Thinking and an explicit temperature are mutually exclusive on this
