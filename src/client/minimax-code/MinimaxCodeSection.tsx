@@ -1009,7 +1009,9 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
                 ? t('quotaNeedsApiKey')
                 : status?.quotaUnavailable === 'unreachable'
                   ? t('quotaUnreachable')
-                  : t('quotaUnavailable')}
+                  : status?.quotaUnavailable === 'token-expired'
+                    ? t('quotaTokenExpired')
+                    : t('quotaUnavailable')}
             </p>
           )
           : (
@@ -1056,6 +1058,15 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
                   </div>
                 )
               })}
+              {/*
+                The last read failed but the host is still serving the numbers that
+                last parsed. Showing them WITH that qualification beats the old
+                behaviour of replacing a working quota box with a sentence that
+                read like a sign-in prompt.
+              */}
+              {status?.quotaUnavailable === 'stale' && (
+                <p className="dsha-notice dshm-quota-note">{t('quotaStale')}</p>
+              )}
             </div>
           )}
       </section>

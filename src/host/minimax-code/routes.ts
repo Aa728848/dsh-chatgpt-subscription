@@ -299,9 +299,19 @@ export function registerMinimaxCodeRoutes(
    * network, and the status route reads the snapshot through the cache instead.
    */
   const refreshQuota = async (force: boolean): Promise<MinimaxCodeQuota | null> => {
-    const credentials = await store.read().catch(() => null)
+    // `ensureAccessToken`, NOT a bare `store.read()`: the usage read used to carry
+    // whatever token the file happened to hold, and with a 60-second refresh margin
+    // on a one-hour token that meant the poll landing just after the boundary
+    // presented a bearer the service had already stopped accepting.
+    const credentials = await ensureAccessToken(store, { fetchFn }).catch(() => null)
     if (credentials === null) return null
-    return await fetchTokenPlanQuota(credentials, { fetchFn, force }).catch(() => null)
+    return await fetchTokenPlanQuota(credentials, {
+      fetchFn,
+      force,
+      // The retry after a 401/403. Forced, because the whole point is that the
+      // token on hand is the one that was just refused.
+      renewCredential: () => ensureAccessToken(store, { fetchFn, force: true }),
+    }).catch(() => null)
   }
 
   /**

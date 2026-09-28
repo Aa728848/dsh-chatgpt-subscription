@@ -342,11 +342,31 @@ const QUOTA_TIMEOUT_MS = 8_000
  *   host answers HTTP 200 with `base_resp.status_code: 1004` for an
  *   `mcode-public` (MiniMax Code) token, under every auth shape tried.
  * - `unreachable` — no candidate host produced a usable answer at all.
+ * - `token-expired` — every candidate refused the bearer with 401/403, and the
+ *   one refresh that follows also failed.
+ *
+ * `token-expired` exists because a refusal and an outage are different facts for
+ * the person looking at the card: an outage means "try again in a minute", while a
+ * refused bearer means the access token aged out. Collapsing the two into
+ * `unreachable` is what made a perfectly healthy account read as signed-out.
+ * - `stale` - the newest read failed, but the card is still being served the last
+ *   numbers that parsed. The value is real; only its age is not.
  */
-export type MinimaxCodeQuotaUnavailable = 'credential-not-accepted' | 'unreachable'
+export type MinimaxCodeQuotaUnavailable = 'credential-not-accepted' | 'unreachable' | 'token-expired' | 'stale'
 
 let quotaHostInForce: string | null = null
+/**
+ * The last usage snapshot, plus the last failure to have one.
+ *
+ * `value` and `reason` are tracked SEPARATELY from the last GOOD value on
+ * purpose. A read that fails carries no information about the previous one, so
+ * replacing a good snapshot with `null` turned every transient refusal into a
+ * visible disappearance of the quota box; `quotaLastGood` lets the card keep
+ * showing the last known numbers while saying they are old.
+ */
 let quotaSnapshot: { at: number; value: MinimaxCodeQuota | null; reason: MinimaxCodeQuotaUnavailable | null } | null = null
+/** The last snapshot that actually parsed, kept across failures. */
+let quotaLastGood: { value: MinimaxCodeQuota; at: number } | null = null
 
 /** How long a refused credential is remembered before asking again. */
 const QUOTA_REJECTED_CACHE_MS = 30 * 60_000
@@ -354,6 +374,7 @@ const QUOTA_REJECTED_CACHE_MS = 30 * 60_000
 /** Forget the cached usage snapshot (a sign-out, a sign-in, a test). */
 export function clearCachedQuota(): void {
   quotaSnapshot = null
+  quotaLastGood = null
   quotaHostInForce = null
 }
 
@@ -507,7 +528,19 @@ export function parseTokenPlanQuota(payload: unknown, now: number = Date.now()):
  */
 export async function fetchTokenPlanQuota(
   credentials: MinimaxCodeCredentials,
-  options: { fetchFn?: typeof fetch; signal?: AbortSignal; force?: boolean } = {},
+  options: {
+    fetchFn?: typeof fetch
+    signal?: AbortSignal
+    force?: boolean
+    /**
+     * Renew the credential and hand back the pair to retry with.
+     *
+     * Injected by the route, which owns the store: this module reads credentials,
+     * it does not write them. Returns null when the credential cannot be renewed,
+     * and callers treat that as "still expired" rather than "signed out".
+     */
+    renewCredential?: () => Promise<MinimaxCodeCredentials | null>
+  } = {},
 ): Promise<MinimaxCodeQuota | null> {
   const fetchFn = options.fetchFn ?? fetch
   const now = Date.now()
@@ -515,9 +548,17 @@ export async function fetchTokenPlanQuota(
     // A refused credential is not worth re-asking on the success cadence: the
     // verdict is about the KIND of credential this line holds, so it will not
     // change by trying again in a minute.
+    //
+    // `token-expired` IS worth re-asking promptly, and only the absence of a
+    // previous snapshot buys it the failure backoff. A token that aged out is
+    // repaired by the very next poll, and a user watching a quota box at the
+    // one-hour boundary needs that repair to show up now - not ten minutes later.
+    // With nothing good left to render there is no progress to suppress either.
     const ttl = quotaSnapshot.reason === 'credential-not-accepted'
       ? QUOTA_REJECTED_CACHE_MS
-      : quotaSnapshot.value === null ? QUOTA_FAILURE_CACHE_MS : QUOTA_CACHE_MS
+      : quotaSnapshot.reason === 'token-expired' && quotaSnapshot.value === null
+        ? QUOTA_FAILURE_CACHE_MS
+        : quotaSnapshot.value === null ? QUOTA_FAILURE_CACHE_MS : QUOTA_CACHE_MS
     if (now - quotaSnapshot.at < ttl) return quotaSnapshot.value
   }
   const candidates = quotaHostCandidates(credentials.region)
@@ -526,6 +567,10 @@ export async function fetchTokenPlanQuota(
     : [quotaHostInForce, ...candidates.filter((host) => host !== quotaHostInForce)]
   let value: MinimaxCodeQuota | null = null
   let reason: MinimaxCodeQuotaUnavailable | null = null
+  // Set when a candidate refused the BEARER rather than the host. That verdict is
+  // about the credential and is identical on every candidate, so it must not be
+  // answered by walking the rest of the list.
+  let authRefused = false
   for (const host of ordered) {
     try {
       const remainsPath = TOKEN_PLAN_REMAINS_PATH
@@ -534,6 +579,16 @@ export async function fetchTokenPlanQuota(
         headers: quotaRequestHeaders(credentials.accessToken, remainsPath),
         signal: withTimeout(options.signal, QUOTA_TIMEOUT_MS),
       })
+      // A 401/403 is the upstream saying the ACCESS TOKEN is no longer accepted —
+      // which is the normal state of this credential at the one-hour boundary, not
+      // a wrong host. Treating it like a 404 walked the remaining candidates,
+      // produced nothing, and reported a healthy signed-in account as unusable.
+      // `renewQuotaCredential` is asked for a token the caller can actually use
+      // and the read is retried once with it.
+      if (response.status === 401 || response.status === 403) {
+        authRefused = true
+        break
+      }
       if (!response.ok) continue
       const payload: unknown = await response.json().catch(() => undefined)
       // The platform endpoint answers HTTP 200 even when it REFUSES the caller,
@@ -556,7 +611,28 @@ export async function fetchTokenPlanQuota(
       // one is tried and a total failure leaves the card degraded.
     }
   }
-  if (value === null && reason === null) reason = 'unreachable'
+
+  // The one thing a refused bearer earns is a fresh token and a second attempt.
+  // `renewQuotaCredential` is injected rather than called directly so this
+  // function keeps its signature for the sibling quota tests.
+  if (value === null && authRefused && options.renewCredential !== undefined) {
+    const renewed = await options.renewCredential().catch(() => null)
+    if (renewed !== null && renewed.accessToken !== credentials.accessToken) {
+      return fetchTokenPlanQuota(renewed, { ...options, force: true })
+    }
+  }
+
+  if (value === null && reason === null) reason = authRefused ? 'token-expired' : 'unreachable'
+  if (value !== null) {
+    quotaLastGood = { value, at: Date.now() }
+  } else if (quotaLastGood !== null) {
+    // Keep serving the last numbers that parsed. A failure says nothing about the
+    // previous read, so discarding a good snapshot here is what made the quota box
+    // vanish at the one-hour boundary and take the whole card's credibility with
+    // it. The card is told separately that they are old.
+    value = quotaLastGood.value
+    reason = 'stale'
+  }
   quotaSnapshot = { at: Date.now(), value, reason }
   return value
 }

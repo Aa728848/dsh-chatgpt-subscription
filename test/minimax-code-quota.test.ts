@@ -291,6 +291,168 @@ describe('MiniMax Token Plan quota fetch', () => {
     // One probe per candidate on the first call, none at all on the second.
     expect(calls).toBe(quotaHostCandidates('global').length)
   })
+
+  // ---- The one-hour boundary ------------------------------------------------
+  //
+  // These three tests are the regression suite for the failure a user actually
+  // hit: at the one-hour mark the access token expires, the usage read is
+  // refused with 401, and the card reported that a perfectly signed-in account
+  // needed to sign in again while its quota box emptied.
+
+  it('renews a refused bearer and retries instead of walking the host list', async () => {
+    // The refused token is answered with 401 on the FIRST host. Renewing must
+    // retry the SAME host: the previous code treated 401 as a wrong host and
+    // exhausted every candidate, which is what erased the snapshot.
+    const seen: string[] = []
+    const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(String(input))
+      const auth = (init?.headers as Record<string, string> | undefined)?.authorization
+      return auth === 'Bearer at-renewed'
+        ? Response.json(payload([row()]))
+        : new Response('unauthorized', { status: 401 })
+    }) as unknown as typeof fetch
+
+    const renewed = { ...credential('cn'), accessToken: 'at-renewed' }
+    const quota = await fetchTokenPlanQuota(credential('cn'), {
+      fetchFn,
+      force: true,
+      renewCredential: async () => renewed,
+    })
+
+    expect(quota).not.toBeNull()
+    expect(getQuotaUnavailable()).toBeNull()
+    // Exactly one host was asked about: the credential was the problem, and the
+    // second request went back to the host that had already refused.
+    expect(seen).toEqual([
+      tokenPlanRemainsUrl('https://api.minimax.cn'),
+      tokenPlanRemainsUrl('https://api.minimax.cn'),
+    ])
+  })
+
+  it('keeps the last good quota when the next read is refused', async () => {
+    // The reported symptom, exactly: a working quota box disappearing at the
+    // one-hour boundary. A failed read carries no information about the previous
+    // one, so the numbers that parsed must survive it.
+    let refused = false
+    const fetchFn = vi.fn(async () => refused
+      ? new Response('unauthorized', { status: 401 })
+      : Response.json(payload([row()]))) as unknown as typeof fetch
+
+    const before = await fetchTokenPlanQuota(credential('cn'), { fetchFn, force: true })
+    expect(before).not.toBeNull()
+    expect(before!.usedPercent).toBe(25)
+
+    refused = true
+    const after = await fetchTokenPlanQuota(credential('cn'), {
+      fetchFn,
+      force: true,
+      // Renewal fails too - the real failure the card has to survive.
+      renewCredential: async () => null,
+    })
+
+    expect(after).not.toBeNull()
+    expect(after!.usedPercent).toBe(25)
+    expect(getCachedQuota()).not.toBeNull()
+    // 'stale', because a good snapshot is still being served and the card must say
+    // so. What it must NOT report is 'unreachable' - that is what the card rendered
+    // as "sign in again" for a healthy account.
+    expect(getQuotaUnavailable()).toBe('stale')
+    expect(getQuotaUnavailable()).not.toBe('unreachable')
+  })
+
+  it('calls a stale snapshot old without dropping it', async () => {
+    // Once a refresh has failed but a good snapshot exists, the card is told the
+    // numbers are stale - it keeps rendering them AND says so.
+    let refused = false
+    const fetchFn = vi.fn(async () => refused
+      ? new Response('unauthorized', { status: 401 })
+      : Response.json(payload([row()]))) as unknown as typeof fetch
+
+    await fetchTokenPlanQuota(credential('cn'), { fetchFn, force: true })
+    refused = true
+    const stale = await fetchTokenPlanQuota(credential('cn'), {
+      fetchFn,
+      force: true,
+      renewCredential: async () => null,
+    })
+
+    expect(stale).not.toBeNull()
+    expect(getQuotaUnavailable()).toBe('stale')
+  })
+
+  it('reports token-expired, never unreachable, when the bearer was refused', async () => {
+    const fetchFn = vi.fn(async () => new Response('unauthorized', { status: 401 })) as unknown as typeof fetch
+    expect(await fetchTokenPlanQuota(credential('cn'), { fetchFn, renewCredential: async () => null })).toBeNull()
+    expect(getQuotaUnavailable()).toBe('token-expired')
+  })
+
+  it('retries a stale snapshot on the success cadence, not the failure backoff', async () => {
+    // A 10-minute backoff here would leave the card showing known-old figures for
+    // ten minutes AFTER the token had been repaired - exactly the window in which
+    // the user needs to be told it recovered.
+    let calls = 0
+    let refuse = false
+    const fetchFn = vi.fn(async () => {
+      calls += 1
+      return refuse ? new Response('unauthorized', { status: 401 }) : Response.json(payload([row()]))
+    }) as unknown as typeof fetch
+
+    // A good snapshot first, so the failure below leaves a STALE one (which
+    // carries a value) rather than a bare 'token-expired' (which does not).
+    await fetchTokenPlanQuota(credential('cn'), { fetchFn, force: true })
+    expect(getQuotaUnavailable()).toBeNull()
+
+    refuse = true
+    await fetchTokenPlanQuota(credential('cn'), {
+      fetchFn,
+      force: true,
+      renewCredential: async () => null,
+    })
+    expect(getQuotaUnavailable()).toBe('stale')
+
+    // A stale snapshot keeps the 60 s SUCCESS cadence rather than the ten-minute
+    // failure backoff. At 61 s the poll must go back out; under the old TTL it
+    // would still have been suppressed, leaving known-old figures on screen for
+    // another nine minutes after the token had been repaired.
+    const realNow = Date.now
+    let clock = realNow() + 61_000
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    try {
+      const afterFailure = calls
+      await fetchTokenPlanQuota(credential('cn'), { fetchFn, renewCredential: async () => null })
+      expect(calls).toBeGreaterThan(afterFailure)
+
+      // And when the service recovers, the box goes back to fresh.
+      refuse = false
+      const recovered = await fetchTokenPlanQuota(credential('cn'), {
+        fetchFn,
+        force: true,
+        renewCredential: async () => null,
+      })
+      expect(recovered).not.toBeNull()
+      expect(getQuotaUnavailable()).toBeNull()
+      clock = realNow()
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('backs off a token-expired read that has nothing to fall back on', async () => {
+    // The counterpart: with no previous snapshot to preserve, a refused bearer
+    // has nothing to show either way, so the failure cache applies and the card
+    // is not made to re-probe on every 60 s poll.
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      calls += 1
+      return new Response('unauthorized', { status: 401 })
+    }) as unknown as typeof fetch
+
+    await fetchTokenPlanQuota(credential('cn'), { fetchFn, renewCredential: async () => null })
+    expect(getQuotaUnavailable()).toBe('token-expired')
+    const afterFirst = calls
+    await fetchTokenPlanQuota(credential('cn'), { fetchFn, renewCredential: async () => null })
+    expect(calls).toBe(afterFirst)
+  })
 })
 
 describe('MiniMax Token Plan quota route', () => {

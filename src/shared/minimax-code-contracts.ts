@@ -186,8 +186,13 @@ export interface MinimaxCodeWebStatus {
    *   `/v1/token_plan/remains` 只接受平台 API 密钥，MiniMax Code 的
    *   `mcode-public` 登录态在四种认证写法下都被拒（`base_resp.status_code: 1004`）。
    * - `unreachable`：没有任何候选主机给出可用应答。
+   * - `token-expired`：所有候选主机都以 401/403 拒绝了 bearer，且随后那一次
+   *   续期也失败了。注意这**不等于**未登录：access token 一小时到期是常态，
+   *   账号仍然是登录态，UI 不应据此提示重新登录。
+   * - `stale`：本次读取失败，但卡片仍在渲染上一次成功解析出的数值——数值是真的，
+   *   只是不再新鲜。
    */
-  quotaUnavailable?: 'credential-not-accepted' | 'unreachable'
+  quotaUnavailable?: 'credential-not-accepted' | 'unreachable' | 'token-expired' | 'stale'
   /**
    * 本次应答背后是否正在刷新用量。
    *
