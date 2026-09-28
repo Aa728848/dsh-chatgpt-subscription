@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { CodexSubscriptionSection } from './CodexSubscriptionSection.tsx'
@@ -38,6 +38,29 @@ const HUB_TABS: ReadonlyArray<{ id: HubTabId; label: string }> = [
  */
 export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): React.JSX.Element {
   const [active, setActive] = useState<HubTabId>('chatgpt')
+  const tabStripRef = useRef<HTMLDivElement | null>(null)
+
+  /**
+   * Keep the selected tab inside the visible strip.
+   *
+   * The strip is one scrolling line, so a tab selected by keyboard (or restored
+   * after a remount) can sit outside the viewport with no feedback about where
+   * the selection went. `scrollIntoView` with `inline: 'nearest'` scrolls only
+   * when the tab is actually out of view and keeps the change to the horizontal
+   * axis, so it never nudges the settings page vertically.
+   *
+   * Guarded because jsdom (the DOM these tests run against) does not implement
+   * `scrollIntoView`, and a settings page must not break in an environment that
+   * lacks a scrolling method.
+   */
+  useEffect(() => {
+    const strip = tabStripRef.current
+    if (strip === null) return
+    const selected = strip.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')
+    if (selected === null) return
+    if (typeof selected.scrollIntoView !== 'function') return
+    selected.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [active])
 
   const onTabKeyDown = useCallback((event: KeyboardEvent<HTMLButtonElement>): void => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
@@ -53,7 +76,7 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
     <header>
       <h2 id="dsh-hub-title" className="dsh-codex-title">{t('hubTitle')}</h2>
     </header>
-    <div className="dsh-codex-segments dsh-hub-tabs" role="tablist" aria-label={t('hubTitle')}>
+    <div ref={tabStripRef} className="dsh-codex-segments dsh-hub-tabs" role="tablist" aria-label={t('hubTitle')}>
       {HUB_TABS.map((tab) => <button
         key={tab.id}
         type="button"

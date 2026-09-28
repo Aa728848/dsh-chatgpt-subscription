@@ -10,12 +10,35 @@ afterEach(() => {
 })
 
 describe('provider hub tab strip', () => {
-  it('lets the hub tab strip wrap so every provider tab stays reachable', () => {
+  it('scrolls the hub tab strip on one line instead of wrapping it', () => {
     installStyles()
     const css = tags()[0]!.textContent ?? ''
-    // Seven tabs exceed a narrow settings pane; without wrapping the strip
-    // overflows and the trailing tabs cannot be clicked at all.
-    expect(css).toContain('.dsh-hub-tabs{align-self:flex-start;flex-wrap:wrap;max-width:100%}')
+    const hubTabs = /\.dsh-hub-tabs\{[^}]*\}/.exec(css)?.[0] ?? ''
+    // Seven tabs exceed a narrow settings pane. Wrapping made them reachable but
+    // produced a ragged second row (five tabs, then two); the strip now stays on
+    // one line and scrolls, so every tab remains reachable at any width.
+    expect(hubTabs).toContain('flex-wrap:nowrap')
+    expect(hubTabs).toContain('overflow-x:auto')
+    // The scrollbar is the affordance that more tabs exist, so it must not be
+    // hidden: a mouse user's vertical wheel cannot scroll this row.
+    expect(hubTabs).not.toContain('scrollbar-width:none')
+    expect(hubTabs).not.toContain('::-webkit-scrollbar{display:none')
+    // Buttons must not shrink, or the labels squash instead of the row scrolling.
+    expect(css).toContain('.dsh-hub-tabs button{flex:none}')
+  })
+
+  it('leaves room for the tab focus outline inside the scroll container', () => {
+    installStyles()
+    const css = tags()[0]!.textContent ?? ''
+    const hubTabs = /\.dsh-hub-tabs\{[^}]*\}/.exec(css)?.[0] ?? ''
+    // The focus outline is 2px wide with a 2px offset (4px beyond the button), and
+    // an overflow container clips at its padding box, so the strip's own padding
+    // has to be at least 4px or the ring is shaved for keyboard users.
+    expect(hubTabs).toContain('overflow-y:hidden')
+    const padding = Number(/\.dsh-hub-tabs\{[^}]*padding:(\d+)px/.exec(hubTabs)?.[1])
+    expect(padding).toBeGreaterThanOrEqual(4)
+    // scroll-padding must match, or a tab scrolled into view sits under the edge.
+    expect(hubTabs).toContain(`scroll-padding-inline:${padding}px`)
   })
 
   it('keeps the shared segments rule single-line for the ChatGPT search group', () => {

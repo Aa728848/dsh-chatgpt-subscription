@@ -405,6 +405,18 @@ describe('client registration', () => {
       }
       expect(minimaxText).toContain('MiniMax Code')
 
+      // The tab strip is one scrolling line, so selecting a tab must bring it into
+      // view; otherwise a keyboard-driven selection can move off-screen with no
+      // feedback. jsdom does not implement scrollIntoView, so the hub guards the
+      // call and this stubs it to observe the request.
+      const scrolled: Element[] = []
+      for (const tab of container.querySelectorAll('[role="tab"]')) {
+        ;(tab as unknown as { scrollIntoView: (options?: unknown) => void }).scrollIntoView =
+          function scrollIntoView(this: Element) { scrolled.push(this) }
+      }
+      await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-claude')?.click() })
+      expect(scrolled.at(-1)?.id).toBe('dsh-hub-tab-claude')
+
       // Arrow keys move the active tab per the tablist pattern. The tab that
       // receives the key is the one that moves relative to the current selection,
       // so the selection is put back on Claude first.
