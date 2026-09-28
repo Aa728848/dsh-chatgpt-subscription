@@ -35,33 +35,30 @@
  * \`effort\` level, so the field is emitted in that vocabulary and nowhere else. No
  * other undocumented field is ever sent.
  *
- * UNRESOLVED, AND DELIBERATELY NOT ACTED ON: prompt caching.
+ * PROMPT CACHING IS ON BY DEFAULT, AND IT IS THE REQUEST THAT TURNS IT ON
  *
- * No `cache_control` marker is ever sent, yet this file reads the two cache
- * counters out of `usage` (see the message_start branch) - so the route is
- * prepared to report cache hits it never asks for. MiniMax documents two
- * different mechanisms, and they are not interchangeable:
+ * MiniMax documents two caching mechanisms, and they are not interchangeable:
  *
  * - an AUTOMATIC cache on its native API, which needs no marker at all; and
  * - an EXPLICIT cache on its Anthropic-compatible API, where the
  *   `cache_control` breakpoints are what create the cache at all
- *   (`tools` -> `system` -> `messages`, per the "Explicit Prompt Caching
- *   (Anthropic API)" page of the MiniMax docs).
+ *   (`tools` -> `system` -> `messages`, at most MAX_CACHE_BREAKPOINTS per
+ *   request, per the "Explicit Prompt Caching (Anthropic API)" page of the
+ *   MiniMax docs).
  *
- * This line speaks the Anthropic dialect, so the explicit mechanism may well be
- * the one that applies - but the subscription endpoint is NOT the public API
- * (`<base>/mavis/api/v1/llm/v1/messages` vs `api.minimax.io/anthropic`), and its
- * caching behaviour has never been measured here. Adding a marker is not free
- * either: `system` is a plain string on this line, so a system-level breakpoint
- * means changing that field into an array of blocks, and a marker on a block the
- * wire does not accept can fail the whole request - the same class of total
- * failure the missing `stream: true` caused.
+ * This line speaks the Anthropic dialect, so the explicit mechanism is the one
+ * that applies: a request with no breakpoint gets no `cache_read_input_tokens`
+ * back no matter how identical its bytes are turn over turn, which is exactly
+ * why this route showed no cache hits before the markers went in.
  *
- * So the marker stays out until one live request settles it: send a body with
- * and without a breakpoint and compare `cache_read_input_tokens`. The shape to
- * copy once that is measured is the Claude line's, which marks only a block the
- * wire accepts and states the intent at the call site because caching there is
- * request-driven (`claude/mapper.ts`, `claude/adapter.ts`).
+ * The shape is the Claude line's (claude/mapper.ts, section 7), because the
+ * wire vocabulary is the same and that shape is the one MiniMax's
+ * explicit-caching page documents: breakpoints on the LAST system block, the
+ * last block of the LAST user message, and the last tool. The first requires
+ * `system` to go out as a block array rather than the plain string this line
+ * was first measured with, so the array form is used only while caching is on -
+ * a caller that opts out (MinimaxRequestOptions.cacheControl === false) gets
+ * the original string body byte-for-byte.
  */
 
 import {
@@ -432,10 +429,134 @@ export function clampOutputToContext(
   return Math.min(requested, available)
 }
 
+/**
+ * Breakpoint budget the wire enforces.
+ *
+ * MiniMax's explicit-caching page caps a request at four `cache_control`
+ * markers, the same number Anthropic allows (claude/mapper.ts). This module
+ * marks at most three (see the module doc), so the budget is never the binding
+ * constraint - the constant exists so a test can assert that against the REAL
+ * number rather than a magic three.
+ */
+export const MAX_CACHE_BREAKPOINTS = 4
+
+/**
+ * Block types the wire accepts a cache_control marker on.
+ *
+ * A marker on any other block is a request the server rejects, so the last
+ * block of the last user message is marked only when its type is one of these
+ * (the same set the Claude line guards on, since the wire vocabulary is the
+ * same).
+ */
+const CACHE_MARKABLE_BLOCK_TYPES: ReadonlySet<string> = new Set(['text', 'image', 'tool_result'])
+
+/**
+ * The last block worth a cache breakpoint on the message list, if any.
+ *
+ * Marks the last block of the last USER message and nothing else, with two
+ * load-bearing guards: the last message must be a user turn (a history ending
+ * on an assistant turn - a prefill-shaped request - gets no message breakpoint
+ * rather than a marker somewhere it was not asked for), and the block must be
+ * one the wire accepts a marker on. An unmarkable block yields NO breakpoint
+ * rather than one moved onto an earlier turn: an unmarked request is merely
+ * uncached, while a marker on a block type the wire rejects fails the whole
+ * turn.
+ */
+function lastCacheableUserBlock(messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>): AnthropicBlock | undefined {
+  const lastMessage = messages[messages.length - 1]
+  if (lastMessage === undefined || lastMessage.role !== 'user') return undefined
+  const block = lastMessage.content[lastMessage.content.length - 1]
+  if (block === undefined) return undefined
+  return CACHE_MARKABLE_BLOCK_TYPES.has(String(block.type)) ? block : undefined
+}
+
+/**
+ * Put the cache breakpoints on one built body, and report how many landed.
+ *
+ * Runs against the FINAL shape - the merged message list and the full tool
+ * array - so the marker cannot land on a block the merge then moves.
+ *
+ * @param body - the built body, mutated in place: it was created by this module
+ *   and has not been handed to a caller yet.
+ * @returns the number of breakpoints written.
+ */
+function markMinimaxCacheBreakpoints(body: Record<string, unknown>): number {
+  let marked = 0
+
+  const system = body.system
+  if (Array.isArray(system)) {
+    const last = system[system.length - 1] as AnthropicBlock | undefined
+    if (last !== undefined) {
+      last.cache_control = { type: 'ephemeral' }
+      marked += 1
+    }
+  }
+
+  const messages = body.messages as Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> | undefined
+  if (Array.isArray(messages)) {
+    const target = lastCacheableUserBlock(messages)
+    if (target !== undefined) {
+      target.cache_control = { type: 'ephemeral' }
+      marked += 1
+    }
+  }
+
+  const tools = body.tools
+  if (Array.isArray(tools) && tools.length > 0) {
+    const last = tools[tools.length - 1] as AnthropicBlock | undefined
+    if (last !== undefined) {
+      last.cache_control = { type: 'ephemeral' }
+      marked += 1
+    }
+  }
+
+  return marked
+}
+
+/**
+ * How many cache_control markers one built body carries.
+ *
+ * Walks the finished body rather than counting calls to the marker: the number
+ * the wire enforces is the number of markers IN THE BYTES, so a test that
+ * counts its own marking calls could pass while the body carried a fourth
+ * breakpoint from somewhere else. Used by the tests only.
+ */
+export function countMinimaxCacheBreakpoints(body: unknown): number {
+  let count = 0
+  // A marker's own value is { type: 'ephemeral' } and holds no nested markers,
+  // so a plain walk cannot double-count one.
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry)
+      return
+    }
+    if (!isRecord(value)) return
+    if (value.cache_control !== undefined) count += 1
+    for (const entry of Object.values(value)) visit(entry)
+  }
+  visit(body)
+  return count
+}
+
+/** Options for one built request that are not part of the conversation itself. */
+export interface MinimaxRequestOptions {
+  /**
+   * Emit prompt-cache breakpoints. Default TRUE: caching is what a caller that
+   * states nothing gets (see the module doc). Pass false only to opt out.
+   *
+   * When on, breakpoints go on the last system block, the last block of the
+   * last user message, and the last tool - at most
+   * {@link MAX_CACHE_BREAKPOINTS} in total, and `system` goes out as a block
+   * array because a plain string cannot carry a marker.
+   */
+  cacheControl?: boolean
+}
+
 /** Build one Anthropic Messages body for this subscription. */
 export function buildMinimaxRequest(
   options: GenerateOptions,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
+  request: MinimaxRequestOptions = {},
 ): Record<string, unknown> {
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
@@ -454,8 +575,9 @@ export function buildMinimaxRequest(
   const system = leadingSystemText(options)
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
   const thinking = thinkingFieldFor(options.model, options.reasoningEffort === undefined ? null : String(options.reasoningEffort))
+  const caching = request.cacheControl !== false
 
-  return {
+  const body: Record<string, unknown> = {
     model: options.model,
     max_tokens: maxTokens,
     // REQUIRED. The adapter reads every response body as an SSE stream, and the
@@ -469,7 +591,11 @@ export function buildMinimaxRequest(
     // claude/mapper.ts).
     stream: true,
     messages: mergeAnthropicMessages(entries),
-    ...(system === undefined ? {} : { system }),
+    // A cache breakpoint cannot sit on a plain string, so the system prompt
+    // takes the block-array form while caching is on - the shape MiniMax's
+    // explicit-caching page marks - and stays the measured string when it is
+    // off.
+    ...(system === undefined ? {} : { system: caching ? [{ type: 'text', text: system }] : system }),
     // Thinking and an explicit temperature are mutually exclusive on this
     // protocol, so the temperature is dropped whenever thinking is engaged.
     ...(options.temperature === undefined || thinking !== undefined ? {} : { temperature: options.temperature }),
@@ -485,6 +611,9 @@ export function buildMinimaxRequest(
       : {}),
     ...(thinking === undefined ? {} : { thinking }),
   }
+
+  if (caching) markMinimaxCacheBreakpoints(body)
+  return body
 }
 
 /**

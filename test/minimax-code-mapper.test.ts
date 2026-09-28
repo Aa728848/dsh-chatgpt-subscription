@@ -4,7 +4,9 @@ import {
   assertStreamComplete,
   buildMinimaxRequest,
   closeMinimaxStream,
+  countMinimaxCacheBreakpoints,
   createStreamState,
+  MAX_CACHE_BREAKPOINTS,
   processMinimaxStreamLine,
   streamHasContent,
 } from '../src/host/minimax-code/mapper.ts'
@@ -47,6 +49,61 @@ describe('buildMinimaxRequest', () => {
     expect(body.model).toBe('MiniMax-M2.7')
     expect(body.max_tokens).toBe(256)
     expect(Array.isArray(body.messages)).toBe(true)
+  })
+})
+
+describe('prompt cache breakpoints', () => {
+  // Caching on this wire is request-driven: the service creates a cache only
+  // where the request puts a cache_control breakpoint, which is why this route
+  // reported no cache hits before the markers went in.
+  it('marks the system block, the last user block, and the last tool by default', () => {
+    const body = buildMinimaxRequest(options({
+      system: 'be brief',
+      tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }],
+    }))
+
+    expect(body.system).toEqual([{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }])
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    expect(messages[messages.length - 1]!.content.at(-1)).toMatchObject({ cache_control: { type: 'ephemeral' } })
+    const tools = body.tools as Array<Record<string, unknown>>
+    expect(tools[tools.length - 1]).toMatchObject({ cache_control: { type: 'ephemeral' } })
+  })
+
+  it('stays within the breakpoint budget the wire enforces', () => {
+    const body = buildMinimaxRequest(options({
+      system: 'be brief',
+      tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }],
+    }))
+    expect(countMinimaxCacheBreakpoints(body)).toBeLessThanOrEqual(MAX_CACHE_BREAKPOINTS)
+  })
+
+  it('marks only the message tail when the request carries no system text or tools', () => {
+    const body = buildMinimaxRequest(options())
+    expect(body.system).toBeUndefined()
+    expect(body.tools).toBeUndefined()
+    expect(countMinimaxCacheBreakpoints(body)).toBe(1)
+  })
+
+  it('sends no marker and keeps the string system form when caching is opted out', () => {
+    const body = buildMinimaxRequest(options({
+      system: 'be brief',
+      tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }],
+    }), undefined, { cacheControl: false })
+
+    expect(body.system).toBe('be brief')
+    expect(countMinimaxCacheBreakpoints(body)).toBe(0)
+  })
+
+  it('marks no message block when the history ends on an assistant turn', () => {
+    const body = buildMinimaxRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] } as Message,
+        { role: 'assistant', content: [{ type: 'text', text: 'hello' }] } as Message,
+      ],
+    }))
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    expect(messages[messages.length - 1]!.role).toBe('assistant')
+    expect(countMinimaxCacheBreakpoints(body)).toBe(0)
   })
 })
 

@@ -250,7 +250,9 @@ describe('MiniMax Code line', () => {
       } as never)
       expect(body.stream).toBe(true)
       expect(body.tools).toBeDefined()
-      expect(body.system).toBe('be brief')
+      // Caching is on by default, and a breakpoint cannot sit on a plain string,
+      // so the system text goes out as a marked block array.
+      expect(body.system).toEqual([{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }])
     })
   })
 

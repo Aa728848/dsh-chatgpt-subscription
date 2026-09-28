@@ -479,6 +479,17 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     const built = buildMinimaxRequest(
       { ...requestOptions, maxTokens: clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions)) },
       images,
+      // TRUE, and stated here rather than left to the builder's default, because
+      // the default is not the mechanism that keeps this working: caching is
+      // REQUEST-DRIVEN on the Anthropic dialect (the service caches a prefix
+      // only where the request puts a cache_control breakpoint), so a request
+      // sent without breakpoints bills every turn as fresh input and returns no
+      // cache_read_input_tokens - which is exactly what this route showed until
+      // the markers went in. Writing the intent down here means a future edit
+      // that changes the builder's default cannot silently turn caching back
+      // off for this provider. See the mapper's module doc for where the
+      // breakpoints go.
+      { cacheControl: true },
     )
     const body = assertRequestBodyFits(built)
 
