@@ -84,6 +84,20 @@
 - **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛出错误而不是把半截文本当成完整回答；
 - 额度来自 `/billing/meter/get-user-resource`，卡片展示套餐名、本周期已用/上限、剩余额度与重置时间；设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有该线路的额度胶囊。
 
+
+**MiniMax Code（编程订阅）线路**
+
+- 注册 `minimax-code` Provider，接入 **MiniMax Code 编程订阅**。它与 MiniMax 开放平台（按量计费的 API Key）是两套互不通用的系统：订阅的模型接口是 Anthropic Messages 协议（`https://agent.minimax.cn/mavis/api/v1/llm/v1/messages`），且**只用 `authorization: Bearer <accessToken>` 认证**——实测 `x-api-key` 一律返回 401 `{"code":401,"message":"token is required"}`，因此本线路**没有** x-api-key 回退分支（回退只会在每次请求上白花一个往返）；
+- **复用桌面端登录态，而不是让你再登录一次**：凭据就是 MiniMax Code 自己写的 `~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json`。**只读优先**：仍在有效期内的令牌原样使用，绝不无谓轮换；需要续期时走**原子替换**（临时文件 + `rename`），失败或中断都让原文件保持逐字节不变，**不创建、不删除、不等待** `auth.lock`（那是桌面端自己的刷新锁，第二方碰它就可能打断官方客户端的刷新）；
+- **两种登录来源互不覆盖**：桌面端的 `auth.json` 归桌面端所有，本插件只读；若本机没有它，才在设置页用 **RFC 8628 设备码流程**（PKCE S256）登录，凭据存到本插件自己的 `$DSH_HOME/storages/minimax-code-credentials.json`。**登出只作用于本插件自己那份凭据**：桌面端的登录态会被续期写回（只读优先），但**绝不撤销、绝不删除**，登出请求对它会被拒绝并说明原因（撤销它等于把你从正在跑的 MiniMax Code 里踢下线），这也是 WorkBuddy 对桌面账号的既有做法；
+- **区域是凭据属性**：`cn` 用 `account.minimax.cn` / `agent.minimax.cn`，`global` 用对应 `.io` 域名。两个区域的目录都会被探测，因此国际区账号不会因为没有国区文件而「未登录」；读回凭据时**以记录里存的区域为准**，而不是拿默认区域覆盖它；
+- **模型目录是硬编码的**（`src/host/minimax-code/model-catalog.ts`）：该端点的 `GET /v1/models` **未对订阅流量开放**（503 `{"errorCode":50115,"errorReason":"direct_route_not_configured"}`），所以任何「实时目录」都只会是一个必然失败的请求。四款模型（M2.7 / M2.7 HighSpeed / M3 / M3.1 Flash Preview）的上下文、输出上限与思考形态都取自本机 `~/.minimax/config.yaml` 的模型表，**不从不存在的接口推断**；
+- **思考形态按模型表三态实现**：M2.7 系列**恒定开启且没有档位**（不发送任何字段）；M3 是**开关二态**（`{type:'enabled'|'disabled'}`）；M3.1 Flash Preview **强制开启并可指定档位**（`{type:'enabled',effort:...}`）。未知或越档的取值一律回落到该模型目录声明的默认档，不会把模型没有声明的档位发出去；
+- **视频不在能力声明里**：模型表虽然给 M3 / M3.1 标了视频输入，但 DSH 的附件服务只存图片、本线路也没有安装视频字节读取器，映射器只能把它替换成一条说明文本。**声明一个做不到的能力比不声明更糟**（DSH 的能力闸门、模型选择器与子代理委派都会当它成立），所以这里只声明 `text` 与 `image`；要加 `video` 必须先有真正的读取器（对照 Kimi Code 线路的 `video-store.ts`）；
+- **瞬时失败按错误类别重试**（`src/host/minimax-code/adapter.ts`）：上游模型供应商临时不可用（5xx）归为 `SERVER`、429 归为 `RATE_LIMIT`、连接未产出响应归为 `TRANSPORT`，走 DSH retry policy 的有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；**但 429 的正文若说的是余额/额度耗尽，则判为终局**——重试只会推迟用户真正需要看到的提示；
+- **401 会强制续期一次再重试**：本地时钟看着还有效、服务端却拒收的令牌（在桌面端被撤销、时钟偏移、桌面端已轮换）与「真的需要重新登录」在状态码上无法区分，所以第一次 401 会**强制刷新一次并原样重试同一个请求体**；重试再被拒才是终局；
+- **请求体超过 2 MB 本地即拒绝**（与 Kimi 线路同一个守卫与上限，因为两条线路上游都是同一族端点）；额度面板**没有配额条**：该订阅没有可测的用量端点，卡片按契约优雅降级并写明原因，输入框右侧也**不显示**额度胶囊（没有数字可显示，只留一个每 60 秒读一次凭据文件的空转定时器是纯浪费）。
+
 **Claude（订阅）线路**
 
 - 注册 `claude-subscription` Provider，以 **Claude Pro / Max 订阅的 OAuth 登录态**访问 Claude 模型（Anthropic Messages 接口），**不使用 API Key、也不按量计费**；
@@ -512,14 +526,32 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 | POST | `/accounts` | 号池动作：`set-primary` / `set-alias` / `delete` / `clear-cooldown` / `clear-auth-failed` / `strategy` |
 | POST | `/logout` | 注销（号池感知） |
 
+### 插件路由（MiniMax Code）
+
+所有路由都挂在本线路自己的 `/minimax-code/api` 前缀下（与 antigravity / claude / command-code /
+kimi-code / workbuddy 一致），**不**占用 Codex 那条线路的 `/api/dsh-chatgpt-subscription` 前缀。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/status` | 账号、区域、凭据来源与路径、硬编码模型目录、路由归属（`serving` / `conflict`）与凭据归属（`ownedByPlugin`） |
+| POST | `/login/start` | 开始设备码授权（可带 `region`） |
+| POST | `/login/poll` | 轮询一次授权结果 |
+| POST | `/login/cancel` | 取消授权 |
+| POST | `/logout` | 注销**本插件自己那份**凭据；桌面端的登录态会拒绝并说明原因 |
+| POST | `/test` | 向上游发一次最小 Messages 请求测试连接 |
+
 与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。**响应里永远不含
-access token / refresh token / 授权码 / PKCE verifier**（有测试锁定）。
+access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某个令牌时只输出它的
+**SHA-256 指纹前缀**（`sha256:.../len:...`），**不是**令牌的任何一段原文——早前版本会打印前 6 个字符，
+那本身就是一次凭据泄露，因为同一个字符串会被渲染到设置卡片并写进 Host 日志（有测试锁定）。
 
 ## 安全边界
 
 Antigravity 的 access token / refresh token 使用独立的系统凭据存储：Windows 使用 CurrentUser DPAPI（`$DSH_HOME/storages/antigravity-oauth.json.dpapi`），macOS 使用登录钥匙串，Linux 使用 Secret Service。macOS / Linux 的服务名为 `dsh-antigravity`，账号键按旧凭据文件的绝对路径生成，隔离不同的 `DSH_HOME`。
 
 **WorkBuddy token 仅在 Host 内处理，从不进入浏览器**（`/workbuddy/api` 响应不含 `accessToken` / `refreshToken`，有测试锁定）。桌面扫描账号仍使用 CodeBuddy 自己的登录态文件：续期只原子写回其 `auth` 块；从本插件删除时只隐藏/恢复，绝不删除原文件。通过浏览器授权添加的账号归本插件所有，保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/workbuddy-accounts.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；这类账号可在设置页真正删除。
+
+**MiniMax Code 的 access token / refresh token 同样只在 Host 内处理，从不进入浏览器**（`/minimax-code/api` 的响应只含非机密事实，有测试锁定）。它的凭据**不是本插件自持的**：正常路径是**只读复用** MiniMax Code 桌面端自己的 `~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json`，续期时通过「同目录临时文件 + `rename`」原子写回，**不创建、不删除、不等待**桌面端的 `auth.lock`，也**不留任何旁路副本**——不会在桌面端的目录里写出明文 `.dsh-bak` 之类的第二份凭据。只有本机没有桌面端凭据时，本插件才把设备码登录得到的凭据存到自己的 `$DSH_HOME/storages/minimax-code-credentials.json`；**登出只删这一份**，桌面端的登录态绝不撤销、绝不删除（撤销它等于把用户从正在运行的官方客户端踢下线）。诊断中提及令牌时只输出 SHA-256 指纹前缀，不含令牌原文。
 
 **Claude 订阅的 access token / refresh token 同样只在 Host 内处理，从不进入浏览器**（`/claude/api` 的响应只含非机密事实，有测试锁定）。它保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/claude-credentials.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；号池另用一份同样加密的文件 `$DSH_HOME/storages/claude-pool.json`。凭据文档是**多账号**结构，账号身份由不可变的 `internalId` 与只增不换的别名集共同表达，**任何路由键都不是令牌或其摘要**（令牌会轮换，用它做键会产生幽灵账号）。每次写入都**先读回校验再落盘**，校验失败会抛错且不破坏既有数据。
 

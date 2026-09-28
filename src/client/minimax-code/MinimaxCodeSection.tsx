@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   MINIMAX_CODE_PROVIDER_ID,
   MINIMAX_CODE_PROVIDER_NAME,
@@ -9,7 +8,7 @@ import {
   type MinimaxCodeWebStatus,
 } from '../../shared/minimax-code-contracts.ts'
 import { get, messageOf, post } from './api.ts'
-import { NS_MINIMAX_CODE, zh } from './locales.ts'
+import { zh } from './locales.ts'
 
 /** Device-code poll cadence. The host owns the real expiry. */
 const LOGIN_POLL_INTERVAL_MS = 2_000
@@ -33,19 +32,32 @@ interface ConnectionTestResult {
   error?: string
 }
 
-type Props = PropsRuntime<'settings.section'> & Partial<PropsLocale<typeof NS_MINIMAX_CODE>> & {
+/**
+ * Props this card accepts.
+ *
+ * Deliberately the same shape every sibling tab declares: the hub hands each tab
+ * only the refresh callback. The card does not take the hub's `settings.section`
+ * runtime seat or its locale seat, because it renders its own dictionary (see
+ * below) and needs none of that scope's other props.
+ */
+interface Props {
   onModelChange?: () => void
 }
 
 /**
- * The keys this card renders. The provider hub mounts every tab under one
- * locale namespace of its own, so the injected `t` seat is optional here: when
- * the card is mounted without one it falls back to its own dictionary, the way
- * the sibling provider tabs render theirs.
+ * The keys this card renders.
+ *
+ * The provider hub hosts every provider tab inside one settings section whose
+ * injected `t` seat is bound to the hub's own namespace, and every sibling tab
+ * therefore renders its own dictionary instead of that seat (see KimiCodeSection,
+ * WorkBuddySection and CommandCodeSection, none of which declare a locale prop).
+ * This card must do the same: its keys are not a subset of the hub's, so using the
+ * hub's seat resolves the overlap to ChatGPT wording ("使用 ChatGPT 登录" on the
+ * MiniMax tab) and every other key to the literal key text.
  */
 type Translate = (key: keyof typeof zh) => string
 
-/** A stable fallback keeps the login-poll effect's dependency identity intact. */
+/** The card's own dictionary; stable identity keeps effect dependencies intact. */
 const fallbackTranslate: Translate = (key) => zh[key]
 
 /**
@@ -80,8 +92,8 @@ function formatDate(ms: number | undefined): string {
   }
 }
 
-export function MinimaxCodeSection({ t: injectedTranslate, onModelChange }: Props): React.JSX.Element {
-  const t: Translate = injectedTranslate ?? fallbackTranslate
+export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element {
+  const t: Translate = fallbackTranslate
   const [status, setStatus] = useState<MinimaxCodeWebStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
@@ -201,7 +213,13 @@ export function MinimaxCodeSection({ t: injectedTranslate, onModelChange }: Prop
       setError(null)
       setConnectionNotice(null)
       setFlow(null)
-      await post('/logout')
+      // The host refuses to sign out a credential the desktop app owns; that
+      // refusal is a successful, expected answer rather than an error, so it is
+      // surfaced as a notice and the status is re-read either way.
+      const result = await post<{ ok?: boolean; native?: boolean; error?: string }>('/logout')
+      if (result.native === true) {
+        setConnectionNotice(result.error ?? t('logoutOwnedByApp'))
+      }
       await loadStatus(true)
       onModelChange?.()
     } catch (cause) {
@@ -351,11 +369,25 @@ export function MinimaxCodeSection({ t: injectedTranslate, onModelChange }: Prop
             </button>
           )}
           {flow === null && authenticated && (
-            <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleLogout()}>
+            // A native sign-in is the desktop app's, so this plugin cannot end it.
+            // The button stays (hiding it would leave the user guessing where
+            // sign-out went) but is disabled, and the reason is rendered as text
+            // below rather than only as a tooltip: a disabled button does not fire
+            // the hover events a tooltip needs, so a title alone would leave the
+            // control unexplained.
+            <button
+              className="dsha-btn"
+              disabled={busy !== null || status?.ownedByPlugin === false}
+              title={status?.ownedByPlugin === false ? t('logoutOwnedByApp') : undefined}
+              onClick={() => void handleLogout()}
+            >
               {t('signOut')}
             </button>
           )}
         </div>
+        {flow === null && authenticated && status?.ownedByPlugin === false && (
+          <p className="dsha-muted">{t('logoutOwnedByApp')}</p>
+        )}
       </section>
 
       <section className="dsha-group">
@@ -370,6 +402,15 @@ export function MinimaxCodeSection({ t: injectedTranslate, onModelChange }: Prop
           <span className="dsha-label">{t('connectionState')}</span>
           <span className="dsha-value">{authenticated ? t('connected') : t('untested')}</span>
         </div>
+        {/* The provider id is contended like every sibling line's, so the same
+            notice they render is rendered here: a user whose models are served by
+            another adapter must be told that, not shown "connected" for a route
+            this plugin does not own. */}
+        <p className="dsha-notice">
+          {status?.serving === false && status.conflict
+            ? t('routeConflict').replace('{detail}', status.conflict)
+            : t('routeOwned')}
+        </p>
         {connectionNotice !== null && <p className="dsha-muted">{connectionNotice}</p>}
         <div className="dsha-actions">
           <button

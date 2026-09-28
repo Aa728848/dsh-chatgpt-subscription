@@ -22,32 +22,13 @@ export const CODEX_CHATGPT_PROVIDER_ID = 'codex-chatgpt' as const
 //
 // The provider id and the route prefix are re-exported from the frozen shared
 // contract rather than restated here, so the two halves of the line cannot drift
-// apart; they are surfaced through this file only so a caller can find every
-// route prefix this package mounts in one place, as it can for the lines above.
+// apart. This line's settings routes live under its own `/minimax-code/api`
+// prefix like every other subscription line, NOT under the Codex
+// `/api/dsh-chatgpt-subscription` prefix below, which belongs to that one route
+// table alone. Exposing the constant here keeps the mounted prefixes discoverable
+// from the compatibility seam.
 //
 export { MINIMAX_CODE_PROVIDER_ID, MINIMAX_CODE_ROUTE_PREFIX } from './shared/minimax-code-contracts.ts'
-
-/**
- * Sibling-line route prefix for the MiniMax Code card.
- *
- * The other subscription lines register under `/<line>/api` (for example
- * `/kimi-code/api`), while the frozen contract for this line names the fully
- * qualified `/api/dsh-chatgpt-subscription/minimax-code`. The host mounts both so
- * a client written against either convention resolves.
- */
-export const MINIMAX_CODE_SIBLING_ROUTE_PREFIX = '/minimax-code/api' as const
-
-/** Anthropic protocol revision the MiniMax Code endpoint documents. */
-export const MINIMAX_CODE_ANTHROPIC_VERSION = '2023-06-01' as const
-
-/** Public OAuth client id MiniMax Code registers (no secret). */
-export const MINIMAX_CODE_CLIENT_ID = 'mcode-public' as const
-
-/** OAuth scope the MiniMax Code subscription token is issued for. */
-export const MINIMAX_CODE_SCOPE = 'agent.default' as const
-
-/** OAuth audience the MiniMax Code subscription token is issued for. */
-export const MINIMAX_CODE_AUDIENCE = 'agent-backend' as const
 
 export const CODEX_API_BASE = 'https://chatgpt.com/backend-api/codex' as const
 export const CODEX_RESPONSES_URL = `${CODEX_API_BASE}/responses` as const

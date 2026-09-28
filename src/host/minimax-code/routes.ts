@@ -45,8 +45,6 @@ import {
 import { listModelIds, testConnection } from './client.ts'
 
 /** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
-const SIBLING_PREFIX = '/minimax-code/api'
-
 const MAX_BODY_BYTES = 64 * 1024
 
 /** The last sign-in this process started, so /status can render it. */
@@ -93,10 +91,9 @@ async function readRequestJson(request: IncomingMessage): Promise<Record<string,
 /** The sub-path one request addresses, whichever prefix it arrived under. */
 export function subPathOf(requestUrl: string): string {
   const pathname = new URL(requestUrl || '/', 'http://dsh.local').pathname
-  for (const prefix of [MINIMAX_CODE_ROUTE_PREFIX, SIBLING_PREFIX]) {
-    if (pathname === prefix) return ''
-    if (pathname.startsWith(prefix + '/')) return pathname.slice(prefix.length + 1)
-  }
+  const prefix = MINIMAX_CODE_ROUTE_PREFIX
+  if (pathname === prefix) return ''
+  if (pathname.startsWith(prefix + '/')) return pathname.slice(prefix.length + 1)
   return pathname.replace(/^\/+/, '')
 }
 
@@ -108,16 +105,29 @@ export interface MinimaxCodeStatusOptions {
   conflict?: string | null | (() => string | null)
 }
 
+/** Read one status option, which the caller may supply as a live predicate. */
+function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
+  return typeof value === 'function' ? (value as () => T)() : value ?? fallback
+}
+
 /** Everything the settings card renders. */
 export async function getMinimaxCodeWebStatus(
   store: MinimaxCodeCredentialStore,
   options: MinimaxCodeStatusOptions = {},
 ): Promise<MinimaxCodeWebStatus> {
-  const credentials = await store.read()
-  const source = await store.activeSource().catch(() => 'file' as const)
-  const path = await store.activePath().catch(() => store.path())
+  // One pass over the credential files, not three: this route is polled by the
+  // settings card, and the targeted accessors would each re-read and re-parse the
+  // native document (one file read plus one JSON parse per probed region).
+  const { credentials, source, path } = await store.readWithProvenance()
   const region: MinimaxCodeRegion = credentials?.region ?? 'cn'
+  // The provider route is contended exactly like the sibling lines', so the same
+  // two facts every other card renders are reported here too: whether this plugin
+  // owns the id, and why not when another adapter family does.
+  const serving = readOption(options.serving, true)
+  const conflict = readOption(options.conflict, null)
   return {
+    serving,
+    conflict,
     authenticated: credentials !== null,
     providerId: PROVIDER_ID,
     region,
@@ -129,6 +139,12 @@ export async function getMinimaxCodeWebStatus(
     // The hardcoded directory. Nothing here calls /v1/models, which is unavailable
     // on this endpoint (503 direct_route_not_configured).
     models: listModelIds(),
+    // True only for a credential in force that this plugin itself wrote, and may
+    // therefore revoke and delete. A native `~/.minimax/auth` sign-in is reused
+    // and renewed in place, but the desktop app owns it: the card must offer no
+    // sign-out that would destroy it, and with no credential at all there is no
+    // ownership to report.
+    ownedByPlugin: credentials !== null && source === 'file',
     // quota is deliberately absent: no quota endpoint was measured for this
     // subscription, and the frozen contract defines its absence as the graceful
     // degradation the card must handle.
@@ -200,15 +216,36 @@ export function registerMinimaxCodeRoutes(
       if (path === 'logout') {
         if (method !== 'POST') return sendMethodNotAllowed(response)
         if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
-        // The refresh token is revoked at the service first, so the session really
-        // ends; the local delete is best effort and never blocks the sign-out.
+        // Sign-out is scoped to what this plugin owns. MiniMax Code's own
+        // `auth.json` is the desktop app's session, not this plugin's: revoking
+        // its refresh token would sign the user out of the application they are
+        // running, and deleting the file would do the same. That is the
+        // WorkBuddy precedent for a credential this plugin reads but does not
+        // own (desktop accounts there are hidden, never deleted). So a sign-out
+        // revokes and deletes only when the credential in force is the plugin's
+        // own file; a native credential is reported as still in force instead of
+        // being silently destroyed.
+        const source = await store.activeSource().catch(() => 'file' as const)
+        if (source === 'minimax-native') {
+          latestLogin = null
+          return sendJson(response, 200, {
+            ok: true,
+            value: {
+              ok: false,
+              native: true,
+              error: 'This sign-in belongs to MiniMax Code itself; sign out in the MiniMax Code app to end it.',
+            },
+          })
+        }
+        // Revoke at the service first, so the session really ends there too; the
+        // local delete is best effort and never blocks the sign-out.
         const credentials = await store.read().catch(() => null)
         if (credentials !== null) {
           await revokeToken(credentials.refreshToken, { fetchFn, region: credentials.region })
         }
         await store.delete()
         latestLogin = null
-        return sendJson(response, 200, { ok: true, value: { ok: true } })
+        return sendJson(response, 200, { ok: true, value: { ok: true, native: false } })
       }
 
       if (path === 'test') {
@@ -242,20 +279,9 @@ export function registerMinimaxCodeRoutes(
     }
   }
 
-  const disposers: Array<() => void> = []
-  disposers.push(ctx.webServer.register({ kind: 'prefix', path: MINIMAX_CODE_ROUTE_PREFIX, handler }))
-  try {
-    disposers.push(ctx.webServer.register({ kind: 'prefix', path: SIBLING_PREFIX, handler }))
-  } catch (error) {
-    // The contract prefix is the one that matters; a harness that refuses the
-    // second mount must not take the line down with it.
-    ctx.logger?.warn(
-      '[dsh-chatgpt-subscription] minimax-code: could not also mount ' + SIBLING_PREFIX + ' ('
-      + (error instanceof Error ? error.message : String(error)) + ')',
-    )
-  }
+  const dispose = ctx.webServer.register({ kind: 'prefix', path: MINIMAX_CODE_ROUTE_PREFIX, handler })
   return () => {
-    for (const dispose of disposers) dispose()
+    dispose()
   }
 }
 

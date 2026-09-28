@@ -73,7 +73,7 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
       {active === 'command-code' ? <CommandCodeSection onModelChange={onModelChange} /> : null}
       {active === 'kimi-code' ? <KimiCodeSection onModelChange={onModelChange} /> : null}
       {active === 'workbuddy' ? <WorkBuddySection onModelChange={onModelChange} /> : null}
-      {active === 'minimax-code' ? <MinimaxCodeSection onModelChange={onModelChange} {...runtime} /> : null}
+      {active === 'minimax-code' ? <MinimaxCodeSection onModelChange={onModelChange} /> : null}
       {active === 'claude' ? <ClaudeSection onModelChange={onModelChange} /> : null}
     </div>
   </section>

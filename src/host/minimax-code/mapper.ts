@@ -49,6 +49,7 @@ import {
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
   MAX_MESSAGE_BODY_BYTES,
+  estimatedInputTokens,
   offloadOldestRequestImages,
   resolveRequestImages,
   stripMetaSchema,
@@ -69,7 +70,7 @@ import {
   PROVIDER_NAME,
 } from './types.ts'
 
-export { MAX_MESSAGE_BODY_BYTES, offloadOldestRequestImages, resolveRequestImages }
+export { MAX_MESSAGE_BODY_BYTES, estimatedInputTokens, offloadOldestRequestImages, resolveRequestImages }
 export type { AttachmentImageReader, ResolvedRequestImages }
 
 /** Anthropic content blocks are plain JSON objects on the wire. */
@@ -370,7 +371,11 @@ export function thinkingFieldFor(
     return undefined
   }
   if (disabled) {
-    return model.thinking === 'toggle' ? { type: 'disabled' } : { type: 'disabled' }
+    // Both remaining modes accept the same off switch, so there is one shape to
+    // send. `always-on` never reaches here (it returns above): the model table
+    // documents no way to turn it off, and inventing one would be a field the
+    // service never agreed to.
+    return { type: 'disabled' }
   }
   if (model.thinking === 'toggle') return { type: 'enabled' }
   return {

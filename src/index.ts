@@ -443,7 +443,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         })
       : undefined
 
-    const disposeMinimaxCodeRoutes = registerMinimaxCodeRoutes(ctx, minimaxCodeStore, { fetchFn: proxyFetch })
+    const disposeMinimaxCodeRoutes = registerMinimaxCodeRoutes(ctx, minimaxCodeStore, {
+      fetchFn: proxyFetch,
+      serving: () => minimaxCodeRegistration !== undefined,
+      conflict: () => minimaxCodeConflict,
+    })
 
     // WorkBuddy is the CodeBuddy subscription: this plugin reads the desktop
     // client's own credential files, so the route is claimed like the others

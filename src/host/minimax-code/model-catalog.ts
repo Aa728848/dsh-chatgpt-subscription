@@ -35,8 +35,20 @@ export interface MinimaxCodeCatalogModel {
   optionalContextWindow: number | null
   /** Output cap the model accepts. */
   maxTokens: number
-  /** Input the model accepts. */
-  inputModalities: readonly ('text' | 'image' | 'video')[]
+  /**
+   * Input the model accepts.
+   *
+   * Declared as the wire accepts it. Note that a capability listed here is a claim
+   * DSH's capability pipeline acts on (prompt admission, the model picker, subagent
+   * delegation), so this line lists only what its mapper can actually put on the
+   * wire. Video is deliberately NOT listed even though the model table documents it
+   * on M3 and M3.1: DSH's attachment service is image-only and this line installs no
+   * video byte reader, so a clip that reached the mapper would be replaced by a
+   * placeholder — advertising it would promise an upload the route cannot perform.
+   * Add 'video' here only together with a real reader (see the Kimi Code line, which
+   * implements one in `video-store.ts` and widens the modality vocabulary for it).
+   */
+  inputModalities: readonly ('text' | 'image')[]
   /** How thinking behaves on this model. */
   thinking: MinimaxCodeThinkingMode
   /**
@@ -106,7 +118,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     contextWindow: 512_000,
     optionalContextWindow: 1_000_000,
     maxTokens: 128_000,
-    inputModalities: ['text', 'image', 'video'],
+    inputModalities: ['text', 'image'],
     thinking: 'toggle',
     // The model's thinking is a two-state switch, not a gradient: the table names
     // it "none-thinking / thinking, default thinking". Exposing one always-on
@@ -126,7 +138,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     contextWindow: 1_000_000,
     optionalContextWindow: null,
     maxTokens: 128_000,
-    inputModalities: ['text', 'image', 'video'],
+    inputModalities: ['text', 'image'],
     thinking: 'forced-effort',
     reasoningEfforts: ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'default',

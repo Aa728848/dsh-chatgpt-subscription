@@ -22,6 +22,7 @@
  * `{"errorCode":50115,"errorReason":"direct_route_not_configured"}`.
  */
 
+import { createHash } from 'node:crypto'
 import type { MinimaxCodeReasoningEffort, MinimaxCodeRegion } from '../../shared/minimax-code-contracts.ts'
 import { MINIMAX_CODE_PROVIDER_ID, MINIMAX_CODE_PROVIDER_NAME } from '../../shared/minimax-code-contracts.ts'
 
@@ -186,13 +187,18 @@ export function isMinimaxCodeReasoningEffort(value: unknown): value is MinimaxCo
 /**
  * Render a token for a log line or an error message without disclosing it.
  *
- * The brief forbids emitting a real token anywhere, so every diagnostic that
- * would otherwise quote one goes through this: a short prefix plus the length is
- * enough to tell two tokens apart and to confirm which credential was rejected,
- * and is not enough to use one.
+ * A real credential must never reach a log, a settings response, or a rendered
+ * error, so nothing derived from the token's *content* is emitted here. An earlier
+ * revision printed the first six characters plus the length "to tell two tokens
+ * apart"; that is still a disclosure of the credential — six characters of a
+ * bearer token is material an attacker can use, and these strings are rendered in
+ * the settings card and written to the host log. The fingerprint below is instead
+ * a truncated SHA-256 over the token, which distinguishes two credentials and
+ * pins which one was rejected (the diagnostic purpose) while being unusable as a
+ * credential prefix.
  */
 export function redactToken(token: string | undefined | null): string {
   if (token === undefined || token === null || token === '') return '<none>'
-  const prefix = token.slice(0, 6)
-  return `${prefix}...(${token.length})`
+  const fingerprint = createHash('sha256').update(token).digest('hex').slice(0, 12)
+  return 'sha256:' + fingerprint + '/len:' + token.length
 }

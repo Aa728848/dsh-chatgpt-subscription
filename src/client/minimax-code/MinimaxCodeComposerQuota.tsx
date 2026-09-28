@@ -81,15 +81,18 @@ export function MinimaxCodeComposerQuota({ t, directory, loadModelDirectory }: P
     }
   }, [])
 
+  // One status read per selection, with no polling interval.
+  //
+  // The sibling badges poll because their quota moves: a window is spent down and
+  // the number must follow it. This line publishes no quota at all (the frozen
+  // contract makes the field optional and no usage endpoint was measured for this
+  // subscription), so a repeating read could not change what the badge shows —
+  // `selectBadgeFacts` returns null and the badge renders nothing either way. A
+  // 60-second timer here would be N-sessions-per-minute of dead traffic to a
+  // /status route that reads a credential file, for no visible effect.
   useEffect(() => {
     if (!isMinimaxCode) return
     void fetchStatus()
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void fetchStatus()
-    }, 60_000)
-    return () => {
-      window.clearInterval(timer)
-    }
   }, [fetchStatus, isMinimaxCode])
 
   const facts = useMemo(() => selectBadgeFacts(status), [status])

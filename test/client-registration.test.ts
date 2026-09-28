@@ -290,15 +290,19 @@ describe('client registration', () => {
     const originalFetch = globalThis.fetch
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
-      // MiniMax Code reads its own frozen route prefix, and its card treats a
-      // missing quota as "this line exposes no usage endpoint".
-      if (url.startsWith('/api/dsh-chatgpt-subscription/minimax-code')) {
+      // MiniMax Code mounts under its own `/minimax-code/api` prefix like every
+      // sibling line, and its card treats a missing quota as "this line exposes
+      // no usage endpoint".
+      if (url.startsWith('/minimax-code/api')) {
         return Response.json({ ok: true, value: {
           authenticated: false,
           account: null,
           region: 'cn',
           storage: { kind: 'minimax-native', path: '/tmp/minimax-auth.json' },
           models: ['MiniMax-M2'],
+          serving: true,
+          conflict: null,
+          ownedByPlugin: false,
         } })
       }
       if (url.startsWith('/antigravity/api') || url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api') || url.startsWith('/workbuddy/api')) {
@@ -350,7 +354,7 @@ describe('client registration', () => {
       expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-page')).not.toBeNull()
       expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-grouphead')?.textContent).toContain(zh.accountPool)
 
-      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/api/dsh-chatgpt-subscription/minimax-code/status'], [6, '/claude/api/status']] as const) {
+      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/minimax-code/api/status'], [6, '/claude/api/status']] as const) {
         const id: string = TAB_IDS[index]
         fetchMock.mockClear()
         await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-' + id)?.click() })
@@ -360,7 +364,26 @@ describe('client registration', () => {
         expect(container.querySelector<HTMLButtonElement>('#dsh-hub-tab-' + id)?.getAttribute('aria-selected')).toBe('true')
       }
 
-      // Arrow keys move the active tab per the tablist pattern.
+      // The MiniMax tab renders its OWN dictionary, not the hub's locale seat.
+      // The hub's `t` is bound to the ChatGPT namespace, whose key set is not a
+      // superset of this card's: using it resolved 35 keys to their literal names
+      // and 8 others to ChatGPT wording (the sign-in button literally read
+      // "使用 ChatGPT 登录"). Resolve `t` the way the real LocaleFace does — an
+      // unknown key falls through to the key itself — and assert no key leaks.
+      await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-minimax-code')?.click() })
+      const minimaxText = container.querySelector('#dsh-hub-panel-minimax-code .dsha-page')?.textContent ?? ''
+      expect(minimaxText).not.toContain('使用 ChatGPT 登录')
+      expect(minimaxText).not.toContain(zh.signIn)
+      // A literal key name would appear as a camelCase word with no CJK context.
+      for (const key of ['pageDesc', 'accountLabel', 'storagePath', 'quotaSection', 'regionCn']) {
+        expect(minimaxText).not.toContain(key)
+      }
+      expect(minimaxText).toContain('MiniMax Code')
+
+      // Arrow keys move the active tab per the tablist pattern. The tab that
+      // receives the key is the one that moves relative to the current selection,
+      // so the selection is put back on Claude first.
+      await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-claude')?.click() })
       await act(async () => {
         container.querySelector<HTMLButtonElement>('#dsh-hub-tab-claude')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
       })

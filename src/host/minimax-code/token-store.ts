@@ -156,10 +156,21 @@ export function parseMinimaxCodeCredentials(
     generation: asFiniteNumber(value.generation) ?? 0,
     loginEpoch: asString(value.loginEpoch) ?? '',
     buildEnv: fallback.buildEnv ?? MINIMAX_CODE_BUILD_ENV,
-    region: fallback.region,
+    // The record's own region wins over the caller's default. The region decides
+    // every host a request goes to, and a credential signed in through the global
+    // flow must be read back as global: a caller-side default would silently
+    // redirect that account at the mainland endpoints. The record is authoritative
+    // because the file the plugin keeps holds exactly one credential, while the
+    // caller's value is only ever the path it happened to look in.
+    region: isRegion(value.region) ? value.region : fallback.region,
     recordKey: fallback.recordKey ?? null,
     source: fallback.source ?? 'file',
   }
+}
+
+/** Whether one value is a region this line understands. */
+function isRegion(value: unknown): value is MinimaxCodeRegion {
+  return value === 'cn' || value === 'global'
 }
 
 /** Whether a credential is valid for long enough to use as-is. */
@@ -182,13 +193,12 @@ async function writeFileAtomic(filePath: string, contents: string): Promise<void
   const temporary = filePath + '.dsh-tmp-' + process.pid + '-' + Date.now()
   try {
     await fs.writeFile(temporary, contents, { encoding: 'utf8', mode: 0o600 })
-    // One fixed-name rollback point, refreshed on every write. Best effort: a
-    // backup failure must not stop the credential from being saved.
-    try {
-      await fs.copyFile(filePath, filePath + '.dsh-bak')
-    } catch {
-      // No previous file, or it is unreadable: there is nothing to back up.
-    }
+    // No sidecar copy is kept. The destination may be MiniMax Code's own
+    // directory, and this plugin must not leave a second copy of a live
+    // credential (or of the app's document shape) beside the one the app owns;
+    // the atomic rename below already guarantees the previous file survives
+    // intact until the replacement is complete, which is the property a backup
+    // would have been there for.
     await fs.rename(temporary, filePath)
   } catch (error) {
     await fs.rm(temporary, { force: true }).catch(() => undefined)
@@ -310,20 +320,30 @@ export class MinimaxCodeCredentialStore {
   }
 
   private async readNative(): Promise<MinimaxCodeCredentials | null> {
-    const document = await readNativeDocument(this.region)
-    if (document === null) return null
-    try {
-      return parseMinimaxCodeCredentials(document.record, {
-        region: this.region,
-        buildEnv: asString(document.record.buildEnv) ?? MINIMAX_CODE_BUILD_ENV,
-        recordKey: document.recordKey,
-        source: 'minimax-native',
-      })
-    } catch {
-      // A present-but-unusable native record falls through to the plugin store
-      // rather than being reported as "signed in".
-      return null
+    // Both region directories are probed, cheapest first: the constructor's
+    // region is the common case, and the other one is a single extra stat for a
+    // user who signed in to the other property. Probing only the configured
+    // region made a global sign-in invisible to this whole line.
+    const order: MinimaxCodeRegion[] = this.region === 'cn' ? ['cn', 'global'] : ['global', 'cn']
+    for (const region of order) {
+      const document = await readNativeDocument(region)
+      if (document === null) continue
+      try {
+        // The region the record was found under is carried on the returned
+        // credential, which is what every later host and write-back is keyed on;
+        // no separate field is needed to remember it.
+        return parseMinimaxCodeCredentials(document.record, {
+          region,
+          buildEnv: asString(document.record.buildEnv) ?? MINIMAX_CODE_BUILD_ENV,
+          recordKey: document.recordKey,
+          source: 'minimax-native',
+        })
+      } catch {
+        // A present-but-unusable native record falls through to the next region
+        // and then to the plugin store rather than being reported as "signed in".
+      }
     }
+    return null
   }
 
   private async readPluginFile(): Promise<MinimaxCodeCredentials | null> {
@@ -347,14 +367,31 @@ export class MinimaxCodeCredentialStore {
     return serialize(this.path(), async () => (await this.readNative()) ?? (await this.readPluginFile()))
   }
 
+  /**
+   * The credential in force plus where it came from, in one pass.
+   *
+   * A status response needs all three facts, and each of the targeted accessors
+   * re-reads and re-parses the native document (a file read plus a JSON parse per
+   * region probed). Reading once here keeps one /status call from doing that work
+   * three times, which matters because the settings card polls this route.
+   */
+  readWithProvenance(): Promise<{
+    credentials: MinimaxCodeCredentials | null
+    source: MinimaxCodeCredentialSource
+    path: string
+  }> {
+    return serialize(this.path(), async () => {
+      const native = await this.readNative()
+      if (native !== null) {
+        return { credentials: native, source: 'minimax-native' as const, path: authJsonPath(native.region) }
+      }
+      return { credentials: await this.readPluginFile(), source: 'file' as const, path: pluginCredentialPath() }
+    })
+  }
+
   /** Which file the credential currently in force lives in. */
   async activeSource(): Promise<MinimaxCodeCredentialSource> {
     return (await this.readNative()) === null ? 'file' : 'minimax-native'
-  }
-
-  /** Path the credential in force is stored in, for the status card. */
-  async activePath(): Promise<string> {
-    return (await this.readNative()) === null ? pluginCredentialPath() : authJsonPath(this.region)
   }
 
   /**
@@ -366,6 +403,9 @@ export class MinimaxCodeCredentialStore {
    */
   write(credentials: MinimaxCodeCredentials): Promise<void> {
     const native = credentials.source === 'minimax-native' && credentials.recordKey !== null
+    // Keyed on the credential's own region, not the constructor default: a
+    // rotation must land in the file it was read from, or the desktop app keeps
+    // the stale token while this plugin holds a live one.
     const target = native ? authJsonPath(credentials.region, credentials.buildEnv) : pluginCredentialPath()
     return serialize(target, async () => {
       if (!native) {
@@ -413,10 +453,13 @@ export class MinimaxCodeCredentialStore {
   }
 
   /**
-   * Forget the plugin's own credential.
+   * Forget the credential this plugin owns.
    *
-   * The desktop app's file is deliberately left alone: it is not this plugin's to
-   * delete, and removing it would sign the user out of MiniMax Code itself.
+   * The desktop app's `auth.json` is deliberately left alone: it is not this
+   * plugin's to delete, and removing it would sign the user out of MiniMax Code
+   * itself. A credential this store is only *reading* from the app therefore
+   * remains in force after a sign-out, which the status route reports so the
+   * user is not told a session ended when it did not.
    */
   delete(): Promise<void> {
     return serialize(pluginCredentialPath(), async () => {

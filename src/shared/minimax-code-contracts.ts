@@ -14,8 +14,15 @@ export type MinimaxCodeRegion = 'cn' | 'global'
 /** M3.1 的思考档位；M2.7 恒定开启，M3 为开关二态。 */
 export type MinimaxCodeReasoningEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-/** 路由前缀（host 暴露、client 消费）。 */
-export const MINIMAX_CODE_ROUTE_PREFIX = '/api/dsh-chatgpt-subscription/minimax-code'
+/**
+ * 路由前缀（host 暴露、client 消费）。
+ *
+ * 与其余各订阅线路一致：每条线路把自己的设置面挂在 `/<line>/api` 下
+ * （antigravity / claude / command-code / kimi-code / workbuddy 都是如此），
+ * 而不是挂到 Codex 那条线路的 `/api/dsh-chatgpt-subscription` 前缀下面。
+ * 唯一的 `/api/dsh-chatgpt-subscription` 前缀属于 Codex 自己的路由表。
+ */
+export const MINIMAX_CODE_ROUTE_PREFIX = '/minimax-code/api'
 
 export interface MinimaxCodeAccount {
   id: string
@@ -56,4 +63,18 @@ export interface MinimaxCodeWebStatus {
   models: readonly string[]
   /** 无配额接口时为 undefined，UI 应优雅降级。 */
   quota?: MinimaxCodeQuota
+  /** 本插件是否正在服务该 Provider 路由；被别的适配器占用时为 false。 */
+  serving: boolean
+  /** 路由被别的适配器占用时的诊断文案。 */
+  conflict: string | null
+  /**
+   * 凭据是否由本插件自己持有（即本插件设备码登录写下的那一份）。
+   *
+   * false 有两种情况：尚未登录，或当前登录态属于 MiniMax Code 桌面端自己
+   * （`~/.minimax/auth`）。后者本插件**会**在需要时续期并原子写回（只读优先），
+   * 但**不会删除**它——删掉等于把用户从正在运行的官方客户端里踢下线。因此
+   * 「登出」对它无效，卡片必须据此禁用按钮并说明原因，而不是给出一个按下去
+   * 没有效果的按钮。
+   */
+  ownedByPlugin: boolean
 }
