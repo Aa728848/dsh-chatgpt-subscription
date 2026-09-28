@@ -20,6 +20,7 @@ import type {
 } from '../../shared/account-pool-contracts.ts'
 import { get, messageOf, post } from './api.ts'
 import { zh } from './locales.ts'
+import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 
 /** The pool slice the status card renders, absent when the line has no pool. */
 type MinimaxCodePoolStatus = Pick<AccountPoolStatusDto, 'accounts' | 'rotationStrategy'> & {
@@ -210,12 +211,20 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
   // and absent for a host that has no pool installed at all.
   const [pool, setPool] = useState<MinimaxCodePoolStatus | undefined>(undefined)
 
+  // The follow-up poll for a usage read the host is running behind its answer.
+  // Every sibling card has this and this one did not, which is why a page
+  // opened right after a restart sat on "no usage data" until the 60 s tick:
+  // the host was already fetching, the answer simply could not say so.
+  const quotaFollowUp = useRef<QuotaFollowUp | undefined>(undefined)
+
   const loadStatus = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
     try {
       const next = await get<MinimaxCodeWebStatus>('/status')
       setStatus(next)
       setContextDrafts(contextDraftsFor(next))
+      quotaFollowUp.current ??= createQuotaFollowUp()
+      quotaFollowUp.current.observe(next.quotaRefreshing === true, () => { void loadStatus(true) })
     } catch (cause) {
       if (!quiet) setError(messageOf(cause))
     } finally {
@@ -237,6 +246,7 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
     return () => {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
+      quotaFollowUp.current?.cancel()
     }
   }, [loadStatus])
 

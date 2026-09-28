@@ -7,6 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   clearCachedQuota,
   fetchTokenPlanQuota,
+  getCachedQuota,
   getQuotaUnavailable,
   parseTokenPlanQuota,
   resolveQuotaCounts,
@@ -411,6 +412,56 @@ describe('MiniMax Token Plan quota route', () => {
     expect((fetchFn as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0)
   })
 
+  // Cold start is the case that was broken: the snapshot cache lives in module
+  // state, so a fresh process answers the first /status with no quota at all while
+  // the read that would fill it runs behind the answer. The card could not tell
+  // that apart from "there is no data", and sat there until its 60 s tick.
+  it('fills the snapshot on the FIRST /status, so a cold card is never empty', async () => {
+    const fetchFn = vi.fn(async () => Response.json(payload([row()]))) as unknown as typeof fetch
+    const { handler } = await harness({ fetchFn })
+
+    const first = exchange()
+    await handler(request({ url: '/minimax-code/api/status' }), first.response)
+    // Not merely "a refresh was scheduled": the answer already carries numbers.
+    expect(first.captured.body.value.quota?.label).toBe('Token Plan')
+    expect(first.captured.body.value.quotaRefreshing).toBe(false)
+  })
+
+  it('reports a background refresh so the card can ask again', async () => {
+    // Only Date is faked, so the gate below is still driven by real promises and
+    // no timer is left hanging.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      let release: (() => void) | undefined
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      let calls = 0
+      const fetchFn = vi.fn(async () => {
+        // The first read fills the cache; every later one blocks, so a refresh
+        // started behind an answer is guaranteed to still be running.
+        calls += 1
+        if (calls > 1) await gate
+        return Response.json(payload([row()]))
+      }) as unknown as typeof fetch
+      const { handler } = await harness({ fetchFn })
+
+      await handler(request({ url: '/minimax-code/api/quota' }), exchange().response)
+      expect(getCachedQuota()).not.toBeNull()
+
+      // Age the snapshot past its TTL. The route then has something to render
+      // AND has a reason to re-read, which is the only case it backgrounds.
+      vi.setSystemTime(Date.now() + 10 * 60_000)
+
+      const held = exchange()
+      await handler(request({ url: '/minimax-code/api/status' }), held.response)
+      expect(held.captured.body.value.quotaRefreshing).toBe(true)
+      // It answered from the snapshot it already had rather than waiting.
+      expect(held.captured.body.value.quota?.label).toBe('Token Plan')
+
+      release!()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('rejects a cross-origin usage refresh', async () => {
     const fetchFn = vi.fn(async () => Response.json(payload([row()]))) as unknown as typeof fetch
     const { handler } = await harness({ fetchFn })

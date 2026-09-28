@@ -72,6 +72,7 @@ import {
   testConnection,
 } from './client.ts'
 import type { MinimaxCodeCheckinService } from './checkin.ts'
+import { QuotaRefresh } from '../common/quota-refresh.ts'
 
 /** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
 const MAX_BODY_BYTES = 64 * 1024
@@ -303,6 +304,21 @@ export function registerMinimaxCodeRoutes(
     return await fetchTokenPlanQuota(credentials, { fetchFn, force }).catch(() => null)
   }
 
+  /**
+   * The in-flight usage read, so the card can be told one is running.
+   *
+   * This line previously fired the background read with a bare `void`, which
+   * discarded the only fact the card needed: nothing. On a cold start there is no
+   * snapshot yet, so the answer carried `quota: undefined` and the refresh that
+   * would fill it was already running but invisible. The card then showed "no
+   * usage data" until its next 60 s poll — which, on a page opened right after a
+   * restart, is most of a minute of a quota box the user just signed in to fill.
+   * Every sibling line reports the flag and the client schedules a short
+   * follow-up (see QuotaRefresh and client/common/quota-follow-up.ts); this one
+   * had neither half.
+   */
+  const quotaRefresh = new QuotaRefresh()
+
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const path = subPathOf(request.url ?? '/')
     const method = request.method ?? 'GET'
@@ -315,11 +331,22 @@ export function registerMinimaxCodeRoutes(
         // Refresh usage BEHIND the answer rather than inside it. Awaiting here would
         // put a network timeout in the middle of a poll whenever the usage host is
         // unreachable, and the card is polled; the snapshot it already had is
-        // rendered now and the refreshed one arrives on the next poll (or at once
-        // from `/quota`).
-        if (options.fetchFn !== undefined) void refreshQuota(false)
+        // rendered now and the refreshed one arrives on the follow-up poll (or at
+        // once from `/quota`).
+        //
+        // A card with NO snapshot has nothing to render meanwhile, so that first
+        // read is awaited rather than backgrounded: the answer must not go out
+        // reporting an empty quota box when the numbers were one request away. It
+        // costs one upstream round trip exactly once per snapshot lifetime.
+        if (options.fetchFn !== undefined) {
+          if (getCachedQuota() === null) await quotaRefresh.run(() => refreshQuota(false))
+          else quotaRefresh.start(() => refreshQuota(false))
+        }
         const value = await getMinimaxCodeWebStatus(store, options, settings)
-        return sendJson(response, 200, { ok: true, value })
+        return sendJson(response, 200, {
+          ok: true,
+          value: { ...value, quotaRefreshing: quotaRefresh.refreshing },
+        })
       }
 
       if (path === 'quota') {
@@ -328,9 +355,16 @@ export function registerMinimaxCodeRoutes(
         // A failed usage read is not a failed request: the contract makes `quota`
         // optional, so the card renders "no data" exactly as it does before the
         // first snapshot, and nothing about the connection half is affected.
-        await refreshQuota(method === 'POST')
+        //
+        // `run` rather than the bare call this used to make, so a read that THROWS
+        // is recorded instead of surfacing as an unhandled rejection on a promise
+        // nothing was awaiting.
+        await quotaRefresh.run(() => refreshQuota(method === 'POST'))
         const value = await getMinimaxCodeWebStatus(store, options, settings)
-        return sendJson(response, 200, { ok: true, value })
+        return sendJson(response, 200, {
+          ok: true,
+          value: { ...value, quotaRefreshing: quotaRefresh.refreshing },
+        })
       }
 
       if (path === 'models' || path === 'settings') {

@@ -188,6 +188,13 @@ export interface MinimaxCodeWebStatus {
    * - `unreachable`：没有任何候选主机给出可用应答。
    */
   quotaUnavailable?: 'credential-not-accepted' | 'unreachable'
+  /**
+   * 本次应答背后是否正在刷新用量。
+   *
+   * 卡片先用已有快照作答、不等待上游请求；该值为 true 时客户端应当稍后
+   * 再问一次，让刷新后的快照尽快上屏。
+   */
+  quotaRefreshing?: boolean
   /** 本插件是否正在服务该 Provider 路由；被别的适配器占用时为 false。 */
   serving: boolean
   /** 路由被别的适配器占用时的诊断文案。 */
