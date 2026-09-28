@@ -240,9 +240,16 @@ export async function getMinimaxCodeWebStatus(
     // sign-out that would destroy it, and with no credential at all there is no
     // ownership to report.
     ownedByPlugin: credentials !== null && source === 'file',
-    // quota is deliberately absent: no quota endpoint was measured for this
-    // subscription, and the frozen contract defines its absence as the graceful
-    // degradation the card must handle.
+    // quota is absent because this line has not wired it up yet, NOT because none
+    // exists: the official MiniMax CLI (`mmx quota show`, "Display Token Plan usage
+    // and remaining quotas") reads `GET {apiHost}/v1/token_plan/remains` with an
+    // OAuth credential — the same RFC 8628 + PKCE flow this line implements — and
+    // gets back per-model `model_remains` rows with 5-hour and weekly windows. What
+    // has never been verified here is whether THIS subscription's credential is
+    // accepted by that host (the CLI's API hosts differ from this line's agent
+    // hosts), and no credential exists on the machine this was written on. The
+    // contract defines the field as optional, so the card degrades to "not
+    // available" until someone measures it.
   }
 }
 
