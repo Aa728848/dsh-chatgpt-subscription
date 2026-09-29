@@ -174,15 +174,14 @@ next upgrade starts by reading the newest file in `references/`.
 
 ## 7. Current state
 
-- Tested baseline: **0.2.0-rc.1** (`devDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded run: forced typecheck + build clean, **1685 tests passed**
-  (116 files passed, 1 failed, 1 skipped file, 7 skipped tests — the failed file is
-  the known Windows-only `antigravity-callback-port` set, 6 tests); the
-  previous-baseline room (clean-room, `^0.1.7-rc.2` resolving exactly to
-  0.1.7-rc.2) is **identical in outcome — 1685 passed, same 6 known failures**;
-  old generation (clean-room 0.1.5-rc.3): source typecheck clean, **1682 tests
-  passed, same 6 known failures**, one generation-bound test file unable to load
-  (`@deepseek-ai/dsh-ptc-runtime`).
+- Tested baseline: **0.2.0-rc.2** (`devDependencies`); peer support 0.1.2-alpha.5
+  onwards. Latest recorded run: forced typecheck + build clean, **1759 tests passed**
+  (118 files passed, 2 failed*, 1 skipped file, 7 skipped tests — the failed files are
+  the known Windows-only host port reservation failures, 12 tests); the
+  previous-baseline room (clean-room, `0.2.0-rc.1` pinned) is **identical in outcome —
+  1759 passed, same 12 known failures**; old generation (clean-room 0.1.5-rc.3):
+  source typecheck clean, **1756 tests passed, same 12 known failures**, one
+  generation-bound test file unable to load (`@deepseek-ai/dsh-ptc-runtime`).
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
   covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
@@ -200,6 +199,9 @@ next upgrade starts by reading the newest file in `references/`.
   `references/0.2.0-rc.1.md` covers 0.2.0-rc.1: **no behavioural change needed**
   despite the major-looking version — every imported package is a version bump or an
   internal/additive delta, both slot contracts are byte-identical across the tags,
-  and the identical-outcome rc.2 room is the evidence. The rc.2 live items are
-  untouched by 0.2.0-rc.1 and remain as recorded there.
+  and the identical-outcome rc.2 room is the evidence.
+  `references/0.2.0-rc.2.md` covers 0.2.0-rc.2: **no behavioural change needed** —
+  additive `ask_user_question` timed mode and question row/record types,
+  `ui-model-selection` fuzzy search and provider ordering, and internal performance
+  memoizations; the identical-outcome 0.2.0-rc.1 clean room is the evidence.
 - Harness checkout used for every claim above: `C:\Users\A\Documents\deepseek-harness`.

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **跟进 DSH 0.2.0-rc.2（本机 harness 仓库更新，npm `latest` 与 `next` 标签已推进至该版本）**。`dsh-v0.2.0-rc.1..dsh-v0.2.0-rc.2` 共 1022 个文件，但逐一审计插件导入的 20 个包与全部兼容接缝后，**无需任何破坏性或行为性适配**：`dsh-llm` / `dsh-settings` / `dsh-web` / `dsh-tools` / `dsh-host-webserver` / `dsh-timeout` 等核心包源码零改动（仅版本号升级），`vendor/`（cordis / loader / schemastery）字节相同；`ui-conversation` 仅增加问答相关 i18n 条目并复用局部插槽对象，`ui-model-selection` 增加模型模糊搜索及提供商排序（插件所引用的 `ModelDirectoryState` 类型定义字节相同），`ui-renderer` 仅 `FactoryOutlet` 做 `useMemo` 细微优化，`ui-tool` 增量导出问答面板类型，`tool-ask-user` 新增 timed 模式且默认 `'legacy'` 保持阻塞完全兼容，shell 工具仅微调提示词。本轮的实际变更：
+  - `package.json`：15 个 `@deepseek-ai/dsh-*` peerDependencies 区间各追加 `|| ^0.2.0-rc.2`（预发布区间不跨版本组，显式追加），devDependencies 基线 `^0.2.0-rc.1` → `^0.2.0-rc.2`。
+  - lockfile：`dsh-attachment@0.2.0-rc.2` 精确钉 `dsh-brand` peer，按既定做法干净重建 `package-lock.json`（`npm ci --dry-run` 显示 up to date）；`pnpm-workspace.yaml` 排除表 38 行各追加 `0.2.0-rc.2`、`pnpm-lock.yaml` 使用 pnpm 11.24.0 重建（363 条，36 个 dsh 包全在 0.2.0-rc.2）。
+  - **验证（三个房间同一份源码）**：新基线 0.2.0-rc.2 强制类型检查 + 构建全净，测试 **1759 passed / 7 skipped**（118 文件通过）；旧基线净室（精确锁定 0.2.0-rc.1）结果**逐项完全相同（1759 passed / 118 文件）**——直接证明本轮无行为破坏；老一代净室（0.1.5-rc.3）**1756 passed**，差额 3 条仍为已知受世代限制的 `dsh-ptc-runtime` 测试文件。三个房间均只剩相同的 12 条 Windows 本机保留端口失败（完全与 harness 无关）。详见 `.dsh/skills/dsh-harness-upgrade/references/0.2.0-rc.2.md`。
+
 - **修复 MiniMax Code 线路「每小时自己掉线、然后要求重新登录」**（用户报告）。根因不是服务端把登录踢掉，而是本插件在**同一枚单次使用的刷新令牌上并发轮换**，而输掉竞态的一方拿到的 `invalid_grant` 被记成了「该账号已失效」。
   - **实测事实**：access token 只有 **1 小时**（`09:40` 签发 → `10:40:51` 到期），而续期阈值是「到期前 **60 秒**」。也就是说这一小时里唯一允许轮换的窗口，正好是并发调用最容易同时到达、且令牌已经会被服务端拒收的那一个瞬间。
   - **竞态的两条来源**：① 号池 `MinimaxCodeAccountPool` **没有任何单飞**，`getEffectiveAccount` / `credentialFor` / `renewCredential` 各自独立刷新（对照 Claude 线路的 `inFlight` map 与它为此写的注释）；② 用量/签到路径走的是 `ensureAccessToken`，它的单飞是**模块级单变量**，号池完全看不见——而设置卡片每 60 秒轮询一次 `/status` 就会后台触发一次用量读取。桌面端也在刷新同一个文件，所以输家还可能是插件自己。
