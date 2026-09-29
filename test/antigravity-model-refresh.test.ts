@@ -4,6 +4,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { mergeCatalogSelection } from '../src/host/antigravity/client.ts'
+import { MODELS } from '../src/host/antigravity/types.ts'
 import { registerAntigravityRoutes } from '../src/host/antigravity/routes.ts'
 import {
   FileCredentialStore,
@@ -51,6 +53,38 @@ function antigravityRouteHarness(preferences?: AntigravityPreferenceStore): {
 
   return { settings, post }
 }
+
+describe('Antigravity catalog selection merge', () => {
+  // The API listing is a request-level catalog whose ids are runtime names.
+  const API_CATALOG = [
+    { id: 'gemini-3.8-flash-tiered', name: 'gemini-3.8-flash-tiered' },
+    { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)' },
+    { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' },
+  ]
+
+  it('keeps a stored selection the API catalog cannot name', () => {
+    // The picker and the adapter index the plugin table (gemini-3.8-flash,
+    // claude-opus-4-6), which shares no vocabulary with the API ids. Pruning
+    // the selection against the API ids emptied it on the first refresh, so
+    // every checkbox rendered unchecked every time the card was reopened.
+    expect(mergeCatalogSelection(['gemini-3.8-flash'], API_CATALOG)).toEqual(['gemini-3.8-flash'])
+    expect(mergeCatalogSelection(['gemini-3.8-flash', 'claude-opus-4-6'], API_CATALOG))
+      .toEqual(['gemini-3.8-flash', 'claude-opus-4-6'])
+  })
+
+  it('adopts the shipped defaults on the first sighting only', () => {
+    const shipped = MODELS.map((model) => model.id)
+    expect(mergeCatalogSelection([], [])).toEqual(shipped)
+    // An empty selection with a catalog already recorded is a deliberate
+    // unselect-all and must stay empty.
+    expect(mergeCatalogSelection([], API_CATALOG)).toEqual([])
+  })
+
+  it('drops only ids the plugin table does not offer', () => {
+    expect(mergeCatalogSelection(['gemini-3.8-flash', 'retired-model'], API_CATALOG))
+      .toEqual(['gemini-3.8-flash'])
+  })
+})
 
 describe('Antigravity model settings routes', () => {
   it.each(['/antigravity/api/models', '/antigravity/api/settings'])('invalidates the picker after saving %s', async (url) => {

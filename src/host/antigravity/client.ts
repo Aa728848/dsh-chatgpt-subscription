@@ -383,6 +383,36 @@ export function parseCatalogModels(data: unknown): AntigravityCatalogModel[] {
   return list
 }
 
+/**
+ * Merge a freshly discovered API catalog into the stored model selection.
+ *
+ * The API catalog is a *request-level* listing: its ids are runtime names
+ * (`gemini-3.8-flash-tiered`, `claude-opus-4-6-thinking`, `gemini-3.1-pro-high`)
+ * that share no vocabulary with the selectable plugin ids (`gemini-3.8-flash`,
+ * `claude-opus-4-6`, `gemini-3.1-pro`). The picker and the adapter both iterate
+ * the plugin table, so pruning the selection against the API ids kept nothing:
+ * the first refresh after the shipped defaults were written dropped every
+ * stored id, which left the card rendering every model unchecked and made a
+ * deliberate pick look like it did not persist. Prune against the table the
+ * selection actually indexes, and keep the API catalog as display metadata
+ * only.
+ *
+ * @param stored - The selection currently persisted for the picker.
+ * @param storedCatalog - The API catalog the previous refresh recorded.
+ * @returns The selection to persist, drawn from the plugin model table.
+ */
+export function mergeCatalogSelection(
+  stored: readonly string[],
+  storedCatalog: readonly AntigravityCatalogModel[],
+): string[] {
+  const shipped = MODELS.map((model) => model.id)
+  const known = new Set(shipped)
+  // A first sighting — nothing selected and nothing catalogued yet — adopts the
+  // shipped defaults, so the provider is usable before the user picks anything.
+  if (stored.length === 0 && storedCatalog.length === 0) return shipped
+  return stored.filter((id) => known.has(id))
+}
+
 export async function fetchAccountQuota(
   store = new FileCredentialStore(),
   modelSettings?: FileModelSettingsStore,
@@ -449,11 +479,7 @@ export async function fetchAccountQuota(
 
     if (modelSettings && catalogModels.length > 0) {
       const current = await modelSettings.read()
-      const isFirstTime = current.catalogModels.length === 0 && current.enabledModelIds.length === 0
-      const catalogIds = new Set(catalogModels.map((m) => m.id))
-      const mergedEnabled = isFirstTime
-        ? catalogModels.map((m) => m.id)
-        : current.enabledModelIds.filter((id) => catalogIds.has(id))
+      const mergedEnabled = mergeCatalogSelection(current.enabledModelIds, current.catalogModels)
       await modelSettings.setCatalogModels(catalogModels, { enabledModelIds: mergedEnabled })
     }
 
