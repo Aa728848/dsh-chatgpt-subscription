@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **修复 MiniMax Code 线路「每小时自己掉线、然后要求重新登录」**（用户报告）。根因不是服务端把登录踢掉，而是本插件在**同一枚单次使用的刷新令牌上并发轮换**，而输掉竞态的一方拿到的 `invalid_grant` 被记成了「该账号已失效」。
+  - **实测事实**：access token 只有 **1 小时**（`09:40` 签发 → `10:40:51` 到期），而续期阈值是「到期前 **60 秒**」。也就是说这一小时里唯一允许轮换的窗口，正好是并发调用最容易同时到达、且令牌已经会被服务端拒收的那一个瞬间。
+  - **竞态的两条来源**：① 号池 `MinimaxCodeAccountPool` **没有任何单飞**，`getEffectiveAccount` / `credentialFor` / `renewCredential` 各自独立刷新（对照 Claude 线路的 `inFlight` map 与它为此写的注释）；② 用量/签到路径走的是 `ensureAccessToken`，它的单飞是**模块级单变量**，号池完全看不见——而设置卡片每 60 秒轮询一次 `/status` 就会后台触发一次用量读取。桌面端也在刷新同一个文件，所以输家还可能是插件自己。
+  - **失败被当成终局**：`oauth.ts` 把 `invalid_grant` / 400 / 401 / 403 一律判为「刷新令牌已死」，于是 ① `rememberRejected` 进程级墓碑 5 分钟内对所有调用者生效；② 号池把该账号写死 `authStatus: expired`（DPAPI 池文件，重启仍在）；③ 卡片渲染「需要重新登录」——而磁盘上的令牌其实是好的。
+  - **修法（六处，全部带回归测试）**：
+    - **提前 5 分钟续期**（`PRE_EXPIRY_REFRESH_MS`、`credentialNeedsRefresh`）：把轮换挪出「已经被拒收」的边界窗口。仍保留 `REFRESH_MARGIN_MS` 作为「能不能用」的判据，两个问题分开回答；
+    - **全进程一次轮换**（`rotateMinimaxCodeCredential` + `token-store.ts` 的按身份注册表）：键是**身份**（`recordKey` / `loginEpoch`）而不是路径或令牌，所以号池与用量路径这两条不同 `store` 实例也共用同一次轮换；后到的调用者要么加入在途轮换、要么等待并采纳结果；等待期间只轮询文件，**不创建、不删除、不等待桌面端的 `auth.lock`**；
+    - **先看 storage 再相信终局判定**：轮换前、轮换成功写回后、以及收到 `invalid_grant` 时，都会重新读一次文件；只要磁盘上的凭证**已属于同一会话且已经前进**（换过刷新令牌，或同一令牌的到期时间显著变晚），就采纳它——**不记 tombstone、不报「重新登录」**；
+    - **号池行自我修复**（`healStaleAuthFailures`）：遗留的 `authStatus: expired` 会在下一次 `listAccounts()` / `getEffectiveAccount()` 时对照当前凭证核对并清除，因此修复对**已经卡住的账号**立刻生效，不需要等用户重新登录。会话身份不匹配（读到的其实是被镜像的**另一个**账号）时绝不采纳，这条有专门的测试；
+    - **用量读取改走号池**（`routes.ts`）：不再让 `ensureAccessToken` 成为第二条独立的轮换权威；并且当 401 到达时若发现凭证已经被换掉（`isCredentialStale`），就不再报 `token-expired`——宁可这一轮没有数字，也不误导用户去重新登录；
+    - **卡片补上「重新登录」按钮**：`MinimaxCodeSection` 此前只传了字典键 `relogin` 而没有传 `onRelogin`，而按钮的渲染条件是 `needsRelogin && props.onRelogin`——徽章出现过，按钮从未出现过；
+    - 另修正一处会误伤：刷新响应**未返回**新的 refresh token 时沿用旧值而不是抛错（RFC 6749 允许不返回）。
+  - 结构：`src/host/minimax-code/{types,token-store,oauth,account-pool,routes,client}.ts`、`src/host/common/account-pool.ts`（新增可选钩子 `liveCredentialsFor`）、`src/client/minimax-code/MinimaxCodeSection.tsx`。
+  - **测试**：新增 13 条（`test/minimax-code-token-contention.test.ts`），每条对应上面的一环，且 fixture **不依赖墙钟先后**——「发生过轮换」用磁盘上的凭证表达，而不是靠谁先跑。全套 **1759 passed / 7 skipped / 12 failed**，12 条全部属于**回调端口无法绑定**这一类，与本次改动无关：antigravity-callback-port 1 条报 EACCES 127.0.0.1:50999，claude-oauth 11 条报 No bindable loopback port in the probe range。本机实测 53692–53819 这 128 个端口**一个都绑不上**（直接跑 node 对整段返回 bindable=0），所以这不是端口被占用而是本机对该区间的限制；这两条线路的代码与测试本次一行未动。强制 typecheck（host + client）与 build 全净。
 - **新增 reasoning-collapse guard：推理流重复坍缩时熔断并自动恢复**。一段长 reasoning 流可能退化成反复循环少数几个短语（`Let me call. Go. Calling. Go.`），既不调用工具也不得出结论，一路跑到输出上限被截断。本机归档里 `session-9764f957` / `seq1626` 就是这样烧掉 **128,000 output tokens** 后交回空答案的。守卫按 n-gram 唯一率给尾部窗口打分（`1 - 唯一 n-gram / 总 n-gram`），越过阈值就停止继续 yield 该流并让 turn 在新的 step 上继续。
   - **触发证据**（全部来自本机归档，非推测）：坍缩段 46,252 行只剩 29 种唯一内容（`Go.`×19819、`Let me call.`×11882）；该 step 工具调用数为 **0**，没有任何外部观测能打断它，所以只能烧到上限。对全部 **2,336 个** 归档 reasoning 块实测，坍缩样本得分 **0.98**，最差健康块 **0.59**，典型健康长思考 **≤0.28**——默认阈值 `0.85` 落在间隙里，对真实坍缩流在字符 1,497 处即触发。
   - **接缝选择是这一轮的关键结论**。守卫包的是 `llm/stream` 而不是 `agent/assistant-stream`：后者是 `@mode emit`（只能观测、**无法中止流**），且 **0.1.5 之前根本不存在**，用它会让守卫在本插件支持的每一个更老世代上静默失效。`llm/stream` 是 waterfall，签名 `(options, next) => AsyncIterable<StreamChunk>` 从 `0.1.2-alpha.5` 到 `0.2.0-rc.1` **逐字节相同**（8 个 tag 全部核过），而从 wrapper 提前 return 正是真正结束流的动作。恢复所需的 live Agent 由 `agent/created`（同样 8 个世代一致）取得，每 turn 的熔断预算挂在请求自带的 abort signal 上——它覆盖整个 turn，新 turn 自然重置。

@@ -42,7 +42,11 @@ import type { CredentialStore } from '../token-store.ts'
 import {
   MinimaxCodeCredentialStore,
   credentialIsFresh,
+  credentialNeedsRefresh,
+  minimaxCodeCredentialAdvancedPast,
+  minimaxCodeSameCredentialSession,
   parseMinimaxCodeCredentials,
+  rotateMinimaxCodeCredential,
   type MinimaxCodeCredentialSource,
   type MinimaxCodeCredentials,
 } from './token-store.ts'
@@ -54,6 +58,7 @@ import {
 import { PROVIDER_ID, isRegion } from './types.ts'
 import type { MinimaxCodeRegion } from '../../shared/minimax-code-contracts.ts'
 import type {
+  AccountAuthStatus,
   AccountRotationStrategy,
   PoolAccountSummaryDto,
 } from '../../shared/account-pool-contracts.ts'
@@ -186,6 +191,16 @@ function projectAccount(input: {
     ...(facts.email === undefined ? {} : { email: facts.email }),
     ...(facts.planName === undefined ? {} : { planName: facts.planName }),
   }
+}
+
+/**
+ * Whether an account row carries an auth failure the card would render.
+ *
+ * Takes the summary shape as well as the pool row, because both the card's list
+ * and the routing read ask the same question about it.
+ */
+function isMarkedFailed(account: { authStatus?: AccountAuthStatus }): boolean {
+  return account.authStatus !== undefined && account.authStatus !== 'ok'
 }
 
 /** The alias an account is labelled with when the user has not named it. */
@@ -353,42 +368,68 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
         isPrimary,
       }),
       expiresAt: (credentials) => credentials.expiresAtMs,
-      // The store's own freshness rule, so the card and the pool never disagree
-      // about whether the stored token is still usable.
-      needsRefresh: (credentials, now) => !credentialIsFresh(credentials, now),
+      // Renew BEFORE the service can refuse, not once it already has.
+      //
+      // This is the line's whole every-hour sign-out in one hook. The access token
+      // lives one hour; the store's freshness rule only asks "is this token still
+      // valid", so the pool used to start its rotation inside the last sixty
+      // seconds of that hour — the one window in which a request is already being
+      // refused and in which two callers spend the same rotating refresh token.
+      // Five minutes of headroom moves the rotation somewhere the service is not
+      // already answering 401.
+      needsRefresh: (credentials, now) => credentialNeedsRefresh(credentials, now),
       refresh: async (credentials, fetchFn) => {
-        // The refresh targets THIS account's own region. A global account must
-        // never be refreshed into a cn one (or the reverse): the region decides
-        // every host the account uses, and the token endpoint of the other
-        // property would either refuse the grant or hand back a token for an
-        // account the user did not pick.
-        const token = await refreshAccessToken(credentials.refreshToken, {
-          fetchFn,
-          region: credentials.region,
+        // Every rotation of one session goes through the store's registry, whoever
+        // asks: the pool, the usage path, or the check-in. The refresh token is
+        // single-use, so two rotations of the same session are not two refreshes —
+        // the second one presents a token the first already spent, the service
+        // answers with a final verdict, and a successful rotation is recorded as a
+        // dead sign-in. Joining an in-flight rotation, and waiting for a rotation
+        // the desktop app is doing to its own file, are both handled inside.
+        const rotation = await rotateMinimaxCodeCredential(store, credentials, async () => {
+          // The refresh targets THIS account's own region. A global account must
+          // never be refreshed into a cn one (or the reverse): the region decides
+          // every host the account uses, and the token endpoint of the other
+          // property would either refuse the grant or hand back a token for an
+          // account the user did not pick.
+          const token = await refreshAccessToken(credentials.refreshToken, {
+            fetchFn,
+            region: credentials.region,
+          })
+          const next: MinimaxCodeCredentials = {
+            ...credentials,
+            accessToken: token.accessToken,
+            // A response that omits the refresh token means the service kept the
+            // old one; storing an empty string would strand the next rotation.
+            refreshToken: token.refreshToken === '' ? credentials.refreshToken : token.refreshToken,
+            tokenType: token.tokenType,
+            expiresAtMs: token.expiresAtMs,
+            // The generation is the desktop app's own rotation counter; advancing
+            // it keeps the two sides' views of the credential in step.
+            generation: credentials.generation + 1,
+            seenAt: Date.now(),
+          }
+          // A native credential is shared with a running application, and the
+          // refresh token rotates: the new pair has to reach the app's own
+          // auth.json through the store's atomic replacement, or the app is left
+          // holding a token this plugin already spent — and the next refresh on
+          // either side fails. This is a WRITE, never a delete: the store preserves
+          // the document's shape, its other records and its record key. A
+          // plugin-owned credential is written by the pool itself (and by the
+          // mirror when it is primary), so it is left alone here. The failure is
+          // swallowed on purpose: the rotation itself succeeded, and the pool's own
+          // record plus the mirror still carry it.
+          if (next.source === 'minimax-native' && next.recordKey !== null) {
+            await store.write(next).catch(() => undefined)
+          }
+          return next
         })
-        const next: MinimaxCodeCredentials = {
-          ...credentials,
-          accessToken: token.accessToken,
-          refreshToken: token.refreshToken,
-          tokenType: token.tokenType,
-          expiresAtMs: token.expiresAtMs,
-          // The generation is the desktop app's own rotation counter; advancing it
-          // keeps the two sides' views of the credential in step.
-          generation: credentials.generation + 1,
-          seenAt: Date.now(),
-        }
-        // A native credential is shared with a running application, and the
-        // refresh token rotates: the new pair has to reach the app's own
-        // auth.json through the store's atomic replacement, or the app is left
-        // holding a token this plugin already spent — and the next refresh on
-        // either side fails. This is a WRITE, never a delete: the store preserves
-        // the document's shape, its other records and its record key. A
-        // plugin-owned credential is written by the pool itself (and by the
-        // mirror when it is primary), so it is left alone here.
-        if (next.source === 'minimax-native' && next.recordKey !== null) {
-          await store.write(next).catch(() => undefined)
-        }
-        return next
+        // A rotation that succeeded is the end of a false auth failure. The account
+        // row may still carry the previous rotation's verdict — the one this very
+        // fix exists to stop producing — and leaving it there keeps a healthy
+        // account out of rotation until the user presses a button. Only this
+        // account's own rows are touched, and only on success.
+        return rotation.credentials
       },
       // A refresh the service calls final is that account's problem; a transient
       // refresh failure (429, 5xx, transport) leaves it in the pool untouched.
@@ -444,12 +485,106 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
           ...(planName === undefined ? {} : { planName, planLabel: planName }),
         }
       },
+      // An account adopted from the desktop app is a COPY of a session that
+      // application keeps rotating: the token the row holds is spent the moment
+      // either side rotates. The store is the authority, so a row whose copy is
+      // older adopts what is on file instead of spending a dead token and being
+      // recorded as expired by the answer.
+      liveCredentialsFor: (account) => this.nativeAuthority(account),
       emptyMessage: 'Not signed in to MiniMax Code. Sign in with the MiniMax Code app, or add an account from Settings > MiniMax Code.',
       ...(options.backend === undefined ? {} : { backend: options.backend }),
       ...(options.maxAccounts === undefined ? {} : { maxAccounts: options.maxAccounts }),
     }
     super(hooks)
     this.store = store
+  }
+
+  /**
+   * Account summaries, with a false auth failure cleared.
+   *
+   * A row can carry an `authStatus` of expired for a rotation that actually
+   * succeeded — the second of two concurrent rotations of one session gets a final
+   * verdict for a token the first already spent. Nobody comes back to clear that
+   * marker, so the account stays out of rotation until the user presses 重新登录.
+   *
+   * The verdict is re-checked against the token in force instead: a row whose
+   * credential has moved on since the failure is routable again, and the marker is
+   * removed. A row still holding the refused token keeps its marker, because that
+   * one really does need a sign-in.
+   */
+  override async listAccounts(): Promise<MinimaxCodeAccountSummaryDto[]> {
+    const summaries = await super.listAccounts()
+    if (!summaries.some(isMarkedFailed)) return summaries
+    await this.healStaleAuthFailures().catch(() => undefined)
+    return await super.listAccounts()
+  }
+
+  /**
+   * Pick an account, healing a stale auth failure first.
+   *
+   * The healing matters here, not only on the card: an account marked expired is
+   * excluded by the core's eligibility rule, so until the marker is gone the line
+   * answers a single-account pool with "all accounts need a new sign-in" — for a
+   * rotation that succeeded. Doing it on the request path means the very next
+   * request after a false refusal routes normally instead of waiting for the card's
+   * next poll.
+   */
+  override async getEffectiveAccount(
+    excludeIds?: ReadonlySet<string>,
+    fetchFn: typeof fetch = fetch,
+  ): Promise<{ account: MinimaxCodePoolAccount; credentials: MinimaxCodeCredentials }> {
+    const data = await this.read()
+    if (data.accounts.some(isMarkedFailed)) {
+      await this.healStaleAuthFailures(data).catch(() => undefined)
+    }
+    return await super.getEffectiveAccount(excludeIds, fetchFn)
+  }
+
+  /**
+   * Drop an `authStatus` that describes a credential this machine no longer holds.
+   *
+   * A row can be marked expired by a rotation that actually SUCCEEDED: the refresh
+   * token is single-use, so when two callers of one session rotate at the same time
+   * the loser is told `invalid_grant` for a token the winner already spent. That is
+   * a verdict about a spent generation, not about the sign-in — and nothing else in
+   * the system ever revisits it, which is why the account stayed parked at
+   * "需要重新登录" until the user pressed a button.
+   *
+   * The verdict is re-checked against the credential in force: if the stored
+   * credential for the same session has moved on, the marker was about the old
+   * token and is removed. A row still holding the refused token keeps its marker,
+   * because that one genuinely needs a sign-in.
+   */
+  private async healStaleAuthFailures(current?: PoolData<MinimaxCodePoolAccount>): Promise<boolean> {
+    const data = current ?? await this.read()
+    if (!data.accounts.some(isMarkedFailed)) return false
+    // The snapshot-serving read is enough here: the credential this plugin wrote is
+    // recorded on write, and the pool file is re-read above precisely so the two
+    // cannot disagree.
+    const live = await this.store.read().catch(() => null)
+    if (live === null) return false
+    let changed = false
+    for (const account of data.accounts) {
+      if (account.authStatus === undefined || account.authStatus === 'ok') continue
+      // Same session, and the stored credential has moved on from the one the row
+      // still carries. A different slot, region or sign-in is a different account,
+      // and its marker is that account's business — the single-credential file this
+      // reads is a mirror, so adopting a stranger's token here would be the one
+      // mistake this line must never make.
+      if (!minimaxCodeSameCredentialSession(live, account.credentials)) continue
+      if (!minimaxCodeCredentialAdvancedPast(live, account.credentials)) continue
+      account.authStatus = undefined
+      account.authFailedReason = undefined
+      // The stored credential is the newer one by construction here, so adopting it
+      // cannot roll anything back: it is what this very store wrote.
+      account.credentials = live
+      changed = true
+    }
+    if (!changed) return false
+    // Bookkeeping: a pool file that cannot be written must not turn a harmless read
+    // into an error, exactly as the core treats its own rotation bookkeeping.
+    await this.write(data).catch(() => undefined)
+    return true
   }
 
   /**
@@ -489,6 +624,27 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
   private async liveNativeCredential(
     account: MinimaxCodePoolAccount,
   ): Promise<MinimaxCodeCredentials | null> {
+    const found = await this.nativeAuthority(account)
+    return found === null || !found.advanced ? null : found.credentials
+  }
+
+  /**
+   * The desktop app's own copy of one native account's session, and whether it has
+   * moved on from the row's copy.
+   *
+   * The app rotates its token on its own schedule, so the copy the pool adopted can
+   * be older than what is on disk. Only the same record slot counts: a different
+   * record key or region is a different account, and substituting it would present
+   * one account's token as another's.
+   *
+   * `advanced` is the whole reason this does not simply return the file: an
+   * EXPIRED file is not newer authority (that is the app's session having lapsed),
+   * while one that has moved on from the row is. The row's refresh token was spent
+   * by whichever side rotated last, and only the file can say what replaced it.
+   */
+  private async nativeAuthority(
+    account: MinimaxCodePoolAccount,
+  ): Promise<{ credentials: MinimaxCodeCredentials; advanced: boolean } | null> {
     if (account.source !== 'minimax-native') return null
     const recordKey = account.credentials.recordKey
     if (recordKey === null || recordKey === '') return null
@@ -496,7 +652,7 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
     if (stored === null || stored.source !== 'minimax-native') return null
     if (stored.recordKey !== recordKey || stored.region !== account.credentials.region) return null
     if (!credentialIsFresh(stored)) return null
-    return stored
+    return { credentials: stored, advanced: stored.refreshToken !== account.credentials.refreshToken }
   }
 
   /**

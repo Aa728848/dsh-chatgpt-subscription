@@ -648,6 +648,11 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
           onSetPrimary={(accountId) => void poolAction('set-primary', accountId)}
           onDelete={(accountId) => void poolAction('delete', accountId)}
           onClearCooldown={(accountId) => void poolAction('clear-cooldown', accountId)}
+          // The account card renders its 重新登录 button only when this handler is
+          // supplied, and every sibling line supplies one. Without it a MiniMax Code
+          // account could be reported as needing a new sign-in with no way to act on
+          // it — the badge appeared and no button ever did.
+          onRelogin={(accountId) => void poolAction('relogin', accountId)}
           onSetStrategy={(strategy) => void poolSetStrategy(strategy)}
         />
       )}

@@ -47,7 +47,8 @@ import {
   MINIMAX_CODE_BUILD_ENV,
 } from './types.ts'
 import {
-  credentialIsFresh,
+  credentialNeedsRefresh,
+  rotateMinimaxCodeCredential,
   type MinimaxCodeCredentialStore,
   type MinimaxCodeCredentials,
 } from './token-store.ts'
@@ -236,8 +237,13 @@ export interface MinimaxToken {
 function parseTokenResponse(record: Record<string, unknown>): MinimaxToken {
   const accessToken = asString(record.access_token)
   if (accessToken === undefined) throw new Error('MiniMax Code token response is missing its access token')
-  const refreshToken = asString(record.refresh_token)
-  if (refreshToken === undefined) throw new Error('MiniMax Code token response is missing its refresh token')
+  // An omitted refresh token is NOT a failed rotation. RFC 6749 makes it optional
+  // on every grant: a service may keep the same refresh token and only issue a new
+  // access token, and a service may also omit the field entirely. Throwing here
+  // turned a successful refresh into "sign in again" — one of the ways this line
+  // signed the user out at the top of the hour. The caller substitutes the token it
+  // presented, which is the only value that can still be correct.
+  const refreshToken = asString(record.refresh_token) ?? ''
   const expiresIn = Number(record.expires_in)
   if (!Number.isFinite(expiresIn) || expiresIn <= 0) {
     throw new Error('MiniMax Code token response carried an invalid lifetime')
@@ -544,8 +550,44 @@ export function resetRefreshRejections(): void {
   rejectedRefreshTokens.clear()
 }
 
-/** One in-flight refresh, so concurrent callers share a single rotation. */
-let inFlightRefresh: Promise<MinimaxCodeCredentials> | null = null
+/**
+ * One in-flight refresh per credential, so concurrent callers share a rotation.
+ *
+ * Keyed on the credential the rotation started from. The module-wide promise this
+ * replaced was shared by EVERY caller, which cannot be right for a pool: a second
+ * account would have been handed the first account's freshly rotated token, and
+ * the desktop app's own file would have been written with a stranger's session.
+ */
+const inFlightRefreshes = new Map<string, { token: string; promise: Promise<MinimaxCodeCredentials> }>()
+
+/** Identity one credential's in-flight rotation is registered under. */
+function refreshFlightKey(credentials: MinimaxCodeCredentials): string {
+  if (credentials.recordKey !== null && credentials.recordKey !== '') {
+    return 'native:' + credentials.region + ':' + credentials.recordKey
+  }
+  if (credentials.loginEpoch !== '') return 'signin:' + credentials.region + ':' + credentials.loginEpoch
+  return 'token:' + credentials.refreshToken
+}
+
+/**
+ * The in-flight rotation this call may join.
+ *
+ * ONLY one that started from the very token this caller holds. A rotation of a
+ * LATER credential of the same session is not a substitute — its result belongs to
+ * the caller that started it, and adopting it here would hand back a credential
+ * this caller never asked for. That case is handled by re-reading the store, which
+ * is where the newer credential already is.
+ */
+function joinInFlightRefresh(credentials: MinimaxCodeCredentials): Promise<MinimaxCodeCredentials> | null {
+  const active = inFlightRefreshes.get(refreshFlightKey(credentials))
+  if (active === undefined || active.token !== credentials.refreshToken) return null
+  return active.promise
+}
+
+/** Test seam: forget every in-flight rotation. */
+export function resetInFlightRefreshes(): void {
+  inFlightRefreshes.clear()
+}
 
 export interface EnsureTokenOptions {
   fetchFn?: typeof fetch
@@ -564,14 +606,28 @@ function signInAgainMessage(reason: string): string {
  *
  * This is the whole of the contention discipline in one function:
  *
- * 1. read the stored credential and use it as-is while it is valid — the
- *    common case, and the one that never touches the file or the network;
- * 2. refresh only when it is not (or when `force` reports a 401 the service has
- *    already issued);
- * 3. share one rotation between concurrent callers, so a burst of tool calls at
- *    expiry cannot each try to rotate the same refresh token;
+ * 1. read the stored credential and use it as-is while it is comfortably valid —
+ *    the common case, and the one that never touches the file or the network;
+ * 2. renew EARLY (PRE_EXPIRY_REFRESH_MS before expiry) rather than at the boundary
+ *    the service refuses at, or when `force` reports a 401 the service has already
+ *    issued;
+ * 3. share one rotation between concurrent callers of the SAME credential, and go
+ *    through the store's rotation registry so a rotation the desktop app is doing
+ *    to the same file is waited for rather than raced;
  * 4. write the result back through the store's atomic replacement, and remember a
- *    rejected token so the next caller is told to sign in instead of retrying.
+ *    rejection only when the credential on disk is still the rejected one.
+ *
+ * Step 4 is the one the every-hour sign-out hung on. `invalid_grant` used to be
+ * recorded unconditionally, but that verdict has two possible meanings and only
+ * one of them is "this sign-in is dead":
+ *
+ * - the token really is revoked (`invalid_grant` / `invalid_client`), which is a
+ *   sign-in problem;
+ * - another holder of the very same session rotated first, so the token this call
+ *   presented was already spent. The service cannot tell the two apart, and the
+ *   plugin must not either — so it looks at the file. A credential newer than the
+ *   one it presented means somebody else rotated successfully, and that credential
+ *   is adopted instead of being buried under a tombstone.
  */
 export async function ensureAccessToken(
   store: MinimaxCodeCredentialStore,
@@ -584,27 +640,39 @@ export async function ensureAccessToken(
     )
   }
 
-  if (options.force !== true && credentialIsFresh(credentials)) return credentials
+  // "Comfortably valid" is the STORE's question (credentialIsFresh); this one is
+  // "should this plugin rotate on its own schedule", which is what the pre-expiry
+  // margin answers. Answering it with the freshness rule is precisely how the line
+  // ended up rotating only inside the last minute of an hour.
+  if (options.force !== true && !credentialNeedsRefresh(credentials)) return credentials
 
+  // A stored credential the service has not actually been asked about yet is not
+  // refused on a tombstone's word: the tombstone may have been set by a refresh
+  // that lost a rotation race rather than by a dead sign-in.
   if (isRefreshTokenRejected(credentials.refreshToken)) {
+    const current = await store.readFresh().catch(() => null)
+    if (current !== null && current.refreshToken !== credentials.refreshToken) return current
     throw new MinimaxCodeUnauthorizedError(
       signInAgainMessage('MiniMax Code rejected the stored refresh token ' + redactToken(credentials.refreshToken) + '.'),
     )
   }
 
-  if (inFlightRefresh !== null) return inFlightRefresh
+  const joined = joinInFlightRefresh(credentials)
+  if (joined !== null) return joined
 
   const pending = (async (): Promise<MinimaxCodeCredentials> => {
-    try {
+    const rotation = await rotateMinimaxCodeCredential(store, credentials, async () => {
       const token = await refreshAccessToken(credentials.refreshToken, {
         fetchFn: options.fetchFn,
         signal: options.signal,
         region: credentials.region,
       })
-      const next: MinimaxCodeCredentials = {
+      return {
         ...credentials,
         accessToken: token.accessToken,
-        refreshToken: token.refreshToken,
+        // An omitted refresh token means the service kept the old one; storing an
+        // empty string would strand the next rotation with nothing to present.
+        refreshToken: token.refreshToken === '' ? credentials.refreshToken : token.refreshToken,
         tokenType: token.tokenType,
         expiresAtMs: token.expiresAtMs,
         // The generation is the desktop app's own rotation counter; advancing it
@@ -612,19 +680,26 @@ export async function ensureAccessToken(
         generation: credentials.generation + 1,
         seenAt: Date.now(),
       }
-      await store.write(next)
-      return next
-    } catch (error) {
-      if (error instanceof MinimaxCodeUnauthorizedError) {
+    }, { signal: options.signal })
+    return rotation.credentials
+  })().catch(async (error: unknown) => {
+    if (error instanceof MinimaxCodeUnauthorizedError) {
+      // Remember the verdict ONLY when the file still holds the credential that was
+      // refused. A successful rotation by another holder leaves a different token
+      // there, and that token has not been refused by anyone.
+      const current = await store.readFresh().catch(() => null)
+      if (current === null || current.refreshToken === credentials.refreshToken) {
         rememberRejected(credentials.refreshToken)
       }
-      throw error
-    } finally {
-      inFlightRefresh = null
     }
-  })()
+    throw error
+  }).finally(() => {
+    if (inFlightRefreshes.get(refreshFlightKey(credentials))?.promise === pending) {
+      inFlightRefreshes.delete(refreshFlightKey(credentials))
+    }
+  })
 
-  inFlightRefresh = pending
+  inFlightRefreshes.set(refreshFlightKey(credentials), { token: credentials.refreshToken, promise: pending })
   return pending
 }
 

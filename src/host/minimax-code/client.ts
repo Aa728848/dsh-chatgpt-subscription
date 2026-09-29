@@ -540,6 +540,15 @@ export async function fetchTokenPlanQuota(
      * and callers treat that as "still expired" rather than "signed out".
      */
     renewCredential?: () => Promise<MinimaxCodeCredentials | null>
+    /**
+     * Whether the credential this read presented has already been replaced.
+     *
+     * Set by the caller, which can see the credential in force. A 401 that arrives
+     * for a token that is no longer current is not a verdict on the account, and
+     * reporting it as `token-expired` would put "sign in again" on a card whose
+     * sign-in is in perfect health.
+     */
+    isCredentialStale?: () => Promise<boolean>
   } = {},
 ): Promise<MinimaxCodeQuota | null> {
   const fetchFn = options.fetchFn ?? fetch
@@ -586,6 +595,13 @@ export async function fetchTokenPlanQuota(
       // `renewQuotaCredential` is asked for a token the caller can actually use
       // and the read is retried once with it.
       if (response.status === 401 || response.status === 403) {
+        // The ONE case where a refused bearer is not a credential problem: a read
+        // that started before a rotation and landed after it carries a token the
+        // service has already stopped accepting, and the credential in force is
+        // fine. The caller can say so, and then the honest verdict is "no numbers
+        // this round" rather than "sign in again" — a card must never talk somebody
+        // into a sign-in they do not need.
+        if ((await options.isCredentialStale?.()) === true) return null
         authRefused = true
         break
       }

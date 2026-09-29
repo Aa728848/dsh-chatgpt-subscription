@@ -36,7 +36,13 @@ import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import z from '@deepseek-ai/schemastery'
 import { dshHomeDir } from '../common/home.ts'
-import { MINIMAX_CODE_BUILD_ENV, MINIMAX_CODE_CLIENT_ID, REFRESH_MARGIN_MS } from './types.ts'
+import {
+  CREDENTIAL_ROTATION_WAIT_MS,
+  MINIMAX_CODE_BUILD_ENV,
+  MINIMAX_CODE_CLIENT_ID,
+  PRE_EXPIRY_REFRESH_MS,
+  REFRESH_MARGIN_MS,
+} from './types.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
 import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import { MINIMAX_CODE_REASONING_EFFORTS } from '../../shared/minimax-code-contracts.ts'
@@ -188,6 +194,28 @@ export function credentialIsFresh(
 }
 
 /**
+ * Whether a credential should be renewed BEFORE it can be refused.
+ *
+ * {@link credentialIsFresh} answers "can this token be presented right now"; this
+ * answers "is it worth rotating on this plugin's own schedule instead of waiting
+ * for the service to say no". The two questions need different answers: the whole
+ * one-hour sign-out was the second question being answered with the first, so the
+ * line only ever rotated inside the last sixty seconds of a sixty-minute token —
+ * exactly the window in which concurrent callers spend the same rotating refresh
+ * token, and exactly the window in which a request can already be refused.
+ *
+ * The desktop app reads the same file and remains the first authority for it: this
+ * plugin renews a few minutes early, writes the rotation back atomically, and
+ * never touches the app's own `auth.lock`.
+ */
+export function credentialNeedsRefresh(
+  credentials: MinimaxCodeCredentials,
+  now: number = Date.now(),
+): boolean {
+  return credentials.expiresAtMs - now <= PRE_EXPIRY_REFRESH_MS
+}
+
+/**
  * Write one file through a temporary sibling plus `rename`.
  *
  * The temporary file is created in the same directory so the rename stays on one
@@ -228,6 +256,297 @@ function serialize<T>(key: string, operation: () => Promise<T>): Promise<T> {
     if (fileOperations.get(resolved) === settled) fileOperations.delete(resolved)
   })
   return result
+}
+
+// ---------------------------------------------------------------------------
+// Rotation registry
+// ---------------------------------------------------------------------------
+
+/**
+ * One rotation a holder of a credential is performing RIGHT NOW.
+ *
+ * The registry is process-wide and keyed by credential IDENTITY rather than by
+ * file path: the pool and the usage path reach the very same file through different
+ * MinimaxCodeCredentialStore objects, and a path-keyed registry would let them race
+ * each other.
+ *
+ * A rotation the DESKTOP APP performs is not claimed here — it is another process,
+ * and its only observable act is the atomic replace of its own `auth.json`. That
+ * case is handled by re-reading the file, which is where the app's result is. This
+ * registry never creates, deletes or waits on the app's own `auth.lock`.
+ */
+interface RotationRecord {
+  /** Refresh token being spent. A credential carrying a different one wins. */
+  token: string
+  /** Expiry the rotation seeks to beat; a materially later one ends the wait. */
+  expiresAtMs: number
+  /** The in-process rotation, when THIS process started one. */
+  promise: Promise<MinimaxCodeCredentials> | null
+}
+
+const rotations = new Map<string, RotationRecord>()
+
+/**
+ * The credential the most recent storage read produced, and when.
+ *
+ * The store is read on every request, and on Windows each uncached read spawns
+ * DPAPI - so the reads a single turn performs are served from here. Correctness
+ * rests on one property the write path enforces: a rotation is written back
+ * BEFORE its caller is handed the credential, and every write lands in the same
+ * `fileOperations` chain this snapshot is filled from. A cached value therefore
+ * can never outlive a write - it is either the current credential or one the very
+ * next write replaces.
+ *
+ * The window is short for the opposite kind of risk: another process (the desktop
+ * app) rotates the same file on its own schedule, and this snapshot must not hide
+ * that for long.
+ */
+const RECENT_READ_WINDOW_MS = 1_500
+let recentRead: { at: number; path: string; credentials: MinimaxCodeCredentials | null } | null = null
+
+function rememberCredentialRead(filePath: string, credentials: MinimaxCodeCredentials | null): void {
+  recentRead = { at: Date.now(), path: path.resolve(filePath), credentials }
+}
+
+/**
+ * The credential a read of THIS file inside the window produced, if any.
+ *
+ * The file is part of the key because a store whose path no longer matches what the
+ * snapshot was taken from has nothing to do with it: one process can hold several
+ * stores, and the tests point each case at a fresh temporary home.
+ */
+function recentCredentialRead(filePath: string): MinimaxCodeCredentials | null {
+  if (recentRead === null) return null
+  if (recentRead.path !== path.resolve(filePath) || Date.now() - recentRead.at > RECENT_READ_WINDOW_MS) {
+    recentRead = null
+    return null
+  }
+  return recentRead.credentials
+}
+
+/** Test seam: forget the snapshot, so one case cannot observe another's read. */
+export function resetMinimaxCodeCredentialReads(): void {
+  recentRead = null
+  rotations.clear()
+}
+
+/**
+ * Identity one credential rotation is registered under.
+ *
+ * Built from the same facts {@link minimaxCodePoolIdentity} uses - a native
+ * record slot, or the sign-in that produced the credential - so every holder of
+ * one session agrees on the key. The region is part of it because the same record
+ * key in two regions is two different sessions.
+ */
+function rotationKey(credentials: MinimaxCodeCredentials): string {
+  if (credentials.recordKey !== null && credentials.recordKey !== '') {
+    return 'native:' + credentials.region + ':' + credentials.recordKey
+  }
+  if (credentials.loginEpoch !== '') return 'signin:' + credentials.region + ':' + credentials.loginEpoch
+  return 'token:' + credentials.refreshToken
+}
+
+/**
+ * Whether two credentials are two generations of ONE session.
+ *
+ * The file this line reads holds a single record, but the plugin's own file is a
+ * mirror that the pool writes for whichever account is primary — so a credential
+ * read from storage may belong to a completely different account than the one a
+ * caller is working on. Adopting a stranger's token would present one account's
+ * session as another's, which is the one mistake this whole line must never make.
+ *
+ * The identity is therefore the same one {@link rotationKey} uses: a native record
+ * slot, or the sign-in that produced a plugin-owned credential.
+ */
+export function minimaxCodeSameCredentialSession(
+  a: MinimaxCodeCredentials | null,
+  b: MinimaxCodeCredentials | null,
+): boolean {
+  if (a === null || b === null) return false
+  if (a.source !== b.source || a.region !== b.region) return false
+  if (a.recordKey !== b.recordKey) return false
+  if (a.recordKey === null || a.recordKey === '') return a.loginEpoch === b.loginEpoch
+  return true
+}
+
+/**
+ * Whether one credential is a LATER state of another.
+ *
+ * The generation is the desktop app's own rotation counter and the expiry moves
+ * forward with every rotation, so either being greater means the candidate is the
+ * result of a rotation the baseline predates. This is also what stops a stale copy
+ * from rolling a newer state back: a pool row the mirror could not write must never
+ * overwrite a fresh file.
+ */
+export function minimaxCodeCredentialAdvancedPast(
+  candidate: MinimaxCodeCredentials | null,
+  baseline: MinimaxCodeCredentials,
+): boolean {
+  if (candidate === null) return false
+  if (candidate.refreshToken !== baseline.refreshToken) {
+    return candidate.generation > baseline.generation || candidate.expiresAtMs > baseline.expiresAtMs
+  }
+  // The SAME refresh token: nothing rotated, so the only question left is whether
+  // this credential was renewed — that is, whether its expiry moved materially
+  // forward. The tolerance is what separates a renewal (a fresh full lifetime from
+  // now) from the same record observed again a moment later, which must not count
+  // as progress: treating it as such would let a re-read "heal" an account whose
+  // refresh token really was refused.
+  return candidate.expiresAtMs > baseline.expiresAtMs + SAME_TOKEN_ADVANCE_TOLERANCE_MS
+}
+
+/**
+ * How much later an expiry must be, with an unchanged refresh token, to count as a
+ * renewal rather than the same credential read twice.
+ */
+const SAME_TOKEN_ADVANCE_TOLERANCE_MS = 60_000
+
+/** Sleep, honouring an abort signal. */
+function rotationSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) {
+      resolve()
+      return
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      resolve()
+    }
+    // The listener is removed on every path: a rotation can poll for the whole wait
+    // window, and a listener per poll on one long-lived signal would accumulate.
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/**
+ * Rotate one credential, or adopt the rotation somebody else is doing.
+ *
+ * The distinction matters: a caller that ADOPTED a result must use the credential
+ * that comes back, because the winner replaced the whole record.
+ */
+export async function rotateMinimaxCodeCredential(
+  store: MinimaxCodeCredentialStore,
+  credentials: MinimaxCodeCredentials,
+  perform: () => Promise<MinimaxCodeCredentials>,
+  options: { signal?: AbortSignal } = {},
+): Promise<{ credentials: MinimaxCodeCredentials; adopted: boolean }> {
+  const key = rotationKey(credentials)
+  const seen = credentials.refreshToken
+  const deadline = Date.now() + CREDENTIAL_ROTATION_WAIT_MS
+
+  // Another holder of this very token is rotating it right now. Join or wait:
+  // spending it again is what turns a successful refresh into a false expiration.
+  while (true) {
+    const active = rotations.get(key)
+    if (active === undefined) break
+    if (active.promise !== null) {
+      if (active.token === seen) {
+        // This process is rotating the very token this caller was about to spend:
+        // join it rather than racing it.
+        return { credentials: await active.promise, adopted: true }
+      }
+      // A rotation of a LATER credential of this same session is running, so the
+      // token in hand is already spent. Waiting for that rotation and adopting its
+      // result is the only correct move.
+      await active.promise.catch(() => undefined)
+      break
+    }
+    // No in-process promise to join: the desktop app is rotating its own file, and
+    // re-reading it is the only observation available. Adopting the app's result is
+    // the whole point of waiting - spending this token would be a duplicate.
+    const current = await store.readFresh().catch(() => null)
+    if (minimaxCodeSameCredentialSession(current, credentials)
+      && minimaxCodeCredentialAdvancedPast(current, credentials)) {
+      return { credentials: current as MinimaxCodeCredentials, adopted: true }
+    }
+    if (Date.now() >= deadline) break
+    await rotationSleep(200, options.signal)
+  }
+
+  // Even with no registry entry, the file may already hold a newer credential of
+  // THIS session - the desktop app rotates its own session on its own schedule.
+  // The session check is load-bearing: the plugin's own file mirrors whichever
+  // pooled account is primary, so "newer" alone could mean "a different account".
+  const latest = await store.readFresh().catch(() => null)
+  if (minimaxCodeSameCredentialSession(latest, credentials)
+    && minimaxCodeCredentialAdvancedPast(latest, credentials)) {
+    return { credentials: latest as MinimaxCodeCredentials, adopted: true }
+  }
+
+  const record: RotationRecord = {
+    token: seen,
+    expiresAtMs: credentials.expiresAtMs,
+    promise: null,
+  }
+  const pending = (async (): Promise<MinimaxCodeCredentials> => {
+    // Claim the slot BEFORE the network call. The service spends the refresh token
+    // during that call, so from the first request byte onward any other caller that
+    // arrives is holding a token that is already gone — and it must find this entry
+    // rather than start a rotation of its own.
+    rotations.set(key, record)
+    try {
+      const next = await perform()
+      // A FINAL verdict may still have been about a token somebody else rotated
+      // away while this call was in flight, and that somebody may be the desktop
+      // app — whose only trace is its own file. Storage is asked before the verdict
+      // is believed, because the two possibilities are indistinguishable from the
+      // response itself.
+      const settled = await store.readFresh().catch(() => null)
+      if (minimaxCodeSameCredentialSession(settled, credentials)
+        && minimaxCodeCredentialAdvancedPast(settled, credentials)) {
+        return settled as MinimaxCodeCredentials
+      }
+      // The rotation must know where to write itself back. A caller that produced
+      // a credential without provenance is repaired from the credential the
+      // rotation was started from, rather than letting the store guess a target.
+      const rotated: MinimaxCodeCredentials =
+        next.source === credentials.source && next.recordKey === credentials.recordKey
+          ? next
+          : { ...next, source: credentials.source, recordKey: credentials.recordKey, buildEnv: credentials.buildEnv }
+      await store.write(rotated)
+      // The entry stays in the registry until the write is on disk, so a caller
+      // that observes it waits instead of spending the token this rotation just
+      // replaced. A newer credential on disk means somebody else won the race, and
+      // that result is what the caller has to present.
+      const verified = await store.readFresh().catch(() => null)
+      if (minimaxCodeSameCredentialSession(verified, rotated)
+        && minimaxCodeCredentialAdvancedPast(verified, rotated)) {
+        return verified as MinimaxCodeCredentials
+      }
+      return rotated
+    } catch (error) {
+      // The rotation failed. If storage has moved on from the credential this call
+      // presented, the failure was about a spent token rather than about the
+      // account, and the cure is the credential that is already there.
+      if (error instanceof Error && error.name === 'MinimaxCodeUnauthorizedError') {
+        const settled = await store.readFresh().catch(() => null)
+        if (minimaxCodeSameCredentialSession(settled, credentials)
+          && minimaxCodeCredentialAdvancedPast(settled, credentials)) {
+          return settled as MinimaxCodeCredentials
+        }
+      }
+      throw error
+    } finally {
+      // The slot is released only after the write landed, so a caller arriving in
+      // between observes the rotation rather than a token that is already spent.
+      if (rotations.get(key) === record) rotations.delete(key)
+    }
+  })()
+  // A rotation that fails must not surface as an unhandled rejection merely
+  // because a waiting caller attached its handler a tick later.
+  void pending.catch(() => undefined)
+  record.promise = pending
+  rotations.set(key, record)
+  return { credentials: await pending, adopted: false }
+}
+
+/** Test seam: forget every rotation, so one test cannot leak into the next. */
+export function resetMinimaxCodeRotations(): void {
+  rotations.clear()
 }
 
 /** The desktop app's auth document, kept whole so a write preserves its shape. */
@@ -369,8 +688,40 @@ export class MinimaxCodeCredentialStore {
     }
   }
 
-  read(): Promise<MinimaxCodeCredentials | null> {
+  async read(): Promise<MinimaxCodeCredentials | null> {
+    // Queue behind whatever is already in flight FIRST. Callers use a read to
+    // drain this store's fire-and-forget mirror write, so answering from the
+    // snapshot without draining would hand back the very state that write is about
+    // to replace. The drain is free when nothing is queued.
+    await this.drain()
+    // The in-process snapshot is then safe: a read that ran inside this turn is
+    // more current than the file, because the rotation is written back before its
+    // caller is handed the credential.
+    const recent = recentCredentialRead(this.path())
+    if (recent !== null) return recent
     return serialize(this.path(), async () => (await this.readNative()) ?? (await this.readPluginFile()))
+  }
+
+  /** Resolve once every operation already queued for this store's file settled. */
+  private drain(): Promise<void> {
+    return fileOperations.get(path.resolve(this.path())) ?? Promise.resolve()
+  }
+
+  /**
+   * Read storage, ignoring the snapshot.
+   *
+   * Used by the rotation path, where the whole question is whether somebody else
+   * has already replaced the credential: a cached answer would report the very
+   * state the caller is trying to move past. This is also what makes a rotation
+   * observable at all - the desktop app's write is only visible by reading the
+   * file again.
+   */
+  readFresh(): Promise<MinimaxCodeCredentials | null> {
+    return serialize(this.path(), async () => {
+      const stored = (await this.readNative()) ?? (await this.readPluginFile())
+      rememberCredentialRead(this.path(), stored)
+      return stored
+    })
   }
 
   /**
@@ -414,6 +765,28 @@ export class MinimaxCodeCredentialStore {
     // the stale token while this plugin holds a live one.
     const target = native ? authJsonPath(credentials.region, credentials.buildEnv) : pluginCredentialPath()
     return serialize(target, async () => {
+      await this.writeOnce(credentials)
+      // The rotated pair is authoritative the moment it is durable, and recording
+      // it is what lets {@link read} answer from this process instead of spawning
+      // a DPAPI helper for every request. The registry that keeps OTHER callers
+      // from spending the token this write replaced is held by
+      // {@link rotateMinimaxCodeCredential}, which wraps the whole rotation.
+      rememberCredentialRead(target, credentials)
+    })
+  }
+
+  /**
+   * One write, to whichever file the credential came from.
+   *
+   * Called with the destination already held by {@link write}'s `serialize`; it
+   * must NOT claim the same chain again, or the outer frame would be waiting on the
+   * inner one while the inner one waits on the outer.
+   */
+  private async writeOnce(credentials: MinimaxCodeCredentials): Promise<void> {
+    const native = credentials.source === 'minimax-native' && credentials.recordKey !== null
+    // The destination the caller resolved (its own region, its own build env).
+    const target = native ? authJsonPath(credentials.region, credentials.buildEnv) : pluginCredentialPath()
+    {
       if (!native) {
         await writeFileAtomic(pluginCredentialPath(), JSON.stringify(credentials, null, 2) + '\n')
         return
@@ -455,7 +828,7 @@ export class MinimaxCodeCredentialStore {
         generation: credentials.generation,
         expiresAtMs: credentials.expiresAtMs,
       })
-    })
+    }
   }
 
   /**
@@ -470,6 +843,9 @@ export class MinimaxCodeCredentialStore {
   delete(): Promise<void> {
     return serialize(pluginCredentialPath(), async () => {
       await fs.rm(pluginCredentialPath(), { force: true })
+      // The snapshot has to go with the file: a read right after a sign-out must
+      // not hand the caller the credential that was just removed.
+      recentRead = null
     })
   }
 }

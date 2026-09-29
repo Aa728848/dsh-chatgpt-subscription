@@ -311,7 +311,8 @@ export class MinimaxCodeCheckinService {
     try {
       // getFreshCredential serializes refreshes per account and writes the
       // rotated token back through the pool; the check-in never refreshes
-      // itself.
+      // itself. It also renews BEFORE expiry now, so a scheduled check-in is not
+      // the caller that discovers a spent refresh token.
       const credentials = await this.pool.getFreshCredential(account.id, this.fetchFn)
       try {
         await this.attemptOnce(account, entry, credentials, region, nowMs)

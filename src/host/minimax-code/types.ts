@@ -191,14 +191,48 @@ export const USER_AGENT =
 /**
  * How long before expiry a token is replaced.
  *
- * The access token lives about 24 hours, and MiniMax Code refreshes the same file
- * this plugin reads, so the policy is "read-only first": a token that is still
- * comfortably valid is used exactly as stored. The margin exists only so a
- * request cannot start with a token that expires while it is in flight — it is
- * deliberately far below the token's own lifetime so the plugin does not race the
- * desktop app for a rotation it does not need.
+ * The measured MiniMax Code access token lives ONE HOUR, not the day an earlier
+ * note assumed, and the desktop app refreshes the same file this plugin reads, so
+ * the policy is "read-only first": a token that is still comfortably valid is used
+ * exactly as stored. The margin exists only so a request cannot start with a token
+ * that expires while it is in flight — it is deliberately far below the token's
+ * own lifetime so the plugin does not race the desktop app for a rotation it does
+ * not need.
  */
 export const REFRESH_MARGIN_MS = 60_000
+
+/**
+ * How long before expiry this plugin renews the credential ON ITS OWN schedule.
+ *
+ * This is the constant that removes the every-hour sign-out. The access token
+ * lives one hour, so a reader that only acts once the token is already inside
+ * {@link REFRESH_MARGIN_MS} of expiry presents a bearer the service has already
+ * stopped accepting: every hour the line dips through 401 → refresh → retry, and
+ * a burst of tool calls at that boundary has two callers spend the same rotating
+ * refresh token. Renewing a few minutes early moves the rotation off the boundary
+ * and onto a schedule this plugin controls.
+ *
+ * It must stay far away from the token's lifetime for the opposite reason: a
+ * margin near the lifetime would rotate on every single read and race the desktop
+ * app for a rotation neither side needs. Five minutes of a sixty-minute token is
+ * the balance — the rotation happens once, well before the token can be refused.
+ */
+export const PRE_EXPIRY_REFRESH_MS = 5 * 60_000
+
+/** Failures cheap enough to retry under {@link PRE_EXPIRY_REFRESH_MS}. */
+export const PRE_EXPIRY_REFRESH_MAX_ATTEMPTS = 2
+
+/**
+ * How long a rotation stays "recent" for other readers of the same credential.
+ *
+ * A refresh token rotates: the moment one holder spends it, every other holder is
+ * left with a token the service has already invalidated. This window is the answer
+ * — a caller that observes the credential rotating right now waits for the winner
+ * to write its result back and adopts that result instead of spending a token that
+ * is already gone. It is a local patience bound, not a lock: no file is created,
+ * and the desktop app's own `auth.lock` is never touched.
+ */
+export const CREDENTIAL_ROTATION_WAIT_MS = 15_000
 
 /** Attempts one refresh gets before the stored credential is called dead. */
 export const REFRESH_MAX_RETRIES = 3

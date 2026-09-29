@@ -115,6 +115,23 @@ export interface AccountPoolHooks<
    * refresh token, for instance). Reported purely: nothing is written here.
    */
   authRejectedReason?(credentials: TCredentials): string | undefined
+  /**
+   * Best-effort repair for an account the pool no longer owns.
+   *
+   * The pool holds a COPY of an account's credential when one was adopted from
+   * another application, and a copy can go stale: the moment either side rotates,
+   * the refresh token the pool holds is spent. Recovery is not a refresh (that
+   * would spend the dead token again) but a re-read of the authority, keeping the
+   * authoritative copy only when it still describes the same account.
+   *
+   * Returning null means "no newer authority"; the pool then leaves the row alone.
+   * Absent means the provider keeps no external authority at all.
+   *
+   * The "has it moved on" test belongs to the provider, which knows what identity
+   * means for its credential: the core only asks for the authority and lets the
+   * provider decide whether it is a newer state of the same account.
+   */
+  liveCredentialsFor?(account: TAccount): Promise<{ credentials: TCredentials; advanced: boolean } | null>
   /** Pre-pool single credential, projected as the primary account on read. */
   legacyAccount?(): Promise<TAccount | null>
   /** Mirror the primary account into the single-credential store; `null` clears it. */
@@ -611,6 +628,16 @@ export class AccountPoolCore<
       return target.credentials
     }
     if (!this.hooks.refresh) return target.credentials
+    // Spending a refresh token this account no longer owns is guaranteed to fail,
+    // and the failure would be recorded as a dead sign-in. When the provider keeps
+    // an authoritative copy elsewhere, a newer one means the row is stale rather
+    // than dead, and adopting it is the repair.
+    const live = await this.hooks.liveCredentialsFor?.(target).catch(() => null)
+    if (live !== null && live !== undefined && live.advanced) {
+      target.credentials = live.credentials
+      await this.write(data).catch(() => undefined)
+      return live.credentials
+    }
 
     let refreshed: TCredentials
     try {

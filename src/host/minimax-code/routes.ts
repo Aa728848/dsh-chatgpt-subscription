@@ -299,18 +299,35 @@ export function registerMinimaxCodeRoutes(
    * network, and the status route reads the snapshot through the cache instead.
    */
   const refreshQuota = async (force: boolean): Promise<MinimaxCodeQuota | null> => {
-    // `ensureAccessToken`, NOT a bare `store.read()`: the usage read used to carry
-    // whatever token the file happened to hold, and with a 60-second refresh margin
-    // on a one-hour token that meant the poll landing just after the boundary
-    // presented a bearer the service had already stopped accepting.
-    const credentials = await ensureAccessToken(store, { fetchFn }).catch(() => null)
+    // The credential comes from the POOL when one is installed, exactly as a model
+    // request does. Reading it from the single-credential file instead made this a
+    // second, independent rotation authority: the pool and the usage read would
+    // each present the same refresh token at the top of the hour, one of them would
+    // lose with `invalid_grant`, and a healthy account would be reported as needing
+    // a new sign-in. With the pool in charge there is one rotation per session, and
+    // `ensureAccessToken` stays as the fallback for a composition without a pool.
+    const credentials = await (options.accountPool === undefined
+      ? ensureAccessToken(store, { fetchFn }).catch(() => null)
+      : options.accountPool.getFreshCredential(undefined, fetchFn).catch(() => null))
     if (credentials === null) return null
+    // The read below is asynchronous, and a rotation can land while it is in
+    // flight: its 401 would then be about a token that is no longer the one on
+    // file. Answering that with "the access token expired" is what put a sign-in
+    // prompt in front of a healthy session.
+    const readToken = credentials.refreshToken
+    const isCredentialStale = async (): Promise<boolean> => {
+      const live = await store.readFresh().catch(() => null)
+      return live !== null && live.refreshToken !== readToken
+    }
     return await fetchTokenPlanQuota(credentials, {
       fetchFn,
       force,
+      isCredentialStale,
       // The retry after a 401/403. Forced, because the whole point is that the
       // token on hand is the one that was just refused.
-      renewCredential: () => ensureAccessToken(store, { fetchFn, force: true }),
+      renewCredential: async () => await (options.accountPool === undefined
+        ? ensureAccessToken(store, { fetchFn, force: true })
+        : options.accountPool.renewCredential(undefined, fetchFn)).catch(() => null),
     }).catch(() => null)
   }
 
