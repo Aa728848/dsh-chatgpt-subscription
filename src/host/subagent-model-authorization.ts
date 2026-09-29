@@ -285,6 +285,40 @@ export function inheritedRouteOf(agent: AuthorizationAgent | undefined): Inherit
   }
 }
 
+/**
+ * Resolve the provider/model pair a call actually names, tolerating a model
+ * value that already carries its provider prefix.
+ *
+ * The discovery tool that hands a model to the model renders each route as
+ * `provider/model` (`minimax-code/MiniMax-M3.1-Flash-Preview`), and the
+ * `model` parameter is documented as "Model id interpreted by provider". A
+ * model that copies that line into `model` while naming `provider` separately
+ * therefore sends `provider` = `minimax-code` and `model` =
+ * `minimax-code/MiniMax-M3.1-Flash-Preview`. That is the single most likely way
+ * a correct-looking call is formed, and treating the doubled text as an opaque
+ * model id both denies it and — had it been authorized — resolved a model the
+ * provider does not have. The prefix is stripped only when the remainder is a
+ * non-empty model id.
+ *
+ * @param provider - Provider the call named, when it named one.
+ * @param model - Model the call named, when it named one.
+ * @returns the exact pair, or undefined when the call named no complete pair.
+ */
+export function explicitRoutePair(
+  provider: unknown,
+  model: unknown,
+): AllowedModelRoute | undefined {
+  const providerId = asString(provider)
+  const modelId = asString(model)
+  if (providerId === undefined || modelId === undefined) return undefined
+  if (providerId.length === 0 || modelId.length === 0) return undefined
+  const prefix = providerId + '/'
+  if (modelId.startsWith(prefix) && modelId.length > prefix.length) {
+    return { provider: providerId, model: modelId.slice(prefix.length) }
+  }
+  return { provider: providerId, model: modelId }
+}
+
 /** Whether an exact route is authorized by a allowlist. */
 function routesInclude(
   allowed: readonly AllowedModelRoute[],
@@ -355,6 +389,39 @@ export function unauthorizedRouteReason(
   return `subagent model selection: ${origin} (${route}). `
     + `Provide an authorized provider and model — ${authorizedRoutesText(allowed)} — `
     + 'using list_subagent_models to inspect their reasoning efforts.'
+}
+
+/**
+ * Build the denial reason for a call that spelled an authorized route the way
+ * the discovery tool prints it.
+ *
+ * `list_subagent_models` renders every route as `provider/model`, and the
+ * delegation tool documents `model` as "Model id interpreted by provider". A
+ * model that copies the printed line into `model` while also naming `provider`
+ * therefore sends a doubled id — the single most likely way a correct-looking
+ * call is formed, and the reason a delegation is refused even though the route
+ * the user picked is authorized.
+ *
+ * The id is deliberately NOT accepted here. The guard is the plugin plane, so
+ * it cannot rewrite the arguments the delegation tool executes: that tool hands
+ * `model` to the adapter verbatim, and the adapter matches it against its own
+ * table, where `minimax-code/MiniMax-M3.1-Flash-Preview` is not a model. A
+ * guard that accepted the doubled text would turn this clear refusal into a
+ * downstream `NO_ADAPTER`/unknown-model failure. Naming the two fields
+ * separately is what actually unblocks the call.
+ *
+ * @param pair - The authorized pair the call described as one string.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function prefixedModelReason(
+  pair: AllowedModelRoute,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  return `subagent model selection: this call passed a whole route as \`model\`. `
+    + `Pass \`provider\` and \`model\` as two separate fields — provider "${pair.provider}", `
+    + `model "${pair.model}" — because \`provider/model\` is only how list_subagent_models `
+    + `prints a route, not a model id. Authorized routes: ${authorizedRoutesText(allowed)}.`
 }
 
 /**
@@ -496,7 +563,20 @@ export function delegationDenialReason(
       : partialRouteReason('provider', requestedModel, allowed)
   }
   if (requestedModel === undefined) return partialRouteReason('model', requestedProvider, allowed)
+  // The route as sent is checked first and by itself: a model id may legally
+  // contain a slash, and one that does is authorized exactly as written.
   if (routesInclude(allowed, requestedProvider, requestedModel)) return undefined
+  // Only then the provider-prefixed reading, which is how `list_subagent_models`
+  // prints a route. A `model` that repeats its provider is not a different
+  // route, so it is judged as the route it describes; when that route is
+  // authorized the id is still not usable as sent — the delegation tool hands
+  // `model` to the adapter verbatim, where the doubled text names no model — so
+  // the reason says which two values to pass instead.
+  const pair = explicitRoutePair(requestedProvider, requestedModel)
+  if (pair !== undefined && pair.model !== requestedModel
+    && routesInclude(allowed, pair.provider, pair.model)) {
+    return prefixedModelReason(pair, allowed)
+  }
   return unauthorizedRouteReason(requestedProvider, requestedModel, allowed, true)
 }
 

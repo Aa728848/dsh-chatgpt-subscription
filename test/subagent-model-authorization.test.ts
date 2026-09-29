@@ -11,6 +11,7 @@ import {
   createSubagentAuthorization,
   delegationDenialReason,
   delegationModeOf,
+  explicitRoutePair,
   inheritOverrideReason,
   inheritRouteDenialReason,
   inheritedRouteOf,
@@ -28,6 +29,8 @@ import {
 
 const GEMINI: AllowedModelRoute = { provider: 'antigravity', model: 'gemini-3.8-flash' }
 const OPUS: AllowedModelRoute = { provider: 'antigravity', model: 'claude-opus-4-6' }
+const MINIMAX: AllowedModelRoute = { provider: 'minimax-code', model: 'MiniMax-M3.1-Flash-Preview' }
+const SLASHED: AllowedModelRoute = { provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash' }
 const PREFERENCE: SubagentModelSelectionPreference = { enabled: true, allowedModels: [GEMINI, OPUS] }
 const NO_SESSIONS: SessionsResolver = { get: () => undefined }
 const DEEPSEEK_OPTIONS = { provider: 'deepseek-official', model: 'deepseek-flash' }
@@ -462,5 +465,57 @@ describe('subagent model authorization', () => {
     expect(disposed).toBe(1)
     expect(() => installSubagentModelAuthorization(ctx as never, registry({}), { toolNames: [] }))
       .toThrow(/at least one delegation tool/)
+  })
+
+  it('names the split when a model repeats the provider prefix', () => {
+    const agent = recordingAgent([MINIMAX])
+    // `list_subagent_models` prints every route as `provider/model`, and the
+    // `model` parameter is documented as the id for that provider — so a model
+    // that copies the printed line into `model` while naming `provider`
+    // separately sends a doubled id. That is the route the user authorized, not
+    // a different one, and it is refused with the exact split rather than an
+    // opaque "not on the allowlist": accepting the doubled id would only hand
+    // an unresolvable model to the adapter.
+    const prefixed = delegationDenialReason(agent, 'subagent', {
+      provider: 'minimax-code', model: 'minimax-code/MiniMax-M3.1-Flash-Preview',
+    }, PREFERENCE, NO_SESSIONS)
+    expect(prefixed).toContain('passed a whole route as `model`')
+    expect(prefixed).toContain('provider "minimax-code", model "MiniMax-M3.1-Flash-Preview"')
+    expect(prefixed).not.toContain('is not on the Session allowlist')
+    // The same authorized route passed as two fields is accepted unchanged.
+    expect(delegationDenialReason(agent, 'subagent', {
+      provider: 'minimax-code', model: 'MiniMax-M3.1-Flash-Preview',
+    }, PREFERENCE, NO_SESSIONS)).toBeUndefined()
+    expect(explicitRoutePair('minimax-code', 'minimax-code/MiniMax-M3.1-Flash-Preview'))
+      .toEqual({ provider: 'minimax-code', model: 'MiniMax-M3.1-Flash-Preview' })
+
+    // An id that merely contains a slash belongs to its own provider and is
+    // left untouched, so a genuine cross-provider id is never rewritten.
+    expect(explicitRoutePair('minimax-code', 'deepseek/deepseek-v4.1-flash'))
+      .toEqual({ provider: 'minimax-code', model: 'deepseek/deepseek-v4.1-flash' })
+    // A model id that legitimately contains the provider prefix is authorized
+    // exactly as written, and the prefix reading must not shadow it.
+    expect(delegationDenialReason(recordingAgent([SLASHED]), 'subagent', {
+      provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash',
+    }, PREFERENCE, NO_SESSIONS)).toBeUndefined()
+    expect(delegationDenialReason(agent, 'subagent', {
+      provider: 'minimax-code', model: 'deepseek/deepseek-v4.1-flash',
+    }, PREFERENCE, NO_SESSIONS)).toContain('is not on the Session allowlist')
+
+    // A half-specified pair never resolves, and a prefix with nothing behind it
+    // is not a model id either.
+    expect(explicitRoutePair('minimax-code', undefined)).toBeUndefined()
+    expect(explicitRoutePair(undefined, 'MiniMax-M3.1-Flash-Preview')).toBeUndefined()
+    expect(explicitRoutePair('', 'MiniMax-M3.1-Flash-Preview')).toBeUndefined()
+    expect(explicitRoutePair('p', 'p/')).toEqual({ provider: 'p', model: 'p/' })
+
+    // A doubled id that resolves to no authorized route is still reported as
+    // the unauthorized route it is, with the authorized list.
+    const reason = delegationDenialReason(agent, 'subagent', {
+      provider: 'minimax-code', model: 'minimax-code/MiniMax-M2',
+    }, PREFERENCE, NO_SESSIONS)
+    expect(reason).toContain('minimax-code/minimax-code/MiniMax-M2')
+    expect(reason).toContain('minimax-code/MiniMax-M3.1-Flash-Preview')
+    expect(reason).toContain('is not on the Session allowlist')
   })
 })
