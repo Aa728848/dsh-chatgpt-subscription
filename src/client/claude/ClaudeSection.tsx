@@ -204,7 +204,10 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: Props): Rea
   // per-account re-login — ends in the same 'pending' state, so one effect
   // drives all of them.
   useEffect(() => {
-    if (flow?.status !== 'pending') return
+    // 'exchanging' too: the host reports it while the code is redeemed, and a
+    // poll that lands in that window used to stop polling for good - the card
+    // then sat on "exchanging" while the host had long finished signing in.
+    if (flow?.status !== 'pending' && flow?.status !== 'exchanging') return
     const timer = window.setInterval(() => {
       void (async () => {
         try {

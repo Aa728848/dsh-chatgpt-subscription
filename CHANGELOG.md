@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Claude 线路审计修复（均有回归测试，且在修复前代码上实测失败）**：
+  - **按账号「重新登录」修不好那个账号**（`routes.ts` `loginStore`）。重新登录经 `pool.credentialStoreFor()` 只写进旧的单账号凭据文档，而请求路由读的是**号池行**；随后又清掉失效标记，于是该行带着**已失效的旧令牌**重新进入轮换，下一次请求再次失败——浏览器登录成功了，账号却立刻又要求重新登录。现在一律经 `pool.addAccount()` 写入（按账号身份就地更新同一行并同步文档），且只有新凭据确实落在用户点的那个账号上时才清除失效标记（浏览器里登成别的账号时，会新增那个账号，而不会把死行放回轮换）。
+  - **刷新令牌在「2xx 但响应体解析失败」后被重发**（`oauth.ts` `refreshAccessToken`）。重试循环只对 `ClaudeUnauthorizedError` 提前停止，而 `parseTokenResponse` 抛的是普通 Error；一次 200 意味着轮换型 refresh token 已被消费，重发同一个必得 `invalid_grant`，账号随即被判失效。现只重试 `ClaudeRetryableError`。
+  - **登录卡片轮询在 `exchanging` 状态永久停止**（`ClaudeSection.tsx`）。主机兑换授权码期间报告 `exchanging`，若某次轮询恰好读到它，轮询即停，卡片永远停在「正在交换令牌」，而主机早已登录完成。现在 `pending` 与 `exchanging` 都持续轮询。
+  - **仅含图片的工具结果发送空 text 块**（`mapper.ts`）。API 要求 text 块非空，截图 / read_image 这类结果会让该轮以及之后每一轮回放它的请求都失败。现在以 `(see attached image)` 占位（同参照实现），并丢弃结果中的空文本块。
+  - **出站文本未清除孤立代理项（unpaired surrogate）**。按字节截断的工具输出可能在 emoji 中间断开，`JSON.stringify` 会写出孤立的 `\uD83D` 转义，上游拒收，且因留在历史里而每轮复现。`sanitizeText` 现同时去除 NUL 与孤立代理项（同参照实现 `sanitizeSurrogates`），成对的 emoji 不受影响。
+  - **403 `permission_error` 被当成凭据失效**（`client.ts` `classifyFailure`）。官方定义它是「无权使用该资源」——例如选了订阅不含的模型——重新登录无法改变。原先会把正常账号标记失效、移出号池轮换，并提示用户重新登录。现归类为请求问题（`PROVIDER_ERROR`）；没有类型化 body 的 403 仍按凭据失败处理（保守）。
+  - **模型列表只读第一页**（`client.ts` `performCatalogLoad`）。`GET /v1/models` 默认每页 20 条，而本线路把该列表当作选择器的权威；现发送文档允许的最大值 `limit=1000`。
+  - **`refusal` / `sensitive` 被当成正常结束，与 tool_use 同时出现时还会执行被拒那一轮的工具调用**；**`model_context_window_exceeded` 被当成正常结束**（官方：应视为截断）。现在前者报告为 `error`（附 `stop_details.explanation`），后者映射为 `max-tokens`。
+
+- **修复 Claude 线路输出速度（TPS）与首字时间（TTFT）统计严重偏高**（用户报告）。DSH 的 TPS = `usage.outputTokens ÷（完成时刻 − 首个非空 delta 时刻）`，而 `outputTokens` 包含全部思考 token。`mapper.ts` 却把 `thinking_delta` **缓冲到 `content_block_stop` 才一次性发出**，于是首字时钟在思考**结束后**才开始：全部思考 token 被除以「回答阶段」的时间（例：思考 60 秒约 5000 token、回答 5 秒约 500 token → 显示约 1100 tok/s，实际约 85 tok/s；以工具调用结尾的步骤更离谱），TTFT 则吞掉整个思考阶段，界面在思考期间也一片空白。
+  - **修法**：思考块在 `content_block_start` 即发 `block-start`，每个 `thinking_delta` 到达即发 `reasoning-delta`；只有回放条目（需要最后才到的 signature）等到块结束写入。原注释给出的缓冲理由（「不能回放的思考不该让调用方看到」）与代码行为本就不符——无签名块一直照常展示。
+  - **顺带修正思考 token 数**：原先 `reasoningTokens` 用「返回文本长度 ÷ 4」估算，而 Claude 4+ 返回的是**摘要**思考，远少于实际计费的思考量。现改用服务端在最终 `message_delta` 给出的 `usage.output_tokens_details.thinking_tokens`（缺失时才回落到估算），并封顶于 `outputTokens`——DSH 会整条丢弃 `reasoningTokens > outputTokens` 的用量记录。
+  - **测试**：新增用例逐事件断言「delta 到达即发出」，并在 HEAD 版 mapper 上实测失败（`expected [] to deeply equal [ block-start … ]`）；另有 `thinking_tokens` 优先与封顶两条。
+- **修复 Claude Opus 5.5 在新账号上可能「一次前缀变化后每轮都 400」**。官方 preserved-thinking 文档列明 Fable 5.1、**Opus 5.5**、Sonnet 5.5 会做思考块前缀校验，2026-08-31 起创建的账号默认强制：`system` / `tools` / 更早消息一旦变化（DSH 压缩、工具列表变化、本插件的图片卸载），回放的思考块即 400，且重发同一请求永远失败，除非设 `block_binding.prefix_mismatch_behavior: 'drop_block'`。Opus 5.5 走 adaptive 分支从不发送它。现能力表新增 `bindsThinkingToPrefix`，adaptive 分支对这类模型附带 `block_binding`（配合上一条的 beta 头），**不**改变其 effort 语义（仍不强制 high）。
+
+- **修复 Claude 线路无法使用 Claude Sonnet 5.5（`claude-sonnet-5-5`）**（用户报告：设置卡片上该模型显示「该模型不接受思考档位」）。
+  - **根因 ①：能力表没有这一行**。服务端 `GET /v1/models` 已列出它，但本地表里查不到，于是落到保守桩：无档位、不支持图片、200K 窗口、`thinkingMode: 'none'`，且**声称支持 temperature**——而官方文档写明该模型收到非默认 temperature 即 400。现新增为**本地策展行**（快照 `pi-ai@0.85.1` 早于该模型）：1M 上下文 / 128K 输出 / 支持图片 / 档位 `low`–`max` / 不支持 temperature / 思考不可关闭（`disabled` 与 budget 形式均为 400）。取值来自官方 overview 与 what's-new 页面，并与更新的参照 `pi-ai@0.99.1` 逐项一致。
+  - **思考形态取 `mid-convo`**：官方默认档位是 `high`（与该分支未指定时强制的 `high` 一致，不会像 Opus 5.5 那样被静默抬档）；且其思考块与会话前缀绑定——2026-08-31 之后创建的账号，前缀一变（system、tools、更早消息）回放就 400，除非请求带 `block_binding.prefix_mismatch_behavior: 'drop_block'`。`test/claude-model-catalog.test.ts` 的 mid-convo 名单相应加入该 id。
+  - **根因 ②：`mid-convo` 请求缺少授权 `block_binding` 的 beta**。官方文档明确：带 `block_binding` 却不带 `anthropic-beta: thinking-binding-controls-2026-08-01` 会返回 400 `block_binding: Extra inputs are not permitted`；参照实现对这类模型一直发送该 beta，本插件此前没有。现在请求头**从已构建的请求体读出**是否带 `block_binding`（`claudeBodyBindsThinking`），带则追加该 beta。这同时影响已有的 `claude-fable-5-1` 与 `claude-opus-5`。
+  - **申报版本 2.1.283 → 2.1.285**（npm `latest`）。Sonnet 5.5 由 Claude Code **2.1.284** 首次提供，而上游此前正是按「首次提供该模型的版本」为 Opus 5.5 设门槛；未观测到上游报错数字，因此**不记录** `minCliVersion`，只加一条测试锁「申报默认版本 ≥ 2.1.284」。若你按旧说明设了 `DSH_CLAUDE_CLI_VERSION=2.1.283`，请删除或改为 ≥ 2.1.284。
+  - **验证**：新增/修改的 10 条用例在**回退 `src/` 后全部失败**、恢复后通过；以 `pi-ai@0.85.1` 快照跑保真锁 206 条 Claude 用例全绿；`npm run typecheck` 0 错误；全量 1777 passed / 10 skipped，仅 `web-provider-lifecycle` 3 条失败——本机 DNS 把公网域名解析到 fake-IP，**干净工作树上同样失败**。未在真实订阅账号上端到端验证。
+
 - **新增 Codex 模型 GPT-6.1 Sol（`gpt-6.1-sol`）**。官方文档（`developers.openai.com/api/docs/models/gpt-6.1-sol`）明确它是 GPT-6 家族里「平衡速度、成本与智能」的一档：near-Astra 性能、更低价格，且在 **ChatGPT Work 与 Codex 中可用**。
   - **规格**（同一份官方文档）：`reasoning.effort` 支持 `low` / `medium`（默认）/ `high` / `xhigh` / `max`，**不支持 `none` 与 `minimal`**；1,050,000 context window、128,000 max output tokens、输入模态 text + image、Apr 30 2026 知识截止。
   - **归入现有 GPT-6 profile**（`reasoningProfile: 'gpt-6'`）：本插件早前的 GPT-6 档已经是不含 `none`/`minimal` 的 `low/medium/high/xhigh/max` 且默认 `medium`，与官方对 6.1 Sol 的描述**逐项一致**，因此直接复用该 profile 而不是新造一个；输出上限 128K 与 384K 起始上下文也沿用 GPT-6 家族常量，并进入 `DEFAULT_VISIBLE_CODEX_MODEL_IDS`（紧邻 Astra）。

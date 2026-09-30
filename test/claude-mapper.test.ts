@@ -51,6 +51,7 @@ import {
   buildClaudeSystemBlocks,
   MAX_CACHE_BREAKPOINTS,
   canonicalClaudeToolName,
+  claudeBodyBindsThinking,
   clampReasoning,
   clampThinkingBudgetToAnswerRoom,
   claudeOriginalToolName,
@@ -457,6 +458,45 @@ describe('Thinking dispatch - the four catalog cases', () => {
 
     const unnamed = body({ model: 'claude-opus-5' })
     expect(outputConfigOf(unnamed)).toEqual({ effort: 'high' })
+  })
+
+  it('sends Claude Sonnet 5.5 the bound adaptive form, never disabled, never a temperature', () => {
+    const named = body({ model: 'claude-sonnet-5-5', reasoningEffort: 'xhigh' as ReasoningEffortId, temperature: 0.2 })
+    expect(thinkingOf(named)).toEqual({
+      type: 'adaptive',
+      display: 'summarized',
+      block_binding: { prefix_mismatch_behavior: 'drop_block' },
+    })
+    expect(outputConfigOf(named)).toEqual({ effort: 'xhigh' })
+    // Documented 400s on this model: a non-default temperature, and 'disabled'.
+    expect(named.temperature).toBeUndefined()
+    const off = body({ model: 'claude-sonnet-5-5', reasoningEffort: 'none' as ReasoningEffortId })
+    expect(JSON.stringify(off)).not.toContain('disabled')
+    // Nothing named -> high, which is this model's documented default.
+    expect(outputConfigOf(body({ model: 'claude-sonnet-5-5' }))).toEqual({ effort: 'high' })
+  })
+
+  it('reports block_binding off the built body, which is what licenses its beta', () => {
+    expect(claudeBodyBindsThinking(body({ model: 'claude-sonnet-5-5' }))).toBe(true)
+    expect(claudeBodyBindsThinking(body({ model: 'claude-opus-5' }))).toBe(true)
+    expect(claudeBodyBindsThinking(body({ model: 'claude-sonnet-4-6' }))).toBe(false)
+    expect(claudeBodyBindsThinking(body({ model: 'claude-opus-5-5' }))).toBe(true)
+    expect(claudeBodyBindsThinking(body({ model: 'claude-does-not-exist' }))).toBe(false)
+  })
+
+  it('binds Opus 5.5 thinking to its prefix WITHOUT forcing an effort', () => {
+    // Documented prefix-check model: on accounts created on or after
+    // 2026-08-31 a changed prefix (compaction, tool list, image offload) is a
+    // 400 on every retry unless drop_block is set. It stays 'adaptive' because
+    // mid-convo would force effort high over its documented medium default.
+    const unnamed = body({ model: 'claude-opus-5-5' })
+    expect(thinkingOf(unnamed)).toEqual({
+      type: 'adaptive',
+      display: 'summarized',
+      block_binding: { prefix_mismatch_behavior: 'drop_block' },
+    })
+    expect(unnamed.output_config).toBeUndefined()
+    expect(outputConfigOf(body({ model: 'claude-opus-5-5', reasoningEffort: 'low' as ReasoningEffortId }))).toEqual({ effort: 'low' })
   })
 
   it('adaptive sends the plain adaptive form, with output_config only when an effort was named', () => {
@@ -1020,6 +1060,41 @@ describe('Request images', () => {
     })
   })
 
+  it('never sends an empty text block in an image tool result — an image-only result gets a placeholder', () => {
+    // Upstream rejects an empty text block, and the result stays in history, so
+    // one screenshot-only result used to fail that turn and every later one.
+    const built = buildClaudeRequestBody(options({
+      messages: [
+        { role: 'user', source: { kind: 'tool', callId: 'a' }, content: [
+          { type: 'tool-result', toolCallId: 'a', content: [
+            { type: 'text', text: '' },
+            { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 3 } },
+          ] },
+        ] },
+      ],
+    }) as unknown as GenerateOptions, images)
+    const result = messagesOf(built)[0]!.content[0]!
+    expect(result.content).toEqual([
+      { type: 'text', text: '(see attached image)' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+    ])
+    expect(JSON.stringify(built)).not.toContain('"text":""')
+  })
+
+  it('strips unpaired surrogates from outbound text and keeps real emoji', () => {
+    // A lone surrogate serializes as a `\uD83D` escape that upstream rejects as
+    // invalid JSON; a tool output sliced mid-emoji is enough to produce one.
+    const lone = 'cut here: \uD83D'
+    const built = body({
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'ok 🙈 ' + lone }] },
+      ],
+    })
+    const text = String(messagesOf(built)[0]!.content[0]!.text)
+    expect(text).toBe('ok 🙈 cut here: ')
+    expect(JSON.stringify(built)).not.toMatch(/\\ud83d"/i)
+  })
+
   it('replaces the OLDEST images with a placeholder past the cap, leaving durable history untouched', () => {
     const durableMessages = [
       { role: 'user' as const, source: { kind: 'user' }, content: [
@@ -1101,6 +1176,89 @@ describe('SSE state machine', () => {
 
     // One closeStream call after the body ends is a no-op, not a second finish.
     expect(closeStream(state)).toEqual([])
+  })
+
+  it('streams thinking as it arrives, so DSH\'s first-token clock (TPS, TTFT) starts when thinking starts', () => {
+    // THE REPORTED TPS BUG. DSH divides usage.outputTokens - which counts every
+    // thinking token - by (completion - first non-empty delta). Holding the text
+    // until content_block_stop started that clock after the thinking was done.
+    const state = createStreamState()
+    const opened = feed([
+      ...eventLines(messageStart()),
+      ...eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }),
+    ], state)
+    expect(opened).toEqual([{ type: 'block-start', index: 0, blockType: 'reasoning' }])
+
+    // Each delta is emitted on arrival, before the block closes.
+    expect(feed(eventLines({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'first ' } }), state))
+      .toEqual([{ type: 'reasoning-delta', index: 0, text: 'first ' }])
+    expect(feed(eventLines({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'second' } }), state))
+      .toEqual([{ type: 'reasoning-delta', index: 0, text: 'second' }])
+    expect(feed(eventLines({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-9' } }), state))
+      .toEqual([])
+
+    // The close repeats nothing: it ends the block with the full text, and the
+    // replay entry still carries the signature that arrived last.
+    expect(feed(eventLines({ type: 'content_block_stop', index: 0 }), state)).toEqual([
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'first second' } },
+    ])
+    const terminal = closeStream(state).find((chunk) => chunk.type === 'finish')
+    if (terminal === undefined || terminal.type !== 'finish') throw new Error('no finish chunk')
+    expect(terminal.replayState).toEqual({
+      response: { provider: PROVIDER_ID },
+      blocks: [{ type: 'thinking', thinking: 'first second', signature: 'sig-9' }],
+    })
+  })
+
+  it('reports the server\'s thinking_tokens over the summary-text estimate, never above outputTokens', () => {
+    // Claude 4+ returns SUMMARIZED thinking, so chars/4 of the returned text
+    // understates the reasoning the model actually billed.
+    const reported = createStreamState()
+    const chunks = feed([
+      ...eventLines(messageStart()),
+      ...eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }),
+      ...eventLines({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'short summary' } }),
+      ...eventLines({ type: 'content_block_stop', index: 0 }),
+      ...eventLines({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 900, output_tokens_details: { thinking_tokens: 750 } } }),
+      ...eventLines({ type: 'message_stop' }),
+    ], reported)
+    expect(chunks.find((chunk) => chunk.type === 'usage')).toMatchObject({ usage: { outputTokens: 900, reasoningTokens: 750 } })
+
+    // DSH drops a usage record whose reasoning count exceeds its output count.
+    const capped = createStreamState()
+    const cappedChunks = feed([
+      ...eventLines({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10, output_tokens_details: { thinking_tokens: 50 } } }),
+      ...eventLines({ type: 'message_stop' }),
+    ], capped)
+    expect(cappedChunks.find((chunk) => chunk.type === 'usage')).toMatchObject({ usage: { outputTokens: 10, reasoningTokens: 10 } })
+  })
+
+  it('reports a refusal as a failure, even beside a tool_use, so the refused turn runs nothing', () => {
+    const finishOf = (lines: string[]) => {
+      const chunk = feed(lines, createStreamState()).find((entry) => entry.type === 'finish')
+      if (chunk === undefined || chunk.type !== 'finish') throw new Error('no finish chunk')
+      return chunk.reason
+    }
+    const refused = finishOf([
+      ...eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_x', name: 'Bash', input: { command: 'x' } } }),
+      ...eventLines({ type: 'content_block_stop', index: 0 }),
+      ...eventLines({ type: 'message_delta', delta: { stop_reason: 'refusal', stop_details: { explanation: 'declined: cyber' } }, usage: { output_tokens: 3 } }),
+      ...eventLines({ type: 'message_stop' }),
+    ])
+    expect(refused).toEqual({ kind: 'error', failure: { message: 'declined: cyber', code: 'PROVIDER_ERROR' } })
+
+    // Documented as "treat the response as truncated", so not a clean stop.
+    expect(finishOf([
+      ...eventLines({ type: 'message_delta', delta: { stop_reason: 'model_context_window_exceeded' }, usage: { output_tokens: 3 } }),
+      ...eventLines({ type: 'message_stop' }),
+    ])).toEqual({ kind: 'max-tokens' })
+  })
+
+  it('opens a redacted_thinking block at its start and never streams its payload as text', () => {
+    const state = createStreamState()
+    const opened = feed(eventLines({ type: 'content_block_start', index: 0, content_block: { type: 'redacted_thinking', data: 'BLOB' } }), state)
+    expect(opened).toEqual([{ type: 'block-start', index: 0, blockType: 'reasoning' }])
+    expect(feed(eventLines({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'leak?' } }), state)).toEqual([])
   })
 
   it('concatenates input_json_delta fragments and parses them ONCE, at content_block_stop', () => {

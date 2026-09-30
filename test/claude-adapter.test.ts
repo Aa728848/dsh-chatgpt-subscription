@@ -413,6 +413,30 @@ describe('claude adapter request path', () => {
     expect(JSON.stringify(body).match(/"cache_control"/g)).toHaveLength(3)
   })
 
+  it('licenses block_binding with its beta on the real request, and only where the body sends it', async () => {
+    // block_binding without thinking-binding-controls is a documented 400 on
+    // every request, so the posted headers and posted bytes are read together.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-5-5')))
+    await drain(adapter.stream(options('claude-sonnet-4-6')))
+
+    const [bound, plain] = calls
+    expect((bound!.body.thinking as Record<string, unknown>).block_binding).toEqual({ prefix_mismatch_behavior: 'drop_block' })
+    expect(bound!.headers['anthropic-beta'].split(',')).toContain('thinking-binding-controls-2026-08-01')
+    expect((plain!.body.thinking as Record<string, unknown>).block_binding).toBeUndefined()
+    expect(plain!.headers['anthropic-beta']).not.toContain('thinking-binding-controls')
+  })
+
+  it('resolves Claude Sonnet 5.5 with its effort ladder instead of the stub', async () => {
+    const { store, settings } = await mount()
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    const resolved = await adapter.resolveModel(PROVIDER_ID, 'claude-sonnet-5-5')
+    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+  })
+
   it('omits the claude-code beta for a haiku model, from the real model id', async () => {
     const { store, settings } = await mount()
     const { fn, calls } = recordingFetch(() => answerResponse())
@@ -695,6 +719,25 @@ describe('claude adapter rotation', () => {
     // The account is kept (signing in again restores it) but flagged.
     expect(pool.authFailures.map((entry) => entry.id)).toEqual(['cl-1'])
     expect(pool.cooldowns).toHaveLength(0)
+  })
+
+  it('keeps an account in the pool on a 403 permission_error, and does not tell the user to sign in again', async () => {
+    // An entitlement answer (a model the plan lacks). Marking the account
+    // auth-failed took a working account out of rotation over a model choice.
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { adapter, calls } = await pooledAdapter(pool, () => errorResponse(403, {
+      type: 'error',
+      error: { type: 'permission_error', message: 'Your account is not permitted to use claude-opus-5-5.' },
+    }))
+    const error = await failureOf(adapter.stream(options('claude-opus-5-5'))) as { code: string; message: string }
+
+    expect(error.code).toBe('PROVIDER_ERROR')
+    expect(error.message).toContain('not permitted')
+    expect(pool.authFailures).toEqual([])
+    expect(calls).toHaveLength(1)
   })
 
   it('stops after three attempts even when the pool keeps offering another account', async () => {

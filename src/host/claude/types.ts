@@ -97,6 +97,17 @@ export const OAUTH_BETA = 'oauth-2025-04-20'
 export const CLAUDE_CODE_BETA = 'claude-code-20250219'
 /** Lets thinking blocks interleave with tool use across a multi-turn loop. */
 export const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
+/**
+ * Licenses `thinking.block_binding` in a request body.
+ *
+ * The field is not optional to license: the vendor documents that a body
+ * carrying `block_binding` WITHOUT this beta is a 400 whose message ends
+ * `block_binding: Extra inputs are not permitted` — every request, every turn.
+ * The mid-convo thinking form always sends `block_binding`, so a request that
+ * uses that form must carry this value. The reference sends it for exactly those
+ * models (`THINKING_BINDING_CONTROLS_BETA`, pushed when `supportsMidConvoEffort`).
+ */
+export const THINKING_BINDING_CONTROLS_BETA = 'thinking-binding-controls-2026-08-01'
 
 /** Anthropic protocol revision sent as `anthropic-version`. */
 export const ANTHROPIC_VERSION = '2023-06-01'
@@ -128,12 +139,18 @@ export const ANTHROPIC_VERSION = '2023-06-01'
  * trades a clear refusal for an unpredictable one. Note that npm's `stable`
  * dist-tag can itself sit below a model's floor, so `latest` is the tag to read.
  *
+ * It must also be at or above the release that FIRST SHIPPED each model in the
+ * table, whether or not a floor for that model has been observed: upstream has
+ * so far gated a new model on the release that added it (Opus 5.5 arrived in
+ * 2.1.280 and is refused below 2.1.280). Claude Sonnet 5.5 arrived in 2.1.284,
+ * so 2.1.283 could not be relied on to reach it; 2.1.285 is npm `latest`.
+ *
  * It is still not a literal that only moves when this package is republished: a
  * user whose installed baseline has aged past the server's floor has to be able
  * to raise it without waiting for a release. Read the effective value with
  * {@link claudeCliVersion}, pin one with {@link setClaudeCliVersion}.
  */
-export const CLAUDE_CLI_VERSION = '2.1.283'
+export const CLAUDE_CLI_VERSION = '2.1.285'
 
 /**
  * Loopback callback port the subscription flow defaults to.

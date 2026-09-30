@@ -176,8 +176,10 @@
  * LOCAL ADDITIONS — the rows the reference snapshot predates
  * ---------------------------------------------------------------------------
  *
- * `claude-opus-5-5` is the only such row today. The mirror list in the test is
- * `LOCALLY_CURATED_MODEL_IDS`; the two must be changed together.
+ * `claude-opus-5-5` and `claude-sonnet-5-5` are the two such rows today. The
+ * mirror list in the test is `LOCALLY_CURATED_MODEL_IDS`; the two must be
+ * changed together. Sonnet 5.5's own reasons are recorded at its row; what
+ * follows below is Opus 5.5's.
  *
  * It is CURATED rather than transcribed because the snapshot this table copies
  * has no entry for it, and the one thing a transcription table must never do is
@@ -295,11 +297,22 @@ export interface ClaudeModelEntry {
    * `compareDottedVersions` / `meetsDottedVersionFloor` in types.ts.
    */
   minCliVersion?: string
+  /**
+   * Whether the vendor documents this model as running the preserved-thinking
+   * PREFIX CHECK (today: Fable 5.1, Opus 5.5, Sonnet 5.5). On accounts created on
+   * or after 2026-08-31 a replayed thinking block whose prefix (system, tools,
+   * earlier messages) changed is then a 400 on every retry, unless the request
+   * sets `block_binding.prefix_mismatch_behavior: 'drop_block'`. DSH edits that
+   * prefix in normal use (compaction, a changed tool list, image offload), so
+   * the adaptive form adds the binding for these models; 'mid-convo' always
+   * sends it. Absent means not documented as checking.
+   */
+  bindsThinkingToPrefix?: boolean
 }
 
 /**
- * Fifteen rows: the snapshot's own 14, in the snapshot's own declaration order,
- * followed by the curated row the snapshot predates (see LOCAL ADDITIONS above).
+ * Sixteen rows: the snapshot's own 14, in the snapshot's own declaration order,
+ * followed by the curated rows the snapshot predates (see LOCAL ADDITIONS above).
  *
  * The order matters and is not cosmetic. The test asserts the snapshot's ids
  * appear in the table as a SUBSEQUENCE, so a curated row may be appended or
@@ -531,6 +544,43 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     // value to its neighbours and do not invent floors for them: see the
     // interface doc comment for why an absent floor is the honest value.
     minCliVersion: '2.1.280',
+    // Documented as running the preserved-thinking prefix check. This is what
+    // lets it stay 'adaptive' (no forced effort) and still send block_binding.
+    bindsThinkingToPrefix: true,
+  },
+  {
+    id: 'claude-sonnet-5-5',
+    name: 'Claude Sonnet 5.5',
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    supportsImage: true,
+    // Documented: a non-default temperature, top_p or top_k is a 400.
+    supportsTemperature: false,
+    // 'mid-convo', and here — unlike Opus 5.5 above — that is the documented
+    // choice, for two reasons that both come from the vendor's pages:
+    // 1. its documented default effort is HIGH, so the form's forced
+    //    `effort: 'high'` when the caller names none IS the model's own default;
+    // 2. its thinking blocks are bound to the conversation prefix, and for
+    //    accounts created on or after 2026-08-31 a replay after any prefix edit
+    //    (system, tools, an earlier message) is a 400 unless the request sets
+    //    block_binding.prefix_mismatch_behavior = 'drop_block' — the field this
+    //    form sends. DSH folds later system messages into the system prompt, so
+    //    that edit is not hypothetical here.
+    // The newer reference (pi-ai 0.99.1) flags this model supportsMidConvoEffort,
+    // which is the same verdict.
+    thinkingMode: 'mid-convo',
+    // All five documented effort levels; 'minimal' maps to null in the newer
+    // reference, so the ladder starts at 'low'.
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    // Documented: thinking: { type: 'disabled' } is a 400 that points to
+    // 'between_tools', and the manual budget form is a 400 too. 'between_tools'
+    // is not a form this line sends, so thinking cannot be turned off here.
+    canDisableThinking: false,
+    // No floor recorded: none has been OBSERVED for this model (see the
+    // interface doc comment). It first shipped in Claude Code 2.1.284, and
+    // CLAUDE_CLI_VERSION is kept at or above that release instead.
+    // Documented prefix-check model; 'mid-convo' already sends the binding.
+    bindsThinkingToPrefix: true,
   },
 ] as const) as readonly ClaudeModelEntry[]
 
@@ -644,6 +694,11 @@ export function claudeThinkingMode(modelId: string, catalog?: readonly ClaudeMod
 /** Whether one model accepts a temperature. */
 export function claudeModelSupportsTemperature(modelId: string, catalog?: readonly ClaudeModelEntry[]): boolean {
   return resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS).supportsTemperature
+}
+
+/** Whether one model runs the documented preserved-thinking prefix check. */
+export function claudeModelBindsThinkingToPrefix(modelId: string, catalog?: readonly ClaudeModelEntry[]): boolean {
+  return resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS).bindsThinkingToPrefix === true
 }
 
 /** Whether thinking can be turned off for one model. */

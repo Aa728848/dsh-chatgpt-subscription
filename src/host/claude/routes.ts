@@ -503,32 +503,32 @@ export function registerClaudeRoutes(
    * is addressed at THAT account, which is what makes a re-login repair the row
    * the user clicked instead of adding a second one.
    */
-  const loginStore = (accountId?: string): ClaudeTokenStore => {
-    const base: ClaudeTokenStore = pool !== undefined && accountId !== undefined
-      ? pool.credentialStoreFor(accountId)
-      : {
-          read: async () => (await activeAccount()).credentials ?? null,
-          write: async (credentials) => {
-            if (pool !== undefined) await pool.addAccount(credentials)
-            else await store.saveAccount(credentials)
-          },
-        }
-    return {
-      read: () => base.read(),
-      write: async (credentials) => {
-        await base.write(credentials)
-        // A re-login is the remedy for a rejected credential, so the marker that
-        // took the account out of rotation goes only AFTER the new credential
-        // has landed. Clearing it first would put an account with a dead token
-        // back into rotation for the length of a browser sign-in.
-        if (pool !== undefined && accountId !== undefined) {
+  const loginStore = (accountId?: string): ClaudeTokenStore => ({
+    read: async () => pool !== undefined && accountId !== undefined
+      ? pool.credentialStoreFor(accountId).read()
+      : (await activeAccount()).credentials ?? null,
+    write: async (credentials) => {
+      if (pool === undefined) {
+        await store.saveAccount(credentials)
+      } else {
+        // THROUGH THE POOL, re-login included. The pool row is what routing
+        // serves; `credentialStoreFor` writes only the pre-pool document, so a
+        // re-login written there left the row on its dead token and the next
+        // request failed it again. addAccount finds the row by the account's
+        // identity, updates it in place, and mirrors the document.
+        const landed = await pool.addAccount(credentials)
+        // The marker goes only AFTER the new credential has landed, and only if
+        // it landed on the account the user asked to repair: a browser signed in
+        // as someone else adds that account instead, and must not put the dead
+        // row back into rotation.
+        if (accountId !== undefined && landed.id === accountId) {
           await pool.clearAuthFailed(accountId).catch(() => undefined)
         }
-        clearCachedQuota()
-        clearCachedCatalog()
-      },
-    }
-  }
+      }
+      clearCachedQuota()
+      clearCachedCatalog()
+    },
+  })
 
   const readStatus = (quotaError: string | null = null): Promise<ClaudeWebStatus> =>
     activeAccount().then((active) => getClaudeWebStatus(store, modelSettings, preferences, options, quotaError, active))

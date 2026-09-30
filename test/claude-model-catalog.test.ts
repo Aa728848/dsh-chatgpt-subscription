@@ -19,11 +19,11 @@
  *
  * WHAT CHANGED WHEN THE TABLE OUTGREW THE SNAPSHOT.
  *
- * The shipped table may carry rows the snapshot predates — today exactly one,
- * `claude-opus-5-5`. Making the lock "at least these rows" would have been the
- * cheap fix and it would have been a lie: a table that had silently dropped a
- * transcribed row, or replaced one with an invented row that merely fits the
- * shape, would still pass. So the lock is split into three assertions that
+ * The shipped table may carry rows the snapshot predates — today two,
+ * `claude-opus-5-5` and `claude-sonnet-5-5`. Making the lock "at least these
+ * rows" would have been the cheap fix and it would have been a lie: a table
+ * that had silently dropped a transcribed row, or replaced one with an invented
+ * row that merely fits the shape, would still pass. So the lock is split into three assertions that
  * together still fail on every drift the old id-equality caught:
  *
  * 1. every reference entry still gets its field-by-field comparison, including a
@@ -122,8 +122,14 @@ const REFERENCE_ENTRY_COUNT = 14
  * values come from the vendor's published documentation — the model overview
  * page and the extended-thinking effort page — and are asserted on their own
  * below rather than against the snapshot.
+ *
+ * `claude-sonnet-5-5` is curated for the same reason (released 2026-09-28). Its
+ * values come from the vendor's model overview and "what's new" pages, and they
+ * agree field for field with the newer reference `@earendil-works/pi-ai` 0.99.1,
+ * which does carry it — but that is not the snapshot this checkout pins.
  */
 const LOCALLY_CURATED_MODEL_IDS: readonly string[] = [
+  'claude-sonnet-5-5',
   'claude-opus-5-5',
 ]
 
@@ -451,17 +457,21 @@ describe('claude model catalog / transcription fidelity', () => {
     // So the ids are pinned here: adding a third one is a deliberate edit to this
     // list plus a check of that model's documented default effort, not a
     // one-word change in the catalog.
-    expect(midConvoIds).toEqual(['claude-fable-5-1', 'claude-opus-5'])
+    // Sonnet 5.5 is the curated member: its documented default effort is high.
+    expect(midConvoIds).toEqual(['claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5-5'])
 
-    // Guard the premise the list above rests on: these two are the models the
-    // reference flags as managed-effort. If the snapshot ever flags a third, the
-    // pinned list must be revisited rather than quietly left short.
+    // Guard the premise the list above rests on: among the rows the snapshot
+    // carries, these are exactly the ones it flags as managed-effort. If the
+    // snapshot ever flags another, the pinned list must be revisited rather than
+    // quietly left short. Curated rows are outside what the snapshot can judge.
     if (hasReference) {
-      const managed = (referenceEntries as ReferenceEntry[])
+      const entries = referenceEntries as ReferenceEntry[]
+      const snapshotIds = new Set(entries.map((entry) => entry.id))
+      const managed = entries
         .filter((entry) => entry.compat?.supportsMidConvoEffort === true)
         .map((entry) => entry.id)
         .sort()
-      expect(managed).toEqual(midConvoIds)
+      expect(managed).toEqual(midConvoIds.filter((id) => snapshotIds.has(id)))
     }
 
     // Opus 5.5 is documented as adaptive with a MEDIUM default effort, so it must
@@ -565,6 +575,33 @@ describe('claude model catalog / locally curated rows', () => {
     // And it is in the fallback view, which is the table itself: a curated row
     // that the fallback hid would be unreachable before the live listing answers.
     expect(FALLBACK_MODELS.some((model) => model.id === 'claude-opus-5-5')).toBe(true)
+  })
+
+  it('carries Claude Sonnet 5.5 as a curated row with the documented values', () => {
+    // THE REPORTED BUG: the live listing named claude-sonnet-5-5, the table did
+    // not, so it resolved to the conservative stub — no effort ladder ("this
+    // model accepts no thinking level" on the card), no images, a 200K window,
+    // and a temperature the model refuses.
+    const row = CLAUDE_MODELS.find((model) => model.id === 'claude-sonnet-5-5')
+    expect(row, 'claude-sonnet-5-5 must be a row in CLAUDE_MODELS').toBeDefined()
+    const sonnet55 = row as ClaudeModelEntry
+
+    expect(sonnet55.name).toBe('Claude Sonnet 5.5')
+    expect(defaultContextWindowFor('claude-sonnet-5-5')).toBe(1_000_000)
+    expect(maxOutputTokensFor('claude-sonnet-5-5')).toBe(128_000)
+    expect(claudeModelSupportsImage('claude-sonnet-5-5')).toBe(true)
+    expect(claudeReasoningEfforts('claude-sonnet-5-5')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+
+    // Documented: a non-default temperature is a 400.
+    expect(claudeModelSupportsTemperature('claude-sonnet-5-5')).toBe(false)
+    // Documented: { type: 'disabled' } and the budget form are both 400s.
+    expect(claudeModelCanDisableThinking('claude-sonnet-5-5')).toBe(false)
+    // Documented default effort HIGH plus a prefix-bound thinking block: the
+    // form that sends block_binding and forces high when nothing is named.
+    expect(claudeThinkingMode('claude-sonnet-5-5')).toBe('mid-convo')
+
+    // No floor is claimed for it: none has been observed.
+    expect(claudeMinCliVersionFor('claude-sonnet-5-5')).toBeUndefined()
   })
 
   it('keeps the locally curated list honest against the table', () => {
@@ -745,6 +782,11 @@ describe('claude model catalog / lookups', () => {
     // And the recorded floor really is the shipped row's own field, reached the
     // way the adapter reaches it.
     expect(claudeMinCliVersionFor('claude-opus-5-5')).toBe('2.1.280')
+
+    // Not a recorded floor but the release that first shipped Claude Sonnet 5.5.
+    // Upstream gated Opus 5.5 on exactly its own first release, so a default
+    // below this one cannot be relied on to reach Sonnet 5.5.
+    expect(meetsDottedVersionFloor(CLAUDE_CLI_VERSION, '2.1.284')).toBe(true)
   })
 
   it('refuses locally, naming both versions, when the effective version is lowered below a floor', () => {

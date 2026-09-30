@@ -828,6 +828,20 @@ describe('token exchange', () => {
     }
   })
 
+  it('never resends the refresh token after a 2xx it could not parse — the grant may already be spent', async () => {
+    // A 200 means the rotating refresh token was consumed. Retrying the same
+    // token then earns invalid_grant, which takes the account out of rotation
+    // over a refresh that actually succeeded.
+    const stub = recordingFetch((_call, index) =>
+      index === 0
+        ? jsonResponse({ refresh_token: 'rotated', expires_in: 3600 })
+        : jsonResponse({ error: 'invalid_grant', error_description: 'already used' }, 400))
+    const failure = await refreshAccessToken('the-refresh-token', { fetchFn: stub.fn }).catch((error: unknown) => error)
+    expect(stub.calls).toHaveLength(1)
+    expect(failure).not.toBeInstanceOf(ClaudeUnauthorizedError)
+    expect(String(failure)).toMatch(/access token/)
+  })
+
   it('classifies 429 and 5xx as retryable, within a bounded budget', async () => {
     vi.useFakeTimers()
     const stub = recordingFetch((_call, index) =>
