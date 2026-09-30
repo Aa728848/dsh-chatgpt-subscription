@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **新增 Codex 模型 GPT-6.1 Sol（`gpt-6.1-sol`）**。官方文档（`developers.openai.com/api/docs/models/gpt-6.1-sol`）明确它是 GPT-6 家族里「平衡速度、成本与智能」的一档：near-Astra 性能、更低价格，且在 **ChatGPT Work 与 Codex 中可用**。
+  - **规格**（同一份官方文档）：`reasoning.effort` 支持 `low` / `medium`（默认）/ `high` / `xhigh` / `max`，**不支持 `none` 与 `minimal`**；1,050,000 context window、128,000 max output tokens、输入模态 text + image、Apr 30 2026 知识截止。
+  - **归入现有 GPT-6 profile**（`reasoningProfile: 'gpt-6'`）：本插件早前的 GPT-6 档已经是不含 `none`/`minimal` 的 `low/medium/high/xhigh/max` 且默认 `medium`，与官方对 6.1 Sol 的描述**逐项一致**，因此直接复用该 profile 而不是新造一个；输出上限 128K 与 384K 起始上下文也沿用 GPT-6 家族常量，并进入 `DEFAULT_VISIBLE_CODEX_MODEL_IDS`（紧邻 Astra）。
+  - **测试**：`client-registration` 的复选框/上下文行数量断言原本硬编码为 10，现改为从 `CODEX_MODEL_CATALOG.length` 推导——新增目录条目不再需要改一条与「渲染」无关的计数；`adapter.test.ts` 的目录断言补上 6.1 Sol 一行。
+
+- **修复各线路模型目录：清空缓存后，仍在途的刷新会把缓存与快照重新写回**（CI 在 Windows 上暴露）。`clearCachedCatalog()` 会丢弃内存缓存，但 stale-while-revalidate 路径**先返回旧值、后台继续拉取**，那次拉取在清空之后才落地，于是把刚被丢弃的缓存和快照都恢复了。
+  - **CI 现场**：Windows 上 `kimi-code-catalog-cache` 一条以 `expected [ { id: 'k3', … }, …(1) ] to deeply equal []` 失败——上一轮的快照在测试清理之后被重新写出，下一个测试把它当作「本来不存在」的文件重新水化。Ubuntu 上不出现，因为凭证读取（Windows 走 DPAPI 需起 `powershell.exe`）慢到足以让这次写入越过清理点。
+  - **修法**：给 `kimi-code` / `command-code` / `workbuddy` 三处目录缓存加 `catalogCacheEpoch`，在发起拉取前采样、落地前比对，与 antigravity / workbuddy **配额**路径早已使用的 epoch 写法一致；清空时递增。快照不再被写入，缓存也不被恢复，但**调用方仍拿到它请求的那份列表**。
+  - 另外让 `writeCatalogSnapshot` 返回其 Promise，并新增 `flushCatalogSnapshots()`：测试此前用 `setTimeout(20)` 赌写入已完成，现在可以确定性地等待（生产路径从不调用）。
+  - **测试**：`kimi-code-catalog-cache` 新增一条直接制造该竞态的用例（拉取被 gate 卡住 → 清空 → 放行），断言调用方拿到列表、缓存仍为空、且**没有**快照落地。已实测：**移除守卫时该用例失败**（`expected [...] to deeply equal []`，与 CI 报错一致），加上守卫后通过；两个文件连跑 10 次全净。
+
 - **跟进 DSH 0.2.0-rc.2（本机 harness 仓库更新，npm `latest` 与 `next` 标签已推进至该版本）**。`dsh-v0.2.0-rc.1..dsh-v0.2.0-rc.2` 共 1022 个文件，但逐一审计插件导入的 20 个包与全部兼容接缝后，**无需任何破坏性或行为性适配**：`dsh-llm` / `dsh-settings` / `dsh-web` / `dsh-tools` / `dsh-host-webserver` / `dsh-timeout` 等核心包源码零改动（仅版本号升级），`vendor/`（cordis / loader / schemastery）字节相同；`ui-conversation` 仅增加问答相关 i18n 条目并复用局部插槽对象，`ui-model-selection` 增加模型模糊搜索及提供商排序（插件所引用的 `ModelDirectoryState` 类型定义字节相同），`ui-renderer` 仅 `FactoryOutlet` 做 `useMemo` 细微优化，`ui-tool` 增量导出问答面板类型，`tool-ask-user` 新增 timed 模式且默认 `'legacy'` 保持阻塞完全兼容，shell 工具仅微调提示词。本轮的实际变更：
   - `package.json`：15 个 `@deepseek-ai/dsh-*` peerDependencies 区间各追加 `|| ^0.2.0-rc.2`（预发布区间不跨版本组，显式追加），devDependencies 基线 `^0.2.0-rc.1` → `^0.2.0-rc.2`。
   - lockfile：`dsh-attachment@0.2.0-rc.2` 精确钉 `dsh-brand` peer，按既定做法干净重建 `package-lock.json`（`npm ci --dry-run` 显示 up to date）；`pnpm-workspace.yaml` 排除表 38 行各追加 `0.2.0-rc.2`、`pnpm-lock.yaml` 使用 pnpm 11.24.0 重建（363 条，36 个 dsh 包全在 0.2.0-rc.2）。
