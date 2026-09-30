@@ -274,16 +274,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   }
 
   // Stop a reasoning stream that degenerates into repetition before it burns
-  // the output budget, then let the turn resume on a fresh step. The guard wraps
-  // the `llm/stream` seam, whose signature is identical on every harness
-  // generation this plugin supports, and is inert when that seam is missing.
-  // Configured to `false` it is never installed at all.
+  // the output budget, then let the turn resume on a fresh step. The guard
+  // subscribes to the `llm/stream` waterfall, whose signature is identical on
+  // every harness generation this plugin supports, and is inert when the host
+  // exposes no event bus. Configured to `false` it is never installed at all.
   if (pluginConfig.reasoningCollapseGuard !== false) {
     const guardOptions: GuardOptions = pluginConfig.reasoningCollapseGuard ?? {}
     ctx.effect(() => {
       const dispose = installReasoningCollapseGuard(ctx as unknown as ReasoningCollapseContext, guardOptions)
       if (dispose === undefined) {
-        ctx.logger.warn('[dsh-chatgpt-subscription] reasoning-collapse guard skipped: this harness exposes no llm/stream seam')
+        ctx.logger.warn('[dsh-chatgpt-subscription] reasoning-collapse guard skipped: this harness exposes no event bus')
         return () => undefined
       }
       return dispose
