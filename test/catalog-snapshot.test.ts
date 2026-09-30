@@ -23,7 +23,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-const { catalogSnapshotName, catalogSnapshotPath, readCatalogSnapshot, writeCatalogSnapshot, rehydrateCatalogCache } = await import(
+const { catalogSnapshotName, catalogSnapshotPath, readCatalogSnapshot, writeCatalogSnapshot, rehydrateCatalogCache, flushCatalogSnapshots } = await import(
   '../src/host/common/catalog-snapshot.ts'
 )
 const commandCode = await import('../src/host/command-code/client.ts')
@@ -61,8 +61,9 @@ afterEach(async () => {
   vi.unstubAllGlobals()
   // The catalog write inside loadProviderModels is fire-and-forget; let any
   // pending one settle before clearing the directory, or it would recreate the
-  // file after the cleanup and leak into the next test.
-  await new Promise((resolve) => setTimeout(resolve, 20))
+  // file after the cleanup and leak into the next test. Waiting on the writes
+  // themselves is what makes that deterministic rather than likely.
+  await flushCatalogSnapshots()
   await fs.rm(storages(), { recursive: true, force: true })
 })
 

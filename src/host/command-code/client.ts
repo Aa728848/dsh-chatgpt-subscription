@@ -556,6 +556,8 @@ function extractUnlimited(payload: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 let cachedCatalog: { models: CommandCodeCatalogModel[]; fetchedAt: number } | undefined
+/** Bumped by every cache clear so a fetch already in flight cannot publish. */
+let catalogCacheEpoch = 0
 let catalogInFlight: Promise<CommandCodeCatalogModel[]> | null = null
 /**
  * Snapshot scopes already consulted in this process.
@@ -660,8 +662,13 @@ function refreshProviderModels(
   options: CommandCodeRequestOptions & { force?: boolean } = {},
 ): Promise<CommandCodeCatalogModel[]> {
   if (catalogInFlight) return catalogInFlight
+  // Sampled before the fetch: a clear during it must silence the publish below.
+  const epoch = catalogCacheEpoch
   const request = fetchProviderModels(options)
     .then((models) => {
+      // A clear landed mid-flight: answer the caller but publish nothing, or the
+      // cache and snapshot that clear dropped would be restored by this fetch.
+      if (epoch !== catalogCacheEpoch) return models.length > 0 ? models : cachedCatalog?.models ?? []
       if (models.length > 0) {
         const fetchedAt = Date.now()
         cachedCatalog = { models, fetchedAt }
@@ -681,6 +688,7 @@ export function getCachedCatalog(): CommandCodeCatalogModel[] {
 }
 
 export function clearCachedCatalog(): void {
+  catalogCacheEpoch += 1
   cachedCatalog = undefined
   catalogInFlight = null
   catalogSnapshotScopesLoaded.clear()

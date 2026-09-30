@@ -183,6 +183,16 @@ interface CatalogCache {
 
 let catalogCache: CatalogCache | null = null
 /**
+ * Bumped by every cache clear so a fetch already in flight cannot publish.
+ *
+ * A stale-while-revalidate refresh answers its caller from cache and keeps
+ * fetching. Clearing the cache — a sign-out, a forced refresh, a test starting
+ * over — must therefore also silence that refresh: without this it landed
+ * afterwards and republished both the in-memory cache and the persisted
+ * snapshot it was written to invalidate.
+ */
+let catalogCacheEpoch = 0
+/**
  * Snapshot scopes already consulted in this process.
  *
  * One entry per region rather than a single flag: the persisted file is scoped
@@ -193,6 +203,7 @@ let catalogCache: CatalogCache | null = null
 const catalogSnapshotScopesLoaded = new Set<KimiCodeRegion>()
 
 export function clearCachedCatalog(): void {
+  catalogCacheEpoch += 1
   catalogCache = null
   catalogSnapshotScopesLoaded.clear()
   // The remembered credential belongs to the listing being dropped: a forced
@@ -404,6 +415,9 @@ async function performListing(options: {
   credentialProvider?: (region: KimiCodeRegion) => Promise<string | undefined>
 }): Promise<KimiCodeCatalogModel[]> {
   const region = options.region ?? await resolveRegion()
+  // Sampled before the first await: a clear during this fetch must silence the
+  // publish below, exactly like the antigravity quota epoch does.
+  const epoch = catalogCacheEpoch
   let accessToken = options.accessToken
 
   if (accessToken === undefined) {
@@ -436,6 +450,13 @@ async function performListing(options: {
   if (!Array.isArray(data)) throw new Error('Kimi Code model listing was not in the documented shape.')
 
   const models = data.map(parseCatalogModel).filter((model): model is KimiCodeCatalogModel => model !== undefined)
+  if (epoch !== catalogCacheEpoch) {
+    // A clear landed while this fetch was in flight: answer the caller with the
+    // listing it asked for, but publish nothing. Republishing would restore the
+    // cache that was just dropped and rewrite the snapshot that clear exists to
+    // invalidate.
+    return models
+  }
   // The listing is cached, not just its models: a later token-free caller for
   // this region can present the same credential instead of decrypting the
   // mirror, which is a second copy of the same rotating refresh token.

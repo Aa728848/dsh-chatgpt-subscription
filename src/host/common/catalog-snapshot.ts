@@ -73,16 +73,53 @@ export async function readCatalogSnapshot<T>(
   }
 }
 
+/**
+ * Snapshot writes still in flight.
+ *
+ * Callers fire-and-forget these writes, so nothing in production ever awaits
+ * one. A test that deletes its private `storages` directory between cases
+ * cannot know when that is safe, and a write that lands after the delete
+ * recreates the file the next case asserts is absent — which is how a stale
+ * listing leaked into a later test and failed it on CI. Registering each write
+ * gives {@link flushCatalogSnapshots} a deterministic point to wait on.
+ */
+const pendingSnapshotWrites = new Set<Promise<void>>()
+
 /** Persist one snapshot; a failure is logged nowhere and never thrown. */
-export async function writeCatalogSnapshot<T>(name: string, models: T[], fetchedAt: number): Promise<void> {
-  try {
-    const filePath = catalogSnapshotPath(name)
-    await fs.mkdir(path.dirname(filePath), { recursive: true })
-    const tmp = `${filePath}.tmp.${Date.now()}`
-    await fs.writeFile(tmp, JSON.stringify({ fetchedAt, models }, null, 2), 'utf8')
-    await fs.rename(tmp, filePath)
-  } catch {
-    // Persistence is best-effort: an unwritable home must not fail the caller.
+export function writeCatalogSnapshot<T>(name: string, models: T[], fetchedAt: number): Promise<void> {
+  const write = (async (): Promise<void> => {
+    try {
+      const filePath = catalogSnapshotPath(name)
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      const tmp = `${filePath}.tmp.${Date.now()}`
+      await fs.writeFile(tmp, JSON.stringify({ fetchedAt, models }, null, 2), 'utf8')
+      await fs.rename(tmp, filePath)
+    } catch {
+      // Persistence is best-effort: an unwritable home must not fail the caller.
+    }
+  })()
+  pendingSnapshotWrites.add(write)
+  void write.finally(() => { pendingSnapshotWrites.delete(write) })
+  return write
+}
+
+/**
+ * Wait until every snapshot write this process queued has settled.
+ *
+ * The write is only queued once the caller reaches it, so a caller that is
+ * still fetching has not registered one yet: yielding first lets those land
+ * before the set is read, and the loop drains anything they queue in turn.
+ * Production never calls this — it exists so a test cannot race a write it
+ * cannot see.
+ */
+export async function flushCatalogSnapshots(): Promise<void> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    // Settle queued writes first, then yield: a revalidating caller that is
+    // awaiting the network registers its write only after the await resolves,
+    // and a set read before that yield would miss it.
+    if (pendingSnapshotWrites.size > 0) await Promise.all([...pendingSnapshotWrites])
+    await new Promise((resolve) => { setImmediate(resolve) })
+    if (pendingSnapshotWrites.size === 0) return
   }
 }
 

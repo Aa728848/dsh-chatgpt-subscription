@@ -20,9 +20,10 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   clearCachedCatalog,
+  getCachedCatalog,
   loadProviderModels,
 } from '../src/host/kimi-code/client.ts'
-import { catalogSnapshotName, catalogSnapshotPath } from '../src/host/common/catalog-snapshot.ts'
+import { catalogSnapshotName, catalogSnapshotPath, flushCatalogSnapshots } from '../src/host/common/catalog-snapshot.ts'
 import { FileCredentialStore } from '../src/host/kimi-code/token-store.ts'
 import type { KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 
@@ -87,8 +88,11 @@ afterEach(async () => {
   //
   // The write itself is fire-and-forget on the fetch path, so a pending one has
   // to settle first — otherwise it lands after this cleanup and recreates the
-  // file the next test is asserting is absent.
-  await new Promise((resolve) => setTimeout(resolve, 20))
+  // file the next test is asserting is absent. A fixed sleep only made that
+  // likely; this waits for the writes themselves. It also covers the
+  // stale-while-revalidate refresh a previous test left in flight, whose write
+  // is only queued once its fetch resolves.
+  await flushCatalogSnapshots()
   await fs.rm(snapshotFile(), { force: true })
 })
 
@@ -207,6 +211,28 @@ describe('Kimi Code catalog caching', () => {
     // the credential the cache already holds rather than the mirror.
     await loadProviderModels({ store, fetchFn, region: 'mainland-cn' })
     expect(reads()).toBe(readsAfterListing)
+  })
+
+  it('does not let a fetch that was in flight republish a cleared catalog', async () => {
+    const { store } = countedStore()
+    // Hold the listing open so the clear lands while the fetch is in flight —
+    // the shape that used to leave a stale snapshot behind for the next test.
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const fetchFn = vi.fn(async () => { await gate; return listingResponse() })
+
+    const pending = loadProviderModels({ store, fetchFn, region: 'mainland-cn' })
+    await vi.waitFor(() => { expect(fetchFn).toHaveBeenCalledTimes(1) })
+    clearCachedCatalog()
+    release?.()
+
+    // The caller still gets the listing it asked for...
+    expect((await pending).map((model) => model.id)).toEqual(['k3', 'kimi-for-coding'])
+    // ...but nothing was published: the cache the clear dropped stays dropped,
+    // and no snapshot was written for the next reader to rehydrate.
+    expect(getCachedCatalog()).toEqual([])
+    await flushCatalogSnapshots()
+    await expect(fs.access(snapshotFile()).then(() => 'present', () => 'absent')).resolves.toBe('absent')
   })
 
   it('clears the remembered pool credential with the cache', async () => {

@@ -313,6 +313,8 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
 }
 
 let cachedCatalog: { region: WorkBuddyCredentials['region']; models: WorkBuddyModelEntry[]; fetchedAt: number } | undefined
+/** Bumped by every cache clear so a fetch already in flight cannot publish. */
+let catalogCacheEpoch = 0
 let catalogInFlight: Promise<WorkBuddyModelEntry[]> | null = null
 let catalogInFlightRegion: WorkBuddyCredentials['region'] | null = null
 const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000
@@ -332,6 +334,7 @@ export function getCachedCatalog(): WorkBuddyModelEntry[] {
 
 export function clearCachedCatalog(): void {
   cachedCatalog = undefined
+  catalogCacheEpoch += 1
   catalogInFlight = null
   catalogInFlightRegion = null
   catalogSnapshotScopesLoaded.clear()
@@ -429,10 +432,15 @@ function refreshConfigCatalog(
   options: WorkBuddyRequestOptions = {},
 ): Promise<WorkBuddyModelEntry[]> {
   if (catalogInFlight && catalogInFlightRegion === credentials.region) return catalogInFlight
+  // Sampled before the fetch: a clear during it must silence the publish below.
+  const epoch = catalogCacheEpoch
   const sameRegionCache = (): WorkBuddyModelEntry[] =>
     cachedCatalog?.region === credentials.region ? cachedCatalog.models : []
   const request = fetchConfigCatalog(credentials, options)
     .then((models) => {
+      // A clear landed mid-flight: answer the caller but publish nothing, or the
+      // cache and snapshot that clear dropped would be restored by this fetch.
+      if (epoch !== catalogCacheEpoch) return models.length > 0 ? models : sameRegionCache()
       if (models.length > 0) {
         const fetchedAt = Date.now()
         cachedCatalog = { region: credentials.region, models, fetchedAt }
