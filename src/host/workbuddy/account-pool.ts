@@ -328,15 +328,15 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
   }
 
   /**
-   * Read the pool, refreshing the legacy-key index on the way.
+   * Load the pool, refreshing the legacy-key index on the way.
    *
-   * Every routing decision goes through this method before it consults the
-   * settings selection, so building the index here is what keeps a pin written
-   * before the identity fix resolvable when {@link resolveSelectionId} is asked
-   * for it.
+   * Every routing decision and mutation goes through this method before it
+   * consults the settings selection, so building the index here is what keeps
+   * a pin written before the identity fix resolvable when
+   * {@link resolveSelectionId} is asked for it.
    */
-  override async read(): Promise<PoolData<WorkBuddyPoolAccount>> {
-    const data = await super.read()
+  protected override async loadPoolData(): Promise<PoolData<WorkBuddyPoolAccount>> {
+    const data = await super.loadPoolData()
     this.legacyIds.clear()
     for (const account of data.accounts) {
       for (const alias of workBuddyAccountIdAliases(account.credentials)) {
@@ -362,19 +362,35 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
    */
   async syncDesktopAccounts(): Promise<WorkBuddyAccountSummaryDto[]> {
     const discovered = await this.store.discoverDesktopCredentials()
-    if (discovered.length > 0) {
-      const data = await this.read()
-      const known = new Set(data.accounts.map((account) => workBuddyAccountId(account.credentials)))
-      // The auth directory keeps historical snapshots of the same account, so
-      // the scan is collapsed by identity first: adopting each snapshot would
-      // re-write the same row through encrypted storage several times over.
-      const seen = new Set<string>()
-      for (const credentials of discovered) {
-        const id = workBuddyAccountId(credentials)
-        if (known.has(id) || seen.has(id)) continue
-        seen.add(id)
-        await this.addAccount({ ...credentials, source: 'desktop' })
-      }
+    const candidates: WorkBuddyCredentials[] = []
+    const seen = new Set<string>()
+    for (const raw of discovered) {
+      const credentials = withResolvedIdentity({ ...raw, source: 'desktop' })
+      const id = workBuddyAccountId(credentials)
+      if (seen.has(id)) continue
+      seen.add(id)
+      candidates.push(credentials)
+    }
+
+    if (candidates.length > 0) {
+      await this.updatePool((data) => {
+        const existingKeys = new Set<string>()
+        for (const account of data.accounts) {
+          existingKeys.add(account.id)
+          const key = this.hooks.dedupeKey?.(account.credentials)
+          if (key !== undefined) existingKeys.add(key)
+        }
+        for (const credentials of candidates) {
+          const key = this.hooks.dedupeKey?.(credentials)
+          const id = this.hooks.accountId?.(credentials)
+          if ((key !== undefined && existingKeys.has(key)) || (id !== undefined && existingKeys.has(id))) {
+            continue
+          }
+          this.addAccountToPool(data, credentials)
+          if (key !== undefined) existingKeys.add(key)
+          if (id !== undefined) existingKeys.add(id)
+        }
+      })
     }
     return this.listAccounts()
   }
@@ -403,7 +419,14 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
     // refresh token rotates and a second exchange would invalidate the first.
     if (isExpired(live)) return effective
     if (live.accessToken !== effective.credentials.accessToken) {
-      await this.updateAccountCredentials(effective.account.id, live).catch(() => undefined)
+      const updated = await this.updateAccountCredentials(
+        effective.account.id,
+        live,
+        effective.credentials,
+      ).catch(() => undefined)
+      if (updated) {
+        return { account: updated, credentials: updated.credentials }
+      }
     }
     return { account: effective.account, credentials: live }
   }
@@ -447,17 +470,16 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
   }
 
   /**
-   * Delete one account.
+   * Remove one account inside a transaction.
    *
    * A desktop account is refused: the plugin does not own that credential file,
    * so removing it from the pool would strand the IDE's session while telling
    * the user their account was deleted. Hiding is the supported action there.
    */
-  override async deleteAccount(accountId: string): Promise<void> {
-    const data = await this.read()
+  protected override deleteAccountFromPool(data: PoolData<WorkBuddyPoolAccount>, accountId: string): void {
     if (data.accounts.find((account) => account.id === accountId)?.source === 'desktop') {
       throw new Error('桌面账号由 CodeBuddy 客户端所有，只能隐藏，不能删除。')
     }
-    await super.deleteAccount(accountId)
+    super.deleteAccountFromPool(data, accountId)
   }
 }

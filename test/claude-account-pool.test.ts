@@ -637,6 +637,80 @@ describe('ClaudeAccountPool — rotation and the rotation contract', () => {
   })
 })
 
+
+/** A promise whose resolution the test controls, so ordering is not a race. */
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve: (value: T) => { resolve(value) } }
+}
+
+describe('ClaudeAccountPool — concurrent commits', () => {
+  it('keeps a re-login in both the pool and the document when a slow refresh finishes', async () => {
+    const { pool, store, refresh } = harness()
+    const account = await pool.addAccount(managed(1, { expiresAt: Date.now() - 1_000 }))
+    const started = deferred<void>()
+    const rotated = deferred<ClaudeCredentials>()
+    refresh.mockImplementation(() => { started.resolve(); return rotated.promise })
+
+    const pending = pool.getFreshCredential(account.id)
+    await started.promise
+    const signedIn = managed(1, { accessToken: 're-login', refreshToken: 're-login-refresh' })
+    await pool.addAccount(signedIn)
+    rotated.resolve(managed(1, { accessToken: 'stale-rotation' }))
+
+    // The rotation that started first must not put a spent pair back.
+    expect(await pending).toEqual(signedIn)
+    expect((await pool.read()).accounts.find((entry) => entry.id === account.id)?.credentials).toEqual(signedIn)
+    expect((await store.listAccounts()).find((entry) => entry.internalId === account.id)?.credentials).toEqual(signedIn)
+  })
+
+  it('does not flag a re-login as broken when its superseded refresh finally fails', async () => {
+    const { pool, refresh } = harness()
+    const account = await pool.addAccount(managed(1, { expiresAt: Date.now() - 1_000 }))
+    const started = deferred<void>()
+    const release = deferred<void>()
+    refresh.mockImplementation(async () => {
+      started.resolve()
+      await release.promise
+      throw new ClaudeUnauthorizedError('Claude rejected the sign-in. Sign in again.')
+    })
+
+    const pending = pool.getFreshCredential(account.id)
+    await started.promise
+    const signedIn = managed(1, { accessToken: 're-login', refreshToken: 're-login-refresh' })
+    await pool.addAccount(signedIn)
+    release.resolve()
+
+    expect(await pending).toEqual(signedIn)
+    expect((await pool.read()).accounts[0]?.authStatus).toBeUndefined()
+  })
+
+  it('does not resurrect an account deleted while its refresh was in flight', async () => {
+    const { pool, refresh } = harness()
+    const account = await pool.addAccount(managed(1, { expiresAt: Date.now() - 1_000 }))
+    const started = deferred<void>()
+    const rotated = deferred<ClaudeCredentials>()
+    refresh.mockImplementation(() => { started.resolve(); return rotated.promise })
+
+    const pending = pool.getEffectiveAccount()
+    await started.promise
+    await pool.removeImportedAccount(account.id).catch(() => pool.deleteAccount(account.id))
+    rotated.resolve(managed(1, { accessToken: 'stale-rotation' }))
+
+    await expect(pending).rejects.toThrow()
+    expect((await pool.read()).accounts).toHaveLength(0)
+  })
+
+  it('keeps both sign-ins when two accounts are added at the same time', async () => {
+    const { pool, store } = harness()
+    const [first, second] = await Promise.all([pool.addAccount(managed(1)), pool.addAccount(managed(2))])
+    expect(new Set([first.id, second.id]).size).toBe(2)
+    expect((await pool.read()).accounts).toHaveLength(2)
+    expect(await store.listAccounts()).toHaveLength(2)
+  })
+})
+
 describe('Claude pool document parsing', () => {
   it('drops an unreadable row instead of failing the whole document', async () => {
     const { pool } = harness()

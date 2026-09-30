@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -21,6 +21,16 @@ import { clearCachedCatalog, clearCachedQuota } from '../src/host/workbuddy/clie
 import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
 
 const temporaryDirs: string[] = []
+
+function createDeferred<T = void>() {
+  let resolve!: (value?: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res as (value?: T | PromiseLike<T>) => void
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 /** Build an unsigned JWT-shaped token carrying the claims under test. */
 function jwtToken(claims: Record<string, unknown>): string {
@@ -314,6 +324,148 @@ describe('WorkBuddy pool adoption and identity', () => {
     // Hidden means "out of rotation", never "removed from disk".
     expect(await fs.readFile(path.join(dir, 'workbuddy-desktop.info'), 'utf8')).toContain('at-u1')
     await expect(pool.getEffectiveAccount()).rejects.toThrow(LlmError)
+  })
+
+  it('syncDesktopAccounts does not overwrite a concurrent login that landed during desktop discovery', async () => {
+    const dir = await makeAuthDir({})
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store)
+
+    const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+    const desktopCreds: WorkBuddyCredentials = {
+      accessToken: jwtToken({ sub: uuid, nickname: 'DesktopUser', uin: '123456789' }),
+      refreshToken: 'rt-desktop',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'cn',
+      domain: 'copilot.tencent.com',
+      backend: 'https://copilot.tencent.com',
+      sourceFile: path.join(dir, 'workbuddy-desktop.info'),
+      sourceMtimeMs: 100,
+      source: 'desktop',
+      nickname: 'DesktopUser',
+      uin: '123456789',
+    }
+
+    const discoveryStarted = createDeferred()
+    const loginCompleted = createDeferred()
+
+    vi.spyOn(store, 'discoverDesktopCredentials').mockImplementation(async () => {
+      discoveryStarted.resolve()
+      await loginCompleted.promise
+      return [desktopCreds]
+    })
+
+    const syncPromise = pool.syncDesktopAccounts()
+    await discoveryStarted.promise
+
+    // Concurrently, a managed login lands in the pool for the same identity
+    const managedLoginCreds: WorkBuddyCredentials = {
+      accessToken: jwtToken({ sub: uuid, nickname: 'ManagedUser', uin: '123456789' }),
+      refreshToken: 'rt-managed-fresh',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'cn',
+      domain: 'copilot.tencent.com',
+      backend: 'https://copilot.tencent.com',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'managed',
+      nickname: 'ManagedUser',
+      uin: '123456789',
+    }
+    await pool.addAccount(managedLoginCreds)
+
+    const afterLogin = await pool.read()
+    expect(afterLogin.accounts).toHaveLength(1)
+    expect(afterLogin.accounts[0]?.source).toBe('managed')
+    expect(afterLogin.accounts[0]?.credentials.refreshToken).toBe('rt-managed-fresh')
+
+    // Now resume syncDesktopAccounts to enter updatePool
+    loginCompleted.resolve()
+    const summaries = await syncPromise
+
+    // syncDesktopAccounts insert-only must NOT overwrite the existing managed account
+    const finalPool = await pool.read()
+    expect(finalPool.accounts).toHaveLength(1)
+    expect(finalPool.accounts[0]?.source).toBe('managed')
+    expect(finalPool.accounts[0]?.credentials.refreshToken).toBe('rt-managed-fresh')
+    expect(finalPool.accounts[0]?.credentials.accessToken).toBe(managedLoginCreds.accessToken)
+    expect(summaries[0]?.source).toBe('managed')
+  })
+
+  it('updates desktop credential via CAS without overwriting if credentials changed concurrently', async () => {
+    const dir = await makeAuthDir({
+      'workbuddy-desktop.info': desktopFile({ uid: 'u1', accessToken: 'at-initial', refreshToken: 'rt-initial' }),
+    })
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store)
+    await pool.syncDesktopAccounts()
+
+    const readStarted = createDeferred()
+    const updateCompleted = createDeferred()
+
+    vi.spyOn(store, 'readDesktopFile').mockImplementation(async (file) => {
+      readStarted.resolve()
+      await updateCompleted.promise
+      return {
+        accessToken: 'at-desktop-live',
+        refreshToken: 'rt-desktop-live',
+        expiresAt: Date.now() + 3_600_000,
+        region: 'cn',
+        domain: 'copilot.tencent.com',
+        backend: 'https://copilot.tencent.com',
+        sourceFile: file,
+        sourceMtimeMs: 200,
+        source: 'desktop',
+      }
+    })
+
+    const getCredPromise = pool.getEffectiveCredential()
+    await readStarted.promise
+
+    // Concurrently, account credentials in pool were updated
+    const concurrentCreds: WorkBuddyCredentials = {
+      accessToken: 'at-concurrent-token',
+      refreshToken: 'rt-concurrent-token',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'cn',
+      domain: 'copilot.tencent.com',
+      backend: 'https://copilot.tencent.com',
+      sourceFile: path.join(dir, 'workbuddy-desktop.info'),
+      sourceMtimeMs: 150,
+      source: 'desktop',
+    }
+    const poolData = await pool.read()
+    await pool.updateAccountCredentials(poolData.accounts[0]!.id, concurrentCreds)
+
+    updateCompleted.resolve()
+    const result = await getCredPromise
+
+    // CAS failed, pool row was not overwritten with at-desktop-live
+    const current = (await pool.read()).accounts[0]!
+    expect(current.credentials.accessToken).toBe('at-concurrent-token')
+    expect(result.credentials.accessToken).toBe('at-concurrent-token')
+  })
+
+  it('maintains legacyIds index on loadPoolData without needing read()', async () => {
+    const dir = await makeAuthDir({})
+    const store = createWorkBuddyStore(dir)
+    const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+    const token = jwtToken({ sub: uuid, nickname: '快跑' })
+
+    const { pool } = makePool(store, {
+      selection: () => ({ selectedAccountId: 'cn:快跑', hiddenAccountIds: [] }),
+    })
+
+    // Add account directly via updatePool/addAccount without calling read()
+    await pool.addAccount({
+      accessToken: token, refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+
+    // Verify selection resolves the legacy alias through loadPoolData
+    const { account } = await pool.getEffectiveAccount()
+    expect(account.id).toBe(`cn:${uuid}`)
   })
 })
 

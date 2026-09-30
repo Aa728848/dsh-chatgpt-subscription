@@ -237,9 +237,10 @@ export class OAuthService {
     this.assertAvailable()
     if (this.pool !== null) {
       // Refresh the account that would serve the next request.
-      const { account, credentials } = await this.pool.getEffectiveAccount(undefined, this.fetchFn)
-      await this.refreshAccount(credentials)
-        .then((refreshed) => this.pool!.updateAccountCredentials(account.id, refreshed))
+      // One forced rotation, not two: reading first refreshes an expiring token,
+      // and this call would then rotate the token it had just produced — spending
+      // a second refresh token moments after the first.
+      await this.pool.getEffectiveAccount(undefined, this.fetchFn, true)
       return this.status()
     }
     const stored = await this.loadAuthenticated()
@@ -313,17 +314,9 @@ export class OAuthService {
       // rotated token — but through the credential-only door, and it refreshes
       // the account it picked rather than rotating to another one.
       if (access.purpose === 'tool') {
-        const { account, credentials } = await this.pool.getCredentialAccount(this.fetchFn)
-        if (!forceRefresh) return credentials
-        const refreshed = await this.refreshAccount(credentials, this.fetchFn)
-        await this.pool.updateAccountCredentials(account.id, refreshed)
-        return refreshed
+        return (await this.pool.getCredentialAccount(this.fetchFn, forceRefresh)).credentials
       }
-      const { account, credentials } = await this.pool.getEffectiveAccount(undefined, this.fetchFn)
-      if (!forceRefresh) return credentials
-      const refreshed = await this.refreshAccount(credentials, this.fetchFn)
-      await this.pool.updateAccountCredentials(account.id, refreshed)
-      return refreshed
+      return (await this.pool.getEffectiveAccount(undefined, this.fetchFn, forceRefresh)).credentials
     }
     const stored = await this.loadAuthenticated()
     if (forceRefresh || stored.expiresAt - this.now() <= TOKEN_REFRESH_MARGIN_MS) {

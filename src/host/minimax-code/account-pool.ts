@@ -29,6 +29,7 @@
 
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { isDeepStrictEqual } from 'node:util'
 import { dshHomeDir } from '../common/home.ts'
 import {
   AccountPoolCore,
@@ -557,34 +558,33 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
    */
   private async healStaleAuthFailures(current?: PoolData<MinimaxCodePoolAccount>): Promise<boolean> {
     const data = current ?? await this.read()
-    if (!data.accounts.some(isMarkedFailed)) return false
-    // The snapshot-serving read is enough here: the credential this plugin wrote is
-    // recorded on write, and the pool file is re-read above precisely so the two
-    // cannot disagree.
+    const failedAccounts = data.accounts.filter(isMarkedFailed)
+    if (failedAccounts.length === 0) return false
+    const targets = new Map(
+      failedAccounts.map((account) => [
+        account.id,
+        { credentials: account.credentials, authStatus: account.authStatus },
+      ]),
+    )
     const live = await this.store.read().catch(() => null)
     if (live === null) return false
-    let changed = false
-    for (const account of data.accounts) {
-      if (account.authStatus === undefined || account.authStatus === 'ok') continue
-      // Same session, and the stored credential has moved on from the one the row
-      // still carries. A different slot, region or sign-in is a different account,
-      // and its marker is that account's business — the single-credential file this
-      // reads is a mirror, so adopting a stranger's token here would be the one
-      // mistake this line must never make.
-      if (!minimaxCodeSameCredentialSession(live, account.credentials)) continue
-      if (!minimaxCodeCredentialAdvancedPast(live, account.credentials)) continue
-      account.authStatus = undefined
-      account.authFailedReason = undefined
-      // The stored credential is the newer one by construction here, so adopting it
-      // cannot roll anything back: it is what this very store wrote.
-      account.credentials = live
-      changed = true
-    }
-    if (!changed) return false
-    // Bookkeeping: a pool file that cannot be written must not turn a harmless read
-    // into an error, exactly as the core treats its own rotation bookkeeping.
-    await this.write(data).catch(() => undefined)
-    return true
+    return await this.updatePool((draft) => {
+      let changed = false
+      for (const account of draft.accounts) {
+        const expected = targets.get(account.id)
+        if (!expected) continue
+        if (account.authStatus !== expected.authStatus) continue
+        if (!isDeepStrictEqual(account.credentials, expected.credentials)) continue
+        if (!minimaxCodeSameCredentialSession(live, account.credentials)) continue
+        if (!minimaxCodeCredentialAdvancedPast(live, account.credentials)) continue
+
+        account.authStatus = undefined
+        account.authFailedReason = undefined
+        account.credentials = live
+        changed = true
+      }
+      return changed
+    })
   }
 
   /**
@@ -606,7 +606,14 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
       // The desktop app is the newer authority for its own session; remembering
       // the token it currently holds is what keeps the pool's copy from going
       // stale between two of this plugin's requests.
-      await this.updateAccountCredentials(effective.account.id, live).catch(() => undefined)
+      const updated = await this.updateAccountCredentials(
+        effective.account.id,
+        live,
+        effective.credentials,
+      ).catch(() => undefined)
+      if (updated) {
+        return { account: updated, credentials: updated.credentials }
+      }
     }
     return { account: effective.account, credentials: live }
   }
@@ -673,7 +680,7 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
   }
 
   /**
-   * Delete one account.
+   * Remove one account inside a transaction.
    *
    * An account whose credential is the desktop app's own \`auth.json\` is refused:
    * this plugin does not own that file, and removing the account would either
@@ -681,13 +688,12 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
    * file — sign the user out of MiniMax Code itself. Signing out there is the
    * supported way to end it, and the card is told so by \`removable: false\`.
    */
-  override async deleteAccount(accountId: string): Promise<void> {
-    const data = await this.read()
+  protected override deleteAccountFromPool(data: PoolData<MinimaxCodePoolAccount>, accountId: string): void {
     const target = data.accounts.find((account) => account.id === accountId)
     if (target?.source === 'minimax-native') {
       throw new Error('该账号来自 MiniMax Code 桌面端（~/.minimax/auth），本插件只能读取和续期，不能删除。请在 MiniMax Code 应用中退出登录。')
     }
-    await super.deleteAccount(accountId)
+    super.deleteAccountFromPool(data, accountId)
   }
 
   /** The credential store this pool mirrors its primary account into. */

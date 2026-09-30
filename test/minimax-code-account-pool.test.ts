@@ -170,6 +170,16 @@ async function waitForMirror(refreshToken: string): Promise<MinimaxCodeCredentia
   return seen!
 }
 
+function createDeferred<T = void>() {
+  let resolve!: (value?: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res as (value?: T | PromiseLike<T>) => void
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 function harness(region: 'cn' | 'global' = 'cn') {
   const store = new MinimaxCodeCredentialStore(region)
   const poolBackend = new PoolBackend(parseMinimaxCodePoolData)
@@ -437,6 +447,109 @@ describe('MinimaxCodeAccountPool', () => {
     // plugin's own mirror is not mistaken for it.
     await fs.rm(path.join(minimaxHome, 'auth', 'prod', 'cn', 'mcode-public', 'auth.json'), { force: true })
     await expect(pool.adoptNativeAccount()).rejects.toThrow(/桌面端/)
+  })
+
+  it('heals stale auth failures without overwriting a concurrent re-login during store read', async () => {
+    const { pool, store } = harness()
+    const original = credential(1, {
+      refreshToken: 'rt-failed',
+      accessToken: jwtToken({ email: 'user1@example.com' }),
+      generation: 1,
+    })
+    const account = await pool.addAccount(original)
+    await pool.markAuthFailed(account.id, 'expired')
+
+    const failedSummaries = await pool.listAccounts()
+    expect(failedSummaries[0]?.authStatus).toBe('expired')
+
+    const storeReadStarted = createDeferred()
+    const reloginCompleted = createDeferred()
+
+    const staleLive = credential(1, {
+      refreshToken: 'rt-stale-live',
+      accessToken: jwtToken({ email: 'user1@example.com' }),
+      generation: 2,
+    })
+
+    vi.spyOn(store, 'read').mockImplementation(async () => {
+      storeReadStarted.resolve()
+      await reloginCompleted.promise
+      return staleLive
+    })
+
+    // Start healing (which reads store.read outside the lock)
+    const healPromise = pool.listAccounts()
+
+    // Wait until store.read is entered
+    await storeReadStarted.promise
+
+    // Concurrently, user re-authenticates (addAccount resets authStatus and updates credentials)
+    const relogin = credential(1, {
+      refreshToken: 'rt-fresh-relogin',
+      accessToken: jwtToken({ email: 'user1@example.com' }),
+      generation: 5,
+    })
+    await pool.addAccount(relogin)
+
+    // Verify re-login has landed in pool under lock
+    const poolAfterRelogin = await pool.read()
+    expect(poolAfterRelogin.accounts[0]?.credentials.refreshToken).toBe('rt-fresh-relogin')
+    expect(poolAfterRelogin.accounts[0]?.authStatus).toBeUndefined()
+
+    // Now resume store.read, letting healStaleAuthFailures proceed to updatePool
+    reloginCompleted.resolve()
+    const settledSummaries = await healPromise
+
+    // healStaleAuthFailures must NOT overwrite the account with staleLive
+    const finalPool = await pool.read()
+    expect(finalPool.accounts[0]?.credentials.refreshToken).toBe('rt-fresh-relogin')
+    expect(finalPool.accounts[0]?.credentials.generation).toBe(5)
+    expect(finalPool.accounts[0]?.authStatus).toBeUndefined()
+    expect(settledSummaries[0]?.authStatus).toBeUndefined()
+  })
+
+  it('updates native credential via CAS without overwriting if credentials changed concurrently', async () => {
+    const { pool, store } = harness()
+    const native = await pool.addAccount(nativeCredential({
+      refreshToken: 'rt-initial',
+      accessToken: 'at-initial',
+      generation: 1,
+      recordKey: 'record-key-hash',
+    }))
+
+    const readStarted = createDeferred()
+    const updateCompleted = createDeferred()
+
+    vi.spyOn(store, 'read').mockImplementation(async () => {
+      readStarted.resolve()
+      await updateCompleted.promise
+      return nativeCredential({
+        refreshToken: 'rt-desktop-live',
+        accessToken: 'at-desktop-live',
+        generation: 2,
+        recordKey: 'record-key-hash',
+      })
+    })
+
+    const getCredPromise = pool.getEffectiveCredential()
+    await readStarted.promise
+
+    // Concurrently update account in pool
+    const intermediate = nativeCredential({
+      refreshToken: 'rt-concurrent-update',
+      accessToken: 'at-concurrent-update',
+      generation: 3,
+      recordKey: 'record-key-hash',
+    })
+    await pool.updateAccountCredentials(native.id, intermediate)
+
+    updateCompleted.resolve()
+    const result = await getCredPromise
+
+    // Pool row should NOT have been overwritten with at-desktop-live because CAS expected at-initial
+    const current = (await pool.read()).accounts.find((a) => a.id === native.id)!
+    expect(current.credentials.refreshToken).toBe('rt-concurrent-update')
+    expect(result.credentials.refreshToken).toBe('rt-concurrent-update')
   })
 })
 

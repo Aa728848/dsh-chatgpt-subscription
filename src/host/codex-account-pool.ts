@@ -218,9 +218,10 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
     if (account === undefined) throw new Error('ChatGPT 账号已不在号池中')
     const refresher = this.refresherRef.current
     if (refresher === undefined) throw new Error('ChatGPT 凭据刷新服务尚未就绪')
-    const refreshed = await refresher.refreshAccount(account.credentials)
-    await this.updateAccountCredentials(accountId, refreshed)
-    return refreshed
+    // The core owns the single-flight and the conditional commit, and the
+    // generation passed here is the guard: a rotation that started before a
+    // re-login must not spend the re-login's refresh token.
+    return this.renewCredential(accountId, fetch, account.credentials)
   }
 
   /** The single-credential store this pool mirrors its primary account into. */

@@ -82,7 +82,7 @@
  * caller in the process, so with a pool it would hand the second account the
  * first account's freshly rotated credential — and, through the adapter above,
  * write it into the second account's record. The pool therefore keeps its OWN
- * single-flight, per account (see the inFlight map), which preserves the property
+ * single-flight, per pool file and account, which preserves the property
  * the frozen module wanted (one rotation per expiry, no two callers spending the
  * same rotating token) without the cross-account contamination.
  *
@@ -116,6 +116,7 @@ import {
   FileCredentialStore,
   SUBSCRIPTION_INFERENCE_SCOPE,
   createInternalId,
+  parseClaudeCredentials,
   identityKeysFor,
   isSubscriptionCredential,
   mergeIdentityKeys,
@@ -745,7 +746,6 @@ export class ClaudeAccountPool extends AccountPoolCore<
    * marked expired immediately after a refresh that in fact succeeded. Keyed by
    * the record's id — never by a token — so it cannot mix two accounts up.
    */
-  private readonly inFlight = new Map<string, Promise<ClaudeCredentials>>()
 
   constructor(options: ClaudeAccountPoolOptions = {}) {
     const store = options.store ?? new FileCredentialStore()
@@ -839,6 +839,15 @@ export class ClaudeAccountPool extends AccountPoolCore<
         if (record === undefined) return null
         return poolAccountForRecord(record, true)
       },
+      // The core runs this once a credential commit is verified on disk, and
+      // only for the account whose credential actually changed. It is what
+      // keeps a ROTATED token out of reach of the pre-pool projection above:
+      // that projection would otherwise hand back a token the rotation spent.
+      // A borrowed snapshot is never copied into this plugin's own document.
+      credentialsCommitted: async (account) => {
+        if (isAdoptedPoolCredential(account.credentials)) return
+        await store.saveAccount(account.credentials, { internalId: account.id })
+      },
       mirrorPrimary: async (credentials) => {
         if (credentials === null) {
           // The pool is empty, so this plugin is signed out of every account it
@@ -917,8 +926,8 @@ export class ClaudeAccountPool extends AccountPoolCore<
    * {@link recordIdsFor} reads is kept in step with the rows that actually exist.
    * See the recordIds field for why entries are not pruned.
    */
-  override async read(): Promise<PoolData<ClaudePoolAccount>> {
-    const data = await super.read()
+  protected override async loadPoolData(): Promise<PoolData<ClaudePoolAccount>> {
+    const data = await super.loadPoolData()
     for (const account of data.accounts) this.indexAccount(account)
     return data
   }
@@ -932,33 +941,57 @@ export class ClaudeAccountPool extends AccountPoolCore<
    * 'one account, one key' section.
    */
   override async addAccount(credentials: ClaudeCredentials, alias?: string): Promise<ClaudePoolAccount> {
-    // A read first, so an incoming credential for an account the pool ALREADY
-    // holds resolves to that row's id.
-    const data = await this.read()
+    // Managed: the credential document is the authority on the id, and the
+    // pool's dedupe key IS that id — so the record has to be resolved before the
+    // core decides on the row. Resolution here is pure: the document is READ,
+    // never written, because a write that happened before the pool commit would
+    // leave an orphan credential behind whenever the commit refused (a full pool,
+    // a failed encrypted write). The document is written post-commit, by
+    // credentialsCommitted, which the core runs only once the pool write verified.
+    return this.updatePool((data) => this.addManagedAccount(data, credentials, alias))
+      .catch((error: unknown) => {
+        // Never leave an alias pointing at an id that was never committed.
+        this.recordIds.clear()
+        throw error
+      })
+  }
 
+  private async addManagedAccount(
+    data: PoolData<ClaudePoolAccount>,
+    credentials: ClaudeCredentials,
+    alias?: string,
+  ): Promise<ClaudePoolAccount> {
     if (isAdoptedPoolCredential(credentials)) {
       return this.addAdoptedAccount(credentials, data, alias)
     }
 
+    // The document is no longer written before this point, so the guard its parse
+    // used to perform has to be performed here: a credential without the
+    // 'user:inference' scope cannot serve /v1/messages at all, and a row holding
+    // one would only fail later with a far less useful message.
+    parseClaudeCredentials(credentials)
+
     const knownId = await this.recordIdFor(credentials)
 
-    // Managed: the credential document is the authority on the id. Writing it is
-    // what makes the two stores agree, and it folds the credential into the
-    // record the identity rules say it belongs to.
-    //
-    // THE DOCUMENT IS WRITTEN BEFORE the core decides on the row, for the same
-    // reason as above and one more: the pool's dedupe key is the document's id,
-    // so a managed credential for an account the pool has never seen has NO key
-    // until this write gives it one. Skipping it would leave a managed sign-in
-    // keyless, and every repeat of that sign-in a second row.
-    //
     // A credential the document already holds — an adopted snapshot that was
     // signed in properly — resolves to THAT record's id and re-keys the row, so
     // one Claude account does not end up with two ids and, with them, two rows.
-    // The document's parse refuses a credential that is not a subscription one
-    // (no 'user:inference'), so a refusal here is reported rather than silently
-    // producing a row that could never serve a request.
-    const record = await this.store.saveAccount(credentials)
+    // Its record (id, aliases, prior fields) is resolved by READING the
+    // document; the write itself happens after the pool commit.
+    const document = await this.store.read()
+    const keys = identityKeysFor(credentials)
+    const stored = document?.accounts.find((record) => record.identityKeys.some((key) => keys.includes(key)))
+    // A managed sign-in for an account the pool has never seen has no id until
+    // one is minted here, or every repeat of that sign-in becomes a second row.
+    const record: ClaudeAccountRecord = stored === undefined
+      ? {
+          internalId: (data.accounts.find((account) => account.id === knownId)?.adopted === false
+            ? knownId ?? createInternalId()
+            : createInternalId()),
+          identityKeys: keys,
+          credentials,
+        }
+      : { ...stored, identityKeys: mergeIdentityKeys(stored.identityKeys, keys), credentials }
     this.indexRecord(record)
 
     if (knownId !== undefined && knownId !== record.internalId) {
@@ -977,11 +1010,10 @@ export class ClaudeAccountPool extends AccountPoolCore<
         delete row.sourcePath
         row.identityKeys = mergeIdentityKeys(row.identityKeys, record.identityKeys)
         if (data.activeAccountId === knownId) data.activeAccountId = record.internalId
-        await this.write(data)
       }
     }
 
-    return super.addAccount(credentials, alias)
+    return this.addAccountToPool(data, credentials, alias)
   }
 
   /**
@@ -1026,9 +1058,7 @@ export class ClaudeAccountPool extends AccountPoolCore<
       // A row this plugin owns. Overwriting it with a borrowed credential would
       // freeze the account until that snapshot expired, silently; so the
       // snapshot contributes only its aliases and the row stays refreshable.
-      const before = existing.identityKeys.length
       existing.identityKeys = mergeIdentityKeys(existing.identityKeys, identityKeysFor(credentials))
-      if (existing.identityKeys.length !== before) await this.write(data)
       return existing
     }
 
@@ -1053,7 +1083,10 @@ export class ClaudeAccountPool extends AccountPoolCore<
       this.recordIds.set(sourceKey, candidateId)
       this.indexCredential(credentials, candidateId)
     }
-    return super.addAccount(credentials, alias)
+    // addAccountToPool, NOT super.addAccount: this runs inside the caller's
+    // updatePool, and the public method would queue behind the very lock it is
+    // already holding — a self-deadlock, not a slow read.
+    return this.addAccountToPool(data, credentials, alias)
   }
 
   /**
@@ -1077,7 +1110,35 @@ export class ClaudeAccountPool extends AccountPoolCore<
    */
   async mergeAccounts(keepAccountId: string, dropAccountId: string): Promise<ClaudePoolAccount> {
     if (keepAccountId === dropAccountId) throw new Error('A Claude pool merge needs two different accounts.')
-    const data = await this.read()
+    // Folding the two rows and reconciling the credential document are ONE
+    // transaction: a merge that wrote the pool first and the document after
+    // could interleave with a re-login and leave the two stores disagreeing
+    // about which record owns the surviving credential.
+    let originals: { keep: ClaudePoolAccount; drop: ClaudePoolAccount } | undefined
+    const merged = await this.updatePool(
+      async (data) => {
+        // Captured from the live document the fold runs against, so the document
+        // reconciliation afterwards describes exactly the two rows it merged.
+        const keep = data.accounts.find((account) => account.id === keepAccountId)
+        const drop = data.accounts.find((account) => account.id === dropAccountId)
+        if (keep === undefined || drop === undefined) {
+          throw new Error('The Claude pool merge addressed an account the pool does not have.')
+        }
+        originals = { keep, drop }
+        return this.mergeAccountsInPool(data, keepAccountId, dropAccountId)
+      },
+      async (_data, result) => {
+        if (originals !== undefined) await this.reconcileMergedDocument(originals.keep, originals.drop, result)
+      },
+    )
+    return merged
+  }
+
+  private async mergeAccountsInPool(
+    data: PoolData<ClaudePoolAccount>,
+    keepAccountId: string,
+    dropAccountId: string,
+  ): Promise<ClaudePoolAccount> {
     const keep = data.accounts.find((account) => account.id === keepAccountId)
     const drop = data.accounts.find((account) => account.id === dropAccountId)
     if (keep === undefined || drop === undefined) {
@@ -1144,12 +1205,9 @@ export class ClaudeAccountPool extends AccountPoolCore<
     data.accounts[index] = merged
     data.accounts = data.accounts.filter((account) => account.id !== dropAccountId)
     if (data.activeAccountId === dropAccountId) data.activeAccountId = merged.id
-    await this.write(data)
-    if (merged.isPrimary) {
-      void this.hooks.mirrorPrimary?.(merged.credentials).catch(() => undefined)
-    }
-
-    await this.reconcileMergedDocument(keep, drop, merged)
+    // The document and the primary mirror are the core's post-commit business:
+    // the pool write and its verification come first, and both mirrors are
+    // best-effort, so a document that cannot be written cannot lose a merge.
     return merged
   }
 
@@ -1204,15 +1262,18 @@ export class ClaudeAccountPool extends AccountPoolCore<
    * neither path.
    */
   async removeImportedAccount(accountId: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((account) => account.id === accountId)
-    if (target === undefined) return
-    if (target.adopted !== true) {
-      throw new Error('That account was signed in through this plugin; delete it instead of removing an import.')
-    }
-    // The core's own deletion, so primary/active/mirror handling stays in one
-    // place.
-    await super.deleteAccount(accountId)
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target === undefined) return
+      if (target.adopted !== true) {
+        throw new Error('That account was signed in through this plugin; delete it instead of removing an import.')
+      }
+      // The core's own deletion, so primary/active/mirror handling stays in one
+      // place, and the check above cannot be separated from it by a concurrent
+      // change. The credential document is never touched: a snapshot is not
+      // this plugin's sign-in to keep.
+      super.deleteAccountFromPool(data, accountId)
+    })
   }
 
   /**
@@ -1226,13 +1287,17 @@ export class ClaudeAccountPool extends AccountPoolCore<
    * back a credential the user just deleted.
    */
   override async deleteAccount(accountId: string): Promise<void> {
-    const data = await this.read()
-    if (data.accounts.find((account) => account.id === accountId)?.adopted === true) {
-      throw new Error('The sign-in imported from Claude Code is not an account this plugin owns; remove the import instead.')
-    }
-    await super.deleteAccount(accountId)
-    // false for a row the document never held, which is not an error.
-    await this.store.deleteAccount(accountId)
+    return this.updatePool((data) => {
+      if (data.accounts.find((account) => account.id === accountId)?.adopted === true) {
+        throw new Error('The sign-in imported from Claude Code is not an account this plugin owns; remove the import instead.')
+      }
+      super.deleteAccountFromPool(data, accountId)
+    }, async () => {
+      // After the commit, never before: false for a row the document never held
+      // is not an error, and a failed pool write must not delete a credential
+      // the pool still routes with.
+      await this.store.deleteAccount(accountId)
+    })
   }
 
   /**
@@ -1343,52 +1408,18 @@ export class ClaudeAccountPool extends AccountPoolCore<
         adoptedCredentialExpired(credentials) ? ADOPTED_CREDENTIAL_EXPIRED_HINT : ADOPTED_NEVER_REFRESHED_MESSAGE,
       ))
     }
-    return this.singleFlightRefresh(credentials, fetchFn)
+    return this.refreshSeam(credentials, fetchFn)
   }
 
   /**
-   * The per-account single-flight, resolving the account's id first.
+   * The hook is the NETWORK call only.
    *
-   * Separated from the hook above only because resolving the id consults the
-   * credential document, and a hook cannot await: the guard stays synchronous so
-   * it can never be skipped by a caller that forgets to wait.
+   * Single-flight and the write-back are the shared core's: a rotating token is
+   * spent once per generation across every pool instance, and the rotated pair
+   * is committed to the pool before this plugin's credential document is
+   * touched. That document write is what stops the pre-pool projection from
+   * handing out a token the rotation already spent, and it is deliberately
+   * best-effort: the credential WAS refreshed and the pool holds it, so a
+   * mirror that could not be written must not fail a servable request.
    */
-  private async singleFlightRefresh(
-    credentials: ClaudeCredentials,
-    fetchFn: typeof fetch,
-  ): Promise<ClaudeCredentials> {
-    const key = await this.recordIdFor(credentials)
-    if (key !== undefined) {
-      const shared = this.inFlight.get(key)
-      if (shared !== undefined) return shared
-    }
-    const pending = this.performRefresh(credentials, fetchFn)
-    if (key !== undefined) {
-      this.inFlight.set(key, pending)
-      // Cleared on settle — including on failure, so a rejected refresh does not
-      // wedge the account onto a promise that can never succeed again.
-      void pending.then(() => undefined, () => undefined).then(() => {
-        if (this.inFlight.get(key) === pending) this.inFlight.delete(key)
-      })
-    }
-    return pending
-  }
-
-  /**
-   * Rotate one managed credential and keep the credential document in step.
-   *
-   * The document write is what stops the pre-pool projection from handing out a
-   * token the rotation has already spent. Its failure is swallowed on purpose:
-   * the credential WAS refreshed, the pool's own record holds it, and a mirror
-   * that could not be written must not fail a request that can still be served —
-   * the same rule the core applies to its own bookkeeping writes.
-   */
-  private async performRefresh(credentials: ClaudeCredentials, fetchFn: typeof fetch): Promise<ClaudeCredentials> {
-    const recordId = await this.recordIdFor(credentials)
-    const refreshed = await this.refreshSeam(credentials, fetchFn)
-    if (recordId !== undefined) {
-      await new ClaudeCredentialStoreAdapter(this.store, recordId).write(refreshed).catch(() => undefined)
-    }
-    return refreshed
-  }
 }

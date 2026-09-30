@@ -132,6 +132,14 @@ export interface AccountPoolHooks<
    * provider decide whether it is a newer state of the same account.
    */
   liveCredentialsFor?(account: TAccount): Promise<{ credentials: TCredentials; advanced: boolean } | null>
+  /**
+   * Best-effort, local-store synchronization after a credential commit.
+   *
+   * Runs under the pool lock and only once the pool write is verified, so a
+   * provider mirror can never get ahead of the pool. It must not re-enter the
+   * pool, and a failure is swallowed: the committed pool is the authority.
+   */
+  credentialsCommitted?(account: TAccount): Promise<void>
   /** Pre-pool single credential, projected as the primary account on read. */
   legacyAccount?(): Promise<TAccount | null>
   /** Mirror the primary account into the single-credential store; `null` clears it. */
@@ -170,9 +178,21 @@ export function poolCredentialAccount(filePath: string): string {
   return createHash('sha256').update(path.resolve(filePath)).digest('hex')
 }
 
-// Every mutating operation on one pool file is serialized, so a concurrent
-// refresh, login and route update cannot interleave a read-modify-write.
+// Locks and refresh flights are shared by every instance addressing one pool
+// file. Only storage transactions hold the file lock; network refreshes never
+// do. This coordinates one host process, not another application.
 const poolOperations = new Map<string, Promise<void>>()
+const poolIdentityRevisions = new Map<string, number>()
+const poolRefreshes = new Map<string, { credentials: unknown; result: Promise<unknown> }>()
+
+/**
+ * A selected row was deleted, or became unusable, while a caller awaited it.
+ *
+ * Distinct from every other credential error because a MODEL REQUEST can still
+ * be served by another account: routing excludes the row and tries the next
+ * one, while a caller that named the account still gets the plain refusal.
+ */
+class PoolAccountUnavailableError extends LlmError {}
 
 /**
  * The shared multi-account pool: encrypted storage, eligibility filtering,
@@ -199,12 +219,16 @@ export class AccountPoolCore<
    * can therefore invalidate on identity change without paying a credential read
    * to discover it.
    */
-  private identityRevision = 0
+  /** Pool-file identity of this instance: locks, revisions and flights key on it. */
+  private readonly operationKey: string
 
   constructor(hooks: AccountPoolHooks<TCredentials, TAccount, TSummary>) {
     this.hooks = hooks
     this.filePath = hooks.poolFile
     this.backend = hooks.backend ?? createPoolBackend(hooks)
+    const resolved = path.resolve(this.filePath)
+    // Windows paths are case-insensitive: two spellings are one pool file.
+    this.operationKey = process.platform === 'win32' ? resolved.toLowerCase() : resolved
   }
 
   /**
@@ -221,7 +245,7 @@ export class AccountPoolCore<
    * would report one account's usage under another account's name.
    */
   currentIdentityRevision(): number {
-    return this.identityRevision
+    return poolIdentityRevisions.get(this.operationKey) ?? 0
   }
 
   /** Human description of where this pool's credentials live. */
@@ -231,8 +255,14 @@ export class AccountPoolCore<
     return `${kind}: ${this.hooks.keychainService}/${poolCredentialAccount(this.filePath)}`
   }
 
+  /**
+   * Queue one storage transaction for this pool file.
+   *
+   * NOT reentrant: a transaction must use {@link loadPoolData} and
+   * {@link updatePool} rather than calling the public read/write methods.
+   */
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const key = path.resolve(this.filePath)
+    const key = this.operationKey
     const result = (poolOperations.get(key) || Promise.resolve()).then(operation)
     const settled = result.then(() => undefined, () => undefined)
     poolOperations.set(key, settled)
@@ -261,48 +291,111 @@ export class AccountPoolCore<
    * getter write to disk.
    */
   read(): Promise<PoolData<TAccount>> {
-    return this.serialize(async () => {
-      let current: PoolData<TAccount> | null = null
-      try {
-        current = await this.backend.load()
-      } catch {
-        // Corrupt file recovery: fall through to the legacy projection.
-      }
-
-      if (current !== null && Array.isArray(current.accounts) && current.accounts.length > 0) {
-        return current
-      }
-
-      try {
-        const legacy = await this.hooks.legacyAccount?.()
-        if (legacy) {
-          return {
-            version: 1,
-            activeAccountId: legacy.id,
-            rotationStrategy: current?.rotationStrategy || 'sequential',
-            accounts: [legacy],
-          }
-        }
-      } catch {
-        // ignore migration failures
-      }
-
-      return current || {
-        version: 1,
-        rotationStrategy: 'sequential',
-        accounts: [],
-      }
-    })
+    return this.serialize(() => this.loadPoolData())
   }
 
+  /**
+   * Load the pool without holding the file lock.
+   *
+   * Providers override this to maintain their own in-memory indexes, so every
+   * load — including one inside {@link updatePool} — refreshes them.
+   */
+  protected async loadPoolData(): Promise<PoolData<TAccount>> {
+    let current: PoolData<TAccount> | null = null
+    try {
+      current = await this.backend.load()
+    } catch {
+      // Corrupt file recovery: fall through to the legacy projection.
+    }
+
+    if (current !== null && Array.isArray(current.accounts) && current.accounts.length > 0) {
+      return current
+    }
+
+    try {
+      const legacy = await this.hooks.legacyAccount?.()
+      if (legacy) {
+        return {
+          version: 1,
+          activeAccountId: legacy.id,
+          rotationStrategy: current?.rotationStrategy || 'sequential',
+          accounts: [legacy],
+        }
+      }
+    } catch {
+      // ignore migration failures
+    }
+
+    // An explicitly empty pool is authoritative too: a best-effort legacy clear
+    // that failed must not resurrect a just-deleted account on the next read.
+    return current || {
+      version: 1,
+      rotationStrategy: 'sequential',
+      accounts: [],
+    }
+  }
+
+  private async persistPoolData(data: PoolData<TAccount>): Promise<void> {
+    // Advance the cheap identity revision rather than in each mutator: every
+    // path that can move which account serves a request lands here, and
+    // forgetting one would let a per-account cache outlive its account. It is
+    // bumped before the await so a failed write still invalidates: a spurious
+    // credential read is cheap, a stale quota card is not. Shared per file, so
+    // every instance observes the same serving identity.
+    poolIdentityRevisions.set(this.operationKey, this.currentIdentityRevision() + 1)
+    await this.saveVerified(data)
+  }
+
+  /**
+   * Replace the whole document (initialization, import), NOT a read-modify-write.
+   * Prefer {@link updatePool} for mutations so the draft is read under the lock.
+   */
   write(data: PoolData<TAccount>): Promise<void> {
-    // Advance the cheap identity revision here rather than in each mutator:
-    // every path that can move which account serves a request goes through this
-    // method, and forgetting one would let a per-account cache outlive its
-    // account. It is bumped before the await so a write that fails still
-    // invalidates: a spurious credential read is cheap, a stale quota card is not.
-    this.identityRevision += 1
-    return this.serialize(() => this.saveVerified(this.hooks.parsePoolData(data)))
+    return this.serialize(() => this.persistPoolData(data))
+  }
+
+  /**
+   * Read the LATEST document, mutate it and persist it as one file transaction.
+   *
+   * This is the whole fix for the read-modify-write race: the old shape read a
+   * snapshot, awaited (a token refresh, a settings write, an encrypted round
+   * trip) and then wrote that whole stale snapshot back, erasing whatever landed
+   * in between — including another account's freshly rotated token.
+   *
+   * The callback runs under the file lock, so it must not call read, write or
+   * updatePool (the lock is not reentrant) and must not do network I/O.
+   * Provider-local stores belong in `afterCommit`, which runs only once the
+   * pool write is verified, and must not re-enter the pool either.
+   */
+  protected updatePool<T>(
+    mutate: (data: PoolData<TAccount>) => T | Promise<T>,
+    afterCommit?: (data: PoolData<TAccount>, result: T) => Promise<void>,
+  ): Promise<T> {
+    return this.serialize(async () => {
+      const data = await this.loadPoolData()
+      const before = structuredClone(data)
+      const result = await mutate(data)
+      if (!isDeepStrictEqual(before, data)) {
+        await this.persistPoolData(data)
+        // Ordered AFTER the commit and awaited, so a slow older mirror cannot
+        // overwrite a newer one. Mirrors stay best-effort: a failure here must
+        // not undo a commit that is already on disk.
+        await afterCommit?.(data, result).catch(() => undefined)
+        for (const account of data.accounts) {
+          const previous = before.accounts.find((entry) => entry.id === account.id)
+          if (!isDeepStrictEqual(previous?.credentials, account.credentials)) {
+            await this.hooks.credentialsCommitted?.(account).catch(() => undefined)
+          }
+        }
+        const previousPrimary = before.accounts.find((account) => account.isPrimary)
+        const primary = data.accounts.find((account) => account.isPrimary)
+        if (previousPrimary?.id !== primary?.id
+          || !isDeepStrictEqual(previousPrimary?.credentials, primary?.credentials)) {
+          await this.hooks.mirrorPrimary?.(primary?.credentials ?? null).catch(() => undefined)
+        }
+      }
+      return result
+    })
   }
 
   /** Public summaries, with cooldowns that already expired reported as absent. */
@@ -336,8 +429,18 @@ export class AccountPoolCore<
   }
 
   /** Add or re-authorize one account; an existing dedupe key updates in place. */
-  async addAccount(credentials: TCredentials, alias?: string): Promise<TAccount> {
-    const data = await this.read()
+  addAccount(credentials: TCredentials, alias?: string): Promise<TAccount> {
+    return this.updatePool((data) => this.addAccountToPool(data, credentials, alias))
+  }
+
+  /**
+   * Add or re-authorize inside an existing transaction.
+   *
+   * Capacity, dedupe and the primary decision are all taken against the live
+   * document, so two simultaneous sign-ins cannot each pass a check the other
+   * has already invalidated.
+   */
+  protected addAccountToPool(data: PoolData<TAccount>, credentials: TCredentials, alias?: string): TAccount {
     const key = this.hooks.dedupeKey?.(credentials)
     const existingIndex = key === undefined
       ? -1
@@ -370,96 +473,90 @@ export class AccountPoolCore<
     else data.accounts.push(account)
 
     if (!data.activeAccountId || account.isPrimary) data.activeAccountId = account.id
-
-    await this.write(data)
-    // Keep the pre-pool single-credential store in step with the primary account.
-    if (account.isPrimary) {
-      void this.hooks.mirrorPrimary?.(credentials).catch(() => undefined)
-    }
     return account
   }
 
-  async setPrimary(accountId: string): Promise<void> {
-    const data = await this.read()
-    for (const account of data.accounts) {
-      account.isPrimary = account.id === accountId
-    }
-    const primary = data.accounts.find((account) => account.isPrimary)
-    if (primary) {
-      data.activeAccountId = primary.id
-      void this.hooks.mirrorPrimary?.(primary.credentials).catch(() => undefined)
-    }
-    await this.write(data)
+  setPrimary(accountId: string): Promise<void> {
+    return this.updatePool((data) => {
+      for (const account of data.accounts) {
+        account.isPrimary = account.id === accountId
+      }
+      const primary = data.accounts.find((account) => account.isPrimary)
+      if (primary) data.activeAccountId = primary.id
+    })
   }
 
   /**
    * Persist a refreshed credential for one account.
    *
+   * `expected` makes this a conditional write: when the stored credential is
+   * no longer the one the caller started from, something newer won the race (a
+   * re-login, a rotation committed while this call was in flight) and the
+   * latest row is returned WITHOUT being overwritten. A deleted account is
+   * never brought back.
+   *
    * Used by a forced refresh (a 401 mid-request) rather than by the rotating
-   * getEffectiveAccount path, which already writes back what it refreshed.
+   * getEffectiveAccount path, which refreshes through its own single-flight.
    */
-  async updateAccountCredentials(accountId: string, credentials: TCredentials): Promise<TAccount | undefined> {
-    const data = await this.read()
-    const target = data.accounts.find((account) => account.id === accountId)
-    if (target === undefined) return undefined
-    target.credentials = credentials
-    await this.write(data)
-    if (target.isPrimary) {
-      void this.hooks.mirrorPrimary?.(credentials).catch(() => undefined)
-    }
-    return target
+  updateAccountCredentials(
+    accountId: string, credentials: TCredentials, expected?: TCredentials,
+  ): Promise<TAccount | undefined> {
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target && (expected === undefined || isDeepStrictEqual(target.credentials, expected))) {
+        target.credentials = credentials
+      }
+      return target
+    })
   }
 
-  async setAlias(accountId: string, alias: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((account) => account.id === accountId)
-    if (target && alias.trim()) {
-      target.alias = alias.trim()
-      await this.write(data)
-    }
+  setAlias(accountId: string, alias: string): Promise<void> {
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target && alias.trim()) target.alias = alias.trim()
+    })
   }
 
-  async deleteAccount(accountId: string): Promise<void> {
-    const data = await this.read()
+  deleteAccount(accountId: string): Promise<void> {
+    return this.updatePool((data) => this.deleteAccountFromPool(data, accountId))
+  }
+
+  /**
+   * Remove one account inside a transaction.
+   *
+   * Provider refusal rules (a snapshot this plugin does not own, a desktop
+   * account it may only hide) belong in an override of this, so the check and
+   * the removal cannot be separated by a concurrent change.
+   */
+  protected deleteAccountFromPool(data: PoolData<TAccount>, accountId: string): void {
     const wasPrimary = data.accounts.find((account) => account.id === accountId)?.isPrimary
     data.accounts = data.accounts.filter((account) => account.id !== accountId)
-    if (wasPrimary && data.accounts.length > 0) {
-      data.accounts[0]!.isPrimary = true
-      void this.hooks.mirrorPrimary?.(data.accounts[0]!.credentials).catch(() => undefined)
-    } else if (data.accounts.length === 0) {
-      void this.hooks.mirrorPrimary?.(null).catch(() => undefined)
-    }
+    if (wasPrimary && data.accounts.length > 0) data.accounts[0]!.isPrimary = true
     if (data.activeAccountId === accountId) {
       data.activeAccountId = data.accounts.find((account) => account.isPrimary)?.id ?? data.accounts[0]?.id
     }
-    await this.write(data)
   }
 
-  async setStrategy(strategy: AccountRotationStrategy): Promise<void> {
-    const data = await this.read()
-    data.rotationStrategy = strategy
-    await this.write(data)
+  setStrategy(strategy: AccountRotationStrategy): Promise<void> {
+    return this.updatePool((data) => { data.rotationStrategy = strategy })
   }
 
   /** Cool one account down after an upstream 429. */
-  async markCooldown(accountId: string, durationMs: number, reason: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((account) => account.id === accountId)
-    if (target) {
-      target.cooldownUntil = Date.now() + Math.max(MIN_COOLDOWN_MS, durationMs)
-      target.cooldownReason = reason
-      await this.write(data)
-    }
+  markCooldown(accountId: string, durationMs: number, reason: string): Promise<void> {
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target) {
+        target.cooldownUntil = Date.now() + Math.max(MIN_COOLDOWN_MS, durationMs)
+        target.cooldownReason = reason
+      }
+    })
   }
 
-  async clearCooldown(accountId: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((account) => account.id === accountId)
-    if (target) {
-      target.cooldownUntil = undefined
-      target.cooldownReason = undefined
-      await this.write(data)
-    }
+  clearCooldown(accountId: string): Promise<void> {
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target) { target.cooldownUntil = undefined; target.cooldownReason = undefined }
+    })
   }
 
   /**
@@ -468,24 +565,18 @@ export class AccountPoolCore<
    * The account stays in the pool: signing in again is what restores it, and a
    * deleted account would take the user's alias and ordering with it.
    */
-  async markAuthFailed(accountId: string, reason: string, status: AccountAuthStatus = 'expired'): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((account) => account.id === accountId)
-    if (target) {
-      target.authStatus = status
-      target.authFailedReason = reason
-      await this.write(data)
-    }
+  markAuthFailed(accountId: string, reason: string, status: AccountAuthStatus = 'expired'): Promise<void> {
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target) { target.authStatus = status; target.authFailedReason = reason }
+    })
   }
 
-  async clearAuthFailed(accountId: string): Promise<void> {
-    const data = await this.read()
-    const target = data.accounts.find((account) => account.id === accountId)
-    if (target) {
-      target.authStatus = undefined
-      target.authFailedReason = undefined
-      await this.write(data)
-    }
+  clearAuthFailed(accountId: string): Promise<void> {
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target) { target.authStatus = undefined; target.authFailedReason = undefined }
+    })
   }
 
   /** Whether an account may serve a request right now. */
@@ -528,7 +619,9 @@ export class AccountPoolCore<
    *
    * @param fetchFn - fetch used if the credential is close to expiry.
    */
-  async getCredentialAccount(fetchFn: typeof fetch = fetch): Promise<{ account: TAccount; credentials: TCredentials }> {
+  async getCredentialAccount(
+    fetchFn: typeof fetch = fetch, forceRefresh = false,
+  ): Promise<{ account: TAccount; credentials: TCredentials }> {
     const data = await this.read()
     if (data.accounts.length === 0) {
       throw new Error(this.hooks.emptyMessage ?? `未登录 ${this.hooks.displayName} 账号，请先在设置页添加账号。`)
@@ -545,17 +638,13 @@ export class AccountPoolCore<
     }
 
     const selected = this.selectAccount(usable, data)
-    if (this.shouldRefreshCredential(selected, now) && this.hooks.refresh) {
-      // The refresh token rotates, so a refreshed pair must be persisted before
-      // it is used: dropping it here would leave the store holding a token the
-      // upstream has already invalidated, and the next sign-in check would fail.
-      const refreshed = await this.hooks.refresh(selected.credentials, fetchFn)
-      await this.updateAccountCredentials(selected.id, refreshed)
-      return { account: selected, credentials: refreshed }
-    }
+    // The refresh token rotates, so a refreshed pair must be persisted before it
+    // is used: dropping it here would leave the store holding a token the
+    // upstream has already invalidated. freshAccount owns that commit.
+    const account = await this.freshAccount(selected, fetchFn, forceRefresh)
     // Deliberately no lastUsedAt / activeAccountId write: reading a credential
     // for an auxiliary tool must not move the conversational rotation.
-    return { account: selected, credentials: selected.credentials }
+    return { account, credentials: account.credentials }
   }
 
   /**
@@ -591,8 +680,10 @@ export class AccountPoolCore<
    * looks unexpired, and only the service's own refusal says so. Renewing it is
    * what separates that from a credential that genuinely needs a new sign-in.
    */
-  async renewCredential(accountId?: string, fetchFn: typeof fetch = fetch): Promise<TCredentials> {
-    return this.credentialFor(accountId, fetchFn, true)
+  async renewCredential(
+    accountId?: string, fetchFn: typeof fetch = fetch, expected?: TCredentials,
+  ): Promise<TCredentials> {
+    return this.credentialFor(accountId, fetchFn, true, expected)
   }
 
   /**
@@ -607,6 +698,7 @@ export class AccountPoolCore<
     accountId: string | undefined,
     fetchFn: typeof fetch,
     force: boolean,
+    expected?: TCredentials,
   ): Promise<TCredentials> {
     const data = await this.read()
     const target = accountId === undefined
@@ -624,40 +716,136 @@ export class AccountPoolCore<
         { status: 401 },
       )
     }
-    if (!force && (!this.shouldRefreshCredential(target, Date.now()) || !this.hooks.refresh)) {
+    // A caller that decided to renew while reading an OLDER generation must not
+    // spend the replacement: that token already belongs to whoever replaced it.
+    if (expected !== undefined && !isDeepStrictEqual(expected, target.credentials)) {
       return target.credentials
     }
-    if (!this.hooks.refresh) return target.credentials
+    return (await this.freshAccount(target, fetchFn, force)).credentials
+  }
+
+  /**
+   * Return one account's current row, refreshing it at most once per generation.
+   *
+   * Shared by every entry point — routing, auxiliary tools, the settings card
+   * and forced renewals — across all instances of the pool file, because a
+   * rotating refresh token may be spent once: two parallel exchanges both fail,
+   * and the losing one gets recorded as a dead sign-in.
+   *
+   * Reading the current generation and registering/joining its flight happen in
+   * one short transaction, so a commit cannot slip between the two decisions.
+   * The network call is fired AFTER the lock is released, and the plan returned
+   * from the lock is a plain value: awaiting a flight while holding the lock
+   * would deadlock that flight's own commit.
+   */
+  private async freshAccount(target: TAccount, fetchFn: typeof fetch, force = false): Promise<TAccount> {
+    let launch: (() => void) | undefined
+    const plan = await this.serialize(async () => {
+      const data = await this.loadPoolData()
+      const current = data.accounts.find((account) => account.id === target.id)
+      if (current === undefined || !this.isCredentialUsable(current)) {
+        throw new PoolAccountUnavailableError(
+          this.hooks.emptyMessage ?? '未登录 ' + this.hooks.displayName + ' 账号，请先在设置页添加账号。',
+          'AUTH',
+        )
+      }
+      if (!isDeepStrictEqual(current.credentials, target.credentials)) return { account: current }
+      if (!this.hooks.refresh || (!force && !this.shouldRefreshCredential(current, Date.now()))) {
+        return { account: current }
+      }
+      const key = JSON.stringify([this.operationKey, current.id])
+      const pending = poolRefreshes.get(key)
+      if (pending !== undefined && isDeepStrictEqual(pending.credentials, current.credentials)) {
+        return { result: pending.result as Promise<TAccount> }
+      }
+      const result = new Promise<TAccount>((resolve, reject) => {
+        launch = () => { void this.refreshAccount(current, fetchFn).then(resolve, reject) }
+      })
+      const flight = { credentials: structuredClone(current.credentials), result }
+      poolRefreshes.set(key, flight)
+      // Cleared on settle, including failure, so a rejected refresh cannot wedge
+      // the account onto a promise that can never succeed again.
+      const release = () => { if (poolRefreshes.get(key) === flight) poolRefreshes.delete(key) }
+      void result.then(release, release)
+      return { result }
+    })
+    launch?.()
+    return plan.result ?? plan.account!
+  }
+
+  /**
+   * Refresh one account: network outside the lock, then a conditional commit.
+   *
+   * Every write-back is checked against the credential the refresh started from,
+   * which is what keeps a late response from restoring a spent token over a
+   * re-login, and keeps a deleted account from coming back.
+   */
+  private async refreshAccount(target: TAccount, fetchFn: typeof fetch): Promise<TAccount> {
+    const expected = structuredClone(target.credentials)
     // Spending a refresh token this account no longer owns is guaranteed to fail,
     // and the failure would be recorded as a dead sign-in. When the provider keeps
     // an authoritative copy elsewhere, a newer one means the row is stale rather
     // than dead, and adopting it is the repair.
     const live = await this.hooks.liveCredentialsFor?.(target).catch(() => null)
     if (live !== null && live !== undefined && live.advanced) {
-      target.credentials = live.credentials
-      await this.write(data).catch(() => undefined)
-      return live.credentials
+      // The external store stays authoritative even if remembering it fails.
+      const account = await this.updateAccountCredentials(target.id, live.credentials, expected)
+        .catch(() => ({ ...target, credentials: live.credentials }))
+      this.assertUsableAccount(account)
+      return account
     }
 
     let refreshed: TCredentials
     try {
-      refreshed = await this.hooks.refresh(target.credentials, fetchFn)
+      refreshed = await this.hooks.refresh!(target.credentials, fetchFn)
     } catch (error) {
       // Same policy as a metered request: a refresh the provider calls final is
-      // that account's problem, and the card should say so rather than keep
-      // presenting a credential the upstream has already refused.
+      // that account's problem, and the caller should say so rather than keep
+      // presenting a credential the upstream has already refused. A failure on a
+      // spent OLD token says nothing about a successful re-login, so the marker
+      // is written only when the row still holds what this refresh started from.
       const status = this.hooks.refreshFailureStatus?.(error)
-      if (status !== undefined) {
-        await this.markAuthFailed(target.id, error instanceof Error ? error.message : String(error), status)
-          .catch(() => undefined)
+      let superseded: TAccount | undefined
+      await this.updatePool((data) => {
+        const current = data.accounts.find((account) => account.id === target.id)
+        if (current === undefined) return
+        if (!isDeepStrictEqual(current.credentials, expected)) {
+          superseded = current
+          return
+        }
+        if (status !== undefined) {
+          current.authStatus = status
+          current.authFailedReason = error instanceof Error ? error.message : String(error)
+        }
+      }).catch(() => undefined)
+      if (superseded !== undefined) {
+        this.assertUsableAccount(superseded)
+        return superseded
       }
       throw error
     }
     // The refresh token rotates, so the rotated pair is persisted before it is
     // used: dropping it here would leave the pool holding a token the upstream
-    // has already invalidated.
-    await this.updateAccountCredentials(target.id, refreshed)
-    return refreshed
+    // has already invalidated. A strict write, unlike the bookkeeping below.
+    const account = await this.updateAccountCredentials(target.id, refreshed, expected)
+    this.assertUsableAccount(account)
+    return account
+  }
+
+  private assertUsableAccount(account: TAccount | undefined): asserts account is TAccount {
+    if (account === undefined) {
+      throw new PoolAccountUnavailableError(
+        this.hooks.emptyMessage ?? '未登录 ' + this.hooks.displayName + ' 账号，请先在设置页添加账号。',
+        'AUTH',
+      )
+    }
+    if (!this.isCredentialUsable(account)) {
+      throw new PoolAccountUnavailableError(
+        this.hooks.displayName + ' 账号的凭据已被拒绝，需要重新登录。',
+        'AUTH',
+        { status: 401 },
+      )
+    }
   }
 
   /** Whether one account's credential must be refreshed before it is handed out. */
@@ -731,6 +919,7 @@ export class AccountPoolCore<
   async getEffectiveAccount(
     excludeIds?: ReadonlySet<string>,
     fetchFn: typeof fetch = fetch,
+    forceRefresh = false,
   ): Promise<{ account: TAccount; credentials: TCredentials }> {
     const data = await this.read()
     if (data.accounts.length === 0) {
@@ -743,42 +932,42 @@ export class AccountPoolCore<
 
     const selected = this.selectAccount(eligible, data)
 
-    if (this.shouldRefreshCredential(selected, now) && this.hooks.refresh) {
-      let refreshed: TCredentials
-      try {
-        refreshed = await this.hooks.refresh(selected.credentials, fetchFn)
-      } catch (error) {
-        const status = this.hooks.refreshFailureStatus?.(error)
-        if (status === undefined) throw error
-        // A refresh the provider calls final is that account's problem alone:
-        // mark it and let another account serve the request.
-        await this.markAuthFailed(selected.id, error instanceof Error ? error.message : String(error), status)
-        const nextExclude = new Set(excludeIds ?? [])
-        nextExclude.add(selected.id)
-        if (await this.hasAnotherAvailableAccount(nextExclude)) {
-          return this.getEffectiveAccount(nextExclude, fetchFn)
-        }
+    let refreshed: TAccount
+    try {
+      refreshed = await this.freshAccount(selected, fetchFn, forceRefresh)
+    } catch (error) {
+      if (this.hooks.refreshFailureStatus?.(error) === undefined
+        && !(error instanceof PoolAccountUnavailableError)) {
         throw error
       }
-      selected.credentials = refreshed
-      const index = data.accounts.findIndex((account) => account.id === selected.id)
-      if (index >= 0) data.accounts[index] = selected
-      if (selected.isPrimary) {
-        void this.hooks.mirrorPrimary?.(refreshed).catch(() => undefined)
+      const nextExclude = new Set(excludeIds ?? [])
+      nextExclude.add(selected.id)
+      // A refresh the provider calls final is that account's problem alone, and a
+      // row deleted mid-request is nobody's problem: either way, another account
+      // may still be able to serve this request.
+      if (await this.hasAnotherAvailableAccount(nextExclude)) {
+        return this.getEffectiveAccount(nextExclude, fetchFn, forceRefresh)
       }
+      throw error
     }
 
-    selected.lastUsedAt = now
-    data.activeAccountId = selected.id
-    // Bookkeeping only: remembering which account was used last must never be
-    // the reason a request cannot get its credential. A pool file that has
-    // become temporarily unwritable (a locked replace, a wedged helper) used to
-    // surface as "credentials could not be refreshed" on the quota card, while
-    // the credential itself was perfectly usable. Writes that *are* the user's
-    // intent — adding, deleting, cooling down — stay strict.
-    await this.write(data).catch(() => undefined)
-
-    return { account: selected, credentials: selected.credentials }
+    // Bookkeeping only, and only onto the LATEST document. Writing the snapshot
+    // read before the refresh is what erased a concurrent re-login, a deletion
+    // or a settings change that landed while the network call was in flight.
+    // It stays best-effort: remembering which account was used last must never be
+    // the reason a request cannot get its credential, while writes that *are*
+    // the user's intent — adding, deleting, cooling down — stay strict.
+    const account = await this.updatePool((current) => {
+      const latest = current.accounts.find((entry) => entry.id === refreshed.id)
+      if (latest === undefined || !isDeepStrictEqual(latest.credentials, refreshed.credentials)) return latest
+      latest.lastUsedAt = now
+      // Only claim the rotation slot if nobody changed the choice while this
+      // request was refreshing: a deliberate setPrimary must not be undone here.
+      if (current.activeAccountId === data.activeAccountId) current.activeAccountId = latest.id
+      return latest
+    }).catch(() => refreshed)
+    this.assertUsableAccount(account)
+    return { account, credentials: account.credentials }
   }
 }
 
