@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **修复 Codex 线路声明了输出上限却从不发送**。`shared/model-catalog.ts` 为 GPT-6 家族声明了 128K 输出上限，`resolveCodexModel` 也把它作为 `defaultMaxTokens` 报给 DSH，但 `responses-mapper.ts` 构建 payload 时**完全没有 `max_output_tokens`** 字段——目录里没有的模型则回落到 32K 预 GPT-6 默认。
+  - **为什么重要**：不带这个字段时由服务端套用自己的默认值，本线路既无法预测也无法上报——某一轮撞上上限看起来就像一次普通的短回答。这与 Claude 线把 `model_context_window_exceeded` 当成正常结束是同一类问题。Codex 走 `store:false` 且每轮全量重发，这一项尤其容易被反复触发。
+  - **修法**：始终发送 `options.maxTokens ?? codexModelMaxTokens(model)`，并在调用方请求更大时用 `Math.min` 封到模型自身上限（与 antigravity mapper 同一道守卫）——超出模型能力的请求会被后端直接拒绝，因此必须向下封而不是原样透传。
+  - **测试**：`test/codex-output-cap.test.ts` 6 条——「始终发送模型上限」（回归锁定）、「调用方要求更小时照发」、「超出上限必须封顶」、「只存在于实时目录的未知模型也带上限」。
+  - **横向审计结论（同一轮核对七条线路，结论是除本条外无其他缺口）**：Codex 是**唯一**支持 `service_tier: 'priority'`（快速模式）、`text.verbosity`、`reasoning.summary` 与 `include: reasoning.encrypted_content`（加密思考回放）的线路——这四项是 Responses 协议独有，其他线路走 Anthropic / chat-completions 协议，没有对应字段，**不应**在其他线补。缓存方面 Claude 与 minimax 用的 `cache_control` 断点是 Anthropic 协议要求（不主动声明即按全价计费），OpenAI 系则是自动前缀缓存、只需 `prompt_cache_key`，两条线现已各自满足。服务端特殊能力（图片生成 `gpt-image-2`、`/alpha/search` 网页搜索、配额重置额度）同样只有 Codex 线具备，是这条线的护城河。minimax 的静态目录**不是**遗漏：其 `model-catalog.ts` 注释记录了 `/v1/models` 对订阅流量返回 `503 direct_route_not_configured` 并明令禁止探测。
+  - **验证**：强制类型检查（`tsc -b --force`）与 test tsconfig 均 0 错误，`npm run build` 通过，全量 **1837 passed** / 7 skipped；失败的 6 条仍是先前已确认与本插件改动无关的 `claude-model-catalog`(5) 与 `antigravity-callback-port`(1)。
 - **Codex 订阅线路跟上上游的第三方接入方式**（OpenAI Codex 负责人 Romain Huet：「我们希望人们能在任何地方使用 Codex 和他们的 ChatGPT 订阅」——涵盖 OpenCode、Pi、Claude Code；Codex CLI / app server 已开源）。本插件的 OAuth 参数此前就与社区逆向结论逐字一致（client_id、scope、redirect_uri、`id_token_add_organizations`、`codex_cli_simplified_flow`），所以基础无需改动；下面四项是实际缺口。
   - **补上 `openai-beta: responses=experimental`**（`wire-auth.ts`）。该订阅后端是在 beta 标志下提供的，官方 CLI 一直发送这个头；逆向文档把它列为必填。缺少它的请求不是同一个面——现在能跑通只是后端当前宽容，这正是后端某次收紧时会突然 400/403 的那一行。
   - **把 `originator` 收敛成一个值**（`compat.ts`）。此前散落三个：对话与 OAuth 用 `opencode`，图像（`codex-images.ts`）与搜索（`codex-search.ts`）覆盖成 `pi`——那是各端点逆向时间点的考古层，不是一次决定。后端按这个值区分客户端身份（官方 CLI 发 `codex_cli_rs`），一个账号因此有三种互不相关的失败签名。现统一为 `CODEX_ORIGINATOR`，并让 `OAUTH_ORIGINATOR` 直接引用它，登录与请求不可能再各说各话。两种取值对后端都已知可用；保留 `opencode` 是因为它是 OAuth 流程一直使用的值，改登录 originator 与改请求 originator 是两种不同的风险。

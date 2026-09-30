@@ -1,7 +1,7 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from './common/llm-compat.ts'
 import { createHash } from 'node:crypto'
-import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexWireReasoningEffort } from '../shared/model-catalog.ts'
+import { codexModelMaxTokens, codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexWireReasoningEffort } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
@@ -12,6 +12,8 @@ export interface ResponsesPayload extends Record<string, unknown> {
   service_tier?: string
   /** Stable per-conversation cache key; lets the backend reuse prompt prefix. */
   prompt_cache_key?: string
+  /** Output cap; always the model's own ceiling or a caller request under it. */
+  max_output_tokens?: number
 }
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -171,6 +173,18 @@ export async function buildResponsesPayload(
   }
   if (outputVerbosity !== null) payload.text = { verbosity: outputVerbosity }
   if (fastMode) payload.service_tier = 'priority'
+  // The output cap is always sent, and never above what the model accepts.
+  //
+  // Declaring a ceiling in the catalog is not the same as asking for it: without
+  // this field the backend applies its own default, which this line cannot
+  // predict and cannot report — a turn that hit it looked like an ordinary
+  // short answer. Sending the model ceiling also keeps a caller's request from
+  // being silently raised above what the model supports, which is the failure
+  // the antigravity mapper guards the same way.
+  const modelMaxTokens = codexModelMaxTokens(options.model)
+  payload.max_output_tokens = options.maxTokens === undefined
+    ? modelMaxTokens
+    : Math.min(options.maxTokens, modelMaxTokens)
   if (options.reasoningEffort !== undefined) {
     const effort = codexWireReasoningEffort(options.model, options.reasoningEffort)
     payload.reasoning = codexModelSupportsReasoningSummary(options.model)

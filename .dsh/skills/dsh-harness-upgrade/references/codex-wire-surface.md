@@ -42,6 +42,7 @@ proxy CODEX_API_DOCS.md, 7shi/codex-oauth).
 | one `CODEX_ORIGINATOR` | `compat.ts`, `codex-images.ts`, `codex-search.ts` | Three values were in use (`opencode` for chat+OAuth, `pi` for image and search) — an archaeological record of when each endpoint was reverse-engineered. The backend keys behaviour off this value, so one account had three unrelated failure signatures. `OAUTH_ORIGINATOR` now aliases the same constant, so sign-in and request cannot disagree. |
 | live model listing | new `codex-catalog.ts` | The subscription's whole advantage is a fresher model surface than the API key path, and this line hardcoded it — a new model needed a code change and a release. Now reads `GET /backend-api/codex/models?client_version=…`, cached 15 min per account, single-flighted, persisted through the existing `catalog-snapshot` module and scoped by account id. |
 | `prompt_cache_key` + `x-codex-turn-state` | `responses-mapper.ts`, `responses-client.ts` | Both are the backend's own continuation mechanisms; without them every turn re-sent the whole history. |
+| `max_output_tokens` always sent | `responses-mapper.ts` | The catalog declared a ceiling and `resolveCodexModel` reported it as `defaultMaxTokens`, but the request never carried the field — the backend then applied a default this line could not predict or report, and a turn that hit it looked like an ordinary short answer. Always send `options.maxTokens ?? modelCap`, clamped with `Math.min` (same guard as the antigravity mapper). |
 
 ## 4. Design notes worth keeping
 
@@ -78,11 +79,36 @@ proxy CODEX_API_DOCS.md, 7shi/codex-oauth).
   equally accepted and is what the OAuth flow has always presented. Changing
   the sign-in originator is a different risk from changing the request one.
 
+## 5b. Cross-line capability audit (why the other lines need nothing)
+
+Seven lines were compared on capability, not just connectivity. Only the output
+cap above was a real gap. The rest is protocol difference, and "fixing" it would
+mean sending fields the other wires do not have:
+
+- **Codex is the ONLY line with `service_tier: 'priority'`, `text.verbosity`,
+  `reasoning.summary` and `include: reasoning.encrypted_content`.** Those are
+  Responses-API fields. The other lines speak Anthropic Messages or
+  chat-completions and have no equivalent. Do not port them.
+- **Caching is two different protocols, both now satisfied.** Claude and minimax
+  emit `cache_control` breakpoints because Anthropic does NOT cache unless a
+  breakpoint is declared (an undeclared request bills at full price). OpenAI-
+  style lines use automatic prefix caching, which needs only a stable
+  `prompt_cache_key` — codex and kimi both send one now. Neither side is missing
+  anything.
+- **Server-side extras are Codex-only and are its moat:** image generation
+  (`gpt-image-2`), web search (`/alpha/search`), and rate-limit reset credits.
+  No other line's backend offers equivalents.
+- **minimax's static catalog is deliberate, not an omission.** Its
+  `model-catalog.ts` records that `/v1/models` answers `503
+  direct_route_not_configured` for subscription traffic and explicitly forbids
+  probing it. Do not "fix" this one.
+- **minimax leads on account features**: it already has device-code sign-in and
+  daily check-in, which codex still lacks.
 ## 6. Verification
 
 - Forced typecheck (`tsc -b --force`, the only meaningful form) and the test
   tsconfig: 0 errors. `npm run build` clean.
-- Full suite: **1831 passed**, 7 skipped. The 6 failures
+- Full suite: **1837 passed**, 7 skipped. The 6 failures
   (`claude-model-catalog` 5, `antigravity-callback-port` 1) reproduce on a
   clean tree with this work stashed — pre-existing, unrelated.
 - Old generation (clean room, 0.1.5-rc.1 pinned): host `tsc -b` clean; the one
