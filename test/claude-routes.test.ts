@@ -615,7 +615,63 @@ describe('Claude settings routes', () => {
   })
 
   // -------------------------------------------------------------------------
-  // 5. Pure helpers
+  // 5. Per-account re-login
+  // -------------------------------------------------------------------------
+
+  describe('per-account re-login', () => {
+    it('repairs the POOL ROW routing serves, not only the credential document', async () => {
+      // THE BUG: the relogin flow wrote through a document-only seam, then
+      // cleared the auth marker - so the row went back into rotation on its DEAD
+      // token and the next request failed it again, after a successful sign-in.
+      await setup()
+      const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+      const ctx = {
+        webServer: { register(route: { handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) { routes.push(route); return () => undefined } },
+        emit: () => undefined,
+      } as unknown as Context
+      const tokenEndpoint = async (url: string | URL): Promise<Response> => String(url).includes('/oauth/token')
+        ? Response.json({
+            access_token: 'fresh-access',
+            refresh_token: 'fresh-refresh',
+            expires_in: 3600,
+            scope: SUBSCRIPTION_SCOPES.join(' '),
+            account: { uuid: 'uuid-1', email_address: 'user@example.com' },
+          })
+        : fetchImpl(url)
+      registerClaudeRoutes(ctx, store, modelSettings, undefined, {
+        fetchFn: tokenEndpoint as unknown as typeof fetch,
+        accountPool: pool,
+        login: { openBrowser: () => undefined },
+      })
+      const send = async (endpoint: string, body: unknown): Promise<Captured> => {
+        const { response, captured } = fakeExchange()
+        await routes[0]!.handler(fakeRequest({ url: ROUTE_PREFIX + endpoint, method: 'POST', body }), response)
+        return captured
+      }
+
+      const dead = await pool.addAccount(credential({ accessToken: 'dead-access', refreshToken: 'dead-refresh' }))
+      await pool.markAuthFailed(dead.id, 'rejected upstream')
+
+      const started = await send('/accounts', { action: 'relogin', accountId: dead.id })
+      expect(started.status).toBe(200)
+      const authUrl = String((started.body.value as { authUrl?: string }).authUrl)
+      const state = new URL(authUrl).searchParams.get('state')
+      const finished = await send('/login/input', { input: 'the-code#' + state })
+      expect(finished.status).toBe(200)
+
+      // One row, the SAME row, holding the new token, back in rotation - and
+      // the request path routes on exactly that.
+      const rows = await pool.listAccounts()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.id).toBe(dead.id)
+      expect(rows[0]!.authStatus).not.toBe('expired')
+      const effective = await pool.getEffectiveAccount(new Set(), tokenEndpoint as unknown as typeof fetch)
+      expect(effective.credentials.accessToken).toBe('fresh-access')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // 6. Pure helpers
   // -------------------------------------------------------------------------
 
 })

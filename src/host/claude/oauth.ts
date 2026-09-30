@@ -563,7 +563,12 @@ export async function refreshAccessToken(
     try {
       return await postTokenGrant(body, options, false, [refreshToken])
     } catch (error) {
-      if (error instanceof ClaudeUnauthorizedError) throw error
+      // ONLY a transient failure is retried. Anything else - a final verdict, or
+      // a 2xx whose body could not be parsed - may mean the grant was already
+      // spent: resending the same rotating refresh token then earns
+      // invalid_grant, and the account is taken out of rotation over a refresh
+      // that actually succeeded.
+      if (!(error instanceof ClaudeRetryableError)) throw error
       lastError = error
     }
     if (attempt < REFRESH_MAX_ATTEMPTS - 1) {

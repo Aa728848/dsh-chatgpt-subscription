@@ -46,7 +46,9 @@
  *                everything, including a caller asking for thinking off: the
  *                block_binding exists so a prefix mismatch is dropped instead of
  *                surfacing as a persistent 400, and suppressing it is exactly
- *                how that 400 comes back.
+ *                how that 400 comes back. The field is itself a 400 unless the
+ *                request carries the thinking-binding-controls beta, so the
+ *                adapter reads claudeBodyBindsThinking(body) to add it.
  *   adaptive  -> { type: 'adaptive', display: 'summarized' }, plus
  *                output_config = { effort } when an effort was named. The budget
  *                form is rejected by these models.
@@ -139,11 +141,12 @@
  * 'error' event THROWS, because a severed reply flushed as a clean stop is a
  * wrong answer rather than a visible failure.
  *
- * Reasoning deltas are BUFFERED and emitted as one block at content_block_stop
- * (CHOICE, see emitPendingThinking): the signature that decides whether the
- * block may be replayed at all arrives at the END of the block, so a signed
- * block cannot be recognized before then, and a reasoning block that cannot be
- * replayed is not content the caller should be told it received.
+ * Reasoning deltas are STREAMED as they arrive (see openThinkingBlock); only the
+ * replay entry waits for content_block_stop, because the signature that decides
+ * whether the block may be replayed arrives at the END of the block. They used
+ * to be buffered until the stop, which made DSH start the step's first-token
+ * clock after all thinking was done - so TPS divided every thinking token by the
+ * answer's time alone, and TTFT absorbed the whole thinking phase.
  *
  * ---------------------------------------------------------------------------
  * 7. PROMPT CACHING IS ON BY DEFAULT, AND IT IS THE REQUEST THAT TURNS IT ON
@@ -188,6 +191,7 @@ import {
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
+  claudeModelBindsThinkingToPrefix,
   claudeModelCanDisableThinking,
   claudeModelSupportsTemperature,
   claudeThinkingMode,
@@ -286,9 +290,17 @@ function jsonSafeValue(value: unknown, seen: WeakSet<object> = new WeakSet()): u
   }
 }
 
-/** Strip a NUL that would truncate the string inside a JSON encoder. */
+/**
+ * Strip what the wire cannot carry: a NUL, which would truncate the string
+ * inside a JSON encoder, and an UNPAIRED surrogate. JSON.stringify writes the
+ * latter as a lone `\uD83D` escape, which upstream rejects as invalid JSON ("no
+ * low surrogate in string") - and since the text sits in history, every later
+ * request fails the same way. A tool output sliced mid-emoji is enough to
+ * produce one. Paired surrogates (emoji) are untouched. Same rule as the
+ * reference's sanitizeSurrogates.
+ */
 function sanitizeText(text: string): string {
-  return text.replace(/\0/g, '')
+  return text.replace(/\0|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')
 }
 
 /**
@@ -559,8 +571,14 @@ export function claudeThinking(
   if (off && claudeModelCanDisableThinking(model)) return { thinking: { type: 'disabled' } }
 
   if (mode === 'adaptive') {
+    // A prefix-check model gets the binding WITHOUT mid-convo's forced effort:
+    // without it, one compaction or tool-list change turns every later request
+    // into the same 400 on accounts the check is enforced for by default.
+    const binding = claudeModelBindsThinkingToPrefix(model)
+      ? { block_binding: { prefix_mismatch_behavior: 'drop_block' } }
+      : {}
     return {
-      thinking: { type: 'adaptive', display: 'summarized' },
+      thinking: { type: 'adaptive', display: 'summarized', ...binding },
       ...(namedEffort === undefined ? {} : { outputConfig: { effort: namedEffort } }),
     }
   }
@@ -1244,7 +1262,9 @@ function toolResultContent(blocks: unknown, images: ResolvedRequestImages): Anth
   for (const block of blocks) {
     if (!isRecord(block)) continue
     if (block.type === 'text' && typeof block.text === 'string') {
-      out.push({ type: 'text', text: sanitizeText(block.text) })
+      // An empty text block is a 400 upstream, inside a tool_result too.
+      const text = sanitizeText(block.text)
+      if (text !== '') out.push({ type: 'text', text })
       continue
     }
     if (block.type === 'image') {
@@ -1261,8 +1281,10 @@ function toolResultContent(blocks: unknown, images: ResolvedRequestImages): Anth
     }
   }
   if (!hasImage) return undefined
-  // Anthropic requires at least one block; keep the shape conservative.
-  if (out[0]?.type !== 'text') out.unshift({ type: 'text', text: '' })
+  // Lead with text, as the reference does. It must NOT be empty: an image-only
+  // result (a screenshot, read_image) used to get `text: ''`, which upstream
+  // rejects, failing the turn and every later one that replays it.
+  if (out[0]?.type !== 'text') out.unshift({ type: 'text', text: '(see attached image)' })
   return out
 }
 
@@ -1446,6 +1468,18 @@ export function buildClaudeRequestBody(
   return body
 }
 
+/**
+ * Whether one built body carries `thinking.block_binding`.
+ *
+ * Read off the BODY rather than re-derived from the catalog, because the header
+ * this answers for (THINKING_BINDING_CONTROLS_BETA) exists to license that one
+ * field: sent without it the field is a 400 on every request, so the header must
+ * follow the bytes, not a second copy of the rule that produced them.
+ */
+export function claudeBodyBindsThinking(body: Record<string, unknown>): boolean {
+  return isRecord(body.thinking) && body.thinking.block_binding !== undefined
+}
+
 // ---------------------------------------------------------------------------
 // Streaming
 // ---------------------------------------------------------------------------
@@ -1471,12 +1505,12 @@ interface OpenTextBlock {
 }
 
 /**
- * One thinking or redacted_thinking block held until the block closes.
+ * One open thinking or redacted_thinking block.
  *
- * Buffered rather than streamed because the signature that decides whether the
- * block can ever be replayed arrives at the END of the block (see the module
- * doc), and because a redacted block's payload must not be paraphrased into
- * visible reasoning text.
+ * Its text streams to the caller as it arrives; this record accumulates the
+ * same text, the signature (which arrives at the END of the block) and a
+ * redacted block's payload, for the replay entry written when it closes. A
+ * redacted block's payload is never paraphrased into visible reasoning text.
  */
 interface PendingThinking {
   index: number
@@ -1494,7 +1528,7 @@ export interface ClaudeStreamState {
   openText: Map<number, OpenTextBlock>
   /** Anthropic content index -> the accumulating tool call. */
   toolCalls: Map<number, PendingToolCall>
-  /** Anthropic content index -> a buffered thinking block. */
+  /** Anthropic content index -> an open thinking block. */
   pending: Map<number, PendingThinking>
   /**
    * Anthropic content index -> the wire block that produced the emitted block.
@@ -1515,11 +1549,20 @@ export interface ClaudeStreamState {
   hasToolCall: boolean
   /** Anthropic stop_reason, verbatim. */
   finishReason: string | null
+  /** `stop_details.explanation` from the final message_delta, when stated. */
+  stopExplanation?: string
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+  /** Estimate from the streamed (possibly summarized) thinking text. */
   reasoningTokens: number
+  /**
+   * The server's own `usage.output_tokens_details.thinking_tokens`, when stated.
+   * It counts the RAW reasoning, which the summarized text returned on Claude 4+
+   * models understates, so it outranks the estimate above.
+   */
+  reportedReasoningTokens: number | undefined
   sawUsage: boolean
   finished: boolean
 }
@@ -1549,6 +1592,7 @@ export function createStreamState(toolNames?: ClaudeToolNames): ClaudeStreamStat
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     reasoningTokens: 0,
+    reportedReasoningTokens: undefined,
     sawUsage: false,
     finished: false,
   }
@@ -1642,14 +1686,15 @@ function closeToolCall(state: ClaudeStreamState, contentIndex: number): StreamCh
 }
 
 /**
- * Emit one buffered thinking block.
+ * Close one thinking block: end it for the caller and record its replay entry.
  *
- * A signed block is emitted as DSH reasoning and replayed verbatim afterwards.
- * An unsigned one is emitted WITHOUT a replay entry: it is still shown to the
- * caller (the model did think, and hiding it would misreport the turn) but it
- * cannot be sent back, and the request builder drops it on the next turn.
+ * Its text already reached the caller as it streamed (see openThinkingBlock);
+ * what waits for the close is the replay entry, because the signature arrives
+ * last. A signed block is replayed verbatim afterwards. An unsigned one is
+ * still shown (the model did think) but the request builder drops it on the
+ * next turn, since it cannot be sent back.
  */
-function emitPendingThinking(state: ClaudeStreamState, contentIndex: number): StreamChunk[] {
+function closeThinkingBlock(state: ClaudeStreamState, contentIndex: number): StreamChunk[] {
   const pending = state.pending.get(contentIndex)
   if (pending === undefined) return []
   state.pending.delete(contentIndex)
@@ -1668,9 +1713,37 @@ function emitPendingThinking(state: ClaudeStreamState, contentIndex: number): St
         ...(pending.signature === '' ? {} : { signature: pending.signature }),
       }
   state.reasoningTokens += estimateReasoningTokens(text)
-  const out: StreamChunk[] = [{ type: 'block-start', index: pending.index, blockType: 'reasoning' }]
-  if (text !== '') out.push({ type: 'reasoning-delta', index: pending.index, text })
-  out.push({ type: 'block-end', index: pending.index, block })
+  return [{ type: 'block-end', index: pending.index, block }]
+}
+
+/**
+ * Open one thinking block and stream whatever text its start already carries.
+ *
+ * STREAMED, not held to content_block_stop: DSH times a step's first token from
+ * the first non-empty delta, and the usage it divides by that window counts every
+ * thinking token. Holding the text until the block closed started the clock
+ * after all the thinking was done - inflating TPS and TTFT alike - and kept the
+ * UI blank for the whole thinking phase. Only the replay entry waits for the
+ * close, because the signature arrives last.
+ */
+function openThinkingBlock(
+  state: ClaudeStreamState,
+  contentIndex: number,
+  block: Record<string, unknown>,
+  kind: PendingThinking['kind'],
+): StreamChunk[] {
+  const index = state.blocks.length
+  state.blocks.push({ type: 'reasoning', text: '' })
+  const seed = kind === 'thinking' ? asString(block.thinking) ?? '' : ''
+  state.pending.set(contentIndex, {
+    index,
+    kind,
+    text: seed,
+    signature: asString(block.signature) ?? '',
+    data: asString(block.data) ?? '',
+  })
+  const out: StreamChunk[] = [{ type: 'block-start', index, blockType: 'reasoning' }]
+  if (seed !== '') out.push({ type: 'reasoning-delta', index, text: seed })
   return out
 }
 
@@ -1684,7 +1757,7 @@ function flushOpenBlocks(state: ClaudeStreamState): StreamChunk[] {
     closers.push({ index: pending.index, close: () => closeToolCall(state, contentIndex) })
   }
   for (const [contentIndex, pending] of state.pending) {
-    closers.push({ index: pending.index, close: () => emitPendingThinking(state, contentIndex) })
+    closers.push({ index: pending.index, close: () => closeThinkingBlock(state, contentIndex) })
   }
   closers.sort((left, right) => left.index - right.index)
   const out: StreamChunk[] = []
@@ -1704,20 +1777,38 @@ function flushOpenBlocks(state: ClaudeStreamState): StreamChunk[] {
  * the billed-input total unaccountable.
  */
 function tokenUsage(state: ClaudeStreamState): TokenUsage {
+  // Capped at outputTokens: reasoning is a subset of output, and DSH discards a
+  // usage record whose reasoning count exceeds its output count.
+  const reasoningTokens = Math.min(state.reportedReasoningTokens ?? state.reasoningTokens, state.outputTokens)
   return {
     inputTokens: state.inputTokens,
     outputTokens: state.outputTokens,
     ...(state.cacheReadTokens > 0 ? { cacheReadTokens: state.cacheReadTokens } : {}),
     ...(state.cacheWriteTokens > 0 ? { cacheWriteTokens: state.cacheWriteTokens } : {}),
-    ...(state.reasoningTokens > 0 ? { reasoningTokens: state.reasoningTokens } : {}),
+    ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
   }
 }
 
 function finishReasonFor(state: ClaudeStreamState): FinishReason {
   const reason = state.finishReason ?? ''
+  // A refusal is not an answer: reported as a clean stop it ended the turn as
+  // if it had succeeded, and reported beside a tool_use it RAN the refused
+  // turn's tool calls. It outranks everything below. Same verdict as the
+  // reference, which maps refusal and sensitive to an error.
+  if (reason === 'refusal' || reason === 'sensitive') {
+    return {
+      kind: 'error',
+      failure: {
+        message: state.stopExplanation ?? 'Claude declined to respond (stop_reason: ' + reason + ').',
+        code: 'PROVIDER_ERROR',
+      },
+    }
+  }
   // max-tokens outranks tool-calls on purpose: the assembler drops tool calls
-  // from a truncated response, and it can only do that if it is told.
-  if (reason === 'max_tokens') return { kind: 'max-tokens' }
+  // from a truncated response, and it can only do that if it is told. The
+  // vendor documents model_context_window_exceeded as "treat the response as
+  // truncated", so it is the same verdict rather than a clean stop.
+  if (reason === 'max_tokens' || reason === 'model_context_window_exceeded') return { kind: 'max-tokens' }
   if (state.hasToolCall || reason === 'tool_use') return { kind: 'tool-calls' }
   return { kind: 'stop' }
 }
@@ -1789,6 +1880,11 @@ function applyUsage(state: ClaudeStreamState, usage: Record<string, unknown>, cu
       ? numberOr(usage.output_tokens, state.outputTokens)
       : state.outputTokens + numberOr(usage.output_tokens, 0)
   }
+  // Stated only on the final message_delta when streaming.
+  const details = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : undefined
+  if (details !== undefined && details.thinking_tokens !== undefined) {
+    state.reportedReasoningTokens = numberOr(details.thinking_tokens, state.reportedReasoningTokens ?? 0)
+  }
 }
 
 /**
@@ -1858,19 +1954,8 @@ export function processStreamLine(line: string, state: ClaudeStreamState): Strea
     if (blockType === 'thinking' || blockType === 'redacted_thinking') {
       // Never two thinking blocks on one index, but a repeated start would
       // otherwise double-allocate a DSH block that nothing ever closes.
-      const existing = state.pending.get(contentIndex)
-      if (existing !== undefined) {
-        out.push(...emitPendingThinking(state, contentIndex))
-      }
-      const index = state.blocks.length
-      state.blocks.push({ type: 'reasoning', text: '' })
-      state.pending.set(contentIndex, {
-        index,
-        kind: blockType === 'redacted_thinking' ? 'redacted_thinking' : 'thinking',
-        text: asString(block.thinking) ?? '',
-        signature: asString(block.signature) ?? '',
-        data: asString(block.data) ?? '',
-      })
+      out.push(...closeThinkingBlock(state, contentIndex))
+      out.push(...openThinkingBlock(state, contentIndex, block, blockType))
       return out
     }
 
@@ -1912,8 +1997,10 @@ export function processStreamLine(line: string, state: ClaudeStreamState): Strea
 
     if (deltaType === 'thinking_delta') {
       const pending = state.pending.get(contentIndex)
-      const text = asString(delta.thinking) ?? ''
-      if (pending !== undefined && text !== '') pending.text += sanitizeText(text)
+      const text = sanitizeText(asString(delta.thinking) ?? '')
+      if (pending === undefined || pending.kind !== 'thinking' || text === '') return out
+      pending.text += text
+      out.push({ type: 'reasoning-delta', index: pending.index, text })
       return out
     }
 
@@ -1933,7 +2020,7 @@ export function processStreamLine(line: string, state: ClaudeStreamState): Strea
   if (type === 'content_block_stop') {
     const contentIndex = numberOr(event.index, -1)
     if (state.toolCalls.has(contentIndex)) return closeToolCall(state, contentIndex)
-    if (state.pending.has(contentIndex)) return emitPendingThinking(state, contentIndex)
+    if (state.pending.has(contentIndex)) return closeThinkingBlock(state, contentIndex)
     return closeTextBlock(state, contentIndex)
   }
 
@@ -1941,6 +2028,9 @@ export function processStreamLine(line: string, state: ClaudeStreamState): Strea
     const delta = isRecord(event.delta) ? event.delta : undefined
     const stop = delta === undefined ? undefined : asString(delta.stop_reason)
     if (stop !== undefined && stop !== '') state.finishReason = stop
+    const details = delta !== undefined && isRecord(delta.stop_details) ? delta.stop_details : undefined
+    const explanation = details === undefined ? undefined : asString(details.explanation)
+    if (explanation !== undefined && explanation !== '') state.stopExplanation = explanation
     const usage = isRecord(event.usage) ? event.usage : undefined
     // Cumulative output count, and the only place the final input-side numbers
     // are restated.

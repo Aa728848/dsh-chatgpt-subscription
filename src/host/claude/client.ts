@@ -132,6 +132,7 @@ import {
   OAUTH_BETA,
   QUOTA_CACHE_TTL_MS,
   QUOTA_FULL_REFRESH_MS,
+  THINKING_BINDING_CONTROLS_BETA,
   USAGE_PATH,
   claudeCliVersion,
   isClaudeErrorType,
@@ -229,6 +230,11 @@ export interface ClaudeHeaderOptions {
   model?: string
   /** Whether this request enables thinking; adds the interleaved-thinking beta. */
   thinking?: boolean
+  /**
+   * Whether this request's body carries `thinking.block_binding`; adds the beta
+   * that licenses the field. Without it the body is a 400 on every request.
+   */
+  thinkingBinding?: boolean
   /** HTTP method. `content-type` is emitted unless this is a GET. */
   method?: 'GET' | 'POST' | string
   /** Which product identity to report. Defaults to the Messages-API one. */
@@ -255,13 +261,14 @@ function isHaikuModel(modelId: string): boolean {
  * Order is not observable — the server parses the header as a set — so the order
  * below is chosen for readability in a log rather than to match a reference.
  */
-export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinking'> = {}): string[] {
+export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinking' | 'thinkingBinding'> = {}): string[] {
   const betas: string[] = []
   // The haiku exclusion is the reference's own rule, not this module's taste:
   // a haiku id is served without the claude-code identity beta.
   if (options.model === undefined || !isHaikuModel(options.model)) betas.push(CLAUDE_CODE_BETA)
   betas.push(OAUTH_BETA)
   if (options.thinking === true) betas.push(INTERLEAVED_THINKING_BETA)
+  if (options.thinkingBinding === true) betas.push(THINKING_BINDING_CONTROLS_BETA)
   return betas
 }
 
@@ -474,7 +481,10 @@ async function performCatalogLoad(
   let models: readonly ClaudeModelEntry[]
   let live = false
   try {
-    const response = await fetchFn(API_BASE + MODELS_PATH, {
+    // limit=1000 (the documented maximum): the default page is 20, and this
+    // listing is the authority on what the picker offers, so a truncated page
+    // silently hid every model after the twentieth.
+    const response = await fetchFn(API_BASE + MODELS_PATH + '?limit=1000', {
       method: 'GET',
       headers: buildClaudeHeaders(credentials.accessToken, { method: 'GET' }),
       signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
@@ -1263,8 +1273,21 @@ export function classifyFailure(
   }
 
   switch (envelope.type) {
-    case ERROR_TYPE.AUTHENTICATION:
     case ERROR_TYPE.PERMISSION:
+      // NOT a credential verdict. The vendor defines 403 permission_error as
+      // "does not have permission to use the specified resource" - an
+      // entitlement answer (a model the plan does not include), which signing in
+      // again cannot change. Classified as credential it marked a working account
+      // auth-failed, took it out of rotation, and told the user to sign in again.
+      return {
+        ...base,
+        kind: 'request',
+        message: envelope.message ?? 'This Claude account is not permitted to use the requested resource.',
+        retryable: false,
+        accountScoped: false,
+        resetsAt: null,
+      }
+    case ERROR_TYPE.AUTHENTICATION:
       return {
         ...base,
         kind: 'credential',

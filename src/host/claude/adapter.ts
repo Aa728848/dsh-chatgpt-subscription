@@ -171,6 +171,7 @@ import {
 import {
   assertStreamComplete,
   buildClaudeRequestBody,
+  claudeBodyBindsThinking,
   claudeRequestThinks,
   claudeToolNames,
   closeStream,
@@ -606,7 +607,7 @@ export class ClaudeAdapter extends LlmAdapter {
     signal: AbortSignal,
     fetchFn: typeof fetch,
   ): Promise<Response> {
-    const body = JSON.stringify(buildClaudeRequestBody(requestOptions, images, {
+    const payload = buildClaudeRequestBody(requestOptions, images, {
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
       toolNames,
@@ -620,7 +621,7 @@ export class ClaudeAdapter extends LlmAdapter {
       // changes the builder's default cannot silently turn caching back off for
       // this provider. See the mapper's section 7 for where the breakpoints go.
       cacheControl: true,
-    }))
+    })
     try {
       return await fetchFn(API_BASE + MESSAGES_PATH, {
         method: 'POST',
@@ -630,9 +631,12 @@ export class ClaudeAdapter extends LlmAdapter {
         headers: buildClaudeHeaders(credentials.accessToken, {
           model: requestOptions.model,
           thinking,
+          // Read off the body just built: the vendor documents block_binding
+          // without its beta as a 400 on every request.
+          thinkingBinding: claudeBodyBindsThinking(payload),
           method: 'POST',
         }),
-        body,
+        body: JSON.stringify(payload),
         signal,
       })
     } catch (error) {

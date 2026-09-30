@@ -67,6 +67,7 @@ import {
   OAUTH_BETA,
   QUOTA_CACHE_TTL_MS,
   QUOTA_FULL_REFRESH_MS,
+  THINKING_BINDING_CONTROLS_BETA,
   USAGE_PATH,
   claudeCliVersion,
   setClaudeCliVersion,
@@ -214,6 +215,14 @@ describe('subscription request headers', () => {
     expect(thinking).toContain(OAUTH_BETA)
   })
 
+  it('adds the thinking-binding beta only when the body carries block_binding', () => {
+    // block_binding without this beta is a documented 400 on every request.
+    expect(claudeBetas({ model: 'claude-sonnet-5-5', thinking: true, thinkingBinding: true }))
+      .toContain(THINKING_BINDING_CONTROLS_BETA)
+    expect(claudeBetas({ model: 'claude-sonnet-4-6', thinking: true })).not.toContain(THINKING_BINDING_CONTROLS_BETA)
+    expect(claudeBetas({ model: 'claude-sonnet-5-5', thinkingBinding: false })).not.toContain(THINKING_BINDING_CONTROLS_BETA)
+  })
+
   it('withholds the claude-code beta from a haiku model, the reference own rule', () => {
     const haiku = claudeBetas({ model: 'claude-haiku-4-5' })
     expect(haiku).not.toContain(CLAUDE_CODE_BETA)
@@ -289,7 +298,9 @@ describe('model listing', () => {
     const models = await loadCatalog(CREDENTIALS, { fetchFn: fetchStub.fn })
 
     expect(fetchStub.calls).toHaveLength(1)
-    expect(fetchStub.calls[0]?.url).toBe(API_BASE + MODELS_PATH)
+    // The documented maximum page: the default of 20 silently truncated the
+    // picker for an account entitled to more models than that.
+    expect(fetchStub.calls[0]?.url).toBe(API_BASE + MODELS_PATH + '?limit=1000')
     expect(fetchStub.calls[0]?.method).toBe('GET')
     expect(fetchStub.calls[0]?.headers.authorization).toBe('Bearer ' + ACCESS_TOKEN)
     expect('x-api-key' in (fetchStub.calls[0]?.headers ?? {})).toBe(false)
@@ -804,7 +815,7 @@ describe('connectivity probe', () => {
 // ---------------------------------------------------------------------------
 
 describe('failure classification', () => {
-  it('treats 401 and 403 as a FINAL credential failure', () => {
+  it('treats 401 and an untyped 403 as a FINAL credential failure', () => {
     const unauthorized = classifyFailure(
       401,
       JSON.stringify({ error: { type: ERROR_TYPE.AUTHENTICATION, message: 'revoked' } }),
@@ -815,13 +826,22 @@ describe('failure classification', () => {
     expect(unauthorized.retryable).toBe(false)
     expect(unauthorized.accountScoped).toBe(false)
 
+    // No typed body: the status line is all there is, and it stays fail-closed.
+    expect(classifyFailure(403, '', {}).kind).toBe('credential')
+  })
+
+  it('treats a typed 403 permission_error as an entitlement answer, NOT a dead credential', () => {
+    // Vendor: "does not have permission to use the specified resource". A model
+    // the plan does not include; signing in again cannot change it, so it must
+    // not mark the account auth-failed or tell the user to sign in again.
     const forbidden = classifyFailure(
       403,
       JSON.stringify({ error: { type: ERROR_TYPE.PERMISSION, message: 'not entitled' } }),
       {},
     )
-    expect(forbidden.kind).toBe('credential')
+    expect(forbidden.kind).toBe('request')
     expect(forbidden.retryable).toBe(false)
+    expect(forbidden.message).toBe('not entitled')
   })
 
   it('treats an invalid_request_error as a non-retryable request problem', () => {
