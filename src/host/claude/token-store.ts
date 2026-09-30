@@ -77,7 +77,7 @@ import path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import z from '@deepseek-ai/schemastery'
-import { PROVIDER_ID } from './types.ts'
+import { PROVIDER_ID, isClaudeCacheTtl, type ClaudeCacheTtl } from './types.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS } from './model-catalog.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
@@ -168,6 +168,12 @@ export interface ClaudeModelSettings {
   enabledModelIds: string[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: string | null
+  /**
+   * Prompt-cache tier the line asks for. `null` means "follow the official
+   * subscription client", which is the one-hour tier while a plan is drawing
+   * on included usage.
+   */
+  cacheTtl: ClaudeCacheTtl | null
   /** Account pinned in the card, by {@link ClaudeAccountRecord.internalId}. */
   selectedAccountId: string | null
 }
@@ -182,6 +188,8 @@ export interface ClaudeSettingsPatch {
   /** `null` deletes one override and falls back to the catalog default. */
   contextWindowOverrides?: ContextWindowOverridePatch
   defaultReasoningEffort?: string | null
+  /** `null` restores the subscription default (the one-hour tier). */
+  cacheTtl?: ClaudeCacheTtl | null
   selectedAccountId?: string | null
 }
 
@@ -200,6 +208,7 @@ export function defaultClaudeSettings(): ClaudeModelSettings {
     enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
+    cacheTtl: null,
     selectedAccountId: null,
   }
 }
@@ -490,12 +499,16 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
     }
   }
   const defaultReasoningEffort = nonEmptyString(record.defaultReasoningEffort) ?? null
+  // An unrecognised tier is read as "not set" rather than passed through: a
+  // value the wire would reject must not become a stored preference.
+  const cacheTtl = isClaudeCacheTtl(record.cacheTtl) ? record.cacheTtl : null
   const selectedAccountId = nonEmptyString(record.selectedAccountId) ?? null
   return {
     enabled: record.enabled !== false,
     enabledModelIds,
     contextWindowOverrides,
     defaultReasoningEffort,
+    cacheTtl,
     selectedAccountId,
   }
 }
@@ -511,6 +524,7 @@ function mergeClaudeSettings(current: ClaudeModelSettings, patch: ClaudeSettings
     defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
       ? patch.defaultReasoningEffort
       : current.defaultReasoningEffort,
+    cacheTtl: patch.cacheTtl !== undefined ? patch.cacheTtl : current.cacheTtl,
     selectedAccountId: patch.selectedAccountId !== undefined ? patch.selectedAccountId : current.selectedAccountId,
   }
 }
@@ -837,12 +851,14 @@ export function registerClaudePreferenceStore(
     enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
     contextWindowOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z.union([z.string(), z.const(null)]).default(null),
+    cacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
     selectedAccountId: z.union([z.string(), z.const(null)]).default(null),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: string | null
+    cacheTtl: ClaudeCacheTtl | null
     selectedAccountId: string | null
   }>
 
@@ -854,6 +870,7 @@ export function registerClaudePreferenceStore(
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
         defaultReasoningEffort: value.defaultReasoningEffort,
+        cacheTtl: isClaudeCacheTtl(value.cacheTtl) ? value.cacheTtl : null,
         selectedAccountId: value.selectedAccountId ?? null,
       }
     },

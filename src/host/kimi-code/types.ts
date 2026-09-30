@@ -214,6 +214,23 @@ export function maxOutputTokensFor(modelId: string, contextWindow?: number): num
 }
 
 /**
+ * Prompt-cache TTL Kimi accepts on either wire.
+ *
+ * Kimi's own documentation names exactly these two values, and the two wires
+ * spell the request differently (see the mapper). The tier is LOCKED when a
+ * prefix is first written: a later request cannot move an existing entry to the
+ * other TTL, and the service re-extends an entry at the TTL it was written
+ * with. Asking for `1h` therefore costs more per write than `5m`, and only pays
+ * off when the same prefix is re-read inside the hour.
+ */
+export type KimiCacheTtl = '5m' | '1h'
+
+/** Whether a stored preference names a tier this line can send. */
+export function isKimiCacheTtl(value: unknown): value is KimiCacheTtl {
+  return value === '5m' || value === '1h'
+}
+
+/**
  * Reduce the requested output cap so prompt + output fit the window.
  *
  * `estimatedInputTokens` is the caller's own size estimate; when it is absent

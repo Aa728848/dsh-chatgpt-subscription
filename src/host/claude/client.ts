@@ -126,6 +126,7 @@ import {
   DISCOVERY_TIMEOUT_MS,
   ERROR_CODE_CLIENT_VERSION_TOO_OLD,
   ERROR_TYPE,
+  EXTENDED_CACHE_TTL_BETA,
   INTERLEAVED_THINKING_BETA,
   MESSAGES_PATH,
   MODELS_PATH,
@@ -136,6 +137,7 @@ import {
   USAGE_PATH,
   claudeCliVersion,
   isClaudeErrorType,
+  type ClaudeCacheTtl,
   type ClaudeErrorType,
 } from './types.ts'
 import { FALLBACK_MODELS, resolveClaudeModel, type ClaudeModelEntry } from './model-catalog.ts'
@@ -235,6 +237,11 @@ export interface ClaudeHeaderOptions {
    * that licenses the field. Without it the body is a 400 on every request.
    */
   thinkingBinding?: boolean
+  /**
+   * Prompt-cache tier this request's body writes. `1h` adds the beta that
+   * licenses it, so the header and the body cannot disagree.
+   */
+  cacheTtl?: ClaudeCacheTtl
   /** HTTP method. `content-type` is emitted unless this is a GET. */
   method?: 'GET' | 'POST' | string
   /** Which product identity to report. Defaults to the Messages-API one. */
@@ -261,7 +268,7 @@ function isHaikuModel(modelId: string): boolean {
  * Order is not observable — the server parses the header as a set — so the order
  * below is chosen for readability in a log rather than to match a reference.
  */
-export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinking' | 'thinkingBinding'> = {}): string[] {
+export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinking' | 'thinkingBinding' | 'cacheTtl'> = {}): string[] {
   const betas: string[] = []
   // The haiku exclusion is the reference's own rule, not this module's taste:
   // a haiku id is served without the claude-code identity beta.
@@ -269,6 +276,11 @@ export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinki
   betas.push(OAUTH_BETA)
   if (options.thinking === true) betas.push(INTERLEAVED_THINKING_BETA)
   if (options.thinkingBinding === true) betas.push(THINKING_BINDING_CONTROLS_BETA)
+  // The header follows the BODY here, for the same reason it does for
+  // `block_binding`: the one-hour cache tier is a licensed capability, and a body
+  // asking for `ttl: '1h'` without the marker is refused. Deriving it from the
+  // tier rather than from a setting means a caller cannot desynchronize the two.
+  if (options.cacheTtl === '1h') betas.push(EXTENDED_CACHE_TTL_BETA)
   return betas
 }
 

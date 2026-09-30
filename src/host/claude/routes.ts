@@ -110,6 +110,7 @@ import type {
 import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import {
   CLAUDE_REASONING_EFFORTS,
+  isClaudeCacheTtl,
   isClaudeReasoningEffort,
   type ClaudeAccount,
   type ClaudeAccountQuota,
@@ -419,6 +420,7 @@ export async function getClaudeWebStatus(
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort as ClaudeWebStatus['defaultReasoningEffort'],
+    cacheTtl: settings.cacheTtl,
     selectedAccountId: settings.selectedAccountId,
     accounts: poolAccounts.map((summary): PoolClaudeAccountSummaryDto => summary),
     rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
@@ -714,6 +716,14 @@ export function registerClaudeRoutes(
             // \`null\` clears the choice and lets the catalog default apply; a
             // named level must be one this route can actually send.
             if (effort === null || isClaudeReasoningEffort(effort)) patch.defaultReasoningEffort = effort
+          }
+          if (body.cacheTtl !== undefined) {
+            // `null` restores the subscription default — the one-hour tier the
+            // official client uses — so it is a real value, not "unset".
+            const ttl = body.cacheTtl
+            if (ttl === null || isClaudeCacheTtl(ttl)) {
+              patch.cacheTtl = ttl
+            }
           }
           if (body.selectedAccountId !== undefined) {
             const selected = body.selectedAccountId

@@ -132,6 +132,7 @@ import {
 import type {} from '@deepseek-ai/dsh-attachment'
 import {
   API_BASE,
+  CLAUDE_SUBSCRIPTION_CACHE_TTL,
   DEFAULT_CONTEXT_WINDOW,
   ERROR_CODE_CLIENT_VERSION_TOO_OLD,
   MESSAGES_PATH,
@@ -141,6 +142,7 @@ import {
   STREAM_IDLE_TIMEOUT_MS,
   claudeCliVersion,
   meetsDottedVersionFloor,
+  type ClaudeCacheTtl,
 } from './types.ts'
 import {
   FileCredentialStore,
@@ -598,15 +600,42 @@ export class ClaudeAdapter extends LlmAdapter {
    * driven by {@link shouldRotateAccount}, which bypasses the pool ENTIRELY when
    * no credentials were resolved for it.
    */
+  /**
+   * The prompt-cache tier this line requests.
+   *
+   * A stored value wins; nothing stored falls back to the tier the OFFICIAL
+   * client uses for a subscription's main conversation, so a user comparing
+   * this plugin with Claude Code sees the same cache lifetime rather than half
+   * of it.
+   *
+   * @param settings - the document the caller already read for this turn.
+   */
+  private static cacheTtlFor(settings: ClaudeModelSettings | null): ClaudeCacheTtl {
+    // A settings read that failed falls back with everything else: a request
+    // must not fail because a preference document could not be read.
+    return settings?.cacheTtl ?? CLAUDE_SUBSCRIPTION_CACHE_TTL
+  }
+
   private async attemptRequest(
     credentials: ClaudeCredentials,
     requestOptions: NormalizedGenerateOptions,
     images: Awaited<ReturnType<typeof resolveRequestImages>>,
     toolNames: ClaudeToolNames,
     thinking: boolean,
+    settings: ClaudeModelSettings | null,
     signal: AbortSignal,
     fetchFn: typeof fetch,
   ): Promise<Response> {
+    // Resolved ONCE and used for both halves of the request: the marker in the
+    // body and the beta in the header. They license the same capability, and a
+    // request that asks for the one-hour tier in the body without the header is
+    // refused — so deriving the header from the body is the only way the two
+    // cannot drift.
+    //
+    // `null` (nothing stored) means "follow the official subscription client",
+    // which requests the one-hour tier while the plan is drawing on included
+    // usage. See CLAUDE_SUBSCRIPTION_CACHE_TTL.
+    const cacheTtl = ClaudeAdapter.cacheTtlFor(settings)
     const payload = buildClaudeRequestBody(requestOptions, images, {
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
@@ -621,6 +650,7 @@ export class ClaudeAdapter extends LlmAdapter {
       // changes the builder's default cannot silently turn caching back off for
       // this provider. See the mapper's section 7 for where the breakpoints go.
       cacheControl: true,
+      cacheTtl,
     })
     try {
       return await fetchFn(API_BASE + MESSAGES_PATH, {
@@ -634,6 +664,8 @@ export class ClaudeAdapter extends LlmAdapter {
           // Read off the body just built: the vendor documents block_binding
           // without its beta as a 400 on every request.
           thinkingBinding: claudeBodyBindsThinking(payload),
+          // The header follows the tier the body just asked for.
+          cacheTtl,
           method: 'POST',
         }),
         body: JSON.stringify(payload),
@@ -665,6 +697,10 @@ export class ClaudeAdapter extends LlmAdapter {
     // hardcoded true: a mid-convo model thinks whatever the caller asked for,
     // and a model with no thinking form never does.
     const thinking = claudeRequestThinks(requestOptions.model, effort)
+    // Read once per turn, next to the thinking flag for the same reason: both
+    // shape the body AND the beta set, and both must come from one snapshot so
+    // a settings change mid-turn cannot desynchronize them.
+    const settings = await this.settings().catch(() => null)
 
     const pool = this.accountPool
     const tried = new Set<string>()
@@ -686,7 +722,7 @@ export class ClaudeAdapter extends LlmAdapter {
 
     while (true) {
       const { credentials, accountId } = await this.resolveCredential(pool, tried, fetchFn, signal)
-      response = await this.attemptRequest(credentials, requestOptions, images, toolNames, thinking, signal, fetchFn)
+      response = await this.attemptRequest(credentials, requestOptions, images, toolNames, thinking, settings, signal, fetchFn)
       // Every attempt so far has been a pre-body failure, so nothing has reached
       // the caller and a rotation is still free. Once this method starts
       // yielding, outputStarted flips and shouldRotateAccount refuses forever.

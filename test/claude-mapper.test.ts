@@ -162,7 +162,7 @@ describe('Claude request body', () => {
     // this is the request the adapter posts, and a marker on the wrong block is
     // as much a bug as no marker at all.
     expect(messagesOf(built)).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }] },
+      { role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral', ttl: '5m' } }] },
     ])
     expect(claudeThinkingMode('claude-unknown-x')).toBe('none')
   })
@@ -197,7 +197,7 @@ describe('Claude request body', () => {
       name: 'run_code',
       description: 'run',
       input_schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
-      cache_control: { type: 'ephemeral' },
+      cache_control: { type: 'ephemeral', ttl: '5m' },
     }])
   })
 
@@ -217,7 +217,7 @@ describe('The Claude Code identity block', () => {
     expect(system).toHaveLength(1)
     // With no caller prompt the identity block IS the last block, so the default
     // breakpoint lands on it.
-    expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT, cache_control: { type: 'ephemeral' } })
+    expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT, cache_control: { type: 'ephemeral', ttl: '5m' } })
     expect(system[0]!.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.")
   })
 
@@ -226,7 +226,7 @@ describe('The Claude Code identity block', () => {
     const system = systemBlocksOf(built)
     expect(system).toHaveLength(2)
     expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT })
-    expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral' } })
+    expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral', ttl: '5m' } })
   })
 
   it('folds a one-shot system header and role:system messages into block 1 without a system role on the wire', () => {
@@ -258,7 +258,7 @@ describe('The Claude Code identity block', () => {
     // The marker goes on the LAST block, so it also covers the identity block
     // above it; marking the identity block alone would cache what never changes.
     expect(system[0]).toEqual({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT })
-    expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral' } })
+    expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral', ttl: '5m' } })
 
     // The opt-OUT is what removes it.
     expect(JSON.stringify(buildClaudeRequestBody(options(), undefined, { cacheControl: false }))).not.toContain('cache_control')
@@ -266,7 +266,7 @@ describe('The Claude Code identity block', () => {
     // With no caller prompt there is only the identity block, and it is last.
     const solo = buildClaudeSystemBlocks(options({ system: undefined, messages: [] }) as unknown as GenerateOptions)
     expect(solo).toHaveLength(1)
-    expect(solo[0]!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(solo[0]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
     const soloOff = buildClaudeSystemBlocks(options({ system: undefined, messages: [] }) as unknown as GenerateOptions, false)
     expect(soloOff[0]!.cache_control).toBeUndefined()
   })
@@ -307,19 +307,19 @@ describe('Prompt-cache breakpoints', () => {
     const system = systemBlocksOf(built)
     expect(system).toHaveLength(2)
     expect(system[0]!.cache_control).toBeUndefined()
-    expect(system[1]!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(system[1]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
 
     // (2) the last block of the LAST user message — what caches history.
     const messages = messagesOf(built)
     const lastUser = messages[messages.length - 1]!
     expect(lastUser.role).toBe('user')
-    expect(lastUser.content[lastUser.content.length - 1]!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(lastUser.content[lastUser.content.length - 1]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
 
     // (3) the last tool — the tool table stays inside the prefix.
     const tools = built.tools as Array<Record<string, unknown>>
     expect(tools).toHaveLength(2)
     expect(tools[0]!.cache_control).toBeUndefined()
-    expect(tools[1]!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(tools[1]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
 
     // Three sites, three markers, one each.
     expect(countClaudeCacheBreakpoints(built)).toBe(3)
@@ -354,7 +354,7 @@ describe('Prompt-cache breakpoints', () => {
     expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user'])
     const toolResult = messages[2]!.content[0]!
     expect(toolResult.type).toBe('tool_result')
-    expect(toolResult.cache_control).toEqual({ type: 'ephemeral' })
+    expect(toolResult.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
     // The text turn BEFORE it is not marked: there is one message breakpoint.
     expect(messages[0]!.content[0]!.cache_control).toBeUndefined()
   })
@@ -375,7 +375,7 @@ describe('Prompt-cache breakpoints', () => {
     expect(messages).toHaveLength(1)
     expect(messages[0]!.content).toEqual([
       { type: 'text', text: 'context notice' },
-      { type: 'text', text: 'the real turn', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'the real turn', cache_control: { type: 'ephemeral', ttl: '5m' } },
     ])
   })
 
@@ -407,7 +407,7 @@ describe('Prompt-cache breakpoints', () => {
     const messages = messagesOf(built)
     const lastBlock = messages[messages.length - 1]!.content.at(-1)!
     expect(lastBlock.type).toBe('image')
-    expect(lastBlock.cache_control).toEqual({ type: 'ephemeral' })
+    expect(lastBlock.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
   })
 
   it('leaves the request uncached with no marker anywhere when a caller opts out', () => {
@@ -744,7 +744,7 @@ describe('Message projection', () => {
       { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.txt' } }] },
       {
         role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'contents', cache_control: { type: 'ephemeral' } }],
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'contents', cache_control: { type: 'ephemeral', ttl: '5m' } }],
       },
     ])
   })
@@ -768,7 +768,7 @@ describe('Message projection', () => {
       { type: 'tool_result', tool_use_id: 'a', content: 'boom', is_error: true },
       { type: 'tool_result', tool_use_id: 'b', content: 'fine' },
       // The marker sits on the tail of the MERGED turn, which is the text turn.
-      { type: 'text', text: 'and now?', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'and now?', cache_control: { type: 'ephemeral', ttl: '5m' } },
     ])
   })
 })
@@ -847,7 +847,7 @@ describe('Thinking-block replay across a tool loop', () => {
     // The tool call goes back out in the CANONICAL spelling with its parsed input.
     expect(messages[1]!.content[2]).toEqual({ type: 'tool_use', id: 'toolu_01', name: 'Bash', input: { command: 'ls' } })
     expect(messages[2]!.content).toEqual([
-      { type: 'tool_result', tool_use_id: 'toolu_01', content: 'a.txt b.txt', cache_control: { type: 'ephemeral' } },
+      { type: 'tool_result', tool_use_id: 'toolu_01', content: 'a.txt b.txt', cache_control: { type: 'ephemeral', ttl: '5m' } },
     ])
     // And thinking is still requested for the continued generation.
     expect(thinkingOf(second)).toEqual({ type: 'adaptive', display: 'summarized' })
@@ -1056,7 +1056,7 @@ describe('Request images', () => {
         { type: 'text', text: 'screenshot follows' },
         { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
       ],
-      cache_control: { type: 'ephemeral' },
+      cache_control: { type: 'ephemeral', ttl: '5m' },
     })
   })
 
@@ -1762,7 +1762,7 @@ describe('The four modes as complete bodies', () => {
     expect(built.output_config).toEqual({ effort: 'medium' })
     expect('temperature' in built).toBe(false)
     expect((built.tools as Array<Record<string, unknown>>)[0]).toEqual({
-      name: 'Bash', description: 'run', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral' },
+      name: 'Bash', description: 'run', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral', ttl: '5m' },
     })
   })
 

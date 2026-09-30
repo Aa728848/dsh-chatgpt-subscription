@@ -114,6 +114,25 @@ export function isClaudeReasoningEffort(value: unknown): value is ClaudeReasonin
   return typeof value === 'string' && (CLAUDE_REASONING_EFFORTS as readonly string[]).includes(value)
 }
 
+/**
+ * Prompt-cache TTL the subscription route can request.
+ *
+ * `null` in the settings means "follow the official subscription client", which
+ * asks for the one-hour tier while a plan is drawing on included usage.
+ */
+export type ClaudeCacheTtl = '5m' | '1h'
+
+/**
+ * Whether a posted value names a tier this route can send.
+ *
+ * Membership is checked at the wire boundary for the same reason effort levels
+ * are: the one-hour tier is a LICENSED capability, so a value that reached the
+ * body without the matching beta would be refused by the service.
+ */
+export function isClaudeCacheTtl(value: unknown): value is ClaudeCacheTtl {
+  return value === '5m' || value === '1h'
+}
+
 /** One model offered by the Claude subscription route. */
 export interface ClaudeModelOption {
   id: string
@@ -272,6 +291,8 @@ export interface ClaudeWebStatus extends Partial<AccountPoolStatusDto> {
   models: ClaudeModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: ClaudeReasoningEffort | null
+  /** Prompt-cache tier; `null` means "follow the official subscription default". */
+  cacheTtl: ClaudeCacheTtl | null
   /** Account selected for catalog, quota and all requests; null means automatic. */
   selectedAccountId: string | null
   /** Signed-in accounts; empty or absent when no pool is installed. */
@@ -288,6 +309,8 @@ export interface ClaudeSettingsUpdateDto {
   /** A number sets an override for that model; `null` restores the default. */
   contextWindowOverrides?: Record<string, number | null>
   defaultReasoningEffort?: ClaudeReasoningEffort | null
+  /** `null` restores the subscription default. */
+  cacheTtl?: ClaudeCacheTtl | null
   selectedAccountId?: string | null
 }
 

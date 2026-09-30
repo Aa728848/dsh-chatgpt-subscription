@@ -197,7 +197,12 @@ import {
   claudeThinkingMode,
   maxOutputTokensFor,
 } from './model-catalog.ts'
-import { PROVIDER_ID } from './types.ts'
+import {
+  cacheControlFor,
+  CLAUDE_DEFAULT_CACHE_TTL,
+  PROVIDER_ID,
+  type ClaudeCacheTtl,
+} from './types.ts'
 
 // ---------------------------------------------------------------------------
 // Shape helpers
@@ -1045,13 +1050,19 @@ export function leadingSystemText(options: GenerateOptions): string | undefined 
 export function buildClaudeSystemBlocks(
   options: GenerateOptions,
   cacheControl: boolean = true,
+  ttl: ClaudeCacheTtl = CLAUDE_DEFAULT_CACHE_TTL,
 ): AnthropicBlock[] {
   const blocks: AnthropicBlock[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }]
   const userText = leadingSystemText(options)
   if (userText !== undefined) blocks.push({ type: 'text', text: userText })
   if (cacheControl) {
     const last = blocks[blocks.length - 1] as AnthropicBlock
-    last.cache_control = { type: 'ephemeral' }
+    // The TTL is applied HERE as well as in markClaudeCacheBreakpoints. This
+    // function is exported and writes its own marker, so leaving it at the
+    // plain form would hand a caller that builds blocks directly the five-minute
+    // tier whatever it asked for; the request builder overwrites it afterwards,
+    // so both writes must agree.
+    last.cache_control = cacheControlFor(ttl)
   }
   return blocks
 }
@@ -1091,14 +1102,15 @@ function lastCacheableUserBlock(messages: ReadonlyArray<{ role: 'user' | 'assist
  *   and has not been handed to a caller yet.
  * @returns the number of breakpoints written.
  */
-function markClaudeCacheBreakpoints(body: Record<string, unknown>): number {
+function markClaudeCacheBreakpoints(body: Record<string, unknown>, ttl: ClaudeCacheTtl = CLAUDE_DEFAULT_CACHE_TTL): number {
   let marked = 0
+  const marker = cacheControlFor(ttl)
 
   const system = body.system
   if (Array.isArray(system)) {
     const last = system[system.length - 1] as AnthropicBlock | undefined
     if (last !== undefined) {
-      last.cache_control = { type: 'ephemeral' }
+      last.cache_control = { ...marker }
       marked += 1
     }
   }
@@ -1107,7 +1119,7 @@ function markClaudeCacheBreakpoints(body: Record<string, unknown>): number {
   if (Array.isArray(messages)) {
     const target = lastCacheableUserBlock(messages)
     if (target !== undefined) {
-      target.cache_control = { type: 'ephemeral' }
+      target.cache_control = { ...marker }
       marked += 1
     }
   }
@@ -1116,7 +1128,7 @@ function markClaudeCacheBreakpoints(body: Record<string, unknown>): number {
   if (Array.isArray(tools) && tools.length > 0) {
     const last = tools[tools.length - 1] as AnthropicBlock | undefined
     if (last !== undefined) {
-      last.cache_control = { type: 'ephemeral' }
+      last.cache_control = { ...marker }
       marked += 1
     }
   }
@@ -1380,6 +1392,17 @@ export interface ClaudeRequestOptions {
    */
   cacheControl?: boolean
   /**
+   * Prompt-cache tier for the breakpoints this request writes.
+   *
+   * Defaults to the five-minute tier so a caller that states nothing keeps the
+   * plain marker. The subscription line passes the one-hour tier, which is what
+   * the official CLI requests while a plan is drawing on included usage — and
+   * the `1h` value REQUIRES the extended-cache-ttl beta header, so a caller
+   * asking for it must also make sure that header is sent
+   * (`claudeBetas({ cacheTtl })`).
+   */
+  cacheTtl?: ClaudeCacheTtl
+  /**
    * Tool-name translation to use. Pass the same value to createStreamState so
    * the response side maps back through the identical table.
    */
@@ -1442,12 +1465,13 @@ export function buildClaudeRequestBody(
   const temperatureAllowed = claudeModelSupportsTemperature(options.model) && !thinkingEnabled
 
   const caching = request.cacheControl !== false
+  const cacheTtl = request.cacheTtl ?? CLAUDE_DEFAULT_CACHE_TTL
 
   const body: Record<string, unknown> = {
     model: options.model,
     max_tokens: maxTokens,
     stream: true,
-    system: buildClaudeSystemBlocks(options, caching),
+    system: buildClaudeSystemBlocks(options, caching, cacheTtl),
     messages: mergeClaudeMessages(entries),
     ...(options.tools !== undefined && options.tools.length > 0
       ? { tools: options.tools.map((tool) => wireTool(tool, names)) }
@@ -1464,7 +1488,7 @@ export function buildClaudeRequestBody(
 
   // The breakpoints go on the FINISHED body: the message marker needs the MERGED
   // list, and the tool marker the full array (see the module doc's section 7).
-  if (caching) markClaudeCacheBreakpoints(body)
+  if (caching) markClaudeCacheBreakpoints(body, cacheTtl)
   return body
 }
 

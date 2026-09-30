@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Claude 与 Kimi 线路补上提示缓存时长(TTL)选择**，两者都可在设置页选择，默认行为各自对齐官方。
+  - **Claude（`claude-subscription`）**：本线路用订阅凭据，而 [Claude Code 官方文档](https://code.claude.com/docs/en/prompt-caching) 写明「订阅用户在套餐额度内，主对话使用 **1 小时** TTL；超出额度改按用量计费后降回 5 分钟」。此前本插件四�� `cache_control` 全部是裸的 `{ type: 'ephemeral' }`（即默认 5 分钟），**与官方客户端行为不一致**——同样的用量，官方用户享受 4 倍缓存窗口而本插件没有。现默认按订阅档位发 `ttl: '1h'`，并在**同一处**同步发出授权它的 beta `extended-cache-ttl-2025-04-11`（1 小时是**需要许可的能力**，body 里要了 `1h` 却没有该标记会被拒，与 `block_binding` 同理）。设置页可选「跟随官方 / 1 小时 / 5 分钟」；1 小时写入价格更高，短会话不划算，故保留覆盖项。
+  - **Kimi（`kimi-code`）**：[Kimi 官方缓存文档](https://www.kimi.com/academy/best-practices-for-context-caching) 明确了 `prompt_cache_options`（OpenAI 兼容线路）与**顶层** `cache_control`（Anthropic 兼容线路）两套写法，且命中价为未命中的 1/10。此前本插件两种都不发——注意这与本插件**自己实测**的结论并不矛盾：那份实测针对的是「缓存身份由内容前缀哈希决定、标记无法干预」，而 TTL 控制的是**写入时长**，两者是不同的机制。**未设置时不发任何缓存字段**，请求与该设置存在之前逐字节一致。
+    - 两条线路写法**不可互换**：`cache_control` 只在请求顶层生效（消息体内的同名标记会被忽略），因此这里发的是顶层字段，不是给 system/消息块加标记。
+    - **档位在首次写入时锁定**，之后无法改写、命中时按原档免费续期；已有条目完全过期后才能用新档重写。1 小时写入约为 5 分钟的两倍价，只有当同一前缀会在一小时内被反复读取才划算——设置项的提示文案写明了这一点。
+  - **测试**：新增 `test/cache-ttl.test.ts` 11 条——Claude 默认写 5 分钟标记、写 1 小时标记、1 小时必带授权 beta、5 分钟不带该 beta、拒绝非法档位、关闭缓存时不写任何标记；Kimi 未设置时两种协议都不发、OpenAI 线路用 `prompt_cache_options`、Anthropic 线路用顶层 `cache_control`、拒绝非法档位。
+  - **顺带修掉一个真实的不一致**：`buildClaudeSystemBlocks` 是导出函数且自己写标记，此前固定写裸 `{ type: 'ephemeral' }`，会绕过 TTL（请求构建器事后虽会覆盖，但直接调用该函数的调用方拿到的永远是 5 分钟）。现两处写入用同一个 `cacheControlFor`，并更新了 `claude-mapper` / `claude-adapter` / `claude-routes` / `claude-token-store` 中断言旧标记形态的用例。
+  - **验证**：强制类型检查（`tsc -b --force`）与 test tsconfig 均 0 错误，`npm run build`、`npm pack --dry-run`、`npm ci --dry-run` 通过，全量 **1847 passed** / 7 skipped；失败的 7 条仍是先前已确认与本插件无关的 `claude-model-catalog`(5)、`antigravity-callback-port`(1) 与一条既有用例。
+  - **未在真实订阅账号上端到端验证**。Kimi 订阅端是否接受 `prompt_cache_options` / 顶层 `cache_control`（开放平台文档有，订阅端未实测）与 Claude 1 小时写入的实际命中收益，都需要在真机上确认；第一检查点是发一轮带 1 小时的请求后看 `usage.cache_creation.ephemeral_1h_input_tokens` 是否非零。
 - **修复 Codex 线路声明了输出上限却从不发送**。`shared/model-catalog.ts` 为 GPT-6 家族声明了 128K 输出上限，`resolveCodexModel` 也把它作为 `defaultMaxTokens` 报给 DSH，但 `responses-mapper.ts` 构建 payload 时**完全没有 `max_output_tokens`** 字段——目录里没有的模型则回落到 32K 预 GPT-6 默认。
   - **为什么重要**：不带这个字段时由服务端套用自己的默认值，本线路既无法预测也无法上报——某一轮撞上上限看起来就像一次普通的短回答。这与 Claude 线把 `model_context_window_exceeded` 当成正常结束是同一类问题。Codex 走 `store:false` 且每轮全量重发，这一项尤其容易被反复触发。
   - **修法**：始终发送 `options.maxTokens ?? codexModelMaxTokens(model)`，并在调用方请求更大时用 `Math.min` 封到模型自身上限（与 antigravity mapper 同一道守卫）——超出模型能力的请求会被后端直接拒绝，因此必须向下封而不是原样透传。

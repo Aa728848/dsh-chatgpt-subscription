@@ -12,7 +12,16 @@ import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
 import { dshHomeDir } from '../antigravity/token-store.ts'
-import { DEFAULT_OAUTH_HOST, FALLBACK_MODELS, PROVIDER_ID, REGION_HOSTS, codingBaseUrl, oauthHost } from './types.ts'
+import {
+  DEFAULT_OAUTH_HOST,
+  FALLBACK_MODELS,
+  PROVIDER_ID,
+  REGION_HOSTS,
+  codingBaseUrl,
+  isKimiCacheTtl,
+  oauthHost,
+  type KimiCacheTtl,
+} from './types.ts'
 
 export const KIMI_CODE_PREFERENCES_NAMESPACE = 'dsh-kimi-code'
 
@@ -87,6 +96,12 @@ export interface KimiCodeModelSettings {
   catalogModels: KimiCodeCatalogModel[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: KimiCodeReasoningEffort | null
+  /**
+   * Prompt-cache tier this line asks for. `null` sends no cache field at all,
+   * which leaves the service on its own default behaviour — the request this
+   * line sent before the setting existed, byte for byte.
+   */
+  cacheTtl: KimiCacheTtl | null
 }
 
 export interface KimiCodePreferenceStore {
@@ -97,6 +112,8 @@ export interface KimiCodePreferenceStore {
     /** `null` deletes one override and falls back to the catalog default. */
     contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: KimiCodeReasoningEffort | null
+    /** `null` clears the tier, returning to "send no cache field". */
+    cacheTtl?: KimiCacheTtl | null
   }): Promise<KimiCodeModelSettings>
 }
 
@@ -121,6 +138,7 @@ export function registerKimiCodePreferenceStore(
       catalogModels: [],
       contextWindowOverrides: {},
       defaultReasoningEffort: null,
+      cacheTtl: null,
     }
     void fallbackStore.read().then((stored) => { snapshot = stored }).catch(() => undefined)
     return {
@@ -142,11 +160,13 @@ export function registerKimiCodePreferenceStore(
         z.const(null),
       ])
       .default(null),
+    cacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: KimiCodeReasoningEffort | null
+    cacheTtl: KimiCacheTtl | null
   }>
 
   return {
@@ -158,6 +178,9 @@ export function registerKimiCodePreferenceStore(
         catalogModels: [],
         contextWindowOverrides: value.contextWindowOverrides,
         defaultReasoningEffort: value.defaultReasoningEffort,
+        // An unrecognised tier reads as "not set": a value the wire would
+        // reject must not become a stored preference.
+        cacheTtl: isKimiCacheTtl(value.cacheTtl) ? value.cacheTtl : null,
       }
     },
     update: async (patch) => {
@@ -171,6 +194,7 @@ export function registerKimiCodePreferenceStore(
         defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
           ? patch.defaultReasoningEffort
           : current.defaultReasoningEffort,
+        cacheTtl: patch.cacheTtl !== undefined ? patch.cacheTtl : current.cacheTtl,
       }
       await scope.update(normalized)
       void fallbackStore.updateSettings(patch).catch(() => undefined)
@@ -404,7 +428,10 @@ export class FileModelSettingsStore {
           ? record.defaultReasoningEffort
           : null
         const enabled = record.enabled !== false
-        return { enabled, enabledModelIds, catalogModels, contextWindowOverrides, defaultReasoningEffort }
+        // A tier the wire does not accept reads as "not set", so a hand-edited
+        // settings file cannot put a value this line would send into the body.
+        const cacheTtl = isKimiCacheTtl(record.cacheTtl) ? record.cacheTtl : null
+        return { enabled, enabledModelIds, catalogModels, contextWindowOverrides, defaultReasoningEffort, cacheTtl }
       }
     } catch {
       // A missing or unreadable settings file falls back to the shipped defaults.
@@ -415,6 +442,7 @@ export class FileModelSettingsStore {
       catalogModels: [],
       contextWindowOverrides: {},
       defaultReasoningEffort: null,
+      cacheTtl: null,
     }
   }
 
@@ -431,6 +459,8 @@ export class FileModelSettingsStore {
     /** `null` deletes one override and falls back to the catalog default. */
     contextWindowOverrides?: ContextWindowOverridePatch
     defaultReasoningEffort?: KimiCodeReasoningEffort | null
+    /** `null` clears the tier, returning to "send no cache field". */
+    cacheTtl?: KimiCacheTtl | null
   }): Promise<KimiCodeModelSettings> {
     const current = await this.read()
     const next: KimiCodeModelSettings = {
@@ -443,6 +473,11 @@ export class FileModelSettingsStore {
       ...(patch.defaultReasoningEffort !== undefined
         ? { defaultReasoningEffort: patch.defaultReasoningEffort }
         : {}),
+      // A tier the wire does not accept is dropped here rather than stored, so
+      // a bad write cannot sit in the settings file until the next request.
+      ...(patch.cacheTtl !== undefined && patch.cacheTtl !== null
+        ? { cacheTtl: isKimiCacheTtl(patch.cacheTtl) ? patch.cacheTtl : current.cacheTtl }
+        : patch.cacheTtl === null ? { cacheTtl: null } : {}),
     }
     await this.write(next)
     return next

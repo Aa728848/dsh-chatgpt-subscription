@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
+  KimiCodeCacheTtl,
   KimiCodeLoginFlowStatus,
   KimiCodeModelOption,
   KimiCodeReasoningEffort,
@@ -401,6 +402,19 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     }
   }
 
+  const handleUpdateCacheTtl = async (ttl: KimiCodeCacheTtl | null) => {
+    try {
+      const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ cacheTtl: ttl }),
+      })
+      setStatus(updated)
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const handleSaveContextWindow = async (modelId: string) => {
     const raw = contextDrafts[modelId] || ''
     const parsed = parsePositiveCapacity(raw)
@@ -705,6 +719,26 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
             {KIMI_CODE_REASONING_EFFORTS.map((effort) => (
               <option key={effort} value={effort}>{EFFORT_LABEL[effort]}</option>
             ))}
+          </select>
+        </div>
+        <div className="dsha-pref-row">
+          <div>
+            <strong>{t.cacheTtl}</strong>
+            <p className="dsha-muted">{t.cacheTtlHint}</p>
+          </div>
+          <select
+            className="dsha-select"
+            aria-label={t.cacheTtl}
+            value={status?.cacheTtl ?? ''}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const value = event.currentTarget.value
+              void handleUpdateCacheTtl(value === '' ? null : (value as KimiCodeCacheTtl))
+            }}
+          >
+            <option value="">{t.cacheTtlDefault}</option>
+            <option value="5m">{t.cacheTtl5m}</option>
+            <option value="1h">{t.cacheTtl1h}</option>
           </select>
         </div>
       </section>

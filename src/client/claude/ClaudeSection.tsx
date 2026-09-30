@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   ClaudeAccountSummaryDto,
+  ClaudeCacheTtl,
   ClaudeConnectionDto,
   ClaudeLoginFlowDto,
   ClaudeModelOption,
@@ -491,6 +492,19 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: Props): Rea
     }
   }
 
+  const handleUpdateCacheTtl = async (ttl: ClaudeCacheTtl | null) => {
+    try {
+      const updated = await fetchApi<ClaudeWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ cacheTtl: ttl }),
+      })
+      setStatus(updated)
+      notifyChange()
+    } catch (err) {
+      reportError(err)
+    }
+  }
+
   const handleSaveContextWindow = async (modelId: string) => {
     const raw = contextDrafts[modelId] || ''
     const parsed = parsePositiveCapacity(raw)
@@ -857,6 +871,26 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: Props): Rea
             {CLAUDE_REASONING_EFFORTS.map((effort) => (
               <option key={effort} value={effort}>{EFFORT_LABELS[effort]}</option>
             ))}
+          </select>
+        </div>
+        <div className="dsha-pref-row">
+          <div>
+            <strong>{t.cacheTtl}</strong>
+            <p className="dsha-muted">{t.cacheTtlHint}</p>
+          </div>
+          <select
+            className="dsha-select"
+            aria-label={t.cacheTtl}
+            value={status?.cacheTtl ?? ''}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const value = event.currentTarget.value
+              void handleUpdateCacheTtl(value === '' ? null : (value as ClaudeCacheTtl))
+            }}
+          >
+            <option value="">{t.cacheTtlSubscription}</option>
+            <option value="1h">{t.cacheTtl1h}</option>
+            <option value="5m">{t.cacheTtl5m}</option>
           </select>
         </div>
         <p className="dsha-muted" style={{ paddingTop: 10 }}>{t.modelLadders}</p>

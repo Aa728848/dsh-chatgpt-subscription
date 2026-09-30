@@ -8,6 +8,7 @@ import {
   PROVIDER_NAME,
   QUOTA_CACHE_TTL_MS,
   codingBaseUrl,
+  isKimiCacheTtl,
   oauthHost,
 } from './types.ts'
 import {
@@ -217,6 +218,7 @@ export async function getKimiCodeWebStatus(
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort,
+    cacheTtl: settings.cacheTtl,
     loginRegion: region,
     serving: readOption(options.serving, true),
     conflict: readOption(options.conflict, null),
@@ -456,6 +458,14 @@ export function registerKimiCodeRoutes(
             const effort = body.defaultReasoningEffort
             if (effort === null || isKimiCodeEffort(effort)) {
               patch.defaultReasoningEffort = effort
+            }
+          }
+          if (body.cacheTtl !== undefined) {
+            // `null` is a real value here: it clears the tier and returns the
+            // request to sending no cache field at all.
+            const ttl = body.cacheTtl
+            if (ttl === null || isKimiCacheTtl(ttl)) {
+              patch.cacheTtl = ttl
             }
           }
           if (preferences) await preferences.update(patch)

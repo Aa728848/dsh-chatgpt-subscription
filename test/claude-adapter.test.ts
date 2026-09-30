@@ -407,9 +407,12 @@ describe('claude adapter request path', () => {
     const tools = body.tools as Array<Record<string, unknown>>
 
     // The last system block, the last block of the last user message, the last tool.
-    expect(system.at(-1)!.cache_control).toEqual({ type: 'ephemeral' })
-    expect(messages.at(-1)!.content.at(-1)!.cache_control).toEqual({ type: 'ephemeral' })
-    expect(tools.at(-1)!.cache_control).toEqual({ type: 'ephemeral' })
+    // The SUBSCRIPTION tier, not the plain one: with nothing stored, the route
+    // asks for the hour the official client asks for, and the request carries
+    // the beta that licenses it.
+    expect(system.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(messages.at(-1)!.content.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(tools.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
     expect(JSON.stringify(body).match(/"cache_control"/g)).toHaveLength(3)
   })
 

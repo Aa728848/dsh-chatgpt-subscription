@@ -115,6 +115,46 @@ mean sending fields the other wires do not have:
   test file that cannot load is `subagent-model-authorization-ptc.test.ts`
   (`@deepseek-ai/dsh-ptc-runtime` does not exist before 0.1.7) — the known
   dev-only limitation from the skill's traps list.
+
+## 7. Cache TTL across lines (added after the Codex round)
+
+Three lines cache prompts, and the three protocols spell the request
+differently. This is the map — it is the part most easily got wrong twice.
+
+| Line | Protocol | How the tier is requested | Beta needed |
+| --- | --- | --- | --- |
+| `claude-subscription` | Anthropic Messages | `cache_control: { type: 'ephemeral', ttl }` on up to 3 breakpoints | **`extended-cache-ttl-2025-04-11`** for `1h` |
+| `kimi-code` (openai wire) | Chat Completions | `prompt_cache_options: { mode: 'implicit', ttl }` | none |
+| `kimi-code` (anthropic wire) | Anthropic Messages | **top-level** `cache_control` | none |
+| `codex-chatgpt` | Responses | `prompt_cache_key` only — no TTL surface | — |
+
+Load-bearing details that cost a round to establish:
+
+- **Anthropic's `1h` is a licensed capability.** A body carrying
+  `ttl: '1h'` WITHOUT the beta is refused, exactly as `block_binding` is. The
+  header must therefore be derived from the built body (the adapter reads the
+  tier it just wrote), never from the setting a second time.
+- **The official subscription client uses `1h` for its main conversation**
+  while the plan is drawing on included usage, and drops to `5m` once requests
+  bill against usage credits. That is the default this plugin now uses, so a
+  user comparing it with Claude Code sees the same cache lifetime. The 1h
+  write costs more, so the setting can override it.
+- **Kimi's `cache_control` only works at the request TOP LEVEL** — a marker
+  inside a message is explicitly ignored by the service. Do not "fix" this by
+  pushing the marker onto the last system or message block.
+- **Kimi locks the tier on first write.** A later request cannot move an
+  existing entry to the other TTL; entries only expire. Unset means the field is
+  not sent at all, which keeps the pre-setting request byte-identical.
+- **Cache IDENTITY and cache TTL are different mechanisms.** Kimi's own
+  measurements (pi-provider-kimi-code, 14 controlled suites) show the identity
+  is the content prefix hash and that neither `prompt_cache_key` nor
+  `cache_control` influences it. That is NOT a reason to omit the TTL field —
+  the TTL controls how long a write lives. Conflating the two made this look
+  unsupported when it was merely unexposed by the official CLI.
+- **Deliberately NOT adopted**: `context_management` / `clear_tool_uses`
+  (Anthropic's server-side context editing). The official Claude Code CLI has
+  open feature requests for it (issues #44521, #26215), so it is not yet
+  something the official client relies on either.
 - **Not verified end-to-end against a live subscription account.** The new
   headers, the listing endpoint and turn-state replay are asserted against
   mocked responses only. First check on a real machine: sign in, send two turns

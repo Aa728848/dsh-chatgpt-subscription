@@ -98,6 +98,44 @@ export const CLAUDE_CODE_BETA = 'claude-code-20250219'
 /** Lets thinking blocks interleave with tool use across a multi-turn loop. */
 export const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
 /**
+ * Licenses the extended one-hour prompt-cache TTL.
+ *
+ * `cache_control: { type: 'ephemeral', ttl: '1h' }` is NOT accepted without this
+ * beta: the one-hour tier is a separate licensed capability, and a body that
+ * asks for it without the marker is refused the same way `block_binding` is.
+ */
+export const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+/**
+ * Prompt-cache TTL this line asks for.
+ *
+ * Anthropic offers two tiers. The official CLI documents that a Claude
+ * SUBSCRIPTION's main conversation uses the one-hour tier while it is drawing
+ * on included plan usage, and drops to five minutes once the plan is exhausted
+ * and requests bill against usage credits. This line authenticates with a
+ * subscription token, so the subscription tier is the one that matches the
+ * official client's behaviour — and a user comparing this plugin against the
+ * official CLI should see the same cache lifetime, not half of it.
+ *
+ * The write is 1.25x the price of a five-minute write, so a short session that
+ * never re-reads the prefix pays more. That is the official trade-off and the
+ * user may override it.
+ */
+export type ClaudeCacheTtl = '5m' | '1h'
+/** TTL the official subscription client uses for its main conversation. */
+export const CLAUDE_SUBSCRIPTION_CACHE_TTL: ClaudeCacheTtl = '1h'
+/** The plain marker, i.e. the default five-minute tier. */
+export const CLAUDE_DEFAULT_CACHE_TTL: ClaudeCacheTtl = '5m'
+
+/** A cache marker for one tier. Absent `ttl` means the five-minute default. */
+export function cacheControlFor(ttl: ClaudeCacheTtl): { type: 'ephemeral'; ttl: ClaudeCacheTtl } {
+  return { type: 'ephemeral', ttl }
+}
+
+/** Whether a stored preference names a tier this line can send. */
+export function isClaudeCacheTtl(value: unknown): value is ClaudeCacheTtl {
+  return value === '5m' || value === '1h'
+}
+/**
  * Licenses `thinking.block_binding` in a request body.
  *
  * The field is not optional to license: the vendor documents that a body

@@ -621,6 +621,9 @@ describe('claude model settings', () => {
       enabledModelIds: ['claude-sonnet-5'],
       contextWindowOverrides: { 'claude-opus-5': 500_000 },
       defaultReasoningEffort: 'high',
+      // A legacy document states no cache tier, and "no tier stored" is the
+      // subscription default rather than a value the reader has to invent.
+      cacheTtl: null,
       selectedAccountId: 'cl_0123456789abcdef0123',
     })
     // The unknown key is GONE from the parsed value rather than carried through:
