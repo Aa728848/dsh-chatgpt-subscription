@@ -1,6 +1,6 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
-  "version": "0.10.13",
+  "version": "0.10.14",
   "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
   "author": {
     "name": "eddyskywalker",
