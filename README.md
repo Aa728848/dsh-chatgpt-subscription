@@ -6,23 +6,41 @@
 
 ## 目录
 
+- [线路总览](#线路总览)
 - [功能特性](#功能特性)
 - [模型目录](#模型目录)
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [使用](#使用)
-- [Kimi Code 线路](#kimi-code-线路)
 - [Command Code 线路](#command-code-线路)
 - [WorkBuddy 线路](#workbuddy-线路)
 - [Claude（订阅）线路](#claude订阅线路)
-- [子代理模型授权](#子代理模型授权0215-起)
+- [子代理模型授权](#子代理模型授权0215-起032-起强制指定模型)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
-- [升级、降级与卸载](#升级降级与卸载)
 - [安全边界](#安全边界)
 - [插件路由](#插件路由)
 - [开发与验证](#开发与验证)
 - [故障排查](#故障排查)
 
+## 线路总览
+
+本插件同时接入 **7 条订阅线路**，每条各自独立注册 Provider、独立登录、独立额度卡片。
+
+| Provider ID | 订阅 | 协议 | 登录方式 | 模型目录来源 |
+| --- | --- | --- | --- | --- |
+| `codex-chatgpt` | ChatGPT（Plus / Pro / Business…） | Responses | 浏览器 OAuth（localhost:1455 回调） | **实时** `/backend-api/codex/models` |
+| `kimi-code` | Kimi 会员 | Anthropic Messages | **设备码**（RFC 8628） | 实时 `/v1/models` + 本地兜底 |
+| `command-code` | Command Code | Anthropic / OpenAI 双轨 | 浏览器 OAuth 或粘贴 API Key | 实时 `/provider/v1/models` |
+| `workbuddy-subscription` | 腾讯 WorkBuddy / CodeBuddy | OpenAI 兼容（仅流式） | 扫描桌面端凭据或官方浏览器授权 | 实时 `/v3/config` |
+| `claude-subscription` | Claude Pro / Max | Anthropic Messages | 手动粘贴 / loopback 回调 | 实时 `/v1/models` + 本地兜底 |
+| `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | **复用桌面端登录态** 或设备码 | **硬编码**（见下） |
+| `antigravity` | Google Antigravity | Gemini | Google OAuth | 内置表 |
+
+> **只有 minimax-code 是硬编码目录，而且是有意的**：该端点的 `GET /v1/models` **未对订阅流量开放**（返回 503 `direct_route_not_configured`），任何「实时目录」都只会是一个必然失败的请求。其取值转录自本机官方客户端的 `config.yaml`。
+>
+> **线路之间互不影响**：某条线路的登录失败、额度耗尽或上游故障都不会波及其它线路；它们共用同一套号池内核与账号卡片，但不是同一个池。
+>
+> ⚠️ **合规提示**：`claude-subscription` 使用的订阅凭据转发方式与 Anthropic 现行条款存在冲突（详见该章节开头的「风险须知」），且插件未获官方授权；`antigravity` 线路的用户亦有账号被限制的公开报告。请自行评估风险。
 ## 功能特性
 
 **登录与会话**
@@ -35,6 +53,10 @@
 **模型接入**
 
 - 固定 Codex Responses 地址，支持流式文本、reasoning summary、图片输入与工具调用/结果；
+- **模型目录来自订阅后端**（`GET /backend-api/codex/models`），按账号缓存并持久化到本地快照，重启后无需等待网络即可渲染选择器。随包发布的模型表是**兜底**而非上限：取不到目录时选择器变宽而不是消失；目录里本表没听过的模型照常出现，但未声明的能力按保守值回落，不会凭空多出图片或思考档位。只有目录里**确实列出**的模型会进入选择器——该目录是「这个账号能调什么」的权威；
+- **请求带 `openai-beta: responses=experimental`**：该订阅后端在 beta 标志下提供，官方 Codex CLI 一直发送这个头，缺它时请求面不同（当前后端宽容，但收紧后就是 400/403）；
+- **多轮续传**：每个会话发送稳定的 `prompt_cache_key` 让后端复用提示前缀，并回传后端在响应头给出的 `x-codex-turn-state` 让它续接该轮而非每轮重发整个历史。后端不再下发该头时插件立即停止回送（不重放过期值）；
+- **始终发送 `max_output_tokens`**，并按 `min(调用方请求, 模型上限)` 封顶（详见下方「模型目录」）；
 - Antigravity（Gemini / Claude）线路同样接受图片输入：DSH 以 `{ type: 'image', attachment }` 下发的粘贴图片会经附件服务读出字节并按 Gemini `inlineData` 发出，读不出的图片降级为一条可见的说明文本而不是被静默丢弃。单次请求的图片 base64 负载超过 12 MiB 时，最旧的图片按上游同款占位文案替换为文本，避免整条请求被体积上限拒绝；
 - 原样转发 DSH 暴露的工具 schema；命令工具兼容 `pwsh` / `powershell`、`bash`、`sh` 与 `shell`，并按 PowerShell、Bash 或 POSIX sh 注入对应说明；
 - 429/5xx 由 DSH retry policy 接管；401 只强制刷新并重试一次，支持 `AbortSignal`；
@@ -126,13 +148,14 @@
 - 子代理的模型与思考深度沿用 DSH 自身设置：**设置 → Subagent** 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 `agent-default-model` 设置提供；
 - 最大嵌套深度不在本插件设置内，由 DSH 侧决定：0.1.5 及以前是 preset 中 `tool-subagent` 行的 `maxDepth`（默认 3），0.1.6 起改由 `subagent` 服务的设置项提供（默认 1）；`provider-managed` 表示把预算交给进程外提供方；
 - GPT-6 系列（6 Astra / 6 Sol / 6 Luna）默认使用 384K 有效上下文，可配置最高 872K；5.6 Sol / Terra / Luna 保持 272K，最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
-- 单次输出上限按模型区分：GPT-6 系列为 128K（官方对 6 Astra / 6 Sol / 6 Luna 均标 128K），更早的模型保持 32768；调用方未显式指定时生效，Responses 报文本身不发送输出长度参数。
+- 单次输出上限按模型区分：GPT-6 系列为 128K（官方对 6 Astra / 6 Sol / 6 Luna 均标 128K），更早的模型保持 32768。调用方未显式指定时按模型上限发送；显式指定时按 `min(请求值, 模型上限)` 封顶——超出模型能力的请求会被上游直接拒绝，因此必须向下封而不是原样透传。**`max_output_tokens` 始终出现在请求中**：不发送时由上游套用自己的默认值，本插件既无法预测也无法上报，某一轮撞上上限会看起来像一次普通的短回答。
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 
 ## 模型目录
 
 | 显示名 | 模型 slug |
 | --- | --- |
+| 6.1 Sol | `gpt-6.1-sol` |
 | 6 Astra | `gpt-6-astra` |
 | 6 Sol | `gpt-6-sol` |
 | 6 Luna | `gpt-6-luna` |
@@ -146,7 +169,7 @@
 
 > 目录只用于展示；账号实际可用的模型由 ChatGPT 套餐、workspace 策略与上游兼容状态决定。
 
-GPT-6 系列（6 Astra / 6 Sol / 6 Luna）支持文本、图片输入和工具调用，默认思考档位为 `medium`，可选 `low`、`medium`、`high`、`xhigh`、`max`。从旧会话带入的 `none` / `minimal` 会按 [OpenAI 官方迁移说明](https://developers.openai.com/api/docs/guides/latest-model) 转为 `low`。三个模型的默认 384K 与上限 872K 均取自 2026-09-23 的 Codex 模型目录（`gpt-6-sol` / `gpt-6-luna` 于 2026-09-22 发布，能力与 `gpt-6-astra` 一致；目录里的 `context_window` 是 272K，本插件把默认有效上下文提高到 384K，仍低于 872K 上限）；[Codex Ultra](https://learn.chatgpt.com/zh-Hans/docs/models) 涉及客户端的子代理编排，本插件不将它作为 Responses 思考参数暴露。
+GPT-6 系列（6.1 Sol / 6 Astra / 6 Sol / 6 Luna）支持文本、图片输入和工具调用，默认思考档位为 `medium`，可选 `low`、`medium`、`high`、`xhigh`、`max`。从旧会话带入的 `none` / `minimal` 会按 [OpenAI 官方迁移说明](https://developers.openai.com/api/docs/guides/latest-model) 转为 `low`。三个模型的默认 384K 与上限 872K 均取自 2026-09-23 的 Codex 模型目录（`gpt-6-sol` / `gpt-6-luna` 于 2026-09-22 发布，能力与 `gpt-6-astra` 一致；目录里的 `context_window` 是 272K，本插件把默认有效上下文提高到 384K，仍低于 872K 上限）；[Codex Ultra](https://learn.chatgpt.com/zh-Hans/docs/models) 涉及客户端的子代理编排，本插件不将它作为 Responses 思考参数暴露。
 
 新配置默认显示 GPT-6 系列与 GPT-5.6 系列；已有配置保留原来的模型勾选，可在 **设置 → Codex 订阅 → 可用模型** 中勾选 **6 Sol** / **6 Luna**。
 
@@ -155,7 +178,10 @@ GPT-6 系列（6 Astra / 6 Sol / 6 Luna）支持文本、图片输入和工具�
 - Windows 或 Linux；
   - Windows：系统需提供 Windows PowerShell，以使用 CurrentUser DPAPI；
   - Linux：Host 用户必须拥有可写的 `~/.dsh`（或 `$DSH_HOME`），凭据文件会强制使用 `0600`、目录使用 `0700`；
-- 已安装 DSH：peer 范围覆盖 0.1.2-alpha.5 及以后的 0.1.x（含 0.1.5-rc.2、0.1.6-alpha 与 0.1.7-alpha.1）。构建与测试以 **0.1.7-alpha.1**（npm 上 `@deepseek-ai/dsh` 的 `alpha`）为基线，旧版行为由版本兼容层保留：0.1.7 重写了会话消息模型（工具结果由 `tool-result` 内容块改为 `role: "tool"` 消息）、删除了 `settings.register`（偏好改由插件自有存储落盘）、并让 agent preset 不再从 `~/.dsh/.agent-presets` 读取，插件在请求边界、设置服务与 preset 注册三处同时适配，因此同一份代码可装在 0.1.2-alpha.5 以来的各代上。0.1.1-rc.2 不再声明支持——它既没有 preset 用到的 `present` 工具，`mode` 枚举那时也还写作 `code`；0.1.6 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见下）；
+- 已安装 DSH：peer 范围覆盖 **0.1.2-alpha.5 及以后的每一代**，一直到 0.2.0-rc.2。构建与测试以 **0.2.0-rc.2** 为基线，旧版行为由版本兼容层保留，因此**同一份代码**可装在 0.1.2-alpha.5 以来的所有代上（用户分散在 npm 的 `latest` / `next` / `alpha` 三个标签上，多数人跑的是比 `alpha` 落后几个版本的 `latest`）。需要桥接的破坏性变更：
+  - **0.1.7** 重写了会话消息模型（工具结果由 `tool-result` 内容块改为 `role: "tool"` 消息）、删除了 `settings.register`（偏好改由插件自有存储落盘）、并让 agent preset 不再从 `~/.dsh/.agent-presets` 读取。插件在请求边界、设置服务与 preset 注册三处同时适配。
+  - **0.1.6** 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见「随包分发的 Agent Preset」）。
+  - 0.1.1-rc.2 不再声明支持——它既没有 preset 用到的 `present` 工具，`mode` 枚举那时也还写作 `code`。
 - Node.js 与 npm。
 
 ## 安装
@@ -173,11 +199,11 @@ dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 npx @deepseek-ai/dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 ```
 
-**版本阶段**：`latest` 现在是 **0.8.2**，上面两条命令装到的就是它。（此前 0.8.0-alpha.0 至 0.8.2 都只发在 `alpha` 标签下，`latest` 一直停在 0.7.0，于是升级时版本会从 0.8 退回 0.7。）预发布版仍只进 `alpha`，需要显式带上标签或版本号：
+**版本阶段**：上面两条命令装到的是 npm `latest` 标签指向的版本（撰写时为 **0.10.12**）。包不预置 `publishConfig.tag`，因此稳定版一发布就落在 `latest`——也就是 `npm install` 与 `dsh plugin add` 解析到的那个标签；预发布版只进 `alpha`，需要显式带上标签或版本号：
 
 ```sh
 dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription@alpha
-npm install @eddyskywalker/dsh-chatgpt-subscription@0.8.0-alpha.0
+npm install @eddyskywalker/dsh-chatgpt-subscription@alpha
 ```
 
 ### 方式 2：在 DSH 界面里安装
@@ -614,6 +640,8 @@ npm run build
 npm pack --dry-run
 ```
 
+> `npm run typecheck` 里的 `tsc -b` **不带** `--force` 时会重放 `lib/*.tsbuildinfo`，在一份陈旧构建上只要几秒就返回——**看起来绿了，却从未真正编译过**。改 harness 版本或新增类型相关的代码后，请以 `npx tsc -b --force` 为准，并把 `tsc -p test/tsconfig.json` 单独跑一遍（测试树不在 `-b` 的范围内）。
+
 `vitest.config.ts` 把 `testTimeout` 设为 60s、`maxWorkers` 限到 4 是有原因的，改回去会让套件重新变得不稳定：多条目测真的会 spawn `powershell.exe` 跑 Windows DPAPI 凭据存储，隔离测量最慢的一条要 12–14s。超时余量不够时不只是那一条失败——**超时后仍在飞的请求会落进下一个用例的 fetch mock**，把邻居也判失败（表现为 `expected to be called 4 times, but got 8 times`）。限并发不增加耗时：这些用例受子进程延迟约束，4 个 worker 约 51s，15 个约 54s。
 
 测试使用 mock OAuth、Responses SSE 和 Wham usage，不需要真实 ChatGPT 凭据。真实账号的端到端登录与生成应在独立 DSH profile 中人工验收，避免影响日常 profile。
@@ -623,6 +651,9 @@ npm pack --dry-run
 | 现象 | 处理 |
 | --- | --- |
 | 1455 端口占用 | 结束旧登录任务或占用该端口的进程后重试；插件卸载会关闭 listener |
+| 模型选择器里没有新发布的模型 | 该模型必须出现在 `/backend-api/codex/models` 返回的列表里（该列表是「这个账号能调什么」的权威）。若后端已发布而选择器没有，点设置页的**强制刷新目录**；仍不出现则说明当前套餐/workspace 无权调用 |
+| 回答在中途被截断 | 可能是撞到输出上限。插件始终发送 `max_output_tokens`（按模型上限或调用方请求的较小值），被截断会以 `max-tokens` 结束原因呈现；可用**增强功能**里的上下文覆盖或换模型调整 |
+| 断网后首次打开设置页很慢 | 目录有本地快照兜底，重启后第一次渲染不需要网络；若仍慢说明快照不可写（home 只读），此时不影响功能 |
 | 登录后仍是 401 | 刷新 token；若刷新 token 已失效，注销并重新登录，不会循环请求 |
 | 额度显示旧数据 | 设置页会保留最后成功值；等待 15 秒节流窗口后手动刷新 |
 | 429 | 插件遵守 `Retry-After`，不会高频轮询；模型请求由 DSH retry policy 有界重试 |
