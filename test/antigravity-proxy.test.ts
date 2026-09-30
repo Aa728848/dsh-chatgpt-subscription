@@ -8,6 +8,9 @@ import { apply } from '../src/index.ts'
 import * as platformStore from '../src/host/platform-token-store.ts'
 import { ProxyManager } from '../src/host/proxy-manager.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
+import { WindowsDpapiCredentialStore } from '../src/host/token-store-windows.ts'
+import { MacKeychainCredentialStore } from '../src/host/token-store-macos.ts'
+import { SecretServiceCredentialStore } from '../src/host/credential-store-secret-service.ts'
 import { getWebLoginStatus } from '../src/host/antigravity/oauth.ts'
 import { FileCredentialStore, FileModelSettingsStore, type AntigravityCredentials } from '../src/host/antigravity/token-store.ts'
 import { DAILY_ENDPOINT, DEFAULT_ENDPOINT, TOKEN_URL } from '../src/host/antigravity/types.ts'
@@ -39,7 +42,45 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
+/**
+ * Replace every OS credential store with one in-memory map.
+ *
+ * This file tests proxy routing, not credential storage, but mounting the whole
+ * plugin reaches the encrypted store each account pool builds for itself:
+ * DPAPI on Windows, Secret Service (`secret-tool`) on Linux. A CI runner has no
+ * Secret Service, and since the pool made token persistence strict, a refresh
+ * whose rotated pair cannot be saved fails by design - so the first test passed
+ * on Windows and failed on Linux for a reason unrelated to proxies. Keyed the
+ * way the real stores address a secret, and parsed on load like them, so the
+ * pool's write-then-verify round trip behaves as it does in production.
+ */
+function useMemoryPlatformStores(): void {
+  interface Addressed { path?: string; service?: string; account?: string; parse: (value: unknown) => unknown }
+  const saved = new Map<string, string>()
+  const keyOf = (store: unknown): string => {
+    const { path, service, account } = store as Addressed
+    return JSON.stringify([path, service, account])
+  }
+  for (const prototype of [
+    WindowsDpapiCredentialStore.prototype,
+    MacKeychainCredentialStore.prototype,
+    SecretServiceCredentialStore.prototype,
+  ] as Array<{ load(): Promise<unknown>; save(value: unknown): Promise<void>; clear(): Promise<void> }>) {
+    vi.spyOn(prototype, 'load').mockImplementation(async function (this: unknown) {
+      const raw = saved.get(keyOf(this))
+      return raw === undefined ? null : (this as Addressed).parse(JSON.parse(raw))
+    })
+    vi.spyOn(prototype, 'save').mockImplementation(async function (this: unknown, value: unknown) {
+      saved.set(keyOf(this), JSON.stringify(value))
+    })
+    vi.spyOn(prototype, 'clear').mockImplementation(async function (this: unknown) {
+      saved.delete(keyOf(this))
+    })
+  }
+}
+
 async function mountPlugin() {
+  useMemoryPlatformStores()
   let credentials: AntigravityCredentials = { access: 'expired-access', refresh: 'test-refresh', expires: 1 }
   vi.spyOn(FileCredentialStore.prototype, 'read').mockImplementation(async () => credentials)
   vi.spyOn(FileCredentialStore.prototype, 'write').mockImplementation(async (value) => { credentials = value })
