@@ -10,9 +10,15 @@
  * The generic halves of this problem already exist beside it in
  * \`../kimi-code/mapper.ts\` and are imported rather than reimplemented: durable
  * image resolution, the image budget that drops the oldest attachments first,
- * JSON-Schema cleanup for tool parameters, and the serialized-body guard. None of
- * those is provider-specific, and having one implementation is what keeps the two
- * lines from drifting.
+ * JSON-Schema cleanup for tool parameters. None of those is provider-specific,
+ * and having one implementation is what keeps the two lines from drifting.
+ *
+ * The serialized-body guard is deliberately NOT in that shared list. It looks
+ * generic and is not: the byte ceiling it enforces is a property of the upstream
+ * gateway, so Kimi's 2 MB figure was Kimi's and had no standing here. It was
+ * imported anyway, and the cost was a local refusal on conversations this route
+ * would have served. The shape of the check is shared; the number is per-route,
+ * and \`maxMessageBodyBytes\` in ./types.ts is where the number lives.
  *
  * The provider-specific halves are written here:
  *
@@ -73,7 +79,6 @@ import {
 } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
-  MAX_MESSAGE_BODY_BYTES,
   estimatedInputTokens,
   offloadOldestRequestImages,
   resolveRequestImages,
@@ -91,11 +96,23 @@ import {
   ANTHROPIC_VERSION,
   CONTEXT_HEADROOM_TOKENS,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_MESSAGE_BODY_BYTES,
+  DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   DEFAULT_MAX_TOKENS,
   PROVIDER_NAME,
+  maxMessageBodyBytes,
+  maxRequestImageBytes,
 } from './types.ts'
 
-export { MAX_MESSAGE_BODY_BYTES, estimatedInputTokens, offloadOldestRequestImages, resolveRequestImages }
+export {
+  DEFAULT_MAX_MESSAGE_BODY_BYTES,
+  DEFAULT_MAX_REQUEST_IMAGE_BYTES,
+  estimatedInputTokens,
+  maxMessageBodyBytes,
+  maxRequestImageBytes,
+  offloadOldestRequestImages,
+  resolveRequestImages,
+}
 export type { AttachmentImageReader, ResolvedRequestImages }
 
 /** Anthropic content blocks are plain JSON objects on the wire. */
@@ -617,18 +634,29 @@ export function buildMinimaxRequest(
 }
 
 /**
- * Reject a request the service would refuse, before sending it.
+ * Reject a request past this route's byte ceiling, before spending the connection.
+ *
+ * The ceiling is this route's own (`maxMessageBodyBytes`), NOT Kimi Code's 2 MB
+ * figure: that number belongs to Kimi's gateway, was imported here on the
+ * "same family of endpoints" assumption, and refused locally conversations
+ * MiniMax would have served. See `types.ts` for the full derivation. The
+ * consequence that matters: this guard must never be the reason an ordinary
+ * turn fails, so it sits far above any real conversation and fires only on a
+ * runaway one.
  *
  * @returns the serialized body, so the caller about to send it does not serialize
  * a multi-megabyte string a second time.
  */
-export function assertRequestBodyFits(body: Record<string, unknown>): string {
+export function assertRequestBodyFits(
+  body: Record<string, unknown>,
+  limit: number = maxMessageBodyBytes(),
+): string {
   const serialized = JSON.stringify(body)
   const bytes = Buffer.byteLength(serialized, 'utf8')
-  if (bytes <= MAX_MESSAGE_BODY_BYTES) return serialized
+  if (bytes <= limit) return serialized
   throw new LlmError(
     PROVIDER_NAME + ' request was not sent: the serialized body is ' + bytes + ' bytes, above the '
-    + MAX_MESSAGE_BODY_BYTES + '-byte ceiling this route enforces. Compact the conversation or start a new '
+    + limit + '-byte ceiling this route enforces. Compact the conversation or start a new '
     + 'session, and check for large tool results or attached media.',
     'PROVIDER_ERROR',
   )

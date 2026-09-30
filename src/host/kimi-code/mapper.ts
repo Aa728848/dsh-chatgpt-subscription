@@ -301,13 +301,25 @@ function collectRequestImageBytes(content: unknown, lengths: number[]): void {
 
 /**
  * Replace the oldest inline images with a text placeholder once one request
- * would carry more than {@link MAX_REQUEST_IMAGE_BYTES} of base64 image data.
+ * would carry more than `maxBytes` of base64 image data.
+ *
+ * The MECHANISM is shared because it is generic: measure the retained
+ * occurrences' encoded length, drop oldest-first, leave durable history alone.
+ * The BUDGET is not, and it is a parameter for exactly that reason — an
+ * image budget is a property of the upstream gateway, and importing one route's
+ * number into another refuses that other route's own legal images. The default
+ * is Kimi's, so every existing call site is byte-for-byte unchanged; a route
+ * with a different ceiling passes its own.
+ *
  * Durable history is untouched; only the request about to be sent changes.
  */
-export function offloadOldestRequestImages(options: GenerateOptions): GenerateOptions {
+export function offloadOldestRequestImages(
+  options: GenerateOptions,
+  maxBytes: number = MAX_REQUEST_IMAGE_BYTES,
+): GenerateOptions {
   const lengths: number[] = []
   for (const message of options.messages) collectRequestImageBytes(message.content, lengths)
-  const excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - MAX_REQUEST_IMAGE_BYTES
+  const excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - maxBytes
   if (excess <= 0) return options
 
   let omitted = 0

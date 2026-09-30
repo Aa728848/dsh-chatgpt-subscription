@@ -65,6 +65,7 @@ import {
   createStreamState,
   estimatedInputTokens,
   maxOutputTokensFor,
+  maxRequestImageBytes,
   offloadOldestRequestImages,
   processMinimaxStreamLine,
   resolveRequestImages,
@@ -466,7 +467,16 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // image input; the bytes are resolved once here and reused for the one request
     // below. The oldest images are dropped first when the request would exceed the
     // route's own image budget.
-    const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options)) as NormalizedGenerateOptions
+    //
+    // The budget is passed in rather than inherited. The mechanism is Kimi's
+    // (measure, drop oldest-first, leave durable history alone) and that is
+    // shared on purpose, but Kimi's 1.5 MB NUMBER is sized for Kimi's 2 MB
+    // request limit; over here it replaced a single ordinary 10 MB MiniMax image
+    // with a placeholder and said nothing. See maxRequestImageBytes in ./types.ts.
+    const requestOptions = offloadOldestRequestImages(
+      normalizeGenerateOptions(options),
+      maxRequestImageBytes(),
+    ) as NormalizedGenerateOptions
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
 
     // The cap tracks the window so a long reasoning turn is not cut off by a fixed

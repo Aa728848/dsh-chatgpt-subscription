@@ -1190,6 +1190,8 @@ export {
   clampOutputToContext as clampMinimaxCodeOutputToContext,
   closeMinimaxStream,
   createStreamState as createMinimaxCodeStreamState,
+  DEFAULT_MAX_MESSAGE_BODY_BYTES as MINIMAX_CODE_MAX_MESSAGE_BODY_BYTES,
+  maxMessageBodyBytes as minimaxCodeMaxMessageBodyBytes,
   maxOutputTokensFor as minimaxCodeMaxOutputTokens,
   processMinimaxStreamLine,
   thinkingFieldFor as minimaxCodeThinkingField,

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **修复 MiniMax Code 线路会话在约 2 MB 处被本地拒绝、请求从未发出**（用户报告：`request was not sent: the serialized body is 2098045 bytes, above the 2097152-byte ceiling this route enforces`）。
+  - **根因**：`minimax-code/mapper.ts` 的 `assertRequestBodyFits` 直接复用了 Kimi 线路的 `MAX_MESSAGE_BODY_BYTES`（**2,097,152**），代码注释与 README 都写着理由是「两条线路上游都是同一族端点」。**这个数字是 Kimi Code 自己的网关上限**——其错误参考里逐字写着 `total message size N exceeds limit 2097152`。MiniMax 的任何文档都没有这条规定，而 MiniMax 自己的 Anthropic 兼容文档给出的请求体量级是**几十 MB**，不是 2 MB。
+  - **为什么这个理由不成立**：字节上限是**上游网关的属性**，不是「Anthropic 协议家族」的通用常量。同一条插件里 Kimi 线路给带视频的请求放宽到 64 MB、纯文本/图片仍是 2 MB，本身就说明这个数字是按路由而定的。更直接的反证来自本线路自己的模型目录：M3 是 **512K 上下文（可选 1M）**、**单张图片 10 MB**——**2 MB 的整包上限与「单图 10 MB」不能共存，一张合法图片就能单独触发它**。
+  - **代价**：这不是「提示了一句」而是**这一轮直接失败**。用户那次会话在 2,098,045 字节处被拦下（离上限只差 893 字节），请求根本没发出去；且会话越长越必然触发，用户唯一的出路是压缩或重开。README 里「与 Kimi 线路同一个守卫与上限」的说明还会让人以为这是服务端的既定事实。
+  - **修法**：上限改为**本线路自己的** `DEFAULT_MAX_MESSAGE_BODY_BYTES`（64 MB，取 MiniMax 对带媒体请求公布的请求体量级），并支持 `DSH_MINIMAX_CODE_MAX_BODY_BYTES` 覆盖（确有实测上限的部署可用；**取值非正整数时回落到默认值而不是静默关闭守卫**）。守卫的**形状**仍与 Kimi 共用，**数字不再共用**——`maxMessageBodyBytes` 现在住在 `minimax-code/types.ts`。
+  - **边界没有被削弱**：守卫仍在花掉连接之前拦下真正的失控请求（如每轮追加数 MB 工具结果的死循环），并给出同样可操作的提示（压缩/开新会话、检查大工具结果与图片），错误码仍是 `PROVIDER_ERROR`。普通会话**永远不会再被本地拒绝**。
+  - **测试**：`test/minimax-code-mapper.test.ts` 新增 7 条——「超过 Kimi 上限的真实请求体现在不被拒绝」（用 `buildMinimaxRequest` 造出 >2 MB 的**真实请求体**，锁住报告中的场景）、「上限远高于任何真实会话」、「失控请求仍被拦下且错误码不变」、「按部署指定的上限度量」，以及 `maxMessageBodyBytes` 的默认值/覆盖/非法值回落三条。已验证这些用例是**承重**的：把守卫换回借用 Kimi 上限的版本后，第一条立即失败。
+  - **验证**：`npm run typecheck`、`npm run build`、`npm pack --dry-run` 通过；`test/minimax-code-mapper.test.ts` 26 条全通过。
+
+  - **同一根因在图片预算上第二次发作，且更隐蔽（顺带修复）**：`minimax-code` 调用的 `offloadOldestRequestImages` 来自 Kimi，其预算是 Kimi 的 **1,500,000**——为塞进 Kimi 自己的 2 MB 请求体上限而定。MiniMax 模型表允许**单图 10 MB 原始字节**（base64 约 13.3 MB），超出近 9 倍，**一张普通截图就被换成占位文本**；
+    - **比请求体那一条更糟**：omit 是**静默替换**——不报错、不计数、不留痕。模型是在一个「图根本不存在」的对话上作答的，用户和排查者都看不出发生了什么；请求体超限至少还会失败并说明原因；
+    - **修法**：预算是**本线路自己的** `DEFAULT_MAX_REQUEST_IMAGE_BYTES`（16 MB：装得下模型 10 MB 单图上限并留余量，且远在 64 MB 请求体上限之内），可用 `DSH_MINIMAX_CODE_MAX_IMAGE_BYTES` 覆盖。共享的是**机制**（度量、按最旧优先丢弃、不动持久历史），不是**数字**；
+    - **对其他线路零影响**：`offloadOldestRequestImages(options, maxBytes?)` 的第二参数缺省即 Kimi 原值，因此 claude / antigravity / command-code / workbuddy / kimi 五条线路的请求体**逐字节不变**（映射层 239 条用例全绿）；
+
+  - **横向审计结论（七条线路逐一核对）**：字节与图片预算是**上游网关的属性**，跨线路继承只有一个正确理由——「两条线真的经过同一个网关」。据此复核后，**只有 minimax 这一处是错误继承**（它与 Kimi 是两家不同厂商、不同网关）：`claude`（8 MB，按 Anthropic 自己的 32 MB 包络与 5 MB 原始/图推得）、`kimi`（1.5 MB、视频 48 MiB，按其自身文档）、`antigravity`（12 MB，按 Google 20 MB inline 上限）三个数字**各自有独立出处**；`command-code` / `workbuddy` 的 12 MB 理由是「本线路是多上游代理，取最严格者并对齐本插件 Gemini 线路」——**这是代理路由的合理保守取值，不是错误继承**，但注释里「与其他线路一致」的措辞同样把「一致」放在「推导」之前，建议后续按各自上游重述（本次未改动，行为无误）。
+  - **未在真实订阅账号上端到端验证**：64 MB 是从 MiniMax 公开文档与本线路模型目录推得的**保守上界**，不是对该订阅网关的实测拒收点。真正的会话上限仍应按上下文窗口（而非字节）判断——本线路已有的 `clampOutputToContext` 就是按 token 做的。
 - **Claude 与 Kimi 线路补上提示缓存时长(TTL)选择**，两者都可在设置页选择，默认行为各自对齐官方。
   - **Claude（`claude-subscription`）**：本线路用订阅凭据，而 [Claude Code 官方文档](https://code.claude.com/docs/en/prompt-caching) 写明「订阅用户在套餐额度内，主对话使用 **1 小时** TTL；超出额度改按用量计费后降回 5 分钟」。此前本插件四�� `cache_control` 全部是裸的 `{ type: 'ephemeral' }`（即默认 5 分钟），**与官方客户端行为不一致**——同样的用量，官方用户享受 4 倍缓存窗口而本插件没有。现默认按订阅档位发 `ttl: '1h'`，并在**同一处**同步发出授权它的 beta `extended-cache-ttl-2025-04-11`（1 小时是**需要许可的能力**，body 里要了 `1h` 却没有该标记会被拒，与 `block_binding` 同理）。设置页可选「跟随官方 / 1 小时 / 5 分钟」；1 小时写入价格更高，短会话不划算，故保留覆盖项。
   - **Kimi（`kimi-code`）**：[Kimi 官方缓存文档](https://www.kimi.com/academy/best-practices-for-context-caching) 明确了 `prompt_cache_options`（OpenAI 兼容线路）与**顶层** `cache_control`（Anthropic 兼容线路）两套写法，且命中价为未命中的 1/10。此前本插件两种都不发——注意这与本插件**自己实测**的结论并不矛盾：那份实测针对的是「缓存身份由内容前缀哈希决定、标记无法干预」，而 TTL 控制的是**写入时长**，两者是不同的机制。**未设置时不发任何缓存字段**，请求与该设置存在之前逐字节一致。

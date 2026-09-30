@@ -178,6 +178,86 @@ export const MESSAGES_PATH = '/messages'
 export const ANTHROPIC_VERSION = '2023-06-01'
 
 /**
+ * Byte ceiling the guard enforces on one request body.
+ *
+ * WHY THIS IS NOT KIMI'S 2 MB FIGURE
+ *
+ * This line used to import `MAX_MESSAGE_BODY_BYTES` (2,097,152) from the Kimi
+ * Code mapper and enforce it here on the stated grounds that "both lines face
+ * the same family of endpoint". That reasoning does not hold, and the cost was
+ * a hard local refusal on conversations the service would have accepted:
+ *
+ * - 2,097,152 with the message `total message size N exceeds limit 2097152` is
+ *   KIMI CODE's own documented limit, quoted verbatim in its error reference.
+ *   It is Kimi's gateway. No MiniMax document states it, and MiniMax's
+ *   Anthropic-compatible page documents its request ceiling in tens of MB, not
+ *   in 2 MB.
+ * - MiniMax's catalog — the source this line transcribes its own numbers from —
+ *   gives the flagship M3 a 512K context window (1M optional) and M3.1 Flash
+ *   Preview 1M, and the model table bounds a single image at 10 MB. A 2 MB
+ *   total-body ceiling cannot coexist with a 10 MB single-image bound: one
+ *   legitimate image would trip the guard on its own.
+ *
+ * So the old number was not this route's limit. What is enforced here now is
+ * a transport ceiling for a route that declares no documented byte limit, set
+ * at MiniMax's own documented request-body figure for media-carrying requests
+ * (64 MB). Two properties make that safe:
+ *
+ * - it is high enough that no legitimate conversation is refused locally, so
+ *   the guard can no longer be the reason a turn fails; and
+ * - it is still a real bound, so a runaway request (a loop appending a
+ *   multi-megabyte tool result every iteration) is stopped before the
+ *   connection is spent, and is reported with the same actionable remedy.
+ *
+ * `DSH_MINIMAX_CODE_MAX_BODY_BYTES` pins a different ceiling for a deployment
+ * that has measured one (a proxy or gateway in front of the route). It is
+ * parsed as bytes and ignored when it is not a positive finite integer, so a
+ * typo cannot silently disable the guard.
+ */
+export const DEFAULT_MAX_MESSAGE_BODY_BYTES = 64 * 1024 * 1024
+
+/** Ceiling this process enforces, honouring the deployment override. */
+export function maxMessageBodyBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.DSH_MINIMAX_CODE_MAX_BODY_BYTES ?? '').trim()
+  if (raw === '') return DEFAULT_MAX_MESSAGE_BODY_BYTES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_MESSAGE_BODY_BYTES
+  return Math.floor(parsed)
+}
+
+/**
+ * Base64 image payload one request on this route may carry.
+ *
+ * The SECOND borrowed number, and the same mistake as the body ceiling above.
+ * This line called Kimi's `offloadOldestRequestImages`, whose budget is Kimi's
+ * 1,500,000 — a figure sized to sit inside Kimi's own 2 MB text/image request
+ * limit. Over here it silently deleted images MiniMax accepts:
+ *
+ * - MiniMax's model table bounds a single image at 10 MB of RAW bytes, about
+ *   13.3 MB once base64-encoded. Against 1.5 MB that is roughly 9x over, so ONE
+ *   ordinary screenshot was replaced by a text placeholder.
+ * - Nothing said so. The offload is a silent substitution, so the model answered
+ *   from a conversation where the picture simply was not, with no counter and no
+ *   warning pointing at the cause. That is worse than a refusal: a refusal tells
+ *   the user what went wrong.
+ *
+ * Derived from this route's own numbers instead of inherited: it holds the 10 MB
+ * raw per-image ceiling with headroom for a second image, and stays well inside
+ * the 64 MB request ceiling above, so legitimate images survive and only a
+ * runaway multi-image request is trimmed.
+ */
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 16 * 1024 * 1024
+
+/** Image budget this process enforces, honouring the deployment override. */
+export function maxRequestImageBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.DSH_MINIMAX_CODE_MAX_IMAGE_BYTES ?? '').trim()
+  if (raw === '') return DEFAULT_MAX_REQUEST_IMAGE_BYTES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_REQUEST_IMAGE_BYTES
+  return Math.floor(parsed)
+}
+
+/**
  * Product token this plugin reports.
  *
  * MiniMax Code's own telemetry headers are deliberately NOT forged: this is a
