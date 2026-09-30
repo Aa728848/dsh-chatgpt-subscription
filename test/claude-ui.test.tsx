@@ -73,6 +73,8 @@ function status(overrides: Partial<ClaudeWebStatus> = {}): ClaudeWebStatus {
     ],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
+    // Nothing stored: the route falls back to the subscription's one-hour tier.
+    cacheTtl: null,
     selectedAccountId: null,
     accounts: [
       {

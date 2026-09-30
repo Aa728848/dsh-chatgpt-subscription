@@ -90,6 +90,7 @@ function modelSettingsStore() {
     catalogModels: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
+    cacheTtl: null,
   })
   return store
 }
