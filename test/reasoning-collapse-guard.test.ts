@@ -10,6 +10,7 @@ import {
   type GuardAgentLike,
   type GuardChunk,
   type GuardOptions,
+  type GuardStreamListener,
   type GuardStreamOptions,
   type ReasoningCollapseContext,
 } from '../src/host/reasoning-collapse-guard/index.ts'
@@ -53,24 +54,32 @@ interface Harness {
   readonly ctx: ReasoningCollapseContext
   readonly warnings: string[]
   readonly source: () => AsyncIterable<GuardChunk>
+  /** Dispatch one `llm/stream` waterfall the way the harness runtime does. */
+  readonly dispatch: (options: GuardStreamOptions) => AsyncIterable<GuardChunk>
+  /** Number of listeners still registered on each event. */
+  readonly listeners: () => { stream: number; agent: number }
 }
 
 function harness(script: GuardChunk[][], agent?: RecordingAgent): Harness {
   const queue = [...script]
   const warnings: string[] = []
+  const streams = new Set<GuardStreamListener>()
+  const created = new Set<(payload: { agent: unknown }) => void>()
   const ctx: ReasoningCollapseContext = {
-    llm: {
-      stream(_options: GuardStreamOptions, next: () => AsyncIterable<GuardChunk>) {
-        return next()
-      },
+    on(event, listener) {
+      if (event === 'llm/stream') {
+        const typed = listener as GuardStreamListener
+        streams.add(typed)
+        return () => { streams.delete(typed) }
+      }
+      const typed = listener as (payload: { agent: unknown }) => void
+      created.add(typed)
+      // The harness reports the agent before any plugin subscribes, so a
+      // `agent/created` listener registered afterwards still receives it.
+      if (agent !== undefined) typed({ agent })
+      return () => { created.delete(typed) }
     },
     logger: { warn: (message: string) => { warnings.push(message) } },
-  }
-  if (agent !== undefined) {
-    ctx.on = (event, listener) => {
-      if (event === 'agent/created') listener({ agent })
-      return () => undefined
-    }
   }
   // One scripted response per `next` *call*, not per stream: the guard invokes
   // `next()` itself, and a factory that shifted the queue would hand the
@@ -79,10 +88,24 @@ function harness(script: GuardChunk[][], agent?: RecordingAgent): Harness {
     const chunks = queue.shift() ?? []
     return (async function* () { yield* chunks })()
   }
+  // The runtime enters the waterfall itself; a listener either calls `next()`
+  // or short-circuits the chain, exactly like `ctx.waterfall(ctx, 'llm/stream', …)`.
+  const dispatch = (options: GuardStreamOptions): AsyncIterable<GuardChunk> => {
+    const listeners = [...streams]
+    const terminal = (): AsyncIterable<GuardChunk> => source()
+    let next = terminal
+    for (const listener of listeners.reverse()) {
+      const downstream = next
+      next = () => listener(options, downstream)
+    }
+    return next()
+  }
   return {
     ctx,
     warnings,
     source,
+    dispatch,
+    listeners: () => ({ stream: streams.size, agent: created.size }),
   }
 }
 
@@ -108,9 +131,7 @@ async function drain(stream: AsyncIterable<GuardChunk>): Promise<GuardChunk[]> {
  * response per `run`, and `next` replays that same response on any repeat call.
  */
 async function run(test: Harness, options: GuardStreamOptions): Promise<GuardChunk[]> {
-  const guarded = test.ctx.llm!.stream!
-  const response = test.source()
-  return drain(guarded(options, () => response))
+  return drain(test.dispatch(options))
 }
 
 /** Let the queued resume microtask run. */
@@ -223,9 +244,7 @@ describe('detection', () => {
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    const guarded = test.ctx.llm!.stream!
-    const response = test.source()
-    const iterator = guarded({ model: 'm', signal: new AbortController().signal }, () => response)
+    const iterator = test.dispatch({ model: 'm', signal: new AbortController().signal })
 
     await drain(iterator)
     await settle()
@@ -387,15 +406,14 @@ describe('cooldown and disposal', () => {
     expect(agent.cancels).toHaveLength(2)
   })
 
-  it('restores the original stream on disposal', async () => {
+  it('removes both listeners on disposal', async () => {
     const agent = recordingAgent()
     const test = harness([reasoningChunks(COLLAPSED)], agent)
-    const before = test.ctx.llm!.stream
     const dispose = installReasoningCollapseGuard(test.ctx, { now: () => 0 })!
 
-    expect(test.ctx.llm!.stream).not.toBe(before)
+    expect(test.listeners()).toEqual({ stream: 1, agent: 1 })
     dispose()
-    expect(test.ctx.llm!.stream).toBe(before)
+    expect(test.listeners()).toEqual({ stream: 0, agent: 0 })
 
     await run(test, { model: 'm', signal: new AbortController().signal })
     expect(agent.cancels).toHaveLength(0)
@@ -403,12 +421,34 @@ describe('cooldown and disposal', () => {
 })
 
 describe('installation', () => {
-  it('is inert when the host exposes no llm/stream seam', () => {
+  it('is inert when the host exposes no event bus', () => {
     expect(installReasoningCollapseGuard({ logger: { warn: () => undefined } })).toBeUndefined()
   })
 
-  it('leaves a context without an llm service alone', () => {
+  it('leaves a context with neither an event bus nor a logger alone', () => {
     expect(installReasoningCollapseGuard({})).toBeUndefined()
+  })
+
+  it('never rewrites the published stream method on a context that has one', async () => {
+    // `ctx.llm.stream` is a one-argument method on every supported harness
+    // generation. Reassigning it with a two-argument wrapper breaks every
+    // caller that dispatches it, because `next` arrives undefined — the
+    // exact failure this guard is being fixed for. Installing must leave the
+    // published method both same and callable with one argument.
+    const runtime = { stream(_options: GuardStreamOptions): AsyncIterable<GuardChunk> {
+      return (async function* () { yield { type: 'finish' } as GuardChunk })()
+    } }
+    const test = harness([reasoningChunks(COLLAPSED)])
+    // The published service is not part of the guard's declared surface, so
+    // a real Context still carries it at runtime.
+    const ctx = { ...test.ctx, llm: runtime } as unknown as ReasoningCollapseContext
+    const before = runtime.stream
+    installReasoningCollapseGuard(ctx)
+
+    expect(runtime.stream).toBe(before)
+    const chunks: GuardChunk[] = []
+    for await (const chunk of runtime.stream({ model: 'm' })) chunks.push(chunk)
+    expect(chunks).toEqual([{ type: 'finish' }])
   })
 })
 

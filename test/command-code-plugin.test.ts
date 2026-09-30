@@ -51,7 +51,8 @@ interface MountResult {
   routes: Route[]
   adapters: Map<string, LlmAdapter>
   owners: Set<string>
-  listeners: Array<() => void>
+  /** Registered listener count per event name. */
+  listeners: Map<string, number>
   release(code: string): void
 }
 
@@ -59,19 +60,22 @@ function mountPlugin(options: { preOwned?: string[] } = {}): MountResult {
   const routes: Route[] = []
   const adapters = new Map<string, LlmAdapter>()
   const owners = new Set<string>(options.preOwned ?? [])
-  const listeners: Array<() => void> = []
+  const listeners = new Map<string, Set<() => void>>()
   const settings = new Map<string, { get: () => SettingsValue; update: (patch: SettingsValue) => Promise<void> }>()
   const services: Record<string, unknown> = {}
   const ctx = {
     effect: (setup: () => () => void) => { disposers.push(setup()) },
     inject: (_deps: string[], setup: (scope: Context) => void): void => setup(ctx as unknown as Context),
     get: (name: string) => services[name],
-    on: (_event: string, listener: () => void) => {
-      listeners.push(listener)
-      return () => {
-        const index = listeners.indexOf(listener)
-        if (index >= 0) listeners.splice(index, 1)
-      }
+    // Listeners are bucketed by event name because `release` replays a single
+    // event. A waterfall listener needs a dispatch argument a bare replay
+    // cannot supply, so broadcasting every registration to every replay
+    // would hand it a `next` that is undefined.
+    on: (event: string, listener: () => void) => {
+      const bucket = listeners.get(event) ?? new Set<() => void>()
+      listeners.set(event, bucket)
+      bucket.add(listener)
+      return () => { bucket.delete(listener) }
     },
     settings: {
       register(namespace: string, schema: z<SettingsValue>) {
@@ -123,10 +127,10 @@ function mountPlugin(options: { preOwned?: string[] } = {}): MountResult {
     routes,
     adapters,
     owners,
-    listeners,
+    listeners: new Map([...listeners].map(([event, bucket]) => [event, bucket.size])),
     release(code: string) {
       owners.delete(code)
-      for (const listener of [...listeners]) listener()
+      for (const listener of [...(listeners.get('llm/adapters-updated') ?? [])]) listener()
     },
   }
 }

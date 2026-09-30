@@ -18,7 +18,13 @@
  * guard a silent no-op on every generation this plugin supports below that.
  * `llm/stream` is a waterfall whose `(options, next) => AsyncIterable<StreamChunk>`
  * signature is byte-identical from 0.1.2-alpha.5 through 0.2.0-rc.1, and
- * returning early from the wrapper is what actually ends the stream.
+ * returning early from the listener is what actually ends the stream.
+ *
+ * The guard subscribes to that waterfall and never reassigns `ctx.llm.stream`.
+ * The harness publishes `stream` as a one-argument method that enters the
+ * waterfall itself, so a property rewrite carrying a second `next` parameter
+ * breaks every caller dispatching it as a method, and misses the prepared
+ * call that skips the published method entirely.
  *
  * The guard rewrites nothing and appends nothing to the aborted attempt. Its
  * only model-visible input is the single resume message it queues afterwards,
@@ -43,18 +49,30 @@ export interface GuardAgentLike {
   steer?(message: unknown): void
 }
 
+/** The `llm/stream` waterfall listener the guard registers. */
+export type GuardStreamListener = (
+  options: GuardStreamOptions,
+  next: () => AsyncIterable<GuardChunk>,
+) => AsyncIterable<GuardChunk>
+
+/** The `agent/created` listener the guard registers. */
+export type GuardAgentCreatedListener = (payload: { agent: unknown }) => void
+
+/** Either listener {@link ReasoningCollapseContext.on} accepts. */
+export type GuardListener = GuardStreamListener | GuardAgentCreatedListener
+
+/** Listener options accepted by the harness event bus. */
+export interface GuardListenerOptions {
+  /** Receive the event regardless of context filter checks. */
+  readonly global?: boolean
+}
+
 /**
  * The Context surface the guard needs, declared structurally so it loads on
  * every supported harness generation without importing generation-bound types.
  */
 export interface ReasoningCollapseContext {
-  llm?: {
-    stream?: (
-      options: GuardStreamOptions,
-      next: () => AsyncIterable<GuardChunk>,
-    ) => AsyncIterable<GuardChunk>
-  } | undefined
-  on?: (event: 'agent/created', listener: (payload: { agent: unknown }) => void) => unknown
+  on?: (event: 'llm/stream' | 'agent/created', listener: GuardListener, options?: GuardListenerOptions) => unknown
   logger?: { warn(message: string): void } | undefined
 }
 
@@ -210,9 +228,9 @@ function appendWindow(current: string, addition: string, limit: number): string 
 /**
  * Install the reasoning-collapse guard on a Context.
  *
- * The guard is inert unless the host exposes the `llm/stream` seam, so a
- * harness without it keeps the built-in behaviour instead of failing this
- * plugin's load.
+ * The guard is inert unless the host exposes the event bus, so a harness
+ * without it keeps the built-in behaviour instead of failing this plugin's
+ * load.
  *
  * Resuming needs the live Agent for `cancel` and `steer`, and no supported
  * generation hands the agent to `llm/stream`. `agent/created` reports it on
@@ -222,23 +240,24 @@ function appendWindow(current: string, addition: string, limit: number): string 
  *
  * @param ctx - plugin context.
  * @param options - see {@link GuardOptions}; validated fail-loud.
- * @returns a disposer, or undefined when the seam is unavailable.
+ * @returns a disposer removing both listeners, or undefined when the host
+ * exposes no event bus.
  */
 export function installReasoningCollapseGuard(
   ctx: ReasoningCollapseContext,
   options: GuardOptions = {},
 ): (() => void) | undefined {
   const resolved = resolveGuardOptions(options)
-  const runtime = ctx.llm
-  if (runtime === undefined || typeof runtime.stream !== 'function') return undefined
-  const original = runtime.stream
+  if (typeof ctx.on !== 'function') return undefined
   const watched = new Set(resolved.includeModels)
   const breakers = new WeakMap<object, BreakerState>()
   let currentAgent: GuardAgentLike | undefined
 
-  const releaseAgent = typeof ctx.on === 'function'
-    ? ctx.on('agent/created', ({ agent }) => { currentAgent = agent as GuardAgentLike })
-    : undefined
+  const releaseAgent = ctx.on(
+    'agent/created',
+    (payload: { agent: unknown }) => { currentAgent = payload.agent as GuardAgentLike },
+  )
+  const releaseStream = ctx.on('llm/stream', guardStream, { global: true })
 
   function breakerFor(key: object): BreakerState {
     let state = breakers.get(key)
@@ -280,7 +299,7 @@ export function installReasoningCollapseGuard(
     })
   }
 
-  runtime.stream = function reasoningCollapseGuardStream(
+  function guardStream(
     request: GuardStreamOptions,
     next: () => AsyncIterable<GuardChunk>,
   ): AsyncIterable<GuardChunk> {
@@ -323,7 +342,7 @@ export function installReasoningCollapseGuard(
   }
 
   return () => {
-    runtime.stream = original
+    releaseListener(releaseStream)
     releaseListener(releaseAgent)
   }
 }
