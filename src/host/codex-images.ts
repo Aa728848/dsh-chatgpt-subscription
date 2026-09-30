@@ -4,7 +4,6 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { PLUGIN_MESSAGE_SOURCE_KIND } from './common/llm-compat.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
-  CODEX_ENHANCED_ORIGINATOR,
   CODEX_IMAGE_GENERATION_URL,
   CODEX_IMAGE_MODEL,
   CODEX_IMAGE_TOOL_NAME,
@@ -176,7 +175,6 @@ function requestImage(
     method: 'POST',
     headers: {
       ...codexHeaders(credentials),
-      originator: CODEX_ENHANCED_ORIGINATOR,
       accept: 'application/json',
       'content-type': 'application/json',
       'x-codex-image-turn-id': turnId,

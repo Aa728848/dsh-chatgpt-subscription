@@ -10,6 +10,8 @@ export interface ResponsesPayload extends Record<string, unknown> {
   stream: true
   store: false
   service_tier?: string
+  /** Stable per-conversation cache key; lets the backend reuse prompt prefix. */
+  prompt_cache_key?: string
 }
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -75,6 +77,7 @@ export async function buildResponsesPayload(
   outputVerbosity: CodexOutputVerbosity | null = null,
   fastMode: boolean = false,
   reasoningSummary: CodexReasoningSummary | null = null,
+  promptCacheKey?: string,
 ): Promise<ResponsesPayload> {
   const sandboxRetryTools = recentSandboxRetryToolNames(options.messages)
   const resolveLocalRawImages = supportsImageInput(options)
@@ -145,6 +148,7 @@ export async function buildResponsesPayload(
     stream: true,
     store: false,
     include: ['reasoning.encrypted_content'],
+    ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
   }
   const instructions = [
     ...instructionParts,

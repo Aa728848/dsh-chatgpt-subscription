@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Codex 订阅线路跟上上游的第三方接入方式**（OpenAI Codex 负责人 Romain Huet：「我们希望人们能在任何地方使用 Codex 和他们的 ChatGPT 订阅」——涵盖 OpenCode、Pi、Claude Code；Codex CLI / app server 已开源）。本插件的 OAuth 参数此前就与社区逆向结论逐字一致（client_id、scope、redirect_uri、`id_token_add_organizations`、`codex_cli_simplified_flow`），所以基础无需改动；下面四项是实际缺口。
+  - **补上 `openai-beta: responses=experimental`**（`wire-auth.ts`）。该订阅后端是在 beta 标志下提供的，官方 CLI 一直发送这个头；逆向文档把它列为必填。缺少它的请求不是同一个面——现在能跑通只是后端当前宽容，这正是后端某次收紧时会突然 400/403 的那一行。
+  - **把 `originator` 收敛成一个值**（`compat.ts`）。此前散落三个：对话与 OAuth 用 `opencode`，图像（`codex-images.ts`）与搜索（`codex-search.ts`）覆盖成 `pi`——那是各端点逆向时间点的考古层，不是一次决定。后端按这个值区分客户端身份（官方 CLI 发 `codex_cli_rs`），一个账号因此有三种互不相关的失败签名。现统一为 `CODEX_ORIGINATOR`，并让 `OAUTH_ORIGINATOR` 直接引用它，登录与请求不可能再各说各话。两种取值对后端都已知可用；保留 `opencode` 是因为它是 OAuth 流程一直使用的值，改登录 originator 与改请求 originator 是两种不同的风险。
+  - **接入实时模型目录 `GET /backend-api/codex/models`**（新增 `codex-catalog.ts`）。这是本轮最有价值的一项：订阅线路的核心优势正是模型面比 API key 更新，而本插件此前把 `gpt-6-astra` 的 384K 起始窗口、128K 输出上限等**全部硬编码**——新模型发布就得改代码发版。目录加载器按账号缓存（15 分钟 TTL）、单飞，并用既有的 `catalog-snapshot` 持久化，重启后第一次请求直接从磁盘水化、不等网络；快照按账号 id 分域，避免 A 账号的列表回答 B 账号的选择器。**随仓库里其他线路（kimi / command / minimax / workbuddy）已有的动态目录范式实现**，也是这些线路里最后一个还在静态的。
+    - **失败时宁可放宽也不清空**：目录取不到就回落到随包发布的表（选择器因此变宽，而不是消失）；只持久化成功取到的列表，失败不会用回落表覆盖已有快照。
+    - **未知模型照常服务**：列表是「这个账号能调什么」的权威，所以本表没听过的 id 也会出现，但**不会**继承臆造的能力——未声明的模态回落为纯文本，未声明的档位回落为该族的 profile。
+    - **档位经过共享词表过滤**：列表给出的档位若超出本线路能表达的词汇，会被剔除，且默认档位取自存活下来的那些，而不是被剔除的那个。
+  - **多轮续传：发送 `prompt_cache_key` 并回传 `x-codex-turn-state`**（`responses-mapper.ts`、`responses-client.ts`）。此前每一轮都全量重发整个历史。缓存键按会话稳定（会话 id 本身已是哈希，直接复用），让后端复用提示前缀；turn state 在响应头读取、按会话保存、下一轮原样回送，让后端续接该轮而非重新摄入历史。两者都只是优化：turn state 是后端不再下发时**立即停止回送**（不猜测重放过期值），缓存键缺失也只是少一次缓存。存储有 200 个会话的上限并淘汰最旧项——宿主进程长期存活而没有任何「会话结束」信号，无界增长是真实的。
+  - **测试**：`test/codex-wire.test.ts`（11 条，beta 头 / 单一定 originator / 登录与请求同源 / turn state 的有无 / 列表解析的各种形态与保守回落）、`test/codex-catalog-adapter.test.ts`（6 条，实时目录生效、未知模型、档位过滤、失败不破选择器、signal 透传）、`test/responses-client.test.ts` 新增 2 条（缓存键跨轮稳定且 turn state 首轮不发次轮回送；后端停发后不再回送）。
+  - **验证**：强制类型检查（`tsc -b --force`）与 test tsconfig 均 0 错误，`npm run build` 通过，全量 **1831 passed** / 7 skipped；失败的 6 条（`claude-model-catalog` 5、`antigravity-callback-port` 1）在**本轮改动前的干净工作树上同样失败**（`git stash` 验证），与本次无关。
 - **修复所有订阅线路共享号池的读-改-写竞争**：原来只分别串行化读和写，令牌刷新或设置更新会把整份旧快照写回，覆盖其他请求的新令牌、账号与冷却状态——共享内核 `account-pool.ts` 的注释曾声称不会发生。现在账号增删、备注、主账号、轮换策略、冷却和认证标记都在同一锁内读取最新文档并修改；指向同一文件的多个号池实例共享锁与身份版本号。
   - **刷新不占用整池锁**：模型请求、工具凭据、设置卡片与 Codex 强制续期共用按账号/凭据代际的单飞。读取当前凭据与登记刷新任务是一个短事务，网络请求在锁外发出，锁内不等待任何 flight（否则它自己的提交会死锁）。
   - **条件写与过期保护**：轮换结果和外部权威凭据都按“发起时的凭据”写回，不匹配就返回最新行而不覆盖——晚到的刷新不会盖掉重新登录的新令牌，也不会复活已删除的账号；旧刷新抛出的终态失败也不会把刚登录的账号标记失效。刷新期间账号被删除时，模型请求会切到其他可用账号。

@@ -204,4 +204,12 @@ next upgrade starts by reading the newest file in `references/`.
   additive `ask_user_question` timed mode and question row/record types,
   `ui-model-selection` fuzzy search and provider ordering, and internal performance
   memoizations; the identical-outcome 0.2.0-rc.1 clean room is the evidence.
+  `references/codex-wire-surface.md` is not a harness round but belongs in this
+  list because it rewrites a compatibility seam: the Codex subscription line now
+  sends the `openai-beta` gate the backend requires, presents ONE `originator`
+  (three divergent values were in use), reads the live `/backend-api/codex/models`
+  listing instead of a hardcoded table, and replays `prompt_cache_key` /
+  `x-codex-turn-state` for multi-turn continuation. It records which wire values
+  are reverse-engineered, so the next round does not "fix" the ones that are
+  already correct.
 - Harness checkout used for every claim above: `C:\Users\A\Documents\deepseek-harness`.

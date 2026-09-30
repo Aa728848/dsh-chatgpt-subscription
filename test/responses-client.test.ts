@@ -273,6 +273,104 @@ describe('Responses streaming', () => {
   })
 })
 
+describe('Responses conversation continuity', () => {
+  it('sends a stable prompt cache key and replays turn state on the next turn', async () => {
+    // Both are the backend's own continuation mechanisms: the cache key lets it
+    // reuse the prompt prefix, and the turn state lets it resume the turn
+    // instead of re-ingesting the whole history. Neither is a correctness
+    // input, so a backend that stops sending turn state must simply stop the
+    // replay rather than have a stale value sent.
+    const store = new MemoryTokenStore()
+    await store.save({
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const oauth = new OAuthService(store)
+    const seen: Array<{ body: Record<string, unknown>; turnState: string | null }> = []
+
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      seen.push({
+        body: JSON.parse(String(init?.body)),
+        turnState: headers.get('x-codex-turn-state'),
+      })
+      return new Response(
+        'data: ' + JSON.stringify({ type: 'response.completed', response: {} }) + '\n\n',
+        { headers: { 'content-type': 'text/event-stream', 'x-codex-turn-state': 'turn-abc' } },
+      )
+    })
+
+    const client = new ResponsesClient(
+      oauth,
+      { readImage: async () => { throw new Error('unused') } },
+      { fetchFn: fetchFn as unknown as typeof fetch },
+    )
+    const options = {
+      provider: 'codex-chatgpt',
+      model: 'gpt-6-sol',
+      sessionId: 'conversation-1',
+      messages: [{ role: 'user', content: 'hi' }],
+    } as unknown as GenerateOptions
+
+    await collect(client.stream(options))
+    await collect(client.stream(options))
+
+    // The first turn has nothing to replay; the second carries what the first
+    // response handed back.
+    expect(seen[0]!.turnState).toBeNull()
+    expect(seen[1]!.turnState).toBe('turn-abc')
+    // A cache key is present on both turns and identical across them, which is
+    // what makes the prefix reusable.
+    expect(typeof seen[0]!.body.prompt_cache_key).toBe('string')
+    expect(seen[1]!.body.prompt_cache_key).toBe(seen[0]!.body.prompt_cache_key)
+  })
+
+  it('stops replaying turn state once the backend stops sending it', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const oauth = new OAuthService(store)
+    const turnStates: Array<string | null> = []
+    let call = 0
+
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      call += 1
+      turnStates.push(new Headers(init?.headers).get('x-codex-turn-state'))
+      return new Response(
+        'data: ' + JSON.stringify({ type: 'response.completed', response: {} }) + '\n\n',
+        {
+          headers: {
+            'content-type': 'text/event-stream',
+            // Only the first response carries the header.
+            ...(call === 1 ? { 'x-codex-turn-state': 'turn-abc' } : {}),
+          },
+        },
+      )
+    })
+
+    const client = new ResponsesClient(
+      oauth,
+      { readImage: async () => { throw new Error('unused') } },
+      { fetchFn: fetchFn as unknown as typeof fetch },
+    )
+    const options = {
+      provider: 'codex-chatgpt',
+      model: 'gpt-6-sol',
+      sessionId: 'conversation-1',
+      messages: [{ role: 'user', content: 'hi' }],
+    } as unknown as GenerateOptions
+
+    await collect(client.stream(options))
+    await collect(client.stream(options))
+    await collect(client.stream(options))
+
+    expect(turnStates).toEqual([null, 'turn-abc', null])
+  })
+})
 
 function sse(events: unknown[]): Response {
   return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {

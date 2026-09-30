@@ -9,6 +9,7 @@ import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
+import { loadCodexCatalog } from './host/codex-catalog.ts'
 import { CodexAccountPool } from './host/codex-account-pool.ts'
 import { createCodexFetchProvider } from './host/codex-fetch.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
@@ -676,7 +677,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       fastMode: () => preferences.status().fastMode,
       reasoningSummary: () => preferences.status().reasoningSummary,
     })
-    const adapter = new CodexChatGptAdapter(responses, preferences)
+    // The live listing is the authority on what this plan serves; without a
+    // credential the loader reports none and the shipped table stands in.
+    const adapter = new CodexChatGptAdapter(responses, preferences, (options) => (
+      oauth.credentials(undefined, { purpose: 'tool' })
+        .then((credentials) => loadCodexCatalog(credentials, { fetchFn: proxyFetch, signal: options?.signal }))
+        .catch(() => [])
+    ))
 
     const searchSwitcher = new SearchProviderSwitcher(ctx.loader)
     // DSH's built-in fetch provider resolves and pins the addresses this machine's resolver

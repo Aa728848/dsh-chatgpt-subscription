@@ -15,7 +15,7 @@ import type { CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { normalizeGenerateOptions } from './common/llm-compat.ts'
-import { codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
+import { CODEX_TURN_STATE_HEADER, codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
@@ -25,6 +25,8 @@ const MAX_VISIBLE_REASONING_CHARS = 12_000
 const DEFAULT_POOL_COOLDOWN_MS = 15 * 60_000
 const REASONING_DELTA_FLUSH_CHARS = 768
 const REASONING_TRUNCATED_NOTICE = '\n\n[Reasoning summary truncated to keep the DSH web UI responsive.]'
+/** Cap on conversations whose turn state is remembered at once. */
+const MAX_TRACKED_TURN_STATES = 200
 
 export interface ResponsesClientOptions {
   fetchFn?: FetchLike
@@ -44,7 +46,16 @@ export class ResponsesClient {
   private readonly fastMode: () => boolean
   private readonly reasoningSummary: () => CodexReasoningSummary | null
   private readonly accountPool: CodexAccountPool | null
-
+  /**
+   * Opaque backend turn state, keyed by conversation session id.
+   *
+   * The Codex backend hands `x-codex-turn-state` back on each response and
+   * expects it on the next request of the same conversation, which lets it
+   * resume the turn instead of re-ingesting the whole history. The value is
+   * short-lived and account-scoped, so it is stored per session and simply
+   * dropped when the backend stops sending it — never a correctness input.
+   */
+  private readonly turnStates = new Map<string, string>()
   constructor(
     private readonly oauth: OAuthService,
     private readonly attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
@@ -77,6 +88,9 @@ export class ResponsesClient {
         this.outputVerbosity(),
         this.fastMode(),
         this.reasoningSummary(),
+        // Stable per conversation, so the backend can reuse the prompt prefix
+        // across turns instead of re-reading the whole history.
+        promptCacheKeyFor(sessionId),
       )
       try {
         response = await this.send(payload, sessionId, options.signal)
@@ -117,7 +131,37 @@ export class ResponsesClient {
       response = await this.request(payload, credentials, sessionId, signal)
     }
     if (!response.ok) throw await responseError(response)
+    this.rememberTurnState(response, sessionId)
     return response
+  }
+
+  /**
+   * Record the turn state a response carried, for the next turn of this session.
+   *
+   * A response that carries none clears any stored value: a backend that stops
+   * sending the header has stopped honouring it, and replaying a stale value
+   * would be guessing. An empty header is treated the same as absent.
+   */
+  private rememberTurnState(response: Response, sessionId: string): void {
+    const next = response.headers.get(CODEX_TURN_STATE_HEADER)?.trim()
+    if (next === undefined || next === '') this.turnStates.delete(sessionId)
+    else this.storeTurnState(sessionId, next)
+  }
+
+  /**
+   * Bounded store: a long-lived host serves many sessions, and nothing here ever
+   * signals that a session ended, so the map is capped and evicts the oldest
+   * entry. The value is an optimization, so a miss only costs a full resend.
+   */
+  private storeTurnState(sessionId: string, value: string): void {
+    // Re-inserting an existing key must refresh its age, so delete before set.
+    this.turnStates.delete(sessionId)
+    this.turnStates.set(sessionId, value)
+    while (this.turnStates.size > MAX_TRACKED_TURN_STATES) {
+      const oldest = this.turnStates.keys().next()
+      if (oldest.done === true) break
+      this.turnStates.delete(oldest.value)
+    }
   }
 
   /**
@@ -163,6 +207,7 @@ export class ResponsesClient {
         })
       }
       if (!response.ok) throw await responseError(response)
+      this.rememberTurnState(response, sessionId)
       return response
     }
   }
@@ -177,7 +222,7 @@ export class ResponsesClient {
       return await this.fetchFn(CODEX_RESPONSES_URL, {
         method: 'POST',
         headers: {
-          ...codexHeaders(credentials, sessionId),
+          ...codexHeaders(credentials, sessionId, { turnState: this.turnStates.get(sessionId) }),
           'content-type': 'application/json',
           accept: 'text/event-stream',
         },
@@ -189,6 +234,18 @@ export class ResponsesClient {
       throw new LlmError('Codex could not be reached.', 'NETWORK', { cause })
     }
   }
+}
+
+/**
+ * Prompt cache key for one conversation.
+ *
+ * The backend keys its prefix cache on this string, so it must be stable for a
+ * conversation and distinct between conversations — otherwise one session would
+ * be served another session's cached prefix. The session id is already a hashed
+ * opaque string, so it is reused directly rather than hashed again.
+ */
+function promptCacheKeyFor(sessionId: string): string {
+  return sessionId
 }
 
 interface ToolState {

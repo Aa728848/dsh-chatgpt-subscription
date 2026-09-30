@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { WebError, type WebSearchProvider, type WebSearchRequest, type WebSearchResult, type WebSearchSource } from '@deepseek-ai/dsh-web'
 import {
-  CODEX_ENHANCED_ORIGINATOR,
   CODEX_SEARCH_PROVIDER_ID,
   CODEX_SEARCH_URL,
 } from '../compat.ts'
@@ -113,7 +112,6 @@ function sendSearch(
     method: 'POST',
     headers: {
       ...codexHeaders(credentials),
-      originator: CODEX_ENHANCED_ORIGINATOR,
       accept: 'application/json',
       'content-type': 'application/json',
     },
