@@ -46,6 +46,16 @@ export const CODEX_MODEL_CATALOG = [
     maxTokens: GPT_6_MAX_TOKENS,
   },
   {
+    id: 'gpt-6.1-sol',
+    name: '6.1 Sol',
+    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    inputModalities: ['text', 'image'],
+    defaultReasoningEffort: 'medium',
+    reasoningProfile: 'gpt-6',
+    supportsReasoningSummary: true,
+    maxTokens: GPT_6_MAX_TOKENS,
+  },
+  {
     id: 'gpt-6-sol',
     name: '6 Sol',
     contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
@@ -128,6 +138,7 @@ export type CodexModelId = typeof CODEX_MODEL_CATALOG[number]['id']
 
 export const DEFAULT_VISIBLE_CODEX_MODEL_IDS = [
   'gpt-6-astra',
+  'gpt-6.1-sol',
   'gpt-6-sol',
   'gpt-6-luna',
   'gpt-5.6-sol',

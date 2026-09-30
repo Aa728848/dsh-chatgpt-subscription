@@ -100,6 +100,7 @@ describe('client registration', () => {
   it.each([
     ['gpt-5.6-sol', '5.6 Sol'],
     ['gpt-6-astra', '6 Astra'],
+    ['gpt-6.1-sol', '6.1 Sol'],
     ['gpt-6-sol', '6 Sol'],
     ['gpt-6-luna', '6 Luna'],
   ] as const)('keeps %s context options rendered while typing a numeric draft', async (model, modelName) => {
@@ -109,9 +110,11 @@ describe('client registration', () => {
       const input = container.querySelector<HTMLInputElement>(`input[aria-label="${modelName} 上下文窗口"]`)
       expect(input).not.toBeNull()
       const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsha-models input[type="checkbox"]')
-      expect(modelChecks).toHaveLength(10)
+      // Derived rather than pinned: adding a catalog entry must not require
+      // editing a count in a test about rendering.
+      expect(modelChecks).toHaveLength(CODEX_MODEL_CATALOG.length)
       // One row per checked model, so checking everything shows the whole catalog.
-      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(10)
+      expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(CODEX_MODEL_CATALOG.length)
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '5')
         input!.dispatchEvent(new Event('input', { bubbles: true }))

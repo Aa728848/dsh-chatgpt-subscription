@@ -9,6 +9,7 @@ describe('CodexChatGptAdapter', () => {
     expect(await adapter.listModels()).toMatchObject([
       { id: 'gpt-5.6-sol', name: '5.6 Sol', inputModalities: ['text', 'image'] },
       { id: 'gpt-6-astra', name: '6 Astra', inputModalities: ['text', 'image'] },
+      { id: 'gpt-6.1-sol', name: '6.1 Sol', inputModalities: ['text', 'image'] },
       { id: 'gpt-6-sol', name: '6 Sol', inputModalities: ['text', 'image'] },
       { id: 'gpt-6-luna', name: '6 Luna', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.6-terra', name: '5.6 Terra', inputModalities: ['text', 'image'] },
