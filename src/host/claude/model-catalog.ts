@@ -176,17 +176,29 @@
  * LOCAL ADDITIONS — the rows the reference snapshot predates
  * ---------------------------------------------------------------------------
  *
- * `claude-opus-5-5` and `claude-sonnet-5-5` are the two such rows today. The
- * mirror list in the test is `LOCALLY_CURATED_MODEL_IDS`; the two must be
- * changed together. Sonnet 5.5's own reasons are recorded at its row; what
- * follows below is Opus 5.5's.
+ * TWO KINDS OF ROW ARE NOT FULLY TRANSCRIBED, and they are different things.
+ * Do not collapse them.
  *
- * It is CURATED rather than transcribed because the snapshot this table copies
- * has no entry for it, and the one thing a transcription table must never do is
- * invent a row and let it read as if it had been read from somewhere. An
- * invented row that mimics the format of a checked one is worse than a missing
- * row: it is unverifiable and it looks verified. So the row below is marked at
- * the row itself, the test asserts the id is on the curated list, and the test
+ * 1. `claude-sonnet-5-5` — the snapshot this table was copied from has no
+ *    entry for it, so the whole row is CURATED: every value below comes from
+ *    the vendor's own documentation and no snapshot field can check it. The
+ *    mirror list in the test is `LOCALLY_CURATED_MODEL_IDS`.
+ *
+ * 2. `claude-opus-5-5` — a NEWER snapshot (pi-ai >= 0.87.1) does carry it, so
+ *    the row sits in the snapshot's own position and EVERY field is checked
+ *    against that snapshot. Exactly one field is not: `thinkingMode`, recorded
+ *    in the test as `SNAPSHOT_AGREES_BUT_CURATED_WINS`. The snapshot would
+ *    classify it 'mid-convo', whose form forces `output_config.effort = 'high'`
+ *    when the caller names none, while the vendor documents this model's
+ *    default effort as MEDIUM. Transcribing it would silently outrank the user
+ *    and think — and bill — harder than asked, so the documented 'adaptive'
+ *    stands. The test asserts the row still disagrees with the snapshot, so a
+ *    future snapshot that agrees fails loudly and retires the entry.
+ *
+ * Both must be changed together with the mirror list in the test. An invented
+ * row that mimics the format of a checked one is worse than a missing row: it
+ * is unverifiable and it looks verified. So each row is marked at the row
+ * itself, the test asserts the id is on the curated list, and the test
  * asserts the curated list is exactly the ids the snapshot lacks — which keeps
  * the lock narrow instead of merely weaker.
  *
@@ -211,10 +223,12 @@
  * 2. `thinkingMode: 'adaptive'`, NOT `'mid-convo'`. The two are easy to confuse
  *    here because every model in this line that refuses a temperature is also,
  *    so far, a managed-effort model. That is a coincidence of `compat`, not a
- *    rule: this row carries no `supportsMidConvoEffort` flag, and 'mid-convo'
+ *    rule. A newer snapshot DOES flag this row `supportsMidConvoEffort` and
+ *    would therefore classify it 'mid-convo' — which is exactly why this is the
+ *    one declared exception rather than a transcription: 'mid-convo'
  *    additionally forces `output_config = { effort: 'high' }` when the caller
- *    names no effort. That forced high is correct for the rows that DO carry the
- *    flag, because the vendor makes `high` their default effort; this model's
+ *    names no effort. That forced high is correct for the rows whose documented
+ *    default effort is high, and wrong for this one; this model's
  *    documented default effort is `medium`. Labelling it 'mid-convo' would
  *    silently override the vendor's own default and make every request think —
  *    and cost — harder than the user asked for.
@@ -311,8 +325,8 @@ export interface ClaudeModelEntry {
 }
 
 /**
- * Sixteen rows: the snapshot's own 14, in the snapshot's own declaration order,
- * followed by the curated rows the snapshot predates (see LOCAL ADDITIONS above).
+ * Sixteen rows: the snapshot's own 15, in the snapshot's own declaration order,
+ * followed by the one row the snapshot still predates (see LOCAL ADDITIONS above).
  *
  * The order matters and is not cosmetic. The test asserts the snapshot's ids
  * appear in the table as a SUBSEQUENCE, so a curated row may be appended or
@@ -450,57 +464,13 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     canDisableThinking: false,
   },
-  {
-    id: 'claude-sonnet-4-5',
-    name: 'Claude Sonnet 4.5 (latest)',
-    contextWindow: 1000000,
-    maxTokens: 64000,
-    supportsImage: true,
-    supportsTemperature: true,
-    thinkingMode: 'budget',
-    reasoningEfforts: ['low', 'medium', 'high'],
-    canDisableThinking: true,
-  },
-  {
-    id: 'claude-sonnet-4-5-20250929',
-    name: 'Claude Sonnet 4.5',
-    contextWindow: 1000000,
-    maxTokens: 64000,
-    supportsImage: true,
-    supportsTemperature: true,
-    thinkingMode: 'budget',
-    reasoningEfforts: ['low', 'medium', 'high'],
-    canDisableThinking: true,
-  },
-  {
-    id: 'claude-sonnet-4-6',
-    name: 'Claude Sonnet 4.6',
-    contextWindow: 1000000,
-    maxTokens: 128000,
-    supportsImage: true,
-    supportsTemperature: true,
-    thinkingMode: 'adaptive',
-    reasoningEfforts: ['low', 'medium', 'high', 'max'],
-    canDisableThinking: true,
-  },
-  {
-    id: 'claude-sonnet-5',
-    name: 'Claude Sonnet 5',
-    contextWindow: 1000000,
-    maxTokens: 128000,
-    supportsImage: true,
-    supportsTemperature: true,
-    thinkingMode: 'adaptive',
-    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    canDisableThinking: true,
-  },
-  // -------------------------------------------------------------------------
-  // LOCALLY CURATED — not from the reference snapshot. See LOCAL ADDITIONS in
-  // the module doc comment, and LOCALLY_CURATED_MODEL_IDS in the fidelity test.
-  // The snapshot predates this model, so the fidelity lock checks the 14 rows
-  // above and asserts this id is declared as curated; it cannot check the
-  // values below the way it checks a transcribed row.
-  // -------------------------------------------------------------------------
+  // TRANSCRIBED row that keeps ONE field from the vendor's documentation. The
+  // reference snapshot (pi-ai >= 0.87.1) DOES carry this model, and the
+  // fidelity lock checks every field below against it — except `thinkingMode`,
+  // the declared exception recorded in SNAPSHOT_AGREES_BUT_CURATED_WINS in the
+  // fidelity test. Transcribing that field would force effort=high when the
+  // caller names none, outranking this model's documented MEDIUM default. The
+  // field's own comment below carries the reasoning.
   {
     id: 'claude-opus-5-5',
     name: 'Claude Opus 5.5',
@@ -548,6 +518,58 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     // lets it stay 'adaptive' (no forced effort) and still send block_binding.
     bindsThinkingToPrefix: true,
   },
+  {
+    id: 'claude-sonnet-4-5',
+    name: 'Claude Sonnet 4.5 (latest)',
+    contextWindow: 1000000,
+    maxTokens: 64000,
+    supportsImage: true,
+    supportsTemperature: true,
+    thinkingMode: 'budget',
+    reasoningEfforts: ['low', 'medium', 'high'],
+    canDisableThinking: true,
+  },
+  {
+    id: 'claude-sonnet-4-5-20250929',
+    name: 'Claude Sonnet 4.5',
+    contextWindow: 1000000,
+    maxTokens: 64000,
+    supportsImage: true,
+    supportsTemperature: true,
+    thinkingMode: 'budget',
+    reasoningEfforts: ['low', 'medium', 'high'],
+    canDisableThinking: true,
+  },
+  {
+    id: 'claude-sonnet-4-6',
+    name: 'Claude Sonnet 4.6',
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    supportsImage: true,
+    supportsTemperature: true,
+    thinkingMode: 'adaptive',
+    reasoningEfforts: ['low', 'medium', 'high', 'max'],
+    canDisableThinking: true,
+  },
+  {
+    id: 'claude-sonnet-5',
+    name: 'Claude Sonnet 5',
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    supportsImage: true,
+    supportsTemperature: true,
+    thinkingMode: 'adaptive',
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    canDisableThinking: true,
+  },
+  // -------------------------------------------------------------------------
+  // LOCALLY CURATED — not from the reference snapshot. See LOCAL ADDITIONS in
+  // the module doc comment, and LOCALLY_CURATED_MODEL_IDS in the fidelity test.
+  // The snapshot this checkout was transcribed against predates this model, so
+  // the fidelity lock checks the rows above and asserts this id is declared as
+  // curated; it cannot check the values below the way it checks a transcribed
+  // row. Its own assertions are written from the vendor's documentation.
+  // -------------------------------------------------------------------------
   {
     id: 'claude-sonnet-5-5',
     name: 'Claude Sonnet 5.5',
