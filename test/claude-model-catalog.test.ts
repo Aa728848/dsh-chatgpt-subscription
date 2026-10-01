@@ -127,6 +127,19 @@ const REFERENCE_ENTRY_COUNT = 14
  * values come from the vendor's model overview and "what's new" pages, and they
  * agree field for field with the newer reference `@earendil-works/pi-ai` 0.99.1,
  * which does carry it — but that is not the snapshot this checkout pins.
+ *
+ * KNOWN, DELIBERATE DIVERGENCE (`claude-opus-5-5`, as of pi-ai 0.87.1): a newer
+ * snapshot than the one this comment names now DOES carry `claude-opus-5-5`, so on
+ * a machine with such a snapshot these fidelity assertions fail on purpose — the
+ * snapshot is a version-specific local artifact, not a dependency, and CI has none
+ * (it skips them). Do NOT resolve it by transcribing the row from that snapshot:
+ * the snapshot flags the model `supportsMidConvoEffort`, which would classify it
+ * 'mid-convo' and then force `output_config.effort = 'high'` whenever the caller
+ * names no effort. The vendor documents Opus 5.5's default effort as MEDIUM, so
+ * that form would silently outrank the user and think — and bill — harder than
+ * asked, which is exactly what the 'adaptive' row exists to prevent. Until the
+ * documented default is re-checked, the curated row stands. Re-check the vendor's
+ * effort page before ever retiring this entry.
  */
 const LOCALLY_CURATED_MODEL_IDS: readonly string[] = [
   'claude-sonnet-5-5',

@@ -23,14 +23,21 @@ const { startCallbackServer, resolveCallbackPort, redirectUri, callbackPort } = 
   '../src/host/antigravity/oauth.ts'
 )
 
-/** Ports this test owns; a port above the well-known reserved blocks. */
-const BLOCKER_PORT = 50999
-
-function listenOn(port: number): Promise<http.Server> {
+/**
+ * No fixed blocker port: Windows reserves TCP port ranges (Hyper-V/WinNAT)
+ * that change on every reboot, so any hard-coded port can land inside one and
+ * fail this test with EACCES for a reason unrelated to the probe. The blocker
+ * binds port 0 and reports the port the OS actually gave it, which is
+ * bindable by construction.
+ */
+function listenOnEphemeralPort(): Promise<{ server: http.Server; port: number }> {
   return new Promise((resolve, reject) => {
     const server = createServer()
     server.once('error', reject)
-    server.listen(port, '127.0.0.1', () => resolve(server))
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      resolve({ server, port: address !== null && typeof address === 'object' ? address.port : 0 })
+    })
   })
 }
 
@@ -57,13 +64,13 @@ describe('callback port probe', () => {
     // the resolved port onward. (The default 51121 cannot be occupied by the
     // test itself: whether it is inside a Windows excluded range is a machine
     // fact, and a bind there would throw EACCES in the test, not the code.)
-    process.env.DSH_ANTIGRAVITY_CALLBACK_PORT = String(BLOCKER_PORT)
-    const blocker = await listenOn(BLOCKER_PORT)
+    const { server: blocker, port: blockerPort } = await listenOnEphemeralPort()
+    process.env.DSH_ANTIGRAVITY_CALLBACK_PORT = String(blockerPort)
     try {
       // A configured port is returned as-is by design (the caller accepted the
       // port), so the occupied-port skip applies to the unconfigured probe
       // range. Assert the resolved port is the configured one here.
-      expect(await resolveCallbackPort()).toBe(BLOCKER_PORT)
+      expect(await resolveCallbackPort()).toBe(blockerPort)
     } finally {
       await close(blocker)
     }
@@ -83,6 +90,9 @@ describe('callback port probe', () => {
   })
 
   it('honors a configured DSH_ANTIGRAVITY_CALLBACK_PORT without probing', async () => {
+    // Configured values are returned as-is, so no socket is bound here and a
+    // literal port is safe: the assertion is about the value, not about
+    // whether this machine can bind it.
     process.env.DSH_ANTIGRAVITY_CALLBACK_PORT = '50999'
     const port = await resolveCallbackPort()
     expect(port).toBe(50999)
