@@ -69,6 +69,39 @@ describe('CodexChatGptAdapter live catalog', () => {
     expect(models.map((model) => model.id)).toContain('gpt-6-sol')
   })
 
+  it('keeps the picker populated when the listing carries no chat model', async () => {
+    // Several plans answer the subscription listing with only the account's
+    // code-review slug, naming no chat model at all. Honouring that literally
+    // would delete every model the user's own selection asks for and leave an
+    // empty picker, so the shipped table has to answer instead.
+    const adapter = new CodexChatGptAdapter(client, {
+      status: () => ({ visibleModelIds: ['gpt-6-astra'] }),
+    } as never, async () => [
+      {
+        id: 'codex-auto-review',
+        name: 'Codex Auto Review',
+        contextWindow: 272_000,
+        inputModalities: ['text', 'image'],
+      },
+    ])
+
+    expect((await adapter.listModels()).map((model) => model.id)).toEqual(['gpt-6-astra'])
+  })
+
+  it('still narrows to the listing when it does offer a selected model', async () => {
+    // The fallback is for a listing that cannot satisfy the selection, not a
+    // licence to widen every picker: a listing naming a selected model stays
+    // authoritative and keeps the models the user did not select out.
+    const adapter = new CodexChatGptAdapter(client, {
+      status: () => ({ visibleModelIds: ['gpt-6-astra', 'gpt-6-sol'] }),
+    } as never, async () => [
+      { id: 'gpt-6-astra', name: '6 Astra', contextWindow: null, inputModalities: ['text', 'image'] },
+      { id: 'codex-auto-review', name: 'Codex Auto Review', contextWindow: 272_000, inputModalities: ['text'] },
+    ])
+
+    expect((await adapter.listModels()).map((model) => model.id)).toEqual(['gpt-6-astra'])
+  })
+
   it('never lets a failing listing break the picker', async () => {
     // A catalog is an optimization; a rejected or unreachable endpoint must not
     // turn into a failed model selection.

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **修复 Codex 线路模型选择器为空（供应商已启动、登录正常，但一个模型都不显示）**（用户报告，账号实测为 `prolite` 套餐）。
+  - **根因**：接入实时目录那次提交（`d821752`，`feat(codex): follow upstream third-party wire`，v0.10.12）让 `listCodexModels` 把订阅目录当成唯一来源，再与用户的 `visibleModelIds` 求交集：`{codex-auto-review} ∩ {gpt-6-astra}` = **空集**，于是选择器一个不剩。
+  - **目录并非空的，是不含 chat 模型**：实测该套餐的 `GET /backend-api/codex/models` 返回 `count=1, slugs=codex-auto-review`——只含账号的 code-review slug。目录「比内置表窄」的设计意图是对的，但它**不能保证窄的那部分与用户的选择有交集**；交集为空时，目录就把用户自己勾选的模型全部删掉了。
+  - **不是账号没权限**：同一账号的 usage 接口报告 `model_usage: {"gpt-6-astra": {"available": true}}`，本地用量台账也记录了 `gpt-6.1-sol` 共 42 次成功调用。**模型是可用的，只是被目录挡掉了**。另外从 `client_version` 0.1 扫到 0.110，≥0.98 全部返回同一个只含 `codex-auto-review` 的结果，**换版本救不了**。
+  - **修法**：目录仍以「本账号能调什么」为权威，但**不再有权清空选择器**——目录能满足所选模型时照旧以它为准（不会擅自放大，该藏的照样藏）；一个都满足不了时回落到随包发布的内置表，并仍按选择过滤。新增回归测试锁住两侧：空目录场景补回所选模型，以及「目录有效时不得放宽」的边界。
+  - **验证**：`npm run typecheck`、`npm run build` 通过；复现用例从 `picker entries: []` 变为 `["gpt-6-astra"]`。全量 **1863 passed** / 7 skipped，失败的 6 条（`claude-model-catalog` 5、`antigravity-callback-port` 1）在**本轮改动前的干净工作树上同样失败**（`git stash` 验证），与本次无关。
 - **修复 MiniMax Code 线路会话在约 2 MB 处被本地拒绝、请求从未发出**（用户报告：`request was not sent: the serialized body is 2098045 bytes, above the 2097152-byte ceiling this route enforces`）。
   - **根因**：`minimax-code/mapper.ts` 的 `assertRequestBodyFits` 直接复用了 Kimi 线路的 `MAX_MESSAGE_BODY_BYTES`（**2,097,152**），代码注释与 README 都写着理由是「两条线路上游都是同一族端点」。**这个数字是 Kimi Code 自己的网关上限**——其错误参考里逐字写着 `total message size N exceeds limit 2097152`。MiniMax 的任何文档都没有这条规定，而 MiniMax 自己的 Anthropic 兼容文档给出的请求体量级是**几十 MB**，不是 2 MB。
   - **为什么这个理由不成立**：字节上限是**上游网关的属性**，不是「Anthropic 协议家族」的通用常量。同一条插件里 Kimi 线路给带视频的请求放宽到 64 MB、纯文本/图片仍是 2 MB，本身就说明这个数字是按路由而定的。更直接的反证来自本线路自己的模型目录：M3 是 **512K 上下文（可选 1M）**、**单张图片 10 MB**——**2 MB 的整包上限与「单图 10 MB」不能共存，一张合法图片就能单独触发它**。

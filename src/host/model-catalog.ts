@@ -17,16 +17,31 @@ export function listCodexModels(
   // A live listing is narrower than the shipped table by design: it names what
   // this account may call. When it is empty the shipped table stands in, so a
   // failed listing widens the picker instead of emptying it.
-  const source = live !== undefined && live.length > 0
+  const listed = live !== undefined && live.length > 0
     ? live.map(entry => ({ id: entry.id, name: entry.name, inputModalities: entry.inputModalities }))
-    : CODEX_MODEL_CATALOG.map(entry => ({ id: entry.id, name: entry.name, inputModalities: entry.inputModalities }))
-  const visible = new Set(status?.visibleModelIds ?? source.map(entry => entry.id))
-  return source.filter(entry => visible.has(entry.id)).map((entry) => ({
+    : undefined
+  const visible = new Set(status?.visibleModelIds ?? (listed ?? shippedModels()).map(entry => entry.id))
+  const selected = (listed ?? shippedModels()).filter(entry => visible.has(entry.id))
+  // A listing must not be able to empty the picker. On several plans the
+  // subscription listing carries only the account's code-review slug
+  // (`codex-auto-review`) and no chat model at all, so honouring it literally
+  // would delete every model the user's own selection asks for. A listing that
+  // cannot satisfy the selection is not a narrower view of what this account
+  // may call, and the shipped table answers instead.
+  const source = listed === undefined || selected.length > 0
+    ? selected
+    : shippedModels().filter(entry => visible.has(entry.id))
+  return source.map((entry) => ({
     provider: PROVIDER_ID,
     id: entry.id,
     name: entry.name,
     inputModalities: [...entry.inputModalities],
   }))
+}
+
+/** The shipped table as picker rows. */
+function shippedModels(): { id: string; name: string; inputModalities: readonly ('text' | 'image')[] }[] {
+  return CODEX_MODEL_CATALOG.map(entry => ({ id: entry.id, name: entry.name, inputModalities: entry.inputModalities }))
 }
 
 export function resolveCodexModel(
