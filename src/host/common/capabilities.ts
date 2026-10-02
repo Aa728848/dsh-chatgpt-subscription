@@ -18,6 +18,11 @@
  * so an unknown entry costs nothing at runtime and only limits what may be
  * turned on later, with evidence.
  *
+ * The table is a record of what has been exercised, not a switchboard: nothing
+ * reads it to decide what to send yet, because every entry it holds is already
+ * what the code does. It exists so a later feature has to state the evidence it
+ * rests on before the field reaches a request body.
+ *
  * @module dsh-chatgpt-subscription/capabilities
  */
 
@@ -50,8 +55,11 @@ const TABLE: Readonly<Record<string, Readonly<Partial<Record<Capability, Capabil
     'native-image': 'supported',
     'native-video': 'unsupported',
     'multi-agent-server': 'unknown',
-    // Implemented as an opt-in transport, defaulting to the SSE path.
-    'websocket-transport': 'supported',
+    // No WebSocket transport is implemented on this route. The Responses API
+    // offers one and the official client uses it, but nothing here speaks it yet,
+    // and an entry that says otherwise would claim a capability that does not
+    // exist in the request path.
+    'websocket-transport': 'unsupported',
   },
   claude: {
     'prompt-cache-read': 'supported',
@@ -121,6 +129,7 @@ const TABLE: Readonly<Record<string, Readonly<Partial<Record<Capability, Capabil
   workbuddy: {
     'prompt-cache-read': 'supported',
     'prompt-cache-write': 'unsupported',
+    // The endpoint rejects a reasoning block sent back, so none is sent.
     'thinking-replay': 'unsupported',
     'server-side-compaction': 'unsupported',
     'tool-search': 'unsupported',

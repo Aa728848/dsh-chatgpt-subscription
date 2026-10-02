@@ -703,6 +703,8 @@ interface PendingToolCall {
 export interface MinimaxStreamState {
   /** Verbatim `thinking` / `redacted_thinking` blocks, signatures included. */
   replayBlocks: AnthropicBlock[]
+  /** wire content index -> the replay block that content fills in. */
+  replayIndexes: Map<number, AnthropicBlock>
   blocks: OutboundContentBlock[]
   current: { index: number; type: 'text' | 'reasoning'; text: string } | null
   /** wire content-block index -> accumulating call. */
@@ -724,6 +726,7 @@ export interface MinimaxStreamState {
 export function createStreamState(): MinimaxStreamState {
   return {
     replayBlocks: [],
+    replayIndexes: new Map(),
     blocks: [],
     current: null,
     toolCalls: new Map(),
@@ -748,6 +751,22 @@ function closeCurrent(state: MinimaxStreamState): StreamChunk[] {
   state.blocks[index] = block
   state.current = null
   return [{ type: 'block-end', index, block }]
+}
+
+/**
+ * The replay block a content index fills, if this turn opened one.
+ *
+ * Blocks are matched by the wire's own content index rather than by position,
+ * because a response can interleave thinking, text and tool blocks and only the
+ * index says which block a later delta belongs to.
+ */
+function replayBlockFor(
+  state: MinimaxStreamState,
+  contentIndex: number,
+  block?: AnthropicBlock,
+): AnthropicBlock | undefined {
+  if (block !== undefined) state.replayIndexes.set(contentIndex, block)
+  return state.replayIndexes.get(contentIndex)
 }
 
 function openTextBlock(state: MinimaxStreamState, type: 'text' | 'reasoning'): StreamChunk[] {
@@ -862,12 +881,14 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
       return out
     }
     if (blockType === 'thinking' || blockType === 'redacted_thinking') {
-      // Keep the block exactly as the service issued it. The reasoning trace is
-      // model state, not display text: replaying a hand-rebuilt block loses the
-      // signature that ties it to this model and this turn, and a trace sent
-      // without its signature is either rejected or no longer the model's own.
-      const block = isRecord(event.content_block) ? event.content_block : {}
-      state.replayBlocks.push(structuredClone(block))
+      // Keep the block exactly as the service issued it, and keep a handle on it
+      // so the deltas that follow can be folded in. The reasoning trace is model
+      // state, not display text: the text arrives over many `thinking_delta`
+      // events and the signature over `signature_delta`, so storing only the
+      // opening block — which is typically empty — replays an empty trace.
+      const block = isRecord(event.content_block) ? structuredClone(event.content_block) : {}
+      state.replayBlocks.push(block)
+      replayBlockFor(state, contentIndex, block)
       out.push(...openTextBlock(state, 'reasoning'))
       state.contentIndexes.set(contentIndex, state.current!.index)
       return out
@@ -898,6 +919,17 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
       return out
     }
 
+    // The signature is model state that belongs to the replayed block, so it is
+    // accumulated onto that block rather than only shown.
+    if (deltaType === 'signature_delta') {
+      const signature = asString(delta.signature)
+      const replay = replayBlockFor(state, contentIndex)
+      if (replay !== undefined && signature !== undefined && signature !== '') {
+        replay.signature = (asString(replay.signature) ?? '') + signature
+      }
+      return out
+    }
+
     const text = deltaType === 'thinking_delta' ? asString(delta.thinking) : asString(delta.text)
     if (text !== undefined && text !== '') {
       const index = state.contentIndexes.get(contentIndex) ?? state.current?.index
@@ -909,6 +941,15 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
         state.blocks.push({ type: kind, text: '' })
         state.contentIndexes.set(contentIndex, next)
         out.push({ type: 'block-start', index: next, blockType: kind })
+      }
+      // Fold the visible text into the replay block as well, so the block that
+      // goes back to the service carries the same trace the model produced.
+      if (kind === 'reasoning') {
+        const replay = replayBlockFor(state, contentIndex)
+        if (replay !== undefined) {
+          const field = replay.type === 'redacted_thinking' ? 'data' : 'thinking'
+          replay[field] = (asString(replay[field]) ?? '') + text
+        }
       }
       state.current.text += sanitizeText(text)
       state.hasContent = true

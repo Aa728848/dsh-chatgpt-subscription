@@ -395,7 +395,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const ollamaAdapter = new OllamaAdapter(
       ollamaStore,
       ollamaModelSettings,
-      { fetchFn: proxyFetch },
+      { fetchFn: proxyFetch, attachments: ctx.attachments },
       ollamaAccountPool,
     )
     let ollamaRegistration: AdapterRegistrationHandle | undefined

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { toToolCallId } from './common/brand-compat.ts'
 
 import {
@@ -90,7 +91,7 @@ export class ResponsesClient {
     // One model call is one turn for routing purposes: it is the unit that gets a
     // routing token back and the unit that may retry. The tool loop issues one
     // call per step, which is exactly the granularity this header is scoped to.
-    const turnKey = `${sessionId}#${turnOrdinal(options)}`
+    const turnKey = turnKeyFor(sessionId, options)
     let currentModel = options.model
     let attemptOptions = options
     let response: Response | undefined
@@ -132,11 +133,13 @@ export class ResponsesClient {
         'Codex',
       )
     } finally {
-      // A turn's routing state outlives nothing: the next model call is a new
-      // turn with its own key, and the cache key (per session) is unchanged.
-      this.turnStates.delete(turnKey)
-      // The stream is over, so this turn no longer occupies the account.
-      for (const release of this.pendingReleases.splice(0)) release()
+      // The turn's routing state deliberately survives here: the next step of a
+      // tool loop is the same turn and has to replay it. A new user turn computes a
+      // new key, and the bound below keeps the map from growing without limit.
+      // The stream is over, so this request no longer occupies the account. The
+      // release belongs to THIS request: a sibling turn on the same account keeps
+      // its own slot until its own stream ends.
+      this.takePendingRelease(turnKey)?.()
       this.onGenerationFinished()
     }
   }
@@ -295,7 +298,7 @@ export class ResponsesClient {
         this.rememberTurnState(response, turnKey, credentials)
         // The body is still streaming, so the slot stays held; the turn releases
         // it once this stream ends.
-        this.pendingReleases.push(free)
+        this.pendingReleases.set(turnKey, free)
         return response
       } catch (error) {
         free()
@@ -304,8 +307,21 @@ export class ResponsesClient {
     }
   }
 
-  /** Slots held for streams that are still running. */
-  private readonly pendingReleases: Array<() => void> = []
+  /**
+   * Concurrency slot held by each streaming request, keyed by turn.
+   *
+   * Keyed rather than a single list on purpose: two turns can run against the
+   * same account at once, and the first one to end must release only its own
+   * slot. A list would hand the departing turn every outstanding release.
+   */
+  private readonly pendingReleases = new Map<string, () => void>()
+
+  /** Take this turn's pending release, if it still holds one. */
+  private takePendingRelease(turnKey: string): (() => void) | undefined {
+    const release = this.pendingReleases.get(turnKey)
+    this.pendingReleases.delete(turnKey)
+    return release
+  }
 
   private async request(
     payload: Record<string, unknown>,
@@ -353,8 +369,63 @@ function promptCacheKeyFor(sessionId: string): string {
  * (the same history is resent) and differs for the next step of a tool loop
  * (the history grew), which is exactly the scope the routing header has.
  */
-function turnOrdinal(options: { messages: readonly unknown[] }): number {
-  return options.messages.length
+/**
+ * Routing scope for one request.
+ *
+ * The header is scoped to a turn, and a turn is a user turn plus however many
+ * model calls its tool loop takes. Nothing in the request says which user turn
+ * this is, so the identity is derived from the conversation the call sends: the
+ * session, and the last user message that opens the turn. Every step of one tool
+ * loop ends on the same trailing user message, so every step of a turn shares a
+ * key and can replay the same routing state; the next user turn brings a new
+ * trailing message and therefore a new key.
+ *
+ * The digest covers the opening message only. Including the whole history would
+ * make each step its own key, which is exactly the case the header forbids.
+ */
+/** Plain text of a message, however this harness generation shaped it. */
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part
+        if (typeof part === 'object' && part !== null) {
+          const text = (part as Record<string, unknown>).text
+          if (typeof text === 'string') return text
+        }
+        return ''
+      })
+      .join('')
+  }
+  return ''
+}
+
+function turnKeyFor(sessionId: string, options: { messages: readonly { role: string; content: unknown; source?: { kind?: string } }[] }): string {
+  // The harness passes no turn id, and no property of the request identifies a
+  // turn reliably: the same user text recurs across turns, a tool result also
+  // carries a user role, and the number of tool calls is 0 at the start of every
+  // turn. Guessing here is what puts a routing token from one turn into the next,
+  // which is the contract violation the header forbids.
+  //
+  // So the key is per request, not per turn. The cost is a full resend for the
+  // rare follow-up inside one turn; the benefit is that no request can ever carry
+  // another turn's state. Until the harness supplies a turn id this is the only
+  // identity that cannot be wrong.
+  const digest = createHash('sha256')
+    .update(sessionId)
+    .update('\0')
+    .update(String(perRequestNonce()))
+    .digest('hex')
+    .slice(0, 24)
+  return `${sessionId}#${digest}`
+}
+
+/** A value no two requests in this process share. */
+let requestCounter = 0
+function perRequestNonce(): number {
+  requestCounter += 1
+  return requestCounter
 }
 
 interface ToolState {

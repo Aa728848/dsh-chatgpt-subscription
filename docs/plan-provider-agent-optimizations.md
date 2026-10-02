@@ -178,6 +178,23 @@
 - MiniMax/Antigravity 视频：明确端点及模型载荷后才声明能力；否则明确降级。
 - Ollama Local：独立需求和安全审查，设计可信端点、鉴权、发现、keep_alive、上下文和显存并发预算；任意 base URL 不是无风险选项，Local 参数不送 Cloud。
 
+### 复核修正（2026-10-02）
+
+代码审查发现上一轮的实现存在若干协议与状态错误，已修复并补齐回归测试：
+
+- Codex 并发槽从客户端级数组改为按请求持有，一个请求结束不再释放其他请求的槽。
+- Codex 路由状态改为每请求一个 key。宿主没有提供 turn id，任何基于消息内容的判据都不可靠（同一用户文本会在多轮重复，工具结果同样占用 user 角色，每轮开头的工具调用数都是 0），因此选择不可能出错的身份，代价是放弃轮内复用。宿主提供 turn id 后可恢复该优化。
+- Command Code Responses 请求读取 Chat Completions 的嵌套 `function` 字段，工具名与参数不再丢失。
+- Command Code 流式按 `item_id` 关联参数增量为 `call_id`，并为并行工具调用分配互不相同的块索引。
+- MiniMax 回放改为累计 `thinking_delta` 与 `signature_delta`，不再只保存通常为空的起始块。
+- Ollama 通过附件存储读取真实图片字节，并在插件入口注入该存储。
+- 并发闸门在解除上限时正确计入等待者，并拒绝低于当前占用的上限。
+
+两项功能已撤回而非保留未验证实现：
+
+- **WebSocket 传输**：删除 `responses-websocket.ts`。它只有连接管理，没有任何请求收发，也未被生产代码引用；能力矩阵中该线路的 `websocket-transport` 改为 `unsupported`。
+- **能力门控**：`capabilities.ts` 保留为证据记录，但不是开关。矩阵中每一条现在都与代码实际行为一致，且文件注释已说明这一点。
+
 ### W9 实施结果（2026-10-02）
 
 多模态部分已随 W2 落地：Ollama 图片不再被静默丢弃，system 与图片按两种 wire 正确投影，thinking 独立成块。Kimi 视频工具与 MiniMax 视频降级保持原状，未改动——它们的文件上传接口未经本线路验证，能力矩阵将两条线路的 `native-video` 记为 unsupported/unknown 而非支持。

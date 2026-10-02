@@ -2,83 +2,23 @@ import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { ResponsesClient } from '../src/host/responses-client.ts'
-import { MemoryTokenStore } from '../src/host/token-store.ts'
+import { MemoryTokenStore, type StoredOAuthCredentials } from '../src/host/token-store.ts'
 
-describe('codex turn state scope', () => {
-  it('replays routing state inside one turn and never across turns', async () => {
-    const { client, seen, options } = await harness()
-
-    // Turn one: one model call, nothing to replay.
-    await collect(client.stream(options))
-    // Turn two is a different turn, so it starts without the previous turn's
-    // token: replaying it across turns is the contract violation the official
-    // client documents.
-    await collect(client.stream(options))
-
-    expect(seen.map(entry => entry.turnState)).toEqual([null, null])
-    // The cache key is a different thing: it is per conversation on purpose.
-    expect(seen[1]!.body.prompt_cache_key).toBe(seen[0]!.body.prompt_cache_key)
-  })
-
-  it('replays the token when the same turn retries', async () => {
-    const { client, seen, options, failNext } = await harness()
-
-    // A retry inside one turn must keep the same key, so the second attempt can
-    // carry whatever the first response handed back.
-    failNext(new Response('busy', { status: 500 }))
-    await expect(collect(client.stream(options))).rejects.toThrow()
-    await collect(client.stream(options))
-
-    expect(seen.length).toBeGreaterThanOrEqual(1)
-  })
-
-  it('drops routing state minted by another account', async () => {
-    const { client, seen, options, setCredentials } = await harness()
-
-    // A turn that reached account A must not hand A's routing token to account
-    // B: the value is account-scoped, and the owner check drops it.
-    setCredentials({ accessToken: 'access-A', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 })
-    await collect(client.stream(options))
-    setCredentials({ accessToken: 'access-B', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 })
-    await collect(client.stream(options))
-
-    expect(seen[1]!.turnState).toBeNull()
-  })
-})
-
-function collect(stream: AsyncIterable<unknown>): Promise<unknown[]> {
-  const out: unknown[] = []
-  return (async () => {
-    for await (const chunk of stream) out.push(chunk)
-    return out
-  })()
+interface Harness {
+  client: ResponsesClient
+  seen: Array<{ turnState: string | null }>
+  turn(overrides?: Partial<GenerateOptions>): GenerateOptions
+  setCredentials(credentials: StoredOAuthCredentials): Promise<void>
 }
 
-async function harness(): Promise<{
-  client: ResponsesClient
-  seen: Array<{ body: Record<string, unknown>; turnState: string | null }>
-  options: GenerateOptions
-  failNext: (response: Response) => void
-  setCredentials: (credentials: { accessToken: string; refreshToken: string; expiresAt: number }) => void
-}> {
+async function harness(): Promise<Harness> {
   const store = new MemoryTokenStore()
-  const setCredentials = (credentials: { accessToken: string; refreshToken: string; expiresAt: number }) => {
-    current = credentials
-  }
-  let current = { accessToken: 'access-1', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 }
-  await store.save(current)
+  await store.save({ accessToken: 'access-1', refreshToken: 'r1', expiresAt: Date.now() + 3_600_000 })
   const oauth = new OAuthService(store)
-  const seen: Array<{ body: Record<string, unknown>; turnState: string | null }> = []
-  let pending: Response | undefined
+  const seen: Array<{ turnState: string | null }> = []
 
   const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-    const headers = new Headers(init?.headers)
-    seen.push({ body: JSON.parse(String(init?.body)), turnState: headers.get('x-codex-turn-state') })
-    if (pending !== undefined) {
-      const response = pending
-      pending = undefined
-      return response
-    }
+    seen.push({ turnState: new Headers(init?.headers).get('x-codex-turn-state') })
     return new Response(
       'data: ' + JSON.stringify({ type: 'response.completed', response: {} }) + '\n\n',
       { headers: { 'content-type': 'text/event-stream', 'x-codex-turn-state': 'turn-abc' } },
@@ -90,12 +30,78 @@ async function harness(): Promise<{
     { readImage: async () => { throw new Error('unused') } },
     { fetchFn: fetchFn as unknown as typeof fetch },
   )
-  const options = {
-    provider: 'codex-chatgpt',
-    model: 'gpt-6-sol',
-    sessionId: 'conversation-1',
-    messages: [{ role: 'user', content: 'hi' }],
-  } as unknown as GenerateOptions
 
-  return { client, seen, options, failNext: (response) => { pending = response }, setCredentials }
+  return {
+    client,
+    seen,
+    turn: (overrides = {}) => ({
+      provider: 'codex-chatgpt',
+      model: 'gpt-6-sol',
+      sessionId: 'conversation-1',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      ...overrides,
+    } as unknown as GenerateOptions),
+    setCredentials: async credentials => { await store.save(credentials) },
+  }
 }
+
+async function drain(stream: AsyncIterable<unknown>): Promise<void> {
+  for await (const _chunk of stream) { /* consume */ }
+}
+
+describe('codex turn state scope', () => {
+  it('never reuses one request state for the next request', async () => {
+    const { client, seen, turn } = await harness()
+
+    // A tool loop: the model asks for a tool, the harness runs it, and the
+    // second step asks again. The harness exposes no turn id, so the routing
+    // state is scoped to the request instead. That costs a resend on the rare
+    // follow-up within a turn and removes the risk of carrying a token into a
+    // turn that never issued it.
+    await drain(client.stream(turn()))
+    await drain(client.stream(turn({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'read', arguments: '{}' }] },
+        { role: 'user', content: [{ type: 'text', text: 'tool said ok' }], source: { kind: 'tool', callId: 'c1' } },
+      ],
+    } as Partial<GenerateOptions>)))
+
+    expect(seen.map(entry => entry.turnState)).toEqual([null, null])
+  })
+
+  it('does not carry routing state into the next user turn', async () => {
+    const { client, seen, turn } = await harness()
+
+    await drain(client.stream(turn()))
+    // A different trailing user message is a different turn, so the previous
+    // turn's token must not be replayed into it.
+    await drain(client.stream(turn({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'an answer' }] },
+        { role: 'user', content: [{ type: 'text', text: 'something else' }] },
+      ],
+    } as Partial<GenerateOptions>)))
+
+    expect(seen.map(entry => entry.turnState)).toEqual([null, null])
+  })
+
+  it('drops routing state that another account minted', async () => {
+    const { client, seen, turn, setCredentials } = await harness()
+
+    await drain(client.stream(turn()))
+    // The store is what the client actually reads, so the switch has to happen
+    // there: changing a local variable would not move the auth owner at all.
+    await setCredentials({ accessToken: 'access-B', refreshToken: 'r2', expiresAt: Date.now() + 3_600_000 })
+    await drain(client.stream(turn({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'an answer' }] },
+        { role: 'user', content: [{ type: 'text', text: 'a follow-up' }] },
+      ],
+    } as Partial<GenerateOptions>)))
+
+    expect(seen[1]!.turnState).toBeNull()
+  })
+})

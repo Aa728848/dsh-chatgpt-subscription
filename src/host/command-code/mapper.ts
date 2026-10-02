@@ -691,7 +691,17 @@ export function buildResponsesRequest(
       const { content, toolCalls } = openAIAssistantContent(message)
       if (content !== '') input.push({ role: 'assistant', content })
       for (const call of toolCalls) {
-        input.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments })
+        // Chat Completions nests the name and arguments one level down under
+        // `function`; the Responses item type carries them flat. Reading the
+        // nested shape's top level would emit a tool call with no name and no
+        // arguments, which the next turn's history cannot use.
+        const fn = isRecord(call.function) ? call.function : undefined
+        input.push({
+          type: 'function_call',
+          call_id: call.id,
+          name: typeof fn?.name === 'string' ? fn.name : '',
+          arguments: typeof fn?.arguments === 'string' ? fn.arguments : '{}',
+        })
       }
       continue
     }
@@ -1214,20 +1224,73 @@ function startResponsesToolCall(
   event: Record<string, unknown>,
   item: Record<string, unknown>,
 ): StreamChunk[] {
-  const out = [...closeCurrent(state), ...closeToolCalls(state)]
-  const index = state.blocks.length
+  // Only the current text block closes: several function calls can be started
+  // while an earlier one is still streaming arguments, and closing every pending
+  // call here would truncate the earlier call's arguments.
+  const out = closeCurrent(state)
+  // Each tool call owns its own block index. Reusing the current block count
+  // would give two calls opened before either closed the same index, and the
+  // second block-end would overwrite the first call in the assembled message.
+  const index = state.blocks.length + countPendingToolCalls(state)
   const name = typeof item.name === 'string' ? item.name : ''
-  const id = typeof item.call_id === 'string' ? item.call_id : `call_${String(event.item_id ?? index)}`
+  // Two different identifiers, and they are not interchangeable: `item_id`
+  // names the output item, `call_id` is the tool call id the model will
+  // reference. Argument deltas are keyed by item id, so both are recorded and
+  // the stream is matched on the item id first.
+  const itemId = typeof event.item_id === 'string' ? event.item_id : null
+  const id = typeof item.call_id === 'string' ? item.call_id : `call_${String(itemId ?? index)}`
   const call = { blockIndex: index, id, name, arguments: '', started: true }
   state.toolCalls.set(index, call)
+  if (itemId !== null) responsesItemIndexOf(state).set(itemId, call)
   state.hasToolCall = true
   out.push({ type: 'block-start', index, blockType: 'tool-call' })
   out.push({ type: 'tool-call-delta', index, id: toToolCallId(call.id), name, argumentsDelta: '' })
   return out
 }
 
+/** Item id -> call, held beside the stream state that produced it. */
+const responsesItemIndex = new WeakMap<CommandCodeStreamState, Map<string, PendingToolCall>>()
+
+/**
+ * A wire key no existing call in this stream uses.
+ *
+ * The map is keyed by wire index, and the Responses events for two parallel
+ * calls carry no shared index, so the key is generated here rather than reused
+ * from the block index — which is the same value for two calls that start
+ * before either one has been closed.
+ */
+/** Calls opened but not yet closed, each of which already owns a block index. */
+function countPendingToolCalls(state: CommandCodeStreamState): number {
+  return state.toolCalls.size
+}
+
+function nextToolCallKey(state: CommandCodeStreamState): number {
+  let key = 0
+  while (state.toolCalls.has(key)) key += 1
+  return key
+}
+
+function responsesItemIndexOf(state: CommandCodeStreamState): Map<string, PendingToolCall> {
+  let index = responsesItemIndex.get(state)
+  if (index === undefined) {
+    index = new Map<string, PendingToolCall>()
+    responsesItemIndex.set(state, index)
+  }
+  return index
+}
+
+/**
+ * The call a function-arguments event refers to.
+ *
+ * The event carries `item_id` while the recorded call carries `call_id`, so
+ * matching on the call id alone silently dropped every argument delta. The
+ * call-id fallback stays for a provider that only sends one of the two.
+ */
 function responsesToolCall(state: CommandCodeStreamState, key: unknown): PendingToolCall | undefined {
-  if (typeof key !== 'string') return undefined
+  if (typeof key !== 'string' || key === '') return undefined
+  const byItem = responsesItemIndex.get(state)
+  const match = byItem?.get(key)
+  if (match !== undefined) return match
   for (const call of state.toolCalls.values()) {
     if (call.id === toToolCallId(key)) return call
   }

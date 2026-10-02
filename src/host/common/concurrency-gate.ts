@@ -33,13 +33,16 @@ export class ConcurrencyGate {
    * being blocked by a value nobody verified.
    */
   setLimit(accountId: string, limit: number): void {
+    // A new cap below the current occupancy does not evict holders: they are
+    // already running, and counting them as over-limit would only invite a
+    // double release to hand a stranger a slot that was never free.
     if (!Number.isFinite(limit) || limit <= 0) {
       this.limits.delete(accountId)
       // Anything already queued for a limit that no longer exists is let go.
       this.drain(accountId)
       return
     }
-    this.limits.set(accountId, Math.floor(limit))
+    this.limits.set(accountId, Math.max(Math.floor(limit), this.held.get(accountId) ?? 0))
     this.drain(accountId)
   }
 
@@ -115,11 +118,13 @@ export class ConcurrencyGate {
     const queue = this.queues.get(accountId)
     if (queue === undefined || queue.length === 0) return
     const limit = this.limits.get(accountId)
-    // An uncapped account owes every waiter a slot.
+    // An uncapped account owes every waiter a slot, and every one of them is a
+    // real holder: a waiter released while uncapped still owns its slot, so the
+    // count has to rise for it exactly as it does under a cap.
     const room = limit === undefined ? queue.length : limit - (this.held.get(accountId) ?? 0)
     for (let index = 0; index < room && queue.length > 0; index++) {
       const waiter = queue.shift()!
-      if (limit !== undefined) this.held.set(accountId, (this.held.get(accountId) ?? 0) + 1)
+      this.held.set(accountId, (this.held.get(accountId) ?? 0) + 1)
       waiter.resolve()
     }
     if (queue.length === 0) this.queues.delete(accountId)

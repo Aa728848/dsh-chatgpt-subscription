@@ -11,6 +11,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   FALLBACK_MODELS,
@@ -51,6 +52,15 @@ export interface OllamaAdapterOptions {
   fetchFn?: typeof fetch
   /** Test seam; production reads `/api/tags` with the active account's key. */
   loadCatalog?: (fetchFn: typeof fetch, credentials: OllamaCredentials) => Promise<OllamaCatalogModel[]>
+  /**
+   * Attachment store used to read image bytes for the request.
+   *
+   * DSH delivers an image as a durable reference, not as bytes, so a route that
+   * declares image input has to resolve those references before building the
+   * body. Without it the image is dropped and the turn silently becomes
+   * text-only while the model picker still advertises image support.
+   */
+  attachments?: Pick<AttachmentStore, 'readImage'>
 }
 
 export class OllamaAdapter extends LlmAdapter {
@@ -182,7 +192,7 @@ export class OllamaAdapter extends LlmAdapter {
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const wire = wireForModel(options.model)
-    const request = toOllamaRequest(options)
+    const request = await toOllamaRequest(options, this.options.attachments, signal)
 
     // Account rotation. The payload is key-independent, so it is built once and
     // replayed unchanged while another key can still serve it: a rate-limited or
@@ -298,7 +308,11 @@ export class OllamaAdapter extends LlmAdapter {
 }
 
 /** Project DSH's request shape onto Ollama's, per surface. */
-export function toOllamaRequest(options: GenerateOptions): Omit<OllamaRequest, 'signal'> {
+export async function toOllamaRequest(
+  options: GenerateOptions,
+  attachments?: Pick<AttachmentStore, 'readImage'>,
+  signal?: AbortSignal,
+): Promise<Omit<OllamaRequest, 'signal'>> {
   const messages: OllamaChatMessage[] = []
   // A one-shot caller may pass its system prompt outside the history. A loop-built
   // request leaves it undefined and carries the prompt as the leading message, so
@@ -324,10 +338,13 @@ export function toOllamaRequest(options: GenerateOptions): Omit<OllamaRequest, '
     }
     // DSH can carry a 'developer' role; both Ollama surfaces take it as a system
     // instruction, and sending an unknown role is rejected outright.
+    const images = await imagesFor(message.content, attachments, signal)
     messages.push({
       role: message.role === 'developer' ? 'system' : message.role,
       content: textOf(message.content),
-      ...imagesFor(message.content).length > 0 ? { images: imagesFor(message.content) } : {},
+      // Absent rather than an empty array: a turn with no image must not carry
+      // the key at all, so a model without image support sees an unchanged body.
+      ...(images === undefined ? {} : { images }),
     })
   }
   const request: Omit<OllamaRequest, 'signal'> = { model: options.model, messages }
@@ -375,20 +392,61 @@ function assistantToolCalls(content: unknown): { id: string; name: string; argum
  * Only inline data is sent: a remote URL is not fetched here, so a link the
  * model cannot resolve would otherwise become a silently empty turn.
  */
-function imagesFor(content: unknown): string[] {
-  if (!Array.isArray(content)) return []
+async function imagesFor(
+  content: unknown,
+  attachments: Pick<AttachmentStore, 'readImage'> | undefined,
+  signal?: AbortSignal,
+): Promise<string[] | undefined> {
+  if (!Array.isArray(content)) return undefined
   const images: string[] = []
   for (const part of content) {
     if (typeof part !== 'object' || part === null) continue
     const record = part as Record<string, unknown>
     if (record.type !== 'image') continue
-    const source = typeof record.source === 'object' && record.source !== null
-      ? record.source as Record<string, unknown>
-      : record
-    if (typeof source.data === 'string' && source.data !== '') images.push(source.data)
-    else if (typeof record.image === 'string' && record.image !== '') images.push(record.image)
+    // A durable attachment reference is how DSH delivers an image; the bytes
+    // have to be read before the body is built.
+    const reference = isImageRef(record.attachment)
+      ? record.attachment
+      : isImageRef(record.source) ? record.source : null
+    if (reference !== null) {
+      if (attachments === undefined) continue
+      const loaded = await attachments.readImage(reference, signal)
+      if (loaded === null) continue
+      images.push(encodeImage(loaded.data, loaded.ref.mediaType))
+      continue
+    }
+    // Already-inline bytes, for a caller that built the request by hand.
+    const inline = record.source
+    if (typeof inline === 'object' && inline !== null) {
+      const data = (inline as Record<string, unknown>).data
+      if (typeof data === 'string' && data !== '') {
+        images.push(encodeImage(data, asMediaType((inline as Record<string, unknown>).mediaType)))
+        continue
+      }
+    }
+    if (typeof record.image === 'string' && record.image !== '') images.push(record.image)
   }
-  return images
+  return images.length > 0 ? images : undefined
+}
+
+function isImageRef(value: unknown): value is ImageAttachmentRef {
+  return typeof value === 'object' && value !== null && typeof (value as { attachmentId?: unknown }).attachmentId === 'string'
+}
+
+function asMediaType(value: unknown): string {
+  return typeof value === 'string' && value !== '' ? value : 'image/png'
+}
+
+/**
+ * The base64 payload Ollama wants, with or without a data URL prefix.
+ *
+ * The native surface takes the bare payload; a `data:` URL is accepted by both
+ * surfaces once, so one encoding serves either and avoids a route-specific
+ * guess about what a given model accepts.
+ */
+function encodeImage(data: Uint8Array | string, mediaType: string): string {
+  const base64 = typeof data === 'string' ? data : Buffer.from(data).toString('base64')
+  return base64.startsWith('data:') ? base64 : `data:${mediaType};base64,${base64}`
 }
 
 /**
