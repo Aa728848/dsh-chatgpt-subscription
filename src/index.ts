@@ -43,6 +43,10 @@ import {
   registerCommandCodePreferenceStore,
 } from './host/command-code/token-store.ts'
 import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/command-code/types.ts'
+import { OllamaAdapter } from './host/ollama/adapter.ts'
+import { OllamaAccountPool } from './host/ollama/account-pool.ts'
+import { PROVIDER_ID as OLLAMA_PROVIDER_ID, PROVIDER_NAME as OLLAMA_PROVIDER_NAME } from './host/ollama/types.ts'
+import { FileCredentialStore as OllamaCredentialStore, FileModelSettingsStore as OllamaModelSettingsStore } from './host/ollama/token-store.ts'
 import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
 import { KimiCodeAccountPool } from './host/kimi-code/account-pool.ts'
 import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
@@ -380,6 +384,21 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     )
     let commandCodeRegistration: AdapterRegistrationHandle | undefined
     let commandCodeConflict: string | null = null
+
+    // Ollama: API-key accounts rotated through the shared pool kernel. The route
+    // is claimed the same contended way as the others, so a second adapter family
+    // that already owns the id is reported rather than silently displaced.
+    const ollamaStore = new OllamaCredentialStore()
+    const ollamaModelSettings = new OllamaModelSettingsStore()
+    const ollamaAccountPool = new OllamaAccountPool({ store: ollamaStore })
+    const ollamaAdapter = new OllamaAdapter(
+      ollamaStore,
+      ollamaModelSettings,
+      { fetchFn: proxyFetch },
+      ollamaAccountPool,
+    )
+    let ollamaRegistration: AdapterRegistrationHandle | undefined
+    let ollamaConflict: string | null = null
     // The Kimi Code route is contended the same way: another adapter family
     // may already own the id, so it is claimed when free and reported when not.
     // The video reader this route needs: DSH's attachment service is image-only,
@@ -423,6 +442,24 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           claimKimiCodeRoute()
         })
       : undefined
+
+    const claimOllamaRoute = (): void => {
+      if (ollamaRegistration !== undefined) return
+      try {
+        ollamaRegistration = ctx.llm.registerAdapter([OLLAMA_PROVIDER_ID], ollamaAdapter)
+        if (ollamaConflict !== null) {
+          ctx.logger.info(`[dsh-chatgpt-subscription] ${OLLAMA_PROVIDER_NAME} route "${OLLAMA_PROVIDER_ID}" is now served by this plugin`)
+        }
+        ollamaConflict = null
+      } catch (error) {
+        ollamaConflict = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(
+          `[dsh-chatgpt-subscription] provider route "${OLLAMA_PROVIDER_ID}" is already owned by another adapter; `
+          + `${OLLAMA_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${ollamaConflict})`,
+        )
+      }
+    }
+    claimOllamaRoute()
 
     const claimCommandCodeRoute = (): void => {
       if (commandCodeRegistration !== undefined) return
