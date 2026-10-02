@@ -29,6 +29,17 @@ export class OllamaApi {
   refreshCatalog(): Promise<{ models: unknown[] }> {
     return post(`${API}/catalog/refresh`, {})
   }
+
+  /**
+   * Replace the enabled-model selection.
+   *
+   * The whole list is sent rather than a single id's new state, because the card
+   * offers bulk select and unselect and would otherwise have to read the current
+   * selection before it could answer 'turn this one off'.
+   */
+  setEnabledModels(enabledModelIds: string[]): Promise<{ enabledModelIds: string[] }> {
+    return post(`${API}/models`, { enabledModelIds })
+  }
 }
 
 async function post<T>(url: string, body: object): Promise<T> {

@@ -25,6 +25,7 @@ const STATUS: OllamaWebStatus = {
     rotationStrategy: 'round-robin',
   },
   models: [{ id: 'gpt-oss:120b-cloud' }, { id: 'gemma4:31b' }],
+  enabledModelIds: [],
   usable: true,
   catalogSynced: true,
 }
@@ -103,6 +104,17 @@ describe('OllamaSection', () => {
     // The form is closed until the user asks for it, and even then it is an empty
     // input - a stored key has no path into the DOM at all.
     expect(el.innerHTML).not.toContain('sk-')
+  })
+
+  it('offers a checkbox per model, so the line can be switched off', async () => {
+    const el = await render()
+    // Every other line lets the user turn its models off; without this the
+    // Ollama models always appear in the picker with no way to hide them.
+    const boxes = el.querySelectorAll('input[type="checkbox"]')
+    expect(boxes).toHaveLength(2)
+    // ...and the two bulk controls its siblings ship.
+    expect(el.textContent).toContain(zh.selectAll)
+    expect(el.textContent).toContain(zh.unselectAll)
   })
 
   it('shows each key own consumption, not a shared pool total', async () => {

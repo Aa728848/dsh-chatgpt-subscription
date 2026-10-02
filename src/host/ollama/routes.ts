@@ -73,6 +73,7 @@ export async function getOllamaWebStatus(options: OllamaRouteOptions): Promise<O
   return {
     pool,
     models: settings.catalogModels.map(model => ({ id: model.id, ...(model.name === undefined ? {} : { name: model.name }) })),
+    enabledModelIds: settings.enabledModelIds,
     usable: accounts.some(account => isUsable(account, now)),
     catalogSynced: settings.catalogModels.length > 0,
   }

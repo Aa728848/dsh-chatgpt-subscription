@@ -44,6 +44,9 @@ export const zh = {
   catalogFailed: '无法从 Ollama 读取模型列表。',
   modelCount: '{count} 个模型',
   noModels: '暂无可用模型。',
+  selectAll: '全选',
+  unselectAll: '全不选',
+  noneSelected: '未选择任何模型，该线路不会出现在模型选择器中。',
 
   // Stated plainly, because these are documented service limits and a user who
   // hits them deserves to know they are not a bug here.
@@ -100,6 +103,9 @@ export const en = {
   catalogFailed: 'Could not read the model list from Ollama.',
   modelCount: '{count} model(s)',
   noModels: 'No models available.',
+  selectAll: 'Select all',
+  unselectAll: 'Clear all',
+  noneSelected: 'No models are selected, so this line will not appear in the model picker.',
 
   limitsSection: 'Documented limits',
   limitsHint: 'Ollama Cloud documents these limits; this line does not work around them:',

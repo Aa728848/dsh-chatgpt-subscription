@@ -42,10 +42,14 @@ export function OllamaSection(props: Props): React.ReactElement {
   const [key, setKey] = useState('')
   const [alias, setAlias] = useState('')
   const [showKeyForm, setShowKeyForm] = useState(false)
+  /** Ids the user has switched on. Empty means 'no filter', i.e. all of them. */
+  const [enabled, setEnabled] = useState<Set<string>>(new Set())
 
   const reload = useCallback(async () => {
     try {
-      setStatus(await API.status())
+      const next = await API.status()
+      setStatus(next)
+      setEnabled(new Set(next.enabledModelIds))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -92,6 +96,36 @@ export function OllamaSection(props: Props): React.ReactElement {
       return API.status()
     })
   }, [run])
+
+  // An empty selection means 'everything the catalog returned', which is what the
+  // adapter reads as no filter. Modelling it that way rather than storing an
+  // explicit all-ids list means a model the service adds later is not silently
+  // hidden by a selection made before it existed.
+  const isModelEnabled = useCallback((id: string): boolean => {
+    return enabled.size === 0 || enabled.has(id)
+  }, [enabled])
+
+  const applyEnabled = useCallback((next: string[]) => {
+    void run('models', async () => {
+      const result = await API.setEnabledModels(next)
+      setEnabled(new Set(result.enabledModelIds))
+      return API.status()
+    })
+  }, [run])
+
+  const toggleModel = useCallback((id: string, checked: boolean) => {
+    if (status === null) return
+    const current = status.models.filter(model => isModelEnabled(model.id)).map(model => model.id)
+    const next = checked
+      ? [...new Set([...current, id])]
+      : current.filter(entry => entry !== id)
+    applyEnabled(next)
+  }, [status, isModelEnabled, applyEnabled])
+
+  const setAllModels = useCallback((selectAll: boolean) => {
+    if (status === null || status.models.length === 0) return
+    applyEnabled(selectAll ? status.models.map(model => model.id) : [])
+  }, [status, applyEnabled])
 
   const t = zh
   const pool = status?.pool
@@ -206,9 +240,32 @@ export function OllamaSection(props: Props): React.ReactElement {
           </div>
         )}
         {status !== null && status.models.length > 0 && (
-          <p className="dsha-muted" style={{ fontSize: 12 }}>
-            {t.modelCount.replace('{count}', String(status.models.length))}
-          </p>
+          <>
+            <p className="dsha-muted" style={{ fontSize: 12 }}>
+              {t.modelCount.replace('{count}', String(status.models.length))}
+            </p>
+            <div className="dsha-models" aria-label="Ollama Models">
+              {status.models.map((model) => (
+                <label key={model.id} title={model.id}>
+                  <input
+                    type="checkbox"
+                    checked={isModelEnabled(model.id)}
+                    disabled={busy !== null}
+                    onChange={(event) => void toggleModel(model.id, event.currentTarget.checked)}
+                  />
+                  <span>{model.name ?? model.id}</span>
+                </label>
+              ))}
+            </div>
+            <div className="dsha-actions">
+              <button className="dsha-btn" disabled={busy !== null} onClick={() => void setAllModels(true)}>
+                {t.selectAll}
+              </button>
+              <button className="dsha-btn" disabled={busy !== null} onClick={() => void setAllModels(false)}>
+                {t.unselectAll}
+              </button>
+            </div>
+          </>
         )}
       </div>
 
