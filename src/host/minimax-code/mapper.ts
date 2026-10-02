@@ -329,8 +329,32 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
   return blocks
 }
 
+/**
+ * Native blocks to replay for one assistant turn, as the service issued them.
+ *
+ * Read from the message's stored replay state rather than rebuilt from the
+ * visible reasoning text: a rebuilt block is not the block the model signed, and
+ * the difference is exactly what the provider validates. Falls back to nothing
+ * when a turn carries no stored state, which is the current behaviour for
+ * history this route did not produce.
+ */
+function replayThinkingBlocks(message: Message): AnthropicBlock[] {
+  const source = message.source
+  if (source === undefined || source.replayState === undefined) return []
+  const state = source.replayState
+  if (!isRecord(state)) return []
+  // The harness stores the envelope's response half, so the blocks sit one level
+  // down rather than at the top.
+  const response = state['response']
+  const container = isRecord(response) ? response : state
+  const thinking = container['minimaxThinking']
+  if (!Array.isArray(thinking)) return []
+  return thinking.filter(isRecord)
+}
+
 function anthropicAssistantContent(message: Message): AnthropicBlock[] {
-  const blocks: AnthropicBlock[] = []
+  // The service's own thinking blocks come first, exactly as issued.
+  const blocks: AnthropicBlock[] = replayThinkingBlocks(message)
   for (const block of message.content) {
     if (!isRecord(block)) continue
     if (block.type === 'text' && typeof block.text === 'string') {
@@ -675,7 +699,10 @@ interface PendingToolCall {
 }
 
 /** Stream accumulator for one Messages response. */
+/** Native blocks the service issued for this turn, kept for exact replay. */
 export interface MinimaxStreamState {
+  /** Verbatim `thinking` / `redacted_thinking` blocks, signatures included. */
+  replayBlocks: AnthropicBlock[]
   blocks: OutboundContentBlock[]
   current: { index: number; type: 'text' | 'reasoning'; text: string } | null
   /** wire content-block index -> accumulating call. */
@@ -696,6 +723,7 @@ export interface MinimaxStreamState {
 
 export function createStreamState(): MinimaxStreamState {
   return {
+    replayBlocks: [],
     blocks: [],
     current: null,
     toolCalls: new Map(),
@@ -769,7 +797,16 @@ export function closeMinimaxStream(state: MinimaxStreamState): StreamChunk[] {
   state.finished = true
   const out = [...closeCurrent(state), ...closeToolCalls(state)]
   if (state.sawUsage) out.push({ type: 'usage', usage: tokenUsage(state) })
-  out.push({ type: 'finish', reason: finishReasonFor(state) })
+  out.push({
+    type: 'finish',
+    reason: finishReasonFor(state),
+    // The service's own thinking blocks travel with the message so the next turn
+    // can replay them verbatim. A turn with no thinking carries no state, which
+    // keeps the envelope absent rather than empty.
+    ...(state.replayBlocks.length > 0
+      ? { replayState: { response: { minimaxThinking: state.replayBlocks } } }
+      : {}),
+  })
   return out
 }
 
@@ -825,6 +862,12 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
       return out
     }
     if (blockType === 'thinking' || blockType === 'redacted_thinking') {
+      // Keep the block exactly as the service issued it. The reasoning trace is
+      // model state, not display text: replaying a hand-rebuilt block loses the
+      // signature that ties it to this model and this turn, and a trace sent
+      // without its signature is either rejected or no longer the model's own.
+      const block = isRecord(event.content_block) ? event.content_block : {}
+      state.replayBlocks.push(structuredClone(block))
       out.push(...openTextBlock(state, 'reasoning'))
       state.contentIndexes.set(contentIndex, state.current!.index)
       return out
