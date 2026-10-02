@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ResponsesWebSocketTransport, type SocketLike } from '../src/host/responses-websocket.ts'
 
 class FakeSocket implements SocketLike {
@@ -104,12 +104,20 @@ describe('responses websocket transport', () => {
   })
 
   it('recycles an idle socket instead of leaking it', async () => {
-    const { value, sockets } = transport({ idleTimeoutMs: 5 })
+    // A fake clock, so this asserts the recycling rule rather than how long a
+    // real timer happens to take; a wall-clock wait would make the suite flaky.
+    vi.useFakeTimers()
+    try {
+      const { value, sockets } = transport({ idleTimeoutMs: 1_000 })
 
-    await value.connect('s1', 'account-a')
-    await new Promise(resolve => setTimeout(resolve, 20))
+      await value.connect('s1', 'account-a')
+      expect(value.openSessions).toBe(1)
 
-    expect(sockets[0]!.closed).toBe(true)
-    expect(value.openSessions).toBe(0)
+      vi.advanceTimersByTime(1_000)
+      expect(sockets[0]!.closed).toBe(true)
+      expect(value.openSessions).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
