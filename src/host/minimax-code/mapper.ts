@@ -92,6 +92,7 @@ import {
   minimaxCodeModelDef,
   type MinimaxCodeCatalogModel,
 } from './model-catalog.ts'
+import { createHash } from 'node:crypto'
 import {
   ANTHROPIC_VERSION,
   CONTEXT_HEADROOM_TOKENS,
@@ -99,6 +100,7 @@ import {
   DEFAULT_MAX_MESSAGE_BODY_BYTES,
   DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   DEFAULT_MAX_TOKENS,
+  PROVIDER_ID,
   PROVIDER_NAME,
   maxMessageBodyBytes,
   maxRequestImageBytes,
@@ -140,6 +142,45 @@ function safeJsonParse(text: string): unknown {
 
 function sanitizeText(text: string): string {
   return text.replace(/\0/g, '')
+}
+
+/** Provenance scope for safe thinking replay. */
+export interface MinimaxReplayScope {
+  route: string
+  model: string
+  authOwner: string
+  provider?: string
+}
+
+function jsonSafeValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (value === null) return null
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return value
+    case 'number':
+      if (!Number.isFinite(value)) return undefined
+      return Object.is(value, -0) ? 0 : value
+    case 'object':
+      break
+    default:
+      return undefined
+  }
+  if (seen.has(value)) return undefined
+  seen.add(value)
+  try {
+    if (Array.isArray(value)) {
+      return Array.from(value, (item) => jsonSafeValue(item, seen) ?? null)
+    }
+    const record: Record<string, unknown> = {}
+    for (const key of Object.keys(value)) {
+      const child = jsonSafeValue((value as Record<string, unknown>)[key], seen)
+      if (child !== undefined) record[key] = child
+    }
+    return record
+  } finally {
+    seen.delete(value)
+  }
 }
 
 /** Media types the wire accepts as inline base64. */
@@ -338,30 +379,132 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
  * when a turn carries no stored state, which is the current behaviour for
  * history this route did not produce.
  */
-function replayThinkingBlocks(message: Message): AnthropicBlock[] {
-  const source = message.source
-  if (source === undefined || source.replayState === undefined) return []
-  const state = source.replayState
-  if (!isRecord(state)) return []
-  // The harness stores the envelope's response half, so the blocks sit one level
-  // down rather than at the top.
-  const response = state['response']
-  const container = isRecord(response) ? response : state
-  const thinking = container['minimaxThinking']
-  if (!Array.isArray(thinking)) return []
-  return thinking.filter(isRecord)
+/** Fingerprint the entire array of emitted visible blocks in an assistant message. */
+function computeVisibleContentHash(blocks: unknown): string {
+  if (!Array.isArray(blocks)) return ''
+  const canonical = blocks.map((b) => {
+    if (!isRecord(b)) return null
+    const type = asString(b.type) ?? ''
+    if (type === 'text' || type === 'reasoning') return [type, sanitizeText(asString(b.text) ?? '')]
+    if (type === 'tool-call') return [type, asString(b.id) ?? '', asString(b.name) ?? '', toolCallArguments(b.arguments)]
+    return [type, jsonSafeValue(b)]
+  })
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 32)
 }
 
-function anthropicAssistantContent(message: Message): AnthropicBlock[] {
-  // The service's own thinking blocks come first, exactly as issued.
-  const blocks: AnthropicBlock[] = replayThinkingBlocks(message)
-  for (const block of message.content) {
+/**
+ * Verbatim wire block to replay for one reasoning block.
+ *
+ * Verifies route, model, and auth owner provenance. Fails safely on legacy unscoped state
+ * or any mismatch, dropping the replay block rather than submitting invalid state.
+ * Preserves raw native text and signature binding.
+ */
+function replayedThinkingBlock(
+  message: Message,
+  index: number,
+  expectedScope?: MinimaxReplayScope,
+  block?: Record<string, unknown>,
+): AnthropicBlock | undefined {
+  const source = message.source
+  if (source === undefined || source === null || !isRecord(source)) return undefined
+  // Check source provider and model when declared
+  if (source.provider && source.provider !== PROVIDER_ID && source.provider !== 'dsh-chatgpt-subscription') {
+    return undefined
+  }
+  if (source.model && expectedScope && source.model !== expectedScope.model) {
+    return undefined
+  }
+  const state = source.replayState
+  if (!isRecord(state)) return undefined
+
+  // Inspect provenance envelope (handles both state.response and flattened state)
+  const resp = isRecord(state.response) ? state.response : state
+  const stateRoute = asString(resp.route) ?? asString(resp.provider)
+  const stateModel = asString(resp.model)
+  const stateAuthOwner = asString(resp.authOwner)
+
+  // Fail safely on legacy unscoped state: all three scope fields MUST be non-empty strings
+  if (!stateRoute || !stateModel || !stateAuthOwner || stateAuthOwner.trim() === '') {
+    return undefined
+  }
+
+  // Provenance verification against expectedScope: empty authOwner never creates an accepted scope
+  if (expectedScope === undefined) return undefined
+  if (expectedScope.route && stateRoute !== expectedScope.route) return undefined
+  if (expectedScope.model && stateModel !== expectedScope.model) return undefined
+  if (!expectedScope.authOwner || expectedScope.authOwner.trim() === '' || stateAuthOwner !== expectedScope.authOwner) {
+    return undefined
+  }
+
+  // Retrieve native block by block-index mapping, response.blocks, or response.nativeBlocks
+  let candidate: AnthropicBlock | undefined
+  if (Array.isArray(state.blocks)) {
+    const entry = state.blocks[index]
+    if (isRecord(entry)) candidate = entry as AnthropicBlock
+  }
+  if (candidate === undefined && Array.isArray(resp.blocks)) {
+    const entry = resp.blocks[index]
+    if (isRecord(entry)) candidate = entry as AnthropicBlock
+  }
+  if (candidate === undefined && Array.isArray(resp.nativeBlocks)) {
+    const entry = resp.nativeBlocks[index]
+    if (isRecord(entry)) candidate = entry as AnthropicBlock
+  }
+
+  if (candidate === undefined) return undefined
+
+  // Envelope binding: reject if turn blocks were compacted, reordered, or truncated
+  if (Array.isArray(state.blocks) && state.blocks.length !== message.content.length) return undefined
+  if (Array.isArray(resp.blocks) && resp.blocks.length !== message.content.length) return undefined
+
+  // Full content hash binding: require nonempty visibleContentHash and exact match
+  const stateVisibleHash = asString(resp.visibleContentHash)
+  if (!stateVisibleHash || stateVisibleHash.trim() === '') return undefined
+  if (computeVisibleContentHash(message.content) !== stateVisibleHash) return undefined
+
+  // Authoritative raw signed block: require candidate.type exactly 'thinking' or 'redacted_thinking'
+  if (candidate.type !== 'thinking' && candidate.type !== 'redacted_thinking') {
+    return undefined
+  }
+
+  const visibleText = asString(block?.text) ?? ''
+
+  if (candidate.type === 'redacted_thinking') {
+    // Redacted thinking carries no visible text
+    if (visibleText !== '') return undefined
+    const data = asString(candidate.data)
+    if (!data || data.trim() === '') return undefined
+    return structuredClone(candidate)
+  }
+
+  // Candidate is 'thinking': strictly bind candidate native text to visible reasoning text
+  const nativeThinking = asString(candidate.thinking) ?? ''
+  if (sanitizeText(nativeThinking) !== sanitizeText(visibleText)) {
+    return undefined
+  }
+  const signature = asString(candidate.signature)
+  if (!signature || signature.trim() === '') return undefined
+
+  return structuredClone(candidate)
+}
+
+function anthropicAssistantContent(
+  message: Message,
+  expectedScope?: MinimaxReplayScope,
+): AnthropicBlock[] {
+  const blocks: AnthropicBlock[] = []
+  if (!Array.isArray(message.content)) return blocks
+
+  for (let index = 0; index < message.content.length; index++) {
+    const block = message.content[index]
     if (!isRecord(block)) continue
+
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
       if (text !== '') blocks.push({ type: 'text', text })
       continue
     }
+
     if (block.type === 'tool-call' && typeof block.name === 'string') {
       const parsed = safeJsonParse(toolCallArguments(block.arguments))
       blocks.push({
@@ -370,10 +513,18 @@ function anthropicAssistantContent(message: Message): AnthropicBlock[] {
         name: block.name,
         input: isRecord(parsed) ? parsed : {},
       })
+      continue
     }
-    // Reasoning blocks are dropped on this wire: a thinking block must carry the
-    // provider signature that produced it, and an unsigned one is rejected.
+
+    if (block.type === 'reasoning') {
+      const replay = replayedThinkingBlock(message, index, expectedScope, block)
+      if (replay !== undefined) {
+        blocks.push(replay)
+      }
+      continue
+    }
   }
+
   return blocks
 }
 
@@ -591,6 +742,10 @@ export interface MinimaxRequestOptions {
    * array because a plain string cannot carry a marker.
    */
   cacheControl?: boolean
+  /** Nonsecret hash of the adapter-selected auth owner, required to scope replay. */
+  authOwner?: string
+  /** Route identity for replay scoping; defaults to PROVIDER_ID. */
+  route?: string
 }
 
 /** Build one Anthropic Messages body for this subscription. */
@@ -599,6 +754,15 @@ export function buildMinimaxRequest(
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   request: MinimaxRequestOptions = {},
 ): Record<string, unknown> {
+  const expectedScope: MinimaxReplayScope | undefined = request.authOwner !== undefined
+    ? {
+        route: request.route ?? PROVIDER_ID,
+        model: options.model,
+        authOwner: request.authOwner,
+        provider: PROVIDER_ID,
+      }
+    : undefined
+
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message)) {
@@ -608,7 +772,7 @@ export function buildMinimaxRequest(
     entries.push({
       role: message.role === 'assistant' ? 'assistant' : 'user',
       content: message.role === 'assistant'
-        ? anthropicAssistantContent(message)
+        ? anthropicAssistantContent(message, expectedScope)
         : anthropicUserContent(message, images),
     })
   }
@@ -701,10 +865,17 @@ interface PendingToolCall {
 /** Stream accumulator for one Messages response. */
 /** Native blocks the service issued for this turn, kept for exact replay. */
 export interface MinimaxStreamState {
-  /** Verbatim `thinking` / `redacted_thinking` blocks, signatures included. */
-  replayBlocks: AnthropicBlock[]
-  /** wire content index -> the replay block that content fills in. */
-  replayIndexes: Map<number, AnthropicBlock>
+  provenance?: MinimaxReplayScope
+  /** Native blocks by DSH block index (null if text/tool-call that has no native thinking). */
+  replayBlocks: (AnthropicBlock | null)[]
+  /** Wire content index -> pending thinking block info. */
+  pendingThinking: Map<number, {
+    dshIndex: number
+    kind: 'thinking' | 'redacted_thinking'
+    text: string
+    signature: string
+    data?: string
+  }>
   blocks: OutboundContentBlock[]
   current: { index: number; type: 'text' | 'reasoning'; text: string } | null
   /** wire content-block index -> accumulating call. */
@@ -723,10 +894,27 @@ export interface MinimaxStreamState {
   sawUsage: boolean
 }
 
-export function createStreamState(): MinimaxStreamState {
+export interface MinimaxStreamStateOptions {
+  model?: string
+  authOwner?: string
+  route?: string
+  provider?: string
+}
+
+export function createStreamState(options?: MinimaxStreamStateOptions): MinimaxStreamState {
+  const provenance: MinimaxReplayScope | undefined = (options?.model && options?.authOwner)
+    ? {
+        route: options.route ?? PROVIDER_ID,
+        model: options.model,
+        authOwner: options.authOwner,
+        provider: options.provider ?? PROVIDER_ID,
+      }
+    : undefined
+
   return {
+    provenance,
     replayBlocks: [],
-    replayIndexes: new Map(),
+    pendingThinking: new Map(),
     blocks: [],
     current: null,
     toolCalls: new Map(),
@@ -753,27 +941,12 @@ function closeCurrent(state: MinimaxStreamState): StreamChunk[] {
   return [{ type: 'block-end', index, block }]
 }
 
-/**
- * The replay block a content index fills, if this turn opened one.
- *
- * Blocks are matched by the wire's own content index rather than by position,
- * because a response can interleave thinking, text and tool blocks and only the
- * index says which block a later delta belongs to.
- */
-function replayBlockFor(
-  state: MinimaxStreamState,
-  contentIndex: number,
-  block?: AnthropicBlock,
-): AnthropicBlock | undefined {
-  if (block !== undefined) state.replayIndexes.set(contentIndex, block)
-  return state.replayIndexes.get(contentIndex)
-}
-
 function openTextBlock(state: MinimaxStreamState, type: 'text' | 'reasoning'): StreamChunk[] {
   const out = closeCurrent(state)
   const index = state.blocks.length
   state.current = { index, type, text: '' }
   state.blocks.push({ type, text: '' })
+  state.replayBlocks[index] = null
   out.push({ type: 'block-start', index, blockType: type })
   return out
 }
@@ -788,6 +961,7 @@ function closeToolCalls(state: MinimaxStreamState): StreamChunk[] {
       arguments: call.arguments === '' ? '{}' : call.arguments,
     }
     state.blocks[call.blockIndex] = block
+    state.replayBlocks[call.blockIndex] = null
     out.push({ type: 'block-end', index: call.blockIndex, block })
     state.toolCalls.delete(wireIndex)
   }
@@ -816,15 +990,41 @@ export function closeMinimaxStream(state: MinimaxStreamState): StreamChunk[] {
   state.finished = true
   const out = [...closeCurrent(state), ...closeToolCalls(state)]
   if (state.sawUsage) out.push({ type: 'usage', usage: tokenUsage(state) })
+
+  const paddedBlocks = state.blocks.map((_, i) => {
+    const b = state.replayBlocks[i]
+    return b !== undefined && b !== null ? (jsonSafeValue(b) as AnthropicBlock) : null
+  })
+  const replayThinking = paddedBlocks.filter((b): b is AnthropicBlock => b !== null)
+  const hasReplay = replayThinking.length > 0
+
+  const visibleContentHash = computeVisibleContentHash(state.blocks)
+  const replayState = hasReplay
+    ? (state.provenance
+      ? {
+          response: {
+            provider: state.provenance.provider ?? PROVIDER_ID,
+            route: state.provenance.route ?? PROVIDER_ID,
+            model: state.provenance.model,
+            authOwner: state.provenance.authOwner,
+            visibleContentHash,
+            minimaxThinking: replayThinking,
+          },
+          blocks: paddedBlocks,
+        }
+      : {
+          response: {
+            visibleContentHash,
+            minimaxThinking: replayThinking,
+          },
+          blocks: paddedBlocks,
+        })
+    : undefined
+
   out.push({
     type: 'finish',
     reason: finishReasonFor(state),
-    // The service's own thinking blocks travel with the message so the next turn
-    // can replay them verbatim. A turn with no thinking carries no state, which
-    // keeps the envelope absent rather than empty.
-    ...(state.replayBlocks.length > 0
-      ? { replayState: { response: { minimaxThinking: state.replayBlocks } } }
-      : {}),
+    ...(replayState !== undefined ? { replayState } : {}),
   })
   return out
 }
@@ -881,16 +1081,23 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
       return out
     }
     if (blockType === 'thinking' || blockType === 'redacted_thinking') {
-      // Keep the block exactly as the service issued it, and keep a handle on it
-      // so the deltas that follow can be folded in. The reasoning trace is model
-      // state, not display text: the text arrives over many `thinking_delta`
-      // events and the signature over `signature_delta`, so storing only the
-      // opening block — which is typically empty — replays an empty trace.
-      const block = isRecord(event.content_block) ? structuredClone(event.content_block) : {}
-      state.replayBlocks.push(block)
-      replayBlockFor(state, contentIndex, block)
-      out.push(...openTextBlock(state, 'reasoning'))
-      state.contentIndexes.set(contentIndex, state.current!.index)
+      const index = state.blocks.length
+      const kind: 'thinking' | 'redacted_thinking' = blockType === 'redacted_thinking' ? 'redacted_thinking' : 'thinking'
+      const data = asString(block.data) ?? ''
+      const signature = asString(block.signature) ?? ''
+      const thinking = asString(block.thinking) ?? ''
+      state.current = { index, type: 'reasoning', text: kind === 'thinking' ? thinking : '' }
+      state.blocks.push({ type: 'reasoning', text: state.current.text })
+      const initialReplay: AnthropicBlock = isRecord(event.content_block)
+        ? structuredClone(event.content_block)
+        : { type: blockType }
+      state.replayBlocks[index] = initialReplay
+      state.pendingThinking.set(contentIndex, { dshIndex: index, kind, text: thinking, signature, data })
+      state.contentIndexes.set(contentIndex, index)
+      out.push({ type: 'block-start', index, blockType: 'reasoning' })
+      if (state.current.text !== '') {
+        out.push({ type: 'reasoning-delta', index, text: state.current.text })
+      }
       return out
     }
     out.push(...openTextBlock(state, 'text'))
@@ -919,19 +1126,43 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
       return out
     }
 
-    // The signature is model state that belongs to the replayed block, so it is
-    // accumulated onto that block rather than only shown.
     if (deltaType === 'signature_delta') {
-      const signature = asString(delta.signature)
-      const replay = replayBlockFor(state, contentIndex)
-      if (replay !== undefined && signature !== undefined && signature !== '') {
-        replay.signature = (asString(replay.signature) ?? '') + signature
+      const signature = asString(delta.signature) ?? ''
+      const pending = state.pendingThinking.get(contentIndex)
+      if (pending !== undefined && signature !== '') {
+        pending.signature += signature
+        const replay = state.replayBlocks[pending.dshIndex]
+        if (replay !== undefined && replay !== null) {
+          replay.signature = (asString(replay.signature) ?? '') + signature
+        }
+      }
+      return out
+    }
+
+    if (deltaType === 'data_delta') {
+      const data = asString(delta.data) ?? ''
+      const pending = state.pendingThinking.get(contentIndex)
+      if (pending !== undefined && data !== '') {
+        pending.data = (pending.data ?? '') + data
+        const replay = state.replayBlocks[pending.dshIndex]
+        if (replay !== undefined && replay !== null) {
+          replay.data = (asString(replay.data) ?? '') + data
+        }
       }
       return out
     }
 
     const text = deltaType === 'thinking_delta' ? asString(delta.thinking) : asString(delta.text)
     if (text !== undefined && text !== '') {
+      const pending = state.pendingThinking.get(contentIndex)
+      if (pending !== undefined) {
+        pending.text += text
+        const replay = state.replayBlocks[pending.dshIndex]
+        if (replay !== undefined && replay !== null) {
+          const field = replay.type === 'redacted_thinking' ? 'data' : 'thinking'
+          replay[field] = (asString(replay[field]) ?? '') + text
+        }
+      }
       const index = state.contentIndexes.get(contentIndex) ?? state.current?.index
       const kind: 'text' | 'reasoning' = deltaType === 'thinking_delta' ? 'reasoning' : 'text'
       if (state.current === null || state.current.index !== index) {
@@ -939,17 +1170,9 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
         const next = state.blocks.length
         state.current = { index: next, type: kind, text: '' }
         state.blocks.push({ type: kind, text: '' })
+        state.replayBlocks[next] = null
         state.contentIndexes.set(contentIndex, next)
         out.push({ type: 'block-start', index: next, blockType: kind })
-      }
-      // Fold the visible text into the replay block as well, so the block that
-      // goes back to the service carries the same trace the model produced.
-      if (kind === 'reasoning') {
-        const replay = replayBlockFor(state, contentIndex)
-        if (replay !== undefined) {
-          const field = replay.type === 'redacted_thinking' ? 'data' : 'thinking'
-          replay[field] = (asString(replay[field]) ?? '') + text
-        }
       }
       state.current.text += sanitizeText(text)
       state.hasContent = true

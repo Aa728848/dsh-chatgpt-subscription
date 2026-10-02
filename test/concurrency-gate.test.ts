@@ -1,7 +1,60 @@
 import { describe, expect, it } from 'vitest'
+import { getEventListeners } from 'node:events'
 import { ConcurrencyGate } from '../src/host/common/concurrency-gate.ts'
 
 describe('concurrency gate', () => {
+  it('honours a lower cap without evicting existing holders', async () => {
+    const gate = new ConcurrencyGate()
+    const first = await gate.acquire('a')
+    const second = await gate.acquire('a')
+    gate.setLimit('a', 1)
+    expect(gate.limitFor('a')).toBe(1)
+    let granted = false
+    const waiting = gate.acquire('a').then(release => { granted = true; return release })
+    first()
+    await Promise.resolve()
+    expect(granted).toBe(false)
+    expect(gate.inFlight('a')).toBe(1)
+    second()
+    const release = await waiting
+    expect(gate.inFlight('a')).toBe(1)
+    release()
+  })
+
+  it('clamps a positive fractional limit to at least one slot', async () => {
+    const gate = new ConcurrencyGate()
+    gate.setLimit('a', 0.5)
+    expect(gate.limitFor('a')).toBe(1)
+    const release = await gate.acquire('a')
+    release()
+  })
+
+  it('removes the abort listener when a queued request is granted', async () => {
+    const gate = new ConcurrencyGate()
+    gate.setLimit('a', 1)
+    const release = await gate.acquire('a')
+    const controller = new AbortController()
+    const waiting = gate.acquire('a', controller.signal)
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1)
+    release()
+    const next = await waiting
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+    next()
+  })
+
+  it('returns a granted slot if cancellation wins before acquire resumes', async () => {
+    const gate = new ConcurrencyGate()
+    gate.setLimit('a', 1)
+    const release = await gate.acquire('a')
+    const controller = new AbortController()
+    const waiting = gate.acquire('a', controller.signal)
+    release()
+    controller.abort(new Error('cancelled after grant'))
+    await expect(waiting).rejects.toThrow('cancelled after grant')
+    expect(gate.inFlight('a')).toBe(0)
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  })
+
   it('passes everything through while the account is uncapped', async () => {
     const gate = new ConcurrencyGate()
 

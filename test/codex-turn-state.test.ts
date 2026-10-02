@@ -50,6 +50,16 @@ async function drain(stream: AsyncIterable<unknown>): Promise<void> {
 }
 
 describe('codex turn state scope', () => {
+  it('cleans request-local routing state after identical repeated prompts', async () => {
+    const { client, seen, turn } = await harness()
+    const states = (client as unknown as { turnStates: Map<string, unknown> }).turnStates
+    for (let index = 0; index < 3; index++) {
+      await drain(client.stream(turn()))
+      expect(states.size).toBe(0)
+    }
+    expect(seen.map(entry => entry.turnState)).toEqual([null, null, null])
+  })
+
   it('never reuses one request state for the next request', async () => {
     const { client, seen, turn } = await harness()
 

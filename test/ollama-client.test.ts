@@ -47,6 +47,142 @@ describe('Ollama request bodies', () => {
     expect(body.options).toHaveProperty('num_predict')
   })
 
+  it('formats native function.arguments as parsed object rather than JSON string', () => {
+    const body = buildBody('native', {
+      model: 'gpt-oss:120b-cloud',
+      messages: [
+        { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'read', arguments: '{"path":"a","line":42}' }] },
+      ],
+    }) as { messages: Array<{ tool_calls?: Array<{ function: { name: string; arguments: unknown } }> }> }
+
+    expect(body.messages[0]?.tool_calls?.[0]?.function.arguments).toEqual({ path: 'a', line: 42 })
+  })
+
+  it('throws on malformed JSON tool arguments instead of silently returning empty object', () => {
+    expect(() => buildBody('native', {
+      model: 'gpt-oss:120b-cloud',
+      messages: [
+        { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'read', arguments: '{invalid-json' }] },
+      ],
+    })).toThrow(/JSON/)
+  })
+
+  it('formats images as bare base64 on native and data URLs on OpenAI', () => {
+    const rawBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    const dataUrl = `data:image/png;base64,${rawBase64}`
+
+    const nativeBody = buildBody('native', {
+      model: 'llava',
+      messages: [{ role: 'user', content: 'inspect', images: [dataUrl] }],
+    }) as { messages: Array<{ images?: string[] }> }
+    expect(nativeBody.messages[0]?.images).toEqual([rawBase64])
+
+    const openAIBody = buildBody('openai', {
+      model: 'llava',
+      messages: [{ role: 'user', content: 'inspect', images: [rawBase64] }],
+    }) as { messages: Array<{ content: Array<{ type: string; image_url?: { url: string } }> }> }
+    expect(openAIBody.messages[0]?.content[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: dataUrl },
+    })
+  })
+
+  it('handles tool result images via trailing user message on OpenAI and native tool images', () => {
+    const rawBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    const dataUrl = `data:image/png;base64,${rawBase64}`
+
+    const openAIBody = buildBody('openai', {
+      model: 'llava',
+      messages: [
+        { role: 'tool', content: 'output text', toolCallId: 'call_1', images: [dataUrl] },
+      ],
+    }) as { messages: Array<Record<string, unknown>> }
+    // OpenAI tool message must have pure text content
+    expect(openAIBody.messages[0]).toEqual({
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: 'output text',
+    })
+    // Image rides on trailing user message
+    expect(openAIBody.messages[1]).toEqual({
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: dataUrl } }],
+    })
+
+    const nativeBody = buildBody('native', {
+      model: 'llava',
+      messages: [
+        { role: 'tool', content: 'output text', toolCallId: 'call_1', images: [dataUrl] },
+      ],
+    }) as { messages: Array<Record<string, unknown>> }
+    expect(nativeBody.messages[0]).toEqual({
+      role: 'tool',
+      content: 'output text',
+      images: [rawBase64],
+    })
+  })
+
+  it('keeps consecutive tool messages together for parallel calls and flushes synthetic user image after the group', () => {
+    const rawBase64Jpeg = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA='
+    const jpegDataUrl = `data:image/jpeg;base64,${rawBase64Jpeg}`
+
+    const openAIBody = buildBody('openai', {
+      model: 'llava',
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            { id: 'call_1', name: 'tool_a', arguments: '{}' },
+            { id: 'call_2', name: 'tool_b', arguments: '{}' },
+          ],
+        },
+        { role: 'tool', content: 'result 1', toolCallId: 'call_1', images: [jpegDataUrl] },
+        { role: 'tool', content: 'result 2', toolCallId: 'call_2' },
+      ],
+    }) as { messages: Array<Record<string, unknown>> }
+
+    expect(openAIBody.messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'tool', 'user'])
+    expect(openAIBody.messages[1]).toEqual({
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: 'result 1',
+    })
+    expect(openAIBody.messages[2]).toEqual({
+      role: 'tool',
+      tool_call_id: 'call_2',
+      content: 'result 2',
+    })
+    // Exact image media type (image/jpeg) is preserved
+    expect(openAIBody.messages[3]).toEqual({
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: jpegDataUrl } }],
+    })
+  })
+
+  it('maps think under native and OpenAI surfaces', () => {
+    const nativeLevel = buildBody('native', { model: 'gpt-oss:120b', messages: [], think: 'high' }) as Record<string, unknown>
+    expect(nativeLevel.think).toBe('high')
+
+    const openaiLevel = buildBody('openai', { model: 'gpt-oss:120b', messages: [], think: 'high' }) as Record<string, unknown>
+    expect(openaiLevel.reasoning_effort).toBe('high')
+
+    const nativeBool = buildBody('native', { model: 'deepseek-r1:70b', messages: [], think: true }) as Record<string, unknown>
+    expect(nativeBool.think).toBe(true)
+
+    const openaiBool = buildBody('openai', { model: 'deepseek-r1:70b', messages: [], think: true }) as Record<string, unknown>
+    expect(openaiBool.reasoning_effort).toBe('auto')
+
+    const openaiNone = buildBody('openai', { model: 'deepseek-r1:70b', messages: [], think: false }) as Record<string, unknown>
+    expect(openaiNone.reasoning_effort).toBe('none')
+
+    const nativeOmit = buildBody('native', { model: 'llama3:8b', messages: [] }) as Record<string, unknown>
+    expect(nativeOmit).not.toHaveProperty('think')
+
+    const openaiOmit = buildBody('openai', { model: 'llama3:8b', messages: [] }) as Record<string, unknown>
+    expect(openaiOmit).not.toHaveProperty('reasoning_effort')
+  })
+
   it('posts to the endpoint each surface actually lives at', () => {
     expect(chatUrl('openai')).toBe(`${CLOUD_BASE_URL}${OPENAI_CHAT_PATH}`)
     expect(chatUrl('native')).toBe(`${CLOUD_BASE_URL}${NATIVE_CHAT_PATH}`)
@@ -80,6 +216,21 @@ describe('Ollama streaming', () => {
     // Both fragments, in order: the whole point of accumulating.
     expect(block.arguments).toBe('{"path":"a"}')
     expect(JSON.parse(block.arguments)).toEqual({ path: 'a' })
+  })
+
+  it('streams reasoning_content as thinking events on OpenAI SSE', async () => {
+    const fetchFn = vi.fn(async () => sseResponse([
+      JSON.stringify({ choices: [{ delta: { reasoning_content: 'thinking step 1' } }] }),
+      JSON.stringify({ choices: [{ delta: { content: 'final answer' } }] }),
+      '[DONE]',
+    ])) as unknown as typeof fetch
+
+    const call = startChat(fetchFn, key, 'openai', { model: 'deepseek-r1:70b', messages: [{ role: 'user', content: 'solve' }] })
+    const events = []
+    for await (const event of call.events) events.push(event)
+
+    expect(events).toContainEqual({ type: 'thinking', text: 'thinking step 1' })
+    expect(events).toContainEqual({ type: 'text', text: 'final answer' })
   })
 
   it('closes a text block that the stream left open', () => {

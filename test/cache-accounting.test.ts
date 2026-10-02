@@ -11,6 +11,14 @@ async function usage(response: unknown): Promise<{ inputTokens: number; cacheRea
 }
 
 describe('cache accounting stays disjoint', () => {
+  it('preserves explicit zero cache counts distinct from missing fields', async () => {
+    const zero = await usage({ input_tokens: 100, output_tokens: 1, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } })
+    expect(zero).toMatchObject({ inputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0 })
+    const missing = await usage({ input_tokens: 100, output_tokens: 1 })
+    expect(missing).not.toHaveProperty('cacheReadTokens')
+    expect(missing).not.toHaveProperty('cacheWriteTokens')
+  })
+
   it('reports codex cache writes apart from reads and from plain input', async () => {
     const reported = await usage({
       input_tokens: 1000,

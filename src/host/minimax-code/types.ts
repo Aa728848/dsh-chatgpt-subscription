@@ -406,3 +406,23 @@ export function redactToken(token: string | undefined | null): string {
   const fingerprint = createHash('sha256').update(token).digest('hex').slice(0, 12)
   return 'sha256:' + fingerprint + '/len:' + token.length
 }
+
+/**
+ * Adapter-selected auth owner (nonsecret hash).
+ *
+ * Scoped to the specific account and credential token/key selected by the adapter.
+ * Any account change or token/key replacement produces a different hash,
+ * preventing thinking/signature replay across different authentication boundaries.
+ */
+export function computeMinimaxAuthOwner(
+  credentials?: { accessToken?: string; apiKey?: string; region?: string } | null,
+  accountId?: string | null,
+): string {
+  const token = (credentials?.apiKey || credentials?.accessToken || '').trim()
+  if (!token) return ''
+  const hash = createHash('sha256')
+  if (accountId && accountId.trim() !== '') hash.update(`acc:${accountId}\0`)
+  if (credentials?.region && credentials.region.trim() !== '') hash.update(`reg:${credentials.region}\0`)
+  hash.update(`tok:${token}`)
+  return hash.digest('hex').slice(0, 32)
+}

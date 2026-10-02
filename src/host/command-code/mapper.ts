@@ -354,6 +354,15 @@ function isToolResultMessage(message: Message): boolean {
   return message.source?.kind === 'tool'
 }
 
+function stopSequences(stop: unknown): string[] | undefined {
+  if (Array.isArray(stop)) {
+    const list = stop.filter((s): s is string => typeof s === 'string' && s !== '')
+    return list.length > 0 ? list : undefined
+  }
+  if (typeof stop === 'string' && stop !== '') return [stop]
+  return undefined
+}
+
 function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
@@ -665,6 +674,51 @@ export function buildRequest(
  * APIs differ in more than field names, and a translated body is a request the
  * route rejects.
  */
+function responsesUserContent(
+  message: Message,
+  images: ResolvedRequestImages,
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(message.content)) return []
+  const parts: Array<Record<string, unknown>> = []
+  for (const block of message.content) {
+    if (!isRecord(block)) continue
+    if (block.type === 'text' && typeof block.text === 'string') {
+      const text = sanitizeText(block.text)
+      if (text !== '') parts.push({ type: 'input_text', text })
+    } else if (block.type === 'image') {
+      const inline = imageBlockToInline(block, images)
+      if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
+        parts.push({ type: 'input_image', image_url: 'data:' + inline.mediaType + ';base64,' + inline.data })
+      } else {
+        parts.push({ type: 'input_text', text: unavailableImageText(block) })
+      }
+    }
+  }
+  return parts
+}
+
+function responsesToolResultImageBlocks(
+  blocks: unknown,
+  images: ResolvedRequestImages,
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(blocks)) return []
+  const out: Array<Record<string, unknown>> = []
+  for (const block of blocks) {
+    if (!isRecord(block)) continue
+    if (block.type === 'image') {
+      const inline = imageBlockToInline(block, images)
+      if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
+        out.push({ type: 'input_image', image_url: 'data:' + inline.mediaType + ';base64,' + inline.data })
+      } else {
+        out.push({ type: 'input_text', text: unavailableImageText(block) })
+      }
+      continue
+    }
+    if (block.type === 'tool-result') out.push(...responsesToolResultImageBlocks(block.content, images))
+  }
+  return out
+}
+
 export function buildResponsesRequest(
   options: GenerateOptions,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
@@ -677,14 +731,20 @@ export function buildResponsesRequest(
     const message = conversation[index]!
     if (isToolResultMessage(message)) {
       // Results stay consecutive: a message wedged between them is rejected.
+      const imageBlocks: Array<Record<string, unknown>> = []
       while (index < conversation.length && isToolResultMessage(conversation[index]!)) {
         const current = conversation[index]!
-        const block = current.content[0]
-        const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
+        const toolResult = Array.isArray(current.content)
+          ? current.content.find((b) => isRecord(b) && b.type === 'tool-result')
+          : undefined
+        const callId = (isRecord(toolResult) && typeof toolResult.toolCallId === 'string' ? toolResult.toolCallId : '')
+          || (typeof current.source?.callId === 'string' ? current.source.callId : '')
         input.push({ type: 'function_call_output', call_id: callId, output: toolResultText(current.content) })
+        imageBlocks.push(...responsesToolResultImageBlocks(current.content, images))
         index += 1
       }
       index -= 1
+      if (imageBlocks.length > 0) input.push({ role: 'user', content: imageBlocks })
       continue
     }
     if (message.role === 'assistant') {
@@ -705,8 +765,8 @@ export function buildResponsesRequest(
       }
       continue
     }
-    const content = openAIUserContent(message, images)
-    if (typeof content === 'string' && content === '') continue
+    const content = responsesUserContent(message, images)
+    if (content.length === 0) continue
     input.push({ role: 'user', content })
   }
 
@@ -719,7 +779,6 @@ export function buildResponsesRequest(
     max_output_tokens: maxTokens,
     ...(system === undefined ? {} : { instructions: system }),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
-    ...(options.stop && options.stop.length > 0 ? { stop: options.stop } : {}),
     ...(options.tools && options.tools.length > 0
       ? {
           tools: options.tools.map((tool) => ({
@@ -1123,7 +1182,7 @@ function tokenUsage(state: CommandCodeStreamState): TokenUsage {
 
 function finishReasonFor(state: CommandCodeStreamState): FinishReason {
   const reason = state.finishReason ?? ''
-  if (reason === 'length' || reason === 'max_tokens') return { kind: 'max-tokens' }
+  if (reason === 'length' || reason === 'max_tokens' || reason === 'max_output_tokens') return { kind: 'max-tokens' }
   if (state.hasToolCall || reason === 'tool_calls' || reason === 'tool_use') return { kind: 'tool-calls' }
   return { kind: 'stop' }
 }
@@ -1194,14 +1253,40 @@ export function processResponsesStreamLine(line: string, state: CommandCodeStrea
   }
   if (type === 'response.completed' || type === 'response.incomplete') {
     const response = isRecord(parsed.response) ? parsed.response : null
-    if (response !== null) readResponsesUsage(response, state)
+    if (response !== null) {
+      if (response.status === 'failed') {
+        state.done = true
+        const errorObj = isRecord(response.error) ? response.error : null
+        const detail = errorObj && typeof errorObj.message === 'string'
+          ? errorObj.message
+          : (typeof response.error === 'string' ? response.error : '')
+        throw new LlmError(
+          detail === '' ? 'Command Code responses stream failed' : `Command Code responses stream failed: ${detail}`,
+          'PROVIDER_ERROR',
+        )
+      }
+      readResponsesUsage(response, state)
+    }
     state.done = true
-    state.finishReason = type === 'response.incomplete' ? 'length' : 'stop'
+    if (type === 'response.incomplete') {
+      const details = response && isRecord(response.incomplete_details) ? response.incomplete_details : null
+      const reason = details && typeof details.reason === 'string' ? details.reason : ''
+      state.finishReason = reason === 'max_output_tokens' || reason === 'length' || reason === 'max_tokens' ? 'length' : (reason || 'length')
+    } else {
+      state.finishReason = 'stop'
+    }
     return []
   }
-  if (type === 'response.failed') {
+  if (type === 'response.failed' || type === 'error') {
     state.done = true
-    const detail = isRecord(parsed.response) && typeof parsed.response.error === 'string' ? parsed.response.error : ''
+    const errorObj = isRecord(parsed.error)
+      ? parsed.error
+      : (isRecord(parsed.response) && isRecord(parsed.response.error) ? parsed.response.error : null)
+    const detail = (typeof parsed.message === 'string' ? parsed.message : '')
+      || (errorObj && typeof errorObj.message === 'string' ? errorObj.message : '')
+      || (isRecord(parsed.response) && typeof parsed.response.error === 'string'
+          ? parsed.response.error
+          : (typeof parsed.error === 'string' ? parsed.error : ''))
     throw new LlmError(
       detail === '' ? 'Command Code responses stream failed' : `Command Code responses stream failed: ${detail}`,
       'PROVIDER_ERROR',
@@ -1228,18 +1313,17 @@ function startResponsesToolCall(
   // while an earlier one is still streaming arguments, and closing every pending
   // call here would truncate the earlier call's arguments.
   const out = closeCurrent(state)
-  // Each tool call owns its own block index. Reusing the current block count
-  // would give two calls opened before either closed the same index, and the
-  // second block-end would overwrite the first call in the assembled message.
-  const index = state.blocks.length + countPendingToolCalls(state)
+  // Each tool call owns its own block index. Reserving the block index immediately
+  // prevents interleaved text or subsequent calls from colliding with pending calls.
+  const index = state.blocks.length
   const name = typeof item.name === 'string' ? item.name : ''
-  // Two different identifiers, and they are not interchangeable: `item_id`
-  // names the output item, `call_id` is the tool call id the model will
-  // reference. Argument deltas are keyed by item id, so both are recorded and
-  // the stream is matched on the item id first.
-  const itemId = typeof event.item_id === 'string' ? event.item_id : null
+  // Two different identifiers, and they are not interchangeable: `item.id`
+  // names the output item in output_item.added, while subsequent argument events
+  // carry `item_id`. `call_id` is the tool call id the model references.
+  const itemId = typeof item.id === 'string' ? item.id : (typeof event.item_id === 'string' ? event.item_id : null)
   const id = typeof item.call_id === 'string' ? item.call_id : `call_${String(itemId ?? index)}`
   const call = { blockIndex: index, id, name, arguments: '', started: true }
+  state.blocks.push({ type: 'tool-call', id: toToolCallId(call.id), name, arguments: '' })
   state.toolCalls.set(index, call)
   if (itemId !== null) responsesItemIndexOf(state).set(itemId, call)
   state.hasToolCall = true
@@ -1251,24 +1335,6 @@ function startResponsesToolCall(
 /** Item id -> call, held beside the stream state that produced it. */
 const responsesItemIndex = new WeakMap<CommandCodeStreamState, Map<string, PendingToolCall>>()
 
-/**
- * A wire key no existing call in this stream uses.
- *
- * The map is keyed by wire index, and the Responses events for two parallel
- * calls carry no shared index, so the key is generated here rather than reused
- * from the block index — which is the same value for two calls that start
- * before either one has been closed.
- */
-/** Calls opened but not yet closed, each of which already owns a block index. */
-function countPendingToolCalls(state: CommandCodeStreamState): number {
-  return state.toolCalls.size
-}
-
-function nextToolCallKey(state: CommandCodeStreamState): number {
-  let key = 0
-  while (state.toolCalls.has(key)) key += 1
-  return key
-}
 
 function responsesItemIndexOf(state: CommandCodeStreamState): Map<string, PendingToolCall> {
   let index = responsesItemIndex.get(state)

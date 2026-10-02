@@ -54,7 +54,9 @@ export class ResponsesClient {
   private readonly reasoningSummary: () => CodexReasoningSummary | null
   private readonly accountPool: CodexAccountPool | null
   /**
-   * Opaque backend turn state, keyed by conversation session id.
+   * Opaque backend routing state, keyed by a unique model-request nonce.
+   * The host does not expose a reliable human-turn identity, so this is the
+   * conservative no-cross-request-reuse fallback, not full turn continuity.
    *
    * The Codex backend hands `x-codex-turn-state` back on each response and
    * expects it on the next request of the SAME turn, which lets it resume the
@@ -88,13 +90,13 @@ export class ResponsesClient {
     const options = normalizeGenerateOptions(rawOptions)
     const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
-    // One model call is one turn for routing purposes: it is the unit that gets a
-    // routing token back and the unit that may retry. The tool loop issues one
-    // call per step, which is exactly the granularity this header is scoped to.
-    const turnKey = turnKeyFor(sessionId, options)
+    // No reliable host turn identity is available: do not infer it from history.
+    // This conservative fallback never replays state across model requests.
+    const turnKey = turnKeyFor(sessionId)
     let currentModel = options.model
     let attemptOptions = options
     let response: Response | undefined
+    let release: (() => void) | undefined
 
     while (true) {
       const payload = await buildResponsesPayload(
@@ -109,7 +111,9 @@ export class ResponsesClient {
         promptCacheKeyFor(sessionId),
       )
       try {
-        response = await this.send(payload, sessionId, turnKey, options.signal)
+        const opened = await this.send(payload, sessionId, turnKey, options.signal)
+        response = opened.response
+        release = opened.release
         break
       } catch (error) {
         if (error instanceof LlmError && (error.code === 'NOT_FOUND' || (error as unknown as { status?: number }).status === 404)) {
@@ -133,13 +137,9 @@ export class ResponsesClient {
         'Codex',
       )
     } finally {
-      // The turn's routing state deliberately survives here: the next step of a
-      // tool loop is the same turn and has to replay it. A new user turn computes a
-      // new key, and the bound below keeps the map from growing without limit.
-      // The stream is over, so this request no longer occupies the account. The
-      // release belongs to THIS request: a sibling turn on the same account keeps
-      // its own slot until its own stream ends.
-      this.takePendingRelease(turnKey)?.()
+      // Without a host turn identity, routing state is request-local only.
+      this.turnStates.delete(turnKey)
+      release?.()
       this.onGenerationFinished()
     }
   }
@@ -149,7 +149,7 @@ export class ResponsesClient {
     sessionId: string,
     turnKey: string,
     signal?: AbortSignal,
-  ): Promise<Response> {
+  ): Promise<{ response: Response; release?: () => void }> {
     if (this.accountPool !== null) return this.sendWithPool(payload, sessionId, turnKey, signal)
     let credentials = await this.oauth.credentials()
     let response = await this.request(payload, credentials, sessionId, turnKey, signal)
@@ -160,7 +160,7 @@ export class ResponsesClient {
     }
     if (!response.ok) throw await responseError(response)
     this.rememberTurnState(response, turnKey, credentials)
-    return response
+    return { response }
   }
 
   /**
@@ -237,11 +237,13 @@ export class ResponsesClient {
     sessionId: string,
     turnKey: string,
     signal?: AbortSignal,
-  ): Promise<Response> {
+  ): Promise<{ response: Response; release: () => void }> {
     const pool = this.accountPool!
     const tried = new Set<string>()
     while (true) {
-      const { account, credentials } = await pool.getEffectiveAccount(tried, this.fetchFn)
+      const selected = await pool.getEffectiveAccount(tried, this.fetchFn)
+      const account = selected.account
+      let credentials = selected.credentials
       tried.add(account.id)
       // One slot per in-flight request on this account. A subagent fan-out is what
       // reaches a plan's concurrency bound, so the cap is held here, before the
@@ -259,8 +261,8 @@ export class ResponsesClient {
         if (response.status === 401) {
           await response.body?.cancel().catch(() => undefined)
           try {
-            const refreshed = await pool.refreshAccountNow(account.id)
-            response = await this.request(payload, refreshed, sessionId, turnKey, signal)
+            credentials = await pool.refreshAccountNow(account.id)
+            response = await this.request(payload, credentials, sessionId, turnKey, signal)
           } catch (error) {
             await pool.markAuthFailed(
               account.id,
@@ -274,14 +276,8 @@ export class ResponsesClient {
         if (response.status === 429) {
           const after = retryAfterMs(response.headers)
           await response.body?.cancel().catch(() => undefined)
-          // A 429 taken while other of our requests are still running on this
-          // account is evidence about its concurrency, not only about its quota,
-          // so the cap drops to what actually succeeded here. A lone request
-          // being rate limited teaches nothing about concurrency, so that case
-          // leaves the cap untouched.
-          if (chatGPTConcurrency().inFlight(account.id) > 1) {
-            chatGPTConcurrency().setLimit(account.id, chatGPTConcurrency().inFlight(account.id) - 1)
-          }
+          // Generic 429 cannot distinguish concurrency from RPM/TPM/quota.
+          // Honour cooldown without inventing a persistent concurrency limit.
           await pool.markCooldown(account.id, after ?? DEFAULT_POOL_COOLDOWN_MS, 'Codex 429').catch(() => undefined)
           free()
           if (await pool.hasAnotherAvailableAccount(tried)) continue
@@ -298,29 +294,12 @@ export class ResponsesClient {
         this.rememberTurnState(response, turnKey, credentials)
         // The body is still streaming, so the slot stays held; the turn releases
         // it once this stream ends.
-        this.pendingReleases.set(turnKey, free)
-        return response
+        return { response, release: free }
       } catch (error) {
         free()
         throw error
       }
     }
-  }
-
-  /**
-   * Concurrency slot held by each streaming request, keyed by turn.
-   *
-   * Keyed rather than a single list on purpose: two turns can run against the
-   * same account at once, and the first one to end must release only its own
-   * slot. A list would hand the departing turn every outstanding release.
-   */
-  private readonly pendingReleases = new Map<string, () => void>()
-
-  /** Take this turn's pending release, if it still holds one. */
-  private takePendingRelease(turnKey: string): (() => void) | undefined {
-    const release = this.pendingReleases.get(turnKey)
-    this.pendingReleases.delete(turnKey)
-    return release
   }
 
   private async request(
@@ -360,48 +339,8 @@ function promptCacheKeyFor(sessionId: string): string {
   return sessionId
 }
 
-/**
- * Position of this model call within its conversation.
- *
- * The harness passes no turn id, and one cannot be derived from message text
- * without guessing, so the call's own position in the request is the turn
- * identity. It is stable across the retries and model fallbacks of one call
- * (the same history is resent) and differs for the next step of a tool loop
- * (the history grew), which is exactly the scope the routing header has.
- */
-/**
- * Routing scope for one request.
- *
- * The header is scoped to a turn, and a turn is a user turn plus however many
- * model calls its tool loop takes. Nothing in the request says which user turn
- * this is, so the identity is derived from the conversation the call sends: the
- * session, and the last user message that opens the turn. Every step of one tool
- * loop ends on the same trailing user message, so every step of a turn shares a
- * key and can replay the same routing state; the next user turn brings a new
- * trailing message and therefore a new key.
- *
- * The digest covers the opening message only. Including the whole history would
- * make each step its own key, which is exactly the case the header forbids.
- */
-/** Plain text of a message, however this harness generation shaped it. */
-function textOf(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part
-        if (typeof part === 'object' && part !== null) {
-          const text = (part as Record<string, unknown>).text
-          if (typeof text === 'string') return text
-        }
-        return ''
-      })
-      .join('')
-  }
-  return ''
-}
-
-function turnKeyFor(sessionId: string, options: { messages: readonly { role: string; content: unknown; source?: { kind?: string } }[] }): string {
+/** Request-local fallback; never infer a human turn identity from message history. */
+function turnKeyFor(sessionId: string): string {
   // The harness passes no turn id, and no property of the request identifies a
   // turn reliably: the same user text recurs across turns, a tool result also
   // carries a user role, and the number of tool calls is 0 at the start of every
@@ -733,14 +672,14 @@ function mapUsage(value: Record<string, unknown> | null): TokenUsage | null {
   const totalInput = number(value.input_tokens) ?? 0
   const outputTokens = number(value.output_tokens) ?? 0
   const details = record(value.input_tokens_details)
-  const cached = number(details?.cached_tokens) ?? 0
-  const written = number(details?.cache_write_tokens) ?? 0
+  const cached = number(details?.cached_tokens)
+  const written = number(details?.cache_write_tokens)
   const reasoning = number(record(value.output_tokens_details)?.reasoning_tokens)
   return {
-    inputTokens: Math.max(0, totalInput - cached - written),
+    inputTokens: Math.max(0, totalInput - (cached ?? 0) - (written ?? 0)),
     outputTokens,
-    ...(cached > 0 ? { cacheReadTokens: cached } : {}),
-    ...(written > 0 ? { cacheWriteTokens: written } : {}),
+    ...(cached === undefined ? {} : { cacheReadTokens: cached }),
+    ...(written === undefined ? {} : { cacheWriteTokens: written }),
     ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
   }
 }

@@ -20,7 +20,7 @@ import type { StoredOAuthCredentials } from './token-store.ts'
 export const CODEX_TURN_STATE_HEADER = 'x-codex-turn-state'
 
 export interface CodexHeaderOptions {
-  /** Opaque state from the previous turn of this conversation, if any. */
+  /** Opaque state from an earlier request in the SAME human turn, if available. */
   turnState?: string
 }
 

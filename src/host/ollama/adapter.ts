@@ -3,7 +3,7 @@ import {
   LlmAdapter,
   LlmError,
   resolveRetryPolicy,
-  type GenerateOptions,
+  type GenerateOptions as HarnessGenerateOptions,
   type LlmModelInfo,
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
@@ -13,12 +13,20 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
+  normalizeGenerateOptions,
+  type GenerateOptions,
+  type Message,
+  type ToolResultBlock,
+} from '../common/llm-compat.ts'
+import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   FALLBACK_MODELS,
   POOL_COOLDOWN_MS,
   PROVIDER_ID,
   PROVIDER_NAME,
   contextWindowFor,
+  ollamaModelSupportsImage,
+  thinkForModel,
   wireForModel,
   type OllamaCatalogModel,
 } from './types.ts'
@@ -149,10 +157,7 @@ export class OllamaAdapter extends LlmAdapter {
       provider: prov,
       id: model.id,
       name: model.name ?? model.id,
-      // Ollama cloud models take images on the OpenAI surface; the native surface
-      // is text-only for the same models, and the mapper sends bytes only when a
-      // request actually has them.
-      inputModalities: ['text', 'image'],
+      inputModalities: ollamaModelSupportsImage(model.id) ? ['text', 'image'] : ['text'],
     }))
   }
 
@@ -164,7 +169,7 @@ export class OllamaAdapter extends LlmAdapter {
       provider,
       id: modelId,
       name: entry?.name ?? modelId,
-      inputModalities: ['text', 'image'],
+      inputModalities: ollamaModelSupportsImage(modelId) ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindowFor(entry) },
       // Ollama does not publish a per-model output ceiling, so this is a request
       // level default rather than a claim about the model.
@@ -179,7 +184,7 @@ export class OllamaAdapter extends LlmAdapter {
     }
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: HarnessGenerateOptions): AsyncIterable<StreamChunk> {
     yield* wrapStreamWithWatchdog(
       (watchdogSignal) => this.requestStream(options, watchdogSignal),
       options.signal,
@@ -189,8 +194,9 @@ export class OllamaAdapter extends LlmAdapter {
     )
   }
 
-  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(rawOptions: HarnessGenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
+    const options = normalizeGenerateOptions(rawOptions)
     const wire = wireForModel(options.model)
     const request = await toOllamaRequest(options, this.options.attachments, signal)
 
@@ -307,54 +313,236 @@ export class OllamaAdapter extends LlmAdapter {
   }
 }
 
-/** Project DSH's request shape onto Ollama's, per surface. */
+function isAbort(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true || (error instanceof Error && error.name === 'AbortError')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+function attachmentLabel(block: Record<string, unknown>): string | undefined {
+  const attachment = isRecord(block.attachment) ? block.attachment : undefined
+  return asString(attachment?.name) || asString(attachment?.attachmentId)
+}
+
+function unavailableImageText(block: Record<string, unknown>): string {
+  const label = attachmentLabel(block)
+  const subject = label ? `${label} could not be read` : 'the image could not be read'
+  return `[image unavailable: ${subject}; ask the user to attach it again if the image is needed]`
+}
+
+function abortException(signal?: AbortSignal): Error {
+  if (signal?.reason !== undefined) {
+    return signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason))
+  }
+  return new DOMException('The operation was aborted', 'AbortError')
+}
+
+function unsupportedImageText(model: string, block: Record<string, unknown>): string {
+  const label = attachmentLabel(block)
+  const subject = label ? `${label}: ` : ''
+  return `[image unsupported: ${subject}model ${model} is not known to declare image support; remove the attachment or switch to a vision model]`
+}
+
+function combineTextParts(parts: string[]): string {
+  let result = ''
+  for (const part of parts) {
+    if (!part) continue
+    if (!result) {
+      result = part
+    } else if (part.startsWith('[image ') || result.endsWith('\n')) {
+      result = result.trimEnd() + '\n\n' + part
+    } else {
+      result += part
+    }
+  }
+  return result
+}
+
+interface ProcessedContent {
+  text: string
+  images?: string[]
+}
+
+async function processMessageContent(
+  content: unknown,
+  model: string,
+  attachments?: Pick<AttachmentStore, 'readImage'>,
+  signal?: AbortSignal,
+): Promise<ProcessedContent> {
+  if (signal?.aborted) throw abortException(signal)
+  if (typeof content === 'string') return { text: content }
+  if (!Array.isArray(content)) return { text: '' }
+
+  const textParts: string[] = []
+  const images: string[] = []
+
+  for (const part of content) {
+    if (typeof part === 'string') {
+      textParts.push(part)
+      continue
+    }
+    if (!isRecord(part)) continue
+
+    if (part.type === 'text') {
+      if (typeof part.text === 'string' && part.text !== '') {
+        textParts.push(part.text)
+      }
+      continue
+    }
+
+    if (part.type === 'image') {
+      if (!ollamaModelSupportsImage(model)) {
+        textParts.push(unsupportedImageText(model, part))
+        continue
+      }
+
+      const reference = isImageRef(part.attachment)
+        ? part.attachment
+        : isImageRef(part.source) ? part.source : null
+
+      if (reference !== null) {
+        if (!attachments) {
+          textParts.push(unavailableImageText(part))
+          continue
+        }
+        try {
+          if (signal?.aborted) throw abortException(signal)
+          const loaded = await attachments.readImage(reference, signal)
+          if (signal?.aborted) throw abortException(signal)
+          if (loaded === null) {
+            textParts.push(unavailableImageText(part))
+          } else {
+            images.push(encodeImage(loaded.data, loaded.ref.mediaType))
+          }
+        } catch (error) {
+          if (isAbort(error, signal)) throw error
+          textParts.push(unavailableImageText(part))
+        }
+        continue
+      }
+
+      const inline = part.source
+      if (isRecord(inline)) {
+        const data = inline.data
+        if (typeof data === 'string' && data !== '') {
+          images.push(encodeImage(data, asMediaType(inline.mediaType)))
+          continue
+        }
+      }
+      if (typeof part.image === 'string' && part.image !== '') {
+        images.push(part.image)
+        continue
+      }
+      // Malformed image part carrying neither reference nor inline data
+      textParts.push(unavailableImageText(part))
+      continue
+    }
+  }
+
+  const text = combineTextParts(textParts)
+  return {
+    text,
+    ...(images.length > 0 ? { images } : {}),
+  }
+}
+
+/**
+ * Project DSH's request shape onto Ollama's, per surface.
+ * Consumes the canonical Message vocabulary produced by normalizeGenerateOptions.
+ */
 export async function toOllamaRequest(
   options: GenerateOptions,
   attachments?: Pick<AttachmentStore, 'readImage'>,
   signal?: AbortSignal,
 ): Promise<Omit<OllamaRequest, 'signal'>> {
+  if (signal?.aborted) throw abortException(signal)
   const messages: OllamaChatMessage[] = []
-  // A one-shot caller may pass its system prompt outside the history. A loop-built
-  // request leaves it undefined and carries the prompt as the leading message, so
-  // the two paths must not both send it.
-  if (options.system !== undefined && options.system.trim() !== '') {
-    messages.push({ role: 'system', content: options.system })
+  const trimmedSystem = typeof options.system === 'string' && options.system.trim() !== ''
+    ? options.system.trim()
+    : undefined
+
+  // A one-shot caller may pass its system prompt outside the history.
+  if (trimmedSystem !== undefined) {
+    messages.push({ role: 'system', content: trimmedSystem })
   }
-  for (const message of options.messages) {
-    if (message.role === 'tool') {
-      messages.push({
-        role: 'tool',
-        content: textOf(message.content),
-        // The result has to name the call it answers, or the next turn's call
-        // history is unpaired and the model repeats itself.
-        toolCallId: message.toolCallId,
-      })
-      continue
+
+  for (let index = 0; index < options.messages.length; index++) {
+    const message = options.messages[index]!
+
+    // Deduplicate only a leading message whose text duplicates options.system;
+    // nonleading repeated instructions in conversation context are preserved.
+    if (index === 0 && trimmedSystem !== undefined && (message.role === 'system' || message.role === 'developer')) {
+      const leadingText = textOf(message.content).trim()
+      if (leadingText === trimmedSystem) continue
     }
+
+    // Canonical vocabulary: verify tool provenance or content blocks before role: 'tool' conversion
+    const isToolResult = message.source?.kind === 'tool' || (
+      Array.isArray(message.content) &&
+      message.content.some((b) => (b as { type?: string }).type === 'tool-result')
+    )
+    if (isToolResult && Array.isArray(message.content)) {
+      const toolResultBlocks = message.content.filter(
+        (b): b is ToolResultBlock => (b as { type?: string }).type === 'tool-result'
+      )
+      if (toolResultBlocks.length > 0) {
+        for (const block of toolResultBlocks) {
+          const toolCallId = String(
+            block.toolCallId ??
+            (isRecord(message.source) ? message.source.callId : '') ??
+            ''
+          )
+          const processed = await processMessageContent(block.content, options.model, attachments, signal)
+          messages.push({
+            role: 'tool',
+            content: processed.text,
+            ...(toolCallId !== '' ? { toolCallId } : {}),
+            ...(processed.images ? { images: processed.images } : {}),
+          })
+        }
+        continue
+      }
+    }
+
     const toolCalls = assistantToolCalls(message.content)
     if (toolCalls.length > 0) {
       messages.push({ role: 'assistant', content: textOf(message.content), toolCalls })
       continue
     }
-    // DSH can carry a 'developer' role; both Ollama surfaces take it as a system
-    // instruction, and sending an unknown role is rejected outright.
-    const images = await imagesFor(message.content, attachments, signal)
+    if (message.role === 'assistant') {
+      messages.push({ role: 'assistant', content: textOf(message.content) })
+      continue
+    }
+
+    if (message.role === 'system' || message.role === 'developer') {
+      const text = textOf(message.content).trim()
+      if (text !== '') {
+        messages.push({ role: 'system', content: text })
+      }
+      continue
+    }
+
+    const processed = await processMessageContent(message.content, options.model, attachments, signal)
     messages.push({
-      role: message.role === 'developer' ? 'system' : message.role,
-      content: textOf(message.content),
-      // Absent rather than an empty array: a turn with no image must not carry
-      // the key at all, so a model without image support sees an unchanged body.
-      ...(images === undefined ? {} : { images }),
+      role: 'user',
+      content: processed.text,
+      ...(processed.images ? { images: processed.images } : {}),
     })
   }
+
   const request: Omit<OllamaRequest, 'signal'> = { model: options.model, messages }
   if (options.maxTokens !== undefined) request.maxOutputTokens = options.maxTokens
   if (options.temperature !== undefined) request.temperature = options.temperature
-  // Thinking is opt-in and model-scoped: an effort only maps to `think` when the
-  // model actually declares thinking support, because a value the model does not
-  // define is rejected or silently ignored.
-  const think = thinkFor(options)
+
+  const think = thinkForModel(options.model, options.reasoningEffort)
   if (think !== undefined) request.think = think
+
   const tools = options.tools
   if (Array.isArray(tools) && tools.length > 0) {
     request.tools = tools.map((tool) => ({
@@ -386,49 +574,6 @@ function assistantToolCalls(content: unknown): { id: string; name: string; argum
   return calls
 }
 
-/**
- * Image parts one message carries, in the base64 form both surfaces accept.
- *
- * Only inline data is sent: a remote URL is not fetched here, so a link the
- * model cannot resolve would otherwise become a silently empty turn.
- */
-async function imagesFor(
-  content: unknown,
-  attachments: Pick<AttachmentStore, 'readImage'> | undefined,
-  signal?: AbortSignal,
-): Promise<string[] | undefined> {
-  if (!Array.isArray(content)) return undefined
-  const images: string[] = []
-  for (const part of content) {
-    if (typeof part !== 'object' || part === null) continue
-    const record = part as Record<string, unknown>
-    if (record.type !== 'image') continue
-    // A durable attachment reference is how DSH delivers an image; the bytes
-    // have to be read before the body is built.
-    const reference = isImageRef(record.attachment)
-      ? record.attachment
-      : isImageRef(record.source) ? record.source : null
-    if (reference !== null) {
-      if (attachments === undefined) continue
-      const loaded = await attachments.readImage(reference, signal)
-      if (loaded === null) continue
-      images.push(encodeImage(loaded.data, loaded.ref.mediaType))
-      continue
-    }
-    // Already-inline bytes, for a caller that built the request by hand.
-    const inline = record.source
-    if (typeof inline === 'object' && inline !== null) {
-      const data = (inline as Record<string, unknown>).data
-      if (typeof data === 'string' && data !== '') {
-        images.push(encodeImage(data, asMediaType((inline as Record<string, unknown>).mediaType)))
-        continue
-      }
-    }
-    if (typeof record.image === 'string' && record.image !== '') images.push(record.image)
-  }
-  return images.length > 0 ? images : undefined
-}
-
 function isImageRef(value: unknown): value is ImageAttachmentRef {
   return typeof value === 'object' && value !== null && typeof (value as { attachmentId?: unknown }).attachmentId === 'string'
 }
@@ -447,20 +592,6 @@ function asMediaType(value: unknown): string {
 function encodeImage(data: Uint8Array | string, mediaType: string): string {
   const base64 = typeof data === 'string' ? data : Buffer.from(data).toString('base64')
   return base64.startsWith('data:') ? base64 : `data:${mediaType};base64,${base64}`
-}
-
-/**
- * Ollama's thinking control for this call, or undefined when the caller asked
- * for none or the model is not known to support it.
- *
- * The native surface takes a boolean, and a model that only knows on/off must
- * not be sent a level name it does not define.
- */
-function thinkFor(options: GenerateOptions): boolean | string | undefined {
-  if (options.reasoningEffort === undefined) return undefined
-  const effort = String(options.reasoningEffort)
-  if (effort === 'none') return false
-  return effort
 }
 
 function textOf(content: unknown): string {

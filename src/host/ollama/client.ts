@@ -97,24 +97,90 @@ export function buildBody(wire: OllamaWire, request: OllamaRequest): unknown {
   return buildNativeBody(request)
 }
 
-function buildOpenAIBody(request: OllamaRequest): unknown {
-  const messages = request.messages.map((message) => {
-    if (message.role === 'tool') {
-      return { role: 'tool', tool_call_id: message.toolCallId ?? '', content: message.content }
+export function toBareBase64(image: string): string {
+  const match = /^data:[^;]+;base64,(.+)$/.exec(image)
+  return match ? match[1]! : image
+}
+
+export function toDataUrl(image: string, defaultMediaType = 'image/png'): string {
+  if (image.startsWith('data:') || image.startsWith('http://') || image.startsWith('https://')) {
+    return image
+  }
+  return `data:${defaultMediaType};base64,${image}`
+}
+
+export function parseArguments(raw: unknown): Record<string, unknown> {
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>
+  }
+  if (raw === undefined || raw === null || raw === '') {
+    return {}
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed === '{}') return {}
+    const parsed = JSON.parse(trimmed)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
     }
+    throw new Error(`Tool call arguments must be a JSON object, got ${typeof parsed}`)
+  }
+  throw new Error(`Invalid tool call arguments: ${String(raw)}`)
+}
+
+function buildOpenAIBody(request: OllamaRequest): unknown {
+  const messages: Record<string, unknown>[] = []
+  let pendingToolImages: string[] = []
+
+  const flushToolImages = () => {
+    if (pendingToolImages.length > 0) {
+      messages.push({
+        role: 'user',
+        content: pendingToolImages.map((image) => ({
+          type: 'image_url',
+          image_url: { url: toDataUrl(image) },
+        })),
+      })
+      pendingToolImages = []
+    }
+  }
+
+  for (const message of request.messages) {
+    if (message.role === 'tool') {
+      messages.push({
+        role: 'tool',
+        tool_call_id: message.toolCallId ?? '',
+        content: message.content,
+      })
+      // Chat Completions tool message schema only allows text content;
+      // images accumulate across consecutive tool messages and ride on
+      // one synthetic user message flushed after the tool group ends.
+      if (message.images !== undefined && message.images.length > 0) {
+        pendingToolImages.push(...message.images)
+      }
+      continue
+    }
+
+    flushToolImages()
+
     if (message.role === 'assistant' && message.toolCalls !== undefined && message.toolCalls.length > 0) {
-      return {
+      messages.push({
         role: 'assistant',
         content: message.content,
         tool_calls: message.toolCalls.map((call) => ({
           id: call.id,
           type: 'function',
-          function: { name: call.name, arguments: call.arguments },
+          function: {
+            name: call.name,
+            arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {}),
+          },
         })),
-      }
+      })
+      continue
     }
-    return openAIContent(message)
-  })
+    messages.push(openAIContent(message))
+  }
+  flushToolImages()
   const body: Record<string, unknown> = {
     model: request.model,
     messages,
@@ -126,6 +192,7 @@ function buildOpenAIBody(request: OllamaRequest): unknown {
   // model's own metadata is sent.
   if (typeof request.think === 'string') body.reasoning_effort = request.think
   else if (request.think === true) body.reasoning_effort = 'auto'
+  else if (request.think === false) body.reasoning_effort = 'none'
   if (request.tools !== undefined && request.tools.length > 0) {
     body.tools = request.tools.map((tool) => ({
       type: 'function',
@@ -141,14 +208,18 @@ function buildOpenAIBody(request: OllamaRequest): unknown {
 function buildNativeBody(request: OllamaRequest): unknown {
   const messages = request.messages.map((message) => {
     if (message.role === 'tool') {
-      return { role: 'tool', content: message.content }
+      const item: Record<string, unknown> = { role: 'tool', content: message.content }
+      if (message.images !== undefined && message.images.length > 0) {
+        item.images = message.images.map(toBareBase64)
+      }
+      return item
     }
     if (message.role === 'assistant' && message.toolCalls !== undefined && message.toolCalls.length > 0) {
       return {
         role: 'assistant',
         content: message.content,
         tool_calls: message.toolCalls.map((call) => ({
-          function: { name: call.name, arguments: call.arguments },
+          function: { name: call.name, arguments: parseArguments(call.arguments) },
         })),
       }
     }
@@ -175,10 +246,7 @@ function buildNativeBody(request: OllamaRequest): unknown {
 /**
  * A user turn on the OpenAI surface: text stays text, images become parts.
  *
- * Ollama's OpenAI compatibility takes the standard `image_url` part, and it
- * takes a bare base64 payload in it. Sending text with the image dropped would
- * quietly turn a screenshot turn into a text-only turn, so the array form is
- * used whenever a turn actually carries bytes.
+ * Ollama's OpenAI compatibility takes the standard `image_url` part with a data URL.
  */
 function openAIContent(message: OllamaChatMessage): Record<string, unknown> {
   if (message.images === undefined || message.images.length === 0) {
@@ -188,20 +256,20 @@ function openAIContent(message: OllamaChatMessage): Record<string, unknown> {
     role: message.role,
     content: [
       { type: 'text', text: message.content },
-      ...message.images.map((image) => ({ type: 'image_url', image_url: { url: image } })),
+      ...message.images.map((image) => ({ type: 'image_url', image_url: { url: toDataUrl(image) } })),
     ],
   }
 }
 
 /**
  * A user turn on the native surface, where images are a sibling array of raw
- * base64 strings rather than interleaved content parts.
+ * base64 strings rather than data URLs or interleaved content parts.
  */
 function nativeContent(message: OllamaChatMessage): Record<string, unknown> {
   if (message.images === undefined || message.images.length === 0) {
     return { role: message.role, content: message.content }
   }
-  return { role: message.role, content: message.content, images: message.images }
+  return { role: message.role, content: message.content, images: message.images.map(toBareBase64) }
 }
 
 /** The endpoint one request goes to. */
@@ -341,7 +409,11 @@ function parseOpenAIChunk(record: Record<string, unknown>, pending: Map<number, 
       }
       const thinking = typeof fields.thinking === 'string'
         ? fields.thinking
-        : typeof fields.reasoning === 'string' ? fields.reasoning : ''
+        : typeof fields.reasoning === 'string'
+          ? fields.reasoning
+          : typeof fields.reasoning_content === 'string'
+            ? fields.reasoning_content
+            : ''
       if (thinking !== '') events.push({ type: 'thinking', text: thinking })
       if (Array.isArray(fields.tool_calls)) {
         for (const raw of fields.tool_calls) accumulateToolCall(raw, pending, true)
@@ -371,7 +443,11 @@ function parseNativeChunk(record: Record<string, unknown>, pending: Map<number, 
     // the answer, so it is a separate event rather than prefixed text.
     const thinking = typeof fields.thinking === 'string'
       ? fields.thinking
-      : typeof fields.reasoning === 'string' ? fields.reasoning : ''
+      : typeof fields.reasoning === 'string'
+        ? fields.reasoning
+        : typeof fields.reasoning_content === 'string'
+          ? fields.reasoning_content
+          : ''
     if (thinking !== '') events.push({ type: 'thinking', text: thinking })
     if (Array.isArray(fields.tool_calls)) {
       for (const raw of fields.tool_calls) accumulateToolCall(raw, pending, false)

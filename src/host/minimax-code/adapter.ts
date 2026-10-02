@@ -33,6 +33,7 @@ import {
   PROVIDER_NAME,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
+  computeMinimaxAuthOwner,
   messagesUrl,
   redactToken,
 } from './types.ts'
@@ -486,24 +487,6 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // anything at all: without it the call is a no-op that always returns the
     // requested cap, and the service rejects the request instead of it being clamped
     // here.
-    const requestedMax = requestOptions.maxTokens ?? maxOutputTokensFor(options.model, contextWindow)
-    const built = buildMinimaxRequest(
-      { ...requestOptions, maxTokens: clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions)) },
-      images,
-      // TRUE, and stated here rather than left to the builder's default, because
-      // the default is not the mechanism that keeps this working: caching is
-      // REQUEST-DRIVEN on the Anthropic dialect (the service caches a prefix
-      // only where the request puts a cache_control breakpoint), so a request
-      // sent without breakpoints bills every turn as fresh input and returns no
-      // cache_read_input_tokens - which is exactly what this route showed until
-      // the markers went in. Writing the intent down here means a future edit
-      // that changes the builder's default cannot silently turn caching back
-      // off for this provider. See the mapper's module doc for where the
-      // breakpoints go.
-      { cacheControl: true },
-    )
-    const body = assertRequestBodyFits(built)
-
     let credentials: MinimaxCodeCredentials
     // The pool account this request is being served by, when there is a pool. It
     // is what makes the 401 recovery below renew the account that actually failed
@@ -524,6 +507,32 @@ export class MinimaxCodeAdapter extends LlmAdapter {
         { cause: error },
       )
     }
+
+    let authOwner = computeMinimaxAuthOwner(credentials, accountId)
+
+    // The cap tracks the window so a long reasoning turn is not cut off by a fixed
+    // ceiling, and is reduced when the caller's prompt is large enough that prompt
+    // plus output would not fit. Passing the estimate is what makes the clamp do
+    // anything at all: without it the call is a no-op that always returns the
+    // requested cap, and the service rejects the request instead of it being clamped
+    // here.
+    const requestedMax = requestOptions.maxTokens ?? maxOutputTokensFor(options.model, contextWindow)
+    const effectiveMax = clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions))
+
+    const buildBodyForOwner = (owner: string): string => {
+      const built = buildMinimaxRequest(
+        { ...requestOptions, maxTokens: effectiveMax },
+        images,
+        {
+          cacheControl: true,
+          authOwner: owner,
+          route: PROVIDER_ID,
+        },
+      )
+      return assertRequestBodyFits(built)
+    }
+
+    let body = buildBodyForOwner(authOwner)
 
     let response: Response
     // At most one recovery attempt. A 401 has two possible causes that the status
@@ -558,6 +567,8 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       const refused = credentials.accessToken
       try {
         credentials = await this.renewCredential(accountId, fetchFn, signal, refused)
+        authOwner = computeMinimaxAuthOwner(credentials, accountId)
+        body = buildBodyForOwner(authOwner)
       } catch (error) {
         // The refresh itself failed: that verdict is the one to report, because it
         // names why the credential can no longer be renewed.
@@ -595,7 +606,12 @@ export class MinimaxCodeAdapter extends LlmAdapter {
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
-    const state = createStreamState()
+    const state = createStreamState({
+      model: options.model,
+      authOwner,
+      route: PROVIDER_ID,
+      provider: PROVIDER_ID,
+    })
     let buffer = ''
 
     try {

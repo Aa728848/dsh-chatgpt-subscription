@@ -221,7 +221,8 @@ describe('MiniMax Code check-in service', () => {
 
   it('parks a not-yet-claimable today and re-checks it on the slow cadence only', async () => {
     const dir = await makeDir()
-    let nowMs = Date.now()
+    // Keep this cadence test within one local day, independent of wall clock.
+    let nowMs = new Date(2026, 0, 15, 12, 0, 0).getTime()
     const fetchLog = makeFetch({ panel: makePanel(DAY_UPCOMING) })
     const service = makeService(dir, makePool([makeAccount('acc-1')]).pool, fetchLog, { now: () => nowMs })
 
@@ -248,6 +249,18 @@ describe('MiniMax Code check-in service', () => {
     expect(fetchLog.calls.status).toBe(before + 1)
     summary = await service.summary()
     expect(summary.doneToday).toBe(0)
+  })
+
+  it('rechecks an inactive account after local midnight even inside the throttle', async () => {
+    const dir = await makeDir()
+    let nowMs = new Date(2026, 0, 15, 23, 55, 0).getTime()
+    const fetchLog = makeFetch({ panel: makePanel(DAY_UPCOMING) })
+    const service = makeService(dir, makePool([makeAccount('acc-1')]).pool, fetchLog, { now: () => nowMs })
+    await service.tick()
+    expect(fetchLog.calls.status).toBe(1)
+    nowMs += 10 * 60 * 1000
+    await service.tick()
+    expect(fetchLog.calls.status).toBe(2)
   })
 
   it('caps a failing account and lets a manual pass ignore the cap', async () => {

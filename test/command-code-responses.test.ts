@@ -4,6 +4,7 @@ import {
   closeStream,
   createStreamState,
   processResponsesStreamLine,
+  assertStreamComplete,
 } from '../src/host/command-code/mapper.ts'
 import { parseProviderModels } from '../src/host/command-code/client.ts'
 import { wireForCatalogEntry, wireForModel } from '../src/host/command-code/types.ts'
@@ -73,7 +74,80 @@ describe('command code responses request', () => {
 
     expect(call).toMatchObject({ call_id: 'call_1', name: 'read', arguments: '{"path":"a"}' })
   })
-})
+
+  it('omits stop from the request body even when stop is configured', () => {
+    const history = toolHistory() as unknown as Record<string, unknown>
+    const body = buildResponsesRequest({ ...history, stop: ['\n\n', 'STOP'] } as never)
+    expect(body.stop).toBeUndefined()
+  })
+
+  it('maps user text and images to Responses input_text and input_image format', () => {
+    const images = new Map([
+      ['img_1', { kind: 'inline' as const, mediaType: 'image/png', data: 'AQID' }],
+    ])
+    const body = buildResponsesRequest({
+      model: 'gpt-6-astra',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'describe' },
+            { type: 'image', attachment: { attachmentId: 'img_1' } },
+          ],
+        },
+      ],
+    } as never, images)
+    const input = body.input as Array<Record<string, unknown>>
+    expect(input).toHaveLength(1)
+    expect(input[0]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'describe' },
+        { type: 'input_image', image_url: 'data:image/png;base64,AQID' },
+      ],
+    })
+  })
+
+  it('propagates tool result images as user input_image after function_call_output', () => {
+    const images = new Map([
+      ['shot_1', { kind: 'inline' as const, mediaType: 'image/png', data: 'c2hvdA==' }],
+    ])
+    const body = buildResponsesRequest({
+      model: 'gpt-6-astra',
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'screenshot' }],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'call_1', name: 'take_screenshot', arguments: '{}' }],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'call_1',
+              content: [
+                { type: 'text', text: 'done' },
+                { type: 'image', attachment: { attachmentId: 'shot_1' } },
+              ],
+            },
+          ],
+          source: { kind: 'tool', callId: 'call_1' },
+        },
+      ],
+    } as never, images)
+    const input = body.input as Array<Record<string, unknown>>
+    expect(input.map(item => item.type ?? item.role)).toEqual(['user', 'function_call', 'function_call_output', 'user'])
+    expect(input[2]).toEqual({ type: 'function_call_output', call_id: 'call_1', output: 'done[image: shot_1]' })
+    expect(input[3]).toEqual({
+      role: 'user',
+      content: [{ type: 'input_image', image_url: 'data:image/png;base64,c2hvdA==' }],
+    })
+  })
+});
 
 describe('command code responses stream', () => {
   it('assembles text and usage', () => {
@@ -100,7 +174,7 @@ describe('command code responses stream', () => {
     const state = createStreamState('responses')
     const send = (event: unknown) => processResponsesStreamLine('data: ' + JSON.stringify(event), state)
     const out = [
-      ...send({ type: 'response.output_item.added', item_id: 'fc_1', item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'read', arguments: '' } }),
+      ...send({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'read', arguments: '' } }),
       ...send({ type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '{"path":' }),
       ...send({ type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '"a"}' }),
       ...send({ type: 'response.function_call_arguments.done', item_id: 'fc_1', arguments: '{"path":"a"}' }),
@@ -116,8 +190,8 @@ describe('command code responses stream', () => {
     const state = createStreamState('responses')
     const send = (event: unknown) => processResponsesStreamLine('data: ' + JSON.stringify(event), state)
     const started: ReturnType<typeof send> = []
-    started.push(...send({ type: 'response.output_item.added', item_id: 'fc_1', item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'read', arguments: '' } }))
-    started.push(...send({ type: 'response.output_item.added', item_id: 'fc_2', item: { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'write', arguments: '' } }))
+    started.push(...send({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'read', arguments: '' } }))
+    started.push(...send({ type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'write', arguments: '' } }))
     const out = [
       ...started,
       ...send({ type: 'response.function_call_arguments.delta', item_id: 'fc_2', delta: '{"b":1}' }),
@@ -133,4 +207,67 @@ describe('command code responses stream', () => {
     expect(calls.find(call => call.name === 'read')?.arguments).toBe('{}')
     expect(calls.find(call => call.name === 'write')?.arguments).toBe('{"b":1}')
   })
-})
+
+  it('reserves unique block indices for interleaved tool and text blocks', () => {
+    const state = createStreamState('responses')
+    const send = (event: unknown) => processResponsesStreamLine('data: ' + JSON.stringify(event), state)
+    const out = [
+      ...send({ type: 'response.output_text.delta', delta: 'first ' }),
+      ...send({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'read', arguments: '' } }),
+      ...send({ type: 'response.output_text.delta', delta: 'second' }),
+      ...send({ type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '{"path":"a"}' }),
+      ...send({ type: 'response.completed', response: {} }),
+      ...closeStream(state),
+    ]
+
+    const blockStarts = out.filter(chunk => chunk.type === 'block-start')
+    expect(blockStarts).toHaveLength(3)
+    expect(blockStarts.map(chunk => (chunk as { index: number }).index)).toEqual([0, 1, 2])
+    expect((blockStarts[0] as { blockType: string }).blockType).toBe('text')
+    expect((blockStarts[1] as { blockType: string }).blockType).toBe('tool-call')
+    expect((blockStarts[2] as { blockType: string }).blockType).toBe('text')
+
+    const blockEnds = out.filter(chunk => chunk.type === 'block-end')
+    expect(blockEnds.map(chunk => (chunk as { index: number }).index)).toEqual([0, 2, 1])
+    expect(state.blocks).toHaveLength(3)
+    expect(state.blocks[0]).toMatchObject({ type: 'text', text: 'first ' })
+    expect(state.blocks[1]).toMatchObject({ type: 'tool-call', name: 'read', arguments: '{"path":"a"}' })
+    expect(state.blocks[2]).toMatchObject({ type: 'text', text: 'second' })
+  })
+
+  it('throws on standard error events and response.failed with object error or string', () => {
+    const state1 = createStreamState('responses')
+    expect(() => processResponsesStreamLine('data: ' + JSON.stringify({
+      type: 'error',
+      message: 'standard event error message',
+    }), state1)).toThrow(/standard event error message/)
+
+    const state2 = createStreamState('responses')
+    expect(() => processResponsesStreamLine('data: ' + JSON.stringify({
+      type: 'response.failed',
+      response: { error: { message: 'upstream failure' } },
+    }), state2)).toThrow(/upstream failure/)
+
+    const state3 = createStreamState('responses')
+    expect(() => processResponsesStreamLine('data: ' + JSON.stringify({
+      type: 'response.failed',
+      response: { error: 'raw string error' },
+    }), state3)).toThrow(/raw string error/)
+  })
+
+  it('rejects a truncated stream that never received a terminal event', () => {
+    const state = createStreamState('responses')
+    processResponsesStreamLine('data: ' + JSON.stringify({ type: 'response.output_text.delta', delta: 'hi' }), state)
+    expect(() => assertStreamComplete(state)).toThrow(/terminal event/)
+  })
+
+  it('handles response.incomplete with max_output_tokens', () => {
+    const state = createStreamState('responses')
+    processResponsesStreamLine('data: ' + JSON.stringify({
+      type: 'response.incomplete',
+      response: { incomplete_details: { reason: 'max_output_tokens' } },
+    }), state)
+    const out = closeStream(state)
+    expect(out.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'max-tokens' } })
+  })
+});

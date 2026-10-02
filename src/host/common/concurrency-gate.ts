@@ -33,16 +33,15 @@ export class ConcurrencyGate {
    * being blocked by a value nobody verified.
    */
   setLimit(accountId: string, limit: number): void {
-    // A new cap below the current occupancy does not evict holders: they are
-    // already running, and counting them as over-limit would only invite a
-    // double release to hand a stranger a slot that was never free.
+    // Existing holders finish normally after a reduction; new requests wait
+    // until occupancy falls below the new limit.
     if (!Number.isFinite(limit) || limit <= 0) {
       this.limits.delete(accountId)
       // Anything already queued for a limit that no longer exists is let go.
       this.drain(accountId)
       return
     }
-    this.limits.set(accountId, Math.max(Math.floor(limit), this.held.get(accountId) ?? 0))
+    this.limits.set(accountId, Math.max(1, Math.floor(limit)))
     this.drain(accountId)
   }
 
@@ -81,8 +80,7 @@ export class ConcurrencyGate {
       }
       const remove = (): void => {
         const index = queue.indexOf(waiter)
-        if (index === -1) return
-        queue.splice(index, 1)
+        if (index !== -1) queue.splice(index, 1)
         if (queue.length === 0) this.queues.delete(accountId)
         signal?.removeEventListener('abort', onAbort)
       }
@@ -91,8 +89,14 @@ export class ConcurrencyGate {
       signal?.addEventListener('abort', onAbort, { once: true })
     })
 
-    // The slot was handed over by drain(), which already counted it.
-    return this.releaseFn(accountId)
+    // drain() already counted this grant. Cancellation can arrive between the
+    // grant and this continuation, so return that slot before rejecting.
+    const release = this.releaseFn(accountId)
+    if (signal?.aborted) {
+      release()
+      throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+    }
+    return release
   }
 
   private take(accountId: string): () => void {
