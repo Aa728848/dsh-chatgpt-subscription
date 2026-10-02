@@ -57,4 +57,15 @@ describe('Ollama model selection', () => {
     const models = await adapter([]).listModels()
     expect(models[0]?.provider).toBe(PROVIDER_ID)
   })
+
+  it('offers nothing at all when the catalog has never synced', async () => {
+    // The regression: this line used to hard-code gpt-oss:120b-cloud and
+    // gpt-oss:20b-cloud as a fallback, and they reached the model picker.
+    // Ollama has no model table of its own, so any name hard-coded here is a
+    // guess about what an account owns - and a guess in the picker is a model a
+    // user selects and then fails on. Nothing is the honest answer before the
+    // first /api/tags call, and the card tells the user to sync instead.
+    const models = await adapter([], []).listModels()
+    expect(models).toHaveLength(0)
+  })
 })

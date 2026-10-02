@@ -239,6 +239,9 @@ export function OllamaSection(props: Props): React.ReactElement {
             {status.catalogSynced ? t.catalogEmpty : t.catalogNeverSynced}
           </div>
         )}
+        {status !== null && status.models.length === 0 && !status.usable && (
+          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.catalogNeedKey}</p>
+        )}
         {status !== null && status.models.length > 0 && (
           <>
             <p className="dsha-muted" style={{ fontSize: 12 }}>

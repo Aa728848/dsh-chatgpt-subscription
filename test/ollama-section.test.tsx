@@ -47,10 +47,12 @@ afterEach(() => {
   container = null
 })
 
-async function renderWith(accounts = STATUS.pool.accounts): Promise<HTMLDivElement> {
+async function renderWith(
+  overrides: Partial<OllamaWebStatus> = {},
+): Promise<HTMLDivElement> {
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({
     ok: true,
-    value: { ...STATUS, pool: { ...STATUS.pool, accounts } },
+    value: { ...STATUS, ...overrides },
   })))
   const root = createRoot(container as HTMLDivElement)
   await act(async () => {
@@ -106,6 +108,18 @@ describe('OllamaSection', () => {
     expect(el.innerHTML).not.toContain('sk-')
   })
 
+  it('tells the user to sync before the model list can be anything', async () => {
+    const el = await renderWith({ models: [], catalogSynced: false, usable: false })
+    // A first-time user has no key and no synced list, so the model block is
+    // empty. Saying only 'not synced' left the tab looking broken with no hint
+    // that the button above it is the next step.
+    expect(el.textContent).toContain(zh.catalogNeverSynced)
+    expect(el.textContent).toContain('同步模型列表')
+    // No key means no sync is possible, and that is said rather than left to be
+    // discovered by pressing the button and getting an error back.
+    expect(el.textContent).toContain(zh.catalogNeedKey)
+  })
+
   it('offers a checkbox per model, so the line can be switched off', async () => {
     const el = await render()
     // Every other line lets the user turn its models off; without this the
@@ -118,10 +132,15 @@ describe('OllamaSection', () => {
   })
 
   it('shows each key own consumption, not a shared pool total', async () => {
-    const el = await renderWith([
-      { id: 'a1', alias: '主号', isPrimary: true, usage: { inputTokens: 1500, outputTokens: 250, requestCount: 4 } },
-      { id: 'a2', alias: '备用号', isPrimary: false },
-    ])
+    const el = await renderWith({
+      pool: {
+        ...STATUS.pool,
+        accounts: [
+          { id: 'a1', alias: '主号', isPrimary: true, usage: { inputTokens: 1500, outputTokens: 250, requestCount: 4 } },
+          { id: 'a2', alias: '备用号', isPrimary: false },
+        ],
+      },
+    })
     // A pool total would be wrong twice over: it hides which key is actually
     // being used, and it reads like a quota the service does not publish.
     expect(el.textContent).toContain('1.5K')

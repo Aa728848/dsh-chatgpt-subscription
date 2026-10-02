@@ -92,11 +92,23 @@ export interface OllamaCatalogModel {
   fetchedAt?: number
 }
 
-/** The conservative view used before any catalog sync has succeeded. */
-export const FALLBACK_MODELS: readonly OllamaCatalogModel[] = Object.freeze([
-  Object.freeze({ id: 'gpt-oss:120b-cloud' }),
-  Object.freeze({ id: 'gpt-oss:20b-cloud' }),
-])
+/**
+ * NO fallback model names.
+ *
+ * An earlier revision hard-coded `gpt-oss:120b-cloud` and `gpt-oss:20b-cloud`
+ * here, and they reached the model picker. That was wrong twice over: this line
+ * has no model table of its own, so every name in it would be a guess about what
+ * some account is entitled to, and a guess that lands in the picker is a model a
+ * user can select and then fail on. The other lines can fall back to hard-coded
+ * names because theirs are transcribed from a real table - Claude's is its own
+ * frozen catalog. Ollama's truth is `/api/tags`, and there is nothing honest to
+ * stand in for it before the first sync.
+ *
+ * So the catalog starts empty and the card says the list has not been synced yet,
+ * with the sync button right beside it. A user who has a key is one click from a
+ * list that is actually theirs.
+ */
+export const FALLBACK_MODELS: readonly OllamaCatalogModel[] = Object.freeze([])
 
 /**
  * Resolve the wire shape for a model.
