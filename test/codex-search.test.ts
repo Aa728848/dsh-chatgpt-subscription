@@ -20,6 +20,42 @@ describe('createCodexSearchProvider', () => {
     expect(result.sources[0].url).toBe('https://example.com/item1')
   })
 
+  // The request body IS the contract with /alpha/search, and that endpoint
+  // rejects unknown parameters rather than ignoring them. A field added here
+  // for a reason that has since expired is not a no-op: it is a 400 on every
+  // subscription search, which is what happened to the hard-coded
+  // `max_output_tokens: 4096`. Asserting the whole body, rather than one
+  // field's absence, is what makes the next one of these loud.
+  it('sends exactly the body the search endpoint accepts, and no output cap', async () => {
+    const oauth = { credentials: vi.fn(async () => ({ accessToken: 'secret', expiresAt: Date.now() + 10_000 })) } as never
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ sources: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+
+    await createCodexSearchProvider(oauth, { fetchFn: fetchFn as never }).search({ query: 'a query' })
+
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+
+    // The regression this pins, named directly so the failure says what broke.
+    expect(
+      body,
+      '/alpha/search rejects max_output_tokens (400 Unsupported parameter). Do not add an '
+        + 'output cap to this request; let the service apply its own default.',
+    ).not.toHaveProperty('max_output_tokens')
+
+    // ...and the fields that endpoint does require, so the removal above cannot
+    // be satisfied by emptying the body.
+    expect(url).toContain('/alpha/search')
+    expect(init.method).toBe('POST')
+    expect(body.input).toBe('a query')
+    expect(body.commands).toEqual({ search_query: [{ q: 'a query' }] })
+    expect(body.settings).toEqual({ allowed_callers: ['direct'], external_web_access: true })
+    expect(typeof body.id).toBe('string')
+    expect(typeof body.model).toBe('string')
+  })
+
   it('asks for a credential as a tool, not as a metered request', async () => {
     // Regression: search used to ask as a request, so a Codex quota cooldown
     // disabled web search with a "credentials are required" message.

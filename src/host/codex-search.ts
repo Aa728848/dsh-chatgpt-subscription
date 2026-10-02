@@ -115,6 +115,18 @@ function sendSearch(
       accept: 'application/json',
       'content-type': 'application/json',
     },
+    // NO `max_output_tokens` here, and that is deliberate. This endpoint is
+    // /alpha/search, not the Responses path, and it rejects the field outright:
+    // a 400 whose body names it as an unsupported parameter. It used to be
+    // hard-coded to 4096 here, so every subscription search 400'd once upstream
+    // tightened validation, while the chat path kept working because the
+    // responses mapper is a different endpoint and legitimately sends it.
+    //
+    // Do not reintroduce an output cap here just in case: an absent field lets
+    // the service apply its own default, and a cap this client invents is one
+    // more thing to fall out of step with the contract. The result is truncated
+    // to `maxResults` by normalizeSearchResult below, which is the only limit
+    // the caller actually asked for.
     body: JSON.stringify({
       id,
       model,
@@ -126,7 +138,6 @@ function sendSearch(
         allowed_callers: ['direct'],
         external_web_access: true,
       },
-      max_output_tokens: 4096,
     }),
     signal,
   })
