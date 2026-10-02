@@ -33,6 +33,7 @@ import { installMinimaxCodeStyles } from './minimax-code/styles.ts'
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
+import { dictionaries as ollamaDicts, NS_OLLAMA } from './ollama/locales.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -44,6 +45,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-kimi-code': any
     'dsh-minimax-code': MinimaxCodeLocaleKey
     'dsh-workbuddy': any
+    'dsh-ollama': any
   }
 }
 
@@ -82,6 +84,7 @@ export function apply(ctx: ClientContext): void {
     return () => {}
   }, 'dsh-minimax-code: styles')
   ctx.effect(() => ctx.locale.register(NS_WORKBUDDY, workBuddyDicts), 'dsh-workbuddy: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS_OLLAMA, ollamaDicts), 'dsh-ollama: dictionaries')
   ctx.effect(() => {
     installWorkBuddyStyles()
     return () => {}

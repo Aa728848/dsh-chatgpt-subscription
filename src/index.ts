@@ -44,6 +44,7 @@ import {
 } from './host/command-code/token-store.ts'
 import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/command-code/types.ts'
 import { OllamaAdapter } from './host/ollama/adapter.ts'
+import { registerOllamaRoutes } from './host/ollama/routes.ts'
 import { OllamaAccountPool } from './host/ollama/account-pool.ts'
 import { PROVIDER_ID as OLLAMA_PROVIDER_ID, PROVIDER_NAME as OLLAMA_PROVIDER_NAME } from './host/ollama/types.ts'
 import { FileCredentialStore as OllamaCredentialStore, FileModelSettingsStore as OllamaModelSettingsStore } from './host/ollama/token-store.ts'
@@ -460,6 +461,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       }
     }
     claimOllamaRoute()
+    // The settings API is registered unconditionally: the card is how a user adds
+    // their first key, so gating it on the adapter winning the route would leave a
+    // contested id with no way to configure it at all.
+    const disposeOllamaRoutes = registerOllamaRoutes(ctx, {
+      accountPool: ollamaAccountPool,
+      modelSettings: ollamaModelSettings,
+      fetchFn: proxyFetch,
+    })
 
     const claimCommandCodeRoute = (): void => {
       if (commandCodeRegistration !== undefined) return
@@ -818,6 +827,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       releaseHandle(antigravityRouteWatch)
       antigravityRegistration?.()
       antigravityRegistration = undefined
+      disposeOllamaRoutes()
+      ollamaRegistration?.()
+      ollamaRegistration = undefined
       disposeCommandCodeRoutes()
       releaseHandle(commandCodeRouteWatch)
       commandCodeRegistration?.()

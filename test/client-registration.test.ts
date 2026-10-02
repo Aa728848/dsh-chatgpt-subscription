@@ -287,7 +287,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind tabs in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'claude'] as const
+    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'claude', 'ollama'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -333,6 +333,20 @@ describe('client registration', () => {
           ownedByPlugin: false,
         } })
       }
+      if (url.startsWith('/ollama/api')) {
+        // Ollama's card is the shared account card over an API-key pool, so the
+        // payload is the pool slice plus a synced catalog.
+        return Response.json({ ok: true, value: {
+          pool: {
+            accounts: [{ id: 'ok_1', alias: 'Ollama 账号 1', isPrimary: true }],
+            activeAccountId: 'ok_1',
+            rotationStrategy: 'sequential',
+          },
+          models: [{ id: 'gpt-oss:120b-cloud' }],
+          usable: true,
+          catalogSynced: true,
+        } })
+      }
       if (url.startsWith('/antigravity/api') || url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api') || url.startsWith('/workbuddy/api')) {
         return Response.json({ ok: true, value: {
           authenticated: false,
@@ -372,7 +386,7 @@ describe('client registration', () => {
     try {
       await act(async () => root.render(createElement(ProviderHubSection, { t, close: () => undefined } as never)))
       const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
-      expect(tabs.map((tab) => tab.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'Claude'])
+      expect(tabs.map((tab) => tab.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'Claude', 'Ollama'])
       expect(container.querySelector('#dsh-hub-tab-claude')?.textContent).toBe('Claude')
       expect(tabs[0]?.getAttribute('aria-selected')).toBe('true')
       // The ChatGPT provider panel mounts by default; the other providers stay unmounted.
@@ -420,12 +434,14 @@ describe('client registration', () => {
       await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-claude')?.click() })
       expect(scrolled.at(-1)?.id).toBe('dsh-hub-tab-claude')
 
-      // Arrow keys move the active tab per the tablist pattern. The tab that
-      // receives the key is the one that moves relative to the current selection,
-      // so the selection is put back on Claude first.
-      await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-claude')?.click() })
+      // Arrow keys move the active tab per the tablist pattern, wrapping at both
+      // ends. Ollama now sits last, so the wrap is asserted from the last tab in
+      // TAB_IDS rather than from a fixed name: that keeps the keyboard order tied
+      // to the rendered strip instead of to whichever provider is newest.
+      const lastTabId = TAB_IDS[TAB_IDS.length - 1]
+      await act(async () => { container.querySelector<HTMLButtonElement>(`#dsh-hub-tab-${lastTabId}`)?.click() })
       await act(async () => {
-        container.querySelector<HTMLButtonElement>('#dsh-hub-tab-claude')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+        container.querySelector<HTMLButtonElement>(`#dsh-hub-tab-${lastTabId}`)?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
       })
       expect(container.querySelector<HTMLButtonElement>('#dsh-hub-tab-chatgpt')?.getAttribute('aria-selected')).toBe('true')
       expect(container.querySelector('#dsh-codex-title')).not.toBeNull()

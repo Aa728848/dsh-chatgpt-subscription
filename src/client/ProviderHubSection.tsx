@@ -8,13 +8,14 @@ import { ClaudeSection } from './claude/ClaudeSection.tsx'
 import { KimiCodeSection } from './kimi-code/KimiCodeSection.tsx'
 import { MinimaxCodeSection } from './minimax-code/MinimaxCodeSection.tsx'
 import { WorkBuddySection } from './workbuddy/WorkBuddySection.tsx'
+import { OllamaSection } from './ollama/OllamaSection.tsx'
 import { NS } from './locales.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS> & {
   onModelChange?: () => void
 }
 
-type HubTabId = 'chatgpt' | 'antigravity' | 'claude' | 'command-code' | 'kimi-code' | 'minimax-code' | 'workbuddy'
+type HubTabId = 'chatgpt' | 'antigravity' | 'claude' | 'command-code' | 'kimi-code' | 'minimax-code' | 'workbuddy' | 'ollama'
 
 // Brand names stay literal: the former standalone sidebar entries used the
 // same hardcoded labels, and every provider section except ChatGPT is
@@ -27,6 +28,7 @@ const HUB_TABS: ReadonlyArray<{ id: HubTabId; label: string }> = [
   { id: 'workbuddy', label: 'WorkBuddy' },
   { id: 'minimax-code', label: 'MiniMax Code' },
   { id: 'claude', label: 'Claude' },
+  { id: 'ollama', label: 'Ollama' },
 ]
 
 /**
@@ -98,6 +100,7 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
       {active === 'workbuddy' ? <WorkBuddySection onModelChange={onModelChange} /> : null}
       {active === 'minimax-code' ? <MinimaxCodeSection onModelChange={onModelChange} /> : null}
       {active === 'claude' ? <ClaudeSection onModelChange={onModelChange} /> : null}
+      {active === 'ollama' ? <OllamaSection onModelChange={onModelChange} /> : null}
     </div>
   </section>
 }
