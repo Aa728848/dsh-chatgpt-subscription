@@ -1,55 +1,50 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
 import { buildResponsesPayload } from '../src/host/responses-mapper.ts'
-import { codexModelMaxTokens } from '../src/shared/model-catalog.ts'
 
 const unusedAttachments = () => ({
   readImage: async () => { throw new Error('unused') },
 })
 
-describe('codex output cap', () => {
-  it.each(['gpt-6-sol', 'gpt-6.1-sol', 'gpt-5.5'])('always sends the model ceiling for %s', async (model) => {
-    // Regression: the catalog DECLARED a ceiling (and resolveCodexModel reported
-    // it as defaultMaxTokens) while the request never carried it, so the
-    // backend applied a default this line could neither predict nor report — a
-    // turn that hit it looked like an ordinary short answer.
-    const payload = await buildResponsesPayload(
-      { provider: 'codex-chatgpt', model, messages: [] } as unknown as GenerateOptions,
-      unusedAttachments(),
-    )
+// The Responses request body IS the contract with the subscription backend, and
+// that backend rejects unknown parameters instead of ignoring them. This pins the
+// whole request against the class of bug that has now happened twice: a field
+// added for a reason that expired is not a no-op, it is a 400 on every turn.
+// First /alpha/search (issue #28), then the chat path (issue #29).
+describe('codex responses request body', () => {
+  const build = (overrides: Partial<GenerateOptions>) => buildResponsesPayload(
+    { provider: 'codex-chatgpt', model: 'gpt-6-sol', messages: [], ...overrides } as unknown as GenerateOptions,
+    unusedAttachments(),
+  )
 
-    expect(payload.max_output_tokens).toBe(codexModelMaxTokens(model))
+  it('never sends max_output_tokens, even when the caller asks for one', async () => {
+    // Regression, named directly so the failure says what broke: the backend
+    // answers 400 Unsupported parameter: max_output_tokens on the accounts in
+    // #29 (gpt-6-sol / gpt-6.1-sol), and the official CLI's ResponsesApiRequest
+    // struct has no such field at all. Removing the field restored the
+    // conversation on the affected account with nothing else changed.
+    const withoutRequest = await build({})
+    const withRequest = await build({ maxTokens: 4096 })
+
+    for (const payload of [withoutRequest, withRequest]) {
+      expect(
+        payload,
+        'the subscription Responses endpoint rejects max_output_tokens with a 400 '
+          + '(Unsupported parameter). Do not add an output cap to this request; the '
+          + 'service applies its own default. The adapter defaultMaxTokens is a local '
+          + 'compaction reservation and must not become a wire field.',
+      ).not.toHaveProperty('max_output_tokens')
+    }
   })
 
-  it('sends a smaller request when the caller asks for one', async () => {
-    const payload = await buildResponsesPayload(
-      { provider: 'codex-chatgpt', model: 'gpt-6-sol', maxTokens: 4096, messages: [] } as unknown as GenerateOptions,
-      unusedAttachments(),
-    )
+  it('still sends the fields this endpoint does require', async () => {
+    // ...so the removal above cannot be satisfied by emptying the body.
+    const payload = await build({})
 
-    expect(payload.max_output_tokens).toBe(4096)
-  })
-
-  it('never sends a cap the model does not accept', async () => {
-    // A caller (or a stale setting) asking for more than the model supports
-    // must be clamped down, not passed through: that is the request the backend
-    // rejects outright. Same guard as the antigravity mapper.
-    const payload = await buildResponsesPayload(
-      { provider: 'codex-chatgpt', model: 'gpt-5.5', maxTokens: 1_000_000, messages: [] } as unknown as GenerateOptions,
-      unusedAttachments(),
-    )
-
-    expect(payload.max_output_tokens).toBe(codexModelMaxTokens('gpt-5.5'))
-  })
-
-  it('sends the cap for a model the shipped table does not know', async () => {
-    // A model only the live listing named still gets a cap rather than falling
-    // through to an unsent field; the table's pre-GPT-6 default applies.
-    const payload = await buildResponsesPayload(
-      { provider: 'codex-chatgpt', model: 'gpt-99-unheard-of', messages: [] } as unknown as GenerateOptions,
-      unusedAttachments(),
-    )
-
-    expect(payload.max_output_tokens).toBe(codexModelMaxTokens('gpt-99-unheard-of'))
+    expect(payload.model).toBe('gpt-6-sol')
+    expect(payload.stream).toBe(true)
+    expect(payload.store).toBe(false)
+    expect(payload.include).toEqual(['reasoning.encrypted_content'])
+    expect(Array.isArray(payload.input)).toBe(true)
   })
 })

@@ -76,6 +76,10 @@ export function resolveCodexModel(
     name: liveEntry?.name ?? (entry.id === model ? entry.name : model),
     inputModalities: [...(liveEntry?.inputModalities ?? entry.inputModalities)],
     context: { contextWindow: configuredContextWindow ?? liveEntry?.contextWindow ?? entry.contextWindow },
+    // A LOCAL reservation, not a wire field: the subscription Responses
+    // endpoint rejects `max_output_tokens` (issue #29). DSH charges this much
+    // of the window to the completion when it plans compaction; the request
+    // builder never transmits it.
     defaultMaxTokens: codexModelMaxTokens(model),
     // No `systemPromptUpdate: 'in-history'`: the Responses wire carries the system
     // prompt in the top-level `instructions` slot, never inside `input`, so this

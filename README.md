@@ -65,7 +65,7 @@
   - 每个会话发送稳定的 `prompt_cache_key`，让后端复用提示前缀；
   - 回传后端在响应头给出的 `x-codex-turn-state`，让它续接该轮；
   - 后端不再下发该头时立即停止回送——不重放过期值；
-- **始终发送 `max_output_tokens`**，按 `min(调用方请求, 模型上限)` 封顶（详见「模型目录」）；
+- **对话报文绝不发送 `max_output_tokens`**：订阅版 Responses 端点在部分账号/模型上直接以 `400 Unsupported parameter: max_output_tokens` 拒收该字段（[#29](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29)，实测 `gpt-6-sol` / `gpt-6.1-sol`），官方 CLI 的请求结构里也没有这个字段；输出长度由服务端默认值决定，撞上限仍以 `max-tokens` 结束原因上报（详见「模型目录」）；
 - Antigravity（Gemini / Claude）线路同样接受图片输入：DSH 以 `{ type: 'image', attachment }` 下发的粘贴图片会经附件服务读出字节并按 Gemini `inlineData` 发出，读不出的图片降级为一条可见的说明文本而不是被静默丢弃。单次请求的图片 base64 负载超过 12 MiB 时，最旧的图片按上游同款占位文案替换为文本，避免整条请求被体积上限拒绝；
 - 原样转发 DSH 暴露的工具 schema；命令工具兼容 `pwsh` / `powershell`、`bash`、`sh` 与 `shell`，并按 PowerShell、Bash 或 POSIX sh 注入对应说明；
 - 429/5xx 由 DSH retry policy 接管；401 只强制刷新并重试一次，支持 `AbortSignal`；
@@ -260,7 +260,7 @@
 - 子代理的模型与思考深度沿用 DSH 自身设置：**设置 → Subagent** 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 `agent-default-model` 设置提供；
 - 最大嵌套深度不在本插件设置内，由 DSH 侧决定：0.1.5 及以前是 preset 中 `tool-subagent` 行的 `maxDepth`（默认 3），0.1.6 起改由 `subagent` 服务的设置项提供（默认 1）；`provider-managed` 表示把预算交给进程外提供方；
 - GPT-6 系列（6 Astra / 6 Sol / 6 Luna）默认使用 384K 有效上下文，可配置最高 872K；5.6 Sol / Terra / Luna 保持 272K，最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；
-- 单次输出上限按模型区分：GPT-6 系列为 128K（官方对 6 Astra / 6 Sol / 6 Luna 均标 128K），更早的模型保持 32768。调用方未显式指定时按模型上限发送；显式指定时按 `min(请求值, 模型上限)` 封顶——超出模型能力的请求会被上游直接拒绝，因此必须向下封而不是原样透传。**`max_output_tokens` 始终出现在请求中**：不发送时由上游套用自己的默认值，本插件既无法预测也无法上报，某一轮撞上上限会看起来像一次普通的短回答。
+- 单次输出上限按模型区分：GPT-6 系列为 128K（官方对 6 Astra / 6 Sol / 6 Luna 均标 128K），更早的模型保持 32768。**这个数字只在本插件进程内使用，不会写进请求**：订阅版 Responses 端点会以 `400 Unsupported parameter: max_output_tokens` 拒收该参数（[#29](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29)），官方 Codex CLI 的 `ResponsesApiRequest` 里同样没有这个字段。它的实际用途是作为 DSH 侧的输出预留量（`defaultMaxTokens`），供压缩判定把完成部分计入上下文窗口；请求本身交给服务端决定长度。撞上服务端上限时该轮仍以 `max-tokens` 结束原因呈现（后端以 `response.incomplete` 收尾）。
 - 可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。
 
 ## 模型目录
@@ -764,7 +764,7 @@ npm pack --dry-run
 | --- | --- |
 | 1455 端口占用 | 结束旧登录任务或占用该端口的进程后重试；插件卸载会关闭 listener |
 | 模型选择器里没有新发布的模型 | 该模型必须出现在 `/backend-api/codex/models` 返回的列表里（该列表是「这个账号能调什么」的权威）。若后端已发布而选择器没有，点设置页的**强制刷新目录**；仍不出现则说明当前套餐/workspace 无权调用 |
-| 回答在中途被截断 | 可能是撞到输出上限。插件始终发送 `max_output_tokens`（按模型上限或调用方请求的较小值），被截断会以 `max-tokens` 结束原因呈现；可用**增强功能**里的上下文覆盖或换模型调整 |
+| 回答在中途被截断 | 可能是撞到服务端的输出上限。对话报文不发送 `max_output_tokens`（该参数会被上游 400 拒收，见「模型目录」），长度由服务端决定；被截断会以 `max-tokens` 结束原因呈现，可用**增强功能**里的上下文覆盖或换模型调整 |
 | 断网后首次打开设置页很慢 | 目录有本地快照兜底，重启后第一次渲染不需要网络；若仍慢说明快照不可写（home 只读），此时不影响功能 |
 | 登录后仍是 401 | 刷新 token；若刷新 token 已失效，注销并重新登录，不会循环请求 |
 | 额度显示旧数据 | 设置页会保留最后成功值；等待 15 秒节流窗口后手动刷新 |

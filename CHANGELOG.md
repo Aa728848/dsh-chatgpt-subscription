@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **修复 Codex 订阅线路对话每轮 400：上游拒收 `max_output_tokens`**（[issue #29](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29)，实测账号 `plus`、模型 `gpt-6-sol` / `gpt-6.1-sol`）。
+  - **根因**：`responses-mapper.ts` 的 `buildResponsesPayload()` 在调用方未指定 `maxTokens` 时也会补上 `codexModelMaxTokens(model)`，因此**每一轮对话报文都带 `max_output_tokens`**；而订阅版 Responses 端点对部分账号/模型直接以 `400 {"detail":"Unsupported parameter: max_output_tokens"}` 拒收。这与 [#28](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/28) 的 `/alpha/search` 是**两个不同端点上的同一个错误结论**：当时认定「只有搜索端点拒收该字段，对话端点合法地发送它」，报告者的对照实验推翻了它——只删掉这个字段、账号/模型/代理都不动，对话即恢复。
+  - **不是配置问题**：错误文案 `Codex request failed (400): …` 由 `responses-client.ts` 的 `responseError()` 产出（搜索侧是 `Codex subscription search failed (400).`），错误码 `PROVIDER_ERROR`，指向对话链路；报告者在 0.10.15 的打包产物里定位到两个发送点，删除对话侧的那两行并重启 host 后 400 消失。
+  - **官方客户端本来就不发这个字段**：Codex CLI 的 `codex-rs/codex-api/src/common.rs` 中 `ResponsesApiRequest` **没有** `max_output_tokens` 字段，`codex-rs/core/src/client.rs` 构建请求时也不赋值；[openai/codex#31181](https://github.com/openai/codex/issues/31181) 记录了同一条 400（自定义 baseURL 走 Responses 时 `@ai-sdk/openai` 会无条件发出该字段）。也就是说，发它是本插件自行加出来的、与 wire 契约不同步的一行。
+  - **修法**：`buildResponsesPayload()` **不再写入该字段**（连同 `ResponsesPayload` 上的类型声明一起删除），`codexModelMaxTokens()` 保留但改为「仅进程内使用」并加注释说明。不再用「按模型上限封顶」的方式重引入——被拒收的正是这个请求本身。
+  - **保留了什么**：适配器仍上报 `defaultMaxTokens`（`host/model-catalog.ts`），DSH 用它做**本地**输出预留、供 `compaction-basic` 把完成部分计入窗口（harness 的 `reservedCompletionTokens`）；这个数字不出进程。截断仍可上报：后端以 `response.incomplete` 收尾，`parseResponsesStream` 映射为 `max-tokens` 结束原因。代价是调用方的 `maxTokens` 不再传给上游，长度由服务端默认值决定——与官方 CLI 行为一致。
+  - **测试**：`test/codex-output-cap.test.ts` 重写为**报文契约**用例（沿用 #28 在搜索侧确立的做法：断言整包而不是单个字段的缺席）——「未指定 `maxTokens` 时不发」「显式指定 4096 时也不发」，并保留一条正向断言锁住 `model` / `stream` / `store` / `include` / `input` 仍在，使「删字段」不能靠清空 body 满足。已验证该用例是**承重**的：把 `payload.max_output_tokens = 128_000` 加回后立即以 `expected … to not have property "max_output_tokens"` 失败。
+  - **验证**：强制类型检查（`npx tsc -b --force`）与 test tsconfig 均 0 错误；全量 **1923 passed** / 7 skipped，**0 失败**；`npm run build` 干净，产物 `lib/index.js` 中该字段只剩注释；`npm pack --dry-run` 正常。
+  - **未在报告者账号上端到端复验**：结论来自报告者的对照实验与本机的报文断言，未用真实订阅凭据发过一轮。
 - **修复 Codex 线路模型选择器为空（供应商已启动、登录正常，但一个模型都不显示）**（用户报告，账号实测为 `prolite` 套餐）。
   - **根因**：接入实时目录那次提交（`d821752`，`feat(codex): follow upstream third-party wire`，v0.10.12）让 `listCodexModels` 把订阅目录当成唯一来源，再与用户的 `visibleModelIds` 求交集：`{codex-auto-review} ∩ {gpt-6-astra}` = **空集**，于是选择器一个不剩。
   - **目录并非空的，是不含 chat 模型**：实测该套餐的 `GET /backend-api/codex/models` 返回 `count=1, slugs=codex-auto-review`——只含账号的 code-review slug。目录「比内置表窄」的设计意图是对的，但它**不能保证窄的那部分与用户的选择有交集**；交集为空时，目录就把用户自己勾选的模型全部删掉了。
@@ -33,7 +42,8 @@
   - **顺带修掉一个真实的不一致**：`buildClaudeSystemBlocks` 是导出函数且自己写标记，此前固定写裸 `{ type: 'ephemeral' }`，会绕过 TTL（请求构建器事后虽会覆盖，但直接调用该函数的调用方拿到的永远是 5 分钟）。现两处写入用同一个 `cacheControlFor`，并更新了 `claude-mapper` / `claude-adapter` / `claude-routes` / `claude-token-store` 中断言旧标记形态的用例。
   - **验证**：强制类型检查（`tsc -b --force`）与 test tsconfig 均 0 错误，`npm run build`、`npm pack --dry-run`、`npm ci --dry-run` 通过，全量 **1847 passed** / 7 skipped；失败的 7 条仍是先前已确认与本插件无关的 `claude-model-catalog`(5)、`antigravity-callback-port`(1) 与一条既有用例。
   - **未在真实订阅账号上端到端验证**。Kimi 订阅端是否接受 `prompt_cache_options` / 顶层 `cache_control`（开放平台文档有，订阅端未实测）与 Claude 1 小时写入的实际命中收益，都需要在真机上确认；第一检查点是发一轮带 1 小时的请求后看 `usage.cache_creation.ephemeral_1h_input_tokens` 是否非零。
-- **修复 Codex 线路声明了输出上限却从不发送**。`shared/model-catalog.ts` 为 GPT-6 家族声明了 128K 输出上限，`resolveCodexModel` 也把它作为 `defaultMaxTokens` 报给 DSH，但 `responses-mapper.ts` 构建 payload 时**完全没有 `max_output_tokens`** 字段——目录里没有的模型则回落到 32K 预 GPT-6 默认。
+- ~~**修复 Codex 线路声明了输出上限却从不发送**~~ — **已被 #29 的修复推翻，勿再照此实现**（本条当时的结论是「对话端点合法地发送该字段」，事实并非如此；详见 Unreleased 首条）。留档以说明这行代码的来历与它为什么看起来合理。
+  - 原文：`shared/model-catalog.ts` 为 GPT-6 家族声明了 128K 输出上限，`resolveCodexModel` 也把它作为 `defaultMaxTokens` 报给 DSH，但 `responses-mapper.ts` 构建 payload 时**完全没有 `max_output_tokens`** 字段——目录里没有的模型则回落到 32K 预 GPT-6 默认。
   - **为什么重要**：不带这个字段时由服务端套用自己的默认值，本线路既无法预测也无法上报——某一轮撞上上限看起来就像一次普通的短回答。这与 Claude 线把 `model_context_window_exceeded` 当成正常结束是同一类问题。Codex 走 `store:false` 且每轮全量重发，这一项尤其容易被反复触发。
   - **修法**：始终发送 `options.maxTokens ?? codexModelMaxTokens(model)`，并在调用方请求更大时用 `Math.min` 封到模型自身上限（与 antigravity mapper 同一道守卫）——超出模型能力的请求会被后端直接拒绝，因此必须向下封而不是原样透传。
   - **测试**：`test/codex-output-cap.test.ts` 6 条——「始终发送模型上限」（回归锁定）、「调用方要求更小时照发」、「超出上限必须封顶」、「只存在于实时目录的未知模型也带上限」。

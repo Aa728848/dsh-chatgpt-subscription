@@ -197,7 +197,17 @@ export function codexModelSupportsReasoningSummary(model: string): boolean {
   return resolveCodexCatalogEntry(model).supportsReasoningSummary
 }
 
-/** Per-request output cap for one model, or the pre-GPT-6 default when it declares none. */
+/**
+ * Declared output ceiling for one model, or the pre-GPT-6 default when it
+ * declares none.
+ *
+ * This is NOT a request field. The subscription Responses endpoint rejects
+ * `max_output_tokens` outright (400 Unsupported parameter, issue #29 — and the
+ * official CLI's own request struct has no such field), so nothing is sent to
+ * the wire from here. The value reaches DSH only as the adapter's
+ * `defaultMaxTokens`, which compaction uses as a local completion reservation
+ * when it plans a fold; that number never leaves this process.
+ */
 export function codexModelMaxTokens(model: string): number {
   return resolveCodexCatalogEntry(model).maxTokens ?? CODEX_DEFAULT_MAX_TOKENS
 }

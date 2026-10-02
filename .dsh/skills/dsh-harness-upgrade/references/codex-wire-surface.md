@@ -42,7 +42,55 @@ proxy CODEX_API_DOCS.md, 7shi/codex-oauth).
 | one `CODEX_ORIGINATOR` | `compat.ts`, `codex-images.ts`, `codex-search.ts` | Three values were in use (`opencode` for chat+OAuth, `pi` for image and search) — an archaeological record of when each endpoint was reverse-engineered. The backend keys behaviour off this value, so one account had three unrelated failure signatures. `OAUTH_ORIGINATOR` now aliases the same constant, so sign-in and request cannot disagree. |
 | live model listing | new `codex-catalog.ts` | The subscription's whole advantage is a fresher model surface than the API key path, and this line hardcoded it — a new model needed a code change and a release. Now reads `GET /backend-api/codex/models?client_version=…`, cached 15 min per account, single-flighted, persisted through the existing `catalog-snapshot` module and scoped by account id. |
 | `prompt_cache_key` + `x-codex-turn-state` | `responses-mapper.ts`, `responses-client.ts` | Both are the backend's own continuation mechanisms; without them every turn re-sent the whole history. |
-| `max_output_tokens` always sent | `responses-mapper.ts` | The catalog declared a ceiling and `resolveCodexModel` reported it as `defaultMaxTokens`, but the request never carried the field — the backend then applied a default this line could not predict or report, and a turn that hit it looked like an ordinary short answer. Always send `options.maxTokens ?? modelCap`, clamped with `Math.min` (same guard as the antigravity mapper). |
+| ~~`max_output_tokens` always sent~~ — **reverted, do not restore** | `responses-mapper.ts` | This row was wrong in the direction that matters. Sending the field was argued from "the catalog declared a ceiling, so declare it on the wire", and the claim that the Responses endpoint accepts it ``the way `/alpha/search` does not`` came from the same round that hit the search 400 (issue #28). Issue #29 disproves it: the subscription Responses endpoint answers `400 {"detail":"Unsupported parameter: max_output_tokens"}` on at least `gpt-6-sol` / `gpt-6.1-sol` on a plus plan, and removing only this field restored conversation. The official client never sends it — `ResponsesApiRequest` in `codex-rs/codex-api/src/common.rs` has no such field, and `codex-rs/core/src/client.rs` never assigns one — so the field was this plugin's own invention, never a wire requirement. See the note below. |
+
+## 3b. The output cap is local-only (issue #29, corrects the row above)
+
+`max_output_tokens` must NOT be sent on the Responses path. It is a natural
+thing to reach for — the catalog knows each model's ceiling, and `/alpha/search`
+looked like the only endpoint that rejected it — but it is not this client's
+field to send:
+
+- The subscription endpoint returns
+  `400 {"detail":"Unsupported parameter: max_output_tokens"}` on at least
+  `gpt-6-sol` and `gpt-6.1-sol` on a plus plan (issue #29). The report's control
+  was exact: same account, model, and proxy; deleting only this field restored
+  conversation.
+- The official CLI does not send it. `codex-rs/codex-api/src/common.rs`
+  declares `ResponsesApiRequest` with no such field, and
+  `codex-rs/core/src/client.rs` builds the request without one. The same 400 is
+  reported for `@ai-sdk/openai` against custom Responses gateways
+  (openai/codex#31181) — so the field is a client-side assumption that some
+  backends reject, not a parameter the Responses contract requires.
+- The error strings tell the two endpoints apart, which is how the first report
+  was misrouted: the chat path produces `Codex request failed (400): …` from
+  `responses-client.ts`, while `/alpha/search` produces
+  `Codex subscription search failed (400).`
+
+What replaces it:
+
+- **Nothing on the wire.** The service applies its own default and the turn's
+  real length is whatever the model produces.
+- **`defaultMaxTokens` stays**, on the adapter's model info only. DSH reads it
+  as a *local* completion reservation when compaction plans a fold
+  (`compaction-basic`'s `reservedCompletionTokens`); it never becomes a request
+  field. `codexModelMaxTokens()` in `shared/model-catalog.ts` is now documented
+  as that local number, not a request cap.
+- **Truncation is still reportable.** The backend ends a capped turn with
+  `response.incomplete`, which `parseResponsesStream` maps to the `max-tokens`
+  finish reason — that mapping is what surfaces the cutoff, not the request
+  field.
+
+Trade-off accepted: a caller's `maxTokens` no longer reaches the provider. That
+matches the official CLI and is the only way to stop the 400 on affected
+accounts; clamping to the model ceiling does not help, because the field itself
+is what is rejected.
+
+The lesson to carry to the next field: "the catalog knows this value" is not
+evidence that the wire accepts it. Verify against the official client's request
+struct, and assert the WHOLE body in a test — `codex-search.test.ts` and
+`codex-output-cap.test.ts` both do this now, so the next invented field fails
+loudly instead of as a 400.
 
 ## 4. Design notes worth keeping
 
