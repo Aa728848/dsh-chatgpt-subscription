@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs'
+import { adoptSessionEvent } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
+import { PLUGIN_MESSAGE_SOURCE_KIND } from '../src/host/common/llm-compat.ts'
 import {
   DEFAULT_GUARD_OPTIONS,
   RESUME_HINT,
@@ -14,6 +16,17 @@ import {
   type GuardStreamOptions,
   type ReasoningCollapseContext,
 } from '../src/host/reasoning-collapse-guard/index.ts'
+
+/** The `notice` summary the guard stamps on every resume message. */
+const RESUME_SUMMARY = 'Reasoning collapsed; the attempt was stopped and resumed.'
+
+/**
+ * Add the random identity the message factory assigns, so an assertion can state
+ * the whole message without pinning a generated uuid.
+ */
+function identify(message: Record<string, unknown>): Record<string, unknown> {
+  return { ...message, id: expect.any(String) }
+}
 
 const FIXTURE_DIR = new URL('./fixtures/reasoning-collapse/', import.meta.url)
 
@@ -230,7 +243,41 @@ describe('detection', () => {
     await settle()
 
     expect(agent.steers).toHaveLength(1)
-    expect(agent.steers[0]).toEqual({ role: 'user', content: [{ type: 'text', text: RESUME_HINT }] })
+    expect(agent.steers[0]).toEqual(identify({
+      role: 'user',
+      content: [{ type: 'text', text: RESUME_HINT }],
+      source: {
+        kind: PLUGIN_MESSAGE_SOURCE_KIND,
+        form: 'notice',
+        summary: RESUME_SUMMARY,
+      },
+    }))
+  })
+
+  it('queues a resume the harness session accepts, so a collapse resumes instead of poisoning the log', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(COLLAPSED)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    await run(test, { model: 'm', signal: new AbortController().signal })
+    await settle()
+
+    // The guard's own steer call cannot fail silently: the harness validates
+    // every admitted message in `session.append` and throws before logging a
+    // message that is not identified, has no source, or has the wrong role. The
+    // pre-fix literal `{ role: 'user', content }` was refused exactly there —
+    // after the abort had already been taken — which ended the turn with a
+    // repairable splice violation and no answer. Reproduce that boundary
+    // directly instead of asserting the shape the guard happens to build.
+    const resume = agent.steers[0] as Record<string, unknown>
+    expect(() => adoptSessionEvent({
+      type: 'user/message',
+      seq: 0 as never,
+      time: 0,
+      // The harness appends an admitted prompt exactly this way.
+      surfaceOp: 'append',
+      data: resume as never,
+    } as never)).not.toThrow()
   })
 
   it('defers the resume past the abort, so a turn unwinding cannot discard it', async () => {
@@ -268,7 +315,15 @@ describe('detection', () => {
     await settle()
 
     expect(agent.cancels).toHaveLength(2)
-    expect(agent.steers.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: RESUME_HINT_STRICT }] })
+    expect(agent.steers.at(-1)).toEqual(identify({
+      role: 'user',
+      content: [{ type: 'text', text: RESUME_HINT_STRICT }],
+      source: {
+        kind: PLUGIN_MESSAGE_SOURCE_KIND,
+        form: 'notice',
+        summary: RESUME_SUMMARY,
+      },
+    }))
   })
 
   it('stops resuming once the break budget is spent', async () => {

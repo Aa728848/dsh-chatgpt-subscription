@@ -171,6 +171,22 @@ next upgrade starts by reading the newest file in `references/`.
 - **Old generations are the requirement, not the fallback.** Anyone reading a diff
   that "simplifies" a mapper by assuming the new shape has broken the plugin for
   most users.
+- **A hand-written message literal is a latent session bug, not a compat shortcut.**
+  DSH validates every admitted message in `session.append` via
+  `assertMessageEventShape` (`packages/core/session/src/index.ts`): a missing
+  `id` throws `lacks an identified message`, a missing `source` throws
+  `has invalid source`, and a wrong role throws. A literal
+  `{ role: 'user', content }` therefore fails at the first steer. The guard
+  shipped that literal behind a comment claiming it avoided a generation-bound
+  factory — but `createUserMessage` has existed since 0.1.2-alpha.5, so the
+  constraint was misread: the factory is the only thing that satisfies BOTH
+  requirements at once. Always build messages with the factory plus this
+  package's own `PLUGIN_MESSAGE_SOURCE_KIND`.
+  Two traps make this expensive when it happens: (1) the throw is synchronous
+  inside `session.append`, so a steer issued after a `cancel` aborts the turn
+  the user is already waiting on, and (2) a shape-only assertion passes
+  forever. Assert against the real boundary (`adoptSessionEvent`) — and verify
+  the new test **fails** when the fix is reverted, or it is not a regression test.
 
 ## 7. Current state
 

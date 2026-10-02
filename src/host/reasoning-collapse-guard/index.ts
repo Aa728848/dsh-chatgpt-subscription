@@ -31,6 +31,9 @@
  * on a fresh turn.
  */
 
+import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'
+import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
+
 /** The subset of `llm/stream` options this guard reads. */
 export interface GuardStreamOptions {
   readonly model?: string | undefined
@@ -213,11 +216,32 @@ function createBreakerState(): BreakerState {
 }
 
 /**
- * The resume message is a literal user message so the guard loads on every
- * generation without importing a generation-bound message factory.
+ * The resume message the guard queues onto the kept inbox.
+ *
+ * It is built with the harness message factory and carries this package's own
+ * source kind, because the harness rejects a message that is not fully
+ * identified: a steer payload with no `id` is refused by
+ * `assertMessageEventShape` (`session event … lacks an identified message`)
+ * and one with no `source` by the same check (`… has invalid source`). Either
+ * refusal is thrown from `session.append` at the very moment the guard's
+ * microtask steers — after the abort has already been taken — so the failure
+ * surfaced as a repairable-splice violation, the attempt was already cancelled,
+ * and the turn ended with the user told nothing.
+ *
+ * `createUserMessage` is available on every supported generation, and the
+ * `dsh-chatgpt-subscription` kind is this package's own entry in the
+ * merge-extensible `MessageSourceMap`, so the resume carries real provenance
+ * instead of impersonating a human turn.
  */
 function createResumeMessage(text: string): unknown {
-  return { role: 'user', content: [{ type: 'text', text }] }
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: {
+      kind: PLUGIN_MESSAGE_SOURCE_KIND,
+      form: 'notice',
+      summary: boundContextSummary('Reasoning collapsed; the attempt was stopped and resumed.'),
+    },
+  })
 }
 
 function appendWindow(current: string, addition: string, limit: number): string {

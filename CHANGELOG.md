@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **修复思维坍塌保护每次触发都把当前会话写成坏记录**（用户报告：DSH 弹出「是否修复插件根因」，并指控本插件）。
+  - **根因**：`reasoning-collapse-guard` 用**手写字面量** `{ role: 'user', content: [...] }` 构造续跑消息（`src/host/reasoning-collapse-guard/index.ts` 的 `createResumeMessage`），既没有 `id` 也没有 `source`。DSH 在 `session.append` 里经 `assertMessageEventShape` 校验每条入站消息，缺 `id` 抛 `lacks an identified message`、缺 `source` 抛 `has invalid source`——**两个都会抛**。
+  - **为什么后果严重**：这个 steer 是在守卫**已经 `cancel` 之后**、于微任务里发出的。抛错发生时，坍塌已经中止、inbox 已保留，而这一轮直接以一条 splice 违规收场，模型什么也没回答——用户看到的正是「提示·等待回答」停在半截。
+  - **为什么当初写成字面量**：注释写的是「不引入绑定版本的 message 工厂，以便在每个 DSH 代际上都能加载」。这是当年**真实**的约束，不是惰性——但它用错了地方：`createUserMessage` 自 0.1.2-alpha.5 起就存在（已按 tag 核对），而 `id` / `source` 的要求是硬性的，工厂恰是唯一能同时满足两者的东西。
+  - **修法**：改用 `createUserMessage()`，并带上本插件自己已声明的 `dsh-chatgpt-subscription` source kind、`form: 'notice'` 与一行摘要。这样续跑消息既带真实身份与出处（不再冒充人工回合），也在 0.1.2-alpha.5 → 0.2.0-rc.2 全区间可用。
+  - **测试**：新增一条**复现原故障**的用例——不只断言消息长什么样，而是把守卫实际 steer 出来的消息喂给 DSH 真正的 `adoptSessionEvent`，断言它被接受。已验证该用例**承重**：临时换回修复前的字面量后，它立即以 `lacks an identified message` 失败（3 failed / 28 passed）。
+  - **验证**：`npx tsc -b --force` 与 test tsconfig 均 0 错误；全量 **2142 passed** / 7 skipped，**0 失败**；`npm run build` 与 `npm pack --dry-run` 干净。
+  - **边界**：已写入的历史坏记录不会被本次修复追溯修改——它们在用户报告的会话里已存在，需要 DSH 侧的一次修复或从修复点前分叉。
+
 - **修复输出上限被当作固定预留，导致自动压缩失效**（#30 / #31）；仅修改本插件，不要求修改 DSH。
   - Kimi / MiniMax 不再上报动态预算为 `defaultMaxTokens`；仍在发送阶段按原公式计算并夹取线上 cap，显式请求上限（含摘要请求）仍优先，不引入固定 32K/64K 截断。
   - 其余六条线路按 DSH 默认压缩策略检查固定预留：安全的默认值保持原样，不安全的省略。覆盖实时目录与窗口覆盖；Command Code 的 Kimi-K2.6 / Grok 4.5 / Grok 4.6、WorkBuddy 的 deepseek-v3-2-volc 默认配置受益。Claude、Antigravity、Codex 内置默认配置未发现同类失败，仍增加小窗口保护；Ollama 检查实时窗口。
