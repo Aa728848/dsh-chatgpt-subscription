@@ -73,8 +73,13 @@ export interface MinimaxCodeCatalogModel {
   maxImageBytes: number | null
   /** Largest single video the model accepts, in bytes. */
   maxVideoBytes: number | null
-  /** Whether the model is served through the subscription's files API. */
-  supportsFilesApi: boolean
+  /**
+   * Whether the subscription documents a files API for this model. Documentation
+   * only: the plugin sends every attachment inline and implements no upload, TTL,
+   * account isolation or deletion, so this flag never means the Files API is
+   * delivered here.
+   */
+  filesApiDocumented: boolean
   /** One-line description, from the model table. */
   description: string
 }
@@ -99,7 +104,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxAttachments: null,
     maxImageBytes: null,
     maxVideoBytes: null,
-    supportsFilesApi: false,
+    filesApiDocumented: false,
     description: 'Thinking is always on and has no selectable level. Text input only.',
   },
   {
@@ -115,7 +120,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxAttachments: null,
     maxImageBytes: null,
     maxVideoBytes: null,
-    supportsFilesApi: false,
+    filesApiDocumented: false,
     description: 'The high-speed M2.7. Thinking is always on with no selectable level. Text input only.',
   },
   {
@@ -135,7 +140,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxAttachments: 9,
     maxImageBytes: 10 * 1024 * 1024,
     maxVideoBytes: 50 * 1024 * 1024,
-    supportsFilesApi: true,
+    filesApiDocumented: true,
     description: 'Flagship subscription model. Thinking is on by default and can be disabled. Accepts text, image and video; up to 9 attachments, 10MB per image and 50MB per video.',
   },
   {
@@ -151,7 +156,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxAttachments: 4,
     maxImageBytes: 10 * 1024 * 1024,
     maxVideoBytes: 50 * 1024 * 1024,
-    supportsFilesApi: true,
+    filesApiDocumented: true,
     description: 'Preview Flash model with a 1M context window. Thinking is forced on with a selectable effort level. Accepts up to 4 attachments.',
   },
 ]

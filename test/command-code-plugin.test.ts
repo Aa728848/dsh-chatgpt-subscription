@@ -43,6 +43,7 @@ afterEach(() => {
   for (const dispose of disposers.splice(0).reverse()) dispose()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   clearCachedCatalog()
   clearCachedQuota()
 })
@@ -51,6 +52,7 @@ interface MountResult {
   routes: Route[]
   adapters: Map<string, LlmAdapter>
   owners: Set<string>
+  logger: { info: ReturnType<typeof vi.fn> }
   /** Registered listener count per event name. */
   listeners: Map<string, number>
   release(code: string): void
@@ -127,6 +129,7 @@ function mountPlugin(options: { preOwned?: string[] } = {}): MountResult {
     routes,
     adapters,
     owners,
+    logger: ctx.logger,
     listeners: new Map([...listeners].map(([event, bucket]) => [event, bucket.size])),
     release(code: string) {
       owners.delete(code)
@@ -151,6 +154,39 @@ async function callRoute(plugin: MountResult, path: string, method = 'GET'): Pro
 }
 
 describe('Command Code plugin wiring', () => {
+  it('wires deployment concurrency into the actual registered Codex adapter', async () => {
+    vi.stubEnv('DSH_PROVIDER_CONCURRENCY', '{"codex-chatgpt":1}')
+    vi.stubEnv('DSH_PROVIDER_DIAGNOSTICS', '1')
+    vi.spyOn(CommandCodeCredentialStore.prototype, 'read').mockResolvedValue(null)
+    let calls = 0
+    let finish!: () => void
+    let started!: () => void
+    const ready = new Promise<void>(resolve => { started = resolve })
+    const pendingBody = new Promise<void>(resolve => { finish = resolve })
+    vi.stubGlobal('fetch', vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      if (!String(input).endsWith('/responses')) throw new Error('Unexpected model endpoint')
+      calls++
+      const bytes = new TextEncoder().encode('data: ' + JSON.stringify({ type: 'response.completed', response: {} }) + '\n\n')
+      return new Response(new ReadableStream({ async start(c) { started(); await pendingBody; c.enqueue(bytes); c.close() } }))
+    }))
+    const mounted = mountPlugin()
+    const adapter = mounted.adapters.get('codex-chatgpt')!
+    const opts = { provider: 'codex-chatgpt', model: 'gpt-6-sol', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] } as never
+    const consume = async () => { for await (const chunk of adapter.stream(opts)) { void chunk } }
+    const first = consume()
+    await ready
+    const second = consume()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(calls).toBe(1)
+    finish()
+    await Promise.all([first, second])
+    expect(calls).toBe(2)
+    const logs = mounted.logger.info.mock.calls.map(args => String(args[0])).filter(line => line.startsWith('[provider-diagnostics]'))
+    expect(logs).toHaveLength(2)
+    expect(logs.join('')).not.toContain('hello')
+    expect(JSON.parse(logs[0]!.slice('[provider-diagnostics] '.length))).toMatchObject({ provider: 'codex-chatgpt', endpoint: 'responses', ttftMs: null })
+  })
+
   it('claims the command-code route and serves its settings card status', async () => {
     vi.spyOn(CommandCodeCredentialStore.prototype, 'read').mockResolvedValue(null)
     vi.spyOn(CommandCodeModelSettingsStore.prototype, 'read').mockResolvedValue({

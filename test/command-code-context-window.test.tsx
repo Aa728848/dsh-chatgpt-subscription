@@ -44,6 +44,9 @@ interface ServerState {
 function statusPayload(server: ServerState): CommandCodeWebStatus {
   return {
     enabled: true,
+    catalogStale: true,
+    catalogFetchedAt: 1700000000000,
+    zeroDataRetention: true,
     authenticated: true,
     hasCredentials: true,
     storagePath: '/home/me/command-code-credentials.json',
@@ -195,6 +198,12 @@ afterEach(async () => {
 })
 
 describe('Command Code context window section', () => {
+  it('shows cached catalog and fail-closed privacy status', async () => {
+    await mount({ enabledModelIds: [], overrides: {} })
+    expect(container.querySelector('[data-testid="command-code-catalog-freshness"]')?.textContent).toContain(zh.catalogStale)
+    expect(container.querySelector('[data-testid="command-code-zdr"]')?.textContent).toContain(zh.zdrEnabled)
+  })
+
   it('renders a row only for checked models, in catalog order', async () => {
     await mount({ enabledModelIds: ['alpha-large', 'beta-plain'], overrides: { 'alpha-large': 512_000 } })
 

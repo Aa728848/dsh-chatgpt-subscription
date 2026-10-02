@@ -16,6 +16,8 @@ import { createCodexImageTool } from './host/codex-images.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ProxyManager } from './host/proxy-manager.ts'
+import { CONTROLLED_PROVIDERS, createControlledModelFetch, readModelRequestLimits, type ControlledProvider } from './host/common/model-request-control.ts'
+import { createDiagnosticFetch } from './host/common/request-diagnostics.ts'
 import { registerPreferenceStore } from './host/preferences.ts'
 import { ResponsesClient } from './host/responses-client.ts'
 import { registerRoutes } from './host/routes.ts'
@@ -318,13 +320,20 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       logger: ctx.logger,
     })
     const proxyFetch = proxyManager.createFetch()
+    const providerLimits = readModelRequestLimits()
+    const modelFetch = Object.fromEntries(CONTROLLED_PROVIDERS.map(provider => [
+      provider, createControlledModelFetch(createDiagnosticFetch(proxyFetch, {
+        provider,
+        onRecord: record => ctx.logger.info('[provider-diagnostics] ' + JSON.stringify(record)),
+      }), { provider, limits: providerLimits }),
+    ])) as Record<ControlledProvider, typeof fetch>
     const antigravityAdapter = new AntigravityAdapter(
       antigravityStore,
       antigravityModelSettings,
       antigravityPreferences,
       // The route declares image input, so DSH hands it durable image blocks
       // that only the attachment service can turn into wire bytes.
-      { fetchFn: proxyFetch, attachments: ctx.attachments },
+      { fetchFn: modelFetch.antigravity, attachments: ctx.attachments },
       antigravityAccountPool,
     )
     let antigravityRegistration: AdapterRegistrationHandle | undefined
@@ -380,7 +389,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       commandCodeStore,
       commandCodeModelSettings,
       commandCodePreferences,
-      { fetchFn: proxyFetch, attachments: ctx.attachments },
+      { fetchFn: modelFetch['command-code'], attachments: ctx.attachments },
       commandCodeAccountPool,
     )
     let commandCodeRegistration: AdapterRegistrationHandle | undefined
@@ -395,7 +404,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const ollamaAdapter = new OllamaAdapter(
       ollamaStore,
       ollamaModelSettings,
-      { fetchFn: proxyFetch, attachments: ctx.attachments },
+      { fetchFn: modelFetch.ollama, attachments: ctx.attachments },
       ollamaAccountPool,
     )
     let ollamaRegistration: AdapterRegistrationHandle | undefined
@@ -416,7 +425,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       kimiCodeStore,
       kimiCodeModelSettings,
       kimiCodePreferences,
-      { fetchFn: proxyFetch, attachments: ctx.attachments, videos: kimiVideos },
+      { fetchFn: modelFetch['kimi-code'], attachments: ctx.attachments, videos: kimiVideos },
       kimiCodeAccountPool,
     )
     let kimiCodeRegistration: AdapterRegistrationHandle | undefined
@@ -513,7 +522,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // and reported when not.
     const minimaxCodeAdapter = new MinimaxCodeAdapter(
       minimaxCodeStore,
-      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: minimaxCodeAccountPool },
+      { fetchFn: modelFetch['minimax-code'], attachments: ctx.attachments, accountPool: minimaxCodeAccountPool },
       minimaxCodeModelSettings,
       minimaxCodePreferences,
     )
@@ -588,7 +597,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       workBuddyStore,
       workBuddyModelSettings,
       workBuddyPreferences,
-      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: workBuddyAccountPool },
+      { fetchFn: modelFetch.workbuddy, attachments: ctx.attachments, accountPool: workBuddyAccountPool },
     )
     let workBuddyRegistration: AdapterRegistrationHandle | undefined
     let workBuddyConflict: string | null = null
@@ -657,7 +666,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       claudeStore,
       claudeModelSettings,
       claudePreferences,
-      { fetchFn: proxyFetch, attachments: ctx.attachments, accountPool: claudeAccountPool },
+      { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool },
     )
     let claudeRegistration: AdapterRegistrationHandle | undefined
     let claudeConflict: string | null = null
@@ -715,7 +724,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // a request is spent on it, instead of rediscovering the same 429 each time.
     codexAccountPool.setQuotaBlockedUntil((account, now) => usage.blockedUntilFor(account.credentials, now))
     const responses = new ResponsesClient(oauth, ctx.attachments, {
-      fetchFn: proxyFetch,
+      fetchFn: modelFetch['codex-chatgpt'],
       accountPool: codexAccountPool,
       localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
       onGenerationFinished: () => usage.invalidate(),

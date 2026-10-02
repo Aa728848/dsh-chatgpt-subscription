@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import {
   DEFAULT_CONTEXT_WINDOW,
   FALLBACK_MODELS,
+  HEADER_ZDR,
   PLUGIN_USER_AGENT,
   PROVIDER_ID,
   PROVIDER_NAME,
@@ -54,6 +55,7 @@ import {
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
+import { requireCapability } from '../common/capabilities.ts'
 
 /**
  * Transient-failure retry policy for the `command-code` route.
@@ -91,6 +93,95 @@ export interface CommandCodeAdapterOptions {
   attachments?: AttachmentImageReader
   /** Live catalog loader seam; defaults to the public `/provider/v1/models` call. */
   loadCatalog?: () => Promise<CommandCodeCatalogModel[]>
+  /** Opt into strict Zero Data Retention (ZDR) routing. Overrides host environment when set. */
+  zeroDataRetention?: boolean
+}
+
+/**
+ * Resolves whether Zero Data Retention (ZDR) routing is active for Command Code.
+ * An explicit boolean on adapter options takes precedence over host environment variables.
+ * When not specified in options, DSH_COMMAND_CODE_ZDR is consulted first, then CMD_ZDR.
+ */
+export function resolveZeroDataRetention(optionsZdr?: boolean): boolean {
+  if (optionsZdr !== undefined) return optionsZdr
+  if (process.env.DSH_COMMAND_CODE_ZDR !== undefined) {
+    return process.env.DSH_COMMAND_CODE_ZDR === '1'
+  }
+  return process.env.CMD_ZDR === '1'
+}
+
+/**
+ * Classifies model-specific access or plan entitlement denials.
+ * These are failures of permissions/entitlement for this model/account,
+ * not invalid API credentials, so the account must not be marked invalid
+ * and whole-account rotation must not occur.
+ */
+export function isCommandCodeModelAccessDenied(status: number, detail: string): boolean {
+  if (status === 403 || status === 404 || status === 400) {
+    const lower = detail.toLowerCase()
+    if (
+      lower.includes('upgrade_required')
+      || lower.includes('not entitled')
+      || lower.includes('entitlement')
+      || lower.includes('model_not_found')
+      || lower.includes('model_not_allowed')
+      || lower.includes('model_access_denied')
+      || lower.includes('permission_denied')
+      || lower.includes('access_denied')
+      || lower.includes('insufficient_permissions')
+      || (lower.includes('model') && (
+        lower.includes('access')
+        || lower.includes('permission')
+        || lower.includes('entitled')
+        || lower.includes('forbidden')
+        || lower.includes('not allowed')
+        || lower.includes('unauthorized')
+        || lower.includes('not supported')
+        || lower.includes('plan')
+        || lower.includes('tier')
+      ))
+      || (lower.includes('plan') && (
+        lower.includes('upgrade')
+        || lower.includes('tier')
+        || lower.includes('include')
+        || lower.includes('support')
+      ))
+    ) {
+      return true
+    }
+    if (status === 403 && !isCommandCodeCredentialInvalid(status, detail)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Classifies actual credential invalidity (e.g. 401 Unauthorized, or 403 with explicit key errors).
+ */
+export function isCommandCodeCredentialInvalid(status: number, detail: string): boolean {
+  if (status === 401) return true
+  if (status === 403) {
+    const lower = detail.toLowerCase()
+    if (
+      lower.includes('invalid_api_key')
+      || lower.includes('invalid_token')
+      || lower.includes('bad_api_key')
+      || lower.includes('invalid key')
+      || lower.includes('bad api key')
+      || lower.includes('api key invalid')
+      || lower.includes('key revoked')
+      || lower.includes('revoked_key')
+      || lower.includes('expired_key')
+      || lower.includes('key expired')
+      || lower.includes('token expired')
+      || lower.includes('incorrect api key')
+      || lower.includes('authentication failed')
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 /** Cooldown one rate-limited key takes when the provider states no delay. */
@@ -248,6 +339,19 @@ export class CommandCodeAdapter extends LlmAdapter {
     // and the shipped table is only the fallback.
     const catalogEntry = (await this.catalog()).find(entry => entry.id === options.model)
     const wire = (catalogEntry === undefined ? undefined : wireForCatalogEntry(catalogEntry)) ?? wireForModel(options.model)
+
+    // ZDR is resolved once at request start and preserved across retries.
+    // Explicit adapter option takes precedence over env; false overrides env.
+    const isZdr = resolveZeroDataRetention(this.options.zeroDataRetention)
+    if (isZdr) {
+      requireCapability({
+        provider: PROVIDER_ID,
+        wire,
+        model: options.model,
+        authMode: 'api-key',
+        capability: 'zdr',
+      })
+    }
     // DSH delivers pasted images as durable references because this route
     // declares image input; both wires need bytes, so resolve them once up
     // front and reuse the result for every attempt below.
@@ -286,18 +390,18 @@ export class CommandCodeAdapter extends LlmAdapter {
       }
 
       const endpoint = `${providerUrl(apiEnv)}${endpointPathFor(wire)}`
+      const baseHeaders: Record<string, string> = {
+        ...commandCodeHeaders(apiKey),
+        'user-agent': PLUGIN_USER_AGENT,
+        accept: 'text/event-stream',
+        ...(isZdr ? { [HEADER_ZDR]: '1' } : {}),
+      }
       const headers = wire === 'anthropic'
         ? {
-            ...commandCodeHeaders(apiKey),
-            'user-agent': PLUGIN_USER_AGENT,
-            accept: 'text/event-stream',
+            ...baseHeaders,
             'anthropic-version': '2023-06-01',
           }
-        : {
-            ...commandCodeHeaders(apiKey),
-            'user-agent': PLUGIN_USER_AGENT,
-            accept: 'text/event-stream',
-          }
+        : baseHeaders
 
       try {
         response = await fetchFn(endpoint, { method: 'POST', headers, body, signal })
@@ -317,11 +421,30 @@ export class CommandCodeAdapter extends LlmAdapter {
       // The body is read here rather than later: a retried attempt needs the
       // detail of the attempt that actually failed.
       detail = (await response.text().catch(() => '')).slice(0, 600)
+
+      // 422 status handling: only cmd_zdr_no_providers is a ZDR failure; generic 422 is normal validation error without rotation.
+      if (response.status === 422) {
+        if (detail.includes('cmd_zdr_no_providers')) {
+          throw new LlmError(
+            `${PROVIDER_NAME} rejected request under Zero Data Retention: no ZDR-capable upstream is available for this model (${detail || 'cmd_zdr_no_providers'}).`,
+            'PROVIDER_ERROR',
+            { status: 422 },
+          )
+        }
+        break
+      }
+
       // Without a pool there is nothing to rotate to; the classification below
       // reports the failure exactly as it did before the pool existed.
       if (pool === null || accountId === undefined) break
 
-      if (response.status === 401 || response.status === 403) {
+      // Model entitlement or plan permission denied: permanent for this model,
+      // not a bad credential. Avoid whole-account rotation and do not mark key invalid.
+      if (isCommandCodeModelAccessDenied(response.status, detail)) {
+        break
+      }
+
+      if (isCommandCodeCredentialInvalid(response.status, detail)) {
         // A rejected key is a permanent verdict for that account alone: keep the
         // account (signing in again restores it) but take it out of rotation.
         await pool.markAuthFailed(
@@ -343,7 +466,31 @@ export class CommandCodeAdapter extends LlmAdapter {
 
     if (response === undefined || !response.ok) {
       const status = response?.status ?? 500
-      if (status === 401 || status === 403) {
+
+      if (status === 422) {
+        if (detail.includes('cmd_zdr_no_providers')) {
+          throw new LlmError(
+            `${PROVIDER_NAME} rejected request under Zero Data Retention: no ZDR-capable upstream is available for this model (${detail || 'cmd_zdr_no_providers'}).`,
+            'PROVIDER_ERROR',
+            { status: 422 },
+          )
+        }
+        throw new LlmError(
+          `${PROVIDER_NAME} validation error (422): ${detail || 'Unprocessable Entity'}`,
+          'PROVIDER_ERROR',
+          { status: 422 },
+        )
+      }
+
+      if (isCommandCodeModelAccessDenied(status, detail)) {
+        throw new LlmError(
+          `${PROVIDER_NAME} access denied for model ${options.model}: this model is not included in the plan or requires higher entitlement (${status}).${detail ? ` ${detail}` : ''}`,
+          'PROVIDER_ERROR',
+          { status },
+        )
+      }
+
+      if (isCommandCodeCredentialInvalid(status, detail) || status === 401) {
         throw new LlmError(
           `${PROVIDER_NAME} rejected the stored API key (${status}). Sign in again from Settings > Command Code.${detail ? ` ${detail}` : ''}`,
           'INVALID_CREDENTIAL',

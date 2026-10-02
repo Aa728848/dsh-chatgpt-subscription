@@ -134,6 +134,12 @@ export interface CommandCodeWebStatus {
    * refreshed snapshot reaches the UI.
    */
   quotaRefreshing?: boolean
+  /** Unix milliseconds the model catalog was fetched, when known. */
+  catalogFetchedAt?: number | null
+  /** True when the catalog in memory or storage is stale and awaiting revalidation. */
+  catalogStale?: boolean
+  /** Whether Zero Data Retention (ZDR) routing is active for Command Code requests. */
+  zeroDataRetention?: boolean
   models: CommandCodeModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: CommandCodeReasoningEffort | null

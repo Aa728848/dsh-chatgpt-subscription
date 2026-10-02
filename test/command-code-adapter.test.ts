@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 import { BlockAssembler, createAssistantMessage, createToolResultMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CommandCodeAdapter } from '../src/host/command-code/adapter.ts'
-import { FileCredentialStore, FileModelSettingsStore } from '../src/host/command-code/token-store.ts'
+import { CommandCodeAdapter, isCommandCodeCredentialInvalid, isCommandCodeModelAccessDenied, resolveZeroDataRetention } from '../src/host/command-code/adapter.ts'
+import { CommandCodeAccountPool, parseCommandCodePoolData } from '../src/host/command-code/account-pool.ts'
+import { FileCredentialStore, FileModelSettingsStore, type CommandCodeCredentials } from '../src/host/command-code/token-store.ts'
 import { clearCachedCatalog } from '../src/host/command-code/client.ts'
 import { PROVIDER_URL } from './support/command-code-fixtures.ts'
 
@@ -14,9 +15,58 @@ function tmp(prefix: string): string {
 const CATALOG = [
   { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1_000_000 },
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 1_000_000 },
+  { id: 'gpt-6-astra', name: 'GPT-6 Astra', contextWindow: 1_000_000, supportedEndpoints: ['/v1/responses'] },
 ]
 
-function buildAdapter(overrides: { enabled?: boolean; enabledModelIds?: string[]; contextWindowOverrides?: Record<string, number>; defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'max' | null } = {}) {
+class MemoryPoolBackend {
+  private data: unknown = null
+  constructor(private readonly parse: (value: unknown) => unknown) {}
+  async load() { return this.data === null ? null : this.parse(JSON.parse(JSON.stringify(this.data))) }
+  async save(data: unknown) { this.data = JSON.parse(JSON.stringify(data)) }
+  async clear() { this.data = null }
+}
+
+class MemoryCredentialBackend {
+  private data: unknown = null
+  async load() { return this.data === null ? null : JSON.parse(JSON.stringify(this.data)) }
+  async save(data: unknown) { this.data = JSON.parse(JSON.stringify(data)) }
+  async clear() { this.data = null }
+}
+
+function testKey(n: number, overrides: Partial<CommandCodeCredentials> = {}): CommandCodeCredentials {
+  return {
+    apiKey: `cmd-key-${n}`,
+    userId: `user-${n}`,
+    userName: `User ${n}`,
+    email: `user${n}@example.com`,
+    keyName: `laptop-${n}`,
+    planLabel: 'GOAT',
+    authenticatedAt: Date.now(),
+    ...overrides,
+  }
+}
+
+function createTestPool(initialKeys: CommandCodeCredentials[] = []): CommandCodeAccountPool {
+  const mirrorBackend = new MemoryCredentialBackend()
+  const mirrorStore = new FileCredentialStore(tmp('cc-mirror'), mirrorBackend as never)
+  const poolBackend = new MemoryPoolBackend(parseCommandCodePoolData)
+  const pool = new CommandCodeAccountPool({ store: mirrorStore, backend: poolBackend as never })
+  for (const k of initialKeys) {
+    void pool.addAccount(k)
+  }
+  return pool
+}
+
+function buildAdapter(
+  overrides: {
+    enabled?: boolean
+    enabledModelIds?: string[]
+    contextWindowOverrides?: Record<string, number>
+    defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'max' | null
+    zeroDataRetention?: boolean
+  } = {},
+  accountPool?: CommandCodeAccountPool,
+) {
   const store = new FileCredentialStore(tmp('cc-cred'))
   const modelSettings = new FileModelSettingsStore(tmp('cc-models'))
   vi.spyOn(modelSettings, 'read').mockResolvedValue({
@@ -28,7 +78,8 @@ function buildAdapter(overrides: { enabled?: boolean; enabledModelIds?: string[]
   })
   const adapter = new CommandCodeAdapter(store, modelSettings, undefined, {
     loadCatalog: async () => CATALOG,
-  })
+    zeroDataRetention: overrides.zeroDataRetention,
+  }, accountPool)
   return { adapter, store, modelSettings }
 }
 
@@ -404,5 +455,280 @@ describe('CommandCodeAdapter streaming', () => {
 
     const { adapter: emptyAdapter } = buildAdapter({ enabled: true, enabledModelIds: [] })
     expect(await emptyAdapter.listModels()).toEqual([])
+  })
+})
+
+describe('CommandCodeAdapter ZDR routing and header enforcement', () => {
+  it('attaches x-cmd-zdr: 1 on all wires when zeroDataRetention: true is configured', async () => {
+    const { adapter, store } = buildAdapter({ zeroDataRetention: true })
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'cmd_key' })
+    const captured: Array<{ url: string; headers: Record<string, string> }> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const urlStr = String(url)
+      captured.push({ url: urlStr, headers: (init?.headers ?? {}) as Record<string, string> })
+      if (urlStr.includes('/messages')) {
+        return sseResponse([
+          { type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 1 } } },
+          { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+          { type: 'content_block_stop', index: 0 },
+          { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          { type: 'message_stop' },
+        ])
+      }
+      if (urlStr.includes('/responses')) {
+        return sseResponse([
+          { type: 'response.output_text.delta', delta: 'hi' },
+          { type: 'response.completed', response: {} },
+        ])
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'zdr ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    }) as typeof fetch
+
+    try {
+      // 1. OpenAI wire (deepseek/deepseek-v4.1-flash)
+      const resOpenAI = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code',
+        model: 'deepseek/deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as unknown as GenerateOptions)) resOpenAI.push(chunk)
+      expect(captured[0]!.url).toContain('/chat/completions')
+      expect(captured[0]!.headers['x-cmd-zdr']).toBe('1')
+
+      // 2. Anthropic wire (claude-sonnet-4-6)
+      const resAnthropic = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code',
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as unknown as GenerateOptions)) resAnthropic.push(chunk)
+      expect(captured[1]!.url).toContain('/messages')
+      expect(captured[1]!.headers['x-cmd-zdr']).toBe('1')
+
+      // 3. Responses wire (gpt-6-astra)
+      const resResponses = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code',
+        model: 'gpt-6-astra',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as unknown as GenerateOptions)) resResponses.push(chunk)
+      expect(captured[2]!.url).toContain('/responses')
+      expect(captured[2]!.headers['x-cmd-zdr']).toBe('1')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('attaches x-cmd-zdr: 1 when DSH_COMMAND_CODE_ZDR=1 is set in host env', async () => {
+    const prevEnv = process.env.DSH_COMMAND_CODE_ZDR
+    process.env.DSH_COMMAND_CODE_ZDR = '1'
+    const { adapter, store } = buildAdapter()
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'cmd_key' })
+    const captured: Array<{ headers: Record<string, string> }> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      captured.push({ headers: (init?.headers ?? {}) as Record<string, string> })
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    }) as typeof fetch
+
+    try {
+      const assembler = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code',
+        model: 'deepseek/deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as unknown as GenerateOptions)) assembler.push(chunk)
+      expect(captured[0]!.headers['x-cmd-zdr']).toBe('1')
+    } finally {
+      globalThis.fetch = originalFetch
+      if (prevEnv === undefined) delete process.env.DSH_COMMAND_CODE_ZDR
+      else process.env.DSH_COMMAND_CODE_ZDR = prevEnv
+    }
+  })
+
+  it('overrides host env when zeroDataRetention: false is explicitly configured', async () => {
+    const prevEnv = process.env.DSH_COMMAND_CODE_ZDR
+    process.env.DSH_COMMAND_CODE_ZDR = '1'
+    const { adapter, store } = buildAdapter({ zeroDataRetention: false })
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'cmd_key' })
+    const captured: Array<{ headers: Record<string, string> }> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      captured.push({ headers: (init?.headers ?? {}) as Record<string, string> })
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    }) as typeof fetch
+
+    try {
+      const assembler = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code',
+        model: 'deepseek/deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as unknown as GenerateOptions)) assembler.push(chunk)
+      expect(captured[0]!.headers['x-cmd-zdr']).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+      if (prevEnv === undefined) delete process.env.DSH_COMMAND_CODE_ZDR
+      else process.env.DSH_COMMAND_CODE_ZDR = prevEnv
+    }
+  })
+
+  it('fails closed immediately on 422 cmd_zdr_no_providers without retries or privacy downgrade', async () => {
+    const { adapter, store } = buildAdapter({ zeroDataRetention: true })
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'cmd_key' })
+    let attempts = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () => {
+      attempts += 1
+      return new Response(JSON.stringify({ error: 'cmd_zdr_no_providers', message: 'No ZDR-capable upstreams available' }), {
+        status: 422,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    try {
+      await expect(async () => {
+        for await (const _chunk of adapter.stream({
+          provider: 'command-code',
+          model: 'deepseek/deepseek-v4.1-flash',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }],
+        } as unknown as GenerateOptions)) void _chunk
+      }).rejects.toMatchObject({
+        code: 'PROVIDER_ERROR',
+        failure: { status: 422 },
+      })
+      // Failed closed on the first attempt without retrying or falling back to non-ZDR
+      expect(attempts).toBe(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
+describe('CommandCodeAdapter error classification and account rotation', () => {
+  it('distinguishes model entitlement / permission denied and avoids whole-account rotation', async () => {
+    const pool = createTestPool([testKey(1), testKey(2)])
+    const { adapter } = buildAdapter({}, pool)
+    let fetchCalls = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () => {
+      fetchCalls += 1
+      return new Response(JSON.stringify({ error: 'upgrade_required', message: 'Model requires higher plan' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    try {
+      await expect(async () => {
+        for await (const _chunk of adapter.stream({
+          provider: 'command-code',
+          model: 'claude-sonnet-4-6',
+          messages: [],
+        } as unknown as GenerateOptions)) void _chunk
+      }).rejects.toMatchObject({
+        code: 'PROVIDER_ERROR',
+        failure: { status: 403 },
+      })
+      // Only 1 attempt made: did NOT rotate to second account
+      expect(fetchCalls).toBe(1)
+
+      // The first account was NOT marked invalid
+      const accounts = await pool.listAccounts()
+      expect(accounts[0]!.authStatus).toBeUndefined()
+      expect(accounts[1]!.authStatus).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('marks account invalid on actual credential rejection (401) and rotates to next account in pool', async () => {
+    const pool = createTestPool([testKey(1), testKey(2)])
+    const { adapter } = buildAdapter({}, pool)
+    const capturedHeaders: Array<Record<string, string>> = []
+    let call = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      call += 1
+      capturedHeaders.push((init?.headers ?? {}) as Record<string, string>)
+      if (call === 1) {
+        return new Response(JSON.stringify({ error: 'invalid_api_key' }), { status: 401 })
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'recovered' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    }) as typeof fetch
+
+    try {
+      const assembler = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code',
+        model: 'deepseek/deepseek-v4.1-flash',
+        messages: [],
+      } as unknown as GenerateOptions)) assembler.push(chunk)
+
+      expect(assembler.blocks()).toEqual([{ type: 'text', text: 'recovered' }])
+      expect(call).toBe(2)
+      expect(capturedHeaders[0]!.authorization).toBe('Bearer cmd-key-1')
+      expect(capturedHeaders[1]!.authorization).toBe('Bearer cmd-key-2')
+
+      const accounts = await pool.listAccounts()
+      expect(accounts[0]!.authStatus).toBe('invalid')
+      expect(accounts[1]!.authStatus).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('marks cooldown on 429 and rotates to next account in pool', async () => {
+    const pool = createTestPool([testKey(1), testKey(2)])
+    const { adapter } = buildAdapter({}, pool)
+    let call = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () => {
+      call += 1
+      if (call === 1) {
+        return new Response('rate limit', { status: 429, headers: { 'retry-after': '60' } })
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'from-account-2' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    }) as typeof fetch
+
+    try {
+      const assembler = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code',
+        model: 'deepseek/deepseek-v4.1-flash',
+        messages: [],
+      } as unknown as GenerateOptions)) assembler.push(chunk)
+
+      expect(assembler.blocks()).toEqual([{ type: 'text', text: 'from-account-2' }])
+      expect(call).toBe(2)
+
+      const accounts = await pool.listAccounts()
+      expect(accounts[0]!.cooldownUntil).toBeGreaterThan(Date.now())
+      expect(accounts[1]!.cooldownUntil).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })

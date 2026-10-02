@@ -3,6 +3,7 @@ import { isSameOriginMutation } from '../common/same-origin.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FALLBACK_MODELS, PROVIDER_ID, PROVIDER_NAME, QUOTA_CACHE_TTL_MS, resolveApiEnv } from './types.ts'
+import { resolveZeroDataRetention } from './adapter.ts'
 import {
   FileCredentialStore,
   FileModelSettingsStore,
@@ -18,7 +19,9 @@ import {
   clearCachedQuota,
   fetchAccountQuota,
   getCachedCatalog,
+  getCachedCatalogFetchedAt,
   getCachedQuotaFor,
+  isCatalogStale,
   loadProviderModels,
   parseWhoami,
   verifyApiKey,
@@ -117,6 +120,8 @@ export interface CommandCodeStatusOptions {
    * invents pool state that would outlive the process.
    */
   accountPool?: CommandCodeAccountPool
+  /** Whether Zero Data Retention (ZDR) routing is active for Command Code requests. */
+  zeroDataRetention?: boolean
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -198,6 +203,11 @@ export async function getCommandCodeWebStatus(
         }),
     quota: quota ?? null,
     lastFetchedAt: quota?.fetchedAt ?? null,
+    catalogFetchedAt: getCachedCatalogFetchedAt(),
+    catalogStale: isCatalogStale(),
+    ...(resolveZeroDataRetention(options.zeroDataRetention)
+      ? { zeroDataRetention: true }
+      : (options.zeroDataRetention !== undefined ? { zeroDataRetention: false } : {})),
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort,

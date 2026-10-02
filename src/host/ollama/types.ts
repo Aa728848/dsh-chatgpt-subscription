@@ -1,3 +1,5 @@
+import { supportsOllamaImage, supportsOllamaThinkingControl } from '../common/capabilities.ts'
+
 /**
  * Static facts about the Ollama provider API.
  *
@@ -137,4 +139,63 @@ export function ollamaHeaders(apiKey: string): Record<string, string> {
     authorization: `Bearer ${apiKey}`,
     'content-type': 'application/json',
   }
+}
+
+/**
+ * Tightly-scoped check for known vision-capable models in Ollama.
+ * Conservative allowlist of known vision families; unknown models default to false.
+ */
+export function ollamaModelSupportsImage(modelId: string): boolean {
+  return supportsOllamaImage(modelId, 'openai', 'api-key')
+}
+
+export type OllamaThinkingMode = 'levels' | 'boolean' | 'none'
+
+/**
+ * Resolve model-specific thinking support in Ollama.
+ * Source: official https://github.com/ollama/ollama/blob/main/docs/capabilities/thinking.mdx
+ * - 'levels': gpt-oss family (values low, medium, high; cannot disable thinking)
+ * - 'boolean': deepseek-r1, qwq, qwen3 families (values true, false)
+ * - 'none': all other / unknown models (omit thinking control entirely)
+ */
+export function thinkingModeForModel(modelId: string): OllamaThinkingMode {
+  if (!supportsOllamaThinkingControl(modelId, 'native', 'api-key')) return 'none'
+  const base = modelId.toLowerCase().split(':')[0] ?? ''
+  if (base === 'gpt-oss') {
+    return 'levels'
+  }
+  if (base === 'deepseek-r1' || base === 'qwq' || base === 'qwen3') {
+    return 'boolean'
+  }
+  return 'none'
+}
+
+/**
+ * Map reasoning effort to wire think parameter for the target model.
+ * Per Ollama docs:
+ * - gpt-oss: only 'low' | 'medium' | 'high' are valid. gpt-oss cannot disable thinking, so 'none'
+ *   as well as 'xhigh'/'max'/garbage MUST be omitted (undefined).
+ * - boolean models: 'none' -> false; 'low'|'medium'|'high'|'auto'|'true' -> true; garbage -> undefined.
+ * - all other models: omit (undefined).
+ */
+export function thinkForModel(modelId: string, reasoningEffort: unknown): boolean | string | undefined {
+  if (reasoningEffort === undefined || reasoningEffort === null) return undefined
+  const mode = thinkingModeForModel(modelId)
+  if (mode === 'none') return undefined
+  const effort = String(reasoningEffort).toLowerCase()
+  if (mode === 'boolean') {
+    if (effort === 'none') return false
+    if (effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'auto' || effort === 'true') {
+      return true
+    }
+    return undefined
+  }
+  // mode === 'levels' (gpt-oss)
+  if (effort === 'low' || effort === 'medium' || effort === 'high') {
+    return effort
+  }
+  if (effort === 'auto' || effort === 'true') {
+    return 'medium'
+  }
+  return undefined
 }

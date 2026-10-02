@@ -569,6 +569,7 @@ function extractUnlimited(payload: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 let cachedCatalog: { models: CommandCodeCatalogModel[]; fetchedAt: number } | undefined
+let catalogIsRehydrated = false
 /** Bumped by every cache clear so a fetch already in flight cannot publish. */
 let catalogCacheEpoch = 0
 let catalogInFlight: Promise<CommandCodeCatalogModel[]> | null = null
@@ -662,6 +663,7 @@ export async function loadProviderModels(
       parseProviderModels,
       (fetchedAt, models) => {
         cachedCatalog = { models, fetchedAt }
+        catalogIsRehydrated = true
       },
       0,
     )
@@ -690,6 +692,7 @@ function refreshProviderModels(
       if (models.length > 0) {
         const fetchedAt = Date.now()
         cachedCatalog = { models, fetchedAt }
+        catalogIsRehydrated = false
         void writeCatalogSnapshot(catalogSnapshotName('command-code', options.apiEnv ?? resolveApiEnv()), models, fetchedAt)
       }
       return models.length > 0 ? models : cachedCatalog?.models ?? []
@@ -705,10 +708,21 @@ export function getCachedCatalog(): CommandCodeCatalogModel[] {
   return cachedCatalog?.models ?? []
 }
 
+export function isCatalogStale(): boolean {
+  if (cachedCatalog === undefined) return true
+  if (catalogIsRehydrated) return true
+  return Date.now() - cachedCatalog.fetchedAt >= CATALOG_CACHE_TTL_MS
+}
+
+export function getCachedCatalogFetchedAt(): number | null {
+  return cachedCatalog?.fetchedAt ?? null
+}
+
 export function clearCachedCatalog(): void {
   catalogCacheEpoch += 1
   cachedCatalog = undefined
   catalogInFlight = null
+  catalogIsRehydrated = false
   catalogSnapshotScopesLoaded.clear()
 }
 

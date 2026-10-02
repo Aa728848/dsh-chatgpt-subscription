@@ -100,6 +100,10 @@ export const HEADER_PROJECT_SLUG = 'x-command-code-project-slug'
 export const HEADER_TASTE_LEARNING = 'x-command-code-taste-learning'
 export const HEADER_SESSION_ID = 'x-command-code-session-id'
 export const HEADER_OSS_PRIMARY_PROVIDER = 'x-command-code-oss-primary-provider'
+/** Official header that enforces Zero Data Retention (ZDR) routing. */
+export const HEADER_ZDR = 'x-cmd-zdr'
+export const ENV_COMMAND_CODE_ZDR = 'DSH_COMMAND_CODE_ZDR'
+export const ENV_CMD_ZDR = 'CMD_ZDR'
 
 export function resolveApiEnv(raw = process.env.DSH_COMMAND_CODE_ENV): CommandCodeApiEnv {
   const value = (raw || '').trim().toLowerCase()

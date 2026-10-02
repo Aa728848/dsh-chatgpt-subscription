@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Provider 协议复核修复（未发布）**：修正 Command Code Responses 的真实事件标识、块索引与多模态报文；修正 Ollama 原生图片/工具参数、附件降级及工具历史；MiniMax 原生回放增加来源隔离和顺序保护。并发闸门正确处理降限、正小数和取消竞争；Codex 使用请求本地释放函数，不再从普通 429 推断并发上限。
+  - Codex 缺少可靠宿主 turn identity 时仍采取不跨请求复用的保守降级，不宣称完整 turn continuity。
+  - 后续补齐：八线路生成请求的显式凭据级并发配置、等待超时与取消释放；可选脱敏首字节/耗时/usage/前缀变化诊断；Command Code ZDR 全协议 fail-closed、权限与认证分类、目录过期及隐私状态展示；Ollama 图片/think 和 ZDR 接入精确证据门控。
+  - 旧 provider-only 表仍仅为库存，精确门控区分协议/模型/认证及离线证据。配置见 [运行控制](<docs/provider-runtime-controls.md>)；原计划状态见 [审计](<docs/plan-provider-agent-optimizations.md>)。未调用真实账号或进行收益 A/B。
+
 - **修复思维坍塌保护每次触发都把当前会话写成坏记录**（用户报告：DSH 弹出「是否修复插件根因」，并指控本插件）。
   - **根因**：`reasoning-collapse-guard` 用**手写字面量** `{ role: 'user', content: [...] }` 构造续跑消息（`src/host/reasoning-collapse-guard/index.ts` 的 `createResumeMessage`），既没有 `id` 也没有 `source`。DSH 在 `session.append` 里经 `assertMessageEventShape` 校验每条入站消息，缺 `id` 抛 `lacks an identified message`、缺 `source` 抛 `has invalid source`——**两个都会抛**。
   - **为什么后果严重**：这个 steer 是在守卫**已经 `cancel` 之后**、于微任务里发出的。抛错发生时，坍塌已经中止、inbox 已保留，而这一轮直接以一条 splice 违规收场，模型什么也没回答——用户看到的正是「提示·等待回答」停在半截。

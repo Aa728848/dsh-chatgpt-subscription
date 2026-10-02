@@ -555,6 +555,12 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           </button>
         </div>
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
+        {status?.catalogStale !== undefined && (
+          <p className="dsha-muted" data-testid="command-code-catalog-freshness">
+            {status.catalogStale ? t.catalogStale : t.catalogFresh} · {formatDate(status.catalogFetchedAt)}
+          </p>
+        )}
+        {status?.zeroDataRetention === true && <p className="dsha-notice" data-testid="command-code-zdr">{t.zdrEnabled}</p>}
         <div className="dsha-models" aria-label="Command Code Models">
           {status?.models.map((model: CommandCodeModelOption) => {
             return (
