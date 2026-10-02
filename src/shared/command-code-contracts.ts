@@ -46,8 +46,15 @@ export interface CommandCodeModelOption {
   wire: CommandCodeWire
 }
 
-/** Request/response dialect a model id is served over. */
-export type CommandCodeWire = 'openai' | 'anthropic'
+/**
+ * Request/response dialect a model id is served over.
+ *
+ * The provider serves each model on exactly one route and answers 400 on the
+ * wrong one, so this is a routing fact rather than a presentation choice.
+ * `responses` is the OpenAI Responses API, which several GPT models require:
+ * sending them to Chat Completions is a rejected request, not a degraded one.
+ */
+export type CommandCodeWire = 'openai' | 'anthropic' | 'responses'
 
 /** One credit / spend meter reported by the billing service. */
 export interface CommandCodeMeter {

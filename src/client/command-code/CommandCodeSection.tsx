@@ -3,6 +3,7 @@ import type {
   CommandCodeModelOption,
   CommandCodeReasoningEffort,
   CommandCodeWebStatus,
+  CommandCodeWire,
 } from '../../shared/command-code-contracts.ts'
 import { COMMAND_CODE_REASONING_EFFORTS } from '../../shared/command-code-contracts.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
@@ -101,6 +102,19 @@ interface LoginPollStatus {
   authUrl?: string
   error?: string
   progress?: string
+}
+
+/**
+ * Route name shown next to a model.
+ *
+ * The three routes are not interchangeable: the provider serves each model on
+ * exactly one and rejects the others, so the label states which one this model
+ * actually uses.
+ */
+function wireLabel(wire: CommandCodeWire, t: { wireAnthropic: string; wireOpenai: string; wireResponses: string }): string {
+  if (wire === 'anthropic') return t.wireAnthropic
+  if (wire === 'responses') return t.wireResponses
+  return t.wireOpenai
 }
 
 export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props): React.ReactElement {
@@ -544,7 +558,10 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
         <div className="dsha-models" aria-label="Command Code Models">
           {status?.models.map((model: CommandCodeModelOption) => {
             return (
-              <label key={model.id} title={`${model.id} · ${model.wire === 'anthropic' ? t.wireAnthropic : t.wireOpenai}`}>
+              <label
+                key={model.id}
+                title={`${model.id} · ${wireLabel(model.wire, t)}`}
+              >
                 <input
                   type="checkbox"
                   checked={model.enabled}

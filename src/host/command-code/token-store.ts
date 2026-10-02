@@ -51,6 +51,13 @@ export interface CommandCodeCatalogModel {
   id: string
   name?: string
   contextWindow?: number
+  /**
+   * Endpoints the provider published for this model, verbatim.
+   *
+   * Absent means the listing said nothing, and the adapter then routes on the
+   * shipped table instead — never on a guess about an unlisted model.
+   */
+  supportedEndpoints?: string[]
 }
 
 export interface CommandCodeModelSettings {

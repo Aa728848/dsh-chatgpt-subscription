@@ -20,6 +20,7 @@ import {
   providerUrl,
   reasoningEffortsFor,
   resolveApiEnv,
+  wireForCatalogEntry,
   wireForModel,
 } from './types.ts'
 import { FileCredentialStore, type CommandCodeCatalogModel, type CommandCodeCredentials } from './token-store.ts'
@@ -30,6 +31,7 @@ import type {
   CommandCodeApiEnv,
   CommandCodeMeter,
   CommandCodeUsageWindow,
+  CommandCodeWire,
 } from '../../shared/command-code-contracts.ts'
 import { catalogSnapshotName, rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
 
@@ -98,6 +100,17 @@ function firstString(record: Record<string, unknown>, keys: readonly string[]): 
   for (const key of keys) {
     const value = asString(record[key])
     if (value !== undefined) return value
+  }
+  return undefined
+}
+
+/** First key that holds a non-empty array of strings. */
+function firstStringArray(record: Record<string, unknown>, keys: readonly string[]): string[] | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (!Array.isArray(value)) continue
+    const entries = value.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
+    if (entries.length > 0) return entries
   }
   return undefined
 }
@@ -583,6 +596,11 @@ export function parseProviderModels(payload: unknown): CommandCodeCatalogModel[]
       id,
       name: firstString(record, ['displayName', 'name']) ?? id,
       contextWindow: firstNumber(record, ['context_length', 'contextLength', 'context_window', 'contextWindow']),
+      // The route each model answers on. Kept verbatim so the adapter routes on
+      // what the provider published rather than on the model name.
+      ...(firstStringArray(record, ['supported_endpoints', 'supportedEndpoints']) === undefined
+        ? {}
+        : { supportedEndpoints: firstStringArray(record, ['supported_endpoints', 'supportedEndpoints'])! }),
     })
   }
   return models
@@ -920,7 +938,7 @@ export function buildModelOptions(
   contextWindow: number
   defaultMaxTokens: number
   reasoningEfforts?: string[]
-  wire: 'openai' | 'anthropic'
+  wire: CommandCodeWire
 }> {
   const enabled = new Set(enabledModelIds)
   return catalog.map((model) => {
@@ -934,7 +952,9 @@ export function buildModelOptions(
       contextWindow: overrides[model.id] && overrides[model.id] > 0 ? overrides[model.id] : contextWindow,
       defaultMaxTokens: maxOutputTokensFor(model.id),
       ...(efforts.length > 0 ? { reasoningEfforts: efforts } : {}),
-      wire: wireForModel(model.id),
+      // The provider's own route wins when the listing publishes one; the
+      // shipped table is the fallback for a model the listing does not describe.
+      wire: wireForCatalogEntry(model) ?? wireForModel(model.id),
     }
   })
 }

@@ -647,9 +647,82 @@ export function buildRequest(
   wire: CommandCodeWire,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
 ): Record<string, unknown> {
-  return wire === 'anthropic'
-    ? buildAnthropicRequest(options, images)
-    : buildOpenAIRequest(options, images)
+  if (wire === 'anthropic') return buildAnthropicRequest(options, images)
+  if (wire === 'responses') return buildResponsesRequest(options, images)
+  return buildOpenAIRequest(options, images)
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI Responses request
+// ---------------------------------------------------------------------------
+
+/**
+ * Build one `/responses` body.
+ *
+ * The Responses API takes a flat `input` list instead of `messages`, and its
+ * reasoning and tool calls are item types rather than message fields. This is a
+ * separate builder rather than a reshaping of the Chat Completions one: the two
+ * APIs differ in more than field names, and a translated body is a request the
+ * route rejects.
+ */
+export function buildResponsesRequest(
+  options: GenerateOptions,
+  images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
+): Record<string, unknown> {
+  const input: Array<Record<string, unknown>> = []
+  const system = leadingSystemText(options)
+  const conversation = nonSystemMessages(options)
+
+  for (let index = 0; index < conversation.length; index++) {
+    const message = conversation[index]!
+    if (isToolResultMessage(message)) {
+      // Results stay consecutive: a message wedged between them is rejected.
+      while (index < conversation.length && isToolResultMessage(conversation[index]!)) {
+        const current = conversation[index]!
+        const block = current.content[0]
+        const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
+        input.push({ type: 'function_call_output', call_id: callId, output: toolResultText(current.content) })
+        index += 1
+      }
+      index -= 1
+      continue
+    }
+    if (message.role === 'assistant') {
+      const { content, toolCalls } = openAIAssistantContent(message)
+      if (content !== '') input.push({ role: 'assistant', content })
+      for (const call of toolCalls) {
+        input.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments })
+      }
+      continue
+    }
+    const content = openAIUserContent(message, images)
+    if (typeof content === 'string' && content === '') continue
+    input.push({ role: 'user', content })
+  }
+
+  const effort = wireReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
+  const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
+  return {
+    model: options.model,
+    input,
+    stream: true,
+    max_output_tokens: maxTokens,
+    ...(system === undefined ? {} : { instructions: system }),
+    ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+    ...(options.stop && options.stop.length > 0 ? { stop: options.stop } : {}),
+    ...(options.tools && options.tools.length > 0
+      ? {
+          tools: options.tools.map((tool) => ({
+            type: 'function',
+            name: tool.name,
+            description: tool.description,
+            parameters: stripMetaSchema(tool.parameters),
+          })),
+          tool_choice: 'auto',
+        }
+      : {}),
+    ...(effort === undefined || effort === '' ? {} : { reasoning: { effort } }),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1116,140 @@ function finishReasonFor(state: CommandCodeStreamState): FinishReason {
   if (reason === 'length' || reason === 'max_tokens') return { kind: 'max-tokens' }
   if (state.hasToolCall || reason === 'tool_calls' || reason === 'tool_use') return { kind: 'tool-calls' }
   return { kind: 'stop' }
+}
+
+/**
+ * Fold one SSE line from `/responses`.
+ *
+ * The Responses stream is event-typed rather than delta-shaped: text arrives as
+ * `response.output_text.delta`, tool calls as `function_call_arguments.delta`
+ * keyed by an item id, and the turn ends on `response.completed` or
+ * `response.failed`. Those are read as written; there is no Chat Completions
+ * shape to reinterpret.
+ */
+export function processResponsesStreamLine(line: string, state: CommandCodeStreamState): StreamChunk[] {
+  const trimmed = line.trim()
+  if (trimmed === '' || !trimmed.startsWith('data:')) return []
+  const payload = trimmed.slice(5).trim()
+  if (payload === '' || payload === '[DONE]') return []
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(payload)
+  } catch {
+    return []
+  }
+  if (!isRecord(parsed)) return []
+
+  const type = typeof parsed.type === 'string' ? parsed.type : ''
+  if (type === 'response.output_text.delta') {
+    const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
+    if (delta === '') return []
+    state.hasContent = true
+    const opened = openBlock(state, 'text')
+    state.current!.text += delta
+    return [...opened, { type: 'text-delta', index: state.current!.index, text: delta }]
+  }
+  if (type === 'response.reasoning_summary_text.delta') {
+    const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
+    if (delta === '') return []
+    state.hasContent = true
+    const opened = openBlock(state, 'reasoning')
+    state.current!.text += delta
+    return [...opened, { type: 'reasoning-delta', index: state.current!.index, text: delta }]
+  }
+  if (type === 'response.output_item.added') {
+    const item = isRecord(parsed.item) ? parsed.item : null
+    if (item === null || item.type !== 'function_call') return []
+    return startResponsesToolCall(state, parsed, item)
+  }
+  if (type === 'response.function_call_arguments.delta') {
+    const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
+    const call = responsesToolCall(state, parsed.item_id ?? parsed.call_id)
+    if (call === undefined || delta === '') return []
+    call.arguments += delta
+    return [{
+      type: 'tool-call-delta',
+      index: call.blockIndex,
+      id: toToolCallId(call.id),
+      name: call.name,
+      argumentsDelta: delta,
+    }]
+  }
+  if (type === 'response.function_call_arguments.done') {
+    const call = responsesToolCall(state, parsed.item_id ?? parsed.call_id)
+    if (call === undefined) return []
+    if (typeof parsed.arguments === 'string') call.arguments = parsed.arguments
+    return []
+  }
+  if (type === 'response.completed' || type === 'response.incomplete') {
+    const response = isRecord(parsed.response) ? parsed.response : null
+    if (response !== null) readResponsesUsage(response, state)
+    state.done = true
+    state.finishReason = type === 'response.incomplete' ? 'length' : 'stop'
+    return []
+  }
+  if (type === 'response.failed') {
+    state.done = true
+    const detail = isRecord(parsed.response) && typeof parsed.response.error === 'string' ? parsed.response.error : ''
+    throw new LlmError(
+      detail === '' ? 'Command Code responses stream failed' : `Command Code responses stream failed: ${detail}`,
+      'PROVIDER_ERROR',
+    )
+  }
+  return []
+}
+
+function openBlock(state: CommandCodeStreamState, type: 'text' | 'reasoning'): StreamChunk[] {
+  if (state.current !== null && state.current.type === type) return []
+  const out = closeCurrent(state)
+  state.current = { index: state.blocks.length, type, text: '' }
+  state.blocks.push({ type, text: '' })
+  out.push({ type: 'block-start', index: state.current.index, blockType: type })
+  return out
+}
+
+function startResponsesToolCall(
+  state: CommandCodeStreamState,
+  event: Record<string, unknown>,
+  item: Record<string, unknown>,
+): StreamChunk[] {
+  const out = [...closeCurrent(state), ...closeToolCalls(state)]
+  const index = state.blocks.length
+  const name = typeof item.name === 'string' ? item.name : ''
+  const id = typeof item.call_id === 'string' ? item.call_id : `call_${String(event.item_id ?? index)}`
+  const call = { blockIndex: index, id, name, arguments: '', started: true }
+  state.toolCalls.set(index, call)
+  state.hasToolCall = true
+  out.push({ type: 'block-start', index, blockType: 'tool-call' })
+  out.push({ type: 'tool-call-delta', index, id: toToolCallId(call.id), name, argumentsDelta: '' })
+  return out
+}
+
+function responsesToolCall(state: CommandCodeStreamState, key: unknown): PendingToolCall | undefined {
+  if (typeof key !== 'string') return undefined
+  for (const call of state.toolCalls.values()) {
+    if (call.id === toToolCallId(key)) return call
+  }
+  return undefined
+}
+
+function readResponsesUsage(response: Record<string, unknown>, state: CommandCodeStreamState): void {
+  const usage = isRecord(response.usage) ? response.usage : null
+  if (usage === null) return
+  const cached = isRecord(usage.input_tokens_details) ? numberOrZero(usage.input_tokens_details.cached_tokens) : 0
+  const written = isRecord(usage.input_tokens_details) ? numberOrZero(usage.input_tokens_details.cache_write_tokens) : 0
+  state.inputTokens = Math.max(0, numberOrZero(usage.input_tokens) - cached - written)
+  state.cacheReadTokens = cached
+  state.cacheWriteTokens = written
+  state.outputTokens = numberOrZero(usage.output_tokens)
+  const outputDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : null
+  if (outputDetails !== null) state.reasoningTokens = numberOrZero(outputDetails.reasoning_tokens)
+  state.sawUsage = true
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
 }
 
 /** Flush every open block, then emit usage and the terminal finish. */

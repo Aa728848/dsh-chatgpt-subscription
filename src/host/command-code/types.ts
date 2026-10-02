@@ -133,6 +133,23 @@ export function wireForModel(modelId: string): CommandCodeWire {
 }
 
 /**
+ * Wire one catalog entry says it is served on, when the catalog said so.
+ *
+ * The provider publishes `supported_endpoints` per model, and that is the
+ * authority on which route answers for it. A model the catalog does not describe
+ * returns undefined so the caller falls back to {@link wireForModel} instead of
+ * being sent to a route nobody vouched for.
+ */
+export function wireForCatalogEntry(entry: { supportedEndpoints?: readonly string[] }): CommandCodeWire | undefined {
+  for (const endpoint of entry.supportedEndpoints ?? []) {
+    if (/\/v1\/messages\b|\bmessages\b/i.test(endpoint)) return 'anthropic'
+    if (/\/v1\/responses\b|\bresponses\b/i.test(endpoint)) return 'responses'
+    if (/chat\/completions|\bcompletions\b/i.test(endpoint)) return 'openai'
+  }
+  return undefined
+}
+
+/**
  * Reasoning levels one model advertises, in DSH's vocabulary.
  *
  * The registry is the authority: a model it describes but gives no

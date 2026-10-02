@@ -26,9 +26,10 @@ import {
   providerUrl,
   reasoningEffortsFor,
   resolveApiEnv,
+  wireForCatalogEntry,
   wireForModel,
 } from './types.ts'
-import type { CommandCodeApiEnv } from '../../shared/command-code-contracts.ts'
+import type { CommandCodeApiEnv, CommandCodeWire } from '../../shared/command-code-contracts.ts'
 import {
   FileCredentialStore,
   FileModelSettingsStore,
@@ -45,6 +46,7 @@ import {
   offloadOldestRequestImages,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
+  processResponsesStreamLine,
   resolveRequestImages,
   type AttachmentImageReader,
   type CommandCodeStreamState,
@@ -241,7 +243,11 @@ export class CommandCodeAdapter extends LlmAdapter {
   private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
 
-    const wire = wireForModel(options.model)
+    // The provider's listing states which endpoint serves this model, and the
+    // wrong endpoint is a 400 rather than a slower answer, so the listing wins
+    // and the shipped table is only the fallback.
+    const catalogEntry = (await this.catalog()).find(entry => entry.id === options.model)
+    const wire = (catalogEntry === undefined ? undefined : wireForCatalogEntry(catalogEntry)) ?? wireForModel(options.model)
     // DSH delivers pasted images as durable references because this route
     // declares image input; both wires need bytes, so resolve them once up
     // front and reuse the result for every attempt below.
@@ -279,7 +285,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         apiEnv = effective.apiEnv
       }
 
-      const endpoint = `${providerUrl(apiEnv)}${wire === 'anthropic' ? '/messages' : '/chat/completions'}`
+      const endpoint = `${providerUrl(apiEnv)}${endpointPathFor(wire)}`
       const headers = wire === 'anthropic'
         ? {
             ...commandCodeHeaders(apiKey),
@@ -410,8 +416,15 @@ export class CommandCodeAdapter extends LlmAdapter {
   }
 }
 
-function processLine(line: string, state: CommandCodeStreamState, wire: 'openai' | 'anthropic'): StreamChunk[] {
-  return wire === 'anthropic'
-    ? processAnthropicStreamLine(line, state)
-    : processOpenAIStreamLine(line, state)
+/** Path suffix the chosen route answers on. */
+function endpointPathFor(wire: CommandCodeWire): string {
+  if (wire === 'anthropic') return '/messages'
+  if (wire === 'responses') return '/responses'
+  return '/chat/completions'
+}
+
+function processLine(line: string, state: CommandCodeStreamState, wire: CommandCodeWire): StreamChunk[] {
+  if (wire === 'anthropic') return processAnthropicStreamLine(line, state)
+  if (wire === 'responses') return processResponsesStreamLine(line, state)
+  return processOpenAIStreamLine(line, state)
 }
