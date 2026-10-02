@@ -16,6 +16,8 @@ import type { OllamaCredentials } from './token-store.ts'
 export interface OllamaChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
+  /** Image parts this turn carries; the OpenAI surface takes an array, the native one too. */
+  images?: string[]
   /** Tool call id a `tool` result answers. */
   toolCallId?: string
   /** Assistant tool calls that produced this turn. */
@@ -35,6 +37,12 @@ export interface OllamaRequest {
   tools?: { name: string; description?: string; parameters: unknown }[]
   maxOutputTokens?: number
   temperature?: number
+  /**
+   * Thinking control, in Ollama's own vocabulary: a boolean for on/off, or a
+   * model-defined level name taken from that model's metadata. It is never
+   * guessed here — the adapter only sends a value the model declares.
+   */
+  think?: boolean | string
   signal?: AbortSignal
 }
 
@@ -57,6 +65,7 @@ export interface OllamaUsage {
 
 export type OllamaStreamEvent =
   | { type: 'text'; text: string }
+  | { type: 'thinking'; text: string }
   | { type: 'tool_call'; call: OllamaToolCall }
   | { type: 'done'; finishReason?: string }
   | { type: 'usage'; usage: OllamaUsage }
@@ -104,7 +113,7 @@ function buildOpenAIBody(request: OllamaRequest): unknown {
         })),
       }
     }
-    return { role: message.role, content: message.content }
+    return openAIContent(message)
   })
   const body: Record<string, unknown> = {
     model: request.model,
@@ -112,6 +121,11 @@ function buildOpenAIBody(request: OllamaRequest): unknown {
     stream: true,
     max_tokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
   }
+  // Ollama's OpenAI surface carries thinking as a top-level `reasoning_effort`;
+  // the native one carries `think`. Only a value the caller resolved from the
+  // model's own metadata is sent.
+  if (typeof request.think === 'string') body.reasoning_effort = request.think
+  else if (request.think === true) body.reasoning_effort = 'auto'
   if (request.tools !== undefined && request.tools.length > 0) {
     body.tools = request.tools.map((tool) => ({
       type: 'function',
@@ -138,9 +152,12 @@ function buildNativeBody(request: OllamaRequest): unknown {
         })),
       }
     }
-    return { role: message.role, content: message.content }
+    return nativeContent(message)
   })
   const body: Record<string, unknown> = { model: request.model, messages, stream: true }
+  // The native surface takes `think` directly, and unlike the OpenAI alias it
+  // accepts a boolean, which is the only form some models take.
+  if (request.think !== undefined) body.think = request.think
   const options: Record<string, unknown> = {
     num_predict: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
   }
@@ -153,6 +170,38 @@ function buildNativeBody(request: OllamaRequest): unknown {
     }))
   }
   return body
+}
+
+/**
+ * A user turn on the OpenAI surface: text stays text, images become parts.
+ *
+ * Ollama's OpenAI compatibility takes the standard `image_url` part, and it
+ * takes a bare base64 payload in it. Sending text with the image dropped would
+ * quietly turn a screenshot turn into a text-only turn, so the array form is
+ * used whenever a turn actually carries bytes.
+ */
+function openAIContent(message: OllamaChatMessage): Record<string, unknown> {
+  if (message.images === undefined || message.images.length === 0) {
+    return { role: message.role, content: message.content }
+  }
+  return {
+    role: message.role,
+    content: [
+      { type: 'text', text: message.content },
+      ...message.images.map((image) => ({ type: 'image_url', image_url: { url: image } })),
+    ],
+  }
+}
+
+/**
+ * A user turn on the native surface, where images are a sibling array of raw
+ * base64 strings rather than interleaved content parts.
+ */
+function nativeContent(message: OllamaChatMessage): Record<string, unknown> {
+  if (message.images === undefined || message.images.length === 0) {
+    return { role: message.role, content: message.content }
+  }
+  return { role: message.role, content: message.content, images: message.images }
 }
 
 /** The endpoint one request goes to. */
@@ -290,6 +339,10 @@ function parseOpenAIChunk(record: Record<string, unknown>, pending: Map<number, 
       if (typeof fields.content === 'string' && fields.content !== '') {
         events.push({ type: 'text', text: fields.content })
       }
+      const thinking = typeof fields.thinking === 'string'
+        ? fields.thinking
+        : typeof fields.reasoning === 'string' ? fields.reasoning : ''
+      if (thinking !== '') events.push({ type: 'thinking', text: thinking })
       if (Array.isArray(fields.tool_calls)) {
         for (const raw of fields.tool_calls) accumulateToolCall(raw, pending, true)
       }
@@ -314,6 +367,12 @@ function parseNativeChunk(record: Record<string, unknown>, pending: Map<number, 
     if (typeof fields.content === 'string' && fields.content !== '') {
       events.push({ type: 'text', text: fields.content })
     }
+    // Thinking streams in its own field on both surfaces and interleaves with
+    // the answer, so it is a separate event rather than prefixed text.
+    const thinking = typeof fields.thinking === 'string'
+      ? fields.thinking
+      : typeof fields.reasoning === 'string' ? fields.reasoning : ''
+    if (thinking !== '') events.push({ type: 'thinking', text: thinking })
     if (Array.isArray(fields.tool_calls)) {
       for (const raw of fields.tool_calls) accumulateToolCall(raw, pending, false)
     }

@@ -21,6 +21,8 @@ export interface OllamaStreamState {
   nextBlockIndex: number
   /** The open text block, or null when the stream is on a tool call. */
   textBlock: { index: number; text: string } | null
+  /** The open reasoning block, closed when the answer starts or a tool is called. */
+  thinkingBlock: { index: number; text: string } | null
   /** Call id -> the call being accumulated, with the block it will close. */
   toolCalls: Map<string, { call: OllamaToolCall; blockIndex: number }>
   /** True once any content has been produced. */
@@ -28,32 +30,60 @@ export interface OllamaStreamState {
 }
 
 export function createStreamState(): OllamaStreamState {
-  return { nextBlockIndex: 0, textBlock: null, toolCalls: new Map(), hasContent: false }
+  return { nextBlockIndex: 0, textBlock: null, thinkingBlock: null, toolCalls: new Map(), hasContent: false }
 }
 
 /** Fold one event into chunks, opening and closing blocks as the stream needs. */
 export function applyEvent(state: OllamaStreamState, event: OllamaStreamEvent): StreamChunk[] {
   if (event.type === 'text') return applyText(state, event.text)
+  if (event.type === 'thinking') return applyThinking(state, event.text)
   if (event.type === 'tool_call') return applyToolCall(state, event.call)
   return []
 }
 
-function applyText(state: OllamaStreamState, text: string): StreamChunk[] {
+/**
+ * Fold a thinking delta into its own block.
+ *
+ * The trace and the answer interleave, so a text delta or a tool call closes
+ * the reasoning block: two open blocks at once would hand the caller chunks in
+ * an order the stream never produced.
+ */
+function applyThinking(state: OllamaStreamState, text: string): StreamChunk[] {
   state.hasContent = true
-  if (state.textBlock === null) {
+  if (state.thinkingBlock === null) {
+    // A trace that starts after the answer began still has to close the text
+    // block it interrupted.
+    const out = closeText(state)
     const index = state.nextBlockIndex
     state.nextBlockIndex += 1
-    // The opening delta belongs to the block too: storing an empty string here
-    // and only appending from the second delta loses the first word of every
-    // single-delta answer, which is exactly the shortest and most common case.
+    state.thinkingBlock = { index, text }
+    return [...out, { type: 'block-start', index, blockType: 'reasoning' }, { type: 'reasoning-delta', index, text }]
+  }
+  state.thinkingBlock.text += text
+  return [{ type: 'reasoning-delta', index: state.thinkingBlock.index, text }]
+}
+
+function closeThinking(state: OllamaStreamState): StreamChunk[] {
+  const block = state.thinkingBlock
+  if (block === null) return []
+  state.thinkingBlock = null
+  return [{ type: 'block-end', index: block.index, block: { type: 'reasoning', text: block.text } }]
+}
+
+function applyText(state: OllamaStreamState, text: string): StreamChunk[] {
+  state.hasContent = true
+  // The answer never shares a block with the trace.
+  const closed = closeThinking(state)
+  if (state.textBlock === null) {
+    closed.push({ type: 'block-start', index: state.nextBlockIndex, blockType: 'text' })
+    const index = state.nextBlockIndex
+    state.nextBlockIndex += 1
     state.textBlock = { index, text }
-    return [
-      { type: 'block-start', index, blockType: 'text' },
-      { type: 'text-delta', index, text },
-    ]
+    closed.push({ type: 'text-delta', index, text })
+    return closed
   }
   state.textBlock.text += text
-  return [{ type: 'text-delta', index: state.textBlock.index, text }]
+  return [...closed, { type: 'text-delta', index: state.textBlock.index, text }]
 }
 
 function applyToolCall(state: OllamaStreamState, call: OllamaToolCall): StreamChunk[] {
@@ -61,6 +91,7 @@ function applyToolCall(state: OllamaStreamState, call: OllamaToolCall): StreamCh
   const out: StreamChunk[] = []
   // A text block open when a tool call arrives has to close first: the two
   // cannot interleave inside one block, and leaving it open would strand it.
+  out.push(...closeThinking(state))
   out.push(...closeText(state))
   const index = state.nextBlockIndex
   state.nextBlockIndex += 1
@@ -117,7 +148,7 @@ function closeToolCalls(state: OllamaStreamState): StreamChunk[] {
 export function closeStream(state: OllamaStreamState): StreamChunk[] {
   // Read this BEFORE closeToolCalls, which empties the map.
   const sawToolCall = state.toolCalls.size > 0
-  const out: StreamChunk[] = [...closeText(state), ...closeToolCalls(state)]
+  const out: StreamChunk[] = [...closeThinking(state), ...closeText(state), ...closeToolCalls(state)]
   // A turn that asked for a tool ends on 'tool-calls', not 'stop'. Reporting stop
   // there would tell the agent loop the model is finished and cut the turn short
   // before the tool ever ran.

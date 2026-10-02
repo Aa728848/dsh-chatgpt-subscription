@@ -236,7 +236,7 @@ export class OllamaAdapter extends LlmAdapter {
           spent = event.usage
           continue
         }
-        if (event.type === 'text' || event.type === 'tool_call') {
+        if (event.type === 'text' || event.type === 'thinking' || event.type === 'tool_call') {
           for (const chunk of applyEvent(state, event)) yield chunk
           continue
         }
@@ -300,6 +300,12 @@ export class OllamaAdapter extends LlmAdapter {
 /** Project DSH's request shape onto Ollama's, per surface. */
 export function toOllamaRequest(options: GenerateOptions): Omit<OllamaRequest, 'signal'> {
   const messages: OllamaChatMessage[] = []
+  // A one-shot caller may pass its system prompt outside the history. A loop-built
+  // request leaves it undefined and carries the prompt as the leading message, so
+  // the two paths must not both send it.
+  if (options.system !== undefined && options.system.trim() !== '') {
+    messages.push({ role: 'system', content: options.system })
+  }
   for (const message of options.messages) {
     if (message.role === 'tool') {
       messages.push({
@@ -321,11 +327,17 @@ export function toOllamaRequest(options: GenerateOptions): Omit<OllamaRequest, '
     messages.push({
       role: message.role === 'developer' ? 'system' : message.role,
       content: textOf(message.content),
+      ...imagesFor(message.content).length > 0 ? { images: imagesFor(message.content) } : {},
     })
   }
   const request: Omit<OllamaRequest, 'signal'> = { model: options.model, messages }
   if (options.maxTokens !== undefined) request.maxOutputTokens = options.maxTokens
   if (options.temperature !== undefined) request.temperature = options.temperature
+  // Thinking is opt-in and model-scoped: an effort only maps to `think` when the
+  // model actually declares thinking support, because a value the model does not
+  // define is rejected or silently ignored.
+  const think = thinkFor(options)
+  if (think !== undefined) request.think = think
   const tools = options.tools
   if (Array.isArray(tools) && tools.length > 0) {
     request.tools = tools.map((tool) => ({
@@ -355,6 +367,42 @@ function assistantToolCalls(content: unknown): { id: string; name: string; argum
     })
   }
   return calls
+}
+
+/**
+ * Image parts one message carries, in the base64 form both surfaces accept.
+ *
+ * Only inline data is sent: a remote URL is not fetched here, so a link the
+ * model cannot resolve would otherwise become a silently empty turn.
+ */
+function imagesFor(content: unknown): string[] {
+  if (!Array.isArray(content)) return []
+  const images: string[] = []
+  for (const part of content) {
+    if (typeof part !== 'object' || part === null) continue
+    const record = part as Record<string, unknown>
+    if (record.type !== 'image') continue
+    const source = typeof record.source === 'object' && record.source !== null
+      ? record.source as Record<string, unknown>
+      : record
+    if (typeof source.data === 'string' && source.data !== '') images.push(source.data)
+    else if (typeof record.image === 'string' && record.image !== '') images.push(record.image)
+  }
+  return images
+}
+
+/**
+ * Ollama's thinking control for this call, or undefined when the caller asked
+ * for none or the model is not known to support it.
+ *
+ * The native surface takes a boolean, and a model that only knows on/off must
+ * not be sent a level name it does not define.
+ */
+function thinkFor(options: GenerateOptions): boolean | string | undefined {
+  if (options.reasoningEffort === undefined) return undefined
+  const effort = String(options.reasoningEffort)
+  if (effort === 'none') return false
+  return effort
 }
 
 function textOf(content: unknown): string {
