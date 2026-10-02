@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **修复输出上限被当作固定预留，导致自动压缩失效**（#30 / #31）；仅修改本插件，不要求修改 DSH。
+  - Kimi / MiniMax 不再上报动态预算为 `defaultMaxTokens`；仍在发送阶段按原公式计算并夹取线上 cap，显式请求上限（含摘要请求）仍优先，不引入固定 32K/64K 截断。
+  - 其余六条线路按 DSH 默认压缩策略检查固定预留：安全的默认值保持原样，不安全的省略。覆盖实时目录与窗口覆盖；Command Code 的 Kimi-K2.6 / Grok 4.5 / Grok 4.6、WorkBuddy 的 deepseek-v3-2-volc 默认配置受益。Claude、Antigravity、Codex 内置默认配置未发现同类失败，仍增加小窗口保护；Ollama 检查实时窗口。
+  - Claude / WorkBuddy 发送阶段保留实时目录 cap，Antigravity 保留模型 cap，Codex 仍不发送输出上限字段；设置卡中的输出能力值不改成零。
+  - 边界：显式过大的 maxTokens、自定义压缩策略、即使零预留也无法容纳 headroom/保留尾部的小窗口不在此保证内。WorkBuddy 的 default（56K）仍需部署方降低 compaction headroom/摘要预算或切换足够大窗口的模型；不会伪造窗口容量。升级后需重启插件/host，让新请求重新解析模型默认值，旧版会话若把旧默认持久化为显式值需清除该覆盖。
+  - 验证：新增 202 条回归用例，强制源码/测试类型检查、构建及全量测试通过；公共预算函数与真实 DSH 压缩解析器的 144 组边界结果一致。保留原 Kimi 复现文件；旧版 clean-room 与真实订阅账号端到端尚未复验。详细结果见兼容记录 `.dsh/skills/dsh-harness-upgrade/references/output-reservation.md`。
+
 - **修复 Codex 线路「跟随官方」名不副实：两个读取参数默认值与官方客户端不一致，其中一项持续多花额度**（用户报告：近期更新后额度消耗变快）。
   - **取证**：以订阅目录 `GET /backend-api/codex/models` 为准，并与本机官方 Codex CLI 的权威产物逐字核对——随包的 `codex-rs/models-manager/models.json`、账号级 cache（`~/.codex/models_cache.json`），以及官方真实会话的 rollout。三处一致：**每个模型都声明 `default_reasoning_summary: "none"`、`default_verbosity: "low"`、`support_verbosity: true`**。官方 `client.rs` 的 `build_responses_request` 也正是这么发的：`default_reasoning_summary != None` 才带 `summary`，`default_verbosity` 每轮都参与 `create_text_param_for_request`。
   - **缺口一（省钱）**：`responses-mapper.ts` 在未配置时发 `{ summary: 'auto' }`，而官方默认是 `none`。**推理摘要是计费生成**——模型要先把思考写成摘要，这部分计入输出。一个从未打开该设置的用户，因此每轮都在花官方客户端从不花的那一块。现在：未配置或选「无」一律**省略 `summary` 字段**（与官方 `skip_serializing_if = "Option::is_none"` 同形）；显式选择 `auto`/`concise`/`detailed` 仍照发。

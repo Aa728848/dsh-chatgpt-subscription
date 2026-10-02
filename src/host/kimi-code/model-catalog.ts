@@ -29,7 +29,7 @@ export interface KimiCodeCatalogModel {
   contextWindow: number
   /** Context the highest tier unlocks, when it is larger than {@link contextWindow}. */
   maxContextWindow: number | null
-  /** Output cap requested when the caller omits one. */
+  /** Floor for the dynamic wire budget, NOT a ceiling or DSH defaultMaxTokens. */
   maxTokens: number
   /** Input the model accepts; DSH only maps the text and image entries. */
   inputModalities: readonly ('text' | 'image' | 'video')[]

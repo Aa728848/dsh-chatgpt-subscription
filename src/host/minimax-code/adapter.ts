@@ -388,9 +388,8 @@ export class MinimaxCodeAdapter extends LlmAdapter {
    * One model's resolved metadata, read through the current selection.
    *
    * The effective context window is the override when one is saved, and the
-   * output cap is sized against that same number — a window the card shows and a
-   * cap the request path computes from a different one is precisely the drift
-   * this single resolver exists to prevent.
+   * wire output cap is sized against that same number in requestStream. It is
+   * deliberately not exposed as a fixed defaultMaxTokens reservation here.
    */
   async resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     if (signal?.aborted === true) throw new LlmError('MiniMax Code model resolution aborted', 'ABORTED')
@@ -407,7 +406,9 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       name: entry?.name ?? modelId,
       inputModalities: modalitiesForModel(modelId),
       context: { contextWindow },
-      defaultMaxTokens: maxOutputTokensFor(modelId, contextWindow),
+      // Do not materialize the wire ceiling as a fixed DSH output reservation:
+      // on M2.7 it leaves too little budget for compaction. requestStream applies
+      // the dynamic cap instead, while preserving explicit caller maxTokens.
       ...(efforts.length === 0
         ? {}
         : {

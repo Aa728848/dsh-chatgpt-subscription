@@ -1,3 +1,4 @@
+import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -187,7 +188,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       name: entry?.name ?? modelId,
       inputModalities: inputModalitiesFor(modelId),
       context: { contextWindow: this.contextWindowFor(modelId, entry, settings.contextWindowOverrides) },
-      defaultMaxTokens: maxOutputTokensFor(modelId),
+      ...outputReservation(this.contextWindowFor(modelId, entry, settings.contextWindowOverrides), maxOutputTokensFor(modelId)),
       ...(efforts.length === 0
         ? {}
         : {

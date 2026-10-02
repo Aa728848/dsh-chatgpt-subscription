@@ -310,6 +310,16 @@ describe('claude adapter catalog', () => {
 })
 
 describe('claude adapter model resolution', () => {
+  it.each([undefined, 4096])('keeps a live wire cap after omitting an unsafe reservation (%s)', async maxTokens => {
+    const { store, settings } = await mount()
+    const live = [{ ...FALLBACK_MODELS.find(m => m.id === 'claude-sonnet-4-6')!, contextWindow: 200_000, maxTokens: 128_000 }]
+    const fetchStub = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fetchStub.fn, { loadCatalog: async () => live as never[] })
+    expect(await adapter.resolveModel(PROVIDER_ID, 'claude-sonnet-4-6')).not.toHaveProperty('defaultMaxTokens')
+    await drain(adapter.stream(options('claude-sonnet-4-6', { maxTokens, reasoningEffort: 'none' as never })))
+    expect(fetchStub.calls[0]?.body.max_tokens).toBe(maxTokens ?? 128_000)
+  })
+
   it('passes the effort ladder through unconverged, xhigh included', async () => {
     const { store, settings } = await mount()
     const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)

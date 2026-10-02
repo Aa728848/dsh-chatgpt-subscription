@@ -93,6 +93,23 @@ afterEach(async () => {
   }
 })
 
+describe('WorkBuddy output reservation', () => {
+  it.each([undefined, 4096])('keeps the live catalog wire cap after omission (%s)', async maxTokens => {
+    const store = await makeStore()
+    const bodies: any[] = []
+    const fetchFn: typeof fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return sseResponse('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    }
+    const adapter = makeAdapter(store, fetchFn)
+    vi.spyOn(adapter as any, 'catalog').mockResolvedValue([{ ...CATALOG[0], contextWindow: 200_000, maxTokens: 128_000 }])
+    expect(await adapter.resolveModel('workbuddy-subscription', 'glm-5.3')).not.toHaveProperty('defaultMaxTokens')
+    for await (const _chunk of adapter.stream({ provider: 'workbuddy-subscription', model: 'glm-5.3', maxTokens,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] } as GenerateOptions)) { /* consume */ }
+    expect(bodies[0]?.max_tokens).toBe(maxTokens ?? 128_000)
+  })
+})
+
 describe('WorkBuddy failure classification', () => {
   it('reads the subscription error code out of a response body', () => {
     expect(readErrorCode('{"code":11102,"msg":"nope"}')).toBe(11102)

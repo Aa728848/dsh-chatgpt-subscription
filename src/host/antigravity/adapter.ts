@@ -1,3 +1,4 @@
+import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -94,7 +95,7 @@ export class AntigravityAdapter extends LlmAdapter {
       name: model.name,
       inputModalities: model.inputModalities,
       context: { contextWindow: overrides[model.id] || model.contextWindow },
-      defaultMaxTokens: model.maxTokens,
+      ...outputReservation(overrides[model.id] || model.contextWindow, model.maxTokens),
       ...(model.reasoningEfforts ? { reasoningEfforts: model.reasoningEfforts } : {}),
     }))
   }
@@ -121,7 +122,7 @@ export class AntigravityAdapter extends LlmAdapter {
       name: model.name,
       inputModalities: model.inputModalities,
       context: { contextWindow: overrides[model.id] || model.contextWindow },
-      defaultMaxTokens: model.maxTokens,
+      ...outputReservation(overrides[model.id] || model.contextWindow, model.maxTokens),
       // No `systemPromptUpdate: 'in-history'`: this route transports the system
       // prompt out of band (a fixed `systemInstruction` plus a user turn), so it
       // cannot read a later system message as the effective prompt.
@@ -162,7 +163,7 @@ export class AntigravityAdapter extends LlmAdapter {
       : options
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(effectiveOptions, model, watchdogSignal),
+      (watchdogSignal) => this.requestStream({ ...effectiveOptions, maxTokens: options.maxTokens ?? model.maxTokens }, model, watchdogSignal),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,

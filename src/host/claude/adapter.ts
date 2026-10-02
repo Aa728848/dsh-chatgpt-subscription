@@ -96,11 +96,9 @@
  *   importing it before it exists would make this adapter uncompilable, and
  *   importing it afterwards changes nothing, because the only methods used are
  *   the five in {@link ClaudeAccountPoolLike}.
- * - A2. The live `GET /v1/models` listing is NOT read on the request path. It
- *   is authoritative for the context window alone (see client.ts), and the only
- *   model fact the body depends on — the thinking form — comes from the frozen
- *   catalog. Loading it per request would add a cached round trip that cannot
- *   change a byte of the body.
+ * - A2. When no fixed output default was materialized, the request path reads
+ *   the cached catalog to preserve its wire cap independently of compaction
+ *   reservation metadata. Thinking forms still come from the frozen catalog.
  * - A3. A 429 with no `retry-after` and no reset instant cools the account for
  *   {@link POOL_COOLDOWN_MS}. That is deliberately shorter than the 5-hour
  *   window: an account parked for hours after a burst limit recovers would cost
@@ -116,6 +114,7 @@
  *   for this function and the two should be one.
  */
 
+import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -493,7 +492,7 @@ export class ClaudeAdapter extends LlmAdapter {
       name: entry.name,
       inputModalities: entry.supportsImage ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindow || DEFAULT_CONTEXT_WINDOW },
-      defaultMaxTokens: maxOutputTokensFor(modelId, catalog),
+      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, maxOutputTokensFor(modelId, catalog)),
       // No `systemPromptUpdate: 'in-history'`: the system prompt travels in the
       // body's own `system` field and never as a message, so this route cannot
       // read a later system message as the effective prompt.
@@ -636,7 +635,11 @@ export class ClaudeAdapter extends LlmAdapter {
     // which requests the one-hour tier while the plan is drawing on included
     // usage. See CLAUDE_SUBSCRIPTION_CACHE_TTL.
     const cacheTtl = ClaudeAdapter.cacheTtlFor(settings)
-    const payload = buildClaudeRequestBody(requestOptions, images, {
+    const catalog = requestOptions.maxTokens === undefined ? await this.catalog(credentials) : undefined
+    const payload = buildClaudeRequestBody({
+      ...requestOptions,
+      maxTokens: requestOptions.maxTokens ?? maxOutputTokensFor(requestOptions.model, catalog),
+    }, images, {
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
       toolNames,

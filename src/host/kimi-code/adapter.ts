@@ -422,12 +422,10 @@ export class KimiCodeAdapter extends LlmAdapter {
       name: entry?.name ?? modelId,
       inputModalities: inputModalitiesForEntry(modelId, catalog),
       context: { contextWindow: this.contextWindowFor(modelId, entry, settings.contextWindowOverrides) },
-      // The cap tracks the window so a long max-effort turn is not truncated by
-      // a fixed 32K ceiling; reasoning_content is billed as output.
-      defaultMaxTokens: maxOutputTokensFor(
-        modelId,
-        this.contextWindowFor(modelId, entry, settings.contextWindowOverrides),
-      ),
+      // Deliberately omit defaultMaxTokens: DSH materializes it into requests
+      // and reserves it in compaction. Our window-sized cap is dynamic, not a
+      // fixed reservation. requestStream computes it after measuring the prompt;
+      // explicit caller caps still win there (including compaction summaries).
       ...(efforts.length === 0
         ? {}
         : {

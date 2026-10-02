@@ -1,3 +1,4 @@
+import { outputReservation } from './common/output-reservation.ts'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
@@ -80,7 +81,7 @@ export function resolveCodexModel(
     // endpoint rejects `max_output_tokens` (issue #29). DSH charges this much
     // of the window to the completion when it plans compaction; the request
     // builder never transmits it.
-    defaultMaxTokens: codexModelMaxTokens(model),
+    ...outputReservation(configuredContextWindow ?? liveEntry?.contextWindow ?? entry.contextWindow, codexModelMaxTokens(model)),
     // No `systemPromptUpdate: 'in-history'`: the Responses wire carries the system
     // prompt in the top-level `instructions` slot, never inside `input`, so this
     // route cannot read a later system message as the effective prompt. Declaring

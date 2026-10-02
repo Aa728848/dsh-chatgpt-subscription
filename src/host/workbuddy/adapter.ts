@@ -1,3 +1,4 @@
+import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -222,7 +223,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
       name: entry.id === modelId ? entry.name : modelId,
       inputModalities: entry.supportsImage ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindow || DEFAULT_CONTEXT_WINDOW },
-      defaultMaxTokens: maxOutputTokensFor(modelId, catalog),
+      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, maxOutputTokensFor(modelId, catalog)),
       // No `systemPromptUpdate: 'in-history'`: the wire carries the system
       // prompt as the mandatory first message, never inside the history, so this
       // route cannot read a later system message as the effective prompt.
@@ -293,7 +294,13 @@ export class WorkBuddyAdapter extends LlmAdapter {
     const fetchFn = this.options.fetchFn ?? fetch
     const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
-    const body = JSON.stringify(buildChatRequest(requestOptions, images))
+    const settings = await this.settings()
+    const credentials = await this.credentials(settings)
+    const catalog = credentials === null ? FALLBACK_MODELS : await this.catalog(credentials)
+    const body = JSON.stringify(buildChatRequest({
+      ...requestOptions,
+      maxTokens: requestOptions.maxTokens ?? maxOutputTokensFor(options.model, catalog),
+    }, images))
 
     const pool = this.accountPool
     const tried = new Set<string>()

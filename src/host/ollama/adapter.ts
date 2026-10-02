@@ -1,3 +1,4 @@
+import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -157,7 +158,7 @@ export class OllamaAdapter extends LlmAdapter {
       context: { contextWindow: contextWindowFor(entry) },
       // Ollama does not publish a per-model output ceiling, so this is a request
       // level default rather than a claim about the model.
-      defaultMaxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      ...outputReservation(contextWindowFor(entry), DEFAULT_MAX_OUTPUT_TOKENS),
     }
   }
 
