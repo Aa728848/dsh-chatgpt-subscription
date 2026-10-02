@@ -485,6 +485,7 @@ export interface WorkBuddyStreamState {
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
+  cacheWriteTokens: number
   reasoningTokens: number
   sawUsage: boolean
 }
@@ -502,6 +503,7 @@ export function createStreamState(): WorkBuddyStreamState {
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     reasoningTokens: 0,
     sawUsage: false,
   }
@@ -576,10 +578,14 @@ export function processStreamLine(line: string, state: WorkBuddyStreamState): St
     const prompt = numberOr(usage.prompt_tokens, 0)
     const details = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined
     const cached = details ? numberOr(details.cached_tokens, 0) : 0
+    // A cache write is billed apart from a cache read, so it is tracked apart
+    // too and subtracted from the aggregate prompt count like a read is.
+    const written = details ? numberOr(details.cache_write_tokens, 0) : 0
     // DSH counts are disjoint: cached input is reported separately, so it is
     // subtracted out of the provider's aggregate prompt count.
-    state.inputTokens = Math.max(0, prompt - cached)
+    state.inputTokens = Math.max(0, prompt - cached - written)
     state.cacheReadTokens = cached
+    state.cacheWriteTokens = written
     state.outputTokens = numberOr(usage.completion_tokens, state.outputTokens)
     if (isRecord(usage.completion_tokens_details)) {
       state.reasoningTokens = numberOr(usage.completion_tokens_details.reasoning_tokens, state.reasoningTokens)
@@ -683,6 +689,7 @@ function tokenUsage(state: WorkBuddyStreamState): TokenUsage {
     inputTokens: state.inputTokens,
     outputTokens: state.outputTokens,
     ...(state.cacheReadTokens > 0 ? { cacheReadTokens: state.cacheReadTokens } : {}),
+    ...(state.cacheWriteTokens > 0 ? { cacheWriteTokens: state.cacheWriteTokens } : {}),
     ...(state.reasoningTokens > 0 ? { reasoningTokens: state.reasoningTokens } : {}),
   }
 }

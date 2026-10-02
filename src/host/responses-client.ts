@@ -610,16 +610,28 @@ function visibleReasoningDelta(
   return { text: `${delta.slice(0, remaining)}${REASONING_TRUNCATED_NOTICE}`, truncated: true }
 }
 
+/**
+ * Map one response's usage onto DSH's disjoint accounting.
+ *
+ * `input_tokens` is the whole input, so cached input has to be subtracted out of
+ * it and reported on its own field. Cache WRITES are counted separately from
+ * reads and billed separately: leaving a write inside `inputTokens` would make a
+ * cold prefix look cheaper than it was and hide the cost of a write. A field the
+ * service omits is unknown, not zero, so it is simply not reported.
+ */
 function mapUsage(value: Record<string, unknown> | null): TokenUsage | null {
   if (value === null) return null
   const totalInput = number(value.input_tokens) ?? 0
   const outputTokens = number(value.output_tokens) ?? 0
-  const cached = number(record(value.input_tokens_details)?.cached_tokens) ?? 0
+  const details = record(value.input_tokens_details)
+  const cached = number(details?.cached_tokens) ?? 0
+  const written = number(details?.cache_write_tokens) ?? 0
   const reasoning = number(record(value.output_tokens_details)?.reasoning_tokens)
   return {
-    inputTokens: Math.max(0, totalInput - cached),
+    inputTokens: Math.max(0, totalInput - cached - written),
     outputTokens,
     ...(cached > 0 ? { cacheReadTokens: cached } : {}),
+    ...(written > 0 ? { cacheWriteTokens: written } : {}),
     ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
   }
 }
