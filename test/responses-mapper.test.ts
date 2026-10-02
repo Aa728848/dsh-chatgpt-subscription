@@ -38,7 +38,9 @@ describe('Responses payload mapping', () => {
     })
     expect(payload.input).toContainEqual({ type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"a"}' })
     expect(payload.input).toContainEqual({ type: 'function_call_output', call_id: 'call_1', output: 'done' })
-    expect(payload).toMatchObject({ stream: true, store: false, tool_choice: 'auto', reasoning: { effort: 'high', summary: 'auto' } })
+    // The provider default is the catalog's own `default_reasoning_summary: none`,
+    // which the wire expresses by omitting the field (see the contract tests).
+    expect(payload).toMatchObject({ stream: true, store: false, tool_choice: 'auto', reasoning: { effort: 'high' } })
   })
 
   it('maps the tool-role result message 0.1.7 delivers to the same function_call_output item', async () => {
@@ -94,7 +96,7 @@ describe('Responses payload mapping', () => {
         temperature: 0.7, top_p: 0.9, top_logprobs: 5, messages: [],
       } as unknown as GenerateOptions
       const payload = await buildResponsesPayload(options, unusedAttachments())
-      expect(payload).toMatchObject({ model, reasoning: { effort: expected, summary: 'auto' } })
+      expect(payload).toMatchObject({ model, reasoning: { effort: expected } })
       expect(payload).not.toHaveProperty('temperature')
       expect(payload).not.toHaveProperty('top_p')
       expect(payload).not.toHaveProperty('top_logprobs')
@@ -127,8 +129,21 @@ describe('Responses payload mapping', () => {
     expect(payload).not.toHaveProperty('service_tier')
   })
 
-  it('uses the provider default when output verbosity is not configured', async () => {
+  it('sends the provider catalog default verbosity when none is configured', async () => {
+    // "Follow the provider" must be what the provider's own client sends. Every
+    // model in the official catalog declares `default_verbosity: "low"`, so
+    // omitting the field would silently get the server's implicit medium
+    // instead — answers more verbose and more expensive than the official
+    // client's, for a user who never opened this setting.
     const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    expect(payload.text).toEqual({ verbosity: 'low' })
+  })
+
+  it('omits verbosity for a model whose support the catalog cannot establish', async () => {
+    // The official catalog gates the field per model, so a model this table has
+    // no record for gets no invented verbosity.
+    const options = { provider: 'codex-chatgpt', model: 'gpt-99-unheard-of', messages: [] } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
     expect(payload).not.toHaveProperty('text')
   })
@@ -138,14 +153,18 @@ describe('Responses payload mapping', () => {
     const payloadConcise = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'concise')
     expect(payloadConcise.reasoning).toEqual({ effort: 'high', summary: 'concise' })
 
+    // "None" asks for no summary, and the wire says that by OMITTING the field:
+    // `summary: "none"` would spend tokens on a summary the caller discards.
     const payloadNone = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'none')
-    expect(payloadNone.reasoning).toEqual({ effort: 'high', summary: 'none' })
+    expect(payloadNone.reasoning).toEqual({ effort: 'high' })
 
     const payloadDetailed = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'detailed')
     expect(payloadDetailed.reasoning).toEqual({ effort: 'high', summary: 'detailed' })
 
+    // Unset means the provider default, and the provider's own catalog default
+    // is `none` — so it is omitted too, not sent as "auto".
     const payloadDefault = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, null)
-    expect(payloadDefault.reasoning).toEqual({ effort: 'high', summary: 'auto' })
+    expect(payloadDefault.reasoning).toEqual({ effort: 'high' })
   })
 
   it('omits summary on reasoning models that do not support reasoning summaries', async () => {

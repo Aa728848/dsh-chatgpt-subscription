@@ -213,8 +213,23 @@ export class CommandCodeAdapter extends LlmAdapter {
       ? options
       : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
 
+    // A stored default is a per-route preference, not a per-model promise: the
+    // settings card offers one ladder for the whole line, and a value chosen
+    // for one model can be invalid for the model this turn actually uses. When
+    // the model advertises a ladder and the level is not on it, the model's own
+    // default wins — otherwise the service answers 400 and the turn fails.
+    const advertised = reasoningEffortsFor(options.model)
+    const effectiveEffort = effectiveOptions.reasoningEffort === undefined
+      ? undefined
+      : String(effectiveOptions.reasoningEffort)
+    const resolvedOptions: GenerateOptions = effectiveEffort === undefined
+      || advertised.length === 0
+      || advertised.includes(effectiveEffort)
+      ? effectiveOptions
+      : { ...effectiveOptions, reasoningEffort: undefined }
+
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(effectiveOptions, watchdogSignal),
+      (watchdogSignal) => this.requestStream(resolvedOptions, watchdogSignal),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,

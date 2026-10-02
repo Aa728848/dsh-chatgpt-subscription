@@ -72,14 +72,34 @@ describe('CommandCodeAdapter catalog', () => {
     const { adapter } = buildAdapter()
     const resolved = await adapter.resolveModel('command-code', 'deepseek/deepseek-v4.1-flash')
     expect(resolved.inputModalities).toEqual(['text', 'image'])
-    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['low', 'high', 'max'])
+    // The registry declares `off`, which DSH spells `none`.
+    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['none', 'low', 'high', 'max'])
   })
 
   it('keeps a genuinely text-only model on the text modality', async () => {
     const { adapter } = buildAdapter()
     const resolved = await adapter.resolveModel('command-code', 'deepseek/deepseek-v4-flash')
     expect(resolved.inputModalities).toEqual(['text'])
-    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['high', 'max'])
+    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['none', 'high', 'max'])
+  })
+
+  it('offers a reasoning ladder for a fast variant the older table omitted', async () => {
+    // Regression: deepseek/deepseek-v4.1-flash-fast served by the live catalog
+    // was missing from the transcribed table, so it fell through to the
+    // text-only/no-ladder default and the composer hid its effort selector.
+    const { adapter } = buildAdapter()
+    const resolved = await adapter.resolveModel('command-code', 'deepseek/deepseek-v4.1-flash-fast')
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['none', 'low', 'high', 'max'])
+  })
+
+  it('offers a reasoning ladder for the GPT-6 siblings the older table omitted', async () => {
+    const { adapter } = buildAdapter()
+    for (const model of ['gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol']) {
+      const resolved = await adapter.resolveModel('command-code', model)
+      expect(resolved.inputModalities).toEqual(['text', 'image'])
+      expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    }
   })
 
   it('sends an inline image to a vision-capable open-weight model', async () => {

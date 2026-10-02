@@ -61,6 +61,10 @@
 - **请求带 `openai-beta: responses=experimental`**：
   - 该订阅后端在 beta 标志下提供，官方 Codex CLI 一直发送这个头；
   - 缺它时请求面不同：当前后端宽容，但这正是收紧后会变成 400/403 的那一行；
+- **读取参数默认值与官方 Codex 一致**（依据订阅目录 `GET /backend-api/codex/models`，与官方随包的 `codex-rs/models-manager/models.json` 同源）：
+  - **推理摘要默认不发**：目录里每个模型都声明 `default_reasoning_summary: none`，官方以此为准。此前本插件在未配置时发 `summary: auto`，而摘要属于**计费生成**，等于每一轮都多花一块官方从不花的额度；现在默认省略该字段，用户显式选择 `auto` / `concise` / `detailed` 时照旧发送，选「无」也改为**省略字段**而不是发 `summary: none`（后者是让后端先生成再丢弃）。
+  - **输出详细程度默认发目录值 `low`**：官方客户端每轮都发送模型目录里的 `default_verbosity`（当前全部为 `low`）。此前本插件在未配置时**整个不发** `text` 字段，于是服务端套用隐含的 `medium`——一个从未打开过该设置的用户，会拿到比官方客户端更啰嗦、也更贵的回答。现在未配置时按目录发 `low`，显式选择仍以用户为准。
+  - 目录里**没有记录**的模型不猜：仅对该表声明了 `supportsOutputVerbosity` 的模型发送 `text`，避免把一个模型可能拒收的字段强加给它；
 - **多轮续传**，避免每轮重发整个历史：
   - 每个会话发送稳定的 `prompt_cache_key`，让后端复用提示前缀；
   - 回传后端在响应头给出的 `x-codex-turn-state`，让它续接该轮；
@@ -252,7 +256,7 @@
 - 模型勾选、思考深度、上下文窗口覆盖与额度在「设置 → 订阅服务 → Claude」标签页中配置，输入框右侧另有额度胶囊（取**剩余最紧的那个窗口**）。
 
 ### 设置页
-- 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；
+- 展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；「输出详细程度」「推理摘要」两项的默认值即官方 Codex 客户端的取值；
 - **偏好落盘位置随 harness 生成**：
   - 有 `settings.register` 的一代（≤0.1.6）仍写进 harness 的设置文档；
   - 0.1.7 起该 API 被 `SettingsForms` 取代，偏好改由插件自己持久化到 `<dshHome>/storages/dsh-chatgpt-subscription-preferences.json`（0600、原子写；读取失败或校验不过就回落默认值）；

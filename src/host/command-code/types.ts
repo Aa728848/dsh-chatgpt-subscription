@@ -133,7 +133,7 @@ export function wireForModel(modelId: string): CommandCodeWire {
 }
 
 /**
- * Reasoning levels one model advertises.
+ * Reasoning levels one model advertises, in DSH's vocabulary.
  *
  * The registry is the authority: a model it describes but gives no
  * `reasoningEfforts` is a non-reasoning model, which is why that answers with an
@@ -141,9 +141,45 @@ export function wireForModel(modelId: string): CommandCodeWire {
  * describe declares nothing either — guessing from the family name is exactly
  * how `deepseek-v4-flash` got treated as a reasoner with image input when it is
  * text-only with a different effort set.
+ *
+ * One level is translated rather than copied. Command Code names the
+ * "do not think" level `off`; DSH names the same level `none` (as the Kimi and
+ * Anthropic lines here already do). Both spellings are accepted on the way in —
+ * a stored selection or a session started elsewhere may carry either — but the
+ * adapter only ever advertises `none`, so the picker shows the level DSH
+ * understands.
+ *
+ * `off` is also what the CLI's `thinkingHook` keys on to send no reasoning
+ * field at all, and the OpenAI-family wire has no such level, so
+ * {@link wireReasoningEffort} drops it before the request is built rather than
+ * transmitting a value the endpoint would reject.
  */
 export function reasoningEffortsFor(modelId: string): string[] {
-  return [...(commandCodeModelDef(modelId)?.reasoningEfforts ?? [])]
+  const declared = commandCodeModelDef(modelId)?.reasoningEfforts ?? []
+  return declared.map((effort) => (effort === 'off' ? DISABLED_THINKING_EFFORT : effort))
+}
+
+/**
+ * The level that means "think as little as possible" on this route.
+ *
+ * DSH's spelling, matching the Kimi and Claude lines. Kept as a constant
+ * because three separate places compare against it — the catalog translation,
+ * the wire filter below, and the Anthropic thinking budget.
+ */
+export const DISABLED_THINKING_EFFORT = 'none'
+
+/**
+ * Whether one effort survives onto the provider wire.
+ *
+ * `none` is a real DSH level but not a Command Code one: it is expressed by
+ * OMITTING the field, which is exactly what the official CLI does when its
+ * effort is `off`. Every other level this route advertises passes through.
+ */
+export function wireReasoningEffort(effort: string | undefined | null): string | undefined {
+  if (effort === undefined || effort === null) return undefined
+  const value = String(effort).trim()
+  if (value === '' || value === DISABLED_THINKING_EFFORT || value === 'off') return undefined
+  return value
 }
 
 /**

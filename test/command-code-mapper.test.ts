@@ -169,6 +169,38 @@ describe('Command Code request mapping', () => {
     ])
   })
 
+  it('omits the reasoning field entirely when thinking is disabled', () => {
+    // Command Code has no `none`/`off` level on either wire: the disabled level
+    // is expressed by sending no reasoning field at all, which is what the
+    // official CLI does for its own `off`. Sending the literal value would be
+    // rejected, and on the Anthropic wire a thinking block must not appear.
+    const openai = buildOpenAIRequest(options({
+      reasoningEffort: 'none' as never,
+    }) as unknown as GenerateOptions)
+    expect(openai.reasoning_effort).toBeUndefined()
+    expect('reasoning_effort' in openai).toBe(false)
+
+    const anthropic = buildAnthropicRequest(options({
+      model: 'claude-sonnet-4-6',
+      reasoningEffort: 'none' as never,
+      maxTokens: 8192,
+    }) as unknown as GenerateOptions)
+    expect(anthropic.thinking).toBeUndefined()
+    expect('thinking' in anthropic).toBe(false)
+  })
+
+  it('still sends an explicit level the model advertises', () => {
+    // The guard above must not swallow real levels: `low` and `max` are both
+    // part of the registry's ladder for this model.
+    expect(buildOpenAIRequest(options({ reasoningEffort: 'low' as never }) as unknown as GenerateOptions).reasoning_effort).toBe('low')
+    expect(buildOpenAIRequest(options({ reasoningEffort: 'max' as never }) as unknown as GenerateOptions).reasoning_effort).toBe('max')
+    expect(buildAnthropicRequest(options({
+      model: 'claude-sonnet-4-6',
+      reasoningEffort: 'high' as never,
+      maxTokens: 8192,
+    }) as unknown as GenerateOptions).thinking).toEqual({ type: 'enabled', budget_tokens: 7168 })
+  })
+
   it('enables thinking only when the budget fits under max_tokens', () => {
     expect(thinkingBudgetFor('high', 8192)).toBe(7168)
     expect(thinkingBudgetFor('high', 2048)).toBe(1024)

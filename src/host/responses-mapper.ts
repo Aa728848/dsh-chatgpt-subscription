@@ -1,7 +1,7 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from './common/llm-compat.ts'
 import { createHash } from 'node:crypto'
-import { codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexWireReasoningEffort } from '../shared/model-catalog.ts'
+import { codexDefaultOutputVerbosity, codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexWireReasoningEffort } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
 export interface ResponsesPayload extends Record<string, unknown> {
@@ -169,7 +169,19 @@ export async function buildResponsesPayload(
     payload.tool_choice = 'auto'
     payload.parallel_tool_calls = true
   }
-  if (outputVerbosity !== null) payload.text = { verbosity: outputVerbosity }
+  // "Follow the provider" is the user's default, and the provider's own client
+  // sends the catalog's `default_verbosity` (low) on every request. Omitting the
+  // field is NOT the same thing: the server then applies its own implicit
+  // medium, so a user who never opened this setting was getting answers more
+  // verbose — and more expensive — than the official client does.
+  //
+  // The field is still omitted for a model whose support this table cannot
+  // establish, because the official catalog gates it per model and an
+  // unsupported verbosity is a request the model may reject.
+  const providerVerbosity = codexDefaultOutputVerbosity(options.model)
+  if (providerVerbosity !== undefined) {
+    payload.text = { verbosity: outputVerbosity ?? providerVerbosity }
+  }
   if (fastMode) payload.service_tier = 'priority'
   // NO `max_output_tokens`, and that is deliberate.
   //
@@ -192,8 +204,14 @@ export async function buildResponsesPayload(
   // exactly the request the accounts in #29 reject.
   if (options.reasoningEffort !== undefined) {
     const effort = codexWireReasoningEffort(options.model, options.reasoningEffort)
-    payload.reasoning = codexModelSupportsReasoningSummary(options.model)
-      ? { effort, summary: reasoningSummary ?? 'auto' }
+    // No summary — whether the user chose "none" or left the choice to the
+    // provider, whose own catalog default is `none` — is expressed by OMITTING
+    // the field. Sending `summary: "none"` would ask the backend to spend
+    // tokens producing a summary it is told to discard, and sending `null` is
+    // not a value the field accepts at all.
+    const summary = reasoningSummary === null || reasoningSummary === 'none' ? undefined : reasoningSummary
+    payload.reasoning = summary !== undefined && codexModelSupportsReasoningSummary(options.model)
+      ? { effort, summary }
       : { effort }
   }
   return payload

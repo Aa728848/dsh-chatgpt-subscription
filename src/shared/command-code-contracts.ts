@@ -12,15 +12,21 @@ import type {
 export type CommandCodeApiEnv = 'prod' | 'staging' | 'local'
 
 /**
- * Reasoning levels the provider registry can expose. The exact set is per
- * model — `minimal` is the cheapest budget, `xhigh` sits between `high` and
- * `max`, and most models declare only a subset.
+ * Reasoning levels this route can expose. The exact set is per model —
+ * `minimal` is the cheapest budget, `xhigh` sits between `high` and `max`, and
+ * most models declare only a subset.
+ *
+ * `none` means "do not think". Command Code declares that level as `off` in its
+ * own registry; the host translates it on the way out (the wire expresses it by
+ * OMITTING the reasoning field entirely), so this vocabulary — and therefore
+ * the settings card and DSH's picker — uses the name DSH already knows, the
+ * same one the Kimi and Claude lines use.
  */
-export type CommandCodeReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type CommandCodeReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 /** Every level, in escalating order; the settings card renders exactly these. */
 export const COMMAND_CODE_REASONING_EFFORTS: readonly CommandCodeReasoningEffort[] =
-  ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 /** One model offered by the Command Code provider API. */
 export interface CommandCodeModelOption {

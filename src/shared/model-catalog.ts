@@ -1,3 +1,5 @@
+import type { CodexOutputVerbosity } from './contracts.ts'
+
 export type CodexModelModality = 'text' | 'image'
 
 export const GPT_56_MAX_CONTEXT_WINDOW = 1_000_000
@@ -19,6 +21,23 @@ export interface CodexModelCatalogEntry {
   defaultReasoningEffort: string
   reasoningProfile: 'standard' | 'gpt-5.6' | 'gpt-6'
   supportsReasoningSummary: boolean
+  /**
+   * Whether the Responses `text.verbosity` control applies to this model.
+   *
+   * Official Codex gates the field on the catalog's own `support_verbosity`:
+   * a model that does not accept it is sent none, and the official client warns
+   * instead of guessing. An absent flag therefore means "not established" — this
+   * line will not invent the field for a model it has no evidence about.
+   */
+  supportsOutputVerbosity?: boolean
+  /**
+   * Verbosity the official client sends when the user has chosen none.
+   *
+   * Read from the same catalog: every model the backend currently lists declares
+   * `default_verbosity: "low"`, so "follow the provider" means low — not the
+   * server's own (medium) fallback, which is what omitting the field gets.
+   */
+  defaultOutputVerbosity?: CodexOutputVerbosity
   /** Output cap when the caller omits one; falls back to {@link CODEX_DEFAULT_MAX_TOKENS}. */
   maxTokens?: number
   fallbackModelId?: string
@@ -34,6 +53,8 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'gpt-5.6',
     supportsReasoningSummary: true,
     fallbackModelId: 'gpt-5.6-terra',
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-6-astra',
@@ -44,6 +65,8 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
     maxTokens: GPT_6_MAX_TOKENS,
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-6.1-sol',
@@ -54,6 +77,8 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
     maxTokens: GPT_6_MAX_TOKENS,
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-6-sol',
@@ -64,6 +89,8 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
     maxTokens: GPT_6_MAX_TOKENS,
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-6-luna',
@@ -74,6 +101,8 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
     maxTokens: GPT_6_MAX_TOKENS,
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-5.6-terra',
@@ -84,6 +113,8 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'gpt-5.6',
     supportsReasoningSummary: true,
     fallbackModelId: 'gpt-5.5',
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-5.6-luna',
@@ -94,6 +125,8 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'gpt-5.6',
     supportsReasoningSummary: true,
     fallbackModelId: 'gpt-5.5',
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-5.5',
@@ -103,6 +136,8 @@ export const CODEX_MODEL_CATALOG = [
     defaultReasoningEffort: 'medium',
     reasoningProfile: 'standard',
     supportsReasoningSummary: true,
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
   },
   {
     id: 'gpt-5.4',
@@ -195,6 +230,35 @@ export function codexModelSupportsImageInput(model: string): boolean {
 
 export function codexModelSupportsReasoningSummary(model: string): boolean {
   return resolveCodexCatalogEntry(model).supportsReasoningSummary
+}
+
+/**
+ * One catalog entry by exact id, or undefined when this table has no record.
+ *
+ * Deliberately NOT {@link resolveCodexCatalogEntry}, which answers an unknown id
+ * with the default entry: that substitution is the right guide for a model whose
+ * capabilities only need a sensible floor, but it cannot tell "this model
+ * declares verbosity support" apart from "nobody said". A wire field must not be
+ * invented from silence.
+ */
+function codexCatalogEntryById(model: string): CodexModelCatalogEntry | undefined {
+  return CODEX_MODEL_CATALOG.find((entry) => entry.id === model)
+}
+
+/**
+ * Verbosity to send when the user has not chosen one.
+ *
+ * "Follow the provider" has to mean what the provider's own client sends. The
+ * official catalog declares `default_verbosity: "low"` for every model it
+ * lists, so the answer is low — not the server's implicit medium, which is what
+ * omitting the field gets.
+ *
+ * @returns the verbosity to send, or `undefined` to omit the field entirely.
+ */
+export function codexDefaultOutputVerbosity(model: string): CodexOutputVerbosity | undefined {
+  const entry = codexCatalogEntryById(model)
+  if (entry?.supportsOutputVerbosity !== true) return undefined
+  return entry.defaultOutputVerbosity ?? 'low'
 }
 
 /**

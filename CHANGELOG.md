@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **修复 Codex 线路「跟随官方」名不副实：两个读取参数默认值与官方客户端不一致，其中一项持续多花额度**（用户报告：近期更新后额度消耗变快）。
+  - **取证**：以订阅目录 `GET /backend-api/codex/models` 为准，并与本机官方 Codex CLI 的权威产物逐字核对——随包的 `codex-rs/models-manager/models.json`、账号级 cache（`~/.codex/models_cache.json`），以及官方真实会话的 rollout。三处一致：**每个模型都声明 `default_reasoning_summary: "none"`、`default_verbosity: "low"`、`support_verbosity: true`**。官方 `client.rs` 的 `build_responses_request` 也正是这么发的：`default_reasoning_summary != None` 才带 `summary`，`default_verbosity` 每轮都参与 `create_text_param_for_request`。
+  - **缺口一（省钱）**：`responses-mapper.ts` 在未配置时发 `{ summary: 'auto' }`，而官方默认是 `none`。**推理摘要是计费生成**——模型要先把思考写成摘要，这部分计入输出。一个从未打开该设置的用户，因此每轮都在花官方客户端从不花的那一块。现在：未配置或选「无」一律**省略 `summary` 字段**（与官方 `skip_serializing_if = "Option::is_none"` 同形）；显式选择 `auto`/`concise`/`detailed` 仍照发。
+    - 顺带修掉一个真实浪费：此前选「无」会发 `summary: 'none'`，那是让后端**先生成再丢弃**——官方表达「不要摘要」的方式是根本不发该字段。
+  - **缺口二（体验，方向相反）**：未配置时本插件**整个不发 `text`**，而官方每轮发 `default_verbosity`（`low`）。省略该字段时服务端套用**隐含的 `medium`**，所以一个从未打开该设置的用户拿到的是比官方客户端更啰嗦的回答——这解释了为何「按默认」反而不简洁。现在未配置时按目录发 `low`。
+  - **不凭沉默放宽**：新增 `codexCatalogEntryById()`，与 `resolveCodexCatalogEntry()` 分开——后者对未知模型回落到默认条目，那是「给一个合理下限」的正确做法，但**无法区分「该模型声明支持」与「没人说过」**。`text` 只对显式声明 `supportsOutputVerbosity` 的模型发送，未知模型照旧省略，不会强加一个可能被拒收的字段。
+  - **测试**：新增 `test/codex-official-defaults.test.ts` 5 条，把官方目录的事实钉住——默认省略摘要、显式选择仍然发送、默认发 `low` 详细程度、GPT-6 全家族都声明了详细程度支持（新增模型漏声明会失败）、未知模型不得凭空得到该字段。已实测**承重**：把 `summary: 'auto'` 改回去，第一条立即以 `expected { effort: 'high', summary: 'auto' } to deeply equal { effort: 'high' }` 失败。既有 `responses-mapper` 13 处断言按官方契约更新（其中 4 处正是编码旧默认值的）。
+  - **未在真实订阅账号上做端到端额度对比**：结论来自官方目录/源码/rollout 的逐字核对与本地报文断言，未测量真实会话前后额度曲线。
+- **修复 Command Code 线路新模型没有思考等级（用户报告：`deepseek/deepseek-v4.1-flash-fast` 只有模型名，选不了思考程度）**。
+  - **根因**：能力表（`src/host/command-code/model-catalog.ts`）是**手工转抄**官方 CLI 注册表的一份快照，而官方注册表已经扩到 **92 条**、实时 `/provider/v1/models` 也在服务这些 id，本文件的转抄却停在 **74 条**。适配器对表里没有的 id 不是「不知道」而是走保守回落——**纯文本 + 空思考等级**，于是这些真实模型同时**丢掉图片输入**、并让 `resolveModel` 返回的 `reasoning` 整个缺失，模型选择器因此不再渲染 Effort 行。
+  - **不是这一个模型的问题**：同一根因造成 **16 个**正在被服务的 id 一起缺档，包括 `gpt-6-sol` / `gpt-6-luna` / `gpt-6.1-sol`、`claude-sonnet-5-5`、`claude-opus-5-5`、`xai/grok-4.7`、`z-ai/glm-5.3-flashx`、`xiaomi/mimo-v2.6-*`、`Qwen/Qwen3.8-Omni-Flash`、`stepfun/Step-5-Preview`、`stealth/space-bunny-alpha`、`inclusionai/ling-3.1-flash:free`、`meituan/LongCat-2.0`；用户报的 `deepseek/deepseek-v4.1-flash-fast` 只是其中一个。另外 4 条已有模型（`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`deepseek-v4.1-flash`）的等级也少报了一档。
+  - **修法**：按官方 CLI 的注册表**重抄整张表**（92 条含 7 条 CLI 隐藏、但本插件不隐藏的免费位；实际服务 85 条，与实时目录逐一核对，context window 完全一致），并**补上此前遗漏的两档**：`z-ai/glm-5.3-flash`、`z-ai/glm-5.3-flashx`、`Qwen/Qwen3.8-27B` 等注册表明写的 `maxTokens` 现在如实落到表里；模型的 `name` 也按 CLI 注册表逐条校正（`gpt-6-astra` 等）。
+  - **`off` 不再原样透传**：注册表把「不思考」这一档命名为 `off`，DSH 的词汇是 `none`（Kimi / Claude 线路早就这么写）。现在 `reasoningEffortsFor()` 在**读**的时候把 `off` 翻成 `none`，表本身保持对来源的忠实转抄；新增 `wireReasoningEffort()` 在两个请求构建器里把 `none` **从报文中彻底删掉**——这条线路表达「不思考」的方式是**不发该字段**（官方 CLI 的 `thinkingHook` 对 `off` 正是直接 return），而不是发一个上游不认识的字面量。为此 `COMMAND_CODE_REASONING_EFFORTS` 增加 `none`，设置卡的默认等级下拉多一项「Off」。
+  - **顺手堵住一个会让用户 400 的缺口**：设置卡只提供**一条**全线路默认等级，而不同模型的可用档位不同（如 `gpt-5.4-mini` 没有 `xhigh`）。此前这个默认值被无条件写进每一轮请求，**为 A 模型选的档用在 B 模型上会被上游拒收**。现在 `adapter.stream()` 检查当前模型公布的档位，不在其中就退回模型自身默认，而不是把无效值发出去。
+  - **测试**：`command-code-routes` 新增「覆盖实时目录的模型」（锁住这次遗漏的 11 个 id，再出现同样漏抄会在这里失败）与「`none` 绝不上线」（`none`/`off`/`null`/`''` 全部不产生字段，`low`/`max` 照常发送）；`command-code-adapter` 新增 fast 变体与 GPT-6 兄弟型号的等级断言；`command-code-mapper` 新增「关闭思考时两种协议都不得出现 reasoning 字段」。已核对**承重**：把 `wireReasoningEffort` 的 `none` 分支拿掉后，mapper 用例立即失败。
+  - **验证**：`tsc -b --force` 与 test tsconfig 均 0 错误；全量 **1929 passed** / 7 skipped，**0 失败**；`npm run build` 干净，并在**构建产物** `lib/index.js` 上直接跑 `resolveModel('deepseek/deepseek-v4.1-flash-fast')`，确认从「无 `reasoning` 字段」变为 `['none','low','high','max']`。
+  - **未在真实订阅账号上端到端复验**：等级表来自官方 CLI 注册表与实时目录的静态核对，未用真实凭据实际发过一轮 `reasoning_effort: 'none'` 请求确认上游接受「省略该字段」这一写法（官方 CLI 如此发送，是当前最强的行为依据）。
+
 - **修复 Codex 订阅线路对话每轮 400：上游拒收 `max_output_tokens`**（[issue #29](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29)，实测账号 `plus`、模型 `gpt-6-sol` / `gpt-6.1-sol`）。
   - **根因**：`responses-mapper.ts` 的 `buildResponsesPayload()` 在调用方未指定 `maxTokens` 时也会补上 `codexModelMaxTokens(model)`，因此**每一轮对话报文都带 `max_output_tokens`**；而订阅版 Responses 端点对部分账号/模型直接以 `400 {"detail":"Unsupported parameter: max_output_tokens"}` 拒收。这与 [#28](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/28) 的 `/alpha/search` 是**两个不同端点上的同一个错误结论**：当时认定「只有搜索端点拒收该字段，对话端点合法地发送它」，报告者的对照实验推翻了它——只删掉这个字段、账号/模型/代理都不动，对话即恢复。
   - **不是配置问题**：错误文案 `Codex request failed (400): …` 由 `responses-client.ts` 的 `responseError()` 产出（搜索侧是 `Codex subscription search failed (400).`），错误码 `PROVIDER_ERROR`，指向对话链路；报告者在 0.10.15 的打包产物里定位到两个发送点，删除对话侧的那两行并重启 host 后 400 消失。

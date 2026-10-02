@@ -12,6 +12,7 @@ import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-
  * string values, so this nested table lives with the control that renders it.
  */
 const EFFORT_LABELS: Record<CommandCodeReasoningEffort, string> = {
+  none: 'Off',
   minimal: 'Minimal',
   low: 'Low',
   medium: 'Medium',

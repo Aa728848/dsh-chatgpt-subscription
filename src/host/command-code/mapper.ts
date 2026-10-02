@@ -21,7 +21,7 @@ import {
 } from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
-import { anthropicThinkingBudget, maxOutputTokensFor } from './types.ts'
+import { anthropicThinkingBudget, maxOutputTokensFor, wireReasoningEffort } from './types.ts'
 import type { CommandCodeWire } from '../../shared/command-code-contracts.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -473,7 +473,9 @@ export function buildOpenAIRequest(
     messages.push({ role: 'user', content })
   }
 
-  const effort = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
+  // `none` is expressed by omitting the field on this wire; Command Code has no
+  // `off`/`none` reasoning_effort level to send.
+  const effort = wireReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
   const body: Record<string, unknown> = {
     model: options.model,
@@ -612,8 +614,11 @@ export function buildAnthropicRequest(
 
   const system = leadingSystemText(options)
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
-  const effort = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
-  const budget = thinkingBudgetFor(effort, maxTokens)
+  // A disabled-thinking level arrives as `none`/`off` and must not become a
+  // thinking budget: omitting `thinking` entirely is how this wire says "do not
+  // think".
+  const requestEffort = wireReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
+  const budget = thinkingBudgetFor(requestEffort, maxTokens)
 
   return {
     model: options.model,

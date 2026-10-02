@@ -25,7 +25,9 @@ import {
   reasoningEffortsFor,
   resolveApiEnv,
   wireForModel,
+  wireReasoningEffort,
 } from '../src/host/command-code/types.ts'
+import { commandCodeModelDef } from '../src/host/command-code/model-catalog.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -75,8 +77,11 @@ describe('Command Code wire routing', () => {
   })
 
   it('advertises exactly the reasoning levels the registry declares', () => {
-    expect(reasoningEffortsFor('deepseek/deepseek-v4.1-flash')).toEqual(['low', 'high', 'max'])
-    expect(reasoningEffortsFor('deepseek/deepseek-v4-flash')).toEqual(['high', 'max'])
+    // The registry's `off` level is translated to DSH's `none`; a value DSH
+    // cannot name would never match the picker's selection.
+    expect(reasoningEffortsFor('deepseek/deepseek-v4.1-flash')).toEqual(['none', 'low', 'high', 'max'])
+    expect(reasoningEffortsFor('deepseek/deepseek-v4-flash')).toEqual(['none', 'high', 'max'])
+    expect(reasoningEffortsFor('deepseek/deepseek-v4-flash-fast')).toEqual(['low', 'high', 'max'])
     expect(reasoningEffortsFor('claude-sonnet-4-6')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
     expect(reasoningEffortsFor('gpt-5.6-sol')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
     expect(reasoningEffortsFor('gpt-5.4-mini')).toEqual(['low', 'medium', 'high'])
@@ -84,6 +89,33 @@ describe('Command Code wire routing', () => {
     expect(reasoningEffortsFor('moonshotai/Kimi-K3')).toEqual(['low', 'high', 'max'])
     expect(reasoningEffortsFor('claude-haiku-4-5-20251001')).toEqual([])
     expect(reasoningEffortsFor('some/future-model')).toEqual([])
+  })
+
+  it('covers every model the live catalog serves', () => {
+    // The bug behind the report was a stale table, not a mapping error: an id
+    // the table omits silently loses its modalities AND its ladder. This locks
+    // the shape rather than the exact membership — the live listing is fetched
+    // at runtime and cannot be asserted offline — so the next omission fails
+    // here instead of in the model picker.
+    for (const id of [
+      'claude-sonnet-5-5', 'claude-opus-5-5', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol',
+      'deepseek/deepseek-v4.1-flash-fast', 'z-ai/glm-5.3-flashx', 'xai/grok-4.7',
+      'stealth/space-bunny-alpha', 'Qwen/Qwen3.8-Omni-Flash', 'stepfun/Step-5-Preview',
+    ]) {
+      expect(commandCodeModelDef(id), id).toBeDefined()
+    }
+  })
+
+  it('never puts the disabled-thinking level on the wire', () => {
+    // Command Code expresses "do not think" by omitting the field; it has no
+    // `none` (nor DSH's `off`) reasoning_effort level to send.
+    expect(wireReasoningEffort(undefined)).toBeUndefined()
+    expect(wireReasoningEffort(null)).toBeUndefined()
+    expect(wireReasoningEffort('')).toBeUndefined()
+    expect(wireReasoningEffort('none')).toBeUndefined()
+    expect(wireReasoningEffort('off')).toBeUndefined()
+    expect(wireReasoningEffort('low')).toBe('low')
+    expect(wireReasoningEffort('max')).toBe('max')
   })
 
   it('resolves the API deployment from the environment seam', () => {
