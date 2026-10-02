@@ -15,7 +15,7 @@ import type { CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { normalizeGenerateOptions } from './common/llm-compat.ts'
-import { CODEX_TURN_STATE_HEADER, codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
+import { CODEX_TURN_STATE_HEADER, authOwnerKey, codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
@@ -25,8 +25,14 @@ const MAX_VISIBLE_REASONING_CHARS = 12_000
 const DEFAULT_POOL_COOLDOWN_MS = 15 * 60_000
 const REASONING_DELTA_FLUSH_CHARS = 768
 const REASONING_TRUNCATED_NOTICE = '\n\n[Reasoning summary truncated to keep the DSH web UI responsive.]'
-/** Cap on conversations whose turn state is remembered at once. */
+/** Cap on live turns whose routing state is remembered at once. */
 const MAX_TRACKED_TURN_STATES = 200
+
+/** Routing state for one turn, plus the auth owner allowed to replay it. */
+interface TurnStateEntry {
+  value: string
+  owner: string
+}
 
 export interface ResponsesClientOptions {
   fetchFn?: FetchLike
@@ -50,12 +56,17 @@ export class ResponsesClient {
    * Opaque backend turn state, keyed by conversation session id.
    *
    * The Codex backend hands `x-codex-turn-state` back on each response and
-   * expects it on the next request of the same conversation, which lets it
-   * resume the turn instead of re-ingesting the whole history. The value is
-   * short-lived and account-scoped, so it is stored per session and simply
-   * dropped when the backend stops sending it — never a correctness input.
+   * expects it on the next request of the SAME turn, which lets it resume the
+   * turn instead of re-ingesting the whole history.
+   *
+   * It is a client/server contract with a one-turn scope: the official client
+   * creates a fresh per-turn session and warns that replaying the token across
+   * turns breaks routing. The value is also account-scoped, so each entry
+   * records the auth owner that minted it and is discarded when the signer
+   * changes. It is only ever an optimization, so a miss costs a full resend and
+   * never correctness.
    */
-  private readonly turnStates = new Map<string, string>()
+  private readonly turnStates = new Map<string, TurnStateEntry>()
   constructor(
     private readonly oauth: OAuthService,
     private readonly attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
@@ -76,6 +87,10 @@ export class ResponsesClient {
     const options = normalizeGenerateOptions(rawOptions)
     const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
+    // One model call is one turn for routing purposes: it is the unit that gets a
+    // routing token back and the unit that may retry. The tool loop issues one
+    // call per step, which is exactly the granularity this header is scoped to.
+    const turnKey = `${sessionId}#${turnOrdinal(options)}`
     let currentModel = options.model
     let attemptOptions = options
     let response: Response | undefined
@@ -93,7 +108,7 @@ export class ResponsesClient {
         promptCacheKeyFor(sessionId),
       )
       try {
-        response = await this.send(payload, sessionId, options.signal)
+        response = await this.send(payload, sessionId, turnKey, options.signal)
         break
       } catch (error) {
         if (error instanceof LlmError && (error.code === 'NOT_FOUND' || (error as unknown as { status?: number }).status === 404)) {
@@ -117,51 +132,88 @@ export class ResponsesClient {
         'Codex',
       )
     } finally {
+      // A turn's routing state outlives nothing: the next model call is a new
+      // turn with its own key, and the cache key (per session) is unchanged.
+      this.turnStates.delete(turnKey)
       this.onGenerationFinished()
     }
   }
 
-  private async send(payload: Record<string, unknown>, sessionId: string, signal?: AbortSignal): Promise<Response> {
-    if (this.accountPool !== null) return this.sendWithPool(payload, sessionId, signal)
+  private async send(
+    payload: Record<string, unknown>,
+    sessionId: string,
+    turnKey: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    if (this.accountPool !== null) return this.sendWithPool(payload, sessionId, turnKey, signal)
     let credentials = await this.oauth.credentials()
-    let response = await this.request(payload, credentials, sessionId, signal)
+    let response = await this.request(payload, credentials, sessionId, turnKey, signal)
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined)
       credentials = await this.oauth.credentials(true)
-      response = await this.request(payload, credentials, sessionId, signal)
+      response = await this.request(payload, credentials, sessionId, turnKey, signal)
     }
     if (!response.ok) throw await responseError(response)
-    this.rememberTurnState(response, sessionId)
+    this.rememberTurnState(response, turnKey, credentials)
     return response
   }
 
   /**
-   * Record the turn state a response carried, for the next turn of this session.
+   * Record the routing state a response carried, for this turn's next request.
    *
    * A response that carries none clears any stored value: a backend that stops
    * sending the header has stopped honouring it, and replaying a stale value
    * would be guessing. An empty header is treated the same as absent.
    */
-  private rememberTurnState(response: Response, sessionId: string): void {
+  private rememberTurnState(
+    response: Response,
+    turnKey: string,
+    credentials: Awaited<ReturnType<OAuthService['credentials']>>,
+  ): void {
     const next = response.headers.get(CODEX_TURN_STATE_HEADER)?.trim()
-    if (next === undefined || next === '') this.turnStates.delete(sessionId)
-    else this.storeTurnState(sessionId, next)
+    if (next === undefined || next === '') this.turnStates.delete(turnKey)
+    else this.storeTurnState(turnKey, next, credentials)
   }
 
   /**
-   * Bounded store: a long-lived host serves many sessions, and nothing here ever
-   * signals that a session ended, so the map is capped and evicts the oldest
-   * entry. The value is an optimization, so a miss only costs a full resend.
+   * Bounded store: a long-lived host serves many sessions and turns, and nothing
+   * here ever signals that either ended, so the map is capped and evicts the
+   * oldest entry. The value is an optimization, so a miss only costs a resend.
    */
-  private storeTurnState(sessionId: string, value: string): void {
+  private storeTurnState(
+    turnKey: string,
+    value: string,
+    credentials: Awaited<ReturnType<OAuthService['credentials']>>,
+  ): void {
     // Re-inserting an existing key must refresh its age, so delete before set.
-    this.turnStates.delete(sessionId)
-    this.turnStates.set(sessionId, value)
+    this.turnStates.delete(turnKey)
+    this.turnStates.set(turnKey, { value, owner: authOwnerKey(credentials) })
     while (this.turnStates.size > MAX_TRACKED_TURN_STATES) {
       const oldest = this.turnStates.keys().next()
       if (oldest.done === true) break
       this.turnStates.delete(oldest.value)
     }
+  }
+
+  /**
+   * Routing state this turn may replay, or undefined.
+   *
+   * A token minted by a different auth owner is dropped rather than sent: the
+   * value is account-scoped, and sending it to another account is at best a
+   * routing hint for the wrong machine and at worst a replay of state that
+   * account never issued. Dropping it only costs a full resend.
+   */
+  private turnStateFor(
+    turnKey: string,
+    credentials: Awaited<ReturnType<OAuthService['credentials']>>,
+  ): string | undefined {
+    const entry = this.turnStates.get(turnKey)
+    if (entry === undefined) return undefined
+    if (entry.owner !== authOwnerKey(credentials)) {
+      this.turnStates.delete(turnKey)
+      return undefined
+    }
+    return entry.value
   }
 
   /**
@@ -174,19 +226,24 @@ export class ResponsesClient {
    * refresh is rejected leaves the rotation instead of invalidating the others.
    * The payload is account-independent, so it is never rebuilt between attempts.
    */
-  private async sendWithPool(payload: Record<string, unknown>, sessionId: string, signal?: AbortSignal): Promise<Response> {
+  private async sendWithPool(
+    payload: Record<string, unknown>,
+    sessionId: string,
+    turnKey: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const pool = this.accountPool!
     const tried = new Set<string>()
     while (true) {
       const { account, credentials } = await pool.getEffectiveAccount(tried, this.fetchFn)
       tried.add(account.id)
 
-      let response = await this.request(payload, credentials, sessionId, signal)
+      let response = await this.request(payload, credentials, sessionId, turnKey, signal)
       if (response.status === 401) {
         await response.body?.cancel().catch(() => undefined)
         try {
           const refreshed = await pool.refreshAccountNow(account.id)
-          response = await this.request(payload, refreshed, sessionId, signal)
+          response = await this.request(payload, refreshed, sessionId, turnKey, signal)
         } catch (error) {
           await pool.markAuthFailed(
             account.id,
@@ -207,7 +264,7 @@ export class ResponsesClient {
         })
       }
       if (!response.ok) throw await responseError(response)
-      this.rememberTurnState(response, sessionId)
+      this.rememberTurnState(response, turnKey, credentials)
       return response
     }
   }
@@ -216,13 +273,14 @@ export class ResponsesClient {
     payload: Record<string, unknown>,
     credentials: Awaited<ReturnType<OAuthService['credentials']>>,
     sessionId: string,
+    turnKey: string,
     signal?: AbortSignal,
   ): Promise<Response> {
     try {
       return await this.fetchFn(CODEX_RESPONSES_URL, {
         method: 'POST',
         headers: {
-          ...codexHeaders(credentials, sessionId, { turnState: this.turnStates.get(sessionId) }),
+          ...codexHeaders(credentials, sessionId, { turnState: this.turnStateFor(turnKey, credentials) }),
           'content-type': 'application/json',
           accept: 'text/event-stream',
         },
@@ -246,6 +304,19 @@ export class ResponsesClient {
  */
 function promptCacheKeyFor(sessionId: string): string {
   return sessionId
+}
+
+/**
+ * Position of this model call within its conversation.
+ *
+ * The harness passes no turn id, and one cannot be derived from message text
+ * without guessing, so the call's own position in the request is the turn
+ * identity. It is stable across the retries and model fallbacks of one call
+ * (the same history is resent) and differs for the next step of a tool loop
+ * (the history grew), which is exactly the scope the routing header has.
+ */
+function turnOrdinal(options: { messages: readonly unknown[] }): number {
+  return options.messages.length
 }
 
 interface ToolState {

@@ -316,10 +316,10 @@ describe('Responses conversation continuity', () => {
     await collect(client.stream(options))
     await collect(client.stream(options))
 
-    // The first turn has nothing to replay; the second carries what the first
-    // response handed back.
+    // Routing state is scoped to one turn, so a later turn never receives the
+    // previous turn's token; the cache key is the per-conversation part.
     expect(seen[0]!.turnState).toBeNull()
-    expect(seen[1]!.turnState).toBe('turn-abc')
+    expect(seen[1]!.turnState).toBeNull()
     // A cache key is present on both turns and identical across them, which is
     // what makes the prefix reusable.
     expect(typeof seen[0]!.body.prompt_cache_key).toBe('string')
@@ -368,7 +368,9 @@ describe('Responses conversation continuity', () => {
     await collect(client.stream(options))
     await collect(client.stream(options))
 
-    expect(turnStates).toEqual([null, 'turn-abc', null])
+    // With nothing left to replay, a later turn simply sends no token: the old
+    // cross-turn carry-over is gone, so only the opt-in retry path can resend it.
+    expect(turnStates).toEqual([null, null, null])
   })
 })
 

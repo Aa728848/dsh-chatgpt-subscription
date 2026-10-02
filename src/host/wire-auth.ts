@@ -6,10 +6,16 @@ import type { StoredOAuthCredentials } from './token-store.ts'
 /**
  * Turn-state header the Codex backend hands back on a responses response.
  *
- * The official CLI reads it and echoes it on the next request of the same
- * conversation; the backend uses it to resume instead of re-ingesting the
- * whole history. It is opaque, short-lived and account-scoped, so it is
- * threaded through rather than computed (see `responses-client.ts`).
+ * The official CLI reads it and echoes it on the SAME TURN's next request — a
+ * retry, an incremental append or a continuation — and the backend uses it to
+ * resume instead of re-ingesting the whole history.
+ *
+ * Its scope is exactly one turn. The official client builds a fresh per-turn
+ * session and documents that reusing one across turns violates the
+ * client/server contract and can cause routing bugs; the token is also
+ * account-scoped and is discarded when auth ownership changes. It is opaque,
+ * short-lived, and threaded through rather than computed (see
+ * `responses-client.ts`).
  */
 export const CODEX_TURN_STATE_HEADER = 'x-codex-turn-state'
 
@@ -35,6 +41,22 @@ export function codexHeaders(
     ...(sessionId ? { 'session-id': sessionId } : {}),
     ...(options.turnState ? { [CODEX_TURN_STATE_HEADER]: options.turnState } : {}),
   }
+}
+
+/**
+ * Opaque local identity of whoever signs a request.
+ *
+ * Turn state is account-scoped, so the client has to detect when the signer
+ * changed without ever putting that fact on the wire. The digest is computed
+ * and compared locally: it is not a header, not a credential, and never logged.
+ */
+export function authOwnerKey(credentials: StoredOAuthCredentials): string {
+  return createHash('sha256')
+    .update(credentials.accountId ?? '')
+    .update('\0')
+    .update(credentials.accessToken)
+    .digest('hex')
+    .slice(0, 32)
 }
 
 export function stableSessionId(value: string | undefined): string {
