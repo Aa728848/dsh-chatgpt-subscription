@@ -11,7 +11,7 @@ import {
 import { CODEX_RESPONSES_URL } from '../compat.ts'
 import { resolveCodexFallbackModel } from '../shared/model-catalog.ts'
 import { wrapStreamWithWatchdog } from './common/idle-watchdog.ts'
-import type { CodexAccountPool } from './codex-account-pool.ts'
+import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
 import { normalizeGenerateOptions } from './common/llm-compat.ts'
@@ -135,6 +135,8 @@ export class ResponsesClient {
       // A turn's routing state outlives nothing: the next model call is a new
       // turn with its own key, and the cache key (per session) is unchanged.
       this.turnStates.delete(turnKey)
+      // The stream is over, so this turn no longer occupies the account.
+      for (const release of this.pendingReleases.splice(0)) release()
       this.onGenerationFinished()
     }
   }
@@ -226,6 +228,7 @@ export class ResponsesClient {
    * refresh is rejected leaves the rotation instead of invalidating the others.
    * The payload is account-independent, so it is never rebuilt between attempts.
    */
+  /** What one pool attempt produced, including the account that served it. */
   private async sendWithPool(
     payload: Record<string, unknown>,
     sessionId: string,
@@ -237,37 +240,72 @@ export class ResponsesClient {
     while (true) {
       const { account, credentials } = await pool.getEffectiveAccount(tried, this.fetchFn)
       tried.add(account.id)
-
-      let response = await this.request(payload, credentials, sessionId, turnKey, signal)
-      if (response.status === 401) {
-        await response.body?.cancel().catch(() => undefined)
-        try {
-          const refreshed = await pool.refreshAccountNow(account.id)
-          response = await this.request(payload, refreshed, sessionId, turnKey, signal)
-        } catch (error) {
-          await pool.markAuthFailed(
-            account.id,
-            error instanceof Error ? error.message : 'ChatGPT sign-in expired.',
-          ).catch(() => undefined)
-          if (await pool.hasAnotherAvailableAccount(tried)) continue
-          throw new LlmError('ChatGPT sign-in has expired. Sign in again.', 'AUTH', { status: 401, cause: error })
+      // One slot per in-flight request on this account. A subagent fan-out is what
+      // reaches a plan's concurrency bound, so the cap is held here, before the
+      // request goes out, and released when the turn ends rather than when the
+      // headers arrive: a stream still running is still work the account is doing.
+      const release = await chatGPTConcurrency().acquire(account.id, signal)
+      let held = true
+      const free = (): void => {
+        if (!held) return
+        held = false
+        release()
+      }
+      try {
+        let response = await this.request(payload, credentials, sessionId, turnKey, signal)
+        if (response.status === 401) {
+          await response.body?.cancel().catch(() => undefined)
+          try {
+            const refreshed = await pool.refreshAccountNow(account.id)
+            response = await this.request(payload, refreshed, sessionId, turnKey, signal)
+          } catch (error) {
+            await pool.markAuthFailed(
+              account.id,
+              error instanceof Error ? error.message : 'ChatGPT sign-in expired.',
+            ).catch(() => undefined)
+            free()
+            if (await pool.hasAnotherAvailableAccount(tried)) continue
+            throw new LlmError('ChatGPT sign-in has expired. Sign in again.', 'AUTH', { status: 401, cause: error })
+          }
         }
+        if (response.status === 429) {
+          const after = retryAfterMs(response.headers)
+          await response.body?.cancel().catch(() => undefined)
+          // A 429 taken while other of our requests are still running on this
+          // account is evidence about its concurrency, not only about its quota,
+          // so the cap drops to what actually succeeded here. A lone request
+          // being rate limited teaches nothing about concurrency, so that case
+          // leaves the cap untouched.
+          if (chatGPTConcurrency().inFlight(account.id) > 1) {
+            chatGPTConcurrency().setLimit(account.id, chatGPTConcurrency().inFlight(account.id) - 1)
+          }
+          await pool.markCooldown(account.id, after ?? DEFAULT_POOL_COOLDOWN_MS, 'Codex 429').catch(() => undefined)
+          free()
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+          throw new LlmError('Codex rate limit reached.', 'RATE_LIMIT', {
+            status: 429,
+            ...(after === undefined ? {} : { providerRetryAfterMs: after }),
+          })
+        }
+        if (!response.ok) {
+          const error = await responseError(response)
+          free()
+          throw error
+        }
+        this.rememberTurnState(response, turnKey, credentials)
+        // The body is still streaming, so the slot stays held; the turn releases
+        // it once this stream ends.
+        this.pendingReleases.push(free)
+        return response
+      } catch (error) {
+        free()
+        throw error
       }
-      if (response.status === 429) {
-        const after = retryAfterMs(response.headers)
-        await response.body?.cancel().catch(() => undefined)
-        await pool.markCooldown(account.id, after ?? DEFAULT_POOL_COOLDOWN_MS, 'Codex 429').catch(() => undefined)
-        if (await pool.hasAnotherAvailableAccount(tried)) continue
-        throw new LlmError('Codex rate limit reached.', 'RATE_LIMIT', {
-          status: 429,
-          ...(after === undefined ? {} : { providerRetryAfterMs: after }),
-        })
-      }
-      if (!response.ok) throw await responseError(response)
-      this.rememberTurnState(response, turnKey, credentials)
-      return response
     }
   }
+
+  /** Slots held for streams that are still running. */
+  private readonly pendingReleases: Array<() => void> = []
 
   private async request(
     payload: Record<string, unknown>,

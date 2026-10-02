@@ -15,6 +15,7 @@ import {
   type TokenStore,
 } from './token-store.ts'
 import { createPlatformTokenStore } from './platform-token-store.ts'
+import { ConcurrencyGate } from './common/concurrency-gate.ts'
 import { OAuthServiceError } from './oauth-service.ts'
 import type { AccountRotationStrategy, PoolAccountSummaryDto } from '../shared/account-pool-contracts.ts'
 
@@ -101,6 +102,19 @@ export interface CodexAccountPoolOptions {
  * hooks the core cannot know — how to refresh one account's tokens and which
  * accounts a cached quota window already rules out.
  */
+/**
+ * Per-account in-flight requests, shared by every ChatGPT request this host
+ * makes. A fan-out of subagents is what reaches a plan's concurrency bound, so
+ * the bound is enforced here rather than discovered by cooling every account at
+ * once. Limits are learned from upstream evidence (see
+ * {@link CodexAccountPool.noteConcurrencySignal}), never assumed.
+ */
+const concurrency = new ConcurrencyGate()
+
+export function chatGPTConcurrency(): ConcurrencyGate {
+  return concurrency
+}
+
 export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, CodexPoolAccount, PoolAccountSummaryDto> {
   private readonly refresherRef: { current?: CodexTokenRefresher }
   private readonly store: TokenStore
