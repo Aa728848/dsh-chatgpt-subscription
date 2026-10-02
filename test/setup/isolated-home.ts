@@ -28,6 +28,33 @@ const codeBuddyAuth = mkdtempSync(path.join(os.tmpdir(), 'dsh-test-codebuddy-aut
 process.env.CODEBUDDY_AUTH_DIR = codeBuddyAuth
 
 afterAll(() => {
-  rmSync(home, { recursive: true, force: true })
-  rmSync(codeBuddyAuth, { recursive: true, force: true })
+  removeTree(home)
+  removeTree(codeBuddyAuth)
 })
+
+/**
+ * Remove a temp tree, tolerating a peer still writing into it.
+ *
+ * These directories are shared by every test file in the run, and vitest tears
+ * each file down as it finishes rather than at the end of the run. A file whose
+ * store has not finished flushing therefore races the `rm` of whichever file
+ * happens to tear down first, and Linux surfaces that as
+ * `ENOTEMPTY: directory not empty, rmdir` - a failure in a test that passed,
+ * naming a directory no assertion ever mentions.
+ *
+ * The cleanup is a courtesy to the next run, not an assertion, so a tree that
+ * cannot be removed is left for the OS temp sweeper instead of failing the
+ * suite. Retrying briefly covers the ordinary case where the writer finishes a
+ * moment later.
+ */
+function removeTree(directory: string): void {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+      return
+    } catch {
+      // Busy on a shared temp dir: fall through and try again.
+    }
+  }
+  console.warn(`[test-setup] could not remove temp dir ${directory}; leaving it to the OS`)
+}
