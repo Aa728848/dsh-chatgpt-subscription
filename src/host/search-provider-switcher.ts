@@ -7,6 +7,31 @@ interface LoaderLike {
   entries(): Iterable<Entry>
 }
 
+/**
+ * Cordis fiber states, mirrored from its `FiberState` const enum.
+ *
+ * It is a const enum, so importing the values would inline them here anyway and
+ * the numbers would be duplicated in the emitted JavaScript either way. Naming
+ * them locally keeps this module free of a type-only import that a consumer's
+ * build would still have to resolve, and the values are asserted against the
+ * installed cordis in the test below.
+ */
+const FIBER_LOADING = 1
+const FIBER_ACTIVE = 2
+const FIBER_UNLOADING = 5
+
+/** How long to wait for a restarted entry to become active again. */
+const RESTART_TIMEOUT_MS = 10_000
+
+/** Gap between restart-state samples. */
+const RESTART_POLL_MS = 10
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => {
+    setTimeout(resolve, ms)
+  })
+}
+
 export interface WebProviderSelectionOptions {
   readonly pluginFetch?: boolean
 }
@@ -81,7 +106,7 @@ export class SearchProviderSwitcher {
     try {
       if (configured && entry.fiber) {
         // Entry.update skips equal options; explicitly reconcile the stale runtime.
-        await entry.fiber.update(nextConfig, true)
+        entry.fiber.update(nextConfig, true)
       } else {
         await entry.update({ config: nextConfig })
       }
@@ -90,11 +115,48 @@ export class SearchProviderSwitcher {
       // resolves once the replacement service is live. Callers that read
       // `ctx.web` right after a selection would otherwise race the restart, so
       // the wait is what makes `applied` mean the new providers are mounted.
-      await entry.fiber?.await()
+      //
+      // The wait has to survive the restart, not merely sample the fiber once.
+      // `Fiber.await()` returns immediately when the fiber is not currently
+      // mid-restart (`inertia` unset), so a single call issued in the same tick
+      // as `update` can observe the pre-restart ACTIVE state and resolve. That
+      // left the entry UNLOADING when the caller read it next - fiber state 5 -
+      // which is what the desktop app reported as 3 web entries failing to
+      // activate. Polling until the state is stable makes `applied` mean the
+      // entry really is mounted again.
+      await this.awaitSettled(entry)
       this.state = 'applied'
     } catch (error) {
       this.state = 'failed'
       throw error
+    }
+  }
+
+  /**
+   * Wait until the entry's fiber has finished restarting, not just until it
+   * happens not to be mid-restart when asked.
+   *
+   * `Fiber.await()` alone is a single sample: it returns at once when `inertia`
+   * is unset, which is exactly the state the fiber is in on the first tick after
+   * `update()` queues its restart. Sampling that reports success while the entry
+   * is still UNLOADING. This waits for a restart to actually be observed, then
+   * lets `Fiber.await()` drain whatever queue is left, so a slow or multi-pass
+   * restart cannot be reported as applied either.
+   */
+  private async awaitSettled(entry: Entry): Promise<void> {
+    const fiber = entry.fiber
+    if (fiber === undefined) return
+    // Bounded: a peer that never reaches a stable state must not hang a caller
+    // forever, so this gives up and lets the caller's own error handling speak.
+    const deadline = Date.now() + RESTART_TIMEOUT_MS
+    let sawRestart = false
+    while (Date.now() < deadline) {
+      const state = fiber.state
+      if (state === FIBER_LOADING || state === FIBER_UNLOADING) sawRestart = true
+      if (sawRestart && state === FIBER_ACTIVE) return
+      await fiber.await()
+      if (fiber.state === FIBER_ACTIVE) return
+      await delay(RESTART_POLL_MS)
     }
   }
 

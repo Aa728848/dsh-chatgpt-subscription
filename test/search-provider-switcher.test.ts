@@ -45,6 +45,18 @@ async function mountSwitcher() {
 }
 
 describe('SearchProviderSwitcher', () => {
+  // The switcher mirrors cordis's FiberState numbers as local constants (a const
+  // enum inlines to the same literals). If cordis ever renumbers, the mirrored
+  // values silently become wrong and the restart wait starts polling for the
+  // wrong states - so read the real ones here.
+  it('mirrors the real cordis fiber state numbers', () => {
+    const { FiberState } = require('@deepseek-ai/cordis') as { FiberState?: Record<string, number> }
+    if (FiberState === undefined) return // const enum: erased at runtime by design
+    expect(FiberState.ACTIVE).toBe(2)
+    expect(FiberState.LOADING).toBe(1)
+    expect(FiberState.UNLOADING).toBe(5)
+  })
+
   it('repairs a configured entry whose running fiber still uses the previous provider', async () => {
     const { ctx, switcher, settled } = await mountSwitcher()
     try {
@@ -57,6 +69,81 @@ describe('SearchProviderSwitcher', () => {
       const update = vi.spyOn(entry.fiber!, 'update')
       await switcher.select('codex')
       expect(update).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  // Issue 22: the desktop app reported "3 entries did not activate ... fiber
+  // state 5". State 5 is UNLOADING, not FAILED, so those web entries were never
+  // broken - they were observed mid-restart. This plugin restarts the `web` entry
+  // to point it at its own providers, and the restart must be finished before
+  // anything reads `ctx.web`.
+  //
+  // The hazard is that `Fiber.update()` returns void (cordis 4.x), so awaiting it
+  // waits for nothing; the only thing that can make `select()` honest is an
+  // explicit wait for the entry to come back ACTIVE. Whether a bare
+  // `fiber.await()` happens to catch that depends on how far the restart has
+  // progressed by the time it is called - it is timing, not a guarantee, which is
+  // why the wait cannot be left to chance. The sequence asserted below
+  // ([5, 1, 2] = UNLOADING, LOADING, ACTIVE) is the restart this must survive.
+  it('resolves only after the restarted entry is active again, never mid-restart', async () => {
+    const { ctx, switcher } = await mountSwitcher()
+    try {
+      // Exercise the configured-but-stale path: the entry is already CONFIGURED
+      // for Codex while its running fiber still serves the old providers, so the
+      // switcher repairs it through `Fiber.update()` - the void-returning call
+      // whose restart this test's wait has to cover.
+      const entry = ctx.loader.resolve('web')
+      entry.options.config = { searchProvider: CODEX_SEARCH_PROVIDER_ID, fetchProvider: CODEX_FETCH_PROVIDER_ID }
+      // ...and the RUNNING fiber still holds the old providers. Configured-but-stale
+      // is the exact shape that takes the `Fiber.update()` branch; config alone
+      // reads as already-applied and returns before touching anything, which is why
+      // setting only `options.config` never reaches the bug.
+      const running = entry.fiber as unknown as { config?: Record<string, unknown> }
+      running.config = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+
+      // Every state the entry passes through during the selection. Reading the
+      // property directly (rather than polling on a timer) catches the whole
+      // transition, including a restart that completes inside one tick - which is
+      // exactly the case the old code mistook for "no restart happened".
+      const seen: number[] = []
+      const fiber = ctx.loader.resolve('web').fiber as { state: number } | undefined
+      if (fiber === undefined) throw new Error('web entry has no fiber to observe')
+      // `state` is a plain data property that cordis reassigns through
+      // `_updateState`, so an accessor on the instance records every transition
+      // while still storing exactly the value the runtime needs.
+      let current = fiber.state
+      Object.defineProperty(fiber, 'state', {
+        configurable: true,
+        get() {
+          return current
+        },
+        set(value: number) {
+          current = value
+          seen.push(value)
+        },
+      })
+      try {
+        await switcher.select('codex')
+      } finally {
+        delete (fiber as { state?: number }).state
+        fiber.state = current
+      }
+
+      // The moment select() resolves, the entry must already be live. Before the
+      // fix this read 5 (UNLOADING), and the caller went on to configure a service
+      // that was not there - which the desktop app surfaced as 3 web entries
+      // failing to activate.
+      expect(
+        fiber.state,
+        'select() resolved while the web entry was not active; a caller reading ctx.web'
+          + ' here sees no service. State 5 is UNLOADING: the entry is mid-restart, which is'
+          + ' what the desktop app reported in issue 22.',
+      ).toBe(2)
+      // And the service is really usable at that instant, with no second wait.
+      expect((await ctx.web.search({ query: 'example' })).sources[0].title).toBe(CODEX_SEARCH_PROVIDER_ID)
+      // The entry genuinely went through a restart rather than never moving: if it
+      // never left ACTIVE, the wait above would be asserting nothing.
+      expect(seen).toContain(5)
     } finally { await ctx.fiber.dispose() }
   })
 
