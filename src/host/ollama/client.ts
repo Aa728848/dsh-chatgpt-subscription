@@ -38,10 +38,28 @@ export interface OllamaRequest {
   signal?: AbortSignal
 }
 
+/**
+ * Token accounting one completed turn reports.
+ *
+ * These are the counts Ollama's own OpenAPI documents on the chat response
+ * (`prompt_eval_count` and `eval_count`), so they measure what this key has
+ * actually spent rather than anything inferred from the text.
+ *
+ * They are NOT a quota. The service publishes no account limit, no remaining
+ * balance and no reset time anywhere in its API: upstream issues #15132 and
+ * #15663 asked for one and both were closed. So nothing here can say how much
+ * is left - only what has been consumed.
+ */
+export interface OllamaUsage {
+  inputTokens: number
+  outputTokens: number
+}
+
 export type OllamaStreamEvent =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; call: OllamaToolCall }
   | { type: 'done'; finishReason?: string }
+  | { type: 'usage'; usage: OllamaUsage }
   | { type: 'error'; message: string }
 
 export interface OllamaCallResult {
@@ -280,6 +298,11 @@ function parseOpenAIChunk(record: Record<string, unknown>, pending: Map<number, 
       events.push({ type: 'done', finishReason: entry.finish_reason })
     }
   }
+  // Read the counts off the terminal chunk, where OpenAI-compatible streams put
+  // them. Only the last chunk carries them, so taking them per-chunk would
+  // double-count every turn.
+  const usage = readUsage(record)
+  if (usage !== null) events.push({ type: 'usage', usage })
   return events
 }
 
@@ -296,7 +319,50 @@ function parseNativeChunk(record: Record<string, unknown>, pending: Map<number, 
     }
   }
   if (record.done === true) events.push({ type: 'done', finishReason: 'stop' })
+  // The native surface reports the same two counts by their own names, on the
+  // chunk it marks done.
+  const usage = readNativeUsage(record)
+  if (usage !== null) events.push({ type: 'usage', usage })
   return events
+}
+
+/**
+ * Read token counts off an OpenAI-compatible chunk.
+ *
+ * Ollama names them the OpenAI way here (`prompt_tokens` / `completion_tokens`),
+ * while the native surface uses `prompt_eval_count` / `eval_count`. Both are
+ * accepted on both paths because the service documents the native names in its
+ * own OpenAPI and an OpenAI-compatible alias in the compatibility layer, and a
+ * counter that silently read zero on the wrong surface would be worse than none.
+ *
+ * Returns null when the chunk carries neither pair, which is every content chunk.
+ */
+function readUsage(record: Record<string, unknown>): OllamaUsage | null {
+  const container = (typeof record.usage === 'object' && record.usage !== null
+    ? record.usage as Record<string, unknown>
+    : record)
+  const input = firstNumber(container, ['prompt_tokens', 'prompt_eval_count', 'input_tokens'])
+  const output = firstNumber(container, ['completion_tokens', 'eval_count', 'output_tokens'])
+  if (input === undefined && output === undefined) return null
+  return { inputTokens: input ?? 0, outputTokens: output ?? 0 }
+}
+
+/** The native surface's names, read from the chunk itself. */
+function readNativeUsage(record: Record<string, unknown>): OllamaUsage | null {
+  const input = firstNumber(record, ['prompt_eval_count', 'prompt_tokens', 'input_tokens'])
+  const output = firstNumber(record, ['eval_count', 'completion_tokens', 'output_tokens'])
+  if (input === undefined && output === undefined) return null
+  return { inputTokens: input ?? 0, outputTokens: output ?? 0 }
+}
+
+function firstNumber(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    // A count the service omits is unknown, not zero; a negative or non-finite
+    // value is a malformed response, and neither may lower a running total.
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.floor(value)
+  }
+  return undefined
 }
 
 /**

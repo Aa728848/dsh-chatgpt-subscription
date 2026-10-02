@@ -114,6 +114,58 @@ describe('Ollama account pool', () => {
     expect(parsed.rotationStrategy).toBe('round-robin')
   })
 
+  it('accumulates token counts across turns instead of replacing them', async () => {
+    const p = pool()
+    const account = await p.addAccount(a)
+    await p.recordUsage(account.id, 100, 20)
+    await p.recordUsage(account.id, 50, 5)
+    const [entry] = await p.listAccounts()
+    // A replace would show 50/5 after the second turn and lose the first
+    // entirely, which is the failure a running total must not have.
+    expect(entry?.usage).toMatchObject({ inputTokens: 150, outputTokens: 25, requestCount: 2 })
+  })
+
+  it('counts a turn that reported no tokens as no request at all', async () => {
+    // A 429 that returned no usage must not inflate the request count; the
+    // number answers how much this key has served, and nothing was served.
+    const p = pool()
+    const account = await p.addAccount(a)
+    await p.recordUsage(account.id, 0, 0)
+    const [entry] = await p.listAccounts()
+    expect(entry?.usage).toBeUndefined()
+  })
+
+  it('ignores usage for an account that no longer exists', async () => {
+    // The pool can be edited while a request is in flight; a late write must not
+    // throw or resurrect a deleted key.
+    const p = pool()
+    const account = await p.addAccount(a)
+    await p.deleteAccount(account.id)
+    await expect(p.recordUsage(account.id, 10, 10)).resolves.toBeUndefined()
+  })
+
+  it('drops a hand-edited counter block rather than trusting it', () => {
+    // A negative or partial total must not shrink the card on the next request.
+    const negative = parseOllamaPoolData({
+      version: 1,
+      rotationStrategy: 'sequential',
+      accounts: [{
+        id: 'x', alias: 'X', credentials: { apiKey: 'sk-x' },
+        usage: { inputTokens: -1, outputTokens: 5, requestCount: 1 },
+      }],
+    })
+    expect(negative.accounts[0]?.usage).toBeUndefined()
+    const partial = parseOllamaPoolData({
+      version: 1,
+      rotationStrategy: 'sequential',
+      accounts: [{
+        id: 'x', alias: 'X', credentials: { apiKey: 'sk-x' },
+        usage: { inputTokens: 10 },
+      }],
+    })
+    expect(partial.accounts[0]?.usage).toBeUndefined()
+  })
+
   it('refuses a pool document whose account has no key', () => {
     // A keyless account is unusable, and silently dropping it would look like a
     // pool that lost an account.

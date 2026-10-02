@@ -11,8 +11,11 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { OllamaSection } from '../src/client/ollama/OllamaSection.tsx'
 import { zh } from '../src/client/ollama/locales.ts'
+import type { OllamaWebStatus } from '../src/shared/ollama-contracts.ts'
 
-const STATUS = {
+// Typed as the status the host actually sends, so a fixture cannot quietly
+// omit a field the card depends on.
+const STATUS: OllamaWebStatus = {
   pool: {
     accounts: [
       { id: 'a1', alias: '主号', isPrimary: true, lastUsedAt: Date.now() - 1000 },
@@ -43,12 +46,20 @@ afterEach(() => {
   container = null
 })
 
-async function render(): Promise<HTMLDivElement> {
+async function renderWith(accounts = STATUS.pool.accounts): Promise<HTMLDivElement> {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+    ok: true,
+    value: { ...STATUS, pool: { ...STATUS.pool, accounts } },
+  })))
   const root = createRoot(container as HTMLDivElement)
   await act(async () => {
     root.render(<OllamaSection />)
   })
   return container as HTMLDivElement
+}
+
+async function render(): Promise<HTMLDivElement> {
+  return renderWith()
 }
 
 describe('OllamaSection', () => {
@@ -92,6 +103,18 @@ describe('OllamaSection', () => {
     // The form is closed until the user asks for it, and even then it is an empty
     // input - a stored key has no path into the DOM at all.
     expect(el.innerHTML).not.toContain('sk-')
+  })
+
+  it('shows each key own consumption, not a shared pool total', async () => {
+    const el = await renderWith([
+      { id: 'a1', alias: '主号', isPrimary: true, usage: { inputTokens: 1500, outputTokens: 250, requestCount: 4 } },
+      { id: 'a2', alias: '备用号', isPrimary: false },
+    ])
+    // A pool total would be wrong twice over: it hides which key is actually
+    // being used, and it reads like a quota the service does not publish.
+    expect(el.textContent).toContain('1.5K')
+    // The key that has served nothing says so rather than showing a zero.
+    expect(el.textContent).toContain(zh.usageNone)
   })
 
   it('reports the synced model count rather than an empty state', async () => {

@@ -52,12 +52,18 @@ export const zh = {
   limitNoStateful: '不支持 Responses 的有状态会话（仅无状态形式）。',
   limitNoWebSearch: '不支持通过 /v1/responses 使用内置联网搜索。',
   limitNoToolReplay: '不支持自定义工具调用的重放（replay）。',
-  limitUsage: 'Ollama 未提供程序可用的用量/配额 API，因此本卡片只显示状态与冷却，不显示用量数字。',
+  limitUsage: 'Ollama 没有配额/剩余额度 API（上游 issue #15132、#15663 均已关闭），所以只能显示「已消耗」，无法显示「剩余多少」。',
   wireNote: '请求默认走 OpenAI 兼容面（/v1），必要时回落到原生面（/api/chat）。',
 
   lastModel: '最近模型',
   keyCreated: '添加于',
   error: '操作失败：{detail}',
+  usageTitle: '累计消耗',
+  usageInput: '输入 {tokens}',
+  usageOutput: '输出 {tokens}',
+  usageRequests: '{count} 次请求',
+  usageNone: '尚无请求',
+  usageHint: '按 Ollama 每次响应自带的 token 计数本地累加。',
 } as const
 
 export const en = {
@@ -100,12 +106,18 @@ export const en = {
   limitNoStateful: 'No stateful Responses (stateless only).',
   limitNoWebSearch: 'No built-in web search through /v1/responses.',
   limitNoToolReplay: 'No replay of custom tool calls.',
-  limitUsage: 'Ollama exposes no programmatic usage/quota API, so this card shows status and cooldowns rather than usage numbers.',
+  limitUsage: 'Ollama has no quota or remaining-balance API (upstream issues #15132 and #15663 were both closed), so this card can show what has been consumed but not what is left.',
   wireNote: 'Requests use the OpenAI-compatible surface (/v1) and fall back to the native surface (/api/chat) when needed.',
 
   lastModel: 'Last model',
   keyCreated: 'Added',
   error: 'Action failed: {detail}',
+  usageTitle: 'Consumed so far',
+  usageInput: 'in {tokens}',
+  usageOutput: 'out {tokens}',
+  usageRequests: '{count} request(s)',
+  usageNone: 'No requests yet',
+  usageHint: 'Summed locally from the token counts Ollama returns on each response.',
 } as const
 
 // Same shape every other provider locale exports: the host selects the active

@@ -7,6 +7,20 @@ import { zh } from './locales.ts'
 
 const API = new OllamaApi()
 
+/**
+ * A token count short enough to sit in an account card.
+ *
+ * Exact below a thousand, then thousands, then millions. A six-figure number with
+ * no grouping is unreadable at card width, and these are running totals that only
+ * ever grow, so rounding is fine but commas are not optional.
+ */
+export function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '—'
+  if (value < 1_000) return String(Math.floor(value))
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}K`
+  return `${(value / 1_000_000).toFixed(1)}M`
+}
+
 interface Props {
   onModelChange?: () => void
   loadModelDirectory?: () => void
@@ -113,9 +127,19 @@ export function OllamaSection(props: Props): React.ReactElement {
           onClearCooldown={(id) => void run('clear-cooldown', () => API.accountAction('clear-cooldown', { accountId: id }))}
           onSetStrategy={(strategy: AccountRotationStrategy) =>
             void run('strategy', () => API.accountAction('strategy', { strategy }))}
-          renderDetails={(account) => (
-            <>{account.lastModelId !== undefined && <span>{t.lastModel}: {account.lastModelId}</span>}</>
-          )}
+          renderDetails={(account) => {
+            const usage = account.usage
+            return <>
+              {account.lastModelId !== undefined && <span>{t.lastModel}: {account.lastModelId}</span>}
+              {usage === undefined
+                ? <span>{t.usageNone}</span>
+                : <span>
+                  {t.usageInput.replace('{tokens}', formatTokens(usage.inputTokens))}
+                  {t.usageOutput.replace('{tokens}', formatTokens(usage.outputTokens))}
+                  {t.usageRequests.replace('{count}', String(usage.requestCount))}
+                </span>}
+            </>
+          }}
           renderLoginActions={() => (
             <div style={{ display: 'flex', gap: 8 }}>
               <button

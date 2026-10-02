@@ -8,10 +8,23 @@ import type { AccountPoolStatusDto, PoolAccountSummaryDto } from './account-pool
 // payload carrying invented plan or usage fields would claim something the
 // upstream cannot support.
 
+// What one pooled key has consumed, counted locally from the service's own
+// per-response token numbers. This is spend, not quota: Ollama publishes no
+// account limit or remaining balance anywhere in its API, so no figure here
+// can say how much is left.
+export interface OllamaUsageDto {
+  inputTokens: number
+  outputTokens: number
+  requestCount: number
+  /** Unix milliseconds the last completed turn was counted. */
+  lastCountedAt?: number
+}
+
 /** One account as the Ollama card renders it. Never carries the key. */
 export interface OllamaAccountSummaryDto extends PoolAccountSummaryDto {
-  /** Model this account last served, when the adapter recorded one. */
+  /** Model id this account last served, when the adapter recorded one. */
   lastModelId?: string
+  usage?: OllamaUsageDto
 }
 
 /** The whole pool slice the card needs. */

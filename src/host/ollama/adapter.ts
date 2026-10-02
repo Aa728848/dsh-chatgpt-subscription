@@ -219,6 +219,10 @@ export class OllamaAdapter extends LlmAdapter {
         openedStatus = value
       })
 
+      // Collected here and recorded only once the turn completes, so a stream
+      // that dies part-way does not leave a half-turn counted against the key.
+      let spent: { inputTokens: number; outputTokens: number } | null = null
+
       let failed = false
       for await (const event of call.events) {
         if (event.type === 'error') {
@@ -226,6 +230,10 @@ export class OllamaAdapter extends LlmAdapter {
           lastDetail = event.message
           failed = true
           break
+        }
+        if (event.type === 'usage') {
+          spent = event.usage
+          continue
         }
         if (event.type === 'text' || event.type === 'tool_call') {
           for (const chunk of applyEvent(state, event)) yield chunk
@@ -237,6 +245,11 @@ export class OllamaAdapter extends LlmAdapter {
         // Close whatever the stream left open before the turn ends, so a model
         // cut off mid-sentence still yields the text that did arrive.
         for (const chunk of closeStream(state)) yield chunk
+        // Counted against the key that actually served the turn, after it
+        // completed, and best-effort: a lost count must never fail a reply.
+        if (pool !== null && accountId !== undefined && spent !== null) {
+          await pool.recordUsage(accountId, spent.inputTokens, spent.outputTokens)
+        }
         return
       }
 
