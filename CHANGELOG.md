@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **修复 Antigravity Claude 普通文本回放碎片化**：不再把每个 SSE 文本 delta 回放成独立内容块，仅合并相邻纯文本 part，保留签名/工具/其他元数据边界，Gemini 不变。目标会话三个缓存断点前的回答分别含 385、365、20 个纯文本 part，离线重建均合并为 1 个且正文不变；这与 Claude 20-position 缓存回看限制吻合，但未进行线上缓存 A/B。旧会话无需改写；首次切换新编码可能重新预热缓存。
+
 - **修复 Antigravity Claude 多轮 400 `thinking.signature: Field required`**：回放时将连续思考分片和独立签名合并为签名完整的 thinking part；省略缺签名及跨模型 reasoning，保留正文和工具调用，Gemini 原始分片回放不变。修复作用于已有历史的请求转换，不改写会话记录。
 
 - **Antigravity 新增 Claude Opus 5.5 / Sonnet 5.5**：按实时 `fetchAvailableModels` 目录确认的 `-low` / `-medium` / `-high` 请求 ID 路由，提供三个推理档位，保留 4.6 与既有模型选择。窗口/输出上限暂沿用反重力 Claude 的 1M / 64K 默认值；未进行真实生成验证。已有用户需在 Antigravity 设置中勾选新模型。

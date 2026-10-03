@@ -389,7 +389,17 @@ function claudeReplayParts(parts: Array<Record<string, unknown>>): Array<Record<
     // Never borrow a tool/text signature for unsigned thinking, or send an
     // incomplete thinking block from interrupted/legacy history to Claude.
     pending = ''
-    if (part.thought !== true) result.push(part)
+    if (part.thought !== true) {
+      // SSE transport chunks are not semantic content blocks. Replaying each
+      // unsigned text delta separately can push the previous cache breakpoint
+      // outside Claude's 20-block lookback, even on the next immediate request.
+      // Restrict merging to pure text: signed/opaque parts retain boundaries.
+      const previous = result[result.length - 1]
+      const pureText = (value: Record<string, unknown> | undefined): boolean =>
+        value !== undefined && typeof value.text === 'string' && Object.keys(value).length === 1
+      if (pureText(part) && pureText(previous)) previous.text = String(previous.text) + part.text
+      else result.push({ ...part })
+    }
   }
   return result
 }

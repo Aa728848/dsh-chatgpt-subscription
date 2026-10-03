@@ -22,6 +22,38 @@ function replay(id: string, wireParts: Record<string, unknown>[], sourceModel = 
 }
 
 describe('Claude thinking signatures through Antigravity', () => {
+  it.each(ids)('coalesces unsigned SSE text fragments before replay to %s', id => {
+    const pieces = Array.from({ length: 385 }, (_, i) => ({ text: 'chunk ' + i + ' ' }))
+    const text = pieces.map(p => p.text).join('')
+    expect(replay(id, pieces)).toEqual([{ text }])
+    expect(replay(id, [{ text }])).toEqual(replay(id, pieces))
+  })
+
+  it('does not merge text across signed parts or tool calls', () => {
+    const call = { functionCall: { id: 'call-1', name: 'read', args: {} } }
+    expect(replay(ids[0], [
+      { text: 'a' }, { text: 'b' }, { text: 'signed', thoughtSignature: 'sig' },
+      { text: 'c' }, { text: 'd' }, call, { text: 'e' }, { text: 'f' },
+    ])).toEqual([{ text: 'ab' }, { text: 'signed', thoughtSignature: 'sig' }, { text: 'cd' }, call, { text: 'ef' }])
+  })
+
+  it('preserves opaque text metadata and does not mutate replay history', () => {
+    const id = ids[0]
+    const parts = [{ text: 'a' }, { text: 'b' }, { text: 'opaque', custom: 1 }, { text: 'c' }, { text: 'd' }]
+    const message = createAssistantMessage({ content: [{ type: 'text', text: 'abopaquecd' }],
+      source: { provider: 'antigravity', model: id, replayState: { blocks: [{ parts }] } } })
+    const before = JSON.stringify(message)
+    const request = buildRequest(normalizeGenerateOptions({ provider: 'antigravity', model: id, messages: [message] }),
+      MODELS.find(m => m.id === id)!, 'project', id)
+    expect((request.request as any).contents[0].parts).toEqual([{ text: 'ab' }, { text: 'opaque', custom: 1 }, { text: 'cd' }])
+    expect(JSON.stringify(message)).toBe(before)
+  })
+
+  it('keeps Gemini replay part boundaries unchanged', () => {
+    const parts = [{ text: 'a' }, { text: 'b' }, { text: '', thoughtSignature: 'sig' }]
+    expect(replay('gemini-3.8-flash', parts)).toEqual(parts)
+  })
+
   it.each(ids)('attaches a separate signature to streamed thinking for %s', id => {
     expect(replay(id, [
       { thought: true, text: 'Plan ' }, { thought: true, text: 'carefully.' },
