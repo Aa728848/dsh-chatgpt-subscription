@@ -35,6 +35,17 @@ describe('createCodexFetchProvider', () => {
     expect(fetchFn).toHaveBeenCalledWith('https://api.github.com/zen', expect.objectContaining({ method: 'GET' }))
   })
 
+  it('fetches a name the proxy fakes in both families (fake-ip-range6 configured)', async () => {
+    const fetchFn = vi.fn(async () => new Response('proxied', { headers: { 'content-type': 'text/plain' } }))
+    const provider = createCodexFetchProvider({
+      fetchFn: fetchFn as never,
+      resolveHostAddresses: async () => ['198.18.0.116', 'fc00::75'],
+    })
+
+    await expect(provider.fetch({ url: 'https://platform.claude.com/docs' })).resolves.toMatchObject({ statusCode: 200 })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('refuses a stated non-public address without calling the transport', async () => {
     const fetchFn = vi.fn()
     const provider = createCodexFetchProvider({ fetchFn: fetchFn as never })
