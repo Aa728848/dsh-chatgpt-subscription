@@ -98,7 +98,7 @@
 
 ### W4：MiniMax thinking 回放
 
-证据：本地丢弃 reasoning；官方开放平台强调保留交错思考，但订阅网关载荷待验证。入口：[assistant 转换](../src/host/minimax-code/mapper.ts#L332-L353)、[缓存探针](../scripts/probe-minimax-cache.probe.ts)。
+证据：原实现丢弃 reasoning。**2026-10-03 实测确认订阅网关开放交错思考**：M2.7 与 M3.1-Flash-Preview 在 `/mavis/api/v1/llm/v1/messages` 返回 `thinking` 块和 64 字符 `signature_delta`，thinking 原样回传后工具循环第二轮均返回 200；M3 实测默认不返回 thinking 块。另一条实测约束：该网关只接受 Anthropic 标准的 `role: user` + `tool_result`，`role: tool` 会报 `tool call id is empty`（现有 mapper 已使用标准形式，无需修改）。入口：[assistant 转换](../src/host/minimax-code/mapper.ts#L332-L353)、[缓存探针](../scripts/probe-minimax-cache.probe.ts)。
 
 1. 核对各模型原始 thinking block、签名和 metadata。
 2. 优先原样保存/回放合法 block，不由显示文本猜测隐藏状态。
@@ -188,7 +188,7 @@
 | W1 Codex turn 生命周期 | 保守降级，跨轮复用决定不做 | [客户端](<../src/host/responses-client.ts>)请求本地槽、结束清理与不跨请求复用；普通 429 不推断并发数 | 宿主无可靠回合身份，内容猜测会误复用；无线上端到端验证 |
 | W2 Ollama 投影 | 本次范围已交付 | 原生/OpenAI 图片格式、工具参数对象、附件降级、新旧工具结果、system 去重、模型级 think；已连接精确模型/认证/协议证据门控 | 未知新模型保持可见降级，不把通用协议 fixture 当网关实测；未消耗真实额度做 Cloud 实测 |
 | W3 Command Code 三协议 | 本次范围已交付 | 三协议 ZDR 头与 fail-closed、显式隐私门控、权限/认证错误分类、目录过期时间和隐私状态 UI 已实现，实际请求测试覆盖 | 原生 encrypted reasoning 回放缺网关样例及来源契约，决定不做；真实套餐/ZDR 保留行为依赖供应商承诺，非本插件可保证 |
-| W4 MiniMax 回放 | 离线交付完成，线上验证不在范围 | 增加来源隔离及原始块顺序保护，保留 thinking/signature 增量，跨账号/模型误复用已用测试拦截 | 订阅端点是否接受该结构由供应商决定；未消耗真实额度，不做缓存收益结论 |
+| W4 MiniMax 回放 | 线上已实测通过 | 来源隔离、原始块顺序保护、thinking/signature 增量保留；2026-10-03 用真实订阅账号实测：M2.7 与 M3.1-Flash-Preview 返回 thinking 块与签名，原样回传后第二轮均 200 | M3 默认不返回 thinking 块（目录标 toggle，实测默认关闭）；未验证服务端是否校验签名内容，也未做缓存收益结论 |
 | W5 usage 与诊断 | 传输层观测已交付，语义关联决定不做 | 八线路可选日志：首字节、总耗时、请求字节、HTTP 状态、端点相关 usage、短期 HMAC 模型/认证/工具/前缀摘要；缓存 0 与缺失分开；日志不含原文 | 字节层不冒充 TTFT（明确 null）；重试仅显式关联时记录，宿主无回合/压缩语义，猜测即伪造；不做费用结论 |
 | W6 并发与预算 | 限流已实现，预算决定不做 | [统一控制层](<../src/host/common/model-request-control.ts>)已接八线路生成请求，按凭据限流、FIFO、等待超时、流结束/取消/错误释放；默认关闭且不猜套餐并发数 | 主 Agent 预留槽与整树预算需要宿主可信身份，HTTP 边界猜测即错误限流；刷新后新凭据不保证同账号跨 token/进程总上限 |
 | W7 WebSocket | 决定不做 | 未接线连接骨架已删除，生产保持 SSE | 无网关握手/续传证据；重放工具副作用无法保证幂等，收益不足以抵消重复执行风险 |
