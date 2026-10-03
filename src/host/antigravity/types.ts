@@ -88,6 +88,33 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
     defaultRequestId: 'gemini-3.8-flash-tiered',
     fallbackCandidates: ['gemini-3.7-flash-tiered', 'gemini-3.6-flash-low'],
   },
+  // Verified against fetchAvailableModels: Claude 5.5 encodes effort in the runtime ID.
+  'claude-opus-5-5': {
+    off: 'claude-opus-5-5-low',
+    routing: {
+      off: 'claude-opus-5-5-low',
+      none: 'claude-opus-5-5-low',
+      minimal: 'claude-opus-5-5-low',
+      low: 'claude-opus-5-5-low',
+      medium: 'claude-opus-5-5-medium',
+      high: 'claude-opus-5-5-high',
+      xhigh: 'claude-opus-5-5-high',
+    },
+    defaultRequestId: 'claude-opus-5-5-medium',
+  },
+  'claude-sonnet-5-5': {
+    off: 'claude-sonnet-5-5-low',
+    routing: {
+      off: 'claude-sonnet-5-5-low',
+      none: 'claude-sonnet-5-5-low',
+      minimal: 'claude-sonnet-5-5-low',
+      low: 'claude-sonnet-5-5-low',
+      medium: 'claude-sonnet-5-5-medium',
+      high: 'claude-sonnet-5-5-high',
+      xhigh: 'claude-sonnet-5-5-high',
+    },
+    defaultRequestId: 'claude-sonnet-5-5-medium',
+  },
   'claude-opus-4-6': {
     off: 'claude-opus-4-6-thinking',
     routing: {
@@ -233,6 +260,14 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'gemini-3.1-pro-low': 65535,
   'gemini-3.1-pro-high': 65535,
   'gemini-pro-agent': 65535,
+  'claude-opus-5-5': 64000,
+  'claude-opus-5-5-low': 64000,
+  'claude-opus-5-5-medium': 64000,
+  'claude-opus-5-5-high': 64000,
+  'claude-sonnet-5-5': 64000,
+  'claude-sonnet-5-5-low': 64000,
+  'claude-sonnet-5-5-medium': 64000,
+  'claude-sonnet-5-5-high': 64000,
   'claude-opus-4-6': 64000,
   'claude-opus-4-6-thinking': 64000,
   'claude-sonnet-4-6': 64000,
@@ -317,6 +352,24 @@ export const MODELS: AntigravityModelDef[] = [
     inputModalities: ['text', 'image'],
     contextWindow: 1048576,
     maxTokens: 65536,
+  },
+  // Retain the existing Antigravity Claude window/output defaults until the
+  // service publishes limits for 5.5; these are not direct-Anthropic limits.
+  {
+    id: 'claude-opus-5-5',
+    name: 'Claude Opus 5.5',
+    inputModalities: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 64000,
+    reasoningEfforts: ['low', 'medium', 'high'],
+  },
+  {
+    id: 'claude-sonnet-5-5',
+    name: 'Claude Sonnet 5.5',
+    inputModalities: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 64000,
+    reasoningEfforts: ['low', 'medium', 'high'],
   },
   {
     id: 'claude-opus-4-6',

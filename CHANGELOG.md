@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Antigravity 新增 Claude Opus 5.5 / Sonnet 5.5**：按实时 `fetchAvailableModels` 目录确认的 `-low` / `-medium` / `-high` 请求 ID 路由，提供三个推理档位，保留 4.6 与既有模型选择。窗口/输出上限暂沿用反重力 Claude 的 1M / 64K 默认值；未进行真实生成验证。已有用户需在 Antigravity 设置中勾选新模型。
+
 - **Provider 协议复核修复（未发布）**：修正 Command Code Responses 的真实事件标识、块索引与多模态报文；修正 Ollama 原生图片/工具参数、附件降级及工具历史；MiniMax 原生回放增加来源隔离和顺序保护。并发闸门正确处理降限、正小数和取消竞争；Codex 使用请求本地释放函数，不再从普通 429 推断并发上限。
   - Codex 缺少可靠宿主 turn identity 时仍采取不跨请求复用的保守降级，不宣称完整 turn continuity。
   - 后续补齐：八线路生成请求的显式凭据级并发配置、等待超时与取消释放；可选脱敏首字节/耗时/usage/前缀变化诊断；Command Code ZDR 全协议 fail-closed、权限与认证分类、目录过期及隐私状态展示；Ollama 图片/think 和 ZDR 接入精确证据门控。
