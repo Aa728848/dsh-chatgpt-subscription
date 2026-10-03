@@ -532,6 +532,16 @@ export function registerClaudeRoutes(
     },
   })
 
+  /**
+   * Options for every sign-in this surface starts.
+   *
+   * The CARD opens the authorization page (`window.open`, which the desktop
+   * shell hands to the system browser). The host must not open it as well: it
+   * did, and every sign-in showed the user two identical login pages. A test may
+   * still inject its own opener through `options.login`.
+   */
+  const loginOptions: BeginLoginOptions = { openBrowser: () => undefined, ...(options.login ?? {}), fetchFn }
+
   const readStatus = (quotaError: string | null = null): Promise<ClaudeWebStatus> =>
     activeAccount().then((active) => getClaudeWebStatus(store, modelSettings, preferences, options, quotaError, active))
 
@@ -575,10 +585,7 @@ export function registerClaudeRoutes(
           const target = typeof body.accountId === 'string' && body.accountId !== '' ? body.accountId : undefined
           // beginLogin returns IMMEDIATELY: the card polls 'login/status' while
           // the user is in the browser, so this request must not stay open.
-          const value: LoginFlowStatus = await beginLogin(loginStore(target), {
-            ...(options.login ?? {}),
-            fetchFn,
-          })
+          const value: LoginFlowStatus = await beginLogin(loginStore(target), loginOptions)
           return sendJson(response, 200, { ok: true, value: value as ClaudeLoginFlowDto })
         }
 
@@ -757,10 +764,7 @@ export function registerClaudeRoutes(
             // A new sign-in lands in THIS account: the flow writes through the
             // pool's own credential-store adapter for it, and the auth-failure
             // marker is cleared only once the credential has arrived.
-            const value: LoginFlowStatus = await beginLogin(loginStore(accountId), {
-              ...(options.login ?? {}),
-              fetchFn,
-            })
+            const value: LoginFlowStatus = await beginLogin(loginStore(accountId), loginOptions)
             return sendJson(response, 200, { ok: true, value: value as ClaudeLoginFlowDto })
           }
 

@@ -288,6 +288,10 @@ export function registerCommandCodeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const value = await beginWebLogin(store, {
             fetchFn,
+            // The CARD opens the authorization page (window.open, which the
+            // desktop shell hands to the system browser). Opening it here too
+            // showed every sign-in as two identical pages.
+            openBrowser: () => undefined,
             ...(accountPool === undefined ? {} : { onSave: (credentials) => accountPool.addAccount(credentials) }),
           })
           return sendJson(response, 200, { ok: true, value })
