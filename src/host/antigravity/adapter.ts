@@ -193,6 +193,7 @@ export class AntigravityAdapter extends LlmAdapter {
     const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
 
+    let recoveredMissingThinkingSignature = false
     const triedAccountIds = new Set<string>()
     let response: Response | undefined
 
@@ -229,6 +230,33 @@ export class AntigravityAdapter extends LlmAdapter {
               body,
               signal,
             })
+            if (response.status === 400 && runtimeModel.startsWith('claude-') && !recoveredMissingThinkingSignature) {
+              const diagnostic = await response.clone().text().catch(() => '')
+              // Match the nested Anthropic diagnostic, not arbitrary validation errors.
+              if (/messages\.\d+\.content\.\d+\.thinking\.signature: Field required/.test(diagnostic)) {
+                const clean = JSON.parse(body)
+                let changed = false
+                clean.request.contents = clean.request.contents.map((content: { role: string; parts: Record<string, unknown>[] }) => {
+                  if (content.role !== 'model') return content
+                  const parts = content.parts.flatMap(part => {
+                    if (part.thought === true) { changed = true; return [] }
+                    const copy = { ...part }
+                    for (const key of ['thoughtSignature', 'thought_signature', 'thinkingSignature', 'textSignature']) {
+                      if (key in copy) { delete copy[key]; changed = true }
+                    }
+                    if (!copy.functionCall && !copy.functionResponse && !copy.inlineData && !copy.text) return []
+                    return [copy]
+                  })
+                  return { ...content, parts }
+                }).filter((content: { parts: unknown[] }) => content.parts.length > 0)
+                if (changed) {
+                  recoveredMissingThinkingSignature = true
+                  response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+                    method: 'POST', headers, body: JSON.stringify(clean), signal,
+                  })
+                }
+              }
+            }
             if (response.ok || response.status === 400) break
             if (response.status === 404) break
           } catch (err) {

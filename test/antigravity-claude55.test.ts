@@ -22,6 +22,29 @@ function harness() {
 }
 
 describe('Antigravity Claude 5.5', () => {
+  it.each([false, true])('recovers missing thinking signature once (repeat failure: %s)', async repeatFailure => {
+    const { adapter, fetchFn } = harness()
+    const error = JSON.stringify({ error: { message: JSON.stringify({ error: { message: 'messages.19.content.1.thinking.signature: Field required' } }) } })
+    fetchFn.mockResolvedValueOnce(new Response(error, { status: 400 }))
+    if (repeatFailure) fetchFn.mockResolvedValueOnce(new Response(error, { status: 400 }))
+    const options = { provider: 'antigravity', model: ids[0], messages: [{
+      role: 'assistant', source: { kind: 'model', provider: 'antigravity', model: ids[0] },
+      content: [{ type: 'reasoning', text: 'Plan', thinkingSignature: 'server-rejected' }, { type: 'text', text: 'Answer' }],
+    }, { role: 'user', content: [{ type: 'text', text: 'Continue' }] }] } as unknown as GenerateOptions
+    const run = async () => { for await (const _chunk of adapter.stream(options)) { /* consume */ } }
+    if (repeatFailure) await expect(run()).rejects.toThrow('thinking.signature: Field required')
+    else await run()
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    const calls = fetchFn.mock.calls as unknown as [string, RequestInit][]
+    expect(calls[1][0]).toBe(calls[0][0])
+    const before = JSON.parse(String(calls[0][1].body))
+    const after = JSON.parse(String(calls[1][1].body))
+    expect(before.request.contents[0].parts[0].thought).toBe(true)
+    expect(after.model).toBe(before.model)
+    expect(after.request.contents[0].parts).toEqual([{ text: 'Answer' }])
+    expect(after.request.contents[1]).toEqual(before.request.contents[1])
+  })
+
   it.each(ids)('lists and resolves %s with the three supported efforts', async (id) => {
     const { adapter } = harness()
     expect(await adapter.listModels()).toContainEqual(expect.objectContaining({ id, reasoningEfforts: ['low', 'medium', 'high'] }))
