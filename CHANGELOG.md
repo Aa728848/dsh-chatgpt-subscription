@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **修复 Antigravity Claude 多轮 400 `thinking.signature: Field required`**：回放时将连续思考分片和独立签名合并为签名完整的 thinking part；省略缺签名及跨模型 reasoning，保留正文和工具调用，Gemini 原始分片回放不变。修复作用于已有历史的请求转换，不改写会话记录。
+
 - **Antigravity 新增 Claude Opus 5.5 / Sonnet 5.5**：按实时 `fetchAvailableModels` 目录确认的 `-low` / `-medium` / `-high` 请求 ID 路由，提供三个推理档位，保留 4.6 与既有模型选择。窗口/输出上限暂沿用反重力 Claude 的 1M / 64K 默认值；未进行真实生成验证。已有用户需在 Antigravity 设置中勾选新模型。
 
 - **Provider 协议复核修复（未发布）**：修正 Command Code Responses 的真实事件标识、块索引与多模态报文；修正 Ollama 原生图片/工具参数、附件降级及工具历史；MiniMax 原生回放增加来源隔离和顺序保护。并发闸门正确处理降限、正小数和取消竞争；Codex 使用请求本地释放函数，不再从普通 429 推断并发上限。

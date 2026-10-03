@@ -367,6 +367,33 @@ function replayPart(part: Record<string, unknown>): Record<string, unknown> {
   return copy
 }
 
+/** Claude requires a signature on each thinking block, not a separate SSE part. */
+function claudeReplayParts(parts: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const result: Array<Record<string, unknown>> = []
+  let pending = ''
+  for (const part of parts) {
+    const signature = thoughtSignature(part)
+    if (part.thought === true && typeof part.text === 'string') {
+      pending += part.text
+      if (signature) {
+        result.push({ thought: true, text: pending, thoughtSignature: signature })
+        pending = ''
+      }
+      continue
+    }
+    if (signature && !part.functionCall && !part.functionResponse && !part.text && pending) {
+      result.push({ thought: true, text: pending, thoughtSignature: signature })
+      pending = ''
+      continue
+    }
+    // Never borrow a tool/text signature for unsigned thinking, or send an
+    // incomplete thinking block from interrupted/legacy history to Claude.
+    pending = ''
+    if (part.thought !== true) result.push(part)
+  }
+  return result
+}
+
 interface ToolCallReference {
   name: string
   id?: string
@@ -384,6 +411,10 @@ function assistantParts(
   for (let index = 0; index < message.content.length; index++) {
     const block = (message.content[index] as unknown) as Record<string, unknown>
     if (!isRecord(block)) continue
+    // Thinking signatures are model-specific; imported/switch-model reasoning
+    // is not valid Claude replay even when it carries another model's signature.
+    if (block.type === 'reasoning' && runtimeModel.startsWith('claude-') &&
+      (message.source?.kind !== 'model' || message.source.provider !== PROVIDER_ID || !('model' in message.source) || message.source.model !== model.id)) continue
     const replay = replayBlockFor(message, index)
     const originalParts = Array.isArray(replay?.parts) ? replay.parts.filter(isRecord) : []
     // Preserve signed part boundaries, including empty signature-only parts.
@@ -431,7 +462,7 @@ function assistantParts(
       parts.push(...originalParts.filter((part) => !part.functionCall).map(replayPart))
     }
   }
-  return parts
+  return runtimeModel.startsWith('claude-') ? claudeReplayParts(parts) : parts
 }
 
 function pushToolResult(
