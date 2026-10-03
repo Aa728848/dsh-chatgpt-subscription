@@ -149,6 +149,32 @@ describe('assertPublicFetchTarget', () => {
   it('refuses when any single answer is private', () => {
     expect(() => assertPublicFetchTarget('dual.example', ['93.184.216.34', '10.0.0.5'])).toThrowError(/non-public IP address/)
   })
+
+  describe('a proxy that fakes IPv6 too (mihomo/Clash fake-ip-range6)', () => {
+    // The exact answer a machine with `fake-ip-range6: fc00::/18` returned for
+    // platform.claude.com - refused before, so every proxied fetch failed there.
+    it('accepts an fc00:: answer beside the IPv4 fake-ip answer', () => {
+      expect(() => assertPublicFetchTarget('platform.claude.com', ['198.18.0.116', 'fc00::75'])).not.toThrow()
+      expect(() => assertPublicFetchTarget('github.com', ['fc00::4b', '198.18.0.74'])).not.toThrow()
+    })
+
+    it('refuses an fc00:: answer with no IPv4 fake-ip answer to prove the proxy claimed the name', () => {
+      expect(() => assertPublicFetchTarget('lan.example', ['fc00::75'])).toThrowError(/non-public IP address/)
+      expect(() => assertPublicFetchTarget('lan.example', ['93.184.216.34', 'fc00::75'])).toThrowError(/non-public IP address/)
+    })
+
+    it('does not let the proof wave through any other private answer', () => {
+      // fd00::/8 is the assigned unique-local half: real LAN hosts live there.
+      expect(() => assertPublicFetchTarget('mixed.example', ['198.18.0.116', 'fd12:3456:789a::1'])).toThrowError(/non-public/)
+      expect(() => assertPublicFetchTarget('mixed.example', ['198.18.0.116', '10.0.0.5'])).toThrowError(/non-public/)
+      expect(() => assertPublicFetchTarget('mixed.example', ['198.18.0.116', '::1'])).toThrowError(/non-public/)
+      expect(() => assertPublicFetchTarget('mixed.example', ['198.18.0.116', 'fe80::1'])).toThrowError(/non-public/)
+    })
+
+    it('still refuses an fc00:: address stated in the URL', () => {
+      expect(() => assertPublicFetchTarget('[fc00::75]', [])).toThrowError(/is not a public IP address/)
+    })
+  })
 })
 
 describe('lookupHostAddresses', () => {
