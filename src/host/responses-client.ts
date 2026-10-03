@@ -4,6 +4,7 @@ import { toToolCallId } from './common/brand-compat.ts'
 import {
   LlmError,
   ProviderRequestId,
+  errorChain,
   type FinishReason,
   type GenerateOptions,
   type StreamChunk,
@@ -136,6 +137,8 @@ export class ResponsesClient {
         'LLM_STREAM_IDLE_TIMEOUT',
         'Codex',
       )
+    } catch (error) {
+      throw streamFailure(error, options.signal)
     } finally {
       // Without a host turn identity, routing state is request-local only.
       this.turnStates.delete(turnKey)
@@ -325,6 +328,37 @@ export class ResponsesClient {
       throw new LlmError('Codex could not be reached.', 'NETWORK', { cause })
     }
   }
+}
+
+/**
+ * The failure a stream that died mid-body is reported as.
+ *
+ * Everything above the response body is already typed — the request path raises
+ * NETWORK, `responseError` raises a status verdict, and the parse raises a
+ * protocol or provider one. The body itself was the one gap: a connection that
+ * ends before the response does arrives as undici's `TypeError: terminated`,
+ * which `wrapStreamWithWatchdog` rethrows untouched. That value carries no code
+ * of its own, so the harness normalizes it to UNKNOWN, and UNKNOWN is not in this
+ * route's `retryableCodes` — one severed connection ended the turn with no
+ * second attempt at all. The real reason (ECONNRESET, a socket closed by the far
+ * side, a body timeout) sat on `.cause`, which the harness drops before the
+ * failure is persisted, so the report could not even say what had happened.
+ *
+ * So the transport is named here and its cause chain is kept in the message,
+ * and only the failures something already typed are left alone: an `LlmError` is
+ * this route's own verdict, and a caller abort is a cancellation, not a fault.
+ *
+ * The code is TRANSPORT even once chunks have been yielded. DSH settles a failed
+ * attempt's partial output as a discarded `assistant/attempt` and starts a fresh
+ * attempt on retry, and a tool call is only executed after its stream finishes,
+ * so retrying can neither repeat committed output nor re-run a tool.
+ */
+function streamFailure(error: unknown, signal?: AbortSignal): LlmError {
+  if (error instanceof LlmError) return error
+  if (signal?.aborted) return new LlmError('Codex request aborted', 'ABORTED', { cause: error })
+  const chain = errorChain(error).trim()
+  const detail = chain === '' ? 'the response stream ended unexpectedly' : chain.slice(0, 500)
+  return new LlmError(`Codex stream failed: ${detail}`, 'TRANSPORT', { cause: error })
 }
 
 /**
