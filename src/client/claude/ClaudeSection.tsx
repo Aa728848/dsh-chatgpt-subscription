@@ -239,8 +239,10 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: Props): Rea
         body: JSON.stringify({}),
       })
       setFlow(next)
-      // A host that opened the browser on its own still answers with the URL, so
-      // a blocked popup changes nothing: the card renders the link below.
+      // The card is the ONLY place the page is opened; the host no longer opens
+      // it too (that showed two identical login pages). The desktop shell hands
+      // window.open to the system browser, and a blocked popup changes nothing:
+      // the card renders the link below.
       if (next.authUrl) window.open(next.authUrl, '_blank', 'noopener,noreferrer')
     } catch (err) {
       reportError(err)
