@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **修复 Claude 与 Command Code 登录时弹出两个一模一样的授权页**（[#33](https://github.com/Aa728848/dsh-chatgpt-subscription/pull/33)，由 @Anuii 提交）。
+  - **根因**：授权页被打开了两次。设置卡片在 `/login` 返回后调用 `window.open(authUrl)`（桌面端主窗口会把 http(s) 的 `window.open` 交给 `shell.openExternal`，即在系统浏览器中打开），而主机端 `/login` 路由调用 `beginLogin` 时没有传 `openBrowser`，于是走了默认实现，在主机上用 `cmd /c start`（macOS `open`、Linux `xdg-open`）把同一个地址又打开一次。
+  - **修法**：保留卡片打开，去掉主机打开。卡片打开的位置就是用户所在的位置（远程访问 GUI 时也正确），且与 Antigravity / WorkBuddy / Codex 早已采用的「只在卡片打开」一致。Claude 两个入口（登录、按账号重新登录）共用一份 `loginOptions`，默认 `openBrowser` 为空操作；测试仍可通过 `options.login` 注入自己的实现。Command Code 的 `beginWebLogin` 同样传入空操作。已核对生产接线（`registerClaudeRoutes` 的 options）不传 `login`，所以空操作在生产下不会被覆盖。
+  - **逐线路排查过的范围**：Antigravity 的 `openBrowser` 调用在 `loginAndSave()` 里（无头 CLI `bin/antigravity-login.mjs` 走的路径），其 `beginWebLogin` 不开浏览器，因此它原本就只在卡片打开，无需改动；Kimi 无卡片 `window.open`、只在主机打开，同样只开一次；WorkBuddy / Codex 的登录流程根本没有 `openBrowser` 选项，也是只在卡片打开。**双开的只有 Claude 与 Command Code 两条线路**。
+  - **测试**：新增 `test/login-opens-browser-once.test.ts`（2 条）——Claude 按生产接线（不注入 `login`）调用 `/login`，断言返回授权地址且没有任何 `cmd`/`open`/`xdg-open` 启动；Command Code 断言路由给登录流程传了空操作的打开函数，调用它不会启动浏览器。测试拦截浏览器启动而不真正执行，失败时也不会弹窗。已实测**承重**：把两处 `routes.ts` 回退到合并前，前两条立即失败（Claude 用例捕获到一次 `cmd` 启动，Command Code 用例 `openBrowser` 为 `undefined`）。
+  - **验证**：`npx tsc -b --force` 与 test tsconfig 均 0 错误；全量 **2313 passed** / 7 skipped，**0 失败**（148 文件通过 / 1 跳过）；CI 的 ubuntu 与 windows 两项均通过。
+  - **已知边界（合并时发现，未在本 PR 内改动）**：Command Code 卡片只有 `window.open`、**没有**像 Claude（`authorizeUrl` + `openAuthorizeUrl` 两个 i18n key）和 Codex 那样渲染可点击的手动链接。因此在会拦截弹窗的远程/网页 GUI 里，弹窗被拦后该线路没有兜底入口——不过这与 Antigravity / WorkBuddy 的现状一致（它们同样只有 `window.open`），是插件既有的模式差异，不是本次改动独有。是否补齐需要动 `command-code/locales.ts` 的文案，留作后续决定。
+
 - **修复 Codex 线路响应流中断被判为 `UNKNOWN` 而一次都不重试，整轮直接失败**（[issue #32](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/32)）。
   - **根因**：请求**之前**的每一条失败路径都已经定好类型——`request()` 抛 `NETWORK`、`responseError()` 抛状态码判定、SSE 解析抛协议或 provider 判定——唯独**响应体消费阶段**没有。连接在响应读完之前断掉时，undici 抛的是 `TypeError: terminated`：它本身不带任何 code，真实原因（`ECONNRESET`、对端关闭 socket、body 超时）只挂在 `.cause` 上。`wrapStreamWithWatchdog()` 对非超时、非取消的错误原样重抛，于是这个裸 TypeError 一路走到 `@deepseek-ai/dsh-llm` 的适配器边界，被 `normalizeLlmFailure()` 归一化成 `code: "UNKNOWN"`。而本线路声明的 `retryableCodes` 是 `['RATE_LIMIT','SERVER_ERROR','SERVER','NETWORK','TIMEOUT','TRANSPORT']`，**不含 UNKNOWN**，`dsh-llm-retry` 因此直接放行——**一次传输中断就终止整轮，一次都不重试**。同一次会话里 429 会重试 3 次，正是因为 `RATE_LIMIT` 在表内。
   - **同文件内的 Claude 适配器早已做对**（`src/host/claude/adapter.ts` 的 `stream()` 有 `catch`），所以这是 Codex 线路漏掉的一步，不是设计选择。
