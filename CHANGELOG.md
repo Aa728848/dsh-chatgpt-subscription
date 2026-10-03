@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **修复 Codex 线路响应流中断被判为 `UNKNOWN` 而一次都不重试，整轮直接失败**（[issue #32](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/32)）。
+  - **根因**：请求**之前**的每一条失败路径都已经定好类型——`request()` 抛 `NETWORK`、`responseError()` 抛状态码判定、SSE 解析抛协议或 provider 判定——唯独**响应体消费阶段**没有。连接在响应读完之前断掉时，undici 抛的是 `TypeError: terminated`：它本身不带任何 code，真实原因（`ECONNRESET`、对端关闭 socket、body 超时）只挂在 `.cause` 上。`wrapStreamWithWatchdog()` 对非超时、非取消的错误原样重抛，于是这个裸 TypeError 一路走到 `@deepseek-ai/dsh-llm` 的适配器边界，被 `normalizeLlmFailure()` 归一化成 `code: "UNKNOWN"`。而本线路声明的 `retryableCodes` 是 `['RATE_LIMIT','SERVER_ERROR','SERVER','NETWORK','TIMEOUT','TRANSPORT']`，**不含 UNKNOWN**，`dsh-llm-retry` 因此直接放行——**一次传输中断就终止整轮，一次都不重试**。同一次会话里 429 会重试 3 次，正是因为 `RATE_LIMIT` 在表内。
+  - **同文件内的 Claude 适配器早已做对**（`src/host/claude/adapter.ts` 的 `stream()` 有 `catch`），所以这是 Codex 线路漏掉的一步，不是设计选择。
+  - **修法**：在 `ResponsesClient.stream()` 消费流的 `try` 上补 `catch`，交给新增的 `streamFailure()` 归类：已是 `LlmError` 的（本线路自己的判定）原样放行，调用方取消归 `ABORTED`，其余一律归 `TRANSPORT`，并把 `errorChain()` 渲染的完整 cause 链写进 message——于是落盘的不再是干巴巴的 `terminated/UNKNOWN`，而是 `Codex stream failed: terminated: read ECONNRESET`。
+  - **已出过 chunk 也仍然按可重试归类**（这点与 Claude 的轮换规则不同，是有意为之）：DSH 把失败尝试的半截输出结算为被丢弃的 `assistant/attempt`，重试会另起一次新尝试；工具调用只在流**正常结束后**才执行。因此重试既不会重复已提交输出，也不会重跑工具。Claude 那条「出过输出就不轮换」约束的是**换账号**（会换凭据重发），不是同凭据重试，不能照搬。
+  - **测试**：`test/responses-client.test.ts` 新增 `Codex stream failure classification` 四条——用 undici 同形的 body（先吐一个 delta 再以 `TypeError: terminated` 断开，cause 为 `ECONNRESET`）断言 `TRANSPORT` 且 message 同时含 `terminated` 与 `ECONNRESET`；断言该 code 落在本线路 `providerRetryPolicy()` 的 `retryableCodes` 内（把「不重试」直接钉在策略上）；调用方取消仍归 `ABORTED`；流内 `response.failed` 的 `RATE_LIMIT` 判定不被改写。已实测**承重**：临时 `git stash` 掉 `responses-client.ts` 后，前两条立即失败（2 failed / 20 passed）。
+  - **验证**：`npx tsc -b --force` 与 test tsconfig 均 0 错误；全量 **2311 passed** / 7 skipped，**0 失败**（147 文件通过、1 跳过）；`npm run build` 与 `npm pack --dry-run` 干净，产物 `lib/index.js` 含新分支。`errorChain` 是 `@deepseek-ai/dsh-llm` 自 0.1.0-rc.7 之前就已存在的导出（`git tag --contains` 核对，引入它的提交已包含在 dsh-v0.1.0-rc.7），覆盖本插件 peer 下限 0.1.2-alpha.5，因此旧世代无需 clean-room 复跑；未改动任何依赖版本或兼容缝。
+  - **未在真实订阅账号上端到端复验**：结论来自 undici 同形错误的本地复现与 DSH 自身的 `agent/request-error` 归约路径阅读，未用真实凭据真的在中途断一次长流观察 `llm/retry` 事件。
+
 - **修复 Antigravity Claude 普通文本回放碎片化**：不再把每个 SSE 文本 delta 回放成独立内容块，仅合并相邻纯文本 part，保留签名/工具/其他元数据边界，Gemini 不变。目标会话三个缓存断点前的回答分别含 385、365、20 个纯文本 part，离线重建均合并为 1 个且正文不变；这与 Claude 20-position 缓存回看限制吻合，但未进行线上缓存 A/B。旧会话无需改写；首次切换新编码可能重新预热缓存。
 
 - **修复 Antigravity Claude 多轮 400 `thinking.signature: Field required`**：回放时将连续思考分片和独立签名合并为签名完整的 thinking part；省略缺签名及跨模型 reasoning，保留正文和工具调用，Gemini 原始分片回放不变。修复作用于已有历史的请求转换，不改写会话记录。

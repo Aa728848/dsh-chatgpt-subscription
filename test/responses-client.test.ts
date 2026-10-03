@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL } from '../src/compat.ts'
+import { CodexChatGptAdapter } from '../src/host/adapter.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { ResponsesClient, parseResponsesStream } from '../src/host/responses-client.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
@@ -373,6 +374,128 @@ describe('Responses conversation continuity', () => {
     expect(turnStates).toEqual([null, null, null])
   })
 })
+
+describe('Codex stream failure classification', () => {
+  /**
+   * The exact shape undici throws when a connection dies mid-body: a bare
+   * `TypeError: terminated` that names no code, with the real reason — the
+   * reset, the far-side close, the body timeout — only on `cause`.
+   *
+   * `onSevered` runs at the moment the body dies, so a caller abort can be
+   * timed to the read that fails.
+   */
+  function severedStream(cause: unknown, events: unknown[] = [], onSevered?: () => void): Response {
+    const encoder = new TextEncoder()
+    let sent = 0
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent < events.length) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(events[sent++]!)}\n\n`))
+          return
+        }
+        onSevered?.()
+        controller.error(new TypeError('terminated', { cause }))
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } })
+  }
+
+  async function codexClient(response: Response): Promise<ResponsesClient> {
+    const store = new MemoryTokenStore()
+    await store.save({
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const fetchFn = vi.fn(async () => response)
+    return new ResponsesClient(
+      new OAuthService(store),
+      { readImage: async () => { throw new Error('unused') } },
+      { fetchFn: fetchFn as unknown as typeof fetch },
+    )
+  }
+
+  function requestOptions(signal?: AbortSignal): GenerateOptions {
+    return {
+      provider: 'codex-chatgpt',
+      model: 'gpt-6-sol',
+      sessionId: 'conversation-1',
+      messages: [{ role: 'user', content: 'hi' }],
+      ...(signal === undefined ? {} : { signal }),
+    } as unknown as GenerateOptions
+  }
+
+  it('reports a severed response body as a transport failure that keeps its cause', async () => {
+    const reset = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+    const client = await codexClient(severedStream(reset, [{ type: 'response.output_text.delta', delta: 'partial' }]))
+
+    const emitted: StreamChunk[] = []
+    // The delta reaches the caller first, so the connection dies with output
+    // already on the wire — the shape a long turn actually fails in.
+    const failure = await collectFailure(async () => {
+      for await (const chunk of client.stream(requestOptions())) emitted.push(chunk)
+    })
+
+    expect(emitted).toContainEqual({ type: 'text-delta', index: 0, text: 'partial' })
+    // TRANSPORT, not UNKNOWN: UNKNOWN is absent from this route's retryable
+    // codes, which is what let one dropped connection end the turn outright.
+    expect(failure).toMatchObject({ code: 'TRANSPORT' })
+    // The cause survives into the persisted message, so the report says what
+    // happened instead of only that the body ended.
+    expect(failure.message).toContain('terminated')
+    expect(failure.message).toContain('ECONNRESET')
+  })
+
+  it('keeps a severed body retryable under the policy this route declares', async () => {
+    const closed = new Error('other side closed')
+    const client = await codexClient(severedStream(closed))
+
+    const failure = await collectFailure(async () => {
+      for await (const chunk of client.stream(requestOptions())) expect(chunk).toBeDefined()
+    })
+
+    const policy = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never)
+      .providerRetryPolicy()
+    expect(policy.mode === 'normal' && policy.retryableCodes.includes(failure.code)).toBe(true)
+  })
+
+  it('leaves a caller abort reported as an abort rather than a transport fault', async () => {
+    const caller = new AbortController()
+    const aborted = new DOMException('This operation was aborted', 'AbortError')
+    const client = await codexClient(severedStream(
+      aborted,
+      [{ type: 'response.output_text.delta', delta: 'partial' }],
+      () => caller.abort(),
+    ))
+
+    const failure = await collectFailure(async () => {
+      for await (const chunk of client.stream(requestOptions(caller.signal))) expect(chunk).toBeDefined()
+    })
+
+    expect(failure.code).toBe('ABORTED')
+  })
+
+  it('passes an in-band provider verdict through with the code the stream gave it', async () => {
+    const client = await codexClient(sse([
+      { type: 'response.failed', response: { error: { message: 'Rate limit reached for this model.', code: 'rate_limit' } } },
+    ]))
+
+    const failure = await collectFailure(async () => {
+      for await (const chunk of client.stream(requestOptions())) expect(chunk).toBeDefined()
+    })
+
+    expect(failure.code).toBe('RATE_LIMIT')
+  })
+})
+
+/** The `LlmError` one failing stream rejected with, with the chunks beside it. */
+async function collectFailure(run: () => Promise<void>): Promise<{ code: string; message: string }> {
+  try {
+    await run()
+  } catch (error) {
+    return error as { code: string; message: string }
+  }
+  throw new Error('the stream was expected to fail')
+}
 
 function sse(events: unknown[]): Response {
   return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
