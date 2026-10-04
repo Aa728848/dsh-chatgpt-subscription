@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **修复设置页「订阅服务」整页样式丢失（只剩标签栏有样式）**。
+  - **根因**：客户端插件系统按属性记账样式归属。模块工厂 materialize 时会把文档里**所有未打标**的 `<style>` 认领给当时正在 materialize 的那个包（`style:not([data-plugin])` 被写上该包 id），并在该包重载 / 被新 revision 替换 / 被从依赖图剪除时执行 `removeOwnedStyles(id)`，按 owner 删掉这些标签。本插件的 7 张表（antigravity / claude / kimi-code / minimax-code / workbuddy / pool / mermaid）此前只用 `style.id = …` 注入、**不带 `data-plugin`**，于是先被别的包认领，再随那个包的重载被一起删除；而聊天区那张已按约定打了 `data-plugin` + `data-plugin-css` 的 `…/main` 表存活下来。设置页标签栏的样式来自 `…/main`（`.dsh-codex-segments`、`.dsh-hub-tabs`），正文控件来自被删掉的共享 `.dsha-*` 基础表，所以呈现为「标签栏正常、整页正文裸奔」。
+  - **修法**：新增 `src/client/common/plugin-style.ts` 的 `installPluginStyle(name, css, legacyId?)`，把原来的「`createElement` + `style.id` + 一次性 append」统一换成：按 `…/<name>` 的 `data-plugin-css` 定位、缺失时创建、**创建/命中时都盖上本包的 `data-plugin` 与唯一的 `data-plugin-css`**、内容变化时刷新 `textContent`、disposer 恒为空操作（标签归文档所有）。八个安装器全部改走它，原来判断存在即 return 的分支一并去掉，因此旧 bundle 在页面里留下的未打标元素会被**就地接管**（不会叠出第二份 CSS），`…/main` 的行为保持不变。
+  - **测试**：新增 `test/client-style-ownership.test.ts`（5 条）——八个安装器跑完后断言文档里不剩任何 `style:not([data-plugin])`（不给别的包留可认领对象）、每张表的 `data-plugin-css` 都指向本包；ChatGPT 默认页依赖的 `.dsha-*` 基础表（Kimi / Antigravity）确实带本包归属；模拟 `removeOwnedStyles` 删光后重新安装能全部恢复；模拟「旧 bundle 的未打标表已被别的包认领」时必须接管同一元素并改回本包；旧 bundle 的过期 CSS 必须被刷新而不是 dedupe 成空操作。
+  - **验证**：`npm run typecheck` 0 错误；全量 **2314 passed** / 9 skipped，仅 `test/quota-ui.test.tsx` 2 条与本次无关、且在本机时区（Etc/GMT+7）下必然失败的历史用例（把 UTC 的 2030-01-01 渲染成 2029-12-31）未过。
+
 - **修复 Ollama「同步模型列表」报 `Failed to execute 'json' on 'Response': Unexpected end of JSON input`**（[issue #36](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/36)）。
   - **根因不在 Ollama Cloud**：issue 里推测的端点与鉴权都没问题——`CLOUD_BASE_URL` 一直就是 `https://ollama.com`，`/api/tags` 也一直带着 `Authorization: Bearer <key>`，只是从来没有任何一条断言钉住这两点（本次补上）。真正的原因是**本插件自己的路由**：`/ollama/api` 是全插件唯一没有用 `try/catch` 包起来的设置路由处理器，一旦它抛错，DSH 的 web server（`packages/host/webserver`）只会回一个**空的 400**（`res.writeHead(400); res.end()`）。卡片再把这个空响应体交给 `response.json()`，浏览器抛出的解析异常就成了用户看到的全部错误——既没有状态码，也没有请求信息，真实原因只留在主机日志里。同步路径上 `storeCatalog()` 当时是唯一没有保护的 `await`，设置文件写不进去就会走到这里。
   - **修法（主机侧）**：路由处理器整体包进 `try/catch`，兜底用与 Claude / Kimi / WorkBuddy 等同级线路相同的 `{ok:false,error}` 500 信封，并补上它们都有、本线路唯独没有的 404 兜底；`storeCatalog()` 单独捕获，区分「列表读到了但本地存不下」与「读不到」。
