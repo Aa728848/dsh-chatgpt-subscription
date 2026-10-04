@@ -207,6 +207,14 @@ describe('stopSequences', () => {
 })
 
 describe('estimatedInputTokens', () => {
+  it('counts replayed reasoning and tool arguments instead of budgeting them as zero', () => {
+    const estimate = estimatedInputTokens(options({ messages: [{ role: 'assistant', content: [
+      { type: 'reasoning', text: 'r'.repeat(4000) },
+      { type: 'tool-call', id: 'call', name: 'read', arguments: 'x'.repeat(4000) },
+    ] }] as never }))
+    expect(estimate).toBe(2001)
+  })
+
   it('estimates from the serialized prompt including tools', () => {
     const withTools = estimatedInputTokens(options({
       system: 'x'.repeat(400),

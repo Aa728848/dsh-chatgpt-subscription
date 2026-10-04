@@ -1,3 +1,4 @@
+import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
@@ -350,7 +351,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
       }
 
       try {
-        response = await fetchFn(`${credentials.backend}${CHAT_PATH}`, {
+        response = await fetchWithContextBudgetRecovery(fetchFn)(`${credentials.backend}${CHAT_PATH}`, {
           method: 'POST',
           headers: workBuddyHeaders(credentials, { accept: 'text/event-stream' }),
           body,

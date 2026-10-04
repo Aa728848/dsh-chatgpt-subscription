@@ -1165,7 +1165,20 @@ export function estimatedInputTokens(options: GenerateOptions): number | undefin
       }
     }
   }
-  for (const message of options.messages) characters += textOf(message.content).length
+  const contentCharacters = (content: unknown): number => {
+    if (!Array.isArray(content)) return typeof content === 'string' ? content.length : 0
+    return content.reduce((total, block) => {
+      if (!isRecord(block)) return total
+      if ((block.type === 'text' || block.type === 'reasoning') && typeof block.text === 'string') return total + block.text.length
+      if (block.type === 'tool-result') return total + contentCharacters(block.content)
+      if (block.type === 'tool-call') {
+        const args = toolCallArguments(block.arguments)
+        return total + String(block.name ?? '').length + args.length
+      }
+      return total
+    }, 0)
+  }
+  for (const message of options.messages) characters += contentCharacters(message.content)
   if (characters === 0) return undefined
   return Math.ceil(characters / 4)
 }

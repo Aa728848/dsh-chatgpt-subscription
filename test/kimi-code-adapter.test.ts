@@ -190,6 +190,31 @@ describe('KimiCodeAdapter retry policy', () => {
 })
 
 describe('KimiCodeAdapter upstream failures', () => {
+  it('recovers the counted completion budget on a compaction request without changing messages', async () => {
+    const { adapter } = await buildAdapter()
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(init!.body as string)
+      bodies.push(body)
+      if (bodies.length === 1) return new Response(JSON.stringify({ error: { message:
+        "This model's maximum context length is 1048576 tokens. However, you requested 1059229 tokens (803229 in the messages, 256000 in the completion). Please reduce the length of the messages or completion.",
+      } }), { status: 400 })
+      return sseResponse([
+        { choices: [{ delta: { content: 'checkpoint' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }))
+    const chunks = await drain(adapter.stream(generateOptions('kimi-for-coding', {
+      maxTokens: 256000, purpose: 'compaction',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'summarize history' }] }] as never,
+    })))
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]!.max_completion_tokens).toBe(256000)
+    expect(bodies[1]!.max_completion_tokens).toBe(244323)
+    expect({ ...bodies[1], max_completion_tokens: 256000 }).toEqual(bodies[0])
+  })
+
   it('surfaces a 502 as a SERVER LlmError so DSH retries it', async () => {
     const { adapter } = await buildAdapter()
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({

@@ -114,6 +114,7 @@
  *   for this function and the two should be one.
  */
 
+import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
@@ -657,7 +658,7 @@ export class ClaudeAdapter extends LlmAdapter {
       cacheTtl,
     })
     try {
-      return await fetchFn(API_BASE + MESSAGES_PATH, {
+      return await fetchWithContextBudgetRecovery(fetchFn)(API_BASE + MESSAGES_PATH, {
         method: 'POST',
         // The REAL model, never a default: the haiku rule changes the beta set,
         // so a hardcoded id would send the wrong headers for every haiku call

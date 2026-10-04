@@ -766,6 +766,8 @@ npm pack --dry-run
 
 ### 压缩失败
 
+Kimi Code、MiniMax Code、Command Code、Claude、WorkBuddy 遇到“输入加输出预留超限”时，插件可在 HTTP 400/422 的完整 token 计数证明输入仍能放下、且上游确实采用了请求输出上限的情况下，仅降低输出上限重试一次。消息、工具和历史保持不变，摘要请求也适用。降低后的输出仍可能截断，截断不会冒充完整摘要。Codex 不支持该输出参数，不走此恢复；输入本身超限、模糊错误或流内错误仍交给 Harness 处理。这不是对所有压缩故障的通用修复。
+
 MiniMax、Kimi、Codex、Claude、Command Code、WorkBuddy 和 Antigravity 的错误处理会将明确的上下文超限错误交给 Harness 的溢出恢复机制。该机制需要宿主启用压缩后端；它不是无条件重发同一个超限请求。认证、配额、请求体字节限制和输出截断不会因此被当作上下文超限。手动压缩仍需生成完整摘要；如果摘要请求本身超限、被截断或缺少正文，修正错误分类也不能保证它成功。请保留失败会话中的 `compaction/end` 错误、provider/model、宿主及插件版本，以便定位。
 
 | 现象 | 处理 |

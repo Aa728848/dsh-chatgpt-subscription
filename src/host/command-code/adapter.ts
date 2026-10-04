@@ -1,3 +1,4 @@
+import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
@@ -405,7 +406,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         : baseHeaders
 
       try {
-        response = await fetchFn(endpoint, { method: 'POST', headers, body, signal })
+        response = await fetchWithContextBudgetRecovery(fetchFn)(endpoint, { method: 'POST', headers, body, signal })
       } catch (error) {
         if (signal.aborted) throw new LlmError('Command Code request aborted', 'ABORTED', { cause: error })
         // A connection that never produced a response is a transport failure, not

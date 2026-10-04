@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **插件内上下文预算恢复**：Kimi Code、MiniMax Code、Command Code、Claude、WorkBuddy 的模型请求在 HTTP 400/422 明确报告完整且一致的窗口、输入和输出 token 计数时，若输入仍能放下、上游输出预留等于实际发送的上限，会保留完整消息和工具，只降低输出上限并重试一次（预留 1024 tokens 余量，至少保留 1024 输出 tokens）。普通请求与摘要请求共用此路径，不修改 DSH、不截断历史。显式 thinking budget 不满足时不强行重试；鉴权、限流、字节限制、模糊计数、服务端忽略参数和流内错误保持原处理，输出截断也仍报告失败。Kimi/MiniMax 共用的输入估算补计推理文本和工具调用参数，避免将这些实际输入计为零。验证：截图预算的三种输出字段回归、MiniMax 普通/摘要真实 LLM 服务调用、Kimi Chat Completions 与 Command Code Responses 适配器回归通过；全量插件测试、强制源码及测试类型检查、构建通过。Codex 不支持输出上限字段，未套用此恢复；未进行真实账号端到端验证，不能据此认定截图中未知线路的所有压缩故障已解决。
+
 - **修复 Ollama「同步模型列表」报 `Failed to execute 'json' on 'Response': Unexpected end of JSON input`**（[issue #36](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/36)）。
   - **根因不在 Ollama Cloud**：issue 里推测的端点与鉴权都没问题——`CLOUD_BASE_URL` 一直就是 `https://ollama.com`，`/api/tags` 也一直带着 `Authorization: Bearer <key>`，只是从来没有任何一条断言钉住这两点（本次补上）。真正的原因是**本插件自己的路由**：`/ollama/api` 是全插件唯一没有用 `try/catch` 包起来的设置路由处理器，一旦它抛错，DSH 的 web server（`packages/host/webserver`）只会回一个**空的 400**（`res.writeHead(400); res.end()`）。卡片再把这个空响应体交给 `response.json()`，浏览器抛出的解析异常就成了用户看到的全部错误——既没有状态码，也没有请求信息，真实原因只留在主机日志里。同步路径上 `storeCatalog()` 当时是唯一没有保护的 `await`，设置文件写不进去就会走到这里。
   - **修法（主机侧）**：路由处理器整体包进 `try/catch`，兜底用与 Claude / Kimi / WorkBuddy 等同级线路相同的 `{ok:false,error}` 500 信封，并补上它们都有、本线路唯独没有的 404 兜底；`storeCatalog()` 单独捕获，区分「列表读到了但本地存不下」与「读不到」。

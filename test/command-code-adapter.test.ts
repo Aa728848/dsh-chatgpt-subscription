@@ -99,6 +99,34 @@ afterEach(() => {
 })
 
 describe('CommandCodeAdapter catalog', () => {
+  it('recovers an overflowing Responses output budget without dropping its input', async () => {
+    const { adapter, store } = buildAdapter()
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'cmd_key' })
+    const originalFetch = globalThis.fetch
+    const bodies: Record<string, unknown>[] = []
+    globalThis.fetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(init!.body as string)
+      bodies.push(body)
+      if (bodies.length === 1) return new Response(JSON.stringify({ error: { message:
+        "This model's maximum context length is 1048576 tokens. However, you requested 1120000 tokens (992000 in the messages, 128000 in the completion). Please reduce the length of the messages or completion.",
+      } }), { status: 400 })
+      return sseResponse([{ type: 'response.completed', response: { output: [
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'checkpoint' }] },
+      ] } }])
+    })
+    try {
+      const assembler = new BlockAssembler()
+      for await (const chunk of adapter.stream({
+        provider: 'command-code', model: 'gpt-6-astra', maxTokens: 128000, purpose: 'compaction',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'summarize history' }] }],
+      } as GenerateOptions)) assembler.push(chunk)
+      expect(assembler.finish).toEqual({ kind: 'stop' })
+      expect(bodies).toHaveLength(2)
+      expect(bodies[1]!.max_output_tokens).toBe(55552)
+      expect({ ...bodies[1], max_output_tokens: 128000 }).toEqual(bodies[0])
+    } finally { globalThis.fetch = originalFetch }
+  })
+
   it('lists only the enabled models from the live catalog', async () => {
     const { adapter } = buildAdapter({ enabledModelIds: ['claude-sonnet-4-6'] })
     const models = await adapter.listModels('command-code')

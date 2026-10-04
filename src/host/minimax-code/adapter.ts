@@ -13,6 +13,7 @@
  *    racing that application for a rotation neither of them needs.
  */
 
+import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmAdapter,
@@ -548,7 +549,7 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // the retry is also rejected, the failure is final and reported to the user.
     for (let attempt = 0; ; attempt += 1) {
       try {
-        response = await fetchFn(messagesUrl(credentials.region), {
+        response = await fetchWithContextBudgetRecovery(fetchFn)(messagesUrl(credentials.region), {
           method: 'POST',
           headers: modelRequestHeaders(credentials.accessToken),
           body,
