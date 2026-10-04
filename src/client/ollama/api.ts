@@ -52,9 +52,55 @@ async function post<T>(url: string, body: object): Promise<T> {
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, credentials: 'same-origin' })
-  const envelope = await response.json() as { ok: boolean; value?: T; error?: string }
+  const envelope = await readEnvelope<T>(response)
   if (!response.ok || !envelope.ok) {
     throw new Error(envelope.error || `HTTP ${response.status}`)
   }
   return envelope.value as T
+}
+
+/**
+ * Read the {ok,value,error} envelope, or say why there was not one.
+ *
+ * `response.json()` is not a way to report an error. A body that is empty —
+ * which is what DSH's web server sends for a route handler that rejected, and
+ * what a proxy sends for a blocked request — throws the browser's own
+ * "Failed to execute 'json' on 'Response': Unexpected end of JSON input" (issue
+ * #36), a sentence that names neither the status nor the request. Reading the
+ * text first costs one string and turns every unreadable answer into a message
+ * that says what the Host actually replied.
+ *
+ * The body is never echoed back: it can be an HTML page of arbitrary size, and
+ * its content-type alone is what identifies the failure.
+ */
+async function readEnvelope<T>(
+  response: Response,
+): Promise<{ ok: boolean; value?: T; error?: string }> {
+  let text: string
+  try {
+    text = await response.text()
+  } catch (cause) {
+    throw new Error(unreadable(response, cause))
+  }
+  if (text.trim() === '') throw new Error(unreadable(response))
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error(unreadable(response))
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(unreadable(response))
+  }
+  const envelope = parsed as { ok: boolean; value?: T; error?: string }
+  if (typeof envelope.error !== 'string') delete envelope.error
+  return envelope
+}
+
+/** The one sentence every unreadable answer turns into. */
+function unreadable(response: Response, cause?: unknown): string {
+  const kind = response.headers.get('content-type') ?? 'no content-type'
+  return `The Ollama settings API answered with ${response.status} and no JSON body (${kind})`
+    + (cause instanceof Error ? `: ${cause.message}` : '')
+    + '. The Host log holds the underlying error.'
 }

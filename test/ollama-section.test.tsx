@@ -153,4 +153,46 @@ describe('OllamaSection', () => {
     expect(el.textContent).toContain('2')
     expect(el.textContent).not.toContain(zh.catalogNeverSynced)
   })
+
+  /**
+   * Issue #36, seen from where the user saw it.
+   *
+   * The web server answers a route handler that rejected with a bare 400 and NO
+   * body. The card used to hand that straight to response.json(), so the browser
+   * raised its own "Failed to execute 'json' on 'Response': Unexpected end of
+   * JSON input" and that sentence — naming neither the status nor the request —
+   * became the error the user was left with.
+   */
+  describe('a sync the card cannot read', () => {
+    async function syncWith(reply: () => Response): Promise<string> {
+      const el = await render()
+      vi.stubGlobal('fetch', vi.fn(reply))
+      const button = Array.from(el.querySelectorAll('button'))
+        .find(node => node.textContent?.includes(zh.catalogSync))
+      expect(button, 'the sync button is on the tab').not.toBeUndefined()
+      await act(async () => {
+        button?.click()
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+      return el.textContent ?? ''
+    }
+
+    it('names the status when the answer has no body', async () => {
+      const text = await syncWith(() => new Response('', { status: 400 }))
+
+      expect(text).toContain(zh.error.split('{detail}')[0]!)
+      expect(text).toContain('400')
+      expect(text).not.toContain('Unexpected end of JSON input')
+    })
+
+    it('names the content type when the answer is not JSON', async () => {
+      const text = await syncWith(() => new Response('<html>Sign in</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }))
+
+      expect(text).toContain('text/html')
+      expect(text).not.toContain('Unexpected token')
+    })
+  })
 })
