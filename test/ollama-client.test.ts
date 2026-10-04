@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { buildBody, chatUrl, loadCatalog, startChat, headersFor } from '../src/host/ollama/client.ts'
+import { buildBody, chatUrl, fetchCatalog, loadCatalog, startChat, headersFor } from '../src/host/ollama/client.ts'
 import { applyEvent, closeStream, createStreamState } from '../src/host/ollama/mapper.ts'
 import { CLOUD_BASE_URL, NATIVE_CHAT_PATH, OPENAI_CHAT_PATH, PROVIDER_ID } from '../src/host/ollama/types.ts'
 import { parseOllamaCredentials } from '../src/host/ollama/token-store.ts'
@@ -277,6 +277,68 @@ describe('Ollama catalog', () => {
   it('degrades to an empty list rather than throwing, so a failed sync is survivable', async () => {
     const fetchFn = vi.fn(async () => new Response('nope', { status: 500 })) as unknown as typeof fetch
     expect(await loadCatalog(fetchFn, key)).toEqual([])
+  })
+})
+
+/**
+ * The four ways a sync can come back with nothing.
+ *
+ * Issue #36 was reported as one undifferentiated failure, and the reason a user
+ * could not act on it is that these were not told apart: a wrong key, an
+ * upstream refusal, a network that never connected and a proxy that answered
+ * with an HTML page all produced the same empty list and the same sentence.
+ */
+describe('Ollama catalog failures', () => {
+  it('names a refused key as an auth failure, with its status', async () => {
+    for (const status of [401, 403]) {
+      const fetchFn = vi.fn(async () => new Response('nope', { status })) as unknown as typeof fetch
+      expect(await fetchCatalog(fetchFn, key)).toEqual({ models: [], failure: 'auth', status })
+    }
+  })
+
+  it('keeps another upstream refusal distinct from an auth failure', async () => {
+    const fetchFn = vi.fn(async () => new Response('slow down', { status: 429 })) as unknown as typeof fetch
+    expect(await fetchCatalog(fetchFn, key)).toEqual({ models: [], failure: 'upstream', status: 429 })
+  })
+
+  it('reports a request that never reached the service as unreachable', async () => {
+    // DNS, TLS, a refused proxy connection, or the catalog timeout itself. These
+    // reject rather than answer, and used to escape the route as a throw.
+    const fetchFn = vi.fn(async () => {
+      throw new TypeError('fetch failed')
+    }) as unknown as typeof fetch
+    expect(await fetchCatalog(fetchFn, key)).toEqual({ models: [], failure: 'unreachable' })
+  })
+
+  it('reports a 200 that is not a /api/tags document as malformed, not as empty', async () => {
+    // The shape a captive portal or a rewriting proxy produces. Reading it with
+    // response.json() is what threw 'Unexpected end of JSON input' in #36.
+    const html = vi.fn(async () => new Response('<html>Sign in</html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    })) as unknown as typeof fetch
+    expect(await fetchCatalog(html, key)).toEqual({ models: [], failure: 'malformed' })
+
+    // ...and JSON that is valid but not the documented document.
+    const wrongShape = vi.fn(async () => Response.json({ data: [{ id: 'm' }] })) as unknown as typeof fetch
+    expect(await fetchCatalog(wrongShape, key)).toEqual({ models: [], failure: 'malformed' })
+  })
+
+  it('treats an account entitled to nothing as a success with an empty list', async () => {
+    // Distinct from every failure above: nothing went wrong, there is simply no
+    // model to show, and saying 'malformed' would send the user looking for a bug.
+    const empty = vi.fn(async () => Response.json({ models: [] })) as unknown as typeof fetch
+    expect(await fetchCatalog(empty, key)).toEqual({ models: [] })
+  })
+
+  it('asks the cloud endpoint, with the bearer key the service requires', async () => {
+    const stub = vi.fn(async () => Response.json({ models: [] }))
+    await fetchCatalog(stub as unknown as typeof fetch, key)
+    const [url, init] = stub.mock.calls[0] as unknown as [string, RequestInit]
+    // The reporter's theory was that the plugin still asked a local Ollama, or
+    // an unauthenticated cloud one. Neither was true, but nothing asserted it.
+    expect(url).toBe(`${CLOUD_BASE_URL}/api/tags`)
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer sk-test')
   })
 })
 

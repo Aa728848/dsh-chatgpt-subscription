@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isSameOriginMutation } from '../common/same-origin.ts'
 import type { OllamaAccountPool } from './account-pool.ts'
-import { loadCatalog } from './client.ts'
+import { fetchCatalog, type OllamaCatalogResult } from './client.ts'
 import type { FileModelSettingsStore, OllamaCredentials } from './token-store.ts'
 import { CLOUD_BASE_URL } from './types.ts'
 import type { OllamaPoolStatusDto, OllamaWebStatus } from '../../shared/ollama-contracts.ts'
@@ -45,6 +45,28 @@ export interface OllamaRouteOptions {
   accountPool: OllamaAccountPool
   modelSettings: FileModelSettingsStore
   fetchFn?: typeof fetch
+}
+
+/**
+ * The sentence the card shows for a catalog read that produced nothing.
+ *
+ * Every one of these used to collapse into "Could not read the model list from
+ * Ollama", which told a user nothing they could act on — the complaint in issue
+ * #36. The four causes have four different remedies, so they are named apart.
+ */
+function catalogFailureMessage(result: OllamaCatalogResult): string {
+  switch (result.failure) {
+    case 'auth':
+      return `Ollama rejected the stored API key (HTTP ${result.status ?? 401}). Create or re-paste a key at ${OLLAMA_KEYS_URL}.`
+    case 'upstream':
+      return `Ollama answered HTTP ${result.status ?? '?'} for ${CLOUD_BASE_URL}/api/tags.`
+    case 'unreachable':
+      return 'Could not reach Ollama Cloud. Check the network or proxy, then sync again.'
+    case 'malformed':
+      return 'Ollama answered with something that is not a /api/tags document (a proxy or filter may be rewriting the reply).'
+    default:
+      return 'Could not read the model list from Ollama.'
+  }
 }
 
 /** Whether one account can serve a request right now. */
@@ -98,118 +120,162 @@ export function registerOllamaRoutes(ctx: Context, options: OllamaRouteOptions):
       const path = url.pathname.replace(/^\/ollama\/api\/?/, '')
       const method = request.method ?? 'GET'
 
-    if (path === '' || path === 'status') {
-      return sendJson(response, 200, { ok: true, value: await getOllamaWebStatus(options) })
-    }
-
-    if (path === 'accounts') {
-      if (method === 'GET') {
+      // Every branch below answers inside this try. A handler that rejects gets
+      // no envelope at all: DSH's web server catches it and answers a bare
+      // 400 with an empty body, which the card could only report as the browser's
+      // "Failed to execute 'json' on 'Response': Unexpected end of JSON input"
+      // (issue #36) — the real cause was logged on the host and nowhere else.
+      // The siblings already wrap their handlers this way; this line was the
+      // one that did not.
+      try {
+      if (path === '' || path === 'status') {
         return sendJson(response, 200, { ok: true, value: await getOllamaWebStatus(options) })
       }
-      if (method !== 'POST') return sendMethodNotAllowed(response)
-      if (!isSameOriginMutation(request)) {
-        return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-      }
-      let body: Record<string, unknown>
-      try {
-        body = await readRequestJson(request)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return sendJson(response, 400, { ok: false, error: message })
-      }
-      const action = typeof body.action === 'string' ? body.action : ''
-      const accountId = typeof body.accountId === 'string' ? body.accountId : undefined
-      try {
-        if (action === 'add') {
-          const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : ''
-          if (apiKey === '') {
-            return sendJson(response, 400, { ok: false, error: 'API key is required.' })
+
+      if (path === 'accounts') {
+        if (method === 'GET') {
+          return sendJson(response, 200, { ok: true, value: await getOllamaWebStatus(options) })
+        }
+        if (method !== 'POST') return sendMethodNotAllowed(response)
+        if (!isSameOriginMutation(request)) {
+          return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+        }
+        let body: Record<string, unknown>
+        try {
+          body = await readRequestJson(request)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return sendJson(response, 400, { ok: false, error: message })
+        }
+        const action = typeof body.action === 'string' ? body.action : ''
+        const accountId = typeof body.accountId === 'string' ? body.accountId : undefined
+        try {
+          if (action === 'add') {
+            const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : ''
+            if (apiKey === '') {
+              return sendJson(response, 400, { ok: false, error: 'API key is required.' })
+            }
+            // An alias is how several bare keys stay distinguishable, since the
+            // service names nothing about the account behind one.
+            const alias = typeof body.alias === 'string' && body.alias.trim() !== ''
+              ? body.alias.trim()
+              : undefined
+            const credentials: OllamaCredentials = { apiKey, addedAt: Date.now() }
+            if (alias !== undefined) credentials.alias = alias
+            const account = await accountPool.addAccount(credentials, alias)
+            return sendJson(response, 200, { ok: true, value: { id: account.id } })
           }
-          // An alias is how several bare keys stay distinguishable, since the
-          // service names nothing about the account behind one.
-          const alias = typeof body.alias === 'string' && body.alias.trim() !== ''
-            ? body.alias.trim()
-            : undefined
-          const credentials: OllamaCredentials = { apiKey, addedAt: Date.now() }
-          if (alias !== undefined) credentials.alias = alias
-          const account = await accountPool.addAccount(credentials, alias)
-          return sendJson(response, 200, { ok: true, value: { id: account.id } })
+          if (accountId === undefined) {
+            return sendJson(response, 400, { ok: false, error: 'accountId is required.' })
+          }
+          if (action === 'set-primary') {
+            await accountPool.setPrimary(accountId)
+          } else if (action === 'set-alias' && typeof body.alias === 'string') {
+            await accountPool.setAlias(accountId, body.alias)
+          } else if (action === 'delete') {
+            await accountPool.deleteAccount(accountId)
+          } else if (action === 'clear-cooldown') {
+            await accountPool.clearCooldown(accountId)
+          } else if (action === 'strategy'
+            && (body.strategy === 'sequential' || body.strategy === 'round-robin' || body.strategy === 'sticky')) {
+            await accountPool.setStrategy(body.strategy)
+          } else {
+            return sendJson(response, 400, { ok: false, error: 'Unsupported account action.' })
+          }
+        } catch (error) {
+          // The pool's own message names the failure (a full pool, a missing
+          // account), so it is what the card should show rather than a generic one.
+          const message = error instanceof Error ? error.message : String(error)
+          return sendJson(response, 400, { ok: false, error: message })
         }
-        if (accountId === undefined) {
-          return sendJson(response, 400, { ok: false, error: 'accountId is required.' })
+        return sendJson(response, 200, { ok: true, value: await getOllamaWebStatus(options) })
+      }
+
+      if (path === 'models') {
+        if (method === 'GET') {
+          const settings = await modelSettings.read()
+          return sendJson(response, 200, { ok: true, value: {
+            models: settings.catalogModels,
+            enabled: settings.enabled,
+            enabledModelIds: settings.enabledModelIds,
+          } })
         }
-        if (action === 'set-primary') {
-          await accountPool.setPrimary(accountId)
-        } else if (action === 'set-alias' && typeof body.alias === 'string') {
-          await accountPool.setAlias(accountId, body.alias)
-        } else if (action === 'delete') {
-          await accountPool.deleteAccount(accountId)
-        } else if (action === 'clear-cooldown') {
-          await accountPool.clearCooldown(accountId)
-        } else if (action === 'strategy'
-          && (body.strategy === 'sequential' || body.strategy === 'round-robin' || body.strategy === 'sticky')) {
-          await accountPool.setStrategy(body.strategy)
-        } else {
-          return sendJson(response, 400, { ok: false, error: 'Unsupported account action.' })
+        if (method !== 'POST') return sendMethodNotAllowed(response)
+        if (!isSameOriginMutation(request)) {
+          return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
         }
+        const body = await readRequestJson(request).catch(() => ({}) as Record<string, unknown>)
+        if (typeof body.enabled === 'boolean') {
+          await modelSettings.update({ enabled: body.enabled })
+        }
+        if (Array.isArray(body.enabledModelIds)) {
+          await modelSettings.update({
+            enabledModelIds: body.enabledModelIds.filter((id): id is string => typeof id === 'string'),
+          })
+        }
+        return sendJson(response, 200, { ok: true, value: await modelSettings.read() })
+      }
+
+      if (path === 'catalog/refresh') {
+        if (method !== 'POST') return sendMethodNotAllowed(response)
+        if (!isSameOriginMutation(request)) {
+          return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+        }
+        // Sync needs a key; with none there is nothing to authenticate the call and
+        // the card is told so rather than receiving a silent empty list.
+        let credentials: OllamaCredentials | null = null
+        let poolBusy = false
+        try {
+          const effective = await accountPool.getEffectiveCredential(undefined, fetchFn)
+          credentials = effective.credentials
+        } catch {
+          // Two different refusals share this catch and must not be reported as
+          // one. 'No key at all' means the card must ask for a key; 'every key is
+          // cooling down' means the pool is busy and waiting is the only move, and
+          // telling that user to add a key would send them for a key that changes
+          // nothing.
+          poolBusy = await accountPool.read().then(data =>
+            data.accounts.length > 0
+            && data.accounts.every(account => isUsable(account, Date.now()) === false),
+          ).catch(() => false)
+          credentials = null
+        }
+        if (credentials === null) {
+          return sendJson(response, 400, {
+            ok: false,
+            error: poolBusy
+              ? 'Every stored Ollama key is cooling down right now. Wait for the cooldown, then sync again.'
+              : 'Add an API key before syncing models.',
+          })
+        }
+        const result = await fetchCatalog(fetchFn, credentials)
+        if (result.models.length === 0) {
+          return sendJson(response, 502, { ok: false, error: catalogFailureMessage(result) })
+        }
+        try {
+          await modelSettings.storeCatalog(result.models)
+        } catch (error) {
+          // The list WAS read; only the local write failed. Saying so is the
+          // difference between a user retrying a sync that will fail the same way
+          // and a user looking at their settings directory.
+          const detail = error instanceof Error ? error.message : String(error)
+          return sendJson(response, 500, {
+            ok: false,
+            error: `Read ${result.models.length} models from Ollama but could not save them locally: ${detail}`,
+          })
+        }
+        return sendJson(response, 200, { ok: true, value: { models: result.models } })
+      }
+
+      return sendJson(response, 404, { ok: false, error: 'not-found' })
       } catch (error) {
-        // The pool's own message names the failure (a full pool, a missing
-        // account), so it is what the card should show rather than a generic one.
+        // The last line of defence. Anything that still throws — a settings file
+        // that cannot be read, a pool document that cannot be parsed — is
+        // reported as the reason it is, in the same envelope every other branch
+        // uses, rather than as an empty body the card cannot read.
         const message = error instanceof Error ? error.message : String(error)
-        return sendJson(response, 400, { ok: false, error: message })
+        return sendJson(response, 500, { ok: false, error: message })
       }
-      return sendJson(response, 200, { ok: true, value: await getOllamaWebStatus(options) })
-    }
-
-    if (path === 'models') {
-      if (method === 'GET') {
-        const settings = await modelSettings.read()
-        return sendJson(response, 200, { ok: true, value: {
-          models: settings.catalogModels,
-          enabled: settings.enabled,
-          enabledModelIds: settings.enabledModelIds,
-        } })
-      }
-      if (method !== 'POST') return sendMethodNotAllowed(response)
-      if (!isSameOriginMutation(request)) {
-        return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-      }
-      const body = await readRequestJson(request).catch(() => ({}) as Record<string, unknown>)
-      if (typeof body.enabled === 'boolean') {
-        await modelSettings.update({ enabled: body.enabled })
-      }
-      if (Array.isArray(body.enabledModelIds)) {
-        await modelSettings.update({
-          enabledModelIds: body.enabledModelIds.filter((id): id is string => typeof id === 'string'),
-        })
-      }
-      return sendJson(response, 200, { ok: true, value: await modelSettings.read() })
-    }
-
-    if (path === 'catalog/refresh') {
-      if (method !== 'POST') return sendMethodNotAllowed(response)
-      if (!isSameOriginMutation(request)) {
-        return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-      }
-      // Sync needs a key; with none there is nothing to authenticate the call and
-      // the card is told so rather than receiving a silent empty list.
-      let credentials: OllamaCredentials | null = null
-      try {
-        const effective = await accountPool.getEffectiveCredential(undefined, fetchFn)
-        credentials = effective.credentials
-      } catch {
-        credentials = null
-      }
-      if (credentials === null) {
-        return sendJson(response, 400, { ok: false, error: 'Add an API key before syncing models.' })
-      }
-      const models = await loadCatalog(fetchFn, credentials).catch(() => [] as never)
-      if (models.length === 0) {
-        return sendJson(response, 502, { ok: false, error: 'Could not read the model list from Ollama.' })
-      }
-      await modelSettings.storeCatalog(models)
-      return sendJson(response, 200, { ok: true, value: { models } })
-    }
     },
   })
 }

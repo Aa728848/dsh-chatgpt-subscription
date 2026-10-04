@@ -534,6 +534,29 @@ function accumulateToolCall(
 }
 
 /**
+ * Why a catalog read came back without a list.
+ *
+ * These are the four things that can go wrong between the card asking for a sync
+ * and the service answering, and they are kept apart because each one has a
+ * different fix on the user's side: `auth` is a key Ollama refused, `upstream` is
+ * Ollama refusing for some other reason, `unreachable` is a network or proxy
+ * problem, and `malformed` is a reply that is not the documented `/api/tags`
+ * document at all. Collapsing them into one "could not read the model list"
+ * sentence leaves the user with nothing to act on, which is the complaint behind
+ * issue #36.
+ */
+export type OllamaCatalogFailure = 'auth' | 'upstream' | 'unreachable' | 'malformed'
+
+/** One catalog read, with the reason it produced no list. */
+export interface OllamaCatalogResult {
+  models: OllamaCatalogModel[]
+  /** Absent on success. An account entitled to nothing succeeds with an empty list. */
+  failure?: OllamaCatalogFailure
+  /** The HTTP status behind an `auth` or `upstream` failure. */
+  status?: number
+}
+
+/**
  * Read the model catalog.
  *
  * `/api/tags` is the native surface's own list and needs no translation; the
@@ -545,16 +568,53 @@ export async function loadCatalog(
   fetchFn: typeof fetch,
   credentials: OllamaCredentials,
 ): Promise<OllamaCatalogModel[]> {
-  const response = await fetchFn(`${CLOUD_BASE_URL}${NATIVE_TAGS_PATH}`, {
-    method: 'GET',
-    headers: headersFor(credentials, 'application/json'),
-    signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
-  })
-  if (!response.ok) return []
-  const data = await response.json() as unknown
-  if (typeof data !== 'object' || data === null) return []
+  return (await fetchCatalog(fetchFn, credentials)).models
+}
+
+/**
+ * The same read as {@link loadCatalog}, keeping the reason it failed.
+ *
+ * Never throws, for the reason its wrapper has always given. What it adds is that
+ * "failed" stops being one opaque state, so the settings card can name the
+ * cause instead of asking the user to guess.
+ */
+export async function fetchCatalog(
+  fetchFn: typeof fetch,
+  credentials: OllamaCredentials,
+): Promise<OllamaCatalogResult> {
+  let response: Response
+  try {
+    response = await fetchFn(`${CLOUD_BASE_URL}${NATIVE_TAGS_PATH}`, {
+      method: 'GET',
+      headers: headersFor(credentials, 'application/json'),
+      signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+    })
+  } catch {
+    // DNS, TLS, a proxy that refuses, or the timeout above. Each of them means
+    // the request never reached a service that answered, which is a different
+    // thing from the service answering "no".
+    return { models: [], failure: 'unreachable' }
+  }
+  if (!response.ok) {
+    return response.status === 401 || response.status === 403
+      ? { models: [], failure: 'auth', status: response.status }
+      : { models: [], failure: 'upstream', status: response.status }
+  }
+  let data: unknown
+  try {
+    data = await response.json()
+  } catch {
+    // A 200 whose body is an HTML interstitial — a captive portal, a corporate
+    // proxy, a CDN challenge. This is the same parse that used to throw straight
+    // through the route and out of the web server.
+    return { models: [], failure: 'malformed' }
+  }
+  if (typeof data !== 'object' || data === null) return { models: [], failure: 'malformed' }
   const record = data as Record<string, unknown>
-  const models = Array.isArray(record.models) ? record.models : []
+  // A document without a `models` array is not `/api/tags`, whatever its status
+  // line claimed.
+  if (!Array.isArray(record.models)) return { models: [], failure: 'malformed' }
+  const models = record.models
   const result: OllamaCatalogModel[] = []
   for (const entry of models) {
     if (typeof entry !== 'object' || entry === null) continue
@@ -565,7 +625,7 @@ export async function loadCatalog(
     if (id === undefined || id === '') continue
     result.push({ id, name, fetchedAt: Date.now() })
   }
-  return result
+  return { models: result }
 }
 
 /** The OpenAI-compatible model list, for callers that prefer that surface's view. */
