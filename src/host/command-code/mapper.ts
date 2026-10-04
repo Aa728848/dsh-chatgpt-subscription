@@ -9,6 +9,7 @@
  * https://commandcode.ai/blog/command-code-provider-api
  */
 
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmError,
   type ContentBlock,
@@ -901,6 +902,13 @@ export function processOpenAIStreamLine(line: string, state: CommandCodeStreamSt
   if (!isRecord(chunk)) return []
   const out: StreamChunk[] = []
 
+  if (isRecord(chunk.error)) {
+    throw new LlmError(
+      `Command Code stream error: ${asString(chunk.error.message) ?? 'unknown error'}`,
+      isContextOverflow(chunk.error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
+    )
+  }
+
   const usage = isRecord(chunk.usage) ? chunk.usage : undefined
   if (usage) {
     state.sawUsage = true
@@ -1163,7 +1171,7 @@ export function processAnthropicStreamLine(line: string, state: CommandCodeStrea
     const error = isRecord(event.error) ? event.error : {}
     throw new LlmError(
       `Command Code stream error: ${asString(error.message) ?? 'unknown error'}`,
-      'PROVIDER_ERROR',
+      isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
 
@@ -1289,7 +1297,7 @@ export function processResponsesStreamLine(line: string, state: CommandCodeStrea
           : (typeof parsed.error === 'string' ? parsed.error : ''))
     throw new LlmError(
       detail === '' ? 'Command Code responses stream failed' : `Command Code responses stream failed: ${detail}`,
-      'PROVIDER_ERROR',
+      isContextOverflow(errorObj ?? detail) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
   return []

@@ -114,6 +114,7 @@
  *   for this function and the two should be one.
  */
 
+import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
@@ -952,6 +953,10 @@ export function toLlmError(failure: ClaudeFailure): LlmError {
       'PROVIDER_ERROR',
       options,
     )
+  }
+
+  if (failure.kind === 'request' && isHttpContextOverflow(failure.status, failure.message)) {
+    return new LlmError(PROVIDER_NAME + ' context window exceeded.' + detail, CONTEXT_OVERFLOW_CODE, options)
   }
 
   switch (failure.kind) {

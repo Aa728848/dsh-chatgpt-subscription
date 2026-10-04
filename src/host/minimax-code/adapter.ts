@@ -13,6 +13,7 @@
  *    racing that application for a rotation neither of them needs.
  */
 
+import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -148,6 +149,9 @@ function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
  */
 export function classifyMinimaxFailure(status: number, bodyText: string): MinimaxFailureClassification {
   const detail = summarizeFailureBody(bodyText)
+  if (isHttpContextOverflow(status, bodyText)) {
+    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+  }
 
   if (status === 401 || status === 403) {
     return {

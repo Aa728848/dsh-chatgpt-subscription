@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+
 - **修复 Ollama「同步模型列表」报 `Failed to execute 'json' on 'Response': Unexpected end of JSON input`**（[issue #36](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/36)）。
   - **根因不在 Ollama Cloud**：issue 里推测的端点与鉴权都没问题——`CLOUD_BASE_URL` 一直就是 `https://ollama.com`，`/api/tags` 也一直带着 `Authorization: Bearer <key>`，只是从来没有任何一条断言钉住这两点（本次补上）。真正的原因是**本插件自己的路由**：`/ollama/api` 是全插件唯一没有用 `try/catch` 包起来的设置路由处理器，一旦它抛错，DSH 的 web server（`packages/host/webserver`）只会回一个**空的 400**（`res.writeHead(400); res.end()`）。卡片再把这个空响应体交给 `response.json()`，浏览器抛出的解析异常就成了用户看到的全部错误——既没有状态码，也没有请求信息，真实原因只留在主机日志里。同步路径上 `storeCatalog()` 当时是唯一没有保护的 `await`，设置文件写不进去就会走到这里。
   - **修法（主机侧）**：路由处理器整体包进 `try/catch`，兜底用与 Claude / Kimi / WorkBuddy 等同级线路相同的 `{ok:false,error}` 500 信封，并补上它们都有、本线路唯独没有的 404 兜底；`storeCatalog()` 单独捕获，区分「列表读到了但本地存不下」与「读不到」。
@@ -9,6 +10,8 @@
   - **测试**：新增 `test/ollama-routes.test.ts`（12 条），每条都断言**响应体可解析**而不只是状态码——`#36` 的故障形态正是「一个字节都没写」；其中最承重的一条让设置存储在同步中途抛错。`test/ollama-client.test.ts` 增 6 条（四类失败分类、端点与 Bearer 头断言、空列表属于成功而非 malformed），`test/ollama-section.test.tsx` 增 2 条（空响应体 / 非 JSON 响应体下界面显示可读错误且**不含** `Unexpected end of JSON input`）。**已实测承重**：把 `src/host/ollama/{routes,client}.ts` 回退到修复前，路由测试 12 条中 8 条立即失败。
   - **验证**：`npm run typecheck` 0 错误；全量 `npm test` **2367 passed / 7 skipped / 0 失败**（151 文件通过 / 1 跳过）。
   - **边界**：未用真实 Ollama Cloud 账号端到端复验——结论来自对 DSH web server 抛错路径的源码路径与本地复现。`src/client/api.ts`（Codex 卡片）存在同一处 `response.json()` 写法，但不在本 issue 范围内，未改动。
+
+- **压缩恢复排查（进行中）**：MiniMax、Kimi、Codex、Claude、Command Code、WorkBuddy 与 Antigravity 的已接入 HTTP/SSE 上下文超限错误现在映射为 `CONTEXT_WINDOW_EXCEEDED`，使支持该机制的 Harness 能进入溢出压缩恢复，而不是按普通 provider 错误终止。认证、限流、配额及输出上限错误保持原分类；未改写历史或放宽请求大小限制。MiniMax 的真实 Harness LLM 服务四组合回归已验证修复前失败、修复后通过；相关 584 条测试、强制源码类型检查、测试类型检查与构建通过；另运行 Harness 自动/手动压缩 138 条现有测试全部通过。新增 MiniMax 摘要成功及输出截断的模拟流回归，确认截断仍以 max-tokens 结束。Command Code OpenAI 与 Antigravity 的流内错误帧不再被忽略。尚未进行真实账号端到端验证；强制压缩具体失败原因及其他线路仍在排查，不能据此宣称所有压缩故障已解决。
 
 - **修复 Claude 与 Command Code 登录时弹出两个一模一样的授权页**（[#33](https://github.com/Aa728848/dsh-chatgpt-subscription/pull/33)，由 @Anuii 提交）。
   - **根因**：授权页被打开了两次。设置卡片在 `/login` 返回后调用 `window.open(authUrl)`（桌面端主窗口会把 http(s) 的 `window.open` 交给 `shell.openExternal`，即在系统浏览器中打开），而主机端 `/login` 路由调用 `beginLogin` 时没有传 `openBrowser`，于是走了默认实现，在主机上用 `cmd /c start`（macOS `open`、Linux `xdg-open`）把同一个地址又打开一次。

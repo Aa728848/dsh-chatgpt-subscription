@@ -1,3 +1,4 @@
+import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
@@ -511,7 +512,7 @@ export function classifyFailure(
 
   return new LlmError(
     `${PROVIDER_NAME} API error (${status}): ${detail || 'No response'}`,
-    'PROVIDER_ERROR',
+    isHttpContextOverflow(status, detail) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     { status },
   )
 }

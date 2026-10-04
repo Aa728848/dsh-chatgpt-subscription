@@ -27,6 +27,7 @@
  * See https://www.kimi.com/code/docs/en/kimi-code/error-reference.html
  */
 
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmError,
   type ContentBlock,
@@ -1753,7 +1754,7 @@ export function processOpenAIStreamLine(line: string, state: KimiCodeStreamState
   if (errorPayload !== undefined) {
     throw new LlmError(
       `Kimi Code stream error: ${asString(errorPayload.message) ?? 'unknown error'}`,
-      'PROVIDER_ERROR',
+      isContextOverflow(errorPayload) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
 
@@ -2016,7 +2017,7 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
     const error = isRecord(event.error) ? event.error : {}
     throw new LlmError(
       `Kimi Code stream error: ${asString(error.message) ?? 'unknown error'}`,
-      'PROVIDER_ERROR',
+      isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
 

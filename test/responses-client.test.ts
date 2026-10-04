@@ -7,6 +7,13 @@ import { ResponsesClient, parseResponsesStream } from '../src/host/responses-cli
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 
 describe('Responses streaming', () => {
+  it.each(['response.failed', 'error'])('normalizes context overflow in %s', async type => {
+    const error = { code: 'context_length_exceeded', message: 'input rejected' }
+    await expect(collect(parseResponsesStream(sse([
+      type === 'error' ? { type, error } : { type, response: { error } },
+    ])))).rejects.toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+  })
+
   it('assembles text, reasoning, usage and a JSON-safe tool call', async () => {
     const chunks = await collect(parseResponsesStream(sse([
       { type: 'response.reasoning_summary_text.delta', delta: 'think' },

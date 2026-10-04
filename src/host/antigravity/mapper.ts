@@ -1,3 +1,4 @@
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmError,
   type ContentBlock,
@@ -754,6 +755,13 @@ export function processStreamLine(line: string, state: StreamState): StreamChunk
   if (!isRecord(chunk)) return []
 
   const responseData = isRecord(chunk.response) ? (chunk.response as Record<string, unknown>) : chunk
+  const error = isRecord(chunk.error) ? chunk.error : isRecord(responseData.error) ? responseData.error : undefined
+  if (error !== undefined) {
+    throw new LlmError(
+      `Antigravity stream error: ${asString(error.message) ?? 'unknown error'}`,
+      isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
+    )
+  }
   const candidates = Array.isArray(responseData.candidates) ? responseData.candidates : []
   const candidate = isRecord(candidates[0]) ? candidates[0] : undefined
   const content = isRecord(candidate?.content) ? (candidate!.content as Record<string, unknown>) : undefined

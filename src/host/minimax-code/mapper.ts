@@ -67,6 +67,7 @@
  * the original string body byte-for-byte.
  */
 
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmError,
   type ContentBlock,
@@ -1235,7 +1236,7 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
     const error = isRecord(event.error) ? event.error : {}
     throw new LlmError(
       PROVIDER_NAME + ' stream error: ' + (asString(error.message) ?? 'unknown error'),
-      'PROVIDER_ERROR',
+      isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
 
