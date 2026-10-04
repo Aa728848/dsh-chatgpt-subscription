@@ -12,6 +12,7 @@ import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
 import { loadCodexCatalog } from './host/codex-catalog.ts'
 import { CodexAccountPool } from './host/codex-account-pool.ts'
 import { createCodexFetchProvider } from './host/codex-fetch.ts'
+import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES } from './host/fetch-configuration.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
@@ -127,6 +128,13 @@ import {
 
 /** Optional deployment configuration for this plugin. */
 export interface Config {
+  /** Independent web fetch selection; auto preserves proxy/search-driven selection.
+   * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
+  fetchProvider?: 'auto' | 'plugin' | 'dsh'
+  /** Plugin fetch decoded character limit (positive safe integer); the DSH tool may truncate again. */
+  fetchMaxBodyChars?: number
+  /** Plugin fetch response byte limit (positive safe integer). */
+  fetchMaxResponseBytes?: number
   /**
    * Whether to sync this package's bundled agent presets into the
    * harness-home preset root (`<dshHome>/.agent-presets`) at startup, making
@@ -165,6 +173,9 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
+  fetchProvider: z.union([z.const('auto'), z.const('plugin'), z.const('dsh')]).default('auto'),
+  fetchMaxBodyChars: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_BODY_CHARS),
+  fetchMaxResponseBytes: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_RESPONSE_BYTES),
   syncAgentPresets: z.boolean().default(true),
   subagentModelAuthorization: z.boolean().default(true),
   subagentModelTools: z.array(z.string()).default([]),
@@ -179,6 +190,7 @@ export const Config: z<Config> = z.object({
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
 
 export function apply(ctx: Context, pluginConfig: Config = {}): void {
+  const fetchConfiguration = resolveFetchConfiguration(pluginConfig)
   // Ship the bundled agent presets. Harness 0.1.7 registers presets from a
   // plugin row instead of reading the harness-home root, so the runtime
   // declaration is preferred and the home copy stays the mechanism for every
@@ -750,9 +762,21 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // the proxy resolves the origin, exactly like a hop DSH routes through a proxy, and the
     // provider still refuses non-public addresses a URL states outright. With no proxy configured
     // the built-in provider keeps the tool, resolution pinning and all.
+    let lastFetchDiagnostic: string | undefined
     const applyWebProviders = (current: SubscriptionPreferencesDto = preferences.status()): void => {
       const pluginFetch = proxyManager.resolveActiveProxyUrl() !== null
-      void searchSwitcher.select(current.searchProvider, { pluginFetch }).catch(error => {
+      void searchSwitcher.select(current.searchProvider, { pluginFetch, fetchProvider: fetchConfiguration.fetchProvider }).then(() => {
+        const status = searchSwitcher.status()
+        if (status.state === 'missing' || status.state === 'failed') return
+        const reason = fetchConfiguration.fetchProvider !== 'auto' ? 'explicit configuration'
+          : current.searchProvider === 'codex' ? 'Codex search selected'
+          : pluginFetch ? 'active proxy detected' : 'no proxy or Codex search'
+        const diagnostic = `${status.configuredFetchProvider ?? 'DSH default'} (mode=${fetchConfiguration.fetchProvider}; ${reason}; plugin limits=${fetchConfiguration.fetchMaxBodyChars} chars/${fetchConfiguration.fetchMaxResponseBytes} bytes)`
+        if (diagnostic !== lastFetchDiagnostic) {
+          lastFetchDiagnostic = diagnostic
+          ctx.logger.info(`[dsh-chatgpt-subscription] Web fetch provider configured: ${diagnostic}`)
+        }
+      }).catch(error => {
         ctx.logger.warn(`[dsh-chatgpt-subscription] Web provider selection could not be applied: ${error instanceof Error ? error.message : String(error)}`)
       })
     }
@@ -783,7 +807,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     }
 
     const disposeRoutes = registerRoutes(
-      ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool)
+      ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool, fetchConfiguration)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     // The video ingress for the Kimi route. Registered here because the tool
@@ -794,7 +818,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // Rebind providers when web reloads without resetting the saved default provider selection.
     ctx.inject(['web'], ctx => {
       ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
-      ctx.web.registerFetchProvider(createCodexFetchProvider({ fetchFn: proxyFetch }))
+      ctx.web.registerFetchProvider(createCodexFetchProvider({
+        fetchFn: proxyFetch,
+        maxBodyChars: fetchConfiguration.fetchMaxBodyChars,
+        maxResponseBytes: fetchConfiguration.fetchMaxResponseBytes,
+      }))
       // Registering a provider is safe here; selecting one is not. A selection
       // rewrites the `web` entry's config, which restarts it and unloads every
       // entry that injects `web`. The profile composes as one loader update and

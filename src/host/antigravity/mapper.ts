@@ -21,7 +21,7 @@ import {
   TOOL_CALLING_MODE,
   type AntigravityModelDef,
 } from './types.ts'
-import { toAntigravityToolSchema } from './tool-schema.ts'
+import { toAntigravityToolSchema, type AntigravityToolSchemaOptions } from './tool-schema.ts'
 
 let toolCallCounter = 0
 
@@ -545,18 +545,38 @@ export function convertMessages(
   return contents
 }
 
-export function stripMetaSchema(schema: unknown): unknown {
-  return toAntigravityToolSchema(schema)
+export function stripMetaSchema(
+  schema: unknown,
+  options?: AntigravityToolSchemaOptions,
+): unknown {
+  return toAntigravityToolSchema(schema, options)
+}
+
+/**
+ * Whether this request's tool declarations must declare one form per parameter.
+ *
+ * Antigravity routes a Claude-family runtime model to Vertex Anthropic, whose
+ * `input_schema` validation rejects a request whose tool schema still composes
+ * itself with `anyOf`/`oneOf`/`allOf` (#39). Gemini ignores `anyOf`, so its
+ * declarations keep the composed form they always sent.
+ */
+function foldsToolSchemaUnions(modelId: string, runtimeModel: string): boolean {
+  return modelId.startsWith('claude-') || runtimeModel.startsWith('claude-')
 }
 
 export function convertTools(
   tools: GenerateOptions['tools'],
+  modelId = '',
+  runtimeModel = '',
 ): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined
+  // Resolved once per request, not once per tool: every declaration of a
+  // Claude request takes the same fold.
+  const foldUnions = foldsToolSchemaUnions(modelId, runtimeModel)
   const declarations = tools.map((tool) => ({
     name: tool.name,
     description: tool.description || '',
-    parameters: stripMetaSchema(tool.parameters) || { type: 'object', properties: {} },
+    parameters: stripMetaSchema(tool.parameters, { foldUnions }) || { type: 'object', properties: {} },
   }))
   return [{ functionDeclarations: declarations }]
 }
@@ -657,7 +677,10 @@ export function buildRequest(
   request.generationConfig = generationConfig
 
   const toolChoice = (options as unknown as { toolChoice?: unknown }).toolChoice
-  const tools = convertTools(options.tools)
+  // The runtime model is what `request.model` names, so it decides the wire
+  // dialect; the catalog id covers a request whose model carries a non-claude
+  // alias (#39, same rule as `toolCallIdNeeded`).
+  const tools = convertTools(options.tools, model.id, runtimeModel)
   if (tools) {
     request.tools = tools
     if (toolChoice) {

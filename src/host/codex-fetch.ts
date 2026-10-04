@@ -1,5 +1,6 @@
 import { WebError, type WebFetchProvider, type WebFetchRequest, type WebFetchResult } from '@deepseek-ai/dsh-web'
 import { CODEX_FETCH_PROVIDER_ID } from '../compat.ts'
+import { DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES, positiveFetchLimit } from './fetch-configuration.ts'
 import { assertPublicFetchTarget, isIpLiteral, lookupHostAddresses } from './fetch-address-policy.ts'
 
 type FetchLike = typeof fetch
@@ -18,15 +19,12 @@ export interface CodexFetchProviderOptions {
   resolveHostAddresses?: HostAddressResolver
 }
 
-const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024 // 2MB
-const DEFAULT_MAX_BODY_CHARS = 100_000
-
 export function createCodexFetchProvider(
   options: CodexFetchProviderOptions = {},
 ): WebFetchProvider {
   const fetchFn = options.fetchFn ?? fetch
-  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES
-  const maxBodyChars = options.maxBodyChars ?? DEFAULT_MAX_BODY_CHARS
+  const maxResponseBytes = positiveFetchLimit(options.maxResponseBytes, DEFAULT_FETCH_MAX_RESPONSE_BYTES, 'maxResponseBytes')
+  const maxBodyChars = positiveFetchLimit(options.maxBodyChars, DEFAULT_FETCH_MAX_BODY_CHARS, 'maxBodyChars')
   const resolveHostAddresses = options.resolveHostAddresses ?? lookupHostAddresses
 
   return {

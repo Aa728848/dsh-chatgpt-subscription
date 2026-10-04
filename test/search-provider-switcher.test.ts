@@ -195,6 +195,27 @@ describe('SearchProviderSwitcher', () => {
     }
   })
 
+  it('reports an already matching configuration as applied', async () => {
+    const { ctx, switcher } = await mountSwitcher()
+    try {
+      await switcher.select('dsh', { fetchProvider: 'dsh' })
+      expect(switcher.status()).toMatchObject({ state: 'applied', configuredFetchProvider: 'http' })
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('lets explicit fetch mode override both search and proxy selection', async () => {
+    const { ctx, switcher } = await mountSwitcher()
+    try {
+      await switcher.select('codex', { pluginFetch: true, fetchProvider: 'dsh' })
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe('http')
+      expect((await ctx.web.search({ query: 'example' })).sources[0].title).toBe(CODEX_SEARCH_PROVIDER_ID)
+      await switcher.select('dsh', { pluginFetch: false, fetchProvider: 'plugin' })
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
+      await switcher.select('dsh', { pluginFetch: false, fetchProvider: 'auto' })
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe('http')
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('reports configuration without inventing defaults or exposing raw errors', async () => {
     const ctx = new Context()
     await ctx.plugin(Loader).await()

@@ -19,7 +19,19 @@ export interface CredentialStorageDto {
   available: boolean
 }
 
+export interface FetchConfigurationDto {
+  fetchProvider: 'auto' | 'plugin' | 'dsh'
+  fetchMaxBodyChars: number
+  fetchMaxResponseBytes: number
+}
+
 export interface PluginStatusDto {
+  fetchConfiguration?: FetchConfigurationDto
+  switcher?: {
+    state: 'idle' | 'applying' | 'applied' | 'missing' | 'failed'
+    configuredSearchProvider: string | null
+    configuredFetchProvider: string | null
+  } | null
   authenticated: boolean
   account: SanitizedAccountDto | null
   storage: CredentialStorageDto

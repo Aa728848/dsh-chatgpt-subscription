@@ -34,6 +34,8 @@ function delay(ms: number): Promise<void> {
 
 export interface WebProviderSelectionOptions {
   readonly pluginFetch?: boolean
+  /** Explicit mode overrides both proxy detection and the search preference. */
+  readonly fetchProvider?: 'auto' | 'plugin' | 'dsh'
 }
 
 /** Configuration diagnostics, not proof that an in-flight tool uses this service. */
@@ -93,10 +95,15 @@ export class SearchProviderSwitcher {
     }
     const codexSelected = preference === SEARCH_PROVIDER_CODEX
     const nextSearch = codexSelected ? CODEX_SEARCH_PROVIDER_ID : this.originalSearchProvider
-    const nextFetch = codexSelected || options.pluginFetch === true ? CODEX_FETCH_PROVIDER_ID : this.originalFetchProvider
+    const usePluginFetch = options.fetchProvider === 'plugin'
+      || (options.fetchProvider !== 'dsh' && (codexSelected || options.pluginFetch === true))
+    const nextFetch = usePluginFetch ? CODEX_FETCH_PROVIDER_ID : this.originalFetchProvider
     const configured = config.searchProvider === nextSearch && config.fetchProvider === nextFetch
     const applied = running === undefined || (running.searchProvider === nextSearch && running.fetchProvider === nextFetch)
-    if (configured && applied) return
+    if (configured && applied) {
+      this.state = 'applied'
+      return
+    }
     const nextConfig = { ...config }
     if (nextSearch === undefined) delete nextConfig.searchProvider
     else nextConfig.searchProvider = nextSearch
