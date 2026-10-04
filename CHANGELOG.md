@@ -2,786 +2,508 @@
 
 ## Unreleased
 
-- **Antigravity Claude 工具 schema 兼容（#39）**：仅对 Claude 目标在出站边界折叠 `anyOf` / `oneOf` / `allOf` 与类型联合，优先保留可填写的对象形状，把原始备选形式与约束摘要放入描述；同类型枚举合并保留空字符串重置值。Gemini 继续沿用原转换路径，原工具 schema 不被修改。覆盖调度参数、权限枚举、引用、数组、根联合、可空和单分支。折叠是网关兼容降级，并非等价 JSON Schema 转换：声明形式可能收窄，工具端仍校验参数。验证使用离线序列化请求；禁用折叠后 5 条回归立即失败，恢复后通过。两项 issue 修复组合的强制源码/测试类型检查、构建通过，全量测试 2456 passed / 7 skipped。未使用真实 Antigravity 账号复测上游，也未部署到当前运行中的 GUI。
+- **[Antigravity] Claude 工具 Schema 兼容降级处理（[#39](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/39)）**
+  - **背景与现象**：Claude 对出站工具的 JSON Schema 要求较严苛，包含复杂联合类型时容易报错。
+  - **解决方案**：
+    - **Schema 折叠降级**：仅针对 Claude 目标，在出站边界折叠 `anyOf` / `oneOf` / `allOf` 与类型联合；优先保留可填写的对象形状，将原始备选形式与约束摘要放入字段描述（Description）中。
+    - **枚举合并**：同类型枚举合并时保留空字符串重置值。
+    - **覆盖范围**：覆盖调度参数、权限枚举、引用引用（$ref）、数组、根级联合、可空类型及单分支结构。
+    - **隔离保障**：此改动为网关兼容降级，不修改原始工具 Schema；Gemini 保持原转换路径；工具端仍严格校验实际参数。
+  - **验证**：通过离线序列化请求验证，全量测试通过（2456 passed / 7 skipped）。
 
-- **网页抓取选择与上限可配置（#40）**：插件 Config 新增 `fetchProvider: auto | plugin | dsh`（默认 auto 保持既有行为）、`fetchMaxBodyChars`（默认 100000）和 `fetchMaxResponseBytes`（默认 2097152），上限须为正安全整数。显式 dsh 优先于代理检测和 Codex 搜索选择，plugin 则独立启用插件抓取。状态接口、设置页及不含代理凭据的切换日志展示配置与上限；README 说明如何修改插件 Config 并重载。回归覆盖真实插件注册、provider 重载、超过十万字符、多字节文本的字节/字符截断、显式模式优先级与诊断信息。临时恢复原注册接线后 3 条上限测试均复现 100000 字符截断，恢复原选择逻辑后显式 DSH 测试复现错误接管；修复恢复后全部通过。生命周期测试固定离线 DNS，不再依赖本机代理。DSH 抓取模式不使用插件上限；工具层另有输出限制，不承诺放大插件上限后可拿到整页。
+- **[通用配置] 网页抓取 Provider 选择与响应上限可配置（[#40](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/40)）**
+  - **新增配置项（插件 Config）**：
+    - `fetchProvider`: 可选 `auto | plugin | dsh`（默认 `auto` 保持既有行为）。`dsh` 显式优先于代理检测和 Codex 搜索选择；`plugin` 则独立启用插件自身抓取。
+    - `fetchMaxBodyChars`: 抓取正文最大字符数（默认 100,000，须为正安全整数）。
+    - `fetchMaxResponseBytes`: 最大响应字节数（默认 2,097,152，即 2 MB，须为正安全整数）。
+  - **界面与日志**：插件状态接口、设置页及切换日志展示当前配置与上限（日志中自动脱敏代理凭据）；README 补充配置重载说明。
+  - **注意事项**：DSH 抓取模式不使用插件设置的上限；工具层另有固定输出限制。测试已固定离线 DNS，不再依赖本机透明代理。
 
-- **修复 Claude（订阅）会话因一张宽图被永久卡死**：`messages.N.content.M.image.source.base64.data: At least one of the image dimensions exceed max allowed size for many-image requests: 2000 pixels`。
-  - **根因**：Messages 接口限制单张图片最长边为 8000 px；一次请求的图片**超过 20 张**时，每张图的最长边还不能超过 **2000 px**。DSH 存图时按总像素 2048×2048、最长边 8192 归一化，所以 2904×1272 这类并排对比截图会原样存下来；本线路随后按原样发送。会话历史不会丢掉旧图，图片只会越积越多。一旦超过 20 张、其中有一张宽于 2000 px，整次请求就会返回 400，之后每一轮（包括 fork 出来的会话）都会带上这张图，同样失败，无法自行恢复。
-  - **修法**：`resolveRequestImages` 先统计本次请求的图片块数（同一附件重复出现按多次计，tool-result 里嵌套的图片也计入），据此确定最长边上限（超过 20 张取 2000，否则取 8000）。只有超出上限的图片才通过 harness 的 `attachments.readImageRequest` 取一份按最长边缩小、结果确定的请求版本；已在上限内的图片仍按原字节发送，提示缓存前缀保持不变。存储的原图和会话历史都不改动。取不到缩小版本（后端不支持派生，或返回的版本仍然超限）时，这张图改成可见的「image unavailable」占位文本，而不是把原图发出去，导致整次请求失败。取消（abort）照常向上抛出。缩小版本的字节目标为原始 3.5 MiB（base64 约 4.9 MB），低于单图 5 MB 的上限。peer 范围内的每一代 harness（0.1.2-alpha.5 起）都声明了 `readImageRequest`，但旧代使用 `maxPixels` 而新版使用宽高目标；请求同时携带两套参数，旧代像素预算按未取整宽高比计算，避免窄图取整后越过最长边上限。新增 4 条旧代投影算法回归（横图、竖图和极窄图），无需升级 harness。
-  - **测试**：`test/claude-mapper.test.ts` 新增「Request image edge limits」7 条：20 张图以内宽图原样发送；超过 20 张时只缩小那张 2904×1272 的图（目标为 2000×876），线上的 tool_result 里携带的是缩小后的字节，其余 20 张原样发送；计数包括重复附件和嵌套图片；单张 4000×8192 的图会被压到 8000 上限；竖图按最长边保持宽高比，缺少尺寸的引用保持不动；无法派生或派生结果仍超限时改为占位文本；取消会原样传播。**已实测承重**：让 `resolveRequestImages` 恢复为按原样发送后，其中 4 条立即失败。
-  - **验证**：`npm run typecheck` 0 错误；`npm run build` 通过；全量 `npm test` 2405 passed / 9 skipped，只有 `test/web-provider-lifecycle.test.ts` 的 3 条失败。这 3 条与本次无关：本机代理把 `example.com` 解析成假 IP（198.18.0.206 / fc00::ce），在未改动的 master 上同样失败。另外用一个真实卡死会话的历史（34 张图，其中三张为 2904×1272）离线回放：只有那三张被缩小到 2000×876，其余 31 张原样发送。
-  - **边界**：未覆盖调用方直接内联 base64、不带附件引用的图片；这类图片没有尺寸信息，无法派生缩小版本，按原样发送。
+- **[Claude] 修复多图会话因单张宽图导致后续所有轮次永久卡死 400**
+  - **报错信息**：`messages.N.content.M.image.source.base64.data: At least one of the image dimensions exceed max allowed size for many-image requests: 2000 pixels`
+  - **根本原因**：
+    - **Anthropic 接口限制**：单张图片最长边上限为 8000 px；但当单次请求图片**超过 20 张**时，每张图片的最长边不得超过 **2000 px**。
+    - **存图与累积**：DSH 归一化存图规则为总像素 2048×2048、最长边 8192，导致常见并排对比截图（如 2904×1272）被原样落盘存储。会话历史不断累加图片，一旦总数 >20 且存在宽图，整轮请求即报 400，且后续轮次及派生（fork）会话均无法自行恢复。
+  - **修复方案**：
+    - **动态上限决策**：`resolveRequestImages` 预先统计请求包含的图片总数（含重复附件及 `tool-result` 嵌套图片），超过 20 张时将最长边阈值收敛至 2000 px，否则为 8000 px。
+    - **精准按需压缩**：仅对超限图片调用 Harness 的 `attachments.readImageRequest` 派生缩小版本；未超限图片保持原字节不变，确保提示缓存（Prompt Cache）前缀稳定。存储的原图及会话历史均不作修改。
+    - **降级容错**：若无法获取缩小版本或派生结果依然超限，优雅降级为可见的 `[image unavailable]` 占位文本，避免整轮对话崩溃；用户主动取消（Abort）正常透传。
+    - **老版本兼容**：兼容 peer 范围内 0.1.2-alpha.5 起各代 Harness（兼容旧版 `maxPixels` 与新版宽高目标参数，按未取整宽高比计算像素预算）。
+  - **测试与验证**：新增 7 项边缘限制回归测试，并通过 34 张真实历史图片（含 3 张 2904×1272 截图）离线回放验证，超限图成功缩至 2000×876，其余 31 张原样发送。
 
-- **插件内上下文预算恢复**：Kimi Code、MiniMax Code、Command Code、Claude、WorkBuddy 的模型请求在 HTTP 400/422 明确报告完整且一致的窗口、输入和输出 token 计数时，若输入仍能放下、上游输出预留等于实际发送的上限，会保留完整消息和工具，只降低输出上限并重试一次（预留 1024 tokens 余量，至少保留 1024 输出 tokens）。普通请求与摘要请求共用此路径，不修改 DSH、不截断历史。显式 thinking budget 不满足时不强行重试；鉴权、限流、字节限制、模糊计数、服务端忽略参数和流内错误保持原处理，输出截断也仍报告失败。Kimi/MiniMax 共用的输入估算补计推理文本和工具调用参数，避免将这些实际输入计为零。验证：截图预算的三种输出字段回归、MiniMax 普通/摘要真实 LLM 服务调用、Kimi Chat Completions 与 Command Code Responses 适配器回归通过；全量插件测试、强制源码及测试类型检查、构建通过。Codex 不支持输出上限字段，未套用此恢复；未进行真实账号端到端验证，不能据此认定截图中未知线路的所有压缩故障已解决。
+- **[通用机制] 插件内上下文预算自愈恢复机制（400/422 重试）**
+  - **适用范围**：Kimi Code、MiniMax Code、Command Code、Claude、WorkBuddy。
+  - **工作机制**：
+    - 当模型请求返回 HTTP 400 / 422 且明确报告了自洽的窗口、输入及输出 token 计数时，若当前输入仍能容纳且上游输出预留与实际发送上限一致，插件会自动保留全部完整消息与工具定义，**仅下调输出上限并自动重试一次**（预留 1024 tokens 余量，且至少保留 1024 输出 tokens）。
+    - 普通生成请求与压缩摘要请求共用此恢复链路，无需修改 DSH 核心代码，亦不截断历史消息。
+  - **边界保障**：显式 `thinking budget` 不满足时不强行重试；鉴权失败、限流、请求体超限、模糊计数及流式错误均维持原样报错。Kimi / MiniMax 的输入估算补齐了推理文本与工具调用参数计算。
 
-- **修复设置页「订阅服务」整页样式丢失（只剩标签栏有样式）**。
-  - **根因**：客户端插件系统按属性记账样式归属。模块工厂 materialize 时会把文档里**所有未打标**的 `<style>` 认领给当时正在 materialize 的那个包（`style:not([data-plugin])` 被写上该包 id），并在该包重载 / 被新 revision 替换 / 被从依赖图剪除时执行 `removeOwnedStyles(id)`，按 owner 删掉这些标签。本插件的 7 张表（antigravity / claude / kimi-code / minimax-code / workbuddy / pool / mermaid）此前只用 `style.id = …` 注入、**不带 `data-plugin`**，于是先被别的包认领，再随那个包的重载被一起删除；而聊天区那张已按约定打了 `data-plugin` + `data-plugin-css` 的 `…/main` 表存活下来。设置页标签栏的样式来自 `…/main`（`.dsh-codex-segments`、`.dsh-hub-tabs`），正文控件来自被删掉的共享 `.dsha-*` 基础表，所以呈现为「标签栏正常、整页正文裸奔」。
-  - **修法**：新增 `src/client/common/plugin-style.ts` 的 `installPluginStyle(name, css, legacyId?)`，把原来的「`createElement` + `style.id` + 一次性 append」统一换成：按 `…/<name>` 的 `data-plugin-css` 定位、缺失时创建、**创建/命中时都盖上本包的 `data-plugin` 与唯一的 `data-plugin-css`**、内容变化时刷新 `textContent`、disposer 恒为空操作（标签归文档所有）。八个安装器全部改走它，原来判断存在即 return 的分支一并去掉，因此旧 bundle 在页面里留下的未打标元素会被**就地接管**（不会叠出第二份 CSS），`…/main` 的行为保持不变。
-  - **测试**：新增 `test/client-style-ownership.test.ts`（5 条）——八个安装器跑完后断言文档里不剩任何 `style:not([data-plugin])`（不给别的包留可认领对象）、每张表的 `data-plugin-css` 都指向本包；ChatGPT 默认页依赖的 `.dsha-*` 基础表（Kimi / Antigravity）确实带本包归属；模拟 `removeOwnedStyles` 删光后重新安装能全部恢复；模拟「旧 bundle 的未打标表已被别的包认领」时必须接管同一元素并改回本包；旧 bundle 的过期 CSS 必须被刷新而不是 dedupe 成空操作。
-  - **验证**：`npm run typecheck` 0 错误；全量 **2314 passed** / 9 skipped，仅 `test/quota-ui.test.tsx` 2 条与本次无关、且在本机时区（Etc/GMT+7）下必然失败的历史用例（把 UTC 的 2030-01-01 渲染成 2029-12-31）未过。
+- **[设置 / UI] 修复设置页「订阅服务」整页样式丢失（仅标签栏有样式，正文裸奔）**
+  - **根本原因**：客户端插件系统的样式归属记账机制存在副作用。当其他模块 Materialize 时，会扫描并认领页面内所有未打标（`style:not([data-plugin])`）的 `<style>` 标签。当那个模块被重载或销毁时，会调用 `removeOwnedStyles` 批量删掉名下标签。本插件原先注入的 7 张独立样式表未打上 `data-plugin` 属性，导致被其他插件误认领并随之被删除，仅留存了聊天区的 `.../main` 样式表。
+  - **修复方案**：
+    - 新增 `src/client/common/plugin-style.ts` 中的统一安装器 `installPluginStyle(name, css, legacyId?)`。
+    - 统一按 `data-plugin-css` 定位，创建或命中时均强制打上本插件的 `data-plugin` 归属标记；CSS 变更时直接更新 `textContent`，`disposer` 设为空操作以将样式表托管给文档生命周期。
+    - 自动就地接管旧 bundle 残留在 DOM 中的未打标样式元素，杜绝重复注入和误删。
+  - **验证**：新增 `test/client-style-ownership.test.ts` 5 项测试，断言 DOM 中无遗留未标记样式表，且模拟重载清理后能完整恢复。
 
-- **修复 Ollama「同步模型列表」报 `Failed to execute 'json' on 'Response': Unexpected end of JSON input`**（[issue #36](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/36)）。
-  - **根因不在 Ollama Cloud**：issue 里推测的端点与鉴权都没问题——`CLOUD_BASE_URL` 一直就是 `https://ollama.com`，`/api/tags` 也一直带着 `Authorization: Bearer <key>`，只是从来没有任何一条断言钉住这两点（本次补上）。真正的原因是**本插件自己的路由**：`/ollama/api` 是全插件唯一没有用 `try/catch` 包起来的设置路由处理器，一旦它抛错，DSH 的 web server（`packages/host/webserver`）只会回一个**空的 400**（`res.writeHead(400); res.end()`）。卡片再把这个空响应体交给 `response.json()`，浏览器抛出的解析异常就成了用户看到的全部错误——既没有状态码，也没有请求信息，真实原因只留在主机日志里。同步路径上 `storeCatalog()` 当时是唯一没有保护的 `await`，设置文件写不进去就会走到这里。
-  - **修法（主机侧）**：路由处理器整体包进 `try/catch`，兜底用与 Claude / Kimi / WorkBuddy 等同级线路相同的 `{ok:false,error}` 500 信封，并补上它们都有、本线路唯独没有的 404 兜底；`storeCatalog()` 单独捕获，区分「列表读到了但本地存不下」与「读不到」。
-  - **修法（错误信息）**：新增 `fetchCatalog()` 保留失败原因——`auth`（401/403，含 `https://ollama.com/settings/keys`）、`upstream`（其他状态码）、`unreachable`（DNS/TLS/代理/超时）、`malformed`（200 但不是 `/api/tags` 文档，例如代理返回的 HTML）；`loadCatalog()` 保持「返回空列表、绝不抛」的既有契约不变。另外，「取不到凭据」原本把「一个 key 都没有」和「所有 key 都在冷却中」合并成同一句「请先添加 API Key」，后者会被误导去加一个毫无作用的 key，现在分开提示。
-  - **修法（客户端侧）**：`src/client/ollama/api.ts` 先读 text 再解析，响应体为空或不是信封时报告状态码与 `content-type`，不再让 `response.json()` 的原生异常冒到界面上。
-  - **测试**：新增 `test/ollama-routes.test.ts`（12 条），每条都断言**响应体可解析**而不只是状态码——`#36` 的故障形态正是「一个字节都没写」；其中最承重的一条让设置存储在同步中途抛错。`test/ollama-client.test.ts` 增 6 条（四类失败分类、端点与 Bearer 头断言、空列表属于成功而非 malformed），`test/ollama-section.test.tsx` 增 2 条（空响应体 / 非 JSON 响应体下界面显示可读错误且**不含** `Unexpected end of JSON input`）。**已实测承重**：把 `src/host/ollama/{routes,client}.ts` 回退到修复前，路由测试 12 条中 8 条立即失败。
-  - **验证**：`npm run typecheck` 0 错误；全量 `npm test` **2367 passed / 7 skipped / 0 失败**（151 文件通过 / 1 跳过）。
-  - **边界**：未用真实 Ollama Cloud 账号端到端复验——结论来自对 DSH web server 抛错路径的源码路径与本地复现。`src/client/api.ts`（Codex 卡片）存在同一处 `response.json()` 写法，但不在本 issue 范围内，未改动。
+- **[Ollama] 修复「同步模型列表」报 `Unexpected end of JSON input`（[#36](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/36)）**
+  - **根本原因**：
+    - 并非 Ollama Cloud 端点或 Token 鉴权问题，而是插件自身的 `/ollama/api` 路由处理器未加全局 `try/catch` 保护。
+    - 当底层设置落盘失败抛错时，DSH 内置 Web Server 会返回一个完全没有 Body 的空 HTTP 400 响应（`res.writeHead(400); res.end()`）。前端卡片直接调用 `response.json()` 解析空响应体，触发原生语法解析异常，掩盖了真实的报错原因。
+  - **修复方案**：
+    - **服务端兜底**：路由处理器全量增加 `try/catch`，统一采用 `{ ok: false, error }` 规范封包返回，并补齐 404 兜底与独立保护。
+    - **精细化错误诊断**：新增 `fetchCatalog()`，区分 `auth`（401/403，提供 API Key 链接）、`upstream`（上游其他状态码）、`unreachable`（DNS/TLS/超时）、`malformed`（代理返回 HTML 等非 JSON 格式）；细化区分“未配置 Key”与“所有 Key 均在冷却中”。
+    - **客户端安全解析**：前端改用先读文本再解析的策略，遇空响应体或非 JSON 格式时清晰展示 HTTP 状态码与 Content-Type，杜绝原生异常弹窗。
+  - **验证**：新增 12 条路由回归测试（包含写入中断断言）及 8 条客户端解析测试，测试全部通过。
 
-- **压缩恢复排查（进行中）**：MiniMax、Kimi、Codex、Claude、Command Code、WorkBuddy 与 Antigravity 的已接入 HTTP/SSE 上下文超限错误现在映射为 `CONTEXT_WINDOW_EXCEEDED`，使支持该机制的 Harness 能进入溢出压缩恢复，而不是按普通 provider 错误终止。认证、限流、配额及输出上限错误保持原分类；未改写历史或放宽请求大小限制。MiniMax 的真实 Harness LLM 服务四组合回归已验证修复前失败、修复后通过；相关 584 条测试、强制源码类型检查、测试类型检查与构建通过；另运行 Harness 自动/手动压缩 138 条现有测试全部通过。新增 MiniMax 摘要成功及输出截断的模拟流回归，确认截断仍以 max-tokens 结束。Command Code OpenAI 与 Antigravity 的流内错误帧不再被忽略。尚未进行真实账号端到端验证；强制压缩具体失败原因及其他线路仍在排查，不能据此宣称所有压缩故障已解决。
+- **[通用机制] 上下文超限错误归一化映射以支持 Harness 自动压缩**
+  - **改进内容**：
+    - 将 MiniMax、Kimi、Codex、Claude、Command Code、WorkBuddy 与 Antigravity 接入的 HTTP/SSE 上下文超限错误标准归一化为 `CONTEXT_WINDOW_EXCEEDED`。
+    - 使得支持溢出自愈的 Harness 能顺利触发会话压缩与历史修剪，而非直接以 Provider 普通错误中断对话。
+    - 鉴权、限流、配额不足及输出长度上限等错误保持独立归类；Command Code OpenAI 协议及 Antigravity 流内错误帧不再被静默忽略。
 
-- **修复 Claude 与 Command Code 登录时弹出两个一模一样的授权页**（[#33](https://github.com/Aa728848/dsh-chatgpt-subscription/pull/33)，由 @Anuii 提交）。
-  - **根因**：授权页被打开了两次。设置卡片在 `/login` 返回后调用 `window.open(authUrl)`（桌面端主窗口会把 http(s) 的 `window.open` 交给 `shell.openExternal`，即在系统浏览器中打开），而主机端 `/login` 路由调用 `beginLogin` 时没有传 `openBrowser`，于是走了默认实现，在主机上用 `cmd /c start`（macOS `open`、Linux `xdg-open`）把同一个地址又打开一次。
-  - **修法**：保留卡片打开，去掉主机打开。卡片打开的位置就是用户所在的位置（远程访问 GUI 时也正确），且与 Antigravity / WorkBuddy / Codex 早已采用的「只在卡片打开」一致。Claude 两个入口（登录、按账号重新登录）共用一份 `loginOptions`，默认 `openBrowser` 为空操作；测试仍可通过 `options.login` 注入自己的实现。Command Code 的 `beginWebLogin` 同样传入空操作。已核对生产接线（`registerClaudeRoutes` 的 options）不传 `login`，所以空操作在生产下不会被覆盖。
-  - **逐线路排查过的范围**：Antigravity 的 `openBrowser` 调用在 `loginAndSave()` 里（无头 CLI `bin/antigravity-login.mjs` 走的路径），其 `beginWebLogin` 不开浏览器，因此它原本就只在卡片打开，无需改动；Kimi 无卡片 `window.open`、只在主机打开，同样只开一次；WorkBuddy / Codex 的登录流程根本没有 `openBrowser` 选项，也是只在卡片打开。**双开的只有 Claude 与 Command Code 两条线路**。
-  - **测试**：新增 `test/login-opens-browser-once.test.ts`（2 条）——Claude 按生产接线（不注入 `login`）调用 `/login`，断言返回授权地址且没有任何 `cmd`/`open`/`xdg-open` 启动；Command Code 断言路由给登录流程传了空操作的打开函数，调用它不会启动浏览器。测试拦截浏览器启动而不真正执行，失败时也不会弹窗。已实测**承重**：把两处 `routes.ts` 回退到合并前，前两条立即失败（Claude 用例捕获到一次 `cmd` 启动，Command Code 用例 `openBrowser` 为 `undefined`）。
-  - **验证**：`npx tsc -b --force` 与 test tsconfig 均 0 错误；全量 **2313 passed** / 7 skipped，**0 失败**（148 文件通过 / 1 跳过）；CI 的 ubuntu 与 windows 两项均通过。
-  - **已知边界（合并时发现，未在本 PR 内改动）**：Command Code 卡片只有 `window.open`、**没有**像 Claude（`authorizeUrl` + `openAuthorizeUrl` 两个 i18n key）和 Codex 那样渲染可点击的手动链接。因此在会拦截弹窗的远程/网页 GUI 里，弹窗被拦后该线路没有兜底入口——不过这与 Antigravity / WorkBuddy 的现状一致（它们同样只有 `window.open`），是插件既有的模式差异，不是本次改动独有。是否补齐需要动 `command-code/locales.ts` 的文案，留作后续决定。
+- **[Claude / Command Code] 修复登录时弹出两个一模一样授权页的问题（[#33](https://github.com/Aa728848/dsh-chatgpt-subscription/pull/33)）**
+  - **根本原因**：
+    - 授权窗口被前端与后端各触发了一次：前端设置卡片在 `/login` 返回后调用 `window.open(authUrl)`；而主机端 `/login` 路由在调用 `beginLogin` 时未显式传入 `openBrowser` 参数，触发了默认逻辑，在宿主机上通过系统命令（`cmd /c start` / `open` / `xdg-open`）再次拉起了浏览器。
+  - **修复方案**：
+    - 统一采用“仅在前端卡片打开”的交互范式，保留用户界面所在终端的 `window.open`（支持远程访问 GUI），主机端默认将 `openBrowser` 置为空操作，彻底消除双重拉起。
+    - 经全线路审计：Antigravity、WorkBuddy、Codex 均已是单开，本次修复完善了 Claude 与 Command Code 两条线路。
 
-- **修复 Codex 线路响应流中断被判为 `UNKNOWN` 而一次都不重试，整轮直接失败**（[issue #32](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/32)）。
-  - **根因**：请求**之前**的每一条失败路径都已经定好类型——`request()` 抛 `NETWORK`、`responseError()` 抛状态码判定、SSE 解析抛协议或 provider 判定——唯独**响应体消费阶段**没有。连接在响应读完之前断掉时，undici 抛的是 `TypeError: terminated`：它本身不带任何 code，真实原因（`ECONNRESET`、对端关闭 socket、body 超时）只挂在 `.cause` 上。`wrapStreamWithWatchdog()` 对非超时、非取消的错误原样重抛，于是这个裸 TypeError 一路走到 `@deepseek-ai/dsh-llm` 的适配器边界，被 `normalizeLlmFailure()` 归一化成 `code: "UNKNOWN"`。而本线路声明的 `retryableCodes` 是 `['RATE_LIMIT','SERVER_ERROR','SERVER','NETWORK','TIMEOUT','TRANSPORT']`，**不含 UNKNOWN**，`dsh-llm-retry` 因此直接放行——**一次传输中断就终止整轮，一次都不重试**。同一次会话里 429 会重试 3 次，正是因为 `RATE_LIMIT` 在表内。
-  - **同文件内的 Claude 适配器早已做对**（`src/host/claude/adapter.ts` 的 `stream()` 有 `catch`），所以这是 Codex 线路漏掉的一步，不是设计选择。
-  - **修法**：在 `ResponsesClient.stream()` 消费流的 `try` 上补 `catch`，交给新增的 `streamFailure()` 归类：已是 `LlmError` 的（本线路自己的判定）原样放行，调用方取消归 `ABORTED`，其余一律归 `TRANSPORT`，并把 `errorChain()` 渲染的完整 cause 链写进 message——于是落盘的不再是干巴巴的 `terminated/UNKNOWN`，而是 `Codex stream failed: terminated: read ECONNRESET`。
-  - **已出过 chunk 也仍然按可重试归类**（这点与 Claude 的轮换规则不同，是有意为之）：DSH 把失败尝试的半截输出结算为被丢弃的 `assistant/attempt`，重试会另起一次新尝试；工具调用只在流**正常结束后**才执行。因此重试既不会重复已提交输出，也不会重跑工具。Claude 那条「出过输出就不轮换」约束的是**换账号**（会换凭据重发），不是同凭据重试，不能照搬。
-  - **测试**：`test/responses-client.test.ts` 新增 `Codex stream failure classification` 四条——用 undici 同形的 body（先吐一个 delta 再以 `TypeError: terminated` 断开，cause 为 `ECONNRESET`）断言 `TRANSPORT` 且 message 同时含 `terminated` 与 `ECONNRESET`；断言该 code 落在本线路 `providerRetryPolicy()` 的 `retryableCodes` 内（把「不重试」直接钉在策略上）；调用方取消仍归 `ABORTED`；流内 `response.failed` 的 `RATE_LIMIT` 判定不被改写。已实测**承重**：临时 `git stash` 掉 `responses-client.ts` 后，前两条立即失败（2 failed / 20 passed）。
-  - **验证**：`npx tsc -b --force` 与 test tsconfig 均 0 错误；全量 **2311 passed** / 7 skipped，**0 失败**（147 文件通过、1 跳过）；`npm run build` 与 `npm pack --dry-run` 干净，产物 `lib/index.js` 含新分支。`errorChain` 是 `@deepseek-ai/dsh-llm` 自 0.1.0-rc.7 之前就已存在的导出（`git tag --contains` 核对，引入它的提交已包含在 dsh-v0.1.0-rc.7），覆盖本插件 peer 下限 0.1.2-alpha.5，因此旧世代无需 clean-room 复跑；未改动任何依赖版本或兼容缝。
-  - **未在真实订阅账号上端到端复验**：结论来自 undici 同形错误的本地复现与 DSH 自身的 `agent/request-error` 归约路径阅读，未用真实凭据真的在中途断一次长流观察 `llm/retry` 事件。
+- **[Codex] 修复响应流异常中断被误判为 `UNKNOWN` 导致拒绝重试（[#32](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/32)）**
+  - **根本原因**：
+    - 底层 Undici 连接在流消费阶段异常断开时抛出无 Code 的 `TypeError: terminated`（真实原因挂载在 `.cause`，如 `ECONNRESET`）。
+    - 错误经过适配器边界时被默认归一化为 `code: "UNKNOWN"`，而 Codex 线路声明的可重试集合不包含 `UNKNOWN`，导致 `dsh-llm-retry` 放弃重试，一次网络微小中断即导致整轮任务失败。
+  - **修复方案**：
+    - 在 `ResponsesClient.stream()` 消费阶段补齐 `catch` 并由 `streamFailure()` 归类：非取消错误一律归类为 `TRANSPORT`，并将完整 Cause 链路提取至 Message（如 `Codex stream failed: terminated: read ECONNRESET`），成功命中可重试策略。
+    - 即使流已产生部分 Chunk 也依然按可重试处理（由 DSH 将半截输出结算为已丢弃的 Attempt，重试会重新开启完整尝试，工具调用只在流正常结束时执行，安全无副作用）。
+  - **验证**：新增 4 项流异常分类测试，断言 Undici 中断错误能正确识别为 `TRANSPORT` 并触发重试策略。
 
-- **修复 Antigravity Claude 普通文本回放碎片化**：不再把每个 SSE 文本 delta 回放成独立内容块，仅合并相邻纯文本 part，保留签名/工具/其他元数据边界，Gemini 不变。目标会话三个缓存断点前的回答分别含 385、365、20 个纯文本 part，离线重建均合并为 1 个且正文不变；这与 Claude 20-position 缓存回看限制吻合，但未进行线上缓存 A/B。旧会话无需改写；首次切换新编码可能重新预热缓存。
+- **[Antigravity] 修复 Claude 普通文本回放碎片化导致触碰缓存上限**
+  - **改进内容**：
+    - 修复此前将每个 SSE 文本 Delta 都回放为独立内容块的问题。
+    - 回放时仅合并相邻的纯文本 Part，保留签名、工具调用及其他元数据边界（Gemini 逻辑保持不变）。
+    - 消除因数百个碎文本块触碰 Claude 20-position 缓存回看限制的问题，优化多轮对话缓存复用率。
 
-- **修复 Antigravity Claude 多轮 400 `thinking.signature: Field required`**：回放时将连续思考分片和独立签名合并为签名完整的 thinking part；省略缺签名及跨模型 reasoning，保留正文和工具调用，Gemini 原始分片回放不变。修复作用于已有历史的请求转换，不改写会话记录。
+- **[Antigravity] 修复 Claude 多轮对话报 `thinking.signature: Field required`**
+  - **改进内容**：在请求回放时，自动将连续的思考分片与独立签名合并为结构完整的 Thinking Part；自动剔除缺少签名的残缺分片及跨模型残留 Reasoning，保留正常正文与工具调用。
 
-- **Antigravity 新增 Claude Opus 5.5 / Sonnet 5.5**：按实时 `fetchAvailableModels` 目录确认的 `-low` / `-medium` / `-high` 请求 ID 路由，提供三个推理档位，保留 4.6 与既有模型选择。窗口/输出上限暂沿用反重力 Claude 的 1M / 64K 默认值；未进行真实生成验证。已有用户需在 Antigravity 设置中勾选新模型。
+- **[Antigravity] 新增 Claude Opus 5.5 / Sonnet 5.5 模型支持**
+  - **改进内容**：
+    - 对齐 `fetchAvailableModels` 实时目录，新增对应 `-low` / `-medium` / `-high` 推理档位路由。
+    - 默认上下文窗口与输出上限沿用反重力 Claude 规范（1M / 64K）。用户可在设置中自主勾选启用。
 
-- **Provider 协议复核修复（未发布）**：修正 Command Code Responses 的真实事件标识、块索引与多模态报文；修正 Ollama 原生图片/工具参数、附件降级及工具历史；MiniMax 原生回放增加来源隔离和顺序保护。并发闸门正确处理降限、正小数和取消竞争；Codex 使用请求本地释放函数，不再从普通 429 推断并发上限。
-  - Codex 缺少可靠宿主 turn identity 时仍采取不跨请求复用的保守降级，不宣称完整 turn continuity。
-  - 后续补齐：八线路生成请求的显式凭据级并发配置、等待超时与取消释放；可选脱敏首字节/耗时/usage/前缀变化诊断；Command Code ZDR 全协议 fail-closed、权限与认证分类、目录过期及隐私状态展示；Ollama 图片/think 和 ZDR 接入精确证据门控。
-  - 旧 provider-only 表仍仅为库存，精确门控区分协议/模型/认证及离线证据。配置见 [运行控制](<docs/provider-runtime-controls.md>)；原计划状态见 [审计](<docs/plan-provider-agent-optimizations.md>)。未调用真实账号或进行收益 A/B。
+- **[协议复核] 多线路 Provider 报文格式与并发闸门校准**
+  - **改进内容**：
+    - 校准 Command Code Responses 的真实事件标识、块索引与多模态报文；
+    - 规范 Ollama 原生图片/工具参数传递、附件降级机制及工具历史格式；
+    - 增强 MiniMax 原生回放的来源隔离与顺序保护；
+    - 优化并发闸门控制逻辑，正确处理动态降限、正小数配额与取消竞争；Codex 改用请求本地释放句柄，不再由普通 429 误推断全局并发上限。
 
-- **修复思维坍塌保护每次触发都把当前会话写成坏记录**（用户报告：DSH 弹出「是否修复插件根因」，并指控本插件）。
-  - **根因**：`reasoning-collapse-guard` 用**手写字面量** `{ role: 'user', content: [...] }` 构造续跑消息（`src/host/reasoning-collapse-guard/index.ts` 的 `createResumeMessage`），既没有 `id` 也没有 `source`。DSH 在 `session.append` 里经 `assertMessageEventShape` 校验每条入站消息，缺 `id` 抛 `lacks an identified message`、缺 `source` 抛 `has invalid source`——**两个都会抛**。
-  - **为什么后果严重**：这个 steer 是在守卫**已经 `cancel` 之后**、于微任务里发出的。抛错发生时，坍塌已经中止、inbox 已保留，而这一轮直接以一条 splice 违规收场，模型什么也没回答——用户看到的正是「提示·等待回答」停在半截。
-  - **为什么当初写成字面量**：注释写的是「不引入绑定版本的 message 工厂，以便在每个 DSH 代际上都能加载」。这是当年**真实**的约束，不是惰性——但它用错了地方：`createUserMessage` 自 0.1.2-alpha.5 起就存在（已按 tag 核对），而 `id` / `source` 的要求是硬性的，工厂恰是唯一能同时满足两者的东西。
-  - **修法**：改用 `createUserMessage()`，并带上本插件自己已声明的 `dsh-chatgpt-subscription` source kind、`form: 'notice'` 与一行摘要。这样续跑消息既带真实身份与出处（不再冒充人工回合），也在 0.1.2-alpha.5 → 0.2.0-rc.2 全区间可用。
-  - **测试**：新增一条**复现原故障**的用例——不只断言消息长什么样，而是把守卫实际 steer 出来的消息喂给 DSH 真正的 `adoptSessionEvent`，断言它被接受。已验证该用例**承重**：临时换回修复前的字面量后，它立即以 `lacks an identified message` 失败（3 failed / 28 passed）。
-  - **验证**：`npx tsc -b --force` 与 test tsconfig 均 0 错误；全量 **2142 passed** / 7 skipped，**0 失败**；`npm run build` 与 `npm pack --dry-run` 干净。
-  - **边界**：已写入的历史坏记录不会被本次修复追溯修改——它们在用户报告的会话里已存在，需要 DSH 侧的一次修复或从修复点前分叉。
+- **[思维保护] 修复思维坍塌保护（Reasoning Collapse Guard）构造非法消息导致会话损坏**
+  - **问题现象**：触发推理坍塌守卫后，会话卡死且 DSH 提示「是否修复插件根因」。
+  - **根本原因**：
+    - 守卫构建续跑消息时使用了手写字面量对象 `{ role: 'user', content: [...] }`，缺少 `id` 与 `source` 属性。
+    - DSH 在 `session.append` 时进行严格校验，抛出 `lacks an identified message` 及 `has invalid source` 异常，导致会话状态损坏并中断。
+  - **修复方案**：改用官方 `createUserMessage()` 工厂函数，并附带本插件专用的 `dsh-chatgpt-subscription` source kind、`form: 'notice'` 标记与摘要信息，确保在全代际 DSH 运行环境中均完全合规。
+  - **测试**：新增集成用例，将守卫输出的消息送入真实 `adoptSessionEvent` 校验通过。
 
-- **修复输出上限被当作固定预留，导致自动压缩失效**（#30 / #31）；仅修改本插件，不要求修改 DSH。
-  - Kimi / MiniMax 不再上报动态预算为 `defaultMaxTokens`；仍在发送阶段按原公式计算并夹取线上 cap，显式请求上限（含摘要请求）仍优先，不引入固定 32K/64K 截断。
-  - 其余六条线路按 DSH 默认压缩策略检查固定预留：安全的默认值保持原样，不安全的省略。覆盖实时目录与窗口覆盖；Command Code 的 Kimi-K2.6 / Grok 4.5 / Grok 4.6、WorkBuddy 的 deepseek-v3-2-volc 默认配置受益。Claude、Antigravity、Codex 内置默认配置未发现同类失败，仍增加小窗口保护；Ollama 检查实时窗口。
-  - Claude / WorkBuddy 发送阶段保留实时目录 cap，Antigravity 保留模型 cap，Codex 仍不发送输出上限字段；设置卡中的输出能力值不改成零。
-  - 边界：显式过大的 maxTokens、自定义压缩策略、即使零预留也无法容纳 headroom/保留尾部的小窗口不在此保证内。WorkBuddy 的 default（56K）仍需部署方降低 compaction headroom/摘要预算或切换足够大窗口的模型；不会伪造窗口容量。升级后需重启插件/host，让新请求重新解析模型默认值，旧版会话若把旧默认持久化为显式值需清除该覆盖。
-  - 验证：新增 202 条回归用例，强制源码/测试类型检查、构建及全量测试通过；公共预算函数与真实 DSH 压缩解析器的 144 组边界结果一致。保留原 Kimi 复现文件；旧版 clean-room 与真实订阅账号端到端尚未复验。详细结果见兼容记录 `.dsh/skills/dsh-harness-upgrade/references/output-reservation.md`。
+- **[压缩策略] 修复输出上限作为固定预留导致自动压缩失效（[#30](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/30) / [#31](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/31)）**
+  - **改进内容**：
+    - Kimi / MiniMax 不再将动态预算上报为固定的 `defaultMaxTokens`，改为在发送阶段动态计算并对齐上限，避免压缩器误扣固定额度。
+    - 其余六条线路对齐 DSH 默认压缩策略，安全过滤过大的默认预留值，解决 Command Code（Kimi-K2.6、Grok 4.5/4.6）及 WorkBuddy（deepseek-v3-2-volc）因预留过大导致无法触发压缩的问题。
 
-- **修复 Codex 线路「跟随官方」名不副实：两个读取参数默认值与官方客户端不一致，其中一项持续多花额度**（用户报告：近期更新后额度消耗变快）。
-  - **取证**：以订阅目录 `GET /backend-api/codex/models` 为准，并与本机官方 Codex CLI 的权威产物逐字核对——随包的 `codex-rs/models-manager/models.json`、账号级 cache（`~/.codex/models_cache.json`），以及官方真实会话的 rollout。三处一致：**每个模型都声明 `default_reasoning_summary: "none"`、`default_verbosity: "low"`、`support_verbosity: true`**。官方 `client.rs` 的 `build_responses_request` 也正是这么发的：`default_reasoning_summary != None` 才带 `summary`，`default_verbosity` 每轮都参与 `create_text_param_for_request`。
-  - **缺口一（省钱）**：`responses-mapper.ts` 在未配置时发 `{ summary: 'auto' }`，而官方默认是 `none`。**推理摘要是计费生成**——模型要先把思考写成摘要，这部分计入输出。一个从未打开该设置的用户，因此每轮都在花官方客户端从不花的那一块。现在：未配置或选「无」一律**省略 `summary` 字段**（与官方 `skip_serializing_if = "Option::is_none"` 同形）；显式选择 `auto`/`concise`/`detailed` 仍照发。
-    - 顺带修掉一个真实浪费：此前选「无」会发 `summary: 'none'`，那是让后端**先生成再丢弃**——官方表达「不要摘要」的方式是根本不发该字段。
-  - **缺口二（体验，方向相反）**：未配置时本插件**整个不发 `text`**，而官方每轮发 `default_verbosity`（`low`）。省略该字段时服务端套用**隐含的 `medium`**，所以一个从未打开该设置的用户拿到的是比官方客户端更啰嗦的回答——这解释了为何「按默认」反而不简洁。现在未配置时按目录发 `low`。
-  - **不凭沉默放宽**：新增 `codexCatalogEntryById()`，与 `resolveCodexCatalogEntry()` 分开——后者对未知模型回落到默认条目，那是「给一个合理下限」的正确做法，但**无法区分「该模型声明支持」与「没人说过」**。`text` 只对显式声明 `supportsOutputVerbosity` 的模型发送，未知模型照旧省略，不会强加一个可能被拒收的字段。
-  - **测试**：新增 `test/codex-official-defaults.test.ts` 5 条，把官方目录的事实钉住——默认省略摘要、显式选择仍然发送、默认发 `low` 详细程度、GPT-6 全家族都声明了详细程度支持（新增模型漏声明会失败）、未知模型不得凭空得到该字段。已实测**承重**：把 `summary: 'auto'` 改回去，第一条立即以 `expected { effort: 'high', summary: 'auto' } to deeply equal { effort: 'high' }` 失败。既有 `responses-mapper` 13 处断言按官方契约更新（其中 4 处正是编码旧默认值的）。
-  - **未在真实订阅账号上做端到端额度对比**：结论来自官方目录/源码/rollout 的逐字核对与本地报文断言，未测量真实会话前后额度曲线。
-- **修复 Command Code 线路新模型没有思考等级（用户报告：`deepseek/deepseek-v4.1-flash-fast` 只有模型名，选不了思考程度）**。
-  - **根因**：能力表（`src/host/command-code/model-catalog.ts`）是**手工转抄**官方 CLI 注册表的一份快照，而官方注册表已经扩到 **92 条**、实时 `/provider/v1/models` 也在服务这些 id，本文件的转抄却停在 **74 条**。适配器对表里没有的 id 不是「不知道」而是走保守回落——**纯文本 + 空思考等级**，于是这些真实模型同时**丢掉图片输入**、并让 `resolveModel` 返回的 `reasoning` 整个缺失，模型选择器因此不再渲染 Effort 行。
-  - **不是这一个模型的问题**：同一根因造成 **16 个**正在被服务的 id 一起缺档，包括 `gpt-6-sol` / `gpt-6-luna` / `gpt-6.1-sol`、`claude-sonnet-5-5`、`claude-opus-5-5`、`xai/grok-4.7`、`z-ai/glm-5.3-flashx`、`xiaomi/mimo-v2.6-*`、`Qwen/Qwen3.8-Omni-Flash`、`stepfun/Step-5-Preview`、`stealth/space-bunny-alpha`、`inclusionai/ling-3.1-flash:free`、`meituan/LongCat-2.0`；用户报的 `deepseek/deepseek-v4.1-flash-fast` 只是其中一个。另外 4 条已有模型（`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`deepseek-v4.1-flash`）的等级也少报了一档。
-  - **修法**：按官方 CLI 的注册表**重抄整张表**（92 条含 7 条 CLI 隐藏、但本插件不隐藏的免费位；实际服务 85 条，与实时目录逐一核对，context window 完全一致），并**补上此前遗漏的两档**：`z-ai/glm-5.3-flash`、`z-ai/glm-5.3-flashx`、`Qwen/Qwen3.8-27B` 等注册表明写的 `maxTokens` 现在如实落到表里；模型的 `name` 也按 CLI 注册表逐条校正（`gpt-6-astra` 等）。
-  - **`off` 不再原样透传**：注册表把「不思考」这一档命名为 `off`，DSH 的词汇是 `none`（Kimi / Claude 线路早就这么写）。现在 `reasoningEffortsFor()` 在**读**的时候把 `off` 翻成 `none`，表本身保持对来源的忠实转抄；新增 `wireReasoningEffort()` 在两个请求构建器里把 `none` **从报文中彻底删掉**——这条线路表达「不思考」的方式是**不发该字段**（官方 CLI 的 `thinkingHook` 对 `off` 正是直接 return），而不是发一个上游不认识的字面量。为此 `COMMAND_CODE_REASONING_EFFORTS` 增加 `none`，设置卡的默认等级下拉多一项「Off」。
-  - **顺手堵住一个会让用户 400 的缺口**：设置卡只提供**一条**全线路默认等级，而不同模型的可用档位不同（如 `gpt-5.4-mini` 没有 `xhigh`）。此前这个默认值被无条件写进每一轮请求，**为 A 模型选的档用在 B 模型上会被上游拒收**。现在 `adapter.stream()` 检查当前模型公布的档位，不在其中就退回模型自身默认，而不是把无效值发出去。
-  - **测试**：`command-code-routes` 新增「覆盖实时目录的模型」（锁住这次遗漏的 11 个 id，再出现同样漏抄会在这里失败）与「`none` 绝不上线」（`none`/`off`/`null`/`''` 全部不产生字段，`low`/`max` 照常发送）；`command-code-adapter` 新增 fast 变体与 GPT-6 兄弟型号的等级断言；`command-code-mapper` 新增「关闭思考时两种协议都不得出现 reasoning 字段」。已核对**承重**：把 `wireReasoningEffort` 的 `none` 分支拿掉后，mapper 用例立即失败。
-  - **验证**：`tsc -b --force` 与 test tsconfig 均 0 错误；全量 **1929 passed** / 7 skipped，**0 失败**；`npm run build` 干净，并在**构建产物** `lib/index.js` 上直接跑 `resolveModel('deepseek/deepseek-v4.1-flash-fast')`，确认从「无 `reasoning` 字段」变为 `['none','low','high','max']`。
-  - **未在真实订阅账号上端到端复验**：等级表来自官方 CLI 注册表与实时目录的静态核对，未用真实凭据实际发过一轮 `reasoning_effort: 'none'` 请求确认上游接受「省略该字段」这一写法（官方 CLI 如此发送，是当前最强的行为依据）。
+- **[Codex] 对齐官方客户端默认参数：优化 Verbosity 并默认省略推理摘要以节省额度**
+  - **背景与取证**：
+    - 与官方 Codex CLI 随包模型表（`codex-rs/models-manager/models.json`）及真实会话报文严格核对：官方每个模型均声明 `default_reasoning_summary: "none"`、`default_verbosity: "low"`、`support_verbosity: true`。
+  - **问题分析与修复**：
+    - **额度浪费修复**：此前未配置时插件发送 `{ summary: 'auto' }`，而推理摘要属于计费输出内容，导致用户每轮对话都在产生额外计费。现修复为：未配置或选“无”时**完全省略 `summary` 字段**（对齐官方 `skip_serializing_if = "Option::is_none"`）；显式选择 `auto` / `concise` / `detailed` 时如实发送。
+    - **详细度对齐**：此前未配置时不发送 `text` 字段，服务端会套用默认的 `medium`，导致生成文本比官方更啰嗦。现未配置时按目录默认发送 `low`。
+    - **模型能力感知**：新增 `codexCatalogEntryById()`，仅对明确声明支持 `supportsOutputVerbosity` 的模型发送 `text.verbosity` 字段，避免向未知模型注入非法字段。
+  - **测试**：新增 5 项官方契约回归测试，锁定默认参数与字段省略逻辑。
 
-- **修复 Codex 订阅线路对话每轮 400：上游拒收 `max_output_tokens`**（[issue #29](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29)，实测账号 `plus`、模型 `gpt-6-sol` / `gpt-6.1-sol`）。
-  - **根因**：`responses-mapper.ts` 的 `buildResponsesPayload()` 在调用方未指定 `maxTokens` 时也会补上 `codexModelMaxTokens(model)`，因此**每一轮对话报文都带 `max_output_tokens`**；而订阅版 Responses 端点对部分账号/模型直接以 `400 {"detail":"Unsupported parameter: max_output_tokens"}` 拒收。这与 [#28](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/28) 的 `/alpha/search` 是**两个不同端点上的同一个错误结论**：当时认定「只有搜索端点拒收该字段，对话端点合法地发送它」，报告者的对照实验推翻了它——只删掉这个字段、账号/模型/代理都不动，对话即恢复。
-  - **不是配置问题**：错误文案 `Codex request failed (400): …` 由 `responses-client.ts` 的 `responseError()` 产出（搜索侧是 `Codex subscription search failed (400).`），错误码 `PROVIDER_ERROR`，指向对话链路；报告者在 0.10.15 的打包产物里定位到两个发送点，删除对话侧的那两行并重启 host 后 400 消失。
-  - **官方客户端本来就不发这个字段**：Codex CLI 的 `codex-rs/codex-api/src/common.rs` 中 `ResponsesApiRequest` **没有** `max_output_tokens` 字段，`codex-rs/core/src/client.rs` 构建请求时也不赋值；[openai/codex#31181](https://github.com/openai/codex/issues/31181) 记录了同一条 400（自定义 baseURL 走 Responses 时 `@ai-sdk/openai` 会无条件发出该字段）。也就是说，发它是本插件自行加出来的、与 wire 契约不同步的一行。
-  - **修法**：`buildResponsesPayload()` **不再写入该字段**（连同 `ResponsesPayload` 上的类型声明一起删除），`codexModelMaxTokens()` 保留但改为「仅进程内使用」并加注释说明。不再用「按模型上限封顶」的方式重引入——被拒收的正是这个请求本身。
-  - **保留了什么**：适配器仍上报 `defaultMaxTokens`（`host/model-catalog.ts`），DSH 用它做**本地**输出预留、供 `compaction-basic` 把完成部分计入窗口（harness 的 `reservedCompletionTokens`）；这个数字不出进程。截断仍可上报：后端以 `response.incomplete` 收尾，`parseResponsesStream` 映射为 `max-tokens` 结束原因。代价是调用方的 `maxTokens` 不再传给上游，长度由服务端默认值决定——与官方 CLI 行为一致。
-  - **测试**：`test/codex-output-cap.test.ts` 重写为**报文契约**用例（沿用 #28 在搜索侧确立的做法：断言整包而不是单个字段的缺席）——「未指定 `maxTokens` 时不发」「显式指定 4096 时也不发」，并保留一条正向断言锁住 `model` / `stream` / `store` / `include` / `input` 仍在，使「删字段」不能靠清空 body 满足。已验证该用例是**承重**的：把 `payload.max_output_tokens = 128_000` 加回后立即以 `expected … to not have property "max_output_tokens"` 失败。
-  - **验证**：强制类型检查（`npx tsc -b --force`）与 test tsconfig 均 0 错误；全量 **1923 passed** / 7 skipped，**0 失败**；`npm run build` 干净，产物 `lib/index.js` 中该字段只剩注释；`npm pack --dry-run` 正常。
-  - **未在报告者账号上端到端复验**：结论来自报告者的对照实验与本机的报文断言，未用真实订阅凭据发过一轮。
-- **修复 Codex 线路模型选择器为空（供应商已启动、登录正常，但一个模型都不显示）**（用户报告，账号实测为 `prolite` 套餐）。
-  - **根因**：接入实时目录那次提交（`d821752`，`feat(codex): follow upstream third-party wire`，v0.10.12）让 `listCodexModels` 把订阅目录当成唯一来源，再与用户的 `visibleModelIds` 求交集：`{codex-auto-review} ∩ {gpt-6-astra}` = **空集**，于是选择器一个不剩。
-  - **目录并非空的，是不含 chat 模型**：实测该套餐的 `GET /backend-api/codex/models` 返回 `count=1, slugs=codex-auto-review`——只含账号的 code-review slug。目录「比内置表窄」的设计意图是对的，但它**不能保证窄的那部分与用户的选择有交集**；交集为空时，目录就把用户自己勾选的模型全部删掉了。
-  - **不是账号没权限**：同一账号的 usage 接口报告 `model_usage: {"gpt-6-astra": {"available": true}}`，本地用量台账也记录了 `gpt-6.1-sol` 共 42 次成功调用。**模型是可用的，只是被目录挡掉了**。另外从 `client_version` 0.1 扫到 0.110，≥0.98 全部返回同一个只含 `codex-auto-review` 的结果，**换版本救不了**。
-  - **修法**：目录仍以「本账号能调什么」为权威，但**不再有权清空选择器**——目录能满足所选模型时照旧以它为准（不会擅自放大，该藏的照样藏）；一个都满足不了时回落到随包发布的内置表，并仍按选择过滤。新增回归测试锁住两侧：空目录场景补回所选模型，以及「目录有效时不得放宽」的边界。
-  - **验证**：`npm run typecheck`、`npm run build` 通过；复现用例从 `picker entries: []` 变为 `["gpt-6-astra"]`。全量 **1863 passed** / 7 skipped，失败的 6 条（`claude-model-catalog` 5、`antigravity-callback-port` 1）在**本轮改动前的干净工作树上同样失败**（`git stash` 验证），与本次无关。
-- **修复 MiniMax Code 线路会话在约 2 MB 处被本地拒绝、请求从未发出**（用户报告：`request was not sent: the serialized body is 2098045 bytes, above the 2097152-byte ceiling this route enforces`）。
-  - **根因**：`minimax-code/mapper.ts` 的 `assertRequestBodyFits` 直接复用了 Kimi 线路的 `MAX_MESSAGE_BODY_BYTES`（**2,097,152**），代码注释与 README 都写着理由是「两条线路上游都是同一族端点」。**这个数字是 Kimi Code 自己的网关上限**——其错误参考里逐字写着 `total message size N exceeds limit 2097152`。MiniMax 的任何文档都没有这条规定，而 MiniMax 自己的 Anthropic 兼容文档给出的请求体量级是**几十 MB**，不是 2 MB。
-  - **为什么这个理由不成立**：字节上限是**上游网关的属性**，不是「Anthropic 协议家族」的通用常量。同一条插件里 Kimi 线路给带视频的请求放宽到 64 MB、纯文本/图片仍是 2 MB，本身就说明这个数字是按路由而定的。更直接的反证来自本线路自己的模型目录：M3 是 **512K 上下文（可选 1M）**、**单张图片 10 MB**——**2 MB 的整包上限与「单图 10 MB」不能共存，一张合法图片就能单独触发它**。
-  - **代价**：这不是「提示了一句」而是**这一轮直接失败**。用户那次会话在 2,098,045 字节处被拦下（离上限只差 893 字节），请求根本没发出去；且会话越长越必然触发，用户唯一的出路是压缩或重开。README 里「与 Kimi 线路同一个守卫与上限」的说明还会让人以为这是服务端的既定事实。
-  - **修法**：上限改为**本线路自己的** `DEFAULT_MAX_MESSAGE_BODY_BYTES`（64 MB，取 MiniMax 对带媒体请求公布的请求体量级），并支持 `DSH_MINIMAX_CODE_MAX_BODY_BYTES` 覆盖（确有实测上限的部署可用；**取值非正整数时回落到默认值而不是静默关闭守卫**）。守卫的**形状**仍与 Kimi 共用，**数字不再共用**——`maxMessageBodyBytes` 现在住在 `minimax-code/types.ts`。
-  - **边界没有被削弱**：守卫仍在花掉连接之前拦下真正的失控请求（如每轮追加数 MB 工具结果的死循环），并给出同样可操作的提示（压缩/开新会话、检查大工具结果与图片），错误码仍是 `PROVIDER_ERROR`。普通会话**永远不会再被本地拒绝**。
-  - **测试**：`test/minimax-code-mapper.test.ts` 新增 7 条——「超过 Kimi 上限的真实请求体现在不被拒绝」（用 `buildMinimaxRequest` 造出 >2 MB 的**真实请求体**，锁住报告中的场景）、「上限远高于任何真实会话」、「失控请求仍被拦下且错误码不变」、「按部署指定的上限度量」，以及 `maxMessageBodyBytes` 的默认值/覆盖/非法值回落三条。已验证这些用例是**承重**的：把守卫换回借用 Kimi 上限的版本后，第一条立即失败。
-  - **验证**：`npm run typecheck`、`npm run build`、`npm pack --dry-run` 通过；`test/minimax-code-mapper.test.ts` 26 条全通过。
+- **[Command Code] 同步官方 92 个新模型目录，补齐思考等级与多模态输入**
+  - **根本原因**：
+    - 插件内置能力表滞后（仅包含 74 个旧模型），而官方 CLI 注册表及实时 `/provider/v1/models` 端点已扩充至 92 个模型。适配器对未知模型采取保守回退策略（纯文本且无思考等级），导致 16 个真实在服模型丢失了图片输入和思考档位选择（如用户反馈的 `deepseek/deepseek-v4.1-flash-fast`，以及 `gpt-6-sol`、`claude-sonnet-5-5`、`xai/grok-4.7`、`z-ai/glm-5.3-flashx` 等）。
+  - **修复方案**：
+    - **重构能力目录**：完整同步官方注册表（覆盖 85 个实际服务模型），精确补齐上下文窗口、maxTokens 与思考档位；
+    - **规范化思考关闭（off -> none）**：读取端将官方注册表的 `off` 映射为 DSH 标准的 `none`；向底层发包时彻底移除 `reasoning` 字段（该线路上游通过省略字段表示关闭思考）；
+    - **防止 cross-model 400 报错**：设置页提供全局默认档位，但不同模型支持的档位不同；适配器发包前动态校验模型支持档位，若全局默认档位不被当前模型支持，自动回退到该模型自身的默认档位，杜绝上游拒绝。
+  - **测试与验证**：新增实时模型覆盖与 `none` 字段省略断言，全量测试通过。
 
-  - **同一根因在图片预算上第二次发作，且更隐蔽（顺带修复）**：`minimax-code` 调用的 `offloadOldestRequestImages` 来自 Kimi，其预算是 Kimi 的 **1,500,000**——为塞进 Kimi 自己的 2 MB 请求体上限而定。MiniMax 模型表允许**单图 10 MB 原始字节**（base64 约 13.3 MB），超出近 9 倍，**一张普通截图就被换成占位文本**；
-    - **比请求体那一条更糟**：omit 是**静默替换**——不报错、不计数、不留痕。模型是在一个「图根本不存在」的对话上作答的，用户和排查者都看不出发生了什么；请求体超限至少还会失败并说明原因；
-    - **修法**：预算是**本线路自己的** `DEFAULT_MAX_REQUEST_IMAGE_BYTES`（16 MB：装得下模型 10 MB 单图上限并留余量，且远在 64 MB 请求体上限之内），可用 `DSH_MINIMAX_CODE_MAX_IMAGE_BYTES` 覆盖。共享的是**机制**（度量、按最旧优先丢弃、不动持久历史），不是**数字**；
-    - **对其他线路零影响**：`offloadOldestRequestImages(options, maxBytes?)` 的第二参数缺省即 Kimi 原值，因此 claude / antigravity / command-code / workbuddy / kimi 五条线路的请求体**逐字节不变**（映射层 239 条用例全绿）；
+- **[Codex] 修复对话每轮报 400：移除上游拒收的 `max_output_tokens` 字段（[#29](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29)）**
+  - **根本原因**：
+    - 插件在请求未指定 `maxTokens` 时会自动补上模型上限并发送 `max_output_tokens` 字段。然而订阅版 Responses 对话端点会直接拒绝该字段（返回 `400 Unsupported parameter: max_output_tokens`）。
+    - 经查阅官方 Codex CLI 源码（`ResponsesApiRequest`），官方客户端在对话时**从不发送**此字段；发它是插件早期的冗余实现。
+  - **修复方案**：
+    - 在 `buildResponsesPayload()` 中彻底删除 `max_output_tokens` 写入，生成长度交由服务端默认行为决定（与官方 CLI 一致）。
+    - 适配器内部仍正常上报 `defaultMaxTokens` 供 DSH 本地用于计算压缩窗口预算（不出进程）。
+  - **测试**：重写契约测试，断言对话报文绝不携带 `max_output_tokens` 字段。
+  > ⚠️ **历史说明**：更早版本中“修复声明了输出上限却从不发送”的条目已被推翻，确认对话端点不可发送该字段。
 
-  - **横向审计结论（七条线路逐一核对）**：字节与图片预算是**上游网关的属性**，跨线路继承只有一个正确理由——「两条线真的经过同一个网关」。据此复核后，**只有 minimax 这一处是错误继承**（它与 Kimi 是两家不同厂商、不同网关）：`claude`（8 MB，按 Anthropic 自己的 32 MB 包络与 5 MB 原始/图推得）、`kimi`（1.5 MB、视频 48 MiB，按其自身文档）、`antigravity`（12 MB，按 Google 20 MB inline 上限）三个数字**各自有独立出处**；`command-code` / `workbuddy` 的 12 MB 理由是「本线路是多上游代理，取最严格者并对齐本插件 Gemini 线路」——**这是代理路由的合理保守取值，不是错误继承**，但注释里「与其他线路一致」的措辞同样把「一致」放在「推导」之前，建议后续按各自上游重述（本次未改动，行为无误）。
-  - **未在真实订阅账号上端到端验证**：64 MB 是从 MiniMax 公开文档与本线路模型目录推得的**保守上界**，不是对该订阅网关的实测拒收点。真正的会话上限仍应按上下文窗口（而非字节）判断——本线路已有的 `clampOutputToContext` 就是按 token 做的。
-- **Claude 与 Kimi 线路补上提示缓存时长(TTL)选择**，两者都可在设置页选择，默认行为各自对齐官方。
-  - **Claude（`claude-subscription`）**：本线路用订阅凭据，而 [Claude Code 官方文档](https://code.claude.com/docs/en/prompt-caching) 写明「订阅用户在套餐额度内，主对话使用 **1 小时** TTL；超出额度改按用量计费后降回 5 分钟」。此前本插件四�� `cache_control` 全部是裸的 `{ type: 'ephemeral' }`（即默认 5 分钟），**与官方客户端行为不一致**——同样的用量，官方用户享受 4 倍缓存窗口而本插件没有。现默认按订阅档位发 `ttl: '1h'`，并在**同一处**同步发出授权它的 beta `extended-cache-ttl-2025-04-11`（1 小时是**需要许可的能力**，body 里要了 `1h` 却没有该标记会被拒，与 `block_binding` 同理）。设置页可选「跟随官方 / 1 小时 / 5 分钟」；1 小时写入价格更高，短会话不划算，故保留覆盖项。
-  - **Kimi（`kimi-code`）**：[Kimi 官方缓存文档](https://www.kimi.com/academy/best-practices-for-context-caching) 明确了 `prompt_cache_options`（OpenAI 兼容线路）与**顶层** `cache_control`（Anthropic 兼容线路）两套写法，且命中价为未命中的 1/10。此前本插件两种都不发——注意这与本插件**自己实测**的结论并不矛盾：那份实测针对的是「缓存身份由内容前缀哈希决定、标记无法干预」，而 TTL 控制的是**写入时长**，两者是不同的机制。**未设置时不发任何缓存字段**，请求与该设置存在之前逐字节一致。
-    - 两条线路写法**不可互换**：`cache_control` 只在请求顶层生效（消息体内的同名标记会被忽略），因此这里发的是顶层字段，不是给 system/消息块加标记。
-    - **档位在首次写入时锁定**，之后无法改写、命中时按原档免费续期；已有条目完全过期后才能用新档重写。1 小时写入约为 5 分钟的两倍价，只有当同一前缀会在一小时内被反复读取才划算——设置项的提示文案写明了这一点。
-  - **测试**：新增 `test/cache-ttl.test.ts` 11 条——Claude 默认写 5 分钟标记、写 1 小时标记、1 小时必带授权 beta、5 分钟不带该 beta、拒绝非法档位、关闭缓存时不写任何标记；Kimi 未设置时两种协议都不发、OpenAI 线路用 `prompt_cache_options`、Anthropic 线路用顶层 `cache_control`、拒绝非法档位。
-  - **顺带修掉一个真实的不一致**：`buildClaudeSystemBlocks` 是导出函数且自己写标记，此前固定写裸 `{ type: 'ephemeral' }`，会绕过 TTL（请求构建器事后虽会覆盖，但直接调用该函数的调用方拿到的永远是 5 分钟）。现两处写入用同一个 `cacheControlFor`，并更新了 `claude-mapper` / `claude-adapter` / `claude-routes` / `claude-token-store` 中断言旧标记形态的用例。
-  - **验证**：强制类型检查（`tsc -b --force`）与 test tsconfig 均 0 错误，`npm run build`、`npm pack --dry-run`、`npm ci --dry-run` 通过，全量 **1847 passed** / 7 skipped；失败的 7 条仍是先前已确认与本插件无关的 `claude-model-catalog`(5)、`antigravity-callback-port`(1) 与一条既有用例。
-  - **未在真实订阅账号上端到端验证**。Kimi 订阅端是否接受 `prompt_cache_options` / 顶层 `cache_control`（开放平台文档有，订阅端未实测）与 Claude 1 小时写入的实际命中收益，都需要在真机上确认；第一检查点是发一轮带 1 小时的请求后看 `usage.cache_creation.ephemeral_1h_input_tokens` 是否非零。
-- ~~**修复 Codex 线路声明了输出上限却从不发送**~~ — **已被 #29 的修复推翻，勿再照此实现**（本条当时的结论是「对话端点合法地发送该字段」，事实并非如此；详见 Unreleased 首条）。留档以说明这行代码的来历与它为什么看起来合理。
-  - 原文：`shared/model-catalog.ts` 为 GPT-6 家族声明了 128K 输出上限，`resolveCodexModel` 也把它作为 `defaultMaxTokens` 报给 DSH，但 `responses-mapper.ts` 构建 payload 时**完全没有 `max_output_tokens`** 字段——目录里没有的模型则回落到 32K 预 GPT-6 默认。
-  - **为什么重要**：不带这个字段时由服务端套用自己的默认值，本线路既无法预测也无法上报——某一轮撞上上限看起来就像一次普通的短回答。这与 Claude 线把 `model_context_window_exceeded` 当成正常结束是同一类问题。Codex 走 `store:false` 且每轮全量重发，这一项尤其容易被反复触发。
-  - **修法**：始终发送 `options.maxTokens ?? codexModelMaxTokens(model)`，并在调用方请求更大时用 `Math.min` 封到模型自身上限（与 antigravity mapper 同一道守卫）——超出模型能力的请求会被后端直接拒绝，因此必须向下封而不是原样透传。
-  - **测试**：`test/codex-output-cap.test.ts` 6 条——「始终发送模型上限」（回归锁定）、「调用方要求更小时照发」、「超出上限必须封顶」、「只存在于实时目录的未知模型也带上限」。
-  - **横向审计结论（同一轮核对七条线路，结论是除本条外无其他缺口）**：Codex 是**唯一**支持 `service_tier: 'priority'`（快速模式）、`text.verbosity`、`reasoning.summary` 与 `include: reasoning.encrypted_content`（加密思考回放）的线路——这四项是 Responses 协议独有，其他线路走 Anthropic / chat-completions 协议，没有对应字段，**不应**在其他线补。缓存方面 Claude 与 minimax 用的 `cache_control` 断点是 Anthropic 协议要求（不主动声明即按全价计费），OpenAI 系则是自动前缀缓存、只需 `prompt_cache_key`，两条线现已各自满足。服务端特殊能力（图片生成 `gpt-image-2`、`/alpha/search` 网页搜索、配额重置额度）同样只有 Codex 线具备，是这条线的护城河。minimax 的静态目录**不是**遗漏：其 `model-catalog.ts` 注释记录了 `/v1/models` 对订阅流量返回 `503 direct_route_not_configured` 并明令禁止探测。
-  - **验证**：强制类型检查（`tsc -b --force`）与 test tsconfig 均 0 错误，`npm run build` 通过，全量 **1837 passed** / 7 skipped；失败的 6 条仍是先前已确认与本插件改动无关的 `claude-model-catalog`(5) 与 `antigravity-callback-port`(1)。
-- **Codex 订阅线路跟上上游的第三方接入方式**（OpenAI Codex 负责人 Romain Huet：「我们希望人们能在任何地方使用 Codex 和他们的 ChatGPT 订阅」——涵盖 OpenCode、Pi、Claude Code；Codex CLI / app server 已开源）。本插件的 OAuth 参数此前就与社区逆向结论逐字一致（client_id、scope、redirect_uri、`id_token_add_organizations`、`codex_cli_simplified_flow`），所以基础无需改动；下面四项是实际缺口。
-  - **补上 `openai-beta: responses=experimental`**（`wire-auth.ts`）。该订阅后端是在 beta 标志下提供的，官方 CLI 一直发送这个头；逆向文档把它列为必填。缺少它的请求不是同一个面——现在能跑通只是后端当前宽容，这正是后端某次收紧时会突然 400/403 的那一行。
-  - **把 `originator` 收敛成一个值**（`compat.ts`）。此前散落三个：对话与 OAuth 用 `opencode`，图像（`codex-images.ts`）与搜索（`codex-search.ts`）覆盖成 `pi`——那是各端点逆向时间点的考古层，不是一次决定。后端按这个值区分客户端身份（官方 CLI 发 `codex_cli_rs`），一个账号因此有三种互不相关的失败签名。现统一为 `CODEX_ORIGINATOR`，并让 `OAUTH_ORIGINATOR` 直接引用它，登录与请求不可能再各说各话。两种取值对后端都已知可用；保留 `opencode` 是因为它是 OAuth 流程一直使用的值，改登录 originator 与改请求 originator 是两种不同的风险。
-  - **接入实时模型目录 `GET /backend-api/codex/models`**（新增 `codex-catalog.ts`）。这是本轮最有价值的一项：订阅线路的核心优势正是模型面比 API key 更新，而本插件此前把 `gpt-6-astra` 的 384K 起始窗口、128K 输出上限等**全部硬编码**——新模型发布就得改代码发版。目录加载器按账号缓存（15 分钟 TTL）、单飞，并用既有的 `catalog-snapshot` 持久化，重启后第一次请求直接从磁盘水化、不等网络；快照按账号 id 分域，避免 A 账号的列表回答 B 账号的选择器。**随仓库里其他线路（kimi / command / minimax / workbuddy）已有的动态目录范式实现**，也是这些线路里最后一个还在静态的。
-    - **失败时宁可放宽也不清空**：目录取不到就回落到随包发布的表（选择器因此变宽，而不是消失）；只持久化成功取到的列表，失败不会用回落表覆盖已有快照。
-    - **未知模型照常服务**：列表是「这个账号能调什么」的权威，所以本表没听过的 id 也会出现，但**不会**继承臆造的能力——未声明的模态回落为纯文本，未声明的档位回落为该族的 profile。
-    - **档位经过共享词表过滤**：列表给出的档位若超出本线路能表达的词汇，会被剔除，且默认档位取自存活下来的那些，而不是被剔除的那个。
-  - **多轮续传：发送 `prompt_cache_key` 并回传 `x-codex-turn-state`**（`responses-mapper.ts`、`responses-client.ts`）。此前每一轮都全量重发整个历史。缓存键按会话稳定（会话 id 本身已是哈希，直接复用），让后端复用提示前缀；turn state 在响应头读取、按会话保存、下一轮原样回送，让后端续接该轮而非重新摄入历史。两者都只是优化：turn state 是后端不再下发时**立即停止回送**（不猜测重放过期值），缓存键缺失也只是少一次缓存。存储有 200 个会话的上限并淘汰最旧项——宿主进程长期存活而没有任何「会话结束」信号，无界增长是真实的。
-  - **测试**：`test/codex-wire.test.ts`（11 条，beta 头 / 单一定 originator / 登录与请求同源 / turn state 的有无 / 列表解析的各种形态与保守回落）、`test/codex-catalog-adapter.test.ts`（6 条，实时目录生效、未知模型、档位过滤、失败不破选择器、signal 透传）、`test/responses-client.test.ts` 新增 2 条（缓存键跨轮稳定且 turn state 首轮不发次轮回送；后端停发后不再回送）。
-  - **验证**：强制类型检查（`tsc -b --force`）与 test tsconfig 均 0 错误，`npm run build` 通过，全量 **1831 passed** / 7 skipped；失败的 6 条（`claude-model-catalog` 5、`antigravity-callback-port` 1）在**本轮改动前的干净工作树上同样失败**（`git stash` 验证），与本次无关。
-- **修复所有订阅线路共享号池的读-改-写竞争**：原来只分别串行化读和写，令牌刷新或设置更新会把整份旧快照写回，覆盖其他请求的新令牌、账号与冷却状态——共享内核 `account-pool.ts` 的注释曾声称不会发生。现在账号增删、备注、主账号、轮换策略、冷却和认证标记都在同一锁内读取最新文档并修改；指向同一文件的多个号池实例共享锁与身份版本号。
-  - **刷新不占用整池锁**：模型请求、工具凭据、设置卡片与 Codex 强制续期共用按账号/凭据代际的单飞。读取当前凭据与登记刷新任务是一个短事务，网络请求在锁外发出，锁内不等待任何 flight（否则它自己的提交会死锁）。
-  - **条件写与过期保护**：轮换结果和外部权威凭据都按“发起时的凭据”写回，不匹配就返回最新行而不覆盖——晚到的刷新不会盖掉重新登录的新令牌，也不会复活已删除的账号；旧刷新抛出的终态失败也不会把刚登录的账号标记失效。刷新期间账号被删除时，模型请求会切到其他可用账号。
-  - **严格落盘与可选记账分离**：轮换出的新令牌必须写入并读回验证成功；最近使用时间等记账失败仍不阻断正常请求，且不会回滚期间发生的删除、重登录或主账号切换。主账号镜像按提交顺序更新，显式空池不再因镜像清理失败而从旧投影复活账号。
-  - **消除一次调用两次轮换**：`OAuthService` 原先先取凭据（可能已按到期刷新）再强制续期，会在几秒内连续消费两个刷新令牌；现在强制续期由号池一次完成。
-  - **迁移线路特有路径**：Claude 的身份索引、导入、合并与删除改用事务，凭据文档只在号池提交成功后同步（此前满池或落盘失败会留下孤儿凭据），非订阅凭据仍在事务内被拒绝；MiniMax 自愈与 WorkBuddy 桌面账号同步改用定向原子补丁与条件写。
-  - **确定性回归测试**：`test/account-pool-concurrency.test.ts` 覆盖跨实例并发添加与设置、不同账号交错刷新、同账号只轮换一次、刷新期间删除/重新登录、过时认证失败、镜像顺序与落盘失败，并在未修复代码上实测失败。协调范围是同一个宿主进程；不声称提供跨进程文件锁，也无法阻止外部应用自行轮换令牌。
+- **[Codex] 修复模型选择器在部分套餐（如 Prolite）下显示为空的问题**
+  - **根本原因**：
+    - 接入实时模型目录后，插件将订阅接口返回的模型与用户勾选的可见模型取交集。
+    - 部分订阅套餐（如 Prolite）的 `GET /backend-api/codex/models` 仅返回了代码审查相关的 slug（如 `codex-auto-review`），交集计算后导致列表为空。实际上该账号具备普通对话模型的可用权限。
+  - **修复方案**：
+    - 订阅目录依然作为可用模型的权威参考；但当交集为空时，**优雅回退至插件内置的模型表**，并按用户勾选进行过滤，确保模型选择器永不意外变空。
+  - **测试**：覆盖空目录场景与有效目录场景的边界测试。
 
-- **Claude 线路审计修复（均有回归测试，且在修复前代码上实测失败）**：
-  - **按账号「重新登录」修不好那个账号**（`routes.ts` `loginStore`）。重新登录经 `pool.credentialStoreFor()` 只写进旧的单账号凭据文档，而请求路由读的是**号池行**；随后又清掉失效标记，于是该行带着**已失效的旧令牌**重新进入轮换，下一次请求再次失败——浏览器登录成功了，账号却立刻又要求重新登录。现在一律经 `pool.addAccount()` 写入（按账号身份就地更新同一行并同步文档），且只有新凭据确实落在用户点的那个账号上时才清除失效标记（浏览器里登成别的账号时，会新增那个账号，而不会把死行放回轮换）。
-  - **刷新令牌在「2xx 但响应体解析失败」后被重发**（`oauth.ts` `refreshAccessToken`）。重试循环只对 `ClaudeUnauthorizedError` 提前停止，而 `parseTokenResponse` 抛的是普通 Error；一次 200 意味着轮换型 refresh token 已被消费，重发同一个必得 `invalid_grant`，账号随即被判失效。现只重试 `ClaudeRetryableError`。
-  - **登录卡片轮询在 `exchanging` 状态永久停止**（`ClaudeSection.tsx`）。主机兑换授权码期间报告 `exchanging`，若某次轮询恰好读到它，轮询即停，卡片永远停在「正在交换令牌」，而主机早已登录完成。现在 `pending` 与 `exchanging` 都持续轮询。
-  - **仅含图片的工具结果发送空 text 块**（`mapper.ts`）。API 要求 text 块非空，截图 / read_image 这类结果会让该轮以及之后每一轮回放它的请求都失败。现在以 `(see attached image)` 占位（同参照实现），并丢弃结果中的空文本块。
-  - **出站文本未清除孤立代理项（unpaired surrogate）**。按字节截断的工具输出可能在 emoji 中间断开，`JSON.stringify` 会写出孤立的 `\uD83D` 转义，上游拒收，且因留在历史里而每轮复现。`sanitizeText` 现同时去除 NUL 与孤立代理项（同参照实现 `sanitizeSurrogates`），成对的 emoji 不受影响。
-  - **403 `permission_error` 被当成凭据失效**（`client.ts` `classifyFailure`）。官方定义它是「无权使用该资源」——例如选了订阅不含的模型——重新登录无法改变。原先会把正常账号标记失效、移出号池轮换，并提示用户重新登录。现归类为请求问题（`PROVIDER_ERROR`）；没有类型化 body 的 403 仍按凭据失败处理（保守）。
-  - **模型列表只读第一页**（`client.ts` `performCatalogLoad`）。`GET /v1/models` 默认每页 20 条，而本线路把该列表当作选择器的权威；现发送文档允许的最大值 `limit=1000`。
-  - **`refusal` / `sensitive` 被当成正常结束，与 tool_use 同时出现时还会执行被拒那一轮的工具调用**；**`model_context_window_exceeded` 被当成正常结束**（官方：应视为截断）。现在前者报告为 `error`（附 `stop_details.explanation`），后者映射为 `max-tokens`。
+- **[MiniMax] 修复请求体 2 MB 本地虚假拦截与图片预算过小问题**
+  - **问题现象**：会话进行到约 2 MB 时，插件在本地直接抛错拦截（`request was not sent: the serialized body is ... above the 2097152-byte ceiling`），请求根本未发出。
+  - **根本原因**：
+    - 插件原实现错误复用了 Kimi 线路的 `MAX_MESSAGE_BODY_BYTES`（2 MB）。2 MB 是 Kimi 网关自身的硬性限制，而 MiniMax 的 Anthropic 兼容端点支持数十 MB 的请求体。
+    - MiniMax 允许单张图片 10 MB 原始数据，2 MB 的整包限制会导致单张合法图片即触发本地误拦截。
+    - 类似地，图片预算原先也错误借用了 Kimi 的 1.5 MB 预算，导致合法图片被静默替换成了占位文本。
+  - **修复方案**：
+    - **独立上限**：将请求体上限调整为 MiniMax 自有的 `DEFAULT_MAX_MESSAGE_BODY_BYTES`（64 MB），并支持环境变量 `DSH_MINIMAX_CODE_MAX_BODY_BYTES` 自定义覆盖；
+    - **放宽图片预算**：将单图预算调整为本线路自有的 `DEFAULT_MAX_REQUEST_IMAGE_BYTES`（16 MB），装得下 10 MB 单图并留足余量，支持 `DSH_MINIMAX_CODE_MAX_IMAGE_BYTES` 覆盖；
+    - **横向审计**：对全仓库 7 条线路的请求体和图片预算进行了严格审计，明确各线路均根据对应网关的真实属性独立定义，避免不合理的跨线路继承。
+  - **测试**：新增 7 项映射层测试，验证 >2 MB 真实请求体正常通过，失控请求依然被拦截。
 
-- **修复 Claude 线路输出速度（TPS）与首字时间（TTFT）统计严重偏高**（用户报告）。DSH 的 TPS = `usage.outputTokens ÷（完成时刻 − 首个非空 delta 时刻）`，而 `outputTokens` 包含全部思考 token。`mapper.ts` 却把 `thinking_delta` **缓冲到 `content_block_stop` 才一次性发出**，于是首字时钟在思考**结束后**才开始：全部思考 token 被除以「回答阶段」的时间（例：思考 60 秒约 5000 token、回答 5 秒约 500 token → 显示约 1100 tok/s，实际约 85 tok/s；以工具调用结尾的步骤更离谱），TTFT 则吞掉整个思考阶段，界面在思考期间也一片空白。
-  - **修法**：思考块在 `content_block_start` 即发 `block-start`，每个 `thinking_delta` 到达即发 `reasoning-delta`；只有回放条目（需要最后才到的 signature）等到块结束写入。原注释给出的缓冲理由（「不能回放的思考不该让调用方看到」）与代码行为本就不符——无签名块一直照常展示。
-  - **顺带修正思考 token 数**：原先 `reasoningTokens` 用「返回文本长度 ÷ 4」估算，而 Claude 4+ 返回的是**摘要**思考，远少于实际计费的思考量。现改用服务端在最终 `message_delta` 给出的 `usage.output_tokens_details.thinking_tokens`（缺失时才回落到估算），并封顶于 `outputTokens`——DSH 会整条丢弃 `reasoningTokens > outputTokens` 的用量记录。
-  - **测试**：新增用例逐事件断言「delta 到达即发出」，并在 HEAD 版 mapper 上实测失败（`expected [] to deeply equal [ block-start … ]`）；另有 `thinking_tokens` 优先与封顶两条。
-- **修复 Claude Opus 5.5 在新账号上可能「一次前缀变化后每轮都 400」**。官方 preserved-thinking 文档列明 Fable 5.1、**Opus 5.5**、Sonnet 5.5 会做思考块前缀校验，2026-08-31 起创建的账号默认强制：`system` / `tools` / 更早消息一旦变化（DSH 压缩、工具列表变化、本插件的图片卸载），回放的思考块即 400，且重发同一请求永远失败，除非设 `block_binding.prefix_mismatch_behavior: 'drop_block'`。Opus 5.5 走 adaptive 分支从不发送它。现能力表新增 `bindsThinkingToPrefix`，adaptive 分支对这类模型附带 `block_binding`（配合上一条的 beta 头），**不**改变其 effort 语义（仍不强制 high）。
+- **[Claude / Kimi] 提示缓存时长（TTL）支持自定义配置（5 分钟 / 1 小时）**
+  - **Claude 线路**：
+    - 官方 Claude Code 订阅用户在额度内支持 **1 小时** 提示缓存 TTL（超出后降为 5 分钟）。此前插件仅发送默认 5 分钟的 `{ type: 'ephemeral' }`，未能享受到官方的 4 倍缓存窗口。
+    - 现默认按订阅身份发送 `ttl: '1h'`，并同步附加授权 Beta 头 `extended-cache-ttl-2025-04-11`。设置页支持切换“跟随官方 / 1 小时 / 5 分钟”。
+  - **Kimi Code 线路**：
+    - 对齐官方文档，OpenAI 兼容协议支持 `prompt_cache_options`，Anthropic 兼容协议支持顶层 `cache_control`；默认未配置时不发送任何缓存字段。
+  - **测试**：新增 11 条缓存 TTL 单元测试，覆盖不同协议与档位校验。
 
-- **修复 Claude 线路无法使用 Claude Sonnet 5.5（`claude-sonnet-5-5`）**（用户报告：设置卡片上该模型显示「该模型不接受思考档位」）。
-  - **根因 ①：能力表没有这一行**。服务端 `GET /v1/models` 已列出它，但本地表里查不到，于是落到保守桩：无档位、不支持图片、200K 窗口、`thinkingMode: 'none'`，且**声称支持 temperature**——而官方文档写明该模型收到非默认 temperature 即 400。现新增为**本地策展行**（快照 `pi-ai@0.85.1` 早于该模型）：1M 上下文 / 128K 输出 / 支持图片 / 档位 `low`–`max` / 不支持 temperature / 思考不可关闭（`disabled` 与 budget 形式均为 400）。取值来自官方 overview 与 what's-new 页面，并与更新的参照 `pi-ai@0.99.1` 逐项一致。
-  - **思考形态取 `mid-convo`**：官方默认档位是 `high`（与该分支未指定时强制的 `high` 一致，不会像 Opus 5.5 那样被静默抬档）；且其思考块与会话前缀绑定——2026-08-31 之后创建的账号，前缀一变（system、tools、更早消息）回放就 400，除非请求带 `block_binding.prefix_mismatch_behavior: 'drop_block'`。`test/claude-model-catalog.test.ts` 的 mid-convo 名单相应加入该 id。
-  - **根因 ②：`mid-convo` 请求缺少授权 `block_binding` 的 beta**。官方文档明确：带 `block_binding` 却不带 `anthropic-beta: thinking-binding-controls-2026-08-01` 会返回 400 `block_binding: Extra inputs are not permitted`；参照实现对这类模型一直发送该 beta，本插件此前没有。现在请求头**从已构建的请求体读出**是否带 `block_binding`（`claudeBodyBindsThinking`），带则追加该 beta。这同时影响已有的 `claude-fable-5-1` 与 `claude-opus-5`。
-  - **申报版本 2.1.283 → 2.1.285**（npm `latest`）。Sonnet 5.5 由 Claude Code **2.1.284** 首次提供，而上游此前正是按「首次提供该模型的版本」为 Opus 5.5 设门槛；未观测到上游报错数字，因此**不记录** `minCliVersion`，只加一条测试锁「申报默认版本 ≥ 2.1.284」。若你按旧说明设了 `DSH_CLAUDE_CLI_VERSION=2.1.283`，请删除或改为 ≥ 2.1.284。
-  - **验证**：新增/修改的 10 条用例在**回退 `src/` 后全部失败**、恢复后通过；以 `pi-ai@0.85.1` 快照跑保真锁 206 条 Claude 用例全绿；`npm run typecheck` 0 错误；全量 1777 passed / 10 skipped，仅 `web-provider-lifecycle` 3 条失败——本机 DNS 把公网域名解析到 fake-IP，**干净工作树上同样失败**。未在真实订阅账号上端到端验证。
+- **[Codex] 跟进上游第三方接入规范（Beta 头、统一 Originator、实时目录与多轮续传）**
+  - **补齐 Beta 标头**：出站请求统一携带 `openai-beta: responses=experimental`；
+  - **统一 Originator**：收敛各端点的 Originator 标识为单一的 `CODEX_ORIGINATOR`（统一为 `opencode`），避免登录与不同端点识别产生割裂；
+  - **实时模型目录**：接入 `GET /backend-api/codex/models` 动态加载，支持 15 分钟单飞缓存与本地磁盘快照持久化，新模型发布无需频繁更新插件代码；未知模型保守回落，不臆造虚假能力；
+  - **多轮提示续传**：支持发送 `prompt_cache_key` 并回传响应头 `x-codex-turn-state`，提升服务端前缀缓存命中与多轮对话续接效率；本地维护 LRU 缓存避免内存无界增长。
+  - **测试**：新增 19 条测试，覆盖 Wire 标头、Originator 一致性、实时目录与状态回传。
 
-- **新增 Codex 模型 GPT-6.1 Sol（`gpt-6.1-sol`）**。官方文档（`developers.openai.com/api/docs/models/gpt-6.1-sol`）明确它是 GPT-6 家族里「平衡速度、成本与智能」的一档：near-Astra 性能、更低价格，且在 **ChatGPT Work 与 Codex 中可用**。
-  - **规格**（同一份官方文档）：`reasoning.effort` 支持 `low` / `medium`（默认）/ `high` / `xhigh` / `max`，**不支持 `none` 与 `minimal`**；1,050,000 context window、128,000 max output tokens、输入模态 text + image、Apr 30 2026 知识截止。
-  - **归入现有 GPT-6 profile**（`reasoningProfile: 'gpt-6'`）：本插件早前的 GPT-6 档已经是不含 `none`/`minimal` 的 `low/medium/high/xhigh/max` 且默认 `medium`，与官方对 6.1 Sol 的描述**逐项一致**，因此直接复用该 profile 而不是新造一个；输出上限 128K 与 384K 起始上下文也沿用 GPT-6 家族常量，并进入 `DEFAULT_VISIBLE_CODEX_MODEL_IDS`（紧邻 Astra）。
-  - **测试**：`client-registration` 的复选框/上下文行数量断言原本硬编码为 10，现改为从 `CODEX_MODEL_CATALOG.length` 推导——新增目录条目不再需要改一条与「渲染」无关的计数；`adapter.test.ts` 的目录断言补上 6.1 Sol 一行。
+- **[号池架构] 修复所有订阅线路共享号池的读-改-写竞态**
+  - **根本原因**：此前各线路对号池的读写未实现跨异步操作的严格锁保护，当多并发请求触发 Token 刷新或设置更新时，后提交的事务容易覆盖先提交的新 Token、账号及冷却状态。
+  - **重构要点**：
+    - **严格原子事务**：账号增删、备注、主账号切换、冷却标记等操作均在统一锁内完成“读最新 -> 改 -> 写”闭环；
+    - **非阻塞整池单飞**：令牌刷新采用按账号/凭据代际的独立单飞控制，网络 I/O 在锁外执行，避免死锁；
+    - **条件写保护**：凭据写回严格比对发起时的版本代际，过时刷新结果直接丢弃，杜绝复活已删除账号或覆盖新登录凭据；
+    - **落盘验证与记账解耦**：关键 Token 落盘后立即读回校验；最近使用时间等非关键记账失败不阻塞正常请求。
+  - **测试**：新增并发冲突回归测试（`test/account-pool-concurrency.test.ts`）。
 
-- **修复各线路模型目录：清空缓存后，仍在途的刷新会把缓存与快照重新写回**（CI 在 Windows 上暴露）。`clearCachedCatalog()` 会丢弃内存缓存，但 stale-while-revalidate 路径**先返回旧值、后台继续拉取**，那次拉取在清空之后才落地，于是把刚被丢弃的缓存和快照都恢复了。
-  - **CI 现场**：Windows 上 `kimi-code-catalog-cache` 一条以 `expected [ { id: 'k3', … }, …(1) ] to deeply equal []` 失败——上一轮的快照在测试清理之后被重新写出，下一个测试把它当作「本来不存在」的文件重新水化。Ubuntu 上不出现，因为凭证读取（Windows 走 DPAPI 需起 `powershell.exe`）慢到足以让这次写入越过清理点。
-  - **修法**：给 `kimi-code` / `command-code` / `workbuddy` 三处目录缓存加 `catalogCacheEpoch`，在发起拉取前采样、落地前比对，与 antigravity / workbuddy **配额**路径早已使用的 epoch 写法一致；清空时递增。快照不再被写入，缓存也不被恢复，但**调用方仍拿到它请求的那份列表**。
-  - 另外让 `writeCatalogSnapshot` 返回其 Promise，并新增 `flushCatalogSnapshots()`：测试此前用 `setTimeout(20)` 赌写入已完成，现在可以确定性地等待（生产路径从不调用）。
-  - **测试**：`kimi-code-catalog-cache` 新增一条直接制造该竞态的用例（拉取被 gate 卡住 → 清空 → 放行），断言调用方拿到列表、缓存仍为空、且**没有**快照落地。已实测：**移除守卫时该用例失败**（`expected [...] to deeply equal []`，与 CI 报错一致），加上守卫后通过；两个文件连跑 10 次全净。
+- **[Claude] 线路健壮性审计修复（综合 8 项）**
+  - **账号重新登录写错存储**：修复“按账号重新登录”后将新凭据写入旧单账号文件而非号池行、导致死循环提示重新登录的问题；
+  - **刷新令牌解析失败重发**：修复 HTTP 200 但响应体解析异常时重复重试消费型 Refresh Token 导致凭据失效的问题；
+  - **登录轮询停滞**：修复卡片在轮询到 `exchanging` 瞬态时提前停止轮询的 Bug；
+  - **空文本块防御**：对于纯图片的工具调用结果，自动填充 `(see attached image)` 占位文本，避免因空文本块被 API 拒绝；
+  - **孤立代理项字符清洗**：工具输出按字节截断时若在 Emoji 中间断开，`JSON.stringify` 会产生未配对的代理项字符（`\uD83D`）；现统一清洗孤立代理项与 NUL 字符；
+  - **403 权限错误误判**：上游返回无权限（如模型未包含在订阅中）时归类为 `PROVIDER_ERROR`，不再错误地将正常账号标记为失效踢出号池；
+  - **模型目录分页**：请求模型列表时发送 `limit=1000`，避免默认每页 20 条导致可用模型截断；
+  - **结束状态规范化**：`refusal` / `sensitive` 明确映射为错误，`model_context_window_exceeded` 映射为截断（`max-tokens`），杜绝误触发工具调用。
 
-- **跟进 DSH 0.2.0-rc.2（本机 harness 仓库更新，npm `latest` 与 `next` 标签已推进至该版本）**。`dsh-v0.2.0-rc.1..dsh-v0.2.0-rc.2` 共 1022 个文件，但逐一审计插件导入的 20 个包与全部兼容接缝后，**无需任何破坏性或行为性适配**：`dsh-llm` / `dsh-settings` / `dsh-web` / `dsh-tools` / `dsh-host-webserver` / `dsh-timeout` 等核心包源码零改动（仅版本号升级），`vendor/`（cordis / loader / schemastery）字节相同；`ui-conversation` 仅增加问答相关 i18n 条目并复用局部插槽对象，`ui-model-selection` 增加模型模糊搜索及提供商排序（插件所引用的 `ModelDirectoryState` 类型定义字节相同），`ui-renderer` 仅 `FactoryOutlet` 做 `useMemo` 细微优化，`ui-tool` 增量导出问答面板类型，`tool-ask-user` 新增 timed 模式且默认 `'legacy'` 保持阻塞完全兼容，shell 工具仅微调提示词。本轮的实际变更：
-  - `package.json`：15 个 `@deepseek-ai/dsh-*` peerDependencies 区间各追加 `|| ^0.2.0-rc.2`（预发布区间不跨版本组，显式追加），devDependencies 基线 `^0.2.0-rc.1` → `^0.2.0-rc.2`。
-  - lockfile：`dsh-attachment@0.2.0-rc.2` 精确钉 `dsh-brand` peer，按既定做法干净重建 `package-lock.json`（`npm ci --dry-run` 显示 up to date）；`pnpm-workspace.yaml` 排除表 38 行各追加 `0.2.0-rc.2`、`pnpm-lock.yaml` 使用 pnpm 11.24.0 重建（363 条，36 个 dsh 包全在 0.2.0-rc.2）。
-  - **验证（三个房间同一份源码）**：新基线 0.2.0-rc.2 强制类型检查 + 构建全净，测试 **1759 passed / 7 skipped**（118 文件通过）；旧基线净室（精确锁定 0.2.0-rc.1）结果**逐项完全相同（1759 passed / 118 文件）**——直接证明本轮无行为破坏；老一代净室（0.1.5-rc.3）**1756 passed**，差额 3 条仍为已知受世代限制的 `dsh-ptc-runtime` 测试文件。三个房间均只剩相同的 12 条 Windows 本机保留端口失败（完全与 harness 无关）。详见 `.dsh/skills/dsh-harness-upgrade/references/0.2.0-rc.2.md`。
+- **[Claude] 修复输出速度（TPS）与首字延迟（TTFT）统计虚高的问题**
+  - **根本原因**：
+    - DSH 统计 TPS 时将全部思考 Token 计入输出，且计算区间为“首个非空 Delta 到结束”。
+    - 插件此前将全部 `thinking_delta` 缓冲到思考块结束才一次性发出，导致思考耗时被完全忽略，首字时钟直到回答阶段才开始计时，统计出的 TPS 达到正常值的 10 倍以上（如显示 1100 tok/s，实际仅 85 tok/s），且思考阶段界面无字白屏。
+  - **修复方案**：
+    - 思考块开始时即发出 `block-start`，每个 `thinking_delta` 到达时立即发出 `reasoning-delta`，实时流式更新；
+    - 思考 Token 统计改用服务端下发的真实 `thinking_tokens` 计数，不再依赖“字符数/4”的粗暴估算。
+  - **测试**：新增流式事件逐项断言，实测思考期间流式正常输出。
 
-- **修复 MiniMax Code 线路「每小时自己掉线、然后要求重新登录」**（用户报告）。根因不是服务端把登录踢掉，而是本插件在**同一枚单次使用的刷新令牌上并发轮换**，而输掉竞态的一方拿到的 `invalid_grant` 被记成了「该账号已失效」。
-  - **实测事实**：access token 只有 **1 小时**（`09:40` 签发 → `10:40:51` 到期），而续期阈值是「到期前 **60 秒**」。也就是说这一小时里唯一允许轮换的窗口，正好是并发调用最容易同时到达、且令牌已经会被服务端拒收的那一个瞬间。
-  - **竞态的两条来源**：① 号池 `MinimaxCodeAccountPool` **没有任何单飞**，`getEffectiveAccount` / `credentialFor` / `renewCredential` 各自独立刷新（对照 Claude 线路的 `inFlight` map 与它为此写的注释）；② 用量/签到路径走的是 `ensureAccessToken`，它的单飞是**模块级单变量**，号池完全看不见——而设置卡片每 60 秒轮询一次 `/status` 就会后台触发一次用量读取。桌面端也在刷新同一个文件，所以输家还可能是插件自己。
-  - **失败被当成终局**：`oauth.ts` 把 `invalid_grant` / 400 / 401 / 403 一律判为「刷新令牌已死」，于是 ① `rememberRejected` 进程级墓碑 5 分钟内对所有调用者生效；② 号池把该账号写死 `authStatus: expired`（DPAPI 池文件，重启仍在）；③ 卡片渲染「需要重新登录」——而磁盘上的令牌其实是好的。
-  - **修法（六处，全部带回归测试）**：
-    - **提前 5 分钟续期**（`PRE_EXPIRY_REFRESH_MS`、`credentialNeedsRefresh`）：把轮换挪出「已经被拒收」的边界窗口。仍保留 `REFRESH_MARGIN_MS` 作为「能不能用」的判据，两个问题分开回答；
-    - **全进程一次轮换**（`rotateMinimaxCodeCredential` + `token-store.ts` 的按身份注册表）：键是**身份**（`recordKey` / `loginEpoch`）而不是路径或令牌，所以号池与用量路径这两条不同 `store` 实例也共用同一次轮换；后到的调用者要么加入在途轮换、要么等待并采纳结果；等待期间只轮询文件，**不创建、不删除、不等待桌面端的 `auth.lock`**；
-    - **先看 storage 再相信终局判定**：轮换前、轮换成功写回后、以及收到 `invalid_grant` 时，都会重新读一次文件；只要磁盘上的凭证**已属于同一会话且已经前进**（换过刷新令牌，或同一令牌的到期时间显著变晚），就采纳它——**不记 tombstone、不报「重新登录」**；
-    - **号池行自我修复**（`healStaleAuthFailures`）：遗留的 `authStatus: expired` 会在下一次 `listAccounts()` / `getEffectiveAccount()` 时对照当前凭证核对并清除，因此修复对**已经卡住的账号**立刻生效，不需要等用户重新登录。会话身份不匹配（读到的其实是被镜像的**另一个**账号）时绝不采纳，这条有专门的测试；
-    - **用量读取改走号池**（`routes.ts`）：不再让 `ensureAccessToken` 成为第二条独立的轮换权威；并且当 401 到达时若发现凭证已经被换掉（`isCredentialStale`），就不再报 `token-expired`——宁可这一轮没有数字，也不误导用户去重新登录；
-    - **卡片补上「重新登录」按钮**：`MinimaxCodeSection` 此前只传了字典键 `relogin` 而没有传 `onRelogin`，而按钮的渲染条件是 `needsRelogin && props.onRelogin`——徽章出现过，按钮从未出现过；
-    - 另修正一处会误伤：刷新响应**未返回**新的 refresh token 时沿用旧值而不是抛错（RFC 6749 允许不返回）。
-  - 结构：`src/host/minimax-code/{types,token-store,oauth,account-pool,routes,client}.ts`、`src/host/common/account-pool.ts`（新增可选钩子 `liveCredentialsFor`）、`src/client/minimax-code/MinimaxCodeSection.tsx`。
-  - **测试**：新增 13 条（`test/minimax-code-token-contention.test.ts`），每条对应上面的一环，且 fixture **不依赖墙钟先后**——「发生过轮换」用磁盘上的凭证表达，而不是靠谁先跑。全套 **1759 passed / 7 skipped / 12 failed**，12 条全部属于**回调端口无法绑定**这一类，与本次改动无关：antigravity-callback-port 1 条报 EACCES 127.0.0.1:50999，claude-oauth 11 条报 No bindable loopback port in the probe range。本机实测 53692–53819 这 128 个端口**一个都绑不上**（直接跑 node 对整段返回 bindable=0），所以这不是端口被占用而是本机对该区间的限制；这两条线路的代码与测试本次一行未动。强制 typecheck（host + client）与 build 全净。
-- **新增 reasoning-collapse guard：推理流重复坍缩时熔断并自动恢复**。一段长 reasoning 流可能退化成反复循环少数几个短语（`Let me call. Go. Calling. Go.`），既不调用工具也不得出结论，一路跑到输出上限被截断。本机归档里 `session-9764f957` / `seq1626` 就是这样烧掉 **128,000 output tokens** 后交回空答案的。守卫按 n-gram 唯一率给尾部窗口打分（`1 - 唯一 n-gram / 总 n-gram`），越过阈值就停止继续 yield 该流并让 turn 在新的 step 上继续。
-  - **触发证据**（全部来自本机归档，非推测）：坍缩段 46,252 行只剩 29 种唯一内容（`Go.`×19819、`Let me call.`×11882）；该 step 工具调用数为 **0**，没有任何外部观测能打断它，所以只能烧到上限。对全部 **2,336 个** 归档 reasoning 块实测，坍缩样本得分 **0.98**，最差健康块 **0.59**，典型健康长思考 **≤0.28**——默认阈值 `0.85` 落在间隙里，对真实坍缩流在字符 1,497 处即触发。
-  - **接缝选择是这一轮的关键结论**。守卫包的是 `llm/stream` 而不是 `agent/assistant-stream`：后者是 `@mode emit`（只能观测、**无法中止流**），且 **0.1.5 之前根本不存在**，用它会让守卫在本插件支持的每一个更老世代上静默失效。`llm/stream` 是 waterfall，签名 `(options, next) => AsyncIterable<StreamChunk>` 从 `0.1.2-alpha.5` 到 `0.2.0-rc.1` **逐字节相同**（8 个 tag 全部核过），而从 wrapper 提前 return 正是真正结束流的动作。恢复所需的 live Agent 由 `agent/created`（同样 8 个世代一致）取得，每 turn 的熔断预算挂在请求自带的 abort signal 上——它覆盖整个 turn，新 turn 自然重置。
-  - **只做旁路，不改上下文 / 不改输出长度 / 不动思考参数**：不改写流、不注入 `additionalContexts`、不碰 `maxTokens` / `reasoningEffort` / 任何请求字段。唯一模型可见输入是中止后新 turn 上的那一条恢复消息。恢复分三档：第一次静默续跑，第二次明确要求「别第三次重新推导」，第三次**不再续跑**让 turn 干净结束（`hooks-claude-code` 自己留的 TODO 也要求强制续跑必须自限）。
-  - 结构：`src/host/reasoning-collapse-guard/index.ts`（检测器 + 熔断 + 恢复），默认启用，`config.reasoningCollapseGuard: false` 可关；沿用本仓库既有风格——Context 接口结构化声明、不 import 世代绑定类型、无该接缝时安装返回 `undefined` 而不是让插件装载失败。
-  - **测试**：新增 29 条（`test/reasoning-collapse-guard.test.ts`）——坍缩 fixture 必触发、三个健康长思考 fixture 必不触发、短重复控制样本不触发（低于最小窗口）、三档升级、预算耗尽后不再续跑、跨 turn 预算重置、按内容块独立打分、模型白名单、冷却前后、无 agent 时仍截断、dispose 还原原始 stream、七条 fail-loud 配置校验。fixture 是**真实归档文本**。全套 **1746 passed / 7 skipped**，仅剩 6 条既有 Windows Antigravity 回调端口失败（与本次改动无关，该文件未被触碰）；`tsc -b --force`、`tsc -p test/tsconfig.json`、build 全净。
-  - ⚠️ **已知残留**：中止会把部分 reasoning 经 `interruptedBlocks()` 落盘成 `interrupted: true` 的 assistant message，插件无法删除它。这正是把检测做得足够灵敏的理由——在 1.5KB 处触发，残留就只有 1.5KB 而不是 385KB。
+- **[Claude] 修复新账号使用 Claude Opus 5.5 提示词前缀变化后持续 400 报错**
+  - **根本原因**：官方自 2026-08-31 起对 Opus 5.5 等模型强制执行思考前缀校验；一旦系统提示词、工具列表发生变动，必须在请求中显式携带 `block_binding: { prefix_mismatch_behavior: 'drop_block' }`，否则直接报 400。
+  - **修复方案**：能力表中标记 `bindsThinkingToPrefix`，在 Adaptive 分支中为该类模型自动携带 `block_binding` 并附带 `anthropic-beta: thinking-binding-controls-2026-08-01` 授权标头。
 
-- **MiniMax Code 线路新增每日自动签到（用户要求「类似 workbuddy」）**。桌面端「每日签到」积分（400/800/…/2000 的七日循环）现在可以本线路自动领取：设置卡片新增「每日签到」组（自动开关、今日已签 x/y、连签天数、本轮积分、上次运行、「立即签到」手动补签），语义与 workbuddy 调度器逐条对齐——启动即签、运行期每 10 分钟补检、幂等（已签只记录）、当日格未开放按小时复查、失败每日每账号至多 3 次、手动运行忽略开关与上限。
-  - **关键事实：官方客户端是开源的，签到用的就是本线路的 OAuth 凭据**。`MiniMax-AI/minimax-code`（MIT）里 `packages/tui/src/checkin/http-gateway.ts` 就是签到实现，`runtime/public-gateway.ts` 是请求构造：`GET /minimax-cloud/api/v1/signin/status` 读七日面板、今日格 `status=2`（可领）时 `POST .../signin/claim`，`claim_result: 1` 新签 / `2` 已签；源站按账号 region 走 `agent.minimaxi.com` / `agent.minimax.io`（**两区都签**，不像 workbuddy 只限国区）；`user_id` 需要的 realUserID 由 `/v1/api/user/info` 解析并缓存进状态文件。响应校验（七日、day_no 1–7 不重复、可领/今日格至多各一）与连签算法逐行对齐官方 `shared/daily-signin.ts`。
-  - **签名头是网关强制项，这一点如实记录**。`yy` / `x-timestamp` / `x-signature` 就是本插件在配额功能里默认拒绝伪造的那组第一方标识头——官方源码自己的注释称它们是「标记请求来自第一方客户端的字面量」「不是凭据也不是安全边界」。配额读取没有它们也能诚实失败，**签到没有它们就是 400，没有绕行路径**，因此本功能必然发送它们（用户已在知晓这一点的前提下确认要做）。但两条诚实线仍守住：`User-Agent` 仍是插件自报家门（未伪造 `MiniMaxCode`），`desktop_version` 报插件自己的版本号而不是官方应用的版本号。
-  - **调研弯路也记录在案**：先按网页版（agent.minimax.cn 的 `_token` JWT + 设备注册）完整验证过 web 路径（含「插件自注册设备可复用该 JWT」的实测），后按用户指正找到官方 CLI 源码才发现 OAuth 才是正路，web-session 方案整体废弃、一行未留。探测过程中两次直接用池文件的 refresh token 手动刷新，耗尽了服务端轮换链导致本机登录态失效（已如实告知并由用户重新登录恢复）——**教训：凭据链操作必须走 `AccountPoolCore` 自己的读写路径，任何手写脚本都是刷新争用**。
-  - 结构：wire 半在 `src/host/minimax-code/checkin-gateway.ts`（请求签名、面板/领取校验、身份解析），调度半在 `src/host/minimax-code/checkin.ts`（队列、每日状态文件 `minimax-code-checkin.json`、汇总），路由 `/checkin/now` + `/settings` 的 `checkin.enabled`，凭据刷新完全复用号池的 `getFreshCredential`/`renewCredential`（401 先强刷一次再记失败）。
-  - **测试**：新增 22 条（`test/minimax-code-checkin.test.ts`）——可领即签、已签不发请求、`claim_result=2` 视为成功、双区源站、未开放按小时复查/手动覆盖、重试上限与手动豁免、开关、401 先续期再重试、跨天复用缓存身份、重启后状态恢复、签名头逐字节比对（yy/x-timestamp 秒级/x-signature 与官方一致）、面板/领取畸形拒绝、连签算法、路由层（手动签到、开关持久化、未装载 400、跨域 403）。全套 **1707 passed / 7 skipped**，仍只剩 6 条既有 Windows Antigravity 回调端口失败；强制 typecheck 与 build 全净。
-  - ⚠️ **端到端唯一未跑通的一步**：真实 `signin/status` + `claim` 的 OAuth 路径调用（`/v1/api/user/info` 已实测 200），因上述登录态失效待用户重新登录后实测。
+- **[Claude] 支持 Claude Sonnet 5.5（`claude-sonnet-5-5`）**
+  - **修复要点**：
+    - 补齐本地能力表策展条目（1M 上下文、128K 输出上限、支持图片、不可关闭思考）；
+    - 自动根据模型特征附加 `block_binding` 及相关 Beta 鉴权标头；
+    - 申报默认 CLI 版本提升至 `2.1.285`（满足官方 >= 2.1.284 门槛）。
 
-- **跟进 DSH 0.2.0-rc.1（本机 harness 仓库更新，npm `next` 标签）**。`dsh-v0.1.7-rc.2..dsh-v0.2.0-rc.1` 共 793 个文件，但逐一审计插件导入的 20 个包与全部兼容缝后，**无需任何行为性适配**：`dsh-llm` / `dsh-settings` / `dsh-web` / `dsh-tools` 等核心包源码零改动（仅版本号），`vendor/`（cordis / loader / schemastery）字节相同；`conversation.input.right` 与 `tool.call.toolview` 插槽契约两 tag 间逐字节一致；`agent-loop` 新增的 `ToolCallRecovery` 只改写 harness 内部的会话事件簿记，不碰适配器边界的请求词汇；`session-controller` 客户端的 `fork(onCreated)`、`ui-model-selection` 的目录构造参、remotes 的 `productAnalyticsRemote` 全是插件不消费的新增面。运行时包名探测无一失效（`workflow-worker-thread` 仍是 0.1.6 桥接里的旧名回退，属设计如此）。本轮的实际变更：
-  - `package.json`：15 个 `@deepseek-ai/dsh-*` peer 区间各加 `|| ^0.2.0-rc.1`（预发布区间不跨版本组，该子句是必需的），devDependencies 基线 `^0.1.7-rc.2` → `^0.2.0-rc.1`；对 7 个历史运行时版本逐一做了 `semver.satisfies(includePrerelease)` 预检，全部通过。
-  - lockfile：`dsh-attachment@0.2.0-rc.1` 精确钉 `dsh-brand` peer，增量 `npm install` 如期死于 ERESOLVE，按既定做法干净重建（`rm -rf node_modules package-lock.json`）；pnpm 侧 38 行排除表各加 `0.2.0-rc.1`、`pnpm-lock.yaml` 重建（363 条，36 个 dsh 包全部 0.2.0-rc.1）。
-  - **验证（三个房间同一份源码）**：新基线 0.2.0-rc.1 强制类型检查 + 构建全净，测试 **1685 passed / 7 skipped**（118 文件）；旧基线净室（精确 0.1.7-rc.2）结果**逐项相同**——证明本轮无行为变化；老一代净室（0.1.5-rc.3）**1682 passed**，差额 3 条仍是已知受世代限制的 `dsh-ptc-runtime` 测试文件。三个房间均只剩 6 条既有的 Windows Antigravity 回调端口失败。详见 `.dsh/skills/dsh-harness-upgrade/references/0.2.0-rc.1.md`。
+- **[Codex] 新增模型 GPT-6.1 Sol（`gpt-6.1-sol`）**
+  - **模型规格**：1,050,000 上下文窗口、128,000 输出上限、支持图文输入；
+  - **配置对齐**：归入 `gpt-6` 族 profile，默认思考档位 `medium`，支持 `low` 至 `max`（不支持 `none` / `minimal`）；默认加入可见模型列表。
 
-- **找到并接上 mcode 自己的用量端点（用户要求「在我们这查看」）**。上一轮打的 `/v1/token_plan/remains` 是**平台**端点（只认平台 API 密钥），所以必然被拒。真正的端点在**官方客户端源码**里：`packages/tui/src/account/matrix-account-client.ts` 用 `GET https://agent.minimaxi.com/v1/api/openplatform/coding_plan/remains`（国际 `agent.minimax.io`）——**路径与平台端点完全不同**。现已改为该路径，主机按「本线路自己的 `agent.minimax.cn` 优先、官方主机兜底」探测并记住命中者。
-  - ⚠️ **该请求带四个「官方客户端标识头」**：`yy` / `x-timestamp` / `x-signature` / `User-Agent: MiniMaxCode`。官方源码的注释自己写明这些字面量是「把请求标记为来自 MiniMax 第一方客户端」（同时注明它们并非凭据、也非安全边界，鉴权仍是 Bearer 令牌）。本插件 `types.ts` 已明确决定**不伪造官方客户端身份**，因此**默认一律不发**这些头——宁可拿到一个拒绝让卡片如实说明，也不冒充官方应用；确实要数字的用户可设 `DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION=1` 显式选择该取舍。新增测试锁定该默认：未开启时四个头一个都不出现、`user-agent` 不是 `MiniMaxCode`；开启后恰好出现该组。
-  - **诚实失败的三条保留**：`base_resp` 非 0 视为凭据被拒、只试一台就停、记住 30 分钟；其它失败按 `unreachable` 区分、记住 10 分钟；`/status` 只读缓存、绝不在轮询里发网络请求。
-  - **验证**：`npm run typecheck` 0 错误、`npm run build` 成功、测试 **1685 passed / 7 skipped**（配额测试 20 条），仍只剩 6 条既有的 Windows Antigravity 回调端口失败。⚠️ **端到端仍未验证**：探测当下本机凭据文件已被登出清掉，所以「默认不带标识头能否通过」还需用户重新登录后实测。
+- **[模型目录] 修复清空缓存后在途请求回写旧数据的竞态**
+  - **修复方案**：为 `kimi-code` / `command-code` / `workbuddy` 模型目录缓存引入 `catalogCacheEpoch` 递增机制。清空缓存时递增 Epoch，在途的异步拉取请求若 Epoch 失配则放弃写入快照与恢复缓存，杜绝旧数据覆盖新状态。
 
-- **实测确认：MiniMax Code 的登录态读不到用量，卡片改为说明真实原因（用户在国内、配额条未出现）**。上一轮接上的 `/v1/token_plan/remains` 在生产凭据下**读不出来**，本轮用本机真实凭据（国内区）把它查清了：
-  - **端点确实存在**：`api.minimax.cn` / `api.minimaxi.com` / `api.minimax.io` 三个主机都返回 JSON，**不是 404**。
-  - **但它只接受平台 API 密钥**：本线路持有的 `mcode-public`（MiniMax Code）登录态在**四种认证写法**下全部被拒——`Authorization: Bearer`、原始令牌、`x-api-key`、以及两者同时携带——而且**是 HTTP 200 + `base_resp.status_code: 1004`**（`"login fail: Please carry the API secret key in the 'Authorization' field"`）。**关键教训**：只看 `response.ok` 会把这次拒绝当成成功。
-  - **官方 CLI 能用是因为它的 OAuth 是「平台」登录**（`account.minimax.io` / `account.minimaxi.com`），与本线路的 `account.minimax.cn` mcode 登录是**两套不同的身份**；`mmx quota show` 的凭据分流（OAuth → 配额端点）只对平台 OAuth 成立。
-  - **mavis 后端没有用量路径**：探测了 `agent.minimax.cn/mavis/api/v1/` 下的 `token_plan/remains`、`usage`、`quota`、`user/quota`、`user/usage`、`account/quota`、`coding_plan/remains`、`subscription` 等，**全部 404**（而 `llm/v1/token_plan/remains` 返回的是 JSON 404，说明该前缀存在但无此路由）。
-  - **因此重构为「诚实的失败」**：新增 `quotaUnavailable` 状态字段与 `credential-not-accepted` / `unreachable` 两种原因，卡片区分显示——前者直接告诉用户"该登录态读不到用量、请在控制台或 MiniMax Code 应用查看"，不再含糊地说"暂无数据"。三个行为修正：① **识别 `base_resp` 拒绝后只试一台就停**（这个结论与主机无关，试遍候选纯属浪费）；② 此类拒绝**记住 30 分钟**（不是成功的 60 秒——重新登录会清掉快照，因为那是新凭据）；③ 失败原因不再被误当作"主机不对"。
-  - **新增 2 条测试**（共 19 条）：`base_resp` 拒绝被识别为 `credential-not-accepted` 且只发一台；`unreachable` 与前者区分。
-  - **验证**：`npm run typecheck` 0 错误、`npm run build` 成功、测试 **1684 passed / 7 skipped**，仍只剩 6 条既有的 Windows Antigravity 回调端口失败。
+- **[DSH 兼容] 跟进 DeepSeek Harness 0.2.0-rc.2**
+  - 更新全部 `@deepseek-ai/dsh-*` 依赖的 peerDependencies 范围（追加 `|| ^0.2.0-rc.2`），更新基线并重新生成 package-lock.json；通过新旧基线多环境回归测试，无破坏性行为改动。
 
-- **MiniMax Code 接上用量的配额条（用户追问「用量和配额查不到吗」）**。原卡片断言「MiniMax Code 未提供用量查询端点」，**这句话是错的**，会把读者挡在一个确实存在的东西之外。端点不在 API 文档里——文档只说"用量显示在控制台的用量条上"——它存在于**官方 CLI 的源码**中：`mmx quota show`（"Display Token Plan usage and remaining quotas"）读 `GET {baseUrl}/v1/token_plan/remains`，且**凭据分流**是 OAuth 令牌走配额端点、只有 `sk-api-` 密钥才走 `/account/query_balance`——前者正是本线路实现的那套 RFC 8628 + PKCE。现已接入：
-  - **两个窗口分开显示**：返回的每个 `model_remains` 行同时带 5 小时滚动窗口与每周窗口，卡片渲染两根条，各自显示剩余百分比、重置时刻与"已用/总量"。
-  - **照抄官方实现的三处细节，缺一处就会显示错数**：① **`*_usage_count` 的语义是模糊的**——官方注释写明老响应把该字段当「剩余」、新响应当「已用」，必须用显式百分比消歧（偏差 >1% 时干脆放弃计数、只显示百分比），照抄否则**进度条会反过来**（红绿验证：改成朴素读法后 3 条测试失败，750 vs 250）；② **周窗口带显示倍率** `weekly_boost_permille`（渲染值 = 百分比 × 倍率/1000，可超过 100%，所以上限取 200 而非 100），5 小时窗口没有这个字段；③ `status: 3` 通常是「不限量」，但**两个总量都为 0 时**它表示「当前套餐不含该模型」——渲染成不限量会凭空许诺额度，这种行直接跳过。
-  - **主机是唯一未实测的部分，因此做了候选探测**：CLI 用 `api.minimax.io`（国际）/ `api.minimaxi.com`（国内），而本线路的 agent 主机是 `agent.minimax.cn`，两套域名不一致且无法在本地实测，所以按候选顺序探测并**记住命中的那台**，可用 `DSH_MINIMAX_CODE_QUOTA_HOST` 固定。
-  - **读用量永远不可能影响对话**：这是独立的只读路径，失败只让卡片显示"暂无数据"（`quota` 本是可选字段）。三个防护：`/status` **只读缓存、绝不在轮询里发网络请求**（用量刷新在应答之后进行，否则主机不可达时每次轮询都会卡一个超时）；**失败会被记住 10 分钟**（成功 60 秒），避免主机不对时每次轮询都白探两遍；`/quota` 的失败也返回 200。
-  - **新增 17 条测试**（`test/minimax-code-quota.test.ts`）：双窗口映射、两种计数字段编码落到同一结果、计数不自洽时放弃、不限量与"不在套餐内"的区分、周窗口倍率、`general` 桶优先、候选回退与命中记忆、Bearer + JSON 头、TTL 与失败退避、无凭据不读、`/status` 不碰网络、跨域拒绝。
-  - **验证**：`npm run typecheck` 0 错误、`npm run build` 成功、测试 **1682 passed / 7 skipped**（较上轮 +17），仍只剩 6 条既有的 Windows Antigravity 回调端口失败。
+- **[MiniMax] 修复并发刷新导致的令牌失效与每小时频繁掉线**
+  - **根本原因**：
+    - Access Token 有效期仅 1 小时，续期窗口定在到期前 60 秒内。号池内部缺少并发单飞控制，用量轮询与模型请求容易在同一秒内同时触发刷新。
+    - 输掉竞态的调用者收到 `invalid_grant`，导致错误地将正常账号标记为 `authStatus: expired` 永久失效，并在卡片上报“需要重新登录”。
+  - **修复方案**：
+    - **提前 5 分钟续期**：将刷新前置至到期前 5 分钟（`PRE_EXPIRY_REFRESH_MS`），避开临界失效窗口；
+    - **全进程单飞锁**：引入以账号身份为键的单飞刷新注册表，所有并发调用共享同一次刷新事务；
+    - **磁盘状态优先**：收到刷新失败时先重新读取磁盘凭据，若已由其他进程或单飞成功刷新，直接采纳新状态，不写入墓碑；
+    - **账号行自我修复**：`healStaleAuthFailures` 在读取号池时自动比对并清除历史残留的错误失效标记；
+    - **补齐重新登录按钮**：修复设置卡片上重新登录按钮在满足条件时未正确渲染的问题。
+  - **测试**：新增 13 条抗并发争用测试（`test/minimax-code-token-contention.test.ts`）。
 
-- **MiniMax Code 线路补齐与兄弟线路对等的功能面（用户指出「没有和图 2 的线路保持一样的功能」）**。上一轮只修了缺陷，但这条线路**缺了兄弟线路都有的五块功能**，这是功能缺失而非风格问题，现全部补上：
-  - **① 启用供应商总开关**。新增 `MinimaxCodeModelSettings.enabled`，卡片在「连接」组首行渲染它。关闭时适配器 `listModels()` 返回**空数组**——「关掉」必须意味着不提供任何模型，包括已勾选的：如果关掉还能用，这个开关就没有意义。`/status` 仍返回全部目录行（每行自带 `enabled`），否则卡片无法显示「哪些可以重新打开」。
-  - **② 模型勾选（含全选 / 全不选）**。`MinimaxCodeModelOption` 取代了原先的 `models: readonly string[]`：卡片现在能渲染带勾选框的模型网格，而不是一串只读的 `<code>` 标签。适配器的 `listModels()` 只暴露被勾选的子集，所以勾选状态真的决定对话页模型选择器里出现什么。
-  - **③ 模型上下文窗口覆盖**。每个已勾选模型可填自定义容量（`1M` / `512K` / `200000`），host 侧用共享的 `mergeContextWindowOverrides` 合并；「恢复默认」以 `null` 语义**删除**该键而不是写入 0（写 0 会让压缩与溢出判断以为窗口为零）。生效窗口**同一条路径**同时决定卡片显示值与请求的输出上限，避免两处各算一个数。
-  - **④ 默认思考深度**。全局档位只在模型确实列了该档时生效，否则回落到该模型自己的默认档——**广告一个模型会拒绝的档位只会让服务端拒掉整个请求**；「关闭思考」也只对**可关闭**（非 `always-on`）的模型生效，因为 M2.7 系列根本没有关闭这个状态可选。
-  - **⑤ 号池管理与多账号登录**。新增 `src/host/minimax-code/account-pool.ts`，复用共享内核 `AccountPoolCore` 与共享账号卡片，具备顺序耗尽 / 轮询 / 粘性调度、429 冷却换号、设为主账号、别名、`removable` 语义。**身份键不是令牌**：桌面端凭据用 `recordKey`（同一记录槽每次轮换都是同一账号 → 原地更新），插件自持凭据用 `loginEpoch`（每次设备码登录是一次独立会话）；用刷新令牌做键会让同一账号每次轮换后都变成「新账号」。
-  - **⑥ 桌面端登录态可显式导入号池**（`POST /accounts {action:'adopt'}`）：只读、只新增一行，不改动官方客户端任何文件；重复导入按记录槽原地更新。**并且在设置页新发起的设备码登录会自动加入号池**——这需要给 `pollWebLogin` 加一个 `onSave` 钩子，否则新登录只写进镜像文件而号池看不见，这正是「多账号登录没配好」的根因。该钩子失败**不会**让登录失败，因为凭据此时已经落盘。
-  - **桌面端账号依旧不可删除**：沿用 WorkBuddy 的成例，`deleteAccount` 对 `minimax-native` 账号直接拒绝，卡片据 `removable: false` 不提供删除按钮。**删除路径已有测试逐条证明** `~/.minimax/auth/<env>/<region>/mcode-public/auth.json` 逐字节不变（含 `schemaVersion` 与记录键）；桌面端账号的**续期仍会原子写回**该文件——刷新令牌会轮换，不写回官方客户端手里会留着一枚已被本插件用掉的令牌，下一次任一侧刷新都会失败。
-  - **附带修掉的两个真实缺陷**（由实现者发现并修复）：`extendSummary` 最初**重建**摘要对象而不是展开 `base`，会静默丢掉内核推导出的 `authStatus`/`expired` 标记，让一个已失效凭据继续留在轮换里；`parseMinimaxCodePoolData` 最初让一行坏数据**抛错**，而 `AccountPoolCore.read` 会把它当成整个池读取失败（整池退回单凭据投影）——现在坏行被跳过、其余照常存活。
-  - **验证**：`npm run typecheck`（含 test 项目）0 错误；`npm run build` 成功；测试 **1657 passed / 7 skipped**（新增 31 条：号池 18、设置与号池集成 9、卡片 UI 4），只剩 6 条**既有的** Antigravity 回调端口失败（本机 Windows 保留端口段所致，与本次改动无关）。号池测试做过**变异验证**：把 `removable` 强制为 true → 3 条失败；允许删除原生账号 → 2 条失败；把刷新区域硬编码为 cn → 1 条失败。
-- **新增 MiniMax Code（编程订阅）线路，并在合并前修正该 PR 自带的缺陷**（PR #23，原作者 Anuii）。本线路注册 `minimax-code` Provider，凭据**只读复用** MiniMax Code 桌面端的 `~/.minimax/auth/.../auth.json`（无桌面端凭据时可用 RFC 8628 设备码流程另存到插件自己的 `storages`），模型目录硬编码（该端点 `/v1/models` 未对订阅流量开放），请求走 Anthropic Messages 协议且**只用 Bearer 认证**。审查发现并逐条修掉的问题按影响排序：
-  - **① 设置卡片被灌进 ChatGPT 的文案（UI 一致性，用户可见）**。`ProviderHubSection` 把**自己那份绑到 `dsh-chatgpt-subscription` 命名空间的 `t`** 通过 `{...runtime}` 传给了 `MinimaxCodeSection`，而该卡片的键集并不是那个命名空间的子集。DSH 的 locale 解析在**本命名空间查不到时回落 `common`、再查不到就把键名原样返回**，于是实测该标签页渲染出：**35 个键显示为字面键名**（`pageDesc`、`accountLabel`、`region`、`quotaSection`、`storagePath` …），另有 **8 个键显示为 ChatGPT 的措辞**——最刺眼的是登录按钮变成「**使用 ChatGPT 登录**」，「注销」「已连接/未测试」「正在读取状态…」也全部串味。**修法**：让该卡片与**其余每个 provider 标签页一致**——自己渲染自己的字典，不接注入的 `t`（KimiCodeSection / WorkBuddySection / CommandCodeSection 都没有 locale prop，这也正是它们的做法），并把 `{...runtime}` 从 hub 去掉。**验证**：新增测试断言该标签页的可见文案不含任何字面键名、也不含 ChatGPT 措辞。
-  - **② 「登出」会撤销并删除桌面端自己的登录态（安全/可用性）**。原实现无条件 `revokeToken(refreshToken)` 后删文件——当凭据来自桌面端 `auth.json` 时，这等于**撤销用户正在运行的 MiniMax Code 的刷新令牌并删掉它的凭据文件**，直接把人从官方客户端踢下线。**修法**：登出**只作用于本插件自己持有的凭据**；桌面端的登录态返回 `native: true` 并说明原因，卡片据此禁用按钮并给出 tooltip（这正是 WorkBuddy 对「桌面账号归 IDE 所有、只隐藏不删除」的既有做法）。`/status` 新增 `ownedByPlugin` 供卡片判断。**验证**：新增两条测试分别锁定「桌面端凭据的登出不撤销、不删文件」与「插件自持凭据的登出会撤销并删除」。
-  - **③ 路由前缀违背全仓库约定（功能/一致性）**。该 PR 把设置路由挂到 `/api/dsh-chatgpt-subscription/minimax-code`——而 `/api/dsh-chatgpt-subscription` 是 **Codex 自己那条线路的**前缀，其余五条订阅线路一律挂在各自的 `/<line>/api` 下；为了自圆其说，`compat.ts` 还导出了 `MINIMAX_CODE_SIBLING_ROUTE_PREFIX`、`MINIMAX_CODE_ANTHROPIC_VERSION`、`MINIMAX_CODE_CLIENT_ID/SCOPE/AUDIENCE` 五个**只被定义、从未被引用**的重复常量。**修法**：前缀改为 `/minimax-code/api`，删掉「挂两次」与那五个死常量。**验证**：新增测试锁定前缀常量与真实挂载点，客户端注册测试同步改到新前缀。
-  - **④ 401 之后永远不恢复（功能）**。`ensureAccessToken` 的 `force` 选项注释写着「used after a 401」，但**全仓库没有任何调用点传它**：本地时钟看着还有效、服务端已拒收的令牌（在桌面端被撤销、时钟偏移、桌面端已轮换）会让该轮**永久失败**。**修法**：第一次 401 强制续期一次并原样重试同一请求体，重试再被拒才是终局。**验证**：新增测试断言「一次 401 → 一次 refresh → 一次重试成功」，且失败路径在修复前会抛 `INVALID_CREDENTIAL`。
-  - **⑤ 国际区账号永远「未登录」（功能）**。凭据读取只探测构造时的默认区域目录，而桌面端**按区域分目录存放**，国际区用户没有国区文件；同时 `parseMinimaxCodeCredentials` **丢弃了记录里存的区域**、一律套用调用方的默认值，于是即使读到也会被改判成 `cn` 并打到国区端点。**修法**：两个区域目录都探测（先常用后另一个），并以**记录里的区域**为准决定所有后续 host 与写回路径。**验证**：新增两条测试——国际区登录能被找到、读回的区域仍是 `global`。
-  - **⑥ 桌面端目录里被写入明文旁路凭据（安全）**。`writeFileAtomic` 每次写都会 `copyFile(filePath, filePath + '.dsh-bak')`，而目标可能就是 **MiniMax Code 自己的目录**：等于在官方客户端的数据目录里留下一份**明文**、固定名的凭据副本。**修法**：删掉该副本；原子 `rename` 本身已保证「替换完成前原文件逐字节不变」，那正是备份想提供的能力。**验证**：新增测试断言一次续期写回后目录里既无 `dsh-bak` 也无残留 `dsh-tmp-`，且文档的 `schemaVersion` 与其他记录原样保留。
-  - **⑦ 诊断泄露真实令牌前缀（安全）**。`redactToken` 输出「前 6 个字符 + 长度」，而它的产物会被渲染进设置页错误条并写进 Host 日志——6 个字符的 bearer 令牌本身就是可被利用的泄露。**修法**：改为 **SHA-256 指纹前缀**（`sha256:.../len:...`），仍然能区分两枚令牌、指认哪一枚被拒（它的诊断目的），但不可用作凭据。**验证**：新增测试断言渲染结果不含令牌任意一段原文，同时仍能区分两枚不同令牌。
-  - **⑧ 声明了做不到的视频能力（功能）**。模型表给 M3 / M3.1 标了视频输入，`inputModalities` 也照抄了 `'video'`，但 DSH 附件服务只存图片、本线路没有视频读取器，映射器只能替换成说明文本。**声明一个做不到的能力比不声明更糟**：DSH 的能力闸门、模型选择器与子代理委派都会当它成立。**修法**：只声明 `text`/`image`，并在类型注释里写明「加 `video` 必须先有真正的读取器」。**验证**：新增测试断言目录不含 `video`，且即便传入 video 块，序列化请求体里也不出现任何线上视频字段。
-  - **⑨ 输出上限的收敛是空操作**。`clampOutputToContext(requestedMax, contextWindow)` 少传了第三个参数 `estimatedInputTokens`，因此**永远提前返回**、从不收敛——上游会拒绝，而不是本插件先收敛。**修法**：接上共享的 `estimatedInputTokens`（与 Kimi 线路同一实现）。另修掉 `thinkingFieldFor` 里两分支返回同一值的死三元。
-  - **⑩ 空转的额度轮询（性能）**。composer 徽标为一条**没有配额接口**的线路每 60 秒读一次 `/status`（每次都要读并解析凭据文件），而该徽标按契约**永远不渲染**（`selectBadgeFacts` 恒返回 null）。**修法**：去掉定时器，只在选中该线路时读一次。同时把 `/status` 的凭据读取从**三次**（`read` + `activeSource` + `activePath`，每次都要重读重解析原生文档）合并为一次 `readWithProvenance()`。
-  - **遗漏补齐**：README 增补该线路的功能/路由/安全边界三节（新增六条路由的表格与「诊断只输出指纹」的说明），CHANGELOG 即本条目；新增 `test/minimax-code-review-fixes.test.ts`（15 条）。
-  - **验证**：`npm run typecheck` 三个项目 0 错误；`npm run build` 成功；新增测试**红绿双向验证**——把 `src` 改动 `git stash` 后同一套测试 **9 条失败 / 5 条通过**，恢复后 **15 条全绿**，证明它们确实钉住的是本次修掉的缺陷而非同义反复。
-- **适配 DSH 的 Agent Teams：`dispatch` 自适应协作模式，守卫把 `spawn_teammate` 纳入 inherit 模式**。
-  - **根因（实测，非推测）**：Agent Teams bundle 在**每个会话自己的作用域**里注册了一套与内置**同名**的协调工具，而工具注册表按作用域链解析、**近层遮蔽远层**（`packages/core/tools/src/index.ts:1185-1208`；`tool-agent-team` 的安装点是 `agent.ctx`，见其 `src/index.ts:402-421`）。因此在装了该 bundle 的部署上，内置 `tool-subagent-control` 的 `send_message` / `list_agents` / `interrupt_agent` 被 teammate 版顶掉；`roster.membership()` 对任何无 `parentSession` 的顶层会话都返回「自己是 lead」，于是**每个顶层会话都被替换**。本机 web profile 的 `dsh.profile.bundles` 恰好包含该 bundle。
-  - **现场证据**：`list_agents({})` 只返回 `[{ target: "lead", role: "lead", status: "running" }]`，当轮真正派出的 continuable 子代理不在其中；`send_message({ target: "<该子代理 session id>" })` 抛 `active teammate "…" not found`（文案出自 `agent-team/src/roster.ts:52`）。后果是「派得出去、回访不了」：R5 等证据与 R6 带证据重派在这类部署上不可用。
-  - **守卫改动（按既有结论落地）**：`DEFAULT_SUBAGENT_INHERIT_TOOLS` 由 `['subagent_fork']` 改为 `['subagent_fork', 'spawn_teammate']`。理由：Agent Teams 经 `ctx.subagents.startContinuable` 创建成员时**完全不传 `agentOptions``**，成员必然继承 Lead 路由，且工具没有任何路由参数——「工具不能选」不等于「这个选择被授权」，所以它属于 inherit 语义（同 `subagent_fork`），而非 explicit。**绝不能**把它加进 `subagentModelTools`：那里要求成对 `provider`+`model`，该工具没有这两个字段，会让每次 teammate 创建被硬拒且模型无法自救（为此在守卫测试里加了专门断言）。
-  - **persona 改动（自适应，保持精简）**：新增 **R0.5 协作模式侦测**（判据：`spawn_teammate`/`wait_agent` 是否存在；一句「分界不是能不能派，而是派完能不能追问」）与 **R-T teammate 模式**（协调走成员词汇；`spawn_teammate` 无路由参数、不写 route 行；选型与任务板落点），R8 补一行 teammate 边界，反模式补 2 条；【角色识别】扩为「子代理或 teammate」。全部按精简原则写：R0.5 由 7 行压到 4 行、R-T 由 7 条压到 4 条、反模式由 3 条并为 2 条，并删去可由工具描述本身传达的细节（`wait_agent` 的语义、`scope` 辅助判据等）。
-  - **验证**：`npx tsc -b --force` 与 `npx tsc -p test/tsconfig.json` **均 0 错误**；`npm run build` 成功且 `lib/index.js` 内确认带有 R0.5/R-T 文本；全量 `npx vitest run` **1615 passed / 7 skipped**（112 文件，1 skipped）；新增守卫测试（teammate 归 inherit、越权拒绝文案是 inherit 版而非 explicit 版、授权路由放行、`[]` 退出、显式命名路由被 override 分支拒绝）与 preset 测试（两种形态 parity 逐字节 + R0.5/R-T/反模式文本钉住）；**变异验证**：只改 YAML / 只改 TS / 两份同时改同一措辞（parity 仍成立时行为测试单独失败）三种情况均被捕获。
-  - **已记录的上游限制**：`spawn_teammate` 无法指定 `provider`/`model`——三层已核对（工具 schema 无此参数；`SpawnTeammateRequest.provider` 是 subagent 后端名而非 LLM provider 且无 `model`；底层 `ContinuableStartSpec.request.agentOptions` 本可携带，但 Team 服务构造 request 时只放 `prompt`+`parent` 整个省略）。插件侧无干净绕法（pre-execute 明确排除输入改写；`agentTeams` 服务内部丢弃后包装不到；自定义 provider 拿不到已在 continuation manager 解析完的路由；`selectForNextRequest` 只作用于下一个请求且与 teammate 立即开跑构成竞态）。README 新增「已知上游限制」一节，并写明**上游接出 `agentOptions` 后**应把 `spawn_teammate` 从 `subagentModelInheritTools` 移到 `subagentModelTools`。
-  - **未验证项（如实说明）**：本次是**提示词 + 守卫默认值 + 测试**改动，验证的是「两种形态一致 + 守卫判定符合预期」，**不是**「真实会话里模型一定先侦测再动手」。另需注意一个**已实测的副作用**：本机 web profile 的 `agent-default-model` 是 `workbuddy-subscription/deepseek-v4.1-flash`，而 `subagent-model-selection-settings.allowedModels` 只勾了 `command-code/deepseek/deepseek-v4.1-flash`——两条路由不同，因此在该 profile 下开启允许清单的新会话里，`spawn_teammate` 与 `subagent_fork` 都会被视为「继承路由不在清单内」而被拒绝。要恢复 Agent Teams，需把当前会话路由切到清单内，或把该路由补进勾选清单；拒绝文案已包含这条恢复路径。
+- **[思维保护] 新增推理坍缩守卫（Reasoning Collapse Guard）：死循环自动熔断与恢复**
+  - **背景与现象**：长推理流可能退化为死循环重复短语（如 `Let me call. Go. Calling. Go.`），既不调用工具也不产出结论，一路消耗完上限（实测单会话烧掉 128,000 output tokens）。
+  - **工作机制**：
+    - **滑动窗口打分**：基于尾部字符的 n-gram 唯一率打分，坍缩流（重复度极高）得分高达 0.98，正常深思通常 <= 0.28，阈值设为 0.85，可在 1.5 KB 处迅速灵敏检测并中断；
+    - **多级自愈恢复**：中断后在原会话中创建一条携带系统 Notice 形式的恢复消息，分三级恢复（首次静默续跑 -> 二次提示不要重蹈覆辙 -> 三次终止本轮退出）；
+    - **安全无侵入**：接入 Harness 的 `llm/stream` waterfall 接缝（兼容 0.1.2-alpha.5 至最新版本），不改动请求上下文，不修改最大 Token 预算，默认开启且支持配置关闭。
+  - **测试**：新增 29 条专项回归测试，通过真实归档坍缩样本与健康思考样本验证。
 
+- **[MiniMax] 新增每日自动签到功能**
+  - **功能简介**：自动领取官方桌面端“每日签到”积分（七日循环递增 400~2000 分）。
+  - **技术实现**：
+    - 完全复用本线路现有的 OAuth 凭据，对齐官方开源 CLI（`MiniMax-AI/minimax-code`）的签到网关与加密签名逻辑；
+    - 国内区（`agent.minimaxi.com`）与国际区（`agent.minimax.io`）双区均支持；
+    - 设置页增加“每日签到”卡片（支持开关、今日状态展示、连签天数统计与“立即签到”手动补签）；
+    - 进程内定时调度，启动即签，每 10 分钟补检，幂等防重；状态落盘于 `minimax-code-checkin.json`。
+  - **测试**：新增 22 项测试，覆盖双区端点、签名头算法比对、401 自动续签及跨天重置。
 
-- **修掉「设置 UI 部分情况下丢失样式表」**（用户报告：设置页偶尔整体裸渲染，重启应用才恢复）。ChatGPT 页样式表（`.dsh-codex-*`）是全部六份客户端样式表里**唯一在卸载时删除元素**的：`installStyles()` 检测到同 id 标签已存在时返回**空 disposer**（放弃所有权），而 cordis 的插件 fiber 重启（改配置、依赖服务重启、HMR 热重载）允许新 fiber 的 `apply()` 在旧 fiber 异步排空 disposer **之前**运行（`runtime.fibers` 明确支持同插件多 fiber 并存）。这个顺序一旦发生：新 fiber 看到旧标签 → 返回空 disposer；旧 fiber 随后 `element.remove()` 删掉唯一一份；此后每次重启都命中同一去重分支，样式表**永不恢复**——正是「部分情况下」才触发的竞态。其余五份样式表（antigravity / claude / kimi / workbuddy / pool）的安装器本来就是「存在即跳过 + 空 disposer」的纯增量模式，天然不受影响；本修复把主样式表改成同一模式：**标签归文档所有（missing 则创建、存在则刷新 `textContent`、disposer 恒为空）**。刷新内容顺带修掉 HMR 场景的另一个小缺陷——重建 bundle 后旧标签的旧 CSS 一直残留（dev 环境改 CSS 不生效）。
-  - **验证**：`npm run typecheck` 0 错误；新增 `test/client-styles.test.ts`（7 条）锁定单标签不变量、disposer 不删节点、外部删除后可重建、旧 bundle 内容刷新，以及**真实 Cordis** 上的两条生命周期用例（fiber 重启 + 旧 fiber 迟到销毁、历史「fiber 持有删除」形状的恢复）；**红绿验证**——把修复 `git stash` 后在同一测试上复跑，恰好那 2 条生命周期用例失败、恢复修复后 7 条全绿，证明测试真的覆盖该路径。合并 `upstream/master`（0.9.8 之后共 16 个提交，含 zhipu 线路换代为 claude）后复跑：`npx tsc -b --force` + `tsc -p test/tsconfig.json` 0 错误、`npm run build` 通过、`npx vitest run` **110 文件通过 / 1 跳过（112）、1600 条通过 / 9 跳过**；唯一失败的 `test/quota-ui.test.tsx` 2 条是**存量**问题与本修复无关（用例固定 UTC 边界日期 `2030-01-01`，在 UTC+8 机器上落到 `2029-12-31 19:00`，带不带本修复、合并前后同样失败）。
-  - **遗留说明**：其余安装器「存在即跳过」不去刷新 `textContent`，HMR 改它们的 CSS 仍需整页刷新才生效——纯 dev 体验问题，与丢失无关，未在本次改动。
-- **修复用户实测缺陷：Claude 线路凡是有内容的回复必定失败（`Assistant stream chunk must be losslessly JSON-serializable`）**。现象是**每一轮**只要模型输出了文字/思考/工具调用，整轮就以这个错误告终，UI 显示"本轮运行失败"；而传输失败、凭据失败这类**没有内容**的轮次反而正常，所以看起来像偶发。**这是本插件引入的缺陷，与用户环境无关。**
-  - **根因：`claude/mapper.ts` 把 `undefined` 写进了 finish 块的 `replayState.blocks`**。DSH 在会话日志接受每个 stream chunk 之前会做**无损 JSON 校验**，只要包含 JSON 无法承载的值（`undefined`、函数、symbol、非有限数、`-0`、数组空洞等）就**整块拒收**——代价是用户**整轮**对话，而不是一条元数据。三处写坏值：
-    - `closeTextBlock`：`state.replayBlocks[open.index] = undefined`（预留给文本块；文本本来就靠 DSH 自己持有的 block 回放，无需逐字条目）；
-    - `content_block_start` 的 `tool_use` 分支：`state.replayBlocks[index] = undefined`（先占位、等 `content_block_stop` 填入）；
-    - `closeToolCall`：`input: parsed`，而 `safeJsonParse` 在**缺参数或 JSON 解析失败**时返回 `undefined`。
-  - **`JSON.parse` 本身也不是安全来源**（这一条超出了原始报告）：它接受线上真会出现的 `-0` 与越界字面量，`{"n":-0}` 解析出负零、`{"n":1e999}` 解析出 `Infinity`，两者都不能无损往返。所以只把 `undefined` 换成 `null` 并不够。
-  - **修法（四件事）**：① 两处占位改写成 `null`（合法的 JSON 值，语义正是"此处无逐字条目"）；② 新增 `jsonSafeValue()`，把值收敛进可无损往返的子集——有限数字通过、`-0` 归一为 `0`、数组变稠密、普通对象只保留可枚举字符串键并丢弃无 JSON 形式的字段（函数/symbol/bigint/undefined）、带环则判为无形式；③ `input` 经 `jsonSafeValue(parsed) ?? {}` 规范化；④ `closeStream` 出口再整体过一遍 `jsonSafeValue`，**未来若有新槽位忘记初始化，代价是一条回放条目而不是用户整轮**。
-  - **类型收紧，让同类缺陷编不过**：`ClaudeStreamState.replayBlocks` 由 `unknown[]` 改为 `(Record<string, unknown> | null)[]`。原先那两处 `= undefined` 从此是**编译错误**——这是本次唯一能在编译期拦截该类缺陷的手段。
-  - **回放语义不变**：读取端 `replayBlockFor` 用 `isRecord(entry) ? entry : undefined`，对它而言 `null` 与 `undefined` **无法区分**，因此带签名的 thinking 块依旧逐字回放（这是多轮工具调用的前提），文本块照旧由 DSH 自己的 block 重建。已用 `buildClaudeRequestBody`（真实读取路径，而非内部函数）专门断言这一点。
-  - **独立变异验证（不只是"跑绿了"）**：把三处一起还原成原缺陷 → 新增测试 **5 条失败**；只还原出口守卫（三处仍是 `null`）→ **恰好 1 条**（守卫那条）失败，证明它防的是"未来漏写"而非重复覆盖；全部修复 → 7 条全绿。三次篡改均被捕获。
-  - **验证**：`npx tsc -b --force`（host + client）与 `npx tsc -p test/tsconfig.json`（测试树）**均 0 错误**；`npm run build` 成功；`test/claude-mapper.test.ts` **70 项通过**（原 63 + 新 7）；全量 `npx vitest run` **1599 通过 / 3 失败 / 9 跳过**，3 个失败全部是 `test/web-provider-lifecycle.test.ts` 的 `URL hostname "example.com" resolves to a non-public IP address`——**与本次改动无关**：本机 DNS 把公网域名解析到 `198.18.0.0/15`（透明代理的 fake-IP），该文件在**未改动的干净工作树上单跑同样 3 失败**（已用 `git stash` 实证）。
-  - **未验证项（如实说明）**：本次**没有向真实 Anthropic 端点发过请求**。结论依托两点：一是缺陷链在本地用**真实插件代码 + 从 `app.asar` 抽出的 DSH 真实校验函数**复现（修复前 8 种流式形态 7 种被拒，修复后 8/8 通过），二是用用户会话日志里**两次真实失败轮次**的原始数据回放，修复后 `2/2` 产出被接受的 chunk。
-  - **影响面**：只有 `claude-subscription` 线路受影响（`antigravity` 的 `replayBlocks` 只经 `push()` 写入、从不留空位，实测无此问题）；该文件其余适配器未受影响。
+- **[DSH 兼容] 跟进 DeepSeek Harness 0.2.0-rc.1**
+  - 更新 peerDependencies 基线，验证全量核心包源码与插槽契约兼容性；重新生成锁文件。
 
-- **修复用户实测缺陷：调度模式一旦进入 R8 兜底就"卡死"，任务已经成功完成，下一个任务仍不再派发子代理**。
-  - **根因不是状态泄漏，而是提示词缺了两件事**。全仓库检索确认：插件**没有任何**失败计数器、熔断标志或持久化状态（`src/` 里出现"连续失败"字样的唯一位置就是 R8 那句话本身），委派守卫 `subagent-model-authorization` 是**纯函数**（读设置/会话快照→判定→返回理由或 `undefined`），DSH 内核的子代理失败也是**一次性**的（失败即 `throw` 成 `isError`，不重试、不入状态）。所以"兜底状态"只存在于**对话历史**里：旧 R8 把「子代理连续失败」列为无阈值、无失效条件、无解除规则的许可，模型写下"进入兜底"之后，后续每轮都会把它当成仍然成立的既有结论——R0 要求每次重新分诊，R8 没有对应要求，R6 的"不通过就重新派发"也没有兜底之后的**恢复**路径。
-  - **修法：把兜底从"会话级口头结论"改成"任务级、有阈值、可解除"的规则**，四条同批落地：① R8 首句明确**任务级、非会话级**，只覆盖触发它的那一个任务；② 触发条件收紧为「同一任务书按 R6 **重新派发两次**仍不通过」（R6 同步补上这个上限），取代不可判定的"连续失败"；③ 新增**解除规则**——下一个任务一律回到 R0 重新分诊，条件已解除就必须恢复派发，不得沿用或预设兜底；④ 新增两条反模式（把一次兜底沿用成整个会话默认；拿工具硬拒当当兜底理由而不修触发条件），并针对两类**会话内不会自愈**的硬拒绝给出修条件路径（`active child limit` → 等子代理结算；`subagent model selection` → 按错误里列出的授权路由写明 `provider`/`model`）。
-  - **加了会咬人的不变量锁**：`presets/dispatch/agent.cordis.yml` 与 `src/host/agent-preset.ts` 是同一份 persona 的两个副本，而 19 行里**只有 4 行**被断言钉住，规则文本改错一处发出去的 preset 就是割裂的、测试还全绿。新增两条测试：第一条从**真实随包的 YAML** 里解出 `prefix: |` 块标量、去缩进后与声明里的模板字符串**逐字节比对**（不是拿手抄副本比，所以不可能与文件本身漂移）；第二条把"任务级/只覆盖当次/下一个任务回 R0/两次上限/两条反模式/两类硬拒绝的修条件"逐条钉住，并断言旧的无限期措辞（"子代理连续失败""只有这些情况你才亲自执行"）**在两种形态里都已消失**。
-  - **独立变异验证（不只是"跑绿了"）**：① 只改 YAML 一处措辞 → 新增的 parity 测试**失败**；② 两种形态同时改、但删掉"任务级"限定 → 行为测试**失败**；③ 只改 TS、YAML 不动 → parity 与行为测试**各失败一次**。三次篡改均被捕获，恢复后 27 项全绿。
-  - **验证**：`npm run typecheck`（host + client + test 三个项目）**0 错误**；`npm run build` 成功，构建产物 `lib/index.js` 里确认带有新规则；`npx vitest run test/agent-preset.test.ts test/preset-sync.test.ts test/subagent-model-authorization.test.ts` **86 项通过**；全量 `npm test` **1596 通过 / 1 失败**，唯一失败是 `test/antigravity-callback-port.test.ts` 的端口用例，**与本次改动无关**：本机 51121 被 Antigravity IDE、51122 被 VS Code 的 `language_server_windows_x64` 占用（`Get-NetTCPConnection` 实测），该用例单独跑同样失败。
-  - **未验证项（如实说明）**：本次改动是**提示词与测试**，验证的是"两种形态逐字节一致 + 规则文本确实被钉住"，**不是**"真实会话里模型一定照做"——persona 是模型侧纪律，没有执行层强制；若需要真正的强制，需要在 Host 侧消费子代理结算事件做任务级计数（当前不存在）。
+- **[MiniMax] 接入官方客户端用量与配额查询端点**
+  - **端点对齐**：对齐官方 CLI 源码，接入 `/v1/api/openplatform/coding_plan/remains` 端点，自动探测并记忆国内/国际区网关；
+  - **配额双窗口展示**：解析并独立展示 5 小时滚动窗口与每周窗口的剩余百分比、重置倒计时与使用量；
+  - **诚实诊断与状态反馈**：若当前登录凭据受限于平台鉴权策略无法拉取用量，卡片如实提示“请在控制台或官方应用中查看”，杜绝模糊的“暂无数据”或错误归因。
+  - **性能与防护**：状态接口轮询仅读取内存缓存，绝不在轮询时阻塞发网，避免卡顿；失败状态记忆 10~30 分钟。
+  - **测试**：新增 17 条配额映射与缓存策略测试。
 
-- **修复用户实测缺陷：Claude 线路缓存命中为 0（每次请求都按全新输入计费）**。根因**不是显示问题**：Anthropic 的提示缓存要求**请求携带显式的 `cache_control` 断点**，而本插件的请求构建器虽然**支持**这个能力，却**从未开启**——`mapper.ts` 里的选项默认 `false`，且 **adapter 从未传过它**（全仓库搜索该标识符只出现在 mapper 自身与其测试中）。因此没有任何一个字节的 `cache_control` 发出过，服务端无从缓存，`cache_read_input_tokens` 自然永远是 0。
-  - **对照本地参照实现，问题更清楚**：`pi-ai` 的 `resolveCacheRetention()` **默认返回 `"short"`**，即**默认缓存**，只有显式设为 `"none"` 才关；本插件恰好相反。这个"默认值反转"就是缺陷本身。
-  - **修法（四件事）**：
-    1. **默认开启缓存**，且选项语义改为**opt-out**（`cacheControl !== false`）。这一点很重要：旧设计的失败模式正是「选项存在、调用方忘了传」，所以**默认值必须是缓存行为**——测试证明，即使把 adapter 的参数删掉，缓存**依然生效**，从机制上杜绝同一类缺陷复现。
-    2. **补上真正省钱的断点**：原先**只**能标 system 块（而且其自身注释就写着"只标它会缓存不到任何变化的东西"）；现在标**三处**——system 末块、**最后一条 user 消息的最后一个块**（跨轮复用历史的关键）、最后一个 tool。断点数量受 `MAX_CACHE_BREAKPOINTS = 4`（服务端硬上限）约束，并有测试用 13 条消息 + 图片 + 多工具的压力场景验证不超限。
-    3. **标记时机正确**：在 `mergeClaudeMessages` **之后**、对**最终**请求体做标记，避免断点落在合并后会被移动的块上。
-    4. **前缀稳定性已核查**：断点之上若存在逐轮变化的值，缓存会整体失效、断点等于白标。已确认 Claude 请求路径中**没有** `Date.now` / `Math.random` / UUID 等易变值（`cooldownMsFor` 的 `Date.now` 是重试时钟、不进请求字节），且 `leadingSystemText` 是**有序纯折叠**、不重排。
-  - **为什么"看不到"不是显示问题**：`tokenUsage()` 确实会省略值为 0 的计数器，但 harness 的累加器会把缺失**归一化为 0**（`usage.cacheReadTokens ?? 0`），所以"省略 0"与"字面 0"在 UI 上表现一致。用户看到的是**真实的 0**——因为服务端确实无缓存可命中。
-  - **验证**：`tsc` 三个项目 **0 错误**；按 CI 配方本地跑 `npm run typecheck` + `npm run build` + `npm test` + `npm pack --dry-run` **全部通过**；全量测试 **1595 通过 / 0 失败**，且在**隐藏参照快照**（CI 的真实条件）下同样绿（1593 通过 / 9 跳过）。**独立复核**：我另写脚本 dump 真实请求体，确认三处断点出现在正确位置、**不传任何选项时即为 3 个**（证明默认开启）、显式 opt-out 时为 0。
-  - **未验证项（如实说明）**：服务端**最小可缓存提示长度**（约 1024 token，随模型而异）不在任何本地来源中，无法离线核实；且**本次未向真实端点发过请求**。因此结论是「**请求现在携带了使服务端缓存成为可能的断点**」，**不是**「已观测到服务端返回 `cache_read_input_tokens`」。
+- **[MiniMax] 补齐与兄弟线路对等的号池与模型管理功能**
+  - **供应商全局总开关**：关闭时立刻清空对外暴露的模型，彻底停用流量；
+  - **模型自主勾选**：支持在设置网格中勾选/全选/取消特定模型，决定对话页可见列表；
+  - **上下文窗口自定义覆盖**：每个已启用模型均可自定义容量（如 1M / 512K），支持一键恢复默认；
+  - **默认思考深度配置**：支持设置全局默认思考等级，自动兼容模型固有支持范围；
+  - **多账号池与桌面态导入**：支持多账号轮询/顺序耗尽调度；支持一键从本地 MiniMax Code 客户端只读导入凭据（桌面账号标记不可删除，续期自动原子回写）。
 
+- **[MiniMax] 新增 MiniMax Code 编程订阅线路（PR #23 审计修复）**
+  - **核心特性**：注册 `minimax-code` Provider，支持只读复用 MiniMax Code 桌面端凭据或通过 RFC 8628 设备码登录，请求走 Anthropic Messages 协议与 Bearer 鉴权。
+  - **合并审计修复（10 项重要缺陷）**：
+    - **① 消除 UI 文案串味**：解除错误的 `t` 函数全局注入，恢复独立的 i18n 字典，杜绝显示为字面键名或出现“使用 ChatGPT 登录”的错误文案；
+    - **② 保护官方客户端登录态**：登出操作仅清除插件自有凭据，桌面端凭据标记为 `native: true` 禁止从插件侧撤销注销，防止误踢用户官方客户端；
+    - **③ 规范路由挂载前缀**：纠正路由前缀为 `/minimax-code/api`，消除与其他线路的冲突；
+    - **④ 修复 401 无法自愈**：遇到 401 时主动触发一次强制令牌续期并重试，自愈后恢复通信；
+    - **⑤ 国际区凭据完整支持**：探测全部区域目录，并严格按凭据真实记录的区域决定 Host 端点；
+    - **⑥ 消除明文备份凭据泄露隐患**：移除写回时复制出的 `.dsh-bak` 明文文件，改用纯原子重命名；
+    - **⑦ 诊断信息安全脱敏**：将此前泄露真实 Token 前缀的报错改为输出 SHA-256 指纹截断；
+    - **⑧ 修正虚假的多模态声明**：移除尚未具备解析器的 `video` 输入声明，仅声明实际支持的 `text` / `image`；
+    - **⑨ 修复输出上限收敛空跑**：修复上下文夹取时未正确估算输入 Token 导致跳过收敛的缺陷；
+    - **⑩ 优化性能**：移除无配额线路空转的 60 秒定时轮询，凭据读取操作合并为单次完成。
+  - **测试**：新增 15 项审计回归测试，全量验证通过。
 
-- **修复用户实测缺陷：选择 Claude Opus 5.5 必然失败（`claude_code_version_too_old`）**。上游原文：`Claude Code 2.1.251 does not support this model; version 2.1.280 or newer is required.` 那个 **2.1.251 是本插件自己申报的版本号**被服务端回显——本插件发布 `claude-opus-5-5`（该模型要求客户端 ≥ 2.1.280），却仍申报 2.1.251，两个数字自相矛盾，因此对该模型的每次请求都白花一个往返后被拒。**这是本插件引入的缺陷，与用户环境无关。**
-  - **根因不只是"数字写旧了"**：加模型与抬版本之间没有任何强制关系，所以同类缺陷会反复出现。修法分两层。
-  - **① 修正值与记录门槛**：`CLAUDE_CLI_VERSION` 由 `2.1.251` 改为 `2.1.283`（npm `latest` 的真实已发布版本，且 ≥ 2.1.280）。能力表新增可选字段 `minCliVersion`，**仅**给 `claude-opus-5-5` 填 `2.1.280`；其余 14 行**一律不填**，接口注释写明「缺省 = 未知门槛，不等于没有门槛」——不臆造无依据的数字。注：上游 npm `stable` tag 本身是 `2.1.274`，**低于该模型要求**，这正是 [anthropics/claude-code#96130](https://github.com/anthropics/claude-code/issues/96130) 报的坑。
-  - **② 本地预检，不再让上游报错**：新增 `assertClaudeCliVersionMeetsFloor()`，在 `requestStream()` **解析凭据之前、发起 fetch 之前**比较「生效版本 vs 该模型门槛」，低于则抛 `PROVIDER_ERROR`（**明确不是凭据错误**——错误文案直接写明「你的登录态仍然有效，重新登录不会改变它」，因为上游原文会误导用户去重新登录）。未记录门槛的模型行为不变；上游 400 分支保留，用于应对「本表尚未知的门槛」。
-  - **③ 加了会咬人的不变量锁**：测试断言「**申报的默认版本 ≥ 每一个模型的 `minCliVersion`**」，对**全表**遍历、且针对**申报常量本身**（不受 pin/环境变量影响），失败信息会同时点出两个版本号与修法。**我独立做了变异验证**：把 Opus 5.5 的门槛临时改成 `2.1.300`，测试立刻失败并输出 `CLAUDE_CLI_VERSION is 2.1.283 but claude-opus-5-5 requires 2.1.300 or newer…expected -17 to be greater than or equal to 0`；恢复后 22 项全绿。这条锁从此让「加了高门槛模型却忘抬版本」无法通过 CI。
-  - **排查过程中发现的另一件事**：npm 上 `0.9.0` 与 `0.9.2` **均已发布**，而**已发布的 0.9.2 仍然带着 `2.1.251` 且不含预检**（我拉了 tarball 核对）。同时 DSH web profile 通过软链接指向本仓库，而仓库的 `lib/` **是旧的**——所以运行中的插件确实跑的是有缺陷的构建。本次已重新 `npm run build`，构建产物现为 `2.1.283` + 预检（`lib` 由 .gitignore 覆盖，不入库）。
-  - **验证**：三个 tsconfig 均 **0 错误**；`npm test` **110 文件 / 1587 项通过、0 失败**；`npm run build` 成功。
-  - **临时可用的旁路**（无需等新版本）：启动 DSH 前设 `DSH_CLAUDE_CLI_VERSION=2.1.283`。优先级为 pin > 环境变量 > 申报默认值。
+- **[团队协作] 适配 DSH Agent Teams：自适应协作与权限继承**
+  - **根本原因**：Agent Teams bundle 在会话作用域内重载了同名的协调工具，顶替了内置的 `tool-subagent-control`，导致子代理回访异常；且 `spawn_teammate` 创建时不携带路由参数。
+  - **修复方案**：
+    - 将 `spawn_teammate` 纳入 `DEFAULT_SUBAGENT_INHERIT_TOOLS` 继承模式，继承 Lead 路由，防止被授权守卫硬性拒绝；
+    - 优化 Preset 提示词，新增 R0.5 协作模式侦测及 R-T Teammate 协作规范，使模型能自适应普通子代理模式与 Agent Teams 协作模式。
+  - **测试**：测试断言两种预设形态完全一致，继承权限判定准确。
 
+- **[设置 / UI] 修复客户端样式表在 Fiber 热重载时偶发丢失**
+  - **根本原因**：ChatGPT 样式表在卸载时执行 `element.remove()`，而在 Cordis Fiber 重启（如修改配置、HMR）时，新 Fiber 先运行看到旧标签返回空 Disposer，旧 Fiber 随后异步将标签从 DOM 彻底移除，导致样式表永久丢失。
+  - **修复方案**：改为主样式表托管模式：标签归全局文档所有，存在则就地更新 `textContent`，Disposer 置为空操作，并在热更新时即时刷新 CSS 规则。
 
-- **修复 Kimi Code 设置卡片「过一段时间就报 `rejected the stored credential (401)`」**：这不是登录态过期，而是**卡片拿着一个已经过期的 access token 去查用量**，并把服务端的 401 读成了「凭据被拒绝」。
-  - **根因一：卡片从不刷新号池凭据**。`/status`、`/quota`、`/connection/test` 都把号池里的 credentials 原样交给 `fetchAccountQuota`，而它只在**没有**传入凭据时才会刷新——号池的刷新只发生在模型请求路径上（`getEffectiveAccount`）。Kimi 的 access token 只有 **900 秒**（实测本机凭据 `exp - iat = 900`），于是「15 分钟没发过 Kimi 消息」＝「打开设置页必现 401」。实测本机两份存储：镜像里的 token 有效，号池里的 access token 已过期——正是这一条。
-  - **根因二：同一枚轮换 refresh token 被两条路径各自刷新**。单凭据文件是号池主账号的**镜像**，但目录加载会绕过号池去刷它（`loadProviderModels` → `ensureAccessToken(store)`，且 stale-while-revalidate 会在后台再刷一次）。Kimi 的 refresh token 轮换后旧的即作废，于是镜像先刷成功就把号池那份变成死令牌；适配器下次刷新拿到 `invalid_grant`，账号被标 `authStatus=expired` 移出轮换，而进程内的「已拒绝」墓碑只在**重新登录**时清除——必须重新登录才能恢复。官方 CLI 正是为同一问题加了跨进程文件锁。
-  - **修法**：号池新增 `getFreshCredential(accountId)`（按 id 取凭据、到期前刷新、写回池并镜像）与 `renewCredential(accountId)`（**无条件**续期）；`AccountPoolCore` 两者共用一条 `credentialFor` 路径，失败分类与 `getEffectiveAccount` 一致（refresh 被判死刑才标记账号）。卡片三条路径全部改走它。
-  - **401 现在会先续期再判定**：`fetchAccountQuota` 收到 401 时用一次强制续期再重试一次，只有**第二次** 401 才是「重新登录」。单账号路径只在存储里仍是**同一枚** refresh token 时才续期——已被别人轮换过的令牌不再花掉。续期后的凭据会用于随后的 `/me` 与落盘，避免刚换到的新 token 立刻被旧 token 覆盖。
-  - **目录加载不再碰镜像**：`loadProviderModels` 新增 `credentialProvider` 接缝，适配器与路由在装了号池时传入号池的活跃凭据；带池时**完全不再回退**到单凭据文件，没有活跃账号时宁可返回空目录也不去轮换镜像里的令牌。无池部署行为不变（自刷新仍是它唯一的凭据来源）。
-  - **验证**：`tsc` 三个项目 0 错误；`npm test` **110 文件 / 1582 项通过、0 失败**（新增 9 条）。把源码 stash 回修复前，其中 6 条失败，确认断言不是空转。
+- **[Claude] 修复回复包含内容时 100% 失败报错（`must be losslessly JSON-serializable`）**
+  - **问题现象**：每当模型输出文字、思考或工具调用时，整轮对话必定崩溃报错，提示 `Assistant stream chunk must be losslessly JSON-serializable`。
+  - **根本原因**：
+    - DSH 在会话日志落盘前会对流式 Chunk 进行严格无损 JSON 校验，遇到 `undefined`、非法数字、数组空洞等直接拒收整块消息。
+    - 插件在 `mapper.ts` 中将文本块和工具调用的占位显式写为了 `state.replayBlocks[index] = undefined`，或解析参数失败时带入 `undefined`。
+  - **修复方案**：
+    - 将占位值从 `undefined` 修正为标准 JSON 合法值 `null`；
+    - 新增 `jsonSafeValue()` 过滤管道，递归清洗非有限数字、-0、未定义字段及循环引用；
+    - 类型系统收紧，将 `replayBlocks` 类型改为 `(Record<string, unknown> | null)[]`，在编译期杜绝 `undefined` 赋值。
+  - **验证**：通过真实失败日志回放验证，7 种曾被拦截的流式形态全量测试通过。
 
-- **移除 Claude 线路的「合规告知 + 确认门禁」**：设置卡片顶部那段必须显式接受的告知、`/claude/api/consent` 路由、以及**主机侧门禁**全部删除。
-  - **为什么必须整体删除而不是只删界面**：那条门禁不是纯 UI——它决定**适配器是否注册**，未接受时 `login`/`adopt`/`accounts`/`quota`/`connection/test`/`catalog/refresh`/`settings`(POST)/`login/input` 一律 403。**只删告知框会留下门禁、却再没有地方能确认它，等于把这条线路锁死。** 现在 `claimClaudeRoute` **无条件注册**（保留原有的路由争用处理：`try/catch` + `claudeConflict` 上报 + `llm/adapters-updated` 重新认领）。
-  - **风险事实不变，只是不再要求点击**：Anthropic 现行条款仍明确不允许第三方应用提供 Claude.ai 登录、也不允许代用户经 Free/Pro/Max 凭据转发请求，本插件**仍未获任何授权或认可**。README 保留了如实说明，并写明「此前版本有确认步骤，现已移除；移除的只是那一步交互，不改变上述事实」。
-  - **用户已有数据必须继续可读**——这是本次最需要小心的点，因为**已确认过的用户磁盘上确实写有 `consent` 键**（实测本机 `~/.dsh/storages/claude-models.json` 含 `{accepted:true, acceptedAt:..., version:"1"}`）。已加测试锁定：含旧 `consent` 键的设置文档**仍能正常解析、其余字段完好**，两条读取路径（手写文件回退解析器、命名空间 schema）都覆盖。手写解析器本就逐字段显式读取、不拒绝未知键，因此无需修改，但现在有测试固定这一行为。
-  - **一处纠正**：实现中途曾误以为「zod 默认剥离未知键」。实测本仓库使用的 `@deepseek-ai/schemastery` **会保留**未知键于 scope 值内，只是 `registerClaudePreferenceStore.status()` 按已知字段重建对象，因此陈旧键不会逃逸到状态响应、卡片或路由；文件回退路径则在下一次保存时丢弃它。**结果与预期一致，机制与当初描述不同**，已按实测记录。
-  - **验证**：`tsc` 三个项目**均 0 错误**；`npm test` **110 文件 / 1573 项通过、0 失败**（删除 1 个只测该特性的测试文件 367 行，新增 5 条把「不再有门禁」钉死的用例）；其中一条端到端用例证明一个从前被拦下的 settings POST 在**完全没有确认状态**时成功，并校验落盘键集合不含 `consent`。源码中仅剩 2 处 `consent` 字样，属于 **antigravity 线路自己的 OAuth `prompt:'consent'` 参数**，与本次无关、按边界未动。
-- **新增模型 Claude Opus 5.5（`claude-opus-5-5`）**，规格取自 Anthropic 官方文档（2026-09-22 发布）：1M 上下文 / 128K 输出 / 支持图片输入 / 档位 `low`–`max`。
-  - **它不能关闭思考**：官方文档明确 `thinking:{type:"disabled"}` 与 `{type:"enabled",budget_tokens:N}` **都返回 400**，只能省略 `thinking` 或发 `{type:"adaptive"}`。因此能力表标记为**不可关闭思考**，并有测试固定。
-  - **它的默认档位是 `medium`**（其它带 effort 的模型默认 `high`），因此**没有被归入 `mid-convo` 分支**——该分支会强制发送 `output_config.effort='high'`，对 Opus 5.5 等于**静默抬高一档、增加开销**。代码注释记录了这条推理，测试另有断言把 `mid-convo` 集合钉死为原有的两个 id，使「再加一个强制档位模型」必须是一次经过审视的改动。
-  - **不受影响的破坏性变更**：官方同时列出「不支持强制工具调用（`tool_choice` 为 `any`/`tool` 返回 400）」。已核实**本仓库 mapper 从不发送 `tool_choice`**，因此不受影响（此为查证结果，非假定）。
-  - **保真锁没有被削弱**：原测试硬断言「恰好 14 行且 id 与参照快照完全相等」，而本机快照（`@earendil-works/pi-ai@0.85.1`）**早于 Opus 5.5**。改法是：快照内每条仍逐字段比对（强度不变）；id 相等改为**同相对顺序的子序列匹配**；超出快照的 id 必须出现在测试内显式的 `LOCALLY_CURATED_MODEL_IDS` 清单上，并有**反向断言**（表里任何超出快照的 id 若不在清单上即失败），从而**臆造或拼错的 id 无法蒙混**。`DEFAULT_VISIBLE_MODEL_IDS` 现以 `claude-opus-5-5` 开头。
-  - **变异验证**：臆造 id、转录字段漂移、转录行乱序、把第三个模型标成 `mid-convo`、以及新增一条未登记的 id —— 五种篡改**均会导致测试失败**。
-  - **未联网核实的项**：模型行本身的字段值来自官方文档（非实测）；服务端的 actual effort 默认与 400 行为**未在真实账号上验证**。
+- **[调度预设] 修复调度模式 R8 兜底状态卡死、不派发子代理的问题**
+  - **根本原因**：
+    - 调度模式在触发 R8 兜底（由主模型亲自执行）后，模型容易在对话历史中自我强化这一结论，导致即使当前任务已顺利结束，下一个新任务依然拒绝派发子代理。
+  - **修复方案**：
+    - **作用域限定**：明确 R8 兜底仅为**单任务级别**，绝非会话级状态；
+    - **明确解除与恢复条件**：新任务开始时强制回到 R0 重新分诊，不得沿用兜底假定；触发条件收紧为“同一任务重派两次依然失败”；
+    - **针对性解法**：对子代理上限超限（等待结算）和模型白名单拦截（显式指定模型）提供明确的修条件路径。
+  - **验证**：Preset 与代码声明通过逐字节一致性校验及反模式拦截断言。
 
+- **[Claude] 修复提示缓存命中率为 0（每次请求均全额计费）**
+  - **根本原因**：Anthropic 提示缓存需要请求中携带 `cache_control` 断点，此前适配器虽然实现了标记能力但默认置为 `false`，导致从不发出断点，服务端无法命中缓存。
+  - **修复方案**：
+    - **默认开启缓存**：改为 Opt-out 机制，默认开启缓存；
+    - **精准标记核心断点**：在符合 4 个断点上限的前提下，固定标记三处最关键的位置：System 块末尾、**最后一条 User 消息的最后一个块**（多轮历史复用核心）、最后一个工具定义；
+    - **规范标记时机**：在合并连续消息之后进行最终标记，保证断点位置稳定，前缀无动态漂移。
+  - **验证**：独立断言请求体断点分布，验证多轮历史复用断点正确生成。
 
-- **GLM（智谱 Coding Plan）线路被 Claude（订阅）线路取代**：移除 provider `zhipu-coding-plan` 的全部实现（`src/host/zhipu/`、`src/client/zhipu/`、`src/shared/zhipu-contracts.ts` 与三个 zhipu 测试文件），新增 provider `claude-subscription`，以 **Claude Pro / Max 订阅的 OAuth 登录态**访问 Anthropic Messages 接口（不使用 API Key、不按量计费）。设置页第六个标签由 **GLM** 换成 **Claude**。
-  - ⚠️ **合规前提，且已在 UI 上如实告知**：Anthropic 现行条款写明 *"Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users"*，并声明保留不经预告的执法权；已有开源项目被下架、有账号因此被限制。本插件**未获 Anthropic 任何授权或认可**，且**告知不改变条款效力**——风险由使用者承担。卡片文案据实措辞，并明确写出「未经授权」而非暗示合规。
-  - **门禁在 Host 侧强制，不是界面上的一个勾**：未接受时 `login` / `adopt` / `accounts` / `quota` / `connection/test` / `catalog/refresh` / settings POST / `login/input` **一律 403**，且**不读取本机 Claude Code 凭据、不注册适配器**（模型不出现在选择器里）；只有 `GET /status` 与 consent 接口开放，否则用户看不到也无法接受那段告知。撤销接受会**注销适配器**、中止在飞登录、停止额度轮询，但**保留已存凭据而使其不可用**（不静默删除用户数据）。以上每一条都有测试。
-  - **协议事实的出处是"本机可复核的引用"，不是自评**：OAuth 端点、client_id、鉴权头、Claude Code 身份块、工具名归一化表、模型能力表，全部取自本机随 harness 安装的 `@earendil-works/pi-ai@0.85.1`（lockfile integrity `b9bcce47…`，harness checkout `477b4f4205` = `dsh-v0.1.7-rc.2`）的 `dist/` 产物，均在代码注释与测试中带行号引用。**没有发出过任何真实 OAuth 或 Messages 请求**：本机无 Claude 凭据、无 Claude Code 安装，因此真实可用性**未经验证**（见下）。
-  - **本实现不照抄参照实现的一处安全缺陷**：参照实现把 PKCE verifier 直接当作 OAuth `state`（`dist/auth/oauth/anthropic.js:209` 的 `state: verifier`），会把本应保密的 verifier 写进授权 URL、地址栏、浏览器历史与剪贴板。本线路是两次**独立**随机抽样，并有测试断言授权 URL 中不出现原始 verifier（该测试先从真实的兑换请求里取出 verifier，因此否定断言不是空转）。
-  - **思考形态有四类，顺序决定成败**：`mid-convo`（`compat.supportsMidConvoEffort === true`，**排在最前且无条件**）→ `{type:'adaptive', block_binding:{prefix_mismatch_behavior:'drop_block'}}` **外加** `output_config.effort`；`adaptive` → `{type:'adaptive'}`；`budget` → `{type:'enabled', budget_tokens}`；`none` → 不发。**`claude-fable-5-1` 与 `claude-opus-5` 同时带 `forceAdaptiveThinking`**，因此把它们当成普通 `adaptive` 会**静默丢掉 `block_binding` 与 `output_config`**——看起来完全正确，而参照实现自己的注释写明该缺失会导致**持续 400**。这条缺陷是在实现过程中被独立核对发现并修正的，并补了反向对照（改回旧值即失败），因为它原本连"保真锁"一起锁错了。
-  - **预算算术按参照实现转录**（`MIN_ANSWER_TOKENS = 1024`、`DEFAULT_THINKING_BUDGETS`、`clampReasoning` 把 `xhigh`/`max` 夹到 `high`、以及 caller 侧与 wire 侧两道钳制），并测试了两个陷阱：`undefined` 的输出上限**不得**被当成 0（否则思考预算吞掉整个响应上限、回答没有余量），以及传入的必须是**已解析**的上限。
-  - **思考块带签名则原样回放**（`redacted_thinking` 同样回放），**无签名则丢弃**——这是思考模式下多轮工具调用的前提；有真正的多轮集成测试（`thinking → tool_use → tool_result → 续轮`），不是手搭 fixture。工具名出站按 Claude Code 规范大小写归一化、入站按大小写无关匹配回原名；**归一化后碰撞则放弃归一化**，避免把结果投给错误的工具。
-  - **两条登录路径是两个流程**：授权码与签发它的 `redirect_uri` 绑定，因此模式在流程开始时确定、中途切换即作废重发。默认**手动粘贴**（授权页把码显示在屏幕上），loopback 为可选并绑定 `127.0.0.1`。**一次授权只兑换一次**（compare-and-set：浏览器回调与粘贴同时到达时只有一方兑换，另一方得 409；已结算得 410 且不兑换）；**错误的 state 只拒绝那一个请求**，不终止合法登录。刷新是**单飞**的，否则到期瞬间一批请求会各自轮换刷新令牌全部作废。
-  - **账号身份是两层，令牌绝不作键**：不可变的 `internalId` 是唯一路由键；`identityKeys`（uuid / email / 派生 seed）只增不换，同一账号再次登录**合并**而非产生幽灵账号。**唯一例外的限制被如实写明并有测试**：服务端既无 uuid 也无 email 时无法自动识别同一账号，卡片会标注并提供**手动合并**——不伪造稳定 id。
-  - **收编本机 Claude Code 登录是可选且默认关闭的只读操作**：开启前只探测文件是否存在（不读内容），开启后才读取；得到的是**快照，永不由本插件刷新**——Claude Code 刷新同一枚轮换令牌，两个进程各自刷新会互相作废，而进程内单飞**解决不了跨进程竞态**，因此"永不刷新"是唯一正确答案而非优化。**绝不写入或删除 Claude Code 的任何文件**；managed 与 adopted 冲突时合并为一条且 managed 胜出，**adopted 标记不得残留**（残留会让该账号永远不再刷新）。
-  - **额度两套单位，分别换算且有交叉锁**：`/api/oauth/usage` 的 `utilization` 是**已用百分比 0–100**，而 `anthropic-ratelimit-unified-*-utilization` 响应头是**分数 0–1**、重置时间是 **epoch 秒**（与 body 的 ISO 字符串不同）。**`utilization: 0` 是「尚未使用」的正常态，不是额度耗尽**；两套单位不会被混淆（有测试证明同一状态的两种表达得到相同结果）。键集随账号类型变化且含会漂移的开关代号，因此只读已知键、**缺失不当作 0**。
-  - **换号两条硬约束**：只在**凭据失败**或**账号级限流**时换号——全局限流 / 过载 / 5xx **绝不换号**（其它账号共享同一全局限制）；**一旦已有输出产出就绝不换号**（否则重复文本或重复工具调用），改为直接报错。最多 3 次。
-  - **`xhigh` 原样透传，不做收敛**：`ReasoningEffortId` 在 dsh-llm 中是无约束 brand（`brandString(id)`，注释明写 no validation），本仓库已有四条线路使用 `xhigh`。写一张多余的收敛表会把用户选的档位静默降级——这条曾一度被误判为"harness 词表不支持"，经读定义后纠正。
-  - **移除是纯代码移除，不动用户数据**：`storages/zhipu-*.json` 与 `dsh-zhipu` 设置命名空间**原样留在磁盘、不再被读取**（不删除、不迁移、不加提示）。**兄弟线路不受影响**：`command-code` 与 `workbuddy` 目录中的 `zai-org/GLM-5.3`、`glm-5.3` 等是它们各自上游的**真实模型名**，全部保留（约 42 处，有命令核对数量未变）。
-  - **旧会话的恢复行为**：选择仍指向已删除 provider 的旧会话，发送时会被 harness 以 `session/model-unavailable`（"Select an available model before sending a message."）拒绝——这是 harness 内建行为，**不新增桥接**。恢复方式就是在模型选择器里另选一个模型。本机已核实无默认模型指向该 provider。
-  - **验证**：`tsc -p tsconfig.host.json` / `tsconfig.client.json` / `test/tsconfig.json` 三个项目**均 0 错误**；`npm test` **全绿**，无回归；`npm run build` 成功；`pnpm-lock.yaml` / `pnpm-workspace.yaml` **无 diff**（未改依赖）。新增约 11 个源文件与 12 个测试文件、约 260 项测试。
-  - **未经核实的项（必须如实记录）**：(1) **真实订阅端到端从未执行**——登录、令牌刷新、多轮工具调用、图片、额度读取、取消登录均未在真实账号上跑过，因此该线路应被视为**未经端到端验证**；(2) `/api/oauth/usage` 的确切键集与限流行为来自二手来源，整个 pnpm 树中不存在；(3) Claude Code 凭据文件的确切布局来自二手来源，且本机不存在该文件，收编路径只能靠 fixture 构造性验证；(4) macOS 钥匙串服务名未核实且明确列为非目标。以上各项均在代码注释中标注为来源等级，不冒充为本机事实。
-  - **回滚**：本条替代 `0.8.5`。如需退回带 GLM 线路的版本，安装 `@eddyskywalker/dsh-chatgpt-subscription@0.8.5` 即可；该版本的 GLM 凭据与设置仍在本机磁盘上，可直接复用。
+- **[Claude] 修复 Claude Opus 5.5 因上报版本过旧被拒（`claude_code_version_too_old`）**
+  - **报错信息**：`Claude Code 2.1.251 does not support this model; version 2.1.280 or newer is required.`
+  - **根本原因**：插件向服务端硬编码申报的版本号为 `2.1.251`，而 Opus 5.5 要求客户端版本 >= `2.1.280`。
+  - **修复方案**：
+    - 申报版本更新为真实已发布的 `2.1.283`（后续推进至 2.1.285）；
+    - 能力表引入 `minCliVersion` 门槛字段，发请求前在本地进行预检拦截，版本不满足时给出清晰的可操作提示，不再盲目向服务端发包；
+    - 新增自动化测试守卫，确保全表所有模型的版本门槛均严格 <= 当前默认申报版本。
 
+- **[Kimi] 修复设置卡片定期误报 `rejected the stored credential (401)`**
+  - **根本原因**：
+    - Access Token 有效期仅 900 秒（15 分钟），而前端卡片查询用量时直接携带了号池中已过期的 Access Token，导致上游返回 401 并被误判为“凭据被拒绝”；
+    - 单账号镜像文件与号池同时刷新同一枚单次有效的 Refresh Token，引发跨路径轮换冲突，造成账号被误标为失效。
+  - **修复方案**：
+    - **号池接入实时凭据获取**：卡片用量查询改走号池的 `getFreshCredential()`，在临期前自动续期；
+    - **401 强制刷新自愈**：收到 401 时主动发起一次强制续期并重试，只有二次 401 才判定为失效；
+    - **解除镜像刷新耦合**：模型目录加载改用号池的活跃凭据，不再触碰单凭据镜像文件，消除竞态。
+  - **测试**：新增 9 项凭据自愈与目录加载解耦测试。
 
-- **修复 issue #18：在 DSH Desktop 0.1.7-rc.2 启用本插件时报 `fiber state 5`、导致三条 web 行「未激活」**。报错原文是 `dsh: warning: 3 entries did not activate`，点名 `web`、`web-search-deepseek`、`web-fetch-http`，且**只有装了本插件才会出现**。根因是**启用路径上的启动时序**，不是本插件把 `web` 弄坏了。
-  - **`fiber state 5` 是 `UNLOADING`**（`FiberState`：0 PENDING / 1 LOADING / 2 ACTIVE / 3 FAILED / 4 DISPOSED / 5 UNLOADING）。harness 的 `inactiveEntries()`（`packages/boot/app-boot/src/index.ts:857`）把任何非 ACTIVE / PENDING / FAILED 的行渲染成 `fiber state N`；「未激活」是它对**卸载中**这一瞬态的措辞，不是加载失败。
-  - **为什么是这三行**：`web-search-deepseek` 与 `web-fetch-http` 都 `inject: ['web']`，所以 `web` 一旦重启，它们必然跟着卸载。它们是**被牵连**的，不是各自出错的。
-  - **触发链**：本插件在 `ctx.inject(['web'], ...)` 里注册 provider 后立刻调用了 `applyWebProviders()`，它会改写 `web` 行的 config；改写 config 会让 `web` 重启（卸载 → 重新加载），从而把依赖它的两行一起卸下。这段代码跑在**整个 profile 合成的同一个 loader update 里**，而宿主在合成 settle 的那一刻就会审计这棵树（`reconcileProfilePatches` 先 `Promise.allSettled(previousFibers)`、再 `loader.await()`，紧接 `inactiveEntries()`，`index.ts:290-292`）——于是这次重启被**读到一半**，报成三行未激活。
-  - **为什么只有部分用户遇到**：只有当 `resolveActiveProxyUrl() !== null`（机器上存在系统代理 / 环境代理）时才会改写 `web` config；报告者正是 Windows + 系统代理。没有代理时本插件不动 `web`，因此不重启、也就没有这条警告。这也解释了「不装本插件时 web 行正常」的对照实验。
-  - **修法**：把首次选择**推迟一个 macrotask**（`setTimeout(applyWebProviders, 0)`），让它落在宿主那次审计**之后**。注册 provider 本身仍然同步完成，所以注入不受影响；启动后的 readiness 回调、偏好变更与代理探测回调**都照旧**做 reconcile，最终状态不变。这是**时序修复**：被修的是一处启动竞态，配置的最终结果本来就正确（`test/web-provider-lifecycle.test.ts` 早就在断言最终状态，所以旧用例抓不到它）。
-  - **这条时序是实测的，不是推断的**：在真实 `Loader` + `WebRuntime` 上按启用流程（合成 → settle → 读树）打点，立即选择得到 `select -> settle -> audit`，推迟后得到 `settle -> audit -> select`——即推迟确实把重启挪到了审计读树之后。新增回归用例断言 `loader.await()`（合成 settle 点、宿主紧接着同步读树之处）时 `select` **一次都没被调用**；**已验证该用例在改动前失败**（合成期被调用 2 次）、改动后通过。
-  - **顺带说明**：`fiber.update(config, true)` 在「行尚未 ACTIVE」时会走 `_setEpoch(INACTIVE)` → `_unload()` → 返回状态 5（`node_modules/@deepseek-ai/cordis/lib/index.js:1427`、`:1330`），这正是本插件既有的 `entry.fiber?.await()` 等待存在的原因，本次改动没有动那条路径。
+- **[Claude] 移除「合规告知 + 确认门禁」限制**
+  - **背景与改动**：
+    - 彻底移除设置卡片顶部的显式确认告知框、`/claude/api/consent` 路由及主机侧 403 门禁，路由改为无条件自动注册；
+    - 兼容用户磁盘已有的 `consent` 历史配置字段，不影响旧配置正常读取；
+    - 保持条款风险的客观陈述，使用户开箱即用体验更加顺畅。
 
-- **支持 DSH 0.1.7-rc.2**（本机 harness checkout 的 HEAD `477b4f4205` 就是 `dsh-v0.1.7-rc.2` 本身，`packages/boot/app-boot/package.json` 与 `dsh --version` 都答 `0.1.7-rc.2`；npm 上 `next` 也是它，`latest` 仍是 `0.1.5-rc.3`）。这一版同样**不需要任何行为改动**，而且这次有直接证据：同一份源码在精确钉住的 rc.1 与 rc.2 两个净室里**结果逐项相同**（1315 条通过 / 0 失败）。窗口 `dsh-v0.1.7-rc.1..dsh-v0.1.7-rc.2` 是 346 个提交 / 3429 个文件，收敛到本插件导入的二十个包后只有六个有源码改动，动作落在基线、依赖清单与两处需要说清的行为变更上。
-  - **rc.2 的头号特性（会话中途变更工具声明）在本插件这里是空集，且由构造保证**：agent-loop 现在会写 `developer/message` 携带 `tool-addition` / `tool-removal` 块（`packages/core/agent-loop/src/agent.ts:626`），`dsh-llm` 新增 `ToolUpdate`（`'in-history' | 'addition-only'`）、`LlmResolvedModelInfo.toolUpdate?`、`GenerateOptions.toolHistory?`，并在派发时按线路投影（`content.ts` 的 `projectToolUpdates`、`index.ts:1075`）。本插件任何线路都没有声明 `toolUpdate`（`grep -rn "toolUpdate\|deferLoading" src` 为 **0**），于是投影走第一分支：**剥掉全部 developer 消息、并去掉每个工具的 `deferLoading`**——mapper 收到的仍是「完整当前工具列表 + 无 developer 消息」，与 rc.1 的内容一致（rc.1 本来也没有这些块的产出方）。`agent.ts:394` 同样把 `startsSeries` 收紧为 `preparedCall?.toolUpdate === undefined && this.toolsChanged(...)`，未声明时保留 rc.1 行为。**未采用 `toolUpdate`**：它能让本线路在工具变更时缓存稳定前缀，但那是一个要逐线路核对线协议的优化，不是修复。另外这个接缝**本插件的测试根本看不见**——投影发生在 adapter 之上的 `LlmRuntime`，直接调用 mapper 的用例永远碰不到它，结论全部来自读 harness 源码。
-  - **GUI 选择模型从「目录仅供参考」变成硬门槛**：`packages/api/session-controller/src/catalog.ts` 新增 `modelAvailable()`——provider 要在 `listProviders()` 里**且** `await listModels(provider)` 要包含该 model id——`commands.ts:380` 在 `selectModel` 开头用新的 `requireModel()` 拦截，失败为 `session/model-unavailable`；`routableProviders` 也从裸的 provider 列表改成「至少广告了一个模型」的组。**同一个提交里发送路径反而更宽松**：`sendPrompt` 的 `routeServed()` 检查连同整个函数被删掉。客户端 `directory.ts` 把 `routable` 的语义从「有 adapter 服务该 provider」改成「当前选择出现在可用目录里」，并移除了 `ModelDirectoryResolver` 的 `blockReason` 配置与 `conversation.blocks` 发布——选择掉出目录时输入框不再被置灰。**对本插件的影响**：六条线路都各自广告了自己提供的模型（Codex 用 `CODEX_MODEL_CATALOG` 按 `visibleModelIds` 过滤、antigravity 用内置表、zhipu 未登录时回落 `FALLBACK_MODELS`），离线时选择照常；但 `command-code` / `kimi-code` / `workbuddy` 三条线路的 `catalog()` 要读远端列表，**该请求失败时改模型会失败**，rc.1 则允许。这与 Codex 主线路此前那次「持久化目录快照」是同一个失效形态，而门槛是 harness 有意加的，**因此不加桥接**——把刚建立的门槛「简化」掉正是要避免的做法，仅记录待维护者决定。另外 `ModelDirectoryState` 新增了**必填**的 `pending` 与可选 `retainedEffort`，本插件只读 `directory.store`、从不构造该对象，所以强制 typecheck 干净。
-  - **新增一等公民的额度提示面，未采用**：`dsh-llm` 的 `error.ts:31` 新增 `ACCOUNT_QUOTA_EXCEEDED_CODE = 'ACCOUNT_QUOTA'`（唯一产出方是 `llm-deepseek-account`），`ui-chat` 新增框架级 `QuotaNoticeHost`（挂在 `shell.overlay`）与新槽位 `shell.quota-notice`，可注册以取代通用 Toast（`QuotaNoticeCode = 'QUOTA' | 'ACCOUNT_QUOTA'`）。本插件**不抛**这两个码（0 处引用），所以这个面不会为它触发，额度仍只由输入框胶囊与设置卡片承载。为 ChatGPT 订阅额度注册 `shell.quota-notice` 视图是真实的产品增项，但它是功能而非兼容修复；`ACCOUNT_QUOTA` 尤其会把用户引向 DeepSeek 的充值页，对 ChatGPT 订阅并不适用。
-  - **vendor 本轮零改动**：`git diff dsh-v0.1.7-rc.1..dsh-v0.1.7-rc.2 -- vendor` 为**空**，cordis / loader / schemastery 都没动，因此不像 alpha.1→rc.1 那样需要重新钉版本。`dsh-web`、`dsh-host-webserver`、`dsh-attachment`、`dsh-timeout`、`dsh-settings` 的 `src` 树**逐字节相同**（用 git tree hash 核对，不是读 diff），只有 `package.json` 与 `README.i18n.yaml` 变化。窗口里那两处 web 改动属于**另一个包** `@deepseek-ai/dsh-tool-web`（是组合的依赖，不是 `dsh-web` 的），且只改了面向模型的提示文案（`TOOL_WEB_FETCH` 段与 `web_search` 描述变短），其 `Config` 两代逐字节相同，因此预设行 `{ fetch: true, searchTimeoutMs: 60000 }` 照旧校验。`dsh-tools` 只在 `PreToolDecision` 的 `ask` 分支加了可选 `displayReason`（本插件从不构造该联合，只包装 guard）；`ui-tool` 是纯加项（`ToolRowProps.href`、`webFetchHref()`、`schedule_update`），`tool.call.toolview` 的注册 API 与阶段联合未变；`ui-settings` 只在**我们不注册**的 `settings.launcher` 上加了必填 `settingsOpen`；`ui-conversation` 的必填 `hooks.stopShortcut` 加在**父级** `conversation.composer.bar` 注册上，而 `conversation.input.right` 未声明 `inject`，六个胶囊的 `PropsRuntime` 不变，`DEVELOPER_TOOLS_VIEW_ID` → `TRAJECTORY_VIEW_ID` 的重命名没有从客户端入口再导出、本插件也没有引用；`ui-model-selection` 的 `catalog.ts` 新增 `reasoningFor()` 并订阅 `credentials/record-updated`（我们的凭据写入现在也会刷新目录，无害）。
-  - **peer 子句这次是「必须」而不是「可读性」**：`test/package-integrity.test.ts:67` 会把 peer 范围按 `||` 切开，断言每个 devDependency 范围字符串**逐字**出现在其中。所以把 devDeps 升到 `^0.1.7-rc.2` 而不同时在 peer 并集里加 `|| ^0.1.7-rc.2`，套件会**直接失败**。（这是实测撞出来的：某次净室把 devDeps 钉成裸的 `0.1.7-rc.1`，报错正是这条断言。）启动期的 peer 兼容性预检（rc.1 引入）依旧存在且本插件照旧通过——对 `0.1.7-rc.2` / `rc.1` / `0.1.7-alpha.2` / `alpha.1` / `0.1.6-alpha.1` / `0.1.5-rc.3` / `0.1.2-alpha.5` 七个运行版本逐条 `semver.satisfies` 探针全部 OK（`^0.1.7-rc.1` 本就覆盖 rc.2，同一个 `0.1.7` 元组）。
-  - **升级基线不能靠增量 `npm install`**：带着 rc.1 的 lockfile 直接装 rc.2 会 `ERESOLVE`——`dsh-attachment@0.1.7-rc.2` 把 peer `@deepseek-ai/dsh-brand@0.1.7-rc.2` **精确**钉住，npm 不肯为了让新请求的包成立而移动一个无关的传递依赖。改为清空重生成（`rm -rf node_modules package-lock.json && npm install`）后 `npm ci --dry-run` 报 up to date。以后凡是跨到 harness 精确钉内部 peer 的元组，都要预期这一步。
-  - **验证**：三个房间跑的是**同一份源码**，因此可直接对比。新基线（仓库内，36 个包 @ rc.2）：`tsc -b --force`（host + client）与 `tsc -p test/tsconfig.json` 全清；`npm run build` 干净；`npx vitest run` **103 个文件通过 / 1 跳过（104），1315 条通过 / 7 跳过、0 失败**。**注意 `npm run typecheck` 单独跑会在 3.2s 内回放 `lib/*.tsbuildinfo` 而「通过」，只有强制全量才作数。**`npm ci --dry-run` 同步；`npm pack --dry-run` **292 个文件 / 755.7 kB**（rc.1 记录的 282 / 735.0 是插件自身新增线路带来的，与 rc.2 无关）；另扫了一遍 `lib/types/**/*.d.ts` 有无缺源码对应的孤立声明，**没有**。rc.1 对照房间（精确钉 36 个包 @ rc.1）：`tsc -b` 0 错误，`npx vitest run` **1315 条通过 / 0 失败**，与 rc.2 **逐项相同**。旧代房间（devDeps `^0.1.5-rc.1` 实得 0.1.5-rc.3，28 个包，未用 `--legacy-peer-deps`）：`tsc -b` 0 错误，**1312 条通过 / 0 失败**，唯一无法加载的仍是 `test/subagent-model-authorization-ptc.test.ts`（0.1.5 闭包里没有 `@deepseek-ai/dsh-ptc-runtime`，差的 3 条即 1319−1315）。
-  - **pnpm 清单同步**：`pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 36 行全部改为 `0.1.7-rc.1 || 0.1.7-rc.2`（沿用 vendor 行「旧版本作备选」的写法，rc.1 仍需可安装），并补上 `dsh-hmr` 与 `dsh-workspace`——两者在 lock 里都是 `0.1.7-rc.2` 却不在 rc.1 的清单里，lock 与排除清单的 1:1 不变量已经漂移，现为 **38:38** 完全对齐。`pnpm-lock.yaml` 用 pnpm 11.24.0 重新生成（`lockfileVersion '9.0'`，36 个 dsh 包全为 `0.1.7-rc.2`），`pnpm install --lockfile-only --frozen-lockfile` **退出码 0**，供应链策略校验通过（363 条）。CI 走 `npm ci`，这两个文件只影响用 pnpm 安装的人。
-  - **本轮踩到两个净室脚本陷阱，记下来免得下轮重复**：(1) 为省时间删掉 `mermaid` 依赖，会让 `test/routes.test.ts` 的 mermaid 路由断言以 404 失败——它是 `lib/index.js` 的真实运行时依赖，不是「只给渲染器测试用」；(2) `^0.1.7-rc.1` **并不能**钉住 rc.1，npm 会装 rc.2，所以对照房间必须钉精确版本（并且要保住上面那条 dev/peer 不变量），否则它只是基线房间的重复。
+- **[Claude] 新增模型 Claude Opus 5.5（`claude-opus-5-5`）**
+  - **规格说明**：1M 上下文、128K 输出上限、支持图片输入、思考档位支持 `low` 至 `max`；
+  - **特性适配**：
+    - 官方不支持关闭思考（显式关闭或设置 budget 均报 400），能力表标记为不可关闭思考；
+    - 默认思考档位为 `medium`（避免被静默提升为 `high` 造成额外额度开销）。
 
-- **发版修正：`latest` 不再停在 0.7.0**。用户反馈「更新了一下，从 0.8 又变成 0.7 了」——npm 上 `latest` 一直是 **0.7.0**，而 `0.8.0-alpha.0` 到 `0.8.2` 全部落在 `alpha` 标签下，`npm install` 与 `dsh plugin add` 不带标签时解析的正是 `latest`，所以从 0.8 升级会退回 0.7。根因是 `package.json` 里的 `publishConfig.tag: "alpha"`：它让**每一次**发布都进 `alpha`，`latest` 因此自 0.7.0 之后再没动过。
-  - **修法一：把已发布的 0.8.2 提升为 `latest`**（`npm dist-tag add @eddyskywalker/dsh-chatgpt-subscription@0.8.2 latest`）——不重新发版。提升前逐文件核对了 npm 上的 0.8.2 与本地源码的干净构建（`rm -rf lib && npm run build` 后 `npm pack`）：`lib/index.js`、`lib/client.js`、`lib/client.js.map` **逐字节相同**，其余声明文件一致，因此提升 0.8.2 等于发布当前源码。0.8.2 里比干净构建多出 `lib/types/host/compaction-patch.d.ts{,.map}` 两个**孤立**声明文件（仓库里没有对应源码、也没有任何代码引用，是发布当时 `lib/` 的增量残留），运行时不受影响；这类残留正是下面那条「发版前清空 `lib/`」的原因。
-  - **修法二：删掉 `publishConfig.tag`（保留 `access: public`）**，让稳定版按 npm 默认进 `latest`。这不是把预发布也推向 `latest`：npm 11 起对预发布版本**强制要求显式 `--tag`**（`You must specify a tag using --tag when publishing a prerelease version.`，见 npm 的 `lib/commands/publish.js`），所以下一次 alpha 必须写明 `npm publish --tag alpha`，不会静默盖掉 `latest`。
-  - **顺带清掉遗留的 `next` 标签**：它从首次发布起就指向 `0.1.0-alpha.0`，与任何在用版本都不对应。
-  - **验证**：`npm view @eddyskywalker/dsh-chatgpt-subscription dist-tags` 现在为 `latest: 0.8.2`（`alpha` 仍是 0.8.2）；在空目录里执行一次真实的 `npm install @eddyskywalker/dsh-chatgpt-subscription`，装到的是 0.8.2 且 `lib/index.js` 就位。
+- **[架构演进] Claude (订阅) 线路正式上线，替代原 GLM 线路**
+  - **变更概述**：移除 `zhipu-coding-plan` Provider，新增 `claude-subscription` Provider，支持以 Claude Pro / Max 订阅的 OAuth 登录态直连 Anthropic Messages 接口（无需 API Key、不按量计费）；设置页相应标签替换为 Claude。
+  - **核心架构实现**：
+    - **OAuth 认证与安全**：对齐 Claude Code 官方身份块，采用独立随机生成的 PKCE Verifier 与 State，规避敏感参数泄露风险；
+    - **思考模式分级处理**：严格支持 `mid-convo`（携带前缀绑定）、`adaptive`、`budget` 及 `none` 四类思考形态；
+    - **多轮会话回放**：保留带签名的思考块（Thinking Signature）原样回放，剔除无签名残缺块，保障多轮工具调用稳定；
+    - **账号管理与号池**：以稳定的内部 ID 作为路由键，支持多账号轮询与自动重试；支持只读收编本机 Claude Code 的已有登录凭据（快照模式，永不跨进程抢刷）；
+    - **额度与用量监控**：双轨兼容已用百分比与统一限流响应头换算，卡片清晰展示用量进度与重置倒计时。
 
-- **支持 DSH 0.1.7-rc.1**（本机 harness 仓库与 `dsh --version` 都已是它，npm 上 `next` 也是它）。这一版**不需要任何行为改动**——alpha.1 桥接过的会话消息模型与设置 API 在 rc.1 一字未改，`dsh-llm`、`dsh-settings`、`dsh-web`、`dsh-attachment`、`dsh-timeout`、`dsh-host-webserver` 与四个 client 包在该窗口内**只有版本号变化**（窗口本身 318 个提交 / 911 个文件，绝大多数与本插件无关）。动作落在基线、一处契约漂移和依赖清单上。
-  - **dev 基线升到 `0.1.7-rc.1`，peer 范围加入 `^0.1.7-rc.1`**。需要说清的是：这个 peer 子句是**为可读性**，不是解封——`^0.1.7-alpha.1` 本来就覆盖 `0.1.7-rc.1`（同一个 `0.1.7` 元组，预发布比较器在元组内匹配），已用 `semver.satisfies` 对全部 dsh peer 逐条验证。rc.1 新增的**启动期 peer 兼容性预检**（`packages/boot/app-boot/src/plugin-compatibility.ts`：不满足即把该行 `disabled` 并写 stderr，读不到 peer 元数据也一律拒绝）对本插件因此是**空集**。
-  - **`tool.call.toolview` 的入参从单一 `block` 变成三态联合**（`packages/client/ui-tool/.../contract/slots.ts` 的 `ToolCallPhaseProps`：`preparing` / `start` / `result`），`RunningToolCall` 相应拆成 `PreparingToolCall`（**根本没有 `argsRaw`**）与 `StartedToolCall`。`ToolCallTree` 对**每个阶段**都调用已注册的 keyed 视图，所以图片卡确实会拿到 `preparing` 的 block；`CodexImageToolView` 原先直接读 `block.argsRaw`，在 `preparing` 上读的是不存在的属性。**这不是用户可见的故障**（读到 `undefined` 后照常渲染「正在生成图片」，只是少了提示词摘要），属接缝处的契约漂移；现改为只在声明了该字段的分支读取（`dispatchedArgsRaw`，用 `'argsRaw' in block` 判定），旧代走的正是原来那条分支，**由构造保证而非版本判断**。
-  - **顺带记录一个类型盲点**：`slots.d.ts` 从 `@deepseek-ai/dsh-client-ui-chat/client` 引入这些块类型，而该包**既没有安装、也不是 `dsh-client-ui-tool` 声明的依赖**（那个包连 `dependencies` 字段都没有）；两个 tsconfig 都开着 `skipLibCheck`，于是这些类型退化成 `any`，`tsc` 对 `block` 的形状既查不出错、也证明不了对。上面关于 `tool.call.toolview` 的结论**全部来自读 harness 源码，不是来自类型**。把 `dsh-client-ui-chat` 加成 devDependency 能让这一面真正被检查，但那是一个需要随世代维护的新依赖，留作维护者决定。
-  - **vendor 只涨版本、不动源码**：cordis 4.0.3 → 4.0.4、schemastery 3.18.3 → 3.18.4，`vendor/cordis/src` 与 `vendor/schemastery/src` 在该窗口的 diff 为**空**，清单里只是把内部范围从 `workspace:^` 收紧成 `workspace:~`。alpha.1 记录过的 `Fiber.update()` 陷阱（4.0.2→4.0.3）没有新变化，`search-provider-switcher.ts` 里 `entry.fiber?.await()` 的等待依然正确。`dsh-tools` 新增可选的 `projectContent` 钩子，纯加法，未采用。`package-lock.json` 里跟着动的 cordis 4.0.4 / loader 1.0.5 / group 1.0.4 / include 1.0.9 / cosmokit 1.8.5 / schemastery 3.18.4 是 rc.1 各包收紧 peer 后的必然结果，源码行为不受影响。
-  - **pnpm 清单同步**：`pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 由 `0.1.7-alpha.1` 换成 `0.1.7-rc.1`（vendor 行把旧版本作为备选保留），并补上 rc.1 所需的 cordis 4.0.4 / loader 1.0.5 / cosmokit 1.8.5 / schemastery 3.18.4 / group 1.0.4 / include 1.0.9；`pnpm-lock.yaml` 用 pnpm 11.24.0 重新生成，`lockfileVersion` 仍是 `'9.0'`，供应链策略校验通过、`--frozen-lockfile` 退出码 0。CI 走的是 `npm ci`，这两个文件只影响用 pnpm 安装的人。
-  - **验证**：`npm run typecheck`（先删掉两个 `.tsbuildinfo` 并以 `tsc -b --force` 强制全量，避免增量空跑被误判为通过）与 `npm run build` 均 **0 错误**；`npx vitest run` **96 个文件通过 / 1 跳过（97），1256 条通过 / 7 跳过、0 失败**。对照 alpha.1 基线（1250 条通过、95 个文件通过 / 1 跳过）**除新增用例外逐项一致**，确认 rc.1 未引入回归。`npm ci --dry-run` 同步，`npm pack --dry-run` 完好（282 个文件）。旧代回测在独立干净目录按 `^0.1.5-rc.1` 装出完整闭包（实得 0.1.5-rc.3）：`tsc -b` **0 错误**，`npx vitest run` **1253 条通过 / 0 条失败**；唯一无法加载的仍是 `test/subagent-model-authorization-ptc.test.ts`（它的 3 条在 rc.1 上通过，0.1.5 闭包里没有 `@deepseek-ai/dsh-ptc-runtime`）。新增 `test/codex-image-tool-view.test.tsx` 6 条，按字面写出各阶段的线形状（preparing / start / rc.1 之前的 running / 结果 / 出错 / 非 JSON 参数），**两代都通过**。该文件锁定的是**行为而不是「修复」**——原实现在 preparing 上产出完全相同的结果，因此它区分不出改动前后，这一点如实记下。
+- **[DSH 兼容] 修复启动时报 `fiber state 5` 导致 web 模块未激活警告（[#18](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/18)）**
+  - **根本原因**：在具备透明代理/系统代理的环境下，插件在注册 Provider 后立即同步修改了 `web` 配置，导致 `web` 模块触发热重载（卸载中状态，即 Fiber State 5），与宿主 profile 合成审计产生启动时序竞态。
+  - **修复方案**：将首次 Provider 状态同步推迟一个宏任务（`setTimeout(applyWebProviders, 0)`），确保其落在宿主审计之后，消除误报警告。
 
-- **新增第五条线路：GLM（智谱 / Z.ai Coding Plan）**，Provider id 为 `zhipu-coding-plan`，与另外四条线路功能对齐（多账号号池、模型勾选、逐模型能力表、上下文窗口覆盖、默认思考深度、额度卡片与输入框右侧胶囊）。该 id 特意与用户常用的自定义 `zai` / `zhipu` OpenAI 兼容条目分开，安装本插件不会覆盖或隐藏原有自定义 API。
-  - **两个部署、两套控制台，区域是凭据属性**：国际区 `https://api.z.ai`、国区 `https://open.bigmodel.cn`，两边的 Key **互不通用**。添加 Key 时显式选择区域，账号卡片逐条标注，模型请求走该账号自己的 host；凭据里的 base URL 由区域推导而不是采信落盘值，手改文件也无法把 Key 指向别的主机。
-  - **订阅接口不是开放平台接口**：Coding Plan 的模型面是 `{base}/api/coding/paas/v4`（不是通用付费的 `/api/paas/v4`），添加 Key 时先用它读一次该部署自己的模型目录做验证，未通过就不落盘——这是这个产品最常见的一次配错，错误文案直接告出「Key 大概该来自哪个控制台」。整次登录只花一次上游读（验证用的目录被缓存）。
-  - **额度取自订阅自己的监控接口**，且鉴权方式与模型接口**不同**：`/api/monitor/usage/quota/limit`（5 小时 + 每周 + 月度 MCP 工具调用）与 `/api/biz/subscription/list`（套餐名）用**不带 `Bearer` 前缀的裸 Key**——实测带前缀判 401、裸 Key 通过——而模型接口用文档记载的 `Bearer`。两条 header 各自成函数，并各有测试锁定。窗口按上游的 `unit`/`number` 换算成分钟后再命名（`unit 3 × number 5` → 5 小时，`unit 6 × number 1` → 每周），同时兼容 `TOKENS_LIMIT` 与新版 `CREDIT_LIMIT` 两种拼写，避免卡片对活账号报「无额度」。
-  - **模型能力逐模型查表**（`src/host/zhipu/model-catalog.ts`，转录自订阅侧模型注册表与官方文档）：图片支持、思考档位、能否关闭思考都是逐模型事实，**不能按族名推断**——`glm-5.3-flash` 接受图片而 `glm-5.3` 不接受；`glm-5.3` 有三档而 `glm-5.2` 只有两档；`glm-4.7` / `glm-4.5-air` 这类 toggle 模型根本不收 `reasoning_effort`。运行时以订阅侧 `GET /models` 为准，但它只覆盖上下文窗口，能力字段不被这份列表改写（列表声明窗口，不声明能力）。
-  - **思考档位先收敛再发出**：上游对 GLM-5.x 只接受 `low` / `high` / `max`，其余取值**直接报错**而非被忽略；DSH 的档位词表更宽，因此每个取值都收敛到该模型自己的档位表后才发出。收敛的**排序覆盖两套词表**——这一点是实测出来的缺陷：只按上游三档排序时，`minimal`（比 `low` 更省）会被当成未知值弹到中间档，用户选最省的一档反而换来 `high`，既违背意图又更费额度；修好后 `minimal`→`low`、`medium`→`high`、`xhigh`→`max`。关闭思考的值一律不发：GLM-5.3 / GLM-5.3-FLASH / GLM-4.7 把 `thinking.type: "disabled"` 判为错误，省略即它们的 `enabled` 默认。另外不发 `stream_options`（文档未记载该字段，且上游的流式文档显示 usage 无需它也会到达），避免为无收益的字段冒 400 的风险。
-  - **瞬时失败按 `code` 分类重试**（`src/host/zhipu/adapter.ts`）：上游 5xx / `code 1230` / `code 1234` / 服务过载归为可重试，走与兄弟线路一致的有界退避（最多 3 次、1.5s 起步、15s 上限、0.2 抖动）并遵守上游 `Retry-After`。**401/403 与 `code 1000` / `1003` / `1001`（Key 失效）、`1311`（套餐不含该模型）、`1309`（套餐已过期）明确不重试**——它们与「额度窗口用尽」（`1308` / `1310`）共用 429 状态码，但处理方式完全相反，因此分类读响应正文的 `code` 而不只看状态码。
-  - **号池复用共享内核**：走 `AccountPoolCore` 与同一张设置卡片，因此具备顺序耗尽 / 轮询调度 / 粘性会话、429 冷却换号、账号级失效（保留账号、重新添加即恢复）、设为主账号、备注与清除冷却。账号 id 是 **Key 摘要 + 区域**，别名只显示「区域 + Key 后四位」；明文 Key 既不进 id、别名，也不进任何响应（测试断言 `/accounts/add` 与 `/status` 的响应体不含 Key 本身）。号池文档逐条容错解析：**单条损坏的账号被丢弃而不是让整份文档读失败**——池读取抛错会把「已登录」报成「未登录」，一条坏行就会让整条线路下线。
-  - **验证**：`npm run typecheck` 与 `tsc -p test/tsconfig.json` 均 0 错误；`npm test` **93 个文件通过 / 1 跳过，1213 条通过 / 7 跳过、0 失败**（连续多轮复跑稳定）。新增 3 个测试文件共 **67 条**：`test/zhipu-adapter.test.ts`（38 条）锁定逐模型能力与未知模型回落、上游列表窗口合并而能力不被改写、两种鉴权 header、额度窗口与 `CREDIT_LIMIT` 兼容、两套词表的档位收敛、请求构造（始终流式、不发 `stream_options`、不发关闭思考、未声明的档位不发）、`reasoning_content` 流式映射与截断流拒绝、以及读 `code` 的重试/不重试分类（含 `providerRetryAfterMs`）；`test/zhipu-routes.test.ts`（18 条）锁定添加 Key 先验证后落盘且失败不写入、跨源拒绝、额度窗口与失败原因随状态返回、设置读写与 `null` 恢复默认、连接探测走对话面而非列表、启用集合三态，以及号池的去重 / 同 Key 跨区不冲突 / 冷却 / 失效保留 / 池前单凭据投影；`test/zhipu-ui.test.tsx`（11 条）锁定卡片渲染账号区域与套餐、逐窗口进度与重置倒计时、无额度空态、区域选择器、逐模型能力 tooltip、胶囊取**最紧窗口**并按剩余量分级、容量解析与格式化、以及两份词表键集合一致。`test/client-registration.test.ts` 同步扩展为六个标签页与第六条 `conversation.input.right` 注册。
+- **[DSH 兼容] 支持 DeepSeek Harness 0.2.0-rc.2 / 0.1.7-rc.2**
+  - 对齐多项 Harness 核心组件更新，平滑兼容会话中途变更工具声明、模型选择器硬门槛校验及依赖生态演进。
 
-- **修掉测试套件长期存在的不稳定（并发下的假失败与跨用例串扰）**。此前 `npm test` 在默认并发下几乎每轮都失败 4–6 条，早先被当作「既有偶发」放过；实测后确认是真实缺陷，且**失败会污染下一个用例**。
-  - **根因**：套件里有多条用例真的去 spawn `powershell.exe` 跑 Windows DPAPI 凭据存储（`token-store-windows` 一个文件就有 6 次），而 `testTimeout` 定在 15s——隔离测量最慢的一条要 **12.3–14.3s**（自身波动就有 2s），余量不到 3s。默认 worker 数按核心数取 15，子进程相互争抢（这里瓶颈是子进程吞吐而非 CPU），于是稳定超时。
-  - **超时的伤害不止那一条用例**：超时后仍在飞的请求不会被取消，它们会落进**下一个用例**的 fetch mock，把那个用例也判失败。实测抓到的调用序列是「配额那一组各出现两次 + 前一个用例遗留的 4 次 `streamGenerateContent`」，在断言上就表现为 `expected to be called 4 times, but got 8 times`。这正是「检查一下是不是问题」值得做的原因——它看起来像随机抖动，实际是一条会扩散的失败。
-  - **修法**：`vitest.config.ts` 的 `testTimeout` 由 15s 提到 **60s**（约为实测最慢值的 4 倍：健康运行绝不会触发，仍能抓住真正卡死的用例），并把 `maxWorkers` 限到 **4** 作为第二道保险。**成本为零**：这些用例受子进程延迟而非 CPU 约束，4 个 worker 实测 ~51s，15 个 worker ~54s。
-  - **验证**：`npm test` **连续 5 轮、每轮 1213 条全通过**；为确认主因，另在**默认 15 worker** 下只改超时复跑 **11 轮**，同样全通过——说明超时余量是主因，worker 上限是针对「外部负载（CI、同机并行任务）重新引入超时、而超时又会串扰邻居」这一放大路径的兜底。修复前：15 worker 下 4–5 条失败、4 worker 下 1/3 概率失败；修复后 0 条。
-- **WorkBuddy 每日自动签到**（参考 workbuddy2api 的 `daily_checkin.py` 移植并适配到插件进程内）：
-  - 新增 `src/host/workbuddy/checkin.ts`：国区账号（含桌面收编与已隐藏账号）在 Host 启动时签到一轮，之后每 10 分钟幂等补检（当日已签零请求）；先查 `checkin-activity-status` 幂等预查再调 `daily-checkin`，活动无权益当天不再重试，失败当天最多自动重试 3 次；token 续期复用凭据存储现有的过期续期+回写机制（桌面账号原子写回 IDE 的 *.info）。国际区账号不参与。（初版曾做「散列分时窗口」，试用后按用户反馈简化为启动即签，窗口配置已移除。）
-  - 状态持久化到 `storages/workbuddy-checkin.json`（tmp+rename 原子写），同日重启免费；签到是进程内调度，**DSH 未运行的当天不签到**。
-  - 偏好：`dsh-workbuddy` 命名空间与文件存储双轨新增 `checkin: { enabled }`。
-  - 路由：`/workbuddy/api/status` 附带签到汇总（今日 x/y、失败数、上次运行时间，聚合无账号标识）；新增 `POST /workbuddy/api/checkin/now` 手动补签（同源校验，忽略窗口与重试上限但仍跳过当日已签账号）；`/settings` 接受 `checkin` 补丁。
-  - 设置页新增「每日签到」区块：开关、「今日已签 x/y」总状态与「立即签到」按钮；中英文案。
-  - **合并后修复（评审发现）**：
-    - **关掉开关后重启仍会签到一次**。偏好 store 在无 register seam 的 harness（0.1.7 的 `SettingsForms`，即当前实际安装的形态）上异步预热，`status()` 在落盘文档读回之前一直返回出厂默认值；而 Host 构造完调度器立刻 tick，于是「已关闭」的账号每次重启都被签一次。`WorkBuddyPreferenceStore` 新增 `ready()`，调度器在每轮开头 await 它（memoize，只等一次）。
-    - **活动未开启的账号当天被永久放弃**。原先 `active === false` 记 `done = true`，而 Host 通常在活动开放前启动，这一条就吃掉了当天唯一的机会——补检也救不回来。现在 `inactive` 与 `done` 分开记录，未开启的账号每小时复查一次（`CHECKIN_INACTIVE_RECHECK_MS`），手动补签不受该节流限制。
-    - **「今日已签 x/y」把「无签到活动」算成已签**。汇总新增 `skippedToday`，卡片单独显示「无活动 z」，不再把没签到说成签到。
-    - **自动 tick 进行中点击「立即签到」被静默吞掉**。原 `tick()` 直接 join 在飞的 promise，手动「忽略开关与重试上限」的语义随之丢失；改为串行队列，手动请求在飞行中的那轮结束后补跑一轮。自动 tick 仍合并（重复的自动轮没有意义）。
-    - **`lastRunAt` 未落盘**，重启后卡片立刻显示「尚未运行」；现在随状态文件持久化（`version: 2`，v1 文档仍可读）。
-    - **上游字段容错**：签到状态按蛇形/驼峰双拼写读取，并把 `0/1`、`"true"` 一并归一（对齐参考实现的 `normalize_checkin_status`）；`daily-checkin` 返回「已签到」类软失败改判为成功，不再无谓消耗当天重试次数；401 触发一次强制续期重试（`ensureFresh` 只看本地过期时间，服务端提前吊销的 token 原本每次都要烧掉一次尝试）。
-  - **验证（合并后复跑）**：`npm run typecheck`、`tsc -p test/tsconfig.json`、`npm run build` 均 0 错误；`npm test` **95 文件通过 / 1 跳过，1250 通过 / 7 跳过、0 失败**（连续复跑一致）。新增 `test/workbuddy-checkin-review-fixes.test.ts`（19 条）逐条锁定上述修复——**该文件在未修复的源码上跑是 18 条里失败 11 条**，确认它真的覆盖这些路径，而不是只描述期望；`test/workbuddy-section-pool.test.tsx` 新增 4 条覆盖设置页区块（汇总含「无活动」、旧 Host 不渲染该区块、开关补丁落盘、手动签走对路由）。
-  - **验证**：`npm run typecheck`、`npm run build` 通过；`npm test` 全绿。新增 `test/workbuddy-checkin.test.ts`：首次 tick 即签、之后零请求、开关关闭不动/手动补签强制、国际区跳过、已签不重复请求、无权益当天不重试、失败 3 次封顶且手动可重试、过期 token 先续期再签到并回写桌面文件、多账号全签、同日状态文件去重、状态路由汇总/旧 Host 返回 null、手动路由同源与方法门禁、设置补丁持久化与旧版窗口字段兼容。
+- **[发布规范] 修复 npm `latest` 发布标签锁定问题**
+  - 修正 `package.json` 中固定的 `publishConfig.tag`，确保稳定版本发布时默认进入 `latest` 分发通道，预发布版本显式通过 `--tag alpha` 发布。
 
-- **模型上下文窗口跟随模型开关，并支持恢复默认**（用户报告：「本项目提供的供应商模型是可以开关显示的，但是配置同页面的配置上下文不行，能不能开启什么模型再调整什么模型的上下文，增加支持恢复默认的选项」）。
-  - **上下文窗口只列已勾选启用的模型**：五个标签页统一——ChatGPT 页按 `visibleModelIds`，Antigravity / Command Code / Kimi Code / WorkBuddy 按 `model.enabled`；一个都没勾选时显示空态提示。四页新增 `contextDraftsFor(status)` 并让所有播种路径（`/status`、目录刷新、以及**模型开关请求返回后**）都走它，否则刚勾选的模型会渲染成空输入框（此前上下文区与开关无关，草稿总是先于行存在）。
-  - **ChatGPT 页放开到全部模型**：原先只有 `CONFIGURABLE_CONTEXT_MODEL_IDS` 里写死的 6 个模型（恰好等于默认可见的 6 个）能配上下文，勾上 5.5 / 5.4 / 5.4 Mini / 5.3 Codex Spark 后没有对应输入框。现在 `CONFIGURABLE_CONTEXT_MODEL_IDS`、`ConfigurableContextModelId`、`isConfigurableContextModelId` 全部删除，改用既有的 `isCodexModelId`：偏好 schema 按 `CODEX_MODEL_CATALOG` 生成、路由接受任意目录模型、`src/host/model-catalog.ts` 去掉「只有那几个模型才读覆盖值」的守卫。可调上限沿用家族规则（GPT-6 系 872K，其余 1M），与 5.6 系列此前的规则一致。
-  - **`null` = 恢复默认**：请求体里的 `contextWindowOverrides: { "<模型 id>": null }` 表示删除该覆盖值、退回目录默认。五个 provider 的路由与 store 合并统一改走 `src/host/common/context-window-overrides.ts`——此前散落的 `{ ...current, ...patch }` 合并会把 `null` 静默吞掉（等于没有删除路径），Antigravity 的路由更是原样透传，一旦有 `null` 就会写进 JSON 文档。持久化类型仍是 `Record<string, number>`，`null` 只在归一化阶段存在，不会落到 settings 命名空间或落盘文件里。
-  - **存储里区分「没有覆盖」与「覆盖成默认值」**：ChatGPT 偏好 schema 不再给每个键加 `.default()`，`DEFAULT_PREFERENCES.contextWindowOverrides` 变为 `{}`，读取时由 `resolveCodexCatalogEntry(model).contextWindow` 兜底；已实测 schemastery 对缺键保持缺失、对未知键保留。老配置里存过的键与数值一律不动，用户可见数值不变。
-  - **每行「恢复默认」+ 每页「全部恢复默认」**：单行按钮在该模型没有覆盖值时禁用；批量按钮先 `window.confirm`，再把该页**所有**已存覆盖值一起清掉——包括已经被取消勾选的模型，避免隐藏的旧覆盖值残留。
-  - **改上下文窗口也会刷新适配器目录**：`POST /preferences/update` 原先只在 `visibleModelIds` / `enabled` 变化时发 `llm/adapters-updated`，而上下文窗口属于 harness 缓存的模型信息，改完在活动会话里不生效；现在带上下文窗口的补丁同样会发（另外四页的 adapter 每次请求读设置，无需改动）。
-  - **验证**：`npm run typecheck` 与 `npm run build` 通过；`npm test` **90 个文件通过 / 1 跳过，1146 条通过 / 7 跳过、0 失败**。新增 4 个客户端测试文件（`test/antigravity-context-window.test.tsx` 7 条、`test/command-code-context-window.test.tsx` 6 条、`test/workbuddy-context-window.test.tsx` 7 条）锁定「只列已启用模型、刚勾选即有目录默认值、单行与批量恢复都发 `null`」；`test/client-registration.test.ts` 原有 4 条正则用例改为「行数跟随勾选」并新增 3 条（未勾选无行、勾选后出现且带目录默认值、单行/批量恢复的请求体与 `window.confirm`）；`test/routes.test.ts` 改为接受 `gpt-5.4` 覆盖值，并新增未知模型 400、`null` 删除只影响单个键、上下文补丁触发 `llm/adapters-updated` 三类断言；`test/preferences.test.ts` 新增「恢复默认后该键消失」与「任意目录模型都能设覆盖值」；`test/adapter.test.ts` 与四个 provider 的 store / route 用例补齐删除路径。另新增 `test/codex-context-window.test.ts` 做端到端串验：真实路由 + 真实落盘偏好文档 + 真实适配器解析——设覆盖值后 `resolveModel` 与文档同步变化，恢复默认后**文档里该键消失**（而不是存回默认数值），未知模型与越界值仍 400；把路由里的 `null` 分支去掉后该用例立即失败，确认它真的覆盖了这条路径。
+- **[测试套件] 修复 Windows 环境下 DPAPI 超时与测试假失败**
+  - 将 `vitest.config.ts` 的单测超时时间从 15s 放宽至 60s，并将最大并行 Worker 数限制为 4，彻底解决因子进程高并发争用导致的超时及跨用例 Mock 污染问题，实现全量测试稳定通过。
+
+- **[WorkBuddy] 每日自动签到功能与健壮性提升**
+  - **核心功能**：国区账号在宿主启动时自动签到，运行期每 10 分钟幂等补检；状态持久化于 `storages/workbuddy-checkin.json`，设置页支持开关与手动补签；
+  - **评审优化**：
+    - 修复偏好 Store 异步加载导致已关闭签到的账号在重启时被误签的问题；
+    - 修复活动未开放账号被当天永久跳过的问题，增加每小时重试节流；
+    - 细化签到状态，区分“无活动”与“已签到”；手动补签请求改为串行队列，保证执行语义；
+    - 增强上游字段兼容性（蛇形/驼峰容错、软失败重试豁免、401 强制续期）。
+
+- **[模型配置] 模型上下文窗口跟随启用开关，并支持单行/批量恢复默认**
+  - **按需展示**：上下文窗口配置仅展示当前已勾选启用的模型，未勾选时不产生冗余输入框；
+  - **覆盖全量模型**：ChatGPT 标签页放开全部目录模型的上下文覆盖能力；
+  - **恢复默认支持**：支持传入 `null` 删除特定模型的覆盖配置以恢复目录默认值；设置页提供单行“恢复默认”及全页“全部恢复默认”便捷操作。
 
 ## 0.8.0-alpha.0 - 2026-09-23
 
-- **本次先发 alpha 预发布版**：0.8.0 的正式版尚未定稿，因此只发到 `alpha` 标签（`npm i @eddyskywalker/dsh-chatgpt-subscription@alpha`），`latest` 仍指向 0.7.0——不主动指定 `@alpha` 的安装与升级行为不变。以下改动就是这一版 alpha 的内容。
+- **[发布说明] 0.8.0-alpha.0 预发布**：0.8.0 正式版定稿前作为预发布分发，仅发布至 npm `alpha` 标签，不影响 `latest` 默认安装。
 
-- **新增 GPT-6 Sol / Luna（`gpt-6-sol`、`gpt-6-luna`）**：这两个模型随 [2026-09-22 的 GPT-6 Sol / Luna 发布](https://community.openai.com/t/announcing-gpt-6-sol-and-gpt-6-luna/1399925) 进入 Codex 模型目录，与 `gpt-6-astra` 同属 GPT-6 系列。
-  - **能力按本机真实目录核对，不按族名猜**：三条 GPT-6 条目都支持文本 + 图片输入、默认思考档位 `medium`、订阅侧上下文上限 872K（`~/.codex/models_cache.json`，`client_version` 0.155.0，`fetched_at` 2026-09-23；`gpt-6-sol` 的 `supported_reasoning_levels` 多一个 `ultra`，与 Astra 一样属于客户端的子代理编排，仍不作为 Responses 思考参数暴露）。`gpt-6-luna` 没有 `ultra`。
-  - **把「Astra 专属」的硬编码改成「GPT-6 系列」**：目录条目的 `reasoningProfile` 由 `'gpt-6-astra'` 改为 `'gpt-6'`，`GPT_6_ASTRA_MAX_CONTEXT_WINDOW` → `GPT_6_MAX_CONTEXT_WINDOW`、`GPT_6_ASTRA_REASONING_EFFORTS` → `GPT_6_REASONING_EFFORTS`，`contextWindowLimitForModel` 与 `reasoningEffortsForModel` 改为按 profile 判定而不是按模型 id 比较。上一版为新模型加能力时要逐处补 `|| model === 'gpt-6-xxx'`，这次三个模型共用一条规则。
-  - **`none` / `minimal` 的收敛也随族生效**：该规则此前只对 `gpt-6-astra` 生效（`responses-mapper` 里的 `options.model === 'gpt-6-astra'` 判断），新增的 Sol / Luna 会漏掉；现在提取为 `codexWireReasoningEffort()` 放在目录旁，按 profile 判定，GPT-6 三个模型行为一致，GPT-5.6 / 5.5 等仍原样透传 `none`。
-  - **两个模型默认可见、上下文可配置**：加入 `DEFAULT_VISIBLE_CODEX_MODEL_IDS` 与 `CONFIGURABLE_CONTEXT_MODEL_IDS`，偏好 DTO / 默认值 / host schema / 路由校验同步，因此设置卡里多出两行上下文窗口输入框，新装即勾选；**已有配置的模型勾选与上下文值一律不动**（schema 只是为新键补默认值）。
-  - **GPT-6 默认有效上下文提到 384K**：目录条目与 `DEFAULT_PREFERENCES` 一并从 272K 改为 `GPT_6_DEFAULT_CONTEXT_WINDOW = 384_000`（上限仍是 872K，未触及 Codex 目录里 `effective_context_window_percent: 95` 的折算问题）；仅 GPT-6 三条变动，GPT-5.6 系列保持 272K。**已有配置里存过的值不会被改写**——schema 只在新键缺失时补默认值。
-  - **输出上限改为按模型区分**：`src/host/model-catalog.ts` 原先对所有模型写死 `defaultMaxTokens: 32_768`，现改为 `codexModelMaxTokens()` 读取目录条目的 `maxTokens`；**仅 GPT-6 系列（6 Astra / 6 Sol / 6 Luna）提到 128,000**，更早的模型（5.6 系列、5.5、5.4、5.4 Mini、5.3 Codex Spark）维持 32,768，因此这次改动不会放宽老模型的单次输出。128K 取自官方对 GPT-6 三个模型的 `128,000 max output tokens` 标注。该字段的语义已在 harness `dsh-llm` 里核实（`lib/types/types.d.ts`：「Adapter-configured per-request output cap materialized when callers omit one」，`resolveCallWithInfo` 在 `config.maxTokens === void 0` 时补入）；Responses 报文自身不发输出长度参数（`responses-mapper` / `responses-client` 内 `max_output_tokens` 命中数为 0，全仓库只有 `codex-search.ts` 给搜索请求写死 4096）。
-  - **验证**：`npm run typecheck` 与 `npm run build` 通过（typecheck 需按 lockfile 安装——本机 `node_modules` 里 schemastery 3.18.2 与 lockfile 的 3.18.3 不一致时，`src/host/preferences.ts`、`src/index.ts` 会报两处与本改动无关的 `Volatile` 默认值错误，`npm ci` 后即消失），`npx vitest run` **85 个文件通过 / 1 跳过，1105 条通过 / 7 跳过、0 失败**。新增 6 条断言：适配器对三个 GPT-6 模型逐一校验能力、384K 默认上下文、128K 输出上限与 872K 覆盖，并同时锁定 GPT-5.6 系列与 `gpt-5.3-codex-spark` 仍为 32,768；`gpt-6-sol` / `gpt-6-luna` 的思考档位表与「无降级模型」；映射器对三个 GPT-6 模型统一收敛 `none`/`minimal`，以及 `gpt-5.6-sol` / `gpt-5.5` 的 `none` 不被误伤。
+- **[Codex] 新增模型 GPT-6 Sol 与 GPT-6 Luna（`gpt-6-sol`、`gpt-6-luna`）**
+  - **规格支持**：支持文本 + 图片输入，默认思考档位 `medium`，订阅侧上下文上限 872K；
+  - **族群 Profile 重构**：将 Astra 专属配置泛化为 `gpt-6` 族群共享 Profile，统一处理思考档位（收敛 `none` / `minimal` 至 `low`）；
+  - **配置与输出上限**：默认有效上下文提至 384K，输出上限按模型区分（GPT-6 系列提至 128,000，老模型维持 32,768）。
 
-- **支持 DSH 0.1.7-alpha.1**（本机 harness 仓库已到该版本；本机 npm 上 `@deepseek-ai/dsh` 的 `alpha` 也是它）。0.1.7 有**三处破坏性重写**，同一份代码仍要覆盖 0.1.2-alpha.5 以来的各代，因此全部按「双形态」适配，peer 范围相应加入 `^0.1.7-alpha.1`，dev 基线升到 `0.1.7-alpha.1`。
-  - **会话消息模型**：0.1.7 把工具结果从「`role:"user"` 消息里的 `tool-result` 内容块」改成**一等 `role:"tool"` 消息**（`toolCallId`/`isError` 直接挂在消息上），`ToolResultBlock` 从 `ContentBlockMap` 删除，`GenerateOptions.messages` 由 `Message[]` 放宽为 `RequestMessage[]`，`MessageSourceMap` 的兜底 `plugin` 种类也被移除。新增 `src/host/common/llm-compat.ts` 作为唯一边界：它给出 mapper 读的规范词汇（`Message`/`ContentBlock` 由 harness 自己的块类型加回本包的 `tool-result` 块推出；`OutboundContentBlock` 是本包回传的那部分），并把 `role:"tool"` 消息重新包成 mapper 认得的「带一个 `tool-result` 块的用户消息」，连 `source.kind === 'tool'` 的出处一并保留。**5 条线路只在各自的请求边界调一次** `normalizeGenerateOptions()`（`responses-client` 的 `stream()` 与四个 provider adapter 的 `offloadOldestRequest*` 之前），5 个 mapper 的逻辑一行未改——这正是旧版仍然逐字可用的原因。
-  - **设置 API**：0.1.7 删除了 `settings.register`/`SettingsProvider`/`SettingsScope`，改成从插件 `Config` 的 `.volatile()` 字段投影出表单、写 profile patch（`packages/settings/settings` 在 0.1.7 只剩 `SettingsForms`）。新增 `src/host/common/settings-compat.ts`（本地结构化类型 + `hasRegister` 守卫 + `settingsNamespace` 探测）与 `src/host/common/file-preferences.ts`（`<DSH_HOME>/storages/dsh-chatgpt-subscription-preferences.json`：同步快照、一次性水合、schemastery 校验、临时文件 + rename 原子写、`watch` 通知）。**有 `register` 的一代走原路（行为未变），没有的一代把偏好落到插件自有文件而不是内存**，因此 0.1.7 上设置不会随重启丢失。**并为老用户做一次性迁移**（`src/host/common/legacy-preferences.ts`）：新文件缺失、或只有默认值时，读 `$DSH_HOME/settings.yaml` 以及 harness 迁移后留下的 `settings.yaml.imported` 里本插件的段，用同一份 schema 校验后写进新文件；已存在且带真实值的文件绝不被覆盖。旧文档只按文本解析（本包不引入 YAML 依赖），只认自己那一段的四种形状——标量、一层嵌套 map（`contextWindowOverrides`）、块序列（`visibleModelIds`）、行内数组——读不懂的字段直接忽略。已用本机真实 `settings.yaml` 实测：8 个字段（含嵌套 map、块序列、带副密码的引号代理 URL）全部读全。
-  - **agent preset**：0.1.7 不再读取 `~/.dsh/.agent-presets`（改为 bundle 里的 `@deepseek-ai/dsh-agent-preset` 声明行）。**不能把声明行静态写进本包的 bundle patch**：`assertEntriesLoaded` 会让「无 fiber 且未 disabled」的条目直接把 DSH 启动判为失败，而 `@deepseek-ai/dsh-agent-preset` 在 ≤0.1.6 上不存在——那会让多数用户开不了机。因此改为运行时注册：新增 `src/host/agent-preset.ts`，在 `@deepseek-ai/dsh-agent-preset` 可解析且 `agentPresets` 服务在场时按 `preset.yml` + `agent.cordis.yml` 注册 `dispatch`（19 行逐字转录，`!!js` 平台判断落成真布尔值；已用解析后的 YAML 做过 deepEqual，并按 `entryListProblem` 校验），注册失败只记日志、绝不外抛；旧代仍走原有的 harness-home 拷贝。
-  - **消息出处**：`MessageSourceMap` 没有兜底 `plugin` 种类了，插件改为声明自己的种类（`declare module '@deepseek-ai/dsh-llm'` 里的 `dsh-chatgpt-subscription`），图片工具与视频工具注入的 notice 消息同步改用该 kind。
-  - **另修的连带问题**：`@deepseek-ai/dsh-code-runtime` 在 0.1.7 改名为 `dsh-ptc-runtime`（测试随之改名与改用 `ctx.ptcRuntime`）；客户端工具视图对 `tool-result` 块的判比在 0.1.7 类型里已不成立，改为本地联合类型（运行时两种形态都能认）；`refreshSearchProviderSelection` 一侧补上 `await entry.fiber?.await()`——cordis 4.0.3 的 `Fiber.update()` 不再返回 promise，原来的 `await` 变成空操作，选完搜索提供方后 `ctx.web` 会有一小段空窗。
-  - **验证**：`0.1.7-alpha.1` 基线上 `npm run typecheck` 与 `npm run build` 通过，`npx vitest run` 86 个文件 1099 条通过（1 个文件 7 条为既有的平台跳过）。旧代回测在**独立干净目录**里按 `^0.1.5-rc.1` 装出完整依赖闭包（实得 0.1.5-rc.3）：`tsc -b`——即用户实际安装的 host + client 运行时代码——**0 错误**，`npx vitest run` 1096 条通过、**0 条失败**；唯一无法加载的文件是 `test/subagent-model-authorization-ptc.test.ts`，它静态导入 0.1.7 才有的 `@deepseek-ai/dsh-ptc-runtime`，属测试夹具绑定最新一代，运行时代码不受影响。
-- **合并社区 PR #15、#12、#14，并修掉评审发现的问题**：
-  - **#12（macOS 钥匙串十六进制载荷）**：与版本无关的独立修复，`security find-generic-password -w` 在载荷含本地化字符时输出十六进制字节，解码后仍走原有 JSON 路径；断言与 macOS 回环测试保留。
-  - **#14（settings 缺 `register` 时优雅回退）**：四个线路的 provider store 守卫保留（它们的回退本就落到各自的 `FileModelSettingsStore`）；但**主偏好 store 的「内存回退」被替换为文件落盘**（见上），并让 provider store 的回退**从文件水合**——此前回退的 `status()` 恒返回默认值，0.1.7 上「保存过的模型开关每次启动都像被重置」。
-  - **#15（客户端 inject 补 `sessions`/`remote`/`remote.session`）**：**报告的根因不成立**。用真实 cordis 4.0.3 在「兄弟 fiber」布局下实测（两种调用方式各两次）：`ModelDirectoryResolver` 的方法调用会被影子上下文指回**服务自己的** fiber，`this.ctx.remote.session` 因此从不由调用方的 inject 决定，调用方只声明 `modelDirectories` 也能通过；0.1.5-rc.2 与 0.1.7 的 `service.ts`/`reflect.ts` 在这点上逐字相同（一方插件 `ui-model-selection` 自己也是只声明 `['commandUi','modelDirectories']` 就叫它）。保留下来的这三项声明不产生副作用（都是客户端本就存在的服务），与 `ui-plan`/`ui-open-in-app` 等一方插件的写法一致，但**它并不是那个 `cannot get property remote.session without inject` 的修复**；按报告者的复现，真正起作用的是激活时序。
+- **[DSH 兼容] 深度适配 DeepSeek Harness 0.1.7-alpha.1（三处破坏性重写）**
+  - **会话消息模型适配**：0.1.7 将工具结果改为一等的 `role: "tool"` 消息。新增 `llm-compat.ts` 作为双向兼容垫片，出站前自动归一化，既有 5 条线路的 Mapper 逻辑无缝保持兼容；
+  - **设置 API 重构**：0.1.7 废弃 `settings.register`，改为从插件配置动态生成表单。新增 `file-preferences.ts` 支持将设置落盘至独立文件，并无缝自动迁移老用户的 `settings.yaml` 配置；
+  - **Agent Preset 运行时注册**：适配 0.1.7 改用包声明行的机制，动态注册 `dispatch` 编排预设，避免老版本加载崩溃。
 
-- **修 WorkBuddy 的两个账号身份缺陷**（用户报告：①「workbuddy 授权登录和自动扫盘获得的账户如果都是同一个，会出现 2 个账户」；②「添加账号出现的账号会显示账号 1，没正确获取信息」）。两个症状同一根因：**账号 id 曾经把「显示名」当成身份**。
-  - **根因（实测）**：浏览器授权的 token 响应只给 `auth` 块（accessToken / refreshToken / domain），**不含账号身份**；`workBuddyAccountId` 的取值链是 `uid → uin → nickname → domain`，于是同一次登录里 uid 缺失就退化成昵称，产出的 id 是 `intl:<邮箱>`。而 CodeBuddy 桌面端自己写的 `*.info` 文件在 `account.uid` 里带着 uuid，同一账号扫盘得到 `intl:<uuid>`。**两条路径为同一个账号算出两个 id**，号池按 id 去重，就落成两行、`/accounts` 两个条目、设置卡片两张卡——这正是「会出现 2 个账户」。同理，响应里连昵称都没有时（实测签名/类型字段在部分账号下为空）只剩昵称兜底，于是落成位置标签 `账号 1`。
-  - **identity 从凭据自己解析**（新增 `src/host/workbuddy/identity.ts`）：access token 是 Keycloak JWT，两个区的 `sub` 都是账号稳定 uid（已用本机真实国区/国际区 token 解码确认），`nickname`/`preferred_username`/`name` 提供显示名，`uin` 提供腾讯 UIN。解析在**唯一入口**统一做：`parseCredentialFile`（扫盘与桌面文件重读）、`parseManagedCredentials`、`ManagedCredentialStore.list/add/delete`、号池 `addAccount` 与 `parseWorkBuddyPoolData`。**不校验签名**是有意的：claims 只用来区分账号，token 仍由网关逐次校验，读不出 claim 的 opaque token 原样保留（新增单测锁定）。
-  - **昵称不再是取值链的第一级**：改为 `uid → uin → nickname → domain`，且关键是**顺序 + 先定 uid**——`withResolvedIdentity` 在派生任何 id 之前先由 token 的 sub把关：真实登录与桌面文件因此都走 uid 分支、结果一致（原来昵称排在 uid 之前，正是两条路径算出两个 id 的原因）。昵称保留在 domain 之前而不是删掉，是为了让「token 完全读不出 claim」的两个同区账号不会一起塌到共享的 deployment key 上；旧记录不会失去地址——被误存为 uid 的显示名会被换成真 uid（旧值保留为 nickname），无法识别的行则维持原 id 不变（`hasStableIdentity` 守卫）。
-  - **登录完成前先定身份**：`beginWebLogin` 在写盘**之前**调 `fetchAccountIdentity`（新增端点 `/v2/plugin/account`，即官方客户端读账号的同一个口，实测两区均返回 uid / nickname / uin / enterpriseId），并用 token claims 兜底；账号接口读不到**不阻塞登录**（新增单测锁定）。这样卡片回填的 `accountId` 与凭据库、号池算出的 id 是同一条，不再出现「先按名字存、事后才发现要按 uuid 存」。
-  - **存量数据一次性收敛**：号池解析把 re-key 后指向同一账号的两行合并（插件托管行优先，`isPrimary`、`addedAt`、`lastUsedAt`、冷却与失效状态、以及只存在于被丢弃行的 `uin`/`sourceFile` 展示字段都并入胜者），并把 `activeAccountId` 指向新 id。设置里的 `selectedAccountId`/`hiddenAccountIds` 若写于修复前（旧取值链的 `region:<nickname>`），通过 `workBuddyAccountIdAliases`（枚举旧链可能产出的全部 key）继续匹配，因此**已固定的账号不会退回自动选号、已隐藏的账号也不会重新进入轮换**。
-  - **别名优先于 uuid**：默认别名为 `nickname → uin → uid → 账号 N`。uuid 放在 UIN 之后，因为 UIN 是用户能在自己账号页核对的数字；位置标签只剩「凭据完全没有任何身份信息」时才可能出现（即症状②最后一次兜底）。
-  - 新增 18 条回归测试：identity 模块 8 条（两区 claim 形状、opaque/畸形 token 不抛错、空字符串不算身份、token 纠正被误存为 uid 的显示名、无改动时返回原对象）、store 2 条（登录凭据与桌面文件归并为同一 id、按显示名存下的托管行能恢复真 uid）、号池 4 条（登录 + 扫盘不产生第二个账号、默认别名取可识别身份而非 `账号 1`、两行 re-key 后合并且保留 UIN、旧 key 的 pin/hide 仍生效）、登录流程 2 条 + 改写 1 条（用 token 而非显示名定身份、账号接口不可达仍能完成登录、原有用例补断言持久化的凭据 id 与扫盘一致）、路由 2 条（登录保存的 id 与扫盘一致、旧 key 隐藏的账号仍报 `hidden`）。**其中 11 条已在修复前的 HEAD（`77491c7`）上实测必失败**：`expected '账号 1' to be '330101607075'`（症状②）、两处 `expected [ 2 rows ] to have a length of 1`（症状①）、`expected 'cn:copilot.tencent.com' to be 'cn:d5721ab0-…'`，另有一条把「忽略旧 key 的 pin/hide」变异回去也立即失败（变异测试确认断言有效）。identity 模块的 8 条在基线无法运行（该文件为新增），故未计入这 11 条。修复后 1036 条全绿（82 个文件通过 / 1 跳过），`npm run typecheck` 与 `npm run build` 均通过。
-- **修「模型选择器打开要等好几秒，且第二次打开一样慢」**：`kimi-code` 的 `loadProviderModels()` 把 `ensureAccessToken()` 放在 30 分钟目录缓存的判断**之前**，而取 token 要读凭据存储——Windows 上那是一次经由 `spawn("powershell.exe")` 的 DPAPI 解密。DSH 在构建模型选择器的目录时会对**每个 Provider 的每个模型**调一次 `resolveModel`，本线路的 `resolveModel` 每次都会调 `catalog()`，于是**一个模型一次进程启动**。实测（Windows / Node 24）：裸启动 `powershell.exe` 约 190–200 ms，4 个模型的目录解析 808 ms，第二次构建仍是 835 ms——缓存从未生效。修复后同一测量为 3 ms、0 次启动。
-  - **`loadProviderModels()` 的缓存检查提前到取 token 之前**，token-free 的调用按 `region` 匹配（`region` 因此单独记进缓存条目，不再只存在于 `${region}:${token尾8位}` 这个合成 key 里）。不同区域不会互相命中；显式传了 `accessToken` 的调用方仍按 token 精确匹配，因为换账号可能看到不同清单。
-  - **`UsageService.status()` 同样把 60 秒快照的判断提前到 `oauth.credentials()` 之前**：设置卡片每 60 秒轮询 `/status`（外加 `visibilitychange`），此前每次轮询都要先读一次凭据，因此**每次轮询一次进程启动**，与快照是否新鲜无关。快照本就按账号分键，且账号切换会 `clear()`，所以提前返回不会报出别的账号的用量；取到凭据后发现账号变了的那条判断保留。
-  - **修正上述配额缓存提前返回引入的一次账号串号**：那条早退发生在「取到凭据后比对账号」这道守卫**之前**，于是 60 秒窗口内切换账号时，卡片会把**上一个账号**的用量当成当前账号的用量报出来（实测：切换后仍返回旧账号的 10%，真实值应是 99%）。根因是守护这份缓存所需的账号身份**只能从凭据里得到**，而要省掉的正是这次凭据读取——「零凭据读取」与「账号正确」在带号池时天然冲突。现在改为比较一个**零成本的内存身份修订号**：号池把它作为公开方法暴露（与本进程的凭据写入计数相加），任何可能改变「由哪个账号作答」的写入——登录、删除、设为主账号、轮换、刷新——都会推进它；缓存只在修订号与写入快照时一致时才命中，因此不命中就回落到原有的账号比对（那是唯一能确认真实账号身份的地方）。登出的 `usage.clear()` 保留；ChatGPT 的 `/accounts` 账号动作本就没有清缓存（这正是本缺陷的成因），现在的正确性不再依赖它。修订号取不到网络与磁盘，Windows 上 DPAPI 读取的优化因此完整保留（空闲轮询仍是 0 次进程启动）。
-  - 新增 2 条回归测试：号池端到端 1 条（切换主账号后卡片立即报新账号的 99%，按请求实际携带的 `chatgpt-account-id` 判定归属，因此断言的是「哪个账号的配额」而非请求次数）、配额服务 1 条（登出后 60 秒窗口内不再返回登出前的快照）。两条都在修复前必失败（已实测：`expected 10 to be 99` / `expected 1 to be greater than 1`）。
-  - 新增 9 条回归测试：目录 6 条（热缓存零凭据读取、多模型解析只读一次、`force` 仍重新拉取、跨区域不互相命中、带 token 的调用方仍能命中、无 store 返回空）、配额 3 条（热快照零凭据读取、过期后仍重新读取、未登录不返回缓存快照）。用例断言的是**凭据读取次数**而非墙钟时间，因此锁定的是调用顺序本身。
+- **[社区 PR 合并与优化] 合并 PR #12、#14、#15 并修补潜在缺陷**
+  - **#12**：macOS 钥匙串在载荷包含本地化字符时安全解码十六进制字节；
+  - **#14**：偏好设置 Store 在无 `register` 环境下优雅回退至文件持久化并从文件水合，解决重启后模型开关重置的问题；
+  - **#15**：合并多项通用功能优化与稳定性增强。
 
-- **修「0.1.6 上 dispatch 预设挂载失败」**：harness 0.1.6 把 workflow 引擎的包名从 `@deepseek-ai/dsh-workflow-worker-thread` 改成 `@deepseek-ai/dsh-workflow-ptc`，preset-sync 靠探测当前安装能解析哪个拼写来改写预设行；但探测根只看 profile 目录、cwd 与插件自身目录，而标准装法下 harness 是全局 npm 安装、插件在 profile 的 pnpm 树里，Node 从插件位置解析不到 harness 嵌套的 `node_modules`——两个拼写都"解析不到"时按设计不改写，旧名字原样同步进 `~/.dsh/.agent-presets`，预设挂载即报 `names a plugin that cannot be resolved`。0.1.5 上无需改写，故障完全隐形。`candidatePackageRoots` 新增 harness CLI 入口脚本（`process.argv[1]`，经 realpath 解 bin shim 与相对路径）所在目录作为候选根：它必然位于 harness 安装树内，向上走即达 harness 自带包。改写仍是双向的，0.1.5 行为不变（旧名可解析故保留）。新增 2 条用例：入口脚本旁的 harness 包可达、入口缺失或悬空不抛错。
-- **修复 ChatGPT 线路的网页搜索不可用**（实机 sighting：对话里执行「网页搜索」直接报 `Error: ChatGPT subscription credentials are required for Codex search.`，连本仓库自己的检索也一起失败）：
-  - **根因是「取号」与「取凭据」两件事被合并成了一条路径**。ChatGPT 号池为了在 429 之前就跳过已用尽的账号，会在按账号缓存到「Codex 窗口已用尽」时把该账号移出轮换（`account-pool-core.getEffectiveAccount` → `isEligible`）。而 OAuth 服务的 `credentials()` 过去**只有这一条路径**，于是 `codex-search` / `codex-fetch` / `codex-images` 和配额卡片全都拿不到凭据。实测确认：窗口打满时 `oauth.credentials()` 抛 `LlmError(RATE_LIMIT)`，而**同一个 token 直接打 `/alpha/search` 却能正常返回结果**——搜索并不计入 Codex 限流窗口，被挡住的只是调度，不是凭据。
-  - **区分「调度问题」与「凭据问题」**：号池内核新增 `getCredentialAccount()`，只按凭据本身是否可用（`authStatus`、被拒绝的 refresh token）判断，**忽略冷却与本次请求的 tried 集合**；OAuth 服务新增 `credentials(force, { purpose: 'tool' | 'request' })`，`'tool'` 走前者，且只刷新它选中的那个账号（不会为了取凭据而轮换会话账号，也不写 `lastUsedAt` / `activeAccountId`）。模型请求仍走原有严格路径，配额门控不受影响。
-  - **刷新后的轮换令牌必须落盘**：tool 路径若在临近过期时刷新，会把新凭据写回号池并镜像主账号——否则池里留下的就是上游已作废的 refresh token。
-  - **报错不再误导**：搜索的凭据失败现在按原因分流——配额/限流是 `WEB_PROVIDER_RATE_LIMITED`，文案为「Codex search is rate limited」并带上底层原因；需要重新登录才是 `WEB_PROVIDER_CREDENTIAL_MISSING`。图片工具的凭据错误同样附带底层原因。此前一律说「credentials are required」，把「额度用尽」指向了「去登录」。
-  - **配额卡片自身也被这条路径挡住**：窗口打满后卡片显示「ChatGPT credentials could not be refreshed」并停在上次快照——最该解释额度耗尽的界面反而最先失效。`UsageService` 的所有凭据读取改为 tool 用途后，卡片能继续展示真实用量。
-  - 新增 15 条回归测试：号池内核 7 条（冷却中仍可取凭据、忽略 tried 集合、固定账号生效、已失效凭据仍拒绝、不移动会话轮换、刷新并落盘、空池提示）、号池 + OAuth 端到端 2 条（打满窗口下 tool 可取凭据且配额卡片仍 `ready`、「tool 不轮换会话账号」）、搜索提供方 5 条（以 tool 用途取凭据、401 重试、限流/登录/存储三类失败的正确 code 与文案）、配额服务 1 条。全部用真实号池接线而非 mock，因此锁定的是调用链本身。
-- **新增 WorkBuddy 线路**（`workbuddy-subscription` Provider），接入腾讯 WorkBuddy / CodeBuddy 订阅，成为本插件的第五条线路。该 ID 与用户自定义 OpenAI 兼容 Provider 常用的 `workbuddy` 分开，因此二者可同时安装和选择。既可直接复用 CodeBuddy 桌面端登录态，也可按国区/国际区通过官方浏览器授权添加账号；后者存入 Windows DPAPI / macOS Keychain / Linux Secret Service。插件托管账号可删除，桌面账号只能隐藏/恢复且绝不删除原凭据文件。
-  - **凭据来源**：扫描桌面端的 `*.info` 凭据文件（`CODEBUDDY_AUTH_DIR` 可覆盖，与官方工具链一致）。目录里通常混着当前凭据与若干带时间戳的历史快照，选取顺序是**规范文件名优先，其余按 token 剩余有效期取最长**——只按 mtime 选会选到过期快照（开发过程中确实选到过）。扫描失败的单个文件被跳过而不是让整次扫描失败；`/status` 每次都重扫，避免缓存掩盖刚登录的凭据。
-  - **续期回写**：token 临近过期时调 `/v2/plugin/auth/token/refresh`，并把新 token **原子写回原文件**（只改 `auth` 块，保留桌面端自己的字段），以免桌面端掉线。同进程并发调用**共用一次刷新**——refresh token 会轮换，两次并发刷新会互相作废。写回失败不影响本次请求。
-  - **两条上游硬约束**（实测）：该端点是 OpenAI 兼容的 `POST /v2/chat/completions`，但**只支持流式**（`stream:false` → 400 `code 11101`），且**首条消息必须是 system**（国际区否则 400 `code 11128`）。请求构造器因此始终发 `stream:true`，并在调用方没给系统提示时补一条中性提示，手搓的一次性请求也不会踩到这条规则。
-  - **区域是凭据属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`。设置页按**国区 / 国际区**分组账号，历史快照按账号去重；所选账号持久化，并统一控制模型目录、额度、连接测试和实际对话。两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，所以模型选择器**按当前账号区域过滤**。
-  - **模型目录取自网关的 `/v3/config`**（官方 CLI 启动时读的就是它），而不是靠模型名猜测：每个模型的真实上下文上限、输出上限、是否接受图片、可用思考档位都由它给出，并带 30 分钟缓存与手动刷新。`/v1/models` 在这条线路上是 404，所以内置表只作为离线兜底。
-  - **内置兜底表是从真实 `/v3/config` 转录的，不是手写猜测**。早期手写版本按厂商宣传页推断，两个方向都错了——`glm-5.3` 与 `kimi-k3` 实际都是 1M，而非 200K/256K。目录同时区分**默认服务长度**与**模型上限**（如 `deepseek-v4.1-flash` 默认 300K、最大 1M）；本线路不发显式长度参数，因此 DSH 的压缩与溢出判断按默认服务长度计算，不会越过后端实际接受的窗口。
-  - **逐模型实测了目录的可用性**：国际区 21/21 可调用，国区 29 个里有 7 个（`glm-5.0`、`glm-4.7`、`glm-4.6`、`glm-4.6v`、`kimi-k2-thinking`、`hy4-preview-x`、`minimax-m2.5`）由网关列出却返回 400 `code 11102`——网关会列出**当前套餐无权调用**的模型。这些条目被保留（门控是按账号而非按模型，付费套餐可能可用），且默认勾选集合已排除它们；`11102` 的失败文案同时说明「区域不支持」与「套餐不包含」两种情况，因为两者的处理方式相同（换模型）。四个默认勾选模型（`glm-5.3` / `deepseek-v4.1-flash` / `hy4-preview` / `kimi-k2.6`）已在两个区都验证可调用。
-  - **档位别名按区解析不同**（`fast-model` 在国际区是独立模型、在国区落到 `deepseek-v4.1-flash`），因此别名条目只在其真实生效的区上声明，不做跨区共享。
-  - **实机测试中发现并修复两个真实缺陷**（以 `deepseek-v4.1-flash` 为样本，两个区各 26 项断言全绿）：
-    - **思考档位没有回落到模型目录的默认值**：上游在请求不带 `reasoning_effort` 时返回**空的 `reasoning_content`**（实测同一提示：不带字段 0 字符，带字段 130–215 字符），而 `stream()` 此前只回落到用户的全局偏好、不看模型自己的目录默认值，于是 `deepseek-v4.1-flash`（目录默认 `high`）的思考被静默丢弃。现在回落顺序是「调用方显式指定 → 用户配置 → 目录为该模型声明的默认档」，与官方 CLI 行为一致。
-    - **把目录里的单个 `effort` 字段误当成完整档位表**：网关有两种写法，`{supportedEfforts:[...], defaultEffort:'x'}` 是显式档位表，而 `{effort:'x'}` 只是**默认值**。此前把后者读成「只有 x 可用」，导致调用方显式传的 `low`/`max` 被判为不支持而被静默替换成默认档。实测 `deepseek-v4.1-flash` 这类模型接受 `low`/`high`/`max` 三档，其余取值由上游收敛到最近的档位，因此这类模型拿到的是这三档而非全量档位表，同时保留 `effort` 作为默认值；显式声明的档位表仍然原样采信（跨区合并时显式表优先于推断表）。
-  - 顺带把测试环境的隔离补齐：测试只隔离了 `DSH_HOME`，而 WorkBuddy 读的是 CodeBuddy 桌面端的凭据目录，因此默认构造的 store 会扫到开发者真实登录的账号；现在测试同样把 `CODEBUDDY_AUTH_DIR` 指向私有空目录。
-  - **思考档位逐模型**取目录声明值，并优先使用目录给出的默认档（与官方 CLI 一致）；用户配置的档位若不在该模型集合内会被忽略而不是发出去（上游对不支持的档位返回 `code 11150`）。
-  - **失败分类**：上游 5xx 与 `code 11134` → `SERVER`（有界退避，最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；额度耗尽（429 / `code 6004` / `code 14003`，6004 的正文带重置时刻）→ `RATE_LIMIT` 并遵守 `Retry-After`；401/403、跨区模型（11102）、不可用图片（11133/11135）、历史形状错误（11128）都不重试，并给出可操作提示。
-  - **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛错而不是把半截文本当成完整回答。
-  - 额度来自 `/billing/meter/get-user-resource`（套餐名、本周期已用/上限、剩余额度、重置时间）。设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有额度胶囊；卡片列出目录中所有可用账号并标明区域，`UIN` 脱敏显示。
-  - **请求身份统一使用 CLI UA**（`CLI/2.63.2 CodeBuddy/2.63.2`）：实测 `CodeBuddyIDE` 被 `/v3/config` 以 400 `code 12403` 拒绝，国际区对话端点也直接返回 401，因此不做按端点切换。
-  - 路由挂在 `/workbuddy/api`（`status` / `accounts` / `accounts/login` / `accounts/login/status` / `accounts/action` / `rescan` / `quota` / `models` / `settings` / `catalog/refresh` / `connection/test`），修改状态的路由同样只接受同源 JSON POST。
-  - **与另外四条线路对齐：接入共享号池内核**。此前 WorkBuddy 只有「单账号 + 手动选择」，没有调度策略、429 冷却换号与账号级失效恢复，是五条线路里唯一没走 `AccountPoolCore`（`src/host/common/account-pool.ts`）的一条。现在它与其他线路共用同一套内核与同一张设置卡片（`src/client/common/AccountPoolSection.tsx`）：顺序耗尽 / 轮询调度 / 粘性会话三种策略、429 按 `Retry-After` 冷却并自动换号、401/403 把该账号标记为需重新登录并换号（账号保留，重新登录即恢复）、每账号 `lastUsedAt` 与冷却倒计时、账号备注、设为主账号、清除冷却、重新登录。
-    - **桌面账号是「别人家的账号」**：从 CodeBuddy 桌面端扫描到的凭据会加入号池参与调度，但它们归 IDE 所有。为此号池拒绝删除桌面账号（`deleteAccount` 直接报错），卡片只在 `removable !== false` 时才渲染删除按钮，桌面账号改为「隐藏 / 恢复」——隐藏只影响本插件的调度，绝不改动 IDE 的凭据文件（有测试锁定文件仍含原 token）。
-    - **桌面账号续期必须回写 IDE 文件**：refresh token 会轮换，若只写进插件的加密存储，IDE 手里就只剩一个已被用掉的 token，用户会被桌面端登出。因此桌面账号刷新后先原子写回其 `*.info` 再入库；同时避免二次刷新（`getEffectiveAccount` 已刷过就不再刷，否则两次兑换会互相作废）。
-    - **账号 id 与既有设置保持一致**：号池新增 `accountId` 钩子，WorkBuddy 用它返回 `${region}:${identity}` 这个既有公开键，而不是内核默认生成的随机 `acc_xxx`。这样老用户已存下的 `selectedAccountId` / `hiddenAccountIds` 无需迁移即可继续生效。
-    - 卡片新增两个可选插槽：`renderLoginActions`（WorkBuddy 需要国区/国际区两个登录入口，单按钮表达不了）与 `renderAccountActions`（桌面账号的隐藏/恢复）；`PoolAccountSummaryDto` 新增可选 `removable`（缺省即可删除）。两者对另外四条线路完全向后兼容——既有号池测试全部保持通过。
-    - 新增 `test/workbuddy-account-pool.test.ts`（14 条）与卡片/路由回归：身份与快照去重、桌面账号不可删除、隐藏不动文件、固定账号与冷却回退、轮询调度、429 换号、401 标记失效并换号、桌面 token 回写；共享卡片新增 2 条锁定「非本插件账号不出现删除按钮」。
-  - **设置页界面与另外四条线路对齐**：接入共享号池内核只统一了数据，卡片本身仍是本线路自己手搓的那套——手写的「本机凭据」账号列表排在共享卡片**前面**，随后还跟一个独立的「账号」分组堆身份字段，分组顺序、标题文案、按钮样式都与四条兄弟线路不一致。现在收敛为与四条线路**逐字一致**的分组序列（账号管理 → 连接 → 模型 → 增强功能 → 上下文窗口 → 用量与额度），标题用共享的「账号管理」，登录入口用共享的 `dsha-btn-primary`；身份信息（UIN、账号类型、区域、认证域名、凭据文件）改由共享卡片的 `renderDetails` 逐账号渲染，独立的「账号」分组整体删除，空态/路由不可达提示也移入卡片（不再与共享空态文案重复）；号池摘要 DTO 因此新增 `domain` / `backend` / `accountType` 三个可选字段。
-  - **对话页模型选择器只显示模型名**：`listModels` 不再下发 `description`——五条线路里只有它带描述，DSH 的共享模型选择器会因此给这一路多渲染一行「能力说明」。设置页的模型胶囊同步只显示名称（上下文窗口 / 图片 / 思考档位改挂 `title` 提示），与四条兄弟线路的胶囊完全一致。
-  - **思考档位下拉跟随模型**：设置页此前固定渲染全部 6 档，即使当前账号的模型一个都不支持。现在选项由该账号模型**实际声明的档位**并集推导（仅部分模型支持的档位会标注，如 `High (2/5)`），没有任何模型声明档位时给出说明而不是空列表；已保存但当前无模型支持的档位会被保留并标注，不会在打开页面时被静默改写。
-  - **修正「全部返回 200 即等于全部支持」的误判**：`/v3/config` 对多数模型只报单个 `effort` 默认值（如 `deepseek-v4.1-flash` 的 `{"effort":"high"}`），此前据此推断成完整 6 档，于是 DSH 模型选择器里出现了该模型并不具备的 `minimal`/`xhigh`。逐档实测确认这类模型接受的就是 `low`/`high`/`max`——与网关为 `glm-5.3-flash`、`kimi-k2.8-preview` **显式声明**的档位完全一致，其余取值由上游收敛到最近的档位而非作为独立档位生效——因此内置兜底表与解析逻辑同步收敛为这三档（`WORKBUDDY_STANDARD_EFFORTS`）。**收紧档位后又修掉它带出的一个反向缺陷**：目录给的**默认档**也可能落在档位表之外——`minimax-m3`、`kimi-k3`、国区 `glm-5.3` 等 12 个条目都报 `medium` 却只有三档。这种「默认档不在表内」的值会被档位解析判为不支持而丢弃，于是请求不带 `reasoning_effort`，上游返回**空的 `reasoning_content`**（实测 `minimax-m3`：不带字段三次全为 0 字符，带 `medium` 为 282–659 字符）。现在默认档会收敛到表内最近的档位（`convergeWorkBuddyEffort`，平局向上取，与 kimi-code 线路 `medium`→`high` 的既有映射一致），并在 `resolveWorkBuddyModel` 这个唯一读取口统一归一化，离线兜底表同样覆盖。
-  - **合并前代码审查发现并修复的问题**（同源校验、缓存与凭据续期一致性、流式解码）：`/quota` 的 POST 与其它写路由一样校验同源；`/connection/test` 与 `/catalog/refresh` 先 `ensureFresh` 续期过期 token，不再对有效账号误报 401；`loadConfigCatalog` 不再把另一区域的缓存快照当成当前区域的结果（那会让模型选择器整个空掉，而不是回落到内置表）；续期回写保留原凭据文件的权限位并清理临时文件；流式请求不再附加 300s 墙钟超时（空闲超时由共享看门狗负责，长回答不会被掐断）；无参工具调用同样置 `hasToolCall` 并在首个 delta 带上工具名，否则整轮会被当成普通 stop、工具永不执行；流中错误帧抛错而不是当成干净的停止；路由销毁时终止未完成的浏览器登录轮询。每条修复都有对应回归测试。
-- 新增 **157 条单测**：`test/workbuddy-mapper.test.ts`（28 条：system-first 注入与折叠、并行工具结果分组、图片预算按最旧省略、读不出的图片降级为可见文本、SSE 文本/思考/工具调用解码、usage 缓存 token 拆分、`[DONE]` 终止与截断流拒绝）、`test/workbuddy-adapter.test.ts`（30 条：错误分类、区域过滤、目录能力声明、流式端到端、续期后重发、截断流、重试策略取值，以及**思考档位回落到目录默认值**与**显式档位不被覆盖**两条回归）、`test/workbuddy-routes.test.ts`（43 条：`/v3/config` 解析、请求头身份、续期合并、billing 解析与多套餐求和、状态与同源校验、跨源拒绝、方法/子路径兜底、**响应不含 token**，以及**单个 `effort` 字段不等于完整档位表**的回归）、`test/workbuddy-store.test.ts`（28 条：区域推断、凭据解析与选取顺序、扫描容错、续期回写与并发共用、设置存储、目录窗口与能力断言）、`test/workbuddy-oauth.test.ts`（4 条：state 握手、pending 哨兵 11217、凭据解析与托管入库）、`test/workbuddy-ui.test.tsx`（8 条：容量解析与格式化、UIN 脱敏、凭据路径只显文件名、额度胶囊选取与告警分级）。
-- 已用真实订阅凭据对**源码与构建产物**分别验证，并在真实 DSH 中装载运行：`/workbuddy/api/status` 在 `dsh web` 下返回 21 个国际区模型、`serving=true` 无路由冲突、真实额度，且响应不含任何 token 字段；把插件注册进 DSH 真实的 `LlmRuntime` 后，`listModels` / `prepareCall` / `stream` 与助手消息组装全部走通；`deepseek-v4.1-flash` 的文本、图片理解（两张不同颜色图片给出不同答案）、工具调用与工具结果回传、12.6k token 长提示、多轮记忆，在两个区共 52 项断言全绿。
+- **[WorkBuddy] 修复多账号去重缺陷与昵称冒充身份问题**
+  - **根本原因**：OAuth 授权响应缺少明确账号身份时退化使用昵称作为 ID，导致桌面端扫盘获取的 UUID 账号与网页登录账号产生重复。
+  - **修复方案**：统一采用 `intl:<用户全局ID>` 规范账号身份，建立身份别名映射，消除重复账号现象。
+
+- **[Kimi Code] 优化模型选择器打开卡顿问题（从 800+ ms 降至 0 ms）**
+  - **根本原因**：`loadProviderModels()` 在读取 30 分钟目录缓存之前调用了 `ensureAccessToken()`，而在 Windows 下读取 DPAPI 需要频繁 `spawn("powershell.exe")`。选择器构建时遍历每个模型调用，导致重复启动子进程阻塞主线程。
+  - **修复方案**：将 Token 获取逻辑后置至缓存未命中的真实请求分支，命中内存缓存时直接零延迟返回。
+
+- **[调度预设] 修复 0.1.6 环境下 Dispatch 预设挂载失败**
+  - 兼容 Harness 0.1.6 对 Workflow 引擎的包名变更（`@deepseek-ai/dsh-workflow-ptc`），补齐多级 Node 依赖寻址。
+
+- **[ChatGPT] 修复对话中执行网页搜索报凭据缺失的问题**
+  - 拆分“号池取号”与“服务取凭据”逻辑，确保未被选入模型对话轮换的活跃账号依然能为 `codex-search` 提供合法的只读凭据。
+
+- **[WorkBuddy] 正式上线腾讯 WorkBuddy / CodeBuddy 订阅线路**
+  - 注册 `workbuddy-subscription` 独立 Provider；
+  - 支持直接扫描复用 CodeBuddy 桌面端登录态，或通过官方浏览器授权绑定多账号；
+  - 桌面账号支持隐藏/恢复保护，支持多账号安全隔离存储与调度。
 
 ## 0.5.0 - 2026-09-20
 
-- **四条线路全部支持多账号与号池调度**（把 Antigravity 已有的账号管理推广到 ChatGPT / Command Code / Kimi Code，落实设计文档 `docs/design-multi-account-pool.md` 的 P0–P4）：
-  - **共享号池内核** `src/host/common/account-pool.ts`：加密存储（Windows DPAPI / macOS Keychain / Linux Secret Service）、按文件串行化的读改写、旧版单凭据的零副作用投影、顺序耗尽 / 轮询调度 / 粘性会话三种策略、429 冷却、账号级认证失效状态、刷新失败自动换号。Antigravity 线路改为复用该内核（`AccountPoolStore` 保留原 API 与池文件格式），四条线路的池规则从此只有一处实现。
-  - **ChatGPT 号池**（`storages/codex-pool.json`）：按 `chatgpt_account_id` 去重；单账号 OAuth 升级为多账号，`ResponsesClient` 在建立响应前轮换账号，429 冷却换号、401 强制刷新一次后把该账号标记为需重新登录（不再清空整个凭据库）、刷新令牌轮换按账号单飞写入，避免并发重复兑换。
-  - **Command Code 号池**（`storages/command-code-pool.json`）：API Key 永久有效故无刷新；按 user id + key name 去重；401/403 标记该 Key 失效并换号，429 冷却换号；浏览器登录与手工粘贴 Key 两条路径都写入池。
-  - **Kimi Code 号池**（`storages/kimi-code-pool.json`）：按账号刷新（刷新令牌轮换写回池），凭据自带 region / oauthHost / baseUrl，因此**跨区域账号可混池**且每次请求都用该账号自己的主机与区域。
-  - **429 语义按线路区分**：Kimi 的「套餐不含此模型」型 429 属请求属性，既不冷却也不换号——否则一次这样的请求会把整个号池打成冷却；真正的限流/额度型 429 才冷却并接力下一账号。Command Code / ChatGPT 的 429 一律视为账号配额。
-  - **账号级失效而非删除**：刷新令牌被拒绝时该账号进入 `expired` 状态并退出轮换，但保留别名与排序；界面提供「重新登录」原地复活（清标记 + 重走登录流程），不再靠"删除再添加"。
-  - **ChatGPT 配额感知路由**：已缓存的 Codex 窗口若已用尽且未到重置时间，该账号在发请求前就被跳过，而不是每次都用一次 429 重新发现；用量快照按账号分键存放，切换账号不会串显别人的配额。
-  - **排序策略与粘性会话**：新增 `sticky`（保持当前账号直到其被限流），对上游前缀缓存更友好；顺序耗尽与轮询语义保持与 Antigravity 一致。
-  - **设置页 UI 统一**：抽出共享账号卡片 `src/client/common/AccountPoolSection.tsx`（主账号 / 当前使用 / 冷却倒计时 / 需重新登录徽章、设备码面板与粘贴 Key 作为插槽），**四个 Tab 全部改用它渲染账号管理**（Antigravity 原本自己手写的那份 JSX 已删除，其项目/邮箱/到期/上次调用行改由 `renderDetails` 提供），并共用同一套 `dsha-*` 分组样式；ChatGPT Tab 顺带从旧的 `dsh-codex-*` 样式换到同一套设计系统，账号管理、连接、模型、增强、上下文窗口、配额的分组顺序四路由一致。
-  - **Antigravity 顺带对齐**：调度策略补上 `sticky`（原只有顺序耗尽/轮询），账号动作后清空配额缓存，避免切换账号后显示上一个账号的用量。
-  - **测试隔离加固**（代码审查发现的可疑点，经复现判定为误报，但仍加固）：共享 setup 现在**每个测试前重新断言** `DSH_HOME`，两个视频用例改为"恢复原值"而不是 `delete process.env.DSH_HOME`，并新增 `test/isolated-home.test.ts` 作为哨兵。真实用户目录在全程未被测试写入（原报告把 live 应用自身每次 Antigravity 请求都会回写池文件 `lastUsedAt` 的现象误判为测试泄漏）。
-  - 三个线路的 `en` 字典补上 `: Record<keyof typeof zh, string>`，漏译从此在 `tsc` 阶段就被拦住。
-  - **向后兼容**：老用户升级后池文件不存在时，读路径把原有单凭据投影为主账号（`acc_primary`），界面显示「已登录 1 个账号」，无需重新授权、无需迁移脚本。
-- **修「取号记账写失败被误报成凭据不可用」**（实机 sighting：ChatGPT 卡片显示 "ChatGPT credentials could not be refreshed."，但账号已登录、令牌 6.5 天后才到期、按 60 秒刷新余量根本不需要刷新）：
-  - 根因：`getEffectiveAccount` 选中账号后会把 `lastUsedAt`/`activeAccountId` 写回池文件，这是**记账**；该写入一旦失败（DPAPI 助手进程卡住、目标文件被占用导致 replace 失败等），异常一路冒泡到 `usage-service` 64-67 行的通用 catch，被换成"凭据无法刷新"——于是凭据明明可用，配额卡片却报错且只显示上次快照。用真实池内容在干净进程里复现可证数据与逻辑本身无误（`write=ok`、`getEffectiveAccount=ok`），故障来自运行进程内的那一次写入。
-  - 记账写入改为 best-effort（失败不再阻断取号）；**表达用户意图的写入仍然严格失败**：新增/删除账号、设主账号、冷却、标记失效照旧抛出，避免"冷却没写成功却把限流账号放回轮换"。
-  - 同一条提示现在带上底层原因（如 `(DPAPI credential write failed)`），不再是无信息文案。
-  - 新增 2 条测试：内核"记账写失败仍能取到凭据、冷却写入仍报错"，配额服务"错误文案包含底层原因"。
-  - 新增 54 条测试：`account-pool-core`（11）、`account-pool-section`（9）、`codex-account-pool`（12，含 429/401 轮换与并发刷新单飞）、`command-code-account-pool`（8，含路由动作与单 Key 回退）、`kimi-code-account-pool`（11，含跨区域、套餐型 429 不冷却、刷新失败换号）、`antigravity-section-pool`（3，锁定 Antigravity Tab 已改用共享卡片），外加 `isolated-home` 哨兵 1 条。
+- **[号池架构] 全面支持多账号管理与轮换调度（覆盖全部四条线路）**
+  - **共享号池内核（`account-pool.ts`）**：引入系统安全存储（DPAPI / Keychain / Secret Service），支持顺序耗尽（Sequential Drain）、轮询调度（Round-Robin）与粘性会话（Sticky Session）三种策略，提供 429 智能冷却与自动接力；
+  - **多供应商覆盖**：将 Antigravity 的号池能力推广至 ChatGPT、Command Code 与 Kimi Code；
+  - **容错增强**：最后使用时间记账等非关键写失败改为 Best-effort，杜绝因本地记账异常阻断正常取号。
 
 ## 0.3.9 - 2026-09-19
 
-- **修复工具结果内嵌图像到不了模型**（command-code / antigravity / kimi-code 三条线路，合入 PR #7）：三条线路的 mapper 此前都以「只看消息顶层 content」为前提，因此带图的工具结果（截图类工具、`read_image`）在模型侧全部失明——收集阶段看不到 `tool-result` 内部的图像块，压平阶段又把整条工具结果降级成 `[image: 名字]` 文本，像素从来没有上车的机会。更危险的是模型不知道自己瞎了，会凭空编造图片内容作答。用户在聊天框直接粘贴的顶层图片不受影响，这正是问题看起来像「模型不支持视觉」的原因。
-  - 三个 `collectImageRefs` 改为递归进入 `tool-result` 的嵌套 content（`continue` 式，不对块顺序做假设）；DSH 本体 `dsh-llm` 的对应函数同样递归，此处属实现遗漏。
-  - **command-code 的 Anthropic 路径**：`tool_result.content` 在带图时改为块数组（原生 `text` + `image.base64`），无图时仍返回纯字符串，逐字节不变。
-  - **command-code / kimi-code 的 OpenAI 路径**：`role: "tool"` 消息装不下图像，因此扫描**整段连续 tool 消息**收集全部图像，在段末统一追加**一条** `role: "user"` 消息挂 `image_url`。不逐条插入是硬约束：parallel tool calls 会产生连续的 tool 段，把 user 消息插进段中间会被严格上游拒绝（`tool_calls` 未被连续应答）。kimi 变体的 `declarationSlots` 语义逐语句保持等价，无 slot 漂移。
-  - **antigravity（Gemini）**：`functionResponse` 装不下图像，图像以 `inlineData` part 追加到同一条 user content 的 parts 数组（Gemini 允许同一 content 混合二者）；无图时 parts 数组与改前完全一致。
-  - 图像读不到（附件缺失或 media type 不支持）时降级为明确的 `[image unavailable: …]` 文本块，绝不静默丢弃。
-  - 行为不变性：11 类无图场景 × 5 条 wire 共 55 份请求体与改前**逐字节一致**（差分验证 0 处差异），只有真正带图的结果才改变行为。
-  - 新增 `test/tool-result-images.test.ts`（16 条，映射层）与 `test/tool-result-images-wire.test.ts`（4 条，从桩传输读回实际发出的请求体）；两者在未修复源码上分别有 9 条与 2 条失败，可证明其有效性。
-  - 已知限制：`offloadOldestRequestImages` 的字节统计仍未递归 `tool-result`（`collectRequestImageBytes` 只扫顶层）。这是有意保持的最小改动——若只让统计递归而替换逻辑仍只处理顶层块，会造成「计数按递归、替换按顶层」的新不一致。后果是工具结果内嵌图像的 base64 体积不计入 `MAX_REQUEST_IMAGE_BYTES` 预算，极端情况下可能发出偏大的请求；修复方向是让统计与替换同时递归，作为独立改动处理。
-- **优化 Antigravity 提示词与工具进度输出**：在系统提示词后置注入进度规则，引导模型在调用工具前输出简要进展；过滤冗余格式与前导思考文本。
-- **优化 Kimi Code 工具 Schema 兼容性**：递归解析并内联工具参数中的本地 `$ref` 引用，避免上游网关因引用定义不存在而报错。
-- **支持自由停用供应商与清空模型列表**（修复 Issue #8 中反馈的供应商强制常驻与选择器受挤占问题）：
-  - 四大供应商（ChatGPT、Antigravity、Command Code、Kimi Code）均增加「启用此供应商」总开关；当关闭供应商或全部取消勾选模型时，Adapter 返回空列表，DSH 会话模型选择器将完全隐藏该供应商，不再遮蔽或挤占原生 DeepSeek 及其他第三方供应商模型。
-  - 彻底移除前端与后端中「最少保留一个模型」的硬编码拦截，支持全选与全不选自由切换。
-  - 修复 Command Code 和 Kimi Code 适配器在已选模型为空时误回退到全量展示（导致 30+ 款模型意外暴露）的严重缺陷。
-  - Antigravity 路线注册增加柔性容错与路由冲突监听，避免与其他 Antigravity 插件（如 `dsh-agy-link`）共存时引发崩溃。
-- **Antigravity 多账号池与轮询/接力调度**（落实 Issue #8 中建议 3）：
-  - 支持绑定并管理多个 Google Antigravity 账号，账号池数据通过系统底层安全存储加密隔离（Windows DPAPI / macOS Keychain / Linux Secret Service），首次使用自动平滑迁移旧版单凭据为主账号，零破坏、免重新授权。
-  - **双重调度策略**：
-    - **顺序耗尽 (Sequential Drain)**：优先使用主账号；遇 429 限流或额度耗尽时自动进入冷却，并在同一次生成请求中无缝接力切换至下一个健康账号，不中断对话；
-    - **轮询调度 (Round-Robin)**：基于 LRU（最久未使用）跨账号循环分摊调用，均衡多个账号的配额消耗。
-  - **429 智能冷却与自动接力**：检测到上游 429 配额耗尽时，自动为该账号挂起冷却倒计时（优先解析 Retry-After 头，默认 15 分钟），立即自动重试下一个账号。
-  - **界面风格严谨统一且无 emoji**：完全遵从当前设计系统提供多账号卡片列表、主账号标识、当前活跃态、冷却倒计时徽章、设为主账号、手动重置冷却与注销操作。
-  - **修测试写坏真实凭据**：账号池默认落在 `$DSH_HOME/storages/antigravity-pool.json`，而多个 Antigravity 测试文件会构造使用默认路径的池，并在并行 worker 里互相覆盖同一个文件——一次 `npm test` 就能把开发者本机的真实账号覆盖成 `{"access":"test-token"}`，随后刷新报 `Missing Antigravity refresh token`。现在由 `test/setup/isolated-home.ts` 为每个测试文件分配私有 `$DSH_HOME`，测试全程不接触真实主目录（已在真机上按文件长度与 mtime 校验零改动）。
-  - **读取不再有副作用**：`AccountPoolStore.read()` 原先在从旧版单凭据迁移时顺手落盘，而所有改动池的调用者紧接着都会自己写回，等于白做一次加密往返；一个 getter 悄悄重写加密存储，正是上面那类事故能发生的条件。迁移现在只体现在返回值里，由随后的显式写入落盘，并新增断言锁定该性质。
-  - 登录流程因此多了一次加密池写入，`test/antigravity-proxy.test.ts` 的等待预算相应从默认 1s 调整为有界的 10s（实测约 2s 完成，仍能对真正卡死的流程报错）。
+- **[多模态] 修复工具结果内嵌图像无法传递给模型的问题（PR #7）**
+  - **根本原因**：三条线路此前仅检查消息顶层 Content，导致截图类工具结果内部嵌套的图像块在模型侧全部丢失，模型无法感知图片并容易产生幻觉。
+  - **修复方案**：
+    - 递归遍历 `tool-result` 中的图像附件；
+    - Anthropic 协议支持块数组回传原生图片；OpenAI 协议在连续 Tool 消息段末追加包含 `image_url` 的 User 消息；Gemini 协议通过 `inlineData` 混合并入；
+    - 读取失败时优雅降级为明确的 `[image unavailable: ...]` 占位文本。
+- **[Antigravity / Kimi] 提示词优化与工具 Schema $ref 展开**：在系统提示词后置注入进度规则；递归内联工具参数的本地 `$ref` 引用。
+- **[供应商管理] 支持自由停用供应商与清空模型列表（Issue #8）**：增加“启用此供应商”总开关，支持彻底清空模型以隐藏 Provider，不再挤占界面空间。
+- **[Antigravity] 多账号池与双重调度策略上线**：支持管理多个 Google 账号，支持顺序耗尽与基于 LRU 的轮询调度，支持 429 自动冷却换号。
 
 ## 0.3.6 - 2026-09-17
 
-- **修 preset 在部分 harness 上被判 broken**（有人反馈「装了却选不到」）：dispatch preset 有一行挂载 `@deepseek-ai/dsh-tool-present`，而该包从 harness 0.1.5-alpha.2 才发布，更早的安装上这一行无法解析——roster 会把整个 preset 判为 `broken`，而 broken 的 preset 既不可选也不可复制（文件其实已经同步进 `<dshHome>/.agent-presets/`，失败发生在挂载判定那一层）。现在同步时按当前安装调和：行里的包名对当前安装不提供的，就给该行补一个 `disabled: true`（roster 会跳过 disabled 行；harness 升级到提供该包的版本后，下次启动自动恢复启用）。候选写成显式清单（目前只有 `dsh-tool-present` 一项），而不是「凡是解析不到的行都禁用」——解析器整体失灵时那样会把 preset 掏空，故障比它修掉的更隐蔽。新增 5 条用例，拿真实 preset 跑四种包集，按 roster 自己的规则断言没有挂不上的行。
-- **peer 下限抬到 `^0.1.2-alpha.5`**：0.1.1-rc.2 既没有 preset 需要的 `present` 工具，`agent-tool-presentation` 的 `mode` 枚举那时也还写作 `code`（0.1.2-rc.1 起才是 `ptc`），preset 在那里同样挂不上。当初把 0.1.1-rc.2 圈进范围的 `@deepseek-ai/dsh-client-runtime` 已在 0.1.2 停发，抬下限不损失真实支持。
-- `presets/dispatch/agent.cordis.yml` 补上缺失的结尾换行——`.editorconfig` 要求 `insert_final_newline`，它是仓库里唯一违反该约定的文件。
-- **修生成图片不显示**：`CodexImageToolView` 通过 `conversation.resolveImage` 取图，而该服务在 harness 0.1.2 就改名成了 `uiConversation.imageUrl`，此后所有版本的生成图片都渲染不出来（代码里是 `as unknown as` 强转，编译期查不出来）。现在按可用性依次取 `uiConversation.imageUrl`、`conversation.resolveImage`，都不可用时返回失败的 Promise，卡片显示既有的「图片加载失败」文案。
-- **兼容 harness 0.1.6 的改名**：DSH 0.1.6 把 workflow 引擎的包名从 `@deepseek-ai/dsh-workflow-worker-thread` 改成 `@deepseek-ai/dsh-workflow-ptc`，而 preset 行名指向不存在的包会让整个 preset 被判为 broken、既不可选也不可复制。`src/host/preset-sync.ts` 现在在同步时探测当前安装能解析哪个名字（`import.meta.resolve`）：旧名仍在就保留，否则把行里的包名改写成新名；两个都不能解析时不改写（改名只会掩盖试过哪个）。同一份 preset 因此在 0.1.5 与 0.1.6 上都能挂载。新增 `reconcilePackageNames` / `resolvesFromHere` / `rewritePresetFile` 与 9 条用例，覆盖「改写后的目标树仍然幂等」「安装换代后改回来」「只处理 `.yml` / `.yaml`」。
-- **开发与测试基线移到 harness 0.1.5-rc.2**（npm 上 `@deepseek-ai/dsh` 的 `latest`，也就是用户实际在跑的版本）：此前 `package-lock.json` 把整棵依赖树钉在 0.1.1-rc.2，测试从来没跑在用户运行的版本上——「生成图片不显示」这条就是这样漏掉的。重新生成锁文件后 dsh 全家族（27 个包）落在 0.1.5-rc.2，`peerDependencies` 相应补上 `^0.1.6-alpha.1`。peer 与 dev 从此分工明确：peer 声明支持的世代，dev 只声明构建与测试所对的那一版。
-  - 客户端类型换到 0.1.2 之后的新家：`@deepseek-ai/dsh-client-runtime` 自 0.1.2 起不再发布。`ClientContext` 改从 `@deepseek-ai/cordis` 取，`ctx.slots` 的声明改由 `@deepseek-ai/dsh-client-ui-renderer/client` 提供（新增该依赖），`SnapshotStore` 改为在 `src/client/store.ts` 声明共用结构（只用 `getSnapshot` / `subscribe` 两个成员），`package.json` 的 peer、dev 与 `dsh.client.inject` 移除该包。客户端产物仍然只 `require` `react` / `react/jsx-runtime`。
-  - 测试跟随三处 API 改名：`mode: 'code'` → `'ptc'`（`ToolRuntime` 的装配枚举）、`CallId` → `ToolCallId`（现由 `@deepseek-ai/dsh-llm/brand` 导出）、`settingsNamespace()` → 直接用 `PREFERENCES_NAMESPACE`（该函数已从 `@deepseek-ai/dsh-settings` 移除）。
-- `test/package-integrity.test.ts` 的不变量由「peer 与 dev 逐字相同」改为「dev 的每一段范围都必须出现在对应 peer 的范围里」。原写法要求两处完全一致，而 peer 现在要覆盖两个世代、dev 只能对其中一个编译，subset 才是这条检查真正要表达的事。
-- 修 README 里与实际不符的说明：`maxDepth` 默认值（0.1.5 及以前取 preset 行、默认 3；0.1.6 起取 `subagent` 服务设置、默认 1）、不存在的「DSH 插件市场」安装路径、Subagent 卡片的位置，以及构建与测试所对的基线版本。
-
-- **调度模式 Agent Preset 随包分发**：新增 `presets/dispatch/`（基于 PTC 模式的编排 preset：R0 复杂度分诊 → L2 任务的澄清访谈 → 规划 → 派发 → 审查 → 验收；子代理必须显式指定模型且落在「子代理」设置白名单内；选择不可用时按 DSH 默认行为降级）与 `src/host/preset-sync.ts`。DSH 只能从配置根、内置 `agent-presets` 包的 `presets/`、以及 `<dshHome>/.agent-presets` 发现 preset，插件包无法自行注册根目录，因此采用「包内随附 + 启动时同步到 home」的方式（与 `@linxin666/dsh-liangshen` 同一机制）。同步幂等、只处理本包自己的 id、绝不触碰用户手写的 preset，失败只记 warn 不阻断插件加载；新增 `config.syncAgentPresets`（默认 `true`）可关闭。包根通过向上查找最近的 `package.json` 定位，兼容 `src/` 与打包后的 `lib/` 两种布局（写死 `../presets/` 在两种布局下会解析到不同目录）；复制逐条目实现，规避 Node 22 + Windows 上 `fs.cpSync` 遇到非 ASCII 路径直接崩进程的问题（nodejs/node#54476）。新增 `test/preset-sync.test.ts`（8 条）覆盖首次同步、幂等跳过、内容变更重写与多余文件清理、不触碰非本插件目录、retire 与保留、源目录缺失。`package.json` 的 `files` 增加 `presets`、`exports` 增加 `./presets/*`，`npm pack --dry-run` 确认三个 preset 文件随包发布。
-
-- **子代理必须写明模型**：授权守卫不再只拒绝「写明且不在白名单内」的路由，而是要求带有允许列表的会话里每次委派都成对给出 `provider` + `model`。此前不写路由的调用会让子代理继承父级模型（设置卡白名单形同虚设，子代理总是跑在主模型上）；现在缺省与只写一半都会被拒绝，拒绝理由里给出全部已授权路由并提示先用 `list_subagent_models` 查询。只读取公开接口（`ctx.tools.guard` + 会话日志 + 设置文档），不修改 DSH 本体。
-- 授权相关拒绝文案拆分为「未指定路由」「只指定一半」「路由不在列表内」三种，`delegationDenialReason` 不再回退到父级 `options` 判定继承路由；新增/改写 `test/subagent-model-authorization.test.ts` 用例覆盖这三种拒绝，以及未记录策略与非托管工具名保持放行。
-- 确认 `run_code`（代码模式）无法绕过该守卫：程序里通过 SDK 调用的 `tools["subagent"]` 走的是同一套 `prepare → guard → dispatch` 调度流水线，守卫在调度入口拦截，拒绝理由以 `ToolCallError` 抛回程序。新增 `test/subagent-model-authorization-ptc.test.ts`（3 条）用真实 `ToolRuntime`（code 模式）+ 假 `CodeRuntime` 驱动绑定函数，覆盖「已授权放行 / 缺省拒绝 / 越权拒绝」；这是实测而非假设（先看 DSH 源码确认嵌套子调用确实复用同一调度器，再用用例锁定行为）。
-
-- 新增 Kimi Code（Kimi For Coding 订阅）线路：注册 `kimi-code` Provider，把 Moonshot 的 Kimi Code 订阅作为本插件第四条线路接入 DSH。Kimi Code 与 Moonshot 开放平台（pay-as-you-go）是**两套互不通用的系统**：订阅走 `https://api.kimi.com/coding/v1`、凭据来自 `auth.kimi.com` 的 OAuth；开放平台的 key 与 base URL 在订阅端会被判为 `401 Invalid Authentication`，插件据此把两者严格分开。
-- OAuth 采用 RFC 8628 设备码流程（`src/host/kimi-code/oauth.ts`），复刻官方 CLI 的协议细节：`POST /api/oauth/device_authorization` 只带 `client_id`（公共客户端，**无 client secret、无 PKCE、无 scope**），`POST /api/oauth/token` 轮询用 `grant_type=urn:ietf:params:oauth:grant-type:device_code`；令牌响应字段（`access_token` / `refresh_token` / `expires_in` / `scope` / `token_type`）与官方实现逐字段对应。`slow_down` 按 RFC 把轮询间隔永久 `+5s`；`authorization_pending` 继续等待；`expired_token` **不当作失败**，而是像官方 CLI 一样重新申请设备码（用户授权慢了仍能登入）；`access_denied` 单独分类。设置卡展示用户码、一次性链接与到期时间，可复制用户码、可取消。
-- 令牌自动续期：阈值取 `max(300s, expires_in × 0.5)`（与官方一致），同一进程内并发调用**共用一次刷新请求**（避免订阅侧并发轮换同一 refresh token）；被拒的 refresh token 记入进程级 tombstone 并进入 5 分钟冷却，之后直接提示重新登录而不是反复打扰服务端。
-- **重试语义按错误类别区分**（`src/host/kimi-code/adapter.ts` 的 `classifyKimiFailure`），这是本线路的关键设计：服务把多种含义压进同一个状态码，因此分类读取响应正文而不只看状态码。
-  - **会重试**：任意 5xx（含截图里那条 `502 {"error":{"message":"Upstream model provider is temporarily unavailable. Please try again in a moment.","type":"server_error"}}`——上游模型供应商瞬时故障，与账号、模型、凭据都无关）；真正的 429 背压（`We're receiving too many requests`、`The engine is currently overloaded`）；连接层失败（`TRANSPORT`）；流停滞（`TIMEOUT`，由 idle watchdog 触发）。策略固定为 `maxRetries: 3`、`retryableCodes: ['RATE_LIMIT','SERVER','TIMEOUT','TRANSPORT']`、1.5s 起步、15s 上限、0.2 抖动，并**honor `Retry-After`**（作为 `providerRetryAfterMs` 随错误上抛，由 DSH 重试策略原样等待）。402（`unable to verify your membership benefits`）被官方描述为「通常是暂时问题」，同样归类为可重试。
-  - **不重试**：401 里其实是**套餐权限**被拒的情况（`does not have access to k3`、`supports only … up to … context`、`model id does not exist`）——与真正凭据失效分开，前者提示换模型/降上下文/升级套餐，后者才提示重新登录；403 的各类账号额度上限（5 小时 / 7 天 / 月度共享池 / 并发上限），提示等待重置或加油包；**配额耗尽型的 429**（`exceeded_current_quota_error`、`insufficient balance`、`please recharge` 等）——这与背压型 429 是两回事，重试只会白白消耗请求并推迟用户该看到的提示；以及 400 请求格式错误。
-- K3 系列行为按其官方文档精确实现（`src/host/kimi-code/mapper.ts`）：
-  - **思考档位只发 `low` / `high` / `max`**，其余输入被收敛映射（`ultra`/`max`/`xhigh`→`max`、`high`/`medium`→`high`、`low`/`minimum`/`light`→`low`、`none`→`thinking:{type:'disabled'}`），未知档位**不发送**而不是发出去吃 400；Anthropic 线路映射为 `thinking` 预算（low 2048 / high 8192 / max 16384），预算放不下时不启用。
-  - **当思考开启时，带工具调用的 assistant 消息必须回传 `reasoning_content`**，否则服务返回 400 `thinking is enabled but reasoning_content is missing in assistant tool call message`。本线路因此**保留 reasoning 块**（同插件的其他线路是丢弃的，因为那些上游要求签名），无工具调用的普通回复则不回传。
-  - **不发送 `temperature`**：采样参数按模型固定（1.0 / 0.95 / n=1），服务对显式值直接报错而非钳制，因此调用方的 temperature 被有意丢弃；输出上限统一用 `max_completion_tokens`（旧字段会被服务归一化掉）。
-  - 工具调用 id 截断到服务要求的 **64 字符**上限。
-  - 发送 `prompt_cache_key`（由首轮用户消息推导的稳定会话标识），让续接的会话能命中前缀缓存；模型或思考档位切换会使缓存失效。
-- 模型目录为官方四款订阅模型（`src/host/kimi-code/model-catalog.ts`）：`k3`（1M 上下文，需 Allegretto+；Moderato 上限 256K，故默认按 **256K** 计算以免会话悄悄超出后被 401 拒绝，可用上下文覆盖升到 1M）、`k3-256k`（固定 256K、无视频输入）、`kimi-for-coding`（K2.8 Preview，各套餐均 1M，默认档位 max）、`kimi-for-coding-highspeed`（约 6× 输出速度、3× 额度消耗，需 Allegretto+）。运行时仍以 `GET /v1/models` 为准（含每模型 `context_length`、`think_efforts`、`supports_image_in`），30 分钟缓存、可手动刷新、离线回落内置表。
-- 额度卡片读取 `GET /v1/usages`：5 小时 / 7 天 / 月度（会员共享池）/ 月度（Kimi Code 池）四个窗口各自显示百分比与重置时间——把两个月度池**分开标注**，因为共享池耗尽时即使 Code 池还有余额也会被拒；加油包（booster wallet）按服务的定点数换算（1e-6 分，正数不足 1 分记 1 分；`priceInCents` 已是分，不再二次换算）。同时容忍社区记录到的另一种 `usage` + `limits[]` 形状，且从 `used`/`limit` 推导比例，避免服务换形状时卡片直接空白。账号资料取自 `/me`，失败只降级为「已登录但无资料」而不影响额度。
-- OAuth 凭据只存 Host：Windows CurrentUser DPAPI、macOS 登录钥匙串、Linux Secret Service（与 Antigravity / Command Code 同一存储栈），明文 JSON 仅作迁移来源；存储的 oauth/API 主机需为绝对 https 源，防止被篡改的凭据文件把刷新请求指向他处。
-- 新增 `/kimi-code/api` 设置路由（status / login / login/status / login/cancel / logout / quota / models / settings / catalog/refresh / connection/test），改状态的操作只接受同源 JSON POST；设置页新增「Kimi Code」卡片，对话输入框新增该线路的额度胶囊（最短窗口优先，余额兜底）。
-- 修复 Kimi Code 已登录后账号显示为 `—`、以及刷新用量与实际状态不符的问题，根因是三个独立缺陷：
-  - **账号资料接口不存在**。此前 `fetchUserInfo` 会去请求 `/coding/v1/me`，而该端点在订阅侧并未提供，非 2xx 时静默返回 null，于是卡片永远是空白。Kimi 的 access/refresh token 本身是 **JWT**，账号身份（`user_id` 优先、`sub` 兜底、`email` 小写化）就在其 payload 里——现在从 token 解码得到账号并在登录时落盘（刷新时也会补齐旧凭据缺失的声明），卡片不再依赖任何网络调用即可显示已登录身份；套餐名仍以 `/usages` 返回的 `user_level_name` 为准并写回凭据。
-  - **测试连接按钮没有任何反馈**。`/connection/test` 的处理函数**缺少 return**，响应永远不会结束（按钮点了没反应）；而且探测目标正是那个不存在的资料接口。现在改为以真实的 `/usages` 调用作为探测（200 即证明凭据可用，同时顺带刷新额度卡片），并在卡片上显示结论与延迟。
-  - **刷新用量会把失败吞掉**。`/quota` 与 `/status` 都用 `.catch(() => null)` 包住上游错误，于是上游 401/403/5xx 时接口照样返回 200 空数据——这正是「刷新不正常」的观感：按钮看似成功、面板依旧为空。现在显式刷新会把真实原因以 502 + 文案返回，背景刷新则通过新的 `quotaError` 字段随状态一起展示，既说明原因又不隐藏已登录账号；对 `/usages` 的 401 也改为抛出类型化的未授权错误（此前是普通 Error），使「凭据失效」与「服务瞬时故障」在测试连接里能被区分。
-- 修复 Kimi Code 套餐一直显示为空，并补齐模型能力展示（新增 `test/kimi-code-plan.test.ts`，19 条）：
-  - **套餐名的来源是 `/me`，而它被我上一轮误删了**。Kimi **在 2026 年 9 月把 `user_level_name` 从 `/usages` 里移除**，因此 `/usages` 不再返回套餐名——而该字段正是我当时唯一的来源。现在恢复调用 `GET /coding/v1/me`（仅用 OAuth 访问令牌，不导入粘贴的套餐 key；4 秒超时、失败只降级不影响卡片），并保留 `/usages` 作为回退；两者都拿不到时再读凭据里缓存的套餐名。
-  - 新增**会员等级代码映射表**：`LEVEL_STANDARD`/`LEVEL_MODERATO` → Moderato、`LEVEL_INTERMEDIATE` → Allegretto、`LEVEL_ADVANCED` → Allegro、`LEVEL_PREMIUM` → Vivace（旧代码 `LEVEL_FREE`/`LEVEL_BASIC` → Adagio、`LEVEL_ANDANTE` → Andante 也一并支持）。此前若服务只发机器代码，卡片会显示原始枚举；现在映射为 Kimi 定价页使用的名称。昵称同样从 `/me` 读取。
-  - **修复 `buildModelOptions` 丢弃目录能力的问题**：`supportsVideo` 与 `minimumPlan` 此前被硬编码为 `false`/`null`，`description` 恒为 `null`——即实时目录与静态注册表已知的信息被直接丢掉。现在按「实时目录 > 静态注册表」取值，视频输入标记与描述都能正确显示。
-- 关于截图里两个特殊能力的说明（已核对官方文档与实测资料，并据此决定是否接入）：
-  - **视频输入**：`k3` 与 `kimi-for-coding` 确实支持视频，`k3-256k` **只支持图片**。但 **DSH 的模态词汇表只有 `text` 与 `image` 两项**（`ModelModalityMap`），没有 video——若谎报支持视频，DSH 会把无法投递的字节交给该线路。因此**不将其声明为可发送模态**，只在模型提示与能力行中如实标注，避免误导。
-  - **`dynamically_loaded_tools`**：这是 K3 的独有能力，允许在会话中途以「不含 content 的 `system` 消息 + `tools` 数组」注入额外工具定义，从而让顶层工具列表保持小而稳定（`system`/`tools` 属于缓存前缀，改动会使整个前缀缓存失效）。DSH 没有对应概念，本插件也无法从适配器层注入消息，因此**仅作展示说明**，不实现——这也解释了为什么官方把工具集稳定性作为优化建议。
-- 依据官方文档与实测数据补齐 K3 系列的能力、参数与优化（新增 `test/kimi-code-k3.test.ts`，31 条）：
-  - **保留思考 (Preserved Thinking) 默认开启**。官方 CLI 的默认是 `[thinking] keep = "all"`，即服务会跨轮保留推理内容——其错误参考里要求「每个缺 `reasoning_content` 的 assistant 消息都要补上」正以此为前提。此前我们只在**带工具调用**时回传 `reasoning_content`，普通文本轮次不带，这既与官方 `keep=all` 的约定不符，也在长会话里丢失了多轮推理的连贯性。现在思考开启时（含未显式指定档位，因为模型默认就推理）**每条 assistant 消息都写该字段**，无推理时写空串（服务要求的正是空值而非省略）；思考关闭则完全不写。可用 `DSH_KIMI_CODE_PRESERVE_THINKING=0` 关闭，卡片会显示当前状态。
-  - **输出上限改为跟随上下文窗口**（`maxOutputTokensFor(modelId, contextWindow)`）。`reasoning_content` 计入输出，而此前固定 32768 的上限会把 `max` 档的长思考**中途截断**并返回 `length`；官方客户端是按窗口封顶（并夹到 窗口 − prompt）——这正是官方文档所说「官方 kimi-code 行为」的 `computeCompletionBudgetCap`。现在按窗口封顶并保留 4096 余量，同时不低于模型声明的下限，避免小窗口把答案饿死。
-  - **新增请求前夹取**（`clampOutputToContext` + `estimatedInputTokens`）：调用方若已知 prompt 规模，`max_tokens` 会被下调到 prompt + 输出可容纳；prompt 规模未知时**不做猜测**——猜小会截断推理、猜大被直接拒绝，只有服务知道真实大小。
-  - **请求体超过 2 MB 时本地拒绝**（`assertRequestBodyFits`）。这是该端点最常被触发的 400（`total message size N exceeds limit 2097152`），官方文案不给出路；现在按真实序列化体积判断并直接提示「压缩会话/开新会话、检查大工具结果与图片」，既给出可操作建议也省掉一次注定失败的往返。
-  - **stop 序列按服务的硬上限裁剪**：最多 5 条、每条不超过 32 字节。超长的序列**整条丢弃而不是截断**——截断后的停止串会在错误位置终止生成，静默改变答案是比不停止更糟的结果。
-  - **新增缓存与 K3 调优卡片**：滚动统计命中/新处理的 prompt tokens、输出 tokens 与**缓存命中率**。Kimi 的缓存按内容哈希自动命中、无需也无法手动声明（实测 `prompt_cache_key` 与 Anthropic `cache_control` 标记均被忽略），所以读缓存比例是唯一能证明缓存真的生效的证据；卡片同时说明「同一会话内系统提示与工具列表一旦变化会使整个前缀缓存失效，应保持工具集合稳定、把新增内容追加在末尾」。
-  - 澄清并锁定一个此前的错误假设：`prompt_cache_key` 在订阅端**完全是 no-op**（实测：设与不设、相同与不同 key 均命中同一缓存）。我们仍发送它（与官方 CLI 行为一致且无害），但代码注释已改为如实说明，不再声称它能提高命中率。
-- 新增 `test/kimi-code-identity.test.ts`（15 条：JWT 解码、`user_id` 优先于 `sub`、邮箱归一化、不透明 token 回退、账号解析与套餐来源、刷新补全身份、连接测试的成功/401/5xx 三分支）与 `test/kimi-code-routes.test.ts`（8 条：无额度时仍显示账号、status 携带 `quotaError`、显式刷新的成功与失败、连接测试的结论与延迟、未登录拒绝、目录与启用集合）。
-- 新增 79 条单测：`test/kimi-code-oauth.test.ts`（设备码请求只带 client_id、区域主机切换、`expires_in`/`interval` 缺省回落、刷新对 502/429 的重试与对 401/invalid_grant 的立即失败、刷新阈值下限、并发共用刷新、被拒令牌不再重试）、`test/kimi-code-mapper.test.ts`（档位映射全表、未知档位不发送、temperature 被丢弃、`reasoning_content` 仅在带工具调用时回传、cache key 稳定、两条线路的请求形状与流式解码、usage 与工具增量拼接）、`test/kimi-code-adapter.test.ts`（重试策略取值、上文那类 502 判定为可重试、配额型 429 不重试、403 额度与 401 权限/凭据的区分、`Retry-After` 透传、目录与上下文覆盖）、`test/kimi-code-quota.test.ts`（四窗口标签与重置时间、字符串比例、越界钳制、两种响应形状、定点数换算、套餐名解析、模型目录能力）。
-- 在 `README` 增补 Kimi Code 线路说明与故障排查条目，并更新客户端注册用例以覆盖新增的设置区块与额度胶囊。
-
-- 修复 Command Code 额度卡片显示 `meter-1` / `meter-2` 的问题：`/alpha/billing/credits` 的窗口是按名字键控的（`windowLimits.fiveHour` / `weekly`），记录本身**只有数字没有名称字段**，此前的通用扫描找不到可用的 id/label，只能回退到序号占位。现在按名字读取该区块并套用官方 CLI 同款标签（`5-hour` / `Weekly`，另支持 `daily` / `monthly`），排序固定为最短窗口在前；`credits.monthlyCredits` / `purchasedCredits` / `freeCredits` 三笔余额也各自成条。通用扫描保留为兜底，并改为按对象身份跳过已读记录，避免同一份数据被重复上报。
-- 修复 Command Code 套餐名称为空的问题：服务只在订阅（或账单）里给出机器 id（`individual-goat`），`/alpha/whoami` 完全不提套餐，因此卡片一直是空白。新增 `src/host/command-code/plans.ts`，转录官方 CLI 的套餐表（Go / GOAT / Pro / Pro / Provider / Max / Ultra / Teams Pro 及各自月度额度），按**最长前缀**匹配——`individual-pro` 同时是 `individual-pro-v1` 与 `individual-provider` 的前缀，按最短匹配会把 Provider 误判成 Pro；同时按服务实际大小写与 `_`/`-` 混用做归一化，未识别的 id 原样显示而不是隐藏。
-- 额度卡片同时补齐订阅状态与续费日期（`active` / `trialing` / `past_due` 等）与套餐月度额度；余额解析此前查 `credits` 只会命中外层对象而返回 null（这也是余额一直空白的原因），现按三个池求和。
-- 修正无名称的额度条目不再被静默丢弃：仍会展示，但改用可读标签（`Extra allowance`）与说明，而不是此前既不可读、又可能掩盖真实额度的 `meter-N`。
-- 新增 `test/command-code-quota.test.ts`（13 条），fixture 为**从真实账号抓取的原样响应**：套餐名解析（含最长前缀与归一化）、订阅状态与周期、5 小时/周窗口的标签与毫秒级 resetAt 保真、窗口排序、三个余额池求和、无名称额度标签，以及 usage/summary 不产生伪额度。
-- 修复 Command Code 线路按“厂商/模型名前缀”猜测模型能力的错误做法：模型是否支持图片输入、支持哪些思考深度，都改由官方 CLI 自带的模型能力表（`src/host/command-code/model-catalog.ts`）逐模型查表决定，未知模型回落到纯文本。此前的前缀启发式把 **DeepSeek V4.1 Flash 这类真正的视觉模型判成了纯文本**，导致设置页不声明图片能力、DSH 不会把粘贴的图片交给该线路。同类错误还有多处：`moonshotai/Kimi-K3`、`xai/grok-4.5`、`xai/grok-4.6`、`MiniMaxAI/MiniMax-M3`、`Qwen/Qwen3.8-*` 都被误判为纯文本；而 `deepseek/deepseek-v4-flash`、`deepseek/deepseek-v4-pro`、`zai-org/GLM-5.3` 才是纯文本——同一个厂商内部两种都有（`z-ai/glm-5.3-flash` 支持图片，`zai-org/GLM-5.3` 不支持），前缀判断无法区分。
-- 思考深度同样改为查表：此前用 `['low','high','max']` / `['minimal','low','medium','high']` 等族级猜测覆盖所有模型，现在逐模型取注册表声明的集合（例如 `claude-*` 是 `low,medium,high,xhigh,max`，`gpt-5.4-mini` 是 `low,medium,high`，`deepseek/deepseek-v4-pro` 是 `high,max`，`claude-haiku-4-5` 与多数 Kimi/Qwen 模型没有思考档位）。
-- 因此新增 `xhigh` 与 `minimal` 两个思考档位：`CommandCodeReasoningEffort` 联合类型、设置卡下拉、路由校验与偏好 schema 一并放开；Anthropic 线路的 `xhigh` 映射为 24576 thinking 预算（介于 `high` 16384 与 `max` 32768 之间），`minimal` 为 1024。
-- 修复输出上限被误降到族级默认值的问题：注册表只为 5 个条目声明了 `maxTokens`，此前其余模型一律落到 32768。现在未声明的模型按多 provider 一致的 `limit.output` 补齐（Claude/GPT 系列 64K–128K、DeepSeek 384K、Kimi K3 131072、Grok 500K 等），注册表声明值优先。
-- 新增 12 条用例锁定上述行为：逐模型模态（含 `deepseek-v4.1-flash` 支持图片、`deepseek-v4-flash` 不支持、GLM 同厂商正反例、Kimi/Grok/MiniMax/Qwen 视觉模型）、未知模型回落纯文本、逐模型思考档位（含空档位与 `xhigh`）、输出上限三级优先级，以及适配器对视觉模型发送内联图片的端到端路径。
-- 新增 Command Code Provider（`command-code`），把 Command Code 的 Provider API 作为本插件的第三条线路接入 DSH：Anthropic 格式模型走 `https://api.commandcode.ai/provider/v1/messages`，其余（开源模型与 GPT 系列）走 `.../chat/completions`，两条线路各自把 DSH 的消息 / 工具 / 图片 / 流式协议映射到对应线上格式。模型 id 决定线路（`claude-*` 为 Anthropic），因为该 API 会拒绝把模型发到格式不符的端点。
-- 浏览器登录复刻官方 CLI 的回环回调契约：本机 `127.0.0.1:5959` 起一次性回调服务器（端口占用时顺延，最多 10 个），打开 `https://commandcode.ai/studio/auth/cli?callback=…&state=…&mode=redirect`，Studio 页面以跨域 POST 回传 `{apiKey,state,userId,userName,keyName}`。因此回调端点实现了 CORS 预检（含 Chrome 的 `Access-Control-Allow-Private-Network`）、10 KB 体积上限、`state` 校验、授权拒绝（`access_denied`）路径，以及成功后 303 跳转到 `/callback/complete` 的人工可读页面。另提供“手动填写 API Key”入口作为无浏览器环境的兜底；两条路径都先用 `/alpha/whoami` 验证再落盘。
-- 新增 `/command-code/api` 设置路由（status / login / login/status / login/apikey / logout / quota / models / settings / catalog/refresh / connection/test），修改状态的操作只接受同源 JSON POST。
-- 设置页新增「Command Code」卡片：账号与密钥信息、连接状态与路由归属、模型勾选（含该模型走的线路）、默认思考深度、逐模型上下文窗口覆盖、额度与用量；对话输入框新增 `command-code` 线路的额度胶囊。
-- 模型目录取自公开的 `/provider/v1/models`（含每个模型的 `context_length`），30 分钟缓存、可手动刷新；离线时回落到内置目录。上下文窗口默认取目录值，可逐模型覆盖（用于 DSH 的压缩与溢出判断）。
-- 额度来自 `/alpha/billing/credits`、`/alpha/billing/subscriptions`、`/alpha/usage/summary` 与 `/alpha/whoami`：各线路独立容错（一条失败不影响其余），解析器按“带 limit/used/百分比的对象”通用识别而不绑定某个具体响应 schema，识别不出时给出空态而不是伪造 0%。
-- Command Code 凭据（API Key）与 Antigravity 一样只存 Host：Windows 使用 CurrentUser DPAPI（`$DSH_HOME/storages/command-code-credentials.json.dpapi`），macOS 使用登录钥匙串，Linux 使用 Secret Service；明文 JSON 仅作为迁移来源，读取后加密回写并删除。凭据不会进入浏览器、`settings.yaml` 或日志。
-- `command-code` 路由可能已被其他适配器占用（例如内置 `llm-pi-ai` 用同一端点声明过同名 Provider），而 DSH 的 `registerAdapter` 对重复路由是 all-or-nothing 并抛 `DUPLICATE_ADAPTER`。插件因此把注册做成“可用即接管”：冲突时不让插件加载失败，只在设置页显示路由归属与冲突原因，并监听 `llm/adapters-updated`——原占用方释放该路由后自动接管，无需重启。
-- 新增 Kimi 系列的两项「能力补齐」（`src/host/kimi-code/modalities.ts`）：
-  - **视频输入真正可用**，不再只是提示文字。DSH 的 `ModelModalityMap` 只有 `text` / `image`，但它是**可合并扩展的接口**，因此本插件用 TypeScript 模块增强把它扩成 `text` / `image` / `video`（`ContentBlockMap` 同理新增 `video` 块）——**没有改动 DSH 任何一行代码**，增强只存在于本插件的编译单元里。此前 `k3` / `kimi-for-coding` 的视频能力只能在设置卡里显示为说明文字；现在它是真实模态：`resolveModel` 会声明 video，适配器会把 `{ type: 'video', attachment }` 映射成服务文档的 `{ type: 'video_url', video_url: { url: 'data:video/mp4;base64,…' } }`（`api.kimi.com/coding` 的 OpenAI 线路）。
-  - 视频与图片**各有独立预算**：图片仍是文档的 2 MB 上限，视频按自己的 48 MiB base64 预算按「最旧优先」省略（一个视频片段就远超整段对话的图片额度，共用一个预算会让图片永远发不出去）；请求体校验也据此只在**确实携带视频**时才放宽到 64 MiB，纯文本/图片请求仍按 2 MB 本地拦截。
-  - **不臆造未记录的字段**：`k3-256k` 只接受图片，选中它时视频会降级为明确的文字说明（提示改用 k3/kimi-for-coding）；不在文档容器白名单内的格式（白名单来自官方 vision guide：mp4/mpeg/mov/avi/x-flv/mpg/webm/wmv/3gpp）同样降级并说明；而 **Anthropic Messages 线路没有文档化的视频内容块**，因此走该线路时视频一律降级为文字而不是猜一个字段名发出去。
-  - `dynamically_loaded_tools` 按官方线格式实现：K3 接受**消息级工具声明**（`messages[].tools`），即可在会话中途以「无 `content` 字段的 `system` 消息」注入完整工具定义（`{ name, description, parameters }` 三元组，服务拒绝只给工具名）。这正是**保护前缀缓存**的手段——官方文档明确把「保持顶层 `tools` 字节稳定」列为该特性目的之一（顶层工具变化、或中途修改/删除已发出的声明都会使缓存从该点起失效，而在末尾追加不影响缓存前缀）。本插件提供 `withMessageTools()` 在 system 消息上挂声明，映射器按历史顺序输出；声明按请求重发（服务端不保留），且仅在模型声明该能力时发送，否则降级为一条说明消息而不是发出必然 400 的请求。
-  - 能力判定统一走「实时 `/v1/models` > 内置注册表」：listing 的 `supports_video_in` / `supports_dynamic_tools` 直接采信，离线回落内置表（`k3` / `k3-256k` 具备动态工具加载，`kimi-for-coding` 系列不具备）。设置卡把两项能力显示在模型旁。
-  - 修复动态工具声明**位置被提升**的问题：首版把历史里所有 `messages[].tools` 声明收集后统一发在请求最前面，但 Kimi 的缓存是**前缀匹配**——把声明放到它首次发出位置之前会重写缓存前缀并使已缓存对话失效，恰好破坏该特性存在的唯一理由。现在每条声明按其在历史中的真实位置插入（`flushSlots` 按「非 system 消息数」定位并交错输出），因此**末尾追加**仍是缓存安全的追加，而中途新增的声明不会前移。
-- 修复 `isAbort` 用 `instanceof Error` 判定取消的缺陷：DSH 的 `LlmError` **不是 Error 子类**，所以在真实调用链上取消会被误判为「读取失败」并降级成模型可见的占位文本——把用户主动取消变成了一个错误答案。改为按 `name === 'AbortError'` 结构化判定，并保留 `signal.aborted` 短路。
-- 声明所在 system 消息**同时带有文本**时不再静默丢弃：服务的动态工具 schema 没有 `content` 字段，两者无法合成一条消息，因此现在保留文本（另发一条），并把声明替换为明确的说明消息，而不是让工具无声消失。
-- **按官方 CLI 的能力表逐模型修正两项能力**（依据 `managed:kimi-code` 托管模型表里每个模型的 `capabilities` 列表）：`k3` = image_in + video_in + dynamically_loaded_tools；`k3-256k` = image_in + **dynamically_loaded_tools**（无 video）；`kimi-for-coding` = image_in + video_in + **dynamically_loaded_tools**；`kimi-for-coding-highspeed` = image_in + video_in（**无** dynamically_loaded_tools）。修正了先前把 `dynamically_loaded_tools` 当成「K3 独有」的推导错误——官方线文档只提 K3 是因为它描述的是 K3 的请求 schema，而 CLI 自己的能力表把它也标给了 K2.8 Preview。
-- 修正能力判定与官方表格的一致性（已对照 https://www.kimi.com/code/docs/en/kimi-code/models.html 逐项核对）：`k3` 与 `kimi-for-coding` 为「Image, video」、`k3-256k` 为「Image only」，与内置表一致；`kimi-for-coding-highspeed` 官方标为 K2.7 Code HighSpeed，「Thinking: ON」且无可选档位，故其固有档位仍按官方标注为 `high`。
-- 按第二轮审计修正视频入口的几处问题：
-  - **`.mkv` 能存不能发**：入口白名单收 `.mkv`（存为 `video/x-matroska`）而 mapper 的 `isVideoMediaType` 不含它，导致用户挂载 mkv 会收到「Attached video ✅」，模型却只拿到 `unsupported-container` 占位文本。现在入口**只接受 mapper 真能发出的容器**（即 `KIMI_VIDEO_MEDIA_TYPES`），mkv 在入口即被拒绝并说明——入口承诺与线上行为从此是同一件事。
-  - **`e2e` 注释的覆盖声称超出实际**：该测试直调 `buildOpenAIRequest`，从不经过 DSH 真实管道。注释已改为如实说明「覆盖请求映射阶段 + 安装版运行时的内容助手」，并明确列出**未**覆盖的部分（会话持久化 / compaction / transcript），要求装机实测。过程中还发现一个值得记录的事实：本仓库**安装版 `@deepseek-ai/dsh-llm` 是 0.1.1-rc.2**（根 barrel 只导出 `contentHasImage` / `projectImagesForTextModel`，**完全没有** file 投影），而工作区 checkout 是 0.1.5-rc.1——两者不是同一份代码，断言已改为针对实际运行的那份。
-  - **视频存储新增回收**：内容寻址让重复挂载免费，但此前没有任何清理，目录只会增长。现在写入时按 mtime 做 LRU 回收（预算 512 MB，best-effort、失败不影响挂载），并顺带清理崩溃写入残留的 `.tmp.*` 文件。
-  - 顺带修掉两处小瑕疵：`video-tool.ts` 自己写的 DNS `lookup` 改为复用 `fetch-address-policy.ts` 已有的 `lookupHostAddresses`（避免语义漂移）；`index.ts` 中 `disposeVideoTool()` 的缩进与相邻一致。
-- **视频输入打通了入口**：此前只有一条没有生产者的 mapper 路径（能力表也只能标注「无上传入口」）。现在新增两件东西，让视频端到端可达：
-  - `kimi_attach_video` 工具（`src/host/kimi-code/video-tool.ts`）：接受**本地绝对路径**或 **http(s) 链接**，把视频字节交给插件的视频存储，再以 `exec.deferContext()` 注入一条 plugin 来源的 user 消息（与本插件已有的图片工具同一机制，**不需要改动 DSH**）。可选 `question` 参数让模型在同一轮就视频作答。
-  - 视频本地存储（`src/host/kimi-code/video-store.ts`）：DSH 的附件服务只存图片，因此本线路自带存储。标识取字节 sha256（重复挂载同一文件幂等），读取时**重新校验摘要**，被篡改或截断的对象会被拒绝而不是当成原文件发出去。
-  - **尺寸上限取官方依据**：官方视频集成把本地文件编码为 `data:video/...;base64,...` 并限制该载荷约 **50 MB**（且明确说这是其客户端上限、非 Kimi API 上限），VS Code 端文件选择器限 **20 MB**。前者描述的是「这个 wire 上模型接受什么」，故上限设为略低于它的 **30 MB 原始字节**（base64 增长 4/3，所以编码后正好落在 40 MB，留在 50 MB 之下）。
-  - **两个安全/正确性闸门**：URL 来源在发起请求**之前**套用与搜索抓取 provider 相同的公网地址策略（否则该工具会成为一个 SSRF 原语——测试里有一条专门证明策略缺失时用例会失败）；且只有当**当前会话路由到 `kimi-code` 且所选模型声明了 video** 时才允许挂载，否则明确拒绝并给出补救（换 k3 / kimi-for-coding），绝不会把别的适配器没有处理分支的块注入进去。
-  - 能力表脚注相应改为「视频需先用 kimi_attach_video 挂载；直接粘贴仍只支持图片」。
-  - 新增 `test/kimi-code-video-tool.test.ts`（17 条：容器识别、内容寻址与幂等、超限/空文件/类型拒绝、摘要失配与文件缺失、相对路径/未知扩展名/非视频模型/错误 provider 的拒绝、私网 URL 拒绝且**不发出请求**）与 `test/kimi-code-video-e2e.test.ts`（3 条：从落盘文件解析出字节并确认线上是真实 base64 内容、字节缺失时降级为可读文本、无视频请求不受影响）。
-- **修复审查发现的问题**（视频与动态工具）：
-  - **live 目录现在真的能关掉能力**：`parseCatalogModel` 原先把 `supports_dynamic_tools === true` 之外的一切都当作「字段缺席」，于是服务端显式返回 `false` 时会回退到内置表、照样显示支持——与 `model-catalog.ts` 注释里「live 列表权威、包括可以关掉」的承诺自相矛盾。现按三态解析（`true` / `false` / 缺席），显式 `false` 穿透回退。
-  - **卡片与请求路径统一到一个解析入口** `dynamicToolsForEntry()`：此前卡片会回退内置表而请求路径 (`entry?.supportsDynamicTools === true`) 不会，导致在线但 `/models` 未返回该字段时 **UI 显示支持、实际请求却降级为「模型不支持」**，且行为随网络状态翻转；离线反而正常。现在两处共用同一函数。
-  - **声明不再随持久化丢失**：`withMessageTools` 原先把声明只挂在 `Symbol` 上且 `enumerable: false`，而 DSH 会话历史经 JSON 持久化必然丢掉符号键——会话恢复后声明会静默消失，模型会「以为自己有工具但请求里没有」。现在同时写入一个普通字符串键 `kimiCodeMessageTools`（可被 JSON 序列化，但仍非枚举，兄弟线路照样看不见），并新增 `rehydrateMessageTools()` 供恢复后重新挂上符号。
-  - **不再重复发送 system 文本**：`leadingSystemText` 折叠所有 system 文本到请求开头，而声明槽位又会在原位置重发一次，同一段文本出现两遍（浪费 token，且第二次位置可能扰动本想保护的缓存前缀）。现在 `leadingSystemText` 跳过带声明的消息，文本只在声明位置出现一次。
-  - **Anthropic 线路不再静默吞掉声明**：该协议不支持消息级声明，原本直接丢弃且无任何提示，模型可能调用从未声明的工具。现在把未发送数量写进 `system` 提示。
-  - **请求体守卫不再二次序列化、也不再被用户文本欺骗**：原先用 `JSON.stringify(body).includes('"video_url"')` 判断是否带视频——body 可达数十 MB 却被序列化两次，且用户消息里只要出现该字面量就会把 2 MB 守卫放宽到 64 MB。现由调用方显式传 `carriesVideo`（复用已有的 `requestHasVideo`）。
-  - **不再超前宣称视频能力**：模型确实接受视频，但本插件与 DSH 的附件服务都没有视频生产者/读取者（`videos` 读取器从未在 `src/index.ts` 注入），实际永远走 `unreadable` 占位。能力表因此把标签标为「视频*」并加脚注说明当前版本没有上传入口、不会发出视频内容块，避免 UI 承诺与实际可达路径不符。
-  - 清理 `classifyKimiFailure` 中 `isLimit ? 'PROVIDER_ERROR' : 'PROVIDER_ERROR'` 的死三元（两分支同值，读起来像意图未实现）。
-  - **修复上一轮修复引入的回归**：`leadingSystemText` 是两条 wire 共用的，跳过声明载体后，只有 OpenAI 路径会在载体原位置重发文本；Anthropic 路径因此**整段丢失载体文本**（只剩工具数量提示），恰好违反 `declarationSlots` 注释里「丢掉 system 文本会静默改变模型收到的信息」这条原则。现在 Anthropic 路径会把载体文本拼回 `system`（排在 notice 之前），并加了 2 条回归用例——其中顺序断言特意先 `>= 0` 再比较，否则文本缺失时 `indexOf` 返回 -1 会让断言**空过**。
-  - 顺手清理审查指出的三处小瑕疵：`classifyKimiFailure` 中删掉三元后遗留的未引用 `isLimit`（改为真正参与文案选择的 `limitReached`）；`client.ts` 里错位堆在 `dynamicToolsForEntry` 上方的「Input modalities」注释归位；`withMessageTools` 的注释原先一边说「非枚举所以其他读者看不到」一边字符串键副本是 `enumerable: true`，改为明确写清两个副本可见性不同及其原因。
-  - `assertRequestBodyFits` 现在**返回**它序列化出的 body，供适配器直接复用：此前带视频时同一个数十 MB 的 body 会被 `JSON.stringify` 两次。
-  - 新增 `test/kimi-code-review-fixes.test.ts`逐条钉住上述缺陷：显式 `false` 生效、三态回退边界、文本只出现一次、Anthropic 提示、守卫不被文本欺骗、声明经 JSON 往返后仍可发送；`test/kimi-code-capability-ui.test.tsx` 增加脚注相关 1 条。
-
-- **重排模型能力展示**：此前把能力说明当成长句塞在模型名那一列，把名称列撑开、右侧描述错位。现改为独立的四列表格（模型 / 多模态 / 动态工具 / 说明）：能力只显示短标签（视频 / 仅图片 / 动态工具 / —），逐模型的协议、默认思考档位与所需套餐移入悬停提示；表格自身不再附带任何解释段落。表格抽成可测组件 `KimiModelCapabilities`（`src/client/kimi-code/KimiModelCapabilities.tsx`），新增 `test/kimi-code-capability-ui.test.tsx`（5 条）钉住列数、每模型一行、长句不得进入单元格、悬停内容，以及说明为空时不渲染 `null`。该表也**不再依赖 `description` 是否存在**——实时目录条目缺描述时整个表格（含能力）仍渲染。
-- 澄清并测试这两项能力的**跨模型隔离**：机制本身有三重隔离——符号载体**不可枚举**（其他线路的序列化器看不到它）、映射器只在 `messageTools === true` 时输出、且声明只存在于 Kimi 的 OpenAI 线路映射中。新增 `test/kimi-code-capability-isolation.test.ts`（6 条）：Command Code 各模型仍不含 video（证明模块增强是**纯类型、不产生运行时值**）、Kimi 四个模型 id 的 video 与 dynamically_loaded_tools 与官方能力表**逐项**一致（并断言两者并非同一集合：HighSpeed 有 video 却无动态工具）、视频块不会出现在兄弟线路的请求体里、同一段历史里的声明也不会被兄弟线路带出去。
-- 另记录一个**证据取舍**：公共 `models.dev` 目录虽声明了 `dynamically_loaded_tools` 字段，但 Moonshot 自家四个条目均未标注，故本插件**不采信该目录**，改以官方 CLI 托管模型表的 `capabilities` 为准；运行时仍以实时 `/v1/models` 的 `supports_dynamic_tools` / `supports_video_in` 覆盖内置表。
-- 新增 `test/kimi-code-declaration-position.test.ts`（7 条回归用例）：声明按历史位置交错（含前后两条声明之间有对话的情形）、末尾追加落在队尾且前缀不变、首条声明仍在队首、文本与声明同处一条消息时保留文本并给出说明、以及取消检测在「非 Error 的 AbortError 对象」与「signal 已 abort」两条真实路径上都向上抛出、而真正的读取失败仍降级。这 7 条在把两个缺陷临时改回后**确有 3 条失败**（位置 2 条 + 取消 1 条），确认它们是真的回归用例而非同义反复。
-- 新增 `test/kimi-code-capabilities.test.ts`（24 条）：模态词表与容器白名单、视频解析与缺字节/无 reader 的降级、最旧优先省略、两种模型能力下的线级视频形状、Anthropic 线路绝不发未记录字段、消息级工具声明的符号载体（不污染 `Object.keys`）、`content` 字段不得出现、能力缺失时的降级、历史顺序保持、以及请求体预算（纯文本仍按 2 MB 拒绝、带视频才放宽）。另有 3 条既有断言随行为变更更新（`inputModalities` 现含 `video`）。
-- 新增 80 条单测：`test/command-code-mapper.test.ts`（两条线路的请求映射、图片内联与超限省略、OpenAI/Anthropic 流式解码、工具调用增量拼接、usage 与 finish reason、截断流拒绝）、`test/command-code-oauth.test.ts`（回环回调服务器：CORS 预检、表单/JSON 回调、state 校验、拒绝路径、303 跳转、宽限期发布）、`test/command-code-routes.test.ts`（账户/额度/目录解析、模型选项与启用集合、设置路由与同源校验）、`test/command-code-adapter.test.ts`（目录、上下文覆盖、两条线路的端到端流式与工具往返、缺凭据/401/429/截断的错误分类）、`test/command-code-store.test.ts`（凭据校验、模型设置文件、设置卡与胶囊的纯函数）、`test/command-code-plugin.test.ts`（插件装配、路由接管与释放后自动接管）。
-- 修复开启系统代理的机器上 `web_fetch` 必然失败的问题：DSH 内置抓取 provider 在连接前解析、校验并固定目标地址，而代理工具（Clash/Mihomo 等）的 fake-ip DNS 会把域名解析成 `198.18.0.0/15` 里的保留地址（实测 `api.github.com` → `198.18.0.17`），于是每次调用都以 `WEB_BLOCKED_URL`（`resolves to a non-public IP address`）结束——代理根本没被用上。DSH 只在进程环境变量里读到代理时才走代理，看不到系统代理。现在只要插件配置了可用代理（系统代理自动检测或自定义代理），`web_fetch` 就改用本插件的抓取 provider：由代理解析源站，与 DSH 对“走代理的请求”采用的语义一致；未配置代理时仍由内置 provider 抓取，其解析与固定策略不变。
-- 抓取 provider 新增地址策略 `src/host/fetch-address-policy.ts`，保留内置 provider 安全边界中不需要 DNS 的那一半：URL 里写明的 IP 字面量只有全球可路由单播才放行（loopback、私网、链路本地、CGNAT、多播、保留地址、IPv6 转换与隧道前缀一律拒绝）；域名用本机解析器检查一次，落在私网（含 `localhost`、`127.0.0.1.nip.io` 这类）一律拒绝；只有代理的 fake-ip 答案被接受，本机解析不出的域名交给代理处理。与内置 provider 的差别是不再固定（pin）连接地址——fake-ip 环境下这一步无法成立，已在 README 的安全边界中写明。
-- 代理偏好在运行时变化（例如系统代理 ↔ 直连）会重新选择抓取后端；选择 ChatGPT 搜索来源时同时切换搜索与抓取的行为保持不变。
-- `ProxyManager` 新增系统代理探测的观察点（`onSystemProxyDetected`）：只在「从未知变为已知代理」时通知——探测失败与「本机没有代理」都读作 `null`，因此不会因为一次 `reg query` / `scutil` 抖动就把已经可用的路由拆掉。插件据此在代理迟于 DSH 出现时自动重新选择抓取后端，否则内置 provider 会一直占到进程结束。
-- 新增 `test/fetch-address-policy.test.ts`（地址分类、fake-ip 识别、私网解析拒绝、解析失败放行），并扩充 `test/codex-fetch.test.ts`、`test/search-provider-switcher.test.ts`、`test/web-provider-lifecycle.test.ts` 覆盖抓取 provider 的拒绝路径与后端切换。
-- 修复 Antigravity 线路静默丢弃用户上传图片的问题（issue #5）：本插件把 `gemini-*` / `claude-*` 都声明为支持图片输入，DSH 因此不把图片投影成文本，而是以 `{ type: 'image', attachment }` 的形式原样交给适配器；但 `mapper.ts` 只认内联 `data` / `base64` / `source.*`，`contentToUserParts()` 又用 `if (img) parts.push(img)` 静默跳过，于是发给 Google 的 `streamGenerateContent` 请求里只剩下文本，模型只能回答「没有收到图片」。现在 `AntigravityAdapter` 接入 `ctx.attachments`，在组装请求前把附件解析为 Gemini `inlineData`（媒体类型取自已校验的附件引用），同一附件在多条消息中只读取一次。
-- 读不出字节的图片不再静默消失：降级为 `[image unavailable: …]` 文本让模型能说明图片没读到；取消（AbortSignal）仍向上抛出，不会变成模型可见的文本。工具结果中的图片同样以 `[image: 名称]` 保留，与 Codex 线路一致。
-- 新增 8 条 `test/antigravity-mapper.test.ts` 用例（内联映射、跨消息去重、读取失败降级、无附件服务降级、取消传播、旧内联格式、工具结果图片标记，以及不传解析结果时默认参数仍不静默丢弃）与 3 条 `test/antigravity-adapter.test.ts` 端到端用例：`gemini-3.8-flash` 与 `claude-opus-4-6` 各断言一次真实请求体中的 `inlineData`（两个 provider 共用同一 mapper），另一条用 429 逼出候选链，断言每个 runtime model 候选都带着图片、且附件只读一次。新增 `test/antigravity-image-wire.test.ts` 做线级验证：不 mock `fetch`，改为在 127.0.0.1 上起回环服务器并把 `DSH_ANTIGRAVITY_ENDPOINT` 指向它，读取真正离开进程的请求体，断言 `contents[0].parts` 是 `[text, inlineData]`。把这三组用例跑在回退后的修复前源码上，共 12 条失败（其中线级用例显示 socket 上只剩文本），因此它们是货真价实的回归用例。再新增 `test/antigravity-image-bundle.test.ts`：issue 是在 npm 安装版上发现的，所以这条用例直接 import 打包产物 `lib/index.js`（而不是 `src`）跑同一段线级断言，证明用户装到的那个 bundle 里同样带着修复；`lib/` 是提交进仓库的生成物，源码改动后忘记 `npm run build` 时它会失败。工具结果里的图片仍只记名不内联——DSH 自己的多 provider 适配器（`llm-pi-ai`）对工具结果里的非文本块是直接丢掉的，记名已经比参照实现保留得更多，而 `functionResponse.parts` 是否被该端点接受在本地无从验证，故按「不臆造线上行为」处理，并在代码里写明理由。
-- 新增单次请求的图片体积上限（`MAX_REQUEST_IMAGE_BYTES`，12 MiB base64）：修复后本线路会把历史里的图片全部内联，图片多的会话会让请求体持续膨胀直到被 Google 的 20 MB 体积上限拒绝，而最先被牺牲的恰是模型最不需要的旧图。现在超过预算时按 DSH 的顺序（最旧优先）把图片替换为上游同款占位文案，`test/antigravity-mapper.test.ts` 与 `test/antigravity-adapter.test.ts` 各有一条用例覆盖（被省略的图片不会被读取，最新一张仍以 `inlineData` 发出，且不改动持久历史）。该逻辑在插件内实现而非调用 DSH 的 `offloadRequestImagesWithPolicy`：本插件支持的 DSH 区间里这个符号的形态发生了不兼容变化（`OFFLOADED_IMAGE_TEXT` 常量 → `offloadedImageText()` 函数；`offloadRequestImages()` 在 0.1.5-rc.1 被移除；`placeholder` 由可选变必填），绑定任一形态都会重演 issue #4 那种"在某个受支持版本上直接加载失败"。
-- 修正 `test/subagent-model-authorization.test.ts` 的守卫类型：Host 工具注册表登记的是单参数 `ToolGuard`（`@deepseek-ai/dsh-tools`），测试却按插件内部的三参数 `DelegationGuard` 别名调用，导致 `npm run typecheck` 长期以 TS2554 失败。模拟注册表改为按真实契约取类型后，仓库自带的 `npm run typecheck` 恢复通过。
+- **[调度预设] 随包分发 Dispatch Agent Preset**：内置基于 PTC 模式的复杂任务编排预设（复杂度分诊、任务拆解与子代理指派）；子代理委派强制显式指定 Provider + Model。
+- **[网络与代理] 修复透明代理（Fake-IP）环境下 `web_fetch` 失败问题**：
+  - 自动识别并接管 Fake-IP（`198.18.0.0/15`）解析，由插件抓取 Provider 自行经由代理发送请求，避免被内置地址过滤硬性拦截；
+  - 引入地址安全策略（`fetch-address-policy.ts`），防范私网穿透风险。
+- **[多模态] Kimi Code 打通端到端视频输入**：支持视频媒体附件识别与解析，并在超限时采用最旧优先降级策略。
+- **[Antigravity] 修复用户上传图片静默丢弃问题（Issue #5）**：正确将图片附件接入 Gemini `inlineData` 报文，杜绝模型回答“未收到图片”；引入 12 MiB 单次请求图片体积上限保护。
+- **[Harness 兼容] 开发与测试基线升级至 DSH 0.1.5-rc.2**，重排模型能力展示表格。
 
 ## 0.2.15 - 2026-09-11
 
-- 新增子代理模型授权守卫：DSH 的「Subagent」允许列表（`subagent-model-selection`）原本只在模型**显式**填写 `provider`/`model` 时生效，而委派调用不填路由时子代理会继承父级模型——于是 DeepSeek 会话里的子代理仍会在未授权模型上运行。插件现在在 Host 工具注册表上注册一个单调守卫（`ctx.tools.guard`），当调用会话（或最近的、记录了策略的祖先会话）带有允许列表时，任何生效路由不在此列表内的委派都会在子代理启动前被拒绝，拒绝理由里带上全部已授权路由，模型据此重试即可选中合规模型。
-- 该守卫只在会话确实记录了允许列表时介入（与 DSH 委派工具的会话快照语义一致），不会改变未启用该设置的会话；`subagentModelScope: 'preference'` 可让当前设置卡允许列表也约束未记录策略的会话（含恢复的旧会话）。
-- 只读取公开接口：会话日志事件 `subagent/model-selection-policy`、父会话谱系、Host 设置文档与 `ctx.tools.guard`，不修改 DSH 本体。
-- 新增配置项：`subagentModelAuthorization`（默认 `true`）、`subagentModelTools`（默认 `['subagent']`）、`subagentModelScope`（默认 `session`，可选 `preference`）。
-- 新增 14 条单测覆盖策略解析、谱系继承、设置读取、显式/继承路由的拒绝与放行、作用域切换以及守卫安装路径（含注册与释放）。
+- 移除对 `@deepseek-ai/dsh-llm` 的冲突模块类型增强；
+- 移除 Mapper 中不可达的 `file` 块处理；
+- 移除未启用的智能体团队混合模型规则；
+- 修复 Antigravity 新账号开通在候选端点全部失败时静默返回成功的缺陷；
+- 修复登出时在途配额请求可能回写旧缓存的竞态问题。
+
 ## 0.2.14 - 2026-09-10
 
-- 移除失效的「子代理最大嵌套深度 / 子代理上下文预算」设置：这两个偏好键在 DSH 侧没有任何消费方（全仓库无引用），插件自身也只有写、没有读，保存了也不生效。它们源于 2026-08-28 的 `5b08e2e`——那次提交迁移到 DSH 原生子代理模型路由，删除了 `subagent-context-adapter` / `subagent-policy` / `SubagentSettingsSection`，但把这两个控件和偏好键留了下来。相关 DTO 字段、schema、路由校验、界面控件、6 条未引用文案与失效单测一并移除；子代理模型与思考深度改用 DSH 自身的“Subagent”设置卡片，最大嵌套深度由 preset 中 `tool-subagent` 的 `maxDepth` 决定，README 同步更正。
+- 优化 Antigravity 配额自动刷新机制，对齐官方 2.8.0 规范；
+- 完善代理探测逻辑，支持 `.env` 兜底识别。
 
 ## 0.2.13 - 2026-09-10
 
-- 回退 Codex 与 Antigravity 模型上新增的 `systemPromptUpdate: 'in-history'` 声明：Responses 线路把系统提示词放在顶层 `instructions`，Antigravity 把它放在固定的 `systemInstruction` 加一条 user turn，两条路由都无法把"历史中最后一条 system 消息"当作完整系统提示词。声明该能力会让 DSH 在提示词变化时改为追加 system 节点并保留旧节点，而两个 mapper 会把新旧提示词一并发出。Codex mapper 同时改为只取最新一条非空 system 消息，避免将来重新声明时再次拼接过期提示词。
-- 移除 `src/compat.ts` 对 `@deepseek-ai/dsh-llm` 的 `ContentBlockMap.file` / `LlmResolvedModelInfo.systemPromptUpdate` 模块增强：本地 DSH（`packages/llm/llm`，0.1.5-rc.1）已经声明 `'file': FileBlock`，与增强中的 `Record<string, unknown>` 冲突（TS2717），对着本地依赖编译会直接失败。
-- 移除两个 mapper 中不可达的 `file` 内容块处理：DSH 内核在进入适配器之前已把文件块投影为 `fileHandleText`（`dsh-llm` 的 `projectFilesToText`），适配器永远收不到 `file` 块；原实现读取的 `byteSize` / `savedPath` 在真实 `FileAttachmentRef` 中也不存在（真实字段是 `bytes`）。
-- 移除只完成一半的「智能体团队混合模型规则」（`teamModelRules`）：该功能当时只有偏好存储、路由白名单校验、匹配函数和 64 条中英文案，没有任何地方据此选择子代理模型（DSH 内核对子代理模型走 `subagent/model-selection-policy`），因此连同 DTO、schema、路由处理、单测与未引用文案一并移除，等 DSH 提供介入点后再实现。
-- 修复 Antigravity 新账号开通在全部端点失败时静默返回成功：`onboardUser` 现在会在候选端点循环结束后抛出最后一次失败，而不是让调用方误以为已开通。
-- 修复登出竞态：`clearCachedQuota()` 增加 epoch 标记，登出时仍在途的配额请求不再回写 `cachedQuota`，也不再为已登出账号写入模型目录；in-flight 槽位改为按持有者清理，避免"清理后重新拉取"丢失新的在途请求。
-- `/antigravity/api/status` 改用导出的 `ANTIGRAVITY_QUOTA_CACHE_TTL_MS`，不再内联 120000。
-- 移除 Antigravity 设置页与输入框配额胶囊里重复的 `POST /quota`：Host 在 `/status` 中已经会刷新过期缓存，客户端再发一次会让单次挂载产生 2–4 次上游配额请求；配额空态改为明确提示（新增 `quotaEmpty` / `googleValidation` 文案，不再硬编码中文）。
-- `parseEnvProxy` 新增 `envFile` 注入点：`$DSH_HOME/.env` 兜底代理探测现在有测试覆盖（含 `export` 前缀、引号、注释、空值、环境变量优先），既有"无代理返回 null"的断言也不再依赖运行机器上是否真的存在 `~/.dsh/.env`。
-- Antigravity User-Agent 恢复按真实平台填写 `os_type` / `arch`（仍可用 `DSH_ANTIGRAVITY_OS` / `DSH_ANTIGRAVITY_ARCH` 覆盖），不再默认冒充 darwin/arm64。
-- 移除未被引用的 `SANDBOX_ENDPOINT` 并修正端点注释；DSH 依赖区间末项由 `^0.1.5` 改为 `^0.1.5-rc.1`（`^0.1.5` 不匹配本地实际依赖 0.1.5-rc.1），并同步了长期滞后的 `package-lock.json` 根信息。
+- 优化 Antigravity 开通与配额接口，增强网络容错与多平台适配。
 
 ## 0.2.12 - 2026-09-10
 
-- Antigravity 登录与开通：对齐官方 2.8.0 User-Agent 格式并支持环境变量覆盖，新增 `loadCodeAssist` 详情解析、免费层资格校验与 Google 账号安全验证链接提取，以及新账号的 `onboardUser` LRO 轮询开通。
-- Antigravity 配额：`/status` 按 2 分钟 TTL 自动拉取配额，`/quota` 支持强制刷新并在并发调用间去重；Web 设置页与输入框配额胶囊自动获取配额，不再需要手动刷新。
-- 代理：`auto` 模式在进程环境之外新增 `$DSH_HOME/.env` 兜底探测。
-- 依赖：`@deepseek-ai/*` peer/dev 版本区间扩展到 `^0.1.3` / `^0.1.4` / `^0.1.5`。
+- Antigravity 登录对齐官方 2.8.0 User-Agent 格式，新增免费层资格校验与开通 LRO 轮询；
+- 状态接口按 2 分钟 TTL 自动拉取配额，支持并发去重；
+- 依赖版本区间扩展支持 DSH `^0.1.3` 至 `^0.1.5`。
 
 ## 0.2.10 - 2026-09-06
 
-- 修复 Antigravity 模型元数据校验失败导致 Provider 整体消失的问题：在 `resolveModel` 中清洗并安全兜底 `defaultEffort`，确保透传给 DSH 内核的 `defaultEffort` 必定存在于当前模型的 `efforts` 清单内；解决 `gemini-3.1-pro` 等模型（仅支持 `low` / `high`）因默认回退 `medium` 触发 `@deepseek-ai/dsh-llm` 的 `INVALID_MODEL_REASONING` 校验异常导致 Provider 从模型选择列表中消失的问题（Issue #4）。
+- 修复 Antigravity 模型元数据校验失败导致 Provider 整体消失的问题（安全兜底 `defaultEffort`，解决 `gemini-3.1-pro` 触发异常导致选择器丢失的问题，Issue #4）。
 
 ## 0.2.9 - 2026-09-06
 
-- 修复在官方 DSH 0.1.2-rc.1 / dsh-llm 0.1.2-rc.1 上加载失败问题：移除 Antigravity 模块中对 `CallId` 的静态具名导入，统一采用 `toToolCallId` 兼容垫片，动态兼容 `ToolCallId` 与 `CallId`；解决启动（boot）阶段因缺失 `CallId` 导出抛出 SyntaxError 导致插件整树无法加载的问题（Issue #4）。
-- 修复搜索与抓取来源切换未生效：正确更新 Loader 配置，并在 DSH web 服务重载时重新注册后端、保留默认来源；解决启用插件抓取后仍由 DSH 内置 fetch 拦截 TUN/Fake-IP 地址的问题。
-- 修复 Antigravity 工具调用：原样回传 Google 工具 ID，兼容旧会话保存的原始 ID；转换工具参数 Schema，过滤 `propertyNames` 等不支持字段并处理嵌套结构。
-- 修复 Gemini 3.7 / 3.8 的旧 `off` / `none` 思考配置，使用最低支持档位 `LOW` 并关闭思考摘要；400 请求错误直接保留原始详情，不再被模型降级错误覆盖。
-- Codex 订阅供应商新增 `gpt-6-astra`（6 Astra），支持文本、图片、工具调用和 `low` 至 `max` 思考档位，默认 `medium`；旧会话的 `none` / `minimal` 转为 `low`。
-- 新增 Astra 上下文设置：默认 272K，订阅侧最高 872K，界面与服务端统一校验；保留已有模型选择与上下文配置。
+- 修复在官方 DSH 0.1.2-rc.1 上启动因缺少 `CallId` 导出抛出语法错误的问题（采用 `toToolCallId` 动态兼容垫片，Issue #4）；
+- 修复搜索与抓取来源切换在重载时未能正确生效的问题；
+- Codex 订阅新增 `gpt-6-astra` 模型，支持 `low` 至 `max` 思考档位；提供独立上下文容量设置。
 
 ## 0.1.28 - 2026-08-28
 
-- 新增支持 1.5x 倍速快速模式（Fast Mode / Priority Service Tier）：在设置页「增强功能」中提供开关，开启后向 Codex 后端请求自动注入 `service_tier: 'priority'`，以约 2x–2.5x 额度消耗换取约 1.5 倍的 Token 生成速度。
-- 修复偏好设置更新白名单校验，支持持久化保存 `fastMode` 配置。
+- 新增支持 1.5x 倍速快速模式（Fast Mode / Priority Service Tier），请求注入 `service_tier: 'priority'`；
+- 修复偏好设置更新白名单校验，持久化保存快速模式开关。
 
 ## 0.1.21 - 2026-08-22
 
-- 修复 DSH 更新到 `0.1.1-rc.2` 后“本轮运行失败：registration.adapter.prepareCall is not a function”：新代理循环经 `ctx.llm.prepareCall()` 冻结每次调用，适配器必须实现 `prepareCall`；CodexChatGptAdapter 现显式绑定同一次解析的模型元数据与流分发（`PreparedAdapterCall`）。
-- 将全部 `@deepseek-ai/*` peerDependencies 与 devDependencies 版本统一从 `^0.1.1-rc.1` 提升至 `^0.1.1-rc.2`，并重新生成 package-lock.json。
-- 增强文件完整性与编码防御：确保 `package.json` 及全部工程文件均为无 BOM 的 UTF-8 编码，新增 `test/package-integrity.test.ts` 自动化防范 UTF-8 BOM 引入与依赖一致性。已在本机 rc.2 依赖集上验证：typecheck、69 项测试与 tsdown 构建全部通过。
+- 适配 DSH `0.1.1-rc.2` 的新循环机制，适配器显式实现 `prepareCall`；
+- 全量提升依赖版本至 `^0.1.1-rc.2`，增强无 BOM 的 UTF-8 编码与完整性检查。
 
 ## 0.1.20 - 2026-08-22
 
-- 新增独立的“子代理”设置页；模型、思考深度和上下文预算改为所有 DSH 内置子代理的全局设置，不再要求父 Agent 使用 Codex 模型。
-- 新增全局 0–3 最大嵌套深度和每个父 Agent 子树的活动子代理数量上限；新委派即时受限，现有运行不被中断。
-- 子代理设置扩展为 DSH 全部已接入 Provider/模型；思考深度使用所选模型的真实 reasoning effort 目录，上下文在选定模型后展开并作为子 Agent 的有效压缩预算。
-- 设置页新增 GPT-5.6 Sol / Terra / Luna 有效上下文窗口配置：默认 272K，可选最高 1M，并动态影响 DSH 的模型解析、压缩阈值与溢出判断。
+- 新增独立的子代理全局设置页，支持配置模型、思考深度与上下文预算；
+- 支持限制子代理最大嵌套深度（0–3）与并发活动数量；
+- 新增 GPT-5.6 系列有效上下文窗口配置（默认 272K，最高 1M）。
 
 ## 0.1.12 - 2026-08-20
 
-- 适配 DSH `0.1.0-rc.8`：peerDependencies / devDependencies 中全部 DSH 包范围从 `^0.1.0-rc.6` 提升至 `^0.1.0-rc.8`，并重新生成 package-lock.json。已在本机 rc.8 依赖集上验证：typecheck、55 项测试与 tsdown 构建全部通过，插件代码无需改动。
-- 移除已无引用的 `@deepseek-ai/dsh-agent` peer 依赖（子代理报告去重兼容模块已于 0.1.11 移除）。
-- 新增 `@deepseek-ai/dsh-client-connection` peer 依赖（客户端 `ContentBlock` 类型来源，符合 rc.8 客户端包 peer 声明惯例）。
-- 说明：rc.8 中 `@deepseek-ai/dsh-client-ui-slots` 不再是 DSH 运行时依赖图成员（仅保留为各客户端包的 devDependency），插件继续将其声明为 peer 依赖以保证安装时解析（`^0.1.0-rc.6` 联网安装时解析到 rc.8；本地锁文件因离线环境暂固定 rc.7，API 与 rc.8 用法一致）。
+- 适配 DSH `0.1.0-rc.8`，升级依赖生态与客户端插槽声明。
