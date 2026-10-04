@@ -728,8 +728,14 @@ export function claudeOriginalToolName(name: string, names?: ClaudeToolNames): s
 // Durable request images
 // ---------------------------------------------------------------------------
 
-/** Attachment seam this route needs: verified bytes for one durable image. */
-export type AttachmentImageReader = Pick<AttachmentStore, 'readImage'>
+/**
+ * Attachment seam this route needs: verified bytes for one durable image, and a
+ * downscaled request version of one that is too large for this request. Every
+ * harness generation in the peer range declares readImageRequest; a backend
+ * that cannot derive request versions rejects the call, and that rejection is
+ * handled like any other unreadable image.
+ */
+export type AttachmentImageReader = Pick<AttachmentStore, 'readImage' | 'readImageRequest'>
 
 /** One durable image resolved for an in-flight request, or proven unreadable. */
 export type ResolvedRequestImage =
@@ -845,9 +851,91 @@ export function offloadOldestRequestImages(options: GenerateOptions): GenerateOp
 }
 
 /**
+ * Longest side, in pixels, the wire accepts for one image in any request.
+ * TRANSCRIBED from the API's vision limits. The harness normalizes stored
+ * images to an 8192 px long edge, so a stored image can still exceed this.
+ */
+export const MAX_IMAGE_EDGE = 8000
+
+/**
+ * Longest side, in pixels, the wire accepts for every image once one request
+ * carries more than {@link MANY_IMAGE_THRESHOLD} images. TRANSCRIBED: past that
+ * count the request is rejected with "At least one of the image dimensions
+ * exceed max allowed size for many-image requests: 2000 pixels".
+ *
+ * Rejection is a 400 for the whole request. History keeps every image, so a
+ * long session can only add images. Once it holds more than twenty and one is
+ * wider than 2000 px, which is common for side-by-side screenshots, every later
+ * turn fails. The session cannot recover by itself.
+ */
+export const MANY_IMAGE_EDGE = 2000
+
+/** Image count above which {@link MANY_IMAGE_EDGE} applies. TRANSCRIBED. */
+export const MANY_IMAGE_THRESHOLD = 20
+
+/**
+ * Encoded-byte target for one downscaled request version.
+ *
+ * CHOICE: 3.5 MiB of raw bytes is about 4.9 MB of base64. That stays under the
+ * 5 MB per-image ceiling whichever form the server measures. When no quality
+ * level meets the target, the harness keeps its smallest output.
+ */
+const REQUEST_IMAGE_VERSION_MAX_BYTES = 3.5 * 1024 * 1024
+
+function countRequestImages(content: unknown): number {
+  if (!Array.isArray(content)) return 0
+  let count = 0
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    if (block.type === 'image') count += 1
+    else if (block.type === 'tool-result') count += countRequestImages(block.content)
+  }
+  return count
+}
+
+/**
+ * Long-edge ceiling every image of this request must meet.
+ *
+ * The API counts image blocks, so a repeated attachment counts every time it
+ * appears. The count is taken before images are resolved: a block that later
+ * degrades to placeholder text still counts. Overcounting can only lower the
+ * ceiling, and a lower ceiling never causes a rejection.
+ */
+export function requestImageEdgeLimit(options: GenerateOptions): number {
+  let count = 0
+  for (const message of options.messages) count += countRequestImages(message.content)
+  return count > MANY_IMAGE_THRESHOLD ? MANY_IMAGE_EDGE : MAX_IMAGE_EDGE
+}
+
+/**
+ * Request-version target for one stored image whose long edge is over the
+ * ceiling, or undefined when it fits. The short edge rounds to the nearest
+ * pixel, matching the harness's long-edge resize. A reference without usable
+ * dimensions is sent as stored.
+ */
+export function requestImageEdgeTarget(
+  ref: ImageAttachmentRef,
+  edge: number,
+): { width: number; height: number; maxBytes: number } | undefined {
+  const { width, height } = ref
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined
+  if (Math.max(width, height) <= edge) return undefined
+  return width >= height
+    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+}
+
+/**
  * Read every durable { type: 'image', attachment } block one request carries.
  * An unreadable image resolves to 'unavailable' rather than disappearing, so
  * the model is told the picture is missing instead of answering about a blank.
+ *
+ * An image whose long edge is over this request's ceiling is sent as the
+ * harness's downscaled request version (see {@link requestImageEdgeLimit}). The
+ * stored image and durable history do not change, and an image that already
+ * fits is sent byte-for-byte as stored. If a downscaled version cannot be
+ * produced, the image resolves to 'unavailable'. A visible placeholder is better
+ * than sending the original, which would make the whole request fail.
  */
 export async function resolveRequestImages(
   options: GenerateOptions,
@@ -858,6 +946,7 @@ export async function resolveRequestImages(
   for (const message of options.messages) collectImageRefs(message.content, refs)
   if (refs.size === 0) return NO_RESOLVED_IMAGES
 
+  const edge = requestImageEdgeLimit(options)
   const resolved = new Map<string, ResolvedRequestImage>()
   await Promise.all([...refs].map(async ([attachmentId, ref]) => {
     if (!attachments) {
@@ -865,6 +954,14 @@ export async function resolveRequestImages(
       return
     }
     try {
+      const target = requestImageEdgeTarget(ref, edge)
+      if (target !== undefined) {
+        const version = await attachments.readImageRequest(ref, target, signal)
+        resolved.set(attachmentId, Math.max(version.width, version.height) > edge
+          ? { kind: 'unavailable' }
+          : { kind: 'inline', mediaType: version.mediaType, data: Buffer.from(version.data).toString('base64') })
+        return
+      }
       const stored = await attachments.readImage(ref, signal)
       resolved.set(attachmentId, {
         kind: 'inline',
