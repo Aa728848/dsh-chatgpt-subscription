@@ -916,13 +916,17 @@ export function requestImageEdgeLimit(options: GenerateOptions): number {
 export function requestImageEdgeTarget(
   ref: ImageAttachmentRef,
   edge: number,
-): { width: number; height: number; maxBytes: number } | undefined {
+): { width: number; height: number; maxPixels: number; maxBytes: number } | undefined {
   const { width, height } = ref
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined
   if (Math.max(width, height) <= edge) return undefined
+  // Older attachment stores consume maxPixels, newer stores consume width/height.
+  // Derive the old budget from the unrounded aspect ratio: multiplying rounded
+  // target dimensions can let a thin image exceed the long-edge ceiling.
+  const maxPixels = Math.max(1, Math.floor(edge * edge * (Math.min(width, height) / Math.max(width, height))))
   return width >= height
-    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
-    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
 }
 
 /**

@@ -1193,7 +1193,7 @@ describe('Request image edge limits', () => {
     const images = await resolveRequestImages(request, reader)
     // Only the wide image is projected; the twenty small ones go out byte-for-byte
     // as stored, so their part of the cached prefix does not change.
-    expect(requests).toEqual([{ id: 'wide', target: { width: 2000, height: 876, maxBytes: 3.5 * 1024 * 1024 } }])
+    expect(requests).toEqual([{ id: 'wide', target: { width: 2000, height: 876, maxPixels: Math.floor(2000 * 2000 * (1272 / 2904)), maxBytes: 3.5 * 1024 * 1024 } }])
     expect(reads).toHaveLength(MANY_IMAGE_THRESHOLD)
     expect(reads).not.toContain('wide')
     expect(images.get('small-0')).toEqual({ kind: 'inline', mediaType: 'image/png', data: Buffer.from(STORED).toString('base64') })
@@ -1220,14 +1220,39 @@ describe('Request image edge limits', () => {
     const request = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: [shot('tall', 4000, 8192)] }] }) as unknown as GenerateOptions
     const { reader, requests } = recordingReader()
     await resolveRequestImages(request, reader)
-    expect(requests).toEqual([{ id: 'tall', target: { width: 3906, height: 8000, maxBytes: 3.5 * 1024 * 1024 } }])
+    expect(requests).toEqual([{ id: 'tall', target: { width: 3906, height: 8000, maxPixels: 31250000, maxBytes: 3.5 * 1024 * 1024 } }])
   })
 
   it('keeps the aspect ratio by the long edge and leaves a reference without dimensions alone', () => {
     expect(requestImageEdgeTarget({ width: 1200, height: 3000 } as never, MANY_IMAGE_EDGE))
-      .toEqual({ width: 800, height: 2000, maxBytes: 3.5 * 1024 * 1024 })
+      .toEqual({ width: 800, height: 2000, maxPixels: 1600000, maxBytes: 3.5 * 1024 * 1024 })
     expect(requestImageEdgeTarget({ width: 2000, height: 2000 } as never, MANY_IMAGE_EDGE)).toBeUndefined()
     expect(requestImageEdgeTarget({ attachmentId: 'legacy' } as never, MANY_IMAGE_EDGE)).toBeUndefined()
+  })
+
+  it.each([[2904, 1272], [1200, 3000], [8192, 3], [3, 8192]])('supports legacy pixel-budget stores for %i x %i images', async (width, height) => {
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), { role: 'user', source: { kind: 'user' }, content: [shot('legacy', width, height)] }] }) as unknown as GenerateOptions
+    const reader = {
+      readImage: async (ref: unknown) => ({ ref, data: STORED }),
+      readImageRequest: async (ref: { width: number; height: number }, policy: { maxPixels: number }) => {
+        expect(Number.isSafeInteger(policy.maxPixels)).toBe(true)
+        // Projection from dsh-v0.1.2-alpha.5 request-projection.ts. Deliberately
+        // ignores width/height on the policy, as that generation does.
+        const landscape = ref.width >= ref.height
+        const long = Math.max(ref.width, ref.height)
+        const short = Math.min(ref.width, ref.height)
+        let projectedLong = Math.max(1, Math.floor(long * Math.min(1, Math.sqrt(policy.maxPixels / (long * short)))))
+        let projectedShort = Math.max(1, Math.round(projectedLong * short / long))
+        while (projectedLong * projectedShort > policy.maxPixels && projectedLong > 1) {
+          projectedLong -= 1
+          projectedShort = Math.max(1, Math.round(projectedLong * short / long))
+        }
+        expect(projectedLong).toBeLessThanOrEqual(MANY_IMAGE_EDGE)
+        return { width: landscape ? projectedLong : projectedShort, height: landscape ? projectedShort : projectedLong, mediaType: 'image/webp', data: VERSION }
+      },
+    } as unknown as AttachmentImageReader
+    expect((await resolveRequestImages(request, reader)).get('legacy'))
+      .toEqual({ kind: 'inline', mediaType: 'image/webp', data: Buffer.from(VERSION).toString('base64') })
   })
 
   it('turns the image into a visible placeholder instead of sending the original when no small version can be made', async () => {
