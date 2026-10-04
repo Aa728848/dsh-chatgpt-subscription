@@ -108,7 +108,10 @@ describe('host routes', () => {
       },
       watch: () => () => undefined,
     }
-    registerRoutes(ctx as never, oauth, usage, preferences)
+    const fetchConfiguration = { fetchProvider: 'dsh' as const, fetchMaxBodyChars: 150_000, fetchMaxResponseBytes: 4_194_304 }
+    registerRoutes(ctx as never, oauth, usage, preferences, undefined, {
+      status: () => ({ state: 'applied', configuredSearchProvider: 'deepseek-official', configuredFetchProvider: 'http' }),
+    } as never, undefined, undefined, fetchConfiguration)
     const prefix = routes.find((route) => route.kind === 'prefix')!
     const { server, origin } = await serve(prefix.handler)
     servers.push(server)
@@ -118,6 +121,10 @@ describe('host routes', () => {
     expect(statusResponse.status).toBe(200)
     expect(statusText).toContain('o***@example.com')
     expect(statusText).toContain('…1234')
+    expect(JSON.parse(statusText).value).toMatchObject({
+      fetchConfiguration,
+      switcher: { state: 'applied', configuredFetchProvider: 'http' },
+    })
     expect(statusText).not.toContain('access-secret')
     expect(statusText).not.toContain('refresh-secret')
     expect(statusText).not.toContain('account-secret-1234')

@@ -2,6 +2,22 @@ import { describe, expect, it, vi } from 'vitest'
 import { createCodexFetchProvider } from '../src/host/codex-fetch.ts'
 
 describe('createCodexFetchProvider', () => {
+  it.each([0, -1, 0.5, NaN, Infinity])('rejects invalid direct factory limits %s', value => {
+    expect(() => createCodexFetchProvider({ maxBodyChars: value })).toThrow(/positive safe integer/)
+    expect(() => createCodexFetchProvider({ maxResponseBytes: value })).toThrow(/positive safe integer/)
+  })
+
+  it('applies byte and decoded character limits independently for multibyte text', async () => {
+    const make = (maxResponseBytes: number, maxBodyChars: number) => createCodexFetchProvider({
+      fetchFn: async () => new Response('你好世界', { headers: { 'content-type': 'text/plain; charset=utf-8' } }),
+      resolveHostAddresses: async () => ['93.184.216.34'],
+      maxResponseBytes, maxBodyChars,
+    })
+    expect(await make(12, 4).fetch({ url: 'https://example.com' })).toMatchObject({ body: { content: '你好世界' }, truncated: false })
+    expect(await make(6, 4).fetch({ url: 'https://example.com' })).toMatchObject({ body: { content: '你好' }, truncated: true })
+    expect(await make(12, 2).fetch({ url: 'https://example.com' })).toMatchObject({ body: { content: '你好' }, truncated: true })
+  })
+
   it('fetches and decodes HTML content', async () => {
     const fetchFn = vi.fn(async () => new Response('<html><body><h1>Hello World</h1></body></html>', {
       status: 200,

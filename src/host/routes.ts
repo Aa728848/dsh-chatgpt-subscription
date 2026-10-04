@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../compat.ts'
 import type {
   ApiEnvelope,
+  FetchConfigurationDto,
   LoginEventDto,
   PublicErrorDto,
   SubagentRouteAuditDto,
@@ -35,6 +36,7 @@ export function registerRoutes(
   searchSwitcher?: SearchProviderSwitcher,
   routeAudit?: RouteAuditReader,
   accountPool?: CodexAccountPool,
+  fetchConfiguration?: FetchConfigurationDto,
 ): () => void {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
@@ -53,6 +55,7 @@ export function registerRoutes(
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
         switcher: searchSwitcher?.status() ?? null,
+        fetchConfiguration,
       } })
       return
     }

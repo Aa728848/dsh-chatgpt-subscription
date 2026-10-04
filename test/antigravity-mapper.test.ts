@@ -84,6 +84,54 @@ describe('Antigravity Mapper', () => {
     })
   })
 
+  it('folds tool schema unions for a claude target only, on the wire buildRequest sends', () => {
+    const claudeModel = MODELS.find((m) => m.id === 'claude-opus-5-5')!
+    const parameters = {
+      type: 'object',
+      properties: {
+        at: {
+          oneOf: [
+            { type: 'string' },
+            { type: 'object', properties: { cron: { type: 'string' } } },
+          ],
+        },
+      },
+    }
+    const tools = [
+      { name: 'schedule_create', description: 'Create a schedule', parameters },
+    ] as unknown as GenerateOptions['tools']
+    const declared = (built: ReturnType<typeof convertTools>): unknown =>
+      (built![0].functionDeclarations as Array<{ parameters: unknown }>)[0].parameters
+    const folded = {
+      type: 'object',
+      properties: {
+        at: {
+          type: 'object',
+          properties: { cron: { type: 'string' } },
+          description: 'Union of accepted forms: string | object {cron}. ' +
+            'Send "object {cron}": this gateway validates the declared form only, ' +
+            'and the alternatives describe the original tool contract.',
+        },
+      },
+    }
+
+    // Claude routes to Vertex Anthropic, whose input_schema check refuses a
+    // composed tool schema outright (#39).
+    expect(declared(convertTools(tools, claudeModel.id, 'claude-opus-5-5-medium'))).toEqual(folded)
+    // Gemini ignores anyOf, so its declarations keep the composed form.
+    expect(declared(convertTools(tools, testModel.id, 'gemini-3.7-flash-tiered'))).toEqual({
+      type: 'object',
+      properties: { at: { anyOf: parameters.properties.at.oneOf } },
+    })
+
+    // The adapter posts buildRequest's body, so the runtime model decides there too.
+    const options = {
+      provider: 'antigravity', model: claudeModel.id, messages: [], tools,
+    } as unknown as GenerateOptions
+    const wire = buildRequest(options, claudeModel, 'test-project-123', 'claude-opus-5-5-medium')
+    expect(declared((wire.request as Record<string, unknown>).tools as never)).toEqual(folded)
+  })
+
   it('injects progress and tool execution rule when tools are present, omits when absent', () => {
     const withoutTools = {
       provider: 'antigravity',

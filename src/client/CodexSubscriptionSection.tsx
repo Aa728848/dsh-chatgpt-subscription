@@ -464,6 +464,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             </button>
           </div>
         </div>
+        <FetchProviderStatusCard status={status} t={t} />
         <div className="dsha-pref-row">
           <div>
             <strong>{t('outputVerbosity')}</strong>
@@ -579,6 +580,69 @@ function Button({ primary = false, disabled, onClick, children }: { primary?: bo
 
 function InfoRow({ label, value }: { label: string; value: string }): React.JSX.Element {
   return <div className="dsha-row"><span className="dsha-label">{label}</span><span className="dsha-value">{value}</span></div>
+}
+
+const SWITCHER_STATE_LABELS = {
+  idle: 'switcherStateIdle',
+  applying: 'switcherStateApplying',
+  applied: 'switcherStateApplied',
+  missing: 'switcherStateMissing',
+  failed: 'switcherStateFailed',
+} as const
+
+const FETCH_MODE_LABELS = {
+  auto: 'fetchModeAuto',
+  plugin: 'fetchModePlugin',
+  dsh: 'fetchModeDsh',
+} as const
+
+/**
+ * Read-only view of the fetch selection, shown under the search source.
+ *
+ * Both blocks are optional on the status DTO, so every row is rendered only from
+ * a value the host actually reported. That distinction is load-bearing: a
+ * missing `switcher` means the host tells us nothing and the row stays hidden,
+ * while a reported `configuredFetchProvider: null` is a real answer — the host
+ * pinned no provider, which is the DSH default. Guessing an id there would claim
+ * a provider the settings page never observed.
+ *
+ * Nothing here is editable: the mode and the limits live in the plugin Config,
+ * not in the preferences this card sits in, so the numbers cannot be mistaken for
+ * a setting that this page can change.
+ */
+export function FetchProviderStatusCard({ status, t }: { status: PluginStatusDto | null | undefined; t: Translate }): React.JSX.Element | null {
+  const switcher = status?.switcher
+  const configuration = status?.fetchConfiguration
+  if (switcher === undefined && configuration === undefined) return null
+  const state = switcher !== null && switcher !== undefined && switcher.state in SWITCHER_STATE_LABELS
+    ? switcher.state
+    : null
+  const mode = configuration !== undefined && configuration.fetchProvider in FETCH_MODE_LABELS
+    ? configuration.fetchProvider
+    : undefined
+  const maxBodyChars = fetchLimit(configuration?.fetchMaxBodyChars)
+  const maxResponseBytes = fetchLimit(configuration?.fetchMaxResponseBytes)
+  return <div className="dsha-context-settings" data-fetch-status={state ?? 'none'}>
+    <div>
+      <strong>{t('fetchStatus')}</strong>
+      <p className="dsha-muted">{t('fetchStatusHint')}</p>
+    </div>
+    {switcher !== null && switcher !== undefined ? <InfoRow
+      label={t('fetchConfiguredProvider')}
+      value={switcher.configuredFetchProvider || t('fetchProviderDshDefault')}
+    /> : null}
+    {state !== null ? <InfoRow label={t('switcherState')} value={t(SWITCHER_STATE_LABELS[state])} /> : null}
+    {mode !== undefined ? <InfoRow label={t('fetchMode')} value={t(FETCH_MODE_LABELS[mode])} /> : null}
+    {maxBodyChars !== null ? <InfoRow label={t('fetchMaxBodyChars')} value={`${maxBodyChars} ${t('characters')}`} /> : null}
+    {maxResponseBytes !== null ? <InfoRow label={t('fetchMaxResponseBytes')} value={`${maxResponseBytes} ${t('bytes')}`} /> : null}
+    {mode !== undefined && mode !== 'plugin' ? <p className="dsha-muted">{t('fetchLimitsInactive')}</p> : null}
+    <p className="dsha-muted">{t('fetchConfigSource')}</p>
+  </div>
+}
+
+/** A limit is shown only once it is the positive safe integer the Config promises. */
+function fetchLimit(value: number | undefined): number | null {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 1 ? value : null
 }
 
 export function storageLabel(storage: CredentialStorageDto | undefined, t: Translate): string {

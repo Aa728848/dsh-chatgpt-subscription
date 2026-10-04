@@ -10,6 +10,11 @@ import * as platformStore from '../src/host/platform-token-store.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 import { PREFERENCES_NAMESPACE } from '../src/shared/preferences.ts'
 
+// Provider lifecycle is independent of the machine's DNS/proxy configuration.
+vi.mock('node:dns/promises', () => ({
+  lookup: async () => [{ address: '93.184.216.34', family: 4 }],
+}))
+
 const namespace = PREFERENCES_NAMESPACE as SettingsNamespace
 
 afterEach(() => {
@@ -19,6 +24,8 @@ afterEach(() => {
 })
 
 interface MountOptions {
+  readonly config?: plugin.Config
+  readonly responseBody?: string
   readonly searchProvider: 'dsh' | 'codex'
   readonly proxyMode: 'auto' | 'custom' | 'direct'
   readonly ready?: { onReady(listener: () => void): () => void }
@@ -82,9 +89,10 @@ async function mountPlugin(options: MountOptions) {
   })
 
   const store = vi.spyOn(platformStore, 'createPlatformTokenStore').mockReturnValue(new MemoryTokenStore())
-  const fetchFn = vi.fn(async () => new Response('plugin page', { headers: { 'content-type': 'text/plain' } }))
+  const fetchFn = vi.fn(async () => new Response(options.responseBody ?? 'plugin page', { headers: { 'content-type': 'text/plain' } }))
   vi.stubGlobal('fetch', fetchFn)
   const ctx = new Context()
+  const info = vi.spyOn(ctx.logger, 'info')
   if (options.ready) ctx.provide('appReady', options.ready)
   ctx.provide('webServer', { host: '127.0.0.1', port: 3000, register: () => () => undefined })
   ctx.provide('llm', { registerAdapter: () => () => undefined })
@@ -104,11 +112,12 @@ async function mountPlugin(options: MountOptions) {
     })
   })
   await nativeProvider.await()
-  await ctx.plugin(plugin).await()
+  await ctx.plugin(plugin, options.config ?? {}).await()
 
   return {
     ctx,
     store,
+    info,
     webConfig: () => ctx.loader.resolve('web').options.config as Record<string, unknown>,
   }
 }
@@ -230,16 +239,47 @@ describe('web provider lifecycle', () => {
     }
   })
 
+  it('keeps DSH fetch with explicit dsh mode even with a proxy and Codex search', async () => {
+    vi.stubEnv('HTTPS_PROXY', 'http://127.0.0.1:9')
+    const { ctx, webConfig } = await mountPlugin({ searchProvider: 'codex', proxyMode: 'auto', config: { fetchProvider: 'dsh' } })
+    try {
+      await vi.waitFor(() => expect(webConfig()).toMatchObject({ searchProvider: 'codex-subscription', fetchProvider: 'http' }))
+      await ctx.settings.update(namespace, { proxyMode: 'direct' })
+      await ctx.settings.update(namespace, { searchProvider: 'dsh' })
+      await vi.waitFor(() => expect(webConfig()).toMatchObject({ searchProvider: 'deepseek-official', fetchProvider: 'http' }))
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it.each([
+    { fetchMaxBodyChars: 150_000, fetchMaxResponseBytes: 200_000, length: 120_000, truncated: false },
+    { fetchMaxBodyChars: 110_000, fetchMaxResponseBytes: 200_000, length: 110_000, truncated: true },
+    { fetchMaxBodyChars: 150_000, fetchMaxResponseBytes: 105_000, length: 105_000, truncated: true },
+  ])('wires custom fetch limits through real plugin registration: %j', async ({ length, truncated, ...limits }) => {
+    const { ctx } = await mountPlugin({ searchProvider: 'dsh', proxyMode: 'direct', config: { fetchProvider: 'plugin', ...limits }, responseBody: 'x'.repeat(120_000) })
+    try {
+      await vi.waitFor(async () => {
+        const result = await ctx.web.fetch({ url: 'https://example.com' })
+        expect(result.body.content).toHaveLength(length)
+        expect(result.truncated).toBe(truncated)
+      })
+      await ctx.loader.resolve('web').fiber!.restart()
+      await vi.waitFor(async () => expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toHaveLength(length))
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('serves the fetch tool from this plugin while a proxy is configured', async () => {
     // A machine with a proxy is exactly the machine whose fake-ip DNS the built-in provider
     // refuses, so the plugin provider takes the tool even with DSH search selected.
     vi.stubEnv('HTTPS_PROXY', 'http://127.0.0.1:9')
-    const { ctx, webConfig } = await mountPlugin({ searchProvider: 'dsh', proxyMode: 'auto' })
+    const { ctx, webConfig, info } = await mountPlugin({ searchProvider: 'dsh', proxyMode: 'auto' })
     try {
       await vi.waitFor(() => expect(webConfig()).toMatchObject({
         searchProvider: 'deepseek-official',
         fetchProvider: CODEX_FETCH_PROVIDER_ID,
       }))
+
+      await vi.waitFor(() => expect(info).toHaveBeenCalledWith(expect.stringContaining('active proxy detected')))
+      expect(info.mock.calls.flat().join(' ')).not.toContain('127.0.0.1:9')
 
       // Direct mode takes the proxy away, and the built-in provider gets the tool back.
       await ctx.settings.update(namespace, { proxyMode: 'direct' })
