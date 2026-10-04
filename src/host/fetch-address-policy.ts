@@ -14,7 +14,8 @@
  * proxy on this machine must not become a path into loopback or a LAN — and it
  * also refuses a name this machine resolves into private space. Only the proxy's
  * own fake-ip answers are accepted, since that is what the proxy's name
- * resolution looks like from here; the URL hostname still reaches the proxy
+ * resolution looks like from here: the IPv4 one, and the IPv6 one only beside it
+ * (see assertPublicFetchTarget). The URL hostname still reaches the proxy
  * intact, so the proxy decides where the name really goes.
  *
  * @module dsh-chatgpt-subscription/fetch-address-policy
@@ -139,10 +140,27 @@ export function assertPublicFetchTarget(hostname: string, addresses: readonly st
   if (isNonPublicIpLiteral(hostname)) {
     throw new WebError(`URL hostname "${hostname}" is not a public IP address`, 'WEB_BLOCKED_URL')
   }
+  // The IPv4 fake-ip answer is the proof that the proxy claimed this name. A proxy
+  // configured with an IPv6 fake range as well (mihomo/Clash `fake-ip-range6`,
+  // commonly fc00::/18) answers the same name with an fc00:: address beside it.
+  // Refusing that address failed every proxied fetch on such a machine. On its own
+  // it would be unique-local space, so it is accepted ONLY next to the proof.
+  const claimedByProxy = addresses.some(isProxyFakeIpAddress)
   for (const address of addresses) {
     if (isPublicIpAddress(address) || isProxyFakeIpAddress(address)) continue
+    if (claimedByProxy && isUnassignedUniqueLocal(address)) continue
     throw new WebError(`URL hostname "${hostname}" resolves to a non-public IP address`, 'WEB_BLOCKED_URL')
   }
+}
+
+/**
+ * Whether an IPv6 address is inside fc00::/8: the unique-local half RFC 4193
+ * leaves unassigned (real unique-local networks are numbered from fd00::/8), and
+ * where proxies place their IPv6 fake-ip range.
+ */
+function isUnassignedUniqueLocal(address: string): boolean {
+  const words = ipv6Words(unbracket(address))
+  return words !== undefined && ((words[0] ?? 0) >> 8) === 0xfc
 }
 
 /** Whether a dotted quad is public, using {@link NON_PUBLIC_IPV4}. */
