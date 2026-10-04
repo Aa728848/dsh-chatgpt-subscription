@@ -63,11 +63,18 @@ import {
   closeStream,
   createStreamState,
   leadingSystemText,
+  MANY_IMAGE_EDGE,
+  MANY_IMAGE_THRESHOLD,
+  MAX_IMAGE_EDGE,
   offloadOldestRequestImages,
   processStreamLine,
+  requestImageEdgeLimit,
+  requestImageEdgeTarget,
   resolveMaxTokens,
+  resolveRequestImages,
   thinkingBudgetForLevel,
   thinkingRequestedOff,
+  type AttachmentImageReader,
   type ClaudeStreamState,
   type ResolvedRequestImages,
 } from '../src/host/claude/mapper.ts'
@@ -1115,6 +1122,163 @@ describe('Request images', () => {
     expect(MAX_REQUEST_IMAGE_BYTES).toBe(8 * 1024 * 1024)
     // 9,000,000 raw bytes expand to 12,000,000 base64 characters, over the cap.
     expect(Math.ceil(9_000_000 / 3) * 4).toBeGreaterThan(MAX_REQUEST_IMAGE_BYTES)
+  })
+})
+
+describe('Request image edge limits', () => {
+  // Once a request carries more than twenty images, the wire rejects any image
+  // whose side exceeds 2000 px. The 400 rejects the whole request, and history
+  // keeps the image, so before this fix one wide screenshot (a 2904x1272
+  // side-by-side comparison) in a long session made every later turn fail.
+
+  const STORED = new Uint8Array([1, 2, 3])
+  const VERSION = new Uint8Array([4, 5, 6, 7])
+
+  function shot(id: string, width: number, height: number) {
+    return { type: 'image', attachment: { attachmentId: id, mediaType: 'image/png', bytes: 3, width, height, name: id + '.png' } }
+  }
+
+  /** `count` small screenshots, each in its own user message. */
+  function history(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      role: 'user', source: { kind: 'user' }, content: [shot('small-' + index, 1440, 1100)],
+    }))
+  }
+
+  /** The wide comparison image, returned inside a tool result as read_image delivers it. */
+  function wideToolResult() {
+    return {
+      role: 'user',
+      source: { kind: 'tool', callId: 'read' },
+      content: [{ type: 'tool-result', toolCallId: 'read', content: [{ type: 'text', text: 'compare' }, shot('wide', 2904, 1272)] }],
+    }
+  }
+
+  type Version = { width: number; height: number; mediaType: string; data: Uint8Array }
+
+  function recordingReader(version?: (target: { width: number; height: number }) => Promise<Version>) {
+    const reads: string[] = []
+    const requests: Array<{ id: string; target: unknown }> = []
+    const reader = {
+      readImage: async (ref: { attachmentId: string }) => {
+        reads.push(ref.attachmentId)
+        return { ref, data: STORED }
+      },
+      readImageRequest: async (ref: { attachmentId: string }, target: { width: number; height: number }) => {
+        requests.push({ id: ref.attachmentId, target })
+        return version
+          ? await version(target)
+          : { width: target.width, height: target.height, mediaType: 'image/webp', data: VERSION }
+      },
+    } as unknown as AttachmentImageReader
+    return { reader, reads, requests }
+  }
+
+  it('sends a wide image as stored while the request carries twenty images or fewer', async () => {
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD - 1), wideToolResult()] }) as unknown as GenerateOptions
+    expect(requestImageEdgeLimit(request)).toBe(MAX_IMAGE_EDGE)
+
+    const { reader, reads, requests } = recordingReader()
+    const images = await resolveRequestImages(request, reader)
+    expect(requests).toEqual([])
+    expect(reads).toContain('wide')
+    expect(images.get('wide')).toEqual({ kind: 'inline', mediaType: 'image/png', data: Buffer.from(STORED).toString('base64') })
+  })
+
+  it('downscales only the images over 2000 px once the request carries more than twenty', async () => {
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), wideToolResult()] }) as unknown as GenerateOptions
+    expect(requestImageEdgeLimit(request)).toBe(MANY_IMAGE_EDGE)
+
+    const { reader, reads, requests } = recordingReader()
+    const images = await resolveRequestImages(request, reader)
+    // Only the wide image is projected; the twenty small ones go out byte-for-byte
+    // as stored, so their part of the cached prefix does not change.
+    expect(requests).toEqual([{ id: 'wide', target: { width: 2000, height: 876, maxPixels: Math.floor(2000 * 2000 * (1272 / 2904)), maxBytes: 3.5 * 1024 * 1024 } }])
+    expect(reads).toHaveLength(MANY_IMAGE_THRESHOLD)
+    expect(reads).not.toContain('wide')
+    expect(images.get('small-0')).toEqual({ kind: 'inline', mediaType: 'image/png', data: Buffer.from(STORED).toString('base64') })
+    expect(images.get('wide')).toEqual({ kind: 'inline', mediaType: 'image/webp', data: Buffer.from(VERSION).toString('base64') })
+
+    // The wire carries the downscaled bytes where the tool result put the image.
+    const built = buildClaudeRequestBody(request, images)
+    const last = messagesOf(built).at(-1)!.content.find((block) => block.type === 'tool_result')!
+    expect(last.content).toEqual([
+      { type: 'text', text: 'compare' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/webp', data: Buffer.from(VERSION).toString('base64') } },
+    ])
+  })
+
+  it('counts every image block, including a repeated attachment and images nested in tool results', () => {
+    const repeated = Array.from({ length: MANY_IMAGE_THRESHOLD }, () => shot('same', 10, 10))
+    const atLimit = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: repeated }] }) as unknown as GenerateOptions
+    expect(requestImageEdgeLimit(atLimit)).toBe(MAX_IMAGE_EDGE)
+    const overLimit = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: repeated }, wideToolResult()] }) as unknown as GenerateOptions
+    expect(requestImageEdgeLimit(overLimit)).toBe(MANY_IMAGE_EDGE)
+  })
+
+  it('caps a lone image at the 8000 px ceiling the wire applies to every request', async () => {
+    const request = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: [shot('tall', 4000, 8192)] }] }) as unknown as GenerateOptions
+    const { reader, requests } = recordingReader()
+    await resolveRequestImages(request, reader)
+    expect(requests).toEqual([{ id: 'tall', target: { width: 3906, height: 8000, maxPixels: 31250000, maxBytes: 3.5 * 1024 * 1024 } }])
+  })
+
+  it('keeps the aspect ratio by the long edge and leaves a reference without dimensions alone', () => {
+    expect(requestImageEdgeTarget({ width: 1200, height: 3000 } as never, MANY_IMAGE_EDGE))
+      .toEqual({ width: 800, height: 2000, maxPixels: 1600000, maxBytes: 3.5 * 1024 * 1024 })
+    expect(requestImageEdgeTarget({ width: 2000, height: 2000 } as never, MANY_IMAGE_EDGE)).toBeUndefined()
+    expect(requestImageEdgeTarget({ attachmentId: 'legacy' } as never, MANY_IMAGE_EDGE)).toBeUndefined()
+  })
+
+  it.each([[2904, 1272], [1200, 3000], [8192, 3], [3, 8192]])('supports legacy pixel-budget stores for %i x %i images', async (width, height) => {
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), { role: 'user', source: { kind: 'user' }, content: [shot('legacy', width, height)] }] }) as unknown as GenerateOptions
+    const reader = {
+      readImage: async (ref: unknown) => ({ ref, data: STORED }),
+      readImageRequest: async (ref: { width: number; height: number }, policy: { maxPixels: number }) => {
+        expect(Number.isSafeInteger(policy.maxPixels)).toBe(true)
+        // Projection from dsh-v0.1.2-alpha.5 request-projection.ts. Deliberately
+        // ignores width/height on the policy, as that generation does.
+        const landscape = ref.width >= ref.height
+        const long = Math.max(ref.width, ref.height)
+        const short = Math.min(ref.width, ref.height)
+        let projectedLong = Math.max(1, Math.floor(long * Math.min(1, Math.sqrt(policy.maxPixels / (long * short)))))
+        let projectedShort = Math.max(1, Math.round(projectedLong * short / long))
+        while (projectedLong * projectedShort > policy.maxPixels && projectedLong > 1) {
+          projectedLong -= 1
+          projectedShort = Math.max(1, Math.round(projectedLong * short / long))
+        }
+        expect(projectedLong).toBeLessThanOrEqual(MANY_IMAGE_EDGE)
+        return { width: landscape ? projectedLong : projectedShort, height: landscape ? projectedShort : projectedLong, mediaType: 'image/webp', data: VERSION }
+      },
+    } as unknown as AttachmentImageReader
+    expect((await resolveRequestImages(request, reader)).get('legacy'))
+      .toEqual({ kind: 'inline', mediaType: 'image/webp', data: Buffer.from(VERSION).toString('base64') })
+  })
+
+  it('turns the image into a visible placeholder instead of sending the original when no small version can be made', async () => {
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), wideToolResult()] }) as unknown as GenerateOptions
+
+    // A backend that cannot derive request versions rejects the call.
+    const unsupported = recordingReader(async () => { throw new Error('ATTACHMENT_PROJECTION_UNSUPPORTED') })
+    const images = await resolveRequestImages(request, unsupported.reader)
+    expect(images.get('wide')).toEqual({ kind: 'unavailable' })
+    expect(unsupported.reads).not.toContain('wide')
+    expect(JSON.stringify(buildClaudeRequestBody(request, images))).toContain('wide.png could not be read')
+
+    // A version that still exceeds the ceiling is not sent either.
+    const tooLarge = recordingReader(async () => ({ width: 2904, height: 1272, mediaType: 'image/png', data: VERSION }))
+    expect((await resolveRequestImages(request, tooLarge.reader)).get('wide')).toEqual({ kind: 'unavailable' })
+  })
+
+  it('propagates cancellation from the downscale instead of degrading it to a placeholder', async () => {
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), wideToolResult()] }) as unknown as GenerateOptions
+    const controller = new AbortController()
+    const abort = new DOMException('stopped', 'AbortError')
+    const { reader } = recordingReader(async () => {
+      controller.abort(abort)
+      throw abort
+    })
+    await expect(resolveRequestImages(request, reader, controller.signal)).rejects.toBe(abort)
   })
 })
 
