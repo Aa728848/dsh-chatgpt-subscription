@@ -1,3 +1,5 @@
+import { installPluginStyle } from '../common/plugin-style.ts'
+
 export const STYLE_ID = 'dsh-kimi-code-settings-style'
 
 /**
@@ -90,9 +92,5 @@ const BASE = `
 
 /** Kimi-specific rules layered on top of the shared control styles. */
 export function installKimiCodeStyles(): void {
-  if (typeof document === 'undefined' || document.getElementById(STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = STYLE_ID
-  style.textContent = BASE
-  document.head.appendChild(style)
+  installPluginStyle('kimi-code', BASE, STYLE_ID)
 }

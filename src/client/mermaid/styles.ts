@@ -1,10 +1,9 @@
+import { installPluginStyle } from '../common/plugin-style.ts'
+
 export const MERMAID_STYLE_ID = 'dsh-mermaid-renderer-style'
 
 export function installMermaidStyles(): void {
-  if (typeof document === 'undefined' || document.getElementById(MERMAID_STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = MERMAID_STYLE_ID
-  style.textContent = `
+  installPluginStyle('mermaid', `
 .dsh-mermaid-wrapper{margin:12px 0;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,0.12));border-radius:8px;overflow:hidden;background:var(--dsw-alias-bg-layer-2,#1a1a1a);box-shadow:0 2px 8px rgba(0,0,0,0.15)}
 .dsh-mermaid-header{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,0.25));border-bottom:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,0.08));font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
 .dsh-mermaid-title{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--dsw-alias-label-tertiary,#aaa);font-weight:600}
@@ -23,6 +22,5 @@ export function installMermaidStyles(): void {
 .dsh-mermaid-modal-btn:hover{background:rgba(255,255,255,0.15)}
 .dsh-mermaid-modal-stage{flex:1;width:100%;height:100%;overflow:auto;display:flex;justify-content:center;align-items:center;padding:40px}
 .dsh-mermaid-modal-stage svg{max-width:90vw;max-height:85vh;height:auto}
-`
-  document.head.append(style)
+`, MERMAID_STYLE_ID)
 }

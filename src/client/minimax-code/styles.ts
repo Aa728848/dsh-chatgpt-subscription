@@ -1,3 +1,5 @@
+import { installPluginStyle } from '../common/plugin-style.ts'
+
 export const STYLE_ID = 'dsh-minimax-code-settings-style'
 
 /**
@@ -10,14 +12,10 @@ export const STYLE_ID = 'dsh-minimax-code-settings-style'
  * credential path and the model-name list.
  */
 export function installMinimaxCodeStyles(): void {
-  if (typeof document === 'undefined' || document.getElementById(STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = STYLE_ID
-  style.textContent = `
+  installPluginStyle('minimax-code', `
 .dshm-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
 .dshm-model-list{display:flex;flex-wrap:wrap;gap:7px;padding-top:8px}
 .dshm-model-list code{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;padding:5px 8px;white-space:nowrap}
 .dshm-quota-note{margin-top:12px}
-`
-  document.head.append(style)
+`, STYLE_ID)
 }
