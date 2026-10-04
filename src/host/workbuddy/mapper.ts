@@ -16,6 +16,7 @@
  *    `reasoning_summary`, and is emitted as its own DSH reasoning block.
  */
 
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmError,
   type ContentBlock,
@@ -568,7 +569,7 @@ export function processStreamLine(line: string, state: WorkBuddyStreamState): St
   if (errorPayload !== undefined) {
     throw new LlmError(
       `WorkBuddy stream error: ${asString(errorPayload.message) ?? 'unknown error'}`,
-      'PROVIDER_ERROR',
+      isContextOverflow(errorPayload) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
 

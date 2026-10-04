@@ -179,6 +179,7 @@
  * marker in the request that caches nothing the next turn can reuse.
  */
 
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmError,
   type ContentBlock,
@@ -2073,7 +2074,7 @@ export function processStreamLine(line: string, state: ClaudeStreamState): Strea
     const kind = asString(error.type)
     throw new LlmError(
       'Claude stream error' + (kind === undefined ? '' : ' (' + kind + ')') + ': ' + message,
-      'PROVIDER_ERROR',
+      isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
 

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow, isHttpContextOverflow } from './common/context-overflow.ts'
 import { toToolCallId } from './common/brand-compat.ts'
 
 import {
@@ -590,7 +591,8 @@ export async function* parseResponsesStream(
         || rawCode === 'service_unavailable'
         || rawCode === 'internal_error'
       const isRateLimit = message.toLowerCase().includes('rate limit') || rawCode === 'rate_limit'
-      const code = isRateLimit ? 'RATE_LIMIT' : (isOverload ? 'SERVER_ERROR' : (string(error?.code)?.toUpperCase() ?? 'PROVIDER_ERROR'))
+      const code = isRateLimit ? 'RATE_LIMIT' : (isOverload ? 'SERVER_ERROR'
+        : isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : (string(error?.code)?.toUpperCase() ?? 'PROVIDER_ERROR'))
       throw new LlmError(message, code)
     }
   }
@@ -753,6 +755,7 @@ async function responseError(response: Response): Promise<LlmError> {
     ...(requestId ? { requestId: ProviderRequestId(requestId) } : {}),
     ...(response.status === 429 ? { providerRetryAfterMs: retryAfterMs(response.headers) } : {}),
   }
+  if (isHttpContextOverflow(response.status, detail)) return new LlmError(`Codex context window exceeded: ${detail}`, CONTEXT_OVERFLOW_CODE, options)
   if (response.status === 401) return new LlmError('ChatGPT sign-in has expired. Sign in again.', 'AUTH', options)
   if (response.status === 404) return new LlmError(`Codex model or resource not found (${response.status})${detail ? `: ${detail}` : '.'}`, 'NOT_FOUND', options)
   if (response.status === 429) return new LlmError('Codex rate limit reached.', 'RATE_LIMIT', options)

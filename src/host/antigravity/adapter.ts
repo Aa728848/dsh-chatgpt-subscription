@@ -1,3 +1,4 @@
+import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
@@ -292,7 +293,7 @@ export class AntigravityAdapter extends LlmAdapter {
           { status: 429 },
         )
       }
-      throw new LlmError(`Antigravity API error (${status}): ${errText || 'No response'}`, 'PROVIDER_ERROR', {
+      throw new LlmError(`Antigravity API error (${status}): ${errText || 'No response'}`, isHttpContextOverflow(status, errText) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR', {
         status,
       })
     }

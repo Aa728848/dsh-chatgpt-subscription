@@ -1,3 +1,4 @@
+import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -206,6 +207,9 @@ export function summarizeFailureBody(raw: string): string {
  */
 export function classifyKimiFailure(status: number, bodyText: string): KimiFailureClassification {
   const detail = summarizeFailureBody(bodyText)
+  if (isHttpContextOverflow(status, bodyText)) {
+    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+  }
 
   if (status === 402) {
     // "We're unable to verify your membership benefits at this time." The docs
