@@ -1,3 +1,5 @@
+import { installPluginStyle } from '../common/plugin-style.ts'
+
 export const STYLE_ID = 'dsh-claude-settings-style'
 
 /**
@@ -13,10 +15,7 @@ export const STYLE_ID = 'dsh-claude-settings-style'
  * markers, neither of which a sibling line renders.
  */
 export function installClaudeStyles(): void {
-  if (typeof document === 'undefined' || document.getElementById(STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = STYLE_ID
-  style.textContent = `
+  installPluginStyle('claude', `
 .dsha-badge.claude-adopted{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 16%,var(--dsw-alias-bg-layer-1));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 45%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary)}
 .dshcl-flow{border-bottom:0.5px solid var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:10px;padding:12px 0}
 .dshcl-flow-url{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.14));border:0.5px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere;padding:8px 10px;user-select:all}
@@ -26,6 +25,5 @@ export function installClaudeStyles(): void {
 .dshcl-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
 .dshcl-model-meta{color:var(--dsw-alias-label-tertiary);font-size:11px;margin-left:5px}
 .dshcl-empty-inline{color:var(--dsw-alias-label-tertiary);font-size:12px}
-`
-  document.head.append(style)
+`, STYLE_ID)
 }

@@ -1,10 +1,9 @@
+import { installPluginStyle } from '../common/plugin-style.ts'
+
 export const STYLE_ID = 'dsh-antigravity-settings-style'
 
 export function installAntigravityStyles(): void {
-  if (typeof document === 'undefined' || document.getElementById(STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = STYLE_ID
-  style.textContent = `
+  installPluginStyle('antigravity', `
 .dsha-page{box-sizing:border-box;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:20px;max-width:780px;min-width:0;padding:2px 0 30px}
 .dsha-page *{box-sizing:border-box}
 .dsha-group{border-top:0.5px solid var(--dsw-alias-border-l2);min-width:0}
@@ -78,6 +77,5 @@ export function installAntigravityStyles(): void {
 .dsha-account-details{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .dsha-account-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
 .dsha-account-actions .dsha-btn{padding:5px 10px;font-size:12px}
-`
-  document.head.append(style)
+`, STYLE_ID)
 }

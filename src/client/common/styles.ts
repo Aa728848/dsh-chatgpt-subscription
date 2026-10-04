@@ -1,3 +1,5 @@
+import { installPluginStyle } from './plugin-style.ts'
+
 export const POOL_STYLE_ID = 'dsh-provider-pool-style'
 
 /**
@@ -9,12 +11,8 @@ export const POOL_STYLE_ID = 'dsh-provider-pool-style'
  * them, so nothing that already rendered changes appearance.
  */
 export function installPoolStyles(): void {
-  if (typeof document === 'undefined' || document.getElementById(POOL_STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = POOL_STYLE_ID
-  style.textContent = `
+  installPluginStyle('pool', `
 .dsha-badge.danger{background:color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 18%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-danger,#d94b4b);border:0.5px solid color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 40%,transparent)}
 .dsha-account-card .dsha-btn.danger{color:var(--dsw-alias-label-danger,#d94b4b)}
-`
-  document.head.append(style)
+`, POOL_STYLE_ID)
 }

@@ -1,5 +1,4 @@
-const PLUGIN_ID = '@eddyskywalker/dsh-chatgpt-subscription'
-const STYLE_ID = `${PLUGIN_ID}/main`
+import { installPluginStyle } from './common/plugin-style.ts'
 
 const CSS = `
 .dsh-codex-page{box-sizing:border-box;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:20px;max-width:780px;min-width:0;padding:2px 0 30px}
@@ -149,18 +148,12 @@ const CSS = `
  * create it when missing, refresh `textContent` when a rebuilt bundle ships
  * different CSS (HMR), and return a no-op disposer unconditionally, matching
  * the additive installers.
+ *
+ * Every other sheet this plugin injects now goes through the same installer
+ * (`installPluginStyle`), which additionally stamps the ownership attributes
+ * the client module system needs so the tag cannot be claimed by, and later
+ * removed with, some other package.
  */
 export function installStyles(): () => void {
-  if (typeof document === 'undefined') return () => undefined
-  const existing = document.querySelector<HTMLStyleElement>(`style[data-plugin-css="${STYLE_ID}"]`)
-  if (existing !== null) {
-    if (existing.textContent !== CSS) existing.textContent = CSS
-    return () => undefined
-  }
-  const element = document.createElement('style')
-  element.dataset.plugin = PLUGIN_ID
-  element.dataset.pluginCss = STYLE_ID
-  element.textContent = CSS
-  document.head.appendChild(element)
-  return () => undefined
+  return installPluginStyle('main', CSS)
 }
