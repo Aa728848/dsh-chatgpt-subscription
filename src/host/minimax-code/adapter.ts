@@ -77,7 +77,11 @@ import {
   type AttachmentVideoReader,
   resolveRequestImages,
   type AttachmentImageReader,
+  type ResolvedRequestImages,
+  type ResolvedRequestVideos,
 } from './mapper.ts'
+import { agentBaseUrl } from './types.ts'
+import { fileRef, uploadMediaFile } from './files-api.ts'
 import type { MinimaxCodeAccountPool } from './account-pool.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
@@ -265,6 +269,152 @@ function resolveDefaultEffort(
   if (globalEffort === null || globalEffort === undefined) return undefined
   if (model.thinking !== 'always-on' && isThinkingDisabledEffort(globalEffort)) return 'none'
   return efforts.includes(globalEffort) ? globalEffort : undefined
+}
+
+
+/**
+ * Upload the media this request cannot carry inline, and record the reference.
+ *
+ * Runs AFTER the offload passes, so anything already dropped for size is gone
+ * and is not uploaded on the way out. What survives and still cannot be encoded
+ * inline - a clip whose base64 would overrun the 64 MB body - is uploaded and
+ * replaced by an `mm_file://` reference.
+ *
+ * A failed upload is NOT fatal: the media simply stays inline, and the request
+ * proceeds. That is deliberate - an upload is an optimization that makes a
+ * large request possible, and losing the optimization must not lose the turn.
+ * The budget check that follows still refuses a body that genuinely cannot fit,
+ * so the failure mode is a clear local error rather than a server 400.
+ *
+ * @returns the options to build from, with references recorded on the blocks.
+/** Whether one content block is a plain object this pass can annotate. */
+function isContentBlockRecord(block: unknown): block is Record<string, unknown> {
+  return typeof block === 'object' && block !== null && !Array.isArray(block)
+}
+
+/** The media type one media block declares, or undefined when it is text. */
+function mediaTypeForBlock(block: Record<string, unknown>): string | undefined {
+  if (block.type !== 'image' && block.type !== 'video') return undefined
+  const source = isContentBlockRecord(block.source) ? block.source : undefined
+  const direct = typeof block.mediaType === 'string' ? block.mediaType : undefined
+  const fromSource = typeof source?.media_type === 'string' ? source.media_type : undefined
+  return direct ?? fromSource
+}
+
+/** Base64 length of a block's inline payload, or its stored size, or undefined. */
+function encodedLengthForBlock(
+  block: Record<string, unknown>,
+  resolved: ResolvedRequestImages | ResolvedRequestVideos | undefined,
+): number | undefined {
+  const inline = typeof block.data === 'string' ? block.data : undefined
+  if (inline !== undefined && inline !== '') return inline.length
+  const attachment = isContentBlockRecord(block.attachment) ? block.attachment : undefined
+  const bytes = typeof attachment?.bytes === 'number' ? attachment.bytes : undefined
+  return bytes === undefined ? undefined : Math.ceil(bytes / 3) * 4
+}
+
+/** The base64 payload of a block, read from storage when it is not inline. */
+function encodedForBlock(
+  block: Record<string, unknown>,
+  resolved: ResolvedRequestImages | ResolvedRequestVideos | undefined,
+): string {
+  const inline = typeof block.data === 'string' ? block.data : undefined
+  if (inline !== undefined && inline !== '') return inline
+  const attachment = isContentBlockRecord(block.attachment) ? block.attachment : undefined
+  const id = typeof attachment?.attachmentId === 'string' ? attachment.attachmentId : undefined
+  if (id === undefined || resolved === undefined) return ''
+  const entry = (resolved as ReadonlyMap<string, { kind: string; data?: string }>).get(id)
+  return entry?.kind === 'inline' && entry.data !== undefined ? entry.data : ''
+}
+
+/**
+ * Upload the media this request cannot carry inline, and record the reference.
+ *
+ * Runs AFTER the offload passes, so anything already dropped for size is gone
+ * and is not uploaded on the way out. What survives and still cannot be encoded
+ * inline - a clip whose base64 would overrun the 64 MB body - is uploaded and
+ * replaced by an `mm_file://` reference.
+ *
+ * A failed upload is NOT fatal: the media simply stays inline and the request
+ * proceeds. An upload is what makes a large request possible, so losing it must
+ * not lose the turn. The budget check that follows still refuses a body that
+ * genuinely cannot fit, turning the failure into a clear local error rather than
+ * a server 400.
+ */
+async function uploadOversizedMedia(
+  options: NormalizedGenerateOptions,
+  images: ResolvedRequestImages,
+  videos: ResolvedRequestVideos | undefined,
+  credentials: MinimaxCodeCredentials,
+  accountKey: string | undefined,
+  fetchFn: typeof fetch,
+  signal: AbortSignal | undefined,
+): Promise<NormalizedGenerateOptions> {
+  if (accountKey === undefined) return options
+  // The Files API hangs off the MESSAGES path, not the host, so the base must
+  // be the messages URL this adapter is about to post to. Deriving it from the
+  // host asks /files/upload, which answers an HTML 404 page instead of the
+  // API's own error.
+  const baseUrl = messagesUrl(credentials.region)
+  const inlineCeiling = Math.min(maxRequestImageBytes(), MAX_REQUEST_VIDEO_BYTES)
+  const uploads: Array<Promise<{ block: Record<string, unknown>; ref: string } | undefined>> = []
+
+  const collect = (
+    content: unknown,
+    resolved: ResolvedRequestImages | ResolvedRequestVideos | undefined,
+  ): void => {
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (!isContentBlockRecord(block)) continue
+      const mediaType = mediaTypeForBlock(block)
+      if (mediaType === undefined) continue
+      const bytes = encodedLengthForBlock(block, resolved)
+      // Below the inline ceiling the media is cheaper to send as bytes than to
+      // upload, so it is left alone.
+      if (bytes !== undefined && bytes <= inlineCeiling) continue
+      uploads.push(
+        uploadMediaFile(
+          {
+            accessToken: credentials.accessToken,
+            baseUrl,
+            base64: encodedForBlock(block, resolved),
+            bytes: bytes ?? 0,
+            mediaType,
+            ...(signal === undefined ? {} : { signal }),
+          },
+          accountKey,
+          { fetchFn },
+        ).then((fileId) =>
+          fileId === undefined ? undefined : { block, ref: fileRef(fileId) },
+        ).catch(() => undefined),
+      )
+    }
+  }
+
+  for (const message of options.messages) {
+    collect(message.content, images)
+    collect(message.content, videos)
+  }
+
+  const settled = (await Promise.all(uploads)).filter((entry): entry is { block: Record<string, unknown>; ref: string } => entry !== undefined)
+  if (settled.length === 0) return options
+
+  const byBlock = new Map<unknown, string>()
+  for (const entry of settled) byBlock.set(entry.block, entry.ref)
+  return {
+    ...options,
+    messages: options.messages.map((message) => {
+      if (!Array.isArray(message.content)) return message
+      let changed = false
+      const content = message.content.map((block) => {
+        const ref = byBlock.get(block)
+        if (ref === undefined) return block
+        changed = true
+        return { ...block, uploadedRef: ref }
+      })
+      return changed ? { ...message, content } : message
+    }),
+  }
 }
 
 export class MinimaxCodeAdapter extends LlmAdapter {
@@ -539,6 +689,19 @@ export class MinimaxCodeAdapter extends LlmAdapter {
 
     let authOwner = computeMinimaxAuthOwner(credentials, accountId)
 
+    // Media that cannot be encoded inline is uploaded and referenced instead.
+    // Runs after the account is selected, because a file id minted by one pooled
+    // account is not assumed readable by another.
+    const withUploads = await uploadOversizedMedia(
+      requestOptions,
+      images,
+      videos,
+      credentials,
+      accountId,
+      this.options.fetchFn ?? fetch,
+      signal,
+    )
+
     // The cap tracks the window so a long reasoning turn is not cut off by a fixed
     // ceiling, and is reduced when the caller's prompt is large enough that prompt
     // plus output would not fit. Passing the estimate is what makes the clamp do
@@ -550,7 +713,7 @@ export class MinimaxCodeAdapter extends LlmAdapter {
 
     const buildBodyForOwner = (owner: string): string => {
       const built = buildMinimaxRequest(
-        { ...requestOptions, maxTokens: effectiveMax },
+        { ...withUploads, maxTokens: effectiveMax },
         images,
         {
           cacheControl: true,

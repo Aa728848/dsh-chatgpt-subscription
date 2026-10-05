@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **[MiniMax Code] Files API：超内联上限的媒体改走上传与 mm_file 引用**
+  - 新增 `src/host/minimax-code/files-api.ts`。这是让大视频可发送的唯一路径——内联 base64 涨 4/3，
+    50 MB 视频编码后约 67 MB，会超出 64 MB 请求体上限。
+  - **每项事实均为实测**，因为官方客户端的 `files_api_upload_endpoint` 只是相对路径，照抄会 404：
+    - 端点是 `/messages` 的**兄弟** `/mavis/api/v1/llm/v1/files/upload`。挂在 `/messages` 下面会得到
+      503 `direct_route_not_configured`，挂到 host 上会得到 404 HTML——两者都不像「路径差一段」。
+    - **只发 `Authorization`，不发本线路其它请求都带的 `X-Msh-*` 身份头**。带上去时服务回答
+      `{"file":null,…"invalid params"}`，与「表单字段名写错」逐字节相同（我扫了 8 个字段名加空表单，
+      全部同一句）。去掉身份头后同样的表单立刻成功。
+    - 表单 `purpose` 在前、`file` 在后；取值 `image_understanding` / `video_understanding`。
+    - 响应 `file.file_id`，但**失败时 HTTP 是 200**，必须同时检查 `base_resp.status_code === 0`，
+      否则会把字面量 `"null"` 当 id 发上线。
+    - 引用形态 `mm_file://<id>`，裸 id 会被拒为「非 http(s)」。
+  - 四个生命周期职责：TTL 取 12 小时并在过期后重传；缓存 key 含账号，**id 绝不跨账号复用**
+    （未验证是否跨账号可读，按不可读处理）；删除因**服务端没有 delete 路由**而做不到，改为靠内容哈希
+    去重控制上传量；失败降级为「媒体保持内联、请求继续」，不让优化失败拖垮整轮。
+  - 触发点在两个体积 offload 之后，且只上传超过内联上限的媒体。
+  - `503 direct_route_not_configured` 单独归类为 `route-not-configured`，与「表单被拒」区分：
+    前者是账号没开该路由、重试无用，后者是请求本身的问题。
+  - 端到端验证：真实上传取得 `file_id`，以 `mm_file://` 引用发送，messages 返回 200。
+  - 测试：新增 `test/minimax-files-api.test.ts`（17 例），其中三例锁定本轮踩过的坑
+    （路径是兄弟而非子路径、只发 bearer、非 JSON body 要如实报告而非谎称「无理由拒绝」）。
+  - 实测细节与仍未解决的问题记录在 `docs/minimax-files-api-handoff.md`。
+  - 验证：`tsc -b --force` 与 `tsc -p test/tsconfig.json` 通过；`vitest run` 2555 passed / 7 skipped；
+    `npm run build` 通过。
+
+
 - **[MiniMax Code] 支持视频输入；把视频子系统提取为两条线路共享**
   - **视频能力（N6）**：M3 与 M3.1 现在声明并支持视频输入，此前只有文档记载、路由没有实现。
     块形状与 base64 取向**均为实测**，未沿用 Kimi 线的猜测：

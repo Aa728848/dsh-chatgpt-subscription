@@ -353,6 +353,17 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
   return options.messages.filter((message) => message.role !== 'system')
 }
 
+/**
+ * The `mm_file://` reference a Files API upload produced for one block.
+ *
+ * The upload runs before the request is built and records what it minted on the
+ * block itself, so the builder reads it back rather than threading a side table
+ * through the content walk. Absent means the media stays inline.
+ */
+function uploadedRefOf(block: Record<string, unknown>): string | undefined {
+  return asString(block['uploadedRef'])
+}
+
 function anthropicUserContent(
   message: Message,
   images: ResolvedRequestImages,
@@ -366,6 +377,17 @@ function anthropicUserContent(
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
       if (text !== '') blocks.push({ type: 'text', text })
+      continue
+    }
+    // A Files API upload replaces the bytes with a reference, which is the only
+    // way a large image or clip fits in a 64 MB request body. Checked BEFORE the
+    // inline paths, because an uploaded reference is the finished form of the
+    // media and must not be re-encoded.
+    // Measured shape: { type, source: { type: 'url', url: 'mm_file://<id>' } } -
+    // a bare id is rejected as not-http(s).
+    const uploadedRef = uploadedRefOf(block)
+    if (uploadedRef !== undefined && (block.type === 'image' || block.type === 'video')) {
+      blocks.push({ type: block.type, source: { type: 'url', url: uploadedRef } })
       continue
     }
     if (block.type === 'image') {

@@ -1,142 +1,130 @@
-# 交接：MiniMax Code Files API（N4）
+# MiniMax Code Files API（N4）
 
-状态：**未实现**。本文是给后续实现者的完整上下文与已验证事实。
-最后更新：2026-10-05，基于订阅端点 `https://agent.minimax.cn/mavis/api/v1/llm/v1/messages` 实测。
+状态：**已实现并端到端验证**（2026-10-05，订阅端点实测通过）。
+实现：`src/host/minimax-code/files-api.ts`；测试：`test/minimax-files-api.test.ts`（17 例）。
 
----
-
-## 0. 一句话
-
-上传大文件到 MiniMax 文件服务换取 file id，让超出内联上限的附件（主要是视频）可发送。
-**这是唯一能让 MiniMax Code 线路发大视频的路径**，但它需要新增网络写入与四个生命周期职责。
+> 本文同时是那批实测事实的记录。**实现前每一项都探测过**，
+> 因为官方客户端的 `files_api_upload_endpoint` 只是一个相对路径，照抄会 404。
 
 ---
 
-## 1. 官方给的事实
+## 1. 端到端结果
 
-来自官方开源客户端 `MiniMax-AI/minimax-code` @ `56221c1`，
-`packages/config/src/minimax-model-catalog.ts:4-11`：
-
-```ts
-const MINIMAX_M3_FILE_API_CAPABILITIES = {
-  support_files_api: true,
-  files_api_upload_endpoint: '/v1/files/upload',
-  max_image_bytes_inline: 10_485_760,   // 10 MB
-  max_video_bytes_inline: 52_428_800,   // 50 MB
-  max_request_body_bytes: 67_108_864,   // 64 MB
-  max_attachments_count: 4,
-};
+```
+上传   -> file_id: 449057657319831
+引用   -> mm_file://449057657319831
+请求   -> { type: 'image', source: { type: 'url', url: 'mm_file://...' } }
+结果   -> messages 200，正常回答
 ```
 
-M3 与 M3.1 **共用**这一块；M2.7 / M2.7-highspeed 没有。
-
-平台文档称 M3 与 M3.1 上下文均为 1,000,000（与本线路订阅 `config.yaml` 的 512K 口径不同，见 §7）。
-
 ---
 
-## 2. 本线路现状
+## 2. 实测事实（照抄代码会踩坑的地方）
 
-| 字段 | 位置 | 含义 |
-| --- | --- | --- |
-| `filesApiDocumented: true` | `src/host/minimax-code/model-catalog.ts` | 文档有、本线路未实现 |
-| `maxAttachments: 4 / 9` | 同上 | **Files API 的数字，不约束内联**（已实测，见 §3.1） |
-| `maxVideoBytes: 50 MB` | 同上 | 文档值；内联路径达不到 |
+### 2.1 端点：是 `/messages` 的**兄弟**，不是子路径
 
-`filesApiDocumented` 的文档已写明本线路不上传，这是**诚实的现状标注**。
-
----
-
-## 3. 已实测的事实（重要，别再猜）
-
-用已登录账号（`MinimaxCodeAccountPool` 取凭证，池内 2 个账号，region `cn`）直接打订阅端点：
-
-### 3.1 内联路径没有数量限制
-
-| 请求 | 结果 |
+| 路径 | 结果 |
 | --- | --- |
-| M3 带 4 / 5 / 8 / 9 / 10 / 12 / 20 / 48 张内联图 | **全部 HTTP 200** |
-| M3 带 32 张 | 网络失败（传输抖动；48 张随后成功，**非服务端拒绝**） |
+| `/mavis/api/v1/llm/v1/files/upload` | ✅ **唯一可用** |
+| `/mavis/api/v1/llm/v1/messages/files/upload` | ❌ 503 `direct_route_not_configured` |
+| `/mavis/api/v1/files/upload` | ❌ 404 |
+| `/v1/files/upload` / `/files/upload` | ❌ 404 HTML 页面 |
 
-**结论**：`maxAttachments` 描述上传路径。**不要**把它当内联上限执行——
-之前正是这么做的，会白白丢掉服务免费接受的图片。已回退。
+官方配置里的 `files_api_upload_endpoint: '/v1/files/upload'` 是**相对模型 base** 的，
+其 resolver 会先剥掉 base 末尾的 `/anthropic` 兼容后缀再拼接。
 
-### 3.2 内联视频的形状（已确认可用）
+**两个错误路径都不像「差一段」**：一个 503（像功能没开），一个 404 HTML（像网关坏了）。
+这就是 `filesUploadUrl` 单独存在并有专门测试的原因。
 
-| 形状 | 服务端反应 |
+### 2.2 只发 `Authorization`，**不要发 `X-Msh-*` 身份头**
+
+最关键、也最难查的一条。本线路其它所有请求都带 7 个 `X-Msh-*` 头。带上去时 Files API 回答：
+
+```json
+{"file":null,"base_resp":{"status_code":2013,"status_msg":"invalid params"}}
+```
+
+这个响应**与「表单字段名写错」逐字节相同**。为此扫了 8 个字段名
+（file / files / upload / data / content / attachment / media / video）加空表单，
+全部得到同一句 `invalid params`——「字段名不对」这个假设会把人带进死胡同。
+
+去掉身份头、只留 `Authorization: Bearer`，**同样的表单立刻成功**。
+
+> 错误信息指向错误方向时，先怀疑「我多发了什么」，而不是「我少发了什么」。
+
+### 2.3 表单：`purpose` 在前，`file` 在后
+
+```
+form.append('purpose', 'image_understanding' | 'video_understanding')
+form.append('file', blob, filenameForMediaType(mediaType))
+```
+
+目的值由媒体类型决定：`image/*` → `image_understanding`，`video/*` → `video_understanding`。
+
+### 2.4 响应：`file.file_id`，且必须检查 `status_code`
+
+```json
+{"file":{"file_id":449057657319831,"bytes":70,"created_at":...},
+ "base_resp":{"status_code":0,"status_msg":"success"}}
+```
+
+**失败时 HTTP 是 200，不是 4xx。** 只读 `file.file_id` 会把字面量 `"null"` 当 id 发上线，
+所以必须 `base_resp.status_code === 0` 才采信。
+
+### 2.5 引用形态：`mm_file://<id>`，scheme 不可省
+
+| 引用 | 结果 |
 | --- | --- |
-| `{type:'video', source:{type:'base64', media_type, data}}` | ✅ 接受，**解码后跑 ffprobe 校验内容** |
-| `{type:'video_url', ...}` | ❌ `unsupported content type 'video_url'` |
-| `{type:'image', source:{media_type:'video/mp4'}}` | ❌ `image media type not supported` |
-| `{type:'document', source:{...}}` | ❌ 按 PDF 解析 |
+| `mm_file://449057657319831` | ✅ 200 |
+| `449057657319831`（裸 id） | ❌ `image url must be http(s):// or data:...;base64` |
 
-**base64 取向**（关键差异）：
+scheme 来自官方默认 `DEFAULT_FILE_API_REF_SCHEME = 'mm_file://'`。
 
-| 形式 | 服务端反应 |
+### 2.6 没有 list / delete 路由
+
+| 路径 | 结果 |
 | --- | --- |
-| **裸 base64** | ✅ 解码成功，进到 ffprobe |
-| data URL | ❌ `illegal base64 data at input byte 4` |
+| `GET /files/upload` | 405 `method_not_allowed` |
+| `GET /files` | 503 `direct_route_not_configured` |
+| `GET /files/list` | 503 `direct_route_not_configured` |
 
-> MiniMax 用**裸 base64**；Kimi 线用 `data:` URL。**两者形状相反，不可共用编码**。
-共享的只是遍历与预算，所以本线路的 `videoBlockToInline` 保留在 mapper 自己的代码里。
-
-### 3.3 当前内联视频预算
-
-`MAX_REQUEST_VIDEO_BYTES = 16 MB`（`src/host/minimax-code/types.ts`），
-远低于文档的 50 MB：base64 涨 4/3，50 MB 编码后约 67 MB，超出 64 MB 请求体上限。
-**所以现在只能内联 ≤16 MB 的视频，更长的必须走 Files API。**
+**后果：过期只能在本地推断，无法向服务端确认。** TTL 保守取 12 小时
+（官方 resolver 的默认值 43,200 秒）。
 
 ---
 
-## 4. 实现清单
+## 3. 实现要点
 
-### 4.1 上传客户端
+### 3.1 四个生命周期职责的落地
 
-- **端点**：`{apiBase}/v1/files/upload`（`apiBase` 见 `types.ts` 的 `agentBaseUrl()`）
-- **认证**：与其它调用同一 Bearer token（`modelRequestHeaders`）
-- multipart 还是 raw body：**未验证**。先打一次探测再写实现
-- 返回结构里取 file id 的字段名：**未验证**
-
-### 4.2 四个必须自己做的生命周期职责
-
-这是本工作的**主要成本**，不是上传本身：
-
-| 职责 | 为什么不能省 |
+| 职责 | 落地方式 |
 | --- | --- |
-| **TTL** | 上传的文件在服务端会过期。必须记录过期时间并在引用前检查 |
-| **账号隔离** | 账号池会让同一会话由不同账号服务。**A 账号上传的 file id 很可能不能被 B 账号引用** —— 最容易踩的坑，实现前必须先验证 |
-| **删除** | 否则文件在服务端无限累积 |
-| **失败降级** | 上传失败必须退回到内联或占位文本，不能让整轮失败 |
+| **TTL** | `DEFAULT_FILE_ID_TTL_SEC = 43_200`；缓存条目带 `expiresAtMs`，过期即重新上传 |
+| **账号隔离** | 缓存 key = `accountKey + ':' + sha256(bytes)`。**id 绝不跨账号复用** |
+| **删除** | ⚠️ **无 delete 路由，做不到**。改为控制上传量：按内容哈希去重 + 12h TTL |
+| **失败降级** | 上传失败**不抛给调用方**，媒体保持内联、请求继续；随后的体积检查仍给出本地明确错误 |
 
-### 4.3 与现有代码的接点
+账号隔离是**保守假设**：实测没有验证 id 是否跨账号可读，
+所以宁可多传一次，也不把 A 账号的 id 发给 B 账号。若服务实际是全局的，代价只是冗余上传。
 
-- `src/host/minimax-code/adapter.ts` — 在 `buildMinimaxRequest` 前按需上传
-- `src/host/minimax-code/types.ts` — 预算与端点常量
-- `src/host/minimax-code/mapper.ts` — `anthropicUserContent` 的 video 分支：file id 形态与内联不同
-- `src/host/common/video-request.ts` — 共享的遍历与预算（**不要在这里加 provider 逻辑**）
+### 3.2 触发条件
 
----
+在两个 offload pass **之后**执行（已被体积限制丢掉的媒体不会白传一次），
+且只有**超过内联上限**的媒体才上传——小于上限的传字节比传 id 更便宜。
 
-## 5. 建议的推进顺序
+### 3.3 503 的分类
 
-1. **先探测，不写实现**：端点是否存在、接受什么 content type、返回什么字段、**跨账号是否可用**。这四点决定整个设计。
-2. 探测通过再写客户端，**先只支持视频**（唯一真正需要它的场景）
-3. 生命周期四个职责**一起做完**，不做半套
-4. 最后把 `filesApiDocumented` 改为「已实现」，并让 `maxAttachments` 生效
+`503 direct_route_not_configured` 单独归为 `route-not-configured`，
+与 `rejected`（表单被拒）区分：前者是**账号没开这个路由**，重试无用；后者是请求本身的问题。
+混为一谈会让用户去查自己的请求，而实际该查的是套餐。
 
 ---
 
-## 6. 不该做的事
-
-- ❌ 把 `maxAttachments` 当内联上限 —— **已实测错误**
-- ❌ 复用 Kimi 的 `data:` URL 编码 —— MiniMax 只认裸 base64
-- ❌ 在 `src/host/common/video-*.ts` 里写 MiniMax 专属逻辑 —— 会污染 kimi 线
-- ❌ 只做上传不做删除 —— 服务端会无限累积
-
----
-
-## 7. 相关但独立的未决项
+## 4. 仍然未解决
 
 | 项 | 状态 |
 | --- | --- |
+| **服务端删除文件** | 无路由。文件会留到其自身过期，长期运行的部署会累积 |
+| **id 是否跨账号可读** | 未验证，当前按「不可读」处理 |
 | M3 上下文 512K（本线路）vs 1M（平台文档） | 口径不同，需约 4 MB 提示实测，**未获授权未烧额度** |
-| 官方规定省略 `effort` 即 `max`，而 `max` 档实测在 4000 输出上限就触顶 | 即**未指定档位默认跑最贵档**。属于产品决策 |
+| 官方规定省略 `effort` 即 `max`，而 `max` 档实测在 4000 输出上限就触顶 | 即未指定档位默认跑最贵档，属产品决策 |
