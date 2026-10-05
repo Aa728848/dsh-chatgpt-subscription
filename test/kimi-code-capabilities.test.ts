@@ -14,18 +14,18 @@ import {
   buildAnthropicRequest,
   buildOpenAIRequest,
   buildRequest,
+  MAX_REQUEST_VIDEO_BYTES,
   messageToolsOf,
-  offloadOldestRequestVideos,
   requestHasVideo,
-  resolveRequestVideos,
   withMessageTools,
 } from '../src/host/kimi-code/mapper.ts'
 import {
-  KIMI_VIDEO_MEDIA_TYPES,
+  VIDEO_MEDIA_TYPES as KIMI_VIDEO_MEDIA_TYPES,
   isVideoMediaType,
   videoDataUrl,
   videoOmissionText,
 } from '../src/host/kimi-code/modalities.ts'
+import { offloadOldestRequestVideos, resolveRequestVideos } from '../src/host/common/video-request.ts'
 
 function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
   return {
@@ -113,13 +113,13 @@ describe('resolveRequestVideos', () => {
 describe('offloadOldestRequestVideos', () => {
   it('leaves a request under the budget untouched', () => {
     const input = options({ messages: [videoBlock('v1', 1024)] })
-    expect(offloadOldestRequestVideos(input)).toBe(input)
+    expect(offloadOldestRequestVideos(input, MAX_REQUEST_VIDEO_BYTES)).toBe(input)
   })
 
   it('omits the oldest clips once the video budget is exceeded', () => {
     const huge = 32 * 1024 * 1024
     const input = options({ messages: [videoBlock('old', huge), videoBlock('recent', huge)] })
-    const bounded = offloadOldestRequestVideos(input)
+    const bounded = offloadOldestRequestVideos(input, MAX_REQUEST_VIDEO_BYTES)
     expect(bounded).not.toBe(input)
     const blocks = bounded.messages.flatMap((message) => message.content as unknown[])
     // The oldest occurrence is replaced by text; the newer one survives.

@@ -270,21 +270,66 @@ describe('MiniMax Code line', () => {
   })
 
   describe('catalog claims match what the route can send', () => {
-    it('never advertises video, which this line has no reader for', () => {
+    it('advertises video only on the models that take it', () => {
+      // The catalog is a claim DSH's capability pipeline acts on, so it may
+      // list video only now that a real byte reader exists and the endpoint's
+      // block shape has been measured rather than assumed.
       for (const model of MINIMAX_CODE_MODELS) {
-        expect(model.inputModalities).not.toContain('video')
+        const expected = model.id === 'MiniMax-M3' || model.id === 'MiniMax-M3.1-Flash-Preview'
+        expect(model.inputModalities.includes('video')).toBe(expected)
       }
     })
 
-    it('produces a body with no video part even when a video block is supplied', () => {
+    it('sends a measured video block when the clip is readable', () => {
+      const body = buildMinimaxRequest(
+        {
+          model: 'MiniMax-M3',
+          messages: [{
+            role: 'user',
+            content: [{
+              type: 'video',
+              attachment: { attachmentId: 'v1', mediaType: 'video/mp4', bytes: 3 },
+            } as never],
+          }],
+        } as never,
+        undefined,
+        {
+          videos: new Map([['v1', { kind: 'inline', mediaType: 'video/mp4', data: 'AAAA' }]]),
+          videoAccepted: true,
+        },
+      )
+      // The shape and the framing were both measured: this endpoint decodes
+      // { type: 'video', source: { type: 'base64', ... } } with BARE base64, and
+      // a data-URL string fails at the ':' because it is read as base64.
+      const block = (body['messages'] as Array<{ content: unknown[] }>)[0]!.content
+        .find((b) => (b as { type?: string }).type === 'video') as Record<string, unknown>
+      expect(block['source']).toEqual({ type: 'base64', media_type: 'video/mp4', data: 'AAAA' })
+      expect(JSON.stringify(body)).not.toContain('data:video/mp4')
+    })
+
+    it('explains a video the selected model cannot take', () => {
       const body = buildMinimaxRequest({
-        model: 'MiniMax-M3',
+        model: 'MiniMax-M2.7',
         messages: [{ role: 'user', content: [{ type: 'video' } as never] }],
-      } as never)
-      // No wire-level video part may appear: the only mention allowed is the
-      // placeholder text explaining that the clip could not be sent.
+      } as never, undefined, { videoAccepted: false })
       const serialized = JSON.stringify(body)
-      expect(serialized).not.toMatch(/video_url|"type":"video"|"type": "video"/)
+      expect(serialized).not.toMatch(/"type": ?"video"/)
+      expect(serialized).toContain('video omitted')
+    })
+
+    it('explains a video whose bytes were never read', () => {
+      const body = buildMinimaxRequest(
+        {
+          model: 'MiniMax-M3',
+          messages: [{ role: 'user', content: [{ type: 'video' } as never] }],
+        } as never,
+        undefined,
+        { videoAccepted: true },
+      )
+      // No reader resolved it, so the model must be told rather than left to
+      // answer about an empty message.
+      const serialized = JSON.stringify(body)
+      expect(serialized).not.toMatch(/"type": ?"video"/)
       expect(serialized).toContain('video omitted')
     })
   })

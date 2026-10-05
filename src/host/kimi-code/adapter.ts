@@ -55,6 +55,7 @@ import {
   closeStream,
   createStreamState,
   estimatedInputTokens,
+  MAX_REQUEST_VIDEO_BYTES,
   offloadOldestRequestImages,
   offloadOldestRequestVideos,
   processAnthropicStreamLine,
@@ -483,7 +484,10 @@ export class KimiCodeAdapter extends LlmAdapter {
     // front and reuse the result for the single request below. Video travels
     // the same path and is dropped oldest-first against its own, far larger
     // budget, because one clip dwarfs the whole image allowance.
-    const requestOptions = offloadOldestRequestVideos(offloadOldestRequestImages(normalizeGenerateOptions(options)))
+    const requestOptions = offloadOldestRequestVideos(
+      offloadOldestRequestImages(normalizeGenerateOptions(options)),
+      MAX_REQUEST_VIDEO_BYTES,
+    )
     const [images, videos] = await Promise.all([
       resolveRequestImages(requestOptions, this.options.attachments, signal),
       resolveRequestVideos(requestOptions, this.options.videos, signal),

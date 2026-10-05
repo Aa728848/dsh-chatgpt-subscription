@@ -44,17 +44,23 @@ export interface MinimaxCodeCatalogModel {
   /**
    * Input the model accepts.
    *
-   * Declared as the wire accepts it. Note that a capability listed here is a claim
-   * DSH's capability pipeline acts on (prompt admission, the model picker, subagent
-   * delegation), so this line lists only what its mapper can actually put on the
-   * wire. Video is deliberately NOT listed even though the model table documents it
-   * on M3 and M3.1: DSH's attachment service is image-only and this line installs no
-   * video byte reader, so a clip that reached the mapper would be replaced by a
-   * placeholder — advertising it would promise an upload the route cannot perform.
-   * Add 'video' here only together with a real reader (see the Kimi Code line, which
-   * implements one in `video-store.ts` and widens the modality vocabulary for it).
+   * Declared as the wire accepts it, which is also what this line can put on that
+   * wire — a capability listed here is a claim DSH's capability pipeline acts on
+   * (prompt admission, the model picker, subagent delegation), so listing
+   * something the mapper cannot encode would be a promise the route breaks.
+   *
+   * Video is now listed for the models that take it. It was not, because the
+   * route had no video byte reader; the reader arrived with the shared video
+   * request layer (see `../common/video-request.ts` and the Kimi Code line's
+   * `video-store.ts`), and a live probe confirmed this endpoint decodes a
+   * `{ type: 'video', source: { type: 'base64', ... } }` block.
+   *
+   * The inline path still tops out well below the documented 50 MB per clip,
+   * because base64 grows bytes by 4/3 against a 64 MB request body; the budget is
+   * `MAX_REQUEST_VIDEO_BYTES` in ./types.ts, and a longer clip needs the Files
+   * API, which this line does not implement.
    */
-  inputModalities: readonly ('text' | 'image')[]
+  inputModalities: readonly ('text' | 'image' | 'video')[]
   /** How thinking behaves on this model. */
   thinking: MinimaxCodeThinkingMode
   /**
@@ -139,7 +145,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     contextWindow: 512_000,
     optionalContextWindow: 1_000_000,
     maxTokens: 128_000,
-    inputModalities: ['text', 'image'],
+    inputModalities: ['text', 'image', 'video'],
     thinking: 'toggle',
     // The model's thinking is a two-state switch, not a gradient: the table names
     // it "none-thinking / thinking, default thinking". Exposing one always-on
@@ -159,7 +165,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     contextWindow: 1_000_000,
     optionalContextWindow: null,
     maxTokens: 128_000,
-    inputModalities: ['text', 'image'],
+    inputModalities: ['text', 'image', 'video'],
     thinking: 'forced-effort',
     // The documented depth levels. `default` is deliberately NOT a wire value:
     // the docs say omitting `effort` means max, so it is a local spelling for

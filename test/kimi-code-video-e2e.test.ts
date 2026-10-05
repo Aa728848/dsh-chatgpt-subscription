@@ -24,7 +24,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 // estimator is reached through the meter's public class. Both are the code a
 // request actually runs against, not the workspace checkout.
 import { contentHasImage, createUserMessage, projectImagesForTextModel } from '@deepseek-ai/dsh-llm'
-import { buildOpenAIRequest, estimatedInputTokens, resolveRequestVideos, offloadOldestRequestVideos } from '../src/host/kimi-code/mapper.ts'
+import { buildOpenAIRequest, estimatedInputTokens, MAX_REQUEST_VIDEO_BYTES } from '../src/host/kimi-code/mapper.ts'
+import { resolveRequestVideos, offloadOldestRequestVideos } from '../src/host/common/video-request.ts'
 import { readVideoBytes, saveVideo } from '../src/host/kimi-code/video-store.ts'
 import { PLUGIN_MESSAGE_SOURCE_KIND } from '../src/host/common/llm-compat.ts'
 import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
@@ -159,7 +160,7 @@ describe('video reaches the wire from a stored file', () => {
       model: 'k3',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] } as Message],
     } as GenerateOptions
-    const bounded = offloadOldestRequestVideos(request)
+    const bounded = offloadOldestRequestVideos(request, MAX_REQUEST_VIDEO_BYTES)
     expect(bounded).toBe(request)
     expect((await resolveRequestVideos(request, undefined)).size).toBe(0)
   })

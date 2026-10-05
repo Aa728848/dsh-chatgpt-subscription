@@ -69,8 +69,12 @@ import {
   estimatedInputTokens,
   maxOutputTokensFor,
   maxRequestImageBytes,
+  MAX_REQUEST_VIDEO_BYTES,
   offloadOldestRequestImages,
+  offloadOldestRequestVideos,
   processMinimaxStreamLine,
+  resolveRequestVideos,
+  type AttachmentVideoReader,
   resolveRequestImages,
   type AttachmentImageReader,
 } from './mapper.ts'
@@ -212,6 +216,13 @@ export interface MinimaxCodeAdapterOptions {
   fetchFn?: typeof fetch
   /** Attachment seam: verified bytes for one durable image. */
   attachments?: AttachmentImageReader
+  /**
+   * Attachment seam: verified bytes for one durable video.
+   *
+   * Absent means every video resolves to `unavailable` and the model is told the
+   * clip is missing, which is the same honest degradation the image seam uses.
+   */
+  videos?: AttachmentVideoReader
   /**
    * The account pool, when this process installed one.
    *
@@ -486,11 +497,18 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // complaint, so that number describes the FILES API (which this line does not
     // implement) rather than the inline path. Enforcing it here would drop
     // images the service accepts for free. See maxAttachments in ./model-catalog.
-    const requestOptions = offloadOldestRequestImages(
-      normalizeGenerateOptions(options),
-      maxRequestImageBytes(),
+    // Video has its own, much larger budget and its own offload pass, run
+    // before the image one: a single clip dwarfs the whole image allowance, and
+    // dropping clips and images in the same pass would make which one survived
+    // depend on the order of two unrelated ceilings.
+    const requestOptions = offloadOldestRequestVideos(
+      offloadOldestRequestImages(normalizeGenerateOptions(options), maxRequestImageBytes()),
+      MAX_REQUEST_VIDEO_BYTES,
     ) as NormalizedGenerateOptions
-    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    const [images, videos] = await Promise.all([
+      resolveRequestImages(requestOptions, this.options.attachments, signal),
+      resolveRequestVideos(requestOptions, this.options.videos, signal),
+    ])
 
     // The cap tracks the window so a long reasoning turn is not cut off by a fixed
     // ceiling, and is reduced when the caller's prompt is large enough that prompt
@@ -536,6 +554,8 @@ export class MinimaxCodeAdapter extends LlmAdapter {
         images,
         {
           cacheControl: true,
+          videos,
+          videoAccepted: minimaxCodeModelDef(options.model)?.inputModalities.includes('video') === true,
           authOwner: owner,
           route: PROVIDER_ID,
         },

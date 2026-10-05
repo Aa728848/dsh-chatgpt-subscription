@@ -94,6 +94,25 @@ import {
   type MinimaxCodeCatalogModel,
 } from './model-catalog.ts'
 import { createHash } from 'node:crypto'
+import { videoOmissionText } from './modalities.ts'
+// Traversal, byte budgeting and base64 encoding are shared with the Kimi Code
+// line; only the wire shape and the wording below are this line's.
+import {
+  offloadOldestRequestVideos,
+  requestHasVideo,
+  resolveRequestVideos,
+  videoBlockToInline,
+  type AttachmentVideoReader,
+  type ResolvedRequestVideos,
+} from '../common/video-request.ts'
+
+export {
+  offloadOldestRequestVideos,
+  requestHasVideo,
+  resolveRequestVideos,
+  type AttachmentVideoReader,
+  type ResolvedRequestVideos,
+}
 import {
   ANTHROPIC_VERSION,
   CONTEXT_HEADROOM_TOKENS,
@@ -101,6 +120,7 @@ import {
   DEFAULT_MAX_MESSAGE_BODY_BYTES,
   DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   DEFAULT_MAX_TOKENS,
+  MAX_REQUEST_VIDEO_BYTES,
   PROVIDER_ID,
   PROVIDER_NAME,
   maxMessageBodyBytes,
@@ -110,6 +130,7 @@ import {
 export {
   DEFAULT_MAX_MESSAGE_BODY_BYTES,
   DEFAULT_MAX_REQUEST_IMAGE_BYTES,
+  MAX_REQUEST_VIDEO_BYTES,
   estimatedInputTokens,
   maxMessageBodyBytes,
   maxRequestImageBytes,
@@ -332,7 +353,12 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
   return options.messages.filter((message) => message.role !== 'system')
 }
 
-function anthropicUserContent(message: Message, images: ResolvedRequestImages): AnthropicBlock[] {
+function anthropicUserContent(
+  message: Message,
+  images: ResolvedRequestImages,
+  videos: ResolvedRequestVideos | undefined,
+  videoAccepted: boolean,
+): AnthropicBlock[] {
   if (!Array.isArray(message.content)) return []
   const blocks: AnthropicBlock[] = []
   for (const block of message.content) {
@@ -359,13 +385,27 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
       continue
     }
     if (block.type === 'video') {
-      // The subscription documents video on M3 and M3.1, but DSH's attachment
-      // service stores images only, so a video part that reaches this mapper has no
-      // bytes behind it. Saying so beats sending an unverified field.
-      blocks.push({
-        type: 'text',
-        text: '[video omitted: this route has no video byte reader installed, so the clip could not be sent]',
-      })
+      // Shape and framing both measured against this endpoint, not assumed:
+      // a { type: 'video', source: { type: 'base64', ... } } block is accepted and
+      // decoded (the service then runs ffprobe over the result), while a
+      // data-URL string fails at the ':' because it is decoded as bare base64.
+      // That is the opposite framing from Kimi's video_url, so the two lines
+      // cannot share the encoder even though they share the vocabulary.
+      const outcome = videoBlockToInline(block, videos ?? new Map(), videoAccepted, videoOmissionText)
+      if ('inline' in outcome) {
+        blocks.push({
+          type: 'video',
+          source: {
+            type: 'base64',
+            media_type: outcome.inline.mediaType,
+            data: outcome.inline.data,
+          },
+        })
+      } else {
+        // A clip this request cannot carry degrades to ordinary text, so the turn
+        // still runs and the model learns why the video is absent.
+        blocks.push({ type: 'text', text: outcome.omission })
+      }
     }
   }
   return blocks
@@ -751,6 +791,16 @@ export interface MinimaxRequestOptions {
    * array because a plain string cannot carry a marker.
    */
   cacheControl?: boolean
+  /** Videos read for this request; absent means none were resolved. */
+  videos?: ResolvedRequestVideos
+  /**
+   * Whether the selected model declares video input.
+   *
+   * Only M3 and M3.1 do. When false a clip degrades to a text placeholder
+   * rather than being dropped, so the model asks for a description instead of
+   * answering as though the message were empty.
+   */
+  videoAccepted?: boolean
   /** Nonsecret hash of the adapter-selected auth owner, required to scope replay. */
   authOwner?: string
   /** Route identity for replay scoping; defaults to PROVIDER_ID. */
@@ -772,17 +822,18 @@ export function buildMinimaxRequest(
       }
     : undefined
 
+  const videoAccepted = request.videoAccepted === true
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message)) {
-      entries.push({ role: 'user', content: anthropicUserContent(message, images) })
+      entries.push({ role: 'user', content: anthropicUserContent(message, images, request.videos, videoAccepted) })
       continue
     }
     entries.push({
       role: message.role === 'assistant' ? 'assistant' : 'user',
       content: message.role === 'assistant'
         ? anthropicAssistantContent(message, expectedScope)
-        : anthropicUserContent(message, images),
+        : anthropicUserContent(message, images, request.videos, videoAccepted),
     })
   }
 

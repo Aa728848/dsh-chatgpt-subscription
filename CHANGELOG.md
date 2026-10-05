@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **[MiniMax Code] 支持视频输入；把视频子系统提取为两条线路共享**
+  - **视频能力（N6）**：M3 与 M3.1 现在声明并支持视频输入，此前只有文档记载、路由没有实现。
+    块形状与 base64 取向**均为实测**，未沿用 Kimi 线的猜测：
+    - 端点接受 `{ type: 'video', source: { type: 'base64', media_type, data } }`，并会解码后跑 ffprobe 校验；
+    - **裸 base64** 正确；`data:` URL 会在第 4 字节被拒（MiniMax 与 Kimi 的取向**相反**）；
+    - `video_url`、把视频当 image、document 块三种形状均被明确拒绝；
+    - 无可读字节、或模型不支持时，降级为解释性占位文本而不是静默丢弃。
+    内联预算 `MAX_REQUEST_VIDEO_BYTES = 16 MB`（base64 涨 4/3，文档的 50 MB 会超出 64 MB 请求体上限）；
+    更长的视频需要 Files API，见交接文档。
+  - **共享化**：视频的块类型、模态表增强、遍历、字节预算与 base64 编码，从 Kimi 线的 mapper 提取到
+    `src/host/common/video.ts` 与 `src/host/common/video-request.ts`。
+    必须共享的原因：`ModelModalityMap` / `ContentBlockMap` 的模块增强是全局的，
+    两条线路各写一份就是对同一个 `video` 键的重复声明。**wire 形状仍各线自有**——
+    两条端点的 base64 取向相反，不能共用编码。
+  - **能力表更新**：M3 / M3.1 的 `inputModalities` 加入 `'video'`。
+    该字段是 DSH 能力管道（提示准入、模型选择器、子代理委派）会据以行动的声明，
+    因此只有在线路真的能编码时才列入。
+  - **测试**：新增 `test/video-shared.test.ts`（7 例）覆盖共享层，
+    其中一例专门锁定「裸 base64、不加 data URL 前缀」这条与 Kimi 相反的约定；
+    更新 minimax review-fixes 的视频用例（此前断言「永不声明 video」，现改为「只在支持它的模型上声明」）。
+  - **N4 Files API 未实现**：已写交接文档 `docs/minimax-files-api-handoff.md`，
+    记录实测事实、实现清单、四个必须自建的生命周期职责，以及「不该做的事」
+    （其中「把 maxAttachments 当内联上限」是本轮已被实测推翻的错误）。
+  - **验证**：`tsc -b --force` 与 `tsc -p test/tsconfig.json` 通过；
+    `vitest run` 2538 passed / 7 skipped；`npm run build` 通过。
+
 - **[MiniMax Code] 按官方文档更正 thinking 控制字段**
   - **背景**：与官方开源客户端 `MiniMax-AI/minimax-code`（`56221c1`）对照后，逐项核对 MiniMax 官方文档
     `platform.minimax.io/docs/guides/text-generation.md`，发现 thinking 控制字段的形状与文档不符。

@@ -248,6 +248,17 @@ export function maxMessageBodyBytes(env: NodeJS.ProcessEnv = process.env): numbe
  */
 export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 16 * 1024 * 1024
 
+/**
+ * Base64 video budget for one request on this line.
+ *
+ * Deliberately far below the model's documented 50 MB inline ceiling: base64
+ * grows bytes by 4/3, so a 50 MB clip would encode to roughly 67 MB and overrun
+ * the 64 MB request body this route enforces. The real answer is the Files API
+ * (a clip over ~48 MB is only sendable through an upload), so this budget is a
+ * working inline allowance rather than the model's limit.
+ */
+export const MAX_REQUEST_VIDEO_BYTES = 16 * 1024 * 1024
+
 /** Image budget this process enforces, honouring the deployment override. */
 export function maxRequestImageBytes(env: NodeJS.ProcessEnv = process.env): number {
   const raw = (env.DSH_MINIMAX_CODE_MAX_IMAGE_BYTES ?? '').trim()
