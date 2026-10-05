@@ -32,7 +32,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { dshHomeDir } from '../antigravity/token-store.ts'
+import { dshHomeDir } from '../common/home.ts'
 
 /** Path suffix appended to the messages URL to reach the Files API. */
 export const FILES_UPLOAD_PATH = '/files/upload'

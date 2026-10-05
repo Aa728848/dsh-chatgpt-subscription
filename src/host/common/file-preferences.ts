@@ -14,7 +14,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type z from '@deepseek-ai/schemastery'
-import { dshHomeDir } from '../antigravity/token-store.ts'
+import { dshHomeDir } from './home.ts'
 import type { SettingsScope, SettingsWatch } from './settings-compat.ts'
 
 /** Where the plugin keeps the preferences that have no settings namespace to live in. */

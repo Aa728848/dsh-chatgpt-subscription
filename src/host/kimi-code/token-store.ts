@@ -11,7 +11,7 @@ import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '..
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
-import { dshHomeDir } from '../antigravity/token-store.ts'
+import { dshHomeDir } from '../common/home.ts'
 import {
   DEFAULT_OAUTH_HOST,
   FALLBACK_MODELS,

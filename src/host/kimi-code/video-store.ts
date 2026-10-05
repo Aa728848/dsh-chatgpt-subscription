@@ -13,7 +13,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { dshHomeDir } from '../antigravity/token-store.ts'
+import { dshHomeDir } from '../common/home.ts'
 import { VIDEO_MEDIA_TYPES as KIMI_VIDEO_MEDIA_TYPES, type VideoAttachmentRef } from './modalities.ts'
 
 /**

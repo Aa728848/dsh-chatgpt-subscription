@@ -22,7 +22,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { PREFERENCES_NAMESPACE } from '../../shared/preferences.ts'
-import { dshHomeDir } from '../antigravity/token-store.ts'
+import { dshHomeDir } from './home.ts'
 
 /** Documents earlier harness releases may still hold the section in, in read order. */
 const LEGACY_DOCUMENTS = ['settings.yaml', 'settings.yaml.imported'] as const

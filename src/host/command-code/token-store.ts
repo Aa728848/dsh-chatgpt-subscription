@@ -12,7 +12,7 @@ import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '..
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
-import { dshHomeDir } from '../antigravity/token-store.ts'
+import { dshHomeDir } from '../common/home.ts'
 
 export const COMMAND_CODE_PREFERENCES_NAMESPACE = 'dsh-command-code'
 

@@ -6,7 +6,7 @@ import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
-import { dshHomeDir } from '../antigravity/token-store.ts'
+import { dshHomeDir } from '../common/home.ts'
 import type { OllamaCatalogModel } from './types.ts'
 
 /**
