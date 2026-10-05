@@ -421,6 +421,157 @@ describe('KimiCodeAdapter account rotation', () => {
     expect(cooling?.cooldownUntil).toBeGreaterThan(Date.now())
   })
 
+  it('cools a spent usage window down and serves the request from the next account', async () => {
+    // The service reports a spent window as a 403: not a dead credential and not
+    // a retryable signal, so only the rotation state can carry the verdict.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    const second = await pool.addAccount(credential(2))
+    const modelSettings = modelSettingsStore()
+
+    const authorizations: string[] = []
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>
+      authorizations.push(headers.authorization)
+      if (headers.authorization === 'Bearer at-1') {
+        return new Response(JSON.stringify({
+          error: { message: "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends." },
+        }), { status: 403 })
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'served by the second account' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    })
+    const adapter = new KimiCodeAdapter(mirror, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      loadCatalog: async () => CATALOG,
+    }, pool)
+
+    const assembled = new BlockAssembler()
+    for await (const chunk of adapter.stream({
+      provider: 'kimi-code',
+      model: 'k3',
+      messages: [{ role: 'user', content: 'hi' } as never],
+    } as unknown as GenerateOptions)) assembled.push(chunk)
+
+    expect(authorizations).toEqual(['Bearer at-1', 'Bearer at-2'])
+    expect(assembled.blocks()).toEqual([{ type: 'text', text: 'served by the second account' }])
+    const accounts = await pool.listAccounts()
+    const spent = accounts.find((entry) => entry.id !== second.id)
+    // The window's length, not the 15 minutes a 429 gets.
+    expect(spent?.cooldownUntil).toBeGreaterThan(Date.now() + 4 * 60 * 60 * 1000)
+    // And only that account: the one that answered stays eligible.
+    expect(accounts.find((entry) => entry.id === second.id)?.cooldownUntil).toBeUndefined()
+  })
+
+  it('stops probing the spent window on the turns after it', async () => {
+    // Before the cooldown was recorded, sequential rotation put the exhausted
+    // account first again on every single turn, so one spent window took a
+    // healthy account offline for its whole length.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    await pool.addAccount(credential(2))
+    const modelSettings = modelSettingsStore()
+
+    const authorizations: string[] = []
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>
+      authorizations.push(headers.authorization)
+      if (headers.authorization === 'Bearer at-1') {
+        return new Response(JSON.stringify({
+          error: { message: "You've reached your 5-hour usage limit." },
+        }), { status: 403 })
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    })
+    const adapter = new KimiCodeAdapter(mirror, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      loadCatalog: async () => CATALOG,
+    }, pool)
+
+    const turn = {
+      provider: 'kimi-code',
+      model: 'k3',
+      messages: [{ role: 'user', content: 'hi' } as never],
+    } as unknown as GenerateOptions
+
+    await collect(adapter.stream(turn))
+    await collect(adapter.stream(turn))
+
+    // The 403 is paid exactly once, by the turn that discovered the window.
+    expect(authorizations).toEqual(['Bearer at-1', 'Bearer at-2', 'Bearer at-2'])
+  })
+
+  it('cools a spent window down exactly until the reset the service states', async () => {
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    const second = await pool.addAccount(credential(2))
+    const modelSettings = modelSettingsStore()
+    const resetsAt = Date.now() + 90 * 60 * 1000
+
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>
+      if (headers.authorization === 'Bearer at-1') {
+        return new Response(JSON.stringify({
+          error: { message: "You've reached your 5-hour usage limit.", reset_at: Math.floor(resetsAt / 1000) },
+        }), { status: 403 })
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    })
+    const adapter = new KimiCodeAdapter(mirror, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      loadCatalog: async () => CATALOG,
+    }, pool)
+
+    await collect(adapter.stream({
+      provider: 'kimi-code',
+      model: 'k3',
+      messages: [{ role: 'user', content: 'hi' } as never],
+    } as unknown as GenerateOptions))
+
+    const spent = (await pool.listAccounts()).find((entry) => entry.id !== second.id)
+    expect(Math.abs((spent?.cooldownUntil ?? 0) - resetsAt)).toBeLessThan(3_000)
+  })
+
+  it('treats a plan-entitlement 403 as a request failure and cools nothing down', async () => {
+    // Every account of one plan is refused the same model, so rotating would
+    // spend the whole pool to learn the same refusal from each of them.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    await pool.addAccount(credential(2))
+    const modelSettings = modelSettingsStore()
+
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: 'Your current subscription does not have access to this model.' } }),
+      { status: 403 },
+    ))
+    const adapter = new KimiCodeAdapter(mirror, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      loadCatalog: async () => CATALOG,
+    }, pool)
+
+    await expect(collect(adapter.stream({
+      provider: 'kimi-code',
+      model: 'k3',
+      messages: [{ role: 'user', content: 'hi' } as never],
+    } as unknown as GenerateOptions))).rejects.toMatchObject({ code: 'PROVIDER_ERROR' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    for (const account of await pool.listAccounts()) {
+      expect(account.cooldownUntil).toBeUndefined()
+    }
+  })
+
   it('treats a plan-scoped 429 as a request failure and cools nothing down', async () => {
     const { pool, mirror, mirrorBackend } = harness()
     await mirrorBackend.save(credential(1))

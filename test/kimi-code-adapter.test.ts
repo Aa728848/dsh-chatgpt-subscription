@@ -5,6 +5,7 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   KIMI_CODE_RETRY_POLICY_CONFIG,
   KimiCodeAdapter,
+  accountLimitCooldownMs,
   classifyKimiFailure,
   resolveDefaultReasoningEffort,
 } from '../src/host/kimi-code/adapter.ts'
@@ -157,6 +158,30 @@ describe('KimiCodeAdapter retry policy', () => {
     expect(failure.retryable).toBe(false)
     expect(failure.code).toBe('PROVIDER_ERROR')
     expect(failure.message).toContain('5-hour usage limit')
+    // Never retried against this account — and yet it IS this account's own
+    // window, so the pool is still allowed to route the request elsewhere.
+    expect(failure.accountScoped).toBe(true)
+  })
+
+  it('marks a plan refusal and ordinary back-pressure as not the account own', () => {
+    // Rotating on either would spend the pool to learn the same answer twice.
+    const entitlement = classifyKimiFailure(403, JSON.stringify({
+      error: { message: 'Your current subscription does not have access to this model.' },
+    }))
+    expect(entitlement.accountScoped).toBe(false)
+
+    const overloaded = classifyKimiFailure(429, JSON.stringify({ error: { message: 'too many requests' } }))
+    expect(overloaded.accountScoped).toBe(false)
+
+    const deadToken = classifyKimiFailure(401, JSON.stringify({ error: { message: 'Invalid Authentication' } }))
+    expect(deadToken.accountScoped).toBe(false)
+
+    // A spent balance is this account's own, and it does not lift when the
+    // window turns over: the same account has to stop being asked.
+    const spent = classifyKimiFailure(429, JSON.stringify({
+      error: { message: 'insufficient balance, please recharge your account' },
+    }))
+    expect(spent.accountScoped).toBe(true)
   })
 
   it('distinguishes a plan-entitlement 401 from a bad credential', () => {
@@ -186,6 +211,43 @@ describe('KimiCodeAdapter retry policy', () => {
       error: { message: "We're unable to verify your membership benefits at this time." },
     }))
     expect(failure.retryable).toBe(true)
+  })
+})
+
+describe('kimi account-limit cooldown', () => {
+  const FIVE_HOURS = 5 * 60 * 60 * 1000
+
+  it('falls back to the window length when the body states no reset time', () => {
+    // The 15 minutes a 429 gets would put the account back into rotation four
+    // times inside the very window that just refused it.
+    expect(accountLimitCooldownMs("You've reached your 5-hour usage limit.")).toBe(FIVE_HOURS)
+  })
+
+  it('cools down until the reset instant the service states', () => {
+    const now = Date.now()
+    const resetsAt = now + 90 * 60 * 1000
+    const body = JSON.stringify({ error: { message: 'usage limit reached', reset_at: Math.floor(resetsAt / 1000) } })
+    // Unix seconds, so the stated instant may be up to a second behind.
+    expect(Math.abs(accountLimitCooldownMs(body, now) - 90 * 60 * 1000)).toBeLessThan(1_000)
+  })
+
+  it('trusts a zoned instant and refuses to guess at an unqualified one', () => {
+    const now = Date.parse('2026-09-04T10:00:00Z')
+    expect(accountLimitCooldownMs('{"error":{"resetsAt":"2026-09-04T11:30:00Z"}}', now)).toBe(90 * 60 * 1000)
+    // Without a zone the instant is local or UTC depending on the machine, and a
+    // cooldown off by that offset is either hours long or already over.
+    expect(accountLimitCooldownMs('{"error":{"resetsAt":"2026-09-04T11:30:00"}}', now)).toBe(FIVE_HOURS)
+  })
+
+  it('keeps a stale or absurd reset time from parking or releasing the account', () => {
+    const now = Date.now()
+    // A reset instant already in the past is stale, not "no cooldown at all".
+    expect(accountLimitCooldownMs(JSON.stringify({ reset_at: Math.floor((now - 60_000) / 1000) }), now)).toBe(FIVE_HOURS)
+    // Two seconds away is still a real window, so it gets the 429 floor.
+    expect(accountLimitCooldownMs(JSON.stringify({ reset_at: Math.floor((now + 2_000) / 1000) }), now)).toBe(15 * 60 * 1000)
+    // And a timestamp far past the horizon cannot park the account for years.
+    expect(accountLimitCooldownMs(JSON.stringify({ reset_at: 99_999_999_999 }), now)).toBe(30 * 24 * 60 * 60 * 1000)
+    expect(accountLimitCooldownMs('You have reached your usage limit for this billing cycle.')).toBe(30 * 24 * 60 * 60 * 1000)
   })
 })
 

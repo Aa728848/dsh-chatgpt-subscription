@@ -43,6 +43,7 @@ import {
   inputModalitiesForEntry,
   maxInputTokensForEntry,
   loadProviderModels,
+  parseTimestamp,
   modelRequestHeaders,
   defaultReasoningEffortForEntry,
   reasoningEffortsForEntry,
@@ -98,8 +99,10 @@ import type { KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contra
  * - `INVALID_CREDENTIAL` — a rejected access token fails identically on every
  *   attempt;
  * - `PROVIDER_ERROR` — a 400, a 401 that is really a plan-entitlement refusal,
- *   or a 403 quota limit. Retrying a quota that resets in hours only burns
- *   requests and delays the message the user needs to see;
+ *   or a 403 quota limit. Retrying a quota that resets in hours against the
+ *   SAME account only burns requests and delays the message the user needs to
+ *   see, so none of it is retried; a 403 limit still rotates to another account
+ *   when the pool holds one, which is a routing decision rather than a retry;
  * - `ABORTED` — the caller already cancelled.
  *
  * The DSH normal defaults would apply anyway; stating the values here pins them
@@ -146,6 +149,22 @@ export interface KimiFailureClassification {
   message: string
   /** True only when the failure is worth retrying. */
   retryable: boolean
+  /**
+   * True when the refusal belongs to THIS account alone, so another pooled
+   * account may still serve the same request.
+   *
+   * A spent usage window is the case that matters, and this service reports it
+   * as a 403 — neither a bad credential nor retryable back-pressure, so nothing
+   * in the code or the message says "rotate". Asking the same account again
+   * cannot help; taking it out of rotation until its window resets lets the next
+   * account answer, and each account in the pool carries its own quota.
+   *
+   * False for every verdict that belongs to the request or to the plan: an
+   * entitlement refusal, a malformed body, ordinary overload. Rotating on one of
+   * those would spend every account in the pool to learn the same answer from
+   * each of them.
+   */
+  accountScoped: boolean
 }
 
 /** Body text the service uses for a plan entitlement refusal (status 401). */
@@ -213,7 +232,7 @@ export function summarizeFailureBody(raw: string): string {
 export function classifyKimiFailure(status: number, bodyText: string): KimiFailureClassification {
   const detail = summarizeFailureBody(bodyText)
   if (isHttpContextOverflow(status, bodyText)) {
-    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, accountScoped: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
   }
 
   if (status === 402) {
@@ -222,6 +241,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     return {
       code: 'SERVER',
       retryable: true,
+      accountScoped: false,
       message: `${PROVIDER_NAME} could not verify the subscription tier (402). Retrying; if it persists, confirm the membership is active.${detail ? ` ${detail}` : ''}`,
     }
   }
@@ -233,6 +253,9 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       return {
         code: 'PROVIDER_ERROR',
         retryable: false,
+        // A plan refusal is the same plan on every account of the pool, and it
+        // is fixed by an upgrade rather than by a different account.
+        accountScoped: false,
         message: `${PROVIDER_NAME} refused this request for the current plan: ${detail || 'the requested model or context is not included'}. Switch to a model the plan includes, lower the context-window override, or upgrade the subscription.`,
       }
     }
@@ -247,12 +270,18 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       return {
         code: 'PROVIDER_ERROR',
         retryable: false,
+        // A spent window is this account's own quota. The 403 carries neither a
+        // dead credential nor a signal worth retrying against the same account,
+        // which is exactly why rotation has to be told about it separately: the
+        // pool's remaining accounts each carry a window of their own.
+        accountScoped: true,
         message: `${PROVIDER_NAME} blocked the request on an account limit (403): ${detail || (limitReached ? 'the account limit was reached' : 'the account refused the request')}. The quota refreshes on its own schedule — check the Kimi Code card in Settings for the reset time.`,
       }
     }
     return {
       code: 'INVALID_CREDENTIAL',
       retryable: false,
+      accountScoped: false,
       message: `${PROVIDER_NAME} rejected the stored credential (401). Sign in again from Settings > Kimi Code.${detail ? ` ${detail}` : ''}`,
     }
   }
@@ -264,12 +293,17 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       return {
         code: 'PROVIDER_ERROR',
         retryable: false,
+        // Balance, not back-pressure: this account's own, and it stays spent.
+        accountScoped: true,
         message: `${PROVIDER_NAME} reports the account quota is exhausted: ${detail || 'no remaining quota'}. Top up or wait for the window to reset.`,
       }
     }
     return {
       code: 'RATE_LIMIT',
       retryable: true,
+      // Ordinary back-pressure says nothing about this account in particular,
+      // and the shared 429 cooldown below already rotates on it.
+      accountScoped: false,
       message: `${PROVIDER_NAME} is rate limited or overloaded (429): ${detail || 'too many requests'}. Retrying with backoff.`,
     }
   }
@@ -281,6 +315,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     return {
       code: 'SERVER',
       retryable: true,
+      accountScoped: false,
       message: `${PROVIDER_NAME} upstream server error (${status}): ${detail || 'the model provider is temporarily unavailable'}. Retrying with backoff.`,
     }
   }
@@ -289,6 +324,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     return {
       code: 'PROVIDER_ERROR',
       retryable: false,
+      accountScoped: false,
       message: `${PROVIDER_NAME} rejected the request (400): ${detail || 'the request was not accepted'}`,
     }
   }
@@ -296,8 +332,50 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
   return {
     code: 'PROVIDER_ERROR',
     retryable: false,
+    accountScoped: false,
     message: `${PROVIDER_NAME} API error (${status}): ${detail || 'No response'}`,
   }
+}
+
+/** Numeric reset the service may ship as a field rather than in prose. */
+const RESET_FIELD_PATTERN = /"?reset[A-Za-z_]*"?\s*[:=]\s*"?(\d{9,16})"?/i
+
+/** ISO instant quoted in prose, trusted only when it names its own zone. */
+const RESET_INSTANT_PATTERN = /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})/
+
+/** The window a billing-cycle refusal names; nothing shorter describes it. */
+const BILLING_CYCLE_PATTERN = /usage limit for this billing cycle/i
+
+/**
+ * How long one account stays out of rotation after it reports a spent limit.
+ *
+ * The reset instant is read from the body whenever the service states one — as a
+ * numeric field, or as an instant carrying its own zone — and the length of the
+ * window the service names is used otherwise. The zone is required for that
+ * instant because an unqualified one is ambiguous, and a cooldown computed from
+ * the wrong zone is either hours too long or already over; where the body is
+ * ambiguous the window length is the honest answer.
+ *
+ * Both ends of the range are load-bearing. A reset instant barely in the future
+ * would otherwise read as no cooldown at all and put the account straight back
+ * into rotation to be refused again; and a reset instant already in the past
+ * (a stale cache, a clock skew) falls back to the window length above rather
+ * than to no cooldown at all.
+ */
+export function accountLimitCooldownMs(bodyText: string, now: number = Date.now()): number {
+  const field = bodyText.match(RESET_FIELD_PATTERN)
+  const instant = bodyText.match(RESET_INSTANT_PATTERN)
+  const resetsAt = field !== null
+    ? parseTimestamp(Number(field[1]))
+    : instant !== null
+      ? Date.parse(instant[0].replace(' ', 'T'))
+      : null
+  if (resetsAt !== null && Number.isFinite(resetsAt) && resetsAt > now) {
+    return Math.min(Math.max(resetsAt - now, POOL_COOLDOWN_MS), MAX_ACCOUNT_LIMIT_COOLDOWN_MS)
+  }
+  return BILLING_CYCLE_PATTERN.test(bodyText)
+    ? BILLING_CYCLE_COOLDOWN_MS
+    : ACCOUNT_LIMIT_COOLDOWN_MS
 }
 
 export interface KimiCodeAdapterOptions {
@@ -317,6 +395,24 @@ export interface KimiCodeAdapterOptions {
 
 /** Cooldown one rate-limited account takes when the provider states no delay. */
 const POOL_COOLDOWN_MS = 15 * 60_000
+
+/**
+ * Fallback cooldown for an account whose usage window is spent.
+ *
+ * The service states the reset time only sometimes, so the fallback is the
+ * window's own length. The 15 minutes a 429 gets would put the account back
+ * into rotation four times inside the very window that just refused it.
+ */
+const ACCOUNT_LIMIT_COOLDOWN_MS = 5 * 60 * 60_000
+
+/**
+ * A billing cycle is not a window: a 5-hour cooldown would spend a request every
+ * five hours to learn an answer that changes at most once a month.
+ */
+const BILLING_CYCLE_COOLDOWN_MS = 30 * 24 * 60 * 60_000
+
+/** Ceiling, so a malformed reset time cannot park an account for years. */
+const MAX_ACCOUNT_LIMIT_COOLDOWN_MS = BILLING_CYCLE_COOLDOWN_MS
 
 export class KimiCodeAdapter extends LlmAdapter {
   /**
@@ -616,12 +712,27 @@ export class KimiCodeAdapter extends LlmAdapter {
         // would take the whole pool offline.
         const planScoped = response.status === 429 && matchesAny(detail, ENTITLEMENT_PATTERNS)
         if (response.status === 429 && !planScoped) {
-          await pool.markCooldown(accountId, after ?? POOL_COOLDOWN_MS, `${PROVIDER_NAME} 429`).catch(() => undefined)
+          // A spent balance is this account's own and stays spent, so it takes
+          // the window's length rather than the retry-after of a back-pressure
+          // signal that would have meant nothing here.
+          const cooldownMs = failure.accountScoped
+            ? accountLimitCooldownMs(detail)
+            : after ?? POOL_COOLDOWN_MS
+          await pool.markCooldown(accountId, cooldownMs, `${PROVIDER_NAME} 429`).catch(() => undefined)
           if (await pool.hasAnotherAvailableAccount(tried)) continue
         } else if (failure.code === 'INVALID_CREDENTIAL') {
           // A dead refresh token is that account's problem alone: keep the
           // account (signing in again restores it) and take it out of rotation.
           await pool.markAuthFailed(accountId, failure.message).catch(() => undefined)
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+        } else if (failure.accountScoped) {
+          // A usage window this account has spent, which this service reports as
+          // a 403. Neither of the branches above recognizes it — the credential
+          // is fine and the request must not be retried against the same account
+          // — so before this branch existed a pool of several accounts failed the
+          // whole turn on whichever one happened to be first. Cooling this one
+          // until its window resets is what lets the next account answer.
+          await pool.markCooldown(accountId, accountLimitCooldownMs(detail), `${PROVIDER_NAME} 403`).catch(() => undefined)
           if (await pool.hasAnotherAvailableAccount(tried)) continue
         }
       }
