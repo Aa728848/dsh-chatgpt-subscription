@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **[Kimi Code] 图片超预算时按需缩放而非丢弃，稳定提示缓存前缀**
+  - **现象**：一次 UI 走查连续贴入 10 张 1440×1000 截图时，`cacheReadTokens` 四次断崖式下跌（100,864 → 16,384 等），合计约 13.3 万 token 被迫按未命中全价重算。
+  - **根本原因**：Kimi 网关对单次请求的**整个消息体**限制 2 MB（官方报错 `total message size N exceeds limit 2097152`），图片 base64 与对话文本、工具 Schema、System Prompt 共享该额度。插件的 `MAX_REQUEST_IMAGE_BYTES`（1.5 MB）超出后，`offloadOldestRequestImages` 从最旧的图开始丢弃。**丢弃张数随每张新图递增，而每次变化都会重写保留前缀，于是下一轮缓存再次失效**——第 4、6、8、10 张图各触发一次，四次全部落在图片注入之后。
+  - **修复方案**：
+    - `resolveRequestImages` 对长边超过 1024 px 的图片调用 Harness 的 `attachments.readImageRequest` 派生缩小版本（目标 256 KiB 原始字节，约 350 KiB base64，四张可落入 1.5 MB 预算），已在限额内的图片保持原字节不变。存储的原图与会话历史均不作修改。
+    - **为何按长边而非累加字节判定**：`readImageRequest` 的 `variantId` 由附件与目标内容寻址，同一张图在每一轮得到同一个 target，字节恒定；若改按累加量动态调整 target，每新增一张图都会改写全部旧图字节，反而造成更频繁的缓存击穿。
+    - **降级容错**：派生版本仍超边长时优雅降级为 `[image unavailable]` 占位文本；派生失败同样降级；用户主动取消（Abort）正常透传。
+    - `offloadOldestRequestImages` 的丢弃逻辑保留为总量兜底，仅在原图大到缩放也装不下时触发。
+  - **测试与验证**：新增 11 项回归测试（长边/竖图缩放、已在限额内逐字节原样发送、十张 QA 图不再触发丢弃、派生超限与失败降级、取消透传）；`npm run typecheck`、`npm test`（2467 passed / 7 skipped）与 `npm run build` 全部通过。
+  - **已知限制**：十张 1440×1000 截图缩放后仍超出 1.5 MB 预算，需缩到 1000 px 宽以内（四张以内）方可全量保留；本改动的作用是使省略数量不再随新增图片递增，从而不再反复击穿缓存。
+
 - **[Antigravity] Claude 工具 Schema 兼容降级处理（[#39](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/39)）**
   - **背景与现象**：Claude 对出站工具的 JSON Schema 要求较严苛，包含复杂联合类型时容易报错。
   - **解决方案**：

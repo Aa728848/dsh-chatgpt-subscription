@@ -199,8 +199,15 @@ export function thinkingBudgetFor(effort: KimiCodeReasoningEffort | undefined, m
 // Durable request images
 // ---------------------------------------------------------------------------
 
-/** Attachment seam this route needs: verified bytes for one durable image. */
-export type AttachmentImageReader = Pick<AttachmentStore, 'readImage'>
+/**
+ * Attachment seam this route needs: verified bytes for one durable image, and a
+ * downscaled request version of one that does not fit the image budget.
+ *
+ * Every harness generation in the peer range declares readImageRequest; a
+ * backend that cannot derive request versions rejects the call, and that
+ * rejection is handled like any other unreadable image.
+ */
+export type AttachmentImageReader = Pick<AttachmentStore, 'readImage' | 'readImageRequest'>
 
 /** One durable user image resolved for an in-flight request, or proven unreadable. */
 export type ResolvedRequestImage =
@@ -301,6 +308,50 @@ function collectRequestImageBytes(content: unknown, lengths: number[]): void {
 }
 
 /**
+ * Longest edge any image of this request may keep.
+ *
+ * Kimi's own client compresses an oversized image down to roughly 2 MB of raw
+ * bytes before it sends it, and this route has to fit every image of one request
+ * inside a far smaller shared budget. Screening on the long edge rather than on
+ * the encoded size is what makes the decision stable: it reads only the
+ * attachment's own dimensions, so the same image yields the same target in every
+ * later turn and the cached prefix survives.
+ */
+export const REQUEST_IMAGE_MAX_EDGE = 1024
+
+/**
+ * Encoded-byte target for one downscaled request version.
+ *
+ * CHOICE: 256 KiB of raw bytes is about 350 KiB of base64, so four images fit
+ * the 1.5 MB budget with room left for the conversation text, tool schemas and
+ * system prompt that share the 2 MB body. Four is the point where a UI review
+ * still reads the shots it needs, and the target is a per-image ceiling rather
+ * than a per-request one so the same image is transformed identically in every
+ * later turn. When no quality level meets the target the harness keeps its
+ * smallest output.
+ */
+const REQUEST_IMAGE_VERSION_MAX_BYTES = 256 * 1024
+
+/**
+ * Request-version target for one stored image whose long edge is over the
+ * ceiling, or undefined when it fits and is sent as stored.
+ *
+ * A reference without usable dimensions is sent as stored: there is no basis
+ * for choosing a target, and the budget fallback still applies to it.
+ */
+export function requestImageTarget(
+  ref: ImageAttachmentRef,
+  edge: number = REQUEST_IMAGE_MAX_EDGE,
+): { width: number; height: number; maxBytes: number } | undefined {
+  const { width, height } = ref
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined
+  if (Math.max(width, height) <= edge) return undefined
+  return width >= height
+    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+}
+
+/**
  * Replace the oldest inline images with a text placeholder once one request
  * would carry more than `maxBytes` of base64 image data.
  *
@@ -351,6 +402,19 @@ export function offloadOldestRequestImages(
  * Read every durable `{ type: 'image', attachment }` block one request carries.
  * An unreadable image resolves to `unavailable` rather than disappearing, so
  * the model is told the picture is missing instead of answering about a blank.
+ *
+ * An image whose long edge is over {@link REQUEST_IMAGE_MAX_EDGE} is sent as the
+ * harness's downscaled request version (see {@link requestImageTarget}). The
+ * stored image and durable history do not change, and an image that already
+ * fits is sent byte-for-byte as stored.
+ *
+ * WHY scale instead of drop. `offloadOldestRequestImages` has to drop an image
+ * once the request exceeds `MAX_REQUEST_IMAGE_BYTES`, and the number it drops
+ * grows with every later image. Each change rewrites the retained prefix, so the
+ * prompt cache is invalidated again on the very next turn. Scaling keeps the
+ * image COUNT stable, which is what preserves that prefix: a conversation that
+ * outgrew the budget once stays inside it instead of breaking the cache every
+ * time an image is added.
  */
 export async function resolveRequestImages(
   options: GenerateOptions,
@@ -368,6 +432,14 @@ export async function resolveRequestImages(
       return
     }
     try {
+      const target = requestImageTarget(ref)
+      if (target !== undefined) {
+        const version = await attachments.readImageRequest(ref, target, signal)
+        resolved.set(attachmentId, Math.max(version.width, version.height) > REQUEST_IMAGE_MAX_EDGE
+          ? { kind: 'unavailable' }
+          : { kind: 'inline', mediaType: version.mediaType, data: Buffer.from(version.data).toString('base64') })
+        return
+      }
       const stored = await attachments.readImage(ref, signal)
       resolved.set(attachmentId, {
         kind: 'inline',
