@@ -480,6 +480,12 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // shared on purpose, but Kimi's 1.5 MB NUMBER is sized for Kimi's 2 MB
     // request limit; over here it replaced a single ordinary 10 MB MiniMax image
     // with a placeholder and said nothing. See maxRequestImageBytes in ./types.ts.
+    // The byte budget is the only attachment ceiling this route applies. The
+    // catalog also carries a per-model attachment count, but a live probe
+    // against the subscription endpoint served 48 inline images on M3 without
+    // complaint, so that number describes the FILES API (which this line does not
+    // implement) rather than the inline path. Enforcing it here would drop
+    // images the service accepts for free. See maxAttachments in ./model-catalog.
     const requestOptions = offloadOldestRequestImages(
       normalizeGenerateOptions(options),
       maxRequestImageBytes(),

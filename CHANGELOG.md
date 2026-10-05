@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- **[MiniMax Code] 按官方文档更正 thinking 控制字段**
+  - **背景**：与官方开源客户端 `MiniMax-AI/minimax-code`（`56221c1`）对照后，逐项核对 MiniMax 官方文档
+    `platform.minimax.io/docs/guides/text-generation.md`，发现 thinking 控制字段的形状与文档不符。
+  - **thinking 字段更正**（经实测确认）：
+    - 文档明确 **Thinking is on by default and needs no configuration**。原实现发送的
+      `thinking: {type:'enabled', effort}` 是**从未被文档支持的推断字段**——这也解释了为什么它
+      一直「生效」：思考之所以出现是因为模型默认就在思考，与该字段是否被读取无关。
+      现**完全不再发送 `thinking` 对象**。
+    - 文档的协议对照表规定 Anthropic 兼容面的思考深度字段是**顶层 `output_config.effort`**，
+      而非 thinking 对象内部。原实现把 `effort` 放错了层级，服务端不会读取。
+    - 文档的 effort 取值只有 `low` / `medium` / `high` / `xhigh` / `max`，且**省略即 max**。
+      原实现的 `'default'` 是本地占位值，现不会到达 wire；调用方未指定时整个 `output_config` 字段不出现。
+    - 实测确认：用一个需要真实推理的题目，`low` 约 1.1–1.3K 输出 / 11–14s，`max` 4000 输出触顶 /
+      51–62s，约 3 倍思考量、4 倍延迟，字段确实被读取。（用简单题目测会得到「无差异」的**假阴性**——
+      任何档位下思考量都相同。）
+  - **实测纠正一处误判**：曾按「`maxAttachments` 只声明、无人执行」为它新增按数量截断，随后用已登录账号
+    实测发现 **M3 带 4/5/8/9/10/12/20/48 张内联图全部返回 200**，订阅端点对内联图片**没有数量上限**。
+    该字段来自模型的 **Files API 能力块**（`max_attachments_count`），描述的是**上传路径**，
+    而本线路从不走上传——与 `filesApiDocumented` 描述的是同一件事。**按数量截断只会白白丢掉服务
+    免费接受的图片，已回退**；字段文档改写为「Files API 的数字，本线路不上传」。
+    教训：「声明了却无人执行」不总是 bug，先要确认那个声明描述的是不是自己走的路径。
+  - **补齐缺失的请求形状测试**：此前 `thinkingFieldFor` / `body.thinking` / `output_config` 在整个
+    测试树中**零命中**——现有的 thinking 回放用例只检查**响应侧**，所以请求体字段写错永远不会被发现，
+    这正是该推断字段能长期存活的原因。新增 7 例锁定：任何模型任何档位都不发送 `thinking` 键、
+    effort 落在顶层、省略时字段不存在、非法档位不落到 wire。
+  - **验证**：`tsc -b --force` 与 `tsc -p test/tsconfig.json` 通过；`vitest run` 2529 passed / 7 skipped；
+    `npm run build` 通过。
+  - **留待决策 / 实测**：
+    - 官方文档规定**省略 effort 即为 max**，而 `max` 档在 4000 输出上限下就已触顶。这意味着
+      **未指定档位的请求默认跑在最贵档位**。这是文档定义的行为而非缺陷，但是否把默认降到 `high`
+      值得作为产品决策复核。
+    - 实测确认 **M3 可以关闭思考**（`effort:'none'` 生效），**M3.1 忽略它并继续思考**，与官方文档一致，
+      因此现有的 `toggle` / `forced-effort` 划分保持不变。
+    - M3 上下文 512K（本线路，抄自订阅 `config.yaml`）vs 1M（平台文档）口径不同，需约 4 MB 提示才能
+      验证，**未获授权前不烧额度**，保持原样。
 - **[Kimi Code] 对齐官方客户端的 K 系列模型能力，修复两处正确性缺陷与一处并发归因错误**
   - **背景**：与官方开源客户端 `MoonshotAI/kimi-code`（`21406fb`）逐文件对照后的 11 项差距，分四批落地。
   - **正确性**：

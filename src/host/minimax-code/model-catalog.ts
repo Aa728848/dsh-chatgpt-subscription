@@ -67,7 +67,17 @@ export interface MinimaxCodeCatalogModel {
   reasoningEfforts: readonly MinimaxCodeReasoningEffort[]
   /** Level used when the conversation does not pick one. */
   defaultReasoningEffort: MinimaxCodeReasoningEffort
-  /** Attachments one request may carry, when the model states a bound. */
+  /**
+   * Attachments the model's FILES API accepts, when it states a bound.
+   *
+   * This is the max_attachments_count that ships with the model's file-API
+   * capability block, NOT a limit on the inline images this line sends. A live
+   * probe of the subscription endpoint served 4, 5, 8, 9, 10, 12, 20 and 48
+   * inline images on M3 with HTTP 200, so enforcing this number on the inline
+   * path would drop images the service accepts. It is reported because the
+   * Files API question is real, and for the same reason as filesApiDocumented:
+   * this line uploads nothing.
+   */
   maxAttachments: number | null
   /** Largest single image the model accepts, in bytes. */
   maxImageBytes: number | null
@@ -151,6 +161,9 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxTokens: 128_000,
     inputModalities: ['text', 'image'],
     thinking: 'forced-effort',
+    // The documented depth levels. `default` is deliberately NOT a wire value:
+    // the docs say omitting `effort` means max, so it is a local spelling for
+    // "the caller picked nothing" and `outputConfigFor` drops it before sending.
     reasoningEfforts: ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'default',
     maxAttachments: 4,

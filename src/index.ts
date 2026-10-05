@@ -1280,7 +1280,7 @@ export {
   maxMessageBodyBytes as minimaxCodeMaxMessageBodyBytes,
   maxOutputTokensFor as minimaxCodeMaxOutputTokens,
   processMinimaxStreamLine,
-  thinkingFieldFor as minimaxCodeThinkingField,
+  outputConfigFor as minimaxCodeOutputConfig,
   type MinimaxStreamState,
 } from './host/minimax-code/mapper.ts'
 export {
