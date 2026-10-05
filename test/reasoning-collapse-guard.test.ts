@@ -9,6 +9,7 @@ import {
   collapseScore,
   installReasoningCollapseGuard,
   resolveGuardOptions,
+  type GuardAgentEventListener,
   type GuardAgentLike,
   type GuardChunk,
   type GuardOptions,
@@ -48,19 +49,42 @@ const HEALTHY_ENUMERATIVE = fixture('healthy-enumerative-reasoning.txt')
 const SHORT_REPETITIVE = fixture('short-repetitive-reasoning.txt')
 
 interface RecordingAgent extends GuardAgentLike {
+  readonly id: string
   readonly cancels: Array<{ cause: unknown; options: unknown }>
   readonly steers: unknown[]
+  /** Set by a test to prove a failed resume is reported instead of dropped. */
+  steerError?: Error
 }
 
-function recordingAgent(): RecordingAgent {
+function recordingAgent(id = 'session-a'): RecordingAgent {
   const cancels: Array<{ cause: unknown; options: unknown }> = []
   const steers: unknown[] = []
-  return {
+  // A real method, not an arrow: `steer` reads its own receiver so a test can
+  // arm `steerError` on the same object the guard was handed.
+  const agent: RecordingAgent = {
+    id,
     cancels,
     steers,
-    cancel: (cause, options) => { cancels.push({ cause, options }) },
-    steer: (message) => { steers.push(message) },
+    cancel(cause, options) { cancels.push({ cause, options }) },
+    steer(message) {
+      if (this.steerError !== undefined) throw this.steerError
+      steers.push(message)
+    },
   }
+  return agent
+}
+
+/** A loop-built request: it names the session whose Agent owns the stream. */
+function turnRequest(
+  signal: AbortSignal,
+  extra: { model?: string; sessionId?: string; purpose?: string } = {},
+): GuardStreamOptions {
+  return { model: 'm', sessionId: 'session-a', ...extra, signal }
+}
+
+interface HarnessOptions {
+  /** Omit the `ctx.agents` service, as a host without the registry would. */
+  readonly registry?: boolean
 }
 
 interface Harness {
@@ -71,13 +95,26 @@ interface Harness {
   readonly dispatch: (options: GuardStreamOptions) => AsyncIterable<GuardChunk>
   /** Number of listeners still registered on each event. */
   readonly listeners: () => { stream: number; agent: number }
+  /** Deliver `agent/created` once, at creation, as the harness does. */
+  readonly created: (agent: RecordingAgent) => void
+  /** Deliver `agent/disposed` once, as the harness does. */
+  readonly disposed: (agent: RecordingAgent) => void
 }
 
-function harness(script: GuardChunk[][], agent?: RecordingAgent): Harness {
+function harness(
+  script: GuardChunk[][],
+  agents?: RecordingAgent | RecordingAgent[],
+  options: HarnessOptions = {},
+): Harness {
   const queue = [...script]
   const warnings: string[] = []
+  // Agents handed to the harness already exist: the guard under test is
+  // installed after they were created, exactly like a plugin load that follows
+  // an open session.
+  const live = new Set<RecordingAgent>(agents === undefined ? [] : Array.isArray(agents) ? agents : [agents])
   const streams = new Set<GuardStreamListener>()
-  const created = new Set<(payload: { agent: unknown }) => void>()
+  const created = new Set<GuardAgentEventListener>()
+  const disposed = new Set<GuardAgentEventListener>()
   const ctx: ReasoningCollapseContext = {
     on(event, listener) {
       if (event === 'llm/stream') {
@@ -85,14 +122,18 @@ function harness(script: GuardChunk[][], agent?: RecordingAgent): Harness {
         streams.add(typed)
         return () => { streams.delete(typed) }
       }
-      const typed = listener as (payload: { agent: unknown }) => void
-      created.add(typed)
-      // The harness reports the agent before any plugin subscribes, so a
-      // `agent/created` listener registered afterwards still receives it.
-      if (agent !== undefined) typed({ agent })
-      return () => { created.delete(typed) }
+      // The harness reports an agent once, when it is created, and never
+      // replays it to a listener that subscribes later — so a guard installed
+      // after the session started must still resolve that agent another way.
+      const lifecycle = event === 'agent/disposed' ? disposed : created
+      const typed = listener as GuardAgentEventListener
+      lifecycle.add(typed)
+      return () => { lifecycle.delete(typed) }
     },
     logger: { warn: (message: string) => { warnings.push(message) } },
+    ...options.registry === false ? {} : {
+      agents: { get: (id: unknown) => [...live].find(agent => agent.id === id) },
+    },
   }
   // One scripted response per `next` *call*, not per stream: the guard invokes
   // `next()` itself, and a factory that shifted the queue would hand the
@@ -118,7 +159,15 @@ function harness(script: GuardChunk[][], agent?: RecordingAgent): Harness {
     warnings,
     source,
     dispatch,
-    listeners: () => ({ stream: streams.size, agent: created.size }),
+    listeners: () => ({ stream: streams.size, agent: created.size + disposed.size }),
+    created: (agent: RecordingAgent) => {
+      live.add(agent)
+      for (const cb of created) cb({ agent })
+    },
+    disposed: (agent: RecordingAgent) => {
+      live.delete(agent)
+      for (const cb of disposed) cb({ agent })
+    },
   }
 }
 
@@ -223,7 +272,7 @@ describe('detection', () => {
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    const chunks = await run(test, { model: 'test-model', signal: new AbortController().signal })
+    const chunks = await run(test, turnRequest(new AbortController().signal, { model: 'test-model' }))
 
     // The stream ends before its finish chunk: the truncated attempt is what
     // stops the runaway, not the output-token ceiling.
@@ -239,7 +288,7 @@ describe('detection', () => {
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    await run(test, { model: 'm', signal: new AbortController().signal })
+    await run(test, turnRequest(new AbortController().signal))
     await settle()
 
     expect(agent.steers).toHaveLength(1)
@@ -259,7 +308,7 @@ describe('detection', () => {
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    await run(test, { model: 'm', signal: new AbortController().signal })
+    await run(test, turnRequest(new AbortController().signal))
     await settle()
 
     // The guard's own steer call cannot fail silently: the harness validates
@@ -283,6 +332,7 @@ describe('detection', () => {
   it('defers the resume past the abort, so a turn unwinding cannot discard it', async () => {
     const order: string[] = []
     const agent: RecordingAgent = {
+      id: 'session-a',
       cancels: [],
       steers: [],
       cancel: (cause, options) => { order.push('cancel'); agent.cancels.push({ cause, options }) },
@@ -291,7 +341,7 @@ describe('detection', () => {
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    const iterator = test.dispatch({ model: 'm', signal: new AbortController().signal })
+    const iterator = test.dispatch(turnRequest(new AbortController().signal))
 
     await drain(iterator)
     await settle()
@@ -309,9 +359,9 @@ describe('detection', () => {
     // shipped default would treat the second as part of the first incident.
     installReasoningCollapseGuard(test.ctx, { cooldownMs: 0, now: () => 0 })
 
-    await run(test, { model: 'm', signal })
+    await run(test, turnRequest(signal))
     await settle()
-    await run(test, { model: 'm', signal })
+    await run(test, turnRequest(signal))
     await settle()
 
     expect(agent.cancels).toHaveLength(2)
@@ -334,7 +384,7 @@ describe('detection', () => {
     installReasoningCollapseGuard(test.ctx, { maxBreaksPerTurn: 2, cooldownMs: 0, now: () => 0 })
 
     for (let i = 0; i < 4; i++) {
-      await run(test, { model: 'm', signal })
+      await run(test, turnRequest(signal))
       await settle()
     }
 
@@ -346,8 +396,8 @@ describe('detection', () => {
     const test = harness([reasoningChunks(COLLAPSED), reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { maxBreaksPerTurn: 1, now: () => 0 })
 
-    await run(test, { model: 'm', signal: new AbortController().signal })
-    await run(test, { model: 'm', signal: new AbortController().signal })
+    await run(test, turnRequest(new AbortController().signal))
+    await run(test, turnRequest(new AbortController().signal))
 
     expect(agent.cancels).toHaveLength(2)
   })
@@ -362,7 +412,7 @@ describe('detection', () => {
       const test = harness([reasoningChunks(text)], agent)
       installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-      const chunks = await run(test, { model: 'm', signal: new AbortController().signal })
+      const chunks = await run(test, turnRequest(new AbortController().signal))
 
       expect(chunks.some(chunk => chunk.type === 'finish'), label).toBe(true)
       expect(agent.cancels, label).toHaveLength(0)
@@ -375,7 +425,7 @@ describe('detection', () => {
     const test = harness([reasoningChunks(SHORT_REPETITIVE)], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    await run(test, { model: 'm', signal: new AbortController().signal })
+    await run(test, turnRequest(new AbortController().signal))
 
     expect(agent.cancels).toHaveLength(0)
   })
@@ -393,7 +443,7 @@ describe('detection', () => {
     const test = harness([chunks], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    await run(test, { model: 'm', signal: new AbortController().signal })
+    await run(test, turnRequest(new AbortController().signal))
 
     expect(agent.cancels).toHaveLength(1)
   })
@@ -402,11 +452,142 @@ describe('detection', () => {
     const test = harness([reasoningChunks(COLLAPSED)])
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    const chunks = await run(test, { model: 'm', signal: new AbortController().signal })
+    const chunks = await run(test, turnRequest(new AbortController().signal))
 
     // Without an agent there is nothing to resume, but the runaway is still cut
     // short rather than left to burn the budget.
     expect(chunks.some(chunk => chunk.type === 'finish')).toBe(false)
+  })
+})
+
+describe('agent resolution', () => {
+  it('resumes the session that owns the stream, not the newest agent', async () => {
+    // The reported failure: a host runs one Agent per session plus one per
+    // subagent, so "the last agent created" is usually a different
+    // conversation. The runaway was cut and the resume went elsewhere, which
+    // reads to the user as a turn that simply stops.
+    const root = recordingAgent('session-a')
+    const child = recordingAgent('session-b')
+    const test = harness([reasoningChunks(COLLAPSED)], [root, child])
+    // The child is created last, so the fallback map's newest entry is the one
+    // that must NOT be addressed.
+    test.created(child)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    expect(root.cancels).toHaveLength(1)
+    expect(root.steers).toHaveLength(1)
+    expect(child.cancels).toHaveLength(0)
+    expect(child.steers).toHaveLength(0)
+  })
+
+  it('resumes an agent that already existed when the guard was installed', async () => {
+    // `agent/created` fires once per agent and is never replayed, so an agent
+    // that started before the plugin loaded can only be found through the
+    // registry. Without it the break cut the runaway and resumed nothing.
+    const agent = recordingAgent('session-a')
+    const test = harness([reasoningChunks(COLLAPSED)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    expect(agent.cancels).toHaveLength(1)
+    expect(agent.steers).toHaveLength(1)
+  })
+
+  it('picks up a registry that only appears after the guard was installed', async () => {
+    // A Cordis context throws when a service is not injected yet, so a plugin
+    // that loads before the agent registry must still find it later. Reading
+    // the registry once at install would have lost it for good.
+    const agent = recordingAgent('session-a')
+    const test = harness([reasoningChunks(COLLAPSED)], undefined, { registry: false })
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+    const base = test.ctx as { agents?: unknown }
+    expect(base.agents).toBeUndefined()
+    base.agents = { get: (id: unknown) => (id === agent.id ? agent : undefined) }
+
+    await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    expect(agent.steers).toHaveLength(1)
+  })
+
+  it('falls back to the agent/created map on a host with no registry', async () => {
+    const agent = recordingAgent('session-a')
+    const test = harness([reasoningChunks(COLLAPSED)], agent, { registry: false })
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+    // The guard was installed first, so the map is empty until the agent is
+    // announced — the only way a registry-less host can be addressed.
+    test.created(agent)
+
+    await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    expect(agent.steers).toHaveLength(1)
+  })
+
+  it('stops resuming an agent the host has disposed', async () => {
+    const agent = recordingAgent('session-a')
+    const test = harness([reasoningChunks(COLLAPSED)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+    test.disposed(agent)
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    // A disposed session is not a live one to steer: still cut, never resumed.
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(false)
+    expect(agent.cancels).toHaveLength(0)
+    expect(agent.steers).toHaveLength(0)
+  })
+
+  it('leaves auxiliary calls alone', async () => {
+    for (const purpose of ['compaction', 'session-title']) {
+      const agent = recordingAgent('session-a')
+      const test = harness([reasoningChunks(COLLAPSED)], agent)
+      installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+      const chunks = await run(test, turnRequest(new AbortController().signal, { purpose }))
+
+      // A one-shot call owns no turn to resume, and truncating it is a hard
+      // error rather than a runaway.
+      expect(chunks.some(chunk => chunk.type === 'finish'), purpose).toBe(true)
+      expect(agent.cancels, purpose).toHaveLength(0)
+    }
+  })
+
+  it('reports a resume it could not build instead of dropping it', async () => {
+    const agent = recordingAgent('session-a')
+    agent.steerError = new Error('inbox is sealed')
+    const test = harness([reasoningChunks(COLLAPSED)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    // The break is already taken; a steer that throws must be reported on top
+    // of it, not surface as an unhandled rejection.
+    expect(test.warnings.join(' ')).toContain('could not queue the resume')
+    expect(test.warnings.join(' ')).toContain('inbox is sealed')
+  })
+
+  it('names the session and the failed resume in the log', async () => {
+    const owned = harness([reasoningChunks(COLLAPSED)], recordingAgent('session-a'))
+    installReasoningCollapseGuard(owned.ctx, { now: () => 0 })
+    await run(owned, turnRequest(new AbortController().signal))
+
+    const orphan = harness([reasoningChunks(COLLAPSED)])
+    installReasoningCollapseGuard(orphan.ctx, { now: () => 0 })
+    await run(orphan, turnRequest(new AbortController().signal, { sessionId: 'session-gone' }))
+
+    expect(owned.warnings.join(' ')).toContain('session session-a')
+    expect(owned.warnings.join(' ')).not.toContain('no agent to resume')
+    // A break that cannot resume is otherwise indistinguishable from a turn
+    // that simply stopped, so the log has to say which one happened.
+    expect(orphan.warnings.join(' ')).toContain('session session-gone, no agent to resume')
   })
 })
 describe('model scope', () => {
@@ -415,7 +596,7 @@ describe('model scope', () => {
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { includeModels: ['some-other-model'], now: () => 0 })
 
-    const chunks = await run(test, { model: 'm', signal: new AbortController().signal })
+    const chunks = await run(test, turnRequest(new AbortController().signal))
 
     expect(agent.cancels).toHaveLength(0)
     expect(chunks.some(chunk => chunk.type === 'finish')).toBe(true)
@@ -426,7 +607,7 @@ describe('model scope', () => {
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     installReasoningCollapseGuard(test.ctx, { now: () => 0 })
 
-    await run(test, { model: 'any-model', signal: new AbortController().signal })
+    await run(test, turnRequest(new AbortController().signal, { model: 'any-model' }))
 
     expect(agent.cancels).toHaveLength(1)
   })
@@ -440,9 +621,9 @@ describe('cooldown and disposal', () => {
     let clock = 0
     installReasoningCollapseGuard(test.ctx, { cooldownMs: 30_000, now: () => clock })
 
-    await run(test, { model: 'm', signal })
+    await run(test, turnRequest(signal))
     clock = 1000
-    await run(test, { model: 'm', signal })
+    await run(test, turnRequest(signal))
 
     expect(agent.cancels).toHaveLength(1)
   })
@@ -454,23 +635,24 @@ describe('cooldown and disposal', () => {
     let clock = 0
     installReasoningCollapseGuard(test.ctx, { cooldownMs: 30_000, now: () => clock })
 
-    await run(test, { model: 'm', signal })
+    await run(test, turnRequest(signal))
     clock = 31_000
-    await run(test, { model: 'm', signal })
+    await run(test, turnRequest(signal))
 
     expect(agent.cancels).toHaveLength(2)
   })
 
-  it('removes both listeners on disposal', async () => {
+  it('removes every listener on disposal', async () => {
     const agent = recordingAgent()
     const test = harness([reasoningChunks(COLLAPSED)], agent)
     const dispose = installReasoningCollapseGuard(test.ctx, { now: () => 0 })!
 
-    expect(test.listeners()).toEqual({ stream: 1, agent: 1 })
+    // One stream listener plus the two agent lifecycle listeners.
+    expect(test.listeners()).toEqual({ stream: 1, agent: 2 })
     dispose()
     expect(test.listeners()).toEqual({ stream: 0, agent: 0 })
 
-    await run(test, { model: 'm', signal: new AbortController().signal })
+    await run(test, turnRequest(new AbortController().signal))
     expect(agent.cancels).toHaveLength(0)
   })
 })

@@ -29,15 +29,36 @@
  * The guard rewrites nothing and appends nothing to the aborted attempt. Its
  * only model-visible input is the single resume message it queues afterwards,
  * on a fresh turn.
+ *
+ * Agent identity is read from the request, never remembered globally. The loop
+ * stamps every request it builds with its `sessionId`, and `ctx.agents.get`
+ * turns that back into the one Agent that owns the stream. Remembering "the
+ * newest agent this process saw" instead was wrong twice over: a host runs one
+ * Agent per session plus one per subagent, so the newest is usually a different
+ * conversation, and `agent/created` fires once per Agent, so an Agent that
+ * already existed when the guard installed was never reported at all. Both
+ * cases cut the runaway and then resumed nothing, which reads to the user as a
+ * conversation that simply stops mid-answer.
  */
 
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
 
-/** The subset of `llm/stream` options this guard reads. */
+/**
+ * The subset of `llm/stream` options this guard reads.
+ *
+ * `sessionId` is what binds a stream to the Agent that owns it, and
+ * `purpose` tells a conversation call from an auxiliary one (compaction,
+ * session title) that owns no turn to resume. Both are plain request fields:
+ * the guard adds no generation-bound named import to learn them.
+ */
 export interface GuardStreamOptions {
   readonly model?: string | undefined
   readonly signal?: AbortSignal | undefined
+  /** Stamped by the agent loop on every request it builds. */
+  readonly sessionId?: string | undefined
+  /** Absent on an ordinary conversation request; set on an auxiliary call. */
+  readonly purpose?: string | undefined
 }
 
 /** A chunk as it crosses the stream boundary; only the reasoning delta is read. */
@@ -48,6 +69,8 @@ export interface GuardChunk {
 
 /** Live Agent methods the guard calls. Optional so an older shape stays loadable. */
 export interface GuardAgentLike {
+  /** The Agent's session identity — the same value the loop stamps on requests. */
+  readonly id?: unknown
   cancel?(cause: { kind: 'hook'; reason: string }, options?: { keepInbox?: boolean }): void
   steer?(message: unknown): void
 }
@@ -58,11 +81,11 @@ export type GuardStreamListener = (
   next: () => AsyncIterable<GuardChunk>,
 ) => AsyncIterable<GuardChunk>
 
-/** The `agent/created` listener the guard registers. */
-export type GuardAgentCreatedListener = (payload: { agent: unknown }) => void
+/** The `agent/created` / `agent/disposed` listener the guard registers. */
+export type GuardAgentEventListener = (payload: { agent: unknown }) => void
 
 /** Either listener {@link ReasoningCollapseContext.on} accepts. */
-export type GuardListener = GuardStreamListener | GuardAgentCreatedListener
+export type GuardListener = GuardStreamListener | GuardAgentEventListener
 
 /** Listener options accepted by the harness event bus. */
 export interface GuardListenerOptions {
@@ -75,8 +98,18 @@ export interface GuardListenerOptions {
  * every supported harness generation without importing generation-bound types.
  */
 export interface ReasoningCollapseContext {
-  on?: (event: 'llm/stream' | 'agent/created', listener: GuardListener, options?: GuardListenerOptions) => unknown
+  on?: (
+    event: 'llm/stream' | 'agent/created' | 'agent/disposed',
+    listener: GuardListener,
+    options?: GuardListenerOptions,
+  ) => unknown
   logger?: { warn(message: string): void } | undefined
+  /**
+   * The harness Agent registry, read once so a guard installed after an Agent
+   * was created can still resolve it. A host without the service degrades to
+   * the `agent/created` map rather than failing this plugin's load.
+   */
+  readonly agents?: { get(id: unknown): unknown } | undefined
 }
 
 /** Configuration for {@link installReasoningCollapseGuard}. */
@@ -249,6 +282,47 @@ function appendWindow(current: string, addition: string, limit: number): string 
   return combined.length > limit ? combined.slice(-limit) : combined
 }
 
+/** An Agent's session identity as the plain string a request carries. */
+function agentId(raw: unknown): string | undefined {
+  const id = (raw as { id?: unknown } | null | undefined)?.id
+  return typeof id === 'string' ? id : undefined
+}
+
+/**
+ * The host's Agent registry, read defensively.
+ *
+ * A Cordis service that was never injected reads as undefined and a host
+ * without the service at all must not fail this plugin's load, so both the
+ * property read and the later lookup are guarded.
+ */
+function agentRegistry(ctx: ReasoningCollapseContext): { get(id: unknown): unknown } | undefined {
+  try {
+    const registry = ctx.agents
+    return typeof registry?.get === 'function' ? registry : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether one request is a conversation call the guard may stop and resume.
+ *
+ * The loop marks its own requests, but that marker is reached through a named
+ * export this plugin cannot assume on every generation it supports, so the
+ * guard reads the request's own `purpose` field instead: compaction and
+ * session-title calls are one-shot, own no turn to resume, and a truncated one
+ * is a hard error rather than a runaway. A generation that predates the field
+ * leaves it undefined, which is the pre-existing behaviour.
+ */
+function conversationCall(request: GuardStreamOptions): boolean {
+  return request.purpose === undefined
+}
+
+/** Error text for one warn line, without importing a generation-bound helper. */
+function describeError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+}
+
 /**
  * Install the reasoning-collapse guard on a Context.
  *
@@ -257,14 +331,15 @@ function appendWindow(current: string, addition: string, limit: number): string 
  * load.
  *
  * Resuming needs the live Agent for `cancel` and `steer`, and no supported
- * generation hands the agent to `llm/stream`. `agent/created` reports it on
- * every one of them, so the guard tracks the newest agent and keys the per-turn
- * break budget on the request's own abort signal — which exists for a whole
- * turn — rather than on the agent object.
+ * generation hands the agent to `llm/stream`. The request does, though: every
+ * request the loop builds carries its `sessionId`, so the guard resolves the
+ * owning Agent per request through `ctx.agents.get`, falling back to the map
+ * `agent/created` fills. The per-turn break budget stays keyed on the
+ * request's own abort signal, which exists for a whole turn.
  *
  * @param ctx - plugin context.
  * @param options - see {@link GuardOptions}; validated fail-loud.
- * @returns a disposer removing both listeners, or undefined when the host
+ * @returns a disposer removing every listener, or undefined when the host
  * exposes no event bus.
  */
 export function installReasoningCollapseGuard(
@@ -275,13 +350,48 @@ export function installReasoningCollapseGuard(
   if (typeof ctx.on !== 'function') return undefined
   const watched = new Set(resolved.includeModels)
   const breakers = new WeakMap<object, BreakerState>()
-  let currentAgent: GuardAgentLike | undefined
+  // Session id -> Agent, filled by the lifecycle events. A fallback for a host
+  // that exposes no registry, never the primary lookup.
+  const known = new Map<string, GuardAgentLike>()
 
-  const releaseAgent = ctx.on(
-    'agent/created',
-    (payload: { agent: unknown }) => { currentAgent = payload.agent as GuardAgentLike },
-  )
+  const releaseCreated = ctx.on('agent/created', (payload: { agent: unknown }) => {
+    remember(payload.agent)
+  })
+  const releaseDisposed = ctx.on('agent/disposed', (payload: { agent: unknown }) => {
+    const id = agentId(payload.agent)
+    if (id !== undefined) known.delete(id)
+  })
   const releaseStream = ctx.on('llm/stream', guardStream, { global: true })
+
+  function remember(raw: unknown): void {
+    const agent = raw as GuardAgentLike | null | undefined
+    if (agent === undefined || agent === null) return
+    const id = agentId(agent)
+    if (id !== undefined) known.set(id, agent)
+  }
+
+  /**
+   * The Agent that owns one guarded request, or undefined when this host
+   * cannot name it.
+   *
+   * The registry is authoritative and is read first: it answers for an Agent
+   * created before this guard was installed, which is exactly the Agent an
+   * `agent/created` listener can never report. Falling back to the newest
+   * Agent this process saw would cancel and resume a different conversation.
+   */
+  function resolveAgent(sessionId: string | undefined): GuardAgentLike | undefined {
+    if (sessionId === undefined) return undefined
+    try {
+      // Read per break, not once at install: a Cordis context throws when a
+      // service is not injected yet, and a plugin may well load before the
+      // registry that comes up moments later.
+      const registered = agentRegistry(ctx)?.get(sessionId)
+      if (registered !== undefined && registered !== null) return registered as GuardAgentLike
+    } catch {
+      // No registry, or one that refuses the id: the event-filled map answers.
+    }
+    return known.get(sessionId)
+  }
 
   function breakerFor(key: object): BreakerState {
     let state = breakers.get(key)
@@ -304,22 +414,39 @@ export function installReasoningCollapseGuard(
    * steering submitted while a turn is still unwinding; by the time the
    * microtask runs the abort has settled, so the wake lands on a fresh turn that
    * inherits the kept inbox.
+   *
+   * With no Agent to address, the runaway is still cut — that half is the whole
+   * point — and the log says so, because a break that cannot resume is
+   * indistinguishable from a broken turn to the user.
    */
-  function breakOff(state: BreakerState, score: number): void {
+  function breakOff(
+    state: BreakerState,
+    score: number,
+    agent: GuardAgentLike | undefined,
+    sessionId: string | undefined,
+  ): void {
     state.breaksThisTurn++
     state.lastBreakAt = resolved.now()
     ctx.logger?.warn(
       `reasoning-collapse-guard: stopped degenerate reasoning (score ${score.toFixed(3)}, `
-      + `break ${state.breaksThisTurn}/${resolved.maxBreaksPerTurn})`,
+      + `break ${state.breaksThisTurn}/${resolved.maxBreaksPerTurn}, `
+      + `session ${sessionId ?? 'unidentified'}`
+      + `${agent === undefined ? ', no agent to resume' : ''})`,
     )
-    const agent = currentAgent
-    agent?.cancel?.({ kind: 'hook', reason: 'reasoning-collapse-guard' }, { keepInbox: true })
-    if (agent === undefined || state.resuming) return
+    if (agent === undefined) return
+    agent.cancel?.({ kind: 'hook', reason: 'reasoning-collapse-guard' }, { keepInbox: true })
+    if (agent.steer === undefined || state.resuming) return
     state.resuming = true
     const text = state.breaksThisTurn >= 2 ? RESUME_HINT_STRICT : RESUME_HINT
     queueMicrotask(() => {
       state.resuming = false
-      agent.steer?.(createResumeMessage(text))
+      try {
+        agent.steer?.(createResumeMessage(text))
+      } catch (error) {
+        // The break is already taken; a resume that cannot be built must not
+        // vanish into an unhandled rejection on top of it.
+        ctx.logger?.warn(`reasoning-collapse-guard: could not queue the resume: ${describeError(error)}`)
+      }
     })
   }
 
@@ -333,7 +460,10 @@ export function installReasoningCollapseGuard(
     // that carries no signal.
     const key: object = request.signal ?? STATIC_KEY
     const state = breakerFor(key)
-    if (state.exhausted || !watchedModel(request.model)) return next()
+    if (state.exhausted || !watchedModel(request.model) || !conversationCall(request)) return next()
+    // Resolved once per attempt: the owning Agent is a property of the
+    // request, so it cannot change between chunks of one stream.
+    const agent = resolveAgent(request.sessionId)
 
     async function* guarded(): AsyncIterable<GuardChunk> {
       let window = ''
@@ -350,7 +480,7 @@ export function installReasoningCollapseGuard(
               if (state.breaksThisTurn >= resolved.maxBreaksPerTurn) {
                 state.exhausted = true
               } else {
-                breakOff(state, score)
+                breakOff(state, score, agent, request.sessionId)
                 // Returning here is what ends the in-flight stream: the harness
                 // never receives a finish chunk for the truncated attempt.
                 return
@@ -367,7 +497,9 @@ export function installReasoningCollapseGuard(
 
   return () => {
     releaseListener(releaseStream)
-    releaseListener(releaseAgent)
+    releaseListener(releaseCreated)
+    releaseListener(releaseDisposed)
+    known.clear()
   }
 }
 
