@@ -5,6 +5,17 @@ export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /**
+ * The same budget under the name every provider adapter passes it by.
+ *
+ * Six provider `types.ts` files each declared their own
+ * `STREAM_IDLE_TIMEOUT_MS = 300_000`, so one line ended up importing a sibling
+ * line's copy just to name the same number. This alias is the single home: the
+ * value is unchanged, and an adapter that took the constant from another line
+ * can now take it from here without renaming its local usage.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = DEFAULT_STREAM_IDLE_TIMEOUT_MS
+
+/**
  * 为异步流包裹可复位的空闲超时看门狗。
  * 当流式 chunk 产出之间的间隔超过指定阈值时，主动终止并抛出带有 TIMEOUT 的 LlmError。
  */

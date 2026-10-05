@@ -34,12 +34,12 @@ import { FileCredentialStore, FileModelSettingsStore, type OllamaCredentials } f
 import { OllamaAccountPool } from './account-pool.ts'
 import { loadCatalog, startChat, type OllamaChatMessage, type OllamaRequest } from './client.ts'
 import { applyEvent, closeStream, createStreamState } from './mapper.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
-import { retryAfterMs } from '../wire-auth.ts'
 import {
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
-} from '../command-code/types.ts'
+  wrapStreamWithWatchdog,
+} from '../common/idle-watchdog.ts'
+import { retryAfterMs } from '../wire-auth.ts'
 
 /**
  * Retry policy for the `ollama` route.

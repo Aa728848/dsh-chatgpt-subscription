@@ -79,14 +79,14 @@ import {
   type TokenUsage,
 } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
+import { stripMetaSchema } from '../common/tool-schema.ts'
+import { estimatedInputTokens } from '../common/prompt-estimate.ts'
 import {
-  estimatedInputTokens,
   offloadOldestRequestImages,
   resolveRequestImages,
-  stripMetaSchema,
   type AttachmentImageReader,
   type ResolvedRequestImages,
-} from '../kimi-code/mapper.ts'
+} from '../common/request-images.ts'
 import {
   effortForModel,
   isThinkingDisabledEffort,
