@@ -393,34 +393,54 @@ describe('Anthropic stream parsing', () => {
 
 describe('prefix stability tracking', () => {
   it('attributes a system-prompt change to the system-prompt cause', () => {
-    buildRequest(options({ sessionId: 'sess-drift' as never, system: 'You are helpful.' } as never), 'openai')
-    buildRequest(options({ sessionId: 'sess-drift' as never, system: 'You are a different assistant.' } as never), 'openai')
-    expect(getLastDriftCause()).toBe('system-prompt')
+    const session = { sessionId: 'sess-drift' as never, system: 'You are helpful.' } as never
+    buildRequest(options(session), 'openai')
+    buildRequest(options({ ...(session as object), system: 'You are a different assistant.' } as never), 'openai')
+    expect(getLastDriftCause('sess-drift')).toBe('system-prompt')
   })
 
   it('reports stable when the prefix-breaking inputs are unchanged', () => {
     const same = { sessionId: 'sess-stable' as never, system: 'constant head' } as never
     buildRequest(options(same), 'openai')
     buildRequest(options(same), 'openai')
-    expect(getLastDriftCause()).toBe('stable')
+    expect(getLastDriftCause('sess-stable')).toBe('stable')
   })
 
   it('attributes a tool-list change to the tools cause', () => {
     const base = { sessionId: 'sess-tools' as never, system: 'head' }
     buildRequest(options({ ...base, tools: [{ name: 'read', description: 'r', parameters: { type: 'object' } }] } as never), 'openai')
     buildRequest(options({ ...base, tools: [{ name: 'write', description: 'w', parameters: { type: 'object' } }] } as never), 'openai')
-    expect(getLastDriftCause()).toBe('tools')
+    expect(getLastDriftCause('sess-tools')).toBe('tools')
   })
 
-  it('flags a session with no identity as cold-key so a miss is explained', () => {
-    buildRequest(options({ sessionId: 'sess-seed' as never } as never), 'openai')
-    buildRequest(options({ messages: [{ role: 'user', content: [{ type: 'text', text: 'no identity' }] } as Message] }), 'openai')
+  it('flags a request with no identity as cold-key so a miss is explained', () => {
+    buildRequest(options({ system: 'head' } as never), 'openai')
+    buildRequest(options({ system: 'head' } as never), 'openai')
     expect(getLastDriftCause()).toBe('cold-key')
   })
 
-  it('flags a changed sessionId as a cache-key switch', () => {
+  it('starts a new session at first-request rather than blaming the old one', () => {
+    // A different session has a different prefix by definition, so the change
+    // is a different conversation rather than a cache-key switch inside one.
     buildRequest(options({ sessionId: 'sess-one' as never, system: 'h' } as never), 'openai')
     buildRequest(options({ sessionId: 'sess-two' as never, system: 'h' } as never), 'openai')
-    expect(getLastDriftCause()).toBe('cache-key')
+    expect(getLastDriftCause('sess-two')).toBe('first-request')
+  })
+
+  it('keeps two concurrent sessions from overwriting each other', () => {
+    const a = { sessionId: 'sess-a' as never, system: 'head A' } as never
+    const b = { sessionId: 'sess-b' as never, system: 'head B' } as never
+    // Interleaved, the way parallel subagents arrive. Without per-session
+    // scope, A's snapshot would be clobbered by B and the cause below would
+    // name a change that happened in the other conversation.
+    buildRequest(options(a), 'openai')
+    buildRequest(options(b), 'openai')
+    buildRequest(options({ ...(a as object) } as never), 'openai')
+    expect(getLastDriftCause('sess-a')).toBe('stable')
+    expect(getLastDriftCause('sess-b')).toBe('first-request')
+  })
+
+  it('reports no cause for a session that has not made a request', () => {
+    expect(getLastDriftCause('sess-never-seen')).toBeUndefined()
   })
 })

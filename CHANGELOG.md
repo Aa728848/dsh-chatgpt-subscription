@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **[Kimi Code] 对齐官方客户端的 K 系列模型能力，修复两处正确性缺陷与一处并发归因错误**
+  - **背景**：与官方开源客户端 `MoonshotAI/kimi-code`（`21406fb`）逐文件对照后的 11 项差距，分四批落地。
+  - **正确性**：
+    - tool-call id 原本只做 `slice(0, 64)`——共享 64 字符前缀的两个 id 会被截成同一个，**后续工具结果配错到错误的调用**；且不净化字符，`.` `:` 空格可能让服务端拒绝整个请求。现改为「净化 + 截断 + 碰撞递增后缀」，后缀同样受 64 上限约束。请求侧与流式侧共享同一个 normalizer，保证同一调用在两侧得到同一 id。
+    - reasoning 字段名原本硬编码 `reasoning_content`。Kimi 用该名，但新版 vLLM 已改名为 `reasoning` 且请求侧**只认**新名（vllm#38488）——回写旧名会静默丢失每个历史 assistant 轮次的思考链，并触发 "thinking is enabled but reasoning_content is missing"。现按对端实际用过的键回写（覆盖 `reasoning_content` / `reasoning_details` / `reasoning`）。
+  - **并发**：前缀稳定性追踪与缓存统计原本是进程级单例，DSH 多会话 / subagent 并行时会互相覆盖，归因指向**另一个会话**的变更——这类错误比没有归因更糟，因为用户会相信它。现按 `sessionId`（漂移）与 `sessionId + accountId`（缓存统计，账号池下每个账号在服务端各有一份缓存）分桶，并有 256 会话 LRU 上限。状态接口新增 `?sessionId=` 参数。
+  - **服务端声明驱动**：新增 `supports_thinking_type` 三态（`only` 剔除 `none`、`no` 返回空）、`limit.input` 独立输入上限（prompt 用 `min(window, cap)` 夹，输出仍用完整窗口）、`supports_tool_use`（与「不支持消息级工具」区分开）、`status` 退役模型过滤。设置卡片相应展示「输入上限」「不支持工具」。
+  - **成本可见性**：新增缓存过期提示——空闲超过所选 TTL 且上下文足够大时提示下一轮将重新处理的 token 数。判定沿用官方的「缺数据即跳过」原则，宁漏报不误报。`cacheWriteTokens` 保留字段并标注该线路恒为 0。
+  - **验证**：`tsc -b --force` 与 `tsc -p test/tsconfig.json` 通过；`vitest run` 2522 passed / 7 skipped（新增 45 例）；`npm run build`、`npm pack --dry-run` 通过。
+  - **未做**：Moonshot 开放平台（API Key）线路——它是唯一能触达 `kimi-k*` 真实 K 系列 id 的路径，按决定暂缓。
+
 - **[Kimi Code] 图片超预算时按需缩放而非丢弃，稳定提示缓存前缀**
   - **现象**：一次 UI 走查连续贴入 10 张 1440×1000 截图时，`cacheReadTokens` 四次断崖式下跌（100,864 → 16,384 等），合计约 13.3 万 token 被迫按未命中全价重算。
   - **根本原因**：Kimi 网关对单次请求的**整个消息体**限制 2 MB（官方报错 `total message size N exceeds limit 2097152`），图片 base64 与对话文本、工具 Schema、System Prompt 共享该额度。插件的 `MAX_REQUEST_IMAGE_BYTES`（1.5 MB）超出后，`offloadOldestRequestImages` 从最旧的图开始丢弃。**丢弃张数随每张新图递增，而每次变化都会重写保留前缀，于是下一轮缓存再次失效**——第 4、6、8、10 张图各触发一次，四次全部落在图片注入之后。

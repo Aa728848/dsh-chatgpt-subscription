@@ -88,14 +88,161 @@ function isAbort(error: unknown, signal?: AbortSignal): boolean {
 }
 
 /**
- * Kimi caps a tool-call id at 64 characters and rejects a longer one.
+ * Wire keys an OpenAI-compatible response can carry reasoning under.
  *
- * DSH ids are usually short, but a provider that prefixes them with a session
- * or turn marker can exceed the bound, so a long id is truncated
- * deterministically rather than allowed to fail the whole request.
+ * The Chat Completions ecosystem never standardized one. Kimi answers with
+ * `reasoning_content`; newer vLLM builds renamed the field to `reasoning` and
+ * accept only that name on the request side, and gateways in between use
+ * `reasoning_details`. The first entry doubles as the default for a request
+ * made before any response has been seen.
+ */
+export const KNOWN_REASONING_KEYS = ['reasoning_content', 'reasoning_details', 'reasoning'] as const
+
+/** Default outbound reasoning key, used until a response proves otherwise. */
+export const DEFAULT_REASONING_KEY: string = KNOWN_REASONING_KEYS[0]
+
+/**
+ * Per-endpoint reasoning-field dialect: observes what the endpoint actually
+ * sends, and echoes thinking back under the same key.
+ *
+ * Sending `reasoning_content` to an endpoint that only reads `reasoning` is not
+ * a cosmetic mismatch — preserved thinking then reports the thinking as
+ * missing, so the model loses the reasoning chain of every prior assistant
+ * turn. Detection never clears: a response with no reasoning keeps the last
+ * known dialect, and an endpoint that switches is adapted on its next reply.
+ */
+export class ReasoningKeyDialect {
+  private detected: string | undefined
+
+  /** Reasoning text on an inbound message or delta, remembering its key. */
+  observe(source: unknown): string | undefined {
+    if (typeof source !== 'object' || source === null) return undefined
+    const record = source as Record<string, unknown>
+    for (const key of KNOWN_REASONING_KEYS) {
+      const value = record[key]
+      // Non-string values are skipped on purpose: vLLM emits a compatibility
+      // placeholder `reasoning_content: null`, and OpenRouter's
+      // `reasoning_details` is an array.
+      if (typeof value !== 'string') continue
+      this.detected = key
+      return value
+    }
+    return undefined
+  }
+
+  /** The key to serialize thinking into on an outbound assistant message. */
+  outboundKey(): string {
+    return this.detected ?? DEFAULT_REASONING_KEY
+  }
+
+  /** Forget the detected key, returning to the default. Test seam only. */
+  reset(): void {
+    this.detected = undefined
+  }
+}
+
+/**
+ * Process-wide reasoning dialect for this route.
+ *
+ * The dialect is a property of the endpoint, not of one request: a request that
+ * has to be answered by a peer which speaks `reasoning` must itself use that
+ * key, and the only evidence available is what an earlier response carried.
+ * One instance per process is therefore correct here, and it is what makes the
+ * first turn of a session safe too — before any observation it answers the
+ * Kimi-documented default.
+ *
+ * Note this is deliberately NOT scoped per session: a per-session instance
+ * would send a newly observed key to a conversation that has never been told
+ * that key, which is the same mismatch it exists to prevent.
+ */
+const reasoningDialect = new ReasoningKeyDialect()
+
+/**
+ * The reasoning key an outbound assistant message should use.
+ *
+ * Exposed for tests and for the request builder, which builds outside any
+ * stream state.
+ */
+export function outboundReasoningKey(): string {
+  return reasoningDialect.outboundKey()
+}
+
+/** Reset the learned dialect. Test seam only. */
+export function resetReasoningDialect(): void {
+  reasoningDialect.reset()
+}
+
+/** Kimi's hard cap on a tool-call id; a longer one is rejected outright. */
+const MAX_TOOL_CALL_ID_LENGTH = 64
+
+/** Fallback for an id that sanitizes down to nothing. */
+const EMPTY_TOOL_CALL_ID = 'tool_call'
+
+/**
+ * Characters the service accepts in a tool-call id.
+ *
+ * DSH ids are usually already clean, but a provider that prefixes them with a
+ * session or turn marker can carry a separator (".", ":", "/"), and the
+ * endpoint rejects an id outside this set. The same allowlist is what pi-ai
+ * applies on its Anthropic route and what the official client applies, so a
+ * value sanitized here stays acceptable to both.
+ */
+const UNSAFE_TOOL_CALL_ID_CHARS = /[^a-zA-Z0-9_-]/g
+
+/**
+ * Sanitize one id into the shape the service accepts, without dedup.
+ *
+ * Exported because the request builders and the stream readers must agree on
+ * the result, and the guarantee callers actually rely on is that this is
+ * idempotent: sanitizing an already-sanitized id returns it unchanged, so an id
+ * that has been through here once stays stable across every later turn.
+ *
+ * Use {@link ToolCallIdNormalizer} instead wherever more than one id in the
+ * same request must be kept distinct.
  */
 export function clampToolCallId(id: string): string {
-  return id.length <= 64 ? id : id.slice(0, 64)
+  const sanitized = id.replace(UNSAFE_TOOL_CALL_ID_CHARS, '_')
+  return sanitized.length <= MAX_TOOL_CALL_ID_LENGTH
+    ? sanitized
+    : sanitized.slice(0, MAX_TOOL_CALL_ID_LENGTH)
+}
+
+/**
+ * Assigns collision-free tool-call ids across one request.
+ *
+ * Truncation alone is not injective: two ids sharing a 64-character prefix
+ * clamp to the same value, and a later tool result then resolves against the
+ * wrong call. This maps each raw id to a unique sanitized id, appending
+ * `_2`, `_3`, … on collision, and returns the same answer for the same
+ * input for the lifetime of the normalizer.
+ *
+ * One normalizer serves one request (or one stream), so the mapping is
+ * request-scoped by construction: a conversation whose history is replayed
+ * re-derives the same assignment from the same inputs, which is what keeps
+ * a tool result answerable by the call it belongs to.
+ */
+export class ToolCallIdNormalizer {
+  private readonly assigned = new Map<string, string>()
+  private readonly used = new Set<string>()
+
+  /** The unique sanitized id for `id`, stable for the life of this normalizer. */
+  normalize(id: string): string {
+    const existing = this.assigned.get(id)
+    if (existing !== undefined) return existing
+
+    const base = clampToolCallId(id) || EMPTY_TOOL_CALL_ID
+    let candidate = base
+    // Collision against an id already handed out. A raw id that sanitizes onto
+    // the same value as another keeps its own unique suffix rather than
+    // overwriting it, so both calls stay answerable.
+    for (let attempt = 2; this.used.has(candidate); attempt++) {
+      candidate = `${base.slice(0, MAX_TOOL_CALL_ID_LENGTH - attempt.toString().length - 1)}_${attempt}`
+      if (candidate.length <= 0) break
+    }
+    this.assigned.set(id, candidate)
+    this.used.add(candidate)
+    return candidate
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,7 +1346,10 @@ function openAIUserContent(
   return parts
 }
 
-function openAIAssistantContent(message: Message): { content: string; toolCalls: OpenAIMessage[]; reasoning: string } {
+function openAIAssistantContent(
+  message: Message,
+  toolCallIds: ToolCallIdNormalizer,
+): { content: string; toolCalls: OpenAIMessage[]; reasoning: string } {
   const textParts: string[] = []
   const toolCalls: OpenAIMessage[] = []
   for (const block of message.content) {
@@ -1207,7 +1357,7 @@ function openAIAssistantContent(message: Message): { content: string; toolCalls:
     if (block.type === 'text' && typeof block.text === 'string') textParts.push(sanitizeText(block.text))
     else if (block.type === 'tool-call' && typeof block.name === 'string') {
       toolCalls.push({
-        id: clampToolCallId(typeof block.id === 'string' && block.id !== '' ? block.id : `call_${toolCalls.length}`),
+        id: toolCallIds.normalize(typeof block.id === 'string' && block.id !== '' ? block.id : `call_${toolCalls.length}`),
         type: 'function',
         function: { name: block.name, arguments: toolCallArguments(block.arguments) },
       })
@@ -1344,6 +1494,11 @@ export function buildOpenAIRequest(
   // reasoning_content rule applies.
   const thinkingOn = effort !== 'none'
 
+  // One assignment for the whole request: every tool call and its result must
+  // resolve to the same id, and two history ids sharing a 64-char prefix would
+  // otherwise collapse onto each other and answer the wrong call.
+  const toolCallIds = new ToolCallIdNormalizer()
+
   const messages: OpenAIMessage[] = []
   const system = leadingSystemText(options)
   if (system !== undefined) messages.push({ role: 'system', content: system })
@@ -1385,7 +1540,7 @@ export function buildOpenAIRequest(
         }
         const block = current.content[0]
         const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
-        messages.push({ role: 'tool', tool_call_id: clampToolCallId(callId), content: toolResultText(current.content) })
+        messages.push({ role: 'tool', tool_call_id: toolCallIds.normalize(callId), content: toolResultText(current.content) })
         imageBlocks.push(...toolResultImageBlocks(current.content, images))
         index += 1
       }
@@ -1394,7 +1549,7 @@ export function buildOpenAIRequest(
       continue
     }
     if (message.role === 'assistant') {
-      const { content, toolCalls, reasoning } = openAIAssistantContent(message)
+      const { content, toolCalls, reasoning } = openAIAssistantContent(message, toolCallIds)
       // An assistant turn with neither text, nor calls, nor reasoning carries nothing on this wire.
       if (content === '' && toolCalls.length === 0 && reasoning === '') continue
       const entry: OpenAIMessage = { role: 'assistant' }
@@ -1407,13 +1562,19 @@ export function buildOpenAIRequest(
       }
       if (toolCalls.length > 0) entry.tool_calls = toolCalls
       // Preserved Thinking (`thinking.keep = "all"`, the official default) requires
-      // `reasoning_content` on every assistant message that lacks it, including
+      // the reasoning field on every assistant message that lacks it, including
       // plain text turns — omitting it is the documented cause of
       // "thinking is enabled but reasoning_content is missing in assistant tool
       // call message at index N". An empty string is the value the service asks
       // for when a turn genuinely produced no reasoning, so the field is always
       // written rather than conditionally added.
-      if (thinkingOn) entry.reasoning_content = reasoning
+      //
+      // The field NAME is the one this endpoint was last observed to send under
+      // (see ReasoningKeyDialect). Echoing the key the peer used is what keeps
+      // the reasoning chain of prior turns readable to it; hard-coding
+      // `reasoning_content` silently breaks the chain against a newer vLLM,
+      // which accepts only `reasoning` on the request side.
+      if (thinkingOn) entry[reasoningDialect.outboundKey()] = reasoning
       messages.push(entry)
       continue
     }
@@ -1504,7 +1665,11 @@ export function promptCacheKey(options: GenerateOptions): string | undefined {
 
 type AnthropicBlock = Record<string, unknown>
 
-function anthropicUserContent(message: Message, images: ResolvedRequestImages): AnthropicBlock[] {
+function anthropicUserContent(
+  message: Message,
+  images: ResolvedRequestImages,
+  toolCallIds: ToolCallIdNormalizer,
+): AnthropicBlock[] {
   if (!Array.isArray(message.content)) return []
   const blocks: AnthropicBlock[] = []
   for (const block of message.content) {
@@ -1535,7 +1700,7 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
       const resultBlocks = toolResultBlocks(block.content, images)
       blocks.push({
         type: 'tool_result',
-        tool_use_id: clampToolCallId(callId),
+        tool_use_id: toolCallIds.normalize(callId),
         content: resultBlocks ?? toolResultText(block.content),
         ...(block.isError === true ? { is_error: true } : {}),
       })
@@ -1544,7 +1709,7 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
   return blocks
 }
 
-function anthropicAssistantContent(message: Message): AnthropicBlock[] {
+function anthropicAssistantContent(message: Message, toolCallIds: ToolCallIdNormalizer): AnthropicBlock[] {
   const blocks: AnthropicBlock[] = []
   for (const block of message.content) {
     if (!isRecord(block)) continue
@@ -1555,7 +1720,7 @@ function anthropicAssistantContent(message: Message): AnthropicBlock[] {
       const parsed = safeJsonParse(toolCallArguments(block.arguments))
       blocks.push({
         type: 'tool_use',
-        id: clampToolCallId(typeof block.id === 'string' && block.id !== '' ? block.id : `toolu_${blocks.length}`),
+        id: toolCallIds.normalize(typeof block.id === 'string' && block.id !== '' ? block.id : `toolu_${blocks.length}`),
         name: block.name,
         input: isRecord(parsed) ? parsed : {},
       })
@@ -1596,6 +1761,8 @@ export function buildAnthropicRequest(
   media: RequestMediaOptions = {},
 ): Record<string, unknown> {
   const cacheTtl = media.cacheTtl ?? null
+  // Shared across the whole request; see buildOpenAIRequest for why.
+  const toolCallIds = new ToolCallIdNormalizer()
   // Message-level tool declarations are an OpenAI-surface feature this protocol
   // does not document, so none is emitted. The count is still reported in the
   // system prompt: without that, a model switched onto this wire would try to
@@ -1618,14 +1785,14 @@ export function buildAnthropicRequest(
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message)) {
-      entries.push({ role: 'user', content: anthropicUserContent(message, images) })
+      entries.push({ role: 'user', content: anthropicUserContent(message, images, toolCallIds) })
       continue
     }
     entries.push({
       role: message.role === 'assistant' ? 'assistant' : 'user',
       content: message.role === 'assistant'
-        ? anthropicAssistantContent(message)
-        : anthropicUserContent(message, images),
+        ? anthropicAssistantContent(message, toolCallIds)
+        : anthropicUserContent(message, images, toolCallIds),
     })
   }
 
@@ -1683,7 +1850,7 @@ export function buildRequest(
   // Fingerprint the prefix-breaking inputs before building, so the cause is
   // recorded even if the build below throws (an oversized body is itself a turn
   // that never reached the warm cache).
-  recordDriftCause(trackPrefixStability(options))
+  recordDriftCause(trackPrefixStability(options), options.sessionId)
   return wire === 'anthropic'
     ? buildAnthropicRequest(options, images, media)
     : buildOpenAIRequest(options, images, preserveThinking, media)
@@ -1756,11 +1923,27 @@ export interface KimiCodeStreamState {
   cacheWriteTokens: number
   reasoningTokens: number
   sawUsage: boolean
+  /**
+   * Per-request tool-call id assignment.
+   *
+   * The request side and the stream side must hand the service the same id for
+   * the same call, and truncation alone cannot guarantee that across a
+   * multi-call response. Shared by reference so both halves of one turn agree.
+   */
+  toolCallIds: ToolCallIdNormalizer
+  /**
+   * Session this turn belongs to, when the caller stated one.
+   *
+   * Carried so usage can be filed under the right conversation at close time,
+   * even if the caller does not pass the session again.
+   */
+  sessionId: string | undefined
 }
 
-export function createStreamState(wire: KimiCodeWire): KimiCodeStreamState {
+export function createStreamState(wire: KimiCodeWire, sessionId?: string): KimiCodeStreamState {
   return {
     wire,
+    sessionId: typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : undefined,
     blocks: [],
     current: null,
     toolCalls: new Map(),
@@ -1777,6 +1960,7 @@ export function createStreamState(wire: KimiCodeWire): KimiCodeStreamState {
     cacheWriteTokens: 0,
     reasoningTokens: 0,
     sawUsage: false,
+    toolCallIds: new ToolCallIdNormalizer(),
   }
 }
 
@@ -1798,7 +1982,7 @@ function closeToolCalls(state: KimiCodeStreamState): StreamChunk[] {
   for (const [wireIndex, call] of [...state.toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
     const block: OutboundContentBlock = {
       type: 'tool-call',
-      id: toToolCallId(clampToolCallId(call.id)),
+      id: toToolCallId(state.toolCallIds.normalize(call.id)),
       name: call.name,
       arguments: call.arguments === '' ? '{}' : call.arguments,
     }
@@ -1862,8 +2046,11 @@ export function processOpenAIStreamLine(line: string, state: KimiCodeStreamState
   const delta = isRecord(choice?.delta) ? (choice as Record<string, unknown>).delta as Record<string, unknown> : undefined
 
   if (delta) {
-    // Newer vLLM gateways name the field `reasoning`; both spellings are read.
-    const reasoning = asString(delta.reasoning_content) ?? asString(delta.reasoning)
+    // Learn which reasoning key this endpoint speaks, and read it under that
+    // key. `reasoning_content` is Kimi's, `reasoning` is newer vLLM's, and
+    // `reasoning_details` is the gateway spelling; all three are accepted and
+    // the observed one is echoed back on the next request.
+    const reasoning = reasoningDialect.observe(delta)
     if (reasoning !== undefined && reasoning !== '') {
       out.push(...closeToolCalls(state))
       if (state.current === null || state.current.type !== 'reasoning') out.push(...openTextBlock(state, 'reasoning'))
@@ -1914,7 +2101,7 @@ function applyOpenAIToolDelta(entry: Record<string, unknown>, state: KimiCodeStr
       arguments: '',
       started: false,
     }
-    state.blocks.push({ type: 'tool-call', id: toToolCallId(clampToolCallId(call.id)), name: call.name, arguments: '' })
+    state.blocks.push({ type: 'tool-call', id: toToolCallId(state.toolCallIds.normalize(call.id)), name: call.name, arguments: '' })
     state.toolCalls.set(wireIndex, call)
   } else {
     if (call.id === `call_${wireIndex}`) {
@@ -1938,7 +2125,7 @@ function applyOpenAIToolDelta(entry: Record<string, unknown>, state: KimiCodeStr
     out.push({
       type: 'tool-call-delta',
       index: call.blockIndex,
-      id: toToolCallId(clampToolCallId(call.id)),
+      id: toToolCallId(state.toolCallIds.normalize(call.id)),
       name: call.name,
       argumentsDelta: argsDelta,
     })
@@ -1989,14 +2176,14 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
       state.toolCalls.set(contentIndex, pending)
       state.contentIndexes.set(contentIndex, index)
       state.openContentIndex = contentIndex
-      state.blocks.push({ type: 'tool-call', id: toToolCallId(clampToolCallId(pending.id)), name: pending.name, arguments: '' })
+      state.blocks.push({ type: 'tool-call', id: toToolCallId(state.toolCallIds.normalize(pending.id)), name: pending.name, arguments: '' })
       state.hasToolCall = true
       state.hasContent = true
       out.push({ type: 'block-start', index, blockType: 'tool-call' })
       out.push({
         type: 'tool-call-delta',
         index,
-        id: toToolCallId(clampToolCallId(pending.id)),
+        id: toToolCallId(state.toolCallIds.normalize(pending.id)),
         name: pending.name,
         argumentsDelta: '',
       })
@@ -2028,7 +2215,7 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
         out.push({
           type: 'tool-call-delta',
           index: pending.blockIndex,
-          id: toToolCallId(clampToolCallId(pending.id)),
+          id: toToolCallId(state.toolCallIds.normalize(pending.id)),
           name: pending.name,
           argumentsDelta: partial,
         })
@@ -2068,7 +2255,7 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
       state.toolCalls.delete(contentIndex)
       const block: OutboundContentBlock = {
         type: 'tool-call',
-        id: toToolCallId(clampToolCallId(pending.id)),
+        id: toToolCallId(state.toolCallIds.normalize(pending.id)),
         name: pending.name,
         arguments: pending.arguments === '' ? '{}' : pending.arguments,
       }
@@ -2140,11 +2327,59 @@ export interface PrefixStabilitySnapshot {
   cacheKey: string | null
 }
 
-let lastPrefixSnapshot: PrefixStabilitySnapshot = {
-  systemPromptHash: null,
-  toolsHash: null,
-  cacheKey: null,
+/**
+ * Bucket key for a request that carries no session identity.
+ *
+ * A one-shot request (a probe, a test, a caller that never had a session) still
+ * gets its usage counted, but it is kept apart from every real session so it can
+ * never inflate — or be mistaken for — a session's hit ratio.
+ */
+const UNSCOPED_CACHE_KEY = ''
+
+/**
+ * How many distinct sessions to remember.
+ *
+ * These maps live for the life of the process, so an unbounded one would grow
+ * for as long as the harness runs. The bound sits far above any real session
+ * count: eviction only begins once a host has served hundreds of them, and it
+ * evicts the least recently written key, which is a stale session by then.
+ */
+const MAX_TRACKED_SESSIONS = 256
+
+/**
+ * Composite key separating one session's numbers from another's.
+ *
+ * The account is part of the key because the account pool can answer the same
+ * session from different accounts, and each account keeps its own cache
+ * server-side. A shared entry would blend a cold account's misses into a warm
+ * account's ratio, leaving a number that means nothing.
+ */
+function cacheScopeKey(sessionId: string | undefined, accountId?: string): string {
+  const session = typeof sessionId === 'string' ? sessionId.trim() : ''
+  if (session === '') return UNSCOPED_CACHE_KEY
+  return accountId === undefined || accountId === '' ? session : `${session} ${accountId}`
 }
+
+/** Write a key, evicting the oldest entry once the bound is reached. */
+function rememberScoped<K, V>(store: Map<K, V>, key: K, value: V): void {
+  // Re-insert so Map iteration order stays least-recently-written first.
+  store.delete(key)
+  store.set(key, value)
+  if (store.size <= MAX_TRACKED_SESSIONS) return
+  const oldest = store.keys().next()
+  if (oldest.done !== true) store.delete(oldest.value)
+}
+
+/**
+ * Prefix snapshots per session.
+ *
+ * Scoped by session on purpose: DSH runs several sessions — and subagents —
+ * concurrently, so one process-wide snapshot is overwritten by whichever request
+ * landed last. The attribution it feeds would then name a cause belonging to a
+ * different conversation, which is worse than no attribution at all because a
+ * reader has no way to tell the two apart.
+ */
+const prefixSnapshots = new Map<string, PrefixStabilitySnapshot>()
 
 /**
  * Which stability input changed relative to the previous request, if any.
@@ -2176,10 +2411,16 @@ export function trackPrefixStability(options: GenerateOptions): PrefixDriftCause
     : fingerprint(JSON.stringify(tools.map((tool) => [tool.name, tool.description ?? '', tool.parameters ?? {}])))
   const cacheKey = promptCacheKey(options) ?? null
 
-  const previous = lastPrefixSnapshot
-  lastPrefixSnapshot = { systemPromptHash, toolsHash, cacheKey }
+  // Scoped by session only: the prefix inputs are properties of the request
+  // itself, and the account that will answer it is not known yet.
+  const scope = cacheScopeKey(options.sessionId)
+  const previous = prefixSnapshots.get(scope)
+  rememberScoped(prefixSnapshots, scope, { systemPromptHash, toolsHash, cacheKey })
 
-  if (previous.systemPromptHash === null && previous.toolsHash === null && previous.cacheKey === null) {
+  if (
+    previous === undefined
+    || (previous.systemPromptHash === null && previous.toolsHash === null && previous.cacheKey === null)
+  ) {
     return 'first-request'
   }
   if (cacheKey === null) return 'cold-key'
@@ -2189,17 +2430,23 @@ export function trackPrefixStability(options: GenerateOptions): PrefixDriftCause
   return 'stable'
 }
 
-/** Last recorded drift cause, for the status surface. */
-let lastDriftCause: PrefixDriftCause = 'first-request'
+/** Drift cause recorded for each session. */
+const driftCauses = new Map<string, PrefixDriftCause>()
 
-/** Record the cause computed for the in-flight request. */
-export function recordDriftCause(cause: PrefixDriftCause): void {
-  lastDriftCause = cause
+/** Record the cause computed for one in-flight request. */
+export function recordDriftCause(cause: PrefixDriftCause, sessionId?: string): void {
+  rememberScoped(driftCauses, cacheScopeKey(sessionId), cause)
 }
 
-/** The cause attributed to the most recent request. */
-export function getLastDriftCause(): PrefixDriftCause {
-  return lastDriftCause
+/**
+ * The cause attributed to the most recent request of one session.
+ *
+ * `undefined` for a session that has not made a request, rather than a default
+ * value: an absent attribution and an unattributed first request are different
+ * facts, and the caller can only tell them apart if absence is expressible.
+ */
+export function getLastDriftCause(sessionId?: string): PrefixDriftCause | undefined {
+  return driftCauses.get(cacheScopeKey(sessionId))
 }
 
 /**
@@ -2222,7 +2469,16 @@ export interface KimiCodeCacheStats {
   cacheWriteTokens: number
 }
 
-let cacheStats: KimiCodeCacheStats = {
+/**
+ * Rolling cache totals per session.
+ *
+ * Per session rather than per process for the same reason as the prefix
+ * snapshots above, and additionally per account: the pool can serve one session
+ * from several accounts, and each of those keeps its own cache server-side.
+ */
+const cacheStatsByScope = new Map<string, KimiCodeCacheStats>()
+
+const EMPTY_CACHE_STATS: KimiCodeCacheStats = {
   requests: 0,
   cachedTokens: 0,
   freshTokens: 0,
@@ -2230,27 +2486,82 @@ let cacheStats: KimiCodeCacheStats = {
   cacheWriteTokens: 0,
 }
 
-/** Record one request's usage into the rolling totals. */
-export function recordCacheStats(state: KimiCodeStreamState): void {
+/** Record one request's usage into its own session's totals. */
+export function recordCacheStats(state: KimiCodeStreamState, sessionId?: string, accountId?: string): void {
   if (!state.sawUsage) return
-  cacheStats = {
-    requests: cacheStats.requests + 1,
-    cachedTokens: cacheStats.cachedTokens + state.cacheReadTokens,
-    freshTokens: cacheStats.freshTokens + state.inputTokens,
-    outputTokens: cacheStats.outputTokens + state.outputTokens,
-    cacheWriteTokens: cacheStats.cacheWriteTokens + state.cacheWriteTokens,
+  const scope = cacheScopeKey(sessionId ?? state.sessionId, accountId)
+  const previous = cacheStatsByScope.get(scope) ?? EMPTY_CACHE_STATS
+  rememberScoped(cacheStatsByScope, scope, {
+    requests: previous.requests + 1,
+    cachedTokens: previous.cachedTokens + state.cacheReadTokens,
+    freshTokens: previous.freshTokens + state.inputTokens,
+    outputTokens: previous.outputTokens + state.outputTokens,
+    cacheWriteTokens: previous.cacheWriteTokens + state.cacheWriteTokens,
+  })
+}
+
+/** Add one entry into an accumulator. */
+function accumulate(totals: KimiCodeCacheStats, stats: KimiCodeCacheStats): void {
+  totals.requests += stats.requests
+  totals.cachedTokens += stats.cachedTokens
+  totals.freshTokens += stats.freshTokens
+  totals.outputTokens += stats.outputTokens
+  totals.cacheWriteTokens += stats.cacheWriteTokens
+}
+
+/**
+ * Totals for one account's share of a session, one whole session, or every
+ * tracked session.
+ *
+ * The three cases are not a convenience: each answers a different question a
+ * caller actually has. Naming an account answers "is this account's cache
+ * warm", naming only a session answers "how is this conversation doing
+ * overall", and naming neither answers "how is this install doing". Summing
+ * the per-scope entries rather than keeping a second running total means the
+ * aggregate can never drift out of step with the parts it summarises.
+ */
+export function getCacheStats(
+  sessionId?: string,
+  accountId?: string,
+): KimiCodeCacheStats & { hitRatio: number | null } {
+  const totals: KimiCodeCacheStats = { ...EMPTY_CACHE_STATS }
+  if (sessionId === undefined) {
+    // No session named: the whole process. An account without a session cannot
+    // be singled out, so it is included rather than silently dropped.
+    for (const stats of cacheStatsByScope.values()) accumulate(totals, stats)
+  } else if (accountId !== undefined) {
+    Object.assign(totals, cacheStatsByScope.get(cacheScopeKey(sessionId, accountId)) ?? EMPTY_CACHE_STATS)
+  } else {
+    // The session across every account that served it. The account is part of
+    // the key, so an exact lookup here would find nothing once rotation has run
+    // and every turn has been filed under "<session> <account>".
+    const prefix = sessionId + ' '
+    for (const [key, stats] of cacheStatsByScope) {
+      if (key === sessionId || key.startsWith(prefix)) accumulate(totals, stats)
+    }
+  }
+  const prompt = totals.cachedTokens + totals.freshTokens
+  return { ...totals, hitRatio: prompt === 0 ? null : totals.cachedTokens / prompt }
+}
+
+/** Drop every key belonging to one session, whatever account served it. */
+function dropSession(store: Map<string, unknown>, sessionId: string): void {
+  for (const key of [...store.keys()]) {
+    if (key === sessionId || key.startsWith(sessionId + ' ')) store.delete(key)
   }
 }
 
-/** Current rolling totals, plus the derived hit ratio. */
-export function getCacheStats(): KimiCodeCacheStats & { hitRatio: number | null } {
-  const prompt = cacheStats.cachedTokens + cacheStats.freshTokens
-  return { ...cacheStats, hitRatio: prompt === 0 ? null : cacheStats.cachedTokens / prompt }
-}
-
-/** Test seam and an explicit reset for a new session. */
-export function resetCacheStats(): void {
-  cacheStats = { requests: 0, cachedTokens: 0, freshTokens: 0, outputTokens: 0, cacheWriteTokens: 0 }
+/** Forget one session's numbers, or all of them. Test seam and session teardown. */
+export function resetCacheStats(sessionId?: string): void {
+  if (sessionId === undefined) {
+    cacheStatsByScope.clear()
+    prefixSnapshots.clear()
+    driftCauses.clear()
+    return
+  }
+  dropSession(cacheStatsByScope, sessionId)
+  dropSession(prefixSnapshots, sessionId)
+  dropSession(driftCauses, sessionId)
 }
 
 function tokenUsage(state: KimiCodeStreamState): TokenUsage {
@@ -2271,13 +2582,13 @@ function finishReasonFor(state: KimiCodeStreamState): FinishReason {
 }
 
 /** Flush every open block, then emit usage and the terminal finish. */
-export function closeStream(state: KimiCodeStreamState): StreamChunk[] {
+export function closeStream(state: KimiCodeStreamState, accountId?: string): StreamChunk[] {
   if (state.finished) return []
   state.finished = true
   const out = [...closeCurrent(state), ...closeToolCalls(state)]
   if (state.sawUsage) {
     // One accounting point per request, so the rolling cache ratio stays honest.
-    recordCacheStats(state)
+    recordCacheStats(state, state.sessionId, accountId)
     out.push({ type: 'usage', usage: tokenUsage(state) })
   }
   out.push({ type: 'finish', reason: finishReasonFor(state) })

@@ -3,7 +3,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import z from '@deepseek-ai/schemastery'
-import type { KimiCodeReasoningEffort, KimiCodeRegion } from '../../shared/kimi-code-contracts.ts'
+import type { KimiCodeReasoningEffort, KimiCodeRegion, KimiCodeThinkingType } from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_REASONING_EFFORTS } from '../../shared/kimi-code-contracts.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../common/settings-compat.ts'
@@ -88,6 +88,35 @@ export interface KimiCodeCatalogModel {
    * information rather than acted on.
    */
   supportsDynamicTools?: boolean
+  /**
+   * Server-declared toggle support for thinking.
+   *
+   * The three-state declaration, and the one that wins over the older
+   * `supports_reasoning` boolean: `only` means the model reasons at every
+   * level and cannot be turned off, `no` means it does not reason at all, and
+   * `both` means it can be toggled. A model declaring `only` must not be
+   * offered a `none` effort, because the service rejects one.
+   *
+   * Absent on older servers, where the effort list alone is the evidence.
+   */
+  thinkingType?: KimiCodeThinkingType
+  /**
+   * Largest prompt the model accepts, when it is smaller than the window.
+   *
+   * A model can have a 1M window and a lower input cap. The window still
+   * bounds the completion budget, but prompt budgeting has to use this, or a
+   * session is allowed to grow past what the endpoint will accept and the
+   * request fails instead of compacting first.
+   */
+  maxInputTokens?: number
+  /**
+   * Whether the model accepts tool declarations at all.
+   *
+   * Absent means the server said nothing, which is not the same as a denial —
+   * the parser keeps that distinction, so a silent listing does not disable
+   * tools on a model that still takes them.
+   */
+  supportsToolUse?: boolean
 }
 
 export interface KimiCodeModelSettings {

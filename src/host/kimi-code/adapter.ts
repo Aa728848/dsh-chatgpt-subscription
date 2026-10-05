@@ -35,13 +35,16 @@ import {
   type KimiCodePreferenceStore,
 } from './token-store.ts'
 import { kimiCodeModelDef } from './model-catalog.ts'
+import { markSessionActive } from './cache-hint.ts'
 import {
   buildModelOptions,
   clearCachedCatalog,
   dynamicToolsForEntry,
   inputModalitiesForEntry,
+  maxInputTokensForEntry,
   loadProviderModels,
   modelRequestHeaders,
+  defaultReasoningEffortForEntry,
   reasoningEffortsForEntry,
   wireForCatalogEntry,
 } from './client.ts'
@@ -416,10 +419,12 @@ export class KimiCodeAdapter extends LlmAdapter {
     const catalog = await this.catalog()
     const entry = catalog.find((model) => model.id === modelId)
     const efforts = reasoningEffortsForEntry(modelId, catalog)
+    // Resolved through the shared helper rather than reading the entry directly,
+    // so a declared default that the three-state thinking rule removed cannot
+    // reach the caller as a level the model no longer accepts.
+    const entryDefault = defaultReasoningEffortForEntry(modelId, catalog)
     const defaultEffortId = resolveDefaultReasoningEffort(efforts, settings.defaultReasoningEffort)
-      ?? (entry?.defaultReasoningEffort === undefined
-        ? undefined
-        : resolveDefaultReasoningEffort(efforts, entry.defaultReasoningEffort))
+      ?? (entryDefault === undefined ? undefined : resolveDefaultReasoningEffort(efforts, entryDefault))
 
     return {
       provider,
@@ -507,9 +512,16 @@ export class KimiCodeAdapter extends LlmAdapter {
     // caller is told about an oversized body rather than about a limit sized
     // for text alone.
     const requestedMax = options.maxTokens ?? maxOutputTokensFor(options.model, contextWindow)
+    // A service-declared input cap is what actually bounds the PROMPT, and the
+    // window is what bounds the completion. Clamping only against the window
+    // lets a prompt grow past the endpoint's input limit and come back as a
+    // rejection rather than as the compaction that would have avoided it, so
+    // the two are separated here and the smaller one guards the prompt.
+    const inputCap = maxInputTokensForEntry(options.model, catalog)
+    const promptLimit = inputCap === undefined ? contextWindow : Math.min(contextWindow, inputCap)
     const boundedOptions: NormalizedGenerateOptions = {
       ...requestOptions,
-      maxTokens: clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions)),
+      maxTokens: clampOutputToContext(requestedMax, promptLimit, estimatedInputTokens(requestOptions)),
     }
     const built = buildRequest(boundedOptions, wire, images, undefined, media)
     // The guard returns the serialized body it measured, so the multi-megabyte
@@ -518,6 +530,9 @@ export class KimiCodeAdapter extends LlmAdapter {
 
     const pool = this.accountPool
     const tried = new Set<string>()
+    // Hoisted out of the rotation loop so the account that actually served the
+    // response is still in scope when the stream closes and files its usage.
+    let servedByAccountId: string | undefined
     let response: Response | undefined
 
     // Account rotation. Without a pool this runs exactly once and keeps the
@@ -557,6 +572,7 @@ export class KimiCodeAdapter extends LlmAdapter {
           )
         }
         accountId = effective.account.id
+        servedByAccountId = accountId
         tried.add(accountId)
         apiCredentials = effective.credentials
       }
@@ -616,7 +632,13 @@ export class KimiCodeAdapter extends LlmAdapter {
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
-    const state = createStreamState(wire)
+    // The session travels with the turn so usage is filed under the right
+    // conversation when the stream closes; the account is passed separately
+    // below, once rotation has settled on one.
+    const state = createStreamState(wire, requestOptions.sessionId)
+    // Recorded after the turn is built and sent, so the timestamp answers when
+    // this conversation last ran — the input the cache-expiry hint needs.
+    markSessionActive(requestOptions.sessionId)
     let buffer = ''
 
     try {
@@ -643,7 +665,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       // A connection that ends without a terminal event is a truncated stream,
       // not a completed answer; the watchdog turns a stalled one into an abort.
       assertStreamComplete(state)
-      for (const chunk of closeStream(state)) yield chunk
+      for (const chunk of closeStream(state, servedByAccountId)) yield chunk
     } finally {
       void reader.cancel().catch(() => undefined)
     }

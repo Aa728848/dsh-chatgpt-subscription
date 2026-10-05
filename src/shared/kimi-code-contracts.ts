@@ -51,6 +51,17 @@ export type KimiCodeReasoningEffort = 'low' | 'high' | 'max' | 'none'
  */
 export type KimiCodeCacheTtl = '5m' | '1h'
 
+/**
+ * How the service says a model handles thinking, when it says so at all.
+ *
+ * The three-state declaration is strictly more informative than a boolean:
+ * `only` distinguishes "always reasons" from "no reasoning support", which
+ * a single boolean cannot express, and the two demand opposite treatment —
+ * the first must not be offered a `none` effort, the second must be offered
+ * nothing at all.
+ */
+export type KimiCodeThinkingType = 'only' | 'no' | 'both'
+
 /** Every level, in escalating order; the settings card renders exactly these. */
 export const KIMI_CODE_REASONING_EFFORTS: readonly KimiCodeReasoningEffort[] =
   ['low', 'high', 'max', 'none']
@@ -65,6 +76,23 @@ export interface KimiCodeModelOption {
   defaultContextWindow: number
   /** Effective context window: the override when one is saved, else the default. */
   contextWindow: number
+  /**
+   * Largest prompt the endpoint accepts, when the service states a cap below
+   * the context window.
+   *
+   * A model can have a 1M window and a lower input limit. The window still
+   * bounds the completion budget, but a prompt sized against it overshoots into
+   * a rejected request instead of a compaction, so the two are reported
+   * separately.
+   */
+  maxInputTokens?: number
+  /**
+   * Ceiling for the prompt of one turn.
+   *
+   * The smaller of the effective window and {@link maxInputTokens}; always a
+   * number, so a caller never has to decide which of the two applies.
+   */
+  promptBudget: number
   /** Maximum output tokens this route requests when a caller omits one. */
   defaultMaxTokens: number
   /** Thinking levels this model accepts; absent for a model that cannot reason. */
@@ -87,6 +115,15 @@ export interface KimiCodeModelOption {
    * what protects the prefix cache.
    */
   supportsDynamicTools: boolean
+  /**
+   * Whether the model accepts tool declarations at all.
+   *
+   * Wider than {@link supportsDynamicTools}, which asks only about message-level
+   * declarations: a model may take tools at the top level and not per message.
+   * The card shows both because a false here is the one that breaks every
+   * coding session on the model.
+   */
+  supportsToolUse: boolean
   /** Subscription tier the model needs, when it is not open to every member. */
   minimumPlan: string | null
 }
@@ -179,6 +216,11 @@ export interface KimiCodeWebStatus {
   quotaError?: string | null
   /** Rolling prefix-cache effectiveness for this process, when requests ran. */
   cache: KimiCodeCacheStatsDto | null
+  /**
+   * Warning that this conversation's prompt cache has expired, when it has and
+   * the context is large enough for reprocessing to be worth mentioning.
+   */
+  cacheHint?: KimiCodeCacheHintDto | null
   /** Whether Preserved Thinking is currently requested on the wire. */
   preserveThinking: boolean
   models: KimiCodeModelOption[]
@@ -224,6 +266,31 @@ export interface KimiCodeCacheStatsDto {
    * service), while the other values name the input that invalidated the cache.
    */
   lastDrift?: 'first-request' | 'stable' | 'system-prompt' | 'tools' | 'cache-key' | 'cold-key'
+  /**
+   * Always 0 on this route: the endpoint writes cache entries without counting
+   * them, so there is no write cost to track.
+   *
+   * Reported rather than dropped so the shape stays aligned with the sibling
+   * providers that DO report writes, and so a route that starts counting them
+   * needs no contract change.
+   */
+  cacheWriteTokensNote?: 'always-zero-on-this-route'
+}
+
+/**
+ * A warning that the conversation's prompt cache has expired.
+ *
+ * Kimi's cache is content-hash based with no marker to set, so a client that
+ * says nothing leaves the user paying a full reprocessing pass with no idea
+ * why the next turn was slow. Absent means "nothing to say" — which is most
+ * of the time, since the hint needs an idle period AND a context large enough
+ * for reprocessing to matter.
+ */
+export interface KimiCodeCacheHintDto {
+  /** How long the conversation has been idle, epoch ms. */
+  idleMs: number
+  /** Context that will be reprocessed on the next turn. */
+  totalTokens: number
 }
 
 /** Patch accepted by the models/settings routes. */

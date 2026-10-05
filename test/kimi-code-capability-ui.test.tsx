@@ -19,7 +19,10 @@ function model(overrides: Partial<KimiCodeModelOption> = {}): KimiCodeModelOptio
     enabled: true,
     defaultContextWindow: 262144,
     contextWindow: 262144,
+    // No separate input cap, so the prompt budget is the window itself.
+    promptBudget: 262144,
     defaultMaxTokens: 32768,
+    supportsToolUse: true,
     wire: 'openai',
     description: 'Flagship model',
     supportsVideo: true,

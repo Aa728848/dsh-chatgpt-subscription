@@ -623,6 +623,11 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           <h3>{t.cacheSection}</h3>
         </div>
         <p className="dsha-muted">{t.cacheDesc}</p>
+        {status?.cacheHint != null && (
+          // Shown above the card rather than inside it: the card is about how
+          // well the cache worked, and this says the next turn will not.
+          <div className="dsha-warn">{t.cacheExpired.replace('{tokens}', status.cacheHint.totalTokens.toLocaleString())}</div>
+        )}
         {status?.cache == null ? (
           <div className="dsha-empty">{t.cacheEmpty}</div>
         ) : (

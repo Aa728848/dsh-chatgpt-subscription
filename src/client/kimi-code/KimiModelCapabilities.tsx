@@ -32,11 +32,14 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
         <tbody>
           {models.map((model) => {
             // Hover text keeps the per-model facts that would otherwise bloat
-            // the table: wire, default effort and required plan.
+            // the table: wire, default effort, input cap and required plan.
             const facts = [
               model.id,
               model.wire === 'anthropic' ? t.wireAnthropic : t.wireOpenai,
               ...(model.defaultReasoningEffort ? [t.defaultReasoningEffort + ': ' + model.defaultReasoningEffort] : []),
+              ...(model.maxInputTokens === undefined
+                ? []
+                : [t.capInputCap.replace('{tokens}', String(model.maxInputTokens))]),
               ...(model.minimumPlan ? [t.capPlan.replace('{plan}', model.minimumPlan)] : []),
             ]
             return (
@@ -50,7 +53,12 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
                 <td>
                   {model.supportsDynamicTools
                     ? <span className="dsha-cap-on">{t.capDynamicTools}</span>
-                    : <span className="dsha-cap-off">{t.capNone}</span>}
+                    // Tools work but per-message disclosure does not: a dash.
+                    : model.supportsToolUse
+                      ? <span className="dsha-cap-off">{t.capNone}</span>
+                      // No tools at all, which breaks every coding session on
+                      // the model — worth naming rather than another dash.
+                      : <span className="dsha-cap-off">{t.capNoTools}</span>}
                 </td>
                 <td className="dsha-cap-notes">{model.description ?? ''}</td>
               </tr>

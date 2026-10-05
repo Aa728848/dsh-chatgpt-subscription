@@ -25,6 +25,7 @@ import type {
   KimiCodeExtraUsage,
   KimiCodeModelOption,
   KimiCodeRegion,
+  KimiCodeThinkingType,
   KimiCodeUsageWindow,
   KimiCodeWire,
 } from '../../shared/kimi-code-contracts.ts'
@@ -222,13 +223,44 @@ export function getCachedCatalog(): KimiCodeCatalogModel[] {
  * change a request or the picker are read; an entry with no positive context
  * length is dropped rather than shown as a zero-capacity model.
  */
+/** Lifecycle markers the service sets on a model it no longer offers. */
+const RETIRED_MODEL_STATUSES = new Set(['deprecated', 'alpha', 'retired'])
+
+/**
+ * Read the three-state thinking declaration.
+ *
+ * Kept separate from the effort list because it can contradict it: a model may
+ * ship `valid_efforts` that still contain `none` while `supports_thinking_type`
+ * says it can only reason. When both are present the declaration wins, because
+ * it is the field the service introduced to replace the older boolean.
+ */
+function parseThinkingType(record: Record<string, unknown>): KimiCodeThinkingType | undefined {
+  const raw = asString(record.supports_thinking_type) ?? asString(record.supportsThinkingType)
+  return raw === 'only' || raw === 'no' || raw === 'both' ? raw : undefined
+}
+
 function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
   const record = asRecord(value)
   if (record === undefined) return undefined
   const id = asString(record.id)
   if (id === undefined) return undefined
+  // A retired alias is dropped rather than offered: selecting it would fail
+  // at request time, and leaving it in the picker hides the model that
+  // replaced it.
+  const status = asString(record.status)?.toLowerCase()
+  if (status !== undefined && RETIRED_MODEL_STATUSES.has(status)) return undefined
   const contextWindow = firstNumber(record, ['context_length', 'contextLength'])
   if (contextWindow === undefined || contextWindow <= 0) return undefined
+  const limits = asRecord(record.limit) ?? asRecord(record.limits)
+  // The input cap is tracked apart from the window: a model can accept a 1M
+  // window while refusing prompts past a lower bound, and budgeting the prompt
+  // against the window overshoots into a rejected request rather than a compaction.
+  const declaredInput = firstNumber(limits ?? {}, ['input'])
+    ?? firstNumber(record, ['max_input_tokens', 'maxInputTokens'])
+  const maxInputTokens = declaredInput !== undefined && declaredInput > 0 && declaredInput < contextWindow
+    ? declaredInput
+    : undefined
+  const thinkingType = parseThinkingType(record)
 
   const efforts = asRecord(record.think_efforts) ?? asRecord(record.thinkEfforts)
   const validEfforts = Array.isArray(efforts?.valid_efforts)
@@ -256,6 +288,14 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
     inputModalities: modalities,
     protocol: protocol === 'anthropic' ? 'anthropic' : 'openai',
     ...(record.supports_video_in === true || record.supportsVideoIn === true ? { supportsVideo: true } : {}),
+    ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+    ...(thinkingType === undefined ? {} : { thinkingType }),
+    // Three-state like the dynamic-tool flag below: silence is not a denial,
+    // and treating it as one would disable tools on a model that still takes
+    // them simply because the listing omitted the field.
+    ...(typeof (record.supports_tool_use ?? record.supportsToolUse) === 'boolean'
+      ? { supportsToolUse: (record.supports_tool_use ?? record.supportsToolUse) as boolean }
+      : {}),
     // Three-state on purpose: the listing may assert true, assert false, or say
     // nothing at all. Collapsing false into "absent" would make an explicit
     // denial indistinguishable from silence, and the static fallback would then
@@ -525,11 +565,73 @@ export function wireForCatalogEntry(modelId: string, catalog: readonly KimiCodeC
   return wireForModel(modelId)
 }
 
-/** Thinking levels for one model, from the catalog when it declares them. */
+/**
+ * Thinking levels for one model, from the catalog when it declares them.
+ *
+ * `supports_thinking_type` is applied last because it is the field that can
+ * invalidate the effort list itself. A model that declares `only` reasons at
+ * every level, so offering `none` asks for a turn the service will reject; a
+ * model that declares `no` does not reason at all, so exposing its levels would
+ * advertise behaviour it does not have.
+ */
 export function reasoningEffortsForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): string[] {
   const entry = catalog.find((model) => model.id === modelId)
-  if (entry?.reasoningEfforts !== undefined) return [...entry.reasoningEfforts]
-  return reasoningEffortsFor(modelId)
+  const declared = entry?.reasoningEfforts ?? reasoningEffortsFor(modelId)
+  switch (entry?.thinkingType) {
+    case 'no':
+      return []
+    case 'only':
+      return declared.filter((effort) => effort !== 'none')
+    default:
+      return [...declared]
+  }
+}
+
+/**
+ * Default thinking level for one model, when the server states one.
+ *
+ * A declared default that the resolved effort list no longer contains is
+ * dropped rather than carried through: with `only` in force the list can lose
+ * `none`, and a default naming a level the model can no longer be asked for
+ * would fail on the first turn that relied on it.
+ */
+export function defaultReasoningEffortForEntry(
+  modelId: string,
+  catalog: readonly KimiCodeCatalogModel[],
+): string | undefined {
+  const entry = catalog.find((model) => model.id === modelId)
+  const declared = entry?.defaultReasoningEffort ?? kimiCodeModelDef(modelId)?.defaultReasoningEffort ?? undefined
+  if (declared === undefined) return undefined
+  return reasoningEffortsForEntry(modelId, catalog).includes(declared) ? declared : undefined
+}
+
+/**
+ * Whether one model accepts tool declarations at all.
+ *
+ * Distinct from {@link dynamicToolsForEntry}, which asks the narrower question
+ * of message-level declarations: a model can take tools at the top level and
+ * not accept them per message, and collapsing the two would disable tools on a
+ * model that still works. Precedence is the live listing, including an
+ * explicit false, then the shipped registry.
+ */
+export function toolUseForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): boolean {
+  const entry = catalog.find((model) => model.id === modelId)
+  if (entry?.supportsToolUse !== undefined) return entry.supportsToolUse
+  return true
+}
+
+/**
+ * Prompt ceiling for one model, or undefined when it equals the window.
+ *
+ * The completion budget still uses the full window — the cap bounds what may be
+ * sent, not how much may be generated — but a caller sizing a prompt needs the
+ * smaller of the two whenever the service states a lower input bound.
+ */
+export function maxInputTokensForEntry(
+  modelId: string,
+  catalog: readonly KimiCodeCatalogModel[],
+): number | undefined {
+  return catalog.find((model) => model.id === modelId)?.maxInputTokens
 }
 
 /**
@@ -571,15 +673,25 @@ export function buildModelOptions(
     const contextWindow = typeof override === 'number' && Number.isFinite(override) && override > 0
       ? override
       : model.contextWindow ?? DEFAULT_CONTEXT_WINDOW
-    const efforts = model.reasoningEfforts ?? reasoningEffortsFor(model.id)
-    const defaultEffort = model.defaultReasoningEffort
+    const efforts = reasoningEffortsForEntry(model.id, catalog)
+    const defaultEffort = defaultReasoningEffortForEntry(model.id, catalog)
+    // The window bounds the completion budget; the input cap, when the service
+    // states one, bounds the prompt. A model declaring a lower input limit is
+    // reported at that limit so a caller sizes the turn against the number the
+    // endpoint will actually accept.
+    const declaredInputCap = maxInputTokensForEntry(model.id, catalog)
+    const promptBudget = declaredInputCap === undefined ? contextWindow : Math.min(contextWindow, declaredInputCap)
     return {
       id: model.id,
       name: model.name ?? model.id,
       enabled: enabled.has(model.id),
       defaultContextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       contextWindow,
-      defaultMaxTokens: maxOutputTokensFor(model.id),
+      ...(declaredInputCap === undefined ? {} : { maxInputTokens: declaredInputCap }),
+      // With no separate input cap, the prompt budget IS the window; reporting
+      // it keeps the card from showing a blank where a caller needs a number.
+      promptBudget,
+      defaultMaxTokens: maxOutputTokensFor(model.id, contextWindow),
       ...(efforts.length === 0 ? {} : { reasoningEfforts: [...efforts] }),
       ...(defaultEffort === undefined ? {} : { defaultReasoningEffort: defaultEffort }),
       wire: model.protocol ?? wireForModel(model.id),
@@ -590,7 +702,8 @@ export function buildModelOptions(
       minimumPlan: model.minimumPlan ?? kimiCodeModelDef(model.id)?.minimumPlan ?? null,
       // Resolved through the shared helper so the card cannot drift from what
       // the request builder will actually do with the same catalog.
-      supportsDynamicTools: dynamicToolsForEntry(model.id, catalog),
+      supportsDynamicTools: dynamicToolsForEntry(model.id, catalog) && toolUseForEntry(model.id, catalog),
+      supportsToolUse: toolUseForEntry(model.id, catalog),
     }
   })
 }

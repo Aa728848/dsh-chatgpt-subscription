@@ -33,11 +33,14 @@ import {
   testConnection,
 } from './client.ts'
 import { getCacheStats, getLastDriftCause, preserveThinkingEnabled } from './mapper.ts'
+import { evaluateCacheHint, sessionLastActiveAt } from './cache-hint.ts'
 import { beginWebLogin, getWebLoginStatus, isRefreshTokenRejected, resetWebLogin } from './oauth.ts'
 import {
   KIMI_CODE_REASONING_EFFORTS,
   type KimiCodeAccount,
+  type KimiCodeCacheHintDto,
   type KimiCodeCacheStatsDto,
+  type KimiCodeCacheTtl,
   type KimiCodeReasoningEffort,
   type KimiCodeRegion,
   type KimiCodeWebStatus,
@@ -134,6 +137,14 @@ export interface KimiCodeStatusOptions {
    * caller that passes none keeps the single-account behavior.
    */
   accountPool?: KimiCodeAccountPool
+  /**
+   * Session whose cache numbers the card should show.
+   *
+   * Omitted means "no particular conversation", which reports the process
+   * aggregate. The cache is per conversation, so a card that names a session
+   * is the only way its hit ratio describes something a reader can act on.
+   */
+  sessionId?: string
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -213,7 +224,8 @@ export async function getKimiCodeWebStatus(
     quota,
     lastFetchedAt: quota?.fetchedAt ?? null,
     credentialsRejected: active !== null && active !== undefined && isRefreshTokenRejected(active.refreshToken),
-    cache: cacheStatsOrNull(),
+    cache: cacheStatsOrNull(options.sessionId),
+    cacheHint: cacheHintOrNull(options.sessionId, settings.cacheTtl),
     preserveThinking: preserveThinkingEnabled(),
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
@@ -225,11 +237,47 @@ export async function getKimiCodeWebStatus(
   }
 }
 
-/** Rolling cache totals, or null while no request has reported usage yet. */
-function cacheStatsOrNull(): KimiCodeCacheStatsDto | null {
-  const stats = getCacheStats()
+/**
+ * Rolling cache totals for one session, or null while nothing has reported usage.
+ *
+ * The session is a query parameter because the numbers are now per session: a
+ * host running several conversations at once cannot present one merged hit
+ * ratio as if it described any of them. With no session named the route still
+ * answers with the process aggregate, which is the right answer for a settings
+ * card that is not showing a specific conversation.
+ */
+function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
+  const stats = getCacheStats(sessionId)
   if (stats.requests === 0) return null
-  return { ...stats, lastDrift: getLastDriftCause() }
+  const lastDrift = getLastDriftCause(sessionId)
+  return {
+    ...stats,
+    ...(lastDrift === undefined ? {} : { lastDrift }),
+    cacheWriteTokensNote: 'always-zero-on-this-route',
+  }
+}
+
+/**
+ * Whether this conversation's cache has expired, or null when there is nothing
+ * to say.
+ *
+ * The context size comes from the same running totals the hit ratio uses, so
+ * the hint describes the conversation the card is actually showing rather than
+ * some global figure.
+ */
+function cacheHintOrNull(
+  sessionId: string | undefined,
+  cacheTtl: KimiCodeCacheTtl | null | undefined,
+): KimiCodeCacheHintDto | null {
+  const lastActiveAt = sessionLastActiveAt(sessionId)
+  const decision = evaluateCacheHint({
+    now: Date.now(),
+    lastActiveAt,
+    totalTokens: getCacheStats(sessionId).cachedTokens + getCacheStats(sessionId).freshTokens,
+    cacheTtl,
+  })
+  if (decision.kind !== 'hint') return null
+  return { idleMs: decision.idleMs, totalTokens: decision.totalTokens }
 }
 
 /** Register the Kimi Code settings routes under `/kimi-code/api`. */
@@ -242,8 +290,16 @@ export function registerKimiCodeRoutes(
   accountPool: KimiCodeAccountPool | undefined = options.accountPool,
 ): () => void {
   const fetchFn = options.fetchFn ?? fetch
-  const readStatus = (): Promise<KimiCodeWebStatus> =>
-    getKimiCodeWebStatus(store, modelSettings, preferences, options, accountPool)
+  const readStatus = (sessionId?: string): Promise<KimiCodeWebStatus> =>
+    getKimiCodeWebStatus(
+      store,
+      modelSettings,
+      preferences,
+      // The cache numbers are per conversation, so the status follows the
+      // session the caller asks about rather than always reporting an aggregate.
+      { ...options, ...(sessionId === undefined ? {} : { sessionId }) },
+      accountPool,
+    )
   /**
    * The account that would serve the next request, or undefined without a pool.
    *
@@ -334,7 +390,7 @@ export function registerKimiCodeRoutes(
             if (cached === null) await quotaRefresh.run(refresh)
             else quotaRefresh.start(refresh)
           }
-          const value = await readStatus()
+          const value = await readStatus(url.searchParams.get('sessionId') ?? undefined)
           return sendJson(response, 200, {
             ok: true,
             value: {
