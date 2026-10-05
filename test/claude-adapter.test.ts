@@ -27,6 +27,10 @@
  *      without one bills every turn as fresh input; this is the call site that
  *      used to send none, and the test reads the REAL posted bytes so the
  *      builder's own default cannot stand in for the adapter's intent.
+ *   8. AN IN-BAND OVERLOAD BEFORE OUTPUT IS RETRYABLE. A 200 whose stream reports
+ *      `overloaded_error` is the same transient failure as a 529, and while
+ *      nothing has reached the caller it must carry a code the retry policy
+ *      repeats; after output it stays PROVIDER_ERROR, as rule 1 requires.
  *
  * Everything runs against an injected fetch and an in-memory encrypted
  * credential backend. No test here touches the network or a platform credential
@@ -901,6 +905,71 @@ describe('claude adapter never rotates after output has started', () => {
     const chunks = await drain(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options()))
     expect(calls).toHaveLength(2)
     expect(chunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-band stream errors
+// ---------------------------------------------------------------------------
+
+describe('claude adapter in-band stream errors', () => {
+  /** A 200 whose stream reports the failure itself, after the given frames. */
+  function inBandError(type: string, message: string, before: unknown[] = [MESSAGE_START]): Response {
+    return streamResponse([...before, { type: 'error', error: { type, message } }])
+  }
+
+  it('keeps a transient in-band error retryable while nothing has reached the caller', async () => {
+    // The shape that ended a real turn: HTTP 200, message_start, then an
+    // overloaded_error event. The same overload sent as a 529 is SERVER, so the
+    // in-band copy must not be the one that ends the turn on the first try.
+    const policy = (await mount().then(({ store, settings }) => makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)))
+      .providerRetryPolicy()
+    const retryable = policy.mode === 'normal' ? policy.retryableCodes : []
+    for (const [type, code] of [
+      ['overloaded_error', 'SERVER'],
+      ['api_error', 'SERVER'],
+      ['rate_limit_error', 'RATE_LIMIT'],
+    ] as const) {
+      const { store, settings } = await mount()
+      const { fn, calls } = recordingFetch(() => inBandError(type, 'Overloaded'))
+      const failure = await failureOf(makeAdapter(store, settings, fn).stream(options()))
+      expect(failure).toMatchObject({ code })
+      // The wire type stays in the message, so the notice still says what happened.
+      expect((failure as Error).message).toContain('Claude stream error (' + type + '): Overloaded')
+      expect(retryable).toContain(code)
+      // Classified, not rotated or re-requested inside the stream: the harness
+      // retry policy owns the repeat.
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('surfaces an in-band overload as PROVIDER_ERROR once output has reached the caller', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => inBandError('overloaded_error', 'Overloaded', [
+      MESSAGE_START,
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial answer' } },
+    ]))
+    const seen: StreamChunk[] = []
+    let failure: unknown
+    try {
+      for await (const chunk of makeAdapter(store, settings, fn).stream(options())) seen.push(chunk)
+    } catch (error) {
+      failure = error
+    }
+    expect(seen.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text)).toEqual(['partial answer'])
+    expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves a non-transient or unrecognized in-band error with the mapper verdict', async () => {
+    for (const type of ['invalid_request_error', 'authentication_error', 'some_future_error']) {
+      const { store, settings } = await mount()
+      const { fn } = recordingFetch(() => inBandError(type, 'nope'))
+      // An unrecognized type must not fall back to the 200 status line, which
+      // the HTTP classifier would read as a server error.
+      expect(await failureOf(makeAdapter(store, settings, fn).stream(options())))
+        .toMatchObject({ code: 'PROVIDER_ERROR' })
+    }
   })
 })
 
