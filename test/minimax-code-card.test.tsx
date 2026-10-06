@@ -71,10 +71,10 @@ describe('MiniMax Code card: sibling parity controls', () => {
     for (const key of ['enableProvider', 'contextWindowSection', 'selectAll', 'enhanced']) {
       expect(text).not.toContain(key)
     }
-    // One checkbox per model, each labelled with the model's display name.
-    const labels = [...container.querySelectorAll('label')].map((l) => l.textContent)
-    expect(labels).toContain('MiniMax M2.7')
-    expect(labels).toContain('MiniMax M3')
+    // One checklist row per model, each labelled with the model's display name.
+    const rows = [...container.querySelectorAll('.dsh-mcl-option .dsh-mcl-name')].map((el) => el.textContent)
+    expect(rows).toContain('MiniMax M2.7')
+    expect(rows).toContain('MiniMax M3')
   })
 
   it('sends the enable flag to /settings when the switch is flipped', async () => {
@@ -91,9 +91,9 @@ describe('MiniMax Code card: sibling parity controls', () => {
   it('sends the narrowed selection to /models when a model is unchecked', async () => {
     const calls = mockFetch()
     await render()
-    const label = [...container.querySelectorAll('label')].find((l) => l.textContent === 'MiniMax M3')!
-    const box = label.querySelector('input[type="checkbox"]') as HTMLInputElement
-    await act(async () => { box.click() })
+    const row = [...container.querySelectorAll('.dsh-mcl-option')].find((el) => el.textContent?.includes('MiniMax M3'))! as HTMLButtonElement
+    expect(row.getAttribute('aria-checked')).toBe('true')
+    await act(async () => { row.click() })
     const modelsCall = calls.find((c) => c.url.includes('/models') && c.body !== undefined)
     expect(modelsCall?.body).toEqual({ enabledModelIds: ['MiniMax-M2.7'] })
   })

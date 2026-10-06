@@ -8,6 +8,7 @@ import type {
 } from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_REASONING_EFFORTS } from '../../shared/kimi-code-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
@@ -668,36 +669,23 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           </button>
         </div>
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
-        <div className="dsha-models" aria-label="Kimi Code Models">
-          {status?.models.map((model: KimiCodeModelOption) => {
-            const facts = [
-              model.id,
+        <ModelChecklist
+          items={(status?.models ?? []).map((model: KimiCodeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            hint: [
               model.wire === 'anthropic' ? t.wireAnthropic : t.wireOpenai,
               ...(model.supportsVideo ? [t.capVideo] : []),
               ...(model.supportsDynamicTools ? [t.capDynamicTools] : []),
               ...(model.minimumPlan ? [t.capPlan.replace('{plan}', model.minimumPlan)] : []),
-            ]
-            return (
-              <label key={model.id} title={facts.join(' · ')}>
-                <input
-                  type="checkbox"
-                  checked={model.enabled}
-                  disabled={busy !== null}
-                  onChange={(event) => toggleModel(model.id, event.currentTarget.checked)}
-                />
-                <span>{model.name}</span>
-              </label>
-            )
-          })}
-        </div>
-        <div className="dsha-actions">
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(true)}>
-            {t.selectAll}
-          </button>
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(false)}>
-            {t.unselectAll}
-          </button>
-        </div>
+            ].join(' · '),
+            enabled: model.enabled,
+          }))}
+          busy={busy !== null}
+          onToggle={toggleModel}
+          onToggleAll={setAllModels}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
+        />
         {status !== null && status.models.length > 0 && <KimiModelCapabilities models={status.models} />}
       </section>
 

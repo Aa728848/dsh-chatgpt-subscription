@@ -15,6 +15,8 @@ import { ProviderHubSection } from './ProviderHubSection.tsx'
 import { SubscriptionApi } from './api.ts'
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
 import { installStyles } from './styles.ts'
+import { installHubStyles } from './hub/hub-styles.ts'
+import { installModelChecklistStyles } from './common/model-checklist-styles.ts'
 import { installAntigravityStyles } from './antigravity/styles.ts'
 import { installPoolStyles } from './common/styles.ts'
 import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from './antigravity/locales.ts'
@@ -62,6 +64,11 @@ export const inject = [
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, dictionaries), 'dsh-chatgpt-subscription: dictionaries')
   ctx.effect(() => installStyles(), 'dsh-chatgpt-subscription: styles')
+  ctx.effect(() => {
+    installHubStyles()
+    installModelChecklistStyles()
+    return () => {}
+  }, 'dsh-chatgpt-subscription: hub styles')
   ctx.effect(() => ctx.locale.register(NS_ANTIGRAVITY, antigravityDicts), 'dsh-antigravity: dictionaries')
   ctx.effect(() => {
     installAntigravityStyles()

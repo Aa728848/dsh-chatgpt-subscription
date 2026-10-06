@@ -26,7 +26,10 @@ describe('quota UI', () => {
   })
 
   it('shows reset credit expiry and enables use only when a credit is available', () => {
-    const expiresAt = Date.parse('2030-01-01T02:00:00Z') / 1000
+    // Mid-year, not a year boundary: the card renders the expiry in the local
+    // zone, so a January 1st instant reads as the previous year anywhere west
+    // of UTC and the assertion would fail for a reason the card is not about.
+    const expiresAt = Date.parse('2030-06-15T02:00:00Z') / 1000
     const available = renderToStaticMarkup(<ResetCreditsFact resetCredits={{ availableCount: 1, expiresAt }} busy={null} onUse={async () => undefined} t={t} />)
     expect(available).toContain('到期时间')
     expect(available).toContain('2030')
@@ -45,8 +48,8 @@ describe('quota UI', () => {
     expect(windowLabel(300, t)).toContain('5')
     expect(windowLabel(300, t)).toContain('额度')
     vi.useFakeTimers()
-    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'))
-    const reset = formatReset(Date.parse('2030-01-01T02:00:00Z') / 1000)
+    vi.setSystemTime(new Date('2030-06-15T00:00:00Z'))
+    const reset = formatReset(Date.parse('2030-06-15T02:00:00Z') / 1000)
     expect(reset).toContain('2030')
     expect(reset).toMatch(/[（(].*2.*[）)]/)
     vi.useRealTimers()

@@ -11,6 +11,7 @@ import type {
 } from '../../shared/claude-contracts.ts'
 import { CLAUDE_REASONING_EFFORTS } from '../../shared/claude-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
@@ -818,35 +819,18 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: Props): Rea
           </button>
         </div>
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
-        <div className="dsha-models" aria-label="Claude Models">
-          {status?.models.map((model: ClaudeModelOption) => (
-            <label key={model.id} title={modelFacts(model, t).join(' · ')}>
-              <input
-                type="checkbox"
-                checked={model.enabled}
-                disabled={busy !== null}
-                onChange={(event) => toggleModel(model.id, event.currentTarget.checked)}
-              />
-              <span>{model.name}</span>
-            </label>
-          ))}
-        </div>
-        <div className="dsha-actions">
-          <button
-            className="dsha-btn"
-            disabled={busy !== null}
-            onClick={() => setAllModels(true)}
-          >
-            {t.selectAll}
-          </button>
-          <button
-            className="dsha-btn"
-            disabled={busy !== null}
-            onClick={() => setAllModels(false)}
-          >
-            {t.unselectAll}
-          </button>
-        </div>
+        <ModelChecklist
+          items={(status?.models ?? []).map((model: ClaudeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            hint: modelFacts(model, t).slice(1).join(' · ') || undefined,
+            enabled: model.enabled,
+          }))}
+          busy={busy !== null}
+          onToggle={toggleModel}
+          onToggleAll={setAllModels}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
+        />
       </section>
 
       <section className="dsha-group">

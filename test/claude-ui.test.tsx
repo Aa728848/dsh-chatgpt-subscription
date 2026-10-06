@@ -148,7 +148,7 @@ describe('claude card with nothing held back', () => {
     expect(first?.className).not.toContain('consent')
     expect(node.querySelector('[class*="consent"]')).toBeNull()
     // The sections that must survive the removal are all still rendered.
-    expect(node.querySelector('.dsha-models')).not.toBeNull()
+    expect(node.querySelector('.dsh-mcl')).not.toBeNull()
     expect(node.querySelector('.dsha-quota-card')).not.toBeNull()
 
     // The controls the gate used to disable are live, which is the property the
@@ -161,7 +161,7 @@ describe('claude card with nothing held back', () => {
     expect(importButton?.disabled).toBe(false)
     // No locked-reason tooltip is attached either: it went with the gate.
     expect(signIn?.getAttribute('title')).toBeNull()
-    const modelInput = node.querySelector<HTMLInputElement>('.dsha-models input[type="checkbox"]')
+    const modelInput = node.querySelector<HTMLButtonElement>('.dsh-mcl-option[role="checkbox"]')
     expect(modelInput?.disabled).toBe(false)
   })
 
@@ -188,9 +188,11 @@ describe('claude model and context settings', () => {
     const { node, fetchMock } = await mountSection(status())
 
     // Opus is checked, Haiku is not.
-    const labels = [...node.querySelectorAll('.dsha-models label')]
-    expect(labels.map((label) => label.textContent)).toEqual(['Claude Opus 4.6', 'Claude Haiku 4.5'])
-    const haiku = labels[1]!.querySelector('input')!
+    const rows = [...node.querySelectorAll('.dsh-mcl-option')]
+    expect(rows.map((row) => row.querySelector('.dsh-mcl-name')?.textContent)).toEqual(['Claude Opus 4.6', 'Claude Haiku 4.5'])
+    expect(rows[0]!.getAttribute('aria-checked')).toBe('true')
+    expect(rows[1]!.getAttribute('aria-checked')).toBe('false')
+    const haiku = rows[1]! as HTMLButtonElement
     await act(async () => haiku.click())
 
     const call = fetchMock.mock.calls.find((entry) => String(entry[0]).endsWith('/claude/api/models'))

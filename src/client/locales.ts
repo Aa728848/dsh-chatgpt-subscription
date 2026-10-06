@@ -156,6 +156,20 @@ export const zh = {
   imagePreviewOpenOriginal: '打开原图',
   retry: '重试',
   unknown: '未知',
+  // The hub overview: the settings page's opening screen.
+  hubBack: '订阅服务',
+  hubOverviewHint: '选择供应商以管理账号、模型与配额；右侧开关控制该供应商是否出现在模型列表中。',
+  hubAccountCount: '{count} 个账号',
+  hubNoAccounts: '暂无账号，点击进入添加',
+  hubStateEnabled: '已启用',
+  hubStateDisabled: '已停用',
+  hubModelsEnabled: '{count} 个模型可用',
+  hubModelsEnabledOfTotal: '{count}/{total} 个模型可用',
+  hubStatusFailed: '状态读取失败',
+  hubSwitchOn: '启用 {name}',
+  hubSwitchOff: '停用 {name}',
+  hubCardLabel: '{name}，{annotation}',
+  modelChecklistCount: '已启用 {count}/{total}',
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
@@ -310,6 +324,20 @@ export const en: Record<keyof typeof zh, string> = {
   imagePreviewOpenOriginal: 'Open original',
   retry: 'Retry',
   unknown: 'Unknown',
+  // The hub overview: the settings page's opening screen.
+  hubBack: 'Subscriptions',
+  hubOverviewHint: 'Pick a provider to manage its accounts, models and quota. The switch controls whether it appears in the model picker.',
+  hubAccountCount: '{count} accounts',
+  hubNoAccounts: 'No accounts yet — open to add one',
+  hubStateEnabled: 'Enabled',
+  hubStateDisabled: 'Disabled',
+  hubModelsEnabled: '{count} models on',
+  hubModelsEnabledOfTotal: '{count}/{total} models on',
+  hubStatusFailed: 'Status unavailable',
+  hubSwitchOn: 'Enable {name}',
+  hubSwitchOff: 'Disable {name}',
+  hubCardLabel: '{name}, {annotation}',
+  modelChecklistCount: '{count}/{total} enabled',
 }
 
 export type LocaleKey = keyof typeof zh

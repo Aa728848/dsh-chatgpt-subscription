@@ -24,14 +24,6 @@ const CSS = `
 .dsh-codex-success{color:var(--dsw-alias-label-success,#2e9b62)}
 .dsh-codex-errorbar{align-items:center;background:color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 9%,transparent);border:0.5px solid color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 28%,transparent);border-radius:7px;color:var(--dsw-alias-label-danger,#d94b4b);display:flex;font-size:13px;gap:12px;justify-content:space-between;padding:10px 12px}
 .dsh-codex-link{color:var(--dsw-alias-label-link,#3278d4);display:inline-block;font-size:13px;margin-top:8px}
-.dsh-codex-models-hint{padding-top:10px}
-.dsh-codex-models{display:flex;flex-wrap:wrap;gap:7px;padding-top:8px}
-.dsh-codex-models label{cursor:pointer;display:block;position:relative}
-.dsh-codex-models input{position:absolute;opacity:0;pointer-events:none}
-.dsh-codex-models span{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;padding:5px 8px}
-.dsh-codex-models input:checked+span{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 14%,var(--dsw-alias-bg-layer-2));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 55%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary)}
-.dsh-codex-models input:focus-visible+span{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
-.dsh-codex-models input:disabled+span{cursor:default;opacity:.5}
 .dsh-codex-pref-row{align-items:center;border-bottom:0.5px solid var(--dsw-alias-border-l2);display:flex;gap:16px;justify-content:space-between;min-height:58px;padding:10px 0}
 .dsh-codex-pref-row strong,.dsh-codex-check strong{display:block;font-size:13px;font-weight:600;line-height:1.35}
 .dsh-codex-segments{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:inline-flex;flex-wrap:nowrap;gap:3px;padding:3px}
@@ -102,29 +94,6 @@ const CSS = `
 .dsh-codex-image-preview{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:block;max-height:260px;max-width:min(100%,360px);object-fit:contain}
 .dsh-codex-image-loading,.dsh-codex-image-failed{border:0.5px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);display:inline-flex;font-size:12px;line-height:1.4;padding:18px 20px}
 .dsh-codex-image-failed{color:var(--dsw-alias-label-danger,#d94b4b)}
-/* Seven provider tabs overflow a narrow settings pane. The shared
-   .dsh-codex-segments rule pins flex-wrap to nowrap, so the strip originally ran
-   past the pane edge with no way to reach the trailing tabs. Wrapping restored
-   reachability but produced a ragged second row (five tabs, then two) whose right
-   edge bore no relation to the first row's, which reads as a layout accident
-   rather than a deliberate two-row control. The strip therefore stays on ONE line
-   and scrolls horizontally.
-   The scrollbar is deliberately thin but VISIBLE: it is the affordance that says
-   more tabs exist, and hiding it would strand a mouse user, whose vertical wheel
-   cannot scroll this row — the original bug in a new shape.
-   Buttons are flex:none so the row scrolls instead of squashing labels. The
-   padding is 4px, not the shared 3px, because overflow clips at the padding box:
-   the focus ring is 2px wide with a 2px offset (4px beyond the button), so 3px
-   would shave a pixel off it for keyboard users. scroll-padding keeps the same
-   margin when a tab is scrolled into view by focus or by the active-tab effect
-   in ProviderHubSection.
-   Scoped to .dsh-hub-tabs so the ChatGPT provider-search group, which reuses
-   .dsh-codex-segments, keeps its single-line layout. */
-.dsh-hub-tabs{align-self:flex-start;flex-wrap:nowrap;max-width:100%;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;padding:4px;scroll-padding-inline:4px;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l2) transparent}
-.dsh-hub-tabs button{flex:none}
-.dsh-hub-tabs::-webkit-scrollbar{height:6px}
-.dsh-hub-tabs::-webkit-scrollbar-track{background:transparent}
-.dsh-hub-tabs::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:999px}
 @keyframes dsh-codex-pulse{0%,100%{opacity:.45}50%{opacity:.85}}
 @media(max-width:560px){.dsh-codex-row,.dsh-codex-pref-row,.dsh-codex-quota-fact,.dsh-codex-reset-credits{align-items:flex-start;flex-direction:column;gap:3px}.dsh-codex-value,.dsh-codex-quota-fact strong{text-align:left}.dsh-codex-actions{justify-content:flex-start}.dsh-codex-grouphead{align-items:flex-start;flex-direction:column;gap:0;padding:12px 0}.dsh-codex-meter-meta{align-items:flex-start;flex-direction:column;gap:2px}.dsh-codex-errorbar{align-items:flex-start;flex-direction:column}.dsh-codex-segments{width:100%}.dsh-codex-select{max-width:none;width:100%}.dsh-codex-context-row{align-items:flex-start;flex-direction:column;gap:5px}.dsh-codex-segments label{flex:1}.dsh-codex-segments span{text-align:center}.dsh-codex-image-tool{max-width:100%;margin-left:0}}
 @media(prefers-reduced-motion:reduce){.dsh-codex-meter>span{transition:none}.dsh-codex-skeleton span{animation:none}}

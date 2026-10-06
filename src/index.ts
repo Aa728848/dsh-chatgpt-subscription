@@ -21,7 +21,9 @@ import { CONTROLLED_PROVIDERS, createControlledModelFetch, readModelRequestLimit
 import { createDiagnosticFetch } from './host/common/request-diagnostics.ts'
 import { registerPreferenceStore } from './host/preferences.ts'
 import { ResponsesClient } from './host/responses-client.ts'
+import { registerHubOverviewRoutes, type HubSummarySource } from './host/hub-overview.ts'
 import { registerRoutes } from './host/routes.ts'
+import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
 import type { SubscriptionPreferencesDto } from './shared/contracts.ts'
@@ -808,6 +810,146 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
 
     const disposeRoutes = registerRoutes(
       ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool, fetchConfiguration)
+
+    // The hub overview's one-request summary of every subscription line. Each
+    // line's read closure stays beside the stores it reads; the aggregation
+    // module itself learns nothing about how a line stores accounts. All reads
+    // are local snapshots — no upstream call is ever triggered by the settings
+    // page's opening screen.
+    const routable = (accounts: readonly { authStatus?: string }[]): boolean =>
+      accounts.some((account) => account.authStatus === undefined || account.authStatus === 'ok')
+    const hubSources: HubSummarySource[] = [
+      {
+        id: 'chatgpt',
+        providerId: PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = preferences.status()
+          const accounts = await codexAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.visibleModelIds.length,
+            totalModelCount: CODEX_MODEL_CATALOG.length,
+          }
+        },
+      },
+      {
+        id: 'antigravity',
+        providerId: ANTIGRAVITY_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = antigravityPreferences.status()
+          const accounts = await antigravityAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.enabledModelIds?.length ?? null,
+            totalModelCount: null,
+          }
+        },
+      },
+      {
+        id: 'command-code',
+        providerId: COMMAND_CODE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = commandCodePreferences.status()
+          const accounts = await commandCodeAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.enabledModelIds?.length ?? null,
+            totalModelCount: null,
+          }
+        },
+      },
+      {
+        id: 'kimi-code',
+        providerId: KIMI_CODE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = kimiCodePreferences.status()
+          const accounts = await kimiCodeAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.enabledModelIds?.length ?? null,
+            totalModelCount: null,
+          }
+        },
+      },
+      {
+        id: 'workbuddy',
+        providerId: WORKBUDDY_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = workBuddyPreferences.status()
+          const accounts = await workBuddyAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.enabledModelIds?.length ?? null,
+            totalModelCount: null,
+          }
+        },
+      },
+      {
+        id: 'minimax-code',
+        providerId: MINIMAX_CODE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = minimaxCodePreferences.status()
+          const accounts = await minimaxCodeAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.enabledModelIds?.length ?? null,
+            totalModelCount: null,
+          }
+        },
+      },
+      {
+        id: 'claude',
+        providerId: CLAUDE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = claudePreferences.status()
+          const accounts = await claudeAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.enabledModelIds?.length ?? null,
+            totalModelCount: null,
+          }
+        },
+      },
+      {
+        // Ollama has no enable switch — a key line is always servable — so its
+        // card renders no toggle and always reports enabled.
+        id: 'ollama',
+        providerId: OLLAMA_PROVIDER_ID,
+        canToggle: false,
+        read: async () => {
+          const accounts = await ollamaAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: true,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: null,
+            totalModelCount: null,
+          }
+        },
+      },
+    ]
+    const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     // The video ingress for the Kimi route. Registered here because the tool
@@ -860,6 +1002,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeVideoTool()
       disposeAdapter()
       disposeRoutes()
+      disposeHubOverview()
       disposeAntigravityRoutes()
       releaseHandle(antigravityRouteWatch)
       antigravityRegistration?.()

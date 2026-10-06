@@ -5,6 +5,7 @@ import type {
   AntigravityWebStatus,
 } from '../../shared/antigravity-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import { zh } from './locales.ts'
 
@@ -487,32 +488,18 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
 
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
 
-        {/* 胶囊标签多选列表 */}
-        <div className="dsha-models" aria-label="Antigravity Models">
-          {status?.models.map((model) => {
-            const checked = model.enabled
-            return (
-              <label key={model.id} title={model.id}>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={busy !== null}
-                  onChange={(e) => void toggleModel(model.id, e.currentTarget.checked)}
-                />
-                <span>{model.name}</span>
-              </label>
-            )
-          })}
-        </div>
-
-        <div className="dsha-actions">
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(true)}>
-            {t.selectAll}
-          </button>
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(false)}>
-            {t.unselectAll}
-          </button>
-        </div>
+        <ModelChecklist
+          items={(status?.models ?? []).map((model) => ({
+            id: model.id,
+            name: model.name,
+            hint: model.defaultContextWindow ? formatCapacity(model.defaultContextWindow) : undefined,
+            enabled: model.enabled,
+          }))}
+          busy={busy !== null}
+          onToggle={(id, enabled) => void toggleModel(id, enabled)}
+          onToggleAll={setAllModels}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll }}
+        />
       </section>
 
       {/* 3. 增强功能（思考深度设置） */}

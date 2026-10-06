@@ -22,6 +22,7 @@ const EFFORT_LABELS: Record<CommandCodeReasoningEffort, string> = {
   max: 'Max',
 }
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
 
@@ -561,32 +562,18 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           </p>
         )}
         {status?.zeroDataRetention === true && <p className="dsha-notice" data-testid="command-code-zdr">{t.zdrEnabled}</p>}
-        <div className="dsha-models" aria-label="Command Code Models">
-          {status?.models.map((model: CommandCodeModelOption) => {
-            return (
-              <label
-                key={model.id}
-                title={`${model.id} · ${wireLabel(model.wire, t)}`}
-              >
-                <input
-                  type="checkbox"
-                  checked={model.enabled}
-                  disabled={busy !== null}
-                  onChange={(event) => toggleModel(model.id, event.currentTarget.checked)}
-                />
-                <span>{model.name}</span>
-              </label>
-            )
-          })}
-        </div>
-        <div className="dsha-actions">
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(true)}>
-            {t.selectAll}
-          </button>
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(false)}>
-            {t.unselectAll}
-          </button>
-        </div>
+        <ModelChecklist
+          items={(status?.models ?? []).map((model: CommandCodeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            hint: wireLabel(model.wire, t),
+            enabled: model.enabled,
+          }))}
+          busy={busy !== null}
+          onToggle={toggleModel}
+          onToggleAll={setAllModels}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll }}
+        />
       </section>
 
       <section className="dsha-group">

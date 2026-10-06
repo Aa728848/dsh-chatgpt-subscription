@@ -5,6 +5,7 @@ import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEX
 import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { AccountPoolSection, type AccountPoolLabels } from './common/AccountPoolSection.tsx'
+import { ModelChecklist } from './common/ModelChecklist.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from './common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../shared/account-pool-contracts.ts'
 import { NS } from './locales.ts'
@@ -349,19 +350,18 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         <InfoRow label={t('connectionState')} value={connection === null ? t('untested') : t('connected')} />
         {connection !== null ? <InfoRow label={t('latency')} value={`${connection.latencyMs} ms · ${formatDate(connection.checkedAt)}`} /> : null}
         <p className="dsha-muted dsha-models-hint">{t('modelsHint')}</p>
-        <div className="dsha-models" aria-label={t('models')}>
-          {CODEX_MODEL_CATALOG.map((model) => {
-            const checked = visibleModelIds.some(id => id === model.id)
-            return <label key={model.id} title={model.id}>
-              <input type="checkbox" checked={checked} disabled={busy !== null} onChange={(event) => void toggleVisibleModel(model.id, event.currentTarget.checked)} />
-              <span>{model.name}</span>
-            </label>
-          })}
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 8, marginBottom: 12 }}>
-          <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(true)}>{t('selectAll')}</Button>
-          <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(false)}>{t('unselectAll')}</Button>
-        </div>
+        <ModelChecklist
+          items={CODEX_MODEL_CATALOG.map((model) => ({
+            id: model.id,
+            name: model.name,
+            hint: `${formatCapacity(model.contextWindow)} ${t('tokens')}`,
+            enabled: visibleModelIds.some(id => id === model.id),
+          }))}
+          busy={busy !== null}
+          onToggle={(id, enabled) => void toggleVisibleModel(id, enabled)}
+          onToggleAll={(enabled) => void setAllVisibleModels(enabled)}
+          labels={{ selectAll: t('selectAll'), clearAll: t('unselectAll'), countTemplate: t('modelChecklistCount'), list: t('models') }}
+        />
         <div className="dsha-actions">
           <Button disabled={!status?.authenticated || busy !== null} onClick={testConnection}>{busy === 'test' ? t('testing') : t('testConnection')}</Button>
         </div>

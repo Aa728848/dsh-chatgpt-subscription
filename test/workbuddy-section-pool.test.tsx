@@ -168,18 +168,18 @@ describe('WorkBuddy settings card', () => {
     for (const button of login) expect(button.classList.contains('dsha-btn-primary')).toBe(true)
   })
 
-  it('shows only the model name on a pill, not the capability summary', async () => {
+  it('shows the model name with its capability facts on the quiet hint line', async () => {
     await render()
 
-    const pill = container.querySelector('.dsha-models label')!
-    expect(pill.querySelector('span')?.textContent).toBe('GLM-5.3')
-    // The context window / image / effort facts moved into the tooltip, so this
-    // tab renders the same single-line pill as its four siblings.
-    expect(pill.textContent).not.toContain('1M')
-    expect(pill.textContent).not.toContain(zh.imageSupport)
-    expect(pill.getAttribute('title')).toContain('1M')
-    expect(pill.getAttribute('title')).toContain(zh.imageSupport)
-    expect(pill.getAttribute('title')).toContain('low/high/max')
+    // The shared checklist row: name on the first line, and the context window /
+    // image / effort facts on the hint line, in the claude-style picker's idiom.
+    const row = container.querySelector('.dsh-mcl-option')!
+    expect(row.querySelector('.dsh-mcl-name')?.textContent).toBe('GLM-5.3')
+    const hint = row.querySelector('.dsh-mcl-hint')?.textContent ?? ''
+    expect(hint).toContain('1M')
+    expect(hint).toContain(zh.imageSupport)
+    expect(hint).toContain('low/high/max')
+    expect(row.getAttribute('title')).toBe('glm-5.3')
   })
 
   it('shows the empty state through the shared card, not a panel of its own', async () => {

@@ -9,6 +9,7 @@ import type {
 import { WORKBUDDY_REASONING_EFFORTS } from '../../shared/workbuddy-contracts.ts'
 import { zh } from './locales.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { accountPoolZh, type AccountPoolLabels } from '../common/account-pool-labels.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
@@ -832,39 +833,24 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: Props): 
           </button>
         </div>
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
-        <div className="dsha-models" aria-label="WorkBuddy Models">
-          {status?.models.map((model: WorkBuddyModelOption) => {
-            // The pill shows only the model name, as every sibling tab does;
-            // the capability facts ride the tooltip instead of a second line.
-            const facts = [
-              model.id,
+        <ModelChecklist
+          items={(status?.models ?? []).map((model: WorkBuddyModelOption) => ({
+            id: model.id,
+            name: model.name,
+            hint: [
               formatCapacity(model.contextWindow),
               model.supportsImage ? t.imageSupport : t.textOnly,
               ...(model.reasoningEfforts && model.reasoningEfforts.length > 0
                 ? [model.reasoningEfforts.join('/')]
                 : []),
-            ]
-            return (
-              <label key={model.id} title={facts.join(' · ')}>
-                <input
-                  type="checkbox"
-                  checked={model.enabled}
-                  disabled={busy !== null}
-                  onChange={(event) => void toggleModel(model.id, event.currentTarget.checked)}
-                />
-                <span>{model.name}</span>
-              </label>
-            )
-          })}
-        </div>
-        <div className="dsha-actions">
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => void setAllModels(true)}>
-            {t.selectAll}
-          </button>
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => void setAllModels(false)}>
-            {t.unselectAll}
-          </button>
-        </div>
+            ].join(' · '),
+            enabled: model.enabled,
+          }))}
+          busy={busy !== null}
+          onToggle={(id, enabled) => void toggleModel(id, enabled)}
+          onToggleAll={(enabled) => void setAllModels(enabled)}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
+        />
       </section>
 
       <section className="dsha-group">

@@ -14,6 +14,7 @@ import {
   type MinimaxCodeReasoningEffort,
 } from '../../shared/minimax-code-contracts.ts'
 import { AccountPoolSection, type AccountPoolLabels } from '../common/AccountPoolSection.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import type {
   AccountPoolStatusDto,
   AccountRotationStrategy,
@@ -871,38 +872,21 @@ export function MinimaxCodeSection({ onModelChange }: Props): React.JSX.Element 
         {models.length === 0
           ? <div className="dsha-empty">{t('modelsUnavailable')}</div>
           : (
-            <>
-              <div className="dsha-models" aria-label={t('modelsSection')}>
-                {models.map((model: MinimaxCodeModelOption) => {
-                  // The tooltip carries what the row cannot: the exact wire id,
-                  // how thinking behaves, and the input the model accepts.
-                  const facts = [
-                    model.id,
-                    thinkingLabel(model.thinking, t),
-                    ...(model.description === null || model.description === '' ? [] : [model.description]),
-                  ]
-                  return (
-                    <label key={model.id} title={facts.join(' · ')}>
-                      <input
-                        type="checkbox"
-                        checked={model.enabled}
-                        disabled={busy !== null}
-                        onChange={(event) => toggleModel(model.id, event.currentTarget.checked)}
-                      />
-                      <span>{model.name}</span>
-                    </label>
-                  )
-                })}
-              </div>
-              <div className="dsha-actions">
-                <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(true)}>
-                  {t('selectAll')}
-                </button>
-                <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(false)}>
-                  {t('unselectAll')}
-                </button>
-              </div>
-            </>
+            <ModelChecklist
+              items={models.map((model: MinimaxCodeModelOption) => ({
+                id: model.id,
+                name: model.name,
+                hint: [
+                  thinkingLabel(model.thinking, t),
+                  ...(model.description === null || model.description === '' ? [] : [model.description]),
+                ].join(' · ') || undefined,
+                enabled: model.enabled,
+              }))}
+              busy={busy !== null}
+              onToggle={toggleModel}
+              onToggleAll={setAllModels}
+              labels={{ selectAll: t('selectAll'), clearAll: t('unselectAll'), list: t('modelsSection') }}
+            />
           )}
       </section>
 
