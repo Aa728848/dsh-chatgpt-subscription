@@ -213,21 +213,75 @@ export function ModelChecklist(props: {
 | 默认值即空文档 | `src/shared/preferences.ts` | 「absent key = 用目录默认」让恢复默认等于不存储，迁移成本为零 |
 | 字段级校验 | `src/host/routes.ts` `readPreferencesUpdate` | 每个字段独立校验、报错带字段名；`PreferenceError` 与 400 映射干净 |
 
-### 6.2 暴力、丑陋、冗长的反例（待重构，按收益排序）
+### 6.2 暴力、丑陋、冗长的反例（按收益排序）
 
-| # | 反例 | 位置 | 问题 | 重构方向 |
-|---|---|---|---|---|
-| 1 | 8 个 ComposerQuota 逐字复制 | `src/client/*/​*ComposerQuota.tsx`（各 ~5KB） | 两两 diff 仅 ~59 行差异（名字/端点/标签）；改 badge 逻辑要改 8 遍 | 抽 `common/ComposerQuotaBadge.tsx`（provider id/endpoint/labels 参数化），8 个文件变 8 个 10 行配置 |
-| 2 | host 装配 8 段 claim-route 模板 | `src/index.ts` L330–L700 | 每段都是 `let registration/conflict + claimXRoute + watch` 三元组，~25 行 × 8 | 抽 `claimRouteWhenFree(ctx, providerId, name, adapterFactory)`，装配表驱动化 |
-| 3 | 巨型 Section 文件 | `MinimaxCodeSection.tsx` 43KB / `ClaudeSection.tsx` 41KB / `WorkBuddySection.tsx` 40KB / `CodexSubscriptionSection.tsx` 36KB | 数据获取、状态机、格式化、渲染四层混在一个函数体 | 每 Section 拆 `useProviderStatus()` hook + 纯渲染块；格式化函数已部分导出，继续下沉到 `common/format.ts` |
-| 4 | fetchApi 每文件一份 | 8 个 Section 各自内联同一 `fetchApi` | 错误形状解析（`json.error` string vs object）各写各的 | `common/line-api.ts` 一个 `createLineApi(prefix)` 工厂 |
-| 5 | locale 命名空间 `any` | `src/client/index.tsx` L41–L48 | 6 个命名空间声明为 `any`，键名漂移编译期不可见 | 各 locales.ts 导出 `LocaleKey` 类型并填入 `LocaleNamespaceMap`（MinimaxCode 已是范本） |
-| 6 | quota badge 注册 × 8 | `src/client/index.tsx` L147–L236 | 8 段只差 order/locale/组件的 `slots.inject` | 一个 `PROVIDER_BADGES` 表 + 循环注册 |
-| 7 | ~~TAB 条挂载全部语义~~ | `ProviderHubSection.tsx` | 横向滚动条 + 键盘导航 + scrollIntoView 守卫，为 8 个并列页付出复杂度 | ✅ 本次已完成：TAB 条与其 `.dsh-hub-tabs` 样式整体删除，由 §3.1 的 drill-in 替代 |
+> 状态（2026-10-06 结构性重构轮）：1 / 2 / 4 / 5 / 6 / 7 已处理；3 部分处理（格式化与 context-window 编辑器已下沉到 `common/`，Section 的 hook 分层仍待做）。逐项结论见 §6.3。
 
-> 反例 1/2/4/5/6 不阻塞本次重绘，列入后续会话（见 §8）。
+| # | 反例 | 位置 | 问题 | 重构方向 | 结果 |
+|---|---|---|---|---|---|
+| 1 | 8 个 ComposerQuota 逐字复制 | `src/client/*/*ComposerQuota.tsx` | 两两 diff 仅 ~59 行差异（名字/端点/标签）；改 badge 逻辑要改 8 遍 | 抽 `common/ComposerQuotaBadge.tsx` | ✅ 6 支合并（ChatGPT 那支结构不同，见 §6.3）；每支只剩自己的 facts 选择器 |
+| 2 | host 装配 7 段 claim-route 模板 | `src/index.ts` | 每段都是 `let registration/conflict + claimXRoute + watch` 三元组 | 抽 `claimProviderRoute(ctx, {providerId, label, adapter})` | ✅ 见 §6.3 |
+| 3 | 巨型 Section 文件 | `MinimaxCodeSection.tsx` 39KB / `WorkBuddySection` 38KB / `ClaudeSection` 37KB / `CodexSubscriptionSection` 37KB | 数据获取、状态机、格式化、渲染四层混在一个函数体 | 下沉格式化到 `common/format.ts`、共享 context-window 编辑器；再拆 `useProviderStatus()` | ◐ 前两项已做；hook 分层待做 |
+| 4 | fetchApi 每文件一份 | 10 个文件各自内联同一 `fetchApi` | 错误形状解析（`json.error` string vs object）各写各的 | `common/line-api.ts` 一个 `createLineApi(prefix, label)` | ✅ 10 份 → 1 个工厂（吸收了两处健壮性差异） |
+| 5 | locale 命名空间 `any` | `src/client/index.tsx` | 6 个命名空间声明为 `any`，键名漂移编译期不可见 | 各 locales.ts 导出 `LocaleKey` 并填入 `LocaleNamespaceMap` | ✅ 7 个命名空间全部类型化 |
+| 6 | quota badge 注册 × 8 | `src/client/index.tsx` | 8 段只差 order/locale/组件的 `slots.inject` | 表驱动注册 | ◐ 重复的 inject 工厂已集中为 `composerBadgeInject`；组件列表仍是 7 处显式 `register`，理由见 §6.3 |
+| 7 | ~~TAB 条挂载全部语义~~ | `ProviderHubSection.tsx` | 横向滚动条 + 键盘导航 + scrollIntoView 守卫 | drill-in 替代 | ✅ 已完成（§3.1） |
 
-## 7. 实施清单（本会话）
+## 6.3 结构性重构的结论（2026-10-06）
+
+### 已完成
+
+| 项 | 共享模块 | 关键取舍 |
+|---|---|---|
+| fetchApi ×10 | [`common/line-api.ts`](../src/client/common/line-api.ts) | 工厂取的是**十份的并集**：既读 `error` 为字符串（兄弟线路的形状）也读 `{code,message}`（ChatGPT 路由的形状，旧代码会印出 `[object Object]`），并保留 workbuddy 那份对**空响应体/非 JSON** 的容忍（那正是「客户端比 host 新」的表现）。另修掉一个真缺陷：`{ok:false,error}` 没有 `value` 键时不再被当成正常载荷。 |
+| 7 段 claim-route | [`host/common/provider-route.ts`](../src/host/common/provider-route.ts) | 适配器类型从 `ctx.llm.registerAdapter` 推导（不引入具体适配器类）；两处真实差异被**显式化**而非抹平——Ollama 从不监听 `llm/adapters-updated`（`watch: false`），以及无事件接缝的旧 harness 仍要能拿到路由。冲突串与两条日志原文保持不变。 |
+| 6 支 ComposerQuota | [`common/ComposerQuotaBadge.tsx`](../src/client/common/ComposerQuotaBadge.tsx) | 只合并骨架，**facts 选择器留在各线路**——那才是值得读的部分。回调走 ref 而非依赖：否则调用方写内联箭头就会让 60 秒轮询每次渲染重启（旧副本的真实缺陷，已用测试钉住）。ChatGPT 那支**故意不合并**：它用 `dsh-codex-composer-quota` 类名（自带样式）、没有 `-label`/`-val` 子元素、没有 `title`（只有 aria-label）、**没有点击刷新**、且受 `quickQuotaVisible` 偏好门控并用自己的字典键——合并等于把共享组件改成五个开关的配置器，比留一份 60 行的独立实现更难读。 |
+| locale `any` ×7 | 各 `locales.ts` 的 `XxxLocaleKey` | 5 条线路其实早已导出该类型，只是 `LocaleNamespaceMap` 没接上；antigravity 补上后全部类型化。 |
+| badge 注册 ×7 | `composerBadgeInject`（`src/client/index.tsx`） | 逐字重复的 8 行 seat 工厂集中为一处，7 段注册由 7 行 ×7 压到 4 行 ×7。**没有**做成组件表，且这次是实测结论而非推测：`ctx.slots.register` 既对 slot key 又对 locale 命名空间泛型、且是重载函数，组件 props 由两者组合而成；异构表会抹掉「这一行的 locale 与 component 的对应关系」，而一个保留该对应关系的泛型 helper 会在**自身函数体内**因命名空间参数尚未实例化而重载解析失败（两种写法都试过）。两条路都会以对 harness 内部 composed-props 类型的 cast 收场，即新增版本敏感接缝（AGENTS.md 红线）。 |
+| 目录计数 | `catalogTotal`（[`host/common/catalog-snapshot.ts`](../src/host/common/catalog-snapshot.ts)） | 概览卡片的 `N/M 模型` 由各线路**已经持有的目录**回答：Antigravity/Command Code/Kimi Code/Ollama 读模型设置里持久化的那份，Claude/WorkBuddy/MiniMax Code 读内存缓存，ChatGPT 用静态目录。**空目录报 null 而不是 0**——「还没同步」与「没有模型」是两句不同的话，前者不该显示成后者。 |
+| 格式化 ×6 + context-window ×6 + `contextDraftsFor` ×6 | [`common/format.ts`](../src/client/common/format.ts)、[`common/ContextWindowEditor.tsx`](../src/client/common/ContextWindowEditor.tsx) | 编辑器保留全部 `dsha-context-*` 类名、逐行 `aria-label` 与禁用语义（6 个 `*-context-window` 测试即安全网）；`inputLabel`/`meta`/`metaClassName` 之所以可选，是因为确实有线路不带 aria-label、不显示有效窗口、或用自己的类前缀。合并时发现 antigravity 的 `formatCapacity` **并非逐字相同**——它缺了 1K 下限，会把 0 渲染成 `0K`；统一取其余五份的行为。 |
+| `useStore` ×2 | [`common/use-store.ts`](../src/client/common/use-store.ts) | 两处逐字相同。先前只把它留在徽标组件里，等于「搬迁」而非去重；现在两个使用者从同一个模块引入。 |
+| 死字段 | `AntigravityModelOption` | `remainingFraction` / `quotaSummary` 无写者无读者，直接删除。 |
+
+### 故意没有合并的重复（连同原因）
+
+- **ChatGPT 的 `formatDate`**：它收的是**秒**并按量级启发式乘 1000（`> 10^10` 视为已是毫秒），调用方传的正是秒（`connection.checkedAt`、`quota.fetchedAt`）；共享版收毫秒，直接替换会让这些时间戳差 1000 倍。留在原处。
+- **`formatPercent` 两份**：Section 那份接受 `number|null|undefined` 且保留 1 位小数，composer 那份只接受 `number` 且 0 位小数；合并必然改变其中一个界面的可见舍入，因此保持两份而不是挑一个「赢家」。
+- **一处无测试覆盖的 DOM 变化**：统一后 antigravity 的模型名 span 也带上了 `title={id}`（其余五行本来就有）。这是本次抽取中唯一未被测试钉住的属性变化；若不需要，去掉即可。
+
+### Section 分层（⑥）
+
+巨型 Section 按「状态/动作 → hook，JSX → 组件」拆开，三个最大的都做了：
+
+| Section | 视图（拆分前 → 拆分后） | 新 hook | hook 形状 |
+|---|---|---|---|
+| claude | 34.4KB → 20.2KB（911 → 478 行） | `useClaudeSection.ts` 20.8KB | `{ state, derived, actions }` |
+| minimax-code | 36.1KB → 18.8KB（915 → 429 行） | `useMinimaxCodeSection.ts` 23.6KB | 同上（并顺带把 `poolAction` 的 `action: string` 收紧成实际传入的联合类型） |
+| workbuddy | 34.2KB → 16.6KB | `useWorkBuddySection.ts` 25.2KB | 同上 |
+
+规则：**纯搬运**——端点、请求体、请求顺序、`busy` token、effect 依赖数组、轮询节奏、`quiet` 语义、默认值一律不变；导出的符号留在原路径原名（`ClaudeSection`、`MinimaxCodeSection` + `remainingHours` 等，测试可能直接 import）。hook 返回命名形状而不是整个 state 对象。视图里**故意留下**的只有纯展示逻辑（如 claude 的 `modelFacts`、minimax 的 `thinkingLabel`/`remainingHours`）与绑定给它们用的 `t`——`Translate`/`fallbackTranslate` 放在 hook 文件里，两层共享同一个字典标识，这样 effect 依赖数组不用改。
+
+一处**行为等价但值得知道**的差别：`account`/`quota`/`models`/`contextModels`/`overrideCount` 这类派生值现在每次渲染都算（包括 loading 那次渲染），此前在 loading 早退之后才算。全是纯计算，渲染输出不变。
+
+### 重构中发现、按要求未改的问题（供后续决定）
+
+拆分被要求「只搬运、不顺手修」，所以下面这些是**读到了但原样保留**的问题，都是有意的欠账而非遗漏：
+
+- **动作未置 `busy`**：claude 的 `updateEffort` / `updateCacheTtl` / `applyEnabled` 不设 `busy`，因此这些控件在请求飞行中仍可点（共享的 `busy !== null` 禁用闸门对它们不生效）。
+- **静默刷新失败会留下过期错误条**：claude 的 `loadStatus(true)`（quiet）失败时既不设也不清 `error`，后台轮询失败会让上一次的错误条一直挂着。
+- **部分动作不重播草稿**：claude 的 `stopImporting` / `accountAction` / `setStrategy` / `refreshQuota` / `testConnection` 在 `setStatus` 后不重新播种 `contextDrafts`；今天无害（这些路由不改模型列表），但依赖了「路由恰好不改列表」这一前提。
+- **归一化不一致**（workbuddy）：`loadStatus` / `rescan` / `accountAction` / `checkinNow` / `updateCheckin` / `refreshCatalog` / `toggleModel` / `setAllModels` / `resetContextWindow(s)` 走 `normalizeStatus`，而 `refreshQuota` / `saveContextWindow` / `updateEffort` 直接存原始载荷。
+- **类型重复**（workbuddy）：hook 里的 `ConnectionPayload` 与 `shared/workbuddy-contracts.ts` 的 `WorkBuddyConnectionDto` 逐字段相同，可以直接换成共享类型。
+- 冗余断言：claude 的 `(status?.accounts ?? []) as ClaudeAccountSummaryDto[]`；minimax 的 `poolAction` 收 `action: string`（已顺手收紧为联合类型，属类型层面、无行为变化）。
+- 悬空/失实注释（逐一保留原样，除了 `test/account-quota-labels.test.ts` 里那处已随分层修正）：minimax 有一处 `applyEnabled` 的文档注释挂在 `loadPool` 上方；`accountPoolLabelsFor` 的注释提到一个并不存在的 `satisfies`；workbuddy 的 `poolAccounts` 注释还留着「在没有 pool 的 host 上回退到单账号视图」这半句，而该视图并不存在。
+
+### 待做（本轮之后）
+
+- §6.2 反例 6 的组件表：需要 harness 先暴露一个不依赖 composed-props 内部类型的注册入口（本轮已实测两条路线都会以 cast 收场）。
+- 上面那张欠账清单；每条都改动可见行为，适合独立一轮、逐条带测试做。
+- ChatGPT 的 `CodexSubscriptionSection.tsx`（37KB，本轮未拆，目标只点名 minimax/claude/workbuddy）可按同一模式继续。
+
+## 7. 实施清单（本次设置页重绘）
 
 1. ✅ `src/shared/hub-contracts.ts`：DTO + `HUB_OVERVIEW_PATH`。
 2. ✅ `src/host/hub-overview.ts` + `src/index.ts` 装配 8 个 source（`Promise.allSettled` 降级、GET-only 守卫）。
@@ -244,11 +298,12 @@ export function ModelChecklist(props: {
 8. ✅ `npm run typecheck && npm test && npm run build` 全绿（2389 passed / 9 skipped）。
 9. ⏳ 浏览器/GUI 实拍核验（亮/暗主题）：客户端半区已随页面加载生效；**host 半区需要一次插件重载**（`/hub/overview` 在旧进程里被 `routes.ts` 的前缀兜底回 405），重载后按 §2 的地址复核一次即可。
 
-## 8. 留给后续会话（非本次前端任务）
+## 8. 后续会话清单（结构性重构轮之后）
 
-- §6.2 反例 1–6 的去重重构（host 装配模板化、ComposerQuota 合并、fetchApi 工厂、locale 类型化、badge 注册表驱动）。
-- 巨型 Section 的四层拆分（建议按供应商逐个做，每个独立可验证）。
-- 各线路 `totalModelCount` 的本地目录快照（让概览卡片显示 `N/M 模型` 需要目录缓存，属 host 侧工作）。
+- ✅ §6.2 反例 1–6 的去重重构：host 装配模板化（②）、ComposerQuota 合并（①）、fetchApi 工厂（③）、locale 类型化（④）、badge inject 去重（⑤）、格式化与 context-window 下沉（⑥ 前半）。逐项结论与**故意没合并**的重复见 §6.3。
+- ◐ 巨型 Section 的四层拆分：格式化已下沉到 `common/format.ts`，context-window 块已共享；状态/动作分层已按供应商逐个做（claude 完成，minimax/workbuddy 见 §6.3 表格）。剩余 Section（ChatGPT）可按同一模式继续。
+- ✅ 各线路 `totalModelCount` 的本地目录快照：已接上，`catalogTotal` 的「空目录 = 未知而非 0」不变量有测试。
+- ⏳ §6.3 末尾列出的四个「重构中发现、未改」问题（未置 `busy`、静默刷新失败留过期错误条、部分动作不重播草稿、冗余断言）——都是小改动，但都会改变可见行为，留给独立一轮做。
 - `temp/` 已清空：品牌 SVG 的生成器是一次性脚本（`combine/*.svg` → `brand-svg.ts`），若将来要补新品牌 mark，按同样方法重做并同步实测 viewBox，不要手改 `brand-svg.ts`。
 - 发布后：`npm pack` 干净构建比对（AGENTS.md 发布规程）。
 

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **[设置 / UI] 「订阅服务」改为总览卡片 + 逐线路下钻，配额进度移入账号卡片**
+  - 概览页替换原横向 TAB 条：每张卡片给出该线路的账号数、连接状态、已启用模型数与启停开关（Ollama 无开关，恒为启用），点卡片进入该线路设置，返回条回到总览。
+  - **每个账号的配额进度条画在它自己的账号卡片里。** 此前页面级进度条在轮询/粘性策略下会显示 A 账号的数字，而实际在服务的是 B——同一页面上两个数字互相矛盾。页面级区块只保留没有「按账号进度条」可放的事实。
+  - **未测量的额度不再画成 0%。** 缺失与 NaN 一律视为「未测量」并丢弃该窗口：antigravity 此前把未测量的 bucket 强转成 0，而 0 剩余 = 100% 已用，于是服务端从未测量的额度被显示成「已用尽」。
+  - 重置倒计时统一为相对时间（分钟/小时/天），同一列不再混用「近处相对、远处日期」两种口径。
+  - 删除凭据储存方式的行与提示（那是实现细节，不是用户设置），删除与账号卡片重复的页面级分组/桶进度行与三条冗余连接行。
+  - composer 徽标的前缀词「额度」随语言切换（此前各线路写死中文）。
+  - 总览卡片的 `N/M 模型` 由各线路**已经持有的目录**回答（打开设置页不触发任何目录抓取）；从未同步过目录的线路报「未知」而不是 0。
+
+- **[重构] 设置页与 host 装配去重（除上面列出的两处外无行为变更）**
+  - 10 份内联 `fetchApi` → `common/line-api.ts` 工厂。工厂取的是十份的并集，顺带修掉两个真缺陷：ChatGPT 路由的 `{code, message}` 错误此前被印成 `[object Object]`；`{ok:false, error}` 不带 `value` 键时会被当成正常载荷。
+  - 6 支 ComposerQuota → `common/ComposerQuotaBadge.tsx`。回调改走 ref：此前调用方写内联箭头会让 60 秒轮询在每次渲染时重启。ChatGPT 那支结构不同（无点击刷新、类名前缀不同、受 quickQuota 偏好门控），保持独立。
+  - 6 份格式化助手与 6 份 context-window 块 → `common/format.ts`、`common/ContextWindowEditor.tsx`。合并时发现 antigravity 的 `formatCapacity` 缺 1K 下限，会把 0 渲染成 `0K`。
+  - `src/index.ts` 的 7 段 claim-route 三元组 → `host/common/provider-route.ts`（171 → 42 行）。Ollama 是唯一不监听 `llm/adapters-updated` 的线路，该差异以 `watch: false` 显式保留，而不是被模板抹平。
+  - 各线路 locale 命名空间的 `any` 全部类型化；badge 注册的 inject 工厂集中为一处（未做成组件表：那需要按 harness 的 composed-props 内部类型书写，等于新增版本敏感接缝）。
+  - claude / minimax / workbuddy 三个巨型 Section 拆为「hook（状态与动作）+ 组件（纯渲染）」两层，hook 返回 `{ state, derived, actions }` 命名形状。
+  - 故意保留的重复及原因（Codex 的 `formatDate` 收**秒**、两份 `formatPercent` 舍入不同、一处未被测试覆盖的 antigravity `title` 变化）记在 `docs/settings-hub-redesign.md` §6.3。
+
 - **[MiniMax Code] Files API：超内联上限的媒体改走上传与 mm_file 引用**
   - 新增 `src/host/minimax-code/files-api.ts`。这是让大视频可发送的唯一路径——内联 base64 涨 4/3，
     50 MB 视频编码后约 67 MB，会超出 64 MB 请求体上限。
