@@ -46,13 +46,13 @@ effort 取值：
 
 ### 改法
 
-[mapper.ts:579-602](src/host/minimax-code/mapper.ts#L579-L602) 的 `thinkingFieldFor` 拆成两件事：
+[mapper.ts:579-602](../src/host/minimax-code/mapper.ts#L579-L602) 的 `thinkingFieldFor` 拆成两件事：
 
 1. **删掉 `thinking` 对象**（M2.7 已经是这个行为，把它推广到 M3 / M3.1）；
 2. 新增顶层 `output_config`：`{ effort }`，effort 取值域改为 `['low','medium','high','xhigh','max']`，
    去掉 `'default'`，**省略时整个字段不出现**（文档：省略即 max，不要显式写 max）。
 
-改完后 [mapper.ts:818](src/host/minimax-code/mapper.ts#L818) 的 `{ thinking }` 换成 `{ output_config }`。
+改完后 [mapper.ts:818](../src/host/minimax-code/mapper.ts#L818) 的 `{ thinking }` 换成 `{ output_config }`。
 当初把它隔离进 `thinkingFieldFor` 就是为了「被证实时只改一处」——现在正是那一刻。
 
 ### 必须先确认的一点
@@ -62,7 +62,7 @@ effort 取值：
 > Thinking cannot be turned off. Sending `thinking: {"type": "disabled"}` or `effort: "none"` returns `400`
 > `model "MiniMax-M3.1-Flash-Preview" requires adaptive thinking`
 
-M3 没说。我们现在给 M3 标了 `thinking: 'toggle'` 并会发 `{type:'disabled'}`（[model-catalog.ts:133](src/host/minimax-code/model-catalog.ts#L133)）。
+M3 没说。我们现在给 M3 标了 `thinking: 'toggle'` 并会发 `{type:'disabled'}`（[model-catalog.ts:133](../src/host/minimax-code/model-catalog.ts#L133)）。
 **M3 与 M3.1 同族，若 M3 同样不可关，我们这个 toggle 就是一个 400 开关。**
 文档没写就不能断言，但**这是 N1′ 之外第二个必须实测的项**。
 
@@ -70,7 +70,7 @@ M3 没说。我们现在给 M3 标了 `thinking: 'toggle'` 并会发 `{type:'dis
 
 ## 二、N1　`maxAttachments` 声明了但无人执行（**代码可判定**）
 
-`maxAttachments` 全仓库只出现在 [model-catalog.ts](src/host/minimax-code/model-catalog.ts#L140) 的定义处；
+`maxAttachments` 全仓库只出现在 [model-catalog.ts](../src/host/minimax-code/model-catalog.ts#L140) 的定义处；
 mapper 只按**字节**兜底，**没有按数量截断**。M3 声明 9，贴 12 张图照样发。
 
 **改法**：图片装配处按 `maxAttachments` 截断，复用现成的 `offloadOldestRequestImages`（最旧优先，
@@ -120,7 +120,7 @@ mapper 只按**字节**兜底，**没有按数量截断**。M3 声明 9，贴 12
 `minimax-thinking-replay.test.ts` 有 20+ 用例锁住。**✅ 与官方要求一致，不动。**
 
 注意文档提到思考内容可能出现在 `thinking` **或** `reasoning_details` 两个字段。
-我们在 Anthropic 线读的是 `thinking_delta`/`thinking`（[mapper.ts:1168](src/host/minimax-code/mapper.ts#L1168)）。
+我们在 Anthropic 线读的是 `thinking_delta`/`thinking`（[mapper.ts:1168](../src/host/minimax-code/mapper.ts#L1168)）。
 **若订阅端点改用 `reasoning_details`，我们会读不到**——这与 kimi 那轮的方言问题同源，
 值得在实测时一并观察。
 

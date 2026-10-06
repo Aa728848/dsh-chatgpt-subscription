@@ -20,13 +20,13 @@
 
 | 能力 | 位置 | 评价 |
 |---|---|---|
-| 双线缓存字段 | [mapper.ts:687-700](src/host/kimi-code/mapper.ts#L687-L700) | ✅ 深度。OpenAI 线 `prompt_cache_options:{mode:'implicit',ttl}`，Anthropic 线**顶层** `cache_control`。注释写明「message 内的 cache_control 会被服务端忽略」——踩过坑的细节 |
-| `prompt_cache_key` 纯从 sessionId 派生 | [mapper.ts:1494-1499](src/host/kimi-code/mapper.ts#L1494-L1499) | ✅ 深度。注释解释了为何不能用首条用户消息：压缩会改写它，整个会话被静默路由到冷条目 |
-| 前缀稳定性指纹 + 漂移归因 | [mapper.ts:2170-2190](src/host/kimi-code/mapper.ts#L2170-L2190) | ✅ 7 种 `PrefixDriftCause`。注释甚至注明对应上游的 `systemPromptHash`/`toolsHash` 遥测 |
-| 动态工具位置稳定 | [mapper.ts:1284-1297](src/host/kimi-code/mapper.ts#L1284-L1297) | ✅ `flushSlots` 追加而非提升，保持缓存前缀 |
-| 系统提示纯序稳定折叠 | [mapper.ts:851-857](src/host/kimi-code/mapper.ts#L851-L857) | ✅ |
-| `cacheReadTokens` 上报 | [mapper.ts:2260](src/host/kimi-code/mapper.ts#L2260) | ✅ DSH `common/request-diagnostics.ts:62` 消费 |
-| 命中率统计 | [mapper.ts:2246](src/host/kimi-code/mapper.ts#L2246) | ✅ 上游只有 hint 提示，没有统计面板 |
+| 双线缓存字段 | [mapper.ts:687-700](../src/host/kimi-code/mapper.ts#L687-L700) | ✅ 深度。OpenAI 线 `prompt_cache_options:{mode:'implicit',ttl}`，Anthropic 线**顶层** `cache_control`。注释写明「message 内的 cache_control 会被服务端忽略」——踩过坑的细节 |
+| `prompt_cache_key` 纯从 sessionId 派生 | [mapper.ts:1494-1499](../src/host/kimi-code/mapper.ts#L1494-L1499) | ✅ 深度。注释解释了为何不能用首条用户消息：压缩会改写它，整个会话被静默路由到冷条目 |
+| 前缀稳定性指纹 + 漂移归因 | [mapper.ts:2170-2190](../src/host/kimi-code/mapper.ts#L2170-L2190) | ✅ 7 种 `PrefixDriftCause`。注释甚至注明对应上游的 `systemPromptHash`/`toolsHash` 遥测 |
+| 动态工具位置稳定 | [mapper.ts:1284-1297](../src/host/kimi-code/mapper.ts#L1284-L1297) | ✅ `flushSlots` 追加而非提升，保持缓存前缀 |
+| 系统提示纯序稳定折叠 | [mapper.ts:851-857](../src/host/kimi-code/mapper.ts#L851-L857) | ✅ |
+| `cacheReadTokens` 上报 | [mapper.ts:2260](../src/host/kimi-code/mapper.ts#L2260) | ✅ DSH `common/request-diagnostics.ts:62` 消费 |
+| 命中率统计 | [mapper.ts:2246](../src/host/kimi-code/mapper.ts#L2246) | ✅ 上游只有 hint 提示，没有统计面板 |
 
 ### 1.2 缓存缺口
 
@@ -34,11 +34,11 @@
 
 三处模块级可变状态：
 
-- [`lastPrefixSnapshot` — mapper.ts:2143](src/host/kimi-code/mapper.ts#L2143)
-- [`lastDriftCause` — mapper.ts:2193](src/host/kimi-code/mapper.ts#L2193)
-- [`cacheStats` — mapper.ts:2225](src/host/kimi-code/mapper.ts#L2225)
+- [`lastPrefixSnapshot` — mapper.ts:2143](../src/host/kimi-code/mapper.ts#L2143)
+- [`lastDriftCause` — mapper.ts:2193](../src/host/kimi-code/mapper.ts#L2193)
+- [`cacheStats` — mapper.ts:2225](../src/host/kimi-code/mapper.ts#L2225)
 
-`trackPrefixStability()` 写全局快照，[routes.ts:230-232](src/host/kimi-code/routes.ts#L230-L232) 读全局漂移原因。
+`trackPrefixStability()` 写全局快照，[routes.ts:230-232](../src/host/kimi-code/routes.ts#L230-L232) 读全局漂移原因。
 
 **DSH 是多会话 + subagent 并行的。** A 会话写完快照，B 会话覆盖后，A 读到的漂移归因是 B 的；
 `getLastDriftCause()` 返回的可能是完全不相关的另一个会话的值。
@@ -84,7 +84,7 @@ return { kind: 'hint', idleSeconds, totalTokens };
 
 #### 🟡 C5　`cacheWriteTokens` 恒为 0
 
-[mapper.ts:2221](src/host/kimi-code/mapper.ts#L2221) 注释自己写了 "always 0 on this route"，
+[mapper.ts:2221](../src/host/kimi-code/mapper.ts#L2221) 注释自己写了 "always 0 on this route"，
 但字段仍被统计和上报，容易让人误以为在追踪写入成本。建议要么删掉，要么在 UI 上明确标注不适用。
 
 ---
@@ -95,19 +95,19 @@ return { kind: 'hint', idleSeconds, totalTokens };
 
 | 能力 | 位置 | 评价 |
 |---|---|---|
-| `normalizeKimiToolSchema` | [mapper.ts:1013-1025](src/host/kimi-code/mapper.ts#L1013-L1025) | ✅ **比上游深**。剥 `$schema`、**递归内联 `$defs`/`definitions`/`$ref`**、给 enum/const 补 type，带环检测 |
-| 动态工具完整闭环 | [mapper.ts:1070-1136](src/host/kimi-code/mapper.ts#L1070-L1136) | ✅ Symbol + 字符串双通道，`rehydrateMessageTools` 让声明**跨 JSON 往返存活** |
+| `normalizeKimiToolSchema` | [mapper.ts:1013-1025](../src/host/kimi-code/mapper.ts#L1013-L1025) | ✅ **比上游深**。剥 `$schema`、**递归内联 `$defs`/`definitions`/`$ref`**、给 enum/const 补 type，带环检测 |
+| 动态工具完整闭环 | [mapper.ts:1070-1136](../src/host/kimi-code/mapper.ts#L1070-L1136) | ✅ Symbol + 字符串双通道，`rehydrateMessageTools` 让声明**跨 JSON 往返存活** |
 | 声明位置稳定 | 同上 + flushSlots | ✅ 缓存友好 |
 | `clampToolCallId` 出入向对称 | 12 处调用点 | ✅ 无不对称 bug |
-| 降级诚实 | [mapper.ts:1265-1269](src/host/kimi-code/mapper.ts#L1265-L1269) | ✅ 动态工具被丢弃时插入明确 notice，而不是静默 |
-| 并行工具调用 | [mapper.ts:1373-1380](src/host/kimi-code/mapper.ts#L1373-L1380) | ✅ 连续 `role:"tool"` |
-| stop 序列预检 | [mapper.ts:112-113](src/host/kimi-code/mapper.ts#L112-L113) | ✅ 5 条 / 32 字节上限，**发之前裁剪**而非发出去吃 400 |
+| 降级诚实 | [mapper.ts:1265-1269](../src/host/kimi-code/mapper.ts#L1265-L1269) | ✅ 动态工具被丢弃时插入明确 notice，而不是静默 |
+| 并行工具调用 | [mapper.ts:1373-1380](../src/host/kimi-code/mapper.ts#L1373-L1380) | ✅ 连续 `role:"tool"` |
+| stop 序列预检 | [mapper.ts:112-113](../src/host/kimi-code/mapper.ts#L112-L113) | ✅ 5 条 / 32 字节上限，**发之前裁剪**而非发出去吃 400 |
 
 ### 2.2 工具缺口
 
 #### 🔴 T1　tool-call id **只截断，不去重、不净化字符**（双 bug）
 
-[`clampToolCallId` — mapper.ts:97-99](src/host/kimi-code/mapper.ts#L97-L99)：
+[`clampToolCallId` — mapper.ts:97-99](../src/host/kimi-code/mapper.ts#L97-L99)：
 
 ```ts
 export function clampToolCallId(id: string): string {
@@ -141,7 +141,7 @@ MCP 场景下两个 server 暴露同名工具 → 我们会发出重复声明，
 #### 🟠 T3　没有工具 schema 预算与渐进裁剪
 
 我们只在 `estimatedInputTokens` 里**统计**工具 schema 字符
-（[mapper.ts:1230-1234](src/host/kimi-code/mapper.ts#L1230-L1234)），超标不裁、只用于预算计算。
+（[mapper.ts:1230-1234](../src/host/kimi-code/mapper.ts#L1230-L1234)），超标不裁、只用于预算计算。
 上游有 `toolSelect` / `toolActivation` / `toolPolicy` 做渐进披露。
 
 我们有动态工具这个**机制**，但没有**何时该用**的策略——

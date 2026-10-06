@@ -53,7 +53,7 @@
 入站观察三种键 `reasoning_content` / `reasoning_details` / `reasoning`，出站回写观察到的那个，默认 `reasoning_content`。
 挂到 `KimiCodeStreamState`（与 0.1 的 normalizer 同一个载体）。
 
-**注意**：[mapper.ts:1409-1415](src/host/kimi-code/mapper.ts#L1409-L1415) 注释说明 preserved thinking 依赖该字段存在才不报
+**注意**：[mapper.ts:1409-1415](../src/host/kimi-code/mapper.ts#L1409-L1415) 注释说明 preserved thinking 依赖该字段存在才不报
 "thinking is enabled but reasoning_content is missing"。方言错配正是打破这个不变量的原因，改完要回归该错误路径。
 
 **测试**：`test/kimi-code-mapper.test.ts`
@@ -137,7 +137,7 @@ DSH 没有独立输入预算字段，但窗口是我们自己从 catalog 解析�
 
 **改法**：`parseCatalogModel` 增加三态解析，结果写进 `KimiCodeCatalogModel`；
 当为 `'only'` 时从 `reasoningEfforts` 里剔除 `'none'`/off。
-**活 listing 优先于静态目录**（沿用 [model-catalog.ts:56-57](src/host/kimi-code/model-catalog.ts#L56-L57) 已有的三态覆盖约定）。
+**活 listing 优先于静态目录**（沿用 [model-catalog.ts:56-57](../src/host/kimi-code/model-catalog.ts#L56-L57) 已有的三态覆盖约定）。
 
 **测试**：`test/kimi-code-capabilities.test.ts`
 
@@ -190,7 +190,7 @@ DSH 没有独立输入预算字段，但窗口是我们自己从 catalog 解析�
 
 ### 3.2　C5　`cacheWriteTokens`
 
-该线路恒为 0（[mapper.ts:2221](src/host/kimi-code/mapper.ts#L2221) 自述）。
+该线路恒为 0（[mapper.ts:2221](../src/host/kimi-code/mapper.ts#L2221) 自述）。
 二选一：删掉字段，或在 `KimiCodeCacheStatsDto` 上明确标注不适用。倾向后者——
 它会随线路能力变化而生效，删掉是倒退。
 
