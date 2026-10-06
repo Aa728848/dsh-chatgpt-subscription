@@ -914,8 +914,16 @@ describe('claude adapter never rotates after output has started', () => {
 
 describe('claude adapter in-band stream errors', () => {
   /** A 200 whose stream reports the failure itself, after the given frames. */
-  function inBandError(type: string, message: string, before: unknown[] = [MESSAGE_START]): Response {
-    return streamResponse([...before, { type: 'error', error: { type, message } }])
+  function inBandError(
+    type: string,
+    message: string,
+    before: unknown[] = [MESSAGE_START],
+    headers: Record<string, string> = {},
+  ): Response {
+    return new Response(sse([...before, { type: 'error', error: { type, message } }]), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', ...headers },
+    })
   }
 
   it('keeps a transient in-band error retryable while nothing has reached the caller', async () => {
@@ -970,6 +978,41 @@ describe('claude adapter in-band stream errors', () => {
       expect(await failureOf(makeAdapter(store, settings, fn).stream(options())))
         .toMatchObject({ code: 'PROVIDER_ERROR' })
     }
+  })
+
+  it('takes an account-scoped in-band rate limit out of rotation so the retry lands elsewhere', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() =>
+      inBandError('rate_limit_error', 'Rate limit exceeded', [MESSAGE_START], ACCOUNT_SCOPED_429))
+    expect(await failureOf(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options())))
+      .toMatchObject({ code: 'RATE_LIMIT' })
+    // The body cannot be re-requested from here, but the evidence is the same one
+    // a 429 carries, so the account leaves rotation the same way. The harness
+    // retry is about to repeat this request, and repeating it against the account
+    // whose window is spent would fail identically three times over.
+    expect(pool.cooldowns.map((entry) => entry.id)).toEqual(['cl-1'])
+    expect(pool.cooldowns[0]!.ms).toBeGreaterThan(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves the pool alone for an in-band failure every account shares', async () => {
+    // An overload is shared by every account behind the gateway even when the
+    // quota headers happen to name this one, so rotating against it would only
+    // burn the pool.
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() =>
+      inBandError('overloaded_error', 'Overloaded', [MESSAGE_START], ACCOUNT_SCOPED_429))
+    expect(await failureOf(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options())))
+      .toMatchObject({ code: 'SERVER' })
+    expect(pool.cooldowns).toHaveLength(0)
   })
 })
 

@@ -81,7 +81,9 @@
  * An in-band `error` event inside a 200 stream carries the same envelope and is
  * classified the same way while nothing has reached the caller; after the first
  * chunk it is surfaced as PROVIDER_ERROR, for the reason in note 1
- * ({@link inBandStreamError}).
+ * ({@link inBandStreamVerdict}). A reclassified in-band failure is weighed by
+ * {@link shouldRotateAccount} exactly as a non-2xx one is, so an account-scoped
+ * limit reported inside the stream still takes that account out of rotation.
  *
  * A reported-client-version rejection is a REQUEST problem even though it
  * arrives as a 400 that mentions the client: it must NOT sign the user out, and
@@ -729,9 +731,20 @@ export class ClaudeAdapter extends LlmAdapter {
      * a later reordering of this method cannot silently drop it.
      */
     let outputStarted = false
+    /**
+     * The account the response now being streamed was issued with.
+     *
+     * Hoisted out of the loop because the in-stream failure path needs it: a
+     * rate limit reported inside a 200 stream belongs to the account that was
+     * asked, and that account is what the failure takes out of rotation — the
+     * harness is about to repeat this request, and repeating it against the same
+     * exhausted account fails identically.
+     */
+    let usedAccountId: string | undefined
 
     while (true) {
       const { credentials, accountId } = await this.resolveCredential(pool, tried, fetchFn, signal)
+      usedAccountId = accountId
       response = await this.attemptRequest(credentials, requestOptions, images, toolNames, thinking, settings, signal, fetchFn)
       // Every attempt so far has been a pre-body failure, so nothing has reached
       // the caller and a rotation is still free. Once this method starts
@@ -811,11 +824,26 @@ export class ClaudeAdapter extends LlmAdapter {
         // A verdict the mapper already typed (a truncated stream, an in-band
         // error event) is passed through — except an in-band error event that
         // arrived before anything reached the caller, which is classified like
-        // the response body it is equivalent to (see inBandStreamError).
+        // the response body it is equivalent to (see inBandStreamVerdict).
         if (error instanceof LlmError) {
-          throw outputStarted || state.streamError === undefined
-            ? error
-            : inBandStreamError(error, state.streamError, response.headers)
+          if (outputStarted || state.streamError === undefined) throw error
+          const verdict = inBandStreamVerdict(error, state.streamError, response.headers)
+          // The rotation cannot happen here — the body is already open — but the
+          // account CAN be taken out of rotation, which is what the pre-stream
+          // branch does for the same verdict and what makes the harness retry
+          // worth taking. Overload and a global limit are shared by every account
+          // behind the gateway, so they leave the pool untouched, exactly as
+          // shouldRotateAccount refuses to rotate them.
+          if (verdict.failure !== null
+            && shouldRotateAccount(verdict.failure, outputStarted)
+            && usedAccountId !== undefined) {
+            await pool?.markCooldown(
+              usedAccountId,
+              cooldownMsFor(verdict.failure),
+              PROVIDER_NAME + ' in-stream 429',
+            ).catch(() => undefined)
+          }
+          throw verdict.error
         }
         if (signal.aborted) throw new LlmError('Claude request aborted', 'ABORTED', { cause: error })
         // A severed connection BEFORE anything reached the caller is a transport
@@ -953,25 +981,45 @@ export function codeForFailure(failure: ClaudeFailure): string {
  *
  * The message stays the mapper's, which names the wire type the user saw.
  *
+ * The classified failure rides along beside the error so the caller can weigh it
+ * with {@link shouldRotateAccount} instead of re-deriving what it says. It is
+ * null whenever the mapper's verdict stands, so a caller never has to guess
+ * whether `accountScoped` is meaningful.
+ *
  * @param thrown - the mapper's PROVIDER_ERROR (or context-overflow) verdict.
  * @param streamError - the event's wire `error` object, from the stream state.
  * @param headers - the 200 response's headers, read for the rate-limit verdict.
  */
-export function inBandStreamError(
+export function inBandStreamVerdict(
   thrown: LlmError,
   streamError: Record<string, unknown>,
   headers: Headers,
-): LlmError {
+): InBandStreamVerdict {
   const failure = classifyFailure(0, JSON.stringify({ error: streamError }), headers)
-  if (failure.type === null || !failure.retryable) return thrown
+  if (failure.type === null || !failure.retryable) return { error: thrown, failure: null }
   const retryAfter = failure.retryAfterMs !== null && failure.retryAfterMs > 0
     ? failure.retryAfterMs
     : undefined
-  return new LlmError(
-    thrown.message,
-    codeForFailure(failure),
-    retryAfter === undefined ? {} : { providerRetryAfterMs: retryAfter },
-  )
+  return {
+    error: new LlmError(
+      thrown.message,
+      codeForFailure(failure),
+      retryAfter === undefined ? {} : { providerRetryAfterMs: retryAfter },
+    ),
+    failure,
+  }
+}
+
+/** What one in-band `error` event becomes when nothing had reached the caller yet. */
+export interface InBandStreamVerdict {
+  /** The error the caller sees: the mapper's, or its reclassified replacement. */
+  error: LlmError
+  /**
+   * The envelope classified as a response body, or null when the mapper's own
+   * verdict stands. Present only for a RECOGNIZED transient type, so `kind` and
+   * `accountScoped` can be read off it directly.
+   */
+  failure: ClaudeFailure | null
 }
 
 /**

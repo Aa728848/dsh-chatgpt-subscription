@@ -684,7 +684,9 @@ export function outputConfigFor(
  *
  * The floor only ever RAISES a cap smaller than this line's forced thinking needs,
  * so a caller that states a larger cap keeps it - the catalog's "preserving
- * explicit caller maxTokens" contract stays intact.
+ * explicit caller maxTokens" contract stays intact. It never raises past what
+ * the catalog says the model can emit either: a floor the wire would reject is
+ * not a floor.
  */
 export const MINIMAX_FORCED_THINKING_FLOOR_TOKENS = 512
 
@@ -703,9 +705,15 @@ export const MINIMAX_FORCED_THINKING_FLOOR_TOKENS = 512
  */
 export function floorForcedThinkingTokens(modelId: string, requested: number | undefined): number | undefined {
   if (requested === undefined) return undefined
-  const thinking = catalogEntry(modelId)?.thinking
+  const model = catalogEntry(modelId)
+  const thinking = model?.thinking
   if (thinking !== 'always-on' && thinking !== 'forced-effort') return requested
-  return Math.max(requested, MINIMAX_FORCED_THINKING_FLOOR_TOKENS)
+  const raised = Math.max(requested, MINIMAX_FORCED_THINKING_FLOOR_TOKENS)
+  // Never past the declared ceiling. Every shipped entry declares far more than
+  // the floor, so this binds only for a future forced-thinking model whose
+  // ceiling sits under it - and it never lowers a cap the caller stated above
+  // its own ceiling, because that is the caller's number and not this one's.
+  return Math.min(raised, Math.max(requested, model?.maxTokens ?? requested))
 }
 
 /** Output cap one request asks for, tracked against the model's declared ceiling. */

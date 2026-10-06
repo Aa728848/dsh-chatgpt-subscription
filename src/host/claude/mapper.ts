@@ -1681,7 +1681,7 @@ export interface ClaudeStreamState {
    * The wire `error` object of an in-band `error` event, recorded just before
    * the mapper throws on it. The mapper cannot tell whether anything has reached
    * the caller yet; the adapter can, and reads this to decide whether the failure
-   * is still safe to retry (see the adapter's `inBandStreamError`).
+   * is still safe to retry (see the adapter's `inBandStreamVerdict`).
    */
   streamError?: Record<string, unknown>
   inputTokens: number
