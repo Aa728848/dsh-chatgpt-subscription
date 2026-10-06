@@ -576,7 +576,10 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       context: { contextWindow },
       // Do not materialize the wire ceiling as a fixed DSH output reservation:
       // on M2.7 it leaves too little budget for compaction. requestStream applies
-      // the dynamic cap instead, while preserving explicit caller maxTokens.
+      // the dynamic cap instead, while preserving explicit caller maxTokens - the
+      // one exception being a model whose thinking cannot be turned off, where a
+      // cap below the forced-thinking floor returns an empty answer and
+      // floorForcedThinkingTokens raises it (see the mapper).
       ...(efforts.length === 0
         ? {}
         : {

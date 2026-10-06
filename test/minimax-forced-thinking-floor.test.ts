@@ -3,6 +3,7 @@ import {
   floorForcedThinkingTokens,
   MINIMAX_FORCED_THINKING_FLOOR_TOKENS,
 } from '../src/host/minimax-code/mapper.ts'
+import { MINIMAX_CODE_MODELS } from '../src/host/minimax-code/model-catalog.ts'
 
 /**
  * A forced-thinking model spends its cap on reasoning before it emits text, so a
@@ -47,5 +48,21 @@ describe('floorForcedThinkingTokens', () => {
 
   it('leaves an unknown model alone', () => {
     expect(floorForcedThinkingTokens('not-a-real-model', 64)).toBe(64)
+  })
+
+  it('never asks a model for more than the catalog says it can emit', () => {
+    // Stated as an invariant over the real catalog rather than a made-up entry,
+    // so a future forced-thinking model whose ceiling sits under the floor
+    // cannot slip in asking for a cap the wire would reject.
+    const forced = MINIMAX_CODE_MODELS.filter((model) =>
+      model.thinking === 'always-on' || model.thinking === 'forced-effort')
+    expect(forced.length).toBeGreaterThan(0)
+    for (const model of forced) {
+      expect(floorForcedThinkingTokens(model.id, 1)).toBeLessThanOrEqual(model.maxTokens)
+      expect(floorForcedThinkingTokens(model.id, 64)).toBeLessThanOrEqual(Math.max(64, model.maxTokens))
+      // A cap the caller stated above its own ceiling is the caller's number and
+      // passes through, exactly as it did before the floor existed.
+      expect(floorForcedThinkingTokens(model.id, 99_000)).toBe(99_000)
+    }
   })
 })
