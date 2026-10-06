@@ -68,6 +68,7 @@ import {
   createStreamState,
   estimatedInputTokens,
   maxOutputTokensFor,
+  floorForcedThinkingTokens,
   maxRequestImageBytes,
   MAX_REQUEST_VIDEO_BYTES,
   offloadOldestRequestImages,
@@ -708,7 +709,12 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // anything at all: without it the call is a no-op that always returns the
     // requested cap, and the service rejects the request instead of it being clamped
     // here.
-    const requestedMax = requestOptions.maxTokens ?? maxOutputTokensFor(options.model, contextWindow)
+    // A caller may ask for a cap smaller than this line's forced thinking needs -
+    // the session-title call asks for one short line - which returns an empty text
+    // block and a max-tokens finish. Raise that cap before clamping so the caller
+    // gets an answer; a caller stating a larger cap is passed through untouched.
+    const flooredMax = floorForcedThinkingTokens(options.model, requestOptions.maxTokens)
+    const requestedMax = flooredMax ?? maxOutputTokensFor(options.model, contextWindow)
     const effectiveMax = clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions))
 
     const buildBodyForOwner = (owner: string): string => {
