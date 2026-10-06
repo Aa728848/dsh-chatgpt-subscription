@@ -109,6 +109,23 @@ interface ProcessResult {
   stdout: string
 }
 
+/**
+ * How long a helper may run before it is killed and the read fails.
+ *
+ * A healthy spawn costs ~200 ms (see the cache note on this class), so the guard
+ * exists only for a child that never exits, and it was set at 10 s - fifty times
+ * the healthy cost. That turned out to be too tight for one real environment: a
+ * cold Windows runner whose freshly-installed dependency tree is being scanned
+ * on first spawn, where the helper legitimately took longer than 10 s and the
+ * kill turned a working credential read into `DPAPI helper timed out`.
+ *
+ * The guard is kept, and only its headroom widened: 30 s is still bounded, still
+ * far above anything a warm machine needs, and a hung helper now blocks one
+ * credential read for 30 s rather than 10 - a worse wait in a case that is already
+ * a failure, in exchange for not failing a machine that is merely cold.
+ */
+const POWERSHELL_HELPER_TIMEOUT_MS = 30_000
+
 function runPowerShell(script: string, path: string, stdin: string): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
@@ -121,7 +138,7 @@ function runPowerShell(script: string, path: string, stdin: string): Promise<Pro
     const timer = setTimeout(() => {
       child.kill()
       reject(new Error('DPAPI helper timed out'))
-    }, 10_000)
+    }, POWERSHELL_HELPER_TIMEOUT_MS)
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk
