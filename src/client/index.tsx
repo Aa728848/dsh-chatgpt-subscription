@@ -19,35 +19,43 @@ import { installHubStyles } from './hub/hub-styles.ts'
 import { installModelChecklistStyles } from './common/model-checklist-styles.ts'
 import { installAntigravityStyles } from './antigravity/styles.ts'
 import { installPoolStyles } from './common/styles.ts'
-import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from './antigravity/locales.ts'
+import { dictionaries as antigravityDicts, NS_ANTIGRAVITY, type AntigravityLocaleKey } from './antigravity/locales.ts'
 import { AntigravityComposerQuota } from './antigravity/AntigravityComposerQuota.tsx'
 import { ClaudeComposerQuota } from './claude/ClaudeComposerQuota.tsx'
-import { dictionaries as claudeDicts, NS_CLAUDE } from './claude/locales.ts'
+import { dictionaries as claudeDicts, NS_CLAUDE, type ClaudeLocaleKey } from './claude/locales.ts'
 import { installClaudeStyles } from './claude/styles.ts'
 import { CommandCodeComposerQuota } from './command-code/CommandCodeComposerQuota.tsx'
-import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from './command-code/locales.ts'
+import { dictionaries as commandCodeDicts, NS_COMMAND_CODE, type CommandCodeLocaleKey } from './command-code/locales.ts'
 import { KimiCodeComposerQuota } from './kimi-code/KimiCodeComposerQuota.tsx'
-import { dictionaries as kimiCodeDicts, NS_KIMI_CODE } from './kimi-code/locales.ts'
+import { dictionaries as kimiCodeDicts, NS_KIMI_CODE, type KimiCodeLocaleKey } from './kimi-code/locales.ts'
 import { installKimiCodeStyles } from './kimi-code/styles.ts'
 import { MinimaxCodeComposerQuota } from './minimax-code/MinimaxCodeComposerQuota.tsx'
 import { dictionaries as minimaxCodeDicts, NS_MINIMAX_CODE, type MinimaxCodeLocaleKey } from './minimax-code/locales.ts'
 import { installMinimaxCodeStyles } from './minimax-code/styles.ts'
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
-import { dictionaries as workBuddyDicts, NS_WORKBUDDY } from './workbuddy/locales.ts'
+import { dictionaries as workBuddyDicts, NS_WORKBUDDY, type WorkBuddyLocaleKey } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
-import { dictionaries as ollamaDicts, NS_OLLAMA } from './ollama/locales.ts'
+import { dictionaries as ollamaDicts, NS_OLLAMA, type OllamaLocaleKey } from './ollama/locales.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
+  /**
+   * Every namespace this plugin registers, typed by that line's own dictionary.
+   *
+   * These were `any`, which made a renamed or misspelled key invisible to the
+   * compiler: the card rendered the key name itself and only a human noticed.
+   * Each line exports its key union beside its dictionaries, so this map is now
+   * the compile-time half of the locale contract.
+   */
   interface LocaleNamespaceMap {
     'dsh-chatgpt-subscription': LocaleKey
-    'dsh-antigravity': any
-    'dsh-claude': any
-    'dsh-command-code': any
-    'dsh-kimi-code': any
+    'dsh-antigravity': AntigravityLocaleKey
+    'dsh-claude': ClaudeLocaleKey
+    'dsh-command-code': CommandCodeLocaleKey
+    'dsh-kimi-code': KimiCodeLocaleKey
     'dsh-minimax-code': MinimaxCodeLocaleKey
-    'dsh-workbuddy': any
-    'dsh-ollama': any
+    'dsh-workbuddy': WorkBuddyLocaleKey
+    'dsh-ollama': OllamaLocaleKey
   }
 }
 
@@ -136,110 +144,32 @@ export function apply(ctx: ClientContext): void {
   }, ProviderHubSectionWrapper))
 
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'codex-subscription-quota',
-    order: 35,
-    locale: NS,
-    inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
-      return {
-        api: new SubscriptionApi(),
-        directory: directory.store,
-        loadModelDirectory: () => {
-          void directory.load().catch(() => undefined)
-        },
-      }
-    },
+    name: 'conversation.input.right', id: 'codex-subscription-quota', order: 35, locale: NS,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId, { withApi: true }),
   }, CodexComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'antigravity-quota',
-    order: 36,
-    locale: NS_ANTIGRAVITY,
-    inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
-      return {
-        directory: directory.store,
-        loadModelDirectory: () => {
-          void directory.load().catch(() => undefined)
-        },
-      }
-    },
+    name: 'conversation.input.right', id: 'antigravity-quota', order: 36, locale: NS_ANTIGRAVITY,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, AntigravityComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'command-code-quota',
-    order: 37,
-    locale: NS_COMMAND_CODE,
-    inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
-      return {
-        directory: directory.store,
-        loadModelDirectory: () => {
-          void directory.load().catch(() => undefined)
-        },
-      }
-    },
+    name: 'conversation.input.right', id: 'command-code-quota', order: 37, locale: NS_COMMAND_CODE,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, CommandCodeComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'kimi-code-quota',
-    order: 38,
-    locale: NS_KIMI_CODE,
-    inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
-      return {
-        directory: directory.store,
-        loadModelDirectory: () => {
-          void directory.load().catch(() => undefined)
-        },
-      }
-    },
+    name: 'conversation.input.right', id: 'kimi-code-quota', order: 38, locale: NS_KIMI_CODE,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, KimiCodeComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'workbuddy-quota',
-    order: 39,
-    locale: NS_WORKBUDDY,
-    inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
-      return {
-        directory: directory.store,
-        loadModelDirectory: () => {
-          void directory.load().catch(() => undefined)
-        },
-      }
-    },
+    name: 'conversation.input.right', id: 'workbuddy-quota', order: 39, locale: NS_WORKBUDDY,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, WorkBuddyComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'minimax-code-quota',
-    order: 40,
-    locale: NS_MINIMAX_CODE,
-    inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
-      return {
-        directory: directory.store,
-        loadModelDirectory: () => {
-          void directory.load().catch(() => undefined)
-        },
-      }
-    },
+    name: 'conversation.input.right', id: 'minimax-code-quota', order: 40, locale: NS_MINIMAX_CODE,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, MinimaxCodeComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'claude-quota',
-    order: 41,
-    locale: NS_CLAUDE,
-    inject: (sessionId) => {
-      const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
-      return {
-        directory: directory.store,
-        loadModelDirectory: () => {
-          void directory.load().catch(() => undefined)
-        },
-      }
-    },
+    name: 'conversation.input.right', id: 'claude-quota', order: 41, locale: NS_CLAUDE,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, ClaudeComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
@@ -252,6 +182,45 @@ export function apply(ctx: ClientContext): void {
 }
 
 type ImageUrlResolver = (sessionId: string, attachment: ImageAttachmentRef) => Promise<string>
+
+/**
+ * The seats every composer badge is handed.
+ *
+ * Seven registrations each repeated this eight-line factory verbatim, and the
+ * only difference between them was whether ChatGPT's own badge also reads the
+ * subscription API directly. It lives here so a badge added later cannot forget
+ * the directory seat (the badge resolves the session's model list through it) or
+ * the reload callback that keeps that list fresh.
+ *
+ * The session id arrives as a plain string while the directory service takes the
+ * branded one, so the cast lives here rather than at seven call sites.
+ */
+function composerBadgeInject(ctx: ClientContext, sessionId: string, options: { withApi?: boolean } = {}) {
+  const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
+  return {
+    ...(options.withApi === true ? { api: new SubscriptionApi() } : {}),
+    directory: directory.store,
+    loadModelDirectory: () => {
+      void directory.load().catch(() => undefined)
+    },
+  }
+}
+
+/**
+ * Why the seven registrations below are spelled out rather than driven from a
+ * table.
+ *
+ * `ctx.slots.register` is generic over the slot key *and* the locale namespace,
+ * and it is overloaded; the component's props are composed from both. A table
+ * would have to hold components of different namespaces, so the correlation
+ * between a row's `locale` and its `component` would be erased — and a helper
+ * that keeps the correlation generically fails overload resolution inside its
+ * own body, because the namespace parameter is still unresolved there. Both
+ * roads end in a cast against the harness's composed-props internals, which is a
+ * version-sensitive seam this plugin does not add. What each row repeats is only
+ * the registration object; the eight-line seat factory is
+ * {@link composerBadgeInject}.
+ */
 
 /**
  * Resolve one session-authorized image URL.
