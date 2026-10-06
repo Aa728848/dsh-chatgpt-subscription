@@ -671,6 +671,43 @@ export function outputConfigFor(
   return effort === 'default' ? undefined : { effort }
 }
 
+/**
+ * Smallest output cap this line will send for a model whose thinking cannot be
+ * turned off.
+ *
+ * Such a model spends its cap on reasoning before it emits any text, so a caller
+ * that wants only a few words can be capped below the reasoning floor and get an
+ * empty answer. Measured on the M3.1 forced-thinking path with a session-title
+ * prompt: \`max_tokens: 64\` returns \`stop_reason: "max_tokens"\` with one thinking
+ * block and no text; \`max_tokens: 512\` returns \`stop_reason: "end_turn"\` with the
+ * title after ~53 output tokens.
+ *
+ * The floor only ever RAISES a cap smaller than this line's forced thinking needs,
+ * so a caller that states a larger cap keeps it - the catalog's "preserving
+ * explicit caller maxTokens" contract stays intact.
+ */
+export const MINIMAX_FORCED_THINKING_FLOOR_TOKENS = 512
+
+/**
+ * Raise a cap that is too small for this line's forced thinking.
+ *
+ * Left alone: a model that can disable thinking (its caller may have asked for
+ * thinking off on purpose, and raising the cap would not enable it but a caller
+ * reading the number back would be misled), and an absent cap (the caller stated
+ * none, so \`maxOutputTokensFor\` owns the ceiling).
+ *
+ * @param modelId - the routed model id.
+ * @param requested - the caller's cap, undefined when it stated none.
+ * @returns the cap to request, raised only when that is the difference between an
+ * empty truncated answer and a usable one.
+ */
+export function floorForcedThinkingTokens(modelId: string, requested: number | undefined): number | undefined {
+  if (requested === undefined) return undefined
+  const thinking = catalogEntry(modelId)?.thinking
+  if (thinking !== 'always-on' && thinking !== 'forced-effort') return requested
+  return Math.max(requested, MINIMAX_FORCED_THINKING_FLOOR_TOKENS)
+}
+
 /** Output cap one request asks for, tracked against the model's declared ceiling. */
 export function maxOutputTokensFor(modelId: string, contextWindow?: number): number {
   const model = catalogEntry(modelId)
