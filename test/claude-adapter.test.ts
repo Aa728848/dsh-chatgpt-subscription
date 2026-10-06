@@ -1014,6 +1014,21 @@ describe('claude adapter in-band stream errors', () => {
       .toMatchObject({ code: 'SERVER' })
     expect(pool.cooldowns).toHaveLength(0)
   })
+
+  it('never rewrites a context-overflow verdict the mapper already typed', async () => {
+    // A transient wire type and an overflow message can arrive together. The
+    // mapper's code is what the harness acts on - CONTEXT_OVERFLOW is the signal
+    // compaction runs on - so rewriting it into a retryable SERVER would throw
+    // that recovery away while the request keeps failing identically.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => inBandError(
+      'api_error',
+      'prompt is too long: 400000 tokens > 200000 tokens maximum',
+    ))
+    expect(await failureOf(makeAdapter(store, settings, fn).stream(options())))
+      .toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(calls).toHaveLength(1)
+  })
 })
 
 // ---------------------------------------------------------------------------

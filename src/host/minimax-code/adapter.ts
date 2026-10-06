@@ -869,7 +869,12 @@ export class MinimaxCodeAdapter extends LlmAdapter {
         // line's OWN failure classifier so every rule the HTTP path owns still
         // owns it. After the first chunk the mapper's verdict stands: a retry
         // would repeat output the user has already seen.
-        if (error instanceof LlmError && !outputStarted && state.streamError !== undefined) {
+        // PROVIDER_ERROR alone is eligible: a CONTEXT OVERFLOW the mapper typed
+        // here is the harness's compaction signal, and rewriting it into a
+        // retryable SERVER would discard that recovery while the request keeps
+        // failing identically. The code the mapper chose decides this, not the
+        // type the wire happened to carry.
+        if (error instanceof LlmError && !outputStarted && error.code === 'PROVIDER_ERROR' && state.streamError !== undefined) {
           throw reclassifyInBandError(error, state.streamError, classifyMinimaxFailure)
         }
         throw error

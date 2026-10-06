@@ -472,4 +472,18 @@ describe('minimax-code in-band stream errors', () => {
       expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
     }
   })
+
+  it('never rewrites a context-overflow verdict the mapper already typed', async () => {
+    // A transient wire type and an overflow message can arrive together. The
+    // mapper's code is what the harness acts on - CONTEXT_OVERFLOW is the signal
+    // compaction runs on - so rewriting it into a retryable SERVER would throw
+    // that recovery away while the request keeps failing identically.
+    const calls: string[] = []
+    const failure = await failureOf(await adapterFor([
+      MESSAGE_START,
+      { type: 'error', error: { type: 'api_error', message: 'prompt is too long: 400000 tokens > 200000 tokens maximum' } },
+    ], calls))
+    expect(failure).toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(calls).toHaveLength(1)
+  })
 })

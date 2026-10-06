@@ -826,7 +826,14 @@ export class ClaudeAdapter extends LlmAdapter {
         // arrived before anything reached the caller, which is classified like
         // the response body it is equivalent to (see inBandStreamVerdict).
         if (error instanceof LlmError) {
-          if (outputStarted || state.streamError === undefined) throw error
+          // PROVIDER_ERROR is the ONLY verdict eligible for reclassification, and
+          // that restriction is load-bearing rather than tidy: a CONTEXT OVERFLOW
+          // the mapper already typed here is the signal the harness compacts on,
+          // and rewriting it into a retryable SERVER would throw that recovery
+          // away while the request keeps failing the same way. An event can carry
+          // a transient `type` AND an overflow message, so the code the mapper
+          // chose - not the type on the wire - decides this.
+          if (outputStarted || error.code !== 'PROVIDER_ERROR' || state.streamError === undefined) throw error
           const verdict = inBandStreamVerdict(error, state.streamError, response.headers)
           // The rotation cannot happen here — the body is already open — but the
           // account CAN be taken out of rotation, which is what the pre-stream
