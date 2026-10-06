@@ -196,9 +196,20 @@ export class UsageService {
     return reopen !== undefined && reopen > now ? reopen : undefined
   }
 
+  /**
+   * The newest quota snapshot held for one credential's account, if any.
+   *
+   * Quota follows the account, so the settings card shows each account its own
+   * progress. The pool asks here while it builds its summaries — this reads the
+   * remembered map only, never the network, because opening the settings page
+   * must not cost one upstream request per pooled account.
+   */
+  snapshotFor(credentials: StoredOAuthCredentials): { usage: QuotaUsageDto; fetchedAt: number } | undefined {
+    return this.snapshots.get(identityKey(credentials))
+  }
+
   /** Remember the newest snapshot for one account, bounded to the accounts in use. */
-  private rememberSnapshot(accountKey: string, usage: QuotaUsageDto, fetchedAt: number): void {
-    this.snapshots.set(accountKey, { usage, fetchedAt })
+  private rememberSnapshot(accountKey: string, usage: QuotaUsageDto, fetchedAt: number): void {    this.snapshots.set(accountKey, { usage, fetchedAt })
     while (this.snapshots.size > 20) {
       const oldest = [...this.snapshots.entries()].sort((left, right) => left[1].fetchedAt - right[1].fetchedAt)[0]
       if (oldest === undefined) break

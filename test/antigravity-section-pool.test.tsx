@@ -100,8 +100,6 @@ describe('Antigravity account card', () => {
     // Provider-specific rows come from renderDetails.
     expect(container.textContent).toContain('proj-second')
     expect(container.textContent).toContain('second@example.com')
-    // The card owns the storage row and the notice the tab used to hand-roll.
-    expect(container.textContent).toContain(zh.storageNotice)
 
     const select = container.querySelector<HTMLSelectElement>('.dsha-select')
     expect(select).not.toBeNull()

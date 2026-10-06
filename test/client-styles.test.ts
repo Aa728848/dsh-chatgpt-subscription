@@ -3,14 +3,16 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { installStyles } from '../src/client/styles.ts'
 import { installHubStyles } from '../src/client/hub/hub-styles.ts'
 import { installModelChecklistStyles } from '../src/client/common/model-checklist-styles.ts'
+import { installPoolStyles } from '../src/client/common/styles.ts'
 
 const SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/main"]'
 const HUB_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/hub"]'
 const CHECKLIST_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/model-checklist"]'
+const POOL_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/pool"]'
 const tags = () => document.querySelectorAll<HTMLStyleElement>(SELECTOR)
 
 afterEach(() => {
-  for (const selector of [SELECTOR, HUB_SELECTOR, CHECKLIST_SELECTOR]) {
+  for (const selector of [SELECTOR, HUB_SELECTOR, CHECKLIST_SELECTOR, POOL_SELECTOR]) {
     for (const tag of [...document.querySelectorAll<HTMLStyleElement>(selector)]) tag.remove()
   }
 })
@@ -38,6 +40,18 @@ describe('provider hub overview styles', () => {
     expect(css).not.toContain('.dsh-hub-tabs')
     // The overview styles live in their own sheet, installed separately.
     expect(css).not.toContain('.dsh-hub-card')
+  })
+
+  it('ships the in-row account quota block in the pool sheet', () => {
+    installPoolStyles()
+    const css = document.querySelector<HTMLStyleElement>(POOL_SELECTOR)?.textContent ?? ''
+    // Quota follows the account, so its bar lives inside the account row.
+    expect(css).toContain('.dsha-account-quota-row{')
+    expect(css).toContain('.dsha-account-quota-fill{')
+    expect(css).toContain('.dsha-account-quota-track{')
+    // The warning/danger levels the page-level bars already use.
+    expect(css).toContain('[data-level=warning]')
+    expect(css).toContain('[data-level=danger]')
   })
 
   it('ships the shared model checklist rows in their own sheet', () => {

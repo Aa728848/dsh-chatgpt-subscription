@@ -30,8 +30,8 @@ interface Props {
 /**
  * The Ollama tab.
  *
- * Deliberately thin. The account card, its badges, the rotation picker and the
- * storage notice are the shared {@link AccountPoolSection}, so this line looks
+ * Deliberately thin. The account card, its badges and the rotation picker are
+ * the shared {@link AccountPoolSection}, so this line looks
  * like every other provider tab by construction rather than by imitation; only
  * what is genuinely Ollama's - pasting a key, syncing the catalog, and the
  * documented service limits - is written here.
@@ -138,10 +138,6 @@ export function OllamaSection(props: Props): React.ReactElement {
           <h3>{t.title}</h3>
         </div>
         <p className="dsha-notice">{t.pageDesc}</p>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.provider}</span>
-          <span className="dsha-value">{t.providerValue}</span>
-        </div>
         {error !== null && (
           <p className="dsha-notice" style={{ color: 'var(--dsha-danger, #c0392b)' }}>
             {t.error.replace('{detail}', error)}

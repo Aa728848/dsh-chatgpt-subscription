@@ -1,83 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   AccountRotationStrategy,
-  AntigravityModelOption,
   AntigravityWebStatus,
 } from '../../shared/antigravity-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ContextWindowEditor, contextDraftsFor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
+import { createLineApi } from '../common/line-api.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
+import { formatCapacity, parsePositiveCapacity } from '../common/format.ts'
 import { zh } from './locales.ts'
 
 const API = '/antigravity/api'
+const api = createLineApi(API, 'Antigravity')
 
 interface Props {
   onModelChange?: () => void
   loadModelDirectory?: () => void
-}
-
-async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  })
-  const json = (await res.json()) as { ok: boolean; value?: T; error?: string }
-  if (!res.ok || !json.ok) {
-    throw new Error(json.error || `HTTP ${res.status}`)
-  }
-  return json.value as T
-}
-
-export function parsePositiveCapacity(value: string): number | null {
-  const normalized = value.trim().toLowerCase().replace(/[,_\s]/g, '')
-  const matched = normalized.match(/^(\d+(?:\.\d+)?)(k|m)?$/)
-  if (matched === null) return null
-  const multiplier = matched[2] === 'm' ? 1_000_000 : matched[2] === 'k' ? 1_000 : 1
-  const parsed = Number(matched[1]) * multiplier
-  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null
-}
-
-export function formatCapacity(value: number): string {
-  if (value >= 1_000_000 && value % 100_000 === 0) return `${value / 1_000_000}M`
-  if (value % 1_000 === 0) return `${value / 1_000}K`
-  return String(value)
-}
-
-/**
- * Seed one draft per model from a status payload. Also run after a model
- * toggle: a model that was just enabled has no draft yet, and the context
- * window section only renders enabled models.
- */
-function contextDraftsFor(status: AntigravityWebStatus): Record<string, string> {
-  const drafts: Record<string, string> = {}
-  for (const model of status.models) {
-    drafts[model.id] = formatCapacity(status.contextWindowOverrides[model.id] || model.defaultContextWindow)
-  }
-  return drafts
-}
-
-function formatResetTime(resetTime?: string): string {
-  if (!resetTime) return ''
-  const diff = new Date(resetTime).getTime() - Date.now()
-  if (diff <= 0) return '现在'
-  const mins = Math.floor(diff / 60000)
-  const hours = Math.floor(mins / 60)
-  const days = Math.floor(hours / 24)
-  if (days > 0) return `${days}天 ${hours % 24}时`
-  if (hours > 0) return `${hours}h ${mins % 60}m`
-  return `${mins}m`
-}
-
-function formatDate(ms?: number): string {
-  if (!ms || ms <= 0) return '—'
-  try {
-    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(ms)
-  } catch {
-    return '—'
-  }
 }
 
 export function AntigravitySection({ onModelChange, loadModelDirectory }: Props): React.ReactElement {
@@ -108,7 +47,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       // The host refreshes a stale quota cache while serving /status, so a second
       // client-side POST /quota here would double every upstream fetch.
-      const data = await fetchApi<AntigravityWebStatus>('/status')
+      const data = await api.request<AntigravityWebStatus>('/status')
       setStatus(data)
       setContextDrafts(contextDraftsFor(data))
       // An answer that refreshed the quota behind itself is followed up shortly,
@@ -142,13 +81,13 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
       setError(null)
       setValidationUrl(null)
       setLoginProgress(null)
-      const flow = await fetchApi<{ authUrl?: string; status?: string }>('/login', { method: 'POST' })
+      const flow = await api.request<{ authUrl?: string; status?: string }>('/login', { method: 'POST' })
       if (flow.authUrl) {
         window.open(flow.authUrl, '_blank')
       }
       const pollTimer = setInterval(async () => {
         try {
-          const pollStatus = await fetchApi<{
+          const pollStatus = await api.request<{
             status: string
             error?: string
             validationUrl?: string
@@ -193,7 +132,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('quota')
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/quota', { method: 'POST' })
+      const updated = await api.request<AntigravityWebStatus>('/quota', { method: 'POST' })
       setStatus(updated)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -206,7 +145,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('logout')
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/logout', { method: 'POST' })
+      const updated = await api.request<AntigravityWebStatus>('/logout', { method: 'POST' })
       setStatus(updated)
       notifyChange()
     } catch (err) {
@@ -220,7 +159,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy(`primary-${accountId}`)
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/accounts', {
+      const updated = await api.request<AntigravityWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action: 'set-primary', accountId }),
       })
@@ -237,7 +176,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy(`delete-${accountId}`)
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/accounts', {
+      const updated = await api.request<AntigravityWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action: 'delete', accountId }),
       })
@@ -254,7 +193,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy(`cooldown-${accountId}`)
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/accounts', {
+      const updated = await api.request<AntigravityWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action: 'clear-cooldown', accountId }),
       })
@@ -270,7 +209,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('strategy')
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/accounts', {
+      const updated = await api.request<AntigravityWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action: 'strategy', strategy }),
       })
@@ -282,21 +221,6 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     }
   }
 
-  const toggleEnabled = async (enabled: boolean) => {
-    setStatus((prev) => prev ? { ...prev, enabled } : prev)
-    try {
-      const updated = await fetchApi<AntigravityWebStatus>('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ enabled }),
-      })
-      setStatus(updated)
-      notifyChange()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      void loadStatus(true)
-    }
-  }
-
   const toggleModel = async (modelId: string, checked: boolean) => {
     if (!status) return
     const currentEnabled = status.models.filter((m) => m.enabled).map((m) => m.id)
@@ -305,7 +229,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
       : currentEnabled.filter((id) => id !== modelId)
 
     try {
-      const updated = await fetchApi<AntigravityWebStatus>('/models', {
+      const updated = await api.request<AntigravityWebStatus>('/models', {
         method: 'POST',
         body: JSON.stringify({ enabledModelIds: nextEnabled }),
       })
@@ -323,7 +247,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     if (!status) return
     const nextEnabled = selectAll ? status.models.map((m) => m.id) : []
     try {
-      const updated = await fetchApi<AntigravityWebStatus>('/models', {
+      const updated = await api.request<AntigravityWebStatus>('/models', {
         method: 'POST',
         body: JSON.stringify({ enabledModelIds: nextEnabled }),
       })
@@ -337,7 +261,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
 
   const handleUpdateEffort = async (effort: 'low' | 'medium' | 'high' | null) => {
     try {
-      const updated = await fetchApi<AntigravityWebStatus>('/settings', {
+      const updated = await api.request<AntigravityWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ defaultReasoningEffort: effort }),
       })
@@ -359,7 +283,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setSavingModel(modelId)
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/settings', {
+      const updated = await api.request<AntigravityWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({
           contextWindowOverrides: {
@@ -382,7 +306,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setSavingModel(modelId)
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/settings', {
+      const updated = await api.request<AntigravityWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: { [modelId]: null } }),
       })
@@ -407,7 +331,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('context')
       setError(null)
-      const updated = await fetchApi<AntigravityWebStatus>('/settings', {
+      const updated = await api.request<AntigravityWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: Object.fromEntries(models.map((model) => [model, null])) }),
       })
@@ -453,39 +377,23 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         onDelete={(accountId) => void handleDeleteAccount(accountId)}
         onClearCooldown={(accountId) => void handleClearCooldown(accountId)}
         onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
+        // Quota follows the account, so a row draws the snapshot the host holds
+        // for that account rather than one line-level figure.
+        showQuota
+        // Only what the shared card cannot know: the line's own project id.
+        // E-mail, expiry and last-used are the shared card's rows, and rendering
+        // them here printed each of them twice.
         renderDetails={(account) => (
-          <>
-            <span>{t.accountId}: {account.projectId || 'antigravity-default'}</span>
-            {account.email && <span>{t.email}: {account.email}</span>}
-            {account.expiresAt && <span>{t.expires}: {formatDate(account.expiresAt)}</span>}
-            {account.lastUsedAt && <span>{t.lastUsed}: {formatDate(account.lastUsedAt)}</span>}
-          </>
+          <span>{t.accountId}: {account.projectId || 'antigravity-default'}</span>
         )}
       />
 
-      {/* 2. 连接与模型胶囊标签选择器 */}
+      {/* 2. 模型选择：这一组现在只做模型，连接事实（开关 / Provider / 连接状态）
+          已删——开关在概览卡片上，Provider 与「已连接」是内部细节。 */}
       <section className="dsha-group">
         <div className="dsha-grouphead">
-          <h3>{t.connection}</h3>
+          <h3>{t.modelsSection}</h3>
         </div>
-        <div className="dsha-row" style={{ marginBottom: 12 }}>
-          <span className="dsha-label" style={{ fontWeight: 600 }}>{t.enableProvider}</span>
-          <input
-            type="checkbox"
-            checked={status?.enabled !== false}
-            disabled={busy !== null}
-            onChange={(e) => void toggleEnabled(e.currentTarget.checked)}
-          />
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.provider}</span>
-          <span className="dsha-value">{t.providerValue}</span>
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.connectionState}</span>
-          <span className="dsha-value">{status?.authenticated ? t.connected : t.untested}</span>
-        </div>
-
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
 
         <ModelChecklist
@@ -537,53 +445,29 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         </div>
         <p className="dsha-muted">{t.contextWindowHint}</p>
 
-        <div className="dsha-context-settings">
-          {contextModels.length === 0 && (
-            <p className="dsha-muted">{t.contextWindowNoneEnabled}</p>
-          )}
-          {contextModels.map((model) => (
-            <div key={model.id} className="dsha-context-row">
-              <span>{model.name}</span>
-              <div className="dsha-capacity-control">
-                <input
-                  type="text"
-                  value={contextDrafts[model.id] ?? ''}
-                  onChange={(e) => setContextDrafts({ ...contextDrafts, [model.id]: e.target.value })}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void handleSaveContextWindow(model.id)
-                  }}
-                />
-                <small>{t.tokens}</small>
-                <button
-                  type="button"
-                  className="dsha-context-save"
-                  disabled={savingModel === model.id}
-                  onClick={() => void handleSaveContextWindow(model.id)}
-                >
-                  {savingModel === model.id ? t.saving : t.save}
-                </button>
-                <button
-                  type="button"
-                  className="dsha-context-save dsha-context-reset"
-                  aria-label={`${model.name} ${t.contextWindowReset}`}
-                  disabled={savingModel === model.id || status?.contextWindowOverrides[model.id] === undefined}
-                  onClick={() => void handleResetContextWindow(model.id)}
-                >
-                  {t.contextWindowReset}
-                </button>
-              </div>
-            </div>
-          ))}
-          <div className="dsha-actions">
-            <button
-              className="dsha-btn"
-              disabled={busy !== null || overrideCount === 0}
-              onClick={() => void handleResetAllContextWindows()}
-            >
-              {t.contextWindowResetAll}
-            </button>
-          </div>
-        </div>
+        <ContextWindowEditor
+          rows={contextModels.map((model) => ({
+            id: model.id,
+            name: model.name,
+            draft: contextDrafts[model.id] ?? '',
+            hasOverride: status?.contextWindowOverrides[model.id] !== undefined,
+            saving: savingModel === model.id,
+          }))}
+          labels={{
+            tokens: t.tokens,
+            save: t.save,
+            saving: t.saving,
+            reset: t.contextWindowReset,
+            resetAll: t.contextWindowResetAll,
+            empty: t.contextWindowNoneEnabled,
+          }}
+          busy={busy !== null}
+          overrideCount={overrideCount}
+          onDraftChange={(id, draft) => setContextDrafts((prev) => ({ ...prev, [id]: draft }))}
+          onCommit={(id) => void handleSaveContextWindow(id)}
+          onReset={(id) => void handleResetContextWindow(id)}
+          onResetAll={() => void handleResetAllContextWindows()}
+        />
       </section>
 
       {/* 5. 用量与配额卡片 */}
@@ -599,43 +483,18 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
           </button>
         </div>
         <p className="dsha-muted">{t.quotaDesc}</p>
+        {/* The per-group/bucket rows went with the bars: every one of them — the
+            remaining share, the reset countdown, the group and bucket names —
+            is drawn on the account card now, where the snapshot actually
+            belongs. What stays is what has no account-row home: the refresh
+            action, the reading's freshness and the states below. */}
+        <p className="dsha-muted">{t.quotaFactsScope}</p>
 
-        {!status?.authenticated ? (
-          <div className="dsha-empty">{t.signedOut}</div>
-        ) : groups.length === 0 ? (
-          <div className="dsha-empty">{busy === 'quota' ? t.refreshingQuota : t.quotaEmpty}</div>
-        ) : (
-          groups.map((group, gIdx) => (
-            <div key={gIdx} className="dsha-quota-card">
-              <div className="dsha-quota-title">
-                <strong>{group.displayName}</strong>
-                {group.description && <span>{group.description}</span>}
-              </div>
-
-              {group.buckets.map((bucket, bIdx) => {
-                const isCyan = /claude|gpt|3p/i.test(group.displayName)
-                const pct = Math.round(bucket.remainingFraction * 100)
-                const resetText = formatResetTime(bucket.resetTime)
-                return (
-                  <div key={bIdx} className="dsha-meter-wrap">
-                    <div className="dsha-meter-label">
-                      <span>{bucket.displayName}</span>
-                      <strong>{pct}% 剩余</strong>
-                    </div>
-                    <div className={`dsha-meter ${isCyan ? 'dsha-meter-cyan' : 'dsha-meter-green'}`}>
-                      <span style={{ width: `${pct}%` }} />
-                    </div>
-                    {resetText && (
-                      <div className="dsha-meter-meta">
-                        <span>重置: {resetText}</span>
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          ))
-        )}
+        {!status?.authenticated
+          ? <div className="dsha-empty">{t.signedOut}</div>
+          : groups.length === 0
+            ? <div className="dsha-empty">{busy === 'quota' ? t.refreshingQuota : t.quotaEmpty}</div>
+            : null}
 
         {quota?.fetchedAt && (
           <div className="dsha-timestamp">

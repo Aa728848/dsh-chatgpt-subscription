@@ -1,14 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { selectBadgeFacts } from '../src/client/workbuddy/WorkBuddyComposerQuota.tsx'
+import { formatCapacity, parsePositiveCapacity } from '../src/client/common/format.ts'
+import { maskUin } from '../src/client/workbuddy/WorkBuddySection.tsx'
 import {
-  displayFile,
-  formatCapacity,
-  maskUin,
-  parsePositiveCapacity,
   reasoningEffortChoices,
   unsupportedReasoningEffort,
-} from '../src/client/workbuddy/WorkBuddySection.tsx'
+} from '../src/client/workbuddy/useWorkBuddySection.ts'
 import type { WorkBuddyModelOption } from '../src/shared/workbuddy-contracts.ts'
 import type { WorkBuddyWebStatus } from '../src/shared/workbuddy-contracts.ts'
 
@@ -78,12 +76,6 @@ describe('WorkBuddy settings card helpers', () => {
     expect(maskUin('')).toBe('—')
   })
 
-  it('shows only the file name of a credential path', () => {
-    expect(displayFile('C:\\Users\\me\\AppData\\Local\\CodeBuddyExtension\\auth\\workbuddy-desktop.info'))
-      .toBe('workbuddy-desktop.info')
-    expect(displayFile('/home/me/.local/share/auth/x.info')).toBe('x.info')
-    expect(displayFile(null)).toBe('—')
-  })
   it('offers only the reasoning levels the account models declare', () => {
     const choices = reasoningEffortChoices([
       model({ id: 'a', name: 'Alpha', reasoningEfforts: ['low', 'high'] }),

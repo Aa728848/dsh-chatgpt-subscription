@@ -247,9 +247,13 @@ describe('CommandCodeAccountPool', () => {
     await fetchAccountQuota(source, fetchMock as unknown as typeof fetch, false, 'acc_b')
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore)
     expect(getCachedQuotaFor('acc_b')).toBeDefined()
-    expect(getCachedQuotaFor('acc_a')).toBeUndefined()
+    // Both readings are kept — quota follows the account, so the pool's card
+    // draws each account its own — and neither is served for the other.
+    expect(getCachedQuotaFor('acc_a')).not.toBe(getCachedQuotaFor('acc_b'))
+    expect(getCachedQuotaFor('acc_never_read')).toBeUndefined()
     clearCachedQuota()
     expect(getCachedQuotaFor('acc_b')).toBeUndefined()
+    expect(getCachedQuotaFor('acc_a')).toBeUndefined()
   })
 })
 

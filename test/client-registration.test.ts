@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { CODEX_MODEL_CATALOG } from '../src/shared/model-catalog.ts'
-import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
+import { CodexSubscriptionSection, parseCapacity } from '../src/client/CodexSubscriptionSection.tsx'
 import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
 import { apply, inject } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -37,6 +37,10 @@ describe('client registration', () => {
   async function mountCodexSection(options: {
     visibleModelIds: string[]
     contextWindowOverrides?: Record<string, number>
+    /** Pooled accounts as the host reports them, quota included. */
+    accounts?: Array<Record<string, unknown>>
+    activeAccountId?: string
+    quota?: Record<string, unknown>
   }): Promise<{ container: HTMLElement; fetchMock: ReturnType<typeof vi.fn>; teardown: () => Promise<void> }> {
     const preferences = {
       visibleModelIds: [...options.visibleModelIds],
@@ -70,9 +74,12 @@ describe('client registration', () => {
       return Response.json({ ok: true, value: {
         authenticated: false,
         account: null,
+        accounts: options.accounts ?? [],
+        ...(options.activeAccountId === undefined ? {} : { activeAccountId: options.activeAccountId }),
+        rotationStrategy: 'sequential',
         storage: { kind: 'memory', encrypted: false, available: true },
         login: { active: false, loginId: null, expiresAt: null },
-        quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
+        quota: options.quota ?? { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
         preferences: payload(),
       } })
     })
@@ -136,6 +143,45 @@ describe('client registration', () => {
         expect(fetchMock).toHaveBeenCalledTimes(2)
         expect(container.textContent).toContain(zh.contextWindowInvalid)
       }
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  it('puts each account its own quota, and leaves only facts on the quota block', async () => {
+    const readAt = Date.parse('2030-06-15T00:00:00Z')
+    const harness = await mountCodexSection({
+      visibleModelIds: ['gpt-5.6-sol'],
+      activeAccountId: 'acc_1',
+      accounts: [
+        { id: 'acc_1', alias: '主账号', isPrimary: true, quota: { fetchedAt: readAt, windows: [{ label: '', usedPercent: 42, windowDurationMins: 300, resetsAt: null }] } },
+        { id: 'acc_2', alias: '备用账号', isPrimary: false },
+      ],
+      quota: {
+        state: 'ready',
+        buckets: [{ id: 'codex', name: 'Codex', planType: 'plus', primary: null, secondary: null, windows: [{ usedPercent: 42, windowDurationMins: 300, resetsAt: null }] }],
+        credits: { hasCredits: true, unlimited: false, balance: '12.50' },
+        individualLimit: null,
+        spendControlReached: null,
+        resetCredits: null,
+        fetchedAt: readAt,
+        stale: false,
+      },
+    })
+    try {
+      const { container } = harness
+      // The progress bar is drawn inside the account it belongs to…
+      const row = container.querySelector('.dsha-account-card .dsha-account-quota-row')
+      expect(row).not.toBeNull()
+      expect(row!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('42')
+      expect(row!.textContent).toContain('42%')
+      // …the account nobody has read says exactly that…
+      expect(container.textContent).toContain(zh.quotaNone)
+      // …and the page-level block keeps the facts and says whose they are.
+      const block = [...container.querySelectorAll('.dsha-group')].find((group) => group.textContent?.includes(zh.quota))!
+      expect(block.textContent).toContain(zh.quotaFactsScope)
+      expect(block.textContent).toContain('plus')
+      expect(block.textContent).toContain('12.50')
     } finally {
       await harness.teardown()
     }
@@ -211,20 +257,6 @@ describe('client registration', () => {
       await harness.teardown()
       window.confirm = originalConfirm
     }
-  })
-
-  it('presents the actual Host credential storage security boundary', () => {
-    const t = ((key: keyof typeof zh) => zh[key]) as never
-    const linux = { kind: 'linux-file', encrypted: false, available: true } as const
-    const windows = { kind: 'windows-dpapi', encrypted: true, available: true } as const
-    const macos = { kind: 'macos-keychain', encrypted: true, available: true } as const
-
-    expect(storageLabel(linux, t)).toContain('0600')
-    expect(storageNotice(linux, t)).toContain('不会额外加密')
-    expect(storageLabel(windows, t)).toContain('DPAPI')
-    expect(storageLabel(macos, t)).toContain('钥匙串')
-    expect(storageNotice(macos, t)).toContain('钥匙串')
-    expect(storageNotice({ ...linux, available: false }, t)).toContain('无法安全访问')
   })
 
   it('contributes the tabbed subscription hub, composer quotas, and image toolview', () => {

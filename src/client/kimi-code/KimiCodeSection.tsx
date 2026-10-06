@@ -8,82 +8,21 @@ import type {
 } from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_REASONING_EFFORTS } from '../../shared/kimi-code-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ContextWindowEditor, contextDraftsFor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
+import { createLineApi } from '../common/line-api.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
+import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
 import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
 
 const API = '/kimi-code/api'
+const api = createLineApi(API, 'Kimi Code')
 
 interface Props {
   onModelChange?: () => void
   loadModelDirectory?: () => void
-}
-
-async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  })
-  const json = (await res.json()) as { ok: boolean; value?: T; error?: string }
-  if (!res.ok || !json.ok) {
-    throw new Error(json.error || `HTTP ${res.status}`)
-  }
-  return json.value as T
-}
-
-/** Parse "1M", "512K", "200000" into a positive integer token count. */
-export function parsePositiveCapacity(value: string): number | null {
-  const normalized = value.trim().toLowerCase().replace(/[,_\s]/g, '')
-  const matched = normalized.match(/^(\d+(?:\.\d+)?)(k|m)?$/)
-  if (matched === null) return null
-  const multiplier = matched[2] === 'm' ? 1_000_000 : matched[2] === 'k' ? 1_000 : 1
-  const parsed = Number(matched[1]) * multiplier
-  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null
-}
-
-export function formatCapacity(value: number): string {
-  if (value >= 1_000_000 && value % 100_000 === 0) return `${value / 1_000_000}M`
-  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`
-  return String(value)
-}
-
-/**
- * Seed one draft per model from a status payload. Also run after a model
- * toggle: a model that was just enabled has no draft yet, and the context
- * window section only renders enabled models.
- */
-function contextDraftsFor(status: KimiCodeWebStatus): Record<string, string> {
-  const drafts: Record<string, string> = {}
-  for (const model of status.models) {
-    drafts[model.id] = formatCapacity(status.contextWindowOverrides[model.id] || model.defaultContextWindow)
-  }
-  return drafts
-}
-
-function formatDate(ms?: number | null): string {
-  if (ms === undefined || ms === null || ms <= 0) return '—'
-  try {
-    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(ms)
-  } catch {
-    return '—'
-  }
-}
-
-function formatReset(resetsAt?: number | null): string {
-  if (resetsAt === undefined || resetsAt === null || resetsAt <= 0) return ''
-  const diff = resetsAt - Date.now()
-  if (diff <= 0) return 'now'
-  const mins = Math.floor(diff / 60000)
-  const hours = Math.floor(mins / 60)
-  const days = Math.floor(hours / 24)
-  if (days > 0) return `${days}d ${hours % 24}h`
-  if (hours > 0) return `${hours}h ${mins % 60}m`
-  return `${mins}m`
 }
 
 /** Money the service reports in minor units, rendered in its own currency. */
@@ -146,7 +85,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   const loadStatus = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
     try {
-      const data = await fetchApi<KimiCodeWebStatus>('/status')
+      const data = await api.request<KimiCodeWebStatus>('/status')
       setStatus(data)
       setContextDrafts(contextDraftsFor(data))
       // An answer that refreshed the quota behind itself is followed up shortly,
@@ -181,7 +120,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     const timer = window.setInterval(() => {
       void (async () => {
         try {
-          const poll = await fetchApi<KimiCodeLoginFlowStatus>('/login/status')
+          const poll = await api.request<KimiCodeLoginFlowStatus>('/login/status')
           setFlow(poll)
           if (poll.status === 'complete') {
             await loadStatus()
@@ -202,7 +141,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       setBusy('login')
       setError(null)
       setCopied(false)
-      const next = await fetchApi<KimiCodeLoginFlowStatus>('/login', {
+      const next = await api.request<KimiCodeLoginFlowStatus>('/login', {
         method: 'POST',
         body: JSON.stringify({}),
       })
@@ -218,7 +157,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
 
   const handleCancelLogin = async () => {
     try {
-      await fetchApi<KimiCodeLoginFlowStatus>('/login/cancel', { method: 'POST' })
+      await api.request<KimiCodeLoginFlowStatus>('/login/cancel', { method: 'POST' })
       setFlow({ status: 'idle' })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -245,7 +184,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     try {
       setBusy(`${action}-${accountId}`)
       setError(null)
-      const updated = await fetchApi<KimiCodeWebStatus>('/accounts', {
+      const updated = await api.request<KimiCodeWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action, accountId }),
       })
@@ -263,7 +202,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     try {
       setBusy('strategy')
       setError(null)
-      const updated = await fetchApi<KimiCodeWebStatus>('/accounts', {
+      const updated = await api.request<KimiCodeWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action: 'strategy', strategy }),
       })
@@ -284,7 +223,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   const handleRelogin = (accountId: string) => {
     void (async () => {
       try {
-        const updated = await fetchApi<KimiCodeWebStatus>('/accounts', {
+        const updated = await api.request<KimiCodeWebStatus>('/accounts', {
           method: 'POST',
           body: JSON.stringify({ action: 'relogin', accountId }),
         })
@@ -303,7 +242,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       setError(null)
       // The host reports the real outcome; a failure arrives as a thrown error
       // carrying the upstream reason rather than an indistinguishable 200.
-      const updated = await fetchApi<KimiCodeWebStatus>('/quota', { method: 'POST' })
+      const updated = await api.request<KimiCodeWebStatus>('/quota', { method: 'POST' })
       setStatus(updated)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -318,7 +257,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     try {
       setBusy('catalog')
       setError(null)
-      const updated = await fetchApi<KimiCodeWebStatus>('/catalog/refresh', { method: 'POST' })
+      const updated = await api.request<KimiCodeWebStatus>('/catalog/refresh', { method: 'POST' })
       setStatus(updated)
       setContextDrafts(contextDraftsFor(updated))
       notifyChange()
@@ -334,7 +273,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       setBusy('connection')
       setError(null)
       setConnectionNotice(null)
-      const result = await fetchApi<{ connected: boolean; latencyMs: number }>('/connection/test', {
+      const result = await api.request<{ connected: boolean; latencyMs: number }>('/connection/test', {
         method: 'POST',
       })
       setConnectionNotice(result.connected ? `${t.testSuccess} · ${result.latencyMs} ms` : t.testFailed)
@@ -349,7 +288,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
 
   const applyEnabled = async (enabledModelIds: string[]) => {
     try {
-      const updated = await fetchApi<KimiCodeWebStatus>('/models', {
+      const updated = await api.request<KimiCodeWebStatus>('/models', {
         method: 'POST',
         body: JSON.stringify({ enabledModelIds }),
       })
@@ -360,21 +299,6 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  const toggleEnabled = async (enabled: boolean) => {
-    setStatus((prev) => prev ? { ...prev, enabled } : prev)
-    try {
-      const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ enabled }),
-      })
-      setStatus(updated)
-      notifyChange()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      void loadStatus(true)
     }
   }
 
@@ -392,7 +316,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
 
   const handleUpdateEffort = async (effort: KimiCodeReasoningEffort | null) => {
     try {
-      const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
+      const updated = await api.request<KimiCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ defaultReasoningEffort: effort }),
       })
@@ -405,7 +329,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
 
   const handleUpdateCacheTtl = async (ttl: KimiCodeCacheTtl | null) => {
     try {
-      const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
+      const updated = await api.request<KimiCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ cacheTtl: ttl }),
       })
@@ -426,7 +350,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     try {
       setSavingModel(modelId)
       setError(null)
-      const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
+      const updated = await api.request<KimiCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: { [modelId]: parsed } }),
       })
@@ -445,7 +369,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     try {
       setSavingModel(modelId)
       setError(null)
-      const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
+      const updated = await api.request<KimiCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: { [modelId]: null } }),
       })
@@ -470,7 +394,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     try {
       setBusy('context')
       setError(null)
-      const updated = await fetchApi<KimiCodeWebStatus>('/settings', {
+      const updated = await api.request<KimiCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: Object.fromEntries(models.map((model) => [model, null])) }),
       })
@@ -517,14 +441,13 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         onClearCooldown={(accountId) => void handleAccountAction('clear-cooldown', accountId)}
         onRelogin={(accountId) => handleRelogin(accountId)}
         onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
-        storageValue={status?.storagePath || '—'}
+        showQuota
         renderDetails={(entry) => (
           <>
             {entry.planName && <span>{t.plan}: {entry.planName}</span>}
             {entry.region && (
               <span>{t.region}: {entry.region === 'global' ? t.regionGlobal : t.regionMainland}</span>
             )}
-            {entry.email && <span>{t.email}: {entry.email}</span>}
           </>
         )}
       >
@@ -577,19 +500,6 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         <div className="dsha-grouphead">
           <h3>{t.connection}</h3>
         </div>
-        <div className="dsha-row" style={{ marginBottom: 12 }}>
-          <span className="dsha-label" style={{ fontWeight: 600 }}>{t.enableProvider}</span>
-          <input
-            type="checkbox"
-            checked={status?.enabled !== false}
-            disabled={busy !== null}
-            onChange={(e) => void toggleEnabled(e.currentTarget.checked)}
-          />
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.provider}</span>
-          <span className="dsha-value">{t.providerValue}</span>
-        </div>
         <div className="dsha-row">
           <span className="dsha-label">{t.oauthHost}</span>
           <span className="dsha-value">{status?.oauthHost || '—'}</span>
@@ -597,10 +507,6 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         <div className="dsha-row">
           <span className="dsha-label">{t.codingEndpoint}</span>
           <span className="dsha-value">{status?.codingBaseUrl || '—'}</span>
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.connectionState}</span>
-          <span className="dsha-value">{status?.authenticated ? t.connected : t.untested}</span>
         </div>
         <p className="dsha-notice">
           {status?.serving === false && status.conflict
@@ -741,59 +647,34 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           <h3>{t.contextWindowSection}</h3>
         </div>
         <p className="dsha-muted">{t.contextWindowHint}</p>
-        <div className="dsha-context-settings">
-          {contextModels.length === 0 && (
-            <p className="dsha-muted">{t.contextWindowNoneEnabled}</p>
-          )}
-          {contextModels.map((model: KimiCodeModelOption) => (
-            <div key={model.id} className="dsha-context-row">
-              <span title={model.id}>
-                {model.name}
-                {model.defaultContextWindow < model.contextWindow && (
-                  <span className="dsha-model-meta">{formatCapacity(model.contextWindow)}</span>
-                )}
-              </span>
-              <div className="dsha-capacity-control">
-                <input
-                  type="text"
-                  aria-label={`${model.name} context window`}
-                  value={contextDrafts[model.id] ?? ''}
-                  onChange={(event) => setContextDrafts({ ...contextDrafts, [model.id]: event.currentTarget.value })}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') void handleSaveContextWindow(model.id)
-                  }}
-                />
-                <small>{t.tokens}</small>
-                <button
-                  type="button"
-                  className="dsha-context-save"
-                  disabled={savingModel === model.id}
-                  onClick={() => void handleSaveContextWindow(model.id)}
-                >
-                  {savingModel === model.id ? t.saving : t.save}
-                </button>
-                <button
-                  type="button"
-                  className="dsha-context-save dsha-context-reset"
-                  aria-label={`${model.name} ${t.contextWindowReset}`}
-                  disabled={savingModel === model.id || status?.contextWindowOverrides[model.id] === undefined}
-                  onClick={() => void handleResetContextWindow(model.id)}
-                >
-                  {t.contextWindowReset}
-                </button>
-              </div>
-            </div>
-          ))}
-          <div className="dsha-actions">
-            <button
-              className="dsha-btn"
-              disabled={busy !== null || overrideCount === 0}
-              onClick={() => void handleResetAllContextWindows()}
-            >
-              {t.contextWindowResetAll}
-            </button>
-          </div>
-        </div>
+        <ContextWindowEditor
+          rows={contextModels.map((model: KimiCodeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            draft: contextDrafts[model.id] ?? '',
+            meta: model.defaultContextWindow < model.contextWindow
+              ? formatCapacity(model.contextWindow)
+              : undefined,
+            inputLabel: `${model.name} context window`,
+            hasOverride: status?.contextWindowOverrides[model.id] !== undefined,
+            saving: savingModel === model.id,
+          }))}
+          labels={{
+            tokens: t.tokens,
+            save: t.save,
+            saving: t.saving,
+            reset: t.contextWindowReset,
+            resetAll: t.contextWindowResetAll,
+            empty: t.contextWindowNoneEnabled,
+          }}
+          busy={busy !== null}
+          overrideCount={overrideCount}
+          metaClassName="dsha-model-meta"
+          onDraftChange={(id, draft) => setContextDrafts((prev) => ({ ...prev, [id]: draft }))}
+          onCommit={(id) => void handleSaveContextWindow(id)}
+          onReset={(id) => void handleResetContextWindow(id)}
+          onResetAll={() => void handleResetAllContextWindows()}
+        />
       </section>
 
       <section className="dsha-group">
@@ -808,6 +689,12 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           </button>
         </div>
         <p className="dsha-muted">{t.quotaDesc}</p>
+        {/* The progress bars moved into each account card: quota follows the
+            account, so a bar here could only ever describe whichever account
+            happened to be active when the snapshot was read. What stays is what
+            has no per-account bar to live in — the plan, the pay-as-you-go
+            wallet, the errors and the freshness of this reading. */}
+        <p className="dsha-muted">{t.quotaFactsScope}</p>
 
         {status?.quotaError && <p className="dsha-notice">{status.quotaError}</p>}
 
@@ -821,29 +708,6 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
               <strong>{t.quotaPlan}</strong>
               <span>{quota.planName || t.planUnknown}</span>
             </div>
-
-            {quota.windows.map((window) => {
-              const remaining = Math.max(0, 100 - window.usedPercent)
-              return (
-                <div key={window.id} className="dsha-meter-wrap">
-                  <div className="dsha-meter-label">
-                    <span>{window.label}</span>
-                    <strong>{remaining}% left</strong>
-                  </div>
-                  <div className={`dsha-meter ${remaining <= 10 ? 'dsha-meter-cyan' : 'dsha-meter-green'}`}>
-                    <span style={{ width: `${remaining}%` }} />
-                  </div>
-                  <div className="dsha-meter-meta">
-                    <span>
-                      {window.used ?? '—'} / {window.limit ?? '—'} {t.requests}
-                    </span>
-                    {window.resetsAt !== null && (
-                      <span>{t.resetAt.replace('{time}', formatReset(window.resetsAt))}</span>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
 
             {quota.extraUsage !== null && (
               <div className="dsha-meter-wrap">

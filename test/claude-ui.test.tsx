@@ -17,7 +17,8 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ClaudeWebStatus } from '../src/shared/claude-contracts.ts'
-import { ClaudeSection, formatCapacity, parsePositiveCapacity } from '../src/client/claude/ClaudeSection.tsx'
+import { ClaudeSection } from '../src/client/claude/ClaudeSection.tsx'
+import { formatCapacity, parsePositiveCapacity } from '../src/client/common/format.ts'
 import { ClaudeComposerQuota, selectBadgeFacts } from '../src/client/claude/ClaudeComposerQuota.tsx'
 import { dictionaries, en, NS_CLAUDE, zh } from '../src/client/claude/locales.ts'
 import { accountPoolZh } from '../src/client/common/account-pool-labels.ts'
@@ -266,6 +267,9 @@ async function mountBadge(
   await act(async () => root!.render(createElement(ClaudeComposerQuota, {
     directory: store,
     loadModelDirectory: () => undefined,
+    // The badge's label now comes from the line's dictionary rather than a
+    // hardcoded word, so the props contract includes the translate seat.
+    t: (key: string) => key,
   } as never)))
   return { node: container, fetchMock }
 }

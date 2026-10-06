@@ -355,18 +355,47 @@ const QUOTA_TIMEOUT_MS = 8_000
 export type MinimaxCodeQuotaUnavailable = 'credential-not-accepted' | 'unreachable' | 'token-expired' | 'stale'
 
 let quotaHostInForce: string | null = null
+
 /**
- * The last usage snapshot, plus the last failure to have one.
+ * One cached usage read, and the account it was made for.
  *
  * `value` and `reason` are tracked SEPARATELY from the last GOOD value on
  * purpose. A read that fails carries no information about the previous one, so
  * replacing a good snapshot with `null` turned every transient refusal into a
- * visible disappearance of the quota box; `quotaLastGood` lets the card keep
- * showing the last known numbers while saying they are old.
+ * visible disappearance of the quota box; keeping the previous entry lets the
+ * card show the last known numbers while saying they are old.
+ *
+ * `accountId` is `undefined` only for a read made without a pool, where the line
+ * has one credential and therefore one account and there is nothing to keep
+ * apart.
  */
-let quotaSnapshot: { at: number; value: MinimaxCodeQuota | null; reason: MinimaxCodeQuotaUnavailable | null } | null = null
-/** The last snapshot that actually parsed, kept across failures. */
-let quotaLastGood: { value: MinimaxCodeQuota; at: number } | null = null
+interface QuotaSnapshotEntry {
+  accountId: string | undefined
+  at: number
+  value: MinimaxCodeQuota | null
+  reason: MinimaxCodeQuotaUnavailable | null
+}
+
+/**
+ * How many accounts' snapshots are remembered.
+ *
+ * Bounded like the ChatGPT line's own per-account map: the pool accepts a
+ * handful of accounts, and a long-lived process must not accumulate one entry
+ * per id it has ever seen. The oldest WRITE is evicted, which is also the read
+ * least likely to be looked at again.
+ */
+const QUOTA_SNAPSHOT_ACCOUNT_LIMIT = 20
+
+/**
+ * The newest read, whichever account it belonged to.
+ *
+ * Kept beside the per-account map because the page-level block and the
+ * "is a read even worth starting" test are about the line's latest reading,
+ * not about one account.
+ */
+let quotaSnapshot: QuotaSnapshotEntry | null = null
+/** Per-account snapshots, so an account is never shown the numbers read for another. */
+const quotaByAccount = new Map<string, QuotaSnapshotEntry>()
 
 /** How long a refused credential is remembered before asking again. */
 const QUOTA_REJECTED_CACHE_MS = 30 * 60_000
@@ -374,13 +403,55 @@ const QUOTA_REJECTED_CACHE_MS = 30 * 60_000
 /** Forget the cached usage snapshot (a sign-out, a sign-in, a test). */
 export function clearCachedQuota(): void {
   quotaSnapshot = null
-  quotaLastGood = null
+  quotaByAccount.clear()
   quotaHostInForce = null
 }
 
 /** The last usage snapshot without touching the network. */
 export function getCachedQuota(): MinimaxCodeQuota | null {
   return quotaSnapshot?.value ?? null
+}
+
+/**
+ * The cached snapshot only when it belongs to this account, without touching the
+ * network.
+ *
+ * Quota follows the account: a rotation decides whose credential is spent next,
+ * so the snapshot a read produced describes the row it was made for. The pool
+ * asks here while it builds the settings card's account list, which must never
+ * wait on — or trigger — an upstream read.
+ *
+ * An absent, empty or null id keeps the pre-pool behaviour and answers with the
+ * newest read, which is what the page-level block wants.
+ */
+export function getCachedQuotaFor(accountId?: string | null): MinimaxCodeQuota | null {
+  if (accountId === undefined || accountId === null || accountId === '') return getCachedQuota()
+  return quotaByAccount.get(accountId)?.value ?? null
+}
+
+/** The entry a read for this account should consult, when there is one. */
+function quotaEntryFor(accountId: string | undefined): QuotaSnapshotEntry | null {
+  if (accountId === undefined || accountId === '') return quotaSnapshot
+  return quotaByAccount.get(accountId) ?? null
+}
+
+/**
+ * Remember one read against the account it was made for.
+ *
+ * Re-inserting an id moves it to the newest position, so the map's first key is
+ * always the least recently written entry and eviction is a single delete.
+ */
+function rememberQuotaSnapshot(entry: QuotaSnapshotEntry): void {
+  quotaSnapshot = entry
+  const accountId = entry.accountId
+  if (accountId === undefined || accountId === '') return
+  quotaByAccount.delete(accountId)
+  quotaByAccount.set(accountId, entry)
+  while (quotaByAccount.size > QUOTA_SNAPSHOT_ACCOUNT_LIMIT) {
+    const oldest = quotaByAccount.keys().next().value
+    if (oldest === undefined) break
+    quotaByAccount.delete(oldest)
+  }
 }
 
 /** Why the last read produced no snapshot, or null when it produced one. */
@@ -533,6 +604,16 @@ export async function fetchTokenPlanQuota(
     signal?: AbortSignal
     force?: boolean
     /**
+     * The pooled account this read is made for.
+     *
+     * The credential cannot identify the account: both tokens rotate, and two
+     * rows may share a region. The caller names none of that itself — it asks the
+     * pool for the account that would serve the next request, so the row it
+     * asked for is the row these numbers describe, and the snapshot is
+     * remembered against that id rather than against the line.
+     */
+    accountId?: string
+    /**
      * Renew the credential and hand back the pair to retry with.
      *
      * Injected by the route, which owns the store: this module reads credentials,
@@ -553,7 +634,11 @@ export async function fetchTokenPlanQuota(
 ): Promise<MinimaxCodeQuota | null> {
   const fetchFn = options.fetchFn ?? fetch
   const now = Date.now()
-  if (options.force !== true && quotaSnapshot !== null) {
+  // The cache is consulted per ACCOUNT: a snapshot read for another row says
+  // nothing about this one, and reusing it would show one account the numbers of
+  // another. A read made without a pool consults the newest entry, as before.
+  const cached = quotaEntryFor(options.accountId)
+  if (options.force !== true && cached !== null) {
     // A refused credential is not worth re-asking on the success cadence: the
     // verdict is about the KIND of credential this line holds, so it will not
     // change by trying again in a minute.
@@ -563,12 +648,12 @@ export async function fetchTokenPlanQuota(
     // repaired by the very next poll, and a user watching a quota box at the
     // one-hour boundary needs that repair to show up now - not ten minutes later.
     // With nothing good left to render there is no progress to suppress either.
-    const ttl = quotaSnapshot.reason === 'credential-not-accepted'
+    const ttl = cached.reason === 'credential-not-accepted'
       ? QUOTA_REJECTED_CACHE_MS
-      : quotaSnapshot.reason === 'token-expired' && quotaSnapshot.value === null
+      : cached.reason === 'token-expired' && cached.value === null
         ? QUOTA_FAILURE_CACHE_MS
-        : quotaSnapshot.value === null ? QUOTA_FAILURE_CACHE_MS : QUOTA_CACHE_MS
-    if (now - quotaSnapshot.at < ttl) return quotaSnapshot.value
+        : cached.value === null ? QUOTA_FAILURE_CACHE_MS : QUOTA_CACHE_MS
+    if (now - cached.at < ttl) return cached.value
   }
   const candidates = quotaHostCandidates(credentials.region)
   const ordered = quotaHostInForce === null
@@ -639,17 +724,19 @@ export async function fetchTokenPlanQuota(
   }
 
   if (value === null && reason === null) reason = authRefused ? 'token-expired' : 'unreachable'
-  if (value !== null) {
-    quotaLastGood = { value, at: Date.now() }
-  } else if (quotaLastGood !== null) {
-    // Keep serving the last numbers that parsed. A failure says nothing about the
-    // previous read, so discarding a good snapshot here is what made the quota box
-    // vanish at the one-hour boundary and take the whole card's credibility with
-    // it. The card is told separately that they are old.
-    value = quotaLastGood.value
-    reason = 'stale'
+  if (value === null) {
+    // Keep serving the last numbers that parsed FOR THIS ACCOUNT. A failure says
+    // nothing about the previous read, so discarding a good snapshot here is what
+    // made the quota box vanish at the one-hour boundary and take the whole card's
+    // credibility with it. The card is told separately that they are old. An
+    // account with nothing good left has nothing to keep, and says so.
+    const previous = quotaEntryFor(options.accountId)
+    if (previous !== null && previous.value !== null) {
+      value = previous.value
+      reason = 'stale'
+    }
   }
-  quotaSnapshot = { at: Date.now(), value, reason }
+  rememberQuotaSnapshot({ accountId: options.accountId, at: Date.now(), value, reason })
   return value
 }
 

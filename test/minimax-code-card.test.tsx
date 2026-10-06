@@ -58,34 +58,23 @@ describe('MiniMax Code card: sibling parity controls', () => {
     await act(async () => root.render(createElement(MinimaxCodeSection, {})))
   }
 
-  it('renders the enable switch, the model grid and the context-window controls', async () => {
+  it('renders the model grid and the context-window controls', async () => {
     mockFetch()
     await render()
     const text = container.textContent ?? ''
-    // The four controls every sibling line has.
-    expect(text).toContain(zh.enableProvider)
+    // The controls every sibling line has, minus the provider switch, which
+    // lives on the overview card now.
     expect(text).toContain(zh.modelsSection)
     expect(text).toContain(zh.contextWindowSection)
     expect(text).toContain(zh.defaultReasoningEffort)
     // No literal key leaked into the rendered output.
-    for (const key of ['enableProvider', 'contextWindowSection', 'selectAll', 'enhanced']) {
+    for (const key of ['contextWindowSection', 'selectAll', 'enhanced']) {
       expect(text).not.toContain(key)
     }
     // One checklist row per model, each labelled with the model's display name.
     const rows = [...container.querySelectorAll('.dsh-mcl-option .dsh-mcl-name')].map((el) => el.textContent)
     expect(rows).toContain('MiniMax M2.7')
     expect(rows).toContain('MiniMax M3')
-  })
-
-  it('sends the enable flag to /settings when the switch is flipped', async () => {
-    const calls = mockFetch()
-    await render()
-    const toggle = [...container.querySelectorAll('input[type="checkbox"]')]
-      .find((el) => el.getAttribute('aria-label') === zh.enableProvider) as HTMLInputElement
-    expect(toggle).toBeDefined()
-    await act(async () => { toggle.click() })
-    const settingsCall = calls.find((c) => c.url.includes('/settings') && c.body !== undefined)
-    expect(settingsCall?.body).toEqual({ enabled: false })
   })
 
   it('sends the narrowed selection to /models when a model is unchecked', async () => {

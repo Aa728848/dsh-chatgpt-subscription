@@ -306,11 +306,16 @@ export function registerMinimaxCodeRoutes(
     // lose with `invalid_grant`, and a healthy account would be reported as needing
     // a new sign-in. With the pool in charge there is one rotation per session, and
     // `ensureAccessToken` stays as the fallback for a composition without a pool.
-    const credentials = await (options.accountPool === undefined
-      ? ensureAccessToken(store, { fetchFn }).catch(() => null)
-      : options.accountPool.getFreshCredential(undefined, fetchFn).catch(() => null))
-    if (credentials === null) return null
-    // The read below is asynchronous, and a rotation can land while it is in
+    //
+    // The account the credential belongs to comes back with it: quota follows the
+    // account, so the snapshot is remembered against that row and cannot be shown
+    // on a row a rotation moved to.
+    const target = await (options.accountPool === undefined
+      ? ensureAccessToken(store, { fetchFn }).then((credentials) => ({ accountId: undefined, credentials })).catch(() => null)
+      : options.accountPool.getQuotaReadTarget(fetchFn).catch(() => null))
+    if (target === null) return null
+    const credentials = target.credentials
+    // The read below is asynchronous, and a rotation can land while it is
     // flight: its 401 would then be about a token that is no longer the one on
     // file. Answering that with "the access token expired" is what put a sign-in
     // prompt in front of a healthy session.
@@ -323,11 +328,14 @@ export function registerMinimaxCodeRoutes(
       fetchFn,
       force,
       isCredentialStale,
+      ...(target.accountId === undefined ? {} : { accountId: target.accountId }),
       // The retry after a 401/403. Forced, because the whole point is that the
-      // token on hand is the one that was just refused.
+      // token on hand is the one that was just refused. It renews the SAME
+      // account: another account's fresh token would answer a refusal that was
+      // never about it, and its numbers would be recorded as this row's.
       renewCredential: async () => await (options.accountPool === undefined
         ? ensureAccessToken(store, { fetchFn, force: true })
-        : options.accountPool.renewCredential(undefined, fetchFn)).catch(() => null),
+        : options.accountPool.renewCredential(target.accountId, fetchFn)).catch(() => null),
     }).catch(() => null)
   }
 

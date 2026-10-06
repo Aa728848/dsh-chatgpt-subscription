@@ -23,6 +23,7 @@ import {
   clearCachedQuota,
   fetchAccountQuota,
   getCachedQuota,
+  getCachedQuotaFor,
   loadConfigCatalog,
   refreshCredentials,
   workBuddyHeaders,
@@ -187,7 +188,10 @@ export async function getWorkBuddyWebStatus(
   const available = modelsForRegion(region, catalog).map((model) => model.id)
   const enabledModelIds = resolveEnabledModelIds(settings.enabledModelIds, available, enabled)
   const models = buildModelOptions(catalog, available, enabledModelIds, settings.contextWindowOverrides)
-  const quota = getCachedQuota()
+  // The page-level facts describe the selected account, so they may only be
+  // rendered from that account's own snapshot: reading the newest entry here
+  // would print a sibling account's credits under this one's name.
+  const quota = getCachedQuotaFor(credentials === null ? null : accountFromCredentials(credentials).id)
 
   // The pool slice the shared account card renders. Read through the pool when
   // this line has one, so cooldowns and per-account auth state are reported; a
@@ -270,16 +274,17 @@ export function registerWorkBuddyRoutes(
           const settings = preferences ? preferences.status() : await modelSettings.read()
           await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds }).catch(() => null)
           const credentials = await store.read({ accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
-          const cached = getCachedQuota()
-          const quotaMatches = cached?.account.id === (credentials === null ? undefined : accountFromCredentials(credentials).id)
+          const cached = getCachedQuotaFor(credentials === null ? null : accountFromCredentials(credentials).id)
           // A snapshot that belongs to another account (or none at all) must be
           // fetched before the card renders; an aged snapshot of the same
-          // account answers now and refreshes behind it.
-          if (credentials !== null && (!quotaMatches || cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
-            if (!quotaMatches) clearCachedQuota()
+          // account answers now and refreshes behind it. The lookup is keyed by
+          // account, so a snapshot remembered for a sibling account is neither
+          // served here nor thrown away: the account card draws each account's
+          // own reading.
+          if (credentials !== null && (cached === undefined || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS)) {
             const refresh = (): Promise<unknown> =>
               fetchAccountQuota(store, fetchFn, false, settings.selectedAccountId, settings.hiddenAccountIds)
-            if (cached === undefined || !quotaMatches) await quotaRefresh.run(refresh)
+            if (cached === undefined) await quotaRefresh.run(refresh)
             else quotaRefresh.start(refresh)
           }
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)

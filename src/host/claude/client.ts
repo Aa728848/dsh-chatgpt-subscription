@@ -828,12 +828,65 @@ interface QuotaCacheEntry {
   observedAt: number
 }
 
-let quotaCache: QuotaCacheEntry | null = null
+/**
+ * How many accounts' snapshots are remembered.
+ *
+ * Mirrors the bound the ChatGPT line's usage service applies to its own
+ * per-account map: room for every account a user is likely to pool, and no way
+ * for a long-lived process to accumulate one snapshot per token it has seen.
+ */
+const QUOTA_ACCOUNT_LIMIT = 20
+
+/**
+ * The newest snapshot of each account, keyed by {@link accountKeyFor}.
+ *
+ * ONE ENTRY PER ACCOUNT rather than one slot for the line: quota follows the
+ * account, and rotation decides which account spends the next request, so a
+ * single slot could only ever describe whichever account was read last. This is
+ * a memory read only — the settings card builds its account list from it, and
+ * that must never cost one upstream request per pooled account.
+ */
+const quotaCache = new Map<string, QuotaCacheEntry>()
+
+/**
+ * Key of the entry written most recently.
+ *
+ * The pre-pool card asks "whatever was read last", and a header reading that
+ * names no account may only merge into the snapshot it was read beside. Both
+ * need the last WRITE rather than a scan: two accounts can be written inside one
+ * millisecond, and a tie would otherwise be broken by map order.
+ */
+let quotaLastKey: string | null = null
+
 const quotaInFlight = new Map<string, Promise<ClaudeAccountQuota>>()
 
-/** Drop the cached snapshot. Called on sign-out and after a credential change. */
+/** Drop every cached snapshot. Called on sign-out and after a credential change. */
 export function clearCachedQuota(): void {
-  quotaCache = null
+  quotaCache.clear()
+  quotaLastKey = null
+}
+
+/** The entry written most recently, whichever account it belongs to. */
+function newestQuotaEntry(): QuotaCacheEntry | null {
+  return quotaLastKey === null ? null : quotaCache.get(quotaLastKey) ?? null
+}
+
+/**
+ * Remember one account's newest snapshot, bounded to the accounts in use.
+ *
+ * The oldest entry is measured by {@link QuotaCacheEntry.observedAt} rather than
+ * by `fetchedAt`: a snapshot kept warm by response headers has no full read
+ * behind it at all, and it is still the newest thing known about that account.
+ */
+function rememberQuota(entry: QuotaCacheEntry): void {
+  quotaCache.set(entry.key, entry)
+  quotaLastKey = entry.key
+  while (quotaCache.size > QUOTA_ACCOUNT_LIMIT) {
+    const oldest = [...quotaCache.entries()].sort((left, right) => left[1].observedAt - right[1].observedAt)[0]
+    if (oldest === undefined) break
+    quotaCache.delete(oldest[0])
+    if (quotaLastKey === oldest[0]) quotaLastKey = null
+  }
 }
 
 /**
@@ -841,11 +894,25 @@ export function clearCachedQuota(): void {
  *
  * With one stored account the argument is unnecessary; it exists so a later
  * pool chunk cannot render one account's usage under another account's name.
+ * Given a credential the answer is THAT account's own newest snapshot, which is
+ * what keeps two pooled accounts apart: a later read of a different account
+ * cannot displace it. Without one the pre-pool answer is kept — whatever was
+ * written last — because the single-account card has no identity to ask with.
  */
 export function getCachedQuota(credentials?: Pick<ClaudeCredentials, 'accessToken'>): ClaudeAccountQuota | null {
-  if (quotaCache === null) return null
-  if (credentials === undefined) return quotaCache.quota
-  return quotaCache.key === accountKeyFor(credentials) ? quotaCache.quota : null
+  if (credentials === undefined) return newestQuotaEntry()?.quota ?? null
+  return cachedQuotaFor(credentials)
+}
+
+/**
+ * The newest snapshot held for one credential's account, for display only.
+ *
+ * The pool asks here while it builds the account list for the settings card, so
+ * this is a pure memory read: it never fetches. Null means nothing was ever
+ * read for this account, which is a different statement from "nothing used".
+ */
+export function cachedQuotaFor(credentials: Pick<ClaudeCredentials, 'accessToken'>): ClaudeAccountQuota | null {
+  return quotaCache.get(accountKeyFor(credentials))?.quota ?? null
 }
 
 /** Options for {@link fetchAccountQuota}. */
@@ -877,10 +944,11 @@ export function fetchAccountQuota(
 ): Promise<ClaudeAccountQuota> {
   const key = accountKeyFor(credentials)
   const at = now()
-  if (options.force !== true && quotaCache !== null && quotaCache.key === key) {
-    const warm = at - quotaCache.observedAt < QUOTA_CACHE_TTL_MS
-    const freshFullRead = quotaCache.fullReadAt !== null && at - quotaCache.fullReadAt < QUOTA_FULL_REFRESH_MS
-    if (warm && freshFullRead) return Promise.resolve(quotaCache.quota)
+  const cached = quotaCache.get(key)
+  if (options.force !== true && cached !== undefined) {
+    const warm = at - cached.observedAt < QUOTA_CACHE_TTL_MS
+    const freshFullRead = cached.fullReadAt !== null && at - cached.fullReadAt < QUOTA_FULL_REFRESH_MS
+    if (warm && freshFullRead) return Promise.resolve(cached.quota)
   }
   const pending = quotaInFlight.get(key)
   if (pending !== undefined) return pending
@@ -905,7 +973,10 @@ async function performQuotaFetch(
 ): Promise<ClaudeAccountQuota> {
   const key = accountKeyFor(credentials)
   const fetchFn = options.fetchFn ?? fetch
-  const previous = quotaCache !== null && quotaCache.key === key ? quotaCache.quota : null
+  // Only a snapshot of the SAME account may answer a failed read: another
+  // account's numbers are not this account's, and a stale reading of the right
+  // account still beats a confident wrong one.
+  const previous = cachedQuotaFor(credentials)
 
   let response: Response
   try {
@@ -948,7 +1019,7 @@ async function performQuotaFetch(
     status: null,
     representativeClaim: null,
   }
-  quotaCache = { quota, key, fullReadAt: at, observedAt: at }
+  rememberQuota({ quota, key, fullReadAt: at, observedAt: at })
   return quota
 }
 
@@ -964,12 +1035,13 @@ async function performQuotaFetch(
  * @param headers - response headers of a model call.
  * @param accountKey - the account those headers belong to, as
  *   {@link accountKeyFor} derives it. Omitted, the reading is filed under
- *   whoever the cached snapshot already belongs to — the correct answer for the
+ *   whoever the newest snapshot already belongs to — the correct answer for the
  *   single-account case, and a reading whose account cannot be determined is
  *   filed under none rather than under the wrong one. When it is given and
- *   disagrees with the snapshot's account the reading is DISCARDED rather than
- *   merged: mixing two accounts' windows is the one outcome worse than a stale
- *   number.
+ *   disagrees with that newest snapshot's account the reading is DISCARDED
+ *   rather than merged: an unnamed reading merges into the snapshot it was read
+ *   beside, so admitting one that is known to belong elsewhere is how two
+ *   accounts' windows would end up in one entry.
  * @returns the updated snapshot, or null when the headers carried nothing usable.
  */
 export function recordQuotaFromHeaders(
@@ -978,10 +1050,10 @@ export function recordQuotaFromHeaders(
 ): ClaudeAccountQuota | null {
   const reading = parseQuotaHeaders(headers)
   if (reading.windows.length === 0) return null
-  if (quotaCache !== null && accountKey !== undefined && quotaCache.key !== '' && quotaCache.key !== accountKey) {
+  const previous = newestQuotaEntry()
+  if (previous !== null && accountKey !== undefined && previous.key !== '' && previous.key !== accountKey) {
     return null
   }
-  const previous = quotaCache
   const byId = new Map<string, ClaudeUsageWindow>()
   for (const window of previous?.quota.windows ?? []) byId.set(window.id, window)
   for (const window of reading.windows) {
@@ -1017,12 +1089,12 @@ export function recordQuotaFromHeaders(
     status: reading.status,
     representativeClaim: reading.representativeClaim,
   }
-  quotaCache = {
+  rememberQuota({
     quota,
     key: previous?.key === undefined || previous.key === '' ? (accountKey ?? '') : previous.key,
     fullReadAt: previous?.fullReadAt ?? null,
     observedAt: at,
-  }
+  })
   return quota
 }
 

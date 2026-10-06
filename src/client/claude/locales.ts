@@ -27,9 +27,6 @@ export const zh = {
   sourceManaged: '本插件登录',
   sourceClaudeCode: '本机 Claude Code',
   adoptedBadge: '导入的快照',
-  snapshotPath: '来源文件',
-  storage: '凭据存储',
-  storageNotice: 'OAuth 凭据由 Host 保存在本地安全存储 ($DSH_HOME/storages/claude-credentials.json)，不会进入浏览器。访问令牌会自动刷新。',
 
   // --- Sign-in flow ---
   signIn: '登录 Claude 账号',
@@ -63,12 +60,6 @@ export const zh = {
 
   // --- Connection ---
   connection: '连接',
-  provider: 'Provider',
-  providerValue: 'Anthropic Claude 订阅 · claude-subscription',
-  enableProvider: '启用此供应商',
-  connectionState: '连接状态',
-  connected: '已连接',
-  untested: '未测试',
   testConnection: '测试连接',
   testingConnection: '测试中...',
   testSuccess: '连接正常',
@@ -173,10 +164,6 @@ export const en: Record<keyof typeof zh, string> = {
   sourceManaged: 'Signed in here',
   sourceClaudeCode: 'Local Claude Code',
   adoptedBadge: 'Imported snapshot',
-  snapshotPath: 'Source file',
-  storage: 'Credential storage',
-  storageNotice: 'The OAuth credential is stored locally by the Host ($DSH_HOME/storages/claude-credentials.json) and never reaches the browser. Access tokens refresh automatically.',
-
   signIn: 'Sign in to Claude',
   signInSection: 'Sign-in',
   signInAgain: 'Sign in again',
@@ -206,12 +193,6 @@ export const en: Record<keyof typeof zh, string> = {
   importSearched: 'Searched: {paths}',
 
   connection: 'Connection',
-  provider: 'Provider',
-  providerValue: 'Anthropic Claude subscription · claude-subscription',
-  enableProvider: 'Enable this provider',
-  connectionState: 'Connection state',
-  connected: 'Connected',
-  untested: 'Untested',
   testConnection: 'Test connection',
   testingConnection: 'Testing...',
   testSuccess: 'Connection OK',

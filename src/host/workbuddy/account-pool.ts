@@ -32,13 +32,17 @@ import {
   workBuddyAccountIdAliases,
   type WorkBuddyCredentials,
 } from './token-store.ts'
-import { refreshCredentials } from './client.ts'
+import { refreshCredentials, getCachedQuotaFor } from './client.ts'
+import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { hasStableIdentity, withResolvedIdentity } from './identity.ts'
 import { PROVIDER_ID, PROVIDER_NAME, regionForDomain } from './types.ts'
 import type {
+  WorkBuddyAccountQuota,
   WorkBuddyAccountSummaryDto,
+  WorkBuddyMeter,
   WorkBuddyRegion,
 } from '../../shared/workbuddy-contracts.ts'
+import type { PoolAccountQuotaDto } from '../../shared/account-pool-contracts.ts'
 
 /** One pooled WorkBuddy account: the credential plus the facts the card renders. */
 export interface WorkBuddyPoolAccount extends PoolAccountShape<WorkBuddyCredentials> {
@@ -214,6 +218,70 @@ function defaultAliasFor(credentials: WorkBuddyCredentials, position: number): s
   return credentials.nickname || credentials.uin || credentials.uid || `账号 ${position}`
 }
 
+/**
+ * A meter's consumed share, from whichever fraction this line measured.
+ *
+ * `usedFraction` is the DTO's own "share consumed"; `remainingFraction` is the
+ * same statement read from the other end, and is the one the rest of the card
+ * renders. A meter that states neither is dropped (null) rather than drawn at
+ * 0, which would claim a full window no reading supports.
+ */
+function meterUsedPercent(meter: WorkBuddyMeter): number | null {
+  if (typeof meter.usedFraction === 'number' && Number.isFinite(meter.usedFraction)) return meter.usedFraction * 100
+  if (typeof meter.remainingFraction === 'number' && Number.isFinite(meter.remainingFraction)) {
+    return (1 - meter.remainingFraction) * 100
+  }
+  return null
+}
+
+/**
+ * One cached snapshot as the shared account card renders it.
+ *
+ * Only what the DTO states is published: every meter that measured a share
+ * becomes a window, and a meter that measured none is dropped rather than drawn
+ * at 0 — which would claim an unspent allowance no reading supports.
+ *
+ * Exported for the pool's regression tests; the card only reaches it through
+ * the summary hook.
+ */
+export function workBuddyPoolQuota(snapshot: WorkBuddyAccountQuota): PoolAccountQuotaDto | undefined {
+  const windows = snapshot.meters.map((meter) => quotaWindow(
+    meter.label,
+    meterUsedPercent(meter),
+    { resetsAt: meter.resetsAt },
+  ))
+  // The cycle counters are the one allowance the meters may not carry: the
+  // line surfaces the cycle as its own `cycle` meter when it is usable, so it
+  // is published here only when no meter states it — otherwise the same
+  // allowance would draw two bars under two names.
+  const cycleStated = snapshot.meters.some((meter) => meter.id === 'cycle')
+  if (!cycleStated
+    && snapshot.cycleCredits !== null
+    && snapshot.cycleCredits > 0
+    && snapshot.cycleUsedCredits !== null) {
+    windows.push(quotaWindow(
+      snapshot.packageName ?? 'Billing cycle',
+      (snapshot.cycleUsedCredits / snapshot.cycleCredits) * 100,
+      { resetsAt: snapshot.cycleEndsAt },
+    ))
+  }
+  return poolQuota(snapshot.fetchedAt, windows)
+}
+
+/**
+ * This account's own newest snapshot, ready for the account card.
+ *
+ * Quota follows the account, so the pool reports the snapshot the line already
+ * remembered for THIS account id. The lookup is a pure memory read: the card
+ * builds its account list here, and that must never cost one upstream request
+ * per pooled account. Undefined means exactly that — never read — which is not
+ * the same statement as "nothing used".
+ */
+function quotaFor(accountId: string): PoolAccountQuotaDto | undefined {
+  const snapshot = getCachedQuotaFor(accountId)
+  return snapshot === undefined ? undefined : workBuddyPoolQuota(snapshot)
+}
+
 export interface WorkBuddyAccountPoolOptions {
   /** Credential store the desktop scan reads through; the pool owns scheduling. */
   store?: FileCredentialStore
@@ -312,6 +380,12 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
         ...(account.credentials.backend === '' ? {} : { backend: account.credentials.backend }),
         ...(account.credentials.accountType === undefined ? {} : { accountType: account.credentials.accountType }),
         ...(account.credentials.expiresAt > 0 ? {} : { expiresAt: undefined }),
+        // This account's own newest snapshot, when it was read before. Absent
+        // means exactly that: never read — which is not "nothing used".
+        ...(() => {
+          const quota = quotaFor(account.id)
+          return quota === undefined ? {} : { quota }
+        })(),
       }),
       // The account the user pinned in settings outranks the rotation strategy.
       // A pin written before the identity fix names the account by its old

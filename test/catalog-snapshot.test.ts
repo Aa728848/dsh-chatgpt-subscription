@@ -23,7 +23,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-const { catalogSnapshotName, catalogSnapshotPath, readCatalogSnapshot, writeCatalogSnapshot, rehydrateCatalogCache, flushCatalogSnapshots } = await import(
+const { catalogSnapshotName, catalogSnapshotPath, catalogTotal, readCatalogSnapshot, writeCatalogSnapshot, rehydrateCatalogCache, flushCatalogSnapshots } = await import(
   '../src/host/common/catalog-snapshot.ts'
 )
 const commandCode = await import('../src/host/command-code/client.ts')
@@ -48,6 +48,19 @@ async function writeRaw(name: string, content: unknown): Promise<void> {
 function countModels(value: unknown): number[] | undefined {
   return Array.isArray(value) && value.length > 0 ? (value as number[]) : undefined
 }
+
+describe('catalog size for the hub overview', () => {
+  it('reports a synced catalog as its size', () => {
+    expect(catalogTotal(1)).toBe(1)
+    expect(catalogTotal(12)).toBe(12)
+  })
+
+  it('reports a catalog nobody has synced as unknown, not as zero', () => {
+    // The overview card hides the model count for a null; a zero would claim the
+    // line offers no models, which is a different — and usually false — statement.
+    expect(catalogTotal(0)).toBeNull()
+  })
+})
 
 beforeEach(async () => {
   await fs.mkdir(storages(), { recursive: true })

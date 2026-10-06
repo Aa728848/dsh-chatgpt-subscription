@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL, OAUTH_TOKEN_URL } from '../src/compat.ts'
-import { CodexAccountPool, parseCodexPoolData } from '../src/host/codex-account-pool.ts'
+import { CodexAccountPool, codexAccountQuota, parseCodexPoolData } from '../src/host/codex-account-pool.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { ResponsesClient } from '../src/host/responses-client.ts'
 import { MemoryTokenStore, type StoredOAuthCredentials } from '../src/host/token-store.ts'
@@ -356,6 +356,56 @@ describe('Codex pool request paths', () => {
 
     expect(after.buckets[0]?.primary?.usedPercent).toBe(99)
     expect(usageFetch).toHaveBeenCalledTimes(2)
+    oauth.dispose()
+  })
+
+  // Quota follows the account. Before this, the card could only show the
+  // line-level figure for whichever account was active when it was read, so a
+  // second account's progress was simply invisible — and a rotation made the
+  // one figure silently switch owner.
+  it('publishes each account the quota snapshot read for that account', async () => {
+    const { pool } = harness()
+    const first = await pool.addAccount(credential(1))
+    const second = await pool.addAccount(credential(2))
+    await pool.setPrimary(first.id)
+    const oauth = new OAuthService(new MemoryTokenStore(), { pool })
+
+    const usedPercentForAccount = new Map([['acct-1', 10], ['acct-2', 99]])
+    const usage = new UsageService(oauth, {
+      fetchFn: (async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+        const header = init?.headers?.['chatgpt-account-id'] ?? ''
+        return Response.json({
+          rate_limit: { primary_window: { used_percent: usedPercentForAccount.get(header) ?? -1, limit_window_seconds: 18_000, reset_at: Math.floor(Date.now() / 1000) + 3600 } },
+        })
+      }) as unknown as typeof fetch,
+    })
+    pool.setQuotaSnapshot((account) => {
+      const snapshot = usage.snapshotFor(account.credentials)
+      return snapshot === undefined ? undefined : codexAccountQuota(snapshot)
+    })
+
+    // Nothing has been read yet, so no account claims a quota. "Never read" is
+    // not "nothing used", and the card renders those differently.
+    expect((await pool.listAccounts()).every((entry) => entry.quota === undefined)).toBe(true)
+
+    // The settings card reads the pinned account, then the other one.
+    await usage.status(true, true)
+    await pool.setPrimary(second.id)
+    await usage.status(true, true)
+
+    const byId = new Map((await pool.listAccounts()).map((entry) => [entry.id, entry]))
+    expect(byId.get(first.id)?.quota?.windows[0]?.usedPercent).toBe(10)
+    expect(byId.get(second.id)?.quota?.windows[0]?.usedPercent).toBe(99)
+    // Each snapshot states when it was read and how long its window is, so the
+    // row can name the window and say how old the reading is.
+    expect(byId.get(first.id)?.quota?.fetchedAt).toBeGreaterThan(0)
+    expect(byId.get(first.id)?.quota?.windows[0]?.windowDurationMins).toBe(300)
+    expect(byId.get(first.id)?.quota?.windows[0]?.resetsAt).toBeGreaterThan(Date.now())
+
+    // A third account nobody has read stays absent rather than reporting zero.
+    const third = await pool.addAccount(credential(3))
+    const withThird = new Map((await pool.listAccounts()).map((entry) => [entry.id, entry]))
+    expect(withThird.get(third.id)?.quota).toBeUndefined()
     oauth.dispose()
   })
 

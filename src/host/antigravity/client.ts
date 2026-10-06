@@ -333,9 +333,13 @@ export function parseQuotaSummary(data: unknown): {
     for (const bucket of rawBuckets) {
       if (typeof bucket !== 'object' || bucket === null) continue
       const bRec = bucket as Record<string, unknown>
-      const remaining = typeof bRec.remainingFraction === 'number'
+      // A stated number is clamped to a share. Anything else — absent, a string,
+      // NaN, Infinity — is NULL, and deliberately not 0: the service stating
+      // nothing is not the service reporting an exhausted allowance, and
+      // defaulting to 0 drew every unmeasured bucket as fully consumed.
+      const remaining = typeof bRec.remainingFraction === 'number' && Number.isFinite(bRec.remainingFraction)
         ? Math.max(0, Math.min(1, bRec.remainingFraction))
-        : 0
+        : null
 
       buckets.push({
         bucketId: String(bRec.bucketId || bRec.displayName || 'limit'),

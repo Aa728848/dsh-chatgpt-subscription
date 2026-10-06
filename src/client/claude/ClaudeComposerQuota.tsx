@@ -1,37 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ClaudeWebStatus } from '../../shared/claude-contracts.ts'
+import { ComposerQuotaBadge, quotaLevel, type ComposerQuotaFacts } from '../common/ComposerQuotaBadge.tsx'
+import { createLineApi } from '../common/line-api.ts'
 import type { SnapshotStore } from '../store.ts'
 import { NS_CLAUDE } from './locales.ts'
 
-const API = '/claude/api'
+const api = createLineApi('/claude/api', 'Claude')
 
-async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  })
-  const json = (await res.json()) as { ok: boolean; value?: T; error?: string }
-  if (!res.ok || !json.ok) {
-    throw new Error(json.error || `HTTP ${res.status}`)
-  }
-  return json.value as T
-}
-
-type Props = PropsRuntime<'conversation.input.right'> &
-  PropsLocale<typeof NS_CLAUDE> & {
-    directory: SnapshotStore<ModelDirectoryState>
-    loadModelDirectory: () => void
-  }
-
-interface BadgeFacts {
-  text: string
-  tooltip: string
-  level: 'normal' | 'warning' | 'danger'
+type Props = PropsRuntime<'conversation.input.right'> & PropsLocale<typeof NS_CLAUDE> & {
+  directory: SnapshotStore<ModelDirectoryState>
+  loadModelDirectory: () => void
 }
 
 /**
@@ -49,7 +28,7 @@ interface BadgeFacts {
  * remaining is 100 - used. A window at 0% used is the normal empty state and
  * grades as 'normal', not as an error.
  */
-export function selectBadgeFacts(status: ClaudeWebStatus | null): BadgeFacts | null {
+export function selectBadgeFacts(status: ClaudeWebStatus | null): ComposerQuotaFacts | null {
   const quota = status?.quota
   if (quota === null || quota === undefined) {
     return { text: '—', tooltip: '[Claude] quota unavailable — click to refresh', level: 'normal' }
@@ -74,82 +53,19 @@ export function selectBadgeFacts(status: ClaudeWebStatus | null): BadgeFacts | n
   return {
     text: `${remaining}%`,
     tooltip: `[Claude] ${tightest.label}: ${remaining}% left`,
-    level: remaining <= 5 ? 'danger' : remaining <= 20 ? 'warning' : 'normal',
+    level: quotaLevel(remaining),
   }
 }
 
-export function ClaudeComposerQuota({ directory, loadModelDirectory }: Props): React.JSX.Element | null {
-  const modelState = useStore(directory)
-  const [status, setStatus] = useState<ClaudeWebStatus | null>(null)
-  const [loading, setLoading] = useState(false)
-  const mountedRef = useRef(false)
-  const selected = modelState.current
-  const isClaude = selected?.provider === 'claude-subscription'
-
-  useEffect(() => {
-    loadModelDirectory()
-  }, [loadModelDirectory])
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-    }
-  }, [])
-
-  const fetchStatus = useCallback(async (refresh = false) => {
-    if (!mountedRef.current) return
-    setLoading(true)
-    try {
-      // The host refreshes a stale quota cache while serving /status; only an
-      // explicit click asks for the forced refresh, so a poll never doubles the
-      // upstream request count.
-      const data = refresh
-        ? await fetchApi<ClaudeWebStatus>('/quota', { method: 'POST' })
-        : await fetchApi<ClaudeWebStatus>('/status')
-      if (mountedRef.current) setStatus(data)
-    } catch {
-      // best-effort: the settings card reports the actionable error
-    } finally {
-      if (mountedRef.current) setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!isClaude) return
-    void fetchStatus(false)
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void fetchStatus(false)
-    }, 60_000)
-    return () => {
-      window.clearInterval(timer)
-    }
-  }, [fetchStatus, isClaude])
-
-  const facts = useMemo(() => selectBadgeFacts(status), [status])
-
-  // Inert unless the conversation is actually on this provider: the badge is one
-  // per line and six of them must never be visible at once.
-  if (!isClaude || !status?.authenticated || facts === null) return null
-
-  return (
-    <span
-      className="dsha-composer-quota"
-      data-level={facts.level}
-      title={facts.tooltip}
-      aria-label={facts.tooltip}
-      onClick={() => void fetchStatus(true)}
-    >
-      <span className="dsha-composer-quota-label">额度</span>
-      <strong className="dsha-composer-quota-val">{loading ? '…' : facts.text}</strong>
-    </span>
-  )
-}
-
-function useStore<T>(store: SnapshotStore<T>): T {
-  return useSyncExternalStore(
-    (listener) => store.subscribe(listener),
-    () => store.getSnapshot(),
-    () => store.getSnapshot(),
-  )
+export function ClaudeComposerQuota({ directory, loadModelDirectory, t }: Props): React.JSX.Element | null {
+  return <ComposerQuotaBadge
+    directory={directory}
+    loadModelDirectory={loadModelDirectory}
+    providerId="claude-subscription"
+    readStatus={(refresh) => (refresh
+      ? api.post<ClaudeWebStatus>('/quota')
+      : api.get<ClaudeWebStatus>('/status'))}
+    selectFacts={selectBadgeFacts}
+    label={t('composerLabel')}
+  />
 }

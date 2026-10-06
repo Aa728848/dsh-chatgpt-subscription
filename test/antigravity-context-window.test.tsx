@@ -13,8 +13,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { AntigravitySection, formatCapacity } from '../src/client/antigravity/AntigravitySection.tsx'
+import { AntigravitySection } from '../src/client/antigravity/AntigravitySection.tsx'
 import { zh } from '../src/client/antigravity/locales.ts'
+import { formatCapacity } from '../src/client/common/format.ts'
 import type { AntigravityWebStatus } from '../src/shared/antigravity-contracts.ts'
 
 const PRO = {
