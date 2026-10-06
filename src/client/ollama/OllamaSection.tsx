@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import type { OllamaWebStatus } from '../../shared/ollama-contracts.ts'
 import { OllamaApi } from './api.ts'
@@ -29,8 +30,8 @@ interface Props {
 /**
  * The Ollama tab.
  *
- * Deliberately thin. The account card, its badges, the rotation picker and the
- * storage notice are the shared {@link AccountPoolSection}, so this line looks
+ * Deliberately thin. The account card, its badges and the rotation picker are
+ * the shared {@link AccountPoolSection}, so this line looks
  * like every other provider tab by construction rather than by imitation; only
  * what is genuinely Ollama's - pasting a key, syncing the catalog, and the
  * documented service limits - is written here.
@@ -137,10 +138,6 @@ export function OllamaSection(props: Props): React.ReactElement {
           <h3>{t.title}</h3>
         </div>
         <p className="dsha-notice">{t.pageDesc}</p>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.provider}</span>
-          <span className="dsha-value">{t.providerValue}</span>
-        </div>
         {error !== null && (
           <p className="dsha-notice" style={{ color: 'var(--dsha-danger, #c0392b)' }}>
             {t.error.replace('{detail}', error)}
@@ -247,27 +244,17 @@ export function OllamaSection(props: Props): React.ReactElement {
             <p className="dsha-muted" style={{ fontSize: 12 }}>
               {t.modelCount.replace('{count}', String(status.models.length))}
             </p>
-            <div className="dsha-models" aria-label="Ollama Models">
-              {status.models.map((model) => (
-                <label key={model.id} title={model.id}>
-                  <input
-                    type="checkbox"
-                    checked={isModelEnabled(model.id)}
-                    disabled={busy !== null}
-                    onChange={(event) => void toggleModel(model.id, event.currentTarget.checked)}
-                  />
-                  <span>{model.name ?? model.id}</span>
-                </label>
-              ))}
-            </div>
-            <div className="dsha-actions">
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void setAllModels(true)}>
-                {t.selectAll}
-              </button>
-              <button className="dsha-btn" disabled={busy !== null} onClick={() => void setAllModels(false)}>
-                {t.unselectAll}
-              </button>
-            </div>
+            <ModelChecklist
+              items={status.models.map((model) => ({
+                id: model.id,
+                name: model.name ?? model.id,
+                enabled: isModelEnabled(model.id),
+              }))}
+              busy={busy !== null}
+              onToggle={(id, enabled) => void toggleModel(id, enabled)}
+              onToggleAll={(enabled) => void setAllModels(enabled)}
+              labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
+            />
           </>
         )}
       </div>

@@ -4,7 +4,15 @@ export interface AntigravityModelBucket {
   window?: string
   resetTime?: string
   description?: string
-  remainingFraction: number
+  /**
+   * Share of this allowance still available, 0-1, or `null` when the service
+   * stated no usable number for it.
+   *
+   * `null` is NOT zero. Zero is a real measurement meaning "nothing left", while
+   * an absent field means nobody measured the bucket at all — publishing that as
+   * 0 would draw a fully consumed bar no reading supports.
+   */
+  remainingFraction: number | null
 }
 
 export interface AntigravityQuotaGroup {
@@ -20,8 +28,6 @@ export interface AntigravityModelOption {
   defaultContextWindow: number
   contextWindow?: number
   description?: string
-  quotaSummary?: string
-  remainingFraction?: number
   reasoningEfforts?: string[]
 }
 

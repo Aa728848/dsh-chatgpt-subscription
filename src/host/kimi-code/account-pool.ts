@@ -15,7 +15,14 @@ import {
 } from './token-store.ts'
 import { KimiCodeUnauthorizedError, isRefreshTokenRejected, refreshAccessToken, refreshThresholdMs } from './oauth.ts'
 import { PROVIDER_ID } from './types.ts'
-import type { KimiCodeAccountSummaryDto, KimiCodeRegion } from '../../shared/kimi-code-contracts.ts'
+import { cachedQuotaFor } from './client.ts'
+import { poolQuota, quotaWindow } from '../common/account-quota.ts'
+import type { PoolAccountQuotaDto } from '../../shared/account-pool-contracts.ts'
+import type {
+  KimiCodeAccountQuota,
+  KimiCodeAccountSummaryDto,
+  KimiCodeRegion,
+} from '../../shared/kimi-code-contracts.ts'
 
 /** One pooled Kimi Code account: the token pair plus the facts the card renders. */
 export interface KimiCodePoolAccount extends PoolAccountShape<KimiCodeCredentials> {
@@ -88,6 +95,36 @@ export interface KimiCodeAccountPoolOptions {
   backend?: CredentialStore<PoolData<KimiCodePoolAccount>>
   /** Accounts this pool accepts; defaults to the core's limit. */
   maxAccounts?: number
+}
+
+/**
+ * One account's own newest quota snapshot, in the shape the account card draws.
+ *
+ * The snapshot comes from 'client.ts''s per-account cache keyed by the pool
+ * account id, and this is where this line's own numbers are translated into the
+ * shared shape. Every judgement below trades a possibly-nice-looking bar for an
+ * honest one:
+ *
+ * - a window whose consumed share nobody measured is DROPPED (`quotaWindow`
+ *   returns null), because "0% used" and "not stated" are different claims. This
+ *   parser only mints a window once it has a ratio, so a window that states none
+ *   never reaches here at all — the drop is the second line of defence;
+ * - `resetsAt` is already Unix MILLISECONDS on this line, so it is passed
+ *   through and normalized rather than multiplied;
+ * - the read time is the snapshot's own `fetchedAt`, which this line always
+ *   sets. A snapshot with no read time is not a snapshot, and `poolQuota`
+ *   reports that as undefined.
+ *
+ * A null snapshot means "this account was never read", which the card renders as
+ * exactly that instead of drawing a zero.
+ */
+export function kimiCodePoolQuota(snapshot: KimiCodeAccountQuota | null): PoolAccountQuotaDto | undefined {
+  if (snapshot === null) return undefined
+  return poolQuota(snapshot.fetchedAt, snapshot.windows.map((window) => quotaWindow(
+    window.label,
+    window.usedPercent,
+    { windowDurationMins: window.windowDurationMins, resetsAt: window.resetsAt },
+  )))
 }
 
 /**
@@ -187,6 +224,10 @@ export class KimiCodeAccountPool extends AccountPoolCore<
         const nickname = account.nickname ?? account.credentials.nickname
         const planName = account.planName ?? account.credentials.planName
         const region = account.region ?? account.credentials.region
+        // The account's own newest snapshot, taken from the identity THIS row
+        // carries. Quota follows the account, so the row draws its own reading;
+        // absent means that account was never read, which is not "nothing used".
+        const quota = kimiCodePoolQuota(cachedQuotaFor(account.id))
         return {
           ...base,
           ...(email === undefined ? {} : { email }),
@@ -194,6 +235,7 @@ export class KimiCodeAccountPool extends AccountPoolCore<
           ...(planName === undefined ? {} : { planName, planLabel: planName }),
           ...(region === undefined ? {} : { region }),
           ...(account.userId === undefined ? {} : { userId: account.userId }),
+          ...(quota === undefined ? {} : { quota }),
         }
       },
       // Keeps the wording the adapter's missing-credential error used before the

@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
 import { loadCodexCatalog } from './host/codex-catalog.ts'
-import { CodexAccountPool } from './host/codex-account-pool.ts'
+import { CodexAccountPool, codexAccountQuota } from './host/codex-account-pool.ts'
 import { createCodexFetchProvider } from './host/codex-fetch.ts'
 import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES } from './host/fetch-configuration.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
@@ -18,10 +18,14 @@ import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ProxyManager } from './host/proxy-manager.ts'
 import { CONTROLLED_PROVIDERS, createControlledModelFetch, readModelRequestLimits, type ControlledProvider } from './host/common/model-request-control.ts'
+import { claimProviderRoute } from './host/common/provider-route.ts'
+import { catalogTotal } from './host/common/catalog-snapshot.ts'
 import { createDiagnosticFetch } from './host/common/request-diagnostics.ts'
 import { registerPreferenceStore } from './host/preferences.ts'
 import { ResponsesClient } from './host/responses-client.ts'
+import { registerHubOverviewRoutes, type HubSummarySource } from './host/hub-overview.ts'
 import { registerRoutes } from './host/routes.ts'
+import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
 import type { SubscriptionPreferencesDto } from './shared/contracts.ts'
@@ -36,7 +40,7 @@ import {
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
 import { AccountPoolStore } from './host/antigravity/account-pool.ts'
-import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID } from './host/antigravity/types.ts'
+import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_PROVIDER_NAME } from './host/antigravity/types.ts'
 import { CommandCodeAdapter } from './host/command-code/adapter.ts'
 import { CommandCodeAccountPool } from './host/command-code/account-pool.ts'
 import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
@@ -66,6 +70,9 @@ import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVID
 import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
 import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
 import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
+// The two lines that do not persist their model catalog in model settings keep
+// it in memory; the overview reads the size from there (see `catalogTotal`).
+import { catalogSize as minimaxCodeCatalogSize } from './host/minimax-code/client.ts'
 import {
   MinimaxCodeCredentialStore,
   MinimaxCodeModelSettingsStore,
@@ -75,6 +82,7 @@ import { PROVIDER_ID as MINIMAX_CODE_PROVIDER_ID, PROVIDER_NAME as MINIMAX_CODE_
 import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
 import { WorkBuddyAccountPool } from './host/workbuddy/account-pool.ts'
 import { registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
+import { getCachedCatalog as getCachedWorkBuddyCatalog } from './host/workbuddy/client.ts'
 import {
   FileCredentialStore as WorkBuddyCredentialStore,
   FileModelSettingsStore as WorkBuddyModelSettingsStore,
@@ -84,6 +92,7 @@ import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVID
 import { ClaudeAdapter } from './host/claude/adapter.ts'
 import { ClaudeAccountPool } from './host/claude/account-pool.ts'
 import { registerClaudeRoutes } from './host/claude/routes.ts'
+import { getCachedCatalog as getCachedClaudeCatalog } from './host/claude/client.ts'
 import {
   FileCredentialStore as ClaudeCredentialStore,
   FileModelSettingsStore as ClaudeModelSettingsStore,
@@ -95,7 +104,6 @@ import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
   MinimaxCodeCheckinService,
 } from './host/minimax-code/checkin.ts'
-import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
   installSubagentModelAuthorization,
@@ -348,30 +356,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       { fetchFn: modelFetch.antigravity, attachments: ctx.attachments },
       antigravityAccountPool,
     )
-    let antigravityRegistration: AdapterRegistrationHandle | undefined
-    let antigravityConflict: string | null = null
-    const claimAntigravityRoute = (): void => {
-      if (antigravityRegistration !== undefined) return
-      try {
-        antigravityRegistration = ctx.llm.registerAdapter([ANTIGRAVITY_PROVIDER_ID], antigravityAdapter)
-        if (antigravityConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] Antigravity route "${ANTIGRAVITY_PROVIDER_ID}" is now served by this plugin`)
-        }
-        antigravityConflict = null
-      } catch (error) {
-        antigravityConflict = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${ANTIGRAVITY_PROVIDER_ID}" is already owned by another adapter; `
-          + `Antigravity models keep being served by that one until its configuration is removed (${antigravityConflict})`,
-        )
-      }
-    }
-    claimAntigravityRoute()
-    const antigravityRouteWatch = typeof ctx.on === 'function'
-      ? ctx.on('llm/adapters-updated', () => {
-          claimAntigravityRoute()
-        })
-      : undefined
+    const antigravityClaim = claimProviderRoute(ctx, {
+      providerId: ANTIGRAVITY_PROVIDER_ID,
+      label: ANTIGRAVITY_PROVIDER_NAME,
+      adapter: antigravityAdapter,
+    })
     const disposeAntigravityRoutes = registerAntigravityRoutes(
       ctx,
       antigravityStore,
@@ -387,16 +376,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       commandCodePreferences,
       {
         fetchFn: proxyFetch,
-        serving: () => commandCodeRegistration !== undefined,
-        conflict: () => commandCodeConflict,
+        serving: () => commandCodeClaim.serving(),
+        conflict: () => commandCodeClaim.conflict(),
       },
       commandCodeAccountPool,
     )
-    // The Command Code route is contended: another adapter family (the generic
-    // pi-ai provider, configured with this same endpoint) may already own the id.
-    // Registration is all-or-nothing and DSH rejects a duplicate route, so this
-    // module takes the route when it is free, reports the conflict when it is
-    // not, and claims it as soon as the owner releases it.
     const commandCodeAdapter = new CommandCodeAdapter(
       commandCodeStore,
       commandCodeModelSettings,
@@ -404,12 +388,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       { fetchFn: modelFetch['command-code'], attachments: ctx.attachments },
       commandCodeAccountPool,
     )
-    let commandCodeRegistration: AdapterRegistrationHandle | undefined
-    let commandCodeConflict: string | null = null
 
-    // Ollama: API-key accounts rotated through the shared pool kernel. The route
-    // is claimed the same contended way as the others, so a second adapter family
-    // that already owns the id is reported rather than silently displaced.
+    // Ollama: API-key accounts rotated through the shared pool kernel.
     const ollamaStore = new OllamaCredentialStore()
     const ollamaModelSettings = new OllamaModelSettingsStore()
     const ollamaAccountPool = new OllamaAccountPool({ store: ollamaStore })
@@ -419,10 +399,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       { fetchFn: modelFetch.ollama, attachments: ctx.attachments },
       ollamaAccountPool,
     )
-    let ollamaRegistration: AdapterRegistrationHandle | undefined
-    let ollamaConflict: string | null = null
-    // The Kimi Code route is contended the same way: another adapter family
-    // may already own the id, so it is claimed when free and reported when not.
     // The video reader this route needs: DSH's attachment service is image-only,
     // so videos are ingested by this plugin's own tool and stored locally. The
     // reader verifies each reference against the stored bytes before handing
@@ -440,48 +416,20 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       { fetchFn: modelFetch['kimi-code'], attachments: ctx.attachments, videos: kimiVideos },
       kimiCodeAccountPool,
     )
-    let kimiCodeRegistration: AdapterRegistrationHandle | undefined
-    let kimiCodeConflict: string | null = null
-    const claimKimiCodeRoute = (): void => {
-      if (kimiCodeRegistration !== undefined) return
-      try {
-        kimiCodeRegistration = ctx.llm.registerAdapter([KIMI_CODE_PROVIDER_ID], kimiCodeAdapter)
-        if (kimiCodeConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] ${KIMI_CODE_PROVIDER_NAME} route "${KIMI_CODE_PROVIDER_ID}" is now served by this plugin`)
-        }
-        kimiCodeConflict = null
-      } catch (error) {
-        kimiCodeConflict = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${KIMI_CODE_PROVIDER_ID}" is already owned by another adapter; `
-          + `${KIMI_CODE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${kimiCodeConflict})`,
-        )
-      }
-    }
-    claimKimiCodeRoute()
-    const kimiCodeRouteWatch = typeof ctx.on === 'function'
-      ? ctx.on('llm/adapters-updated', () => {
-          claimKimiCodeRoute()
-        })
-      : undefined
+    const kimiCodeClaim = claimProviderRoute(ctx, {
+      providerId: KIMI_CODE_PROVIDER_ID,
+      label: KIMI_CODE_PROVIDER_NAME,
+      adapter: kimiCodeAdapter,
+    })
 
-    const claimOllamaRoute = (): void => {
-      if (ollamaRegistration !== undefined) return
-      try {
-        ollamaRegistration = ctx.llm.registerAdapter([OLLAMA_PROVIDER_ID], ollamaAdapter)
-        if (ollamaConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] ${OLLAMA_PROVIDER_NAME} route "${OLLAMA_PROVIDER_ID}" is now served by this plugin`)
-        }
-        ollamaConflict = null
-      } catch (error) {
-        ollamaConflict = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${OLLAMA_PROVIDER_ID}" is already owned by another adapter; `
-          + `${OLLAMA_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${ollamaConflict})`,
-        )
-      }
-    }
-    claimOllamaRoute()
+    const ollamaClaim = claimProviderRoute(ctx, {
+      providerId: OLLAMA_PROVIDER_ID,
+      label: OLLAMA_PROVIDER_NAME,
+      adapter: ollamaAdapter,
+      // This line has never watched `llm/adapters-updated`; it claims once at
+      // setup and keeps that behaviour here.
+      watch: false,
+    })
     // The settings API is registered unconditionally: the card is how a user adds
     // their first key, so gating it on the adapter winning the route would leave a
     // contested id with no way to configure it at all.
@@ -491,30 +439,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       fetchFn: proxyFetch,
     })
 
-    const claimCommandCodeRoute = (): void => {
-      if (commandCodeRegistration !== undefined) return
-      try {
-        commandCodeRegistration = ctx.llm.registerAdapter([COMMAND_CODE_PROVIDER_ID], commandCodeAdapter)
-        if (commandCodeConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] ${COMMAND_CODE_PROVIDER_NAME} route "${COMMAND_CODE_PROVIDER_ID}" is now served by this plugin`)
-        }
-        commandCodeConflict = null
-      } catch (error) {
-        commandCodeConflict = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${COMMAND_CODE_PROVIDER_ID}" is already owned by another adapter; `
-          + `${COMMAND_CODE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${commandCodeConflict})`,
-        )
-      }
-    }
-    claimCommandCodeRoute()
-    // A composition without the event seam (or a reduced test context) still
-    // serves the route; only the automatic claim on release is unavailable.
-    const commandCodeRouteWatch = typeof ctx.on === 'function'
-      ? ctx.on('llm/adapters-updated', () => {
-          claimCommandCodeRoute()
-        })
-      : undefined
+    const commandCodeClaim = claimProviderRoute(ctx, {
+      providerId: COMMAND_CODE_PROVIDER_ID,
+      label: COMMAND_CODE_PROVIDER_NAME,
+      adapter: commandCodeAdapter,
+    })
 
     const disposeKimiCodeRoutes = registerKimiCodeRoutes(
       ctx,
@@ -523,47 +452,23 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       kimiCodePreferences,
       {
         fetchFn: proxyFetch,
-        serving: () => kimiCodeRegistration !== undefined,
-        conflict: () => kimiCodeConflict,
+        serving: () => kimiCodeClaim.serving(),
+        conflict: () => kimiCodeClaim.conflict(),
       },
       kimiCodeAccountPool,
     )
 
-    // MiniMax Code is contended the same way as the sibling lines: another
-    // adapter family may already own the provider id, so it is claimed when free
-    // and reported when not.
     const minimaxCodeAdapter = new MinimaxCodeAdapter(
       minimaxCodeStore,
       { fetchFn: modelFetch['minimax-code'], attachments: ctx.attachments, accountPool: minimaxCodeAccountPool },
       minimaxCodeModelSettings,
       minimaxCodePreferences,
     )
-    let minimaxCodeRegistration: AdapterRegistrationHandle | undefined
-    let minimaxCodeConflict: string | null = null
-    const claimMinimaxCodeRoute = (): void => {
-      if (minimaxCodeRegistration !== undefined) return
-      try {
-        minimaxCodeRegistration = ctx.llm.registerAdapter([MINIMAX_CODE_PROVIDER_ID], minimaxCodeAdapter)
-        if (minimaxCodeConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] ${MINIMAX_CODE_PROVIDER_NAME} route "${MINIMAX_CODE_PROVIDER_ID}" is now served by this plugin`)
-        }
-        minimaxCodeConflict = null
-      } catch (error) {
-        minimaxCodeConflict = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${MINIMAX_CODE_PROVIDER_ID}" is already owned by another adapter; `
-          + `${MINIMAX_CODE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${minimaxCodeConflict})`,
-        )
-      }
-    }
-    claimMinimaxCodeRoute()
-    // A composition without the event seam (or a reduced test context) still
-    // serves the route; only the automatic claim on release is unavailable.
-    const minimaxCodeRouteWatch = typeof ctx.on === 'function'
-      ? ctx.on('llm/adapters-updated', () => {
-          claimMinimaxCodeRoute()
-        })
-      : undefined
+    const minimaxCodeClaim = claimProviderRoute(ctx, {
+      providerId: MINIMAX_CODE_PROVIDER_ID,
+      label: MINIMAX_CODE_PROVIDER_NAME,
+      adapter: minimaxCodeAdapter,
+    })
 
     // The daily check-in scheduler (official-client recipe; both regions).
     // Same host-owned cadence as the workbuddy line: the startup pass is the
@@ -596,45 +501,25 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
 
     const disposeMinimaxCodeRoutes = registerMinimaxCodeRoutes(ctx, minimaxCodeStore, {
       fetchFn: proxyFetch,
-      serving: () => minimaxCodeRegistration !== undefined,
-      conflict: () => minimaxCodeConflict,
+      serving: () => minimaxCodeClaim.serving(),
+      conflict: () => minimaxCodeClaim.conflict(),
       accountPool: minimaxCodeAccountPool,
       checkin: minimaxCodeCheckin,
     }, minimaxCodeModelSettings, minimaxCodePreferences)
 
     // WorkBuddy is the CodeBuddy subscription: this plugin reads the desktop
-    // client's own credential files, so the route is claimed like the others
-    // (when free) and reported when another adapter family already owns the id.
+    // client's own credential files, so its route is claimed like the rest.
     const workBuddyAdapter = new WorkBuddyAdapter(
       workBuddyStore,
       workBuddyModelSettings,
       workBuddyPreferences,
       { fetchFn: modelFetch.workbuddy, attachments: ctx.attachments, accountPool: workBuddyAccountPool },
     )
-    let workBuddyRegistration: AdapterRegistrationHandle | undefined
-    let workBuddyConflict: string | null = null
-    const claimWorkBuddyRoute = (): void => {
-      if (workBuddyRegistration !== undefined) return
-      try {
-        workBuddyRegistration = ctx.llm.registerAdapter([WORKBUDDY_PROVIDER_ID], workBuddyAdapter)
-        if (workBuddyConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] ${WORKBUDDY_PROVIDER_NAME} route "${WORKBUDDY_PROVIDER_ID}" is now served by this plugin`)
-        }
-        workBuddyConflict = null
-      } catch (error) {
-        workBuddyConflict = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${WORKBUDDY_PROVIDER_ID}" is already owned by another adapter; `
-          + `${WORKBUDDY_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${workBuddyConflict})`,
-        )
-      }
-    }
-    claimWorkBuddyRoute()
-    const workBuddyRouteWatch = typeof ctx.on === 'function'
-      ? ctx.on('llm/adapters-updated', () => {
-          claimWorkBuddyRoute()
-        })
-      : undefined
+    const workBuddyClaim = claimProviderRoute(ctx, {
+      providerId: WORKBUDDY_PROVIDER_ID,
+      label: WORKBUDDY_PROVIDER_NAME,
+      adapter: workBuddyAdapter,
+    })
 
     // The daily check-in scheduler (CN billing activity). The host owns the
     // interval; a day the process never runs is a day nothing signs in.
@@ -664,50 +549,28 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       workBuddyPreferences,
       {
         fetchFn: proxyFetch,
-        serving: () => workBuddyRegistration !== undefined,
-        conflict: () => workBuddyConflict,
+        serving: () => workBuddyClaim.serving(),
+        conflict: () => workBuddyClaim.conflict(),
         accountPool: workBuddyAccountPool,
         checkin: workBuddyCheckin,
       },
     )
 
-    // The Claude subscription route is contended the same way as the sibling
-    // lines: another adapter family may already own the provider id, so it is
-    // claimed when free and reported when not.
     const claudeAdapter = new ClaudeAdapter(
       claudeStore,
       claudeModelSettings,
       claudePreferences,
       { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool },
     )
-    let claudeRegistration: AdapterRegistrationHandle | undefined
-    let claudeConflict: string | null = null
     // Registered unconditionally: there is no acknowledgement, flag or other
     // prior state that can hold this line back. The only thing that can keep the
     // route unclaimed is another adapter family already owning the id, and that
-    // is reported rather than hidden — see the 'catch' below.
-    const claimClaudeRoute = (): void => {
-      if (claudeRegistration !== undefined) return
-      try {
-        claudeRegistration = ctx.llm.registerAdapter([CLAUDE_PROVIDER_ID], claudeAdapter)
-        if (claudeConflict !== null) {
-          ctx.logger.info(`[dsh-chatgpt-subscription] ${CLAUDE_PROVIDER_NAME} route "${CLAUDE_PROVIDER_ID}" is now served by this plugin`)
-        }
-        claudeConflict = null
-      } catch (error) {
-        claudeConflict = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(
-          `[dsh-chatgpt-subscription] provider route "${CLAUDE_PROVIDER_ID}" is already owned by another adapter; `
-          + `${CLAUDE_PROVIDER_NAME} models keep being served by that one until its configuration is removed (${claudeConflict})`,
-        )
-      }
-    }
-    claimClaudeRoute()
-    const claudeRouteWatch = typeof ctx.on === 'function'
-      ? ctx.on('llm/adapters-updated', () => {
-          claimClaudeRoute()
-        })
-      : undefined
+    // is reported rather than hidden by {@link claimProviderRoute}'s catch.
+    const claudeClaim = claimProviderRoute(ctx, {
+      providerId: CLAUDE_PROVIDER_ID,
+      label: CLAUDE_PROVIDER_NAME,
+      adapter: claudeAdapter,
+    })
 
     const disposeClaudeRoutes = registerClaudeRoutes(
       ctx,
@@ -716,8 +579,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       claudePreferences,
       {
         fetchFn: proxyFetch,
-        serving: () => claudeRegistration !== undefined,
-        conflict: () => claudeConflict,
+        serving: () => claudeClaim.serving(),
+        conflict: () => claudeClaim.conflict(),
         accountPool: claudeAccountPool,
       },
     )
@@ -734,7 +597,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const usage = new UsageService(oauth, { fetchFn: proxyFetch })
     // A pooled account whose last known Codex window is spent is skipped before
     // a request is spent on it, instead of rediscovering the same 429 each time.
-    codexAccountPool.setQuotaBlockedUntil((account, now) => usage.blockedUntilFor(account.credentials, now))
+    codexAccountPool.setQuotaBlockedUntil((account, now) => usage.blockedUntilFor(account.id, account.credentials, now))
+    // The same per-account snapshots answer the settings card: each account row
+    // draws its own window progress, instead of one figure that belongs to
+    // whichever account was active when it was read. The row id keys it, so a
+    // token refresh cannot strand a row's meters on the credential it rotated
+    // away from.
+    codexAccountPool.setQuotaSnapshot((account) => {
+      const snapshot = usage.snapshotFor(account.id, account.credentials)
+      return snapshot === undefined ? undefined : codexAccountQuota(snapshot)
+    })
     const responses = new ResponsesClient(oauth, ctx.attachments, {
       fetchFn: modelFetch['codex-chatgpt'],
       accountPool: codexAccountPool,
@@ -808,6 +680,166 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
 
     const disposeRoutes = registerRoutes(
       ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool, fetchConfiguration)
+
+    // The hub overview's one-request summary of every subscription line. Each
+    // line's read closure stays beside the stores it reads; the aggregation
+    // module itself learns nothing about how a line stores accounts. All reads
+    // are local snapshots — no upstream call is ever triggered by the settings
+    // page's opening screen.
+    const routable = (accounts: readonly { authStatus?: string }[]): boolean =>
+      accounts.some((account) => account.authStatus === undefined || account.authStatus === 'ok')
+    // What the overview card's "N/M models" counts. Every line already holds its
+    // catalog: Antigravity, Command Code, Kimi Code and Ollama persist the last
+    // successful sync in their model settings, while Claude, WorkBuddy and
+    // MiniMax Code keep it in memory. All of these are reads of what the line
+    // already has — opening the settings page must not trigger a catalog fetch —
+    // and a line that has never synced one reports null rather than a zero that
+    // would read as "this line has no models".
+    const hubSources: HubSummarySource[] = [
+      {
+        id: 'chatgpt',
+        providerId: PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = preferences.status()
+          const accounts = await codexAccountPool.listAccounts().catch(() => [])
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: current.visibleModelIds.length,
+            totalModelCount: CODEX_MODEL_CATALOG.length,
+          }
+        },
+      },
+      {
+        id: 'antigravity',
+        providerId: ANTIGRAVITY_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = antigravityPreferences.status()
+          const accounts = await antigravityAccountPool.listAccounts().catch(() => [])
+          const total = catalogTotal((await antigravityModelSettings.read()).catalogModels.length)
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
+        id: 'command-code',
+        providerId: COMMAND_CODE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = commandCodePreferences.status()
+          const accounts = await commandCodeAccountPool.listAccounts().catch(() => [])
+          const total = catalogTotal((await commandCodeModelSettings.read()).catalogModels.length)
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
+        id: 'kimi-code',
+        providerId: KIMI_CODE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = kimiCodePreferences.status()
+          const accounts = await kimiCodeAccountPool.listAccounts().catch(() => [])
+          const total = catalogTotal((await kimiCodeModelSettings.read()).catalogModels.length)
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
+        id: 'workbuddy',
+        providerId: WORKBUDDY_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = workBuddyPreferences.status()
+          const accounts = await workBuddyAccountPool.listAccounts().catch(() => [])
+          // This line does not persist its catalog in model settings, so the
+          // in-memory cache is the one that knows how many models exist.
+          const total = catalogTotal(getCachedWorkBuddyCatalog().length)
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
+        id: 'minimax-code',
+        providerId: MINIMAX_CODE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = minimaxCodePreferences.status()
+          const accounts = await minimaxCodeAccountPool.listAccounts().catch(() => [])
+          const total = catalogTotal(minimaxCodeCatalogSize())
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
+        id: 'claude',
+        providerId: CLAUDE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = claudePreferences.status()
+          const accounts = await claudeAccountPool.listAccounts().catch(() => [])
+          const total = catalogTotal(getCachedClaudeCatalog().length)
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
+        // Ollama has no enable switch — a key line is always servable — so its
+        // card renders no toggle and always reports enabled.
+        id: 'ollama',
+        providerId: OLLAMA_PROVIDER_ID,
+        canToggle: false,
+        read: async () => {
+          const accounts = await ollamaAccountPool.listAccounts().catch(() => [])
+          const current = ollamaModelSettings.status()
+          const total = catalogTotal(current.catalogModels.length)
+          // An empty selection on this line means "every synced model", not
+          // "none": reporting its length raw would show 0 of 12 enabled.
+          const enabled = current.enabledModelIds.length === 0 ? total : current.enabledModelIds.length
+          return {
+            enabled: true,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(enabled ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+    ]
+    const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     // The video ingress for the Kimi route. Registered here because the tool
@@ -860,35 +892,23 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeVideoTool()
       disposeAdapter()
       disposeRoutes()
+      disposeHubOverview()
       disposeAntigravityRoutes()
-      releaseHandle(antigravityRouteWatch)
-      antigravityRegistration?.()
-      antigravityRegistration = undefined
+      antigravityClaim.dispose()
       disposeOllamaRoutes()
-      ollamaRegistration?.()
-      ollamaRegistration = undefined
+      ollamaClaim.dispose()
       disposeCommandCodeRoutes()
-      releaseHandle(commandCodeRouteWatch)
-      commandCodeRegistration?.()
-      commandCodeRegistration = undefined
+      commandCodeClaim.dispose()
       disposeKimiCodeRoutes()
-      releaseHandle(kimiCodeRouteWatch)
-      kimiCodeRegistration?.()
-      kimiCodeRegistration = undefined
+      kimiCodeClaim.dispose()
       disposeMinimaxCodeRoutes()
-      releaseHandle(minimaxCodeRouteWatch)
-      minimaxCodeRegistration?.()
-      minimaxCodeRegistration = undefined
+      minimaxCodeClaim.dispose()
       clearInterval(minimaxCodeCheckinTimer)
       clearInterval(checkinTimer)
       disposeWorkBuddyRoutes()
-      releaseHandle(workBuddyRouteWatch)
-      workBuddyRegistration?.()
-      workBuddyRegistration = undefined
+      workBuddyClaim.dispose()
       disposeClaudeRoutes()
-      releaseHandle(claudeRouteWatch)
-      claudeRegistration?.()
-      claudeRegistration = undefined
+      claudeClaim.dispose()
       oauth.dispose()
       proxyManager.dispose()
     }
@@ -1315,16 +1335,6 @@ export {
   type MinimaxCodeWebLogin,
   type MinimaxCodeWebStatus,
 } from './shared/minimax-code-contracts.ts'
-
-/** Cordis event handles are either a disposer function or a disposable object. */
-function releaseHandle(handle: unknown): void {
-  if (typeof handle === 'function') {
-    (handle as () => void)()
-    return
-  }
-  const disposable = handle as { dispose?: () => void } | null | undefined
-  disposable?.dispose?.()
-}
 
 function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {
   return `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`

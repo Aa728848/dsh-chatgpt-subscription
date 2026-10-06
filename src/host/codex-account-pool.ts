@@ -17,7 +17,9 @@ import {
 import { createPlatformTokenStore } from './platform-token-store.ts'
 import { ConcurrencyGate } from './common/concurrency-gate.ts'
 import { OAuthServiceError } from './oauth-service.ts'
-import type { AccountRotationStrategy, PoolAccountSummaryDto } from '../shared/account-pool-contracts.ts'
+import type { AccountRotationStrategy, PoolAccountQuotaDto, PoolAccountSummaryDto } from '../shared/account-pool-contracts.ts'
+import type { QuotaUsageDto } from '../shared/contracts.ts'
+import { poolQuota, quotaWindow } from './common/account-quota.ts'
 
 /** One pooled ChatGPT account: the credential plus the facts the card renders. */
 export interface CodexPoolAccount extends PoolAccountShape<StoredOAuthCredentials> {
@@ -115,14 +117,39 @@ export function chatGPTConcurrency(): ConcurrencyGate {
   return concurrency
 }
 
+/**
+ * One ChatGPT usage snapshot as the account card's per-account quota.
+ *
+ * A bucket lists its windows either in `windows` or, on older payloads, only as
+ * the `primary`/`secondary` pair — the same fallback the quota card itself
+ * applies, so the account row cannot show fewer windows than the card does. The
+ * label stays empty on purpose: a ChatGPT window is named by its length, and
+ * the card localizes that length in the reader's own language.
+ */
+export function codexAccountQuota(snapshot: { usage: QuotaUsageDto; fetchedAt: number }): PoolAccountQuotaDto | undefined {
+  return poolQuota(snapshot.fetchedAt, snapshot.usage.buckets.flatMap((bucket) => {
+    const windows = bucket.windows.length > 0
+      ? bucket.windows
+      : [bucket.primary, bucket.secondary].filter((window) => window !== null)
+    return windows.map((window) => quotaWindow('', window.usedPercent, {
+      windowDurationMins: window.windowDurationMins,
+      resetsAt: window.resetsAt,
+    }))
+  }))
+}
+
 export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, CodexPoolAccount, PoolAccountSummaryDto> {
   private readonly refresherRef: { current?: CodexTokenRefresher }
   private readonly store: TokenStore
+  private readonly quotaSnapshotRef: { current?: (account: CodexPoolAccount) => PoolAccountQuotaDto | undefined }
   private quotaBlockedUntil?: (account: CodexPoolAccount, now: number) => number | undefined
 
   constructor(options: CodexAccountPoolOptions = {}) {
     const store = options.store ?? createPlatformTokenStore()
     const ref: { current?: CodexTokenRefresher } = {}
+    // A ref rather than a field: the hooks below are built before `super()`, so
+    // they may only close over something that already exists.
+    const quotaSnapshotRef: { current?: (account: CodexPoolAccount) => PoolAccountQuotaDto | undefined } = {}
     const hooks: AccountPoolHooks<StoredOAuthCredentials, CodexPoolAccount, PoolAccountSummaryDto> = {
       providerId: 'codex-chatgpt',
       displayName: 'ChatGPT',
@@ -183,6 +210,12 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
         ...base,
         ...(account.email === undefined ? {} : { email: account.email }),
         ...(account.planType === undefined ? {} : { planLabel: account.planType }),
+        // The account's own newest quota snapshot, when the usage service has
+        // read this account before. Absent means exactly that: never read.
+        ...(() => {
+          const quota = quotaSnapshotRef.current?.(account)
+          return quota === undefined ? {} : { quota }
+        })(),
       }),
       emptyMessage: '未登录 ChatGPT 账号，请在「设置 → 订阅服务 → ChatGPT」中添加并登录账号。',
       ...(options.backend === undefined ? {} : { backend: options.backend }),
@@ -190,6 +223,7 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
     }
     super(hooks)
     this.refresherRef = ref
+    this.quotaSnapshotRef = quotaSnapshotRef
     this.store = store
   }
 
@@ -208,6 +242,19 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
    */
   setQuotaBlockedUntil(lookup: (account: CodexPoolAccount, now: number) => number | undefined): void {
     this.quotaBlockedUntil = lookup
+  }
+
+  /**
+   * Wire in the account's own newest quota snapshot, for display only.
+   *
+   * The same map that already spares an exhausted account a wasted request also
+   * answers "what did this account's window look like last time we read it".
+   * The lookup must be a memory read: it runs while the settings card builds
+   * its account list, and that page must never fan out an upstream request per
+   * pooled account.
+   */
+  setQuotaSnapshot(lookup: (account: CodexPoolAccount) => PoolAccountQuotaDto | undefined): void {
+    this.quotaSnapshotRef.current = lookup
   }
 
   protected override isEligible(

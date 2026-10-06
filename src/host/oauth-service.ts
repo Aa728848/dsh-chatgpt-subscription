@@ -308,21 +308,40 @@ export class OAuthService {
    *   "credentials are required" on every web search.
    */
   async credentials(forceRefresh = false, access: CredentialAccess = {}): Promise<StoredOAuthCredentials> {
+    return (await this.credentialSelection(forceRefresh, access)).credentials
+  }
+
+  /**
+   * The credential to use next, together with the pool row that owns it.
+   *
+   * The settings card keys each account's quota snapshot by the row the reading
+   * was made for, and the credential cannot do that job: a refresh rotates its
+   * tokens, and an account may state no id of its own. Callers that care about
+   * identity ask here; every other caller keeps using {@link credentials} and
+   * sees no difference.
+   *
+   * @param forceRefresh - refresh even a token that is not close to expiry.
+   * @param access - who is asking; see {@link credentials}.
+   */
+  async credentialSelection(
+    forceRefresh = false,
+    access: CredentialAccess = {},
+  ): Promise<{ accountId?: string; credentials: StoredOAuthCredentials }> {
     if (this.pool !== null) {
       // The pool owns selection, cooldowns and the proactive refresh. A tool
       // call still goes through the pool — it knows how to refresh an account's
       // rotated token — but through the credential-only door, and it refreshes
       // the account it picked rather than rotating to another one.
-      if (access.purpose === 'tool') {
-        return (await this.pool.getCredentialAccount(this.fetchFn, forceRefresh)).credentials
-      }
-      return (await this.pool.getEffectiveAccount(undefined, this.fetchFn, forceRefresh)).credentials
+      const picked = access.purpose === 'tool'
+        ? await this.pool.getCredentialAccount(this.fetchFn, forceRefresh)
+        : await this.pool.getEffectiveAccount(undefined, this.fetchFn, forceRefresh)
+      return { accountId: picked.account.id, credentials: picked.credentials }
     }
     const stored = await this.loadAuthenticated()
     if (forceRefresh || stored.expiresAt - this.now() <= TOKEN_REFRESH_MARGIN_MS) {
-      return this.refreshCredentials(stored)
+      return { credentials: await this.refreshCredentials(stored) }
     }
-    return stored
+    return { credentials: stored }
   }
 
   dispose(): void {

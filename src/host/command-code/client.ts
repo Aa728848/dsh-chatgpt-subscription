@@ -781,17 +781,56 @@ export async function verifyApiKey(
   return parseWhoami(payload, { authenticatedAt: Date.now() })
 }
 
-/**
- * Quota cache entry stored per account.
- * Switching accounts can never display the previous account's quota.
- */
+/** One cached snapshot, tagged with the account its key belongs to. */
 interface QuotaCacheEntry {
   accountId?: string
   quota: CommandCodeAccountQuota
   fetchedAt: number
 }
 
-let cachedQuotaEntry: QuotaCacheEntry | undefined
+/**
+ * One newest snapshot PER ACCOUNT.
+ *
+ * Quota follows the account: rotation decides which key spends the next
+ * request, so a single slot only ever described whichever key was read last.
+ * The pool's card draws every account its own reading, so each account keeps
+ * its own entry; past the cap the oldest read is evicted.
+ *
+ * This map is a memory read only. Nothing here fetches — the settings card
+ * builds its account list from it, and that must never cost one upstream
+ * request per pooled key.
+ */
+const cachedQuotaEntries = new Map<string, QuotaCacheEntry>()
+
+/** How many accounts' snapshots are remembered; mirrors the Codex usage service. */
+const QUOTA_CACHE_LIMIT = 20
+
+/** Key of a snapshot whose caller named no account. */
+const UNNAMED_ACCOUNT_KEY = ''
+
+function quotaCacheKey(accountId: string | null | undefined): string {
+  return accountId ?? UNNAMED_ACCOUNT_KEY
+}
+
+/** The entry read most recently, whichever account it belongs to. */
+function newestQuotaEntry(): QuotaCacheEntry | undefined {
+  let newest: QuotaCacheEntry | undefined
+  for (const entry of cachedQuotaEntries.values()) {
+    if (newest === undefined || entry.fetchedAt > newest.fetchedAt) newest = entry
+  }
+  return newest
+}
+
+/** Remember one account's newest snapshot, bounded to the accounts in use. */
+function rememberQuotaEntry(entry: QuotaCacheEntry): void {
+  cachedQuotaEntries.set(quotaCacheKey(entry.accountId), entry)
+  while (cachedQuotaEntries.size > QUOTA_CACHE_LIMIT) {
+    const oldest = [...cachedQuotaEntries.entries()].sort((left, right) => left[1].fetchedAt - right[1].fetchedAt)[0]
+    if (oldest === undefined) break
+    cachedQuotaEntries.delete(oldest[0])
+  }
+}
+
 let quotaInFlight: Promise<CommandCodeAccountQuota> | null = null
 let quotaInFlightAccountId: string | undefined
 let quotaCacheEpoch = 0
@@ -801,23 +840,24 @@ let quotaCacheEpoch = 0
  * Kept with a no-argument signature for backward compatibility.
  */
 export function getCachedQuota(): CommandCodeAccountQuota | undefined {
-  return cachedQuotaEntry?.quota
+  return newestQuotaEntry()?.quota
 }
 
 /**
  * The cached snapshot only when it belongs to this account.
  *
  * Passing no account keeps the pre-pool behavior of returning whatever was
- * fetched last.
+ * fetched last. This is the lookup the account pool calls while it builds its
+ * summaries: a pure memory read, never a fetch.
  */
 export function getCachedQuotaFor(accountId?: string | null): CommandCodeAccountQuota | undefined {
-  if (accountId === undefined || accountId === null) return cachedQuotaEntry?.quota
-  return cachedQuotaEntry?.accountId === accountId ? cachedQuotaEntry.quota : undefined
+  if (accountId === undefined || accountId === null) return newestQuotaEntry()?.quota
+  return cachedQuotaEntries.get(accountId)?.quota
 }
 
 export function clearCachedQuota(): void {
   quotaCacheEpoch += 1
-  cachedQuotaEntry = undefined
+  cachedQuotaEntries.clear()
   quotaInFlight = null
   quotaInFlightAccountId = undefined
 }
@@ -845,9 +885,9 @@ export async function fetchAccountQuota(
   const effectiveForce = isOptionsObj ? (fetchFnOrOptions.force ?? force) : force
   const effectiveAccountId = isOptionsObj ? (fetchFnOrOptions.accountId ?? accountId) : accountId
 
-  const sameAccount = effectiveAccountId === undefined || cachedQuotaEntry?.accountId === effectiveAccountId
-  if (!effectiveForce && sameAccount && cachedQuotaEntry && Date.now() - cachedQuotaEntry.fetchedAt < QUOTA_CACHE_TTL_MS) {
-    return cachedQuotaEntry.quota
+  const cached = getCachedQuotaFor(effectiveAccountId)
+  if (!effectiveForce && cached !== undefined && Date.now() - (cached.fetchedAt || 0) < QUOTA_CACHE_TTL_MS) {
+    return cached
   }
   const inFlightMatches = quotaInFlight !== null
     && (effectiveAccountId === undefined || quotaInFlightAccountId === effectiveAccountId)
@@ -919,11 +959,11 @@ export async function fetchAccountQuota(
     }
 
     if (epoch !== quotaCacheEpoch) return snapshot
-    cachedQuotaEntry = {
+    rememberQuotaEntry({
       accountId: effectiveAccountId,
       quota: snapshot,
       fetchedAt: snapshot.fetchedAt,
-    }
+    })
     return snapshot
   })()
 

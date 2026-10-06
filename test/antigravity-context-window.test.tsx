@@ -13,8 +13,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { AntigravitySection, formatCapacity } from '../src/client/antigravity/AntigravitySection.tsx'
+import { AntigravitySection } from '../src/client/antigravity/AntigravitySection.tsx'
 import { zh } from '../src/client/antigravity/locales.ts'
+import { formatCapacity } from '../src/client/common/format.ts'
 import type { AntigravityWebStatus } from '../src/shared/antigravity-contracts.ts'
 
 const PRO = {
@@ -140,12 +141,12 @@ function resetAllButton(): HTMLButtonElement {
   return button!
 }
 
-/** The checkbox on the model pill in the connection group. */
-function pillFor(name: string): HTMLInputElement {
-  const label = [...container.querySelectorAll<HTMLLabelElement>('.dsha-models label')]
-    .find((candidate) => candidate.textContent === name)
-  expect(label).toBeDefined()
-  return label!.querySelector('input')!
+/** The model row in the connection group's checklist. */
+function pillFor(name: string): HTMLButtonElement {
+  const row = [...container.querySelectorAll<HTMLButtonElement>('.dsh-mcl-option')]
+    .find((candidate) => candidate.querySelector('.dsh-mcl-name')?.textContent === name)
+  expect(row).toBeDefined()
+  return row!
 }
 
 beforeEach(() => {
@@ -171,8 +172,8 @@ describe('Antigravity context window section', () => {
 
     expect(contextRows().map((row) => row.querySelector('span')?.textContent))
       .toEqual(['Gemini 2.5 Pro', 'Claude Sonnet 4.6'])
-    // The unchecked model keeps its pill in the connection group.
-    expect(container.querySelector('.dsha-models')?.textContent).toContain('GPT-5')
+    // The unchecked model keeps its row in the connection group.
+    expect(container.querySelector('.dsh-mcl')?.textContent).toContain('GPT-5')
     // The stored override seeds the draft, not the catalog default.
     expect(inputFor('Gemini 2.5 Pro').value).toBe(formatCapacity(500_000))
     expect(inputFor('Claude Sonnet 4.6').value).toBe(formatCapacity(SONNET.defaultContextWindow))

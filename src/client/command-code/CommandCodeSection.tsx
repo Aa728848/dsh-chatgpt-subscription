@@ -22,79 +22,19 @@ const EFFORT_LABELS: Record<CommandCodeReasoningEffort, string> = {
   max: 'Max',
 }
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { ContextWindowEditor, contextDraftsFor } from '../common/ContextWindowEditor.tsx'
+import { ModelChecklist } from '../common/ModelChecklist.tsx'
+import { createLineApi } from '../common/line-api.ts'
+import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh } from './locales.ts'
 
 const API = '/command-code/api'
+const api = createLineApi(API, 'Command Code')
 
 interface Props {
   onModelChange?: () => void
   loadModelDirectory?: () => void
-}
-
-async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  })
-  const json = (await res.json()) as { ok: boolean; value?: T; error?: string }
-  if (!res.ok || !json.ok) {
-    throw new Error(json.error || `HTTP ${res.status}`)
-  }
-  return json.value as T
-}
-
-/** Parse "1M", "512K", "200000" into a positive integer token count. */
-export function parsePositiveCapacity(value: string): number | null {
-  const normalized = value.trim().toLowerCase().replace(/[,_\s]/g, '')
-  const matched = normalized.match(/^(\d+(?:\.\d+)?)(k|m)?$/)
-  if (matched === null) return null
-  const multiplier = matched[2] === 'm' ? 1_000_000 : matched[2] === 'k' ? 1_000 : 1
-  const parsed = Number(matched[1]) * multiplier
-  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null
-}
-
-export function formatCapacity(value: number): string {
-  if (value >= 1_000_000 && value % 100_000 === 0) return `${value / 1_000_000}M`
-  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`
-  return String(value)
-}
-
-/**
- * Seed one draft per model from a status payload. Also run after a model
- * toggle: a model that was just enabled has no draft yet, and the context
- * window section only renders enabled models.
- */
-function contextDraftsFor(status: CommandCodeWebStatus): Record<string, string> {
-  const drafts: Record<string, string> = {}
-  for (const model of status.models) {
-    drafts[model.id] = formatCapacity(status.contextWindowOverrides[model.id] || model.defaultContextWindow)
-  }
-  return drafts
-}
-
-function formatDate(ms?: number | null): string {
-  if (ms === undefined || ms === null || ms <= 0) return '—'
-  try {
-    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(ms)
-  } catch {
-    return '—'
-  }
-}
-
-function formatReset(resetsAt?: number | null): string {
-  if (resetsAt === undefined || resetsAt === null || resetsAt <= 0) return ''
-  const diff = resetsAt - Date.now()
-  if (diff <= 0) return 'now'
-  const mins = Math.floor(diff / 60000)
-  const hours = Math.floor(mins / 60)
-  const days = Math.floor(hours / 24)
-  if (days > 0) return `${days}d ${hours % 24}h`
-  if (hours > 0) return `${hours}h ${mins % 60}m`
-  return `${mins}m`
 }
 
 interface LoginPollStatus {
@@ -142,7 +82,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
       setError(null)
     }
     try {
-      const data = await fetchApi<CommandCodeWebStatus>('/status')
+      const data = await api.request<CommandCodeWebStatus>('/status')
       setStatus(data)
       setContextDrafts(contextDraftsFor(data))
       // An answer that refreshed the quota behind itself is followed up shortly,
@@ -175,14 +115,14 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
       setBusy('login')
       setError(null)
       setLoginProgress(null)
-      const flow = await fetchApi<LoginPollStatus>('/login', { method: 'POST' })
+      const flow = await api.request<LoginPollStatus>('/login', { method: 'POST' })
       if (flow.authUrl) {
         window.open(flow.authUrl, '_blank')
       }
       const pollTimer = window.setInterval(() => {
         void (async () => {
           try {
-            const poll = await fetchApi<LoginPollStatus>('/login/status')
+            const poll = await api.request<LoginPollStatus>('/login/status')
             if (poll.progress) setLoginProgress(poll.progress)
             if (poll.status === 'complete') {
               window.clearInterval(pollTimer)
@@ -217,7 +157,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('apikey')
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/login/apikey', {
+      const updated = await api.request<CommandCodeWebStatus>('/login/apikey', {
         method: 'POST',
         body: JSON.stringify({ apiKey }),
       })
@@ -239,7 +179,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy(`${action}-${accountId}`)
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/accounts', {
+      const updated = await api.request<CommandCodeWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action, accountId }),
       })
@@ -256,7 +196,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('strategy')
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/accounts', {
+      const updated = await api.request<CommandCodeWebStatus>('/accounts', {
         method: 'POST',
         body: JSON.stringify({ action: 'strategy', strategy }),
       })
@@ -277,7 +217,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
   const handleRelogin = (accountId: string) => {
     void (async () => {
       try {
-        const updated = await fetchApi<CommandCodeWebStatus>('/accounts', {
+        const updated = await api.request<CommandCodeWebStatus>('/accounts', {
           method: 'POST',
           body: JSON.stringify({ action: 'relogin', accountId }),
         })
@@ -294,7 +234,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('quota')
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/quota', { method: 'POST' })
+      const updated = await api.request<CommandCodeWebStatus>('/quota', { method: 'POST' })
       setStatus(updated)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -307,7 +247,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('catalog')
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/catalog/refresh', { method: 'POST' })
+      const updated = await api.request<CommandCodeWebStatus>('/catalog/refresh', { method: 'POST' })
       setStatus(updated)
       setContextDrafts(contextDraftsFor(updated))
       notifyChange()
@@ -322,7 +262,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('connection')
       setError(null)
-      await fetchApi('/connection/test', { method: 'POST' })
+      await api.post('/connection/test')
       await loadStatus(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -333,7 +273,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
 
   const applyEnabled = async (enabledModelIds: string[]) => {
     try {
-      const updated = await fetchApi<CommandCodeWebStatus>('/models', {
+      const updated = await api.request<CommandCodeWebStatus>('/models', {
         method: 'POST',
         body: JSON.stringify({ enabledModelIds }),
       })
@@ -344,21 +284,6 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  const toggleEnabled = async (enabled: boolean) => {
-    setStatus((prev) => prev ? { ...prev, enabled } : prev)
-    try {
-      const updated = await fetchApi<CommandCodeWebStatus>('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ enabled }),
-      })
-      setStatus(updated)
-      notifyChange()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      void loadStatus(true)
     }
   }
 
@@ -376,7 +301,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
 
   const handleUpdateEffort = async (effort: CommandCodeReasoningEffort | null) => {
     try {
-      const updated = await fetchApi<CommandCodeWebStatus>('/settings', {
+      const updated = await api.request<CommandCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ defaultReasoningEffort: effort }),
       })
@@ -397,7 +322,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setSavingModel(modelId)
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/settings', {
+      const updated = await api.request<CommandCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: { [modelId]: parsed } }),
       })
@@ -416,7 +341,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setSavingModel(modelId)
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/settings', {
+      const updated = await api.request<CommandCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: { [modelId]: null } }),
       })
@@ -441,7 +366,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     try {
       setBusy('context')
       setError(null)
-      const updated = await fetchApi<CommandCodeWebStatus>('/settings', {
+      const updated = await api.request<CommandCodeWebStatus>('/settings', {
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: Object.fromEntries(models.map((model) => [model, null])) }),
       })
@@ -487,7 +412,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
         onClearCooldown={(accountId) => void handleAccountAction('clear-cooldown', accountId)}
         onRelogin={(accountId) => handleRelogin(accountId)}
         onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
-        storageValue={status?.storagePath || '—'}
+        showQuota
         renderDetails={(entry) => (
           <>
             {entry.keyName && <span>{t.keyName}: {entry.keyName}</span>}
@@ -522,23 +447,6 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
         <div className="dsha-grouphead">
           <h3>{t.connection}</h3>
         </div>
-        <div className="dsha-row" style={{ marginBottom: 12 }}>
-          <span className="dsha-label" style={{ fontWeight: 600 }}>{t.enableProvider}</span>
-          <input
-            type="checkbox"
-            checked={status?.enabled !== false}
-            disabled={busy !== null}
-            onChange={(e) => void toggleEnabled(e.currentTarget.checked)}
-          />
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.provider}</span>
-          <span className="dsha-value">{t.providerValue}</span>
-        </div>
-        <div className="dsha-row">
-          <span className="dsha-label">{t.connectionState}</span>
-          <span className="dsha-value">{status?.authenticated ? t.connected : t.untested}</span>
-        </div>
         <p className="dsha-notice">{status?.serving === false && status.conflict ? t.routeConflict.replace('{detail}', status.conflict) : t.routeOwned}</p>
         <div className="dsha-actions">
           <button className="dsha-btn" disabled={busy !== null || !status?.authenticated} onClick={() => void handleTestConnection()}>
@@ -561,32 +469,18 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           </p>
         )}
         {status?.zeroDataRetention === true && <p className="dsha-notice" data-testid="command-code-zdr">{t.zdrEnabled}</p>}
-        <div className="dsha-models" aria-label="Command Code Models">
-          {status?.models.map((model: CommandCodeModelOption) => {
-            return (
-              <label
-                key={model.id}
-                title={`${model.id} · ${wireLabel(model.wire, t)}`}
-              >
-                <input
-                  type="checkbox"
-                  checked={model.enabled}
-                  disabled={busy !== null}
-                  onChange={(event) => toggleModel(model.id, event.currentTarget.checked)}
-                />
-                <span>{model.name}</span>
-              </label>
-            )
-          })}
-        </div>
-        <div className="dsha-actions">
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(true)}>
-            {t.selectAll}
-          </button>
-          <button className="dsha-btn" disabled={busy !== null} onClick={() => setAllModels(false)}>
-            {t.unselectAll}
-          </button>
-        </div>
+        <ModelChecklist
+          items={(status?.models ?? []).map((model: CommandCodeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            hint: wireLabel(model.wire, t),
+            enabled: model.enabled,
+          }))}
+          busy={busy !== null}
+          onToggle={toggleModel}
+          onToggleAll={setAllModels}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
+        />
       </section>
 
       <section className="dsha-group">
@@ -621,54 +515,30 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           <h3>{t.contextWindowSection}</h3>
         </div>
         <p className="dsha-muted">{t.contextWindowHint}</p>
-        <div className="dsha-context-settings">
-          {contextModels.length === 0 && (
-            <p className="dsha-muted">{t.contextWindowNoneEnabled}</p>
-          )}
-          {contextModels.map((model: CommandCodeModelOption) => (
-            <div key={model.id} className="dsha-context-row">
-              <span title={model.id}>{model.name}</span>
-              <div className="dsha-capacity-control">
-                <input
-                  type="text"
-                  aria-label={`${model.name} context window`}
-                  value={contextDrafts[model.id] ?? ''}
-                  onChange={(event) => setContextDrafts({ ...contextDrafts, [model.id]: event.currentTarget.value })}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') void handleSaveContextWindow(model.id)
-                  }}
-                />
-                <small>{t.tokens}</small>
-                <button
-                  type="button"
-                  className="dsha-context-save"
-                  disabled={savingModel === model.id}
-                  onClick={() => void handleSaveContextWindow(model.id)}
-                >
-                  {savingModel === model.id ? t.saving : t.save}
-                </button>
-                <button
-                  type="button"
-                  className="dsha-context-save dsha-context-reset"
-                  aria-label={`${model.name} ${t.contextWindowReset}`}
-                  disabled={savingModel === model.id || status?.contextWindowOverrides[model.id] === undefined}
-                  onClick={() => void handleResetContextWindow(model.id)}
-                >
-                  {t.contextWindowReset}
-                </button>
-              </div>
-            </div>
-          ))}
-          <div className="dsha-actions">
-            <button
-              className="dsha-btn"
-              disabled={busy !== null || overrideCount === 0}
-              onClick={() => void handleResetAllContextWindows()}
-            >
-              {t.contextWindowResetAll}
-            </button>
-          </div>
-        </div>
+        <ContextWindowEditor
+          rows={contextModels.map((model: CommandCodeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            draft: contextDrafts[model.id] ?? '',
+            inputLabel: `${model.name} context window`,
+            hasOverride: status?.contextWindowOverrides[model.id] !== undefined,
+            saving: savingModel === model.id,
+          }))}
+          labels={{
+            tokens: t.tokens,
+            save: t.save,
+            saving: t.saving,
+            reset: t.contextWindowReset,
+            resetAll: t.contextWindowResetAll,
+            empty: t.contextWindowNoneEnabled,
+          }}
+          busy={busy !== null}
+          overrideCount={overrideCount}
+          onDraftChange={(id, draft) => setContextDrafts((prev) => ({ ...prev, [id]: draft }))}
+          onCommit={(id) => void handleSaveContextWindow(id)}
+          onReset={(id) => void handleResetContextWindow(id)}
+          onResetAll={() => void handleResetAllContextWindows()}
+        />
       </section>
 
       <section className="dsha-group">
@@ -679,6 +549,12 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           </button>
         </div>
         <p className="dsha-muted">{t.quotaDesc}</p>
+        {/* The progress bars moved into each account card: quota follows the
+            account, so a bar here could only ever describe whichever account
+            happened to be active when the snapshot was read. What stays is what
+            has no per-account bar to live in — the credits, the meters that
+            state no share, and the freshness of this reading. */}
+        <p className="dsha-muted">{t.quotaFactsScope}</p>
 
         {!status?.authenticated ? (
           <div className="dsha-empty">{t.signedOut}</div>
@@ -697,49 +573,20 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
               </span>
             </div>
 
-            {quota.windows.map((window) => (
-              <div key={window.id} className="dsha-meter-wrap">
+            {quota.meters.filter((meter) => meter.remainingFraction === null).map((meter) => (
+              <div key={meter.id} className="dsha-meter-wrap">
                 <div className="dsha-meter-label">
-                  <span>{window.label}</span>
-                  <strong>{Math.max(0, 100 - window.usedPercent)}% left</strong>
+                  <span>{meter.label}</span>
+                  <strong>{meter.limit ?? '—'}</strong>
                 </div>
-                <div className="dsha-meter dsha-meter-green">
-                  <span style={{ width: `${Math.max(0, 100 - window.usedPercent)}%` }} />
-                </div>
-                {window.resetsAt !== null && (
-                  <div className="dsha-meter-meta">
-                    <span>Reset: {formatReset(window.resetsAt)}</span>
-                  </div>
+                {meter.used !== null && (
+                  <div className="dsha-meter-meta"><span>{meter.used} / {meter.limit ?? '—'}</span></div>
+                )}
+                {meter.description !== null && (
+                  <div className="dsha-meter-meta"><span>{meter.description}</span></div>
                 )}
               </div>
             ))}
-
-            {quota.meters.map((meter) => {
-              const remaining = meter.remainingFraction
-              const percent = remaining === null ? null : Math.round(remaining * 100)
-              const isWindow = percent !== null
-              return (
-                <div key={meter.id} className="dsha-meter-wrap">
-                  <div className="dsha-meter-label">
-                    <span>{meter.label}</span>
-                    <strong>{isWindow ? `${percent}% left` : (meter.limit ?? '—')}</strong>
-                  </div>
-                  {isWindow && (
-                    <div className="dsha-meter dsha-meter-cyan">
-                      <span style={{ width: `${percent}%` }} />
-                    </div>
-                  )}
-                  {isWindow ? (
-                    <div className="dsha-meter-meta">
-                      <span>{meter.used ?? '—'} / {meter.limit ?? '—'}</span>
-                      {meter.resetsAt !== null && <span>Reset: {formatReset(meter.resetsAt)}</span>}
-                    </div>
-                  ) : meter.description !== null ? (
-                    <div className="dsha-meter-meta"><span>{meter.description}</span></div>
-                  ) : null}
-                </div>
-              )
-            })}
 
             {quota.meters.length === 0 && quota.windows.length === 0 && (
               <div className="dsha-empty">{t.quotaEmpty}</div>

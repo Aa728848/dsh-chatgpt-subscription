@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
 import type { PluginStatusDto } from '../shared/contracts.ts'
 import { SubscriptionApi } from './api.ts'
+import { useStore } from './common/use-store.ts'
 import { NS } from './locales.ts'
 import { selectQuotaForModel } from './quota.ts'
 import type { SnapshotStore } from './store.ts'
@@ -70,14 +71,6 @@ export function CodexComposerQuota({ api, directory, loadModelDirectory, t }: Pr
     <span>{t('quickQuotaLabel')}</span>
     <strong>{quota === null ? (loading ? t('quickQuotaLoading') : '—') : formatPercent(quota.remainingPercent)}</strong>
   </span>
-}
-
-function useStore<T>(store: SnapshotStore<T>): T {
-  return useSyncExternalStore(
-    (listener) => store.subscribe(listener),
-    () => store.getSnapshot(),
-    () => store.getSnapshot(),
-  )
 }
 
 function formatPercent(value: number): string {

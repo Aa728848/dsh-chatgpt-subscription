@@ -165,11 +165,11 @@ function restoreAllButton(): HTMLButtonElement {
   return button!
 }
 
-function modelCheckbox(name: string): HTMLInputElement {
-  const label = [...container.querySelectorAll<HTMLLabelElement>('.dsha-models label')]
-    .find((candidate) => candidate.querySelector('span')?.textContent === name)
-  expect(label).toBeDefined()
-  return label!.querySelector<HTMLInputElement>('input')!
+function modelCheckbox(name: string): HTMLButtonElement {
+  const row = [...container.querySelectorAll<HTMLButtonElement>('.dsh-mcl-option')]
+    .find((candidate) => candidate.querySelector('.dsh-mcl-name')?.textContent === name)
+  expect(row).toBeDefined()
+  return row!
 }
 
 function callsTo(path: string): RecordedCall[] {

@@ -1,106 +1,91 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent } from 'react'
+import { useCallback, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { CodexSubscriptionSection } from './CodexSubscriptionSection.tsx'
-import { AntigravitySection } from './antigravity/AntigravitySection.tsx'
-import { CommandCodeSection } from './command-code/CommandCodeSection.tsx'
-import { ClaudeSection } from './claude/ClaudeSection.tsx'
-import { KimiCodeSection } from './kimi-code/KimiCodeSection.tsx'
-import { MinimaxCodeSection } from './minimax-code/MinimaxCodeSection.tsx'
-import { WorkBuddySection } from './workbuddy/WorkBuddySection.tsx'
-import { OllamaSection } from './ollama/OllamaSection.tsx'
 import { NS } from './locales.ts'
+import { HubOverview } from './hub/HubOverview.tsx'
+import { hubProviderDescriptor, HUB_PROVIDERS } from './hub/providers.tsx'
+import type { HubProviderId } from './hub/brand-icons.tsx'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS> & {
   onModelChange?: () => void
 }
 
-type HubTabId = 'chatgpt' | 'antigravity' | 'claude' | 'command-code' | 'kimi-code' | 'minimax-code' | 'workbuddy' | 'ollama'
+type HubView = { view: 'overview' } | { view: 'detail'; id: HubProviderId }
 
-// Brand names stay literal: the former standalone sidebar entries used the
-// same hardcoded labels, and every provider section except ChatGPT is
-// zh-only today.
-const HUB_TABS: ReadonlyArray<{ id: HubTabId; label: string }> = [
-  { id: 'chatgpt', label: 'ChatGPT' },
-  { id: 'antigravity', label: 'Antigravity' },
-  { id: 'command-code', label: 'Command Code' },
-  { id: 'kimi-code', label: 'Kimi Code' },
-  { id: 'workbuddy', label: 'WorkBuddy' },
-  { id: 'minimax-code', label: 'MiniMax Code' },
-  { id: 'claude', label: 'Claude' },
-  { id: 'ollama', label: 'Ollama' },
-]
+const STORAGE_KEY = 'dsh-chatgpt-subscription:hub-view'
 
 /**
- * Single settings page that hosts every subscription provider behind tabs,
- * so the settings sidebar shows one entry instead of one per provider. Only
- * the active tab is mounted, mirroring the shell's previous behavior of
- * mounting just the selected settings page (each provider section refetches
- * its status on mount).
+ * The detail page a user was last on survives a settings-page remount, so a
+ * provider toggle deep in a detail page never throws them back to the
+ * overview. Session storage, not local: a new browser session starts at the
+ * overview, which is the page's whole point.
+ */
+function readStoredView(): HubView {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (raw === null) return { view: 'overview' }
+    const parsed = JSON.parse(raw) as { view?: string; id?: string }
+    if (parsed.view !== 'detail' || typeof parsed.id !== 'string') return { view: 'overview' }
+    // A provider the registry no longer knows (renamed, removed) falls back
+    // to the overview rather than stranding the page on an empty panel.
+    return hubProviderDescriptor(parsed.id) === undefined ? { view: 'overview' } : { view: 'detail', id: parsed.id as HubProviderId }
+  } catch {
+    return { view: 'overview' }
+  }
+}
+
+function storeView(view: HubView): void {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(view))
+  } catch {
+    // Storage can be unavailable (private mode); navigation still works.
+  }
+}
+
+const BACK_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4l-4 4 4 4"/></svg>'
+
+/**
+ * Single settings page hosting every subscription provider. The opening
+ * screen is the overview — one card per line with its enable switch and
+ * account count — and picking a card replaces it with that line's detail
+ * page under a back bar. Only the active view is mounted, mirroring the
+ * shell's behavior of mounting just the selected settings page (each
+ * provider section refetches its status on mount).
  */
 export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): React.JSX.Element {
-  const [active, setActive] = useState<HubTabId>('chatgpt')
-  const tabStripRef = useRef<HTMLDivElement | null>(null)
+  const [view, setView] = useState<HubView>(readStoredView)
 
-  /**
-   * Keep the selected tab inside the visible strip.
-   *
-   * The strip is one scrolling line, so a tab selected by keyboard (or restored
-   * after a remount) can sit outside the viewport with no feedback about where
-   * the selection went. `scrollIntoView` with `inline: 'nearest'` scrolls only
-   * when the tab is actually out of view and keeps the change to the horizontal
-   * axis, so it never nudges the settings page vertically.
-   *
-   * Guarded because jsdom (the DOM these tests run against) does not implement
-   * `scrollIntoView`, and a settings page must not break in an environment that
-   * lacks a scrolling method.
-   */
-  useEffect(() => {
-    const strip = tabStripRef.current
-    if (strip === null) return
-    const selected = strip.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')
-    if (selected === null) return
-    if (typeof selected.scrollIntoView !== 'function') return
-    selected.scrollIntoView({ inline: 'nearest', block: 'nearest' })
-  }, [active])
+  const open = useCallback((id: HubProviderId): void => {
+    const next: HubView = { view: 'detail', id }
+    storeView(next)
+    setView(next)
+  }, [])
 
-  const onTabKeyDown = useCallback((event: KeyboardEvent<HTMLButtonElement>): void => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-    event.preventDefault()
-    const index = HUB_TABS.findIndex((tab) => tab.id === active)
-    const delta = event.key === 'ArrowRight' ? 1 : -1
-    const next = HUB_TABS[(index + delta + HUB_TABS.length) % HUB_TABS.length]
-    setActive(next.id)
-    document.getElementById(`dsh-hub-tab-${next.id}`)?.focus()
-  }, [active])
+  const back = useCallback((): void => {
+    const next: HubView = { view: 'overview' }
+    storeView(next)
+    setView(next)
+  }, [])
 
-  return <section className="dsh-codex-page" aria-labelledby="dsh-hub-title">
-    <header>
-      <h2 id="dsh-hub-title" className="dsh-codex-title">{t('hubTitle')}</h2>
-    </header>
-    <div ref={tabStripRef} className="dsh-codex-segments dsh-hub-tabs" role="tablist" aria-label={t('hubTitle')}>
-      {HUB_TABS.map((tab) => <button
-        key={tab.id}
-        type="button"
-        role="tab"
-        id={`dsh-hub-tab-${tab.id}`}
-        aria-selected={active === tab.id}
-        aria-controls={`dsh-hub-panel-${tab.id}`}
-        className={active === tab.id ? 'active' : undefined}
-        tabIndex={active === tab.id ? 0 : -1}
-        onClick={() => setActive(tab.id)}
-        onKeyDown={onTabKeyDown}
-      >{tab.label}</button>)}
-    </div>
-    <div role="tabpanel" id={`dsh-hub-panel-${active}`} aria-labelledby={`dsh-hub-tab-${active}`}>
-      {active === 'chatgpt' ? <CodexSubscriptionSection t={t} {...runtime} /> : null}
-      {active === 'antigravity' ? <AntigravitySection onModelChange={onModelChange} /> : null}
-      {active === 'command-code' ? <CommandCodeSection onModelChange={onModelChange} /> : null}
-      {active === 'kimi-code' ? <KimiCodeSection onModelChange={onModelChange} /> : null}
-      {active === 'workbuddy' ? <WorkBuddySection onModelChange={onModelChange} /> : null}
-      {active === 'minimax-code' ? <MinimaxCodeSection onModelChange={onModelChange} /> : null}
-      {active === 'claude' ? <ClaudeSection onModelChange={onModelChange} /> : null}
-      {active === 'ollama' ? <OllamaSection onModelChange={onModelChange} /> : null}
+  if (view.view === 'overview') {
+    return <section className="dsh-codex-page" aria-labelledby="dsh-hub-title">
+      <header>
+        <h2 id="dsh-hub-title" className="dsh-codex-title">{t('hubTitle')}</h2>
+      </header>
+      <HubOverview t={t} onOpen={open} />
+    </section>
+  }
+
+  const descriptor = hubProviderDescriptor(view.id) ?? HUB_PROVIDERS[0]
+  return <section className="dsh-codex-page" aria-labelledby="dsh-hub-detail-name">
+    <nav className="dsh-hub-backbar">
+      <button type="button" className="dsh-hub-back" onClick={back} aria-label={t('hubBack')}>
+        <span aria-hidden="true" dangerouslySetInnerHTML={{ __html: BACK_SVG }} />
+        {t('hubBack')}
+      </button>
+      <span className="dsh-hub-backbar-name" id="dsh-hub-detail-name">{descriptor.name}</span>
+    </nav>
+    <div className="dsh-hub-detail">
+      {descriptor.renderDetail({ t, onModelChange, runtime })}
     </div>
   </section>
 }

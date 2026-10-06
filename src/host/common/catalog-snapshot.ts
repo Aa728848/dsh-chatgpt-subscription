@@ -26,6 +26,18 @@ export function catalogSnapshotPath(name: string): string {
 }
 
 /**
+ * How many models one line's catalog holds, for the hub overview's "N/M models".
+ *
+ * An empty catalog is reported as `null` rather than `0`: "this line has synced
+ * nothing yet" and "this line offers no models" are different statements, and
+ * only the second one is a fact. The overview hides the model count for a null,
+ * which is what a line that has never synced should show.
+ */
+export function catalogTotal(count: number): number | null {
+  return count === 0 ? null : count
+}
+
+/**
  * Snapshot name for one catalog *and* one credential scope.
  *
  * A persisted snapshot answers before any credential is read — that is the whole

@@ -100,13 +100,14 @@ describe('Antigravity account card', () => {
     // Provider-specific rows come from renderDetails.
     expect(container.textContent).toContain('proj-second')
     expect(container.textContent).toContain('second@example.com')
-    // The card owns the storage row and the notice the tab used to hand-roll.
-    expect(container.textContent).toContain(zh.storageNotice)
 
     const select = container.querySelector<HTMLSelectElement>('.dsha-select')
     expect(select).not.toBeNull()
     expect([...select!.options].map((option) => option.value)).toEqual(['sequential', 'round-robin', 'sticky'])
     expect(select!.value).toBe('sticky')
+    // The model list is a named group, not one a screen reader announces as bare
+    // "group" — the shared checklist takes its name from this line's dictionary.
+    expect(container.querySelector('.dsh-mcl-list')?.getAttribute('aria-label')).toBe(zh.modelsSection)
   })
 
   it('promotes another account through the provider accounts route', async () => {

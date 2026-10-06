@@ -111,7 +111,8 @@ import {
   type PoolData,
 } from '../common/account-pool.ts'
 import type { CredentialStore } from '../token-store.ts'
-import type { AccountAuthStatus, PoolAccountSummaryDto } from '../../shared/account-pool-contracts.ts'
+import type { AccountAuthStatus, PoolAccountQuotaDto, PoolAccountSummaryDto } from '../../shared/account-pool-contracts.ts'
+import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import {
   FileCredentialStore,
   SUBSCRIPTION_INFERENCE_SCOPE,
@@ -135,7 +136,7 @@ import {
   isAdoptedCredentialExpired,
 } from './adopt.ts'
 import { PROVIDER_ID, PROVIDER_NAME } from './types.ts'
-import type { ClaudeFailure } from './client.ts'
+import { cachedQuotaForPool, type ClaudeAccountQuota, type ClaudeFailure } from './client.ts'
 
 /** Keychain / Secret Service service name of this line's pool. */
 const KEYCHAIN_SERVICE = 'dsh-claude-pool'
@@ -710,6 +711,40 @@ async function refreshClaudeCredential(
 }
 
 /**
+ * One account's own newest quota snapshot, in the shape the account card draws.
+ *
+ * The snapshot comes from 'client.ts''s per-account cache, and this is where
+ * this line's own numbers are translated into the shared shape. Every judgement
+ * below trades a possibly-nice-looking bar for an honest one:
+ *
+ * - a window whose consumed share nobody measured is DROPPED (`quotaWindow`
+ *   returns null), because "0% used" and "not stated" are different claims;
+ * - the share falls back to `100 - remainingPercent` only when that field was
+ *   stated; when the payload stated NEITHER share there is nothing to draw;
+ * - the read time is the full read's own `fetchedAt`, or — for a snapshot that
+ *   only response headers ever kept warm, which performed no full read — the
+ *   `observedAt` instant those numbers arrived. Either way it is when this line
+ *   saw the numbers, never when upstream served them.
+ *
+ * A null snapshot means "this account was never read", which `poolQuota` reports
+ * as undefined so the card can say exactly that instead of drawing a zero.
+ */
+export function claudePoolQuota(snapshot: ClaudeAccountQuota | null): PoolAccountQuotaDto | undefined {
+  if (snapshot === null) return undefined
+  return poolQuota(snapshot.fetchedAt ?? snapshot.observedAt, snapshot.windows.map((window) => quotaWindow(
+    window.label,
+    window.usedPercent ?? (window.remainingPercent === null ? null : 100 - window.remainingPercent),
+    {
+      windowDurationMins: window.windowMinutes,
+      // ISO 8601 on this line. `quotaWindow` normalizes what `Date.parse`
+      // produced, so an unparseable string becomes "no stated reset" rather
+      // than a NaN the card would have to defend against.
+      resetsAt: typeof window.resetsAt === 'string' ? Date.parse(window.resetsAt) : null,
+    },
+  )))
+}
+
+/**
  * The Claude subscription account pool.
  *
  * Read the module comment first: it carries the two rules this class exists to
@@ -875,6 +910,12 @@ export class ClaudeAccountPool extends AccountPoolCore<
         // LIVE, not stored: an adopted snapshot becomes unusable at its own
         // expiry instant, and persisting that would mean a write on every read.
         const expired = adopted && adoptedCredentialExpired(credentials)
+        // The account's own newest snapshot, taken from the identity THIS row
+        // carries. Quota follows the account, so the row draws its own reading;
+        // absent means that account was never read, which is not "nothing used".
+        // The row id — not the access token — is the key: every refresh rotates
+        // the token, and a snapshot filed under a tail would be lost with it.
+        const quota = claudePoolQuota(cachedQuotaForPool(account.id, credentials))
         return {
           ...base,
           ...(email === undefined ? {} : { email }),
@@ -889,6 +930,7 @@ export class ClaudeAccountPool extends AccountPoolCore<
           // pool's precedent for accounts it did not sign in.
           removable: !adopted,
           ...(account.sourcePath === undefined ? {} : { sourcePath: account.sourcePath }),
+          ...(quota === undefined ? {} : { quota }),
           ...(expired
             ? { authStatus: 'expired' as AccountAuthStatus, authFailedReason: ADOPTED_CREDENTIAL_EXPIRED_HINT }
             : {}),

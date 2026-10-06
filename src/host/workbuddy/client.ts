@@ -589,18 +589,74 @@ export function billingMeters(billing: ParsedBilling): WorkBuddyMeter[] {
   return meters
 }
 
-let cachedQuota: WorkBuddyAccountQuota | undefined
+/**
+ * One newest snapshot PER ACCOUNT, keyed by the snapshot's own `account.id` —
+ * the same public key the pool addresses an account with.
+ *
+ * Quota follows the account: rotation decides which account spends the next
+ * request, so a single slot only ever described whichever account was read
+ * last. The pool's card draws every account its own reading, so each account
+ * keeps its own entry; past the cap the oldest read is evicted.
+ *
+ * This map is a memory read only. Nothing here fetches — the settings card
+ * builds its account list from it, and that must never cost one upstream
+ * request per pooled account.
+ */
+const cachedQuotaEntries = new Map<string, WorkBuddyAccountQuota>()
+
+/** How many accounts' snapshots are remembered; mirrors the Codex usage service. */
+const QUOTA_CACHE_LIMIT = 20
+
+/** The entry read most recently, whichever account it belongs to. */
+function newestCachedQuota(): WorkBuddyAccountQuota | undefined {
+  let newest: WorkBuddyAccountQuota | undefined
+  for (const snapshot of cachedQuotaEntries.values()) {
+    if (newest === undefined || (snapshot.fetchedAt || 0) > (newest.fetchedAt || 0)) newest = snapshot
+  }
+  return newest
+}
+
+/** Remember one account's newest snapshot, bounded to the accounts in use. */
+function rememberCachedQuota(snapshot: WorkBuddyAccountQuota): void {
+  cachedQuotaEntries.set(snapshot.account.id, snapshot)
+  while (cachedQuotaEntries.size > QUOTA_CACHE_LIMIT) {
+    const oldest = [...cachedQuotaEntries.entries()]
+      .sort((left, right) => (left[1].fetchedAt || 0) - (right[1].fetchedAt || 0))[0]
+    if (oldest === undefined) break
+    cachedQuotaEntries.delete(oldest[0])
+  }
+}
+
 let quotaInFlight: Promise<WorkBuddyAccountQuota> | null = null
 let quotaInFlightAccountId: string | null = null
 let quotaCacheEpoch = 0
 
+/**
+ * The snapshot read most recently, whichever account it belongs to.
+ *
+ * Kept with a no-argument signature for backward compatibility; the page-level
+ * facts use {@link getCachedQuotaFor} instead, because they describe one
+ * account and must never be another account's numbers.
+ */
 export function getCachedQuota(): WorkBuddyAccountQuota | undefined {
-  return cachedQuota
+  return newestCachedQuota()
+}
+
+/**
+ * The snapshot remembered for one account, if it was read before.
+ *
+ * This is the lookup the account pool calls while it builds its summaries: a
+ * pure memory read, never a fetch. Passing no account keeps the pre-pool
+ * behavior of returning whatever was fetched last.
+ */
+export function getCachedQuotaFor(accountId?: string | null): WorkBuddyAccountQuota | undefined {
+  if (accountId === undefined || accountId === null) return newestCachedQuota()
+  return cachedQuotaEntries.get(accountId)
 }
 
 export function clearCachedQuota(): void {
   quotaCacheEpoch += 1
-  cachedQuota = undefined
+  cachedQuotaEntries.clear()
   quotaInFlight = null
   quotaInFlightAccountId = null
 }
@@ -621,11 +677,11 @@ export async function fetchAccountQuota(
   const credentials = await store.read({ accountId, hiddenAccountIds })
   if (credentials === null) throw new Error(`Not signed in to ${PROVIDER_NAME}.`)
   const requestedAccountId = workBuddyAccountId(credentials)
+  const cached = cachedQuotaEntries.get(requestedAccountId)
   if (!force
-    && cachedQuota
-    && cachedQuota.account.id === requestedAccountId
-    && Date.now() - (cachedQuota.fetchedAt || 0) < QUOTA_CACHE_TTL_MS) {
-    return cachedQuota
+    && cached !== undefined
+    && Date.now() - (cached.fetchedAt || 0) < QUOTA_CACHE_TTL_MS) {
+    return cached
   }
   // A poll already serving another account must not be reused after a switch.
   if (quotaInFlight && quotaInFlightAccountId === requestedAccountId) return quotaInFlight
@@ -670,7 +726,7 @@ export async function fetchAccountQuota(
     }
 
     if (epoch !== quotaCacheEpoch) return snapshot
-    cachedQuota = snapshot
+    rememberCachedQuota(snapshot)
     return snapshot
   })()
 

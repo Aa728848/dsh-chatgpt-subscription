@@ -10,7 +10,6 @@ describe('Ollama locale dictionary', () => {
     // slowly say different things for the same badge, and the user would read
     // that as a different feature rather than the same one.
     expect(zh.accountPool).toBe(accountPoolZh.accountPool)
-    expect(zh.storage).toBe(accountPoolZh.storage)
     expect(zh.strategyRoundRobin).toBe(accountPoolZh.strategyRoundRobin)
     expect(zh.cooldownLeft).toBe(accountPoolZh.cooldownLeft)
   })

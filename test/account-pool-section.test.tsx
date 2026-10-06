@@ -41,11 +41,10 @@ function render(overrides: Partial<AccountPoolSectionProps> = {}): string {
 }
 
 describe('AccountPoolSection', () => {
-  it('renders the empty state and the storage notice when no account is signed in', () => {
+  it('renders the empty state when no account is signed in', () => {
     const html = render({ accounts: [] })
     expect(html).toContain('账号管理')
     expect(html).toContain(accountPoolZh.noAccounts)
-    expect(html).toContain(accountPoolZh.storageNotice)
     expect(html).not.toContain('dsha-account-card')
   })
 
@@ -60,6 +59,18 @@ describe('AccountPoolSection', () => {
     expect(html).toContain('first@example.com')
     expect(html).toContain(accountPoolZh.expires)
     expect(html).toContain(accountPoolZh.lastUsed)
+  })
+
+  it('names the address once, even when the alias is that address', () => {
+    // Most lines sign in with an address and alias the account with it, so the
+    // card's title already IS the address; printing "邮箱: <same>" under it is
+    // the same fact twice.
+    const titled = render({ accounts: [account({ alias: 'me@example.com', email: 'me@example.com' })] })
+    expect(titled.match(/me@example\.com/g)).toHaveLength(1)
+    // A nickname alias still gets the address beside it.
+    const nicknamed = render({ accounts: [account({ alias: '主力账号', email: 'me@example.com' })] })
+    expect(nicknamed).toContain('me@example.com')
+    expect(nicknamed).toContain(accountPoolZh.email)
   })
 
   it('marks a cooling account and offers to clear the cooldown', () => {
@@ -156,6 +167,37 @@ describe('AccountPoolSection', () => {
     expect(isCoolingDown({ ...account(), cooldownUntil: now + 1000 }, now)).toBe(true)
     expect(isCoolingDown({ ...account(), cooldownUntil: now - 1000 }, now)).toBe(false)
     expect(isCoolingDown(account(), now)).toBe(false)
+  })
+
+  it('draws each account its own quota, because quota follows the account', () => {
+    const html = render({
+      showQuota: true,
+      accounts: [
+        account({ id: 'acc_1', quota: { fetchedAt: now, windows: [{ label: '', usedPercent: 40, windowDurationMins: 300, resetsAt: null }] } }),
+        account({ id: 'acc_2', isPrimary: false, alias: '备用', quota: { fetchedAt: now, windows: [{ label: 'Weekly', usedPercent: 90, windowDurationMins: 10_080, resetsAt: null }] } }),
+      ],
+    })
+    // Two accounts, two independent readings — not one line-level figure drawn
+    // twice.
+    expect(html.match(/dsha-account-quota-row/g)).toHaveLength(2)
+    expect(html).toContain('40%')
+    expect(html).toContain('Weekly')
+    expect(html).toContain('aria-valuenow="90"')
+  })
+
+  it('says an account has no quota reading yet, but only on a line that reads quota', () => {
+    const reading = account({ quota: { fetchedAt: now, windows: [{ label: '', usedPercent: 5, windowDurationMins: 300, resetsAt: null }] } })
+    const never = account({ id: 'acc_2', isPrimary: false, alias: '备用' })
+
+    // One sibling with a snapshot proves the line reads quota per account, so
+    // the account it has not read yet may say so.
+    const mixed = render({ accounts: [reading, never] })
+    expect(mixed).toContain(accountPoolZh.quotaNone)
+
+    // A line with no quota concept at all (Ollama: spend, no allowance) must
+    // not grow a "not read yet" row on every account.
+    expect(render({ accounts: [never] })).not.toContain(accountPoolZh.quotaNone)
+    expect(render({ accounts: [never], showQuota: true })).toContain(accountPoolZh.quotaNone)
   })
 
   it('keeps every locale set complete so no tab can render an empty label', () => {

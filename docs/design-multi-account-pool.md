@@ -230,12 +230,11 @@ interface AccountPoolSectionProps<TAccount> {
   onRelogin?(id): void
   onSetStrategy(s): void
   renderAccountDetails(acc: TAccount): ReactNode   // 各线路特有行：projectId / planType / keyName / region…
-  storageNotice: string
   children?: ReactNode            // Command Code 的手贴 Key 框、Kimi 的 region 选择
 }
 ```
 
-视觉元素与截图中的 Antigravity 完全一致：`dsha-account-card`、徽标（`主账号`/`当前使用`/`冷却中（剩 N 分）`/新增 `需重新登录`）、调度策略下拉（≥2 个账号时显示：顺序耗尽 / 轮询调度）、底部凭据存储说明行。
+视觉元素与截图中的 Antigravity 完全一致：`dsha-account-card`、徽标（`主账号`/`当前使用`/`冷却中（剩 N 分）`/新增 `需重新登录`）、调度策略下拉（≥2 个账号时显示：顺序耗尽 / 轮询调度）。（**变更**：原先的「底部凭据存储说明行」已整体删除——凭据存哪里不是用户能操作的设置项，且多条线路的说明会印出凭据文件路径；见 [`per-account-quota.md`](./per-account-quota.md) 同期改动。）
 
 ### 8.2 四个 Tab 的统一分组顺序
 
@@ -252,7 +251,7 @@ CodexSubscriptionSection 从 `dsh-codex-*`（Section/InfoRow 自绘组件）迁�
 
 ### 8.4 文案与本地化
 
-- 池相关文案键（accountPool / addAccount / rotationStrategy / primaryAccount / activeAccount / cooling / clearCooldown / setPrimary / deleteAccount / relogin / noAccounts / storageNotice…）从 `antigravity/locales.ts` 提升为共享字典，四个线路的 locales.ts 各自 re-export/覆盖，保持各 NS 独立注册的现状。
+- 池相关文案键（accountPool / addAccount / rotationStrategy / primaryAccount / activeAccount / cooling / clearCooldown / setPrimary / deleteAccount / relogin / noAccounts…）从 `antigravity/locales.ts` 提升为共享字典，四个线路的 locales.ts 各自 re-export/覆盖，保持各 NS 独立注册的现状。
 - Antigravity/Command Code/Kimi Code 现状为 zh-only，ChatGPT 有中英双语——共享键同步补齐英文。
 
 ## 9. 兼容与迁移
@@ -284,6 +283,7 @@ CodexSubscriptionSection 从 `dsh-codex-*`（Section/InfoRow 自绘组件）迁�
 
 1. **Codex refresh token 轮换的并发写**：两个并发流同时刷新同一账号 → 泛型核沿用 `refreshPromise` 去重模式（按账号 id），失败只标 `expired` 不删账号。需要单测覆盖。
 2. **配额缓存的账号归属**：三条线路的 quota 缓存目前都是全局单份，池化后必须按 accountId 键控，否则 UI 会展示错账号的配额。
+   → **已解决（见 [`per-account-quota.md`](./per-account-quota.md)）**：7 条有配额的线路各自把配额缓存改为按账号键控的有界 Map，`PoolAccountSummaryDto.quota` 把每个账号自己的最新快照送到账号卡片，进度条画在账号行内；页面级区块只保留非进度事实。antigravity 的配额读的是 legacy 单凭据文件（只跟随 primary），因此它的快照只挂在 primary 行上，不编造其他账号的数字。
 3. **轮询策略打破上游缓存亲和**（见 7.3），MVP 接受；如需缓解再加 `sticky` 策略。
 4. **Kimi 套餐型 429 不误轮换**是必要正确性约束，测试必须覆盖。
 5. **账号数软上限**、`relogin` 入口的交互细节（ expired 账号卡片上的按钮 vs 重新走"添加账号"）建议在 P1 的 UI 联调中定稿。

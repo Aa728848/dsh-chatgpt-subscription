@@ -712,23 +712,99 @@ export function buildModelOptions(
 // Quota
 // ---------------------------------------------------------------------------
 
-let quotaCache: KimiCodeAccountQuota | null = null
-// Which account the cached snapshot belongs to; see QuotaFetchOptions.accountId.
-let quotaAccountId: string | undefined
+/**
+ * How many accounts' snapshots are remembered.
+ *
+ * Mirrors the bound the ChatGPT line's usage service applies to its own
+ * per-account map: room for every account a user is likely to pool, and no way
+ * for a long-lived process to accumulate one snapshot per account it has seen.
+ */
+const QUOTA_ACCOUNT_LIMIT = 20
 
-export function getCachedQuota(): KimiCodeAccountQuota | null {
-  return quotaCache
+/** Key of a snapshot whose caller named no account: the single-credential read. */
+const UNNAMED_ACCOUNT_KEY = ''
+
+/**
+ * One newest snapshot PER ACCOUNT, keyed by the account id the caller stated.
+ *
+ * Quota follows the account: rotation decides which account spends the next
+ * request, so a single slot could only ever describe whichever account was read
+ * last. The pool's card draws every account its own reading, so each account
+ * keeps its own entry; past the cap the oldest read is evicted.
+ *
+ * This map is a memory read only. Nothing here fetches — the settings card
+ * builds its account list from it, and that must never cost one upstream
+ * request per pooled account.
+ */
+const quotaCache = new Map<string, KimiCodeAccountQuota>()
+
+/**
+ * Key of the entry written most recently.
+ *
+ * The pre-pool card asks "whatever was fetched last"; the last WRITE answers
+ * that exactly, where a scan by `fetchedAt` would break a tie between two
+ * accounts read inside the same millisecond by map order.
+ */
+let quotaLastKey = UNNAMED_ACCOUNT_KEY
+
+function quotaCacheKeyFor(accountId?: string | null): string {
+  return accountId ?? UNNAMED_ACCOUNT_KEY
 }
 
-/** The cached snapshot only when it belongs to this account. */
+/** The entry read most recently, whichever account it belongs to. */
+function newestQuotaEntry(): KimiCodeAccountQuota | undefined {
+  return quotaCache.get(quotaLastKey)
+}
+
+/** Remember one account's newest snapshot, bounded to the accounts in use. */
+function rememberQuota(accountId: string | undefined, snapshot: KimiCodeAccountQuota): void {
+  const key = quotaCacheKeyFor(accountId)
+  quotaCache.set(key, snapshot)
+  quotaLastKey = key
+  while (quotaCache.size > QUOTA_ACCOUNT_LIMIT) {
+    const oldest = [...quotaCache.entries()].sort((left, right) => left[1].fetchedAt - right[1].fetchedAt)[0]
+    if (oldest === undefined) break
+    quotaCache.delete(oldest[0])
+    if (quotaLastKey === oldest[0]) quotaLastKey = UNNAMED_ACCOUNT_KEY
+  }
+}
+
+/**
+ * The snapshot read most recently, whichever account it belongs to.
+ *
+ * Kept for the pre-pool single-credential card, which has no account id to ask
+ * with. A pooled caller asks {@link getCachedQuotaFor} instead.
+ */
+export function getCachedQuota(): KimiCodeAccountQuota | null {
+  return newestQuotaEntry() ?? null
+}
+
+/**
+ * The cached snapshot only when it belongs to this account.
+ *
+ * Passing no account keeps the pre-pool behavior of returning whatever was
+ * fetched last. Passing one answers that account's own newest snapshot, or null
+ * when this line has never read it — null is "never read", which is a different
+ * statement from a snapshot whose windows are all at zero.
+ */
 export function getCachedQuotaFor(accountId?: string | null): KimiCodeAccountQuota | null {
-  if (accountId === undefined || accountId === null) return quotaCache
-  return quotaAccountId === accountId ? quotaCache : null
+  if (accountId === undefined || accountId === null) return newestQuotaEntry() ?? null
+  return cachedQuotaFor(accountId)
+}
+
+/**
+ * The newest snapshot held for one account, for display only.
+ *
+ * The pool asks here while it builds the account list for the settings card, so
+ * this is a pure memory read: it never fetches.
+ */
+export function cachedQuotaFor(accountId: string): KimiCodeAccountQuota | null {
+  return quotaCache.get(accountId) ?? null
 }
 
 export function clearCachedQuota(): void {
-  quotaCache = null
-  quotaAccountId = undefined
+  quotaCache.clear()
+  quotaLastKey = UNNAMED_ACCOUNT_KEY
 }
 
 /**
@@ -1006,7 +1082,8 @@ export interface QuotaFetchOptions {
    * Account the snapshot belongs to.
    *
    * With a pool the card must never render one account's quota under another
-   * account's name, so a snapshot is only reused for the same id.
+   * account's name, so each account keeps its own cache entry, keyed by this id.
+   * Omitted, the reading is filed under the single-credential slot.
    */
   accountId?: string
   /**
@@ -1034,9 +1111,11 @@ export async function fetchAccountQuota(
   store: FileCredentialStore,
   options: QuotaFetchOptions = {},
 ): Promise<KimiCodeAccountQuota | null> {
-  const sameAccount = options.accountId === undefined || quotaAccountId === options.accountId
-  if (options.force !== true && sameAccount && quotaCache !== null && Date.now() - quotaCache.fetchedAt < QUOTA_CACHE_TTL_MS) {
-    return quotaCache
+  // The TTL belongs to ONE account: this account's snapshot is served only
+  // while warm, and a fresh reading of a different account never answers here.
+  const cached = quotaCache.get(quotaCacheKeyFor(options.accountId))
+  if (options.force !== true && cached !== undefined && Date.now() - cached.fetchedAt < QUOTA_CACHE_TTL_MS) {
+    return cached
   }
 
   const fetchFn = options.fetchFn ?? fetch
@@ -1114,8 +1193,7 @@ export async function fetchAccountQuota(
     fetchedAt: Date.now(),
     sources: [openAIUrl(USAGES_PATH, credentials.region)],
   }
-  quotaCache = snapshot
-  quotaAccountId = options.accountId
+  rememberQuota(options.accountId, snapshot)
   return snapshot
 }
 

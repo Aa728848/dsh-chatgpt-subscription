@@ -1,62 +1,24 @@
 /**
- * The MiniMax Code routes the settings card consumes, in one place.
+ * The MiniMax Code routes the settings card consumes.
  *
- * Every path is prefixed with the frozen shared constant, so the client cannot
- * drift from the host's mount point. Answers are read tolerantly: the sibling
- * lines reply with an `{ ok, value }` envelope while this line's route table
- * documents the payload itself, and a card must not care which one arrived.
+ * This module used to carry its own reader — the last one left after
+ * `common/line-api.ts` took the other nine — and it still carried the predicate
+ * the shared reader dropped: a 2xx answer of `{ ok: false, error }` with no
+ * `value` was handed back as a payload instead of raising. Delegating is
+ * therefore not only de-duplication: it is what makes this line answer a
+ * failure exactly like its siblings.
+ *
+ * The names stay as they were so the hook that consumes them does not have to
+ * change with the reader.
  */
 import { MINIMAX_CODE_ROUTE_PREFIX } from '../../shared/minimax-code-contracts.ts'
+import { createLineApi } from '../common/line-api.ts'
 
-interface Envelope {
-  ok?: unknown
-  value?: unknown
-  error?: unknown
-}
+const api = createLineApi(MINIMAX_CODE_ROUTE_PREFIX, 'MiniMax Code')
 
-/** A route's error field is a plain string on some routes and an object on others. */
-function errorMessage(value: unknown, fallback: string): string {
-  if (typeof value === 'string' && value !== '') return value
-  if (value !== null && typeof value === 'object') {
-    const message = (value as { message?: unknown }).message
-    if (typeof message === 'string' && message !== '') return message
-  }
-  return fallback
-}
-
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${MINIMAX_CODE_ROUTE_PREFIX}${path}`, {
-    ...init,
-    credentials: 'same-origin',
-    headers: {
-      'Content-Type': 'application/json',
-      ...init?.headers,
-    },
-  })
-  const raw = await res.text()
-  let body: unknown = null
-  try {
-    body = raw === '' ? null : (JSON.parse(raw) as unknown)
-  } catch {
-    throw new Error(`HTTP ${res.status}`)
-  }
-
-  const envelope = body as Envelope | null
-  if (envelope !== null && typeof envelope === 'object' && typeof envelope.ok === 'boolean' && 'value' in envelope) {
-    if (!res.ok || envelope.ok === false) throw new Error(errorMessage(envelope.error, `HTTP ${res.status}`))
-    return envelope.value as T
-  }
-  if (!res.ok) throw new Error(errorMessage((body as Envelope | null)?.error, `HTTP ${res.status}`))
-  return body as T
-}
-
-export function get<T>(path: string): Promise<T> {
-  return request<T>(path)
-}
-
-export function post<T>(path: string, body: object = {}): Promise<T> {
-  return request<T>(path, { method: 'POST', body: JSON.stringify(body) })
-}
+export const request = api.request
+export const get = api.get
+export const post = api.post
 
 export function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)

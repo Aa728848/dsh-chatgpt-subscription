@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { CODEX_MODEL_CATALOG } from '../src/shared/model-catalog.ts'
-import { CodexSubscriptionSection, parseCapacity, storageLabel, storageNotice } from '../src/client/CodexSubscriptionSection.tsx'
+import { CodexSubscriptionSection, parseCapacity } from '../src/client/CodexSubscriptionSection.tsx'
 import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
 import { apply, inject } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -37,6 +37,10 @@ describe('client registration', () => {
   async function mountCodexSection(options: {
     visibleModelIds: string[]
     contextWindowOverrides?: Record<string, number>
+    /** Pooled accounts as the host reports them, quota included. */
+    accounts?: Array<Record<string, unknown>>
+    activeAccountId?: string
+    quota?: Record<string, unknown>
   }): Promise<{ container: HTMLElement; fetchMock: ReturnType<typeof vi.fn>; teardown: () => Promise<void> }> {
     const preferences = {
       visibleModelIds: [...options.visibleModelIds],
@@ -70,9 +74,12 @@ describe('client registration', () => {
       return Response.json({ ok: true, value: {
         authenticated: false,
         account: null,
+        accounts: options.accounts ?? [],
+        ...(options.activeAccountId === undefined ? {} : { activeAccountId: options.activeAccountId }),
+        rotationStrategy: 'sequential',
         storage: { kind: 'memory', encrypted: false, available: true },
         login: { active: false, loginId: null, expiresAt: null },
-        quota: { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
+        quota: options.quota ?? { state: 'signed-out', buckets: [], credits: null, individualLimit: null, spendControlReached: null, resetCredits: null, fetchedAt: null, stale: false },
         preferences: payload(),
       } })
     })
@@ -109,7 +116,7 @@ describe('client registration', () => {
       const { container, fetchMock } = harness
       const input = container.querySelector<HTMLInputElement>(`input[aria-label="${modelName} 上下文窗口"]`)
       expect(input).not.toBeNull()
-      const modelChecks = container.querySelectorAll<HTMLInputElement>('.dsha-models input[type="checkbox"]')
+      const modelChecks = container.querySelectorAll<HTMLButtonElement>('.dsh-mcl-option[role="checkbox"]')
       // Derived rather than pinned: adding a catalog entry must not require
       // editing a count in a test about rendering.
       expect(modelChecks).toHaveLength(CODEX_MODEL_CATALOG.length)
@@ -141,6 +148,45 @@ describe('client registration', () => {
     }
   })
 
+  it('puts each account its own quota, and leaves only facts on the quota block', async () => {
+    const readAt = Date.parse('2030-06-15T00:00:00Z')
+    const harness = await mountCodexSection({
+      visibleModelIds: ['gpt-5.6-sol'],
+      activeAccountId: 'acc_1',
+      accounts: [
+        { id: 'acc_1', alias: '主账号', isPrimary: true, quota: { fetchedAt: readAt, windows: [{ label: '', usedPercent: 42, windowDurationMins: 300, resetsAt: null }] } },
+        { id: 'acc_2', alias: '备用账号', isPrimary: false },
+      ],
+      quota: {
+        state: 'ready',
+        buckets: [{ id: 'codex', name: 'Codex', planType: 'plus', primary: null, secondary: null, windows: [{ usedPercent: 42, windowDurationMins: 300, resetsAt: null }] }],
+        credits: { hasCredits: true, unlimited: false, balance: '12.50' },
+        individualLimit: null,
+        spendControlReached: null,
+        resetCredits: null,
+        fetchedAt: readAt,
+        stale: false,
+      },
+    })
+    try {
+      const { container } = harness
+      // The progress bar is drawn inside the account it belongs to…
+      const row = container.querySelector('.dsha-account-card .dsha-account-quota-row')
+      expect(row).not.toBeNull()
+      expect(row!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('42')
+      expect(row!.textContent).toContain('42%')
+      // …the account nobody has read says exactly that…
+      expect(container.textContent).toContain(zh.quotaNone)
+      // …and the page-level block keeps the facts and says whose they are.
+      const block = [...container.querySelectorAll('.dsha-group')].find((group) => group.textContent?.includes(zh.quota))!
+      expect(block.textContent).toContain(zh.quotaFactsScope)
+      expect(block.textContent).toContain('plus')
+      expect(block.textContent).toContain('12.50')
+    } finally {
+      await harness.teardown()
+    }
+  })
+
   it('lists a context row only for the models checked under Available models', async () => {
     const harness = await mountCodexSection({ visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra'] })
     try {
@@ -150,8 +196,8 @@ describe('client registration', () => {
       // Nothing is overridden yet, so there is nothing to restore.
       expect(container.querySelector<HTMLButtonElement>('.dsha-context-settings .dsha-actions button')?.disabled).toBe(true)
 
-      const astraCheck = container.querySelector<HTMLInputElement>('label[title="gpt-6-astra"] input')
-      expect(astraCheck?.checked).toBe(false)
+      const astraCheck = container.querySelector<HTMLButtonElement>('.dsh-mcl-option[title="gpt-6-astra"]')
+      expect(astraCheck?.getAttribute('aria-checked')).toBe('false')
       await act(async () => astraCheck?.click())
       expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'],
@@ -213,20 +259,6 @@ describe('client registration', () => {
     }
   })
 
-  it('presents the actual Host credential storage security boundary', () => {
-    const t = ((key: keyof typeof zh) => zh[key]) as never
-    const linux = { kind: 'linux-file', encrypted: false, available: true } as const
-    const windows = { kind: 'windows-dpapi', encrypted: true, available: true } as const
-    const macos = { kind: 'macos-keychain', encrypted: true, available: true } as const
-
-    expect(storageLabel(linux, t)).toContain('0600')
-    expect(storageNotice(linux, t)).toContain('不会额外加密')
-    expect(storageLabel(windows, t)).toContain('DPAPI')
-    expect(storageLabel(macos, t)).toContain('钥匙串')
-    expect(storageNotice(macos, t)).toContain('钥匙串')
-    expect(storageNotice({ ...linux, available: false }, t)).toContain('无法安全访问')
-  })
-
   it('contributes the tabbed subscription hub, composer quotas, and image toolview', () => {
     const injectedSlots: string[] = []
     const registrations: Array<Record<string, unknown>> = []
@@ -286,13 +318,27 @@ describe('client registration', () => {
     for (const dispose of disposers.reverse()) dispose()
   })
 
-  it('hosts every subscription provider behind tabs in one settings page', async () => {
+  it('hosts every subscription provider behind an overview hub in one settings page', async () => {
     const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'claude', 'ollama'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.startsWith('/api/dsh-chatgpt-subscription/hub/overview')) {
+        return Response.json({ ok: true, value: {
+          providers: TAB_IDS.map((id, index) => ({
+            id,
+            providerId: `${id}-provider`,
+            canToggle: id !== 'ollama',
+            enabled: true,
+            accountCount: index % 3,
+            authenticated: index % 3 > 0,
+            enabledModelCount: id === 'chatgpt' ? 2 : null,
+            totalModelCount: id === 'chatgpt' ? CODEX_MODEL_CATALOG.length : null,
+          })),
+        } })
+      }
       // MiniMax Code mounts under its own `/minimax-code/api` prefix like every
       // sibling line, and its card treats a missing quota as "this line exposes
       // no usage endpoint".
@@ -384,36 +430,55 @@ describe('client registration', () => {
     const root = createRoot(container)
     const t = ((key: keyof typeof zh) => zh[key]) as never
     try {
+      sessionStorage.removeItem('dsh-chatgpt-subscription:hub-view')
       await act(async () => root.render(createElement(ProviderHubSection, { t, close: () => undefined } as never)))
-      const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
-      expect(tabs.map((tab) => tab.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'Claude', 'Ollama'])
-      expect(container.querySelector('#dsh-hub-tab-claude')?.textContent).toBe('Claude')
-      expect(tabs[0]?.getAttribute('aria-selected')).toBe('true')
-      // The ChatGPT provider panel mounts by default; the other providers stay unmounted.
-      expect(container.querySelector('#dsh-codex-title')).not.toBeNull()
-      // Every tab, ChatGPT included, renders the same shared settings layout and
-      // the same account-management card.
-      expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-page')).not.toBeNull()
-      expect(container.querySelector('#dsh-hub-panel-chatgpt .dsha-grouphead')?.textContent).toContain(zh.accountPool)
 
+      // The opening screen is the overview: one card per provider, in registry
+      // order, and no provider section mounted underneath.
+      const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'Claude', 'Ollama'])
+      expect(container.querySelector('.dsh-hub-detail')).toBeNull()
+      expect(container.querySelector('#dsh-codex-title')).toBeNull()
+      // Every toggleable line renders a switch on its card; Ollama, which has
+      // no enable switch on the host, renders none.
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(7)
+      const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
+      expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
+      // Annotations carry the account count from the aggregated overview.
+      expect(cards[1]?.textContent).toContain('1 个账号')
+
+      // Drilling in replaces the overview with that line's section, mounted
+      // under the back bar; leaving the page means the section unmounts.
       for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/minimax-code/api/status'], [6, '/claude/api/status']] as const) {
         const id: string = TAB_IDS[index]
         fetchMock.mockClear()
-        await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-' + id)?.click() })
-        expect(container.querySelector('#dsh-codex-title')).toBeNull()
-        expect(container.querySelector('#dsh-hub-panel-' + id + ' .dsha-page')).not.toBeNull()
+        await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[index]?.click() })
+        expect(container.querySelector('.dsh-hub-overview')).toBeNull()
+        expect(container.querySelector('.dsh-hub-detail .dsha-page')).not.toBeNull()
+        expect(container.querySelector('.dsh-hub-backbar-name')?.textContent?.length).toBeGreaterThan(0)
         expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith(apiPrefix))).toBe(true)
-        expect(container.querySelector<HTMLButtonElement>('#dsh-hub-tab-' + id)?.getAttribute('aria-selected')).toBe('true')
+        await act(async () => { container.querySelector<HTMLButtonElement>('.dsh-hub-back')?.click() })
+        expect(container.querySelector('.dsh-hub-overview')).not.toBeNull()
+        expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       }
 
-      // The MiniMax tab renders its OWN dictionary, not the hub's locale seat.
+      // The ChatGPT card mounts the ChatGPT section, which is the one section
+      // with its own page-level header.
+      fetchMock.mockClear()
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[0]?.click() })
+      expect(container.querySelector('.dsh-hub-detail .dsha-page')).not.toBeNull()
+      expect(container.querySelector('#dsh-codex-title')).not.toBeNull()
+      expect(container.querySelector('.dsh-hub-detail .dsha-grouphead')?.textContent).toContain(zh.accountPool)
+      await act(async () => { container.querySelector<HTMLButtonElement>('.dsh-hub-back')?.click() })
+
+      // The MiniMax detail renders its OWN dictionary, not the hub's locale seat.
       // The hub's `t` is bound to the ChatGPT namespace, whose key set is not a
       // superset of this card's: using it resolved 35 keys to their literal names
       // and 8 others to ChatGPT wording (the sign-in button literally read
       // "使用 ChatGPT 登录"). Resolve `t` the way the real LocaleFace does — an
       // unknown key falls through to the key itself — and assert no key leaks.
-      await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-minimax-code')?.click() })
-      const minimaxText = container.querySelector('#dsh-hub-panel-minimax-code .dsha-page')?.textContent ?? ''
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[5]?.click() })
+      const minimaxText = container.querySelector('.dsh-hub-detail .dsha-page')?.textContent ?? ''
       expect(minimaxText).not.toContain('使用 ChatGPT 登录')
       expect(minimaxText).not.toContain(zh.signIn)
       // A literal key name would appear as a camelCase word with no CJK context.
@@ -421,32 +486,20 @@ describe('client registration', () => {
         expect(minimaxText).not.toContain(key)
       }
       expect(minimaxText).toContain('MiniMax Code')
+      await act(async () => { container.querySelector<HTMLButtonElement>('.dsh-hub-back')?.click() })
 
-      // The tab strip is one scrolling line, so selecting a tab must bring it into
-      // view; otherwise a keyboard-driven selection can move off-screen with no
-      // feedback. jsdom does not implement scrollIntoView, so the hub guards the
-      // call and this stubs it to observe the request.
-      const scrolled: Element[] = []
-      for (const tab of container.querySelectorAll('[role="tab"]')) {
-        ;(tab as unknown as { scrollIntoView: (options?: unknown) => void }).scrollIntoView =
-          function scrollIntoView(this: Element) { scrolled.push(this) }
-      }
-      await act(async () => { container.querySelector<HTMLButtonElement>('#dsh-hub-tab-claude')?.click() })
-      expect(scrolled.at(-1)?.id).toBe('dsh-hub-tab-claude')
-
-      // Arrow keys move the active tab per the tablist pattern, wrapping at both
-      // ends. Ollama now sits last, so the wrap is asserted from the last tab in
-      // TAB_IDS rather than from a fixed name: that keeps the keyboard order tied
-      // to the rendered strip instead of to whichever provider is newest.
-      const lastTabId = TAB_IDS[TAB_IDS.length - 1]
-      await act(async () => { container.querySelector<HTMLButtonElement>(`#dsh-hub-tab-${lastTabId}`)?.click() })
-      await act(async () => {
-        container.querySelector<HTMLButtonElement>(`#dsh-hub-tab-${lastTabId}`)?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
-      })
-      expect(container.querySelector<HTMLButtonElement>('#dsh-hub-tab-chatgpt')?.getAttribute('aria-selected')).toBe('true')
-      expect(container.querySelector('#dsh-codex-title')).not.toBeNull()
-    } finally {
+      // The detail the user was last on survives a remount of the settings page.
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[6]?.click() })
+      expect(container.querySelector('.dsh-hub-backbar-name')?.textContent).toBe('Claude')
       await act(async () => root.unmount())
+      const remountRoot = createRoot(container)
+      await act(async () => remountRoot.render(createElement(ProviderHubSection, { t, close: () => undefined } as never)))
+      expect(container.querySelector('.dsh-hub-backbar-name')?.textContent).toBe('Claude')
+      expect(container.querySelector('.dsh-hub-detail .dsha-page')).not.toBeNull()
+      await act(async () => remountRoot.unmount())
+    } finally {
+      // The remount check above may have unmounted the first root already.
+      await act(async () => { try { root.unmount() } catch { /* already unmounted */ } })
       container.remove()
       globalThis.fetch = originalFetch
       globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment

@@ -124,7 +124,7 @@ describe('OllamaSection', () => {
     const el = await render()
     // Every other line lets the user turn its models off; without this the
     // Ollama models always appear in the picker with no way to hide them.
-    const boxes = el.querySelectorAll('input[type="checkbox"]')
+    const boxes = el.querySelectorAll('.dsh-mcl-option[role="checkbox"]')
     expect(boxes).toHaveLength(2)
     // ...and the two bulk controls its siblings ship.
     expect(el.textContent).toContain(zh.selectAll)

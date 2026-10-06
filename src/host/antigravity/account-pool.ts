@@ -5,6 +5,7 @@ import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
 import { AccountPoolCore, normalizeRotationStrategy, type AccountPoolHooks } from '../common/account-pool.ts'
+import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { dshHomeDir } from '../common/home.ts'
 import {
   FileCredentialStore,
@@ -12,10 +13,13 @@ import {
   type AntigravityCredentials,
 } from './token-store.ts'
 import { refreshAntigravityToken } from './oauth.ts'
+import { getCachedQuota } from './client.ts'
 import type {
+  AntigravityAccountQuota,
   AntigravityAccountSummaryDto,
   AccountRotationStrategy,
 } from '../../shared/antigravity-contracts.ts'
+import type { PoolAccountQuotaDto, PoolAccountQuotaWindowDto } from '../../shared/account-pool-contracts.ts'
 
 export interface AntigravityPoolAccount {
   id: string
@@ -102,6 +106,64 @@ function createPoolCredentialBackend(filePath: string): CredentialStore<Antigrav
 }
 
 /**
+ * One bucket's reset moment as Unix milliseconds, when it parses as a date.
+ *
+ * The service states it as an ISO-ish string; anything `Date.parse` refuses is
+ * dropped rather than guessed at, because a wrong instant on the card is worse
+ * than none.
+ */
+function resetTimeMs(resetTime: string | undefined): number | null {
+  if (resetTime === undefined || resetTime === '') return null
+  const parsed = Date.parse(resetTime)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+/**
+ * One cached Antigravity snapshot as the shared account card renders it.
+ *
+ * One window per bucket. The service states what is LEFT, and the card draws what
+ * is SPENT, so the used share is the complement. A bucket whose fraction is
+ * `null` (never measured) or outside 0-1 is dropped rather than drawn as 0% or
+ * 100%: "not stated" and "nothing used" are different claims and only one of
+ * them is true. A stated 0 is a real measurement — the allowance is exhausted —
+ * and is published as 100% used.
+ *
+ * `windowDurationMins` is deliberately absent. The bucket's `window` field is
+ * carried through this line's cache verbatim and nothing in the line interprets
+ * it as a duration, so naming a window from it would be a guess; the card names
+ * each window from the label below instead.
+ */
+export function antigravityPoolQuota(quota: AntigravityAccountQuota | undefined): PoolAccountQuotaDto | undefined {
+  if (quota === undefined) return undefined
+  // A bucket name that repeats across groups identifies nothing on its own, so
+  // those rows carry their group's name as well.
+  const nameCounts = new Map<string, number>()
+  for (const group of quota.groups) {
+    for (const bucket of group.buckets) {
+      const name = bucket.displayName.trim()
+      if (name === '') continue
+      nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1)
+    }
+  }
+  const windows: Array<PoolAccountQuotaWindowDto | null> = []
+  for (const group of quota.groups) {
+    const groupName = group.displayName.trim()
+    for (const bucket of group.buckets) {
+      const remaining = bucket.remainingFraction
+      // `null` is unmeasured and must never be read as 0 (which would claim the
+      // bucket is spent); a hand-built snapshot can also carry NaN or a share
+      // outside 0-1, which is no more publishable than an absent one.
+      if (remaining === null || !Number.isFinite(remaining) || remaining < 0 || remaining > 1) continue
+      const name = bucket.displayName.trim()
+      const ambiguous = name === '' || (nameCounts.get(name) ?? 0) > 1
+      const label = ambiguous && groupName !== '' ? (name === '' ? groupName : groupName + ' · ' + name) : name
+      windows.push(quotaWindow(label, (1 - remaining) * 100, { resetsAt: resetTimeMs(bucket.resetTime) }))
+    }
+  }
+  return poolQuota(quota.fetchedAt, windows)
+}
+
+/**
  * Antigravity's account pool.
  *
  * The storage, eligibility, rotation and cooldown rules live in the shared
@@ -185,6 +247,21 @@ export class AccountPoolStore {
           ...(projectId === undefined ? {} : { projectId }),
           ...(email === undefined ? {} : { email }),
           ...(account.planLabel === undefined ? {} : { planLabel: account.planLabel }),
+          // The cached quota snapshot belongs to the PRIMARY row, and to no other.
+          //
+          // This line has no per-account quota path: `fetchAccountQuota` reads the
+          // legacy single-credential file, which `mirrorPrimary` keeps in step with
+          // the primary account alone, and the cache is one global slot with no
+          // account key. Under round-robin or sticky the snapshot therefore still
+          // describes the primary account, not whichever account is serving, which
+          // is exactly why it is attached here rather than to the active row:
+          // publishing it on the serving account would put the primary's numbers
+          // under another account's name. There is deliberately no upstream read
+          // per account — building this list must not fan out one request each.
+          ...(account.isPrimary === true ? (() => {
+            const quota = antigravityPoolQuota(getCachedQuota())
+            return quota === undefined ? {} : { quota }
+          })() : {}),
         }
       },
       emptyMessage: '未登录 Antigravity 账号，请在「设置 → Antigravity」中添加并登录账号。',

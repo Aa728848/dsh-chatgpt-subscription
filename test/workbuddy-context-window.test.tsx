@@ -201,11 +201,11 @@ describe('WorkBuddy context window section', () => {
     await render()
     expect(contextInput(contextSection(), 'Hunyuan T1')).toBeNull()
 
-    const pill = [...container.querySelectorAll<HTMLElement>('.dsha-models label')].find(
-      (label) => label.querySelector('span')?.textContent === 'Hunyuan T1',
+    const row = [...container.querySelectorAll<HTMLElement>('.dsh-mcl-option')].find(
+      (candidate) => candidate.querySelector('.dsh-mcl-name')?.textContent === 'Hunyuan T1',
     )
-    expect(pill).toBeDefined()
-    await act(async () => pill!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click())
+    expect(row).toBeDefined()
+    await act(async () => row!.click())
 
     expect(settingsCalls()).toEqual([
       {

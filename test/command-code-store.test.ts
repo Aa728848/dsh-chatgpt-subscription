@@ -9,7 +9,7 @@ import {
   modelSettingsPath,
   parseCommandCodeCredentials,
 } from '../src/host/command-code/token-store.ts'
-import { formatCapacity, parsePositiveCapacity } from '../src/client/command-code/CommandCodeSection.tsx'
+import { formatCapacity, parsePositiveCapacity } from '../src/client/common/format.ts'
 import { selectBadgeFacts } from '../src/client/command-code/CommandCodeComposerQuota.tsx'
 import type { CommandCodeWebStatus } from '../src/shared/command-code-contracts.ts'
 

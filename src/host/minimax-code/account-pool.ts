@@ -56,11 +56,15 @@ import {
   isRefreshTokenRejected,
   refreshAccessToken,
 } from './oauth.ts'
+import { getCachedQuotaFor } from './client.ts'
+import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { PROVIDER_ID, isRegion } from './types.ts'
-import type { MinimaxCodeRegion } from '../../shared/minimax-code-contracts.ts'
+import type { MinimaxCodeRegion, MinimaxCodeQuota, MinimaxCodeQuotaWindow } from '../../shared/minimax-code-contracts.ts'
 import type {
   AccountAuthStatus,
   AccountRotationStrategy,
+  PoolAccountQuotaDto,
+  PoolAccountQuotaWindowDto,
   PoolAccountSummaryDto,
 } from '../../shared/account-pool-contracts.ts'
 
@@ -330,6 +334,45 @@ export interface MinimaxCodeAccountPoolOptions {
 }
 
 /**
+ * Nominal length of the two windows the Token Plan reports, in minutes.
+ *
+ * The line's own card names these two keys (`quotaWindowInterval` = 5 小时窗口,
+ * `quotaWindowWeekly` = 每周窗口), and 5 hours / 7 days is what those words mean,
+ * so the shared account card can name an unlabeled window from its length
+ * instead of showing a generic one. The same two numbers label the equivalent
+ * windows on the Command Code and Kimi Code lines.
+ */
+const WINDOW_MINUTES: Record<MinimaxCodeQuotaWindow['key'], number> = {
+  interval: 300,
+  weekly: 10_080,
+}
+
+/**
+ * One cached read as the shared account card renders it.
+ *
+ * Every window is labeled through its LENGTH rather than with a string: the
+ * canonical window names live in the client's dictionary, and the host has no
+ * business shipping display text. A window whose consumed share nobody measured
+ * is dropped by {@link quotaWindow} — a null percentage is not 0%, it is
+ * "not stated", and a bar would lie about it. An `unlimited` window states no
+ * consumed share at all and the per-account shape has no way to say
+ * "unlimited", so it is dropped too rather than drawn as an empty bar.
+ */
+export function minimaxCodePoolQuota(quota: MinimaxCodeQuota | null | undefined): PoolAccountQuotaDto | undefined {
+  if (quota === null || quota === undefined) return undefined
+  const windows: Array<PoolAccountQuotaWindowDto | null> = quota.windows === undefined || quota.windows.length === 0
+    // A snapshot that stated a single figure and no window detail: it is the
+    // interval window's number, but the read never said so and this shape cannot
+    // claim a length it was not told, so the window stays unlabeled.
+    ? [quotaWindow('', quota.usedPercent, { resetsAt: quota.resetsAtMs })]
+    : quota.windows.map((window) => quotaWindow('', window.usedPercent, {
+      windowDurationMins: WINDOW_MINUTES[window.key],
+      resetsAt: window.resetsAtMs,
+    }))
+  return poolQuota(quota.fetchedAtMs, windows)
+}
+
+/**
  * MiniMax Code's account pool.
  *
  * It owns rotation and the write-back, exactly like the sibling lines, with one
@@ -484,6 +527,16 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
           removable: source === 'file',
           ...(email === undefined ? {} : { email }),
           ...(planName === undefined ? {} : { planName, planLabel: planName }),
+          // This account's OWN newest snapshot, when a read was ever made for it.
+          // Quota follows the account, so the map is keyed by the row the read
+          // belonged to; absent means exactly "never read for this account",
+          // which is not the same claim as "nothing used". The lookup is a pure
+          // memory read: building the settings card must never fan out one
+          // upstream request per pooled account.
+          ...(() => {
+            const quota = minimaxCodePoolQuota(getCachedQuotaFor(account.id))
+            return quota === undefined ? {} : { quota }
+          })(),
         }
       },
       // An account adopted from the desktop app is a COPY of a session that
@@ -585,6 +638,36 @@ export class MinimaxCodeAccountPool extends AccountPoolCore<
       }
       return changed
     })
+  }
+
+  /**
+   * The account a usage read belongs to, together with the credential to read it
+   * with.
+   *
+   * Authored here rather than in the routes because it is provider-shaped: the
+   * routes need a credential and the ACCOUNT it was read for, so a snapshot can
+   * be remembered against the row whose numbers it describes. The selection is
+   * the core's own rule for a caller that names no account — the active one, then
+   * the primary, then the first — repeated in these three lines because the core
+   * exposes it only through `getFreshCredential`, which returns the credential
+   * alone; the credential (and its single-flight refresh, write-back and
+   * bookkeeping) still comes from the core, so no rotation rule lives here.
+   *
+   * No upstream request is made for the selection itself, and none of this moves
+   * the rotation: reading quota is not serving a request.
+   */
+  async getQuotaReadTarget(fetchFn: typeof fetch = fetch): Promise<{ accountId: string; credentials: MinimaxCodeCredentials }> {
+    const data = await this.read()
+    const target = data.accounts.find((account) => account.id === data.activeAccountId)
+      ?? data.accounts.find((account) => account.isPrimary)
+      ?? data.accounts[0]
+    if (target === undefined) {
+      // An empty pool: ask the core for the credential anyway so the error every
+      // other caller already handles is the one raised.
+      await this.getFreshCredential(undefined, fetchFn)
+      throw new Error('MiniMax Code 号池中没有账号。')
+    }
+    return { accountId: target.id, credentials: await this.getFreshCredential(target.id, fetchFn) }
   }
 
   /**

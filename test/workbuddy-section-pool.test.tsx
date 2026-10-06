@@ -128,12 +128,9 @@ describe('WorkBuddy settings card', () => {
     const first = container.querySelectorAll('.dsha-account-card')[0]!
     expect(first.querySelector('.dsha-badge.primary')?.textContent).toBe(poolZh.primaryAccount)
     expect(first.querySelector('.dsha-badge.active')?.textContent).toBe(poolZh.activeAccount)
-    // The shared group heading, strategy picker and labels are the shared ones;
-    // only the storage notice is overridden, as every sibling tab overrides it.
+    // The shared group heading and strategy picker are the shared ones.
     expect(container.textContent).toContain('账号管理')
     expect(container.textContent).toContain(poolZh.rotationStrategy)
-    expect(container.textContent).toContain(poolZh.storage)
-    expect(container.textContent).toContain(zh.storageNotice)
     // WorkBuddy-specific identity facts still reach the card via renderDetails,
     // including the full token expiry the shared card does not render itself.
     expect(container.textContent).toContain('1000****01')
@@ -152,9 +149,8 @@ describe('WorkBuddy settings card', () => {
     expect(headings[1]).toBe(zh.connection)
     expect(headings).not.toContain(zh.account)
     expect(headings.filter((heading) => heading.includes('账号管理'))).toHaveLength(1)
-    // The provider switch, its verification and the rescan entry live in the
-    // card; the connection group keeps the shared route notice.
-    expect(container.textContent).toContain(zh.enableProvider)
+    // The provider switch lives on the overview card now; the connection group
+    // keeps the rescan entry and the shared route notice.
     expect(container.textContent).toContain(zh.rescan)
     expect(container.textContent).toContain(zh.routeOwned)
   })
@@ -168,18 +164,18 @@ describe('WorkBuddy settings card', () => {
     for (const button of login) expect(button.classList.contains('dsha-btn-primary')).toBe(true)
   })
 
-  it('shows only the model name on a pill, not the capability summary', async () => {
+  it('shows the model name with its capability facts on the quiet hint line', async () => {
     await render()
 
-    const pill = container.querySelector('.dsha-models label')!
-    expect(pill.querySelector('span')?.textContent).toBe('GLM-5.3')
-    // The context window / image / effort facts moved into the tooltip, so this
-    // tab renders the same single-line pill as its four siblings.
-    expect(pill.textContent).not.toContain('1M')
-    expect(pill.textContent).not.toContain(zh.imageSupport)
-    expect(pill.getAttribute('title')).toContain('1M')
-    expect(pill.getAttribute('title')).toContain(zh.imageSupport)
-    expect(pill.getAttribute('title')).toContain('low/high/max')
+    // The shared checklist row: name on the first line, and the context window /
+    // image / effort facts on the hint line, in the claude-style picker's idiom.
+    const row = container.querySelector('.dsh-mcl-option')!
+    expect(row.querySelector('.dsh-mcl-name')?.textContent).toBe('GLM-5.3')
+    const hint = row.querySelector('.dsh-mcl-hint')?.textContent ?? ''
+    expect(hint).toContain('1M')
+    expect(hint).toContain(zh.imageSupport)
+    expect(hint).toContain('low/high/max')
+    expect(row.getAttribute('title')).toBe('glm-5.3')
   })
 
   it('shows the empty state through the shared card, not a panel of its own', async () => {

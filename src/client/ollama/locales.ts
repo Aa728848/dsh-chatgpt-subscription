@@ -14,12 +14,9 @@ export const zh = {
   needsRelogin: 'Key 已失效',
   addAccount: '添加 API Key',
   noAccounts: '暂无 API Key。点击「添加 API Key」粘贴 ollama.com 创建的 Key。',
-  storageNotice: 'API Key 由 Host 保存于本地安全存储，不会进入浏览器。',
 
   title: 'Ollama',
   pageDesc: '接入 Ollama Cloud，用多个 API Key 组成号池，自动轮换与故障转移。',
-  provider: 'Provider',
-  providerValue: 'Ollama · ollama',
   routeOwned: '模型路由由本插件提供',
   routeConflict: '模型路由已被其他 Provider 占用：{detail}。请在 DSH 设置中移除重复的 Provider 配置后重试。',
 
@@ -75,12 +72,9 @@ export const en = {
   needsRelogin: 'Key rejected',
   addAccount: 'Add API Key',
   noAccounts: 'No API keys yet. Click "Add API Key" to paste one from ollama.com.',
-  storageNotice: 'API keys are stored locally by the Host and never sent to the browser.',
 
   title: 'Ollama',
   pageDesc: 'Connect Ollama Cloud with several API keys pooled for rotation and failover.',
-  provider: 'Provider',
-  providerValue: 'Ollama · ollama',
   routeOwned: 'Model route served by this plugin',
   routeConflict: 'The model route is already owned by another provider: {detail}',
 

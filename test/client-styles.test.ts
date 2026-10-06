@@ -1,51 +1,83 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
 import { installStyles } from '../src/client/styles.ts'
+import { installAntigravityStyles } from '../src/client/antigravity/styles.ts'
+import { installHubStyles } from '../src/client/hub/hub-styles.ts'
+import { installKimiCodeStyles } from '../src/client/kimi-code/styles.ts'
+import { installModelChecklistStyles } from '../src/client/common/model-checklist-styles.ts'
+import { installPoolStyles } from '../src/client/common/styles.ts'
 
 const SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/main"]'
+const HUB_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/hub"]'
+const CHECKLIST_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/model-checklist"]'
+const POOL_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/pool"]'
+const ANTIGRAVITY_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/antigravity"]'
+const KIMI_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/kimi-code"]'
 const tags = () => document.querySelectorAll<HTMLStyleElement>(SELECTOR)
 
 afterEach(() => {
-  for (const tag of [...tags()]) tag.remove()
+  for (const selector of [SELECTOR, HUB_SELECTOR, CHECKLIST_SELECTOR, POOL_SELECTOR, ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
+    for (const tag of [...document.querySelectorAll<HTMLStyleElement>(selector)]) tag.remove()
+  }
 })
 
-describe('provider hub tab strip', () => {
-  it('scrolls the hub tab strip on one line instead of wrapping it', () => {
-    installStyles()
-    const css = tags()[0]!.textContent ?? ''
-    const hubTabs = /\.dsh-hub-tabs\{[^}]*\}/.exec(css)?.[0] ?? ''
-    // Seven tabs exceed a narrow settings pane. Wrapping made them reachable but
-    // produced a ragged second row (five tabs, then two); the strip now stays on
-    // one line and scrolls, so every tab remains reachable at any width.
-    expect(hubTabs).toContain('flex-wrap:nowrap')
-    expect(hubTabs).toContain('overflow-x:auto')
-    // The scrollbar is the affordance that more tabs exist, so it must not be
-    // hidden: a mouse user's vertical wheel cannot scroll this row.
-    expect(hubTabs).not.toContain('scrollbar-width:none')
-    expect(hubTabs).not.toContain('::-webkit-scrollbar{display:none')
-    // Buttons must not shrink, or the labels squash instead of the row scrolling.
-    expect(css).toContain('.dsh-hub-tabs button{flex:none}')
+describe('provider hub overview styles', () => {
+  it('ships the overview card, the switch and the back bar as one tagged sheet', () => {
+    installHubStyles()
+    const css = document.querySelector<HTMLStyleElement>(HUB_SELECTOR)?.textContent ?? ''
+    // The card is a full-width row: brand tile, copy block, switch + chevron.
+    expect(css).toContain('.dsh-hub-card{')
+    expect(css).toContain('.dsh-hub-brand-tile{')
+    // The switch is a sliding pill, not a native checkbox.
+    expect(css).toContain('.dsh-hub-switch[aria-checked=true]')
+    expect(css).toContain('.dsh-hub-switch::after')
+    // The detail page's back bar, which replaced the tab strip.
+    expect(css).toContain('.dsh-hub-backbar{')
+    expect(css).toContain('.dsh-hub-back{')
+    // A disabled line's card reads as such.
+    expect(css).toContain('[data-enabled=false]')
   })
 
-  it('leaves room for the tab focus outline inside the scroll container', () => {
+  it('no longer carries the removed tab strip in the main sheet', () => {
     installStyles()
     const css = tags()[0]!.textContent ?? ''
-    const hubTabs = /\.dsh-hub-tabs\{[^}]*\}/.exec(css)?.[0] ?? ''
-    // The focus outline is 2px wide with a 2px offset (4px beyond the button), and
-    // an overflow container clips at its padding box, so the strip's own padding
-    // has to be at least 4px or the ring is shaved for keyboard users.
-    expect(hubTabs).toContain('overflow-y:hidden')
-    const padding = Number(/\.dsh-hub-tabs\{[^}]*padding:(\d+)px/.exec(hubTabs)?.[1])
-    expect(padding).toBeGreaterThanOrEqual(4)
-    // scroll-padding must match, or a tab scrolled into view sits under the edge.
-    expect(hubTabs).toContain(`scroll-padding-inline:${padding}px`)
+    expect(css).not.toContain('.dsh-hub-tabs')
+    // The overview styles live in their own sheet, installed separately.
+    expect(css).not.toContain('.dsh-hub-card')
   })
 
-  it('keeps the shared segments rule single-line for the ChatGPT search group', () => {
-    installStyles()
-    const css = tags()[0]!.textContent ?? ''
-    const segments = /\.dsh-codex-segments\{[^}]*\}/.exec(css)?.[0] ?? ''
-    expect(segments).toContain('flex-wrap:nowrap')
+  it('ships the in-row account quota block in the pool sheet', () => {
+    installPoolStyles()
+    const css = document.querySelector<HTMLStyleElement>(POOL_SELECTOR)?.textContent ?? ''
+    // Quota follows the account, so its bar lives inside the account row.
+    expect(css).toContain('.dsha-account-quota-row{')
+    expect(css).toContain('.dsha-account-quota-fill{')
+    expect(css).toContain('.dsha-account-quota-track{')
+    // The warning/danger levels the page-level bars already use.
+    expect(css).toContain('[data-level=warning]')
+    expect(css).toContain('[data-level=danger]')
+  })
+
+  it('ships the shared model checklist rows in their own sheet', () => {
+    installModelChecklistStyles()
+    const css = document.querySelector<HTMLStyleElement>(CHECKLIST_SELECTOR)?.textContent ?? ''
+    expect(css).toContain('.dsh-mcl-option{')
+    expect(css).toContain('.dsh-mcl-check{')
+    expect(css).toContain('.dsh-mcl-option[aria-checked=true] .dsh-mcl-check')
+    expect(css).toContain('.dsh-mcl-head{')
+  })
+
+  it('drops the replaced chip rules from the line sheets that still carried them', () => {
+    // The shared checklist owns the model rows now, so a line sheet that still
+    // defined the old chip list would be carrying a rule nothing can match — the
+    // same dead CSS the main sheet already shed.
+    installAntigravityStyles()
+    installKimiCodeStyles()
+    for (const selector of [ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
+      const css = document.querySelector<HTMLStyleElement>(selector)?.textContent ?? ''
+      expect(css).not.toContain('.dsha-models{')
+      expect(css).toContain('.dsha-models-hint{')
+    }
   })
 })
 

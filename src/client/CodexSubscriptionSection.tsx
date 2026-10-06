@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CodexReasoningSummary, CredentialStorageDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { CodexReasoningSummary, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { AccountPoolSection, type AccountPoolLabels } from './common/AccountPoolSection.tsx'
+import { ModelChecklist } from './common/ModelChecklist.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from './common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../shared/account-pool-contracts.ts'
 import { NS } from './locales.ts'
@@ -206,18 +207,38 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
    * every pool label is resolved through the tab's own translator and follows
    * whichever locale is active.
    */
-  const poolLabels: AccountPoolLabels = (() => {
-    const keys: Array<keyof AccountPoolLabels> = [
-      'accountPool', 'addAccount', 'accountCount', 'primaryAccount', 'activeAccount',
-      'setPrimary', 'deleteAccount', 'cooling', 'cooldownLeft', 'clearCooldown',
-      'needsRelogin', 'relogin', 'rotationStrategy', 'strategySequential',
-      'strategyRoundRobin', 'strategySticky', 'noAccounts', 'storage', 'storageNotice',
-      'email', 'expires', 'lastUsed', 'accountId',
-    ]
-    const labels = {} as AccountPoolLabels
-    for (const key of keys) labels[key] = t(key as Parameters<Translate>[0])
-    return labels
-  })()
+  const poolLabels: AccountPoolLabels = {
+    accountPool: t('accountPool'),
+    addAccount: t('addAccount'),
+    accountCount: t('accountCount'),
+    primaryAccount: t('primaryAccount'),
+    activeAccount: t('activeAccount'),
+    setPrimary: t('setPrimary'),
+    deleteAccount: t('deleteAccount'),
+    cooling: t('cooling'),
+    cooldownLeft: t('cooldownLeft'),
+    clearCooldown: t('clearCooldown'),
+    needsRelogin: t('needsRelogin'),
+    relogin: t('relogin'),
+    rotationStrategy: t('rotationStrategy'),
+    strategySequential: t('strategySequential'),
+    strategyRoundRobin: t('strategyRoundRobin'),
+    strategySticky: t('strategySticky'),
+    noAccounts: t('noAccounts'),
+    email: t('email'),
+    expires: t('expires'),
+    lastUsed: t('lastUsed'),
+    accountId: t('accountId'),
+    accountQuota: t('accountQuota'),
+    quotaNone: t('quotaNone'),
+    quotaSnapshot: t('quotaSnapshot'),
+    quotaResets: t('quotaResets'),
+    quotaExhausted: t('quotaExhausted'),
+    quotaWindow: t('quotaWindow'),
+    quotaUsed: t('quotaUsed'),
+    quotaFactsScope: t('quotaFactsScope'),
+    composerLabel: t('composerLabel'),
+  }
 
   const accountAction = async (
     action: 'set-primary' | 'delete' | 'clear-cooldown',
@@ -280,7 +301,6 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const account = status?.account
   const preferences = status?.preferences
   const quota = status?.quota
-  const storage = status?.storage
   const login = status?.login
   const visibleModelIds = preferences?.visibleModelIds ?? DEFAULT_VISIBLE_CODEX_MODEL_IDS
   // Only checked models get a context row, in catalog order.
@@ -311,15 +331,13 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         onClearCooldown={(accountId) => void accountAction('clear-cooldown', accountId)}
         onRelogin={(accountId) => relogin(accountId)}
         onSetStrategy={(strategy) => void setRotationStrategy(strategy)}
-        storageValue={storageLabel(storage, t)}
+        showQuota
         renderDetails={(entry) => (
           <>
             {entry.planLabel && <span>{t('plan')}: {entry.planLabel}</span>}
-            {entry.email && <span>{t('email')}: {entry.email}</span>}
           </>
         )}
       >
-        <p className="dsha-notice">{storageNotice(storage, t)}</p>
         {login?.active ? <p className="dsha-muted" role="status">{t('pending')}</p> : null}
         {popupBlocked ? <p className="dsh-codex-error">{t('popupBlocked')}</p> : null}
         {authUrl !== null ? <a className="dsh-codex-link" href={authUrl} target="_blank" rel="noreferrer">{t('continueLogin')}</a> : null}
@@ -330,38 +348,20 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
       </AccountPoolSection>
 
       <Section title={t('connection')}>
-        <div className="dsha-pref-row" style={{ marginBottom: 12 }}>
-          <div>
-            <strong>{t('enableProvider')}</strong>
-          </div>
-          <input
-            type="checkbox"
-            checked={preferences?.enabled ?? true}
-            disabled={busy !== null}
-            onChange={(event) => {
-              const enabled = event.currentTarget.checked
-              setStatus((cur) => cur === null ? cur : { ...cur, preferences: { ...cur.preferences, enabled } })
-              void updatePreferences({ enabled })
-            }}
-          />
-        </div>
-        <InfoRow label={t('provider')} value="Codex（ChatGPT 订阅） · codex-chatgpt" />
-        <InfoRow label={t('connectionState')} value={connection === null ? t('untested') : t('connected')} />
         {connection !== null ? <InfoRow label={t('latency')} value={`${connection.latencyMs} ms · ${formatDate(connection.checkedAt)}`} /> : null}
         <p className="dsha-muted dsha-models-hint">{t('modelsHint')}</p>
-        <div className="dsha-models" aria-label={t('models')}>
-          {CODEX_MODEL_CATALOG.map((model) => {
-            const checked = visibleModelIds.some(id => id === model.id)
-            return <label key={model.id} title={model.id}>
-              <input type="checkbox" checked={checked} disabled={busy !== null} onChange={(event) => void toggleVisibleModel(model.id, event.currentTarget.checked)} />
-              <span>{model.name}</span>
-            </label>
-          })}
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 8, marginBottom: 12 }}>
-          <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(true)}>{t('selectAll')}</Button>
-          <Button disabled={busy !== null} onClick={() => void setAllVisibleModels(false)}>{t('unselectAll')}</Button>
-        </div>
+        <ModelChecklist
+          items={CODEX_MODEL_CATALOG.map((model) => ({
+            id: model.id,
+            name: model.name,
+            hint: `${formatCapacity(model.contextWindow)} ${t('tokens')}`,
+            enabled: visibleModelIds.some(id => id === model.id),
+          }))}
+          busy={busy !== null}
+          onToggle={(id, enabled) => void toggleVisibleModel(id, enabled)}
+          onToggleAll={(enabled) => void setAllVisibleModels(enabled)}
+          labels={{ selectAll: t('selectAll'), clearAll: t('unselectAll'), countTemplate: t('modelChecklistCount'), list: t('models') }}
+        />
         <div className="dsha-actions">
           <Button disabled={!status?.authenticated || busy !== null} onClick={testConnection}>{busy === 'test' ? t('testing') : t('testConnection')}</Button>
         </div>
@@ -549,8 +549,14 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
 
       <Section title={t('quota')} aside={<Button disabled={!status?.authenticated || busy !== null} onClick={refreshQuota}>{busy === 'quota' ? t('refreshing') : t('refreshQuota')}</Button>}>
         <p className="dsha-muted">{t('quotaIntro')}</p>
+        {/* The progress bars moved into each account card: quota follows the
+            account, so a bar here could only ever describe whichever account
+            happened to be active when the snapshot was read. What stays is what
+            has no per-account bar to live in — the plan, the credits, the
+            monthly spend, the reset cards and the freshness of this reading. */}
+        <p className="dsha-muted">{poolLabels.quotaFactsScope}</p>
         {quota?.state === 'signed-out' || !status?.authenticated ? <p className="dsh-codex-empty">{t('quotaSignedOut')}</p> : null}
-        {quota?.buckets?.map((bucket) => <QuotaBucket key={bucket.id} bucket={bucket} t={t} />)}
+        {quota?.buckets?.map((bucket) => <QuotaFact key={bucket.id} label={bucket.name} value={bucket.planType ?? '—'} />)}
         {quota?.credits !== null && quota?.credits !== undefined ? <QuotaFact label={t('credits')} value={quota.credits.unlimited ? t('unlimited') : quota.credits.balance ?? (quota.credits.hasCredits ? t('available') : t('unavailable'))} /> : null}
         {quota?.individualLimit !== null && quota?.individualLimit !== undefined ? <QuotaFact label={t('monthlySpend')} value={individualLimitLabel(quota.individualLimit, t)} /> : null}
         {quota?.resetCredits !== null && quota?.resetCredits !== undefined ? <ResetCreditsFact resetCredits={quota.resetCredits} busy={busy} onUse={useResetCredit} t={t} /> : null}
@@ -643,32 +649,6 @@ export function FetchProviderStatusCard({ status, t }: { status: PluginStatusDto
 /** A limit is shown only once it is the positive safe integer the Config promises. */
 function fetchLimit(value: number | undefined): number | null {
   return value !== undefined && Number.isSafeInteger(value) && value >= 1 ? value : null
-}
-
-export function storageLabel(storage: CredentialStorageDto | undefined, t: Translate): string {
-  if (storage === undefined || !storage.available) return t('storageUnavailable')
-  if (storage.kind === 'windows-dpapi') return t('storageWindows')
-  if (storage.kind === 'macos-keychain') return t('storageMacKeychain')
-  if (storage.kind === 'linux-file') return t('storageLinuxFile')
-  if (storage.kind === 'memory') return t('storageMemory')
-  return t('storageUnavailable')
-}
-
-export function storageNotice(storage: CredentialStorageDto | undefined, t: Translate): string {
-  if (storage === undefined || !storage.available) return t('securityUnavailable')
-  if (storage.kind === 'windows-dpapi') return t('securityWindows')
-  if (storage.kind === 'macos-keychain') return t('securityMacKeychain')
-  if (storage.kind === 'linux-file') return t('securityLinuxFile')
-  if (storage.kind === 'memory') return t('securityMemory')
-  return t('securityUnavailable')
-}
-
-function QuotaBucket({ bucket, t }: { bucket: QuotaBucketDto; t: Translate }): React.JSX.Element {
-  const windows = quotaWindows(bucket)
-  return <article className="dsh-codex-quota-card">
-    <div className="dsh-codex-quota-title"><strong>{bucket.name}</strong>{bucket.planType ? <span>{bucket.planType}</span> : null}</div>
-    {windows.map((window, index) => <QuotaBar key={`${window.windowDurationMins ?? 'x'}:${window.resetsAt ?? 'x'}:${index}`} label={windowLabel(window.windowDurationMins, t)} window={window} t={t} />)}
-  </article>
 }
 
 function QuotaFact({ label, value }: { label: string; value: string }): React.JSX.Element {

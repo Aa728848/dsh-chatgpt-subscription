@@ -15,8 +15,42 @@ import {
   type CommandCodeCredentials,
 } from './token-store.ts'
 import { commandCodePlanLabel } from './plans.ts'
+import { getCachedQuotaFor } from './client.ts'
+import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { PROVIDER_ID, resolveApiEnv } from './types.ts'
-import type { CommandCodeAccountSummaryDto, CommandCodeApiEnv } from '../../shared/command-code-contracts.ts'
+import type { CommandCodeAccountQuota, CommandCodeAccountSummaryDto, CommandCodeApiEnv } from '../../shared/command-code-contracts.ts'
+import type { PoolAccountQuotaDto } from '../../shared/account-pool-contracts.ts'
+
+/**
+ * One cached snapshot as the shared account card renders it.
+ *
+ * A usage window states its own consumed share, so it maps straight across; a
+ * window whose share nobody measured is dropped rather than drawn at 0, which
+ * would claim an unspent window no reading supports.
+ *
+ * Exported for the pool's regression tests; the card only reaches it through
+ * the summary hook.
+ */
+export function commandCodePoolQuota(cached: CommandCodeAccountQuota): PoolAccountQuotaDto | undefined {
+  return poolQuota(cached.fetchedAt, cached.windows.map((window) => quotaWindow(
+    window.label,
+    window.usedPercent,
+    { windowDurationMins: window.windowDurationMins, resetsAt: window.resetsAt },
+  )))
+}
+
+/**
+ * This key's own newest snapshot, ready for the account card.
+ *
+ * Quota follows the account, so the pool reports what the line already
+ * remembered for THIS account id. The lookup is a pure memory read: the card
+ * builds its account list here, and that must never cost one upstream request
+ * per pooled key.
+ */
+function quotaFor(accountId: string): PoolAccountQuotaDto | undefined {
+  const cached = getCachedQuotaFor(accountId)
+  return cached === undefined ? undefined : commandCodePoolQuota(cached)
+}
 
 /** One pooled Command Code key: the bearer key plus the account facts the card renders. */
 export interface CommandCodePoolAccount extends PoolAccountShape<CommandCodeCredentials> {
@@ -191,6 +225,12 @@ export class CommandCodeAccountPool extends AccountPoolCore<
           ...(account.organizationName === undefined ? {} : { organizationName: account.organizationName }),
           ...(account.planId === undefined ? {} : { planId: account.planId }),
           ...(account.userId === undefined ? {} : { userId: account.userId }),
+          // This key's own newest snapshot, when it was read before. Absent
+          // means exactly that — never read — which is not "nothing used".
+          ...(() => {
+            const quota = quotaFor(account.id)
+            return quota === undefined ? {} : { quota }
+          })(),
         }
       },
       // The message keeps the wording the adapter's missing-credential error

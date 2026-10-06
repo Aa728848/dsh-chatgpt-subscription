@@ -5,6 +5,7 @@ import type {
   PoolAccountSummaryDto,
 } from '../../shared/account-pool-contracts.ts'
 import { formatPoolLabel, type AccountPoolLabels } from './account-pool-labels.ts'
+import { AccountQuota } from './account-quota.tsx'
 
 export type { AccountPoolLabels } from './account-pool-labels.ts'
 
@@ -35,14 +36,21 @@ export interface AccountPoolSectionProps<
   /** Provider-specific detail rows, rendered before the shared ones. */
   renderDetails?(account: TAccount): ReactNode
   /**
+   * Whether this line has a quota concept at all.
+   *
+   * Quota follows the account, so an account the host never read shows "no
+   * quota read yet" instead of nothing — but only on a line that reads quota in
+   * the first place. A line without one (Ollama: spend, no allowance) leaves
+   * this off and its rows stay silent about quota.
+   */
+  showQuota?: boolean
+  /**
    * Provider-specific per-account buttons, rendered before the shared ones.
    *
    * Used by a line that adopts accounts it does not own: hiding or restoring
    * an externally-managed account replaces the delete it must never offer.
    */
   renderAccountActions?(account: TAccount): ReactNode
-  /** Value shown beside the storage label; defaults to a generic description. */
-  storageValue?: string
   /** Extra controls inside the group, after the account list. */
   children?: ReactNode
 }
@@ -71,8 +79,13 @@ export function isCoolingDown(account: PoolAccountSummaryDto, now = Date.now()):
  * The account-management group every provider tab renders.
  *
  * One component rather than four near-identical blocks: the account card, its
- * badges, the rotation-strategy picker and the storage notice are identical
- * across providers, and only the identity details differ.
+ * badges and the rotation-strategy picker are identical across providers, and
+ * only the identity details differ.
+ *
+ * Credential storage is deliberately NOT shown here. Where the host keeps a
+ * token is not a setting a user can act on, and rendering it as a labeled row
+ * invited exactly that reading; several lines' notices went further and printed
+ * the credential file's path.
  */
 export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = PoolAccountSummaryDto>(
   props: AccountPoolSectionProps<TAccount>,
@@ -80,6 +93,10 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
   const t = props.labels
   const accounts = props.accounts
   const now = Date.now()
+  // One sibling holding a snapshot proves the line reads quota per account, so
+  // the accounts it has not read yet may say so. Without this, a line that has
+  // no quota concept would grow a row of "not read yet" on every account.
+  const anyQuota = accounts.some((account) => account.quota !== undefined)
 
   return (
     <section className="dsha-group">
@@ -191,11 +208,24 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
                 </div>
 
                 <div className="dsha-account-details">
+                  {/* The line's own facts first, then the shared ones. Neither
+                      repeats the card's title: on most lines the alias IS the
+                      address, so printing "邮箱: <same address>" under a title
+                      that already reads as that address is the same fact twice.
+                      The same rule is why no line's renderDetails may render
+                      e-mail, expiry or last-used itself. */}
                   {props.renderDetails?.(account)}
-                  {account.email && <span>{t.email}: {account.email}</span>}
+                  {account.email !== undefined && account.email !== account.alias
+                    && <span>{t.email}: {account.email}</span>}
                   {account.expiresAt !== undefined && <span>{t.expires}: {formatAccountDate(account.expiresAt)}</span>}
                   {account.lastUsedAt !== undefined && <span>{t.lastUsed}: {formatAccountDate(account.lastUsedAt)}</span>}
                 </div>
+                <AccountQuota
+                  quota={account.quota}
+                  labels={t}
+                  showEmpty={props.showQuota === true || anyQuota}
+                  now={now}
+                />
                 {needsRelogin && account.authFailedReason && (
                   <div className="dsha-account-details">
                     <span>{account.authFailedReason}</span>
@@ -208,12 +238,6 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
       )}
 
       {props.children}
-
-      <div className="dsha-row" style={{ marginTop: 12 }}>
-        <span className="dsha-label">{t.storage}</span>
-        <span className="dsha-value">{props.storageValue ?? '本地安全存储 (JSON/DPAPI)'}</span>
-      </div>
-      <p className="dsha-notice">{t.storageNotice}</p>
     </section>
   )
 }

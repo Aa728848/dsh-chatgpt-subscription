@@ -28,12 +28,28 @@ export interface AccountPoolLabels {
   strategyRoundRobin: string
   strategySticky: string
   noAccounts: string
-  storage: string
-  storageNotice: string
   email: string
   expires: string
   lastUsed: string
   accountId: string
+  /** Legend of the per-account quota block. */
+  accountQuota: string
+  /** Shown when no quota was ever read for that account. */
+  quotaNone: string
+  /** `{time}` is replaced with the snapshot's read time. */
+  quotaSnapshot: string
+  /** Prefix of a window's reset moment, e.g. `重置 3 小时后`. */
+  quotaResets: string
+  /** Drawn in place of a percentage once a window is spent. */
+  quotaExhausted: string
+  /** Fallback window name when the line gave neither a label nor a length. */
+  quotaWindow: string
+  /** Read out by a screen reader beside the bar's percentage. */
+  quotaUsed: string
+  /** Explains that the page-level facts belong to the current account only. */
+  quotaFactsScope: string
+  /** The composer badge's own label, in front of its number. */
+  composerLabel: string
 }
 
 /** Chinese labels; the wording the Antigravity card shipped with. */
@@ -55,12 +71,19 @@ export const accountPoolZh: AccountPoolLabels = {
   strategyRoundRobin: '轮询调度（按账号循环均匀分摊）',
   strategySticky: '粘性会话（保持当前账号，遇限流才切换）',
   noAccounts: '暂无账号，点击「添加账号」完成登录授权。',
-  storage: '凭据存储',
-  storageNotice: '令牌由 Host 保存于本地安全存储，不会进入浏览器。',
   email: '邮箱',
   expires: '令牌到期',
   lastUsed: '上次调用',
   accountId: '账号 ID',
+  accountQuota: '配额',
+  quotaNone: '尚无配额数据',
+  quotaSnapshot: '快照 {time}',
+  quotaResets: '重置',
+  quotaExhausted: '已用尽',
+  quotaWindow: '额度窗口',
+  quotaUsed: '已用',
+  quotaFactsScope: '以下为当前账号的配额事实；每个账号自己的进度显示在它的账号卡片里。',
+  composerLabel: '额度',
 }
 
 /** English labels for the ChatGPT tab, which is the bilingual one. */
@@ -82,12 +105,19 @@ export const accountPoolEn: AccountPoolLabels = {
   strategyRoundRobin: 'Round-Robin (evenly rotate across accounts)',
   strategySticky: 'Sticky Session (keep the current account until it is limited)',
   noAccounts: 'No accounts yet. Click "Add Account" to authorize.',
-  storage: 'Credential storage',
-  storageNotice: 'Credentials are stored locally by the Host and never sent to the browser.',
   email: 'Email',
   expires: 'Token expires',
   lastUsed: 'Last used',
   accountId: 'Account ID',
+  accountQuota: 'Quota',
+  quotaNone: 'No quota read yet',
+  quotaSnapshot: 'Snapshot {time}',
+  quotaResets: 'Resets',
+  quotaExhausted: 'Exhausted',
+  quotaWindow: 'Limit window',
+  quotaUsed: 'used',
+  quotaFactsScope: 'These facts describe the current account; each account\u2019s own progress is shown on its card above.',
+  composerLabel: 'Quota',
 }
 
 /** Replace `{name}` placeholders in one label. */
