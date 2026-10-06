@@ -373,3 +373,103 @@ describe('MiniMax Code line', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// In-band stream errors
+// ---------------------------------------------------------------------------
+
+describe('minimax-code in-band stream errors', () => {
+  const MESSAGE_START = { type: 'message_start', message: { usage: { input_tokens: 1 } } }
+  let home: string
+  const originalMinimaxHome = process.env.MINIMAX_HOME
+
+  beforeEach(async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-inband-'))
+    process.env.MINIMAX_HOME = home
+  })
+
+  afterEach(async () => {
+    if (originalMinimaxHome === undefined) delete process.env.MINIMAX_HOME
+    else process.env.MINIMAX_HOME = originalMinimaxHome
+    await fs.rm(home, { recursive: true, force: true }).catch(() => undefined)
+  })
+
+  /** An adapter whose every request answers 200 and then reports the failure. */
+  async function adapterFor(frames: unknown[], calls: string[]): Promise<MinimaxCodeAdapter> {
+    const store = new MinimaxCodeCredentialStore()
+    await store.write({
+      accessToken: 'ACCESS', refreshToken: 'r-own', tokenType: 'Bearer', clientId: 'mcode-public',
+      scopes: [], audience: '', expiresAtMs: Date.now() + 3_600_000, generation: 1, loginEpoch: 'e',
+      buildEnv: 'prod', region: 'cn', recordKey: null, source: 'file',
+    })
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return new Response(
+        frames.map((frame) => 'data: ' + JSON.stringify(frame) + '\n\n').join(''),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )
+    }) as unknown as typeof fetch
+    return new MinimaxCodeAdapter(store, { fetchFn })
+  }
+
+  async function failureOf(adapter: MinimaxCodeAdapter): Promise<unknown> {
+    try {
+      for await (const _chunk of adapter.stream({
+        provider: 'minimax-code', model: 'MiniMax-M3',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+      } as never)) { /* drain */ }
+    } catch (error) {
+      return error
+    }
+    throw new Error('expected the stream to fail')
+  }
+
+  it('reclassifies a transient in-band failure while nothing has reached the caller', async () => {
+    // The shape that ended a real turn: HTTP 200, message_start, then an
+    // overloaded_error event. The same overload sent as a 529 is SERVER, so the
+    // in-band copy must not be the one that ends the turn on the first try.
+    const policy = new MinimaxCodeAdapter(new MinimaxCodeCredentialStore()).providerRetryPolicy()
+    const retryable = policy.mode === 'normal' ? policy.retryableCodes : []
+    for (const [type, message, code] of [
+      ['overloaded_error', 'Overloaded', 'SERVER'],
+      ['api_error', 'Internal server error', 'SERVER'],
+      ['rate_limit_error', 'Too many requests', 'RATE_LIMIT'],
+    ] as const) {
+      const calls: string[] = []
+      const failure = await failureOf(await adapterFor(
+        [MESSAGE_START, { type: 'error', error: { type, message } }], calls,
+      ))
+      expect(failure).toMatchObject({ code })
+      // The provider's own diagnostic stays in the message, so the notice still
+      // says what happened rather than becoming a bare code.
+      expect((failure as Error).message).toContain(message)
+      expect(retryable).toContain(code)
+      // Classified, not re-requested inside the stream: the harness retry policy
+      // owns the repeat.
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps the mapper verdict once output has reached the caller', async () => {
+    // A retry would repeat 'partial' for the user and could re-run a tool call.
+    const calls: string[] = []
+    const failure = await failureOf(await adapterFor([
+      MESSAGE_START,
+      { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+      { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+    ], calls))
+    expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves a non-transient or unrecognized in-band type with the mapper verdict', async () => {
+    for (const type of ['invalid_request_error', 'authentication_error', 'request_too_large', 'some_future_error']) {
+      const calls: string[] = []
+      const failure = await failureOf(await adapterFor(
+        [MESSAGE_START, { type: 'error', error: { type, message: 'nope' } }], calls,
+      ))
+      expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    }
+  })
+})

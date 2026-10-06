@@ -59,6 +59,7 @@ import {
   ensureAccessToken,
 } from './oauth.ts'
 import { modelRequestHeaders, summarizeFailureBody } from './client.ts'
+import { reclassifyInBandError } from '../common/stream-error.ts'
 import {
   assertRequestBodyFits,
   assertStreamComplete,
@@ -816,32 +817,63 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       provider: PROVIDER_ID,
     })
     let buffer = ''
+    /**
+     * Set the moment ANY chunk reaches the caller, and never cleared.
+     *
+     * Deliberately broader than "a content delta or a tool block": a retry would
+     * duplicate a block-start the caller has already seen just as surely, so the
+     * conservative reading is the one that cannot be wrong. It is what keeps the
+     * in-band reclassification below pre-output only.
+     */
+    let outputStarted = false
 
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          for (const chunk of processMinimaxStreamLine(line, state)) yield chunk
-          if (state.finished) return
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            for (const chunk of processMinimaxStreamLine(line, state)) {
+              outputStarted = true
+              yield chunk
+            }
+            if (state.finished) return
+          }
         }
-      }
 
-      buffer += decoder.decode()
-      if (buffer.trim() !== '') {
-        for (const line of buffer.split('\n')) {
-          for (const chunk of processMinimaxStreamLine(line, state)) yield chunk
+        buffer += decoder.decode()
+        if (buffer.trim() !== '') {
+          for (const line of buffer.split('\n')) {
+            for (const chunk of processMinimaxStreamLine(line, state)) {
+              outputStarted = true
+              yield chunk
+            }
+          }
         }
-      }
-      if (state.finished) return
+        if (state.finished) return
 
-      // A connection that ends without a terminal event is a truncated stream, not
-      // a completed answer.
-      assertStreamComplete(state)
-      for (const chunk of closeMinimaxStream(state)) yield chunk
+        // A connection that ends without a terminal event is a truncated stream, not
+        // a completed answer.
+        assertStreamComplete(state)
+        for (const chunk of closeMinimaxStream(state)) {
+          outputStarted = true
+          yield chunk
+        }
+      } catch (error) {
+        // A verdict the mapper already typed (a truncated stream, an in-band error
+        // event) is passed through - except an in-band error event that arrived
+        // before anything reached the caller, which is classified through this
+        // line's OWN failure classifier so every rule the HTTP path owns still
+        // owns it. After the first chunk the mapper's verdict stands: a retry
+        // would repeat output the user has already seen.
+        if (error instanceof LlmError && !outputStarted && state.streamError !== undefined) {
+          throw reclassifyInBandError(error, state.streamError, classifyMinimaxFailure)
+        }
+        throw error
+      }
     } finally {
       void reader.cancel().catch(() => undefined)
     }

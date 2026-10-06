@@ -1012,6 +1012,13 @@ export interface MinimaxStreamState {
   hasContent: boolean
   hasToolCall: boolean
   finishReason: string | null
+  /**
+   * The wire `error` object of an in-band `error` event, recorded just before
+   * the mapper throws on it. The mapper cannot tell whether anything has reached
+   * the caller yet; the adapter can, and reclassifies a transient one from this
+   * while nothing has.
+   */
+  streamError?: Record<string, unknown>
   done: boolean
   finished: boolean
   inputTokens: number
@@ -1360,6 +1367,9 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
 
   if (type === 'error') {
     const error = isRecord(event.error) ? event.error : {}
+    // Typed PROVIDER_ERROR here because output may already have reached the
+    // caller; the adapter, which knows, reclassifies a transient one from this.
+    state.streamError = error
     throw new LlmError(
       PROVIDER_NAME + ' stream error: ' + (asString(error.message) ?? 'unknown error'),
       isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
