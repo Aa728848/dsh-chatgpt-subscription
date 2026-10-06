@@ -50,8 +50,8 @@ interface PoolAccountQuotaWindowDto {
 
 | 线路 | 快照来源 | 按账号键 | 说明 |
 |---|---|---|---|
-| chatgpt | `UsageService` 的 per-account Map（本就存在，供池子跳过耗尽账号） | `identityKey(credentials)` = accountId ?? email ?? planType | 新增 `snapshotFor(credentials)` 只读访问器 + `codexAccountQuota()` 纯映射（含 `primary`/`secondary` 回退，与配额卡片一致） |
-| claude | `claude/client.ts` 的单槽配额缓存 | **token 尾 8 位**（该线路原有键，不是账号 id） | 单槽 → 有界 Map（按 `observedAt` 淘汰：只靠响应头保持新鲜的快照没有 `fetchedAt`）；`getCachedQuota(credentials?)` 语义不变 |
+| chatgpt | `UsageService` 的 per-account Map（本就存在，供池子跳过耗尽账号） | **号池行 id**（`snapshotKeyFor`；无池时回退 `identityKey(credentials)` = accountId ?? email ?? planType） | 新增 `snapshotFor(accountId, credentials)` 只读访问器 + `codexAccountQuota()` 纯映射（含 `primary`/`secondary` 回退，与配额卡片一致）；`OAuthService.credentialSelection` 把凭据连同它所属的行一起交回 |
+| claude | `claude/client.ts` 的有界 Map | **号池行 id**（`fetchAccountQuota({accountId})`；无池时回退 token 尾 8 位） | 单槽 → 有界 Map（按 `observedAt` 淘汰：只靠响应头保持新鲜的快照没有 `fetchedAt`）；`getCachedQuota(credentials?)` 语义不变，池化读取走 `cachedQuotaForPool(accountId, credentials)` |
 | kimi-code | `kimi-code/client.ts` 的单槽缓存（原带 `quotaAccountId`） | 账号 id（`''` = 单凭据读取） | 单槽 → 有界 Map；`getCachedQuotaFor(id)` 现在回答「该账号自己的那份」而不是「最后一次写入的那份」 |
 | command-code | `command-code/client.ts` 的单槽缓存（原带 `accountId`） | 账号 id（`''` = 未具名调用方） | 单槽 → 有界 Map；`getCachedQuota()` = 最新、`getCachedQuotaFor(id)` = 该账号、`getCachedQuotaFor(null)` = 最新（保持池化前语义） |
 | workbuddy | `workbuddy/client.ts` 的单槽缓存 | `snapshot.account.id` | 单槽 → 有界 Map；routes 的状态读取改为按键取「被选中账号」的那份，不再因为一份槽装不下别的账号而 `clearCachedQuota()` 丢掉所有兄弟快照 |
@@ -66,7 +66,7 @@ interface PoolAccountQuotaWindowDto {
 1. **只发布已经读到的快照，不新增任何上游请求。** 打开设置页不会为 N 个账号发 N 次请求（各线路 TTL 60–300 秒，多账号时很容易触发限流）。从未被读过的账号显示「尚无配额数据」——这句话是准确的，且与「未消耗」不同。测试直接对 `listAccounts()` 前后的 fetch 计数断言为 0。
 2. **antigravity 的快照只属于 primary。** 它的配额读的是 legacy 单凭据文件，而池子只把 primary 镜像进去；轮询/粘性下活跃账号可能是别的号。所以快照挂在 primary 行上（它真正的主人），其余行不编造。
 3. **workbuddy 的配额跟随被选中账号**（`settings.selectedAccountId`），与轮询活跃账号可能不同——快照按它自己的账号 id 归属，不做二次推断。其「计费周期」窗口只在没有 `cycle` meter 时才发布：该线路已把周期计数做成 `cycle` meter，否则同一份额度会画成两根条。meter 既无 `usedFraction` 也无 `remainingFraction` 时**丢弃**，不写 0。
-4. **claude 的缓存键是 token 尾 8 位**（沿用该线路既有键），不是账号 id：令牌刷新会换尾号，旧快照会短暂变成孤儿，该行显示「尚无配额数据」直到下次读取。这是有意的诚实降级，不是遗漏。
+4. **chatgpt 与 claude 的快照按号池行 id 归属**，不按凭据推导出的身份。两个理由：token 每次刷新都会轮换（claude 曾以 token 尾 8 位为键，于是每次刷新后该行短暂显示「尚无配额数据」，死键还会把兄弟账号的活条目挤出 20 条上限），而 chatgpt 的 `accountId ?? email ?? planType` 对两个都不带这些字段的账号会退化成同一个键——两行于是显示对方的数字。行 id 是唯一同时**跨刷新稳定**且**跨账号唯一**的身份。无池的组合仍回退到凭据身份（`identityKey` / token 尾）：此时进程里只有一个账号，不存在串号问题。`OAuthService.credentialSelection` 提供「凭据 + 它所属的行」，`UsageService` 在 401 重试后会重算键——续期可能落到另一个账号，读数属于真正作答的那个。
 5. **无按需刷新按钮。** 每行加「刷新」意味着 host 要为 7 条线路新增按账号读取路径（其中 chatgpt/antigravity 目前没有账号参数化的读法）。这是明确的后续项，不是遗漏。
 6. 快照的**读取时刻**总会显示；跨天的快照会带上日期，避免「12:03」被读成刚刚。
 7. 各线路的 `clearCachedQuota()` 调用点（保存密钥、账号动作、登出、切换选中账号）保持原样：有了按账号查询后它们对正确性已非必需，但收窄失效策略超出本次范围。一个测试钉住了关键的一半：为某账号读状态不会毁掉兄弟账号的快照。
@@ -97,6 +97,7 @@ interface PoolAccountQuotaWindowDto {
 - `test/codex-account-pool.test.ts`：端到端——先无快照（不谎报 0），读 A 再读 B 后两行各自显示自己的百分比，第三个从未读过的账号仍为空。
 - `test/client-registration.test.ts`：ChatGPT 标签页里进度条在账号行内、页面级区块无进度条且保留事实与范围说明。
 - 各线路自己的 host 测试：`claude-quota-accounts`、`kimi-code-quota-accounts`、`command-code-quota-accounts`、`workbuddy-quota-accounts`、`minimax-code-account-quota`、`antigravity-account-quota` —— Map 区分账号、超过 20 条淘汰最旧、`extendSummary` 有/无快照两种情况、未测量窗口被丢弃、列账号不发请求。
+- 行 id 语义的两条钉子：`test/claude-quota-accounts.test.ts` 里「token 轮换后同一行仍取到自己的快照（而 token 尾形式取不到）」与「另一行绝不会被答以这条的读数」；`test/codex-account-pool.test.ts` 里「两个 `accountId`/`email`/`planType` 全缺的账号各自保留自己的读数」。
 - 各线路的 jsdom 行渲染测试：`claude-quota-ui`、`kimi-code-quota-ui`、`command-code-quota-row`、`workbuddy-quota-row`、`minimax-code-account-quota-row`、`antigravity-account-quota-row`。
 
 ## 7. 明确不做
