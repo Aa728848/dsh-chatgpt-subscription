@@ -66,10 +66,16 @@ import {
   resolveRequestVideos,
   type AttachmentImageReader,
   type AttachmentVideoReader,
+  type KimiCodeInBandStreamError,
   type KimiCodeStreamState,
 } from './mapper.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import {
+  inBandAnthropicStatus,
+  reclassifyInBandError,
+  reclassifyInBandResponsesError,
+} from '../common/stream-error.ts'
 import { KimiCodeAccountPool } from './account-pool.ts'
 import { ensureAccessToken, KimiCodeUnauthorizedError } from './oauth.ts'
 import { retryAfterMs } from '../wire-auth.ts'
@@ -631,7 +637,9 @@ export class KimiCodeAdapter extends LlmAdapter {
     const pool = this.accountPool
     const tried = new Set<string>()
     // Hoisted out of the rotation loop so the account that actually served the
-    // response is still in scope when the stream closes and files its usage.
+    // response is still in scope when the stream closes and files its usage, and
+    // when a failure reported inside the stream takes that account out of
+    // rotation below.
     let servedByAccountId: string | undefined
     let response: Response | undefined
 
@@ -755,35 +763,163 @@ export class KimiCodeAdapter extends LlmAdapter {
     // this conversation last ran — the input the cache-expiry hint needs.
     markSessionActive(requestOptions.sessionId)
     let buffer = ''
+    /**
+     * Set the moment ANY chunk reaches the caller, and never cleared.
+     *
+     * Deliberately broader than "text arrived": a block-start the caller has
+     * already seen repeats just as badly as text it has already read, so the
+     * conservative reading is the one that cannot be wrong. It is what keeps the
+     * in-band reclassification below pre-output only.
+     */
+    let outputStarted = false
 
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          for (const chunk of processLine(line, state, wire)) yield chunk
-          if (state.finished) return
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            for (const chunk of processLine(line, state, wire)) {
+              outputStarted = true
+              yield chunk
+            }
+            if (state.finished) return
+          }
         }
-      }
 
-      buffer += decoder.decode()
-      if (buffer.trim() !== '') {
-        for (const line of buffer.split('\n')) {
-          for (const chunk of processLine(line, state, wire)) yield chunk
+        buffer += decoder.decode()
+        if (buffer.trim() !== '') {
+          for (const line of buffer.split('\n')) {
+            for (const chunk of processLine(line, state, wire)) {
+              outputStarted = true
+              yield chunk
+            }
+          }
         }
-      }
-      if (state.finished) return
+        if (state.finished) return
 
-      // A connection that ends without a terminal event is a truncated stream,
-      // not a completed answer; the watchdog turns a stalled one into an abort.
-      assertStreamComplete(state)
-      for (const chunk of closeStream(state, servedByAccountId)) yield chunk
+        // A connection that ends without a terminal event is a truncated stream,
+        // not a completed answer; the watchdog turns a stalled one into an abort.
+        assertStreamComplete(state)
+        for (const chunk of closeStream(state, servedByAccountId)) {
+          outputStarted = true
+          yield chunk
+        }
+      } catch (error) {
+        // A verdict the mapper already typed (a truncated stream, an in-band
+        // error event) is passed through — except an in-band error event that
+        // arrived before anything reached the caller, which is classified the
+        // way this line classifies the response body it is equivalent to: an
+        // Anthropic type through {@link classifyKimiFailure} at the status that
+        // type stands for, an OpenAI one through the Responses vocabulary the
+        // sibling lines read. Either way every rule the HTTP path owns still
+        // owns the verdict, so the same overload, the same spent window and the
+        // same plan refusal reach the retry policy as they would have as a
+        // status. A context overflow is excluded from that, because its code is
+        // how the turn is compacted and recovered rather than retried. After the
+        // first chunk the mapper's verdict stands: a retry would repeat output
+        // the user has already seen.
+        const inBand = state.streamError
+        if (error instanceof LlmError && !outputStarted && error.code === 'PROVIDER_ERROR'
+          && inBand !== undefined) {
+          throw await this.inBandStreamFailure(error, inBand, servedByAccountId)
+        }
+        throw error
+      }
     } finally {
       void reader.cancel().catch(() => undefined)
     }
+  }
+
+  /**
+   * What one in-band failure becomes once the pool has been told what the
+   * verdict means for it.
+   *
+   * Reclassification and the pool reaction are separate because they answer
+   * different questions about the same classification: the code decides whether
+   * the harness retries, `accountScoped` decides whether a retry could land
+   * somewhere that can answer. The mapper can supply only the first, which is
+   * why the wire object is recorded there and read here.
+   *
+   * The body is the one a non-2xx response would have carried, so every pattern
+   * below reads exactly what the HTTP branch reads and a limit cannot mean one
+   * thing as a status and another as an event. The request itself is NOT
+   * re-issued: its body is already open and part-read, and the harness retry
+   * policy owns the repeat.
+   */
+  private async inBandStreamFailure(
+    thrown: LlmError,
+    inBand: KimiCodeInBandStreamError,
+    accountId: string | undefined,
+  ): Promise<LlmError> {
+    const bodyText = JSON.stringify({ error: inBand.error })
+    const reclassified = inBand.vocabulary === 'anthropic'
+      ? reclassifyInBandError(thrown, inBand.error, classifyKimiFailure)
+      : reclassifyInBandResponsesError(thrown, inBand.error, inBand.message, classifyKimiFailure)
+    const pool = this.accountPool
+    if (pool === null || accountId === undefined) return reclassified
+
+    if (inBand.vocabulary === 'anthropic') {
+      const status = inBandAnthropicStatus(inBand.error)
+      // A type this vocabulary does not name classifies to nothing, so there is
+      // no verdict to weigh against the pool and the mapper's own stands.
+      if (status === null) return reclassified
+      const failure = classifyKimiFailure(status, bodyText)
+      // The same chain the non-2xx branch runs, in the same order: a
+      // plan-scoped 429 is a property of the request, so it cools nothing and
+      // rotating on it would spend the whole pool to learn the same refusal.
+      // Kept whole rather than narrowed to the statuses named today, so a type
+      // the table later adds lands in the arm that already owns it.
+      const planScoped = status === 429 && matchesAny(bodyText, ENTITLEMENT_PATTERNS)
+      if (status === 429 && !planScoped) {
+        await this.coolInBandRateLimit(pool, accountId, failure.accountScoped, bodyText)
+      } else if (failure.code === 'INVALID_CREDENTIAL') {
+        // A credential the stream itself calls dead is that account's problem
+        // alone, and signing in again restores it — so mark it, never delete.
+        await pool.markAuthFailed(accountId, failure.message).catch(() => undefined)
+      } else if (failure.accountScoped) {
+        // A window this account has spent: the retry is about to repeat the
+        // request, and repeating it against the same spent window fails
+        // identically three times over.
+        await pool.markCooldown(accountId, accountLimitCooldownMs(bodyText), `${PROVIDER_NAME} in-stream 403`).catch(() => undefined)
+      }
+      return reclassified
+    }
+
+    // This vocabulary names no status at all, so nothing is synthesized to
+    // classify against and no arm is invented: the code the vocabulary derived
+    // selects it. RATE_LIMIT is the 429 rule below, and SERVER is the 5xx rule,
+    // which the HTTP path leaves the pool alone for — an overload is not one
+    // account's property to carry.
+    if (reclassified.code === 'RATE_LIMIT' && !matchesAny(bodyText, ENTITLEMENT_PATTERNS)) {
+      // The same 429 rule, with the scope read off that arm's own classification
+      // — which is where the HTTP branch reads `accountScoped` from too, so a
+      // spent balance leaves rotation here exactly as it does there.
+      await this.coolInBandRateLimit(pool, accountId, classifyKimiFailure(429, bodyText).accountScoped, bodyText)
+    }
+    return reclassified
+  }
+
+  /**
+   * Cool the account whose own rate limit the stream reported.
+   *
+   * The window this route already defaults to, never a Retry-After: there is no
+   * 429 response to read one from, and a delay stated on the 200 belongs to a
+   * different message. An account-scoped verdict takes its own window instead,
+   * because a spent balance is not back-pressure and 15 minutes would put the
+   * account back into rotation four times inside the window that refused it.
+   */
+  private async coolInBandRateLimit(
+    pool: KimiCodeAccountPool,
+    accountId: string,
+    accountScoped: boolean,
+    bodyText: string,
+  ): Promise<void> {
+    const cooldownMs = accountScoped ? accountLimitCooldownMs(bodyText) : POOL_COOLDOWN_MS
+    await pool.markCooldown(accountId, cooldownMs, `${PROVIDER_NAME} in-stream 429`).catch(() => undefined)
   }
 }
 

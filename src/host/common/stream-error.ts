@@ -52,14 +52,19 @@ const ANTHROPIC_IN_BAND_STATUS: Readonly<Record<string, number>> = {
  * names nothing transient.
  *
  * The Responses stream reports failure as `response.failed` or `error`, whose
- * `error.code` is the only structured evidence and whose message is free text.
- * Both are read here, exactly as `responses-client.ts` reads them for the Codex
- * line, because a message that says "overloaded" is the whole signal on some
- * deployments. Anything not recognized keeps the mapper's verdict.
+ * message is free text and whose structured evidence is split across TWO fields:
+ * this plugin's own routes document `{"error":{"message":"Upstream model
+ * provider is temporarily unavailable. Please try again in a moment.","type":
+ * "server_error"}}` - `type`, not `code` - so reading only `code` would miss
+ * the exact body this exists for, and its message names nothing the heuristic
+ * would catch. Both fields are read, and the message is read too, because a
+ * deployment that says "overloaded" in prose is the whole signal there.
+ *
+ * Anything not recognized keeps the mapper's verdict.
  */
 export function inBandResponsesCode(error: unknown, message: string): string | null {
   const fields = isRecord(error) ? error : {}
-  const rawCode = typeof fields.code === 'string' ? fields.code.toLowerCase() : ''
+  const rawCode = (asString(fields.code) ?? asString(fields.type) ?? '').toLowerCase()
   const text = message.toLowerCase()
   if (text.includes('rate limit') || rawCode === 'rate_limit' || rawCode === 'rate_limit_exceeded') return 'RATE_LIMIT'
   if (text.includes('overload')
@@ -106,6 +111,15 @@ export function reclassifyInBandError(
 /**
  * {@link reclassifyInBandError} for a line whose classifier reads a status, fed
  * by the Responses vocabulary instead of the Anthropic one.
+ *
+ * The transient verdict found here is a QUESTION, not the answer: a
+ * `rate_limit` code says only that the failure is worth retrying, and whether
+ * it actually is - a 429 naming a spent balance is this route's PROVIDER_ERROR,
+ * not a RATE_LIMIT - is a rule the line's own classifier owns. So the answer is
+ * asked of `classify` at the status the verdict stands for, exactly as the
+ * Anthropic sibling does, and the CODE that comes back is the one the HTTP path
+ * would have produced for the same body. That agreement is the whole point: the
+ * in-band delivery must not be the one delivery with its own opinion.
  */
 export function reclassifyInBandResponsesError(
   thrown: LlmError,
@@ -115,13 +129,19 @@ export function reclassifyInBandResponsesError(
 ): LlmError {
   const code = inBandResponsesCode(rawError, message)
   if (code === null) return thrown
-  return new LlmError(thrown.message, code, { cause: thrown })
+  const failure = classify(code === 'RATE_LIMIT' ? 429 : 500, JSON.stringify({ error: rawError, message }))
+  if (!failure.retryable) return thrown
+  return new LlmError(thrown.message, failure.code, { cause: thrown })
 }
 
 /** The wire `error` object of an in-band event, read defensively. */
 function readErrorType(error: unknown): string | null {
   if (!isRecord(error)) return null
   return typeof error.type === 'string' ? error.type : null
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

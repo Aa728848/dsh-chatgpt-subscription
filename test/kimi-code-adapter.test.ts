@@ -10,6 +10,8 @@ import {
   resolveDefaultReasoningEffort,
 } from '../src/host/kimi-code/adapter.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/kimi-code/token-store.ts'
+import type { KimiCodeAccountPool } from '../src/host/kimi-code/account-pool.ts'
+import type { KimiCodeWire } from '../src/shared/kimi-code-contracts.ts'
 import { clearCachedCatalog } from '../src/host/kimi-code/client.ts'
 import type { KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 
@@ -381,5 +383,367 @@ describe('KimiCodeAdapter catalog and models', () => {
     // answers an unmapped effort with HTTP 400.
     expect(resolveDefaultReasoningEffort(efforts, 'minimal')).toBeUndefined()
     expect(resolveDefaultReasoningEffort(efforts, null)).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-band stream errors
+// ---------------------------------------------------------------------------
+
+/**
+ * The Anthropic wire, which reports a failure as an `error` EVENT.
+ *
+ * Selected exactly the way the service selects it: a live catalog entry that
+ * declares the protocol. The OpenAI wire is this route's DEFAULT, so the plain
+ * catalog the rest of this file uses already selects it, with no ceremony.
+ */
+const ANTHROPIC_CATALOG = [{ id: 'k3', name: 'K3', contextWindow: 262_144, protocol: 'anthropic' }]
+const MESSAGE_START = { type: 'message_start', message: { usage: { input_tokens: 1 } } }
+
+/** The window an ordinary rate limit gets, and the one a spent window gets instead. */
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
+const SPENT_WINDOW_MS = 5 * 60 * 60 * 1000
+
+/** The pool surface the adapter uses, recorded instead of persisted. */
+class FakePool {
+  readonly cooldowns: Array<{ id: string; ms: number; reason: string }> = []
+  readonly authFailures: Array<{ id: string; reason: string }> = []
+
+  async getEffectiveCredential() {
+    return { account: { id: 'kc-1' }, credentials: credentials({ accessToken: 'at-1' }) }
+  }
+
+  async hasAnotherAvailableAccount(triedAccountIds: ReadonlySet<string>): Promise<boolean> {
+    return !triedAccountIds.has('kc-1')
+  }
+
+  async markCooldown(id: string, ms: number, reason: string): Promise<void> {
+    this.cooldowns.push({ id, ms, reason })
+  }
+
+  async markAuthFailed(id: string, reason: string): Promise<void> {
+    this.authFailures.push({ id, reason })
+  }
+}
+
+/**
+ * An adapter whose one request answers 200 and then reports the failure.
+ *
+ * The wire is named rather than inferred because the two vocabularies state
+ * the same failure differently - an `error` event on one, an `error` field on an
+ * ordinary data frame on the other - and each test says which one it exercises.
+ */
+async function adapterFor(
+  frames: unknown[],
+  wire: KimiCodeWire = 'anthropic',
+  pool?: FakePool,
+): Promise<{ adapter: KimiCodeAdapter; calls: string[] }> {
+  const store = new FileCredentialStore(tmp('kc-inband'))
+  vi.spyOn(store, 'read').mockResolvedValue(credentials())
+  const modelSettings = new FileModelSettingsStore(tmp('kc-inband-models'))
+  vi.spyOn(modelSettings, 'read').mockResolvedValue({
+    enabled: true,
+    enabledModelIds: ['k3'],
+    catalogModels: [],
+    contextWindowOverrides: {},
+    defaultReasoningEffort: null,
+    cacheTtl: null,
+  })
+  const calls: string[] = []
+  const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+    calls.push(String(input))
+    return sseResponse(frames)
+  }) as unknown as typeof fetch
+  return {
+    adapter: new KimiCodeAdapter(store, modelSettings, undefined, {
+      fetchFn,
+      loadCatalog: async () => (wire === 'anthropic' ? ANTHROPIC_CATALOG : CATALOG),
+    }, pool as unknown as KimiCodeAccountPool | undefined),
+    calls,
+  }
+}
+
+/** Drain one turn, returning the error that ended it and what it had emitted. */
+async function streamOf(adapter: KimiCodeAdapter): Promise<{ error: unknown; chunks: StreamChunk[] }> {
+  const chunks: StreamChunk[] = []
+  try {
+    for await (const chunk of adapter.stream(generateOptions('k3'))) chunks.push(chunk)
+  } catch (error) {
+    return { error, chunks }
+  }
+  throw new Error('expected the in-band error to end the stream')
+}
+
+const retryableCodes = (): string[] => new KimiCodeAdapter(
+  new FileCredentialStore(tmp('kc-inband-policy')),
+).providerRetryPolicy().retryableCodes
+
+describe('kimi-code in-band stream errors on the Anthropic wire', () => {
+  it('reclassifies a transient in-band failure while nothing has reached the caller', async () => {
+    // The shape that ends a real turn: HTTP 200, message_start, then the
+    // failure. The same overload sent as a 529 is a retryable SERVER, so the
+    // in-band copy must not be the one that ends the turn on the first try.
+    for (const [type, message, code] of [
+      ['overloaded_error', 'Overloaded', 'SERVER'],
+      ['api_error', 'Internal server error', 'SERVER'],
+      ['rate_limit_error', "We're receiving too many requests", 'RATE_LIMIT'],
+    ] as const) {
+      const { adapter, calls } = await adapterFor([
+        MESSAGE_START,
+        { type: 'error', error: { type, message } },
+      ], 'anthropic')
+      const { error } = await streamOf(adapter)
+      expect(error).toMatchObject({ code })
+      // The provider's own diagnostic stays in the message, so the notice still
+      // says what happened rather than becoming a bare code.
+      expect((error as Error).message).toContain(message)
+      expect(retryableCodes()).toContain(code)
+      // No synthetic status: the response really was a 200, and attaching one
+      // would misreport what the provider said.
+      expect((error as { failure?: { status?: number } }).failure?.status).toBeUndefined()
+      // Classified, not re-requested inside the stream. The harness retry
+      // policy owns the repeat.
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps the mapper verdict once a chunk has reached the caller', async () => {
+    // A retry here would repeat 'partial' for the user and could re-run a tool
+    // call the model already emitted.
+    const { adapter, calls } = await adapterFor([
+      MESSAGE_START,
+      { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+      { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+    ], 'anthropic')
+    const { error, chunks } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(chunks.map((chunk) => chunk.type)).toContain('text-delta')
+    expect(JSON.stringify(chunks)).toContain('partial')
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves a non-transient or unrecognized in-band type with the mapper verdict', async () => {
+    // Nothing here has a status behind it, and inventing one would file an
+    // unknown type as a retryable server error.
+    for (const type of ['invalid_request_error', 'authentication_error', 'request_too_large', 'some_future_error']) {
+      const { adapter, calls } = await adapterFor([
+        MESSAGE_START,
+        { type: 'error', error: { type, message: 'nope' } },
+      ], 'anthropic')
+      const { error } = await streamOf(adapter)
+      expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps the context-overflow verdict the mapper already typed', async () => {
+    // That code is how the turn is compacted and recovered. A retryable code
+    // would spend the budget on a request that cannot fit and lose the
+    // recovery the harness performs on this verdict.
+    const { adapter, calls } = await adapterFor([
+      MESSAGE_START,
+      { type: 'error', error: { type: 'api_error', message: "prompt is too long for this model's context" } },
+    ], 'anthropic')
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('takes an in-band rate limit out of rotation so the retry lands elsewhere', async () => {
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      MESSAGE_START,
+      { type: 'error', error: { type: 'rate_limit_error', message: "We're receiving too many requests" } },
+    ], 'anthropic', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'RATE_LIMIT' })
+    // The body cannot be re-requested from here, but the evidence is the same
+    // one a 429 carries, so the account leaves rotation the same way. The
+    // harness retry is about to repeat this request, and repeating it against
+    // the account that just refused fails identically.
+    expect(pool.cooldowns).toEqual([
+      { id: 'kc-1', ms: RATE_LIMIT_WINDOW_MS, reason: 'Kimi Code in-stream 429' },
+    ])
+    expect(pool.authFailures).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('cools an account-scoped in-band limit for its own window and does not retry it', async () => {
+    // The 429 rule this line already owns: a spent balance is not
+    // back-pressure, so it takes the window's length instead of the 15
+    // minutes, and no amount of retrying fills it.
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      MESSAGE_START,
+      { type: 'error', error: { type: 'rate_limit_error', message: 'insufficient balance, please recharge your account' } },
+    ], 'anthropic', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(pool.cooldowns).toEqual([
+      { id: 'kc-1', ms: SPENT_WINDOW_MS, reason: 'Kimi Code in-stream 429' },
+    ])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves the pool alone for an in-band failure every account shares', async () => {
+    // Overload is not this account's property, so cooling one of them would
+    // take the pool offline for a fault none of them caused.
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      MESSAGE_START,
+      { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+    ], 'anthropic', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'SERVER' })
+    expect(pool.cooldowns).toHaveLength(0)
+    expect(pool.authFailures).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('cools nothing for a plan-scoped in-band rate limit', async () => {
+    // Every account of one plan is refused the same way, so this is a request
+    // failure: rotating could not change it, and cooling the pool after it
+    // would take accounts that could still answer offline.
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      MESSAGE_START,
+      { type: 'error', error: { type: 'rate_limit_error', message: 'Your current plan does not have access to this model.' } },
+    ], 'anthropic', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'RATE_LIMIT' })
+    expect(pool.cooldowns).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+  })
+})
+// The DEFAULT wire, so this is the delivery most turns actually fail through.
+describe('kimi-code in-band stream errors on the OpenAI wire', () => {
+  it('reclassifies a transient in-band failure while nothing has reached the caller', async () => {
+    // No catalog entry is needed to reach this wire: it is what every model id
+    // resolves to unless a live listing says otherwise, so the failure arrives
+    // on an ordinary data frame that happens to carry an `error`.
+    for (const [inBand, code] of [
+      [{ code: 'rate_limit_exceeded', message: "We're receiving too many requests" }, 'RATE_LIMIT'],
+      [{ code: 'server_error', message: 'The engine is currently overloaded.' }, 'SERVER'],
+      // No structured code at all: on some deployments the message text is the
+      // only evidence there is, so the text alone has to carry the verdict.
+      [{ message: 'Service is overloaded, try again shortly' }, 'SERVER'],
+    ] as const) {
+      const { adapter, calls } = await adapterFor([{ error: inBand }], 'openai')
+      const { error } = await streamOf(adapter)
+      expect(error).toMatchObject({ code })
+      // The provider's own diagnostic stays in the message, so the notice still
+      // says what happened rather than becoming a bare code.
+      expect((error as Error).message).toContain(inBand.message)
+      expect(retryableCodes()).toContain(code)
+      // No synthetic status: the response really was a 200.
+      expect((error as { failure?: { status?: number } }).failure?.status).toBeUndefined()
+      // Classified, not re-requested inside the stream.
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps the mapper verdict once a chunk has reached the caller', async () => {
+    // A retry here would repeat 'partial' for the user and could re-run a tool
+    // call the model already emitted.
+    const { adapter, calls } = await adapterFor([
+      { choices: [{ delta: { content: 'partial' } }] },
+      { error: { code: 'server_error', message: 'Overloaded' } },
+    ], 'openai')
+    const { error, chunks } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(chunks.map((chunk) => chunk.type)).toContain('text-delta')
+    expect(JSON.stringify(chunks)).toContain('partial')
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves an unrecognized in-band failure with the mapper verdict', async () => {
+    // Nothing here names a transient failure, and inventing one would file an
+    // unknown shape as a retryable server error.
+    for (const inBand of [
+      { message: 'nope' },
+      { code: 'invalid_request_error', message: 'bad request' },
+      { code: 'permission_error', message: 'the model is not available to this account' },
+    ]) {
+      const { adapter, calls } = await adapterFor([{ error: inBand }], 'openai')
+      const { error } = await streamOf(adapter)
+      expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps the context-overflow verdict the mapper already typed', async () => {
+    // The wire code alone would call this a server error, and the harness would
+    // then retry a request that cannot fit - losing the compaction this verdict
+    // exists to trigger.
+    const { adapter, calls } = await adapterFor([
+      { error: { code: 'internal_error', message: "prompt is too long for this model's context" } },
+    ], 'openai')
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('takes an in-band rate limit out of rotation so the retry lands elsewhere', async () => {
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      { error: { code: 'rate_limit_exceeded', message: "We're receiving too many requests" } },
+    ], 'openai', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'RATE_LIMIT' })
+    // The same rule the 429 response would have applied, reached off the code
+    // rather than off a status this vocabulary never carries.
+    expect(pool.cooldowns).toEqual([
+      { id: 'kc-1', ms: RATE_LIMIT_WINDOW_MS, reason: 'Kimi Code in-stream 429' },
+    ])
+    expect(pool.authFailures).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('keeps the mapper verdict for an in-band limit that names a spent balance', async () => {
+    // A balance that is spent is not a rate limit: retrying it verbatim repeats a
+    // refusal the user can only clear by topping up, and this line's HTTP path
+    // already says so - a 429 whose body names an exhausted plan is
+    // PROVIDER_ERROR, cools nothing, and is not retried. The in-band delivery
+    // must reach that same verdict, which is why the shared helper asks the
+    // line's own classifier instead of trusting the vocabulary heuristic: the
+    // heuristic only says "worth retrying", and only the classifier knows this
+    // one is not.
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      { error: { code: 'rate_limit_exceeded', message: 'insufficient balance, please recharge your account' } },
+    ], 'openai', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(pool.cooldowns).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves the pool alone for an in-band failure every account shares', async () => {
+    // Overload is not this account's property, and the HTTP path leaves the pool
+    // alone for every 5xx for the same reason.
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      { error: { code: 'server_error', message: 'The engine is currently overloaded.' } },
+    ], 'openai', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'SERVER' })
+    expect(pool.cooldowns).toHaveLength(0)
+    expect(pool.authFailures).toHaveLength(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('cools nothing for a plan-scoped in-band rate limit', async () => {
+    // Every account of one plan is refused the same way, so this is a request
+    // failure: rotating could not change it, and cooling the pool after it
+    // would take accounts that could still answer offline.
+    const pool = new FakePool()
+    const { adapter, calls } = await adapterFor([
+      { error: { code: 'rate_limit_exceeded', message: 'Your current plan does not have access to this model.' } },
+    ], 'openai', pool)
+    const { error } = await streamOf(adapter)
+    expect(error).toMatchObject({ code: 'RATE_LIMIT' })
+    expect(pool.cooldowns).toHaveLength(0)
+    expect(calls).toHaveLength(1)
   })
 })

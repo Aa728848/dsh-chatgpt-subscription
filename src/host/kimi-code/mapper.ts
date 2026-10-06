@@ -1303,6 +1303,24 @@ interface PendingToolCall {
   started: boolean
 }
 
+/**
+ * One failure the stream reported itself, as the wire stated it.
+ *
+ * The vocabulary travels with the object because the two wires do not spell a
+ * transient failure the same way — an Anthropic frame is an `error` EVENT, an
+ * OpenAI one an `error` field on an ordinary data frame — so the same verdict is
+ * reached by two different rules, and the adapter cannot re-derive which one
+ * applied from the wire it happened to send the request on.
+ */
+export interface KimiCodeInBandStreamError {
+  /** Wire the event was read with; it selects the vocabulary it reclassifies by. */
+  vocabulary: KimiCodeWire
+  /** The event's wire `error` object, as received. */
+  error: Record<string, unknown>
+  /** The provider's own diagnostic, without this mapper's prefix. */
+  message: string
+}
+
 export interface KimiCodeStreamState {
   wire: KimiCodeWire
   blocks: OutboundContentBlock[]
@@ -1316,6 +1334,15 @@ export interface KimiCodeStreamState {
   hasContent: boolean
   hasToolCall: boolean
   finishReason: string | null
+  /**
+   * An in-band failure, recorded just before the mapper throws on it.
+   *
+   * The mapper cannot tell whether anything has reached the caller yet and has
+   * no other verdict to give the event; the adapter can, and reclassifies a
+   * transient one from this while nothing has. Both wires record into the one
+   * field because one request is served by one of them, never both.
+   */
+  streamError?: KimiCodeInBandStreamError
   done: boolean
   finished: boolean
   inputTokens: number
@@ -1419,11 +1446,17 @@ export function processOpenAIStreamLine(line: string, state: KimiCodeStreamState
   const out: StreamChunk[] = []
 
   // The service reports a mid-stream failure as an SSE data frame rather than
-  // an HTTP error, so it must be surfaced as a provider error here.
+  // an HTTP error, so it must be surfaced as a provider error here. This is
+  // the route's DEFAULT wire, so it is the delivery most turns actually fail
+  // through, and it records the same evidence the Anthropic branch does.
   const errorPayload = isRecord(chunk.error) ? chunk.error : undefined
   if (errorPayload !== undefined) {
+    const message = asString(errorPayload.message) ?? 'unknown error'
+    // Typed PROVIDER_ERROR here because output may already have reached the
+    // caller; the adapter, which knows, reclassifies a transient one from this.
+    state.streamError = { vocabulary: 'openai', error: errorPayload, message }
     throw new LlmError(
-      `Kimi Code stream error: ${asString(errorPayload.message) ?? 'unknown error'}`,
+      `Kimi Code stream error: ${message}`,
       isContextOverflow(errorPayload) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
@@ -1688,8 +1721,12 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
   // A mid-stream error event carries the provider's own diagnostic.
   if (type === 'error') {
     const error = isRecord(event.error) ? event.error : {}
+    const message = asString(error.message) ?? 'unknown error'
+    // Typed PROVIDER_ERROR here because output may already have reached the
+    // caller; the adapter, which knows, reclassifies a transient one from this.
+    state.streamError = { vocabulary: 'anthropic', error, message }
     throw new LlmError(
-      `Kimi Code stream error: ${asString(error.message) ?? 'unknown error'}`,
+      `Kimi Code stream error: ${message}`,
       isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
