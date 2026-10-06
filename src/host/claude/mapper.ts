@@ -1677,6 +1677,13 @@ export interface ClaudeStreamState {
   finishReason: string | null
   /** `stop_details.explanation` from the final message_delta, when stated. */
   stopExplanation?: string
+  /**
+   * The wire `error` object of an in-band `error` event, recorded just before
+   * the mapper throws on it. The mapper cannot tell whether anything has reached
+   * the caller yet; the adapter can, and reads this to decide whether the failure
+   * is still safe to retry (see the adapter's `inBandStreamError`).
+   */
+  streamError?: Record<string, unknown>
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
@@ -2173,6 +2180,9 @@ export function processStreamLine(line: string, state: ClaudeStreamState): Strea
     const error = isRecord(event.error) ? event.error : {}
     const message = asString(error.message) ?? 'unknown error'
     const kind = asString(error.type)
+    // Typed PROVIDER_ERROR here because output may already have reached the
+    // caller; the adapter, which knows, reclassifies a transient one from this.
+    state.streamError = error
     throw new LlmError(
       'Claude stream error' + (kind === undefined ? '' : ' (' + kind + ')') + ': ' + message,
       isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',

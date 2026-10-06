@@ -78,6 +78,11 @@
  * - `request` -> PROVIDER_ERROR;
  * - `network` -> TRANSPORT.
  *
+ * An in-band `error` event inside a 200 stream carries the same envelope and is
+ * classified the same way while nothing has reached the caller; after the first
+ * chunk it is surfaced as PROVIDER_ERROR, for the reason in note 1
+ * ({@link inBandStreamError}).
+ *
  * A reported-client-version rejection is a REQUEST problem even though it
  * arrives as a 400 that mentions the client: it must NOT sign the user out, and
  * it has a real remedy (raise the reported version), so it is handled
@@ -804,8 +809,14 @@ export class ClaudeAdapter extends LlmAdapter {
         }
       } catch (error) {
         // A verdict the mapper already typed (a truncated stream, an in-band
-        // error event) is passed through untouched.
-        if (error instanceof LlmError) throw error
+        // error event) is passed through — except an in-band error event that
+        // arrived before anything reached the caller, which is classified like
+        // the response body it is equivalent to (see inBandStreamError).
+        if (error instanceof LlmError) {
+          throw outputStarted || state.streamError === undefined
+            ? error
+            : inBandStreamError(error, state.streamError, response.headers)
+        }
         if (signal.aborted) throw new LlmError('Claude request aborted', 'ABORTED', { cause: error })
         // A severed connection BEFORE anything reached the caller is a transport
         // failure and may be retried; after the first chunk it is reported as a
@@ -918,6 +929,49 @@ export function codeForFailure(failure: ClaudeFailure): string {
   if (failure.kind === 'overloaded' || failure.kind === 'server') return 'SERVER'
   if (failure.kind === 'network') return 'TRANSPORT'
   return 'PROVIDER_ERROR'
+}
+
+/**
+ * The DSH error an in-band `error` event becomes when it arrived BEFORE any
+ * chunk reached the caller.
+ *
+ * Anthropic can answer 200 and then report the failure inside the stream, in
+ * the same `{ error: { type, message } }` envelope a non-2xx body carries. The
+ * mapper types every such event PROVIDER_ERROR, because it cannot know whether
+ * output has started — and PROVIDER_ERROR is outside the retry set, so an
+ * `overloaded_error` delivered this way ended the turn on the first try while
+ * the identical overload delivered as a 529 is retried. Before any output a
+ * fresh request is still free (module note 1), so the envelope is classified
+ * exactly as a response body would be, and a transient verdict (overloaded,
+ * server, rate limit) takes its retryable code.
+ *
+ * Everything else keeps the mapper's verdict: a request problem, a context
+ * overflow, a credential refusal, and a type this line does not recognize. The
+ * last matters: classifyFailure falls back to the status line for an unknown
+ * type, and no status here describes the failure — the response itself was a
+ * 200 — so the status passed is 0 and never consulted for a recognized type.
+ *
+ * The message stays the mapper's, which names the wire type the user saw.
+ *
+ * @param thrown - the mapper's PROVIDER_ERROR (or context-overflow) verdict.
+ * @param streamError - the event's wire `error` object, from the stream state.
+ * @param headers - the 200 response's headers, read for the rate-limit verdict.
+ */
+export function inBandStreamError(
+  thrown: LlmError,
+  streamError: Record<string, unknown>,
+  headers: Headers,
+): LlmError {
+  const failure = classifyFailure(0, JSON.stringify({ error: streamError }), headers)
+  if (failure.type === null || !failure.retryable) return thrown
+  const retryAfter = failure.retryAfterMs !== null && failure.retryAfterMs > 0
+    ? failure.retryAfterMs
+    : undefined
+  return new LlmError(
+    thrown.message,
+    codeForFailure(failure),
+    retryAfter === undefined ? {} : { providerRetryAfterMs: retryAfter },
+  )
 }
 
 /**

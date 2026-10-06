@@ -1514,6 +1514,9 @@ describe('SSE state machine', () => {
       ...eventLines(messageStart()),
       ...eventLines({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }),
     ], errored)).toThrow(/Overloaded/)
+    // The wire error is kept for the adapter, which alone knows whether output
+    // has started and so whether the failure is still safe to retry.
+    expect(errored.streamError).toEqual({ type: 'overloaded_error', message: 'Overloaded' })
 
     const truncated = createStreamState()
     feed([
