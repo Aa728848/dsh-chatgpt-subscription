@@ -22,7 +22,13 @@ export type AccountQuotaLabels = Pick<
   'accountQuota' | 'quotaNone' | 'quotaSnapshot' | 'quotaResets' | 'quotaExhausted' | 'quotaWindow' | 'quotaUsed'
 >
 
-/** Percent with at most one decimal, never a bare NaN. */
+/**
+ * Percent with at most one decimal.
+ *
+ * A share that is not a finite number renders as `0%` rather than `NaN%`. Every
+ * caller has already tested `Number.isFinite` and skips the row, so this is the
+ * last line of defence, not a claim about an unmeasured window.
+ */
 export function formatQuotaPercent(value: number): string {
   if (!Number.isFinite(value)) return '0%'
   try {

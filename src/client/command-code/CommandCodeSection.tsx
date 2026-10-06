@@ -479,7 +479,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           busy={busy !== null}
           onToggle={toggleModel}
           onToggleAll={setAllModels}
-          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll }}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
         />
       </section>
 

@@ -145,7 +145,7 @@ export function ContextWindowEditor({
       </div>
     ))}
     <div className="dsha-actions">
-      <button className="dsha-btn" disabled={busy || overrideCount === 0} onClick={onResetAll}>
+      <button type="button" className="dsha-btn" disabled={busy || overrideCount === 0} onClick={onResetAll}>
         {labels.resetAll}
       </button>
     </div>

@@ -406,7 +406,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
           busy={busy !== null}
           onToggle={(id, enabled) => void toggleModel(id, enabled)}
           onToggleAll={setAllModels}
-          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll }}
+          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
         />
       </section>
 

@@ -7,11 +7,13 @@
  * part worth reading — how each line picks its most meaningful number — and that
  * is the only thing a line still supplies.
  *
- * Two deliberate details the copies got subtly wrong:
+ * Two details this shared shape depends on:
  *
- *   - the callbacks are held in refs. Passing them through dependencies meant a
- *     caller that wrote `readStatus: () => api.get('/status')` inline restarted
- *     the interval — and refetched — on every render;
+ *   - the callbacks are held in refs. Every caller hands them over as an inline
+ *     arrow, and a callback in the dependency array would restart the interval —
+ *     and refetch — on every render. The copies this replaced were only safe
+ *     because each was rendered with a stable prop, which is a property of the
+ *     call site rather than of the badge;
  *   - `authenticated` is part of the status contract rather than a predicate a
  *     line could forget, so a signed-out line can never leave a stale badge up.
  */

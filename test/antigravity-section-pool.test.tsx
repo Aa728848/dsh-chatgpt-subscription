@@ -105,6 +105,9 @@ describe('Antigravity account card', () => {
     expect(select).not.toBeNull()
     expect([...select!.options].map((option) => option.value)).toEqual(['sequential', 'round-robin', 'sticky'])
     expect(select!.value).toBe('sticky')
+    // The model list is a named group, not one a screen reader announces as bare
+    // "group" — the shared checklist takes its name from this line's dictionary.
+    expect(container.querySelector('.dsh-mcl-list')?.getAttribute('aria-label')).toBe(zh.modelsSection)
   })
 
   it('promotes another account through the provider accounts route', async () => {

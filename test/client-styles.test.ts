@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
 import { installStyles } from '../src/client/styles.ts'
+import { installAntigravityStyles } from '../src/client/antigravity/styles.ts'
 import { installHubStyles } from '../src/client/hub/hub-styles.ts'
+import { installKimiCodeStyles } from '../src/client/kimi-code/styles.ts'
 import { installModelChecklistStyles } from '../src/client/common/model-checklist-styles.ts'
 import { installPoolStyles } from '../src/client/common/styles.ts'
 
@@ -9,10 +11,12 @@ const SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription
 const HUB_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/hub"]'
 const CHECKLIST_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/model-checklist"]'
 const POOL_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/pool"]'
+const ANTIGRAVITY_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/antigravity"]'
+const KIMI_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/kimi-code"]'
 const tags = () => document.querySelectorAll<HTMLStyleElement>(SELECTOR)
 
 afterEach(() => {
-  for (const selector of [SELECTOR, HUB_SELECTOR, CHECKLIST_SELECTOR, POOL_SELECTOR]) {
+  for (const selector of [SELECTOR, HUB_SELECTOR, CHECKLIST_SELECTOR, POOL_SELECTOR, ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
     for (const tag of [...document.querySelectorAll<HTMLStyleElement>(selector)]) tag.remove()
   }
 })
@@ -61,6 +65,19 @@ describe('provider hub overview styles', () => {
     expect(css).toContain('.dsh-mcl-check{')
     expect(css).toContain('.dsh-mcl-option[aria-checked=true] .dsh-mcl-check')
     expect(css).toContain('.dsh-mcl-head{')
+  })
+
+  it('drops the replaced chip rules from the line sheets that still carried them', () => {
+    // The shared checklist owns the model rows now, so a line sheet that still
+    // defined the old chip list would be carrying a rule nothing can match — the
+    // same dead CSS the main sheet already shed.
+    installAntigravityStyles()
+    installKimiCodeStyles()
+    for (const selector of [ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
+      const css = document.querySelector<HTMLStyleElement>(selector)?.textContent ?? ''
+      expect(css).not.toContain('.dsha-models{')
+      expect(css).toContain('.dsha-models-hint{')
+    }
   })
 })
 

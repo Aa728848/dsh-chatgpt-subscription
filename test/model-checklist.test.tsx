@@ -109,4 +109,14 @@ describe('ModelChecklist', () => {
       expect(action.disabled).toBe(true)
     }
   })
+
+  it('names the list with the label its section supplies', async () => {
+    await render()
+    expect(container.querySelector('.dsh-mcl-list')?.getAttribute('aria-label')).toBe('模型')
+    // A section that supplies none leaves the group unnamed. That is the state a
+    // provider line must not be in: it had a list with an accessible name before
+    // this component existed.
+    await render({ labels: { selectAll: '全选', clearAll: '全不选' } })
+    expect(container.querySelector('.dsh-mcl-list')?.getAttribute('aria-label')).toBeNull()
+  })
 })

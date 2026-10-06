@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createLineApi } from '../src/client/common/line-api.ts'
+import * as minimaxApi from '../src/client/minimax-code/api.ts'
 
 const originalFetch = globalThis.fetch
 afterEach(() => {
@@ -81,5 +82,30 @@ describe('line api', () => {
     respond(JSON.stringify({ ok: false }), { status: 503 })
     const api = createLineApi('/kimi-code/api', 'Kimi Code')
     await expect(api.get('/status')).rejects.toThrow('HTTP 503')
+  })
+})
+
+describe('the MiniMax Code reader', () => {
+  // This line kept its own copy of the reader after the other nine moved to the
+  // shared one, and the copy still carried the predicate the shared reader was
+  // written to drop: `{ ok: false, error }` with no `value`, answered 200, was
+  // returned as if it were a payload.
+  it('raises on a 200 that states ok:false, like every sibling line', async () => {
+    respond(JSON.stringify({ ok: false, error: 'nope' }), { status: 200 })
+    await expect(minimaxApi.get('/status')).rejects.toThrow('nope')
+  })
+
+  it('still posts under this line\'s own prefix with a same-origin JSON body', async () => {
+    const calls = respond(JSON.stringify({ ok: true, value: null }))
+    await minimaxApi.post('/settings', { enabled: false })
+    expect(calls[0]?.url).toBe('/minimax-code/api/settings')
+    expect(calls[0]?.init?.method).toBe('POST')
+    expect(calls[0]?.init?.body).toBe('{"enabled":false}')
+    expect(calls[0]?.init?.credentials).toBe('same-origin')
+  })
+
+  it('reads a payload that documents itself instead of an envelope', async () => {
+    respond(JSON.stringify({ enabled: true, models: [] }))
+    await expect(minimaxApi.get<{ enabled: boolean }>('/status')).resolves.toMatchObject({ enabled: true })
   })
 })

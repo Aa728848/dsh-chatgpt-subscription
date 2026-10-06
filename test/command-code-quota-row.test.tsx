@@ -157,4 +157,10 @@ describe('Command Code quota rendering', () => {
     expect(section.textContent).not.toContain('Spend control')
     expect(section.textContent).toContain(accountPoolZh.quotaFactsScope)
   })
+
+  it('names the model list, so the group it renders is not an unnamed one', async () => {
+    await render()
+
+    expect(container.querySelector('.dsh-mcl-list')?.getAttribute('aria-label')).toBe(zh.modelsSection)
+  })
 })
