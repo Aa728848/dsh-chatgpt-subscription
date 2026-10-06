@@ -123,7 +123,7 @@ describe('Codex usage mapping', () => {
     const store = new MemoryTokenStore()
     await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
     const oauth = new OAuthService(store, { now: () => now })
-    vi.spyOn(oauth, 'credentials').mockRejectedValue(new Error('DPAPI credential write failed'))
+    vi.spyOn(oauth, 'credentialSelection').mockRejectedValue(new Error('DPAPI credential write failed'))
     const service = new UsageService(oauth, { fetchFn: (async () => Response.json({})) as unknown as typeof fetch, now: () => now })
 
     const result = await service.status(true)
@@ -160,7 +160,7 @@ describe('Codex usage mapping', () => {
     const store = new MemoryTokenStore()
     await store.save({ accessToken: 'a', refreshToken: 'r', accountId: 'account-1', expiresAt: Date.now() + 3_600_000 })
     const oauth = new OAuthService(store)
-    const credentials = vi.spyOn(oauth, 'credentials')
+    const credentials = vi.spyOn(oauth, 'credentialSelection')
     const service = new UsageService(oauth, {
       fetchFn: (async () => Response.json({ rate_limit: { primary_window: { used_percent: 100 } } })) as unknown as typeof fetch,
     })
@@ -179,7 +179,7 @@ describe('Codex usage mapping', () => {
     const store = new MemoryTokenStore()
     await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
     const oauth = new OAuthService(store, { now: () => now })
-    const credentials = vi.spyOn(oauth, 'credentials')
+    const credentials = vi.spyOn(oauth, 'credentialSelection')
     const fetchFn = vi.fn(async () => Response.json({
       rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 3_600 } },
     }))
@@ -201,7 +201,7 @@ describe('Codex usage mapping', () => {
     const store = new MemoryTokenStore()
     await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
     const oauth = new OAuthService(store, { now: () => now })
-    const credentials = vi.spyOn(oauth, 'credentials')
+    const credentials = vi.spyOn(oauth, 'credentialSelection')
     const fetchFn = vi.fn(async () => Response.json({
       rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 3_600 } },
     }))
@@ -240,7 +240,7 @@ describe('Codex usage mapping', () => {
     const store = new MemoryTokenStore()
     await store.save({ accessToken: 'a', refreshToken: 'r', expiresAt: now + 3_600_000 })
     const oauth = new OAuthService(store, { now: () => now })
-    const credentials = vi.spyOn(oauth, 'credentials')
+    const credentials = vi.spyOn(oauth, 'credentialSelection')
     const fetchFn = vi.fn(async () => Response.json({
       rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 3_600 } },
     }))

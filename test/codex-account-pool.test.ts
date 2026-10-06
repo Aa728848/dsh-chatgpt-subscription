@@ -301,11 +301,11 @@ describe('Codex pool request paths', () => {
       rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 604_800, reset_at: Math.floor(Date.now() / 1000) + 3600 } },
     }))
     const usage = new UsageService(oauth, { fetchFn: usageFetch as unknown as typeof fetch })
-    pool.setQuotaBlockedUntil((entry, now) => usage.blockedUntilFor(entry.credentials, now))
+    pool.setQuotaBlockedUntil((entry, now) => usage.blockedUntilFor(entry.id, entry.credentials, now))
 
     const primed = await usage.status(true, true)
     expect(primed.buckets[0]?.windows[0]?.usedPercent).toBe(100)
-    expect(usage.blockedUntilFor(account.credentials, Date.now())).toBeGreaterThan(Date.now())
+    expect(usage.blockedUntilFor(account.id, account.credentials, Date.now())).toBeGreaterThan(Date.now())
 
     // The chat path is still gated — that is the point of the quota verdict.
     await expect(oauth.credentials()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
@@ -380,7 +380,7 @@ describe('Codex pool request paths', () => {
       }) as unknown as typeof fetch,
     })
     pool.setQuotaSnapshot((account) => {
-      const snapshot = usage.snapshotFor(account.credentials)
+      const snapshot = usage.snapshotFor(account.id, account.credentials)
       return snapshot === undefined ? undefined : codexAccountQuota(snapshot)
     })
 
@@ -406,6 +406,46 @@ describe('Codex pool request paths', () => {
     const third = await pool.addAccount(credential(3))
     const withThird = new Map((await pool.listAccounts()).map((entry) => [entry.id, entry]))
     expect(withThird.get(third.id)?.quota).toBeUndefined()
+    oauth.dispose()
+  })
+
+  // The credential-derived identity is a fallback: `accountId ?? email ??
+  // planType`. An account that states none of the three collides with every other
+  // such account, and the card would draw one row's meters on the other's row.
+  // The pool row id is what keeps them apart.
+  it('keys each row by its row id when the credentials state no identity at all', async () => {
+    const { pool } = harness()
+    const anonymous = (n: number): StoredOAuthCredentials => ({
+      accessToken: `anon-${n}`,
+      refreshToken: `anon-refresh-${n}`,
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const first = await pool.addAccount(anonymous(1))
+    const second = await pool.addAccount(anonymous(2))
+    await pool.setPrimary(first.id)
+    const oauth = new OAuthService(new MemoryTokenStore(), { pool })
+
+    const usedByToken = new Map([['Bearer anon-1', 10], ['Bearer anon-2', 99]])
+    const usage = new UsageService(oauth, {
+      fetchFn: (async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+        const bearer = init?.headers?.authorization ?? ''
+        return Response.json({
+          rate_limit: { primary_window: { used_percent: usedByToken.get(bearer) ?? -1, limit_window_seconds: 18_000, reset_at: Math.floor(Date.now() / 1000) + 3600 } },
+        })
+      }) as unknown as typeof fetch,
+    })
+    pool.setQuotaSnapshot((account) => {
+      const snapshot = usage.snapshotFor(account.id, account.credentials)
+      return snapshot === undefined ? undefined : codexAccountQuota(snapshot)
+    })
+
+    await usage.status(true, true)
+    await pool.setPrimary(second.id)
+    await usage.status(true, true)
+
+    const byId = new Map((await pool.listAccounts()).map((entry) => [entry.id, entry]))
+    expect(byId.get(first.id)?.quota?.windows[0]?.usedPercent).toBe(10)
+    expect(byId.get(second.id)?.quota?.windows[0]?.usedPercent).toBe(99)
     oauth.dispose()
   })
 

@@ -22,6 +22,7 @@ import path from 'node:path'
 import { ClaudeAccountPool, claudePoolQuota } from '../src/host/claude/account-pool.ts'
 import {
   cachedQuotaFor,
+  cachedQuotaForPool,
   clearCachedCatalog,
   clearCachedQuota,
   fetchAccountQuota,
@@ -67,9 +68,17 @@ function usagePayload(overrides: Record<string, unknown> = {}): Record<string, u
 }
 
 /** Read one account's usage through the real client, over an injected fetch. */
-function readQuota(credentials: ClaudeCredentials, payload: Record<string, unknown>): Promise<ClaudeAccountQuota> {
+function readQuota(
+  credentials: ClaudeCredentials,
+  payload: Record<string, unknown>,
+  accountId?: string,
+): Promise<ClaudeAccountQuota> {
   const fetchFn = (async () => Response.json(payload)) as unknown as typeof fetch
-  return fetchAccountQuota(credentials, { fetchFn, force: true })
+  return fetchAccountQuota(credentials, {
+    fetchFn,
+    force: true,
+    ...(accountId === undefined ? {} : { accountId }),
+  })
 }
 
 function pool(): ClaudeAccountPool {
@@ -152,6 +161,35 @@ describe('claude per-account quota cache', () => {
   })
 })
 
+describe('claude pool-row keying', () => {
+  it('keeps a row\'s snapshot across the token rotation every refresh performs', async () => {
+    const before = credential(1)
+    await readQuota(before, usagePayload({ five_hour: { utilization: 33, resets_at: RESET_ISO } }), 'acc_row_1')
+
+    // The pool refreshed the token: the row is the same, the credential is not.
+    const rotated: ClaudeCredentials = { ...before, accessToken: 'at-1-rotated', refreshToken: 'rt-1-rotated' }
+    expect(cachedQuotaForPool('acc_row_1', rotated)?.windows[0]?.usedPercent)
+      .toBe(33)
+    // The token-tail form has nothing for the new token, and another row is never
+    // answered with this reading.
+    expect(cachedQuotaFor(rotated)).toBeNull()
+    expect(cachedQuotaForPool('acc_row_2', rotated)).toBeNull()
+  })
+
+  it('serves a row-keyed read from its own row cache rather than from the newest read', async () => {
+    const first = credential(1)
+    const second = credential(2)
+    await readQuota(first, usagePayload({ five_hour: { utilization: 20, resets_at: RESET_ISO } }), 'acc_row_1')
+    await readQuota(second, usagePayload({ five_hour: { utilization: 90, resets_at: RESET_ISO } }), 'acc_row_2')
+
+    // Both rows keep their own reading; the second read did not overwrite the first.
+    expect(cachedQuotaForPool('acc_row_1', first)?.windows[0]?.usedPercent).toBe(20)
+    expect(cachedQuotaForPool('acc_row_2', second)?.windows[0]?.usedPercent).toBe(90)
+    // A row whose credential names no row of its own falls back to its token tail.
+    expect(cachedQuotaForPool(undefined, first)).toBeNull()
+  })
+})
+
 describe('claudePoolQuota', () => {
   it('says nothing for an account that was never read', () => {
     expect(claudePoolQuota(null)).toBeUndefined()
@@ -192,7 +230,9 @@ describe('claude account rows carry their own quota', () => {
     expect((await accounts.listAccounts()).every((entry) => entry.quota === undefined)).toBe(true)
 
     const stored = (await accounts.read()).accounts.find((entry) => entry.id === first.id)!
-    await readQuota(stored.credentials, usagePayload())
+    // The route reads with the row id it resolved, which is what the summary asks
+    // with too.
+    await readQuota(stored.credentials, usagePayload(), first.id)
 
     const byId = new Map((await accounts.listAccounts()).map((entry) => [entry.id, entry]))
     const quota = byId.get(first.id)?.quota
@@ -213,7 +253,7 @@ describe('claude account rows carry their own quota', () => {
 
     // `five_hour` is present but states no utilization: the payload is silent
     // about that window, which is not the same as it being empty.
-    await readQuota(stored.credentials, usagePayload({ five_hour: {} }))
+    await readQuota(stored.credentials, usagePayload({ five_hour: {} }), account.id)
 
     const quota = (await accounts.listAccounts()).find((entry) => entry.id === account.id)?.quota
     expect(quota?.windows.map((entry) => entry.label)).toEqual(['Weekly (7 days)'])

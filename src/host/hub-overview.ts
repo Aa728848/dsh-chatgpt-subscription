@@ -52,7 +52,10 @@ export function registerHubOverviewRoutes(ctx: Context, sources: readonly HubSum
         id: source.id,
         providerId: source.providerId,
         canToggle: source.canToggle,
-        enabled: false,
+        // A line with no switch is always servable — `enabled` is false only
+        // where a switch exists to be off. The failure is reported through
+        // `error`, which is what the card renders from.
+        enabled: !source.canToggle,
         accountCount: 0,
         authenticated: false,
         enabledModelCount: null,

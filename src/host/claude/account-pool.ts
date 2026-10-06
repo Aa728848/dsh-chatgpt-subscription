@@ -136,7 +136,7 @@ import {
   isAdoptedCredentialExpired,
 } from './adopt.ts'
 import { PROVIDER_ID, PROVIDER_NAME } from './types.ts'
-import { cachedQuotaFor, type ClaudeAccountQuota, type ClaudeFailure } from './client.ts'
+import { cachedQuotaForPool, type ClaudeAccountQuota, type ClaudeFailure } from './client.ts'
 
 /** Keychain / Secret Service service name of this line's pool. */
 const KEYCHAIN_SERVICE = 'dsh-claude-pool'
@@ -913,7 +913,9 @@ export class ClaudeAccountPool extends AccountPoolCore<
         // The account's own newest snapshot, taken from the identity THIS row
         // carries. Quota follows the account, so the row draws its own reading;
         // absent means that account was never read, which is not "nothing used".
-        const quota = claudePoolQuota(cachedQuotaFor(credentials))
+        // The row id — not the access token — is the key: every refresh rotates
+        // the token, and a snapshot filed under a tail would be lost with it.
+        const quota = claudePoolQuota(cachedQuotaForPool(account.id, credentials))
         return {
           ...base,
           ...(email === undefined ? {} : { email }),

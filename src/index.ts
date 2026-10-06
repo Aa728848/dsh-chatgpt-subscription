@@ -597,12 +597,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const usage = new UsageService(oauth, { fetchFn: proxyFetch })
     // A pooled account whose last known Codex window is spent is skipped before
     // a request is spent on it, instead of rediscovering the same 429 each time.
-    codexAccountPool.setQuotaBlockedUntil((account, now) => usage.blockedUntilFor(account.credentials, now))
+    codexAccountPool.setQuotaBlockedUntil((account, now) => usage.blockedUntilFor(account.id, account.credentials, now))
     // The same per-account snapshots answer the settings card: each account row
     // draws its own window progress, instead of one figure that belongs to
-    // whichever account was active when it was read.
+    // whichever account was active when it was read. The row id keys it, so a
+    // token refresh cannot strand a row's meters on the credential it rotated
+    // away from.
     codexAccountPool.setQuotaSnapshot((account) => {
-      const snapshot = usage.snapshotFor(account.credentials)
+      const snapshot = usage.snapshotFor(account.id, account.credentials)
       return snapshot === undefined ? undefined : codexAccountQuota(snapshot)
     })
     const responses = new ResponsesClient(oauth, ctx.attachments, {

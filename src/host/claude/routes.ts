@@ -73,6 +73,7 @@ import {
   type ClaudeModelEntry,
 } from './model-catalog.ts'
 import {
+  cachedQuotaForPool,
   clearCachedCatalog,
   clearCachedQuota,
   fetchAccountQuota,
@@ -384,9 +385,10 @@ export async function getClaudeWebStatus(
   const enabledModelIds = resolveEnabledModelIds(settings.enabledModelIds, available, enabled)
   const models = buildClaudeModelOptions(catalog, available, enabledModelIds, settings.contextWindowOverrides)
 
-  // Only a snapshot belonging to the displayed account may be rendered; the
-  // cache is keyed on the token tail precisely so this question has an answer.
-  const quota = credential === undefined ? getCachedQuota() : getCachedQuota(credential)
+  // Only a snapshot belonging to the displayed account may be rendered. The pool
+  // row is the identity that survives a token refresh, so it is asked with the
+  // row id; a composition without a pool falls back to the credential's tail.
+  const quota = credential === undefined ? getCachedQuota() : cachedQuotaForPool(active.id, credential)
 
   const poolData = options.accountPool === undefined
     ? null
@@ -557,7 +559,7 @@ export function registerClaudeRoutes(
         if (path === '' || path === 'status') {
           if (method !== 'GET') return sendMethodNotAllowed(response)
           const active = await activeAccount()
-          const cached = active.credentials === undefined ? null : getCachedQuota(active.credentials)
+          const cached = active.credentials === undefined ? null : cachedQuotaForPool(active.id, active.credentials)
           const stale = cached === null || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS
           // A failure is reported alongside the status rather than failing the
           // whole read, so the card can show why the meters are missing. A
@@ -567,7 +569,7 @@ export function registerClaudeRoutes(
           if (active.credentials !== undefined && stale) {
             const credentials = active.credentials
             const refresh = (): Promise<unknown> =>
-              fetchAccountQuota(credentials, { fetchFn, signal: quotaAbort.signal })
+              fetchAccountQuota(credentials, { fetchFn, signal: quotaAbort.signal, accountId: active.id })
             if (cached === null) await quotaRefresh.run(refresh)
             else quotaRefresh.start(refresh)
           }
@@ -668,6 +670,7 @@ export function registerClaudeRoutes(
               fetchFn,
               force: method === 'POST',
               signal: quotaAbort.signal,
+              accountId: active.id,
             })
           } catch (error) {
             // Reported as a field rather than as a failed request: the card's

@@ -99,6 +99,14 @@ describe('hub overview route', () => {
     })
   })
 
+  it('keeps a switchless line reported as enabled when its own store cannot be read', async () => {
+    // `enabled` is false only where a switch exists to be off: a line without one
+    // is always servable, and the failure is what `error` is for.
+    const { origin } = mount([source('ollama', { canToggle: false }, async () => { throw new Error('unreadable') })])
+    const body = await (await fetch(`${await origin}${HUB_OVERVIEW_PATH}`)).json() as { value: HubOverviewDto }
+    expect(body.value.providers[0]).toMatchObject({ id: 'ollama', canToggle: false, enabled: true, error: true })
+  })
+
   it('answers only GET, so the read-only route never looks like a mutation', async () => {
     const { origin } = mount([source('chatgpt')])
     const base = await origin

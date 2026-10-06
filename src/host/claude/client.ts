@@ -829,6 +829,19 @@ interface QuotaCacheEntry {
 }
 
 /**
+ * Cache key of one account's snapshot.
+ *
+ * A pool row id when the caller names one — that is the identity that survives a
+ * token refresh and the one the account card asks with — and otherwise the
+ * credential's token tail, which is all a single-credential process has. The
+ * `acc:` prefix keeps the two apart, so no row id can ever be answered with an
+ * entry written under a token tail.
+ */
+function quotaEntryKey(accountId: string | undefined, credentials: Pick<ClaudeCredentials, 'accessToken'>): string {
+  return accountId === undefined || accountId === '' ? accountKeyFor(credentials) : `acc:${accountId}`
+}
+
+/**
  * How many accounts' snapshots are remembered.
  *
  * Mirrors the bound the ChatGPT line's usage service applies to its own
@@ -838,7 +851,7 @@ interface QuotaCacheEntry {
 const QUOTA_ACCOUNT_LIMIT = 20
 
 /**
- * The newest snapshot of each account, keyed by {@link accountKeyFor}.
+ * The newest snapshot of each account, keyed by {@link quotaEntryKey}.
  *
  * ONE ENTRY PER ACCOUNT rather than one slot for the line: quota follows the
  * account, and rotation decides which account spends the next request, so a
@@ -907,12 +920,29 @@ export function getCachedQuota(credentials?: Pick<ClaudeCredentials, 'accessToke
 /**
  * The newest snapshot held for one credential's account, for display only.
  *
- * The pool asks here while it builds the account list for the settings card, so
- * this is a pure memory read: it never fetches. Null means nothing was ever
- * read for this account, which is a different statement from "nothing used".
+ * The token-tail form, kept for a composition with a single stored credential.
+ * A pooled caller asks {@link cachedQuotaForPool} with the row id instead: a
+ * token is rotated by every refresh, so an entry filed under a tail is lost the
+ * moment the account renews.
  */
 export function cachedQuotaFor(credentials: Pick<ClaudeCredentials, 'accessToken'>): ClaudeAccountQuota | null {
   return quotaCache.get(accountKeyFor(credentials))?.quota ?? null
+}
+
+/**
+ * The newest snapshot held for one pool row, for display only.
+ *
+ * The pool asks here while it builds the account list for the settings card, so
+ * this is a pure memory read: it never fetches. Null means nothing was ever read
+ * for this account, which is a different statement from "nothing used". A row id
+ * that is undefined falls back to the credential's own tail, which is what a
+ * composition without a pool has.
+ */
+export function cachedQuotaForPool(
+  accountId: string | undefined,
+  credentials: Pick<ClaudeCredentials, 'accessToken'>,
+): ClaudeAccountQuota | null {
+  return quotaCache.get(quotaEntryKey(accountId, credentials))?.quota ?? null
 }
 
 /** Options for {@link fetchAccountQuota}. */
@@ -921,6 +951,14 @@ export interface QuotaFetchOptions {
   signal?: AbortSignal
   /** Bypass the cache and read the usage endpoint now. */
   force?: boolean
+  /**
+   * Pool row this read is made for, when a pool is in charge.
+   *
+   * The snapshot is then remembered against the row rather than against the
+   * access token, so the row keeps its meters across the token rotations that
+   * every refresh performs.
+   */
+  accountId?: string
 }
 
 /**
@@ -942,7 +980,7 @@ export function fetchAccountQuota(
   credentials: ClaudeCredentials,
   options: QuotaFetchOptions = {},
 ): Promise<ClaudeAccountQuota> {
-  const key = accountKeyFor(credentials)
+  const key = quotaEntryKey(options.accountId, credentials)
   const at = now()
   const cached = quotaCache.get(key)
   if (options.force !== true && cached !== undefined) {
@@ -971,12 +1009,13 @@ async function performQuotaFetch(
   credentials: ClaudeCredentials,
   options: QuotaFetchOptions,
 ): Promise<ClaudeAccountQuota> {
-  const key = accountKeyFor(credentials)
+  const key = quotaEntryKey(options.accountId, credentials)
   const fetchFn = options.fetchFn ?? fetch
   // Only a snapshot of the SAME account may answer a failed read: another
   // account's numbers are not this account's, and a stale reading of the right
-  // account still beats a confident wrong one.
-  const previous = cachedQuotaFor(credentials)
+  // account still beats a confident wrong one. The key is this read's own, so a
+  // row-keyed read is answered by a row-keyed snapshot.
+  const previous = quotaCache.get(key)?.quota ?? null
 
   let response: Response
   try {

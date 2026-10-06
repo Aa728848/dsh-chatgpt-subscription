@@ -86,7 +86,11 @@ export interface PoolAccountQuotaWindowDto {
 
 /** The newest quota snapshot one line holds for one account. */
 export interface PoolAccountQuotaDto {
-  /** Windows shortest-first, in the order the line's own card lists them. */
+  /**
+   * Windows in the order the line's own card lists them, unlabeled ones
+   * included: no code sorts this list, and the lines that know a window's length
+   * happen to state the shortest first.
+   */
   windows: PoolAccountQuotaWindowDto[]
   /** Unix milliseconds this snapshot was read, never when it was served. */
   fetchedAt: number

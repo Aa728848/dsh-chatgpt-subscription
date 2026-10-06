@@ -109,9 +109,9 @@ export class UsageService {
       return this.fromCache(false)
     }
 
-    let credentials: StoredOAuthCredentials
+    let selection: { accountId?: string; credentials: StoredOAuthCredentials }
     try {
-      credentials = await this.oauth.credentials(false, USAGE_CREDENTIAL_ACCESS)
+      selection = await this.oauth.credentialSelection(false, USAGE_CREDENTIAL_ACCESS)
     } catch (error) {
       // "Could not be refreshed" alone sent people looking at their token; the
       // provider's own reason (a rejected refresh, an unwritable store, a
@@ -122,7 +122,12 @@ export class UsageService {
         message: `ChatGPT credentials could not be refreshed.${reason}`,
       })
     }
-    const accountKey = identityKey(credentials)
+    const credentials = selection.credentials
+    // ONE key for the page-level cache and the per-account map: the POOL ROW when
+    // there is one — the identity that survives a token refresh, and the only one
+    // that tells two pooled accounts apart when neither states an id or an email
+    // — and the credential identity otherwise.
+    const accountKey = this.snapshotKeyFor(selection.accountId, credentials)
     if (this.cache !== null && this.cache.accountKey !== accountKey) this.clear()
     if (!force && !this.invalidated && this.cache !== null && now - this.cache.fetchedAt < QUOTA_CACHE_MS) {
       return this.fromCache(false)
@@ -160,9 +165,9 @@ export class UsageService {
    * The rejection is absorbed here: this refresh has no caller to receive it,
    * and {@link fromCache} keeps serving the snapshot it failed to replace.
    */
-  private startBackgroundRefresh(credentials: StoredOAuthCredentials, accountKey: string): void {
+  private startBackgroundRefresh(credentials: StoredOAuthCredentials, snapshotKey: string): void {
     if (this.inFlight !== null) return
-    const task = this.refreshUpstream(credentials, accountKey).finally(() => {
+    const task = this.refreshUpstream(credentials, snapshotKey).finally(() => {
       if (this.inFlight === task) this.inFlight = null
     })
     this.inFlight = task
@@ -181,8 +186,12 @@ export class UsageService {
    * cooldown rather than forever, so a missing upstream field cannot strand an
    * account permanently.
    */
-  blockedUntilFor(credentials: StoredOAuthCredentials, now: number): number | undefined {
-    const snapshot = this.snapshots.get(identityKey(credentials))
+  blockedUntilFor(
+    accountId: string | undefined,
+    credentials: StoredOAuthCredentials,
+    now: number,
+  ): number | undefined {
+    const snapshot = this.snapshots.get(this.snapshotKeyFor(accountId, credentials))
     if (snapshot === undefined) return undefined
     let reopen: number | undefined
     for (const bucket of snapshot.usage.buckets) {
@@ -197,19 +206,39 @@ export class UsageService {
   }
 
   /**
-   * The newest quota snapshot held for one credential's account, if any.
+   * The newest quota snapshot held for one account, if any.
    *
    * Quota follows the account, so the settings card shows each account its own
-   * progress. The pool asks here while it builds its summaries — this reads the
-   * remembered map only, never the network, because opening the settings page
-   * must not cost one upstream request per pooled account.
+   * progress. The pool asks here with the row id it addresses the account by —
+   * the identity that survives a token refresh — while its credentials answer
+   * for a composition without a pool. This reads the remembered map only, never
+   * the network, because opening the settings page must not cost one upstream
+   * request per pooled account.
    */
-  snapshotFor(credentials: StoredOAuthCredentials): { usage: QuotaUsageDto; fetchedAt: number } | undefined {
-    return this.snapshots.get(identityKey(credentials))
+  snapshotFor(
+    accountId: string | undefined,
+    credentials: StoredOAuthCredentials,
+  ): { usage: QuotaUsageDto; fetchedAt: number } | undefined {
+    return this.snapshots.get(this.snapshotKeyFor(accountId, credentials))
+  }
+
+  /**
+   * Key one account's remembered snapshot is filed under.
+   *
+   * A pool row id when the caller names one, prefixed so it can never be
+   * confused with the credential-derived key, and otherwise the credential
+   * identity — which is all a composition without a pool has. Two pooled accounts
+   * that state neither an account id nor an email would otherwise collapse onto
+   * one key and show each other's numbers, so the row id is the answer wherever
+   * a pool is in charge.
+   */
+  private snapshotKeyFor(accountId: string | undefined, credentials: StoredOAuthCredentials): string {
+    return accountId === undefined || accountId === '' ? identityKey(credentials) : `row:${accountId}`
   }
 
   /** Remember the newest snapshot for one account, bounded to the accounts in use. */
-  private rememberSnapshot(accountKey: string, usage: QuotaUsageDto, fetchedAt: number): void {    this.snapshots.set(accountKey, { usage, fetchedAt })
+  private rememberSnapshot(accountKey: string, usage: QuotaUsageDto, fetchedAt: number): void {
+    this.snapshots.set(accountKey, { usage, fetchedAt })
     while (this.snapshots.size > 20) {
       const oldest = [...this.snapshots.entries()].sort((left, right) => left[1].fetchedAt - right[1].fetchedAt)[0]
       if (oldest === undefined) break
@@ -225,8 +254,8 @@ export class UsageService {
   }
 
   /** Drop the remembered snapshot of one account, after its window is known to have reset. */
-  forgetSnapshot(credentials: StoredOAuthCredentials): void {
-    this.snapshots.delete(identityKey(credentials))
+  forgetSnapshot(accountId: string | undefined, credentials: StoredOAuthCredentials): void {
+    this.snapshots.delete(this.snapshotKeyFor(accountId, credentials))
   }
 
   async consumeResetCredit(): Promise<QuotaStatusDto> {
@@ -239,12 +268,17 @@ export class UsageService {
 
   private async consumeResetCreditUpstream(): Promise<QuotaStatusDto> {
     let credentials: StoredOAuthCredentials
+    let accountId: string | undefined
     try {
-      credentials = await this.oauth.credentials(false, USAGE_CREDENTIAL_ACCESS)
+      const selection = await this.oauth.credentialSelection(false, USAGE_CREDENTIAL_ACCESS)
+      credentials = selection.credentials
+      accountId = selection.accountId
       let creditsResponse = await this.fetchResetCredits(credentials)
       if (creditsResponse.status === 401) {
         await creditsResponse.body?.cancel().catch(() => undefined)
-        credentials = await this.oauth.credentials(true, USAGE_CREDENTIAL_ACCESS)
+        const renewed = await this.oauth.credentialSelection(true, USAGE_CREDENTIAL_ACCESS)
+        credentials = renewed.credentials
+        accountId = renewed.accountId
         creditsResponse = await this.fetchResetCredits(credentials)
       }
       if (!creditsResponse.ok) {
@@ -268,7 +302,9 @@ export class UsageService {
       })
       if (consumeResponse.status === 401) {
         await consumeResponse.body?.cancel().catch(() => undefined)
-        credentials = await this.oauth.credentials(true, USAGE_CREDENTIAL_ACCESS)
+        const renewed = await this.oauth.credentialSelection(true, USAGE_CREDENTIAL_ACCESS)
+        credentials = renewed.credentials
+        accountId = renewed.accountId
         consumeResponse = await this.fetchFn(CODEX_RESET_CREDITS_CONSUME_URL, {
           method: 'POST',
           headers: { ...codexHeaders(credentials), accept: 'application/json', 'content-type': 'application/json' },
@@ -285,7 +321,7 @@ export class UsageService {
       }
       await consumeResponse.body?.cancel().catch(() => undefined)
       this.clear()
-      const refreshed = await this.refreshUpstream(credentials, identityKey(credentials))
+      const refreshed = await this.refreshUpstream(credentials, this.snapshotKeyFor(accountId, credentials))
       if (refreshed.error !== undefined) {
         throw new UsageServiceError({ code: 'quota-failed', message: 'The reset credit was used, but usage could not be refreshed.' })
       }
@@ -305,16 +341,20 @@ export class UsageService {
     return { connected: true, latencyMs: Math.max(0, this.now() - started), checkedAt: Math.floor(this.now() / 1000) }
   }
 
-  private async refreshUpstream(initialCredentials: StoredOAuthCredentials, initialAccountKey: string): Promise<QuotaStatusDto> {
+  private async refreshUpstream(initialCredentials: StoredOAuthCredentials, initialSnapshotKey: string): Promise<QuotaStatusDto> {
     this.lastUpstreamAt = this.now()
     try {
       let credentials = initialCredentials
-      let accountKey = initialAccountKey
+      let snapshotKey = initialSnapshotKey
       let response = await this.fetch(credentials)
       if (response.status === 401) {
         await response.body?.cancel().catch(() => undefined)
-        credentials = await this.oauth.credentials(true, USAGE_CREDENTIAL_ACCESS)
-        accountKey = identityKey(credentials)
+        const renewed = await this.oauth.credentialSelection(true, USAGE_CREDENTIAL_ACCESS)
+        credentials = renewed.credentials
+        // A renewal can land on another account. The reading belongs to whoever
+        // answered, so the key follows the credential actually used rather than
+        // the one that was refused.
+        snapshotKey = this.snapshotKeyFor(renewed.accountId, credentials)
         response = await this.fetch(credentials)
       }
       if (response.status === 429) {
@@ -338,11 +378,11 @@ export class UsageService {
           await resetResponse?.body?.cancel().catch(() => undefined)
         }
       }
-      this.cache = { usage, fetchedAt: this.now(), accountKey }
+      this.cache = { usage, fetchedAt: this.now(), accountKey: snapshotKey }
       // Recorded as late as possible so a credential rotation that happened
       // while this request was in flight is still captured.
       this.cacheIdentityRevision = this.oauth.currentIdentityRevision()
-      this.rememberSnapshot(accountKey, usage, this.cache.fetchedAt)
+      this.rememberSnapshot(snapshotKey, usage, this.cache.fetchedAt)
       this.invalidated = false
       return this.fromCache(false)
     } catch (error) {
