@@ -64,6 +64,45 @@ export const DEFAULT_CONTEXT_WINDOW = 128_000
  */
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 
+/**
+ * Smallest output cap this line will send for a model whose thinking cannot be
+ * turned off.
+ *
+ * Such a model spends its cap on reasoning before it emits any text, so a caller
+ * that wants only a few words can be capped below the reasoning floor and get an
+ * empty answer with a length finish - which Harness reports as a truncated
+ * stream. DSH's own session-title call is the caller that hits it: it asks for
+ * one short line with `maxTokens: 64`, and on a forced-thinking model every
+ * title comes back empty.
+ *
+ * The value is carried over from the MiniMax Code line, where 512 is MEASURED:
+ * 64 returns a thinking block and no text, 512 returns the title after ~53
+ * output tokens. It is NOT measured on this line - see docs/ for the observation
+ * that motivated it - so it is deliberately a round, conservative number rather
+ * than a tight one: the cost of a too-high floor is a few unused tokens on an
+ * auxiliary call, and the cost of a too-low one is the title failing at all.
+ */
+export const FORCED_THINKING_FLOOR_TOKENS = 512
+
+/**
+ * Raise a cap that is too small for this model's forced thinking.
+ *
+ * Left alone: a model whose thinking CAN be disabled - its caller may have asked
+ * for thinking off on purpose, and raising the cap would not enable it while the
+ * number read back would be misleading - and an absent cap, which
+ * `DEFAULT_MAX_OUTPUT_TOKENS` already owns at a size nothing is short of.
+ *
+ * @param modelId - the routed model id.
+ * @param requested - the caller's cap, undefined when it stated none.
+ * @returns the cap to request, raised only when that is the difference between an
+ * empty truncated answer and a usable one.
+ */
+export function floorForcedThinkingTokens(modelId: string, requested: number | undefined): number | undefined {
+  if (requested === undefined) return undefined
+  if (thinkingModeForModel(modelId) !== 'levels') return requested
+  return Math.max(requested, FORCED_THINKING_FLOOR_TOKENS)
+}
+
 /** How long a catalog sync may take before the cached list is used instead. */
 export const CATALOG_TIMEOUT_MS = 15_000
 

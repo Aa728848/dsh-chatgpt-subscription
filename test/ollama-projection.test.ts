@@ -3,6 +3,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import { buildBody } from '../src/host/ollama/client.ts'
 import { OllamaAdapter, toOllamaRequest } from '../src/host/ollama/adapter.ts'
+import { FORCED_THINKING_FLOOR_TOKENS } from '../src/host/ollama/types.ts'
 import { applyEvent, closeStream, createStreamState } from '../src/host/ollama/mapper.ts'
 
 function options(overrides: Record<string, unknown> = {}): never {
@@ -221,6 +222,22 @@ describe('ollama request projection', () => {
     expect((await toOllamaRequest(options({ model: 'llama3:8b', reasoningEffort: 'high' }))).think).toBeUndefined()
     expect((await toOllamaRequest(options({ model: 'gemma4:31b', reasoningEffort: 'high' }))).think).toBeUndefined()
   })
+
+  it('floors a cap too small for a forced-thinking model (gpt-oss)', async () => {
+    // The session-title call asks for one short line with maxTokens: 64. A model
+    // whose thinking cannot be turned off spends that cap on reasoning and
+    // answers with no text at all, which Harness reports as a truncated stream.
+    expect((await toOllamaRequest(options({ model: 'gpt-oss:120b', maxTokens: 64 }))).maxOutputTokens)
+      .toBe(FORCED_THINKING_FLOOR_TOKENS)
+    // An absent cap is DEFAULT_MAX_OUTPUT_TOKENS, which nothing is short of.
+    expect((await toOllamaRequest(options({ model: 'gpt-oss:120b' }))).maxOutputTokens).toBeUndefined()
+    // A cap the caller stated above the floor is the caller's number.
+    expect((await toOllamaRequest(options({ model: 'gpt-oss:120b', maxTokens: 8192 }))).maxOutputTokens).toBe(8192)
+    // A model whose thinking CAN be turned off keeps every cap exactly: raising
+    // one would not enable thinking, and the number read back would be a lie.
+    expect((await toOllamaRequest(options({ model: 'deepseek-r1:70b', maxTokens: 64 }))).maxOutputTokens).toBe(64)
+    expect((await toOllamaRequest(options({ model: 'llama3:8b', maxTokens: 64 }))).maxOutputTokens).toBe(64)
+  })
 })
 
 describe('ollama thinking stream', () => {
@@ -345,5 +362,196 @@ describe('OllamaAdapter adapter-level capabilities and streaming', () => {
     await expect(async () => {
       for await (const _ of iter) {}
     }).rejects.toThrow()
+  })
+})
+// ---------------------------------------------------------------------------
+// In-band stream errors
+// ---------------------------------------------------------------------------
+
+describe('ollama in-band stream errors', () => {
+  interface ChunkLike {
+    type: string
+    text?: string
+  }
+
+  /** A pool double whose eligibility is a pure function of the tried set. */
+  class FakePool {
+    readonly cooldowns: Array<{ id: string; ms: number; reason: string }> = []
+    readonly authFailures: Array<{ id: string; reason: string }> = []
+    picks = 0
+
+    private readonly accounts = [{ id: 'acc_primary' }, { id: 'acc_second' }]
+
+    async getEffectiveCredential(excludeIds?: ReadonlySet<string>) {
+      const account = this.accounts.find((candidate) => !excludeIds?.has(candidate.id))
+      if (account === undefined) throw new Error('no eligible account')
+      this.picks += 1
+      return { account, credentials: { apiKey: 'sk-' + account.id } }
+    }
+
+    async hasAnotherAvailableAccount(tried: ReadonlySet<string>): Promise<boolean> {
+      return this.accounts.some((account) => !tried.has(account.id))
+    }
+
+    async markCooldown(accountId: string, durationMs: number, reason: string): Promise<void> {
+      this.cooldowns.push({ id: accountId, ms: durationMs, reason })
+    }
+
+    async markAuthFailed(accountId: string, reason: string): Promise<void> {
+      this.authFailures.push({ id: accountId, reason })
+    }
+
+    async recordUsage(): Promise<void> {}
+  }
+
+  const settings = {
+    enabled: true,
+    enabledModelIds: [],
+    catalogModels: [{ id: 'gpt-oss:120b' }],
+    defaultReasoningEffort: null,
+  }
+
+  /**
+   * An adapter whose every request answers 200 and then says what it wanted to
+   * say, the way Ollama reports a failure inside a successful stream.
+   */
+  function adapterFor(frames: unknown[], calls: string[], pool?: FakePool): OllamaAdapter {
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return new Response(
+        frames.map((frame) => 'data: ' + JSON.stringify(frame) + '\n\n').join(''),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )
+    }) as unknown as typeof fetch
+    const store = {
+      read: vi.fn(async () => ({ apiKey: 'sk-test' })),
+      write: vi.fn(async () => undefined),
+      clear: vi.fn(async () => undefined),
+    }
+    const modelSettings = {
+      read: vi.fn(async () => settings),
+      status: vi.fn(() => settings),
+      update: vi.fn(async () => settings),
+      storeCatalog: vi.fn(async () => settings),
+    }
+    return new OllamaAdapter(store as never, modelSettings as never, {
+      fetchFn,
+      loadCatalog: async () => [{ id: 'gpt-oss:120b' }],
+    }, pool as never)
+  }
+
+  /** Drain one turn, keeping both what the caller saw and what ended it. */
+  async function run(adapter: OllamaAdapter): Promise<{ chunks: ChunkLike[]; failure: unknown }> {
+    const chunks: ChunkLike[] = []
+    try {
+      for await (const chunk of adapter.stream({
+        provider: 'ollama',
+        model: 'gpt-oss:120b',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+      } as never)) {
+        chunks.push(chunk as ChunkLike)
+      }
+    } catch (error) {
+      return { chunks, failure: error }
+    }
+    throw new Error('expected the stream to fail')
+  }
+
+  it('retypes a transient in-band failure while nothing has reached the caller', async () => {
+    // The shape that ends a real turn: HTTP 200, then an {"error": "..."} frame.
+    // Each of these arrives as a 5xx or a 429 when it is reported any other way,
+    // and that copy is already retried - so the in-band copy must not be the one
+    // that ends the turn on the first try.
+    const policy = new OllamaAdapter().providerRetryPolicy()
+    const retryable = policy.mode === 'normal' ? policy.retryableCodes : []
+    for (const [message, code] of [
+      ['loading model llama3.2-vision:11b', 'SERVER'],
+      ['server busy', 'SERVER'],
+      ['model is overloaded, please retry', 'SERVER'],
+      ['unable to load the runner', 'SERVER'],
+      ['rate limit exceeded', 'RATE_LIMIT'],
+      ['too many requests', 'RATE_LIMIT'],
+    ] as const) {
+      const calls: string[] = []
+      const { failure } = await run(adapterFor([{ error: message }], calls))
+      expect(failure).toMatchObject({ code })
+      // Ollama's own diagnostic stays in the message, so the notice still says
+      // what happened rather than becoming a bare code.
+      expect((failure as Error).message).toContain(message)
+      expect(retryable).toContain(code)
+      // Classified, not re-requested inside the stream: the harness retry policy
+      // owns the repeat.
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps the non-retryable verdict once output has reached the caller', async () => {
+    // A retry would repeat 'partial' for the user and could re-run a tool call,
+    // so the verdict the adapter reaches on its own still stands here.
+    const calls: string[] = []
+    const { chunks, failure } = await run(adapterFor([
+      { choices: [{ delta: { content: 'partial' } }] },
+      { error: 'server busy' },
+    ], calls))
+    expect(failure).toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text)).toEqual(['partial'])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves a refusal the wording does not name with the adapter verdict', async () => {
+    // The caller's message is what the service objected to in every one of these;
+    // retrying repeats it verbatim, so guessing here would cost backoff and
+    // report the wrong fault.
+    for (const message of [
+      'invalid request: temperature must be <= 2',
+      'registry.ollama.ai/library/llama3:8b not found',
+      'the input length (200000 tokens) exceeds the context length (131072 tokens)',
+    ]) {
+      const calls: string[] = []
+      const { failure } = await run(adapterFor([{ error: message }], calls))
+      expect(failure).toMatchObject({ code: 'INVALID_REQUEST' })
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('leaves the pool alone for an in-band failure, because none was reported', async () => {
+    // Rotation and cooldown here are statements about an ACCOUNT, and an in-band
+    // event carries no status to make one with. Cooling the key down or rotating
+    // off it would be a guess dressed as a verdict - and the second key would
+    // fail the same way - so the harness retry policy owns the repeat instead.
+    const pool = new FakePool()
+    const calls: string[] = []
+    const { failure } = await run(adapterFor([{ error: 'rate limit exceeded' }], calls, pool))
+    expect(failure).toMatchObject({ code: 'RATE_LIMIT' })
+    expect(pool.picks).toBe(1)
+    expect(pool.cooldowns).toEqual([])
+    expect(pool.authFailures).toEqual([])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('keeps the verdict a non-2xx status already gave it', async () => {
+    // The same wording inside a body that arrived with a 500 is not in-band
+    // evidence: the status already answered, and the verdict it produced is the
+    // one this line has always returned here.
+    const fetchFn = vi.fn(async () => new Response('{"error":"rate limit exceeded"}', {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch
+    const store = {
+      read: vi.fn(async () => ({ apiKey: 'sk-test' })),
+      write: vi.fn(async () => undefined),
+      clear: vi.fn(async () => undefined),
+    }
+    const modelSettings = {
+      read: vi.fn(async () => settings),
+      status: vi.fn(() => settings),
+      update: vi.fn(async () => settings),
+      storeCatalog: vi.fn(async () => settings),
+    }
+    const adapter = new OllamaAdapter(store as never, modelSettings as never, { fetchFn })
+
+    const { failure } = await run(adapter)
+    expect(failure).toMatchObject({ code: 'SERVER', failure: { status: 500 } })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 })

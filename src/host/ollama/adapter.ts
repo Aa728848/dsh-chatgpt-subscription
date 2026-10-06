@@ -25,6 +25,7 @@ import {
   PROVIDER_ID,
   PROVIDER_NAME,
   contextWindowFor,
+  floorForcedThinkingTokens,
   ollamaModelSupportsImage,
   thinkForModel,
   wireForModel,
@@ -208,6 +209,23 @@ export class OllamaAdapter extends LlmAdapter {
     let lastStatus: number | undefined
     let lastDetail = ''
     let accountId: string | undefined
+    /**
+     * Set the moment ANY chunk reaches the caller, and never cleared.
+     *
+     * Deliberately broader than "some text arrived": a block start or a tool
+     * call the caller has already seen is exactly as visible as the text, so the
+     * conservative reading is the one that cannot be wrong. It also survives the
+     * pool rotation below, because output an account produced before failing is
+     * still output.
+     */
+    let outputStarted = false
+    /**
+     * The code a transient in-band failure becomes, or null for this attempt.
+     *
+     * Assigned per failure rather than accumulated, so a later attempt that
+     * failed for a reason of its own is never judged by an earlier one's wording.
+     */
+    let lastInBandCode: InBandTransientCode | null = null
 
     for (;;) {
       let credentials: OllamaCredentials
@@ -245,6 +263,15 @@ export class OllamaAdapter extends LlmAdapter {
         if (event.type === 'error') {
           lastStatus = openedStatus
           lastDetail = event.message
+          // A failure the service put INSIDE a successful response is the one
+          // case the status rule below reads as the caller's fault, because the
+          // response really was a 200. Its wording is re-read here, where the
+          // turn is still able to start over - and only here, because this is the
+          // only layer that knows whether anything has reached the caller. A
+          // non-2xx already carries a status and keeps the verdict that status
+          // gave it; the body it was sent with is not a second opinion about it.
+          const inBand = openedStatus !== undefined && openedStatus >= 200 && openedStatus < 300
+          lastInBandCode = outputStarted || !inBand ? null : inBandTransientCode(event.message)
           failed = true
           break
         }
@@ -253,7 +280,10 @@ export class OllamaAdapter extends LlmAdapter {
           continue
         }
         if (event.type === 'text' || event.type === 'thinking' || event.type === 'tool_call') {
-          for (const chunk of applyEvent(state, event)) yield chunk
+          for (const chunk of applyEvent(state, event)) {
+            outputStarted = true
+            yield chunk
+          }
           continue
         }
       }
@@ -261,7 +291,10 @@ export class OllamaAdapter extends LlmAdapter {
       if (!failed) {
         // Close whatever the stream left open before the turn ends, so a model
         // cut off mid-sentence still yields the text that did arrive.
-        for (const chunk of closeStream(state)) yield chunk
+        for (const chunk of closeStream(state)) {
+          outputStarted = true
+          yield chunk
+        }
         // Counted against the key that actually served the turn, after it
         // completed, and best-effort: a lost count must never fail a reply.
         if (pool !== null && accountId !== undefined && spent !== null) {
@@ -305,13 +338,99 @@ export class OllamaAdapter extends LlmAdapter {
         { status: 429 },
       )
     }
+    // A transient failure the service reported inside its own 200 would end the
+    // turn on the one try that matters, because the status rule reads a 200 as a
+    // caller's mistake - the same overload sent as a 529 is retried today, and the
+    // in-band copy of it is not. Only the code changes: the message stays this
+    // adapter's own and still names what Ollama said, and no `status` is attached,
+    // because the response really was a 200.
+    //
+    // The pool chain above is deliberately NOT consulted for it. That chain keys
+    // on 401, 403 and 429, all of them statements about an account; naming one of
+    // them from a message would put a key on cooldown for a condition nothing
+    // evidenced, and would rotate onto a second key that fails identically. The
+    // transient verdict is left to the harness retry policy instead, which replays
+    // the same request without inventing anything about this account.
     throw new LlmError(
       `${PROVIDER_NAME} request failed${status === undefined ? '' : ` (${status})`}.${lastDetail}`,
-      status !== undefined && status >= 500 ? 'SERVER' : 'INVALID_REQUEST',
+      lastInBandCode ?? (status !== undefined && status >= 500 ? 'SERVER' : 'INVALID_REQUEST'),
       status === undefined ? {} : { status },
     )
   }
 }
+
+/** The only two verdicts an in-band Ollama failure can be retyped as. */
+type InBandTransientCode = 'RATE_LIMIT' | 'SERVER'
+
+/**
+ * The DSH code an in-band Ollama failure becomes, or null when the message names
+ * nothing transient.
+ *
+ * Ollama reports a failure inside a 200 as `{"error": "<message>"}` - one string,
+ * no type - so the shared helper's Anthropic table cannot apply and there is no
+ * status to name either. The wording is the whole signal, which is the same
+ * message heuristic the Codex line already reads on `response.failed` in
+ * `responses-client.ts` (generalized for the Responses vocabulary by
+ * `inBandResponsesCode` in `common/stream-error.ts`); it is kept local here
+ * because these are Ollama's own phrasings, not a vocabulary lines share.
+ *
+ * Every phrase below names a condition Ollama reports that clears on its own: a
+ * model still being pulled into memory, a runner that would not start, a server
+ * with no slot for this request, an overloaded or throttled front door. That is
+ * what makes a retry worth taking - the request did not change, so a later one
+ * is genuinely a different bet.
+ *
+ * Deliberately narrow, because the cost of guessing is paid by the user in
+ * backoff. A refusal the wording does not name is usually the service objecting
+ * to the caller's message, and retrying repeats it verbatim: three identical
+ * requests ending in the same verdict, with the real fault unreported. Falling
+ * back to some invented status instead would be worse on both counts, filing an
+ * unrecognized refusal as a retryable server error and inviting the pool chain
+ * to cool an account down for something nothing observed.
+ */
+function inBandTransientCode(message: string): InBandTransientCode | null {
+  const text = message.toLowerCase()
+  if (IN_BAND_RATE_LIMIT.some((phrase) => text.includes(phrase))) return 'RATE_LIMIT'
+  if (IN_BAND_SERVER.some((phrase) => text.includes(phrase))) return 'SERVER'
+  return null
+}
+
+/**
+ * Throttling wording, read first because it is the narrower of the two verdicts.
+ *
+ * The same conditions this line already types RATE_LIMIT for when they arrive as
+ * a 429; a gateway that reports one inside the stream is describing the same
+ * state, and the harness backoff that 429 earns is what the turn should get.
+ */
+const IN_BAND_RATE_LIMIT: readonly string[] = [
+  'rate limit',
+  'rate-limit',
+  'rate_limit',
+  'too many requests',
+  'quota',
+]
+
+/**
+ * Server-side conditions, in no particular order.
+ *
+ * The model-loading and runner wording covers the two failures Ollama raises while
+ * it is still getting ready to serve - the request was well formed and the
+ * service was not ready for it - and the rest is what its front door says when it
+ * is saturated.
+ */
+const IN_BAND_SERVER: readonly string[] = [
+  'overload',
+  'server busy',
+  'model is loading',
+  'loading model',
+  "couldn't load",
+  'could not load',
+  'unable to load',
+  'failed to load',
+  'runner',
+  'service unavailable',
+  'internal server error',
+]
 
 function isAbort(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof Error && error.name === 'AbortError')
@@ -537,7 +656,13 @@ export async function toOllamaRequest(
   }
 
   const request: Omit<OllamaRequest, 'signal'> = { model: options.model, messages }
-  if (options.maxTokens !== undefined) request.maxOutputTokens = options.maxTokens
+  // A caller may ask for a cap smaller than this model's forced thinking needs -
+  // DSH's session-title call asks for one short line - which returns an empty
+  // text block and a length finish. Raise that cap; a caller stating a larger one
+  // is passed through untouched, and an absent cap stays DEFAULT_MAX_OUTPUT_TOKENS,
+  // which nothing is short of.
+  const flooredMax = floorForcedThinkingTokens(options.model, options.maxTokens)
+  if (flooredMax !== undefined) request.maxOutputTokens = flooredMax
   if (options.temperature !== undefined) request.temperature = options.temperature
 
   const think = thinkForModel(options.model, options.reasoningEffort)
