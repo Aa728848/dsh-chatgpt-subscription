@@ -64,6 +64,9 @@ const ANTHROPIC_IN_BAND_STATUS: Readonly<Record<string, number>> = {
  */
 export function inBandResponsesCode(error: unknown, message: string): string | null {
   const fields = isRecord(error) ? error : {}
+  // Both fields, and `??` is correct here BECAUSE asString answers undefined for an
+  // absent one - the contract every mapper's asString in this plugin keeps, so a
+  // chain of them reaches `type` whenever `code` is missing.
   const rawCode = (asString(fields.code) ?? asString(fields.type) ?? '').toLowerCase()
   const text = message.toLowerCase()
   if (text.includes('rate limit') || rawCode === 'rate_limit' || rawCode === 'rate_limit_exceeded') return 'RATE_LIMIT'
@@ -140,8 +143,9 @@ function readErrorType(error: unknown): string | null {
   return typeof error.type === 'string' ? error.type : null
 }
 
-function asString(value: unknown): string {
-  return typeof value === 'string' ? value : ''
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

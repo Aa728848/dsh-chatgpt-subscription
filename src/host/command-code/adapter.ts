@@ -53,8 +53,10 @@ import {
   resolveRequestImages,
   type AttachmentImageReader,
   type CommandCodeStreamState,
+  type InBandStreamError,
 } from './mapper.ts'
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
+import { reclassifyInBandError, reclassifyInBandResponsesError } from '../common/stream-error.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import { requireCapability } from '../common/capabilities.ts'
@@ -184,6 +186,57 @@ export function isCommandCodeCredentialInvalid(status: number, detail: string): 
     }
   }
   return false
+}
+
+/** What one failed response means for this route's retry policy. */
+export interface CommandCodeFailureClassification {
+  /** DSH error code; decides whether the route retries. */
+  code: string
+  /** True only when the failure is worth repeating. */
+  retryable: boolean
+}
+
+/**
+ * The verdict one failed response becomes on this route.
+ *
+ * An in-band `error` event is a status the provider chose not to send as a
+ * status, so the chain that answers a non-2xx body has to answer it too rather
+ * than a second, looser one: every rule this route already owns - a model the
+ * plan does not include, a rejected key, a spent quota - keeps owning the
+ * answer, and the codes below are the ONLY place the HTTP path reads them from.
+ *
+ * `retryable` is membership of this route's own policy rather than a second
+ * judgement, because a code is worth repeating exactly when RETRY_POLICY repeats
+ * it; a verdict the policy would not act on must not be filed as transient.
+ *
+ * @param status - the response status, or the status an in-band type stands for.
+ * @param detail - the response body, or the serialized in-band error envelope.
+ */
+export function classifyCommandCodeFailure(
+  status: number,
+  detail: string,
+): CommandCodeFailureClassification {
+  // The order is the order of the throw chain below and is load-bearing: a 403
+  // is an entitlement denial BEFORE it is a rejected key, because that verdict
+  // keeps the account, and a 429 is a rate limit before it is anything else.
+  let code: string
+  if (status === 422) {
+    code = 'PROVIDER_ERROR'
+  } else if (isCommandCodeModelAccessDenied(status, detail)) {
+    code = 'PROVIDER_ERROR'
+  } else if (isCommandCodeCredentialInvalid(status, detail) || status === 401) {
+    code = 'INVALID_CREDENTIAL'
+  } else if (status === 429) {
+    code = 'RATE_LIMIT'
+  } else if (status >= 500) {
+    code = 'SERVER'
+  } else {
+    code = isHttpContextOverflow(status, detail) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR'
+  }
+  return {
+    code,
+    retryable: RETRY_POLICY.mode === 'normal' && RETRY_POLICY.retryableCodes.includes(code),
+  }
 }
 
 /** Cooldown one rate-limited key takes when the provider states no delay. */
@@ -468,18 +521,24 @@ export class CommandCodeAdapter extends LlmAdapter {
 
     if (response === undefined || !response.ok) {
       const status = response?.status ?? 500
+      // One classifier decides every code below, so the in-band reclassification
+      // further down runs the SAME chain and cannot drift from what a status
+      // carrying the same failure produces. Only the messages stay per branch:
+      // they are what the user reads, and the entitlement and key refusals are
+      // the ones that can name a remedy.
+      const { code } = classifyCommandCodeFailure(status, detail)
 
       if (status === 422) {
         if (detail.includes('cmd_zdr_no_providers')) {
           throw new LlmError(
             `${PROVIDER_NAME} rejected request under Zero Data Retention: no ZDR-capable upstream is available for this model (${detail || 'cmd_zdr_no_providers'}).`,
-            'PROVIDER_ERROR',
+            code,
             { status: 422 },
           )
         }
         throw new LlmError(
           `${PROVIDER_NAME} validation error (422): ${detail || 'Unprocessable Entity'}`,
-          'PROVIDER_ERROR',
+          code,
           { status: 422 },
         )
       }
@@ -487,7 +546,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       if (isCommandCodeModelAccessDenied(status, detail)) {
         throw new LlmError(
           `${PROVIDER_NAME} access denied for model ${options.model}: this model is not included in the plan or requires higher entitlement (${status}).${detail ? ` ${detail}` : ''}`,
-          'PROVIDER_ERROR',
+          code,
           { status },
         )
       }
@@ -495,7 +554,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       if (isCommandCodeCredentialInvalid(status, detail) || status === 401) {
         throw new LlmError(
           `${PROVIDER_NAME} rejected the stored API key (${status}). Sign in again from Settings > Command Code.${detail ? ` ${detail}` : ''}`,
-          'INVALID_CREDENTIAL',
+          code,
           { status },
         )
       }
@@ -505,7 +564,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         const after = response === undefined ? undefined : retryAfterMs(response.headers)
         throw new LlmError(
           `${PROVIDER_NAME} rate limit or plan quota reached (429). Check the quota card in Settings > Command Code.${detail ? ` ${detail}` : ''}`,
-          'RATE_LIMIT',
+          code,
           { status: 429, ...(after === undefined ? {} : { providerRetryAfterMs: after }) },
         )
       }
@@ -516,13 +575,13 @@ export class CommandCodeAdapter extends LlmAdapter {
         // failure and is retried under the bounded policy above.
         throw new LlmError(
           `${PROVIDER_NAME} upstream server error (${status}): ${detail || 'No response'}`,
-          'SERVER',
+          code,
           { status },
         )
       }
       throw new LlmError(
         `${PROVIDER_NAME} API error (${status}): ${detail || 'No response'}`,
-        isHttpContextOverflow(status, detail) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
+        code,
         { status },
       )
     }
@@ -533,38 +592,125 @@ export class CommandCodeAdapter extends LlmAdapter {
     const decoder = new TextDecoder()
     const state = createStreamState(wire)
     let buffer = ''
+    /**
+     * Set the moment ANY chunk reaches the caller, and never cleared.
+     *
+     * Deliberately broader than `a text delta or a tool call`: a retry would repeat
+     * a block-start the caller has already seen just as surely, and could re-issue
+     * a tool call the agent has already run, so the conservative reading is the
+     * one that cannot be wrong. It is what keeps the in-band reclassification
+     * below pre-output only, and before that point a fresh request is still free.
+     */
+    let outputStarted = false
 
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          for (const chunk of processLine(line, state, wire)) yield chunk
-          if (state.finished) return
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            for (const chunk of processLine(line, state, wire)) {
+              outputStarted = true
+              yield chunk
+            }
+            if (state.finished) return
+          }
         }
-      }
 
-      buffer += decoder.decode()
-      if (buffer.trim() !== '') {
-        for (const line of buffer.split('\n')) {
-          for (const chunk of processLine(line, state, wire)) yield chunk
+        buffer += decoder.decode()
+        if (buffer.trim() !== '') {
+          for (const line of buffer.split('\n')) {
+            for (const chunk of processLine(line, state, wire)) {
+              outputStarted = true
+              yield chunk
+            }
+          }
         }
-      }
-      if (state.finished) return
+        if (state.finished) return
 
-      // A connection that ends without a terminal event is a truncated stream,
-      // not a completed answer; the watchdog turns a stalled one into an abort.
-      assertStreamComplete(state)
-      for (const chunk of closeStream(state)) yield chunk
+        // A connection that ends without a terminal event is a truncated stream,
+        // not a completed answer; the watchdog turns a stalled one into an abort.
+        assertStreamComplete(state)
+        for (const chunk of closeStream(state)) {
+          outputStarted = true
+          yield chunk
+        }
+      } catch (error) {
+        // A verdict the mapper already typed (a truncated stream, an in-band error
+        // event) is passed through - except an in-band error event that arrived
+        // before anything reached the caller, which is classified through this
+        // line's OWN failure classifier so every rule the HTTP path owns still owns
+        // it. After the first chunk the mapper's verdict stands: a retry would
+        // repeat output the user has already seen.
+        const inBand = state.streamError
+        // `error.code === PROVIDER_ERROR` is part of the condition and not an extra:
+        // it says the mapper had nothing MORE SPECIFIC to say. A context overflow is
+        // a verdict of its own, about the request rather than the server, and no
+        // retry fixes it - so a body that also happens to read transiently must not
+        // be turned into a retryable server error here.
+        if (error instanceof LlmError
+          && !outputStarted
+          && inBand !== undefined
+          && error.code === 'PROVIDER_ERROR') {
+          const reclassified = reclassifyInBandStreamError(error, inBand)
+          // The account that served this stream is the one whose window a rate
+          // limit spent, and the harness is about to repeat this request, so that
+          // account leaves rotation by the same call and with the same fallback its
+          // own 429 above uses: repeating against it would fail identically. The
+          // rotation itself cannot happen here because the body is already open,
+          // and an overload leaves the pool untouched because the HTTP path
+          // owns no rule that spreads one across it.
+          if (reclassified.code === 'RATE_LIMIT' && pool !== null && accountId !== undefined) {
+            const after = retryAfterMs(response.headers)
+            await pool.markCooldown(
+              accountId,
+              after ?? POOL_COOLDOWN_MS,
+              `${PROVIDER_NAME} in-stream 429`,
+            ).catch(() => undefined)
+          }
+          throw reclassified
+        }
+        throw error
+      }
     } finally {
       void reader.cancel().catch(() => undefined)
     }
   }
 }
 
+/**
+ * The error one recorded in-band failure becomes, or the mapper's own verdict.
+ *
+ * Two rules, because this line speaks three in-band vocabularies and they do
+ * not carry the same evidence. The messages wire names a transient failure with
+ * a `type` that STANDS FOR A STATUS - an `overloaded_error` is the 529 it would
+ * have sent - so its envelope is answered by the status table. The
+ * chat-completions and Responses wires have no such type: their evidence is a
+ * `code`, a `type` in the looser `server_error` sense, or plain prose, and the
+ * status-reading helper is what turns that into the question this line's own
+ * classifier answers.
+ *
+ * The switch is exhaustive on purpose. A fourth vocabulary must be a compile
+ * error here rather than a silent fall into the rule above, which is the one
+ * shape of this bug that cannot be caught by a test.
+ */
+function reclassifyInBandStreamError(thrown: LlmError, inBand: InBandStreamError): LlmError {
+  switch (inBand.vocabulary) {
+    case 'anthropic':
+      return reclassifyInBandError(thrown, inBand.error, classifyCommandCodeFailure)
+    case 'openai':
+    case 'responses':
+      return reclassifyInBandResponsesError(
+        thrown,
+        inBand.error,
+        inBand.message,
+        classifyCommandCodeFailure,
+      )
+  }
+}
 /** Path suffix the chosen route answers on. */
 function endpointPathFor(wire: CommandCodeWire): string {
   if (wire === 'anthropic') return '/messages'

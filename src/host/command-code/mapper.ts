@@ -808,6 +808,40 @@ interface PendingToolCall {
   started: boolean
 }
 
+/**
+ * One failure a Command Code stream reported INSIDE a 200 response.
+ *
+ * ALL THREE of this line's wires can answer 200 and then report the failure in
+ * the stream, in the envelope a non-2xx body would have carried, and they speak
+ * three different vocabularies. The messages wire sends `{ type: `error`, error:
+ * { type, message } }`, where `type` stands for a STATUS. The Responses wire sends
+ * `response.failed` or `error` whose error may be an object, a nested
+ * `response.error`, or a bare string. The chat-completions wire puts the error
+ * straight on the chunk - `{"error":{"message","type"}}`, the body this route's own
+ * upstream reports, which names `type` where the others would name a code.
+ */
+export interface InBandStreamError {
+  /**
+   * Which wire named it, and so which rule reads it.
+   *
+   * Recorded rather than inferred from the request that produced it: only the
+   * branch that threw knows, and the rules genuinely differ - a `type` that stands
+   * for a status on the messages wire, a code or plain prose that stands for one
+   * on the other two. The values are the wire values themselves, so an adapter
+   * reading them cannot mistake one vocabulary for another.
+   */
+  vocabulary: 'openai' | 'anthropic' | 'responses'
+  /**
+   * The event's wire `error` object, or null when the event carried only text.
+   *
+   * A Responses `error` event may be a bare string, and then nothing structured
+   * is left to read: the message below is the whole signal.
+   */
+  error: Record<string, unknown> | null
+  /** The provider's own diagnostic, as this mapper folded it into its message. */
+  message: string
+}
+
 export interface CommandCodeStreamState {
   wire: CommandCodeWire
   blocks: OutboundContentBlock[]
@@ -821,6 +855,17 @@ export interface CommandCodeStreamState {
   hasContent: boolean
   hasToolCall: boolean
   finishReason: string | null
+  /**
+   * The in-band failure this wire reported inside a 200 response, recorded just
+   * before the mapper throws on it. Undefined until such an event arrives, and
+   * never set by any other failure.
+   *
+   * The mapper cannot know whether anything has reached the caller, so the code
+   * it throws is the general one; the adapter can, and reclassifies a transient
+   * one from this while nothing has. It is left in place afterwards so a reader
+   * of the state can still see what the stream ended on.
+   */
+  streamError?: InBandStreamError
   done: boolean
   finished: boolean
   inputTokens: number
@@ -903,8 +948,14 @@ export function processOpenAIStreamLine(line: string, state: CommandCodeStreamSt
   const out: StreamChunk[] = []
 
   if (isRecord(chunk.error)) {
+    const message = asString(chunk.error.message) ?? 'unknown error'
+    // Recorded for the adapter for the same reason as the other two wires: this
+    // is the envelope a 502 would have carried, and the only structured evidence
+    // in it is the `type` this vocabulary uses where the Responses one would put
+    // a code - which is exactly the body the route's own upstream sends.
+    state.streamError = { vocabulary: 'openai', error: chunk.error, message }
     throw new LlmError(
-      `Command Code stream error: ${asString(chunk.error.message) ?? 'unknown error'}`,
+      `Command Code stream error: ${message}`,
       isContextOverflow(chunk.error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
@@ -1169,8 +1220,15 @@ export function processAnthropicStreamLine(line: string, state: CommandCodeStrea
   // A mid-stream error event carries the provider's own diagnostic.
   if (type === 'error') {
     const error = isRecord(event.error) ? event.error : {}
+    const message = asString(error.message) ?? 'unknown error'
+    // Recorded for the adapter, which is the only layer that knows whether
+    // anything has reached the caller. The code below is the general one
+    // because the mapper cannot know, and PROVIDER_ERROR sits outside every
+    // retry set: so an `overloaded_error` delivered this way ended the turn on
+    // the first try while the identical overload delivered as a 529 was retried.
+    state.streamError = { vocabulary: 'anthropic', error, message }
     throw new LlmError(
-      `Command Code stream error: ${asString(error.message) ?? 'unknown error'}`,
+      `Command Code stream error: ${message}`,
       isContextOverflow(error) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     )
   }
@@ -1268,6 +1326,10 @@ export function processResponsesStreamLine(line: string, state: CommandCodeStrea
         const detail = errorObj && typeof errorObj.message === 'string'
           ? errorObj.message
           : (typeof response.error === 'string' ? response.error : '')
+        // Recorded through the same rule as the `response.failed` branch below, and
+        // for the same reason: a `failed` response IS an in-band failure that
+        // arrived inside a success-shaped event, and it carries the same envelope.
+        state.streamError = { vocabulary: 'responses', error: errorObj, message: detail }
         throw new LlmError(
           detail === '' ? 'Command Code responses stream failed' : `Command Code responses stream failed: ${detail}`,
           'PROVIDER_ERROR',
@@ -1295,6 +1357,13 @@ export function processResponsesStreamLine(line: string, state: CommandCodeStrea
       || (isRecord(parsed.response) && typeof parsed.response.error === 'string'
           ? parsed.response.error
           : (typeof parsed.error === 'string' ? parsed.error : ''))
+    // Recorded for the adapter for the same reason as the messages wire above,
+    // and the text is recorded beside it because this vocabulary can leave the
+    // text as the only evidence: `error` may arrive as a bare string, and then
+    // there is no `error.code` to read and `overloaded` in the message is all
+    // there is. A context overflow keeps its own code either way - it is a
+    // request problem, and no retry fixes it.
+    state.streamError = { vocabulary: 'responses', error: errorObj, message: detail }
     throw new LlmError(
       detail === '' ? 'Command Code responses stream failed' : `Command Code responses stream failed: ${detail}`,
       isContextOverflow(errorObj ?? detail) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',

@@ -93,6 +93,52 @@ function sseResponse(frames: unknown[]): Response {
   }))
 }
 
+/** One model per wire, so a test names the vocabulary it exercises. */
+const OPENAI_MODEL = 'deepseek/deepseek-v4.1-flash'
+const ANTHROPIC_MODEL = 'claude-sonnet-4-6'
+const RESPONSES_MODEL = 'gpt-6-astra'
+
+/**
+ * One turn against a provider that answers 200 and then fails inside the
+ * stream, returning the thrown error and the requests it actually issued.
+ *
+ * The request count is what tells classification from an internal retry: this
+ * route never repeats a stream itself, the harness retry policy owns that, so
+ * a transient in-band failure must still show exactly one request.
+ */
+async function failureOf(
+  model: string,
+  frames: unknown[],
+  options: { headers?: Record<string, string>; pool?: CommandCodeAccountPool } = {},
+): Promise<{ failure: unknown; calls: string[] }> {
+  const { adapter, store } = buildAdapter({}, options.pool)
+  vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'cmd_key' })
+  const calls: string[] = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async (url: unknown) => {
+    calls.push(String(url))
+    const bytes = new TextEncoder().encode(
+      frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''),
+    )
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes)
+        controller.close()
+      },
+    }), { status: 200, headers: { 'content-type': 'text/event-stream', ...(options.headers ?? {}) } })
+  }) as typeof fetch
+  try {
+    for await (const _chunk of adapter.stream({
+      provider: 'command-code', model, messages: [],
+    } as unknown as GenerateOptions)) void _chunk
+  } catch (error) {
+    return { failure: error, calls }
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  throw new Error('expected the stream to fail')
+}
+
 afterEach(() => {
   clearCachedCatalog()
   vi.restoreAllMocks()
@@ -757,6 +803,279 @@ describe('CommandCodeAdapter error classification and account rotation', () => {
       expect(accounts[1]!.cooldownUntil).toBeUndefined()
     } finally {
       globalThis.fetch = originalFetch
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-band stream errors
+// ---------------------------------------------------------------------------
+
+describe('CommandCodeAdapter in-band stream errors', () => {
+  const MESSAGE_START = { type: 'message_start', message: { usage: { input_tokens: 1 } } }
+
+
+  it('reclassifies a transient in-band failure while nothing has reached the caller', async () => {
+    // The shape that ended a real turn: HTTP 200, an open stream, then the
+    // failure inside it. The same overload sent as a 529 is SERVER, so the
+    // in-band copy must not be the one that ends the turn on the first try.
+    const policy = buildAdapter().adapter.providerRetryPolicy()
+    const retryable = policy.mode === 'normal' ? policy.retryableCodes : []
+    for (const [model, frames, code, message] of [
+      [
+        ANTHROPIC_MODEL,
+        [MESSAGE_START, { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }],
+        'SERVER',
+        'Overloaded',
+      ],
+      [
+        ANTHROPIC_MODEL,
+        [MESSAGE_START, { type: 'error', error: { type: 'api_error', message: 'Internal server error' } }],
+        'SERVER',
+        'Internal server error',
+      ],
+      [
+        ANTHROPIC_MODEL,
+        [MESSAGE_START, { type: 'error', error: { type: 'rate_limit_error', message: 'Too many requests' } }],
+        'RATE_LIMIT',
+        'Too many requests',
+      ],
+      [
+        RESPONSES_MODEL,
+        [{ type: 'response.failed', error: { code: 'server_error', message: 'Upstream unavailable' } }],
+        'SERVER',
+        'Upstream unavailable',
+      ],
+      [
+        RESPONSES_MODEL,
+        [{ type: 'response.failed', error: { code: 'rate_limit_exceeded', message: 'Rate limit reached' } }],
+        'RATE_LIMIT',
+        'Rate limit reached',
+      ],
+      // A bare string error carries no code at all, so on this vocabulary the
+      // message text is the only evidence that the failure was transient.
+      [
+        RESPONSES_MODEL,
+        [{ type: 'error', error: 'Overloaded, try again later' }],
+        'SERVER',
+        'Overloaded, try again later',
+      ],
+    ] as const) {
+      const { failure, calls } = await failureOf(model, [...frames])
+      expect(failure).toMatchObject({ code })
+      // Only the code changed: the provider's own diagnostic stays in the
+      // message, and no status is invented for a response that really was a 200.
+      expect((failure as Error).message).toContain(message)
+      expect((failure as { failure?: { status?: number } }).failure?.status).toBeUndefined()
+      // The mapper's verdict is kept as the cause, so nothing about the original
+      // failure is lost.
+      expect((failure as { cause?: { code?: string } }).cause?.code).toBe('PROVIDER_ERROR')
+      expect(retryable).toContain(code)
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps the mapper verdict once output has reached the caller', async () => {
+    // A retry would repeat 'partial' for the user and could re-issue a tool call
+    // the agent has already run.
+    const messages = await failureOf(ANTHROPIC_MODEL, [
+      MESSAGE_START,
+      { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+      { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+    ])
+    expect(messages.failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(messages.calls).toHaveLength(1)
+
+    const responses = await failureOf(RESPONSES_MODEL, [
+      { type: 'response.output_text.delta', delta: 'partial' },
+      { type: 'response.failed', error: { code: 'server_error', message: 'Upstream unavailable' } },
+    ])
+    expect(responses.failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(responses.calls).toHaveLength(1)
+  })
+
+  it('leaves a non-transient or unrecognized in-band type with the mapper verdict', async () => {
+    // A type this vocabulary does not name, and one it names as final: neither
+    // may be filed as a retryable server error, which is worse than not retrying.
+    for (const type of ['invalid_request_error', 'authentication_error', 'request_too_large', 'some_future_error']) {
+      const { failure, calls } = await failureOf(ANTHROPIC_MODEL, [
+        MESSAGE_START,
+        { type: 'error', error: { type, message: 'nope' } },
+      ])
+      expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+      expect(calls).toHaveLength(1)
+    }
+
+    const responses = await failureOf(RESPONSES_MODEL, [
+      { type: 'response.failed', error: { code: 'invalid_prompt', message: 'bad prompt' } },
+    ])
+    expect(responses.failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+
+    // A context overflow is the mapper's own verdict on both wires and no
+    // reclassification is owed to it: the request itself was refused.
+    const overflow = await failureOf(ANTHROPIC_MODEL, [
+      MESSAGE_START,
+      {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'prompt is too long: 300000 tokens > 200000 maximum',
+        },
+      },
+    ])
+    expect(overflow.failure).toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+  })
+
+  it('takes the account serving a spent window out of rotation', async () => {
+    // The same reaction the non-2xx 429 branch reaches, through the same call
+    // and the same fallback: a provider-stated delay wins, and the harness retry
+    // that follows lands on an account this one did not spend.
+    const pool = createTestPool([testKey(1), testKey(2)])
+    const limited = await failureOf(
+      ANTHROPIC_MODEL,
+      [MESSAGE_START, { type: 'error', error: { type: 'rate_limit_error', message: 'Too many requests' } }],
+      { pool, headers: { 'retry-after': '60' } },
+    )
+    expect(limited.failure).toMatchObject({ code: 'RATE_LIMIT' })
+    // The rotation itself cannot happen from inside an open body, so the account
+    // leaves the pool instead and the harness retry does the moving on.
+    expect(limited.calls).toHaveLength(1)
+    const limitedAccounts = await pool.listAccounts()
+    expect(limitedAccounts[0]!.cooldownUntil).toBeGreaterThan(Date.now() + 30_000)
+    expect(limitedAccounts[1]!.cooldownUntil).toBeUndefined()
+
+    // An overload is shared by every account behind the gateway, so this route
+    // has no rule that spreads it across the pool and none is invented here.
+    const overloadedPool = createTestPool([testKey(1), testKey(2)])
+    const overloaded = await failureOf(
+      ANTHROPIC_MODEL,
+      [MESSAGE_START, { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }],
+      { pool: overloadedPool },
+    )
+    expect(overloaded.failure).toMatchObject({ code: 'SERVER' })
+    const untouched = await overloadedPool.listAccounts()
+    expect(untouched[0]!.cooldownUntil).toBeUndefined()
+    expect(untouched[1]!.cooldownUntil).toBeUndefined()
+  })
+})
+
+describe('CommandCodeAdapter in-band stream errors on the other two wires', () => {
+  /** The body this route's own upstream documents for a 502, delivered in band. */
+  const UPSTREAM_UNAVAILABLE = {
+    error: {
+      message: 'Upstream model provider is temporarily unavailable. Please try again in a moment.',
+      type: 'server_error',
+    },
+  }
+  /** A `failed` response is an in-band failure inside a success-shaped event. */
+  const completedButFailed = (error: unknown): unknown[] => [
+    { type: 'response.completed', response: { status: 'failed', error } },
+  ]
+
+  it('reclassifies a chat-completions in-band failure before any output', async () => {
+    // The 502 body this route already classifies, arriving inside a 200 instead.
+    // Nothing in its message reads transient - it says 'temporarily', not 'server
+    // error' - so only the `type` the envelope uses instead of a code recognizes it.
+    const policy = buildAdapter().adapter.providerRetryPolicy()
+    const retryable = policy.mode === 'normal' ? policy.retryableCodes : []
+    for (const [frames, code] of [
+      [[UPSTREAM_UNAVAILABLE], 'SERVER'],
+      [[{ error: { message: 'Rate limit reached for requests', code: 'rate_limit' } }], 'RATE_LIMIT'],
+      // No structured evidence at all: on this vocabulary the prose is the signal.
+      [[{ error: { message: 'The model is overloaded, try again shortly' } }], 'SERVER'],
+    ] as const) {
+      const { failure, calls } = await failureOf(OPENAI_MODEL, [...frames])
+      expect(failure).toMatchObject({ code })
+      expect(retryable).toContain(code)
+      expect((failure as { failure?: { status?: number } }).failure?.status).toBeUndefined()
+      expect((failure as { cause?: { code?: string } }).cause?.code).toBe('PROVIDER_ERROR')
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('reclassifies a failed response.completed before any output', async () => {
+    const policy = buildAdapter().adapter.providerRetryPolicy()
+    const retryable = policy.mode === 'normal' ? policy.retryableCodes : []
+    for (const [error, code] of [
+      [{ code: 'server_error', message: 'Upstream unavailable' }, 'SERVER'],
+      [{ code: 'rate_limit_exceeded', message: 'Rate limit reached' }, 'RATE_LIMIT'],
+    ] as const) {
+      const { failure, calls } = await failureOf(RESPONSES_MODEL, completedButFailed(error))
+      expect(failure).toMatchObject({ code })
+      expect(retryable).toContain(code)
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('keeps both mapper verdicts once output has reached the caller', async () => {
+    const openAI = await failureOf(OPENAI_MODEL, [
+      { choices: [{ delta: { content: 'partial' } }] },
+      UPSTREAM_UNAVAILABLE,
+    ])
+    expect(openAI.failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(openAI.calls).toHaveLength(1)
+
+    const responses = await failureOf(RESPONSES_MODEL, [
+      { type: 'response.output_text.delta', delta: 'partial' },
+      ...completedButFailed({ code: 'server_error', message: 'Upstream unavailable' }),
+    ])
+    expect(responses.failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(responses.calls).toHaveLength(1)
+  })
+
+  it('leaves an unrecognized in-band failure with the mapper verdict', async () => {
+    const openAI = await failureOf(OPENAI_MODEL, [{ error: { message: 'nope', type: 'invalid_request' } }])
+    expect(openAI.failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(openAI.calls).toHaveLength(1)
+
+    const responses = await failureOf(RESPONSES_MODEL, completedButFailed({ code: 'invalid_prompt', message: 'bad prompt' }))
+    expect(responses.failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(responses.calls).toHaveLength(1)
+  })
+
+  it('keeps a context overflow an overflow even when the body reads transiently', async () => {
+    // The mapper types an overflow CONTEXT_WINDOW_EXCEEDED, which is a verdict
+    // about the request rather than about the server, and no retry fixes it. A
+    // body carrying BOTH a transient `type` and an overflow message must not be
+    // reclassified into a retryable server error, or the bounded policy would
+    // spend three attempts on a request that cannot succeed.
+    const openAI = await failureOf(OPENAI_MODEL, [{
+      error: {
+        type: 'server_error',
+        message: 'prompt is too long: 300000 tokens > 200000 maximum',
+      },
+    }])
+    expect(openAI.failure).toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+
+    // The same body on the messages wire, where the transient `type` IS a status.
+    const messages = await failureOf(ANTHROPIC_MODEL, [
+      { type: 'message_start', message: { usage: { input_tokens: 1 } } },
+      {
+        type: 'error',
+        error: {
+          type: 'overloaded_error',
+          message: 'prompt is too long: 300000 tokens > 200000 maximum',
+        },
+      },
+    ])
+    expect(messages.failure).toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+  })
+
+  it('cools down the account an in-band rate limit spends on either wire', async () => {
+    // Both new sites reach the same cooldown arm, so the pool reaction is proven
+    // once per vocabulary rather than assumed from the messages wire.
+    for (const [model, frames] of [
+      [OPENAI_MODEL, [{ error: { message: 'Rate limit reached for requests', code: 'rate_limit' } }]],
+      [RESPONSES_MODEL, completedButFailed({ code: 'rate_limit_exceeded', message: 'Rate limit reached' })],
+    ] as const) {
+      const pool = createTestPool([testKey(1), testKey(2)])
+      const { failure, calls } = await failureOf(model, [...frames], { pool, headers: { 'retry-after': '60' } })
+      expect(failure).toMatchObject({ code: 'RATE_LIMIT' })
+      expect(calls).toHaveLength(1)
+      const accounts = await pool.listAccounts()
+      expect(accounts[0]!.cooldownUntil).toBeGreaterThan(Date.now() + 30_000)
+      expect(accounts[1]!.cooldownUntil).toBeUndefined()
     }
   })
 })

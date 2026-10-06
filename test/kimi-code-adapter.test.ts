@@ -12,6 +12,7 @@ import {
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/kimi-code/token-store.ts'
 import type { KimiCodeAccountPool } from '../src/host/kimi-code/account-pool.ts'
 import type { KimiCodeWire } from '../src/shared/kimi-code-contracts.ts'
+import type { KimiCodeCatalogModel } from '../src/host/kimi-code/token-store.ts'
 import { clearCachedCatalog } from '../src/host/kimi-code/client.ts'
 import type { KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 
@@ -36,7 +37,7 @@ function credentials(overrides: Partial<KimiCodeCredentials> = {}): KimiCodeCred
 const CATALOG = [
   { id: 'k3', name: 'K3', contextWindow: 262_144, reasoningEfforts: ['low', 'high', 'max'], defaultReasoningEffort: 'high' },
   { id: 'kimi-for-coding', name: 'Kimi for Coding', contextWindow: 1_048_576, reasoningEfforts: ['low', 'high', 'max'], defaultReasoningEffort: 'max' },
-]
+] satisfies KimiCodeCatalogModel[]
 
 async function buildAdapter(options: {
   enabled?: boolean
@@ -397,7 +398,11 @@ describe('KimiCodeAdapter catalog and models', () => {
  * declares the protocol. The OpenAI wire is this route's DEFAULT, so the plain
  * catalog the rest of this file uses already selects it, with no ceremony.
  */
-const ANTHROPIC_CATALOG = [{ id: 'k3', name: 'K3', contextWindow: 262_144, protocol: 'anthropic' }]
+// `protocol` is typed as a literal union, so the stub says `as const` rather
+// than widening itself to string and failing the assignment.
+const ANTHROPIC_CATALOG: KimiCodeCatalogModel[] = [
+  { id: 'k3', name: 'K3', contextWindow: 262_144, protocol: 'anthropic' },
+]
 const MESSAGE_START = { type: 'message_start', message: { usage: { input_tokens: 1 } } }
 
 /** The window an ordinary rate limit gets, and the one a spent window gets instead. */
@@ -474,9 +479,12 @@ async function streamOf(adapter: KimiCodeAdapter): Promise<{ error: unknown; chu
   throw new Error('expected the in-band error to end the stream')
 }
 
-const retryableCodes = (): string[] => new KimiCodeAdapter(
-  new FileCredentialStore(tmp('kc-inband-policy')),
-).providerRetryPolicy().retryableCodes
+// The resolved policy is a union, so the always-retry variant has no code list
+// to read: narrow it the way every other test in this repo does.
+const retryableCodes = (): readonly string[] => {
+  const policy = new KimiCodeAdapter(new FileCredentialStore(tmp('kc-inband-policy'))).providerRetryPolicy()
+  return policy.mode === 'normal' ? policy.retryableCodes : []
+}
 
 describe('kimi-code in-band stream errors on the Anthropic wire', () => {
   it('reclassifies a transient in-band failure while nothing has reached the caller', async () => {
