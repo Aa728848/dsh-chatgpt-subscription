@@ -129,6 +129,23 @@ jobs:
       - name: Publish to npm
         shell: bash
         run: |
+          # A missing secret and an expired one both surface as a bare ENEEDAUTH,
+          # which reads like an npm outage and sends you looking in the wrong
+          # place. Check for it here and say exactly what to do.
+          #
+          # The token must be an *Automation* token: a Publish token requires an
+          # interactive 2FA OTP that no CI runner can answer, so npm rejects it
+          # the same way it rejects a missing one.
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error title=Missing NPM_TOKEN::This repository has no NPM_TOKEN secret, so npm publish cannot authenticate. Create an Automation token (npm token create --automation), then add it with: gh secret set NPM_TOKEN"
+            exit 1
+          fi
+
+          # Proves the credential can actually publish before the real attempt,
+          # so an expired or read-only token fails here with a clear message
+          # rather than as ENEEDAUTH twenty lines into the publish output.
+          npm whoami --registry https://registry.npmjs.org/
+
           if [ "${{ steps.version_info.outputs.is_prerelease }}" = "true" ]; then
             echo "Publishing prerelease to npm with tag ${{ steps.version_info.outputs.dist_tag }}..."
             npm publish --access public --tag "${{ steps.version_info.outputs.dist_tag }}"
