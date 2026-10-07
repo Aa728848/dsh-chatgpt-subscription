@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.13.2 - 2026-10-08
+
+- **[Kimi Code] 读图请求按「实际发送体积」计量，超限时回收而非直接拒绝**
+  - **报错 `Kimi Code rejected the request before sending: the serialized body is N bytes, above the 2097152-byte limit` 的根因是三处计量缺陷叠加，2 MB 网关上限本身没有问题**（那是 Kimi 文档里的真实限制，见其错误参考 `total message size N exceeds limit 2097152`）。
+  - **图片按「存储原始字节」计量，但发出去的是「缩放后的请求版本」。** `resolveRequestImages` 会把长边超过 1024px 的图缩到 `REQUEST_IMAGE_VERSION_MAX_BYTES`（256 KiB，与官方 CLI 的 `read_byte_budget` 同量级）后再内联，而预算是拿 `attachment.bytes` 算的。一张 5 MB 截图因此被记成 ~6.7 MB base64，判定超预算 5 MB 被丢弃——可它真正上线时只有 ~350 KB，四张都装得下。官方 CLI 的做法是「送达模型前自动降采样并重新编码，避免供应商因图片过大而报错」，语义相同：**量的必须是送出去的那个版本**。现在先解析、再按解析后的真实 base64 长度计量。
+  - **工具结果里的图片从未被计入预算。** `collectRequestImageBytes` 只遍历顶层 block，不递归 `tool-result`，而 `toolResultBlocks` 是会发送那里的图的。重度使用 `read_image` 的会话——也就是这个报错的典型场景——恰好系统性地少算了自己最占地方的图片。计数器现在与 `collectImageRefs` 一致地递归。
+  - **超限时只会拒绝，不会回收。** `assertRequestBodyFits` 量完超限就抛 `PROVIDER_ERROR`，而此时再丢一张图很可能就装得下了。现在改为：量真实请求体 → 按需丢最旧的图 → 重新构造 → 直到塞进上限，一张不多丢。已经装得下的请求只序列化一次，字节级不变。丢无可丢时才报错，文本与工具 schema 不会被静默丢弃。
+  - **报错区分「图太多」和「文本太多」。** 旧文案一律让用户去压缩会话，于是图片占主导的用户会被引向错误的 remedy。现在报出构成（`images N bytes, tool schemas N bytes, conversation text and system prompt N bytes`），并按主导项给处方：图主导提示少带图，文本主导才提示压缩会话。
+  - 测试：新增 `test/kimi-code-body-fit.test.ts`（8 例），逐条锁住上述行为。
+  - 验证：`tsc -b --pretty false` 与 `tsc -p test/tsconfig.json` 均 0 错误；全量 `vitest run` 2784 passed / 7 skipped。
+  - **未一并处理的**：workbuddy / command-code / claude / antigravity 四条线路各有自己的本地实现，同样存在「按存储字节计量」与「工具结果图片漏算」两个缺陷，但各自预算数字不同，需逐条评估而非照搬。
+
 - **[Codex] 请求级图片总量上限，以及请求路径失败的 cause 链（[#50](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/50)）**
   - **codex 此前是全插件唯一没有请求级图片总量约束的线路。** 历史里的每张图片每轮都会被重新内联，请求体随读图数量单调增长；超过传输层能接受的体积后整轮失败。报告方的现场日志：≤4 MB 稳过、4~5 MB 掉到 3/10；合成复现里 ≥4 MB 全挂（`ERR_HTTP2_STREAM_ERROR: NGHTTP2_ENHANCE_YOUR_CALM`），≤3 MB 全过。这是**概率关系**而非硬阈值——报告者自己也标明了这一点，所以修的是「无上限」，不是「阈值是多少」。
   - 现在按**最旧优先**把超出预算的图片替换为明确的占位文本。**预算在构造好的请求体上执行**，而不是在 `options.messages` 上：图片有两种到达方式，粘贴附件是 `{ type: 'image', attachment }` 块，而工具读取的本地图片是 `![](/describe-image/raw/sha256:…)` 链接、由 `mapUserText` 在构造时才取回并内联；消息块级方案看不到第二种，且共享的 `offloadOldestRequestImages` 也不递归 `tool-result`。在构造后测量是唯一能覆盖全部形态的位置。

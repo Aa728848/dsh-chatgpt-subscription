@@ -57,7 +57,6 @@ import {
   createStreamState,
   estimatedInputTokens,
   MAX_REQUEST_VIDEO_BYTES,
-  offloadOldestRequestImages,
   offloadOldestRequestVideos,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
@@ -69,6 +68,56 @@ import {
   type KimiCodeInBandStreamError,
   type KimiCodeStreamState,
 } from './mapper.ts'
+import {
+  imagesToOffloadCount,
+  offloadOldestRequestImages,
+  replaceOldestRequestImages,
+  requestHasSendableImage,
+  requestImagePayloadLengths,
+  MAX_MESSAGE_BODY_BYTES,
+  MAX_REQUEST_IMAGE_BYTES,
+  MAX_VIDEO_MESSAGE_BODY_BYTES,
+  type ResolvedRequestImages,
+} from '../common/request-images.ts';
+
+/**
+ * Rebuild attempts allowed while shrinking a request into its body ceiling.
+ *
+ * Each attempt drops at least one image, so the loop is bounded by the number of
+ * images the request carries; this cap only exists so a future change that fails
+ * to make progress fails fast instead of spinning.
+ */
+const MAX_BODY_FIT_ATTEMPTS = 64
+
+/**
+ * Drop the fewest oldest images that free at least `excessBytes`.
+ *
+ * `current` is the options the over-large body was built from, and `resolved`
+ * supplies the post-scaling payload length of each occurrence, so the arithmetic
+ * is made of the bytes the wire actually carries rather than of stored sizes.
+ */
+function dropOldestImagesUntilFits(
+  current: NormalizedGenerateOptions,
+  resolved: ResolvedRequestImages,
+  excessBytes: number,
+  baseline: NormalizedGenerateOptions,
+): NormalizedGenerateOptions {
+  const lengths = requestImagePayloadLengths(baseline, resolved)
+  const alreadyDropped = countOmitted(current, baseline)
+  const remaining = lengths.slice(alreadyDropped)
+  // How many more oldest occurrences free the excess, counting only what the
+  // current request still carries.
+  const additional = imagesToOffloadCount(remaining, excessBytes)
+  if (additional === 0) return current
+  return replaceOldestRequestImages(current, additional)
+}
+
+/** How many image occurrences `current` has already had replaced, versus `baseline`. */
+function countOmitted(current: NormalizedGenerateOptions, baseline: NormalizedGenerateOptions): number {
+  const before = requestImagePayloadLengths(baseline).length
+  const after = requestImagePayloadLengths(current).length
+  return Math.max(0, before - after)
+}
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import {
@@ -586,14 +635,19 @@ export class KimiCodeAdapter extends LlmAdapter {
     // front and reuse the result for the single request below. Video travels
     // the same path and is dropped oldest-first against its own, far larger
     // budget, because one clip dwarfs the whole image allowance.
-    const requestOptions = offloadOldestRequestVideos(
-      offloadOldestRequestImages(normalizeGenerateOptions(options)),
-      MAX_REQUEST_VIDEO_BYTES,
+    // Resolution runs BEFORE the budget decision so the decision is made on
+    // the bytes that will actually be sent. Measuring the stored image — as this
+    // route did — reported every scaled screenshot as several megabytes and
+    // dropped images that were about to fit in ~256 KiB each.
+    const normalized = normalizeGenerateOptions(options)
+    const images = await resolveRequestImages(normalized, this.options.attachments, signal)
+    const imageTrimmed = offloadOldestRequestImages(
+      normalized,
+      MAX_REQUEST_IMAGE_BYTES,
+      images,
     )
-    const [images, videos] = await Promise.all([
-      resolveRequestImages(requestOptions, this.options.attachments, signal),
-      resolveRequestVideos(requestOptions, this.options.videos, signal),
-    ])
+    const requestOptions = offloadOldestRequestVideos(imageTrimmed, MAX_REQUEST_VIDEO_BYTES)
+    const videos = await resolveRequestVideos(requestOptions, this.options.videos, signal)
     const settings = await this.settings()
     const media = {
       videos,
@@ -629,10 +683,32 @@ export class KimiCodeAdapter extends LlmAdapter {
       ...requestOptions,
       maxTokens: clampOutputToContext(requestedMax, promptLimit, estimatedInputTokens(requestOptions)),
     }
-    const built = buildRequest(boundedOptions, wire, images, undefined, media)
-    // The guard returns the serialized body it measured, so the multi-megabyte
-    // string is built once instead of twice.
-    const body = assertRequestBodyFits(built, requestHasVideo(requestOptions))
+    // Greedy body fit. The image budget above is a heuristic that assumes room
+    // for the conversation; when a long session leaves none, this measures the
+    // REAL body and drops only as many oldest images as it takes to fit, rather
+    // than refusing a request the upstream would have accepted after one more
+    // omission. It stops as soon as the body fits, so a request that already fit
+    // is serialized exactly once and unchanged.
+    const carriesVideo = requestHasVideo(requestOptions)
+    const bodyLimit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : MAX_MESSAGE_BODY_BYTES
+    let buildOptions = boundedOptions
+    let body = ''
+    for (let attempt = 0; ; attempt++) {
+      const built = buildRequest(buildOptions, wire, images, undefined, media)
+      // The guard returns the serialized body it measured, so the multi-megabyte
+      // string is built once instead of twice.
+      body = JSON.stringify(built)
+      const bytes = Buffer.byteLength(body, 'utf8')
+      if (bytes <= bodyLimit) break
+      // Nothing left to give back: the remainder is conversation text, tool
+      // schemas or video, none of which this route may silently discard. The
+      // guard then reports the composition so the remedy names the real cause.
+      if (attempt > MAX_BODY_FIT_ATTEMPTS || !requestHasSendableImage(buildOptions)) {
+        assertRequestBodyFits(built, carriesVideo)
+        throw new Error('unreachable: assertRequestBodyFits returns or throws')
+      }
+      buildOptions = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, requestOptions)
+    }
 
     const pool = this.accountPool
     const tried = new Set<string>()

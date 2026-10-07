@@ -1282,12 +1282,85 @@ export function assertRequestBodyFits(body: Record<string, unknown>, carriesVide
   // text containing that literal widen the text/image guard.
   const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : MAX_MESSAGE_BODY_BYTES
   if (bytes <= limit) return serialized
-  throw new LlmError(
-    `Kimi Code rejected the request before sending: the serialized body is ${bytes} bytes, above the `
-    + `${limit}-byte limit this route enforces. Compact the conversation or start a new `
-    + 'session, and check for large tool results or attached media.',
-    'PROVIDER_ERROR',
-  )
+  throw new LlmError(oversizedBodyMessage(bytes, limit, body), 'PROVIDER_ERROR')
+}
+
+/**
+ * How a request body splits into the parts that share the ceiling.
+ *
+ * The 2 MB limit covers images, conversation text, tool schemas and the system
+ * prompt together, but only the first is compressible by dropping something. A
+ * message that names which part dominates is the difference between a user who
+ * compacts the conversation and a user who deletes images and fails again.
+ */
+export interface RequestBodyBreakdown {
+  readonly totalBytes: number
+  readonly imageBytes: number
+  readonly toolSchemaBytes: number
+  readonly otherBytes: number
+}
+
+function walkJson(value: unknown, visit: (node: Record<string, unknown>) => void): void {
+  if (Array.isArray(value)) {
+    for (const item of value) walkJson(item, visit)
+    return
+  }
+  if (!isRecord(value)) return
+  visit(value)
+  for (const nested of Object.values(value)) walkJson(nested, visit)
+}
+
+/**
+ * Measure one already-serialized body by composition.
+ *
+ * Image payload is found structurally (a base64 `data:` URL or an Anthropic
+ * base64 source) rather than by searching for a marker substring, so a user
+ * message that happens to contain that text cannot inflate the image share.
+ */
+export function requestBodyBreakdown(
+  body: Record<string, unknown>,
+  carriesVideo = false,
+): RequestBodyBreakdown {
+  const serialized = JSON.stringify(body)
+  const totalBytes = Buffer.byteLength(serialized, 'utf8')
+  let imageBytes = 0
+  walkJson(body, (node) => {
+    const url = isRecord(node.image_url) ? asString(node.image_url.url) : undefined
+    if (url?.startsWith('data:')) {
+      imageBytes += Buffer.byteLength(url, 'utf8')
+      return
+    }
+    const source = isRecord(node.source) ? node.source : undefined
+    if (source && asString(source.data) !== undefined && asString(source.media_type) !== undefined) {
+      imageBytes += Buffer.byteLength(asString(source.data) ?? '', 'utf8')
+    }
+  })
+  const toolSchemaBytes = Buffer.byteLength(JSON.stringify(body.tools ?? []), 'utf8')
+  return {
+    totalBytes,
+    imageBytes,
+    toolSchemaBytes,
+    otherBytes: Math.max(0, totalBytes - imageBytes - toolSchemaBytes),
+  }
+}
+
+function oversizedBodyMessage(
+  bytes: number,
+  limit: number,
+  body: Record<string, unknown>,
+): string {
+  const parts = requestBodyBreakdown(body)
+  const composition = `images ${parts.imageBytes} bytes, tool schemas ${parts.toolSchemaBytes} bytes, `
+    + `conversation text and system prompt ${parts.otherBytes} bytes`
+  // Two failures that look identical from outside need different remedies, and
+  // the old single message sent everyone to compaction even when their images
+  // were the whole problem.
+  const remedy = parts.imageBytes >= parts.otherBytes
+    ? 'Older images are omitted first; drop or re-attach fewer images, or start a new session.'
+    : 'The conversation text and tool schemas dominate, so no image budget can fix this: '
+      + 'compact the conversation or start a new session.'
+  return `Kimi Code rejected the request before sending: the serialized body is ${bytes} bytes, above the `
+    + `${limit}-byte limit this route enforces. Composition: ${composition}. ${remedy}`
 }
 
 // ---------------------------------------------------------------------------

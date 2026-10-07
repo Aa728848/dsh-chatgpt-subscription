@@ -126,20 +126,138 @@ function base64Length(bytes: number): number {
   return Math.ceil(bytes / 3) * 4
 }
 
-function requestImageBytes(block: Record<string, unknown>): number | undefined {
+/**
+ * Base64 payload one image block contributes to the wire, or undefined when it
+ * contributes none.
+ *
+ * This is the length of what is SENT, which is not the length of what is
+ * STORED. Kimi's own client downsamples and re-encodes an oversized image before
+ * delivery "to avoid the supplier erroring on an oversized image", and this route
+ * does the same through `requestImageTarget`: a 5 MB screenshot reaches the
+ * wire as a ~256 KiB request version. Measuring `attachment.bytes` therefore
+ * over-counts every image that was scaled, and an image that fits comfortably
+ * after scaling was reported as several megabytes over budget and dropped.
+ *
+ * With `images` supplied the measurement is exact. Without it the stored size is
+ * the only estimate available, so it stays the fallback and every call site that
+ * has no resolved map behaves exactly as before.
+ */
+function requestImagePayloadLength(
+  block: Record<string, unknown>,
+  images?: ResolvedRequestImages,
+): number | undefined {
+  let data = asString(block.data) || asString(block.base64)
+  const source = isRecord(block.source) ? block.source : undefined
+  if (!data && source) data = asString(source.data) || asString(source.base64)
+  // Mirrors the data-URL stripping in imageBlockToInline: the prefix is not sent.
+  if (data?.startsWith('data:')) {
+    const matched = data.match(/^data:([^;,]+);base64,(.*)$/s)
+    if (matched) data = matched[2] ?? ''
+  }
+  if (data) return data.length
+
   const attachment = attachmentOf(block)
-  if (attachment) return base64Length(attachment.bytes)
-  const inline = asString(block.data) || asString(block.base64)
-  return inline ? inline.length : undefined
+  if (!attachment) return undefined
+  if (images === undefined) return base64Length(attachment.bytes)
+  const resolved = images.get(attachment.attachmentId)
+  // An image that resolved to `unavailable` is serialized as a short text
+  // placeholder by the mapper, so it carries no image payload and must not be
+  // counted as one.
+  return resolved?.kind === 'inline' ? resolved.data.length : undefined
 }
 
-function collectRequestImageBytes(content: unknown, lengths: number[]): void {
+/**
+ * Collect every image occurrence in model request order, recursing into tool
+ * results the way `collectImageRefs` does.
+ *
+ * RECURSION IS NOT OPTIONAL. A `read_image` result or a screenshot inside a tool
+ * result carries its pixels to the wire — `toolResultBlocks` sends them — so an
+ * earlier version that only looked at top-level blocks under-counted exactly the
+ * images a tool-using session produces most of. The budget has to describe the
+ * body that is actually built.
+ */
+function collectRequestImagePayloads(
+  content: unknown,
+  images: ResolvedRequestImages | undefined,
+  lengths: number[],
+): void {
   if (!Array.isArray(content)) return
   for (const block of content) {
-    if (!isRecord(block) || block.type !== 'image') continue
-    const bytes = requestImageBytes(block)
-    if (bytes !== undefined) lengths.push(bytes)
+    if (!isRecord(block)) continue
+    if (block.type === 'image') {
+      const bytes = requestImagePayloadLength(block, images)
+      if (bytes !== undefined) lengths.push(bytes)
+      continue
+    }
+    if (block.type === 'tool-result') collectRequestImagePayloads(block.content, images, lengths)
   }
+}
+
+/**
+ * Wire-level base64 payload of each image occurrence one request carries, in the
+ * order the request sends them, so index N is the Nth oldest image.
+ */
+export function requestImagePayloadLengths(
+  options: GenerateOptions,
+  images?: ResolvedRequestImages,
+): number[] {
+  const lengths: number[] = []
+  for (const message of options.messages) collectRequestImagePayloads(message.content, images, lengths)
+  return lengths
+}
+
+/** How many of the oldest occurrences must go to bring the total under `maxBytes`. */
+export function imagesToOffloadCount(lengths: readonly number[], maxBytes: number): number {
+  const excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - maxBytes
+  if (excess <= 0) return 0
+  let freed = 0
+  let omitted = 0
+  for (const bytes of lengths) {
+    if (freed >= excess) break
+    freed += bytes
+    omitted += 1
+  }
+  return omitted
+}
+
+/**
+ * Replace the first `count` image occurrences with a visible placeholder,
+ * recursing into tool results. Durable history is untouched; only the request
+ * about to be sent changes.
+ */
+export function replaceOldestRequestImages(options: GenerateOptions, count: number): GenerateOptions {
+  if (count <= 0) return options
+  const remaining = { count }
+  const replaceIn = (content: unknown): { content: unknown; replaced: boolean } => {
+    if (!Array.isArray(content) || remaining.count === 0) return { content, replaced: false }
+    let replaced = false
+    const next = content.map((block) => {
+      if (remaining.count === 0 || !isRecord(block)) return block
+      if (block.type === 'image') {
+        if (requestImagePayloadLength(block) === undefined) return block
+        remaining.count -= 1
+        replaced = true
+        return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
+      }
+      if (block.type === 'tool-result' && Array.isArray(block.content)) {
+        const inner = replaceIn(block.content)
+        if (!inner.replaced) return block
+        replaced = true
+        return { ...block, content: inner.content }
+      }
+      return block
+    })
+    return { content: next, replaced }
+  }
+
+  let changed = false
+  const messages = options.messages.map((message) => {
+    const result = replaceIn(message.content)
+    if (!result.replaced) return message
+    changed = true
+    return { ...message, content: result.content } as typeof message
+  })
+  return changed ? { ...options, messages } : options
 }
 
 /**
@@ -203,34 +321,25 @@ export function requestImageTarget(
 export function offloadOldestRequestImages(
   options: GenerateOptions,
   maxBytes: number = MAX_REQUEST_IMAGE_BYTES,
+  images?: ResolvedRequestImages,
 ): GenerateOptions {
-  const lengths: number[] = []
-  for (const message of options.messages) collectRequestImageBytes(message.content, lengths)
-  const excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - maxBytes
-  if (excess <= 0) return options
+  const lengths = requestImagePayloadLengths(options, images)
+  return replaceOldestRequestImages(options, imagesToOffloadCount(lengths, maxBytes))
+}
 
-  let omitted = 0
-  let freed = 0
-  for (const bytes of lengths) {
-    if (freed >= excess) break
-    freed += bytes
-    omitted += 1
-  }
-
-  const remaining = { count: omitted }
-  const messages = options.messages.map((message) => {
-    if (remaining.count === 0 || !Array.isArray(message.content)) return message
-    let replaced = false
-    const content = message.content.map((block) => {
-      if (remaining.count === 0 || !isRecord(block) || block.type !== 'image') return block
-      if (requestImageBytes(block) === undefined) return block
-      remaining.count -= 1
-      replaced = true
-      return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
-    })
-    return replaced ? { ...message, content } : message
+/**
+ * Whether a request still carries at least one image the mapper can send.
+ *
+ * A request whose images have all been replaced by placeholders can no longer
+ * shrink, which is what separates "drop more images" from "this body is too
+ * large for a reason no image budget can fix".
+ */
+export function requestHasSendableImage(options: GenerateOptions): boolean {
+  return options.messages.some((message) => {
+    const content = message.content
+    if (!Array.isArray(content)) return false
+    return content.some((block) => isRecord(block) && block.type === 'image')
   })
-  return { ...options, messages }
 }
 
 /**
