@@ -70,6 +70,11 @@
   - 回传后端在响应头给出的 `x-codex-turn-state`，让它续接该轮；
   - 后端不再下发该头时立即停止回送——不重放过期值；
 - **对话报文绝不发送 `max_output_tokens`**：订阅版 Responses 端点在部分账号/模型上直接以 `400 Unsupported parameter: max_output_tokens` 拒收该字段（[#29](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29)，实测 `gpt-6-sol` / `gpt-6.1-sol`），官方 CLI 的请求结构里也没有这个字段；输出长度由服务端默认值决定，撞上限仍以 `max-tokens` 结束原因上报（详见「模型目录」）；
+- **单次请求的图片负载有上限（2 MiB，可用 `DSH_CODEX_MAX_IMAGE_BYTES` 覆盖）**：历史里的每张图片每轮都会被重新内联，此前这条线路**没有任何总量约束**，长会话的请求体随读图数量单调增长，超过传输层能接受的体积后整轮失败，而报错只是一句没有信息量的「Codex could not be reached.」（[#50](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/50)）。现在按**最旧优先**把超出预算的图片替换为一条明确的占位文本，请求体因此有界，且模型知道那张图已经不在了；
+  - 预算是**在构造好的请求体上**执行的，因为图片有两种到达方式：粘贴的附件是 `{ type: 'image', attachment }` 块，而工具读取的本地图片是 `![](/describe-image/raw/sha256:…)` 链接、由映射器在构造时才取回并内联。只扫消息块的方案看不到第二种；
+  - 数字取自 #50 的实测（≤3 MB 全过、≥4 MB 全挂），而不是照搬别的线路：Kimi 的 1.5 MB 是按它自己的 2 MB 请求上限定的，用在这里会静默删掉本端点能接受的图片；MiniMax 的 16 MB 是按 64 MB 请求体定的，这里没有那个上限；
+  - 只约束**图片**这部分。纯文本本身就超出传输层体积的请求仍然会被拒绝，任何图片预算都救不了它；
+- **请求路径的传输层失败会带上原因链**：此前 `request()` 把任何失败都报成同一句 `Codex could not be reached.`，而 DSH 只持久化 `{message, code}`，于是 `NGHTTP2_ENHANCE_YOUR_CALM`、`ECONNRESET`、`UND_ERR_SOCKET` 在界面和日志里长得一模一样——上面那条体积问题正是因此无法自助定位。现在与流中段断流（`streamFailure`）一致，把 cause 链拼进 message；
 - Antigravity（Gemini / Claude）线路同样接受图片输入：DSH 以 `{ type: 'image', attachment }` 下发的粘贴图片会经附件服务读出字节并按 Gemini `inlineData` 发出，读不出的图片降级为一条可见的说明文本而不是被静默丢弃。单次请求的图片 base64 负载超过 12 MiB 时，最旧的图片按上游同款占位文案替换为文本，避免整条请求被体积上限拒绝；
 - 原样转发 DSH 暴露的工具 schema；命令工具兼容 `pwsh` / `powershell`、`bash`、`sh` 与 `shell`，并按 PowerShell、Bash 或 POSIX sh 注入对应说明；
 - 429/5xx 由 DSH retry policy 接管；401 只强制刷新并重试一次，支持 `AbortSignal`；

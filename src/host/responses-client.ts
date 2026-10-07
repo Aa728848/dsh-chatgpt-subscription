@@ -326,7 +326,17 @@ export class ResponsesClient {
       })
     } catch (cause) {
       if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
-      throw new LlmError('Codex could not be reached.', 'NETWORK', { cause })
+      // The cause chain goes into the message, not just onto `.cause`. DSH
+      // persists only `{message, code}` for a failed attempt, so an
+      // `ERR_HTTP2_STREAM_ERROR: NGHTTP2_ENHANCE_YOUR_CALM`, an `ECONNRESET`
+      // and an `UND_ERR_SOCKET` were all reported to the user and to the log as
+      // one information-free sentence. That is issue #50's first finding: the
+      // request body had grown past what the transport accepts, and the report
+      // could not say so. Same treatment `streamFailure` already gives a
+      // mid-body death.
+      const chain = errorChain(cause).trim()
+      const detail = chain === '' ? 'the connection failed before any response arrived' : chain.slice(0, 500)
+      throw new LlmError(`Codex request failed: ${detail}`, 'NETWORK', { cause })
     }
   }
 }

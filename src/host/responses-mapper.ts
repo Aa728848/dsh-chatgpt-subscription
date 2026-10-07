@@ -27,6 +27,103 @@ interface LocalRawImageStats {
   failed: number
 }
 
+/**
+ * Base64 image payload one Codex request may carry.
+ *
+ * THIS ROUTE HAD NO BOUND AT ALL, which is what made a long session fail
+ * intermittently (issue #50). Every turn re-inlines every image still in
+ * history, so the request body grew with the number of images ever read and
+ * nothing ever trimmed it. Past roughly 4 MB the transport itself gives up: the
+ * report's field logs show 18/18 successes in the 3–4 MB band and 3/10 in the
+ * 4–5 MB band, and a synthetic probe against the subscription endpoint returned
+ * `NGHTTP2_ENHANCE_YOUR_CALM` / `NGHTTP2_INTERNAL_ERROR` on every ≥4 MB body
+ * while ≤3 MB always passed.
+ *
+ * The NUMBER is this route's own, derived from those measurements rather than
+ * borrowed. Kimi's 1.5 MB figure is sized for Kimi's 2 MB request limit and
+ * would silently drop images this endpoint accepts; MiniMax's 16 MB is sized
+ * for a 64 MB body ceiling this route does not have. 2 MiB of image data keeps
+ * the whole body inside the band that never failed, even after the
+ * conversation text, tool schemas and system prompt are added. It is a
+ * transport property of this deployment, not a documented API limit, so
+ * `DSH_CODEX_MAX_IMAGE_BYTES` overrides it.
+ *
+ * It bounds the IMAGE contribution only. A request whose text alone exceeds the
+ * transport is still refused by the transport, and no image budget can fix that.
+ */
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 2 * 1024 * 1024
+
+/**
+ * Image budget this process enforces, honouring the deployment override.
+ *
+ * Parsed as bytes and ignored when it is not a positive finite number, so a
+ * typo cannot silently disable the guard by producing `NaN`.
+ */
+export function maxRequestImageBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.DSH_CODEX_MAX_IMAGE_BYTES ?? '').trim()
+  if (raw === '') return DEFAULT_MAX_REQUEST_IMAGE_BYTES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_REQUEST_IMAGE_BYTES
+  return Math.floor(parsed)
+}
+
+/**
+ * Placeholder left where an over-budget image was removed. It says the picture
+ * is gone rather than leaving a blank the model would answer about anyway.
+ */
+const OMITTED_IMAGE_TEXT =
+  '[image omitted to keep the request within its size limit; older images are omitted first. '
+  + 'If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]'
+
+/**
+ * Replace the oldest images with that placeholder once the built request would
+ * carry more than `maxBytes` of base64 image data.
+ *
+ * WHY THIS RUNS ON THE BUILT INPUT rather than on `options.messages` like the
+ * other routes. Two image forms reach this wire and only one of them is a
+ * message block: a pasted attachment arrives as `{ type: 'image', attachment }`,
+ * but the tool-read images in issue #50 arrive as local markdown links
+ * (`![](/describe-image/raw/sha256:…)`) that `mapUserText` fetches and inlines
+ * while building. A message-level pass cannot see the second form at all, and
+ * the shared `offloadOldestRequestImages` additionally does not recurse into
+ * `tool-result` content — so measuring here, after every form has become an
+ * `input_image` item, is the one place that bounds what actually goes out.
+ *
+ * The oldest occurrences go first and durable history is untouched; only the
+ * request about to be sent changes. A retry after a model fallback reuses the
+ * bounded input instead of re-inflating it.
+ *
+ * @param input - the payload's `input` items, mutated in place.
+ * @param maxBytes - base64 image budget for the whole request.
+ * @returns how many images were replaced.
+ */
+export function offloadOldestInputImages(
+  input: Array<Record<string, unknown>>,
+  maxBytes: number = maxRequestImageBytes(),
+): number {
+  const retained: Array<{ content: Array<Record<string, unknown>>; index: number; bytes: number }> = []
+  for (const item of input) {
+    if (!Array.isArray(item.content)) continue
+    for (const [index, block] of item.content.entries()) {
+      if (record(block) === null || (block as Record<string, unknown>).type !== 'input_image') continue
+      const url = (block as Record<string, unknown>).image_url
+      if (typeof url !== 'string') continue
+      retained.push({ content: item.content as Array<Record<string, unknown>>, index, bytes: url.length })
+    }
+  }
+  let total = retained.reduce((sum, entry) => sum + entry.bytes, 0)
+  if (total <= maxBytes) return 0
+
+  let omitted = 0
+  for (const entry of retained) {
+    if (total <= maxBytes) break
+    entry.content[entry.index] = { type: 'input_text', text: OMITTED_IMAGE_TEXT }
+    total -= entry.bytes
+    omitted += 1
+  }
+  return omitted
+}
+
 export function hiddenSandboxControlToolNames(options: GenerateOptions): Set<string> {
   const retryTools = recentSandboxRetryToolNames(options.messages)
   return new Set(options.tools
@@ -141,6 +238,12 @@ export async function buildResponsesPayload(
       appendMissingToolCalls(input, knownToolCalls, message, normalizeCallId)
     }
   }
+
+  // Bound the image payload HERE, on the built input, because this is the only
+  // point where every image form is visible: pasted attachments, tool-read
+  // images inlined from local markdown links, and tool-result images have all
+  // become `input_image` items by now. See offloadOldestInputImages.
+  offloadOldestInputImages(input)
 
   const payload: ResponsesPayload = {
     model: options.model,

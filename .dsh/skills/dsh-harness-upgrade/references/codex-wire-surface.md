@@ -208,3 +208,44 @@ Load-bearing details that cost a round to establish:
   mocked responses only. First check on a real machine: sign in, send two turns
   in one conversation, and confirm a second request carries
   `x-codex-turn-state` and a non-empty `prompt_cache_key`.
+
+## 8. The request body has a size ceiling that nothing documented (issue #50)
+
+This line had **no request-level image bound at all**, which is the one place it
+differed from the other six image-capable routes. Every turn re-inlines every
+image still in history, so the body grew with the number of images ever read.
+Past roughly 4 MB the transport itself refuses the request:
+
+| Body | Result |
+| --- | --- |
+| ≤ 3 MB | always passed |
+| 3–4 MB | 18/18 passed (field logs) |
+| 4–5 MB | 3/10 passed (field logs) |
+| ≥ 4 MB | 0% (synthetic probe) |
+
+The failure arrives as `ERR_HTTP2_STREAM_ERROR` /
+`NGHTTP2_ENHANCE_YOUR_CALM` or `NGHTTP2_INTERNAL_ERROR`, not as an HTTP
+status — so it is raised by the transport, before any response exists.
+
+Three things to keep straight, because each was a wrong turn:
+
+- **It is a probability, not a cliff.** The reporter measured 4.6 MB requests
+  that succeeded, and attributed the failures to the size band *plus* general
+  egress jitter. Fix the absence of a bound, not a threshold.
+- **The threshold is a property of the deployment**, not an upstream constant
+  (5 MB succeeded to httpbin through the same proxy that refused it to the
+  Codex edge). Hence `DSH_CODEX_MAX_IMAGE_BYTES`.
+- **The bound is applied to the BUILT payload**, in
+  `offloadOldestInputImages` (`responses-mapper.ts`), not to
+  `options.messages`. Two image forms reach this wire and only one is a message
+  block: a pasted attachment is `{ type: 'image', attachment }`, but a tool-read
+  image is a local markdown link (`![](/describe-image/raw/sha256:…)`) that
+  `mapUserText` fetches and inlines while building. A message-level pass cannot
+  see the second form, and the shared `offloadOldestRequestImages` additionally
+  does not recurse into `tool-result` content. Measuring after the build is the
+  only point where every form has become an `input_image` item.
+
+Related: `request()` reported every transport failure as the same
+information-free sentence. DSH persists only `{message, code}`, so the cause
+chain has to live in the message — the same treatment `streamFailure()` already
+gives a mid-body death. Without it, this issue was un-self-diagnosable.

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[Codex] 请求级图片总量上限，以及请求路径失败的 cause 链（[#50](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/50)）**
+  - **codex 此前是全插件唯一没有请求级图片总量约束的线路。** 历史里的每张图片每轮都会被重新内联，请求体随读图数量单调增长；超过传输层能接受的体积后整轮失败。报告方的现场日志：≤4 MB 稳过、4~5 MB 掉到 3/10；合成复现里 ≥4 MB 全挂（`ERR_HTTP2_STREAM_ERROR: NGHTTP2_ENHANCE_YOUR_CALM`），≤3 MB 全过。这是**概率关系**而非硬阈值——报告者自己也标明了这一点，所以修的是「无上限」，不是「阈值是多少」。
+  - 现在按**最旧优先**把超出预算的图片替换为明确的占位文本。**预算在构造好的请求体上执行**，而不是在 `options.messages` 上：图片有两种到达方式，粘贴附件是 `{ type: 'image', attachment }` 块，而工具读取的本地图片是 `![](/describe-image/raw/sha256:…)` 链接、由 `mapUserText` 在构造时才取回并内联；消息块级方案看不到第二种，且共享的 `offloadOldestRequestImages` 也不递归 `tool-result`。在构造后测量是唯一能覆盖全部形态的位置。
+  - 预算是**这条线路自己的 2 MiB**，不是照搬：Kimi 的 1.5 MB 按它自己的 2 MB 请求上限定，用在这里会静默删掉本端点能接受的图片；MiniMax 的 16 MB 按 64 MB 请求体定，这里没有那个上限。`DSH_CODEX_MAX_IMAGE_BYTES` 可覆盖，非法值回落到默认而不是让守卫静默失效。
+  - **只约束图片部分**：纯文本本身就超出传输层体积的请求仍会被拒绝，图片预算不解决那个问题。
+  - `request()` 的 catch 补上 `errorChain()`：此前任何传输层失败都报成同一句 `Codex could not be reached.`，而 DSH 只持久化 `{message, code}`，于是 `NGHTTP2_ENHANCE_YOUR_CALM`、`ECONNRESET`、`UND_ERR_SOCKET` 在界面与日志里无法区分——正是这条让上面的体积问题无法自助定位。现在与 `streamFailure` 的既有做法一致。
+  - 测试：新增 `test/codex-image-budget.test.ts`（10 例）。**承重已验证**：撤掉 offload 调用后 40 张图 ~10.7 MB 直接上线并失败；还原成信息量低的报错后 cause 断言失败。
+  - 验证：`tsc -b --force` 与 `tsc -p test/tsconfig.json` 均 0 错误；全量 `vitest run` 2776 passed / 7 skipped；`npm run build` 干净。
+
 - **[设置 / UI] 「订阅服务」改为总览卡片 + 逐线路下钻，配额进度移入账号卡片**
   - 概览页替换原横向 TAB 条：每张卡片给出该线路的账号数、连接状态、已启用模型数与启停开关（Ollama 无开关，恒为启用），点卡片进入该线路设置，返回条回到总览。
   - **每个账号的配额进度条画在它自己的账号卡片里。** 此前页面级进度条在轮询/粘性策略下会显示 A 账号的数字，而实际在服务的是 B——同一页面上两个数字互相矛盾。页面级区块只保留没有「按账号进度条」可放的事实。
