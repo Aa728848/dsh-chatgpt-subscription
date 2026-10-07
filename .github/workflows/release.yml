@@ -106,8 +106,24 @@ jobs:
         id: pack
         shell: bash
         run: |
-          TARBALL=$(npm pack)
-          echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
+          # The lifecycle banner that breaks this is not only npm's own
+          # "> pkg@version prepack" line: the `prepack` script runs the build,
+          # and tsdown prints its whole progress log to stdout. So stdout carries
+          # build output followed by the tarball name, and writing that straight
+          # to $GITHUB_OUTPUT puts a line starting with ">" into the output file,
+          # which Actions rejects as a command-injection attempt.
+          #
+          # The tarball name is the LAST line of stdout and is the only one that
+          # ends in .tgz, so select it rather than the whole stream. printf is
+          # used instead of echo so the value is written literally.
+          npm pack > pack.log
+          TARBALL=$(grep -E '\.tgz$' pack.log | tail -n 1 | tr -d '\r')
+          if [ -z "$TARBALL" ]; then
+            echo "::error::could not find a .tgz filename in npm pack output"
+            cat pack.log
+            exit 1
+          fi
+          printf 'tarball=%s\n' "$TARBALL" >> "$GITHUB_OUTPUT"
           echo "Packaged: $TARBALL"
 
       - name: Publish to npm
