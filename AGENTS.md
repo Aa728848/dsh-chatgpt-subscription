@@ -8,8 +8,8 @@ This repository is a DeepSeek Harness(DSH) plugin that exposes ChatGPT subscript
 - `src/host/`: adapter, OAuth, token storage, quota routes, Responses mapping, and streaming.
 - `src/client/`: web settings UI, client API helpers, and styles.
 - `src/shared/`: shared DTO/contracts.
-- `test/`: Vitest unit and jsdom tests.
 - `.dsh/skills/dsh-harness-upgrade/`: maintenance skill for harness upgrades — the compatibility seams, the upgrade procedure, the verification recipe, and per-release notes under `references/`. Not published with the package.
+- `.dsh/skills/release-plugin/`: standard operating procedure for plugin releases — SemVer bump, CHANGELOG archiving, verification, tag, and npm / GitHub release workflow. Not published with the package.
 
 ## Harness Compatibility
 

@@ -1,6 +1,6 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
   "author": {
     "name": "eddyskywalker",
@@ -126,6 +126,7 @@
   "scripts": {
     "build": "tsc -b && tsdown",
     "prepack": "npm run build",
+    "release": "node .dsh/skills/release-plugin/scripts/release.mjs",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false && tsc -p test/tsconfig.json --pretty false"
   },
