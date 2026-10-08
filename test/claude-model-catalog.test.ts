@@ -19,9 +19,10 @@
  *
  * WHAT CHANGED WHEN THE TABLE OUTGREW THE SNAPSHOT.
  *
- * The shipped table may carry rows the snapshot predates — today two,
- * `claude-opus-5-5` and `claude-sonnet-5-5`. Making the lock "at least these
- * rows" would have been the cheap fix and it would have been a lie: a table
+ * The shipped table may carry rows the snapshot predates — today three,
+ * `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`. Making the lock
+ * "at least these rows" would have been the cheap fix and it would have been a
+ * lie: a table
  * that had silently dropped a transcribed row, or replaced one with an invented
  * row that merely fits the shape, would still pass. So the lock is split into three assertions that
  * together still fail on every drift the old id-equality caught:
@@ -116,8 +117,9 @@ const REFERENCE_KEY = 'anthropic-messages'
  *
  * 15 as of pi-ai 0.87.1, which added `claude-opus-5-5`. That id is still a
  * curated row in this table (see SNAPSHOT_AGREES_BUT_CURATED_WINS for the one
- * field the table keeps), so the table carries the 15 snapshot rows PLUS the one
- * curated row the snapshot still lacks, `claude-sonnet-5-5`.
+ * field the table keeps), so the table carries the 15 snapshot rows PLUS the two
+ * curated rows the snapshot still lacks, `claude-sonnet-5-5` and
+ * `claude-haiku-5-5`.
  */
 const REFERENCE_ENTRY_COUNT = 15
 
@@ -143,9 +145,18 @@ const REFERENCE_ENTRY_COUNT = 15
  * `SNAPSHOT_AGREES_BUT_CURATED_WINS` below. Keeping it on this list is what makes
  * that exception visible and lets a stale declaration fail loudly.
  *
+ * `claude-haiku-5-5` (released 2026-10-07) is curated for the same reason as
+ * Sonnet 5.5 and is the FIRST curated row whose documented
+ * `canDisableThinking` is true: the vendor accepts `thinking: { type: 'disabled' }`
+ * at low/medium/high effort and refuses it only at xhigh/max. That is asserted
+ * below rather than asserted away, because a reader who takes "400 above xhigh"
+ * to mean "cannot be disabled" would take the off switch away from the levels
+ * that accept it.
+ *
  * The one deliberate exception is explained where it is declared, below.
  */
 const LOCALLY_CURATED_MODEL_IDS: readonly string[] = [
+  'claude-haiku-5-5',
   'claude-sonnet-5-5',
   'claude-opus-5-5',
 ]
@@ -704,6 +715,60 @@ describe('claude model catalog / locally curated rows', () => {
     expect(claudeMinCliVersionFor('claude-sonnet-5-5')).toBeUndefined()
   })
 
+  it('carries Claude Haiku 5.5 as a curated row with the documented values', () => {
+    // The model the live listing names but this table predates: without the row
+    // it resolves to the conservative stub — a 200K window, no images, no effort
+    // ladder, and a temperature the model answers with a 400.
+    const row = CLAUDE_MODELS.find((model) => model.id === 'claude-haiku-5-5')
+    expect(row, 'claude-haiku-5-5 must be a row in CLAUDE_MODELS').toBeDefined()
+    const haiku55 = row as ClaudeModelEntry
+
+    expect(haiku55.name).toBe('Claude Haiku 5.5')
+    // Up from 200K/64K on Haiku 4.5: a fixed id with no date suffix and no alias.
+    expect(defaultContextWindowFor('claude-haiku-5-5')).toBe(1_000_000)
+    expect(maxOutputTokensFor('claude-haiku-5-5')).toBe(128_000)
+    expect(claudeModelSupportsImage('claude-haiku-5-5')).toBe(true)
+
+    // Documented: omit temperature, top_p and top_k. A temperature has to be 1
+    // and a top_p 0.99; anything else is a 400, top_p: 1 included.
+    expect(haiku55.supportsTemperature).toBe(false)
+    expect(claudeModelSupportsTemperature('claude-haiku-5-5')).toBe(false)
+
+    // The manual budget form Haiku 4.5 used is a 400 on this model, so the row
+    // must not inherit 'budget' from its own predecessor.
+    expect(haiku55.thinkingMode).toBe('adaptive')
+    expect(claudeThinkingMode('claude-haiku-5-5')).toBe('adaptive')
+    // …and NOT 'mid-convo': the documented default effort is medium, so the
+    // form's forced 'high' would outrank the model's own default. Same trap as
+    // Opus 5.5, which also refuses a temperature.
+    expect(haiku55.thinkingMode).not.toBe('mid-convo')
+
+    // The first Haiku model with effort levels: all five, and no 'minimal'.
+    expect(claudeReasoningEfforts('claude-haiku-5-5')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+
+    // Documented asymmetry: { type: 'disabled' } is accepted at low/medium/high
+    // and is a 400 at xhigh/max, so the answer is TRUE — not a guess, and not the
+    // 'no map means nothing forbids it' default the snapshot's rule would give.
+    expect(haiku55.canDisableThinking).toBe(true)
+    expect(claudeModelCanDisableThinking('claude-haiku-5-5')).toBe(true)
+
+    // Documented as a prefix-check model, and it stays 'adaptive' rather than
+    // mid-convo, so the binding is what carries it.
+    expect(haiku55.bindsThinkingToPrefix).toBe(true)
+
+    // No floor is claimed: none has been observed.
+    expect(claudeMinCliVersionFor('claude-haiku-5-5')).toBeUndefined()
+  })
+
+  it('reaches Claude Haiku 5.5 through the same lookups as every other row', () => {
+    expect(resolveClaudeModel('claude-haiku-5-5').id).toBe('claude-haiku-5-5')
+    expect(CLAUDE_MODEL_IDS).toContain('claude-haiku-5-5')
+    expect(FALLBACK_MODELS.some((model) => model.id === 'claude-haiku-5-5')).toBe(true)
+    // A curated row is a normal row: reachable by id, not only by table scan, or
+    // the adapter would resolve it to the stub and send the wrong request.
+    expect(defaultContextWindowFor('claude-haiku-5-5')).toBe(1_000_000)
+  })
+
   it('keeps the locally curated list honest against the table', () => {
     // Every declared curated id must be a real row. Without this, the list could
     // name a model the table dropped and the extras check above would still pass
@@ -946,6 +1011,13 @@ describe('claude model catalog / lookups', () => {
     // Upstream gated Opus 5.5 on exactly its own first release, so a default
     // below this one cannot be relied on to reach Sonnet 5.5.
     expect(meetsDottedVersionFloor(CLAUDE_CLI_VERSION, '2.1.284')).toBe(true)
+
+    // And the same statement for Claude Haiku 5.5, added in Claude Code 2.1.293.
+    // This one is NOT hypothetical: when that row was added, npm's `stable`
+    // dist-tag still read 2.1.285 — the value this constant had been sitting on
+    // — while `latest` was already 2.1.293. A default left at `stable` advertises
+    // a Haiku that every request for it would be refused for.
+    expect(meetsDottedVersionFloor(CLAUDE_CLI_VERSION, '2.1.293')).toBe(true)
   })
 
   it('refuses locally, naming both versions, when the effective version is lowered below a floor', () => {

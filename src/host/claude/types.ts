@@ -181,14 +181,19 @@ export const ANTHROPIC_VERSION = '2023-06-01'
  * table, whether or not a floor for that model has been observed: upstream has
  * so far gated a new model on the release that added it (Opus 5.5 arrived in
  * 2.1.280 and is refused below 2.1.280). Claude Sonnet 5.5 arrived in 2.1.284,
- * so 2.1.283 could not be relied on to reach it; 2.1.285 is npm `latest`.
+ * so 2.1.283 could not be relied on to reach it. Claude Haiku 5.5 arrived in
+ * 2.1.293, so 2.1.292 could not be relied on to reach it either — and that is
+ * not hypothetical: when this row was added, npm's `stable` dist-tag was STILL
+ * sitting at 2.1.285, five releases below the one that ships the model, while
+ * `latest` was already 2.1.293. The warning above about reading `stable` is
+ * therefore about this table's own newest model, not a hypothetical.
  *
  * It is still not a literal that only moves when this package is republished: a
  * user whose installed baseline has aged past the server's floor has to be able
  * to raise it without waiting for a release. Read the effective value with
  * {@link claudeCliVersion}, pin one with {@link setClaudeCliVersion}.
  */
-export const CLAUDE_CLI_VERSION = '2.1.285'
+export const CLAUDE_CLI_VERSION = '2.1.293'
 
 /**
  * Loopback callback port the subscription flow defaults to.

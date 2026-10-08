@@ -179,10 +179,11 @@
  * TWO KINDS OF ROW ARE NOT FULLY TRANSCRIBED, and they are different things.
  * Do not collapse them.
  *
- * 1. `claude-sonnet-5-5` — the snapshot this table was copied from has no
- *    entry for it, so the whole row is CURATED: every value below comes from
- *    the vendor's own documentation and no snapshot field can check it. The
- *    mirror list in the test is `LOCALLY_CURATED_MODEL_IDS`.
+ * 1. `claude-sonnet-5-5` and `claude-haiku-5-5` — the snapshot this table
+ *    was copied from has no entry for either, so each whole row is CURATED:
+ *    every value below comes from the vendor's own documentation and no
+ *    snapshot field can check it. The mirror list in the test is
+ *    `LOCALLY_CURATED_MODEL_IDS`.
  *
  * 2. `claude-opus-5-5` — a NEWER snapshot (pi-ai >= 0.87.1) does carry it, so
  *    the row sits in the snapshot's own position and EVERY field is checked
@@ -195,22 +196,35 @@
  *    stands. The test asserts the row still disagrees with the snapshot, so a
  *    future snapshot that agrees fails loudly and retires the entry.
  *
- * Both must be changed together with the mirror list in the test. An invented
- * row that mimics the format of a checked one is worse than a missing row: it
- * is unverifiable and it looks verified. So each row is marked at the row
- * itself, the test asserts the id is on the curated list, and the test
+ * 3. `claude-haiku-5-5` (released 2026-10-07) is the second fully curated
+ *    row, and the first one whose documented `canDisableThinking` is TRUE. That
+ *    flag is not a free choice here and the row's own comment records why the
+ *    documented answer is safe to send: `thinking: { type: 'disabled' }` is
+ *    accepted at `low`/`medium`/`high` and is a 400 at `xhigh`/`max`, and this
+ *    line only sends that form when the caller asked for thinking OFF, in which
+ *    case it names no effort at all and the server's own default (`medium`) is
+ *    what the request runs at. Its documented default effort is MEDIUM, so it is
+ *    'adaptive' rather than 'mid-convo' for exactly the reason Opus 5.5 is —
+ *    'mid-convo' would force `high` — and it runs the preserved-thinking prefix
+ *    check, so `bindsThinkingToPrefix` is set even though the form is adaptive.
+ *
+ * All three must be changed together with the mirror list in the test. An
+ * invented row that mimics the format of a checked one is worse than a missing
+ * row: it is unverifiable and it looks verified. So each row is marked at the
+ * row itself, the test asserts the id is on the curated list, and the test
  * asserts the curated list is exactly the ids the snapshot lacks — which keeps
  * the lock narrow instead of merely weaker.
  *
- * Its fields come from the vendor's own published documentation for the model
- * (the model overview page plus the extended-thinking effort page), NOT from the
- * snapshot, and they are the values a person read off those pages. That is a
+ * `claude-sonnet-5-5`'s fields come from the vendor's own published
+ * documentation for the model (the model overview page plus the extended-thinking
+ * effort page), NOT from the snapshot, and they are the values a person read off
+ * those pages. That is a
  * weaker source than the snapshot and it is labelled as such: nothing here
  * proves the account is entitled to the model, and the server's own
  * `GET /v1/models` still outranks it.
  *
- * Two of its fields are the ones worth recording a WHY for, because both look
- * like mistakes against their neighbours:
+ * Two of that row's fields are the ones worth recording a WHY for, because both
+ * look like mistakes against their neighbours:
  *
  * 1. `canDisableThinking: false`. The vendor documents that thinking cannot be
  *    turned off on this model at all: sending `thinking: { type: 'disabled' }`
@@ -236,9 +250,10 @@
  * A future reader who notices the shared `supportsTemperature: false` and
  * "fixes" item 2 to 'mid-convo' has reintroduced exactly that bug.
  *
- * One more field on that row comes from neither source: its `minCliVersion`
- * floor is the number upstream itself states when it refuses the model
- * (`claude_code_version_too_old`, "version 2.1.280 or newer is required"). That
+ * One more field on `claude-opus-5-5` comes from neither source: its
+ * `minCliVersion` floor is the number upstream itself states when it refuses
+ * the model (`claude_code_version_too_old`, "version 2.1.280 or newer is
+ * required"). That
  * is a stronger witness than a documentation page — the server said it — and it
  * is recorded here so a claim below it is refused locally, before the request is
  * sent, instead of as an upstream 400 that names neither the model nor the number
@@ -313,8 +328,8 @@ export interface ClaudeModelEntry {
   minCliVersion?: string
   /**
    * Whether the vendor documents this model as running the preserved-thinking
-   * PREFIX CHECK (today: Fable 5.1, Opus 5.5, Sonnet 5.5). On accounts created on
-   * or after 2026-08-31 a replayed thinking block whose prefix (system, tools,
+   * PREFIX CHECK (today: Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5). On accounts
+   * created on or after 2026-08-31 a replayed thinking block whose prefix (system, tools,
    * earlier messages) changed is then a 400 on every retry, unless the request
    * sets `block_binding.prefix_mismatch_behavior: 'drop_block'`. DSH edits that
    * prefix in normal use (compaction, a changed tool list, image offload), so
@@ -325,8 +340,8 @@ export interface ClaudeModelEntry {
 }
 
 /**
- * Sixteen rows: the snapshot's own 15, in the snapshot's own declaration order,
- * followed by the one row the snapshot still predates (see LOCAL ADDITIONS above).
+ * Seventeen rows: the snapshot's own 15, in the snapshot's own declaration order,
+ * followed by the two rows the snapshot still predates (see LOCAL ADDITIONS above).
  *
  * The order matters and is not cosmetic. The test asserts the snapshot's ids
  * appear in the table as a SUBSEQUENCE, so a curated row may be appended or
@@ -604,6 +619,56 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     // Documented prefix-check model; 'mid-convo' already sends the binding.
     bindsThinkingToPrefix: true,
   },
+ {
+    id: 'claude-haiku-5-5',
+    name: 'Claude Haiku 5.5',
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    supportsImage: true,
+    // Documented as unsupported, and not merely "incompatible with thinking" as
+    // on the opus rows: the migration guide states the request must OMIT
+    // temperature, top_p and top_k. A temperature has to be 1 and a top_p has to
+    // be 0.99; anything else, a top_p of 1 included, is a 400.
+    supportsTemperature: false,
+    // 'adaptive' for two independent reasons, and NEITHER of them is 'budget':
+    // the manual budget form { type: 'enabled', budget_tokens: N } is a 400 on
+    // this model, so the row that inherited 'budget' from claude-haiku-4-5 would
+    // send a request the model refuses outright.
+    //
+    // And NOT 'mid-convo', which is the subtle one. This model's documented
+    // default effort is MEDIUM, and 'mid-convo' sends
+    // output_config = { effort: <named> ?? 'high' } — it forces high whenever the
+    // caller names nothing, so the row would think — and bill — a rung harder
+    // than the vendor's own default. Same reasoning, and same deliberate
+    // divergence, as claude-opus-5-5 above.
+    thinkingMode: 'adaptive',
+    // All five documented levels. 'minimal' is not among them: this is the first
+    // Haiku model with effort levels at all, and the ladder starts at 'low'.
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    // TRUE, and the only curated row that says so. The vendor documents the
+    // asymmetry precisely: thinking: { type: 'disabled' } works at low, medium
+    // and high, and is a 400 at xhigh and max.
+    //
+    // That is safe to encode as a plain true here because of HOW this line sends
+    // the form: claudeThinking writes { type: 'disabled' } only when the caller
+    // asked for thinking off, and in that case it names NO effort at all — so
+    // the request runs at the server's own default (medium), which is inside the
+    // documented window. The xhigh/max refusals are only reachable by naming one
+    // of those levels, and naming one means thinking is on, which sends the
+    // adaptive form instead. So the flag is a documented YES, not an optimistic
+    // default: reading "400 above xhigh" as "cannot be disabled" would wrongly
+    // take the off switch away from the levels that accept it.
+    canDisableThinking: true,
+    // No floor recorded: none has been OBSERVED for this model (see the interface
+    // doc comment), exactly as for claude-sonnet-5-5. The model first shipped in
+    // Claude Code 2.1.293, and CLAUDE_CLI_VERSION is kept at or above that
+    // release instead — claiming below it is how the request would be refused.
+    // Documented as a prefix-check model ("Changing earlier turns invalidates
+    // thinking blocks"), so the adaptive form sends block_binding WITHOUT
+    // mid-convo's forced effort — which is the whole reason the row is not
+    // mid-convo.
+    bindsThinkingToPrefix: true,
+  },
 ] as const) as readonly ClaudeModelEntry[]
 
 /** Every id the fallback table knows, in declaration order. */
@@ -630,6 +695,13 @@ export const FALLBACK_MODELS: readonly ClaudeModelEntry[] = CLAUDE_MODELS
  * than one that leads with the general-purpose ids. The rest stay selectable
  * from the model card and are one click away.
  *
+ * The list tracks ONE current model per family rather than the newest of each,
+ * so a slot follows its family's newest release in place instead of growing: the
+ * Haiku slot is `claude-haiku-5-5`, which replaced `claude-haiku-4-5` when that
+ * model shipped. That is a deliberate swap and not a silent append — a list that
+ * offered both generations of every family would be longer than the picker it
+ * feeds, and the older Haiku stays one click away in the card.
+ *
  * This list is the SHIPPED DEFAULT, and edits to it are a deliberate onboarding
  * decision rather than a no-op: a stored list that still equals the shipped
  * default counts as "never edited", and the routes and adapter read it that way
@@ -643,7 +715,7 @@ export const DEFAULT_VISIBLE_MODEL_IDS: readonly string[] = [
   'claude-opus-5-5',
   'claude-opus-4-6',
   'claude-sonnet-4-6',
-  'claude-haiku-4-5',
+  'claude-haiku-5-5',
   'claude-opus-4-5',
 ]
 
