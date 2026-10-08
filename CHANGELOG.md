@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.14.0 - 2026-10-08
+
+- **[Claude] 支持 Claude Haiku 5.5（`claude-haiku-5-5`），并把申报的客户端版本抬到 2.1.293**
+  - **能力表新增一行**（`src/host/claude/model-catalog.ts`）：官方 2026-10-07 发布，1M 上下文 / 128K 输出 / 支持图片，档位 `low`–`max`。**固定 id，没有日期后缀也没有别名**，所以不像 4.5 那样成对出现。
+  - **每个字段来自官方文档，不是从模型名推的**：这一行与邻居在三个字段上直接冲突——`claude-haiku-4-5` 是 `budget`、可关思考、支持 temperature，5.5 三条全反（自适应思考、档位控制深度、拒绝非默认采样参数）。能力表的地基就是「名字不决定任何字段」，照抄邻居就是这条地基要防的那种错。
+  - **不能用 `budget`**：官方迁移指南写明手动预算形式 `{type:"enabled",budget_tokens:N}` 在 5.5 上是 400。照抄 4.5 那一行会发出模型直接拒绝的请求。
+  - **也不进 `mid-convo` 分支**：官方默认档位是 `medium`，而 `mid-convo` 在调用方未指定档位时会强制 `effort: high`——等于每次请求都替用户多花一档、多付一档的钱。这与 Opus 5.5 是同一个坑、同一份理由，因此 Haiku 5.5 同样靠 `bindsThinkingToPrefix` 拿到 `block_binding`，而**不**接受强制 effort。测试里钉死 mid-convo 白名单的那条断言也没有收录它。
+  - **`canDisableThinking: true`——本表第一个为真的本地新增行**：官方明确 `thinking:{type:"disabled"}` 在 `low`/`medium`/`high` 被接受、在 `xhigh`/`max` 是 400。这条不对称能安全记成一个布尔值，靠的是本线路**发这个 form 的时机**：只有调用方明确要求关闭思考时才发，且此时**不申报任何档位**，请求因此跑在官方默认 `medium` 上——落在被接受的一侧；想用 `xhigh`/`max` 的人一定开着思考，走的是 adaptive form。反过来把「xhigh 以上 400」读成「不能关闭」才是错的——那会把低档位本来可用的开关一起拿走。
+  - **与号池相关的一条用户可见后果**：官方写明 Haiku 5.5 的思考块只在产出它的账号（或其关联账号）里有效，换账号回放会被**静默丢弃**——请求成功，模型看不到那段推理。多账号轮换因此表现为「同一段对话里答案质量忽高忽低」而**不报错**。这一条记在能力表的行注释与 README 里，因为它是号池的行为，不是模型的性质。
+  - **申报版本 2.1.285 → 2.1.293**：Haiku 5.5 首发于 Claude Code 2.1.293，而 `types.ts` 早就写着「默认版本必须 ≥ 首次提供每个模型的那个发行版」。这不是假设：加这一行时 npm 的 `stable` 标签**仍停在 2.1.285**（插件当时申报的值），`latest` 已经是 2.1.293——不抬版本的结果是照常广告一个每次请求都会被 `claude_code_version_too_old` 拒掉的模型，而本地预检看不出来。该行**没有** `minCliVersion`：没见过上游真的拒它，就不臆造门槛数字（Sonnet 5.5 也是这么处理的）。版本锁另加一条断言，把「≥ 2.1.293」写进测试而不只写进注释。
+  - **保真锁同步跟着加**：本机参照目录（pi-ai 0.87.1）里没有这个模型，所以它进 `LOCALLY_CURATED_MODEL_IDS`，并在 `test/claude-model-catalog.test.ts` 里逐字段断言官方文档的值；该文件的三处说明文字（「今天两行」「快照之外还差几行」「两行的理由」）一并改成三行，否则文档会比锁先过期。
+  - **新装默认勾选里的 Haiku 槽位换成 5.5**：默认列表每族只放一个当前代模型，所以 `claude-haiku-4-5` 被 `claude-haiku-5-5` 顶掉，长度不变。这是安装期的明确决策而不是静默追加：「未编辑过默认列表」按成员比对，老用户存的旧默认仍按原样生效，不会被这次改动悄悄改写。
+  - 验证：`npm run typecheck` 0 错误；`test/claude-model-catalog.test.ts` **26 passed / 0 failed**（本机装有参照目录，15 行转录保真断言与「快照之外恰为这两行」都真的跑了，不是 skip）、`test/claude-mapper.test.ts` 91、`test/claude-adapter.test.ts` 43、`test/claude-routes.test.ts` 21、`test/claude-token-store.test.ts` 45、`test/provider-output-reservation.test.ts` 181 全通过；全量 `npm test` **2826 passed / 11 failed / 7 skipped**，11 个失败全部是 `test/claude-oauth.test.ts` 的 `No bindable loopback port in the probe range.`——本机 bind `127.0.0.1` 直接 `EACCES`（已单独探测确认），与本次改动无关。
 - **[Codex] 在 ChatGPT 卡片里导入本机 Codex CLI 的登录（可选）**
   - **重复登录是纯粹的摩擦**：已经在官方 CLI 登录过的用户，登录的正是这个 Provider 服务的那份订阅，却还要再走一次完整的 OAuth。新增 `POST /adopt`，让它点一次就少一整轮登录。
   - **导入得到的是快照，本插件永不再刷新它**：ChatGPT 的 refresh token 会轮换，而 CLI 会在**原地刷新自己的文件**——两个进程刷同一份授权会互相作废，输的一方握着服务端已经作废的令牌，结果是用户**被本插件的好意踢出 Codex CLI**。进程内的单飞解决不了，因为竞态在**进程之间**：两个进程唯一共享的就是那个文件，而按只读规则本插件不能写它。因此快照只在 CLI 还为它作保时可用，**过期是收编这件事的一部分而不是缺陷**。
