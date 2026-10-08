@@ -5,6 +5,7 @@ import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEX
 import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
 import { AccountPoolSection, type AccountPoolLabels } from './common/AccountPoolSection.tsx'
+import { formatPoolLabel } from './common/account-pool-labels.ts'
 import { ModelChecklist } from './common/ModelChecklist.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from './common/quota-follow-up.ts'
 import type { AccountRotationStrategy } from '../shared/account-pool-contracts.ts'
@@ -13,7 +14,7 @@ import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
 type BusyAction = 'login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences'
-  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | null
+  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt-disable' | null
 type Translate = Props['t']
 
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
@@ -250,6 +251,23 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     })
   }
 
+  /**
+   * Forget every imported snapshot: the undo for the hub block's import button.
+   *
+   * ONE control for the whole pool rather than one per row, because the host's
+   * route deliberately ignores an accountId and clears every imported row at once.
+   * That is not an oversight to route around: the pool refuses to delete an
+   * adopted credential, so a per-row control here could only ever be a button that
+   * silently clears its neighbours — a worse bug than offering no button at all.
+   * The Codex CLI's own file is not deleted, rewritten or moved by this; it only
+   * makes this plugin forget the copy it took.
+   */
+  const stopImporting = async (): Promise<void> => {
+    await run('adopt-disable', async () => {
+      setStatus(await apiRef.current.disableAdoptedLocalLogins())
+    })
+  }
+
   const setRotationStrategy = async (strategy: AccountRotationStrategy): Promise<void> => {
     await run('strategy', async () => {
       const next = await apiRef.current.accountAction('strategy', { strategy })
@@ -298,6 +316,11 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     }
   }
 
+  // `removable: false` is the shared summary DTO's own signal for a borrowed
+  // credential (it is what suppresses Delete on the shared card). The Codex pool
+  // also puts an `adopted` flag on the wire, but that field is not in the shared
+  // contract this tab is typed against, so the declared one is what is read.
+  const importedAccounts = (status?.accounts ?? []).filter((account) => account.removable === false)
   const account = status?.account
   const preferences = status?.preferences
   const quota = status?.quota
@@ -345,6 +368,24 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           {login?.active ? <Button disabled={busy !== null} onClick={cancelLogin}>{t('cancel')}</Button> : null}
           {status?.authenticated ? <Button disabled={busy !== null} onClick={refreshToken}>{t('refreshToken')}</Button> : null}
         </div>
+        {/* The imported rows have no Delete (the shared card hides it for a
+            borrowed credential), so without this the hub block's import button
+            would be a one-way door. Rendered once, below the list, and its label
+            says "all": the route it calls forgets every snapshot at once. */}
+        {importedAccounts.length > 0 ? (
+          <>
+            <p className="dsha-muted">{formatPoolLabel(t('stopImportingHint'), { count: importedAccounts.length })}</p>
+            <div className="dsha-actions">
+              <button
+                className="dsha-btn"
+                type="button"
+                disabled={busy !== null}
+                aria-label={formatPoolLabel(t('stopImportingLabel'), { count: importedAccounts.length })}
+                onClick={() => void stopImporting()}
+              >{busy === 'adopt-disable' ? t('stopImportingBusy') : t('stopImporting')}</button>
+            </div>
+          </>
+        ) : null}
       </AccountPoolSection>
 
       <Section title={t('connection')}>

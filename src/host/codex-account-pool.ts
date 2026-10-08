@@ -1,3 +1,38 @@
+/**
+ * The ChatGPT account pool.
+ *
+ * TWO KINDS OF ACCOUNT, AND ONLY ONE OF THEM MAY BE REFRESHED.
+ *
+ * - managed — signed in through this plugin. Its credential lives in the pool's
+ *   encrypted storage AND in the pre-pool credential document beside it, it is
+ *   refreshable, and deleting it is this plugin's business.
+ * - adopted — a SNAPSHOT read out of a local Codex CLI sign-in by 'codex-adopt.ts'
+ *   (marker 'adopted: true', source 'codex'). It is used only while its own access
+ *   token is still valid.
+ *
+ * An adopted snapshot is NEVER refreshed, and the reason is not an optimisation:
+ * the ChatGPT refresh token the CLI stores rotates, and the CLI refreshes its own
+ * file in place. Two processes spending one grant invalidate each other, and
+ * whoever loses the race holds a token the server has already retired — which
+ * leaves the user signed OUT of the Codex CLI by this plugin's good intentions. An
+ * in-process single-flight cannot fix that, because the race is across PROCESSES
+ * and the only state they share is a file 'codex-adopt.ts' must never write. Once
+ * such a snapshot has expired the pool takes it out of rotation and surfaces
+ * ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT — sign in again in the CODEX CLI and
+ * re-import, not here.
+ *
+ * The rule is enforced twice on purpose: the needsRefresh hook answers false for
+ * an adopted credential no matter what its expiry says, and the refresh hook
+ * itself refuses one, so a future caller that forgets the first fails loudly
+ * instead of silently spending a grant that is not ours to spend.
+ *
+ * MANAGED BEATS ADOPTED on a conflict, and the marker is therefore written on
+ * EVERY account this file creates, including the explicit false case: the core
+ * merges a re-authorization as { ...existing, ...created }, so an omitted key
+ * would leave a stored 'adopted: true' — and its never-refresh consequence — on a
+ * record that is now plugin-owned.
+ */
+
 import path from 'node:path'
 import { TOKEN_REFRESH_MARGIN_MS } from '../compat.ts'
 import { dshHomeDir } from './common/home.ts'
@@ -20,12 +55,112 @@ import { OAuthServiceError } from './oauth-service.ts'
 import type { AccountRotationStrategy, PoolAccountQuotaDto, PoolAccountSummaryDto } from '../shared/account-pool-contracts.ts'
 import type { QuotaUsageDto } from '../shared/contracts.ts'
 import { poolQuota, quotaWindow } from './common/account-quota.ts'
+import {
+  ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT,
+  CODEX_CLI_CREDENTIAL_SOURCE,
+  isAdoptedCodexCredentialExpired,
+} from './codex-adopt.ts'
+
+/** Where a pooled account's credential came from. */
+export type CodexPoolAccountSource = 'managed' | typeof CODEX_CLI_CREDENTIAL_SOURCE
 
 /** One pooled ChatGPT account: the credential plus the facts the card renders. */
 export interface CodexPoolAccount extends PoolAccountShape<StoredOAuthCredentials> {
+  /**
+   * Which store owns the credential. Only managed rows may be refreshed.
+   *
+   * Derived from the credential rather than trusted from the row, so the two
+   * spellings of the marker can never disagree about one account.
+   */
+  source: CodexPoolAccountSource
+  /**
+   * Whether this row is a borrowed snapshot.
+   *
+   * Required rather than optional: every construction site has to state it, which
+   * is what keeps a stale true from surviving an in-place re-authorization.
+   */
+  adopted: boolean
+  /** The Codex CLI file an adopted snapshot was read from; absent for managed rows. */
+  sourcePath?: string
   email?: string
   planType?: string
   accountId?: string
+}
+
+/**
+ * Whether a pooled credential is an adopted snapshot.
+ *
+ * The two fields, and only those two: a plain credential carries no 'adopted'
+ * field and must never be mistaken for a snapshot, because treating a
+ * plugin-owned account as a disposable one would freeze it out of refreshing and
+ * make deleteAccount refuse to remove an account the user signed in here.
+ */
+export function isAdoptedCodexPoolCredential(credentials: StoredOAuthCredentials): boolean {
+  return credentials.adopted === true && credentials.source === CODEX_CLI_CREDENTIAL_SOURCE
+}
+
+/**
+ * Whether a credential must be refreshed before the next request.
+ *
+ * FALSE for every adopted snapshot, valid or expired. That is this pool's core
+ * rule: an adopted credential is borrowed for exactly as long as the Codex CLI
+ * vouched for it, and this pool has no business rotating a token another process
+ * is rotating too. See the module comment.
+ */
+export function codexNeedsRefresh(credentials: StoredOAuthCredentials, now: number): boolean {
+  if (isAdoptedCodexPoolCredential(credentials)) return false
+  return credentials.expiresAt - now <= TOKEN_REFRESH_MARGIN_MS
+}
+
+/**
+ * Why a stored credential is already known to be unusable, or nothing.
+ *
+ * Reported purely — nothing is written here — and consulted by the core for both
+ * routing eligibility and credential usability, which is what makes an expired
+ * snapshot non-routable WITHOUT a write on every read. The hint names the remedy
+ * in the Codex CLI, because that is where the user has to go: re-adopting here is
+ * only possible after the CLI itself signed in again.
+ */
+export function codexAuthRejectedReason(credentials: StoredOAuthCredentials): string | undefined {
+  if (!isAdoptedCodexPoolCredential(credentials)) return undefined
+  return isAdoptedCodexCredentialExpired(credentials) ? ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT : undefined
+}
+
+/**
+ * Message raised if a refresh of a still-valid adopted snapshot were attempted.
+ *
+ * Unreachable through this pool's own paths (see the module comment); it exists
+ * because 'unreachable' is a claim the guard has to be able to make good on.
+ */
+export const ADOPTED_NEVER_REFRESHED_MESSAGE =
+  'The sign-in imported from the Codex CLI is never refreshed by this plugin: the Codex '
+  + 'CLI refreshes the same rotating token, and two refreshers would invalidate each '
+  + 'other. Sign in again in the Codex CLI, then import the new sign-in from this settings card.'
+
+/** Raised when a refresh of an adopted snapshot is attempted. Never a 401. */
+export class CodexAdoptedCredentialError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CodexAdoptedCredentialError'
+  }
+}
+
+/**
+ * One account as the ChatGPT settings card renders it.
+ *
+ * Declared here rather than under 'src/shared/', for the same reason the Claude
+ * line declares its own: source and provenance are this pool's vocabulary, and a
+ * second copy in the shared contracts module is one that can drift. The base is
+ * the shared summary, so every existing consumer of listAccounts() keeps working
+ * unchanged — the extra fields are additive.
+ */
+export interface CodexAccountSummaryDto extends PoolAccountSummaryDto {
+  /** Where the credential came from; a card offers different actions per source. */
+  source?: CodexPoolAccountSource
+  /** Whether this row is a snapshot borrowed from a local Codex CLI sign-in. */
+  adopted?: boolean
+  /** The Codex CLI file an adopted snapshot was read from. */
+  sourcePath?: string
 }
 
 /** Encrypted pool file the ChatGPT line owns; the single-credential store stays the mirror. */
@@ -52,13 +187,25 @@ export function parseCodexPoolData(value: unknown): PoolData<CodexPoolAccount> {
     const raw = item as Record<string, unknown>
     if (typeof raw.id !== 'string') continue
     const credentials = parseStoredCredentials(raw.credentials)
+    // The marker lives on the CREDENTIAL (see AdoptedCredentialMarkers) and is
+    // read back by parseStoredCredentials, so it survives this round trip instead
+    // of being dropped by a write the pool made for some other reason. A row that
+    // lost it would come back looking plugin-owned and would be handed to a token
+    // endpoint that rotates a grant the Codex CLI is also rotating.
+    const adopted = isAdoptedCodexPoolCredential(credentials)
     const account: CodexPoolAccount = {
       id: raw.id,
       alias: typeof raw.alias === 'string' ? raw.alias : (credentials.email || '账号'),
       credentials,
       addedAt: typeof raw.addedAt === 'number' ? raw.addedAt : Date.now(),
       isPrimary: raw.isPrimary === true,
+      adopted,
+      source: adopted ? CODEX_CLI_CREDENTIAL_SOURCE : 'managed',
     }
+    // The row's own spelling first, then the credential's: a row written before
+    // the marker was carried on the credential still names its file.
+    const sourcePath = optionalString(raw, 'sourcePath') ?? credentials.sourcePath
+    if (adopted && sourcePath !== undefined) account.sourcePath = sourcePath
     const email = optionalString(raw, 'email') ?? credentials.email
     if (email !== undefined) account.email = email
     const planType = optionalString(raw, 'planType') ?? credentials.planType
@@ -97,14 +244,6 @@ export interface CodexAccountPoolOptions {
 }
 
 /**
- * ChatGPT's account pool.
- *
- * Thin wrapper over {@link AccountPoolCore}: it only supplies the credential
- * shape, the identity a duplicate sign-in collapses onto, and the two provider
- * hooks the core cannot know — how to refresh one account's tokens and which
- * accounts a cached quota window already rules out.
- */
-/**
  * Per-account in-flight requests, shared by every ChatGPT request this host
  * makes. A fan-out of subagents is what reaches a plan's concurrency bound, so
  * the bound is enforced here rather than discovered by cooling every account at
@@ -138,7 +277,7 @@ export function codexAccountQuota(snapshot: { usage: QuotaUsageDto; fetchedAt: n
   }))
 }
 
-export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, CodexPoolAccount, PoolAccountSummaryDto> {
+export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, CodexPoolAccount, CodexAccountSummaryDto> {
   private readonly refresherRef: { current?: CodexTokenRefresher }
   private readonly store: TokenStore
   private readonly quotaSnapshotRef: { current?: (account: CodexPoolAccount) => PoolAccountQuotaDto | undefined }
@@ -150,7 +289,7 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
     // A ref rather than a field: the hooks below are built before `super()`, so
     // they may only close over something that already exists.
     const quotaSnapshotRef: { current?: (account: CodexPoolAccount) => PoolAccountQuotaDto | undefined } = {}
-    const hooks: AccountPoolHooks<StoredOAuthCredentials, CodexPoolAccount, PoolAccountSummaryDto> = {
+    const hooks: AccountPoolHooks<StoredOAuthCredentials, CodexPoolAccount, CodexAccountSummaryDto> = {
       providerId: 'codex-chatgpt',
       displayName: 'ChatGPT',
       poolFile: codexPoolPath(),
@@ -160,23 +299,50 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
       // fallback for credentials minted before the id claim was read.
       dedupeKey: (credentials) => credentials.accountId ?? credentials.email,
       defaultAlias: (credentials, position) => credentials.email ?? `账号 ${position}`,
-      createAccount: ({ id, alias, credentials, addedAt, isPrimary }) => ({
-        id,
-        alias,
-        credentials,
-        addedAt,
-        isPrimary,
-        ...(credentials.email === undefined ? {} : { email: credentials.email }),
-        ...(credentials.planType === undefined ? {} : { planType: credentials.planType }),
-        ...(credentials.accountId === undefined ? {} : { accountId: credentials.accountId }),
-      }),
+      createAccount: ({ id, alias, credentials, addedAt, isPrimary }) => {
+        const adopted = isAdoptedCodexPoolCredential(credentials)
+        return {
+          id,
+          alias,
+          credentials,
+          addedAt,
+          isPrimary,
+          // Written on EVERY path, including the false one: the core merges a
+          // re-authorization as { ...existing, ...created }, so an omitted key
+          // would leave a stored 'adopted: true' — and its never-refresh
+          // consequence — on a record that is now plugin-owned.
+          adopted,
+          source: adopted ? CODEX_CLI_CREDENTIAL_SOURCE : 'managed',
+          // Cleared explicitly rather than omitted, for the same merge reason: a
+          // re-authorization that follows an import must not keep naming a file it
+          // no longer has anything to do with.
+          sourcePath: adopted ? credentials.sourcePath : undefined,
+          ...(credentials.email === undefined ? {} : { email: credentials.email }),
+          ...(credentials.planType === undefined ? {} : { planType: credentials.planType }),
+          ...(credentials.accountId === undefined ? {} : { accountId: credentials.accountId }),
+        } satisfies CodexPoolAccount
+      },
       expiresAt: (credentials) => credentials.expiresAt,
-      needsRefresh: (credentials, now) => credentials.expiresAt - now <= TOKEN_REFRESH_MARGIN_MS,
+      needsRefresh: (credentials, now) => codexNeedsRefresh(credentials, now),
       refresh: async (credentials) => {
+        // The guard, stated where the call happens: a caller that reaches here
+        // with a snapshot fails loudly instead of spending a rotating grant the
+        // Codex CLI is also spending. Unreachable from the pool's own paths
+        // (needsRefresh answers false), and that is exactly why it is here.
+        if (isAdoptedCodexPoolCredential(credentials)) {
+          throw new CodexAdoptedCredentialError(
+            isAdoptedCodexCredentialExpired(credentials)
+              ? ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT
+              : ADOPTED_NEVER_REFRESHED_MESSAGE,
+          )
+        }
         const refresher = ref.current
         if (refresher === undefined) throw new Error('ChatGPT 凭据刷新服务尚未就绪')
         return refresher.refreshAccount(credentials)
       },
+      // Pure check — nothing is written — and the reason a borrowed snapshot that
+      // has aged out is refused without a refresh ever being attempted.
+      authRejectedReason: (credentials) => codexAuthRejectedReason(credentials),
       // A refresh the token endpoint rejects (400/401) means this account must be
       // signed in again; a transport failure must not cost it its place.
       refreshFailureStatus: (error) => (error instanceof OAuthServiceError
@@ -194,29 +360,57 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
           credentials: stored,
           addedAt: Date.now(),
           isPrimary: true,
+          // The pre-pool document only ever holds this plugin's own sign-ins: an
+          // adopted snapshot is added to the pool and never written here, because
+          // it is not this plugin's credential to keep.
+          adopted: false,
+          source: 'managed',
           ...(stored.email === undefined ? {} : { email: stored.email }),
           ...(stored.planType === undefined ? {} : { planType: stored.planType }),
           ...(stored.accountId === undefined ? {} : { accountId: stored.accountId }),
-        }
+        } satisfies CodexPoolAccount
       },
       mirrorPrimary: async (credentials) => {
         if (credentials === null) {
           await store.clear()
           return
         }
+        // A borrowed snapshot is NEVER copied into this plugin's own
+        // single-credential store. It is not this plugin's sign-in to keep, and
+        // mirroring it would make the pre-pool projection hand a Codex CLI
+        // snapshot back as though the user had signed in here — and would
+        // overwrite the managed sign-in this store exists to keep. The pool still
+        // routes the row; only the mirror is skipped.
+        if (isAdoptedCodexPoolCredential(credentials)) return
         await store.save(credentials)
       },
-      extendSummary: (account, base) => ({
-        ...base,
-        ...(account.email === undefined ? {} : { email: account.email }),
-        ...(account.planType === undefined ? {} : { planLabel: account.planType }),
-        // The account's own newest quota snapshot, when the usage service has
-        // read this account before. Absent means exactly that: never read.
-        ...(() => {
-          const quota = quotaSnapshotRef.current?.(account)
-          return quota === undefined ? {} : { quota }
-        })(),
-      }),
+      extendSummary: (account, base) => {
+        const adopted = account.adopted === true
+        // LIVE, not stored: a snapshot becomes unusable at its own expiry instant,
+        // and persisting that would mean a write on every read.
+        const expired = adopted && isAdoptedCodexCredentialExpired(account.credentials)
+        return {
+          ...base,
+          ...(account.email === undefined ? {} : { email: account.email }),
+          ...(account.planType === undefined ? {} : { planLabel: account.planType }),
+          adopted,
+          source: account.source,
+          // Deleting the row is the card's action for an account this plugin owns.
+          // A borrowed snapshot is not this plugin's file to delete, so the card
+          // offers its own remove-import action instead.
+          removable: !adopted,
+          ...(account.sourcePath === undefined ? {} : { sourcePath: account.sourcePath }),
+          // The account's own newest quota snapshot, when the usage service has
+          // read this account before. Absent means exactly that: never read.
+          ...(() => {
+            const quota = quotaSnapshotRef.current?.(account)
+            return quota === undefined ? {} : { quota }
+          })(),
+          ...(expired
+            ? { authStatus: 'expired' as const, authFailedReason: ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT }
+            : {}),
+        }
+      },
       emptyMessage: '未登录 ChatGPT 账号，请在「设置 → 订阅服务 → ChatGPT」中添加并登录账号。',
       ...(options.backend === undefined ? {} : { backend: options.backend }),
       ...(options.maxAccounts === undefined ? {} : { maxAccounts: options.maxAccounts }),
@@ -283,6 +477,45 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
     // generation passed here is the guard: a rotation that started before a
     // re-login must not spend the re-login's refresh token.
     return this.renewCredential(accountId, fetch, account.credentials)
+  }
+
+  /**
+   * Remove one account inside a transaction, refusing a borrowed snapshot.
+   *
+   * The check lives HERE rather than in the public delete method so it cannot be
+   * separated from the removal by a concurrent change, and so every caller of the
+   * core's own deletion inherits it. The remedy is a separate action
+   * ({@link removeImportedAccount}): a card must not destroy an account this plugin
+   * did not create with the same button that deletes its own.
+   */
+  protected override deleteAccountFromPool(data: PoolData<CodexPoolAccount>, accountId: string): void {
+    if (data.accounts.find((account) => account.id === accountId)?.adopted === true) {
+      throw new Error('The sign-in imported from the Codex CLI is not an account this plugin owns; remove the import instead.')
+    }
+    super.deleteAccountFromPool(data, accountId)
+  }
+
+  /**
+   * Drop an imported snapshot from the pool — the card's 'remove import' action.
+   *
+   * Separate from {@link deleteAccount} because that refuses one, and because the
+   * user is asking to stop borrowing a sign-in, not to sign out of an account. The
+   * Codex CLI's own file is touched by neither path: not deleted, not rewritten,
+   * not moved. This only forgets the copy.
+   */
+  async removeImportedAccount(accountId: string): Promise<void> {
+    return this.updatePool((data) => {
+      const target = data.accounts.find((account) => account.id === accountId)
+      if (target === undefined) return
+      if (target.adopted !== true) {
+        throw new Error('That account was signed in through this plugin; delete it instead of removing an import.')
+      }
+      // The core's own deletion, so primary/active/mirror handling stays in one
+      // place, and the check above cannot be separated from it by a concurrent
+      // change. The credential document is never touched: a snapshot is not this
+      // plugin's sign-in to keep.
+      super.deleteAccountFromPool(data, accountId)
+    })
   }
 
   /** The single-credential store this pool mirrors its primary account into. */

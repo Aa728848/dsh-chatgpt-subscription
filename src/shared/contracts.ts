@@ -55,6 +55,15 @@ export interface PluginStatusDto {
   /** Account the next request would use. */
   activeAccountId?: string
   rotationStrategy?: AccountRotationStrategy
+  /**
+   * Whether a local Codex CLI sign-in exists to import.
+   *
+   * Presence only, answered by a stat: the settings card has to offer the import
+   * BEFORE the user agrees to it, and a startup path that read the file "just in
+   * case" would make that agreement decorative. Validity is answered by the adopt
+   * route itself, after opt-in.
+   */
+  codexCliSignInAvailable?: boolean
   detectedProxy?: string | null
   activeProxy?: string | null
   error?: PublicErrorDto
@@ -191,6 +200,32 @@ export interface SubagentRouteAuditDto {
   /** Exact authorized routes the audit compared against. */
   allowedModels: { provider: string; model: string }[]
   violations: SubagentRouteViolationDto[]
+}
+
+/**
+ * A local sign-in this plugin knows how to adopt.
+ *
+ * Presence only, for every id: the scanner stats candidates and reads no token, so
+ * a user who never opts in never has a credential's contents touched. Whether the
+ * file holds something USABLE is not answered here and must not be inferred from
+ * 'detected' — that is what the adopt route is for.
+ */
+export type LocalLoginSourceId = 'codex' | 'claude-code' | 'minimax-code'
+
+export interface LocalLoginSourceDto {
+  id: LocalLoginSourceId
+  /** True when a usable local sign-in was found. Presence only; no token was read. */
+  detected: boolean
+  /** Candidate paths consulted, in priority order. */
+  paths: string[]
+  /** 'adopt' = this plugin can import it in one click; 'settings-only' = the provider already owns its own control. */
+  importMode: 'adopt' | 'settings-only'
+  /** Human-facing provider name. Keep it a plain name; the client owns all translated copy. */
+  providerLabel: string
+}
+
+export interface LocalLoginScanDto {
+  sources: LocalLoginSourceDto[]
 }
 
 export interface PublicErrorDto {

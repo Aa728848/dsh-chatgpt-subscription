@@ -17,6 +17,7 @@
 - [Claude（订阅）线路](#claude订阅线路)
 - [子代理模型授权](#子代理模型授权0215-起032-起强制指定模型)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
+- [本机登录](#本机登录)
 - [安全边界](#安全边界)
 - [插件路由](#插件路由)
 - [开发与验证](#开发与验证)
@@ -28,7 +29,7 @@
 
 | Provider ID | 订阅 | 协议 | 登录方式 | 模型目录来源 |
 | --- | --- | --- | --- | --- |
-| `codex-chatgpt` | ChatGPT（Plus / Pro / Business…） | Responses | 浏览器 OAuth（localhost:1455 回调） | **实时** `/backend-api/codex/models` |
+| `codex-chatgpt` | ChatGPT（Plus / Pro / Business…） | Responses | 浏览器 OAuth（localhost:1455 回调），或导入本机 Codex CLI 登录 | **实时** `/backend-api/codex/models` |
 | `kimi-code` | Kimi 会员 | Anthropic Messages | **设备码**（RFC 8628） | 实时 `/v1/models` + 本地兜底 |
 | `command-code` | Command Code | Anthropic / OpenAI 双轨 | 浏览器 OAuth 或粘贴 API Key | 实时 `/provider/v1/models` |
 | `workbuddy-subscription` | 腾讯 WorkBuddy / CodeBuddy | OpenAI 兼容（仅流式） | 扫描桌面端凭据或官方浏览器授权 | 实时 `/v3/config` |
@@ -49,6 +50,7 @@
 - 支持 token 刷新、登录取消与账号注销；
 - Windows 使用 CurrentUser DPAPI 加密存储 token；Linux 使用当前用户独占的 `0600` 文件存储；明文不发送给 Client；
 - 设置页会明确显示当前存储类型，并在 Linux 上提示文件存储未额外加密。
+- **本机已经登录过 Codex CLI 的用户可以不再走一次 OAuth**（详见「本机登录」）：「设置 → 订阅服务」总览页的**本机登录**区块列出本机各 AI 命令行工具的登录态与查过的路径，扫描**只看凭据文件是否存在、从不读取令牌**，且**每一行都要你显式点「导入登录」**之后才会读取。导入得到的是一份**快照**，**永不由本插件刷新**——ChatGPT 的 refresh token 会轮换，而 CLI 会在原地刷新自己的文件，两个进程各自刷新会互相作废，最后是你被本插件的好意踢出 Codex CLI，而进程内的单飞解决不了这个**跨进程**竞态。快照过期后请**回 Codex CLI 重新登录后再导入**；本插件**绝不写入或删除 Codex CLI 的任何文件**。
 
 ### 模型接入
 
@@ -362,6 +364,8 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。GPT-6 系列与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（Subagent 卡片授权的模型清单，以及 `agent-default-model` 的默认路由；该卡片 0.1.5 及以前在「设置」页，0.1.6 起在 **Plugins** 页）；最大嵌套深度由 DSH 侧决定（0.1.5 及以前取 preset 中 `tool-subagent` 的 `maxDepth`，默认 3；0.1.6 起取 `subagent` 服务的设置，默认 1）。
 
 **设置 → Codex 订阅 → 网络代理** 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。
+
+已经用官方 Codex CLI 登录过的用户可以跳过第 3 步的 OAuth：在 **设置 → 订阅服务** 总览页底部的 **本机登录** 区块里，Codex CLI 那一行点「导入登录」即可（见「本机登录」）。
 
 ### Command Code
 
@@ -735,6 +739,47 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 **SHA-256 指纹前缀**（`sha256:.../len:...`），**不是**令牌的任何一段原文——早前版本会打印前 6 个字符，
 那本身就是一次凭据泄露，因为同一个字符串会被渲染到设置卡片并写进 Host 日志（有测试锁定）。
 
+## 本机登录
+
+「设置 → 订阅服务」总览页底部有一块 **本机登录**。它回答的不是「某条线路怎么样」，而是关于这台机器的问题：**本机装着的 AI 命令行工具里，哪些登录态可以直接复用**。它放在总览页而不是某条线路的详情页里，是因为这个动作影响的不止一条线路——先打开某条线路才知道「本机已经登录过了」是一个没有意义的顺序。
+
+### 扫描只看文件在不在，从不读令牌
+
+三行的顺序固定，每一行都由一次 `stat` 回答，**没有任何一个文件被打开读取**：
+
+| 行 | 可导入 | 查过的路径 |
+| --- | --- | --- |
+| Codex CLI | 是，行内点「导入登录」 | `$CODEX_HOME/auth.json`，未设置该变量时为 `~/.codex/auth.json` |
+| Claude Code | 否 | `~/.claude/.credentials.json`（目录可用 `CLAUDE_CONFIG_DIR` 改，见「Claude（订阅）线路」） |
+| MiniMax Code | 否 | `~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json`，国区与国际区各一（见「MiniMax Code（编程订阅）线路」） |
+
+- **Claude Code 与 MiniMax Code 没有导入按钮**：这两条线路的设置页里本来就各有一个导入入口，同一个文件再放一个入口就多了一份需要跟另一份同步的东西。这两行只提供「在不在」与查过的路径，用来回答「我到底装了没有」，导入仍然到各自的设置页里做。
+- **Kimi Code 不在这块里**：本机 Kimi Code 的凭据文件**不带**本插件需要的区域、`oauthHost` 与 `baseUrl`，而插件**拒绝猜**这三个值，因此既不扫描也不显示——那一行若是显示成「未检测到」，看起来就像装个插件就能收编。
+
+理由不是谨慎，而是这一块的位置：它要渲染的是一份**邀请**（一个可以点的按钮），而此时你还没有同意任何事。一个会读文件的扫描器会让后面那个 opt-in 变成装饰，同时为一页只需要「有 / 没有」的信息在内存里握着三份订阅的令牌。所以这一块**不显示**任何账号、套餐、邮箱或到期时间：这些答案要导入之后才存在，导入前显示它们等于提前读取。
+
+因此**「已检测到」只表示那个文件在**，不表示它可用——判断可用必须读取文件，而那是 opt-in 之后的事。文件在却形状不认识时（不是 JSON、`auth_mode` 不是 `chatgpt`、`tokens` 不是对象、缺 access 或 refresh token、access token 不是一个带可用 `exp` 的 JWT），导入会明确报出「格式无法识别」而不是抛错或静默成功，也不会把默认值当成事实；邮箱与套餐则来自 id token 自己的声明，没有就不填。查过的路径**每行都写出来**，包括没找到的那一行——「你到底去哪儿找了」问的往往正是它。
+
+### 导入 Codex CLI 登录（可选）
+
+在 **本机登录 → Codex CLI** 点「导入登录」。三点与 Claude Code 的收编同源：
+
+- 导入的是**快照**，**本插件永不再刷新它**；
+- 快照过期后请**回 Codex CLI 重新登录、再导入一次**，本插件里没有这条登录路径；
+- 本插件**绝不写入、不创建、不移动、不删除** Codex CLI 的任何文件。
+
+前两条的理由值得写全，因为这是整个功能最容易被误解的地方：ChatGPT 的 refresh token 会轮换，而 CLI 会在**原地刷新自己的文件**。两个进程刷同一份授权会互相作废，输的一方握着服务端已经作废的令牌，结果是**你被本插件的好意踢出 Codex CLI**。进程内的单飞解决不了它——这是**跨进程**竞态，两个进程之间唯一共享的就是那个文件，而按上一条本插件不能写它。所以这份快照只在 CLI 自己还为它作保的期间可用，**过期是收编这件事的一部分，而不是一个待修的缺陷**。
+
+「绝不写入」是**结构性**的保证而不是承诺：`codex-adopt.ts` 只按名字从 `node:fs/promises` 导入 `readFile` 与 `stat`，加一次写操作必须先改这行 import，而 import 正是评审第一眼看的地方；测试还断言一次读取前后该凭据文件的**字节、大小与 mtime 完全不变**。
+
+### 导入之后
+
+- **只是号池里多一行**，不替换你当前的登录：已存储的登录态原样保留，两者在同一个池里参与调度；
+- **同一个账号导入两次会原地更新**，不会多出一个重复账号：号池的去重键是 `accountId ?? email`；
+- **导入的行与插件自持的登录语义不同**：它**永不被刷新**——`needsRefresh` 钩子对 adopted 凭据恒答否，刷新钩子本身也直接拒绝，两者都挡住是为了让将来漏掉前者的调用者大声失败而不是悄悄花掉一枚不属于本插件的授权；过期即**退出调度**且**不产生任何写入**，摘要标为**不可删除**，删除只能走显式的 `removeImportedAccount`（`POST /adopt/disable` 清掉插件这边记下的快照）。因此你在本插件里自己签入的账号不会被这个动作顺手清掉，而 CLI 自己的文件更不会被删除或改写；
+- **过期不是失败**：卡片与号池会说明这份快照已过期、该回 Codex CLI 里重新登录后再导入一次；这一行随之退出调度，而不是拿一枚作废的令牌去试一次请求。
+- **导入可以撤销，但撤销是「全部」而非「某一行」**：借来的凭据在账号池里被标为**不可删除**（这正是「过期不产生任何写入」与「插件自持的登录不会被顺手清掉」两条规则的代价），因此删除入口不在每一行上，而在 ChatGPT 标签页账号池卡片下方的一个按钮：**停止导入全部本机登录**。点它走 `POST /adopt/disable`，清掉插件这边记下的**所有**导入快照；你在本插件里自己签入的账号不在其中，**Codex CLI 自己的登录文件也不会被删除或改写**——这一步只是让本插件忘记它拷贝的那一份。按池级语义设计而不是行级，是因为该路由刻意不接受 `accountId`：一个摆在某一行上、却会连带清空邻居的按钮，比没有按钮更糟，所以按钮文案与提示里都写明「全部」，将来若改成逐行语义能被看见。
+
 ## 安全边界
 
 Antigravity 的 access token / refresh token 使用独立的系统凭据存储：Windows 使用 CurrentUser DPAPI（`$DSH_HOME/storages/antigravity-oauth.json.dpapi`），macOS 使用登录钥匙串，Linux 使用 Secret Service。macOS / Linux 的服务名为 `dsh-antigravity`，账号键按旧凭据文件的绝对路径生成，隔离不同的 `DSH_HOME`。
@@ -746,6 +791,8 @@ Antigravity 的 access token / refresh token 使用独立的系统凭据存储�
 **Claude 订阅的 access token / refresh token 同样只在 Host 内处理，从不进入浏览器**（`/claude/api` 的响应只含非机密事实，有测试锁定）。它保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/claude-credentials.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；号池另用一份同样加密的文件 `$DSH_HOME/storages/claude-pool.json`。凭据文档是**多账号**结构，账号身份由不可变的 `internalId` 与只增不换的别名集共同表达，**任何路由键都不是令牌或其摘要**（令牌会轮换，用它做键会产生幽灵账号）。每次写入都**先读回校验再落盘**，校验失败会抛错且不破坏既有数据。
 
 **收编（adopt）是只读的**：本插件从不创建、修改、移动或删除 Claude Code 的任何文件；它只读取。收编得到的快照**永不由本插件刷新**（原因见上文）。
+
+**Codex CLI 的导入（adopt）同样是只读的**：本插件从不创建、修改、移动或删除 Codex CLI 的任何文件。存在性与内容是两个函数——`GET /local-logins` 与 `/status` 里的那一位都由一次 `stat` 回答，**在你点击导入之前没有任何令牌被读取**，而这一块的响应也不含任何凭据字段。导入得到的快照**永不由本插件刷新**；过期后该行退出调度，且**不产生任何写入**（原因见「本机登录」）。
 
 macOS 钥匙串服务名为 `Claude Code-credentials`（**未核实**，本仓库不读取它：一份第三方指南与真实客户端对该名称说法不一致，因此它被明确列为非目标）。
 
@@ -772,7 +819,7 @@ Antigravity 的 Gemini 用量以流结束时的上游累计计数为准，缓存
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/status` | 查询账号、连接状态与额度 |
+| GET | `/status` | 查询账号、连接状态与额度；另带 `codexCliSignInAvailable`（本机是否有可导入的 Codex CLI 登录，**只 `stat` 不读取**） |
 | POST | `/login/start` | 开始 OAuth 登录 |
 | GET | `/login/events?loginId=...` | SSE 订阅登录进度 |
 | POST | `/login/cancel` | 取消登录任务 |
@@ -781,6 +828,9 @@ Antigravity 的 Gemini 用量以流结束时的上游累计计数为准，缓存
 | POST | `/quota/refresh` | 刷新额度 |
 | POST | `/connection/test` | 测试连接 |
 | POST | `/preferences/update` | 更新搜索来源和 composer 快捷用量偏好 |
+| GET | `/local-logins` | 扫描本机各 AI 命令行工具的登录态：**只判断凭据文件是否存在**，不读取令牌、不写任何文件（见「本机登录」） |
+| POST | `/adopt` | 导入本机登录（body `{source:'codex'}`），**只读**：快照作为一行加入 ChatGPT 号池，不触碰当前登录，也不触碰 Codex CLI 的文件 |
+| POST | `/adopt/disable` | 停止导入：清掉插件这边记录的导入快照；**不删除也不改写 Codex CLI 的文件** |
 
 状态响应只包含脱敏 email、套餐、账号 ID 后四位、token 到期时间和额度 DTO。
 
@@ -842,6 +892,7 @@ MiniMax、Kimi、Codex、Claude、Command Code、WorkBuddy 和 Antigravity 的�
 | 模型请求报持续 400 / 「You're out of extra usage」 | 可能是身份或版本门槛：订阅令牌要求 Claude Code 身份头与 `system` 首块，且服务端会校验你申报的客户端版本。此类错误被归类为**请求问题而非凭据问题**，不会把你登出 |
 | 额度显示为空 / 某项显示「—」 | 额度接口的键集随账号类型变化，未提供的窗口会显示为未知而**不会伪造 0**。注意 **`utilization` 是已用百分比，0% 表示尚未使用（正常态）**，不是额度耗尽；真正的耗尽会以 429 与响应头状态呈现。接口被限流时卡片保留上次成功快照并标注时间 |
 | 收编后提示「本机 Claude Code 登录已过期」 | 这是设计如此：收编的是**快照**，插件永不刷新它（Claude Code 刷新同一枚轮换令牌，两个进程各自刷新会互相作废）。回 Claude Code 重新登录后**再收编一次**即可 |
+| 导入后提示「从 Codex CLI 导入的登录已过期」 | 同样如此：导入的是**快照**，插件永不刷新它（ChatGPT 的 refresh token 会轮换，而 CLI 会原地刷新自己的文件，两个进程各自刷新会互相作废，最后是你被本插件踢出 Codex CLI）。回 **Codex CLI** 重新登录后**再导入一次**即可——本插件里没有这条登录路径 |
 | 账号被标为「无法识别账号身份」 | 服务端这个账号既没返回 uuid 也没返回 email，插件无法在再次登录时自动认出它。用卡片上的**手动合并**把它并入既有账号；这是已知限制，插件不会用假 id 掩盖它 |
 | 模型不出现在选择器里 | 依次检查：卡片是否显示「模型路由已被其他 Provider 占用」（另一适配器持有该 id 时本插件会如实报告冲突而非抛错）；以及模型是否已勾选 |
 | Kimi Code 发送视频却没有画面 | `k3-256k` 不支持视频，切到 `k3` 或 `kimi-for-coding`；容器须在白名单内（mp4/mpeg/mov/avi/x-flv/mpg/webm/wmv/3gpp）；若该模型走的是 Anthropic 线路，视频会降级为文字（该协议没有文档化的视频块）。以上情况模型都会收到明确的文字说明，据此向你说明而不是凭空回答 |

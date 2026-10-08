@@ -7,7 +7,9 @@ import { ROUTE_PREFIX } from '../compat.ts'
 import type {
   ApiEnvelope,
   FetchConfigurationDto,
+  LocalLoginScanDto,
   LoginEventDto,
+  PluginStatusDto,
   PublicErrorDto,
   SubagentRouteAuditDto,
   SubscriptionPreferencesUpdateDto,
@@ -21,11 +23,26 @@ import { PreferenceError, type SubscriptionPreferenceStore } from './preferences
 import type { ProxyManager } from './proxy-manager.ts'
 import type { SearchProviderSwitcher } from './search-provider-switcher.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
+import { CODEX_CLI_CREDENTIAL_SOURCE, codexCliCredentialPaths, codexCliCredentialPresence, readCodexCliCredentials } from './codex-adopt.ts'
+import { scanLocalLogins } from './local-logins.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
 /** Read-only audit provider the optional route serves. */
 export type RouteAuditReader = (sessionId: string) => Promise<SubagentRouteAuditDto>
+
+/**
+ * Test seam for the adopt routes: the paths the Codex reader consults.
+ *
+ * Present for the same reason the Claude line carries 'adoptPaths': the reader
+ * resolves its own path from CODEX_HOME, and a test must point it at a fixture
+ * rather than at the machine it is running on. Production callers take the default.
+ */
+export interface RouteAdoptOptions {
+  adoptPaths?: readonly string[]
+  /** Candidate paths the local-login scanner reports; defaults to each reader's own. */
+  localLoginPaths?: { codex?: readonly string[]; claude?: readonly string[]; minimax?: readonly string[] }
+}
 
 export function registerRoutes(
   ctx: Context,
@@ -37,7 +54,11 @@ export function registerRoutes(
   routeAudit?: RouteAuditReader,
   accountPool?: CodexAccountPool,
   fetchConfiguration?: FetchConfigurationDto,
+  adopt?: RouteAdoptOptions,
 ): () => void {
+  // Resolved once per registration rather than per request, so every request of
+  // this table looks at exactly the same candidates.
+  const adoptPaths = adopt?.adoptPaths
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://dsh.local')
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/status`) {
@@ -47,11 +68,19 @@ export function registerRoutes(
       // `quotaRefreshing` is what tells the client to ask again when that
       // refresh lands.
       const quota = await usage.status(oauthStatus.authenticated, false, { backgroundRefresh: true })
+      // A stat, never a read. The card has to offer the import BEFORE the user
+      // agrees to it, and a status request that opened the credential file "just
+      // in case" would make that agreement decorative — see 'codex-adopt.ts'
+      // Rule 2. A failure to establish existence answers false rather than taking
+      // the whole status call down over a missing file.
+      const codexCliSignInAvailable = await codexCliCredentialPresence(adoptPaths ?? codexCliCredentialPaths())
+        .catch(() => false)
       json(response, { ok: true, value: {
         ...oauthStatus,
         quota,
         quotaRefreshing: usage.refreshing,
         preferences: preferences.status(),
+        codexCliSignInAvailable,
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
         switcher: searchSwitcher?.status() ?? null,
@@ -77,6 +106,20 @@ export function registerRoutes(
           'route-audit-failed',
         ))
       }
+      return
+    }
+    if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/local-logins`) {
+      // The one read-only summary of every sign-in this plugin can reuse. It
+      // stats candidates and nothing else — no token is read, no file is opened
+      // for reading, and nothing is written — because the answer feeds an offer
+      // the user has not yet accepted. A failure in one provider's reader is that
+      // row reporting nothing rather than the whole scan failing.
+      const value: LocalLoginScanDto = await scanLocalLogins({
+        ...(adopt?.localLoginPaths?.codex === undefined ? {} : { codexPaths: adopt.localLoginPaths.codex }),
+        ...(adopt?.localLoginPaths?.claude === undefined ? {} : { claudePaths: adopt.localLoginPaths.claude }),
+        ...(adopt?.localLoginPaths?.minimax === undefined ? {} : { minimaxPaths: adopt.localLoginPaths.minimax }),
+      })
+      json(response, { ok: true, value })
       return
     }
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/mermaid.min.js`) {
@@ -112,6 +155,18 @@ export function registerRoutes(
       jsonError(response, 400, { code: 'bad-request', message: 'Malformed JSON request.' })
       return
     }
+    // The same refreshed status the /accounts action answers with, so a card
+    // that adopts an account and then re-renders does not need a second request
+    // to learn the result. Declared once and shared by every mutating case that
+    // returns a status rather than a bare acknowledgement.
+    const refreshedStatus = async (): Promise<PluginStatusDto> => {
+      const afterAction = await oauth.status()
+      return {
+        ...afterAction,
+        quota: await usage.status(afterAction.authenticated),
+        preferences: preferences.status(),
+      }
+    }
     try {
       switch (url.pathname) {
         case `${ROUTE_PREFIX}/login/start`:
@@ -145,12 +200,76 @@ export function registerRoutes(
             // signing into it again clears the failure marker.
             await accountPool.clearAuthFailed(accountId)
           }
-          const afterAction = await oauth.status()
-          json(response, { ok: true, value: {
-            ...afterAction,
-            quota: await usage.status(afterAction.authenticated),
-            preferences: preferences.status(),
-          } })
+          json(response, { ok: true, value: await refreshedStatus() })
+          return
+        }
+        case `${ROUTE_PREFIX}/adopt`: {
+          // The ONLY route that opens the local Codex CLI credential file; the
+          // status route asks whether one exists and never reads it. Keep it that
+          // way — see 'codex-adopt.ts' Rule 2.
+          if (accountPool === undefined) {
+            // Refused rather than written into the single-credential store, and
+            // the reason is a real limitation rather than caution: that store's
+            // own record has no adopted marker, so the line would treat a
+            // borrowed credential as its own and REFRESH it. That refresh is the
+            // cross-process race the whole adoption design exists to avoid, and it
+            // would leave the user signed out of the Codex CLI.
+            jsonError(response, 400, {
+              code: 'bad-request',
+              message: 'Importing a local Codex CLI sign-in needs the account pool, which is not installed.',
+            })
+            return
+          }
+          // The body names the source so one URL can serve every provider this
+          // line can import. An unknown one is a 400 with a sentence that points
+          // the user at the provider that DOES own it, rather than a silent no-op.
+          const adoptSource = field(body, 'source')
+          if (adoptSource !== 'codex') {
+            jsonError(response, 400, {
+              code: 'bad-request',
+              message: 'That local sign-in is not imported here. Claude Code and MiniMax Code are imported from their own provider settings.',
+            })
+            return
+          }
+          const adopted = await readCodexCliCredentials(adoptPaths ?? codexCliCredentialPaths())
+          if (adopted === undefined) {
+            // A value, never an exception: an absent file, an unreadable one, a
+            // half-written one and a document of an unrecognised shape all land
+            // here, and the card says so in the user's own terms.
+            jsonError(response, 400, {
+              code: 'bad-request',
+              message: 'No usable local Codex CLI sign-in was found (unrecognised local sign-in format).',
+            })
+            return
+          }
+          // The markers go onto the CREDENTIAL, because the pool's hooks receive
+          // the credential and never the account row. The pool then refuses to
+          // refresh it, refuses to delete it as though it owned it, and never
+          // mirrors it into the single-credential store this plugin keeps for its
+          // own sign-ins.
+          await accountPool.addAccount({
+            ...adopted.credentials,
+            adopted: true,
+            source: CODEX_CLI_CREDENTIAL_SOURCE,
+            sourcePath: adopted.sourcePath,
+          })
+          json(response, { ok: true, value: await refreshedStatus() })
+          return
+        }
+        case `${ROUTE_PREFIX}/adopt/disable`: {
+          if (accountPool === undefined) {
+            jsonError(response, 400, { code: 'bad-request', message: 'The ChatGPT account pool is not installed.' })
+            return
+          }
+          // Only rows this plugin borrowed are selected, so a managed sign-in can
+          // never be removed by the 'stop importing' action — it is a different
+          // account and it is the user's own.
+          const pooled = await accountPool.read().catch(() => null)
+          const imported = (pooled?.accounts ?? []).filter((account) => account.adopted === true)
+          for (const account of imported) await accountPool.removeImportedAccount(account.id)
+          // The Codex CLI's own file is NOT touched — not deleted, not rewritten,
+          // not moved. This only forgets the snapshot this plugin copied.
+          json(response, { ok: true, value: await refreshedStatus() })
           return
         }
         case `${ROUTE_PREFIX}/logout`:

@@ -678,6 +678,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       })
     }
 
+    // The route table owns the local-login scanner; it needs nothing beyond what
+    // registerRoutes already receives, so no new collaborator is threaded through
+    // this wiring just to produce a row of stats.
     const disposeRoutes = registerRoutes(
       ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool, fetchConfiguration)
 

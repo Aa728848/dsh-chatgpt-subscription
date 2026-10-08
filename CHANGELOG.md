@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **[Codex] 导入本机 Codex CLI 的登录（可选），并把「本机登录」做成一次统一的只读扫描**
+  - **重复登录是纯粹的摩擦**：已经在官方 CLI 登录过的用户，登录的正是这个 Provider 服务的那份订阅，却还要再走一次完整的 OAuth。新增 `GET /local-logins` 与 `POST /adopt`，让它点一次就少一整轮登录。
+  - **导入得到的是快照，本插件永不再刷新它**：ChatGPT 的 refresh token 会轮换，而 CLI 会在**原地刷新自己的文件**——两个进程刷同一份授权会互相作废，输的一方握着服务端已经作废的令牌，结果是用户**被本插件的好意踢出 Codex CLI**。进程内的单飞解决不了，因为竞态在**进程之间**：两个进程唯一共享的就是那个文件，而按只读规则本插件不能写它。因此快照只在 CLI 还为它作保时可用，**过期是收编这件事的一部分而不是缺陷**。
+  - **只读是结构性的，不是承诺**：`codex-adopt.ts` 只按名字从 `node:fs/promises` 导入 `readFile` 与 `stat`，加一次写操作必须先改这行 import（而 import 是评审第一眼看的地方）；测试断言一次读取前后凭据文件的**字节、大小与 mtime 完全不变**。
+  - **存在性与内容是两个函数**：`codexCliCredentialPresence()` 只 `stat`，开机即可跑；`readCodexCliCredentials()` 只在你点了导入之后才调用。合成一个「顺手先读一下以防万一」的启动路径，正是会把 opt-in 变成装饰的那种做法。
+  - **统一扫描只回答有 / 没有**：新的 `scanLocalLogins` 复用三条线路**各自的既有读取器**（Claude 的 presence 函数、MiniMax 的路径助手），不重写第二份「文件在哪」的答案——那份答案会漂移。MiniMax 的原文件是它自己原地续期的那一份，这里连打开都不打开。
+  - **「已检测到」不等于可用**：判断可用必须读取文件，那正是 opt-in 之后才做的事。未识别的形状（文件不存在、不是 JSON、`auth_mode` 不是 `chatgpt`、`tokens` 不是对象、缺 access/refresh token、access token 不是带可用 `exp` 的 JWT）一律给出 `undefined` 而不是异常，卡片报「格式无法识别」；邮箱与套餐来自 id token 自己的声明，没有就不填。`exp` 由秒换算成毫秒——错向时是静默的，而错向另一边会让一枚凭据看起来几个世纪都不过期。
+  - **不猜 Kimi Code**：本机 Kimi Code 的凭据文件没有区域 / `oauthHost` / `baseUrl`，插件宁可拒绝也不猜，因此该行不出现，而不是显示成一个「装上就能收编」的承诺。
+  - **卡片与号池共同钉住「只借 access token」**：`codexNeedsRefresh` 对 adopted 凭据**恒答否**，刷新钩子本身也直接拒绝（双重挡住是为了让将来漏掉前者的调用者大声失败，而不是悄悄花掉一枚不属于本插件的授权）；过期即退出调度且**不产生任何写入**，摘要标 `removable: false`，删除只能走显式的 `removeImportedAccount`。池文件往返保存该标记，于是重启后也不会把快照当成自持凭据。
+  - **导入只是多一行**：不触碰当前存储的登录态；去重键 `accountId ?? email` 让同一账号重复导入时**原地更新**而不是产生重复账号。
+  - 客户端只在总览页新增一块 **本机登录**：列出 Codex CLI / Claude Code / MiniMax Code 三行与各自查过的路径，**不显示**任何账号、套餐、邮箱或到期时间。Claude Code 与 MiniMax Code **没有导入按钮**——它们各自的设置页已有导入入口，同一个文件再放一个入口就是第二件要同步的事。
+  - **导入必须能撤销，而撤销的形状由路由决定**：`/adopt/disable` 刻意不接受 `accountId`（池对 adopted 行的删除拒绝是一条**安全**规则，逐条撤销的入口一旦能抵达自持登录就会打破它），于是撤销做成了 ChatGPT 账号池卡片下方的一个**池级**按钮「停止导入全部本机登录」，文案与提示都写明「全部」。导入行被标为 `removable: false`，共享卡片据此隐去 Delete；没有这个按钮时导入就是**单向门**，只能手改 pool 文件才能收回——一个只进不出的功能不算做完。
+  - 路由：`GET /local-logins`、`POST /adopt`（body `{source:'codex'}`，未知来源返回一句指向真正拥有它的供应商的话，而不是静默无操作）、`POST /adopt/disable`；`GET /status` 另带 `codexCliSignInAvailable`。
+  - 测试：新增 `test/codex-adopt.test.ts`（19 例）与 `test/hub-local-logins-ui.test.tsx`（12 例），并扩充 `test/codex-account-pool.test.ts`（27 例）与 `test/routes.test.ts`（12 例）。
+  - 验证：这四个测试文件本机 `vitest run` 共 **70 passed / 0 failed**；全量 `vitest run` 的通过数、`tsc -b --force` 与 `npm run build` 的结果由实现该功能的那次提交记录。本条为文档补充，未改动实现。
+
 ## 0.13.2 - 2026-10-08
 
 - **[Kimi Code] 读图请求按「实际发送体积」计量，超限时回收而非直接拒绝**

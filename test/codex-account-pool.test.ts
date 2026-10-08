@@ -1,11 +1,43 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL, OAUTH_TOKEN_URL } from '../src/compat.ts'
-import { CodexAccountPool, codexAccountQuota, parseCodexPoolData } from '../src/host/codex-account-pool.ts'
-import { OAuthService } from '../src/host/oauth-service.ts'
+import {
+  ADOPTED_NEVER_REFRESHED_MESSAGE,
+  CodexAccountPool,
+  CodexAdoptedCredentialError,
+  codexAccountQuota,
+  codexAuthRejectedReason,
+  codexNeedsRefresh,
+  isAdoptedCodexPoolCredential,
+  parseCodexPoolData,
+} from '../src/host/codex-account-pool.ts'
+import {
+  ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT,
+  CODEX_CLI_CREDENTIAL_SOURCE,
+} from '../src/host/codex-adopt.ts'
+import { OAuthService, OAuthServiceError } from '../src/host/oauth-service.ts'
 import { ResponsesClient } from '../src/host/responses-client.ts'
 import { MemoryTokenStore, type StoredOAuthCredentials } from '../src/host/token-store.ts'
 import { UsageService } from '../src/host/usage-service.ts'
+
+/** A credential the Codex CLI already holds, marked as a borrowed snapshot. */
+function adoptedCredential(
+  n: number,
+  expiresInMs = 3_600_000,
+  sourcePath = 'C:\\Users\\a\\.codex\\auth.json',
+): StoredOAuthCredentials {
+  return {
+    accessToken: `adopted-access-${n}`,
+    refreshToken: `adopted-refresh-${n}`,
+    expiresAt: Date.now() + expiresInMs,
+    accountId: `adopted-acct-${n}`,
+    email: `adopted${n}@example.com`,
+    planType: 'plus',
+    adopted: true,
+    source: CODEX_CLI_CREDENTIAL_SOURCE,
+    sourcePath,
+  }
+}
 
 /** Mirrors the platform backends: JSON on disk, and the parse hook on read. */
 class MemoryBackend {
@@ -165,6 +197,207 @@ describe('CodexAccountPool', () => {
       rotationStrategy: 'sticky',
     })
     expect(parseCodexPoolData({ accounts: [] }).rotationStrategy).toBe('sequential')
+  })
+})
+
+describe('an adopted snapshot is borrowed, never owned', () => {
+  it('never refreshes it, even with a token about to expire', async () => {
+    const { pool, refreshed } = harness()
+    // 10 seconds left: a managed credential this close to expiry is refreshed.
+    const adopted = await pool.addAccount(adoptedCredential(1, 10_000))
+
+    const { credentials } = await pool.getEffectiveAccount()
+
+    // The very token that was imported, untouched.
+    expect(credentials.accessToken).toBe('adopted-access-1')
+    expect(refreshed).toHaveLength(0)
+    // The predicate, asked directly, so the guarantee is not only observable
+    // through the pool: the refresh hook is never even offered the credential.
+    expect(codexNeedsRefresh(credentials, Date.now())).toBe(false)
+    // ...while a managed credential in the same shape IS due a refresh.
+    expect(codexNeedsRefresh(credential(9, 10_000), Date.now())).toBe(true)
+  })
+
+  it('refuses a forced refresh with its own error class, never a 401', async () => {
+    const { pool, refreshed } = harness()
+    const adopted = await pool.addAccount(adoptedCredential(1))
+    // The public "renew this account now" path a 401 recovery takes.
+    const attempt = pool.refreshAccountNow(adopted.id)
+
+    await expect(attempt).rejects.toBeInstanceOf(CodexAdoptedCredentialError)
+    await expect(attempt).rejects.not.toBeInstanceOf(OAuthServiceError)
+    expect(refreshed).toHaveLength(0)
+    // The stored credential is exactly what was imported.
+    expect((await pool.read()).accounts[0]!.credentials.accessToken).toBe('adopted-access-1')
+    expect(ADOPTED_NEVER_REFRESHED_MESSAGE).toContain('Codex CLI')
+  })
+
+  it('reports removable: false and names the file it was read from', async () => {
+    const { pool } = harness()
+    const sourcePath = 'C:\\Users\\a\\.codex\\auth.json'
+    await pool.addAccount(adoptedCredential(1, 3_600_000, sourcePath))
+    await pool.addAccount(credential(2))
+
+    const rows = await pool.listAccounts()
+    const imported = rows.find((row) => row.email === 'adopted1@example.com')!
+    const managed = rows.find((row) => row.email === 'user2@example.com')!
+
+    expect(imported).toMatchObject({ adopted: true, source: 'codex', removable: false, sourcePath })
+    // A managed row is unchanged by any of this: still deletable, still managed.
+    expect(managed).toMatchObject({ adopted: false, source: 'managed', removable: true })
+    expect(managed.sourcePath).toBeUndefined()
+  })
+
+  it('takes an expired snapshot out of rotation WITHOUT a write, and says where to re-sign in', async () => {
+    const { pool } = harness()
+    const save = vi.spyOn((pool as unknown as { backend: { save: (data: unknown) => Promise<void> } }).backend, 'save')
+    const managed = await pool.addAccount(credential(1))
+    // Already expired on arrival: the snapshot was imported, and the CLI's own
+    // token lapsed while it sat there.
+    await pool.addAccount({ ...adoptedCredential(2, -1_000) })
+    save.mockClear()
+
+    const rejected = (await pool.listAccounts()).find((row) => row.email === 'adopted2@example.com')!
+    expect(rejected).toMatchObject({ authStatus: 'expired', authFailedReason: ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT })
+    // The read that produced that verdict wrote nothing.
+    expect(save).not.toHaveBeenCalled()
+    // And the expired row is not the one that serves a request.
+    expect((await pool.getEffectiveAccount()).account.id).toBe(managed.id)
+    // The predicate is the seam, so the rule is testable without the pool too.
+    expect(codexAuthRejectedReason({ ...adoptedCredential(2, -1_000) })).toBe(ADOPTED_CODEX_CREDENTIAL_EXPIRED_HINT)
+    expect(codexAuthRejectedReason(adoptedCredential(2))).toBeUndefined()
+    // A managed credential is never refused by this hook; the core's own auth
+    // status is what takes one out of rotation.
+    expect(codexAuthRejectedReason(credential(1))).toBeUndefined()
+  })
+
+  it('survives a pool file round trip with its marker intact', async () => {
+    const backend = new MemoryBackend(parseCodexPoolData)
+    const mirror = new MemoryTokenStore()
+    const first = new CodexAccountPool({ store: mirror, backend: backend as never })
+    await first.addAccount(adoptedCredential(1))
+    await first.addAccount(credential(2))
+    const importId = (await first.read()).accounts.find((row) => row.adopted)!.id
+
+    // A second pool over the SAME stored document: this is a restart, and it is
+    // the case that matters, because a marker dropped by a write would come back
+    // looking plugin-owned and would then be refreshed.
+    const second = new CodexAccountPool({ store: mirror, backend: backend as never })
+    const restored = (await second.read()).accounts.find((row) => row.id === importId)!
+
+    expect(restored.adopted).toBe(true)
+    expect(restored.source).toBe(CODEX_CLI_CREDENTIAL_SOURCE)
+    expect(restored.credentials.adopted).toBe(true)
+    expect(restored.credentials.source).toBe(CODEX_CLI_CREDENTIAL_SOURCE)
+    expect(restored.sourcePath).toBe('C:\\Users\\a\\.codex\\auth.json')
+    expect(isAdoptedCodexPoolCredential(restored.credentials)).toBe(true)
+    // Still not refreshable after the restart.
+    expect(codexNeedsRefresh(restored.credentials, Date.now())).toBe(false)
+    expect((await second.listAccounts()).find((row) => row.id === importId)?.removable).toBe(false)
+  })
+
+  it('writes the explicit false so a re-authorization unfreezes the row', async () => {
+    const backend = new MemoryBackend(parseCodexPoolData)
+    const pool = new CodexAccountPool({ store: new MemoryTokenStore(), backend: backend as never })
+    const sourcePath = 'C:\\Users\\a\\.codex\\auth.json'
+    // The SAME account, imported and then signed in through this plugin. The
+    // dedupe key is the accountId, and the imported snapshot states the very id
+    // the managed sign-in does — which is the only thing that lets one row be
+    // recognized as the other without asking the user.
+    const imported = { ...adoptedCredential(1, 3_600_000, sourcePath), accountId: 'acct-1' }
+    await pool.addAccount(imported)
+    const reauthorized = await pool.addAccount({ ...credential(1, 3_600_000), accessToken: 'managed-access-1' })
+
+    // One row, not two, and it is plugin-owned again.
+    expect((await pool.read()).accounts).toHaveLength(1)
+    expect(reauthorized.adopted).toBe(false)
+    expect(reauthorized.source).toBe('managed')
+    expect(reauthorized.credentials.adopted).toBeUndefined()
+    expect(reauthorized.sourcePath).toBeUndefined()
+    // A managed credential is refreshable again, which is the whole point.
+    expect(codexNeedsRefresh(reauthorized.credentials, Date.now())).toBe(false)
+    expect((await pool.listAccounts())[0]).toMatchObject({ adopted: false, removable: true })
+    // ...and the marker is gone from disk too, not just in memory.
+    const reloaded = new CodexAccountPool({ store: new MemoryTokenStore(), backend: backend as never })
+    expect((await reloaded.read()).accounts[0]!.adopted).toBe(false)
+  })
+
+  it('refuses deleteAccount and removes through removeImportedAccount instead', async () => {
+    const { pool, mirror } = harness()
+    await pool.addAccount(credential(1))
+    const adopted = await pool.addAccount(adoptedCredential(2))
+
+    await expect(pool.deleteAccount(adopted.id)).rejects.toThrow(/not an account this plugin owns/)
+    // The refusal is loud AND total: the row is still there afterwards.
+    expect((await pool.read()).accounts).toHaveLength(2)
+
+    // The one action that means it: stop borrowing. The Codex CLI's file is
+    // neither read nor written by either path.
+    await pool.removeImportedAccount(adopted.id)
+
+    const remaining = (await pool.read()).accounts
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0]!.id).not.toBe(adopted.id)
+    // The managed sign-in and its mirror are untouched by the removal.
+    expect(remaining[0]!.credentials.accessToken).toBe('access-1')
+    expect((await mirror.load())?.accessToken).toBe('access-1')
+  })
+
+  it('refuses to remove a managed row through the import action', async () => {
+    const { pool } = harness()
+    const managed = await pool.addAccount(credential(1))
+    await expect(pool.removeImportedAccount(managed.id)).rejects.toThrow(/signed in through this plugin/)
+    expect((await pool.read()).accounts).toHaveLength(1)
+  })
+
+  it('never mirrors an adopted snapshot into the single-credential store', async () => {
+    const { pool, mirror } = harness()
+    await pool.addAccount(credential(1))
+    await pool.addAccount(adoptedCredential(2))
+
+    // The store holds the managed sign-in and nothing else: a snapshot is not
+    // this plugin's credential to keep, and writing it there would both overwrite
+    // the real sign-in and resurrect a borrowed credential on the next restart.
+    const stored = await mirror.load()
+    expect(stored?.accessToken).toBe('access-1')
+    expect(stored?.adopted).toBeUndefined()
+    // The snapshot still routes, which is the point of adopting it at all.
+    expect((await pool.getEffectiveAccount()).account.credentials.accessToken).toBe('access-1')
+  })
+
+  it('leaves every managed behaviour exactly as it was', async () => {
+    const { pool, mirror, refreshed } = harness()
+    const first = await pool.addAccount(credential(1))
+    const second = await pool.addAccount(credential(2))
+    await pool.setPrimary(first.id)
+
+    // Dedupe key, alias, primary flag, rotation, cooldown blocking, refresh and
+    // the mirror: none of this may have moved.
+    const again = await pool.addAccount({ ...credential(1), planType: 'pro' })
+    expect(again.id).toBe(first.id)
+    expect(again.isPrimary).toBe(true)
+    expect((await pool.listAccounts()).find((row) => row.id === first.id)?.planLabel).toBe('pro')
+
+    expect((await pool.getEffectiveAccount()).account.id).toBe(first.id)
+    await pool.markCooldown(first.id, 600_000, 'Codex 429')
+    expect((await pool.getEffectiveAccount()).account.id).toBe(second.id)
+    await pool.clearCooldown(first.id)
+    await pool.setStrategy('round-robin')
+    expect((await pool.strategy())).toBe('round-robin')
+    pool.setQuotaBlockedUntil((account, now) => (account.id === first.id ? now + 600_000 : undefined))
+    expect((await pool.getEffectiveAccount()).account.id).toBe(second.id)
+    pool.setQuotaBlockedUntil(() => undefined)
+
+    // A managed credential about to expire is still rotated through the refresher,
+    // and the rotated pair still reaches the mirror: the guard is narrow.
+    const { pool: fresh, mirror: freshMirror, refreshed: freshRefreshed } = harness()
+    const expiring = await fresh.addAccount(credential(3, 10_000))
+    const served = await fresh.getEffectiveAccount()
+    expect(served.account.id).toBe(expiring.id)
+    expect(served.credentials.accessToken).toBe('refreshed-access-3')
+    expect(freshRefreshed).toHaveLength(1)
+    expect((await freshMirror.load())?.accessToken).toBe('refreshed-access-3')
+    expect((await mirror.load())?.accountId).toBe('acct-1')
   })
 })
 

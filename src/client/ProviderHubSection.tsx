@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS } from './locales.ts'
 import { HubOverview } from './hub/HubOverview.tsx'
+import { LocalLoginsBlock } from './hub/LocalLoginsBlock.tsx'
 import { hubProviderDescriptor, HUB_PROVIDERS } from './hub/providers.tsx'
 import type { HubProviderId } from './hub/brand-icons.tsx'
 
@@ -54,10 +55,20 @@ const BACK_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" st
 export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): React.JSX.Element {
   const [view, setView] = useState<HubView>(readStoredView)
 
+  //
+  // Re-mounts the provider cards after a local sign-in is imported: the account
+  // that lands belongs to the ChatGPT line the card above is counting, and that
+  // card reads the host's overview once per mount.
+  const [overviewEpoch, setOverviewEpoch] = useState(0)
+
   const open = useCallback((id: HubProviderId): void => {
     const next: HubView = { view: 'detail', id }
     storeView(next)
     setView(next)
+  }, [])
+
+  const markImported = useCallback((): void => {
+    setOverviewEpoch((epoch) => epoch + 1)
   }, [])
 
   const back = useCallback((): void => {
@@ -71,7 +82,14 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
       <header>
         <h2 id="dsh-hub-title" className="dsh-codex-title">{t('hubTitle')}</h2>
       </header>
-      <HubOverview t={t} onOpen={open} />
+      {/* The cards are the page's job; the local sign-in block is an offer about
+          the machine rather than about any one line, so it sits BELOW them here
+          instead of inside a detail page, where reaching it would mean first
+          opening a provider to find out it has nothing to do with that
+          provider. It stays on the overview so the import is one click from
+          the page that lists the lines it can change. */}
+      <HubOverview key={overviewEpoch} t={t} onOpen={open} />
+      <LocalLoginsBlock t={t} onImported={markImported} />
     </section>
   }
 
