@@ -35,27 +35,6 @@ const CSS = `
 .dsh-hub-skeleton span{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border-radius:5px;display:block;height:12px}
 .dsh-hub-skeleton .dsh-hub-skel-name{width:120px;margin-bottom:6px}
 .dsh-hub-skeleton .dsh-hub-skel-note{width:180px;height:10px}
-/* The overview's local sign-in block: same hairline rows as the cards above it, so
-   a third provider does not read as a different page. */
-.dsh-hub-locals{border-top:0.5px solid var(--dsw-alias-border-l2,#eceadf);display:flex;flex-direction:column;gap:8px;margin-top:18px;padding-top:16px}
-.dsh-hub-locals-title{font-size:14px;font-weight:600;line-height:1.3;margin:0}
-.dsh-hub-locals-hint{color:var(--dsw-alias-label-secondary,#5d5c52);font-size:13px;line-height:1.55;margin:0 0 4px}
-.dsh-hub-local-row{align-items:flex-start;border-bottom:0.5px solid var(--dsw-alias-border-l2,#eceadf);display:flex;gap:14px;justify-content:space-between;padding:11px 6px}
-.dsh-hub-local-row:last-child{border-bottom:none}
-.dsh-hub-local-copy{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
-.dsh-hub-local-name{font-size:13px;font-weight:600;line-height:1.3}
-/* Absence is stated, never implied: a row the host could not find says so in the
-   same weight as the one it found. */
-.dsh-hub-local-state{color:var(--dsw-alias-label-danger,#d94b4b);font-size:12px;line-height:1.4}
-.dsh-hub-local-state[data-detected=true]{color:var(--dsw-alias-label-tertiary,#8f8d84)}
-.dsh-hub-local-note{color:var(--dsw-alias-label-tertiary,#8f8d84);font-size:12px;line-height:1.4}
-/* Windows credential paths are long and absolute, so they wrap instead of
-   pushing the row's button off the card. */
-.dsh-hub-local-paths{display:flex;flex-direction:column;gap:2px;margin-top:2px}
-.dsh-hub-local-path{color:var(--dsw-alias-label-caption,#a6a094);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
-.dsh-hub-local-skeleton{border-bottom:0.5px solid var(--dsw-alias-border-l2,#eceadf);display:flex;flex-direction:column;gap:7px;padding:13px 6px}
-.dsh-hub-local-skeleton i{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border-radius:5px;display:block;height:12px;width:140px}
-.dsh-hub-local-skeleton span{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border-radius:5px;display:block;height:10px;width:220px}
 .dsh-hub-backbar{align-items:center;display:flex;gap:10px;margin-bottom:14px;min-height:32px}
 .dsh-hub-back{align-items:center;background:transparent;border:none;border-radius:6px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;display:inline-flex;font:inherit;font-size:13px;font-weight:550;gap:2px;padding:5px 8px 5px 2px}
 .dsh-hub-back:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-primary,#141413)}

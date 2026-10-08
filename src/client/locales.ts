@@ -153,18 +153,15 @@ export const zh = {
   hubSwitchOn: '启用 {name}',
   hubSwitchOff: '停用 {name}',
   hubCardLabel: '{name}，{annotation}',
-  // The overview's local sign-in block: what this machine already has signed in.
-  localLoginsTitle: '本机登录',
-  localLoginsHint: '本机已安装的 AI 命令行工具里可以复用的登录状态。这里只判断凭据文件是否存在，不会读取任何令牌。',
-  localLoginDetected: '已检测到',
-  localLoginNotDetected: '未检测到',
-  localLoginImport: '导入登录',
-  localLoginImporting: '导入中…',
-  localLoginImportLabel: '导入 {name} 的本机登录',
-  localLoginSettingsOnly: '该供应商在自己的设置页里已有导入入口，请到那里导入。',
-  // The account pool's undo for the import the hub offers. The wording says "all"
-  // because the host's route clears every imported row at once: a label reading like
-  // a per-row action would promise something the pool forbids.
+  // The import button that sits beside 登录 in the account pool's login row.
+  // Two labels and nothing else: the button says what it does, the row it sits in
+  // says where it goes, and the Claude section's own import button is worded the
+  // same way because the two are the same decision.
+  localCodexLoginImport: '导入本机 Codex CLI 登录',
+  localCodexLoginImporting: '导入中…',
+  // The account pool's undo for the local sign-in imported just above it. The
+  // wording says "all" because the host's route clears every imported row at once:
+  // a label reading like a per-row action would promise something the pool forbids.
   stopImporting: '停止导入全部本机登录',
   stopImportingLabel: '停止导入全部本机登录（当前 {count} 个）',
   stopImportingBusy: '停止导入中…',
@@ -321,18 +318,15 @@ export const en: Record<keyof typeof zh, string> = {
   hubSwitchOn: 'Enable {name}',
   hubSwitchOff: 'Disable {name}',
   hubCardLabel: '{name}, {annotation}',
-  // The overview's local sign-in block: what this machine already has signed in.
-  localLoginsTitle: 'Local sign-ins',
-  localLoginsHint: 'Sign-ins from the AI command-line tools installed on this machine that this plugin can reuse. Only the presence of a credential file is checked; no token is read.',
-  localLoginDetected: 'Detected',
-  localLoginNotDetected: 'Not detected',
-  localLoginImport: 'Import sign-in',
-  localLoginImporting: 'Importing…',
-  localLoginImportLabel: 'Import the local {name} sign-in',
-  localLoginSettingsOnly: 'This provider already has its own import control in its settings; import it there.',
-  // The account pool's undo for the import the hub offers. The wording says "all"
-  // because the host's route clears every imported row at once: a label reading like
-  // a per-row action would promise something the pool forbids.
+  // The import button that sits beside 登录 in the account pool's login row.
+  // Two labels and nothing else: the button says what it does, the row it sits in
+  // says where it goes, and the Claude section's own import button is worded the
+  // same way because the two are the same decision.
+  localCodexLoginImport: 'Import the local Codex CLI sign-in',
+  localCodexLoginImporting: 'Importing…',
+  // The account pool's undo for the local sign-in imported just above it. The
+  // wording says "all" because the host's route clears every imported row at once:
+  // a label reading like a per-row action would promise something the pool forbids.
   stopImporting: 'Stop importing all local sign-ins',
   stopImportingLabel: 'Stop importing all local sign-ins ({count} currently imported)',
   stopImportingBusy: 'Stopping the import…',

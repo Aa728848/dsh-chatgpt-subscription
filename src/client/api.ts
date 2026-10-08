@@ -1,8 +1,6 @@
 import { ROUTE_PREFIX } from '../compat.ts'
 import type {
   ApiEnvelope,
-  LocalLoginScanDto,
-  LocalLoginSourceId,
   LoginEventDto,
   LoginStartDto,
   PluginStatusDto,
@@ -41,25 +39,15 @@ export class SubscriptionApi {
   }
 
   /**
-   * Every local sign-in this plugin could reuse, presence only.
+   * Import this machine's Codex CLI sign-in, answering with the refreshed status.
    *
-   * The scan stats candidate files and never opens one, so it can answer before
-   * the user has agreed to anything; nothing it carries is a credential, and
-   * whether a file that IS there holds something usable is answered by the adopt
-   * route instead, once the user has opted in.
+   * The body names the source rather than the URL carrying it, so the host can
+   * refuse a sign-in it does not import with a sentence instead of a silent
+   * no-op. The type is 'codex' alone on purpose: Claude Code and MiniMax Code are
+   * imported from their own provider settings, and a union here would invite a
+   * call the host always answers with a 400.
    */
-  localLogins(): Promise<LocalLoginScanDto> {
-    return request<LocalLoginScanDto>(`${ROUTE_PREFIX}/local-logins`)
-  }
-
-  /**
-   * Import one local sign-in, answering with the refreshed status.
-   *
-   * The body names the source rather than the URL carrying it, so one route can
-   * serve every provider this line can import and the host can refuse a source it
-   * does not own with a sentence instead of a silent no-op.
-   */
-  adoptLocalLogin(source: LocalLoginSourceId): Promise<PluginStatusDto> {
+  adoptLocalLogin(source: 'codex'): Promise<PluginStatusDto> {
     return post<PluginStatusDto>(`${ROUTE_PREFIX}/adopt`, { source })
   }
 

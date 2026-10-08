@@ -252,7 +252,8 @@ describe('host routes', () => {
 
 
 // ---------------------------------------------------------------------------
-// The adopt and local-login surface
+// The adopt surface: importing a local sign-in, undoing it, and the presence
+// flag the Codex card offers it from
 // ---------------------------------------------------------------------------
 
 /** Mirrors the platform backends: JSON on disk, and the parse hook on read. */
@@ -315,12 +316,10 @@ const minimalPreferences: SubscriptionPreferenceStore = {
   watch: () => () => undefined,
 }
 
-/** Register the route table over a pool and a set of fixture paths. */
+/** Register the route table over a pool and a fixture credential path. */
 async function adoptHarness(options: {
   authPath: string
-  claudePaths?: string[],
-  minimaxPaths?: string[],
-  withPool?: boolean,
+  withPool?: boolean
 }): Promise<{ origin: string; pool: CodexAccountPool; mirror: MemoryTokenStore; dispose: () => void }> {
   const backend = new MemoryBackend(parseCodexPoolData)
   const mirror = new MemoryTokenStore()
@@ -344,14 +343,7 @@ async function adoptHarness(options: {
   const disposeRoutes = registerRoutes(
     ctx as never, oauth, usage, minimalPreferences, undefined, undefined, undefined,
     options.withPool === false ? undefined : pool, undefined,
-    {
-      adoptPaths: [options.authPath],
-      localLoginPaths: {
-        codex: [options.authPath],
-        claude: options.claudePaths ?? [join('C:', 'absent', '.credentials.json')],
-        minimax: options.minimaxPaths ?? [join('C:', 'absent', 'auth.json')],
-      },
-    },
+    { adoptPaths: [options.authPath] },
   )
   const served = await serve(routes.find((route) => route.kind === 'prefix')!.handler)
   servers.push(served.server)
@@ -546,6 +538,9 @@ describe('adopting a local sign-in', () => {
     try {
       const present = await (await fetch(origin + ROUTE_PREFIX + '/status')).json()
       expect(present.value.codexCliSignInAvailable).toBe(true)
+      // The exact file that was stat'ed, so the card can answer "nothing was
+      // found — where did you look?" without asking a second question.
+      expect(present.value.codexCliSignInPath).toBe(authPath)
     } finally {
       dispose()
     }
@@ -558,6 +553,9 @@ describe('adopting a local sign-in', () => {
       // Presence is a stat: an absent file is false, not an error, and the whole
       // status call still answers.
       expect(status.value.codexCliSignInAvailable).toBe(false)
+      // And the path is reported for the absence too: an answer about a file
+      // without the file's name cannot be acted on.
+      expect(status.value.codexCliSignInPath).toBe(missing)
       expect(absent).toBeDefined()
     } finally {
       disposeAbsent()
@@ -565,58 +563,6 @@ describe('adopting a local sign-in', () => {
   })
 })
 
-describe('the local login scanner', () => {
-  it('reports every provider in a uniform shape, presence only', async () => {
-    const codexPath = await codexAuthFile(adoptableDocument())
-    const claudePath = join(await fixtureDir(), '.credentials.json')
-    const minimaxPath = join(await fixtureDir(), 'auth.json')
-    await writeFile(claudePath, JSON.stringify({ claudeAiOauth: {} }), 'utf8')
-    await writeFile(minimaxPath, JSON.stringify({ records: {} }), 'utf8')
-
-    const { origin, dispose } = await adoptHarness({
-      authPath: codexPath, claudePaths: [claudePath], minimaxPaths: [minimaxPath],
-    })
-    try {
-      const response = await fetch(origin + ROUTE_PREFIX + '/local-logins')
-      expect(response.status).toBe(200)
-      // The same envelope every route here uses.
-      const { sources } = (await response.json()).value as { sources: Array<Record<string, unknown>> }
-
-      expect(sources.map((source) => source.id)).toEqual(['codex', 'claude-code', 'minimax-code'])
-      expect(sources.every((source) => source.detected === true)).toBe(true)
-      // One row, one rule: the Codex row is importable here; the other two
-      // providers already own their own control, so the honest answer is to point
-      // the user at it rather than invent a second import path.
-      expect(sources[0]).toMatchObject({ id: 'codex', importMode: 'adopt', providerLabel: 'Codex CLI' })
-      expect(sources[1]).toMatchObject({ id: 'claude-code', importMode: 'settings-only', providerLabel: 'Claude Code' })
-      expect(sources[2]).toMatchObject({ id: 'minimax-code', importMode: 'settings-only', providerLabel: 'MiniMax Code' })
-      // Every row names the exact candidates it stat'ed, in priority order.
-      expect(sources[0]!.paths).toEqual([codexPath])
-      expect(sources[1]!.paths).toEqual([claudePath])
-      expect(sources[2]!.paths).toEqual([minimaxPath])
-      // No token value is in the answer, which is what 'presence only' means.
-      const text = JSON.stringify(sources)
-      expect(text).not.toContain('codex-refresh-token')
-    } finally {
-      dispose()
-    }
-  })
-
-  it('reports an absent sign-in as detected: false rather than failing', async () => {
-    const missingCodex = join(await fixtureDir(), 'absent.json')
-    const { origin, dispose } = await adoptHarness({ authPath: missingCodex })
-    try {
-      const envelope = (await (await fetch(origin + ROUTE_PREFIX + '/local-logins')).json()) as { value: { sources: Array<{ id: string; detected: boolean; paths: string[] }> } }
-      const { sources } = envelope.value
-      expect(sources.every((source) => source.detected === false)).toBe(true)
-      // The path is still reported, so 'not found' is distinguishable from
-      // 'your client stores it somewhere else'.
-      expect(sources[0]!.paths).toEqual([missingCodex])
-    } finally {
-      dispose()
-    }
-  })
-})
 async function serve(handler: http.RequestListener): Promise<{ server: http.Server; origin: string }> {
   const server = http.createServer(handler)
   await new Promise<void>((resolve, reject) => {

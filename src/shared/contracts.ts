@@ -64,6 +64,19 @@ export interface PluginStatusDto {
    * route itself, after opt-in.
    */
   codexCliSignInAvailable?: boolean
+  /**
+   * The exact file that was consulted to answer `codexCliSignInAvailable`.
+   *
+   * Presence alone cannot answer "why was nothing found?", so the path travels
+   * with the flag. It is a location, never a credential: `codex-adopt.ts`
+   * resolves it from CODEX_HOME and the flag is a stat of that one file, so
+   * printing it says where the plugin looked without opening anything.
+   *
+   * One path rather than a list, because this reader defines exactly one
+   * candidate — a list here would imply a precedence this provider does not
+   * have. A host that does not consult the file simply omits the field.
+   */
+  codexCliSignInPath?: string
   detectedProxy?: string | null
   activeProxy?: string | null
   error?: PublicErrorDto
@@ -200,32 +213,6 @@ export interface SubagentRouteAuditDto {
   /** Exact authorized routes the audit compared against. */
   allowedModels: { provider: string; model: string }[]
   violations: SubagentRouteViolationDto[]
-}
-
-/**
- * A local sign-in this plugin knows how to adopt.
- *
- * Presence only, for every id: the scanner stats candidates and reads no token, so
- * a user who never opts in never has a credential's contents touched. Whether the
- * file holds something USABLE is not answered here and must not be inferred from
- * 'detected' — that is what the adopt route is for.
- */
-export type LocalLoginSourceId = 'codex' | 'claude-code' | 'minimax-code'
-
-export interface LocalLoginSourceDto {
-  id: LocalLoginSourceId
-  /** True when a usable local sign-in was found. Presence only; no token was read. */
-  detected: boolean
-  /** Candidate paths consulted, in priority order. */
-  paths: string[]
-  /** 'adopt' = this plugin can import it in one click; 'settings-only' = the provider already owns its own control. */
-  importMode: 'adopt' | 'settings-only'
-  /** Human-facing provider name. Keep it a plain name; the client owns all translated copy. */
-  providerLabel: string
-}
-
-export interface LocalLoginScanDto {
-  sources: LocalLoginSourceDto[]
 }
 
 export interface PublicErrorDto {

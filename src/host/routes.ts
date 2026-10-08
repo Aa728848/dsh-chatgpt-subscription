@@ -7,7 +7,6 @@ import { ROUTE_PREFIX } from '../compat.ts'
 import type {
   ApiEnvelope,
   FetchConfigurationDto,
-  LocalLoginScanDto,
   LoginEventDto,
   PluginStatusDto,
   PublicErrorDto,
@@ -24,7 +23,6 @@ import type { ProxyManager } from './proxy-manager.ts'
 import type { SearchProviderSwitcher } from './search-provider-switcher.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
 import { CODEX_CLI_CREDENTIAL_SOURCE, codexCliCredentialPaths, codexCliCredentialPresence, readCodexCliCredentials } from './codex-adopt.ts'
-import { scanLocalLogins } from './local-logins.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -40,8 +38,6 @@ export type RouteAuditReader = (sessionId: string) => Promise<SubagentRouteAudit
  */
 export interface RouteAdoptOptions {
   adoptPaths?: readonly string[]
-  /** Candidate paths the local-login scanner reports; defaults to each reader's own. */
-  localLoginPaths?: { codex?: readonly string[]; claude?: readonly string[]; minimax?: readonly string[] }
 }
 
 export function registerRoutes(
@@ -73,14 +69,21 @@ export function registerRoutes(
       // in case" would make that agreement decorative — see 'codex-adopt.ts'
       // Rule 2. A failure to establish existence answers false rather than taking
       // the whole status call down over a missing file.
-      const codexCliSignInAvailable = await codexCliCredentialPresence(adoptPaths ?? codexCliCredentialPaths())
+      const codexCliPaths = adoptPaths ?? codexCliCredentialPaths()
+      const codexCliSignInAvailable = await codexCliCredentialPresence(codexCliPaths)
         .catch(() => false)
+      // The file the flag above is about. One candidate, so the first entry IS
+      // the whole candidate list; it travels so a client can answer "nothing was
+      // found — where did you look?" without a second request. A location, never
+      // a credential: the presence check is a stat and this prints that same path.
+      const codexCliSignInPath = codexCliPaths[0]
       json(response, { ok: true, value: {
         ...oauthStatus,
         quota,
         quotaRefreshing: usage.refreshing,
         preferences: preferences.status(),
         codexCliSignInAvailable,
+        codexCliSignInPath,
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
         switcher: searchSwitcher?.status() ?? null,
@@ -106,20 +109,6 @@ export function registerRoutes(
           'route-audit-failed',
         ))
       }
-      return
-    }
-    if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/local-logins`) {
-      // The one read-only summary of every sign-in this plugin can reuse. It
-      // stats candidates and nothing else — no token is read, no file is opened
-      // for reading, and nothing is written — because the answer feeds an offer
-      // the user has not yet accepted. A failure in one provider's reader is that
-      // row reporting nothing rather than the whole scan failing.
-      const value: LocalLoginScanDto = await scanLocalLogins({
-        ...(adopt?.localLoginPaths?.codex === undefined ? {} : { codexPaths: adopt.localLoginPaths.codex }),
-        ...(adopt?.localLoginPaths?.claude === undefined ? {} : { claudePaths: adopt.localLoginPaths.claude }),
-        ...(adopt?.localLoginPaths?.minimax === undefined ? {} : { minimaxPaths: adopt.localLoginPaths.minimax }),
-      })
-      json(response, { ok: true, value })
       return
     }
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/mermaid.min.js`) {

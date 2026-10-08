@@ -140,15 +140,6 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
           </>
         )}
       >
-        <p className="dsha-muted" style={{ paddingTop: 12 }}>{t.importHint}</p>
-        <p className="dsha-muted">
-          {status?.claudeCodeSignInAvailable === true ? t.importClaudeCode : t.importUnavailable}
-        </p>
-        {status?.claudeCodePaths !== undefined && status.claudeCodePaths.length > 0 && (
-          <p className="dsha-muted dshcl-mono">
-            {t.importSearched.replace('{paths}', status.claudeCodePaths.join(' · '))}
-          </p>
-        )}
         {hasAdopted && (
           <div className="dsha-actions">
             <button

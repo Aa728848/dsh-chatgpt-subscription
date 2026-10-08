@@ -54,9 +54,11 @@ export const zh = {
   importClaudeCode: '导入本机 Claude Code 登录态',
   importing: '导入中...',
   stopImporting: '停止导入',
-  importHint: '读取本机 Claude Code 的登录凭据，作为只读快照加入账号池。不会修改、移动或删除 Claude Code 自己的文件，停止导入只是让本插件忘记这份快照。',
-  importUnavailable: '未找到可导入的本机 Claude Code 登录态。',
-  importSearched: '查找位置：{paths}',
+  // Only the button's own labels live here now. The prose that used to sit under
+  // the pool — what the import does, whether one was found, where it looked — was
+  // removed: the button already names the action, and a click with no sign-in
+  // present returns the host's own sentence in the card's error strip, so the
+  // three paragraphs described a state the control itself already reports.
 
   // --- Connection ---
   connection: '连接',
@@ -188,9 +190,11 @@ export const en: Record<keyof typeof zh, string> = {
   importClaudeCode: 'Import the local Claude Code sign-in',
   importing: 'Importing...',
   stopImporting: 'Stop importing',
-  importHint: 'Reads the local Claude Code credential and adds it to the account pool as a read-only snapshot. Claude Code\'s own file is never modified, moved or deleted; stopping the import only makes this plugin forget the snapshot.',
-  importUnavailable: 'No usable local Claude Code sign-in was found.',
-  importSearched: 'Searched: {paths}',
+  // Only the button's own labels live here now. The prose that used to sit under
+  // the pool — what the import does, whether one was found, where it looked — was
+  // removed: the button already names the action, and a click with no sign-in
+  // present returns the host's own sentence in the card's error strip, so the
+  // three paragraphs described a state the control itself already reports.
 
   connection: 'Connection',
   testConnection: 'Test connection',

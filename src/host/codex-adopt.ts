@@ -255,7 +255,7 @@ async function existsAsFile(candidate: string): Promise<boolean> {
  *
  * A boolean, rather than the record the Claude reader returns, because the two
  * callers want different things and neither needs the other's shape: the status
- * route wants a flag, and the local-login scanner prints its own path list. paths
+ * route wants a flag, and reports the path it consulted beside it. paths
  * is injectable so tests drive it against fixtures instead of a real profile;
  * production callers take the default.
  */

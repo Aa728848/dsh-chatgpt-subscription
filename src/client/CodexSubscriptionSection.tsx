@@ -14,7 +14,7 @@ import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
 type BusyAction = 'login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences'
-  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt-disable' | null
+  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt' | 'adopt-disable' | null
 type Translate = Props['t']
 
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
@@ -252,7 +252,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   }
 
   /**
-   * Forget every imported snapshot: the undo for the hub block's import button.
+   * Forget every imported snapshot: the undo for the local sign-in import below.
    *
    * ONE control for the whole pool rather than one per row, because the host's
    * route deliberately ignores an accountId and clears every imported row at once.
@@ -265,6 +265,23 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const stopImporting = async (): Promise<void> => {
     await run('adopt-disable', async () => {
       setStatus(await apiRef.current.disableAdoptedLocalLogins())
+    })
+  }
+
+  /**
+   * Copy this machine's Codex CLI sign-in into the pool as a snapshot.
+   *
+   * The status is re-read rather than taken from the route's answer: the route
+   * answers with the pool's refreshed status, which knows nothing about the
+   * CLI file, so adopting from its value would flip the block to "not detected"
+   * one click after the import succeeded. The file is still there — the import
+   * copies it — so /status is the answer that tells the truth, and the row the
+   * account just created comes back with it.
+   */
+  const importLocalSignIn = async (): Promise<void> => {
+    await run('adopt', async () => {
+      await apiRef.current.adoptLocalLogin('codex')
+      await load(true)
     })
   }
 
@@ -355,6 +372,43 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         onRelogin={(accountId) => relogin(accountId)}
         onSetStrategy={(strategy) => void setRotationStrategy(strategy)}
         showQuota
+        renderLoginActions={() => (
+          // The pool card's own login row, in the shape the Claude section uses:
+          // the sign-in keeps the primary treatment, and a sign-in that already
+          // exists on this machine sits beside it as the alternative way in.
+          //
+          // The first button REPRODUCES the shared card's default login button
+          // (same classes, same label, same disable rule), because taking the row
+          // over means reproducing it — nothing about signing in changes here.
+          <div className="dsha-account-add-actions">
+            <button
+              className="dsha-btn dsha-btn-primary"
+              disabled={busy !== null}
+              onClick={() => void startLogin()}
+            >
+              {login?.active ? t('pending') : t('addAccount')}
+            </button>
+            {/* The second entry: a local Codex CLI sign-in can be imported instead
+                of running a fresh ChatGPT OAuth flow.
+
+                ALWAYS RENDERED, exactly as the Claude section renders its own —
+                including when the host found no sign-in, which is the decision
+                stated here rather than left to drift: a button that DISAPPEARS
+                when there is nothing to import cannot answer whether one exists,
+                and "is my CLI signed in here?" is the question this row is here to
+                answer. Clicking it with nothing there is not a dead end and needs
+                no substitute prose: the host refuses in a sentence, and that
+                sentence lands in the card's existing error strip. */}
+            <button
+              className="dsha-btn"
+              disabled={busy !== null}
+              aria-label={t('localCodexLoginImport')}
+              onClick={() => void importLocalSignIn()}
+            >
+              {busy === 'adopt' ? t('localCodexLoginImporting') : t('localCodexLoginImport')}
+            </button>
+          </div>
+        )}
         renderDetails={(entry) => (
           <>
             {entry.planLabel && <span>{t('plan')}: {entry.planLabel}</span>}
@@ -369,9 +423,9 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           {status?.authenticated ? <Button disabled={busy !== null} onClick={refreshToken}>{t('refreshToken')}</Button> : null}
         </div>
         {/* The imported rows have no Delete (the shared card hides it for a
-            borrowed credential), so without this the hub block's import button
-            would be a one-way door. Rendered once, below the list, and its label
-            says "all": the route it calls forgets every snapshot at once. */}
+            borrowed credential), so without the import button above this would be
+            a one-way door. Rendered once, below the list, and its label says "all":
+            the route it calls forgets every snapshot at once. */}
         {importedAccounts.length > 0 ? (
           <>
             <p className="dsha-muted">{formatPoolLabel(t('stopImportingHint'), { count: importedAccounts.length })}</p>

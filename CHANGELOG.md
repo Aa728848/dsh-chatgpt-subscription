@@ -2,21 +2,22 @@
 
 ## Unreleased
 
-- **[Codex] 导入本机 Codex CLI 的登录（可选），并把「本机登录」做成一次统一的只读扫描**
-  - **重复登录是纯粹的摩擦**：已经在官方 CLI 登录过的用户，登录的正是这个 Provider 服务的那份订阅，却还要再走一次完整的 OAuth。新增 `GET /local-logins` 与 `POST /adopt`，让它点一次就少一整轮登录。
+- **[Codex] 在 ChatGPT 卡片里导入本机 Codex CLI 的登录（可选）**
+  - **重复登录是纯粹的摩擦**：已经在官方 CLI 登录过的用户，登录的正是这个 Provider 服务的那份订阅，却还要再走一次完整的 OAuth。新增 `POST /adopt`，让它点一次就少一整轮登录。
   - **导入得到的是快照，本插件永不再刷新它**：ChatGPT 的 refresh token 会轮换，而 CLI 会在**原地刷新自己的文件**——两个进程刷同一份授权会互相作废，输的一方握着服务端已经作废的令牌，结果是用户**被本插件的好意踢出 Codex CLI**。进程内的单飞解决不了，因为竞态在**进程之间**：两个进程唯一共享的就是那个文件，而按只读规则本插件不能写它。因此快照只在 CLI 还为它作保时可用，**过期是收编这件事的一部分而不是缺陷**。
   - **只读是结构性的，不是承诺**：`codex-adopt.ts` 只按名字从 `node:fs/promises` 导入 `readFile` 与 `stat`，加一次写操作必须先改这行 import（而 import 是评审第一眼看的地方）；测试断言一次读取前后凭据文件的**字节、大小与 mtime 完全不变**。
   - **存在性与内容是两个函数**：`codexCliCredentialPresence()` 只 `stat`，开机即可跑；`readCodexCliCredentials()` 只在你点了导入之后才调用。合成一个「顺手先读一下以防万一」的启动路径，正是会把 opt-in 变成装饰的那种做法。
-  - **统一扫描只回答有 / 没有**：新的 `scanLocalLogins` 复用三条线路**各自的既有读取器**（Claude 的 presence 函数、MiniMax 的路径助手），不重写第二份「文件在哪」的答案——那份答案会漂移。MiniMax 的原文件是它自己原地续期的那一份，这里连打开都不打开。
+  - **每条线路只在自己的页面里回答自己的问题**：一开始把这三处做成了总览页上一次跨线路的统一只读扫描（一条统一扫描路由加一个扫描模块），结果那一块替 Claude Code 与 MiniMax Code 回答了它们自己已经回答过的问题，只能挂一句「该供应商在自己的设置页里已有导入入口，请到那里导入」——而用户就在离那一页一步之遥的地方。现在没有跨线路扫描了：Codex CLI 的答案由 `GET /status` 上的 `codexCliSignInAvailable` 给出，Claude 与 MiniMax 继续用各自的既有读取器与各自的导入入口。**「文件在哪」只有一份答案，因为只有各自的读取器拥有它。**
+  - **宿主顺带报出它 stat 过的那个路径**：`GET /status` 多带一个 `codexCliSignInPath`（`codexCliCredentialPaths()` 的唯一候选，纯函数、不碰文件系统），有了它「没找到」才可追问「你到底找哪儿了」。**卡片本身不显示它**——卡片上除了按钮不加文字，本条只保证答案在接口上随时可取。
   - **「已检测到」不等于可用**：判断可用必须读取文件，那正是 opt-in 之后才做的事。未识别的形状（文件不存在、不是 JSON、`auth_mode` 不是 `chatgpt`、`tokens` 不是对象、缺 access/refresh token、access token 不是带可用 `exp` 的 JWT）一律给出 `undefined` 而不是异常，卡片报「格式无法识别」；邮箱与套餐来自 id token 自己的声明，没有就不填。`exp` 由秒换算成毫秒——错向时是静默的，而错向另一边会让一枚凭据看起来几个世纪都不过期。
   - **不猜 Kimi Code**：本机 Kimi Code 的凭据文件没有区域 / `oauthHost` / `baseUrl`，插件宁可拒绝也不猜，因此该行不出现，而不是显示成一个「装上就能收编」的承诺。
   - **卡片与号池共同钉住「只借 access token」**：`codexNeedsRefresh` 对 adopted 凭据**恒答否**，刷新钩子本身也直接拒绝（双重挡住是为了让将来漏掉前者的调用者大声失败，而不是悄悄花掉一枚不属于本插件的授权）；过期即退出调度且**不产生任何写入**，摘要标 `removable: false`，删除只能走显式的 `removeImportedAccount`。池文件往返保存该标记，于是重启后也不会把快照当成自持凭据。
   - **导入只是多一行**：不触碰当前存储的登录态；去重键 `accountId ?? email` 让同一账号重复导入时**原地更新**而不是产生重复账号。
-  - 客户端只在总览页新增一块 **本机登录**：列出 Codex CLI / Claude Code / MiniMax Code 三行与各自查过的路径，**不显示**任何账号、套餐、邮箱或到期时间。Claude Code 与 MiniMax Code **没有导入按钮**——它们各自的设置页已有导入入口，同一个文件再放一个入口就是第二件要同步的事。
+  - 客户端只多一个按钮，且只在 **ChatGPT 卡片**里：账号池卡片头部那行「登录」**旁边**的「导入本机 Codex CLI 登录」，用共享卡片的 `renderLoginActions` 插槽，和 Claude 页面那个收编按钮同一套布局——登录保留主按钮样式，导入是次要的那个。这个按钮**不受检测结果影响，永远都在**：一个会自己消失的按钮回答不了「我本机到底登录了没有」，而没有登录时点它也并非无声无息，宿主会回一句明说缘由的错误，并显示在该卡片已有的错误条里。**卡片上不添加任何说明文字**：按钮已经说明了自己的动作，而「有没有」「找到了吗」「去哪儿找的」三段散文正是用户要求移除的「无关文字」（Claude 页面上同样的三段一并移除）。
   - **导入必须能撤销，而撤销的形状由路由决定**：`/adopt/disable` 刻意不接受 `accountId`（池对 adopted 行的删除拒绝是一条**安全**规则，逐条撤销的入口一旦能抵达自持登录就会打破它），于是撤销做成了 ChatGPT 账号池卡片下方的一个**池级**按钮「停止导入全部本机登录」，文案与提示都写明「全部」。导入行被标为 `removable: false`，共享卡片据此隐去 Delete；没有这个按钮时导入就是**单向门**，只能手改 pool 文件才能收回——一个只进不出的功能不算做完。
-  - 路由：`GET /local-logins`、`POST /adopt`（body `{source:'codex'}`，未知来源返回一句指向真正拥有它的供应商的话，而不是静默无操作）、`POST /adopt/disable`；`GET /status` 另带 `codexCliSignInAvailable`。
-  - 测试：新增 `test/codex-adopt.test.ts`（19 例）与 `test/hub-local-logins-ui.test.tsx`（12 例），并扩充 `test/codex-account-pool.test.ts`（27 例）与 `test/routes.test.ts`（12 例）。
-  - 验证：这四个测试文件本机 `vitest run` 共 **70 passed / 0 failed**；全量 `vitest run` 的通过数、`tsc -b --force` 与 `npm run build` 的结果由实现该功能的那次提交记录。本条为文档补充，未改动实现。
+  - 路由：`POST /adopt`（body `{source:'codex'}`，未知来源返回一句指向真正拥有它的供应商的话，而不是静默无操作）、`POST /adopt/disable`；`GET /status` 另带 `codexCliSignInAvailable` 与 `codexCliSignInPath`。
+  - 测试：新增 `test/codex-adopt.test.ts`（19 例）与 `test/codex-local-signin-ui.test.tsx`（6 例），并扩充 `test/codex-account-pool.test.ts`（27 例）与 `test/routes.test.ts`（10 例）。
+  - 验证：`npm run typecheck` 与 `npm run build` 均 0 错误；`test/client-registration.test.ts` **16 passed / 0 failed**、`test/codex-import-undo-ui.test.tsx` 6、`test/codex-local-signin-ui.test.tsx` 6、`test/routes.test.ts` 10、`test/codex-account-pool.test.ts` 27、`test/codex-adopt.test.ts` 19 全通过；全量 `npm test` **2823 passed / 11 failed / 7 skipped**，11 个失败全部是 `test/claude-oauth.test.ts` 的 `No bindable loopback port in the probe range.`，在**未改动的工作树上同样复现**，与本功能无关。
 
 ## 0.13.2 - 2026-10-08
 

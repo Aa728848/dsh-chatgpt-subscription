@@ -678,9 +678,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       })
     }
 
-    // The route table owns the local-login scanner; it needs nothing beyond what
-    // registerRoutes already receives, so no new collaborator is threaded through
-    // this wiring just to produce a row of stats.
+    // Each provider's own "is there a local sign-in to reuse?" answer is its
+    // own reader's business: the ChatGPT line stats the Codex CLI credential on
+    // its own /status, and the Claude line answers the same question on its own
+    // route. Nothing aggregates them here, so no collaborator is threaded through
+    // this wiring just to produce a row of stats about someone else's file.
     const disposeRoutes = registerRoutes(
       ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool, fetchConfiguration)
 
