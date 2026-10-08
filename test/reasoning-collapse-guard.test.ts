@@ -7,8 +7,11 @@ import {
   RESUME_HINT,
   RESUME_HINT_STRICT,
   collapseScore,
+  distinctSentenceRatio,
   installReasoningCollapseGuard,
   resolveGuardOptions,
+  semanticRecurrence,
+  splitSentences,
   type GuardAgentEventListener,
   type GuardAgentLike,
   type GuardChunk,
@@ -47,6 +50,7 @@ const HEALTHY_LONG = fixture('healthy-long-reasoning.txt')
 const HEALTHY_PROSE = fixture('healthy-prose-reasoning.txt')
 const HEALTHY_ENUMERATIVE = fixture('healthy-enumerative-reasoning.txt')
 const SHORT_REPETITIVE = fixture('short-repetitive-reasoning.txt')
+const PARAPHRASED_LOOP = fixture('paraphrased-loop-reasoning.txt')
 
 interface RecordingAgent extends GuardAgentLike {
   readonly id: string
@@ -232,6 +236,105 @@ describe('collapseScore', () => {
   })
 })
 
+describe('splitSentences', () => {
+  it('breaks on Chinese terminators with nothing after them', () => {
+    expect(splitSentences('第一句。第二句！第三句？')).toEqual(['第一句。', '第二句！', '第三句？'])
+  })
+
+  it('breaks Latin sentences only on whitespace, so decimals and file names survive', () => {
+    expect(splitSentences('Look at selectors.test.ts:745 and the value 3.14 here.')).toEqual([
+      'look at selectors.test.ts:745 and the value 3.14 here.',
+    ])
+    expect(splitSentences('One. Two! Three?')).toEqual(['one.', 'two!', 'three?'])
+  })
+
+  it('reads a CJK and Latin mix as one stream', () => {
+    expect(splitSentences('先看 selectors.test.ts:745。Then the value 3.14 changes.')).toEqual([
+      '先看 selectors.test.ts:745。',
+      'then the value 3.14 changes.',
+    ])
+  })
+
+  it('drops blank segments and folds case and spacing', () => {
+    expect(splitSentences('One.   Two.')).toEqual(['one.', 'two.'])
+    expect(splitSentences('')).toEqual([])
+  })
+})
+
+describe('semanticRecurrence', () => {
+  /** The trailing window the guard scores, which is not the whole fixture. */
+  function tail(text: string, chars = DEFAULT_GUARD_OPTIONS.windowChars): string {
+    return text.slice(-chars)
+  }
+
+  it('keeps every healthy fixture far below the default semantic threshold', () => {
+    for (const [label, text] of [
+      ['healthy-long', HEALTHY_LONG],
+      ['healthy-prose', HEALTHY_PROSE],
+      ['healthy-enumerative', HEALTHY_ENUMERATIVE],
+      ['short-repetitive', SHORT_REPETITIVE],
+    ] as const) {
+      expect(semanticRecurrence(tail(text), 6), label).toBeLessThan(0.35)
+    }
+  })
+
+  it('peaks far below the threshold on every streaming prefix of a healthy trace', () => {
+    // The guard scores every few dozen characters, so the number that matters
+    // is the worst prefix, not the final window. A single early spike would
+    // fire the signal on text that never repeats at all.
+    for (const [label, text] of [
+      ['healthy-long', HEALTHY_LONG],
+      ['healthy-prose', HEALTHY_PROSE],
+      ['healthy-enumerative', HEALTHY_ENUMERATIVE],
+    ] as const) {
+      let worst = 0
+      for (let end = 360; end <= text.length; end += 64) {
+        const score = semanticRecurrence(text.slice(Math.max(0, end - 4096), end), 6)
+        if (score > worst) worst = score
+      }
+      expect(worst, label).toBeLessThan(0.35)
+    }
+  })
+
+  it('sees a verbatim loop and a paraphrased loop alike', () => {
+    expect(semanticRecurrence(tail(COLLAPSED), 6)).toBeGreaterThan(0.35)
+    expect(semanticRecurrence(tail(PARAPHRASED_LOOP), 6)).toBeGreaterThan(0.35)
+  })
+
+  it('reads a list that changes what it reports as recurrence too, which is why it needs a second gate', () => {
+    // Measured, not assumed: a list of findings shares one frame and differs in
+    // a couple of tokens, which is near-total recurrence by any wording metric.
+    // Nothing here can tell that list from a loop on wording alone, which is
+    // exactly why recurrence is allowed to vote but never to act by itself —
+    // see the guard-level test that a varied list is not cut.
+    const dims = ['simplicity', 'maintainability', 'decoupling', 'coverage', 'naming', 'structure']
+    const scores = ['92', '88', '95', '71', '84', '90']
+    const enumerated = Array.from({ length: 24 }, (_, i) =>
+      `Round ${i + 1} judged ${dims[i % 6]} at ${scores[(i * 5) % 6]} for that row.`,
+    ).join(' ')
+    expect(semanticRecurrence(enumerated, 6)).toBeGreaterThan(0.35)
+    // What keeps that list alive is the other signal, not this one.
+    expect(collapseScore(enumerated, 8)).toBeLessThan(0.85)
+  })
+
+  it('reads the same repetition as recurrence once it is pushed away', () => {
+    const moves = [
+      'Let me look at the failing assertion one more time.',
+      'The pane string is wrong and the test keeps reporting it.',
+      'I should check how the pane variable is built before comparing.',
+      'The runtime selector resolves to a longer string than expected.',
+      'Appending the missing combinator should settle the comparison.',
+      'Running the test again will tell us whether that worked.',
+    ]
+    const looped = Array.from({ length: 12 }, () => moves.join(' ')).join(' ')
+    expect(semanticRecurrence(looped, 6)).toBeGreaterThan(0.35)
+  })
+
+  it('returns zero below one full lag of sentences', () => {
+    expect(semanticRecurrence('One. Two. Three.', 6)).toBe(0)
+    expect(semanticRecurrence('', 6)).toBe(0)
+  })
+})
 describe('option validation', () => {
   it('fills in the shipped defaults', () => {
     expect(resolveGuardOptions()).toEqual({ ...DEFAULT_GUARD_OPTIONS, now: expect.any(Function) })
@@ -262,6 +365,113 @@ describe('option validation', () => {
     expect(() => resolveGuardOptions({ cooldownMs: -1 })).toThrow(/invalid cooldownMs/)
   })
 
+  it('fails loud on a semantic threshold outside (0, 1)', () => {
+    expect(() => resolveGuardOptions({ semanticThreshold: 0 })).toThrow(/invalid semanticThreshold/)
+    expect(() => resolveGuardOptions({ semanticThreshold: 1 })).toThrow(/invalid semanticThreshold/)
+  })
+
+  it('fails loud on a non-integer or too-small semantic lag', () => {
+    expect(() => resolveGuardOptions({ semanticLag: 0 })).toThrow(/invalid semanticLag/)
+    expect(() => resolveGuardOptions({ semanticLag: 1.5 })).toThrow(/invalid semanticLag/)
+  })
+
+  it('fails loud when the semantic floor exceeds the window', () => {
+    expect(() => resolveGuardOptions({ windowChars: 1000, semanticMinChars: 2000 }))
+      .toThrow(/must not exceed windowChars/)
+  })
+
+  it('fails loud on a semantic minimum below two sentences', () => {
+    expect(() => resolveGuardOptions({ semanticMinSentences: 1 })).toThrow(/invalid semanticMinSentences/)
+  })
+
+  it('fails loud on a non-positive confirmation count', () => {
+    expect(() => resolveGuardOptions({ semanticConfirmations: 0 })).toThrow(/invalid semanticConfirmations/)
+  })
+
+  it('keeps an explicit semantic override', () => {
+    const resolved = resolveGuardOptions({
+      semanticThreshold: 0.6,
+      semanticLag: 4,
+      semanticMinChars: 200,
+      semanticMinSentences: 5,
+      semanticConfirmations: 2,
+    })
+    expect(resolved.semanticThreshold).toBe(0.6)
+    expect(resolved.semanticLag).toBe(4)
+    expect(resolved.semanticMinChars).toBe(200)
+    expect(resolved.semanticMinSentences).toBe(5)
+    expect(resolved.semanticConfirmations).toBe(2)
+  })
+
+  it('fails loud on a literal floor outside (0, 1)', () => {
+    expect(() => resolveGuardOptions({ semanticLiteralFloor: 0 })).toThrow(/invalid semanticLiteralFloor/)
+    expect(() => resolveGuardOptions({ semanticLiteralFloor: 1 })).toThrow(/invalid semanticLiteralFloor/)
+  })
+
+  it('fails loud on a strict threshold outside (0, 1)', () => {
+    expect(() => resolveGuardOptions({ semanticStrictThreshold: 0 })).toThrow(/invalid semanticStrictThreshold/)
+    expect(() => resolveGuardOptions({ semanticStrictThreshold: 1 })).toThrow(/invalid semanticStrictThreshold/)
+  })
+
+  it('fails loud on a distinct ceiling outside (0, 1)', () => {
+    expect(() => resolveGuardOptions({ semanticDistinctCeiling: 0 })).toThrow(/invalid semanticDistinctCeiling/)
+    expect(() => resolveGuardOptions({ semanticDistinctCeiling: 1 })).toThrow(/invalid semanticDistinctCeiling/)
+  })
+
+  it('fails loud on a non-positive strict confirmation count', () => {
+    expect(() => resolveGuardOptions({ semanticStrictConfirmations: 0 })).toThrow(/invalid semanticStrictConfirmations/)
+  })
+
+  it('keeps an explicit low-literal override', () => {
+    const resolved = resolveGuardOptions({
+      semanticLiteralFloor: 0.5,
+      semanticStrictThreshold: 0.6,
+      semanticDistinctCeiling: 0.4,
+      semanticStrictConfirmations: 8,
+    })
+    expect(resolved.semanticLiteralFloor).toBe(0.5)
+    expect(resolved.semanticStrictThreshold).toBe(0.6)
+    expect(resolved.semanticDistinctCeiling).toBe(0.4)
+    expect(resolved.semanticStrictConfirmations).toBe(8)
+  })
+
+  it('holds the low-literal path stricter than the high one under any configuration', () => {
+    // Derived rather than validated, so no configuration can flatten the
+    // gradient — including the one a caller reaches for when switching a path
+    // off by moving the other path's threshold past it.
+    for (const options of [
+      {},
+      { semanticThreshold: 0.9 },
+      { semanticConfirmations: 7 },
+      { semanticThreshold: 0.999999, semanticConfirmations: 6 },
+      { semanticStrictThreshold: 0.2, semanticStrictConfirmations: 1 },
+      { threshold: 0.4 },
+    ] satisfies GuardOptions[]) {
+      const resolved = resolveGuardOptions(options)
+      expect(resolved.semanticStrictThreshold, JSON.stringify(options))
+        .toBeGreaterThanOrEqual(resolved.semanticThreshold)
+      expect(resolved.semanticStrictConfirmations, JSON.stringify(options))
+        .toBeGreaterThan(resolved.semanticConfirmations)
+      expect(resolved.semanticLiteralFloor, JSON.stringify(options))
+        .toBeLessThanOrEqual(resolved.threshold)
+    }
+  })
+
+  it('empties the low-literal band rather than inverting it', () => {
+    // A caller who lowers `threshold` below the shipped floor gets a band that
+    // cannot be entered, not a band that swallows the high path.
+    const resolved = resolveGuardOptions({ threshold: 0.4 })
+    expect(resolved.semanticLiteralFloor).toBe(0.4)
+  })
+  it('keeps the semantic floor independent of the literal one', () => {
+    // The literal floor stays where it has always been and still governs the
+    // literal signal, which is what makes the short-reasoning case reachable
+    // without changing any existing literal-detection behaviour.
+    expect(DEFAULT_GUARD_OPTIONS.minWindowChars).toBe(1500)
+    expect(DEFAULT_GUARD_OPTIONS.semanticMinChars).toBeLessThan(DEFAULT_GUARD_OPTIONS.minWindowChars)
+    expect(DEFAULT_GUARD_OPTIONS.threshold).toBe(0.85)
+    expect(DEFAULT_GUARD_OPTIONS.semanticThreshold).toBeLessThan(DEFAULT_GUARD_OPTIONS.threshold)
+  })
   it('fails loud on a non-string model list', () => {
     expect(() => resolveGuardOptions({ includeModels: [1] as unknown as string[] })).toThrow(/array of strings/)
   })
@@ -460,6 +670,372 @@ describe('detection', () => {
   })
 })
 
+/**
+ * One logical answer repeated around a fixed frame, the way a report is
+ * written. Recurrence votes for it; the other two signals are what stop it.
+ */
+function variedList(): string {
+  const dims = ['simplicity', 'maintainability', 'decoupling', 'coverage', 'naming', 'structure']
+  const scores = ['92', '88', '95', '71', '84', '90']
+  return Array.from({ length: 24 }, (_, i) =>
+    `Round ${i + 1} judged ${dims[i % 6]} at ${scores[(i * 5) % 6]} for that row.`,
+  ).join(' ')
+}
+
+describe('dual signal gradient', () => {
+  it('stops a paraphrased loop once both signals agree on consecutive windows', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(PARAPHRASED_LOOP)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    // The fixture loops in paraphrase long before it repeats verbatim, so the
+    // semantic signal sees it first and the literal one only later.
+    expect(semanticRecurrence(PARAPHRASED_LOOP.slice(1200, 3200), 6)).toBeGreaterThan(0.35)
+    expect(collapseScore(PARAPHRASED_LOOP.slice(1200, 3200), 8)).toBeLessThan(0.85)
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(false)
+    expect(agent.cancels).toHaveLength(1)
+    expect(test.warnings.join(' ')).toContain('stopped degenerate reasoning')
+  })
+
+  it('reports a paraphrase loop the low-literal path is not cleared for', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(paraphraseLoop())], agent)
+    // The floor is raised past this sample's literal score, so the low path
+    // is out of reach, and the score never reaches `threshold` either. What is
+    // left is the semantic signal on its own, which is logged and released.
+    installReasoningCollapseGuard(test.ctx, { semanticLiteralFloor: 0.99, now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    const tail = paraphraseLoop().slice(-4096)
+    expect(collapseScore(tail, 8)).toBeLessThan(0.85)
+    expect(semanticRecurrence(tail, 6)).toBeGreaterThan(0.45)
+    expect(test.warnings.join(' ')).toContain('observed the semantic signal alone')
+    expect(agent.cancels).toHaveLength(0)
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(true)
+  })
+
+  it('does not act on a varied list that only the semantic signal objects to', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(variedList())], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    // Recurrence is high on this text and the guard still leaves it alone,
+    // because the literal signal never agrees. That is the conservative mode
+    // doing its job: enumeration looks repetitive and reads as progress.
+    expect(semanticRecurrence(variedList(), 6)).toBeGreaterThan(0.35)
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(true)
+    expect(agent.cancels).toHaveLength(0)
+    expect(agent.steers).toHaveLength(0)
+  })
+
+  it('does not act on the literal signal alone', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(COLLAPSED)], agent)
+    // A recurrence threshold no text reaches, which is exactly what a literal
+    // signal on its own would be left with.
+    installReasoningCollapseGuard(test.ctx, { semanticThreshold: 0.999999, now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    expect(collapseScore(COLLAPSED, 8)).toBeGreaterThan(0.85)
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(true)
+    expect(agent.cancels).toHaveLength(0)
+    expect(test.warnings.join(' ')).toContain('observed the literal signal alone')
+  })
+
+  it('needs the configured number of consecutive windows before it acts', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(COLLAPSED)], agent)
+    // Two confirmations is still more than a single window, and the stream is
+    // hundreds of windows long, so this must still stop.
+    installReasoningCollapseGuard(test.ctx, { semanticConfirmations: 2, now: () => 0 })
+
+    await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    expect(agent.cancels).toHaveLength(1)
+    expect(test.warnings.join(' ')).toContain('both signals hold in window 1/2')
+  })
+
+  it('does not act on a lone confirmed window', async () => {
+    const agent = recordingAgent()
+    // A stream that collapses, clears, and collapses again: the two bursts are
+    // separated by a window in which the signals disagree, so neither streak
+    // ever reaches the confirmation count.
+    const chatter = 'Thinking about the next step in the plan.\n\n'
+    const script = [
+      [
+        { type: 'block-start' } as GuardChunk,
+        ...slices(COLLAPSED.slice(0, 3000)).map(part => ({ type: 'reasoning-delta' as const, text: part })),
+        ...slices(chatter.repeat(400)).map(part => ({ type: 'reasoning-delta' as const, text: part })),
+        { type: 'finish' } as GuardChunk,
+      ],
+    ]
+    const test = harness(script, agent)
+    installReasoningCollapseGuard(test.ctx, { semanticConfirmations: 6, now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    // The collapse runs for far more windows than the streak requires, so this
+    // asserts the opposite of what it looks like: the count is over windows
+    // where both signals held, and both must hold this many times in a row.
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(false)
+    expect(agent.cancels).toHaveLength(1)
+    expect(test.warnings.join(' ')).toContain('both signals hold in window 5/6')
+  })
+
+  it('requires the agreeing windows to be consecutive, not merely numerous', async () => {
+    const agent = recordingAgent()
+    // Three reasoning blocks, each scored on its own output: two of them
+    // collapse hard enough for both signals to agree, and the one between
+    // them is ordinary work that disagrees.
+    const dims = ['simplicity', 'maintainability', 'decoupling', 'coverage', 'naming', 'structure']
+    const scores = ['92', '88', '95', '71', '84', '90']
+    const ordinary = Array.from({ length: 24 }, (_, i) =>
+      `Round ${i + 1} judged ${dims[i % 6]} at ${scores[(i * 5) % 6]} for that row.`,
+    ).join(' ')
+    const chunks: GuardChunk[] = []
+    for (const [index, text] of [COLLAPSED.slice(0, 1700), ordinary, COLLAPSED.slice(0, 1700)].entries()) {
+      chunks.push({ type: 'block-start' })
+      for (const part of slices(text)) chunks.push({ type: 'reasoning-delta', text: part })
+      if (index === 0) chunks.push({ type: 'block-end' })
+    }
+    chunks.push({ type: 'finish' })
+    const test = harness([chunks], agent)
+    // Six windows agree across this stream, more than the four this guard is
+    // allowed to act on — but they arrive as two runs of three, and a run has
+    // to reach the count on its own before anything is stopped.
+    installReasoningCollapseGuard(test.ctx, { semanticConfirmations: 4, now: () => 0 })
+
+    const drained = await run(test, turnRequest(new AbortController().signal))
+
+    expect(drained.some(chunk => chunk.type === 'finish')).toBe(true)
+    expect(agent.cancels).toHaveLength(0)
+    expect(agent.steers).toHaveLength(0)
+    const warnings = test.warnings.join(' ')
+    // Six windows in which both signals held, split into two runs of three by
+    // the ordinary block. Counting them rather than adding them up is the
+    // whole assertion: an accumulating counter would reach 4/4 here and stop
+    // the stream, so the absence of a fourth window is what proves the reset.
+    expect(warnings.match(/both signals hold/g)).toHaveLength(6)
+    expect(warnings).toContain('both signals hold in window 3/4')
+    expect(warnings).toContain('stopped agreeing after 3 of 4 windows')
+    expect(warnings).not.toContain('window 4/4')
+  })
+  it('scores short reasoning even when the literal gate is still shut', async () => {
+    const agent = recordingAgent()
+    const moves = [
+      'Let me look at the failing assertion again.',
+      'The pane string is wrong.',
+      'I should check how the pane variable is built.',
+      'The resolved selector is longer than expected.',
+      'Appending the missing combinator should help.',
+      'Running the test again will tell us.',
+    ]
+    // Four passes of a six-sentence cycle: long enough for recurrence to be
+    // measurable, short enough that the literal signal is never computed.
+    const shortLoop = Array.from({ length: 24 }, (_, i) => moves[i % moves.length]!).join(' ')
+    const test = harness([reasoningChunks(shortLoop)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    await run(test, turnRequest(new AbortController().signal))
+
+    // Far below minWindowChars, so the literal signal was never computed at
+    // all. The semantic one has its own floor precisely so that a trace which
+    // never emits 1500 characters in one step is still examined.
+    expect(shortLoop.length).toBeLessThan(1500)
+    expect(semanticRecurrence(shortLoop, 6)).toBeGreaterThan(0.35)
+    expect(test.warnings.join(' ')).toContain('observed the semantic signal alone')
+    expect(test.warnings.join(' ')).toContain('literal not scored')
+    expect(agent.cancels).toHaveLength(0)
+  })
+
+  it('keeps the literal floor on the literal signal and the lower floor on the semantic one', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(SHORT_REPETITIVE)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    await run(test, turnRequest(new AbortController().signal))
+
+    // Below semanticMinSentences as well as minWindowChars, so neither signal
+    // has anything to say and the guard stays silent rather than guessing.
+    expect(splitSentences(SHORT_REPETITIVE).length).toBeLessThan(8)
+    expect(test.warnings).toHaveLength(0)
+    expect(agent.cancels).toHaveLength(0)
+  })
+})
+/**
+ * A model restating the same twelve conclusions in two different sets of
+ * words, over and over. At six or more cycles it measures 0.692 literally,
+ * which clears the low-literal floor and can never reach `threshold`, so the
+ * high-literal path is structurally closed to it.
+ *
+ * The cycle count is a parameter because the length decides how many windows
+ * clear the low-literal bars, and a test that needs the streak to stop short
+ * of its confirmation count has to be able to choose that length.
+ */
+function paraphraseLoop(cycles = 8): string {
+    const first = [
+      'Let me go back to the selector that the runtime actually resolves.',
+      'The value at line 745 keeps disagreeing with the string the helper builds.',
+      'So the mismatch is real, and it is not coming from the assertion itself.',
+      'The pane variable is supposed to name the sidebar container, nothing more.',
+      'That is where the combinator has to be inserted before anything else.',
+      'Concatenating the pane with the tail reproduces the resolved selector.',
+      'Applying that to the helper should settle the comparison.',
+      'Running the test once more will tell us whether the change is correct.',
+      'If it still fails I will dump both strings and diff them.',
+      'The difference ought to be a single combinator if the markup reads right.',
+      'Fixing the helper is still the shortest path to a green run.',
+      'Let me make that edit now and re-run the suite.',
+    ]
+    const second = [
+      'Back to the selector the runtime resolves for that assertion.',
+      'What line 745 resolves to disagrees with the string the helper assembles.',
+      'The mismatch is genuine and it does not originate in the assertion.',
+      'The pane variable ought to reference the sidebar container and nothing beyond it.',
+      'Which is exactly where the combinator belongs, ahead of everything else.',
+      'Joining the pane with the tail reproduces the resolved selector byte for byte.',
+      'Making that change in the helper ought to settle the comparison.',
+      'Another run of the test shows whether the edit is the right one.',
+      'Should it fail again I will print both strings and compare them.',
+      'If the markup reads as I think, the difference is a single combinator.',
+      'Editing the helper is still the quickest route to a passing run.',
+      'I will apply that edit now and re-run the suite.',
+    ]
+  return Array.from({ length: cycles }, (_, i) => (i % 2 === 0 ? first : second).join(' ')).join(' ')
+}
+
+describe('low-literal path', () => {
+  it('is a sample the high-literal path cannot reach', () => {
+    // Everything below depends on this holding: if the paraphrase cleared
+    // `threshold`, every other assertion here would be testing the old path.
+    const tail = paraphraseLoop().slice(-4096)
+    expect(collapseScore(tail, 8)).toBeGreaterThan(DEFAULT_GUARD_OPTIONS.semanticLiteralFloor)
+    expect(collapseScore(tail, 8)).toBeLessThan(DEFAULT_GUARD_OPTIONS.threshold)
+    expect(semanticRecurrence(tail, 6)).toBeGreaterThan(DEFAULT_GUARD_OPTIONS.semanticStrictThreshold)
+  })
+
+  it('stops a paraphrase loop that the high-literal path is closed to', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(paraphraseLoop())], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    // The log has to name the path, because the two paths have different
+    // thresholds and a reader cannot otherwise tell which rule fired.
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(false)
+    expect(agent.cancels).toHaveLength(1)
+    expect(test.warnings.join(' ')).toContain('stopped degenerate reasoning on the low-literal path')
+  })
+
+  it('leaves the high-literal path named as such when that is the one that fires', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(COLLAPSED)], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    await run(test, turnRequest(new AbortController().signal))
+    await settle()
+
+    expect(collapseScore(COLLAPSED.slice(-4096), 8)).toBeGreaterThan(DEFAULT_GUARD_OPTIONS.threshold)
+    expect(test.warnings.join(' ')).toContain('stopped degenerate reasoning on the high-literal path')
+  })
+
+  it('does not act when the literal score is in the band but the semantic one is not strong enough', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(paraphraseLoop())], agent)
+    // The low band is open, and the semantic score clears the high bar, but
+    // not the stricter one this path demands.
+    installReasoningCollapseGuard(test.ctx, { semanticStrictThreshold: 0.999999, now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(true)
+    expect(agent.cancels).toHaveLength(0)
+    expect(test.warnings.join(' ')).not.toContain('low-literal bars hold')
+  })
+
+  it('does not act when the semantic score is strong but the literal one is under the floor', async () => {
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(paraphraseLoop())], agent)
+    // The mirror image: strong semantics, and literal evidence the floor
+    // refuses. A low score is not a weak score, it is no score.
+    installReasoningCollapseGuard(test.ctx, { semanticLiteralFloor: 0.99, now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(true)
+    expect(agent.cancels).toHaveLength(0)
+    expect(test.warnings.join(' ')).not.toContain('low-literal bars hold')
+  })
+
+  it('waits longer on the low-literal path than on the high one', async () => {
+    // The two paths are measured against the same sample, and the difference
+    // is the gradient itself rather than an assertion about the defaults.
+    const high = DEFAULT_GUARD_OPTIONS.semanticConfirmations
+    const low = DEFAULT_GUARD_OPTIONS.semanticStrictConfirmations
+    expect(low).toBeGreaterThan(high)
+
+    // A run cleared for the low path but not yet for the high one. The streak
+    // passes the high count and keeps going, and nothing is stopped, because
+    // the fuse this path carries is the longer one.
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(paraphraseLoop(6))], agent)
+    installReasoningCollapseGuard(test.ctx, { semanticStrictConfirmations: 25, now: () => 0 })
+
+    const chunks = await run(test, turnRequest(new AbortController().signal))
+
+    const warnings = test.warnings.join(' ')
+    expect(warnings).toContain('low-literal bars hold in window 3/25')
+    expect(agent.cancels).toHaveLength(0)
+    expect(chunks.some(chunk => chunk.type === 'finish')).toBe(true)
+  })
+
+  it('does not act on a list whose sentences are all new', async () => {
+    // The false positive this path could have introduced. A list reuses its
+    // frame as hard as a loop does and scores higher on recurrence, so
+    // recurrence cannot save it; the distinct ratio can.
+    const agent = recordingAgent()
+    const test = harness([reasoningChunks(variedList())], agent)
+    installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+    const drained = await run(test, turnRequest(new AbortController().signal))
+
+    const tail = variedList().slice(-4096)
+    expect(semanticRecurrence(tail, 6)).toBeGreaterThan(DEFAULT_GUARD_OPTIONS.semanticStrictThreshold)
+    expect(collapseScore(tail, 8)).toBeGreaterThan(DEFAULT_GUARD_OPTIONS.semanticLiteralFloor)
+    // Every line is a sentence that has not been written before, which is
+    // what the low path is barred from acting on.
+    expect(distinctSentenceRatio(variedList())).toBe(1)
+    expect(test.warnings.join(' ')).not.toContain('low-literal bars hold')
+    expect(drained.some(chunk => chunk.type === 'finish')).toBe(true)
+    expect(agent.cancels).toHaveLength(0)
+  })
+
+  it('keeps the healthy fixtures clear of both paths', async () => {
+    for (const [label, text] of [
+      ['healthy-long', HEALTHY_LONG],
+      ['healthy-prose', HEALTHY_PROSE],
+      ['healthy-enumerative', HEALTHY_ENUMERATIVE],
+    ] as const) {
+      const agent = recordingAgent()
+      const test = harness([reasoningChunks(text)], agent)
+      installReasoningCollapseGuard(test.ctx, { now: () => 0 })
+
+      const drained = await run(test, turnRequest(new AbortController().signal))
+
+      expect(drained.some(chunk => chunk.type === 'finish'), label).toBe(true)
+      expect(agent.cancels, label).toHaveLength(0)
+      expect(test.warnings.join(' '), label).not.toContain('low-literal bars hold')
+    }
+  })
+})
 describe('agent resolution', () => {
   it('resumes the session that owns the stream, not the newest agent', async () => {
     // The reported failure: a host runs one Agent per session plus one per

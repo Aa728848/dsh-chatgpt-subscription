@@ -12,6 +12,22 @@
  * degenerate stream scores near one. On a hit it stops yielding chunks, so the
  * in-flight request ends, and lets the turn resume on a fresh step.
  *
+ * Uniqueness alone only sees verbatim repetition. A stream can restate one
+ * conclusion over and over in fresh words, score 0.48 where the threshold is
+ * 0.85, and run to the output ceiling untouched. So a second, independent
+ * signal scores the same window for recurrence: how strongly each sentence
+ * repeats something the model already said at least `semanticLag` sentences
+ * earlier. Enumerative reasoning repeats itself too, but adjacently — each item
+ * borrows the previous item's frame — and recurrence ignores adjacency, which
+ * is what separates the two.
+ *
+ * Neither signal stops anything on its own. A break needs both over their
+ * thresholds in the same window, and then `semanticConfirmations` consecutive
+ * such windows: one signal alone, or a single anomalous window, is logged and
+ * released. That gradient is the whole design. A guard that cuts a healthy
+ * answer is worse than one that lets a runaway finish, because the user sees a
+ * turn stop mid-sentence with no explanation, and the fix costs a whole turn.
+ *
  * Seam choice: the guard wraps `llm/stream`, not `agent/assistant-stream`.
  * `agent/assistant-stream` is emit-mode — it can observe but cannot stop a
  * stream — and it does not exist before harness 0.1.5, which would make the
@@ -128,6 +144,91 @@ export interface GuardOptions {
   cooldownMs?: number
   /** Model ids to watch; empty watches every model. */
   includeModels?: string[]
+  /**
+   * Recurrence score at or above which the semantic signal is considered to
+   * hold (default 0.35).
+   *
+   * Measured on the trailing window: the three healthy fixtures peak at 0.19,
+   * 0.17 and 0.17 across every streaming prefix, while a paraphrased loop and
+   * the verbatim loop score 0.75 and 0.99. 0.35 sits near the geometric mean
+   * of that gap, roughly 1.8x above the worst healthy prefix.
+   */
+  semanticThreshold?: number
+  /**
+   * Sentences a claim must be separated from to count as recurrence
+   * (default 6).
+   *
+   * Zero would make healthy enumeration look degenerate: item N of a list
+   * legitimately shares most of its wording with item N-1. Requiring the
+   * earlier sentence to be at least this far back keeps the measurement on
+   * "the model said this before" rather than "the model is still on this point".
+   */
+  semanticLag?: number
+  /**
+   * Characters required before the semantic signal is scored (default 360).
+   *
+   * Deliberately its own floor, well below `minWindowChars`: a real trace
+   * emitted 16 steps of which only one crossed 1500 characters, so the
+   * literal signal saw a single step of a whole turn. The two floors are
+   * separate knobs because they answer different questions — the literal one
+   * is about how much text a duplicate needs to be visible in, the semantic
+   * one about how much text a recurrence needs to be measurable in.
+   */
+  semanticMinChars?: number
+  /** Sentences required before recurrence is scored (default 8). */
+  semanticMinSentences?: number
+  /**
+   * Consecutive windows in which both signals must hold before a break
+   * (default 3).
+   *
+   * Counted independently of the per-turn break budget, which bounds how often
+   * the guard may act, not how sure it must be. A stream delivers a scoring
+   * window every few dozen characters, so three confirmations cost a few
+   * hundred wasted tokens against a runaway measured in the tens of thousands.
+   */
+  semanticConfirmations?: number
+  /**
+   * Lowest literal score the low-literal path will act on (default 0.6).
+   *
+   * A paraphrased loop sits far below `threshold` — measured at 0.676 for a
+   * model restating twelve conclusions in fresh words, against 0.85 for
+   * verbatim repetition. So a strong semantic signal has to be allowed to
+   * carry a decision the literal signal cannot make on its own.
+   *
+   * The floor exists because a low score is not the same as a high one: 0.6 is
+   * evidence that something is repeating, 0.2 is a short trace that has not
+   * repeated long enough to say anything. Measured healthy literal peaks at
+   * 0.276, so 0.6 keeps a 2.2x margin over every healthy prefix.
+   */
+  semanticLiteralFloor?: number
+  /**
+   * Semantic score the low-literal path demands (default 0.45).
+   *
+   * Strictly greater than `semanticThreshold`, and validated as such. The literal
+   * evidence on this path is weaker by construction, so the semantic evidence
+   * has to be stronger: 0.45 against a measured healthy peak of 0.194 is a
+   * 2.3x margin, while a paraphrase loop measures 0.77.
+   */
+  semanticStrictThreshold?: number
+  /**
+   * Most of a window's sentences may be distinct and still be eligible for the
+   * low-literal path (default 0.47).
+   *
+   * This is the dimension that separates a model circling from a model
+   * listing. Both reuse a frame heavily and both score high on recurrence, but
+   * a list writes a sentence that has never been written before on every line
+   * — measured at 1.000 distinct, against 0.42 for a paraphrase loop and 0.075
+   * for a verbatim one. Recurrence says the wording comes back; this says
+   * whether anything at all was new.
+   */
+  semanticDistinctCeiling?: number
+  /**
+   * Consecutive windows the low-literal path needs (default 5).
+   *
+   * Strictly greater than `semanticConfirmations`, and validated as such. The path is
+   * acting on weaker evidence, so it also waits longer before it acts.
+   */
+  semanticStrictConfirmations?: number
   /** Injectable clock, so the cooldown is testable without a timer. */
   now?: () => number
 }
@@ -141,6 +242,15 @@ export interface ResolvedGuardOptions {
   maxBreaksPerTurn: number
   cooldownMs: number
   includeModels: string[]
+  semanticThreshold: number
+  semanticLag: number
+  semanticMinChars: number
+  semanticMinSentences: number
+  semanticConfirmations: number
+  semanticLiteralFloor: number
+  semanticStrictThreshold: number
+  semanticDistinctCeiling: number
+  semanticStrictConfirmations: number
   now: () => number
 }
 
@@ -152,6 +262,15 @@ export const DEFAULT_GUARD_OPTIONS: ResolvedGuardOptions = {
   maxBreaksPerTurn: 3,
   cooldownMs: 30000,
   includeModels: [],
+  semanticThreshold: 0.35,
+  semanticLag: 6,
+  semanticMinChars: 360,
+  semanticMinSentences: 8,
+  semanticConfirmations: 3,
+  semanticLiteralFloor: 0.6,
+  semanticStrictThreshold: 0.45,
+  semanticDistinctCeiling: 0.47,
+  semanticStrictConfirmations: 5,
   now: () => Date.now(),
 }
 
@@ -194,12 +313,60 @@ export function resolveGuardOptions(options: GuardOptions = {}): ResolvedGuardOp
   if (!Number.isInteger(resolved.cooldownMs) || resolved.cooldownMs < 0) {
     throw new Error(`reasoning-collapse-guard: invalid cooldownMs ${String(resolved.cooldownMs)} — must be an integer >= 0`)
   }
+  if (!Number.isFinite(resolved.semanticThreshold) || resolved.semanticThreshold <= 0 || resolved.semanticThreshold >= 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticThreshold ${String(resolved.semanticThreshold)} — must be strictly between 0 and 1`)
+  }
+  if (!Number.isInteger(resolved.semanticLag) || resolved.semanticLag < 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticLag ${String(resolved.semanticLag)} — must be an integer >= 1`)
+  }
+  if (!Number.isInteger(resolved.semanticMinChars) || resolved.semanticMinChars < 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticMinChars ${String(resolved.semanticMinChars)} — must be an integer >= 1`)
+  }
+  if (resolved.semanticMinChars > resolved.windowChars) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticMinChars ${resolved.semanticMinChars} — must not exceed windowChars ${resolved.windowChars}`)
+  }
+  if (!Number.isInteger(resolved.semanticMinSentences) || resolved.semanticMinSentences < 2) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticMinSentences ${String(resolved.semanticMinSentences)} — must be an integer >= 2`)
+  }
+  if (!Number.isInteger(resolved.semanticConfirmations) || resolved.semanticConfirmations < 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticConfirmations ${String(resolved.semanticConfirmations)} — must be an integer >= 1`)
+  }
+  if (!Number.isFinite(resolved.semanticLiteralFloor) || resolved.semanticLiteralFloor <= 0 || resolved.semanticLiteralFloor >= 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticLiteralFloor ${String(resolved.semanticLiteralFloor)} — must be strictly between 0 and 1`)
+  }
+
+  if (!Number.isFinite(resolved.semanticStrictThreshold) || resolved.semanticStrictThreshold <= 0 || resolved.semanticStrictThreshold >= 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticStrictThreshold ${String(resolved.semanticStrictThreshold)} — must be strictly between 0 and 1`)
+  }
+  // The gradient is derived rather than validated. Refusing a configuration
+  // would be wrong here, because the natural way to switch a path off is to
+  // move the other path's threshold past it, and that is exactly the case
+  // where the low path must follow rather than fail: raising
+  // `semanticThreshold` past `semanticStrictThreshold` means the caller wants
+  // no semantic detection at all, not a second route to it.
+  if (!Number.isFinite(resolved.semanticDistinctCeiling) || resolved.semanticDistinctCeiling <= 0 || resolved.semanticDistinctCeiling >= 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticDistinctCeiling ${String(resolved.semanticDistinctCeiling)} — must be strictly between 0 and 1`)
+  }
+  if (!Number.isInteger(resolved.semanticStrictConfirmations) || resolved.semanticStrictConfirmations < 1) {
+    throw new Error(`reasoning-collapse-guard: invalid semanticStrictConfirmations ${String(resolved.semanticStrictConfirmations)} — must be an integer >= 1`)
+  }
+
   if (!Array.isArray(resolved.includeModels) || resolved.includeModels.some(entry => typeof entry !== 'string')) {
     throw new Error('reasoning-collapse-guard: includeModels must be an array of strings')
   }
   if (typeof resolved.now !== 'function') {
     throw new Error('reasoning-collapse-guard: now must be a function')
   }
+  // Every step of the low-literal path is at least as strict as the high one,
+  // and stays that way under any configuration: it cannot demand less semantic
+  // evidence, and it cannot be given a shorter fuse than the path above it.
+  // The floor is clamped the same way, for the same reason — a caller who
+  // lowers `threshold` below it would otherwise be rejected for configuring a
+  // threshold they never named. Clamping empties the band, which leaves the
+  // low path inert rather than wrong.
+  resolved.semanticStrictThreshold = Math.max(resolved.semanticStrictThreshold, resolved.semanticThreshold)
+  resolved.semanticStrictConfirmations = Math.max(resolved.semanticStrictConfirmations, resolved.semanticConfirmations + 1)
+  resolved.semanticLiteralFloor = Math.min(resolved.semanticLiteralFloor, resolved.threshold)
   return resolved
 }
 
@@ -223,6 +390,146 @@ export function collapseScore(window: string, n: number): number {
   if (total === 0) return 0
   return 1 - grams.size / total
 }
+/**
+ * Split reasoning text into sentences, for mixed CJK and Latin streams.
+ *
+ * A Chinese full stop ends a sentence whatever follows it. An ASCII `.!?` only
+ * ends one when whitespace or the end of the text follows, because the same
+ * characters carry out decimals, file names and version numbers
+ * (`selectors.test.ts:745`, `3.14`) that must not become sentence
+ * edges. Whitespace runs collapse and case folds, so a difference in spacing
+ * or capitalisation cannot read as a difference in wording.
+ *
+ * @param text - reasoning text, typically one trailing window.
+ * @returns non-empty normalized sentences, in order.
+ */
+export function splitSentences(text: string): string[] {
+  const parts: string[] = []
+  let start = 0
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!
+    const next = text[i + 1]
+    const cjk = CJK_TERMINATORS.has(char)
+    const latin = LATIN_TERMINATORS.has(char) && (next === undefined || TRAILING_SPACE.test(next))
+    if (!cjk && !latin) continue
+    parts.push(text.slice(start, i + 1))
+    start = i + 1
+  }
+  parts.push(text.slice(start))
+  const sentences: string[] = []
+  for (const part of parts) {
+    const normalized = part.replace(WHITESPACE_RUN, ' ').trim().toLowerCase()
+    if (normalized.length > 0) sentences.push(normalized)
+  }
+  return sentences
+}
+
+/** The three Chinese sentence terminators, which need no trailing space. */
+const CJK_TERMINATORS: ReadonlySet<string> = new Set(['\u3002', '\uff01', '\uff1f'])
+/** The three ASCII terminators, which only close a sentence before whitespace. */
+const LATIN_TERMINATORS: ReadonlySet<string> = new Set(['.', '!', '?'])
+const TRAILING_SPACE = /\s/
+const WHITESPACE_RUN = /\s+/g
+
+/** Character n-grams of one normalized sentence, as a set. */
+function sentenceGrams(sentence: string): Set<string> {
+  const grams = new Set<string>()
+  for (let i = 0; i + SEMANTIC_NGRAM_SIZE <= sentence.length; i++) {
+    grams.add(sentence.slice(i, i + SEMANTIC_NGRAM_SIZE))
+  }
+  return grams
+}
+
+function gramJaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  let shared = 0
+  for (const gram of a) {
+    if (b.has(gram)) shared++
+  }
+  return shared / (a.size + b.size - shared)
+}
+
+/**
+ * How strongly a window keeps returning to sentences it already stated.
+ *
+ * Each sentence is compared against every sentence at least `lag` positions earlier
+ * and keeps the best match; the score is the mean of those best matches. The
+ * comparison is normalized (Jaccard), so two sentences match on shared wording
+ * rather than on shared length, and character n-grams are used rather than words
+ * because no tokenizer is available here, and none would survive a CJK/Latin
+ * mix without segmenting Chinese first.
+ *
+ * Two properties matter more than the exact number. The score saturates — a
+ * twelve-sentence loop and a four-hundred-sentence one both approach one — so
+ * it does not drift with length the way a mean pairwise similarity does, and
+ * it does not reward a long answer merely for containing more pairs. And the
+ * lag is what makes it safe to ship: healthy enumeration reuses its framing
+ * from the sentence immediately before, which this metric cannot see.
+ *
+ * @param window - trailing reasoning characters.
+ * @param lag - sentences a claim must be separated from to count as recurrence.
+ * @returns recurrence score in [0,1]; 0 means nothing recurs, or too little text to tell.
+ */
+export function semanticRecurrence(window: string, lag: number): number {
+  return sentenceRecurrence(splitSentences(window), lag)
+}
+
+/** {@link semanticRecurrence} over sentences the caller has already split. */
+function sentenceRecurrence(sentences: readonly string[], lag: number): number {
+  const grams = sentences.map(sentenceGrams)
+  if (grams.length <= lag) return 0
+  let total = 0
+  let counted = 0
+  for (let i = lag; i < grams.length; i++) {
+    const current = grams[i]!
+    let best = 0
+    for (let j = 0; j <= i - lag; j++) {
+      const earlier = grams[j]!
+      // Jaccard cannot exceed the smaller set over the larger, so a pair that
+      // cannot beat the running best is never intersected.
+      const ceiling = Math.min(current.size, earlier.size) / Math.max(current.size, earlier.size)
+      if (ceiling <= best) continue
+      const similarity = gramJaccard(current, earlier)
+      if (similarity > best) best = similarity
+    }
+    total += best
+    counted++
+  }
+  return counted === 0 ? 0 : total / counted
+}
+
+/** Character n-gram size both halves of the semantic signal are built on. */
+const SEMANTIC_NGRAM_SIZE = 3
+
+/**
+ * The share of a window's sentences that have never been said before.
+ *
+ * Recurrence cannot tell a model that is circling from a model that is
+ * listing, because a list reuses its frame as heavily as a loop does and
+ * scores just as high. The difference is that a list writes a new sentence on
+ * every line. Measured over a trailing window: 0.075 for the verbatim loop,
+ * 0.42 for a paraphrase loop, 1.000 for every healthy fixture and for every
+ * list shape tried.
+ *
+ * Equality is exact and on the normalized sentence, which is what keeps the
+ * lists out. Two rows differing only by a row number are 0.86 similar by
+ * `semanticRecurrence` and 1.000 distinct here, and that gap is the whole point: the
+ * fuzzy measure asks whether the wording came back, this one asks whether
+ * anything was new.
+ *
+ * @param window - trailing reasoning characters.
+ * @returns distinct share in (0,1]; 1 when every sentence is unique.
+ */
+export function distinctSentenceRatio(window: string): number {
+  return distinctRatioOf(splitSentences(window))
+}
+
+/** {@link distinctSentenceRatio} over sentences the caller already split. */
+function distinctRatioOf(sentences: readonly string[]): number {
+  if (sentences.length < 2) return 1
+  return new Set(sentences).size / sentences.length
+}
+
 export const RESUME_HINT =
   'Your previous reasoning became repetitive and was stopped before it finished. '
   + 'Resume from what you already established instead of restarting the analysis, '
@@ -242,10 +549,35 @@ interface BreakerState {
   lastBreakAt: number
   exhausted: boolean
   resuming: boolean
+  /**
+   * Consecutive windows in which both signals cleared the high-literal bar,
+   * cleared whenever a window disagrees and whenever a break is taken.
+   *
+   * This is the guard's confidence, and it is deliberately not the break
+   * budget: that one bounds how often the guard may act in a turn, this one
+   * bounds how sure it has to be before it acts at all. The low-literal path
+   * keeps its own count because it clears on different evidence and has to
+   * wait longer on it.
+   */
+  dualStreak: number
+  /** Consecutive windows clearing the stricter low-literal bar. */
+  lowStreak: number
+  /** Whether each lone-signal observation has already been reported this turn. */
+  notedLiteralOnly: boolean
+  notedSemanticOnly: boolean
 }
 
 function createBreakerState(): BreakerState {
-  return { breaksThisTurn: 0, lastBreakAt: -Infinity, exhausted: false, resuming: false }
+  return {
+    breaksThisTurn: 0,
+    lastBreakAt: -Infinity,
+    exhausted: false,
+    resuming: false,
+    dualStreak: 0,
+    lowStreak: 0,
+    notedLiteralOnly: false,
+    notedSemanticOnly: false,
+  }
 }
 
 /**
@@ -421,14 +753,22 @@ export function installReasoningCollapseGuard(
    */
   function breakOff(
     state: BreakerState,
-    score: number,
+    literal: number,
+    semantic: number,
+    path: 'high-literal' | 'low-literal',
     agent: GuardAgentLike | undefined,
     sessionId: string | undefined,
   ): void {
     state.breaksThisTurn++
     state.lastBreakAt = resolved.now()
+    // The streaks belonged to the attempt that just ended. Carrying either
+    // over would let the next attempt inherit confirmations it never earned.
+    state.dualStreak = 0
+    state.lowStreak = 0
     ctx.logger?.warn(
-      `reasoning-collapse-guard: stopped degenerate reasoning (score ${score.toFixed(3)}, `
+      `reasoning-collapse-guard: stopped degenerate reasoning on the ${path} path after `
+      + `${path === 'high-literal' ? resolved.semanticConfirmations : resolved.semanticStrictConfirmations} confirmed windows `
+      + `(literal ${literal.toFixed(3)}, semantic ${semantic.toFixed(3)}, `
       + `break ${state.breaksThisTurn}/${resolved.maxBreaksPerTurn}, `
       + `session ${sessionId ?? 'unidentified'}`
       + `${agent === undefined ? ', no agent to resume' : ''})`,
@@ -448,6 +788,91 @@ export function installReasoningCollapseGuard(
         ctx.logger?.warn(`reasoning-collapse-guard: could not queue the resume: ${describeError(error)}`)
       }
     })
+  }
+
+  /**
+   * Report one signal holding without the other.
+   *
+   * Reported once per kind per turn, not once per window: a runaway can hold
+   * one signal for hundreds of windows, and a line each would bury the report
+   * of the one that mattered. This is the diagnostic half of the gradient —
+   * the reason a near miss is still diagnosable after the fact.
+   */
+  function noteLoneSignal(
+    state: BreakerState,
+    kind: 'literal' | 'semantic',
+    literal: number | undefined,
+    semantic: number | undefined,
+    sessionId: string | undefined,
+  ): void {
+    if (kind === 'literal' ? state.notedLiteralOnly : state.notedSemanticOnly) return
+    if (kind === 'literal') state.notedLiteralOnly = true
+    else state.notedSemanticOnly = true
+    ctx.logger?.warn(
+      `reasoning-collapse-guard: observed the ${kind} signal alone `
+      + `(literal ${literal === undefined ? 'not scored' : literal.toFixed(3)}, `
+      + `semantic ${semantic === undefined ? 'not scored' : semantic.toFixed(3)}, `
+      + `session ${sessionId ?? 'unidentified'}) — the other signal has not agreed, not acting`
+    )
+  }
+
+  /**
+   * Report a run of agreeing windows that ended before it reached the count.
+   *
+   * Without this, two short runs of agreeing windows look in the log exactly
+   * like one long one that simply stopped short, and the confirmation count
+   * becomes impossible to reason about after the fact.
+   */
+  function noteStreakCleared(state: BreakerState, reached: number, sessionId: string | undefined): void {
+    ctx.logger?.warn(
+      `reasoning-collapse-guard: the signals stopped agreeing after ${reached} `
+      + `of ${resolved.semanticConfirmations} windows (session ${sessionId ?? 'unidentified'}) — streak cleared, not acting`
+    )
+  }
+
+  /** Report the low-literal run that ended before it reached its longer count. */
+  function noteLowStreakCleared(reached: number, sessionId: string | undefined): void {
+    ctx.logger?.warn(
+      `reasoning-collapse-guard: the low-literal bars stopped holding after ${reached} `
+      + `of ${resolved.semanticStrictConfirmations} windows (session ${sessionId ?? 'unidentified'}) — streak cleared, not acting`
+    )
+  }
+
+  /** Report a low-literal window that qualifies but has not been confirmed enough. */
+  function notePendingLowConfirmation(
+    state: BreakerState,
+    literal: number,
+    semantic: number,
+    distinct: number,
+    sessionId: string | undefined,
+  ): void {
+    ctx.logger?.warn(
+      `reasoning-collapse-guard: low-literal bars hold in window ${state.lowStreak}`
+      + `/${resolved.semanticStrictConfirmations} (literal ${literal.toFixed(3)} >= ${resolved.semanticLiteralFloor}, `
+      + `semantic ${semantic.toFixed(3)} >= ${resolved.semanticStrictThreshold}, `
+      + `distinct ${distinct.toFixed(3)} <= ${resolved.semanticDistinctCeiling}, `
+      + `session ${sessionId ?? 'unidentified'}) — not acting yet`
+    )
+  }
+
+  /**
+   * Report a window where both signals held but the streak is still short.
+   *
+   * `semanticConfirmations` is what makes a break a decision rather than a
+   * reflex, so each pending confirmation is named, and the log then says how
+   * close a stream came to being cut by a guard that did not cut it.
+   */
+  function notePendingConfirmation(
+    state: BreakerState,
+    literal: number,
+    semantic: number,
+    sessionId: string | undefined,
+  ): void {
+    ctx.logger?.warn(
+      `reasoning-collapse-guard: both signals hold in window ${state.dualStreak}`
+      + `/${resolved.semanticConfirmations} (literal ${literal.toFixed(3)}, `
+      + `semantic ${semantic.toFixed(3)}, session ${sessionId ?? 'unidentified'}) — not acting yet`
+    )
   }
 
   function guardStream(
@@ -473,17 +898,76 @@ export function installReasoningCollapseGuard(
         if (chunk.type === 'block-start') window = ''
         if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') {
           window = appendWindow(window, chunk.text, resolved.windowChars)
-          if (window.length >= resolved.minWindowChars
-            && resolved.now() - state.lastBreakAt >= resolved.cooldownMs) {
-            const score = collapseScore(window, resolved.ngramSize)
-            if (score >= resolved.threshold) {
+          if (resolved.now() - state.lastBreakAt >= resolved.cooldownMs) {
+            // The two signals are floored separately and on purpose. The
+            // literal one keeps `minWindowChars` and its exact old condition,
+            // so nothing about verbatim detection moves; the semantic one has
+            // its own floor because a real trace emitted sixteen steps of which
+            // one crossed 1500 characters, and a gate the text almost never
+            // reaches is a gate that never fires.
+            const literal = window.length >= resolved.minWindowChars
+              ? collapseScore(window, resolved.ngramSize)
+              : undefined
+            const sentences = window.length >= resolved.semanticMinChars
+              ? splitSentences(window)
+              : []
+            const semantic = sentences.length >= resolved.semanticMinSentences
+              ? sentenceRecurrence(sentences, resolved.semanticLag)
+              : undefined
+            const distinct = sentences.length >= resolved.semanticMinSentences
+              ? distinctRatioOf(sentences)
+              : undefined
+            // Both, or neither counts. One signal is evidence, not a verdict.
+            //
+            // Two paths, and the second is stricter at every step. The high one
+            // is the original rule and is unchanged. The low one exists because
+            // a paraphrased loop measures 0.676 literally and can never reach
+            // 0.85, so without it the only thing the semantic signal does is
+            // corroborate a decision the literal signal had already made. It
+            // pays for the weaker literal evidence with a higher semantic bar,
+            // a novelty bar the high path does not need, and more confirmations:
+            // weaker evidence, more of it, and longer.
+            const high = literal !== undefined && literal >= resolved.threshold
+              && semantic !== undefined && semantic >= resolved.semanticThreshold
+            const low = literal !== undefined
+              && literal >= resolved.semanticLiteralFloor && literal < resolved.threshold
+              && semantic !== undefined && semantic >= resolved.semanticStrictThreshold
+              && distinct !== undefined && distinct <= resolved.semanticDistinctCeiling
+            // Both streaks are advanced first, and every reset is reported
+            // there, because a run can end on a window the other path claims:
+            // otherwise a streak silently returns to zero on exactly the
+            // window a reader would want to see it happen.
+            const reachedHigh = state.dualStreak
+            const reachedLow = state.lowStreak
+            state.dualStreak = high ? reachedHigh + 1 : 0
+            state.lowStreak = low ? reachedLow + 1 : 0
+            if (reachedHigh !== 0 && state.dualStreak === 0) noteStreakCleared(state, reachedHigh, request.sessionId)
+            if (reachedLow !== 0 && state.lowStreak === 0) noteLowStreakCleared(reachedLow, request.sessionId)
+            if (high && state.dualStreak >= resolved.semanticConfirmations) {
               if (state.breaksThisTurn >= resolved.maxBreaksPerTurn) {
                 state.exhausted = true
               } else {
-                breakOff(state, score, agent, request.sessionId)
+                breakOff(state, literal, semantic, 'high-literal', agent, request.sessionId)
                 // Returning here is what ends the in-flight stream: the harness
                 // never receives a finish chunk for the truncated attempt.
                 return
+              }
+            } else if (low && state.lowStreak >= resolved.semanticStrictConfirmations) {
+              if (state.breaksThisTurn >= resolved.maxBreaksPerTurn) {
+                state.exhausted = true
+              } else {
+                breakOff(state, literal, semantic, 'low-literal', agent, request.sessionId)
+                return
+              }
+            } else if (high) {
+              notePendingConfirmation(state, literal, semantic, request.sessionId)
+            } else if (low) {
+              notePendingLowConfirmation(state, literal, semantic, distinct!, request.sessionId)
+            } else {
+              if (literal !== undefined && literal >= resolved.threshold) {
+                noteLoneSignal(state, 'literal', literal, semantic, request.sessionId)
+              } else if (semantic !== undefined && semantic >= resolved.semanticThreshold) {
+                noteLoneSignal(state, 'semantic', literal, semantic, request.sessionId)
               }
             }
           }
