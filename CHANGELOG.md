@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0 - 2026-10-09
+
 - **[WorkBuddy] 模型行加上消耗倍率提示**
   - **倍率一直是公开的，只是本插件没读。** 网关 `GET /v3/config` 每个模型条目都带一个 `credits` 字符串（国际区 `x6.67`、国区 `x0.79 credits`），就是该模型消耗套餐额度的相对速率；官方 CodeBuddy 客户端把同一个字段渲染成 `6.67x` 显示在模型下拉里（其 web-ui 里对应的就是 `credits.replace(/\s*credits$/i,'').replace(/^[x×]/i,'') + 'x'`）。
   - **倍率必须按区域存，不能一个 id 一个数。** 实测 2026-10-09：`deepseek-v4.1-flash` 国区 `0.11`、国际区 `0.00`——一个标量必然对其中一个区的账号是错的。因此 `credits` 是 `Partial<Record<WorkBuddyRegion, string>>`，**只为该区确实公布过的值写键**；两区共有的 8 个 id 里 7 个数值一致、1 个不一致。
