@@ -218,7 +218,7 @@ describe('workbuddy persisted catalog', () => {
     }), { status: 200 }))
 
     const first = await workbuddy.loadConfigCatalog(credentials, { fetchFn })
-    expect(first.map((m) => m.id)).toEqual(['wb-1'])
+    expect(first.map((m) => m.id)).toContain('wb-1')
     // The snapshot write inside loadConfigCatalog is fire-and-forget.
     await vi.waitFor(async () => {
       expect((await readCatalogSnapshot(catalogSnapshotName('workbuddy', 'intl'), countModels))?.fetchedAt).toBeGreaterThan(0)
@@ -227,7 +227,11 @@ describe('workbuddy persisted catalog', () => {
     workbuddy.clearCachedCatalog()
     const fetchFn2 = vi.fn(async () => new Response('{}', { status: 500 }))
     const second = await workbuddy.loadConfigCatalog(credentials, { fetchFn: fetchFn2 })
-    expect(second.map((m) => m.id)).toEqual(['wb-1'])
+    // The snapshot carries the fetched entry and the models the gateway serves
+    // without publishing are merged on read, so the next process answers with
+    // exactly the listing the first one did.
+    expect(second.map((m) => m.id)).toEqual(first.map((m) => m.id))
+    expect(second.map((m) => m.id)).toContain('gpt-6-sol')
   })
 
   it('never serves one region a snapshot fetched for another', async () => {

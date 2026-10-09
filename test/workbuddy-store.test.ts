@@ -473,10 +473,45 @@ describe('WorkBuddy fallback catalog', () => {
     const intl = modelsForRegion('intl').map((m) => m.id)
     expect(intl).toContain('gemini-3.5-flash')
     expect(cn).not.toContain('gemini-3.5-flash')
+    // intl started serving GLM-5.3-Flash alongside cn; asking a region for a
+    // model it dropped is the 400 `code 11102` this filter exists to avoid.
+    expect(intl).toContain('glm-5.3-flash')
     expect(cn).toContain('glm-5.3-flash')
-    expect(intl).not.toContain('glm-5.3-flash')
     expect(intl).toContain('kimi-k3')
     expect(cn).toContain('kimi-k3-1')
+  })
+
+  it('reconciles a model the two regions serve with different figures', () => {
+    // One entry has to cover both regions, so where the live `/v3/config` reads
+    // disagree the smaller served default and the smaller output cap win: this
+    // route sends no explicit context length, and over-declaring either figure
+    // is a request the gateway rejects, while under-declaring only compresses a
+    // conversation earlier than needed and stays overridable per model.
+    const flash = resolveWorkBuddyModel('glm-5.3-flash')
+    expect(flash.contextWindow).toBe(300000)
+    expect(flash.maxContextWindow).toBe(1000000)
+    expect(flash.maxTokens).toBe(32000)
+    expect(resolveWorkBuddyModel('glm-5.3').maxTokens).toBe(48000)
+    expect(resolveWorkBuddyModel('glm-5.2').maxTokens).toBe(48000)
+    expect(resolveWorkBuddyModel('kimi-k2.8-preview').maxTokens).toBe(32000)
+  })
+
+  it('offers the models the gateway serves but never publishes', () => {
+    // Measured on the international backend: these answer a normal streaming
+    // completion with 200 while being absent from `/v3/config`. They have to be
+    // in the shipped table, because that is what a first run before sign-in,
+    // and any gateway failure, falls back to.
+    const intl = modelsForRegion('intl').map((m) => m.id)
+    const cn = modelsForRegion('cn').map((m) => m.id)
+    for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gemini-3.8-flash']) {
+      expect(intl).toContain(id)
+      expect(cn).not.toContain(id)
+    }
+    // The reasoning ladder was measured, not read off the name: gpt-6-sol takes
+    // exactly the levels gpt-6-astra publishes and refuses `minimal`.
+    expect(resolveWorkBuddyModel('gpt-6-sol').reasoningEfforts)
+      .toEqual(resolveWorkBuddyModel('gpt-6-astra').reasoningEfforts)
+    expect(resolveWorkBuddyModel('gpt-6-luna').reasoningEfforts).not.toContain('minimal')
   })
 
   it('resolves an unknown id to a text-only entry rather than a real model', () => {

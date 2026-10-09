@@ -542,6 +542,29 @@ describe('WorkBuddy routes', () => {
     expect(JSON.parse(allowed.captured.body).ok).toBe(true)
   })
 
+  it('keeps offering the unlisted models once the live catalog loads', async () => {
+    // A reachable gateway replaces the shipped table with the list it publishes,
+    // so a model it serves without listing would disappear from the picker the
+    // moment the catalog arrives. The merge is the only thing preventing that.
+    const online = (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch
+    const credentials: WorkBuddyCredentials = {
+      accessToken: 't',
+      refreshToken: 'r',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'intl',
+      domain: 'www.workbuddy.ai',
+      backend: 'https://www.workbuddy.ai',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'desktop',
+    }
+    const ids = (await loadConfigCatalog(credentials, { fetchFn: online })).map((model) => model.id)
+    for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gemini-3.8-flash']) expect(ids).toContain(id)
+    // The payload is the authority on what it does describe: a published entry
+    // is never overwritten by the fallback row that shadows its id.
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
   it('never serves one region the catalog snapshot read for another', async () => {
     const offline = (async () => { throw new Error('offline') }) as unknown as typeof fetch
     const online = (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch

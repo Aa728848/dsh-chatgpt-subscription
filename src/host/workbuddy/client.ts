@@ -30,7 +30,7 @@ import {
 } from './types.ts'
 import { FileCredentialStore, workBuddyAccountId, type WorkBuddyCredentials } from './token-store.ts'
 import type { WorkBuddyTokenIdentity } from './identity.ts'
-import type { WorkBuddyModelEntry } from './model-catalog.ts'
+import { withUnpublishedModels, type WorkBuddyModelEntry } from './model-catalog.ts'
 import {
   convergeWorkBuddyEffort,
   WORKBUDDY_STANDARD_EFFORTS,
@@ -359,7 +359,11 @@ export async function fetchConfigCatalog(
   if (!response.ok) {
     throw new Error(`${PROVIDER_NAME} model catalog failed: ${response.status}`)
   }
-  return parseConfigModels(await response.json(), credentials.region)
+  const parsed = parseConfigModels(await response.json(), credentials.region)
+  // The gateway serves models it does not list, and this list replaces the
+  // shipped table; without the merge they vanish from the picker at the moment
+  // the catalog loads. See UNPUBLISHED_MODELS for what each row was measured.
+  return withUnpublishedModels(parsed, credentials.region)
 }
 
 /** Cached catalog with a TTL; a failed refresh keeps the previous snapshot.
@@ -414,7 +418,14 @@ export async function loadConfigCatalog(
         return models.length > 0 ? models : undefined
       },
       (fetchedAt, models) => {
-        cachedCatalog = { region: credentials.region, models, fetchedAt }
+        // A snapshot written before these models were known carries none of
+        // them; merging on read closes that window instead of leaving the
+        // picker short until the background refresh lands.
+        cachedCatalog = {
+          region: credentials.region,
+          models: withUnpublishedModels(models, credentials.region),
+          fetchedAt,
+        }
       },
       0,
     )

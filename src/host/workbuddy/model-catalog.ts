@@ -11,9 +11,21 @@
  * The fallback is a verbatim transcription of a live `/v3/config` read, not
  * hand-written guesses: an earlier revision of this file guessed context
  * windows from vendor marketing and was wrong in both directions (`glm-5.3`
- * and `kimi-k3` are 1M, not 200K/256K). Where the two regions disagree, the
- * larger maximum is kept while the served default comes from whichever region
- * reported one.
+ * and `kimi-k3` are 1M, not 200K/256K).
+ *
+ * One entry serves both regions, so a model the regions disagree about needs a
+ * merged figure. The rule is asymmetric on purpose: the **larger maximum** is
+ * kept, while the **served default** and the **output cap** take the **smaller**
+ * of the two. Over-declaring either one is a hard failure — DSH would send a
+ * request the gateway rejects — whereas under-declaring only compresses a
+ * conversation earlier than needed, and both remain overridable per model from
+ * the settings card. Measured disagreements (`glm-5.3-flash`, `glm-5.3`,
+ * `glm-5.2`, `kimi-k2.8-preview` served 300000/48000/48000/32000 by intl
+ * against 1000000/64000/64000/64000 by cn) are reconciled that way.
+ *
+ * The regions also do not serve the same ids. intl added `glm-5.3-flash` and
+ * keeps `gemini-3.5-flash`, `kimi-k3` and the `*-model` aliases to itself; cn
+ * keeps `glm-5.3-flash`, `kimi-k3-1` and its own `-x` variants.
  *
  * `regions` is a routing fact, not a preference: asking a region for a model it
  * does not serve answers 400 `code 11102`.
@@ -71,6 +83,79 @@ export interface WorkBuddyModelEntry {
   /** One-line note shown beside the model in the settings card. */
   description: string
 }
+
+/**
+ * Models the gateway serves but does not publish in `/v3/config`.
+ *
+ * The catalog is a published list, not the served one: measured on the
+ * international backend, `gpt-6-sol`, `gpt-6-luna` and `gemini-3.8-flash` all
+ * answer a normal streaming completion with 200 while being absent from
+ * `/v3/config` entirely, and a reachable gateway *replaces* the shipped table
+ * with that list. Without these rows the picker would simply never show them, so
+ * they are declared here and merged into a live catalog too
+ * ({@link withUnpublishedModels}) rather than living in the fallback alone.
+ *
+ * What each row records, and how it was established, differs by field:
+ *
+ * - **Existence, the reasoning ladder, image support** were measured against the
+ *   live endpoint, not inferred from the name. A rejected level answers 400
+ *   `code 11133` with `extError` `400002`; `gpt-6-sol` takes exactly the ladder
+ *   `gpt-6-astra` publishes (`minimal` refused, `low`/`medium`/`high`/`xhigh`/
+ *   `max` accepted) and both accept a 1x1 PNG.
+ * - **Context window, output cap and `canDisableThinking` are inherited from the
+ *   published sibling in the same family** — `gpt-6-astra` for `gpt-6-sol` and
+ *   `gpt-6-luna`, `gemini-3.5-flash` for `gemini-3.8-flash`. They are marked
+ *   here rather than measured because the gateway publishes nothing for these
+ *   ids and offers no cheap way to read the real figure: it accepts a
+ *   `max_tokens` larger than any published window (even for `gpt-6-astra`, whose
+ *   own catalog caps at 128000), so the number is neither enforced nor
+ *   discoverable from the request side.
+ *
+ * Every field stays overridable per model from the settings card, and an
+ * inherited window errs low rather than high: over-declaring overflows the
+ * gateway mid-session, while under-declaring only compresses earlier.
+ */
+export const UNPUBLISHED_MODELS: readonly WorkBuddyModelEntry[] = [
+  {
+    id: 'gpt-6-sol',
+    name: 'GPT-6-Sol',
+    contextWindow: 400000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['intl'],
+    supportsImage: true,
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: true,
+    description: 'OpenAI 旗舰模型，擅长复杂推理与长程任务',
+  },
+  {
+    id: 'gpt-6-luna',
+    name: 'GPT-6-Luna',
+    contextWindow: 400000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['intl'],
+    supportsImage: true,
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: true,
+    description: 'OpenAI 轻量模型，响应快速，适合日常任务',
+  },
+  {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini-3.8-Flash',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 65536,
+    regions: ['intl'],
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'medium',
+    canDisableThinking: false,
+    description: '能力均衡，适合日常使用',
+  },
+]
 
 /**
  * Offline fallback catalog, transcribed from a live `/v3/config` read.
@@ -157,6 +242,8 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     canDisableThinking: false,
     description: '深度推理，适合深度分析与难题',
   },
+  // Served but absent from `/v3/config`; see {@link UNPUBLISHED_MODELS}.
+  ...UNPUBLISHED_MODELS.filter((model) => model.id === 'gpt-6-sol' || model.id === 'gpt-6-luna'),
   {
     id: 'gpt-6-astra',
     name: 'GPT-6-Astra',
@@ -240,7 +327,8 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     name: 'GLM-5.3',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
-    maxTokens: 64000,
+    // intl caps output at 48000 where cn allows 64000.
+    maxTokens: 48000,
     regions: ['intl', 'cn'],
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
@@ -251,10 +339,13 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
   {
     id: 'glm-5.3-flash',
     name: 'GLM-5.3-Flash',
-    contextWindow: 1000000,
+    // intl serves 300000 by default and allows 1000000; cn serves 1000000 by
+    // default, so the smaller served default is the one both regions honour.
+    contextWindow: 300000,
     maxContextWindow: 1000000,
+    // intl caps output at 32000 where cn allows 131072.
     maxTokens: 32000,
-    regions: ['cn'],
+    regions: ['intl', 'cn'],
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -266,7 +357,8 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     name: 'GLM-5.2',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
-    maxTokens: 64000,
+    // intl caps output at 48000 where cn allows 64000.
+    maxTokens: 48000,
     regions: ['intl', 'cn'],
     supportsImage: true,
     reasoningEfforts: ['high', 'xhigh'],
@@ -394,9 +486,11 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
   {
     id: 'kimi-k2.8-preview',
     name: 'Kimi-K2.8-Preview',
+    // intl serves 300000 by default and caps output at 32000; cn serves
+    // 1000000 by default and allows 64000.
     contextWindow: 300000,
     maxContextWindow: 1000000,
-    maxTokens: 64000,
+    maxTokens: 32000,
     regions: ['intl', 'cn'],
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
@@ -535,7 +629,8 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: '混元思考模型，具有增强的推理能力',
   },
   {
-    id: 'hy4-preview-x',
+    // Replaces `hy4-preview-x`, which the cn backend no longer serves.
+    id: 'hy4-preview-f',
     name: 'Hy4 preview',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
@@ -587,6 +682,19 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: '',
   },
   {
+    id: 'space-bunny',
+    name: 'Space-Bunny',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['cn'],
+    supportsImage: true,
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultReasoningEffort: 'max',
+    canDisableThinking: false,
+    description: '推理速度极快，编码能力强劲，并支持原生多模态输入的匿名大模型',
+  },
+  {
     id: 'minimax-m3',
     name: 'MiniMax-M3',
     contextWindow: 512000,
@@ -625,6 +733,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     canDisableThinking: false,
     description: '',
   },
+  ...UNPUBLISHED_MODELS.filter((model) => model.id === 'gemini-3.8-flash'),
   {
     id: 'gemini-3.5-flash',
     name: 'Gemini-3.5-Flash',
@@ -657,6 +766,27 @@ export const DEFAULT_VISIBLE_MODEL_IDS: readonly string[] = [
 
 /** Every id the fallback knows, in declaration order. */
 export const WORKBUDDY_MODEL_IDS: readonly string[] = FALLBACK_MODELS.map((model) => model.id)
+
+/**
+ * Add the served-but-unpublished models to a live `/v3/config` catalog.
+ *
+ * A reachable gateway replaces the shipped table with the list it publishes, so
+ * a model it serves without listing ({@link UNPUBLISHED_MODELS}) would drop out
+ * of the picker the moment the catalog loads. Merging here keeps it offered.
+ *
+ * A published entry always wins: the gateway is the authority on anything it
+ * does describe, so these rows only fill ids the payload is silent about.
+ */
+export function withUnpublishedModels(
+  catalog: readonly WorkBuddyModelEntry[],
+  region: WorkBuddyRegion,
+): WorkBuddyModelEntry[] {
+  const known = new Set(catalog.map((model) => model.id))
+  const extra = UNPUBLISHED_MODELS.filter(
+    (model) => model.regions.includes(region) && !known.has(model.id),
+  )
+  return extra.length > 0 ? [...catalog, ...extra] : [...catalog]
+}
 
 /**
  * Resolve one entry from a catalog.
