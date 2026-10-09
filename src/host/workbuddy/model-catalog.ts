@@ -834,12 +834,119 @@ export function isWorkBuddyModelId(
   return typeof id === 'string' && catalog.some((model) => model.id === id)
 }
 
-/** Models an account in `region` can actually call, in catalog order. */
+/**
+ * Vendor families, resolved from a model id.
+ *
+ * The gateway orders `/v3/config` the way it feels like, which interleaves
+ * vendors: a DeepSeek row, then a GPT row, then two Hunyuan rows, then a Kimi
+ * row, then three more GPT rows. In a picker that reads as noise — the eye
+ * cannot tell that the GPT entries belong together — so the list is grouped by
+ * family before it is shown.
+ *
+ * The rules are ordered, first match wins. Only families this subscription
+ * actually serves are listed: a rule for a model that cannot appear would be a
+ * guess about a future catalog.
+ *
+ * An id no rule claims is its own family rather than a shared `other` bucket, so
+ * an unrecognised model keeps its place in the order instead of being swept into
+ * a pile of models it has nothing to do with.
+ */
+const WORKBUDDY_VENDOR_RULES: ReadonlyArray<{ re: RegExp; family: string }> = [
+  // WorkBuddy's own routing aliases, which are not a vendor at all — they
+  // forward to whichever model the subscription points them at today.
+  { re: /^(default|fast|balanced|primary|deep)(-model)?$/, family: 'alias' },
+  { re: /^gpt-/, family: 'openai' },
+  { re: /^gemini-/, family: 'google' },
+  { re: /^glm-/, family: 'zhipu' },
+  { re: /^kimi-/, family: 'moonshot' },
+  { re: /^deepseek-/, family: 'deepseek' },
+  // Tencent's own family: `hy3`/`hy4-preview` are Hunyuan and `hunyuan-chat`
+  // is the same vendor spelled out, so both must land in one group.
+  { re: /^hy[0-9]/, family: 'tencent' },
+  { re: /^hunyuan/, family: 'tencent' },
+  { re: /^minimax-/, family: 'minimax' },
+  { re: /^space-bunny$/, family: 'space-bunny' },
+]
+
+/** The vendor family one model belongs to. */
+export function workBuddyModelVendor(id: string): string {
+  const value = id.toLowerCase()
+  for (const rule of WORKBUDDY_VENDOR_RULES) {
+    if (rule.re.test(value)) return rule.family
+  }
+  return id
+}
+
+/**
+ * Numeric segments of a model id, e.g. `gpt-6-astra` → [6].
+ *
+ * Version numbers are compared as numbers, so GPT-6.0 sorts below GPT-6.6 rather
+ * than above it as it would if the strings were compared.
+ */
+function versionSegments(id: string): number[] {
+  return [...id.toLowerCase().matchAll(/\d+/g)].map((match) => Number(match[0]))
+}
+
+/**
+ * Order two models of one family, newest generation first.
+ *
+ * Catalog order alone is not good enough. The models served but not published
+ * are appended after the published list, which left `gpt-6-sol` below
+ * `gpt-5.4` — the newest models at the bottom of their own group. Comparing the
+ * numeric segments puts every GPT-6 row together and ahead of every GPT-5 one,
+ * and leaves an id whose version cannot be read (an alias, a nickname) in the
+ * catalog's own order rather than guessing where it belongs.
+ *
+ * Ties keep catalog order, so `deepseek-v4.1-flash` still leads its
+ * `-flash-sg` sibling.
+ */
+function compareWithinFamily(a: { id: string }, b: { id: string }): number {
+  const left = versionSegments(a.id)
+  const right = versionSegments(b.id)
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const x = left[index]
+    const y = right[index]
+    // One id runs out of segments: the longer one names a refinement of it
+    // (`gpt-5.6` vs `gpt-5.6-sol`), so it follows.
+    if (x === undefined) return 1
+    if (y === undefined) return -1
+    if (x !== y) return y - x
+  }
+  return 0
+}
+
+/**
+ * Group a list so every vendor's models sit together.
+ *
+ * Families appear in the order their first model does — the catalog decides
+ * which vendor leads, not this function — and each family is ordered newest
+ * generation first.
+ */
+export function groupWorkBuddyModelsByVendor<T extends { id: string }>(models: readonly T[]): T[] {
+  const families = new Map<string, T[]>()
+  for (const model of models) {
+    const family = workBuddyModelVendor(model.id)
+    const bucket = families.get(family)
+    if (bucket === undefined) families.set(family, [model])
+    else bucket.push(model)
+  }
+  return [...families.values()]
+    .map((bucket) => [...bucket].sort(compareWithinFamily))
+    .flat()
+}
+
+/**
+ * Models an account in `region` can actually call, grouped by vendor.
+ *
+ * Grouped here rather than in the settings card because this is also what the
+ * request path resolves against: one ordering rule, so the picker and the
+ * adapter can never disagree about which models a region offers.
+ */
 export function modelsForRegion(
   region: WorkBuddyRegion,
   catalog: readonly WorkBuddyModelEntry[] = FALLBACK_MODELS,
 ): WorkBuddyModelEntry[] {
-  return catalog.filter((model) => model.regions.includes(region))
+  return groupWorkBuddyModelsByVendor(catalog.filter((model) => model.regions.includes(region)))
 }
 
 /** Whether one model accepts image input. */

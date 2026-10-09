@@ -117,7 +117,13 @@ export function resolveEnabledModelIds(
   return stored.filter((id) => known.has(id))
 }
 
-/** Build the model options the settings card renders, in catalog order. */
+/**
+ * Build the model options the settings card renders.
+ *
+ * Order comes from the caller, which passes a vendor-grouped list so a family
+ * is not interleaved with the next one; this preserves whatever order it is
+ * given rather than imposing a second one.
+ */
 export function buildModelOptions(
   catalog: readonly WorkBuddyModelEntry[],
   available: readonly string[],

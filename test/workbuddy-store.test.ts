@@ -12,7 +12,13 @@ import {
   workBuddyAccountId,
 } from '../src/host/workbuddy/token-store.ts'
 import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
-import { FALLBACK_MODELS, modelsForRegion, resolveWorkBuddyModel } from '../src/host/workbuddy/model-catalog.ts'
+import {
+  FALLBACK_MODELS,
+  groupWorkBuddyModelsByVendor,
+  modelsForRegion,
+  resolveWorkBuddyModel,
+  workBuddyModelVendor,
+} from '../src/host/workbuddy/model-catalog.ts'
 import { backendForDomain, isIntlDomain, regionForDomain, refreshSourceForDomain } from '../src/host/workbuddy/types.ts'
 
 const temporaryDirs: string[] = []
@@ -494,6 +500,43 @@ describe('WorkBuddy fallback catalog', () => {
     expect(resolveWorkBuddyModel('glm-5.3').maxTokens).toBe(48000)
     expect(resolveWorkBuddyModel('glm-5.2').maxTokens).toBe(48000)
     expect(resolveWorkBuddyModel('kimi-k2.8-preview').maxTokens).toBe(32000)
+  })
+
+  it('groups the picker by vendor, since the gateway interleaves them', () => {
+    // Measured on the international backend, `/v3/config` lists a DeepSeek row,
+    // then GPT-6-Astra, then two Hunyuan rows, then Kimi, then three more GPT
+    // rows — so the six OpenAI models never appear together in catalog order.
+    const vendors = modelsForRegion('intl').map((m) => workBuddyModelVendor(m.id))
+    // Every family is contiguous: seeing one vendor again after another means
+    // the list went back to interleaving.
+    const firstSeen = vendors.filter((vendor, index) => vendors.indexOf(vendor) === index)
+    expect(new Set(firstSeen).size).toBe(firstSeen.length)
+    expect(firstSeen.length).toBeGreaterThan(3)
+    // Hunyuan reaches this line under two spellings; they are one vendor.
+    expect(workBuddyModelVendor('hy3')).toBe(workBuddyModelVendor('hy4-preview-f'))
+    expect(workBuddyModelVendor('hunyuan-chat')).toBe(workBuddyModelVendor('hy4-preview'))
+    expect(workBuddyModelVendor('hy4-preview')).toBe(workBuddyModelVendor('hy3'))
+    // An id no rule claims is its own family, not swept into a shared bucket.
+    expect(workBuddyModelVendor('some-future-model')).toBe('some-future-model')
+    // Within a family the newest generation leads. Catalog order alone put the
+    // appended unlisted models at the bottom of their own group: gpt-6-sol
+    // rendered below gpt-5.4.
+    const openai = modelsForRegion('intl')
+      .filter((m) => workBuddyModelVendor(m.id) === 'openai')
+      .map((m) => m.id)
+    expect(openai.indexOf('gpt-6-sol')).toBeLessThan(openai.indexOf('gpt-5.6-sol'))
+    expect(openai.indexOf('gpt-5.6-sol')).toBeLessThan(openai.indexOf('gpt-5.4'))
+    // Versions compare as numbers, so 6.0 is not read as newer than 6.6.
+    expect(groupWorkBuddyModelsByVendor([{ id: 'gpt-6.6' }, { id: 'gpt-6.10' }]).map((m) => m.id))
+      .toEqual(['gpt-6.10', 'gpt-6.6'])
+    // An id with no readable version stays put rather than being guessed at.
+    expect(groupWorkBuddyModelsByVendor([{ id: 'primary-model' }, { id: 'deep-model' }]).map((m) => m.id))
+      .toEqual(['primary-model', 'deep-model'])
+    // Ties keep catalog order, so the sg sibling still follows its base model.
+    const deepseek = modelsForRegion('intl')
+      .filter((m) => workBuddyModelVendor(m.id) === 'deepseek')
+      .map((m) => m.id)
+    expect(deepseek.indexOf('deepseek-v4.1-flash')).toBeLessThan(deepseek.indexOf('deepseek-v4.1-flash-sg'))
   })
 
   it('offers the models the gateway serves but never publishes', () => {
