@@ -30,6 +30,7 @@ const commandCode = await import('../src/host/command-code/client.ts')
 const kimi = await import('../src/host/kimi-code/client.ts')
 const workbuddy = await import('../src/host/workbuddy/client.ts')
 const { FileCredentialStore } = await import('../src/host/kimi-code/token-store.ts')
+const { workBuddyModelCredits } = await import('../src/host/workbuddy/model-catalog.ts')
 
 const home = () => process.env.DSH_HOME ?? path.join(os.tmpdir(), 'dsh-catalog-snapshot-fallback')
 const storages = () => path.join(home(), 'storages')
@@ -244,6 +245,38 @@ describe('workbuddy persisted catalog', () => {
     const fetchFn = vi.fn(async () => new Response('{}', { status: 500 }))
     const result = await workbuddy.loadConfigCatalog(credentials, { fetchFn })
     expect(result).toEqual([])
+  })
+
+  it('serves a snapshot written before the multiplier column existed', async () => {
+    // Forward/backward compatibility for the `credits` field added to
+    // `WorkBuddyModelEntry` later: a snapshot on disk from an older install has
+    // no such key, and the rehydrate path casts the JSON entry straight to the
+    // entry type rather than validating field by field. The required behavior is
+    // "this entry carries no multiplier hint" — not a throw, and not a
+    // fabricated rate — so the picker keeps working across an upgrade.
+    await writeRaw(catalogSnapshotName('workbuddy', 'intl'), {
+      fetchedAt: Date.now(),
+      models: [{
+        id: 'wb-legacy',
+        name: 'Legacy',
+        regions: ['intl'],
+        contextWindow: 100_000,
+        maxContextWindow: 100_000,
+        maxTokens: 1_000,
+        supportsImage: false,
+        reasoningEfforts: [],
+        defaultReasoningEffort: null,
+        canDisableThinking: false,
+        description: '',
+      }],
+    })
+    const fetchFn = vi.fn(async () => new Response('{}', { status: 500 }))
+    const models = await workbuddy.loadConfigCatalog(credentials, { fetchFn })
+    const legacy = models.find((model) => model.id === 'wb-legacy')!
+    expect(legacy).toBeDefined()
+    expect(legacy.credits).toBeUndefined()
+    // The accessor a caller reads it through reports "nothing published".
+    expect(workBuddyModelCredits('wb-legacy', models)).toEqual({})
   })
 })
 

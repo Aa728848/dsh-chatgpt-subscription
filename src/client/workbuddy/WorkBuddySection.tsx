@@ -9,8 +9,10 @@
 import React from 'react'
 import type {
   WorkBuddyAccountSummaryDto,
+  WorkBuddyModelCredits,
   WorkBuddyModelOption,
   WorkBuddyReasoningEffort,
+  WorkBuddyRegion,
 } from '../../shared/workbuddy-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
@@ -30,6 +32,74 @@ const EFFORT_LABELS: Record<WorkBuddyReasoningEffort, string> = {
   high: 'High',
   xhigh: 'X-High',
   max: 'Max',
+}
+
+/**
+ * The consumption rate of one model, as the settings row states it.
+ *
+ * The gateway publishes one rate per region and the official CodeBuddy picker
+ * spells it beside a model as `6.67x`; the row uses the same shape behind the
+ * section's own label. Which rates reach the row depends on what the card knows
+ * about the account, and the two cases are deliberately different:
+ *
+ * - A KNOWN region shows that region's rate and nothing else. Borrowing the
+ *   sibling region's number would state a price this account never pays —
+ *   measured 2026-10-09, `deepseek-v4.1-flash` is `0.11` on cn against `0.00`
+ *   on intl, and the backends reject a model asked of the wrong region anyway.
+ * - An UNKNOWN region (no account read back yet) shows both rates when the
+ *   backends disagree, so the row is honest about the range instead of picking
+ *   one of them. When they agree there is nothing to disambiguate.
+ *
+ * The two-region form is assembled entirely from the caller's labels: the
+ * qualifier comes from `labels.region(value, key)` and the join from
+ * `labels.pair(first, second)`, so the dictionary owns the region nouns, the
+ * bracket glyphs AND the separator. Nothing about the two-region string is
+ * spelled in this file, which is the point — the glyphs differ per language
+ * (`倍率 0.11x（国区） / 0.00x（国际区）` in Chinese,
+ * `Multiplier 0.11x (China) / 0.00x (International)` in English) and a
+ * separator chosen here would be right in at most one of them.
+ *
+ * `null` means "this row states no rate"; the caller drops it from the hint
+ * array rather than rendering a placeholder, because a guessed rate on a spend
+ * figure is worse than a missing one. `'0.00'` is a declaration — this model
+ * consumes no allowance — so it renders like any other value.
+ */
+export function creditMultiplierHint(
+  credits: WorkBuddyModelCredits | undefined,
+  region: WorkBuddyRegion | null,
+  labels: {
+    multiplier: string
+    region: (value: string, key: WorkBuddyRegion) => string
+    pair: (first: string, second: string) => string
+  },
+): string | null {
+  // An empty string is the shape a catalog entry takes when its publisher
+  // declared no rate: the host's parser already turns it into an absent key,
+  // and a client running against a host that did not must not print `倍率 x`.
+  const rate = (key: WorkBuddyRegion): string | null => {
+    const value = credits?.[key]
+    return typeof value === 'string' && value !== '' ? value : null
+  }
+
+  if (region !== null) {
+    const value = rate(region)
+    return value === null ? null : `${labels.multiplier} ${value}x`
+  }
+
+  const cn = rate('cn')
+  const intl = rate('intl')
+  if (cn === null) return intl === null ? null : `${labels.multiplier} ${intl}x`
+  if (intl === null || intl === cn) return `${labels.multiplier} ${cn}x`
+  // Both regions, cn first, each qualified: an unqualified pair would read as
+  // one rate with a stray number beside it. The join comes from `labels.pair`
+  // too — a separator written here would be the one piece of this string the
+  // dictionary could not reach, and it is exactly where the two languages
+  // diverge (a full-width bracket already carries its own spacing, an ASCII one
+  // does not, so `(China)/ 0.00x` glued the entries together).
+  return `${labels.multiplier} ${labels.pair(
+    labels.region(`${cn}x`, 'cn'),
+    labels.region(`${intl}x`, 'intl'),
+  )}`
 }
 
 /** Mask a UIN so the card shows identity without publishing the full number. */
@@ -207,18 +277,37 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
         </div>
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
         <ModelChecklist
-          items={(status?.models ?? []).map((model: WorkBuddyModelOption) => ({
-            id: model.id,
-            name: model.name,
-            hint: [
-              formatCapacity(model.contextWindow),
-              model.supportsImage ? t.imageSupport : t.textOnly,
-              ...(model.reasoningEfforts && model.reasoningEfforts.length > 0
-                ? [model.reasoningEfforts.join('/')]
-                : []),
-            ].join(' · '),
-            enabled: model.enabled,
-          }))}
+          items={(status?.models ?? []).map((model: WorkBuddyModelOption) => {
+            // The spend rate goes LAST: capacity and the image/effort facts
+            // describe what the model accepts, while the multiplier describes
+            // what it costs. Keeping the money fact at the end leaves the
+            // capability cluster readable as one phrase, and it reads the same
+            // way the official picker spells a rate beside a model.
+            const multiplier = creditMultiplierHint(model.credits, status?.account?.region ?? null, {
+              multiplier: t.creditMultiplier,
+              region: (value: string, key: WorkBuddyRegion): string => t.creditMultiplierRegion
+                .replace('{value}', value)
+                .replace('{region}', key === 'cn' ? t.regionCn : t.regionIntl),
+              pair: (first: string, second: string): string => t.creditMultiplierPair
+                .replace('{first}', first)
+                .replace('{second}', second),
+            })
+            return {
+              id: model.id,
+              name: model.name,
+              hint: [
+                formatCapacity(model.contextWindow),
+                model.supportsImage ? t.imageSupport : t.textOnly,
+                ...(model.reasoningEfforts && model.reasoningEfforts.length > 0
+                  ? [model.reasoningEfforts.join('/')]
+                  : []),
+                // A model with no published rate contributes NO element, so the
+                // line neither grows a placeholder nor gains a doubled separator.
+                ...(multiplier === null ? [] : [multiplier]),
+              ].join(' · '),
+              enabled: model.enabled,
+            }
+          })}
           busy={busy !== null}
           onToggle={(id, enabled) => void toggleModel(id, enabled)}
           onToggleAll={(enabled) => void setAllModels(enabled)}

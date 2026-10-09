@@ -35,6 +35,7 @@ import {
   maxOutputTokensFor,
   modelsForRegion,
   resolveWorkBuddyModel,
+  workBuddyModelCredits,
   workBuddyModelSupportsImage,
   workBuddyReasoningEfforts,
   type WorkBuddyModelEntry,
@@ -123,6 +124,13 @@ export function resolveEnabledModelIds(
  * Order comes from the caller, which passes a vendor-grouped list so a family
  * is not interleaved with the next one; this preserves whatever order it is
  * given rather than imposing a second one.
+ *
+ * `credits` is passed through whole, every region the entry carries. Trimming
+ * it to one account's region is tempting and wrong: this DTO is also read with
+ * no account in hand (the harness resolves a model list before a credential is
+ * chosen), and such a caller would be told nothing rather than everything. The
+ * region key the reader actually has is already on each entry as `regions`, so
+ * picking a value is the renderer's job, not this one's.
  */
 export function buildModelOptions(
   catalog: readonly WorkBuddyModelEntry[],
@@ -147,6 +155,14 @@ export function buildModelOptions(
       reasoningEfforts: [...workBuddyReasoningEfforts(id, catalog)],
       supportsImage: workBuddyModelSupportsImage(id, catalog),
       regions: [...entry.regions],
+      // Key order follows the entry. An entry that published nothing — the
+      // shipped fallback for an id no catalog rates, or the synthetic entry an
+      // unknown id resolves to — keeps the field OFF rather than shipping `{}`:
+      // the contract defines absence as "nothing usable was published", and two
+      // spellings of that one fact would leave every reader testing for both.
+      ...(entry.credits === undefined || Object.keys(entry.credits).length === 0
+        ? {}
+        : { credits: { ...entry.credits } }),
       description: entry.description,
     }
   })

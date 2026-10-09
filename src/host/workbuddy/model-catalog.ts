@@ -39,6 +39,17 @@
  * shipped default selection excludes them anyway. The adapter's failure message
  * names this case so a user knows to pick another model rather than to retry.
  *
+ * `credits` is the consumption multiplier the same payload publishes as a
+ * string (`x0.79 credits` on cn, `x6.67` on intl), stored here in the bare
+ * numeric form the settings card renders. It is kept per region because the two
+ * backends do not always agree — measured 2026-10-09, `deepseek-v4.1-flash`
+ * is `0.11` on cn against `0.00` on intl — and a key is written only for a
+ * region that actually published one (every `gpt-5.x` and `gpt-6-astra` is
+ * intl-only, the `minimax` and `glm-5.0`/`glm-4.x` rows carry no intl key).
+ * An empty string (`default-model`) means no rate was declared at all, so that
+ * row has no `credits` field rather than a zeroed one: a guessed rate on a
+ * spend figure is worse than a missing one.
+ *
  * `reasoningEfforts` carries the ladder a model accepts, transcribed from the
  * gateway's own declaration. `/v3/config` uses two shapes and they were once
  * conflated, in opposite directions: a lone `{ effort: 'high' }` (no
@@ -50,7 +61,7 @@
  * `kimi-k2.8-preview`, and routes any other value into the nearest of them.
  */
 
-import type { WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
+import type { WorkBuddyModelCredits, WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
 import { DEFAULT_CONTEXT_WINDOW, FALLBACK_MAX_TOKENS } from './types.ts'
 import { convergeWorkBuddyEffort } from '../../shared/workbuddy-contracts.ts'
 
@@ -72,6 +83,16 @@ export interface WorkBuddyModelEntry {
   maxTokens: number
   /** Regions whose backend serves this id. */
   regions: readonly WorkBuddyRegion[]
+  /**
+   * Consumption multiplier per region, as `/v3/config` publishes it.
+   *
+   * Optional on purpose: the multiplier is the one field the gateway may omit
+   * for a model it otherwise describes (`default-model` ships an empty string),
+   * so every catalog literal in this repo — test fixtures and the live parser
+   * alike — must stay valid without it. Absent therefore means "nothing usable
+   * was published", never "zero": `x0.00` is a real declaration and is kept.
+   */
+  credits?: WorkBuddyModelCredits
   /** Whether the model accepts image input. */
   supportsImage: boolean
   /** Reasoning ladder the model accepts; empty for a non-reasoning model. */
@@ -184,6 +205,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 56000,
     maxTokens: 24000,
     regions: ['cn'],
+    credits: { cn: '2.00' },
     supportsImage: false,
     reasoningEfforts: [],
     defaultReasoningEffort: null,
@@ -197,6 +219,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 32000,
     regions: ['intl'],
+    credits: { intl: '0.34' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -210,6 +233,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 256000,
     maxTokens: 32000,
     regions: ['intl'],
+    credits: { intl: '0.59' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -223,6 +247,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 272000,
     maxTokens: 72000,
     regions: ['intl'],
+    credits: { intl: '3.31' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -236,6 +261,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 24000,
     regions: ['intl'],
+    credits: { intl: '3.33' },
     supportsImage: true,
     reasoningEfforts: [],
     defaultReasoningEffort: null,
@@ -251,6 +277,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl'],
+    credits: { intl: '6.67' },
     supportsImage: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'high',
@@ -264,6 +291,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl'],
+    credits: { intl: '3.47' },
     supportsImage: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'high',
@@ -277,6 +305,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl'],
+    credits: { intl: '1.39' },
     supportsImage: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'high',
@@ -290,6 +319,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl'],
+    credits: { intl: '0.14' },
     supportsImage: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'high',
@@ -303,6 +333,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl'],
+    credits: { intl: '3.31' },
     supportsImage: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
     defaultReasoningEffort: 'high',
@@ -316,6 +347,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 272000,
     maxTokens: 72000,
     regions: ['intl'],
+    credits: { intl: '1.65' },
     supportsImage: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
     defaultReasoningEffort: 'high',
@@ -330,6 +362,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     // intl caps output at 48000 where cn allows 64000.
     maxTokens: 48000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.79', intl: '0.79' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -346,6 +379,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     // intl caps output at 32000 where cn allows 131072.
     maxTokens: 32000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.06', intl: '0.06' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -360,6 +394,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     // intl caps output at 48000 where cn allows 64000.
     maxTokens: 48000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.79', intl: '0.79' },
     supportsImage: true,
     reasoningEfforts: ['high', 'xhigh'],
     defaultReasoningEffort: 'high',
@@ -373,6 +408,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 48000,
     regions: ['cn'],
+    credits: { cn: '0.79' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -386,6 +422,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 64000,
     regions: ['cn'],
+    credits: { cn: '0.71' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -399,6 +436,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 48000,
     regions: ['cn'],
+    credits: { cn: '0.80' },
     supportsImage: false,
     reasoningEfforts: [],
     defaultReasoningEffort: null,
@@ -412,6 +450,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 48000,
     regions: ['cn'],
+    credits: { cn: '0.95' },
     supportsImage: false,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -425,6 +464,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 48000,
     regions: ['cn'],
+    credits: { cn: '0.23' },
     supportsImage: false,
     reasoningEfforts: [],
     defaultReasoningEffort: null,
@@ -438,6 +478,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 128000,
     maxTokens: 32000,
     regions: ['cn'],
+    credits: { cn: '0.11' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -451,6 +492,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 168000,
     maxTokens: 32000,
     regions: ['cn'],
+    credits: { cn: '0.23' },
     supportsImage: false,
     reasoningEfforts: [],
     defaultReasoningEffort: null,
@@ -464,6 +506,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 32000,
     regions: ['intl'],
+    credits: { intl: '1.62' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -477,6 +520,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 32000,
     regions: ['cn'],
+    credits: { cn: '1.62' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -492,6 +536,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 32000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.77', intl: '0.77' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -505,6 +550,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 256000,
     maxTokens: 32000,
     regions: ['cn'],
+    credits: { cn: '0.57' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -518,6 +564,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 256000,
     maxTokens: 32000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.52', intl: '0.52' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -531,6 +578,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 164000,
     maxTokens: 32000,
     regions: ['cn'],
+    credits: { cn: '0.45' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -544,6 +592,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 164000,
     maxTokens: 32000,
     regions: ['cn'],
+    credits: { cn: '0.54' },
     supportsImage: false,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -557,6 +606,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.11', intl: '0.00' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -570,6 +620,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl'],
+    credits: { intl: '0.03' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -583,6 +634,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['cn'],
+    credits: { cn: '0.51' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -596,6 +648,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 50000,
     regions: ['cn'],
+    credits: { cn: '0.17' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -609,6 +662,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 96000,
     maxTokens: 32000,
     regions: ['cn'],
+    credits: { cn: '0.29' },
     supportsImage: false,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -622,6 +676,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 64000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.29', intl: '0.29' },
     supportsImage: true,
     reasoningEfforts: ['high'],
     defaultReasoningEffort: 'high',
@@ -636,6 +691,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 64000,
     regions: ['cn'],
+    credits: { cn: '0.00' },
     supportsImage: true,
     reasoningEfforts: ['high'],
     defaultReasoningEffort: 'high',
@@ -649,6 +705,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 192000,
     maxTokens: 64000,
     regions: ['intl', 'cn'],
+    credits: { cn: '0.00', intl: '0.00' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high'],
     defaultReasoningEffort: 'high',
@@ -662,6 +719,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 192000,
     maxTokens: 64000,
     regions: ['cn'],
+    credits: { cn: '0.05' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -675,6 +733,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 8192,
     regions: ['cn'],
+    credits: { cn: '0.10' },
     supportsImage: false,
     reasoningEfforts: [],
     defaultReasoningEffort: null,
@@ -688,6 +747,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['cn'],
+    credits: { cn: '0.08' },
     supportsImage: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'max',
@@ -701,6 +761,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 512000,
     maxTokens: 64000,
     regions: ['cn'],
+    credits: { cn: '0.25' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -714,6 +775,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 48000,
     regions: ['cn'],
+    credits: { cn: '0.19' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -727,6 +789,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 200000,
     maxTokens: 48000,
     regions: ['cn'],
+    credits: { cn: '0.18' },
     supportsImage: false,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -741,6 +804,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     maxContextWindow: 1000000,
     maxTokens: 65536,
     regions: ['intl'],
+    credits: { intl: '0.99' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'medium',
@@ -818,6 +882,8 @@ export function resolveWorkBuddyModel(
     maxContextWindow: DEFAULT_CONTEXT_WINDOW,
     maxTokens: FALLBACK_MAX_TOKENS,
     regions: ['cn', 'intl'],
+    // Nothing is published for an id no catalog describes, so no rate is.
+    credits: {},
     supportsImage: false,
     reasoningEfforts: [],
     defaultReasoningEffort: null,
@@ -963,6 +1029,20 @@ export function workBuddyReasoningEfforts(
   catalog: readonly WorkBuddyModelEntry[] = FALLBACK_MODELS,
 ): readonly string[] {
   return resolveWorkBuddyModel(id, catalog).reasoningEfforts
+}
+
+/**
+ * Consumption multiplier per region one model publishes.
+ *
+ * Read through {@link resolveWorkBuddyModel} like the other accessors, so an id
+ * no catalog describes reports `{}` — "no rate published" rather than a rate
+ * of zero.
+ */
+export function workBuddyModelCredits(
+  id: string,
+  catalog: readonly WorkBuddyModelEntry[] = FALLBACK_MODELS,
+): WorkBuddyModelCredits {
+  return resolveWorkBuddyModel(id, catalog).credits ?? {}
 }
 
 /** Output cap requested when the caller omits one. */

@@ -2,7 +2,8 @@
 import { describe, expect, it } from 'vitest'
 import { selectBadgeFacts } from '../src/client/workbuddy/WorkBuddyComposerQuota.tsx'
 import { formatCapacity, parsePositiveCapacity } from '../src/client/common/format.ts'
-import { maskUin } from '../src/client/workbuddy/WorkBuddySection.tsx'
+import { creditMultiplierHint, maskUin } from '../src/client/workbuddy/WorkBuddySection.tsx'
+import { en, zh } from '../src/client/workbuddy/locales.ts'
 import {
   reasoningEffortChoices,
   unsupportedReasoningEffort,
@@ -167,3 +168,84 @@ describe('WorkBuddy composer badge', () => {
     expect(selectBadgeFacts(statusWith(null))?.text).toBe('—')
   })
 })
+
+describe('WorkBuddy credit multiplier hint', () => {
+  // The hint is built from the caller's own dictionary, so these tests use the
+  // shipped one rather than an inline stub: the region nouns and the brackets
+  // are part of what the row shows.
+  const labels = (dict: {
+    creditMultiplier: string
+    creditMultiplierRegion: string
+    creditMultiplierPair: string
+    regionCn: string
+    regionIntl: string
+  }) => ({
+    multiplier: dict.creditMultiplier,
+    region: (value: string, key: 'cn' | 'intl'): string => dict.creditMultiplierRegion
+      .replace('{value}', value)
+      .replace('{region}', key === 'cn' ? dict.regionCn : dict.regionIntl),
+    pair: (first: string, second: string): string => dict.creditMultiplierPair
+      .replace('{first}', first)
+      .replace('{second}', second),
+  })
+
+  it('states only the known region rate', () => {
+    expect(creditMultiplierHint({ cn: '0.11', intl: '0.00' }, 'cn', labels(zh))).toBe('倍率 0.11x')
+    expect(creditMultiplierHint({ cn: '0.11', intl: '0.00' }, 'intl', labels(zh))).toBe('倍率 0.00x')
+    expect(creditMultiplierHint({ cn: '0.79', intl: '0.79' }, 'cn', labels(zh))).toBe('倍率 0.79x')
+  })
+
+  it('states nothing when the known region published no rate', () => {
+    // Measured 2026-10-09: the two backends do not always agree, and a model
+    // asked of the wrong region is rejected upstream. Falling back to the
+    // sibling region would print a price this account never pays.
+    expect(creditMultiplierHint({ intl: '0.00' }, 'cn', labels(zh))).toBeNull()
+    expect(creditMultiplierHint({ cn: '0.11' }, 'intl', labels(zh))).toBeNull()
+  })
+
+  it('states nothing for a model the catalog did not rate', () => {
+    expect(creditMultiplierHint(undefined, 'cn', labels(zh))).toBeNull()
+    expect(creditMultiplierHint({}, 'cn', labels(zh))).toBeNull()
+    expect(creditMultiplierHint(undefined, null, labels(zh))).toBeNull()
+    expect(creditMultiplierHint({}, null, labels(zh))).toBeNull()
+    // The empty string is a publisher\u2019s "no rate declared" spelling; it must
+    // not reach the row as a bare x.
+    expect(creditMultiplierHint({ cn: '' }, null, labels(zh))).toBeNull()
+  })
+
+  it('states the single published rate when the region is unknown', () => {
+    expect(creditMultiplierHint({ cn: '0.11' }, null, labels(zh))).toBe('倍率 0.11x')
+    expect(creditMultiplierHint({ intl: '6.67' }, null, labels(zh))).toBe('倍率 6.67x')
+  })
+
+  it('collapses to one value when both regions agree', () => {
+    expect(creditMultiplierHint({ cn: '0.79', intl: '0.79' }, null, labels(zh))).toBe('倍率 0.79x')
+  })
+
+  it('names both regions, cn first, when they disagree', () => {
+    // The join is the dictionary's too, so it spaces both sides: the Chinese
+    // form gained a space it used to absorb inside its full-width bracket. That
+    // is the deliberate trade for one separator template both languages read.
+    expect(creditMultiplierHint({ cn: '0.11', intl: '0.00' }, null, labels(zh)))
+      .toBe('倍率 0.11x（国区） / 0.00x（国际区）')
+    // Still cn first when the caller\u2019s object lists intl first.
+    expect(creditMultiplierHint({ intl: '0.00', cn: '0.11' }, null, labels(zh)))
+      .toBe('倍率 0.11x（国区） / 0.00x（国际区）')
+  })
+
+  it('keeps a declared zero, which is a rate and not a missing value', () => {
+    // '0.00' means "this model consumes no allowance"; dropping it would be a
+    // wrong answer about price rather than a missing one.
+    expect(creditMultiplierHint({ cn: '0.00', intl: '0.00' }, null, labels(zh))).toBe('倍率 0.00x')
+    expect(creditMultiplierHint({ cn: '0.00' }, null, labels(zh))).toBe('倍率 0.00x')
+    expect(creditMultiplierHint({ cn: '0.11', intl: '0.00' }, null, labels(zh)))
+      .toContain('0.00x（国际区）')
+  })
+
+  it('spells the same fact in the English dictionary', () => {
+    expect(creditMultiplierHint({ cn: '6.67', intl: '6.67' }, 'cn', labels(en))).toBe('Multiplier 6.67x')
+    expect(creditMultiplierHint({ cn: '0.11', intl: '0.00' }, null, labels(en)))
+      .toBe('Multiplier 0.11x (China) / 0.00x (International)')
+  })
+})
+

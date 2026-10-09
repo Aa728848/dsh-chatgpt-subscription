@@ -16,6 +16,47 @@ import type { AccountPoolStatusDto, PoolAccountSummaryDto } from './account-pool
 export type WorkBuddyRegion = 'cn' | 'intl'
 
 /**
+ * Consumption multiplier of one model, per region.
+ *
+ * The subscription publishes a \`credits\` string per model in its own
+ * \`/v3/config\` catalog — \`x0.79 credits\`, \`x6.67\` — which is the relative rate at
+ * which that model consumes the package allowance. The official CodeBuddy
+ * client renders it as \`6.67x\` beside the model in its picker; this route
+ * carries the same fact to the settings card, so a model's cost is visible at
+ * the moment it is chosen rather than only on the bill.
+ *
+ * Keyed by region because the two backends do not always agree: measured
+ * 2026-10-09, \`deepseek-v4.1-flash\` is \`0.11\` on cn against \`0.00\` on intl. A
+ * region the catalog did not name for this model is absent rather than guessed,
+ * and a model whose publisher declares no usable rate (\`default-model\` ships an
+ * empty string) carries no entry at all.
+ *
+ * Values are the bare numeric form (\`'0.79'\`), never the wire spelling: the
+ * label and the \`x\` suffix belong to whichever surface renders it.
+ */
+export type WorkBuddyModelCredits = Partial<Record<WorkBuddyRegion, string>>
+
+/**
+ * Parse one gateway \`credits\` string into the bare multiplier it names.
+ *
+ * Measured shapes: \`x6.67\` (intl), \`x0.79 credits\` (cn), and \`''\` for a model
+ * whose publisher declares no rate. \`x0.00\` is deliberately kept — it is a real
+ * declaration ("this model does not consume allowance"), not a missing value,
+ * so it must not be confused with the empty string that means nothing is known.
+ *
+ * The return is \`null\` rather than \`0\` for anything unparseable, so a caller can
+ * tell "no rate published" from "a rate of zero".
+ */
+export function parseWorkBuddyCreditMultiplier(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const stripped = raw.replace(/\s*credits\s*$/i, '').trim().replace(/^[x×]/i, '').trim()
+  if (stripped === '') return null
+  const value = Number(stripped)
+  if (!Number.isFinite(value) || value < 0) return null
+  return stripped
+}
+
+/**
  * Reasoning levels this route can name.
  *
  * Deliberately the widest set any model declares, so a saved default is not
@@ -101,6 +142,16 @@ export interface WorkBuddyModelOption {
   supportsImage: boolean
   /** Regions that serve this model; the account's own region must be listed. */
   regions: WorkBuddyRegion[]
+  /**
+   * Consumption multiplier per region, as the gateway declares it.
+   *
+   * Absent when nothing usable was published for this model — an unreachable
+   * gateway served by the shipped fallback for a model it does not rate, or an
+   * account whose region is not among the keys. The card must then show no
+   * multiplier rather than a placeholder: a guessed rate on a spend figure is
+   * worse than a missing one.
+   */
+  credits?: WorkBuddyModelCredits
   /** One-line description shown beside the model in the settings card. */
   description?: string
 }

@@ -33,6 +33,7 @@ import type { WorkBuddyTokenIdentity } from './identity.ts'
 import { withUnpublishedModels, type WorkBuddyModelEntry } from './model-catalog.ts'
 import {
   convergeWorkBuddyEffort,
+  parseWorkBuddyCreditMultiplier,
   WORKBUDDY_STANDARD_EFFORTS,
 } from '../../shared/workbuddy-contracts.ts'
 import { catalogSnapshotName, rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
@@ -245,6 +246,14 @@ export async function fetchAccountIdentity(
  * inferred from the model's name. Image-generation tools (`tags` naming
  * `text-to-image`/`image-to-image`) are skipped: they are not chat models and
  * carry no context window.
+ *
+ * `credits` is read here rather than left to the shipped table because a
+ * reachable gateway **replaces** that table entirely: a multiplier transcribed
+ * offline would be the only one a signed-in user ever saw, and it would stay
+ * wrong the moment the subscription repriced a model. A string this route cannot
+ * turn into a number (`''`, which `default-model` publishes, or a value a
+ * future gateway invents) leaves the field off the entry altogether instead of
+ * writing a plausible-looking `0` — see `parseWorkBuddyCreditMultiplier`.
  */
 export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials['region']): WorkBuddyModelEntry[] {
   const root = asRecord(payload) ?? {}
@@ -295,6 +304,12 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
     const contextWindowConfig = asRecord(record.contextWindow)
     const servedDefault = asNumber(contextWindowConfig?.defaultLength)
 
+    // The entry declares only the region it was fetched for, so the multiplier
+    // is keyed by that region: the two backends do not always agree (measured
+    // 2026-10-09, `deepseek-v4.1-flash` is 0.11 on cn against 0.00 on intl),
+    // and one scalar per id would be wrong for one region's accounts.
+    const multiplier = parseWorkBuddyCreditMultiplier(record.credits)
+
     models.push({
       id,
       name: asString(record.name) ?? id,
@@ -302,6 +317,10 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
       maxContextWindow,
       maxTokens: asNumber(record.maxOutputTokens) ?? 32_768,
       regions: [region],
+      // Spread rather than a direct field: an unparseable or absent rate must
+      // leave the key OFF the entry, so the card shows no multiplier instead of
+      // a guessed zero.
+      ...(multiplier === null ? {} : { credits: { [region]: multiplier } }),
       supportsImage: record.supportsImages === true,
       reasoningEfforts: efforts,
       defaultReasoningEffort: modelDefault,

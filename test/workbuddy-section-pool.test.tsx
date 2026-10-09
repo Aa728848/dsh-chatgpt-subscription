@@ -178,6 +178,83 @@ describe('WorkBuddy settings card', () => {
     expect(row.getAttribute('title')).toBe('glm-5.3')
   })
 
+  it('states the account region\u2019s consumption rate at the end of the hint line', async () => {
+    await render({
+      models: [
+        {
+          id: 'glm-5.3', name: 'GLM-5.3', enabled: true, defaultContextWindow: 128_000,
+          contextWindow: 1_000_000, defaultMaxTokens: 32_768, supportsImage: true,
+          reasoningEfforts: ['low', 'high', 'max'], regions: ['cn'],
+          credits: { cn: '0.79', intl: '0.79' },
+        },
+        {
+          id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', enabled: true,
+          defaultContextWindow: 128_000, contextWindow: 128_000, defaultMaxTokens: 32_768,
+          supportsImage: false, regions: ['cn'], credits: { cn: '0.11', intl: '0.00' },
+        },
+      ],
+    })
+
+    const hints = [...container.querySelectorAll<HTMLElement>('.dsh-mcl-option')].map((row) => [
+      row.querySelector('.dsh-mcl-name')?.textContent ?? '',
+      row.querySelector('.dsh-mcl-hint')?.textContent ?? '',
+    ])
+    // The account is cn, so each row states cn's own rate and nothing else.
+    // Measured 2026-10-09: deepseek-v4.1-flash is 0.11 on cn against 0.00 on
+    // intl, and quoting the sibling number here would state a price this
+    // account never pays. The rate trails the capability facts, which are what
+    // the model accepts; the multiplier is what it costs.
+    expect(hints).toEqual([
+      ['GLM-5.3', '1M · 图片 · low/high/max · 倍率 0.79x'],
+      ['DeepSeek V4.1 Flash', '128K · 纯文本 · 倍率 0.11x'],
+    ])
+  })
+
+  it('omits the rate without leaving a separator behind', async () => {
+    // The default catalog row declares no credits, which is the shipped shape
+    // for a model the gateway did not rate.
+    await render()
+
+    const hint = container.querySelector('.dsh-mcl-hint')?.textContent ?? ''
+    expect(hint).toBe('1M · 图片 · low/high/max')
+    expect(hint).not.toContain(zh.creditMultiplier)
+    // No placeholder and no doubled separator: the row did not grow a slot it
+    // could not fill.
+    expect(hint).not.toMatch(/·\s*·/)
+    expect(hint.split(' · ')).not.toContain('')
+  })
+
+  it('names both regions in the row when the account region is unknown', async () => {
+    // No account read back yet, so the row cannot know which backend will bill
+    // it. The two published rates are stated instead of one being picked:
+    // measured 2026-10-09 these two anchors disagree on cn (0.11) and intl (0.00).
+    await render({
+      account: null,
+      models: [
+        {
+          id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', enabled: true,
+          defaultContextWindow: 300_000, contextWindow: 300_000, defaultMaxTokens: 128_000,
+          supportsImage: true, reasoningEfforts: ['low', 'high', 'max'], regions: ['intl', 'cn'],
+          credits: { cn: '0.11', intl: '0.00' },
+        },
+        {
+          id: 'glm-5.3', name: 'GLM-5.3', enabled: true,
+          defaultContextWindow: 1_000_000, contextWindow: 1_000_000, defaultMaxTokens: 48_000,
+          supportsImage: true, reasoningEfforts: ['low', 'high', 'max'], regions: ['intl', 'cn'],
+          credits: { cn: '0.79', intl: '0.79' },
+        },
+      ],
+    })
+
+    const hints = [...container.querySelectorAll<HTMLElement>('.dsh-mcl-option')].map(
+      (row) => row.querySelector('.dsh-mcl-hint')?.textContent ?? '',
+    )
+    // cn is named first and both entries carry their qualifier; the equal pair
+    // collapses to the single value, because there is nothing to disambiguate.
+    expect(hints[0]).toBe('300K · 图片 · low/high/max · 倍率 0.11x（国区） / 0.00x（国际区）')
+    expect(hints[1]).toBe('1M · 图片 · low/high/max · 倍率 0.79x')
+  })
+
   it('shows the empty state through the shared card, not a panel of its own', async () => {
     // The shared card already renders "no account signed in"; a second
     // not-found panel beside it is exactly the drift this tab had.

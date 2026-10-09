@@ -24,8 +24,13 @@ import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
 import { FileModelSettingsStore, registerWorkBuddyPreferenceStore } from '../src/host/workbuddy/token-store.ts'
 import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { WorkBuddyAccountPool, parseWorkBuddyPoolData } from '../src/host/workbuddy/account-pool.ts'
-import { DEFAULT_VISIBLE_MODEL_IDS, FALLBACK_MODELS } from '../src/host/workbuddy/model-catalog.ts'
+import {
+  DEFAULT_VISIBLE_MODEL_IDS,
+  FALLBACK_MODELS,
+  workBuddyModelCredits,
+} from '../src/host/workbuddy/model-catalog.ts'
 import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
+import { parseWorkBuddyCreditMultiplier } from '../src/shared/workbuddy-contracts.ts'
 
 const temporaryDirs: string[] = []
 
@@ -201,6 +206,73 @@ describe('WorkBuddy config catalog parsing', () => {
     expect(parseConfigModels(null, 'cn')).toEqual([])
     expect(parseConfigModels({ data: {} }, 'cn')).toEqual([])
     expect(parseConfigModels({ data: { models: 'nope' } }, 'cn')).toEqual([])
+  })
+})
+
+/**
+ * The consumption multiplier `/v3/config` publishes per model, as a string:
+ * `x0.79 credits` on cn and `x6.67` on intl were both measured live. It is the
+ * rate a model draws down the package allowance, and the official CodeBuddy
+ * client renders it beside the model in its picker.
+ */
+describe('WorkBuddy credit multiplier parsing', () => {
+  it('reads both measured wire spellings into the bare number', () => {
+    expect(parseWorkBuddyCreditMultiplier('x6.67')).toBe('6.67')
+    expect(parseWorkBuddyCreditMultiplier('x0.79 credits')).toBe('0.79')
+    // The cn payload spells the prefix with U+00D7, not ASCII 'x'.
+    expect(parseWorkBuddyCreditMultiplier('×3.31')).toBe('3.31')
+    expect(parseWorkBuddyCreditMultiplier('  x1.62 credits  ')).toBe('1.62')
+  })
+
+  it('keeps a declared zero, which is a rate and not a missing value', () => {
+    // 'x0.00' means "this model consumes no allowance". Collapsing it into the
+    // same bucket as the empty string would turn a published price into silence.
+    expect(parseWorkBuddyCreditMultiplier('x0.00')).toBe('0.00')
+  })
+
+  it('reports nothing for a value that names no rate', () => {
+    // '' is what `default-model` ships: the publisher declared no rate at all.
+    expect(parseWorkBuddyCreditMultiplier('')).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier('credits')).toBeNull()
+    // A suffix the gateway does not use, a thousands separator Number() would
+    // read as NaN, a non-string, and an absent field.
+    expect(parseWorkBuddyCreditMultiplier('0.5x')).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier('x1,000')).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier(null)).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier(42)).toBeNull()
+  })
+
+  it('keys the multiplier by the region the entry was fetched for', () => {
+    const payload = {
+      data: {
+        models: [
+          { id: 'glm-5.3', maxAllowedSize: 1_000_000, credits: 'x0.79 credits' },
+          { id: 'gpt-5.5', maxAllowedSize: 1_000_000, credits: 'x3.31' },
+        ],
+      },
+    }
+    expect(parseConfigModels(payload, 'cn').map((m) => m.credits)).toEqual([{ cn: '0.79' }, { cn: '3.31' }])
+    expect(parseConfigModels(payload, 'intl').map((m) => m.credits)).toEqual([{ intl: '0.79' }, { intl: '3.31' }])
+  })
+
+  it('leaves the field off rather than writing a placeholder', () => {
+    // `default-model` publishes an empty string, and a model may omit the field
+    // entirely. Either way the entry must carry NO `credits` key — the card
+    // renders "no rate published" from its absence, and a zeroed placeholder
+    // would read as "free".
+    const models = parseConfigModels({
+      data: {
+        models: [
+          { id: 'default-model', maxAllowedSize: 1_000_000, credits: '' },
+          { id: 'no-field', maxAllowedSize: 1_000_000 },
+        ],
+      },
+    }, 'intl')
+    expect(models).toHaveLength(2)
+    for (const model of models) {
+      expect('credits' in model).toBe(false)
+      expect(model.credits).toBeUndefined()
+    }
   })
 })
 
@@ -394,6 +466,106 @@ describe('WorkBuddy model selection', () => {
     expect(glm.contextWindow).toBe(500_000)
     expect(glm.supportsImage).toBe(true)
     expect(glm.reasoningEfforts).toEqual(['low', 'high', 'max'])
+  })
+
+  it('passes the published multiplier through, every region the entry carries', () => {
+    // Whole-table passthrough, deliberately not trimmed to one account's
+    // region: this DTO is also read with no account in hand, and such a caller
+    // would otherwise be told nothing. Measured 2026-10-09, the one id the two
+    // backends rate differently must reach the card with both keys.
+    const options = buildModelOptions(
+      FALLBACK_MODELS,
+      ['deepseek-v4.1-flash', 'gpt-6-astra'],
+      ['deepseek-v4.1-flash', 'gpt-6-astra'],
+      {},
+    )
+    expect(options.find((o) => o.id === 'deepseek-v4.1-flash')?.credits)
+      .toEqual({ cn: '0.11', intl: '0.00' })
+    expect(options.find((o) => o.id === 'gpt-6-astra')?.credits).toEqual({ intl: '6.67' })
+  })
+
+  it('omits the field for a model the catalog did not rate', () => {
+    // `default-model` publishes an empty string, so it has no rate to pass
+    // on; an id no catalog describes resolves to a synthetic entry with none
+    // either.
+    const options = buildModelOptions(
+      FALLBACK_MODELS,
+      ['default-model', 'never-heard-of-it'],
+      ['default-model', 'never-heard-of-it'],
+      {},
+    )
+    for (const option of options) {
+      expect('credits' in option).toBe(false)
+      expect(option.credits).toBeUndefined()
+    }
+  })
+
+  it('reads a multiplier through the accessor and reports none for an unknown id', () => {
+    // The accessor is what the request path and the card both go through, so
+    // an id no catalog describes must answer `no rate published` rather than throw
+    // or invent one.
+    expect(workBuddyModelCredits('deepseek-v4.1-flash')).toEqual({ cn: '0.11', intl: '0.00' })
+    expect(workBuddyModelCredits('hy3')).toEqual({ cn: '0.00', intl: '0.00' })
+    expect(workBuddyModelCredits('default-model')).toEqual({})
+    expect(workBuddyModelCredits('never-heard-of-it')).toEqual({})
+  })
+})
+
+describe('WorkBuddy catalog credit invariants', () => {
+  it('keys every shipped multiplier on a region that entry declares', () => {
+    // A rate filed under a region the model is not served by would never be
+    // rendered — the card looks up the reader's own region — so it would be a
+    // silent transcription error rather than a visible one.
+    for (const model of FALLBACK_MODELS) {
+      for (const region of Object.keys(model.credits ?? {})) {
+        const where = model.id + ' rates ' + region
+        expect(model.regions, where).toContain(region)
+      }
+    }
+  })
+
+  it('ships a rate for every model the gateway rated, per the measured table', () => {
+    // The counts below are the transcription's own audit: 43 of the 49 shipped
+    // rows carry a rate, and exactly eight are rated by BOTH regions.
+    const rated = FALLBACK_MODELS.filter((model) => model.credits !== undefined)
+    const bothRegions = rated.filter((model) => Object.keys(model.credits!).length === 2)
+    expect(rated).toHaveLength(43)
+    expect(bothRegions.map((model) => model.id)).toEqual([
+      'glm-5.3',
+      'glm-5.3-flash',
+      'glm-5.2',
+      'kimi-k2.8-preview',
+      'kimi-k2.6',
+      'deepseek-v4.1-flash',
+      'hy4-preview',
+      'hy3',
+    ])
+    // The one measured disagreement: 0.11 on cn against 0.00 on intl.
+    expect(FALLBACK_MODELS.find((m) => m.id === 'deepseek-v4.1-flash')?.credits)
+      .toEqual({ cn: '0.11', intl: '0.00' })
+  })
+
+  it('stores every shipped multiplier as a bare finite non-negative number', () => {
+    // The stored form is the bare number, never the wire spelling: no 'x'
+    // prefix and no 'credits' suffix, and always something Number() reads back
+    // unchanged — a consumer doing arithmetic must not have to re-run the wire
+    // parser, and a rounded or padded value would be a transcription error.
+    for (const model of FALLBACK_MODELS) {
+      for (const [region, value] of Object.entries(model.credits ?? {})) {
+        const where = model.id + ' (' + region + ')'
+        expect(typeof value, where).toBe('string')
+        expect(value, where).not.toContain('x')
+        expect(value, where).not.toContain('credits')
+        const numeric = Number(value)
+        expect(Number.isFinite(numeric), where).toBe(true)
+        expect(numeric >= 0, where).toBe(true)
+        // A plain decimal literal: no sign, no exponent, no padding to trim.
+        // Trailing zeros are KEPT ('2.00', not '2'), because the value is a
+        // verbatim transcription of the published string and re-formatting it
+        // would be the rounding this table exists to avoid.
+        expect(value, where).toMatch(/^\d+(\.\d+)?$/)
+      }
+    }
   })
 })
 
