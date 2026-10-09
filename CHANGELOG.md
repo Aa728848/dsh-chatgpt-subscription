@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[Antigravity] 缓存卡片改为只报「整段未命中」并给出它之前的空闲时长**
+  - **原来的口径把最有用的信息盖掉了。** 卡片报的是「相比上一次请求，三段前缀里哪一段变了」，而每次发新消息都必然改变 `contents`，于是它**每一次都显示「对话内容变化」**——既报了唯一注定要变的那一项，又把真正花钱的那件事藏了起来。这个口径是我上一版写的，属于设计失误。
+  - **现在只在整段未命中时发布归因**（`cachedContentTokenCount === 0`，即整个前缀被重算）。部分命中是对话增长的正常状态，每次新回合都必然带入服务端没见过的 token，`freshTokens > 0` 本身不代表任何东西，因此不再上报。
+  - **归因改为「先暂存、后发布」**：请求发出前算出的变化只暂存（`pendingBySession`），等响应报回用量后才决定要不要发布。改动的代价是否为零，只有响应的用量能回答。
+  - **新增空闲时长**：记录每个会话上一次**发出请求**的时刻，未命中时一并报出间隔。服务端的缓存按空闲时间过期（实测在 76 秒仍命中、183 秒整段失效），而客户端无法读取那个阈值——这是唯一能在本地观测到它的读数。首次请求没有可比较的前值，因此不填该字段（填 0 会被读成「立刻返回」）。
+  - **契约与 UI 同步**：`AntigravityCacheStatsDto.lastDriftCause` → `lastMiss: { cause, idleMs?, at }`；卡片显示「最近一次整段未命中」+「未命中前空闲」，时长按 3m 3s / 45s 这样的人类单位渲染；中英文案与段落说明一并重写。
+  - 测试：缓存统计 19 → 22 例（新增「命中时不报」「未命中时发布归因」「记录空闲时长」「首次请求不填空闲」），卡片渲染新增 1 例（全部命中时**不出现**任何未命中行，防止退回「每次都有话说」）。既有断言中 3 处依赖旧口径的已按新契约更新。
+  - 验证：`npm run typecheck` 0 错误；全量 `npm test` **2956 passed / 7 skipped, 0 failed**（较基线增 4 例）。
+
 - **[Antigravity] 让 Gemini 路线的请求前缀保持逐字节稳定，并给这条线路补上缓存观测**
   - **Antigravity 用的是 Google 服务端隐式缓存，客户端没有任何开关可拨。** 二进制里 `cachedContents` / `ContextCacheConfig` / `ttl` 这些字段确实存在，但都属于它链进来的官方 Go SDK，不是它的调用面：它实际只 POST `/v1internal:streamGenerateContent`，那层消息里不含任何缓存控制字段。所以唯一能提高命中率的手段，就是**不修改**请求前缀——前缀一旦在某个位置被改写，从该位置往后全部失效。
   - **Gemini 路线一直在把每个 SSE text delta 回放成独立 part。** 这条修复此前只做给了 Claude（见 `docs/antigravity-claude-cache-audit.md`：385 个 delta 回放成 385 个 part，命中率因此掉到 68.84%），Gemini 走的是同一份 delta 却漏了。现在抽出纯函数 `mergeAdjacentTextParts`，两条路线各自调用；Claude 专属的 thinking/signature 配对逻辑原地保留，只对 Claude 生效。合并只针对「仅含 `text` 一个键」的相邻 part，带 signature、`thought: true`、`functionCall` 的边界一律不跨越。

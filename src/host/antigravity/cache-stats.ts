@@ -94,8 +94,17 @@ export interface AntigravityCacheStats {
 
 /** The shape the settings route publishes, and the browser card renders. */
 export interface AntigravityCacheStatsDto extends AntigravityCacheStats {
-  /** Why the most recent request's prefix broke, when it did. */
-  lastDriftCause?: AntigravityPrefixDriftCause
+  /**
+   * The most recent request that came back with nothing cached.
+   *
+   * Only misses are published. A prefix change on its own says nothing: a new
+   * user turn always changes `contents`, and that turn still hits the cache for
+   * everything before it. Publishing every change made the card read "contents
+   * changed" on every single turn — it named the one input that is SUPPOSED to
+   * change and hid the one that actually costs: an idle gap that outlived the
+   * service's cache.
+   */
+  lastMiss?: AntigravityCacheMiss
 }
 
 /** Totals held for one scope; the ratio is derived on read, never stored. */
@@ -113,17 +122,41 @@ interface PrefixSnapshot {
   tools: string | null
 }
 
-/** The attribution recorded for one session, with when it was made. */
-interface DriftRecord {
+/**
+ * One total miss, and the two facts that explain it.
+ *
+ * A miss here means the response reported zero cached tokens — the whole prefix
+ * was reprocessed. That is the event worth naming; a partial hit is the normal
+ * state of a growing conversation.
+ */
+export interface AntigravityCacheMiss {
+  /** The segment that changed since this session's previous request. */
   cause: AntigravityPrefixDriftCause
+  /**
+   * Milliseconds since this session's previous request, or undefined when this
+   * was the session's first. The service's cache expires on idle time it does
+   * not disclose, so this is the reading that separates "the conversation
+   * restarted" from "the cache timed out while the user was away".
+   */
+  idleMs?: number
+  /** When the miss was recorded. */
   at: number
+}
+
+/** The attribution a request computed, held until its response says it missed. */
+interface PendingDrift {
+  cause: AntigravityPrefixDriftCause
+  idleMs?: number
 }
 
 const EMPTY_TOTALS: ScopeTotals = { requests: 0, cachedTokens: 0, freshTokens: 0 }
 
 const totalsByScope = new Map<string, ScopeTotals>()
 const prefixesBySession = new Map<string, PrefixSnapshot>()
-const driftBySession = new Map<string, DriftRecord>()
+const pendingBySession = new Map<string, PendingDrift>()
+const missBySession = new Map<string, AntigravityCacheMiss>()
+/** When each session last SENT a request, for the idle reading a miss reports. */
+const requestAtBySession = new Map<string, number>()
 
 /**
  * Sessions the process is willing to remember before evicting the oldest.
@@ -275,7 +308,13 @@ export function recordCacheRequest(body: string, sessionId?: unknown): Antigravi
   rememberScoped(prefixesBySession, scope, snapshot)
 
   const cause = driftCause(previous, snapshot)
-  rememberScoped(driftBySession, scope, { cause, at: Date.now() })
+  // Staged, not published. Whether this change COST anything is only knowable
+  // once the response reports its usage, and recordCacheUsage publishes it then
+  // and only if the turn came back with nothing cached.
+  const previousRequestAt = requestAtBySession.get(scope)
+  rememberScoped(requestAtBySession, scope, Date.now())
+  const idleMs = previousRequestAt === undefined ? undefined : Math.max(0, Date.now() - previousRequestAt)
+  rememberScoped(pendingBySession, scope, { cause, ...(idleMs === undefined ? {} : { idleMs }) })
   return cause
 }
 
@@ -308,6 +347,20 @@ export function recordCacheUsage(sample: AntigravityUsageSample, sessionId?: unk
     requests: previous.requests + 1,
     cachedTokens: previous.cachedTokens + cached,
     freshTokens: previous.freshTokens + fresh,
+  })
+
+  // Only a total miss is worth naming. A partial hit is the ordinary state of a
+  // conversation that keeps growing — every new turn adds tokens the service has
+  // never seen, so `freshTokens > 0` is expected and says nothing went wrong.
+  // Publishing on every change is what made the card read "contents changed" on
+  // each turn and never once name the idle timeout that actually costs.
+  const session = sessionScopeKey(sessionId)
+  const pending = pendingBySession.get(session)
+  if (cached !== 0 || pending === undefined) return
+  rememberScoped(missBySession, session, {
+    cause: pending.cause,
+    ...(pending.idleMs === undefined ? {} : { idleMs: pending.idleMs }),
+    at: Date.now(),
   })
 }
 
@@ -345,19 +398,19 @@ function sumTotals(sessionId?: string, accountId?: string): ScopeTotals {
   return totals
 }
 
-/** The attribution to publish for the requested scope, when one was recorded. */
-function causeFor(sessionId?: string): AntigravityPrefixDriftCause | undefined {
+/** The most recent miss for the requested scope, when one was recorded. */
+function missFor(sessionId?: string): AntigravityCacheMiss | undefined {
   if (sessionId === undefined) {
-    // A session was not named, so no single attribution describes the answer;
-    // the most recent one this process made still describes a real request,
-    // where picking the first key would report whichever ran longest ago.
-    let latest: DriftRecord | undefined
-    for (const record of driftBySession.values()) {
+    // A session was not named, so no single miss describes the answer; the most
+    // recent one this process recorded still describes a real request, where
+    // picking the first key would report whichever ran longest ago.
+    let latest: AntigravityCacheMiss | undefined
+    for (const record of missBySession.values()) {
       if (latest === undefined || record.at >= latest.at) latest = record
     }
-    return latest?.cause
+    return latest
   }
-  return driftBySession.get(sessionScopeKey(sessionId))?.cause
+  return missBySession.get(sessionScopeKey(sessionId))
 }
 
 /**
@@ -370,11 +423,11 @@ function causeFor(sessionId?: string): AntigravityPrefixDriftCause | undefined {
 export function getCacheStats(sessionId?: string, accountId?: string): AntigravityCacheStatsDto {
   const totals = sumTotals(sessionId, accountId)
   const prompt = totals.cachedTokens + totals.freshTokens
-  const cause = causeFor(sessionId)
+  const miss = missFor(sessionId)
   return {
     ...totals,
     hitRatio: prompt === 0 ? null : totals.cachedTokens / prompt,
-    ...(cause === undefined ? {} : { lastDriftCause: cause }),
+    ...(miss === undefined ? {} : { lastMiss: miss }),
   }
 }
 
@@ -396,10 +449,14 @@ export function resetCacheStats(sessionId?: string): void {
   if (sessionId === undefined) {
     totalsByScope.clear()
     prefixesBySession.clear()
-    driftBySession.clear()
+    pendingBySession.clear()
+    missBySession.clear()
+    requestAtBySession.clear()
     return
   }
   dropSession(totalsByScope, sessionId)
   dropSession(prefixesBySession, sessionId)
-  dropSession(driftBySession, sessionId)
+  dropSession(pendingBySession, sessionId)
+  dropSession(missBySession, sessionId)
+  dropSession(requestAtBySession, sessionId)
 }

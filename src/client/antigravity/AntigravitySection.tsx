@@ -20,8 +20,17 @@ interface Props {
   loadModelDirectory?: () => void
 }
 
-/** Human label for the last request's prefix-drift cause. */
-function driftLabel(cause: AntigravityPrefixDriftCause, t: typeof zh): string {
+/** A gap in human units, so the idle reading is legible without arithmetic. */
+function idleLabel(ms: number): string {
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`
+}
+
+/** Human label for the cause of the last request that lost the whole cache. */
+function missLabel(cause: AntigravityPrefixDriftCause, t: typeof zh): string {
   switch (cause) {
     case 'none': return t.cacheDriftNone
     case 'contents': return t.cacheDriftContents
@@ -515,11 +524,19 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
                 <span>{t.cacheRequests}: {status.cache.requests}</span>
               </div>
             </div>
-            {status.cache.lastDriftCause !== undefined && (
-              <div className="dsha-row">
-                <span className="dsha-label">{t.cacheDrift}</span>
-                <span className="dsha-value">{driftLabel(status.cache.lastDriftCause, t)}</span>
-              </div>
+            {status.cache.lastMiss !== undefined && (
+              <>
+                <div className="dsha-row">
+                  <span className="dsha-label">{t.cacheMiss}</span>
+                  <span className="dsha-value">{missLabel(status.cache.lastMiss.cause, t)}</span>
+                </div>
+                {status.cache.lastMiss.idleMs !== undefined && (
+                  <div className="dsha-row">
+                    <span className="dsha-label">{t.cacheMissIdle}</span>
+                    <span className="dsha-value">{idleLabel(status.cache.lastMiss.idleMs)}</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

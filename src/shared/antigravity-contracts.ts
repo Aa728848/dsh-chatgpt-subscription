@@ -94,8 +94,37 @@ export interface AntigravityCacheStatsDto {
   freshTokens: number
   /** cached / (cached + fresh); null until a request reports usage. */
   hitRatio: number | null
-  /** Why the most recent request's prefix broke, when it did. */
-  lastDriftCause?: AntigravityPrefixDriftCause
+  /**
+   * The most recent request that came back with NOTHING cached.
+   *
+   * Only total misses are published. Every user turn changes the conversation, so
+   * reporting the latest prefix change reported the same thing on every turn and
+   * buried the reading that matters: how long the client was idle before the turn
+   * that lost the cache. A partial hit is the normal state of a growing
+   * conversation and is deliberately not reported here.
+   */
+  lastMiss?: AntigravityCacheMiss
+}
+
+/**
+ * One total miss, and the two facts that explain it.
+ *
+ * A miss means the response reported zero cached tokens: the service reprocessed
+ * the entire prefix. Naming the cause beside the idle time is what separates a
+ * conversation that restarted from a cache that expired while the user was away
+ * — the two have opposite remedies, and the ratio alone cannot tell them apart.
+ */
+export interface AntigravityCacheMiss {
+  /** The segment that changed since this session's previous request. */
+  cause: AntigravityPrefixDriftCause
+  /**
+   * Milliseconds since this session's previous request, or undefined when this
+   * was the session's first. The service's cache expires on idle time it does
+   * not disclose, so this is the only client-side reading of that boundary.
+   */
+  idleMs?: number
+  /** When the miss was recorded, in Unix milliseconds. */
+  at: number
 }
 
 /** One pooled Antigravity account as the settings card renders it. */

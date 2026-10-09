@@ -178,7 +178,9 @@ describe('Antigravity account card', () => {
         cachedTokens: 3800,
         freshTokens: 200,
         hitRatio: 0.95,
-        lastDriftCause: 'contents' as const,
+        // A total miss, reported with the idle gap that preceded it: the cache
+        // expires on idle time, and this is the pair the card exists to show.
+        lastMiss: { cause: 'none' as const, idleMs: 183_000, at: 1_791_552_655_806 },
       },
     }
     globalThis.fetch = vi.fn(async () => Response.json({ ok: true, value: withCache })) as typeof fetch
@@ -190,7 +192,29 @@ describe('Antigravity account card', () => {
     expect(container.textContent).toContain(zh.cacheCached + ': 3,800')
     expect(container.textContent).toContain(zh.cacheFresh + ': 200')
     expect(container.textContent).toContain(zh.cacheRequests + ': 4')
-    expect(container.textContent).toContain(zh.cacheDriftContents)
+    // The miss is named, and the idle reading is rendered in human units rather
+    // than raw milliseconds. The label and value are separate spans, so each is
+    // asserted on its own rather than as one joined string.
+    expect(container.textContent).toContain(zh.cacheMiss)
+    expect(container.textContent).toContain(zh.cacheDriftNone)
+    expect(container.textContent).toContain(zh.cacheMissIdle)
+    expect(container.textContent).toContain('3m 3s')
+  })
+
+  it('reports no miss while every turn has hit the cache', async () => {
+    const warm = {
+      ...statusPayload(),
+      cache: { requests: 3, cachedTokens: 9000, freshTokens: 300, hitRatio: 0.968 },
+    }
+    globalThis.fetch = vi.fn(async () => Response.json({ ok: true, value: warm })) as typeof fetch
+
+    await act(async () => root.render(createElement(AntigravitySection, {})))
+
+    expect(container.textContent).toContain('96.8%')
+    // Nothing to report is not the same as reporting "unchanged": a card that
+    // always showed a cause would put "contents changed" on every single turn.
+    expect(container.textContent).not.toContain(zh.cacheMiss)
+    expect(container.textContent).not.toContain(zh.cacheMissIdle)
   })
 
   it('says so when no request has reported usage yet', async () => {

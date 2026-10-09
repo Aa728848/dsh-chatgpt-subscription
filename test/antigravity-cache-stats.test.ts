@@ -119,10 +119,28 @@ describe('Antigravity cache statistics', () => {
   })
 
   describe('prefix drift attribution', () => {
-    it('does not report drift for a repeated identical request', () => {
+    it('reports nothing for a turn that hit the cache', () => {
+      // The turn's own prefix change is real, but it cost nothing: everything
+      // before it was still cached. Publishing it would put "contents changed"
+      // on the card every single turn and never name what actually costs.
       expect(turn('sess-a', body(USER_TURN), 900, 100)).toBe('new-session')
+      expect(getCacheStats('sess-a').lastMiss).toBeUndefined()
+
       expect(turn('sess-a', body(USER_TURN), 900, 100)).toBe('none')
-      expect(getCacheStats('sess-a').lastDriftCause).toBe('none')
+      expect(getCacheStats('sess-a').lastMiss).toBeUndefined()
+    })
+
+    it('reports the miss once a turn comes back with nothing cached', () => {
+      turn('sess-a', body(USER_TURN), 900, 100)
+      // A total miss: cachedContentTokenCount was 0, so the whole prefix was
+      // reprocessed. That is the event the card names.
+      expect(turn('sess-a', body(USER_TURN), 0, 5000)).toBe('none')
+
+      const miss = getCacheStats('sess-a').lastMiss
+      expect(miss?.cause).toBe('none')
+      // 'none' beside a real miss is the service-side expiry reading: the client
+      // sent a byte-identical prefix and still lost the whole cache.
+      expect(typeof miss?.at).toBe('number')
     })
 
     it('does not report drift when the same request is reserialized with a different key order', () => {
@@ -139,7 +157,34 @@ describe('Antigravity cache statistics', () => {
       const next = body([...USER_TURN, { role: 'model', parts: [{ text: 'answer' }] }])
 
       expect(recordCacheRequest(next, 'sess-a')).toBe('contents')
-      expect(getCacheStats('sess-a').lastDriftCause).toBe('contents')
+      // The cause alone is not published — only a miss publishes, and this
+      // request has not reported usage yet.
+      expect(getCacheStats('sess-a').lastMiss).toBeUndefined()
+
+      recordCacheUsage({ cachedTokens: 0, freshTokens: 4200 }, 'sess-a')
+      expect(getCacheStats('sess-a').lastMiss?.cause).toBe('contents')
+    })
+
+    it('records how long the client was idle before the miss', () => {
+      // The service expires its cache on idle time it does not disclose, so this
+      // reading is the only client-side way to see that boundary.
+      turn('sess-a', body(USER_TURN), 900, 100)
+      const before = Date.now()
+      recordCacheRequest(body(USER_TURN), 'sess-a')
+      recordCacheUsage({ cachedTokens: 0, freshTokens: 5000 }, 'sess-a')
+
+      const idleMs = getCacheStats('sess-a').lastMiss?.idleMs
+      expect(idleMs).toBeGreaterThanOrEqual(0)
+      expect(idleMs).toBeLessThanOrEqual(Date.now() - before + 50)
+    })
+
+    it('leaves the idle reading off the session\'s very first request', () => {
+      // There is no previous request to measure from, and inventing a zero would
+      // read as "returned immediately" rather than "nothing to compare".
+      recordCacheRequest(body(USER_TURN), 'sess-a')
+      recordCacheUsage({ cachedTokens: 0, freshTokens: 5000 }, 'sess-a')
+
+      expect(getCacheStats('sess-a').lastMiss?.idleMs).toBeUndefined()
     })
 
     it('attributes a changed system instruction to systemInstruction', () => {
@@ -225,11 +270,12 @@ describe('Antigravity cache statistics', () => {
 
     it('drops the named session\'s prefix snapshot too, so its next request starts over', () => {
       recordCacheRequest(body(USER_TURN), 'sess-a')
+      recordCacheUsage({ cachedTokens: 0, freshTokens: 100 }, 'sess-a')
       resetCacheStats('sess-a')
 
       expect(recordCacheRequest(body(USER_TURN), 'sess-a')).toBe('new-session')
-      // Reset means the attribution is gone as well, not left over from before.
-      expect(getCacheStats('sess-a').lastDriftCause).toBe('new-session')
+      // Reset means the recorded miss is gone as well, not left over from before.
+      expect(getCacheStats('sess-a').lastMiss).toBeUndefined()
     })
 
     it('clears every session when none is named', () => {
