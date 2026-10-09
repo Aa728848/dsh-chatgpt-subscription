@@ -49,6 +49,55 @@ import type { AccountRotationStrategy, PoolAccountSummaryDto } from './account-p
 
 export type { AccountRotationStrategy }
 
+/**
+ * The part of an Antigravity request that changed since that session's previous
+ * request.
+ *
+ * The line's cache is implicit and server-side: nothing in the request turns it
+ * on, so a hit ratio alone cannot say why a turn went cold. `'none'` means the
+ * prefix held; every other value names the input that broke it.
+ *
+ * Read `'none'` narrowly. It says the segments this line fingerprints are
+ * byte-identical to the previous request of the same session — not that nothing
+ * about the turn changed. The serving account is one input it cannot see: the
+ * snapshots are keyed by session while the token totals are keyed by session and
+ * account, so a conversation that fell through to another pooled account reports
+ * `'none'` even though the account changed. Whether that accounts for anything
+ * server-side is inferred, not measured.
+ */
+export type AntigravityPrefixDriftCause =
+  | 'none'
+  | 'contents'
+  | 'systemInstruction'
+  | 'tools'
+  /**
+   * The session identifier the request carries changed inside one session scope.
+   * It names the client-side string and promises nothing about the service's
+   * cache, which is why it is spelled out rather than shortened to "session ID".
+   */
+  | 'session-id'
+  | 'new-session'
+
+/**
+ * How well Antigravity's implicit prefix cache is working for one session.
+ *
+ * Reported because the cache is invisible otherwise: there is no marker to set
+ * and no client-side control field, so the served-from-cache share of the prompt
+ * is the only evidence a conversation is reusing its prefix.
+ */
+export interface AntigravityCacheStatsDto {
+  /** Requests that reported usage. */
+  requests: number
+  /** Prompt tokens served from cache across those requests. */
+  cachedTokens: number
+  /** Prompt tokens processed afresh across those requests. */
+  freshTokens: number
+  /** cached / (cached + fresh); null until a request reports usage. */
+  hitRatio: number | null
+  /** Why the most recent request's prefix broke, when it did. */
+  lastDriftCause?: AntigravityPrefixDriftCause
+}
+
 /** One pooled Antigravity account as the settings card renders it. */
 export interface AntigravityAccountSummaryDto extends PoolAccountSummaryDto {
   projectId?: string
@@ -79,6 +128,12 @@ export interface AntigravityWebStatus {
   accounts?: AntigravityAccountSummaryDto[]
   activeAccountId?: string
   rotationStrategy?: AccountRotationStrategy
+  /**
+   * Rolling prefix-cache effectiveness for the requested session, or for the
+   * whole process when the request named none. Null while nothing has reported
+   * usage yet — which is not the same fact as a 0% hit ratio.
+   */
+  cache?: AntigravityCacheStatsDto | null
 }
 
 export interface AntigravitySettingsUpdateDto {

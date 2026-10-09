@@ -1,12 +1,17 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FileCredentialStore, FileModelSettingsStore, type AntigravityPreferenceStore } from './token-store.ts'
-import { AccountPoolStore } from './account-pool.ts'
+import { AccountPoolStore, poolRotationStrategy } from './account-pool.ts'
 import { beginWebLogin, getWebLoginStatus } from './oauth.ts'
 import { ANTIGRAVITY_QUOTA_CACHE_TTL_MS, clearCachedQuota, fetchAccountQuota, getCachedQuota } from './client.ts'
 import { MODELS } from './types.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
-import type { AntigravityModelOption, AntigravityWebStatus } from '../../shared/antigravity-contracts.ts'
+import { getCacheStats } from './cache-stats.ts'
+import type {
+  AntigravityCacheStatsDto,
+  AntigravityModelOption,
+  AntigravityWebStatus,
+} from '../../shared/antigravity-contracts.ts'
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json' })
@@ -42,6 +47,7 @@ export async function getAntigravityWebStatus(
   modelSettings: FileModelSettingsStore,
   preferences?: AntigravityPreferenceStore,
   accountPool = new AccountPoolStore(undefined, undefined, store),
+  sessionId?: string,
 ): Promise<AntigravityWebStatus> {
   const credentials = await store.read()
   const settings = preferences ? preferences.status() : await modelSettings.read()
@@ -76,8 +82,28 @@ export async function getAntigravityWebStatus(
     defaultReasoningEffort: settings.defaultReasoningEffort || null,
     accounts,
     activeAccountId: poolData?.activeAccountId || activeAccount?.id,
-    rotationStrategy: poolData?.rotationStrategy || 'sequential',
+    // Both lines fall back to the same default: the strategy the pool itself
+    // would use for an unstated one. A stored choice — including a
+    // 'sequential' written before this default moved — wins, so what the card
+    // shows is what the adapter will actually do.
+    rotationStrategy: poolData?.rotationStrategy || poolRotationStrategy(undefined),
+    cache: cacheStatsOrNull(sessionId),
   }
+}
+
+/**
+ * Rolling cache totals for one session, or null while nothing has reported usage.
+ *
+ * The session is a query parameter because the numbers are per session: a host
+ * running several conversations at once cannot present one merged hit ratio as
+ * if it described any of them. With no session named the route still answers
+ * with the process aggregate, which is the right answer for a settings card
+ * that is not showing a specific conversation.
+ */
+function cacheStatsOrNull(sessionId?: string): AntigravityCacheStatsDto | null {
+  const stats = getCacheStats(sessionId)
+  if (stats.requests === 0) return null
+  return stats
 }
 
 export function registerAntigravityRoutes(
@@ -112,7 +138,16 @@ export function registerAntigravityRoutes(
             if (cached === undefined) await quotaRefresh.run(refresh)
             else quotaRefresh.start(refresh)
           }
-          const value = await getAntigravityWebStatus(store, modelSettings, preferences, accountPool)
+          // The cache totals are per session when the caller names one, so a card
+          // showing a specific conversation can read that conversation's ratio
+          // instead of the process-wide one.
+          const value = await getAntigravityWebStatus(
+            store,
+            modelSettings,
+            preferences,
+            accountPool,
+            url.searchParams.get('sessionId') ?? undefined,
+          )
           return sendJson(response, 200, { ok: true, value: { ...value, quotaRefreshing: quotaRefresh.refreshing } })
         }
 

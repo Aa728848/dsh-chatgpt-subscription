@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **[Antigravity] 让 Gemini 路线的请求前缀保持逐字节稳定，并给这条线路补上缓存观测**
+  - **Antigravity 用的是 Google 服务端隐式缓存，客户端没有任何开关可拨。** 二进制里 `cachedContents` / `ContextCacheConfig` / `ttl` 这些字段确实存在，但都属于它链进来的官方 Go SDK，不是它的调用面：它实际只 POST `/v1internal:streamGenerateContent`，那层消息里不含任何缓存控制字段。所以唯一能提高命中率的手段，就是**不修改**请求前缀——前缀一旦在某个位置被改写，从该位置往后全部失效。
+  - **Gemini 路线一直在把每个 SSE text delta 回放成独立 part。** 这条修复此前只做给了 Claude（见 `docs/antigravity-claude-cache-audit.md`：385 个 delta 回放成 385 个 part，命中率因此掉到 68.84%），Gemini 走的是同一份 delta 却漏了。现在抽出纯函数 `mergeAdjacentTextParts`，两条路线各自调用；Claude 专属的 thinking/signature 配对逻辑原地保留，只对 Claude 生效。合并只针对「仅含 `text` 一个键」的相邻 part，带 signature、`thought: true`、`functionCall` 的边界一律不跨越。
+  - **图片预算原本按存储字节度量，而缩放发生在预算之后**，导致一组图在缩放有机会生效之前就已经超限、最旧的图照样被替换成占位文本——图片数量仍然变化，前缀照旧被改写，缩放等于没接上。现在 `requestImageBytes` 度量的是**实际要发送的尺寸**（有缩放目标时取 `min(存储字节, 目标上限)`），这是 `host/common/request-images.ts` 已记录过的同一个陷阱。预算仍保持 Antigravity 自己的 12MB，**没有**借用 Kimi 的 1.5MB。
+  - **这条线路此前完全不可观测**：`request-diagnostics` 的指纹是进程内临时 HMAC、不落盘，而且只看顶层 `tools/system/messages`，看不到 Antigravity 嵌套的 `request.contents/systemInstruction/tools`。新增的 `cache-stats.ts` 按会话记录命中率，并对三段前缀各取一个稳定指纹，把冷却归因到 `contents` / `systemInstruction` / `tools` / `session-id` / `none`。哈希走键排序后的稳定序列化，否则两个结构相同、键序不同的请求会被报成假漂移。统计纯内存、按 `sessionId + accountId` 分作用域、256 作用域 LRU。
+  - **已知局限写进了文件头，而不是留在报告里**：前缀快照按 session 分区、token 总计按 session+account 分区，两者作用域不同，所以**会话中途 429 换号会被报成 `'none'`**——读者不能据此读成「客户端什么都没变」。账号是否真的分区服务端缓存始终是 **INFERRED, not measured**，也正因如此没有把 `account` 提升成漂移原因：在假设未验证前把它写进契约，等于把假设当事实陈述。`'session-id'` 那个枚举同理，文案用「会话标识变化」而不承诺缓存语义。
+  - **账号调度缺省改为 sticky**，且只改缺省：`parseAntigravityPoolData` 会把缺失值补成 `'sequential'` 并写回池文件，所以那里的解析器也必须一起改，否则 `routes.ts` 的回退分支是死代码。**已存盘的显式选择继续生效**，不为存量用户做迁移——这条改动的前提（账号=缓存命名空间）尚未验证，不适合在未证实收益的情况下改变既有行为。共享 core `host/common/account-pool.ts` 的策略语义未动，其他线路不受影响。
+  - 设置页新增缓存卡片（命中率、累计 cached/fresh、最近一次漂移原因），中英文案齐备；未测得用量时显示为空而不是画一个 0% 的假仪表。
+  - 验证：`npm run typecheck` 0 错误；全量 `npm test` **2952 passed / 7 skipped, 0 failed**。新用例在改动前的实现上实测 **12 failed**（用 `git stash` 单独暂存 `mapper.ts` 复现），改后全过。
+  - **本次没有证明命中率提升**：Google 的隐式缓存是服务端的，本机无法做 A/B，`readImageRequest` 的真实缩放产物在测试里全是 mock。改动依据是「前缀逐字节稳定」这一机制，与 68.84% 那次的成因同构，但没有可报的线上数字。
+
 ## 0.16.0 - 2026-10-09
 
 - **[WorkBuddy] 模型行加上消耗倍率提示**

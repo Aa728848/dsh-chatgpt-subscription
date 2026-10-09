@@ -158,4 +158,49 @@ describe('Antigravity account card', () => {
     expect(calls[1]).toEqual({ url: '/antigravity/api/accounts', body: { action: 'clear-cooldown', accountId: 'acc_2' } })
     expect(container.textContent).not.toContain(zh.cooling)
   })
+
+  it('falls back to sticky when the host reports no strategy', async () => {
+    const { rotationStrategy: _omitted, ...withoutStrategy } = statusPayload()
+    globalThis.fetch = vi.fn(async () => Response.json({ ok: true, value: withoutStrategy })) as typeof fetch
+
+    await act(async () => root.render(createElement(AntigravitySection, {})))
+
+    // The fallback matches the host's own default, so the card never shows a
+    // strategy the adapter is not using.
+    expect(container.querySelector<HTMLSelectElement>('.dsha-select')!.value).toBe('sticky')
+  })
+
+  it('renders the session cache totals the status reports', async () => {
+    const withCache = {
+      ...statusPayload(),
+      cache: {
+        requests: 4,
+        cachedTokens: 3800,
+        freshTokens: 200,
+        hitRatio: 0.95,
+        lastDriftCause: 'contents' as const,
+      },
+    }
+    globalThis.fetch = vi.fn(async () => Response.json({ ok: true, value: withCache })) as typeof fetch
+
+    await act(async () => root.render(createElement(AntigravitySection, {})))
+
+    expect(container.textContent).toContain(zh.cacheSection)
+    expect(container.textContent).toContain('95.0%')
+    expect(container.textContent).toContain(zh.cacheCached + ': 3,800')
+    expect(container.textContent).toContain(zh.cacheFresh + ': 200')
+    expect(container.textContent).toContain(zh.cacheRequests + ': 4')
+    expect(container.textContent).toContain(zh.cacheDriftContents)
+  })
+
+  it('says so when no request has reported usage yet', async () => {
+    globalThis.fetch = vi.fn(async () => Response.json({ ok: true, value: statusPayload() })) as typeof fetch
+
+    await act(async () => root.render(createElement(AntigravitySection, {})))
+
+    // Null is "nothing measured", not a 0% ratio: the card must not draw a meter
+    // for a request that never ran.
+    expect(container.textContent).toContain(zh.cacheEmpty)
+    expect(container.textContent).not.toContain(zh.cacheHitRatio)
+  })
 })

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   AccountRotationStrategy,
+  AntigravityPrefixDriftCause,
   AntigravityWebStatus,
 } from '../../shared/antigravity-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
@@ -17,6 +18,19 @@ const api = createLineApi(API, 'Antigravity')
 interface Props {
   onModelChange?: () => void
   loadModelDirectory?: () => void
+}
+
+/** Human label for the last request's prefix-drift cause. */
+function driftLabel(cause: AntigravityPrefixDriftCause, t: typeof zh): string {
+  switch (cause) {
+    case 'none': return t.cacheDriftNone
+    case 'contents': return t.cacheDriftContents
+    case 'systemInstruction': return t.cacheDriftSystemInstruction
+    case 'tools': return t.cacheDriftTools
+    case 'session-id': return t.cacheDriftSessionId
+    case 'new-session': return t.cacheDriftNewSession
+    default: return String(cause)
+  }
 }
 
 export function AntigravitySection({ onModelChange, loadModelDirectory }: Props): React.ReactElement {
@@ -368,7 +382,12 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
       <AccountPoolSection
         accounts={status?.accounts ?? []}
         activeAccountId={status?.activeAccountId}
-        rotationStrategy={status?.rotationStrategy ?? 'sequential'}
+        // Matches what the host reports for an unstated strategy: the account
+        // that served the previous request keeps the next one, which is assumed
+        // to leave its cache warm — the host documents that assumption and its
+        // lack of live verification. A stored choice still arrives from the host
+        // and wins over this fallback.
+        rotationStrategy={status?.rotationStrategy ?? 'sticky'}
         busy={busy}
         labels={t}
         loginBusyLabel={busy === 'login' ? (loginProgress || t.signingIn) : undefined}
@@ -470,7 +489,43 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
         />
       </section>
 
-      {/* 5. 用量与配额卡片 */}
+      {/* 5. 缓存可观测性（只读） */}
+      <section className="dsha-group">
+        <div className="dsha-grouphead">
+          <h3>{t.cacheSection}</h3>
+        </div>
+        <p className="dsha-muted">{t.cacheDesc}</p>
+        {status?.cache == null ? (
+          <div className="dsha-empty">{t.cacheEmpty}</div>
+        ) : (
+          <div className="dsha-quota-card">
+            <div className="dsha-meter-wrap">
+              <div className="dsha-meter-label">
+                <span>{t.cacheHitRatio}</span>
+                <strong>
+                  {status.cache.hitRatio === null ? '—' : `${(status.cache.hitRatio * 100).toFixed(1)}%`}
+                </strong>
+              </div>
+              <div className={`dsha-meter ${(status.cache.hitRatio ?? 0) >= 0.9 ? 'dsha-meter-green' : 'dsha-meter-cyan'}`}>
+                <span style={{ width: `${Math.round((status.cache.hitRatio ?? 0) * 100)}%` }} />
+              </div>
+              <div className="dsha-meter-meta">
+                <span>{t.cacheCached}: {status.cache.cachedTokens.toLocaleString()}</span>
+                <span>{t.cacheFresh}: {status.cache.freshTokens.toLocaleString()}</span>
+                <span>{t.cacheRequests}: {status.cache.requests}</span>
+              </div>
+            </div>
+            {status.cache.lastDriftCause !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.cacheDrift}</span>
+                <span className="dsha-value">{driftLabel(status.cache.lastDriftCause, t)}</span>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* 6. 用量与配额卡片 */}
       <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.quotaSection}</h3>

@@ -66,7 +66,13 @@ describe.skipIf(!existsSync(BUNDLE_PATH))('Antigravity image wire format (built 
     const modelSettings = new FileModelSettingsStore()
     vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [], defaultReasoningEffort: 'low' })
     const readImage = vi.fn(async () => ({ ref: ATTACHMENT, data: PNG }))
-    const adapter = new bundle.AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage } })
+    // The seam declares readImageRequest, so a stub must supply one. This
+    // attachment is inside the edge ceiling, so the scaled path is never taken.
+    const readImageRequest = vi.fn(async (_ref: Parameters<AttachmentStore['readImageRequest']>[0],
+      _target: Parameters<AttachmentStore['readImageRequest']>[1]) => ({ attachment: ATTACHMENT, variantId: 'variant' as never, data: PNG,
+      mediaType: 'image/png' as const, bytes: PNG.length, width: 1, height: 1,
+      depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false }))
+    const adapter = new bundle.AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage, readImageRequest } })
 
     for await (const chunk of adapter.stream({
       provider: 'antigravity',

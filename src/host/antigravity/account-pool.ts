@@ -4,7 +4,7 @@ import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
-import { AccountPoolCore, normalizeRotationStrategy, type AccountPoolHooks } from '../common/account-pool.ts'
+import { AccountPoolCore, type AccountPoolHooks } from '../common/account-pool.ts'
 import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { dshHomeDir } from '../common/home.ts'
 import {
@@ -46,12 +46,41 @@ export function poolPath(): string {
   return path.join(dshHomeDir(), 'storages', 'antigravity-pool.json')
 }
 
+/**
+ * The rotation strategy this line defaults to, and the reader for it.
+ *
+ * Sticky rather than the shared core's sequential default, because the account a
+ * request is served by may also decide which server-side prefix cache it can
+ * reach: each account is a separate quota domain, and an account that changes mid
+ * conversation plausibly lands on a cache the previous one had not warmed, so the
+ * next turn may reprocess a prefix that was already paid for. Holding the account
+ * that served the previous request is the cheap way to not find out the hard way,
+ * and a request that is rate limited still falls through to another account.
+ *
+ * That account identity selects a cache namespace is INFERRED, not measured.
+ * Nothing here observes an account-scoped cache metric, no live capture has been
+ * taken, and docs/antigravity-claude-cache-audit.md records the upstream position
+ * — on-wire session affinity still needs transport diagnostics — against a run
+ * that had a single account, so cross-account behaviour was never exercised.
+ * The default stands as a design assumption until one of those is done.
+ *
+ * Only the DEFAULT differs. An explicit stored choice is returned unchanged, and
+ * a pool file written before this change carries an explicit 'sequential' — so
+ * upgrading does not silently move an existing user onto a different strategy.
+ * The shared core keeps its own sequential default for every other line.
+ */
+export function poolRotationStrategy(value: unknown): AccountRotationStrategy {
+  return value === 'sequential' || value === 'round-robin' || value === 'sticky'
+    ? value
+    : 'sticky'
+}
+
 export function parseAntigravityPoolData(value: unknown): AntigravityPoolData {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Antigravity pool payload is invalid')
   }
   const record = value as Record<string, unknown>
-  const strategy: AccountRotationStrategy = normalizeRotationStrategy(record.rotationStrategy)
+  const strategy: AccountRotationStrategy = poolRotationStrategy(record.rotationStrategy)
   const activeAccountId = typeof record.activeAccountId === 'string' ? record.activeAccountId : undefined
   const rawAccounts = Array.isArray(record.accounts) ? record.accounts : []
   const accounts: AntigravityPoolAccount[] = []

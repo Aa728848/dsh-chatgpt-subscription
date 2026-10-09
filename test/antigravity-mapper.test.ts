@@ -7,6 +7,7 @@ import {
   MAX_REQUEST_IMAGE_BYTES,
   offloadOldestRequestImages,
   processStreamLine,
+  requestImageTarget,
   resolveRequestImages,
   stripMetaSchema,
 } from '../src/host/antigravity/mapper.ts'
@@ -18,9 +19,9 @@ import {
 } from '../src/host/antigravity/types.ts'
 import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
 import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
-import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
-import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 describe('Antigravity Mapper', () => {
   const testModel = MODELS.find((m) => m.id === 'gemini-3.7-flash')!
@@ -393,8 +394,23 @@ describe('Antigravity image attachments', () => {
     } as unknown as GenerateOptions
   }
 
+  /**
+   * A scaled request version of {@link REF}. The seam declares readImageRequest,
+   * so every reader here must supply one; REF is 1x1 and inside the edge
+   * ceiling, so the scaled path is never actually taken in these cases.
+   */
+  function requestVersion(data: Uint8Array) {
+    return vi.fn(async (_ref: ImageAttachmentRef,
+      _target: Parameters<AttachmentStore['readImageRequest']>[1]) => ({ attachment: REF,
+      variantId: 'variant' as never, data, mediaType: 'image/png' as const, bytes: data.length,
+      width: 1, height: 1, depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false }))
+  }
+
   function readerReturning(data: Uint8Array) {
-    return { readImage: vi.fn(async (_ref: ImageAttachmentRef, _signal?: AbortSignal) => ({ ref: REF, data })) }
+    return {
+      readImage: vi.fn(async (_ref: ImageAttachmentRef, _signal?: AbortSignal) => ({ ref: REF, data })),
+      readImageRequest: requestVersion(data),
+    }
   }
 
   function requestParts(options: GenerateOptions, images: Awaited<ReturnType<typeof resolveRequestImages>>) {
@@ -435,7 +451,10 @@ describe('Antigravity image attachments', () => {
   })
 
   it('keeps an unreadable image visible as text instead of dropping it', async () => {
-    const attachments = { readImage: vi.fn(async () => { throw new Error('attachment store unavailable') }) }
+    const attachments = {
+      readImage: vi.fn(async () => { throw new Error('attachment store unavailable') }),
+      readImageRequest: requestVersion(PNG_BYTES),
+    }
     const options = requestWith([{ type: 'text', text: 'look' }, { type: 'image', attachment: REF }])
 
     const parts = requestParts(options, await resolveRequestImages(options, attachments))
@@ -459,7 +478,10 @@ describe('Antigravity image attachments', () => {
   it('propagates cancellation instead of reporting it as model text', async () => {
     const abort = new Error('aborted')
     abort.name = 'AbortError'
-    const attachments = { readImage: vi.fn(async () => { throw abort }) }
+    const attachments = {
+      readImage: vi.fn(async () => { throw abort }),
+      readImageRequest: requestVersion(PNG_BYTES),
+    }
     const options = requestWith([{ type: 'image', attachment: REF }])
 
     await expect(resolveRequestImages(options, attachments)).rejects.toBe(abort)
@@ -501,7 +523,10 @@ describe('Antigravity image attachments', () => {
         { role: 'user', content: [{ type: 'text', text: 'and this one?' }, { type: 'image', attachment: newest }] },
       ],
     } as unknown as GenerateOptions
-    const attachments = { readImage: vi.fn(async (value: ImageAttachmentRef) => ({ ref: value, data: PNG_BYTES })) }
+    const attachments = {
+      readImage: vi.fn(async (value: ImageAttachmentRef) => ({ ref: value, data: PNG_BYTES })),
+      readImageRequest: requestVersion(PNG_BYTES),
+    }
 
     const bounded = offloadOldestRequestImages(options)
     const parts = requestParts(bounded, await resolveRequestImages(bounded, attachments))
@@ -539,5 +564,135 @@ describe('Antigravity image attachments', () => {
     expect(contents[0].parts[0].functionResponse.response).toEqual({ output: '[image: shot.png]' })
   })
 })
+})
+
+describe('Antigravity replay part merging', () => {
+  const GEMINI = 'gemini-3.8-flash'
+  const CLAUDE = 'claude-opus-5-5'
+  const line = (value: unknown) => 'data: ' + JSON.stringify(value)
+
+  /**
+   * One assistant turn replayed the way production builds it: SSE text deltas
+   * through `processStreamLine`, the assembled blocks and their replay state into
+   * a message, then the next request built from that message.
+   */
+  function replayParts(modelId: string, frames: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+    const state = createStreamState()
+    const assembler = new BlockAssembler()
+    for (const part of frames) {
+      for (const chunk of processStreamLine(line({ candidates: [{ content: { parts: [part] } }] }), state)) assembler.push(chunk)
+    }
+    for (const chunk of processStreamLine(line({ candidates: [{ finishReason: 'STOP' }] }), state)) assembler.push(chunk)
+    for (const chunk of closeStream(state)) assembler.push(chunk)
+    const message = createAssistantMessage({
+      content: assembler.blocks(),
+      source: { provider: 'antigravity', model: modelId, replayState: assembler.replayState },
+    })
+    const request = buildRequest(normalizeGenerateOptions({
+      provider: 'antigravity', model: modelId, messages: [message],
+    }), MODELS.find((entry) => entry.id === modelId)!, 'project', modelId)
+    return (request.request as { contents: Array<{ parts: Array<Record<string, unknown>> }> }).contents[0]?.parts ?? []
+  }
+
+  it('merges the text fragments of one Gemini answer into a single replay part', () => {
+    // A long reply arrives as hundreds of separate SSE text deltas, and each one
+    // used to be replayed as its own wire part on every later turn.
+    const frames = Array.from({ length: 385 }, (_, index) => ({ text: 'chunk ' + index + ' ' }))
+    expect(replayParts(GEMINI, frames)).toEqual([{ text: frames.map((frame) => frame.text).join('') }])
+  })
+
+  it('keeps the merged Gemini text identical to the fragments it replaces', () => {
+    const frames = Array.from({ length: 40 }, (_, index) => ({ text: 'piece-' + index + ' ' }))
+    const text = frames.map((frame) => frame.text).join('')
+    // The model must read the same characters either way, so one part carrying
+    // the whole answer and forty parts carrying its pieces build the same bytes.
+    expect(replayParts(GEMINI, frames)).toEqual(replayParts(GEMINI, [{ text }]))
+  })
+
+  it('merges Gemini text around a signed part without moving that boundary', () => {
+    const call = { functionCall: { id: 'call-1', name: 'read', args: { path: 'a.ts' } } }
+    expect(replayParts(GEMINI, [
+      { text: 'a' }, { text: 'b' },
+      { text: 'signed', thoughtSignature: 'sig' },
+      { text: 'c' }, { text: 'd' },
+      call,
+      { text: 'e' }, { text: 'f' },
+    ])).toEqual([
+      { text: 'ab' },
+      { text: 'signed', thoughtSignature: 'sig' },
+      { text: 'cd' },
+      { functionCall: { name: 'read', args: { path: 'a.ts' }, id: 'call-1' } },
+      { text: 'ef' },
+    ])
+  })
+
+  it('never merges Gemini text across a signature-only part', () => {
+    expect(replayParts(GEMINI, [{ text: 'a' }, { text: '', thoughtSignature: 's1' }, { text: 'b' }]))
+      .toEqual([{ text: 'a' }, { text: '', thoughtSignature: 's1' }, { text: 'b' }])
+  })
+
+  it('does not route Gemini through the Claude thinking-signature pairing', () => {
+    // Claude joins an unsigned thinking run with a later signature-only part into
+    // one signed thinking block. That is Claude's wire contract, not Gemini's:
+    // applying it here would move every one of these four boundaries.
+    const frames = [
+      { thought: true, text: 'Plan ' },
+      { thought: true, text: 'carefully.' },
+      { text: '', thought_signature: 'native-signature' },
+      { text: 'Answer' },
+    ]
+    expect(replayParts(GEMINI, frames)).toEqual([
+      { thought: true, text: 'Plan ' },
+      { thought: true, text: 'carefully.' },
+      { text: '', thoughtSignature: 'native-signature' },
+      { text: 'Answer' },
+    ])
+    expect(replayParts(CLAUDE, frames)).toEqual([
+      { thought: true, text: 'Plan carefully.', thoughtSignature: 'native-signature' },
+      { text: 'Answer' },
+    ])
+  })
+
+  it('keeps the Antigravity budget its own instead of borrowing another route\'s', () => {
+    // host/common/request-images.ts holds Kimi's 1.5 MB budget and warns in the
+    // same file that importing one route's number into another refuses that
+    // other route's own legal images. Antigravity answers to Google's request
+    // cap, so its budget stays at 12 MB.
+    expect(MAX_REQUEST_IMAGE_BYTES).toBe(12 * 1024 * 1024)
+  })
+})
+
+describe('Antigravity request image targets', () => {
+  const ref = (width: number, height: number) => ({
+    attachmentId: 'sha256:target', mediaType: 'image/png', bytes: 500_000, width, height,
+  } as unknown as ImageAttachmentRef)
+
+  it('leaves an image inside the edge ceiling untouched', () => {
+    expect(requestImageTarget(ref(800, 600))).toBeUndefined()
+  })
+
+  it('scales the long edge and keeps the aspect ratio', () => {
+    const target = requestImageTarget(ref(2880, 1800))
+    expect(target?.width).toBe(1024)
+    expect(target?.height).toBe(Math.round(1024 * 1800 / 2880))
+  })
+
+  it('scales a portrait image on its height', () => {
+    const target = requestImageTarget(ref(900, 3000))
+    expect(target?.height).toBe(1024)
+    expect(target?.width).toBe(Math.round(1024 * 900 / 3000))
+  })
+
+  it('has no target for a reference without usable dimensions', () => {
+    expect(requestImageTarget({ attachmentId: 'a', mediaType: 'image/png', bytes: 10 } as unknown as ImageAttachmentRef)).toBeUndefined()
+    expect(requestImageTarget(ref(0, 100))).toBeUndefined()
+  })
+
+  it('keeps a request of scaled screenshots inside the Antigravity budget', () => {
+    // The invariant that makes scaling work: the per-image request target is
+    // small enough that a long session stays inside 12 MB without dropping any.
+    const perImage = requestImageTarget(ref(2880, 1800))!.maxBytes
+    expect(Math.ceil(perImage / 3) * 4 * 20).toBeLessThan(MAX_REQUEST_IMAGE_BYTES)
+  })
 })
 

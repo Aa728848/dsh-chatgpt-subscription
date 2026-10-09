@@ -34,6 +34,7 @@ import {
 } from './mapper.ts'
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { recordCacheRequest, recordCacheUsage } from './cache-stats.ts'
 
 export function resolveDefaultReasoningEffort(
   efforts: readonly string[],
@@ -55,6 +56,26 @@ export function resolveDefaultReasoningEffort(
 }
 
 import { AccountPoolStore } from './account-pool.ts'
+
+/**
+ * Land one stream chunk's usage on its session's cache totals.
+ *
+ * The adapter is the only place that still knows the request's session and the
+ * account that served it by the time the terminal chunk arrives: usage is
+ * emitted from the mapper's stream state, which carries neither. Chunks of every
+ * other type pass through untouched, and the mapper is left alone.
+ *
+ * The mapper counts cached and fresh prompt tokens separately
+ * (`cacheReadTokens` / `inputTokens`), which is exactly the split these totals
+ * are built from, so the numbers here are the ones the harness already reported.
+ */
+function recordUsageChunk(chunk: StreamChunk, sessionId?: string, accountId?: string): void {
+  if (chunk.type !== 'usage') return
+  recordCacheUsage({
+    cachedTokens: chunk.usage.cacheReadTokens ?? 0,
+    freshTokens: chunk.usage.inputTokens ?? 0,
+  }, sessionId, accountId)
+}
 
 export class AntigravityAdapter extends LlmAdapter {
   private readonly accountPool: AccountPoolStore
@@ -197,6 +218,12 @@ export class AntigravityAdapter extends LlmAdapter {
     let recoveredMissingThinkingSignature = false
     const triedAccountIds = new Set<string>()
     let response: Response | undefined
+    // The session this request belongs to, and the pooled account the successful
+    // attempt was served by. Both are read back when the stream reports usage:
+    // the tokens describe a cache those two identify, and the cache is the
+    // account's own, so a number without them attributes nothing.
+    let statsSessionId: string | undefined = options.sessionId === undefined ? undefined : String(options.sessionId)
+    let statsAccountId: string | undefined
 
     while (true) {
       let eff: { account: { id: string }; token: string; projectId?: string }
@@ -218,6 +245,12 @@ export class AntigravityAdapter extends LlmAdapter {
 
       for (const runtimeModel of candidates) {
         const body = JSON.stringify(buildRequest(requestOptions, model, projectId, runtimeModel, effort, images))
+        // Fingerprinted before the request goes out, so the attribution describes
+        // the prefix the service actually sees. A retry through the loop below
+        // re-records the same body, which reports no drift — by design.
+        recordCacheRequest(body, requestOptions.sessionId)
+        statsSessionId = requestOptions.sessionId === undefined ? undefined : String(requestOptions.sessionId)
+        statsAccountId = account.id
         const headers = {
           ...antigravityHeaders(token),
           ...(model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {}),
@@ -317,7 +350,10 @@ export class AntigravityAdapter extends LlmAdapter {
           const trimmed = line.trim()
           if (!trimmed) continue
           const chunks = processStreamLine(trimmed, state)
-          for (const chunk of chunks) yield chunk
+          for (const chunk of chunks) {
+            recordUsageChunk(chunk, statsSessionId, statsAccountId)
+            yield chunk
+          }
           if (state.finished) return
         }
       }
@@ -325,10 +361,14 @@ export class AntigravityAdapter extends LlmAdapter {
       buffer += decoder.decode()
       if (buffer.trim()) {
         const chunks = processStreamLine(buffer.trim(), state)
-        for (const chunk of chunks) yield chunk
+        for (const chunk of chunks) {
+          recordUsageChunk(chunk, statsSessionId, statsAccountId)
+          yield chunk
+        }
       }
 
       for (const chunk of closeStream(state)) {
+        recordUsageChunk(chunk, statsSessionId, statsAccountId)
         yield chunk
       }
     } finally {

@@ -49,9 +49,59 @@ describe('Claude thinking signatures through Antigravity', () => {
     expect(JSON.stringify(message)).toBe(before)
   })
 
-  it('keeps Gemini replay part boundaries unchanged', () => {
+  it('keeps Gemini replay part boundaries unchanged around a signature', () => {
+    // PRESERVED INTENT: Gemini must not get Claude's thinking/signature pairing,
+    // so a signature-only part still stands alone on the wire and is never
+    // absorbed into a neighbouring text part. Only the adjacent pure-text pair
+    // merges; the signed boundary is untouched.
     const parts = [{ text: 'a' }, { text: 'b' }, { text: '', thoughtSignature: 'sig' }]
-    expect(replay('gemini-3.8-flash', parts)).toEqual(parts)
+    expect(replay('gemini-3.8-flash', parts)).toEqual([{ text: 'ab' }, { text: '', thoughtSignature: 'sig' }])
+  })
+
+  it('merges unsigned Gemini text deltas that Claude already merges', () => {
+    // The regression this file guards: both dialects now collapse a run of
+    // unsigned text deltas, so the two replay paths agree on that much and only
+    // Claude adds signature pairing on top.
+    const pieces = Array.from({ length: 385 }, (_, i) => ({ text: 'chunk ' + i + ' ' }))
+    const text = pieces.map(p => p.text).join('')
+    expect(replay('gemini-3.8-flash', pieces)).toEqual([{ text }])
+    expect(replay('gemini-3.8-flash', [{ text }])).toEqual(replay('gemini-3.8-flash', pieces))
+  })
+
+  it('leaves Gemini thinking parts alone where Claude pairs and discards them', () => {
+    const frames = [
+      { thought: true, text: 'Plan ' }, { thought: true, text: 'carefully.' },
+      { text: '', thought_signature: 'native-signature' }, { text: 'Answer' },
+    ]
+    // Gemini: no pairing, no discard, no merge of thought parts.
+    expect(replay('gemini-3.8-flash', frames)).toEqual([
+      { thought: true, text: 'Plan ' }, { thought: true, text: 'carefully.' },
+      { text: '', thoughtSignature: 'native-signature' }, { text: 'Answer' },
+    ])
+    // Claude: the same frames collapse into one signed thinking block.
+    expect(replay(ids[0], frames)).toEqual([
+      { thought: true, text: 'Plan carefully.', thoughtSignature: 'native-signature' }, { text: 'Answer' },
+    ])
+  })
+
+  it.each(ids)('replays %s text identically before and after the merge change', id => {
+    // REGRESSION GUARD for the Claude path. These expectations were captured
+    // from the implementation as it stood BEFORE the Gemini merge was added, so
+    // any drift in Claude's outbound parts shows up here.
+    expect(replay(id, [{ text: 'a' }, { text: 'b' }, { text: 'signed', thoughtSignature: 'sig' }, { text: 'c' }, { text: 'd' }]))
+      .toEqual([{ text: 'ab' }, { text: 'signed', thoughtSignature: 'sig' }, { text: 'cd' }])
+    expect(replay(id, [{ text: 'a' }, { text: '', thoughtSignature: 's1' }, { text: 'b' }]))
+      .toEqual([{ text: 'a' }, { text: '', thoughtSignature: 's1' }, { text: 'b' }])
+    expect(replay(id, [{ text: 'Done.' }, { thoughtSignature: 'late-signature' }]))
+      .toEqual([{ text: 'Done.' }, { thoughtSignature: 'late-signature' }])
+    // The unsigned thinking part is dropped before the merge runs, so the two
+    // text runs on either side of it become adjacent and collapse together.
+    expect(replay(id, [{ text: 'a' }, { thought: true, text: 'Unsigned' }, { text: 'b' }, { text: 'c' }]))
+      .toEqual([{ text: 'abc' }])
+    expect(replay(id, [{ thought: true, text: 'First', thoughtSignature: 'sig1' },
+      { thought: true, text: 'Second', thoughtSignature: 'sig2' }, { text: 'Done' }]))
+      .toEqual([{ thought: true, text: 'First', thoughtSignature: 'sig1' },
+        { thought: true, text: 'Second', thoughtSignature: 'sig2' }, { text: 'Done' }])
   })
 
   it.each(ids)('attaches a separate signature to streamed thinking for %s', id => {

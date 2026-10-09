@@ -385,7 +385,12 @@ describe('AntigravityAdapter', () => {
       name: 'shot.png',
     } as unknown as Parameters<AttachmentStore['readImage']>[0]
     const readImage = vi.fn(async () => ({ ref: attachment, data: png }))
-    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage } })
+    // The seam declares readImageRequest; this image is inside the edge ceiling.
+    const readImageRequest = vi.fn(async (_ref: Parameters<AttachmentStore['readImageRequest']>[0],
+      _target: Parameters<AttachmentStore['readImageRequest']>[1]) => ({ attachment, variantId: 'variant' as never, data: png,
+      mediaType: 'image/png' as const, bytes: png.length, width: 1, height: 1,
+      depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false }))
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage, readImageRequest } })
 
     const captured: any[] = []
     const originalFetch = globalThis.fetch
@@ -430,7 +435,11 @@ describe('AntigravityAdapter', () => {
     const newest = sized('sha256:newest')
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
     const readImage = vi.fn(async (value: Parameters<AttachmentStore['readImage']>[0]) => ({ ref: value, data: png }))
-    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage } })
+    const readImageRequest = vi.fn(async (ref: Parameters<AttachmentStore['readImageRequest']>[0]) => ({
+      attachment: ref, variantId: 'variant' as never, data: png, mediaType: 'image/png' as const,
+      bytes: png.length, width: 1, height: 1, depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false,
+    }))
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage, readImageRequest } })
 
     const captured: any[] = []
     const originalFetch = globalThis.fetch
@@ -482,7 +491,12 @@ describe('AntigravityAdapter', () => {
       name: 'shot.png',
     } as unknown as Parameters<AttachmentStore['readImage']>[0]
     const readImage = vi.fn(async () => ({ ref: attachment, data: png }))
-    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage } })
+    // The seam declares readImageRequest; this image is inside the edge ceiling.
+    const readImageRequest = vi.fn(async (_ref: Parameters<AttachmentStore['readImageRequest']>[0],
+      _target: Parameters<AttachmentStore['readImageRequest']>[1]) => ({ attachment, variantId: 'variant' as never, data: png,
+      mediaType: 'image/png' as const, bytes: png.length, width: 1, height: 1,
+      depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false }))
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { attachments: { readImage, readImageRequest } })
 
     const captured: any[] = []
     const originalFetch = globalThis.fetch

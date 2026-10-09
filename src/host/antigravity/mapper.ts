@@ -67,8 +67,16 @@ function parseArguments(raw: unknown): Record<string, unknown> {
   return isRecord(parsed) ? parsed : {}
 }
 
-/** Attachment seam this route needs: verified bytes for one durable image. */
-export type AttachmentImageReader = Pick<AttachmentStore, 'readImage'>
+/**
+ * Attachment seam this route needs: verified bytes for one durable image, and a
+ * downscaled request version of one that is larger than the wire wants.
+ *
+ * Every harness generation in the peer range declares readImageRequest; a
+ * backend that cannot derive request versions rejects the call, and that
+ * rejection is handled like any other unreadable image. Matching the Claude
+ * route's declaration keeps the two scaled routes on one contract.
+ */
+export type AttachmentImageReader = Pick<AttachmentStore, 'readImage' | 'readImageRequest'>
 
 /** One durable user image resolved for an in-flight request, or proven unreadable. */
 export type ResolvedRequestImage =
@@ -131,15 +139,83 @@ const OMITTED_IMAGE_TEXT = '[image omitted to keep the request within its image 
  */
 export const MAX_REQUEST_IMAGE_BYTES = 12 * 1024 * 1024
 
+/**
+ * Longest edge, in pixels, one image of this request may keep.
+ *
+ * CHOICE: 1024 px matches the long edge the other scaled routes send, and it is
+ * what makes the scaling in {@link resolveRequestImages} effective rather than
+ * nominal: the target is computed from the stored image's own dimensions, so the
+ * same image yields the same request bytes in every later turn and the prefix
+ * Google's implicit cache matches stays byte-stable.
+ *
+ * The budget stays Antigravity's own 12 MB. The 1.5 MB in
+ * host/common/request-images.ts is Kimi's, and that file warns in the same
+ * breath that importing one route's number into another refuses the other
+ * route's own legal images; Google accepts a request of up to 20 MB.
+ */
+export const REQUEST_IMAGE_MAX_EDGE = 1024
+
+/**
+ * Encoded-byte target for one downscaled request version.
+ *
+ * 256 KiB of raw bytes is about 350 KiB of base64, so twenty of them still fit
+ * the 12 MB budget with room left for the system instruction, the conversation
+ * text, and the tool declarations that share the body. The harness keeps its
+ * smallest output when no quality level meets the target.
+ */
+const REQUEST_IMAGE_VERSION_MAX_BYTES = 256 * 1024
+
+/**
+ * Request-version target for one stored image whose long edge is over the
+ * ceiling, or undefined when it already fits and is sent as stored.
+ *
+ * A reference without usable dimensions is sent as stored: there is no basis for
+ * choosing a target, and the budget fallback in
+ * {@link offloadOldestRequestImages} still applies to it.
+ */
+export function requestImageTarget(
+  ref: ImageAttachmentRef,
+  edge: number = REQUEST_IMAGE_MAX_EDGE,
+): { width: number; height: number; maxBytes: number } | undefined {
+  const { width, height } = ref
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined
+  if (Math.max(width, height) <= edge) return undefined
+  return width >= height
+    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+}
+
 /** Base64 length of raw image bytes, including padding. */
 function base64Length(bytes: number): number {
   return Math.ceil(bytes / 3) * 4
 }
 
-/** Request payload one inline image block occupies, when it can be measured. */
+/**
+ * Base64 payload one image block will actually contribute to the wire, or
+ * undefined when it contributes none.
+ *
+ * This is the length of what is SENT, which is not the length of what is
+ * STORED. An image whose long edge is over {@link REQUEST_IMAGE_MAX_EDGE} is
+ * sent as its downscaled request version (see {@link resolveRequestImages}), so
+ * measuring `attachment.bytes` counts a 5 MB screenshot as 5 MB when it reaches
+ * the wire as a few hundred kilobytes. That over-count is not harmless: it makes
+ * {@link offloadOldestRequestImages} replace an image with placeholder text that
+ * would have fitted once scaled, and every replacement rewrites the prefix
+ * Google's implicit cache matches.
+ *
+ * The exact size is only known once the attachment service has derived the
+ * version, which happens after this budget runs, so an image with a scale target
+ * is measured at its target ceiling. An image without one travels as stored, and
+ * there the stored size is exact.
+ */
 function requestImageBytes(block: Record<string, unknown>): number | undefined {
   const attachment = attachmentOf(block)
-  if (attachment) return base64Length(attachment.bytes)
+  if (attachment) {
+    const target = requestImageTarget(attachment)
+    return target
+      ? base64Length(Math.min(attachment.bytes, target.maxBytes))
+      : base64Length(attachment.bytes)
+  }
   const inline = asString(block.data) || asString(block.base64)
   return inline ? inline.length : undefined
 }
@@ -162,6 +238,12 @@ function collectRequestImageBytes(content: unknown, lengths: number[]): void {
  * needed least. The oldest occurrences go first, exactly as DSH's own providers
  * order them, and the placeholder tells the model the image is missing instead
  * of letting it answer as though the picture were simply blank.
+ *
+ * Each occurrence is measured at the size it will actually be sent at, so an
+ * image that only fits after scaling is not replaced (see
+ * {@link requestImageBytes}). Replacing an image is the LAST resort: it rewrites
+ * the retained prefix and costs the next turn its whole implicit cache hit, so
+ * it is worth keeping the image count stable for as long as the bytes allow.
  *
  * @param options - the request about to be built; durable history stays untouched.
  * @returns the original options when they already fit, otherwise shallow copies.
@@ -206,6 +288,17 @@ export function offloadOldestRequestImages(options: GenerateOptions): GenerateOp
  * model a text marker, because a turn that silently loses its image is far
  * harder to diagnose than one that says so.
  *
+ * WHY SCALE INSTEAD OF DROP. `offloadOldestRequestImages` has to replace an
+ * image with placeholder text once the request exceeds
+ * {@link MAX_REQUEST_IMAGE_BYTES}, and the count it replaces grows with every
+ * image added afterwards. Each change rewrites the retained prefix, so Google's
+ * implicit cache misses again on the very next turn. An image whose long edge is
+ * over {@link REQUEST_IMAGE_MAX_EDGE} is therefore sent as the harness's
+ * downscaled request version, which keeps the image COUNT steady and with it the
+ * prefix. The stored image and durable history do not change, and an image that
+ * already fits is sent byte-for-byte as stored. The drop path stays as the last
+ * resort for a request that is over budget even after scaling.
+ *
  * @param options - the exact request about to be built.
  * @param attachments - durable attachment store; absent when the host wired none.
  * @param signal - cancellation, forwarded to every attachment read.
@@ -227,6 +320,16 @@ export async function resolveRequestImages(
       return
     }
     try {
+      const target = requestImageTarget(ref)
+      if (target !== undefined) {
+        const version = await attachments.readImageRequest(ref, target, signal)
+        // A version that is still over the ceiling cannot be made to fit, and
+        // the size that matters is the bytes actually sent.
+        resolved.set(attachmentId, Math.max(version.width, version.height) > REQUEST_IMAGE_MAX_EDGE
+          ? { kind: 'unavailable' }
+          : { kind: 'inline', mediaType: version.mediaType, data: Buffer.from(version.data).toString('base64') })
+        return
+      }
       const stored = await attachments.readImage(ref, signal)
       resolved.set(attachmentId, {
         kind: 'inline',
@@ -368,7 +471,60 @@ function replayPart(part: Record<string, unknown>): Record<string, unknown> {
   return copy
 }
 
-/** Claude requires a signature on each thinking block, not a separate SSE part. */
+/**
+ * Whether one part is nothing but visible text.
+ *
+ * A part carrying any second key keeps its own boundary. A signature, an opaque
+ * provider field, `thought: true`, and a tool call all make the boundary around
+ * them meaningful, and Google's implicit cache matches a byte-stable prefix, so
+ * none of them may be crossed by a merge.
+ */
+function isPureTextPart(
+  part: Record<string, unknown> | undefined,
+): part is Record<string, unknown> & { text: string } {
+  return part !== undefined && typeof part.text === 'string' && Object.keys(part).length === 1
+}
+
+/**
+ * Collapse each run of adjacent pure-text parts into a single part.
+ *
+ * SSE transport chunks are not semantic content blocks. One answer arrives as
+ * hundreds of text deltas, and replaying each delta as its own part adds one
+ * part per delta to the request prefix on every later turn of the conversation.
+ * Antigravity relies on Google's implicit cache, which matches a byte-stable
+ * prefix: the moment the prefix gains a part the previous request did not have,
+ * everything after it misses. The Claude route lost 68.84% cache hits to exactly
+ * that growth before its deltas were merged; the Gemini route sends the same
+ * deltas and needs the same treatment.
+ *
+ * Merging is restricted to pure text, so signed, opaque, thinking, and tool
+ * parts keep their boundaries exactly where the model produced them.
+ *
+ * @param parts - replay parts in model order; the input is never mutated.
+ * @returns parts with every adjacent pure-text run merged into its first member.
+ */
+export function mergeAdjacentTextParts(
+  parts: ReadonlyArray<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const merged: Array<Record<string, unknown>> = []
+  for (const part of parts) {
+    const previous = merged[merged.length - 1]
+    if (isPureTextPart(part) && isPureTextPart(previous)) {
+      previous.text = String(previous.text) + part.text
+      continue
+    }
+    merged.push({ ...part })
+  }
+  return merged
+}
+
+/**
+ * Claude requires a signature on each thinking block, not a separate SSE part.
+ *
+ * The thinking/signature pairing below is Claude's wire contract alone: Vertex
+ * Anthropic rejects a thinking block without its signature, while Gemini has no
+ * such rule and must receive the thinking parts the model actually produced.
+ */
 function claudeReplayParts(parts: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = []
   let pending = ''
@@ -390,19 +546,11 @@ function claudeReplayParts(parts: Array<Record<string, unknown>>): Array<Record<
     // Never borrow a tool/text signature for unsigned thinking, or send an
     // incomplete thinking block from interrupted/legacy history to Claude.
     pending = ''
-    if (part.thought !== true) {
-      // SSE transport chunks are not semantic content blocks. Replaying each
-      // unsigned text delta separately can push the previous cache breakpoint
-      // outside Claude's 20-block lookback, even on the next immediate request.
-      // Restrict merging to pure text: signed/opaque parts retain boundaries.
-      const previous = result[result.length - 1]
-      const pureText = (value: Record<string, unknown> | undefined): boolean =>
-        value !== undefined && typeof value.text === 'string' && Object.keys(value).length === 1
-      if (pureText(part) && pureText(previous)) previous.text = String(previous.text) + part.text
-      else result.push({ ...part })
-    }
+    if (part.thought !== true) result.push({ ...part })
   }
-  return result
+  // Signed and opaque parts keep their boundaries either way; only the unsigned
+  // text deltas between them are merged.
+  return mergeAdjacentTextParts(result)
 }
 
 interface ToolCallReference {
@@ -473,7 +621,8 @@ function assistantParts(
       parts.push(...originalParts.filter((part) => !part.functionCall).map(replayPart))
     }
   }
-  return runtimeModel.startsWith('claude-') ? claudeReplayParts(parts) : parts
+  // Both dialects merge their text deltas; only Claude adds signature pairing.
+  return runtimeModel.startsWith('claude-') ? claudeReplayParts(parts) : mergeAdjacentTextParts(parts)
 }
 
 function pushToolResult(
