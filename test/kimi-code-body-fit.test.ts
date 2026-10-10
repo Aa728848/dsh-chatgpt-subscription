@@ -21,6 +21,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ContentBlock, GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import {
+  MAX_MESSAGE_BODY_BYTES,
   MAX_REQUEST_IMAGE_BYTES,
   imagesToOffloadCount,
   offloadOldestRequestImages,
@@ -32,6 +33,7 @@ import {
 } from '../src/host/common/request-images.ts'
 import {
   assertRequestBodyFits,
+  buildAnthropicRequest,
   requestBodyBreakdown,
 } from '../src/host/kimi-code/mapper.ts'
 
@@ -209,5 +211,130 @@ describe('composing an oversized-body diagnostic', () => {
       messages: [{ role: 'user', content: 'data:image/png;base64,AAAA and video_url in prose' }],
     }
     expect(requestBodyBreakdown(decoy).imageBytes).toBe(0)
+  })
+})
+
+/**
+ * #51: the guard and the counter must be the same question.
+ *
+ * collectRequestImagePayloads recursed into a tool-result and
+ * requestHasSendableImage did not, so for a session whose images all arrive
+ * through tool results — what read_image and every screenshot tool produce —
+ * the counter saw the images while the guard answered "nothing left to give
+ * back". The body-fit loop short-circuited on that answer and threw with every
+ * image still attached, while telling the user older images had been omitted.
+ *
+ * The nesting itself is pinned elsewhere: normalizeMessages is what puts a
+ * tool message's images inside tool-result.content (test/llm-compat.test.ts).
+ */
+describe('the sendable-image guard agrees with the image counter', () => {
+  /** 1,044,470 bytes of PNG: about 1,392,628 base64 characters on the wire. */
+  const SHOT: Ref = { attachmentId: 'shot', width: 3840, height: 2160, bytes: 1_044_470, mediaType: 'image/png' }
+  /** An image the reader could not load; the mapper sends it as text instead. */
+  const BROKEN: Ref = { attachmentId: 'broken', width: 640, height: 480, bytes: 500_000, mediaType: 'image/png' }
+  const INLINE_BASE64 = 1_392_628
+
+  function inline(id: string): ResolvedRequestImages {
+    return new Map([[id, { kind: 'inline' as const, mediaType: 'image/png', data: 'A'.repeat(INLINE_BASE64) }]])
+  }
+
+  function imageContent(...refs: Ref[]) {
+    return refs.map((ref) => ({
+      type: 'image',
+      attachment: { attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height },
+    }))
+  }
+
+  /** Every image occurrence still present, at any nesting depth, by attachment id. */
+  function survivingImageIds(messages: Message[]): string[] {
+    return messages
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .flatMap((block) => {
+        const nested = (block as { content?: unknown }).content
+        const list = Array.isArray(nested) ? nested : [block]
+        return list
+          .filter((inner) => typeof inner === 'object' && inner !== null && (inner as { type?: string }).type === 'image')
+          .map((inner) => String((inner as { attachment?: { attachmentId?: string } }).attachment?.attachmentId))
+      })
+  }
+
+  it('sees a tool-result image while the counter can still see it', () => {
+    // The state #51 got wrong: the image has not been dropped yet.
+    const opts = options({ messages: [toolResultImageMessage(SHOT)] })
+    const images = inline(SHOT.attachmentId)
+
+    expect(requestImagePayloadLengths(opts, images)).toHaveLength(1)
+    // THE INVARIANT — before the fix the right side was false with a length of 1.
+    expect(requestHasSendableImage(opts, images)).toBe(requestImagePayloadLengths(opts, images).length > 0)
+    expect(requestHasSendableImage(opts, images)).toBe(true)
+  })
+
+  it('recovers an over-limit body rather than refusing it', () => {
+    const opts = options({
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'call-1',
+          content: [{ type: 'text', text: 'x'.repeat(900_000) }, ...imageContent(SHOT)],
+        }],
+      }] as unknown as Message[],
+    })
+    const images = inline(SHOT.attachmentId)
+
+    const before = buildAnthropicRequest(opts, images)
+    // The reported shape: the image plus the conversation just cross 2 MiB.
+    expect(Buffer.byteLength(JSON.stringify(before), 'utf8')).toBeGreaterThan(MAX_MESSAGE_BODY_BYTES)
+    expect(() => assertRequestBodyFits(before)).toThrow()
+
+    // One dropped image is enough, so the guard must let the loop reach it.
+    const repaired = replaceOldestRequestImages(opts, 1, images)
+    const repairedBody = buildAnthropicRequest(repaired, images)
+    expect(Buffer.byteLength(JSON.stringify(repairedBody), 'utf8')).toBeLessThan(MAX_MESSAGE_BODY_BYTES)
+    expect(() => assertRequestBodyFits(repairedBody)).not.toThrow()
+  })
+
+  it('still sees a top-level image', () => {
+    // Guards the fix against being pushed the other way.
+    const opts = options({ messages: [imageMessage(SHOT)] })
+    const images = inline(SHOT.attachmentId)
+
+    expect(requestImagePayloadLengths(opts, images)).toHaveLength(1)
+    expect(requestHasSendableImage(opts, images)).toBe(true)
+  })
+
+  it('does not report an unreadable image as sendable', () => {
+    // The mapper serializes this one as a text placeholder, so it frees no
+    // bytes and dropping it would only spin the loop.
+    const opts = options({ messages: [toolResultImageMessage(SHOT)] })
+    const images: ResolvedRequestImages = new Map([[SHOT.attachmentId, { kind: 'unavailable' as const }]])
+
+    expect(requestImagePayloadLengths(opts, images)).toEqual([])
+    expect(requestHasSendableImage(opts, images)).toBe(false)
+  })
+
+  it('spends a replacement on an image that actually carries bytes', () => {
+    // countOmitted, requestImagePayloadLengths and replaceOldestRequestImages
+    // had measured with different resolutions: the measured list skipped the
+    // unreadable image while the replacement still spent a slot on it, so a
+    // request under-dropped until the loop gave up.
+    const opts = options({
+      messages: [{
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: 'call-1', content: imageContent(BROKEN, SHOT) }],
+      }] as unknown as Message[],
+    })
+    const images: ResolvedRequestImages = new Map([
+      [BROKEN.attachmentId, { kind: 'unavailable' as const }],
+      [SHOT.attachmentId, { kind: 'inline' as const, mediaType: 'image/png', data: 'A'.repeat(INLINE_BASE64) }],
+    ])
+
+    // Only the second occurrence is measured, so index 0 names the second image.
+    expect(requestImagePayloadLengths(opts, images)).toHaveLength(1)
+
+    const trimmed = replaceOldestRequestImages(opts, 1, images)
+    expect(omittedCount(trimmed.messages)).toBe(1)
+    // The slot went to the image that frees bytes, not to the unreadable one.
+    expect(survivingImageIds(trimmed.messages)).toEqual([BROKEN.attachmentId])
   })
 })

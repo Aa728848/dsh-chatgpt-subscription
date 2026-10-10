@@ -103,19 +103,33 @@ function dropOldestImagesUntilFits(
   baseline: NormalizedGenerateOptions,
 ): NormalizedGenerateOptions {
   const lengths = requestImagePayloadLengths(baseline, resolved)
-  const alreadyDropped = countOmitted(current, baseline)
+  const alreadyDropped = countOmitted(current, baseline, resolved)
   const remaining = lengths.slice(alreadyDropped)
   // How many more oldest occurrences free the excess, counting only what the
   // current request still carries.
   const additional = imagesToOffloadCount(remaining, excessBytes)
   if (additional === 0) return current
-  return replaceOldestRequestImages(current, additional)
+  // The same resolution as `lengths`: index N names the Nth occurrence that
+  // actually carries bytes, which is the only reading that keeps the count and
+  // the replacement addressing the same images.
+  return replaceOldestRequestImages(current, additional, resolved)
 }
 
-/** How many image occurrences `current` has already had replaced, versus `baseline`. */
-function countOmitted(current: NormalizedGenerateOptions, baseline: NormalizedGenerateOptions): number {
-  const before = requestImagePayloadLengths(baseline).length
-  const after = requestImagePayloadLengths(current).length
+/**
+ * How many image occurrences `current` has already had replaced, versus `baseline`.
+ *
+ * Measured with the same resolution the drop loop measures with. Without it an
+ * image that resolved to `unavailable` counts as payload-bearing here but not in
+ * `lengths`, so `alreadyDropped` overshoots and `slice` quietly discards images
+ * the request still has to give back.
+ */
+function countOmitted(
+  current: NormalizedGenerateOptions,
+  baseline: NormalizedGenerateOptions,
+  resolved: ResolvedRequestImages,
+): number {
+  const before = requestImagePayloadLengths(baseline, resolved).length
+  const after = requestImagePayloadLengths(current, resolved).length
   return Math.max(0, before - after)
 }
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
@@ -703,7 +717,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       // Nothing left to give back: the remainder is conversation text, tool
       // schemas or video, none of which this route may silently discard. The
       // guard then reports the composition so the remedy names the real cause.
-      if (attempt > MAX_BODY_FIT_ATTEMPTS || !requestHasSendableImage(buildOptions)) {
+      if (attempt > MAX_BODY_FIT_ATTEMPTS || !requestHasSendableImage(buildOptions, images)) {
         assertRequestBodyFits(built, carriesVideo)
         throw new Error('unreachable: assertRequestBodyFits returns or throws')
       }

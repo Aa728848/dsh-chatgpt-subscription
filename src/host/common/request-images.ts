@@ -224,8 +224,19 @@ export function imagesToOffloadCount(lengths: readonly number[], maxBytes: numbe
  * Replace the first `count` image occurrences with a visible placeholder,
  * recursing into tool results. Durable history is untouched; only the request
  * about to be sent changes.
+ *
+ * `images` must be the same resolution {@link requestImagePayloadLengths} was
+ * measured with. An image that resolved to `unavailable` is already serialized
+ * as a short text placeholder, so dropping it frees no bytes — counting it as
+ * replaceable here would shift every later occurrence by one against the
+ * measured lengths, and the caller would under-drop for as long as such an
+ * image is in the conversation.
  */
-export function replaceOldestRequestImages(options: GenerateOptions, count: number): GenerateOptions {
+export function replaceOldestRequestImages(
+  options: GenerateOptions,
+  count: number,
+  images?: ResolvedRequestImages,
+): GenerateOptions {
   if (count <= 0) return options
   const remaining = { count }
   const replaceIn = (content: unknown): { content: unknown; replaced: boolean } => {
@@ -234,7 +245,7 @@ export function replaceOldestRequestImages(options: GenerateOptions, count: numb
     const next = content.map((block) => {
       if (remaining.count === 0 || !isRecord(block)) return block
       if (block.type === 'image') {
-        if (requestImagePayloadLength(block) === undefined) return block
+        if (requestImagePayloadLength(block, images) === undefined) return block
         remaining.count -= 1
         replaced = true
         return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
@@ -324,7 +335,9 @@ export function offloadOldestRequestImages(
   images?: ResolvedRequestImages,
 ): GenerateOptions {
   const lengths = requestImagePayloadLengths(options, images)
-  return replaceOldestRequestImages(options, imagesToOffloadCount(lengths, maxBytes))
+  // The same resolution has to reach the replacement, or index N stops naming
+  // the Nth measured occurrence.
+  return replaceOldestRequestImages(options, imagesToOffloadCount(lengths, maxBytes), images)
 }
 
 /**
@@ -333,13 +346,22 @@ export function offloadOldestRequestImages(
  * A request whose images have all been replaced by placeholders can no longer
  * shrink, which is what separates "drop more images" from "this body is too
  * large for a reason no image budget can fix".
+ *
+ * DEFINED AS the counter, not as a traversal of its own. The two have to agree
+ * by construction: when they did not, {@link collectRequestImagePayloads} saw
+ * the images inside a `tool-result` — which is where a `read_image` result
+ * or a screenshot lands — while this answer reported that nothing was left to
+ * give back, so the body-fit loop refused a request that dropping one image
+ * would have fitted. A fifth hand-written recursion would have fixed that one
+ * instance; deriving one from the other makes the next drift impossible rather
+ * than merely unlikely.
+ *
+ * `images` must be the same resolution the builder will use. An image that
+ * resolved to `unavailable` is serialized as text and therefore is not a
+ * sendable image; reporting it as one only spins the loop until it gives up.
  */
-export function requestHasSendableImage(options: GenerateOptions): boolean {
-  return options.messages.some((message) => {
-    const content = message.content
-    if (!Array.isArray(content)) return false
-    return content.some((block) => isRecord(block) && block.type === 'image')
-  })
+export function requestHasSendableImage(options: GenerateOptions, images?: ResolvedRequestImages): boolean {
+  return requestImagePayloadLengths(options, images).length > 0
 }
 
 /**

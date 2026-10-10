@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **[Kimi Code] 请求体超限时，「还有图可丢吗」的判定与计量脱节，兜底一次都没跑（[#51](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/51)）**
+  - **`requestHasSendableImage()` 只扫消息顶层，不递归 `tool-result`。** 同文件的另外三个兄弟函数全部递归——`collectImageRefs`、`collectRequestImagePayloads`（其注释明写 *RECURSION IS NOT OPTIONAL*）、`replaceOldestRequestImages`。于是对「图片全部来自工具结果」的请求，计量数得出 N 张图，判定恒返回 `false`。
+  - **后果不是「丢错图」，而是「一张都没丢」。** `kimi-code/adapter.ts` 的 body-fit 循环从 `attempt = 0` 起算，第一轮就短路，直接 `assertRequestBodyFits` 抛 `PROVIDER_ERROR`，唯一的丢图入口从未执行；`MAX_BODY_FIT_ATTEMPTS = 64` 形同虚设。报告方的现场只超限 **1494 字节**，丢一张约 150 KB 的图即可解决。混合会话同样中招：顶层图被丢光后，tool-result 里剩下的图一张不动，然后报错说「会先丢最旧的图」。
+  - **报错文案同时说了反话。** `oversizedBodyMessage` 的 remedy 按字节构成判定（`imageBytes >= otherBytes`），于是文案写着 “Older images are omitted first”，而实际一张都没丢。讽刺的是同文件的 `requestBodyBreakdown` 走的是全递归的 `walkJson`——**报错里的图片字节数看得见那些图，决定要不要继续丢图的门禁看不见。**
+  - **修复：把判定改成计量的定义式复用。** `requestHasSendableImage(options, images)` 现在就是 `requestImagePayloadLengths(options, images).length > 0`。手写第五遍递归也能修好这一例，但那条路保留了「同一条递归规则被抄多遍、下次再漏一遍」的结构性风险；复用定义让两者**按构造**不可能再分叉。
+  - **顺带统一了同一路径上的第二处口径错配（独立缺陷）。** `dropOldestImagesUntilFits` 里 `requestImagePayloadLengths(baseline, resolved)` 带 images 映射，`countOmitted` 里两次调用**不带**，`replaceOldestRequestImages` 的跳过判断也**不带**。三处只在 `unavailable`（读不出来的图）上分叉：不带映射时它回落 `base64Length(attachment.bytes)` 被当作「有载荷」，于是 `alreadyDropped` 虚高、`slice` 提前掏空、`additional` 算成 0，循环空转到 64 轮才抛错。现在三处统一传入同一个 `images`，`replaceOldestRequestImages` 新增可选形参。**只改计数端是不够的**：替换端若不同步改，`lengths[N]` 与「第 N 个可替换块」仍然错位。
+  - **附带效果**：`unavailable` 图现在会被判定为「不是可发送的图」，这类请求因此**立即 fail fast**，而不是白白重建 65 次几 MB 的请求体。
+  - 测试：`test/kimi-code-body-fit.test.ts` 新增 5 例——不变量（嵌套图、**丢图之前**判定必须与计量一致）、超限请求丢一张即可恢复、顶层图仍被看见（防修复被推到反方向）、`unavailable` 图不算作可丢（防过度递归）、替换名额必须花在真正带字节的图上。**承重已验证**：`git stash push -- src/host/common/request-images.ts src/host/kimi-code/adapter.ts` 后实测 **2 failed**（`expected false to be true`、``expected ['shot'] to deeply equal ['broken']``），还原后全过。
+  - 既有两条断言（`:143` 顶层图 `true`、`:153` 丢图后 `false`）**逐字未改仍然成立**——它们此前就与修复后的实现同值，只是从未覆盖真正出问题的那个状态。
+  - 验证：`tsc -b --pretty false` 与 `tsc -p test/tsconfig.json` 均 0 错误；全量 `npm test` **2961 passed / 7 skipped, 0 failed**（较基线增 5 例）。
+  - **未一并处理的**（与 0.13.2 记下的同一批）：claude / command-code / workbuddy / antigravity 四条线路的计量与替换仍只扫顶层，工具结果里的图对它们的图片预算系统性失明；它们没有布尔门，不会本地抛错，表现为静默超预算后被上游 413/400 拒绝。codex 干净（在构造后的 input 上测量），minimax-code 干净（复用共享递归实现）。
+
 ## 0.17.0 - 2026-10-09
 
 - **[Antigravity] 缓存卡片改为只报「整段未命中」并给出它之前的空闲时长**
