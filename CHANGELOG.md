@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.17.1 - 2026-10-10
+
 - **[Kimi Code] 请求体超限时，「还有图可丢吗」的判定与计量脱节，兜底一次都没跑（[#51](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/51)）**
   - **`requestHasSendableImage()` 只扫消息顶层，不递归 `tool-result`。** 同文件的另外三个兄弟函数全部递归——`collectImageRefs`、`collectRequestImagePayloads`（其注释明写 *RECURSION IS NOT OPTIONAL*）、`replaceOldestRequestImages`。于是对「图片全部来自工具结果」的请求，计量数得出 N 张图，判定恒返回 `false`。
   - **后果不是「丢错图」，而是「一张都没丢」。** `kimi-code/adapter.ts` 的 body-fit 循环从 `attempt = 0` 起算，第一轮就短路，直接 `assertRequestBodyFits` 抛 `PROVIDER_ERROR`，唯一的丢图入口从未执行；`MAX_BODY_FIT_ATTEMPTS = 64` 形同虚设。报告方的现场只超限 **1494 字节**，丢一张约 150 KB 的图即可解决。混合会话同样中招：顶层图被丢光后，tool-result 里剩下的图一张不动，然后报错说「会先丢最旧的图」。
@@ -13,7 +15,6 @@
   - 既有两条断言（`:143` 顶层图 `true`、`:153` 丢图后 `false`）**逐字未改仍然成立**——它们此前就与修复后的实现同值，只是从未覆盖真正出问题的那个状态。
   - 验证：`tsc -b --pretty false` 与 `tsc -p test/tsconfig.json` 均 0 错误；全量 `npm test` **2961 passed / 7 skipped, 0 failed**（较基线增 5 例）。
   - **未一并处理的**（与 0.13.2 记下的同一批）：claude / command-code / workbuddy / antigravity 四条线路的计量与替换仍只扫顶层，工具结果里的图对它们的图片预算系统性失明；它们没有布尔门，不会本地抛错，表现为静默超预算后被上游 413/400 拒绝。codex 干净（在构造后的 input 上测量），minimax-code 干净（复用共享递归实现）。
-
 
 - **[Kimi Code] 四条线路的图片预算让工具结果里的图「隐形」，以及字节上限缺出口 —— 补完 [#51](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/51) 的遗留项**
   - **状态 A 换了一条路存活。** 310590b 关掉的是「`tool-result` 里的图对门禁不可见」那一个实例；但 `dropOldestImagesUntilFits` 在「剩余图片总字节 < 超限缺口」时算出 `additional = 0` 并**原样返回**，调用方无法区分「成功了」与「没进展」，于是下一轮重建出**完全相同**的 body，空转到 `attempt > 64` 才抛出——期间连续构建 65 次几 MB 的请求体。实测可达：图片 1.6 MB + 文本 1.5 MB + schema 0.7 MB = 3.8 MB，缺口 1.7 MB > 图片 1.6 MB。
@@ -181,7 +182,6 @@
   - 实测细节与仍未解决的问题记录在 `docs/minimax-files-api-handoff.md`。
   - 验证：`tsc -b --force` 与 `tsc -p test/tsconfig.json` 通过；`vitest run` 2555 passed / 7 skipped；
     `npm run build` 通过。
-
 
 - **[MiniMax Code] 支持视频输入；把视频子系统提取为两条线路共享**
   - **视频能力（N6）**：M3 与 M3.1 现在声明并支持视频输入，此前只有文档记载、路由没有实现。
