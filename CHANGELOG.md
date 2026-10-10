@@ -14,6 +14,19 @@
   - 验证：`tsc -b --pretty false` 与 `tsc -p test/tsconfig.json` 均 0 错误；全量 `npm test` **2961 passed / 7 skipped, 0 failed**（较基线增 5 例）。
   - **未一并处理的**（与 0.13.2 记下的同一批）：claude / command-code / workbuddy / antigravity 四条线路的计量与替换仍只扫顶层，工具结果里的图对它们的图片预算系统性失明；它们没有布尔门，不会本地抛错，表现为静默超预算后被上游 413/400 拒绝。codex 干净（在构造后的 input 上测量），minimax-code 干净（复用共享递归实现）。
 
+
+- **[Kimi Code] 四条线路的图片预算让工具结果里的图「隐形」，以及字节上限缺出口 —— 补完 [#51](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/51) 的遗留项**
+  - **状态 A 换了一条路存活。** 310590b 关掉的是「`tool-result` 里的图对门禁不可见」那一个实例；但 `dropOldestImagesUntilFits` 在「剩余图片总字节 < 超限缺口」时算出 `additional = 0` 并**原样返回**，调用方无法区分「成功了」与「没进展」，于是下一轮重建出**完全相同**的 body，空转到 `attempt > 64` 才抛出——期间连续构建 65 次几 MB 的请求体。实测可达：图片 1.6 MB + 文本 1.5 MB + schema 0.7 MB = 3.8 MB，缺口 1.7 MB > 图片 1.6 MB。
+  - **无进展检测。** 该函数改为返回 `{ options, dropped }`，`dropped === 0` 时立即停止并带着上下文抛错，不再消耗 attempt 预算重建一个不可能改变的请求。
+  - **报错文案从两态改为三态。** 判据从「字节构成猜测」换成「循环实际做了什么」：①**有图可丢但丢了也补不上缺口** → 明确说明剩下的图比缺口小，省略全部也装不下（不再声称「Older images are omitted first」）；②**图已全部省略仍超限** → 报出已省略的张数；③**本来就没有图** → 直接排除删图这个无效动作。`BodyFitContext` 是可选第三参，**不传时逐字沿用原文案**，现有 14 条断言一条未改仍通过。
+  - **kimi-code 的字节上限补上环境变量出口**，`DSH_KIMI_CODE_MAX_BODY_BYTES` / `DSH_KIMI_CODE_MAX_IMAGE_BYTES`，与 MiniMax / Codex 两条线对齐（resolver 逐字同构：trim → 空串回落 → 非正有限数回落 → floor）。**视频上限不加出口**：三条线对称（minimax 同样是裸常量、codex 无视频），且一个变量管两档会让按 2 MB 场景设的值顺手压垮 64 MiB 视频档。共享常量 `common/request-images.ts` 的值与默认参数**未动**——那 8 处无参调用仍依赖它。
+  - **claude / command-code / workbuddy / antigravity 四条线路的工具结果图片重新进入预算。** 四条各自持有私有副本（预算数字不同、缩放策略不同、attachment seam 不同），实测**不能**合并到共享实现：合并会同时替换四条线路的度量口径、缩放策略与取消语义，且有两处行为变化**不会让任何现有用例变红**（用例都不传 images 映射，走 `images === undefined` 分支）——那是最危险的一类。因此逐条把度量和替换改为递归，**零测试期望值变化**。
+  - 顺带记录一处**刻意保留**的不一致：claude 的 `countRequestImages`（claude/mapper.ts:885-894）早已递归，而同文件的 `collectRequestImageBytes` 此前不递归——这正是本 bug 的**第五次**复制。统一它会让 `requestImageEdgeLimit` 不再把 `unavailable` 的图计入，而现有测试钉住了「刻意过度计数」的语义（低上限永远不会导致拒绝），故不动。
+  - 测试：新增 `test/tool-result-image-budget.test.ts`（13 例，`describe.each` 覆盖四条线路的「计量」「替换名额顺序」「装得下时不动」）、`test/kimi-code-body-limits.test.ts`（6 例，出口生效 / 非法值回落矩阵 / 默认值即 2,097,152 与 1,500,000）、`test/kimi-code-body-fit.test.ts` +4 例（三态文案各一条 + 不传参数时逐字不变）；`test/kimi-code-adapter.test.ts` +1 例（适配器级「无进展即停止」，此前 `KimiCodeAdapter` 的 `options.attachments` 在测试中**从未被注入过**，那段 body-fit 循环零端到端覆盖）。`buildAdapter` 因此新增 `fetchFn` / `attachments` 两个可选参数。
+  - **承重已验证**：`git stash push -- ` 七个源文件后实测 **18 failed**（三态文案 3、无进展 1、四线路递归 9、环境出口 5），还原后全过。
+  - 验证：`npm run typecheck` 0 错误；全量 `npm test` **2985 passed / 7 skipped, 0 failed**（较 310590b 的 2961 增 24 例）；`npm run build` 干净。
+  - **未一并处理的**：`/compact` 的 “could not produce a useful summary” 与真实原因不符。已复核——真实原因**已经落盘**在 `compaction/end.error`，宿主 `ManualCompactionError` 自己也带着 `message` 与 `cause`，是 `command-compact` **既不读 session 也不渲染自己的 error.message**。本插件的 `inject` 里没有 `commands` / `compaction` / `sessions`，也无法重名注册 `compact`（宿主 registry 硬拒）。这是 deepseek-harness 的修复点，不在本仓库能力范围内。
+
 ## 0.17.0 - 2026-10-09
 
 - **[Antigravity] 缓存卡片改为只报「整段未命中」并给出它之前的空闲时长**

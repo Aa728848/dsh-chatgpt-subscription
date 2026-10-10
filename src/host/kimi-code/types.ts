@@ -20,6 +20,7 @@
 
 import type { KimiCodeReasoningEffort, KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_MODELS, kimiCodeModelDef } from './model-catalog.ts'
+import { MAX_MESSAGE_BODY_BYTES, MAX_REQUEST_IMAGE_BYTES } from '../common/request-images.ts'
 
 export const PROVIDER_ID = 'kimi-code'
 export const PROVIDER_NAME = 'Kimi Code'
@@ -151,6 +152,60 @@ export function anthropicUrl(suffix: string, region: KimiCodeRegion = 'mainland-
  * exactly as the official client's `client.beta.messages.create` call does.
  */
 export const ANTHROPIC_MESSAGES_PATH = '/v1/messages?beta=true'
+
+
+// ---------------------------------------------------------------------------
+// Byte ceilings
+// ---------------------------------------------------------------------------
+
+/**
+ * Byte ceiling this route enforces on one text/image request body.
+ *
+ * Named with the DEFAULT_ prefix, like the MiniMax and Codex resolvers, because
+ * the budget belongs to the gateway in front of the route rather than to the
+ * shared image machinery: common/request-images.ts keeps Kimi's figures as the
+ * default arguments of functions other routes call with their own number.
+ *
+ * DSH_KIMI_CODE_MAX_BODY_BYTES pins a different ceiling for a deployment that has
+ * measured one — a proxy or gateway in front of this route. It is parsed as bytes
+ * and ignored when it is not a positive finite number, so a typo cannot silently
+ * disable the guard.
+ *
+ * It covers the text/image tier only. A request carrying video goes to
+ * MAX_VIDEO_MESSAGE_BODY_BYTES, which has no override on any route: one variable
+ * spanning both tiers could not express "relax the text ceiling, leave the video
+ * one alone", and a value chosen for a 2 MB conversation would collapse the video
+ * tier with it. MiniMax's video budget is likewise a bare constant.
+ */
+export const DEFAULT_MAX_MESSAGE_BODY_BYTES = MAX_MESSAGE_BODY_BYTES
+
+/** Ceiling this process enforces, honouring the deployment override. */
+export function maxMessageBodyBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.DSH_KIMI_CODE_MAX_BODY_BYTES ?? '').trim()
+  if (raw === '') return DEFAULT_MAX_MESSAGE_BODY_BYTES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_MESSAGE_BODY_BYTES
+  return Math.floor(parsed)
+}
+
+/**
+ * Base64 image payload one request on this route may carry.
+ *
+ * Sized to leave room for the conversation inside the body ceiling above, which
+ * is why it is the smaller of the two. DSH_KIMI_CODE_MAX_IMAGE_BYTES overrides it
+ * under the same rules: ignored, never applied as a disabled guard.
+ */
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = MAX_REQUEST_IMAGE_BYTES
+
+/** Image budget this process enforces, honouring the deployment override. */
+export function maxRequestImageBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.DSH_KIMI_CODE_MAX_IMAGE_BYTES ?? '').trim()
+  if (raw === '') return DEFAULT_MAX_REQUEST_IMAGE_BYTES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_REQUEST_IMAGE_BYTES
+  return Math.floor(parsed)
+}
+
 /** Anthropic protocol revision the managed service documents. */
 export const ANTHROPIC_VERSION = '2023-06-01'
 

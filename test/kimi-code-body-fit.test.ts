@@ -338,3 +338,69 @@ describe('the sendable-image guard agrees with the image counter', () => {
     expect(survivingImageIds(trimmed.messages)).toEqual([BROKEN.attachmentId])
   })
 })
+
+/** The thrown message, for a call whose only outcome is the throw. */
+function capturedMessage(run: () => unknown): string {
+  try {
+    run()
+  } catch (error) {
+    return (error as Error).message
+  }
+  throw new Error('expected the guard to throw')
+}
+
+describe('the oversized-body remedy names what the loop did', () => {
+  const bigImage = {
+    messages: [{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(2_100_000)}` } }],
+    }],
+    tools: [],
+  }
+  const textOnly = { messages: [{ role: 'user', content: 'x'.repeat(2_400_000) }], tools: [] }
+
+  it('says omitting cannot close the gap while an image is still attached', () => {
+    // The loop gave up with the image on the wire: everything left weighs less
+    // than the overflow, so it dropped nothing. Describing that as "older images
+    // are omitted first" promises an action the loop never performed.
+    const message = capturedMessage(() => assertRequestBodyFits(bigImage, false, {
+      droppedImages: 0,
+      sendableImagesRemaining: 1,
+      excessBytes: 4_000,
+    }))
+    expect(message).toMatch(/cannot fit this request/i)
+    expect(message).toMatch(/compact the conversation/i)
+    expect(message).not.toMatch(/Older images are omitted first/)
+  })
+
+  it('names the images it already omitted once none are left', () => {
+    const message = capturedMessage(() => assertRequestBodyFits(bigImage, false, {
+      droppedImages: 3,
+      sendableImagesRemaining: 0,
+      excessBytes: 4_000,
+    }))
+    expect(message).toMatch(/All 3 images were already omitted/)
+    expect(message).toMatch(/compact the conversation/i)
+  })
+
+  it('says the request never carried an image', () => {
+    const message = capturedMessage(() => assertRequestBodyFits(textOnly, false, {
+      droppedImages: 0,
+      sendableImagesRemaining: 0,
+      excessBytes: 4_000,
+    }))
+    expect(message).toMatch(/carries no images/)
+    expect(message).not.toMatch(/Older images/)
+  })
+
+  it('leaves the composition-only text byte-for-byte unchanged', () => {
+    // Every existing assertion calls the guard with two arguments or fewer, so
+    // the optional third parameter must not reach them.
+    expect(capturedMessage(() => assertRequestBodyFits(bigImage))).toContain(
+      'Older images are omitted first; drop or re-attach fewer images, or start a new session.',
+    )
+    expect(capturedMessage(() => assertRequestBodyFits(textOnly))).toMatch(
+      /compact the conversation or start a new session\.$/,
+    )
+  })
+})

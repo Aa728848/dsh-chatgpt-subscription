@@ -807,7 +807,16 @@ function requestImageBytes(block: Record<string, unknown>): number | undefined {
 function collectRequestImageBytes(content: unknown, lengths: number[]): void {
   if (!Array.isArray(content)) return
   for (const block of content) {
-    if (!isRecord(block) || block.type !== 'image') continue
+    if (!isRecord(block)) continue
+    // Tool results nest their own content, and a screenshot or a read_image
+    // result carries its pixels there. Stopping at the top level left every
+    // tool-produced image outside the budget while the builder sent it, so the
+    // request grew past the route's own ceiling and only the upstream answered.
+    if (block.type === 'tool-result') {
+      collectRequestImageBytes(block.content, lengths)
+      continue
+    }
+    if (block.type !== 'image') continue
     const bytes = requestImageBytes(block)
     if (bytes !== undefined) lengths.push(bytes)
   }
@@ -835,17 +844,34 @@ export function offloadOldestRequestImages(options: GenerateOptions): GenerateOp
   }
 
   const remaining = { count: omitted }
-  const messages = options.messages.map((message) => {
-    if (remaining.count === 0 || !Array.isArray(message.content)) return message
+  // Walks the same shape, in the same order, as the measurement above: index N
+  // has to name the Nth occurrence that was measured, or the count is spent on
+  // the wrong images and the budget is met by replacing the wrong ones.
+  const replaceIn = (content: unknown): { content: unknown; replaced: boolean } => {
+    if (!Array.isArray(content) || remaining.count === 0) return { content, replaced: false }
     let replaced = false
-    const content = message.content.map((block) => {
-      if (remaining.count === 0 || !isRecord(block) || block.type !== 'image') return block
-      if (requestImageBytes(block) === undefined) return block
-      remaining.count -= 1
-      replaced = true
-      return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
+    const next = content.map((block) => {
+      if (remaining.count === 0 || !isRecord(block)) return block
+      if (block.type === 'image') {
+        if (requestImageBytes(block) === undefined) return block
+        remaining.count -= 1
+        replaced = true
+        return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
+      }
+      if (block.type === 'tool-result' && Array.isArray(block.content)) {
+        const inner = replaceIn(block.content)
+        if (!inner.replaced) return block
+        replaced = true
+        return { ...block, content: inner.content }
+      }
+      return block
     })
-    return replaced ? { ...message, content } : message
+    return { content: next, replaced }
+  }
+  const messages = options.messages.map((message) => {
+    const result = replaceIn(message.content)
+    if (!result.replaced) return message
+    return { ...message, content: result.content } as typeof message
   })
   return { ...options, messages }
 }

@@ -80,7 +80,7 @@ export {
   type ResolvedRequestImage,
   type ResolvedRequestImages,
 }
-import { maxOutputTokensFor, type KimiCacheTtl } from './types.ts'
+import { maxMessageBodyBytes, maxOutputTokensFor, type KimiCacheTtl } from './types.ts'
 import { base64LengthOf, videoBlockLabel, videoDataUrl, videoOmissionText } from './modalities.ts'
 // The traversal, byte budgeting and base64 encoding are provider-neutral and are
 // shared with the MiniMax Code line; see ../common/video-request.ts.
@@ -1269,7 +1269,27 @@ export function buildRequest(
  * @returns the serialized body, so a caller that is about to send it does not
  * serialize a body of up to tens of megabytes a second time.
  */
-export function assertRequestBodyFits(body: Record<string, unknown>, carriesVideo = false): string {
+/**
+ * What the body-fit loop actually did, so the remedy can describe it.
+ *
+ * Optional by design: a caller that has not run the loop leaves it undefined and
+ * gets the composition-based message, so every direct assertion of this guard
+ * keeps its exact text.
+ */
+export interface BodyFitContext {
+  /** How many image occurrences the loop already replaced with a placeholder. */
+  readonly droppedImages: number
+  /** How many sendable image occurrences the body still carries. */
+  readonly sendableImagesRemaining: number
+  /** The overflow that remained after the last drop. */
+  readonly excessBytes: number
+}
+
+export function assertRequestBodyFits(
+  body: Record<string, unknown>,
+  carriesVideo = false,
+  context?: BodyFitContext,
+): string {
   const serialized = JSON.stringify(body)
   const bytes = Buffer.byteLength(serialized, 'utf8')
   // Video raises the ceiling: the 2 MB figure is the documented text/image
@@ -1280,9 +1300,9 @@ export function assertRequestBodyFits(body: Record<string, unknown>, carriesVide
   // the serialized JSON for a "video_url" substring both paid for a second
   // full serialization of a body that can reach tens of megabytes and let user
   // text containing that literal widen the text/image guard.
-  const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : MAX_MESSAGE_BODY_BYTES
+  const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : maxMessageBodyBytes()
   if (bytes <= limit) return serialized
-  throw new LlmError(oversizedBodyMessage(bytes, limit, body), 'PROVIDER_ERROR')
+  throw new LlmError(oversizedBodyMessage(bytes, limit, body, context), 'PROVIDER_ERROR')
 }
 
 /**
@@ -1344,10 +1364,47 @@ export function requestBodyBreakdown(
   }
 }
 
+/**
+ * What the loop DID, which is not always what the byte composition SUGGESTS.
+ *
+ * A caller that ran the loop passes what it did, and the message then names the action
+ * that actually happened. One that did not — every direct assertion of the guard —
+ * gets the composition-based text below, unchanged.
+ *
+ * Three states rather than two: an image can still be attached while omitting every
+ * remaining one still cannot close the gap. That case used to be described with the
+ * same sentence as a request the loop had just fixed by dropping images.
+ */
+function bodyFitRemedy(parts: RequestBodyBreakdown, context: BodyFitContext | undefined): string {
+  if (context === undefined) {
+    // Two failures that look identical from outside need different remedies, and
+    // the old single message sent everyone to compaction even when their images
+    // were the whole problem.
+    return parts.imageBytes >= parts.otherBytes
+      ? 'Older images are omitted first; drop or re-attach fewer images, or start a new session.'
+      : 'The conversation text and tool schemas dominate, so no image budget can fix this: '
+        + 'compact the conversation or start a new session.'
+  }
+  const dropped = context.droppedImages === 1
+    ? '1 image was'
+    : `All ${context.droppedImages} images were`
+  if (context.sendableImagesRemaining === 0) {
+    return context.droppedImages === 0
+      ? 'This request carries no images, so no image budget can fix this: compact the conversation or start a new session.'
+      : `${dropped} already omitted and the body is still over the limit, so no image budget can fix this: compact the conversation or start a new session.`
+  }
+  // An image is still attached and dropping all of them still cannot close a gap
+  // wider than they are. Saying older images are omitted first would promise an
+  // action the loop has already exhausted.
+  const prior = context.droppedImages === 0 ? '' : ` (${dropped} omitted first)`
+  return `The images still attached weigh less than the ${context.excessBytes}-byte overflow, so omitting all of them cannot fit this request${prior}: compact the conversation or start a new session.`
+}
+
 function oversizedBodyMessage(
   bytes: number,
   limit: number,
   body: Record<string, unknown>,
+  context?: BodyFitContext,
 ): string {
   const parts = requestBodyBreakdown(body)
   const composition = `images ${parts.imageBytes} bytes, tool schemas ${parts.toolSchemaBytes} bytes, `
@@ -1355,10 +1412,7 @@ function oversizedBodyMessage(
   // Two failures that look identical from outside need different remedies, and
   // the old single message sent everyone to compaction even when their images
   // were the whole problem.
-  const remedy = parts.imageBytes >= parts.otherBytes
-    ? 'Older images are omitted first; drop or re-attach fewer images, or start a new session.'
-    : 'The conversation text and tool schemas dominate, so no image budget can fix this: '
-      + 'compact the conversation or start a new session.'
+  const remedy = bodyFitRemedy(parts, context)
   return `Kimi Code rejected the request before sending: the serialized body is ${bytes} bytes, above the `
     + `${limit}-byte limit this route enforces. Composition: ${composition}. ${remedy}`
 }

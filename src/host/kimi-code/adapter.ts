@@ -23,7 +23,9 @@ import {
   STREAM_IDLE_TIMEOUT_MS,
   clampOutputToContext,
   codingBaseUrl,
+  maxMessageBodyBytes,
   maxOutputTokensFor,
+  maxRequestImageBytes,
   reasoningEffortsFor,
 } from './types.ts'
 import {
@@ -65,6 +67,7 @@ import {
   resolveRequestVideos,
   type AttachmentImageReader,
   type AttachmentVideoReader,
+  type BodyFitContext,
   type KimiCodeInBandStreamError,
   type KimiCodeStreamState,
 } from './mapper.ts'
@@ -95,24 +98,31 @@ const MAX_BODY_FIT_ATTEMPTS = 64
  * `current` is the options the over-large body was built from, and `resolved`
  * supplies the post-scaling payload length of each occurrence, so the arithmetic
  * is made of the bytes the wire actually carries rather than of stored sizes.
+ *
+ * REPORTS PROGRESS through the returned count, because zero is a real outcome
+ * rather than the absence of one: when the images still attached weigh less than
+ * the overflow, every one of them together cannot close the gap. That case used to
+ * return `current` unchanged, which the caller could not distinguish from
+ * having dropped everything droppable, so it rebuilt the identical multi-megabyte
+ * body until the attempt cap fired.
  */
 function dropOldestImagesUntilFits(
   current: NormalizedGenerateOptions,
   resolved: ResolvedRequestImages,
   excessBytes: number,
   baseline: NormalizedGenerateOptions,
-): NormalizedGenerateOptions {
+): { options: NormalizedGenerateOptions; dropped: number } {
   const lengths = requestImagePayloadLengths(baseline, resolved)
   const alreadyDropped = countOmitted(current, baseline, resolved)
   const remaining = lengths.slice(alreadyDropped)
   // How many more oldest occurrences free the excess, counting only what the
   // current request still carries.
   const additional = imagesToOffloadCount(remaining, excessBytes)
-  if (additional === 0) return current
+  if (additional === 0) return { options: current, dropped: 0 }
   // The same resolution as `lengths`: index N names the Nth occurrence that
   // actually carries bytes, which is the only reading that keeps the count and
   // the replacement addressing the same images.
-  return replaceOldestRequestImages(current, additional, resolved)
+  return { options: replaceOldestRequestImages(current, additional, resolved), dropped: additional }
 }
 
 /**
@@ -657,7 +667,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     const images = await resolveRequestImages(normalized, this.options.attachments, signal)
     const imageTrimmed = offloadOldestRequestImages(
       normalized,
-      MAX_REQUEST_IMAGE_BYTES,
+      maxRequestImageBytes(),
       images,
     )
     const requestOptions = offloadOldestRequestVideos(imageTrimmed, MAX_REQUEST_VIDEO_BYTES)
@@ -704,7 +714,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     // omission. It stops as soon as the body fits, so a request that already fit
     // is serialized exactly once and unchanged.
     const carriesVideo = requestHasVideo(requestOptions)
-    const bodyLimit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : MAX_MESSAGE_BODY_BYTES
+    const bodyLimit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : maxMessageBodyBytes()
     let buildOptions = boundedOptions
     let body = ''
     for (let attempt = 0; ; attempt++) {
@@ -717,11 +727,28 @@ export class KimiCodeAdapter extends LlmAdapter {
       // Nothing left to give back: the remainder is conversation text, tool
       // schemas or video, none of which this route may silently discard. The
       // guard then reports the composition so the remedy names the real cause.
+      // What the loop DID, which is not what the byte composition suggests. A
+      // guard answering from the composition alone promises an omission a
+      // stalled loop never performed.
+      const context = (): BodyFitContext => ({
+        droppedImages: countOmitted(buildOptions, requestOptions, images),
+        sendableImagesRemaining: requestImagePayloadLengths(buildOptions, images).length,
+        excessBytes: bytes - bodyLimit,
+      })
       if (attempt > MAX_BODY_FIT_ATTEMPTS || !requestHasSendableImage(buildOptions, images)) {
-        assertRequestBodyFits(built, carriesVideo)
+        assertRequestBodyFits(built, carriesVideo, context())
         throw new Error('unreachable: assertRequestBodyFits returns or throws')
       }
-      buildOptions = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, requestOptions)
+      const drop = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, requestOptions)
+      // Nothing was droppable even though an image is still attached: the images
+      // left weigh less than the overflow, so another turn would rebuild the
+      // identical body. Stop here instead of spending the attempt budget
+      // re-serializing a multi-megabyte request that cannot change.
+      if (drop.dropped === 0) {
+        assertRequestBodyFits(built, carriesVideo, context())
+        throw new Error('unreachable: assertRequestBodyFits returns or throws')
+      }
+      buildOptions = drop.options
     }
 
     const pool = this.accountPool

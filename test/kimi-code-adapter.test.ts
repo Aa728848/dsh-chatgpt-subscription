@@ -15,6 +15,7 @@ import type { KimiCodeWire } from '../src/shared/kimi-code-contracts.ts'
 import type { KimiCodeCatalogModel } from '../src/host/kimi-code/token-store.ts'
 import { clearCachedCatalog } from '../src/host/kimi-code/client.ts'
 import type { KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
+import type { AttachmentImageReader } from '../src/host/common/request-images.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -45,6 +46,8 @@ async function buildAdapter(options: {
   contextWindowOverrides?: Record<string, number>
   defaultReasoningEffort?: 'low' | 'high' | 'max' | 'none' | null
   creds?: KimiCodeCredentials
+  fetchFn?: typeof fetch
+  attachments?: AttachmentImageReader
 } = {}) {
   const store = new FileCredentialStore(tmp('kc-cred'))
   vi.spyOn(store, 'read').mockResolvedValue(options.creds ?? credentials())
@@ -60,6 +63,8 @@ async function buildAdapter(options: {
   })
   const adapter = new KimiCodeAdapter(store, modelSettings, undefined, {
     loadCatalog: async () => CATALOG,
+    fetchFn: options.fetchFn,
+    attachments: options.attachments,
   })
   return { adapter, store, modelSettings }
 }
@@ -753,5 +758,45 @@ describe('kimi-code in-band stream errors on the OpenAI wire', () => {
     expect(error).toMatchObject({ code: 'RATE_LIMIT' })
     expect(pool.cooldowns).toHaveLength(0)
     expect(calls).toHaveLength(1)
+  })
+})
+describe('the body-fit loop gives up on the first turn it cannot improve', () => {
+  it('does not report an omission it never performed', async () => {
+    // One small image plus enough text to clear the 2 MB ceiling. The overflow is
+    // wider than the image, so dropping it could never fit the request — the loop
+    // has nothing to gain from a second turn.
+    const image = new Uint8Array(64 * 1024)
+    const fetchCalls: number[] = []
+    const { adapter } = await buildAdapter({
+      fetchFn: (async () => { fetchCalls.push(1); return sseResponse([]) }) as typeof fetch,
+      // The branded attachment ids are irrelevant here: the reader only has to
+      // hand back a payload of the stated size, which is what the budget measures.
+      attachments: {
+        readImage: async () => ({
+          ref: { attachmentId: 'small', mediaType: 'image/png', bytes: image.length, width: 1, height: 1 },
+          data: image,
+        }),
+        readImageRequest: async (ref: { attachmentId: string }) => ({
+          attachment: { attachmentId: ref.attachmentId, mediaType: 'image/png', bytes: image.length, width: 1, height: 1 },
+          variantId: 'v', data: image, mediaType: 'image/png', bytes: image.length,
+          width: 1, height: 1, depth: 'uchar', space: 'srgb', hasAlpha: false,
+        }),
+      } as never,
+    })
+
+    const options = generateOptions(CATALOG[0].id, {
+      messages: [
+        { role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'small', mediaType: 'image/png', bytes: image.length, width: 1, height: 1 } }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(2_400_000) }] },
+      ] as never,
+    })
+
+    // Refused before the request went out, which is the pre-existing behaviour.
+    await expect(drain(adapter.stream(options))).rejects.toThrow(/Kimi Code rejected the request before sending/)
+    // What matters is what it says: the image is still attached, and dropping all
+    // of it could not have closed a gap wider than it is.
+    await expect(drain(adapter.stream(options))).rejects.toThrow(/cannot fit this request/i)
+    await expect(drain(adapter.stream(options))).rejects.not.toThrow(/Older images are omitted first/)
+    expect(fetchCalls).toEqual([])
   })
 })
