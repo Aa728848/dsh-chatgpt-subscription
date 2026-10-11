@@ -99,6 +99,16 @@ import {
   registerClaudePreferenceStore,
 } from './host/claude/token-store.ts'
 import { PROVIDER_ID as CLAUDE_PROVIDER_ID, PROVIDER_NAME as CLAUDE_PROVIDER_NAME } from './host/claude/types.ts'
+import { GlmCodingPlanAdapter } from './host/glm-coding-plan/adapter.ts'
+import { GlmCodingPlanAccountPool } from './host/glm-coding-plan/account-pool.ts'
+import { glmCodingPlanSettingsSource, registerGlmCodingPlanRoutes } from './host/glm-coding-plan/routes.ts'
+import { catalogSize as glmCodingPlanCatalogSize } from './host/glm-coding-plan/model-catalog.ts'
+import {
+  GlmCodingPlanCredentialStore,
+  GlmCodingPlanModelSettingsStore,
+  registerGlmCodingPlanPreferenceStore,
+} from './host/glm-coding-plan/token-store.ts'
+import { PROVIDER_ID as GLM_CODING_PLAN_PROVIDER_ID, PROVIDER_NAME as GLM_CODING_PLAN_PROVIDER_NAME } from './host/glm-coding-plan/types.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
@@ -280,6 +290,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     preferAccountId: () => claudePreferences.status().selectedAccountId,
   })
 
+  // GLM（ZCode 账号）：浏览器 OAuth 登录与 adopt 产出同一种凭据，一个池里可以同时
+  // 有国区与国际区账号。凭据文件是号池主账号的镜像，只在号池为空时投影出一个账号。
+  const glmCodingPlanStore = new GlmCodingPlanCredentialStore()
+  const glmCodingPlanModelSettings = new GlmCodingPlanModelSettingsStore()
+  const glmCodingPlanPreferences = registerGlmCodingPlanPreferenceStore(ctx.settings, glmCodingPlanModelSettings)
+  const glmCodingPlanAccountPool = new GlmCodingPlanAccountPool({
+    store: glmCodingPlanStore,
+    // 卡片可以钉住一个账号，而它能在适配器服务请求期间改变，所以每次选号都读一次。
+    preferAccountId: () => glmCodingPlanPreferences.status().selectedAccountId ?? null,
+  })
+
   // The allowlist a Session recorded outranks the current settings document,
   // because the built-in delegation tool snapshot it when the Session started.
   const delegationToolNames = normalizeDelegationToolNames(pluginConfig.subagentModelTools)
@@ -456,6 +477,35 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         conflict: () => kimiCodeClaim.conflict(),
       },
       kimiCodeAccountPool,
+    )
+
+    const glmCodingPlanAdapter = new GlmCodingPlanAdapter(
+      glmCodingPlanStore,
+      glmCodingPlanModelSettings,
+      glmCodingPlanPreferences,
+      {
+        fetchFn: modelFetch[GLM_CODING_PLAN_PROVIDER_ID],
+        attachments: ctx.attachments,
+        accountPool: glmCodingPlanAccountPool,
+      },
+    )
+    const glmCodingPlanClaim = claimProviderRoute(ctx, {
+      providerId: GLM_CODING_PLAN_PROVIDER_ID,
+      label: GLM_CODING_PLAN_PROVIDER_NAME,
+      adapter: glmCodingPlanAdapter,
+    })
+    // Registered unconditionally: the card is how a user signs in for the first
+    // time, so gating it on winning the route would leave a contested id with no
+    // way to configure it at all.
+    const disposeGlmCodingPlanRoutes = registerGlmCodingPlanRoutes(
+      ctx,
+      glmCodingPlanSettingsSource(glmCodingPlanPreferences, glmCodingPlanModelSettings),
+      {
+        fetchFn: proxyFetch,
+        serving: () => glmCodingPlanClaim.serving(),
+        conflict: () => glmCodingPlanClaim.conflict(),
+        accountPool: glmCodingPlanAccountPool,
+      },
     )
 
     const minimaxCodeAdapter = new MinimaxCodeAdapter(
@@ -822,6 +872,26 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         },
       },
       {
+        id: 'glm-coding-plan',
+        providerId: GLM_CODING_PLAN_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = glmCodingPlanPreferences.status()
+          const accounts = await glmCodingPlanAccountPool.listAccounts().catch(() => [])
+          // This line ships its catalog with the build (the live listing only
+          // refreshes the per-account context windows), so the packaged size is
+          // the total there is.
+          const total = catalogTotal(glmCodingPlanCatalogSize())
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
         // Ollama has no enable switch — a key line is always servable — so its
         // card renders no toggle and always reports enabled.
         id: 'ollama',
@@ -914,6 +984,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       workBuddyClaim.dispose()
       disposeClaudeRoutes()
       claudeClaim.dispose()
+      disposeGlmCodingPlanRoutes()
+      glmCodingPlanClaim.dispose()
       oauth.dispose()
       proxyManager.dispose()
     }
@@ -1215,6 +1287,89 @@ export {
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
 export { AccountPoolStore } from './host/antigravity/account-pool.ts'
+// --- GLM（ZCode 账号）-------------------------------------------------------------
+export {
+  GlmCodingPlanAdapter,
+  GLM_CODING_PLAN_RETRY_POLICY_CONFIG,
+  GLM_POOL_COOLDOWN_MS,
+  buildGlmRequestPlan,
+  glmCooldownDecision,
+  readGlmResetAt,
+  type GlmRequestPlan,
+} from './host/glm-coding-plan/adapter.ts'
+export {
+  GlmAdoptedCredentialRefreshError,
+  GlmCodingPlanAccountPool,
+  glmCodingPlanPoolIdentity,
+  glmCodingPlanPoolPath,
+  glmCodingPlanPoolQuota,
+  glmCodingPlanPoolStatus,
+  parseGlmCodingPlanPoolData,
+  type GlmCodingPlanAccountSummary,
+  type GlmCodingPlanPoolAccount,
+  type GlmCodingPlanPoolStatus,
+} from './host/glm-coding-plan/account-pool.ts'
+export {
+  GLM_CODING_PLAN_PREFERENCES_NAMESPACE,
+  GlmCodingPlanCredentialStore,
+  GlmCodingPlanModelSettingsStore,
+  credentialPath as glmCodingPlanCredentialPath,
+  credentialsFromAdopt,
+  credentialsFromCliLogin,
+  isAdoptedCredential as isAdoptedGlmCodingPlanCredential,
+  mergeGlmCodingPlanSettings,
+  modelSettingsPath as glmCodingPlanModelSettingsPath,
+  parseGlmCodingPlanCredentials,
+  registerGlmCodingPlanPreferenceStore,
+  type GlmCodingPlanCredentialOrigin,
+  type GlmCodingPlanCredentials,
+  type GlmCodingPlanModelSettings,
+  type GlmCodingPlanPreferenceStore,
+  type GlmCodingPlanSettingsPatch,
+} from './host/glm-coding-plan/token-store.ts'
+export {
+  getGlmCodingPlanStatus,
+  glmCatalogSize,
+  glmCodingPlanSettingsSource,
+  glmSubPathOf,
+  registerGlmCodingPlanRoutes,
+  type GlmCodingPlanRouteOptions,
+  type GlmCodingPlanSettingsSource,
+} from './host/glm-coding-plan/routes.ts'
+export {
+  GLM_MODEL_CATALOG,
+  GLM_MODEL_IDS,
+  catalogModelOptions,
+  catalogSize as glmCodingPlanCatalogCount,
+  modelsForRegion as glmCodingPlanModelsForRegion,
+  resolveGlmModel,
+  type GlmModelEntry as GlmCodingPlanModelEntry,
+} from './host/glm-coding-plan/model-catalog.ts'
+export {
+  PROVIDER_ID as GLM_CODING_PLAN_ROUTE_PROVIDER_ID,
+  PROVIDER_NAME as GLM_CODING_PLAN_ROUTE_PROVIDER_NAME,
+  QUOTA_WINDOW_MINUTES as GLM_CODING_PLAN_QUOTA_WINDOW_MINUTES,
+  authorizeUrl as glmCodingPlanAuthorizeUrl,
+  convergeGlmEffort,
+  isGlmReasoningEffort,
+  normalizeRegion as normalizeGlmCodingPlanRegion,
+} from './host/glm-coding-plan/types.ts'
+export {
+  adoptZcodeSignIn as adoptGlmZcodeSignIn,
+  isAdoptedZcodeCredential as isAdoptedGlmZcodeCredential,
+  zcodeCredentialsPath,
+} from './host/glm-coding-plan/adopt.ts'
+export {
+  applyGlmClientSigning,
+  GlmClientSigner,
+  parseGlmCodingPlanApiKey,
+} from './host/glm-coding-plan/signing.ts'
+export {
+  fetchGlmQuota,
+  getCachedQuota as getCachedGlmCodingPlanQuota,
+  loadCatalog as loadGlmCodingPlanCatalog,
+  verifyCodingPlanKey as verifyGlmCodingPlanKey,
+} from './host/glm-coding-plan/client.ts'
 export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts'
 export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
 

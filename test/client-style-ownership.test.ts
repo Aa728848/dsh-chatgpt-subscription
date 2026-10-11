@@ -7,6 +7,7 @@ import { installClaudeStyles } from '../src/client/claude/styles.ts'
 import { installKimiCodeStyles } from '../src/client/kimi-code/styles.ts'
 import { installMinimaxCodeStyles } from '../src/client/minimax-code/styles.ts'
 import { installWorkBuddyStyles } from '../src/client/workbuddy/styles.ts'
+import { installGlmCodingPlanStyles } from '../src/client/glm-coding-plan/styles.ts'
 import { installPoolStyles } from '../src/client/common/styles.ts'
 import { installMermaidStyles } from '../src/client/mermaid/styles.ts'
 
@@ -18,6 +19,9 @@ const SHEETS = [
   { name: 'kimi-code', install: installKimiCodeStyles },
   { name: 'minimax-code', install: installMinimaxCodeStyles },
   { name: 'workbuddy', install: installWorkBuddyStyles },
+  // GLM（ZCode 账号）卡片也有自己的一张：登录流程块、手工粘贴行与「导入的登录态」徽标。
+  // 它由 `src/client/index.tsx` 无条件安装，所以这张表漏掉它就等于不再覆盖那张表。
+  { name: 'glm-coding-plan', install: installGlmCodingPlanStyles },
   { name: 'pool', install: installPoolStyles },
   { name: 'mermaid', install: installMermaidStyles },
 ] as const

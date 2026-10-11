@@ -2,8 +2,8 @@
  * A sign-in opens the authorization page ONCE.
  *
  * The settings card opens the page itself (`window.open`, which the desktop
- * shell hands to the system browser). The Claude and Command Code hosts used to
- * open the same URL again from `/login`, so every sign-in showed the user two
+ * shell hands to the system browser). The Claude, Command Code and GLM hosts used
+ * to open the same URL again from `/login`, so every sign-in showed the user two
  * identical login pages. These tests pin the host side: `/login` must answer the
  * URL for the card and launch nothing on its own.
  */
@@ -24,6 +24,22 @@ vi.mock('node:child_process', async (importOriginal) => {
     : (actual.spawn as (...args: unknown[]) => unknown)(command, ...rest)))
   return { ...actual, spawn }
 })
+vi.mock('../src/host/glm-coding-plan/oauth.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/host/glm-coding-plan/oauth.ts')>()
+  return {
+    ...actual,
+    // Same reason as the Command Code stub below: the flow itself talks to the
+    // upstream and keeps polling, and what is under test here is the route's
+    // choice of opener, not the flow.
+    beginWebLogin: vi.fn(async () => ({
+      status: 'pending',
+      loginId: 'login-1',
+      credentials: null,
+      region: 'intl',
+      authorizeUrl: 'https://chat.z.ai/api/oauth/authorize?client_id=x',
+    })),
+  }
+})
 vi.mock('../src/host/command-code/oauth.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/host/command-code/oauth.ts')>()
   return {
@@ -42,6 +58,9 @@ const { cancelLogin } = await import('../src/host/claude/oauth.ts')
 const commandCodeOauth = await import('../src/host/command-code/oauth.ts')
 const { registerCommandCodeRoutes } = await import('../src/host/command-code/routes.ts')
 const CommandCodeStores = await import('../src/host/command-code/token-store.ts')
+const glmOauth = await import('../src/host/glm-coding-plan/oauth.ts')
+const { registerGlmCodingPlanRoutes } = await import('../src/host/glm-coding-plan/routes.ts')
+const { GLM_CODING_PLAN_ROUTE_PREFIX: GLM_PREFIX } = await import('../src/shared/glm-coding-plan-contracts.ts')
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>
 
@@ -68,7 +87,7 @@ function capture(register: (ctx: Context) => void): Handler {
 }
 
 /** A same-origin JSON POST whose body is replayed to late listeners. */
-async function post(handler: Handler, url: string): Promise<{ status: number; body: { ok: boolean; value?: { authUrl?: string } } }> {
+async function post(handler: Handler, url: string): Promise<{ status: number; body: { ok: boolean; value?: { authUrl?: string; authorizeUrl?: string } } }> {
   const chunks = [Buffer.from('{}')]
   const request = {
     url,
@@ -81,7 +100,7 @@ async function post(handler: Handler, url: string): Promise<{ status: number; bo
     },
     destroy() {},
   } as unknown as IncomingMessage
-  const captured = { status: 0, body: { ok: false } as { ok: boolean; value?: { authUrl?: string } } }
+  const captured = { status: 0, body: { ok: false } as { ok: boolean; value?: { authUrl?: string; authorizeUrl?: string } } }
   const response = {
     writeHead(status: number) { captured.status = status; return response },
     end(raw?: string) { if (raw !== undefined) captured.body = JSON.parse(raw) },
@@ -95,8 +114,17 @@ function browserLaunches(): unknown[][] {
   return spawnSpy.mock.calls.filter(([command]) => ['cmd', 'open', 'xdg-open'].includes(String(command)))
 }
 
+/** GLM 的设置源：`/login/start` 这一条路由只读登录状态，根本不会碰它。 */
+function glmSettingsSource() {
+  return {
+    status: () => ({}) as never,
+    update: () => ({}) as never,
+  }
+}
+
 afterEach(() => {
   cancelLogin()
+  glmOauth.resetWebLogins()
   spawnSpy.mockClear()
 })
 
@@ -132,6 +160,28 @@ describe('a sign-in opens the login page once', () => {
     // Absent would mean the flow's own default, which spawns the system browser.
     expect(options.openBrowser).toBeTypeOf('function')
     options.openBrowser!('https://commandcode.ai/auth?x=1')
+    expect(browserLaunches()).toEqual([])
+  })
+
+  it('GLM: /login/start asks the flow for a no-op opener, so only the card opens the page', async () => {
+    const handler = capture((ctx) => registerGlmCodingPlanRoutes(
+      ctx,
+      glmSettingsSource(),
+      {
+        fetchFn: (async () => Response.json({})) as unknown as typeof fetch,
+        // NO `openBrowser` override: this is the production wiring.
+      },
+    ))
+    const result = await post(handler, GLM_PREFIX + '/login/start')
+    expect(result.status).toBe(200)
+    expect(result.body.value?.authorizeUrl).toMatch(/^https:\/\//)
+
+    const begin = vi.mocked(glmOauth.beginWebLogin)
+    expect(begin).toHaveBeenCalledTimes(1)
+    const options = begin.mock.calls[0]![0]!
+    // Absent would mean the flow's own default, which spawns the system browser.
+    expect(options.openBrowser).toBeTypeOf('function')
+    options.openBrowser!('https://chat.z.ai/api/oauth/authorize?client_id=x')
     expect(browserLaunches()).toEqual([])
   })
 })

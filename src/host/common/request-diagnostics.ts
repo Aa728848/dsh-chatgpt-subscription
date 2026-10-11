@@ -28,6 +28,8 @@ export const DIAGNOSTIC_PROVIDERS = [
   'claude',
   'workbuddy',
   'codex',
+  // 第九条线路：与 CONTROLLED_PROVIDERS 一样，「诊断里认识这条线路」是一条注册点。
+  'glm-coding-plan',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

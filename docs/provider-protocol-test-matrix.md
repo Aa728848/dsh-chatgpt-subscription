@@ -12,6 +12,7 @@ This is a reproducible offline test index, not a claim that every upstream subsc
 | Command Code | [mapper](<../test/command-code-mapper.test.ts>), [Responses](<../test/command-code-responses.test.ts>) | [adapter](<../test/command-code-adapter.test.ts>), [plugin](<../test/command-code-plugin.test.ts>) | Three wires remain distinct; reasoning replay not fabricated |
 | WorkBuddy | [mapper](<../test/workbuddy-mapper.test.ts>), [cache accounting](<../test/cache-accounting.test.ts>) | [adapter](<../test/workbuddy-adapter.test.ts>) | Community error semantics are not treated as universal provider guarantees |
 | Ollama | [projection](<../test/ollama-projection.test.ts>), [wire](<../test/ollama-client.test.ts>) | [pool](<../test/ollama-account-pool.test.ts>) | Cloud only; explicit known model controls, unknown visible downgrade |
+| GLM (ZCode account) | [Anthropic mapper](<../test/glm-coding-plan-mapper-anthropic.test.ts>), [OpenAI mapper](<../test/glm-coding-plan-mapper-openai.test.ts>), [catalog and quota](<../test/glm-coding-plan-client.test.ts>) | [OAuth](<../test/glm-coding-plan-oauth.test.ts>), [adopt](<../test/glm-coding-plan-adopt.test.ts>), [signing](<../test/glm-coding-plan-signing.test.ts>), [contracts](<../test/glm-coding-plan-contracts.test.ts>), [UI](<../test/glm-coding-plan-ui.test.tsx>) | Client Signing V4 off by default (only observed A/B comparison shows identical responses with and without it); CN-region exchange chain unverified (reverse-engineered, level B); no live account — mock-only acceptance |
 
 ## Cross-route gates
 
@@ -26,3 +27,5 @@ This is a reproducible offline test index, not a claim that every upstream subsc
 ## Reference evidence
 
 Reference fetches and reviewed contracts are recorded in [protocol repair evidence](<../.dsh/skills/dsh-harness-upgrade/references/provider-protocol-review.md>). Evidence date for this extension pass: 2026-10-03. Runtime approvals based on official contract/fixtures must identify that tier; none are relabelled live-validated.
+
+- GLM (ZCode account) line: per-model capabilities and the Coding Plan endpoints transcribed from the official open-source repository [`zai-org/ZCode`](https://github.com/zai-org/ZCode) — `config/provider/zcode-builtin.json` (revision 31) for the capability/site rules, and `apps/zcode-cli/packages/adapters/src/auth/*` for the OAuth control plane. Evidence date: 2026-10-11. The account-to-Key exchange chain is level B (reverse-engineered from three independent community implementations, protocol read only), and the whole line was accepted against **mocks with no live ZCode account** — nothing in its rows is a live-validated claim.

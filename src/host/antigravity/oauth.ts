@@ -504,6 +504,16 @@ export async function loginAndSave(
   onUrl?: (url: string) => void,
   fetchFn: typeof fetch = fetch,
   onProgress?: (stage: string) => void,
+  /**
+   * 打开授权页的方式；缺省是本模块那份平台实现。
+   *
+   * 这一栏只是给测试留的口子：这一行以前是硬编码的 openBrowser(authUrl)，将来
+   * 任何调用 loginAndSave 的用例都会在跑测试的机器上真的弹出窗口，而写用例的人
+   * 不会事先知道。
+   *
+   * 默认值就是改动前那一行本身，所以**生产行为一点没变**：该开还是开。
+   */
+  openFn: (url: string) => void = openBrowser,
 ): Promise<AntigravityCredentials> {
   const { verifier, challenge } = generatePKCE()
   const state = base64Url(randomBytes(32))
@@ -523,7 +533,7 @@ export async function loginAndSave(
 
   try {
     if (onUrl) onUrl(authUrl)
-    openBrowser(authUrl)
+    openFn(authUrl)
 
     if (signal?.aborted) throw new Error('OAuth login aborted')
     const { code, state: returnedState } = await waitForCode()

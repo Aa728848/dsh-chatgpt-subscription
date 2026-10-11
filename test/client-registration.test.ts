@@ -295,6 +295,8 @@ describe('client registration', () => {
       'conversation.input.right',
       'conversation.input.right',
       'conversation.input.right',
+      // 一条新线路加一个胶囊槽位：注入次数由线路数决定，这里跟着 HUB_PROVIDERS 走。
+      'conversation.input.right',
       'tool.call.toolview',
     ])
     // Every provider, MiniMax Code included, lives behind one tabbed settings
@@ -310,6 +312,7 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'workbuddy-quota', order: 39 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'minimax-code-quota', order: 40 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'claude-quota', order: 41 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42 }),
     ])
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
       key: CODEX_IMAGE_TOOL_NAME,
@@ -319,7 +322,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'claude', 'ollama'] as const
+    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -379,6 +382,29 @@ describe('client registration', () => {
           ownedByPlugin: false,
         } })
       }
+      if (url.startsWith('/glm-coding-plan/api')) {
+        // GLM mounts under its own prefix like every sibling line, and reads one
+        // /status carrying the whole card: pool, models, quota and the login flow.
+        return Response.json({ ok: true, value: {
+          enabled: true,
+          authenticated: false,
+          hasCredentials: false,
+          providerId: 'glm-coding-plan',
+          storagePath: 'DPAPI: /tmp/glm-credentials.json.dpapi',
+          region: 'cn',
+          account: null,
+          quota: null,
+          lastFetchedAt: null,
+          models: [],
+          contextWindowOverrides: {},
+          defaultReasoningEffort: null,
+          login: { status: 'idle' },
+          accounts: [],
+          rotationStrategy: 'sequential',
+          serving: true,
+          conflict: null,
+        } })
+      }
       if (url.startsWith('/ollama/api')) {
         // Ollama's card is the shared account card over an API-key pool, so the
         // payload is the pool slice plus a synced catalog.
@@ -436,12 +462,12 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'Claude', 'Ollama'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none.
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(7)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(8)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.
@@ -449,7 +475,7 @@ describe('client registration', () => {
 
       // Drilling in replaces the overview with that line's section, mounted
       // under the back bar; leaving the page means the section unmounts.
-      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/minimax-code/api/status'], [6, '/claude/api/status']] as const) {
+      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/minimax-code/api/status'], [6, '/glm-coding-plan/api/status'], [7, '/claude/api/status']] as const) {
         const id: string = TAB_IDS[index]
         fetchMock.mockClear()
         await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[index]?.click() })
@@ -489,7 +515,7 @@ describe('client registration', () => {
       await act(async () => { container.querySelector<HTMLButtonElement>('.dsh-hub-back')?.click() })
 
       // The detail the user was last on survives a remount of the settings page.
-      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[6]?.click() })
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[7]?.click() })
       expect(container.querySelector('.dsh-hub-backbar-name')?.textContent).toBe('Claude')
       await act(async () => root.unmount())
       const remountRoot = createRoot(container)

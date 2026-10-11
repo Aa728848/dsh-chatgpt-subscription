@@ -35,6 +35,9 @@ import { installMinimaxCodeStyles } from './minimax-code/styles.ts'
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY, type WorkBuddyLocaleKey } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
+import { GlmCodingPlanComposerQuota } from './glm-coding-plan/GlmCodingPlanComposerQuota.tsx'
+import { dictionaries as glmCodingPlanDicts, NS_GLM_CODING_PLAN, type GlmCodingPlanLocaleKey } from './glm-coding-plan/locales.ts'
+import { installGlmCodingPlanStyles } from './glm-coding-plan/styles.ts'
 import { dictionaries as ollamaDicts, NS_OLLAMA, type OllamaLocaleKey } from './ollama/locales.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
@@ -55,6 +58,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-kimi-code': KimiCodeLocaleKey
     'dsh-minimax-code': MinimaxCodeLocaleKey
     'dsh-workbuddy': WorkBuddyLocaleKey
+    'dsh-glm-coding-plan': GlmCodingPlanLocaleKey
     'dsh-ollama': OllamaLocaleKey
   }
 }
@@ -99,6 +103,11 @@ export function apply(ctx: ClientContext): void {
     return () => {}
   }, 'dsh-minimax-code: styles')
   ctx.effect(() => ctx.locale.register(NS_WORKBUDDY, workBuddyDicts), 'dsh-workbuddy: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS_GLM_CODING_PLAN, glmCodingPlanDicts), 'dsh-glm-coding-plan: dictionaries')
+  ctx.effect(() => {
+    installGlmCodingPlanStyles()
+    return () => {}
+  }, 'dsh-glm-coding-plan: styles')
   ctx.effect(() => ctx.locale.register(NS_OLLAMA, ollamaDicts), 'dsh-ollama: dictionaries')
   ctx.effect(() => {
     installWorkBuddyStyles()
@@ -171,6 +180,13 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.right', id: 'claude-quota', order: 41, locale: NS_CLAUDE,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, ClaudeComposerQuota))
+  // 顺序 42：接在 claude-quota(41) 之后顺延，而不是插进 38/39 之间。
+  // 这串 order 只要求互不撞号且保持递增；给新线路重排既有线路的号，会让一条已经
+  // 上线的线路的槽位位置无谓地变一次，顺延则旧号全部不动。
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42, locale: NS_GLM_CODING_PLAN,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, GlmCodingPlanComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

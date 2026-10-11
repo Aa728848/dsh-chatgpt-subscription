@@ -15,6 +15,7 @@
 - [Command Code 线路](#command-code-线路)
 - [WorkBuddy 线路](#workbuddy-线路)
 - [Claude（订阅）线路](#claude订阅线路)
+- [GLM（ZCode 账号）线路](#glmzcode-账号线路)
 - [子代理模型授权](#子代理模型授权0215-起032-起强制指定模型)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [本机登录](#本机登录)
@@ -25,7 +26,7 @@
 
 ## 线路总览
 
-本插件同时接入 **7 条订阅线路**，每条各自独立注册 Provider、独立登录、独立额度卡片。
+本插件同时接入 **8 条订阅线路**，每条各自独立注册 Provider、独立登录、独立额度卡片。
 
 | Provider ID | 订阅 | 协议 | 登录方式 | 模型目录来源 |
 | --- | --- | --- | --- | --- |
@@ -36,6 +37,7 @@
 | `claude-subscription` | Claude Pro / Max | Anthropic Messages | 手动粘贴 / loopback 回调 | 实时 `/v1/models` + 本地兜底 |
 | `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | **复用桌面端登录态** 或设备码 | **硬编码**（见下） |
 | `antigravity` | Google Antigravity | Gemini | Google OAuth | 内置表 |
+| `glm-coding-plan` | GLM Coding Plan（ZCode 账号，国区 BigModel / 国际区 Z.ai） | Anthropic Messages + OpenAI Chat Completions（按模型声明） | ZCode 账号 OAuth（浏览器中转轮询）+ 可选导入本机 ZCode 登录态 | 随包目录（源自官方 `zcode-builtin.json`） |
 
 > **只有 minimax-code 是硬编码目录，而且是有意的**：该端点的 `GET /v1/models` **未对订阅流量开放**（返回 503 `direct_route_not_configured`），任何「实时目录」都只会是一个必然失败的请求。其取值转录自本机官方客户端的 `config.yaml`。
 >
@@ -759,6 +761,106 @@ kimi-code / workbuddy 一致），**不**占用 Codex 那条线路的 `/api/dsh-
 access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某个令牌时只输出它的
 **SHA-256 指纹前缀**（`sha256:.../len:...`），**不是**令牌的任何一段原文——早前版本会打印前 6 个字符，
 那本身就是一次凭据泄露，因为同一个字符串会被渲染到设置卡片并写进 Host 日志（有测试锁定）。
+
+## GLM（ZCode 账号）线路
+
+`glm-coding-plan`（显示名 **GLM（ZCode 账号）**）接入 **GLM Coding Plan** 订阅：你在 ZCode 页面用自己的**账号**完成授权，插件用 ZCode 自己的 CLI OAuth 控制面换出 Coding Plan Key，再打**套餐专用**端点——不粘贴 API Key，也不需要你手工铸造 Key。国区（BigModel）与国际区（Z.ai）是两套互不连通的部署：各自独立登录、独立凭据、独立号池行，同一个号池里可以同时存在两区账号且互不串用。
+
+> ⚠️ **本线路没有经过实机账号验证。** 开发与验收环境不具备真实的 ZCode 账号，全部验收都是 mock 验收。下面「已知限制」逐条写明哪些上游行为**仍未验证**、以及拿到账号后必须先复验什么——那不是免责套话，是复审清单。
+
+**登录**：
+
+1. 确认自己属于国区还是国际区。**付费套餐与免费体验额度都可以登录**：官方文档写明新用户连接 BigModel 账号后自动获得「体验套餐：无需付费，在首次使用起的 5 天内，每天提供 800 万 token 的 GLM 系列模型体验额度」，所以本线路**不再要求**必须先订阅 Coding Plan；
+2. 重启 DSH，打开 **设置 → 订阅服务 → GLM（ZCode 账号）**；
+3. 选好区域后点「登录」：插件开一次 OAuth 流并自动打开授权页；浏览器打不开不是致命错误，授权链接始终显示在卡片上，可自行复制打开。卡片每 2 秒轮询一次进度；
+4. 授权完成后插件自动跑兑换链换出 Coding Plan Key、验一次活、加密落盘并加入号池。验活只回答「这把 Key 会不会被上游认出来」，**不要求账号有付费套餐**：认得出来就落盘，卡片上如实标出当前是「付费套餐」还是「免费体验额度」。浏览器没走通时可以「手工粘贴」回调链接或授权码——粘贴只是「去问一次上游」的信号，**凭据仍然只来自上游轮询**；
+5. 也可以点「导入本机 ZCode 登录态」省掉一次登录（见下）。
+
+**导入本机 ZCode 登录态（可选，只读）**：只读本机已登录的 ZCode 客户端凭据文件 `~/.zcode/v2/credentials.json`（`ZCODE_DATA_BASE_DIR` 可覆盖），**从不创建、修改或删除** ZCode 的任何文件。该文件的加密密钥可由「平台 + 用户名 + 主目录」推导，因此普通用户的导入不依赖额外密钥；**设了 `ZCODE_CREDENTIAL_SECRET` 的用户会导入失败**，此时回落浏览器登录、不阻断。导入到的凭据与浏览器登录走**同一条兑换链**，下游完全共用。
+
+**上游接口**：
+
+| 用途 | 路径 | 鉴权 |
+| --- | --- | --- |
+| OAuth 开流 | `POST https://zcode.z.ai/api/v1/oauth/cli/init` | `Authorization: Bearer <pollToken>`；pollToken 是本地 `randomBytes(32)` 生成的绑定令牌，**不是登录凭据**、不落盘 |
+| OAuth 轮询 | `GET https://zcode.z.ai/api/v1/oauth/cli/poll/{flow_id}` | 同一个 Bearer pollToken |
+| 业务 JWT（**仅国际区**） | `POST {业务 host}/api/auth/z/login` | 请求体带 OAuth access_token；响应给出业务 JWT 与 `expires_in` |
+| 兑换：默认机构与项目 | `GET {业务 host}/api/biz/customer/getCustomerInfo` | 国际区 `Authorization: Bearer <业务 JWT>`；国区是**裸 access_token**（见「两区差异」） |
+| 兑换：Key 列表 / 创建 | `GET` / `POST {业务 host}/api/biz/v1/organization/{orgId}/projects/{projectId}/api_keys` | 同上 |
+| 兑换：取 secretKey | `GET {业务 host}/api/biz/v1/organization/{orgId}/projects/{projectId}/api_keys/copy/{apiKeyId}` | 同上 |
+| 模型生成（Anthropic 面） | `POST {api host}/api/anthropic/v1/messages` | `x-api-key` 与 `Authorization: Bearer` **同值双头**（该兼容网关两个都读） |
+| 模型生成（OpenAI 兼容面） | `POST {api host}/api/coding/paas/v4/chat/completions` | `Authorization: Bearer <Coding Plan Key>` |
+| 配额 | `GET {业务 host}/api/monitor/usage/quota/limit` | **`authorization: <id>.<secret>` 裸 Key，不可加 `Bearer`**（加了会鉴权失败，与模型面正好相反） |
+
+模型面刻意**不是**通用开放平台的 `/api/paas/v4`：官方文档的 Common mistakes 段写明走那个面套餐额度不生效——用户会看到「买了套餐却在扣余额」。所以 `glm-5.1` / `glm-4.7` 那批只挂在通用面上的模型**不在本线路目录里**；上游目录真出现、而本插件未转录过的 id 会作为「未声明模型」进入目录（不猜协议、不发思考档位、不认图），而不是凭空补一行能力。
+
+轮换出来的 Key 落盘前会用配额接口验一次活，而这一步的两类失败**处置相反**：**凭据本身无效**（鉴权类业务码 1000 / 1001 / 1003）仍然在**登录阶段**报错——放行等于拿着一把废 Key 进对话，用户只会在某次请求里以一个莫名其妙的 401 看到它；**凭据有效但没有付费套餐**（配额面按余额 / 套餐 / 额度维度拒绝）则**放行**，并把额度类型如实记为「免费体验额度」。额度耗尽时由上游返回 429 告知，本线路不预判、也不绕过。
+
+**两区差异**：
+
+| | 国区 `cn` | 国际区 `intl` |
+| --- | --- | --- |
+| 业务 host（兑换链、配额） | `https://bigmodel.cn` | `https://api.z.ai` |
+| 模型面 host | `https://open.bigmodel.cn` | `https://api.z.ai`（国际区把控制台与模型面放在同一个源站上） |
+| 浏览器授权入口 | `https://bigmodel.cn/login?appId=zcode` | `https://chat.z.ai/api/oauth/authorize?client_id=client_P8X5CMWmlaRO9gyO-KSqtg` |
+| 开流请求里的 `provider` | `bigmodel` | `zai` |
+| 业务 JWT | **跳过 `/api/auth/z/login`**，拿 OAuth access_token 当**裸 `Authorization`** 直接打 `/api/biz/*` | 先换业务 JWT，之后 `/api/biz/*` 带 `Bearer <业务 JWT>` |
+
+两区共用同一个 OAuth 控制面（`zcode.z.ai/api/v1/oauth/cli/*`），分开的只有上面这几行。**业务 JWT 的自动重取只服务国际区**——国区没有这一层。授权参数里**没有 PKCE**（两个 provider 的授权参数只有 redirect / appId / state），本插件照抄上游形状，不自带 `code_challenge`。本仓库历史里那句「国区没有浏览器登录」是错的，本线路删除了它：国区**有**浏览器登录，只是入口与参数名都不同。
+
+**模型目录**：随包目录 4 个模型（`GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` / `GLM-5-Turbo`），逐模型事实转录自官方开源版内置配置 `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`（revision 31）。能力**逐模型查表，不从模型名推断**，其中三处是被官方配置纠正过的历史值：
+
+- **输出上限**：GLM-5.3 家族与 GLM-5.2 是 **128000**、GLM-5-Turbo 是 **64000**。历史转录引用的 docs.z.ai 通用参数表给的是 131072，按本仓库「取小值」的规则取 128000（高报会被网关拒，低报只是提前压缩）；128000 也正是**官方客户端自己在 Coding Plan 面上发的那个数**。同一代模型上限差一倍，正是「不得按家族名推」的又一处证据；
+- **图片输入**：四个模型的 `supportsImages` 全为 `true`——**不是因为模型多模态**，而是官方配置里两条 `modelMatch: ".*"` 的站点规则把 `api.z.ai/api/anthropic` 与 `open.bigmodel.cn/api/anthropic` 这两个 Coding Plan 基址的 `supportsImage` 打开成 true（基础规则对 `GLM-5.3` / `GLM-5.2` / `GLM-5-Turbo` 写的都是 false）。所以这条能力读作「**经本线路这两个端点时**收不收图」；
+- **套餐归属**：这四个**全部**是 Coding Plan 模型；反倒是 **Start Plan 缺 `GLM-5.3`**。这一条曾被写反过，写反的代价是把两个确实在套餐里的模型判成未订阅、用户连试都不能试。留着它是为了让复审记住：**套餐归属是账号的属性，不是模型的属性**，同一个 id 在不同 provider 规则下启用的集合是不同的。
+
+思考档位同样逐模型声明：`GLM-5.3` / `GLM-5.3-Flash` 三档且**不可关闭思考**（上游把 `thinking.type: "disabled"` 当错误拒绝），`GLM-5.2` 两档（模型页面写的是更宽的词汇，但它同时写明套餐如何映射，真正能上线缆的只有这两级）且可关闭，`GLM-5-Turbo` **不收档位**（梯子为空，请求里根本不发思考控制字段）。DSH 词汇表更宽的 `minimal` / `medium` / `xhigh` 先收敛到模型真实的梯子再发出去，平手时向上取。
+
+**瞬时失败按错误类别重试**：`glm-coding-plan` 路由显式声明 `normal` 策略（最多 3 次，1.5s 起指数退避、15s 上限、0.2 抖动），覆盖 `RATE_LIMIT` / `SERVER` / `TIMEOUT` / `TRANSPORT`。分类**不能停在状态行**——冻结的错误码表里七条 429 中**只有两条可重试**（1302 频率限制、1305 瞬时过载），其余五条全是额度类，所以**正文没给业务码的裸 429 一律判不可重试**（`Retry-After` 仍然读取并下发，它不改变判定）。同一张表在两个协议面上是**同一份取值**，Anthropic 面与 OpenAI 面各有一份判读函数，改一处必须同时改另一处。
+
+### 插件路由（GLM Coding Plan）
+所有路由都以 `/glm-coding-plan/api` 为前缀：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/status` | 账号、区域、配额快照、模型目录、登录流程与路由归属（`serving` / `conflict`）；页面唯一的读口 |
+| POST | `/settings` | 启用开关、勾选模型、上下文窗口覆盖、默认思考深度、选中账号；**先落盘再发** `llm/adapters-updated` |
+| POST | `/accounts` | 号池动作：`set-primary` / `clear-cooldown` / `delete` / `relogin` / `strategy`（`sequential` / `round-robin` / `sticky`） |
+| POST | `/login/start` | 按区域开一次 OAuth 流，立即返回流程状态（不阻塞） |
+| GET | `/login/status` | 轮询登录流程状态；**只有这一条 GET 会推进状态机**——host 刻意不在后台轮询，关掉设置页之后就不会继续打上游 |
+| POST | `/login/cancel` | 取消登录流程 |
+| POST | `/login/manual` | 手工粘贴回调链接或授权码 |
+| POST | `/adopt` | 导入本机 ZCode 登录态（只读，作快照入池）；失败**永不阻断**，每种失败都是契约里的一个 reason，卡片据此回落浏览器登录 |
+| POST | `/connection/test` | 沿用兑换链验活那条路径（配额接口裸 Key）：它答「这把 Key 还能不能读配额」，**答不了**「这个模型能不能被调用」——后者要花一次真实生成，交给用户发第一条消息 |
+| POST | `/quota` | 强制刷新配额；一次失败的配额读不是一次失败的请求，卡片照旧渲染 |
+| POST | `/catalog/refresh` | 强制刷新模型目录 |
+
+与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。`/adopt` 与 `/connection/test` 的 DTO 定在**顶层**（不带 `{ok,value}` 信封），其余一律走信封。**响应里永远不含 access token、refresh token、业务 JWT 或 Coding Plan Key 的原文**——登录状态 DTO 是逐字段显式投影出来的，而不是展开整个会话对象；将来给会话对象加字段会因此变成一次必须被看见的改动。
+
+**已知限制（拿到账号后请先复验这几条）**：
+
+- **本线路的全部验收都是 mock，没有任何实机账号验证。** 开发与验收环境不具备真实的 ZCode 账号：下面每一条上游行为都是照官方源码、官方文档与社区逆向实现实现的，并由 mock 走通流程与分支，**没有一条经过 live 验证**。因此本节不是「已知问题」清单，而是**拿到账号后的复审清单**——先复验它们，再谈这条线路在你的账号上可用。同批仍未验证的细项还有：服务端实际下发的 `poll_interval_sec`（只见最小 1 秒的校验，无实测样本）、桌面回调中转路径里的握手标识是否会轮换、以及周度 / 月度配额窗口的长度（按词义取 7 天 / 30 天，上游只给了「周度」「月度」这个名称，缺一份真实配额响应样本里的窗口起止时刻；5 小时那一档有逐字证据，不受影响）。
+- **支持免费体验额度与付费套餐，但免费额度的具体行为未经验证。** 本线路现在
+  「有额度就放行」：验活只判断这把 Coding Plan Key 会不会被上游认出来，不再要求账号
+  已订阅付费 Coding Plan。官方文档（逐字：zcode.z.ai/cn/docs/configuration）写明新用户
+  连接 BigModel 账号后自动获得「体验套餐：无需付费，在首次使用起的 5 天内，每天提供
+  800 万 token 的 GLM 系列模型体验额度」，welcome 页也写明「新用户可享受每日免费的 GLM
+  旗舰模型体验额度」——所以**「没有付费套餐」不等于「没有额度」**，登录阶段硬拒会把免费额度的
+  新用户全部挡在门外。卡片会如实区分「付费套餐 / 免费体验额度 / 未判定」，不把免费额度
+  渲染成套餐名。
+  **仍未验证（拿到账号后请先复验）**：
+  - 免费额度账号在配额接口上究竟返回什么形状——是 403 + 业务码（当前按「已知套餐类业务码」
+    与「裸 401/403」两支分别处理），还是能读出一份带窗口的快照。**没有一份实机样本**；
+  - 「凭据无效」与「没有付费套餐」在上游是否**一定**可区分。当前只认三个鉴权类业务码
+    （1000 / 1001 / 1003）为凭据无效；分不出时按 `unknown` **放行**——因为额度耗尽的 429
+    可恢复，而误拒一个有效账号不可恢复（用户再也登不进这条线路，且无从自查）；
+  - 免费额度是否真的能服务模型面（配额接口答得了不代表模型接口答得了），以及它耗尽时的
+    确切错误码与重置节奏；
+  - 「闲时任务」类免费算力（welcome 页所述）本线路**未接入**，它属于另一条调度路径。
+- **上游没有 refresh_token 交换接口。** 官方客户端对刷新直接抛「OAuth 暂未提供 refresh token 交换接口，请重新登录」。因此 `access_token` 过期**只能重新登录**；插件能自动重取的只有业务 JWT 这一层（提前 120 秒 + 0~60 秒抖动防尖峰），而且**它只服务国际区**。账号行上的「重新登录」在 host 这一侧只做两件事：撤掉鉴权失败标记与冷却，让这一行重新参与轮转；真正的登录要由卡片再开一次流程。
+- **客户端签名层（Client Signing V4）默认关闭。** 唯一有实测记录的项目做过 A/B 对照：**带签名与不带签名的响应完全一致**（都是 429/1113），从未观察到服务端因为缺签名而拒绝请求。没有证据表明缺签名会被拒时，默认开启一个逆向来的签名算法只会平白增加故障面，因此它默认关、需要显式打开。反过来，**服务端是否真会因为缺签名返回签名错误，至今从未被观察到**——这条不是「已验证不需要签名」，而是「从未验证过」。
+- **国区兑换链未验证。** 证据来自三个社区实现（等级 B，逆向实测而非官方契约），三者**都以国际区为主**，国区业务面的形状是否同构没有实测样本。国区兑换失败会带上明确说明与下一步建议（改用国际区，或用 `DSH_GLM_CN_BUSINESS_HOST` 等环境变量指向实测过的部署），**不静默失败**。同理，国区配额到底打 `bigmodel.cn` 还是官方文档里那句「亦可用 `open.bigmodel.cn`」也没有实测，本插件取 `bigmodel.cn`。
+- **兑换链的所有端点都可用 `DSH_GLM_*` 环境变量覆盖**（两区的业务 host、模型面 host、授权入口、appId / client_id、Key 名、OAuth 控制面基址，签名层开关也在其中）。这是为等级 B 的兑换链准备的退路：上游一次变更让整条链失效时，回滚是改一个环境变量，而不是发一个版本。
 
 ## 本机登录
 

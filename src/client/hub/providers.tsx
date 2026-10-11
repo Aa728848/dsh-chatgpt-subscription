@@ -11,12 +11,17 @@ import type { ReactElement } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ROUTE_PREFIX } from '../../compat.ts'
 import { MINIMAX_CODE_ROUTE_PREFIX } from '../../shared/minimax-code-contracts.ts'
+import {
+  GLM_CODING_PLAN_PROVIDER_NAME,
+  GLM_CODING_PLAN_ROUTE_PREFIX,
+} from '../../shared/glm-coding-plan-contracts.ts'
 import { CodexSubscriptionSection } from '../CodexSubscriptionSection.tsx'
 import { AntigravitySection } from '../antigravity/AntigravitySection.tsx'
 import { CommandCodeSection } from '../command-code/CommandCodeSection.tsx'
 import { KimiCodeSection } from '../kimi-code/KimiCodeSection.tsx'
 import { WorkBuddySection } from '../workbuddy/WorkBuddySection.tsx'
 import { MinimaxCodeSection } from '../minimax-code/MinimaxCodeSection.tsx'
+import { GlmCodingPlanSection } from '../glm-coding-plan/GlmCodingPlanSection.tsx'
 import { ClaudeSection } from '../claude/ClaudeSection.tsx'
 import { OllamaSection } from '../ollama/OllamaSection.tsx'
 import type { HubProviderId } from './brand-icons.tsx'
@@ -108,6 +113,13 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: 'MiniMax Code',
     setEnabled: (enabled) => postLineSettings(MINIMAX_CODE_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <MinimaxCodeSection onModelChange={onModelChange} />,
+  },
+  {
+    // GLM（ZCode 账号）：位置与 host 侧注册顺序一致（minimax-code 之后、claude 之前）。
+    id: 'glm-coding-plan',
+    name: GLM_CODING_PLAN_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(GLM_CODING_PLAN_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <GlmCodingPlanSection onModelChange={onModelChange} />,
   },
   {
     id: 'claude',

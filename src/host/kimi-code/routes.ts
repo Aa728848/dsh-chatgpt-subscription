@@ -145,6 +145,16 @@ export interface KimiCodeStatusOptions {
    * is the only way its hit ratio describes something a reader can act on.
    */
   sessionId?: string
+  /**
+   * 打开授权页的方式；缺省用 oauth.ts 的平台实现。
+   *
+   * 这一栏只是给测试留的口子：/login 会走 beginWebLogin，而它的缺省分支会真的
+   * spawn 浏览器（本文件的 /login 被十几条用例打中，将来只要有人补一条就会在
+   * 跑测试的机器上弹出窗口，而写用例的人不会事先知道）。
+   *
+   * 生产装配（src/index.ts）不传这个字段，所以**生产行为一点没变**：该开还是开。
+   */
+  openBrowser?: (url: string) => void
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -409,6 +419,9 @@ export function registerKimiCodeRoutes(
           const value = await beginWebLogin(store, {
             fetchFn,
             region: requested,
+            openBrowser: options.openBrowser,
+            // 显式注入了就用注入的那一份；没注入就是 undefined，oauth.ts 那边
+            // 「注入的 ?? 平台默认」取到的还是平台默认——与改动之前逐字一样。
             ...(accountPool === undefined ? {} : { onSave: (credentials) => accountPool.addAccount(credentials) }),
           })
           return sendJson(response, 200, { ok: true, value })
