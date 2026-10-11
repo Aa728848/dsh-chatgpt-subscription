@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.18.0 - 2026-10-11
+
+- **[MiniMax Code] 额度耗尽后不换号，而且把「限流」判成了「欠费」**
+  - **这条线路是唯一一条有号池却完全没有号池行为的线路。** 全包共 7 条线路（codex / claude / kimi-code / command-code / ollama / workbuddy / antigravity）都在非 2xx 的 429 上 `markCooldown` 并 `hasAnotherAvailableAccount(tried) → continue`；MiniMax 的 `src/host/minimax-code/` 全目录**零次** `markCooldown` 调用，`getEffectiveCredential(undefined, …)` 的 `excludeIds` 恒为空。于是某一个账号的 Token Plan 跑光之后，**后面每一个请求都继续由它来服务**——号池选它、被拒、再选它，没有任何一处在学习「它已经被拒过」。
+  - **结果是用户看不到换号，只看到额度耗尽。** 冷却机制本身是好的（`isEligible` 是纯时间比较，到期自动恢复），问题只在于从不写入。
+  - **识别层把普通限流判成了终局欠费。** 旧表里 `/exceeded/i` / `/quota/i` / `/balance/i` 是**裸词**，于是 `{"errorCode":1002,"errorReason":"rate_limit_exceeded"}` 这种最标准的限流信封被判成 `PROVIDER_ERROR` / `retryable:false` ——**本该由 DSH 有界退避重试的请求直接硬失败**。现在收紧为短语并补上本服务实际使用的中文措辞（余额/额度/配额 不足|耗尽|用尽、请充值、欠费、超出额度），且刻意**不**收录裸的「限制」「上限」，因为「请求超过频率限制」是标准限流句，必须继续保持可重试。
+  - **`summarizeFailureBody` 不认 `base_resp.status_msg`。** 那正是本线路在配额、Files API、签到三处都在解析的信封，用户此前会被展示一整个原始 JSON，而它唯一的内容就是那句话。
+  - **现在与兄弟线路同形**：新增 `accountScoped` 分类字段（沿用 kimi-code 的字段名与语义），429 冷却后在同一轮内换号重试；轮换循环按轮重建凭据、超大媒体上传与请求体，因此重放出来的请求绝不会指向另一个账号上传的文件 id（`uploadOversizedMedia` 把 access token 与 account key 一起交给 Files API，这是本线路独有的真实耦合）。
+  - **403 形态的额度耗尽一并处理，且不与凭据类 403 混淆。** 判别顺序是「先跑额度表、再落到凭据分支」，并且**状态码是外层条件**——任何 401 无论 body 写什么都进不了冷却分支，否则一个坏 token 会把整个号池走一遍。凭据提示语改为按**分类**挂载，额度耗尽的 403 不会再顺带甩一句 `sha256:…` 去怪那枚刚续期过的 token。
+  - **额度型 403 不再白花一次强制续期。** 这是上一版行为里最贵的一处：`renewCredential` 对「窗口已耗尽」毫无帮助，而对原生账号（凭据就是桌面端自己的 `auth.json`，池内 adopted never destroyed）那次续期会**把一对新令牌写回用户的桌面端文件**。现在有号池且 body 命中额度表时直接交给号池分支。**无号池路径刻意不跳过**：那里续期推进的是插件自己的凭据文件，且最终抛出的 detail 来自重放后的响应，跳过会改掉用户看到的文案。
+  - **401/403 不写 `markAuthFailed`，而且这是有证据的结论。** 适配器永远不会分类一个没先续期过的 401/403；能走到号池分支的必然是刚轮换出来的新令牌仍被拒。而「凭据不可用」早有两条更可靠的写入路径（`refreshFailureStatus` 在令牌端点最终拒绝时写 `authStatus`，`authRejectedReason` 另有免写入的排除）。在请求阶段补写反而制造**不可自愈的假阳性**：续期成功时新令牌对已经写进桌面端 `auth.json`，于是 `healStaleAuthFailures` 的四个条件一个都不满足——一次瞬时 403 会把正在使用的桌面账号**永久**标成「需要重新登录」，理由还是错的。现状已用测试钉住。
+  - 测试：新增 `test/minimax-code-429-cooldown.test.ts`（28 例），核心断言是「**一次** `adapter.stream()` 调用内，第一个账号 429 额度耗尽 → 第二个账号给出答案」，即 `['Bearer at-1', 'Bearer at-2']` 的鉴权顺序 + 调用方拿到 `text-delta` 而非异常。另覆盖：额度型 403 换号且 `tokenCalls === 0`、凭据型 401/403 **不冷却不轮换**（含单账号池与双账号池）、400/5xx 不轮换、原生桌面账号不被标记也不被冷却、in-band 429 只冷却、无号池路径逐字不变、以及「额度判决不会因为 body 被读两次而退化成凭据判决」。承重已用变异测试验证（禁用新门 → 2 红；去掉 body 复用 → 4 红，报错正是 `expected 'INVALID_CREDENTIAL' to be 'PROVIDER_ERROR'`）。
+  - 验证：`npm run typecheck` 0 错误；全量 `npm test` **3013 passed / 7 skipped, 0 failed**（较 0.17.1 的 2985 增 28 例，基线 2994 增 19 例）。未改共享内核、UI、DTO、路由。
+  - **未一并处理的**：① 无号池的额度型 403 仍会多花一次续期（上一段说明的取舍）；② in-band（流式事件）的账号级 429 只能冷却、不能换号——响应体已经开着读了一半，结构上换不了，这是 7 条线路的共同限制，不是本线路独有。
 ## 0.17.1 - 2026-10-10
 
 - **[Kimi Code] 请求体超限时，「还有图可丢吗」的判定与计量脱节，兜底一次都没跑（[#51](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/51)）**
