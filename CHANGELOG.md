@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.19.0 - 2026-10-11
 - **[GLM（ZCode 账号）] 新增第九条 Provider 线路：用 ZCode 账号 OAuth 登录 GLM Coding Plan，国区与国际区两套部署各自独立**
   - **问题：GLM Coding Plan 此前只能以「粘贴 API Key」的形态接入，而公开的 OpenAI 兼容面根本不生效套餐额度。** 官方文档的 Common mistakes 段写明走通用面 `/api/paas/v4` 会变成按量计费——用户明明买了订阅，却在一条声称提供 GLM 的线路上看着余额被扣。要拿到真正吃套餐额度的端点，必须先有 Coding Plan Key，而 Key 又只能由 ZCode **账号**授权换出来。
   - **修法：新增 `glm-coding-plan` Provider，把「账号授权」接到 DSH 上。** 浏览器里由用户用自己的 ZCode 账号完成授权，插件只做两件事：按 ZCode 自己的 CLI OAuth 控制面开一次流（`POST https://zcode.z.ai/api/v1/oauth/cli/init`），再按上游给的节奏轮询（`GET .../oauth/cli/poll/{flow_id}`），两个请求共用同一个本地 `randomBytes(32)` 生成的 Bearer pollToken——它只是把一次开流与它的轮询绑在一起，**不是登录凭据**、不落盘。拿到 OAuth access_token 之后跑兑换链，换出 `{apiKeyId}.{secretKey}` 形式的 Coding Plan Key，最后只打**套餐专用**端点。凭据落盘前先用配额接口验一次活：账号没有套餐就在**登录阶段**报错，而不是等到某次对话里以一个莫名其妙的 429 暴露出来。**本线路不做 API Key 粘贴**——账号授权产出的就是同一种凭据，下游完全共用。
