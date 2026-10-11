@@ -267,10 +267,24 @@ describe('GLM 设置卡片', () => {
     expect(posts[posts.length - 1]?.body).toEqual({ enabledModelIds: ['GLM-5.3', 'GLM-5.3-Flash', 'GLM-5.2'] })
   })
 
-  it('两区登录入口与 adopt 入口都在账号池的登录位上', async () => {
+  it('账号管理标题行只有两个「添加账号」，导入入口下移到下面的登录区', async () => {
     const { node } = await mountSection(status())
-    const actions = [...node.querySelectorAll<HTMLButtonElement>('.dsha-account-add-actions .dsha-btn')]
-    expect(actions.map((button) => button.textContent)).toEqual([zh.addCnAccount, zh.addIntlAccount, zh.adopt])
+    // 标题行 = 带着 .dsha-account-add-actions 的那个 .dsha-grouphead（页面上还有别的 grouphead）。
+    const head = [...node.querySelectorAll('.dsha-grouphead')]
+      .find((entry) => entry.querySelector('.dsha-account-add-actions'))
+    expect(head).toBeDefined()
+    const actions = [...head!.querySelectorAll<HTMLButtonElement>('button.dsha-btn')]
+    expect(actions.map((button) => button.textContent)).toEqual([zh.addCnAccount, zh.addIntlAccount])
+    // 护栏：只允许两个。第三个数一多，.dsha-account-add-actions 的 flex-wrap 就把它挤到下一行
+    // （需求方的实测反馈），而新增入口应当放进登录区而不是这个标题行。
+    expect(actions).toHaveLength(2)
+
+    // 导入本机登录态现在在登录区里，与上方的浏览器登录并列成两条登录路径。
+    // 这条 status 的 login 是 null：入口不依赖某一次流程状态，所以仍必须点得到。
+    const adopt = [...node.querySelectorAll<HTMLButtonElement>('.dshglm-flow button.dsha-btn')]
+      .find((button) => button.textContent === zh.adopt)
+    expect(adopt).toBeDefined()
+    expect(adopt!.closest('.dsha-grouphead')).toBeNull()
   })
 
   it('连接测试把 host 的 GlmConnectionDto 说成人话', async () => {
@@ -475,7 +489,7 @@ describe('adopt 入口', () => {
       url === `${PREFIX}/adopt` && init?.method === 'POST'
         ? Response.json({ ok: true, value: result })
         : undefined)
-    const button = [...harness.node.querySelectorAll<HTMLButtonElement>('.dsha-account-add-actions .dsha-btn')]
+    const button = [...harness.node.querySelectorAll<HTMLButtonElement>('.dshglm-flow button.dsha-btn')]
       .find((entry) => entry.textContent === zh.adopt)!
     await act(async () => button.click())
     return harness.node
@@ -490,6 +504,24 @@ describe('adopt 入口', () => {
     const node = await runAdopt({ attempted: reason !== 'no-credentials-file', adopted: false, reason })
     expect(node.textContent).toContain(adoptReasonText(reason, zh))
     expect(node.textContent).toContain(zh.adoptFallback)
+  })
+
+  it('导入结果提示紧挨着它的按钮（同一个登录区），且可当场关掉', async () => {
+    const adopted = zh.adoptAdopted.replace('{region}', zh.regionCn)
+    const node = await runAdopt({ attempted: true, adopted: true, region: 'cn' })
+    const row = [...node.querySelectorAll<HTMLElement>('.dshglm-flow .dsha-row')]
+      .find((entry) => entry.textContent?.includes(adopted))
+    expect(row).toBeDefined()
+    // 结果跟着按钮一起搬：留在账号池卡片外的话，点了按钮却在远处看到结果。
+    expect(row!.closest('.dshglm-flow')).not.toBeNull()
+    expect(row!.closest('.dsha-grouphead')).toBeNull()
+
+    // 「知道了」当场清掉它，不留在版面上。
+    const dismiss = [...row!.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === zh.dismiss)!
+    expect(dismiss).toBeDefined()
+    await act(async () => dismiss.click())
+    expect(node.textContent).not.toContain(adopted)
   })
 
   it('每个 reason 说的是不同的话（不是同一个兜底串）', () => {

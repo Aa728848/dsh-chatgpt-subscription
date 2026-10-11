@@ -97,17 +97,15 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
         onRelogin={(accountId) => void accountAction('relogin', accountId)}
         onSetStrategy={(strategy) => void setStrategy(strategy)}
         renderLoginActions={() => (
+          // 标题行只放两个「添加账号」：.dsha-grouphead 是一行 justify-content:space-between，
+          // 第三个按钮会被 .dsha-account-add-actions 的 flex-wrap 挤到下一行（需求方实测反馈）。
+          // 「导入本机 ZCode 登录态」因此下移到下面的登录区。
           <div className="dsha-account-add-actions">
             <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={() => void startLogin('cn')}>
               {busy === 'login:cn' ? t.authorizing : t.addCnAccount}
             </button>
             <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={() => void startLogin('intl')}>
               {busy === 'login:intl' ? t.authorizing : t.addIntlAccount}
-            </button>
-            {/* 第二条入口：免去一次浏览器登录的快捷路径。失败永不阻断（D6、R6），
-                每种失败都落成下面那句「可回落浏览器登录」的说明。 */}
-            <button className="dsha-btn" disabled={busy !== null} onClick={() => void adopt()}>
-              {busy === 'adopt' ? t.adopting : t.adopt}
             </button>
           </div>
         )}
@@ -121,142 +119,162 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
           </>
         )}
       >
-        {login !== null && (
-          <div className="dshglm-flow">
-            <strong>{t.loginSection}</strong>
-            {login.status === 'idle' && <p className="dsha-muted">{t.loginIdle}</p>}
+        {/* 登录区常驻：浏览器登录、导入本机登录态与手工粘贴都是**入口**，不是某一次流程的
+            结果，所以不再等 host 报出流程状态才整块出现——导入按钮搬进这一块之后，跟着它一起
+            隐藏，用户在开过一次流之前就再也点不到那条快捷路径。 */}
+        <div className="dshglm-flow">
+          <strong>{t.loginSection}</strong>
+          {login !== null && (
+            <>
+              {login.status === 'idle' && <p className="dsha-muted">{t.loginIdle}</p>}
 
-            {login.status === 'pending' && (
-              <>
-                <p className="dsha-muted">{t.loginPending}</p>
-                {/* authorizeUrl 始终下发：即使 host 打开浏览器失败，用户仍能手动打开。 */}
-                {login.authorizeUrl !== undefined && login.authorizeUrl !== '' && (
-                  <>
-                    <span className="dsha-label">{t.authorizeUrl}</span>
-                    <code className="dshglm-flow-url">{login.authorizeUrl}</code>
-                    <div className="dsha-actions">
-                      <a className="dsha-btn" href={login.authorizeUrl} target="_blank" rel="noreferrer noopener">
-                        {t.openAuthorizeUrl}
-                      </a>
+              {login.status === 'pending' && (
+                <>
+                  <p className="dsha-muted">{t.loginPending}</p>
+                  {/* authorizeUrl 始终下发：即使 host 打开浏览器失败，用户仍能手动打开。 */}
+                  {login.authorizeUrl !== undefined && login.authorizeUrl !== '' && (
+                    <>
+                      <span className="dsha-label">{t.authorizeUrl}</span>
+                      <code className="dshglm-flow-url">{login.authorizeUrl}</code>
+                      <div className="dsha-actions">
+                        <a className="dsha-btn" href={login.authorizeUrl} target="_blank" rel="noreferrer noopener">
+                          {t.openAuthorizeUrl}
+                        </a>
+                      </div>
+                    </>
+                  )}
+                  {login.progress !== undefined && login.progress !== '' && (
+                    <div className="dsha-row">
+                      <span className="dsha-label">{t.progress}</span>
+                      <span className="dsha-value">{login.progress}</span>
                     </div>
-                  </>
-                )}
-                {login.progress !== undefined && login.progress !== '' && (
-                  <div className="dsha-row">
-                    <span className="dsha-label">{t.progress}</span>
-                    <span className="dsha-value">{login.progress}</span>
-                  </div>
-                )}
-                {login.pollIntervalSec !== undefined && (
-                  <p className="dsha-muted">
-                    {t.pollEvery.replace('{seconds}', String(login.pollIntervalSec))}
+                  )}
+                  {login.pollIntervalSec !== undefined && (
+                    <p className="dsha-muted">
+                      {t.pollEvery.replace('{seconds}', String(login.pollIntervalSec))}
+                    </p>
+                  )}
+                  {login.expiresAt !== undefined && (
+                    <p className="dsha-muted">
+                      {t.loginExpiresAt.replace('{time}', formatDate(login.expiresAt))}
+                    </p>
+                  )}
+                </>
+              )}
+
+              {/* 成功是把凭据换算出来并落进号池的那一刻，所以除了邮箱还要说出时间：
+                  host 保留这条终态直到下一次开流，账号池那几行却会被下一次登录刷新。
+                  账号之后被删掉时另说一句：号池里没有账号还宣称「已加入号池」是谎报。 */}
+              {login.status === 'complete' && !authenticated && (
+                <p className="dsha-muted">{t.loginCompleteNoAccount}</p>
+              )}
+              {login.status === 'complete' && authenticated && (
+                <>
+                  <p className="dsha-notice">
+                    {t.loginComplete}
+                    {login.email !== undefined && login.email !== '' ? ` ${login.email}` : ''}
                   </p>
-                )}
-                {login.expiresAt !== undefined && (
-                  <p className="dsha-muted">
-                    {t.loginExpiresAt.replace('{time}', formatDate(login.expiresAt))}
-                  </p>
-                )}
-              </>
-            )}
+                  {login.completedAt !== undefined && (
+                    <p className="dsha-muted">
+                      {t.loginCompletedAt.replace('{time}', formatDate(login.completedAt))}
+                    </p>
+                  )}
+                </>
+              )}
 
-            {/* 成功是把凭据换算出来并落进号池的那一刻，所以除了邮箱还要说出时间：
-                host 保留这条终态直到下一次开流，账号池那几行却会被下一次登录刷新。
-                账号之后被删掉时另说一句：号池里没有账号还宣称「已加入号池」是谎报。 */}
-            {login.status === 'complete' && !authenticated && (
-              <p className="dsha-muted">{t.loginCompleteNoAccount}</p>
-            )}
-            {login.status === 'complete' && authenticated && (
-              <>
-                <p className="dsha-notice">
-                  {t.loginComplete}
-                  {login.email !== undefined && login.email !== '' ? ` ${login.email}` : ''}
-                </p>
-                {login.completedAt !== undefined && (
-                  <p className="dsha-muted">
-                    {t.loginCompletedAt.replace('{time}', formatDate(login.completedAt))}
-                  </p>
-                )}
-              </>
-            )}
-
-            {login.status === 'error' && (
-              <div className="dsha-error">
-                <div>{login.error !== undefined && login.error !== '' ? `${t.loginError} ${login.error}` : t.loginError}</div>
-                {/* retryable 来自契约：4xx / 信封 code!=0 / 未知 status 是致命的，
-                    5xx 与畸形 200 才值得自动回落。两种失败的下一步不同，因此分两句。 */}
-                <div>{login.retryable === true ? t.loginRetryable : t.loginNotRetryable}</div>
-              </div>
-            )}
-
-            {/* 「取消登录」是**流程控制**，不是粘贴的一部分：它撤销的是这一次浏览器
-                授权流程，所以与流程状态同级（放在上面 pending 块之后），而不是与
-                「提交授权码」并排——并排会让人以为它只影响粘贴。
-                只在确实有进行中的流程时出现：idle / complete / error 都没有可取消的东西。 */}
-            {login.status === 'pending' && (
-              <div className="dsha-actions">
-                <button className="dsha-btn" disabled={busy !== null} onClick={() => void cancelLogin()}>
-                  {busy === 'login:cancel' ? t.cancelLoginBusy : t.cancelLogin}
-                </button>
-              </div>
-            )}
-
-            {/* 手工粘贴兜底**不删**：浏览器回调被拦时，它是唯一能完成登录的地方。
-                但它常驻版面会在登录完成后把登录结果挤下去，所以收成一个开关——
-                没有进行中的流程时收起（展开态由 useGlmCodingPlanSection 跟着
-                pending / error 自动打开），需要时仍可随时点开。 */}
-            <div className="dshglm-paste">
-              <button
-                type="button"
-                className="dsha-btn"
-                aria-expanded={pasteOpen}
-                aria-controls="dshglm-paste-body"
-                onClick={togglePaste}
-              >
-                {t.manualPasteSection}
-              </button>
-              {pasteOpen && (
-                <div id="dshglm-paste-body">
-                  <p className="dsha-muted">{t.manualPasteHint}</p>
-                  <div className="dshglm-paste-row">
-                    <input
-                      type="text"
-                      className="dsha-select"
-                      aria-label={t.manualPasteSection}
-                      placeholder={t.manualPastePlaceholder}
-                      value={pasteValue}
-                      disabled={busy !== null}
-                      onChange={(event) => setPasteValue(event.currentTarget.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') void submitPaste()
-                      }}
-                    />
-                    <button
-                      className="dsha-btn dsha-btn-primary"
-                      disabled={busy !== null || pasteValue.trim() === ''}
-                      onClick={() => void submitPaste()}
-                    >
-                      {busy === 'login-manual' ? t.manualPasteSubmitting : t.manualPasteSubmit}
-                    </button>
-                  </div>
+              {login.status === 'error' && (
+                <div className="dsha-error">
+                  <div>{login.error !== undefined && login.error !== '' ? `${t.loginError} ${login.error}` : t.loginError}</div>
+                  {/* retryable 来自契约：4xx / 信封 code!=0 / 未知 status 是致命的，
+                      5xx 与畸形 200 才值得自动回落。两种失败的下一步不同，因此分两句。 */}
+                  <div>{login.retryable === true ? t.loginRetryable : t.loginNotRetryable}</div>
                 </div>
               )}
-            </div>
-          </div>
-        )}
 
-        {adoptResult !== null && (
-          <div className="dsha-row">
-            <span className="dsha-value">
-              {adoptResult.adopted
-                ? t.adoptAdopted.replace('{region}', regionLabel(adoptResult.region ?? region))
-                : (adoptResult.reason === undefined
-                  ? t.adoptNoAttempt
-                  : `${adoptReasonText(adoptResult.reason, t)} ${t.adoptFallback}`)}
-            </span>
-            <button className="dsha-btn" disabled={busy !== null} onClick={clearAdoptResult}>{t.dismiss}</button>
+              {/* 「取消登录」是**流程控制**，不是粘贴的一部分：它撤销的是这一次浏览器
+                  授权流程，所以与流程状态同级（放在上面 pending 块之后），而不是与
+                  「提交授权码」并排——并排会让人以为它只影响粘贴。
+                  只在确实有进行中的流程时出现：idle / complete / error 都没有可取消的东西。 */}
+              {login.status === 'pending' && (
+                <div className="dsha-actions">
+                  <button className="dsha-btn" disabled={busy !== null} onClick={() => void cancelLogin()}>
+                    {busy === 'login:cancel' ? t.cancelLoginBusy : t.cancelLogin}
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* 第二条登录路径：免去一次浏览器登录的快捷路径。失败永不阻断（D6、R6），
+              每种失败都落成下面那句「可回落浏览器登录」的说明。
+
+              它跟着登录区而不跟着标题行走，有两个原因：
+              1. 标题行（.dsha-grouphead，space-between）只放得下两个按钮，第三个会被
+                 .dsha-account-add-actions 的 flex-wrap 挤到下一行；
+              2. 它与标题行里的两个「添加账号」是同一件事的两种做法（浏览器授权 vs 读本机
+                 已有登录态），两条登录路径放在同一个区里才读得出「怎么登录」。 */}
+          <div className="dsha-actions">
+            <button className="dsha-btn" disabled={busy !== null} onClick={() => void adopt()}>
+              {busy === 'adopt' ? t.adopting : t.adopt}
+            </button>
           </div>
-        )}
+
+          {/* 导入结果紧挨着它的按钮：点了按钮却在远处看到结果，用户会不知道是哪一步给的。 */}
+          {adoptResult !== null && (
+            <div className="dsha-row">
+              <span className="dsha-value">
+                {adoptResult.adopted
+                  ? t.adoptAdopted.replace('{region}', regionLabel(adoptResult.region ?? region))
+                  : (adoptResult.reason === undefined
+                    ? t.adoptNoAttempt
+                    : `${adoptReasonText(adoptResult.reason, t)} ${t.adoptFallback}`)}
+              </span>
+              <button className="dsha-btn" disabled={busy !== null} onClick={clearAdoptResult}>{t.dismiss}</button>
+            </div>
+          )}
+
+          {/* 手工粘贴兜底**不删**：浏览器回调被拦时，它是唯一能完成登录的地方。
+              但它常驻版面会在登录完成后把登录结果挤下去，所以收成一个开关——
+              没有进行中的流程时收起（展开态由 useGlmCodingPlanSection 跟着
+              pending / error 自动打开），需要时仍可随时点开。 */}
+          <div className="dshglm-paste">
+            <button
+              type="button"
+              className="dsha-btn"
+              aria-expanded={pasteOpen}
+              aria-controls="dshglm-paste-body"
+              onClick={togglePaste}
+            >
+              {t.manualPasteSection}
+            </button>
+            {pasteOpen && (
+              <div id="dshglm-paste-body">
+                <p className="dsha-muted">{t.manualPasteHint}</p>
+                <div className="dshglm-paste-row">
+                  <input
+                    type="text"
+                    className="dsha-select"
+                    aria-label={t.manualPasteSection}
+                    placeholder={t.manualPastePlaceholder}
+                    value={pasteValue}
+                    disabled={busy !== null}
+                    onChange={(event) => setPasteValue(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void submitPaste()
+                    }}
+                  />
+                  <button
+                    className="dsha-btn dsha-btn-primary"
+                    disabled={busy !== null || pasteValue.trim() === ''}
+                    onClick={() => void submitPaste()}
+                  >
+                    {busy === 'login-manual' ? t.manualPasteSubmitting : t.manualPasteSubmit}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </AccountPoolSection>
 
       <section className="dsha-group">
