@@ -52,12 +52,21 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
+/**
+ * 开流响应的 `expires_at`（秒），整个文件共用这一个值。
+ *
+ * fixture 必须在两次调用之间保持稳定：initBody() 若每次都重算 Date.now()，
+ * 「秒 -> 毫秒」的换算断言拿到的就会是另一个秒值，跨过一个整秒边界就差 1000ms。
+ * 所以在模块加载时算一次：一次运行内不再漂移，又不像写死常量那样日后会变成「已过期」。
+ */
+const INIT_EXPIRES_AT_SEC = Math.floor(Date.now() / 1000) + 600
+
 /** 一份合法的开流响应，字段名逐字照 CLI_INIT_RESPONSE_FIELDS。 */
 function initBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     [CLI_INIT_RESPONSE_FIELDS.flowId]: 'flow-1',
     [CLI_INIT_RESPONSE_FIELDS.authorizeUrl]: 'https://chat.z.ai/authorize?x=1',
-    [CLI_INIT_RESPONSE_FIELDS.expiresAt]: Math.floor(Date.now() / 1000) + 600,
+    [CLI_INIT_RESPONSE_FIELDS.expiresAt]: INIT_EXPIRES_AT_SEC,
     [CLI_INIT_RESPONSE_FIELDS.pollIntervalSec]: 2,
     ...overrides,
   }
@@ -109,7 +118,10 @@ afterEach(() => {
 
 describe('开流请求形状（计划 §3.1）', () => {
   it('POST zcode.z.ai/api/v1/oauth/cli/init，头是 Bearer <32 字节 hex pollToken>', async () => {
-    const { fetchFn, calls } = routedFetch([[/\/api\/v1\/oauth\/cli\/init$/, () => jsonResponse(initBody())]])
+    // fixture 取一次并复用：期望值必须来自**同一个**响应体，不能再调一次 initBody()，
+    // 否则比对的是两次调用、两个可能不同的秒值。
+    const body = initBody()
+    const { fetchFn, calls } = routedFetch([[/\/api\/v1\/oauth\/cli\/init$/, () => jsonResponse(body)]])
     const init = await requestCliInit('intl', { fetchFn, env: {} })
 
     expect(calls[0]!.url).toBe('https://zcode.z.ai/api/v1/oauth/cli/init')
@@ -120,8 +132,25 @@ describe('开流请求形状（计划 §3.1）', () => {
     expect(calls[0]!.body).toEqual({ provider: 'zai' })
     expect(init.flowId).toBe('flow-1')
     expect(init.pollIntervalSec).toBe(2)
-    expect(init.expiresAt).toBeCloseTo((initBody()[CLI_INIT_RESPONSE_FIELDS.expiresAt] as number) * 1000, -2)
+    // 实现是 expiresAtSec * 1000（oauth.ts:216），不取整、不留容差，两边本就该完全相等，
+    // 所以只能 toBe 逐字比。旧的 toBeCloseTo(x, -2) 容差只有 ±50ms，是拿「近似」去比一个
+    // 精确值——CI 上正是它把一次分毫不差的换算判成了失败（差 1000ms，来自 fixture 自身漂移）。
+    expect(init.expiresAt).toBe((body[CLI_INIT_RESPONSE_FIELDS.expiresAt] as number) * 1000)
     expect(init.pollToken).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('expires_at 秒 -> 毫秒是精确换算，不是近似', async () => {
+    // 喂一个写死的秒值，把「fixture 恰好没漂移」这个变量彻底排除掉。
+    // 换算强度因此钉死：少了乘 1000、多了一次取整或四舍五入，下两行都会红。
+    const expiresAtSec = 1_800_000_000
+    const { fetchFn } = routedFetch([
+      [/\/cli\/init$/, () => jsonResponse(initBody({ [CLI_INIT_RESPONSE_FIELDS.expiresAt]: expiresAtSec }))],
+    ])
+    const init = await requestCliInit('intl', { fetchFn, env: {} })
+
+    expect(init.expiresAt).toBe(expiresAtSec * 1000)
+    // 漏乘 1000（把秒当毫秒用）时这里会红。
+    expect(init.expiresAt).not.toBe(expiresAtSec)
   })
 
   it('国区把 provider 翻成 bigmodel，其余请求形状不变', async () => {

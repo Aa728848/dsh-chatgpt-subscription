@@ -24,7 +24,7 @@
 import { createCipheriv, randomBytes } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, posix, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -252,12 +252,49 @@ describe('候选路径：ZCODE_DATA_BASE_DIR 说了算', () => {
     expect(zcodeCredentialPaths({})).toEqual([join(homedir(), '.zcode', 'v2', ZCODE_CREDENTIAL_FILE)])
   })
 
-  it('变量非空时覆盖，且展开 ~/', () => {
+  // 为什么这一块要这么写：实现把变量值交给**当前平台的 path 语义**去解析
+  // （resolveUserPath 里的 resolve，再 join，见 adopt.ts:206-228），
+  // 而「期望值」如果写死成某一条绝对路径，就等于把测试钉死在那一个平台上。
+  // 例如旧的 `join('C:', 'profiles', ...)`：win32 下得到 `C:\\profiles\\...`，POSIX 下却得到
+  // `C:/profiles/...`（join 把 `C:` 当一个普通相对段），而实现在 POSIX 上是把整串当相对路径
+  // 拼在 CWD 之后——两边就此分道扬镳，CI（ubuntu-latest）就是这么红的。
+  // 这里的期望值一律用「当前平台的语义」算，于是 Windows 与 Linux 跑的是同一段断言。
+  const platformPath = process.platform === 'win32' ? win32 : posix
+
+  it('变量非空时覆盖，且展开 ~/', async () => {
+    // 覆盖的第一层：变量非空时确实盖掉了默认 base（默认是 homedir）。
+    // 基准取 mkdtemp 的目录——它在两个平台上都是绝对且已归一的路径，resolve 对它恒等，
+    // 所以「base 被换成了变量值」这条语义可以在两个平台上逐字断言，不依赖任何平台假设。
+    const base = await tempDir()
+    expect(zcodeDataBaseDir({ [ZCODE_DATA_BASE_DIR_ENV]: base })).toBe(base)
+    expect(zcodeCredentialsPath({ [ZCODE_DATA_BASE_DIR_ENV]: base }))
+      .toBe(join(base, '.zcode', 'v2', ZCODE_CREDENTIAL_FILE))
+    // 关键：拿到的是变量里那个目录下的路径，而不是默认 homedir 下的路径。
+    expect(zcodeCredentialsPath({ [ZCODE_DATA_BASE_DIR_ENV]: base }))
+      .not.toBe(zcodeCredentialsPath({}))
+
+    // 覆盖的第二层：一个 Windows 风格的绝对路径，在**每个**平台上都由该平台自己的语义解释——
+    // win32 认出盘符、原样返回；POSIX 把它当普通相对段拼在 CWD 之后（就是 CI 失败的那条）。
+    // 期望值用 platformPath 算，与实现走的是同一套语义。
+    expect(zcodeDataBaseDir({ [ZCODE_DATA_BASE_DIR_ENV]: 'C:\\profiles\\zcode' }))
+      .toBe(platformPath.resolve('C:\\profiles\\zcode'))
     expect(zcodeCredentialsPath({ [ZCODE_DATA_BASE_DIR_ENV]: 'C:\\profiles\\zcode' }))
-      .toBe(join('C:', 'profiles', 'zcode', '.zcode', 'v2', ZCODE_CREDENTIAL_FILE))
+      .toBe(platformPath.join(platformPath.resolve('C:\\profiles\\zcode'), '.zcode', 'v2', ZCODE_CREDENTIAL_FILE))
+
+    // 两条语义的结论都在这里被写死钉住：不论这次跑在哪个平台，下两行都成立，
+    // 也就是「win32 与 posix 各自会得到什么」是被断言写下来的，
+    // 而不是碰巧在 Windows 上蒙对——任何平台跑都会对照到另一条语义。
+    expect(win32.join(win32.resolve('C:\\profiles\\zcode'), '.zcode', 'v2', ZCODE_CREDENTIAL_FILE))
+      .toBe('C:\\profiles\\zcode\\.zcode\\v2\\' + ZCODE_CREDENTIAL_FILE)
+    expect(posix.join(posix.resolve('/C:\\profiles\\zcode'), '.zcode', 'v2', ZCODE_CREDENTIAL_FILE))
+      .toBe('/C:\\profiles\\zcode/.zcode/v2/' + ZCODE_CREDENTIAL_FILE)
+
     // 上游允许写成 ~/zcode-data，不展开就会在 CWD 下建出一个字面叫 ~ 的目录。
+    // 实现与期望用的是同一个 join(homedir(), ...)，两边同源，因此跨平台成立。
     expect(zcodeDataBaseDir({ [ZCODE_DATA_BASE_DIR_ENV]: '~/zcode-data' }))
       .toBe(join(homedir(), 'zcode-data'))
+    expect(zcodeCredentialsPath({ [ZCODE_DATA_BASE_DIR_ENV]: '~/zcode-data' }))
+      .toBe(join(homedir(), 'zcode-data', '.zcode', 'v2', ZCODE_CREDENTIAL_FILE))
   })
 
   it('空白变量按未设置处理（在 Windows 上它会解析成盘符相对路径）', () => {
