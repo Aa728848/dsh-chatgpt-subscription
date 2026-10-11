@@ -121,6 +121,15 @@ export function summarizeFailureBody(raw: string): string {
       const nested = asRecord(record.error)
       const nestedMessage = nested?.message
       if (typeof nestedMessage === 'string') return nestedMessage.slice(0, 400)
+      // The platform envelope this line already parses everywhere else
+      // (fetchTokenPlanQuota below, files-api.ts, checkin-gateway.ts) puts its
+      // sentence in `base_resp.status_msg` and no other field. Without this arm
+      // such a body fell through to the RAW JSON, so a user was shown an envelope
+      // with its own reason quoted inside it — and, because the reason is the only
+      // thing in the document, the classification layer below could not read a
+      // quota verdict out of the line it had to judge.
+      const baseResp = asRecord(record.base_resp)?.status_msg
+      if (typeof baseResp === 'string') return baseResp.slice(0, 400)
     }
   } catch {
     // Not JSON: fall through to the raw text.

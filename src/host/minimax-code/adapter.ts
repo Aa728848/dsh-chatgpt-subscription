@@ -59,7 +59,7 @@ import {
   ensureAccessToken,
 } from './oauth.ts'
 import { modelRequestHeaders, summarizeFailureBody } from './client.ts'
-import { reclassifyInBandError } from '../common/stream-error.ts'
+import { inBandAnthropicStatus, reclassifyInBandError } from '../common/stream-error.ts'
 import {
   assertRequestBodyFits,
   assertStreamComplete,
@@ -127,6 +127,58 @@ export interface MinimaxFailureClassification {
   message: string
   /** True only when the failure is worth retrying. */
   retryable: boolean
+  /**
+   * Whether the verdict is about the ACCOUNT that made the request.
+   *
+   * False for every failure that belongs to the request or to the plan: ordinary
+   * back-pressure, an overload, a malformed body. True only for a Token Plan window
+   * this account has spent, which stays spent — so cooling it is what lets the NEXT
+   * request land on an account that can answer, and cooling a plan-scoped refusal
+   * would take a whole pool offline over one request. Same rule and same field name
+   * as the sibling lines' `accountScoped` (kimi-code/adapter.ts:246).
+   */
+  accountScoped: boolean
+}
+
+/**
+ * Cooldown one rate-limited account takes when the service states no delay.
+ *
+ * The length every sibling line defaults to (command-code:243, kimi-code:476,
+ * ollama/types.ts:115, responses-client.ts:28), so a deployment reading these rows
+ * across lines sees one number rather than four.
+ */
+const POOL_COOLDOWN_MS = 15 * 60_000
+
+/**
+ * Fallback cooldown for an account whose Token Plan window is spent.
+ *
+ * The 15 minutes a plain 429 gets would put the account back into rotation several
+ * times inside the very window that just refused it, which is the same reason
+ * kimi-code gives for its own ACCOUNT_LIMIT_COOLDOWN_MS (kimi-code/adapter.ts:478-485).
+ * The Token Plan reports a 5-hour interval window and a weekly one, so each length is
+ * used for the window it actually describes.
+ */
+const QUOTA_WINDOW_COOLDOWN_MS = 5 * 60 * 60_000
+
+/**
+ * A weekly window is not an interval window: cooling five hours would spend a request
+ * every five hours to learn an answer that changes at most once a week.
+ */
+const WEEKLY_WINDOW_COOLDOWN_MS = 7 * 24 * 60 * 60_000
+
+/** Body text naming the weekly window rather than the interval one. */
+const WEEKLY_QUOTA_WINDOW_PATTERN = /weekly|周(?:额度|配额|重置|窗口)|每周/iu
+
+/**
+ * The cooldown one exhausted account takes, read from the body that named the verdict.
+ *
+ * Deliberately never a Retry-After. That header is back-pressure arithmetic — come
+ * back in N seconds — and a spent plan window does not become unspent by waiting N
+ * seconds. kimi-code/adapter.ts:840-845 states the same reasoning for its own exhausted
+ * balance, and two lines must not disagree about a rule this shared.
+ */
+function quotaCooldownMs(bodyText: string): number {
+  return WEEKLY_QUOTA_WINDOW_PATTERN.test(bodyText) ? WEEKLY_WINDOW_COOLDOWN_MS : QUOTA_WINDOW_COOLDOWN_MS
 }
 
 /**
@@ -135,18 +187,84 @@ export interface MinimaxFailureClassification {
  * The status alone cannot separate these from ordinary back-pressure, so the body
  * is read rather than trusted: a 429 whose text names a spent balance is a verdict,
  * and retrying it only delays the message the user needs to see.
+ *
+ * Matched against the RAW body, not the one field summarizeFailureBody unwraps.
+ * That extractor picks a single key, and the two envelopes this line documents put
+ * the verdict in different places — `errorReason` on one, `base_resp.status_msg` on
+ * the other — so a body whose chosen field says "rate limit" while its sibling says
+ * 额度不足 must still be read as the quota verdict it is. Same reasoning, same raw-text
+ * match, as the sibling line's plan-scope test (kimi-code/adapter.ts:838).
  */
 const QUOTA_EXHAUSTED_PATTERNS = [
-  /insufficient/i,
-  /balance/i,
-  /quota/i,
+  // English, as this service and the gateways in front of it word it. Every entry
+  // is a PHRASE, never a bare noun: the previous table tested /quota/i, /balance/i
+  // and /exceeded/i on their own, which is how `errorReason: "rate_limit_exceeded"`
+  // — ordinary back-pressure, retryable, same on every account — was filed as a
+  // terminal quota verdict and handed to the user with no retry left to spend.
+  /insufficient\s+(?:balance|quota|credit|funds)/i,
+  /(?:balance|credit)\s+(?:is\s+)?(?:exhausted|depleted|insufficient|not\s+enough)/i,
+  /quota\s+(?:is\s+)?(?:exhausted|depleted|used\s*up|run\s*out)/i,
+  /exceeded\s+(?:your\s+)?(?:current\s+)?(?:quota|balance|credit|token|usage)/i,
+  /exceeded_current_quota_error/i,
+  /account\s+balance/i,
   /arrears/i,
   /recharge/i,
-  /exceeded/i,
+  // Chinese. MiniMax is a domestic service and answers in its own language, so a
+  // pure-English table never fired on the very envelopes this line documents:
+  // `base_resp.status_msg` and `errorCode`/`errorReason` (client.ts:15, types.ts:22).
+  // 额度不足、余额不足、配额不足、额度已耗尽、余额已用尽、用户额度已用完
+  /(?:余额|额度|配额)[^，。；;]{0,4}?(?:不足|不够|耗尽|用尽|用完|已用光)/u,
+  // 请充值、需立即充值、充值后重试 — a call to action no rate limit ever issues.
+  /(?:请|需|需要|立即|尽快)[^，。；;]{0,4}?(?:充值|续费|购买套餐|购买额度)/u,
+  // 欠费、已欠费 — billing, never back-pressure.
+  /欠费/u,
+  // 超出额度 / 超过配额. Deliberately NOT 限制 or 上限 on their own: 请求超过频率限制
+  // is the standard Chinese rate-limit sentence and has to stay retryable.
+  /(?:超出|超过)[^，。；;]{0,6}?(?:额度|配额|余额)/u,
 ]
 
 function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text))
+}
+
+/**
+ * Whether this refusal is a spent window rather than a refused credential.
+ *
+ * The same raw-body match classifyMinimaxFailure performs, hoisted into its own name
+ * because it now answers a second question too, and one the status alone cannot: is
+ * renewing this credential worth attempting at all (see the recovery loop in this
+ * adapter). A verdict the pool acts on and a verdict the user is shown have to be the
+ * SAME verdict, so both read this one predicate against the same table rather than
+ * keeping two copies of the condition that could drift apart.
+ *
+ * The status is inside on purpose. 403 is the only status a spent window arrives as,
+ * and that outer test is what keeps a 401 the credential however its body happens to
+ * read — on this route the service answers code 401 with the same sentence both
+ * when no credential was sent and when one was refused, so reading quota wording
+ * into it would send a working token off to be renewed.
+ */
+function isSpentWindow403(status: number, bodyText: string): boolean {
+  return status === 403 && matchesAny(bodyText, QUOTA_EXHAUSTED_PATTERNS)
+}
+
+/**
+ * The verdict a spent Token Plan window gets, whichever status carries it.
+ *
+ * One classification for both statuses on purpose. The condition is the same and so
+ * is the remedy — this account's own window is gone until it resets — so a caller
+ * that branched on the status would have to duplicate this sentence, and the two
+ * copies would drift. Which status the service happened to use stays visible to the
+ * user through the LlmError it is thrown with.
+ */
+function quotaExhaustedFailure(detail: string): MinimaxFailureClassification {
+  return {
+    code: 'PROVIDER_ERROR',
+    retryable: false,
+    accountScoped: true,
+    message: PROVIDER_NAME + ' reports the account quota is exhausted: '
+      + (detail === '' ? 'no remaining quota' : detail)
+      + '. Top up or wait for the window to reset.',
+  }
 }
 
 /**
@@ -161,13 +279,34 @@ function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
 export function classifyMinimaxFailure(status: number, bodyText: string): MinimaxFailureClassification {
   const detail = summarizeFailureBody(bodyText)
   if (isHttpContextOverflow(status, bodyText)) {
-    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, accountScoped: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+  }
+
+  // A spent window this service reports as a 403 rather than a 429.
+  //
+  // Read BEFORE the credential branch below, and against the RAW body for the reason
+  // QUOTA_EXHAUSTED_PATTERNS documents: on this route the status alone cannot say
+  // which of the two a 403 is. A 403 whose text names a spent window is the same
+  // account-level quota verdict a 429 carries, and the pool reaction is the same too
+  // — cool this account until its window resets so the next account can answer
+  // (kimi-code/adapter.ts:853-862 reaches the same place from the other direction).
+  //
+  // It must come first for the opposite reason as well: every 403 the table does NOT
+  // match is a refused credential, and cooling or rotating on those would spend the
+  // pool's other accounts one by one presenting a token the service is refusing for
+  // a reason a different account cannot fix.
+  if (isSpentWindow403(status, bodyText)) {
+    return quotaExhaustedFailure(detail)
   }
 
   if (status === 401 || status === 403) {
     return {
       code: 'INVALID_CREDENTIAL',
       retryable: false,
+      // markAuthFailed, not markCooldown, owns this one — see the pool branch in
+      // the adapter. It is still this account's verdict and no other's, so the
+      // flag is true even though the call that consumes it is a different one.
+      accountScoped: true,
       message: PROVIDER_NAME + ' rejected the stored credential (' + status + '). Sign in again in the '
         + 'MiniMax Code app, then reopen this card.'
         + (detail === '' ? '' : ' ' + detail),
@@ -175,18 +314,15 @@ export function classifyMinimaxFailure(status: number, bodyText: string): Minima
   }
 
   if (status === 429) {
-    if (matchesAny(detail, QUOTA_EXHAUSTED_PATTERNS)) {
-      return {
-        code: 'PROVIDER_ERROR',
-        retryable: false,
-        message: PROVIDER_NAME + ' reports the account quota is exhausted: '
-          + (detail === '' ? 'no remaining quota' : detail)
-          + '. Top up or wait for the window to reset.',
-      }
+    if (matchesAny(bodyText, QUOTA_EXHAUSTED_PATTERNS)) {
+      return quotaExhaustedFailure(detail)
     }
+    // Back-pressure: every account behind the same plan would be refused the same
+    // way, so this is NOT accountScoped and cooling it would empty the pool.
     return {
       code: 'RATE_LIMIT',
       retryable: true,
+      accountScoped: false,
       message: PROVIDER_NAME + ' is rate limited or overloaded (429): '
         + (detail === '' ? 'too many requests' : detail) + '. Retrying with backoff.',
     }
@@ -196,6 +332,7 @@ export function classifyMinimaxFailure(status: number, bodyText: string): Minima
     return {
       code: 'SERVER',
       retryable: true,
+      accountScoped: false,
       message: PROVIDER_NAME + ' upstream server error (' + status + '): '
         + (detail === '' ? 'the model provider is temporarily unavailable' : detail)
         + '. Retrying with backoff.',
@@ -206,6 +343,7 @@ export function classifyMinimaxFailure(status: number, bodyText: string): Minima
     return {
       code: 'PROVIDER_ERROR',
       retryable: false,
+      accountScoped: false,
       message: PROVIDER_NAME + ' rejected the request (400): '
         + (detail === '' ? 'the request was not accepted' : detail),
     }
@@ -214,6 +352,7 @@ export function classifyMinimaxFailure(status: number, bodyText: string): Minima
   return {
     code: 'PROVIDER_ERROR',
     retryable: false,
+    accountScoped: false,
     message: PROVIDER_NAME + ' API error (' + status + '): ' + (detail === '' ? 'No response' : detail),
   }
 }
@@ -483,10 +622,19 @@ export class MinimaxCodeAdapter extends LlmAdapter {
   private async acquireCredential(
     fetchFn: typeof fetch,
     signal: AbortSignal | undefined,
+    /**
+     * Accounts this same request has already been refused by.
+     *
+     * The rotation loop passes the set it has accumulated so the pool cannot hand
+     * back an account this turn already failed on. It is ignored without a pool,
+     * where there is nothing to rotate between: the one stored credential is read
+     * and prepared exactly as before.
+     */
+    excludeAccountIds?: ReadonlySet<string>,
   ): Promise<{ credentials: MinimaxCodeCredentials; accountId: string | undefined }> {
     const pool = this.options.accountPool
     if (pool !== undefined) {
-      const effective = await pool.getEffectiveCredential(undefined, fetchFn)
+      const effective = await pool.getEffectiveCredential(excludeAccountIds, fetchFn)
       return { credentials: effective.credentials, accountId: effective.account.id }
     }
     return { credentials: await ensureAccessToken(this.store, { fetchFn, signal }), accountId: undefined }
@@ -671,131 +819,289 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // anything at all: without it the call is a no-op that always returns the
     // requested cap, and the service rejects the request instead of it being clamped
     // here.
-    let credentials: MinimaxCodeCredentials
-    // The pool account this request is being served by, when there is a pool. It
-    // is what makes the 401 recovery below renew the account that actually failed
-    // rather than whatever the single-credential file happens to hold.
-    let accountId: string | undefined
-    try {
-      const selection = await this.acquireCredential(fetchFn, signal)
-      credentials = selection.credentials
-      accountId = selection.accountId
-    } catch (error) {
-      if (error instanceof MinimaxCodeUnauthorizedError) {
-        throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
-      }
-      throw new LlmError(
-        PROVIDER_NAME + ' credential could not be prepared: '
-        + (error instanceof Error ? error.message : String(error)),
-        'MISSING_CREDENTIAL',
-        { cause: error },
-      )
-    }
-
-    let authOwner = computeMinimaxAuthOwner(credentials, accountId)
-
-    // Media that cannot be encoded inline is uploaded and referenced instead.
-    // Runs after the account is selected, because a file id minted by one pooled
-    // account is not assumed readable by another.
-    const withUploads = await uploadOversizedMedia(
-      requestOptions,
-      images,
-      videos,
-      credentials,
-      accountId,
-      this.options.fetchFn ?? fetch,
-      signal,
-    )
-
-    // The cap tracks the window so a long reasoning turn is not cut off by a fixed
-    // ceiling, and is reduced when the caller's prompt is large enough that prompt
-    // plus output would not fit. Passing the estimate is what makes the clamp do
-    // anything at all: without it the call is a no-op that always returns the
-    // requested cap, and the service rejects the request instead of it being clamped
-    // here.
     // A caller may ask for a cap smaller than this line's forced thinking needs -
     // the session-title call asks for one short line - which returns an empty text
     // block and a max-tokens finish. Raise that cap before clamping so the caller
     // gets an answer; a caller stating a larger cap is passed through untouched.
+    //
+    // Computed once, above the rotation: it is a function of the model, the
+    // request and the window only, so no account can change the answer and
+    // recomputing it per round would buy nothing.
     const flooredMax = floorForcedThinkingTokens(options.model, requestOptions.maxTokens)
     const requestedMax = flooredMax ?? maxOutputTokensFor(options.model, contextWindow)
     const effectiveMax = clampOutputToContext(requestedMax, contextWindow, estimatedInputTokens(requestOptions))
 
-    const buildBodyForOwner = (owner: string): string => {
-      const built = buildMinimaxRequest(
-        { ...withUploads, maxTokens: effectiveMax },
-        images,
-        {
-          cacheControl: true,
-          videos,
-          videoAccepted: minimaxCodeModelDef(options.model)?.inputModalities.includes('video') === true,
-          authOwner: owner,
-          route: PROVIDER_ID,
-        },
-      )
-      return assertRequestBodyFits(built)
-    }
-
-    let body = buildBodyForOwner(authOwner)
-
+    // Account rotation, the same shape every sibling line already has
+    // (command-code:421/426, kimi-code:767): one round per account that gets to
+    // try this request.
+    //
+    // `tried` is what makes the loop terminate. The pool must not hand back an
+    // account that has already been refused during THIS request, or a rate-limited
+    // account would simply be selected again and the loop would spin on a verdict
+    // it already has. It is also what `hasAnotherAvailableAccount` is asked
+    // against at the bottom: "is there an account left that this turn has not
+    // already burned", not "is the pool non-empty".
+    const tried = new Set<string>()
+    //
+    // The pool account the answer came from, and the credential and auth owner
+    // that go with it. Hoisted ABOVE the loop because everything after the rotation
+    // has to name the account that produced the answer, not merely that some
+    // account did: `authOwner` is carried into the stream state, and the refusal
+    // below redacts that account's own token.
+    let credentials: MinimaxCodeCredentials
+    let authOwner: string
+    // The pool account this request is being served by, when there is a pool. It
+    // is what makes the 401 recovery below renew the account that actually failed
+    // rather than whatever the single-credential file happens to hold. Absent means
+    // the single-credential line, which has no account to cool and must behave
+    // exactly as it did before any pool existed.
+    let accountId: string | undefined
     let response: Response
-    // At most one recovery attempt. A 401 has two possible causes that the status
-    // alone cannot separate: the stored token is stale in a way the local clock did
-    // not see (a token revoked in the MiniMax Code app, a clock skew, a rotation the
-    // app performed), or the credential genuinely needs a new sign-in. So the first
-    // 401 forces exactly one refresh and retries the same body once — the
-    // `force` option exists for this and is otherwise never used on this line. If
-    // the retry is also rejected, the failure is final and reported to the user.
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        response = await fetchWithContextBudgetRecovery(fetchFn)(messagesUrl(credentials.region), {
-          method: 'POST',
-          headers: modelRequestHeaders(credentials.accessToken),
-          body,
-          signal,
-        })
-      } catch (error) {
-        if (signal.aborted) throw new LlmError('MiniMax Code request aborted', 'ABORTED', { cause: error })
-        throw new LlmError(
-          PROVIDER_NAME + ' request failed: ' + (error instanceof Error ? error.message : String(error)),
-          'TRANSPORT',
-          { cause: error },
-        )
-      }
+    //
+    // Hoisted beside them because BOTH account-level failure paths below need it —
+    // the non-2xx response and the in-band error event — and the second is inside
+    // the streaming loop, far from any request setup.
+    const pool = this.options.accountPool
 
-      if (response.ok) break
-      if (attempt > 0 || (response.status !== 401 && response.status !== 403)) break
-
-      // Drain the refused response so the connection is reusable, then renew.
-      await response.text().catch(() => '')
-      const refused = credentials.accessToken
+    while (true) {
       try {
-        credentials = await this.renewCredential(accountId, fetchFn, signal, refused)
-        authOwner = computeMinimaxAuthOwner(credentials, accountId)
-        body = buildBodyForOwner(authOwner)
+        // Every round asks for a DIFFERENT account: the accounts this request has
+        // already tried are handed to the pool as the exclusion set, so the
+        // selection cannot return one this turn has already been refused by.
+        // Without a pool this is the one stored credential, read and renewed
+        // exactly as it always was.
+        const selection = await this.acquireCredential(fetchFn, signal, pool === undefined ? undefined : tried)
+        credentials = selection.credentials
+        accountId = selection.accountId
       } catch (error) {
-        // The refresh itself failed: that verdict is the one to report, because it
-        // names why the credential can no longer be renewed.
         if (error instanceof MinimaxCodeUnauthorizedError) {
           throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
         }
         throw new LlmError(
-          PROVIDER_NAME + ' credential could not be renewed after the service refused '
-          + redactToken(refused) + ': ' + (error instanceof Error ? error.message : String(error)),
-          'INVALID_CREDENTIAL',
+          PROVIDER_NAME + ' credential could not be prepared: '
+          + (error instanceof Error ? error.message : String(error)),
+          'MISSING_CREDENTIAL',
           { cause: error },
         )
       }
-    }
+      if (accountId !== undefined) tried.add(accountId)
 
-    if (!response.ok) {
-      const detail = (await response.text().catch(() => '')).slice(0, 2_000)
+      authOwner = computeMinimaxAuthOwner(credentials, accountId)
+
+      // Media that cannot be encoded inline is uploaded and referenced instead.
+      // Runs after the account is selected, because a file id minted by one pooled
+      // account is not assumed readable by another.
+      //
+      // Repeated per round for exactly that reason. uploadOversizedMedia hands
+      // THIS account's access token and account key to the Files API
+      // (see the upload call inside it), so a round replayed against a second
+      // account must re-derive the uploads with that second account's own
+      // credential: a body still pointing at the first account's file ids would
+      // ask the new account to read files it cannot see. It is a pure function of
+      // a requestOptions it does not mutate, so re-running it per round costs
+      // nothing beyond the transfer itself.
+      const withUploads = await uploadOversizedMedia(
+        requestOptions,
+        images,
+        videos,
+        credentials,
+        accountId,
+        this.options.fetchFn ?? fetch,
+        signal,
+      )
+
+      const buildBodyForOwner = (owner: string): string => {
+        const built = buildMinimaxRequest(
+          { ...withUploads, maxTokens: effectiveMax },
+          images,
+          {
+            cacheControl: true,
+            videos,
+            videoAccepted: minimaxCodeModelDef(options.model)?.inputModalities.includes('video') === true,
+            authOwner: owner,
+            route: PROVIDER_ID,
+          },
+        )
+        return assertRequestBodyFits(built)
+      }
+
+      let body = buildBodyForOwner(authOwner)
+
+      // The 401 recovery. Deliberately its own loop, and deliberately NOT the
+      // rotation above — the two answer different questions and must never share a
+      // counter.
+      //
+      // This one asks "is the credential I just presented stale?", and the answer is
+      // fixed for THIS account: renewing it and replaying the same body is the
+      // whole remedy. Rotation asks "is there a different account left?", and the
+      // answer is about the pool. Sharing a counter would make a 401 that survives
+      // its own renewal silently turn into a new account on the next pass, so an
+      // account whose refresh is genuinely broken would walk the pool instead of
+      // reporting why it cannot sign in — and, worse, a rotation would consume the
+      // single retry budget a stale token is entitled to.
+      //
+      // At most one recovery attempt, per account. A 401 has two possible causes
+      // that the status alone cannot separate: the stored token is stale in a way the
+      // local clock did not see (a token revoked in the MiniMax Code app, a clock
+      // skew, a rotation the app performed), or the credential genuinely needs a new
+      // sign-in. So the first 401 forces exactly one refresh and retries the same
+      // body once — the `force` option exists for this and is otherwise never used
+      // on this line. If the retry is also rejected, the failure is final and
+      // reported to the user.
+      //
+      // `attempt` is scoped to this round, so a round that follows a rotation gets
+      // its own single recovery for the account it is now serving.
+      //
+      // The refused response's body, captured rather than discarded. Two places in
+      // this round need this exact text and a Response body is a one-shot stream:
+      // the gate below must know whether a 403 names a spent window (only the body
+      // says), and the non-ok branch below classifies the very same text into the
+      // verdict the user is shown. Read twice, the second read comes back EMPTY —
+      // and an empty body is not a shorter verdict, it is a DIFFERENT one, because
+      // the classifier then falls through to its empty-body defaults. So the text is
+      // taken once, kept here, and handed down.
+      let refusedBody: string | undefined
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          response = await fetchWithContextBudgetRecovery(fetchFn)(messagesUrl(credentials.region), {
+            method: 'POST',
+            headers: modelRequestHeaders(credentials.accessToken),
+            body,
+            signal,
+          })
+        } catch (error) {
+          if (signal.aborted) throw new LlmError('MiniMax Code request aborted', 'ABORTED', { cause: error })
+          throw new LlmError(
+            PROVIDER_NAME + ' request failed: ' + (error instanceof Error ? error.message : String(error)),
+            'TRANSPORT',
+            { cause: error },
+          )
+        }
+
+        // This attempt's response is a different body from the previous attempt's,
+        // so whatever the previous one said says nothing about this one.
+        refusedBody = undefined
+
+        if (response.ok) break
+        if (attempt > 0 || (response.status !== 401 && response.status !== 403)) break
+
+        // Drain the refused response so the connection is reusable, then renew.
+        // The account is NOT changed here: renewCredential renews precisely the one
+        // that was refused, which is what keeps this a same-account recovery.
+        //
+        // The drained text is kept instead of thrown away: it is the same body the
+        // non-ok branch below has to classify, and a body that has already been read
+        // cannot be read again (see `refusedBody` above).
+        refusedBody = await response.text().catch(() => '')
+
+        // A 403 whose OWN body names a spent window is not a stale token, and the one
+        // remedy this loop has — renew and replay the same body — cannot touch a
+        // window that stays spent until it resets. Renewing it spent real things:
+        //
+        //  · a native account's renewal writes the new pair straight back into the
+        //    desktop app's own auth.json (account-pool.ts:456-468), so a quota verdict
+        //    was overwriting the user's own sign-in for nothing;
+        //  · every such 403 bought a full token round trip before the rotation below
+        //    could take over, once per account, on every turn that meets a window.
+        //
+        // So the verdict is read HERE, before the renewal it does not deserve, and the
+        // response falls through to the branch below — where the cooldown and the
+        // rotation already exist — rather than being reimplemented here.
+        //
+        // Gated on the pool deliberately. Without one there is no second account to
+        // reach, and the single-credential line keeps the posture it has always had:
+        // one forced renewal on ANY 401 or 403, one replay, one classified throw, and
+        // the stored credential left exactly where the line itself put it.
+        //
+        // The 403 lives inside isSpentWindow403 and that is the reason no 401 can be
+        // diverted here however its body reads — on this route a 401 IS the
+        // credential, full stop.
+        if (pool !== undefined && accountId !== undefined && isSpentWindow403(response.status, refusedBody)) break
+
+        const refused = credentials.accessToken
+        try {
+          credentials = await this.renewCredential(accountId, fetchFn, signal, refused)
+          authOwner = computeMinimaxAuthOwner(credentials, accountId)
+          body = buildBodyForOwner(authOwner)
+        } catch (error) {
+          // The refresh itself failed: that verdict is the one to report, because it
+          // names why the credential can no longer be renewed.
+          if (error instanceof MinimaxCodeUnauthorizedError) {
+            throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
+          }
+          throw new LlmError(
+            PROVIDER_NAME + ' credential could not be renewed after the service refused '
+            + redactToken(refused) + ': ' + (error instanceof Error ? error.message : String(error)),
+            'INVALID_CREDENTIAL',
+            { cause: error },
+          )
+        }
+      }
+
+      // The account served this turn. Everything from here on — the body this
+      // response carried, the auth owner in the stream state, the token named in
+      // the refusal below — belongs to it, so the rotation stops here rather than
+      // re-issuing the request against somebody else.
+      if (response.ok) break
+
+      // `refusedBody` is this response's own body when the gate above read it to
+      // classify a 403, and undefined otherwise — in which case this is that body's
+      // first and only read. Either way the verdict below is read off the REAL body;
+      // it can never see an already-drained ''.
+      const detail = (refusedBody ?? await response.text().catch(() => '')).slice(0, 2_000)
       const failure = classifyMinimaxFailure(response.status, detail)
       const after = response.status === 429 ? retryAfterMs(response.headers) : undefined
-      // The rejected credential is named only in redacted form. The refresh path
-      // has already been asked to renew it (see above), so this is the service's
-      // final verdict rather than a stale token being re-presented.
-      const hint = response.status === 401 || response.status === 403
+      // The pool reaction every sibling line already gives this response. Without
+      // it the line never cooled anything and never rotated, so once one account's
+      // Token Plan ran out EVERY later request kept being served by that same
+      // account — the pool existed, selected it each time, and had no way to learn
+      // it had been refused.
+      //
+      // A 429 always names an account here, and a 403 does whenever its body said
+      // the window is spent; a 400 or a 5xx is about the request (or about every
+      // account behind this plan at once), and cooling on those would empty the
+      // pool over one bad turn.
+      if (pool !== undefined && accountId !== undefined) {
+        // Whether this verdict is a SPENT WINDOW, as against every other verdict
+        // that is also this account's own.
+        //
+        // accountScoped cannot answer that by itself: the 401/403 credential branch
+        // sets it too (see classifyMinimaxFailure), and cooling or rotating on THAT
+        // is how one unusable token walks the whole pool. What separates the two is
+        // the code the classifier chose - a spent window is PROVIDER_ERROR, a refused
+        // credential is INVALID_CREDENTIAL - the same distinction the sibling line
+        // draws from the same field (kimi-code/adapter.ts:848-862).
+        const spentWindow = failure.accountScoped && failure.code !== 'INVALID_CREDENTIAL'
+        // The status is the OUTER test, so no 401 can reach this branch however its
+        // body reads: on this route a 401 means the credential, full stop.
+        if (response.status === 429 || (response.status === 403 && spentWindow)) {
+          await pool.markCooldown(
+            accountId,
+            // A spent window is this account's own and stays spent, so it takes the
+            // window's length; plain back-pressure is the Retry-After the service
+            // itself stated, and the shared 15-minute default when it states none.
+            failure.accountScoped ? quotaCooldownMs(detail) : after ?? POOL_COOLDOWN_MS,
+            PROVIDER_NAME + (response.status === 429 ? ' 429' : ' 403'),
+          ).catch(() => undefined)
+          // The refusal ends THIS account's part of the turn, not the turn: another
+          // account can still serve the very same request, and the loop above rebuilds
+          // everything that is per-account (credential, uploads, body) for it. This
+          // is the step that makes a pooled line behave like its seven siblings —
+          // before it, a spent window ended the request outright and the user was
+          // shown the first account's refusal even though the pool had an account
+          // left that could answer. When no other account is available the verdict
+          // falls through unchanged, so the last refusal is still what the user is
+          // shown.
+          if (await pool.hasAnotherAvailableAccount(tried)) continue
+        }
+      }
+      // The rejected credential is named only in redacted form, and only when one
+      // was rejected: the refresh path has already been asked to renew it (see
+      // above), so this is the service's final verdict rather than a stale token
+      // being re-presented. Keyed off the classification rather than the status, so
+      // the 403 that names a spent window does not go on to blame the token it was
+      // just refused for.
+      const hint = failure.code === 'INVALID_CREDENTIAL'
         ? ' (credential ' + redactToken(credentials.accessToken) + ')'
         : ''
       throw new LlmError(failure.message + hint, failure.code, {
@@ -875,7 +1181,36 @@ export class MinimaxCodeAdapter extends LlmAdapter {
         // failing identically. The code the mapper chose decides this, not the
         // type the wire happened to carry.
         if (error instanceof LlmError && !outputStarted && error.code === 'PROVIDER_ERROR' && state.streamError !== undefined) {
-          throw reclassifyInBandError(error, state.streamError, classifyMinimaxFailure)
+          const reclassified = reclassifyInBandError(error, state.streamError, classifyMinimaxFailure)
+          // Reclassification and the pool reaction are separate because they answer
+          // different questions about the same classification: the code decides
+          // whether the harness retries, accountScoped decides whether a retry is
+          // worth taking anywhere else. The mapper can supply only the first, which
+          // is why the wire object is recorded there and read here.
+          //
+          // The body is the one a non-2xx response would have carried, so a limit
+          // cannot mean one thing as a status and another as an event. The request
+          // itself is NOT re-issued — its body is open and part-read — so cooling
+          // the account is the whole of what can be done here, and it is what makes
+          // the harness retry land on an account that can answer.
+          if (pool !== undefined && accountId !== undefined) {
+            const inBandBody = JSON.stringify({ error: state.streamError })
+            const status = inBandAnthropicStatus(state.streamError)
+            // A type this vocabulary does not name classifies to nothing, so there
+            // is no verdict to weigh against the pool and nothing is cooled.
+            if (status === 429) {
+              const failure = classifyMinimaxFailure(status, inBandBody)
+              await pool.markCooldown(
+                accountId,
+                // No Retry-After exists here: there is no 429 response left to read
+                // one from, and a delay stated on the 200 belongs to a different
+                // message. Same rule the HTTP branch reads, same fields.
+                failure.accountScoped ? quotaCooldownMs(inBandBody) : POOL_COOLDOWN_MS,
+                PROVIDER_NAME + ' in-stream 429',
+              ).catch(() => undefined)
+            }
+          }
+          throw reclassified
         }
         throw error
       }
