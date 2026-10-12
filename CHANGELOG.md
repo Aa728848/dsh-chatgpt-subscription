@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.19.2 - 2026-10-12
 - **[九条线路] 空闲超时把「没有可展示内容」误判成「连接已死」，长时间思考或上游持续心跳时整轮被判 TIMEOUT**
   - **问题（issue #52）**：流式线路的空闲看门狗只对「解析器 yield 出的 `StreamChunk`」复位。Codex 线路的 `wrapStreamWithWatchdog` 包在 `parseResponsesStream()` 外面，于是两类完全正常的流量会被判成 5 分钟静默：① 上游持续发 `response.in_progress` 这类状态帧——它们走完 mapper 后**不产出任何 chunk**；② reasoning summary 超过 12000 字符展示上限被截断后继续发送摘要——`visibleReasoningDelta()` 返回空文本，且不够 768 字符的 flush 水位。同一条误判存在于其余八条自建流的线路（antigravity / claude / command-code / minimax / glm / kimi / workbuddy / ollama），共九条。
   - **修法：把计时判据从「展示层产出」下沉到「传输层收到数据」。** 共享 seam `wrapStreamWithWatchdog` 新增可选第二参数 `StreamActivity`（`pulse()`），内部接 `@deepseek-ai/dsh-timeout` 的 `idleWatchdog.pulse()`——它只在 `next()` 挂起期间重新计时，正是「读操作在等、字节在到」这个场景。因为 TypeScript 里参数更少的函数可以赋值给参数更多的签名，历史单参调用点继续编译通过，八条线路因此各自独立接线、互不阻塞。每条线路在**两处**上报：`reader.read()` 返回非空字节时一次，每个完整 SSE 帧一次。第二处刻意放在 `data:` 过滤**之前**，所以 `: ping` / `: keep-alive` 这类纯注释心跳（Codex 解析器原本在 `data === ''` 处整个丢掉）同样算活动。**摘要上限与展示缓冲逐字未动**：截断只影响展示，不再影响活动判定，也没有生成任何假的界面文字。
