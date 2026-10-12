@@ -235,7 +235,12 @@ describe('GLM 设置卡片', () => {
     // 图标：modelBrandMark('GLM-5.3') 命中本线路的品牌标记（不是别人的）。
     const mark = row.querySelector('svg')
     expect(mark).not.toBeNull()
-    expect(mark?.textContent).toContain('GLM')
+    // 标记是智谱官方 logo.svg 里那个方形标记：三条 currentColor path，第一条的起点
+    // M16.5376 认出是本线路而不是别人的。它曾是一块 <text>GLM</text> 字标——那是本地
+    // 自选的占位图形；换成官方标记后 svg 的 textContent 恒为空，所以改为按图形本身
+    // 断言，判别力比原来查字符串更强（别人的标记不会恰好是这三条 path）。
+    expect(mark?.querySelectorAll('path')).toHaveLength(3)
+    expect(mark?.querySelector('path')?.getAttribute('d')).toMatch(/^M16\.5376 /)
     // 名称与描述：描述逐字取契约里的 hint，客户端不改写。
     expect(row.querySelector('.dsh-mcl-name')?.textContent).toBe(payload.models[0]!.name)
     expect(row.querySelector('.dsh-mcl-hint')?.textContent).toBe(payload.models[0]!.hint)
@@ -267,24 +272,28 @@ describe('GLM 设置卡片', () => {
     expect(posts[posts.length - 1]?.body).toEqual({ enabledModelIds: ['GLM-5.3', 'GLM-5.3-Flash', 'GLM-5.2'] })
   })
 
-  it('账号管理标题行只有两个「添加账号」，导入入口下移到下面的登录区', async () => {
+  it('账号管理标题行就是全部登录入口：一个「添加账号」+「导入本机登录态」，下面直接是账号列表', async () => {
     const { node } = await mountSection(status())
     // 标题行 = 带着 .dsha-account-add-actions 的那个 .dsha-grouphead（页面上还有别的 grouphead）。
     const head = [...node.querySelectorAll('.dsha-grouphead')]
       .find((entry) => entry.querySelector('.dsha-account-add-actions'))
     expect(head).toBeDefined()
     const actions = [...head!.querySelectorAll<HTMLButtonElement>('button.dsha-btn')]
-    expect(actions.map((button) => button.textContent)).toEqual([zh.addCnAccount, zh.addIntlAccount])
-    // 护栏：只允许两个。第三个数一多，.dsha-account-add-actions 的 flex-wrap 就把它挤到下一行
-    // （需求方的实测反馈），而新增入口应当放进登录区而不是这个标题行。
+    // 两条登录路径都在标题行里，与 Claude 卡同款：浏览器授权的主按钮，加上免去一次登录的
+    // 「导入本机登录态」。区域不再是两个按钮——它由上面那张卡的 select 决定，主按钮按当前区域发起。
+    expect(actions.map((button) => button.textContent)).toEqual([zh.addAccount, zh.adopt])
+    // 护栏：仍然只允许两个。第三个数一多，.dsha-account-add-actions 的 flex-wrap 就把它挤到下一行
+    // （需求方的实测反馈），而手工粘贴兜底因此留在下面的兜底入口行，不进标题行。
     expect(actions).toHaveLength(2)
 
-    // 导入本机登录态现在在登录区里，与上方的浏览器登录并列成两条登录路径。
-    // 这条 status 的 login 是 null：入口不依赖某一次流程状态，所以仍必须点得到。
-    const adopt = [...node.querySelectorAll<HTMLButtonElement>('.dshglm-flow button.dsha-btn')]
-      .find((button) => button.textContent === zh.adopt)
-    expect(adopt).toBeDefined()
-    expect(adopt!.closest('.dsha-grouphead')).toBeNull()
+    // 独立的「登录授权」区整块没有了：idle 时页面上只剩标题行、账号列表与一行兜底入口。
+    // 这条 status 的 login 是 null：入口不依赖某一次流程状态，所以两条路径都点得到。
+    expect(node.textContent).not.toContain('登录授权')
+    expect(actions.map((button) => button.disabled)).toEqual([false, false])
+    // 兜底入口行在、且不在标题行里。
+    const paste = node.querySelector<HTMLButtonElement>('.dshglm-paste button[aria-expanded]')
+    expect(paste).not.toBeNull()
+    expect(paste!.closest('.dsha-grouphead')).toBeNull()
   })
 
   it('连接测试把 host 的 GlmConnectionDto 说成人话', async () => {
@@ -304,11 +313,18 @@ describe('GLM 设置卡片', () => {
 describe('登录状态机', () => {
   const cases: Array<{ name: string; login: GlmLoginFlowStatus; expect: (node: HTMLDivElement) => void }> = [
     {
-      name: 'idle',
+      // host 的 flow 是进程内变量，重启 host 后回到 idle，而这一档用的默认 status 里号池
+      // 已经有一个账号（authenticated: true）。这时卡片必须说「已有 N 个账号可用」，
+      // 不能再自称「尚未开始登录」——那与卡片正上方的账号区自相矛盾。
+      name: 'idle（号池已有账号）',
       login: { status: 'idle', region: 'cn' },
       expect: (node) => {
-        expect(node.textContent).toContain(zh.loginSection)
-        expect(node.textContent).toContain(zh.loginIdle)
+        // 「登录授权」那个小标题随独立登录区一起去掉了；idle 那一行现在住在兜底入口行里。
+        expect(node.textContent).not.toContain('登录授权')
+        expect(node.querySelector('.dshglm-paste-note')?.textContent)
+          .toContain(zh.loginHaveAccounts.replace('{count}', '1'))
+        expect(node.textContent).toContain(zh.loginHaveAccounts.replace('{count}', '1'))
+        expect(node.textContent).not.toContain(zh.loginIdle)
         // idle 不该凭空给出一个授权链接。
         expect(node.querySelector('a[href]')).toBeNull()
       },
@@ -370,6 +386,19 @@ describe('登录状态机', () => {
   it.each(cases)(`渲染 status=$name 各自不同的话`, async ({ login, expect: check }) => {
     const { node } = await mountSection(status({ login }))
     check(node)
+  })
+
+  it('idle 且号池真的空着时，才说「尚未开始登录」', async () => {
+    // 三态的另一半：号池里一个账号都没有，idle 才真的是「尚未开始登录」。
+    const { node } = await mountSection(status({
+      login: { status: 'idle', region: 'cn' },
+      accounts: [],
+      authenticated: false,
+      hasCredentials: false,
+    }))
+    expect(node.textContent).toContain(zh.loginIdle)
+    // 另一条路会渲染成「号池里已有 0 个账号可用」——那是在谎报。
+    expect(node.textContent).not.toContain(zh.loginHaveAccounts.replace('{count}', '0'))
   })
 
   it('complete 时显示成功（含完成时间），且不再出现「尚未开始登录」', async () => {
@@ -489,7 +518,10 @@ describe('adopt 入口', () => {
       url === `${PREFIX}/adopt` && init?.method === 'POST'
         ? Response.json({ ok: true, value: result })
         : undefined)
-    const button = [...harness.node.querySelectorAll<HTMLButtonElement>('.dshglm-flow button.dsha-btn')]
+    // 导入入口在账号管理的标题行里（与「添加账号」并排），因此按那一条取按钮。
+    const head = [...harness.node.querySelectorAll('.dsha-grouphead')]
+      .find((entry) => entry.querySelector('.dsha-account-add-actions'))!
+    const button = [...head.querySelectorAll<HTMLButtonElement>('button.dsha-btn')]
       .find((entry) => entry.textContent === zh.adopt)!
     await act(async () => button.click())
     return harness.node
@@ -506,14 +538,16 @@ describe('adopt 入口', () => {
     expect(node.textContent).toContain(zh.adoptFallback)
   })
 
-  it('导入结果提示紧挨着它的按钮（同一个登录区），且可当场关掉', async () => {
+  it('导入结果落在账号区正文里（不在标题行里），且可当场关掉', async () => {
     const adopted = zh.adoptAdopted.replace('{region}', zh.regionCn)
     const node = await runAdopt({ attempted: true, adopted: true, region: 'cn' })
-    const row = [...node.querySelectorAll<HTMLElement>('.dshglm-flow .dsha-row')]
+    const row = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
       .find((entry) => entry.textContent?.includes(adopted))
     expect(row).toBeDefined()
-    // 结果跟着按钮一起搬：留在账号池卡片外的话，点了按钮却在远处看到结果。
-    expect(row!.closest('.dshglm-flow')).not.toBeNull()
+    // 按钮在标题行里，结果行是账号区正文里紧挨着它的那一行：一行 space-between 的标题行
+    // 放不下第二段文字，所以结果不能跟着按钮一起进标题行；但它仍在**同一个账号区**里，
+    // 点了按钮不会在远处看到结果。
+    expect(row!.closest('.dsha-group')).not.toBeNull()
     expect(row!.closest('.dsha-grouphead')).toBeNull()
 
     // 「知道了」当场清掉它，不留在版面上。
@@ -568,8 +602,10 @@ describe('hub 卡片（进入入口）', () => {
     const card = [...container!.querySelectorAll<HTMLElement>('.dsh-hub-card')]
       .find((entry) => entry.querySelector('.dsh-hub-card-name')?.textContent === GLM_CODING_PLAN_PROVIDER_NAME)!
     expect(card).not.toBeNull()
-    // 图标：本线路的品牌标记。
-    expect(card.querySelector('.dsh-hub-brand-tile svg')?.textContent).toContain('GLM')
+    // 图标：本线路的品牌标记——同样按图形断言（理由见上面模型行那条）。
+    const tile = card.querySelector('.dsh-hub-brand-tile svg')
+    expect(tile?.querySelectorAll('path')).toHaveLength(3)
+    expect(tile?.querySelector('path')?.getAttribute('d')).toMatch(/^M16\.5376 /)
     // 名称取契约里的显示名。
     expect(card.querySelector('.dsh-hub-card-name')?.textContent).toBe(GLM_CODING_PLAN_PROVIDER_NAME)
     // 「2 个账号 · 3/4 个模型可用」由 hub 的聚合 overview 给出，卡片不自己数。

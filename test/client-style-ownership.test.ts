@@ -10,6 +10,7 @@ import { installWorkBuddyStyles } from '../src/client/workbuddy/styles.ts'
 import { installGlmCodingPlanStyles } from '../src/client/glm-coding-plan/styles.ts'
 import { installPoolStyles } from '../src/client/common/styles.ts'
 import { installMermaidStyles } from '../src/client/mermaid/styles.ts'
+import { installStepCodeStyles } from '../src/client/step-code/styles.ts'
 
 /** Every sheet this plugin injects, by its `data-plugin-css` sub-name. */
 const SHEETS = [
@@ -24,6 +25,10 @@ const SHEETS = [
   { name: 'glm-coding-plan', install: installGlmCodingPlanStyles },
   { name: 'pool', install: installPoolStyles },
   { name: 'mermaid', install: installMermaidStyles },
+  // Step Code 卡片也有自己的一张：登录流程块、额度凭据的密文输入行，以及老式窗口与
+  // Credit 桶各自的形状。它同样由 src/client/index.tsx 无条件安装，所以这张表
+  // 漏掉它就等于不再覆盖那张表。追加在末尾，既有条目一个顺序都没动。
+  { name: 'step-code', install: installStepCodeStyles },
 ] as const
 
 const owned = (): HTMLStyleElement[] =>

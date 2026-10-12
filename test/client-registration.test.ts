@@ -297,6 +297,8 @@ describe('client registration', () => {
       'conversation.input.right',
       // 一条新线路加一个胶囊槽位：注入次数由线路数决定，这里跟着 HUB_PROVIDERS 走。
       'conversation.input.right',
+      // Step Code 的胶囊同样只是又一个槽位，顺序接在 GLM 那条之后（order 43）。
+      'conversation.input.right',
       'tool.call.toolview',
     ])
     // Every provider, MiniMax Code included, lives behind one tabbed settings
@@ -313,6 +315,7 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'minimax-code-quota', order: 40 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'claude-quota', order: 41 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'step-code-quota', order: 43 }),
     ])
     expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
       key: CODEX_IMAGE_TOOL_NAME,
@@ -322,7 +325,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama'] as const
+    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -419,6 +422,32 @@ describe('client registration', () => {
           catalogSynced: true,
         } })
       }
+      if (url.startsWith('/step-code/api')) {
+        // Step Code mounts under its own prefix like every sibling line, and reads
+        // one /status carrying the whole card: pool, models, quota, cache and the
+        // login flow. Signed out with no quota here, so the card renders its empty
+        // branches rather than a fake plan.
+        return Response.json({ ok: true, value: {
+          enabled: true,
+          authenticated: false,
+          hasCredentials: false,
+          providerId: 'step-code',
+          storagePath: 'DPAPI: /tmp/step-code-credentials.json.dpapi',
+          profile: 'step_plan',
+          account: null,
+          quota: null,
+          lastFetchedAt: null,
+          models: [],
+          contextWindowOverrides: {},
+          defaultReasoningEffort: null,
+          login: { status: 'idle' },
+          accounts: [],
+          rotationStrategy: 'sequential',
+          cacheRequestParams: false,
+          serving: true,
+          conflict: null,
+        } })
+      }
       if (url.startsWith('/antigravity/api') || url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api') || url.startsWith('/workbuddy/api')) {
         return Response.json({ ok: true, value: {
           authenticated: false,
@@ -462,12 +491,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
-      // no enable switch on the host, renders none.
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(8)
+      // no enable switch on the host, renders none. Step Code joins the toggleable
+      // side (it posts enabled to its own /settings like every other line).
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(9)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.

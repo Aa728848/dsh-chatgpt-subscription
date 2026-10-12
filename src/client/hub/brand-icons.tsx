@@ -14,28 +14,68 @@ import { BRAND_MARKS, type BrandMarkKey, type BrandMarkSvg } from './brand-svg.t
 export type HubProviderId =
   | 'chatgpt' | 'antigravity' | 'command-code' | 'kimi-code'
   | 'workbuddy' | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
+  | 'step-code'
 
 /**
- * GLM（ZCode 账号）这张卡自带的标记。
+ * GLM（ZCode 账号）这张卡自带的标记：智谱官方 logo.svg 里那个方形标记，逐字转录。
  *
- * 与 BRAND_MARKS 里的同族一样是一个 viewBox + 单色 currentColor 的内联体、同一个
- * size 盒子；差别在来源：那一张张是从 vendored lockup 提取的（brand-svg.ts 注明
- * 「do not hand-edit」），而 Z.ai/GLM 没有可提取的 lockup 可用，且 brand-svg.ts
- * 不在本工作包的改动白名单内，所以这张以同样的形状就地声明在这里。
+ * 来源 https://www.zhipuai.cn/logo.svg —— 2026-10-12 抓取，HTTP 200，2632 字节，
+ * sha256 3f8e33a4…b0121。那张图 viewBox="0 0 95 27"、12 条 path：前 9 条是
+ * 「智谱」两个汉字，后 3 条是这个方形标记。这里**只取后 3 条**，fill 由原图的
+ * black 改为 currentColor，于是它与 BRAND_MARKS 里的同族是同一个形状：viewBox +
+ * 单色 currentColor 的内联体、同一个 size 盒子。汉字部分在方块尺寸下读不出来
+ * （那是字标，不是标记），所以不取。
  *
- * 画的是三个字母本身而不是仿造官方商标的路径：一个认得出品牌的字标，
- * 配一块品牌色底砖，与 command-code / ollama 的单字母底砖同属一个层次。
+ * viewBox 是按三条 path 的极值推出来的，不是抄来的近似值（对每条 path 的三次
+ * 贝塞尔取导数零点，得出真实极值）：
+ *   path 1  x[0.787598, 16.5376]   y[0.015152, 3.911629]
+ *   path 2  x[0, 31.5]             y[0.032166, 26.5273]
+ *   path 3  x[14.9624, 30.7124]    y[22.6308, 26.5272]
+ *   三条并集 x[0, 31.5]，y[0.015152, 26.5273]
+ * 最左是 path 2 的 H0，最右是 path 2 的 M31.5/H31.5，所以宽 31.5；最低是 path 1
+ * 的 V0.015152，最高是 path 2 的 L12.6 26.5273。那 0.015152 在 22px 的盒子里不到
+ * 0.02px，按原点归零并取高度 = 最高点，得到 viewBox="0 0 31.5 26.5273"。
+ *
+ * brand-svg.ts 不在本工作包的改动白名单内（文件头写着「do not hand-edit the
+ * artwork」），所以这张以同样的形状就地声明在这里。
  */
 const GLM_MARK: BrandMarkSvg = {
-  viewBox: '0 0 24 24',
-  body: '<text x="12" y="16.4" text-anchor="middle" font-family="ui-sans-serif,system-ui,-apple-system,\'Segoe UI\',sans-serif" font-size="10.6" font-weight="700" letter-spacing="0.2" fill="currentColor">GLM</text>',
+  viewBox: '0 0 31.5 26.5273',
+  body: '<path d="M16.5376 0.0307374L14.3326 3.13223C14.1617 3.37577 13.9331 3.57415 13.6667 3.71001C13.4004 3.84586 13.1045 3.91504 12.8048 3.9115H0.787598V0.015152H16.5376V0.0307374Z" fill="currentColor"/>'
+    + '<path d="M31.5 0.0321655L12.6 26.5273H0L18.9 0.0321655H31.5Z" fill="currentColor"/>'
+    + '<path d="M14.9624 26.5272L17.1832 23.4101C17.3564 23.1689 17.5856 22.9723 17.8513 22.8368C18.1171 22.7012 18.4119 22.6306 18.7109 22.6308H30.7124V26.5272H14.9624Z" fill="currentColor"/>',
+}
+
+/**
+ * Step Code（Step Plan 订阅）这张卡自带的标记：StepFun 官方 favicon 的字形，逐字转录。
+ *
+ * 来源 https://platform.stepfun.com/favicon.svg —— 2026-10-12 抓取，HTTP 200，
+ * 380 字节，sha256 cdcb79a0…3ea9。官方那张是 viewBox="0 0 64 64"：一个
+ * <rect width="64" height="64" rx="12" fill="#1d1d1d"> 的圆角底 + 一条
+ * <path fill="#fff">。这里**只取那条 path 的 d**，fill 改为 currentColor，深色
+ * rect 底丢弃——底砖由 PROVIDER_BRANDS[].tile 提供（那一格现在用官方那个
+ * #1d1d1d），这是本文件既有的分层：标记只管形状，底砖管颜色。
+ *
+ * viewBox 沿用官方的 0 0 64 64，不裁到字形的紧包围盒：实测这条 path 的字形是
+ * x[12.19, 51.87]、y[12.19, 51.87] 的一个 39.68×39.68 方块，在官方 64×64 的框里
+ * 四边各留约 12.2 的内缩。保留官方的框就保留了这个内缩带来的视觉重量，而
+ * BrandTile 在下面画的那块圆角底砖正好补上被丢掉的 rect，合起来与官方 favicon
+ * 是同一个比例。
+ *
+ * 与上面 GLM 那张**同一条理由**：brand-svg.ts 不在本工作包的改动白名单内，所以
+ * 这张同样以「viewBox + 单色 currentColor 的内联体 + 同一个 size 盒子」的形状
+ * 就地声明在这里，而不是画四个字母。
+ */
+const STEP_CODE_MARK: BrandMarkSvg = {
+  viewBox: '0 0 64 64',
+  body: '<path d="M33.76 43.03v-8.84h18.05v1.58H41.56v16.1h-7.8zm-21.57-4.39h9.3l-.02-10.4-.01-10.38h25.15l.02 7.62H29.37v20.8H12.2Zm4.28-23.24h1.58v17.67h-1.58zm32.28-.07h-3.23v-1.57h3.23v-1.57h1.54v1.57h1.58l-.01.79v.79h-1.57v3.19h-1.54v-3.2" fill="currentColor"/>',
 }
 
 /** 一张标记的键：BRAND_MARKS 的全部键，加上本文件自带的键。 */
-export type ProviderMarkKey = BrandMarkKey | 'glm'
+export type ProviderMarkKey = BrandMarkKey | 'glm' | 'step-code'
 
 /** 本文件自带的标记（BRAND_MARKS 之外的补充，按键索引）。 */
-const LOCAL_MARKS: Record<string, BrandMarkSvg> = { glm: GLM_MARK }
+const LOCAL_MARKS: Record<string, BrandMarkSvg> = { glm: GLM_MARK, 'step-code': STEP_CODE_MARK }
 
 function artworkOf(mark: ProviderMarkKey): BrandMarkSvg {
   return mark in BRAND_MARKS ? BRAND_MARKS[mark as BrandMarkKey] : LOCAL_MARKS[mark]
@@ -63,9 +103,15 @@ export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   'kimi-code': { mark: 'kimi', color: '#1F1F1F', tile: '#1783FF' },
   workbuddy: { mark: 'tencent', tile: '#0055E9' },
   'minimax-code': { mark: 'minimax', tile: '#E2167E' },
-  'glm-coding-plan': { mark: 'glm', tile: '#3859FF' },
+  // 底砖色仍是既有那块品牌色；标记换成官方那三条 path 之后它是 currentColor，
+  // 所以补一个白字压砖，否则深蓝底上那枚标记读不出来。
+  'glm-coding-plan': { mark: 'glm', color: '#ffffff', tile: '#3859FF' },
   claude: { mark: 'claude', color: '#D97757', tile: '#D97757' },
   ollama: { monogram: 'O', color: '#3B3B3B', tile: '#3B3B3B' },
+  // 底砖色取自官方 favicon 那个圆角底的 fill（#1d1d1d），不再是本地选定的靛蓝：
+  // 它现在有出处了，上面那句「Step 没有可核验的品牌色取值来源」随之作废。标记画成
+  // currentColor，所以这里配 #ffffff，白字压深砖才读得出来。
+  'step-code': { mark: 'step-code', color: '#ffffff', tile: '#1d1d1d' },
 }
 
 /** One brand mark at a given box size; the artwork is decorative. */

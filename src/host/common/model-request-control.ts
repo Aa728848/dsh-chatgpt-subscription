@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { ConcurrencyGate } from './concurrency-gate.ts'
 
-export const CONTROLLED_PROVIDERS = ['codex-chatgpt', 'claude', 'antigravity', 'kimi-code', 'minimax-code', 'command-code', 'workbuddy', 'ollama', 'glm-coding-plan'] as const
+export const CONTROLLED_PROVIDERS = ['codex-chatgpt', 'claude', 'antigravity', 'kimi-code', 'minimax-code', 'command-code', 'workbuddy', 'ollama', 'glm-coding-plan', 'step-code'] as const
 export type ControlledProvider = typeof CONTROLLED_PROVIDERS[number]
 export interface ModelRequestLimits {
   /** Per credential limits, not guessed subscription entitlements. Zero disables. */

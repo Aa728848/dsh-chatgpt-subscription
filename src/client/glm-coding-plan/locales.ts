@@ -23,14 +23,14 @@ export const zh = {
   region: '区域',
   regionCn: '国区（bigmodel.cn）',
   regionIntl: '国际区（z.ai）',
-  regionHint: '「导入本机登录态」与「手工粘贴授权码」按这里选定的区域发起；上方两个登录按钮各自固定一个区域。区域是凭据的属性，一区铸造的 Key 会被另一区拒绝，所以两区账号互不串用。',
+  regionHint: '下方账号区的全部登录入口都按这里选定的区域发起：「添加账号」按它打开授权页，「导入本机登录态」与「手工粘贴授权码」也落在它那一区。区域是凭据的属性，一区铸造的 Key 会被另一区拒绝，所以两区账号互不串用。',
 
-  addCnAccount: '添加国区账号',
-  addIntlAccount: '添加国际区账号',
   authorizing: '授权中…',
 
-  loginSection: '登录授权',
   loginIdle: '尚未开始登录。',
+  // idle 是一个状态，不是「你没登录」：host 的 flow 是进程内变量，重启后回到 idle，而号池里
+  // 的账号还在。这句与 Step Code 那张卡同名同文，两张卡因此说同一句话。
+  loginHaveAccounts: '号池里已有 {count} 个账号可用。要再加一个就点上面的「添加账号」。',
   loginPending: '等待浏览器完成登录与授权，然后本卡片会自动继续。',
   loginComplete: '登录完成，账号已加入号池。',
   // 完成时刻是「成功」这件事唯一的时间证据：账号池那几行会被下一次开流刷新，
@@ -68,7 +68,7 @@ export const zh = {
   adoptTokenExpired: 'ZCode 的登录态已经过期，回 ZCode 客户端重新登录后再导入。',
   adoptExchangeFailed: '兑换 Coding Plan Key 失败：这个账号可能没有 Coding Plan 套餐，或没有建 Key 的权限。',
   adoptNotAZcodeLogin: '凭据文件里没有本线路认识的 ZCode 登录态（该文件也可能属于别的工具）。',
-  adoptFallback: '导入只是省一次登录的快捷路径，失败不影响使用——请改用上方的浏览器登录。',
+  adoptFallback: '导入只是省一次登录的快捷路径，失败不影响使用——请改用浏览器登录或手工粘贴授权码。',
   adoptedBadge: '导入的登录态',
 
   connection: '连接',
@@ -136,14 +136,12 @@ export const en: Record<keyof typeof zh, string> = {
   region: 'Region',
   regionCn: 'China (bigmodel.cn)',
   regionIntl: 'International (z.ai)',
-  regionHint: '“Import the local sign-in” and the manual code paste start on the region chosen here; the two sign-in buttons above each pin one region. A region is a property of the credential — a key minted in one region is refused by the other — so the two never share.',
+  regionHint: 'Every sign-in entry point in the account section below starts on the region chosen here: “Add Account” opens its authorization page there, and “Import the local sign-in” and the manual code paste both land in that region. A region is a property of the credential — a key minted in one region is refused by the other — so the two never share.',
 
-  addCnAccount: 'Add China account',
-  addIntlAccount: 'Add international account',
   authorizing: 'Authorizing…',
 
-  loginSection: 'Sign-in',
   loginIdle: 'No sign-in started yet.',
+  loginHaveAccounts: 'The pool already holds {count} account(s), ready to use. To add another, choose “Add Account” above.',
   loginPending: 'Finish sign-in and authorization in the browser; this card then continues on its own.',
   loginComplete: 'Signed in — the account joined the pool.',
   // The completion instant is the only time evidence of that success: the pool rows
@@ -181,7 +179,7 @@ export const en: Record<keyof typeof zh, string> = {
   adoptTokenExpired: 'The ZCode sign-in has expired — sign in again in the ZCode client and import once more.',
   adoptExchangeFailed: 'Exchanging the Coding Plan key failed: this account may have no Coding Plan, or no permission to create a key.',
   adoptNotAZcodeLogin: 'The credentials file holds no ZCode sign-in this line recognizes (it may belong to another tool).',
-  adoptFallback: 'Importing only saves you one sign-in; a failure never blocks the line — use the browser sign-in above instead.',
+  adoptFallback: 'Importing only saves you one sign-in; a failure never blocks the line — use the browser sign-in or the manual code paste instead.',
   adoptedBadge: 'Imported sign-in',
 
   connection: 'Connection',

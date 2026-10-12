@@ -39,6 +39,9 @@ import { GlmCodingPlanComposerQuota } from './glm-coding-plan/GlmCodingPlanCompo
 import { dictionaries as glmCodingPlanDicts, NS_GLM_CODING_PLAN, type GlmCodingPlanLocaleKey } from './glm-coding-plan/locales.ts'
 import { installGlmCodingPlanStyles } from './glm-coding-plan/styles.ts'
 import { dictionaries as ollamaDicts, NS_OLLAMA, type OllamaLocaleKey } from './ollama/locales.ts'
+import { StepCodeComposerQuota } from './step-code/StepCodeComposerQuota.tsx'
+import { dictionaries as stepCodeDicts, NS_STEP_CODE, type StepCodeLocaleKey } from './step-code/locales.ts'
+import { installStepCodeStyles } from './step-code/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -60,6 +63,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-workbuddy': WorkBuddyLocaleKey
     'dsh-glm-coding-plan': GlmCodingPlanLocaleKey
     'dsh-ollama': OllamaLocaleKey
+    'dsh-step-code': StepCodeLocaleKey
   }
 }
 
@@ -113,6 +117,11 @@ export function apply(ctx: ClientContext): void {
     installWorkBuddyStyles()
     return () => {}
   }, 'dsh-workbuddy: styles')
+  ctx.effect(() => ctx.locale.register(NS_STEP_CODE, stepCodeDicts), 'dsh-step-code: dictionaries')
+  ctx.effect(() => {
+    installStepCodeStyles()
+    return () => {}
+  }, 'dsh-step-code: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -187,6 +196,12 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42, locale: NS_GLM_CODING_PLAN,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, GlmCodingPlanComposerQuota))
+  // 顺序 43：接在 glm-coding-plan-quota(42) 之后顺延，理由与 42 那条注释相同——
+  // 既有槽位一个 order 都不动，新线路只往后拿号。
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'step-code-quota', order: 43, locale: NS_STEP_CODE,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, StepCodeComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

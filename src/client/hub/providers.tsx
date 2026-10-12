@@ -15,6 +15,10 @@ import {
   GLM_CODING_PLAN_PROVIDER_NAME,
   GLM_CODING_PLAN_ROUTE_PREFIX,
 } from '../../shared/glm-coding-plan-contracts.ts'
+import {
+  STEP_CODE_PROVIDER_NAME,
+  STEP_CODE_ROUTE_PREFIX,
+} from '../../shared/step-code-contracts.ts'
 import { CodexSubscriptionSection } from '../CodexSubscriptionSection.tsx'
 import { AntigravitySection } from '../antigravity/AntigravitySection.tsx'
 import { CommandCodeSection } from '../command-code/CommandCodeSection.tsx'
@@ -24,6 +28,7 @@ import { MinimaxCodeSection } from '../minimax-code/MinimaxCodeSection.tsx'
 import { GlmCodingPlanSection } from '../glm-coding-plan/GlmCodingPlanSection.tsx'
 import { ClaudeSection } from '../claude/ClaudeSection.tsx'
 import { OllamaSection } from '../ollama/OllamaSection.tsx'
+import { StepCodeSection } from '../step-code/StepCodeSection.tsx'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -132,6 +137,14 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: 'Ollama',
     setEnabled: (enabled) => postLineSettings('/ollama/api', { enabled }),
     renderDetail: ({ onModelChange }) => <OllamaSection onModelChange={onModelChange} />,
+  },
+  {
+    // Step Code（Step Plan 订阅）：追加在最后，与 host 侧注册顺序一致（ollama 之后）。
+    // 既有条目一个字符都没有移动——给已上线的线路重排卡片位置没有收益，只有风险。
+    id: 'step-code',
+    name: STEP_CODE_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(STEP_CODE_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <StepCodeSection onModelChange={onModelChange} />,
   },
 ]
 

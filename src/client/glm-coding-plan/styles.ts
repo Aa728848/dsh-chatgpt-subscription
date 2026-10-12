@@ -8,17 +8,24 @@ export const STYLE_ID = 'dsh-glm-coding-plan-settings-style'
  * 共享样式一律不重复声明：模型清单（.dsh-mcl-*）由 common/model-checklist-styles.ts
  * 负责，账号卡与配额条（.dsha-account-*）由 common/styles.ts 负责，基础控件
  * （.dsha-page / .dsha-group / .dsha-row / 胶囊等）由兄弟线路的安装器负责。
- * 本文件只声明没有兄弟线路共用过的东西：登录流程块、手工粘贴行、等宽文本、
- * 模型行右侧的窗口数字，以及「导入的登录态」徽标。
+ * 本文件只声明没有兄弟线路共用过的东西：登录流程块、兜底入口行与手工粘贴面板、
+ * 等宽文本、模型行右侧的窗口数字，以及「导入的登录态」徽标。
  *
  * 两区登录入口复用的 .dsha-account-add-actions 由 workbuddy/styles.ts 声明；
  * Claude 卡片同样直接用它而不在自己文件里重复声明，本卡沿用同一做法。
  */
 export function installGlmCodingPlanStyles(): void {
   installPluginStyle('glm-coding-plan', `
-.dshglm-flow{border-bottom:0.5px solid var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:10px;padding:12px 0}
+/* 登录流程块是**临时内容**：idle 时整块不渲染，因此它是一条顶部分隔线加间距，
+   不再有底边——下面紧接着就是兜底入口行，两条线会把中间那一段夹成夹心。 */
+.dshglm-flow{border-top:0.5px solid var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:10px;margin-top:12px;padding-top:12px}
 .dshglm-flow-url{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.14));border:0.5px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere;padding:8px 10px;user-select:all}
-.dshglm-paste{align-items:flex-start;display:flex;flex-direction:column;gap:8px}
+/* 兜底入口行：闲置时只有一行——idle 说明占左侧剩余宽度，手工粘贴开关在右侧。
+   展开的面板用 flex-basis:100% 折到下一行占满整宽，所以窄屏回落是自然换行，
+   不需要额外的媒体查询（写法与共享 .dsha-account-add-actions 同一套节奏）。 */
+.dshglm-paste{align-items:center;display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.dshglm-paste-note{flex:1 1 260px;font-size:12px;min-width:0}
+.dshglm-paste-body{display:flex;flex:1 1 100%;flex-direction:column;gap:8px}
 .dshglm-paste-row{align-items:center;display:flex;flex-wrap:wrap;gap:8px}
 .dshglm-paste-row input{flex:1 1 260px;min-width:200px}
 .dshglm-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}

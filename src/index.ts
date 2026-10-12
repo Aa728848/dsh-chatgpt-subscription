@@ -111,6 +111,15 @@ import {
   registerGlmCodingPlanPreferenceStore,
 } from './host/glm-coding-plan/token-store.ts'
 import { PROVIDER_ID as GLM_CODING_PLAN_PROVIDER_ID, PROVIDER_NAME as GLM_CODING_PLAN_PROVIDER_NAME } from './host/glm-coding-plan/types.ts'
+import { StepCodeAdapter, stepCodeCatalogSize } from './host/step-code/adapter.ts'
+import { StepCodeAccountPool } from './host/step-code/account-pool.ts'
+import { registerStepCodeRoutes, stepCodeSettingsSource } from './host/step-code/routes.ts'
+import {
+  StepCodeCredentialStore,
+  StepCodeModelSettingsStore,
+  registerStepCodePreferenceStore,
+} from './host/step-code/token-store.ts'
+import { PROVIDER_ID as STEP_CODE_PROVIDER_ID, PROVIDER_NAME as STEP_CODE_PROVIDER_NAME } from './host/step-code/types.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
@@ -311,6 +320,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     store: glmCodingPlanStore,
     // 卡片可以钉住一个账号，而它能在适配器服务请求期间改变，所以每次选号都读一次。
     preferAccountId: () => glmCodingPlanPreferences.status().selectedAccountId ?? null,
+  })
+
+  // Step Code（Step Plan 订阅）：国区与国际区可以同时在池里，区域由凭据的 profile
+  // 唯一决定（一个区的 Key 打另一区的端点会被拒，所以去重键里带着区域）。
+  // 这条线路的凭据永不过期也没有刷新链，号池的 refresh 钩子因此恒抛错——那是刻意的。
+  const stepCodeStore = new StepCodeCredentialStore()
+  const stepCodeModelSettings = new StepCodeModelSettingsStore()
+  const stepCodePreferences = registerStepCodePreferenceStore(ctx.settings, stepCodeModelSettings)
+  const stepCodeAccountPool = new StepCodeAccountPool({
+    // 卡片可以钉住一个账号，而它能在适配器服务请求期间改变，所以每次选号都读一次。
+    preferAccountId: () => stepCodePreferences.status().selectedAccountId,
   })
 
   // The allowlist a Session recorded outranks the current settings document,
@@ -647,6 +667,35 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       },
     )
 
+    const stepCodeAdapter = new StepCodeAdapter(
+      stepCodeStore,
+      stepCodeModelSettings,
+      stepCodePreferences,
+      {
+        fetchFn: modelFetch[STEP_CODE_PROVIDER_ID],
+        attachments: ctx.attachments,
+        accountPool: stepCodeAccountPool,
+      },
+    )
+    const stepCodeClaim = claimProviderRoute(ctx, {
+      providerId: STEP_CODE_PROVIDER_ID,
+      label: STEP_CODE_PROVIDER_NAME,
+      adapter: stepCodeAdapter,
+    })
+    // Registered unconditionally: the card is how a user signs in for the first
+    // time, so gating it on winning the route would leave a contested id with no
+    // way to configure it at all.
+    const disposeStepCodeRoutes = registerStepCodeRoutes(
+      ctx,
+      stepCodeSettingsSource(stepCodePreferences, stepCodeModelSettings),
+      {
+        fetchFn: proxyFetch,
+        serving: () => stepCodeClaim.serving(),
+        conflict: () => stepCodeClaim.conflict(),
+        accountPool: stepCodeAccountPool,
+      },
+    )
+
     // The IDE can sign in or out on its own; adopting whatever its directory
     // currently holds keeps the pool in step without a manual rescan.
     void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
@@ -924,6 +973,26 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
         },
       },
+      {
+        id: 'step-code',
+        providerId: STEP_CODE_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = stepCodePreferences.status()
+          const accounts = await stepCodeAccountPool.listAccounts().catch(() => [])
+          // This line ships no model catalog at all (the official one is empty too),
+          // so the packaged size is 0 and catalogTotal reports "nothing synced yet"
+          // rather than a fabricated count; the real list is discovered at runtime.
+          const total = catalogTotal(stepCodeCatalogSize())
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
@@ -999,6 +1068,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       glmCodingPlanClaim.dispose()
       oauth.dispose()
       proxyManager.dispose()
+      disposeStepCodeRoutes()
+      stepCodeClaim.dispose()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -1506,6 +1577,71 @@ export {
   type MinimaxCodeWebLogin,
   type MinimaxCodeWebStatus,
 } from './shared/minimax-code-contracts.ts'
+
+// --- Step Code（Step Plan 订阅）---------------------------------------------------
+export {
+  StepCodeAdapter,
+  STEP_CODE_POOL_COOLDOWN_MS,
+  STEP_CODE_RETRY_POLICY_CONFIG,
+  cachedStepCodeModelCatalog,
+  readStepCodeCacheStats,
+  rememberStepCodeCacheUsage,
+  stepCodeCatalogSize,
+  stepCodeModelCatalogFrom,
+  type StepCodeAdapterOptions,
+  type StepCodePickedCredential,
+} from './host/step-code/adapter.ts'
+export {
+  StepCodeAccountPool,
+  StepCodeCredentialRefreshError,
+  stepCodePoolIdentity,
+  stepCodePoolPath,
+  stepCodePoolQuota,
+  stepCodePoolStatus,
+  stepCodePoolStatusSlice,
+  type StepCodePoolAccount,
+  type StepCodePoolStatus,
+} from './host/step-code/account-pool.ts'
+export {
+  getStepCodeStatus,
+  registerStepCodeRoutes,
+  stepCodeSettingsSource,
+  stepCodeSubPathOf,
+  type StepCodePoolSlice,
+  type StepCodeRouteOptions,
+  type StepCodeSettingsSource,
+  type StepCodeStatusSources,
+} from './host/step-code/routes.ts'
+export {
+  StepCodeCredentialStore,
+  StepCodeModelSettingsStore,
+  StepCodeQuotaCredentialStore,
+  credentialPath as stepCodeCredentialPath,
+  modelSettingsPath as stepCodeModelSettingsPath,
+  quotaCredentialPath as stepCodeQuotaCredentialPath,
+  registerStepCodePreferenceStore,
+  type StepCodeCredentials,
+  type StepCodeModelSettings,
+  type StepCodePreferenceStore,
+  type StepCodeQuotaCredential,
+  type StepCodeSettingsPatch,
+} from './host/step-code/token-store.ts'
+export {
+  STEP_CODE_PROVIDER_ID,
+  STEP_CODE_PROVIDER_NAME,
+  STEP_CODE_ROUTE_PREFIX,
+  STEP_CODE_PROFILES,
+  type StepCodeAccountSummaryDto,
+  type StepCodeAdoptResultDto,
+  type StepCodeCacheStatsDto,
+  type StepCodeConnectionDto,
+  type StepCodeLoginFlowStatus,
+  type StepCodeModelOption,
+  type StepCodeProfile,
+  type StepCodeQuotaSnapshotDto,
+  type StepCodeReasoningEffort,
+  type StepCodeStatusDto,
+} from './shared/step-code-contracts.ts'
 
 function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {
   return `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`

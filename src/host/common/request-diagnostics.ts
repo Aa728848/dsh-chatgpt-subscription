@@ -30,6 +30,9 @@ export const DIAGNOSTIC_PROVIDERS = [
   'codex',
   // 第九条线路：与 CONTROLLED_PROVIDERS 一样，「诊断里认识这条线路」是一条注册点。
   'glm-coding-plan',
+  // 第十条线路：Step Code（Step Plan 订阅）。同样是注册点——不写在这里，
+  // 本线路就静默失去 [provider-diagnostics] 日志与它的指纹/用量诊断。
+  'step-code',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]
