@@ -11,6 +11,7 @@ import {
   type OllamaWire,
 } from './types.ts'
 import type { OllamaCredentials } from './token-store.ts'
+import type { StreamActivity } from '../common/idle-watchdog.ts'
 
 /** One message on the wire, in either surface's shape. */
 export interface OllamaChatMessage {
@@ -291,6 +292,12 @@ export function startChat(
   credentials: OllamaCredentials,
   wire: OllamaWire,
   request: OllamaRequest,
+  /**
+   * Transport-level liveness reporter for a caller that wraps this stream in an
+   * idle watchdog. Optional: without it, heartbeats and status frames that
+   * produce no event stay invisible to the caller's timeout, exactly as before.
+   */
+  activity?: StreamActivity,
 ): OllamaCallResult {
   let resolveStatus: (status: number) => void = () => undefined
   let rejectStatus: (error: unknown) => void = () => undefined
@@ -326,7 +333,7 @@ export function startChat(
       yield { type: 'error', message: `Ollama request failed (${response.status}): ${detail}` }
       return
     }
-    yield* readStream(response, wire)
+    yield* readStream(response, wire, activity)
   })()
   return { events, status }
 }
@@ -341,7 +348,11 @@ async function safeErrorText(response: Response): Promise<string> {
 }
 
 /** Parse the SSE stream of either surface. */
-async function* readStream(response: Response, wire: OllamaWire): AsyncGenerator<OllamaStreamEvent> {
+async function* readStream(
+  response: Response,
+  wire: OllamaWire,
+  activity?: StreamActivity,
+): AsyncGenerator<OllamaStreamEvent> {
   const body = response.body
   if (body === null) return
   const decoder = new TextDecoder()
@@ -354,12 +365,18 @@ async function* readStream(response: Response, wire: OllamaWire): AsyncGenerator
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
+      // Transport received bytes, whether or not a parser turns them into an
+      // event: a heartbeat frame is proof the connection is alive.
+      if (value !== undefined && value.byteLength > 0) activity?.pulse()
       buffer += decoder.decode(value, { stream: true })
       let newline = buffer.indexOf('\n')
       while (newline !== -1) {
         const line = buffer.slice(0, newline).trim()
         buffer = buffer.slice(newline + 1)
         newline = buffer.indexOf('\n')
+        // One complete frame arrived. A ': ping' comment yields no event at all
+        // and must still re-time the watchdog.
+        if (line !== '') activity?.pulse()
         if (line === '' || !line.startsWith('data:')) continue
         const payload = line.slice(5).trim()
         if (payload === '' || payload === '[DONE]') continue

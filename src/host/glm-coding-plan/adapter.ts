@@ -41,7 +41,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import {
   offloadOldestRequestImages,
@@ -431,7 +431,7 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(options, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream(options, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -445,7 +445,11 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
    * 账号轮转的循环只有一处：一次 429 或一次 AUTH 会把那个账号移出本次请求，
    * 由另一个账号来发**同一份**请求体。没有池时这个循环只跑一次。
    */
-  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(
+    options: GenerateOptions,
+    signal: AbortSignal,
+    activity?: StreamActivity,
+  ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const settings = await this.settings()
     // 超大图片先换成占位文本；共用共享的预算机制，与兄弟线路同一份。
@@ -547,10 +551,16 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+          // 传输层收到字节就是连接还活着的证据：心跳帧不产生任何可展示 chunk，
+          // 计时判据因此下沉到传输层，而不是解析器是否产出。
+          if (value !== undefined && value.byteLength > 0) activity?.pulse()
           buffer += decoder.decode(value, { stream: true })
           const lines = buffer.split('\n')
           buffer = lines.pop() ?? ''
           for (const line of lines) {
+            // 每个完整帧各上报一次；纯注释帧（": ping" / ": keep-alive"）正是
+            // 展示层计时会误判成静默的那种。
+            activity?.pulse()
             for (const chunk of processGlmAnthropicStreamLine(line, state)) yield chunk
             if (state.finished) return
           }
@@ -579,10 +589,13 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
+        // 与 Anthropic 面同一套判据，见上。
+        if (value !== undefined && value.byteLength > 0) activity?.pulse()
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
         for (const line of lines) {
+          activity?.pulse()
           for (const chunk of processStreamLine(line, state)) yield chunk
           if (state.finished) return
         }

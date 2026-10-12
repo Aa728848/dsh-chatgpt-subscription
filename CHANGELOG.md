@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- **[九条线路] 空闲超时把「没有可展示内容」误判成「连接已死」，长时间思考或上游持续心跳时整轮被判 TIMEOUT**
+  - **问题（issue #52）**：流式线路的空闲看门狗只对「解析器 yield 出的 `StreamChunk`」复位。Codex 线路的 `wrapStreamWithWatchdog` 包在 `parseResponsesStream()` 外面，于是两类完全正常的流量会被判成 5 分钟静默：① 上游持续发 `response.in_progress` 这类状态帧——它们走完 mapper 后**不产出任何 chunk**；② reasoning summary 超过 12000 字符展示上限被截断后继续发送摘要——`visibleReasoningDelta()` 返回空文本，且不够 768 字符的 flush 水位。同一条误判存在于其余七条自建流的线路（antigravity / claude / command-code / minimax / glm / kimi / workbuddy / ollama）。
+  - **修法：把计时判据从「展示层产出」下沉到「传输层收到数据」。** 共享 seam `wrapStreamWithWatchdog` 新增可选第二参数 `StreamActivity`（`pulse()`），内部接 `@deepseek-ai/dsh-timeout` 的 `idleWatchdog.pulse()`——它只在 `next()` 挂起期间重新计时，正是「读操作在等、字节在到」这个场景。因为 TypeScript 里参数更少的函数可以赋值给参数更多的签名，历史单参调用点继续编译通过，八条线路因此各自独立接线、互不阻塞。每条线路在**两处**上报：`reader.read()` 返回非空字节时一次，每个完整 SSE 帧一次。第二处刻意放在 `data:` 过滤**之前**，所以 `: ping` / `: keep-alive` 这类纯注释心跳（Codex 解析器原本在 `data === ''` 处整个丢掉）同样算活动。**摘要上限与展示缓冲逐字未动**：截断只影响展示，不再影响活动判定，也没有生成任何假的界面文字。
+  - **Codex 线路另加可配置超时**：插件 Config 新增 `codexStreamIdleTimeoutMs`，默认仍是 300000，`min(1)` 且上限 `MAX_TIMER_DELAY_MS`——**0 不是关闭开关**，这条线是截止时间不是功能开关。该常量与 `pulse()` 在 `@deepseek-ai/dsh-timeout` 里自 0.1.2-alpha.5 起就存在（已核对该 tag 的源码），所以没有新增跨代兼容 seam。
+  - **测试**：新增 5 个文件、8 条线路各一例，全部不 mock `idle-watchdog`（要观察的正是它本身不肯触发）。每条线路的用例都是同一个实验：假响应体连续发送纯注释心跳帧、撑过数倍于空闲窗口的时间且**期间不产生任何可展示 chunk**，最后正常收尾——修复后必须正常完成，修复前必然 `stream idle timeout`。另各配一条反向用例：真正一个字节都不发时仍然抛 `TIMEOUT`，证明反向用例不是空转。摘要截断那一条显式断言 block-end 的 reasoning 仍含 `Reasoning summary truncated` 且长度 < 12100，排除「靠去掉上限过关」这条路。
+  - **变异验证（复审时独立重做）**：只把共享 seam 里 `pulse` 的实现置空（一处改动，不动任何线路），8 条线路的 12 条用例**全部**以真实 TIMEOUT 失败，反向静默用例仍通过；恢复后全绿。子代理另各自做过一次「注释掉本线路 `activity?.pulse()`」的变异，结论一致。
+  - **验证：`npx tsc -b --force` 0 错误；`npx tsc -p test/tsconfig.json` 0 错误；全量 `npx vitest run` 213 passed | 1 skipped（214 文件）、3448 passed | 7 skipped | 0 failed。** 本轮未复现历史记录里的 Windows host 端口保留类失败。
+  - **诚实声明：本轮全部为 mock SSE 验收，没有真实 ChatGPT 订阅账号参与。** 心跳形态只实测了 SSE 注释帧；「合法但被 mapper 丢弃的 `data:` 状态帧」由代码路径推断同样会 pulse（pulse 挂在每一帧上），但未单独构造该形态实测。issue 里并列出现的 `NGHTTP2_INTERNAL_ERROR` 属于 HTTP/2 传输层异常，本报告不声称本次改动能解决它。
+
 
 ## 0.19.1 - 2026-10-11
 - **[GLM（ZCode 账号）] 账号管理一行的三个按钮排不下，第三个被挤到下一行**

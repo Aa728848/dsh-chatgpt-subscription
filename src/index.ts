@@ -13,6 +13,8 @@ import { loadCodexCatalog } from './host/codex-catalog.ts'
 import { CodexAccountPool, codexAccountQuota } from './host/codex-account-pool.ts'
 import { createCodexFetchProvider } from './host/codex-fetch.ts'
 import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES } from './host/fetch-configuration.ts'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './host/common/idle-watchdog.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
@@ -188,6 +190,14 @@ export interface Config {
    * leave the built-in behaviour alone; the shipped defaults apply otherwise.
    */
   reasoningCollapseGuard?: GuardOptions | false
+  /**
+   * Idle budget for one Codex Responses stream, in milliseconds.
+   *
+   * Counted on transport activity rather than on visible chunks, so status
+   * frames and truncated reasoning keep the connection alive. `0` is not a
+   * disable switch: the floor is 1ms, and a real stall still times out.
+   */
+  codexStreamIdleTimeoutMs?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -203,6 +213,8 @@ export const Config: z<Config> = z.object({
   // than by a nested schema here, so one rule describes the numbers for both
   // the shipped defaults and a deployment's overrides. `false` opts out.
   reasoningCollapseGuard: z.union([z.object({}), z.const(false)]).default({}),
+  // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
+  codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
 })
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
@@ -665,6 +677,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       outputVerbosity: () => preferences.status().outputVerbosity,
       fastMode: () => preferences.status().fastMode,
       reasoningSummary: () => preferences.status().reasoningSummary,
+      codexStreamIdleTimeoutMs: pluginConfig.codexStreamIdleTimeoutMs,
     })
     // The live listing is the authority on what this plan serves; without a
     // credential the loader reports none and the shipped table stands in.

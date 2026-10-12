@@ -39,6 +39,7 @@ import {
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
   wrapStreamWithWatchdog,
+  type StreamActivity,
 } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 
@@ -187,7 +188,7 @@ export class OllamaAdapter extends LlmAdapter {
 
   async *stream(options: HarnessGenerateOptions): AsyncIterable<StreamChunk> {
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(options, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream(options, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -195,7 +196,7 @@ export class OllamaAdapter extends LlmAdapter {
     )
   }
 
-  private async *requestStream(rawOptions: HarnessGenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(rawOptions: HarnessGenerateOptions, signal: AbortSignal, activity?: StreamActivity): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const options = normalizeGenerateOptions(rawOptions)
     const wire = wireForModel(options.model)
@@ -245,7 +246,7 @@ export class OllamaAdapter extends LlmAdapter {
         credentials = effective.credentials
       }
 
-      const call = startChat(fetchFn, credentials, wire, { ...request, signal })
+      const call = startChat(fetchFn, credentials, wire, { ...request, signal }, activity)
       const state = createStreamState()
       let opened = false
       let openedStatus: number | undefined

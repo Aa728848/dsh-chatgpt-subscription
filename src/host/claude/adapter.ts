@@ -194,7 +194,7 @@ import {
 } from './mapper.ts'
 import { ClaudeUnauthorizedError, ensureAccessToken, type ClaudeTokenStore } from './oauth.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 
 /**
  * Transient-failure retry policy for the `claude-subscription` route.
@@ -534,7 +534,7 @@ export class ClaudeAdapter extends LlmAdapter {
     // but active generation is not cut off by a wall-clock cap, and a stalled one
     // becomes a TIMEOUT rather than a hang.
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(options, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream(options, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -689,7 +689,7 @@ export class ClaudeAdapter extends LlmAdapter {
     }
   }
 
-  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(options: GenerateOptions, signal: AbortSignal, activity?: StreamActivity): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
@@ -790,10 +790,16 @@ export class ClaudeAdapter extends LlmAdapter {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+          // Transport received bytes, whether or not a parser turns them into a
+          // visible chunk: a heartbeat frame is proof the connection is alive.
+          if (value !== undefined && value.byteLength > 0) activity?.pulse()
           buffer += decoder.decode(value, { stream: true })
           const lines = buffer.split('\n')
           buffer = lines.pop() ?? ''
           for (const line of lines) {
+            // One complete frame arrived. A ': ping' comment yields no chunk at
+            // all and must still re-time the watchdog.
+            if (line.trim() !== '') activity?.pulse()
             for (const chunk of processStreamLine(line, state)) {
               outputStarted = true
               yield chunk

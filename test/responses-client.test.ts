@@ -515,3 +515,100 @@ async function collect(iterable: AsyncIterable<StreamChunk>): Promise<StreamChun
   for await (const chunk of iterable) result.push(chunk)
   return result
 }
+
+describe('Codex idle watchdog counts transport activity', () => {
+  // 复现 issue #52：看门狗的 5 分钟计时曾包在解析器外面，只对 yield 出的 chunk
+  // 复位。上游持续发状态帧、或摘要被 12000 字符上限截断后继续发包时，解析器什么都不
+  // yield，一条活着的连接就被当成静默。这里把阈值缩到 250ms 级让缺陷在测试里显形，
+  // 生产默认值仍然是 300000。
+  const IDLE_BUDGET_MS = 250
+  const FRAME_GAP_MS = 60
+
+  /** 把若干 SSE 帧按固定间隔推入，第一帧立即到达，之后每帧间隔远小于阈值。 */
+  function pacedStream(frames: string[], gapMs: number = FRAME_GAP_MS): Response {
+    const encoder = new TextEncoder()
+    return new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const [index, frame] of frames.entries()) {
+          if (index > 0) await new Promise((resolve) => setTimeout(resolve, gapMs))
+          controller.enqueue(encoder.encode(frame))
+        }
+        controller.close()
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } })
+  }
+
+  function frame(event: unknown): string {
+    return `data: ${JSON.stringify(event)}\n\n`
+  }
+
+  async function clientFor(response: Response): Promise<ResponsesClient> {
+    const store = new MemoryTokenStore()
+    await store.save({
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      expiresAt: Date.now() + 3_600_000,
+    })
+    const fetchFn = vi.fn(async () => response)
+    return new ResponsesClient(
+      new OAuthService(store),
+      { readImage: async () => { throw new Error('unused') } },
+      { fetchFn: fetchFn as unknown as typeof fetch, codexStreamIdleTimeoutMs: IDLE_BUDGET_MS },
+    )
+  }
+
+  function requestOptions(): GenerateOptions {
+    return {
+      provider: 'codex-chatgpt',
+      model: 'gpt-6-sol',
+      sessionId: 'conversation-1',
+      messages: [{ role: 'user', content: 'hi' }],
+    } as unknown as GenerateOptions
+  }
+
+  it('finishes normally when only status frames arrive and nothing is displayable', async () => {
+    const frames = Array.from({ length: 8 }, () => frame({ type: 'response.in_progress' }))
+    frames.push(frame({ type: 'response.completed', response: {} }))
+    const client = await clientFor(pacedStream(frames))
+
+    const chunks = await collect(client.stream(requestOptions()))
+
+    // 整个流的时长（约 480ms）超过阈值，但每一帧都证明连接活着。
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('finishes normally when reasoning was truncated and summaries keep arriving', async () => {
+    const frames = [frame({ type: 'response.reasoning_summary_text.delta', delta: 'x'.repeat(13_000) })]
+    // 截断之后每个 delta 都不再产出可见 chunk，只有 block-end 才有内容。
+    for (let index = 0; index < 6; index += 1) {
+      frames.push(frame({ type: 'response.reasoning_summary_text.delta', delta: 'y'.repeat(200) }))
+    }
+    frames.push(frame({ type: 'response.in_progress' }))
+    frames.push(frame({ type: 'response.completed', response: {} }))
+    const client = await clientFor(pacedStream(frames))
+
+    const chunks = await collect(client.stream(requestOptions()))
+
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    // 证明修的是「接收层活动」而不是去掉摘要上限：截断行为原样保留。
+    const end = chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'reasoning')
+    const text = end?.type === 'block-end' && end.block.type === 'reasoning' ? end.block.text : ''
+    expect(text).toContain('Reasoning summary truncated')
+    expect(text.length).toBeLessThan(12_100)
+  })
+
+  it('still reports TIMEOUT when no frame arrives at all', async () => {
+    // 反向护栏：连接真的死了就必须超时，不能因为放宽计时而永远挂着。
+    const silent = new Response(new ReadableStream<Uint8Array>({ start() { /* 什么都不发，也不关闭 */ } }), {
+      headers: { 'content-type': 'text/event-stream' },
+    })
+    const client = await clientFor(silent)
+
+    const failure = await collectFailure(async () => {
+      for await (const chunk of client.stream(requestOptions())) expect(chunk).toBeDefined()
+    })
+
+    expect(failure.code).toBe('TIMEOUT')
+    expect(failure.message).toContain(`stream idle timeout after ${IDLE_BUDGET_MS}ms`)
+  })
+})

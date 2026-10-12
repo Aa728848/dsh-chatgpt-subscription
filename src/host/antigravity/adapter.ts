@@ -33,7 +33,7 @@ import {
   type AttachmentImageReader,
 } from './mapper.ts'
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { recordCacheRequest, recordCacheUsage } from './cache-stats.ts'
 
 export function resolveDefaultReasoningEffort(
@@ -185,7 +185,7 @@ export class AntigravityAdapter extends LlmAdapter {
       : options
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream({ ...effectiveOptions, maxTokens: options.maxTokens ?? model.maxTokens }, model, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream({ ...effectiveOptions, maxTokens: options.maxTokens ?? model.maxTokens }, model, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -197,6 +197,7 @@ export class AntigravityAdapter extends LlmAdapter {
     options: GenerateOptions,
     model: AntigravityModelDef,
     signal: AbortSignal,
+    activity?: StreamActivity,
   ): AsyncIterable<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const effort = String(options.reasoningEffort || 'medium').toLowerCase()
@@ -342,6 +343,9 @@ export class AntigravityAdapter extends LlmAdapter {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
+        // Transport received bytes, whether or not a parser turns them into a
+        // visible chunk: a heartbeat frame is proof the connection is alive.
+        if (value !== undefined && value.byteLength > 0) activity?.pulse()
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
@@ -349,6 +353,9 @@ export class AntigravityAdapter extends LlmAdapter {
         for (const line of lines) {
           const trimmed = line.trim()
           if (!trimmed) continue
+          // One complete frame arrived. A ': ping' comment yields no chunk at
+          // all and must still re-time the watchdog.
+          activity?.pulse()
           const chunks = processStreamLine(trimmed, state)
           for (const chunk of chunks) {
             recordUsageChunk(chunk, statsSessionId, statsAccountId)

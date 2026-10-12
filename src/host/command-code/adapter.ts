@@ -57,7 +57,7 @@ import {
 } from './mapper.ts'
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { reclassifyInBandError, reclassifyInBandResponsesError } from '../common/stream-error.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import { requireCapability } from '../common/capabilities.ts'
 
@@ -378,7 +378,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       : { ...effectiveOptions, reasoningEffort: undefined }
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(resolvedOptions, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream(resolvedOptions, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -386,7 +386,7 @@ export class CommandCodeAdapter extends LlmAdapter {
     )
   }
 
-  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(options: GenerateOptions, signal: AbortSignal, activity?: StreamActivity): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
 
     // The provider's listing states which endpoint serves this model, and the
@@ -608,10 +608,16 @@ export class CommandCodeAdapter extends LlmAdapter {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+          // Transport received bytes, whether or not a parser turns them into a
+          // visible chunk: a heartbeat frame is proof the connection is alive.
+          if (value !== undefined && value.byteLength > 0) activity?.pulse()
           buffer += decoder.decode(value, { stream: true })
           const lines = buffer.split('\n')
           buffer = lines.pop() ?? ''
           for (const line of lines) {
+            // One complete frame arrived. A ': ping' comment yields no chunk at
+            // all and must still re-time the watchdog.
+            if (line.trim() !== '') activity?.pulse()
             for (const chunk of processLine(line, state, wire)) {
               outputStarted = true
               yield chunk

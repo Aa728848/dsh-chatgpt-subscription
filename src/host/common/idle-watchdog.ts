@@ -16,11 +16,25 @@ export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 export const STREAM_IDLE_TIMEOUT_MS = DEFAULT_STREAM_IDLE_TIMEOUT_MS
 
 /**
+ * 传输层活动上报器。
+ *
+ * 计时以「收到传输层数据」为判据，而不是「解析器是否 yield 了可展示片段」：
+ * 业务过滤、展示缓冲、摘要截断都只影响展示，不改变连接是否活着。
+ */
+export interface StreamActivity {
+  /** 上报一次不产生消费端可见 chunk 的传输活动，用于重新计时。 */
+  pulse(): void
+}
+
+/** 看门狗包裹的流工厂：第二个参数可选，旧的单参调用点仍然合法。 */
+export type WatchdogSource<T> = (signal: AbortSignal, activity: StreamActivity) => AsyncIterable<T>
+
+/**
  * 为异步流包裹可复位的空闲超时看门狗。
  * 当流式 chunk 产出之间的间隔超过指定阈值时，主动终止并抛出带有 TIMEOUT 的 LlmError。
  */
 export async function* wrapStreamWithWatchdog<T>(
-  source: (signal: AbortSignal) => AsyncIterable<T>,
+  source: WatchdogSource<T>,
   upstreamSignal: AbortSignal | undefined,
   timeoutMs: number = DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   timeoutCode: string = STREAM_IDLE_TIMEOUT_CODE,
@@ -31,7 +45,10 @@ export async function* wrapStreamWithWatchdog<T>(
     ? consumer.signal
     : AbortSignal.any([upstreamSignal, consumer.signal])
   const watchdog = idleWatchdog(upstream, timeoutMs, timeoutCode)
-  const iterator = source(watchdog.signal)[Symbol.asyncIterator]()
+  // 参数更少的函数可以赋值给参数更多的签名，所以历史单参调用点继续编译通过，
+  // 而需要区分「传输有数据」与「有可展示 chunk」的线路可以接住 activity。
+  const activity: StreamActivity = { pulse: () => { watchdog.pulse() } }
+  const iterator = source(watchdog.signal, activity)[Symbol.asyncIterator]()
 
   let exhausted = false
   try {

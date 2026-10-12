@@ -52,7 +52,7 @@ import {
   type AttachmentImageReader,
 } from './mapper.ts'
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import type { WorkBuddyCredentials } from './token-store.ts'
 import type { WorkBuddyAccountPool } from './account-pool.ts'
@@ -254,7 +254,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
       : { ...options, reasoningEffort: ReasoningEffortId(effort) }
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(effectiveOptions, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream(effectiveOptions, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -292,7 +292,11 @@ export class WorkBuddyAdapter extends LlmAdapter {
     return candidates.find((candidate): candidate is string => candidate !== undefined && efforts.includes(candidate))
   }
 
-  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(
+    options: GenerateOptions,
+    signal: AbortSignal,
+    activity?: StreamActivity,
+  ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
@@ -403,10 +407,17 @@ export class WorkBuddyAdapter extends LlmAdapter {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
+        // Bytes on the wire are the liveness signal: a heartbeat or status frame
+        // that produces no displayable chunk still proves the connection is alive,
+        // so the timer is reset at the transport layer, not at the parser.
+        if (value !== undefined && value.byteLength > 0) activity?.pulse()
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
         for (const line of lines) {
+          // One pulse per complete frame; a pure comment frame (": ping",
+          // ": keep-alive") is exactly what the display-layer timer misread as silence.
+          activity?.pulse()
           for (const chunk of processStreamLine(line, state)) yield chunk
           if (state.finished) return
         }

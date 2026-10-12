@@ -143,7 +143,7 @@ function countOmitted(
   return Math.max(0, before - after)
 }
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import {
   inBandAnthropicStatus,
   reclassifyInBandError,
@@ -638,7 +638,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(effectiveOptions, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream(effectiveOptions, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -646,7 +646,11 @@ export class KimiCodeAdapter extends LlmAdapter {
     )
   }
 
-  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(
+    options: GenerateOptions,
+    signal: AbortSignal,
+    activity?: StreamActivity,
+  ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
 
     const catalog = await this.catalog().catch(() => [])
@@ -895,10 +899,17 @@ export class KimiCodeAdapter extends LlmAdapter {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+          // Bytes on the wire are the liveness signal: a heartbeat or status frame
+          // that produces no displayable chunk still proves the connection is alive,
+          // so the timer is reset at the transport layer, not at the parser.
+          if (value !== undefined && value.byteLength > 0) activity?.pulse()
           buffer += decoder.decode(value, { stream: true })
           const lines = buffer.split('\n')
           buffer = lines.pop() ?? ''
           for (const line of lines) {
+            // One pulse per complete frame; a pure comment frame (": ping",
+            // ": keep-alive") is exactly what the display-layer timer misread as silence.
+            activity?.pulse()
             for (const chunk of processLine(line, state, wire)) {
               outputStarted = true
               yield chunk

@@ -86,7 +86,7 @@ import { agentBaseUrl } from './types.ts'
 import { fileRef, uploadMediaFile } from './files-api.ts'
 import type { MinimaxCodeAccountPool } from './account-pool.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
-import { wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
+import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 
 /**
@@ -766,7 +766,7 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal) => this.requestStream(effectiveOptions, watchdogSignal),
+      (watchdogSignal, activity) => this.requestStream(effectiveOptions, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -774,7 +774,11 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     )
   }
 
-  private async *requestStream(options: GenerateOptions, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *requestStream(
+    options: GenerateOptions,
+    signal: AbortSignal,
+    activity?: StreamActivity,
+  ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const settings = await this.settings()
     const entry = minimaxCodeModelDef(options.model)
@@ -1138,10 +1142,18 @@ export class MinimaxCodeAdapter extends LlmAdapter {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+          // Bytes on the wire are the liveness signal: a heartbeat or status frame
+          // that produces no displayable chunk still proves the connection is alive,
+          // so the timer is reset at the transport layer, not at the parser.
+          if (value !== undefined && value.byteLength > 0) activity?.pulse()
           buffer += decoder.decode(value, { stream: true })
           const lines = buffer.split('\n')
           buffer = lines.pop() ?? ''
           for (const line of lines) {
+            // One pulse per complete frame; `lines` holds only frames already closed
+            // by a newline, and a pure comment frame (": ping", ": keep-alive") is
+            // exactly the case the display-layer timer used to misread as silence.
+            activity?.pulse()
             for (const chunk of processMinimaxStreamLine(line, state)) {
               outputStarted = true
               yield chunk

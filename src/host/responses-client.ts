@@ -13,7 +13,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL } from '../compat.ts'
 import { resolveCodexFallbackModel } from '../shared/model-catalog.ts'
-import { wrapStreamWithWatchdog } from './common/idle-watchdog.ts'
+import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from './common/idle-watchdog.ts'
 import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
@@ -46,6 +46,12 @@ export interface ResponsesClientOptions {
   reasoningSummary?: () => CodexReasoningSummary | null
   /** Account pool to rotate over; without one the single stored credential is used. */
   accountPool?: CodexAccountPool
+  /**
+   * Idle budget for one Responses stream, counted on transport activity rather
+   * than on visible chunks. Defaults to the shared five-minute budget; the
+   * plugin config exposes it so a deployment can retune it without a rebuild.
+   */
+  codexStreamIdleTimeoutMs?: number
 }
 
 export class ResponsesClient {
@@ -55,6 +61,7 @@ export class ResponsesClient {
   private readonly fastMode: () => boolean
   private readonly reasoningSummary: () => CodexReasoningSummary | null
   private readonly accountPool: CodexAccountPool | null
+  private readonly codexStreamIdleTimeoutMs: number
   /**
    * Opaque backend routing state, keyed by a unique model-request nonce.
    * The host does not expose a reliable human-turn identity, so this is the
@@ -84,6 +91,7 @@ export class ResponsesClient {
     this.fastMode = options.fastMode ?? (() => false)
     this.reasoningSummary = options.reasoningSummary ?? (() => null)
     this.accountPool = options.accountPool ?? null
+    this.codexStreamIdleTimeoutMs = options.codexStreamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
   }
 
   private readonly localRawImages: LocalRawImageOptions
@@ -132,9 +140,12 @@ export class ResponsesClient {
 
     try {
       yield* wrapStreamWithWatchdog(
-        (watchdogSignal) => parseResponsesStream(response!, watchdogSignal, hiddenSandboxControls),
+        // The parser sees transport activity the watchdog cannot see on its own:
+        // status frames and truncated reasoning deltas keep the connection alive
+        // without producing a visible chunk, and used to look like a silent one.
+        (watchdogSignal, activity) => parseResponsesStream(response!, watchdogSignal, hiddenSandboxControls, activity),
         options.signal,
-        300_000,
+        this.codexStreamIdleTimeoutMs,
         'LLM_STREAM_IDLE_TIMEOUT',
         'Codex',
       )
@@ -425,6 +436,8 @@ export async function* parseResponsesStream(
   response: Response,
   signal?: AbortSignal,
   hiddenSandboxControls: ReadonlySet<string> = new Set(),
+  /** Reports transport activity so a caller-side idle watchdog keeps rearming. */
+  activity?: StreamActivity,
 ): AsyncIterable<StreamChunk> {
   if (response.body === null) throw new LlmError('Codex returned no response stream.', 'PROVIDER_ERROR')
   const reader = response.body.getReader()
@@ -612,10 +625,17 @@ export async function* parseResponsesStream(
       if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
       const { done, value } = await reader.read()
       if (done) break
+      // Bytes arriving at all prove the connection is alive, whatever the parser
+      // makes of them; a byte-less read is not evidence of anything.
+      if (value !== undefined && value.byteLength > 0) activity?.pulse()
       buffer += decoder.decode(value, { stream: true })
       const frames = buffer.split(/\r?\n\r?\n/)
       buffer = frames.pop() ?? ''
       for (const frame of frames) {
+        // Counted per complete frame, before the `data:` filter below: a bare
+        // comment heartbeat such as `: ping` yields no payload and is filtered
+        // out, yet it is the clearest possible proof the upstream is still there.
+        activity?.pulse()
         const data = frame.split(/\r?\n/)
           .filter((line) => line.startsWith('data:'))
           .map((line) => line.slice(5).trimStart())
