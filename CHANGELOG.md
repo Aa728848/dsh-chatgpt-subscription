@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.20.0 - 2026-10-12
 - **[MiniMax Code] 新增「限额重置卡」：查看可用卡与近 30 天流水，选卡确认后重置套餐限额**
   - **能力来源**：MiniMax 官方桌面端 v3.1.1（2026-10-04）起提供「限额重置」——订阅用户可在用量页查看可用重置卡与近 30 天获得/使用记录，**选择一张卡并确认后**重置对应限额。本插件复刻它，接同一组上游接口。
   - **上游事实（用真实账号实测确证，非推测）**：`GET /backend/account/reset_card/list`（可用卡）、`GET /backend/account/reset_card/flows`（流水）、`POST /backend/account/reset_card/use`（消费）。主机是插件**已在用**的 `api.minimax.cn` / `api.minimaxi.com`（即 `QUOTA_HOST_CANDIDATES`），认证是**现有**的 `Authorization: Bearer`。不需要新主机、不需要签名头、不需要新认证方式。
@@ -16,7 +18,6 @@
   - **诚实声明：没有跑过真实消费。** 全部 `/use` 路径都是 mock 验收——真实消费会消耗用户真实的重置卡，本轮刻意不做。`list`/`flows` 的响应形状是用真实账号只读实测过的。
   - **遗留项（既有问题，非本次引入）**：`QUOTA_HOST_CANDIDATES.global` 只有一个候选 `api.minimax.io`，而该主机对国区凭据返回 401。国际区账号的可用主机仍未实测——这与本线路既有的配额读取是同一个未解问题。
 
-## 0.19.2 - 2026-10-12
 - **[九条线路] 空闲超时把「没有可展示内容」误判成「连接已死」，长时间思考或上游持续心跳时整轮被判 TIMEOUT**
   - **问题（issue #52）**：流式线路的空闲看门狗只对「解析器 yield 出的 `StreamChunk`」复位。Codex 线路的 `wrapStreamWithWatchdog` 包在 `parseResponsesStream()` 外面，于是两类完全正常的流量会被判成 5 分钟静默：① 上游持续发 `response.in_progress` 这类状态帧——它们走完 mapper 后**不产出任何 chunk**；② reasoning summary 超过 12000 字符展示上限被截断后继续发送摘要——`visibleReasoningDelta()` 返回空文本，且不够 768 字符的 flush 水位。同一条误判存在于其余八条自建流的线路（antigravity / claude / command-code / minimax / glm / kimi / workbuddy / ollama），共九条。
   - **修法：把计时判据从「展示层产出」下沉到「传输层收到数据」。** 共享 seam `wrapStreamWithWatchdog` 新增可选第二参数 `StreamActivity`（`pulse()`），内部接 `@deepseek-ai/dsh-timeout` 的 `idleWatchdog.pulse()`——它只在 `next()` 挂起期间重新计时，正是「读操作在等、字节在到」这个场景。因为 TypeScript 里参数更少的函数可以赋值给参数更多的签名，历史单参调用点继续编译通过，八条线路因此各自独立接线、互不阻塞。每条线路在**两处**上报：`reader.read()` 返回非空字节时一次，每个完整 SSE 帧一次。第二处刻意放在 `data:` 过滤**之前**，所以 `: ping` / `: keep-alive` 这类纯注释心跳（Codex 解析器原本在 `data === ''` 处整个丢掉）同样算活动。**摘要上限与展示缓冲逐字未动**：截断只影响展示，不再影响活动判定，也没有生成任何假的界面文字。
