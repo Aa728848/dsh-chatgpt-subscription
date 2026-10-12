@@ -905,23 +905,21 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         },
       },
       {
-        // Ollama has no enable switch — a key line is always servable — so its
-        // card renders no toggle and always reports enabled.
         id: 'ollama',
         providerId: OLLAMA_PROVIDER_ID,
-        canToggle: false,
+        canToggle: true,
         read: async () => {
           const accounts = await ollamaAccountPool.listAccounts().catch(() => [])
-          const current = ollamaModelSettings.status()
+          const current = await ollamaModelSettings.read()
           const total = catalogTotal(current.catalogModels.length)
-          // An empty selection on this line means "every synced model", not
-          // "none": reporting its length raw would show 0 of 12 enabled.
-          const enabled = current.enabledModelIds.length === 0 ? total : current.enabledModelIds.length
+          // The selection is a tri-state: null is "no filter" (every synced
+          // model), an array is explicit — and an empty one switches all off.
+          const selected = current.enabledModelIds === null ? total : current.enabledModelIds.length
           return {
-            enabled: true,
+            enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
-            enabledModelCount: total === null ? null : Math.min(enabled ?? 0, total),
+            enabledModelCount: total === null || selected === null ? null : Math.min(selected, total),
             totalModelCount: total,
           }
         },

@@ -43,14 +43,14 @@ export function OllamaSection(props: Props): React.ReactElement {
   const [key, setKey] = useState('')
   const [alias, setAlias] = useState('')
   const [showKeyForm, setShowKeyForm] = useState(false)
-  /** Ids the user has switched on. Empty means 'no filter', i.e. all of them. */
-  const [enabled, setEnabled] = useState<Set<string>>(new Set())
+  /** Ids the user has switched on. Null means 'no filter', i.e. all of them. */
+  const [enabled, setEnabled] = useState<Set<string> | null>(null)
 
   const reload = useCallback(async () => {
     try {
       const next = await API.status()
       setStatus(next)
-      setEnabled(new Set(next.enabledModelIds))
+      setEnabled(next.enabledModelIds == null ? null : new Set(next.enabledModelIds))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -98,38 +98,44 @@ export function OllamaSection(props: Props): React.ReactElement {
     })
   }, [run])
 
-  // An empty selection means 'everything the catalog returned', which is what the
-  // adapter reads as no filter. Modelling it that way rather than storing an
-  // explicit all-ids list means a model the service adds later is not silently
-  // hidden by a selection made before it existed.
+  // A null selection means 'everything the catalog returned', which is what the
+  // adapter reads as no filter. Modelling 'all' as null rather than an explicit
+  // all-ids list means a model the service adds later is not silently hidden by
+  // a selection made before it existed. An array is an explicit selection, and
+  // an empty one switches every model off.
   const isModelEnabled = useCallback((id: string): boolean => {
-    return enabled.size === 0 || enabled.has(id)
+    return enabled === null || enabled.has(id)
   }, [enabled])
 
-  const applyEnabled = useCallback((next: string[]) => {
+  const applyEnabled = useCallback((next: string[] | null) => {
     void run('models', async () => {
       const result = await API.setEnabledModels(next)
-      setEnabled(new Set(result.enabledModelIds))
+      setEnabled(result.enabledModelIds == null ? null : new Set(result.enabledModelIds))
       return API.status()
     })
   }, [run])
 
   const toggleModel = useCallback((id: string, checked: boolean) => {
     if (status === null) return
-    const current = status.models.filter(model => isModelEnabled(model.id)).map(model => model.id)
+    const all = status.models ?? []
+    const current = all.filter(model => isModelEnabled(model.id)).map(model => model.id)
     const next = checked
       ? [...new Set([...current, id])]
       : current.filter(entry => entry !== id)
-    applyEnabled(next)
+    // Covering the whole list is stored as null, so 'all' keeps tracking the
+    // catalog instead of freezing at the list that happened to be complete.
+    applyEnabled(next.length === all.length ? null : next)
   }, [status, isModelEnabled, applyEnabled])
 
   const setAllModels = useCallback((selectAll: boolean) => {
-    if (status === null || status.models.length === 0) return
-    applyEnabled(selectAll ? status.models.map(model => model.id) : [])
-  }, [status, applyEnabled])
+    applyEnabled(selectAll ? null : [])
+  }, [applyEnabled])
 
   const t = zh
   const pool = status?.pool
+  // A partial status payload (a host build whose action answer is not the full
+  // status) must degrade to empty blocks, never crash the settings page.
+  const models = status?.models ?? []
 
   return (
     <div>
@@ -231,21 +237,21 @@ export function OllamaSection(props: Props): React.ReactElement {
         </div>
         <p className="dsha-muted" style={{ fontSize: 12 }}>{t.modelsHint}</p>
         <p className="dsha-muted" style={{ fontSize: 12 }}>{t.wireNote}</p>
-        {status !== null && status.models.length === 0 && (
+        {status !== null && models.length === 0 && (
           <div className="dsha-empty">
             {status.catalogSynced ? t.catalogEmpty : t.catalogNeverSynced}
           </div>
         )}
-        {status !== null && status.models.length === 0 && !status.usable && (
+        {status !== null && models.length === 0 && !status.usable && (
           <p className="dsha-muted" style={{ fontSize: 12 }}>{t.catalogNeedKey}</p>
         )}
-        {status !== null && status.models.length > 0 && (
+        {status !== null && models.length > 0 && (
           <>
             <p className="dsha-muted" style={{ fontSize: 12 }}>
-              {t.modelCount.replace('{count}', String(status.models.length))}
+              {t.modelCount.replace('{count}', String(models.length))}
             </p>
             <ModelChecklist
-              items={status.models.map((model) => ({
+              items={models.map((model) => ({
                 id: model.id,
                 name: model.name ?? model.id,
                 enabled: isModelEnabled(model.id),

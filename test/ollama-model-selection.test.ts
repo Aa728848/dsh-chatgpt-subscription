@@ -7,7 +7,7 @@ import { PROVIDER_ID } from '../src/host/ollama/types.ts'
  * settings page draws. These build a real adapter over a fixed catalog and read
  * the list back, which is the list the model picker consumes.
  */
-function adapter(enabledModelIds: string[], catalog = ['gpt-oss:120b-cloud', 'gemma4:31b']) {
+function adapter(enabledModelIds: string[] | null, catalog = ['gpt-oss:120b-cloud', 'gemma4:31b']) {
   const settings = {
     enabled: true,
     enabledModelIds,
@@ -32,10 +32,10 @@ function adapter(enabledModelIds: string[], catalog = ['gpt-oss:120b-cloud', 'ge
 
 describe('Ollama model selection', () => {
   it('offers every catalogued model when nothing has been deselected', async () => {
-    // An empty selection means 'no filter'. Storing an explicit all-ids list
+    // A null selection means 'no filter'. Storing an explicit all-ids list
     // instead would hide any model the service adds after the selection was made,
     // and the user would have no way to see the new one.
-    const models = await adapter([]).listModels()
+    const models = await adapter(null).listModels()
     expect(models.map(m => m.id)).toEqual(['gpt-oss:120b-cloud', 'gemma4:31b'])
   })
 
@@ -47,14 +47,16 @@ describe('Ollama model selection', () => {
   })
 
   it('offers nothing once every model is deselected', async () => {
-    // Distinct from 'no filter': a user who unchecks all has switched the line
-    // off, and must not get every model back.
-    const models = await adapter(['gpt-oss:120b-cloud']).listModels()
-    expect(models.map(m => m.id)).toEqual(['gpt-oss:120b-cloud'])
+    // An empty array is an explicit 'none', distinct from null's 'no filter':
+    // a user who unchecks every model has switched the line off and must not
+    // get the whole catalog back. Before the tri-state this read as 'all',
+    // which is what made the card's clear-all snap back to all-checked.
+    const models = await adapter([]).listModels()
+    expect(models).toHaveLength(0)
   })
 
   it('reports the provider id DSH registers the line under', async () => {
-    const models = await adapter([]).listModels()
+    const models = await adapter(null).listModels()
     expect(models[0]?.provider).toBe(PROVIDER_ID)
   })
 
@@ -65,7 +67,7 @@ describe('Ollama model selection', () => {
     // guess about what an account owns - and a guess in the picker is a model a
     // user selects and then fails on. Nothing is the honest answer before the
     // first /api/tags call, and the card tells the user to sync instead.
-    const models = await adapter([], []).listModels()
+    const models = await adapter(null, []).listModels()
     expect(models).toHaveLength(0)
   })
 })

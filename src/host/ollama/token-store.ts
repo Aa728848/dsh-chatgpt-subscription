@@ -33,7 +33,12 @@ export interface OllamaCredentials {
 
 export interface OllamaModelSettings {
   enabled: boolean
-  enabledModelIds: string[]
+  /**
+   * The user's model filter: null is "no filter" — every catalogued model,
+   * including ones a later sync adds. An array is an explicit selection, and
+   * an empty one switches every model off.
+   */
+  enabledModelIds: string[] | null
   catalogModels: OllamaCatalogModel[]
   defaultReasoningEffort: string | null
 }
@@ -42,7 +47,7 @@ export interface OllamaPreferenceStore {
   status(): OllamaModelSettings
   update(patch: {
     enabled?: boolean
-    enabledModelIds?: string[]
+    enabledModelIds?: string[] | null
     defaultReasoningEffort?: string | null
   }): Promise<OllamaModelSettings>
 }
@@ -130,6 +135,22 @@ export class FileCredentialStore {
 }
 
 /**
+ * The selection as one settings file means it. Version 2 stores the tri-state
+ * as-is; a file from before then could not say "none" at all — its empty array
+ * was the untouched default, so it is read as "no filter", the behaviour it
+ * always had.
+ */
+function readEnabledModelIds(record: Record<string, unknown>): string[] | null {
+  const value = record.enabledModelIds
+  if (record.version === 2) {
+    if (!Array.isArray(value)) return null
+    return value.filter((id): id is string => typeof id === 'string')
+  }
+  if (!Array.isArray(value) || value.length === 0) return null
+  return value.filter((id): id is string => typeof id === 'string')
+}
+
+/**
  * Model settings, bound to the DSH settings document when the harness offers one
  * and to a JSON file beside it otherwise.
  */
@@ -144,7 +165,7 @@ export class FileModelSettingsStore implements OllamaPreferenceStore {
   }
 
   status(): OllamaModelSettings {
-    return this.cached ?? { enabled: true, enabledModelIds: [], catalogModels: [], defaultReasoningEffort: null }
+    return this.cached ?? { enabled: true, enabledModelIds: null, catalogModels: [], defaultReasoningEffort: null }
   }
 
   async read(): Promise<OllamaModelSettings> {
@@ -162,9 +183,7 @@ export class FileModelSettingsStore implements OllamaPreferenceStore {
       const parsed = JSON.parse(content) as unknown
       if (typeof parsed === 'object' && parsed !== null) {
         const record = parsed as Record<string, unknown>
-        const enabledModels = Array.isArray(record.enabledModelIds)
-          ? record.enabledModelIds.filter((id): id is string => typeof id === 'string')
-          : []
+        const enabledModels = readEnabledModelIds(record)
         const catalogModels = Array.isArray(record.catalogModels)
           ? record.catalogModels.filter((entry): entry is OllamaCatalogModel =>
             typeof entry === 'object' && entry !== null && typeof (entry as OllamaCatalogModel).id === 'string')
@@ -182,27 +201,30 @@ export class FileModelSettingsStore implements OllamaPreferenceStore {
     } catch {
       // No settings yet: the defaults above are the honest empty state.
     }
-    this.cached = { enabled: true, enabledModelIds: [], catalogModels: [], defaultReasoningEffort: null }
+    this.cached = { enabled: true, enabledModelIds: null, catalogModels: [], defaultReasoningEffort: null }
     return this.cached
   }
 
   async write(settings: OllamaModelSettings): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true })
     const tmp = `${this.filePath}.tmp.${Date.now()}`
-    await fs.writeFile(tmp, JSON.stringify(settings, null, 2), 'utf8')
+    // The version marker is what lets a future read tell a stored "none"
+    // ([]) apart from a pre-tri-state file, whose empty array meant "no filter".
+    await fs.writeFile(tmp, JSON.stringify({ version: 2, ...settings }, null, 2), 'utf8')
     await fs.rename(tmp, this.filePath)
     this.cached = settings
   }
 
   async update(patch: {
     enabled?: boolean
-    enabledModelIds?: string[]
+    enabledModelIds?: string[] | null
     defaultReasoningEffort?: string | null
   }): Promise<OllamaModelSettings> {
     const current = await this.read()
     const next: OllamaModelSettings = {
       enabled: patch.enabled ?? current.enabled,
-      enabledModelIds: patch.enabledModelIds ?? current.enabledModelIds,
+      // Null is a real value here ("no filter"), not an absent patch.
+      enabledModelIds: patch.enabledModelIds !== undefined ? patch.enabledModelIds : current.enabledModelIds,
       catalogModels: current.catalogModels,
       defaultReasoningEffort: patch.defaultReasoningEffort === undefined
         ? current.defaultReasoningEffort

@@ -109,6 +109,11 @@ function fakeRequest(input: {
       deliver(event, listener)
       return request
     },
+    // readRequestJson consumes the request with 'for await', which the listener
+    // API above cannot serve; the accounts route is the one that reads a body.
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk
+    },
     destroy() {},
   } as unknown as IncomingMessage
   return request
@@ -146,6 +151,8 @@ describe('Ollama settings routes', () => {
   }) => Promise<Captured>
   /** The reply the double fetcher gives to /api/tags. */
   let tags: () => Promise<Response>
+  /** Host events the routes raised, in order. */
+  let emitted: string[]
 
   const setup = async (options: { modelSettings?: FileModelSettingsStore } = {}) => {
     const store = new FileCredentialStore(tmpFile('ollama-cred'), new MemoryBackend() as never)
@@ -165,7 +172,9 @@ describe('Ollama settings routes', () => {
           return () => undefined
         },
       },
-      emit: () => undefined,
+      emit: (event: string) => {
+        emitted.push(event)
+      },
     } as unknown as Context
     registerOllamaRoutes(ctx, {
       accountPool: pool,
@@ -190,6 +199,7 @@ describe('Ollama settings routes', () => {
 
   beforeEach(async () => {
     tags = async () => Response.json(TAGS)
+    emitted = []
     await setup()
   })
 
@@ -362,5 +372,123 @@ describe('Ollama settings routes', () => {
   it('answers 405 for a catalog sync that is not a POST', async () => {
     const captured = await respond({ endpoint: '/catalog/refresh' })
     expectEnvelope(captured, 405)
+  })
+
+  // -------------------------------------------------------------------------
+  // 4. An account action answers with the full status the card renders
+  // -------------------------------------------------------------------------
+
+  it('answers an added key with the whole status, never a bare id', async () => {
+    const captured = await respond({
+      endpoint: '/accounts',
+      method: 'POST',
+      body: { action: 'add', apiKey: 'sk-one', alias: '主号' },
+    })
+
+    expectEnvelope(captured, 200)
+    // The card stores this reply AS the status it renders. A bare '{id}' here
+    // crashed the tab's render on 'status.models.length' and blanked the whole
+    // settings page, so every field the card reads is asserted by name.
+    const value = captured.body.value as {
+      pool?: { accounts?: Array<{ alias?: string; isPrimary?: boolean }> }
+      models?: unknown[]
+      enabledModelIds?: string[] | null
+      usable?: boolean
+      catalogSynced?: boolean
+    }
+    expect(value.pool?.accounts).toHaveLength(1)
+    expect(value.pool?.accounts?.[0]?.alias).toBe('主号')
+    expect(value.pool?.accounts?.[0]?.isPrimary).toBe(true)
+    expect(Array.isArray(value.models)).toBe(true)
+    // A store the user never narrowed answers 'no filter', which null carries.
+    expect(value.enabledModelIds).toBeNull()
+    expect(typeof value.usable).toBe('boolean')
+    expect(typeof value.catalogSynced).toBe('boolean')
+    // The key itself stays host-side: it has no path into the answer.
+    expect(captured.raw).not.toContain('sk-one')
+  })
+
+  it('keeps answering with the full status after a delete', async () => {
+    const added = await respond({
+      endpoint: '/accounts',
+      method: 'POST',
+      body: { action: 'add', apiKey: 'sk-one' },
+    })
+    const id = (added.body.value as { pool: { accounts: Array<{ id: string }> } })
+      .pool.accounts[0]!.id
+
+    const captured = await respond({
+      endpoint: '/accounts',
+      method: 'POST',
+      body: { action: 'delete', accountId: id },
+    })
+
+    expectEnvelope(captured, 200)
+    const value = captured.body.value as { pool?: { accounts?: unknown[] }; models?: unknown[] }
+    expect(value.pool?.accounts).toHaveLength(0)
+    expect(Array.isArray(value.models)).toBe(true)
+  })
+
+  // -------------------------------------------------------------------------
+  // 5. The model selection is a tri-state, and the picker hears about changes
+  // -------------------------------------------------------------------------
+
+  it('lets the user deselect every model, and tells the picker', async () => {
+    // Empty used to mean 'no filter', so clear-all wrote [] and read back as
+    // all-checked — the user could never narrow a long list. An explicit empty
+    // selection must now persist, and the picker must hear the offer changed.
+    const captured = await respond({ endpoint: '/models', method: 'POST', body: { enabledModelIds: [] } })
+    expectEnvelope(captured, 200)
+    expect(emitted).toContain('llm/adapters-updated')
+
+    const status = await respond({ endpoint: '/status' })
+    expect((status.body.value as { enabledModelIds: unknown }).enabledModelIds).toEqual([])
+  })
+
+  it('restores no-filter when the user selects all again', async () => {
+    await respond({ endpoint: '/models', method: 'POST', body: { enabledModelIds: ['gpt-oss:120b-cloud'] } })
+    const captured = await respond({ endpoint: '/models', method: 'POST', body: { enabledModelIds: null } })
+    expectEnvelope(captured, 200)
+    expect(emitted).toContain('llm/adapters-updated')
+
+    const status = await respond({ endpoint: '/status' })
+    expect((status.body.value as { enabledModelIds: unknown }).enabledModelIds).toBeNull()
+  })
+
+  it('reads a pre-tri-state empty selection back as no filter', async () => {
+    // Files written before the version-2 marker could not say "none": their
+    // empty array was the untouched default and must keep meaning "everything",
+    // or every existing install would lose its models on upgrade.
+    await fs.writeFile(modelSettingsFile, JSON.stringify({ enabledModelIds: [] }), 'utf8')
+
+    const status = await respond({ endpoint: '/status' })
+    expect((status.body.value as { enabledModelIds: unknown }).enabledModelIds).toBeNull()
+  })
+
+  it('keeps a stored "none" across a rewrite, thanks to the version marker', async () => {
+    // The tri-state round-trip: [] is stored, the file is marked version 2,
+    // and the next process to read it still sees "none", never "all".
+    await respond({ endpoint: '/models', method: 'POST', body: { enabledModelIds: [] } })
+    const raw = JSON.parse(await fs.readFile(modelSettingsFile, 'utf8')) as { version?: number }
+    expect(raw.version).toBe(2)
+
+    const status = await respond({ endpoint: '/status' })
+    expect((status.body.value as { enabledModelIds: unknown }).enabledModelIds).toEqual([])
+  })
+
+  it('switches the whole line off from the hub card', async () => {
+    const captured = await respond({ endpoint: '/settings', method: 'POST', body: { enabled: false } })
+    expectEnvelope(captured, 200)
+    expect(emitted).toContain('llm/adapters-updated')
+    expect((captured.body.value as { enabled: unknown }).enabled).toBe(false)
+
+    const back = await respond({ endpoint: '/settings', method: 'POST', body: { enabled: true } })
+    expectEnvelope(back, 200)
+    expect((back.body.value as { enabled: unknown }).enabled).toBe(true)
+  })
+
+  it('does not emit on a read that changes nothing', async () => {
+    await respond({ endpoint: '/models' })
+    expect(emitted).not.toContain('llm/adapters-updated')
   })
 })

@@ -37,7 +37,7 @@ export class OllamaApi {
    * offers bulk select and unselect and would otherwise have to read the current
    * selection before it could answer 'turn this one off'.
    */
-  setEnabledModels(enabledModelIds: string[]): Promise<{ enabledModelIds: string[] }> {
+  setEnabledModels(enabledModelIds: string[] | null): Promise<{ enabledModelIds: string[] | null }> {
     return post(`${API}/models`, { enabledModelIds })
   }
 }

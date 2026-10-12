@@ -25,7 +25,7 @@ const STATUS: OllamaWebStatus = {
     rotationStrategy: 'round-robin',
   },
   models: [{ id: 'gpt-oss:120b-cloud' }, { id: 'gemma4:31b' }],
-  enabledModelIds: [],
+  enabledModelIds: null,
   usable: true,
   catalogSynced: true,
 }
@@ -152,6 +152,103 @@ describe('OllamaSection', () => {
     const el = await render()
     expect(el.textContent).toContain('2')
     expect(el.textContent).not.toContain(zh.catalogNeverSynced)
+  })
+
+  it('keeps every model unchecked after clear-all, instead of snapping back', async () => {
+    // Empty used to mean 'no filter': clear-all wrote [] and the card read it
+    // back as all-checked, so a long list could never be narrowed.
+    const el = await render()
+    let posted: unknown = null
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      // The write is the only call to '/models'; the status re-read behind it
+      // is a GET to '/status' and must not overwrite what the test captured.
+      if (String(url).endsWith('/models')) {
+        posted = JSON.parse(String(init?.body ?? 'null'))
+        return Response.json({ ok: true, value: { enabledModelIds: (posted as { enabledModelIds?: unknown })?.enabledModelIds ?? null } })
+      }
+      return Response.json({ ok: true, value: STATUS })
+    }))
+
+    const clearAll = Array.from(el.querySelectorAll('button'))
+      .find(node => node.textContent === zh.unselectAll)
+    expect(clearAll, 'the clear-all button is on the list').not.toBeUndefined()
+    await act(async () => {
+      clearAll?.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    expect(posted).toEqual({ enabledModelIds: [] })
+    const boxes = Array.from(el.querySelectorAll('.dsh-mcl-option[role="checkbox"]'))
+    expect(boxes.length).toBeGreaterThan(0)
+    expect(boxes.every(node => node.getAttribute('aria-checked') === 'false')).toBe(true)
+    expect(el.textContent).toContain('0/2')
+  })
+
+  it('stores a fully-checked list as no filter again, not as an explicit list', async () => {
+    // Checking every box by hand must collapse back to null: an explicit
+    // all-ids list would hide any model the service adds tomorrow.
+    const el = await render()
+    const posts: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      // Only the '/models' write is a post; the status re-read behind it is a
+      // GET and would otherwise be captured as an empty-bodied "post".
+      if (String(url).endsWith('/models')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { enabledModelIds?: unknown }
+        posts.push(body)
+        return Response.json({ ok: true, value: { enabledModelIds: body.enabledModelIds ?? null } })
+      }
+      return Response.json({ ok: true, value: STATUS })
+    }))
+
+    const gemma = Array.from(el.querySelectorAll('.dsh-mcl-option'))
+      .find(node => node.textContent?.includes('gemma4:31b')) as HTMLElement | undefined
+    expect(gemma, 'the gemma row is on the list').not.toBeUndefined()
+    await act(async () => {
+      gemma?.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    await act(async () => {
+      gemma?.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    expect(posts).toEqual([{ enabledModelIds: ['gpt-oss:120b-cloud'] }, { enabledModelIds: null }])
+  })
+
+  it('keeps rendering when an action answer is not the full status', async () => {
+    // The host once answered 'add' with a bare '{id}'. The card stored it as
+    // its status and the next render crashed on 'status.models.length' — the
+    // whole settings page went blank. A partial payload now degrades to empty
+    // blocks instead of taking the page down.
+    const el = await render()
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true, value: { id: 'a3' } })))
+
+    const openForm = Array.from(el.querySelectorAll('button'))
+      .find(node => node.textContent === zh.addAccount)
+    expect(openForm, 'the add-account button is on the tab').not.toBeUndefined()
+    await act(async () => {
+      openForm?.click()
+    })
+
+    const input = el.querySelector('#ollama-key') as HTMLInputElement | null
+    expect(input, 'the key input opened with the form').not.toBeNull()
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+    await act(async () => {
+      setter?.call(input, 'sk-live')
+      input?.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+
+    const save = Array.from(el.querySelectorAll('button'))
+      .find(node => node.textContent === zh.keySave)
+    expect(save, 'the save button is on the form').not.toBeUndefined()
+    await act(async () => {
+      save?.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    // The malformed reply was stored as the status, and the tab still draws.
+    expect(el.textContent).toContain(zh.title)
+    expect(el.textContent).toContain(zh.catalogNeverSynced)
   })
 
   /**

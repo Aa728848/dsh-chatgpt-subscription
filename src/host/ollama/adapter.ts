@@ -149,10 +149,12 @@ export class OllamaAdapter extends LlmAdapter {
     const settings = await this.settings()
     if (settings.enabled === false) return []
     const catalog = await this.catalog()
-    const enabled = new Set(settings.enabledModelIds)
-    // An empty selection means "whatever the catalog returned", which is what a
-    // user sees before narrowing it; a non-empty one is an explicit filter.
-    const available = settings.enabledModelIds.length === 0
+    // Null means "whatever the catalog returned" — no filter, so a model the
+    // service adds later is not hidden by a selection made before it existed.
+    // An array is an explicit selection, and an empty one switches every model
+    // off without deleting a key.
+    const enabled = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
+    const available = enabled === null
       ? catalog
       : catalog.filter((model) => enabled.has(model.id))
     return available.map((model) => ({

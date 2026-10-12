@@ -130,7 +130,7 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
   {
     id: 'ollama',
     name: 'Ollama',
-    setEnabled: null,
+    setEnabled: (enabled) => postLineSettings('/ollama/api', { enabled }),
     renderDetail: ({ onModelChange }) => <OllamaSection onModelChange={onModelChange} />,
   },
 ]

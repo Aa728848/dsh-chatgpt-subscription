@@ -39,10 +39,14 @@ export interface OllamaWebStatus {
   pool: OllamaPoolStatusDto
   /** Model ids synced from the service's own tag list. */
   models: { id: string; name?: string }[]
-  // Which of them the user has switched on. Empty means 'no filter', i.e. every
-  // model in the list: modelling it that way means a model the service adds
-  // later is not silently hidden by a selection made before it existed.
-  enabledModelIds: string[]
+  /**
+   * Which of them the user has switched on: null is 'no filter', i.e. every
+   * model in the list — modelling 'all' this way rather than as an explicit
+   * all-ids list means a model the service adds later is not silently hidden
+   * by a selection made before it existed. An array is an explicit selection,
+   * and an empty one switches every model off.
+   */
+  enabledModelIds: string[] | null
   /** True when at least one account can currently serve a request. */
   usable: boolean
   // Distinct from an empty models list: 'never synced' and 'synced, the

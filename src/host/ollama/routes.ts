@@ -90,7 +90,7 @@ export async function getOllamaWebStatus(options: OllamaRouteOptions): Promise<O
     ...(data?.activeAccountId === undefined ? {} : { activeAccountId: data.activeAccountId }),
   }
   const settings = await modelSettings.read().catch(() => ({
-    enabled: true, enabledModelIds: [], catalogModels: [], defaultReasoningEffort: null,
+    enabled: true, enabledModelIds: null, catalogModels: [], defaultReasoningEffort: null,
   }))
   return {
     pool,
@@ -132,6 +132,22 @@ export function registerOllamaRoutes(ctx: Context, options: OllamaRouteOptions):
         return sendJson(response, 200, { ok: true, value: await getOllamaWebStatus(options) })
       }
 
+      if (path === 'settings') {
+        if (method !== 'POST') return sendMethodNotAllowed(response)
+        if (!isSameOriginMutation(request)) {
+          return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+        }
+        const body = await readRequestJson(request).catch(() => ({}) as Record<string, unknown>)
+        // The hub card's line switch; every sibling line commits the same flag
+        // through its own '/settings', and the picker learns of the change
+        // through the same event they emit.
+        if (typeof body.enabled === 'boolean') {
+          await modelSettings.update({ enabled: body.enabled })
+          ctx.emit?.('llm/adapters-updated')
+        }
+        return sendJson(response, 200, { ok: true, value: await modelSettings.read() })
+      }
+
       if (path === 'accounts') {
         if (method === 'GET') {
           return sendJson(response, 200, { ok: true, value: await getOllamaWebStatus(options) })
@@ -162,13 +178,14 @@ export function registerOllamaRoutes(ctx: Context, options: OllamaRouteOptions):
               : undefined
             const credentials: OllamaCredentials = { apiKey, addedAt: Date.now() }
             if (alias !== undefined) credentials.alias = alias
-            const account = await accountPool.addAccount(credentials, alias)
-            return sendJson(response, 200, { ok: true, value: { id: account.id } })
-          }
-          if (accountId === undefined) {
+            // No early answer here: the card stores the reply of every account
+            // action as the status it renders, so add must fall through to the
+            // same full-status answer as its siblings — a bare '{id}' crashed
+            // the tab's render and blanked the settings page.
+            await accountPool.addAccount(credentials, alias)
+          } else if (accountId === undefined) {
             return sendJson(response, 400, { ok: false, error: 'accountId is required.' })
-          }
-          if (action === 'set-primary') {
+          } else if (action === 'set-primary') {
             await accountPool.setPrimary(accountId)
           } else if (action === 'set-alias' && typeof body.alias === 'string') {
             await accountPool.setAlias(accountId, body.alias)
@@ -205,14 +222,27 @@ export function registerOllamaRoutes(ctx: Context, options: OllamaRouteOptions):
           return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
         }
         const body = await readRequestJson(request).catch(() => ({}) as Record<string, unknown>)
+        let touched = false
         if (typeof body.enabled === 'boolean') {
           await modelSettings.update({ enabled: body.enabled })
+          touched = true
         }
-        if (Array.isArray(body.enabledModelIds)) {
+        // Null is "no filter": every catalogued model, including ones a later
+        // sync adds. An array is an explicit selection — and an empty one
+        // switches every model off, which the old empty-means-all shape could
+        // not say at all.
+        if (Array.isArray(body.enabledModelIds) || body.enabledModelIds === null) {
           await modelSettings.update({
-            enabledModelIds: body.enabledModelIds.filter((id): id is string => typeof id === 'string'),
+            enabledModelIds: Array.isArray(body.enabledModelIds)
+              ? body.enabledModelIds.filter((id): id is string => typeof id === 'string')
+              : null,
           })
+          touched = true
         }
+        // The model picker learns the offer changed only through this event;
+        // without it an unchecked model stays selectable until another line
+        // happens to emit.
+        if (touched) ctx.emit?.('llm/adapters-updated')
         return sendJson(response, 200, { ok: true, value: await modelSettings.read() })
       }
 
