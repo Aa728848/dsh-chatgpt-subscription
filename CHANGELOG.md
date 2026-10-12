@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.22.0 - 2026-10-12
+- **[WorkBuddy / 共享号池] 非鉴权的 403 不再误杀整个账号池；「全部账号不可用」不再伪造 429 与 15 分钟冷却（issue #53）**
+  - **问题 1（403 一律＝凭据失效）**：WorkBuddy 的 `classifyFailure` 只看状态码，`401 || 403` 无条件返回 `INVALID_CREDENTIAL`。代理 / lane 策略 / 同 lane 其它插件合成的应用层拒绝（issue 给出的实测体：`{"error":{"type":"server_error","code":"dsh_compaction_refused","retryable":false}}`）因此被当成 token 失效，账号池把**每一个**账号依次 `markAuthFailed` → `authStatus="expired"`——拒绝属于 lane 而不属于某个账号，所以三个账号无一幸免——此后每个请求在发出前即失败，且**不会自愈**，只有重新登录才能恢复。
+  - **修法**：403 改为「正文给出非鉴权的**正面证据**」才改判。判据刻意单向——空正文、网关 HTML、不可解析的 JSON、没有决定性字段的 JSON 一律回落原本的 `INVALID_CREDENTIAL`（fail-closed：读不出的证据绝不能成为「被拒 token 继续留在轮换里」的理由）。能翻案的是**本线路自己不会发出的形状**：字符串 `code`（本线路只说数字码），或 `retryable:false` / `type:"server_error"` 这类明确的「别重试」声明。改判结果是 `PROVIDER_ERROR`，在本线路重试集合之外（同一个请求撞同一条规则，重试只花额度），且**不写账号池**。
+  - **问题 2（伪造 429 与 15 分钟）**：共享号池的 `allUnavailableError` 不看「为什么都不可用」，一律返回 `RATE_LIMIT` + `status 429`，文案里的分钟数取自「最短冷却」；当没有任何账号在冷却时 `shortest` 是 `Infinity`，于是落到**硬编码的 `15`**。用户被告知等待一个从未开始、也永远不会结束的窗口，而唯一有效的处置（重新登录）一个字都没提。另外 `retryAfterMs` 把 `Retry-After` 封顶在 10 分钟，所以这条路径上**物理上不可能**出现 15 分钟的真实冷却。
+  - **修法**：先问「池里还有没有任何凭据可用的账号」——没有则以 `AUTH` + `status 401` 报「全部 N 个账号均需要重新登录」，不再提冷却；有冷却才按 429 报告，且分钟数在**没有实测重置时刻时是 `null`**（而不是编一个数），`allUnavailableMessage` 钩子签名随之改为 `number | null`，antigravity / glm-coding-plan / step-code 三处覆写同步跟上，并新增可选的 `allAuthFailedMessage` 钩子供线路自定措辞。**刻意排除**「只是这次请求把自己能试的账号试完了」：tried-set 是重试循环的簿记，那些凭据完全可用，不能因此让用户去重新登录。
+  - **测试**：号池 3 例（全部凭据失效必须报 AUTH，且文案里不得出现 `429` / `15 分钟`；试完 tried-set 仍报 RATE_LIMIT；钩子拿到的 `waitMinutes` 在没有冷却时不被调用、有真实冷却时是实测分钟数）；WorkBuddy 分类器 3 例（401 与裸/不可读 403 保持凭据判定；实测的代理合成 403 必须归 `PROVIDER_ERROR`、落在重试集合外、且文案不劝人重新登录；本线路数字码的 403 仍归凭据）。两处既有断言把旧行为写成了期望（`claude-account-pool` 把「全部账号凭据失效」钉成 `RATE_LIMIT`），按其真实意图（路由拒绝、且不得触发 refresh）改为 `AUTH`。
+  - **变异验证**：把 `allUnavailableError` 的 AUTH 分支短路后，4 条用例（含 2 条新增）以真实的 `RATE_LIMIT` / `429` 失败；把 WorkBuddy 的 403 判定短路后，恰好 1 条新增用例以 `INVALID_CREDENTIAL` 失败。恢复后全绿。
+  - **验证：`npx tsc -b --force` 0 错误；全量 `npx vitest run` 220 passed | 1 skipped（221 文件）、3653 passed | 7 skipped | 0 failed。**
+  - **诚实声明**：403 的正文字段判据来自 issue 给出的实测报文与代码定位，**没有**用一个真实 lane 级 403 复现端到端；断言全部建立在分类器与号池的单元层。
+- **[Step Code] 新增「Step Code（Step Plan 订阅）」线路：StepFun 国区 / 国际区订阅与开放平台 API Key 接入，含套餐额度与缓存用量卡片**
+  - **能力来源**：StepFun 官方开源的 Step-Code 客户端。四个凭据 profile（`step_plan` / `step_plan_oversea` / `platform_cn` / `platform_oversea`）**与官方 `STEP_LOGIN_PROFILE_IDS` 逐字相同，一个不多一个不少**；区域（`cn` = stepfun.com，`intl` = stepfun.ai）是**凭据的属性而不是请求的属性**，由 profile 唯一决定，所以设置页不给自由输入——区域交叉的凭据会被上游直接拒绝。同一个号池里可以同时持有两区账号且互不串用。
+  - **四条登录入口互不替代**：云端轮询的浏览器授权（**不开本地回调端口**，流程跑在 host 上，卡片每 2 秒轮询）、手工粘贴 Platform API Key、只读导入本机 `~/.stepcode/auth.json`（**只读，绝不改写 stepcode 的任何文件**），以及仅用于读额度的开发者中心凭据。前三条的导入**失败永不阻断**：契约把失败拆成四个 reason（没文件 / 读坏了 / 形状不认识 / 里面不是 Step 的登录态），卡片据此给出四个不同的下一步，一律回落浏览器登录或手工粘贴。
+  - **能力不从模型名推断**：模型目录**完全靠运行时发现**，随包表**刻意为空**。每行的一句话描述、是否收图片、接受哪些思考档位、上下文窗口全部来自上游目录字段，拿不到证据时按兜底值显示而不是猜。档位在本地先收敛到**模型真实梯子**（`reasoning_effort_support_list`）再发出去，所以设置里列出 DSH 的完整档位词汇也不会给只认两档的模型发错档。
+  - **⚠️ 额度接口是非公开接口，这是本线路唯一的合规与稳定性风险点**：先用开放平台**账号密码**换取 `Oasis-Token`，再用它读 Dashboard。上游随时可以改形状、改鉴权或直接关掉。处置是把它隔离成**一个只读、失败永不阻断**的面：额度读不出来时卡片照旧渲染，模型请求一个字节都不受影响。卡片上如实写出「非公开接口」这行字，不把尽力而为的读数包装成有 SLA 的承诺。
+  - **两代套餐分别渲染，不揉成一份「看起来一样」的进度条**：老式账号只有 5 小时 / 周窗口（有已用百分比），新式账号只有 Credit 月池（总额 / 剩余的绝对量）。判定**按载荷形状**（老式窗口字段 vs `credit_buckets`）而不是只信 `plan_family`；两端都认不出来时只显示「认不出」，**一个进度条都不画**——画出来的是上游从没说过存在的东西。折算成百分比同样被拒绝：Credit 桶的分母要自己选，而新式套餐里不同桶的地位并不等价（订阅额度与充值额度不是一回事），折出来的是编的。
+  - **缓存区只有 token 维度，不出现任何金额**：Step 服务端是自动前缀缓存，客户端没有「写入」这个动作，所以**写侧恒为 0 并被显式标注**（`always-zero-on-this-route`）而不是画一条永远是 0 的条；官方模型表里四个 cost 键全是 0（单价未文档化），所以整页只展示 token 与命中率，**不展示任何金额**——拿 0 当单价算出「省了 0 元」是正确但无用，拿编的费率算出「省了 N 元」是撒谎。「在请求里发送缓存参数」做成**默认关闭**的能力位，因为官方对 Step 端点默认也不发该字段。
+  - **凭据边界**：api_key、`Oasis-Token` 与账号密码**一律不出现在任何 DTO 里**。手工粘贴与账号密码登录的请求体正因如此**刻意不在冻结契约里声明**（它必然带凭据，由 host 侧自行解析）；卡片只显示「有没有凭据、从哪来、大概什么时候过期、上次读它出了什么问题」，而这三条秘密只在点击提交那一刻随请求体过一趟 host，随即被清空——不写本地存储、不进 URL、不写日志，也没有任何接口能把它们读回来。
+  - **接入方式（全部是追加）**：hub 描述符追加在 `ollama` 之后、输入框胶囊槽位 `step-code-quota` 取 **order 43**（接在 `glm-coding-plan-quota` 的 42 之后顺延）、新增 `dsh-step-code` 命名空间与一张自有样式表。**既有线路的卡片顺序与槽位号一个字符都没有动**——给已上线的线路重排位置没有收益，只有风险。
+  - **测试**：新增 `test/step-code-ui.test.tsx`（5 例，jsdom，全程 mock fetch 且**只在本线路 `/step-code/api` 前缀下应答**，越界请求当场抛错）覆盖卡片渲染账号区 / 额度区 / 模型清单、`quota` 为 null 不崩且不画 0%、`windowed` 与 `credit` 两种额度分别渲染、缓存区不出现任何金额且写侧显式声明恒零。既有测试只**追加条目**：`client-registration` 的注入次数、胶囊注册表、`TAB_IDS`、卡片名与开关数；`hub-overview-ui` 的 summary 与卡片顺序；`client-style-ownership` 的 SHEETS 表。
+  - **实机验证（本轮用真实账号补齐，分档如实列出）**：
+    - **live 验证通过**：浏览器授权开流/轮询；**账号密码换 `Oasis-Token`**（`RegisterDevice` → `SignInByPassword`）；用该 token 读 `QueryStepPlanRateLimit` 与 `GetStepPlanStatus`（真实返回套餐 `Plus`、`plan_family=2`、Credit 桶总额与剩余）；模型目录字段与档位回落按实测载荷对齐。
+    - **仅 mock 验收**：模型面真实对话请求、手工粘贴 Platform API Key 的完整会话、`adopt` 四种失败分支、额度卡片的渲染本身。
+  - **上线后修的两处硬伤（都是「HTTP 200/401 却读不出东西」，错误措辞会把根因指向错误的字段）**：
+    - **`oasis-appid` 填成了 `oasis-platform` 的值 `web`**，服务端据此查应用配置，直接 `500 app configuration is missing`。正确值是应用 id **`10300`**（响应里 `registry.appId` 会回显，可复核）。该错误当时出现在**两条**路径上（设备注册与额度读取），第一轮只修了前者、漏了后者，导致额度卡片继续报同一个错——**同一常量在多处使用时，修完必须全仓 grep 一遍**。
+    - **`SignInByPassword` 的 cookie 里没带匿名 token**，服务端找不到登录会话，一律 `401 token is missing` / `token is illegal`。实测对照：cookie 带 **`access...refresh` 无空格成对形式**→ 200 并返回 token；只带 access 或只带 refresh → 401；两段之间**多一个空格** → `token is malformed: could not base64 decode header`。这三个 401 的措辞各不相同却同因，代码注释已记录完整对照表。
+
 ## 0.21.0 - 2026-10-12
 - **[Ollama] 修复添加 Key 后「订阅服务」整页空白；补齐线路启停开关；「全不选」与勾选状态实时同步到模型选择器**
   - **问题 1（整页空白）**：`/ollama/api/accounts` 的 `add` 分支独自返回 `{ id }`，其余动作都返回完整 status。客户端把动作回包直接当作渲染状态，`status.models` 为 `undefined` 时渲染期 `TypeError` 把设置页整棵 React 子树打崩。修法：add 与其他动作一样回落到统一的完整 status 应答；客户端渲染路径对残缺 status 一律降级为空区块（`status?.models ?? []`），任何残缺载荷永不再崩页。
