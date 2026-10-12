@@ -46,12 +46,19 @@ export function remainingHours(expiresAtMs: number | undefined): string | null {
 
 export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): React.JSX.Element {
   const { state, derived, actions } = useMinimaxCodeSection({ onModelChange })
-  const { status, loading, busy, error, flow, copied, connectionNotice, contextDrafts, savingModel, pool } = state
-  const { authenticated, account, quota, models, contextModels, overrideCount, poolLabels } = derived
+  const {
+    status, loading, busy, error, flow, copied, connectionNotice, contextDrafts, savingModel, pool,
+    resetCards, resetNotice, selectedResetCardId,
+  } = state
+  const {
+    authenticated, account, quota, models, contextModels, overrideCount, poolLabels,
+    resetCardList, resetCardFlows,
+  } = derived
   const {
     login, cancelLogin, copyCode, logout, poolAction, setStrategy, toggleModel, setAllModels,
     setCheckinEnabled, runCheckinNow, updateEffort, saveContextWindow, resetContextWindow,
-    resetAllContextWindows, refreshQuota, testConnection, updateContextDraft,
+    resetAllContextWindows, refreshQuota, refreshResetCards, selectResetCard, useResetCard,
+    testConnection, updateContextDraft,
   } = actions
 
   const t: Translate = fallbackTranslate
@@ -418,6 +425,90 @@ export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): 
             </div>
           )}
       </section>
+
+      {/*
+        The reset-card panel mirrors the official client's usage page: the cards
+        still held, one picked at a time, and the last 30 days of flow. It renders
+        only once the host has answered with a panel — a line that cannot read
+        one shows nothing here rather than an empty box, and the first read is
+        silent while it is still in flight.
+      */}
+      {resetCards !== null && (
+        <section className="dsha-group">
+          <div className="dsha-grouphead">
+            <h3>{t('resetSection')}</h3>
+            <button
+              className="dsha-btn"
+              disabled={busy !== null}
+              onClick={() => void refreshResetCards()}
+            >
+              {busy === 'reset-card' ? t('resetRefreshing') : t('resetRefresh')}
+            </button>
+          </div>
+          <p className="dsha-muted">{t('resetHint')}</p>
+          <div className="dsha-row">
+            <span className="dsha-label">
+              {t('resetAvailable').replace('{count}', String(resetCardList.length))}
+            </span>
+            <span className="dsha-value">{formatDate(resetCards.fetchedAtMs)}</span>
+          </div>
+          {resetCardList.length === 0
+            ? (
+              <div className="dsha-empty">{t('resetNone')}</div>
+            )
+            : (
+              <div className="dshm-reset-list">
+                {resetCardList.map((card) => (
+                  <div className="dsha-row dshm-reset-row" key={card.cardId}>
+                    <button
+                      type="button"
+                      className="dsha-btn dshm-reset-pick"
+                      aria-pressed={selectedResetCardId === card.cardId}
+                      disabled={busy !== null}
+                      onClick={() => selectResetCard(selectedResetCardId === card.cardId ? null : card.cardId)}
+                    >
+                      <span className="dshm-mono">{card.cardId}</span>
+                    </button>
+                    <span className="dsha-value">
+                      {t('resetExpires').replace('{time}', formatDate(card.expiresAtMs))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          {/*
+            The confirmation the official client asks for is also printed here, so
+            the sentence that has to be confirmed is on screen before the dialog
+            hides it behind an OK button.
+          */}
+          <p className="dsha-notice dshm-quota-note">{t('resetConfirm')}</p>
+          {resetNotice !== null && (
+            <p className="dsha-notice dshm-quota-note" role="status">{resetNotice}</p>
+          )}
+          <div className="dsha-actions">
+            <button
+              className="dsha-btn dsha-btn-primary"
+              disabled={busy !== null || selectedResetCardId === null}
+              onClick={() => {
+                if (selectedResetCardId !== null) void useResetCard(selectedResetCardId)
+              }}
+            >
+              {busy === 'reset-card' ? t('resetUsing') : t('resetUse')}
+            </button>
+          </div>
+          <p className="dsha-muted dshm-quota-note">{t('resetFlowTitle')}</p>
+          {resetCardFlows.length === 0
+            ? <div className="dsha-empty">{t('resetFlowEmpty')}</div>
+            : resetCardFlows.map((entry, index) => (
+              <div className="dsha-row" key={`${entry.cardId}:${entry.createdAtMs}:${index}`}>
+                <span className="dsha-label">
+                  {entry.eventType === 'GRANT' ? t('resetFlowGrant') : t('resetFlowUse')}
+                </span>
+                <span className="dsha-value dshm-mono">{entry.cardId} · {formatDate(entry.createdAtMs)}</span>
+              </div>
+            ))}
+        </section>
+      )}
 
       {error !== null && (
         <div className="dsha-error">

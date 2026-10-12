@@ -72,6 +72,13 @@ import {
   testConnection,
 } from './client.ts'
 import type { MinimaxCodeCheckinService } from './checkin.ts'
+import {
+  MinimaxCodeResetCardError,
+  fetchResetCards,
+  resetCardHttpStatus,
+  useResetCard,
+} from './reset-card.ts'
+import type { MinimaxCodeResetResultDto } from '../../shared/minimax-code-contracts.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 
 /** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
@@ -354,6 +361,27 @@ export function registerMinimaxCodeRoutes(
    */
   const quotaRefresh = new QuotaRefresh()
 
+  /**
+   * The credential a reset-card call presents, read the same way `refreshQuota`
+   * reads one.
+   *
+   * The pool is the rotation authority when it is installed, so the reset-card
+   * surface must take its credential from the same place a model request would:
+   * a second, independent reader would be a second refresh-token authority, and
+   * two of them presenting the same rotating token is how a healthy account ends
+   * up reported as needing a new sign-in.
+   */
+  const readResetCardCredential = async (): Promise<MinimaxCodeCredentials | null> => {
+    if (options.accountPool !== undefined) {
+      const target = await options.accountPool.getQuotaReadTarget(fetchFn).catch(() => null)
+      return target?.credentials ?? null
+    }
+    // No pool: ensureAccessToken hands back the credential ITSELF (the pool hands
+    // back a wrapper carrying the account id as well), so it is used directly
+    // rather than unwrapped.
+    return await ensureAccessToken(store, { fetchFn }).catch(() => null)
+  }
+
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const path = subPathOf(request.url ?? '/')
     const method = request.method ?? 'GET'
@@ -452,6 +480,52 @@ export function registerMinimaxCodeRoutes(
         }
         const value = await getMinimaxCodeWebStatus(store, options, settings)
         return sendJson(response, 200, { ok: true, value })
+      }
+
+      // ---- The reset-card panel ------------------------------------------------
+      //
+      // Two routes, shaped like the ChatGPT line's own reset-credit pair
+      // (`/quota/reset-credit/use` in src/host/routes.ts): a GET that renders
+      // what the account holds, and a POST that spends one card.
+      //
+      // The POST takes a `cardId` and NOTHING ELSE. The idempotency key
+      // (`out_biz_no`) is a field of the card, and it is the one field a client
+      // must never be handed the power to invent: a made-up key is a card the
+      // service has no record of, so it would spend a card the user did not
+      // choose. The host therefore looks the card up in its own freshly read
+      // panel and spends the one it found.
+      if (path === 'reset-cards') {
+        if (method !== 'GET') return sendMethodNotAllowed(response)
+        const credentials = await readResetCardCredential()
+        if (credentials === null) return sendJson(response, 401, { ok: false, error: 'Not signed in.' })
+        const value = await fetchResetCards(credentials, { fetchFn })
+        return sendJson(response, 200, { ok: true, value })
+      }
+
+      if (path === 'reset-cards/use') {
+        if (method !== 'POST') return sendMethodNotAllowed(response)
+        if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
+        const body = await readRequestJson(request)
+        const cardId = typeof body.cardId === 'string' ? body.cardId : ''
+        if (cardId === '') return sendJson(response, 400, { ok: false, error: 'cardId is required.' })
+        const credentials = await readResetCardCredential()
+        if (credentials === null) return sendJson(response, 401, { ok: false, error: 'Not signed in.' })
+        // Read the panel first: it is where the card's own source_type and
+        // out_biz_no come from, and it is also the panel the answer carries, so
+        // the two can never describe different moments.
+        const before = await fetchResetCards(credentials, { fetchFn })
+        const card = before.cards.find((entry) => entry.cardId === cardId)
+        if (card === undefined) {
+          return sendJson(response, 404, { ok: false, error: 'No reset card with that id is currently available.' })
+        }
+        const outcome = await useResetCard(credentials, { sourceType: card.sourceType, outBizNo: card.outBizNo }, { fetchFn })
+        // Re-read so the panel reflects the card's new state. A failure of THIS
+        // read is not a failure of the spend — the service already gave its
+        // verdict — so the pre-spend panel is served rather than turning a
+        // successful use into an error the user would answer by pressing again.
+        const after = await fetchResetCards(credentials, { fetchFn }).catch(() => before)
+        const value: MinimaxCodeResetResultDto = { outcome, cards: after }
+        return sendJson(response, 200, { ok: true, value, ...value })
       }
 
       if (path === 'checkin/now') {
@@ -582,6 +656,12 @@ export function registerMinimaxCodeRoutes(
       }
       if (error instanceof MinimaxCodeAccessDeniedError) {
         return sendJson(response, 403, { ok: false, error: error.message })
+      }
+      // A reset-card refusal arrives over HTTP 200 and is classified by the
+      // module that made the call: a rate limit is 429 and a refused credential
+      // is 401, because those two ask the user for opposite things.
+      if (error instanceof MinimaxCodeResetCardError) {
+        return sendJson(response, resetCardHttpStatus(error), { ok: false, error: error.message })
       }
       return sendJson(response, 500, {
         ok: false,

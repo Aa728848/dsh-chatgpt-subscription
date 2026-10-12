@@ -17,5 +17,9 @@ export function installMinimaxCodeStyles(): void {
 .dshm-model-list{display:flex;flex-wrap:wrap;gap:7px;padding-top:8px}
 .dshm-model-list code{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;padding:5px 8px;white-space:nowrap}
 .dshm-quota-note{margin-top:12px}
+.dshm-reset-list{display:flex;flex-direction:column;gap:6px;padding-top:8px}
+.dshm-reset-row{align-items:center;justify-content:space-between}
+.dshm-reset-pick{background:none;border:0.5px solid var(--dsw-alias-border-l2);cursor:pointer;padding:4px 8px}
+.dshm-reset-pick[aria-pressed="true"]{border-color:var(--dsw-alias-border-focus,var(--dsw-alias-border-l3));background:var(--dsw-alias-bg-layer-2)}
 `, STYLE_ID)
 }

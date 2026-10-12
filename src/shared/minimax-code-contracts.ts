@@ -232,3 +232,48 @@ export interface MinimaxCodeWebStatus {
   checkin?: MinimaxCodeCheckinSummary | null
 }
 
+/** 一张可用的重置卡。 */
+export interface MinimaxCodeResetCardDto {
+  cardId: string
+  /** 卡的来源，消费时原样回传。 */
+  sourceType: string
+  /** 到期时刻（Unix 毫秒）。 */
+  expiresAtMs: number
+  createdAtMs: number
+  /** 幂等键：消费时原样回传，服务端据此去重。 */
+  outBizNo: string
+}
+
+/** 近 30 天重置卡流水的一条记录。 */
+export interface MinimaxCodeResetCardFlowDto {
+  cardId: string
+  eventType: 'GRANT' | 'USE'
+  createdAtMs: number
+}
+
+/** 重置卡面板：可用卡 + 流水。 */
+export interface MinimaxCodeResetCardsDto {
+  cards: MinimaxCodeResetCardDto[]
+  flows: MinimaxCodeResetCardFlowDto[]
+  fetchedAtMs: number
+}
+
+/**
+ * 消费一张卡的结果。
+ *
+ * 服务端用 out_biz_no 去重，所以客户端必须能区分「成功了」与「不确定」：
+ * REPLAYED / LOCK_BUSY / RETRYABLE_FAIL 都要求用户用同一张卡重试来确认结果，
+ * 而不是换一张卡——换卡会真的多消费一张。
+ */
+export type MinimaxCodeResetOutcome =
+  | 'SUCCESS'
+  | 'REPLAYED'
+  | 'EXPIRED'
+  | 'NOT_FOUND'
+  | 'RETRYABLE_FAIL'
+  | 'LOCK_BUSY'
+
+export interface MinimaxCodeResetResultDto {
+  outcome: MinimaxCodeResetOutcome
+  cards: MinimaxCodeResetCardsDto
+}

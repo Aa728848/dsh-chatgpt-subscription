@@ -17,6 +17,8 @@ import type {
   MinimaxCodeModelOption,
   MinimaxCodeQuota,
   MinimaxCodeReasoningEffort,
+  MinimaxCodeResetCardsDto,
+  MinimaxCodeResetOutcome,
   MinimaxCodeWebLogin,
   MinimaxCodeWebStatus,
 } from '../../shared/minimax-code-contracts.ts'
@@ -24,7 +26,7 @@ import type { AccountPoolLabels } from '../common/AccountPoolSection.tsx'
 import { contextDraftsFor } from '../common/ContextWindowEditor.tsx'
 import { formatCapacity, parsePositiveCapacity } from '../common/format.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
-import { get, messageOf, post } from './api.ts'
+import { fetchResetCards, get, messageOf, post, useResetCard } from './api.ts'
 import { zh } from './locales.ts'
 
 /** The pool slice the status card renders, absent when the line has no pool. */
@@ -93,6 +95,63 @@ function accountPoolLabelsFor(t: Translate): AccountPoolLabels {
   }
 }
 
+/**
+ * One reset-card panel read, defensively shaped.
+ *
+ * The route is new and the card renders whatever it is handed, so a half that
+ * answers something else (a stale host, a route that 404s into an error body the
+ * reader already raised) must not turn into a render crash on `cards.length`.
+ * A missing list is an empty list, which is also the truthful reading: the user
+ * can select nothing and the use button stays disabled.
+ */
+export function normalizeResetCards(
+  value: MinimaxCodeResetCardsDto | null | undefined,
+): MinimaxCodeResetCardsDto {
+  return {
+    cards: Array.isArray(value?.cards) ? value.cards : [],
+    flows: Array.isArray(value?.flows) ? value.flows : [],
+    fetchedAtMs: typeof value?.fetchedAtMs === 'number' && Number.isFinite(value.fetchedAtMs)
+      ? value.fetchedAtMs
+      : 0,
+  }
+}
+
+/**
+ * What the card tells the user after a spend, one sentence per outcome.
+ *
+ * The six outcomes are not six flavours of the same answer. Two are certain
+ * ("done"), two are refusals (the card is gone — re-read the list), and two are
+ * `I did not find out`: the service de-duplicates on the card's own key, so
+ * retrying THE SAME card costs nothing while picking another one really does
+ * spend a second card. That is why the uncertain sentence names the same card.
+ */
+export function resetOutcomeNotice(outcome: MinimaxCodeResetOutcome, t: Translate): string {
+  switch (outcome) {
+    case 'SUCCESS':
+      return t('resetOutcomeSuccess')
+    case 'REPLAYED':
+      return t('resetOutcomeReplayed')
+    case 'LOCK_BUSY':
+    case 'RETRYABLE_FAIL':
+      return t('resetOutcomeUncertain')
+    case 'EXPIRED':
+      return t('resetOutcomeExpired')
+    case 'NOT_FOUND':
+      return t('resetOutcomeNotFound')
+  }
+}
+
+/**
+ * Whether an outcome leaves the spent card's fate decided.
+ *
+ * True for the four outcomes that will not change if the user waits: the card is
+ * consumed or it is not usable. False for the two uncertain ones — refreshing
+ * there would drop the very row the sentence tells the user to retry with.
+ */
+export function outcomeIsDecided(outcome: MinimaxCodeResetOutcome): boolean {
+  return outcome !== 'LOCK_BUSY' && outcome !== 'RETRYABLE_FAIL'
+}
+
 /** Device-code poll cadence. The host owns the real expiry. */
 const LOGIN_POLL_INTERVAL_MS = 2_000
 
@@ -157,6 +216,17 @@ export interface MinimaxCodeSectionView {
     savingModel: string | null
     /** The pool slice read beside the status; undefined when the line has no pool. */
     pool: MinimaxCodePoolStatus | undefined
+    /**
+     * The reset-card panel: cards still held plus the last 30 days of flow.
+     *
+     * Null until the first read settles. A read that fails is not an error the
+     * user can act on, so it renders as an explanation rather than a banner.
+     */
+    resetCards: MinimaxCodeResetCardsDto | null
+    /** Sentence describing the last spend, kept until the next one replaces it. */
+    resetNotice: string | null
+    /** The card the user picked but has not spent yet; null when none is. */
+    selectedResetCardId: string | null
   }
   /** Facts read straight off the current status answer. */
   derived: {
@@ -172,6 +242,10 @@ export interface MinimaxCodeSectionView {
     contextModels: MinimaxCodeModelOption[]
     /** How many stored overrides exist, whether or not a row still shows them. */
     overrideCount: number
+    /** The cards the panel read, already normalised to a list. */
+    resetCardList: MinimaxCodeResetCardsDto['cards']
+    /** The 30-day flow the panel read, already normalised to a list. */
+    resetCardFlows: MinimaxCodeResetCardsDto['flows']
     /**
      * The line's label set, handed to the shared pool card as one object.
      *
@@ -205,6 +279,12 @@ export interface MinimaxCodeSectionView {
     resetContextWindow(modelId: string): Promise<void>
     resetAllContextWindows(): Promise<void>
     refreshQuota(): Promise<void>
+    /** Re-read the reset-card panel on demand. */
+    refreshResetCards(): Promise<void>
+    /** Pick (or clear) the card the use button would spend. */
+    selectResetCard(cardId: string | null): void
+    /** Confirm, spend the selected card, then re-read the panel and the usage. */
+    useResetCard(cardId: string): Promise<void>
     testConnection(): Promise<void>
     /** Edit one capacity draft mid-typing; the editor never parses it. */
     updateContextDraft(modelId: string, draft: string): void
@@ -229,6 +309,14 @@ export function useMinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps
   // The pool slice, read beside the status. Absent until the first read answers,
   // and absent for a host that has no pool installed at all.
   const [pool, setPool] = useState<MinimaxCodePoolStatus | undefined>(undefined)
+  // The reset-card panel. Kept whole rather than as two lists so a read that
+  // fails clears both at once and the section cannot show cards beside flows
+  // from two different moments.
+  const [resetCards, setResetCards] = useState<MinimaxCodeResetCardsDto | null>(null)
+  // The spend sentence survives every re-render and is only replaced by the next
+  // spend: an uncertain outcome must stay readable while the user retries.
+  const [resetNotice, setResetNotice] = useState<string | null>(null)
+  const [selectedResetCardId, setSelectedResetCardId] = useState<string | null>(null)
 
   // The follow-up poll for a usage read the host is running behind its answer.
   // Every sibling card has this and this one did not, which is why a page
@@ -326,6 +414,71 @@ export function useMinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps
       }
     })()
   }, [authenticated, status?.quota])
+
+  /**
+   * Read the reset-card panel.
+   *
+   * Silent on failure, exactly like the pool read: this feature is absent on
+   * accounts that never earned a card, and a settings card must not raise an
+   * error banner for a route that has nothing to say.
+   */
+  const loadResetCards = useCallback(async (): Promise<void> => {
+    try {
+      setResetCards(normalizeResetCards(await fetchResetCards()))
+    } catch {
+      setResetCards(null)
+    }
+  }, [])
+
+  /**
+   * The panel is read once the card knows there is an account to read it for.
+   *
+   * Reads before sign-in answer with a refusal, which is not a state the user
+   * can act on, so the read waits for a signed-in account exactly as the usage
+   * read below does.
+   */
+  useEffect(() => {
+    if (!authenticated) return
+    void loadResetCards()
+  }, [authenticated, loadResetCards])
+
+  const refreshResetCards = async (): Promise<void> => {
+    await loadResetCards()
+  }
+
+  const selectResetCard = (cardId: string | null): void => {
+    setSelectedResetCardId(cardId)
+  }
+
+  /**
+   * Spend one card, behind the confirmation the official client asks for.
+   *
+   * The confirmation lives here rather than in the view because "cancel" must
+   * mean no request at all: the card may not even be sent when the user says no.
+   * After a decided outcome the panel is re-read so the spent card leaves the
+   * list; after an uncertain one it is deliberately left alone, because the row
+   * the user is told to retry with is the one that would disappear.
+   */
+  const spendResetCard = async (cardId: string): Promise<void> => {
+    if (typeof window !== 'undefined' && !window.confirm(t('resetConfirm'))) return
+    try {
+      setBusy('reset-card')
+      setError(null)
+      const result = await useResetCard(cardId)
+      setResetCards(normalizeResetCards(result.cards))
+      setResetNotice(resetOutcomeNotice(result.outcome, t))
+      setSelectedResetCardId(null)
+      if (!outcomeIsDecided(result.outcome)) return
+      await loadResetCards()
+      // The official client re-reads usage after a reset; it never resends the
+      // conversation, and neither does this.
+      await refreshQuota()
+    } catch (cause) {
+      setError(messageOf(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const login = async (): Promise<void> => {
     try {
@@ -628,6 +781,9 @@ export function useMinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps
       contextDrafts,
       savingModel,
       pool,
+      resetCards,
+      resetNotice,
+      selectedResetCardId,
     },
     derived: {
       authenticated,
@@ -636,6 +792,8 @@ export function useMinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps
       models,
       contextModels,
       overrideCount,
+      resetCardList: resetCards?.cards ?? [],
+      resetCardFlows: resetCards?.flows ?? [],
       poolLabels: accountPoolLabelsFor(t),
     },
     actions: {
@@ -654,6 +812,9 @@ export function useMinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps
       resetContextWindow,
       resetAllContextWindows,
       refreshQuota,
+      refreshResetCards,
+      selectResetCard,
+      useResetCard: spendResetCard,
       testConnection,
       updateContextDraft,
     },

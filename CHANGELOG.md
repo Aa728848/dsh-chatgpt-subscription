@@ -1,6 +1,20 @@
 # Changelog
 
 ## Unreleased
+- **[MiniMax Code] 新增「限额重置卡」：查看可用卡与近 30 天流水，选卡确认后重置套餐限额**
+  - **能力来源**：MiniMax 官方桌面端 v3.1.1（2026-10-04）起提供「限额重置」——订阅用户可在用量页查看可用重置卡与近 30 天获得/使用记录，**选择一张卡并确认后**重置对应限额。本插件复刻它，接同一组上游接口。
+  - **上游事实（用真实账号实测确证，非推测）**：`GET /backend/account/reset_card/list`（可用卡）、`GET /backend/account/reset_card/flows`（流水）、`POST /backend/account/reset_card/use`（消费）。主机是插件**已在用**的 `api.minimax.cn` / `api.minimaxi.com`（即 `QUOTA_HOST_CANDIDATES`），认证是**现有**的 `Authorization: Bearer`。不需要新主机、不需要签名头、不需要新认证方式。
+  - **三处踩过的坑，都写进了实现**：
+    - **`flows` 必带 `create_time`**（起始毫秒，取 30 天前），否则上游返回 `2013 invalid params`。这不是可选参数，是硬要求。
+    - **消费成功靠原样回传卡上的 `source_type` + `out_biz_no`，绝不自己生成 request id。** 服务端以 `out_biz_no` 去重；自造一个 id 等于递给服务端一个它没记录过的键，第二次点击就会**真的多消费一张卡**——正是本线路契约警告的那种伤害。
+    - **`outcome` 必须原样透传，不能塌缩成布尔值。** 六个值里 `REPLAYED` / `LOCK_BUSY` / `RETRYABLE_FAIL` 三个的含义是「可能已消费，请用**同一张卡**确认」，界面必须据此劝用户重试同一张卡而非换卡。官方客户端也是这么处理的。
+  - **幂等键不出浏览器**：`POST /reset-cards/use` 只接受 `{ cardId }`。host 侧先读一次面板，从**自己刚读到**的那份数据里查出该卡的 `source_type`/`out_biz_no` 再调上游——浏览器无法指定幂等键，也就无法消费一张它没读过的卡。同源检查照旧。
+  - **不确定态不刷新列表**：`LOCK_BUSY` / `RETRYABLE_FAIL` 之后**故意不重读面板、不刷新用量**，否则会把那一行「让用户用同一张卡重试」的提示直接从屏幕上刷掉。已决的四个 outcome 才刷新。
+  - **测试**：host 20 例 + 客户端 15 例，全部 mock fetch，**没有任何一次真实 `/use` 调用**。host 侧六组变异（删 `create_time`、自造 request id、不容忍 flows 失败、放行任意 outcome、只试首个主机、路由信任浏览器传来的 `out_biz_no`）各自被对应用例捕获；客户端侧四组变异（改错不确定态文案、删二次确认守卫、按钮不禁用、去掉使用后刷新）同样如期变红，恢复后全绿。
+  - **复审时独立重做变异**：只把 `out_biz_no` 换成自造值（一处改动），4 个用例立刻失败——含「重试必须用同一张卡」这条安全关键用例；恢复后 20/20。
+  - **验证：`npx tsc -b --force` 0 错误；`npx tsc -p test/tsconfig.json` 0 错误；全量 `npx vitest run` 215 passed | 1 skipped（216 文件）、3483 passed | 7 skipped | 0 failed。**
+  - **诚实声明：没有跑过真实消费。** 全部 `/use` 路径都是 mock 验收——真实消费会消耗用户真实的重置卡，本轮刻意不做。`list`/`flows` 的响应形状是用真实账号只读实测过的。
+  - **遗留项（既有问题，非本次引入）**：`QUOTA_HOST_CANDIDATES.global` 只有一个候选 `api.minimax.io`，而该主机对国区凭据返回 401。国际区账号的可用主机仍未实测——这与本线路既有的配额读取是同一个未解问题。
 
 ## 0.19.2 - 2026-10-12
 - **[九条线路] 空闲超时把「没有可展示内容」误判成「连接已死」，长时间思考或上游持续心跳时整轮被判 TIMEOUT**
