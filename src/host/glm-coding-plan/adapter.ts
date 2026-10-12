@@ -10,14 +10,11 @@
  * Chat Completions 线，`null`（目录没有转录过的 id）**拒绝这个模型**——挑错的表现是
  * 1212 `WRONG_METHOD`，比直接拒绝更难排查。
  *
- * 另外三件事也刻意留在这里而不是散进两个 mapper：
+ * 另外两件事也刻意留在这里而不是散进两个 mapper：
  *
  * - **ladder 由本层传入**：`glmEffortForLadder` / `buildChatRequest` 只收敛，不查目录。
  *   梯子来自 `GlmModelOption.reasoningEfforts`，空数组 = 该模型完全不发思考控制
  *   （**有意语义**，不是 bug）。
- * - **签名层就地合并**：`applyGlmClientSigning` 门控关闭时原样返回、零网络请求，
- *   所以这里不写任何 `if`。sessionId 在一个适配器实例的生命周期内固定复用，
- *   每次新生成会让 PoW seed 与签名串都变。
  * - **冷却键看状态码 429 与正文里的重置时刻**，而不是只看 `code`。冻结的错误码表里
  *   七条 429 有五条是额度类（`USAGE_LIMIT` / `PLAN_LIMIT` / `NO_BALANCE` / `PLAN_EXPIRED` /
  *   `MODEL_NOT_IN_PLAN`），它们不可重试，而「`code === 'RATE_LIMIT'` 才冷却」会让
@@ -54,7 +51,6 @@ import {
   PROVIDER_NAME,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
-  clientSigningEnabled,
   normalizeRegion,
 } from './types.ts'
 import {
@@ -86,7 +82,6 @@ import {
   processStreamLine,
 } from './mapper-openai.ts'
 import { getCachedCatalog } from './client.ts'
-import { applyGlmClientSigning, GlmClientSigner } from './signing.ts'
 import {
   GlmCodingPlanCredentialStore,
   GlmCodingPlanModelSettingsStore,
@@ -283,16 +278,6 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   private readonly preferences: GlmCodingPlanPreferenceStore | undefined
   private readonly accountPool: GlmCodingPlanAccountPool | null
   private readonly options: GlmCodingPlanAdapterOptions
-  /**
-   * 签名器：每个适配器实例一个。
-   *
-   * 握手结果与私钥按凭据缓存，而一个池里可以同时有两区多个账号，所以做成实例级而不是模块级单例。
-   * 默认门控关闭时它从不被用到（`applyGlmClientSigning` 直接原样返回），
-   * 换凭据时也不需要手动清——因为它按 `apiKey` 派生缓存键。
-   */
-  private readonly signer: GlmClientSigner
-  /** 一个实例内固定复用的会话 id；每次新生成都会改变 PoW seed 与签名串。 */
-  private readonly signingSessionId: string
 
   constructor(
     store: GlmCodingPlanCredentialStore = new GlmCodingPlanCredentialStore(),
@@ -306,10 +291,6 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
     this.preferences = preferences
     this.options = options
     this.accountPool = options.accountPool ?? null
-    this.signer = new GlmClientSigner({
-      ...(options.fetchFn === undefined ? {} : { fetchFn: options.fetchFn }),
-    })
-    this.signingSessionId = 'dsh-glm-coding-plan'
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -473,20 +454,12 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
       const headers = plan.wire === 'anthropic'
         ? glmAnthropicHeaders(key, plan.headers)
         : glmOpenAiHeaders(key, plan.headers)
-      // 就地合并：门控关闭时原样返回、零网络请求，所以这里不需要任何分支。
-      const signed = clientSigningEnabled(process.env)
-        ? await applyGlmClientSigning(headers, { apiKey: key, signal }, {
-          signer: this.signer,
-          sessionId: this.signingSessionId,
-          ...(this.options.fetchFn === undefined ? {} : { fetchFn: this.options.fetchFn }),
-        })
-        : headers
       const body = JSON.stringify(plan.body)
 
       try {
         response = await fetchWithContextBudgetRecovery(fetchFn)(plan.url, {
           method: 'POST',
-          headers: signed,
+          headers,
           body,
           // 空闲看门狗拥有这个 deadline：它在出字时重置，所以一次又长又活跃的生成
           // 不会被一个墙钟上限砍断。

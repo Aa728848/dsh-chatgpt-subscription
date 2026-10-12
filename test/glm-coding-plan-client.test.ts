@@ -588,7 +588,13 @@ describe('GLM 配额读取与缓存', () => {
     const refused = stubFetch([{ match: QUOTA_PATH, payload: { success: false, data: {} } }])
     const refusedRead = await fetchGlmQuota('intl', KEY, { fetchFn: refused.fetchFn, force: true })
     expect(refusedRead.snapshot).toBeNull()
-    expect(refusedRead.error).toContain('success')
+    expect(refusedRead.error).not.toBeNull()
+    // 这句话**原样印在设置卡片上**，所以它必须是人话：既不说空话，也不把内部词汇
+    // （信封字段名、unit 编号、MCP 请求上限这些）漏给用户。技术原因留在代码注释里。
+    expect((refusedRead.error ?? '').length).toBeGreaterThan(0)
+    for (const jargon of ['success', 'unit', 'TIME_LIMIT', 'unit=']) {
+      expect(refusedRead.error).not.toContain(jargon)
+    }
   })
 })
 

@@ -387,19 +387,6 @@ export const USER_AGENT =
   'dsh-chatgpt-subscription (+https://github.com/Aa728848/dsh-chatgpt-subscription)'
 
 // ---------------------------------------------------------------------------
-// Client Signing V4
-// ---------------------------------------------------------------------------
-
-/**
- * 签名层默认关闭（计划 D5、R2，证据等级 C）。
- *
- * 唯一有实测记录的项目做过 A/B 对照：带签名与不带签名的响应**完全一致**（都是 429/1113），
- * 从未观察到服务端因为缺签名而拒绝请求。既然没有任何证据表明缺签名会被拒，
- * 默认开启一个逆向来的签名算法只会平白增加故障面，所以默认关、能力门控。
- */
-export const CLIENT_SIGNING_DEFAULT_ENABLED = false
-
-// ---------------------------------------------------------------------------
 // 业务错误码表
 // ---------------------------------------------------------------------------
 
@@ -613,11 +600,6 @@ export function desktopLoginRelayUrl(appVersion: string, env: NodeJS.ProcessEnv 
 /** 本线路创建 Key 时用的名字（可覆盖，默认值刻意不同于官方客户端的 key 名）。 */
 export function keyName(env: NodeJS.ProcessEnv = process.env): string {
   return textOverride(env, 'DSH_GLM_KEY_NAME') || GLM_KEY_NAME
-}
-
-/** 签名层是否被显式打开；默认关闭（证据等级 C，见 `CLIENT_SIGNING_DEFAULT_ENABLED`）。 */
-export function clientSigningEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return CLIENT_SIGNING_DEFAULT_ENABLED || (env.DSH_GLM_CLIENT_SIGNING ?? '').trim() === '1'
 }
 
 // ---------------------------------------------------------------------------

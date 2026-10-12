@@ -395,7 +395,6 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
             这里只画没有账号卡进度条可画的事实，并且窗口名由共享组件按窗口长度本地化，
             本文件不硬编码「5 小时 / 1 周 / 1 月」。 */}
         <p className="dsha-muted">{poolLabels.quotaFactsScope}</p>
-        <p className="dsha-muted">{t.quotaWindowNames}</p>
         {status?.quotaRefreshing === true && <p className="dsha-notice">{t.quotaRefreshingNote}</p>}
         {status?.quotaError !== undefined && status.quotaError !== null && status.quotaError !== '' && (
           <p className="dsha-notice">{`${t.quotaErrorLabel}: ${status.quotaError}`}</p>

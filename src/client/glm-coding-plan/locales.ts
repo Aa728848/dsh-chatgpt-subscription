@@ -105,7 +105,7 @@ export const zh = {
   invalidCapacity: '容量格式无效：{value}',
 
   quotaSection: '用量与配额',
-  quotaDesc: '数据来自 Coding Plan 的配额接口（该接口用裸 Key 鉴权，不加 Bearer）。',
+  quotaDesc: '数据来自 Coding Plan 的配额接口，页面可见时最多每 60 秒刷新一次。',
   quotaRefresh: '刷新用量',
   quotaRefreshing: '刷新中...',
   quotaSignedOut: '未登录，先在上方完成登录授权。',
@@ -115,7 +115,6 @@ export const zh = {
   quotaRenews: '续费时间',
   quotaReadAt: '读取时间',
   quotaSources: '数据源',
-  quotaWindowNames: '窗口名按窗口长度本地化（5 小时 / 1 周 / 1 月），不在本页硬编码；每个账号自己的进度条画在它的账号卡片里。',
   quotaRefreshingNote: '正在后台刷新配额，下方是上一次读到的数字。',
   quotaErrorLabel: '配额读取失败',
   // 额度类型：如实区分「付费套餐」与「免费体验额度」。免费额度**不写成套餐名**——
@@ -124,7 +123,7 @@ export const zh = {
   quotaAllowancePlan: '付费套餐',
   quotaAllowanceFreeTrial: '免费体验额度',
   quotaAllowanceUnknown: '未判定',
-  quotaAllowanceHint: '登录时探活认定的额度来源。「免费体验额度」按官方文档指新用户注册即自动获得、首次使用起 5 天内每天 800 万 token 的体验额度；额度耗尽时由上游返回 429，本线路不预判。',
+  quotaAllowanceHint: '登录时探活认定的额度来源。「免费体验额度」指新用户注册后自动获得、首次使用起 5 天内每天 800 万 token 的体验额度。',
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
@@ -216,7 +215,7 @@ export const en: Record<keyof typeof zh, string> = {
   invalidCapacity: 'Invalid capacity: {value}',
 
   quotaSection: 'Usage & quota',
-  quotaDesc: 'Read from the Coding Plan quota endpoint, which authenticates with the bare key and no Bearer prefix.',
+  quotaDesc: 'Read from the Coding Plan quota endpoint; refreshes at most once every 60 seconds while visible.',
   quotaRefresh: 'Refresh usage',
   quotaRefreshing: 'Refreshing...',
   quotaSignedOut: 'Not signed in — finish the sign-in above first.',
@@ -226,7 +225,6 @@ export const en: Record<keyof typeof zh, string> = {
   quotaRenews: 'Renews',
   quotaReadAt: 'Read at',
   quotaSources: 'Sources',
-  quotaWindowNames: 'Window names are localized from the window length (5 hours / 1 week / 1 month) rather than hardcoded here; each account\'s own progress bar is drawn on its account card.',
   quotaRefreshingNote: 'Quota is refreshing in the background; the figures below are the last read.',
   quotaErrorLabel: 'Quota read failed',
   // Honesty rule: a free trial is never rendered as a paid plan. Official docs describe
@@ -235,7 +233,7 @@ export const en: Record<keyof typeof zh, string> = {
   quotaAllowancePlan: 'Paid plan',
   quotaAllowanceFreeTrial: 'Free trial allowance',
   quotaAllowanceUnknown: 'Undetermined',
-  quotaAllowanceHint: 'The allowance source established by the sign-in probe. \u201cFree trial allowance\u201d is what official docs describe as 8M tokens per day for 5 days from first use, granted automatically to new accounts; once it runs out the upstream answers 429, which this line does not pre-empt.',
+  quotaAllowanceHint: 'The allowance source established by the sign-in probe. \u201cFree trial allowance\u201d means 8M tokens per day for 5 days from first use, granted automatically to new accounts.',
 }
 
 export const dictionaries = {

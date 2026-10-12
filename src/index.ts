@@ -1442,11 +1442,6 @@ export {
   zcodeCredentialsPath,
 } from './host/glm-coding-plan/adopt.ts'
 export {
-  applyGlmClientSigning,
-  GlmClientSigner,
-  parseGlmCodingPlanApiKey,
-} from './host/glm-coding-plan/signing.ts'
-export {
   fetchGlmQuota,
   getCachedQuota as getCachedGlmCodingPlanQuota,
   loadCatalog as loadGlmCodingPlanCatalog,

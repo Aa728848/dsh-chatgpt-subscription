@@ -701,9 +701,12 @@ export async function fetchGlmQuota(
       ...(plan === null ? {} : { sources: [...sources, SUBSCRIPTION_PATH] }),
     })
     if (snapshot === null) {
+      // 这句会**原样出现在卡片上**，所以只写用户能照做的话；技术原因留在代码里：
+      // `parseQuotaSnapshot` 返回 null 只有两种情况——信封 `success` 不为 true，
+      // 或窗口行全部被丢弃（未知 `unit` 一律丢、`TIME_LIMIT` 是 MCP 请求上限不是套餐窗口）。
       return {
         snapshot: null,
-        error: failure('配额响应里没有可解析的窗口（信封 success 不为 true，或只剩未知 unit / MCP 请求上限）。'),
+        error: failure('上游没有返回可显示的额度窗口。'),
         fromCache: false,
       }
     }
