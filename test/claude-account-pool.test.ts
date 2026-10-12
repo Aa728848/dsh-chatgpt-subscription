@@ -225,7 +225,11 @@ describe('ClaudeAccountPool — an adopted snapshot is a snapshot', () => {
       adopted: true,
       removable: false,
     })
-    await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    // AUTH, not RATE_LIMIT: nothing here is cooling down, so the honest answer
+    // is "this credential needs a new sign-in". The old expectation of
+    // RATE_LIMIT was the aggregate-error bug this change fixes — every
+    // all-accounts-unavailable reason reported itself as a rate limit.
+    await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'AUTH', failure: { status: 401 } })
     expect(refresh).not.toHaveBeenCalled()
 
     // 3. The refresh hook itself is UNREACHABLE for it, and says so.
@@ -313,7 +317,10 @@ describe('ClaudeAccountPool — an adopted snapshot is a snapshot', () => {
     const rows = await pool.listAccounts()
     expect(rows).toHaveLength(1)
     expect(rows[0]!.id).toBe('cl_' + 'a'.repeat(20))
-    await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    // The reason is a rejected credential, and nothing is cooling down, so the
+    // refusal is AUTH. It used to say RATE_LIMIT, which sent the user looking
+    // for a rate limit this account never hit.
+    await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'AUTH', failure: { status: 401 } })
     expect(await store.listAccounts()).toEqual([])
   })
 

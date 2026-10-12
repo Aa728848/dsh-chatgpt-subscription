@@ -456,7 +456,34 @@ export function classifyFailure(
 ): LlmError {
   const code = readErrorCode(detail)
 
+  // A bare status is not a credential verdict on this route.
+  //
+  // Every 403 used to be filed as `INVALID_CREDENTIAL`, and the pool then wrote
+  // `authStatus = 'expired'` onto EVERY account in turn — because the refusal
+  // belongs to the lane, not to one account — after which no request could be
+  // sent at all and the user was told to wait out a cooldown that never started.
+  //
+  // 403 does not mean "your token is bad". It is also what an intermediary
+  // answers: a proxy, a lane policy, a WAF, another plugin in the same lane
+  // refusing the call. Those bodies carry an application-layer shape rather than
+  // an auth one, and telling them apart is exactly what the body is read for
+  // here — a refusal the provider itself words as an authentication failure
+  // still lands on `INVALID_CREDENTIAL` below.
   if (status === 401 || status === 403) {
+    if (status === 403 && refusalIsNotCredential(detail)) {
+      return new LlmError(
+        `${PROVIDER_NAME} refused this request (403) before it reached the model: `
+        + `the refusal did not name a rejected credential, so it most likely came from a proxy, `
+        + `a gateway rule or another component on this lane rather than from the subscription. `
+        + `The stored credential was left untouched.${detail ? ` ${detail}` : ''}`,
+        // PROVIDER_ERROR, deliberately OUTSIDE this route's retry set: the same
+        // request meets the same rule, so retrying only spends quota to hear it
+        // again. It is also NOT a credential verdict, which is what keeps the
+        // pool's accounts out of the `markAuthFailed` path.
+        'PROVIDER_ERROR',
+        { status },
+      )
+    }
     return new LlmError(
       `${PROVIDER_NAME} rejected the stored credential (${status}). `
       + `Sign in again with the CodeBuddy desktop client.${detail ? ` ${detail}` : ''}`,
@@ -527,6 +554,64 @@ export function classifyFailure(
     isHttpContextOverflow(status, detail) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
     { status },
   )
+}
+
+/**
+ * Whether a 403 body carries POSITIVE evidence that the refusal was not a
+ * credential verdict.
+ *
+ * The test is deliberately one-sided. A body this function cannot read — empty,
+ * HTML from a gateway, malformed JSON, a JSON envelope with nothing decisive in
+ * it — answers FALSE, which keeps the long-standing `INVALID_CREDENTIAL`
+ * behaviour. Failing closed that way is right for a credential gate: unreadable
+ * evidence must never be the reason a rejected token stays in rotation.
+ *
+ * What flips the verdict is the shape this route's own subscriptions do NOT
+ * use. The service speaks NUMERIC codes (`readErrorCode`); an
+ * application-layer refusal from a proxy or another plugin in the lane speaks a
+ * STRING code, and says so in its own field names:
+ *
+ * - `{"error":{"code":"dsh_compaction_refused","type":"server_error","retryable":false}}`
+ *   — measured in the field, from a middleware that owns compression on the lane.
+ * - `retryable: false` is the strongest single signal available: no authentication
+ *   failure bothers to state that retrying is pointless, because signing in again
+ *   is exactly what would fix one.
+ *
+ * A numeric `code` anywhere, or no decisive field at all, keeps the credential
+ * verdict.
+ */
+function refusalIsNotCredential(detail: string): boolean {
+  const text = detail.trim()
+  if (text === '' || !text.startsWith('{')) return false
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return false
+  }
+  if (typeof parsed !== 'object' || parsed === null) return false
+
+  const envelope = parsed as Record<string, unknown>
+  const inner = typeof envelope.error === 'object' && envelope.error !== null
+    ? envelope.error as Record<string, unknown>
+    : envelope
+
+  // A numeric code is this subscription's own vocabulary, so its verdict stands.
+  if (typeof inner.code === 'number' || typeof envelope.code === 'number') return false
+
+  // A string code is a different layer speaking: the subscription never sends one.
+  if (typeof inner.code === 'string' && inner.code !== '') return true
+
+  // Otherwise require the explicit "do not retry" statement, paired with a
+  // message, so a JSON object carrying neither a code nor a message (an empty
+  // envelope) is not read as evidence of anything.
+  const retryable = inner.retryable ?? envelope.retryable
+  const hasMessage = typeof inner.message === 'string' || typeof envelope.message === 'string'
+  if (retryable === false && hasMessage) return true
+
+  const type = inner.type ?? envelope.type
+  return typeof type === 'string' && type === 'server_error' && hasMessage
 }
 
 /** Read the subscription's own numeric error code out of a response body. */

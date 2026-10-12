@@ -358,7 +358,10 @@ export class GlmCodingPlanAccountPool extends AccountPoolCore<
       },
       emptyMessage: '还没有登录 ' + PROVIDER_NAME + ' 账号。请在设置页点击登录，或先在 ZCode 客户端登录后使用 adopt。',
       allUnavailableMessage: (count, waitMinutes) =>
-        '全部 ' + count + ' 个 ' + PROVIDER_NAME + ' 账号都处于配额限制或冷却中（429）。最短预计在 ' + waitMinutes + ' 分钟后解除。',
+        '全部 ' + count + ' 个 ' + PROVIDER_NAME + ' 账号都处于配额限制或冷却中（429）。'
+        + (waitMinutes === null ? '目前没有处于冷却中的账号。' : '最短预计在 ' + waitMinutes + ' 分钟后解除。'),
+      allAuthFailedMessage: (count) =>
+        '全部 ' + count + ' 个 ' + PROVIDER_NAME + ' 账号都需要重新登录。',
       ...(options.backend === undefined ? {} : { backend: options.backend }),
       ...(options.maxAccounts === undefined ? {} : { maxAccounts: options.maxAccounts }),
       ...(options.preferAccountId === undefined ? {} : { preferAccountId: options.preferAccountId }),

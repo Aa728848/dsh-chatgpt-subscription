@@ -295,7 +295,12 @@ export class AccountPoolStore {
       },
       emptyMessage: '未登录 Antigravity 账号，请在「设置 → Antigravity」中添加并登录账号。',
       allUnavailableMessage: (count, waitMinutes) =>
-        `全部 ${count} 个 Antigravity 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMinutes} 分钟后解除冷却。`,
+        `全部 ${count} 个 Antigravity 账号均处于配额限制或冷却中 (429)。`
+        + (waitMinutes === null
+          ? '目前没有处于冷却中的账号。'
+          : `最短预计在 ${waitMinutes} 分钟后解除冷却。`),
+      allAuthFailedMessage: (count) =>
+        `全部 ${count} 个 Antigravity 账号均需要重新登录。`,
       backend,
     }
     this.core = new AccountPoolCore(hooks)

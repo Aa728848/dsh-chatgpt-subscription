@@ -229,6 +229,74 @@ describe('AccountPoolCore', () => {
     expect(failure?.message).toMatch(/全部 1 个 Toy 账号均处于配额限制或冷却中/)
   })
 
+  it('reports a rejected pool as AUTH instead of inventing a rate limit and a wait', async () => {
+    // Issue #53, second half: every account marked unusable reached
+    // 'allUnavailableError', which unconditionally said "RATE_LIMIT (429), try
+    // again in N minutes". Nothing was cooling down, so 'shortest' stayed
+    // Infinity and the wait was the hardcoded 15 — a cooldown the user could
+    // wait out forever, while "sign in again" was never mentioned.
+    const pool = build()
+    const a1 = await pool.addAccount(makeCredential(1))
+    await pool.addAccount(makeCredential(2))
+    await pool.markAuthFailed(a1.id, 'refresh token rejected')
+    const second = (await pool.read()).accounts[1]!
+    await pool.markAuthFailed(second.id, 'refresh token rejected')
+
+    const failure = await pool.getEffectiveAccount().then(
+      () => undefined,
+      (error: unknown) => error as { code?: string; failure?: { status?: number }; message: string },
+    )
+    expect(failure?.code).toBe('AUTH')
+    expect(failure?.failure?.status).toBe(401)
+    // The two things the old message fabricated, asserted absent.
+    expect(failure?.message).not.toMatch(/429/)
+    expect(failure?.message).not.toMatch(/15 分钟/)
+    expect(failure?.message).toMatch(/需要重新登录/)
+  })
+
+  it('does not call a merely-tried-out pool a credential failure', async () => {
+    // The tried set is a retry loop's bookkeeping, not a statement about any
+    // credential: a request that has already tried every account has perfectly
+    // good tokens and must not be told to sign in again.
+    const pool = build()
+    const a1 = await pool.addAccount(makeCredential(1))
+    const a2 = await pool.addAccount(makeCredential(2))
+    const tried = new Set([a1.id, a2.id])
+
+    const failure = await pool.getEffectiveAccount(tried).then(
+      () => undefined,
+      (error: unknown) => error as { code?: string; failure?: { status?: number } },
+    )
+    expect(failure?.code).toBe('RATE_LIMIT')
+    expect(failure?.failure?.status).toBe(429)
+  })
+
+  it('never names a wait when no cooldown was measured', async () => {
+    // A provider hook that overrides the sentence still receives the truth:
+    // null, not a fabricated number to interpolate.
+    const seen: Array<number | null> = []
+    const pool = build({
+      allUnavailableMessage: (count, waitMinutes) => {
+        seen.push(waitMinutes)
+        return `${count} unavailable (${waitMinutes})`
+      },
+    })
+    const account = await pool.addAccount(makeCredential(1))
+    await pool.markAuthFailed(account.id, 'rejected')
+
+    // This is the AUTH path, so the hook is not consulted at all.
+    await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'AUTH' })
+    expect(seen).toEqual([])
+
+    // With a real cooldown the hook runs and gets the measured minutes.
+    const cooling = await pool.addAccount(makeCredential(2))
+    await pool.clearAuthFailed(account.id)
+    await pool.markCooldown(account.id, 600_000, '429')
+    await pool.markCooldown(cooling.id, 600_000, '429')
+    await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(seen).toEqual([10])
+  })
+
   it('keeps a failed account in the pool but out of rotation, and restores it on sign-in', async () => {
     const pool = build()
     const a1 = await pool.addAccount(makeCredential(1), '账号1')

@@ -151,8 +151,23 @@ export interface AccountPoolHooks<
   extendSummary?(account: TAccount, base: PoolAccountSummaryDto, now: number): TSummary
   /** Message raised when the pool holds no account at all. */
   emptyMessage?: string
-  /** Message raised when every account is cooling down or unusable. */
-  allUnavailableMessage?(count: number, waitMinutes: number): string
+  /**
+   * Message raised when every account is cooling down or unusable.
+   *
+   * `waitMinutes` is null when NOTHING is cooling down: the caller then knows no
+   * reset instant was measured and must not name one.
+   */
+  allUnavailableMessage?(count: number, waitMinutes: number | null): string
+  /**
+   * Message raised when every unusable account is unusable because its
+   * credential was rejected, and nothing is cooling down.
+   *
+   * Separate from {@link allUnavailableMessage} because the two conditions need
+   * opposite actions: waiting versus signing in again. Reporting a rejected pool
+   * as "rate limited, try again in N minutes" sent people to wait out a cooldown
+   * that never started and would never end.
+   */
+  allAuthFailedMessage?(count: number): string
   /** Accounts this pool accepts; defaults to {@link DEFAULT_MAX_POOL_ACCOUNTS}. */
   maxAccounts?: number
   /**
@@ -890,7 +905,27 @@ export class AccountPoolCore<
     return eligible.find((account) => account.isPrimary) || eligible[0]!
   }
 
-  /** The error every-account-unavailable raises, including the shortest wait. */
+  /**
+   * The error every-account-unavailable raises.
+   *
+   * WHICH unavailable state this is decides both the code and the sentence, and
+   * the two are not interchangeable:
+   *
+   * - Nothing cooling down, and every row unusable because its credential was
+   *   rejected: this is a sign-in problem. Reported as `AUTH` with the sign-in
+   *   remedy. The previous form called it a rate limit and invented "wait 15
+   *   minutes" on top, because the shortest-cooldown scan below finds nothing
+   *   when nothing is cooling down and fell back to a hardcoded 15. The user was
+   *   told to wait out a window that had never started and would never end,
+   *   while the only real fix — signing in again — was never mentioned.
+   * - Anything cooling down: an honest 429, with the measured instant when one
+   *   exists. `waitMinutes` is null when no reset instant was measured, and the
+   *   message then says so instead of naming a made-up number.
+   *
+   * The mixed case (some cooling down, some rejected) reports the 429: a window
+   * really is open, and the sentence names the wait. What it must not do — and
+   * no longer does — is claim a wait when no cooldown was ever written.
+   */
   private allUnavailableError(data: PoolData<TAccount>, now: number): LlmError {
     let shortest = Infinity
     for (const account of data.accounts) {
@@ -898,10 +933,33 @@ export class AccountPoolCore<
         shortest = Math.min(shortest, account.cooldownUntil - now)
       }
     }
-    const waitMinutes = Number.isFinite(shortest) ? Math.ceil(shortest / 60_000) : 15
+
+    // Every account's credential is rejected — asked of the same predicate
+    // `isEligible` consults, so a provider-side rejection (`authRejectedReason`,
+    // which writes no `authStatus`) is not mistaken for a usable row here. This
+    // is deliberately "no usable credential anywhere" rather than "nothing is
+    // cooling down": a request that merely exhausted its own tried set still has
+    // perfectly good credentials and must not be told to sign in again.
+    const credentialUsable = data.accounts.some((account) => this.isCredentialUsable(account))
+    if (!credentialUsable) {
+      return new LlmError(
+        this.hooks.allAuthFailedMessage?.(data.accounts.length)
+          ?? `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均需要重新登录。`,
+        'AUTH',
+        { status: 401 },
+      )
+    }
+
+    // Null, never a fabricated number: `shortest` is Infinity when nothing is
+    // cooling down, and the old `?? 15` is exactly the invented cooldown this
+    // fix removes. A provider may override the sentence, so the hook is told the
+    // truth and left to word it.
+    const waitMinutes = Number.isFinite(shortest) ? Math.ceil(shortest / 60_000) : null
     return new LlmError(
       this.hooks.allUnavailableMessage?.(data.accounts.length, waitMinutes)
-        ?? `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMinutes} 分钟后解除冷却。`,
+        ?? (waitMinutes === null
+          ? `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号当前都不可用，且没有处于冷却中的账号。`
+          : `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMinutes} 分钟后解除冷却。`),
       'RATE_LIMIT',
       { status: 429 },
     )

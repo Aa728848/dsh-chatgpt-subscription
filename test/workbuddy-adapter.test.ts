@@ -117,9 +117,50 @@ describe('WorkBuddy failure classification', () => {
     expect(readErrorCode('<html>401</html>')).toBeNull()
   })
 
-  it('treats 401 and 403 as a rejected credential that must not be retried', () => {
-    const error = classifyFailure(401, 'unauthorized')
-    expect(error.code).toBe('INVALID_CREDENTIAL')
+  it('treats 401 and a bare 403 as a rejected credential that must not be retried', () => {
+    // A 401 is the credential, whatever its body says. A 403 with nothing
+    // decisive in the body is still fail-closed for the same reason: an
+    // unreadable refusal must never be why a rejected token stays in rotation.
+    expect(classifyFailure(401, 'unauthorized').code).toBe('INVALID_CREDENTIAL')
+    expect(classifyFailure(403, '').code).toBe('INVALID_CREDENTIAL')
+    expect(classifyFailure(403, 'Forbidden').code).toBe('INVALID_CREDENTIAL')
+    expect(classifyFailure(403, '<html>403 forbidden</html>').code).toBe('INVALID_CREDENTIAL')
+  })
+
+  it('does NOT read an application-layer 403 as a dead credential', () => {
+    // Issue #53, first half, with the body measured in the field: a middleware
+    // owning compression on the lane refused the call with its own STRING code
+    // and an explicit "not retryable". Filed as INVALID_CREDENTIAL this marked
+    // EVERY pooled account expired in turn and made the whole line unrecoverable
+    // without re-signing in three accounts — for a refusal none of them caused.
+    const refusal = JSON.stringify({
+      error: {
+        type: 'server_error',
+        code: 'dsh_compaction_refused',
+        message: 'dsh native compaction call refused by billion-context: bili owns compression on this lane',
+        retryable: false,
+      },
+    })
+    const error = classifyFailure(403, refusal)
+    expect(error.code).toBe('PROVIDER_ERROR')
+    expect(error.code).not.toBe('INVALID_CREDENTIAL')
+    // Outside the retry set: the same request meets the same rule.
+    const policy = makeAdapter(createWorkBuddyStore()).providerRetryPolicy()
+    if (policy.mode !== 'normal') throw new Error('expected the bounded normal policy')
+    expect(policy.retryableCodes).not.toContain(error.code)
+    // And the message must not send the user to sign in again.
+    expect(error.message).not.toMatch(/sign in again/i)
+    expect(error.message).toMatch(/403/)
+  })
+
+  it('still reads a provider-worded 403 as the credential it names', () => {
+    // Numeric codes are this subscription's own vocabulary, so its verdict
+    // stands even on a 403. This is the half that must NOT become lenient.
+    expect(classifyFailure(403, '{"code":12403,"msg":"check ua"}').code).toBe('INVALID_CREDENTIAL')
+    expect(classifyFailure(403, '{"error":{"code":401,"message":"token expired"}}').code).toBe('INVALID_CREDENTIAL')
+    // An empty JSON envelope proves nothing either way, so it fails closed.
+    expect(classifyFailure(403, '{}').code).toBe('INVALID_CREDENTIAL')
+    expect(classifyFailure(403, '{"error":{}}').code).toBe('INVALID_CREDENTIAL')
   })
 
   it('classifies quota exhaustion carried inside a 400 as retryable rate limiting', () => {
