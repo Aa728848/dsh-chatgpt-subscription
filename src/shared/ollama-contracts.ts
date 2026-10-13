@@ -53,6 +53,40 @@ export interface OllamaWebStatus {
   // service returned nothing' are different states, and the card words them
   // differently.
   catalogSynced: boolean
+  /**
+   * The thinking level the user picked in the settings card; null is 'do not
+   * specify', which leaves each model on its own default.
+   */
+  defaultReasoningEffort: string | null
+}
+
+/**
+ * The thinking levels this line's card offers.
+ *
+ * Deliberately narrower than the union of what every model accepts. Ollama's
+ * thinking control comes in three shapes (see {@link thinkingModeForModel} in
+ * src/host/ollama/types.ts): gpt-oss takes low/medium/high, the boolean models
+ * (deepseek-r1, qwq, qwen3) take only on/off, and every other model takes no
+ * thinking control at all. These four strings are the vocabulary both shapes can
+ * be expressed with, so one dropdown covers the whole line.
+ *
+ * Whether a given model can actually honour a level is decided by the host, not
+ * by this list: {@link thinkForModel} in src/host/ollama/types.ts drops what a
+ * model cannot express, so picking 'high' is safe for a user whose catalog holds
+ * a mixture of families.
+ */
+export const OLLAMA_REASONING_EFFORTS = ['none', 'low', 'medium', 'high'] as const
+export type OllamaReasoningEffort = typeof OLLAMA_REASONING_EFFORTS[number]
+
+/**
+ * Whether a submitted value names a level this line accepts.
+ *
+ * The route uses this to refuse an unknown level outright. Storing one anyway
+ * would be silently useless: {@link thinkForModel} drops a level a model cannot
+ * express, so the card would keep showing a choice that does nothing at all.
+ */
+export function isOllamaReasoningEffort(value: unknown): value is OllamaReasoningEffort {
+  return typeof value === 'string' && (OLLAMA_REASONING_EFFORTS as readonly string[]).includes(value)
 }
 
 /** Actions the accounts endpoint accepts. */

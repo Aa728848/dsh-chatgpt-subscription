@@ -11,7 +11,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { OllamaSection } from '../src/client/ollama/OllamaSection.tsx'
 import { zh } from '../src/client/ollama/locales.ts'
-import type { OllamaWebStatus } from '../src/shared/ollama-contracts.ts'
+import { OLLAMA_REASONING_EFFORTS, type OllamaWebStatus } from '../src/shared/ollama-contracts.ts'
 
 // Typed as the status the host actually sends, so a fixture cannot quietly
 // omit a field the card depends on.
@@ -28,6 +28,7 @@ const STATUS: OllamaWebStatus = {
   enabledModelIds: null,
   usable: true,
   catalogSynced: true,
+  defaultReasoningEffort: null,
 }
 
 let container: HTMLDivElement | null = null
@@ -260,6 +261,117 @@ describe('OllamaSection', () => {
    * JSON input" and that sentence — naming neither the status nor the request —
    * became the error the user was left with.
    */
+  // -------------------------------------------------------------------------
+  // The default thinking level
+  // -------------------------------------------------------------------------
+
+  describe('the default thinking level', () => {
+    /** The dropdown, found by the label the card gives it. */
+    function effortSelect(el: HTMLElement): HTMLSelectElement {
+      const select = el.querySelector('select[aria-label="' + zh.defaultReasoningEffort + '"]')
+      return select as HTMLSelectElement
+    }
+
+    /** Change the dropdown the way a click does, past React's value tracker. */
+    async function choose(select: HTMLSelectElement, value: string): Promise<void> {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set
+      await act(async () => {
+        setter?.call(select, value)
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+    }
+
+    it('offers every level the line knows, plus a way to un-choose one', async () => {
+      const el = await render()
+      const select = effortSelect(el)
+      expect(select, 'the thinking-level dropdown is on the tab').not.toBeNull()
+      // The empty first option is the card's "not specified", which is null on
+      // the wire — the host has to be able to tell it from "not mentioned".
+      expect(select.options[0]?.value).toBe('')
+      expect(select.options[0]?.textContent).toBe(zh.defaultEffortAuto)
+      expect(Array.from(select.options).slice(1).map(option => option.value))
+        .toEqual([...OLLAMA_REASONING_EFFORTS])
+      expect(el.textContent).toContain(zh.defaultReasoningEffort)
+    })
+
+    it('shows the level the host sent, rather than always the default', async () => {
+      const el = await renderWith({ defaultReasoningEffort: 'high' })
+      // A dropdown stuck on its first option would report every stored choice
+      // as unset, and the user would re-pick one that was already in effect.
+      expect(effortSelect(el).value).toBe('high')
+    })
+
+    it('renders with the level left unspecified, which is the common case', async () => {
+      const el = await renderWith({ defaultReasoningEffort: null })
+      expect(effortSelect(el).value).toBe('')
+    })
+
+    it('still renders when an older host answers without the field at all', async () => {
+      // The card once blanked the entire settings page over one absent field.
+      // A host predating this one has no such key, and that answer must read as
+      // "not specified" rather than take the page down.
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        const { defaultReasoningEffort: _omitted, ...withoutField } = STATUS
+        return Response.json({ ok: true, value: withoutField })
+      }))
+      const root = createRoot(container as HTMLDivElement)
+      await act(async () => {
+        root.render(<OllamaSection />)
+      })
+
+      const el = container as HTMLDivElement
+      expect(el.textContent).toContain(zh.title)
+      expect(effortSelect(el).value).toBe('')
+    })
+
+    it('posts the chosen level to the settings route', async () => {
+      const el = await render()
+      const calls: Array<{ url: string; body: unknown }> = []
+      vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+        calls.push({ url: String(url), body: init?.body === undefined ? null : JSON.parse(String(init.body)) })
+        return Response.json({ ok: true, value: STATUS })
+      }))
+
+      await choose(effortSelect(el), 'medium')
+
+      const write = calls.find(call => call.url.endsWith('/ollama/api/settings'))
+      expect(write, 'the choice was written to the settings route').not.toBeUndefined()
+      expect(write?.body).toEqual({ defaultReasoningEffort: 'medium' })
+    })
+
+    it('sends null when the user picks "not specified" again', async () => {
+      const el = await renderWith({ defaultReasoningEffort: 'low' })
+      const calls: Array<{ url: string; body: unknown }> = []
+      vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+        calls.push({ url: String(url), body: init?.body === undefined ? null : JSON.parse(String(init.body)) })
+        return Response.json({ ok: true, value: STATUS })
+      }))
+
+      await choose(effortSelect(el), '')
+
+      // The body must carry the key with a null value. Leaving it out would
+      // leave the stored level in place, and "not specified" would be a choice
+      // the user could never get back to.
+      const write = calls.find(call => call.url.endsWith('/ollama/api/settings'))
+      expect(write?.body).toEqual({ defaultReasoningEffort: null })
+    })
+
+    it('reports a refused level in the tab instead of failing silently', async () => {
+      const el = await render()
+      vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+        if (init?.method === 'POST') {
+          return Response.json({ ok: false, error: 'Unsupported reasoning effort.' })
+        }
+        return Response.json({ ok: true, value: STATUS })
+      }))
+
+      await choose(effortSelect(el), 'high')
+
+      expect(el.textContent).toContain('Unsupported reasoning effort.')
+    })
+  })
+
   describe('a sync the card cannot read', () => {
     async function syncWith(reply: () => Response): Promise<string> {
       const el = await render()

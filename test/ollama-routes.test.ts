@@ -491,4 +491,134 @@ describe('Ollama settings routes', () => {
     await respond({ endpoint: '/models' })
     expect(emitted).not.toContain('llm/adapters-updated')
   })
+
+  // -------------------------------------------------------------------------
+  // 6. The default thinking level reaches the card, and only as a real level
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read the stored settings the way the next process would.
+   *
+   * A reply that echoes the request proves nothing: the value has to survive
+   * the write to disk and come back out of a store that never saw the request.
+   * Every assertion about persistence goes through this, never through
+   * `captured.body.value`.
+   */
+  async function storedSettings(): Promise<{ defaultReasoningEffort?: unknown; enabled?: unknown }> {
+    const onDisk = await fs.readFile(modelSettingsFile, 'utf8')
+      .then(text => JSON.parse(text) as Record<string, unknown>)
+      // A body that was refused writes nothing at all, so the file may not exist
+      // yet. "No file" is a truthful answer here, not a broken test: a store
+      // whose value is still untouched leaves exactly that behind.
+      .catch(() => ({} as Record<string, unknown>))
+    const cold = await new FileModelSettingsStore(modelSettingsFile).read()
+    // Both must agree, or one of the two reads is lying about what was stored.
+    expect(cold.defaultReasoningEffort).toBe(onDisk.defaultReasoningEffort ?? null)
+    return onDisk as { defaultReasoningEffort?: unknown; enabled?: unknown }
+  }
+
+  it('carries the thinking level into the status, starting at null', async () => {
+    // The field the card binds its dropdown to. A status without it left the
+    // dropdown with nothing to show, which is the defect this whole surface
+    // exists to close.
+    const status = await respond({ endpoint: '/status' })
+    expectEnvelope(status, 200)
+    expect((status.body.value as { defaultReasoningEffort?: unknown }).defaultReasoningEffort).toBeNull()
+  })
+
+  it('stores a chosen thinking level, on disk and through a cold read', async () => {
+    const captured = await respond({
+      endpoint: '/settings',
+      method: 'POST',
+      body: { defaultReasoningEffort: 'high' },
+    })
+
+    expectEnvelope(captured, 200)
+    expect((captured.body.value as { defaultReasoningEffort?: unknown }).defaultReasoningEffort).toBe('high')
+    // The picker has to hear about it, or the next request still runs on the
+    // old level until some other line happens to emit.
+    expect(emitted).toContain('llm/adapters-updated')
+    // Persisted, not merely echoed: a fresh store over the same file is the only
+    // thing that proves the user will still have this choice tomorrow.
+    expect((await storedSettings()).defaultReasoningEffort).toBe('high')
+
+    const status = await respond({ endpoint: '/status' })
+    expect((status.body.value as { defaultReasoningEffort?: unknown }).defaultReasoningEffort).toBe('high')
+  })
+
+  it('takes null back, so "not specified" is something the user can undo', async () => {
+    await respond({ endpoint: '/settings', method: 'POST', body: { defaultReasoningEffort: 'medium' } })
+    const captured = await respond({
+      endpoint: '/settings',
+      method: 'POST',
+      body: { defaultReasoningEffort: null },
+    })
+
+    // null is a real answer, not an absent field. Collapsing the two would make
+    // the card's own "not specified" option a no-op the user cannot escape.
+    expectEnvelope(captured, 200)
+    expect((captured.body.value as { defaultReasoningEffort?: unknown }).defaultReasoningEffort).toBeNull()
+    expect((await storedSettings()).defaultReasoningEffort).toBeNull()
+  })
+
+  it('refuses an unknown thinking level and leaves the stored one alone', async () => {
+    await respond({ endpoint: '/settings', method: 'POST', body: { defaultReasoningEffort: 'low' } })
+
+    const captured = await respond({
+      endpoint: '/settings',
+      method: 'POST',
+      body: { defaultReasoningEffort: 'max' },
+    })
+
+    // 'max' is not this line's vocabulary. Storing it anyway would be silently
+    // useless — the adapter drops a level the model cannot express — so the
+    // route refuses instead, and the level the user already chose survives.
+    expectEnvelope(captured, 400)
+    expect(captured.body.error).toContain('reasoning effort')
+    expect((await storedSettings()).defaultReasoningEffort).toBe('low')
+  })
+
+  it('refuses an unknown level from the model branch too, without a half-applied write', async () => {
+    const captured = await respond({
+      endpoint: '/models',
+      method: 'POST',
+      // Both fields present: a body that is half valid must change nothing,
+      // rather than applying the flag and dropping the level on the floor.
+      body: { enabledModelIds: [], defaultReasoningEffort: 'turbo' },
+    })
+
+    expectEnvelope(captured, 400)
+    const stored = await storedSettings()
+    expect(stored.defaultReasoningEffort ?? null, 'no level reached the disk').toBeNull()
+    const status = await respond({ endpoint: '/status' })
+    expect((status.body.value as { enabledModelIds?: unknown }).enabledModelIds).toBeNull()
+  })
+
+  it('accepts the thinking level from the model branch as well', async () => {
+    // The card's model block and its line block both post here, so both have to
+    // reach the same store rather than one of them silently losing the write.
+    const captured = await respond({
+      endpoint: '/models',
+      method: 'POST',
+      body: { defaultReasoningEffort: 'low' },
+    })
+
+    expectEnvelope(captured, 200)
+    expect(emitted).toContain('llm/adapters-updated')
+    expect((await storedSettings()).defaultReasoningEffort).toBe('low')
+  })
+
+  it('leaves the stored level alone when a body does not mention it', async () => {
+    await respond({ endpoint: '/settings', method: 'POST', body: { defaultReasoningEffort: 'high' } })
+    emitted = []
+
+    const captured = await respond({ endpoint: '/settings', method: 'POST', body: { enabled: true } })
+
+    // A body that says nothing about the level must not clear it, and must not
+    // emit: nothing changed.
+    expectEnvelope(captured, 200)
+    expect((captured.body.value as { defaultReasoningEffort?: unknown }).defaultReasoningEffort).toBe('high')
+    expect((await storedSettings()).defaultReasoningEffort).toBe('high')
+    expect(emitted).toContain('llm/adapters-updated')
+  })
 })

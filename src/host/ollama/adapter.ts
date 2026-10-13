@@ -2,6 +2,7 @@ import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
   LlmError,
+  ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions as HarnessGenerateOptions,
   type LlmModelInfo,
@@ -27,13 +28,16 @@ import {
   contextWindowFor,
   floorForcedThinkingTokens,
   ollamaModelSupportsImage,
+  reasoningEffortsForModel,
+  resolveOllamaDefaultEffort,
   thinkForModel,
   wireForModel,
   type OllamaCatalogModel,
+  type OllamaThinkingCapability,
 } from './types.ts'
 import { FileCredentialStore, FileModelSettingsStore, type OllamaCredentials } from './token-store.ts'
 import { OllamaAccountPool } from './account-pool.ts'
-import { loadCatalog, startChat, type OllamaChatMessage, type OllamaRequest } from './client.ts'
+import { fetchModelThinking, loadCatalog, startChat, type OllamaChatMessage, type OllamaRequest } from './client.ts'
 import { applyEvent, closeStream, createStreamState } from './mapper.ts'
 import {
   STREAM_IDLE_TIMEOUT_CODE,
@@ -82,6 +86,18 @@ export class OllamaAdapter extends LlmAdapter {
    * than minting pool state that would outlive the process.
    */
   private readonly accountPool: OllamaAccountPool | null
+
+  /**
+   * What `/api/show` has already said, per model id.
+   *
+   * Only a successful read is remembered. A failed one is a transient condition
+   * (no key, a 500, a proxy), and caching it would pin every model to the
+   * fallback ladder for the life of the process - so it is asked again next time.
+   */
+  private readonly thinkingCache = new Map<string, OllamaThinkingCapability>()
+
+  /** Probes currently in flight, so one model asked twice at once is read once. */
+  private readonly thinkingProbes = new Map<string, Promise<OllamaThinkingCapability | undefined>>()
 
   constructor(
     private readonly store = new FileCredentialStore(),
@@ -144,6 +160,38 @@ export class OllamaAdapter extends LlmAdapter {
     return this.store.read().catch(() => null)
   }
 
+  /**
+   * What this model says about its own thinking, read once and remembered.
+   *
+   * Never throws and never rejects: an adapter that cannot reach `/api/show`
+   * (no key stored yet, service down) is a line that still resolves models and
+   * still chats, one step behind on the ladder.
+   */
+  private async thinkingCapability(modelId: string): Promise<OllamaThinkingCapability | undefined> {
+    const cached = this.thinkingCache.get(modelId)
+    if (cached !== undefined) return cached
+    const inflight = this.thinkingProbes.get(modelId)
+    if (inflight !== undefined) return await inflight
+    const probe = (async (): Promise<OllamaThinkingCapability | undefined> => {
+      try {
+        const credentials = await this.anyCredentials()
+        // Nothing to authenticate the read with is not a failure worth reporting:
+        // it only means the fallback ladder is used until a key exists.
+        if (credentials === null) return undefined
+        const declared = await fetchModelThinking(this.options.fetchFn ?? fetch, credentials, modelId)
+        if (declared !== undefined) this.thinkingCache.set(modelId, declared)
+        return declared
+      } catch {
+        return undefined
+      }
+    })()
+    const tracked = probe.finally(() => {
+      this.thinkingProbes.delete(modelId)
+    })
+    this.thinkingProbes.set(modelId, tracked)
+    return await tracked
+  }
+
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
     const prov = provider || PROVIDER_ID
     const settings = await this.settings()
@@ -167,8 +215,14 @@ export class OllamaAdapter extends LlmAdapter {
 
   async resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     if (signal?.aborted) throw new LlmError('Ollama model resolution aborted', 'ABORTED')
+    const settings = await this.settings()
     const catalog = await this.catalog()
     const entry = catalog.find((model) => model.id === modelId)
+    // Aborted while the catalog was loading: the abort above already threw for
+    // the caller, and a read the caller no longer wants must not be started.
+    const declared = signal?.aborted ? undefined : await this.thinkingCapability(modelId)
+    const efforts = reasoningEffortsForModel(modelId, declared)
+    const defaultEffort = resolveOllamaDefaultEffort(modelId, declared, settings.defaultReasoningEffort)
     return {
       provider,
       id: modelId,
@@ -178,6 +232,16 @@ export class OllamaAdapter extends LlmAdapter {
       // Ollama does not publish a per-model output ceiling, so this is a request
       // level default rather than a claim about the model.
       ...outputReservation(contextWindowFor(entry), DEFAULT_MAX_OUTPUT_TOKENS),
+      // Absent for a model that declares no thinking, which is what the picker
+      // reads as "this model has no levels to choose from".
+      ...(efforts.length === 0
+        ? {}
+        : {
+            reasoning: {
+              efforts: efforts.map((effort) => ({ id: ReasoningEffortId(effort.id), name: effort.name })),
+              ...(defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultEffort) }),
+            },
+          }),
     }
   }
 
@@ -202,7 +266,29 @@ export class OllamaAdapter extends LlmAdapter {
     const fetchFn = this.options.fetchFn ?? fetch
     const options = normalizeGenerateOptions(rawOptions)
     const wire = wireForModel(options.model)
-    const request = await toOllamaRequest(options, this.options.attachments, signal)
+    // A stored default is a per-route preference, not a per-model promise: the
+    // settings card offers one ladder for the whole line, so the level chosen
+    // for one model can be one THIS model cannot express. The caller's own
+    // choice still wins; a level the wire has no room for is dropped from here,
+    // so an unexpressible one costs the level rather than the turn.
+    const configured = (await this.settings()).defaultReasoningEffort
+    const effort = options.reasoningEffort ?? configured ?? undefined
+    // The declared metadata is read in exactly two places below - mapping a
+    // level onto `think`, and flooring a cap too small for forced thinking -
+    // and a turn carrying neither cannot be changed by it. So it is not read for
+    // one: that read is a network call, and `resolveModel` has already made it
+    // for every model this line is about to offer a ladder for.
+    const declared = effort === undefined && options.maxTokens === undefined
+      ? undefined
+      : await this.thinkingCapability(options.model)
+    const request = await toOllamaRequest(
+      effort === undefined || effort === null
+        ? options
+        : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) },
+      this.options.attachments,
+      signal,
+      declared,
+    )
 
     // Account rotation. The payload is key-independent, so it is built once and
     // replayed unchanged while another key can still serve it: a rate-limited or
@@ -582,6 +668,12 @@ export async function toOllamaRequest(
   options: GenerateOptions,
   attachments?: Pick<AttachmentStore, 'readImage'>,
   signal?: AbortSignal,
+  /**
+   * What the target model says about its own thinking, when it was read. Passed
+   * in rather than looked up here because this is a pure projection: it must not
+   * spend a network read to decide what one request may send.
+   */
+  declared?: OllamaThinkingCapability,
 ): Promise<Omit<OllamaRequest, 'signal'>> {
   if (signal?.aborted) throw abortException(signal)
   const messages: OllamaChatMessage[] = []
@@ -664,11 +756,14 @@ export async function toOllamaRequest(
   // text block and a length finish. Raise that cap; a caller stating a larger one
   // is passed through untouched, and an absent cap stays DEFAULT_MAX_OUTPUT_TOKENS,
   // which nothing is short of.
-  const flooredMax = floorForcedThinkingTokens(options.model, options.maxTokens)
+  const flooredMax = floorForcedThinkingTokens(options.model, options.maxTokens, declared)
   if (flooredMax !== undefined) request.maxOutputTokens = flooredMax
   if (options.temperature !== undefined) request.temperature = options.temperature
 
-  const think = thinkForModel(options.model, options.reasoningEffort)
+  // A level this model cannot express is dropped here rather than sent: the
+  // service's own default then applies, which is a weaker turn and never a
+  // failed one.
+  const think = thinkForModel(options.model, options.reasoningEffort, declared)
   if (think !== undefined) request.think = think
 
   const tools = options.tools

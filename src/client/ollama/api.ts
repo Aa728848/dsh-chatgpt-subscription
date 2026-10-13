@@ -31,6 +31,23 @@ export class OllamaApi {
   }
 
   /**
+   * Store the default thinking level, answering with the refreshed status.
+   *
+   * '/settings' replies with the stored settings document rather than with the
+   * status the card renders, so the status is re-read behind the write. That is
+   * the same shape {@link refreshCatalog} needs, and it is why the return type is
+   * a status: handing the settings document to the renderer would blank the
+   * model list the user just configured.
+   *
+   * null is a real value ('do not specify'), not an absent one, so it is sent
+   * explicitly rather than left out of the body.
+   */
+  setDefaultReasoningEffort(effort: string | null): Promise<OllamaWebStatus> {
+    return post<unknown>(`${API}/settings`, { defaultReasoningEffort: effort })
+      .then(() => this.status())
+  }
+
+  /**
    * Replace the enabled-model selection.
    *
    * The whole list is sent rather than a single id's new state, because the card

@@ -3,11 +3,13 @@ import {
   CLOUD_BASE_URL,
   DEFAULT_MAX_OUTPUT_TOKENS,
   NATIVE_CHAT_PATH,
+  NATIVE_SHOW_PATH,
   NATIVE_TAGS_PATH,
   OPENAI_CHAT_PATH,
   OPENAI_MODELS_PATH,
   ollamaHeaders,
   type OllamaCatalogModel,
+  type OllamaThinkingCapability,
   type OllamaWire,
 } from './types.ts'
 import type { OllamaCredentials } from './token-store.ts'
@@ -667,4 +669,69 @@ export async function loadOpenAIModels(
     if (typeof id === 'string' && id !== '') ids.push(id)
   }
   return ids
+}
+
+/**
+ * Read what one model says about its own thinking.
+ *
+ * `POST /api/show` is the only place a model states the values `think` accepts,
+ * and the ladder this line offers has to be exactly those values: DSH rejects an
+ * effort that is not on the ladder before a request is built, and the service
+ * rejects a `think` it does not know. So the metadata, not a prefix list, is
+ * what the picker is built from.
+ *
+ * Returns undefined rather than throwing for every way this can fail - no key, a
+ * 401, a 500, a proxy's HTML where JSON was promised, a document that is not
+ * `/api/show`. The caller falls back to what it already knew about the model,
+ * and a failed probe must never be what breaks a turn.
+ */
+export async function fetchModelThinking(
+  fetchFn: typeof fetch,
+  credentials: OllamaCredentials,
+  modelId: string,
+): Promise<OllamaThinkingCapability | undefined> {
+  let response: Response
+  try {
+    response = await fetchFn(`${CLOUD_BASE_URL}${NATIVE_SHOW_PATH}`, {
+      method: 'POST',
+      headers: headersFor(credentials, 'application/json'),
+      body: JSON.stringify({ model: modelId }),
+      signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+    })
+  } catch {
+    // DNS, TLS, a proxy that refuses, or the timeout above: nothing answered.
+    return undefined
+  }
+  if (!response.ok) return undefined
+  let data: unknown
+  try {
+    data = await response.json()
+  } catch {
+    // The same captive-portal / proxy-interstitial body `fetchCatalog` already
+    // has to survive.
+    return undefined
+  }
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return undefined
+  const thinking = (data as Record<string, unknown>).thinking
+  if (typeof thinking !== 'object' || thinking === null || Array.isArray(thinking)) return undefined
+  const record = thinking as Record<string, unknown>
+  // No `values` array means the service said nothing about this model's
+  // thinking, which is not the same as it having none - both read as "unknown".
+  if (!Array.isArray(record.values)) return undefined
+  const values: (boolean | string)[] = []
+  for (const value of record.values) {
+    if (typeof value === 'boolean') {
+      values.push(value)
+    } else if (typeof value === 'string' && value !== '') {
+      values.push(value)
+    }
+  }
+  // An empty set after filtering is not a ladder: nothing could be selected.
+  if (values.length === 0) return undefined
+  const fallback = record.default
+  const declaredDefault = typeof fallback === 'boolean' || typeof fallback === 'string' ? fallback : undefined
+  return {
+    values,
+    ...(declaredDefault === undefined ? {} : { default: declaredDefault }),
+  }
 }

@@ -2,11 +2,30 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
-import type { OllamaWebStatus } from '../../shared/ollama-contracts.ts'
+import {
+  OLLAMA_REASONING_EFFORTS,
+  type OllamaReasoningEffort,
+  type OllamaWebStatus,
+} from '../../shared/ollama-contracts.ts'
 import { OllamaApi } from './api.ts'
 import { zh } from './locales.ts'
 
 const API = new OllamaApi()
+
+/**
+ * What each thinking level says in this card.
+ *
+ * 'none' is the only one that needs words, because it is not a weaker rung on
+ * the same ladder: it means "send no thinking control", which for the boolean
+ * families (deepseek-r1 and friends) is an explicit off, and for gpt-oss means
+ * nothing at all. The other three are spelled the way the models spell them.
+ */
+const EFFORT_LABELS: Record<OllamaReasoningEffort, string> = {
+  none: 'none（关闭思考）',
+  low: 'low（低）',
+  medium: 'medium（中）',
+  high: 'high（高）',
+}
 
 /**
  * A token count short enough to sit in an account card.
@@ -130,6 +149,13 @@ export function OllamaSection(props: Props): React.ReactElement {
   const setAllModels = useCallback((selectAll: boolean) => {
     applyEnabled(selectAll ? null : [])
   }, [applyEnabled])
+
+  const setEffort = useCallback((value: string) => {
+    // The dropdown's empty option is the card's 'not specified', which is null on
+    // the wire and a real stored value rather than an absent patch: sending
+    // nothing would leave the previous level in place and make it un-undoable.
+    void run('effort', () => API.setDefaultReasoningEffort(value === '' ? null : value))
+  }, [run])
 
   const t = zh
   const pool = status?.pool
@@ -263,6 +289,35 @@ export function OllamaSection(props: Props): React.ReactElement {
             />
           </>
         )}
+      </div>
+
+      <div className="dsha-group">
+        <div className="dsha-grouphead">
+          <h3>{t.enhanced}</h3>
+        </div>
+        <div className="dsha-pref-row">
+          <div>
+            <strong>{t.defaultReasoningEffort}</strong>
+            <p className="dsha-muted">{t.defaultReasoningEffortHint}</p>
+          </div>
+          {/* Read through the nullish coalesce on purpose. A host that
+              predates this field answers without it, and an undefined value on
+              a controlled select is one of the ways a settings page goes blank.
+              The empty option is exactly the state the field's null means, so
+              such a host degrades to "not specified" rather than to an error. */}
+          <select
+            className="dsha-select"
+            aria-label={t.defaultReasoningEffort}
+            value={status?.defaultReasoningEffort ?? ''}
+            disabled={busy !== null}
+            onChange={(event) => setEffort(event.currentTarget.value)}
+          >
+            <option value="">{t.defaultEffortAuto}</option>
+            {OLLAMA_REASONING_EFFORTS.map((effort) => (
+              <option key={effort} value={effort}>{EFFORT_LABELS[effort]}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="dsha-group">

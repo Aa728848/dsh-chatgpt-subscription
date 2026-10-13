@@ -5,12 +5,27 @@ import type { OllamaAccountPool } from './account-pool.ts'
 import { fetchCatalog, type OllamaCatalogResult } from './client.ts'
 import type { FileModelSettingsStore, OllamaCredentials } from './token-store.ts'
 import { CLOUD_BASE_URL } from './types.ts'
-import type { OllamaPoolStatusDto, OllamaWebStatus } from '../../shared/ollama-contracts.ts'
+import {
+  isOllamaReasoningEffort,
+  type OllamaPoolStatusDto,
+  type OllamaReasoningEffort,
+  type OllamaWebStatus,
+} from '../../shared/ollama-contracts.ts'
 
 const ROUTE_PREFIX = '/ollama/api'
 
 /** Where a user creates the keys this line stores. */
 export const OLLAMA_KEYS_URL = 'https://ollama.com/settings/keys'
+
+/**
+ * The one sentence every refused thinking level answers with.
+ *
+ * Names the accepted values because the card sends its own dropdown values, so a
+ * rejected body is a stale card talking to a newer line (or the reverse), and
+ * the fix is on whichever side moved.
+ */
+const UNSUPPORTED_EFFORT_ERROR =
+  'Unsupported reasoning effort. Expected null, or one of: none, low, medium, high.'
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
@@ -98,6 +113,10 @@ export async function getOllamaWebStatus(options: OllamaRouteOptions): Promise<O
     enabledModelIds: settings.enabledModelIds,
     usable: accounts.some(account => isUsable(account, now)),
     catalogSynced: settings.catalogModels.length > 0,
+    // Coerced rather than passed through: this line's whole status used to be
+    // blanked by one absent field, and a settings store built against an older
+    // shape must not be able to do that here.
+    defaultReasoningEffort: settings.defaultReasoningEffort ?? null,
   }
 }
 
@@ -138,13 +157,33 @@ export function registerOllamaRoutes(ctx: Context, options: OllamaRouteOptions):
           return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
         }
         const body = await readRequestJson(request).catch(() => ({}) as Record<string, unknown>)
+        // Read before anything is written, so a body naming a level this line
+        // does not have is refused whole instead of half-applied. null must
+        // survive as a real answer: it is how the card undoes a stored level,
+        // and a truthiness check here would make that undo impossible.
+        let effort: OllamaReasoningEffort | null | undefined
+        if (body.defaultReasoningEffort !== undefined) {
+          const submitted = body.defaultReasoningEffort
+          if (submitted !== null && !isOllamaReasoningEffort(submitted)) {
+            return sendJson(response, 400, { ok: false, error: UNSUPPORTED_EFFORT_ERROR })
+          }
+          effort = submitted
+        }
+        let touched = false
         // The hub card's line switch; every sibling line commits the same flag
         // through its own '/settings', and the picker learns of the change
         // through the same event they emit.
         if (typeof body.enabled === 'boolean') {
           await modelSettings.update({ enabled: body.enabled })
-          ctx.emit?.('llm/adapters-updated')
+          touched = true
         }
+        if (effort !== undefined) {
+          await modelSettings.update({ defaultReasoningEffort: effort })
+          touched = true
+        }
+        // Emitted only for a real write, like '/models': a body that changed
+        // nothing must not rebuild the model picker under the user.
+        if (touched) ctx.emit?.('llm/adapters-updated')
         return sendJson(response, 200, { ok: true, value: await modelSettings.read() })
       }
 
@@ -222,6 +261,19 @@ export function registerOllamaRoutes(ctx: Context, options: OllamaRouteOptions):
           return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
         }
         const body = await readRequestJson(request).catch(() => ({}) as Record<string, unknown>)
+        // Validated first, before either write, for the same reason the
+        // '/settings' branch does it: a rejected body must leave the stored
+        // settings exactly as they were rather than half-applied. The card's
+        // model block and its line block both post here, so both are answered
+        // by the one check.
+        let effort: OllamaReasoningEffort | null | undefined
+        if (body.defaultReasoningEffort !== undefined) {
+          const submitted = body.defaultReasoningEffort
+          if (submitted !== null && !isOllamaReasoningEffort(submitted)) {
+            return sendJson(response, 400, { ok: false, error: UNSUPPORTED_EFFORT_ERROR })
+          }
+          effort = submitted
+        }
         let touched = false
         if (typeof body.enabled === 'boolean') {
           await modelSettings.update({ enabled: body.enabled })
@@ -237,6 +289,10 @@ export function registerOllamaRoutes(ctx: Context, options: OllamaRouteOptions):
               ? body.enabledModelIds.filter((id): id is string => typeof id === 'string')
               : null,
           })
+          touched = true
+        }
+        if (effort !== undefined) {
+          await modelSettings.update({ defaultReasoningEffort: effort })
           touched = true
         }
         // The model picker learns the offer changed only through this event;

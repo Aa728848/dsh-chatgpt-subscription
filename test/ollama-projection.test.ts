@@ -39,6 +39,25 @@ function imageTurn(): never {
 
 const store = { readImage: async () => ({ ref: ATTACHMENT, data: PNG }) }
 
+/**
+ * What `/api/show` says about a model it has nothing to say about.
+ *
+ * The thinking ladder this line offers is read from the service's own metadata,
+ * so a test double has to answer that read the way the service does for a model
+ * with no `thinking` field: successfully, and with nothing in it.
+ */
+function noThinkingMetadata(): Response {
+  return new Response(JSON.stringify({ details: {} }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+/** Whether this request is the metadata read rather than a chat turn. */
+function isMetadataRead(url: string): boolean {
+  return url.endsWith('/api/show')
+}
+
 describe('ollama request projection', () => {
   it('sends a one-shot system prompt that lives outside the history', async () => {
     const request = await toOllamaRequest(options({ system: 'be terse' }))
@@ -276,8 +295,13 @@ describe('OllamaAdapter adapter-level capabilities and streaming', () => {
       update: vi.fn(async () => settings),
       storeCatalog: vi.fn(async () => settings),
     }
+    /** Resolving a model reads its metadata, so the default has to answer that. */
+    const noNetwork = vi.fn(async (input: RequestInfo | URL) => {
+      if (isMetadataRead(String(input))) return noThinkingMetadata()
+      throw new Error(`unexpected request to ${String(input)}`)
+    }) as unknown as typeof fetch
     return new OllamaAdapter(store as never, modelSettings as never, {
-      fetchFn: fetchFn ?? fetch,
+      fetchFn: fetchFn ?? noNetwork,
       loadCatalog: async () => catalog.map(id => ({ id })),
       attachments: store as never,
     })
@@ -302,6 +326,7 @@ describe('OllamaAdapter adapter-level capabilities and streaming', () => {
     }
     const capturedBodies: BodyShape[] = []
     const mockFetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (isMetadataRead(_url)) return noThinkingMetadata()
       capturedBodies.push(JSON.parse(init?.body as string) as BodyShape)
       const stream = new ReadableStream({
         start(controller) {
@@ -417,7 +442,11 @@ describe('ollama in-band stream errors', () => {
    */
   function adapterFor(frames: unknown[], calls: string[], pool?: FakePool): OllamaAdapter {
     const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
-      calls.push(String(input))
+      const url = String(input)
+      // `calls` counts what this line went to the service to SAY, so the
+      // per-model metadata read is answered here and kept out of the count.
+      if (isMetadataRead(url)) return noThinkingMetadata()
+      calls.push(url)
       return new Response(
         frames.map((frame) => 'data: ' + JSON.stringify(frame) + '\n\n').join(''),
         { status: 200, headers: { 'content-type': 'text/event-stream' } },
@@ -533,10 +562,14 @@ describe('ollama in-band stream errors', () => {
     // The same wording inside a body that arrived with a 500 is not in-band
     // evidence: the status already answered, and the verdict it produced is the
     // one this line has always returned here.
-    const fetchFn = vi.fn(async () => new Response('{"error":"rate limit exceeded"}', {
-      status: 500,
-      headers: { 'content-type': 'application/json' },
-    })) as unknown as typeof fetch
+    const chatFetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (isMetadataRead(String(input))) return noThinkingMetadata()
+      return new Response('{"error":"rate limit exceeded"}', {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    const fetchFn = chatFetch as unknown as typeof fetch
     const store = {
       read: vi.fn(async () => ({ apiKey: 'sk-test' })),
       write: vi.fn(async () => undefined),
@@ -552,6 +585,9 @@ describe('ollama in-band stream errors', () => {
 
     const { failure } = await run(adapter)
     expect(failure).toMatchObject({ code: 'SERVER', failure: { status: 500 } })
-    expect(fetchFn).toHaveBeenCalledTimes(1)
+    // The turn was requested once. The other fetch is the per-model metadata
+    // read, which is not a re-request of the call that failed.
+    const chatCalls = chatFetch.mock.calls.filter(([url]) => !isMetadataRead(String(url)))
+    expect(chatCalls).toHaveLength(1)
   })
 })

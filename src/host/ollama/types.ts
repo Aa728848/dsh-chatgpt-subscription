@@ -40,6 +40,8 @@ export const CLOUD_BASE_URL = 'https://ollama.com'
 /** Native surface. */
 export const NATIVE_CHAT_PATH = '/api/chat'
 export const NATIVE_TAGS_PATH = '/api/tags'
+/** Per-model metadata: the one surface where a model states its own thinking levels. */
+export const NATIVE_SHOW_PATH = '/api/show'
 
 /** OpenAI-compatible surface. */
 export const OPENAI_BASE_URL = 'https://ollama.com/v1'
@@ -94,12 +96,17 @@ export const FORCED_THINKING_FLOOR_TOKENS = 512
  *
  * @param modelId - the routed model id.
  * @param requested - the caller's cap, undefined when it stated none.
+ * @param declared - the model's own thinking metadata, when it was read.
  * @returns the cap to request, raised only when that is the difference between an
  * empty truncated answer and a usable one.
  */
-export function floorForcedThinkingTokens(modelId: string, requested: number | undefined): number | undefined {
+export function floorForcedThinkingTokens(
+  modelId: string,
+  requested: number | undefined,
+  declared?: OllamaThinkingCapability,
+): number | undefined {
   if (requested === undefined) return undefined
-  if (thinkingModeForModel(modelId) !== 'levels') return requested
+  if (thinkingModeForModel(modelId, declared) !== 'levels') return requested
   return Math.max(requested, FORCED_THINKING_FLOOR_TOKENS)
 }
 
@@ -191,13 +198,134 @@ export function ollamaModelSupportsImage(modelId: string): boolean {
 export type OllamaThinkingMode = 'levels' | 'boolean' | 'none'
 
 /**
- * Resolve model-specific thinking support in Ollama.
- * Source: official https://github.com/ollama/ollama/blob/main/docs/capabilities/thinking.mdx
- * - 'levels': gpt-oss family (values low, medium, high; cannot disable thinking)
- * - 'boolean': deepseek-r1, qwq, qwen3 families (values true, false)
- * - 'none': all other / unknown models (omit thinking control entirely)
+ * What one model says about its own thinking, as `POST /api/show` reports it.
+ *
+ * `values` is the complete set the wire accepts: a boolean, meaning on/off, or
+ * a level name that model defines itself (gpt-oss declares low/medium/high and
+ * cannot be switched off). `[false]` means the model has no thinking to control,
+ * and an absent `thinking` means the service states nothing about it. `default`
+ * is the value the service uses when a request sends no `think` at all.
+ *
+ * Source: https://github.com/ollama/ollama/blob/main/docs/capabilities/thinking.mdx
  */
-export function thinkingModeForModel(modelId: string): OllamaThinkingMode {
+export interface OllamaThinkingCapability {
+  values: readonly (boolean | string)[]
+  default?: boolean | string
+}
+
+/** One selectable effort, as the picker renders it. */
+export interface OllamaReasoningEffort {
+  /** Sent as the caller's `reasoningEffort` and mapped onto the wire from it. */
+  id: string
+  name: string
+}
+
+/**
+ * The ladder a levels model takes when no metadata could be read for it.
+ *
+ * The list is the fallback, not the answer: it can only ever name families this
+ * file already knows, and a model the service describes with any other level
+ * names has to be sent those names verbatim.
+ */
+const DEFAULT_LEVEL_EFFORTS: readonly OllamaReasoningEffort[] = Object.freeze([
+  { id: 'low', name: 'low' },
+  { id: 'medium', name: 'medium' },
+  { id: 'high', name: 'high' },
+])
+
+/**
+ * One position of a thinking ladder: what the picker offers, and the single value
+ * the wire accepts for it.
+ *
+ * `value` is the reason this table exists. A model states what `think` takes,
+ * and DSH rejects an effort that is not on the ladder before a request is built -
+ * so a position that cannot name a value the model declared is not a position at
+ * all. Keeping both halves in one row is what makes that impossible to get wrong:
+ * the ladder is rendered from these rows, and a request is built by reversing one
+ * row back to its `value`.
+ */
+interface OllamaDeclaredEffort {
+  /** What `think` receives here: a boolean, or a level name. */
+  value: boolean | string
+  /** What the caller selects. */
+  id: string
+  /** What the picker shows. */
+  name: string
+}
+
+/**
+ * The on/off positions a boolean ladder is made of.
+ *
+ * The ids are the two values `thinkForModel` puts on the wire for such a model:
+ * `none` becomes `false`, `low` becomes `true`. The names are the user's, because
+ * on a model that thinks, a bare "none" reads as "this model cannot think"
+ * rather than as the switch that turns its thinking off.
+ */
+const BOOLEAN_EFFORTS: readonly OllamaDeclaredEffort[] = Object.freeze([
+  { value: false, id: 'none', name: '关闭思考' },
+  { value: true, id: 'low', name: '开启思考' },
+])
+
+/** The same two positions as the picker renders them, without the wire value. */
+function booleanEfforts(): OllamaReasoningEffort[] {
+  return BOOLEAN_EFFORTS.map(({ id, name }) => ({ id, name }))
+}
+
+/**
+ * The ladder this model declares, one row per value it accepts.
+ *
+ * Every row is derived from `declared.values` itself, so the ladder can neither
+ * offer a position the wire would refuse nor hide one it will take: a model that
+ * declares `[true]` - thinking on, with no way to switch it off - is offered
+ * exactly that one position and never the off switch, which `false` there would
+ * be refused for.
+ *
+ * Levels keep the model's own spelling and declaration order; the on/off pair
+ * follows them in a fixed order (off, then on). So two models declaring the same
+ * values in a different order offer the same ladder, and the last position a
+ * picker shows is the one that turns thinking on rather than off.
+ */
+function declaredEfforts(declared: OllamaThinkingCapability): OllamaDeclaredEffort[] {
+  const levels: OllamaDeclaredEffort[] = []
+  const switches = new Map<boolean, OllamaDeclaredEffort>()
+  const taken = new Set<string>()
+  for (const value of declared.values) {
+    if (typeof value === 'string') {
+      if (taken.has(value)) continue
+      taken.add(value)
+      levels.push({ value, id: value, name: value })
+      continue
+    }
+    const known = BOOLEAN_EFFORTS.find((entry) => entry.value === value)
+    // A level name that collides with an on/off id keeps the position: it was
+    // declared first, and the id is what both halves of the table key on.
+    if (known === undefined || switches.has(value) || taken.has(known.id)) continue
+    switches.set(value, known)
+    taken.add(known.id)
+  }
+  const off = switches.get(false)
+  const on = switches.get(true)
+  return [...levels, ...(off === undefined ? [] : [off]), ...(on === undefined ? [] : [on])]
+}
+
+/**
+ * Resolve model-specific thinking support in Ollama.
+ *
+ * The service's own metadata outranks the prefix list: `/api/show` is where a
+ * model states the levels it accepts, and it is the only source there is for a
+ * family this file has never heard of. The prefix list stays as the fallback for
+ * a model whose metadata could not be read, and that fallback is unchanged.
+ *
+ * Source: official https://github.com/ollama/ollama/blob/main/docs/capabilities/thinking.mdx
+ * - 'levels': named levels (gpt-oss: low, medium, high; cannot disable thinking)
+ * - 'boolean': booleans (deepseek-r1, qwq, qwen3: true, false)
+ * - 'none': declared [false], declared nothing, or unknown
+ */
+export function thinkingModeForModel(modelId: string, declared?: OllamaThinkingCapability): OllamaThinkingMode {
+  if (declared !== undefined) {
+    if (declared.values.some((value) => typeof value === 'string')) return 'levels'
+    return declared.values.includes(true) ? 'boolean' : 'none'
+  }
   if (!supportsOllamaThinkingControl(modelId, 'native', 'api-key')) return 'none'
   const base = modelId.toLowerCase().split(':')[0] ?? ''
   if (base === 'gpt-oss') {
@@ -210,18 +338,92 @@ export function thinkingModeForModel(modelId: string): OllamaThinkingMode {
 }
 
 /**
+ * The efforts one model can actually be sent, in display order.
+ *
+ * This set is the whole contract with the harness: a level outside it is
+ * rejected before a request is built (see `resolveCallWithInfo`), so it must be
+ * exactly what the wire accepts and no more - which is why, when the model has
+ * declared its own values, this returns that table row for row instead of
+ * choosing from a fixed menu. A model that declares `[false]` is the one case
+ * with a declared value and no ladder at all: `[false]` is the service saying
+ * there is no thinking here to turn on or off.
+ *
+ * Without metadata the families this file knows answer instead, unchanged:
+ * gpt-oss takes the three levels, and a boolean family takes the on/off pair.
+ */
+export function reasoningEffortsForModel(modelId: string, declared?: OllamaThinkingCapability): OllamaReasoningEffort[] {
+  if (declared !== undefined) {
+    if (thinkingModeForModel(modelId, declared) === 'none') return []
+    return declaredEfforts(declared).map(({ id, name }) => ({ id, name }))
+  }
+  const mode = thinkingModeForModel(modelId)
+  if (mode === 'none') return []
+  if (mode === 'boolean') return booleanEfforts()
+  return [...DEFAULT_LEVEL_EFFORTS]
+}
+
+/**
+ * The effort this model's ladder should start on.
+ *
+ * A stored default is a per-route preference, not a per-model promise: the
+ * settings card offers one ladder for the whole line, so a level chosen for one
+ * model can be one this model cannot express - and DSH rejects a level that is
+ * not on the ladder before a request is built. So the order is: the configured
+ * level when this model has it, then the level the model itself defaults to,
+ * then the ladder's own first entry.
+ *
+ * The last step skips a "thinking off" position. A user who picked a thinking
+ * model and was handed that position would silently get a model that never
+ * thinks, which is a worse wrong answer than the mildest level that does think.
+ */
+export function resolveOllamaDefaultEffort(
+  modelId: string,
+  declared: OllamaThinkingCapability | undefined,
+  configured: string | null | undefined,
+): string | undefined {
+  const efforts = reasoningEffortsForModel(modelId, declared)
+  if (efforts.length === 0) return undefined
+  if (typeof configured === 'string' && efforts.some((effort) => effort.id === configured)) {
+    return configured
+  }
+  if (declared?.default !== undefined) {
+    // The declared default is a wire value; the ladder speaks effort ids. Read it
+    // back through the same mapping a request uses, so the default a turn starts
+    // on is the one that would be sent.
+    const wanted = declared.default
+    const match = efforts.find((effort) => thinkForModel(modelId, effort.id, declared) === wanted)
+    if (match !== undefined) return match.id
+  }
+  return efforts.find((effort) => effort.id !== 'none')?.id ?? efforts[0]?.id
+}
+
+/**
  * Map reasoning effort to wire think parameter for the target model.
  * Per Ollama docs:
- * - gpt-oss: only 'low' | 'medium' | 'high' are valid. gpt-oss cannot disable thinking, so 'none'
- *   as well as 'xhigh'/'max'/garbage MUST be omitted (undefined).
+ * - a model that has declared its own values: the effort reverses to the one
+ *   value that model declared for it, and nothing else is sent. A level the
+ *   model never declared is omitted rather than coerced - a model that declares
+ *   `[true]` is never asked for `false`, and one that declares ['low','high'] is
+ *   never handed 'medium'. Omitting is the service's own default, which is a
+ *   weaker turn and never a failed one.
+ * - gpt-oss with no metadata: only 'low' | 'medium' | 'high' are valid. gpt-oss cannot disable
+ *   thinking, so 'none' as well as 'xhigh'/'max'/garbage MUST be omitted (undefined).
  * - boolean models: 'none' -> false; 'low'|'medium'|'high'|'auto'|'true' -> true; garbage -> undefined.
  * - all other models: omit (undefined).
  */
-export function thinkForModel(modelId: string, reasoningEffort: unknown): boolean | string | undefined {
+export function thinkForModel(modelId: string, reasoningEffort: unknown, declared?: OllamaThinkingCapability): boolean | string | undefined {
   if (reasoningEffort === undefined || reasoningEffort === null) return undefined
+  const effort = String(reasoningEffort).toLowerCase()
+  // The reverse of the ladder the picker was rendered from, so a position cannot
+  // mean one thing there and another on the wire.
+  if (declared !== undefined) {
+    for (const entry of declaredEfforts(declared)) {
+      if (entry.id.toLowerCase() === effort) return entry.value
+    }
+    return undefined
+  }
   const mode = thinkingModeForModel(modelId)
   if (mode === 'none') return undefined
-  const effort = String(reasoningEffort).toLowerCase()
   if (mode === 'boolean') {
     if (effort === 'none') return false
     if (effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'auto' || effort === 'true') {

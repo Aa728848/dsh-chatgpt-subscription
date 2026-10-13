@@ -45,6 +45,14 @@ export const zh = {
   unselectAll: '全不选',
   noneSelected: '未选择任何模型，该线路不会出现在模型选择器中。',
 
+  // The thinking level, stated in the words the service actually uses: this
+  // line's models do not share one ladder, so a promise that every model takes
+  // every level would be the one thing this card must not say.
+  enhanced: '增强功能',
+  defaultReasoningEffort: '默认思考档位',
+  defaultReasoningEffortHint: '只对支持思考控制的模型生效。具体可选档位由模型自身决定：gpt-oss 一类只接受 low / medium / high，deepseek-r1 一类只有开或关，其余模型不接受思考控制，Host 会按模型形态收敛。选「不指定」时使用模型自身的默认值。',
+  defaultEffortAuto: '不指定',
+
   // Stated plainly, because these are documented service limits and a user who
   // hits them deserves to know they are not a bug here.
   limitsSection: '能力边界',
@@ -100,6 +108,11 @@ export const en = {
   selectAll: 'Select all',
   unselectAll: 'Clear all',
   noneSelected: 'No models are selected, so this line will not appear in the model picker.',
+
+  enhanced: 'Enhanced',
+  defaultReasoningEffort: 'Default thinking level',
+  defaultReasoningEffortHint: 'Applies only to models that accept thinking control. The levels a model can take are its own: the gpt-oss family takes low / medium / high, the deepseek-r1 family takes only on or off, and the rest take no thinking control at all — the Host narrows the stored level to what the target model accepts. Choose "Do not specify" to leave each model on its own default.',
+  defaultEffortAuto: 'Do not specify',
 
   limitsSection: 'Documented limits',
   limitsHint: 'Ollama Cloud documents these limits; this line does not work around them:',
