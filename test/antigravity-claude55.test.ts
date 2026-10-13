@@ -50,7 +50,7 @@ describe('Antigravity Claude 5.5', () => {
     expect(await adapter.listModels()).toContainEqual(expect.objectContaining({ id, reasoningEfforts: ['low', 'medium', 'high'] }))
     expect(MODELS.find(m => m.id === id)?.inputModalities).toEqual(['text', 'image'])
     expect(await adapter.resolveModel('antigravity', id)).toMatchObject({ id })
-    expect(ROUTING[id].fallbackCandidates).toBeUndefined()
+    expect(Object.keys(ROUTING[id])).toEqual(['off', 'routing', 'defaultRequestId'])
   })
 
   it.each(ids.flatMap(id => [
@@ -79,6 +79,7 @@ describe('Antigravity Claude 5.5', () => {
     expect(mergeCatalogSelection(ids, catalog)).toEqual(ids)
     expect(mergeCatalogSelection([], [])).toEqual(expect.arrayContaining(ids))
     expect(mergeCatalogSelection([], catalog)).toEqual([])
-    expect(mergeCatalogSelection(['claude-opus-4-6'], catalog)).toEqual(['claude-opus-4-6'])
+    // A retired model is no longer in the plugin table, so a stored pick of it is pruned.
+    expect(mergeCatalogSelection(['claude-opus-4-6', ...ids], catalog)).toEqual(ids)
   })
 })

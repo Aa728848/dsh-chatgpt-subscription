@@ -2,7 +2,7 @@
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
-import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
+import { ANTIGRAVITY_IMAGE_TOOL_NAME, CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { CODEX_MODEL_CATALOG } from '../src/shared/model-catalog.ts'
 import { CodexSubscriptionSection, parseCapacity } from '../src/client/CodexSubscriptionSection.tsx'
 import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
@@ -300,6 +300,8 @@ describe('client registration', () => {
       // Step Code 的胶囊同样只是又一个槽位，顺序接在 GLM 那条之后（order 43）。
       'conversation.input.right',
       'tool.call.toolview',
+      // Antigravity 生图工具复用同一张生图卡片，按工具名再注册一次。
+      'tool.call.toolview',
     ])
     // Every provider, MiniMax Code included, lives behind one tabbed settings
     // page, so the hub is the only settings.section entry registered.
@@ -317,9 +319,10 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'step-code-quota', order: 43 }),
     ])
-    expect(registrations.find((registration) => registration.name === 'tool.call.toolview')).toMatchObject({
-      key: CODEX_IMAGE_TOOL_NAME,
-    })
+    expect(registrations.filter((registration) => registration.name === 'tool.call.toolview')).toEqual([
+      expect.objectContaining({ key: CODEX_IMAGE_TOOL_NAME }),
+      expect.objectContaining({ key: ANTIGRAVITY_IMAGE_TOOL_NAME }),
+    ])
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()
   })

@@ -766,9 +766,50 @@ export function getMaxOutputTokens(modelId: string, runtimeModel: string): numbe
   return RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel] || RUNTIME_MAX_OUTPUT_TOKENS[modelId] || 65536
 }
 
+/**
+ * `thinkingBudget` for one Gemini 2.5 runtime at one effort, inside the range
+ * that runtime accepts.
+ *
+ * The ranges are the published Gemini API ones: 2.5 Pro takes 128-32768 and
+ * cannot turn thinking off, 2.5 Flash and Flash-Lite take 0-24576. One table of
+ * 4096 / 16384 / 32768 for every 2.5 model asked Flash for more than its
+ * ceiling at `high`, and asked Pro for an impossible 0 when thinking was off.
+ * Off on Pro is therefore its floor, with the thought summary suppressed by the
+ * caller's `includeThoughts: false`.
+ */
+export function gemini25ThinkingBudget(runtimeModel: string, effort: string): number {
+  const isPro = runtimeModel.startsWith('gemini-2.5-pro')
+  const min = isPro ? 128 : 0
+  const max = isPro ? 32768 : 24576
+  const requested = effort === 'off' || effort === 'none'
+    ? 0
+    : effort === 'high' || effort === 'xhigh'
+      ? max
+      : effort === 'medium'
+        ? 16384
+        : 4096
+  return Math.min(max, Math.max(min, requested))
+}
+
 export function progressExplanationInstruction(tools: GenerateOptions['tools']): string | undefined {
   if (!tools?.length) return undefined
   return ANTIGRAVITY_PROGRESS_INSTRUCTION
+}
+
+/** Wire-level choices the adapter makes per request, outside the caller's options. */
+export interface BuildRequestWireOptions {
+  /**
+   * Send `functionCallingConfig.mode: VALIDATED` for Claude runtimes that carry
+   * tools and no explicit tool choice. Default on; the adapter turns it off for
+   * the rest of the process once the service rejects the mode.
+   */
+  claudeValidatedToolCalling?: boolean
+  /**
+   * Output ceiling `fetchAvailableModels` reported for this runtime. When
+   * known it replaces the built-in RUNTIME_MAX_OUTPUT_TOKENS entry, which is
+   * only a guess kept for when the catalog is missing or silent.
+   */
+  maxOutputTokens?: number
 }
 
 export function buildRequest(
@@ -778,6 +819,7 @@ export function buildRequest(
   runtimeModel: string,
   effort?: string,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
+  wire: BuildRequestWireOptions = {},
 ): Record<string, unknown> {
   const progressInstruction = progressExplanationInstruction(options.tools)
   const request: Record<string, unknown> = {
@@ -805,7 +847,7 @@ export function buildRequest(
   // 2. 带档位后缀、agent 别名及 Gemini 3 运行时：补 includeThoughts，保留路由选择的档位。
   // 3. Gemini 2.5 系列：采用 thinkingBudget 控制思考预算与 includeThoughts。
   // 4. Claude 运行时依赖 anthropic-beta interleaved-thinking 头，非思考模型均不发送 thinkingConfig。
-  const isTiered = runtimeModel === 'gemini-3.8-flash-tiered' || runtimeModel === 'gemini-3.7-flash-tiered'
+  const isTiered = /^gemini-.+-tiered$/.test(runtimeModel)
   const isSuffixed = /^gemini-.+(?:-(?:extra-)?low|-medium|-high|-xhigh)$/.test(runtimeModel)
   const isGemini25 = runtimeModel.startsWith('gemini-2.5-') || model.id.startsWith('gemini-2.5-')
   const isGemini3 = /^gemini-3[.-]/.test(runtimeModel) && !runtimeModel.includes('image')
@@ -814,7 +856,7 @@ export function buildRequest(
   if (isTiered) {
     const selected = (effort || 'medium').toLowerCase()
     const isOff = selected === 'off' || selected === 'none'
-    // Gemini 3.7/3.8 support LOW, MEDIUM and HIGH, but cannot disable thinking.
+    // Tiered runtimes support LOW, MEDIUM and HIGH, but cannot disable thinking.
     // Legacy off/none requests use LOW and suppress the thought summary.
     generationConfig.thinkingConfig = {
       thinkingLevel: selected === 'high' || selected === 'xhigh'
@@ -833,19 +875,12 @@ export function buildRequest(
   } else if (isGemini25) {
     const selected = (effort || 'medium').toLowerCase()
     const isOff = selected === 'off' || selected === 'none'
-    const budget = isOff
-      ? 0
-      : selected === 'high' || selected === 'xhigh'
-        ? 32768
-        : selected === 'medium'
-          ? 16384
-          : 4096
     generationConfig.thinkingConfig = {
-      thinkingBudget: budget,
+      thinkingBudget: gemini25ThinkingBudget(runtimeModel, selected),
       includeThoughts: !isOff,
     }
   }
-  const maxAllowed = getMaxOutputTokens(model.id, runtimeModel)
+  const maxAllowed = wire.maxOutputTokens ?? getMaxOutputTokens(model.id, runtimeModel)
   generationConfig.maxOutputTokens =
     options.maxTokens !== undefined ? Math.min(options.maxTokens, maxAllowed) : maxAllowed
 
@@ -858,8 +893,20 @@ export function buildRequest(
   const tools = convertTools(options.tools, model.id, runtimeModel)
   if (tools) {
     request.tools = tools
-    if (toolChoice) {
-      request.toolConfig = { functionCallingConfig: { mode: mapToolChoiceMode(toolChoice) } }
+    const mode = toolChoice ? mapToolChoiceMode(toolChoice) : undefined
+    if (
+      (mode === undefined || mode === TOOL_CALLING_MODE.auto)
+      && wire.claudeValidatedToolCalling !== false
+      && foldsToolSchemaUnions(model.id, runtimeModel)
+    ) {
+      // VALIDATED is AUTO plus schema-checked calls: the model may still answer
+      // in text, but a function call it emits must match its declaration. Claude
+      // behind Antigravity is asked for it so a malformed call is caught
+      // upstream instead of reaching a tool as unparsable arguments. An explicit
+      // none/any keeps its own mode.
+      request.toolConfig = { functionCallingConfig: { mode: TOOL_CALLING_MODE.validated } }
+    } else if (mode !== undefined) {
+      request.toolConfig = { functionCallingConfig: { mode } }
     }
   }
 
@@ -883,6 +930,8 @@ export interface StreamState {
   hasToolCall: boolean
   usageMetadata: Record<string, number> | null
   finishReason?: string
+  /** Gemini's own explanation beside a non-STOP finish, when it sent one. */
+  finishMessage?: string
   done: boolean
   finished: boolean
 }
@@ -1031,13 +1080,63 @@ export function processStreamLine(line: string, state: StreamState): StreamChunk
   collectUsage(chunk.usageMetadata, state)
   if (responseData !== chunk) collectUsage(responseData.usageMetadata, state)
 
-  const finishReason = asString(candidate?.finishReason) || asString(responseData.finishReason)
+  const finishMessage = asString(candidate?.finishMessage)
+  if (finishMessage) state.finishMessage = finishMessage
+  // A blocked prompt arrives with no candidate at all, only promptFeedback, so
+  // without this the stream "ended before its terminal response" and the user
+  // was told the transport broke instead of why the request was refused.
+  const promptFeedback = isRecord(responseData.promptFeedback) ? responseData.promptFeedback : undefined
+  const blockReason = asString(promptFeedback?.blockReason)
+  const finishReason = asString(candidate?.finishReason) || asString(responseData.finishReason) ||
+    (blockReason ? `PROMPT_BLOCKED:${blockReason}` : undefined)
   if (finishReason) {
     state.finishReason = finishReason
     out.push(...closeCurrentBlock(state))
   }
 
   return out
+}
+
+/**
+ * Gemini finish reasons that mean the response is NOT an answer.
+ *
+ * Reported as a clean stop, each of these ended the turn as if it had
+ * succeeded — usually with nothing visible — and a refused turn's tool calls
+ * would even have run. The Claude route maps refusals the same way.
+ */
+const REFUSED_FINISH_REASONS: Readonly<Record<string, string>> = {
+  SAFETY: 'the response was blocked by safety filters',
+  RECITATION: 'the response was blocked for reciting source material',
+  LANGUAGE: 'the response was in an unsupported language',
+  BLOCKLIST: 'the response contained blocklisted terms',
+  PROHIBITED_CONTENT: 'the response was blocked as prohibited content',
+  SPII: 'the response contained sensitive personal information',
+  IMAGE_SAFETY: 'the generated image was blocked by safety filters',
+  MALFORMED_FUNCTION_CALL: 'the model produced a malformed tool call',
+  UNEXPECTED_TOOL_CALL: 'the model called a tool that was not declared',
+  TOO_MANY_TOOL_CALLS: 'the model produced too many tool calls',
+  MISSING_THOUGHT_SIGNATURE: 'a replayed tool call was missing its thought signature',
+}
+
+function finishReasonFor(state: StreamState): FinishReason {
+  const reason = state.finishReason ?? ''
+  const refusal = reason.startsWith('PROMPT_BLOCKED:')
+    ? `the prompt was blocked (${reason.slice('PROMPT_BLOCKED:'.length)})`
+    : REFUSED_FINISH_REASONS[reason] ??
+      // OTHER is only a failure when it left nothing behind.
+      (reason === 'OTHER' && !state.hasContent ? 'the response stopped for an unspecified reason' : undefined)
+  if (refusal !== undefined) {
+    const detail = state.finishMessage ? `: ${state.finishMessage}` : ''
+    return {
+      kind: 'error',
+      failure: {
+        message: `Antigravity ended the response without an answer — ${refusal} (finishReason: ${reason})${detail}`,
+        code: 'PROVIDER_ERROR',
+      },
+    }
+  }
+  if (reason === 'MAX_TOKENS') return { kind: 'max-tokens' }
+  return state.hasToolCall ? { kind: 'tool-calls' } : { kind: 'stop' }
 }
 
 export function closeStream(state: StreamState): StreamChunk[] {
@@ -1048,14 +1147,9 @@ export function closeStream(state: StreamState): StreamChunk[] {
   state.finished = true
   const out = closeCurrentBlock(state)
   if (state.usageMetadata) out.push({ type: 'usage', usage: tokenUsage(state.usageMetadata) })
-  const reason: FinishReason = state.finishReason === 'MAX_TOKENS'
-    ? { kind: 'max-tokens' }
-    : state.hasToolCall
-      ? { kind: 'tool-calls' }
-      : { kind: 'stop' }
   out.push({
     type: 'finish',
-    reason,
+    reason: finishReasonFor(state),
     replayState: { response: { provider: PROVIDER_ID }, blocks: state.replayBlocks },
   })
   return out

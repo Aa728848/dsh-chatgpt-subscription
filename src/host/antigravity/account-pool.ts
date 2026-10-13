@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
@@ -369,4 +370,104 @@ export class AccountPoolStore {
     const projectId = account.projectId || credentials.projectId
     return { account, token, ...(projectId === undefined ? {} : { projectId }) }
   }
+
+  /**
+   * Cooldowns keyed by account AND quota family.
+   *
+   * Antigravity meters Gemini and "Claude and GPT" as separate allowances
+   * (`retrieveUserQuotaSummary` reports them as separate groups), so a 429 on
+   * one says nothing about the other. The account-wide cooldown the shared core
+   * writes took a whole account out of rotation for 15 minutes when only its
+   * Claude allowance was spent, and its Gemini allowance went unused.
+   *
+   * Held in memory rather than in the pool document: it is a routing hint that
+   * the next 429 re-establishes, and the shared pool format has no per-family
+   * field to put it in.
+   */
+  private readonly familyCooldowns = new Map<string, { until: number; reason: string }>()
+
+  private familyKey(accountId: string, family: AntigravityQuotaFamily): string {
+    return `${family}\u0000${accountId}`
+  }
+
+  /** Cool one account down for one quota family after an upstream 429. */
+  markFamilyCooldown(accountId: string, family: AntigravityQuotaFamily, durationMs: number, reason: string): void {
+    this.familyCooldowns.set(this.familyKey(accountId, family), {
+      until: Date.now() + Math.max(1_000, durationMs),
+      reason,
+    })
+  }
+
+  /** Accounts whose allowance for this family is still cooling down. */
+  familyCoolingAccountIds(family: AntigravityQuotaFamily, now = Date.now()): Set<string> {
+    const ids = new Set<string>()
+    const prefix = `${family}\u0000`
+    for (const [key, entry] of this.familyCooldowns) {
+      if (!key.startsWith(prefix)) continue
+      if (entry.until > now) ids.add(key.slice(prefix.length))
+      else this.familyCooldowns.delete(key)
+    }
+    return ids
+  }
+
+  private shortestFamilyCooldownMs(family: AntigravityQuotaFamily, now = Date.now()): number | null {
+    let shortest = Infinity
+    const prefix = `${family}\u0000`
+    for (const [key, entry] of this.familyCooldowns) {
+      if (key.startsWith(prefix) && entry.until > now) shortest = Math.min(shortest, entry.until - now)
+    }
+    return Number.isFinite(shortest) ? shortest : null
+  }
+
+  /**
+   * {@link getEffectiveAccount} for one quota family: accounts whose allowance
+   * for that family is cooling down are skipped, every other account stays
+   * eligible.
+   *
+   * @throws LlmError `RATE_LIMIT` naming the family's own wait when every
+   *   remaining account is cooling down for this family.
+   */
+  async getEffectiveAccountFor(
+    family: AntigravityQuotaFamily,
+    excludeIds?: ReadonlySet<string>,
+    fetchFn: typeof fetch = fetch,
+  ): Promise<{ account: AntigravityPoolAccount; token: string; projectId?: string }> {
+    const cooling = this.familyCoolingAccountIds(family)
+    const exclude = new Set([...(excludeIds ?? []), ...cooling])
+    try {
+      return await this.getEffectiveAccount(exclude, fetchFn)
+    } catch (error) {
+      if (cooling.size === 0 || !(error instanceof LlmError) || error.code !== 'RATE_LIMIT') throw error
+      const wait = this.shortestFamilyCooldownMs(family)
+      const label = family === 'gemini' ? 'Gemini' : 'Claude / GPT'
+      throw new LlmError(
+        `全部可用 Antigravity 账号的 ${label} 配额均处于限制或冷却中 (429)。`
+          + (wait === null ? '' : `最短预计在 ${Math.ceil(wait / 60_000)} 分钟后解除冷却。`)
+          + '其他模型族的配额不受影响，可切换到其他模型族继续使用。',
+        'RATE_LIMIT',
+        { status: 429, cause: error },
+      )
+    }
+  }
+
+  /** Whether an account not yet tried may still serve this family. */
+  async hasAnotherAvailableAccountFor(
+    family: AntigravityQuotaFamily,
+    triedAccountIds: ReadonlySet<string>,
+  ): Promise<boolean> {
+    const exclude = new Set([...triedAccountIds, ...this.familyCoolingAccountIds(family)])
+    return this.core.hasAnotherAvailableAccount(exclude)
+  }
+}
+
+/**
+ * The separately metered allowance one model draws from.
+ *
+ * Mirrors the quota groups `retrieveUserQuotaSummary` reports: Gemini models in
+ * one, "Claude and GPT models" in the other.
+ */
+export type AntigravityQuotaFamily = 'gemini' | 'claude-gpt'
+
+export function quotaFamilyForModel(modelId: string): AntigravityQuotaFamily {
+  return modelId.startsWith('claude-') || modelId.startsWith('gpt-') ? 'claude-gpt' : 'gemini'
 }

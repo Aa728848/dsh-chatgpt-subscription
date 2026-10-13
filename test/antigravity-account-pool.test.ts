@@ -192,10 +192,14 @@ describe('AntigravityAdapter multi-account failover on 429', () => {
       // Verify the stream received chunk from account 2
       expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: 'Hello from account 2!' })
 
-      // Verify account 1 is in cooldown in the pool
+      // Account 1 is cooling down for Gemini only: its Claude / GPT allowance is
+      // metered separately and must stay in rotation.
+      expect(poolStore.familyCoolingAccountIds('gemini').has(a1.id)).toBe(true)
+      expect(poolStore.familyCoolingAccountIds('claude-gpt').has(a1.id)).toBe(false)
       const accounts = await poolStore.listAccounts()
       const acc1 = accounts.find((a) => a.id === a1.id)
-      expect(acc1?.cooldownUntil).toBeDefined()
+      expect(acc1?.cooldownUntil).toBeUndefined()
+      expect((await poolStore.getEffectiveAccountFor('claude-gpt')).account.id).toBe(a1.id)
     } finally {
       globalThis.fetch = originalFetch
     }

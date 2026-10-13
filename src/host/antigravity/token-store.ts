@@ -30,6 +30,10 @@ export interface AntigravityCatalogModel {
   id: string
   name?: string
   description?: string
+  /** Context window `fetchAvailableModels` reported for this runtime id, when it did. */
+  contextWindow?: number
+  /** Output ceiling `fetchAvailableModels` reported for this runtime id, when it did. */
+  maxOutputTokens?: number
 }
 
 export interface AntigravityModelSettings {

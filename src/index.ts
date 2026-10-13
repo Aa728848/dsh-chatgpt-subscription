@@ -16,6 +16,7 @@ import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './host/common/idle-watchdog.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
+import { createAntigravityImageTool } from './host/antigravity/image-tool.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ProxyManager } from './host/proxy-manager.ts'
@@ -997,6 +998,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
+    // gemini-3.1-flash-image is served as a tool, not a chat model: the harness
+    // accepts text-only assistant output, so only a tool result can carry the image.
+    const disposeAntigravityImageTool = ctx.tools.register(createAntigravityImageTool(
+      antigravityAccountPool,
+      antigravityStore,
+      ctx.attachments,
+      { fetchFn: proxyFetch, isEnabled: () => antigravityPreferences.status().enabled !== false },
+    ))
     // The video ingress for the Kimi route. Registered here because the tool
     // needs the plugin context to resolve the calling session's route before it
     // agrees to attach anything.
@@ -1044,6 +1053,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeProxyWatch()
       disposePreferenceWatch()
       disposeImageTool()
+      disposeAntigravityImageTool()
       disposeVideoTool()
       disposeAdapter()
       disposeRoutes()
@@ -1163,6 +1173,7 @@ export { AccountPoolCore, normalizeRotationStrategy } from './host/common/accoun
 export { dshHomeDir } from './host/common/home.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'
+export { createAntigravityImageTool } from './host/antigravity/image-tool.ts'
 export { createCodexSearchProvider } from './host/codex-search.ts'
 export { createCodexFetchProvider } from './host/codex-fetch.ts'
 export { SearchProviderSwitcher, type SearchProviderSwitcherStatus } from './host/search-provider-switcher.ts'

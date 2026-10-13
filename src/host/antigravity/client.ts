@@ -375,16 +375,34 @@ export function parseCatalogModels(data: unknown): AntigravityCatalogModel[] {
   for (const [modelId, info] of Object.entries(rawModels)) {
     if (typeof info !== 'object' || info === null) continue
     const rec = info as Record<string, unknown>
-    if (rec.isInternal || modelId.startsWith('chat_')) continue
+    // `chat_*` and `tab_*` are the editor's internal chat and tab-completion
+    // models (`tab_flash_lite_preview`, `tab_jump_flash_lite_preview`), not
+    // models a conversation can be routed to.
+    if (rec.isInternal || modelId.startsWith('chat_') || modelId.startsWith('tab_')) continue
 
+    const contextWindow = positiveTokenCount(rec.maxTokens ?? rec.inputTokenLimit ?? rec.contextWindow)
+    const maxOutputTokens = positiveTokenCount(rec.maxOutputTokens ?? rec.outputTokenLimit)
     list.push({
       id: modelId,
       name: typeof rec.displayName === 'string' ? rec.displayName : modelId,
       description: typeof rec.description === 'string' ? rec.description : undefined,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
     })
   }
 
   return list
+}
+
+/**
+ * A token limit from the catalog, or undefined when absent or unusable.
+ *
+ * Protobuf JSON renders int64 fields as strings, so a numeric string is read
+ * the same as a number.
+ */
+function positiveTokenCount(value: unknown): number | undefined {
+  const parsed = typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : value
+  return typeof parsed === 'number' && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 /**

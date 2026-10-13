@@ -1,6 +1,20 @@
 # Changelog
 
 ## Unreleased
+- **[Antigravity] 模型目录与路由对齐线上 `fetchAvailableModels`（2026-10-12 快照）**
+  - **目录**：删除已下线的 Claude Opus 4.6 / Sonnet 4.6（目录里 Claude 只剩 5.5）；Gemini 3.7 Flash 改用目录中真实存在的 `-low/-medium/-high`，不再走未列出的 `gemini-3.7-flash-tiered`；修正 Gemini 3.5 Flash 错位一档（官方 “(Low)” 是 `extra-low`，选 low 原先拿到的是 Medium）；新增 Gemini 3.5 Flash Lite、Gemini 3.1 Flash Lite；目录过滤掉 `tab_*` 编辑器补全模型。
+  - **生图模型下架**：`gemini-3.1-flash-image` 的产出是图片，而 Harness 只接受纯文本的助手输出（dsh-llm `ImageBlock` 注释），聊天线路只能丢掉图片；应改为图片生成工具承载。
+  - **不再静默跨模型降级**：每次请求只发用户所选模型对应的一个运行时 ID。原先 404/429 会悄悄换到 `off` 档或别的模型（3.8 → 3.7 → 3.6、3.1 Pro High → Low），用户拿到的并不是自己选的模型。
+  - **429 按配额族冷却**：Gemini 与 “Claude and GPT” 是分开计量的配额，一族耗尽不再让该账号另一族一起停用 15 分钟；冷却时长优先读 Google 错误体里的 `quotaResetTimeStamp` / `quotaResetDelay` / `RetryInfo.retryDelay`，最后才用 `Retry-After`。
+  - **Gemini 2.5 思考预算按模型收敛**：Flash/Lite 上限 24576（原先 high 发 32768），Pro 下限 128 且不能关闭。
+  - **异常结束原因不再当作正常结束**：`SAFETY`、`RECITATION`、`PROHIBITED_CONTENT`、`MALFORMED_FUNCTION_CALL` 等，以及 `promptFeedback.blockReason`（提示被拦截），都改为 error finish 并附上上游 `finishMessage`；原先会以空回复结束本轮。
+- **[Antigravity] 新增生图工具 `antigravity_image_generate`（同 Codex 生图工具的形态）**
+  - 走已登录的 Antigravity 账号池调用 `gemini-3.1-flash-image`，参数 `prompt`（必填）与可选 `aspectRatio`；返回图片存为附件、渲染为图片块，嵌套调用时以 notice 注入下一轮请求。客户端复用 Codex 的生图卡片。
+  - 计入 Gemini 配额族：429 只冷却该账号的 Gemini 配额并换下一个账号；Antigravity 线路关闭时工具拒绝执行。
+  - 返回图片在入库前校验媒体类型白名单、base64、大小上限与文件头魔数，`thought: true` 的草稿图被跳过；无图时把 `finishReason` 与模型文字一并报出。
+- **[Antigravity] Claude 工具调用使用 `VALIDATED` 模式**：带工具且未显式指定 `toolChoice`（或为 `auto`）的 Claude 请求发送 `functionCallingConfig.mode: VALIDATED`，显式 none/any 不变；Gemini 不受影响。若服务端以 400 拒绝该模式，同一模型去掉 `toolConfig` 重试一次，并在本进程内不再发送（协议回退，不换模型）。
+- **[Antigravity] 上下文/输出上限改为优先读 `fetchAvailableModels`**：目录条目解析 `maxTokens`（或 `inputTokenLimit`）与 `maxOutputTokens`（或 `outputTokenLimit`），兼容 int64 字符串；一个可选模型对应多个运行时 ID 时取最小值，目录缺失时回落内置表；用户覆盖值仍然优先，设置页「默认上下文」随之一致。
+  - **诚实声明**：生图请求的 `requestType: 'image_gen'`、Claude 对 `VALIDATED` 的接受情况、目录上限字段名，均来自社区客户端与公开文档，**没有**用真实账号抓包或实测；三处都留了回退（生图失败如实报错、VALIDATED 被拒自动回退、字段缺失回落内置表）。
 
 ## 0.23.0 - 2026-10-13
 - **[Ollama] 思考档位从「猜白名单」改为「读模型自己声明的事实」，并接通设置页的默认档位（用户报障：ollama 线路缺少模型思考档位选择器）**

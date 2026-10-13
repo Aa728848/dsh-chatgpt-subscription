@@ -18,11 +18,18 @@ import {
   ROUTING,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
+  TOOL_CALLING_MODE,
   type AntigravityModelDef,
 } from './types.ts'
-import { FileCredentialStore, FileModelSettingsStore, type AntigravityPreferenceStore } from './token-store.ts'
+import {
+  FileCredentialStore,
+  FileModelSettingsStore,
+  type AntigravityCatalogModel,
+  type AntigravityPreferenceStore,
+} from './token-store.ts'
 import { ensureApiKey } from './oauth.ts'
 import { antigravityHeaders, endpointCandidates } from './client.ts'
+import { catalogMaxOutputFor, effectiveModelLimits } from './catalog-limits.ts'
 import {
   buildRequest,
   closeStream,
@@ -55,7 +62,69 @@ export function resolveDefaultReasoningEffort(
   return undefined
 }
 
-import { AccountPoolStore } from './account-pool.ts'
+import { AccountPoolStore, quotaFamilyForModel } from './account-pool.ts'
+
+/** Cooldown applied to a 429 that states no reset time anywhere. */
+export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000
+
+/**
+ * Milliseconds in one duration string: protobuf JSON (`"12.5s"`) or Go form
+ * (`"1h2m3.5s"`, `"373.8ms"`). Undefined when the string is neither.
+ */
+export function parseDurationMs(value: string): number | undefined {
+  const text = value.trim()
+  if (!/^(?:\d+(?:\.\d+)?(?:h|ms|m|s|us|µs|ns))+$/.test(text)) return undefined
+  const unitMs: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000, ms: 1, us: 0.001, µs: 0.001, ns: 0.000001 }
+  let total = 0
+  for (const match of text.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s|us|µs|ns)/g)) {
+    total += Number(match[1]) * unitMs[match[2]!]!
+  }
+  return Number.isFinite(total) ? total : undefined
+}
+
+/**
+ * How long one 429 says to wait, or undefined when it does not say.
+ *
+ * Google states the reset in the error body rather than in `Retry-After`:
+ * `ErrorInfo.metadata.quotaResetTimeStamp` (an instant) and `quotaResetDelay`
+ * (a Go duration) for a spent allowance, `RetryInfo.retryDelay` for a short
+ * rate limit. Reading only the header made every Antigravity 429 fall back to
+ * the flat 15 minutes, whether the allowance reset in two seconds or in five
+ * hours. The most specific statement wins; the header is the last resort.
+ */
+export function retryDelayMs(headers: Headers, body: string, now = Date.now()): number | undefined {
+  let parsed: unknown
+  try { parsed = JSON.parse(body) } catch { parsed = undefined }
+  const root = Array.isArray(parsed) ? parsed[0] : parsed
+  const error = typeof root === 'object' && root !== null ? (root as { error?: unknown }).error : undefined
+  const details = typeof error === 'object' && error !== null && Array.isArray((error as { details?: unknown }).details)
+    ? (error as { details: unknown[] }).details
+    : []
+
+  let resetAt: number | undefined
+  let resetDelay: number | undefined
+  let retryDelay: number | undefined
+  for (const detail of details) {
+    if (typeof detail !== 'object' || detail === null) continue
+    const record = detail as Record<string, unknown>
+    const metadata = typeof record.metadata === 'object' && record.metadata !== null
+      ? record.metadata as Record<string, unknown>
+      : undefined
+    if (typeof metadata?.quotaResetTimeStamp === 'string') {
+      const at = Date.parse(metadata.quotaResetTimeStamp)
+      if (Number.isFinite(at)) resetAt = at
+    }
+    if (typeof metadata?.quotaResetDelay === 'string') resetDelay = parseDurationMs(metadata.quotaResetDelay)
+    if (typeof record.retryDelay === 'string') retryDelay = parseDurationMs(record.retryDelay)
+  }
+  if (resetAt !== undefined && resetAt > now) return resetAt - now
+  if (resetDelay !== undefined && resetDelay > 0) return resetDelay
+  if (retryDelay !== undefined && retryDelay > 0) return retryDelay
+
+  const header = headers.get('retry-after')
+  const seconds = header ? Number(header) : NaN
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined
+}
 
 /**
  * Land one stream chunk's usage on its session's cache totals.
@@ -77,8 +146,31 @@ function recordUsageChunk(chunk: StreamChunk, sessionId?: string, accountId?: st
   }, sessionId, accountId)
 }
 
+/**
+ * A 400 that names the tool-calling mode. Matched narrowly so an unrelated
+ * validation error is reported as itself rather than retried.
+ */
+const VALIDATED_REJECTION = /VALIDATED|function_?calling_?config|tool_?config|tool_choice/i
+
+/**
+ * The same request body without its `toolConfig`, when that config asked for
+ * VALIDATED; undefined when it did not (nothing to fall back from).
+ */
+export function withoutValidatedToolConfig(body: string): string | undefined {
+  let parsed: { request?: { toolConfig?: { functionCallingConfig?: { mode?: unknown } } } }
+  try { parsed = JSON.parse(body) } catch { return undefined }
+  if (parsed.request?.toolConfig?.functionCallingConfig?.mode !== TOOL_CALLING_MODE.validated) return undefined
+  delete parsed.request.toolConfig
+  return JSON.stringify(parsed)
+}
+
 export class AntigravityAdapter extends LlmAdapter {
   private readonly accountPool: AccountPoolStore
+  /**
+   * Set once the service refuses `functionCallingConfig.mode: VALIDATED`; from
+   * then on Claude requests leave the mode unset (AUTO) for this process.
+   */
+  private validatedToolCallingRejected = false
 
   constructor(
     private readonly store = new FileCredentialStore(),
@@ -111,15 +203,18 @@ export class AntigravityAdapter extends LlmAdapter {
     const available = MODELS.filter((m) => enabledSet.has(m.id))
     const overrides = settings.contextWindowOverrides || {}
 
-    return available.map((model) => ({
-      provider: prov,
-      id: model.id,
-      name: model.name,
-      inputModalities: model.inputModalities,
-      context: { contextWindow: overrides[model.id] || model.contextWindow },
-      ...outputReservation(overrides[model.id] || model.contextWindow, model.maxTokens),
-      ...(model.reasoningEfforts ? { reasoningEfforts: model.reasoningEfforts } : {}),
-    }))
+    return available.map((model) => {
+      const limits = effectiveModelLimits(model, settings.catalogModels)
+      return {
+        provider: prov,
+        id: model.id,
+        name: model.name,
+        inputModalities: model.inputModalities,
+        context: { contextWindow: overrides[model.id] || limits.contextWindow },
+        ...outputReservation(overrides[model.id] || limits.contextWindow, limits.maxTokens),
+        ...(model.reasoningEfforts ? { reasoningEfforts: model.reasoningEfforts } : {}),
+      }
+    })
   }
 
   async resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
@@ -137,14 +232,15 @@ export class AntigravityAdapter extends LlmAdapter {
 
     const efforts = model.reasoningEfforts || ['low', 'medium', 'high']
     const defaultEffortId = resolveDefaultReasoningEffort(efforts, settings.defaultReasoningEffort)
+    const limits = effectiveModelLimits(model, settings.catalogModels)
 
     return {
       provider,
       id: model.id,
       name: model.name,
       inputModalities: model.inputModalities,
-      context: { contextWindow: overrides[model.id] || model.contextWindow },
-      ...outputReservation(overrides[model.id] || model.contextWindow, model.maxTokens),
+      context: { contextWindow: overrides[model.id] || limits.contextWindow },
+      ...outputReservation(overrides[model.id] || limits.contextWindow, limits.maxTokens),
       // No `systemPromptUpdate: 'in-history'`: this route transports the system
       // prompt out of band (a fixed `systemInstruction` plus a user turn), so it
       // cannot read a later system message as the effective prompt.
@@ -183,9 +279,11 @@ export class AntigravityAdapter extends LlmAdapter {
     const effectiveOptions: GenerateOptions = effectiveEffort
       ? { ...options, reasoningEffort: effectiveEffort as any }
       : options
+    const catalog = settings.catalogModels
+    const maxTokens = options.maxTokens ?? effectiveModelLimits(model, catalog).maxTokens
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal, activity) => this.requestStream({ ...effectiveOptions, maxTokens: options.maxTokens ?? model.maxTokens }, model, watchdogSignal, activity),
+      (watchdogSignal, activity) => this.requestStream({ ...effectiveOptions, maxTokens }, model, watchdogSignal, activity, catalog),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
@@ -198,25 +296,22 @@ export class AntigravityAdapter extends LlmAdapter {
     model: AntigravityModelDef,
     signal: AbortSignal,
     activity?: StreamActivity,
+    catalog?: readonly AntigravityCatalogModel[],
   ): AsyncIterable<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const effort = String(options.reasoningEffort || 'medium').toLowerCase()
     const routing = ROUTING[model.id]
-    const initialRuntime = routing?.routing[effort] || routing?.defaultRequestId || model.id
-    const fallbackRuntime = routing?.off && routing.off !== initialRuntime ? routing.off : undefined
-
-    const candidates = [initialRuntime]
-    if (fallbackRuntime && !candidates.includes(fallbackRuntime)) candidates.push(fallbackRuntime)
-    if (routing?.fallbackCandidates) {
-      for (const fc of routing.fallbackCandidates) {
-        if (!candidates.includes(fc)) candidates.push(fc)
-      }
-    }
+    // Exactly one runtime id: a request is never retried on a different model
+    // than the one the user picked (see AntigravityRoutingEntry).
+    const runtimeModel = routing?.routing[effort] || routing?.defaultRequestId || model.id
+    const family = quotaFamilyForModel(model.id)
+    const runtimeMaxOutput = catalogMaxOutputFor(runtimeModel, catalog)
 
     const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
 
     let recoveredMissingThinkingSignature = false
+    let recoveredValidatedToolCalling = false
     const triedAccountIds = new Set<string>()
     let response: Response | undefined
     // The session this request belongs to, and the pooled account the successful
@@ -229,7 +324,7 @@ export class AntigravityAdapter extends LlmAdapter {
     while (true) {
       let eff: { account: { id: string }; token: string; projectId?: string }
       try {
-        eff = await this.accountPool.getEffectiveAccount(triedAccountIds, fetchFn)
+        eff = await this.accountPool.getEffectiveAccountFor(family, triedAccountIds, fetchFn)
       } catch (poolErr) {
         const poolData = await this.accountPool.read().catch(() => null)
         if (!poolData || poolData.accounts.length === 0) {
@@ -244,71 +339,87 @@ export class AntigravityAdapter extends LlmAdapter {
       const projectId = defaultProj || 'antigravity-default'
       triedAccountIds.add(account.id)
 
-      for (const runtimeModel of candidates) {
-        const body = JSON.stringify(buildRequest(requestOptions, model, projectId, runtimeModel, effort, images))
-        // Fingerprinted before the request goes out, so the attribution describes
-        // the prefix the service actually sees. A retry through the loop below
-        // re-records the same body, which reports no drift — by design.
-        recordCacheRequest(body, requestOptions.sessionId)
-        statsSessionId = requestOptions.sessionId === undefined ? undefined : String(requestOptions.sessionId)
-        statsAccountId = account.id
-        const headers = {
-          ...antigravityHeaders(token),
-          ...(model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {}),
-        }
+      const body = JSON.stringify(buildRequest(requestOptions, model, projectId, runtimeModel, effort, images, {
+        claudeValidatedToolCalling: !this.validatedToolCallingRejected,
+        ...(runtimeMaxOutput === undefined ? {} : { maxOutputTokens: runtimeMaxOutput }),
+      }))
+      // Fingerprinted before the request goes out, so the attribution describes
+      // the prefix the service actually sees. A retry through the loop below
+      // re-records the same body, which reports no drift — by design.
+      recordCacheRequest(body, requestOptions.sessionId)
+      statsSessionId = requestOptions.sessionId === undefined ? undefined : String(requestOptions.sessionId)
+      statsAccountId = account.id
+      const headers = {
+        ...antigravityHeaders(token),
+        ...(model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {}),
+      }
 
-        for (const endpoint of endpointCandidates()) {
-          try {
-            response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-              method: 'POST',
-              headers,
-              body,
-              signal,
-            })
-            if (response.status === 400 && runtimeModel.startsWith('claude-') && !recoveredMissingThinkingSignature) {
-              const diagnostic = await response.clone().text().catch(() => '')
-              // Match the nested Anthropic diagnostic, not arbitrary validation errors.
-              if (/messages\.\d+\.content\.\d+\.thinking\.signature: Field required/.test(diagnostic)) {
-                const clean = JSON.parse(body)
-                let changed = false
-                clean.request.contents = clean.request.contents.map((content: { role: string; parts: Record<string, unknown>[] }) => {
-                  if (content.role !== 'model') return content
-                  const parts = content.parts.flatMap(part => {
-                    if (part.thought === true) { changed = true; return [] }
-                    const copy = { ...part }
-                    for (const key of ['thoughtSignature', 'thought_signature', 'thinkingSignature', 'textSignature']) {
-                      if (key in copy) { delete copy[key]; changed = true }
-                    }
-                    if (!copy.functionCall && !copy.functionResponse && !copy.inlineData && !copy.text) return []
-                    return [copy]
-                  })
-                  return { ...content, parts }
-                }).filter((content: { parts: unknown[] }) => content.parts.length > 0)
-                if (changed) {
-                  recoveredMissingThinkingSignature = true
-                  response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-                    method: 'POST', headers, body: JSON.stringify(clean), signal,
-                  })
-                }
+      for (const endpoint of endpointCandidates()) {
+        try {
+          let sentBody = body
+          response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+            method: 'POST',
+            headers,
+            body,
+            signal,
+          })
+          if (response.status === 400 && runtimeModel.startsWith('claude-') && !recoveredMissingThinkingSignature) {
+            const diagnostic = await response.clone().text().catch(() => '')
+            // Match the nested Anthropic diagnostic, not arbitrary validation errors.
+            if (/messages\.\d+\.content\.\d+\.thinking\.signature: Field required/.test(diagnostic)) {
+              const clean = JSON.parse(body)
+              let changed = false
+              clean.request.contents = clean.request.contents.map((content: { role: string; parts: Record<string, unknown>[] }) => {
+                if (content.role !== 'model') return content
+                const parts = content.parts.flatMap(part => {
+                  if (part.thought === true) { changed = true; return [] }
+                  const copy = { ...part }
+                  for (const key of ['thoughtSignature', 'thought_signature', 'thinkingSignature', 'textSignature']) {
+                    if (key in copy) { delete copy[key]; changed = true }
+                  }
+                  if (!copy.functionCall && !copy.functionResponse && !copy.inlineData && !copy.text) return []
+                  return [copy]
+                })
+                return { ...content, parts }
+              }).filter((content: { parts: unknown[] }) => content.parts.length > 0)
+              if (changed) {
+                recoveredMissingThinkingSignature = true
+                sentBody = JSON.stringify(clean)
+                response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+                  method: 'POST', headers, body: sentBody, signal,
+                })
               }
             }
-            if (response.ok || response.status === 400) break
-            if (response.status === 404) break
-          } catch (err) {
-            if (signal.aborted) throw new LlmError('Antigravity request aborted', 'ABORTED', { cause: err })
           }
+          if (response.status === 400 && !recoveredValidatedToolCalling) {
+            const plain = withoutValidatedToolConfig(sentBody)
+            const diagnostic = plain === undefined ? '' : await response.clone().text().catch(() => '')
+            if (plain !== undefined && VALIDATED_REJECTION.test(diagnostic)) {
+              // A protocol fallback on the same model, not a model switch: the
+              // request goes out again exactly as before minus the tool-calling
+              // mode the service refused, and no later request sends it again.
+              recoveredValidatedToolCalling = true
+              this.validatedToolCallingRejected = true
+              sentBody = plain
+              response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+                method: 'POST', headers, body: sentBody, signal,
+              })
+            }
+          }
+          if (response.ok || response.status === 400) break
+          if (response.status === 404) break
+        } catch (err) {
+          if (signal.aborted) throw new LlmError('Antigravity request aborted', 'ABORTED', { cause: err })
         }
-
-        if (response && (response.ok || response.status === 400)) break
       }
 
       if (response && response.status === 429) {
-        const retryAfterHeader = response.headers.get('retry-after')
-        const retryAfterSec = retryAfterHeader ? Number(retryAfterHeader) : NaN
-        const cooldownMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 15 * 60 * 1000
-        await this.accountPool.markCooldown(account.id, cooldownMs, '429 Rate Limit')
+        const errorBody = await response.clone().text().catch(() => '')
+        const cooldownMs = retryDelayMs(response.headers, errorBody) ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS
+        // Only this family's allowance is spent; the account keeps serving the other.
+        this.accountPool.markFamilyCooldown(account.id, family, cooldownMs, '429 Rate Limit')
 
-        const hasNext = await this.accountPool.hasAnotherAvailableAccount(triedAccountIds)
+        const hasNext = await this.accountPool.hasAnotherAvailableAccountFor(family, triedAccountIds)
         if (hasNext) {
           continue
         }

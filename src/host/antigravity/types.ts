@@ -68,11 +68,23 @@ export const TOOL_CALLING_MODE = {
   validated: 'VALIDATED',
 } as const
 
+/**
+ * How one selectable model reaches its runtime ids.
+ *
+ * Every entry resolves to exactly ONE runtime id per request. There is
+ * deliberately no fallback list: retrying a failed request on a different
+ * model (3.8 → 3.7 → 3.6, Pro High → Pro Low) served the user a model they
+ * did not pick without telling them, which the official client never does. A
+ * runtime id the service rejects now surfaces as that rejection.
+ *
+ * The runtime ids are the ones `fetchAvailableModels` lists (snapshot of
+ * 2026-10-12); the display names it publishes beside them are quoted where the
+ * mapping is not obvious.
+ */
 export interface AntigravityRoutingEntry {
   off: string
   routing: Record<string, string>
   defaultRequestId: string
-  fallbackCandidates?: string[]
 }
 
 export const ROUTING: Record<string, AntigravityRoutingEntry> = {
@@ -86,7 +98,6 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
       xhigh: 'gemini-3.8-flash-tiered',
     },
     defaultRequestId: 'gemini-3.8-flash-tiered',
-    fallbackCandidates: ['gemini-3.7-flash-tiered', 'gemini-3.6-flash-low'],
   },
   // Verified against fetchAvailableModels: Claude 5.5 encodes effort in the runtime ID.
   'claude-opus-5-5': {
@@ -115,40 +126,19 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
     },
     defaultRequestId: 'claude-sonnet-5-5-medium',
   },
-  'claude-opus-4-6': {
-    off: 'claude-opus-4-6-thinking',
-    routing: {
-      minimal: 'claude-opus-4-6-thinking',
-      low: 'claude-opus-4-6-thinking',
-      medium: 'claude-opus-4-6-thinking',
-      high: 'claude-opus-4-6-thinking',
-      xhigh: 'claude-opus-4-6-thinking',
-    },
-    defaultRequestId: 'claude-opus-4-6-thinking',
-    fallbackCandidates: ['claude-sonnet-4-6'],
-  },
-  'claude-sonnet-4-6': {
-    off: 'claude-sonnet-4-6',
-    routing: {
-      minimal: 'claude-sonnet-4-6',
-      low: 'claude-sonnet-4-6',
-      medium: 'claude-sonnet-4-6',
-      high: 'claude-sonnet-4-6',
-      xhigh: 'claude-sonnet-4-6',
-    },
-    defaultRequestId: 'claude-sonnet-4-6',
-  },
+  // The catalog lists no `gemini-3.7-flash-tiered`; it lists the three suffixed
+  // tiers, so 3.7 routes like 3.6 rather than through an id the service no
+  // longer advertises.
   'gemini-3.7-flash': {
-    off: 'gemini-3.7-flash-tiered',
+    off: 'gemini-3.7-flash-low',
     routing: {
-      minimal: 'gemini-3.7-flash-tiered',
-      low: 'gemini-3.7-flash-tiered',
-      medium: 'gemini-3.7-flash-tiered',
-      high: 'gemini-3.7-flash-tiered',
-      xhigh: 'gemini-3.7-flash-tiered',
+      minimal: 'gemini-3.7-flash-low',
+      low: 'gemini-3.7-flash-low',
+      medium: 'gemini-3.7-flash-medium',
+      high: 'gemini-3.7-flash-high',
+      xhigh: 'gemini-3.7-flash-high',
     },
-    defaultRequestId: 'gemini-3.7-flash-tiered',
-    fallbackCandidates: ['gemini-3.6-flash-low'],
+    defaultRequestId: 'gemini-3.7-flash-medium',
   },
   'gemini-3.6-flash': {
     off: 'gemini-3.6-flash-low',
@@ -161,17 +151,33 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
     },
     defaultRequestId: 'gemini-3.6-flash-high',
   },
+  // The 3.5 runtime ids are offset by one from their names. The catalog
+  // publishes `gemini-3.5-flash-extra-low` as "Gemini 3.5 Flash (Low)",
+  // `gemini-3.5-flash-low` as "(Medium)" and `gemini-3-flash-agent` as "(High)",
+  // so each effort is routed by the published display name, not by the suffix.
   'gemini-3.5-flash': {
     off: 'gemini-3.5-flash-extra-low',
     routing: {
       minimal: 'gemini-3.5-flash-extra-low',
-      low: 'gemini-3.5-flash-low',
+      low: 'gemini-3.5-flash-extra-low',
       medium: 'gemini-3.5-flash-low',
       high: 'gemini-3-flash-agent',
       xhigh: 'gemini-3-flash-agent',
     },
     defaultRequestId: 'gemini-3-flash-agent',
   },
+  'gemini-3.5-flash-lite': {
+    off: 'gemini-3.5-flash-lite',
+    routing: {
+      minimal: 'gemini-3.5-flash-lite',
+      low: 'gemini-3.5-flash-lite',
+      medium: 'gemini-3.5-flash-lite',
+      high: 'gemini-3.5-flash-lite',
+      xhigh: 'gemini-3.5-flash-lite',
+    },
+    defaultRequestId: 'gemini-3.5-flash-lite',
+  },
+  // `gemini-pro-agent` is published as "Gemini 3.1 Pro (High)".
   'gemini-3.1-pro': {
     off: 'gemini-3.1-pro-low',
     routing: {
@@ -183,16 +189,16 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
     },
     defaultRequestId: 'gemini-pro-agent',
   },
-  'gemini-3.1-flash-image': {
-    off: 'gemini-3.1-flash-image',
+  'gemini-3.1-flash-lite': {
+    off: 'gemini-3.1-flash-lite',
     routing: {
-      minimal: 'gemini-3.1-flash-image',
-      low: 'gemini-3.1-flash-image',
-      medium: 'gemini-3.1-flash-image',
-      high: 'gemini-3.1-flash-image',
-      xhigh: 'gemini-3.1-flash-image',
+      minimal: 'gemini-3.1-flash-lite',
+      low: 'gemini-3.1-flash-lite',
+      medium: 'gemini-3.1-flash-lite',
+      high: 'gemini-3.1-flash-lite',
+      xhigh: 'gemini-3.1-flash-lite',
     },
-    defaultRequestId: 'gemini-3.1-flash-image',
+    defaultRequestId: 'gemini-3.1-flash-lite',
   },
   'gemini-3-flash': {
     off: 'gemini-3-flash',
@@ -244,7 +250,6 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'gemini-3.8-flash': 65536,
   'gemini-3.8-flash-tiered': 65536,
   'gemini-3.7-flash': 65536,
-  'gemini-3.7-flash-tiered': 65536,
   'gemini-3.7-flash-low': 65536,
   'gemini-3.7-flash-medium': 65536,
   'gemini-3.7-flash-high': 65536,
@@ -256,6 +261,8 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'gemini-3.5-flash-extra-low': 65536,
   'gemini-3.5-flash-low': 65536,
   'gemini-3-flash-agent': 65536,
+  'gemini-3.5-flash-lite': 65536,
+  'gemini-3.1-flash-lite': 65536,
   'gemini-3.1-pro': 65535,
   'gemini-3.1-pro-low': 65535,
   'gemini-3.1-pro-high': 65535,
@@ -268,9 +275,6 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'claude-sonnet-5-5-low': 64000,
   'claude-sonnet-5-5-medium': 64000,
   'claude-sonnet-5-5-high': 64000,
-  'claude-opus-4-6': 64000,
-  'claude-opus-4-6-thinking': 64000,
-  'claude-sonnet-4-6': 64000,
   'gpt-oss-120b': 32768,
   'gpt-oss-120b-medium': 32768,
 }
@@ -318,6 +322,13 @@ export const MODELS: AntigravityModelDef[] = [
     reasoningEfforts: ['low', 'medium', 'high'],
   },
   {
+    id: 'gemini-3.5-flash-lite',
+    name: 'Gemini 3.5 Flash Lite',
+    inputModalities: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
     id: 'gemini-3.1-pro',
     name: 'Gemini 3.1 Pro',
     inputModalities: ['text', 'image'],
@@ -326,12 +337,17 @@ export const MODELS: AntigravityModelDef[] = [
     reasoningEfforts: ['low', 'high'],
   },
   {
-    id: 'gemini-3.1-flash-image',
-    name: 'Gemini 3.1 Flash Image',
+    id: 'gemini-3.1-flash-lite',
+    name: 'Gemini 3.1 Flash Lite',
     inputModalities: ['text', 'image'],
     contextWindow: 1048576,
-    maxTokens: 8192,
+    maxTokens: 65536,
   },
+  // `gemini-3.1-flash-image` is deliberately absent although the catalog lists
+  // it. Its value is the image it generates, and the harness accepts text-only
+  // assistant output (dsh-llm `ImageBlock`: "the current production adapters
+  // declare text-only output"), so a chat route could only discard the picture.
+  // It belongs behind an image-generation tool, the way Codex images are served.
   {
     id: 'gemini-3-flash',
     name: 'Gemini 3 Flash',
@@ -355,6 +371,8 @@ export const MODELS: AntigravityModelDef[] = [
   },
   // Retain the existing Antigravity Claude window/output defaults until the
   // service publishes limits for 5.5; these are not direct-Anthropic limits.
+  // Claude Opus 4.6 / Sonnet 4.6 were removed: the catalog of 2026-10-12 lists
+  // only the 5.5 runtime ids for the Claude family.
   {
     id: 'claude-opus-5-5',
     name: 'Claude Opus 5.5',
@@ -366,22 +384,6 @@ export const MODELS: AntigravityModelDef[] = [
   {
     id: 'claude-sonnet-5-5',
     name: 'Claude Sonnet 5.5',
-    inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 64000,
-    reasoningEfforts: ['low', 'medium', 'high'],
-  },
-  {
-    id: 'claude-opus-4-6',
-    name: 'Claude Opus 4.6',
-    inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 64000,
-    reasoningEfforts: ['low', 'medium', 'high'],
-  },
-  {
-    id: 'claude-sonnet-4-6',
-    name: 'Claude Sonnet 4.6',
     inputModalities: ['text', 'image'],
     contextWindow: 1048576,
     maxTokens: 64000,

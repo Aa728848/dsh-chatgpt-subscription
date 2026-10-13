@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
-import { CODEX_IMAGE_TOOL_NAME } from '../compat.ts'
+import { ANTIGRAVITY_IMAGE_TOOL_NAME, CODEX_IMAGE_TOOL_NAME } from '../compat.ts'
 import { CodexComposerQuota } from './CodexComposerQuota.tsx'
 import { CodexImageToolView, type ImageLoader } from './CodexImageToolView.tsx'
 import { ProviderHubSection } from './ProviderHubSection.tsx'
@@ -205,6 +205,15 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,
+    locale: NS,
+    inject: (sessionId) => ({
+      loadImage: imageLoader(ctx, sessionId),
+    }),
+  }, CodexImageToolView))
+  // Antigravity 生图工具的结果与 Codex 生图同形（prompt 参数 + 图片块），复用同一张卡片。
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview',
+    key: ANTIGRAVITY_IMAGE_TOOL_NAME,
     locale: NS,
     inject: (sessionId) => ({
       loadImage: imageLoader(ctx, sessionId),

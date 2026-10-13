@@ -4,7 +4,7 @@ import { buildRequest, closeStream, createStreamState, processStreamLine } from 
 import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import { MODELS } from '../src/host/antigravity/types.ts'
 
-const ids = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-opus-4-6', 'claude-sonnet-4-6']
+const ids = ['claude-opus-5-5', 'claude-sonnet-5-5']
 function replay(id: string, wireParts: Record<string, unknown>[], sourceModel = id) {
   const state = createStreamState()
   const assembler = new BlockAssembler()

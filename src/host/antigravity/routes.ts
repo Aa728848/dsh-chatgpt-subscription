@@ -5,6 +5,7 @@ import { AccountPoolStore, poolRotationStrategy } from './account-pool.ts'
 import { beginWebLogin, getWebLoginStatus } from './oauth.ts'
 import { ANTIGRAVITY_QUOTA_CACHE_TTL_MS, clearCachedQuota, fetchAccountQuota, getCachedQuota } from './client.ts'
 import { MODELS } from './types.ts'
+import { effectiveModelLimits } from './catalog-limits.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import { getCacheStats } from './cache-stats.ts'
 import type {
@@ -55,14 +56,19 @@ export async function getAntigravityWebStatus(
   const enabledSet = new Set(settings.enabledModelIds)
   const overrides = settings.contextWindowOverrides || {}
 
-  const models: AntigravityModelOption[] = MODELS.map((m) => ({
-    id: m.id,
-    name: m.name,
-    enabled: enabledSet.has(m.id),
-    defaultContextWindow: m.contextWindow,
-    contextWindow: overrides[m.id] || m.contextWindow,
-    reasoningEfforts: m.reasoningEfforts,
-  }))
+  const models: AntigravityModelOption[] = MODELS.map((m) => {
+    // The same limit the adapter advertises, so the card's "default" is the
+    // window a conversation actually gets without an override.
+    const { contextWindow } = effectiveModelLimits(m, settings.catalogModels)
+    return {
+      id: m.id,
+      name: m.name,
+      enabled: enabledSet.has(m.id),
+      defaultContextWindow: contextWindow,
+      contextWindow: overrides[m.id] || contextWindow,
+      reasoningEfforts: m.reasoningEfforts,
+    }
+  })
 
   const accounts = await accountPool.listAccounts().catch(() => [])
   const poolData = await accountPool.read().catch(() => null)

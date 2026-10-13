@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
+import { AccountPoolStore } from '../src/host/antigravity/account-pool.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/antigravity/token-store.ts'
 import { BlockAssembler, createAssistantMessage, createToolResultMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
@@ -68,7 +69,16 @@ describe('AntigravityAdapter', () => {
         { functionCall: { id: 'run-1', name: 'run_code', args: { code: 'print(1)' } }, thoughtSignature: 'call-state' },
       ])
       expect(captured[1].request.contents[2].parts[0].functionResponse).toEqual({ id: 'run-1', name: 'run_code', response: { output: '1' } })
-      for (const body of captured) expect(body.request.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH', includeThoughts: true })
+      // 3.8 is served through its tiered runtime, which takes the level in the
+      // request; 3.7 has no tiered runtime in the catalog and encodes the level
+      // in its runtime id instead.
+      const expected = modelId === 'gemini-3.8-flash'
+        ? { model: 'gemini-3.8-flash-tiered', thinkingConfig: { thinkingLevel: 'HIGH', includeThoughts: true } }
+        : { model: 'gemini-3.7-flash-high', thinkingConfig: { includeThoughts: true } }
+      for (const body of captured) {
+        expect(body.model).toBe(expected.model)
+        expect(body.request.generationConfig.thinkingConfig).toEqual(expected.thinkingConfig)
+      }
 
       // The same history as harness 0.1.7 delivers it: the result is its own
       // `role: 'tool'` message, which the adapter normalizes before any mapper
@@ -103,7 +113,13 @@ describe('AntigravityAdapter', () => {
     expect(models.length).toBeGreaterThan(0)
     expect(models.some((m) => m.id === 'gemini-3.8-flash')).toBe(true)
     expect(models.some((m) => m.id === 'gemini-3.7-flash')).toBe(true)
-    expect(models.some((m) => m.id === 'claude-opus-4-6')).toBe(true)
+    expect(models.some((m) => m.id === 'claude-opus-5-5')).toBe(true)
+    expect(models.some((m) => m.id === 'gemini-3.5-flash-lite')).toBe(true)
+    expect(models.some((m) => m.id === 'gemini-3.1-flash-lite')).toBe(true)
+    // Gone from the service catalog, or unusable through a text-only chat route.
+    for (const removed of ['claude-opus-4-6', 'claude-sonnet-4-6', 'gemini-3.1-flash-image']) {
+      expect(models.some((m) => m.id === removed)).toBe(false)
+    }
 
     const g38 = models.find((m) => m.id === 'gemini-3.8-flash')!
     expect(g38.name).toBe('Gemini 3.8 Flash')
@@ -265,7 +281,7 @@ describe('AntigravityAdapter', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
-  it('handles 404 fallback routing when primary runtime candidate fails', async () => {
+  it('reports a 404 for the selected runtime instead of retrying on a lower tier', async () => {
     const store = new FileCredentialStore()
     const modelSettings = new FileModelSettingsStore()
 
@@ -301,26 +317,24 @@ describe('AntigravityAdapter', () => {
 
     try {
       const adapter = new AntigravityAdapter(store, modelSettings)
-      const chunks: StreamChunk[] = []
-      for await (const chunk of adapter.stream({
-        provider: 'antigravity',
-        model: 'gemini-3.6-flash',
-        reasoningEffort: 'high',
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-      } as unknown as GenerateOptions)) {
-        chunks.push(chunk)
+      const run = async () => {
+        for await (const _chunk of adapter.stream({
+          provider: 'antigravity',
+          model: 'gemini-3.6-flash',
+          reasoningEffort: 'high',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        } as unknown as GenerateOptions)) { /* drain */ }
       }
 
-      expect(fetchCalls.length).toBe(2)
-      expect(fetchCalls[0].model).toBe('gemini-3.6-flash-high')
-      expect(fetchCalls[1].model).toBe('gemini-3.6-flash-low')
-      expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: 'Hello from fallback' })
+      await expect(run()).rejects.toMatchObject({ code: 'PROVIDER_ERROR', failure: { status: 404 } })
+      // The user picked High: a rejected High is reported, never quietly served as Low.
+      expect(fetchCalls.map((call) => call.model)).toEqual(['gemini-3.6-flash-high'])
     } finally {
       globalThis.fetch = originalFetch
     }
   })
 
-  it('handles 429 fallback routing to next candidate when primary model is exhausted', async () => {
+  it('reports a 429 on the selected model without switching models, cooling only that quota family', async () => {
     const store = new FileCredentialStore()
     const modelSettings = new FileModelSettingsStore()
 
@@ -331,45 +345,40 @@ describe('AntigravityAdapter', () => {
 
     const fetchCalls: Array<{ model: string }> = []
     const originalFetch = globalThis.fetch
+    const errorBody = JSON.stringify({ error: {
+      code: 429, status: 'RESOURCE_EXHAUSTED', message: 'quota exhausted',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', metadata: { quotaResetDelay: '2h30m' } }],
+    } })
 
     globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body))
-      const reqModel = body.model
-      fetchCalls.push({ model: reqModel })
-
-      if (reqModel === 'gemini-3.8-flash-tiered') {
-        return new Response('{"error":{"code":429,"message":"RESOURCE_EXHAUSTED"}}', { status: 429 })
-      }
-
-      const sseContent = 'data: {"candidates":[{"content":{"parts":[{"text":"Hello from 3.7 fallback"}]}}],"finishReason":"STOP"}\n'
-      return new Response(sseContent, {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      })
+      fetchCalls.push({ model: body.model })
+      return new Response(errorBody, { status: 429 })
     }) as typeof fetch
 
     try {
-      const adapter = new AntigravityAdapter(store, modelSettings)
-      const chunks: StreamChunk[] = []
-      for await (const chunk of adapter.stream({
-        provider: 'antigravity',
-        model: 'gemini-3.8-flash',
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'test 429' }] }],
-      } as unknown as GenerateOptions)) {
-        chunks.push(chunk)
+      const pool = new AccountPoolStore(undefined, undefined, store)
+      const adapter = new AntigravityAdapter(store, modelSettings, undefined, {}, pool)
+      const run = async () => {
+        for await (const _chunk of adapter.stream({
+          provider: 'antigravity',
+          model: 'gemini-3.8-flash',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'test 429' }] }],
+        } as unknown as GenerateOptions)) { /* drain */ }
       }
 
-      expect(fetchCalls.length).toBe(3)
-      expect(fetchCalls[0].model).toBe('gemini-3.8-flash-tiered')
-      expect(fetchCalls[1].model).toBe('gemini-3.8-flash-tiered')
-      expect(fetchCalls[2].model).toBe('gemini-3.7-flash-tiered')
-      expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: 'Hello from 3.7 fallback' })
+      await expect(run()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+      // Both endpoints were asked for the selected model, and no other model.
+      expect(new Set(fetchCalls.map((call) => call.model))).toEqual(new Set(['gemini-3.8-flash-tiered']))
+      const accountId = (await pool.read()).accounts[0]!.id
+      expect(pool.familyCoolingAccountIds('gemini').has(accountId)).toBe(true)
+      expect(pool.familyCoolingAccountIds('claude-gpt').has(accountId)).toBe(false)
     } finally {
       globalThis.fetch = originalFetch
     }
   })
 
-  it.each(['gemini-3.8-flash', 'claude-opus-4-6'])('carries a pasted image on the %s route as inlineData instead of dropping it', async (modelId) => {
+  it.each(['gemini-3.8-flash', 'claude-opus-5-5'])('carries a pasted image on the %s route as inlineData instead of dropping it', async (modelId) => {
     const store = new FileCredentialStore()
     vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
     const modelSettings = new FileModelSettingsStore()

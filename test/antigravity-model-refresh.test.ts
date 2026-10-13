@@ -58,18 +58,18 @@ describe('Antigravity catalog selection merge', () => {
   // The API listing is a request-level catalog whose ids are runtime names.
   const API_CATALOG = [
     { id: 'gemini-3.8-flash-tiered', name: 'gemini-3.8-flash-tiered' },
-    { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)' },
+    { id: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
     { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' },
   ]
 
   it('keeps a stored selection the API catalog cannot name', () => {
     // The picker and the adapter index the plugin table (gemini-3.8-flash,
-    // claude-opus-4-6), which shares no vocabulary with the API ids. Pruning
+    // claude-opus-5-5), which shares no vocabulary with the API ids. Pruning
     // the selection against the API ids emptied it on the first refresh, so
     // every checkbox rendered unchecked every time the card was reopened.
     expect(mergeCatalogSelection(['gemini-3.8-flash'], API_CATALOG)).toEqual(['gemini-3.8-flash'])
-    expect(mergeCatalogSelection(['gemini-3.8-flash', 'claude-opus-4-6'], API_CATALOG))
-      .toEqual(['gemini-3.8-flash', 'claude-opus-4-6'])
+    expect(mergeCatalogSelection(['gemini-3.8-flash', 'claude-opus-5-5'], API_CATALOG))
+      .toEqual(['gemini-3.8-flash', 'claude-opus-5-5'])
   })
 
   it('adopts the shipped defaults on the first sighting only', () => {
@@ -131,18 +131,18 @@ describe('Antigravity context window overrides', () => {
 
   it('writes one override and deletes another in the same patch', async () => {
     const { settings, post } = antigravityRouteHarness()
-    await settings.updateSettings({ contextWindowOverrides: { 'gemini-2.5-pro': 500_000, 'claude-sonnet-4-6': 900_000 } })
+    await settings.updateSettings({ contextWindowOverrides: { 'gemini-2.5-pro': 500_000, 'claude-sonnet-5-5': 900_000 } })
 
     const { status, body } = await post('/antigravity/api/settings', {
-      contextWindowOverrides: { 'gemini-2.5-pro': null, 'claude-sonnet-4-6': 600_000 },
+      contextWindowOverrides: { 'gemini-2.5-pro': null, 'claude-sonnet-5-5': 600_000 },
     })
 
     expect(status).toBe(200)
-    expect((await settings.read()).contextWindowOverrides).toEqual({ 'claude-sonnet-4-6': 600_000 })
-    expect(body.value.contextWindowOverrides).toEqual({ 'claude-sonnet-4-6': 600_000 })
+    expect((await settings.read()).contextWindowOverrides).toEqual({ 'claude-sonnet-5-5': 600_000 })
+    expect(body.value.contextWindowOverrides).toEqual({ 'claude-sonnet-5-5': 600_000 })
     const gemini = body.value.models.find((entry: { id: string }) => entry.id === 'gemini-2.5-pro')
     expect(gemini.contextWindow).toBe(gemini.defaultContextWindow)
-    expect(body.value.models.find((entry: { id: string }) => entry.id === 'claude-sonnet-4-6').contextWindow).toBe(600_000)
+    expect(body.value.models.find((entry: { id: string }) => entry.id === 'claude-sonnet-5-5').contextWindow).toBe(600_000)
   })
 
   it('deletes through the settings namespace without persisting a null', async () => {
@@ -163,17 +163,17 @@ describe('Antigravity context window overrides', () => {
     expect(preferences.status().contextWindowOverrides).toEqual({ 'gemini-2.5-pro': 500_000 })
 
     const { status, body } = await post('/antigravity/api/models', {
-      contextWindowOverrides: { 'gemini-2.5-pro': null, 'claude-sonnet-4-6': 600_000 },
+      contextWindowOverrides: { 'gemini-2.5-pro': null, 'claude-sonnet-5-5': 600_000 },
     })
 
     expect(status).toBe(200)
-    expect(preferences.status().contextWindowOverrides).toEqual({ 'claude-sonnet-4-6': 600_000 })
-    expect(body.value.contextWindowOverrides).toEqual({ 'claude-sonnet-4-6': 600_000 })
+    expect(preferences.status().contextWindowOverrides).toEqual({ 'claude-sonnet-5-5': 600_000 })
+    expect(body.value.contextWindowOverrides).toEqual({ 'claude-sonnet-5-5': 600_000 })
     // The fallback document is written in the background; it must merge the
     // same way, so the deleted key cannot survive on disk as a null.
     await vi.waitFor(async () => {
       const written = JSON.parse(await fs.readFile(fallback.path(), 'utf8')) as { contextWindowOverrides: unknown }
-      expect(written.contextWindowOverrides).toEqual({ 'claude-sonnet-4-6': 600_000 })
+      expect(written.contextWindowOverrides).toEqual({ 'claude-sonnet-5-5': 600_000 })
     })
   })
 })

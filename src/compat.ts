@@ -74,6 +74,15 @@ export const CODEX_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rat
 export const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume` as const
 export const CODEX_IMAGE_TOOL_NAME = 'codex_image_generate' as const
 export const CODEX_IMAGE_MODEL = 'gpt-image-2' as const
+/**
+ * The Antigravity image tool and the runtime it calls.
+ *
+ * `gemini-3.1-flash-image` is listed by `fetchAvailableModels`, but its product
+ * is an image and the harness accepts text-only assistant output, so it is
+ * served as a tool (like Codex images) rather than as a chat model.
+ */
+export const ANTIGRAVITY_IMAGE_TOOL_NAME = 'antigravity_image_generate' as const
+export const ANTIGRAVITY_IMAGE_MODEL = 'gemini-3.1-flash-image' as const
 export const CODEX_SEARCH_PROVIDER_ID = 'codex-subscription' as const
 export const CODEX_FETCH_PROVIDER_ID = 'codex-subscription' as const
 export const QUOTA_CACHE_MS = 60_000
