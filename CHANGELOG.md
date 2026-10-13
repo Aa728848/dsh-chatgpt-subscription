@@ -1,6 +1,18 @@
 # Changelog
 
 ## Unreleased
+
+## 0.23.0 - 2026-10-13
+- **[Ollama] 思考档位从「猜白名单」改为「读模型自己声明的事实」，并接通设置页的默认档位（用户报障：ollama 线路缺少模型思考档位选择器）**
+  - **问题（三层各缺一环，不是 UI 漏做）**：本插件其余每条线路都在 `adapter.resolveModel()` 里返回 `reasoning: { efforts, defaultEffort }`，Harness 的模型选择器只在拿到它时才渲染档位下拉——Ollama 是唯一不返回的线路，所以下拉根本不出现。而 Harness 侧的行为不是「静默忽略」而是硬拒绝：`resolveCallWithInfo` 在 `reasoning === undefined` 且调用方传了 `reasoningEffort` 时抛 `UNSUPPORTED_REASONING_EFFORT`。同时设置页的 `defaultReasoningEffort` 是一个**写进去就没人读的死字段**——`token-store.ts` 读写完备，但 `/settings` 路由只处理 `enabled`，卡片没有下拉，`OllamaWebStatus` 里也没有这个字段。
+  - **第一处：档位阶梯改为由模型元数据驱动**。`POST /api/show` 返回的顶层 `thinking: { values, default }` 是该模型**唯一一处**自述其 `think` 接受值的来源（官方 thinking.mdx 逐字）。新增 `fetchModelThinking()` 读取它，`reasoningEffortsForModel()` 据此构建阶梯；原有的 `gpt-oss` / `deepseek-r1` / `qwq` / `qwen3` 四个前缀白名单**降级为回退**——只在元数据读不到时使用，无 `declared` 时行为逐字不变。于是白名单之外的家族（如 `glm-4.6:cloud` 若声明 `['low','high']`）也能拿到自己的正确阶梯。
+  - **第二处（本轮最关键的缺陷，验收阶段抓出并退回返工）**：档位集合与 wire 取值曾由**两张不同的表**产生——集合走 `reasoningEffortsForModel`，取值走 `thinkForModel`——于是对声明 `values: [true]` 的模型（支持思考、**不允许关闭**），集合仍无条件给出「关闭思考」位置，选中后发出 `reasoning_effort: 'none'`，而官方文档明写 `"none"` 请求 `false`：**等于对一个明确声明不接受 `false` 的模型发了 `false`**。同源漏洞是混合声明 `['low','high',false]` 被判成 `levels` 后 `false` 被字符串分支静默丢弃，该位置**选了什么也不发**。修法不是加特例，而是让正反两向由**同一张表** `{ value, id, name }` 导出：`true` → 开启思考、`false` → 关闭思考、字符串原样保留拼写与声明顺序。`values:[true]` 因此不再提供关闭位，`['low','high',false]` 则三项齐全且各自发出正确的 wire 值。
+  - **第三处：接通设置页默认档位**。`OllamaWebStatus` 增加 `defaultReasoningEffort`，`/settings` 与 `/models` 两个分支接受并校验它（只收 `null` 或四档词表，越界返回 400；校验前置到写入之前，避免带多个字段的请求被半应用），客户端新增 `setDefaultReasoningEffort()` 与一个下拉框，`null` 是「不指定」这一可撤销的真实取值而非缺省。
+  - **降级纪律**：探测的每一种失败形态（无凭据 / 网络错 / 401 / 500 / 代理 HTML / 结构不符 / 空 values）都返回 `undefined` 且**绝不抛错**——读不到元数据只是「少一个阶梯」，不能让设置页或聊天链路出错。请求侧同理：目标模型表达不出的档位**只丢档位、不丢回合**。探测按 modelId 记忆化（仅成功才缓存，并发合并为一次），且在 `requestStream` 内**惰性**发起——无条件探测会读空 `test/stream-activity-idle.test.ts` 手工喂的心跳流，该用例会变红（此约束写在 `adapter.ts` 注释里）。
+  - **验证**：`npm run typecheck` 0 错误；全量 `npm test` 220 passed | 1 skipped（221 文件）、**3670 passed | 7 skipped | 0 failed**。新增 `test/ollama-thinking.test.ts`（24 例，覆盖 `[true]` 无关闭位、两种布尔声明顺序、混合声明三位置各自的 wire 值、8 种探测失败形态、记忆化与并发合并、`:cloud` 后缀命中）与路由/卡片各 7 例。既有 20 例中 19 例一字未改；1 例按新语义重新锚定（`drops an unexpressible stored level...`：原断言 `reasoning_effort === 'auto'`，那正是「把 high 强扭成 true」的旧特例，改为 `toBeUndefined()`——新值更严格，用例主张不变）。
+  - **独立验证**：调度者另写一次性用例断言最强不变量——「每一个被提供的档位都能反查回一个声明过的 wire 值」，7/7 通过后删除。
+  - **诚实声明**：全部证据来自官方文档与桩测，**没有**对真实 Ollama Cloud 账号实测过各模型的 `/api/show` 返回；「档位会正确出现」是由文档加 444 例桩测推出的结论，不是眼见为实。
+
 - **[GLM（ZCode 账号）] 删除客户端签名层（Client Signing V4），并把四条外部证据补进 README 已知限制**
   - **问题**：签名层以「实现了但默认关闭 + 能力门控」的形态长期留在生产路径上——`signing.ts`、契约里的能力位、`DSH_GLM_*` 开关一应俱全，README 也照此写着「默认关、需要显式打开」。它本身是 C 级证据（社区经验 / 架构推断，无实测），按本仓库规则 C 级「不得进入默认路径」；而这一次连一份**能证明自己有用**的证据都没有。
   - **后果**：一个逆向来的签名算法（移植自 MIT 的 `zcode-signer.ts`）留在仓库里、留在能力清单里、留在环境变量表里，此后每一轮改动都要再回答一次「这个开关要不要动」。唯一有实测记录的项目做过 A/B 对照，**带签名与不带签名的响应归一化后完全一致**（都是 429/1113）；官方那个本可当作开关信号的 feature gate 端点 `/api/v1/agent/configs` **根本不校验凭据**，两类凭据拿到逐字相同的响应，答不了「签名是否启用」。README 里那句「默认关、需要显式打开」还会让读者以为存在一个可开启的官方机制。
