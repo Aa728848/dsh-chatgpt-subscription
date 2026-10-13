@@ -440,43 +440,74 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
-  it('adapts to the collaboration mode the session actually offers', () => {
-    // Agent Teams replaces the coordination tools with same-named teammates
-    // versions inside the agent's own scope, where they shadow the built-in
-    // ones. A dispatched subagent then cannot be reached: \`list_agents\` hides
-    // it and \`send_message\` resolves only member names. Both copies must tell
-    // the model to detect which mode is live rather than assume one.
+  it('refuses to orchestrate under Agent Teams instead of adapting to it', () => {
+    // The field report: with the Agent Teams bundle composed, the preset kept
+    // dispatching while the team-scoped send_message / list_agents /
+    // interrupt_agent shadowed the subagent ones — children became invisible
+    // and unreachable, and the "switch vocabulary" branch made that failure
+    // silent instead of loud. Both copies must stop at a compatibility gate
+    // and hand the decision to the user; the degraded branch must be gone
+    // from both, in every spelling it ever had.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
-    const committed = [personaBlockOf(yml), declaredPrefix()]
-    for (const persona of committed) {
-      // Detection is its own numbered rule and runs before planning.
-      expect(persona).toContain('## R0.5 · 协作模式侦测')
-      expect(persona).toContain('spawn_teammate')
-      expect(persona).toContain('wait_agent')
-      // The mode boundary is stated as reachability, not as capability: the
-      // model must not read a failed follow-up as a subagent bug.
-      expect(persona).toContain('派完能不能追问')
-      // The teammate branch keeps subagent-mode delegation intact.
-      expect(persona).toContain('## R-T · teammate 模式')
-      expect(persona).toContain('spawn_teammate 没有 provider/model')
-      // And the routing rule it must NOT invent a route for.
-      expect(persona).toContain('不要为它写 route 行')
-      // The role-identification paragraph covers teammates too.
-      expect(persona).toContain('说明你是子代理或 teammate')
-      expect(persona).not.toContain('说明你是子代理：R0、R-G')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      // Detection survives unchanged, and still runs before triage.
+      expect(persona).toContain('## R0.5 · 兼容性闸门')
+      expect(persona).toContain('spawn_teammate 与 wait_agent 是否存在')
+      // The incompatibility is stated as a mechanism, not a preference...
+      expect(persona).toContain('调度模式与 Agent Teams **不兼容**')
+      expect(persona).toContain('顶替 send_message / list_agents / interrupt_agent')
+      // ...and it gates the WHOLE flow rather than selecting a vocabulary.
+      expect(persona).toContain('本会话**不可编排**')
+      expect(persona).toContain('不分诊、不规划、不派发、不动文件')
+      // The exit is the user's, taken through the question tool (R-W).
+      expect(persona).toContain('用一次 ask_user_question 把出路交给用户选')
+      // And the fix needs a new session: this one's tool surface is fixed.
+      expect(persona).toContain('必须**新建会话**才生效')
+      // The anti-patterns that let the old degraded branch back in.
+      expect(persona).toContain('检测到 Agent Teams 就改用 teammate 词汇继续编排')
+      expect(persona).toContain('撞上不兼容却只用一段文字解释')
+      // No trace of the vocabulary switch remains in either copy.
+      expect(persona).not.toContain('## R-T')
+      expect(persona).not.toContain('team_task_*')
+      expect(persona).not.toContain('wait_agent()')
+      expect(persona).not.toContain('spawn_teammate 没有 provider/model')
+      expect(persona).not.toContain('不要把子代理 session id 交给 send_message')
+      expect(persona).not.toContain('说明你是子代理或 teammate')
     }
   })
 
-  it('names the two coordination vocabularies without conflating them', () => {
+  it('stops on the turn boundary instead of manufacturing a wait', () => {
+    // Three field reports, one rule. The main agent used to (1) burn a long
+    // command to wait for a subagent that was going to announce itself, (2) arm
+    // a goal at task start, whose automatic continuation woke it in the middle
+    // of that wait, and (3) end on a paragraph of prose where a question
+    // belonged. Both copies must carry the whole boundary rule, and the
+    // coordinator-only list must exclude it from subagents too.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
-      // The teammate vocabulary is stated explicitly...
-      expect(persona).toContain('team_task_*')
-      expect(persona).toContain('target: <成员名>')
-      // ...and the subagent session id is explicitly ruled out as a target.
-      expect(persona).toContain('不要把子代理 session id 交给 send_message')
-      // Detection stays anchored to the two tools that only Agent Teams adds.
-      expect(persona).toContain('spawn_teammate 与 wait_agent 是否存在')
+      expect(persona).toContain('## R-W · 回合边界')
+      // Waiting: the completion notification IS the wait.
+      expect(persona).toContain('等子代理完成的通知把你叫醒')
+      expect(persona).toContain('禁止 sleep、轮询循环、watch')
+      expect(persona).toContain('job_output({ wait: true })')
+      // An incompatible session never reaches this rule, so there is no
+      // teammate wait channel to name.
+      expect(persona).not.toContain('wait_agent()')
+      // No self-appointed wake-up call during the wait.
+      expect(persona).toContain('【目标】不主动建目标')
+      expect(persona).toContain('不要调用 create_goal 或 /goal')
+      expect(persona).toContain('落在 todo_write，不是 create_goal，见 R-W')
+      // A blocked-on decision is a question, not a paragraph.
+      expect(persona).toContain('用一次 ask_user_question 把问题递出去')
+      expect(persona).toContain('同一条要求覆盖访谈之外的每一个停点')
+      // Plan-mode approval keeps its own channel; a finished task asks nothing.
+      expect(persona).toContain('例外只有两个：plan mode 的计划审批仍走 exit_plan_mode')
+      // The anti-patterns that let each of the three back in.
+      expect(persona).toContain('占位长命令去等')
+      expect(persona).toContain('任务开头主动创建目标')
+      expect(persona).toContain('文字结尾停下等回话')
+      // R-W is dispatch-side only, like every other coordinator rule.
+      expect(persona).toContain('R0、R0.5、R-G、R1、R2、R4、R5、R-W 中面向调度者的规则')
     }
   })
 })

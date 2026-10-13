@@ -1,6 +1,22 @@
 # Changelog
 
 ## Unreleased
+- **[调度模式] 与 Agent Teams 改为刻意互斥：检测到就停，不再「换一套词汇接着干」（现场问题：开了智能体团队后这套调度就不好使）**
+  - **现象**：组合了 `@deepseek-ai/dsh-experimental-agent-team-profile` 的部署里，调度模式「派得出去、回访不了」——`list_agents` 看不到 `subagent` 的孩子，`send_message` 只认成员名，`interrupt_agent` 同理。复审、返工、追问三条通道同时失灵。
+  - **根因（两层）**：① **时机**——`TeamRoster.tryMembership` 对任何「无 `parentSession`、且不是 subagent descriptor」的 Agent 直接判为 `lead`，不需要先有 teammate，于是 team 工具从会话第一轮就装在 Lead 上，顶替掉内置的 `send_message`/`list_agents`/`interrupt_agent`——**还没派发就已经失去协调工具**。② **组合非法**——team 的 scoped 注册与内置同名工具按「近的层遮蔽远的层」解析，而 `dispatch` 正是那组旧定义的持有者（0.1.7+ 由本插件在运行时注册里挂载四行，preset 每一代独立 `createScope`，与宿主组合里被 patch 置 `disabled` 的那四行不是同一批实例）。上游文档对此写得很直接：`tool-agent-team`「当同名的旧全局 subagent 工具必须继续可用时，请不要选择……想同时使用两者的组合必须禁用旧定义」。
+  - **原设计为什么不够**：R0.5 原本做的是「侦测协作模式 → 按模式换协调词汇」（原 R-T）。它在有 teammate 时让模型改用成员词汇继续编排，但遮蔽由 scope 链决定、persona 改不回注册表，于是「适配」只能改行为、改不了「哪些工具被顶替」这个事实。更糟的是它把失败**藏**起来了：roster 里查不到孩子 ≠ 孩子没了，模型会误判成子代理丢失并重复派发。第三，teammate 结构上拿不到 per-task 路由（`SpawnTeammateRequest` 无 model 字段，构造 `startContinuable` 时整段省略 `agentOptions`），组队等于自愿放弃 R2。
+  - **改法**：persona 的 R0.5 由「协作模式侦测」改写为**兼容性闸门**（每个新会话判一次，早于 R0 分诊）：两个 team 工具都不存在 → 写一行「编排可用：subagent」后照常编排；任一存在 → 本会话**不可编排**，按顺序只做三件：一句话说明不兼容 → 一次 `ask_user_question` 给出三条出路（关掉 bundle 重启并新建会话 / 换 preset / 本次直接做）→ 用户答复前不分诊、不规划、不派发、不动文件。**原 R-T 整段删除**，teammate 词汇（`team_task_*`、`target: <成员名>`、`wait_agent()`）在两份 persona 里不再出现；R8 的 teammate 专属条款与反模式 11/12 一并重写为「停在闸门处把选择交给用户」。
+  - **边界不变的部分**：模型路由守卫不动。`spawn_teammate` 仍是 `subagentModelInheritTools` 的 inherit 成员（成员一律继承 Lead 路由，守卫校验它实际继承到的那条）；README 新增一条建议——用调度模式时可把它从该列表去掉，误用即硬拒。插件默认值不改，因为那是全局设置、会波及不用调度模式的会话。
+  - **解除互斥的上游条件（尚未落地）**：① `agent-team/src/roster.ts` 构造 `startContinuable` 的 request 处补上 `agentOptions`，给 `SpawnTeammateRequest` 与工具 schema 加路由字段、创建前接 `assertAllowedModelSelection`；② 把 team 工具的安装条件从「是 team 成员」收紧为「**有 teammate**」——后者能直接消掉「Lead 第一轮就被顶替」。只做 ① 不够。
+  - **验证**：`npm run typecheck` 0 错误；`test/agent-preset.test.ts` 29 例全绿（新增「检测到不兼容就停、不适配」的用例，同时断言两份副本里 R-T / `team_task_*` / `wait_agent()` / 「说明你是子代理或 teammate」等降级措辞**一个都不剩**）；全量 `npm test` **223 passed | 1 skipped（224 文件）、3706 passed | 7 skipped | 1 failed**——唯一失败是 `test/claude-oauth.test.ts` 的「占用端口时报告真实绑定的那个端口」，单跑该文件 43/43 通过。本轮三次全量里出现过两个**不同**的环境敏感用例偶发（本次是端口占用，上一轮是 `antigravity-token-store` 的真实 DPAPI 写入），二者都只依赖真实 OS 资源、与本次 diff 无交集；此前一次全量基线为 3708 passed | 0 failed，差的 2 例来自被合并掉的 teammate 词汇用例。
+- **[调度模式] 新增规则段 R-W「回合边界」，一次修掉三处现场问题：占位长命令等待、目标续跑打断等待、需要拍板时用文字停下**
+  - **问题 1（等待 = 自己造一个）**：派出子代理后，模型会去跑一条长时间命令挂着等（`sleep`、轮询、`watch`）。子代理完成的通知本来就是自带的，这条命令换回来的信息量是零，却实打实烧掉上下文与预算，还把用户晾在一段沉默里。
+  - **问题 2（目标把等待从中间劈开）**：部分模型在任务开头主动创建目标。目标一旦激活，DSH 会自动续跑把主代理叫醒，而子代理何时返回不由它控制——于是主代理在半路被续跑打断，重新分诊、重新检查「还差什么」，一次干净的等待被拆成两段，附带每次续跑都要重载整段历史。
+  - **问题 3（该问的不问，该停的用文字停）**：收到子代理全部内容后需要用户决策时，模型用一段文字结尾就停下，等用户自己把那段话翻译成一次输入。提问本是代理的工具，不该转嫁给用户。
+  - **修法**：新增编号规则段 `R-W · 回合边界（等待 / 目标 / 提问）`，三件事放在一起是因为它们都落在回合边界上。① 等待：默认结束本轮回复、一个工具都不调，由完成通知唤醒；禁止 `sleep`/轮询/`watch` 等占位长命令；确实被阻塞时才用 `job_output({ wait: true })` 有界地等一次（teammate 模式对应 `wait_agent()`），并在停下前说清「派出去了谁、在等什么、拿到证据要做什么」。② 目标：除非用户明确要求，不调用 `create_goal` / `/goal`，任务清单一律落 `todo_write`（R7 同步改了措辞）。③ 提问：一切「我停在这里是因为缺一个决定」的停点都用 `ask_user_question` 递出去，含选项、推荐答案与自定义输入口子；例外只有 plan mode 的计划审批（走 `exit_plan_mode`）与任务完成后的收尾。
+  - **交叉引用**：反模式列表新增第 13–15 条，逐条对应上面三件事；`R-G` 的 G3 补一句「同一条要求覆盖访谈之外的每一个停点」；【角色识别】把 `R-W` 列入面向调度者、对子代理/teammate 不生效的规则清单。
+  - **两份副本**：persona 在 `src/host/agent-preset.ts`（0.1.7+ 运行时注册的声明）与 `presets/dispatch/agent.cordis.yml`（0.1.6 及以前的文件同步）里各存一份，`test/agent-preset.test.ts` 逐字节校验二者一致，因此本次两处同步修改；测试新增 1 例（30 例），文档同步更新 `presets/dispatch/README.md` 与根 `README.md`。
+  - **验证**：`npm run typecheck` 0 错误；`npm test` **223 passed | 1 skipped（224 文件）、3708 passed | 7 skipped | 0 failed**；`test/agent-preset.test.ts` 由 29 例增至 30 例（新增 1 例断言 R-W 的三条规则与反模式 13–15）。首次全量运行时 `test/antigravity-token-store.test.ts` 的真实 DPAPI 用例在并行下失败 1 次，单跑该文件（8/8）与第二次全量均全绿，属既有的偶发；本次 diff 只涉及 preset 文本、文档与该一个测试文件，与凭据存储无交集。
 - **[Antigravity] 模型目录与路由对齐线上 `fetchAvailableModels`（2026-10-12 快照）**
   - **目录**：删除已下线的 Claude Opus 4.6 / Sonnet 4.6（目录里 Claude 只剩 5.5）；Gemini 3.7 Flash 改用目录中真实存在的 `-low/-medium/-high`，不再走未列出的 `gemini-3.7-flash-tiered`；修正 Gemini 3.5 Flash 错位一档（官方 “(Low)” 是 `extra-low`，选 low 原先拿到的是 Medium）；新增 Gemini 3.5 Flash Lite、Gemini 3.1 Flash Lite；目录过滤掉 `tab_*` 编辑器补全模型。
   - **生图模型下架**：`gemini-3.1-flash-image` 的产出是图片，而 Harness 只接受纯文本的助手输出（dsh-llm `ImageBlock` 注释），聊天线路只能丢掉图片；应改为图片生成工具承载。

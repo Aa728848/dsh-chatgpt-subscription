@@ -452,7 +452,7 @@ DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。GPT-6 系列�
 
 > 路径解析不写死相对路径：`src/host/preset-sync.ts` 从模块位置向上查找最近的 `package.json` 作为包根，因此 `src/` 布局、打包后的 `lib/` 布局，以及通过 pnpm symlink / Windows junction 安装都能正确解析。注意 `fs.cpSync({ recursive: true })` 在 Node 22 + Windows 上遇到含非 ASCII 的源路径会直接崩进程（nodejs/node#54476），所以复制是逐条目实现的。
 
-### 协作模式自适应（teammate / subagent）
+### 与 Agent Teams 不兼容（刻意互斥）
 
 DSH 的 Agent Teams（bundle `@deepseek-ai/dsh-experimental-agent-team-profile`）会在**每个会话自己的作用域**里注册一套与内置**同名**的协调工具。工具注册表按作用域链解析、**近的层遮蔽远的层**，所以一旦该 bundle 被组合进来，会话里的 `send_message`、`list_agents`、`interrupt_agent` 就都换成了 teammate 版：
 
@@ -460,18 +460,42 @@ DSH 的 Agent Teams（bundle `@deepseek-ai/dsh-experimental-agent-team-profile`�
 - `send_message` 的 `target` 只接受成员名，把子代理的 session id 传进去会抛 `active teammate "…" not found`（实测）；
 - 于是「派得出去、回访不了」——`subagent` 的孩子只能等完成通知，无法追问。
 
-`dispatch` preset 现在**每个任务开始时先侦测一次协作模式**（persona 的 R0.5），再按模式选择协调词汇（R-T）：
+**坏消息在时机上**：Agent Teams 的 `agent-team/src/roster.ts` 里 `tryMembership` 对任何「无 `parentSession`、且不是 subagent descriptor」的 Agent 直接判为 `lead`，**不需要先有 teammate**。于是 team 工具从会话第一轮起就装在 Lead 上，调度模式还没派发第一个子代理，复审与返工所依赖的三个工具已经没了。
 
-| 侦测为 | 判据 | 协调词汇 | 派发 |
-|---|---|---|---|
-| teammate | `spawn_teammate` / `wait_agent` 存在 | `list_agents()`、`send_message({ target: <成员名> })`、`wait_agent()`、`team_task_*` | `spawn_teammate`（无路由参数，继承主代理路由）或 `subagent`（按 R2 显式路由） |
-| subagent | 二者都不存在 | `list_agents()`、`send_message({ agent_id })`、`interrupt_agent` | `subagent` / `subagent_fork` |
+上游对此的立场是明确的：`tool-agent-team` 的文档写着「当同名的旧全局 subagent 工具必须继续可用时，请不要选择……**想同时使用两者的组合必须禁用旧定义**」。而 `dispatch` preset 恰恰是那组旧定义的持有者——0.1.7+ 的运行时注册里由本插件自己挂了 `tool-subagent-control` / `tool-subagent-list-agents` / `tool-subagent` / `tool-subagent-fork` 四行（preset 每一代都是独立 `createScope`，与宿主组合里被 profile patch 置 `disabled` 的那四行不是同一批实例）。所以这不是「可以调好的配置」，而是一个上游明确不承诺的组合。
 
-两种模式下 R0 分诊、R1 职责边界、R3 自治、R6 验收都照常执行；**模型路由守卫（`subagentModelAuthorization`）不变**——它默认把 `spawn_teammate` 与 `subagent_fork` 同为 **inherit 模式**（见下），校验的是成员实际继承到的路由，而不是要求它给出并不存在的路由参数。
+`dispatch` 的处理是**停，不降级**（persona 的 R0.5 兼容性闸门，每个新会话判一次，早于 R0 分诊）：
 
-> **不要**把 `spawn_teammate` 加进 `subagentModelTools`。该列表是 **explicit** 模式：要求每次调用成对给出 `provider` + `model`，而 `spawn_teammate` 的参数里根本没有这两个字段（DSH 设计如此：成员一律继承 Lead 的路由），结果是每一次 teammate 创建都会被硬拒，且模型无法通过补参数自救。它的正确归属是 `subagentModelInheritTools`（默认已包含）。
+| 判据 | 行为 |
+|---|---|
+| `spawn_teammate` 与 `wait_agent` 都不存在 | 编排可用，写一行「编排可用：subagent」后按 R0 → R-G → R5 → R6 正常走 |
+| 任一存在 | 本会话**不可编排**：一句话说明 → 一次 `ask_user_question` 给出三条出路 → 用户答复前**不分诊、不规划、不派发、不动文件** |
 
-### 已知上游限制：teammate 不能选模型
+三条出路是：① 关掉 Agent Teams bundle、重启 Host 后**新建会话**；② 换用别的 preset，本会话不编排；③ 本次直接做，不进编排流程。**都要新建会话**——工具面在会话启动时就定死了，改完配置在旧会话里也不会回来。
+
+刻意**没有**保留「切到 teammate 词汇继续编排」这条分支（原 R-T）。三条理由：
+
+1. 遮蔽由 scope 链决定，persona 改不回工具注册表——「适配」只能改行为，改不了「哪些工具被顶替」这个事实；
+2. 那条分支把「回访不了」从**明摆着的失败**变成**看不见的失败**：roster 里查不到孩子 ≠ 孩子没了，模型会误判并重复派发，白烧一轮预算；
+3. teammate 结构上拿不到 per-task 路由（见下节），而 R2 显式路由正是这套设计里最值钱的部分——组队等于自愿放弃它。
+
+> 想把误用也用机制挡掉：把 `spawn_teammate` 从 inherit 清单去掉即可，配置 `subagentModelInheritTools: ['subagent_fork']`，该工具在守卫里就变成**硬拒**（拒绝理由指向 `subagent`），而不是让它悄悄按 Lead 的路由跑完整轮。插件默认值不动——那是全局设置，改它会波及不使用调度模式的会话。
+
+### 回合边界纪律（R-W）
+
+调度模式的 persona 里有一条专门管「回合边界」的规则 `R-W`，约束三件最容易把编排拖慢、拖贵的事：
+
+| 场景 | 规则 | 为什么 |
+|---|---|---|
+| 等子代理返回 | 默认**结束本轮回复**、一个工具都不调，由完成通知唤醒主代理；禁止 `sleep`、轮询循环和任何只为占位存在的长命令。确实被阻塞时才用 `job_output({ wait: true })` 有界地等一次 | 子代理完成通知是自带的；占位长命令不产出信息，只烧上下文和预算，还把用户晾在一段沉默里 |
+| 任务开始建目标 | 除非用户明确要求，否则**不调用 `create_goal` / `/goal`**，任务清单一律走 `todo_write` | 机制性的：目标一旦激活，DSH 会自动续跑唤醒主代理，而子代理何时返回不由它控制——等待被从中间劈开，模型重新分诊、重新检查「还差什么」，每次续跑还要重载整段历史 |
+| 需要用户拍板 | 一切「我停在这里是因为缺一个决定」的停点（收到子代理结果要选下一步、验收不过要定返工范围、前提被推翻要改计划）都用 `ask_user_question` 递出去，并给出选项与推荐答案 | 提问是代理的工具，不是用户的义务：否则用户得先替模型把那段话翻译成一次输入。例外是 plan mode 的计划审批（走 `exit_plan_mode`）与任务完成后的收尾 |
+
+三条各自对应 persona 反模式列表里的第 13–15 条。
+
+### 为什么不降级：teammate 不能选模型
+
+这是上面第三条理由的技术底座，也是上游修好之后才谈得上重新评估兼容性的前提。
 
 `spawn_teammate` 目前**无法**指定 `provider`/`model`，这不是插件的问题，而是 Agent Teams 有意不做 per-teammate 路由。三层都已核对：
 
@@ -485,7 +509,7 @@ DSH 的 Agent Teams（bundle `@deepseek-ai/dsh-experimental-agent-team-profile`�
 
 **插件侧无法绕过**，四条路都已验证死：pre-execute 明确排除输入改写（参数已被记录与呈现，`PreToolDecision` 只有 allow/deny/cancel/ask）；`agentTeams` 服务在内部丢弃后包装不到；注册自定义 subagent provider 也拿不到路由（`agentOptions` 在 continuation manager 就已解析完，provider 只返回 `seed`）；唯一能改子会话路由的 `selectForNextRequest` 只作用于「下一个请求」，而 teammate 创建后立刻开跑，抢不进去。
 
-**上游正路**：在 `packages/experimental/agent-team/src/roster.ts` 构造 `startContinuable` 的 `request` 处补上 `agentOptions`，并给 `SpawnTeammateRequest` 加字段、给工具 schema 加参数、创建前接 `assertAllowedModelSelection`。**该改动落地后**，`spawn_teammate` 就应从 `subagentModelInheritTools` 移到 `subagentModelTools`（explicit）——否则它会变成「能选模型却没人管」。
+**上游正路**：在 `packages/experimental/agent-team/src/roster.ts` 构造 `startContinuable` 的 `request` 处补上 `agentOptions`，并给 `SpawnTeammateRequest` 加字段、给工具 schema 加参数、创建前接 `assertAllowedModelSelection`。**该改动落地后**，`spawn_teammate` 就应从 `subagentModelInheritTools` 移到 `subagentModelTools`（explicit）——否则它会变成「能选模型却没人管」。只补这一条还不足以解除互斥：team 工具的遮蔽发生在会话第一轮（见上节），要真正共存还需要把安装条件从「是 team 成员」收紧成「**有 teammate**」，让没有队友的会话保留内置的 subagent 协调工具。
 
 > 实践提醒：inherit 模式校验的是**当前会话路由**。若当前会话跑在允许清单之外的路由上（例如默认模型与勾选清单不是同一条），teammate 与 `subagent_fork` 都会被拒绝——拒绝文案会指出恢复路径（改用显式路由的 `subagent`，或先把会话切到清单内的模型）。`subagent` 的显式路由不受影响。
 
