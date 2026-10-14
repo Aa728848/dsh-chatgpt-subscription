@@ -77,6 +77,26 @@ function harness(options: { mirror?: KimiCodeCredentials | null } = {}) {
   return { pool, mirror, mirrorBackend, poolBackend }
 }
 
+/**
+ * What the pool document itself says about cooldown, read off the stored data
+ * rather than off `listAccounts()`.
+ *
+ * The point of the overload tests is that nothing was WRITTEN, so the assertion
+ * has to look at the persisted document. `listAccounts()` projects accounts for
+ * the settings card and could in principle answer from a projection; this reads
+ * the stored rows directly, so a cooldown that was written and then hidden would
+ * still fail the test.
+ */
+function poolBackendDocument(data: { accounts: Array<{ cooldownUntil?: number; cooldownReason?: string }> }): {
+  cooldownUntil: number[]
+  cooldownReasons: string[]
+} {
+  return {
+    cooldownUntil: data.accounts.flatMap((account) => (account.cooldownUntil === undefined ? [] : [account.cooldownUntil])),
+    cooldownReasons: data.accounts.flatMap((account) => (account.cooldownReason === undefined ? [] : [account.cooldownReason])),
+  }
+}
+
 function sseResponse(frames: unknown[]): Response {
   const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
@@ -599,6 +619,175 @@ describe('KimiCodeAdapter account rotation', () => {
     for (const account of await pool.listAccounts()) {
       expect(account.cooldownUntil).toBeUndefined()
     }
+  })
+
+  it('keeps an account in rotation after an overloaded 429 and really re-sends the request', async () => {
+    // The regression this locks: a 429 whose body names the ENGINE, not the
+    // account. Read as back-pressure it cooled the only account for 15 minutes,
+    // and every harness retry was then refused by isEligible before a single
+    // byte went out — three backoffs (3.2s, 6.1s, pure local time) against a
+    // signed-in account with a healthy quota.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    await pool.addAccount(credential(2))
+    const modelSettings = modelSettingsStore()
+
+    const authorizations: string[] = []
+    let overloaded = true
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>
+      authorizations.push(headers.authorization)
+      if (overloaded) {
+        return new Response(
+          JSON.stringify({ error: { message: 'The engine is currently overloaded, please try again later.' } }),
+          { status: 429 },
+        )
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'answered after the overload' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    })
+    const adapter = new KimiCodeAdapter(mirror, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      loadCatalog: async () => CATALOG,
+    }, pool)
+
+    const turn = {
+      provider: 'kimi-code',
+      model: 'k3',
+      messages: [{ role: 'user', content: 'hi' } as never],
+    } as unknown as GenerateOptions
+
+    // Still retryable, so the harness keeps its backoff — but nothing about the
+    // account changed, which is the whole point.
+    await expect(collect(adapter.stream(turn))).rejects.toMatchObject({ code: 'SERVER' })
+
+    // The load-bearing assertions: not "the classification field says overload"
+    // but "the pool document was never written and the account is still there".
+    expect(poolBackendDocument(await pool.read())).toEqual({ cooldownUntil: [], cooldownReasons: [] })
+    expect((await pool.listAccounts()).every((account) => account.cooldownUntil === undefined)).toBe(true)
+
+    // One attempt, not two: an overload is shared by every account behind the
+    // endpoint, so rotating would only spend the second one to learn the same
+    // answer. Neither account is written off.
+    expect(authorizations).toEqual(['Bearer at-1'])
+    expect(poolBackendDocument(await pool.read())).toEqual({ cooldownUntil: [], cooldownReasons: [] })
+
+    // And the turn after it is served, on the same account, with a request that
+    // actually left the process — the step that used to be blocked locally.
+    overloaded = false
+    const assembled = new BlockAssembler()
+    for await (const chunk of adapter.stream(turn)) assembled.push(chunk)
+
+    expect(assembled.blocks()).toEqual([{ type: 'text', text: 'answered after the overload' }])
+    expect(authorizations).toEqual(['Bearer at-1', 'Bearer at-1'])
+    expect((await pool.listAccounts()).every((account) => account.cooldownUntil === undefined)).toBe(true)
+  })
+
+  it('applies the same rule to an in-band overload as to a 429 overload', async () => {
+    // Same signal, different delivery: the failure arrives inside a 200 stream
+    // instead of as a status. Before this rule existed the two deliveries could
+    // disagree about the same words, and the in-band one is what a live turn
+    // actually goes through.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    await pool.addAccount(credential(2))
+    const modelSettings = modelSettingsStore()
+
+    // The Anthropic wire authenticates with x-api-key rather than a bearer
+    // header, so the account is identified by that instead.
+    const tokens: string[] = []
+    let overloaded = true
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>
+      tokens.push(headers['x-api-key'])
+      if (overloaded) {
+        return sseResponse([
+          { type: 'message_start', message: { usage: { input_tokens: 1 } } },
+          {
+            type: 'error',
+            error: {
+              type: 'rate_limit_error',
+              message: 'The engine is currently overloaded, please try again later.',
+            },
+          },
+        ])
+      }
+      return sseResponse([
+        { type: 'message_start', message: { usage: { input_tokens: 1 } } },
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'answered after the in-band overload' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_stop' },
+      ])
+    })
+    const adapter = new KimiCodeAdapter(mirror, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      // The Anthropic wire, which reports a failure as an event and maps
+      // rate_limit_error onto a synthesized 429 — the arm that has to consult
+      // the classification rather than the status.
+      loadCatalog: async () => [{ id: 'k3', name: 'K3', contextWindow: 262_144, protocol: 'anthropic' }],
+    }, pool)
+
+    const turn = {
+      provider: 'kimi-code',
+      model: 'k3',
+      messages: [{ role: 'user', content: 'hi' } as never],
+    } as unknown as GenerateOptions
+
+    await expect(collect(adapter.stream(turn))).rejects.toMatchObject({ code: 'SERVER' })
+    expect(poolBackendDocument(await pool.read())).toEqual({ cooldownUntil: [], cooldownReasons: [] })
+    expect(tokens).toEqual(['at-1'])
+
+    overloaded = false
+    const assembled = new BlockAssembler()
+    for await (const chunk of adapter.stream(turn)) assembled.push(chunk)
+
+    expect(assembled.blocks()).toEqual([{ type: 'text', text: 'answered after the in-band overload' }])
+    expect(tokens).toEqual(['at-1', 'at-1'])
+    expect((await pool.listAccounts()).every((account) => account.cooldownUntil === undefined)).toBe(true)
+  })
+
+  it('still cools and rotates on a genuine 429 back-pressure', async () => {
+    // The counterpart, so the new rule cannot be satisfied by simply never
+    // cooling a 429 again: real back-pressure IS about this account, so it
+    // still leaves rotation with the delay the provider stated.
+    const { pool, mirror, mirrorBackend } = harness()
+    await mirrorBackend.save(credential(1))
+    const second = await pool.addAccount(credential(2))
+    const modelSettings = modelSettingsStore()
+
+    const authorizations: string[] = []
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>
+      authorizations.push(headers.authorization)
+      if (headers.authorization === 'Bearer at-1') {
+        return new Response(JSON.stringify({ error: { message: 'too many requests' } }), { status: 429, headers: { 'retry-after': '90' } })
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'served by the second account' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        '[DONE]',
+      ])
+    })
+    const adapter = new KimiCodeAdapter(mirror, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      loadCatalog: async () => CATALOG,
+    }, pool)
+
+    const assembled = new BlockAssembler()
+    for await (const chunk of adapter.stream({
+      provider: 'kimi-code',
+      model: 'k3',
+      messages: [{ role: 'user', content: 'hi' } as never],
+    } as unknown as GenerateOptions)) assembled.push(chunk)
+
+    expect(authorizations).toEqual(['Bearer at-1', 'Bearer at-2'])
+    expect(assembled.blocks()).toEqual([{ type: 'text', text: 'served by the second account' }])
+    const cooling = (await pool.listAccounts()).find((entry) => entry.id !== second.id)
+    expect(cooling?.cooldownUntil).toBeGreaterThan(Date.now())
   })
 
   it('stops routing to an account whose refresh was rejected and uses the other one', async () => {

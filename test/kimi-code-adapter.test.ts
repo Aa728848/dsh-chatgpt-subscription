@@ -145,6 +145,45 @@ describe('KimiCodeAdapter retry policy', () => {
     expect(failure.retryable).toBe(true)
   })
 
+  it('files an overloaded 429 as a retryable server error and never as this account fault', () => {
+    // The exact body a real turn failed on: status 429, but the sentence names
+    // the engine rather than the account. Read as back-pressure it became a
+    // 15-minute cooldown on the only account in the pool, after which every
+    // harness retry was refused by isEligible before a request was ever sent.
+    for (const message of [
+      'The engine is currently overloaded, please try again later.',
+      'the engine is overloaded',
+      'Service is overloaded, try again shortly',
+      'Our servers are currently overloaded. Please try again later.',
+      'Upstream model provider is temporarily unavailable. Please try again in a moment.',
+    ]) {
+      const failure = classifyKimiFailure(429, JSON.stringify({ error: { message, type: 'server_error' } }))
+      // SERVER and RATE_LIMIT are both in this route's retryable set, so the
+      // bounded backoff still runs either way; SERVER is the code that does not
+      // tell the pool (or the user) that an account was limited.
+      expect(failure.code).toBe('SERVER')
+      expect(failure.retryable).toBe(true)
+      expect(failure.accountScoped).toBe(false)
+      // The field the pool branch actually reads: true here, false for real
+      // back-pressure. Without it the status code is all the pool has, and that
+      // is the whole bug.
+      expect(failure.upstreamOverload).toBe(true)
+    }
+  })
+
+  it('keeps a genuine 429 back-pressure an ordinary rate limit', () => {
+    // The other half of the same 429: this one IS about the account, so it
+    // keeps cooling it and rotating away from it.
+    for (const message of [
+      'too many requests',
+      "We're receiving too many requests at the moment. Please wait a moment and try again.",
+    ]) {
+      const failure = classifyKimiFailure(429, JSON.stringify({ error: { message } }))
+      expect(failure.code).toBe('RATE_LIMIT')
+      expect(failure.upstreamOverload).toBe(false)
+    }
+  })
+
   it('does NOT retry a 429 that reports a spent quota', () => {
     // Retrying cannot succeed until the account is topped up, so it must fail
     // fast and tell the user, not burn the retry budget.

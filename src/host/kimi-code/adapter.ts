@@ -166,10 +166,14 @@ import type { KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contra
  *
  * The retryable set is therefore:
  *
- * - `SERVER` — any 5xx, including that upstream-unavailable 502;
- * - `RATE_LIMIT` — a 429 that is genuine back-pressure ("too many requests",
- *   "the engine is currently overloaded"), which the documentation describes as
- *   transient;
+ * - `SERVER` — any 5xx, including that upstream-unavailable 502, and the
+ *   overloaded 429 (`UPSTREAM_OVERLOAD_PATTERNS`). Overload shares the 429
+ *   status with real back-pressure but not its meaning: it describes the state
+ *   of the upstream engine, which every account behind this endpoint shares, so
+ *   it is filed as the server condition it is and the pool is left alone;
+ * - `RATE_LIMIT` — a 429 that is genuine back-pressure ("too many requests"),
+ *   which the documentation describes as transient and which does belong to the
+ *   account that hit it, so rotation on it still earns its keep;
  * - `TRANSPORT` — a connection that produced no response at all;
  * - `TIMEOUT` — a stalled stream, handled by the idle watchdog.
  *
@@ -229,6 +233,19 @@ export interface KimiFailureClassification {
   /** True only when the failure is worth retrying. */
   retryable: boolean
   /**
+   * 本次失败是不是上游引擎过载（正文命中 `UPSTREAM_OVERLOAD_PATTERNS`）。
+   *
+   * 单列成一个字段，是因为「过载」这条信息号池需要、而 code 本身已经不够用了：
+   * 过载要可重试（harness 的退避重试正是为它准备的），所以它必须留在
+   * retryable 集合里；但过载不是任何账号的错，所以它绝不能被当成账号级限流
+   * 写进冷却。code 只有一个，说不了这两件事；`accountScoped` 也只回答「能不能
+   * 换号」，不回答「要不要冷却」——真正限流时答案是「能换号、也要冷却」，
+   * 过载时是「不必换号、更不必冷却」。两条路都可重试却必须分开处理，所以这里
+   * 把归属显式带出来，而不是让调用方拿状态码去猜：同一个 429 状态码同时承载
+   * 这两种含义，而这正是本缺陷的成因。
+   */
+  upstreamOverload: boolean
+  /**
    * True when the refusal belongs to THIS account alone, so another pooled
    * account may still serve the same request.
    *
@@ -253,6 +270,36 @@ const ENTITLEMENT_PATTERNS = [
   /model id does not exist/i,
   /recognized as other/i,
   /currently plan supports only/i,
+]
+
+/**
+ * 正文里说明「上游引擎过载」的措辞，与上面两组按**归属**分界，而不是按严重程度。
+ *
+ * - `ENTITLEMENT_PATTERNS` 说的是套餐：换号、换时间都不会变，是请求/套餐的属性；
+ * - `QUOTA_EXHAUSTED_PATTERNS` 说的是这个账号自己的余额/额度：别人可能还好，
+ *   但这个账号在窗口重置前一定起不来；
+ * - 本组说的是**上游引擎的繁忙**：这是所有账号共用的同一台引擎，谁来问都是这句
+ *   话，本地没有任何动作能改变它。
+ *
+ * 第三组必须单独识别，因为它和真正的限流共用同一个 429 状态码，却不共享结论。
+ * 服务端用 429 表达「引擎过载」时，本线路此前把它归进 RATE_LIMIT，号池随即按
+ * 限流语义给**唯一那个账号**写 15 分钟冷却（`POOL_COOLDOWN_MS`），之后同一
+ * 会话的每一次重试都被 `isEligible` 直接挡在门外——重试根本没发出网络请求，
+ * 3 次退避（3.2s/6.1s，纯本地耗时）打在一个登录正常、额度正常的账号上，最后以
+ * 「全部 1 个 Kimi Code 账号均处于配额限制或冷却中 (429)。最短预计在 15 分钟后
+ * 解除冷却。」收场。真正被限流的服务端状态不该有账号级的副作用。
+ *
+ * 这里只按正文判定，绝不按状态码判定：同一个 429 既可能是过载也可能是真限流，
+ * 唯一能区分的证据就是服务自己写下的那句话。措辞取自本线路文档与实际响应，
+ * 刻意保留 "the engine is …" 的限定，避免把任何提到 "overload" 的正文一律
+ * 吞掉——将来若出现「本账号请求量过载」这类真限流措辞，它不该落进这一组。
+ */
+const UPSTREAM_OVERLOAD_PATTERNS = [
+  /\bengine is (currently )?overloaded\b/i,
+  /\bservers? (?:is|are) (?:currently )?overloaded\b/i,
+  /\bservice is (?:currently )?overloaded\b/i,
+  /\bupstream model provider is temporarily unavailable\b/i,
+  /\bcurrently overloaded\b/i,
 ]
 
 /** Body text the service uses for a 429 that must NOT be retried. */
@@ -311,7 +358,7 @@ export function summarizeFailureBody(raw: string): string {
 export function classifyKimiFailure(status: number, bodyText: string): KimiFailureClassification {
   const detail = summarizeFailureBody(bodyText)
   if (isHttpContextOverflow(status, bodyText)) {
-    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, accountScoped: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, accountScoped: false, upstreamOverload: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
   }
 
   if (status === 402) {
@@ -321,6 +368,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       code: 'SERVER',
       retryable: true,
       accountScoped: false,
+      upstreamOverload: false,
       message: `${PROVIDER_NAME} could not verify the subscription tier (402). Retrying; if it persists, confirm the membership is active.${detail ? ` ${detail}` : ''}`,
     }
   }
@@ -335,6 +383,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
         // A plan refusal is the same plan on every account of the pool, and it
         // is fixed by an upgrade rather than by a different account.
         accountScoped: false,
+        upstreamOverload: false,
         message: `${PROVIDER_NAME} refused this request for the current plan: ${detail || 'the requested model or context is not included'}. Switch to a model the plan includes, lower the context-window override, or upgrade the subscription.`,
       }
     }
@@ -354,6 +403,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
         // which is exactly why rotation has to be told about it separately: the
         // pool's remaining accounts each carry a window of their own.
         accountScoped: true,
+        upstreamOverload: false,
         message: `${PROVIDER_NAME} blocked the request on an account limit (403): ${detail || (limitReached ? 'the account limit was reached' : 'the account refused the request')}. The quota refreshes on its own schedule — check the Kimi Code card in Settings for the reset time.`,
       }
     }
@@ -361,6 +411,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       code: 'INVALID_CREDENTIAL',
       retryable: false,
       accountScoped: false,
+      upstreamOverload: false,
       message: `${PROVIDER_NAME} rejected the stored credential (401). Sign in again from Settings > Kimi Code.${detail ? ` ${detail}` : ''}`,
     }
   }
@@ -374,7 +425,28 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
         retryable: false,
         // Balance, not back-pressure: this account's own, and it stays spent.
         accountScoped: true,
+        upstreamOverload: false,
         message: `${PROVIDER_NAME} reports the account quota is exhausted: ${detail || 'no remaining quota'}. Top up or wait for the window to reset.`,
+      }
+    }
+    // 正文点名上游引擎过载时，状态码仍是 429，但它描述的根本不是本账号：
+    // 所有账号共用同一台引擎，本地任何动作都改变不了它。这条必须在上面那条
+    // 额度判断之后、回到 RATE_LIMIT 之前，因为「余额见底」比「引擎繁忙」
+    // 更具体——两句话同时出现时，账号自己的问题才是更需要被告知的那个。
+    if (matchesAny(detail, UPSTREAM_OVERLOAD_PATTERNS)) {
+      return {
+        // 用 SERVER 而不是 RATE_LIMIT：两码都在 KIMI_CODE_RETRY_POLICY_CONFIG 的
+        // retryableCodes 里，退避重试行为完全一致；但 SERVER 在全仓是「服务端故障」
+        // 的规范码（5xx 分支、以及 GLM 把 OVERLOADED 映射到的都是它），RATE_LIMIT
+        // 在 UI 与号池文案里的含义是「这个账号被限流了」，用过载去借它会让用户在
+        // 界面上读到一个关于自己账号的错误结论。
+        code: 'SERVER',
+        // 过载是典型的瞬时故障，退避后重试正是为它准备的。
+        retryable: true,
+        // 换号也救不了：下一台引擎一样忙。所以轮转没有任何意义。
+        accountScoped: false,
+        upstreamOverload: true,
+        message: `${PROVIDER_NAME} upstream engine is overloaded (429): ${detail || 'the engine is currently overloaded'}. This is a temporary upstream condition shared by every account, so no account is taken out of rotation; retrying with backoff.`,
       }
     }
     return {
@@ -383,7 +455,8 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       // Ordinary back-pressure says nothing about this account in particular,
       // and the shared 429 cooldown below already rotates on it.
       accountScoped: false,
-      message: `${PROVIDER_NAME} is rate limited or overloaded (429): ${detail || 'too many requests'}. Retrying with backoff.`,
+      upstreamOverload: false,
+      message: `${PROVIDER_NAME} is rate limited (429): ${detail || 'too many requests'}. Retrying with backoff.`,
     }
   }
 
@@ -395,6 +468,9 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       code: 'SERVER',
       retryable: true,
       accountScoped: false,
+      // A 5xx is the same upstream condition this line reports for an overloaded
+      // 429, so the flag agrees with the code rather than contradicting it.
+      upstreamOverload: matchesAny(detail, UPSTREAM_OVERLOAD_PATTERNS),
       message: `${PROVIDER_NAME} upstream server error (${status}): ${detail || 'the model provider is temporarily unavailable'}. Retrying with backoff.`,
     }
   }
@@ -404,6 +480,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       code: 'PROVIDER_ERROR',
       retryable: false,
       accountScoped: false,
+      upstreamOverload: false,
       message: `${PROVIDER_NAME} rejected the request (400): ${detail || 'the request was not accepted'}`,
     }
   }
@@ -412,6 +489,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     code: 'PROVIDER_ERROR',
     retryable: false,
     accountScoped: false,
+    upstreamOverload: false,
     message: `${PROVIDER_NAME} API error (${status}): ${detail || 'No response'}`,
   }
 }
@@ -472,7 +550,13 @@ export interface KimiCodeAdapterOptions {
   loadCatalog?: () => Promise<KimiCodeCatalogModel[]>
 }
 
-/** Cooldown one rate-limited account takes when the provider states no delay. */
+/**
+ * Cooldown one rate-limited account takes when the provider states no delay.
+ *
+ * 只在**真正的**限流上使用：上游引擎过载走 SERVER，既不落这条窗口，也不消耗轮转
+ * 名额。它是 15 分钟而不是服务自己说的时长，正是因为拿不准——拿不准的那次猜测
+ * 落在一个只有单个账号的号池上，代价是整个号池在 15 分钟里彻底不可用。
+ */
 const POOL_COOLDOWN_MS = 15 * 60_000
 
 /**
@@ -840,7 +924,16 @@ export class KimiCodeAdapter extends LlmAdapter {
         // rotating cannot help, and cooling every account after one such request
         // would take the whole pool offline.
         const planScoped = response.status === 429 && matchesAny(detail, ENTITLEMENT_PATTERNS)
-        if (response.status === 429 && !planScoped) {
+        // 过载必须在这里显式排除：整条链路的判据历来是 HTTP 状态码，而 429 同时
+        // 承载「本账号被限流」和「上游引擎繁忙」两种含义。若不在这一层挡下，
+        // classifyKimiFailure 判得再对也没有用——号池会照旧给唯一那个账号写
+        // 15 分钟冷却（POOL_COOLDOWN_MS），harness 的每一次退避重试随后都被
+        // isEligible 挡在门外，一次网络请求都发不出去。判据取自分类结果的
+        // upstreamOverload（正文命中 UPSTREAM_OVERLOAD_PATTERNS），而不是这里
+        // 再匹配一次正文：分类是唯一知道这句话含义的地方，号池只消费它的结论。
+        // 排除后既不冷却也不轮转，直接把可重试的 SERVER 抛给 harness，让退避
+        // 在同一个账号上真的重发请求——过载时换号只会撞上同一台繁忙的引擎。
+        if (response.status === 429 && !planScoped && !failure.upstreamOverload) {
           // A spent balance is this account's own and stays spent, so it takes
           // the window's length rather than the retry-after of a back-pressure
           // signal that would have meant nothing here.
@@ -1002,7 +1095,9 @@ export class KimiCodeAdapter extends LlmAdapter {
       // Kept whole rather than narrowed to the statuses named today, so a type
       // the table later adds lands in the arm that already owns it.
       const planScoped = status === 429 && matchesAny(bodyText, ENTITLEMENT_PATTERNS)
-      if (status === 429 && !planScoped) {
+      // 与 HTTP 分支同一个排除项：in-band 走的是同一套判定，只是投递方式不同。
+      // 同一个信号换个投递方式就又冷却一次，等于这条线路只在状态码那条路上修好了。
+      if (status === 429 && !planScoped && !failure.upstreamOverload) {
         await this.coolInBandRateLimit(pool, accountId, failure.accountScoped, bodyText)
       } else if (failure.code === 'INVALID_CREDENTIAL') {
         // A credential the stream itself calls dead is that account's problem
@@ -1022,6 +1117,12 @@ export class KimiCodeAdapter extends LlmAdapter {
     // selects it. RATE_LIMIT is the 429 rule below, and SERVER is the 5xx rule,
     // which the HTTP path leaves the pool alone for — an overload is not one
     // account's property to carry.
+    //
+    // 过载不需要在这里再排除一次，因为本臂的判据是 code 而不是状态码：那条 code
+    // 正是 classifyKimiFailure 给同一段正文定的罪，而它现在把过载定成 SERVER，
+    // 所以过载根本走不进来。Anthropic 那条臂就不同了 —— 它的判据是自己合成的
+    // 状态码（rate_limit_error → 429），不经过分类，所以必须显式排除。两条臂
+    // 判据不同，防护的位置也就必须不同。
     if (reclassified.code === 'RATE_LIMIT' && !matchesAny(bodyText, ENTITLEMENT_PATTERNS)) {
       // The same 429 rule, with the scope read off that arm's own classification
       // — which is where the HTTP branch reads `accountScoped` from too, so a
