@@ -20,8 +20,8 @@ export const FREE_TIER_ID = 'free-tier'
 export const ONBOARD_TIMEOUT_MS = 30_000
 export const ONBOARD_POLL_INTERVAL_MS = 1_000
 
-export const DEFAULT_ANTIGRAVITY_VERSION = '2.8.0'
-export const DEFAULT_ANTIGRAVITY_CL = '963137146'
+export const DEFAULT_ANTIGRAVITY_VERSION = '2.23.0'
+export const DEFAULT_ANTIGRAVITY_CL = '998057262'
 
 export const REDIRECT_PATH = '/oauth-callback'
 export const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -78,8 +78,8 @@ export const TOOL_CALLING_MODE = {
  * runtime id the service rejects now surfaces as that rejection.
  *
  * The runtime ids are the ones `fetchAvailableModels` lists (snapshot of
- * 2026-10-12); the display names it publishes beside them are quoted where the
- * mapping is not obvious.
+ * 2026-10-14, client 2.23.0); the display names it publishes beside them are
+ * quoted where the mapping is not obvious.
  */
 export interface AntigravityRoutingEntry {
   off: string
@@ -88,6 +88,20 @@ export interface AntigravityRoutingEntry {
 }
 
 export const ROUTING: Record<string, AntigravityRoutingEntry> = {
+  // Verified against fetchAvailableModels (client 2.23.0): Gemini 4 Argon has
+  // no `-tiered` runtime; the catalog lists the three suffixed tiers and names
+  // `gemini-4-argon-medium` as `defaultAgentModelId`.
+  'gemini-4-argon': {
+    off: 'gemini-4-argon-low',
+    routing: {
+      minimal: 'gemini-4-argon-low',
+      low: 'gemini-4-argon-low',
+      medium: 'gemini-4-argon-medium',
+      high: 'gemini-4-argon-high',
+      xhigh: 'gemini-4-argon-high',
+    },
+    defaultRequestId: 'gemini-4-argon-medium',
+  },
   'gemini-3.8-flash': {
     off: 'gemini-3.8-flash-tiered',
     routing: {
@@ -247,6 +261,10 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
 }
 
 export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  'gemini-4-argon': 65536,
+  'gemini-4-argon-low': 65536,
+  'gemini-4-argon-medium': 65536,
+  'gemini-4-argon-high': 65536,
   'gemini-3.8-flash': 65536,
   'gemini-3.8-flash-tiered': 65536,
   'gemini-3.7-flash': 65536,
@@ -289,6 +307,14 @@ export interface AntigravityModelDef {
 }
 
 export const MODELS: AntigravityModelDef[] = [
+  {
+    id: 'gemini-4-argon',
+    name: 'Gemini 4 Argon',
+    inputModalities: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+    reasoningEfforts: ['low', 'medium', 'high'],
+  },
   {
     id: 'gemini-3.8-flash',
     name: 'Gemini 3.8 Flash',

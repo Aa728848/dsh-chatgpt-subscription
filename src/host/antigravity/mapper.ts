@@ -844,13 +844,13 @@ export function buildRequest(
   // Gemini 只在 thinkingConfig.includeThoughts 为 true 时才返回 thought 部分，否则模型照常思考
   // （usageMetadata.thoughtsTokenCount 照常计入）但流里没有可渲染的思维链。
   // 1. tiered 运行时：思考档位由 effort 决定，同时必须请求返回思考内容 includeThoughts。
-  // 2. 带档位后缀、agent 别名及 Gemini 3 运行时：补 includeThoughts，保留路由选择的档位。
+  // 2. 带档位后缀、agent 别名及 Gemini 3/4 运行时：补 includeThoughts，保留路由选择的档位。
   // 3. Gemini 2.5 系列：采用 thinkingBudget 控制思考预算与 includeThoughts。
   // 4. Claude 运行时依赖 anthropic-beta interleaved-thinking 头，非思考模型均不发送 thinkingConfig。
   const isTiered = /^gemini-.+-tiered$/.test(runtimeModel)
   const isSuffixed = /^gemini-.+(?:-(?:extra-)?low|-medium|-high|-xhigh)$/.test(runtimeModel)
   const isGemini25 = runtimeModel.startsWith('gemini-2.5-') || model.id.startsWith('gemini-2.5-')
-  const isGemini3 = /^gemini-3[.-]/.test(runtimeModel) && !runtimeModel.includes('image')
+  const isGemini3Or4 = /^gemini-[34][.-]/.test(runtimeModel) && !runtimeModel.includes('image')
   const isGeminiAgent = runtimeModel === 'gemini-pro-agent' || runtimeModel === 'gemini-3-flash-agent'
 
   if (isTiered) {
@@ -866,7 +866,7 @@ export function buildRequest(
           : 'LOW',
       includeThoughts: !isOff,
     }
-  } else if (isSuffixed || isGemini3 || isGeminiAgent) {
+  } else if (isSuffixed || isGemini3Or4 || isGeminiAgent) {
     const selected = (effort || 'medium').toLowerCase()
     const isOff = selected === 'off' || selected === 'none'
     generationConfig.thinkingConfig = {

@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- **[Antigravity] 新增 Gemini 4 Argon（`gemini-4-argon`）并同步官方 2.23.0 客户端版本标识（2026-10-14 线上实测）**
+  - **版本门控（User-Agent）**：实测确认 `/v1internal:fetchAvailableModels` 对 `User-Agent` 版本存在门控——旧 `2.8.0` (`cl=963137146`) 仅下发 26 个模型且默认模型停留在 `gemini-3.8-flash-high`；升级为官方最新客户端 `2.23.0` (`cl=998057262`) 后服务端下发 29 个模型（新增 `gemini-4-argon-low` / `-medium` / `-high`），并将 `defaultAgentModelId` 切至 `gemini-4-argon-medium`。同步更新 `DEFAULT_ANTIGRAVITY_VERSION = '2.23.0'` 与 `DEFAULT_ANTIGRAVITY_CL = '998057262'`。
+  - **模型与路由**：在可选目录首位新增 `gemini-4-argon`（`Gemini 4 Argon`，上下文 `1048576`，最大输出 `65536`，支持文本与图片输入及 `low` / `medium` / `high` 三档思考）；线上实测不存在裸 `gemini-4-argon` 或 `gemini-4-argon-tiered`（均返回 404），路由按档位映射至 `gemini-4-argon-low` / `gemini-4-argon-medium` / `gemini-4-argon-high`（默认 `gemini-4-argon-medium`，`off` 走 `gemini-4-argon-low` 并在 `thinkingConfig` 中设 `includeThoughts: false`）。
+  - **思考配置**：`mapper.ts` 的 `isGemini3` 扩展为 `isGemini3Or4`（`/^gemini-[34][.-]/`），覆盖 Gemini 4 系列运行时。
 - **[调度模式] 与 Agent Teams 改为刻意互斥：检测到就停，不再「换一套词汇接着干」（现场问题：开了智能体团队后这套调度就不好使）**
   - **现象**：组合了 `@deepseek-ai/dsh-experimental-agent-team-profile` 的部署里，调度模式「派得出去、回访不了」——`list_agents` 看不到 `subagent` 的孩子，`send_message` 只认成员名，`interrupt_agent` 同理。复审、返工、追问三条通道同时失灵。
   - **根因（两层）**：① **时机**——`TeamRoster.tryMembership` 对任何「无 `parentSession`、且不是 subagent descriptor」的 Agent 直接判为 `lead`，不需要先有 teammate，于是 team 工具从会话第一轮就装在 Lead 上，顶替掉内置的 `send_message`/`list_agents`/`interrupt_agent`——**还没派发就已经失去协调工具**。② **组合非法**——team 的 scoped 注册与内置同名工具按「近的层遮蔽远的层」解析，而 `dispatch` 正是那组旧定义的持有者（0.1.7+ 由本插件在运行时注册里挂载四行，preset 每一代独立 `createScope`，与宿主组合里被 patch 置 `disabled` 的那四行不是同一批实例）。上游文档对此写得很直接：`tool-agent-team`「当同名的旧全局 subagent 工具必须继续可用时，请不要选择……想同时使用两者的组合必须禁用旧定义」。

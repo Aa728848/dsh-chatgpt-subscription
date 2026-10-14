@@ -7,12 +7,14 @@ import { parseDurationMs, retryDelayMs } from '../src/host/antigravity/adapter.t
 import { quotaFamilyForModel } from '../src/host/antigravity/account-pool.ts'
 
 /**
- * Runtime ids `fetchAvailableModels` listed on 2026-10-12 (internal `tab_*`
- * completion models omitted). Every id the routing table sends must be one of
- * them: an id the service does not advertise is how 3.7 Flash ended up routed
- * through `gemini-3.7-flash-tiered` with a silent fallback to 3.6.
+ * Runtime ids `fetchAvailableModels` listed on 2026-10-14 with Antigravity
+ * 2.23.0 (cl=998057262; internal `tab_*` completion models omitted). Every id
+ * the routing table sends must be one of them: an id the service does not
+ * advertise is how 3.7 Flash ended up routed through `gemini-3.7-flash-tiered`
+ * with a silent fallback to 3.6.
  */
 const CATALOG_2026_10_12 = new Set([
+  'gemini-4-argon-low', 'gemini-4-argon-medium', 'gemini-4-argon-high',
   'gemini-2.5-flash-thinking', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
   'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3-flash-agent',
   'gemini-3.5-flash-extra-low', 'gemini-3.5-flash-low',
@@ -59,7 +61,25 @@ describe('Antigravity catalog alignment', () => {
     expect(ids).not.toContain('claude-opus-4-6')
     expect(ids).not.toContain('claude-sonnet-4-6')
     expect(ids).not.toContain('gemini-3.1-flash-image')
-    expect(ids).toEqual(expect.arrayContaining(['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']))
+    expect(ids).toEqual(expect.arrayContaining(['gemini-4-argon', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']))
+  })
+
+  it('routes Gemini 4 Argon through its suffixed tiers with medium as default', () => {
+    expect(ROUTING['gemini-4-argon']).toEqual({
+      off: 'gemini-4-argon-low',
+      routing: {
+        minimal: 'gemini-4-argon-low',
+        low: 'gemini-4-argon-low',
+        medium: 'gemini-4-argon-medium',
+        high: 'gemini-4-argon-high',
+        xhigh: 'gemini-4-argon-high',
+      },
+      defaultRequestId: 'gemini-4-argon-medium',
+    })
+    const argonReq = buildRequest(options('gemini-4-argon'), model('gemini-4-argon'), 'p', 'gemini-4-argon-medium', 'medium')
+    expect((argonReq.request as any).generationConfig.thinkingConfig).toEqual({ includeThoughts: true })
+    const argonOff = buildRequest(options('gemini-4-argon'), model('gemini-4-argon'), 'p', 'gemini-4-argon-low', 'off')
+    expect((argonOff.request as any).generationConfig.thinkingConfig).toEqual({ includeThoughts: false })
   })
 
   it('maps Gemini 3.5 Flash efforts by the published display names', () => {
@@ -159,6 +179,8 @@ describe('Antigravity 429 handling helpers', () => {
   it('assigns models to the quota groups the service meters separately', () => {
     expect(quotaFamilyForModel('claude-opus-5-5')).toBe('claude-gpt')
     expect(quotaFamilyForModel('gpt-oss-120b')).toBe('claude-gpt')
+    expect(quotaFamilyForModel('gemini-4-argon')).toBe('gemini')
     expect(quotaFamilyForModel('gemini-3.8-flash')).toBe('gemini')
   })
 })
+
