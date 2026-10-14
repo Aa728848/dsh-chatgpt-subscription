@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.24.1 - 2026-10-14
 - **[调度模式 & 子代理授权守卫] 插件端机制级修复模型调用 `list_subagent_models` 后仍疯狂翻找本地文件定义的问题，并全面优化预设提示词（现场会话 `session-01724ca8`）**
   - **现象**：主模型在启动阶段已调用 `list_subagent_models`，但因无参调用 `list_subagent_models({})` 只返回 provider 摘要，或看到上游工具描述写着 `"Catalog membership is advisory"` / `"Child LLM selection is optional..."`，不敢直接采信返回值，紧接着连续 9 个回合在工作区 grep `subagentModelAuthorization`、读取源码、递归扫描 `~/.dsh`（触发 120s 命令超时）并翻看 `settings.json` / `cordis.patch.yml` 以寻找「真正的允许清单定义」。
   - **插件端机制级修复（`src/host/subagent-model-authorization.ts`，零修改上游 DSH）**：
