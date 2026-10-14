@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.24.0 - 2026-10-14
 - **[Antigravity] 新增 Gemini 4 Argon（`gemini-4-argon`）并同步官方 2.23.0 客户端版本标识（2026-10-14 线上实测）**
   - **版本门控（User-Agent）**：实测确认 `/v1internal:fetchAvailableModels` 对 `User-Agent` 版本存在门控——旧 `2.8.0` (`cl=963137146`) 仅下发 26 个模型且默认模型停留在 `gemini-3.8-flash-high`；升级为官方最新客户端 `2.23.0` (`cl=998057262`) 后服务端下发 29 个模型（新增 `gemini-4-argon-low` / `-medium` / `-high`），并将 `defaultAgentModelId` 切至 `gemini-4-argon-medium`。同步更新 `DEFAULT_ANTIGRAVITY_VERSION = '2.23.0'` 与 `DEFAULT_ANTIGRAVITY_CL = '998057262'`。
   - **模型与路由**：在可选目录首位新增 `gemini-4-argon`（`Gemini 4 Argon`，上下文 `1048576`，最大输出 `65536`，支持文本与图片输入及 `low` / `medium` / `high` 三档思考）；线上实测不存在裸 `gemini-4-argon` 或 `gemini-4-argon-tiered`（均返回 404），路由按档位映射至 `gemini-4-argon-low` / `gemini-4-argon-medium` / `gemini-4-argon-high`（默认 `gemini-4-argon-medium`，`off` 走 `gemini-4-argon-low` 并在 `thinkingConfig` 中设 `includeThoughts: false`）。
