@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **[三条登录线路] 回调端口探测窗口按「100 端口一块」的否证前提定宽，导致整段保留区把探测窗口吃穿：Windows 实测连续 277 个端口不可用，而窗口只有 128（command-code 只有 10）**
+  - **现象**：本机全量 `npx vitest run` 稳定复现 **7 failed / 3711 passed**，全部集中在 `test/antigravity-callback-port.test.ts`（5 条）与 `test/login-open-browser-seams.test.ts`（2 条），报 `No usable local port for the Antigravity sign-in callback (tried 128 ports from 51121 on localhost)`，另有一条直接 `listen EACCES: permission denied ::1:51121`。
+  - **根因（实测否证既有注释）**：`port-constants.ts` 写着「Windows 排除区最多 100 端口一块，128 覆盖任何一块」——本机实测从默认端口 51121 起**连续 277 个端口不可用**（51121-51397，`netsh` 表印证），窗口在排除区内部就耗尽，必然抛错。除静态表外还有一批**散落的单端口 EACCES**（51512/51580/51620/51840…）根本不在 `netsh` 表里，属 Hyper-V/HNS 动态保留，且会在**百毫秒尺度上出现与释放**。三个取值（`antigravity` 128、`claude` 128、`command-code` **10**）建立在同一个被否定之前提上。
+  - **失效形态三条各不相同**：`antigravity` 抛错、`claude` 返回 `null` → `beginLogin` 把用户**静默推进手动粘贴流程**（机器上明明有数百个空闲端口就在保留区后面）、`command-code` 抛错且**没有手动流程可退**，窄窗口等于登录直接死掉。
+  - **改法**：三条线路的窗口统一为 **1024**（≈实测最宽区的 3.7 倍；终点 52144 / 54716 / 6983 均远低于 65535，command-code 另有断言确保不越入 49152+ 的 OS 动态端口区）并重写被否证的注释，把 277 宽实测、失效形态与 ~0.35ms/次探测的最坏代价一并记入。`resolveCallbackPort` / `findAvailablePort` 各补一个**可选**注入式 `probe` seam（`claude` 本就已有同形参数），使「窗口契约」与「机器事实」解耦；生产默认值仍是真绑定，调用点逐字未变。`claude` 的 `probed.length <= CALLBACK_PORT_ATTEMPTS` 收紧为 `===`，`command-code` 测试里硬编码的 `5959 + 10` 改为常量推导（两侧区间断言保留，上界仍被断言）。
+  - **command-code 的 10 为什么加宽（而非保持）**：「matches the official CLI」约束的是**起点**（5959 保留且仍先试，有测试钉死字面量），不是宽度；端口经 callback URL 交给 studio，5960+ 本就是「非 CLI 端口」，加宽不引入新的端口类别；决定性是失败形态——这条线路没有手动流程可退，窗口耗尽即登录失败。
+  - **测试为什么不碰真实 socket**：曾出现「用真实 socket 拼一段连续占用区」的写法在同一棵树上**时过时不过**（40 轮 3 轮失败，且 3 次全部停在 build 期就是 EACCES 的端口上，自持有端口一次都没变）——动态保留区会在测试运行途中解禁。新用例因此**全部注入 probe**，零真实 socket、零 skip，与机器排布无关。
+  - **验证**：`npm run typecheck` 0 错误；全量 **225 passed | 1 skipped（226 文件）、3732 passed | 7 skipped、0 failed**（基线 7 failed）；承重文件连跑 20 次全绿；`login-open-browser-seams.test.ts` **未改测试**，靠生产修复自然通过且真的走到了 abort 分支。承重已双向检查：常量单独还原为 128/10 时 5 条立刻失败（`expected 128 to be greater than 277`、`expected null to be 53969`、`expected 'manual' to be 'loopback'`、`No free local port … (tried 10 ports from 5959)`）。
 
 ## 0.24.1 - 2026-10-14
 - **[调度模式 & 子代理授权守卫] 插件端机制级修复模型调用 `list_subagent_models` 后仍疯狂翻找本地文件定义的问题，并全面优化预设提示词（现场会话 `session-01724ca8`）**

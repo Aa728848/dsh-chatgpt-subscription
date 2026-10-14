@@ -58,18 +58,40 @@ export function callbackPort(): number {
  * URI carries whatever port this returns, so any free loopback port works. A
  * configured `DSH_ANTIGRAVITY_CALLBACK_PORT` still wins — callers who set it
  * accept that the port must be usable.
+ *
+ * How wide such a reserved run is not something this function can look up — it
+ * is the host's own bookkeeping — so the probe only has to be wider than the
+ * widest run it can meet, and it walks a window sized for that (see
+ * {@link CALLBACK_PORT_ATTEMPTS}) instead of guessing a block size. `start` and
+ * `probe` are the seams that keep that claim testable: production probes from
+ * the line's own default and judges each port by really binding it, and a test
+ * can point the walk at a run whose width it controls.
  */
 export async function resolveCallbackPort(
   attempts = CALLBACK_PORT_ATTEMPTS,
   host = resolveCallbackHost(),
+  start = DEFAULT_CALLBACK_PORT,
+  /**
+   * How one port is judged. Defaults to the real bind on `host`, the only
+   * authority that can answer the question for the machine this will run on.
+   *
+   * Overridable because the width of the window is a contract while the width of
+   * the run it must clear is a machine fact: Windows reservations appear *and*
+   * are released while a test is running, and another process can own a port a
+   * scenario wanted free, so a run built out of real sockets measures this host
+   * as much as the probe. An injected judge gives the run a known width and
+   * leaves the assertion about the window alone. (The Claude line injects its
+   * probe the same way.)
+   */
+  probe: (port: number) => Promise<boolean> = (port) => isPortUsable(port, host),
 ): Promise<number> {
   if (antigravityEnv('CALLBACK_PORT') !== undefined) return callbackPort()
   for (let offset = 0; offset < attempts; offset += 1) {
-    if (await isPortUsable(DEFAULT_CALLBACK_PORT + offset, host)) return DEFAULT_CALLBACK_PORT + offset
+    if (await probe(start + offset)) return start + offset
   }
   throw new Error(
     `No usable local port for the Antigravity sign-in callback `
-    + `(tried ${attempts} ports from ${DEFAULT_CALLBACK_PORT} on ${host}). `
+    + `(tried ${attempts} ports from ${start} on ${host}). `
     + 'A Windows excluded-port range may cover them; set DSH_ANTIGRAVITY_CALLBACK_PORT to a free port.',
   )
 }

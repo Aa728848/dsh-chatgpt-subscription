@@ -95,19 +95,23 @@ function checkPortAvailable(port: number): Promise<boolean> {
 }
 
 /**
- * First free loopback port in the CLI's probe range.
+ * First free loopback port in the probe range.
  *
  * The studio receives the port in the callback URL, so any free port works;
  * starting at the CLI's own default keeps behavior identical on a machine where
- * a server-side allowlist is ever introduced.
+ * a server-side allowlist is ever introduced. `probe` is the seam the tests walk
+ * a reserved run through, which is what lets the width of the window be asserted
+ * without binding a thousand real sockets on a machine whose own reservations
+ * move underneath the test.
  */
 export async function findAvailablePort(
   start = DEFAULT_CALLBACK_PORT,
   attempts = CALLBACK_PORT_ATTEMPTS,
+  probe: (port: number) => Promise<boolean> = checkPortAvailable,
 ): Promise<number> {
   for (let offset = 0; offset < attempts; offset += 1) {
     const port = start + offset
-    if (await checkPortAvailable(port)) return port
+    if (await probe(port)) return port
   }
   throw new Error(`No free local port for the Command Code sign-in callback (tried ${attempts} ports from ${start}).`)
 }

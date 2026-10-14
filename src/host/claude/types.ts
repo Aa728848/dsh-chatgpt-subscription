@@ -210,12 +210,27 @@ export const DEFAULT_CALLBACK_PORT = 53692
  *
  * Windows (Hyper-V/WinNAT) dynamically reserves TCP port ranges that change on
  * every reboot. A fixed callback port can land inside one and `listen` fails
- * with `EACCES`, so browser authorization never completes. Excluded ranges are
- * reserved in blocks of up to 100 ports, which is why a probe narrower than that
- * can stop inside a block and still fail; 128 covers any single block the
- * default port can start in. Mirrors the Antigravity line's own probe.
+ * with `EACCES`, so browser authorization never completes.
+ *
+ * An excluded run is not a block of a width anyone can look up. One Windows 11
+ * host was measured holding 277 consecutive unusable ports (51121-51397) plus
+ * scattered single ones that appear in no static table, and the picture changes
+ * across reboots — so a window justified as "covers any single block" is covering
+ * a block size that does not exist. A window narrower than the run the default
+ * starts inside ends INSIDE that run, and the consequence here is worse than an
+ * error: resolveCallbackPort returns null, which beginLogin reads as "fall back
+ * to manual". The user is then pushed into pasting a code with no visible cause
+ * on a machine that has hundreds of free ports immediately behind the run.
+ *
+ * 1024 is ~3.7x the widest run measured and still ends at 54716, far below the
+ * 65535 ceiling. The window is walked one failed bind at a time (~0.35ms per
+ * rejected listen here), so the worst case costs a fraction of a second once per
+ * sign-in and only when every port in it is unusable; the ordinary case stops at
+ * the first usable port. Widening changes neither which port is tried first nor
+ * the default status as the one port known to be registered for this client
+ * (see {@link DEFAULT_CALLBACK_PORT}).
  */
-export const CALLBACK_PORT_ATTEMPTS = 128
+export const CALLBACK_PORT_ATTEMPTS = 1024
 
 /** Path of the loopback callback the browser is redirected to. */
 export const CALLBACK_PATH = '/callback'

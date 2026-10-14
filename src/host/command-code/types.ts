@@ -54,8 +54,28 @@ export const USAGE_SUMMARY_PATH = '/alpha/usage/summary'
 
 /** First loopback port tried for the browser callback; matches the official CLI. */
 export const DEFAULT_CALLBACK_PORT = 5959
-/** Consecutive ports probed when the default is taken; matches the official CLI. */
-export const CALLBACK_PORT_ATTEMPTS = 10
+/**
+ * Consecutive ports probed when the default is taken.
+ *
+ * The CLI opens its own search at 5959, which {@link DEFAULT_CALLBACK_PORT}
+ * keeps, so on an ordinary machine this line still lands on the port the CLI
+ * would. The WIDTH is recovery budget, not compatibility: the studio is handed
+ * whatever port this returns in the callback URL, so ports past the CLI's own
+ * range were already reachable here before the window was widened, and starting
+ * at the CLI default is what preserves the "behaves like the CLI" property if the
+ * studio ever does pin an allowlist.
+ *
+ * The failure shape makes the width matter more than it does for a line that has
+ * a manual flow to fall back to: exhausting this window is a thrown error and a
+ * dead sign-in, not a downgrade. Windows (Hyper-V/WinNAT) reserves TCP port
+ * ranges of no fixed width that change on every reboot — one host was measured
+ * holding 277 consecutive ports — so a ten-port window is one reboot away from
+ * failing outright and a wider one is not. 1024 matches the other two sign-in
+ * lines here and still ends at 6983: clear of the privileged ports, clear of the
+ * OS dynamic range, and walked one failed bind at a time (~0.35ms each), so the
+ * worst case costs a fraction of a second once per sign-in.
+ */
+export const CALLBACK_PORT_ATTEMPTS = 1024
 export const CALLBACK_PATH = '/callback'
 /** Page the studio's browser tab lands on after a successful POST; CLI-compatible. */
 export const CALLBACK_COMPLETE_PATH = '/callback/complete'

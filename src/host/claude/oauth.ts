@@ -870,10 +870,14 @@ function isPortUsable(port: number): Promise<boolean> {
  * First usable loopback port, or null when the probe finds none.
  *
  * null rather than a throw is deliberate (see beginLogin): a failed probe is
- * NOT a hard error, it is the signal to fall back to the manual flow. Windows
- * (Hyper-V/WinNAT) reserves TCP port ranges that move on every reboot, and
- * CALLBACK_PORT_ATTEMPTS covers any single 100-port excluded block the default
- * port can start inside.
+ * NOT a hard error, it is the signal to fall back to the manual flow. That is
+ * exactly why the window has to be wide rather than merely generous: a run of
+ * excluded ports wider than CALLBACK_PORT_ATTEMPTS ends this walk early and drops
+ * the user into a paste-a-code flow for a reason nothing on screen explains,
+ * while the ports immediately behind that run sit free. Windows
+ * (Hyper-V/WinNAT) reserves ranges of no fixed width that move on every reboot,
+ * so the width of this window, not any assumed block size, is what keeps the
+ * sign-in in loopback.
  */
 export async function resolveCallbackPort(
   probe: (port: number) => Promise<boolean> = isPortUsable,

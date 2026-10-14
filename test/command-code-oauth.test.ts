@@ -7,6 +7,7 @@ import {
   resetWebLogin,
   type CommandCodeAuthServerHandle,
 } from '../src/host/command-code/oauth.ts'
+import { CALLBACK_PORT_ATTEMPTS, DEFAULT_CALLBACK_PORT } from '../src/host/command-code/types.ts'
 
 const handles: CommandCodeAuthServerHandle[] = []
 
@@ -44,8 +45,12 @@ describe('Command Code browser sign-in', () => {
 
   it('finds a loopback port in the CLI probe range', async () => {
     const port = await findAvailablePort()
-    expect(port).toBeGreaterThanOrEqual(5959)
-    expect(port).toBeLessThan(5959 + 10)
+    // Bounded by the constants rather than the literals this used to spell out:
+    // the same two-sided range check, still asserting that the port found lies
+    // inside the window the flow actually probes, and now tracking that window
+    // instead of orphaning a number the next edit would change underneath it.
+    expect(port).toBeGreaterThanOrEqual(DEFAULT_CALLBACK_PORT)
+    expect(port).toBeLessThan(DEFAULT_CALLBACK_PORT + CALLBACK_PORT_ATTEMPTS)
   })
 
   it('answers the studio preflight, including the private-network request header', async () => {

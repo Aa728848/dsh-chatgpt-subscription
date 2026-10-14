@@ -554,9 +554,37 @@ describe('loopback callback listener', () => {
     expect(flow.fallbackReason).toBeTruthy()
     expect(flow.fallbackReason).toContain(String(DEFAULT_CALLBACK_PORT))
     expect(probed.length).toBeGreaterThan(0)
-    expect(probed.length).toBeLessThanOrEqual(CALLBACK_PORT_ATTEMPTS)
+    // The whole window is walked before giving up: an exhausted budget has to
+    // mean an exhausted walk, not an early exit reporting a range it never tried.
+    expect(probed.length).toBe(CALLBACK_PORT_ATTEMPTS)
     expect(opened).toHaveLength(1)
     expect(new URL(opened[0] ?? 'https://invalid/').searchParams.get('redirect_uri')).toBe(OAUTH_MANUAL_REDIRECT_URI)
+  })
+
+  it('keeps the browser flow when the excluded run is as wide as any measured', async () => {
+    const store = memoryStore(null)
+    // The widest run of unusable ports measured on a Windows host. The probe
+    // is injected and the listener is never bound, so the case is identical
+    // on every machine: what it asserts is the decision beginLogin makes over
+    // a run that wide, not whether this host happens to be holding one.
+    const widestRun = 277
+    const probed: number[] = []
+    const flow = await beginLogin(store.store, {
+      mode: 'loopback',
+      probe: async (port) => { probed.push(port); return port >= DEFAULT_CALLBACK_PORT + widestRun },
+      listen: async () => http.createServer(),
+      openBrowser: () => undefined,
+      fetchFn: recordingFetch(() => jsonResponse(tokenBody())).fn,
+    })
+
+    // The case above already covers what an exhausted window does; this one
+    // covers the window that must NOT be exhausted by a run this size. Loopback
+    // survives, so the user is never dropped into a manual paste they cannot
+    // explain, and the armed redirect URI is the probed port rather than a lie.
+    expect(flow.mode).toBe('loopback')
+    expect(flow.fallbackReason).toBeUndefined()
+    expect(flow.redirectUri).toBe(loopbackRedirectUri(DEFAULT_CALLBACK_PORT + widestRun))
+    expect(probed).toHaveLength(widestRun + 1)
   })
 
   it('rejects a wrong state without cancelling the in-flight sign-in', async () => {
