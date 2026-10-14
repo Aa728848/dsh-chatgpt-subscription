@@ -2,6 +2,7 @@
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
   "version": "0.24.1",
   "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
+  "icon": "./icon.svg",
   "author": {
     "name": "eddyskywalker",
     "url": "https://www.npmjs.com/~eddyskywalker"
@@ -111,6 +112,7 @@
     "antigravity-login": "./bin/antigravity-login.mjs"
   },
   "files": [
+    "icon.svg",
     "lib/index.js",
     "lib/client.js",
     "lib/client.js.map",
