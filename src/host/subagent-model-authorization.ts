@@ -501,6 +501,184 @@ export function delegationModeOf(
 }
 
 /**
+ * Resolve the effective allowlist that governs delegations from this agent:
+ * empty when the Host preference explicitly disables enforcement, otherwise
+ * the Session's (or nearest subagent ancestor's) recorded policy, falling
+ * back to the live preference only under `preference` scope.
+ * @param agent - Calling agent.
+ * @param preference - Current Host preference, when the settings service exists.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param scope - Whether an unrecorded Session falls back to the preference.
+ * @returns the authorized routes in force for this agent, or an empty list when unrestricted.
+ */
+export function effectiveAllowedRoutes(
+  agent: AuthorizationAgent | undefined,
+  preference: SubagentModelSelectionPreference | undefined,
+  sessions: SessionsResolver,
+  scope: AuthorizationScope = 'session',
+): readonly AllowedModelRoute[] {
+  // An explicit "off" in the Host document suspends enforcement everywhere,
+  // matching the preference the Settings card owns.
+  if (preference !== undefined && !preference.enabled) return []
+  return authorizedRoutesFor(agent, sessions)
+    ?? (scope === 'preference' ? preference?.allowedModels ?? [] : [])
+}
+
+/**
+ * Append the Session's authorized `{ provider, model }` pairs to a successful
+ * `list_subagent_models` result when the calling Session is governed by an
+ * allowlist.
+ *
+ * Calling `list_subagent_models({})` upstream returns only provider names
+ * (`minimax-code — MiniMax Code`), and calling it with `provider` prints
+ * `<provider>/<model>` without stating that the output is already filtered to
+ * the Session allowlist. Appending the exact split `{ provider, model }` pairs
+ * here lets even a single `list_subagent_models({})` call hand the model every
+ * authorized route in the form `subagent` expects, eliminating any reason to
+ * search local config files or source code for the allowlist.
+ * @param output - Original text returned by `list_subagent_models`.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the output with the Session allowlist summary appended.
+ */
+export function enrichListSubagentModelsOutput(
+  output: string,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  if (allowed.length === 0) return output
+  const header = 'Authorized child routes for this Session (already filtered by the Session allowlist; '
+    + 'only these routes are accepted, and `provider` and `model` must be passed as separate fields):'
+  if (output.includes(header)) return output
+  const lines = allowed.map(
+    route => `- ${route.provider}/${route.model} -> provider: "${route.provider}", model: "${route.model}"`,
+  )
+  const suffix = `${header}\n${lines.join('\n')}`
+  return output.trim().length === 0 ? suffix : `${output}\n\n${suffix}`
+}
+
+/**
+ * Rewrite the upstream `list_subagent_models` and `subagent` tool/parameter
+ * descriptions when the calling Session enforces an allowlist.
+ *
+ * Upstream `dsh-tool-subagent` ships static descriptions stating that
+ * `"Catalog membership is advisory: an adapter may accept an unlisted model id."`
+ * and `"Child LLM selection is optional. Omit provider, model, and reasoning_effort..."`.
+ * In an allowlist-governed Session both statements are false and actively
+ * mislead the dispatcher into either omitting `provider`/`model` or distrusting
+ * `list_subagent_models` and hunting through local files for the "real" allowlist.
+ * @param text - Tool description, parameter description, or rendered `tools:sdk` section text.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the text with the misleading upstream sentences replaced by the Session's exact policy.
+ */
+export function rewriteAuthorizedToolDescriptions(
+  text: string,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  if (allowed.length === 0 || text.length === 0) return text
+  const routes = authorizedRoutesText(allowed)
+  return text
+    .replaceAll(
+      'Catalog membership is advisory: an adapter may accept an unlisted model id.',
+      `Output is already filtered to this Session's allowlist (${routes}); only these authorized provider/model routes are accepted.`,
+    )
+    .replace(
+      /Child LLM selection is optional\.\s*Omit `?provider`?, `?model`?, and `?reasoning_effort`? to use configured child defaults and (?:inherit compatible missing values from the parent Agent|this provider's route defaults)\./g,
+      `Child LLM selection is required in this Session: pass an authorized \`provider\` and \`model\` from \`list_subagent_models\` (${routes}) as separate fields; omitting either field is rejected.`,
+    )
+    .replace(
+      /Supply together with model; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit from the parent Agent\./g,
+      `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`,
+    )
+    .replace(
+      /Supply together with provider; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit when the child provider matches the parent provider\./g,
+      'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
+    )
+}
+
+/** Minimal shape of a prompt assembly passed through `system-prompt/assemble`. */
+interface MutablePromptAssembly {
+  readonly sections?: readonly { readonly name?: unknown; readonly text?: unknown }[]
+  readonly tools?: readonly {
+    readonly name?: unknown
+    readonly description?: unknown
+    readonly parameters?: unknown
+  }[]
+}
+
+/**
+ * Rewrite one assembled prompt's `tools:sdk` section and native tool schemas
+ * when the target Agent's Session enforces a subagent model allowlist.
+ * @param assembly - Assembled prompt from `system-prompt/assemble`.
+ * @param allowed - Routes the calling Session authorizes.
+ * @param toolNames - Explicit-route delegation tool names.
+ * @returns the updated assembly, or the original object when nothing changed.
+ */
+export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>(
+  assembly: T,
+  allowed: readonly AllowedModelRoute[],
+  toolNames: readonly string[] = DEFAULT_DELEGATION_TOOLS,
+): T {
+  if (allowed.length === 0) return assembly
+  let sectionsChanged = false
+  const sections = Array.isArray(assembly.sections)
+    ? assembly.sections.map((section) => {
+        if (section?.name !== 'tools:sdk' || typeof section.text !== 'string') return section
+        const rewritten = rewriteAuthorizedToolDescriptions(section.text, allowed)
+        if (rewritten === section.text) return section
+        sectionsChanged = true
+        return { ...section, text: rewritten }
+      })
+    : assembly.sections
+
+  let toolsChanged = false
+  const tools = Array.isArray(assembly.tools)
+    ? assembly.tools.map((tool) => {
+        const name = asString(tool?.name)
+        if (name === undefined || (name !== 'list_subagent_models' && !toolNames.includes(name))) {
+          return tool
+        }
+        const description = typeof tool.description === 'string'
+          ? rewriteAuthorizedToolDescriptions(tool.description, allowed)
+          : tool.description
+        let params = tool.parameters
+        const paramsRecord = asRecord(params)
+        const propsRecord = asRecord(paramsRecord?.['properties'])
+        if (paramsRecord !== undefined && propsRecord !== undefined) {
+          let propsMutated = false
+          const nextProps: Record<string, unknown> = { ...propsRecord }
+          for (const field of ['provider', 'model'] as const) {
+            const prop = asRecord(propsRecord[field])
+            const propDesc = asString(prop?.['description'])
+            if (prop !== undefined && propDesc !== undefined) {
+              const nextDesc = rewriteAuthorizedToolDescriptions(propDesc, allowed)
+              if (nextDesc !== propDesc) {
+                nextProps[field] = { ...prop, description: nextDesc }
+                propsMutated = true
+              }
+            }
+          }
+          if (propsMutated) {
+            params = { ...paramsRecord, properties: nextProps }
+          }
+        }
+        if (description === tool.description && params === tool.parameters) return tool
+        toolsChanged = true
+        return {
+          ...tool,
+          ...(description !== tool.description ? { description } : {}),
+          ...(params !== tool.parameters ? { parameters: params } : {}),
+        }
+      })
+    : assembly.tools
+
+  if (!sectionsChanged && !toolsChanged) return assembly
+  return {
+    ...assembly,
+    ...(sectionsChanged ? { sections } : {}),
+    ...(toolsChanged ? { tools } : {}),
+  }
+}
+
+/**
  * Decide whether one delegation call may start its child.
  * @param agent - Calling agent.
  * @param toolName - Tool being dispatched.
@@ -530,11 +708,7 @@ export function delegationDenialReason(
     toolName,
   )
   if (mode === undefined) return undefined
-  // An explicit "off" in the Host document suspends enforcement everywhere,
-  // matching the preference the Settings card owns.
-  if (preference !== undefined && !preference.enabled) return undefined
-  const recorded = authorizedRoutesFor(agent, sessions)
-  const allowed = recorded ?? (scope === 'preference' ? preference?.allowedModels ?? [] : [])
+  const allowed = effectiveAllowedRoutes(agent, preference, sessions, scope)
   if (allowed.length === 0) return undefined
   const request = asRecord(args) ?? {}
   const requestedProvider = asString(request['provider'])
@@ -689,12 +863,20 @@ export interface SubagentModelAuthorizationConfig {
   readonly scope?: AuthorizationScope
 }
 
+/** Event-registration surface used when the Host context is a full Cordis context. */
+interface EventHost {
+  on?(event: string, listener: (...args: never[]) => unknown): () => void
+}
+
 /**
- * Register the monotonic guard on the Host tool registry.
- * @param ctx - Host context carrying `tools` (and optionally `settings`).
+ * Register the monotonic guard on the Host tool registry, and — when the Host
+ * context exposes Cordis events — enrich `list_subagent_models` output with the
+ * Session's split `{ provider, model }` routes and rewrite the misleading
+ * upstream optional/advisory wording in assembled prompts.
+ * @param ctx - Host context carrying `tools` (and optionally `settings` / `on`).
  * @param sessions - Session registry used for ancestor lookup.
  * @param config - Enforcement toggle and delegation tool names.
- * @returns the exact disposer that unregisters the guard.
+ * @returns the exact disposer that unregisters the guard and listeners.
  */
 export function installSubagentModelAuthorization(
   ctx: Context,
@@ -714,9 +896,88 @@ export function installSubagentModelAuthorization(
   // below checks for it and leaves recorded policies in charge when it is gone.
   const settings = (ctx as unknown as { get?(name: string): unknown }).get?.('settings') as SettingsService | undefined
   const authorize = createSubagentAuthorization({ settings, sessions, toolNames, inheritToolNames, scope })
-  return ctx.tools.guard(exec =>
+  const disposeGuard = ctx.tools.guard(exec =>
     authorize(exec.agent as AuthorizationAgent | undefined, exec.name, exec.arguments))
+
+  const eventHost = ctx as unknown as EventHost
+  const disposePostExecute = eventHost.on?.(
+    'tools/post-execute',
+    async (
+      exec: { readonly name?: unknown; readonly agent?: unknown },
+      result: {
+        readonly isError?: unknown
+        readonly value?: unknown
+        readonly content?: readonly { readonly type?: unknown; readonly text?: unknown }[]
+      },
+      next: () => Promise<unknown>,
+    ) => {
+      const decision = await next() as {
+        readonly kind?: string
+        readonly value?: unknown
+        readonly content?: readonly { readonly type?: unknown; readonly text?: unknown }[]
+        readonly additionalContexts?: unknown
+      }
+      if (exec.name !== 'list_subagent_models' || result.isError === true || decision?.kind !== 'accept') {
+        return decision
+      }
+      const allowed = effectiveAllowedRoutes(
+        exec.agent as AuthorizationAgent | undefined,
+        subagentModelSelectionPreference(settings),
+        sessions,
+        scope,
+      )
+      if (allowed.length === 0) return decision
+      const currentValue = decision.value !== undefined ? decision.value : result.value
+      if (typeof currentValue === 'string') {
+        const enriched = enrichListSubagentModelsOutput(currentValue, allowed)
+        if (enriched === currentValue) return decision
+        return {
+          kind: 'accept' as const,
+          value: enriched,
+          ...(decision.additionalContexts !== undefined ? { additionalContexts: decision.additionalContexts } : {}),
+        }
+      }
+      const currentContent = decision.content ?? result.content
+      const firstBlock = Array.isArray(currentContent) ? currentContent[0] : undefined
+      if (firstBlock?.type === 'text' && typeof firstBlock.text === 'string') {
+        const enriched = enrichListSubagentModelsOutput(firstBlock.text, allowed)
+        if (enriched === firstBlock.text) return decision
+        return {
+          kind: 'accept' as const,
+          content: [{ type: 'text' as const, text: enriched }, ...currentContent!.slice(1)],
+          ...(decision.additionalContexts !== undefined ? { additionalContexts: decision.additionalContexts } : {}),
+        }
+      }
+      return decision
+    },
+  )
+
+  const disposeAssemble = eventHost.on?.(
+    'system-prompt/assemble',
+    async (
+       _assembly: MutablePromptAssembly,
+      context: { readonly agent?: unknown; readonly scope?: unknown } | undefined,
+      next: () => Promise<MutablePromptAssembly>,
+    ) => {
+      const assembled = await next()
+      const agent = (context?.agent ?? context?.scope) as AuthorizationAgent | undefined
+      const allowed = effectiveAllowedRoutes(
+        agent,
+        subagentModelSelectionPreference(settings),
+        sessions,
+        scope,
+      )
+      return rewriteAuthorizedPromptAssembly(assembled, allowed, toolNames)
+    },
+  )
+
+  return () => {
+    disposeGuard()
+    disposePostExecute?.()
+    disposeAssemble?.()
+  }
 }
+
 /**
  * Validate the configured authorization scope.
  * @param scope - Candidate scope from deployment configuration.

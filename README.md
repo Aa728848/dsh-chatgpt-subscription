@@ -491,7 +491,7 @@ DSH 的 Agent Teams（bundle `@deepseek-ai/dsh-experimental-agent-team-profile`�
 | 任务开始建目标 | 除非用户明确要求，否则**不调用 `create_goal` / `/goal`**，任务清单一律走 `todo_write` | 机制性的：目标一旦激活，DSH 会自动续跑唤醒主代理，而子代理何时返回不由它控制——等待被从中间劈开，模型重新分诊、重新检查「还差什么」，每次续跑还要重载整段历史 |
 | 需要用户拍板 | 一切「我停在这里是因为缺一个决定」的停点（收到子代理结果要选下一步、验收不过要定返工范围、前提被推翻要改计划）都用 `ask_user_question` 递出去，并给出选项与推荐答案 | 提问是代理的工具，不是用户的义务：否则用户得先替模型把那段话翻译成一次输入。例外是 plan mode 的计划审批（走 `exit_plan_mode`）与任务完成后的收尾 |
 
-三条各自对应 persona 反模式列表里的第 13–15 条。
+三条各自对应 persona 反模式列表里的第 13–15 条。此外，本插件在运行时通过 `system-prompt/assemble` 原位重写 `list_subagent_models` 与 `subagent` 工具描述中的 `"Catalog membership is advisory"` / `"Child LLM selection is optional..."` 误导措辞，并通过 `tools/post-execute` 在每次 `list_subagent_models` 返回末尾直接附上本会话全部已授权的 `{ provider, model }` 拆解对；`R2` 与 `plan-mode` 提示词也同步写明 `list_subagent_models` 是本会话允许清单的**唯一真源**，直接采信其输出即可，无需仅为了确认哪些子代理模型可用去翻找本地配置文件或工作区代码（对应 Anti-Pattern 第 16 条）。
 
 ### 为什么不降级：teammate 不能选模型
 

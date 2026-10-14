@@ -24,7 +24,7 @@
 | R0.5 | 兼容性闸门（每个新会话一次）：检测到 Agent Teams 就**停**并把选择交给用户——本模式与 team 不兼容，没有降级路径 |
 | R-G | L2 规划前必须做澄清访谈：设计树 / 前沿 / 轮次，每题给推荐答案，事实自己查、决策交用户，前沿为空且用户确认后才进入规划 |
 | R1 | 仅 L2：主代理只做规划/派发/审查/验收/文档/兜底 |
-| R2 | 派发必须显式给出 `provider` 与 `model`，且落在 DSH 允许清单内；禁止静默继承主代理模型 |
+| R2 | 允许清单唯一真源是 `list_subagent_models`（`{}` → `{ provider }`）；派发必须显式给出拆开的 `provider` 与 `model`，直接采信工具返回值，无需去翻本地配置或代码核对 |
 | R3 | 子代理对自己的模块拥有规划/执行/自检自治权 |
 | R4 | 子代理使用 DSH 默认子代理角色；选模型的权力只在主代理 |
 | R5 | 任务书含目标/边界/约束/验收标准/证据；独立任务并行派发 |
@@ -56,7 +56,8 @@
 
 被拒绝时，理由里会直接列出授权路由，并提示调用 `list_subagent_models` 查看各模型的能力与
 推理强度——该工具由 `modelSelectionSettings: true` 自动注册，且其可见范围恰好被限制在你勾选的
-清单内，放心使用。
+清单内。为消除上游工具自带英文说明（`"Catalog membership is advisory"`、`"Child LLM selection is optional..."`）与需要两步调用的盲区，本插件在运行时做了双重机制级增强：① 通过 `system-prompt/assemble` 原位重写 `list_subagent_models` 与 `subagent` 的工具描述（覆盖 PTC `tools:sdk` 与 Native 工具定义），直接写明强制显式路由与本会话允许清单；② 通过 `tools/post-execute` 在每次 `list_subagent_models` 返回末尾直接附上本会话全部已授权的 `{ provider, model }` 拆解对。R2 与 `plan-mode` 提示词也同步写明 `list_subagent_models` 是允许清单的**唯一真源**，直接采信其输出即可，无需仅为了确认哪些子代理模型可用去翻本地配置或代码（Anti-Pattern 16）。
+
 
 ## 已知边界
 

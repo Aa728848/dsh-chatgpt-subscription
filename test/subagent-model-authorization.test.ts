@@ -11,6 +11,8 @@ import {
   createSubagentAuthorization,
   delegationDenialReason,
   delegationModeOf,
+  effectiveAllowedRoutes,
+  enrichListSubagentModelsOutput,
   explicitRoutePair,
   inheritOverrideReason,
   inheritRouteDenialReason,
@@ -20,6 +22,8 @@ import {
   normalizeInheritToolNames,
   parseAllowedRoutes,
   policyRoutesOf,
+  rewriteAuthorizedPromptAssembly,
+  rewriteAuthorizedToolDescriptions,
   subagentModelSelectionPreference,
   unauthorizedRouteReason,
   validateAuthorizationScope,
@@ -518,4 +522,103 @@ describe('subagent model authorization', () => {
     expect(reason).toContain('minimax-code/MiniMax-M3.1-Flash-Preview')
     expect(reason).toContain('is not on the Session allowlist')
   })
+
+  it('enriches list_subagent_models output with split authorized routes and rewrites misleading tool descriptions', async () => {
+    expect(effectiveAllowedRoutes(recordingAgent([MINIMAX]), PREFERENCE, NO_SESSIONS)).toEqual([MINIMAX])
+    expect(effectiveAllowedRoutes(recordingAgent([MINIMAX]), { enabled: false, allowedModels: [MINIMAX] }, NO_SESSIONS))
+      .toEqual([])
+
+    const rawProviderList = 'minimax-code — MiniMax Code'
+    const enriched = enrichListSubagentModelsOutput(rawProviderList, [MINIMAX])
+    expect(enriched).toContain('minimax-code — MiniMax Code')
+    expect(enriched).toContain('already filtered by the Session allowlist')
+    expect(enriched).toContain('- minimax-code/MiniMax-M3.1-Flash-Preview -> provider: "minimax-code", model: "MiniMax-M3.1-Flash-Preview"')
+    // Idempotent when called twice and a no-op when no allowlist applies.
+    expect(enrichListSubagentModelsOutput(enriched, [MINIMAX])).toBe(enriched)
+    expect(enrichListSubagentModelsOutput(rawProviderList, [])).toBe(rawProviderList)
+
+    const upstreamListDesc = 'Discover LLM routes for subagents without changing the current Agent. '
+      + 'Catalog membership is advisory: an adapter may accept an unlisted model id.'
+    const upstreamSubagentDesc = 'Delegate a self-contained task. '
+      + 'Child LLM selection is optional. Omit `provider`, `model`, and `reasoning_effort` to use configured child defaults and inherit compatible missing values from the parent Agent.'
+    expect(rewriteAuthorizedToolDescriptions(upstreamListDesc, [MINIMAX]))
+      .toContain("Output is already filtered to this Session's allowlist (minimax-code/MiniMax-M3.1-Flash-Preview)")
+    expect(rewriteAuthorizedToolDescriptions(upstreamListDesc, [MINIMAX]))
+      .not.toContain('Catalog membership is advisory')
+    expect(rewriteAuthorizedToolDescriptions(upstreamSubagentDesc, [MINIMAX]))
+      .toContain('Child LLM selection is required in this Session')
+    expect(rewriteAuthorizedToolDescriptions(upstreamSubagentDesc, [MINIMAX]))
+      .not.toContain('Child LLM selection is optional')
+
+    const assembly = {
+      sections: [{ name: 'tools:sdk', text: `${upstreamListDesc}\n${upstreamSubagentDesc}` }],
+      tools: [
+        {
+          name: 'list_subagent_models',
+          description: upstreamListDesc,
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: 'subagent',
+          description: upstreamSubagentDesc,
+          parameters: {
+            type: 'object',
+            properties: {
+              provider: {
+                type: 'string',
+                description: 'LLM provider route for the child. Supply together with model; omit both to use configured child defaults or inherit the parent route.',
+              },
+              model: {
+                type: 'string',
+                description: 'Model id interpreted by provider. Supply together with provider; omit both to use configured child defaults or inherit the parent route.',
+              },
+            },
+          },
+        },
+      ],
+    }
+    const rewritten = rewriteAuthorizedPromptAssembly(assembly, [MINIMAX])
+    expect(rewritten.sections[0]!.text).not.toContain('Catalog membership is advisory')
+    expect(rewritten.sections[0]!.text).not.toContain('Child LLM selection is optional')
+    expect(rewritten.tools[0]!.description).toContain("Output is already filtered to this Session's allowlist")
+    expect(rewritten.tools[1]!.description).toContain('Child LLM selection is required in this Session')
+    const props = (rewritten.tools[1]!.parameters as { properties: Record<string, { description: string }> }).properties
+    expect(props['provider']!.description).toContain('Required in this Session: pass an authorized provider id')
+    expect(props['model']!.description).toContain('Required in this Session: pass the authorized model id (without the provider/ prefix)')
+    // Unrestricted sessions keep the original assembly reference untouched.
+    expect(rewriteAuthorizedPromptAssembly(assembly, [])).toBe(assembly)
+
+    // Verify the event hooks registered by installSubagentModelAuthorization.
+    const listeners = new Map<string, (...args: unknown[]) => unknown>()
+    let disposedEvents = 0
+    const ctx = {
+      tools: { guard: () => () => undefined },
+      get: (name: string) => name === 'settings' ? SETTINGS : undefined,
+      on: (event: string, fn: (...args: unknown[]) => unknown) => {
+        listeners.set(event, fn)
+        return () => { disposedEvents += 1 }
+      },
+    }
+    const dispose = installSubagentModelAuthorization(ctx as never, NO_SESSIONS)
+    const postExecute = listeners.get('tools/post-execute')!
+    const postDecision = await postExecute(
+      { name: 'list_subagent_models', agent: recordingAgent([MINIMAX]) },
+      { isError: false, value: rawProviderList },
+      async () => ({ kind: 'accept' }),
+    ) as { kind: string; value: string }
+    expect(postDecision.kind).toBe('accept')
+    expect(postDecision.value).toContain('provider: "minimax-code", model: "MiniMax-M3.1-Flash-Preview"')
+
+    const assembleHook = listeners.get('system-prompt/assemble')!
+    const assembledOut = await assembleHook(
+      assembly,
+      { scope: recordingAgent([MINIMAX]) },
+      async () => assembly,
+    ) as typeof assembly
+    expect(assembledOut.sections[0]!.text).toContain('Child LLM selection is required in this Session')
+
+    dispose()
+    expect(disposedEvents).toBe(2)
+  })
 })
+

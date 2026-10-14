@@ -195,4 +195,67 @@ describe('subagent authorization covers the run_code transport', () => {
     expect(observed.message).toContain('is not on the Session allowlist')
     expect(calls).toEqual([])
   })
+
+  it('enriches list_subagent_models inside run_code and rewrites the rendered tools:sdk section', async () => {
+    const { ctx, runtime } = await setup()
+    ctx.tools.register(defineTool({
+      name: 'list_subagent_models',
+      description:
+        'Discover LLM routes for subagents without changing the current Agent. '
+        + 'Catalog membership is advisory: an adapter may accept an unlisted model id.',
+      parameters: {
+        provider: { type: 'string', description: 'Registered LLM provider id. Omit to list providers.' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      execute() {
+        return Promise.resolve('antigravity — Antigravity')
+      },
+    }))
+    ctx.tools.register(defineTool({
+      name: 'subagent',
+      description:
+        'Delegate a self-contained task to a subagent. '
+        + 'Child LLM selection is optional. Omit `provider`, `model`, and `reasoning_effort` to use configured child defaults and inherit compatible missing values from the parent Agent.',
+      parameters: {
+        description: { type: 'string', required: true },
+        prompt: { type: 'string', required: true },
+        provider: {
+          type: 'string',
+          description: 'LLM provider route for the child. Supply together with model; omit both to use configured child defaults or inherit the parent route.',
+        },
+        model: {
+          type: 'string',
+          description: 'Model id interpreted by provider. Supply together with provider; omit both to use configured child defaults or inherit the parent route.',
+        },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      execute() {
+        return Promise.resolve('started')
+      },
+    }))
+    const agent = recordingAgent([GEMINI])
+    installSubagentModelAuthorization(ctx as never, NO_SESSIONS, { toolNames: ['subagent'] })
+
+    const { observed } = await runCode(ctx, agent, runtime, tools =>
+      tools['list_subagent_models']!({}))
+
+    expect(observed.isError).toBeUndefined()
+    expect(observed.message).toContain('antigravity — Antigravity')
+    expect(observed.message).toContain('Authorized child routes for this Session')
+    expect(observed.message).toContain('- antigravity/gemini-3.8-flash -> provider: "antigravity", model: "gemini-3.8-flash"')
+
+    const assembled = await ctx.systemPrompt.assemble({ scope: agent })
+    const sdkSection = assembled.sections.find(section => section.name === 'tools:sdk')
+    expect(sdkSection?.text).toContain("Output is already filtered to this Session's allowlist (antigravity/gemini-3.8-flash)")
+    expect(sdkSection?.text).toContain('Child LLM selection is required in this Session')
+    expect(sdkSection?.text).not.toContain('Catalog membership is advisory')
+    expect(sdkSection?.text).not.toContain('Child LLM selection is optional')
+  })
 })
+

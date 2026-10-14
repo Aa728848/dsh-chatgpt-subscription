@@ -422,14 +422,14 @@ describe('the persona block the declaration transcribes', () => {
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     const committed = [personaBlockOf(yml), declaredPrefix()]
     for (const persona of committed) {
-      expect(persona).toContain('## R8 · 兜底')
-      expect(persona).toContain('兜底是任务级、非会话级')
-      expect(persona).toContain('只覆盖触发它的那一个任务')
-      expect(persona).toContain('下一个任务开始一律回到 R0 重新分诊')
-      expect(persona).toContain('同一任务书按 R6 重新派发两次仍不通过')
+      expect(persona).toContain('## R8 · Fallback')
+      expect(persona).toContain('Fallback is a task-scoped, non-session-wide exception')
+      expect(persona).toContain('covers only the single task that triggered it')
+      expect(persona).toContain('When the next task begins, always return to R0 to triage anew')
+      expect(persona).toContain('the same task brief still fails after two re-dispatches under R6')
       // The anti-patterns that made the stale fallback self-reinforcing.
-      expect(persona).toContain('把一次兜底沿用成整个会话的默认')
-      expect(persona).toContain('拿工具硬拒当当兜底理由而不去修触发条件')
+      expect(persona).toContain('Carrying a one-off fallback forward as the default for the rest of the session')
+      expect(persona).toContain('Using a tool hard-rejection as a fallback excuse instead of fixing its trigger condition')
       // The condition-fix guidance for the two hard rejections seen in the field.
       expect(persona).toContain('active child limit')
       expect(persona).toContain('subagent model selection')
@@ -451,21 +451,21 @@ describe('the persona block the declaration transcribes', () => {
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
       // Detection survives unchanged, and still runs before triage.
-      expect(persona).toContain('## R0.5 · 兼容性闸门')
-      expect(persona).toContain('spawn_teammate 与 wait_agent 是否存在')
+      expect(persona).toContain('## R0.5 · Compatibility Gate')
+      expect(persona).toContain('whether spawn_teammate and wait_agent exist')
       // The incompatibility is stated as a mechanism, not a preference...
-      expect(persona).toContain('调度模式与 Agent Teams **不兼容**')
-      expect(persona).toContain('顶替 send_message / list_agents / interrupt_agent')
+      expect(persona).toContain('Dispatch Mode is **incompatible** with Agent Teams')
+      expect(persona).toContain('replaces send_message, list_agents, and interrupt_agent')
       // ...and it gates the WHOLE flow rather than selecting a vocabulary.
-      expect(persona).toContain('本会话**不可编排**')
-      expect(persona).toContain('不分诊、不规划、不派发、不动文件')
+      expect(persona).toContain('This session is **not orchestratable**')
+      expect(persona).toContain('do not triage, plan, dispatch, touch files')
       // The exit is the user's, taken through the question tool (R-W).
-      expect(persona).toContain('用一次 ask_user_question 把出路交给用户选')
+      expect(persona).toContain('Call ask_user_question once to hand the choice of exit path to the user')
       // And the fix needs a new session: this one's tool surface is fixed.
-      expect(persona).toContain('必须**新建会话**才生效')
+      expect(persona).toContain('**must start a new session** for it to take effect')
       // The anti-patterns that let the old degraded branch back in.
-      expect(persona).toContain('检测到 Agent Teams 就改用 teammate 词汇继续编排')
-      expect(persona).toContain('撞上不兼容却只用一段文字解释')
+      expect(persona).toContain('Switching to teammate vocabulary to keep orchestrating when Agent Teams is detected')
+      expect(persona).toContain('Explaining an incompatibility in plain text and leaving the user to figure out the exit path')
       // No trace of the vocabulary switch remains in either copy.
       expect(persona).not.toContain('## R-T')
       expect(persona).not.toContain('team_task_*')
@@ -485,29 +485,85 @@ describe('the persona block the declaration transcribes', () => {
     // coordinator-only list must exclude it from subagents too.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
-      expect(persona).toContain('## R-W · 回合边界')
+      expect(persona).toContain('## R-W · Turn Boundary')
       // Waiting: the completion notification IS the wait.
-      expect(persona).toContain('等子代理完成的通知把你叫醒')
-      expect(persona).toContain('禁止 sleep、轮询循环、watch')
+      expect(persona).toContain('let the subagent completion notification wake you')
+      expect(persona).toContain('Never run sleep, polling loops, watch')
       expect(persona).toContain('job_output({ wait: true })')
       // An incompatible session never reaches this rule, so there is no
       // teammate wait channel to name.
       expect(persona).not.toContain('wait_agent()')
       // No self-appointed wake-up call during the wait.
-      expect(persona).toContain('【目标】不主动建目标')
-      expect(persona).toContain('不要调用 create_goal 或 /goal')
-      expect(persona).toContain('落在 todo_write，不是 create_goal，见 R-W')
+      expect(persona).toContain('[Goals] Do not proactively create goals')
+      expect(persona).toContain('never call create_goal or /goal')
+      expect(persona).toContain('in todo_write, not create_goal; see R-W')
       // A blocked-on decision is a question, not a paragraph.
-      expect(persona).toContain('用一次 ask_user_question 把问题递出去')
-      expect(persona).toContain('同一条要求覆盖访谈之外的每一个停点')
+      expect(persona).toContain('hand the question out with a single ask_user_question call')
+      expect(persona).toContain('The same rule covers every decision stop outside the interview')
       // Plan-mode approval keeps its own channel; a finished task asks nothing.
-      expect(persona).toContain('例外只有两个：plan mode 的计划审批仍走 exit_plan_mode')
+      expect(persona).toContain('Only two exceptions: plan-mode approval still goes through exit_plan_mode')
       // The anti-patterns that let each of the three back in.
-      expect(persona).toContain('占位长命令去等')
-      expect(persona).toContain('任务开头主动创建目标')
-      expect(persona).toContain('文字结尾停下等回话')
+      expect(persona).toContain('placeholder long commands to wait')
+      expect(persona).toContain('Proactively creating a goal at the start of a task')
+      expect(persona).toContain('Ending with a paragraph of prose to wait for user sign-off')
       // R-W is dispatch-side only, like every other coordinator rule.
-      expect(persona).toContain('R0、R0.5、R-G、R1、R2、R4、R5、R-W 中面向调度者的规则')
+      expect(persona).toContain('the coordinator-facing rules in R0, R0.5, R-G, R1, R2, R4, R5, and R-W')
+    }
+  })
+
+  it('makes list_subagent_models the sole source of the allowlist instead of local files', () => {
+    // Field report (session-01724ca8): the dispatcher called list_subagent_models,
+    // saw the generic upstream tool description ("list registered providers /
+    // advertised models... Catalog membership is advisory"), and spent 9 turns
+    // grepping the workspace for `subagentModelAuthorization` and scanning
+    // `~/.dsh` config files to find the "real" allowlist. Both copies must
+    // state that list_subagent_models IS the runtime-filtered allowlist,
+    // spell out the two-step call, forbid local file/code hunting, and drop
+    // the internal symbol name that baited the grep.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('The sole source of truth for the allowlist is list_subagent_models')
+      expect(persona).toContain('call list_subagent_models({}) to list authorized providers')
+      expect(persona).toContain('call list_subagent_models({ provider }) to list authorized models under that provider')
+      expect(persona).toContain('model without the <provider>/ prefix')
+      expect(persona).toContain('trust its output directly without cross-checking local config files or workspace code')
+      expect(persona).toContain('Catalog membership is advisory')
+      expect(persona).toContain('the runtime output is already filtered to this session\'s allowlist')
+      expect(persona).toContain('Second-guessing list_subagent_models output by hunting through local config or source files just to check which subagent models are allowed')
+      expect(persona).not.toContain('subagentModelAuthorization')
+    }
+  })
+
+  it('keeps the plan-mode section byte-identical between YAML and declaration and aligned with R0/R-G/R2', () => {
+    function planModeSectionOf(yml: string): string {
+      const lines = yml.split('\n')
+      const start = lines.findIndex(line => line.trim() === 'section: |')
+      if (start < 0) throw new Error('agent.cordis.yml carries no "section: |" block')
+      const block: string[] = []
+      for (const line of lines.slice(start + 1)) {
+        if (line.trim() === '') { block.push(''); continue }
+        if (!line.startsWith('              ')) break
+        block.push(line.slice(14))
+      }
+      return block.join('\n').replace(/\n+$/, '')
+    }
+
+    function declaredPlanModeSection(): string {
+      const found = allRows().find(row => row.id === 'plan-mode')
+      const config = found?.config as { section?: unknown } | undefined
+      if (typeof config?.section !== 'string') throw new Error('the declaration carries no plan-mode section')
+      return config.section.replace(/\n+$/, '')
+    }
+
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    const fromYaml = planModeSectionOf(yml)
+    const fromDecl = declaredPlanModeSection()
+    expect(fromYaml).toBe(fromDecl)
+    for (const section of [fromYaml, fromDecl]) {
+      expect(section).toContain('[Plan Mode]')
+      expect(section).toContain('[Read-Only Exploration & Clarification Interview]')
+      expect(section).toContain('using the routes returned directly by list_subagent_models')
+      expect(section).toContain('exit_plan_mode')
     }
   })
 })
@@ -518,3 +574,4 @@ describe('the bundled files the declaration transcribes', () => {
     expect(existsSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'preset.yml'))).toBe(true)
   })
 })
+

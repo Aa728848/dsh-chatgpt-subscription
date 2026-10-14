@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- **[调度模式 & 子代理授权守卫] 插件端机制级修复模型调用 `list_subagent_models` 后仍疯狂翻找本地文件定义的问题，并全面优化预设提示词（现场会话 `session-01724ca8`）**
+  - **现象**：主模型在启动阶段已调用 `list_subagent_models`，但因无参调用 `list_subagent_models({})` 只返回 provider 摘要，或看到上游工具描述写着 `"Catalog membership is advisory"` / `"Child LLM selection is optional..."`，不敢直接采信返回值，紧接着连续 9 个回合在工作区 grep `subagentModelAuthorization`、读取源码、递归扫描 `~/.dsh`（触发 120s 命令超时）并翻看 `settings.json` / `cordis.patch.yml` 以寻找「真正的允许清单定义」。
+  - **插件端机制级修复（`src/host/subagent-model-authorization.ts`，零修改上游 DSH）**：
+    1. **`tools/post-execute` 输出增强（`enrichListSubagentModelsOutput`）**：当会话开启子代理模型授权守卫且允许清单生效时，拦截成功的 `list_subagent_models` 调用（含 PTC `run_code` 内调用），在原始输出末尾直接附上本会话全部已授权的 `{ provider, model }` 拆解对（`- <provider>/<model> -> provider: "<provider>", model: "<model>"`），使模型哪怕只调一次无参 `list_subagent_models({})` 也能一步拿到完整授权路由与精确传参字段。
+    2. **`system-prompt/assemble` 工具描述原位重写（`rewriteAuthorizedPromptAssembly`）**：当会话受允许清单管控时，在系统提示组装阶段原位改写 PTC 模式的 `tools:sdk` section 与 Native 模式的 `assembly.tools` 中 `list_subagent_models` 的 `"Catalog membership is advisory..."` 及 `subagent` 的 `"Child LLM selection is optional..."` 误导描述，直接替换为本会话的强制显式选模型要求与已授权路由清单，从源头消除工具 schema 与守卫规则的冲突。
+  - **预设提示词全面优化并统一为英文（`src/host/agent-preset.ts` 与 `presets/dispatch/agent.cordis.yml` 逐字节同步）**：
+    1. **全英文统一与执行主线对齐**：将 `persona.config.prefix` 与 `plan-mode.config.section` 统一为高信噪比英文指令（与 DSH 工具签名及运行时系统提示词语言保持一致）；在顶部新增 `[Execution Pipeline]` 速查流水线，并将 `## R0.5 · Compatibility Gate` 调整至 `## R0 · Complexity Triage` 之前，使阅读顺序与实际执行顺序完全一致。
+    2. **消除 `G4` 与 `R2` 的张力**：在 `R-G` 的 `G4` 中明确补注本会话允许的子代理模型路由由 `list_subagent_models` 直接提供而非仓库文件，防止模型把「查仓库事实」泛化到搜本地允许清单。
+    3. **重写 `R2 · Model Routing`**：明确允许清单的唯一真源是 `list_subagent_models`（无参调用末尾已直接附上完整 `provider/model` 拆解清单），直接采信其输出而无需去翻本地配置文件或工作区代码交叉核对（避免硬性禁读文件影响正常的配置/源码任务），移除诱发 grep 的内部符号名 `subagentModelAuthorization`，并新增 Anti-Pattern 第 16 条。
+    4. **精简重写 `plan-mode.config.section`**：消除了原本与 `R-G` 大段重复的冗余段落，收敛为与 `R0 / R-G / R2` 紧密衔接的英文四段式规则（`[Plan Mode]`、`[Read-Only Exploration & Clarification Interview]`、`[Plan Completeness]`、`[Plan Approval]`），并在只读探查段同步指明直接使用 `list_subagent_models` 返回的路由。
 
 ## 0.24.0 - 2026-10-14
 - **[Antigravity] 新增 Gemini 4 Argon（`gemini-4-argon`）并同步官方 2.23.0 客户端版本标识（2026-10-14 线上实测）**
