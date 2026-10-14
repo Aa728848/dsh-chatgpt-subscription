@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.24.2 - 2026-10-14
 - **[三条登录线路] 回调端口探测窗口按「100 端口一块」的否证前提定宽，导致整段保留区把探测窗口吃穿：Windows 实测连续 277 个端口不可用，而窗口只有 128（command-code 只有 10）**
   - **现象**：本机全量 `npx vitest run` 稳定复现 **7 failed / 3711 passed**，全部集中在 `test/antigravity-callback-port.test.ts`（5 条）与 `test/login-open-browser-seams.test.ts`（2 条），报 `No usable local port for the Antigravity sign-in callback (tried 128 ports from 51121 on localhost)`，另有一条直接 `listen EACCES: permission denied ::1:51121`。
   - **根因（实测否证既有注释）**：`port-constants.ts` 写着「Windows 排除区最多 100 端口一块，128 覆盖任何一块」——本机实测从默认端口 51121 起**连续 277 个端口不可用**（51121-51397，`netsh` 表印证），窗口在排除区内部就耗尽，必然抛错。除静态表外还有一批**散落的单端口 EACCES**（51512/51580/51620/51840…）根本不在 `netsh` 表里，属 Hyper-V/HNS 动态保留，且会在**百毫秒尺度上出现与释放**。三个取值（`antigravity` 128、`claude` 128、`command-code` **10**）建立在同一个被否定之前提上。
