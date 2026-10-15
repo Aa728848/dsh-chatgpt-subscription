@@ -151,13 +151,16 @@ describe('SecretServiceCredentialStore launches', () => {
     await instance.load()
     expect(launches()).toBe(1)
 
+    // A save probes the previous entry first: that probe is what names the
+    // shard generation a chunked value must clean up after the new one lands.
+    helperResult(1)
     helperResult(0)
     await instance.save({ access: 'rotated-access' })
-    expect(launches()).toBe(2)
+    expect(launches()).toBe(3)
 
     helperResult(0, JSON.stringify({ access: 'rotated-access' }))
     expect(await instance.load()).toEqual({ access: 'rotated-access' })
-    expect(launches()).toBe(3)
+    expect(launches()).toBe(4)
   })
 
   it('answers a missing entry without launching again on the next read', async () => {
