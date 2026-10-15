@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.24.4 - 2026-10-15
 - **[Kimi Code] 额度倍率与缓存时长档位写进设置页说明：倍率此前只在官方英文 description 里隐含提及，缓存档位说明则完全没给选择依据**
   - **现象**：模型能力表里 `k3` 的说明是官方表格的英文原文，倍率只隐含在 "consumes about twice the quota of k3-256k" 一句里；`kimi-for-coding-highspeed` 的 3× 与 `kimi-for-coding` 的 1× 则一个字都没有。官方模型表实际声明的是 k3 = 2×、k3-256k = 1×、kimi-for-coding = 1×、highspeed = 3×，而**设置页从头到尾没有出现过这组数字**。缓存时长那一栏只说了「1h 写入更贵」，没给任何选择依据——用户无从判断该选哪个档。
   - **改法（结构化接入，非改文案）**：`KimiCodeModelOption` 新增 `quotaMultiplier: number | null`，由 `buildModelOptions` 从**静态注册表**填充（实时目录不发布倍率，因此是唯一来源），能力表「说明」列首行渲染为「额度倍率 2x」并进入悬停 facts。**注册表没有该 id 时填 `null` 而不是默认 1×** —— 把未知模型显示成 1× 会在一个专门用来说明「谁更费额度」的页面上低报一个 2×/3× 模型。顺带复用了一直定义却全项目无人使用的 `quotaCost` 文案键（与 `speedRegular`/`speedHighspeed` 同批预留）。
