@@ -99,6 +99,10 @@ async function mountPlugin(options: MountOptions) {
   ctx.provide('attachments', {})
   ctx.provide('tools', { register: () => () => undefined })
   ctx.provide('settings', settings)
+  // The plugin declares `agents` in its `inject` list (the reasoning-collapse
+  // guard resolves the Agent it must cancel and resume through it), so the
+  // composition waits for the service exactly as a real host provides it.
+  ctx.provide('agents', { get: () => undefined })
   await ctx.plugin(Loader).await()
   ctx.loader.builtins.web = WebRuntime
   await ctx.loader.root.update([{
@@ -138,6 +142,10 @@ async function mountProfileComposition(searchProvider: 'dsh' | 'codex') {
   ctx.provide('attachments', {})
   ctx.provide('tools', { register: () => () => undefined })
   ctx.provide('settings', settings)
+  // The plugin declares `agents` in its `inject` list (the reasoning-collapse
+  // guard resolves the Agent it must cancel and resume through it), so the
+  // composition waits for the service exactly as a real host provides it.
+  ctx.provide('agents', { get: () => undefined })
   await ctx.plugin(Loader).await()
   ctx.loader.builtins.web = WebRuntime
   ctx.loader.builtins.nativeFetch = {

@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createRequire } from 'node:module'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -227,7 +228,12 @@ export const Config: z<Config> = z.object({
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
 })
 
-export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
+// `agents` carries the harness Agent registry, which the reasoning-collapse
+// guard reads to find the Agent it must cancel and resume. It is a plain
+// service property read (`ctx.agents`), not fetched through `ctx.get`, so
+// without this entry the property is undefined at runtime and every break
+// silently cancels without queuing its resume.
+export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader', 'agents']
 
 export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const fetchConfiguration = resolveFetchConfiguration(pluginConfig)
