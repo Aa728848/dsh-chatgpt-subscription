@@ -22,11 +22,7 @@ import {
 } from '../src/host/workbuddy/routes.ts'
 import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
 import { FileModelSettingsStore, registerWorkBuddyPreferenceStore } from '../src/host/workbuddy/token-store.ts'
-import {
-  catalogSnapshotName,
-  catalogSnapshotPath,
-  flushCatalogSnapshots,
-} from '../src/host/common/catalog-snapshot.ts'
+import { flushCatalogSnapshots } from '../src/host/common/catalog-snapshot.ts'
 import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { WorkBuddyAccountPool, parseWorkBuddyPoolData } from '../src/host/workbuddy/account-pool.ts'
 import {
@@ -77,28 +73,45 @@ async function makeSettings(): Promise<FileModelSettingsStore> {
   return new FileModelSettingsStore(path.join(dir, 'models.json'))
 }
 
-/** The persisted catalogs this file's region tests write: one per region. */
-function catalogSnapshots(): string[] {
-  return (['cn', 'intl'] as const).map((region) =>
-    catalogSnapshotPath(catalogSnapshotName('workbuddy', region)))
-}
+/**
+ * Point this test's storage at a private home, so no snapshot can cross over.
+ *
+ * `loadConfigCatalog` persists its catalog with a fire-and-forget write, and
+ * `catalogSnapshotPath` resolves `DSH_HOME` when that write *runs*, not when it
+ * is queued. A write still in flight when a test ends therefore lands after any
+ * cleanup — a delete alone cannot win that race, which is why the region test
+ * failed on CI: it expects `[]` for intl+offline, but an earlier case's intl
+ * listing was written back to disk and rehydrated by its first cache miss.
+ *
+ * Giving every test its own home removes the race instead of narrowing it: a
+ * late write can only recreate a file under the *previous* test's directory,
+ * which nothing reads again. `dshHomeDir()` reads the variable per call, so
+ * pointing it here is enough.
+ *
+ * The public-catalog tests below read `DSH_HOME` too, so this is scoped to the
+ * whole file rather than to one case.
+ */
+let homeBefore: string | undefined
 
 beforeEach(async () => {
-  for (const snapshot of catalogSnapshots()) await fs.rm(snapshot, { force: true })
+  homeBefore = process.env.DSH_HOME
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-routes-home-'))
+  temporaryDirs.push(home)
+  process.env.DSH_HOME = home
 })
 
 afterEach(async () => {
   clearCachedQuota()
   clearCachedCatalog()
   vi.restoreAllMocks()
-  // The snapshot write is fire-and-forget on the fetch path, so a pending one
-  // has to settle before the delete: otherwise it lands afterwards and recreates
-  // the very file the next case asserts is absent. That race is not hypothetical
-  // - it is what failed this file on CI, where the region test read a snapshot
-  // an earlier case had written and expected [].
+  // Let pending writes settle before the tree goes, so an ordinary one lands in
+  // the directory about to be removed rather than in the next test's.
+  await flushCatalogSnapshots()
   for (const dir of temporaryDirs.splice(0)) {
     await fs.rm(dir, { recursive: true, force: true })
   }
+  if (homeBefore === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = homeBefore
 })
 
 /** A /v3/config payload shaped exactly like the live gateway's. */

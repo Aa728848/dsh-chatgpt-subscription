@@ -1,11 +1,12 @@
 # Changelog
 
 ## Unreleased
-- **[测试隔离] `workbuddy-routes.test.ts` 跨用例泄漏目录快照，导致 CI 在 ubuntu 上偶发失败（与本次功能改动无关的既有缺陷）**
-  - **现象**：v0.24.4 的 release bump 提交在 CI 上 ubuntu 失败而 windows 通过，唯一失败断言是 `test/workbuddy-routes.test.ts:762` 的 `expected [ { id: 'glm-5.3', …(10) }, …(6) ] to deeply equal []`，报错落在 `never serves one region the catalog snapshot read for another`。同一套代码在前一个提交（纯功能改动）上通过，说明是**时序敏感**而非确定性失败。
-  - **根因**：`loadConfigCatalog` 成功取目录后会 **fire-and-forget** 地 `writeCatalogSnapshot`。该测试文件的 `afterEach` 只调 `clearCachedCatalog()`，**既不等待在途写入、也不删除快照文件**。于是前一个用例（:717 取自 intl）留下的 `workbuddy-intl-catalog.json` 会被后一个用例（:740 的 `intl + offline`）在首轮 cache miss 时 rehydrate 读回——正是该用例断言必须为 `[]` 的场景。是否复现取决于那个写入有没有抢先落盘。`catalog-snapshot.ts:88-97` 的注释早已记载过这同一失效形态（"a write that lands after the delete recreates the file the next case asserts is absent — which is how a stale listing leaked into a later test and failed it on CI"）。
-  - **改法**：照搬同仓既有正确写法（`test/kimi-code-catalog-cache.test.ts:95-96`）——`afterEach` 先 `await flushCatalogSnapshots()` 等所有在途写入落定，再删除 cn / intl 两份快照；并补 `beforeEach` 清理，防止同一次运行里其它文件写下的快照顶进来。
-  - **验证**：`npm run typecheck` 0 错误；全量 **3743 passed | 7 skipped、0 failed**；目标文件连跑 10 次全绿。**承重已双向检查**：构造「前段用例写 intl 快照并强制落盘 → 后段用例 intl+offline」的最小复现，**未打补丁时读回 3 个模型并使断言失败，打上补丁后返回 0 并通过**——同一场景、同一强制落盘，唯一变量是这处修复。（注：该文件单独跑 10 次不失败，说明需要 CI 的跨文件并发时序才能触发，这也是它此前未被本地发现的原因。）
+- **[测试隔离] `workbuddy-routes.test.ts` 的目录快照会跨用例串味：fire-and-forget 的写入在用例结束后才落盘，被下一个用例 rehydrate 回来，导致 CI ubuntu 上偶发失败**
+  - **现象**：v0.24.4 的 release bump 提交在 CI 上 ubuntu 失败而 windows 通过，唯一失败断言是 `test/workbuddy-routes.test.ts` 的 `expected [ { id: 'glm-5.3', …(10) }, …(6) ] to deeply equal []`，报错落在 `never serves one region the catalog snapshot read for another`。同一份代码在前一个提交（纯功能改动）上通过 CI，说明是**时序敏感**而非确定性失败；本地单独跑该文件 10 次也不复现。
+  - **根因（用插桩实测定位，不是推断）**：`loadConfigCatalog` 取目录成功后调用 `writeCatalogSnapshot`，而它是 **fire-and-forget**（调用方不 await）；关键在于 `catalogSnapshotPath` 是在**写入真正执行时**才读 `DSH_HOME` 拼路径，不是入队时。给写路径插桩后抓到一条**没有任何用例栈帧**的写入（`processTicksAndRejections`，count=31），即一个脱离用例的孤儿写入在 afterEach 清理**之后**才落盘，于是 cn/intl 快照被重新创建、并被下一个用例（`intl` + `offline`）在首轮 cache miss 时 rehydrate 读回——正是该用例断言必须为 `[]` 的场景。**先前的排查方向（跨文件污染）已被证伪**：实测每个测试文件拥有各自的 `DSH_HOME` 与各自进程，文件之间不可能互污。
+  - **改法**：给**每个用例**分配私有 `DSH_HOME`（`mkdtemp`，`beforeEach` 写入、`afterEach` 还原），把竞态**消除**而不是收窄——孤儿写入只能落到上一个用例那个已无人读取的目录里。另在 `afterEach` 保留 `await flushCatalogSnapshots()`，让常规写入在目录被删前落定。（`dshHomeDir()` 每次调用都读环境变量，因此改环境变量即可生效。）
+  - **为什么不是"先 flush 再删文件"**：那是第一版修法，本地 10 次全绿、CI 仍然失败——它只能收窄窗口，无法阻止一个在清理之后才执行的写入。真正的修复必须是让"迟到的那一次写入"写进一个不会再被读的位置。
+  - **验证**：`npm run typecheck` 0 错误；全量**连续 3 次** `3743 passed | 7 skipped、0 failed`；目标文件连跑 6 次全绿。**承重已双向检查（负对照）**：在同一个测试文件里构造「用例 A 排队一次孤儿写入、不 await → 用例 B 读 `intl` + `offline`」，**共享 home 时读回 4 个模型（含注入的 `LEAKED-MODEL`）并使断言失败；改为每用例私有 home 后读回 0 个、通过**——同场景、同一迟到写入，唯一变量是 home 策略。
 
 ## 0.24.4 - 2026-10-15
 - **[Kimi Code] 额度倍率与缓存时长档位写进设置页说明：倍率此前只在官方英文 description 里隐含提及，缓存档位说明则完全没给选择依据**
