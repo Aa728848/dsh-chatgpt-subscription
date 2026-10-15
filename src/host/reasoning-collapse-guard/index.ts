@@ -121,9 +121,21 @@ export interface ReasoningCollapseContext {
   ) => unknown
   logger?: { warn(message: string): void } | undefined
   /**
-   * The harness Agent registry, read once so a guard installed after an Agent
-   * was created can still resolve it. A host without the service degrades to
-   * the `agent/created` map rather than failing this plugin's load.
+   * Read one service from the store, with no `inject` requirement.
+   *
+   * This is the read that actually reaches the Agent registry. `ctx.agents`
+   * below is a property read, and Cordis throws for a property the plugin did
+   * not declare in its `inject` list — the registry is provided by a SIBLING
+   * fiber (`@deepseek-ai/dsh-agent`), not by this plugin's own context — so
+   * the property path is the one that fails in a real host. `ctx.get` reads
+   * the service store directly and therefore needs no declaration. Optional so
+   * a host without the reader keeps the property fallback.
+   */
+  get?(name: string): unknown
+  /**
+   * The harness Agent registry, read so a guard installed after an Agent was
+   * created can still resolve it. A host without the service degrades to the
+   * `agent/created` map rather than failing this plugin's load.
    */
   readonly agents?: { get(id: unknown): unknown } | undefined
 }
@@ -620,17 +632,40 @@ function agentId(raw: unknown): string | undefined {
   return typeof id === 'string' ? id : undefined
 }
 
+/** A service object exposing the lookup the guard needs, if it is one. */
+function asRegistry(value: unknown): { get(id: unknown): unknown } | undefined {
+  return (value !== null && typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function'
+    ? value as { get(id: unknown): unknown }
+    : undefined)
+}
+
 /**
- * The host's Agent registry, read defensively.
+ * The host's Agent registry, read defensively through both available routes.
  *
- * A Cordis service that was never injected reads as undefined and a host
- * without the service at all must not fail this plugin's load, so both the
- * property read and the later lookup are guarded.
+ * `ctx.get` is tried FIRST and is the route that works in a real host. The
+ * registry is provided by a sibling fiber, and Cordis raises
+ * `cannot get property "agents" without inject` the moment a plugin that did
+ * not declare `agents` reaches for the property — so reading only `ctx.agents`
+ * made `resolveAgent` answer `undefined` on every real deployment. That is not
+ * a missing resume: it is the silent half of the break, because `breakOff`
+ * returns before the `cancel` that marks the turn as interrupted. Reading via
+ * `ctx.get` needs no `inject` entry, so it also keeps this plugin loadable on
+ * a host that does not provide the service at all, which the property fallback
+ * and the `agent/created` map then cover.
+ *
+ * Both reads are guarded: a host without the reader, and one without the
+ * service, must leave this plugin loadable rather than failing its import.
  */
 function agentRegistry(ctx: ReasoningCollapseContext): { get(id: unknown): unknown } | undefined {
   try {
-    const registry = ctx.agents
-    return typeof registry?.get === 'function' ? registry : undefined
+    const viaGet = typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+    const registry = asRegistry(viaGet)
+    if (registry !== undefined) return registry
+  } catch {
+    // No reader on this host, or one that refuses the name: the property answers.
+  }
+  try {
+    return asRegistry(ctx.agents)
   } catch {
     return undefined
   }

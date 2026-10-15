@@ -1,6 +1,17 @@
 # Changelog
 
 ## Unreleased
+
+## 0.24.5 - 2026-10-16
+- **[推理塌缩守卫] Agent 先于守卫创建时注册表两条读取路径同时失效：熔断生效但续写从未排队，回合被截断后静默结束**
+  - **现象**：对话在思考中途**没有任何报错地突然结束**，界面上什么都不显示。
+  - **触发条件（判别实验实测，非推断）**：Agent 注册表由**兄弟 fiber** `@deepseek-ai/dsh-agent` 提供，插件 `inject` 未声明 `agents`，Cordis 对未声明的服务属性读取**直接抛** `cannot get property "agents" without inject`。守卫有两条读取路径（`ctx.agents` 属性、`agent/created` 映射表），而**当 Agent 在守卫装载之前就已创建**时——插件 HMR 重载、或激活晚于会话建立，本 profile 的 `hmr` 是启用的——映射表为空，属性读取又抛异常，**两条路同时断**：`resolveAgent` 返回 `undefined`，`breakOff` 在**第一行** `if (agent === undefined) return` 就返回，**熔断（`return` 截断流）已发生，而 `cancel` 与 `steer` 都没发生**。截断的流没有 finish chunk，harness 的 `assembler.finish` 把「没有 finish」默认为 `{kind:'stop'}`，`agent-loop` 因此**当成正常说完**（既不报错也不重试），从用户视角就是「无预兆、无反馈地停了」。
+  - **为什么之前没被发现**：守卫自己的测试假 ctx **直接给 `agents` 属性**，声明与否都能过；且**另一条时序是好的**——判别实验证实，Agent 在守卫装载**之后**才创建时，`agent/created` 映射表正常兜住（原代码 `cancels=1, steers=1`）。所以故障只在「先建 Agent、后装守卫」这个窗口出现，正是插件一旦重载就必然落入的那一个。
+  - **改法（`reasoning-collapse-guard/index.ts`，一处修复全线路受益）**：读注册表改为**先走 `ctx.get('agents')`**（直读服务存储，无需 `inject` 声明，因此不受时序影响），属性读取保留为回退，另加服务形状校验 `asRegistry`。**没有采用给 `inject` 加 `agents`**——那会让插件在**不提供该服务**的宿主上永不激活（本仓库明令「旧代际是要求而非回退」），而 `ctx.get` 在服务缺失时返回 `undefined`，由属性回退与 `agent/created` 映射表兜住，两个方向都不牺牲。
+  - **验证**：`npx tsc -b --force` 与测试树 tsc 均 0 错误；全量 **226 passed | 1 skipped（227 文件）、3745 passed | 7 skipped、0 failed**。新增 `test/reasoning-collapse-guard-registry.test.ts` 以**真实 Cordis 边界**建模（`agents` 属性按 Cordis 语义抛错、`ctx.get` 作答）：断言熔断同时**真的 cancel + steer 各一次**。**承重已双向检查（负对照）**：在「先建 Agent、后装守卫」时序下，还原 `ctx.get` 那一路立刻复现 `cancels=0, steers=0` 并使新用例失败；恢复后重新全绿。
+  - **附（两处经实测否证的判断，故未改动）**：① 社区 PR 称 `z.union([z.object({}), z.const(false)])` 会 strip 掉 `maxBreaksPerTurn`/`cooldownMs`；以本机 schemastery 3.18.4 实测这些键**被完整保留**（`{"maxBreaksPerTurn":5,"cooldownMs":1000}`），`Config` 无需改动。② 曾怀疑 `preparedCall.stream()` 会绕过 `llm/stream` 瀑布使守卫失位；实测 `prepareCall.stream` 内部同样走该瀑布，**不成立**。
+  - **未解决的**：用户报告 MiniMax 静默、而 workbuddy 的 deepseek 能正常 steer，本机全部可读会话存档（8 个）中**未出现任何守卫熔断痕迹**（`interrupted` 与续写 notice 均为 0），因此该差异**尚无证据定性**；本次修的是「时序窗口下熔断不留续写且完全静默」这条已复现的缺陷，不等同于已解释该差异。
+
 - **[测试隔离] `workbuddy-routes.test.ts` 的目录快照会跨用例串味：fire-and-forget 的写入在用例结束后才落盘，被下一个用例 rehydrate 回来，导致 CI ubuntu 上偶发失败**
   - **现象**：v0.24.4 的 release bump 提交在 CI 上 ubuntu 失败而 windows 通过，唯一失败断言是 `test/workbuddy-routes.test.ts` 的 `expected [ { id: 'glm-5.3', …(10) }, …(6) ] to deeply equal []`，报错落在 `never serves one region the catalog snapshot read for another`。同一份代码在前一个提交（纯功能改动）上通过 CI，说明是**时序敏感**而非确定性失败；本地单独跑该文件 10 次也不复现。
   - **根因（用插桩实测定位，不是推断）**：`loadConfigCatalog` 取目录成功后调用 `writeCatalogSnapshot`，而它是 **fire-and-forget**（调用方不 await）；关键在于 `catalogSnapshotPath` 是在**写入真正执行时**才读 `DSH_HOME` 拼路径，不是入队时。给写路径插桩后抓到一条**没有任何用例栈帧**的写入（`processTicksAndRejections`，count=31），即一个脱离用例的孤儿写入在 afterEach 清理**之后**才落盘，于是 cn/intl 快照被重新创建、并被下一个用例（`intl` + `offline`）在首轮 cache miss 时 rehydrate 读回——正是该用例断言必须为 `[]` 的场景。**先前的排查方向（跨文件污染）已被证伪**：实测每个测试文件拥有各自的 `DSH_HOME` 与各自进程，文件之间不可能互污。
