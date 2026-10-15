@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -22,6 +22,11 @@ import {
 } from '../src/host/workbuddy/routes.ts'
 import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
 import { FileModelSettingsStore, registerWorkBuddyPreferenceStore } from '../src/host/workbuddy/token-store.ts'
+import {
+  catalogSnapshotName,
+  catalogSnapshotPath,
+  flushCatalogSnapshots,
+} from '../src/host/common/catalog-snapshot.ts'
 import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
 import { WorkBuddyAccountPool, parseWorkBuddyPoolData } from '../src/host/workbuddy/account-pool.ts'
 import {
@@ -72,10 +77,25 @@ async function makeSettings(): Promise<FileModelSettingsStore> {
   return new FileModelSettingsStore(path.join(dir, 'models.json'))
 }
 
+/** The persisted catalogs this file's region tests write: one per region. */
+function catalogSnapshots(): string[] {
+  return (['cn', 'intl'] as const).map((region) =>
+    catalogSnapshotPath(catalogSnapshotName('workbuddy', region)))
+}
+
+beforeEach(async () => {
+  for (const snapshot of catalogSnapshots()) await fs.rm(snapshot, { force: true })
+})
+
 afterEach(async () => {
   clearCachedQuota()
   clearCachedCatalog()
   vi.restoreAllMocks()
+  // The snapshot write is fire-and-forget on the fetch path, so a pending one
+  // has to settle before the delete: otherwise it lands afterwards and recreates
+  // the very file the next case asserts is absent. That race is not hypothetical
+  // - it is what failed this file on CI, where the region test read a snapshot
+  // an earlier case had written and expected [].
   for (const dir of temporaryDirs.splice(0)) {
     await fs.rm(dir, { recursive: true, force: true })
   }

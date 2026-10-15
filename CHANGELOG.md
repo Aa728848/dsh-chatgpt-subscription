@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **[测试隔离] `workbuddy-routes.test.ts` 跨用例泄漏目录快照，导致 CI 在 ubuntu 上偶发失败（与本次功能改动无关的既有缺陷）**
+  - **现象**：v0.24.4 的 release bump 提交在 CI 上 ubuntu 失败而 windows 通过，唯一失败断言是 `test/workbuddy-routes.test.ts:762` 的 `expected [ { id: 'glm-5.3', …(10) }, …(6) ] to deeply equal []`，报错落在 `never serves one region the catalog snapshot read for another`。同一套代码在前一个提交（纯功能改动）上通过，说明是**时序敏感**而非确定性失败。
+  - **根因**：`loadConfigCatalog` 成功取目录后会 **fire-and-forget** 地 `writeCatalogSnapshot`。该测试文件的 `afterEach` 只调 `clearCachedCatalog()`，**既不等待在途写入、也不删除快照文件**。于是前一个用例（:717 取自 intl）留下的 `workbuddy-intl-catalog.json` 会被后一个用例（:740 的 `intl + offline`）在首轮 cache miss 时 rehydrate 读回——正是该用例断言必须为 `[]` 的场景。是否复现取决于那个写入有没有抢先落盘。`catalog-snapshot.ts:88-97` 的注释早已记载过这同一失效形态（"a write that lands after the delete recreates the file the next case asserts is absent — which is how a stale listing leaked into a later test and failed it on CI"）。
+  - **改法**：照搬同仓既有正确写法（`test/kimi-code-catalog-cache.test.ts:95-96`）——`afterEach` 先 `await flushCatalogSnapshots()` 等所有在途写入落定，再删除 cn / intl 两份快照；并补 `beforeEach` 清理，防止同一次运行里其它文件写下的快照顶进来。
+  - **验证**：`npm run typecheck` 0 错误；全量 **3743 passed | 7 skipped、0 failed**；目标文件连跑 10 次全绿。**承重已双向检查**：构造「前段用例写 intl 快照并强制落盘 → 后段用例 intl+offline」的最小复现，**未打补丁时读回 3 个模型并使断言失败，打上补丁后返回 0 并通过**——同一场景、同一强制落盘，唯一变量是这处修复。（注：该文件单独跑 10 次不失败，说明需要 CI 的跨文件并发时序才能触发，这也是它此前未被本地发现的原因。）
 
 ## 0.24.4 - 2026-10-15
 - **[Kimi Code] 额度倍率与缓存时长档位写进设置页说明：倍率此前只在官方英文 description 里隐含提及，缓存档位说明则完全没给选择依据**
