@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.24.3 - 2026-10-15
 - **[Linux 凭据存储] 账号池撞上 secret-tool 的 8192 字节 stdin 上限：第 3 个账号添加后凭据写入成功、池写入失败，账号在 UI 闪现后消失（issue #54）**
   - **现象**：Linux（gnome-keyring）下添加第 3 个 WorkBuddy 账号后账号区闪现即消失——凭据条目（7934B）惊险通过，但池条目（约 8960B）≥ 8192 被 `SecretServiceCredentialStore.save` 拒绝，`status.accounts`（池）永远少一个。该上限对齐的是 libsecret `secret-tool` 的 stdin 固定缓冲（超限静默截断仍 exit 0），且对**所有线路**（antigravity / claude / command-code / glm-coding-plan / kimi-code / minimax-code / ollama / step-code / workbuddy 的池与凭据共 25 处调用点）一视同仁，账号一多都会撞。
   - **改法（`credential-store-secret-service.ts`，一处修复全线路受益）**：载荷 ≥ 8192 字节时改为**分片存储**——UTF-8 载荷 base64 后按 7000 字符切片写入独立 shard 条目（account 属性为 `<account>#<gen>#<i>`，Secret Service 属性精确匹配所以互不串扰），主条目最后写入作为**提交点**，内容为信封 `{ __dshChunked: { gen, chunks, bytes } }`；读取时按信封重组并校验解码字节数，损坏即报 `payload is too large` 同款 invalid 错误而非静默截断。小于上限的载荷保持单条目原格式，存量数据零迁移。shard 用随机代际（gen）标签：中断的 save 不触碰旧信封与旧分片，新代际要么整体提交要么回滚清理；提交成功后清理上一代分片（含分片→单条目的收缩场景）。`clear()` 改为先 lookup 探测：既拿到待清理的分片代际，也绕开 Ubuntu libsecret-tools 0.20.4 对不存在条目 `clear` 段错误的坑。分片数上限 128（约 650 KiB）防畸形信封。
