@@ -13,6 +13,16 @@ import { zh } from './locales.ts'
 
 const t = zh
 
+/**
+ * Render one quota multiplier the way the official table states it: "2x", "3x".
+ *
+ * The value is transcribed, never computed — the service is the only party that
+ * knows how a request is billed, so this shows what the model table declares.
+ */
+function formatMultiplier(value: number): string {
+  return `${value}x`
+}
+
 export interface KimiModelCapabilitiesProps {
   models: KimiCodeModelOption[]
 }
@@ -32,7 +42,9 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
         <tbody>
           {models.map((model) => {
             // Hover text keeps the per-model facts that would otherwise bloat
-            // the table: wire, default effort, input cap and required plan.
+            // the table: wire, default effort, input cap, required plan and the
+            // quota multiplier (which is also shown in the notes cell, because
+            // it is the one cost fact a user compares across rows).
             const facts = [
               model.id,
               model.wire === 'anthropic' ? t.wireAnthropic : t.wireOpenai,
@@ -41,6 +53,9 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
                 ? []
                 : [t.capInputCap.replace('{tokens}', String(model.maxInputTokens))]),
               ...(model.minimumPlan ? [t.capPlan.replace('{plan}', model.minimumPlan)] : []),
+              ...(model.quotaMultiplier === null
+                ? []
+                : [`${t.quotaCost}: ${formatMultiplier(model.quotaMultiplier)}`]),
             ]
             return (
               <tr key={model.id}>
@@ -60,7 +75,14 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
                       // the model — worth naming rather than another dash.
                       : <span className="dsha-cap-off">{t.capNoTools}</span>}
                 </td>
-                <td className="dsha-cap-notes">{model.description ?? ''}</td>
+                <td className="dsha-cap-notes">
+                  {model.quotaMultiplier === null ? null : (
+                    <span className="dsha-cap-cost">
+                      {t.quotaCost} {formatMultiplier(model.quotaMultiplier)}
+                    </span>
+                  )}
+                  {model.description ?? ''}
+                </td>
               </tr>
             )
           })}

@@ -175,6 +175,28 @@ describe('buildModelOptions capabilities', () => {
     expect(options[0]?.supportsVideo).toBe(false)
   })
 
+  it('reports the quota multiplier the official table declares', () => {
+    // 2x / 1x / 3x is what the models page states, and it is the only place a
+    // user can see why one model spends quota faster than another.
+    const options = buildModelOptions(
+      KIMI_CODE_MODELS.map((m) => ({ id: m.id, contextWindow: m.contextWindow })),
+      KIMI_CODE_MODELS.map((m) => m.id),
+      {},
+    )
+    const byId = Object.fromEntries(options.map((option) => [option.id, option.quotaMultiplier]))
+    expect(byId).toEqual({
+      'k3': 2,
+      'k3-256k': 1,
+      'kimi-for-coding': 1,
+      'kimi-for-coding-highspeed': 3,
+    })
+  })
+
+  it('reports null rather than 1x for a model the registry does not know', () => {
+    const options = buildModelOptions([{ id: 'k3-next', contextWindow: 262_144 }], ['k3-next'], {})
+    expect(options[0]?.quotaMultiplier).toBeNull()
+  })
+
   it('prefers a live-catalog capability flag when it reports one', () => {
     const options = buildModelOptions(
       [{ id: 'k3', contextWindow: 262_144, supportsVideo: false, description: 'from catalog' }],

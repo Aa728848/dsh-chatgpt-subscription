@@ -81,6 +81,7 @@ const BASE = `
 .dsha-cap-on{color:var(--dsw-alias-label-primary);font-weight:500}
 .dsha-cap-off{color:var(--dsw-alias-label-tertiary)}
 .dsha-cap-notes{line-height:1.5;min-width:200px}
+.dsha-cap-cost{color:var(--dsw-alias-label-primary);display:block;font-weight:500;margin-bottom:3px}
 .dsha-cap-footnote{font-size:11px;line-height:1.55;margin:8px 0 0}
 .dsha-warn{border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;line-height:1.55;margin:0 0 10px;padding:8px 10px}
 `

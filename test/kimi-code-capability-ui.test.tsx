@@ -28,6 +28,7 @@ function model(overrides: Partial<KimiCodeModelOption> = {}): KimiCodeModelOptio
     supportsVideo: true,
     supportsDynamicTools: true,
     minimumPlan: 'Moderato',
+    quotaMultiplier: 2,
     ...overrides,
   }
 }
@@ -91,5 +92,22 @@ describe('Kimi capability table', () => {
   it('renders an empty notes cell rather than the word null', () => {
     const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ description: null })]} />)
     expect(html).not.toContain('null')
+  })
+
+  it('states the quota multiplier for a model the registry knows', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ quotaMultiplier: 2 })]} />)
+    // The cost fact belongs in the notes cell so it can be compared down a
+    // column; the same value also rides along in the hover title.
+    expect(html).toContain('额度倍率 2x')
+    expect(/title="([^"]*)"/.exec(html)?.[1] ?? '').toContain('额度倍率: 2x')
+  })
+
+  it('omits the multiplier for an id the registry has no row for', () => {
+    // The live catalog publishes no multiplier, so a model it adds is reported
+    // as unknown. Rendering a guessed 1x would understate a 2x model on the one
+    // page whose whole purpose is telling the user what costs more.
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ quotaMultiplier: null })]} />)
+    expect(html).not.toContain('额度倍率')
+    expect(html).not.toContain('dsha-cap-cost')
   })
 })

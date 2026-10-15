@@ -700,6 +700,11 @@ export function buildModelOptions(
       description: model.description ?? kimiCodeModelDef(model.id)?.description ?? null,
       supportsVideo: model.supportsVideo ?? (kimiCodeModelDef(model.id)?.inputModalities.includes('video') ?? false),
       minimumPlan: model.minimumPlan ?? kimiCodeModelDef(model.id)?.minimumPlan ?? null,
+      // The live catalog publishes no quota multiplier, so this comes only from
+      // the shipped registry and is null for an id the registry has no row for.
+      // Guessing 1x for an unknown id would understate a 2x or 3x model on the
+      // one page whose purpose is telling the user what actually costs more.
+      quotaMultiplier: kimiCodeModelDef(model.id)?.quotaMultiplier ?? null,
       // Resolved through the shared helper so the card cannot drift from what
       // the request builder will actually do with the same catalog.
       supportsDynamicTools: dynamicToolsForEntry(model.id, catalog) && toolUseForEntry(model.id, catalog),

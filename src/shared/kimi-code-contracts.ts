@@ -126,6 +126,15 @@ export interface KimiCodeModelOption {
   supportsToolUse: boolean
   /** Subscription tier the model needs, when it is not open to every member. */
   minimumPlan: string | null
+  /**
+   * Quota this model consumes relative to the cheapest one on the line.
+   *
+   * From the official model table: k3 is 2x, k3-256k and kimi-for-coding are
+   * 1x, kimi-for-coding-highspeed is 3x. `null` means the shipped registry has
+   * no record for this id — the live catalog publishes no multiplier, so a model
+   * it adds is reported as unknown rather than guessed at 1x.
+   */
+  quotaMultiplier: number | null
 }
 
 /** One quota window reported for the signed-in account. */
