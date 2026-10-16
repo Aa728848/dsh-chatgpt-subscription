@@ -14,6 +14,7 @@ import {
   maxRequestImageBytes,
   offloadOldestRequestImages,
   processMinimaxStreamLine,
+  streamCompletion,
   streamHasContent,
 } from '../src/host/minimax-code/mapper.ts'
 
@@ -149,6 +150,50 @@ describe('minimax stream completeness', () => {
     for (const entry of body.split('\n')) processMinimaxStreamLine(entry, state)
 
     expect(() => assertStreamComplete(state)).toThrow(/stream ended before its terminal event/)
+  })
+
+  it('reports a turn spent entirely on reasoning as a failure, not an answer', () => {
+    // Measured four times on this line at `effort: 'max'`: the response is one
+    // thinking block and `end_turn`, with no text and no tool call. The harness
+    // reads a tool-call-free stop as a finished turn, so without this the caller
+    // sees a reply that simply stops.
+    const state = createStreamState()
+    const events = [
+      line({ type: 'message_start', message: { usage: { input_tokens: 5 } } }),
+      line({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+      line({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'Let me read lines 130-160 of the upstream preset.' },
+      }),
+      line({ type: 'content_block_stop', index: 0 }),
+      line({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
+      line({ type: 'message_stop' }),
+    ]
+    const chunks = events.flatMap((entry) => processMinimaxStreamLine(entry, state))
+
+    expect(() => assertStreamComplete(state)).not.toThrow()
+    expect(chunks).toContainEqual(
+      expect.objectContaining({
+        type: 'finish',
+        reason: expect.objectContaining({
+          kind: 'error',
+          failure: expect.objectContaining({ code: 'PROVIDER_ERROR' }),
+        }),
+      }),
+    )
+  })
+
+  it('names the event that ended the stream', () => {
+    const whole = createStreamState()
+    for (const entry of HAPPY_PATH) processMinimaxStreamLine(entry, whole)
+    expect(streamCompletion(whole)).toBe('message_stop')
+
+    const stopped = createStreamState()
+    for (const entry of HAPPY_PATH.slice(0, 5)) processMinimaxStreamLine(entry, stopped)
+    expect(streamCompletion(stopped)).toBe('stop-reason')
+
+    expect(streamCompletion(createStreamState())).toBe('stream-end')
   })
 
   it('rejects a stream that stopped mid-answer', () => {

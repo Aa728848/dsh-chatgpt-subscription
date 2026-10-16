@@ -1111,10 +1111,54 @@ function tokenUsage(state: MinimaxStreamState): TokenUsage {
   }
 }
 
+/**
+ * Which event ended the stream.
+ *
+ * `message_stop` is the terminal event the protocol promises. `stop-reason` means
+ * the body simply ended after a `message_delta` carried one - the shape the
+ * completeness check accepts on purpose ("treats a stop_reason without
+ * message_stop as complete"). `stream-end` is a body that carried neither, which
+ * `assertStreamComplete` rejects.
+ */
+export function streamCompletion(state: MinimaxStreamState): 'message_stop' | 'stop-reason' | 'stream-end' {
+  if (state.done) return 'message_stop'
+  return state.finishReason === null ? 'stream-end' : 'stop-reason'
+}
+
+/**
+ * Whether the answer left the caller anything to act on: visible text or a tool
+ * call. Reasoning alone does not count - a thought cannot drive a tool, and the
+ * harness reads a tool-call-free stop as a finished turn.
+ *
+ * `hasContent` cannot answer this: that flag is set by `thinking_delta` too, so an
+ * answer made of nothing but reasoning still reads as content.
+ */
+function hasVisibleOutput(state: MinimaxStreamState): boolean {
+  if (state.hasToolCall) return true
+  return state.blocks.some((block) => block.type === 'text' && block.text.trim() !== '')
+}
+
 function finishReasonFor(state: MinimaxStreamState): FinishReason {
   const reason = state.finishReason ?? ''
   if (reason === 'length' || reason === 'max_tokens') return { kind: 'max-tokens' }
   if (state.hasToolCall || reason === 'tool_use' || reason === 'tool_calls') return { kind: 'tool-calls' }
+  // A stop with nothing behind it is not an answer the caller can use. This line's
+  // forced thinking can spend a whole response reasoning and then end the turn with
+  // `end_turn`, leaving no text and no tool call; the harness maps a tool-call-free
+  // stop to `completed` unconditionally, so without this the turn ends silently -
+  // no error, no retry, just a reply that stops.
+  if (!hasVisibleOutput(state)) {
+    return {
+      kind: 'error',
+      failure: {
+        message:
+          PROVIDER_NAME +
+          ' ended the turn with reasoning only — no text and no tool call' +
+          ` (finishReason: ${reason === '' ? '(none)' : reason}, stream ended by: ${streamCompletion(state)})`,
+        code: 'PROVIDER_ERROR',
+      },
+    }
+  }
   return { kind: 'stop' }
 }
 
