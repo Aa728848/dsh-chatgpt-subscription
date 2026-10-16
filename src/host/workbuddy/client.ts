@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   WorkBuddyAccount,
@@ -12,6 +13,10 @@ import {
   CONFIG_PATH,
   DEFAULT_DOMAIN,
   DISCOVERY_TIMEOUT_MS,
+  HEADER_ACP_CONNECTION_ID,
+  HEADER_CONVERSATION_ID,
+  HEADER_CONVERSATION_MESSAGE_ID,
+  HEADER_CONVERSATION_REQUEST_ID,
   HEADER_DOMAIN,
   HEADER_ENTERPRISE_ID,
   HEADER_IDE_NAME,
@@ -19,6 +24,7 @@ import {
   HEADER_REFRESH_SOURCE,
   HEADER_REFRESH_TOKEN,
   HEADER_REQUESTED_WITH,
+  HEADER_REQUEST_ID,
   HEADER_TENANT_ID,
   HEADER_USER_ID,
   PROVIDER_ID,
@@ -71,16 +77,80 @@ function asNumber(value: unknown): number | undefined {
 }
 
 /**
+ * One UUID-shaped value deterministically derived from a seed.
+ *
+ * Session-scoped conversation headers must keep the same value for the whole
+ * conversation while looking like the v4 UUIDs the official client sends, so
+ * the seed is hashed and the version/variant nibbles are stamped in rather than
+ * taken from the digest. Nothing here is a credential or a secret: it is a
+ * locally derived identifier that happens to travel on the wire.
+ */
+function uuidFromSeed(seed: string): string {
+  const hex = createHash('sha256').update(seed).digest('hex')
+  const variant = ((Number.parseInt(hex[16] ?? '0', 16) & 0x3) | 0x8).toString(16)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+/**
+ * Which chat surface a call is, for the headers only that surface needs.
+ *
+ * Passing this opts the request into the conversation header group. It is
+ * deliberately a separate argument rather than a consequence of `sessionId`
+ * being present: the group belongs to the chat endpoint's channel check, and
+ * the config, billing, refresh and check-in surfaces keep the exact header set
+ * they already worked with.
+ */
+export interface WorkBuddyChannelOptions {
+  /**
+   * Harness session the chat call belongs to.
+   *
+   * Omit it for a call with no conversation behind it (the connection-test
+   * probe). The group is still sent — the gateway requires it either way — but
+   * the scoped ids fall back to random values.
+   */
+  sessionId?: string
+}
+
+/**
+ * Conversation header group the international gateway demands.
+ *
+ * The gateway answers 400 `code 11128` to a chat request that omits these,
+ * whatever its message shape, so they stand between the route and a working
+ * conversation. `X-Conversation-ID`, `X-Conversation-Request-ID` and
+ * `acp-connection-id` are session-scoped — the official client reuses one value
+ * across a conversation — while the message and request ids are fresh per
+ * request. An absent session id degrades to a random value for the scoped
+ * three: measured to pass the check, but it loses the conversation identity the
+ * gateway may tighten around later.
+ */
+function conversationHeaders(sessionId: string | undefined): Record<string, string> {
+  const scoped = (tag: string): string => sessionId === undefined || sessionId === ''
+    ? randomUUID()
+    : uuidFromSeed(`${sessionId}\0${tag}`)
+  return {
+    [HEADER_CONVERSATION_ID]: scoped('conversation'),
+    [HEADER_CONVERSATION_REQUEST_ID]: scoped('conversation-request'),
+    [HEADER_ACP_CONNECTION_ID]: scoped('acp-connection'),
+    [HEADER_CONVERSATION_MESSAGE_ID]: randomUUID(),
+    [HEADER_REQUEST_ID]: randomUUID(),
+  }
+}
+
+/**
  * Attribution and identity headers for one backend request.
  *
  * The gateway gates on this header set: the international deployment answers
  * 401 without the CLI user agent and matching `Origin`/`Referer`, and both
  * deployments read the account identity headers rather than deriving it from
  * the bearer token alone.
+ *
+ * `channel` marks a request to the chat endpoint, which is the only surface
+ * whose channel check wants the {@link conversationHeaders} group.
  */
 export function workBuddyHeaders(
   credentials: Pick<WorkBuddyCredentials, 'accessToken' | 'domain' | 'uid' | 'enterpriseId' | 'backend'>,
   extra: Record<string, string> = {},
+  channel?: WorkBuddyChannelOptions,
 ): Record<string, string> {
   const domain = credentials.domain || DEFAULT_DOMAIN
   const intl = isIntlDomain(domain)
@@ -98,6 +168,7 @@ export function workBuddyHeaders(
     'user-agent': CLIENT_USER_AGENT,
     // The international backend validates the browser origin the IDE would send.
     ...(intl ? { origin: credentials.backend, referer: `${credentials.backend}/` } : {}),
+    ...(intl && channel !== undefined ? conversationHeaders(channel.sessionId) : {}),
     ...extra,
   }
 }

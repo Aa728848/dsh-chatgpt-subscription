@@ -198,6 +198,18 @@ describe('WorkBuddy failure classification', () => {
     expect(error.message).toMatch(/system prompt/i)
   })
 
+  it('reads the same code as the channel check when the gateway says the conversation id is missing', () => {
+    // The code is overloaded upstream. Reporting the system-prompt reading here
+    // would send the reader looking at a message history that is already correct.
+    const error = classifyFailure(
+      400,
+      '{"code":11128,"msg":"conversation id missing","displayTips":{"en":"This call failed channel verification"}}',
+    )
+    expect(error.code).toBe('PROVIDER_ERROR')
+    expect(error.message).toMatch(/channel/i)
+    expect(error.message).not.toMatch(/system prompt/i)
+  })
+
   it('classifies 5xx and the upstream vendor code as a retryable server failure', () => {
     expect(classifyFailure(503, 'busy').code).toBe('SERVER')
     expect(classifyFailure(500, '{"code":11134}').code).toBe('SERVER')
@@ -360,12 +372,45 @@ describe('WorkBuddy adapter streaming', () => {
     expect(calls[0]!.headers['user-agent']).toBe('CLI/2.63.2 CodeBuddy/2.63.2')
     expect(calls[0]!.headers.origin).toBe('https://www.workbuddy.ai')
     expect(calls[0]!.headers['x-user-id']).toBe('uid-1')
+    // The international gateway refuses a chat call that omits this group, so a
+    // real turn has to carry it to get past the channel check at all.
+    expect(calls[0]!.headers['x-conversation-id']).toBeDefined()
+    expect(calls[0]!.headers['acp-connection-id']).toBeDefined()
+    expect(calls[0]!.headers['x-request-id']).toBeDefined()
     expect(calls[0]!.body.stream).toBe(true)
     expect(calls[0]!.body.messages[0]).toEqual({ role: 'system', content: 'You are a helpful assistant.' })
 
     expect(chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')).toBe('pong')
     expect(chunks.find((c) => c.type === 'finish')).toMatchObject({ reason: { kind: 'stop' } })
   })
+  it('ties the conversation headers to the session the harness stamped', async () => {
+    const store = await makeStore({ domain: 'www.workbuddy.ai' })
+    const seen: Array<Record<string, string>> = []
+    const fetchFn = (async (_url: any, init: any) => {
+      seen.push(init.headers)
+      return sseResponse('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    }) as unknown as typeof fetch
+    const adapter = makeAdapter(store, fetchFn)
+    const options = (sessionId: string) => ({
+      provider: 'workbuddy', model: 'glm-5.3', sessionId,
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }],
+    }) as unknown as GenerateOptions
+
+    for await (const _chunk of adapter.stream(options('session-a'))) { /* drain */ }
+    const first = seen[0]!
+    for await (const _chunk of adapter.stream(options('session-a'))) { /* drain */ }
+    const second = seen[1]!
+    for await (const _chunk of adapter.stream(options('session-b'))) { /* drain */ }
+    const other = seen[2]!
+
+    // The harness session id is what the gateway sees as the conversation, so two
+    // turns of one session must present one conversation id. Reading the option
+    // off the way to the header is the whole fix; dropping it silently degrades
+    // to a random id per request, which is what this pins down.
+    expect(first['x-conversation-id']).toBe(second['x-conversation-id'])
+    expect(other['x-conversation-id']).not.toBe(first['x-conversation-id'])
+  })
+
   it('leaves the stream deadline to the idle watchdog, not a wall-clock cap', async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     const store = await makeStore()

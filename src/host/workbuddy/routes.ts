@@ -498,7 +498,16 @@ export function registerWorkBuddyRoutes(
           })
           const probe = await fetchFn(`${credentials.backend}${CHAT_PATH}`, {
             method: 'POST',
-            headers: workBuddyHeaders(credentials, { accept: 'text/event-stream', 'user-agent': CLIENT_USER_AGENT }),
+            // The probe must carry the same conversation header group as a real
+            // turn: without it the international gateway answers 400 code 11128
+            // and the test would report a working line as broken.
+            headers: workBuddyHeaders(
+              credentials,
+              { accept: 'text/event-stream', 'user-agent': CLIENT_USER_AGENT },
+              // A probe belongs to no conversation, so the scoped ids are random;
+              // the group itself is what the gateway checks for.
+              {}
+            ),
             body,
             signal: AbortSignal.timeout(30_000),
           })
