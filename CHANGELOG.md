@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.24.7 - 2026-10-16
 - **[MiniMax Code] M3.1 在 `effort: max` 下偶尔把一整轮花在思考上就 `end_turn`：只有 thinking 块、没有正文也没有工具调用，harness 把「无工具调用的 stop」当成正常完成，整轮无报错地停住（issue #57）**
   - **现象**：MiniMax Code 线路偶发**整轮无预警停住**——界面不报错、不重试、不弹提示，回复停在半句话上（如 `...Let me read lines 130-160 of the upstream preset.`）。
   - **根因（会话存档实证，非推断）**：M3.1 在 `effort: 'max'` 下有时把整轮都花在思考上，然后带 `stop_reason: end_turn` 收尾，**只回一个 thinking 块**。mapper 把它如实映射成 `{ kind: 'stop' }`（这一步没错），但 harness 的 `agent-loop` 对「没有工具调用的 stop」无条件返回 `{ kind: 'completed' }`（`packages/core/agent-loop/src/agent.ts`），于是整轮就这么结束、调用方零感知。**责任层在 turn-end 映射，不在适配器**：本机 24 个会话存档里该线路 20 个 completed 轮次中有 **4 个**是这种形状，全部 `effort: 'max'`，每一轮的下一句用户输入都是「继续」。存档里的 `message.source.replayState.blocks` 保存了未改写的原生块，四例均为 `["thinking"]`——即上游本来就没发正文，不是适配器吞了内容，也不是流被掐断（`state.done` 为真，`assertStreamComplete` 放行是正确的）。
