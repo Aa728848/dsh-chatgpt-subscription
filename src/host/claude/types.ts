@@ -87,6 +87,20 @@ export const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const OAUTH_SCOPES = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
 
 /**
+ * Scopes a refresh asks for when the credential being refreshed records none.
+ *
+ * The claude.ai subset of {@link OAUTH_SCOPES} - everything but
+ * `org:create_api_key` - which is the set the official client sends on every
+ * refresh. The authorization host strips `org:create_api_key` from a
+ * subscription grant without failing the sign-in, and a refresh may not ask for
+ * a scope the grant does not hold (RFC 6749 section 6), so re-asking for the
+ * full authorize set is answered with `invalid_scope`. A credential that does
+ * record its scopes is refreshed with exactly those; see oauth.ts's
+ * refreshScopeFor.
+ */
+export const OAUTH_REFRESH_FALLBACK_SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+
+/**
  * Required on any request authenticated with a subscription OAuth token.
  *
  * The `anthropic-beta` header is cumulative: one request carries every marker

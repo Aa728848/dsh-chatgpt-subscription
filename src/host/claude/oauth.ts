@@ -119,6 +119,7 @@ import {
   LOGIN_TIMEOUT_MS,
   OAUTH_CLIENT_ID,
   OAUTH_MANUAL_REDIRECT_URI,
+  OAUTH_REFRESH_FALLBACK_SCOPES,
   OAUTH_SCOPES,
   OAUTH_TOKEN_URL,
   loopbackRedirectUri,
@@ -538,6 +539,31 @@ export async function exchangeAuthorizationCode(
 }
 
 /**
+ * The 'scope' a refresh sends: never more than the grant holds.
+ *
+ * RFC 6749 section 6 forbids a refresh from asking for a scope the resource
+ * owner did not originally grant. The authorize request asks for OAUTH_SCOPES,
+ * but the authorization host strips 'org:create_api_key' from a subscription
+ * grant without failing the sign-in. Re-asking for the full authorize set
+ * therefore made EVERY refresh an 'invalid_scope' - a final verdict that took
+ * the account out of rotation each time the access token aged out, so the line
+ * demanded a new sign-in roughly once per token lifetime.
+ *
+ * The scopes the credential records are the ones the token endpoint reported
+ * for this grant, so they are sent back as they are (trimmed, de-duplicated,
+ * order kept). A credential that records none falls back to the claude.ai set
+ * the official client sends, which also leaves 'org:create_api_key' out.
+ */
+export function refreshScopeFor(grantedScopes: readonly string[] | undefined): string {
+  const scopes: string[] = []
+  for (const entry of grantedScopes ?? []) {
+    const scope = entry.trim()
+    if (scope !== '' && !scopes.includes(scope)) scopes.push(scope)
+  }
+  return scopes.length > 0 ? scopes.join(' ') : OAUTH_REFRESH_FALLBACK_SCOPES
+}
+
+/**
  * Refresh an access token, with a bounded retry over transient failures.
  *
  * Only a transient status or a transport failure is retried. A final verdict —
@@ -545,18 +571,21 @@ export async function exchangeAuthorizationCode(
  * further attempt would be a guaranteed rejection and, on a rotation endpoint,
  * one more chance to spend the refresh token.
  *
+ * 'grantedScopes' is the scope list stored with the credential being refreshed;
+ * see {@link refreshScopeFor} for why the request must not ask for more.
+ *
  * The returned 'refreshToken' is empty when the endpoint named none; the caller
  * merges that case by keeping the stored value (A3).
  */
 export async function refreshAccessToken(
   refreshToken: string,
-  options: TokenRequestOptions = {},
+  options: TokenRequestOptions & { grantedScopes?: readonly string[] } = {},
 ): Promise<OAuthTokenResult> {
   const body = {
     grant_type: 'refresh_token',
     client_id: OAUTH_CLIENT_ID,
     refresh_token: refreshToken,
-    scope: OAUTH_SCOPES,
+    scope: refreshScopeFor(options.grantedScopes),
   }
   let lastError: unknown
   for (let attempt = 0; attempt < REFRESH_MAX_ATTEMPTS; attempt += 1) {
@@ -651,6 +680,7 @@ export async function ensureAccessToken(
       const token = await refreshAccessToken(credentials.refreshToken, {
         ...(options.fetchFn === undefined ? {} : { fetchFn: options.fetchFn }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(credentials.scopes === undefined ? {} : { grantedScopes: credentials.scopes }),
       })
       const account = mergeAccount(token.account, credentials.account)
       const next: ClaudeCredentials = {

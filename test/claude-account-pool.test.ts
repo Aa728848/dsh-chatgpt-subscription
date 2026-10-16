@@ -642,6 +642,35 @@ describe('ClaudeAccountPool — rotation and the rotation contract', () => {
     const summary = (await pool.listAccounts()).find((entry) => entry.id === account.id)
     expect(summary).toMatchObject({ authStatus: 'expired' })
   })
+
+  it('refreshes through the token endpoint asking only for the scopes the account was granted', async () => {
+    // No refresh seam: the real hook, oauth.ts's request body, and an endpoint
+    // that applies RFC 6749 section 6. Asking for the full authorize set (which
+    // includes the org:create_api_key the host strips) is answered with
+    // invalid_scope and would mark this account expired.
+    const granted = ['user:file_upload', 'user:inference', 'user:mcp_servers', 'user:profile', 'user:sessions:claude_code']
+    const pool = new ClaudeAccountPool({ store: documentStore(), backend: new MemoryBackend() as never })
+    const account = await pool.addAccount(managed(1, { expiresAt: Date.now() + 1_000, scopes: granted }))
+    const bodies: Record<string, unknown>[] = []
+    const json = (payload: unknown, status: number) =>
+      new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      bodies.push(body)
+      return String(body.scope).split(' ').every((scope) => granted.includes(scope))
+        ? json({ access_token: 'refreshed-at', refresh_token: 'rotated-rt', expires_in: 28_800, scope: granted.join(' ') }, 200)
+        : json({ error: 'invalid_scope', error_description: 'The requested scope is invalid, unknown, or malformed.' }, 400)
+    }) as typeof fetch
+
+    const effective = await pool.getEffectiveAccount(undefined, fetchFn)
+
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'rt-1', scope: granted.join(' ') })
+    expect(effective.credentials.accessToken).toBe('refreshed-at')
+    expect(effective.credentials.refreshToken).toBe('rotated-rt')
+    const summary = (await pool.listAccounts()).find((entry) => entry.id === account.id)
+    expect(summary).not.toMatchObject({ authStatus: 'expired' })
+  })
 })
 
 

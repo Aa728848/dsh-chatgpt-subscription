@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- **[Claude] 续期请求要了授权里没有的 `org:create_api_key`：每次 access token 到期都被判 `invalid_scope`，账号被标成过期，只能重新登录**
+  - **现象**：Claude 线路大约每个 token 周期（约 8 小时，或隔夜后第一次使用）就报 `Claude rejected the sign-in: The requested scope is invalid, unknown, or malformed.. Sign in again.`，必须重新登录；其他线路没有这个问题。
+  - **根因（会话存档实证，非推断）**：authorize 请求的是 `OAUTH_SCOPES`（含 `org:create_api_key`），授权服务器对订阅账号**静默剥掉**这一项而不让登录失败（落盘凭据的 `scopes` 只有 5 个 `user:*`），续期却把整组 `OAUTH_SCOPES` 原样发回。RFC 6749 §6 规定续期不得请求原授权以外的 scope，服务器回 `invalid_scope`；它在 `FINAL_GRANT_CODES` 里 → `ClaudeUnauthorizedError` → 号池 `refreshFailureStatus` 标 `expired` 并移出轮换。本机会话存档在 10-14 至 10-16 间出现 4 次上述原文报错，间隔 11–13 小时。对照：官方 Claude Code 续期只发 5 个 claude.ai scope，参考实现 pi-mono 续期不带 scope——只有本插件多要了一项。
+  - **改法**：新增 `refreshScopeFor`，续期只回发凭据自己记录的已授权 scope（去空白、去重、保序）；凭据没有记录时回退到新常量 `OAUTH_REFRESH_FALLBACK_SCOPES`（与官方客户端一致，不含 `org:create_api_key`）。`ensureAccessToken` 与号池 `refreshClaudeCredential` 两个调用点都传入 `credentials.scopes`。authorize 请求保持不变。
+  - **验证**：`npm run typecheck`、`npm run build` 0 错误；全量 **226 passed | 1 skipped（227 文件）、3753 passed | 9 skipped、0 failed**（新增 4 例；多出的 2 个 skipped 是本机缺 pi-ai 参考快照的 `claude-model-catalog` 保真断言，与本改动无关）。新用例的假 token 端点按 RFC 6749 §6 拒绝越权 scope，号池用例走真实 refresh hook（不经测试 seam）。**承重已双向检查（负对照）**：把续期 body 还原为 `scope: OAUTH_SCOPES`，3 条新用例失败，其中两条抛出的正是线上那句 `The requested scope is invalid, unknown, or malformed.. Sign in again.`。
+  - **升级提示**：升级前已被这个问题标成"需要重新登录"的账号，升级后仍需重新登录一次来清除标记；之后续期正常。
 
 ## 0.24.6 - 2026-10-16
 - **[WorkBuddy 国际区] 补上与官方客户端一致的会话头组，并修正 `11128` 被当成单一含义的过期结论（issue #56）**
