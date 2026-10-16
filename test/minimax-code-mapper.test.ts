@@ -14,7 +14,6 @@ import {
   maxRequestImageBytes,
   offloadOldestRequestImages,
   processMinimaxStreamLine,
-  streamCompletion,
   streamHasContent,
 } from '../src/host/minimax-code/mapper.ts'
 
@@ -152,48 +151,141 @@ describe('minimax stream completeness', () => {
     expect(() => assertStreamComplete(state)).toThrow(/stream ended before its terminal event/)
   })
 
-  it('reports a turn spent entirely on reasoning as a failure, not an answer', () => {
-    // Measured four times on this line at `effort: 'max'`: the response is one
-    // thinking block and `end_turn`, with no text and no tool call. The harness
-    // reads a tool-call-free stop as a finished turn, so without this the caller
-    // sees a reply that simply stops.
-    const state = createStreamState()
-    const events = [
-      line({ type: 'message_start', message: { usage: { input_tokens: 5 } } }),
-      line({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
-      line({
-        type: 'content_block_delta',
-        index: 0,
-        delta: { type: 'thinking_delta', thinking: 'Let me read lines 130-160 of the upstream preset.' },
-      }),
-      line({ type: 'content_block_stop', index: 0 }),
-      line({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
-      line({ type: 'message_stop' }),
-    ]
-    const chunks = events.flatMap((entry) => processMinimaxStreamLine(entry, state))
+  /**
+   * The wire shapes this line can end on, and what each must be reported as.
+   *
+   * A table rather than one case per shape: the judgement is a single predicate
+   * over the whole response, so what needs pinning is the boundary between a
+   * reply and a turn that produced nothing - including the two shapes that carry
+   * no reasoning at all and so are not "reasoning-only" in any sense.
+   */
+  const TERMINAL_SHAPES: Array<{
+    name: string
+    events: string[]
+    reason: string
+  }> = [
+    {
+      // The shape measured four times on this line at `effort: 'max'`.
+      name: 'thinking deltas then end_turn',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+        line({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Let me read the preset.' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+      ],
+      reason: 'error',
+    },
+    {
+      name: 'thinking seeded by content_block_start then end_turn',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: 'seeded' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+      ],
+      reason: 'error',
+    },
+    {
+      name: 'no blocks at all',
+      events: [],
+      reason: 'error',
+    },
+    {
+      name: 'text block opened but never filled',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+      ],
+      reason: 'error',
+    },
+    {
+      name: 'whitespace-only text',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+        line({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '   \n  ' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+      ],
+      reason: 'error',
+    },
+    {
+      name: 'reasoning then text',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+        line({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'think' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+        line({ type: 'content_block_start', index: 1, content_block: { type: 'text' } }),
+        line({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'answer' } }),
+        line({ type: 'content_block_stop', index: 1 }),
+      ],
+      reason: 'stop',
+    },
+    {
+      name: 'text only',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+        line({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+      ],
+      reason: 'stop',
+    },
+    {
+      name: 'tool call only',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'read' } }),
+        line({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+      ],
+      reason: 'tool-calls',
+    },
+    {
+      name: 'reasoning then a tool call',
+      events: [
+        line({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+        line({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'think' } }),
+        line({ type: 'content_block_stop', index: 0 }),
+        line({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 't1', name: 'read' } }),
+        line({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{}' } }),
+        line({ type: 'content_block_stop', index: 1 }),
+      ],
+      reason: 'tool-calls',
+    },
+  ]
 
+  it.each(TERMINAL_SHAPES)('reports $name as $reason', ({ events, reason }) => {
+    const state = createStreamState()
+    const chunks = [
+      line({ type: 'message_start', message: { usage: { input_tokens: 12, output_tokens: 0 } } }),
+      ...events,
+      line({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } }),
+      line({ type: 'message_stop' }),
+    ].flatMap((entry) => processMinimaxStreamLine(entry, state))
+
+    // A terminal event really did arrive in every one of these shapes, so the
+    // completeness check must still pass: the verdict below is about the CONTENT,
+    // never about whether the stream was cut short.
     expect(() => assertStreamComplete(state)).not.toThrow()
-    expect(chunks).toContainEqual(
-      expect.objectContaining({
-        type: 'finish',
-        reason: expect.objectContaining({
-          kind: 'error',
-          failure: expect.objectContaining({ code: 'PROVIDER_ERROR' }),
-        }),
-      }),
-    )
+
+    const finish = chunks.find((chunk) => chunk.type === 'finish') as
+      | { reason: { kind: string } }
+      | undefined
+    expect(finish?.reason.kind).toBe(reason)
   })
 
-  it('names the event that ended the stream', () => {
-    const whole = createStreamState()
-    for (const entry of HAPPY_PATH) processMinimaxStreamLine(entry, whole)
-    expect(streamCompletion(whole)).toBe('message_stop')
+  it('keeps a max_tokens ceiling out of the empty-answer verdict', () => {
+    // A cap that ran out is already its own turn-end reason upstream, and the
+    // floor added for forced thinking exists precisely so a small cap is not
+    // reported as an answerless turn. This shape must keep meaning max-tokens.
+    const state = createStreamState()
+    const chunks = [
+      line({ type: 'message_start', message: { usage: { input_tokens: 12, output_tokens: 0 } } }),
+      line({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+      line({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'spent' } }),
+      line({ type: 'content_block_stop', index: 0 }),
+      line({ type: 'message_delta', delta: { stop_reason: 'max_tokens' } }),
+      line({ type: 'message_stop' }),
+    ].flatMap((entry) => processMinimaxStreamLine(entry, state))
 
-    const stopped = createStreamState()
-    for (const entry of HAPPY_PATH.slice(0, 5)) processMinimaxStreamLine(entry, stopped)
-    expect(streamCompletion(stopped)).toBe('stop-reason')
-
-    expect(streamCompletion(createStreamState())).toBe('stream-end')
+    const finish = chunks.find((chunk) => chunk.type === 'finish') as
+      | { reason: { kind: string } }
+      | undefined
+    expect(finish?.reason.kind).toBe('max-tokens')
   })
 
   it('rejects a stream that stopped mid-answer', () => {

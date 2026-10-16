@@ -1118,9 +1118,12 @@ function tokenUsage(state: MinimaxStreamState): TokenUsage {
  * the body simply ended after a `message_delta` carried one - the shape the
  * completeness check accepts on purpose ("treats a stop_reason without
  * message_stop as complete"). `stream-end` is a body that carried neither, which
- * `assertStreamComplete` rejects.
+ * `assertStreamComplete` rejects before this is ever reached.
+ *
+ * Not exported: the failure message below is its only reader, and a path with no
+ * logger does not earn a public accessor for a single call site.
  */
-export function streamCompletion(state: MinimaxStreamState): 'message_stop' | 'stop-reason' | 'stream-end' {
+function streamCompletion(state: MinimaxStreamState): 'message_stop' | 'stop-reason' | 'stream-end' {
   if (state.done) return 'message_stop'
   return state.finishReason === null ? 'stream-end' : 'stop-reason'
 }
@@ -1153,7 +1156,7 @@ function finishReasonFor(state: MinimaxStreamState): FinishReason {
       failure: {
         message:
           PROVIDER_NAME +
-          ' ended the turn with reasoning only — no text and no tool call' +
+          ' ended the turn without an answer or a tool call — the response stopped before it did anything' +
           ` (finishReason: ${reason === '' ? '(none)' : reason}, stream ended by: ${streamCompletion(state)})`,
         code: 'PROVIDER_ERROR',
       },
