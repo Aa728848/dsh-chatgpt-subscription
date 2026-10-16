@@ -357,7 +357,11 @@ export class WorkBuddyAdapter extends LlmAdapter {
       try {
         response = await fetchWithContextBudgetRecovery(fetchFn)(`${credentials.backend}${CHAT_PATH}`, {
           method: 'POST',
-          headers: workBuddyHeaders(credentials, { accept: 'text/event-stream' }),
+          headers: workBuddyHeaders(
+            credentials,
+            { accept: 'text/event-stream' },
+            { ...(requestOptions.sessionId === undefined ? {} : { sessionId: String(requestOptions.sessionId) }) },
+          ),
           body,
           // The idle watchdog owns the deadline: it resets while tokens flow, so a
           // long but active generation is not cut off by a wall-clock cap.
@@ -533,9 +537,17 @@ export function classifyFailure(
   }
 
   if (code === 11128) {
+    // The code is overloaded upstream and the message says which reading is
+    // meant: "conversation id missing" is the gateway refusing the request's
+    // channel verification, while the system-first wording is the history
+    // check. Naming only the latter sends the reader down the wrong path.
+    const channelRejected = /conversation id/i.test(detail)
     return new LlmError(
-      `${PROVIDER_NAME} rejected the message history: the conversation must open with a system prompt.`
-      + `${detail ? ` ${detail}` : ''}`,
+      channelRejected
+        ? `${PROVIDER_NAME} blocked the request at its channel check (11128): the gateway did not `
+          + 'accept it as an official client request. This is a plugin-side gap, not an account problem.'
+        : `${PROVIDER_NAME} rejected the message history: the conversation must open with a system prompt.`
+          + `${detail ? ` ${detail}` : ''}`,
       'PROVIDER_ERROR',
       { status },
     )

@@ -11,7 +11,11 @@
  *    A request whose first message is a user turn answers 400 `code 11128`
  *    ("first message is not system prompt"). {@link buildChatRequest} injects
  *    one when the caller supplied none, so a hand-built one-shot request cannot
- *    trip this.
+ *    trip this. Note that the same code is also the gateway's channel-verification
+ *    refusal (`msg: "conversation id missing"`), which the conversation header
+ *    group this route sends is what satisfies — see `conversationHeaders` in
+ *    `client.ts`. A history that is already correct can still answer 11128 for
+ *    that second reason, so the code alone does not implicate the messages.
  * 3. **Reasoning rides `delta.reasoning_content`,** not OpenAI's
  *    `reasoning_summary`, and is emitted as its own DSH reasoning block.
  */

@@ -35,6 +35,9 @@ import { parseWorkBuddyCreditMultiplier } from '../src/shared/workbuddy-contract
 
 const temporaryDirs: string[] = []
 
+/** Shape the official client's conversation ids take on the wire. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
 /** Build an unsigned JWT-shaped token carrying the claims under test. */
 function jwtToken(claims: Record<string, unknown>): string {
   const encode = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8')
@@ -330,6 +333,62 @@ describe('WorkBuddy request headers', () => {
     // The international gateway validates the browser origin the IDE would send.
     expect(headers.origin).toBe('https://www.workbuddy.ai')
     expect(headers.referer).toBe('https://www.workbuddy.ai/')
+  })
+
+  it('sends the conversation header group the international gateway verifies', () => {
+    const headers = workBuddyHeaders(
+      { accessToken: 't', domain: 'www.workbuddy.ai', uid: 'u1', backend: 'https://www.workbuddy.ai' },
+      {},
+      { sessionId: 'session-1' },
+    )
+    // Measured: without exactly this group the chat endpoint answers 400 code
+    // 11128 regardless of the message shape.
+    expect(headers['x-conversation-id']).toMatch(UUID_SHAPE)
+    expect(headers['x-conversation-request-id']).toMatch(UUID_SHAPE)
+    expect(headers['x-conversation-message-id']).toMatch(UUID_SHAPE)
+    expect(headers['x-request-id']).toMatch(UUID_SHAPE)
+    expect(headers['acp-connection-id']).toMatch(UUID_SHAPE)
+  })
+
+  it('keeps the conversation identity stable per session and the ids fresh per request', () => {
+    const credentials = {
+      accessToken: 't', domain: 'www.workbuddy.ai', uid: 'u1', backend: 'https://www.workbuddy.ai',
+    }
+    const first = workBuddyHeaders(credentials, {}, { sessionId: 'session-1' })
+    const second = workBuddyHeaders(credentials, {}, { sessionId: 'session-1' })
+    const other = workBuddyHeaders(credentials, {}, { sessionId: 'session-2' })
+
+    // The official client reuses one conversation id for the whole conversation,
+    // so two turns of the same session must agree on the scoped three.
+    expect(second['x-conversation-id']).toBe(first['x-conversation-id'])
+    expect(second['x-conversation-request-id']).toBe(first['x-conversation-request-id'])
+    expect(second['acp-connection-id']).toBe(first['acp-connection-id'])
+    // A different session must not reuse them.
+    expect(other['x-conversation-id']).not.toBe(first['x-conversation-id'])
+
+    // The per-message ids are the ones the official client randomizes.
+    expect(second['x-conversation-message-id']).not.toBe(first['x-conversation-message-id'])
+    expect(second['x-request-id']).not.toBe(first['x-request-id'])
+  })
+
+  it('leaves the conversation group off the domestic line and off non-chat surfaces', () => {
+    const cn = workBuddyHeaders(
+      { accessToken: 't', domain: 'copilot.tencent.com', uid: 'u1', backend: 'https://copilot.tencent.com' },
+      {},
+      { sessionId: 'session-1' },
+    )
+    // The domestic line works without them; adding headers it does not expect is
+    // an unnecessary change to a working path.
+    expect(cn['x-conversation-id']).toBeUndefined()
+    expect(cn['acp-connection-id']).toBeUndefined()
+
+    const intl = workBuddyHeaders(
+      { accessToken: 't', domain: 'www.workbuddy.ai', uid: 'u1', backend: 'https://www.workbuddy.ai' },
+    )
+    // Only the chat endpoint enforces the group: config, billing, refresh and
+    // check-in calls pass no session and must stay byte-identical to before.
+    expect(intl['x-conversation-id']).toBeUndefined()
+    expect(intl['x-request-id']).toBeUndefined()
   })
 })
 
@@ -1259,5 +1318,31 @@ describe('WorkBuddy routes', () => {
     const payload = JSON.parse(res.captured.body)
     expect(payload.value.connected).toBe(true)
     expect(seen.some((u) => u.includes('/v2/chat/completions'))).toBe(true)
+  })
+
+  it('carries the conversation group on an international connection probe', async () => {
+    const dir = await makeAuthDir({ domain: 'www.workbuddy.ai' })
+    const handlers: any[] = []
+    let probeHeaders: Record<string, string> | undefined
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, {
+      fetchFn: (async (url: any, init: any) => {
+        if (String(url).includes('/v3/config')) return new Response(JSON.stringify(CONFIG), { status: 200 })
+        probeHeaders = init.headers
+        return new Response('data: [DONE]\n\n', { status: 200 })
+      }) as unknown as typeof fetch,
+    })
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'),
+      res,
+    )
+
+    // The probe posts to the same gated chat endpoint a real turn uses, so it
+    // must clear the same channel check: without the group the international
+    // gateway answers 400 code 11128 and the test reports a healthy line broken.
+    expect(res.captured.status).toBe(200)
+    expect(probeHeaders?.['x-conversation-id']).toMatch(UUID_SHAPE)
+    expect(probeHeaders?.['acp-connection-id']).toMatch(UUID_SHAPE)
+    expect(probeHeaders?.['x-request-id']).toMatch(UUID_SHAPE)
   })
 })

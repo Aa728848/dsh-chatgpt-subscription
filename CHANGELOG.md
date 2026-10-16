@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.24.6 - 2026-10-16
+- **[WorkBuddy 国际区] 补上与官方客户端一致的会话头组，并修正 `11128` 被当成单一含义的过期结论（issue #56）**
+  - **报告**：#56 称国际区（`www.workbuddy.ai`）线路恒返回 400 `code 11128` / `msg: "conversation id missing"`，根因是网关新增渠道校验、要求 `X-Conversation-ID` / `X-Conversation-Request-ID` / `X-Conversation-Message-ID` / `X-Request-ID` / `acp-connection-id` 这 5 个头，而插件一个都不带；报告者用自己的国际区凭据做过单变量差分，称这 5 个是**最小充分集**。
+  - **本机未能复现，如实记录**：本机有可用的国际区账号，实测真实 `POST https://www.workbuddy.ai/v2/chat/completions`（system 开头 + `stream:true` + `max_tokens:1`）——**修复前的头组（只有身份头）已经是 200，SSE 正常流出**；把 5 个会话头逐个删除同样是 200；**连身份头全部去掉、只留 bearer 也是 200**；走真实 adapter 端到端（国际区凭据）得到 `text="pong"` / `finish=stop`。同时 `11128` 在本环境是**活的**，但它绑定的仍是 `msg:"first message is not system prompt"`（user 开头时必现 400）——报告的 `conversation id missing` 分支在任何头组合下都打不到。
+  - **因此这版不声称已验证根因**，只做两件彼此独立、各自成立的事：① 补上这组头，与官方客户端 `applyGatewayHeaders` 的行为对齐（**仅国际区**、**仅对话端点**：config / billing / refresh / check-in 四个面保持原有头集一字不改，国内区不加）；其中 `X-Conversation-ID`、`X-Conversation-Request-ID`、`acp-connection-id` **按会话稳定**（由 harness 的 `GenerateOptions.sessionId` 派生，与官方客户端"每会话复用同一值"一致），`X-Conversation-Message-ID` / `X-Request-ID` **每请求随机**。实测这组头**带上与不带都是 200**，即无回归；② 修正 `classifyFailure` 与 `types.ts` / `mapper.ts` 的过期注释——`11128` 在上游已被复用，**同一个码有两个含义**，文案改为先读 `msg` 再定性（`conversation id` 判为渠道校验、否则判为 system-first）。这一条**已由实测独立证成**（本环境 `11128` 确实同时出现在这两个语义上）。
+  - **两个假设尚未区分（需要受影响账号才能判定）**：H1 渠道校验按账号灰度、报告的账号被拦而本机账号豁免，则该头组是真修复；H2 该门禁不存在或已回滚、对方的 400 另有来源，则头组只是无害对齐。两者下本改动都无副作用，但**都不能由本机证据宣布为已证实的根因**——报告者手上有受影响的环境，0.24.6 的复测结果才是判据。
+  - **验证**：`npm run typecheck` 0 错误；全量 **226 passed | 1 skipped（227 文件）、3751 passed | 7 skipped、0 failed**（基线 3745，新增 6 例）。新增 `scripts/probe-workbuddy-channel.probe.ts`（一次性实况探针，`vitest.probe.config.ts`，读真实凭据、不进 CI），它**刻意把修复前的头组当负对照一起打**——只断言修复后的 200 无法区分"头组起作用"与"网关不再校验"。**承重已双向检查**：移除头组本身 → 5 条用例失败（含两处调用点与头组契约）；保留头组但丢掉 `sessionId` 透传 → 会话稳定性用例失败。
+
 ## 0.24.5 - 2026-10-16
 - **[推理塌缩守卫] Agent 先于守卫创建时注册表两条读取路径同时失效：熔断生效但续写从未排队，回合被截断后静默结束**
   - **现象**：对话在思考中途**没有任何报错地突然结束**，界面上什么都不显示。

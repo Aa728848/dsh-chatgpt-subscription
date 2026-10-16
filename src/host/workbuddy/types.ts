@@ -87,6 +87,23 @@ export const HEADER_IDE_NAME = 'x-ide-name'
 export const HEADER_REQUESTED_WITH = 'x-requested-with'
 export const CLIENT_PRODUCT = 'SaaS'
 
+/**
+ * Conversation header group the international gateway gates on.
+ *
+ * Measured 2026-10 on `www.workbuddy.ai`: a request carrying the identity
+ * headers alone answers 400 `code 11128` whatever its message shape, while
+ * adding exactly these five answers 200 with a normal SSE body. The other
+ * headers the official client sends (trace context, `X-Agent-Intent`,
+ * `X-Agent-Purpose`, `x-codebuddy-request`, its own user agent) were added one
+ * at a time and each left the outcome unchanged, so this group is the minimal
+ * sufficient set rather than a copy of the whole client.
+ */
+export const HEADER_CONVERSATION_ID = 'x-conversation-id'
+export const HEADER_CONVERSATION_REQUEST_ID = 'x-conversation-request-id'
+export const HEADER_CONVERSATION_MESSAGE_ID = 'x-conversation-message-id'
+export const HEADER_REQUEST_ID = 'x-request-id'
+export const HEADER_ACP_CONNECTION_ID = 'acp-connection-id'
+
 /** Refresh-token header the token endpoint reads. */
 export const HEADER_REFRESH_TOKEN = 'x-refresh-token'
 /** Refresh origin marker; `workbuddy` for the .ai domains, `plugin` otherwise. */
@@ -117,7 +134,16 @@ export const ERROR_CODE = {
   BAD_REQUEST: 11101,
   /** Model not served in this region — a wrong-region request. */
   MODEL_UNAVAILABLE: 11102,
-  /** Message history violates the required shape (missing leading system prompt). */
+  /**
+   * Gateway channel verification refused the request.
+   *
+   * The code is overloaded upstream, so the message — not the code — decides
+   * what it means. Measured 2026-09: the international chat endpoint answers it
+   * for a request that does not open with a system turn. Measured 2026-10: the
+   * same code, with `msg: "conversation id missing"`, is the answer to *every*
+   * request that omits the {@link HEADER_CONVERSATION_ID} group, whatever its
+   * message shape. Read `msg` before concluding the history is at fault.
+   */
   SECURITY_BLOCKED: 11128,
   /** Provider rejected the parameters, e.g. an unsupported image for that model. */
   PROVIDER_REJECTED: 11133,
