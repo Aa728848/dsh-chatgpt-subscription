@@ -40,6 +40,7 @@ import {
   generatePkceMaterial,
   getLoginStatus,
   refreshAccessToken,
+  refreshScopeFor,
   resolveCallbackPort,
   resolveLoginInput,
   submitLoginInput,
@@ -51,6 +52,8 @@ import {
   CALLBACK_PORT_ATTEMPTS,
   DEFAULT_CALLBACK_PORT,
   OAUTH_MANUAL_REDIRECT_URI,
+  OAUTH_REFRESH_FALLBACK_SCOPES,
+  OAUTH_SCOPES,
   OAUTH_TOKEN_URL,
   loopbackRedirectUri,
 } from '../src/host/claude/types.ts'
@@ -932,6 +935,51 @@ describe('token exchange', () => {
     // Nothing new was reported, so nothing is thrown away.
     expect(keptResult.refreshToken).toBe('still-good-refresh-token')
     expect(kept.current()?.refreshToken).toBe('still-good-refresh-token')
+  })
+
+  it('asks a refresh for the scopes the grant holds, never the org:create_api_key the host stripped', async () => {
+    // The live failure this pins: the sign-in asks for OAUTH_SCOPES, the host
+    // grants the five claude.ai scopes WITHOUT org:create_api_key, and a refresh
+    // that re-asked for the full authorize set was answered with invalid_scope -
+    // a final verdict that demanded a new sign-in every time the token aged out.
+    const granted = ['user:file_upload', 'user:inference', 'user:mcp_servers', 'user:profile', 'user:sessions:claude_code']
+    const store = memoryStore(credentials({ scopes: granted }))
+    // An endpoint that applies RFC 6749 section 6 to the request it receives.
+    const stub = recordingFetch((call) => {
+      const requested = String(call.body.scope ?? '').split(' ').filter((scope) => scope !== '')
+      return requested.every((scope) => granted.includes(scope))
+        ? jsonResponse(tokenBody({ scope: granted.join(' ') }))
+        : jsonResponse({ error: 'invalid_scope', error_description: 'The requested scope is invalid, unknown, or malformed.' }, 400)
+    })
+
+    const refreshed = await ensureAccessToken(store.store, { fetchFn: stub.fn })
+
+    expect(refreshed.accessToken).toBe(ACCESS_TOKEN)
+    expect(stub.calls).toHaveLength(1)
+    expect(stub.calls[0]?.body.scope).toBe(granted.join(' '))
+    expect(String(stub.calls[0]?.body.scope)).not.toContain('org:create_api_key')
+    // The AUTHORIZE request still asks for it, exactly as the official client does.
+    expect(OAUTH_SCOPES.split(' ')).toContain('org:create_api_key')
+  })
+
+  it('falls back to the claude.ai scope set when the credential records no scopes', async () => {
+    for (const grantedScopes of [undefined, [], ['  ', '']]) {
+      const stub = recordingFetch(() => jsonResponse(tokenBody()))
+      await refreshAccessToken('the-refresh-token', { fetchFn: stub.fn, grantedScopes })
+      expect(stub.calls[0]?.body.scope).toBe(OAUTH_REFRESH_FALLBACK_SCOPES)
+    }
+    expect(OAUTH_REFRESH_FALLBACK_SCOPES.split(' ')).not.toContain('org:create_api_key')
+    // Every scope the fallback asks for is one the authorize request asked for too.
+    for (const scope of OAUTH_REFRESH_FALLBACK_SCOPES.split(' ')) {
+      expect(OAUTH_SCOPES.split(' ')).toContain(scope)
+    }
+  })
+
+  it('sends a granted scope list back as it is: trimmed, de-duplicated, order kept', () => {
+    expect(refreshScopeFor([' user:inference ', 'user:profile', 'user:inference'])).toBe('user:inference user:profile')
+    // The rule is "nothing the grant lacks", so a grant that DOES hold
+    // org:create_api_key keeps asking for it.
+    expect(refreshScopeFor(['org:create_api_key', 'user:inference'])).toBe('org:create_api_key user:inference')
   })
 })
 

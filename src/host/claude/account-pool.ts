@@ -689,7 +689,11 @@ async function refreshClaudeCredential(
   credentials: ClaudeCredentials,
   fetchFn: typeof fetch,
 ): Promise<ClaudeCredentials> {
-  const token = await refreshAccessToken(credentials.refreshToken, { fetchFn })
+  // The grant's own scopes, never the full authorize set: see refreshScopeFor.
+  const token = await refreshAccessToken(credentials.refreshToken, {
+    fetchFn,
+    ...(credentials.scopes === undefined ? {} : { grantedScopes: credentials.scopes }),
+  })
   const next = token.account
   const current = credentials.account
   const uuid = next.uuid ?? current?.uuid
