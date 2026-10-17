@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.26.1 - 2026-10-17
 - **[WorkBuddy] 一次上游 401 把整个号池写成「需要重新登录」且永不恢复：线路跑着跑着忽然全部国区账号要重登**
   - **现象**：运行中的一轮突然失败，报 `WorkBuddy（CodeBuddy 订阅） rejected the stored credential (401). Sign in again with the CodeBuddy desktop client.`；随后设置卡片里**每一个**国区账号都显示「需要重新登录」，只有重新登录（重新加号）才能恢复。
   - **本机实证（非推断）**：解密号池文件读到事发那几秒——22:52:42 / 22:52:48 两个国际区账号先被 429 冷却，同一个请求随即把两个国区账号依次判 401；22:54:05 / 22:54:41 用户重新登录，`authStatus` 才被清掉。同时用库里的 bearer 打两个面：`GET /v3/config` → **200**，`POST /v2/chat/completions` → **401 + APISIX HTML**；同一枚 token 在一个面被接受、在另一个面被拒，即这个 401 是 chat 路由/会话层的判定，不是「token 坏了」。库里 5 枚国区 bearer 中 4 枚在 chat 面拿到 `400 {"code":11101}`（鉴权已过），只有会话被后登录顶掉的那枚 401。
