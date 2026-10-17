@@ -306,13 +306,18 @@ const REQUEST_IMAGE_VERSION_MAX_BYTES = 256 * 1024
 export function requestImageTarget(
   ref: ImageAttachmentRef,
   edge: number = REQUEST_IMAGE_MAX_EDGE,
-): { width: number; height: number; maxBytes: number } | undefined {
+): { width: number; height: number; maxPixels: number; maxBytes: number } | undefined {
   const { width, height } = ref
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined
   if (Math.max(width, height) <= edge) return undefined
+  const maxPixels = Math.max(1, Math.floor(edge * edge * (Math.min(width, height) / Math.max(width, height))))
   return width >= height
-    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
-    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+}
+
+export function requestImageTargetOrOriginal(ref: ImageAttachmentRef): { width: number; height: number; maxBytes: number } {
+  return requestImageTarget(ref) ?? { width: ref.width, height: ref.height, maxBytes: ref.bytes }
 }
 
 /**

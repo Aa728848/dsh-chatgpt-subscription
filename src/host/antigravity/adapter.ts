@@ -11,6 +11,7 @@ import {
   type PreparedAdapterCall,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   MODELS,
   PROVIDER_ID,
@@ -36,6 +37,7 @@ import {
   createStreamState,
   offloadOldestRequestImages,
   processStreamLine,
+  requestImageTarget,
   resolveRequestImages,
   type AttachmentImageReader,
 } from './mapper.ts'
@@ -193,6 +195,10 @@ export class AntigravityAdapter extends LlmAdapter {
 
   imageRequestPricing(_provider?: string, _model?: string): undefined {
     return undefined
+  }
+
+  imageRequestTarget(_provider: string, _model: string, image: ImageAttachmentRef) {
+    return requestImageTarget(image) ?? { width: image.width, height: image.height, maxBytes: image.bytes }
   }
 
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {

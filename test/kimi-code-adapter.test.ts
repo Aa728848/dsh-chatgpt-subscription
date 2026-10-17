@@ -48,6 +48,7 @@ async function buildAdapter(options: {
   creds?: KimiCodeCredentials
   fetchFn?: typeof fetch
   attachments?: AttachmentImageReader
+  catalog?: KimiCodeCatalogModel[]
 } = {}) {
   const store = new FileCredentialStore(tmp('kc-cred'))
   vi.spyOn(store, 'read').mockResolvedValue(options.creds ?? credentials())
@@ -62,7 +63,7 @@ async function buildAdapter(options: {
     cacheTtl: null,
   })
   const adapter = new KimiCodeAdapter(store, modelSettings, undefined, {
-    loadCatalog: async () => CATALOG,
+    loadCatalog: async () => options.catalog ?? CATALOG,
     fetchFn: options.fetchFn,
     attachments: options.attachments,
   })
@@ -418,6 +419,21 @@ describe('KimiCodeAdapter catalog and models', () => {
   it('falls back to the model default thinking level when none is configured', async () => {
     const { adapter } = await buildAdapter({ enabledModelIds: ['k3'] })
     const resolved = await adapter.resolveModel('kimi-code', 'k3')
+    expect(resolved.reasoning?.defaultEffort).toBe('high')
+  })
+
+  it('orders a live ladder by reasoning strength without changing its default', async () => {
+    const { adapter } = await buildAdapter({
+      catalog: [{
+        ...CATALOG[0]!,
+        reasoningEfforts: ['low', 'high', 'none'],
+        defaultReasoningEffort: 'high',
+        thinkingType: 'both',
+      }],
+    })
+
+    const resolved = await adapter.resolveModel('kimi-code', 'k3')
+    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['none', 'low', 'high'])
     expect(resolved.reasoning?.defaultEffort).toBe('high')
   })
 

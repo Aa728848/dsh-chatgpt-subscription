@@ -13,7 +13,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type {} from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   DEFAULT_CONTEXT_WINDOW,
   FALLBACK_MODELS,
@@ -77,11 +77,13 @@ import {
   replaceOldestRequestImages,
   requestHasSendableImage,
   requestImagePayloadLengths,
+  requestImageTargetOrOriginal,
   MAX_MESSAGE_BODY_BYTES,
   MAX_REQUEST_IMAGE_BYTES,
   MAX_VIDEO_MESSAGE_BODY_BYTES,
   type ResolvedRequestImages,
 } from '../common/request-images.ts';
+import { orderReasoningEfforts } from '../common/reasoning-efforts.ts'
 
 /**
  * Rebuild attempts allowed while shrinking a request into its body ceiling.
@@ -610,6 +612,10 @@ export class KimiCodeAdapter extends LlmAdapter {
     return undefined
   }
 
+  imageRequestTarget(_provider: string, _model: string, image: ImageAttachmentRef) {
+    return requestImageTargetOrOriginal(image)
+  }
+
   private settings() {
     return this.preferences ? Promise.resolve(this.preferences.status()) : this.modelSettings.read()
   }
@@ -678,7 +684,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     const settings = await this.settings()
     const catalog = await this.catalog()
     const entry = catalog.find((model) => model.id === modelId)
-    const efforts = reasoningEffortsForEntry(modelId, catalog)
+    const efforts = orderReasoningEfforts(reasoningEffortsForEntry(modelId, catalog), ['none', 'low', 'high', 'max'])
     // Resolved through the shared helper rather than reading the entry directly,
     // so a declared default that the three-state thinking rule removed cannot
     // reach the caller as a level the model no longer accepts.

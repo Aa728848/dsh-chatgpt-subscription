@@ -90,7 +90,7 @@ function blockStarts(chunks: StreamChunk[]): Array<{ index: number; blockType: s
 }
 
 function blockEnds(chunks: StreamChunk[]): OutboundContentBlock[] {
-  return chunks.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : []))
+  return chunks.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : [])) as OutboundContentBlock[]
 }
 
 function finishReasonOf(chunks: StreamChunk[]): FinishReason | undefined {

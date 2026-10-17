@@ -37,7 +37,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type {} from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import {
   STREAM_IDLE_TIMEOUT_CODE,
@@ -50,7 +50,7 @@ import {
   type GenerateOptions as NormalizedGenerateOptions,
 } from '../common/llm-compat.ts'
 import { outputReservation } from '../common/output-reservation.ts'
-import type { AttachmentImageReader } from '../common/request-images.ts'
+import { requestImageTargetOrOriginal, type AttachmentImageReader } from '../common/request-images.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import { promptTokensOf, type StepCodeCacheUsage } from './cache-stats.ts'
 import {
@@ -283,6 +283,10 @@ export class StepCodeAdapter extends LlmAdapter {
 
   imageRequestPricing(): undefined {
     return undefined
+  }
+
+  imageRequestTarget(_provider: string, _model: string, image: ImageAttachmentRef) {
+    return requestImageTargetOrOriginal(image)
   }
 
   private settings(): Promise<StepCodeModelSettings> {

@@ -1,8 +1,9 @@
 import { outputReservation } from './common/output-reservation.ts'
+import { orderReasoningEfforts } from './common/reasoning-efforts.ts'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
-import { CODEX_MODEL_CATALOG, codexModelMaxTokens, isCodexReasoningEffort, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, GPT_56_REASONING_EFFORTS, codexModelMaxTokens, isCodexReasoningEffort, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { CodexCatalogEntry } from './codex-catalog.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
 
@@ -88,7 +89,7 @@ export function resolveCodexModel(
     // it would make DSH append every later prompt while the earlier ones stayed
     // effective, and the mapper would have to drop them again.
     reasoning: {
-      efforts: efforts.map((effort) => ({
+      efforts: orderReasoningEfforts(efforts, GPT_56_REASONING_EFFORTS).map((effort) => ({
         id: ReasoningEffortId(effort),
         name: effort,
       })),

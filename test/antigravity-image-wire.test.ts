@@ -209,11 +209,14 @@ describe('Antigravity image wire format', () => {
     })) as unknown as Array<typeof ATTACHMENT>
     const readImage = vi.fn(async (ref: Parameters<AttachmentStore['readImage']>[0]) => ({ ref, data: stored }))
     const readImageRequest = vi.fn(async (ref: Parameters<AttachmentStore['readImageRequest']>[0],
-      target: Parameters<AttachmentStore['readImageRequest']>[1]) => ({
-      attachment: ref, variantId: 'variant' as never, data: stored, mediaType: 'image/png' as const,
-      bytes: stored.length, width: target.width, height: target.height,
-      depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false,
-    }))
+      target: Parameters<AttachmentStore['readImageRequest']>[1]) => {
+      const dimensions = target as unknown as { width: number; height: number }
+      return {
+        attachment: ref, variantId: 'variant' as never, data: stored, mediaType: 'image/png' as const,
+        bytes: stored.length, width: dimensions.width, height: dimensions.height,
+        depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false,
+      }
+    })
 
     const record = await wireFor(images.map((attachment) => ({ type: 'image', attachment })),
       { readImage, readImageRequest })

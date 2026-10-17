@@ -168,9 +168,8 @@ function probePort(port: number): Promise<boolean> {
  * one. The discovery cannot drift from the implementation: it walks the same
  * range from the same constant.
  */
-async function firstBindablePort(): Promise<number> {
-  for (let offset = 0; offset < CALLBACK_PORT_ATTEMPTS; offset += 1) {
-    const port = DEFAULT_CALLBACK_PORT + offset
+async function firstBindablePort(start = DEFAULT_CALLBACK_PORT): Promise<number> {
+  for (let port = start; port < DEFAULT_CALLBACK_PORT + CALLBACK_PORT_ATTEMPTS; port += 1) {
     if (await probePort(port)) return port
   }
   throw new Error('No bindable loopback port in the probe range.')
@@ -519,8 +518,8 @@ describe('loopback callback listener', () => {
   it('skips an occupied port and reports the one it really bound', async () => {
     const store = memoryStore(null)
     const freePort = await firstBindablePort()
+    const nextPort = await firstBindablePort(freePort + 1)
     const blocker = await listenOn(freePort)
-    const nextPort = freePort + 1
     try {
       const probed: number[] = []
       const flow = await beginLogin(store.store, {

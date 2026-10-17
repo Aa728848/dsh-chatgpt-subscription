@@ -56,6 +56,8 @@ function GeneratedImage({ attachment, load, label, t }: {
 }
 
 function promptFromBlock(block: Props['block']): string | null {
+  const partial = partialPromptFromBlock(block)
+  if (partial !== null) return partial
   const raw = 'kind' in block ? block.call?.argsRaw : dispatchedArgsRaw(block)
   if (typeof raw !== 'string' || raw.trim() === '') return null
   try {
@@ -66,6 +68,18 @@ function promptFromBlock(block: Props['block']): string | null {
       && typeof (value as { prompt?: unknown }).prompt === 'string'
       ? (value as { prompt: string }).prompt
       : null
+  } catch {
+    return null
+  }
+}
+
+function partialPromptFromBlock(block: Props['block']): string | null {
+  if (!('args' in block)) return null
+  const args = block.args as { text?: unknown } | undefined
+  if (typeof args?.text !== 'function') return null
+  try {
+    const prompt = (args.text as (key: string) => unknown).call(args, 'prompt')
+    return typeof prompt === 'string' ? prompt : null
   } catch {
     return null
   }

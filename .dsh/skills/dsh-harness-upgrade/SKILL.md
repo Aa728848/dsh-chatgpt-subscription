@@ -44,6 +44,8 @@ keeps generations comparable. Each seam has one file:
 | Agent presets | `src/host/agent-preset.ts`, `src/host/preset-sync.ts` | Runtime registration when the harness ships the declaration-row package (`@deepseek-ai/dsh-agent-preset`) and an `agentPresets` service; the `$DSH_HOME/.agent-presets` copy below that. **Never** a static declaration row in `cordis.patch.yml` (see traps). |
 | Client services | `src/client/index.tsx` (`export const inject`), `package.json` `dsh.client.inject` | Cordis resolves a service method's own `this.ctx` through a shadow that points back at the **service's** fiber, so a caller declares only what *it* reads — not what the callee reads. Check `packages/client/*/src/client/index.ts` in the harness for the current first-party spelling. |
 | Provenance and names | `src/host/codex-images.ts`, `src/host/kimi-code/video-tool.ts`, `src/host/preset-sync.ts` | Message source kinds are merge-extensible: declare your own (`declare module '@deepseek-ai/dsh-llm'` → `MessageSourceMap`, kind `dsh-chatgpt-subscription`) instead of relying on a catch-all. Package renames are reconciled by probing resolution (`import.meta.resolve`), never by hard-coding a harness version. |
+| Host transport | `src/host/common/webserver-compat.ts`, `src/host/common/idle-watchdog.ts` | Use the running WebServer's origin API when present, preserve the legacy loopback fallback otherwise, and never await an abandoned stream generator's queued cleanup after its deadline has already settled. |
+| Request metadata | `src/host/common/reasoning-efforts.ts`, `src/host/common/request-images.ts` | Resolved reasoning ladders are least-to-greatest without changing default-effort selection or settings display order; adapter image targets equal the mapper's actual request projection and retain the old store's `maxPixels` alongside newer dimensions. |
 
 ## 3. Procedure for a new harness release
 
@@ -190,14 +192,13 @@ next upgrade starts by reading the newest file in `references/`.
 
 ## 7. Current state
 
-- Tested baseline: **0.2.0-rc.2** (`devDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded run: forced typecheck + build clean, **1759 tests passed**
-  (118 files passed, 2 failed*, 1 skipped file, 7 skipped tests — the failed files are
-  the known Windows-only host port reservation failures, 12 tests); the
-  previous-baseline room (clean-room, `0.2.0-rc.1` pinned) is **identical in outcome —
-  1759 passed, same 12 known failures**; old generation (clean-room 0.1.5-rc.3):
-  source typecheck clean, **1756 tests passed, same 12 known failures**, one
-  generation-bound test file unable to load (`@deepseek-ai/dsh-ptc-runtime`).
+- Tested baseline: **0.2.1-alpha.5** (exact `devDependencies`); peer support 0.1.2-alpha.5
+  onwards. Latest recorded run: forced typecheck + clean build, **3785 tests passed / 7 skipped / 0 failed**
+  (230 files passed, 1 skipped); previous-baseline room (clean-room `0.2.0-rc.2` exact):
+  **3784 passed / 8 skipped / 0 failed**; old generation (clean-room `0.1.5-rc.3` exact):
+  source typecheck clean, **3780 passed / 8 skipped**, with only the known
+  generation-bound PTC test file unable to load because that closure has no
+  `@deepseek-ai/dsh-ptc-runtime`.
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
   covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
@@ -220,6 +221,12 @@ next upgrade starts by reading the newest file in `references/`.
   additive `ask_user_question` timed mode and question row/record types,
   `ui-model-selection` fuzzy search and provider ordering, and internal performance
   memoizations; the identical-outcome 0.2.0-rc.1 clean room is the evidence.
+  `references/0.2.1-alpha.5.md` covers 0.2.1-alpha.5: WebServer origin and
+  optional-port bridging, detached idle cleanup, least-to-greatest reasoning
+  metadata, exact adapter image targets (including old-store `maxPixels`), lazy
+  tool arguments, and the PTC test-fixture requirements. It also records the
+  stable-vendor peer-closure choice, the old-generation GLM type bridge, and the
+  capabilities deliberately left unadopted.
   `references/codex-wire-surface.md` is not a harness round but belongs in this
   list because it rewrites a compatibility seam: the Codex subscription line now
   sends the `openai-beta` gate the backend requires, presents ONE `originator`

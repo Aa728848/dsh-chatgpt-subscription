@@ -15,6 +15,7 @@ import { createCodexFetchProvider } from './host/codex-fetch.ts'
 import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES } from './host/fetch-configuration.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './host/common/idle-watchdog.ts'
+import { webServerOrigin } from './host/common/webserver-compat.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
 import { createAntigravityImageTool } from './host/antigravity/image-tool.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
@@ -722,7 +723,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const responses = new ResponsesClient(oauth, ctx.attachments, {
       fetchFn: modelFetch['codex-chatgpt'],
       accountPool: codexAccountPool,
-      localRawImages: { baseUrl: localWebServerBaseUrl(ctx.webServer.host, ctx.webServer.port) },
+      localRawImages: { baseUrl: webServerOrigin(ctx.webServer) },
       onGenerationFinished: () => usage.invalidate(),
       outputVerbosity: () => preferences.status().outputVerbosity,
       fastMode: () => preferences.status().fastMode,
@@ -1648,7 +1649,3 @@ export {
   type StepCodeReasoningEffort,
   type StepCodeStatusDto,
 } from './shared/step-code-contracts.ts'
-
-function localWebServerBaseUrl(host: '127.0.0.1' | '0.0.0.0', port: number): string {
-  return `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`
-}

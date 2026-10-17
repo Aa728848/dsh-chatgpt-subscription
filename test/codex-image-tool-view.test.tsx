@@ -96,6 +96,16 @@ describe('image Tool view dispatch stages', () => {
     expect(summary()).toBeNull()
   })
 
+  it('reads a preparing prompt from the lazy argument view', async () => {
+    await render({
+      ...PREPARING,
+      args: { text: (key: string) => key === 'prompt' ? 'a fox still being written' : undefined },
+    })
+
+    expect(title()).toBe(en.imageToolRunning)
+    expect(summary()).toBe('a fox still being written')
+  })
+
   it('summarizes the dispatched arguments once they exist', async () => {
     await render(STARTED)
 

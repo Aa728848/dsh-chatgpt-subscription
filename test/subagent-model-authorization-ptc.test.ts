@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
@@ -54,6 +54,7 @@ class FakeRuntime extends PtcRuntime {
 
 /** Appended events observed on the fake Session, in order. */
 let appended: { type: string; data: unknown }[] = []
+const agentContexts: Context[] = []
 
 /** Minimal Session double carrying one durable route-policy event. */
 function session(routes: readonly AllowedModelRoute[]): PolicySession {
@@ -69,8 +70,11 @@ function session(routes: readonly AllowedModelRoute[]): PolicySession {
 
 /** Calling agent whose Session recorded the allowlist the delegation tool snapshots. */
 function recordingAgent(routes: readonly AllowedModelRoute[]): Agent {
+  const ctx = new Context()
+  agentContexts.push(ctx)
   return {
     id: 'ptc-parent',
+    ctx,
     options: DEEPSEEK_OPTIONS,
     session: session(routes),
   } as unknown as Agent
@@ -83,6 +87,9 @@ function recordingAgent(routes: readonly AllowedModelRoute[]): Agent {
  */
 async function setup(): Promise<{ ctx: Context; runtime: FakeRuntime }> {
   const ctx = new Context()
+  ctx.provide('workingDirectory', {
+    ensure: () => Promise.resolve(process.cwd()),
+  } as never)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime, { mode: CODE_MODE })
   await ctx.plugin(FakeRuntime)
@@ -140,6 +147,9 @@ function runCode(
 
 describe('subagent authorization covers the run_code transport', () => {
   beforeEach(() => { appended = [] })
+  afterEach(async () => {
+    await Promise.all(agentContexts.splice(0).map(ctx => ctx.fiber.dispose()))
+  })
 
   it('denies a delegation dispatched from inside a program when the route is missing', async () => {
     const { ctx, runtime } = await setup()

@@ -1,6 +1,14 @@
+import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../src/host/common/idle-watchdog.ts'
+
+const require = createRequire(import.meta.url)
+const timeoutVersion = (require('@deepseek-ai/dsh-timeout/package.json') as { version: string }).version
+const [timeoutMajor = 0, timeoutMinor = 0, timeoutPatch = 0] = timeoutVersion.split('.').map((part) => Number.parseInt(part, 10))
+const supportsDeadlineRace = timeoutMajor > 0
+  || timeoutMajor === 0 && (timeoutMinor > 2 || timeoutMinor === 2 && timeoutPatch >= 1)
+const itDeadlineRace = supportsDeadlineRace ? it : it.skip
 
 describe('idle-watchdog', () => {
   it('yields all values when stream emits within idle interval', async () => {
@@ -143,5 +151,67 @@ describe('idle-watchdog', () => {
     expect((caught as LlmError).message).toContain(`stream idle timeout after ${idleMs}ms`)
     // 传给看门狗的 timeoutCode 才是这次超时的身份，source 侧看到的正是它。
     expect(abortReason).toMatchObject({ code: 'TEST_TIMEOUT', timeoutMs: idleMs })
+  })
+
+  async function settleWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const guard = new Promise<'CLEANUP_HUNG'>((resolve) => {
+      timer = setTimeout(() => { resolve('CLEANUP_HUNG') }, ms)
+    })
+    try {
+      return await Promise.race([promise, guard])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  it('does not await a stuck iterator return after a source failure', async () => {
+    let returnCalled = false
+    const iterator: AsyncIterator<string> = {
+      next: () => Promise.reject(new Error('source failed')),
+      return: () => {
+        returnCalled = true
+        return new Promise<IteratorResult<string>>(() => {})
+      },
+    }
+    const source = (): AsyncIterable<string> => ({
+      [Symbol.asyncIterator]: () => iterator,
+    })
+    const run = (async () => {
+      try {
+        for await (const _chunk of wrapStreamWithWatchdog(source, undefined, 1_000, 'TEST_TIMEOUT', 'test')) {
+          // The source rejects before producing a chunk.
+        }
+      } catch (error) {
+        return error
+      }
+    })()
+
+    const outcome = await settleWithin(run, 100)
+    expect(returnCalled).toBe(true)
+    expect(outcome).toBeInstanceOf(Error)
+    expect((outcome as Error).message).toBe('source failed')
+  })
+
+  itDeadlineRace('settles an abandoned demand without awaiting its queued cleanup', async () => {
+    async function* abandoned(_signal: AbortSignal): AsyncIterable<string> {
+      yield 'first'
+      await new Promise(() => {})
+    }
+    const collected: string[] = []
+    const run = (async () => {
+      try {
+        for await (const chunk of wrapStreamWithWatchdog(abandoned, undefined, 30, 'TEST_TIMEOUT', 'test')) {
+          collected.push(chunk)
+        }
+      } catch (error) {
+        return error
+      }
+    })()
+
+    const outcome = await settleWithin(run, 250)
+    expect(collected).toEqual(['first'])
+    expect(outcome).toBeInstanceOf(LlmError)
+    expect((outcome as LlmError).code).toBe('TIMEOUT')
   })
 })

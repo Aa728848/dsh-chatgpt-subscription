@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[Harness] 支持 DSH 0.2.1-alpha.5，并接入新版可用的请求元数据能力**
+  - **依赖与启动兼容**：15 个 `@deepseek-ai/dsh-*` peer range 都明确加入 `0.2.1-alpha.5`，dev 基线使用精确版本，避免安装时静默落到刚发布的 `0.2.1-rc.1`。Cordis / loader / schemastery 使用与 alpha.5 peer 约束兼容的稳定补丁版，消除了根包 alpha 与间接稳定插件之间的真实 peer 冲突；`package-lock.json`、`pnpm-lock.yaml` 和 `pnpm-workspace.yaml` 已同步。
+  - **WebServer 与流超时**：`webServer.port` 在新版变为可空，Codex 本地图片地址改为优先使用新版 `getOrigin()`，旧版保留原 loopback / wildcard 构造，未绑定服务则明确报错。上游 idle watchdog 已能在传输忽略 abort 时结束等待；插件清理路径同步改为 detached drain，不再因 `await iterator.return()` 把已经超时的流重新挂死。
+  - **推理档位**：新版把 `reasoning.efforts` 定义为从低到高，会话标题等辅助调用直接选择第一项。Kimi live 乱序、MiniMax M3.1 的本地 `default`（省略后上游默认为 `max`）和 Codex live 档位现在都在 adapter 边界规范，设置页展示顺序与普通请求默认档不变，辅助调用能取得真正的最低档。
+  - **图片与工具视图**：Kimi / Step / MiniMax / Antigravity 新增 `imageRequestTarget()`，返回与真实 mapper 一致的缩放目标，供新版 CUA 等调用方使用；小图保留原尺寸和字节。共享与 Antigravity 目标同时补回旧 attachment store 必需的 `maxPixels`。Claude 的缩放取决于整次请求图片数，未伪造单图实现。Codex / Antigravity 图片工具视图还会读取新版惰性 `args`，在 preparing 阶段即可显示正在生成的 prompt，旧 `argsRaw` 形状继续兼容。
+  - **PTC 与旧代际**：新版 `run_code` 要求 `workingDirectory` 并用 `agent.ctx` 管理状态；实际受影响的是测试夹具而非生产授权逻辑，四个子代理授权用例已按新契约补齐并全部恢复。`llm-compat` 同时补齐旧类型没有的 `toolHistory`、`deferLoading` 与 tool-update 块，GLM 的现有拒绝行为不变。Claude OAuth 测试不再假设 `freePort + 1` 一定可绑定，以匹配 Windows 动态单端口保留；生产 OAuth 代码未改。
+  - **验证**：新基线强制 typecheck、干净 build、`npm ci --dry-run`、`npm pack --dry-run`（523 文件）均通过，全量 **230 passed | 1 skipped（231 文件）、3785 passed | 7 skipped、0 failed**。`0.2.0-rc.2` clean room 为 **3784 passed | 8 skipped、0 failed**；`0.1.5-rc.3` clean room 为 **3780 passed | 8 skipped**，仅已有记录的无 `dsh-ptc-runtime` PTC 文件无法加载，其他 229 个文件全部通过。
+  - **未采用 / 未验证**：`conversation.input.model.label` 需要另一套新旧双轨额度 UI 设计，第一方 `AccountNoticeStack` 不是通用插件通知服务，本轮没有强行迁移九条额度徽标；`ConfigureCall` 在插件内没有 auxiliary 调用点，`toolUpdate`、nested PTC `presentationMeta` 和官方图片 factory 留待独立评估。`0.2.1-rc.1` 无对应源码标签，不在本轮已验证范围；未做真实账号网络调用或 CUA / 新槽位的交互验证。
+
 ## 0.24.7 - 2026-10-16
 - **[MiniMax Code] M3.1 在 `effort: max` 下偶尔把一整轮花在思考上就 `end_turn`：只有 thinking 块、没有正文也没有工具调用，harness 把「无工具调用的 stop」当成正常完成，整轮无报错地停住（issue #57）**
   - **现象**：MiniMax Code 线路偶发**整轮无预警停住**——界面不报错、不重试、不弹提示，回复停在半句话上（如 `...Let me read lines 130-160 of the upstream preset.`）。

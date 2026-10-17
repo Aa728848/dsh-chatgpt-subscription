@@ -28,7 +28,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type {} from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   DEFAULT_CONTEXT_WINDOW,
   PROVIDER_ID,
@@ -87,6 +87,8 @@ import { fileRef, uploadMediaFile } from './files-api.ts'
 import type { MinimaxCodeAccountPool } from './account-pool.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
+import { orderReasoningEfforts } from '../common/reasoning-efforts.ts'
+import { requestImageTargetOrOriginal } from '../common/request-images.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 
 /**
@@ -675,6 +677,10 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     return undefined
   }
 
+  imageRequestTarget(_provider: string, _model: string, image: ImageAttachmentRef) {
+    return requestImageTargetOrOriginal(image)
+  }
+
   /**
    * The hardcoded directory, narrowed to what the user enabled it to serve.
    *
@@ -712,7 +718,7 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     if (signal?.aborted === true) throw new LlmError('MiniMax Code model resolution aborted', 'ABORTED')
     const settings = await this.settings()
     const entry = minimaxCodeModelDef(modelId)
-    const efforts = effortsForModel(modelId)
+    const efforts = orderReasoningEfforts(effortsForModel(modelId), ['low', 'medium', 'high', 'xhigh', 'max', 'default'])
     const contextWindow = contextWindowForModel(modelId, settings.contextWindowOverrides)
     const defaultEffort = entry === undefined
       ? undefined

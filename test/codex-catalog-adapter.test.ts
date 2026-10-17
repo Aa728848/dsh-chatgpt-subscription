@@ -41,6 +41,23 @@ describe('CodexChatGptAdapter live catalog', () => {
     expect(resolved.reasoning?.defaultEffort).toBe('high')
   })
 
+  it('orders live levels by strength while preserving the original fallback default', async () => {
+    const adapter = new CodexChatGptAdapter(client, undefined, async () => [
+      {
+        id: 'gpt-6-sol',
+        name: '6 Sol',
+        contextWindow: null,
+        inputModalities: ['text', 'image'],
+        reasoningEfforts: ['high', 'low', 'none'],
+        defaultReasoningEffort: 'unsupported',
+      },
+    ])
+
+    const resolved = await adapter.resolveModel(PROVIDER_ID, 'gpt-6-sol')
+    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['none', 'low', 'high'])
+    expect(resolved.reasoning?.defaultEffort).toBe('high')
+  })
+
   it('drops a reasoning level this line cannot express', async () => {
     // A level outside the shared vocabulary is not an effort the picker can
     // offer, so it must not reach the model as an option.

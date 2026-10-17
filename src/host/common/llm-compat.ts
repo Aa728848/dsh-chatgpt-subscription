@@ -19,6 +19,7 @@
 import type {
   ContentBlock as HarnessContentBlock,
   GenerateOptions as HarnessGenerateOptions,
+  ToolSchema as HarnessToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm/message'
 
@@ -47,6 +48,16 @@ export interface ToolResultBlock {
   isError?: boolean
 }
 
+export interface ToolAdditionBlock {
+  type: 'tool-addition'
+  toolName: string
+}
+
+export interface ToolRemovalBlock {
+  type: 'tool-removal'
+  toolName: string
+}
+
 /**
  * Every content block the mappers read.
  *
@@ -55,7 +66,10 @@ export interface ToolResultBlock {
  * harness still declares one — and {@link ToolResultBlock} supplies the single
  * spelling the mappers pattern-match on.
  */
-export type ContentBlock = Exclude<HarnessContentBlock, { type: 'tool-result' }> | ToolResultBlock
+export type ContentBlock = Exclude<HarnessContentBlock, { type: 'tool-result' }>
+  | ToolResultBlock
+  | ToolAdditionBlock
+  | ToolRemovalBlock
 
 /**
  * Blocks this package hands back to the harness.
@@ -64,7 +78,7 @@ export type ContentBlock = Exclude<HarnessContentBlock, { type: 'tool-result' }>
  * harness has no `tool-result` block to accept one, so outbound values are the
  * shared harness blocks without it.
  */
-export type OutboundContentBlock = Exclude<ContentBlock, ToolResultBlock>
+export type OutboundContentBlock = Exclude<ContentBlock, ToolResultBlock | ToolAdditionBlock | ToolRemovalBlock>
 
 /** Producer-declared provenance, read for `kind` and the model replay envelope. */
 export interface MessageSource {
@@ -82,8 +96,14 @@ export interface Message {
   readonly source?: MessageSource
 }
 
+type HarnessToolHistory = HarnessGenerateOptions extends { toolHistory?: infer History } ? History : unknown
+
 /** Request options carrying the normalized conversation. */
-export type GenerateOptions = Omit<HarnessGenerateOptions, 'messages'> & { messages: Message[] }
+export type GenerateOptions = Omit<HarnessGenerateOptions, 'messages' | 'tools'> & {
+  messages: Message[]
+  tools?: Array<HarnessToolSchema & { deferLoading?: true }>
+  toolHistory?: HarnessToolHistory
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

@@ -74,11 +74,9 @@ export async function* wrapStreamWithWatchdog<T>(
   } finally {
     consumer.abort(`${providerTag} stream consumer stopped`)
     if (!exhausted) {
-      try {
-        await iterator.return?.(undefined)
-      } catch {
-        // 忽略迭代器清理时的异常
-      }
+      // An abandoned demand can stay pending forever; awaiting the generator's
+      // queued return would re-hang the outcome that the deadline just settled.
+      void iterator.return?.(undefined).catch(() => {})
     }
     watchdog[Symbol.dispose]()
   }
