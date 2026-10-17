@@ -247,4 +247,27 @@ describe('SearchProviderSwitcher', () => {
     await switcher.select('codex')
     expect(switcher.status()).toEqual({ state: 'missing', configuredSearchProvider: null, configuredFetchProvider: null })
   })
+
+  it('unwraps Volatile config references on @deepseek-ai/dsh-web >=0.2.1-rc.2 without forcing redundant restarts', async () => {
+    const { ctx, switcher } = await mountSwitcher()
+    try {
+      const entry = ctx.loader.resolve('web')
+      await switcher.select('codex')
+      const running = entry.fiber as unknown as { config?: Record<string, unknown> }
+      running.config = {
+        searchProvider: { get: () => CODEX_SEARCH_PROVIDER_ID },
+        fetchProvider: { get: () => CODEX_FETCH_PROVIDER_ID },
+      }
+      const fiberUpdate = vi.spyOn(entry.fiber!, 'update')
+      const entryUpdate = vi.spyOn(entry, 'update')
+      await switcher.select('codex')
+      expect(fiberUpdate).not.toHaveBeenCalled()
+      expect(entryUpdate).not.toHaveBeenCalled()
+      expect(switcher.status()).toEqual({
+        state: 'applied',
+        configuredSearchProvider: CODEX_SEARCH_PROVIDER_ID,
+        configuredFetchProvider: CODEX_FETCH_PROVIDER_ID,
+      })
+    } finally { await ctx.fiber.dispose() }
+  })
 })

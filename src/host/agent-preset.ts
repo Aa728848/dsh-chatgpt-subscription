@@ -29,6 +29,13 @@ import { resolvesFromHere } from './preset-sync.ts'
 /** The row package whose presence marks a harness that takes presets from a row. */
 export const PRESET_REGISTRY_PACKAGE = '@deepseek-ai/dsh-agent-preset'
 
+/**
+ * The package whose presence marks a harness (>= 0.2.1) that injects the
+ * session working directory via `WORKING_DIRECTORY` user context and no longer
+ * registers `{{cwd}}` as a `systemPrompt` variable.
+ */
+export const WORKING_DIRECTORY_PACKAGE = '@deepseek-ai/dsh-working-directory'
+
 /** The id the `dispatch` preset is selectable under. */
 export const DISPATCH_PRESET_ID = 'dispatch'
 
@@ -113,7 +120,7 @@ export const DISPATCH_PRESET: PresetDefinition = {
       name: '@deepseek-ai/dsh-persona',
       config: {
         suffix: 'Your working directory is {{cwd}}.',
-        prefix: `You are powered by {{model}}. Your working directory is {{cwd}}.
+        prefix: `You are powered by {{model}}.
 
 [Role Identification] If your first user message is a task brief (rather than a direct request from the human user), you are a subagent: the coordinator-facing rules in R0, R0.5, R-G, R1, R2, R4, R5, and R-W do not apply to you. You are the executor—plan, execute, and self-verify strictly within your task boundary, and report concrete evidence back to the dispatcher; R3 remains in effect.
 
@@ -380,6 +387,31 @@ Reset: fallback applies only to the current task. When the next task begins, alw
   ],
 }
 
+/**
+ * Reconcile {@link DISPATCH_PRESET} with the running harness generation.
+ *
+ * Harnesses shipping `@deepseek-ai/dsh-working-directory` (>= 0.2.1) provide the
+ * session working directory through the `WORKING_DIRECTORY` dynamic context and
+ * no longer register `{{cwd}}` on `ctx.systemPrompt`, so keeping `persona.config.suffix`
+ * (`Your working directory is {{cwd}}.`) makes `SystemPrompt` throw
+ * `unknown prompt variable "{{cwd}}"` at render time. On 0.1.7–0.2.0 that package
+ * is absent and `{{cwd}}` is still the only way the persona states the workspace,
+ * so the unmodified {@link DISPATCH_PRESET} is returned unchanged.
+ * @param resolves - whether a bare specifier resolves in this installation.
+ * @returns the preset definition for the running harness generation.
+ */
+export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFromHere): PresetDefinition {
+  if (!resolves(WORKING_DIRECTORY_PACKAGE)) return DISPATCH_PRESET
+  return {
+    ...DISPATCH_PRESET,
+    plugins: DISPATCH_PRESET.plugins.map((row) => {
+      if (row.id !== 'persona' || typeof row.config !== 'object' || row.config === null) return row
+      const { suffix: _omitted, ...rest } = row.config as Record<string, unknown>
+      return { ...row, config: rest }
+    }),
+  }
+}
+
 /** The `agentPresets` service, when the host exposes one that can register. */
 function presetRegistry(host: PresetHost): AgentPresetRegistry | undefined {
   if (typeof host.get !== 'function') return undefined
@@ -421,7 +453,7 @@ export function installDispatchPreset(
       return 'legacy'
     }
     host.effect(
-      () => registerDispatchPreset(host, registry),
+      () => registerDispatchPreset(host, registry, resolves),
       'dsh-chatgpt-subscription: dispatch agent preset',
     )
     return 'registered'
@@ -438,14 +470,16 @@ export function installDispatchPreset(
  * it.
  * @param host - plugin context, for the logger.
  * @param registry - the service the definition is submitted to.
+ * @param resolves - whether a bare specifier resolves in this installation.
  * @returns the harness's own unregister function, or a no-op after a failure.
  */
 async function registerDispatchPreset(
   host: PresetHost,
   registry: AgentPresetRegistry,
+  resolves: SpecifierResolver,
 ): Promise<() => Promise<void>> {
   try {
-    const unregister = await registry.register(DISPATCH_PRESET)
+    const unregister = await registry.register(resolveDispatchPreset(resolves))
     host.logger.info(`[dsh-chatgpt-subscription] agent preset "${DISPATCH_PRESET_ID}" registered with the running harness`)
     return unregister
   } catch (error) {

@@ -413,6 +413,61 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     reasoningEfforts: ['low', 'medium', 'high'],
     canDisableThinking: true,
   },
+  // TRANSCRIBED row that keeps TWO fields from the vendor's documentation
+  // (`thinkingMode` and `canDisableThinking`, recorded in
+  // SNAPSHOT_AGREES_BUT_CURATED_WINS in the fidelity test). The reference
+  // snapshot (pi-ai >= 1.1.0) carries this model in this position, and every
+  // other field below is checked against it.
+  {
+    id: 'claude-haiku-5-5',
+    name: 'Claude Haiku 5.5',
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    supportsImage: true,
+    // Documented as unsupported, and not merely "incompatible with thinking" as
+    // on the opus rows: the migration guide states the request must OMIT
+    // temperature, top_p and top_k. A temperature has to be 1 and a top_p has to
+    // be 0.99; anything else, a top_p of 1 included, is a 400.
+    supportsTemperature: false,
+    // 'adaptive' for two independent reasons, and NEITHER of them is 'budget':
+    // the manual budget form { type: 'enabled', budget_tokens: N } is a 400 on
+    // this model, so the row that inherited 'budget' from claude-haiku-4-5 would
+    // send a request the model refuses outright.
+    //
+    // And NOT 'mid-convo', which is the subtle one. This model's documented
+    // default effort is MEDIUM, and 'mid-convo' sends
+    // output_config = { effort: <named> ?? 'high' } — it forces high whenever the
+    // caller names nothing, so the row would think — and bill — a rung harder
+    // than the vendor's own default. Same reasoning, and same deliberate
+    // divergence, as claude-opus-5-5 below.
+    thinkingMode: 'adaptive',
+    // All five documented levels. 'minimal' is not among them: this is the first
+    // Haiku model with effort levels at all, and the ladder starts at 'low'.
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    // TRUE, and the only curated divergence on this flag. The vendor documents the
+    // asymmetry precisely: thinking: { type: 'disabled' } works at low, medium
+    // and high, and is a 400 at xhigh and max.
+    //
+    // That is safe to encode as a plain true here because of HOW this line sends
+    // the form: claudeThinking writes { type: 'disabled' } only when the caller
+    // asked for thinking off, and in that case it names NO effort at all — so
+    // the request runs at the server's own default (medium), which is inside the
+    // documented window. The xhigh/max refusals are only reachable by naming one
+    // of those levels, and naming one means thinking is on, which sends the
+    // adaptive form instead. So the flag is a documented YES, not an optimistic
+    // default: reading "400 above xhigh" as "cannot be disabled" would wrongly
+    // take the off switch away from the levels that accept it.
+    canDisableThinking: true,
+    // No floor recorded: none has been OBSERVED for this model (see the interface
+    // doc comment), exactly as for claude-sonnet-5-5. The model first shipped in
+    // Claude Code 2.1.293, and CLAUDE_CLI_VERSION is kept at or above that
+    // release instead — claiming below it is how the request would be refused.
+    // Documented as a prefix-check model ("Changing earlier turns invalidates
+    // thinking blocks"), so the adaptive form sends block_binding WITHOUT
+    // mid-convo's forced effort — which is the whole reason the row is not
+    // mid-convo.
+    bindsThinkingToPrefix: true,
+  },
   {
     id: 'claude-opus-4-5',
     name: 'Claude Opus 4.5 (latest)',
@@ -577,14 +632,9 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     canDisableThinking: true,
   },
-  // -------------------------------------------------------------------------
-  // LOCALLY CURATED — not from the reference snapshot. See LOCAL ADDITIONS in
-  // the module doc comment, and LOCALLY_CURATED_MODEL_IDS in the fidelity test.
-  // The snapshot this checkout was transcribed against predates this model, so
-  // the fidelity lock checks the rows above and asserts this id is declared as
-  // curated; it cannot check the values below the way it checks a transcribed
-  // row. Its own assertions are written from the vendor's documentation.
-  // -------------------------------------------------------------------------
+  // TRANSCRIBED row (carried in the reference snapshot from pi-ai >= 1.1.0),
+  // whose snapshot fields agree with the vendor's documentation on every
+  // transcribed column.
   {
     id: 'claude-sonnet-5-5',
     name: 'Claude Sonnet 5.5',
@@ -603,7 +653,7 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     //    block_binding.prefix_mismatch_behavior = 'drop_block' — the field this
     //    form sends. DSH folds later system messages into the system prompt, so
     //    that edit is not hypothetical here.
-    // The newer reference (pi-ai 0.99.1) flags this model supportsMidConvoEffort,
+    // The newer reference (pi-ai >= 0.99.1) flags this model supportsMidConvoEffort,
     // which is the same verdict.
     thinkingMode: 'mid-convo',
     // All five documented effort levels; 'minimal' maps to null in the newer
@@ -617,56 +667,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     // interface doc comment). It first shipped in Claude Code 2.1.284, and
     // CLAUDE_CLI_VERSION is kept at or above that release instead.
     // Documented prefix-check model; 'mid-convo' already sends the binding.
-    bindsThinkingToPrefix: true,
-  },
- {
-    id: 'claude-haiku-5-5',
-    name: 'Claude Haiku 5.5',
-    contextWindow: 1000000,
-    maxTokens: 128000,
-    supportsImage: true,
-    // Documented as unsupported, and not merely "incompatible with thinking" as
-    // on the opus rows: the migration guide states the request must OMIT
-    // temperature, top_p and top_k. A temperature has to be 1 and a top_p has to
-    // be 0.99; anything else, a top_p of 1 included, is a 400.
-    supportsTemperature: false,
-    // 'adaptive' for two independent reasons, and NEITHER of them is 'budget':
-    // the manual budget form { type: 'enabled', budget_tokens: N } is a 400 on
-    // this model, so the row that inherited 'budget' from claude-haiku-4-5 would
-    // send a request the model refuses outright.
-    //
-    // And NOT 'mid-convo', which is the subtle one. This model's documented
-    // default effort is MEDIUM, and 'mid-convo' sends
-    // output_config = { effort: <named> ?? 'high' } — it forces high whenever the
-    // caller names nothing, so the row would think — and bill — a rung harder
-    // than the vendor's own default. Same reasoning, and same deliberate
-    // divergence, as claude-opus-5-5 above.
-    thinkingMode: 'adaptive',
-    // All five documented levels. 'minimal' is not among them: this is the first
-    // Haiku model with effort levels at all, and the ladder starts at 'low'.
-    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    // TRUE, and the only curated row that says so. The vendor documents the
-    // asymmetry precisely: thinking: { type: 'disabled' } works at low, medium
-    // and high, and is a 400 at xhigh and max.
-    //
-    // That is safe to encode as a plain true here because of HOW this line sends
-    // the form: claudeThinking writes { type: 'disabled' } only when the caller
-    // asked for thinking off, and in that case it names NO effort at all — so
-    // the request runs at the server's own default (medium), which is inside the
-    // documented window. The xhigh/max refusals are only reachable by naming one
-    // of those levels, and naming one means thinking is on, which sends the
-    // adaptive form instead. So the flag is a documented YES, not an optimistic
-    // default: reading "400 above xhigh" as "cannot be disabled" would wrongly
-    // take the off switch away from the levels that accept it.
-    canDisableThinking: true,
-    // No floor recorded: none has been OBSERVED for this model (see the interface
-    // doc comment), exactly as for claude-sonnet-5-5. The model first shipped in
-    // Claude Code 2.1.293, and CLAUDE_CLI_VERSION is kept at or above that
-    // release instead — claiming below it is how the request would be refused.
-    // Documented as a prefix-check model ("Changing earlier turns invalidates
-    // thinking blocks"), so the adaptive form sends block_binding WITHOUT
-    // mid-convo's forced effort — which is the whole reason the row is not
-    // mid-convo.
     bindsThinkingToPrefix: true,
   },
 ] as const) as readonly ClaudeModelEntry[]

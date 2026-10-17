@@ -99,7 +99,10 @@ export class SearchProviderSwitcher {
       || (options.fetchProvider !== 'dsh' && (codexSelected || options.pluginFetch === true))
     const nextFetch = usePluginFetch ? CODEX_FETCH_PROVIDER_ID : this.originalFetchProvider
     const configured = config.searchProvider === nextSearch && config.fetchProvider === nextFetch
-    const applied = running === undefined || (running.searchProvider === nextSearch && running.fetchProvider === nextFetch)
+    const applied = running === undefined || (
+      runningProviderValue(running.searchProvider) === nextSearch
+      && runningProviderValue(running.fetchProvider) === nextFetch
+    )
     if (configured && applied) {
       this.state = 'applied'
       return
@@ -178,6 +181,17 @@ export class SearchProviderSwitcher {
 function currentConfig(entry: Entry): Record<string, unknown> {
   const config = entry.options.config
   return typeof config === 'object' && config !== null && !Array.isArray(config) ? config as Record<string, unknown> : {}
+}
+
+/**
+ * Unwrap a Cordis `Volatile<string | undefined>` config reference (`@deepseek-ai/dsh-web`
+ * >=0.2.1-rc.2) or return a plain runtime config value (`<=0.2.1-rc.1`).
+ */
+function runningProviderValue(value: unknown): unknown {
+  if (typeof value === 'object' && value !== null && 'get' in value && typeof (value as { get?: unknown }).get === 'function') {
+    return (value as { get(): unknown }).get()
+  }
+  return value
 }
 
 /** Never include paths, credentials, or arbitrary configuration in public diagnostics. */

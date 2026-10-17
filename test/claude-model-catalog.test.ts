@@ -115,86 +115,85 @@ const REFERENCE_KEY = 'anthropic-messages'
  * against the table — so bumping it is a deliberate edit that has to agree with
  * both.
  *
- * 15 as of pi-ai 0.87.1, which added `claude-opus-5-5`. That id is still a
- * curated row in this table (see SNAPSHOT_AGREES_BUT_CURATED_WINS for the one
- * field the table keeps), so the table carries the 15 snapshot rows PLUS the two
- * curated rows the snapshot still lacks, `claude-sonnet-5-5` and
- * `claude-haiku-5-5`.
+ * 17 as of pi-ai 1.1.0, which added `claude-haiku-5-5` and `claude-sonnet-5-5`.
+ * `claude-sonnet-5-5` matches the snapshot on every transcribed field and is now
+ * locked like any other row; `claude-opus-5-5` and `claude-haiku-5-5` remain on
+ * LOCALLY_CURATED_MODEL_IDS for the documented divergences declared in
+ * SNAPSHOT_AGREES_BUT_CURATED_WINS.
  */
-const REFERENCE_ENTRY_COUNT = 15
+const REFERENCE_ENTRY_COUNT = 17
 
 /**
- * Catalog rows the snapshot predates, newest first.
+ * Catalog rows the snapshot predates or that keep a documented field divergence,
+ * newest first.
  *
- * Every id here is a row this file CANNOT check against the snapshot, and each
- * one has to be justified on its own before it is added: the snapshot is the
- * only independent witness the transcribed rows have, and this list is the
+ * Every id here is a row this file CANNOT check verbatim against the snapshot,
+ * and each one has to be justified on its own before it is added: the snapshot is
+ * the only independent witness the transcribed rows have, and this list is the
  * narrow, explicit hole in that coverage. It is deliberately NOT "whatever the
  * table happens to contain" — the assertions below derive the extras FROM the
- * table and require them to equal this list exactly, so a new row fails here
- * until someone writes its id down, and a stale entry fails too.
+ * table and require them to equal this list's non-snapshot subset exactly, so a
+ * new row fails here until someone writes its id down, and a stale entry fails
+ * too.
  *
- * `claude-sonnet-5-5` (released 2026-09-28) is curated because the snapshot this
- * table was transcribed from predates the model. Every value comes from the
- * vendor's model overview and "what's new" pages, and no snapshot field can check
- * it — which is the whole point of the list.
+ * `claude-opus-5-5` and `claude-haiku-5-5` are carried by newer snapshots
+ * (pi-ai >= 1.1.0), so their rows sit in the snapshot's own positions and are
+ * field-checked like any other, with ONLY the declared exceptions in
+ * `SNAPSHOT_AGREES_BUT_CURATED_WINS` below. Keeping them on this list is what
+ * makes those exceptions visible and lets a stale declaration fail loudly.
  *
- * `claude-opus-5-5` is here for a DIFFERENT reason and is NOT a hole in the same
- * way: newer snapshots (pi-ai >= 0.87.1) do carry it, so its row is transcribed
- * and field-checked like any other, with ONE declared exception in
- * `SNAPSHOT_AGREES_BUT_CURATED_WINS` below. Keeping it on this list is what makes
- * that exception visible and lets a stale declaration fail loudly.
- *
- * `claude-haiku-5-5` (released 2026-10-07) is curated for the same reason as
- * Sonnet 5.5 and is the FIRST curated row whose documented
- * `canDisableThinking` is true: the vendor accepts `thinking: { type: 'disabled' }`
- * at low/medium/high effort and refuses it only at xhigh/max. That is asserted
+ * `claude-haiku-5-5` (released 2026-10-07) is also the row whose documented
+ * `canDisableThinking` is true while the snapshot sets `off: null`: the vendor
+ * accepts `thinking: { type: 'disabled' }` at low/medium/high effort (including
+ * the server default `medium`) and refuses it only at xhigh/max. That is asserted
  * below rather than asserted away, because a reader who takes "400 above xhigh"
  * to mean "cannot be disabled" would take the off switch away from the levels
  * that accept it.
  *
- * The one deliberate exception is explained where it is declared, below.
+ * The deliberate exceptions are explained where they are declared, below.
  */
 const LOCALLY_CURATED_MODEL_IDS: readonly string[] = [
   'claude-haiku-5-5',
-  'claude-sonnet-5-5',
   'claude-opus-5-5',
 ]
 
 /**
- * Curated rows a NEWER snapshot happens to carry, and the one field on each that
+ * Curated rows a NEWER snapshot happens to carry, and the fields on each that
  * the curated row deliberately does NOT transcribe.
  *
  * The snapshot is a version-specific local artifact, not a dependency, so this
  * table must not rot when a harness upgrade makes the file grow. When a snapshot
  * DOES carry a curated id, the row stops being an unverified hole in the fidelity
  * lock and every field becomes checkable against an independent witness — with
- * exactly one exception, recorded here:
+ * only the exceptions recorded here:
  *
- * `claude-opus-5-5` - `thinkingMode`. A newer pi-ai (>= 0.87.1) flags the model
- * `supportsMidConvoEffort`, which `referenceThinkingMode` reads as 'mid-convo'.
- * That form sends `output_config = { effort: <named> ?? 'high' }`, so it would
- * FORCE high whenever the caller names no effort, while the vendor documents this
- * model's default effort as MEDIUM. Transcribing it would silently outrank the
- * user and think — and bill — harder than they asked, which is the precise
- * failure the curated 'adaptive' row exists to prevent.
+ * - `claude-opus-5-5` / `claude-haiku-5-5` - `thinkingMode`. Newer pi-ai
+ *   (>= 1.1.0) flags both models `supportsMidConvoEffort`, which
+ *   `referenceThinkingMode` reads as 'mid-convo'. That form sends
+ *   `output_config = { effort: <named> ?? 'high' }`, so it would FORCE high
+ *   whenever the caller names no effort, while the vendor documents both models'
+ *   default effort as MEDIUM. Transcribing it would silently outrank the user
+ *   and think — and bill — harder than they asked, which is the precise failure
+ *   the curated 'adaptive' rows (with `bindsThinkingToPrefix: true`) exist to
+ *   prevent.
+ * - `claude-haiku-5-5` - `canDisableThinking`. Newer pi-ai sets
+ *   `thinkingLevelMap.off: null`, which `referenceCanDisableThinking` reads as
+ *   `false`, whereas the vendor documents `thinking: { type: 'disabled' }` as
+ *   accepted at low/medium/high (including the server default `medium` when no
+ *   effort is named).
  *
- * So the row stays curated on this ONE field and every other field on it is
- * checked against the snapshot when one is present. That is strictly stronger
- * than leaving all five assertions red: `adaptive` is now an ASSERTED, explained
- * decision that fails loudly if the snapshot ever stops disagreeing (retire this
- * entry then) instead of a standing unexplained mismatch.
- *
- * Before removing an id here, re-check the vendor's extended-thinking effort page
- * for the model's documented DEFAULT effort. `high` is the only value for which
- * the forced `mid-convo` form is safe.
+ * Before removing an entry here, re-check the vendor's extended-thinking effort
+ * page for the model's documented DEFAULT effort (`high` is the only value for
+ * which the forced `mid-convo` form is safe) and disabled-thinking rules.
  */
 const SNAPSHOT_AGREES_BUT_CURATED_WINS: readonly { id: string; field: string }[] = [
   { id: 'claude-opus-5-5', field: 'thinkingMode' },
+  { id: 'claude-haiku-5-5', field: 'thinkingMode' },
+  { id: 'claude-haiku-5-5', field: 'canDisableThinking' },
 ]
-/** The single field a curated row keeps against a snapshot that carries it. */
-function curatedFieldFor(id: string): string | undefined {
-  return SNAPSHOT_AGREES_BUT_CURATED_WINS.find((entry) => entry.id === id)?.field
+/** Whether a curated row deliberately keeps `field` against a snapshot that carries it. */
+function hasCuratedField(id: string, field: string): boolean {
+  return SNAPSHOT_AGREES_BUT_CURATED_WINS.some((entry) => entry.id === id && entry.field === field)
 }
 
 interface ReferenceEntry {
@@ -473,17 +472,21 @@ describe('claude model catalog / transcription fidelity', () => {
         expect(model.maxTokens).toBe(entry.maxTokens)
         expect(model.supportsImage).toBe((entry.input ?? []).includes('image'))
         expect(model.supportsTemperature).toBe(referenceSupportsTemperature(entry))
-        // The one declared exception: this row is transcribed like every other,
-        // except on the field the curated row deliberately keeps. Asserted in the
-        // OTHER direction so it cannot rot into a silent match: if a future
+        // Declared exceptions: these rows are transcribed like every other,
+        // except on the fields the curated rows deliberately keep. Asserted in
+        // the OTHER direction so they cannot rot into a silent match: if a future
         // snapshot stops disagreeing, this fails and says to retire the entry.
-        if (curatedFieldFor(entry.id) === 'thinkingMode') {
+        if (hasCuratedField(entry.id, 'thinkingMode')) {
           expect(model.thinkingMode).not.toBe(referenceThinkingMode(entry))
         } else {
           expect(model.thinkingMode).toBe(referenceThinkingMode(entry))
         }
         expect(model.reasoningEfforts).toEqual(referenceLadder(entry))
-        expect(model.canDisableThinking).toBe(referenceCanDisableThinking(entry))
+        if (hasCuratedField(entry.id, 'canDisableThinking')) {
+          expect(model.canDisableThinking).not.toBe(referenceCanDisableThinking(entry))
+        } else {
+          expect(model.canDisableThinking).toBe(referenceCanDisableThinking(entry))
+        }
       }
     },
   )
@@ -561,19 +564,19 @@ describe('claude model catalog / transcription fidelity', () => {
         .filter((entry) => entry.compat?.supportsMidConvoEffort === true)
         .map((entry) => entry.id)
         .sort()
-      // The snapshot flags one row the table does NOT follow: `claude-opus-5-5`.
-    // It is a curated 'adaptive' row, because the forced-high mid-convo form
-    // would outrank the vendor-documented MEDIUM default (see
-    // SNAPSHOT_AGREES_BUT_CURATED_WINS). Excluded here by that declaration, so
-    // the guard still catches a THIRD unexpected managed-effort model.
-    expect(managed).toEqual(
-      midConvoIds.filter((id) => snapshotIds.has(id))
-        .concat(Array.from(SNAPSHOT_AGREES_BUT_CURATED_WINS)
-          .filter((entry) => entry.field === 'thinkingMode')
-          .map((entry) => entry.id)
-          .filter((id) => managed.includes(id)))
-        .sort(),
-    )
+      // The snapshot flags two rows the table does NOT follow: `claude-opus-5-5`
+      // and `claude-haiku-5-5`. Both are curated 'adaptive' rows because the
+      // forced-high mid-convo form would outrank their vendor-documented MEDIUM
+      // default (see SNAPSHOT_AGREES_BUT_CURATED_WINS). Excluded here by that
+      // declaration, so the guard still catches any unexpected managed-effort model.
+      expect(managed).toEqual(
+        midConvoIds.filter((id) => snapshotIds.has(id))
+          .concat(Array.from(SNAPSHOT_AGREES_BUT_CURATED_WINS)
+            .filter((entry) => entry.field === 'thinkingMode')
+            .map((entry) => entry.id)
+            .filter((id) => managed.includes(id)))
+          .sort(),
+      )
     }
 
     // Opus 5.5 is documented as adaptive with a MEDIUM default effort, so it must
@@ -596,7 +599,7 @@ describe('claude model catalog / transcription fidelity', () => {
     expect(managed.length).toBeGreaterThan(0)
     for (const entry of managed) {
       expect(referenceThinkingMode(entry)).toBe('mid-convo')
-      if (curatedFieldFor(entry.id) === 'thinkingMode') {
+      if (hasCuratedField(entry.id, 'thinkingMode')) {
         // The declared exception, asserted rather than skipped: the table
         // deliberately keeps 'adaptive' here because the forced-high
         // mid-convo form would outrank this model's documented MEDIUM
@@ -809,7 +812,7 @@ describe('claude model catalog / locally curated rows', () => {
   // SNAPSHOT_AGREES_BUT_CURATED_WINS exempting a row that no longer diverges,
   // silently switching off checks that were supposed to keep running.
   it('keeps every declared divergence real: the id exists, is curated, and still disagrees', () => {
-    expect(new Set(SNAPSHOT_AGREES_BUT_CURATED_WINS.map((entry) => entry.id)).size)
+    expect(new Set(SNAPSHOT_AGREES_BUT_CURATED_WINS.map((entry) => `${entry.id}:${entry.field}`)).size)
       .toBe(SNAPSHOT_AGREES_BUT_CURATED_WINS.length)
     for (const { id, field } of SNAPSHOT_AGREES_BUT_CURATED_WINS) {
       // It only means anything as a CURATED id; a stray entry would exempt a row
@@ -839,7 +842,11 @@ describe('claude model catalog / locally curated rows', () => {
       // so the entry gets retired instead of quietly becoming a second copy of
       // the rule above.
       const tableValue = (row as unknown as Record<string, unknown>)[field]
-      const snapshotValue = field === 'thinkingMode' ? referenceThinkingMode(entry as ReferenceEntry) : undefined
+      const snapshotValue = field === 'thinkingMode'
+        ? referenceThinkingMode(entry as ReferenceEntry)
+        : field === 'canDisableThinking'
+          ? referenceCanDisableThinking(entry as ReferenceEntry)
+          : undefined
       expect(
         tableValue,
         id + ' no longer diverges from the snapshot on ' + field + ': the table now stores '

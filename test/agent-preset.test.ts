@@ -7,7 +7,9 @@ import {
   DISPATCH_PRESET,
   DISPATCH_PRESET_ID,
   PRESET_REGISTRY_PACKAGE,
+  WORKING_DIRECTORY_PACKAGE,
   installDispatchPreset,
+  resolveDispatchPreset,
   type AgentPresetRegistry,
   type PresetDefinition,
   type PresetHost,
@@ -182,6 +184,37 @@ describe('the dispatch definition', () => {
     expect(rowById('tool-subagent').config).toMatchObject({ modelSelectionSettings: true })
     expect(rowById('tool-presentation').config).toEqual({ mode: 'ptc' })
     expect(rowById('persona').config).toMatchObject({ suffix: 'Your working directory is {{cwd}}.' })
+    expect((rowById('persona').config as { prefix: string }).prefix).not.toContain('{{cwd}}')
+  })
+
+  it('strips persona.config.suffix on >=0.2.1 where @deepseek-ai/dsh-working-directory replaces {{cwd}}', async () => {
+    expect(resolveDispatchPreset(() => false)).toBe(DISPATCH_PRESET)
+    const resolved021 = resolveDispatchPreset(specifier => specifier === WORKING_DIRECTORY_PACKAGE)
+    const personaRow = resolved021.plugins.find(row => row.id === 'persona')
+    expect(personaRow?.config).toBeDefined()
+    expect('suffix' in (personaRow!.config as Record<string, unknown>)).toBe(false)
+    expect(JSON.stringify(resolved021)).not.toContain('{{cwd}}')
+
+    // Verify against the real 0.2.1 SystemPrompt service where only `provider` and
+    // `model` variables are registered (no `cwd` variable).
+    const SystemPromptModule = await import('@deepseek-ai/dsh-system-prompt')
+    const SystemPrompt = SystemPromptModule.default ?? SystemPromptModule.SystemPrompt
+    const { Context } = await import('@deepseek-ai/cordis')
+    const ctx = new Context()
+    try {
+      const config = personaRow!.config as { prefix: string; suffix?: string }
+      await ctx.plugin(SystemPrompt, {
+        personaPrefix: config.prefix,
+        personaSuffix: config.suffix ?? '',
+      })
+      ctx.systemPrompt.variable('provider', () => 'codex-chatgpt')
+      ctx.systemPrompt.variable('model', () => 'gpt-5.4')
+      const rendered = SystemPromptModule.renderPrompt(await ctx.systemPrompt.assemble())
+      expect(rendered).toContain('You are powered by gpt-5.4.')
+      expect(rendered).not.toContain('{{cwd}}')
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('mounts the harness 0.1.7 spelling of the renamed workflow package', () => {
@@ -216,20 +249,28 @@ describe('the dispatch definition', () => {
 })
 
 describe('declaring the preset to the running harness', () => {
-  it('registers exactly the definition when the mechanism is present', async () => {
-    const { registry, register, unregister } = fakeRegistry()
-    const { host, effects, warnings, infos } = fakeHost({ agentPresets: registry })
+  it('registers the unmodified definition on 0.1.7-0.2.0 and the suffix-stripped definition on >=0.2.1', async () => {
+    const pre021 = fakeRegistry()
+    const pre021Host = fakeHost({ agentPresets: pre021.registry })
 
-    expect(installDispatchPreset(host, () => true)).toBe('registered')
-    expect(effects).toHaveLength(1)
-    expect(register).not.toHaveBeenCalled()
+    expect(installDispatchPreset(pre021Host.host, specifier => specifier === PRESET_REGISTRY_PACKAGE)).toBe('registered')
+    expect(pre021Host.effects).toHaveLength(1)
+    expect(pre021.register).not.toHaveBeenCalled()
 
-    const disposer = await effects[0]!()
-    expect(register).toHaveBeenCalledTimes(1)
-    expect(register.mock.calls[0]?.[0]).toBe(DISPATCH_PRESET)
-    expect(disposer).toBe(unregister)
-    expect(warnings).toEqual([])
-    expect(infos.join('\n')).toContain('dispatch')
+    const disposer = await pre021Host.effects[0]!()
+    expect(pre021.register).toHaveBeenCalledTimes(1)
+    expect(pre021.register.mock.calls[0]?.[0]).toBe(DISPATCH_PRESET)
+    expect(disposer).toBe(pre021.unregister)
+    expect(pre021Host.warnings).toEqual([])
+    expect(pre021Host.infos.join('\n')).toContain('dispatch')
+
+    const post021 = fakeRegistry()
+    const post021Host = fakeHost({ agentPresets: post021.registry })
+    expect(installDispatchPreset(post021Host.host, () => true)).toBe('registered')
+    await post021Host.effects[0]!()
+    expect(post021.register).toHaveBeenCalledTimes(1)
+    expect(post021.register.mock.calls[0]?.[0]).toEqual(resolveDispatchPreset(() => true))
+    expect(JSON.stringify(post021.register.mock.calls[0]?.[0])).not.toContain('{{cwd}}')
   })
 
   it('retires the declaration through the harness unregisterer when the plugin unloads', async () => {
