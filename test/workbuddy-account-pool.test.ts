@@ -64,6 +64,9 @@ const CATALOG: WorkBuddyModelEntry[] = [
   },
 ]
 
+/** A one-chunk SSE answer, the shape this endpoint streams on success. */
+const SSE_BODY = 'data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+
 /** One credential file in the IDE's own auth directory. */
 function desktopFile(options: {
   uid: string
@@ -593,32 +596,111 @@ describe('WorkBuddy adapter rotation', () => {
     expect(accounts.find((account) => account.id === 'cn:u1')?.cooldownUntil).toBeGreaterThan(Date.now())
   })
 
-  it('marks a rejected credential for re-login and rotates to the other account', async () => {
+  it('renews a refused token once and finishes the same turn on the renewed credential', async () => {
+    const dir = await makeAuthDir({})
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store, { selection: () => ({ selectedAccountId: 'cn:u1', hiddenAccountIds: [] }) })
+    await pool.addAccount({
+      accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'u1',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+
+    const sent: string[] = []
+    const fetchFn = (async (url: string, init: any) => {
+      // The gate's own 401 page: what the field actually returns.
+      if (String(url).includes('/v2/plugin/auth/token/refresh')) {
+        return new Response(JSON.stringify({ code: 0, data: { accessToken: 'at-1-renewed', refreshToken: 'rt-1-renewed', expiresIn: 3600 } }), { status: 200 })
+      }
+      sent.push(String(init.headers.authorization))
+      if (sent.length === 1) {
+        return new Response('<html><head><title>401 Authorization Required</title></head></html>', { status: 401 })
+      }
+      return new Response(SSE_BODY, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const adapter = makeAdapter(store, fetchFn, pool)
+    const chunks: any[] = []
+    for await (const chunk of adapter.stream(options())) chunks.push(chunk)
+
+    // Same account, same body, renewed bearer: a 401 is a statement about one
+    // presentation of the credential, not about the sign-in.
+    expect(sent).toEqual(['Bearer at-1', 'Bearer at-1-renewed'])
+    expect(chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')).toBe('ok')
+    const account = (await pool.listAccounts()).find((entry) => entry.id === 'cn:u1')
+    expect(account?.authStatus).toBeUndefined()
+    expect((await pool.read()).accounts[0]!.credentials.accessToken).toBe('at-1-renewed')
+  })
+
+  it('marks the account only when the token endpoint also refuses the renewal, then rotates', async () => {
     const dir = await makeAuthDir({})
     const store = createWorkBuddyStore(dir)
     const { pool } = makePool(store, { selection: () => ({ selectedAccountId: 'cn:u1', hiddenAccountIds: [] }) })
     for (const n of [1, 2]) {
       await pool.addAccount({
-        accessToken: `at-${n}`, refreshToken: `rt-${n}`, expiresAt: Date.now() + 3_600_000, region: 'cn',
-        domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: `u${n}`,
+        accessToken: 'at-' + n, refreshToken: 'rt-' + n, expiresAt: Date.now() + 3_600_000, region: 'cn',
+        domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'u' + n,
         sourceFile: '', sourceMtimeMs: 0, source: 'managed',
       })
     }
 
-    let calls = 0
-    const fetchFn = (async () => {
-      calls += 1
-      if (calls === 1) return new Response('unauthorized', { status: 401 })
-      return new Response('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { status: 200 })
+    const sent: string[] = []
+    const fetchFn = (async (url: string, init: any) => {
+      if (String(url).includes('/v2/plugin/auth/token/refresh')) {
+        // The credential really is dead: the token endpoint says so.
+        return new Response('{"code":1000,"msg":"invalid_grant"}', { status: 401 })
+      }
+      sent.push(String(init.headers.authorization))
+      if (sent.length === 1) return new Response('unauthorized', { status: 401 })
+      return new Response(SSE_BODY, { status: 200 })
     }) as unknown as typeof fetch
 
     const adapter = makeAdapter(store, fetchFn, pool)
     for await (const _chunk of adapter.stream(options())) { /* drain */ }
 
+    // The refused account is out of rotation; the marker came from the token
+    // endpoint's refusal, not from the 401 the gate answered.
+    expect(sent).toEqual(['Bearer at-1', 'Bearer at-2'])
     const accounts = await pool.listAccounts()
-    // The dead account is kept (signing in again restores it) but not routed to.
-    expect(accounts.find((account) => account.id === 'cn:u1')?.authStatus).toBe('expired')
+    expect(accounts.find((entry) => entry.id === 'cn:u1')?.authStatus).toBe('expired')
+    expect(accounts.find((entry) => entry.id === 'cn:u2')?.authStatus).toBeUndefined()
   })
+
+  it('leaves the pool untouched when the renewed token is refused too', async () => {
+    const dir = await makeAuthDir({})
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store, { selection: () => ({ selectedAccountId: 'cn:u1', hiddenAccountIds: [] }) })
+    await pool.addAccount({
+      accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'u1',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+
+    let chatCalls = 0
+    const fetchFn = (async (url: string) => {
+      if (String(url).includes('/v2/plugin/auth/token/refresh')) {
+        return new Response(JSON.stringify({ code: 0, data: { accessToken: 'at-1-renewed', expiresIn: 3600 } }), { status: 200 })
+      }
+      chatCalls += 1
+      return new Response('<html>401</html>', { status: 401 })
+    }) as unknown as typeof fetch
+
+    const adapter = makeAdapter(store, fetchFn, pool)
+    let failure: unknown
+    try {
+      for await (const _chunk of adapter.stream(options())) { /* drain */ }
+    } catch (error) {
+      failure = error
+    }
+
+    // One renewal, one replay, then the honest verdict — and no permanent
+    // marker on an account a single lane-wide 401 would otherwise have killed.
+    expect(chatCalls).toBe(2)
+    expect(failure).toMatchObject({ code: 'INVALID_CREDENTIAL' })
+    expect((await pool.listAccounts())[0]?.authStatus).toBeUndefined()
+  })
+
+
 
   it('writes a rotated desktop token back to the IDE file so the IDE is not signed out', async () => {
     const dir = await makeAuthDir({ 'workbuddy-desktop.info': desktopFile({ uid: 'u1', expiresAt: Date.now() - 1000 }) })
@@ -639,5 +721,48 @@ describe('WorkBuddy adapter rotation', () => {
     const onDisk = JSON.parse(await fs.readFile(path.join(dir, 'workbuddy-desktop.info'), 'utf8'))
     expect(onDisk.auth.accessToken).toBe('rotated-at')
     expect(onDisk.auth.refreshToken).toBe('rotated-rt')
+  })
+})
+
+describe('WorkBuddy stale auth markers', () => {
+  it('clears a marker the IDE file has outlived and adopts the newer token', async () => {
+    const dir = await makeAuthDir({
+      'workbuddy-desktop.info': desktopFile({ uid: 'u1', accessToken: 'at-refused' }),
+    })
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store)
+    await pool.syncDesktopAccounts()
+    const accountId = workBuddyAccountId((await store.read())!)
+    await pool.markAuthFailed(accountId, 'rejected the stored credential (401)')
+
+    // The IDE rotates its own token while the row sits parked: the refusal was
+    // about the token that was in force then, not about the sign-in.
+    await fs.writeFile(
+      path.join(dir, 'workbuddy-desktop.info'),
+      JSON.stringify(desktopFile({ uid: 'u1', accessToken: 'at-ide-renewed' })),
+      'utf8',
+    )
+    store.invalidate()
+
+    // Asked on the REQUEST path first: a marker that only the card clears would
+    // still leave the next turn answering "全部账号都需要重新登录".
+    const { credentials } = await pool.getEffectiveAccount()
+    expect(credentials.accessToken).toBe('at-ide-renewed')
+    expect((await pool.listAccounts())[0]?.authStatus).toBeUndefined()
+  })
+
+  it('keeps the marker while the credential in force is still the refused one', async () => {
+    const dir = await makeAuthDir({
+      'workbuddy-desktop.info': desktopFile({ uid: 'u1', accessToken: 'at-refused' }),
+    })
+    const store = createWorkBuddyStore(dir)
+    const { pool } = makePool(store)
+    await pool.syncDesktopAccounts()
+    const accountId = workBuddyAccountId((await store.read())!)
+    await pool.markAuthFailed(accountId, 'rejected the stored credential (401)')
+
+    // Nothing moved on disk: this one really does need a sign-in.
+    expect((await pool.listAccounts())[0]?.authStatus).toBe('expired')
+    await expect(pool.getEffectiveAccount()).rejects.toMatchObject({ code: 'AUTH' })
   })
 })

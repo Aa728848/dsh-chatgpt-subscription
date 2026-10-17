@@ -317,7 +317,11 @@ export class WorkBuddyAdapter extends LlmAdapter {
     // or no longer authenticating steps out of this request while another
     // account serves the same body. The credential's own backend is used every
     // time, so one pool may hold accounts from both regions.
-    while (true) {
+    //
+    // Labelled because the renewal below is a second, inner loop that replays
+    // the same body on the SAME account: rotating is `continue rotation`, while
+    // replaying is a plain iteration of that inner loop.
+    rotation: while (true) {
       let credentials: WorkBuddyCredentials
       let accountId: string | undefined
 
@@ -354,32 +358,82 @@ export class WorkBuddyAdapter extends LlmAdapter {
         credentials = effective.credentials
       }
 
-      try {
-        response = await fetchWithContextBudgetRecovery(fetchFn)(`${credentials.backend}${CHAT_PATH}`, {
-          method: 'POST',
-          headers: workBuddyHeaders(
-            credentials,
-            { accept: 'text/event-stream' },
-            { ...(requestOptions.sessionId === undefined ? {} : { sessionId: String(requestOptions.sessionId) }) },
-          ),
-          body,
-          // The idle watchdog owns the deadline: it resets while tokens flow, so a
-          // long but active generation is not cut off by a wall-clock cap.
-          signal,
-        })
-      } catch (error) {
-        if (signal.aborted) throw new LlmError('WorkBuddy request aborted', 'ABORTED', { cause: error })
-        throw new LlmError(
-          `WorkBuddy request failed: ${error instanceof Error ? error.message : String(error)}`,
-          'TRANSPORT',
-          { cause: error },
-        )
+      // One forced renewal per account per request, in its own loop because the
+      // replay must reuse the SAME picked account rather than ask the pool for
+      // another one.
+      //
+      // A 401 here does not say the credential is dead, and this route must not
+      // read it that way. The same bearer is accepted by `/v3/config` and
+      // refused on this endpoint — measured on a real pool — so the refusal
+      // describes one presentation of the credential (an access token another
+      // holder rotated, a session the service ended early), not the end of the
+      // sign-in. The local clock cannot see any of that: this line's access
+      // tokens live about 28 days, so `needsRefresh` is essentially never true
+      // when it happens. The one question answerable from here is whether the
+      // token endpoint still honours the account, so a 401 buys one forced
+      // renewal of that account and one replay of the identical body. The
+      // check-in path has always done exactly this; the chat path used to skip
+      // it and write the whole pool dead instead.
+      //
+      // `refusedDetail` is kept rather than discarded: the branch after this
+      // loop classifies the very same text, and a Response body is a one-shot
+      // stream — read twice, the second read comes back EMPTY, which the
+      // classifier would read as a different verdict than the body stated.
+      let renewed = false
+      let refusedDetail = ''
+      while (true) {
+        try {
+          response = await fetchWithContextBudgetRecovery(fetchFn)(`${credentials.backend}${CHAT_PATH}`, {
+            method: 'POST',
+            headers: workBuddyHeaders(
+              credentials,
+              { accept: 'text/event-stream' },
+              { ...(requestOptions.sessionId === undefined ? {} : { sessionId: String(requestOptions.sessionId) }) },
+            ),
+            body,
+            // The idle watchdog owns the deadline: it resets while tokens flow, so a
+            // long but active generation is not cut off by a wall-clock cap.
+            signal,
+          })
+        } catch (error) {
+          if (signal.aborted) throw new LlmError('WorkBuddy request aborted', 'ABORTED', { cause: error })
+          throw new LlmError(
+            `WorkBuddy request failed: ${error instanceof Error ? error.message : String(error)}`,
+            'TRANSPORT',
+            { cause: error },
+          )
+        }
+
+        if (response.ok) break
+        refusedDetail = (await response.text().catch(() => '')).slice(0, 600)
+        // A pool, a named account and a first refusal: the only shape this line
+        // can repair. A second 401 after a renewed token has nothing left to try.
+        if (renewed || response.status !== 401 || pool === null || accountId === undefined) break
+
+        renewed = true
+        const refusedAccount = accountId
+        try {
+          credentials = await pool.renewCredential(refusedAccount, fetchFn, credentials)
+        } catch (error) {
+          // The token endpoint refused the account. THAT verdict is the
+          // authoritative one, and the pool has already recorded it through
+          // `refreshFailureStatus` — which is why nothing is written here.
+          const verdict = error instanceof LlmError
+            ? error
+            : new LlmError(
+                `${PROVIDER_NAME} credential could not be renewed after the service refused it: `
+                + `${error instanceof Error ? error.message : String(error)}`,
+                'INVALID_CREDENTIAL',
+                { cause: error },
+              )
+          if (await pool.hasAnotherAvailableAccount(tried)) continue rotation
+          throw verdict
+        }
       }
 
       if (response.ok) break
 
-      const detail = (await response.text().catch(() => '')).slice(0, 600)
-      const failure = classifyFailure(response.status, detail, response.headers)
+      const failure = classifyFailure(response.status, refusedDetail, response.headers)
 
       if (pool !== null && accountId !== undefined) {
         const after = retryAfterMs(response.headers)
@@ -388,9 +442,15 @@ export class WorkBuddyAdapter extends LlmAdapter {
             .catch(() => undefined)
           if (await pool.hasAnotherAvailableAccount(tried)) continue
         } else if (failure.code === 'INVALID_CREDENTIAL') {
-          // A dead credential is that account's problem alone: keep the account
-          // (signing in again restores it) and take it out of rotation.
-          await pool.markAuthFailed(accountId, failure.message).catch(() => undefined)
+          // Nothing is written to the pool from here. A request-time 401 is a
+          // statement about one presentation of a credential, and this pool has
+          // no way back from `authStatus = 'expired'`: no caller ever clears
+          // it, so one lane-wide 401 wrote EVERY account dead inside a single
+          // request and the line then demanded a fresh sign-in for all of them,
+          // permanently. The renewal above is what separates a stale token from a
+          // dead sign-in, and a refused renewal is what writes the marker.
+          // Rotating stays right — this account cannot serve THIS request — so
+          // the next account gets the same body.
           if (await pool.hasAnotherAvailableAccount(tried)) continue
         }
       }

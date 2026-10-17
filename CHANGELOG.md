@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[WorkBuddy] 一次上游 401 把整个号池写成「需要重新登录」且永不恢复：线路跑着跑着忽然全部国区账号要重登**
+  - **现象**：运行中的一轮突然失败，报 `WorkBuddy（CodeBuddy 订阅） rejected the stored credential (401). Sign in again with the CodeBuddy desktop client.`；随后设置卡片里**每一个**国区账号都显示「需要重新登录」，只有重新登录（重新加号）才能恢复。
+  - **本机实证（非推断）**：解密号池文件读到事发那几秒——22:52:42 / 22:52:48 两个国际区账号先被 429 冷却，同一个请求随即把两个国区账号依次判 401；22:54:05 / 22:54:41 用户重新登录，`authStatus` 才被清掉。同时用库里的 bearer 打两个面：`GET /v3/config` → **200**，`POST /v2/chat/completions` → **401 + APISIX HTML**；同一枚 token 在一个面被接受、在另一个面被拒，即这个 401 是 chat 路由/会话层的判定，不是「token 坏了」。库里 5 枚国区 bearer 中 4 枚在 chat 面拿到 `400 {"code":11101}`（鉴权已过），只有会话被后登录顶掉的那枚 401。
+  - **根因**：`classifyFailure` 对 401 一律 `INVALID_CREDENTIAL`（403 有正文翻案，401 没有），请求循环随即对**每个**被拒账号写 `markAuthFailed → authStatus='expired'` 再轮下一个——**一个请求就能把整池写死**；而本线路从不调用 `clearAuthFailed`，也没有 heal，写死的行再也回不来。雪上加霜的是本地时钟：access token 有效期约 28 天，`needsRefresh` 几乎永远不会在 401 时触发，于是「会话被顶掉」直接等于「永久 401 + 全池登出 + 只能人工重登」。签到路径（`checkin.ts`）一直有「401 → 强制续期一次再重试」的处理，chat 路径却没有。
+  - **改法（三处）**：① chat 请求收到 401 时，先对**同一个账号**强制 `renewCredential` 一次并用新 token 重放同一份 body；续期成功=凭据还活着，什么都不写；续期被上游拒绝=真死，由号池既有的 `refreshFailureStatus` 写标记——**请求期不再写 `markAuthFailed`**。② 新增 `healStaleAuthFailures`：选号前与列表前重新对照权威存储，账号已换另一枚**未过期** token 就清掉标记并采用它，仍持着被拒那枚的保留标记。③ 两处都守「一次」纪律：一次续期、一次重放，第二次仍 401 就换号或如实报错，不写永久状态。
+  - **验证**：`npm run typecheck` 0 错误；全量 **231 passed | 1 skipped（232 文件）、3813 passed | 7 skipped、0 failed**（基线 3809，新增 4 例）。**承重已双向检查**：关掉续期 → 2 例红；把 `markAuthFailed` 加回请求期 → 1 例红；关掉 heal → 1 例红；恢复后全绿。
+  - **升级提示**：升级前已被标成「需要重新登录」的账号，若权威存储里已有更新过的 token 会自动恢复；没有的更动过的仍需重新登录一次。
+
 ## 0.26.0 - 2026-10-17
 
 - **[MiniMax Code] 无答案轮次现在会自动续跑跑完（社区 PR #61），并把「续跑预算」真正做成有界**

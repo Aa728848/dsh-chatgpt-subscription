@@ -470,6 +470,79 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
   }
 
   /**
+   * A stale `authStatus` is cleared once the credential in force has moved on.
+   *
+   * The marker records that ONE token was refused; it does not record that the
+   * sign-in is gone. This line can still produce it from a token-endpoint
+   * refusal, and the copy that refusal was about can be replaced afterwards by
+   * whoever owns it — the IDE rotates a desktop account's token on its own
+   * schedule, and the daily check-in renews a managed one and writes it back to
+   * this plugin's store. Nothing else in the system ever revisits an
+   * `authStatus`, so without this a row stays out of rotation for good and the
+   * card keeps saying "需要重新登录" for an account that is signed in.
+   *
+   * The verdict is re-checked against what the store holds NOW: a row whose
+   * account has a DIFFERENT, unexpired token is routable again and adopts it,
+   * while a row still holding the refused token keeps its marker — that one
+   * really does need a sign-in.
+   */
+  private async healStaleAuthFailures(current?: PoolData<WorkBuddyPoolAccount>): Promise<boolean> {
+    const data = current ?? await this.read()
+    if (!data.accounts.some(isMarkedFailed)) return false
+    // The scan is file I/O and the pool transaction must not do any, so the
+    // authoritative copy is read before the lock is taken.
+    const live = await this.store.list().catch(() => [])
+    if (live.length === 0) return false
+    const byId = new Map<string, WorkBuddyCredentials>()
+    for (const credentials of live) byId.set(workBuddyAccountId(credentials), credentials)
+    return await this.updatePool((draft) => {
+      let changed = false
+      for (const account of draft.accounts) {
+        if (!isMarkedFailed(account)) continue
+        const candidate = byId.get(account.id)
+        if (candidate === undefined) continue
+        // The same token in force means nothing has moved: the refusal still
+        // describes the credential this row holds.
+        if (candidate.accessToken === account.credentials.accessToken) continue
+        if (isExpired(candidate)) continue
+        account.authStatus = undefined
+        account.authFailedReason = undefined
+        account.credentials = candidate
+        changed = true
+      }
+      return changed
+    })
+  }
+
+  /** Account summaries, with a marker the credentials have outlived cleared. */
+  override async listAccounts(): Promise<WorkBuddyAccountSummaryDto[]> {
+    const summaries = await super.listAccounts()
+    if (!summaries.some(isMarkedFailed)) return summaries
+    await this.healStaleAuthFailures().catch(() => undefined)
+    return await super.listAccounts()
+  }
+
+  /**
+   * Pick an account, healing a stale marker first.
+   *
+   * The healing belongs on the request path, not only on the card: an account
+   * marked expired is excluded by the core's eligibility rule, so until the
+   * marker is gone the next request is answered with "全部 N 个账号都需要重新登录"
+   * for a credential the store has already replaced.
+   */
+  override async getEffectiveAccount(
+    excludeIds?: ReadonlySet<string>,
+    fetchFn: typeof fetch = fetch,
+    forceRefresh = false,
+  ): Promise<{ account: WorkBuddyPoolAccount; credentials: WorkBuddyCredentials }> {
+    const data = await this.read()
+    if (data.accounts.some(isMarkedFailed)) {
+      await this.healStaleAuthFailures(data).catch(() => undefined)
+    }
+    return await super.getEffectiveAccount(excludeIds, fetchFn, forceRefresh)
+  }
+
+  /**
    * Pick the account for the next request.
    *
    * A desktop account's credential is re-read from the IDE's file first: the IDE
@@ -556,4 +629,14 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
     }
     super.deleteAccountFromPool(data, accountId)
   }
+}
+
+/**
+ * Whether a row's credential was reported as refused and never cleared.
+ *
+ * Mirrors the core's own eligibility predicate (`authStatus` present and not
+ * `ok`), so the heal agrees with the rule that excluded the row.
+ */
+function isMarkedFailed(account: { authStatus?: string }): boolean {
+  return account.authStatus !== undefined && account.authStatus !== 'ok'
 }
