@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.25.1 - 2026-10-17
+
 - **[Harness & 调度预设] 适配 DSH 0.2.1-rc.1 / 0.2.1-rc.2，并修复调度模式在 0.2.1 下报 `unknown prompt variable "{{cwd}}"` 的启动失败**
   - **调度预设（`dispatch`）移除未注册的 `{{cwd}}` 变量**：DSH 0.2.1 引入独立的 `@deepseek-ai/dsh-working-directory` 服务（通过 `working-directory` section 注入工作目录提示），不再向 `ctx.systemPrompt` 注册 `cwd` 模板变量（仅保留 `provider` 与 `model`），导致 `dispatch` 预设在组装系统提示词时直接报错 `unknown prompt variable "{{cwd}}" in section "deployment:persona-prefix"; registered variables: provider, model`。本次从 `presets/dispatch/agent.cordis.yml` 与 `src/host/agent-preset.ts` 的 `persona.config.prefix` 中移除重复的 `Your working directory is {{cwd}}.`，并新增 `resolveDispatchPreset()` 在检测到 `@deepseek-ai/dsh-working-directory`（`>=0.2.1`）时自动剥离 `persona.config.suffix`，而在 `0.1.7–0.2.0` 及 `≤0.1.6` 上完整保留 `suffix: 'Your working directory is {{cwd}}.'`。
   - **适配 0.2.1-rc.2 的 `Volatile` 搜索配置（`SearchProviderSwitcher`）**：`dsh-v0.2.1-rc.2` 将 `@deepseek-ai/dsh-web` 的 `searchProvider` / `fetchProvider` 配置改为 `z.string().volatile()`，运行时 `fiber.config.searchProvider` 为暴露 `.get()` 的 `Volatile` 包装器而非裸字符串。`src/host/search-provider-switcher.ts` 新增 `runningProviderValue()` 同时兼容裸字符串（`≤0.2.1-rc.1`）与 `Volatile<string>`（`>=0.2.1-rc.2`），避免在 `>=0.2.1-rc.2` 下切换搜索源时误判热更新未生效而触发多余的 fiber 强制重启。
