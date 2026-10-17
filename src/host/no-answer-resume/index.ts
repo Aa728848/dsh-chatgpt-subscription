@@ -14,6 +14,12 @@ import { NO_ANSWER_PHRASE } from '../minimax-code/mapper.ts'
  * This hook closes that gap. It watches the `llm/stream` waterfall, recognises
  * that specific failure, and steers one continuation so the turn finishes.
  *
+ * The budget counts `consecutive` answerless turns, so it only ever grows on
+ * a turn that ran to its end and reported the failure. A stream that was
+ * abandoned — the caller pressed Stop mid-answer, or the collapse guard returned
+ * upstream of this hook — never delivered its finish chunk and therefore says
+ * nothing at all: it neither spends the budget nor clears the streak.
+ *
  * The steer has to land while the Agent is **idle**. `Agent.steer` splices into
  * the inbox and calls `wakeDriver`, and `wakeDriver` only opens a new turn from
  * `idle`: sent while a turn is still running it latches nothing and the message
@@ -59,6 +65,24 @@ export type ResumeStreamListener = (
   next: () => AsyncIterable<ResumeChunk>,
 ) => AsyncIterable<ResumeChunk>
 
+/**
+ * The `agent/disposed` listener this hook registers.
+ *
+ * The payload carries the Agent whose `id` keys this hook's per-session state,
+ * so a session that closes takes its entry with it instead of leaving the streak
+ * — and the memory behind it — behind for the life of the process.
+ */
+export type ResumeAgentEventListener = (payload: { agent: unknown }) => void
+
+/** Either listener {@link NoAnswerResumeContext.on} accepts. */
+export type ResumeListener = ResumeStreamListener | ResumeAgentEventListener
+
+/** Listener options accepted by the harness event bus. */
+export interface ResumeListenerOptions {
+  /** Receive the event regardless of context filter checks. */
+  readonly global?: boolean
+}
+
 /** Configuration for {@link installNoAnswerResume}. */
 export interface NoAnswerResumeOptions {
   /** Consecutive answerless turns resumed before giving up (default 2). */
@@ -94,9 +118,9 @@ export const DEFAULT_NO_ANSWER_RESUME_OPTIONS: ResolvedNoAnswerResumeOptions = {
  */
 export interface NoAnswerResumeContext {
   on?: (
-    event: 'llm/stream',
-    listener: ResumeStreamListener,
-    options?: { readonly global?: boolean },
+    event: 'llm/stream' | 'agent/disposed',
+    listener: ResumeListener,
+    options?: ResumeListenerOptions,
   ) => unknown
   logger?: { info?(message: string): void; warn(message: string): void } | undefined
   get?(name: string): unknown
@@ -148,6 +172,11 @@ function agentId(raw: unknown): string | undefined {
   return typeof id === 'string' ? id : undefined
 }
 
+/** The map key one session's state lives under; requests carry no id at all. */
+function sessionKey(sessionId: string | undefined): string {
+  return sessionId ?? ''
+}
+
 function asRegistry(value: unknown): { get(id: unknown): unknown } | undefined {
   return value !== null && typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function'
     ? value as { get(id: unknown): unknown }
@@ -193,16 +222,28 @@ function isAnswerlessFailure(chunk: ResumeChunk): boolean {
   return typeof failure.message === 'string' && failure.message.includes(NO_ANSWER_PHRASE)
 }
 
-/** Whether a chunk proves the response carried something a reader can act on. */
+/**
+ * Whether a chunk proves the response carried something a reader can act on.
+ *
+ * Whitespace is trimmed exactly as the mapper trims it when it decides
+ * answerlessness (`hasVisibleOutput`): a delta of blanks is not an answer, and
+ * a consumer that disagreed with the producer about that would classify a turn
+ * the provider already called answered — or the reverse.
+ */
 function isVisible(chunk: ResumeChunk): boolean {
   if (chunk.type === 'tool-call-delta') return true
-  return chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text !== ''
+  return chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.trim() !== ''
 }
 
 /** One session's resume bookkeeping. */
 interface ResumeState {
-  /** Answerless turns resumed in a row; reset by any turn that answers. */
+  /**
+   * Answerless turns resumed in a row; reset by every completed turn that is
+   * not answerless, whether or not that turn answered.
+   */
   consecutive: number
+  /** A resume has been queued for this session and has not been delivered yet. */
+  pending: boolean
 }
 
 /**
@@ -213,8 +254,8 @@ interface ResumeState {
  *
  * @param ctx - plugin context.
  * @param options - see {@link NoAnswerResumeOptions}; validated fail-loud.
- * @returns a disposer removing the listener, or undefined when the host exposes
- *   no event bus.
+ * @returns a disposer removing every listener, or undefined when the host
+ *   exposes no event bus.
  */
 export function installNoAnswerResume(
   ctx: NoAnswerResumeContext,
@@ -223,6 +264,9 @@ export function installNoAnswerResume(
   const resolved = resolveNoAnswerResumeOptions(options)
   if (typeof ctx.on !== 'function') return undefined
   const sessions = new Map<string, ResumeState>()
+  // Set by the disposer: a resume queued on a promise this plugin no longer
+  // owns must not reach into a torn-down context.
+  let disposed = false
 
   /**
    * The Agent that owns one request, or undefined when this host cannot name it.
@@ -243,10 +287,10 @@ export function installNoAnswerResume(
   }
 
   function stateFor(sessionId: string | undefined): ResumeState {
-    const key = sessionId ?? ''
+    const key = sessionKey(sessionId)
     let state = sessions.get(key)
     if (state === undefined) {
-      state = { consecutive: 0 }
+      state = { consecutive: 0, pending: false }
       sessions.set(key, state)
     }
     return state
@@ -259,9 +303,23 @@ export function installNoAnswerResume(
    * is spliced into the inbox with no wake latched behind it, so it would never
    * be read. A generation without `whenIdle` cannot be asked, so the resume is
    * attempted on a microtask and the log says the pickup is not guaranteed.
+   *
+   * `fire` can run long after it was queued, and by then the plugin may be
+   * gone. The slot is only released once a resume actually reaches the Agent:
+   * holding it across a queue that ends in disposal would strand the session.
    */
-  function resume(agent: ResumeAgentLike, attempt: number, sessionId: string | undefined): void {
+  function resume(
+    state: ResumeState,
+    agent: ResumeAgentLike,
+    attempt: number,
+    sessionId: string | undefined,
+  ): void {
     const fire = (): void => {
+      // The queued promise outlives this plugin whenever the Agent takes longer
+      // to go idle than the host lives: steering into a released context would
+      // wake an inbox nobody is reading any more.
+      if (disposed) return
+      state.pending = false
       try {
         agent.steer?.(createResumeMessage(resolved.text))
         ctx.logger?.info?.(
@@ -283,18 +341,35 @@ export function installNoAnswerResume(
   }
 
   /**
-   * Decide what one finished stream means for its session.
+   * Decide what one completed stream means for its session.
    *
-   * A turn that answered clears the streak: the budget counts consecutive
-   * answerless turns, so one bad turn in an otherwise healthy session does not
-   * spend it.
+   * The budget counts *consecutive* answerless turns, so every completed turn
+   * that did not report the failure ends the streak — not only the ones that
+   * answered. An aborted finish, a max-tokens finish, a TIMEOUT or any other
+   * provider error is just as much an interruption: a streak that survived one
+   * of them would spend the budget on answerless turns that never were
+   * adjacent, report them as "in a row", and then stop resuming for the rest of
+   * the session. `answered` closes the mirror image: the mapper only reports
+   * this failure when nothing visible was emitted, so a turn that did emit
+   * something is not an unanswered turn whichever chunk says otherwise.
+   *
+   * Only called for a stream that ran to its end — an abandoned or thrown one
+   * proves nothing, so it is not asked about at all.
    */
   function settle(sessionId: string | undefined, answered: boolean, answerless: boolean): void {
-    if (!answerless) {
-      if (answered) stateFor(sessionId).consecutive = 0
+    const state = stateFor(sessionId)
+    if (!answerless || answered) {
+      state.consecutive = 0
+      // The turn that just completed is the turn the queued resume was steering
+      // towards, so the slot it held is free again.
+      state.pending = false
       return
     }
-    const state = stateFor(sessionId)
+    // One queued resume per session. Two turns can settle before the Agent
+    // reaches idle — a retrying deployment re-requests the same turn — and each
+    // of them would otherwise spend a unit of budget and deliver a continuation
+    // to the same wake, waking the session twice for one failure.
+    if (state.pending) return
     if (state.consecutive >= resolved.maxResumes) {
       ctx.logger?.warn(
         `no-answer-resume: gave up after ${state.consecutive} answerless turns in a row (session ${sessionId ?? 'unidentified'})`,
@@ -309,7 +384,8 @@ export function installNoAnswerResume(
       return
     }
     state.consecutive += 1
-    resume(agent, state.consecutive, sessionId)
+    state.pending = true
+    resume(state, agent, state.consecutive, sessionId)
   }
 
   function resumeStream(
@@ -319,23 +395,41 @@ export function installNoAnswerResume(
     return (async function* () {
       let answered = false
       let answerless = false
+      // Whether the consumer read this stream to its end. The `finally` below
+      // runs on every exit, and two of them describe nothing: the caller
+      // abandoned the turn (Stop pressed mid-answer, or the collapse guard
+      // returning upstream of this hook), or the inner stream threw. Neither
+      // delivered a finish chunk, so neither may spend the budget or clear the
+      // streak — and neither is a failure worth a log line.
+      let completed = false
       try {
         for await (const chunk of next()) {
           if (isVisible(chunk)) answered = true
           if (chunk.type === 'finish' && isAnswerlessFailure(chunk)) answerless = true
           yield chunk
         }
+        completed = true
       } finally {
         // Only a conversation call owns a turn worth resuming; compaction and
         // session-title calls are one-shot and have nothing to continue.
-        if (conversationCall(request)) settle(request.sessionId, answered, answerless)
+        if (completed && conversationCall(request)) settle(request.sessionId, answered, answerless)
       }
     })()
   }
 
-  const release = ctx.on('llm/stream', resumeStream, { global: true })
+  // Per-session state is dropped with the session it belongs to, the same way
+  // the collapse guard drops its Agent map: an entry otherwise survives every
+  // conversation the process ever runs, and the streak in it outlives the
+  // session that earned it.
+  const releaseDisposed = ctx.on('agent/disposed', (payload: { agent: unknown }) => {
+    const id = agentId(payload.agent)
+    if (id !== undefined) sessions.delete(sessionKey(id))
+  })
+  const releaseStream = ctx.on('llm/stream', resumeStream, { global: true })
   return () => {
-    releaseListener(release)
+    disposed = true
+    releaseListener(releaseStream)
+    releaseListener(releaseDisposed)
     sessions.clear()
   }
 }
