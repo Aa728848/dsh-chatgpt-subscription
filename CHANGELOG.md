@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.25.0 - 2026-10-17
+
 - **[Harness] 支持 DSH 0.2.1-alpha.5，并接入新版可用的请求元数据能力**
   - **依赖与启动兼容**：15 个 `@deepseek-ai/dsh-*` peer range 都明确加入 `0.2.1-alpha.5`，dev 基线使用精确版本，避免安装时静默落到刚发布的 `0.2.1-rc.1`。Cordis / loader / schemastery 使用与 alpha.5 peer 约束兼容的稳定补丁版，消除了根包 alpha 与间接稳定插件之间的真实 peer 冲突；`package-lock.json`、`pnpm-lock.yaml` 和 `pnpm-workspace.yaml` 已同步。
   - **WebServer 与流超时**：`webServer.port` 在新版变为可空，Codex 本地图片地址改为优先使用新版 `getOrigin()`，旧版保留原 loopback / wildcard 构造，未绑定服务则明确报错。上游 idle watchdog 已能在传输忽略 abort 时结束等待；插件清理路径同步改为 detached drain，不再因 `await iterator.return()` 把已经超时的流重新挂死。
