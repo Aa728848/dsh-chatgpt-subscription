@@ -1141,6 +1141,16 @@ function hasVisibleOutput(state: MinimaxStreamState): boolean {
   return state.blocks.some((block) => block.type === 'text' && block.text.trim() !== '')
 }
 
+/**
+ * The phrase this line stamps on the failure it reports for a turn that ended
+ * without an answer or a tool call.
+ *
+ * Exported so a host-side hook can recognise that failure by construction,
+ * instead of copying the sentence. Only the phrase is matched, never the whole
+ * message: the rest of it carries diagnostics that may change.
+ */
+export const NO_ANSWER_PHRASE = 'ended the turn without an answer or a tool call'
+
 function finishReasonFor(state: MinimaxStreamState): FinishReason {
   const reason = state.finishReason ?? ''
   if (reason === 'length' || reason === 'max_tokens') return { kind: 'max-tokens' }
@@ -1156,7 +1166,9 @@ function finishReasonFor(state: MinimaxStreamState): FinishReason {
       failure: {
         message:
           PROVIDER_NAME +
-          ' ended the turn without an answer or a tool call — the response stopped before it did anything' +
+          ' ' +
+          NO_ANSWER_PHRASE +
+          ' — the response stopped before it did anything' +
           ` (finishReason: ${reason === '' ? '(none)' : reason}, stream ended by: ${streamCompletion(state)})`,
         code: 'PROVIDER_ERROR',
       },

@@ -156,6 +156,11 @@ import {
   type GuardOptions,
   type ReasoningCollapseContext,
 } from './host/reasoning-collapse-guard/index.ts'
+import {
+  installNoAnswerResume,
+  type NoAnswerResumeContext,
+  type NoAnswerResumeOptions,
+} from './host/no-answer-resume/index.ts'
 
 /** Optional deployment configuration for this plugin. */
 export interface Config {
@@ -202,6 +207,12 @@ export interface Config {
    */
   reasoningCollapseGuard?: GuardOptions | false
   /**
+   * Resume a turn that ended without an answer or a tool call. Omit the key
+   * (or set it to `false`) to leave the turn failed; the shipped defaults
+   * apply otherwise.
+   */
+  noAnswerResume?: NoAnswerResumeOptions | false
+  /**
    * Idle budget for one Codex Responses stream, in milliseconds.
    *
    * Counted on transport activity rather than on visible chunks, so status
@@ -224,6 +235,9 @@ export const Config: z<Config> = z.object({
   // than by a nested schema here, so one rule describes the numbers for both
   // the shipped defaults and a deployment's overrides. `false` opts out.
   reasoningCollapseGuard: z.union([z.object({}), z.const(false)]).default({}),
+  // Same shape as the guard above: the resume hook validates its own numbers
+  // fail-loud, and `false` opts out.
+  noAnswerResume: z.union([z.object({}), z.const(false)]).default({}),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
 })
@@ -371,6 +385,22 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       }
       return dispose
     }, 'dsh-chatgpt-subscription: reasoning collapse guard')
+  }
+
+  // A turn this line reports as answerless is honest but unfinished: the
+  // harness has no representation for "the model stopped before it did
+  // anything", so nothing continues it. The hook steers one continuation once
+  // the Agent is idle. Configured to `false` it is never installed at all.
+  if (pluginConfig.noAnswerResume !== false) {
+    const resumeOptions: NoAnswerResumeOptions = pluginConfig.noAnswerResume ?? {}
+    ctx.effect(() => {
+      const dispose = installNoAnswerResume(ctx as unknown as NoAnswerResumeContext, resumeOptions)
+      if (dispose === undefined) {
+        ctx.logger.warn('[dsh-chatgpt-subscription] no-answer resume skipped: this harness exposes no event bus')
+        return () => undefined
+      }
+      return dispose
+    }, 'dsh-chatgpt-subscription: no-answer resume')
   }
 
   // One read-only diagnostic probe, inert unless the deployment enables it.
