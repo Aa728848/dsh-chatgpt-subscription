@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.26.0 - 2026-10-17
+
+- **[MiniMax Code] 无答案轮次现在会自动续跑跑完（社区 PR #61），并把「续跑预算」真正做成有界**
+  - **问题**：0.24.7 之后，模型把整轮花在思考上、只回 thinking 块就 `end_turn` 的轮次不再静默停住，而是**明确报错**——诚实，但这一轮仍然没跑完。harness 没有「模型啥也没干就停了」这个失败模式的表示，所以报完错这一轮就结束了，没有任何东西接着往下做。PR #61 新增 host 侧钩子监听 `llm/stream` 瀑布，认出这条失败后 steer 一句续跑提示，让这一轮跑完。**关键约束（PR 已论证且经复核）**：steer 必须在 Agent 空闲时发——`Agent.steer` 往 inbox 里 splice 并调 `wakeDriver`，而 `wakeDriver` 只在 `phase.kind === 'idle'` 时开新回合；回合还在 running 时发，什么都不 latch，消息会一直躺在 inbox 里没人读。因此这里等 `whenIdle()`。失败靠 `mapper.ts` 导出的 `NO_ANSWER_PHRASE` 识别，不抄句子。配置：`"noAnswerResume": { "maxResumes": 2, "text": "..." }`，`"noAnswerResume": false` 关闭。
+  - **合并后另行修复的两个缺陷（在发版前发现，若直接发布会让默认安装的用户被无限烧请求）**：① **`maxResumes` 实际不封顶**——`settle()` 从生成器的 `finally` 调用，而 `finally` 在**正常结束、被放弃、抛错**三种退出上都会跑；流被放弃时根本没见到 finish chunk，`answerless` 一定是 false，只要此前吐过正文 `answered` 就是 true，于是那句 `if (answered) consecutive = 0` 把计数清零。生产上有两条常规路径会踩到：用户按停止（harness `for await` + `throwIfAborted`），以及**推理塌缩守卫**——它在 `llm/stream` 上先注册，因此处在 Cordis 瀑布的**外层**，`return` 时不给 finish chunk。实测 `maxResumes: 2` 却续跑了 6 次。改法：只有**读到底**的流才结算，被放弃或抛错的流什么都不能证明，既不消耗预算也不清零、且不写日志。② **计数不是「连续」，日志在说谎**——只有「答出来了」的轮次才清零，于是 `aborted finish` / `max-tokens` / `TIMEOUT` / 其他 `PROVIDER_ERROR` 都不会打断连击：三段**不相邻**的无答案轮照样打出 `gave up after 2 answerless turns in a row`，预算被花掉一次之后该功能在本会话余下时间里静默失效。改法：**任何**正常结束且非无答案的轮次都清零连击，让标识符、注释与日志三者一致。
+  - **另外三处加固**：③ 每会话状态在 `agent/disposed` 时清理（照搬塌缩守卫的做法），不再为进程生命周期内每个会话常驻一条；④ 插件销毁后排队中的续跑不再 steer，且一个会话同时只持有一条排队续跑（同一轮重试 settle 两次不会投递两次）；⑤ `isVisible` 改为 `trim()`，与产出方 `hasVisibleOutput` 完全一致，避免消费方与产出方对「这一轮算不算答了」产生分歧。
+  - **验证**：`npm run typecheck` 0 错误；`test/no-answer-resume.test.ts` **22 passed**（贡献者的 15 例 + 7 例回归：`iterator.return()` 放弃、中途抛错、`TIMEOUT` 轮次、销毁时有续跑在排队、空闲前两次 settle）；`test/reasoning-collapse-guard.test.ts` 80 passed；全量 **231 passed | 1 skipped（232 文件）、3809 passed | 7 skipped、0 failed**。**承重已双向检查**：把源码还原到合并提交后重跑，新增用例 **7 failed | 15 passed**，失败项正是上述缺陷，恢复后重新全绿。
+  - **复核结论（对照真实 harness 源码逐条核对）**：`llm/stream` 瀑布签名、`{ global: true }` 为真实的 `EventOptions` 字段、`GenerateOptions.sessionId`/`purpose`、`StreamChunk` 的 finish/delta 形状、`Agent.steer`+`whenIdle` 语义（空闲 steer 会开新回合、忙碌 steer 会 latch 并被 live driver 认领、只有 `cancel()` 才丢弃）、`ctx.get('agents')` 是**合法的免 inject 读取**而 `ctx.agents` 会抛——全部为真；`NO_ANSWER_PHRASE` 只有一个产出方，不存在跨线路误判。
+  - **未做**：真正的「不让它发生」仍要靠请求侧降档（effort 从 max 降到 xhigh/high），那是部署配置、不在本仓；本版只让**已经发生**的轮次跑完。子代理会话同样会被续跑（`purpose` 为 undefined 且自带 sessionId），若日后需要只对主线生效，应以 `request.provider` 收窄，留作后续。
 ## 0.25.1 - 2026-10-17
 
 - **[Harness & 调度预设] 适配 DSH 0.2.1-rc.1 / 0.2.1-rc.2，并修复调度模式在 0.2.1 下报 `unknown prompt variable "{{cwd}}"` 的启动失败**
