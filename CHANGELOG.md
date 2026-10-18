@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[Web 抓取] 选择退回 DSH 自带 provider 后再无触发点自愈：整条抓取线路静默失效（本机实证）**
+  - **现象**：本机 `web_fetch` 对任何域名都报 `URL hostname "…" resolves to a non-public IP address`（`WEB_BLOCKED_URL`），而设置页显示搜索来源已是「ChatGPT（代理隧道）」、自定义代理 `http://127.0.0.1:7890` 可用。
+  - **本机实证**：`GET /api/dsh-chatgpt-subscription/status` 读到 `preferences.searchProvider = "codex"`、`activeProxy = "http://127.0.0.1:7890"`，而 `switcher = { state: "applied", configuredSearchProvider: "deepseek-official", configuredFetchProvider: "http" }` —— `web` 条目仍是 DSH 默认值。报错文案同时指认服务方：对 IP 字面量 `127.0.0.1` 得到的是内置 provider 的措辞（`resolves to a non-public IP address`，见 `web-fetch-http/src/network.ts`），本插件对字面量用的是 `is not a public IP address`（`fetch-address-policy.ts`）。
+  - **根因（两处，都是「没人再问一次」）**：① `applyWebProviders` 可能在 `preferences.hydrate()` 落盘之前就跑完，此时读到的默认值（`dsh` + 无代理）算出的目标恰好等于 `web` 条目自带默认值，`applySelection` 的 `configured && applied` 提前返回、写 `state='applied'`，一个字节都没写，之后同样没有事件再触发；② 即使选择写进去了，它只存在于 loader 条目的运行期 config，后续一次组合把该 config 改回默认值时，同样没有任何事件通知本插件。
+  - **改法**：`applyWebProviders` 先 `await preferences.hydrate()` 再读 `preferences.status()`（不再采信调用方传入的旧快照）；新增 `src/host/web-provider-reconciler.ts`，每 30s 做一次干对账——无漂移时 `select()` 直接返回、不重启任何条目，有漂移才把选择写回，并在插件 disposer 里停表。
+  - **验证**：`npm run typecheck` 0 错误；`npm run build` 通过；全量 **232 passed | 1 skipped（233 文件）、3818 passed | 7 skipped、0 failed**（基线 3813，新增 5 例：对账定时器 4 例 + 条目 config 被外部改写后自愈 1 例）。**运行时双向验证**：修复前 `web_fetch` 全部被拒；用插件接口把搜索来源切到 `dsh` 再切回 `codex` 触发一次真实应用后，`configuredFetchProvider` 变为 `codex-subscription`，`example.com` / npm registry / `deepseek.com/harness` 均 200，`web_search` 正常返回来源。
+  - **升级提示**：运行中的 Host 需重启（或重载该插件条目）才会加载新 bundle；重启前若仍被拒抓，可在设置页把「搜索来源」切到 DSH 默认再切回 ChatGPT 手动触发一次。
+
 ## 0.26.1 - 2026-10-17
 - **[WorkBuddy] 一次上游 401 把整个号池写成「需要重新登录」且永不恢复：线路跑着跑着忽然全部国区账号要重登**
   - **现象**：运行中的一轮突然失败，报 `WorkBuddy（CodeBuddy 订阅） rejected the stored credential (401). Sign in again with the CodeBuddy desktop client.`；随后设置卡片里**每一个**国区账号都显示「需要重新登录」，只有重新登录（重新加号）才能恢复。

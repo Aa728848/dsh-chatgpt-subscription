@@ -195,6 +195,30 @@ describe('SearchProviderSwitcher', () => {
     }
   })
 
+  // The selection lives in the loader entry's config, and a later composition of
+  // that entry can discard it. Nothing then fires an event, so the switcher's
+  // last verdict keeps reading `applied` while the entry serves DSH's own
+  // providers — the state this machine was found in, where every `web_fetch` hit
+  // the built-in provider's resolve-and-pin check. Re-running the selection has
+  // to be all it takes to put the write back.
+  it('re-applies a selection whose entry config a later composition rewrote', async () => {
+    const { ctx, switcher, settled } = await mountSwitcher()
+    try {
+      await switcher.select('codex')
+      await settled()
+      const entry = ctx.loader.resolve('web')
+      // What a recomposition of the profile leaves behind: the shipped defaults.
+      entry.options.config = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+      await switcher.select('codex')
+      await settled()
+      expect(entry.options.config).toMatchObject({
+        searchProvider: CODEX_SEARCH_PROVIDER_ID,
+        fetchProvider: CODEX_FETCH_PROVIDER_ID,
+      })
+      expect((await ctx.web.fetch({ url: 'https://example.com' })).body.content).toBe(CODEX_FETCH_PROVIDER_ID)
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('reports an already matching configuration as applied', async () => {
     const { ctx, switcher } = await mountSwitcher()
     try {

@@ -32,7 +32,7 @@ import { registerRoutes } from './host/routes.ts'
 import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
-import type { SubscriptionPreferencesDto } from './shared/contracts.ts'
+import { startWebProviderReconciler } from './host/web-provider-reconciler.ts'
 import { UsageService } from './host/usage-service.ts'
 import { AntigravityAdapter } from './host/antigravity/adapter.ts'
 import { registerAntigravityRoutes } from './host/antigravity/routes.ts'
@@ -779,19 +779,32 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // provider still refuses non-public addresses a URL states outright. With no proxy configured
     // the built-in provider keeps the tool, resolution pinning and all.
     let lastFetchDiagnostic: string | undefined
-    const applyWebProviders = (current: SubscriptionPreferencesDto = preferences.status()): void => {
-      const pluginFetch = proxyManager.resolveActiveProxyUrl() !== null
-      void searchSwitcher.select(current.searchProvider, { pluginFetch, fetchProvider: fetchConfiguration.fetchProvider }).then(() => {
-        const status = searchSwitcher.status()
-        if (status.state === 'missing' || status.state === 'failed') return
-        const reason = fetchConfiguration.fetchProvider !== 'auto' ? 'explicit configuration'
-          : current.searchProvider === 'codex' ? 'Codex search selected'
-          : pluginFetch ? 'active proxy detected' : 'no proxy or Codex search'
-        const diagnostic = `${status.configuredFetchProvider ?? 'DSH default'} (mode=${fetchConfiguration.fetchProvider}; ${reason}; plugin limits=${fetchConfiguration.fetchMaxBodyChars} chars/${fetchConfiguration.fetchMaxResponseBytes} bytes)`
-        if (diagnostic !== lastFetchDiagnostic) {
-          lastFetchDiagnostic = diagnostic
-          ctx.logger.info(`[dsh-chatgpt-subscription] Web fetch provider configured: ${diagnostic}`)
-        }
+    // The selection must be computed from the STORED preferences, never from the
+    // shipped defaults. Those defaults are exactly what the `web` entry already
+    // holds (`deepseek-official` search, `http` fetch), so a pass that runs before
+    // the preferences document has hydrated is not merely stale: it agrees with
+    // the entry, returns `applied` without writing anything, and leaves DSH's own
+    // fetch provider in place with no later event to repair it. That is the state
+    // this machine was found in — the user had picked the Codex line and a proxy,
+    // every `web_fetch` still failed on the built-in provider's resolve-and-pin
+    // step, and the switcher kept reporting `applied` because nothing had ever
+    // asked it to look again.
+    const applyWebProviders = (): void => {
+      void preferences.hydrate().then(() => {
+        const current = preferences.status()
+        const pluginFetch = proxyManager.resolveActiveProxyUrl() !== null
+        return searchSwitcher.select(current.searchProvider, { pluginFetch, fetchProvider: fetchConfiguration.fetchProvider }).then(() => {
+          const status = searchSwitcher.status()
+          if (status.state === 'missing' || status.state === 'failed') return
+          const reason = fetchConfiguration.fetchProvider !== 'auto' ? 'explicit configuration'
+            : current.searchProvider === 'codex' ? 'Codex search selected'
+            : pluginFetch ? 'active proxy detected' : 'no proxy or Codex search'
+          const diagnostic = `${status.configuredFetchProvider ?? 'DSH default'} (mode=${fetchConfiguration.fetchProvider}; ${reason}; plugin limits=${fetchConfiguration.fetchMaxBodyChars} chars/${fetchConfiguration.fetchMaxResponseBytes} bytes)`
+          if (diagnostic !== lastFetchDiagnostic) {
+            lastFetchDiagnostic = diagnostic
+            ctx.logger.info(`[dsh-chatgpt-subscription] Web fetch provider configured: ${diagnostic}`)
+          }
+        })
       }).catch(error => {
         ctx.logger.warn(`[dsh-chatgpt-subscription] Web provider selection could not be applied: ${error instanceof Error ? error.message : String(error)}`)
       })
@@ -1063,7 +1076,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
 
     // Any preference can change the selection: the search picker chooses the search backend, and
     // the proxy settings decide whether this plugin's provider is the one that can reach the web.
-    const disposePreferenceWatch = preferences.watch(next => applyWebProviders(next))
+    // The selection re-reads the hydrated store, so the changed document is what
+    // it acts on whether or not the callback's own snapshot is threaded through.
+    const disposePreferenceWatch = preferences.watch(() => applyWebProviders())
 
     // The launcher publishes readiness only after the full host tree has settled.
     // Reconcile then as well as on service injection; neither timers nor a user
@@ -1078,11 +1093,19 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       applyWebProviders()
     })
 
+    // Every trigger above is an event this plugin does not own the timing of, and
+    // a selection only holds for as long as the loader keeps the config it was
+    // written into. Re-check on a timer, which is the one trigger that needs no
+    // event at all: it repairs a write a later composition discarded, and it
+    // costs a loader scan when nothing drifted.
+    const disposeWebProviderReconciler = startWebProviderReconciler({ reconcile: () => applyWebProviders() })
+
     return () => {
       searchSwitcher.dispose()
       disposeReadyWatch?.()
       disposeProxyWatch()
       disposePreferenceWatch()
+      disposeWebProviderReconciler()
       disposeImageTool()
       disposeAntigravityImageTool()
       disposeVideoTool()
