@@ -364,8 +364,6 @@ export interface WorkBuddyWebStatus extends Partial<AccountPoolStatusDto> {
   outboundIdentity?: WorkBuddyOutboundSetting
   /** Local quota guardrails currently armed (all zero when off). */
   guardrails?: WorkBuddyGuardrailsDto
-  /** Models an account must never serve, keyed by pool account id. */
-  disabledModels?: Record<string, string[]>
   /**
    * Whether this process holds the key that opens `$wbEncrypted` credentials.
    *
@@ -393,13 +391,6 @@ export interface WorkBuddySettingsUpdateDto {
   outboundIdentity?: WorkBuddyOutboundSetting
   /** Partial guardrail update; omitted fields keep their stored value. */
   guardrails?: Partial<WorkBuddyGuardrailsDto>
-  /**
-   * Full replacement of the per-account model blacklist.
-   *
-   * A map rather than a single entry because the store replaces it wholesale: a
-   * caller clearing one account sends the whole map without that key.
-   */
-  disabledModels?: Record<string, string[]>
 }
 
 /** Result of a connection test against the upstream chat endpoint. */

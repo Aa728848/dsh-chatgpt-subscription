@@ -12,7 +12,6 @@ import { WorkBuddyCheckinService, CHECKIN_JITTER_MIN_MS } from '../src/host/work
 import {
   FileCredentialStore,
   FileModelSettingsStore,
-  workBuddyAccountId,
   type WorkBuddyCredentials,
 } from '../src/host/workbuddy/token-store.ts'
 import { WorkBuddyUsageLedger } from '../src/host/workbuddy/guardrails.ts'
@@ -73,7 +72,7 @@ interface Harness {
 
 async function harness(
   uids: readonly string[],
-  options: { fetchFn?: typeof fetch; disabledModels?: Record<string, string[]> } = {},
+  options: { fetchFn?: typeof fetch } = {},
 ): Promise<Harness> {
   const dir = await tempDir('wb-safety-')
   const store = createWorkBuddyStore(dir) as FileCredentialStore
@@ -84,7 +83,6 @@ async function harness(
     await pool.addAccount(credentialsFor(uid))
   }
   const settings = new FileModelSettingsStore(path.join(dir, 'models.json'))
-  if (options.disabledModels !== undefined) await settings.updateSettings({ disabledModels: options.disabledModels })
   const ledger = new WorkBuddyUsageLedger(path.join(dir, 'usage.json'))
   await ledger.load()
 
@@ -157,20 +155,6 @@ describe('check-in spacing', () => {
 })
 
 describe('account safety on the wire', () => {
-  it('routes a blacklisted model to another account', async () => {
-    // The pool summary carries the id, not the credential, so the id is derived
-    // the same way the pool derived it.
-    const firstId = workBuddyAccountId(credentialsFor('uid-a'))
-    const { adapter, seen } = await harness(['uid-a', 'uid-b'])
-    const withBlacklist = await harness(['uid-a', 'uid-b'], { disabledModels: { [firstId]: ['glm-5.3'] } })
-
-    for await (const _chunk of adapter.stream(options())) { /* drain */ }
-    expect(seen[0]).toBe('uid-a')
-
-    for await (const _chunk of withBlacklist.adapter.stream(options())) { /* drain */ }
-    expect(withBlacklist.seen[0]).toBe('uid-b')
-  })
-
   it('never parks an account for a transport failure', async () => {
     const { adapter, pool } = await harness(['uid-a'], {
       fetchFn: (async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch,

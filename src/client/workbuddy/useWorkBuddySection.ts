@@ -236,8 +236,6 @@ export interface WorkBuddySectionView {
     updateOutboundIdentity(setting: WorkBuddyOutboundSetting): Promise<void>
     /** Arm, change or clear the local quota guardrails. */
     updateGuardrails(guardrails: Partial<WorkBuddyGuardrailsDto>): Promise<void>
-    /** Replace one account's model blacklist (an empty list clears it). */
-    updateDisabledModels(accountId: string, models: string[]): Promise<void>
     /** Store the desktop client's at-rest key so sealed credentials can be read. */
     saveAtRestKey(key: string): Promise<void>
     /** Forget that key; sealed accounts become unreadable again. */
@@ -526,26 +524,6 @@ export function useWorkBuddySection({ onModelChange, loadModelDirectory }: WorkB
     }
   }
 
-  /** Replace one account's model blacklist; the route takes the whole map. */
-  const updateDisabledModels = async (accountId: string, models: string[]) => {
-    const next: Record<string, string[]> = { ...(status?.disabledModels ?? {}) }
-    if (models.length === 0) delete next[accountId]
-    else next[accountId] = models
-    try {
-      setBusy(`disabled:${accountId}`)
-      setError(null)
-      const updated = await api.request<WorkBuddyWebStatus>('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ disabledModels: next }),
-      })
-      setStatus(normalizeStatus(updated))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(null)
-    }
-  }
-
   /** Store the desktop client's at-rest key, which unlocks sealed credentials. */
   const saveAtRestKey = async (key: string) => {
     try {
@@ -781,7 +759,6 @@ export function useWorkBuddySection({ onModelChange, loadModelDirectory }: WorkB
       updateContextDraft,
       updateOutboundIdentity,
       updateGuardrails,
-      updateDisabledModels,
       saveAtRestKey,
       clearAtRestKey,
     },

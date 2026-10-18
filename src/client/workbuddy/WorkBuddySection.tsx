@@ -125,7 +125,7 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
     login, rescan, accountAction, deleteAccount, setStrategy, testConnection, refreshQuota,
     checkinNow, updateCheckin, toggleModel, setAllModels, updateEffort, refreshCatalog,
     saveContextWindow, resetContextWindow, resetAllContextWindows, updateContextDraft,
-    updateOutboundIdentity, saveAtRestKey, clearAtRestKey, updateGuardrails, updateDisabledModels,
+    updateOutboundIdentity, saveAtRestKey, clearAtRestKey, updateGuardrails,
   } = actions
 
   // The pasted secret never leaves this component except through the one POST
@@ -200,23 +200,6 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
                 {candidate.domain}
               </span>
             ) : null}
-            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <span>{t.disabledModels}</span>
-              <input
-                className="dsha-input"
-                style={{ width: 170 }}
-                placeholder="glm-5.3,kimi-k3"
-                defaultValue={(status?.disabledModels?.[candidate.id] ?? []).join(',')}
-                disabled={busy !== null}
-                onBlur={(event) => {
-                  const models = event.currentTarget.value
-                    .split(',')
-                    .map((model) => model.trim())
-                    .filter((model) => model !== '')
-                  void updateDisabledModels(candidate.id, models)
-                }}
-              />
-            </label>
             {candidate.hidden === true ? <span>{t.hiddenAccount}</span> : null}
           </>
         )}
@@ -244,7 +227,7 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
       <section className="dsha-group">
         <p className="dsha-label" style={{ fontWeight: 600 }}>{t.outboundSection}</p>
         <p className="dsha-muted">{t.outboundHint}</p>
-        <div className="dsha-pref-row">
+        <div style={{ margin: '10px 0 14px' }}>
           <select
             className="dsha-select"
             value={status?.outboundIdentity ?? 'cli'}
@@ -260,36 +243,37 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
 
         <p className="dsha-label" style={{ fontWeight: 600, marginTop: 12 }}>{t.guardrailsSection}</p>
         <p className="dsha-muted">{t.guardrailsHint}</p>
-        <div className="dsha-row" style={{ gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+        <div className="dshwb-fields">
           {([
             ['reserveCredits', t.guardrailsReserve],
             ['dailyTokens', t.guardrailsDaily],
             ['modelDailyTokens', t.guardrailsModelDaily],
           ] as const).map(([field, label]) => (
-            <label key={field} className="dsha-pref-row" style={{ gap: 6, alignItems: 'center' }}>
-              <span className="dsha-label">{label}</span>
-              <input
-                className="dsha-input"
-                type="number"
-                min={0}
-                step={1}
-                style={{ width: 110 }}
-                disabled={busy !== null}
-                value={guardrailDrafts[field] ?? String(status?.guardrails?.[field] ?? 0)}
-                onChange={(event) => setGuardrailDrafts((prev) => ({ ...prev, [field]: event.currentTarget.value }))}
-                onBlur={() => {
-                  const draft = guardrailDrafts[field]
-                  if (draft === undefined) return
-                  setGuardrailDrafts((prev) => {
-                    const next = { ...prev }
-                    delete next[field]
-                    return next
-                  })
-                  const value = Math.floor(Number(draft))
-                  if (!Number.isFinite(value) || value < 0) return
-                  void updateGuardrails({ [field]: value })
-                }}
-              />
+            <label key={field} className="dshwb-field">
+              <span>{label}</span>
+              <span className="dshwb-control">
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  disabled={busy !== null}
+                  value={guardrailDrafts[field] ?? String(status?.guardrails?.[field] ?? 0)}
+                  onChange={(event) => setGuardrailDrafts((prev) => ({ ...prev, [field]: event.currentTarget.value }))}
+                  onBlur={() => {
+                    const draft = guardrailDrafts[field]
+                    if (draft === undefined) return
+                    setGuardrailDrafts((prev) => {
+                      const next = { ...prev }
+                      delete next[field]
+                      return next
+                    })
+                    const value = Math.floor(Number(draft))
+                    if (!Number.isFinite(value) || value < 0) return
+                    void updateGuardrails({ [field]: value })
+                  }}
+                />
+                <small>{field === 'reserveCredits' ? 'credits' : 'tokens'}</small>
+              </span>
             </label>
           ))}
         </div>
@@ -299,9 +283,8 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
         {sealedCount > 0 ? (
           <p className="dsha-notice">{t.atRestSealed.replace('{count}', String(sealedCount))}</p>
         ) : null}
-        <div className="dsha-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <div className="dshwb-inputrow">
           <input
-            className="dsha-input"
             type="password"
             autoComplete="off"
             spellCheck={false}

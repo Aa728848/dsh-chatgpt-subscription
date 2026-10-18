@@ -49,26 +49,6 @@ function positiveOrZero(value: unknown): number {
   return Math.floor(value)
 }
 
-/**
- * Keep only well-formed model ids per account, trimmed and deduplicated.
- *
- * An empty list is the same instruction as no entry, so it is dropped: "cleared"
- * and "never set" must not need two code paths.
- */
-export function normalizeDisabledModels(value: unknown): Record<string, string[]> {
-  if (typeof value !== 'object' || value === null) return {}
-  const out: Record<string, string[]> = {}
-  for (const [accountId, models] of Object.entries(value as Record<string, unknown>)) {
-    if (accountId === '' || !Array.isArray(models)) continue
-    const unique = [...new Set(models
-      .filter((model): model is string => typeof model === 'string')
-      .map((model) => model.trim())
-      .filter((model) => model !== ''))]
-    if (unique.length > 0) out[accountId] = unique
-  }
-  return out
-}
-
 /** Narrow a stored or patched value into guardrails; anything unusable means off. */
 export function normalizeGuardrails(value: unknown): WorkBuddyGuardrails {
   if (typeof value !== 'object' || value === null) return { ...DEFAULT_GUARDRAILS }

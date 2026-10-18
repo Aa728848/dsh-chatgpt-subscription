@@ -103,7 +103,6 @@ export const zh = {
   guardrailsReserve: '保留积分',
   guardrailsDaily: '账号日 token',
   guardrailsModelDaily: '模型日 token',
-  disabledModels: '禁用模型',
 } as const
 
 export const en = {
@@ -209,7 +208,6 @@ export const en = {
   guardrailsReserve: 'Reserve credits',
   guardrailsDaily: 'Account daily tokens',
   guardrailsModelDaily: 'Model daily tokens',
-  disabledModels: 'Models off limits',
 } as const
 
 export const dictionaries = {

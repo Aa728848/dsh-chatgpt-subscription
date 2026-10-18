@@ -279,7 +279,6 @@ export async function getWorkBuddyWebStatus(
     checkin,
     outboundIdentity: normalizeOutboundSetting(settings.outboundIdentity),
     guardrails: normalizeGuardrails(settings.guardrails),
-    disabledModels: settings.disabledModels,
     atRestKeySet: hasAtRestKey(),
     sealedAccounts: sealedDiagnostics.sealedFiles,
     sealedAccountsError: sealedDiagnostics.missingKey
@@ -599,17 +598,6 @@ export function registerWorkBuddyRoutes(
               guardrails[field] = Math.floor(value)
             }
             patch.guardrails = guardrails
-          }
-          if (typeof body.disabledModels === 'object' && body.disabledModels !== null) {
-            const raw = body.disabledModels as Record<string, unknown>
-            const disabledModels: Record<string, string[]> = {}
-            for (const [accountId, models] of Object.entries(raw)) {
-              if (!Array.isArray(models)) {
-                return sendJson(response, 400, { ok: false, error: 'disabledModels values must be arrays of model ids.' })
-              }
-              disabledModels[accountId] = models.filter((model): model is string => typeof model === 'string')
-            }
-            patch.disabledModels = disabledModels
           }
           if (body.outboundIdentity !== undefined) {
             const requested = normalizeOutboundSetting(body.outboundIdentity)

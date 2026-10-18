@@ -13,7 +13,6 @@ import { DEFAULT_VISIBLE_MODEL_IDS } from './model-catalog.ts'
 import { withResolvedIdentity } from './identity.ts'
 import {
   DEFAULT_GUARDRAILS,
-  normalizeDisabledModels,
   normalizeGuardrails,
   type WorkBuddyGuardrails,
 } from './guardrails.ts'
@@ -116,15 +115,6 @@ export interface WorkBuddyModelSettings {
   outboundIdentity: WorkBuddyOutboundSetting
   /** Local quota guardrails; all-off by default. */
   guardrails: WorkBuddyGuardrails
-  /**
-   * Models one account must never be asked to serve, keyed by pool account id.
-   *
-   * The automatic park (a 429 window) is time-boxed; this one is a standing
-   * instruction — a model that account is not entitled to, or one the user does
-   * not want it spending on. Enforced in the same exclusion path as the park, so
-   * a blacklisted model simply routes to another account.
-   */
-  disabledModels: Record<string, string[]>
 }
 
 export interface WorkBuddyPreferenceStore {
@@ -150,7 +140,6 @@ export interface WorkBuddyPreferenceStore {
     checkin?: Partial<WorkBuddyCheckinSettings>
     outboundIdentity?: WorkBuddyOutboundSetting
     guardrails?: Partial<WorkBuddyGuardrails>
-    disabledModels?: Record<string, string[]>
   }): Promise<WorkBuddyModelSettings>
 }
 
@@ -193,7 +182,6 @@ export function registerWorkBuddyPreferenceStore(
       checkin: { ...DEFAULT_CHECKIN_SETTINGS },
       outboundIdentity: DEFAULT_OUTBOUND_SETTING,
       guardrails: { ...DEFAULT_GUARDRAILS },
-      disabledModels: {},
     }
     // The warmup promise is kept so a startup caller can await it instead of
     // racing it; `status()` still answers immediately from the defaults.
@@ -231,7 +219,6 @@ export function registerWorkBuddyPreferenceStore(
       dailyTokens: z.number().min(0).default(0),
       modelDailyTokens: z.number().min(0).default(0),
     }).default({ ...DEFAULT_GUARDRAILS }),
-    disabledModels: z.dict(z.array(z.string())).default({}),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
@@ -242,7 +229,6 @@ export function registerWorkBuddyPreferenceStore(
     checkin: WorkBuddyCheckinSettings
     outboundIdentity: WorkBuddyOutboundSetting
     guardrails: WorkBuddyGuardrails
-    disabledModels: Record<string, string[]>
   }>
 
   return {
@@ -261,7 +247,6 @@ export function registerWorkBuddyPreferenceStore(
         checkin: normalizeCheckinSettings(value.checkin),
         outboundIdentity: normalizeOutboundSetting(value.outboundIdentity),
         guardrails: normalizeGuardrails(value.guardrails),
-        disabledModels: normalizeDisabledModels(value.disabledModels),
       }
     },
     update: async (patch) => {
@@ -288,7 +273,6 @@ export function registerWorkBuddyPreferenceStore(
         guardrails: patch.guardrails !== undefined
           ? normalizeGuardrails({ ...normalizeGuardrails(current.guardrails), ...patch.guardrails })
           : normalizeGuardrails(current.guardrails),
-        disabledModels: normalizeDisabledModels(patch.disabledModels ?? current.disabledModels),
       }
       await scope.update(normalized)
       void fallbackStore.updateSettings(patch).catch(() => undefined)
@@ -1046,7 +1030,6 @@ export class FileModelSettingsStore {
           checkin: normalizeCheckinSettings(parsed.checkin),
           outboundIdentity: normalizeOutboundSetting(parsed.outboundIdentity),
           guardrails: normalizeGuardrails(parsed.guardrails),
-          disabledModels: normalizeDisabledModels(parsed.disabledModels),
         }
       }
     } catch {
@@ -1062,7 +1045,6 @@ export class FileModelSettingsStore {
       checkin: { ...DEFAULT_CHECKIN_SETTINGS },
       outboundIdentity: DEFAULT_OUTBOUND_SETTING,
       guardrails: { ...DEFAULT_GUARDRAILS },
-      disabledModels: {},
     }
   }
 
@@ -1084,7 +1066,6 @@ export class FileModelSettingsStore {
     checkin?: Partial<WorkBuddyCheckinSettings>
     outboundIdentity?: WorkBuddyOutboundSetting
     guardrails?: Partial<WorkBuddyGuardrails>
-    disabledModels?: Record<string, string[]>
   }): Promise<WorkBuddyModelSettings> {
     const current = await this.read()
     const next: WorkBuddyModelSettings = {
@@ -1111,9 +1092,6 @@ export class FileModelSettingsStore {
         : {}),
       ...(patch.guardrails !== undefined
         ? { guardrails: normalizeGuardrails({ ...normalizeGuardrails(current.guardrails), ...patch.guardrails }) }
-        : {}),
-      ...(patch.disabledModels !== undefined
-        ? { disabledModels: normalizeDisabledModels(patch.disabledModels) }
         : {}),
     }
     await this.write(next)

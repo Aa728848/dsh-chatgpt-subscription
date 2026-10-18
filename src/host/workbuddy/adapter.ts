@@ -305,20 +305,8 @@ export class WorkBuddyAdapter extends LlmAdapter {
     const ledger = this.options.usageLedger
     const pool = this.accountPool
     if (pool === null) return blocked
-    const hasBlacklist = Object.keys(settings.disabledModels).length > 0
-    // Neither a blacklist nor an armed guardrail means there is nothing to check.
-    if (!hasBlacklist && (ledger === undefined || !guardrailsArmed(settings.guardrails))) return blocked
-    // Reaching here means at least one of the two applies.
+    if (ledger === undefined || !guardrailsArmed(settings.guardrails)) return blocked
     for (const account of await pool.listAccounts()) {
-      // A standing blacklist is an instruction, not a measurement, so it is
-      // checked before the guardrails and applies even when they are all off.
-      if ((settings.disabledModels[account.id] ?? []).includes(model)) {
-        blocked.add(account.id)
-        continue
-      }
-      // No ledger with an armed guardrail means the counters cannot be trusted, so
-      // the guardrails stand down; the blacklist above already applied.
-      if (ledger === undefined || !guardrailsArmed(settings.guardrails)) continue
       const verdict = evaluateGuardrails({
         guardrails: settings.guardrails,
         tokensToday: ledger.tokensToday(account.id),
