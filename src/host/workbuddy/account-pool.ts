@@ -320,6 +320,17 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
    * decision goes through, so the mapping is never stale when it is consulted.
    */
   private readonly legacyIds = new Map<string, string>()
+  /**
+   * Per-model parks, in memory only: account id → model → the instant it lifts.
+   *
+   * The subscription meters an account × MODEL over a 24h window (429 `code
+   * 6004` names when it lifts), so cooling the whole ACCOUNT for one exhausted
+   * model throws away every other model that account can still serve. Process
+   * local on purpose, like the sibling gateway's model cooldowns: the window is
+   * short, and a restart re-measures it with the first request rather than
+   * trusting a stale timestamp.
+   */
+  private readonly modelCooldowns = new Map<string, Map<string, number>>()
 
   constructor(options: WorkBuddyAccountPoolOptions = {}) {
     const store = options.store ?? new FileCredentialStore()
@@ -552,8 +563,15 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
   async getEffectiveCredential(
     excludeIds?: ReadonlySet<string>,
     fetchFn: typeof fetch = fetch,
+    model?: string,
   ): Promise<{ account: WorkBuddyPoolAccount; credentials: WorkBuddyCredentials }> {
-    const effective = await this.getEffectiveAccount(excludeIds, fetchFn)
+    // A model park is an exclusion for THIS request only: the account stays in
+    // rotation for every other model, which is what makes the park worth having.
+    const parked = model === undefined ? new Set<string>() : this.parkedAccountIds(model)
+    const effective = await this.getEffectiveAccount(
+      parked.size === 0 ? excludeIds : new Set<string>([...(excludeIds ?? []), ...parked]),
+      fetchFn,
+    )
     if (effective.account.source !== 'desktop' || effective.account.sourceFile === undefined) {
       return effective
     }
@@ -576,6 +594,56 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
       }
     }
     return { account: effective.account, credentials: live }
+  }
+
+  /**
+   * Park ONE model on one account; every other model keeps serving.
+   *
+   * Returns the instant the park lifts, or undefined for a non-positive
+   * duration (which clears any existing park rather than extending it).
+   */
+  markModelCooldown(accountId: string, model: string, durationMs: number): number | undefined {
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      this.modelCooldowns.get(accountId)?.delete(model)
+      return undefined
+    }
+    const until = Date.now() + durationMs
+    const forAccount = this.modelCooldowns.get(accountId) ?? new Map<string, number>()
+    forAccount.set(model, until)
+    this.modelCooldowns.set(accountId, forAccount)
+    return until
+  }
+
+  /** When this account's park on this model lifts, or undefined when it may serve. */
+  modelCooldownUntil(accountId: string, model: string, now = Date.now()): number | undefined {
+    const until = this.modelCooldowns.get(accountId)?.get(model)
+    return until !== undefined && until > now ? until : undefined
+  }
+
+  /** Accounts currently parked on one model, with lifted entries pruned on the way. */
+  private parkedAccountIds(model: string, now = Date.now()): ReadonlySet<string> {
+    const parked = new Set<string>()
+    for (const [accountId, models] of this.modelCooldowns) {
+      const until = models.get(model)
+      if (until === undefined) continue
+      if (until > now) parked.add(accountId)
+      else models.delete(model)
+    }
+    return parked
+  }
+
+  /**
+   * Whether another account besides `triedAccountIds` can serve THIS model.
+   *
+   * The plain {@link hasAnotherAvailableAccount} answers for any model, so a
+   * rotation loop that consulted it would keep trying while every remaining
+   * account is parked on the model it is asking for — turning one exhausted
+   * window into a burst of refused requests.
+   */
+  async hasAnotherAvailableAccountFor(triedAccountIds: ReadonlySet<string>, model: string): Promise<boolean> {
+    const parked = this.parkedAccountIds(model)
+    if (parked.size === 0) return super.hasAnotherAvailableAccount(triedAccountIds)
+    return super.hasAnotherAvailableAccount(new Set<string>([...triedAccountIds, ...parked]))
   }
 
   /**

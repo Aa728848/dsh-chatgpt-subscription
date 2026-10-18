@@ -16,6 +16,34 @@ import type { AccountPoolStatusDto, PoolAccountSummaryDto } from './account-pool
 export type WorkBuddyRegion = 'cn' | 'intl'
 
 /**
+ * Local quota guardrails, as the settings card edits them.
+ *
+ * The host owns the enforcement; this is the wire shape. `0` means OFF for every
+ * field, and all-off is the default, so an untouched install behaves exactly as
+ * before the guardrails existed.
+ */
+export interface WorkBuddyGuardrailsDto {
+  /** Stop serving an account whose remaining credits are below this. */
+  reserveCredits: number
+  /** Stop serving an account for the rest of the local day at this many tokens. */
+  dailyTokens: number
+  /** Stop serving one model for the rest of the local day at this many tokens. */
+  modelDailyTokens: number
+}
+
+/** Client families this line can present to the gateway. */
+export type WorkBuddyOutboundProduct = 'cli' | 'workbuddy' | 'vscode'
+
+/**
+ * Stored preference for which client family requests present.
+ *
+ * `auto` assigns one product per account and keeps it for that account's whole
+ * life; every other value pins it line-wide. The shipped default (`cli`) is the
+ * identity this line has always sent.
+ */
+export type WorkBuddyOutboundSetting = 'auto' | WorkBuddyOutboundProduct
+
+/**
  * Consumption multiplier of one model, per region.
  *
  * The subscription publishes a \`credits\` string per model in its own
@@ -63,11 +91,19 @@ export function parseWorkBuddyCreditMultiplier(raw: unknown): string | null {
  * discarded merely because the model that suggested it is no longer selected.
  * The settings card renders the subset the account's models actually declare.
  */
-export type WorkBuddyReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type WorkBuddyReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-/** Every level this route can name, in escalating order (the card's sort key). */
+/**
+ * Every level this route can name, in escalating order (the card's sort key).
+ *
+ * `none` is the one level that is not a rung of any ladder: it is the measured
+ * spelling that turns the reasoning trace OFF upstream (`reasoning_effort:
+ * "none"`, the value the sibling gateway sends on its own cheap calls). It is
+ * only ever offered on a model the catalog marks `canDisableThinking`, so it
+ * sorts below everything and is never used to converge a level onto a ladder.
+ */
 export const WORKBUDDY_REASONING_EFFORTS: readonly WorkBuddyReasoningEffort[] =
-  ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 /**
  * Ladder of a WorkBuddy model that leaves the level choice to the gateway.
@@ -324,6 +360,23 @@ export interface WorkBuddyWebStatus extends Partial<AccountPoolStatusDto> {
   accounts?: WorkBuddyAccountSummaryDto[]
   /** Aggregate daily check-in state; absent when the host predates check-in. */
   checkin?: WorkBuddyCheckinSummary | null
+  /** Which client identity chat requests present. */
+  outboundIdentity?: WorkBuddyOutboundSetting
+  /** Local quota guardrails currently armed (all zero when off). */
+  guardrails?: WorkBuddyGuardrailsDto
+  /** Models an account must never serve, keyed by pool account id. */
+  disabledModels?: Record<string, string[]>
+  /**
+   * Whether this process holds the key that opens `$wbEncrypted` credentials.
+   *
+   * False with {@link sealedAccounts} above zero is the actionable state: the
+   * desktop client has sealed its tokens and nothing can read them yet.
+   */
+  atRestKeySet?: boolean
+  /** Sealed desktop credential files the last scan met. */
+  sealedAccounts?: number
+  /** Why the last sealed file refused to open, when one did. */
+  sealedAccountsError?: string | null
 }
 
 /** Patch accepted by the models/settings route. */
@@ -336,6 +389,17 @@ export interface WorkBuddySettingsUpdateDto {
   selectedAccountId?: string | null
   /** Partial check-in update; omitted fields keep their stored value. */
   checkin?: Partial<WorkBuddyCheckinSettings>
+  /** Which client identity chat requests present. */
+  outboundIdentity?: WorkBuddyOutboundSetting
+  /** Partial guardrail update; omitted fields keep their stored value. */
+  guardrails?: Partial<WorkBuddyGuardrailsDto>
+  /**
+   * Full replacement of the per-account model blacklist.
+   *
+   * A map rather than a single entry because the store replaces it wholesale: a
+   * caller clearing one account sends the whole map without that key.
+   */
+  disabledModels?: Record<string, string[]>
 }
 
 /** Result of a connection test against the upstream chat endpoint. */

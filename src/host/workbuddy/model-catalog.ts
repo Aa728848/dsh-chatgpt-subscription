@@ -1023,12 +1023,21 @@ export function workBuddyModelSupportsImage(
   return resolveWorkBuddyModel(id, catalog).supportsImage
 }
 
-/** Reasoning ladder one model accepts. */
+/**
+ * Reasoning ladder one model accepts, plus `none` when its trace can be turned off.
+ *
+ * The ladder in the catalog is what the model ACCEPTS, so `none` never appears
+ * in it; `canDisableThinking` is the separate statement that switching thinking
+ * off is allowed, and this is the single place that turns it into the one level
+ * the picker can offer. Callers that need the ladder alone read the entry.
+ */
 export function workBuddyReasoningEfforts(
   id: string,
   catalog: readonly WorkBuddyModelEntry[] = FALLBACK_MODELS,
 ): readonly string[] {
-  return resolveWorkBuddyModel(id, catalog).reasoningEfforts
+  const entry = resolveWorkBuddyModel(id, catalog)
+  if (!entry.canDisableThinking || entry.reasoningEfforts.length === 0) return entry.reasoningEfforts
+  return entry.reasoningEfforts.includes('none') ? entry.reasoningEfforts : ['none', ...entry.reasoningEfforts]
 }
 
 /**

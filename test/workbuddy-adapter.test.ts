@@ -277,7 +277,10 @@ describe('WorkBuddy adapter catalog', () => {
     const resolved = await adapter.resolveModel('workbuddy', 'glm-5.3')
     expect(resolved.context?.contextWindow).toBe(1_000_000)
     expect(resolved.defaultMaxTokens).toBe(48_000)
-    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['low', 'high', 'max'])
+    // `none` leads because the catalog entry marks `canDisableThinking`: the
+    // picker is where that fact becomes a selectable level, and the wire
+    // spelling is `reasoning_effort: "none"`.
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['none', 'low', 'high', 'max'])
     expect(resolved.reasoning?.defaultEffort).toBe('high')
   })
 

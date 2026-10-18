@@ -34,6 +34,12 @@ import {
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { maxOutputTokensFor } from './model-catalog.ts'
+import {
+  printedCallHoldIndex,
+  printedCallLooksComplete,
+  recoverPrintedToolCalls,
+  type PrintedToolCall,
+} from './dsml.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -418,6 +424,147 @@ function openAIAssistantContent(message: Message): { content: string; toolCalls:
   return { content: textParts.join(''), toolCalls }
 }
 
+// ---------------------------------------------------------------------------
+// History repair
+// ---------------------------------------------------------------------------
+
+/** Whether one wire message is an assistant turn. */
+function isAssistantTurn(message: OpenAIMessage): boolean {
+  return message.role === 'assistant'
+}
+
+/**
+ * The text of one assistant turn, or `undefined` when the message is not an
+ * assistant turn or does not carry plain text.
+ */
+function assistantTextOf(message: OpenAIMessage): string | undefined {
+  if (!isAssistantTurn(message)) return undefined
+  // Every assistant turn this builder emits carries a string; a shape it did
+  // not build itself is left alone rather than rewritten.
+  return typeof message.content === 'string' ? message.content : undefined
+}
+
+/** The tool calls one wire message declares, which may be none. */
+function toolCallsOf(message: OpenAIMessage): OpenAIMessage[] {
+  return Array.isArray(message.tool_calls) ? message.tool_calls as OpenAIMessage[] : []
+}
+
+/**
+ * Concatenate one assistant turn's text onto another.
+ *
+ * A concatenation that would merge two words is separated by a single space: a
+ * batch split across turns ends its first turn mid-sentence, so `"let me"` +
+ * `"look"` has to leave as `"let me look"` and not `"let melook"`.
+ */
+function appendAssistantText(base: string, extra: string): string {
+  if (extra === '') return base
+  if (base === '') return extra
+  if (/\s$/.test(base) || /^\s/.test(extra) || /[\u3000-\u9fff\uff00-\uff9f]/.test(base + extra)) return base + extra
+  return `${base} ${extra}`
+}
+
+/**
+ * Fold adjacent assistant turns that each carry tool calls into one turn.
+ *
+ * A parallel batch the harness serialized as two assistant messages is one
+ * batch to the upstream, and only one assistant turn may declare it: a gateway
+ * that sees the batch split rejects every later turn of that conversation. Text
+ * is concatenated and the calls are appended in order, ids untouched. A tool
+ * result between two assistant turns is what proves they are separate turns,
+ * so only the immediately adjacent run is merged — the following tool results
+ * keep their own order.
+ */
+function mergeSplitToolCallBatches(messages: readonly OpenAIMessage[]): OpenAIMessage[] {
+  const repaired: OpenAIMessage[] = []
+  for (const message of messages) {
+    const text = assistantTextOf(message)
+    const calls = toolCallsOf(message)
+    const previous = repaired.length > 0 ? repaired[repaired.length - 1]! : undefined
+    const previousText = previous === undefined ? undefined : assistantTextOf(previous)
+    if (
+      text !== undefined
+      && previous !== undefined
+      && previousText !== undefined
+      && (calls.length > 0 || toolCallsOf(previous).length > 0)
+    ) {
+      // The guard above already proved at least one of the two turns carries
+      // calls, so the merged turn always declares them.
+      repaired[repaired.length - 1] = {
+        ...previous,
+        content: appendAssistantText(previousText, text),
+        tool_calls: [...toolCallsOf(previous), ...calls],
+      }
+      continue
+    }
+    repaired.push(message)
+  }
+  return repaired
+}
+
+/**
+ * The text an assistant tool call is answered with when its result never came.
+ *
+ * This text is invented on purpose, exactly as the sibling gateway invents it:
+ * an interrupted run leaves the call declared with no `role: "tool"` reply, and
+ * the upstream rejects the whole turn rather than the missing result. Sending a
+ * sentence the model can read beats both alternatives — dropping the call
+ * silently rewrites history the model already saw (and leaves the *next*
+ * assistant turn referring to a call that is no longer there), while dropping
+ * the turn throws away the rest of the conversation's context. The wording is
+ * deliberately unlike a real tool output: it is short, says it failed, and
+ * carries no content that could be mistaken for a result.
+ */
+const NO_TOOL_RESULT_TEXT = '[no result: the tool call did not complete]'
+
+/**
+ * Answer every declared tool call that has no `role: "tool"` message.
+ *
+ * The window is the stretch before the next assistant turn: call ids are only
+ * meaningful inside one turn's batch, and a later turn's results may reuse none
+ * of them. Calls that were answered are left alone, and the invented replies go
+ * after the results that did arrive so the real ones keep their position.
+ */
+function fillMissingToolResults(messages: readonly OpenAIMessage[]): OpenAIMessage[] {
+  const repaired: OpenAIMessage[] = []
+  let index = 0
+  while (index < messages.length) {
+    const message = messages[index]!
+    repaired.push(message)
+    index += 1
+    if (!isAssistantTurn(message)) continue
+
+    const calls = toolCallsOf(message)
+    if (calls.length === 0) continue
+
+    // The turn's results, up to the next assistant turn (or the end).
+    const answered = new Set<string>()
+    const results: OpenAIMessage[] = []
+    while (index < messages.length && !isAssistantTurn(messages[index]!)) {
+      const result = messages[index]!
+      if (result.role === 'tool' && typeof result.tool_call_id === 'string') answered.add(result.tool_call_id)
+      results.push(result)
+      index += 1
+    }
+
+    const invented: OpenAIMessage[] = []
+    for (const call of calls) {
+      const id = typeof call.id === 'string' ? call.id : ''
+      // A call with no id cannot be answered: `tool_call_id` would be empty and
+      // the upstream would reject that message instead of the turn.
+      if (id === '' || answered.has(id)) continue
+      invented.push({ role: 'tool', tool_call_id: id, content: NO_TOOL_RESULT_TEXT })
+    }
+    // A user turn can close this window — the image a tool-result carried, and
+    // any user message after it. An invented `tool` reply must not land beyond
+    // one of those, or the turn's answers stop being one uninterrupted run, so
+    // they go in front of the whole trailing run of user turns.
+    let insertAt = results.length
+    while (insertAt > 0 && results[insertAt - 1]!.role === 'user') insertAt -= 1
+    repaired.push(...results.slice(0, insertAt), ...invented, ...results.slice(insertAt))
+  }
+  return repaired
+}
+
 /**
  * Build one `/v2/chat/completions` body.
  *
@@ -467,12 +614,19 @@ export function buildChatRequest(
   }
 
   const effort = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
+  // Two repairs run between the projection and the body, in this order: a batch
+  // that was split is folded back into one assistant turn, then every call that
+  // turn declares is guaranteed an answer. Nothing else is invented: an empty
+  // `reasoning_content` backfill was measured against both deployments on
+  // 2026-10-18 and neither requires it, so the field is not sent
+  // (`scripts/probe-workbuddy-assumptions.probe.ts`).
+  const repairedMessages = fillMissingToolResults(mergeSplitToolCallBatches(messages))
   const body: Record<string, unknown> = {
     model: options.model,
-    messages,
+    messages: repairedMessages,
     stream: true,
     stream_options: { include_usage: true },
-    max_tokens: options.maxTokens ?? maxOutputTokensFor(options.model),
+    max_tokens: clampMinimumOutput(options.model, options.maxTokens ?? maxOutputTokensFor(options.model)),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options.stop && options.stop.length > 0 ? { stop: options.stop } : {}),
     ...(options.tools && options.tools.length > 0
@@ -519,6 +673,14 @@ export interface WorkBuddyStreamState {
   cacheWriteTokens: number
   reasoningTokens: number
   sawUsage: boolean
+  /**
+   * Text held back while it may still turn into a printed tool call.
+   *
+   * `holding` is set once a `<` that could open a call region was seen; the
+   * buffer then grows until the region closes (or the cap is hit), and is
+   * resolved into prose or calls exactly once.
+   */
+  printed: { pending: string; holding: boolean }
 }
 
 export function createStreamState(): WorkBuddyStreamState {
@@ -537,7 +699,104 @@ export function createStreamState(): WorkBuddyStreamState {
     cacheWriteTokens: 0,
     reasoningTokens: 0,
     sawUsage: false,
+    printed: { pending: '', holding: false },
   }
+}
+
+/**
+ * Smallest output request the GPT-family upstreams accept.
+ *
+ * Measured upstream behaviour (also pinned by workbuddy2api-hub as #364/#252):
+ * a `gpt-*` model rejects `max_tokens` below 16 with 400
+ * `integer_below_min_value`, while every other family accepts a small value.
+ * This route only ever asks for a small cap on purpose — the connection probe and
+ * an output-limit probe both do — so the floor is applied here rather than left
+ * for each caller to remember.
+ */
+const MINIMUM_GPT_MAX_TOKENS = 16
+
+/** Raise a GPT-family output request to the floor that family enforces. */
+function clampMinimumOutput(model: string, maxTokens: number): number {
+  if (!model.trimStart().toLowerCase().startsWith('gpt-')) return maxTokens
+  return Math.max(maxTokens, MINIMUM_GPT_MAX_TOKENS)
+}
+
+/** Longest printed-call region held before it is written out as prose anyway. */
+const PRINTED_CALL_LIMIT = 64 * 1024
+
+/** Append prose to the open text block, opening one when needed. */
+function emitProse(state: WorkBuddyStreamState, text: string): StreamChunk[] {
+  if (text === '') return []
+  const out = closeToolCalls(state)
+  if (state.current === null || state.current.type !== 'text') out.push(...openTextBlock(state, 'text'))
+  state.current!.text += text
+  state.hasContent = true
+  out.push({ type: 'text-delta', index: state.current!.index, text })
+  return out
+}
+
+/** Emit recovered calls as settled tool-call blocks. */
+function emitPrintedCalls(state: WorkBuddyStreamState, calls: readonly PrintedToolCall[]): StreamChunk[] {
+  const out = closeCurrent(state)
+  for (const call of calls) {
+    const index = state.blocks.length
+    const id = toToolCallId(call.id)
+    const block: OutboundContentBlock = { type: 'tool-call', id, name: call.name, arguments: call.arguments }
+    state.blocks.push(block)
+    out.push({ type: 'block-start', index, blockType: 'tool-call' })
+    out.push({ type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments })
+    out.push({ type: 'block-end', index, block })
+    state.hasToolCall = true
+    state.hasContent = true
+  }
+  return out
+}
+
+/**
+ * Release held text, resolving it into prose or calls.
+ *
+ * `force` is what the end of a turn passes: whatever is still held must be
+ * written out rather than dropped, even when it never closed.
+ */
+function drainPrinted(state: WorkBuddyStreamState, force: boolean): StreamChunk[] {
+  const out: StreamChunk[] = []
+  for (;;) {
+    const pending = state.printed.pending
+    if (pending === '') return out
+
+    if (!state.printed.holding) {
+      const hold = printedCallHoldIndex(pending)
+      if (hold === -1) {
+        out.push(...emitProse(state, pending))
+        state.printed.pending = ''
+        return out
+      }
+      if (hold > 0) out.push(...emitProse(state, pending.slice(0, hold)))
+      state.printed.pending = pending.slice(hold)
+      state.printed.holding = true
+    }
+
+    const buffer = state.printed.pending
+    if (!force && !printedCallLooksComplete(buffer) && buffer.length < PRINTED_CALL_LIMIT) return out
+
+    state.printed.holding = false
+    state.printed.pending = ''
+    const recovered = recoverPrintedToolCalls(buffer)
+    if (recovered === null) {
+      out.push(...emitProse(state, buffer))
+      return out
+    }
+    if (recovered.clean !== '') out.push(...emitProse(state, recovered.clean))
+    out.push(...emitPrintedCalls(state, recovered.calls))
+    return out
+  }
+}
+
+/** Append chat text, recovering a call the model printed instead of emitting. */
+function feedText(state: WorkBuddyStreamState, text: string): StreamChunk[] {
+  if (text === '') return []
+  state.printed.pending += text
+  return drainPrinted(state, false)
 }
 
 function closeCurrent(state: WorkBuddyStreamState): StreamChunk[] {
@@ -639,11 +898,7 @@ export function processStreamLine(line: string, state: WorkBuddyStreamState): St
 
     const content = asString(delta.content)
     if (content !== undefined && content !== '') {
-      out.push(...closeToolCalls(state))
-      if (state.current === null || state.current.type !== 'text') out.push(...openTextBlock(state, 'text'))
-      state.current!.text += sanitizeText(content)
-      state.hasContent = true
-      out.push({ type: 'text-delta', index: state.current!.index, text: sanitizeText(content) })
+      out.push(...feedText(state, sanitizeText(content)))
     }
 
     const toolDeltas = Array.isArray(delta.tool_calls) ? delta.tool_calls : []
@@ -656,6 +911,9 @@ export function processStreamLine(line: string, state: WorkBuddyStreamState): St
   const finish = asString(choice?.finish_reason)
   if (finish !== undefined && finish !== '') {
     state.finishReason = finish
+    // Held text is resolved before the blocks close, or a printed call that
+    // never saw a closing tag would be dropped at the terminal frame.
+    out.push(...drainPrinted(state, true))
     out.push(...closeCurrent(state))
     out.push(...closeToolCalls(state))
   }
@@ -736,7 +994,7 @@ function finishReasonFor(state: WorkBuddyStreamState): FinishReason {
 export function closeStream(state: WorkBuddyStreamState): StreamChunk[] {
   if (state.finished) return []
   state.finished = true
-  const out = [...closeCurrent(state), ...closeToolCalls(state)]
+  const out = [...drainPrinted(state, true), ...closeCurrent(state), ...closeToolCalls(state)]
   if (state.sawUsage) out.push({ type: 'usage', usage: tokenUsage(state) })
   out.push({ type: 'finish', reason: finishReasonFor(state) })
   return out

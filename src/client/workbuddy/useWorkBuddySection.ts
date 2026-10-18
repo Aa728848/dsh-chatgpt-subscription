@@ -14,7 +14,9 @@ import type {
   WorkBuddyAccountQuota,
   WorkBuddyAccountSummaryDto,
   WorkBuddyCheckinSettings,
+  WorkBuddyGuardrailsDto,
   WorkBuddyModelOption,
+  WorkBuddyOutboundSetting,
   WorkBuddyReasoningEffort,
   WorkBuddyWebStatus,
 } from '../../shared/workbuddy-contracts.ts'
@@ -230,6 +232,16 @@ export interface WorkBuddySectionView {
     resetAllContextWindows(): Promise<void>
     /** Edit one capacity draft mid-typing; the editor never parses it. */
     updateContextDraft(modelId: string, draft: string): void
+    /** Switch which client identity chat requests present. */
+    updateOutboundIdentity(setting: WorkBuddyOutboundSetting): Promise<void>
+    /** Arm, change or clear the local quota guardrails. */
+    updateGuardrails(guardrails: Partial<WorkBuddyGuardrailsDto>): Promise<void>
+    /** Replace one account's model blacklist (an empty list clears it). */
+    updateDisabledModels(accountId: string, models: string[]): Promise<void>
+    /** Store the desktop client's at-rest key so sealed credentials can be read. */
+    saveAtRestKey(key: string): Promise<void>
+    /** Forget that key; sealed accounts become unreadable again. */
+    clearAtRestKey(): Promise<void>
   }
 }
 
@@ -480,6 +492,91 @@ export function useWorkBuddySection({ onModelChange, loadModelDirectory }: WorkB
     }
   }
 
+  /** Switch which client identity chat requests present. */
+  const updateOutboundIdentity = async (outboundIdentity: WorkBuddyOutboundSetting) => {
+    try {
+      setBusy('outbound')
+      setError(null)
+      const updated = await api.request<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ outboundIdentity }),
+      })
+      setStatus(normalizeStatus(updated))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Arm, change or clear the local quota guardrails. */
+  const updateGuardrails = async (guardrails: Partial<WorkBuddyGuardrailsDto>) => {
+    try {
+      setBusy('guardrails')
+      setError(null)
+      const updated = await api.request<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ guardrails }),
+      })
+      setStatus(normalizeStatus(updated))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Replace one account's model blacklist; the route takes the whole map. */
+  const updateDisabledModels = async (accountId: string, models: string[]) => {
+    const next: Record<string, string[]> = { ...(status?.disabledModels ?? {}) }
+    if (models.length === 0) delete next[accountId]
+    else next[accountId] = models
+    try {
+      setBusy(`disabled:${accountId}`)
+      setError(null)
+      const updated = await api.request<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ disabledModels: next }),
+      })
+      setStatus(normalizeStatus(updated))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Store the desktop client's at-rest key, which unlocks sealed credentials. */
+  const saveAtRestKey = async (key: string) => {
+    try {
+      setBusy('atrest')
+      setError(null)
+      const updated = await api.request<WorkBuddyWebStatus>('/at-rest-key', {
+        method: 'POST',
+        body: JSON.stringify({ key }),
+      })
+      setStatus(normalizeStatus(updated))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Forget the at-rest key; sealed accounts become unreadable again. */
+  const clearAtRestKey = async () => {
+    try {
+      setBusy('atrest')
+      setError(null)
+      const updated = await api.request<WorkBuddyWebStatus>('/at-rest-key', { method: 'DELETE' })
+      setStatus(normalizeStatus(updated))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const toggleModel = async (modelId: string, enabled: boolean) => {
     if (status === null) return
     const current = status.models.filter((model) => model.enabled).map((model) => model.id)
@@ -682,6 +779,11 @@ export function useWorkBuddySection({ onModelChange, loadModelDirectory }: WorkB
       resetContextWindow,
       resetAllContextWindows,
       updateContextDraft,
+      updateOutboundIdentity,
+      updateGuardrails,
+      updateDisabledModels,
+      saveAtRestKey,
+      clearAtRestKey,
     },
   }
 }

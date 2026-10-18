@@ -13,10 +13,15 @@ import {
 import {
   FileCredentialStore,
   FileModelSettingsStore,
+  sealedCredentialDiagnostics,
   workBuddyAccountIdAliases,
+  type WorkBuddyAtRestKeyStore,
   type WorkBuddyModelSettings,
   type WorkBuddyPreferenceStore,
 } from './token-store.ts'
+import { hasAtRestKey } from './atrest.ts'
+import { normalizeOutboundSetting } from './outbound-identity.ts'
+import { normalizeGuardrails } from './guardrails.ts'
 import {
   accountFromCredentials,
   clearCachedCatalog,
@@ -178,6 +183,13 @@ export interface WorkBuddyStatusOptions {
   accountPool?: WorkBuddyAccountPool
   /** Daily check-in scheduler; absent leaves the card's check-in row empty. */
   checkin?: Pick<WorkBuddyCheckinService, 'tick' | 'summary'>
+  /**
+   * Storage for the `$wbEncrypted` at-rest key.
+   *
+   * Absent hides the whole control: without it a pasted key could not be
+   * remembered, and offering the field anyway would lose it on restart.
+   */
+  atRestKey?: Pick<WorkBuddyAtRestKeyStore, 'adopt' | 'clear' | 'load' | 'path'>
 }
 
 function readOption<T>(value: T | (() => T) | undefined, fallback: T): T {
@@ -193,6 +205,7 @@ export async function getWorkBuddyWebStatus(
 ): Promise<WorkBuddyWebStatus> {
   const settings: WorkBuddyModelSettings = preferences ? preferences.status() : await modelSettings.read()
   const credentials = await store.read({ accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
+  const sealedDiagnostics = sealedCredentialDiagnostics()
   const enabled = settings.enabled !== false
 
   // The gateway's own catalog is the authority on capabilities; without a
@@ -264,6 +277,14 @@ export async function getWorkBuddyWebStatus(
     activeAccountId: poolData?.activeAccountId,
     rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
     checkin,
+    outboundIdentity: normalizeOutboundSetting(settings.outboundIdentity),
+    guardrails: normalizeGuardrails(settings.guardrails),
+    disabledModels: settings.disabledModels,
+    atRestKeySet: hasAtRestKey(),
+    sealedAccounts: sealedDiagnostics.sealedFiles,
+    sealedAccountsError: sealedDiagnostics.missingKey
+      ? 'The CodeBuddy desktop client seals its tokens; paste its at-rest key to read them.'
+      : sealedDiagnostics.lastError,
   }
 }
 
@@ -292,7 +313,9 @@ export function registerWorkBuddyRoutes(
         if (path === '' || path === 'status') {
           if (method !== 'GET') return sendMethodNotAllowed(response)
           // A cached scan can hide a credential the user just created, so the
-          // status read always re-reads the directory.
+          // status read always re-reads the directory. The at-rest key is
+          // settled first, or a sealed credential would be reported as missing.
+          await options.atRestKey?.load().catch(() => null)
           const settings = preferences ? preferences.status() : await modelSettings.read()
           await store.read({ force: true, accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds }).catch(() => null)
           const credentials = await store.read({ accountId: settings.selectedAccountId, hiddenAccountIds: settings.hiddenAccountIds })
@@ -564,6 +587,37 @@ export function registerWorkBuddyRoutes(
             const raw = body.checkin as Record<string, unknown>
             if (typeof raw.enabled === 'boolean') patch.checkin = { enabled: raw.enabled }
           }
+          if (typeof body.guardrails === 'object' && body.guardrails !== null) {
+            const raw = body.guardrails as Record<string, unknown>
+            const guardrails: Record<string, number> = {}
+            for (const field of ['reserveCredits', 'dailyTokens', 'modelDailyTokens'] as const) {
+              const value = raw[field]
+              if (value === undefined) continue
+              if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+                return sendJson(response, 400, { ok: false, error: `${field} must be a non-negative number.` })
+              }
+              guardrails[field] = Math.floor(value)
+            }
+            patch.guardrails = guardrails
+          }
+          if (typeof body.disabledModels === 'object' && body.disabledModels !== null) {
+            const raw = body.disabledModels as Record<string, unknown>
+            const disabledModels: Record<string, string[]> = {}
+            for (const [accountId, models] of Object.entries(raw)) {
+              if (!Array.isArray(models)) {
+                return sendJson(response, 400, { ok: false, error: 'disabledModels values must be arrays of model ids.' })
+              }
+              disabledModels[accountId] = models.filter((model): model is string => typeof model === 'string')
+            }
+            patch.disabledModels = disabledModels
+          }
+          if (body.outboundIdentity !== undefined) {
+            const requested = normalizeOutboundSetting(body.outboundIdentity)
+            if (requested !== body.outboundIdentity) {
+              return sendJson(response, 400, { ok: false, error: 'Unsupported outbound identity.' })
+            }
+            patch.outboundIdentity = requested
+          }
           if (body.selectedAccountId !== undefined) {
             const selected = body.selectedAccountId
             if (selected === null || typeof selected === 'string') {
@@ -599,6 +653,39 @@ export function registerWorkBuddyRoutes(
           await loadConfigCatalog(credentials, { fetchFn, force: true }).catch(() => undefined)
           const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
           return sendJson(response, 200, { ok: true, value })
+        }
+
+        if (path === 'at-rest-key') {
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          const keyStore = options.atRestKey
+          if (keyStore === undefined) return sendJson(response, 400, { ok: false, error: 'At-rest key storage is not installed.' })
+          if (method === 'DELETE') {
+            await keyStore.clear()
+            // Sealed accounts became unreadable with the key gone, so the caches
+            // that hold credentials must not outlive it.
+            store.invalidate()
+            clearCachedQuota()
+            clearCachedCatalog()
+            const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+            return sendJson(response, 200, { ok: true, value })
+          }
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          const body = await readRequestJson(request)
+          const secret = typeof body.key === 'string' ? body.key : ''
+          if (secret.trim() === '') return sendJson(response, 400, { ok: false, error: 'A key is required.' })
+          let keyId: string
+          try {
+            keyId = await keyStore.adopt(secret)
+          } catch (error) {
+            // A rejected key is a user-facing verdict, not a server fault: the
+            // keyblob check exists so a typo names itself here.
+            return sendJson(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+          }
+          store.invalidate()
+          clearCachedQuota()
+          clearCachedCatalog()
+          const value = await getWorkBuddyWebStatus(store, modelSettings, preferences, options)
+          return sendJson(response, 200, { ok: true, value: { ...value, atRestKeyId: keyId } })
         }
 
         if (path === 'accounts/strategy') {

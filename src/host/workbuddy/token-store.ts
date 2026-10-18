@@ -11,6 +11,27 @@ import { hasRegister, resolveSettingsNamespace, type SettingsScope } from '../co
 import { mergeContextWindowOverrides, type ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import { DEFAULT_VISIBLE_MODEL_IDS } from './model-catalog.ts'
 import { withResolvedIdentity } from './identity.ts'
+import {
+  DEFAULT_GUARDRAILS,
+  normalizeDisabledModels,
+  normalizeGuardrails,
+  type WorkBuddyGuardrails,
+} from './guardrails.ts'
+import {
+  DEFAULT_OUTBOUND_SETTING,
+  normalizeOutboundSetting,
+  type WorkBuddyOutboundSetting,
+} from './outbound-identity.ts'
+import {
+  AtRestError,
+  activeAtRestKey,
+  deriveKeyId,
+  isSealedValue,
+  openSealedField,
+  parseKeyText,
+  setActiveAtRestKey,
+  verifyKeyAgainstKeyBlob,
+} from './atrest.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
@@ -63,6 +84,15 @@ export interface WorkBuddyCredentials {
   sourceMtimeMs: number
   /** Which store owns the secret; only managed credentials may be deleted. */
   source: 'desktop' | 'managed'
+  /**
+   * Sealed token material, when the file holds `$wbEncrypted` envelopes.
+   *
+   * The desktop client stopped writing plaintext tokens on 2026-09-24, so a
+   * credential read from such a file has no usable `accessToken` until the
+   * at-rest key opens these. They are kept verbatim here — never logged, never
+   * sent anywhere — and resolved by {@link unsealCredentials}.
+   */
+  sealed?: { accessToken?: unknown; refreshToken?: unknown }
 }
 
 export interface WorkBuddyModelSettings {
@@ -76,6 +106,25 @@ export interface WorkBuddyModelSettings {
   hiddenAccountIds: string[]
   /** Daily check-in scheduler preferences. */
   checkin: WorkBuddyCheckinSettings
+  /**
+   * Which outbound client identity requests present.
+   *
+   * `auto` assigns one product per account (stable for the account's life);
+   * anything else pins it line-wide. The default is the identity this line has
+   * always sent, so an untouched install behaves exactly as before.
+   */
+  outboundIdentity: WorkBuddyOutboundSetting
+  /** Local quota guardrails; all-off by default. */
+  guardrails: WorkBuddyGuardrails
+  /**
+   * Models one account must never be asked to serve, keyed by pool account id.
+   *
+   * The automatic park (a 429 window) is time-boxed; this one is a standing
+   * instruction — a model that account is not entitled to, or one the user does
+   * not want it spending on. Enforced in the same exclusion path as the park, so
+   * a blacklisted model simply routes to another account.
+   */
+  disabledModels: Record<string, string[]>
 }
 
 export interface WorkBuddyPreferenceStore {
@@ -99,6 +148,9 @@ export interface WorkBuddyPreferenceStore {
     selectedAccountId?: string | null
     hiddenAccountIds?: string[]
     checkin?: Partial<WorkBuddyCheckinSettings>
+    outboundIdentity?: WorkBuddyOutboundSetting
+    guardrails?: Partial<WorkBuddyGuardrails>
+    disabledModels?: Record<string, string[]>
   }): Promise<WorkBuddyModelSettings>
 }
 
@@ -139,6 +191,9 @@ export function registerWorkBuddyPreferenceStore(
       selectedAccountId: null,
       hiddenAccountIds: [],
       checkin: { ...DEFAULT_CHECKIN_SETTINGS },
+      outboundIdentity: DEFAULT_OUTBOUND_SETTING,
+      guardrails: { ...DEFAULT_GUARDRAILS },
+      disabledModels: {},
     }
     // The warmup promise is kept so a startup caller can await it instead of
     // racing it; `status()` still answers immediately from the defaults.
@@ -168,6 +223,15 @@ export function registerWorkBuddyPreferenceStore(
     checkin: z.object({
       enabled: z.boolean().default(true),
     }).default({ enabled: true }),
+    outboundIdentity: z
+      .union([z.const('auto'), z.const('cli'), z.const('workbuddy'), z.const('vscode')])
+      .default(DEFAULT_OUTBOUND_SETTING),
+    guardrails: z.object({
+      reserveCredits: z.number().min(0).default(0),
+      dailyTokens: z.number().min(0).default(0),
+      modelDailyTokens: z.number().min(0).default(0),
+    }).default({ ...DEFAULT_GUARDRAILS }),
+    disabledModels: z.dict(z.array(z.string())).default({}),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
@@ -176,6 +240,9 @@ export function registerWorkBuddyPreferenceStore(
     selectedAccountId: string | null
     hiddenAccountIds: string[]
     checkin: WorkBuddyCheckinSettings
+    outboundIdentity: WorkBuddyOutboundSetting
+    guardrails: WorkBuddyGuardrails
+    disabledModels: Record<string, string[]>
   }>
 
   return {
@@ -192,6 +259,9 @@ export function registerWorkBuddyPreferenceStore(
         selectedAccountId: value.selectedAccountId,
         hiddenAccountIds: value.hiddenAccountIds,
         checkin: normalizeCheckinSettings(value.checkin),
+        outboundIdentity: normalizeOutboundSetting(value.outboundIdentity),
+        guardrails: normalizeGuardrails(value.guardrails),
+        disabledModels: normalizeDisabledModels(value.disabledModels),
       }
     },
     update: async (patch) => {
@@ -212,6 +282,13 @@ export function registerWorkBuddyPreferenceStore(
         checkin: patch.checkin !== undefined
           ? normalizeCheckinSettings({ ...normalizeCheckinSettings(current.checkin), ...patch.checkin })
           : normalizeCheckinSettings(current.checkin),
+        outboundIdentity: patch.outboundIdentity !== undefined
+          ? normalizeOutboundSetting(patch.outboundIdentity)
+          : normalizeOutboundSetting(current.outboundIdentity),
+        guardrails: patch.guardrails !== undefined
+          ? normalizeGuardrails({ ...normalizeGuardrails(current.guardrails), ...patch.guardrails })
+          : normalizeGuardrails(current.guardrails),
+        disabledModels: normalizeDisabledModels(patch.disabledModels ?? current.disabledModels),
       }
       await scope.update(normalized)
       void fallbackStore.updateSettings(patch).catch(() => undefined)
@@ -252,6 +329,89 @@ export function managedCredentialsPath(): string {
   return path.join(dshHomeDir(), 'storages', 'workbuddy-accounts.json')
 }
 
+/** Platform-encrypted storage for the pasted at-rest key (never plaintext on disk). */
+export function atRestKeyPath(): string {
+  return path.join(dshHomeDir(), 'storages', 'workbuddy-atrest-key.json')
+}
+
+function createAtRestKeyBackend(filePath: string): CredentialStore<{ version: 1; keyHex: string }> {
+  const parse = (value: unknown) => {
+    const record = isRecord(value) ? value : {}
+    return { version: 1 as const, keyHex: typeof record.keyHex === 'string' ? record.keyHex : '' }
+  }
+  if (process.platform === 'win32') return new WindowsDpapiCredentialStore(`${filePath}.dpapi`, parse)
+  if (process.platform === 'darwin') return new MacKeychainCredentialStore('dsh-workbuddy-atrest', managedCredentialAccount(filePath), parse)
+  if (process.platform === 'linux') return new SecretServiceCredentialStore('dsh-workbuddy-atrest', managedCredentialAccount(filePath), parse)
+  throw new Error('WorkBuddy encrypted key storage requires Windows, macOS, or Linux.')
+}
+
+/**
+ * Storage for the `$wbEncrypted` protector key.
+ *
+ * The key is the one secret that unlocks the desktop client's tokens, so it goes
+ * through the same platform store the managed pool uses (DPAPI / Keychain /
+ * Secret Service) and is installed into the process only after the client's own
+ * keyblob accepts it. A pasted value that fails that check never displaces a
+ * working key.
+ */
+export class WorkBuddyAtRestKeyStore {
+  private cached: Buffer | null = null
+
+  constructor(
+    private readonly filePath = atRestKeyPath(),
+    private readonly backend: CredentialStore<{ version: 1; keyHex: string }> = createAtRestKeyBackend(filePath),
+  ) {}
+
+  /** Human-readable storage description, mirroring the managed pool's. */
+  path(): string {
+    if (process.platform === 'win32') return `${this.filePath}.dpapi`
+    const kind = process.platform === 'darwin' ? 'Keychain' : 'Secret Service'
+    return `${kind}: dsh-workbuddy-atrest/${managedCredentialAccount(this.filePath)}`
+  }
+
+  /**
+   * Load the stored key into the process.
+   *
+   * Called once at startup: the credential readers consult the module-level
+   * slot, so a key that is only on disk would otherwise leave every sealed
+   * account unreadable until something else triggered a load.
+   */
+  async load(): Promise<Buffer | null> {
+    if (this.cached !== null) {
+      setActiveAtRestKey(this.cached)
+      return this.cached
+    }
+    const stored = await this.backend.load().catch(() => null)
+    const hex = stored?.keyHex ?? ''
+    if (!/^[0-9a-f]{64}$/i.test(hex)) {
+      setActiveAtRestKey(null)
+      return null
+    }
+    this.cached = Buffer.from(hex, 'hex')
+    setActiveAtRestKey(this.cached)
+    return this.cached
+  }
+
+  /** Validate and persist a pasted secret; returns the key id for display. */
+  async adopt(text: string): Promise<string> {
+    const key = parseKeyText(text)
+    // Best-effort: throws only when a keyblob exists and disagrees, which is
+    // exactly the typo case this check exists for.
+    await verifyKeyAgainstKeyBlob(key)
+    await this.backend.save({ version: 1, keyHex: key.toString('hex') })
+    this.cached = key
+    setActiveAtRestKey(key)
+    return deriveKeyId(key)
+  }
+
+  /** Forget the key, both on disk and in this process. */
+  async clear(): Promise<void> {
+    this.cached = null
+    setActiveAtRestKey(null)
+    await this.backend.clear().catch(() => undefined)
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -276,8 +436,19 @@ export function parseCredentialFile(value: unknown, sourceFile: string, sourceMt
   const auth = isRecord(value.auth) ? value.auth : undefined
   if (auth === undefined) throw new Error('WorkBuddy credential file has no auth block')
 
-  const accessToken = readString(auth, 'accessToken')
-  if (accessToken === undefined) throw new Error('WorkBuddy credential file has no access token')
+  // Since 2026-09-24 the desktop client seals its tokens (`$wbEncrypted`), so a
+  // usable token may be an envelope rather than a string. Such a file is still
+  // a valid credential — it just needs the at-rest key before it can be used,
+  // which is why it is accepted here and resolved by `unsealCredentials`.
+  const rawAccess = auth.accessToken
+  const sealedAccess = isSealedValue(rawAccess) ? rawAccess : undefined
+  const plainAccess = sealedAccess === undefined ? readString(auth, 'accessToken') : undefined
+  if (sealedAccess === undefined && plainAccess === undefined) {
+    throw new Error('WorkBuddy credential file has no access token')
+  }
+  const accessToken = plainAccess ?? ''
+  const rawRefresh = auth.refreshToken
+  const sealedRefresh = isSealedValue(rawRefresh) ? rawRefresh : undefined
 
   const account = isRecord(value.account) ? value.account : {}
   const domain = readString(auth, 'domain') ?? DEFAULT_DOMAIN
@@ -292,7 +463,15 @@ export function parseCredentialFile(value: unknown, sourceFile: string, sourceMt
   // goes through.
   return withResolvedIdentity({
     accessToken,
-    refreshToken: readString(auth, 'refreshToken') ?? '',
+    refreshToken: sealedRefresh === undefined ? (readString(auth, 'refreshToken') ?? '') : '',
+    ...(sealedAccess === undefined && sealedRefresh === undefined
+      ? {}
+      : {
+          sealed: {
+            ...(sealedAccess === undefined ? {} : { accessToken: sealedAccess }),
+            ...(sealedRefresh === undefined ? {} : { refreshToken: sealedRefresh }),
+          },
+        }),
     expiresAt,
     region: regionForDomain(domain),
     domain,
@@ -412,6 +591,66 @@ export function parseManagedCredentials(value: unknown): WorkBuddyCredentials[] 
  * mtime selected a stale snapshot during development, so the token's own
  * expiry is what decides.
  */
+/** What the last credential scan observed about sealed (`$wbEncrypted`) files. */
+export interface SealedCredentialDiagnostics {
+  /** Sealed credential files the scan met. */
+  sealedFiles: number
+  /** Of those, how many the held key opened. */
+  opened: number
+  /** True when at least one sealed file was skipped because no key is held. */
+  missingKey: boolean
+  /** Why the last sealed file refused to open, when it did. */
+  lastError: string | null
+}
+
+let sealedDiagnostics: SealedCredentialDiagnostics = {
+  sealedFiles: 0,
+  opened: 0,
+  missingKey: false,
+  lastError: null,
+}
+
+/** Snapshot of the last scan's sealed-credential observations. */
+export function sealedCredentialDiagnostics(): SealedCredentialDiagnostics {
+  return { ...sealedDiagnostics }
+}
+
+/** Start a fresh scan window; the settings card reads what the last scan left. */
+function resetSealedDiagnostics(): void {
+  sealedDiagnostics = { sealedFiles: 0, opened: 0, missingKey: false, lastError: null }
+}
+
+/**
+ * Resolve a credential's sealed tokens into usable plaintext.
+ *
+ * Returns `null` when the credential is sealed and this process holds no key
+ * that opens it: such a file is not an error the caller can act on per-file, it
+ * is a missing key the settings card reports once.
+ */
+export function unsealCredentials<T extends WorkBuddyCredentials>(credentials: T): T | null {
+  if (credentials.sealed === undefined) return credentials
+  sealedDiagnostics.sealedFiles += 1
+  const key = activeAtRestKey()
+  if (key === null) {
+    sealedDiagnostics.missingKey = true
+    return null
+  }
+  try {
+    const accessToken = openSealedField(key, credentials.sealed.accessToken)
+    if (accessToken === '') throw new AtRestError('sealed access token opened to an empty string')
+    const refreshToken = credentials.sealed.refreshToken === undefined
+      ? credentials.refreshToken
+      : openSealedField(key, credentials.sealed.refreshToken)
+    sealedDiagnostics.opened += 1
+    // The token is only now readable, so the identity heal that the parser could
+    // not perform (it had no claims to read) runs here instead.
+    return withResolvedIdentity({ ...credentials, accessToken, refreshToken, sealed: undefined })
+  } catch (error) {
+    sealedDiagnostics.lastError = error instanceof Error ? error.message : String(error)
+    return null
+  }
+}
+
 function isCanonicalFile(name: string): boolean {
   return /^(workbuddy|codebuddy)-desktop(-\w+)?\.info$/i.test(name)
 }
@@ -432,6 +671,7 @@ export async function scanCredentials(dir = codeBuddyAuthDir()): Promise<WorkBud
     throw new Error(`WorkBuddy credential directory could not be read: ${dir}`)
   }
 
+  resetSealedDiagnostics()
   const found: WorkBuddyCredentials[] = []
   for (const name of names) {
     if (!name.endsWith('.info')) continue
@@ -440,7 +680,8 @@ export async function scanCredentials(dir = codeBuddyAuthDir()): Promise<WorkBud
       const stats = await fs.stat(file)
       if (!stats.isFile()) continue
       const raw = await fs.readFile(file, 'utf8')
-      found.push(parseCredentialFile(JSON.parse(raw) as unknown, file, stats.mtimeMs))
+      const unsealed = unsealCredentials(parseCredentialFile(JSON.parse(raw) as unknown, file, stats.mtimeMs))
+      if (unsealed !== null) found.push(unsealed)
     } catch {
       // A malformed or concurrently-rewritten snapshot is skipped; the live
       // file is still picked up by its own iteration.
@@ -664,7 +905,7 @@ export class FileCredentialStore {
       const stats = await fs.stat(filePath)
       if (!stats.isFile()) return null
       const raw = await fs.readFile(filePath, 'utf8')
-      return parseCredentialFile(JSON.parse(raw) as unknown, filePath, stats.mtimeMs)
+      return unsealCredentials(parseCredentialFile(JSON.parse(raw) as unknown, filePath, stats.mtimeMs))
     } catch {
       return null
     }
@@ -803,6 +1044,9 @@ export class FileModelSettingsStore {
             ? parsed.hiddenAccountIds.filter((id): id is string => typeof id === 'string')
             : [],
           checkin: normalizeCheckinSettings(parsed.checkin),
+          outboundIdentity: normalizeOutboundSetting(parsed.outboundIdentity),
+          guardrails: normalizeGuardrails(parsed.guardrails),
+          disabledModels: normalizeDisabledModels(parsed.disabledModels),
         }
       }
     } catch {
@@ -816,6 +1060,9 @@ export class FileModelSettingsStore {
       selectedAccountId: null,
       hiddenAccountIds: [],
       checkin: { ...DEFAULT_CHECKIN_SETTINGS },
+      outboundIdentity: DEFAULT_OUTBOUND_SETTING,
+      guardrails: { ...DEFAULT_GUARDRAILS },
+      disabledModels: {},
     }
   }
 
@@ -835,6 +1082,9 @@ export class FileModelSettingsStore {
     selectedAccountId?: string | null
     hiddenAccountIds?: string[]
     checkin?: Partial<WorkBuddyCheckinSettings>
+    outboundIdentity?: WorkBuddyOutboundSetting
+    guardrails?: Partial<WorkBuddyGuardrails>
+    disabledModels?: Record<string, string[]>
   }): Promise<WorkBuddyModelSettings> {
     const current = await this.read()
     const next: WorkBuddyModelSettings = {
@@ -855,6 +1105,15 @@ export class FileModelSettingsStore {
         : {}),
       ...(patch.checkin !== undefined
         ? { checkin: normalizeCheckinSettings({ ...current.checkin, ...patch.checkin }) }
+        : {}),
+      ...(patch.outboundIdentity !== undefined
+        ? { outboundIdentity: normalizeOutboundSetting(patch.outboundIdentity) }
+        : {}),
+      ...(patch.guardrails !== undefined
+        ? { guardrails: normalizeGuardrails({ ...normalizeGuardrails(current.guardrails), ...patch.guardrails }) }
+        : {}),
+      ...(patch.disabledModels !== undefined
+        ? { disabledModels: normalizeDisabledModels(patch.disabledModels) }
         : {}),
     }
     await this.write(next)

@@ -11,6 +11,7 @@ import { installGlmCodingPlanStyles } from '../src/client/glm-coding-plan/styles
 import { installPoolStyles } from '../src/client/common/styles.ts'
 import { installMermaidStyles } from '../src/client/mermaid/styles.ts'
 import { installStepCodeStyles } from '../src/client/step-code/styles.ts'
+import { installProgressUpdatesStyles } from '../src/client/progress-updates/styles.ts'
 
 /** Every sheet this plugin injects, by its `data-plugin-css` sub-name. */
 const SHEETS = [
@@ -29,6 +30,10 @@ const SHEETS = [
   // Credit 桶各自的形状。它同样由 src/client/index.tsx 无条件安装，所以这张表
   // 漏掉它就等于不再覆盖那张表。追加在末尾，既有条目一个顺序都没动。
   { name: 'step-code', install: installStepCodeStyles },
+  // 「进展更新」的设置卡片也有自己的一张（三行卡片的排版、开关与 chevron）。它由
+  // src/client/index.tsx 无条件安装，所以这张表漏掉它就等于不再覆盖那张表。
+  // 追加在末尾，既有条目一个顺序都没动。
+  { name: 'progress-updates', install: installProgressUpdatesStyles },
 ] as const
 
 const owned = (): HTMLStyleElement[] =>

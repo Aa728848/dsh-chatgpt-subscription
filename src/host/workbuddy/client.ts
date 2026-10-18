@@ -6,6 +6,10 @@ import type {
   WorkBuddyMeter,
 } from '../../shared/workbuddy-contracts.ts'
 import {
+  outboundIdentity,
+  type WorkBuddyOutboundProduct,
+} from './outbound-identity.ts'
+import {
   ACCOUNT_PATH,
   BILLING_PATH,
   CLIENT_PRODUCT,
@@ -102,6 +106,14 @@ function uuidFromSeed(seed: string): string {
  */
 export interface WorkBuddyChannelOptions {
   /**
+   * Which client identity this request presents.
+   *
+   * Omitted means the line's shipped identity (`cli`). Only the chat call ever
+   * sets it: the config, billing and refresh surfaces are the ones measured to
+   * accept the CLI identity, and the choice exists for the chat fingerprint.
+   */
+  product?: WorkBuddyOutboundProduct
+  /**
    * Harness session the chat call belongs to.
    *
    * Omit it for a call with no conversation behind it (the connection-test
@@ -154,6 +166,11 @@ export function workBuddyHeaders(
 ): Record<string, string> {
   const domain = credentials.domain || DEFAULT_DOMAIN
   const intl = isIntlDomain(domain)
+  const conversation = intl && channel !== undefined ? conversationHeaders(channel.sessionId) : {}
+  // The identity owns the user agent and the client-shaped header block. The
+  // shipped `cli` product contributes no overrides at all, so an install that
+  // never touches the preference sends exactly the headers it always has.
+  const identity = outboundIdentity(channel?.product ?? 'cli', intl ? 'intl' : 'cn', credentials.uid ?? '')
   return {
     'content-type': 'application/json',
     accept: 'application/json',
@@ -165,10 +182,11 @@ export function workBuddyHeaders(
     [HEADER_PRODUCT]: CLIENT_PRODUCT,
     [HEADER_IDE_NAME]: 'CodeBuddyIDE',
     [HEADER_REQUESTED_WITH]: 'XMLHttpRequest',
-    'user-agent': CLIENT_USER_AGENT,
+    'user-agent': identity.userAgent,
     // The international backend validates the browser origin the IDE would send.
     ...(intl ? { origin: credentials.backend, referer: `${credentials.backend}/` } : {}),
-    ...(intl && channel !== undefined ? conversationHeaders(channel.sessionId) : {}),
+    ...conversation,
+    ...identity.headers(conversation),
     ...extra,
   }
 }
@@ -356,6 +374,10 @@ export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials
       ? reasoning.supportedEfforts.filter((effort): effort is string => typeof effort === 'string')
       : []
     const single = asString(reasoning.effort)
+    // The parsed ladder stays exactly what the gateway stated. `none` is a
+    // separate fact (`canDisableThinking`) and is added by
+    // `workBuddyReasoningEfforts` at the presentation boundary, so a stored
+    // entry never claims a level the publisher did not list.
     const efforts = declared.length > 0
       ? declared
       : (single === undefined ? [] : [...WORKBUDDY_STANDARD_EFFORTS])

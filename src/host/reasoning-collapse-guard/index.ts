@@ -55,6 +55,11 @@
  * already existed when the guard installed was never reported at all. Both
  * cases cut the runaway and then resumed nothing, which reads to the user as a
  * conversation that simply stops mid-answer.
+ *
+ * Status: **switched off in this line by default**. Everything here still
+ * works and is still tested; what changed is the wiring in `src/index.ts`,
+ * whose `reasoningCollapseGuard` config now defaults to `false` instead of
+ * `{}`. A deployment that wants the break back opts in with an object.
  */
 
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'

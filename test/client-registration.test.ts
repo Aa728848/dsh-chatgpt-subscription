@@ -302,11 +302,21 @@ describe('client registration', () => {
       'tool.call.toolview',
       // Antigravity 生图工具复用同一张生图卡片，按工具名再注册一次。
       'tool.call.toolview',
+      // 进展更新子模块（./progress-updates/）：对话流进展行、侧栏页签的正文与
+      // 标题（阶段二的 keyed 槽位）、以及它自己那一格设置页。页签**类型**的注册走
+      // ctx.sidebarRightTabs（服务，不是槽位），所以这里看不到第四类槽位。
+      'tool.call.toolview',
+      'sidebar.right.pane.tab',
+      'sidebar.right.pane.tab.title',
+      'settings.section',
     ])
     // Every provider, MiniMax Code included, lives behind one tabbed settings
-    // page, so the hub is the only settings.section entry registered.
+    // page, so the hub is the one subscription settings.section entry. Progress
+    // updates get their OWN page (order 150) beside it — a separate concern from
+    // the provider lines, and the user asked for a distinct section.
     expect(registrations.filter((registration) => registration.name === 'settings.section')).toEqual([
       expect.objectContaining({ name: 'settings.section', id: 'subscription-hub', order: 45 }),
+      expect.objectContaining({ name: 'settings.section', id: 'progress-updates', order: 150 }),
     ])
     expect(registrations.filter((registration) => registration.name === 'conversation.input.right')).toEqual([
       expect.objectContaining({ name: 'conversation.input.right', id: 'codex-subscription-quota', order: 35 }),
@@ -322,6 +332,7 @@ describe('client registration', () => {
     expect(registrations.filter((registration) => registration.name === 'tool.call.toolview')).toEqual([
       expect.objectContaining({ key: CODEX_IMAGE_TOOL_NAME }),
       expect.objectContaining({ key: ANTIGRAVITY_IMAGE_TOOL_NAME }),
+      expect.objectContaining({ key: 'progress_update' }),
     ])
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()

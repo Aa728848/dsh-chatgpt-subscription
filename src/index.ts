@@ -1,4 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { createRequire } from 'node:module'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -90,8 +90,10 @@ import { getCachedCatalog as getCachedWorkBuddyCatalog } from './host/workbuddy/
 import {
   FileCredentialStore as WorkBuddyCredentialStore,
   FileModelSettingsStore as WorkBuddyModelSettingsStore,
+  WorkBuddyAtRestKeyStore,
   registerWorkBuddyPreferenceStore,
 } from './host/workbuddy/token-store.ts'
+import { WorkBuddyUsageLedger } from './host/workbuddy/guardrails.ts'
 import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
 import { ClaudeAdapter } from './host/claude/adapter.ts'
 import { ClaudeAccountPool } from './host/claude/account-pool.ts'
@@ -161,8 +163,19 @@ import {
   type NoAnswerResumeContext,
   type NoAnswerResumeOptions,
 } from './host/no-answer-resume/index.ts'
+import {
+  installProgressUpdates,
+  resolveProgressUpdatesSettings,
+  type ProgressUpdatesContext,
+} from './host/progress-updates/index.ts'
+import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/progress-updates/store.ts'
 
-/** Optional deployment configuration for this plugin. */
+/**
+ * 运行期配置形状：标了 `volatile()` 的字段在 loader 解析之后是**活引用**。
+ *
+ * 这一份是插件体在 `apply` 里真正拿到的形状，也是 {@link Config} schema 的输出
+ * 类型；{@link ConfigInput} 才是 profile 里写的普通值。
+ */
 export interface Config {
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
@@ -202,8 +215,10 @@ export interface Config {
    */
   subagentModelScope?: 'session' | 'preference'
   /**
-   * Reasoning-collapse guard tuning. Omit the key (or set it to `false`) to
-   * leave the built-in behaviour alone; the shipped defaults apply otherwise.
+   * Reasoning-collapse guard tuning. **Disabled by default**: the guard is
+   * shipped and fully wired, but this line no longer installs it unless a
+   * deployment explicitly opts in. Set the key to an object (`{}` accepts the
+   * shipped defaults) to turn the break back on; `false` keeps it off.
    */
   reasoningCollapseGuard?: GuardOptions | false
   /**
@@ -220,9 +235,61 @@ export interface Config {
    * disable switch: the floor is 1ms, and a real stall still times out.
    */
   codexStreamIdleTimeoutMs?: number
+  /**
+   * 「进展更新」总开关。打开后 agent 可以用 `progress_update` 工具在不结束回
+   * 合的前提下主动汇报多步任务的进展，网页在对话流里显示成一行，右侧栏面板汇
+   * 总。默认关闭：这是一条会改变模型行为的提示词，必须由部署人显式打开。
+   *
+   * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：loader 把这个字段
+   * 解析成一个活引用交进 `apply`，设置一保存就就地写新值、不重挂插件行。
+   */
+  progressUpdates?: Volatile<boolean>
+  /**
+   * 进展更新的催促阈值：连续这么多轮带工具调用却没有进展更新时，给模型追加一
+   * 条提醒。默认 8（与 `NUDGE_THRESHOLD` 同一个数，两处不会漂移）。
+   */
+  progressUpdatesNudgeThreshold?: Volatile<number>
 }
 
-export const Config: z<Config> = z.object({
+/**
+ * profile 里写的配置形状：volatile 字段在这里仍是普通值。
+ *
+ * 两者必须分开声明——schemastery 的 `z<S, T>` 是「输入 / 输出」二元组，写成一个
+ * 合并的接口会让 schema 与声明互相矛盾（`volatile()` 的字段输出是引用，输入是
+ * 值）。分开放还有一个好处：测试与部署方写配置时用的是 {@link ConfigInput}，
+ * 手写活引用不会被误认为合法部署配置。
+ */
+export interface ConfigInput {
+  /** Independent web fetch selection; auto preserves proxy/search-driven selection.
+   * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
+  fetchProvider?: 'auto' | 'plugin' | 'dsh'
+  /** Plugin fetch decoded character limit (positive safe integer); the DSH tool may truncate again. */
+  fetchMaxBodyChars?: number
+  /** Plugin fetch response byte limit (positive safe integer). */
+  fetchMaxResponseBytes?: number
+  /** Whether to sync this package's bundled agent presets into the harness-home preset root. */
+  syncAgentPresets?: boolean
+  /** Whether the Subagent model allowlist also governs the route a delegation would inherit. */
+  subagentModelAuthorization?: boolean
+  /** Delegation tool names the authorization guard recognizes (default `subagent`). */
+  subagentModelTools?: string[]
+  /** Delegation tools that always run their child on the calling agent's route. */
+  subagentModelInheritTools?: string[]
+  /** `session` (default) enforces the recorded allowlist; `preference` also enforces the current card. */
+  subagentModelScope?: 'session' | 'preference'
+  /** Reasoning-collapse guard tuning; `false` keeps the guard off. */
+  reasoningCollapseGuard?: GuardOptions | false
+  /** Resume a turn that ended without an answer or a tool call; `false` leaves it failed. */
+  noAnswerResume?: NoAnswerResumeOptions | false
+  /** Idle budget for one Codex Responses stream, in milliseconds. */
+  codexStreamIdleTimeoutMs?: number
+  /** 「进展更新」总开关（默认关闭，打开后往系统提示词里加入引导节）。 */
+  progressUpdates?: boolean
+  /** 进展更新的催促阈值（默认 8）。 */
+  progressUpdatesNudgeThreshold?: number
+}
+
+export const Config: z<ConfigInput, Config> = z.object({
   fetchProvider: z.union([z.const('auto'), z.const('plugin'), z.const('dsh')]).default('auto'),
   fetchMaxBodyChars: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_BODY_CHARS),
   fetchMaxResponseBytes: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_RESPONSE_BYTES),
@@ -233,13 +300,25 @@ export const Config: z<Config> = z.object({
   subagentModelScope: z.union([z.const('session'), z.const('preference')]).default('session'),
   // A free-form object is validated by the guard's own fail-loud resolver rather
   // than by a nested schema here, so one rule describes the numbers for both
-  // the shipped defaults and a deployment's overrides. `false` opts out.
-  reasoningCollapseGuard: z.union([z.object({}), z.const(false)]).default({}),
+  // the shipped defaults and a deployment's overrides. The default is `false`:
+  // the guard stays maintained and installable, but this line does not turn it
+  // on by itself — a deployment must opt in with an object of its own.
+  reasoningCollapseGuard: z.union([z.object({}), z.const(false)]).default(false),
   // Same shape as the guard above: the resume hook validates its own numbers
   // fail-loud, and `false` opts out.
   noAnswerResume: z.union([z.object({}), z.const(false)]).default({}),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  // 进展更新：两个字段都是 `volatile()`，设置面板里保存时直接被提交进正在运行的
+  // 实例（loader 把字段换成活引用并广播 `loader/volatile-update`），不重挂插件
+  // 行——开关必须在同一个会话里立刻生效，否则用户要为了打开它重开一次对话。
+  // `progressUpdates` 默认关闭：它往系统提示词里加一节引导，属于会改变模型行为
+  // 的开关，必须由部署人显式打开；`progressUpdatesNudgeThreshold` 默认就是冻结
+  // 在 store 里的 8，两处共用同一个常量。
+  progressUpdates: z.boolean().default(false).volatile()
+    .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。'),
+  progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
+    .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
 })
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
@@ -298,6 +377,19 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const minimaxCodeAccountPool = new MinimaxCodeAccountPool({ store: minimaxCodeStore })
 
   const workBuddyStore = new WorkBuddyCredentialStore()
+  // The at-rest key that opens the desktop client's `$wbEncrypted` tokens is
+  // loaded into the process before anything scans for accounts: a sealed
+  // credential is otherwise indistinguishable from a broken one.
+  // The daily token counters behind the local guardrails. Loaded up front for the
+  // same reason the at-rest key is: a guardrail that started from zero on every
+  // boot would be one a restart walks around.
+  const workBuddyUsageLedger = new WorkBuddyUsageLedger()
+  void workBuddyUsageLedger.load().catch(() => undefined)
+  const workBuddyAtRestKey = new WorkBuddyAtRestKeyStore()
+  // Loading is async and this wiring is synchronous, so it is kicked off here
+  // and awaited by every surface that is about to read credentials (the status
+  // route calls `load()`, which answers from the cache once settled).
+  void workBuddyAtRestKey.load().catch(() => null)
   const workBuddyModelSettings = new WorkBuddyModelSettingsStore()
   const workBuddyPreferences = registerWorkBuddyPreferenceStore(ctx.settings, workBuddyModelSettings)
   // WorkBuddy is the line that adopts accounts it does not own: the IDE's own
@@ -374,7 +466,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // the output budget, then let the turn resume on a fresh step. The guard
   // subscribes to the `llm/stream` waterfall, whose signature is identical on
   // every harness generation this plugin supports, and is inert when the host
-  // exposes no event bus. Configured to `false` it is never installed at all.
+  // exposes no event bus. Configured to `false` it is never installed at all,
+  // and `false` is the default: this line is switched off, so every code path
+  // below (install, resume queue, per-turn breaker bookkeeping) stays unwired
+  // until a deployment opts back in.
   if (pluginConfig.reasoningCollapseGuard !== false) {
     const guardOptions: GuardOptions = pluginConfig.reasoningCollapseGuard ?? {}
     ctx.effect(() => {
@@ -627,7 +722,12 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       workBuddyStore,
       workBuddyModelSettings,
       workBuddyPreferences,
-      { fetchFn: modelFetch.workbuddy, attachments: ctx.attachments, accountPool: workBuddyAccountPool },
+      {
+        fetchFn: modelFetch.workbuddy,
+        attachments: ctx.attachments,
+        accountPool: workBuddyAccountPool,
+        usageLedger: workBuddyUsageLedger,
+      },
     )
     const workBuddyClaim = claimProviderRoute(ctx, {
       providerId: WORKBUDDY_PROVIDER_ID,
@@ -667,6 +767,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         conflict: () => workBuddyClaim.conflict(),
         accountPool: workBuddyAccountPool,
         checkin: workBuddyCheckin,
+        atRestKey: workBuddyAtRestKey,
       },
     )
 
@@ -1055,6 +1156,19 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // agrees to attach anything.
     const disposeVideoTool = ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetch }))
 
+    // 「进展更新」：不结束回合的 `progress_update` 工具 + 系统提示词引导 +
+    // `tools/post-execute` 上的 8 轮催促 + 客户端唯一的取数路由。挂载是无条件
+    // 的——工具清单不能在会话中途变化，所以开关关闭时工具照样注册、execute 直接
+    // 返回 displayed:false（见 host/progress-updates/tool.ts）。
+    //
+    // 交进去的是**配置本身**而不是解析后的值：两个字段在 loader 里是 volatile
+    // 活引用，设置面板一保存就把新值写进同一个引用，子模块每次用到都重读一次，
+    // 于是开关在同一个会话里立刻生效、不必重开对话。
+    const disposeProgressUpdates = installProgressUpdates(
+      ctx as unknown as ProgressUpdatesContext,
+      { settings: () => resolveProgressUpdatesSettings(pluginConfig) },
+    )
+
     // Rebind providers when web reloads without resetting the saved default provider selection.
     ctx.inject(['web'], ctx => {
       ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
@@ -1109,6 +1223,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeImageTool()
       disposeAntigravityImageTool()
       disposeVideoTool()
+      disposeProgressUpdates()
       disposeAdapter()
       disposeRoutes()
       disposeHubOverview()

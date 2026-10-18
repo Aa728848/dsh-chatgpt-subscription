@@ -6,11 +6,12 @@
  * below reads. The two files are the split of a single 885-line component — the
  * behaviour is unchanged, and this one should stay render-shaped.
  */
-import React from 'react'
+import React, { useState } from 'react'
 import type {
   WorkBuddyAccountSummaryDto,
   WorkBuddyModelCredits,
   WorkBuddyModelOption,
+  WorkBuddyOutboundSetting,
   WorkBuddyReasoningEffort,
   WorkBuddyRegion,
 } from '../../shared/workbuddy-contracts.ts'
@@ -26,6 +27,9 @@ import { zh } from './locales.ts'
  * string values, so this nested table lives with the control that renders it.
  */
 const EFFORT_LABELS: Record<WorkBuddyReasoningEffort, string> = {
+  // Not a rung of any ladder: the measured spelling that switches the trace off
+  // on the models whose catalog entry allows it.
+  none: 'Off',
   minimal: 'Minimal',
   low: 'Low',
   medium: 'Medium',
@@ -116,11 +120,20 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
     poolAccounts, effortChoices, allModels, strayEffort, contextModels, overrideCount,
     quota, authenticated, unreachable, poolLabels,
   } = derived
+  const sealedCount = status?.sealedAccounts ?? 0
   const {
     login, rescan, accountAction, deleteAccount, setStrategy, testConnection, refreshQuota,
     checkinNow, updateCheckin, toggleModel, setAllModels, updateEffort, refreshCatalog,
     saveContextWindow, resetContextWindow, resetAllContextWindows, updateContextDraft,
+    updateOutboundIdentity, saveAtRestKey, clearAtRestKey, updateGuardrails, updateDisabledModels,
   } = actions
+
+  // The pasted secret never leaves this component except through the one POST
+  // that stores it; it is not mirrored into the hook's state.
+  const [keyDraft, setKeyDraft] = useState('')
+  // Guardrail fields are edited as drafts and committed on blur: a number input
+  // fires on every keystroke, and each commit is a round trip.
+  const [guardrailDrafts, setGuardrailDrafts] = useState<Record<string, string>>({})
 
   const t = zh
 
@@ -187,6 +200,23 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
                 {candidate.domain}
               </span>
             ) : null}
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <span>{t.disabledModels}</span>
+              <input
+                className="dsha-input"
+                style={{ width: 170 }}
+                placeholder="glm-5.3,kimi-k3"
+                defaultValue={(status?.disabledModels?.[candidate.id] ?? []).join(',')}
+                disabled={busy !== null}
+                onBlur={(event) => {
+                  const models = event.currentTarget.value
+                    .split(',')
+                    .map((model) => model.trim())
+                    .filter((model) => model !== '')
+                  void updateDisabledModels(candidate.id, models)
+                }}
+              />
+            </label>
             {candidate.hidden === true ? <span>{t.hiddenAccount}</span> : null}
           </>
         )}
@@ -207,6 +237,98 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
           </button>
         </div>
       </AccountPoolSection>
+
+      {/* No new `h3` here: the card's heading order is pinned by a test and by
+          the shared settings-page layout, so these two controls join the card as
+          sub-blocks rather than becoming panels of their own. */}
+      <section className="dsha-group">
+        <p className="dsha-label" style={{ fontWeight: 600 }}>{t.outboundSection}</p>
+        <p className="dsha-muted">{t.outboundHint}</p>
+        <div className="dsha-pref-row">
+          <select
+            className="dsha-select"
+            value={status?.outboundIdentity ?? 'cli'}
+            disabled={busy !== null}
+            onChange={(event) => void updateOutboundIdentity(event.currentTarget.value as WorkBuddyOutboundSetting)}
+          >
+            <option value="cli">{t.outboundCli}</option>
+            <option value="auto">{t.outboundAuto}</option>
+            <option value="workbuddy">{t.outboundWorkbuddy}</option>
+            <option value="vscode">{t.outboundVscode}</option>
+          </select>
+        </div>
+
+        <p className="dsha-label" style={{ fontWeight: 600, marginTop: 12 }}>{t.guardrailsSection}</p>
+        <p className="dsha-muted">{t.guardrailsHint}</p>
+        <div className="dsha-row" style={{ gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+          {([
+            ['reserveCredits', t.guardrailsReserve],
+            ['dailyTokens', t.guardrailsDaily],
+            ['modelDailyTokens', t.guardrailsModelDaily],
+          ] as const).map(([field, label]) => (
+            <label key={field} className="dsha-pref-row" style={{ gap: 6, alignItems: 'center' }}>
+              <span className="dsha-label">{label}</span>
+              <input
+                className="dsha-input"
+                type="number"
+                min={0}
+                step={1}
+                style={{ width: 110 }}
+                disabled={busy !== null}
+                value={guardrailDrafts[field] ?? String(status?.guardrails?.[field] ?? 0)}
+                onChange={(event) => setGuardrailDrafts((prev) => ({ ...prev, [field]: event.currentTarget.value }))}
+                onBlur={() => {
+                  const draft = guardrailDrafts[field]
+                  if (draft === undefined) return
+                  setGuardrailDrafts((prev) => {
+                    const next = { ...prev }
+                    delete next[field]
+                    return next
+                  })
+                  const value = Math.floor(Number(draft))
+                  if (!Number.isFinite(value) || value < 0) return
+                  void updateGuardrails({ [field]: value })
+                }}
+              />
+            </label>
+          ))}
+        </div>
+
+        <p className="dsha-label" style={{ fontWeight: 600, marginTop: 12 }}>{t.atRestSection}</p>
+        <p className="dsha-muted">{t.atRestHint}</p>
+        {sealedCount > 0 ? (
+          <p className="dsha-notice">{t.atRestSealed.replace('{count}', String(sealedCount))}</p>
+        ) : null}
+        <div className="dsha-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <input
+            className="dsha-input"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={t.atRestPlaceholder}
+            value={keyDraft}
+            disabled={busy !== null}
+            onChange={(event) => setKeyDraft(event.currentTarget.value)}
+          />
+          <button
+            className="dsha-btn dsha-btn-primary"
+            disabled={busy !== null || keyDraft.trim() === ''}
+            onClick={() => {
+              void saveAtRestKey(keyDraft.trim()).then(() => setKeyDraft(''))
+            }}
+          >
+            {busy === 'atrest' ? t.saving : t.atRestSave}
+          </button>
+          {status?.atRestKeySet === true ? (
+            <>
+              <span className="dsha-muted">{t.atRestSaved}</span>
+              <button className="dsha-btn" disabled={busy !== null} onClick={() => void clearAtRestKey()}>
+                {t.atRestClear}
+              </button>
+            </>
+          ) : null}
+        </div>
+      </section>
 
       {status?.checkin != null ? (
         <section className="dsha-group">

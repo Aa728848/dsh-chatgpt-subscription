@@ -43,6 +43,9 @@ import { StepCodeComposerQuota } from './step-code/StepCodeComposerQuota.tsx'
 import { dictionaries as stepCodeDicts, NS_STEP_CODE, type StepCodeLocaleKey } from './step-code/locales.ts'
 import { installStepCodeStyles } from './step-code/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
+import { installProgressUpdatesClient } from './progress-updates/index.ts'
+import { installProgressUpdatesStyles } from './progress-updates/styles.ts'
+import { dictionaries as progressUpdatesDicts, NS_PROGRESS_UPDATES, type ProgressUpdatesLocaleKey } from './progress-updates/locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   /**
@@ -64,6 +67,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-glm-coding-plan': GlmCodingPlanLocaleKey
     'dsh-ollama': OllamaLocaleKey
     'dsh-step-code': StepCodeLocaleKey
+    'dsh-progress-updates': ProgressUpdatesLocaleKey
   }
 }
 
@@ -117,6 +121,11 @@ export function apply(ctx: ClientContext): void {
     installWorkBuddyStyles()
     return () => {}
   }, 'dsh-workbuddy: styles')
+  ctx.effect(() => ctx.locale.register(NS_PROGRESS_UPDATES, progressUpdatesDicts), 'dsh-progress-updates: dictionaries')
+  ctx.effect(() => {
+    installProgressUpdatesStyles()
+    return () => {}
+  }, 'dsh-progress-updates: styles')
   ctx.effect(() => ctx.locale.register(NS_STEP_CODE, stepCodeDicts), 'dsh-step-code: dictionaries')
   ctx.effect(() => {
     installStepCodeStyles()
@@ -219,6 +228,11 @@ export function apply(ctx: ClientContext): void {
       loadImage: imageLoader(ctx, sessionId),
     }),
   }, CodexImageToolView))
+
+  // 「进展更新」客户端半边：对话流进展行、侧栏面板、以及它自己的设置分区。
+  // 单独一个子模块（./progress-updates/），与 kimi-code / workbuddy 这些线路同一种
+  // 组织方式：入口只负责调用，注册细节留在子模块里。
+  installProgressUpdatesClient(ctx)
 }
 
 type ImageUrlResolver = (sessionId: string, attachment: ImageAttachmentRef) => Promise<string>

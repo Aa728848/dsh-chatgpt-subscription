@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[推理塌缩守卫] 熔断器默认关闭：功能与实现全部保留，只把「默认接电」改成「部署显式接电」**
+  - **现状**：本线的「熔断器」即推理塌缩守卫（`src/host/reasoning-collapse-guard/index.ts`），它订阅 `llm/stream` 瀑布，在「n-gram 重复度」与「语义复现」双信号连续命中时切断本轮流并排一条续跑。该守卫已无需在生产轮次里生效。
+  - **改法（只动接线，不动实现）**：`src/index.ts` 的 `reasoningCollapseGuard` 配置默认值由 `{}` 改为 `false`（`Config` 与 `apply()` 的注释同步改写）。默认配置下 `if (pluginConfig.reasoningCollapseGuard !== false)` 直接跳过，守卫的 `ctx.effect` 注册、`llm/stream` 订阅、per-turn 熔断簿记与续跑排队**全部不装配**，运行时零开销、零副作用。
+  - **保留下来的**：`installReasoningCollapseGuard` 导出、全部调参与 fail-loud 校验（`resolveOptions`、`threshold`/`semantic*`/`maxBreaksPerTurn` 等）、`test/reasoning-collapse-guard.test.ts`（80 例）与 `test/reasoning-collapse-guard-registry.test.ts`（注册表读取边界）**一律未动**；部署要重新启用只需在插件配置里写 `"reasoningCollapseGuard": {}`（用出厂默认）或写入调参对象，`false` 保持关闭。
+  - **新增回归**：`test/circuit-breaker-default.test.ts`（3 例）钉住两半——`Config({}).reasoningCollapseGuard === false`、写入对象/ `false` 仍被原样接受、`installReasoningCollapseGuard` 仍可导入且无事件总线时返回 `undefined` 而不抛错。
+  - **验证**：`npm run typecheck` 0 错误；全量 **233 passed | 1 skipped（234 文件）、3821 passed | 7 skipped、0 failed**；**承重已双向检查**——把默认值临时改回 `{}`，新用例立即 1 failed，恢复后全绿。
+  - **升级提示**：默认安装的 Host 升级后不再有任何塌缩熔断与随之的续跑；此前依赖「死循环自动刹车」的部署需在插件配置里显式写回 `"reasoningCollapseGuard": {}`。运行中的 Host 需重启（或重载该插件条目）才会加载新 bundle。
+  - **文档（“将来需要时再开”的落点）**：README 新增独立章节 **「推理塌缩守卫（熔断，默认关闭）」**——两个信号各测什么、双信号连续命中才切断且只排一条续跑、关闭后哪四样东西不再发生（不注册 `llm/stream` 订阅 / 不建每回合熔断簿记 / 不排续跑 / 零运行时开销）、以及**将来重新开启的具体做法**（`cordis.patch.yml` 里写 `reasoningCollapseGuard: {}` 或调参对象，取值表：缺省=`false` 关闭、`{}`=出厂默认开启、对象=调参、`false`=显式关闭），并记下守卫与 `noAnswerResume` 在 `llm/stream` 外层的共用边界（重新开守卫前需复查）；「子代理模型授权」的配置项表下补一条指向该章节的说明；守卫源码头部与 §Config 注释同步标注默认关闭。
+
 - **[Web 抓取] 选择退回 DSH 自带 provider 后再无触发点自愈：整条抓取线路静默失效（本机实证）**
   - **现象**：本机 `web_fetch` 对任何域名都报 `URL hostname "…" resolves to a non-public IP address`（`WEB_BLOCKED_URL`），而设置页显示搜索来源已是「ChatGPT（代理隧道）」、自定义代理 `http://127.0.0.1:7890` 可用。
   - **本机实证**：`GET /api/dsh-chatgpt-subscription/status` 读到 `preferences.searchProvider = "codex"`、`activeProxy = "http://127.0.0.1:7890"`，而 `switcher = { state: "applied", configuredSearchProvider: "deepseek-official", configuredFetchProvider: "http" }` —— `web` 条目仍是 DSH 默认值。报错文案同时指认服务方：对 IP 字面量 `127.0.0.1` 得到的是内置 provider 的措辞（`resolves to a non-public IP address`，见 `web-fetch-http/src/network.ts`），本插件对字面量用的是 `is not a public IP address`（`fetch-address-policy.ts`）。

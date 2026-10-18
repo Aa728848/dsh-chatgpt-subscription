@@ -24,7 +24,10 @@ afterEach(() => {
 })
 
 interface MountOptions {
-  readonly config?: plugin.Config
+  // A profile writes plain values: the volatile fields only become live
+  // references after the loader parses them, so the input shape is the type a
+  // test-supplied config has.
+  readonly config?: plugin.ConfigInput
   readonly responseBody?: string
   readonly searchProvider: 'dsh' | 'codex'
   readonly proxyMode: 'auto' | 'custom' | 'direct'

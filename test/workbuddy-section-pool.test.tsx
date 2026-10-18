@@ -143,10 +143,15 @@ describe('WorkBuddy settings card', () => {
 
     const headings = [...container.querySelectorAll('.dsha-group')]
       .map((group) => group.querySelector('.dsha-grouphead h3')?.textContent ?? '')
+    // One group renders WITHOUT an h3: the outbound-identity and at-rest-key
+    // block is a sub-block of the card rather than a panel, so it contributes no
+    // heading and must not appear in this order.
+    expect(headings).not.toContain(zh.outboundSection)
+    const named = headings.filter((heading) => heading !== '')
     // Identical to the other four tabs: the account card carries identity too,
     // so there is no standalone 账号 group between it and 连接.
-    expect(headings[0]).toContain('账号管理')
-    expect(headings[1]).toBe(zh.connection)
+    expect(named[0]).toContain('账号管理')
+    expect(named[1]).toBe(zh.connection)
     expect(headings).not.toContain(zh.account)
     expect(headings.filter((heading) => heading.includes('账号管理'))).toHaveLength(1)
     // The provider switch lives on the overview card now; the connection group

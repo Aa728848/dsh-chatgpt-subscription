@@ -63,6 +63,17 @@ export const CHECKIN_TIMEOUT_MS = 20_000
  */
 export const CHECKIN_INACTIVE_RECHECK_MS = 60 * 60 * 1000
 
+/**
+ * Random pause between two accounts in one pass.
+ *
+ * Sequential accounts already serialise their requests, but they still arrive as
+ * one tight cluster from one outbound IP; a dozen-account pool doing that at the
+ * same minute is the burst pattern the sibling gateway added jitter for after
+ * seeing upstream rate-limit whole pools.
+ */
+export const CHECKIN_JITTER_MIN_MS = 2_000
+export const CHECKIN_JITTER_MAX_MS = 5_000
+
 /** State document the scheduler keeps beside the other plugin stores. */
 export function checkinStatePath(): string {
   return path.join(dshHomeDir(), 'storages', 'workbuddy-checkin.json')
@@ -197,6 +208,10 @@ export interface WorkBuddyCheckinServiceOptions {
   ready?: () => Promise<void>
   /** Clock injection for tests. */
   now?: () => number
+  /** Wait between two accounts in one pass; injected so tests run without delays. */
+  pause?: (ms: number) => Promise<void>
+  /** Jitter source; injected so a test can pin the delay it caused. */
+  random?: () => number
   logger?: {
     info(message: string): void
     warn(message: string): void
@@ -211,6 +226,8 @@ export class WorkBuddyCheckinService {
   private readonly fetchFn: typeof fetch
   private readonly statePath: string
   private readonly now: () => number
+  private readonly pause: (ms: number) => Promise<void>
+  private readonly random: () => number
   private readonly logger: WorkBuddyCheckinServiceOptions['logger']
   private state: Record<string, CheckinAccountState> = {}
   private loaded = false
@@ -230,6 +247,8 @@ export class WorkBuddyCheckinService {
     this.fetchFn = options.fetchFn ?? fetch
     this.statePath = options.statePath ?? checkinStatePath()
     this.now = options.now ?? (() => Date.now())
+    this.pause = options.pause ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms) }))
+    this.random = options.random ?? Math.random
     this.logger = options.logger
   }
 
@@ -302,6 +321,7 @@ export class WorkBuddyCheckinService {
       this.logger?.warn(`[workbuddy-checkin] account scan failed: ${error instanceof Error ? error.message : String(error)}`)
       return
     }
+    let ranOne = false
     for (const credentials of accounts) {
       // The international deployment has no check-in activity; polling it
       // would only produce a daily 401 per account.
@@ -315,7 +335,12 @@ export class WorkBuddyCheckinService {
       // every ten minutes, and a manual pass always overrides the throttle.
       if (!manual && sameDay && existing.inactive === true
         && nowMs - (existing.inactiveAt ?? 0) < CHECKIN_INACTIVE_RECHECK_MS) continue
+      if (ranOne) {
+        await this.pause(CHECKIN_JITTER_MIN_MS
+          + Math.floor(this.random() * (CHECKIN_JITTER_MAX_MS - CHECKIN_JITTER_MIN_MS)))
+      }
       await this.checkinOne(id, credentials, today, nowMs)
+      ranOne = true
     }
     // Recorded on every pass, including the idle ones, so the card can show a
     // real "last run" instead of resetting to "never" on each restart.

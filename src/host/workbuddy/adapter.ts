@@ -39,7 +39,7 @@ import {
   workBuddyReasoningEfforts,
   type WorkBuddyModelEntry,
 } from './model-catalog.ts'
-import { loadConfigCatalog, workBuddyHeaders, refreshCredentials } from './client.ts'
+import { getCachedQuotaFor, loadConfigCatalog, workBuddyHeaders, refreshCredentials } from './client.ts'
 import { resolveEnabledModelIds } from './routes.ts'
 import {
   assertStreamComplete,
@@ -56,6 +56,12 @@ import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watc
 import { retryAfterMs } from '../wire-auth.ts'
 import type { WorkBuddyCredentials } from './token-store.ts'
 import type { WorkBuddyAccountPool } from './account-pool.ts'
+import { resolveOutboundProduct } from './outbound-identity.ts'
+import {
+  evaluateGuardrails,
+  guardrailsArmed,
+  type WorkBuddyUsageLedger,
+} from './guardrails.ts'
 
 /**
  * Transient-failure retry policy for the `workbuddy` route.
@@ -101,6 +107,13 @@ export function resolveDefaultReasoningEffort(
 export const POOL_COOLDOWN_MS = 5 * 60 * 1000
 
 export interface WorkBuddyAdapterOptions {
+  /**
+   * Per-account daily token counters behind the local guardrails.
+   *
+   * Absent means the guardrails cannot be evaluated, so a deployment without it
+   * never refuses a request for a reason nothing is counting.
+   */
+  usageLedger?: WorkBuddyUsageLedger
   fetchFn?: typeof fetch
   attachments?: AttachmentImageReader
   /** Live catalog loader seam; defaults to the gateway `/v3/config` call. */
@@ -277,6 +290,48 @@ export class WorkBuddyAdapter extends LlmAdapter {
    * A candidate the model does not accept is discarded rather than sent, since
    * the endpoint rejects an unsupported level with `code 11150`.
    */
+  /**
+   * Accounts the LOCAL guardrails refuse for this model right now.
+   *
+   * Reads only numbers this plugin already owns — the billing snapshot's
+   * remaining credits and this line's own token counters — so it never becomes a
+   * second, disagreeing source of truth about the upstream allowance.
+   */
+  private async guardrailBlockedAccounts(
+    settings: WorkBuddyModelSettings,
+    model: string,
+  ): Promise<ReadonlySet<string>> {
+    const blocked = new Set<string>()
+    const ledger = this.options.usageLedger
+    const pool = this.accountPool
+    if (pool === null) return blocked
+    const hasBlacklist = Object.keys(settings.disabledModels).length > 0
+    // Neither a blacklist nor an armed guardrail means there is nothing to check.
+    if (!hasBlacklist && (ledger === undefined || !guardrailsArmed(settings.guardrails))) return blocked
+    // Reaching here means at least one of the two applies.
+    for (const account of await pool.listAccounts()) {
+      // A standing blacklist is an instruction, not a measurement, so it is
+      // checked before the guardrails and applies even when they are all off.
+      if ((settings.disabledModels[account.id] ?? []).includes(model)) {
+        blocked.add(account.id)
+        continue
+      }
+      // No ledger with an armed guardrail means the counters cannot be trusted, so
+      // the guardrails stand down; the blacklist above already applied.
+      if (ledger === undefined || !guardrailsArmed(settings.guardrails)) continue
+      const verdict = evaluateGuardrails({
+        guardrails: settings.guardrails,
+        tokensToday: ledger.tokensToday(account.id),
+        modelTokensToday: ledger.modelTokensToday(account.id, model),
+        // Undefined when this account's billing snapshot was never read: an
+        // unmeasured balance is not a low one.
+        remainingCredits: getCachedQuotaFor(account.id)?.remainingCredits,
+      })
+      if (!verdict.allowed) blocked.add(account.id)
+    }
+    return blocked
+  }
+
   private async effortFor(options: GenerateOptions): Promise<string | undefined> {
     const settings = await this.settings()
     const credentials = await this.credentials(settings)
@@ -311,6 +366,15 @@ export class WorkBuddyAdapter extends LlmAdapter {
     const pool = this.accountPool
     const tried = new Set<string>()
     let response: Response | undefined
+    // The account that ends up serving, kept outside the rotation block so the
+    // usage recorded at the end of the stream is attributed to the right row.
+    let servedAccountId: string | undefined
+    // Guardrail-blocked accounts are excluded exactly like a tried one: the pool
+    // skips them, and `hasAnotherAvailableAccount` sees them, so a pool whose
+    // every account is blocked fails here rather than hammering the upstream.
+    if (pool !== null) {
+      for (const blockedId of await this.guardrailBlockedAccounts(settings, options.model)) tried.add(blockedId)
+    }
 
     // Account rotation. With no pool this runs exactly once and keeps the
     // single-credential behaviour; with one, an account that is rate limited
@@ -342,7 +406,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
       } else {
         let effective: { account: { id: string }; credentials: WorkBuddyCredentials }
         try {
-          effective = await pool.getEffectiveCredential(tried, fetchFn)
+          effective = await pool.getEffectiveCredential(tried, fetchFn, options.model)
         } catch (error) {
           // The pool's own verdict (an exhausted rotation) is already typed; a
           // plain error means no account is signed in at all.
@@ -354,6 +418,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
           )
         }
         accountId = effective.account.id
+        servedAccountId = accountId
         tried.add(accountId)
         credentials = effective.credentials
       }
@@ -388,7 +453,12 @@ export class WorkBuddyAdapter extends LlmAdapter {
             headers: workBuddyHeaders(
               credentials,
               { accept: 'text/event-stream' },
-              { ...(requestOptions.sessionId === undefined ? {} : { sessionId: String(requestOptions.sessionId) }) },
+              {
+                ...(requestOptions.sessionId === undefined ? {} : { sessionId: String(requestOptions.sessionId) }),
+                // Stable per account: `auto` gives an account one client for its
+                // whole life, which is the only shape a device fingerprint tolerates.
+                product: resolveOutboundProduct(settings.outboundIdentity, accountId ?? credentials.uid ?? ''),
+              },
             ),
             body,
             // The idle watchdog owns the deadline: it resets while tokens flow, so a
@@ -436,11 +506,25 @@ export class WorkBuddyAdapter extends LlmAdapter {
       const failure = classifyFailure(response.status, refusedDetail, response.headers)
 
       if (pool !== null && accountId !== undefined) {
-        const after = retryAfterMs(response.headers)
+        // The classifier already resolved this: header first, then the reset
+        // instant the body named. Reading the header alone would park a 24h
+        // allowance for the five-minute default and retry into the same wall.
+        const after = failure.failure.providerRetryAfterMs ?? retryAfterMs(response.headers)
         if (failure.code === 'RATE_LIMIT') {
-          await pool.markCooldown(accountId, after ?? POOL_COOLDOWN_MS, `${PROVIDER_NAME} 429`)
-            .catch(() => undefined)
-          if (await pool.hasAnotherAvailableAccount(tried)) continue
+          // Two different refusals arrive as 429. A SHORT one (a transient rate
+          // limit, seconds) belongs to the account, exactly as before. A LONG
+          // one — the 24h account × model window that `code 6004` names a reset
+          // for — parks only that model, so the account keeps serving the rest of
+          // its catalog instead of leaving the pool for a day.
+          const longWindow = after !== undefined && after > POOL_COOLDOWN_MS
+          if (longWindow) {
+            if (accountId !== undefined) pool.markModelCooldown(accountId, options.model, after)
+            if (await pool.hasAnotherAvailableAccountFor(tried, options.model)) continue
+          } else {
+            await pool.markCooldown(accountId, after ?? POOL_COOLDOWN_MS, `${PROVIDER_NAME} 429`)
+              .catch(() => undefined)
+            if (await pool.hasAnotherAvailableAccount(tried)) continue
+          }
         } else if (failure.code === 'INVALID_CREDENTIAL') {
           // Nothing is written to the pool from here. A request-time 401 is a
           // statement about one presentation of a credential, and this pool has
@@ -466,6 +550,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
     const decoder = new TextDecoder()
     const state = createStreamState()
     let buffer = ''
+    // One request's billed tokens, taken from the single `usage` frame the
+    // upstream sends (input excludes the cache counts, so they are added back).
+    let recordedTokens = 0
 
     try {
       while (true) {
@@ -482,7 +569,15 @@ export class WorkBuddyAdapter extends LlmAdapter {
           // One pulse per complete frame; a pure comment frame (": ping",
           // ": keep-alive") is exactly what the display-layer timer misread as silence.
           activity?.pulse()
-          for (const chunk of processStreamLine(line, state)) yield chunk
+          for (const chunk of processStreamLine(line, state)) {
+            if (chunk.type === 'usage') {
+              recordedTokens = chunk.usage.inputTokens
+                + chunk.usage.outputTokens
+                + (chunk.usage.cacheReadTokens ?? 0)
+                + (chunk.usage.cacheWriteTokens ?? 0)
+            }
+            yield chunk
+          }
           if (state.finished) return
         }
       }
@@ -490,7 +585,15 @@ export class WorkBuddyAdapter extends LlmAdapter {
       buffer += decoder.decode()
       if (buffer.trim() !== '') {
         for (const line of buffer.split('\n')) {
-          for (const chunk of processStreamLine(line, state)) yield chunk
+          for (const chunk of processStreamLine(line, state)) {
+            if (chunk.type === 'usage') {
+              recordedTokens = chunk.usage.inputTokens
+                + chunk.usage.outputTokens
+                + (chunk.usage.cacheReadTokens ?? 0)
+                + (chunk.usage.cacheWriteTokens ?? 0)
+            }
+            yield chunk
+          }
         }
       }
       if (state.finished) return
@@ -500,6 +603,11 @@ export class WorkBuddyAdapter extends LlmAdapter {
       assertStreamComplete(state)
       for (const chunk of closeStream(state)) yield chunk
     } finally {
+      if (servedAccountId !== undefined && recordedTokens > 0) {
+        // Fire-and-forget: a counter that fails to persist must not fail a
+        // request the user already paid for.
+        void this.options.usageLedger?.record(servedAccountId, options.model, recordedTokens)
+      }
       void reader.cancel().catch(() => undefined)
     }
   }
@@ -561,7 +669,9 @@ export function classifyFailure(
   // failure is retryable under the bounded policy with the reset instant the
   // service reported.
   if (status === 429 || code === 6004 || code === 14003) {
-    const after = headers ? retryAfterMs(headers) : undefined
+    // A structured Retry-After is authoritative; otherwise the body's reset
+    // wall clock is the only thing that says how long the account is out.
+    const after = (headers ? retryAfterMs(headers) : undefined) ?? readRateLimitReset(detail)
     return new LlmError(
       `${PROVIDER_NAME} rate limit or plan quota reached. Check the quota card in Settings > WorkBuddy.`
       + `${detail ? ` ${detail}` : ''}`,
@@ -684,6 +794,55 @@ function refusalIsNotCredential(detail: string): boolean {
 
   const type = inner.type ?? envelope.type
   return typeof type === 'string' && type === 'server_error' && hasMessage
+}
+
+/** How far out a reset instant may be and still be treated as one. */
+const MAX_RESET_HORIZON_MS = 7 * 24 * 60 * 60 * 1000
+
+const RESET_STAMP_RE = /(?:resets?\s+at|reset\s+at|将在)\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/
+const RESET_TZ_RE = /UTC([+-])(\d{1,2})(?::?(\d{2}))?/
+
+/**
+ * The reset instant a quota refusal names, as a delay from now.
+ *
+ * A 24h allowance that is exhausted answers 429 / `code 6004` with the wall
+ * clock it lifts — but only in the MESSAGE, never in a header, and in two
+ * realm-specific wordings (measured: intl "… resets at 2026-09-20 10:50:48
+ * UTC+8", cn "… 将在 2026-10-09 14:44:59 UTC+8 重置"). Reading the status alone
+ * therefore loses the only fact that says how long the account is out, and the
+ * pool parks a 24-hour limit for five minutes before trying it again.
+ *
+ * Deliberately tolerant, in the same direction as their gateway: an unparseable
+ * body yields `undefined` (callers keep their default cooldown) rather than an
+ * error, because this runs on a failure path. An absent `UTC±h` marker means
+ * UTC, which is how the sibling implementation reads it too.
+ */
+export function readRateLimitReset(detail: string, now = Date.now()): number | undefined {
+  const stamp = RESET_STAMP_RE.exec(detail)
+  if (stamp === null) return undefined
+  const [, date, clock] = stamp
+  const parts = `${date} ${clock}`.split(/[- :]/).map((part) => Number(part))
+  const [year, month, day, hour, minute, second] = parts
+  if (parts.length !== 6 || parts.some((part) => !Number.isFinite(part))) return undefined
+
+  const zone = RESET_TZ_RE.exec(detail)
+  let offsetMs = 0
+  if (zone !== null) {
+    const hours = Number(zone[2] ?? '0')
+    const minutes = Number(zone[3] ?? '0')
+    const sign = zone[1] === '-' ? -1 : 1
+    offsetMs = sign * (hours * 60 + minutes) * 60_000
+  }
+
+  // The stamp is a wall clock expressed at that offset, so the instant is the
+  // UTC reading minus the offset.
+  const at = Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1, hour ?? 0, minute ?? 0, second ?? 0) - offsetMs
+  if (!Number.isFinite(at)) return undefined
+  const delay = at - now
+  // A past instant says the window already lifted; an absurdly distant one is
+  // a parse artefact, not a 24h allowance. Either way the caller's default wins.
+  if (delay <= 0 || delay > MAX_RESET_HORIZON_MS) return undefined
+  return delay
 }
 
 /** Read the subscription's own numeric error code out of a response body. */

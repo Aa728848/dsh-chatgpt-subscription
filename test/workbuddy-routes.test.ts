@@ -557,7 +557,9 @@ describe('WorkBuddy model selection', () => {
     expect(glm.defaultContextWindow).toBe(1_000_000)
     expect(glm.contextWindow).toBe(500_000)
     expect(glm.supportsImage).toBe(true)
-    expect(glm.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    // The card offers what the model ACCEPTS plus, because the entry allows it,
+    // the level that switches the trace off entirely.
+    expect(glm.reasoningEfforts).toEqual(['none', 'low', 'high', 'max'])
   })
 
   it('passes the published multiplier through, every region the entry carries', () => {
