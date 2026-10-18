@@ -37,6 +37,7 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SidebarRightTabDefinition, SidebarRightTabRegistryService } from './contracts.ts'
+import { ProgressUpdatesArtwork } from './guide-artwork.tsx'
 import { ProgressRow } from './progress-row.tsx'
 import { ProgressUpdatesSettingsSection } from './settings-section.tsx'
 import { ProgressUpdatesTab, ProgressUpdatesTabTitle, type ProgressSnapshotSource } from './updates-panel.tsx'
@@ -217,6 +218,27 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
             return zh.progressTitle
           }
         },
+        // 右侧栏 guide 页里的那一格：没有它，面板虽然注册好了却没有任何可见入口
+        // （截图里那四张卡片就是 guide 条目，不是槽位注册出来的）。
+        guide: [{
+          id: 'open',
+          order: 60,
+          title: () => {
+            try {
+              return ctx.locale.bind(NS_PROGRESS_UPDATES)('progressTitle')
+            } catch {
+              return zh.progressTitle
+            }
+          },
+          description: () => {
+            try {
+              return ctx.locale.bind(NS_PROGRESS_UPDATES)('progressGuideNote')
+            } catch {
+              return zh.progressGuideNote
+            }
+          },
+          icon: ProgressUpdatesArtwork,
+        }],
       }
       return tabs.register(definition)
     } catch {

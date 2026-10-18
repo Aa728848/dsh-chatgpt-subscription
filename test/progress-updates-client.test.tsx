@@ -30,7 +30,7 @@ import {
 } from '../src/client/progress-updates/index.ts'
 import { ProgressRow, progressOfBlock } from '../src/client/progress-updates/progress-row.tsx'
 import { ProgressUpdatesSettingsSection } from '../src/client/progress-updates/settings-section.tsx'
-import { ProgressUpdatesTab } from '../src/client/progress-updates/updates-panel.tsx'
+import { ProgressUpdatesPanel, ProgressUpdatesTab } from '../src/client/progress-updates/updates-panel.tsx'
 import type { ProgressSnapshotSource } from '../src/client/progress-updates/updates-panel.tsx'
 import type { ProgressSettingsForm, ProgressUpdatesSettingsValues } from '../src/client/progress-updates/settings-binding.ts'
 import { PROGRESS_UPDATES_PATH, createHostProgressSource } from '../src/client/progress-updates/host-source.ts'
@@ -527,6 +527,49 @@ describe('D. 侧栏页签：身份一致', () => {
     expect(registrationOf(registrations, 'sidebar.right.pane.tab').key).toBe(definitions[0]!.id)
     expect(registrationOf(registrations, 'sidebar.right.pane.tab.title').key).toBe(definitions[0]!.id)
   })
+
+  /**
+   * 回归守卫：右侧栏 guide 页里必须有「进展更新」那一格。
+   *
+   * 页签类型只是声明，**guide 条目才是用户在右侧栏里看得见、点得到的入口**。
+   * 线上真出现过这一格缺失：面板注册齐全但右侧栏空着，用户根本找不到它。
+   * 所以这里钉住三件事：有一条 guide 项、它有标题与彩色图标、它是点得开的。
+   */
+  it('右侧栏 guide 里有一格进展更新，且带彩色图标', () => {
+    // Given 装着侧栏类型注册表的上下文
+    const definitions: Array<{
+      id: string
+      kind: string
+      guide?: ReadonlyArray<{ id: string, order: number, title: () => string, description?: () => string, icon?: unknown }>
+    }> = []
+    const { ctx } = makeCtx({
+      sidebarRightTabs: { register: (definition: never) => { definitions.push(definition); return () => {} } },
+      sidebarRight: { openTab: vi.fn() },
+    })
+    // When 子模块挂载
+    installProgressUpdatesClient(ctx)
+    // Then 恰好一格 guide 入口，且它带着可渲染的标题与图标
+    const guide = definitions[0]?.guide
+    expect(guide).toBeDefined()
+    expect(guide).toHaveLength(1)
+    expect(guide![0]!.title()).toBe(zh.progressTitle)
+    expect(guide![0]!.order).toBeTypeOf('number')
+    // icon 必须是组件（平台会把它当 ComponentType 渲染），不是字符串也不是空
+    expect(typeof guide![0]!.icon === 'function' || typeof guide![0]!.icon === 'object').toBe(true)
+    // And 说明行也走本插件字典，不是硬编码
+    expect(guide![0]!.description?.()).toBe(zh.progressGuideNote)
+  })
+
+  it('guide 图标能渲染出彩色 SVG（不依赖 currentColor）', async () => {
+    const { ProgressUpdatesArtwork } = await import('../src/client/progress-updates/guide-artwork.tsx')
+    await act(async () => root.render(createElement(ProgressUpdatesArtwork, { size: 36 })))
+    const svg = container.querySelector('svg')
+    expect(svg).not.toBeNull()
+    expect(svg!.getAttribute('viewBox')).toBe('0 0 36 36')
+    // 带自己的填充色（渐变引用或十六进制），而不是完全交给 currentColor
+    expect(container.innerHTML).toContain('linearGradient')
+    expect(container.innerHTML).toMatch(/#[0-9A-Fa-f]{6}/)
+  })
 })
 
 describe('E. 进展更新的 ProgressUpdate 与宿主同形（双向赋值）', () => {
@@ -538,5 +581,60 @@ describe('E. 进展更新的 ProgressUpdate 与宿主同形（双向赋值）', 
     expect(host).toEqual(client)
     const back: ProgressUpdate = host
     expect(back).toEqual(client)
+  })
+})
+
+describe('F. 面板的三个已修问题（回归守卫）', () => {
+  /**
+   * 守卫一：多条可以**同时**展开。
+   * 线上真出现过：展开下面那条会把上面那条关掉，因为展开状态是单个 id。
+   */
+  it('展开两条时两条都保持展开，互不排挤', async () => {
+    const updates = [
+      { id: 'a', title: '第一条', message: '正文 A', at: 1 },
+      { id: 'b', title: '第二条', message: '正文 B', at: 2 },
+    ]
+    await act(async () => root.render(createElement(ProgressUpdatesPanel, { updates } as never)))
+    const headers = () => Array.from(container.querySelectorAll('[data-dsh-part="update-header"]'))
+    // 默认最新一条（b）展开、a 收起
+    expect(headers()[0]!.getAttribute('aria-expanded')).toBe('false')
+    expect(headers()[1]!.getAttribute('aria-expanded')).toBe('true')
+    // 展开 a 之后，b **仍然**展开 —— 这就是本条要钉住的行为
+    await act(async () => headers()[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    expect(headers()[0]!.getAttribute('aria-expanded')).toBe('true')
+    expect(headers()[1]!.getAttribute('aria-expanded')).toBe('true')
+    // 两条正文同时在场
+    expect(container.querySelectorAll('[data-dsh-part="update-message"]')).toHaveLength(2)
+  })
+
+  /** 守卫二：正文真的按 Markdown 渲染，不是原文照搬。 */
+  it('正文里的列表与行内标记渲染成元素，而不是原样显示星号', async () => {
+    const updates = [{
+      id: 'a',
+      title: '带格式的进展',
+      message: '这一段是**粗体**与 `代码`。\n\n- 第一条\n- 第二条',
+      at: 1,
+    }]
+    await act(async () => root.render(createElement(ProgressUpdatesPanel, { updates } as never)))
+    const body = container.querySelector('[data-dsh-part="update-message"]')!
+    // 块级：列表被解析成 li
+    expect(body.querySelectorAll('li')).toHaveLength(2)
+    // 行内：粗体与代码成为元素
+    expect(body.querySelector('[data-dsh-part="md-strong"]')?.textContent).toBe('粗体')
+    expect(body.querySelector('[data-dsh-part="md-code"]')?.textContent).toBe('代码')
+    // 原文的双星号与反引号不该以纯文本形式残留
+    expect(body.textContent).not.toContain('**粗体**')
+  })
+
+  /** 守卫三：计数文案的 {n} 必须被替换（线上出现过「共 {n} 条」）。 */
+  it('计数文案的占位符被替换成真实条数', async () => {
+    const updates = [
+      { id: 'a', title: '一', message: 'x', at: 1 },
+      { id: 'b', title: '二', message: 'y', at: 2 },
+    ]
+    await act(async () => root.render(createElement(ProgressUpdatesPanel, { updates } as never)))
+    const count = container.querySelector('[data-dsh-part="updates-count"]')!.textContent ?? ''
+    expect(count).not.toContain('{n}')
+    expect(count).toContain('2')
   })
 })

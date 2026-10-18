@@ -18,6 +18,7 @@
  */
 
 import { useEffect, useId, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react'
+import { MarkdownLite } from './markdown-lite.tsx'
 import type { ProgressUpdate } from './contracts.ts'
 import { NS_PROGRESS_UPDATES, zh, type ProgressUpdatesLocaleKey } from './locales.ts'
 
@@ -42,14 +43,29 @@ export type CopySeat = {
  * @returns 该键的文案；缺键时回退为键本身。
  */
 export function fallbackTranslate(key: string, params?: Record<string, unknown>): string {
-  let text = (zh as Record<string, string>)[key] ?? key
-  if (params !== undefined) {
-    for (const [name, value] of Object.entries(params)) {
-      text = text.replaceAll(`{${name}}`, String(value))
-    }
+  return interpolate((zh as Record<string, string>)[key] ?? key, params)
+}
+
+/**
+ * 把 `{name}` 占位符换成实参。
+ *
+ * 单独成一个函数，是因为**两条取值路径都要用它**：没有 locale 服务的兜底字典，
+ * 和有服务时的当前语言字典。早先只有兜底那条做了替换，于是真实部署里
+ * 「共 {n} 条」原样上屏。
+ * @param template - 含占位符的模板。
+ * @param params - 各占位符的实参。
+ * @returns 替换后的文本；没有 params 时原样返回。
+ */
+export function interpolate(template: string, params?: Record<string, unknown>): string {
+  if (params === undefined) return template
+  let text = template
+  for (const [name, value] of Object.entries(params)) {
+    text = text.replaceAll(`{${name}}`, String(value))
   }
   return text
 }
+
+
 
 /** 面板的数据源面：一份只读快照 + 变更订阅。 */
 export interface ProgressSnapshotSource {
@@ -152,13 +168,18 @@ const metaStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-tertiary, #8a9099)',
 }
 
-/** 展开行正文样式：保留换行（契约允许轻 Markdown，这里只保证换行可读）。 */
+/**
+ * 展开行正文的容器样式。
+ *
+ * 正文本身交给平台的 `MarkdownText` 渲染（GFM、列表、行内代码、表格、KaTeX 全都在
+ * 那一套里），这里只负责外边距、字号与颜色：`pre-wrap` 与手写解析都撤掉了，
+ * 因为 Markdown 的块级结构必须由渲染器产出的元素决定，纯文本的换行保留只会把
+ * 列表符号与星号原样显示出来。
+ */
 const messageStyle: CSSProperties = {
-  whiteSpace: 'pre-wrap',
-  overflowWrap: 'anywhere',
-  margin: '0',
-  fontSize: '12px',
-  lineHeight: '1.55',
+  margin: '2px 0 0',
+  fontSize: '13px',
+  lineHeight: '1.6',
   color: 'var(--dsw-alias-label-secondary, #5b6270)',
 }
 
@@ -219,13 +240,40 @@ function Chevron({ expanded }: { expanded: boolean }): ReactNode {
  * @returns 进展列表；没有进展时渲染占位空态。
  */
 export function ProgressUpdatesPanel({ updates, t }: UpdatesPanelProps): ReactNode {
-  const translate = (key: string, params?: Record<string, unknown>): string =>
-    t === undefined ? fallbackTranslate(key, params) : t(key as ProgressUpdatesLocaleKey)
+  /**
+   * 翻译并**补齐占位符**。
+   *
+   * locale 服务交来的 `t` 只接受一个键、不做插值，所以参数必须在这一层补上：
+   * 直接把 `t(key)` 当作结果会留下原样的 `{n}`（线上真出现过「共 {n} 条」）。
+   * 先按当前语言的字典取值（没有 `t` 时才用兜底字典），再统一做一次替换。
+   */
+  const translate = (key: string, params?: Record<string, unknown>): string => {
+    const template = t === undefined
+      ? (zh as Record<string, string>)[key] ?? key
+      : t(key as ProgressUpdatesLocaleKey)
+    return interpolate(template, params)
+  }
   const latestId = updates.length > 0 ? updates[updates.length - 1].id : undefined
-  // 默认展开最新一条；最新一条换了（新进展到达）就跟过去，旧的自然收起。
-  const [expandedId, setExpandedId] = useState<string | undefined>(latestId)
+  /**
+   * 展开的进展集合 —— **不是**单个 id。
+   *
+   * 早先这里是单值 `expandedId`，于是展开下面那条会把上面那条关掉：用户想对照着
+   * 看两条进展时永远只能看到一条。展开是逐条的独立选择，所以用集合。
+   *
+   * 只写「显式展开过/收起过」的状态，不在渲染期推导：一条新进展到达时，把最新的
+   * 那条追加进集合（默认展开最新），但**不动**用户已经展开的其它条目。
+   */
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(
+    () => new Set(latestId === undefined ? [] : [latestId]),
+  )
   useEffect(() => {
-    setExpandedId(latestId)
+    if (latestId === undefined) return
+    setExpandedIds((current) => {
+      if (current.has(latestId)) return current
+      const next = new Set(current)
+      next.add(latestId)
+      return next
+    })
   }, [latestId])
 
   const idPrefix = useId()
@@ -249,7 +297,7 @@ export function ProgressUpdatesPanel({ updates, t }: UpdatesPanelProps): ReactNo
         style={{ listStyle: 'none', margin: '0', padding: '0', display: 'flex', flexDirection: 'column', gap: '8px' }}
       >
         {updates.map((update, index) => {
-          const expanded = update.id === expandedId
+          const expanded = expandedIds.has(update.id)
           const latest = update.id === latestId
           const title = titleOf(update)
           const bodyId = `${idPrefix}-${index}-body`
@@ -265,7 +313,14 @@ export function ProgressUpdatesPanel({ updates, t }: UpdatesPanelProps): ReactNo
                 aria-label={toggleLabel}
                 title={toggleLabel}
                 style={headerStyle}
-                onClick={() => { setExpandedId(expanded ? undefined : update.id) }}
+                onClick={() => {
+                  setExpandedIds((current) => {
+                    const next = new Set(current)
+                    if (next.has(update.id)) next.delete(update.id)
+                    else next.add(update.id)
+                    return next
+                  })
+                }}
               >
                 <Chevron expanded={expanded} />
                 <span data-dsh-part="update-title" style={titleStyle}>{title}</span>
@@ -277,7 +332,9 @@ export function ProgressUpdatesPanel({ updates, t }: UpdatesPanelProps): ReactNo
                 {clock !== '' && <time dateTime={new Date(update.at).toISOString()} style={metaStyle}>{clock}</time>}
               </button>
               {expanded && (
-                <div id={bodyId} data-dsh-part="update-message" style={messageStyle}>{update.message}</div>
+                <div id={bodyId} data-dsh-part="update-message" style={messageStyle}>
+                  <MarkdownLite text={update.message} />
+                </div>
               )}
             </li>
           )

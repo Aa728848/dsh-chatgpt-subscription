@@ -54,6 +54,32 @@ export interface SidebarRightTabDefinition {
   readonly priority?: 'extension' | 'builtin' | 'fallback'
   /** 页签条上的标题，打开时捕获。 */
   readonly title: (address: string) => string
+  /**
+   * 右侧栏 guide 页里的入口格；省略则这一页签不出现在 guide 上。
+   *
+   * 这是「用户怎么到达这个面板」的**可见入口**：页签类型只是声明，guide 条目才是
+   * 那块可以点的卡片。条目的 `icon` 收一个组件，平台自家的几格都带自己的品牌色。
+   */
+  readonly guide?: readonly SidebarRightGuideEntry[]
+}
+
+/**
+ * 右侧栏 guide 页里的一个入口格。
+ *
+ * 字段与官方 `SidebarRightGuideEntry` 同形（完整定义在 ui-sidebar-right 的
+ * tab-registry 里）；本插件用到的就是标题、一行说明与图标。
+ */
+export interface SidebarRightGuideEntry {
+  /** 本类型内部唯一的入口标识。 */
+  readonly id: string
+  /** 在全部类型的所有入口里升序排位。 */
+  readonly order: number
+  /** 卡片标题（惰性求值，切语言无需重注册）。 */
+  readonly title: () => string
+  /** 标题下的一行说明；guide 条目少时才显示。 */
+  readonly description?: () => string
+  /** 标题前的彩色标记；省略时平台画一个立方体占位。 */
+  readonly icon?: import('react').ComponentType<{ size?: number, className?: string }>
 }
 
 /** 右侧栏页签类型注册表（阶段一的服务面）。 */

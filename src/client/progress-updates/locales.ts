@@ -18,6 +18,11 @@ export const zh = {
   /** 设置页导航里的那一格，也是侧栏页签的标题。 */
   navTitle: '进展更新',
   progressTitle: '进展更新',
+  /** 右侧栏 guide 卡片标题下的一行说明。 */
+  progressGuideNote: 'agent 汇报的每一步进展，都收在这里',
+  markdownCopy: '复制',
+  markdownCopied: '已复制',
+  markdownFootnotes: '脚注',
   progressLatest: '最新',
   progressCount: '共 {n} 条',
   progressExpand: '展开这条进展',
@@ -46,6 +51,10 @@ export const zh = {
 export const en: Record<ProgressUpdatesLocaleKey, string> = {
   navTitle: 'Progress updates',
   progressTitle: 'Progress updates',
+  progressGuideNote: 'Every step the agent reports, collected here',
+  markdownCopy: 'Copy',
+  markdownCopied: 'Copied',
+  markdownFootnotes: 'Footnotes',
   progressLatest: 'Latest',
   progressCount: '{n} total',
   progressExpand: 'Expand this update',
