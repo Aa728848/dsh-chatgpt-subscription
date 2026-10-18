@@ -26,6 +26,7 @@
 
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import type { ProgressUpdate } from './contracts.ts'
+import { MarkdownLite } from './markdown-lite.tsx'
 import { fallbackTranslate, type CopySeat } from './updates-panel.tsx'
 
 /**
@@ -116,9 +117,15 @@ const stateStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-tertiary, #8a9099)',
 }
 
-/** 正文样式：保留换行（契约允许轻 Markdown，这里只保证换行可读）。 */
+/**
+ * 正文样式：只管外边距、字号与颜色。
+ *
+ * **不再**在这里写 `whiteSpace: 'pre-wrap'`：正文交给 {@link MarkdownLite} 渲染，
+ * 换行该不该保留由它产出的块级元素决定。早先这里是纯文本 `<p>{message}</p>`，
+ * 于是列表符号、`**粗体**` 和管道符表格全部原样上屏 —— 同一份进展在侧栏面板里
+ * 是渲染过的、在对话流里是原文，两处观感对不上。
+ */
 const messageStyle: CSSProperties = {
-  whiteSpace: 'pre-wrap',
   overflowWrap: 'anywhere',
   margin: '0',
   fontSize: '12px',
@@ -222,7 +229,9 @@ export function ProgressRow({ block, t }: ProgressRowProps): ReactNode {
         <span data-dsh-part="progress-row-state" style={stateStyle}>{translate(STATE_KEYS[state])}</span>
       </button>
       {expanded && message !== '' && (
-        <p data-dsh-part="progress-row-message" style={messageStyle}>{message}</p>
+        <div data-dsh-part="progress-row-message" style={messageStyle}>
+          <MarkdownLite text={message} />
+        </div>
       )}
     </div>
   )

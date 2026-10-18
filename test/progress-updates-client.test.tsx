@@ -238,6 +238,33 @@ describe('A. 对话流里的进展行', () => {
     expect(container.querySelector('[data-dsh-part="progress-row-header"]')?.getAttribute('aria-label')).toBe(en.rowExpand)
   })
 
+  /**
+   * 守卫四：**对话流主形态也走同一个渲染器**。
+   *
+   * 早先这里正文是纯文本 `<p>{message}</p>`：同一份进展在侧栏面板里是渲染过的、
+   * 在对话流里是原文（星号、管道符全露）。这条用例钉住两处观感一致。
+   */
+  it('对话流展开的正文按 Markdown 渲染，不再原样显示星号与管道符', async () => {
+    const block = {
+      kind: 'tool-result',
+      callId: 'call-6',
+      name: PROGRESS_UPDATE_TOOL_NAME,
+      args: argsOf({
+        title: '带表格的进展',
+        message: '这一段是**粗体**。\n\n| 列 | 值 |\n| --- | --- |\n| a | 1 |',
+      }),
+      isError: false,
+    }
+    await act(async () => root.render(createElement(ProgressRow, { block } as never)))
+    const header = container.querySelector('[data-dsh-part="progress-row-header"]')!
+    await act(async () => { (header as HTMLElement).click() })
+    const body = container.querySelector('[data-dsh-part="progress-row-message"]')!
+    expect(body.querySelector('[data-dsh-part="md-strong"]')?.textContent).toBe('粗体')
+    expect(body.querySelector('table[data-dsh-part="md-table"]')).not.toBeNull()
+    expect(body.textContent).not.toContain('**粗体**')
+    expect(body.textContent).not.toContain('| 列 | 值 |')
+  })
+
   it('标题缺省时退回正文首行，两个参数都缺时只有空正文', () => {
     expect(progressOfBlock({ args: argsOf({ message: '只有正文\n第二行' }) })).toEqual({ message: '只有正文\n第二行' })
     expect(progressOfBlock({ args: argsOf({}) })).toEqual({ message: '' })
@@ -624,6 +651,59 @@ describe('F. 面板的三个已修问题（回归守卫）', () => {
     expect(body.querySelector('[data-dsh-part="md-code"]')?.textContent).toBe('代码')
     // 原文的双星号与反引号不该以纯文本形式残留
     expect(body.textContent).not.toContain('**粗体**')
+  })
+
+  /**
+   * 守卫二之补：**GFM 表格**。
+   *
+   * 早先版本把表格当「超出契约」排除了，于是一份带表格的进展在面板里整块显示成
+   * 一堆竖线（用户看到的就是原样管道符）。这条用例钉住：表头进 thead、数据行进
+   * tbody、对齐方式真的落到单元格上，且原文的 `|` 分隔行不再以文本形式残留。
+   */
+  it('正文里的 GFM 表格渲染成真正的 table 元素', async () => {
+    const updates = [{
+      id: 'a',
+      title: '带表格的进展',
+      message: [
+        '| 题 | 难度 | 断言 |',
+        '| :--- | :---: | ---: |',
+        '| CONC-04 | extreme | RangeError |',
+        '| ARCH-01 | easy | TypeError |',
+      ].join('\n'),
+      at: 1,
+    }]
+    await act(async () => root.render(createElement(ProgressUpdatesPanel, { updates } as never)))
+    const body = container.querySelector('[data-dsh-part="update-message"]')!
+    const table = body.querySelector('table[data-dsh-part="md-table"]')
+    expect(table).not.toBeNull()
+    // 表头三格、数据两行三列
+    expect(table!.querySelectorAll('thead th')).toHaveLength(3)
+    expect(table!.querySelectorAll('tbody tr')).toHaveLength(2)
+    expect(table!.querySelectorAll('tbody td')).toHaveLength(6)
+    expect(table!.querySelector('thead th')?.textContent).toBe('题')
+    expect(table!.querySelectorAll('tbody tr')[0]!.querySelectorAll('td')[2]!.textContent).toBe('RangeError')
+    // 对齐：第 1 列左、第 2 列居中、第 3 列右
+    const headerCells = Array.from(table!.querySelectorAll('thead th')) as HTMLElement[]
+    expect(headerCells[0]!.style.textAlign).toBe('left')
+    expect(headerCells[1]!.style.textAlign).toBe('center')
+    expect(headerCells[2]!.style.textAlign).toBe('right')
+    // 分隔行与原文管道符不该以纯文本残留
+    expect(body.textContent).not.toContain(':---')
+    expect(body.textContent).not.toContain('| CONC-04')
+  })
+
+  /** 表格识别的前瞻条件：只有表头 + 分隔行同时在场才认，孤立的竖线不算表格。 */
+  it('正文里孤立的竖线不会被误判成表格', async () => {
+    const updates = [{
+      id: 'a',
+      title: '带竖线的正文',
+      message: '管道符 | 在这里只是个符号，不是表格。\n\n第二段。',
+      at: 1,
+    }]
+    await act(async () => root.render(createElement(ProgressUpdatesPanel, { updates } as never)))
+    const body = container.querySelector('[data-dsh-part="update-message"]')!
+    expect(body.querySelector('table')).toBeNull()
+    expect(body.textContent).toContain('管道符 | 在这里只是个符号')
   })
 
   /** 守卫三：计数文案的 {n} 必须被替换（线上出现过「共 {n} 条」）。 */

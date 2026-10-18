@@ -70,7 +70,7 @@ export function createProgressUpdateTool(deps: {
       message: {
         type: 'string',
         required: true,
-        description: 'The details, about 1000 characters at most, in light Markdown: one paragraph of prose plus a few bullets.',
+        description: 'The details, about 1000 characters at most, in light Markdown: one paragraph of prose plus a few bullets. Tables are supported: when several items share fields, use a GFM pipe table (header row plus a | --- | separator row) instead of one item per line.',
       },
     },
     output: {
