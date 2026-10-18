@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.27.0 - 2026-10-18
+- **【进展更新】agent 在多步任务中主动汇报，对话流里一行一条，右侧栏可回看**
+  - **是什么**：新增 in-tree 子模块 `src/host/progress-updates/` + `src/client/progress-updates/`，复刻 Kimi Code 的「进展更新」。agent 通过一个**不结束回合**的工具 `progress_update(title?, message)` 主动汇报，对话流里渲染成一行（状态点 + 标题 + 状态词，正文点开看），右侧栏有一个总览面板。
+  - **宿主侧**：工具注册始终进行（工具清单不能在会话中途变化），开关关闭时 `execute` 返回 `{displayed:false}` 而不是抛错；系统提示词用 `systemPrompt.section({ text: () => enabled ? … : '' })` 的**函数形式**，所以设置改了立刻生效、不需要新开会话；`tools/post-execute` 上做 8 轮催促——**按会话维度计数**（subagent 沿 `header.parentSession` 归并到顶层祖先，整棵委派树共用一个计数器，修正了「主 agent 与子 agent 各记一份、谁都没到阈值」的既有瑕疵）、**按模型步去重**（读 `sessionProjections` 的 `turnBoundary.lastStepStartSeq`，一次并行发多个工具只算一轮），达到阈值注入一条 `additionalContexts` 提醒。
+  - **可选服务一律走 `ctx.get()`**：`tools` / `systemPrompt` / `webServer` / `sessions` / `sessionProjections` 全部在**调用时**读取，缺任何一个只退化成更弱的实现（不注册工具 / 无提示词 / 无路由 / 按工具结果计数），**不抛错、不降级整个插件**。`inject` 数组没有新增任何一项。
+  - **取数通道**：`GET /api/dsh-progress-updates/updates?session=<id>` → `{ updates: ProgressUpdate[] }`，带 `cache-control: no-store`，loopback 信任栅栏（socket + Host 头 + `sec-fetch-site`）。浏览器半边是独立运行时，拿不到宿主进程的任何对象，所以只能走同源 HTTP —— 轮询客户端在 `src/client/progress-updates/host-source.ts`，无订阅者时不发任何请求。
+  - **设置**：并入本插件已有的 `Config`，两个字段 `progressUpdates`（默认 false）与 `progressUpdatesNudgeThreshold`（默认 8，1–50），都是 `volatile()`，改完即时生效。设置页是**独立一格**（`settings.section`，id `progress-updates`，order 150），不与订阅服务那格（`subscription-hub`，45）合并。
+  - **右侧栏入口**：`sidebarRightTabs.register` 声明页面型页签，并带一个 `guide` 条目与自绘的 36×36 彩色标记——页签类型只是声明，**guide 条目才是用户看得见、点得到的入口**。
+  - **正文渲染**：`markdown-lite.tsx`（零依赖）渲染段落、无序/有序列表、行内代码、粗体与最多三级标题；段落、列表、行内标记都是真实元素，不经 `dangerouslySetInnerHTML`，因此没有注入面。平台 `MarkdownText` 是第一选择但被排除（见提交信息：它的 lib 顶层静态 import `.module.css`，Node 的 ESM 加载器先于任何 vite 插件与 alias 生效）。
+  - **验证**：`npm run typecheck` 0 错误；全量 **3985 passed | 7 skipped**；`npm run build` 通过。四条回归守卫各自做过变异测试（不插值 / 展开改回单选 / 正文改回纯文本 / 去掉 guide 条目，各自都会让对应用例变红）。
+
 - **[推理塌缩守卫] 熔断器默认关闭：功能与实现全部保留，只把「默认接电」改成「部署显式接电」**
   - **现状**：本线的「熔断器」即推理塌缩守卫（`src/host/reasoning-collapse-guard/index.ts`），它订阅 `llm/stream` 瀑布，在「n-gram 重复度」与「语义复现」双信号连续命中时切断本轮流并排一条续跑。该守卫已无需在生产轮次里生效。
   - **改法（只动接线，不动实现）**：`src/index.ts` 的 `reasoningCollapseGuard` 配置默认值由 `{}` 改为 `false`（`Config` 与 `apply()` 的注释同步改写）。默认配置下 `if (pluginConfig.reasoningCollapseGuard !== false)` 直接跳过，守卫的 `ctx.effect` 注册、`llm/stream` 订阅、per-turn 熔断簿记与续跑排队**全部不装配**，运行时零开销、零副作用。
