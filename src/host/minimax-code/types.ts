@@ -194,7 +194,7 @@ export const ANTHROPIC_VERSION = '2023-06-01'
  *   in 2 MB.
  * - MiniMax's catalog — the source this line transcribes its own numbers from —
  *   gives the flagship M3 a 512K context window (1M optional) and M3.1 Flash
- *   Preview 1M, and the model table bounds a single image at 10 MB. A 2 MB
+ *   1M, and the model table bounds a single image at 10 MB. A 2 MB
  *   total-body ceiling cannot coexist with a 10 MB single-image bound: one
  *   legitimate image would trip the guard on its own.
  *

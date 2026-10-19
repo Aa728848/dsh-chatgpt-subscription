@@ -189,8 +189,8 @@
 - **区域是凭据属性**：`cn` 用 `account.minimax.cn` / `agent.minimax.cn`，`global` 用对应 `.io` 域名。两个区域的目录都会被探测，因此国际区账号不会因为没有国区文件而「未登录」；读回凭据时**以记录里存的区域为准**，而不是拿默认区域覆盖它；
 - **模型目录是硬编码的，而且必须硬编码**（`src/host/minimax-code/model-catalog.ts`）：
   - 该端点的 `GET /v1/models` **未对订阅流量开放**（503 `"{\"errorCode\":50115,\"errorReason\":\"direct_route_not_configured\"}"`），所以任何「实时目录」都只会是一个必然失败的请求；
-  - 四款模型（M2.7 / M2.7 HighSpeed / M3 / M3.1 Flash Preview）的上下文、输出上限与思考形态都取自本机 `~/.minimax/config.yaml` 的模型表，**不从不存在的接口推断**；
-- **思考形态按模型表三态实现**：M2.7 系列**恒定开启且没有档位**（不发送任何字段）；M3 是**开关二态**（`{type:'enabled'|'disabled'}`）；M3.1 Flash Preview **强制开启并可指定档位**（`{type:'enabled',effort:...}`）。未知或越档的取值一律回落到该模型目录声明的默认档，不会把模型没有声明的档位发出去；
+  - 四款模型：M2.7 / M2.7 HighSpeed / M3 取自本机 `~/.minimax/config.yaml` 的模型表；**M3.1 Flash 是 2026-10-19 换上的正式版 id**（`MiniMax-M3.1-Flash`，去掉了 `-Preview` 后缀），取自 MiniMax 自己的 Model Invocation 页 Supported Models 表并在该订阅端点上实测（正式 id、`output_config.effort` 的 low/max、内联图片）。无论哪一条，**都不从不存在的接口推断**；
+- **思考形态按模型表三态实现，且一律走 `output_config`，不发 `thinking` 对象**（该字段从未被文档确认，发出去只是一种形状的猜测）：M2.7 系列**恒定开启且没有档位**（不发送任何字段）；M3 是**开关二态**（关闭时 `output_config.effort: 'none'`）；M3.1 Flash **强制开启并可指定档位**（`output_config.effort` 取 low/medium/high/xhigh/max，省略即 max）。未知或越档的取值一律回落到该模型目录声明的默认档，不会把模型没有声明的档位发出去；
 - **视频不在能力声明里**：模型表虽然给 M3 / M3.1 标了视频输入，但 DSH 的附件服务只存图片、本线路也没有安装视频字节读取器，映射器只能把它替换成一条说明文本。**声明一个做不到的能力比不声明更糟**（DSH 的能力闸门、模型选择器与子代理委派都会当它成立），所以这里只声明 `text` 与 `image`；要加 `video` 必须先有真正的读取器（对照 Kimi Code 线路的 `video-store.ts`）；
 - **瞬时失败按错误类别重试**（`src/host/minimax-code/adapter.ts`）：上游模型供应商临时不可用（5xx）归为 `SERVER`、429 归为 `RATE_LIMIT`、连接未产出响应归为 `TRANSPORT`，走 DSH retry policy 的有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；**但 429 的正文若说的是余额/额度耗尽，则判为终局**——重试只会推迟用户真正需要看到的提示；
 - **401 会强制续期一次再重试**：本地时钟看着还有效、服务端却拒收的令牌（在桌面端被撤销、时钟偏移、桌面端已轮换）与「真的需要重新登录」在状态码上无法区分，所以第一次 401 会**强制刷新一次并原样重试同一个请求体**；重试再被拒才是终局；

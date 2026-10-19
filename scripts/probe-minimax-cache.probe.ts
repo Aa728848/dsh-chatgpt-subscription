@@ -25,7 +25,7 @@ import { buildMinimaxRequest } from '../src/host/minimax-code/mapper.ts'
 import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 
 const TIMEOUT_MS = 120_000
-const MODEL = (process.env.PROBE_MINIMAX_MODEL || 'MiniMax-M3.1-Flash-Preview').trim()
+const MODEL = (process.env.PROBE_MINIMAX_MODEL || 'MiniMax-M3.1-Flash').trim()
 
 const proxy = new ProxyManager({ getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }) })
 const fetchFn = proxy.createFetch()

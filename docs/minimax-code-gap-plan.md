@@ -4,6 +4,8 @@
 - **官方文档**：`platform.minimax.io/docs/guides/text-generation.md`、`/docs/guides/text-m3-function-call.md`
 
 > **v2 修订说明**：v1 里 N2/N5/N7 三条结论有误，本版按官方文档更正，并作废两条基于 pi-ai 通用代码的错误推断。
+>
+> **2026-10-19 补记（模型改名）**：MiniMax 发布了正式版 `MiniMax-M3.1-Flash`（去掉了 `-Preview` 后缀），本文引用的官方错误文案与模型表里的 `MiniMax-M3.1-Flash-Preview` 是**当时的原文**，保持不动；我们随包目录已改用正式版 id，旧 id 由 [model-catalog.ts](../src/host/minimax-code/model-catalog.ts) 的改名映射接管（查得到、但不再作为 id 发上线路）。
 
 ---
 

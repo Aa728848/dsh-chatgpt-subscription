@@ -16,7 +16,7 @@ describe('adapter image request targets', () => {
   for (const [provider, model, adapter] of [
     ['antigravity', 'gemini-3.7-flash', new AntigravityAdapter()],
     ['kimi-code', 'k3', new KimiCodeAdapter()],
-    ['minimax-code', 'MiniMax-M3.1-Flash-Preview', new MinimaxCodeAdapter()],
+    ['minimax-code', 'MiniMax-M3.1-Flash', new MinimaxCodeAdapter()],
     ['step-code', 'step-3.5-flash', new StepCodeAdapter()],
   ] as const) {
     it(`${provider} reports the same downscaled target its mapper sends`, () => {

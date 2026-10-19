@@ -12,7 +12,7 @@ import { MINIMAX_CODE_MODELS } from '../src/host/minimax-code/model-catalog.ts'
  * "max_tokens" with one thinking block and no text; 512 -> stop_reason "end_turn"
  * with the title after ~53 output tokens.
  */
-const FORCED_THINKING = 'MiniMax-M3.1-Flash-Preview'
+const FORCED_THINKING = 'MiniMax-M3.1-Flash'
 
 describe('floorForcedThinkingTokens', () => {
   it('raises a cap below the forced-thinking floor', () => {

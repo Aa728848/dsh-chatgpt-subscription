@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[MiniMax Code] 模型目录跟上正式版：`MiniMax-M3.1-Flash` 取代 `MiniMax-M3.1-Flash-Preview`，并给存量用户留了一条迁移路**
+  - **上游改名了**：MiniMax 于 2026-10-19 发布正式版 `MiniMax-M3.1-Flash`（官方 Model Invocation 页的 Supported Models 表已不再带 `-Preview` 后缀，1,000,000 上下文）。我们随包的硬编码目录里那条 `MiniMax-M3.1-Flash-Preview` 已经不是上游当前的名字。
+  - **先实测，再改目录**：用本机设备码凭据打国区订阅端点 `https://agent.minimax.cn/mavis/api/v1/llm/v1/messages`，三个 id 各发一次真实请求，全部 **HTTP 200** 且服务回显同名——`MiniMax-M3.1-Flash`（新）、`MiniMax-M3.1-Flash-Preview`（旧，仍未被下线）、`MiniMax-M3`（对照）。正式版另测两项能力：`output_config.effort` 真生效（同一 prompt 下 `low` 289 思考 token / `max` 412），内联图片块被接受并正常作答（多模态可用）。
+  - **改法一（目录换名）**：[model-catalog.ts](../src/host/minimax-code/model-catalog.ts) 第四条改为 `MiniMax-M3.1-Flash`（显示名 `MiniMax M3.1 Flash`）。**1M 上下文取自官方 Model Invocation 页**，思考强制开启 / effort 可调 / 收图三项为 2026-10-19 实测；**输出上限 128k 与 4 附件这两个数是沿用 Preview 条目的**（官方只公布上下文，不公布输出上限与每模型附件数），注释里写明未重测。
+  - **改法二（存量勾选不再被丢掉 —— 本轮真正的坑）**：`resolveMinimaxCodeEnabledModelIds` 会把目录里没有的 id 全部过滤掉。别的用户 `enabledModelIds` 里存着 `MiniMax-M3.1-Flash-Preview`，换名后这一条被丢掉；**如果他只勾了这一个模型，升级后模型选择器会一个都不剩**。因此目录加了一张**单向改名映射**（旧 id → 新 id），并让它在四个地方生效：查目录条目、`isMinimaxCodeModelId`、存量勾选解析（去重后不重复列）、以及**按旧 id 存过的上下文窗口覆盖**继续生效。默认勾选「未编辑过」的判定也改在解析之后做，所以用旧拼写写下的完整默认列表仍按「随目录增长」处理。
+  - **改法三（线上的 id 不动）**：改名只发生在**查找**层，**发上线路的 model 字段仍按调用方给的那个 id 走**。已有会话记录里的 id 因此原样保留，它带着的 thinking 签名回放作用域（route/model/authOwner）不会因为换名而失配——把 wire 也改掉会让在途会话的回放校验对不上。
+  - **文档同步**：README 里「四款模型」与「思考形态三态」两条（后者原本还在写早已不用的 `thinking` 对象，已改为 `output_config`）、视频占位提示文案、`types.ts` 的过期注释、[subagent-model-authorization.ts](../src/host/subagent-model-authorization.ts) 的示例路由串、5 个测试文件里的模型 id 全部改为正式版；[docs/minimax-code-gap-plan.md](docs/minimax-code-gap-plan.md) 补记改名事实并说明其中引用的官方原文保持不动。
+  - **验证**：`npm run typecheck` 0 错误；全量 **247 passed | 1 skipped（248 文件）、3997 passed | 7 skipped、0 failed**（新增 `test/minimax-code-model-rename.test.ts` 9 例，钉住「目录只列新 id」「旧 id 仍解析到同一条目」「存量勾选不丢」「两种拼写不重复列」「旧 id 的窗口覆盖继续生效」「卡片按新 id 显示为已勾选」）。
+
 ## 0.27.2 - 2026-10-18
 - **[进展更新] 正文补上 GFM 表格，对话流与侧栏面板改用同一个渲染器**
   - **现象**：模型在进展正文里写 GFM 表格（`| 题 | 难度 |` + `| --- | --- |`）时，面板把整块表格**原样**显示成一堆竖线；同时对话流里的主形态（`progress-row.tsx`）正文是纯文本 `<p>{message}</p>`，连 `**粗体**` 都不解析——同一份进展在侧栏渲染过、在对话流里是原文，两处观感对不上。

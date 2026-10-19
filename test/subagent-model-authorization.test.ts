@@ -33,7 +33,7 @@ import {
 
 const GEMINI: AllowedModelRoute = { provider: 'antigravity', model: 'gemini-3.8-flash' }
 const OPUS: AllowedModelRoute = { provider: 'antigravity', model: 'claude-opus-4-6' }
-const MINIMAX: AllowedModelRoute = { provider: 'minimax-code', model: 'MiniMax-M3.1-Flash-Preview' }
+const MINIMAX: AllowedModelRoute = { provider: 'minimax-code', model: 'MiniMax-M3.1-Flash' }
 const SLASHED: AllowedModelRoute = { provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash' }
 const PREFERENCE: SubagentModelSelectionPreference = { enabled: true, allowedModels: [GEMINI, OPUS] }
 const NO_SESSIONS: SessionsResolver = { get: () => undefined }
@@ -481,17 +481,17 @@ describe('subagent model authorization', () => {
     // opaque "not on the allowlist": accepting the doubled id would only hand
     // an unresolvable model to the adapter.
     const prefixed = delegationDenialReason(agent, 'subagent', {
-      provider: 'minimax-code', model: 'minimax-code/MiniMax-M3.1-Flash-Preview',
+      provider: 'minimax-code', model: 'minimax-code/MiniMax-M3.1-Flash',
     }, PREFERENCE, NO_SESSIONS)
     expect(prefixed).toContain('passed a whole route as `model`')
-    expect(prefixed).toContain('provider "minimax-code", model "MiniMax-M3.1-Flash-Preview"')
+    expect(prefixed).toContain('provider "minimax-code", model "MiniMax-M3.1-Flash"')
     expect(prefixed).not.toContain('is not on the Session allowlist')
     // The same authorized route passed as two fields is accepted unchanged.
     expect(delegationDenialReason(agent, 'subagent', {
-      provider: 'minimax-code', model: 'MiniMax-M3.1-Flash-Preview',
+      provider: 'minimax-code', model: 'MiniMax-M3.1-Flash',
     }, PREFERENCE, NO_SESSIONS)).toBeUndefined()
-    expect(explicitRoutePair('minimax-code', 'minimax-code/MiniMax-M3.1-Flash-Preview'))
-      .toEqual({ provider: 'minimax-code', model: 'MiniMax-M3.1-Flash-Preview' })
+    expect(explicitRoutePair('minimax-code', 'minimax-code/MiniMax-M3.1-Flash'))
+      .toEqual({ provider: 'minimax-code', model: 'MiniMax-M3.1-Flash' })
 
     // An id that merely contains a slash belongs to its own provider and is
     // left untouched, so a genuine cross-provider id is never rewritten.
@@ -509,8 +509,8 @@ describe('subagent model authorization', () => {
     // A half-specified pair never resolves, and a prefix with nothing behind it
     // is not a model id either.
     expect(explicitRoutePair('minimax-code', undefined)).toBeUndefined()
-    expect(explicitRoutePair(undefined, 'MiniMax-M3.1-Flash-Preview')).toBeUndefined()
-    expect(explicitRoutePair('', 'MiniMax-M3.1-Flash-Preview')).toBeUndefined()
+    expect(explicitRoutePair(undefined, 'MiniMax-M3.1-Flash')).toBeUndefined()
+    expect(explicitRoutePair('', 'MiniMax-M3.1-Flash')).toBeUndefined()
     expect(explicitRoutePair('p', 'p/')).toEqual({ provider: 'p', model: 'p/' })
 
     // A doubled id that resolves to no authorized route is still reported as
@@ -519,7 +519,7 @@ describe('subagent model authorization', () => {
       provider: 'minimax-code', model: 'minimax-code/MiniMax-M2',
     }, PREFERENCE, NO_SESSIONS)
     expect(reason).toContain('minimax-code/minimax-code/MiniMax-M2')
-    expect(reason).toContain('minimax-code/MiniMax-M3.1-Flash-Preview')
+    expect(reason).toContain('minimax-code/MiniMax-M3.1-Flash')
     expect(reason).toContain('is not on the Session allowlist')
   })
 
@@ -532,7 +532,7 @@ describe('subagent model authorization', () => {
     const enriched = enrichListSubagentModelsOutput(rawProviderList, [MINIMAX])
     expect(enriched).toContain('minimax-code — MiniMax Code')
     expect(enriched).toContain('already filtered by the Session allowlist')
-    expect(enriched).toContain('- minimax-code/MiniMax-M3.1-Flash-Preview -> provider: "minimax-code", model: "MiniMax-M3.1-Flash-Preview"')
+    expect(enriched).toContain('- minimax-code/MiniMax-M3.1-Flash -> provider: "minimax-code", model: "MiniMax-M3.1-Flash"')
     // Idempotent when called twice and a no-op when no allowlist applies.
     expect(enrichListSubagentModelsOutput(enriched, [MINIMAX])).toBe(enriched)
     expect(enrichListSubagentModelsOutput(rawProviderList, [])).toBe(rawProviderList)
@@ -542,7 +542,7 @@ describe('subagent model authorization', () => {
     const upstreamSubagentDesc = 'Delegate a self-contained task. '
       + 'Child LLM selection is optional. Omit `provider`, `model`, and `reasoning_effort` to use configured child defaults and inherit compatible missing values from the parent Agent.'
     expect(rewriteAuthorizedToolDescriptions(upstreamListDesc, [MINIMAX]))
-      .toContain("Output is already filtered to this Session's allowlist (minimax-code/MiniMax-M3.1-Flash-Preview)")
+      .toContain("Output is already filtered to this Session's allowlist (minimax-code/MiniMax-M3.1-Flash)")
     expect(rewriteAuthorizedToolDescriptions(upstreamListDesc, [MINIMAX]))
       .not.toContain('Catalog membership is advisory')
     expect(rewriteAuthorizedToolDescriptions(upstreamSubagentDesc, [MINIMAX]))
@@ -607,7 +607,7 @@ describe('subagent model authorization', () => {
       async () => ({ kind: 'accept' }),
     ) as { kind: string; value: string }
     expect(postDecision.kind).toBe('accept')
-    expect(postDecision.value).toContain('provider: "minimax-code", model: "MiniMax-M3.1-Flash-Preview"')
+    expect(postDecision.value).toContain('provider: "minimax-code", model: "MiniMax-M3.1-Flash"')
 
     const assembleHook = listeners.get('system-prompt/assemble')!
     const assembledOut = await assembleHook(

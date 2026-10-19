@@ -275,7 +275,7 @@ describe('MiniMax Code line', () => {
       // list video only now that a real byte reader exists and the endpoint's
       // block shape has been measured rather than assumed.
       for (const model of MINIMAX_CODE_MODELS) {
-        const expected = model.id === 'MiniMax-M3' || model.id === 'MiniMax-M3.1-Flash-Preview'
+        const expected = model.id === 'MiniMax-M3' || model.id === 'MiniMax-M3.1-Flash'
         expect(model.inputModalities.includes('video')).toBe(expected)
       }
     })

@@ -7,9 +7,13 @@
  * (and 401 when queried with `x-api-key`). Nothing in this package may probe it,
  * at startup or otherwise.
  *
- * The four entries and every number in them are transcribed verbatim from the
- * model table in `~/.minimax/config.yaml` (brief section 2.3). No value here is
- * inferred from another provider's catalog.
+ * The first three entries and every number in them are transcribed verbatim
+ * from the model table in `~/.minimax/config.yaml` (brief section 2.3). The
+ * fourth (M3.1 Flash) no longer is: MiniMax published the GA model on its own
+ * Model Invocation page and dropped the `-Preview` suffix there, so it is
+ * transcribed from that page's Supported Models table and measured on this
+ * subscription endpoint on 2026-10-19. No value here is inferred from another
+ * provider's catalog.
  */
 
 import type {
@@ -105,6 +109,13 @@ export interface MinimaxCodeCatalogModel {
  *
  * `MiniMax-M3` is the durable default: it is the flagship the measured request
  * used, and it is the one model whose wire behaviour is directly attested.
+ *
+ * The fourth id used to be `MiniMax-M3.1-Flash-Preview`. MiniMax published
+ * `MiniMax-M3.1-Flash` (no suffix) and the preview id was measured answering
+ * 200 on the same day, so the catalog carries the GA name only. Anything still
+ * naming the preview id in a stored selection, a `provider/model` route string
+ * or a doc must be rewritten, or it resolves to a model this build has no entry
+ * for.
  */
 export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
   {
@@ -160,8 +171,8 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     description: 'Flagship subscription model. Thinking is on by default and can be disabled. Accepts text, image and video; up to 9 attachments, 10MB per image and 50MB per video.',
   },
   {
-    id: 'MiniMax-M3.1-Flash-Preview',
-    name: 'MiniMax M3.1 Flash Preview',
+    id: 'MiniMax-M3.1-Flash',
+    name: 'MiniMax M3.1 Flash',
     contextWindow: 1_000_000,
     optionalContextWindow: null,
     maxTokens: 128_000,
@@ -176,25 +187,73 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxImageBytes: 10 * 1024 * 1024,
     maxVideoBytes: 50 * 1024 * 1024,
     filesApiDocumented: true,
-    description: 'Preview Flash model with a 1M context window. Thinking is forced on with a selectable effort level. Accepts up to 4 attachments.',
+    // 2026-10-19, on this subscription endpoint and the GA id: thinking is on
+    // with no `output_config` at all (so it is forced, not defaulted into the
+    // request), `effort` moves the thinking token count (low 289, max 412 on
+    // the same prompt), and an inline image block is accepted and answered.
+    // The output cap and the 4-attachment figure are carried over from the
+    // preview entry: the docs state a 1M context window, not an output cap or a
+    // per-model attachment count, and neither is cheap to re-measure.
+    description: 'Flash model with a 1M context window. Thinking is forced on with a selectable effort level. Accepts up to 4 attachments.',
   },
 ]
 
 const BY_ID = new Map(MINIMAX_CODE_MODELS.map((model) => [model.id, model]))
 
-/** Registry entry for one model id, or undefined when the id is unknown. */
-export function minimaxCodeModelDef(modelId: string): MinimaxCodeCatalogModel | undefined {
-  return BY_ID.get(modelId.trim())
+/**
+ * Ids this line used to serve, mapped to the id that replaced them.
+ *
+ * MiniMax published `MiniMax-M3.1-Flash` on 2026-10-19 and dropped the
+ * `-Preview` suffix; the preview id was measured answering 200 the same day.
+ * A stored selection, a saved conversation or a hand-edited route may still
+ * name the old id, and dropping it on sight would empty a selection the user
+ * made on purpose: the picker would show no model at all. The map is one-way,
+ * because the old id and the new one are the same model and only the spelling
+ * changed.
+ */
+const RENAMED_MODEL_IDS: Readonly<Record<string, string>> = {
+  'MiniMax-M3.1-Flash-Preview': 'MiniMax-M3.1-Flash',
 }
 
-/** Membership test for one known model id. */
+/**
+ * The id a model name resolves to now.
+ *
+ * The WIRE still carries whatever id the caller asked for, so a session
+ * recorded under the old id keeps talking to the id it was recorded with - and
+ * keeps its replayed thinking blocks, whose signatures belong to that model.
+ * Only the LOOKUP is renamed: a retired id now finds the same catalog entry
+ * the new id finds, so its capabilities, its context window and its thinking
+ * shape stay exactly what they were.
+ */
+export function resolveMinimaxCodeModelId(modelId: string): string {
+  const trimmed = modelId.trim()
+  return RENAMED_MODEL_IDS[trimmed] ?? trimmed
+}
+
+/** The retired ids that now name one model. */
+function retiredIdsFor(modelId: string): string[] {
+  return Object.keys(RENAMED_MODEL_IDS).filter((retired) => RENAMED_MODEL_IDS[retired] === modelId)
+}
+
+/** Registry entry for one model id, or undefined when the id is unknown. */
+export function minimaxCodeModelDef(modelId: string): MinimaxCodeCatalogModel | undefined {
+  return BY_ID.get(resolveMinimaxCodeModelId(modelId))
+}
+
+/**
+ * Membership test for one known model id.
+ *
+ * A retired id counts: it still names a model this line serves, so a caller
+ * asking whether an id is known gets the honest answer instead of a denial
+ * that would only be true of the spelling.
+ */
 export function isMinimaxCodeModelId(value: unknown): boolean {
-  return typeof value === 'string' && BY_ID.has(value.trim())
+  return typeof value === 'string' && BY_ID.has(resolveMinimaxCodeModelId(value))
 }
 
 /** Display name for one model id, falling back to the raw id so nothing is hidden. */
 export function minimaxCodeModelName(modelId: string): string {
-  return BY_ID.get(modelId.trim())?.name ?? modelId
+  return BY_ID.get(resolveMinimaxCodeModelId(modelId))?.name ?? modelId
 }
 
 /** Every model id the picker offers, in catalog order. */
@@ -265,10 +324,18 @@ export function contextWindowForModel(
   modelId: string,
   contextWindowOverrides: Record<string, number> | undefined,
 ): number {
-  const fallback = minimaxCodeModelDef(modelId)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
-  const override = contextWindowOverrides?.[modelId]
-  if (typeof override === 'number' && Number.isFinite(override) && override >= MIN_CONTEXT_WINDOW) {
-    return Math.floor(override)
+  const trimmed = modelId.trim()
+  const resolved = resolveMinimaxCodeModelId(trimmed)
+  const fallback = BY_ID.get(resolved)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+  // The override is looked up under the id the caller named, under the id that
+  // name resolves to, and under the retired ids that resolve to it, so a window
+  // the user set before the rename keeps applying to the same model instead of
+  // silently reverting to the catalog's number.
+  for (const candidate of [trimmed, resolved, ...retiredIdsFor(resolved)]) {
+    const override = contextWindowOverrides?.[candidate]
+    if (typeof override === 'number' && Number.isFinite(override) && override >= MIN_CONTEXT_WINDOW) {
+      return Math.floor(override)
+    }
   }
   return fallback
 }
@@ -290,9 +357,15 @@ export function resolveMinimaxCodeEnabledModelIds(
   if (!enabled) return []
   const catalogIds = minimaxCodeModelIds()
   const shipped = new Set(catalogIds)
-  const isUntouchedDefault = stored.length === shipped.size && stored.every((id) => shipped.has(id))
+  // A stored id that has been renamed resolves to its successor FIRST, so a
+  // selection made before the rename keeps the model it named instead of being
+  // filtered away - which would leave the picker showing nothing at all.
+  const resolved = stored.map((id) => resolveMinimaxCodeModelId(id))
+  const isUntouchedDefault = resolved.length === shipped.size && resolved.every((id) => shipped.has(id))
   if (isUntouchedDefault) return catalogIds
-  return stored.filter((id) => shipped.has(id))
+  // De-duplicated: a stored list naming both the old and the new spelling of
+  // one model resolves to one entry, and the picker must not list it twice.
+  return [...new Set(resolved)].filter((id) => shipped.has(id))
 }
 
 /**

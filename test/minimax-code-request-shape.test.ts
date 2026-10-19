@@ -17,7 +17,7 @@ function effort(value: string | undefined): GenerateOptions['reasoningEffort'] {
 
 function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
   return {
-    model: 'MiniMax-M3.1-Flash-Preview',
+    model: 'MiniMax-M3.1-Flash',
     messages: [
       { role: 'user', content: [{ type: 'text', text: 'Hello there' }] } as Message,
     ],
@@ -36,7 +36,7 @@ function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
  */
 describe('the thinking control on the wire', () => {
   it('never sends a thinking object', () => {
-    for (const model of ['MiniMax-M2.7', 'MiniMax-M2.7-highspeed', 'MiniMax-M3', 'MiniMax-M3.1-Flash-Preview']) {
+    for (const model of ['MiniMax-M2.7', 'MiniMax-M2.7-highspeed', 'MiniMax-M3', 'MiniMax-M3.1-Flash']) {
       for (const level of [undefined, 'low', 'high', 'max', 'none']) {
         const body = buildMinimaxRequest(options({ model, reasoningEffort: effort(level) }))
         // MiniMax documents thinking as on by default with no configuration;

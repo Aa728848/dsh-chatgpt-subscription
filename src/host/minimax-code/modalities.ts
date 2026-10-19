@@ -23,7 +23,7 @@ export function videoOmissionText(reason: VideoOmissionReason, label?: string): 
   const subject = label === undefined || label === '' ? 'the attached video' : label
   switch (reason) {
     case 'unsupported-model':
-      return '[video omitted: ' + subject + ' cannot be sent because the selected MiniMax model does not accept video input; switch to MiniMax-M3 or MiniMax-M3.1-Flash-Preview, or ask the user to describe the video.]'
+      return '[video omitted: ' + subject + ' cannot be sent because the selected MiniMax model does not accept video input; switch to MiniMax-M3 or MiniMax-M3.1-Flash, or ask the user to describe the video.]'
     case 'unsupported-container':
       return '[video omitted: ' + subject + ' uses a container the MiniMax coding endpoint does not accept; supported formats are ' + VIDEO_MEDIA_TYPES.join(', ') + '.]'
     case 'unreadable':

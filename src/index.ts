@@ -1703,6 +1703,7 @@ export {
   minimaxCodeModelIds,
   minimaxCodeModelName,
   resolveMinimaxCodeEnabledModelIds,
+  resolveMinimaxCodeModelId,
   type MinimaxCodeCatalogModel,
   type MinimaxCodeThinkingMode,
 } from './host/minimax-code/model-catalog.ts'

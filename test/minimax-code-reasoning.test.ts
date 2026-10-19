@@ -7,7 +7,7 @@ describe('MiniMax Code reasoning metadata', () => {
       status: () => ({ contextWindowOverrides: {}, defaultReasoningEffort: 'high' }),
     } as never)
 
-    const resolved = await adapter.resolveModel('minimax-code', 'MiniMax-M3.1-Flash-Preview')
+    const resolved = await adapter.resolveModel('minimax-code', 'MiniMax-M3.1-Flash')
     expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual([
       'low', 'medium', 'high', 'xhigh', 'max', 'default',
     ])

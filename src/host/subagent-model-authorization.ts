@@ -290,11 +290,11 @@ export function inheritedRouteOf(agent: AuthorizationAgent | undefined): Inherit
  * value that already carries its provider prefix.
  *
  * The discovery tool that hands a model to the model renders each route as
- * `provider/model` (`minimax-code/MiniMax-M3.1-Flash-Preview`), and the
+ * `provider/model` (`minimax-code/MiniMax-M3.1-Flash`), and the
  * `model` parameter is documented as "Model id interpreted by provider". A
  * model that copies that line into `model` while naming `provider` separately
  * therefore sends `provider` = `minimax-code` and `model` =
- * `minimax-code/MiniMax-M3.1-Flash-Preview`. That is the single most likely way
+ * `minimax-code/MiniMax-M3.1-Flash`. That is the single most likely way
  * a correct-looking call is formed, and treating the doubled text as an opaque
  * model id both denies it and — had it been authorized — resolved a model the
  * provider does not have. The prefix is stripped only when the remainder is a
@@ -405,7 +405,7 @@ export function unauthorizedRouteReason(
  * The id is deliberately NOT accepted here. The guard is the plugin plane, so
  * it cannot rewrite the arguments the delegation tool executes: that tool hands
  * `model` to the adapter verbatim, and the adapter matches it against its own
- * table, where `minimax-code/MiniMax-M3.1-Flash-Preview` is not a model. A
+ * table, where `minimax-code/MiniMax-M3.1-Flash` is not a model. A
  * guard that accepted the doubled text would turn this clear refusal into a
  * downstream `NO_ADAPTER`/unknown-model failure. Naming the two fields
  * separately is what actually unblocks the call.
