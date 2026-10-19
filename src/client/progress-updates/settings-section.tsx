@@ -187,7 +187,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
   const writable = settings !== undefined && snapshot.status === 'ready' && snapshot.writable
-  const enabled = value.progressUpdates === true
+  const enabled = value.progressUpdates !== false
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[进展更新] 默认开启，并补上「宿主服务晚到」时丢失的右侧栏入口**
+  - **现象一（多数用户）**：「进展更新」的开关默认是**关**的。没手动开过的用户装上插件后：`progress_update` 工具的 `execute` 一直返回 `displayed: false`，系统提示词里没有引导节，8 轮催促也不触发——功能整套静默不工作，而设置页里那个开关是唯一线索（截图里它是关的）。
+  - **现象二（部分用户）**：右侧栏 guide 里那一格「进展更新」**整格不出现**。页签类型是在本插件 `apply` 的那一刻同步向 `ctx.get('sidebarRightTabs')` 读的；宿主 `ui-sidebar-right` 若比本插件晚上线，那次读回来的是 `undefined`，注册被整段跳过——面板注册齐全但右侧栏空着，用户根本找不到入口（`test/progress-updates-client.test.tsx` 里那条「guide 入口缺失」的回归守卫就是为这个写的）。
+  - **改法一（默认开启）**：[src/index.ts](../src/index.ts) 的 `progressUpdates` 由 `default(false)` 改为 `default(true)`；[src/host/progress-updates/index.ts](../src/host/progress-updates/index.ts) 的 `resolveProgressUpdatesSettings` 判定由 `enabled === true` 改为 `enabled !== false`（**缺省即开启**，只有显式写 `false` 才关）；[settings-section.tsx](../src/client/progress-updates/settings-section.tsx) 的开关展示同步按「缺省即开启」——宿主还没答上来时显示为**开**而不是关。关掉的能力没有丢：设置页写 `false` 立刻生效（字段是 `volatile()`，不重挂插件行）。
+  - **改法二（晚到的服务自动补注册）**：[src/client/progress-updates/index.ts](../src/client/progress-updates/index.ts) 里，服务在位时仍**就地注册**（同步，行为不变）；服务缺席但上下文支持 `ctx.inject` 时，改用 `ctx.inject(['sidebarRightTabs'], ...)` **等它上线时补注册**页签类型与 guide 入口。取服务时先试 scope 的属性读（scope 的 inject 名单里有它，合法）、失败再退回 `ctx.get()`——本插件自己的静态 `inject` 没有这个服务名，直接读属性会被 Cordis 拒绝。设置表单 `configForms` 晚到时同样按需重取，设置页不再永久停在只读态。
+  - **没有踩的坑**：`ctx.inject` 在 Cordis 里会新建一个 fiber，服务永不上线时它就一直等着，**不影响**本插件其余部分的挂载；因此没有把 `sidebarRightTabs` 写进本插件的静态 `inject` 名单（那会让整个插件在没装 `ui-sidebar-right` 的部署上挂不上）。
+  - **验证**：`npm run typecheck` 0 错误（`tsc -b --force` + `tsc -p test/tsconfig.json`）；全量 **247 passed | 1 skipped（248 文件）、4006 passed | 7 skipped、0 failed**；`npm run build` 通过。新增/更新 5 条回归守卫，并做**变异验证**：临时回退这 4 个源码文件后，其中 5 条全部变红（默认开启 3 条、侧栏服务晚到 1 条、设置服务晚到 1 条），恢复后全绿。
+
 ## 0.28.0 - 2026-10-19
 - **[MiniMax Code] 模型目录跟上正式版：`MiniMax-M3.1-Flash` 取代 `MiniMax-M3.1-Flash-Preview`，并给存量用户留了一条迁移路**
   - **上游改名了**：MiniMax 于 2026-10-19 发布正式版 `MiniMax-M3.1-Flash`（官方 Model Invocation 页的 Supported Models 表已不再带 `-Preview` 后缀，1,000,000 上下文）。我们随包的硬编码目录里那条 `MiniMax-M3.1-Flash-Preview` 已经不是上游当前的名字。

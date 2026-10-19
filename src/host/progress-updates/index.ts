@@ -96,7 +96,7 @@ export function resolveProgressUpdatesSettings(config?: ProgressUpdatesConfigFie
   const enabled = readProgressConfigField(config?.progressUpdates)
   const threshold = readProgressConfigField(config?.progressUpdatesNudgeThreshold)
   return {
-    enabled: enabled === true,
+    enabled: enabled !== false,
     // 缺省就是 store 里那个冻结的 NUDGE_THRESHOLD（8），两处永远不会漂移。
     nudgeThreshold: typeof threshold === 'number' && Number.isSafeInteger(threshold) && threshold > 0
       ? threshold

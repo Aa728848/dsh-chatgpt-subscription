@@ -485,7 +485,14 @@ describe('设置：loader 的活引用', () => {
   })
 
   it('resolveProgressUpdatesSettings 缺省时给出 8 轮阈值', () => {
-    expect(resolveProgressUpdatesSettings()).toEqual({ enabled: false, nudgeThreshold: NUDGE_THRESHOLD })
+    // 缺省即**开启**：没配置过的用户装上插件就能用进展更新，不必先去设置里翻开关。
+    expect(resolveProgressUpdatesSettings()).toEqual({ enabled: true, nudgeThreshold: NUDGE_THRESHOLD })
     expect(resolveProgressUpdatesSettings({ progressUpdates: true })).toEqual({ enabled: true, nudgeThreshold: NUDGE_THRESHOLD })
+  })
+
+  it('显式写 false 才是关闭：默认值改成 true 之后，关闭必须由用户自己做', () => {
+    // 回归守卫：`enabled` 的判定不能写回 `=== true`，否则 undefined（缺省）会被
+    // 读成关闭，默认开启的改动就只落在一半的地方。
+    expect(resolveProgressUpdatesSettings({ progressUpdates: false })).toEqual({ enabled: false, nudgeThreshold: NUDGE_THRESHOLD })
   })
 })

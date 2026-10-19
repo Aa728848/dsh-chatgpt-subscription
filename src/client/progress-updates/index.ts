@@ -178,13 +178,23 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
    * 设置表单通道。
    *
    * 调用方给了就用它；否则从 `ctx.configForms` 现取一份，并登记到本插件的 effect
-   * 上（插件卸载时释放镜像订阅）。服务缺席时是 undefined——卡片据此渲染成只读。
+   * 上（插件卸载时释放镜像订阅）。若 `configForms` 晚于本插件挂载，设置页渲染时
+   * 再次按需获取；服务始终缺席时是 undefined——卡片据此渲染成只读。
    */
-  const settings: ProgressSettingsForm | undefined = options.settings ?? (() => {
+  let settings: ProgressSettingsForm | undefined = options.settings
+  const resolveSettings = (): ProgressSettingsForm | undefined => {
+    if (settings !== undefined) return settings
     const form = createProgressSettingsForm(ctx as unknown as { get(name: string): unknown })
-    if (form !== undefined) ctx.effect(() => () => { form.dispose() }, 'dsh-progress-updates: settings form')
-    return form
-  })()
+    if (form !== undefined) {
+      settings = form
+      ctx.effect(() => () => {
+        form.dispose()
+        if (settings === form) settings = undefined
+      }, 'dsh-progress-updates: settings form')
+    }
+    return settings
+  }
+  resolveSettings()
 
   // 卸载时停掉所有轮询：插件行被禁用后不该还有请求在飞。
   ctx.effect(() => () => {
@@ -199,13 +209,35 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
   }, 'dsh-progress-updates: poll lifecycle')
 
   /**
+   * 取侧栏页签类型注册表。
+   *
+   * 属性读只在服务名确实在当前 scope 的 inject 名单里时合法——本插件自己的
+   * 静态 `inject` 没有 `sidebarRightTabs`，属性读会被 Cordis 拒绝，所以先试
+   * 属性、失败再退回 `get()`（服务缺席时按缺失处理）。
+   *
+   * @param scope - 浏览器根上下文，或 `ctx.inject(['sidebarRightTabs'], ...)` 交来的 scope。
+   * @returns 注册表实例，或 undefined。
+   */
+  const tabsOf = (scope: ClientContext): SidebarRightTabRegistryService | undefined => {
+    try {
+      const direct = (scope as unknown as { sidebarRightTabs?: SidebarRightTabRegistryService }).sidebarRightTabs
+      if (direct !== undefined) return direct
+    } catch {
+      // Cordis 拒绝这次属性读（服务不在该 scope 的 inject 名单里）：按缺失处理。
+    }
+    return serviceOf(scope, 'sidebarRightTabs') as SidebarRightTabRegistryService | undefined
+  }
+
+  /**
    * 阶段一：声明页签**类型**。
    *
    * 这一步是面板能打开的前提。`patterns` 省略 = 页面型页签，按 kind 打开。
-   * 服务不存在（没装 ui-sidebar-right）时整段跳过：对话流行与设置页照常挂上。
+   * 服务不存在（没装 ui-sidebar-right）时整段跳过：对话流行与设置页照常挂上；
+   * 若 `sidebarRightTabs` 晚于本插件挂载，通过 `ctx.inject(['sidebarRightTabs'], ...)`
+   * 在服务就绪时自动补注册。
    */
-  ctx.effect(() => {
-    const tabs = serviceOf(ctx, 'sidebarRightTabs') as SidebarRightTabRegistryService | undefined
+  const registerTabDefinition = (targetCtx: ClientContext): (() => void) => {
+    const tabs = tabsOf(targetCtx)
     if (typeof tabs?.register !== 'function') return () => {}
     try {
       const definition: SidebarRightTabDefinition = {
@@ -244,7 +276,20 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
     } catch {
       return () => {}
     }
-  }, 'dsh-progress-updates: tab type')
+  }
+  const immediateTabs = tabsOf(ctx)
+  const injectService = (ctx as unknown as {
+    inject?: (deps: readonly string[], callback: (scope: ClientContext) => void) => void
+  }).inject
+  if (typeof immediateTabs?.register === 'function' || typeof injectService !== 'function') {
+    // 服务已经在位（或这个上下文没有 inject 能力）：就地注册。
+    ctx.effect(() => registerTabDefinition(ctx), 'dsh-progress-updates: tab type')
+  } else {
+    // 服务还没上线：等它上线时补注册，否则右侧栏里永远没有这一格。
+    injectService.call(ctx, ['sidebarRightTabs'], (scope) => {
+      scope.effect(() => registerTabDefinition(scope), 'dsh-progress-updates: tab type')
+    })
+  }
 
   /**
    * 对话流里的进展行：`progress_update` 每次调用渲染成一行。
@@ -313,7 +358,10 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
           }
         },
         locale: NS_PROGRESS_UPDATES,
-        inject: () => (settings === undefined ? { openPanel } : { openPanel, settings }),
+        inject: () => {
+          const currentSettings = resolveSettings()
+          return currentSettings === undefined ? { openPanel } : { openPanel, settings: currentSettings }
+        },
       }, ProgressUpdatesSettingsSection)
     } catch {
       return () => {}

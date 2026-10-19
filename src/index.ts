@@ -238,7 +238,7 @@ export interface Config {
   /**
    * 「进展更新」总开关。打开后 agent 可以用 `progress_update` 工具在不结束回
    * 合的前提下主动汇报多步任务的进展，网页在对话流里显示成一行，右侧栏面板汇
-   * 总。默认关闭：这是一条会改变模型行为的提示词，必须由部署人显式打开。
+   * 总。默认开启：安装插件后默认启用，用户可在设置中按需关闭。
    *
    * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：loader 把这个字段
    * 解析成一个活引用交进 `apply`，设置一保存就就地写新值、不重挂插件行。
@@ -283,7 +283,7 @@ export interface ConfigInput {
   noAnswerResume?: NoAnswerResumeOptions | false
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
-  /** 「进展更新」总开关（默认关闭，打开后往系统提示词里加入引导节）。 */
+  /** 「进展更新」总开关（默认开启，打开后往系统提示词里加入引导节）。 */
   progressUpdates?: boolean
   /** 进展更新的催促阈值（默认 8）。 */
   progressUpdatesNudgeThreshold?: number
@@ -312,10 +312,9 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 进展更新：两个字段都是 `volatile()`，设置面板里保存时直接被提交进正在运行的
   // 实例（loader 把字段换成活引用并广播 `loader/volatile-update`），不重挂插件
   // 行——开关必须在同一个会话里立刻生效，否则用户要为了打开它重开一次对话。
-  // `progressUpdates` 默认关闭：它往系统提示词里加一节引导，属于会改变模型行为
-  // 的开关，必须由部署人显式打开；`progressUpdatesNudgeThreshold` 默认就是冻结
-  // 在 store 里的 8，两处共用同一个常量。
-  progressUpdates: z.boolean().default(false).volatile()
+  // `progressUpdates` 默认开启：安装插件后开箱即用，用户可在设置页随时关闭；
+  // `progressUpdatesNudgeThreshold` 默认就是冻结在 store 里的 8，两处共用同一个常量。
+  progressUpdates: z.boolean().default(true).volatile()
     .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。'),
   progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
     .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),

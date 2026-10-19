@@ -141,10 +141,16 @@ function mount(enabled: boolean | { get(): boolean }) {
 }
 
 describe('插件 Config：两个字段都是活引用', () => {
-  it('解析出来的就是 { get() } 引用，默认关闭、阈值 8', () => {
+  it('解析出来的就是 { get() } 引用，默认开启、阈值 8', () => {
+    // 默认开启：装上插件即开箱可用，用户可随时在设置里关掉。
     const parsed = Config({})
-    expect(parsed.progressUpdates?.get()).toBe(false)
+    expect(parsed.progressUpdates?.get()).toBe(true)
     expect(parsed.progressUpdatesNudgeThreshold?.get()).toBe(NUDGE_THRESHOLD)
+  })
+
+  it('显式写 false 时解析出来是关闭（默认值改了不等于关不掉）', () => {
+    const parsed = Config({ progressUpdates: false })
+    expect(parsed.progressUpdates?.get()).toBe(false)
   })
 
   it('解析出来的引用正是挂载函数认识的形状', () => {

@@ -67,6 +67,13 @@ function makeCtx(services: Record<string, unknown> = {}) {
   const disposers: Array<() => void> = []
   /** 入口申请过的槽位名：inject 与 register 必须指向同一个槽位。 */
   const injects: string[] = []
+  /**
+   * `ctx.inject([...], callback)` 登记的可选服务依赖。
+   *
+   * 真 Cordis 里这会新建一个 fiber，等服务上线才跑回调；这里把它记下来，让测试
+   * 能自己扮演「服务上线」那一刻。
+   */
+  const pendingInjects: Array<{ deps: readonly string[], callback: (scope: unknown) => void }> = []
   const ctx = {
     effect: (fn: () => unknown) => {
       const dispose = fn()
@@ -74,6 +81,9 @@ function makeCtx(services: Record<string, unknown> = {}) {
       return () => {}
     },
     get: (name: string) => services[name],
+    inject: (deps: readonly string[], callback: (scope: unknown) => void) => {
+      pendingInjects.push({ deps, callback })
+    },
     locale: {
       register: () => () => {},
       bind: () => (key: string) => (zh as Record<string, string>)[key] ?? key,
@@ -89,7 +99,7 @@ function makeCtx(services: Record<string, unknown> = {}) {
       },
     },
   }
-  return { ctx: ctx as never, registrations, disposers, injects }
+  return { ctx: ctx as never, registrations, disposers, injects, pendingInjects, services }
 }
 
 /**
@@ -126,6 +136,42 @@ afterEach(async () => {
 /** 造一个工具调用的参数视图（流式阶段的前缀读法）。 */
 function argsOf(fields: Record<string, string>): { text: (key: string) => string | undefined } {
   return { text: (key) => fields[key] }
+}
+
+/**
+ * 一份假的表单通道：记录 set 的字段与值。
+ *
+ * 模块级而非某个 describe 内部：设置页的多个测试组都要用它。
+ *
+ * @param value - 这一份表单快照里的配置值。
+ * @returns 表单通道，外加记录写入的 `writes`。
+ */
+function fakeForm(value: Partial<ProgressUpdatesSettingsValues>): ProgressSettingsForm & { writes: Array<[string, unknown]> } {
+  const writes: Array<[string, unknown]> = []
+  let snapshot = {
+    status: 'ready' as const,
+    value,
+    base: undefined,
+    user: undefined,
+    revision: 1,
+    writable: true,
+  }
+  const listeners = new Set<() => void>()
+  return {
+    writes,
+    getSnapshot: () => snapshot as never,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    set: async (field, next) => {
+      writes.push([field, next])
+      snapshot = { ...snapshot, value: { ...snapshot.value, [field]: next } }
+      for (const listener of Array.from(listeners)) listener()
+      return true
+    },
+    dispose: () => { listeners.clear() },
+  }
 }
 
 describe('A. 对话流里的进展行', () => {
@@ -272,35 +318,6 @@ describe('A. 对话流里的进展行', () => {
 })
 
 describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTab', () => {
-  /** 一份假的表单通道：记录 set 的字段与值。 */
-  function fakeForm(value: Partial<ProgressUpdatesSettingsValues>): ProgressSettingsForm & { writes: Array<[string, unknown]> } {
-    const writes: Array<[string, unknown]> = []
-    let snapshot = {
-      status: 'ready' as const,
-      value,
-      base: undefined,
-      user: undefined,
-      revision: 1,
-      writable: true,
-    }
-    const listeners = new Set<() => void>()
-    return {
-      writes,
-      getSnapshot: () => snapshot as never,
-      subscribe: (listener: () => void) => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-      set: async (field, next) => {
-        writes.push([field, next])
-        snapshot = { ...snapshot, value: { ...snapshot.value, [field]: next } }
-        for (const listener of Array.from(listeners)) listener()
-        return true
-      },
-      dispose: () => { listeners.clear() },
-    }
-  }
-
   it('注册成独立的一格：id 是 progress-updates，order 与订阅服务那格不冲突', () => {
     // Given 一个装着侧栏服务的上下文
     const { ctx, registrations } = makeCtx({ sidebarRightTabs: { register: () => () => {} }, sidebarRight: { openTab: vi.fn() } })
@@ -596,6 +613,125 @@ describe('D. 侧栏页签：身份一致', () => {
     // 带自己的填充色（渐变引用或十六进制），而不是完全交给 currentColor
     expect(container.innerHTML).toContain('linearGradient')
     expect(container.innerHTML).toMatch(/#[0-9A-Fa-f]{6}/)
+  })
+})
+
+/**
+ * 假的服务设置表单服务：`createProgressSettingsForm` 只要求它有 `get` 与
+ * `describe` 两个成员。
+ *
+ * @param value - 这一份配置条目的解析值。
+ * @returns 可以交给 `ctx.get('configForms')` 的服务。
+ */
+function fakeConfigFormsService(value: ProgressUpdatesSettingsValues): unknown {
+  const listeners = new Set<() => void>()
+  const snapshot = {
+    status: 'ready' as const,
+    value,
+    base: undefined,
+    user: undefined,
+    revision: 1,
+    writable: true,
+  }
+  const form = {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    set: async () => true,
+  }
+  return {
+    get: () => form,
+    describe: () => ({
+      getSnapshot: () => ({ view: { namespaces: [{ ns: 'dsh-chatgpt-subscription', value }] } }),
+      subscribe: (listener: () => void) => {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+    }),
+  }
+}
+
+describe('G. 可选服务晚于本插件上线（入口缺失的真实原因）', () => {
+  /**
+   * 回归守卫：右侧栏的「进展更新」那一格，是在宿主提供 `sidebarRightTabs`
+   * **之后**才注册进去的。宿主服务比本插件晚上线时，入口就整格消失——用户看
+   * 不到、也点不开面板，只剩设置页里一个打不开的按钮。
+   *
+   * 修法是 `ctx.inject(['sidebarRightTabs'], ...)`：服务上线时自动补注册。
+   */
+  it('侧栏服务晚于本插件上线时，等它上线就补注册页签类型与 guide 入口', () => {
+    // Given 一个还没有侧栏服务的上下文
+    const { ctx, pendingInjects, services } = makeCtx()
+
+    // When 子模块挂载
+    installProgressUpdatesClient(ctx)
+
+    // Then 它没有就地注册（服务还不在），而是**等着**它上线
+    expect(pendingInjects).toHaveLength(1)
+    expect(pendingInjects[0]!.deps).toEqual(['sidebarRightTabs'])
+
+    // When 宿主的服务上线
+    const definitions: Array<{ id: string, kind: string, guide?: ReadonlyArray<{ id: string }> }> = []
+    services.sidebarRightTabs = {
+      register: (definition: { id: string, kind: string, guide?: ReadonlyArray<{ id: string }> }) => {
+        definitions.push(definition)
+        return () => {}
+      },
+    }
+    const scope = {
+      get: (name: string) => services[name],
+      effect: (fn: () => unknown) => {
+        fn()
+        return () => {}
+      },
+    }
+    pendingInjects[0]!.callback(scope)
+
+    // Then 那一格补上了：页签类型 + guide 入口都在
+    expect(definitions).toHaveLength(1)
+    expect(definitions[0]!.id).toBe(PANEL_TAB_ID)
+    expect(definitions[0]!.kind).toBe(PANEL_TAB_KIND)
+    expect(definitions[0]!.guide).toHaveLength(1)
+  })
+
+  /**
+   * 回归守卫：设置服务（`configForms`）晚上线时，设置页不能永远停在只读态。
+   */
+  it('设置服务晚于本插件上线时，设置页重新取一次就拿到可写表单', () => {
+    // Given 一个还没有设置服务的上下文
+    const { ctx, registrations, services } = makeCtx()
+    installProgressUpdatesClient(ctx)
+    const section = registrationOf(registrations, 'settings.section')
+
+    // Then 第一次取：没有设置服务，开关只能只读
+    const before = section.inject?.() as { openPanel: () => void, settings?: unknown }
+    expect(before.settings).toBeUndefined()
+
+    // When 设置服务上线，用户再次打开设置页
+    services.configForms = fakeConfigFormsService({ progressUpdates: true, progressUpdatesNudgeThreshold: 8 })
+    const after = section.inject?.() as { openPanel: () => void, settings?: unknown }
+
+    // Then 这一次拿到了表单，开关可写
+    expect(after.settings).toBeDefined()
+  })
+
+  /**
+   * 回归守卫：默认开启。表单里还没有这个字段（宿主还没答上来、或用的是默认值）
+   * 时，开关必须显示为**开**，而不是因为「读到 undefined」显示成关。
+   */
+  it('表单没有给出这个字段时，开关显示为开启（默认开箱即用）', async () => {
+    // Given 一份还没有 progressUpdates 字段的表单
+    const form = fakeForm({})
+
+    // When 渲染设置分区
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+
+    // Then 开关是开的
+    expect(container.querySelector<HTMLElement>('[data-dsh-part="settings-switch"]')?.getAttribute('aria-checked')).toBe('true')
   })
 })
 
