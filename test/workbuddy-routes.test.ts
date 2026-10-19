@@ -1128,6 +1128,34 @@ describe('WorkBuddy routes', () => {
     expect(JSON.parse(strategy.captured.body).value.rotationStrategy).toBe('sticky')
   })
 
+  it('carries the account model parks in the status payload', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const handlers: any[] = []
+    const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+    await pool.addAccount({
+      accessToken: 'at-park', refreshToken: 'rt-park', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'u1',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+    const accountId = (await pool.listAccounts())[0]!.id
+    const until = pool.markModelCooldown(accountId, 'glm-5.3', 60_000)
+    expect(until).toBeGreaterThan(Date.now())
+    registerWorkBuddyRoutes(makeContext(handlers), store, await makeSettings(), undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+      accountPool: pool,
+    })
+
+    const status = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/status'), status)
+    expect(status.captured.status).toBe(200)
+    const value = JSON.parse(status.captured.body).value
+    // The card draws the parks out of the status payload, so they have to
+    // survive the trip through the route: the model, and the instant its park
+    // lifts.
+    expect(value.accounts[0].modelCooldowns).toEqual([{ model: 'glm-5.3', cooldownUntil: until }])
+  })
+
   it('refuses to delete a desktop account and only hides it', async () => {
     const dir = await makeAuthDir()
     await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({

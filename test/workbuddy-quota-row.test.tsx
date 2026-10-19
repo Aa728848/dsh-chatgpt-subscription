@@ -107,6 +107,7 @@ afterEach(async () => {
   container.remove()
   globalThis.fetch = originalFetch
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = originalActEnvironment
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -139,6 +140,19 @@ describe('WorkBuddy quota rendering', () => {
     // Every bar on the page is an account row's.
     expect(container.querySelectorAll('[role="progressbar"]').length)
       .toBe(container.querySelectorAll('.dsha-account-quota-row').length)
+  })
+
+  it('re-reads the status every 60 seconds while the tab is visible', async () => {
+    // The card refreshed only when the tab became visible again, so it sat on
+    // the account list it read when the tab was opened: a cooldown that had
+    // since lifted, or a model park that had since appeared, stayed on screen
+    // until the page was reloaded by hand. Every sibling tab polls on this
+    // rhythm already.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    await render()
+    const before = vi.mocked(globalThis.fetch).mock.calls.length
+    await act(async () => { vi.advanceTimersByTime(60_000) })
+    expect(vi.mocked(globalThis.fetch).mock.calls.length).toBeGreaterThan(before)
   })
 
   it('keeps the facts that have no per-account bar, and says whose they are', async () => {

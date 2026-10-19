@@ -1,4 +1,4 @@
-import React, { type ReactNode } from 'react'
+import React, { useEffect, useState, type ReactNode } from 'react'
 import type {
   AccountPoolStatusDto,
   AccountRotationStrategy,
@@ -6,6 +6,7 @@ import type {
 } from '../../shared/account-pool-contracts.ts'
 import { formatPoolLabel, type AccountPoolLabels } from './account-pool-labels.ts'
 import { AccountQuota } from './account-quota.tsx'
+import { cooldownRemainingParts } from './format.ts'
 
 export type { AccountPoolLabels } from './account-pool-labels.ts'
 
@@ -65,9 +66,24 @@ export function formatAccountDate(ms?: number): string {
   }
 }
 
-/** Whole minutes left in a cooldown, never below one. */
-export function cooldownMinutesLeft(cooldownUntil: number, now = Date.now()): number {
-  return Math.max(1, Math.ceil((cooldownUntil - now) / 60_000))
+/** The labels the remaining-time text needs; every tab's set carries them. */
+export type CooldownRemainingLabels = Pick<
+  AccountPoolLabels,
+  'cooldownLeft' | 'cooldownRemaining' | 'cooldownRemainingSeconds'
+>
+
+/**
+ * The remaining cooldown, in the reader's own words.
+ *
+ * Whole minutes while a minute or more is left, minutes and seconds below
+ * that, and the seconds alone under a minute: "剩 1 分" for the last 59
+ * seconds is a lie, and "剩 0 分 42 秒" is unreadable.
+ */
+export function formatCooldownRemaining(remainingMs: number, labels: CooldownRemainingLabels): string {
+  const { minutes, seconds } = cooldownRemainingParts(remainingMs)
+  if (minutes === 0) return formatPoolLabel(labels.cooldownRemainingSeconds, { seconds })
+  if (seconds === 0) return formatPoolLabel(labels.cooldownLeft, { minutes })
+  return formatPoolLabel(labels.cooldownRemaining, { minutes, seconds })
 }
 
 /** Whether one account currently carries a live 429 cooldown. */
@@ -92,11 +108,40 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
 ): React.ReactElement {
   const t = props.labels
   const accounts = props.accounts
-  const now = Date.now()
+  // The clock the cooldown badges count down against.
+  //
+  // It used to be a single `Date.now()` taken while the card rendered, which
+  // froze every badge at the value it had when the page was drawn: a user
+  // watching a five-minute cooldown read "剩 5 分" for five minutes. The clock
+  // now lives in state, and the host's `cooldownUntil` is the anchor it counts
+  // down to - the browser's own time, not a value the host has to refresh.
+  const [now, setNow] = useState(() => Date.now())
   // One sibling holding a snapshot proves the line reads quota per account, so
   // the accounts it has not read yet may say so. Without this, a line that has
   // no quota concept would grow a row of "not read yet" on every account.
   const anyQuota = accounts.some((account) => account.quota !== undefined)
+
+  // Whether anything on this card is counting down right now.
+  const counting = accounts.some((account) => (
+    isCoolingDown(account, now)
+    || (account.modelCooldowns ?? []).some((park) => park.cooldownUntil > now)
+  ))
+
+  // The tick.
+  //
+  // It runs only while something is actually cooling down: a settings page that
+  // shows no cooldown has nothing to count, and a permanent 1 Hz timer there
+  // would wake the whole tab every second for the sake of a number that never
+  // changes. The badge therefore also disappears on its own when the cooldown
+  // lifts, without waiting for the next status read.
+  useEffect(() => {
+    if (!counting) return
+    // The clock may have been idle for a long while - nothing was cooling down
+    // - so it is read again the moment a countdown starts, not one tick later.
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [counting])
 
   return (
     <section className="dsha-group">
@@ -147,6 +192,13 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
           {accounts.map((account) => {
             const isActive = account.id === props.activeAccountId
             const cooling = isCoolingDown(account, now)
+            // The models this account is parked on, right now.
+            //
+            // A model park is a different fact from the account's own cooldown:
+            // the account keeps serving every model that is not named here, so a
+            // card that only drew the account cooldown reported the account as
+            // available while the model the request wanted was the one refused.
+            const modelParks = (account.modelCooldowns ?? []).filter((park) => park.cooldownUntil > now)
             const needsRelogin = account.authStatus !== undefined && account.authStatus !== 'ok'
             return (
               <div key={account.id} className={`dsha-account-card ${isActive ? 'active' : ''}`}>
@@ -158,7 +210,7 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
                       {isActive && <span className="dsha-badge active">{t.activeAccount}</span>}
                       {cooling && (
                         <span className="dsha-badge cooldown">
-                          {t.cooling}（{formatPoolLabel(t.cooldownLeft, { minutes: cooldownMinutesLeft(account.cooldownUntil!, now) })}）
+                          {t.cooling}（{formatCooldownRemaining(account.cooldownUntil! - now, t)}）
                         </span>
                       )}
                       {needsRelogin && <span className="dsha-badge danger">{t.needsRelogin}</span>}
@@ -220,6 +272,20 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
                   {account.expiresAt !== undefined && <span>{t.expires}: {formatAccountDate(account.expiresAt)}</span>}
                   {account.lastUsedAt !== undefined && <span>{t.lastUsed}: {formatAccountDate(account.lastUsedAt)}</span>}
                 </div>
+                {modelParks.length > 0 && (
+                  <div className="dsha-account-model-cooldowns">
+                    {modelParks.map((park) => (
+                      <div key={park.model} className="dsha-account-model-cooldown-row">
+                        <span className="dsha-account-model-cooldown-tag">{t.modelCooldown}</span>
+                        <span className="dsha-account-model-cooldown-name" title={park.model}>{park.model}</span>
+                        <span className="dsha-account-model-cooldown-time">
+                          {formatCooldownRemaining(park.cooldownUntil - now, t)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <AccountQuota
                   quota={account.quota}
                   labels={t}

@@ -31,6 +31,14 @@ export function installPoolStyles(): void {
 .dsha-account-quota-row[data-level=danger] .dsha-account-quota-fill{background:var(--dsw-alias-label-danger,#d94b4b)}
 .dsha-account-quota-value{color:var(--dsw-alias-label-primary);flex:none;font-variant-numeric:tabular-nums;min-width:40px;text-align:right}
 .dsha-account-quota-meta{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px;font-variant-numeric:tabular-nums}
+/* Models parked on one account. A model park is not the account's own
+   cooldown - the account keeps serving every other model it has - so the row
+   names the model and gives that park a countdown of its own. */
+.dsha-account-model-cooldowns{display:flex;flex-direction:column;gap:4px;margin-top:9px}
+.dsha-account-model-cooldown-row{align-items:center;display:flex;font-size:12px;gap:8px}
+.dsha-account-model-cooldown-tag{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px}
+.dsha-account-model-cooldown-name{color:var(--dsw-alias-label-secondary);flex:none;max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsha-account-model-cooldown-time{color:var(--dsw-alias-label-primary);flex:none;font-variant-numeric:tabular-nums}
 @media(max-width:560px){.dsha-account-quota-meta{display:none}}
 `, POOL_STYLE_ID)
 }

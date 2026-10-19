@@ -17,6 +17,9 @@ export const zh = {
   rescan: '重新扫描',
   rescanning: '扫描中...',
   accounts: '账号管理',
+  // This line parks a MODEL because the upstream refused that model alone
+  // (429), not because the account is limited - so the row says so.
+  modelCooldown: '模型限流',
   addCnAccount: '添加国区账号',
   addIntlAccount: '添加国际区账号',
   authorizing: '授权中…',
@@ -122,6 +125,9 @@ export const en = {
   rescan: 'Rescan',
   rescanning: 'Scanning...',
   accounts: 'Account Management',
+  // This line parks a MODEL because the upstream refused that model alone
+  // (429), not because the account is limited - so the row says so.
+  modelCooldown: 'Model rate limit',
   addCnAccount: 'Add China account',
   addIntlAccount: 'Add international account',
   authorizing: 'Authorizing…',

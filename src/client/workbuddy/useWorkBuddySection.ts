@@ -49,6 +49,10 @@ function accountPoolLabels(t: typeof zh): AccountPoolLabels {
     noAccounts: t.noAccounts,
     // A WorkBuddy identity reads as a nickname, not an e-mail address.
     email: t.nickname,
+    // The upstream refuses ONE model on this line (429), while the account
+    // keeps serving the rest, so the row names that cause rather than the
+    // generic "the account is cooling" wording.
+    modelCooldown: t.modelCooldown,
   }
 }
 
@@ -311,7 +315,13 @@ export function useWorkBuddySection({ onModelChange, loadModelDirectory }: WorkB
       if (document.visibilityState === 'visible') void loadStatus(true)
     }
     document.addEventListener('visibilitychange', refreshWhenVisible)
+    // The same visible-only poll every sibling tab runs. This one was missing,
+    // so the card sat on the account list it read when the tab was opened: a
+    // cooldown that had since lifted, or a model park that had since appeared,
+    // stayed on screen until the page was reloaded by hand.
+    const timer = window.setInterval(refreshWhenVisible, 60_000)
     return () => {
+      window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
       quotaFollowUp.current?.cancel()
       if (loginIntervalRef.current !== null) window.clearInterval(loginIntervalRef.current)

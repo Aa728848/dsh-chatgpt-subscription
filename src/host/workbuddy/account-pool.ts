@@ -42,7 +42,7 @@ import type {
   WorkBuddyMeter,
   WorkBuddyRegion,
 } from '../../shared/workbuddy-contracts.ts'
-import type { PoolAccountQuotaDto } from '../../shared/account-pool-contracts.ts'
+import type { PoolAccountModelCooldownDto, PoolAccountQuotaDto } from '../../shared/account-pool-contracts.ts'
 
 /** One pooled WorkBuddy account: the credential plus the facts the card renders. */
 export interface WorkBuddyPoolAccount extends PoolAccountShape<WorkBuddyCredentials> {
@@ -375,7 +375,7 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
       refreshFailureStatus: (error) => (
         error instanceof LlmError && error.code === 'INVALID_CREDENTIAL' ? 'expired' : undefined
       ),
-      extendSummary: (account, base) => ({
+      extendSummary: (account, base, now) => ({
         ...base,
         region: account.region ?? account.credentials.region,
         source: account.source,
@@ -396,6 +396,14 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
         ...(() => {
           const quota = quotaFor(account.id)
           return quota === undefined ? {} : { quota }
+        })(),
+        // The models this account is parked on, with the instant each park
+        // lifts. The account itself stays eligible, so a card that drew only
+        // the account cooldown would report it as available while the model
+        // the request wants is the one that is refused.
+        ...(() => {
+          const modelCooldowns = this.liveModelCooldowns(account.id, now)
+          return modelCooldowns.length === 0 ? {} : { modelCooldowns }
         })(),
       }),
       // The account the user pinned in settings outranks the rotation strategy.
@@ -618,6 +626,47 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
   modelCooldownUntil(accountId: string, model: string, now = Date.now()): number | undefined {
     const until = this.modelCooldowns.get(accountId)?.get(model)
     return until !== undefined && until > now ? until : undefined
+  }
+
+  /**
+   * The models this account is parked on right now, with the instant each park
+   * lifts.
+   *
+   * Only LIVE parks are reported: a window that has passed is dropped here, so
+   * the card never shows a model that may already serve. The lift instant is
+   * the one the upstream named, stored verbatim by
+   * {@link markModelCooldown}; it is never recomputed from a duration that has
+   * since drifted, because a re-derived instant would drift with it.
+   */
+  private liveModelCooldowns(accountId: string, now: number): PoolAccountModelCooldownDto[] {
+    const models = this.modelCooldowns.get(accountId)
+    if (models === undefined) return []
+    const live: PoolAccountModelCooldownDto[] = []
+    for (const [model, until] of models) {
+      if (until > now) live.push({ model, cooldownUntil: until })
+      // A window that has passed is not a park any more. Keeping it would grow
+      // this map for every model the account ever exhausted.
+      else models.delete(model)
+    }
+    if (models.size === 0) this.modelCooldowns.delete(accountId)
+    return live
+  }
+
+  /**
+   * Clear one account's cooldown AND the models it is parked on.
+   *
+   * The card's "reset cooldown" button promises the account is usable again. A
+   * model park is a cooldown too — the account stays eligible, but it still
+   * refuses the model the request wants — so leaving the park behind would
+   * report a reset that did not happen, and the park would outlive the only
+   * control the user has over it.
+   *
+   * The base write comes first: it is the half that can fail, and a failed
+   * write must leave the account's state as it was rather than half-cleared.
+   */
+  override async clearCooldown(accountId: string): Promise<void> {
+    await super.clearCooldown(accountId)
+    this.modelCooldowns.delete(accountId)
   }
 
   /** Accounts currently parked on one model, with lifted entries pruned on the way. */

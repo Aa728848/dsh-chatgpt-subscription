@@ -44,6 +44,21 @@ export function formatDate(ms?: number | null): string {
 }
 
 /**
+ * The remaining part of a cooldown, split into whole minutes and seconds.
+ *
+ * A cooldown counted in whole minutes only is frozen for a whole minute at a
+ * time: the badge says "剩 5 分" while the wait drops from 5:00 to 4:01, and
+ * the user is left watching a number that does not move. The seconds are what
+ * make the wait legible, so they are carried separately - and rounded UP,
+ * because a cooldown with 30.2 seconds left is still 31 seconds of waiting, and
+ * rounding down would announce "0 seconds left" while the wait is not over.
+ */
+export function cooldownRemainingParts(remainingMs: number): { minutes: number; seconds: number } {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000))
+  return { minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 }
+}
+
+/**
  * Countdown to a reset instant ("3d 4h"), empty when there is nothing to count
  * down to. Empty rather than "—" because callers append it to a date they have
  * already rendered, and a dash there would read as a second missing value.

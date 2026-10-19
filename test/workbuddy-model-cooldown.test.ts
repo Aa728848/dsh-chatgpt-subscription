@@ -108,3 +108,66 @@ describe('per-model parks', () => {
     expect(pool.modelCooldownUntil(parkedId, 'glm-5.3')).toBeUndefined()
   })
 })
+
+describe('reporting the model parks', () => {
+  it('reports a live park on the account summary', async () => {
+    const pool = await makePool()
+    const accounts = await pool.listAccounts()
+    const parkedId = accounts[0]!.id
+
+    const until = pool.markModelCooldown(parkedId, 'glm-5.3', 60_000)
+    expect(until).toBeGreaterThan(Date.now())
+
+    const summaries = await pool.listAccounts()
+    const summary = summaries.find((account) => account.id === parkedId)
+    // The card draws the park from here, so the summary must name the model
+    // and the instant the park lifts - the one the upstream named, not a
+    // duration counted again on the way out.
+    expect(summary?.modelCooldowns).toEqual([{ model: 'glm-5.3', cooldownUntil: until }])
+  })
+
+  it('leaves a park whose window has passed out of the summary', async () => {
+    vi.useFakeTimers()
+    try {
+      const pool = await makePool()
+      const accounts = await pool.listAccounts()
+      const parkedId = accounts[0]!.id
+      pool.markModelCooldown(parkedId, 'glm-5.3', 1_000)
+
+      // The park is reported while its window is open...
+      const live = (await pool.listAccounts()).find((account) => account.id === parkedId)
+      expect(live?.modelCooldowns).toHaveLength(1)
+
+      vi.advanceTimersByTime(1_500)
+
+      // ...and gone once the window has passed.
+      const summaries = await pool.listAccounts()
+      const summary = summaries.find((account) => account.id === parkedId)
+      // A window that has passed is not a park any more: reporting it would
+      // draw a model as refused that may already serve.
+      expect(summary?.modelCooldowns ?? []).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the account cooldown and its model parks together', async () => {
+    const pool = await makePool()
+    const accounts = await pool.listAccounts()
+    const parkedId = accounts[0]!.id
+    await pool.markCooldown(parkedId, 60_000, 'WorkBuddy 429')
+    pool.markModelCooldown(parkedId, 'glm-5.3', 60_000)
+
+    const before = (await pool.listAccounts()).find((account) => account.id === parkedId)
+    expect(before?.cooldownUntil).toBeGreaterThan(Date.now())
+    expect(before?.modelCooldowns).toHaveLength(1)
+
+    await pool.clearCooldown(parkedId)
+
+    const after = (await pool.listAccounts()).find((account) => account.id === parkedId)
+    // The card's "reset cooldown" button must leave nothing behind: a park
+    // that survived it would be a state the user cannot clear at all.
+    expect(after?.cooldownUntil).toBeUndefined()
+    expect(after?.modelCooldowns ?? []).toEqual([])
+  })
+})

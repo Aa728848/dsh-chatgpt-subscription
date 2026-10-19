@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AccountPoolSection,
-  cooldownMinutesLeft,
   formatAccountDate,
+  formatCooldownRemaining,
   isCoolingDown,
   type AccountPoolSectionProps,
 } from '../src/client/common/AccountPoolSection.tsx'
@@ -12,6 +14,29 @@ import { accountPoolEn, accountPoolZh, formatPoolLabel } from '../src/client/com
 import type { PoolAccountSummaryDto } from '../src/shared/account-pool-contracts.ts'
 
 const now = Date.now()
+
+/** React's act() only drives updates when the environment says so. */
+let originalActEnvironment: boolean | undefined
+
+/**
+ * The clock is pinned for every test.
+ *
+ * A cooldown that counts seconds is only exact against a fixed clock: left to
+ * the wall clock, the text a test asserts on depends on how long the test
+ * itself took, and "剩 1 分 30 秒" can be "剩 1 分 29 秒" by the time the next
+ * line runs.
+ */
+beforeEach(() => {
+  originalActEnvironment = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT
+  ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(now)
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = originalActEnvironment
+})
 
 function account(overrides: Partial<PoolAccountSummaryDto> = {}): PoolAccountSummaryDto {
   return {
@@ -23,8 +48,8 @@ function account(overrides: Partial<PoolAccountSummaryDto> = {}): PoolAccountSum
   }
 }
 
-function render(overrides: Partial<AccountPoolSectionProps> = {}): string {
-  const props: AccountPoolSectionProps = {
+function propsFor(overrides: Partial<AccountPoolSectionProps> = {}): AccountPoolSectionProps {
+  return {
     accounts: [account()],
     activeAccountId: 'acc_1',
     rotationStrategy: 'sequential',
@@ -37,7 +62,22 @@ function render(overrides: Partial<AccountPoolSectionProps> = {}): string {
     onSetStrategy: vi.fn(),
     ...overrides,
   }
-  return renderToStaticMarkup(<AccountPoolSection {...props} />)
+}
+
+/** The card as the server renders it: effects do not run, so no timer ticks. */
+function render(overrides: Partial<AccountPoolSectionProps> = {}): string {
+  return renderToStaticMarkup(<AccountPoolSection {...propsFor(overrides)} />)
+}
+
+/** The card as the browser runs it: mounted, so its effects do run. */
+async function mount(overrides: Partial<AccountPoolSectionProps> = {}): Promise<HTMLElement> {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const root = createRoot(container)
+  await act(async () => {
+    root.render(<AccountPoolSection {...propsFor(overrides)} />)
+  })
+  return container
 }
 
 describe('AccountPoolSection', () => {
@@ -81,6 +121,61 @@ describe('AccountPoolSection', () => {
     expect(html).toContain('冷却中')
     expect(html).toContain('剩 10 分')
     expect(html).toContain(accountPoolZh.clearCooldown)
+  })
+
+  it('counts the cooldown down to the second and drops the badge when it lifts', async () => {
+    // The card's own clock drives the badge: the number moves every second on
+    // its own, and the badge disappears when the cooldown is over - no refetch.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(now)
+    const container = await mount({
+      accounts: [account({ cooldownUntil: now + 90_000 })],
+    })
+    const badge = () => container.querySelector('.dsha-badge.cooldown')?.textContent ?? ''
+
+    expect(badge()).toBe('冷却中（剩 1 分 30 秒）')
+    await act(async () => { vi.advanceTimersByTime(1_000) })
+    expect(badge()).toBe('冷却中（剩 1 分 29 秒）')
+    // Exactly a minute left: the seconds are dropped instead of shown as zero.
+    await act(async () => { vi.advanceTimersByTime(29_000) })
+    expect(badge()).toBe('冷却中（剩 1 分）')
+    // Under a minute: the seconds alone, because "剩 1 分" here would be a lie.
+    await act(async () => { vi.advanceTimersByTime(30_000) })
+    expect(badge()).toBe('冷却中（剩 30 秒）')
+    // The cooldown is over, so the badge goes away by itself.
+    await act(async () => { vi.advanceTimersByTime(30_000) })
+    expect(badge()).toBe('')
+  })
+
+  it('draws each parked model its own row, and none when nothing is parked', () => {
+    const html = render({
+      accounts: [account({
+        modelCooldowns: [
+          { model: 'glm-5.3', cooldownUntil: now + 4 * 60_000 + 32_000 },
+          { model: 'kimi-k3', cooldownUntil: now + 42_000 },
+        ],
+      })],
+    })
+    // One row per parked model, each with its own remaining time: a model park
+    // is not the account's own cooldown, and the account keeps serving the
+    // models that are not parked.
+    expect(html.match(/dsha-account-model-cooldown-row/g)).toHaveLength(2)
+    expect(html).toContain('glm-5.3')
+    expect(html).toContain('kimi-k3')
+    expect(html).toContain('剩 4 分 32 秒')
+    expect(html).toContain('剩 42 秒')
+    expect(html).toContain(accountPoolZh.modelCooldown)
+
+    // An account that parks nothing grows no row at all.
+    const plain = render({ accounts: [account()] })
+    expect(plain).not.toContain('dsha-account-model-cooldown-row')
+    expect(plain).not.toContain(accountPoolZh.modelCooldown)
+
+    // A park that has already lifted is not drawn either.
+    const lifted = render({
+      accounts: [account({ modelCooldowns: [{ model: 'glm-5.3', cooldownUntil: now - 1_000 }] })],
+    })
+    expect(lifted).not.toContain('glm-5.3')
   })
 
   it('flags an account that needs another sign-in and only offers relogin when handled', () => {
@@ -161,9 +256,11 @@ describe('AccountPoolSection', () => {
     expect(formatPoolLabel('no placeholder', { count: 1 })).toBe('no placeholder')
     expect(formatAccountDate(undefined)).toBe('—')
     expect(formatAccountDate(now)).toContain('20')
-    expect(cooldownMinutesLeft(now + 61_000, now)).toBe(2)
-    expect(cooldownMinutesLeft(now + 60_000, now)).toBe(1)
-    expect(cooldownMinutesLeft(now - 1000, now)).toBe(1)
+    expect(formatCooldownRemaining(4 * 60_000 + 32_000, accountPoolZh)).toBe('剩 4 分 32 秒')
+    expect(formatCooldownRemaining(42_000, accountPoolZh)).toBe('剩 42 秒')
+    expect(formatCooldownRemaining(5 * 60_000, accountPoolZh)).toBe('剩 5 分')
+    expect(formatCooldownRemaining(4 * 60_000 + 32_000, accountPoolEn)).toBe('4 min 32s left')
+    expect(formatCooldownRemaining(42_000, accountPoolEn)).toBe('42s left')
     expect(isCoolingDown({ ...account(), cooldownUntil: now + 1000 }, now)).toBe(true)
     expect(isCoolingDown({ ...account(), cooldownUntil: now - 1000 }, now)).toBe(false)
     expect(isCoolingDown(account(), now)).toBe(false)

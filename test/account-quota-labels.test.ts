@@ -33,13 +33,31 @@ const SHARED_QUOTA_KEYS = [
 ] as const satisfies readonly (keyof AccountPoolLabels)[]
 
 /**
+ * The cooldown labels the shared card counts down with.
+ *
+ * The same rule as the quota labels above, and for the same reason: the shared
+ * card renders them, so a tab that defines one of them for its own page would
+ * have the card speak with the tab's words - and with placeholders the card
+ * never fills.
+ */
+const SHARED_COOLDOWN_KEYS = [
+  'cooldownLeft',
+  'cooldownRemaining',
+  'cooldownRemainingSeconds',
+  'modelCooldown',
+] as const satisfies readonly (keyof AccountPoolLabels)[]
+
+/** Every shared label the card renders, in the order the two lists name them. */
+const SHARED_KEYS = [...SHARED_QUOTA_KEYS, ...SHARED_COOLDOWN_KEYS]
+
+/**
  * Tabs whose locale dictionary carries the shared set (spread in `locales.ts`).
  *
  * WorkBuddy is deliberately absent: its tab is Chinese-only and it spreads the
  * shared set inside its own card instead — the module-private `accountPoolLabels`
  * in `useWorkBuddySection.ts` (where the card's state and actions live), which
- * overrides three keys on purpose. A locale entry there cannot shadow a shared
- * label, and the three overrides sit in one six-line function where they are
+ * overrides four keys on purpose. A locale entry there cannot shadow a shared
+ * label, and the four overrides sit in one small function where they are
  * visible.
  */
 const TABS: Record<string, { zh: Record<string, string>; en: Record<string, string> }> = {
@@ -52,11 +70,11 @@ const TABS: Record<string, { zh: Record<string, string>; en: Record<string, stri
   ollama: { zh: ollamaZh, en: ollamaEn },
 }
 
-describe('shared quota labels', () => {
+describe('shared account-pool labels', () => {
   it('are present in every tab, in both locales', () => {
     for (const [tab, dicts] of Object.entries(TABS)) {
       for (const [locale, dict] of Object.entries(dicts)) {
-        for (const key of SHARED_QUOTA_KEYS) {
+        for (const key of SHARED_KEYS) {
           expect(dict[key], `${tab}/${locale} is missing the shared label "${key}"`).toBeTruthy()
         }
       }
@@ -67,7 +85,7 @@ describe('shared quota labels', () => {
     for (const [tab, dicts] of Object.entries(TABS)) {
       for (const [locale, dict] of Object.entries(dicts)) {
         const shared = locale === 'zh' ? accountPoolZh : accountPoolEn
-        for (const key of SHARED_QUOTA_KEYS) {
+        for (const key of SHARED_KEYS) {
           expect(
             dict[key],
             `${tab}/${locale} redefines the shared label "${key}"; the shared card would render its wording`,

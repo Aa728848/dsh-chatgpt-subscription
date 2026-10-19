@@ -20,6 +20,23 @@ export interface AccountPoolLabels {
   cooling: string
   /** `{minutes}` is replaced with the remaining cooldown in whole minutes. */
   cooldownLeft: string
+  /**
+   * `{minutes}` and `{seconds}` are the remaining cooldown, to the second.
+   *
+   * A badge that counts whole minutes only reads "剩 5 分" for the whole minute,
+   * which tells a user who is waiting for it to lift exactly nothing; this one
+   * counts the seconds as they pass.
+   */
+  cooldownRemaining: string
+  /**
+   * `{seconds}` is the remaining cooldown once less than a minute is left.
+   *
+   * A template of its own because "剩 1 分" for the last 59 seconds is a lie:
+   * under a minute the seconds are the only honest thing to show.
+   */
+  cooldownRemainingSeconds: string
+  /** Names the row of one model parked on an account. */
+  modelCooldown: string
   clearCooldown: string
   needsRelogin: string
   relogin: string
@@ -63,6 +80,9 @@ export const accountPoolZh: AccountPoolLabels = {
   deleteAccount: '删除',
   cooling: '冷却中',
   cooldownLeft: '剩 {minutes} 分',
+  cooldownRemaining: '剩 {minutes} 分 {seconds} 秒',
+  cooldownRemainingSeconds: '剩 {seconds} 秒',
+  modelCooldown: '模型冷却',
   clearCooldown: '重置冷却',
   needsRelogin: '需重新登录',
   relogin: '重新登录',
@@ -97,6 +117,9 @@ export const accountPoolEn: AccountPoolLabels = {
   deleteAccount: 'Delete',
   cooling: 'In Cooldown',
   cooldownLeft: '{minutes} min left',
+  cooldownRemaining: '{minutes} min {seconds}s left',
+  cooldownRemainingSeconds: '{seconds}s left',
+  modelCooldown: 'Model cooldown',
   clearCooldown: 'Clear Cooldown',
   needsRelogin: 'Sign-in required',
   relogin: 'Sign in again',
