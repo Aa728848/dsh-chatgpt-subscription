@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.29.0 - 2026-10-19
 - **[Antigravity] 429 不再被当成「配额耗尽」：裸 429 不冷却账号、不换账号，也不再把上游原因藏起来**
   - **现象**：账号配额还很充足（实测 Gemini 5h 桶剩余 95.95%、周桶剩余 84.67%，Claude/GPT 100%），插件却报「账号配额已耗尽」，并把该账号的 Gemini 配额族冷却 15 分钟；此后每次重试都被账号池直接挡下，连一次网络请求都不发。
   - **根因一（端点链）**：[adapter.ts](../src/host/antigravity/adapter.ts) 与 [image-tool.ts](../src/host/antigravity/image-tool.ts) 的端点候选循环只在 ok/400/404 时中断，主端点失败后会落到兜底端点。实测 `https://daily-cloudcode-pa.googleapis.com` 对 Antigravity 请求稳定 200，而 `https://cloudcode-pa.googleapis.com` 对**每一个** Antigravity 请求都回 429 `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`——没有 details、没有 Retry-After。这个 429 于是成了「被上报的那一次失败」。
