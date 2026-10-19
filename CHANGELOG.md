@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## 0.28.0 - 2026-10-19
 - **[MiniMax Code] 模型目录跟上正式版：`MiniMax-M3.1-Flash` 取代 `MiniMax-M3.1-Flash-Preview`，并给存量用户留了一条迁移路**
   - **上游改名了**：MiniMax 于 2026-10-19 发布正式版 `MiniMax-M3.1-Flash`（官方 Model Invocation 页的 Supported Models 表已不再带 `-Preview` 后缀，1,000,000 上下文）。我们随包的硬编码目录里那条 `MiniMax-M3.1-Flash-Preview` 已经不是上游当前的名字。
   - **先实测，再改目录**：用本机设备码凭据打国区订阅端点 `https://agent.minimax.cn/mavis/api/v1/llm/v1/messages`，三个 id 各发一次真实请求，全部 **HTTP 200** 且服务回显同名——`MiniMax-M3.1-Flash`（新）、`MiniMax-M3.1-Flash-Preview`（旧，仍未被下线）、`MiniMax-M3`（对照）。正式版另测两项能力：`output_config.effort` 真生效（同一 prompt 下 `low` 289 思考 token / `max` 412），内联图片块被接受并正常作答（多模态可用）。
