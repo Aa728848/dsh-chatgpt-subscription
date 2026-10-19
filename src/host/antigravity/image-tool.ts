@@ -5,7 +5,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ANTIGRAVITY_IMAGE_MODEL, ANTIGRAVITY_IMAGE_TOOL_NAME } from '../../compat.ts'
 import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
 import { AccountPoolStore } from './account-pool.ts'
-import { DEFAULT_RATE_LIMIT_COOLDOWN_MS, retryDelayMs } from './adapter.ts'
+import { retryDelayMs, upstreamBodyExcerpt } from './adapter.ts'
 import { antigravityHeaders, endpointCandidates } from './client.ts'
 import { ensureApiKey } from './oauth.ts'
 import { FileCredentialStore } from './token-store.ts'
@@ -359,6 +359,10 @@ async function requestImage(
     const body = JSON.stringify(buildImageRequest(prompt, projectId || 'antigravity-default', aspectRatio))
 
     let response: Response | undefined
+    // The response this attempt reports. The FIRST endpoint that answers owns
+    // it: a later endpoint replaces it only when it serves the request (ok) or
+    // answers 400/404, and a later 429 never replaces it.
+    let firstResponse: Response | undefined
     for (const endpoint of endpointCandidates()) {
       try {
         response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
@@ -367,7 +371,20 @@ async function requestImage(
           body,
           signal,
         })
+        if (firstResponse === undefined) firstResponse = response
         if (response.ok || response.status === 400 || response.status === 404) break
+        if (response.status === 429) {
+          // A quota verdict from one endpoint is not improved by asking a
+          // different one, and the prod endpoint answers every Antigravity
+          // request with a permanent bare 429 that says nothing about the
+          // account's allowance. The chain ends here, and the first
+          // endpoint's outcome is what gets reported.
+          response = firstResponse
+          break
+        }
+        // Any other status (a 5xx): the next endpoint may still serve the
+        // request, but the reported outcome stays the first endpoint's.
+        response = firstResponse
       } catch (error) {
         if (signal.aborted) throw error
       }
@@ -378,10 +395,27 @@ async function requestImage(
     const status = response?.status
     const errorText = await response?.text().catch(() => '') ?? ''
     if (status === 429 && response) {
-      const cooldownMs = retryDelayMs(response.headers, errorText) ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS
-      accountPool.markFamilyCooldown(account.id, 'gemini', cooldownMs, '429 Rate Limit')
-      if (await accountPool.hasAnotherAvailableAccountFor('gemini', tried)) continue
-      throw new HarnessError(`Antigravity image generation was rate limited. ${errorText}`.trim(), 'ANTIGRAVITY_IMAGE_RATE_LIMITED')
+      const statedWaitMs = retryDelayMs(response.headers, errorText)
+      if (statedWaitMs !== undefined) {
+        // A 429 that states when the allowance resets IS a verdict about this
+        // account: only its Gemini allowance is spent. The upstream body
+        // travels with the cooldown, so the next attempt can say WHY the
+        // upstream refused.
+        accountPool.markFamilyCooldown(
+          account.id, 'gemini', statedWaitMs, '429 Rate Limit', upstreamBodyExcerpt(errorText),
+        )
+        if (await accountPool.hasAnotherAvailableAccountFor('gemini', tried)) continue
+        throw new HarnessError(`Antigravity image generation was rate limited. ${errorText}`.trim(), 'ANTIGRAVITY_IMAGE_RATE_LIMITED')
+      }
+      // A 429 that states no reset time is NOT a verdict: the prod endpoint
+      // answers every Antigravity request with a bare 429, so a bare 429
+      // carries no information about this account's Gemini allowance. A quota
+      // verdict needs evidence, so the allowance is not cooled and no other
+      // account is tried.
+      throw new HarnessError(
+        `Antigravity image generation was rate limited (429) without a stated reset time, so it is handled as a transient rate limit rather than a spent quota. ${upstreamBodyExcerpt(errorText)}`.trim(),
+        'ANTIGRAVITY_IMAGE_RATE_LIMITED',
+      )
     }
     throw new HarnessError(
       `Antigravity image generation failed (${status ?? 'no response'}).${errorText ? ` ${errorText}` : ''}`,

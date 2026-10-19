@@ -187,9 +187,36 @@ describe('Antigravity image tool', () => {
       return new Response(sse(imageFrame([{ inlineData: { mimeType: 'image/png', data: PNG_1X1 } }])))
     })
     const value = await createAntigravityImageTool(pool, store, attachments, { fetchFn }).execute({ prompt: 'fox' }, execContext(false))
-    expect(mock.markFamilyCooldown).toHaveBeenCalledWith('a', 'gemini', 30_000, '429 Rate Limit')
+    // The upstream body travels with the cooldown it caused, so the next
+    // attempt can report why the upstream refused.
+    expect(mock.markFamilyCooldown).toHaveBeenCalledWith(
+      'a', 'gemini', 30_000, '429 Rate Limit', expect.stringContaining('retryDelay'),
+    )
     expect(fetchFn.mock.calls.at(-1)?.[1]?.headers).toMatchObject({ Authorization: 'Bearer token-b' })
+    // One request per account: the 429 ends the endpoint chain, because a
+    // verdict from one endpoint is not improved by asking a different one.
+    expect(fetchFn).toHaveBeenCalledTimes(2)
     expect(value).toMatchObject({ images: [expect.objectContaining({ attachmentId: 'image-1' })] })
+  })
+
+  it('does not cool the Gemini allowance for a 429 that states no reset time', async () => {
+    const { pool, mock } = poolMock(['a'])
+    const { attachments } = attachmentsMock()
+    // What the prod endpoint answers with: no details, no Retry-After.
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ error: { code: 429, message: 'Resource has been exhausted (e.g. check quota).', status: 'RESOURCE_EXHAUSTED' } }),
+      { status: 429 },
+    ))
+    await expect(createAntigravityImageTool(pool, store, attachments, { fetchFn }).execute({ prompt: 'fox' }, execContext(false)))
+      .rejects.toMatchObject({
+        code: 'ANTIGRAVITY_IMAGE_RATE_LIMITED',
+        message: expect.stringContaining('without a stated reset time'),
+      })
+    // The failure is reported, but it is not a claim about the account's
+    // allowance, so the allowance is not cooled.
+    expect(mock.markFamilyCooldown).not.toHaveBeenCalled()
+    // One request: the 429 ends the endpoint chain.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   it('reports a rate limit when no other account remains', async () => {

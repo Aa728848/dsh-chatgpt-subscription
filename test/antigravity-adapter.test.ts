@@ -8,6 +8,26 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import os from 'node:os'
 import path from 'node:path'
 
+/** A pool backend that keeps the pool document in memory; nothing touches disk. */
+class MemoryCredentialStore {
+  private data: unknown = null
+  async load() { return this.data ? JSON.parse(JSON.stringify(this.data)) : null }
+  async save(data: unknown) { this.data = JSON.parse(JSON.stringify(data)) }
+  async clear() { this.data = null }
+}
+
+/**
+ * A pool holding exactly the legacy account, so a test never reads (or writes)
+ * the real pool document on the machine that runs it.
+ */
+function poolWithLegacyAccount(store: FileCredentialStore): AccountPoolStore {
+  return new AccountPoolStore(
+    path.join(os.tmpdir(), `test-antigravity-pool-${Date.now()}-${Math.random().toString(36).slice(2)}.json`),
+    new MemoryCredentialStore() as any,
+    store,
+  )
+}
+
 describe('AntigravityAdapter', () => {
   it.each(['gemini-3.7-flash', 'gemini-3.8-flash'])('preserves %s IDs, thinking and usage through a complete tool execution round trip', async (modelId) => {
     const store = new FileCredentialStore()
@@ -368,7 +388,7 @@ describe('AntigravityAdapter', () => {
       }
 
       await expect(run()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
-      // Both endpoints were asked for the selected model, and no other model.
+      // The selected model was asked for, and no other model.
       expect(new Set(fetchCalls.map((call) => call.model))).toEqual(new Set(['gemini-3.8-flash-tiered']))
       const accountId = (await pool.read()).accounts[0]!.id
       expect(pool.familyCoolingAccountIds('gemini').has(accountId)).toBe(true)
@@ -376,6 +396,125 @@ describe('AntigravityAdapter', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('asks the primary endpoint once for a 429 and never falls through to the fallback endpoint', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    // A quota verdict: the body states when the allowance resets.
+    const errorBody = JSON.stringify({ error: {
+      code: 429, status: 'RESOURCE_EXHAUSTED', message: 'quota exhausted',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', metadata: { quotaResetDelay: '2h30m' } }],
+    } })
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(errorBody, { status: 429 }))
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+    const run = async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'antigravity', model: 'gemini-3.8-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'test 429' }] }],
+      } as unknown as GenerateOptions)) { /* drain */ }
+    }
+
+    await expect(run()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    // One request only: the prod endpoint answers every Antigravity request
+    // with a permanent bare 429, so asking it after a real verdict could only
+    // replace that verdict with a meaningless one.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports the first endpoint outcome when a later endpoint answers 429', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const fetchFn = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('upstream unavailable', { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: {
+        code: 429, message: 'Resource has been exhausted (e.g. check quota).', status: 'RESOURCE_EXHAUSTED',
+      } }), { status: 429 }))
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+    const run = async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'antigravity', model: 'gemini-3.8-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'test 5xx then 429' }] }],
+      } as unknown as GenerateOptions)) { /* drain */ }
+    }
+
+    // The prod endpoint's permanent 429 must not be reported over the first
+    // endpoint's failure.
+    await expect(run()).rejects.toMatchObject({ code: 'PROVIDER_ERROR', failure: { status: 503 } })
+    expect(pool.familyCoolingAccountIds('gemini').size).toBe(0)
+  })
+
+  it('treats a 429 without a stated reset time as a transient rate limit, not a spent quota', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    // What the prod endpoint answers with: no details, no Retry-After.
+    const bareBody = JSON.stringify({ error: {
+      code: 429, message: 'Resource has been exhausted (e.g. check quota).', status: 'RESOURCE_EXHAUSTED',
+    } })
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(bareBody, { status: 429 }))
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+    const run = async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'antigravity', model: 'gemini-3.8-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'test bare 429' }] }],
+      } as unknown as GenerateOptions)) { /* drain */ }
+    }
+
+    // Retryable, and not a claim about the account's allowance.
+    await expect(run()).rejects.toMatchObject({
+      code: 'SERVER',
+      failure: { status: 429 },
+      message: expect.stringContaining('RESOURCE_EXHAUSTED'),
+    })
+    // Nothing is cooled: a bare 429 carries no information about the account's
+    // Gemini allowance, and a quota verdict needs evidence.
+    expect(pool.familyCoolingAccountIds('gemini').size).toBe(0)
+    // The account is still selectable by the next request.
+    const accountId = (await pool.read()).accounts[0]!.id
+    expect((await pool.getEffectiveAccountFor('gemini', undefined, fetchFn)).account.id).toBe(accountId)
+  })
+
+  it('carries the upstream body into the next attempt, where the pool guard reports it', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const errorBody = JSON.stringify({ error: {
+      code: 429, status: 'RESOURCE_EXHAUSTED', message: 'quota exhausted',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', metadata: { quotaResetDelay: '1h2m3s' } }],
+    } })
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(errorBody, { status: 429 }))
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+    const run = async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'antigravity', model: 'gemini-3.8-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'test 429' }] }],
+      } as unknown as GenerateOptions)) { /* drain */ }
+    }
+
+    // The first attempt cools the family and reports the upstream body itself.
+    await expect(run()).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+
+    // The second attempt is answered by the pool guard, and its message now
+    // quotes what the upstream actually said - the body that travelled with
+    // the cooldown - instead of a sentence about the pool.
+    const failure = await run().then(() => null, (error: unknown) => error)
+    const message = (failure as { message: string }).message
+    expect(message).toContain(`上游返回：${errorBody}`)
+    expect(message).not.toContain('上游返回：全部 1 个 Antigravity 账号')
+    // The guard answers before any request goes out.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   it.each(['gemini-3.8-flash', 'claude-opus-5-5'])('carries a pasted image on the %s route as inlineData instead of dropping it', async (modelId) => {
@@ -513,8 +652,10 @@ describe('AntigravityAdapter', () => {
     globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
       captured.push(JSON.parse(String(init?.body)))
       attempt += 1
-      // Rate-limit the first attempt so the adapter walks its candidate chain.
-      if (attempt === 1) return new Response('{"error":{"code":429,"message":"RESOURCE_EXHAUSTED"}}', { status: 429 })
+      // Fail the first endpoint so the adapter walks its candidate chain. A
+      // 429 no longer walks it: the chain ends at a rate limit, because a
+      // verdict from one endpoint is not improved by asking another one.
+      if (attempt === 1) return new Response('{"error":{"code":503,"message":"unavailable"}}', { status: 503 })
       const frame = { response: { candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 } } }
       const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\r\n\r\n`)
       return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } }))

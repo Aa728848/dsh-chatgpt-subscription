@@ -66,8 +66,19 @@ export function resolveDefaultReasoningEffort(
 
 import { AccountPoolStore, quotaFamilyForModel } from './account-pool.ts'
 
-/** Cooldown applied to a 429 that states no reset time anywhere. */
-export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000
+/** How much of an upstream error body is quoted back to the user. */
+const MAX_UPSTREAM_BODY_CHARS = 500
+
+/**
+ * The upstream error body, short enough to read in a notice.
+ *
+ * A 429 body is small when the service states a reset time in it and can be an
+ * arbitrary blob when it does not, so the excerpt is what a notice carries.
+ */
+export function upstreamBodyExcerpt(body: string): string {
+  const text = body.trim()
+  return text.length > MAX_UPSTREAM_BODY_CHARS ? `${text.slice(0, MAX_UPSTREAM_BODY_CHARS)}…` : text
+}
 
 /**
  * Milliseconds in one duration string: protobuf JSON (`"12.5s"`) or Go form
@@ -360,6 +371,10 @@ export class AntigravityAdapter extends LlmAdapter {
         ...(model.id.startsWith('claude-') ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' } : {}),
       }
 
+      // The response this attempt reports. The FIRST endpoint that answers owns
+      // it: a later endpoint replaces it only when it serves the request (ok)
+      // or answers 400/404, and a later 429 never replaces it.
+      let firstResponse: Response | undefined
       for (const endpoint of endpointCandidates()) {
         try {
           let sentBody = body
@@ -412,8 +427,21 @@ export class AntigravityAdapter extends LlmAdapter {
               })
             }
           }
+          if (firstResponse === undefined) firstResponse = response
           if (response.ok || response.status === 400) break
           if (response.status === 404) break
+          if (response.status === 429) {
+            // A quota verdict from one endpoint is not improved by asking a
+            // different one, and the prod endpoint answers every Antigravity
+            // request with a permanent bare 429 that says nothing about this
+            // account's allowance. The chain ends here, and the first
+            // endpoint's outcome is what gets reported.
+            response = firstResponse
+            break
+          }
+          // Any other status (a 5xx): the next endpoint may still serve the
+          // request, but the reported outcome stays the first endpoint's.
+          response = firstResponse
         } catch (err) {
           if (signal.aborted) throw new LlmError('Antigravity request aborted', 'ABORTED', { cause: err })
         }
@@ -421,14 +449,27 @@ export class AntigravityAdapter extends LlmAdapter {
 
       if (response && response.status === 429) {
         const errorBody = await response.clone().text().catch(() => '')
-        const cooldownMs = retryDelayMs(response.headers, errorBody) ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS
-        // Only this family's allowance is spent; the account keeps serving the other.
-        this.accountPool.markFamilyCooldown(account.id, family, cooldownMs, '429 Rate Limit')
+        const statedWaitMs = retryDelayMs(response.headers, errorBody)
+        if (statedWaitMs !== undefined) {
+          // A 429 that states when the allowance resets IS a verdict about this
+          // account: only this family's allowance is spent, and the account
+          // keeps serving the other. The upstream body travels with the
+          // cooldown, so the next attempt can say WHY the upstream refused.
+          this.accountPool.markFamilyCooldown(
+            account.id, family, statedWaitMs, '429 Rate Limit', upstreamBodyExcerpt(errorBody),
+          )
 
-        const hasNext = await this.accountPool.hasAnotherAvailableAccountFor(family, triedAccountIds)
-        if (hasNext) {
-          continue
+          const hasNext = await this.accountPool.hasAnotherAvailableAccountFor(family, triedAccountIds)
+          if (hasNext) {
+            continue
+          }
         }
+        // A 429 that states no reset time is NOT a verdict: the prod endpoint
+        // answers every Antigravity request with a bare 429, so a bare 429
+        // carries no information about this account's Gemini or Claude / GPT
+        // allowance. A quota verdict needs evidence, so nothing is cooled and
+        // no other account is tried; the failure is reported as the transient
+        // rate limit it is.
       }
 
       break
@@ -436,11 +477,24 @@ export class AntigravityAdapter extends LlmAdapter {
 
     if (!response || !response.ok) {
       const status = response?.status ?? 500
-      const errText = await response?.text().catch(() => '')
-      if (status === 429) {
+      const errText = await response?.text().catch(() => '') ?? ''
+      if (response && response.status === 429) {
+        // A 429 that states a reset time is a spent allowance: the verdict is
+        // the account's, and the wait the service named is the real one.
+        if (retryDelayMs(response.headers, errText) !== undefined) {
+          throw new LlmError(
+            `Antigravity 账号配额已耗尽或请求受限 (429 RESOURCE_EXHAUSTED)。请在插件设置页查看配额剩余百分比及重置倒计时。原始响应: ${errText || 'No response'}`,
+            'RATE_LIMIT',
+            { status: 429 },
+          )
+        }
+        // A bare 429 says nothing about this account's allowance - the prod
+        // endpoint answers every Antigravity request with one - so it is
+        // reported as the transient rate limit it is, and it costs the account
+        // nothing: no cooldown, no rotation to another account.
         throw new LlmError(
-          `Antigravity 账号配额已耗尽或请求受限 (429 RESOURCE_EXHAUSTED)。请在插件设置页查看配额剩余百分比及重置倒计时。原始响应: ${errText || 'No response'}`,
-          'RATE_LIMIT',
+          `Antigravity 上游返回 429 (RESOURCE_EXHAUSTED) 但未给出重置时间，因此按瞬时限流处理，不视为账号配额耗尽，也不会冷却该账号。原始响应: ${upstreamBodyExcerpt(errText) || 'No response'}`,
+          'SERVER',
           { status: 429 },
         )
       }

@@ -193,6 +193,9 @@ export function antigravityPoolQuota(quota: AntigravityAccountQuota | undefined)
   return poolQuota(quota.fetchedAt, windows)
 }
 
+/** How much of the upstream detail the family guard quotes in its message. */
+const MAX_DETAIL_CHARS = 500
+
 /**
  * Antigravity's account pool.
  *
@@ -384,17 +387,31 @@ export class AccountPoolStore {
    * the next 429 re-establishes, and the shared pool format has no per-family
    * field to put it in.
    */
-  private readonly familyCooldowns = new Map<string, { until: number; reason: string }>()
+  private readonly familyCooldowns = new Map<string, { until: number; reason: string; detail?: string }>()
 
   private familyKey(accountId: string, family: AntigravityQuotaFamily): string {
     return `${family}\u0000${accountId}`
   }
 
-  /** Cool one account down for one quota family after an upstream 429. */
-  markFamilyCooldown(accountId: string, family: AntigravityQuotaFamily, durationMs: number, reason: string): void {
+  /**
+   * Cool one account down for one quota family after an upstream 429.
+   *
+   * `detail` is what the upstream actually said, kept beside the cooldown it
+   * caused: the pool sentence the guard raises is about the pool, and the
+   * upstream statement is the only part that tells the user WHY the request
+   * was refused.
+   */
+  markFamilyCooldown(
+    accountId: string,
+    family: AntigravityQuotaFamily,
+    durationMs: number,
+    reason: string,
+    detail?: string,
+  ): void {
     this.familyCooldowns.set(this.familyKey(accountId, family), {
       until: Date.now() + Math.max(1_000, durationMs),
       reason,
+      ...(detail === undefined || detail === '' ? {} : { detail }),
     })
   }
 
@@ -410,13 +427,31 @@ export class AccountPoolStore {
     return ids
   }
 
-  private shortestFamilyCooldownMs(family: AntigravityQuotaFamily, now = Date.now()): number | null {
-    let shortest = Infinity
+  /**
+   * The family cooldown that expires soonest, with the account it belongs to.
+   *
+   * The wait the guard reports and the upstream detail it quotes come from
+   * this ONE entry: two separate scans could pick different accounts, and the
+   * message would then name a wait for one cooldown and a reason for another.
+   */
+  private soonestFamilyCooldown(
+    family: AntigravityQuotaFamily,
+    now = Date.now(),
+  ): { accountId: string; until: number; reason: string; detail?: string } | null {
+    let soonest: { accountId: string; until: number; reason: string; detail?: string } | undefined
     const prefix = `${family}\u0000`
     for (const [key, entry] of this.familyCooldowns) {
-      if (key.startsWith(prefix) && entry.until > now) shortest = Math.min(shortest, entry.until - now)
+      if (!key.startsWith(prefix) || entry.until <= now) continue
+      if (soonest === undefined || entry.until < soonest.until) {
+        soonest = {
+          accountId: key.slice(prefix.length),
+          until: entry.until,
+          reason: entry.reason,
+          ...(entry.detail === undefined ? {} : { detail: entry.detail }),
+        }
+      }
     }
-    return Number.isFinite(shortest) ? shortest : null
+    return soonest ?? null
   }
 
   /**
@@ -438,11 +473,19 @@ export class AccountPoolStore {
       return await this.getEffectiveAccount(exclude, fetchFn)
     } catch (error) {
       if (cooling.size === 0 || !(error instanceof LlmError) || error.code !== 'RATE_LIMIT') throw error
-      const wait = this.shortestFamilyCooldownMs(family)
+      const soonest = this.soonestFamilyCooldown(family)
+      const wait = soonest === null ? null : soonest.until - Date.now()
       const label = family === 'gemini' ? 'Gemini' : 'Claude / GPT'
+      // The upstream statement travels WITH the cooldown it caused, and the
+      // clause quotes the entry that expires soonest - the same one the wait
+      // below refers to. The error the shared core throws describes the POOL,
+      // so it stays the chained cause and is never dressed up as something
+      // the upstream said.
+      const detail = soonest?.detail
       throw new LlmError(
         `全部可用 Antigravity 账号的 ${label} 配额均处于限制或冷却中 (429)。`
           + (wait === null ? '' : `最短预计在 ${Math.ceil(wait / 60_000)} 分钟后解除冷却。`)
+          + (detail === undefined || detail === '' ? '' : `上游返回：${detail.length > MAX_DETAIL_CHARS ? `${detail.slice(0, MAX_DETAIL_CHARS)}…` : detail}`)
           + '其他模型族的配额不受影响，可切换到其他模型族继续使用。',
         'RATE_LIMIT',
         { status: 429, cause: error },

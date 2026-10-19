@@ -5,6 +5,7 @@ import { AccountPoolStore, type AntigravityPoolAccount } from '../src/host/antig
 import { FileCredentialStore, type AntigravityCredentials } from '../src/host/antigravity/token-store.ts'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import { FileModelSettingsStore } from '../src/host/antigravity/token-store.ts'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 class MemoryCredentialStore {
@@ -111,6 +112,51 @@ describe('AccountPoolStore', () => {
     await poolStore.markCooldown(a1.id, 600_000, 'Quota Exhausted')
 
     await expect(poolStore.getEffectiveAccount()).rejects.toThrow(/全部 1 个 Antigravity 账号均处于配额限制或冷却中/)
+  })
+
+  it('names the upstream statement in the family guard message', async () => {
+    const a1 = await poolStore.addAccount(cred1, '账号1')
+    // Only the Gemini allowance cools, so the family guard is what the user hits.
+    const upstream = '{"error":{"code":429,"details":[{"metadata":{"quotaResetDelay":"1h2m3s"}}]}}'
+    poolStore.markFamilyCooldown(a1.id, 'gemini', 600_000, '429 Rate Limit', upstream)
+    const noNetwork = async () => { throw new Error('the pool must not need the network here') }
+
+    const failure = await poolStore.getEffectiveAccountFor('gemini', undefined, noNetwork)
+      .then(() => null, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(LlmError)
+    const error = failure as LlmError
+    expect(error.code).toBe('RATE_LIMIT')
+    // The family wording stays useful, and the upstream statement - the body
+    // the 429 carried - is appended to it.
+    expect(error.message).toContain('Gemini')
+    expect(error.message).toContain(`上游返回：${upstream}`)
+    // The shared core's sentence describes the POOL. It must never be dressed
+    // up as something the upstream said.
+    expect(error.message).not.toContain('上游返回：全部 1 个 Antigravity 账号')
+    // The cause chain still carries the original error.
+    expect(error.cause).toBeInstanceOf(LlmError)
+    // The other family is unaffected: the account is still eligible for it.
+    expect((await poolStore.getEffectiveAccountFor('claude-gpt', undefined, noNetwork)).account.id).toBe(a1.id)
+  })
+
+  it('adds no upstream clause to the family guard message when the cooldown carries no detail', async () => {
+    const a1 = await poolStore.addAccount(cred1, '账号1')
+    poolStore.markFamilyCooldown(a1.id, 'gemini', 600_000, '429 Rate Limit')
+    const noNetwork = async () => { throw new Error('the pool must not need the network here') }
+
+    const failure = await poolStore.getEffectiveAccountFor('gemini', undefined, noNetwork)
+      .then(() => null, (error: unknown) => error)
+
+    const error = failure as LlmError
+    expect(error.code).toBe('RATE_LIMIT')
+    // Nothing upstream was recorded, so the message claims nothing about the
+    // upstream at all.
+    expect(error.message).not.toContain('上游返回：')
+    expect(error.message).toContain('Gemini')
+    // The cause chain still holds the core error.
+    expect(error.cause).toBeInstanceOf(LlmError)
+    expect((error.cause as LlmError).code).toBe('RATE_LIMIT')
   })
 })
 
