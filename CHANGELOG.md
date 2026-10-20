@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.33.0 - 2026-10-20
 - **[qoder] 看板上的 Qoder 卡片用的是字母 Q，不是官方标志——现在换成官方那张 412×412 应用图标**
   - **现象**：设置页订阅列表里其余线路都是自家标志，只有 Qoder 是一个灰底字母方块。
   - **真因**：[brand-icons.tsx](../src/client/hub/brand-icons.tsx) 里那条注释给出的理由是「官方 favicon 是一枚 73 KB 的复合字形，体量不适合内联」。那个 73 KB 确实存在——但 `https://qoder.com/favIcon.svg` 现在返回的是**整站 HTML**（73,379 字节，HTML 长度不是图标大小），页面真正挂的图标是 `<link rel="icon" type="image/png">` 指向的一张 alicdn PNG。于是「太大所以不做」这个判断建立在一次看错的抓取上。
