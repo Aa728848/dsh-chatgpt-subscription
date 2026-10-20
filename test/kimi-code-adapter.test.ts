@@ -502,6 +502,8 @@ async function adapterFor(
   frames: unknown[],
   wire: KimiCodeWire = 'anthropic',
   pool?: FakePool,
+  /** A body of the test's own, for a failure no frame can express. */
+  response?: Response,
 ): Promise<{ adapter: KimiCodeAdapter; calls: string[] }> {
   const store = new FileCredentialStore(tmp('kc-inband'))
   vi.spyOn(store, 'read').mockResolvedValue(credentials())
@@ -517,7 +519,7 @@ async function adapterFor(
   const calls: string[] = []
   const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
     calls.push(String(input))
-    return sseResponse(frames)
+    return response ?? sseResponse(frames)
   }) as unknown as typeof fetch
   return {
     adapter: new KimiCodeAdapter(store, modelSettings, undefined, {
@@ -529,10 +531,10 @@ async function adapterFor(
 }
 
 /** Drain one turn, returning the error that ended it and what it had emitted. */
-async function streamOf(adapter: KimiCodeAdapter): Promise<{ error: unknown; chunks: StreamChunk[] }> {
+async function streamOf(adapter: KimiCodeAdapter, signal?: AbortSignal): Promise<{ error: unknown; chunks: StreamChunk[] }> {
   const chunks: StreamChunk[] = []
   try {
-    for await (const chunk of adapter.stream(generateOptions('k3'))) chunks.push(chunk)
+    for await (const chunk of adapter.stream(generateOptions('k3', signal === undefined ? {} : { signal }))) chunks.push(chunk)
   } catch (error) {
     return { error, chunks }
   }
@@ -545,6 +547,85 @@ const retryableCodes = (): readonly string[] => {
   const policy = new KimiCodeAdapter(new FileCredentialStore(tmp('kc-inband-policy'))).providerRetryPolicy()
   return policy.mode === 'normal' ? policy.retryableCodes : []
 }
+
+/**
+ * The exact shape undici throws when a connection dies mid-body: a bare
+ * `TypeError: terminated` that names no code, with the real reason — the reset,
+ * the far-side close, the body timeout — only on `cause`. DSH persists only
+ * `{message, code}`, so an untyped value used to reach the user as the bare word
+ * `terminated` filed under UNKNOWN, which this route never retries.
+ *
+ * `onSevered` runs at the moment the body dies, so a caller abort can be timed
+ * to the read that fails.
+ */
+function severedResponse(frames: unknown[], cause: unknown, onSevered?: () => void): Response {
+  const encoder = new TextEncoder()
+  let sent = 0
+  return new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent < frames.length) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(frames[sent++])}\n\n`))
+        return
+      }
+      onSevered?.()
+      controller.error(new TypeError('terminated', { cause }))
+    },
+  }), { headers: { 'content-type': 'text/event-stream' } })
+}
+
+/** Enough frames for a text delta to reach the caller before the body dies. */
+const PARTIAL_ANSWER = [
+  MESSAGE_START,
+  { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+]
+
+describe('kimi-code severed streams', () => {
+  it('reports a body that dies mid-stream as a transport failure that keeps its cause', async () => {
+    const reset = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+    const { adapter, calls } = await adapterFor([], 'anthropic', undefined, severedResponse(PARTIAL_ANSWER, reset))
+
+    const { error, chunks } = await streamOf(adapter)
+
+    // The delta reaches the caller first: the connection dies with output already
+    // on the wire, which is the shape a long turn actually fails in.
+    expect(JSON.stringify(chunks)).toContain('partial')
+    // TRANSPORT, not UNKNOWN: UNKNOWN is absent from this route's retryable
+    // codes, which is what let one dropped connection end the turn outright.
+    expect(error).toMatchObject({ code: 'TRANSPORT' })
+    // The cause survives into the persisted message, so the report says what
+    // happened instead of only that the body ended.
+    expect((error as Error).message).toContain('terminated')
+    expect((error as Error).message).toContain('ECONNRESET')
+    expect(retryableCodes()).toContain('TRANSPORT')
+    // Classified, not re-requested inside the stream. The harness retry policy
+    // owns the repeat.
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves a caller abort reported as an abort rather than a transport fault', async () => {
+    const caller = new AbortController()
+    const { adapter } = await adapterFor(
+      [],
+      'anthropic',
+      undefined,
+      severedResponse(PARTIAL_ANSWER, new Error('other side closed'), () => caller.abort()),
+    )
+    const { error } = await streamOf(adapter, caller.signal)
+    expect(error).toMatchObject({ code: 'ABORTED' })
+  })
+
+  it('reports a stream that ends without its terminal event as retryable too', async () => {
+    // The sibling shape: the connection closes cleanly, but no message_stop ever
+    // arrives, so what came back is half an answer.
+    const { adapter } = await adapterFor(PARTIAL_ANSWER, 'anthropic')
+    const { error, chunks } = await streamOf(adapter)
+    expect(JSON.stringify(chunks)).toContain('partial')
+    expect(error).toMatchObject({ code: 'TRANSPORT' })
+    expect((error as Error).message).toContain('before its terminal event')
+    expect(retryableCodes()).toContain('TRANSPORT')
+  })
+})
 
 describe('kimi-code in-band stream errors on the Anthropic wire', () => {
   it('reclassifies a transient in-band failure while nothing has reached the caller', async () => {

@@ -4,6 +4,7 @@ import {
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
+  errorChain,
   resolveRetryPolicy,
   type GenerateOptions,
   type LlmModelInfo,
@@ -176,7 +177,9 @@ import type { KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contra
  * - `RATE_LIMIT` — a 429 that is genuine back-pressure ("too many requests"),
  *   which the documentation describes as transient and which does belong to the
  *   account that hit it, so rotation on it still earns its keep;
- * - `TRANSPORT` — a connection that produced no response at all;
+ * - `TRANSPORT` — a connection that failed to carry the response: none at all,
+ *   a body severed mid-stream (`streamFailure`), or a stream that ended without
+ *   its terminal event (`assertStreamComplete`);
  * - `TIMEOUT` — a stalled stream, handled by the idle watchdog.
  *
  * Deliberately outside the set:
@@ -1054,7 +1057,9 @@ export class KimiCodeAdapter extends LlmAdapter {
           && inBand !== undefined) {
           throw await this.inBandStreamFailure(error, inBand, servedByAccountId)
         }
-        throw error
+        // Everything else that escaped the read loop came from the transport, not
+        // from the provider: see streamFailure.
+        throw streamFailure(error, signal)
       }
     } finally {
       void reader.cancel().catch(() => undefined)
@@ -1156,6 +1161,39 @@ export class KimiCodeAdapter extends LlmAdapter {
     const cooldownMs = accountScoped ? accountLimitCooldownMs(bodyText) : POOL_COOLDOWN_MS
     await pool.markCooldown(accountId, cooldownMs, `${PROVIDER_NAME} in-stream 429`).catch(() => undefined)
   }
+}
+
+/**
+ * The failure a stream that died mid-body is reported as.
+ *
+ * Everything above the response body is already typed: a connection that never
+ * produced a response raises TRANSPORT, a non-2xx raises its classified verdict,
+ * and the parser raises its own protocol or provider verdict. The body itself
+ * was the gap. A connection that ends before the response does arrives as
+ * undici's bare `TypeError: terminated`, which carries no code of its own, so the
+ * harness normalizes it to UNKNOWN — and UNKNOWN is not in this route's
+ * `retryableCodes`, so one severed connection ended the turn with no second
+ * attempt at all. The real reason (ECONNRESET, a socket closed by the far side, a
+ * body timeout) sat on `.cause`, which the harness drops before the failure is
+ * persisted, so the report could not even say what had happened.
+ *
+ * So the transport is named here and its cause chain is kept in the message, and
+ * only what the route already typed is left alone: an `LlmError` is this line's
+ * own verdict, and a caller abort is a cancellation rather than a fault.
+ *
+ * The code is TRANSPORT even once chunks have been yielded. DSH settles a failed
+ * attempt as an `assistant/attempt` — no model history and no rendered answer —
+ * and starts a fresh attempt on retry, and a tool call is only executed after its
+ * stream finishes, so retrying can neither repeat committed output nor re-run a
+ * tool. What the user sees is the live text of the dead attempt replaced by the
+ * retried one.
+ */
+function streamFailure(error: unknown, signal: AbortSignal): LlmError {
+  if (error instanceof LlmError) return error
+  if (signal.aborted) return new LlmError('Kimi Code stream aborted', 'ABORTED', { cause: error })
+  const chain = errorChain(error).trim()
+  const detail = chain === '' ? 'the response stream ended unexpectedly' : chain.slice(0, 500)
+  return new LlmError(`Kimi Code stream failed: ${detail}`, 'TRANSPORT', { cause: error })
 }
 
 function processLine(line: string, state: KimiCodeStreamState, wire: KimiCodeWire): StreamChunk[] {

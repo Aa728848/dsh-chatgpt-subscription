@@ -2163,6 +2163,12 @@ export function closeStream(state: KimiCodeStreamState, accountId?: string): Str
 /** Model families whose stream never carried a terminal event. */
 export function assertStreamComplete(state: KimiCodeStreamState): void {
   if (!state.done && state.finishReason === null) {
-    throw new LlmError('Kimi Code stream ended before its terminal event', 'PROVIDER_ERROR')
+    // An answer that was cut off, not a request the provider refused: the
+    // connection ended cleanly inside the stream, which is the transport failing
+    // in the one shape that leaves no exception behind. TRANSPORT is what makes
+    // the harness ask for the same step again instead of ending the turn on half
+    // an answer — the sibling shape of undici's `TypeError: terminated`, raised at
+    // the mapper because only here is it visible that nothing terminal arrived.
+    throw new LlmError('Kimi Code stream ended before its terminal event', 'TRANSPORT')
   }
 }

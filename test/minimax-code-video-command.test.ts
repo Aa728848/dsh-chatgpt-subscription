@@ -34,15 +34,15 @@ import {
   type VideoFormValues,
 } from '../src/client/minimax-code/video-form-rules.ts'
 import {
-  CUSTOM_OPTION_ID,
   MINIMAX_CODE_PROVIDER,
   VIDEO_COMMAND_NAME,
+  composerDraftOf,
   createVideoCommand,
   fillComposer,
-  presetDraftText,
   sessionRouteOf,
+  stripLeadingCommandToken,
 } from '../src/client/minimax-code/video-command.ts'
-import { videoPresets } from '../src/client/minimax-code/VideoFormDialog.tsx'
+import { videoPresets } from '../src/client/minimax-code/video-presets.ts'
 import {
   VIDEO_DEFAULTS_STORAGE_KEY,
   readVideoDefaults,
@@ -50,20 +50,16 @@ import {
   type KeyValueStorage,
 } from '../src/client/minimax-code/video-defaults-store.ts'
 
-/** A command contribution, read structurally: the popup half has no other shape. */
-interface PopupCommand {
+/** A command contribution, read structurally: the action half has no other shape. */
+interface ActionCommand {
   readonly name: string
+  readonly label: () => string
+  readonly description: () => string
+  readonly icon: unknown
   readonly available: (session: { readonly sessionId: string }) => boolean
   readonly ui: {
-    readonly kind: 'popupSelect'
-    readonly options: (
-      session: { readonly sessionId: string },
-      signal: AbortSignal,
-    ) => Promise<readonly { readonly id: string; readonly label: string }[]>
-    readonly onSelect: (
-      option: { readonly id: string; readonly label: string },
-      session: { readonly sessionId: string },
-    ) => void | Promise<void>
+    readonly kind: 'action'
+    readonly run: (session: { readonly sessionId: string }) => void
   }
 }
 
@@ -76,6 +72,8 @@ interface PopupCommand {
 function contextWith(input: {
   route?: { provider: string; model: string }
   draft?: ((text: string) => void) | undefined
+  /** Text already sitting in the composer, as `InputState.draft` reports it. */
+  existing?: string
 }): { ctx: never } {
   const binding = input.route === undefined
     ? { ctx: { scoped: true } }
@@ -93,7 +91,10 @@ function contextWith(input: {
     },
     conversation: {
       input: {
-        for: () => ({ setDraft: input.draft ?? (() => {}) }),
+        for: () => ({
+          setDraft: input.draft ?? (() => {}),
+          state: { getSnapshot: () => ({ draft: input.existing ?? '' }) },
+        }),
       },
     },
   }
@@ -109,10 +110,10 @@ describe('/video command', () => {
   it('is available only in a minimax-code session', () => {
     const minimax = contextWith({ route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' } })
     const other = contextWith({ route: { provider: 'codex-chatgpt', model: 'gpt-5' } })
-    const commandOf = (ctx: never): PopupCommand => createVideoCommand(ctx, {
+    const commandOf = (ctx: never): ActionCommand => createVideoCommand(ctx, {
       openForm: () => {},
       translate: translate as never,
-    }) as unknown as PopupCommand
+    }) as unknown as ActionCommand
 
     expect(commandOf(minimax.ctx).available({ sessionId: 's1' })).toBe(true)
     expect(commandOf(other.ctx).available({ sessionId: 's1' })).toBe(false)
@@ -124,7 +125,7 @@ describe('/video command', () => {
     const command = createVideoCommand(empty.ctx, {
       openForm: () => {},
       translate: translate as never,
-    }) as unknown as PopupCommand
+    }) as unknown as ActionCommand
     expect(command.available({ sessionId: 's1' })).toBe(false)
     expect(command.available({ sessionId: 'unknown-session' })).toBe(false)
     // And a context with no `sessions` service at all must not throw either: the
@@ -132,56 +133,50 @@ describe('/video command', () => {
     const bare = createVideoCommand({} as never, {
       openForm: () => {},
       translate: translate as never,
-    }) as unknown as PopupCommand
+    }) as unknown as ActionCommand
     expect(bare.available({ sessionId: 's1' })).toBe(false)
   })
 
-  it('offers one preset row per model plus the custom row, all of them legal', async () => {
+  it('carries the menu glyph the slash menu renders beside the label', () => {
+    // The row has to line up with the built-in commands, which all ship an icon.
+    // A contribution without one renders as the only unindented row in the list.
     const { ctx } = contextWith({ route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' } })
     const command = createVideoCommand(ctx, {
       openForm: () => {},
       translate: translate as never,
-    }) as unknown as PopupCommand
-    const rows = await command.ui.options({ sessionId: 's1' }, new AbortController().signal)
-
-    expect(rows.filter(row => row.id === CUSTOM_OPTION_ID)).toHaveLength(1)
-    expect(rows.filter(row => row.id !== CUSTOM_OPTION_ID)).toHaveLength(MINIMAX_VIDEO_MODELS.length)
-
-    // Every preset must name a duration its OWN model accepts, and a resolution
-    // its own model accepts. This is the assertion that would have caught a
-    // preset built from the union instead of from the per-model table.
-    for (const { preset } of videoPresets(translate as never)) {
-      const rule = videoModelRule(preset.model)
-      expect(rule).toBeDefined()
-      expect(durationChoices(preset.model)).toContain(preset.durationSeconds)
-      expect(rule?.resolutions).toContain(preset.resolution)
-      // A preset is a text-only row, so it must never carry `adaptive`.
-      expect(preset.ratio).not.toBe('adaptive')
-    }
+    }) as unknown as ActionCommand
+    expect(command.icon).toBeDefined()
+    expect(command.ui.kind).toBe('action')
   })
 
-  it('fills the composer with a legal preset and opens the form for the custom row', async () => {
-    const filled: { sessionId: string; text: string }[] = []
+  it('opens the panel with the saved defaults and never touches the composer', () => {
     const opened: { sessionId: string; model: string }[] = []
-    const { ctx } = contextWith({ route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' } })
+    const filled: string[] = []
+    const { ctx } = contextWith({
+      route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' },
+      draft: text => filled.push(text),
+    })
     const command = createVideoCommand(ctx, {
       openForm: (sessionId, defaults) => { opened.push({ sessionId, model: defaults.model }) },
-      fill: (sessionId, text) => { filled.push({ sessionId, text }); return true },
       translate: translate as never,
       defaults: () => normalizeVideoDefaults({ model: 'MiniMax-H3-Max' }),
-    }) as unknown as PopupCommand
-    const rows = await command.ui.options({ sessionId: 's1' }, new AbortController().signal)
+    }) as unknown as ActionCommand
 
-    const custom = rows.find(row => row.id === CUSTOM_OPTION_ID)
-    expect(custom).toBeDefined()
-    await command.ui.onSelect(custom!, { sessionId: 's1' })
+    command.ui.run({ sessionId: 's1' })
     expect(opened).toEqual([{ sessionId: 's1', model: 'MiniMax-H3-Max' }])
-    expect(filled).toHaveLength(0)
+    // The whole point of the rewrite: picking /video must not paste a template.
+    expect(filled).toEqual([])
+  })
 
-    const presetRow = rows.find(row => row.id !== CUSTOM_OPTION_ID)!
-    await command.ui.onSelect(presetRow, { sessionId: 's1' })
-    expect(filled).toHaveLength(1)
-    expect(filled[0].text).toContain('minimax_generate_video')
+  it('labels the row with the command copy', () => {
+    const { ctx } = contextWith({ route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' } })
+    const command = createVideoCommand(ctx, {
+      openForm: () => {},
+      translate: translate as never,
+    }) as unknown as ActionCommand
+    expect(command.name).toBe(VIDEO_COMMAND_NAME)
+    expect(command.label()).toBe('videoCommandLabel')
+    expect(command.description()).toBe('videoCommandDesc')
   })
 
   it('names the tool and every argument in the text it puts in the composer', () => {
@@ -456,21 +451,21 @@ describe('defaults store', () => {
   })
 })
 
-describe('presetDraftText', () => {
-  it('leaves the prompt as an explicit placeholder the user fills in', () => {
-    const text = presetDraftText({
-      id: 'x',
-      model: 'MiniMax-H3',
-      ratio: '16:9',
-      durationSeconds: 4,
-      resolution: '768P',
-    })
-    expect(text).toContain('minimax_generate_video')
-    // A preset never invents a scene description on the user's behalf.
-    expect(text).toContain('prompt=（在这里写画面描述）')
-    expect(text).toContain('model=MiniMax-H3')
-    expect(text).toContain('durationSeconds=4')
-    expect(text).toContain('resolution=768P')
+describe('videoPresets', () => {
+  it('names a duration and resolution its OWN model accepts', () => {
+    const rows = videoPresets(translate as never)
+    expect(rows).toHaveLength(MINIMAX_VIDEO_MODELS.length)
+    // Every preset must name a duration its OWN model accepts, and a resolution
+    // its own model accepts. This is the assertion that would have caught a
+    // preset built from the union instead of from the per-model table.
+    for (const { preset } of rows) {
+      const rule = videoModelRule(preset.model)
+      expect(rule).toBeDefined()
+      expect(durationChoices(preset.model)).toContain(preset.durationSeconds)
+      expect(rule?.resolutions).toContain(preset.resolution)
+      // A preset is a text-only row, so it must never carry `adaptive`.
+      expect(preset.ratio).not.toBe('adaptive')
+    }
   })
 })
 
@@ -479,15 +474,45 @@ describe('command name', () => {
     expect(VIDEO_COMMAND_NAME).toBe('video')
   })
 
-  it('does not touch the composer for an unknown option id', async () => {
+  it('never writes the composer from the command itself', () => {
     const fill = vi.fn(() => true)
-    const { ctx } = contextWith({ route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' } })
+    const { ctx } = contextWith({ route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' }, draft: fill })
     const command = createVideoCommand(ctx, {
       openForm: () => {},
-      fill,
       translate: translate as never,
-    }) as unknown as PopupCommand
-    await command.ui.onSelect({ id: 'not-a-preset', label: '?' }, { sessionId: 's1' })
+    }) as unknown as ActionCommand
+    command.ui.run({ sessionId: 's1' })
+    // Text reaches the composer only from the panel's own submit.
     expect(fill).not.toHaveBeenCalled()
+  })
+})
+
+describe('stripLeadingCommandToken', () => {
+  it('drops a command token left at the head of the draft', () => {
+    // The menu usually consumes the token, but a re-pick leaves it behind.
+    expect(stripLeadingCommandToken('/video')).toBe('')
+    expect(stripLeadingCommandToken('/video 黄昏的海岸线')).toBe('黄昏的海岸线')
+    expect(stripLeadingCommandToken('  /video\n黄昏的海岸线')).toBe('黄昏的海岸线')
+  })
+
+  it('leaves prose that merely contains a slash alone', () => {
+    expect(stripLeadingCommandToken('黄昏/夜晚的海岸线')).toBe('黄昏/夜晚的海岸线')
+    expect(stripLeadingCommandToken('')).toBe('')
+  })
+})
+
+describe('composerDraftOf', () => {
+  it('reads the text already sitting in the composer', () => {
+    const { ctx } = contextWith({
+      route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' },
+      existing: '黄昏的海岸线',
+    })
+    expect(composerDraftOf(ctx, 's1')).toBe('黄昏的海岸线')
+  })
+
+  it('answers an empty string instead of throwing when there is nothing to read', () => {
+    expect(composerDraftOf({} as never, 's1')).toBe('')
+    const { ctx } = contextWith({ route: { provider: MINIMAX_CODE_PROVIDER, model: 'MiniMax-M3' } })
+    expect(composerDraftOf(ctx, 'gone')).toBe('')
   })
 })

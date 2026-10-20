@@ -1,19 +1,25 @@
 /**
- * 「/video 命令 + 参数弹窗」的挂载点，由 `src/client/index.tsx` 调用。
+ * 「/video 命令 + 参数面板」的挂载点，由 `src/client/index.tsx` 调用。
  *
  * 挂两样东西：
  *
- * 1. **弹窗的渲染座位**：一个客户端容器，portal 到 `document.body`。它不挂在任何
- *    会话槽位上——弹窗是**全局**的，而 `/video` 命令的回调在一段没有 React 树的
+ * 1. **面板的渲染座位**：一个客户端容器，portal 到 `document.body`。它不挂在任何
+ *    会话槽位上——面板是**全局**的，而 `/video` 命令的回调在一段没有 React 树的
  *    代码里；把两者连起来的是这个容器持有的 `open` 状态加一个模块级句柄。
- * 2. **命令本体**：`createVideoCommand` 产出的 popupSelect 贡献，注册到
+ * 2. **命令本体**：`createVideoCommand` 产出的 action 贡献，注册到
  *    `ctx.commandUi`，与宿主 `ui-message-feedback` 的 `/feedback` 装饰同一形状。
  *
  * ## 为什么命令回调要经过一个句柄
  *
- * `CommandUiSpec` 的回调是普通函数，不是 React 组件，拿不到 setState。所以容器把
- * 自己的 `openForm` 登记到一个模块级的可变引用上，命令回调通过它打开弹窗。容器
- * 卸载时把这个引用清掉（只清自己那一个），回调因此永远调不到一个已卸载的组件。
+ * 命令的回调是普通函数，不是 React 组件，拿不到 setState。所以容器把自己的
+ * `openForm` 登记到一个模块级的可变引用上，命令回调通过它打开面板。容器卸载时
+ * 把这个引用清掉（只清自己那一个），回调因此永远调不到一个已卸载的组件。
+ *
+ * ## 打开面板时顺手读一次输入框
+ *
+ * 用户常常先写了一句话才想起要用面板。命令回调在这里取一次
+ * {@link composerDraftOf}，交给面板当初始的「画面描述」——省掉一次抄写。读不到
+ * 就是空串，面板照常以空白打开。
  *
  * ## 注册失败了怎么办
  *
@@ -23,17 +29,18 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/minimax-code/video-command-host
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { VideoFormDialog } from './VideoFormDialog.tsx'
-import { createVideoCommand, fillComposer } from './video-command.ts'
+import { composerDraftOf, createVideoCommand, fillComposer, fallbackTranslate } from './video-command.ts'
+import { workspaceListerFor } from './video-workspace.ts'
 import { readVideoDefaults } from './video-defaults-store.ts'
 import { normalizeVideoDefaults, type VideoDefaults } from './video-form-rules.ts'
-import { fallbackTranslate } from './useMinimaxCodeSection.ts'
 
 /** 一次「打开表单」请求。 */
 interface OpenRequest {
   readonly defaults: VideoDefaults
+  readonly seedPrompt: string
 }
 
 /** 容器登记给命令回调的那个句柄。 */
@@ -43,12 +50,12 @@ type OpenFormHandle = (sessionId: string, defaults: VideoDefaults) => void
  * 当前挂着的容器句柄。
  *
  * 模块级的可变引用是刻意的：命令回调由宿主持有，它没有别的通道能碰到 React 树。
- * 只允许一个值，因为一个浏览器页只有一棵树、一个弹窗。
+ * 只允许一个值，因为一个浏览器页只有一棵树、一个面板。
  */
 let activeHandle: OpenFormHandle | undefined
 
 /**
- * 打开参数弹窗。
+ * 打开参数面板。
  *
  * 没有容器挂着时什么也不做——插件被禁用、或页面还没挂载时调到这里，静默即可；
  * 抛错只会让一次斜杠菜单点击变成控制台里的一条异常。
@@ -61,10 +68,10 @@ export function openVideoForm(sessionId: string, defaults: VideoDefaults): void 
 }
 
 /**
- * 构造弹窗容器。
+ * 构造面板容器。
  *
- * 常驻挂载、`open` 为 false 时渲染出 null，而不是按需创建：请求来自命令回调，那时
- * 组件树已经渲染完了，没有第二次渲染去创建它。
+ * 常驻挂载、`open` 为 false 时渲染出 null，而不是按需创建：请求来自命令回调，
+ * 那时组件树已经渲染完了，没有第二次渲染去创建它。
  *
  * @param ctx - 浏览器根上下文；提交时用它把文本写进对应会话的输入框。
  * @returns 一个不需要 props 的组件。
@@ -72,12 +79,16 @@ export function openVideoForm(sessionId: string, defaults: VideoDefaults): void 
 export function createVideoCommandHost(ctx: ClientContext): () => React.JSX.Element | null {
   return function VideoCommandHost(): React.JSX.Element | null {
     const [request, setRequest] = useState<OpenRequest | null>(null)
-    // 提交时要知道往哪个会话写；弹窗只拿到文本，会话 id 留在这里。
+    // 提交时要知道往哪个会话写；面板只拿到文本，会话 id 留在这里。
     const sessionRef = useRef<string | null>(null)
 
     const handle = useCallback<OpenFormHandle>((sessionId, defaults) => {
       sessionRef.current = sessionId
-      setRequest({ defaults: normalizeVideoDefaults(defaults) })
+      setRequest({
+        defaults: normalizeVideoDefaults(defaults),
+        // 先写一句话、再叫面板：那句话就是画面描述。
+        seedPrompt: composerDraftOf(ctx, sessionId),
+      })
     }, [])
 
     useEffect(() => {
@@ -96,12 +107,23 @@ export function createVideoCommandHost(ctx: ClientContext): () => React.JSX.Elem
       return fillComposer(ctx, sessionId, text)
     }, [])
 
+    // 目录补全按会话取：工作区根由会话决定，换个会话就是另一棵树。每次打开面板
+    // 现取一次，宿主没装 remote 时拿到 undefined，媒体块退回纯手填。
+    const listWorkspace = useMemo(
+      () => (request === null || sessionRef.current === null
+        ? undefined
+        : workspaceListerFor(ctx, sessionRef.current)),
+      [request],
+    )
+
     return (
       <VideoFormDialog
         open={request !== null}
         onClose={close}
         onSubmit={submit}
         defaults={request?.defaults ?? normalizeVideoDefaults({})}
+        seedPrompt={request?.seedPrompt ?? ''}
+        listWorkspace={listWorkspace}
         t={fallbackTranslate}
       />
     )

@@ -1,6 +1,22 @@
 # Changelog
 
 ## Unreleased
+- **[kimi-code] K3 跑到一半突然整轮失败，红条上只有一个 `terminated` 配 `UNKNOWN`——现在它是可重试的 `TRANSPORT`**
+  - **现象**：`k3` 的长回答（截图那次已经执行 27 次思考、调用 30 次工具）偶发中断，界面是「本轮运行失败 terminated」，右侧徽标 `UNKNOWN`；手动重发一次立刻恢复。
+  - **真因**：连接在响应体中途被掐断时 undici 抛的是裸 `TypeError: terminated`——它自身不带任何错误码，真原因（ECONNRESET、对端关闭、body timeout）只挂在 `.cause` 上。[adapter.ts](../src/host/kimi-code/adapter.ts) 的读流循环只改写 mapper 已经定性的 in-band 错误，其余原样 `throw error`，于是这个裸值一路漏到 harness：`normalizeLlmFailure` 对它只能归一成 `UNKNOWN`，而 `UNKNOWN` 不在本线路的 `retryableCodes`（RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT）里——一次断连就把整轮判死，连一次自动重试都没有，同时还把 `.cause` 丢掉，报告里连发生过什么都说不出来。
+  - **对照**：同仓库 codex 线路早为同一形状写过 `streamFailure()`（[responses-client.ts](../src/host/responses-client.ts)），claude 线路有 `outputStarted ? PROVIDER_ERROR : TRANSPORT` 的分支；kimi 是唯一照旧写法留下的那条。
+  - **改法**：新增 `streamFailure()`（[adapter.ts](../src/host/kimi-code/adapter.ts)），把逃出读循环的非 `LlmError` 值改判成 `TRANSPORT`，并把 `.cause` 链拼进消息（`Kimi Code stream failed: terminated: read ECONNRESET`）；调用方取消仍是 `ABORTED`，本线路自己定性的 `LlmError` 原样通过。`assertStreamComplete` 那条同类形状——连接干净结束、但始终没等到终止事件——同步从 `PROVIDER_ERROR` 改成 `TRANSPORT`（[mapper.ts](../src/host/kimi-code/mapper.ts)），两种「说到一半没了」都交给 harness 的退避重试（最多 3 次，1.5s–15s）。
+  - **为什么已经出字也重试**：失败的那次 attempt 由 DSH 记成 `assistant/attempt`——不进行模型历史、也不作为正文渲染（宿主 `turn-process.ts` 的 `visibleAssistantEvent` 对 attempt 恒为不可见），工具调用要等流结束才执行，所以重试既不会让模型看到重复内容，也不会重跑工具；用户看到的只是已流出的那段字被重试的那一次顶替，比整轮作废划算。
+  - **验证**：`npx vitest run test/kimi-code-adapter.test.ts test/kimi-code-stream-idle.test.ts test/kimi-code-mapper.test.ts` **90 passed**（新增 3 条断流用例；把 `throw streamFailure(...)` 临时改回 `throw error` 时，断流用例当场复现裸 `TypeError: terminated`，证明用例咬得住）；`npm run typecheck` 0 错误；全量 `npx vitest run` **270 文件 / 4491 passed / 7 skipped**。
+- **[minimax-code] `/video` 不再是「先选档位、再往输入框塞一段模板」：命令行有了图标，档位搬进面板，面板也终于不再把整页压暗**
+  - **现象**：斜杠菜单里 `/video` 是**唯一一行没有图标**的，混在「压缩 / 权限 / 模型 / 导出」里明显没对齐；点它先弹一个只有「常用档位 + 自定义…」的小列表，选中任何一档都会把一整段 `用 minimax_generate_video 生成视频：prompt=（在这里写画面描述）…` 灌进输入框，用户还得回到那段话里找该改哪一处；而「自定义…」打开的面板盖着一层半透明遮罩，整页对话被压暗，参数又是 9 个同权重字段竖着排下来。
+  - **改法（[video-command.ts](../src/client/minimax-code/video-command.ts)）**：`popupSelect` 换成 `action`——命令只做一件事：打开面板。图标走宿主的 `CommandContribution.icon`（[`video-command-icon.tsx`](../src/client/minimax-code/video-command-icon.tsx)，按 `IconProps` 的 `{ size, className }` 同形自绘，因为 `dsh-client-ui-primitives` 的 `lib` 是宿主装配产物、插件装不到）。**宿主侧限制**：`ui-commands` 的 `matchEnter` 只在裸命令时把一行交给客户端贡献（`if (!bare) return undefined`），所以「`/video` 后面直接写描述」做不到；改为**打开时把输入框里已有的文字当成画面描述带进来**（`composerDraftOf` 读 `InputState.draft`，并剥掉可能残留的前导命令 token）。
+  - **改法（[VideoFormDialog.tsx](../src/client/minimax-code/VideoFormDialog.tsx) / [styles.ts](../src/client/minimax-code/styles.ts)）**：去掉遮罩，面板变成阴影浮起的居中浮层（`margin:auto` 保住「内容太高仍可滚动」），点浮层外仍然关闭；版面按「先说画面、再说参数」重排——描述占最大位，下面一排**档位胶囊**，再一行模型/时长/分辨率，比例按联动规则锁死或可选，水印与参考媒体收进「更多参数」。
+  - **参考媒体**（新增 [video-media-input.ts](../src/client/minimax-code/video-media-input.ts) 与 [video-media-dropzone.tsx](../src/client/minimax-code/video-media-dropzone.tsx)）：四排纯文本框换成四个媒体块，**浏览 / 拖拽 / 粘贴**三入口合一，路径显示成可移除的标签。桌面端靠 `__DSH_HOST_PATHS__.pathFor` 把 `File` 还原成真实绝对路径；拿不到路径时如实提示而不是编一条。`file://` 地址还原成本机路径；`http(s)` 链接里**只有 `cdn.hailuoai.com` 被接受**（宿主 `assertMinimaxCdnUrl` 实测只读这一个主机），其余公网地址当场拒绝——否则会变成计费之后才被服务端打回。CDN 参考视频读不到时长，所以每出现一条就长出一行「它的时长」，填了才进请求（宿主 `MINIMAX_VIDEO_REFERENCE_DURATION_REQUIRED`）。
+  - **两处回调**：① 档位胶囊原本会折成两行（三个全名并排塞不进 600px），改成`grid-auto-flow:column` 等宽一行，胶囊上只留 `H3 · 4秒` 这类短标签，分辨率与比例挂在 `title`/`aria-label` 上仍然查得到；② 每个媒体块补了一行**手填入口**——路径与 `@工作区文件` 都收（`stripReferencePrefix` 去掉那个前缀，因为工具参数要的是普通路径），回车即添加。
+  - **版面再调整**：面板从 `600px` 加宽到 `880px` 并改成两栏（左栏只放**画面描述**，右栏放档位、参数与参考媒体，≤720px 时折回一栏）；拖拽区与输入行**合并为同一个框**——已收下的标签在上、输入行贴底，整块都是放置目标；输入框里的 `@` 现在会弹出**真实工作区候选**（新增 [video-workspace.ts](../src/client/minimax-code/video-workspace.ts) 包住宿主 `remote.workspaceFiles.list`：`@` 后的目录片段决定列哪一层，选中文件即入列、选中目录则继续下钻，`Tab` 取第一项、`Esc` 先收候选再关面板）；宿主没有这条远端时自动退化为纯手填，不报错。
+  - **两栏落地后的三处修正**：① 描述框的 `width:100%` 加上左右内边距把它**顶出了栏宽**，文字一路压到右栏的「档位」标签上——补 `box-sizing:border-box`，两栏间距同时从 16px 放到 28px；② 展开「更多参数」后左栏只剩一小块输入框、下半截全空——描述框改为跟随右栏一起长（`flex:1` 一路传到 textarea，上限 520px）；③ 左栏标题行的「已带入输入框里的文字」提示与右栏列头贴在一起，允许换行并在挤不下时省略。
+  - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **270 文件 / 4488 passed / 7 skipped**（新增 `test/minimax-code-video-media-input.test.ts`，扩写命令与面板两个套件）；`npm run build` 通过。
 
 ## 0.32.0 - 2026-10-20
 - **[cline-pass] 凭据后端读不出来时不再吞掉 `CLINE_PASS_API_KEY`：环境变量与密钥环是两条独立来源**

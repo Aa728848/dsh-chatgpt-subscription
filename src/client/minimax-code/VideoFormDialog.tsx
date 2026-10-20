@@ -1,35 +1,41 @@
 /**
- * `/video` 的参数弹窗：把「有哪些参数」和「哪些组合合法」一次讲清楚。
+ * `/video` 的参数面板：写一句描述，选好参数，再把它填进输入框。
  *
- * ## 为什么是一个自建弹窗，而不是宿主的 popupSelect
+ * ## 形态：没有遮罩的浮层，而不是遮住整页的对话框
  *
- * 宿主的 popupSelect 只有 `options()` 与 `onSelect()`（`ui-commands/src/client/
- * contract.ts:64-75`），**单选**，装不下「提示词 + 模型 + 比例 + 时长 + 分辨率 +
- * 四类参考文件 + 水印」。而 `ActionSpec.run(session)` 的契约明写它「不提交任何
- * 东西」，所以命令自己也发不出去。`/video` 因此是两级：popupSelect 给预设档
- * （见 `video-command.ts`），「自定义…」这一档打开本组件。
+ * 这里曾经盖一层半透明遮罩，整页随之变灰——用户看着像被弹窗劫持了。视频生成
+ * 只是「给下一条消息配参数」，它不该把整个对话压暗。所以现在只有一块带阴影的
+ * 浮层：点面板外仍然关闭（有边界检查），Escape 仍然关闭，但没有遮罩、没有
+ * 背景变灰，对话内容照常可读。
+ *
+ * ## 布局：从「一排排表单」改成「先说画面，再说参数」
+ *
+ * 原先是 9 个同权重的字段竖着排下来，用户第一眼看到的是「模型 / 时长 / 分辨率」
+ * 这些次要决定。现在分成三段，按用户真正的思考顺序：
+ *
+ * 1. **描述**——面板里最大的一块，也是唯一必填的东西；
+ * 2. **档位胶囊 + 一行参数**——常见组合一键就能定，细调折叠在「更多参数」里；
+ * 3. **参考媒体**——四类媒体块，支持浏览、拖拽、粘贴。
  *
  * ## 关键行为：它**不发送**，只把参数写进输入框
  *
- * 这是这次入口的核心价值。视频参数有联动规则（给了首帧→比例被强制改成
- * `adaptive`；纯文本→`adaptive` 不可选），如果直接发起生成，用户永远看不到
- * 自己填的东西被改成了什么。所以这里只调用 `setDraft`，把
- * {@link buildVideoDraftText} 拼出来的那段话放进输入框，剩下的交给用户。
+ * 视频参数有联动规则（给了首帧→比例被强制改成 `adaptive`；纯文本→`adaptive`
+ * 不可选），如果直接发起生成，用户永远看不到自己填的东西被改成了什么。所以这里
+ * 只调用 `onSubmit`，把 {@link buildVideoDraftText} 拼出来的那段话放进输入框。
  *
  * ## 弹窗怎么落地
  *
- * 宿主有 `@deepseek-ai/dsh-client-ui-primitives` 的 `Modal`（`Modal.tsx:48`，
- * 内部 `createPortal(..., document.body)` 在 `:57-90`）。**本插件不依赖那个包的
- * 运行时**（`progress-updates/markdown-lite.tsx:6` 记录了这个决定：它的 `lib`
- * 是宿主装配产物，插件装不到），所以这里按同一形状自己 portal 到 `document.body`：
- * 遮罩 + 居中卡片 + `role="dialog"` + `aria-modal` + Escape 关闭 + 点遮罩关闭。
- * portal 到 body 是必须的——输入框所在的那片容器有 `overflow`，就地渲染会被裁掉。
+ * 宿主有 `@deepseek-ai/dsh-client-ui-primitives` 的 `Modal`，但**本插件不依赖那个
+ * 包的运行时**（`progress-updates/markdown-lite.tsx:6` 记录了这个决定），所以这里
+ * 自己 portal 到 `document.body`：无遮罩浮层 + `role="dialog"` + Escape 关闭 +
+ * 点浮层外关闭。portal 到 body 是必须的——输入框所在的那片容器有 `overflow`，
+ * 就地渲染会被裁掉。
  *
  * ## 键盘可达性
  *
- * 卡片带 `tabIndex={-1}` 并在打开时聚焦，Tab 因此从卡片内部开始按 DOM 顺序走遍
- * 每个字段；Escape 关闭（在 `keydown` 捕获阶段处理，输入框里的 Escape 也生效）；
- * 关闭后焦点还给打开它的元素，见 {@link VideoFormDialog} 里的 `restoreFocus`。
+ * 浮层带 `tabIndex={-1}` 并在打开时聚焦，Tab 因此从面板内部开始按 DOM 顺序走遍
+ * 每个字段；Escape 关闭（`keydown` 捕获阶段处理，输入框里的 Escape 也生效）；
+ * 关闭后焦点还给打开它的元素。
  *
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/minimax-code/video-form-dialog
  */
@@ -37,9 +43,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  DEFAULT_MINIMAX_VIDEO_MODEL,
   MINIMAX_VIDEO_MODELS,
-  VIDEO_MODEL_RULES,
   buildVideoDraftText,
   canSubmitVideoForm,
   defaultDuration,
@@ -47,7 +51,6 @@ import {
   durationChoices,
   mediaPresence,
   normalizeVideoDefaults,
-  parsePathLines,
   resolveVideoRatioChoice,
   validateVideoForm,
   videoModelRule,
@@ -58,7 +61,14 @@ import {
   type VideoFormIssue,
   type VideoFormValues,
 } from './video-form-rules.ts'
+import { presetIdOf, videoPresets } from './video-presets.ts'
+import { MediaDropZone } from './video-media-dropzone.tsx'
+import { mediaNameOf, needsDuration } from './video-media-input.ts'
+import type { WorkspaceLister } from './video-workspace.ts'
 import type { MinimaxCodeLocaleKey } from './locales.ts'
+
+// 老调用方（以及文档）仍然可以从面板模块取这张表；定义已经搬进 video-presets.ts。
+export { defaultPreset, videoPresets, type VideoPreset } from './video-presets.ts'
 
 /** 翻译函数的座位：参数化的键允许带模板参数。 */
 export type Translate = (key: MinimaxCodeLocaleKey, params?: Record<string, string | number>) => string
@@ -67,17 +77,30 @@ export type Translate = (key: MinimaxCodeLocaleKey, params?: Record<string, stri
 export interface VideoFormDialogProps {
   /** 是否显示。 */
   readonly open: boolean
-  /** 关闭（Escape、点遮罩、取消按钮都走这里）。 */
+  /** 关闭（Escape、点浮层外、取消按钮都走这里）。 */
   readonly onClose: () => void
   /**
    * 提交：把拼好的那段话交给调用方。
    *
    * **返回 false 表示没有填进去**（这个会话没有输入框），弹窗据此显示一句错误而
-   * 不是假装成功。弹窗自己不碰 session —— 它不知道 `setDraft` 怎么调。
+   * 不是假装成功。
    */
   readonly onSubmit: (text: string) => boolean
   /** 初始值：设置页里的默认参数。 */
   readonly defaults?: VideoDefaults
+  /**
+   * 打开时输入框里已有的文字。
+   *
+   * 有的话直接当成画面描述带进来——用户常常先写了一句话才想起要用面板，把那段
+   * 话再抄一遍是最没必要的一次劳动。
+   */
+  readonly seedPrompt?: string
+  /**
+   * 列出工作区目录，供媒体块的 `@` 补全。
+   *
+   * 缺席时媒体块退化为「拖拽 / 粘贴 / 手填路径」，不报错。
+   */
+  readonly listWorkspace?: WorkspaceLister | undefined
   /** 翻译函数。 */
   readonly t: Translate
 }
@@ -98,23 +121,15 @@ function issueText(issue: VideoFormIssue, t: Translate): string {
   }
 }
 
-/** 一个带标签的表单行。标签与控件用 `useId` 关联，屏幕阅读器读得到。 */
-function Field({ label, id, children }: { label: string; id: string; children: React.ReactNode }): React.JSX.Element {
-  return (
-    <div className="dshm-video-field">
-      <label className="dshm-video-field-label" htmlFor={id}>{label}</label>
-      {children}
-    </div>
-  )
-}
-
 /**
- * 参数弹窗。
+ * 参数面板。
  *
  * 受控到组件内部：`/video` 只负责开与关，表单状态活在这里，关闭即丢弃——一次
  * 生成填一次参数，没有「上次填到一半」的语义要维护。
  */
-export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoFormDialogProps): React.JSX.Element | null {
+export function VideoFormDialog({
+  open, onClose, onSubmit, defaults, seedPrompt, listWorkspace, t,
+}: VideoFormDialogProps): React.JSX.Element | null {
   const seeded = useMemo(() => normalizeVideoDefaults(defaults ?? {}), [defaults])
   const [prompt, setPrompt] = useState('')
   const [model, setModel] = useState<MinimaxVideoModel>(seeded.model)
@@ -122,12 +137,15 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
   const [durationSeconds, setDurationSeconds] = useState<number | undefined>(seeded.durationSeconds)
   const [resolution, setResolution] = useState<MinimaxVideoResolution | undefined>(defaultResolution(seeded.model))
   const [watermark, setWatermark] = useState(seeded.watermark)
-  const [inputImagePath, setInputImagePath] = useState('')
-  const [lastFrameImagePath, setLastFrameImagePath] = useState('')
-  const [referenceImages, setReferenceImages] = useState('')
-  const [referenceVideos, setReferenceVideos] = useState('')
-  const [referenceVideoDurations, setReferenceVideoDurations] = useState('')
-  const [referenceAudios, setReferenceAudios] = useState('')
+  const [advanced, setAdvanced] = useState(false)
+  const [seededPrompt, setSeededPrompt] = useState(false)
+  const [inputImagePath, setInputImagePath] = useState<string[]>([])
+  const [lastFrameImagePath, setLastFrameImagePath] = useState<string[]>([])
+  const [referenceImages, setReferenceImages] = useState<string[]>([])
+  const [referenceVideos, setReferenceVideos] = useState<string[]>([])
+  const [referenceAudios, setReferenceAudios] = useState<string[]>([])
+  // 远端参考视频读不到时长，只能由用户给：key 是路径，值是输入的原文。
+  const [remoteDurations, setRemoteDurations] = useState<Record<string, string>>({})
   const [notice, setNotice] = useState<{ tone: 'info' | 'danger'; text: string } | null>(null)
   const dialog = useRef<HTMLDivElement>(null)
   const restoreFocus = useRef<HTMLElement | null>(null)
@@ -141,25 +159,27 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
   // 打开时做三件事，**顺序即语义**：
   //
   // 1. **把上一次的输入清掉**。组件是常驻的（命令回调没有第二次渲染去创建它），
-  //    所以不重置的话，用户取消一次、再打开会看到上一轮的残留——那不是「上次填到
-  //    一半」，是一次全新的生成。重置成 defaults 而不是空串：那才是「起手值」。
+  //    所以不重置的话，用户取消一次、再打开会看到上一轮的残留。
   // 2. 记住「是谁打开的」，关闭时把焦点还回去。
-  // 3. 把焦点送进弹窗，Tab 因此从这个对话框内部开始走。
+  // 3. 把焦点送进面板；输入框里已有的文字当成画面描述带进来。
   useEffect(() => {
     if (!open) return
     const seed = normalizeVideoDefaults(defaults ?? {})
-    setPrompt('')
+    const carried = seedPrompt?.trim() ?? ''
+    setPrompt(carried)
+    setSeededPrompt(carried !== '')
     setModel(seed.model)
     setRatio(seed.ratio)
     setDurationSeconds(seed.durationSeconds)
     setResolution(defaultResolution(seed.model))
     setWatermark(seed.watermark)
-    setInputImagePath('')
-    setLastFrameImagePath('')
-    setReferenceImages('')
-    setReferenceVideos('')
-    setReferenceVideoDurations('')
-    setReferenceAudios('')
+    setAdvanced(false)
+    setInputImagePath([])
+    setLastFrameImagePath([])
+    setReferenceImages([])
+    setReferenceVideos([])
+    setReferenceAudios([])
+    setRemoteDurations({})
     setNotice(null)
     restoreFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const frame = requestAnimationFrame(() => { promptRef.current?.focus() })
@@ -181,16 +201,20 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
     return () => { document.removeEventListener('keydown', onKeyDown, true) }
   }, [open, onClose])
 
-  const media = useMemo(() => ({
-    ...(inputImagePath.trim() === '' ? {} : { inputImagePath }),
-    ...(lastFrameImagePath.trim() === '' ? {} : { lastFrameImagePath }),
-    referenceImagePaths: parsePathLines(referenceImages),
-    referenceVideoPaths: parsePathLines(referenceVideos),
-    referenceVideoDurationSeconds: parsePathLines(referenceVideoDurations)
-      .map(line => Number(line))
-      .filter(value => Number.isFinite(value) && value > 0),
-    referenceAudioPaths: parsePathLines(referenceAudios),
-  }), [inputImagePath, lastFrameImagePath, referenceImages, referenceVideos, referenceVideoDurations, referenceAudios])
+  const media = useMemo(() => {
+    // 时长数组是**按位置**配对的（宿主 `prepareGenerationMedia` 里逐项对齐），
+    // 所以要么给出与视频同样多的一整串，要么一个都不给——不能只给后半段。
+    const durations = referenceVideos.map(path => Number(remoteDurations[path] ?? ''))
+    const everyOne = referenceVideos.length > 0 && durations.every(value => Number.isFinite(value) && value > 0)
+    return {
+      ...(inputImagePath.length === 0 ? {} : { inputImagePath: inputImagePath[0] }),
+      ...(lastFrameImagePath.length === 0 ? {} : { lastFrameImagePath: lastFrameImagePath[0] }),
+      referenceImagePaths: referenceImages,
+      referenceVideoPaths: referenceVideos,
+      ...(everyOne ? { referenceVideoDurationSeconds: durations } : {}),
+      referenceAudioPaths: referenceAudios,
+    }
+  }, [inputImagePath, lastFrameImagePath, referenceImages, referenceVideos, referenceAudios, remoteDurations])
 
   const presence = useMemo(() => mediaPresence(media), [media])
   const ratioChoice = useMemo(
@@ -218,6 +242,8 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
   const rule = videoModelRule(model)
   const durations = durationChoices(model)
   const ratios = ratioChoice.options
+  const presets = useMemo(() => videoPresets(t), [t])
+  const activePreset = presetIdOf({ model, durationSeconds, resolution })
 
   // 换模型时把时长/分辨率拉回该模型自己的合法集：不这么做，用户会看到一条
   // 「这个模型不支持 8 秒」的错误，而那个 8 秒是他根本没改过的上一手残留。
@@ -232,6 +258,19 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
       ? current
       : defaultResolution(next))
     setRatio(undefined)
+  }, [])
+
+  const applyPreset = useCallback((preset: {
+    readonly model: MinimaxVideoModel
+    readonly ratio: MinimaxVideoRatio | undefined
+    readonly durationSeconds: number
+    readonly resolution: MinimaxVideoResolution
+  }) => {
+    setModel(preset.model)
+    setRatio(preset.ratio)
+    setDurationSeconds(preset.durationSeconds)
+    setResolution(preset.resolution)
+    setNotice(null)
   }, [])
 
   const submit = useCallback(() => {
@@ -252,18 +291,25 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
       return
     }
     onClose()
-  }, [onClose, onSubmit, submittable, t, values])
+  }, [onClose, onSubmit, submittable, t, values, resolution])
 
   if (!open) return null
 
+  const referenceCapable = rule?.supportsReferenceMedia === true
+
   return createPortal((
-    <div className="dshm-video-modal-root" role="presentation">
-      <div className="dshm-video-modal-mask" aria-hidden="true" onClick={onClose} />
+    <div
+      className="dshm-video-modal-root"
+      role="presentation"
+      onMouseDown={(event) => {
+        // 没有遮罩了，所以「点外面关闭」靠边界检查：按下点落在浮层之外才算。
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
       <div
         ref={dialog}
         className="dshm-video-modal"
         role="dialog"
-        aria-modal="true"
         aria-label={t('videoDialogTitle')}
         tabIndex={-1}
       >
@@ -278,23 +324,59 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
             ×
           </button>
         </div>
-        <p className="dshm-video-modal-desc">{t('videoDialogDesc')}</p>
 
         <div className="dshm-video-modal-body">
-          <Field label={t('videoPromptLabel')} id={promptId}>
-            <textarea
-              ref={promptRef}
-              id={promptId}
-              className="dshm-video-input dshm-video-textarea"
-              rows={3}
-              placeholder={t('videoPromptPlaceholder')}
-              value={prompt}
-              onChange={(event) => { setPrompt(event.currentTarget.value); setNotice(null) }}
-            />
-          </Field>
+          {/*
+            两栏：左边只放「画面描述」，右边是参数与参考媒体。描述是唯一必填的东
+            西，给它一整栏；参数是若干互不相干的选择，挤在一栏里反而更快扫完。
+            窄屏（≤720px）时两栏摞回一栏，顺序仍是先描述、后参数。
+          */}
+          <div className="dshm-video-columns">
+            <div className="dshm-video-col-main">
+              <div className="dshm-video-field">
+                <div className="dshm-video-prompt-head">
+                  <label className="dshm-video-field-label" htmlFor={promptId}>{t('videoPromptLabel')}</label>
+                  {seededPrompt && <span className="dshm-video-hint">{t('videoPromptFromComposer')}</span>}
+                </div>
+                <textarea
+                  ref={promptRef}
+                  id={promptId}
+                  className="dshm-video-input dshm-video-prompt"
+                  rows={8}
+                  placeholder={t('videoPromptPlaceholder')}
+                  value={prompt}
+                  onChange={(event) => { setPrompt(event.currentTarget.value); setSeededPrompt(false); setNotice(null) }}
+                />
+              </div>
+            </div>
+
+            <div className="dshm-video-col-side">
+          {/*
+            档位胶囊：常见组合一键定下来。数量随模型表走（现在是 3 档），所以不
+            做成「固定三个按钮」，而是从表里长出来——加一个模型只需要改那张表。
+          */}
+          <div className="dshm-video-field">
+            <span className="dshm-video-field-label">{t('videoTierLabel')}</span>
+            <div className="dshm-video-tiers" role="group" aria-label={t('videoTierLabel')}>
+              {presets.map(({ preset, label, title }) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className="dshm-video-tier"
+                  aria-pressed={activePreset === preset.id}
+                  title={title}
+                  aria-label={title}
+                  onClick={() => { applyPreset(preset) }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <div className="dshm-video-field-row">
-            <Field label={t('videoModelLabel')} id={modelId}>
+            <div className="dshm-video-field">
+              <label className="dshm-video-field-label" htmlFor={modelId}>{t('videoModelLabel')}</label>
               <select
                 id={modelId}
                 className="dshm-video-input"
@@ -303,9 +385,10 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
               >
                 {MINIMAX_VIDEO_MODELS.map(entry => <option key={entry} value={entry}>{entry}</option>)}
               </select>
-            </Field>
+            </div>
 
-            <Field label={t('videoDurationLabel')} id={durationId}>
+            <div className="dshm-video-field">
+              <label className="dshm-video-field-label" htmlFor={durationId}>{t('videoDurationLabel')}</label>
               <select
                 id={durationId}
                 className="dshm-video-input"
@@ -319,13 +402,14 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
                   <option key={value} value={String(value)}>{value} {t('videoDurationUnit')}</option>
                 ))}
               </select>
-            </Field>
+            </div>
 
-            <Field label={t('videoResolutionLabel')} id={resolutionId}>
+            <div className="dshm-video-field">
+              <label className="dshm-video-field-label" htmlFor={resolutionId}>{t('videoResolutionLabel')}</label>
               {/*
                 分辨率这一栏只有模型自己的合法集：三个模型的集合两两不同，用一张
                 并集去列会让 H3-Max 的用户选到 2K，然后被服务端在计费之后拒掉。
-                H3 家族的省略值不是「不发」而是 2K（宿主 `resolveVideoSubmissionResolution`），
+                H3 家族的省略值不是「不发」而是 2K（宿主 resolveVideoSubmissionResolution），
                 所以这里永远带上一个值，用户看到的就是真正会发出去的那个。
               */}
               <select
@@ -339,7 +423,7 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
               >
                 {(rule?.resolutions ?? []).map(entry => <option key={entry} value={entry}>{entry}</option>)}
               </select>
-            </Field>
+            </div>
           </div>
 
           {/*
@@ -348,7 +432,8 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
             - 可选 → 给选择器，且纯文本时 adaptive 根本不在选项里。
             这一条就是「不给用户选一个会被改写的比例」的落点。
           */}
-          <Field label={t('videoRatioLabel')} id={ratioId}>
+          <div className="dshm-video-field dshm-video-ratio">
+            <label className="dshm-video-field-label" htmlFor={ratioId}>{t('videoRatioLabel')}</label>
             {ratioChoice.selectable
               ? (
                 <select
@@ -372,86 +457,138 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
             {ratioChoice.selectable && ratioChoice.lockedReason === 'text-only' && (
               <span className="dshm-video-hint">{t('videoRatioLockedTextOnly')}</span>
             )}
-          </Field>
-
-          <div className="dshm-video-field-row dshm-video-watermark">
-            <label className="dshm-video-field-label" htmlFor="dshm-video-watermark">
-              {t('videoWatermarkLabel')}
-            </label>
-            <input
-              id="dshm-video-watermark"
-              type="checkbox"
-              checked={watermark}
-              onChange={(event) => { setWatermark(event.currentTarget.checked) }}
-            />
           </div>
 
-          <div className="dshm-video-media">
-            <h3 className="dshm-video-media-title">{t('videoMediaSection')}</h3>
-            <p className="dshm-video-hint">{t('videoMediaHint')}</p>
+          {/*
+            「更多参数」：水印与参考媒体。默认收起——它们都不是每次都要改的东西，
+            竖着摊开会把唯一必填的「画面描述」挤到看不见。
+          */}
+          <button
+            type="button"
+            className="dshm-video-advanced"
+            aria-expanded={advanced}
+            onClick={() => { setAdvanced(current => !current) }}
+          >
+            <span className="dshm-video-advanced-caret" aria-hidden="true">{advanced ? '▾' : '▸'}</span>
+            {t('videoAdvanced')}
+            {(referenceImages.length + referenceVideos.length + referenceAudios.length
+              + inputImagePath.length + lastFrameImagePath.length) > 0 && (
+              <span className="dshm-video-advanced-count">
+                {referenceImages.length + referenceVideos.length + referenceAudios.length
+                  + inputImagePath.length + lastFrameImagePath.length}
+              </span>
+            )}
+          </button>
 
-            <Field label={t('videoInputImageLabel')} id="dshm-video-input-image">
-              <input
-                id="dshm-video-input-image"
-                className="dshm-video-input"
-                type="text"
-                value={inputImagePath}
-                onChange={(event) => { setInputImagePath(event.currentTarget.value) }}
-              />
-            </Field>
-            {rule?.supportsReferenceMedia === true && (
-              <Field label={t('videoLastFrameLabel')} id="dshm-video-last-frame">
+          {advanced && (
+            <div className="dshm-video-advanced-body">
+              <div className="dshm-video-field dshm-video-watermark">
+                <label className="dshm-video-field-label" htmlFor="dshm-video-watermark">
+                  {t('videoWatermarkLabel')}
+                </label>
                 <input
-                  id="dshm-video-last-frame"
-                  className="dshm-video-input"
-                  type="text"
-                  value={lastFrameImagePath}
-                  onChange={(event) => { setLastFrameImagePath(event.currentTarget.value) }}
+                  id="dshm-video-watermark"
+                  type="checkbox"
+                  checked={watermark}
+                  onChange={(event) => { setWatermark(event.currentTarget.checked) }}
                 />
-              </Field>
-            )}
+              </div>
 
-            {rule?.supportsReferenceMedia === true && (
-              <>
-                <Field label={t('videoReferenceImagesLabel')} id="dshm-video-ref-images">
-                  <textarea
-                    id="dshm-video-ref-images"
-                    className="dshm-video-input dshm-video-textarea"
-                    rows={2}
-                    value={referenceImages}
-                    onChange={(event) => { setReferenceImages(event.currentTarget.value) }}
+              <div className="dshm-video-media">
+                <h3 className="dshm-video-media-title">{t('videoMediaSection')}</h3>
+                <p className="dshm-video-hint">{t('videoMediaHint')}</p>
+
+                <MediaDropZone
+                  id="dshm-video-input-image"
+                  label={t('videoInputImageLabel')}
+                  accept="image/*"
+                  multiple={false}
+                  paths={inputImagePath}
+                  onChange={(next) => { setInputImagePath(next.slice(0, 1)) }}
+                  listWorkspace={listWorkspace}
+                  t={t}
+                />
+                {referenceCapable && (
+                  <MediaDropZone
+                    id="dshm-video-last-frame"
+                    label={t('videoLastFrameLabel')}
+                    accept="image/*"
+                    multiple={false}
+                    paths={lastFrameImagePath}
+                    onChange={(next) => { setLastFrameImagePath(next.slice(0, 1)) }}
+                    listWorkspace={listWorkspace}
+                    t={t}
                   />
-                </Field>
-                <Field label={t('videoReferenceVideosLabel')} id="dshm-video-ref-videos">
-                  <textarea
-                    id="dshm-video-ref-videos"
-                    className="dshm-video-input dshm-video-textarea"
-                    rows={2}
-                    value={referenceVideos}
-                    onChange={(event) => { setReferenceVideos(event.currentTarget.value) }}
-                  />
-                </Field>
-                <Field label={t('videoReferenceVideoDurationsLabel')} id="dshm-video-ref-video-durations">
-                  <textarea
-                    id="dshm-video-ref-video-durations"
-                    className="dshm-video-input dshm-video-textarea"
-                    rows={2}
-                    value={referenceVideoDurations}
-                    onChange={(event) => { setReferenceVideoDurations(event.currentTarget.value) }}
-                  />
-                </Field>
-                <Field label={t('videoReferenceAudiosLabel')} id="dshm-video-ref-audios">
-                  <textarea
-                    id="dshm-video-ref-audios"
-                    className="dshm-video-input dshm-video-textarea"
-                    rows={2}
-                    value={referenceAudios}
-                    onChange={(event) => { setReferenceAudios(event.currentTarget.value) }}
-                  />
-                </Field>
-              </>
-            )}
-          </div>
+                )}
+
+                {referenceCapable && (
+                  <>
+                    <MediaDropZone
+                      id="dshm-video-ref-images"
+                      label={t('videoReferenceImagesLabel')}
+                      accept="image/*"
+                      paths={referenceImages}
+                      onChange={(next) => { setReferenceImages([...next]) }}
+                      listWorkspace={listWorkspace}
+                      t={t}
+                    />
+                    <MediaDropZone
+                      id="dshm-video-ref-videos"
+                      label={t('videoReferenceVideosLabel')}
+                      accept="video/*"
+                      paths={referenceVideos}
+                      listWorkspace={listWorkspace}
+                      onChange={(next) => {
+                        setReferenceVideos([...next])
+                        // 移除一条就顺手丢掉它的时长，免得残留值配错下一段。
+                        setRemoteDurations((current) => {
+                          const kept: Record<string, string> = {}
+                          for (const path of next) if (current[path] !== undefined) kept[path] = current[path]
+                          return kept
+                        })
+                      }}
+                      t={t}
+                    />
+                    {referenceVideos.filter(path => needsDuration(path)).length > 0 && (
+                      <div className="dshm-video-durations">
+                        {referenceVideos.filter(path => needsDuration(path)).map(path => (
+                          <div className="dshm-video-duration-row" key={path}>
+                            <label className="dshm-video-field-label" htmlFor={'dshm-video-duration-' + path}>
+                              {t('videoReferenceVideoDurationOne', { name: mediaNameOf(path) })}
+                            </label>
+                            <input
+                              id={'dshm-video-duration-' + path}
+                              className="dshm-video-input"
+                              type="number"
+                              min={1}
+                              max={15}
+                              step={1}
+                              placeholder={t('videoReferenceVideoDurationPlaceholder')}
+                              value={remoteDurations[path] ?? ''}
+                              onChange={(event) => {
+                                const value = event.currentTarget.value
+                                setRemoteDurations(current => ({ ...current, [path]: value }))
+                              }}
+                            />
+                          </div>
+                        ))}
+                        <span className="dshm-video-hint">{t('videoReferenceVideoDurationWhy')}</span>
+                      </div>
+                    )}
+                    <MediaDropZone
+                      id="dshm-video-ref-audios"
+                      label={t('videoReferenceAudiosLabel')}
+                      accept="audio/*"
+                      paths={referenceAudios}
+                      onChange={(next) => { setReferenceAudios([...next]) }}
+                      listWorkspace={listWorkspace}
+                      t={t}
+                    />
+                  </>
+                )}
+              </div>
+            </div>
+          )}
 
           {/*
             校验问题只列**本地能确定会被拒**的那几条。提示词为空单列，因为它是
@@ -463,9 +600,12 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
           {notice !== null && (
             <p className="dshm-video-issue" data-tone={notice.tone} role="status">{notice.text}</p>
           )}
+            </div>
+          </div>
         </div>
 
         <div className="dshm-video-modal-foot">
+          <span className="dshm-video-foot-hint">{t('videoDialogDesc')}</span>
           <button type="button" className="dsha-btn" onClick={onClose}>{t('videoCancel')}</button>
           <button
             type="button"
@@ -479,57 +619,4 @@ export function VideoFormDialog({ open, onClose, onSubmit, defaults, t }: VideoF
       </div>
     </div>
   ), document.body)
-}
-
-/** 预设档：popupSelect 的每一行，都是**实测合法**的组合。 */
-export interface VideoPreset {
-  readonly id: string
-  readonly model: MinimaxVideoModel
-  readonly ratio: MinimaxVideoRatio | undefined
-  readonly durationSeconds: number
-  readonly resolution: MinimaxVideoResolution
-}
-
-/**
- * 预设档表。
- *
- * 每一行都是「模型 × 比例 × 时长 × 分辨率」的一个**实测合法**组合：
- *
- * - H3：4-15 秒、768P/2K；H3-Max：5-15 秒、480P/768P；Hailuo：6 或 10 秒、768P/1080P；
- * - 比例是纯文本分支，所以 `adaptive` 一律不出现（那是首帧/参考媒体的分支才会有的值）。
- *
- * 时长都取各模型的下界，理由与 {@link defaultDuration} 相同：第一档应当是最便宜的
- * 一次生成。用户要别的组合，走「自定义…」。
- */
-export function videoPresets(t: Translate): readonly { readonly preset: VideoPreset; readonly label: string }[] {
-  const rows: { preset: VideoPreset; label: string }[] = []
-  for (const rule of VIDEO_MODEL_RULES) {
-    const duration = defaultDuration(rule.model)
-    const resolution = defaultResolution(rule.model)
-    if (duration === undefined || resolution === undefined) continue
-    // 纯文本比例：H3 家族默认 16:9，Hailuo 不给（服务端用它自己的默认）。这里
-    // 统一按「16:9 会真的发出去」与否决定写不写进标签。
-    const ratio: MinimaxVideoRatio | undefined = rule.isH3Family ? '16:9' : undefined
-    rows.push({
-      preset: { id: rule.model + ':' + String(duration) + ':' + resolution, model: rule.model, ratio, durationSeconds: duration, resolution },
-      label: rule.model + ' · ' + String(duration) + t('videoDurationUnit') + ' · ' + resolution
-        + (ratio === undefined ? '' : ' · ' + ratio),
-    })
-  }
-  return rows
-}
-
-/** 默认的一档：H3 的合法下界，也就是 {@link DEFAULT_MINIMAX_VIDEO_MODEL} 自己的默认值。 */
-export function defaultPreset(): VideoPreset | undefined {
-  const rule = videoModelRule(DEFAULT_MINIMAX_VIDEO_MODEL)
-  const duration = defaultDuration(DEFAULT_MINIMAX_VIDEO_MODEL)
-  const resolution = defaultResolution(DEFAULT_MINIMAX_VIDEO_MODEL)
-  if (rule === undefined || duration === undefined || resolution === undefined) return undefined
-  return {
-    id: DEFAULT_MINIMAX_VIDEO_MODEL + ':' + String(duration) + ':' + resolution,
-    model: DEFAULT_MINIMAX_VIDEO_MODEL,
-    ratio: rule.isH3Family ? '16:9' : undefined,
-    durationSeconds: duration,
-    resolution,
-  }
 }
