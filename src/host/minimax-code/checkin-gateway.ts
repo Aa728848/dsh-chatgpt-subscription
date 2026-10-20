@@ -93,6 +93,51 @@ export interface MinimaxCodeAccountIdentity {
   userEmail?: string
 }
 
+/**
+ * Non-secret identity of the SIGN-IN a check-in credential came from.
+ *
+ * Spelled the way `minimaxCodePoolIdentity` (account-pool.ts) and
+ * `rotationKey` (token-store.ts) spell it — a native record slot, or the
+ * sign-in that produced a plugin-owned credential — because it names the same
+ * thing those do: one session, stable across every token rotation. It is
+ * repeated here rather than imported so this wire half stays free of the pool's
+ * imports.
+ *
+ * **Read this before trusting it as an account id.** It is a rotation key — a
+ * guard rail that tells "the same session, rotated" from "a different session" —
+ * and NOT the authoritative identity of the person behind it:
+ *
+ * - `native:<region>:<recordKey>` names a RECORD SLOT in the desktop app's
+ *   `auth.json`, not a user. `recordKey` is a digest of the app's auth-home
+ *   path, and the app keeps one record per slot, so signing a DIFFERENT account
+ *   in on the desktop replaces that slot's session while the key stays the same.
+ * - `signin:<region>:<loginEpoch>` has the same shape of gap: it names the
+ *   sign-in event, not the account it produced.
+ *
+ * The authoritative account fact on this line is therefore the `realUserID`
+ * resolved from the identity surface, and that is what the check-in state pins
+ * and what an attempt is compared against. This key is supporting evidence: it
+ * distinguishes a rotation from a swap, which `realUserID` cannot do without
+ * a request.
+ *
+ * Both fields are deliberately non-secret: a record slot name and a sign-in
+ * epoch, never a token and never a digest of one. That is what makes this the
+ * only account identity allowed to appear in a check-in error message.
+ */
+export function checkinAccountIdentity(credentials: {
+  region?: string | undefined
+  recordKey?: string | null | undefined
+  loginEpoch?: string | undefined
+}): string | undefined {
+  const region = credentials.region
+  if (typeof region !== 'string' || region === '') return undefined
+  const recordKey = credentials.recordKey
+  if (typeof recordKey === 'string' && recordKey !== '') return `native:${region}:${recordKey}`
+  const loginEpoch = credentials.loginEpoch
+  if (typeof loginEpoch === 'string' && loginEpoch !== '') return `signin:${region}:${loginEpoch}`
+  return undefined
+}
+
 const DAY_STATUSES = new Set([SIGNIN_DAY_UPCOMING, SIGNIN_DAY_CLAIMABLE, SIGNIN_DAY_CLAIMED, SIGNIN_DAY_DISABLED])
 const CLAIM_RESULTS = new Set([SIGNIN_CLAIM_FRESH, SIGNIN_CLAIM_ALREADY])
 const PANEL_SCENES = new Set([0, 1, 2, 3, 4])

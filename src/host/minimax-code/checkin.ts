@@ -32,7 +32,9 @@ import { dshHomeDir } from '../common/home.ts'
 import type { MinimaxCodeRegion } from '../../shared/minimax-code-contracts.ts'
 import type { MinimaxCodeCheckinSummary } from '../../shared/minimax-code-contracts.ts'
 import type { MinimaxCodeAccountPool, MinimaxCodeAccountSummaryDto } from './account-pool.ts'
+import type { MinimaxCodeCredentials } from './token-store.ts'
 import {
+  checkinAccountIdentity,
   claimSignin,
   currentSigninStreak,
   fetchAccountIdentity,
@@ -93,6 +95,43 @@ interface CheckinAccountState {
 interface CheckinIdentityState {
   realUserID: string
   region: MinimaxCodeRegion
+  /**
+   * {@link checkinAccountIdentity} of the credential this realUserID was
+   * resolved with — the account this entry is FOR. Absent only on a state
+   * document written before the field existed, which is why an absent value is
+   * adopted rather than treated as a mismatch.
+   */
+  accountIdentity?: string
+}
+
+/**
+ * The check-in refused to act because the account changed **halfway through one
+ * attempt**.
+ *
+ * This is deliberately NOT the "the pool row was re-pointed at another account"
+ * case: that one is a legitimate state change and the entry re-synchronises to
+ * it (see {@link MinimaxCodeCheckinService['identityFor']}). What this class
+ * reports is the one case that must never self-heal — a forced 401 renewal that
+ * answers with a different account — because the panel was already read for one
+ * account and the claim would post as another.
+ *
+ * Its own class so the caller can tell it apart from a transport failure: it is
+ * never retried, and never recorded as "nothing to do today". The message
+ * carries only non-secret facts — the account keys each side resolved to — and
+ * never a token.
+ */
+export class MinimaxCodeCheckinAccountMismatchError extends Error {
+  constructor(
+    readonly accountId: string,
+    readonly expectedIdentity: string | undefined,
+    readonly actualIdentity: string | undefined,
+  ) {
+    super(
+      `账号不一致：签到条目 pinned 到 ${expectedIdentity ?? '未知账号'}，当前凭据属于 ${actualIdentity ?? '未知账号'}；`
+      + `已中止本次签到（account ${accountId}），未领取。`,
+    )
+    this.name = 'MinimaxCodeCheckinAccountMismatchError'
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -151,6 +190,38 @@ export interface MinimaxCodeCheckinServiceOptions {
     info(message: string): void
     warn(message: string): void
   }
+}
+
+/**
+ * Refuse to act when the credential drifted away from the account this attempt
+ * started on.
+ *
+ * This is the narrow, intra-attempt half of the account guard. The wide half —
+ * "the pool row was re-pointed at another account" — is a legitimate state
+ * change that `identityFor` re-synchronises to; this one is the case that must
+ * never self-heal, because by the time it fires the panel and the claim would
+ * belong to two different accounts.
+ *
+ * The comparison is on {@link checkinAccountIdentity}, which is deliberately
+ * the ROTATION key rather than an account id: a rotated token of the same
+ * sign-in passes by construction, and only a different sign-in fails. What it
+ * cannot promise is that the sign-in behind a key is still the same person —
+ * see the note on `native:<region>:<recordKey>` in {@link checkinAccountIdentity}
+ * — which is exactly why the authoritative account fact in this file stays the
+ * resolved `realUserID`, and why this check is a guard rail rather than the
+ * identity system.
+ *
+ * With no key on either side there is nothing to compare, and comparing keys
+ * that were absent when the attempt began would refuse a legitimate re-sync.
+ */
+function assertSameAccount(
+  accountId: string,
+  credentials: MinimaxCodeCredentials,
+  pinned: string | undefined,
+): void {
+  const actual = checkinAccountIdentity(credentials)
+  if (pinned === undefined || actual === undefined || pinned === actual) return
+  throw new MinimaxCodeCheckinAccountMismatchError(accountId, pinned, actual)
 }
 
 /**
@@ -283,21 +354,61 @@ export class MinimaxCodeCheckinService {
    * it, so it is fetched from the identity surface once and kept in the state
    * document. The region is cached alongside because the identity call's
    * origin depends on it.
+   *
+   * The account identity of the resolving credential is pinned to the entry as
+   * well: the pin records which sign-in this realUserID was learned FOR, and it
+   * outlives the token that resolved it.
+   *
+   * **A re-pointed row is a state change, not a fault.** When the pin no longer
+   * matches the credential in hand, the pool row now holds a different account
+   * (the user signed a second account into the desktop app's sheet, or adopted
+   * another session into this row). Following it is the correct outcome: a pool
+   * row IS one account this plugin manages, and the check-in exists to sign in
+   * whatever account that row now holds. Holding the stale pin instead would
+   * mean asking the panel with A's realUserID while presenting B's token —
+   * precisely "B's credential used to check in A" — and would have no exit,
+   * because nothing clears a state document the card cannot reach.
+   *
+   * So a diverging pin re-resolves the identity WITH the credential in hand and
+   * re-pins the entry to it. An entry written before the pin existed carries
+   * `undefined` and re-resolves once too, which is how an old state document
+   * heals itself into a pinned one.
+   *
+   * The one thing that must still never happen — an account changing halfway
+   * through a single attempt — is caught elsewhere, because it cannot be caught
+   * here: {@link attemptOnce}'s panel/claim pair and the forced-renewal guard in
+   * {@link checkinOne}.
    */
   private async identityFor(
     account: MinimaxCodeAccountSummaryDto,
-    accessToken: string,
+    credentials: MinimaxCodeCredentials,
     region: MinimaxCodeRegion,
-  ): Promise<CheckinIdentityState> {
+  ): Promise<{ identity: CheckinIdentityState; changedFrom: string | undefined }> {
+    const credentialIdentity = checkinAccountIdentity(credentials)
     const cached = this.identities[account.id]
-    if (cached !== undefined && cached.region === region) return cached
-    const identity = await fetchAccountIdentity(accessToken, region, {
+    // Reusable only while the pin still describes the credential in hand. Two
+    // absent keys count as a match (a credential with no stable identity has
+    // nothing to pin), which is what keeps such an account from re-resolving on
+    // every single pass.
+    if (cached !== undefined && cached.region === region && cached.accountIdentity === credentialIdentity) {
+      return { identity: cached, changedFrom: undefined }
+    }
+    const identity = await fetchAccountIdentity(credentials.accessToken, region, {
       fetchFn: this.fetchFn,
       ...(this.appVersion === undefined ? {} : { appVersion: this.appVersion }),
     })
-    const next: CheckinIdentityState = { realUserID: identity.realUserID, region }
+    const next: CheckinIdentityState = {
+      realUserID: identity.realUserID,
+      region,
+      ...(credentialIdentity === undefined ? {} : { accountIdentity: credentialIdentity }),
+    }
     this.identities[account.id] = next
-    return next
+    // Reported only for a real change of account. An entry that was merely
+    // unpinned is a format upgrade, not something worth a warning.
+    const changedFrom = cached?.accountIdentity !== undefined && cached.accountIdentity !== credentialIdentity
+      ? cached.accountIdentity
+      : undefined
+    return { identity: next, changedFrom }
   }
 
   /** Check one account in, recording the outcome in its today's entry. */
@@ -327,11 +438,25 @@ export class MinimaxCodeCheckinService {
         // dropping it is what lets the retry resolve the identity afresh.
         delete this.identities[account.id]
         const renewed = await this.pool.renewCredential(account.id, this.fetchFn)
+        // A renewal that lands on a different account than the one that asked is
+        // not a renewal of this sign-in; handing it over anyway is precisely the
+        // cross-account claim the retry must not make.
+        const beforeRenewal = checkinAccountIdentity(credentials)
+        const afterRenewal = checkinAccountIdentity(renewed)
+        if (beforeRenewal !== undefined && afterRenewal !== undefined && beforeRenewal !== afterRenewal) {
+          throw new MinimaxCodeCheckinAccountMismatchError(account.id, beforeRenewal, afterRenewal)
+        }
         await this.attemptOnce(account, entry, renewed, region, nowMs)
       }
     } catch (error) {
       entry.attempts += 1
       entry.lastError = error instanceof Error ? error.message : String(error)
+      // A thrown attempt is a FAILURE, not a parked day. An `inactive` recorded by
+      // an earlier pass of the same day would otherwise outlive it, and the card
+      // would keep reporting the account as skipped — which is exactly the
+      // reading an account mismatch must never produce.
+      entry.inactive = false
+      delete entry.inactiveAt
       this.logger?.warn(`[minimax-code-checkin] ${account.id} attempt ${entry.attempts}/${CHECKIN_ATTEMPT_CAP} failed: ${entry.lastError}`)
     }
   }
@@ -344,37 +469,66 @@ export class MinimaxCodeCheckinService {
   private async attemptOnce(
     account: MinimaxCodeAccountSummaryDto,
     entry: CheckinAccountState,
-    credentials: { accessToken: string },
+    credentials: MinimaxCodeCredentials,
     region: MinimaxCodeRegion,
     nowMs: number,
   ): Promise<void> {
-    const identity = await this.identityFor(account, credentials.accessToken, region)
-    const panel = await this.panel(credentials, identity, region)
+    const { identity, changedFrom } = await this.identityFor(account, credentials, region)
+    if (changedFrom !== undefined) {
+      // Non-secret facts only: the account keys and the pool row id. Neither the
+      // token nor the resolved realUserID is logged.
+      this.logger?.warn(
+        `[minimax-code-checkin] ${account.id} account changed since the last pass (${changedFrom} -> `
+        + `${checkinAccountIdentity(credentials) ?? 'unknown'}); entry re-synced to the credential now held`,
+      )
+    }
+    // The identity just resolved IS the account this attempt signs in, and the
+    // credential that resolved it is the only one allowed to act for it.
+    const pinned = checkinAccountIdentity(credentials)
+    const panel = await this.panel(account, credentials, identity, region, pinned)
     if (this.recordPanelOutcome(entry, panel, account.id, nowMs)) return
-    const claim = await this.claim(credentials, identity, region)
+    const claim = await this.claim(account, credentials, identity, region, pinned)
     this.markSignedIn(entry, claim.panel)
     if (claim.claim_result === 1) entry.claimedPoints = claim.points
     this.logger?.info(`[minimax-code-checkin] ${account.id} signed in; +${claim.points} credits${claim.claim_result === 2 ? ' (already claimed upstream)' : ''}`)
   }
 
-  /** The status call, against the current credential. */
+  /**
+   * The status call, against the current credential.
+   *
+   * The guard runs BEFORE the panel is read: the credential making this request
+   * must still be the one the identity was resolved with a moment ago.
+   */
   private async panel(
-    credentials: { accessToken: string },
+    account: MinimaxCodeAccountSummaryDto,
+    credentials: MinimaxCodeCredentials,
     identity: CheckinIdentityState,
     region: MinimaxCodeRegion,
+    pinned: string | undefined,
   ): Promise<SigninPanel> {
+    assertSameAccount(account.id, credentials, pinned)
     return fetchSigninPanel(credentials.accessToken, identity.realUserID, region, {
       fetchFn: this.fetchFn,
       ...(this.appVersion === undefined ? {} : { appVersion: this.appVersion }),
     })
   }
 
-  /** The claim call, against the current credential. */
+  /**
+   * The claim call, against the current credential.
+   *
+   * The guard runs again here — the pair the official client protects
+   * (`getSigninPanel` then `claimSignin`) — so a panel read for one account can
+   * never be followed by a claim posted as another, and both calls carry the
+   * same identity value by construction.
+   */
   private async claim(
-    credentials: { accessToken: string },
+    account: MinimaxCodeAccountSummaryDto,
+    credentials: MinimaxCodeCredentials,
     identity: CheckinIdentityState,
     region: MinimaxCodeRegion,
+    pinned: string | undefined,
   ) {
+    assertSameAccount(account.id, credentials, pinned)
     return claimSignin(credentials.accessToken, identity.realUserID, region, {
       fetchFn: this.fetchFn,
       ...(this.appVersion === undefined ? {} : { appVersion: this.appVersion }),
@@ -482,7 +636,12 @@ export class MinimaxCodeCheckinService {
         if (isRecord(parsed.identities)) {
           for (const [id, value] of Object.entries(parsed.identities)) {
             if (isRecord(value) && typeof value.realUserID === 'string' && isRegion(value.region)) {
-              this.identities[id] = { realUserID: value.realUserID, region: value.region }
+              this.identities[id] = {
+                realUserID: value.realUserID,
+                region: value.region,
+                ...(typeof value.accountIdentity === 'string' && value.accountIdentity !== ''
+                  ? { accountIdentity: value.accountIdentity } : {}),
+              }
             }
           }
         }

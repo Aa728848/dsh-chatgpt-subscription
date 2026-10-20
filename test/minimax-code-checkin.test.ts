@@ -6,6 +6,7 @@ import path from 'node:path'
 import {
   CHECKIN_ATTEMPT_CAP,
   CHECKIN_INACTIVE_RECHECK_MS,
+  MinimaxCodeCheckinAccountMismatchError,
   MinimaxCodeCheckinService,
   localDateString,
   type MinimaxCodeCheckinPool,
@@ -14,6 +15,7 @@ import {
   SIGNIN_CLAIM_PATH,
   SIGNIN_STATUS_PATH,
   USER_INFO_PATH,
+  checkinAccountIdentity,
   claimSignin,
   currentSigninStreak,
   fetchSigninPanel,
@@ -22,6 +24,7 @@ import {
   type SigninPanel,
 } from '../src/host/minimax-code/checkin-gateway.ts'
 import type { MinimaxCodeAccountSummaryDto } from '../src/host/minimax-code/account-pool.ts'
+import type { MinimaxCodeCredentials } from '../src/host/minimax-code/token-store.ts'
 
 const temporaryDirs: string[] = []
 
@@ -112,22 +115,81 @@ function makeAccount(id: string, region: 'cn' | 'global' = 'cn'): MinimaxCodeAcc
   return { id, alias: id, isPrimary: true, region } as MinimaxCodeAccountSummaryDto
 }
 
+/**
+ * One credential, complete enough that its pool identity is real.
+ *
+ * `checkinAccountIdentity` reads `region` plus either `recordKey` (the desktop
+ * app's record slot) or `loginEpoch` (a plugin-owned sign-in), so a double that
+ * only carried an access token would silently skip every assertion under test.
+ */
+function makeCredential(
+  token: string,
+  facts: { region?: 'cn' | 'global'; recordKey?: string | null; loginEpoch?: string } = {},
+): MinimaxCodeCredentials {
+  const recordKey = facts.recordKey ?? null
+  return {
+    accessToken: token,
+    refreshToken: `refresh-${token}`,
+    tokenType: 'Bearer',
+    clientId: 'test-client',
+    scopes: [],
+    audience: 'test',
+    expiresAtMs: Date.now() + 3_600_000,
+    generation: 0,
+    loginEpoch: facts.loginEpoch ?? '',
+    buildEnv: 'release',
+    region: facts.region ?? 'cn',
+    recordKey,
+    source: recordKey === null ? 'file' : 'minimax-native',
+  }
+}
+
 interface PoolLog {
   pool: MinimaxCodeCheckinPool
   renewals: string[]
+  /** Re-point one row at another sign-in, as adopting a different credential does. */
+  setCredential(accountId: string, credentials: MinimaxCodeCredentials): void
+  /** What a forced renewal answers with; defaults to a rotation of the row's own credential. */
+  setRenewal(accountId: string, credentials: MinimaxCodeCredentials): void
 }
 
 function makePool(accounts: MinimaxCodeAccountSummaryDto[]): PoolLog {
   const renewals: string[] = []
+  // Each row starts on its own native record slot, which is the ordinary shape.
+  const held = new Map(accounts.map((account) => [
+    account.id,
+    makeCredential(`token-${account.id}`, {
+      region: account.region ?? 'cn',
+      recordKey: `rk-${account.id}`,
+    }),
+  ]))
+  const renewalsByAccount = new Map<string, MinimaxCodeCredentials>()
   const pool = {
     listAccounts: async () => accounts,
-    getFreshCredential: async (accountId: string) => ({ accessToken: `token-${accountId}` }),
+    getFreshCredential: async (accountId: string) => held.get(accountId) ?? makeCredential('token-missing'),
     renewCredential: async (accountId: string) => {
       renewals.push(accountId)
-      return { accessToken: `token-${accountId}-renewed` }
+      const pinned = renewalsByAccount.get(accountId)
+      if (pinned !== undefined) return pinned
+      const current = held.get(accountId) ?? makeCredential(`token-${accountId}`)
+      return { ...current, accessToken: `${current.accessToken}-renewed`, generation: current.generation + 1 }
     },
   } as unknown as MinimaxCodeCheckinPool
-  return { pool, renewals }
+  return {
+    pool,
+    renewals,
+    setCredential(accountId, credentials) { held.set(accountId, credentials) },
+    setRenewal(accountId, credentials) { renewalsByAccount.set(accountId, credentials) },
+  }
+}
+
+/** The scheduler's own state document, as it lands on disk. */
+async function readStateFile(dir: string): Promise<Record<string, any>> {
+  return JSON.parse(await fs.readFile(path.join(dir, 'checkin-state.json'), 'utf8')) as Record<string, any>
+}
+
+async function writeStateFile(dir: string, document: unknown): Promise<void> {
+  await fs.writeFile(path.join(dir, 'checkin-state.json'), JSON.stringify(document), 'utf8')
 }
 
 async function makeDir(): Promise<string> {
@@ -139,13 +201,22 @@ async function makeDir(): Promise<string> {
 function makeService(dir: string, pool: MinimaxCodeCheckinPool, fetchLog: FetchLog, options: {
   settings?: () => { enabled: boolean }
   now?: () => number
+  logger?: { info(message: string): void; warn(message: string): void }
 } = {}): MinimaxCodeCheckinService {
   return new MinimaxCodeCheckinService(pool, {
     fetchFn: fetchLog.fetchFn,
     settings: options.settings ?? (() => ({ enabled: true })),
     statePath: path.join(dir, 'checkin-state.json'),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
   })
+}
+
+/** Collects what the scheduler logs, so the non-secret warn line can be asserted. */
+function makeLogger(): { info: string[]; warn: string[]; logger: { info(m: string): void; warn(m: string): void } } {
+  const info: string[] = []
+  const warn: string[] = []
+  return { info, warn, logger: { info: (m: string) => info.push(m), warn: (m: string) => warn.push(m) } }
 }
 
 afterEach(async () => {
@@ -374,6 +445,232 @@ describe('MiniMax Code check-in service', () => {
     expect(fetchLog.calls.identity).toBe(1)
     expect(fetchLog.calls.status).toBe(2)
     expect(fetchLog.calls.claim).toBe(2)
+  })
+})
+
+describe('MiniMax Code check-in account consistency', () => {
+  it('claims with the credentials of one account and pins that account in the state', async () => {
+    const dir = await makeDir()
+    const fetchLog = makeFetch()
+    const { pool } = makePool([makeAccount('acc-1')])
+    const service = makeService(dir, pool, fetchLog)
+
+    await service.tick()
+    expect(fetchLog.calls.identity).toBe(1)
+    expect(fetchLog.calls.status).toBe(1)
+    expect(fetchLog.calls.claim).toBe(1)
+    const summary = await service.summary()
+    expect(summary.doneToday).toBe(1)
+    expect(summary.failedToday).toBe(0)
+
+    // The identity the entry is signed in under is pinned to the sign-in it was
+    // learned with, and that pin is persisted — the next boot compares against it.
+    const state = await readStateFile(dir)
+    expect(state.identities['acc-1']).toEqual({ realUserID: 'ru-1', region: 'cn', accountIdentity: 'native:cn:rk-acc-1' })
+    // Nothing secret is written into the state document.
+    expect(JSON.stringify(state)).not.toContain('token-acc-1')
+  })
+
+  it('re-syncs and signs the current account in when the row now holds another account', async () => {
+    const dir = await makeDir()
+    const fetchLog = makeFetch({ panel: makePanel(DAY_UPCOMING) })
+    const poolLog = makePool([makeAccount('acc-1')])
+    const first = makeService(dir, poolLog.pool, fetchLog)
+
+    // Day one: the identity ru-1 is learned for acc-1, today is not claimable yet.
+    await first.tick()
+    expect(fetchLog.calls.identity).toBe(1)
+    expect((await first.summary()).skippedToday).toBe(1)
+
+    // The row is re-pointed at a different sign-in: same pool row id, different
+    // account behind it. That is a state change, not a fault.
+    poolLog.setCredential('acc-1', makeCredential('token-other', { region: 'cn', recordKey: 'rk-someone-else' }))
+
+    const log = makeLogger()
+    const claimable = makeFetch({ identity: { data: { userInfo: { realUserID: 'ru-2' } } } })
+    const second = makeService(dir, poolLog.pool, claimable, { logger: log.logger })
+    await second.tick(true)
+
+    // The identity is resolved afresh WITH the credential now held, and that is
+    // the account both calls are sent for — never A's realUserID with B's token.
+    expect(claimable.calls.identity).toBe(1)
+    expect(claimable.calls.status).toBe(1)
+    expect(claimable.calls.claim).toBe(1)
+    expect(claimable.urls.find((url) => url.includes(SIGNIN_STATUS_PATH))).toContain('user_id=ru-2')
+    expect(claimable.urls.find((url) => url.includes(SIGNIN_CLAIM_PATH))).toContain('user_id=ru-2')
+
+    const summary = await second.summary()
+    expect(summary.doneToday).toBe(1)
+    expect(summary.skippedToday).toBe(0)
+    expect(summary.failedToday).toBe(0)
+
+    // The pin is re-written to the account the row now holds.
+    const state = await readStateFile(dir)
+    expect(state.identities['acc-1']).toEqual({ realUserID: 'ru-2', region: 'cn', accountIdentity: 'native:cn:rk-someone-else' })
+    expect(state.accounts['acc-1'].lastError).toBeUndefined()
+
+    // One non-secret warning records the re-sync: account keys and the row id only.
+    expect(log.warn).toHaveLength(1)
+    expect(log.warn[0]).toContain('acc-1')
+    expect(log.warn[0]).toContain('native:cn:rk-acc-1')
+    expect(log.warn[0]).toContain('native:cn:rk-someone-else')
+    expect(log.warn[0]).not.toContain('token-other')
+    expect(log.warn[0]).not.toContain('ru-1')
+
+    // The next pass rides the refreshed pin instead of paying for another call.
+    const nextDay = makeFetch({ identity: { data: { userInfo: { realUserID: 'ru-2' } } } })
+    const tomorrow = makeService(dir, poolLog.pool, nextDay, { now: () => Date.now() + 86_400_000 })
+    await tomorrow.tick()
+    expect(nextDay.calls.identity).toBe(0)
+    expect(nextDay.calls.claim).toBe(1)
+  })
+
+  it('refuses when the credential identity drifts between the two calls', async () => {
+    const dir = await makeDir()
+    const fetchLog = makeFetch()
+    const poolLog = makePool([makeAccount('acc-1')])
+    // A credential whose identity changes under the attempt. Nothing in the
+    // scheduler does this today — the credential is captured in a local and only
+    // the forced-renewal path swaps it, and that one is refused separately — so
+    // this getter is how the guard's contract is exercised at all.
+    // Reads 1 and 2 are `identityFor` resolving and `attemptOnce` capturing the
+    // pin; the panel's guard is read 3. If that ever stops being true this test
+    // fails loudly, which is the point: the guard is only worth keeping if it
+    // can still fire.
+    let reads = 0
+    const drifting = makeCredential('token-drift', { region: 'cn', recordKey: 'rk-acc-1' })
+    Object.defineProperty(drifting, 'recordKey', {
+      get: () => (reads++ < 2 ? 'rk-acc-1' : 'rk-other'),
+      configurable: true,
+    })
+    poolLog.setCredential('acc-1', drifting)
+    const service = makeService(dir, poolLog.pool, fetchLog)
+
+    await service.tick()
+    // Refused before anything was sent: the panel never went out, so no claim
+    // could be posted for a different account than the one being signed in.
+    expect(fetchLog.calls.status).toBe(0)
+    expect(fetchLog.calls.claim).toBe(0)
+    expect((await service.summary()).doneToday).toBe(0)
+
+    const state = await readStateFile(dir)
+    const lastError = String(state.accounts['acc-1'].lastError)
+    expect(lastError).toContain('账号不一致')
+    expect(lastError).toContain('native:cn:rk-acc-1')
+    expect(lastError).toContain('native:cn:rk-other')
+    expect(lastError).not.toContain('token-drift')
+  })
+
+  it('heals a state document written before the pin existed', async () => {
+    const dir = await makeDir()
+    const today = localDateString(Date.now())
+    // A document from an older build: an identity with no accountIdentity field.
+    await writeStateFile(dir, {
+      version: 1,
+      lastRunAt: null,
+      accounts: { 'acc-1': { date: today, done: false, attempts: 0 } },
+      identities: { 'acc-1': { realUserID: 'ru-1', region: 'cn' } },
+    })
+    const log = makeLogger()
+    const fetchLog = makeFetch()
+    const service = makeService(dir, makePool([makeAccount('acc-1')]).pool, fetchLog, { logger: log.logger })
+
+    await service.tick()
+    // Re-resolved once, signed in normally, and pinned on the way out.
+    expect(fetchLog.calls.identity).toBe(1)
+    expect(fetchLog.calls.claim).toBe(1)
+    expect((await service.summary()).doneToday).toBe(1)
+    const state = await readStateFile(dir)
+    expect(state.identities['acc-1'].accountIdentity).toBe('native:cn:rk-acc-1')
+    // A format upgrade is not an account change: no warning.
+    expect(log.warn).toHaveLength(0)
+  })
+
+  it('refuses a forced renewal that answers with a different account', async () => {
+    const dir = await makeDir()
+    const fetchLog = makeFetch({ claimStatus: 401 })
+    const poolLog = makePool([makeAccount('acc-1')])
+    // The renewal lands on another account's sign-in. This one is a mid-attempt
+    // swap, so it must NOT self-heal the way a re-pointed row does.
+    poolLog.setRenewal('acc-1', makeCredential('token-swapped', { region: 'cn', recordKey: 'rk-b' }))
+    const log = makeLogger()
+    const service = makeService(dir, poolLog.pool, fetchLog, { logger: log.logger })
+
+    await service.tick()
+    // The panel was read once and rejected once; no second attempt ran under the
+    // foreign credential, and no identity was resolved for it either.
+    expect(fetchLog.calls.status).toBe(1)
+    expect(fetchLog.calls.claim).toBe(1)
+    expect(fetchLog.calls.identity).toBe(1)
+    const summary = await service.summary()
+    expect(summary.doneToday).toBe(0)
+
+    const state = await readStateFile(dir)
+    const lastError = String(state.accounts['acc-1'].lastError)
+    expect(lastError).toContain('账号不一致')
+    expect(lastError).toContain('native:cn:rk-acc-1')
+    expect(lastError).toContain('native:cn:rk-b')
+    expect(lastError).not.toContain('token-swapped')
+    // The foreign account is never pinned: the entry the 401 path drops stays
+    // dropped, instead of being rewritten to the swapped sign-in the way a
+    // re-pointed row is.
+    expect(state.identities['acc-1']).toBeUndefined()
+  })
+
+  it('treats a rotation of the same sign-in as the same account', async () => {
+    const dir = await makeDir()
+    let claimCalls = 0
+    const fetchFn = (async (url: any) => {
+      const target = String(url)
+      if (target.includes(USER_INFO_PATH)) return jsonResponse({ data: { userInfo: { realUserID: 'ru-1' } } })
+      if (target.includes(SIGNIN_STATUS_PATH)) return jsonResponse({ base_resp: { status_code: 0 }, data: makePanel(DAY_CLAIMABLE) })
+      if (target.includes(SIGNIN_CLAIM_PATH)) {
+        claimCalls += 1
+        if (claimCalls === 1) return new Response('', { status: 401 })
+        return jsonResponse({ base_resp: { status_code: 0 }, data: makeClaim() })
+      }
+      throw new Error(`unexpected fetch: ${target}`)
+    }) as unknown as typeof fetch
+    const poolLog = makePool([makeAccount('acc-1')])
+    // Same native record slot, rotated tokens: still one account, so the retry
+    // is allowed to claim with the renewed credential.
+    poolLog.setRenewal('acc-1', makeCredential('token-rotated', { region: 'cn', recordKey: 'rk-acc-1' }))
+    const service = makeService(dir, poolLog.pool, { urls: [], calls: { status: 0, claim: 0, identity: 0 }, fetchFn })
+
+    await service.tick()
+    expect(poolLog.renewals).toEqual(['acc-1'])
+    expect(claimCalls).toBe(2)
+    const summary = await service.summary()
+    expect(summary.doneToday).toBe(1)
+    const state = await readStateFile(dir)
+    expect(state.accounts['acc-1'].lastError).toBeUndefined()
+  })
+
+  it('derives the identity key from the non-secret facts alone', () => {
+    expect(checkinAccountIdentity({ region: 'cn', recordKey: 'rk-1', loginEpoch: 'le-1' })).toBe('native:cn:rk-1')
+    expect(checkinAccountIdentity({ region: 'global', recordKey: null, loginEpoch: 'le-1' })).toBe('signin:global:le-1')
+    expect(checkinAccountIdentity({ region: 'cn', recordKey: '', loginEpoch: '' })).toBeUndefined()
+    expect(checkinAccountIdentity({ recordKey: 'rk-1' })).toBeUndefined()
+    // The token is never part of the key, so a rotation cannot change it.
+    const rotated = makeCredential('token-a', { region: 'cn', recordKey: 'rk-1' })
+    const next = { ...rotated, accessToken: 'token-b', refreshToken: 'refresh-b', generation: 3 }
+    expect(checkinAccountIdentity(next)).toBe(checkinAccountIdentity(rotated))
+  })
+
+  it('keeps the panel validation strict even though the account is pinned', async () => {
+    const dir = await makeDir()
+    // A duplicate claimable day is a wire surprise, not "nothing to do".
+    const broken = makePanel(DAY_CLAIMABLE)
+    broken.days[3]!.status = DAY_CLAIMABLE
+    const fetchLog = makeFetch({ panel: broken })
+    const { pool } = makePool([makeAccount('acc-1')])
+    const service = makeService(dir, pool, fetchLog)
+
+    await service.tick()
+    expect(fetchLog.calls.claim).toBe(0)
+    const summary = await service.summary()
+    expect(summary.doneToday).toBe(0)
+    expect(summary.skippedToday).toBe(0)
   })
 })
 
