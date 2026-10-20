@@ -16,6 +16,7 @@ import type { AttachmentImageReader } from '../common/request-images.ts'
 import { ClinePassAccountPool } from './account-pool.ts'
 import { ClinePassAdapter } from './adapter.ts'
 import { ClinePassEngine } from './engine.ts'
+import { ClinePassLoginManager } from './oauth.ts'
 import { getClinePassWebStatus, registerClinePassRoutes, CLINE_PASS_ROUTES } from './routes.ts'
 import { createClinePassStore, type ClinePassStore } from './store.ts'
 import { ClinePassModelSettingsStore, type ClinePassModelSettings } from './token-store.ts'
@@ -68,7 +69,9 @@ export function clinePassVisibleModelIds(settings: ClinePassModelSettings, catal
  */
 export function createClinePassLine(ctx: Context, options: ClinePassLineOptions): ClinePassLine {
   const modelSettings = new ClinePassModelSettingsStore()
-  const accountPool = new ClinePassAccountPool()
+  const accountPool = new ClinePassAccountPool({
+    baseURL: () => modelSettings.status().baseURL,
+  })
   const store = createClinePassStore()
 
   const engine = new ClinePassEngine({
@@ -94,6 +97,17 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
     },
   )
 
+  // Device-code sign-in. The card drives polling through the route; this object
+  // owns the pending WorkOS device code and completes the account add.
+  const login = new ClinePassLoginManager({
+    fetchFn: options.fetchFn,
+    baseURL: () => modelSettings.status().baseURL,
+    onLogin: async (credentials) => {
+      await accountPool.addAccount(credentials, credentials.email ?? credentials.name)
+    },
+    logger: ctx.logger,
+  })
+
   const claim = claimProviderRoute(ctx, {
     providerId: PROVIDER_ID,
     label: PROVIDER_NAME,
@@ -108,6 +122,7 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
     store,
     engine,
     fetchFn: options.fetchFn,
+    login,
     serving: () => claim.serving(),
     conflict: () => claim.conflict(),
   })
@@ -131,6 +146,7 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
           store,
           engine,
           fetchFn: options.fetchFn,
+          login,
           serving: () => claim.serving(),
           conflict: () => claim.conflict(),
         }),
@@ -174,6 +190,7 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
     hubSource,
     dispose: () => {
       for (const dispose of disposeTools.splice(0)) dispose()
+      login.dispose()
       disposeRoutes()
       claim.dispose()
     },

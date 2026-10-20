@@ -18,7 +18,7 @@
 - [Claude（订阅）线路](#claude订阅线路)
 - [GLM（ZCode 账号）线路](#glmzcode-账号线路)
 - [Step Code（Step Plan 订阅）线路](#step-codestep-plan-订阅线路)
-- [Cline Pass（API Key 订阅）线路](#cline-passapi-key-订阅线路)
+- [Cline Pass（OAuth 订阅）线路](#cline-passoauth-订阅线路)
 - [子代理模型授权](#子代理模型授权0215-起032-起强制指定模型)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [本机登录](#本机登录)
@@ -42,7 +42,7 @@
 | `antigravity` | Google Antigravity | Gemini | Google OAuth | 内置表 |
 | `glm-coding-plan` | GLM Coding Plan（ZCode 账号，国区 BigModel / 国际区 Z.ai） | Anthropic Messages + OpenAI Chat Completions（按模型声明） | ZCode 账号 OAuth（浏览器中转轮询）+ 可选导入本机 ZCode 登录态 | 随包目录（源自官方 `zcode-builtin.json`） |
 | `step-code` | StepFun Step Plan 订阅（国区 api.stepfun.com / 国际区 api.stepfun.ai）或开放平台 API Key | OpenAI Chat Completions | **云端轮询**浏览器授权（不开本地回调端口）/ 手工粘贴 Platform API Key / 只读导入本机 `~/.stepcode/auth.json` | **实时运行时发现**（随包表刻意为空） |
-| `cline-pass` | Cline Pass | OpenAI Chat Completions | **粘贴 API Key**（静态、不过期；多 Key 号池） | 随包表兜底 + 官方 `recommended-models` / models.dev / 上游网关目录补全 |
+| `cline-pass` | Cline Pass | OpenAI Chat Completions | **浏览器设备码 OAuth**（WorkOS，账号入池、自动续期）；API Key 仅作兼容回退 | 随包表兜底 + 官方 `recommended-models` / models.dev / 上游网关目录补全 |
 
 > **只有 minimax-code 是硬编码目录，而且是有意的**：该端点的 `GET /v1/models` **未对订阅流量开放**（返回 503 `direct_route_not_configured`），任何「实时目录」都只会是一个必然失败的请求。其取值转录自本机官方客户端的 `config.yaml`。
 >
@@ -1016,9 +1016,18 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 
 与其它线路一样，所有修改状态的路由只接受同源 JSON POST 并校验 `Origin` 与 `Host`。**响应里永远不含 api_key、`Oasis-Token` 或账号密码的原文**——下发的只有「有没有凭据、从哪来、大概什么时候过期、上次读它出了什么问题」。
 
-## Cline Pass（API Key 订阅）线路
+## Cline Pass（OAuth 订阅）线路
 
-`cline-pass`（显示名 **Cline Pass**）接入 [Cline Pass](https://cline.bot/cline-pass)。它是本插件里唯一**没有 OAuth** 的订阅线路：凭据就是一个静态 API Key，不会过期，吊销在 Cline 账号页完成。因此这条线路的「登录」只有一种动作——在卡片里粘贴 Key——而号池、轮换、冷却与鉴权失败标记仍与其它线路共用同一套内核。
+`cline-pass`（显示名 **Cline Pass**）接入 [Cline Pass](https://cline.bot/cline-pass)。与其它订阅线路一样，它**用 OAuth 登录**：Cline 账号走 **WorkOS 设备码授权**（RFC 8628 形态），浏览器确认后账号自动加入号池；聊天请求携带 `Authorization: Bearer workos:<accessToken>`，access token 到期前用轮换的 refresh token 自动续期。静态 API Key 仍保留为**兼容回退**（旧 `dsh-cline-pass` 用户或某些部署），但不再是默认入口。
+
+设备码流程的四个上游调用与常量来自 Cline 官方开源仓库，不是猜的：
+
+- `POST https://api.workos.com/user_management/authorize/device`（client id `client_01K3A541FN8TA3EPPHTD2325AR`）；
+- 浏览器确认后轮询 `POST https://api.workos.com/user_management/authenticate`；
+- `POST https://api.cline.bot/api/v1/auth/register` 换取 Cline 会话；
+- `POST https://api.cline.bot/api/v1/auth/refresh` 续期。
+
+对应源码：Cline 仓库 `sdk/packages/core/src/auth/cline.ts`、`auth/provider-auth-registry.ts`（`workos:` 前缀）、`sdk/packages/shared/src/runtime/cline-environment.ts`（client id 与端点）、`sdk/packages/llms/src/providers/vendors/cline.ts`（Bearer 发送）。抓取日期 2026-10-20。
 
 **能力**
 
@@ -1026,7 +1035,8 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 - 模型目录：随包 15 个 Cline Pass 模型是**兜底**。点「刷新模型目录」会读官方 `/ai/cline/recommended-models`、models.dev 与上游网关目录，只增不减，并把每个模型的能力（上下文窗口、输出上限、图片、推理档位）一起补上；新发布、本版本不认识的模型按保守值录取，不会被隐藏；
 - **上游渠道可观测、可钉住**：同一模型可能由 OpenRouter（direct 管线）或 Vercel AI Gateway（planner 管线）转发。卡片可以对单个模型「探测」渠道、逐个「校验」、按顺序钉住或排除，并在**首个 token 之前**失败切换到下一个渠道；`strict` 只发允许列表，`preferred` 按顺序尝试。钉住字段默认**两种写法都写**（`provider.only/order/sort` 与 `providerOptions.gateway.*`），因为网关可以在两次请求之间换管线，只写一种会让钉住悄悄失效；
 - **钉住是否被采纳以响应为准**：网关对未知/不可用的 `only` 不报错，直接从别的渠道服务。因此探测、校验与真实请求都会回读响应里的实际服务渠道；「请求 baseten、实际 deepseek」会被明确标成未被采纳，而不是当成成功；
-- **号池**：多 Key、顺序/轮询/粘性三种调度、429 冷却、401/403 标记失效后换号；额度耗尽（`QUOTA`）与鉴权失败是**账号级**失败，会换账号；普通 429 是**渠道级**，只换渠道，不牺牲账号容量；
+- **登录态**：设备码确认后账号自动入池；access token 以 `workos:` 前缀发送，到期前 5 分钟自动 refresh（refresh token 轮换并先落盘再使用）；refresh 被上游判 `invalid_grant` 时账号标记为失效并提示重新登录，网络/5xx 只算瞬时失败，不会误登出；
+- **号池**：多账号（OAuth）或 API Key、顺序/轮询/粘性三种调度、429 冷却、401/403 标记失效后换号；额度耗尽（`QUOTA`）与鉴权失败是**账号级**失败，会换账号；普通 429 是**渠道级**，只换渠道，不牺牲账号容量；
 - **额度**：`GET /users/me/plan/usage-limits` 的 `five_hour` / `weekly` / `monthly` 三个窗口，**按账号**读取并显示；读取失败只报原因，不阻断请求；
 - **请求历史**：记录模型、账号、实际服务渠道、首 token / 总耗时、token 用量、错误与失败尝试链；只在进程内存里，重启清空；
 - **管理工具**：`cline_pass_status` / `models` / `probe` / `validate` / `test` / `pin` / `accounts` / `history` 八个工具，**默认不注册**——它们的 schema 会出现在每次请求的工具列表里，而大多数对话不需要它们。在卡片「高级设置」里勾选后，**重启 DSH** 生效；Provider 与设置卡本身不受影响。
@@ -1035,7 +1045,10 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/status` | 号池、模型与渠道观测、额度快照、历史条数、行级设置；页面唯一的读口 |
+| GET | `/status` | 号池、登录流程、模型与渠道观测、额度快照、历史条数、行级设置；页面唯一的读口 |
+| POST | `/login/start` | 申请 WorkOS 设备码，返回短码与授权链接（不打开浏览器） |
+| GET | `/login/status?id=` | 轮询设备码；host 按 WorkOS 的 interval 节流，成功时完成 `auth/register` 并把账号入池 |
+| POST | `/login/cancel` | 放弃当前设备码；之后即使浏览器确认也不会落盘 |
 | POST | `/settings` | 启用开关、默认网关、默认上下文/输出预算、每账号并发、流空闲超时、历史条数、目录/工具开关、钉住写法 |
 | GET/POST | `/accounts` | 号池动作：`add` / `test` / `set-primary` / `set-alias` / `delete` / `clear-cooldown` / `strategy` |
 | GET/POST | `/models` | 模型勾选（`enabledModelIds`，`null` = 全选）与线路启用 |
@@ -1047,14 +1060,14 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 | GET/POST | `/usage` | 读缓存 / 强制为每个可用账号读一次官方额度 |
 | GET | `/history` | 进程内请求历史（`limit`、`model` 过滤） |
 
-部署也可以用 `CLINE_PASS_API_KEY` 环境变量提供第一把 Key：号池为空时它会被投射为「首要账号」，无需先粘贴；在卡片里添加账号后，以卡片配置的号池为准（环境变量不会被写入凭据库）。**从 `dsh-cline-pass` 迁移时不会自动导入旧插件的设置与凭据引用**——请先在旧插件里记下 Key，再在卡片里重新添加；两个插件不要同时启用，否则会争抢同一个 `cline-pass` 路由（本卡会明确显示占用方）。
+OAuth 是默认入口；「使用 API Key」按钮保留为兼容回退，部署也可以用 `CLINE_PASS_API_KEY` 提供第一把 Key：号池为空时它会被投射为「首要账号」，无需先粘贴（环境变量不会被写入凭据库）。**从 `dsh-cline-pass` 迁移时不会自动导入旧插件的设置与凭据引用**——OAuth 账号重新登录一次即可，静态 Key 需要在卡片里重新添加；两个插件不要同时启用，否则会争抢同一个 `cline-pass` 路由（本卡会明确显示占用方）。
 
-所有修改状态的路由只接受同源 JSON POST 并校验 `Origin` 与 `Host`。**响应里永远不含 API Key 原文**：下发的只有账号 id、别名、冷却/失效状态与掩码后的存在性；Key 存在操作系统的加密凭据库（Windows DPAPI / macOS Keychain / Linux Secret Service）里。
+所有修改状态的路由只接受同源 JSON POST 并校验 `Origin` 与 `Host`。**响应里永远不含 access token、refresh token 或 API Key 原文**：下发的只有账号 id、别名、`authKind`、冷却/失效状态与错误原因；OAuth 会话与 Key 都存在操作系统的加密凭据库（Windows DPAPI / macOS Keychain / Linux Secret Service）里。登录流程的 DTO 同样是逐字段投影，而不是展开整个会话对象。
 
 **已知边界与风险**
 
-- **本线路来自 `dsh-cline-pass` 的功能移植**，网关的渠道探测/钉住/故障转移语义沿用该插件（MIT）与 `cline-pass-switcher`（MIT）的公开实现。网关不是公开契约：渠道名、`provider.only` 是否被采纳、错误措辞都可能变化；本线路的策略是**读回真实渠道并如实报告**，不把一次 200 当成钉住成功的证据。
-- **没有实时订阅账号的验收记录**：本版本的准确度上限是「协议与映射按线上抓取/上游实现对齐 + mock 全绿」。首次实机使用时，请先对目标模型点一次「探测」与「测试」，确认钉住是否被采纳，再决定是否长期钉住。
+- **本线路来自 `dsh-cline-pass` 的功能移植**，网关的渠道探测/钉住/故障转移语义沿用该插件（MIT）与 `cline-pass-switcher`（MIT）的公开实现；OAuth 链路的端点、client id 与 `workos:` 前缀转录自 Cline 官方开源仓库（见上）。网关与 WorkOS 都不是公开契约：渠道名、`provider.only` 是否被采纳、错误措辞、设备码策略都可能变化；本线路的策略是**读回真实渠道并如实报告**，不把一次 200 当成钉住成功的证据。
+- **没有实时订阅账号的验收记录**：本版本的准确度上限是「协议与映射按线上抓取/上游实现对齐 + mock 全绿」。设备码登录的四个请求与 refresh 链都有 mock 覆盖，但**尚未用一个真实 Cline 账号走完浏览器确认**；首次实机请先完成一次登录，再对目标模型点「探测」与「测试」。
 - **两个管线对渠道名的拼写不同**（例如 Z.AI 在 planner 侧是 `zai`、direct 侧是 `z-ai`），本线路按管线翻译；即便如此，**未知渠道不会让请求失败，只会被网关静默忽略**，所以「保存了钉住」不等于「钉住生效」。
 - **额度窗口是网关的读数，不是账单**；接口失败时卡片保留上一次读数并显示原因，不编造 0。
 - **模型目录随订阅变化**：随包表只覆盖发布时的模型；刷新失败不会清空已有目录，新模型按保守能力录取。

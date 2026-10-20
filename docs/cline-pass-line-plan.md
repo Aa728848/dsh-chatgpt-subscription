@@ -1,6 +1,6 @@
 # Cline Pass line — integration plan and evidence
 
-Status: implemented in this branch, mock-verified, **not live-verified against a real Cline Pass subscription**.
+Status: implemented in this branch, mock-verified, **not live-verified against a real Cline Pass subscription**. Sign-in uses Cline's WorkOS device authorization, transcribed from the Cline open-source repository at commit `ca7402c5abced42da9c7c50500b7a9bae82cb6fa` (2026-10-20).
 
 ## 1. What was ported and what was not
 
@@ -8,7 +8,8 @@ The source is the MIT-licensed plugin [`dsh-cline-pass`](https://github.com/yhsh
 
 | Source feature | Ported as | Notes |
 | --- | --- | --- |
-| Single provider route with API-key accounts | `ClinePassAccountPool` + `ClinePassAdapter` | Reuses `AccountPoolCore`, so rotation, cooldowns, auth markers and encrypted storage are shared with the other lines |
+| Single provider route with API-key accounts | `ClinePassAccountPool` + `ClinePassAdapter` | Reuses `AccountPoolCore`, so rotation, cooldowns, auth markers and encrypted storage are shared with the other lines; API keys remain a compatibility fallback |
+| Cline account sign-in (not in the standalone plugin) | `oauth.ts` + `/login/*` routes + card panel | WorkOS device authorization → `auth/register` → pooled OAuth session; `Bearer workos:<access>`; rotating refresh before expiry |
 | Streaming chat completions, tools, images, reasoning, idle timeout | `client.ts` + `mapper.ts` + `adapter.ts` | `stream_options.include_usage`, `reasoning_effort`, image parts as `image_url` data URLs |
 | Pipeline detection and dual-spelling pins | `protocol.ts` | `provider.only/order/sort` (direct) **and** `providerOptions.gateway.*` (planner) by default |
 | Channel probe / validate / pin / exclude / failover | `engine.ts` | Failover only before the first delivered chunk; success is judged by the channel the response reports |
@@ -40,6 +41,12 @@ Not ported, deliberately:
 | Pinned channel alias | `zai` (planner) ↔ `z-ai` (direct) | `lib/protocol.js` `CHANNEL_ALIASES` |
 | Upstream list cap | 64 | `lib/protocol.js` `MAX_UPSTREAMS` |
 | Spent-window detection | status 402, or window name + exhaustion wording | `lib/adapter.js` `streamErrorCode` |
+| WorkOS client id | `client_01K3A541FN8TA3EPPHTD2325AR` | Cline repo `sdk/packages/shared/src/runtime/cline-environment.ts` (production entry) |
+| WorkOS device authorize | `POST https://api.workos.com/user_management/authorize/device` | Cline repo `sdk/packages/core/src/auth/cline.ts` |
+| WorkOS device poll | `POST https://api.workos.com/user_management/authenticate` | same |
+| Cline token register | `POST https://api.cline.bot/api/v1/auth/register` `{accessToken, refreshToken}` | same |
+| Cline token refresh | `POST https://api.cline.bot/api/v1/auth/refresh` `{refreshToken, grantType:'refresh_token'}` | same |
+| OAuth bearer | `workos:<accessToken>` | Cline repo `sdk/packages/core/src/auth/provider-auth-registry.ts` `formatClineApiKey`; sent as `Bearer` by `sdk/packages/llms/src/providers/vendors/cline.ts` |
 
 The model table in `src/host/cline-pass/types.ts` is a literal transcription of `lib/catalog.js` `MODEL_CATALOG` (15 entries, with per-model context window, output ceiling, modalities and effort ladder). No number was guessed during the port; a model the table does not know is adopted from the live scan with conservative metadata.
 
@@ -50,12 +57,14 @@ The model table in `src/host/cline-pass/types.ts` is a literal transcription of 
 3. **Pin success is read back, never assumed.** A 200 is not evidence that an `only` list was honored; the adapter records the channel named by the response, and marks the channel available only when the pin was actually adopted.
 4. **Quota is per account.** The badge shows the most-consumed window across accounts the host has already read; refreshing is an explicit action that costs one request per usable account.
 5. **Tools are off by default**, matching the source's shipped default. The setting is read when the line starts; the card says a restart is required because a registered tool cannot be withdrawn from a live conversation.
-6. **No sibling line was edited.** Shared additions are appends only: one id in `CONTROLLED_PROVIDERS`, one in `DIAGNOSTIC_PROVIDERS`, one hub entry, one brand entry, one locale/style/slot registration, and one item in each existing count assertion.
+6. **Sign-in is OAuth, not a pasted key.** The Cline clients use WorkOS device authorization for `cline` / `cline-pass`; this line follows that flow and stores the rotating refresh token in the pool, so a session survives a host restart and refreshes before expiry. The standalone plugin's static key remains a secondary, documented fallback. Polling is card-driven and host-throttled to WorkOS's advertised interval; a cancelled flow can never persist late-arriving credentials.
+7. **Refresh failures are classified, not collapsed.** `invalid_grant` (and 400/401/403 with invalid-token wording) marks the account `invalid` and asks for a new sign-in; a network or 5xx failure is wrapped as `TRANSPORT` and leaves the account in the pool. This is the same distinction Cline's own `getValidClineCredentials` makes.
+8. **No sibling line was edited.** Shared additions are appends only: one id in `CONTROLLED_PROVIDERS`, one in `DIAGNOSTIC_PROVIDERS`, one hub entry, one brand entry, one locale/style/slot registration, and one item in each existing count assertion.
 
 ## 4. Verification
 
 - `npm run typecheck`: host + client + tests, 0 errors.
-- `npx vitest run`: 259 files / 4129 passed, 9 skipped (baseline before this line: 253 / 4074).
+- `npx vitest run`: 261 files / 4139 passed, 9 skipped (baseline before this line: 253 / 4074).
 - `npm run build` and `npm pack --dry-run`: `lib/types/host/cline-pass/*` present in the tarball.
 - New tests:
   - `test/cline-pass-protocol.test.ts` — attempt expansion, both spellings, aliases, adherence, exclusions, channel recovery.
@@ -63,10 +72,13 @@ The model table in `src/host/cline-pass/types.ts` is a literal transcription of 
   - `test/cline-pass-routes.test.ts` — status envelope, account add without leaking the key, pin/visibility persistence, settings validation, same-origin guard, history.
   - `test/cline-pass-adapter.test.ts` — channel failover before the first chunk and account rotation on 401.
   - `test/cline-pass-section.test.tsx` — shared account card, channel chips and their verdicts, local pin editing and save, quota rendering, no key in the DOM.
+  - `test/cline-pass-oauth.test.ts` — device authorization, poll interval, pending/denied outcomes, token registration/refresh bodies, invalid-grant classification and both credential generations.
+  - `test/cline-pass-account-refresh.test.ts` — expired OAuth session refreshes and persists the rotated pair; a rejected grant marks the account invalid; a static key never triggers a refresh.
+  - `test/cline-pass-routes.test.ts` also covers `/login/start`, interval-throttled `/login/status`, and the account landing in the pool.
 
 ## 5. Risks and left-unverified
 
-- **No live subscription was used.** Every wire shape came from the source plugin's captured behaviour and the public catalogs above. The first real use should start with a probe + test on the target model, exactly as the card says.
+- **No live subscription was used.** Every wire shape came from the source plugin's captured behaviour, the Cline repository above, and the public catalogs. In particular the WorkOS device flow and `auth/register` have only been exercised against mocks; the first real use should complete one browser sign-in, then probe + test the target model.
 - **The gateway is not a public contract.** Channel names, whether `provider.only` is honored, and error wording can change without notice. The line deliberately reads the serving channel back instead of promising that a pin works.
 - **Quota endpoint shape unverified on this line.** The reader accepts both `{ data: { limits } }` and a bare `{ limits }`, and reports any refusal; it does not fabricate zeroes when the endpoint changes.
 - **Catalog drift.** The shipped table is a snapshot. A model published after this release is adopted from the live scan; if every source is unreachable, it is simply absent rather than invented.

@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import { dshHomeDir } from '../common/home.ts'
 import {
   AccountPoolCore,
@@ -11,10 +11,15 @@ import {
 import type { CredentialStore } from '../token-store.ts'
 import {
   FileCredentialStore,
+  credentialsExpiresAt,
+  credentialsIdentity,
+  credentialsLabel,
+  isOAuthCredentials,
   parseClinePassCredentials,
   type ClinePassCredentials,
 } from './token-store.ts'
-import { PROVIDER_ID, PROVIDER_NAME } from './types.ts'
+import { clinePassNeedsRefresh, isClinePassInvalidGrant, refreshClinePassCredentials } from './oauth.ts'
+import { DEFAULT_BASE_URL, PROVIDER_ID, PROVIDER_NAME } from './types.ts'
 import type {
   AccountPoolStatusDto,
   AccountRotationStrategy,
@@ -40,7 +45,7 @@ export const CLINE_PASS_API_KEY_ENV = 'CLINE_PASS_API_KEY'
 /** The launching environment's key, projected as the primary account on read. */
 function ambientCredentials(): ClinePassCredentials | null {
   const value = process.env[CLINE_PASS_API_KEY_ENV]?.trim()
-  return value === undefined || value === '' ? null : { apiKey: value }
+  return value === undefined || value === '' ? null : { kind: 'api-key', apiKey: value }
 }
 
 /**
@@ -52,7 +57,7 @@ function ambientCredentials(): ClinePassCredentials | null {
  * and it is not a credential and cannot be used as one.
  */
 export function clinePassAccountKey(credentials: ClinePassCredentials): string {
-  return createHash('sha256').update(credentials.apiKey).digest('hex')
+  return credentialsIdentity(credentials)
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
@@ -105,14 +110,16 @@ export interface ClinePassAccountPoolOptions {
   /** Test seam; production builds the platform backend from the pool path. */
   backend?: CredentialStore<PoolData<ClinePassPoolAccount>>
   maxAccounts?: number
+  /** The line's current chat base URL, used when an account names none. */
+  baseURL?: () => string
 }
 
 /**
  * Cline Pass's account pool.
  *
- * A Cline Pass credential is a static key that never expires, so this wrapper
- * supplies identity, the display alias a user chose, and the mirror of the
- * single-credential file — no refresh logic is needed anywhere.
+ * Two credential kinds share one pool: an OAuth session (WorkOS device sign-in,
+ * rotating refresh token, expiry) and a legacy static API key. The kernel's
+ * refresh hooks are wired for the first and are no-ops for the second.
  */
 export class ClinePassAccountPool extends AccountPoolCore<
   ClinePassCredentials,
@@ -131,7 +138,7 @@ export class ClinePassAccountPool extends AccountPoolCore<
       parsePoolData: parseClinePassPoolData,
       dedupeKey: clinePassAccountKey,
       defaultAlias: (credentials, position) =>
-        credentials.alias ?? `Cline Pass 账号 ${position}`,
+        credentialsLabel(credentials) ?? `Cline Pass 账号 ${position}`,
       createAccount: ({ id, alias, credentials, addedAt, isPrimary }) => ({
         id,
         alias,
@@ -139,6 +146,41 @@ export class ClinePassAccountPool extends AccountPoolCore<
         addedAt,
         isPrimary,
       }),
+      expiresAt: (credentials) => credentialsExpiresAt(credentials),
+      needsRefresh: (credentials, now) =>
+        isOAuthCredentials(credentials) && clinePassNeedsRefresh(credentials, now),
+      // The refresh token rotates on every exchange, so the kernel's conditional
+      // commit is what keeps a concurrent request from spending the old one.
+      refresh: async (credentials, fetchFn) => {
+        if (!isOAuthCredentials(credentials)) return credentials
+        const baseURL = credentials.baseURL?.trim() || options.baseURL?.() || DEFAULT_BASE_URL
+        try {
+          return await refreshClinePassCredentials(fetchFn, credentials, { baseURL })
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          const status = typeof error === 'object' && error !== null ? (error as { status?: unknown }).status : undefined
+          const statusNote = typeof status === 'number' ? ` (HTTP ${status})` : ''
+          if (isClinePassInvalidGrant(error)) {
+            throw new LlmError(`Cline Pass sign-in expired; sign in again.${statusNote} ${detail}`, 'AUTH', { status: 401, cause: error })
+          }
+          // A transient failure must not be mistaken for a dead session: keep the
+          // account in the pool and let the harness retry policy decide.
+          throw new LlmError(`Cline Pass token refresh failed: ${detail}`, 'TRANSPORT', { cause: error })
+        }
+      },
+      // A rejected grant is final for this session; a network/5xx failure is
+      // transient and must not log the account out.
+      refreshFailureStatus: (error) => (
+        isClinePassInvalidGrant(error)
+        || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'AUTH')
+          ? 'invalid'
+          : undefined
+      ),
+      authRejectedReason: (credentials) => (
+        isOAuthCredentials(credentials) && credentials.refresh.trim() === ''
+          ? 'This Cline session has no refresh token; sign in again.'
+          : undefined
+      ),
       // An existing single-key install becomes the primary account, so nothing a
       // user already configured has to be re-entered. A deployment that exports
       // CLINE_PASS_API_KEY (what the standalone dsh-cline-pass plugin reads) gets
@@ -149,7 +191,7 @@ export class ClinePassAccountPool extends AccountPoolCore<
         if (ambient === null) return null
         return {
           id: 'acc_primary',
-          alias: ambient.alias ?? 'Cline Pass 账号 1',
+          alias: credentialsLabel(ambient) ?? 'Cline Pass 账号 1',
           credentials: ambient,
           addedAt: ambient.addedAt ?? Date.now(),
           isPrimary: true,
@@ -163,8 +205,16 @@ export class ClinePassAccountPool extends AccountPoolCore<
         await store.write(credentials)
       },
       extendSummary: (account, base) => {
-        if (account.lastModelId === undefined) return base
-        return { ...base, planLabel: account.lastModelId } as ClinePassAccountSummaryDto
+        const credentials = account.credentials
+        const summary: ClinePassAccountSummaryDto = {
+          ...base,
+          authKind: isOAuthCredentials(credentials) ? 'oauth' : 'api-key',
+        }
+        if (isOAuthCredentials(credentials) && credentials.email !== undefined && credentials.email !== '' && summary.email === undefined) {
+          summary.email = credentials.email
+        }
+        if (account.lastModelId !== undefined) summary.planLabel = account.lastModelId
+        return summary
       },
       ...(options.backend === undefined ? {} : { backend: options.backend }),
       ...(options.maxAccounts === undefined ? {} : { maxAccounts: options.maxAccounts }),

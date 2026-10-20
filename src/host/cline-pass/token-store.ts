@@ -28,15 +28,104 @@ import {
  * expires. The key is host-only and never crosses to a browser; the settings
  * card renders the alias and the account row, never this value.
  */
-export interface ClinePassCredentials {
-  /** Bearer key created in the Cline account settings. Host-only. */
-  apiKey: string
-  /** User-chosen label so several keys are distinguishable. */
+interface ClinePassCredentialBase {
+  /** User-chosen label so several accounts are distinguishable. */
   alias?: string
-  /** Unix milliseconds the key was added to the pool. */
+  /** Unix milliseconds the credential was added to the pool. */
   addedAt?: number
   /** Per-account gateway override; empty means the line's own base URL. */
   baseURL?: string
+}
+
+/**
+ * A static API key, the shape the standalone `dsh-cline-pass` plugin used.
+ *
+ * Kept as a fallback: the official clients now sign in with WorkOS OAuth, but
+ * existing users may still hold a key, and a key has no refresh lifecycle.
+ */
+export interface ClinePassApiKeyCredentials extends ClinePassCredentialBase {
+  /** Absent on records written before the OAuth path existed. */
+  kind?: 'api-key'
+  /** Host-only bearer key. */
+  apiKey: string
+}
+
+/**
+ * One Cline account signed in through WorkOS device authorization.
+ *
+ * `access` is the raw WorkOS access token; the wire bearer is
+ * `workos:<access>` (Cline's own clients add that prefix). `refresh` rotates on
+ * every refresh, so it is persisted before the new access token is used.
+ */
+export interface ClinePassOAuthCredentials extends ClinePassCredentialBase {
+  kind: 'oauth'
+  access: string
+  refresh: string
+  /** Unix milliseconds the access token expires. */
+  expires: number
+  /** Cline's stable user id, when the token registration returned one. */
+  accountId?: string
+  email?: string
+  name?: string
+  metadata?: Record<string, unknown>
+}
+
+export type ClinePassCredentials = ClinePassOAuthCredentials | ClinePassApiKeyCredentials
+
+/** Cline's own clients send OAuth access tokens with this prefix. */
+export const CLINE_WORKOS_TOKEN_PREFIX = 'workos:'
+
+/** Whether one credential is an OAuth session rather than a static key. */
+export function isOAuthCredentials(credentials: ClinePassCredentials): credentials is ClinePassOAuthCredentials {
+  return credentials.kind === 'oauth' || 'access' in credentials
+}
+
+/** The `Authorization: Bearer` value for one credential. */
+export function bearerFor(credentials: ClinePassCredentials): string {
+  if (!isOAuthCredentials(credentials)) return credentials.apiKey
+  // The stored token is normally bare; a record written by another tool may
+  // already carry the prefix, and doubling it is a 401 with no useful message.
+  return credentials.access.toLowerCase().startsWith(CLINE_WORKOS_TOKEN_PREFIX)
+    ? credentials.access
+    : `${CLINE_WORKOS_TOKEN_PREFIX}${credentials.access}`
+}
+
+/** Stable identity two credentials share when they are the same Cline account. */
+export function credentialsIdentity(credentials: ClinePassCredentials): string {
+  if (isOAuthCredentials(credentials)) {
+    if (credentials.accountId !== undefined && credentials.accountId !== '') return `oauth:${credentials.accountId}`
+    if (credentials.email !== undefined && credentials.email !== '') return `email:${credentials.email.toLowerCase()}`
+    return `refresh:${createHash('sha256').update(credentials.refresh).digest('hex')}`
+  }
+  return `key:${createHash('sha256').update(credentials.apiKey).digest('hex')}`
+}
+
+/** Unix milliseconds the credential expires, when it has an expiry. */
+export function credentialsExpiresAt(credentials: ClinePassCredentials): number | undefined {
+  return isOAuthCredentials(credentials) && credentials.expires > 0 ? credentials.expires : undefined
+}
+
+/** The user-facing label for one credential, when it states one. */
+export function credentialsLabel(credentials: ClinePassCredentials): string | undefined {
+  if (isOAuthCredentials(credentials)) {
+    return credentials.name?.trim() || credentials.email?.trim() || undefined
+  }
+  return credentials.alias?.trim() || undefined
+}
+
+/** Decode a JWT's `exp` claim, without trusting anything else in it. */
+export function jwtExpiryMs(token: string): number | undefined {
+  const payload = token.split('.')[1]
+  if (payload === undefined) return undefined
+  try {
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const parsed: unknown = JSON.parse(Buffer.from(normalized, 'base64').toString('utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const exp = (parsed as { exp?: unknown }).exp
+    return typeof exp === 'number' && exp > 0 ? exp * 1000 : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** One catalog entry, as the last successful scan published it. */
@@ -108,24 +197,54 @@ function optionalString(record: Record<string, unknown>, key: string, what: stri
   return value
 }
 
-/** Validate one stored credential. */
+/** Validate one stored credential: an OAuth session or a static API key. */
 export function parseClinePassCredentials(value: unknown): ClinePassCredentials {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Cline Pass credential payload is invalid')
   }
   const record = value as Record<string, unknown>
+  const alias = optionalString(record, 'alias', 'credential')
+  const baseURL = optionalString(record, 'baseURL', 'credential')
+  const addedAt = typeof record.addedAt === 'number' && Number.isFinite(record.addedAt) ? record.addedAt : undefined
+  const common = {
+    ...(alias === undefined ? {} : { alias }),
+    ...(baseURL === undefined ? {} : { baseURL }),
+    ...(addedAt === undefined ? {} : { addedAt }),
+  }
+
+  const access = record.access
+  const refresh = record.refresh
+  if (typeof access === 'string' && access.trim() !== '' && typeof refresh === 'string' && refresh.trim() !== '') {
+    const rawExpires = record.expires
+    const parsedExpires = typeof rawExpires === 'number' && Number.isFinite(rawExpires) && rawExpires > 0 ? rawExpires : 0
+    const credentials: ClinePassOAuthCredentials = {
+      kind: 'oauth',
+      access: access.trim(),
+      refresh: refresh.trim(),
+      expires: parsedExpires > 0 ? parsedExpires : (jwtExpiryMs(access.trim()) ?? 0),
+      ...common,
+    }
+    const accountId = optionalString(record, 'accountId', 'credential')
+    if (accountId !== undefined) credentials.accountId = accountId
+    const email = optionalString(record, 'email', 'credential')
+    if (email !== undefined) credentials.email = email
+    const name = optionalString(record, 'name', 'credential')
+    if (name !== undefined) credentials.name = name
+    if (typeof record.metadata === 'object' && record.metadata !== null && !Array.isArray(record.metadata)) {
+      credentials.metadata = record.metadata as Record<string, unknown>
+    }
+    return credentials
+  }
+
   const apiKey = record.apiKey
   if (typeof apiKey !== 'string' || apiKey.trim() === '') {
     throw new Error('Cline Pass credential is missing its API key')
   }
-  const credentials: ClinePassCredentials = { apiKey: apiKey.trim() }
-  const alias = optionalString(record, 'alias', 'credential')
-  if (alias !== undefined) credentials.alias = alias
-  const baseURL = optionalString(record, 'baseURL', 'credential')
-  if (baseURL !== undefined) credentials.baseURL = baseURL
-  const addedAt = record.addedAt
-  if (typeof addedAt === 'number' && Number.isFinite(addedAt)) credentials.addedAt = addedAt
-  return credentials
+  return {
+    ...(record.kind === 'api-key' ? { kind: 'api-key' as const } : {}),
+    apiKey: apiKey.trim(),
+    ...common,
+  }
 }
 
 /**

@@ -6,6 +6,7 @@ import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/for
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import type {
   ClinePassHistoryRowDto,
+  ClinePassLoginFlowDto,
   ClinePassModelDto,
   ClinePassProbeResultDto,
   ClinePassTestResultDto,
@@ -97,6 +98,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
   const [results, setResults] = useState<Record<string, ModelResult>>({})
   const [settingsForm, setSettingsForm] = useState<SettingsForm | null>(null)
   const [history, setHistory] = useState<{ total: number; entries: ClinePassHistoryRowDto[] } | null>(null)
+  const [loginFlow, setLoginFlow] = useState<ClinePassLoginFlowDto | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -130,6 +132,54 @@ export function ClinePassSection(props: Props): React.ReactElement {
       return changed ? next : current
     })
   }, [status])
+
+  // A pending flow lives on the host, so reopening the card resumes it; a newer
+  // flow id always wins, and a terminal local state is never overwritten by an
+  // older status snapshot.
+  useEffect(() => {
+    const incoming = status?.login
+    if (incoming === undefined || incoming === null) return
+    setLoginFlow((current) => (
+      current !== null && current.id === incoming.id && current.status !== 'pending'
+        ? current
+        : incoming
+    ))
+  }, [status])
+
+  // Drive the device-code poll from the card. The host throttles each call to
+  // WorkOS's advertised interval and answers without a network call when the
+  // interval has not elapsed.
+  useEffect(() => {
+    const flow = loginFlow
+    if (flow === null || flow.status !== 'pending') return
+    const timer = window.setInterval(() => {
+      void API.loginStatus(flow.id).then((next) => {
+        setLoginFlow(next)
+        if (next.status === 'complete') {
+          setNotice(zh.loginComplete.replace('{account}', next.accountAlias === '' ? 'Cline Pass' : next.accountAlias))
+          setShowKeyForm(false)
+          void reload()
+        } else if (next.status === 'failed') {
+          setError(zh.loginFailed.replace('{detail}', next.error))
+        }
+      }).catch((cause) => setError(detail(cause)))
+    }, Math.max(2, flow.intervalSeconds) * 1000)
+    return () => window.clearInterval(timer)
+  }, [loginFlow, reload])
+
+  const startLogin = useCallback(() => {
+    setBusy('login')
+    setError(null)
+    setNotice(null)
+    void API.startLogin().then(setLoginFlow).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
+  }, [])
+
+  const cancelLogin = useCallback(() => {
+    if (loginFlow === null) return
+    void API.cancelLogin(loginFlow.id).then(() => {
+      setLoginFlow({ ...loginFlow, status: 'cancelled' })
+    }).catch((cause) => setError(detail(cause)))
+  }, [loginFlow])
 
   const applyStatus = useCallback((next: ClinePassWebStatus) => {
     setStatus(next)
@@ -374,6 +424,21 @@ export function ClinePassSection(props: Props): React.ReactElement {
         {notice !== null && notice !== '' && <p className="dsha-notice">{notice}</p>}
       </div>
 
+      {loginFlow !== null && loginFlow.status === 'pending' && (
+        <div className="dsha-group dshcp-login">
+          <div className="dsha-grouphead">
+            <h3>{t.loginTitle}</h3>
+            <button className="dsha-btn" disabled={busyAny} onClick={cancelLogin}>{t.loginCancel}</button>
+          </div>
+          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.loginHint}</p>
+          <div className="dshcp-login-row">
+            <span className="dshcp-login-code" aria-label={t.loginCode}>{loginFlow.userCode}</span>
+            <a className="dsha-btn" href={loginFlow.verificationUri} target="_blank" rel="noreferrer">{t.loginOpen}</a>
+          </div>
+          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.loginWaiting}</p>
+        </div>
+      )}
+
       {pool !== undefined && (
         <AccountPoolSection
           accounts={pool.accounts}
@@ -381,7 +446,9 @@ export function ClinePassSection(props: Props): React.ReactElement {
           rotationStrategy={pool.rotationStrategy}
           labels={t}
           busy={busy}
-          onLogin={() => setShowKeyForm((value) => !value)}
+          onLogin={startLogin}
+          loginBusyLabel={t.loggingIn}
+          onRelogin={startLogin}
           onSetPrimary={(id) => void run('set-primary', () => API.accountAction('set-primary', { accountId: id }))}
           onDelete={(id) => void run('delete', () => API.accountAction('delete', { accountId: id }))}
           onClearCooldown={(id) => void run('clear-cooldown', () => API.accountAction('clear-cooldown', { accountId: id }))}
@@ -395,10 +462,22 @@ export function ClinePassSection(props: Props): React.ReactElement {
               {busy === 'test:' + account.id ? t.keyTesting : t.testSavedKey}
             </button>
           )}
+          renderDetails={(account) => (
+            <span>{account.authKind === 'oauth' ? t.oauthAccount : t.apiKeyAccount}</span>
+          )}
           renderLoginActions={() => (
-            <button className="dsha-btn dsha-btn-primary" disabled={busyAny} onClick={() => setShowKeyForm((value) => !value)}>
-              {t.addAccount}
-            </button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                className="dsha-btn dsha-btn-primary"
+                disabled={busyAny || loginFlow?.status === 'pending'}
+                onClick={startLogin}
+              >
+                {busy === 'login' || loginFlow?.status === 'pending' ? t.loggingIn : t.login}
+              </button>
+              <button className="dsha-btn" disabled={busyAny} onClick={() => setShowKeyForm((value) => !value)}>
+                {t.useApiKey}
+              </button>
+            </div>
           )}
         >
           {showKeyForm && (

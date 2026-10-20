@@ -17,6 +17,7 @@ import type { ClinePassAccountPool } from './account-pool.ts'
 import type { ClinePassEngine } from './engine.ts'
 import type { ClinePassStore } from './store.ts'
 import type { ClinePassModelSettingsStore } from './token-store.ts'
+import { bearerFor } from './token-store.ts'
 import { DEFAULT_MODELS, defaultPin, type ClinePassPinSettings } from './types.ts'
 import type { ClinePassWebStatus } from '../../shared/cline-pass-contracts.ts'
 
@@ -641,7 +642,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           const account = accounts.find((entry) => entry.id === target || entry.alias === target)
           if (account === undefined) throw new Error('cline_pass_accounts action="test" needs key=… or an existing name=…')
           const credentials = await accountPool.getFreshCredential(account.id)
-          key = credentials.apiKey
+          key = bearerFor(credentials)
           baseURL = credentials.baseURL && credentials.baseURL.trim() !== '' ? credentials.baseURL : baseURL
         }
         const result = await engine.testAccount({ key, baseURL, model })
