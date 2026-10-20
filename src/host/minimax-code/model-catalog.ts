@@ -181,7 +181,15 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     // The documented depth levels. `default` is deliberately NOT a wire value:
     // the docs say omitting `effort` means max, so it is a local spelling for
     // "the caller picked nothing" and `outputConfigFor` drops it before sending.
-    reasoningEfforts: ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
+    //
+    // It is therefore not a LEVEL either, and listing it here put it at the top
+    // of the ladder: `orderReasoningEfforts` ranks by strength, so `default`
+    // was advertised above `max` and DSH's picker showed it as the strongest
+    // thinking level. DSH already has a first-class spelling for "the caller
+    // picked nothing" - a model that advertises no `defaultEffort` - and that
+    // is what this model now uses. The kimi-code line does the same: its
+    // strength table names no `default` either.
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'default',
     maxAttachments: 4,
     maxImageBytes: 10 * 1024 * 1024,

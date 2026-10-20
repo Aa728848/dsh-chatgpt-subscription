@@ -9,8 +9,26 @@ describe('MiniMax Code reasoning metadata', () => {
 
     const resolved = await adapter.resolveModel('minimax-code', 'MiniMax-M3.1-Flash')
     expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual([
-      'low', 'medium', 'high', 'xhigh', 'max', 'default',
+      'low', 'medium', 'high', 'xhigh', 'max',
     ])
     expect(resolved.reasoning?.defaultEffort).toBe('high')
+  })
+
+  it('ranks max as the strongest level, not the absence of one', async () => {
+    // `default` means "the caller picked nothing" and the docs say omitting
+    // `effort` means max. It is not a level, so it must not sit at the top of
+    // the ladder - DSH's picker renders this list in order and the core reads
+    // `efforts[0]` as the least supported level.
+    const adapter = new MinimaxCodeAdapter({} as never, {}, {} as never, {
+      status: () => ({ contextWindowOverrides: {}, defaultReasoningEffort: null }),
+    } as never)
+
+    const resolved = await adapter.resolveModel('minimax-code', 'MiniMax-M3.1-Flash')
+    const ids = resolved.reasoning?.efforts.map((effort) => effort.id) ?? []
+    expect(ids).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(ids).not.toContain('default')
+    // No level picked means the provider's own default, which DSH spells as
+    // an absent `defaultEffort`.
+    expect(resolved.reasoning?.defaultEffort).toBeUndefined()
   })
 })
