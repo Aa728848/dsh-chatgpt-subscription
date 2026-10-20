@@ -22,7 +22,7 @@ import { ensureAccessToken } from '../src/host/minimax-code/oauth.ts'
 import { modelRequestHeaders } from '../src/host/minimax-code/client.ts'
 import { messagesUrl } from '../src/host/minimax-code/types.ts'
 import { buildMinimaxRequest } from '../src/host/minimax-code/mapper.ts'
-import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
+import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
 
 const TIMEOUT_MS = 120_000
 const MODEL = (process.env.PROBE_MINIMAX_MODEL || 'MiniMax-M3.1-Flash').trim()
@@ -40,12 +40,18 @@ const SYSTEM_FILLER =
 const SYSTEM = SYSTEM_FILLER.repeat(300)
 
 function probeOptions(): GenerateOptions {
+  // Typed as the mapper's own input instead of cast to it: `GenerateOptions`
+  // carries the harness's required `provider`, so a hand-written harness-shaped
+  // literal no longer overlaps with it and the old `as GenerateOptions` stopped
+  // being a widening cast (TS2352). Building the real type keeps the probe honest
+  // when the harness adds another required field.
   return {
+    provider: 'minimax-code',
     model: MODEL,
     system: SYSTEM,
     maxTokens: 64,
     messages: [
-      { role: 'user', content: [{ type: 'text', text: 'Reply with the single word: ok' }] } as Message,
+      { role: 'user', content: [{ type: 'text', text: 'Reply with the single word: ok' }] },
     ],
     tools: [
       {
@@ -54,7 +60,7 @@ function probeOptions(): GenerateOptions {
         parameters: { type: 'object', properties: {} },
       },
     ],
-  } as GenerateOptions
+  }
 }
 
 interface UsageReport {

@@ -8,7 +8,11 @@ test('step usage accounting shape', async () => {
   const cred = await signInOasisQuotaCredential({ profile: 'step_plan', account, password })
   console.log('[probe] stepChatCompletionsUrl =', stepChatCompletionsUrl('step_plan'))
   const url = stepChatCompletionsUrl('step_plan')
-  const req = buildChatRequest({ model: 'step-5-preview', messages: [{ role: 'user', content: 'Reply with the single word OK.' }] })
+  const req = buildChatRequest({
+    provider: 'step-code',
+    model: 'step-5-preview',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with the single word OK.' }] }],
+  })
   console.log('[probe] request body keys =', Object.keys(req as object).join(','))
   const res = await fetch(url, {
     method: 'POST',

@@ -13,6 +13,7 @@ import { test } from 'vitest'
 import { ProxyManager } from '../src/host/proxy-manager.ts'
 import { WorkBuddyAccountPool } from '../src/host/workbuddy/account-pool.ts'
 import { clearCachedCatalog, loadConfigCatalog } from '../src/host/workbuddy/client.ts'
+import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
 import { FALLBACK_MODELS, modelsForRegion, workBuddyModelVendor } from '../src/host/workbuddy/model-catalog.ts'
 
 const proxy = new ProxyManager({ getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }) })
@@ -27,7 +28,9 @@ test('print the picker order for each region', async () => {
     if (seen.has(region)) continue
     seen.add(region)
     clearCachedCatalog()
-    let live = []
+    // Annotated: a bare `[]` infers `any[]`, which silently defeats the strict
+    // settings this project is checked under.
+    let live: WorkBuddyModelEntry[] = []
     try {
       live = await loadConfigCatalog(account.credentials, { fetchFn, force: true })
     } catch {

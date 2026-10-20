@@ -24,6 +24,7 @@ import { buildRequest } from '../src/host/antigravity/mapper.ts'
 import { MODELS } from '../src/host/antigravity/types.ts'
 import { WorkBuddyAccountPool } from '../src/host/workbuddy/account-pool.ts'
 import { workBuddyHeaders, refreshCredentials } from '../src/host/workbuddy/client.ts'
+import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
 
 const TIMEOUT_MS = 45_000
 const proxy = new ProxyManager({ getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }) })
@@ -262,7 +263,10 @@ async function antigravityProbeModel(): Promise<string> {
 }
 
 async function probeWorkBuddy(): Promise<void> {
-  let credentials
+  // Explicit: this binding is assigned inside `try` and read after `catch`, and an
+  // un-annotated `let` there infers `any` (TS7034), which hid every typo on the
+  // credential fields the rest of the function reads.
+  let credentials: WorkBuddyCredentials | undefined
   try {
     const pool = new WorkBuddyAccountPool()
     const data = await pool.read()
@@ -280,6 +284,13 @@ async function probeWorkBuddy(): Promise<void> {
     return
   }
 
+  // Unreachable in practice — the `catch` above returns, and so does the branch that
+  // finds no account — but a `let` assigned inside `try` is never narrowed as
+  // definitely-assigned, and spelling the invariant out is cheaper than a `!`.
+  if (credentials === undefined) {
+    note('workbuddy:credentials', 'error', 'no credential survived the read')
+    return
+  }
   const backend = credentials.backend
   for (const path of ['/agenttool/v1/search', '/v1/web_search', '/v1/search']) {
     try {
