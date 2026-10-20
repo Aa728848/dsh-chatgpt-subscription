@@ -36,6 +36,14 @@ import {
   callMatrixTool,
   matrixPayloadField,
 } from './matrix-client.ts'
+import { IsoBmffDurationError, readIsoBmffDurationSeconds } from './iso-bmff-duration.ts'
+import {
+  attemptedVideoSubmissionFor,
+  assertGenerationMediaLimits,
+  isPreciseSubmissionKey,
+  recordVideoSubmissionAttempt,
+  videoSubmissionKey,
+} from './video-submit-rules.ts'
 import {
   MediaStoreError,
   MAX_GENERATED_VIDEO_BYTES,
@@ -43,6 +51,7 @@ import {
   writeGeneratedVideo,
   type MediaStoreExec,
 } from './media-store.ts'
+import { recordMinimaxVideoGeneration } from './video-history.ts'
 import { PROVIDER_NAME, maxMessageBodyBytes } from './types.ts'
 
 export const MINIMAX_UNDERSTAND_VIDEO_TOOL_NAME = 'minimax_understand_video'
@@ -554,6 +563,180 @@ export function assertVideoResolution(value: unknown, model: MinimaxVideoModel):
   return match
 }
 
+/* ------------------------------------------------------------------------- *
+ * The submit-side rules: ratio/resolution linkage, media limits, and the
+ * one-submit-per-turn guard
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Every `ratio` spelling the service accepts, in upstream's own order.
+ *
+ * COPIED FROM UPSTREAM'S SCHEMA (docs/minimax-video-extended-spec.md section 1),
+ * including `adaptive`. `adaptive` is listed even though a caller should rarely
+ * type it, because the LINKAGE below produces it: on the H3 family a keyframe
+ * submit OVERWRITES whatever ratio was given with `adaptive`, and a reference
+ * submit defaults to it.
+ */
+export const MINIMAX_VIDEO_RATIOS = ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'] as const
+export type MinimaxVideoRatio = (typeof MINIMAX_VIDEO_RATIOS)[number]
+
+/** The ratio the H3 linkage sends for a text-only submit (upstream: `ratio ?? '16:9'`). */
+export const MINIMAX_H3_TEXT_DEFAULT_RATIO: MinimaxVideoRatio = '16:9'
+
+/** The ratio the H3 linkage FORCES when a first and/or last frame is present. */
+export const MINIMAX_KEYFRAME_RATIO: MinimaxVideoRatio = 'adaptive'
+
+/** The ratio the H3 linkage falls back to when reference media is present. */
+export const MINIMAX_REFERENCE_DEFAULT_RATIO: MinimaxVideoRatio = 'adaptive'
+
+/**
+ * The resolution the H3 linkage sends when the caller names none.
+ *
+ * UPSTREAM'S DEFAULT (`input.resolution ?? '2K'`), applied only where it is a
+ * LEGAL value for that model - see {@link resolveVideoSubmissionResolution} for
+ * the one row where the literal rule and the measured table disagree.
+ */
+export const MINIMAX_H3_DEFAULT_RESOLUTION: MinimaxVideoResolution = '2K'
+
+/**
+ * Whether this model belongs to the H3 family, which is what the ratio and
+ * resolution linkage is written for.
+ *
+ * THE SAME PREDICATE UPSTREAM USES (`isH3VideoModel`), and the same one that
+ * decides reference-media support: H3 and H3-Max take the reference collections
+ * and the linkage defaults, Hailuo-2.3 takes neither.
+ *
+ * @param model - a model id.
+ * @returns true for `MiniMax-H3` and `MiniMax-H3-Max`.
+ */
+export function isH3VideoModel(model: string): boolean {
+  return model === 'MiniMax-H3' || model === 'MiniMax-H3-Max'
+}
+
+/**
+ * Prove the `ratio` argument is one of the spellings the service knows.
+ *
+ * ONLY THE SPELLING IS CHECKED HERE. Which ratio is finally sent is decided by
+ * {@link resolveVideoSubmissionRatio}, because on the H3 family the caller's
+ * choice is often replaced (a keyframe submit is forced to `adaptive`) and on
+ * Hailuo it is passed through untouched. Refusing an invented spelling here means
+ * the linkage never has to reason about a value the service would reject anyway,
+ * and it costs no request.
+ *
+ * @param value - the caller's argument.
+ * @returns the matched spelling, exactly as the schema lists it.
+ * @throws HarnessError `MINIMAX_VIDEO_RATIO_INVALID` listing every spelling.
+ */
+export function assertVideoRatio(value: unknown): MinimaxVideoRatio {
+  const candidate = typeof value === 'string' ? value.trim() : ''
+  const match = MINIMAX_VIDEO_RATIOS.find(entry => entry === candidate)
+  if (match === undefined) {
+    throw new HarnessError(
+      'ratio must be one of ' + MINIMAX_VIDEO_RATIOS.map(entry => '"' + entry + '"').join(', ')
+      + ', got ' + JSON.stringify(value) + '. The match is case-sensitive. '
+      + 'On MiniMax-H3 and MiniMax-H3-Max it is usually better to omit it: a first/last frame is forced to '
+      + '"adaptive", reference media defaults to "adaptive", and a text-only submit defaults to "16:9".',
+      'MINIMAX_VIDEO_RATIO_INVALID',
+    )
+  }
+  return match
+}
+
+/** Everything the ratio rule branches on. */
+export interface MinimaxVideoRatioDecision {
+  /** The model the submit names; only the H3 family gets a default. */
+  readonly model: MinimaxVideoModel
+  /** The caller's ratio, already proven to be a known spelling. */
+  readonly ratio?: MinimaxVideoRatio
+  /** True when `inputImagePath` and/or `lastFrameImagePath` is present. */
+  readonly hasKeyframes: boolean
+  /** True when at least one reference image, video or audio is present. */
+  readonly hasReferences: boolean
+}
+
+/**
+ * Decide the ratio that is actually SENT, or undefined when none is.
+ *
+ * COPIED FROM UPSTREAM (`submit-video-generation.ts:77-86`), branch for branch:
+ *
+ * ```ts
+ * const effectiveRatio = isH3VideoModel(model)
+ *   ? hasKeyframes ? 'adaptive'
+ *     : hasReferences ? (ratio ?? 'adaptive')
+ *     : (ratio ?? '16:9')
+ *   : ratio
+ * ```
+ *
+ * ONE REFUSAL IS ADDED ON TOP, and it comes from upstream's own description
+ * ("cannot use adaptive"): `adaptive` means "adapt to the input frame", so a
+ * TEXT-ONLY submit has nothing to adapt to. Sending it anyway would spend a
+ * billed request learning what upstream already states, so it is refused here,
+ * for every model - a text-only adaptive request is meaningless whichever model
+ * reads it. On the H3 family the refusal is also unavoidable rather than
+ * pedantic: the text-only branch would otherwise have replaced it with `16:9`
+ * silently, and a caller who asked for `adaptive` and got `16:9` was never told.
+ *
+ * @param input - the model, the caller's ratio, and what the call carries.
+ * @returns the ratio to send, or undefined to send no `ratio` field at all.
+ * @throws HarnessError `MINIMAX_VIDEO_RATIO_ADAPTIVE_UNSUPPORTED` for a
+ *   text-only adaptive call.
+ */
+export function resolveVideoSubmissionRatio(input: MinimaxVideoRatioDecision): MinimaxVideoRatio | undefined {
+  const { model, ratio, hasKeyframes, hasReferences } = input
+  if (!hasKeyframes && !hasReferences && ratio === 'adaptive') {
+    throw new HarnessError(
+      'ratio "adaptive" cannot be used for a text-only submit: there is no first frame, last frame or '
+      + 'reference media for the service to adapt the aspect ratio to. Nothing was submitted. Give a concrete '
+      + 'ratio instead (' + MINIMAX_VIDEO_RATIOS.filter(entry => entry !== 'adaptive')
+        .map(entry => '"' + entry + '"').join(', ')
+      + '), or omit ratio entirely - a text-only H3 submit then defaults to "16:9".',
+      'MINIMAX_VIDEO_RATIO_ADAPTIVE_UNSUPPORTED',
+    )
+  }
+  if (!isH3VideoModel(model)) return ratio
+  if (hasKeyframes) return MINIMAX_KEYFRAME_RATIO
+  if (hasReferences) return ratio ?? MINIMAX_REFERENCE_DEFAULT_RATIO
+  return ratio ?? MINIMAX_H3_TEXT_DEFAULT_RATIO
+}
+
+/**
+ * Decide the resolution that is actually SENT, or undefined when none is.
+ *
+ * TWO VALUES, AND THEY ARE NOT THE SAME VALUE - which is the whole point of the
+ * split with {@link assertVideoResolution}:
+ *
+ * - The CALLER's resolution is proven by `assertVideoResolution`, against the
+ * measured set for the model in {@link MINIMAX_VIDEO_MODEL_RULES}. That check runs
+ * first, outside this function, and is untouched by it.
+ * - The value SENT is what this function returns. For the H3 family it is
+ * `resolution ?? '2K'` (upstream's "defaults to 2K when omitted"); for Hailuo it
+ * is whatever the caller gave, with NO default, because upstream sets none for
+ * that model. THIS IS THE BEHAVIOUR CHANGE: an H3 submit that names no resolution
+ * used to send no `resolution` field at all, and now sends `2K`.
+ *
+ * THE ONE PLACE THIS DELIBERATELY DIVERGES FROM A LITERAL COPY, and the reason is
+ * MEASURED rather than stylistic: `MiniMax-H3-Max` is part of the H3 family, so
+ * the literal rule would make 2K its default - and 2K is exactly the spelling its
+ * measured set does NOT contain ("model resolution for MiniMax-H3-Max must be
+ * 480P or 768P", docs/minimax-video-model-rules.md section 2.1). Defaulting it to
+ * 2K would turn every H3-Max call that omits `resolution` into a billed submit
+ * the service always refuses. So the default is applied only where it is a legal
+ * member of THAT model's set; where it is not, no resolution is sent and the
+ * service keeps its own default - H3-Max's behaviour is unchanged on purpose.
+ *
+ * @param model - the model the submit names.
+ * @param resolution - the caller's value, already proven legal for that model.
+ * @returns the resolution to send, or undefined to send no `resolution` field.
+ */
+export function resolveVideoSubmissionResolution(
+  model: MinimaxVideoModel,
+  resolution: MinimaxVideoResolution | undefined,
+): MinimaxVideoResolution | undefined {
+  if (!isH3VideoModel(model)) return resolution
+  if (resolution !== undefined) return resolution
+  const legal = videoModelRule(model)?.resolutions ?? MINIMAX_VIDEO_RESOLUTION_UNION
+  return legal.includes(MINIMAX_H3_DEFAULT_RESOLUTION) ? MINIMAX_H3_DEFAULT_RESOLUTION : undefined
+}
 /** Resolve the bearer these tools present, from the line's own pool. */
 async function acquireCredential(
   pool: MinimaxVideoCredentialSource,
@@ -698,22 +881,31 @@ export const MINIMAX_CDN_HOST_SUFFIXES: readonly string[] = ['agent.minimax.']
  * The exempt hosts are exactly the ones this route's own upload path produces,
  * so `transport: "upload"` never trips this check.
  *
+ * `what` NAMES THE ARGUMENT, and that is not decoration: the generation submit
+ * carries a whole set of media arguments (a first frame, a last frame, up to
+ * nine reference images, three reference videos, three reference audios), so a
+ * refusal that said only "the URL" would leave the caller hunting for which of
+ * thirteen arguments it was.
+ *
  * @param url - the parsed caller URL.
+ * @param what - the argument being refused, named in the message.
  * @throws HarnessError `MINIMAX_VIDEO_URL_NOT_MINIMAX_CDN` for anything else.
  */
-export function assertMinimaxCdnUrl(url: URL): void {
+export function assertMinimaxCdnUrl(url: URL, what: string = 'the video URL'): void {
   const host = url.hostname.toLowerCase()
   const allowed = host === MINIMAX_CDN_HOST || MINIMAX_CDN_HOST_SUFFIXES.some(suffix => host.startsWith(suffix))
   if (allowed) return
   throw new HarnessError(
-    'refusing the URL ' + JSON.stringify(url.origin) + ' because "' + host + '" is not a MiniMax CDN address. '
+    'refusing ' + what + ': the URL ' + JSON.stringify(url.origin) + ' is not a MiniMax CDN address, because "'
+    + host + '" is not one. '
     + 'The url field only works for MiniMax\'s own media: ' + MINIMAX_CDN_HOST + ' (what this route\'s upload '
     + 'path cites) or an ' + MINIMAX_CDN_HOST_SUFFIXES[0] + ' host. A third-party public URL is refused by the '
     + 'service itself - MEASURED, verbatim: "video_info.url could not be used as a media source" - and two of '
     + 'the three addresses that produced that sentence were confirmed fetchable by ordinary clients, so this is '
-    + 'not a network problem on this side. Nothing was sent. Download the clip and pass its absolute local path '
-    + 'instead (inline for the default, or transport: "upload" for a large file); the local path is the '
-    + 'supported way to have the service read a video it does not host.',
+    + 'not a network problem on this side. Nothing was sent. Pass the absolute local path of the file '
+    + 'instead: this route uploads a local file through get_upload_url and cites the cdn_url it gets back, '
+    + 'which is exactly the host shape this check exempts - that is the supported way to have the service '
+    + 'read media it does not already host.',
     'MINIMAX_VIDEO_URL_NOT_MINIMAX_CDN',
   )
 }
@@ -933,7 +1125,29 @@ async function readLocalVideo(
 }
 
 /**
+ * The `category` every upload body must carry, measured upstream.
+ *
+ * WHY IT IS A CONSTANT RATHER THAN A LITERAL AT THE CALL SITE. The value is
+ * part of upstream's own measured request body
+ * (`{ filename, mime_type, size_bytes, category: 'user_file_upload_tmp' }`,
+ * docs/minimax-video-extended-spec.md section 2.1). It names the TEMPORARY
+ * bucket the object lands in, and it is the same bucket for a video being
+ * understood and for a reference image being sent to the generation service -
+ * so both paths share the one spelling instead of each carrying its own copy
+ * that can drift.
+ */
+export const MINIMAX_UPLOAD_CATEGORY = 'user_file_upload_tmp'
+
+/**
  * One presigned upload: ask the broker, PUT the bytes, return the URL to cite.
+ *
+ * THIS IS THE ONE UPLOAD CHANNEL THIS ROUTE HAS, and it is shared deliberately:
+ * understanding a local clip (`transport: "upload"`) and preparing every local
+ * generation input (first frame, last frame, reference image/video/audio) all
+ * go through the code below. The sequence it performs is the one measured end
+ * to end, so a second copy of it for the generation side would be a second
+ * chance to get `category`, the PUT content type, or `cdn_url`-vs-`put_url`
+ * wrong - and the cache-control/`expires_in` shape is one probe result, not two.
  *
  * MEASURED END TO END. docs/minimax-video-upload-probe.md ran this exact
  * sequence live: `get_upload_url` → PUT → an unauthenticated GET of `cdn_url`
@@ -1001,6 +1215,13 @@ async function uploadLocalVideo(
       filename: options.name,
       mime_type: options.mediaType,
       size_bytes: options.data.byteLength,
+      // THE FOURTH FIELD, and it was missing until now: upstream's measured
+      // upload body carries `category`, naming the temporary bucket the object
+      // lands in (docs/minimax-video-extended-spec.md section 2.1). The three
+      // names above are the ones the service spelled out in its own error;
+      // this one is the one upstream's client actually sends, and leaving it
+      // out is what made this body a near-miss rather than the measured shape.
+      category: MINIMAX_UPLOAD_CATEGORY,
     },
     fetchFn: options.fetchFn,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -1010,10 +1231,10 @@ async function uploadLocalVideo(
   const cdnUrl = firstStringField(granted.body, ['cdn_url'])
   if (putTarget === undefined || cdnUrl === undefined) {
     throw new HarnessError(
-      'cannot upload the video for understanding: the media gateway answered ' + MATRIX_TOOL_GET_UPLOAD_URL
+      'cannot upload ' + options.name + ': the media gateway answered ' + MATRIX_TOOL_GET_UPLOAD_URL
       + ' without a presigned PUT target and a citable URL. This route reads put_url and cdn_url, and the '
-      + 'answer carried [' + Object.keys(granted.body).join(', ') + ']. Nothing was uploaded. Pass a local '
-      + 'path with the default transport ("inline") to send the bytes in the request instead.',
+      + 'answer carried [' + Object.keys(granted.body).join(', ') + ']. Nothing was uploaded, so there is '
+      + 'nothing to cite and no request that uses the media was made.',
       'MINIMAX_VIDEO_UPLOAD_FAILED',
     )
   }
@@ -1035,14 +1256,679 @@ async function uploadLocalVideo(
   if (!put.ok) {
     await put.body?.cancel().catch(() => undefined)
     throw new HarnessError(
-      'cannot upload the video for understanding: the presigned PUT to the address ' + MATRIX_TOOL_GET_UPLOAD_URL
-      + ' returned was refused with HTTP ' + put.status + '. The video was not stored, so there is nothing to '
-      + 'cite to ' + MATRIX_TOOL_VIDEOS_UNDERSTAND + '.',
+      'cannot upload ' + options.name + ': the presigned PUT to the address ' + MATRIX_TOOL_GET_UPLOAD_URL
+      + ' returned was refused with HTTP ' + put.status + '. Nothing was stored, so there is no cdn_url to '
+      + 'cite and no request that uses the media was made.',
       'MINIMAX_VIDEO_UPLOAD_FAILED',
     )
   }
   await put.body?.cancel().catch(() => undefined)
   return cdnUrl
+}
+
+/* ------------------------------------------------------------------------- *
+ * Generation media: the first/last frame, and the reference collections
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The tool parameter each service field name belongs to, and where they differ.
+ *
+ * THIS TABLE IS THE POINT OF THIS SECTION, so it is stated once, here, in the
+ * service's own spelling:
+ *
+ * | tool parameter             | sent as            |
+ * | -------------------------- | ------------------ |
+ * | inputImagePath             | input_image        |
+ * | lastFrameImagePath         | last_frame_image   |
+ * | referenceImagePaths        | reference_images   |
+ * | referenceVideoPaths        | reference_videos   |
+ * | referenceAudioPaths        | reference_audios   |
+ *
+ * Four of the five differ from their parameter names, which is exactly the kind
+ * of mapping that survives right up until someone builds the body by
+ * destructuring the arguments. Nothing outside this section spells either
+ * column: prepareGenerationMedia returns an object whose keys ARE the right-hand
+ * column, so the submit merges it instead of re-deriving a name.
+ * (docs/minimax-video-extended-spec.md section 0.)
+ */
+
+/** One prepared media argument: the shape the service reads. */
+export interface MinimaxMediaPayload {
+  /** A cdn.hailuoai.com address - measured to be the only url shape read. */
+  readonly url: string
+  readonly mime_type: string
+}
+
+/** A prepared reference video: a media payload plus the length the service needs. */
+export interface MinimaxVideoMediaPayload extends MinimaxMediaPayload {
+  /** Seconds, from the container or from the caller. */
+  readonly duration_seconds: number
+}
+
+/**
+ * Largest total number of reference media items (images + videos + audios).
+ *
+ * COPIED FROM UPSTREAM'S MEASURED LIMITS (spec section 6): 1-9 images, 1-3
+ * videos, 1-3 audios, and never more than 12 in total. The per-set ceilings are
+ * enforced as well as the total, because the two refuse different mistakes -
+ * 9 images plus 3 videos is 12 items and passes both, while 13 images passes
+ * neither.
+ */
+export const MAX_REFERENCE_MEDIA_TOTAL = 12
+/** Most reference images one submit may carry. */
+export const MAX_REFERENCE_IMAGES = 9
+/** Most reference videos one submit may carry. */
+export const MAX_REFERENCE_VIDEOS = 3
+/** Most reference audios one submit may carry. */
+export const MAX_REFERENCE_AUDIOS = 3
+
+/**
+ * How far a caller's stated reference-video length may sit from the length this
+ * route reads out of the container before the two are treated as a contradiction.
+ *
+ * A SECOND of slack, because the container reports an exact rational and a
+ * caller writing 10 for a 10.033 s clip is not wrong. Beyond that the two
+ * describe different clips, and accepting either one silently would mean
+ * sending a length the user never saw.
+ */
+export const MINIMAX_REFERENCE_DURATION_TOLERANCE_SECONDS = 1
+
+/** One media kind's extensions, media types and byte ceiling. */
+interface MediaKindRule {
+  /** image, video or audio; used in the messages. */
+  readonly kind: 'image' | 'video' | 'audio'
+  /** Every extension this kind accepts (lower-case, leading dot). */
+  readonly extensions: readonly string[]
+  /** Extension -> media type, for the same set. */
+  readonly mimeTypes: Readonly<Record<string, string>>
+  /** Largest local file of this kind, in bytes. */
+  readonly maxBytes: number
+  /**
+   * The narrower extension set one model accepts, when a model narrows it.
+   *
+   * Hailuo-2.3 takes only .jpg .png .webp images (spec section 2.3). Kept beside
+   * the full set rather than replacing it, because the narrowing is a property
+   * of THAT model, not of images.
+   */
+  readonly modelExtensions?: Readonly<Record<string, readonly string[]>>
+}
+
+/** Image rule: .jpg .jpeg .png .webp .heic .heif, at most 30 MiB. */
+const IMAGE_RULE: MediaKindRule = {
+  kind: 'image',
+  extensions: ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif'],
+  mimeTypes: {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.heic': 'image/heic',
+    '.heif': 'image/heif',
+  },
+  maxBytes: 30 * 1024 * 1024,
+  modelExtensions: { 'MiniMax-Hailuo-2.3': ['.jpg', '.png', '.webp'] },
+}
+
+/** Video rule: .mp4 .mov, at most 50 MiB. */
+const VIDEO_RULE: MediaKindRule = {
+  kind: 'video',
+  extensions: ['.mp4', '.mov'],
+  mimeTypes: { '.mp4': 'video/mp4', '.mov': 'video/quicktime' },
+  maxBytes: 50 * 1024 * 1024,
+}
+
+/** Audio rule: .wav .mp3, at most 15 MiB. */
+const AUDIO_RULE: MediaKindRule = {
+  kind: 'audio',
+  extensions: ['.wav', '.mp3'],
+  mimeTypes: { '.wav': 'audio/wav', '.mp3': 'audio/mpeg' },
+  maxBytes: 15 * 1024 * 1024,
+}
+
+/**
+ * Everything one media preparation needs.
+ *
+ * sleepFn and backoffMs are here because the upload channel retries, and a test
+ * must not spend the real 1.5 s doing it - the same injection the understanding
+ * path already uses.
+ */
+export interface MinimaxMediaPrepareContext {
+  readonly credential: MinimaxVideoCredential
+  readonly fetchFn: FetchLike
+  readonly sleepFn: (ms: number) => Promise<void>
+  readonly backoffMs: number
+  readonly signal?: AbortSignal
+  /** The model the submit names, which can narrow the legal extension set. */
+  readonly model?: MinimaxVideoModel
+}
+
+/** The media arguments one generation call may carry, as the caller typed them. */
+export interface MinimaxGenerationMediaInput {
+  readonly inputImagePath?: string
+  readonly lastFrameImagePath?: string
+  readonly referenceImagePaths?: readonly string[]
+  readonly referenceVideoPaths?: readonly string[]
+  readonly referenceVideoDurationSeconds?: readonly number[]
+  readonly referenceAudioPaths?: readonly string[]
+}
+
+/**
+ * The prepared media, keyed by the SERVICE's field names.
+ *
+ * The two booleans beside them are what the submit's ratio rule branches on;
+ * they are reported rather than acted on here, because this layer decides what
+ * is sent as media, not what ratio defaults to.
+ */
+export interface MinimaxGenerationMedia {
+  readonly input_image?: MinimaxMediaPayload
+  readonly last_frame_image?: MinimaxMediaPayload
+  readonly reference_images?: readonly MinimaxMediaPayload[]
+  readonly reference_videos?: readonly MinimaxVideoMediaPayload[]
+  readonly reference_audios?: readonly MinimaxMediaPayload[]
+  /** True when a first and/or last frame image was prepared. */
+  readonly hasKeyframes: boolean
+  /** True when at least one reference image, video or audio was prepared. */
+  readonly hasReferences: boolean
+}
+
+/**
+ * Whether this model accepts the reference collections at all.
+ *
+ * Hailuo-2.3 does not (spec section 7): upstream's own description limits it to
+ * first_frame and the legacy subject reference type, with no image/video/audio
+ * reference sets and no last frame. Both H3 models do.
+ *
+ * @param model - the model id the submit names.
+ * @returns true for the two H3 models.
+ */
+export function minimaxModelSupportsReferenceMedia(model: string): boolean {
+  return model === 'MiniMax-H3' || model === 'MiniMax-H3-Max'
+}
+
+/** The extensions one model accepts for one media kind. */
+function extensionsFor(rule: MediaKindRule, model: string | undefined): readonly string[] {
+  const narrowed = model === undefined ? undefined : rule.modelExtensions?.[model]
+  return narrowed ?? rule.extensions
+}
+
+/**
+ * The part of a caller's argument its extension should be read from.
+ *
+ * For a URL that is the PATH, not the whole string: a cdn address can carry a
+ * query (?x-oss-signature=...), and path.extname('a.mp4?sig=1') is
+ * '.mp4?sig=1', which matches nothing.
+ */
+function extensionSourceOf(pathOrUrl: string): string {
+  return /^https?:\/\//i.test(pathOrUrl) ? new URL(pathOrUrl).pathname : pathOrUrl
+}
+
+/** The media type for one path or URL, or undefined when its extension is not accepted. */
+function mediaTypeForMedia(
+  pathOrUrl: string,
+  rule: MediaKindRule,
+  model: string | undefined,
+): string | undefined {
+  const extension = path.extname(extensionSourceOf(pathOrUrl)).toLowerCase()
+  if (!extensionsFor(rule, model).includes(extension)) return undefined
+  return rule.mimeTypes[extension]
+}
+
+/** A length rounded the way seconds are reported, without float noise. */
+export function normalizeDurationSeconds(seconds: number): number {
+  return Math.round(seconds * 1000) / 1000
+}
+
+/**
+ * Refuse a local media argument whose extension or size this kind does not accept.
+ *
+ * BOTH REFUSALS NAME THE ARGUMENT, and they have to: one generation call can
+ * carry thirteen media arguments, so "unsupported extension" with no argument
+ * name is a message the caller cannot act on.
+ *
+ * @param filePath - the local file the caller named.
+ * @param fieldName - the tool argument, for the message.
+ * @returns the media type for that extension.
+ */
+function assertMediaFileAcceptable(
+  filePath: string,
+  fieldName: string,
+  rule: MediaKindRule,
+  stats: { readonly size: number },
+  model: string | undefined,
+): string {
+  const accepted = extensionsFor(rule, model)
+  const extension = path.extname(filePath).toLowerCase()
+  if (!accepted.includes(extension)) {
+    throw new HarnessError(
+      fieldName + ' must be a ' + rule.kind + ' file with one of these extensions: ' + accepted.join(' ')
+      + ', got ' + JSON.stringify(extension === '' ? path.basename(filePath) : extension) + ' for '
+      + JSON.stringify(filePath) + '.'
+      + (accepted.length < rule.extensions.length
+        ? ' This model accepts a NARROWER set than the route does (' + rule.extensions.join(' ') + '), so the '
+          + 'extension was refused for the model rather than for the tool.'
+        : '')
+      + ' Nothing was uploaded and no request was made.',
+      'MINIMAX_VIDEO_MEDIA_TYPE_UNSUPPORTED',
+    )
+  }
+  if (stats.size > rule.maxBytes) {
+    throw new HarnessError(
+      fieldName + ' (' + path.basename(filePath) + ') is ' + humanBytes(stats.size) + ', above the '
+      + humanBytes(rule.maxBytes) + ' this route can upload for a ' + rule.kind + '. Nothing was uploaded and no '
+      + 'request was made. Send a smaller file, or, where the service accepts one, a MiniMax CDN URL it can '
+      + 'fetch itself.',
+      'MINIMAX_VIDEO_MEDIA_TOO_LARGE',
+    )
+  }
+  return rule.mimeTypes[extension] as string
+}
+
+/**
+ * Prepare one media argument: upload a local file, or pass a MiniMax CDN URL
+ * through untouched.
+ *
+ * THE ASYMMETRY IS MEASURED, not a shortcut. A third-party public URL is refused
+ * by the service itself - "video_info.url could not be used as a media source" -
+ * for addresses ordinary clients could fetch, so the only remote form that works
+ * is MiniMax's own CDN, which is exactly what this route's upload returns. Hence:
+ *
+ * - a local file is READ and uploaded through uploadLocalVideo, and the cdn_url
+ *   it returns is what gets cited;
+ * - an https://cdn.hailuoai.com/... URL is passed through with no request at all;
+ * - anything else http(s) is refused locally (spec section 2.2).
+ *
+ * IT NEVER INLINES. These are inputs to a generation task, not something to be
+ * described, and upstream forces the remote form for exactly that reason
+ * (forceRemoteUrl: true, spec section 2.1).
+ */
+async function prepareMediaInput(
+  pathOrUrl: string,
+  fieldName: string,
+  rule: MediaKindRule,
+  context: MinimaxMediaPrepareContext,
+  options: {
+    /**
+     * A check that must run BEFORE the bytes are read and PUT.
+     *
+     * IT EXISTS FOR ONE REASON: a local reference video's length is read out of
+     * the same file, and that read can fail (no moov, corrupt box, a container
+     * the service would refuse anyway). Running it first means such a file costs
+     * NO upload request, and the failure names the container rather than
+     * whatever the upload happened to answer.
+     */
+    readonly beforeUpload?: (filePath: string) => Promise<void>
+  } = {},
+): Promise<MinimaxMediaPayload> {
+  const source = pathOrUrl.trim()
+  if (source === '') {
+    throw new HarnessError(
+      fieldName + ' is empty. Give an absolute path to a local ' + rule.kind + ' file, or an http(s) URL on '
+      + MINIMAX_CDN_HOST + '.',
+      'MINIMAX_VIDEO_MEDIA_EMPTY',
+    )
+  }
+
+  if (/^https?:\/\//i.test(source)) {
+    let parsed: URL
+    try {
+      parsed = new URL(source)
+    } catch {
+      throw new HarnessError(
+        fieldName + ' is not a valid URL: ' + JSON.stringify(source),
+        'MINIMAX_VIDEO_URL_INVALID',
+      )
+    }
+    // Named argument, because there may be thirteen of them.
+    assertMinimaxCdnUrl(parsed, fieldName)
+    await assertPublicUrl(parsed, fieldName)
+    const declared = mediaTypeForMedia(parsed.toString(), rule, context.model)
+    if (declared === undefined) {
+      const accepted = extensionsFor(rule, context.model)
+      throw new HarnessError(
+        fieldName + ' must point at a file with one of these extensions: ' + accepted.join(' ') + ', got '
+        + JSON.stringify(path.extname(parsed.pathname)) + ' for ' + JSON.stringify(source) + '.'
+        + (accepted.length < rule.extensions.length
+          ? ' This model accepts a NARROWER set than the route does (' + rule.extensions.join(' ') + '), so the '
+            + 'extension was refused for the model rather than for the tool.'
+          : '')
+        + ' The extension is read from the URL path, before any query string. Nothing was sent.',
+        'MINIMAX_VIDEO_MEDIA_TYPE_UNSUPPORTED',
+      )
+    }
+    return { url: parsed.toString(), mime_type: declared }
+  }
+
+  if (!path.isAbsolute(source)) {
+    throw new HarnessError(
+      fieldName + ' must be an absolute path or an http(s) URL: ' + JSON.stringify(source) + '. A relative '
+      + 'path is resolved against whatever directory the tool happened to run in, which is not necessarily the '
+      + 'file the caller meant.',
+      'MINIMAX_VIDEO_PATH_NOT_ABSOLUTE',
+    )
+  }
+  const stats = await fs.stat(source).catch(() => undefined)
+  if (stats === undefined || !stats.isFile()) {
+    throw new HarnessError(
+      fieldName + ' is not a file: ' + JSON.stringify(source) + '. Nothing was uploaded and no request was made.',
+      'MINIMAX_VIDEO_MEDIA_NOT_FOUND',
+    )
+  }
+  // Extension and size first: both are refusals that must cost no request.
+  const mimeType = assertMediaFileAcceptable(source, fieldName, rule, stats, context.model)
+  // Then anything else the caller must prove, still before a byte is read.
+  if (options.beforeUpload !== undefined) await options.beforeUpload(source)
+  const data = await fs.readFile(source)
+  const url = await uploadLocalVideo(context.credential, {
+    data,
+    name: path.basename(source),
+    mediaType: mimeType,
+    fetchFn: context.fetchFn,
+    sleepFn: context.sleepFn,
+    backoffMs: context.backoffMs,
+    ...(context.signal === undefined ? {} : { signal: context.signal }),
+  })
+  return { url, mime_type: mimeType }
+}
+
+/**
+ * Prepare an image argument (a first frame, a last frame, or a reference).
+ *
+ * @param pathOrUrl - absolute local path, or a MiniMax CDN URL.
+ * @param fieldName - the tool argument, for every message this can raise.
+ * @param context - credential, fetch, retry policy and the model.
+ * @returns an object with url and mime_type.
+ */
+export async function prepareImageInput(
+  pathOrUrl: string,
+  fieldName: string,
+  context: MinimaxMediaPrepareContext,
+): Promise<MinimaxMediaPayload> {
+  return prepareMediaInput(pathOrUrl, fieldName, IMAGE_RULE, context)
+}
+
+/**
+ * Prepare an audio argument.
+ *
+ * @param pathOrUrl - absolute local path, or a MiniMax CDN URL.
+ * @param fieldName - the tool argument, for every message this can raise.
+ * @param context - credential, fetch, retry policy and the model.
+ * @returns an object with url and mime_type.
+ */
+export async function prepareAudioInput(
+  pathOrUrl: string,
+  fieldName: string,
+  context: MinimaxMediaPrepareContext,
+): Promise<MinimaxMediaPayload> {
+  return prepareMediaInput(pathOrUrl, fieldName, AUDIO_RULE, context)
+}
+
+/**
+ * Reconcile the caller's stated reference-video length with the one this route
+ * read out of the file.
+ *
+ * THE CALLER WINS, BUT NOT SILENTLY (spec section 4.4): a caller may deliberately
+ * trim a clip and state the trimmed length, so their number is the one sent -
+ * but if the container disagrees by more than
+ * MINIMAX_REFERENCE_DURATION_TOLERANCE_SECONDS the two are describing different
+ * things, and sending either one quietly would mean the user believes a 5 s
+ * reference was used while 12 s went out.
+ *
+ * @param fieldName - the tool argument, for the message.
+ * @param measured - seconds read from the container.
+ * @param given - the caller's value, when they supplied one.
+ * @returns the length to send.
+ * @throws HarnessError naming BOTH values when they contradict each other.
+ */
+export function reconcileReferenceVideoDurationSeconds(
+  fieldName: string,
+  measured: number,
+  given: number | undefined,
+): number {
+  const fromContainer = normalizeDurationSeconds(measured)
+  if (given === undefined) return fromContainer
+  if (typeof given !== 'number' || !Number.isFinite(given) || given <= 0) {
+    throw new HarnessError(
+      fieldName + ' must be a positive number of seconds, got ' + JSON.stringify(given)
+      + '. Omit it for a local file - the length is read from the container - and give it only for a URL.',
+      'MINIMAX_VIDEO_REFERENCE_DURATION_INVALID',
+    )
+  }
+  if (Math.abs(given - fromContainer) > MINIMAX_REFERENCE_DURATION_TOLERANCE_SECONDS) {
+    throw new HarnessError(
+      fieldName + ' was given as ' + given + ' s, but the file itself says ' + fromContainer + ' s (an ISO BMFF '
+      + 'mvhd duration). Those describe different clips, so neither was sent. Give the length that matches the '
+      + 'file, or pass the trimmed file so the two agree. A difference of up to '
+      + MINIMAX_REFERENCE_DURATION_TOLERANCE_SECONDS + ' s is treated as rounding and allowed.',
+      'MINIMAX_VIDEO_REFERENCE_DURATION_MISMATCH',
+    )
+  }
+  return given
+}
+
+/**
+ * Prepare a reference video: the media payload PLUS the length it must carry.
+ *
+ * THE LENGTH COMES FROM TWO PLACES AND THEY ARE NOT INTERCHANGEABLE:
+ *
+ * - a LOCAL file is read here, out of the container's own moov/mvhd
+ *   (readIsoBmffDurationSeconds), so the caller owes nothing;
+ * - a REMOTE URL cannot be read - this route does not download a reference to
+ *   measure it, and the service does not either - so the caller MUST state it,
+ *   and a missing value is refused rather than guessed (spec section 4.2).
+ *
+ * @param pathOrUrl - absolute local path, or a MiniMax CDN URL.
+ * @param fieldName - the tool argument, for every message this can raise.
+ * @param durationSeconds - the caller's stated length, when they gave one.
+ * @param context - credential, fetch, retry policy and the model.
+ * @returns an object with url, mime_type and duration_seconds.
+ */
+export async function prepareVideoInput(
+  pathOrUrl: string,
+  fieldName: string,
+  durationSeconds: number | undefined,
+  context: MinimaxMediaPrepareContext,
+): Promise<MinimaxVideoMediaPayload> {
+  const source = pathOrUrl.trim()
+  const remote = /^https?:\/\//i.test(source)
+
+  /** Read the length out of the container, with this argument named in the refusal. */
+  const measure = async (filePath: string): Promise<number> => {
+    try {
+      return await readIsoBmffDurationSeconds(filePath)
+    } catch (error) {
+      // The reader's own code travels: it is already the specific one
+      // (not ISO BMFF, no mvhd, unreadable mvhd) a caller can act on.
+      if (error instanceof IsoBmffDurationError) {
+        throw new HarnessError('cannot prepare ' + fieldName + ' (' + filePath + '): ' + error.message, error.code)
+      }
+      throw error
+    }
+  }
+
+  if (remote) {
+    if (durationSeconds === undefined || durationSeconds === null) {
+      throw new HarnessError(
+        fieldName + ' is a public URL, so its length cannot be read here: this route does not download a '
+        + 'reference clip to measure it, and the service does not either. Add the clip length in seconds beside '
+        + 'it, in referenceVideoDurationSeconds, in the same order as referenceVideoPaths. Nothing was submitted.',
+        'MINIMAX_VIDEO_REFERENCE_DURATION_REQUIRED',
+      )
+    }
+    return {
+      ...await prepareMediaInput(source, fieldName, VIDEO_RULE, context),
+      duration_seconds: durationSeconds,
+    }
+  }
+
+  // MEASURED BEFORE THE UPLOAD, not after: a file whose container states no
+  // length is refused here, so it never costs a byte read or an upload request,
+  // and the failure names the container instead of whatever the broker said.
+  let measured = 0
+  const payload = await prepareMediaInput(source, fieldName, VIDEO_RULE, context, {
+    beforeUpload: async (filePath) => {
+      measured = await measure(filePath)
+    },
+  })
+  return {
+    ...payload,
+    duration_seconds: reconcileReferenceVideoDurationSeconds(fieldName, measured, durationSeconds),
+  }
+}
+
+/** Trim a caller's list, dropping blank entries. */
+function cleanList(values: readonly string[] | undefined): string[] {
+  if (values === undefined) return []
+  return values.map(value => value.trim()).filter(value => value !== '')
+}
+
+/**
+ * Refuse a collection that is over its own limit, naming the set and the excess.
+ *
+ * THE EXCESS IS A NUMBER, not an adjective. "too many reference images" leaves
+ * the caller to work out how many to drop; "3 over the limit of 9" does not.
+ *
+ * @param fieldName - the tool argument, for the message.
+ * @param label - what the set is, in words.
+ * @param count - how many were given.
+ * @param limit - the ceiling.
+ */
+function assertCollectionSize(fieldName: string, label: string, count: number, limit: number): void {
+  if (count <= limit) return
+  throw new HarnessError(
+    fieldName + ' carries ' + count + ' ' + label + ', which is ' + (count - limit) + ' over the limit of '
+    + limit + '. Nothing was submitted. Remove ' + (count - limit) + ' and retry.',
+    'MINIMAX_VIDEO_REFERENCE_LIMIT',
+  )
+}
+
+/**
+ * Prepare every media argument of one generation submit.
+ *
+ * The ORDER of the refusals is deliberate: the free ones come first. A model
+ * that does not accept reference media at all is refused before a single file is
+ * read, and the counts are checked before any upload, so an over-limit call
+ * costs no request instead of nine uploads and then a refusal.
+ *
+ * @param input - the media arguments as the caller typed them.
+ * @param model - the model the submit names, which constrains what is legal.
+ * @param context - credential, fetch, retry policy.
+ * @returns the media keyed by the SERVICE's field names, plus the two booleans
+ *   the ratio rule branches on.
+ * @throws HarnessError for any refusal; nothing is uploaded before the last free
+ *   check has passed.
+ */
+export async function prepareGenerationMedia(
+  input: MinimaxGenerationMediaInput,
+  model: MinimaxVideoModel,
+  context: MinimaxMediaPrepareContext,
+): Promise<MinimaxGenerationMedia> {
+  const images = cleanList(input.referenceImagePaths)
+  const videos = cleanList(input.referenceVideoPaths)
+  const audios = cleanList(input.referenceAudioPaths)
+  const firstFrame = input.inputImagePath?.trim() ?? ''
+  const lastFrame = input.lastFrameImagePath?.trim() ?? ''
+  const durations = input.referenceVideoDurationSeconds ?? []
+  const hasReferences = images.length > 0 || videos.length > 0 || audios.length > 0
+
+  // THE MODEL GATE, before anything is read: Hailuo-2.3 has neither the
+  // reference collections nor a last frame (spec section 7). Both refusals name
+  // the argument, because "this model does not support that" is not actionable
+  // when thirteen arguments could be the one.
+  if (!minimaxModelSupportsReferenceMedia(model)) {
+    if (hasReferences) {
+      const carried = [
+        images.length === 0 ? '' : images.length + ' reference image(s)',
+        videos.length === 0 ? '' : videos.length + ' reference video(s)',
+        audios.length === 0 ? '' : audios.length + ' reference audio(s)',
+      ].filter(part => part !== '').join(', ')
+      throw new HarnessError(
+        model + ' does not accept reference media, and this call carries ' + carried
+        + '. It takes a first frame, or the legacy subject reference type, and nothing else. Nothing was '
+        + 'submitted. Remove referenceImagePaths / referenceVideoPaths / referenceAudioPaths, or switch to '
+        + 'MiniMax-H3, which accepts them.',
+        'MINIMAX_VIDEO_REFERENCES_UNSUPPORTED',
+      )
+    }
+    if (lastFrame !== '') {
+      throw new HarnessError(
+        model + ' does not accept lastFrameImagePath: it supports first_frame (or the legacy subject reference '
+        + 'type) and nothing else, so a last frame cannot be honoured. Nothing was submitted. Drop '
+        + 'lastFrameImagePath, or switch to MiniMax-H3 and pass both frames there.',
+        'MINIMAX_VIDEO_LAST_FRAME_UNSUPPORTED',
+      )
+    }
+  }
+
+  // THE COUNTS, also before anything is read or uploaded.
+  assertCollectionSize('referenceImagePaths', 'reference image(s)', images.length, MAX_REFERENCE_IMAGES)
+  assertCollectionSize('referenceVideoPaths', 'reference video(s)', videos.length, MAX_REFERENCE_VIDEOS)
+  assertCollectionSize('referenceAudioPaths', 'reference audio(s)', audios.length, MAX_REFERENCE_AUDIOS)
+  const total = images.length + videos.length + audios.length
+  if (total > MAX_REFERENCE_MEDIA_TOTAL) {
+    throw new HarnessError(
+      'this call carries ' + total + ' reference media item(s) (' + images.length + ' image(s), ' + videos.length
+      + ' video(s), ' + audios.length + ' audio(s)), which is ' + (total - MAX_REFERENCE_MEDIA_TOTAL)
+      + ' over the combined limit of ' + MAX_REFERENCE_MEDIA_TOTAL + '. Nothing was submitted. The per-set limits '
+      + 'are also enforced (' + MAX_REFERENCE_IMAGES + ' images, ' + MAX_REFERENCE_VIDEOS + ' videos, '
+      + MAX_REFERENCE_AUDIOS + ' audios), so a call can pass those and still be over this one.',
+      'MINIMAX_VIDEO_REFERENCE_LIMIT',
+    )
+  }
+  // The duration array is POSITIONAL beside the video list (spec section 1), so a
+  // length disagreement would pair every item after the first mismatch with the
+  // wrong clip.
+  if (durations.length !== 0 && durations.length !== videos.length) {
+    throw new HarnessError(
+      'referenceVideoDurationSeconds has ' + durations.length + ' entr'
+      + (durations.length === 1 ? 'y' : 'ies') + ' but referenceVideoPaths has ' + videos.length + ', and the two '
+      + 'are matched by POSITION. Nothing was submitted. Give one length per video, in the same order, or omit '
+      + 'the array entirely when every video is a local file, whose length is then read from the container.',
+      'MINIMAX_VIDEO_REFERENCE_DURATION_INVALID',
+    )
+  }
+
+  const prepared: {
+    input_image?: MinimaxMediaPayload
+    last_frame_image?: MinimaxMediaPayload
+    reference_images?: MinimaxMediaPayload[]
+    reference_videos?: MinimaxVideoMediaPayload[]
+    reference_audios?: MinimaxMediaPayload[]
+  } = {}
+
+  // The first frame is input_image on the wire, never input_image_path.
+  if (firstFrame !== '') {
+    prepared.input_image = await prepareImageInput(firstFrame, 'inputImagePath', context)
+  }
+  if (lastFrame !== '') {
+    prepared.last_frame_image = await prepareImageInput(lastFrame, 'lastFrameImagePath', context)
+  }
+  if (images.length > 0) {
+    const list: MinimaxMediaPayload[] = []
+    for (const [index, item] of images.entries()) {
+      list.push(await prepareImageInput(item, 'referenceImagePaths[' + index + ']', context))
+    }
+    prepared.reference_images = list
+  }
+  if (videos.length > 0) {
+    const list: MinimaxVideoMediaPayload[] = []
+    for (const [index, item] of videos.entries()) {
+      list.push(await prepareVideoInput(item, 'referenceVideoPaths[' + index + ']', durations[index], context))
+    }
+    prepared.reference_videos = list
+  }
+  if (audios.length > 0) {
+    const list: MinimaxMediaPayload[] = []
+    for (const [index, item] of audios.entries()) {
+      list.push(await prepareAudioInput(item, 'referenceAudioPaths[' + index + ']', context))
+    }
+    prepared.reference_audios = list
+  }
+
+  return {
+    ...prepared,
+    hasKeyframes: prepared.input_image !== undefined || prepared.last_frame_image !== undefined,
+    hasReferences,
+  }
 }
 
 /**
@@ -1449,6 +2335,47 @@ export function createMinimaxUnderstandVideoTool(ctx: Context, options: MinimaxV
  * @param options - credential source, fetch and the injectable clocks.
  * @returns a registry-ready tool definition.
  */
+
+/**
+ * The session one tool call belongs to, as far as the execution exposes it.
+ *
+ * It is part of the submission guard's key: two calls in DIFFERENT sessions are
+ * different requests, even with identical arguments, and must both be sent.
+ *
+ * @param exec - the tool execution.
+ * @returns the session id, or undefined when the runtime exposes none.
+ */
+function submissionSessionId(exec: { readonly agent?: unknown }): string | undefined {
+  const agent = exec.agent as {
+    id?: unknown
+    session?: { id?: unknown }
+  } | undefined
+  if (agent === undefined) return undefined
+  if (typeof agent.id === 'string' && agent.id !== '') return agent.id
+  if (typeof agent.session?.id === 'string' && agent.session.id !== '') return agent.session.id
+  return undefined
+}
+
+/**
+ * The turn one tool call belongs to, as far as the execution exposes it.
+ *
+ * The guard's key is per TURN because a model may legitimately ask for a second
+ * generation in a LATER turn of the same session - that is a new intention and
+ * must be paid for. The call id stands in when the runtime exposes no turn, which
+ * makes the guard slightly weaker (a repeated call in a later turn with the same
+ * id would be refused) but never lets a duplicate through.
+ *
+ * @param exec - the tool execution.
+ * @returns the turn identity, or undefined when the runtime exposes none.
+ */
+function submissionTurnId(exec: { readonly agent?: unknown; readonly rootCallId?: unknown; readonly callId?: unknown }): string | undefined {
+  const agent = exec.agent as { turn?: unknown } | undefined
+  if (agent !== undefined && typeof agent.turn === 'number') return String(agent.turn)
+  if (typeof exec.rootCallId === 'string' && exec.rootCallId !== '') return exec.rootCallId
+  if (typeof exec.callId === 'string' && exec.callId !== '') return exec.callId
+  return undefined
+}
+
 export function createMinimaxGenerateVideoTool(ctx: Context, options: MinimaxVideoToolOptions) {
   const fetchFn = options.fetchFn ?? fetch
   const pollIntervalMs = options.pollIntervalMs ?? VIDEO_POLL_INTERVAL_MS
@@ -1465,12 +2392,6 @@ export function createMinimaxGenerateVideoTool(ctx: Context, options: MinimaxVid
       + 'takes minutes; the call returns once the file exists. A failed submit is NOT re-sent: the attempt is '
       + 'terminal for that request, and generation is billed, so report the error instead of retrying. Only '
       + 'available on the minimax-code provider.'
-      // The supported parameter surface, stated because it is deliberately
-      // NARROWER than upstream's: this build sends model, prompt, resolution
-      // and duration only. Upstream also offers `ratio` (21:9 16:9 4:3 1:1 3:4
-      // 9:16 adaptive) and `aigc_watermark` (default false); neither is wired
-      // here yet, so a caller must not assume they exist.
-      //
       // THE LIMITS ARE PER MODEL, because the service said so in its own refusal
       // sentences, and ALL THREE are measured now (docs/minimax-video-model-rules.md
       // section 5): H3 takes 4-15 s and 768P or 2K; H3-Max takes 5-15 s and 480P
@@ -1482,8 +2403,19 @@ export function createMinimaxGenerateVideoTool(ctx: Context, options: MinimaxVid
       + 'resolution and durationSeconds. durationSeconds must be 4-15 for MiniMax-H3, 5-15 for '
       + 'MiniMax-H3-Max, and exactly 6 or 10 for MiniMax-Hailuo-2.3. resolution must be 768P or 2K for '
       + 'MiniMax-H3, 480P or 768P for MiniMax-H3-Max, and 768P or 1080P for MiniMax-Hailuo-2.3 - each '
-      + 'model has its OWN set and the three differ; the spelling is case-sensitive, so "768p" is '
-      + 'refused. The upstream ratio and aigc_watermark arguments are not implemented on this route yet.',
+      + 'model has its OWN set and the three differ; the spelling is case-sensitive, so "768p" is refused. '
+      + 'A generation may also carry INPUT MEDIA, which is what makes it more than a text-to-video call: '
+      + 'inputImagePath is the first frame (or the last frame when referenceType says so), '
+      + 'lastFrameImagePath adds an ending frame, referenceImagePaths adds up to 9 reference images, '
+      + 'referenceVideoPaths up to 3 reference videos and referenceAudioPaths up to 3 reference audio '
+      + 'files. Those reference collections exist for MiniMax-H3 only; MiniMax-Hailuo-2.3 takes a first '
+      + 'frame but no reference set and no last frame. ratio picks the shape of the clip and is REWRITTEN '
+      + 'before it is sent: a frame forces adaptive, reference media default to adaptive, and a text-only '
+      + 'generation defaults to 16:9 - so adaptive is not allowed for a text-only generation. '
+      + 'aigcWatermark asks for the AIGC watermark (MiniMax-H3). Media paths are local files or URLs on '
+      + 'MiniMax own CDN; local files are uploaded before the submit, and a third-party public URL is refused '
+      + 'because the service refuses it too. A reference video given as a public URL needs its length in '
+      + 'referenceVideoDurationSeconds, in the same order as the videos.',
     parameters: {
       prompt: {
         type: 'string',
@@ -1524,6 +2456,64 @@ export function createMinimaxGenerateVideoTool(ctx: Context, options: MinimaxVid
         description: 'Clip length in whole seconds: 4-15 for MiniMax-H3, 5-15 for MiniMax-H3-Max, and '
           + 'exactly 6 or 10 for MiniMax-Hailuo-2.3. Must be given when a duration is wanted: 0 is treated '
           + 'as absent by the service. Omit to let the service choose.',
+      },
+      ratio: {
+        type: 'string',
+        enum: [...MINIMAX_VIDEO_RATIOS],
+        // The seven upstream values, including adaptive. The LINKAGE below decides
+        // the value that goes on the wire: a first or last frame forces adaptive,
+        // reference media defaults to adaptive, a text-only generation defaults to 16:9.
+        description: 'Aspect ratio of the generated clip: 21:9, 16:9, 4:3, 1:1, 3:4, 9:16, or adaptive.'
+          + ' The value is REWRITTEN before it is sent: a first or last frame forces adaptive, reference'
+          + ' media defaults to adaptive, and a text-only generation defaults to 16:9. adaptive is NOT'
+          + ' allowed for a text-only generation.',
+      },
+      aigcWatermark: {
+        type: 'boolean',
+        description: 'Ask for the AIGC watermark. MiniMax-H3 only. Leave it out for the default, which is no watermark.',
+      },
+      inputImagePath: {
+        type: 'string',
+        description: 'First frame image, or the last frame when referenceType says so. A local file path, or a'
+          + ' URL on MiniMax own CDN (cdn.hailuoai.com) - a third-party public URL is refused by the'
+          + ' service itself. Local images are uploaded before the submit.',
+      },
+      lastFrameImagePath: {
+        type: 'string',
+        description: 'Ending frame image, for the first+last frame mode. MiniMax-H3 only; the service forces'
+          + ' the aspect ratio to adaptive when a frame is given.',
+      },
+      referenceType: {
+        type: 'string',
+        enum: ['first_frame', 'last_frame', 'subject'],
+        description: 'How inputImagePath is read: as the first frame, as the last frame, or as a subject'
+          + ' reference. Defaults to first_frame when an image is given.',
+      },
+      referenceImagePaths: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Up to 9 reference images for MiniMax-H3. Local paths are uploaded before the submit.',
+      },
+      referenceVideoPaths: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Up to 3 reference videos for MiniMax-H3 (.mp4 or .mov). A local path has its length read'
+          + ' from the file; a public URL needs referenceVideoDurationSeconds, because the service does not'
+          + ' download it and cannot know how long it is.',
+      },
+      referenceVideoDurationSeconds: {
+        type: 'array',
+        items: { type: 'number' },
+        description: 'The length of each reference video in seconds, in the same order as referenceVideoPaths.'
+          + ' Needed for a public URL, optional for a local file - a difference of more than one second'
+          + ' between your value and the file own length is refused, because a clip sent at the wrong'
+          + ' length is not the clip you meant.',
+      },
+      referenceAudioPaths: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Up to 3 reference audio files for MiniMax-H3 (.wav or .mp3). This is guidance for the'
+          + ' sound, not a requirement: MiniMax-H3 generates synchronized audio from the prompt on its own.',
       },
     },
     output: {
@@ -1611,44 +2601,121 @@ export function createMinimaxGenerateVideoTool(ctx: Context, options: MinimaxVid
       // Validated BEFORE the submit for one reason: the service refuses a bad
       // resolution or duration AFTER accepting (and billing) the request, and a
       // refusal that costs a generation is worth catching for free here.
-      const submitBody: Record<string, unknown> = { model, prompt }
-      // THE ORDER OF THESE TWO CHECKS IS PART OF THE CONTRACT, and it is
-      // `duration` BEFORE `resolution`, which is the opposite of what this
-      // function did until now.
+      // The media the generation carries, prepared BEFORE the submit.
       //
-      // MEASURED: the service validates the whole parameter set in the order
-      // `model -> duration -> resolution -> prompt -> ratio`, executing each
-      // check and short-circuiting on the first refusal
-      // (docs/minimax-video-model-rules.md section 3.3). A client that
-      // pre-validates is reporting the FIRST rule the service would have broken,
-      // so its own order has to match: given `{duration: 7, resolution: "2K"}`
-      // on Hailuo, the service answers about the DURATION (7 is not one of 6/10)
-      // and never reaches the resolution. Checking resolution first produced a
-      // message about a rule the service would not have mentioned at all - the
-      // user's first error would have been one this route invented.
-      //
-      // `prompt` sits between resolution and ratio upstream, and it is not
-      // validated here: it is `required: true` in the parameter schema, so a
-      // request without one never reaches this function, and an empty one is
-      // refused above with the service's own wording.
-      //
-      // BOTH checks are per-MODEL, and `model` is passed in rather than
-      // implied: H3 accepts 4-15 and 768P/2K, H3-Max accepts 5-15 and 480P/768P,
-      // and Hailuo accepts only 6 or 10 seconds and 768P/1080P. A single shared
-      // window or list would refuse legal calls and let illegal ones through to
-      // be billed.
-      //
-      // `0` is deliberately NOT filtered out here: the service treats it as a
-      // MISSING duration ("duration is required", measured), and the honest
-      // local answer is the same one, so it reaches assertVideoDuration and is
-      // reported as "must be specified" instead of being silently dropped.
-      if (args.durationSeconds !== undefined && args.durationSeconds !== null) {
-        submitBody.duration = assertVideoDuration(args.durationSeconds, model)
+      // Two things happen here that the plain text-only path never needed: the
+      // local files are uploaded to a URL the service can read, and the ratio
+      // and resolution that go on the wire are decided by what the media IS.
+      const mediaInput: MinimaxGenerationMediaInput = {
+        inputImagePath: typeof args.inputImagePath === 'string' ? args.inputImagePath : undefined,
+        lastFrameImagePath: typeof args.lastFrameImagePath === 'string' ? args.lastFrameImagePath : undefined,
+        referenceImagePaths: Array.isArray(args.referenceImagePaths) ? args.referenceImagePaths : undefined,
+        referenceVideoPaths: Array.isArray(args.referenceVideoPaths) ? args.referenceVideoPaths : undefined,
+        referenceVideoDurationSeconds: Array.isArray(args.referenceVideoDurationSeconds)
+          ? args.referenceVideoDurationSeconds
+          : undefined,
+        referenceAudioPaths: Array.isArray(args.referenceAudioPaths) ? args.referenceAudioPaths : undefined,
       }
-      if (args.resolution !== undefined && args.resolution !== null) {
-        submitBody.resolution = assertVideoResolution(args.resolution, model)
+      // The collection limits and the per-model support are checked HERE, before
+      // any byte is read and before any request is spent: a submit is billed, and
+      // the service answers its refusal AFTER accepting the request.
+      assertGenerationMediaLimits(mediaInput, model)
+      const media = await prepareGenerationMedia(mediaInput, model, {
+        credential,
+        fetchFn,
+        sleepFn,
+        backoffMs,
+        ...(exec.signal === undefined ? {} : { signal: exec.signal }),
+        model,
+      })
+
+      // The ratio and resolution that go on the wire are DECIDED here, not taken
+      // from the caller: a first frame forces adaptive, reference media defaults
+      // to adaptive, a text-only generation defaults to 16:9, and the H3 family
+      // defaults its resolution to 2K (upstream's own rule, with one deviation
+      // this route measured - see resolveVideoSubmissionResolution).
+      // The user's duration and resolution are validated HERE, against the model's
+      // own rules, and the ORDER is part of the contract: duration before
+      // resolution, which is the order the service itself checks them in
+      // (model -> duration -> resolution -> prompt -> ratio, measured -
+      // docs/minimax-video-model-rules.md section 3.3). A client that checks
+      // them out of order reports a rule the service would never have mentioned.
+      //
+      // `0` is deliberately NOT filtered out: the service treats it as a MISSING
+      // duration, and the honest local answer is the same one.
+      const submittedDuration = args.durationSeconds === undefined || args.durationSeconds === null
+        ? undefined
+        : assertVideoDuration(args.durationSeconds, model)
+      const submittedResolution = args.resolution === undefined || args.resolution === null
+        ? undefined
+        : assertVideoResolution(args.resolution, model)
+
+      const requestedRatio = args.ratio === undefined || args.ratio === null
+        ? undefined
+        : assertVideoRatio(args.ratio)
+      const effectiveRatio = resolveVideoSubmissionRatio({
+        model,
+        ...(requestedRatio === undefined ? {} : { ratio: requestedRatio }),
+        hasKeyframes: media.hasKeyframes,
+        hasReferences: media.hasReferences,
+      })
+      const effectiveResolution = resolveVideoSubmissionResolution(model, submittedResolution)
+
+      // The body is assembled LAST, because the guard below keys on the FINAL
+      // body - the one that goes on the wire.
+      //
+      // The media is added under the SERVICE's field names, which are not the
+      // argument names: inputImagePath goes on the wire as input_image, and so on
+      // (docs/minimax-video-extended-spec.md section 0).
+      const submitBody: Record<string, unknown> = { model, prompt }
+      if (submittedDuration !== undefined) submitBody.duration = submittedDuration
+      if (effectiveResolution !== undefined) submitBody.resolution = effectiveResolution
+      if (effectiveRatio !== undefined) submitBody.ratio = effectiveRatio
+      if (media.input_image !== undefined) submitBody.input_image = media.input_image
+      if (media.last_frame_image !== undefined) submitBody.last_frame_image = media.last_frame_image
+      if (media.reference_images !== undefined) submitBody.reference_images = media.reference_images
+      if (media.reference_videos !== undefined) submitBody.reference_videos = media.reference_videos
+      if (media.reference_audios !== undefined) submitBody.reference_audios = media.reference_audios
+      if (args.referenceType !== undefined && args.referenceType !== null) {
+        submitBody.reference_type = args.referenceType
+      } else if (media.input_image !== undefined) {
+        submitBody.reference_type = 'first_frame'
+      }
+      if (args.aigcWatermark !== undefined && args.aigcWatermark !== null) {
+        submitBody.aigc_watermark = args.aigcWatermark
       }
 
+      // ONE SUBMIT PER REQUEST, because a generation is BILLED and a model may
+      // call this tool twice in one turn with the same arguments.
+      //
+      // The key is the FINAL body - the one that goes on the wire - so two calls
+      // that differ only in a value the submit rules rewrote (a defaulted ratio,
+      // a defaulted resolution) are recognised as the same request, not as two.
+      //
+      // The attempt is REMEMBERED BEFORE the request goes out, not after it
+      // succeeds: the service may have accepted and billed a request whose
+      // answer never arrived, and re-sending the same body would be a second
+      // charge for one intention.
+      const submissionSession = submissionSessionId(exec)
+      const submissionTurn = submissionTurnId(exec)
+      // The guard only fires when the key identifies one request inside one
+      // session turn. Without a session identity it would degrade to the body
+      // alone, and two DIFFERENT generations would look like one - so the guard
+      // stays off rather than refuse a video the user actually asked for.
+      if (isPreciseSubmissionKey(submissionSession, submissionTurn)) {
+        const submissionKey = videoSubmissionKey(submissionSession, submissionTurn, submitBody)
+        const alreadyAttempted = attemptedVideoSubmissionFor(submissionKey)
+        if (alreadyAttempted !== undefined) {
+          throw new HarnessError(
+            'this generation was already submitted in this turn, and a second attempt would be billed again'
+              + (alreadyAttempted === '' ? '.' : ' (task ' + alreadyAttempted + ').'),
+            'MINIMAX_VIDEO_ALREADY_SUBMITTED',
+          )
+        }
+        recordVideoSubmissionAttempt(submissionKey)
+      }
+
+      // NO RETRY, and that is the fix rather than an omission: a submit attempt
       // NO RETRY, and that is the fix rather than an omission: a submit attempt
       // is terminal for this request and generation is billed, so a second
       // attempt buys a second charge and not a second chance. See
@@ -1746,6 +2813,31 @@ export function createMinimaxGenerateVideoTool(ctx: Context, options: MinimaxVid
         if (error instanceof MediaStoreError) throw new HarnessError(error.message, error.code)
         throw error
       }
+
+      // THE HISTORY LEDGER, written HERE and not in the client.
+      //
+      // The clip is on disk at this point, so the row describes a file that really
+      // exists. It is written after the write rather than before it for exactly
+      // that reason: a row for a clip that failed to materialize would point the
+      // user at nothing.
+      //
+      // A FAILURE TO RECORD IS NOT A FAILURE TO GENERATE. `recordMinimaxVideoGeneration`
+      // never throws: the generation succeeded, the quota is spent and the file is
+      // written, so turning a disk-full history file into an error here would tell
+      // the user their video failed when it did not. The reason is kept on the
+      // store module instead and surfaced by the settings card's history section;
+      // the successful result below is returned unchanged either way.
+      await recordMinimaxVideoGeneration({
+        model,
+        videoPath: stored.relativePath,
+        bytes: stored.bytes,
+        taskId,
+        // The ratio the LINKAGE decided, not the one the caller asked for: this row
+        // is a description of the clip that exists, and for a keyframe submit the
+        // effective ratio is `adaptive` whatever was requested.
+        ...(effectiveRatio === undefined ? {} : { ratio: effectiveRatio }),
+        ...(settled.duration === undefined ? {} : { durationSeconds: settled.duration }),
+      })
 
       const value: MinimaxVideoPresentationMeta = {
         videoPath: stored.relativePath,

@@ -15,10 +15,16 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   MAX_INLINE_VIDEO_BYTES,
+  MAX_REFERENCE_AUDIOS,
+  MAX_REFERENCE_IMAGES,
+  MAX_REFERENCE_MEDIA_TOTAL,
+  MAX_REFERENCE_VIDEOS,
   MAX_UPLOAD_VIDEO_BYTES,
   MINIMAX_CDN_HOST,
   MINIMAX_GENERATE_VIDEO_TOOL_NAME,
+  MINIMAX_REFERENCE_DURATION_TOLERANCE_SECONDS,
   MINIMAX_UNDERSTAND_VIDEO_TOOL_NAME,
+  MINIMAX_UPLOAD_CATEGORY,
   MINIMAX_VIDEO_MODEL_RULES,
   createMinimaxGenerateVideoTool,
   createMinimaxUnderstandVideoTool,
@@ -28,8 +34,15 @@ import {
   declaresNoVideoViewed,
   inlineSourceBytes,
   inlineVideoByteBudget,
+  minimaxModelSupportsReferenceMedia,
+  prepareAudioInput,
+  prepareGenerationMedia,
+  prepareImageInput,
+  prepareVideoInput,
+  reconcileReferenceVideoDurationSeconds,
   sniffVideoContainer,
 } from '../src/host/minimax-code/video-tool.ts'
+import { readIsoBmffDurationSeconds } from '../src/host/minimax-code/iso-bmff-duration.ts'
 import { MAX_GENERATED_VIDEO_BYTES, GENERATED_VIDEO_DIR } from '../src/host/minimax-code/media-store.ts'
 import { DEFAULT_MAX_MESSAGE_BODY_BYTES } from '../src/host/minimax-code/types.ts'
 
@@ -131,6 +144,572 @@ function answered(
     base_resp: { status_code: 0, status_msg: 'success' },
   }
 }
+
+/* ------------------------------------------------------------------------- *
+ * Generation media: the first/last frame, the reference collections, and the
+ * container-read reference-video length.
+ *
+ * EVERY ONE OF THESE RUNS WITHOUT A REAL REQUEST. The upload channel is the same
+ * mock-fetch sequence the understanding tests use, so what is pinned here is the
+ * payload SHAPE and the order of the refusal checks, not the network.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Build one ISO BMFF box: a 32-bit size, a four-letter type, then the payload.
+ *
+ * Constructing the containers by hand is what makes the reader arithmetic
+ * checkable - a real clip would only tell us the number it happened to contain.
+ */
+function box(type: string, ...payload: Uint8Array[]): Uint8Array {
+  const body = Uint8Array.from(payload.flatMap(part => Array.from(part)))
+  const head = new Uint8Array(8)
+  new DataView(head.buffer).setUint32(0, 8 + body.byteLength)
+  for (let index = 0; index < 4; index += 1) head[4 + index] = type.charCodeAt(index)
+  return Uint8Array.from([...head, ...body])
+}
+
+/**
+ * An mvhd payload.
+ *
+ * The offsets the reader reads are the ones this builder writes, and they are
+ * the ones the format defines: version 0 puts a 32-bit timescale at payload
+ * offset 12 and the 32-bit duration at 16; version 1 moves them to 20 and 24,
+ * with the duration 64 bits wide. Everything before them (version+flags,
+ * creation and modification times) is zero here and ignored by the reader; every
+ * field after the duration (rate, volume, the matrix, the next track id) is
+ * deliberately absent - a reader that needed it would be doing more than
+ * reading a length.
+ */
+function mvhd(version: 0 | 1, timescale: number, duration: number): Uint8Array {
+  if (version === 0) {
+    // 4 version+flags, 4 creation time, 4 modification time, then timescale at
+    // 12 and duration at 16 - the offsets the reader must find them at.
+    const payload = new Uint8Array(20)
+    const view = new DataView(payload.buffer)
+    view.setUint32(12, timescale)
+    view.setUint32(16, duration)
+    return payload
+  }
+  // Version 1 widens both times to 64 bits, so the timescale moves to 20 and the
+  // 64-bit duration to 24.
+  const payload = new Uint8Array(32)
+  const view = new DataView(payload.buffer)
+  payload[0] = 0x01
+  view.setUint32(20, timescale)
+  view.setBigUint64(24, BigInt(duration))
+  return payload
+}
+
+/** A plausible ftyp payload (brand "isom", minor version 0x200, compatible "mp42"). */
+const FTYP_PAYLOAD = new Uint8Array([
+  0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00,
+  0x6d, 0x70, 0x34, 0x32,
+])
+
+/** A moov holding one version 0 mvhd of 5 seconds at timescale 1000. */
+function moovV0(timescale: number, duration: number): Uint8Array {
+  return box('moov', box('mvhd', mvhd(0, timescale, duration)))
+}
+
+/** A moov holding one version 1 mvhd, whose fields are 64 bits wide. */
+function moovV1(timescale: number, duration: number): Uint8Array {
+  return box('moov', box('mvhd', mvhd(1, timescale, duration)))
+}
+
+/** Media data filler. Its CONTENT is irrelevant; only its declared size matters. */
+function mdat(size: number): Uint8Array {
+  return box('mdat', new Uint8Array(size))
+}
+
+/** Write one byte sequence into the temp workspace and return its absolute path. */
+async function writeMedia(name: string, bytes: Uint8Array): Promise<string> {
+  const file = path.join(work, name)
+  await writeFile(file, bytes)
+  return file
+}
+
+/** The JSON body of one recorded call. */
+function uploadBodyOf(call: Recorded | undefined): Record<string, unknown> {
+  return JSON.parse(String(call?.init?.body)) as Record<string, unknown>
+}
+
+/** The credential the standalone prepare calls present. */
+const CREDENTIAL = { accessToken: 'tok-abc', region: 'cn' as const }
+
+/** The context every standalone prepare call needs. */
+function mediaContext(overrides: {
+  model?: 'MiniMax-H3' | 'MiniMax-H3-Max' | 'MiniMax-Hailuo-2.3'
+  fetchFn: typeof fetch
+}): {
+  credential: typeof CREDENTIAL
+  fetchFn: typeof fetch
+  sleepFn: (ms: number) => Promise<void>
+  backoffMs: number
+  model?: 'MiniMax-H3' | 'MiniMax-H3-Max' | 'MiniMax-Hailuo-2.3'
+} {
+  return {
+    credential: CREDENTIAL,
+    fetchFn: overrides.fetchFn,
+    sleepFn: async () => undefined,
+    backoffMs: 0,
+    ...(overrides.model === undefined ? {} : { model: overrides.model }),
+  }
+}
+
+/** A broker answer granting a presigned PUT and a citable cdn_url. */
+function uploadGranted(name: string, mimeType: string): { status: number; body: unknown } {
+  return {
+    status: 200,
+    body: {
+      code: 0,
+      put_url: 'https://upload.example.com/put/' + name,
+      cdn_url: 'https://' + MINIMAX_CDN_HOST + '/tmp/' + name,
+      content_type: mimeType,
+      expires_in: 600,
+      base_resp: { status_code: 0 },
+    },
+  }
+}
+
+/** The two calls one successful local upload costs. */
+function uploadPair(name: string, mimeType: string): Array<{ status: number; body: unknown }> {
+  return [uploadGranted(name, mimeType), { status: 200, body: '' }]
+}
+
+/** Run a promise expected to fail, and hand back the HarnessError it threw. */
+async function refusalOf(promise: Promise<unknown>): Promise<{ code?: string; message?: string } | undefined> {
+  return promise.then(() => undefined, (error: { code?: string; message?: string }) => error)
+}
+
+describe('readIsoBmffDurationSeconds', () => {
+  it('reads a version 0 mvhd: duration divided by timescale', async () => {
+    // 5000 / 1000 = 5 s.
+    const file = await writeMedia('v0.mp4', Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...moovV0(1000, 5000)]))
+    expect(await readIsoBmffDurationSeconds(file)).toBe(5)
+  })
+
+  it('reads a version 1 mvhd, whose timescale and duration are 64 bits wide', async () => {
+    // 7200 / 600 = 12 s. Read with version 0 offsets this payload would yield a
+    // different number, which is why the version byte is checked, not assumed.
+    const file = await writeMedia('v1.mp4', Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...moovV1(600, 7200)]))
+    expect(await readIsoBmffDurationSeconds(file)).toBe(12)
+  })
+
+  it('finds the moov when it comes FIRST (faststart layout)', async () => {
+    const file = await writeMedia('faststart.mp4', Uint8Array.from([
+      ...box('ftyp', FTYP_PAYLOAD),
+      ...moovV0(1000, 4000),
+      ...mdat(4096),
+    ]))
+    expect(await readIsoBmffDurationSeconds(file)).toBe(4)
+  })
+
+  it('finds the moov when it comes LAST, after the media data (ordinary layout)', async () => {
+    // The layout that breaks a naive "read the head" reader: the mvhd sits past a
+    // 64 KiB mdat, so the seek is the whole point of the implementation.
+    const file = await writeMedia('moov-last.mp4', Uint8Array.from([
+      ...box('ftyp', FTYP_PAYLOAD),
+      ...mdat(64 * 1024),
+      ...moovV0(90000, 900000),
+    ]))
+    expect(await readIsoBmffDurationSeconds(file)).toBe(10)
+  })
+
+  it('skips a trak inside the moov rather than assuming mvhd comes first', async () => {
+    const file = await writeMedia('trak-first.mp4', Uint8Array.from([
+      ...box('ftyp', FTYP_PAYLOAD),
+      ...box('moov', box('trak', new Uint8Array(200)), box('mvhd', mvhd(0, 100, 250))),
+    ]))
+    expect(await readIsoBmffDurationSeconds(file)).toBe(2.5)
+  })
+
+  it('refuses a file that is not ISO BMFF at all, instead of returning undefined', async () => {
+    // A WebM head: a real video, but no boxes anywhere in it.
+    const file = await writeMedia('clip.webm', WEBM)
+    const failure = await refusalOf(readIsoBmffDurationSeconds(file))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_NOT_ISO_BMFF')
+    expect(failure?.message).toContain('not an ISO BMFF')
+  })
+
+  it('refuses bytes that merely happen to start with a plausible size', async () => {
+    const file = await writeMedia('notes.mp4', new Uint8Array([0, 0, 0, 8, 0x68, 0x65, 0x6c, 0x6c]))
+    const failure = await refusalOf(readIsoBmffDurationSeconds(file))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_NOT_ISO_BMFF')
+    expect(failure?.message).toContain('"hell"')
+  })
+
+  it('refuses a container with no moov box', async () => {
+    const file = await writeMedia('no-moov.mp4', Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...mdat(64)]))
+    const failure = await refusalOf(readIsoBmffDurationSeconds(file))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_DURATION_UNREADABLE')
+    expect(failure?.message).toContain('no moov box')
+  })
+
+  it('refuses a moov with no mvhd child', async () => {
+    const file = await writeMedia('no-mvhd.mp4', Uint8Array.from([
+      ...box('ftyp', FTYP_PAYLOAD),
+      ...box('moov', box('trak', new Uint8Array(16))),
+    ]))
+    const failure = await refusalOf(readIsoBmffDurationSeconds(file))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_DURATION_UNREADABLE')
+    expect(failure?.message).toContain('no mvhd child')
+  })
+
+  it('refuses an mvhd whose timescale is zero, which has no seconds to answer with', async () => {
+    const file = await writeMedia('zero-timescale.mp4', Uint8Array.from([
+      ...box('ftyp', FTYP_PAYLOAD),
+      ...box('moov', box('mvhd', mvhd(0, 0, 5000))),
+    ]))
+    const failure = await refusalOf(readIsoBmffDurationSeconds(file))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_DURATION_UNREADABLE')
+    expect(failure?.message).toContain('timescale of 0')
+  })
+
+  it('refuses a truncated container rather than walking past the end', async () => {
+    const complete = Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...moovV0(1000, 5000)])
+    const file = await writeMedia('truncated.mp4', complete.subarray(0, complete.byteLength - 8))
+    const failure = await refusalOf(readIsoBmffDurationSeconds(file))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_NOT_ISO_BMFF')
+    expect(failure?.message).toContain('truncated')
+  })
+
+  it('refuses a missing file instead of reporting a duration of NaN', async () => {
+    const failure = await refusalOf(readIsoBmffDurationSeconds(path.join(work, 'does-not-exist.mp4')))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_MEDIA_NOT_FOUND')
+  })
+})
+
+describe('prepareImageInput / prepareVideoInput / prepareAudioInput', () => {
+  it('uploads a local image and cites the cdn_url, sending the measured upload body', async () => {
+    const file = await writeMedia('frame.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47]))
+    const { fetchFn, calls } = queuedFetch(uploadPair('frame.png', 'image/png'))
+    const payload = await prepareImageInput(file, 'inputImagePath', mediaContext({ fetchFn }))
+
+    expect(payload).toEqual({
+      url: 'https://' + MINIMAX_CDN_HOST + '/tmp/frame.png',
+      mime_type: 'image/png',
+    })
+    expect(uploadBodyOf(calls[0])).toEqual({
+      filename: 'frame.png',
+      mime_type: 'image/png',
+      size_bytes: 4,
+      category: MINIMAX_UPLOAD_CATEGORY,
+    })
+    // The bytes go to put_url; the cdn_url is only ever CITED.
+    expect(calls[1]?.url).toBe('https://upload.example.com/put/frame.png')
+    expect(calls[2]).toBeUndefined()
+  })
+
+  it('uploads a local audio file with its own media type', async () => {
+    const file = await writeMedia('voice.mp3', new Uint8Array([0x49, 0x44, 0x33]))
+    const { fetchFn, calls } = queuedFetch(uploadPair('voice.mp3', 'audio/mpeg'))
+    const payload = await prepareAudioInput(file, 'referenceAudioPaths[0]', mediaContext({ fetchFn }))
+    expect(payload.mime_type).toBe('audio/mpeg')
+    expect(uploadBodyOf(calls[0]).mime_type).toBe('audio/mpeg')
+  })
+
+  it('passes a MiniMax CDN URL through WITHOUT sending an upload request', async () => {
+    const url = 'https://' + MINIMAX_CDN_HOST + '/tmp/already-there.png'
+    const { fetchFn, calls } = queuedFetch([])
+    const payload = await prepareImageInput(url, 'referenceImagePaths[0]', mediaContext({ fetchFn }))
+    expect(payload).toEqual({ url, mime_type: 'image/png' })
+    // Not one request: the URL is already somewhere the service can read.
+    expect(calls).toHaveLength(0)
+  })
+
+  it('keeps a cdn URL exactly as given, query string and all', async () => {
+    // Only the EXTENSION is read from the path; the cited URL is not rewritten.
+    const url = 'https://' + MINIMAX_CDN_HOST + '/tmp/x.mp4?x-oss-signature=abc'
+    const { fetchFn, calls } = queuedFetch([])
+    const payload = await prepareVideoInput(url, 'referenceVideoPaths[0]', 4, mediaContext({ fetchFn }))
+    expect(payload.url).toBe(url)
+    expect(payload.duration_seconds).toBe(4)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a third-party public URL locally, naming the argument and sending nothing', async () => {
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareImageInput('https://example.com/cat.png', 'lastFrameImagePath', mediaContext({ fetchFn })))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_URL_NOT_MINIMAX_CDN')
+    // The ARGUMENT is named: thirteen media arguments could be the one.
+    expect(failure?.message).toContain('lastFrameImagePath')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses an extension outside the image whitelist, without a single request', async () => {
+    const file = await writeMedia('frame.gif', new Uint8Array([0x47, 0x49, 0x46]))
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareImageInput(file, 'inputImagePath', mediaContext({ fetchFn })))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_MEDIA_TYPE_UNSUPPORTED')
+    expect(failure?.message).toContain('.gif')
+    expect(failure?.message).toContain('inputImagePath')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a .mkv reference video: a video, but not one of the two extensions this route sends', async () => {
+    const file = await writeMedia('clip.mkv', new Uint8Array(16))
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareVideoInput(file, 'referenceVideoPaths[0]', undefined, mediaContext({ fetchFn })))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_MEDIA_TYPE_UNSUPPORTED')
+    expect(failure?.message).toContain('.mp4 .mov')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses an image above 30 MiB after the stat and before reading it', async () => {
+    const file = path.join(work, 'huge.png')
+    await writeFile(file, Buffer.alloc(0))
+    await truncate(file, 30 * 1024 * 1024 + 1)
+    const readSpy = vi.spyOn(fsPromises, 'readFile')
+    try {
+      const { fetchFn, calls } = queuedFetch([])
+      const failure = await refusalOf(prepareImageInput(file, 'inputImagePath', mediaContext({ fetchFn })))
+      expect(failure?.code).toBe('MINIMAX_VIDEO_MEDIA_TOO_LARGE')
+      expect(failure?.message).toContain('30.0 MB')
+      expect(readSpy).not.toHaveBeenCalled()
+      expect(calls).toHaveLength(0)
+    } finally {
+      readSpy.mockRestore()
+    }
+  })
+
+  it('applies each kind its own ceiling: 50 MiB for a video, 15 MiB for audio', async () => {
+    const video = path.join(work, 'big.mp4')
+    await writeFile(video, Buffer.alloc(0))
+    await truncate(video, 50 * 1024 * 1024 + 1)
+    const audio = path.join(work, 'big.wav')
+    await writeFile(audio, Buffer.alloc(0))
+    await truncate(audio, 15 * 1024 * 1024 + 1)
+
+    const { fetchFn, calls } = queuedFetch([])
+    const videoFailure = await refusalOf(prepareVideoInput(video, 'referenceVideoPaths[0]', undefined, mediaContext({ fetchFn })))
+    const audioFailure = await refusalOf(prepareAudioInput(audio, 'referenceAudioPaths[0]', mediaContext({ fetchFn })))
+    expect(videoFailure?.code).toBe('MINIMAX_VIDEO_MEDIA_TOO_LARGE')
+    expect(videoFailure?.message).toContain('50.0 MB')
+    expect(audioFailure?.code).toBe('MINIMAX_VIDEO_MEDIA_TOO_LARGE')
+    expect(audioFailure?.message).toContain('15.0 MB')
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe('reference video durations', () => {
+  it('reads a local reference video length out of the container, with no argument from the caller', async () => {
+    const file = await writeMedia('reference.mp4', Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...moovV0(1000, 7000)]))
+    const { fetchFn, calls } = queuedFetch(uploadPair('reference.mp4', 'video/mp4'))
+    const payload = await prepareVideoInput(file, 'referenceVideoPaths[0]', undefined, mediaContext({ fetchFn }))
+    expect(payload.duration_seconds).toBe(7)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('refuses a public reference video with no stated length, because a URL cannot be measured', async () => {
+    const url = 'https://' + MINIMAX_CDN_HOST + '/tmp/ref.mp4'
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareVideoInput(url, 'referenceVideoPaths[1]', undefined, mediaContext({ fetchFn })))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_REFERENCE_DURATION_REQUIRED')
+    expect(failure?.message).toContain('referenceVideoDurationSeconds')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('lets the caller override the measured length when the two agree within a second', async () => {
+    const file = await writeMedia('trimmed.mp4', Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...moovV0(1000, 10000)]))
+    const { fetchFn } = queuedFetch(uploadPair('trimmed.mp4', 'video/mp4'))
+    const payload = await prepareVideoInput(file, 'referenceVideoPaths[0]', 10.4, mediaContext({ fetchFn }))
+    // The caller number is what travels, not the container one.
+    expect(payload.duration_seconds).toBe(10.4)
+    expect(reconcileReferenceVideoDurationSeconds('x', 10, 10.9)).toBe(10.9)
+    expect(MINIMAX_REFERENCE_DURATION_TOLERANCE_SECONDS).toBe(1)
+  })
+
+  it('refuses a stated length that contradicts the container, naming BOTH values', async () => {
+    const file = await writeMedia('mismatch.mp4', Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...moovV0(1000, 12000)]))
+    const { fetchFn } = queuedFetch(uploadPair('mismatch.mp4', 'video/mp4'))
+    const failure = await refusalOf(prepareVideoInput(file, 'referenceVideoPaths[0]', 5, mediaContext({ fetchFn })))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_REFERENCE_DURATION_MISMATCH')
+    // Both numbers, or the caller cannot tell which side is wrong.
+    expect(failure?.message).toContain('given as 5 s')
+    expect(failure?.message).toContain('says 12 s')
+  })
+
+  it('reports a container it cannot measure with the reader own error code, before uploading it', async () => {
+    // A real ftyp, then media data and no moov: the length simply is not there.
+    // The ORDER is the assertion as much as the code - measuring first means
+    // this costs no upload request at all.
+    const file = await writeMedia('weird.mp4', Uint8Array.from([...box('ftyp', FTYP_PAYLOAD), ...mdat(32)]))
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareVideoInput(file, 'referenceVideoPaths[0]', undefined, mediaContext({ fetchFn })))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_DURATION_UNREADABLE')
+    expect(failure?.message).toContain('referenceVideoPaths[0]')
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe('prepareGenerationMedia', () => {
+  it('keys the prepared media by the SERVICE field names, not by the parameter names', async () => {
+    // THE FIELD-NAME TABLE FROM THE SPEC, section 0. Four of the five differ, and
+    // a body built by destructuring the arguments gets all four wrong.
+    const frame = await writeMedia('first.png', new Uint8Array([1, 2, 3]))
+    const last = await writeMedia('last.png', new Uint8Array([4, 5, 6]))
+    const { fetchFn } = queuedFetch([...uploadPair('first.png', 'image/png'), ...uploadPair('last.png', 'image/png')])
+    const media = await prepareGenerationMedia(
+      { inputImagePath: frame, lastFrameImagePath: last },
+      'MiniMax-H3',
+      mediaContext({ fetchFn }),
+    )
+    expect(Object.keys(media).sort()).toEqual([
+      'hasKeyframes', 'hasReferences', 'input_image', 'last_frame_image',
+    ])
+    expect(media.input_image?.url).toBe('https://' + MINIMAX_CDN_HOST + '/tmp/first.png')
+    expect(media.last_frame_image?.url).toBe('https://' + MINIMAX_CDN_HOST + '/tmp/last.png')
+    expect(media).not.toHaveProperty('input_image_path')
+    expect(media).not.toHaveProperty('last_frame_image_path')
+    expect(media.hasKeyframes).toBe(true)
+    expect(media.hasReferences).toBe(false)
+  })
+
+  it('reports hasReferences for a reference collection, and uploads every item in order', async () => {
+    const one = await writeMedia('a.jpg', new Uint8Array([1]))
+    const two = await writeMedia('b.jpg', new Uint8Array([2]))
+    const { fetchFn, calls } = queuedFetch([...uploadPair('a.jpg', 'image/jpeg'), ...uploadPair('b.jpg', 'image/jpeg')])
+    const media = await prepareGenerationMedia(
+      { referenceImagePaths: [one, two] },
+      'MiniMax-H3',
+      mediaContext({ fetchFn }),
+    )
+    expect(media.reference_images?.map(entry => entry.url)).toEqual([
+      'https://' + MINIMAX_CDN_HOST + '/tmp/a.jpg',
+      'https://' + MINIMAX_CDN_HOST + '/tmp/b.jpg',
+    ])
+    expect(media.hasReferences).toBe(true)
+    expect(media.hasKeyframes).toBe(false)
+    expect(calls.filter(call => call.url.includes('get_upload_url'))).toHaveLength(2)
+  })
+
+  it('refuses more than 9 reference images, naming the set and the excess, with nothing sent', async () => {
+    const paths = Array.from({ length: MAX_REFERENCE_IMAGES + 3 }, (_value, index) => path.join(work, 'i' + index + '.png'))
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareGenerationMedia({ referenceImagePaths: paths }, 'MiniMax-H3', mediaContext({ fetchFn })))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_REFERENCE_LIMIT')
+    expect(failure?.message).toContain('12 reference image(s)')
+    expect(failure?.message).toContain('3 over the limit of 9')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses more than 3 reference videos and more than 3 reference audios', async () => {
+    const videos = Array.from({ length: MAX_REFERENCE_VIDEOS + 1 }, (_v, i) => 'https://' + MINIMAX_CDN_HOST + '/v' + i + '.mp4')
+    const audios = Array.from({ length: MAX_REFERENCE_AUDIOS + 2 }, (_v, i) => 'https://' + MINIMAX_CDN_HOST + '/a' + i + '.mp3')
+    const { fetchFn, calls } = queuedFetch([])
+    const videoFailure = await refusalOf(prepareGenerationMedia({ referenceVideoPaths: videos }, 'MiniMax-H3', mediaContext({ fetchFn })))
+    expect(videoFailure?.message).toContain('4 reference video(s)')
+    expect(videoFailure?.message).toContain('1 over the limit of 3')
+
+    const audioFailure = await refusalOf(prepareGenerationMedia({ referenceAudioPaths: audios }, 'MiniMax-H3', mediaContext({ fetchFn })))
+    expect(audioFailure?.message).toContain('5 reference audio(s)')
+    expect(audioFailure?.message).toContain('2 over the limit of 3')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses more than 12 media items in TOTAL even when each set is inside its own limit', async () => {
+    // 9 images + 3 videos + 1 audio = 13: every set is legal, the total is not.
+    const images = Array.from({ length: MAX_REFERENCE_IMAGES }, (_v, i) => 'https://' + MINIMAX_CDN_HOST + '/i' + i + '.png')
+    const videos = Array.from({ length: MAX_REFERENCE_VIDEOS }, (_v, i) => 'https://' + MINIMAX_CDN_HOST + '/v' + i + '.mp4')
+    const audios = ['https://' + MINIMAX_CDN_HOST + '/a0.mp3']
+    expect(images.length + videos.length + audios.length).toBe(MAX_REFERENCE_MEDIA_TOTAL + 1)
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareGenerationMedia(
+      {
+        referenceImagePaths: images,
+        referenceVideoPaths: videos,
+        referenceVideoDurationSeconds: [4, 4, 4],
+        referenceAudioPaths: audios,
+      },
+      'MiniMax-H3',
+      mediaContext({ fetchFn }),
+    ))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_REFERENCE_LIMIT')
+    expect(failure?.message).toContain('13 reference media item(s)')
+    expect(failure?.message).toContain('1 over the combined limit of 12')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a duration array whose length does not match the video list', async () => {
+    const videos = ['https://' + MINIMAX_CDN_HOST + '/v0.mp4', 'https://' + MINIMAX_CDN_HOST + '/v1.mp4']
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareGenerationMedia(
+      { referenceVideoPaths: videos, referenceVideoDurationSeconds: [4] },
+      'MiniMax-H3',
+      mediaContext({ fetchFn }),
+    ))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_REFERENCE_DURATION_INVALID')
+    expect(failure?.message).toContain('POSITION')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses reference media on MiniMax-Hailuo-2.3, naming the arguments to drop', async () => {
+    expect(minimaxModelSupportsReferenceMedia('MiniMax-H3')).toBe(true)
+    expect(minimaxModelSupportsReferenceMedia('MiniMax-H3-Max')).toBe(true)
+    expect(minimaxModelSupportsReferenceMedia('MiniMax-Hailuo-2.3')).toBe(false)
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareGenerationMedia(
+      { referenceImagePaths: ['https://' + MINIMAX_CDN_HOST + '/x.png'] },
+      'MiniMax-Hailuo-2.3',
+      mediaContext({ fetchFn }),
+    ))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_REFERENCES_UNSUPPORTED')
+    expect(failure?.message).toContain('referenceImagePaths')
+    expect(failure?.message).toContain('1 reference image(s)')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a last frame on Hailuo, which supports first_frame and the legacy subject type only', async () => {
+    const { fetchFn, calls } = queuedFetch([])
+    const failure = await refusalOf(prepareGenerationMedia(
+      {
+        inputImagePath: 'https://' + MINIMAX_CDN_HOST + '/a.png',
+        lastFrameImagePath: 'https://' + MINIMAX_CDN_HOST + '/b.png',
+      },
+      'MiniMax-Hailuo-2.3',
+      mediaContext({ fetchFn }),
+    ))
+    expect(failure?.code).toBe('MINIMAX_VIDEO_LAST_FRAME_UNSUPPORTED')
+    expect(failure?.message).toContain('lastFrameImagePath')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('allows a Hailuo first frame, which is the one media argument that model takes', async () => {
+    const { fetchFn, calls } = queuedFetch([])
+    const media = await prepareGenerationMedia(
+      { inputImagePath: 'https://' + MINIMAX_CDN_HOST + '/a.jpg' },
+      'MiniMax-Hailuo-2.3',
+      mediaContext({ fetchFn }),
+    )
+    expect(media.input_image?.url).toBe('https://' + MINIMAX_CDN_HOST + '/a.jpg')
+    expect(media.hasKeyframes).toBe(true)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('narrows the image extension set for Hailuo and keeps the wider set for H3', async () => {
+    // .heic is legal for the route and NOT for Hailuo (spec section 2.3).
+    const haultoFailure = await refusalOf(prepareGenerationMedia(
+      { inputImagePath: 'https://' + MINIMAX_CDN_HOST + '/a.heic' },
+      'MiniMax-Hailuo-2.3',
+      mediaContext({ fetchFn: queuedFetch([]).fetchFn, model: 'MiniMax-Hailuo-2.3' }),
+    ))
+    expect(haultoFailure?.message).toContain('NARROWER set')
+
+    const h3 = await prepareGenerationMedia(
+      { inputImagePath: 'https://' + MINIMAX_CDN_HOST + '/a.heic' },
+      'MiniMax-H3',
+      mediaContext({ fetchFn: queuedFetch([]).fetchFn }),
+    )
+    expect(h3.input_image?.mime_type).toBe('image/heic')
+  })
+
+  it('returns no media keys at all for a plain text-to-video call', async () => {
+    const { fetchFn, calls } = queuedFetch([])
+    const media = await prepareGenerationMedia({}, 'MiniMax-H3', mediaContext({ fetchFn }))
+    expect(media).toEqual({ hasKeyframes: false, hasReferences: false })
+    expect(calls).toHaveLength(0)
+  })
+})
 
 let work: string
 
@@ -415,8 +994,20 @@ describe('minimax_understand_video', () => {
     expect(calls[0]?.url).toBe('https://agent.minimax.cn/mavis/api/v1/mcp/get_upload_url')
     // The three field names the service spelled out in its own error (probe
     // §5). file_name / content_type / file_size were wrong on all three.
+    //
+    // `category` is the FOURTH field, and it is the one this body was missing:
+    // upstream's measured upload body carries it and names the temporary bucket
+    // the object lands in (docs/minimax-video-extended-spec.md section 2.1). It
+    // is asserted by exact equality rather than by `toMatchObject` on purpose -
+    // the point is that the body IS the measured shape, not a superset of it.
     const granted = JSON.parse(String(calls[0]?.init?.body)) as Record<string, unknown>
-    expect(granted).toEqual({ filename: 'clip.webm', mime_type: 'video/webm', size_bytes: MP4.byteLength })
+    expect(granted).toEqual({
+      filename: 'clip.webm',
+      mime_type: 'video/webm',
+      size_bytes: MP4.byteLength,
+      category: MINIMAX_UPLOAD_CATEGORY,
+    })
+    expect(MINIMAX_UPLOAD_CATEGORY).toBe('user_file_upload_tmp')
     expect(granted).not.toHaveProperty('file_name')
     expect(granted).not.toHaveProperty('content_type')
     expect(granted).not.toHaveProperty('file_size')
@@ -818,19 +1409,20 @@ describe('local container validation', () => {
   })
 })
 
-describe('minimax_generate_video', () => {
-  /** One planned mock answer. */
-  type PlannedAnswer = { status: number; body: unknown; headers?: Record<string, string> }
+/** One planned mock answer. */
+type PlannedAnswer = { status: number; body: unknown; headers?: Record<string, string> }
 
-  /** The four answers one successful generation consumes. */
-  function successPlan(videoUrl = 'https://cdn.example.com/out.mp4'): PlannedAnswer[] {
-    return [
-      { status: 200, body: { base_resp: { status_code: 0 }, task_id: 'task-42' } },
-      { status: 200, body: { base_resp: { status_code: 0 }, status: 'running' } },
-      { status: 200, body: { base_resp: { status_code: 0 }, status: 'succeeded', video_url: videoUrl, duration: 6 } },
-      { status: 200, body: MP4, headers: { 'content-type': 'video/mp4' } },
-    ]
-  }
+/** The four answers one successful generation consumes. */
+function successPlan(videoUrl = 'https://cdn.example.com/out.mp4'): PlannedAnswer[] {
+  return [
+    { status: 200, body: { base_resp: { status_code: 0 }, task_id: 'task-42' } },
+    { status: 200, body: { base_resp: { status_code: 0 }, status: 'running' } },
+    { status: 200, body: { base_resp: { status_code: 0 }, status: 'succeeded', video_url: videoUrl, duration: 6 } },
+    { status: 200, body: MP4, headers: { 'content-type': 'video/mp4' } },
+  ]
+}
+
+describe('minimax_generate_video', () => {
 
   it('runs submit, poll, download and write, and returns the workspace path', async () => {
     const { fetchFn, calls } = queuedFetch(successPlan())
@@ -1328,7 +1920,14 @@ describe('minimax_generate_video', () => {
     expect(tool.description).toContain('5-15 for MiniMax-H3-Max')
     expect(tool.description).toContain('exactly 6 or 10 for MiniMax-Hailuo-2.3')
     expect(tool.description).toContain('case-sensitive')
-    expect(tool.description).toContain('ratio and aigc_watermark arguments are not implemented')
+    // `ratio` and `aigcWatermark` ARE implemented now, so the description has to
+    // describe the RULE rather than deny the feature. The old assertion pinned
+    // the denial sentence and went stale the moment the linkage landed.
+    expect(tool.description).toContain('ratio picks the shape of the clip')
+    expect(tool.description).toContain('is REWRITTEN before it is sent')
+    expect(tool.description).toContain('adaptive is not allowed for a text-only generation')
+    expect(tool.description).toContain('aigcWatermark asks for the AIGC watermark')
+    expect(tool.description).not.toContain('not implemented on this route yet')
     // The no-retry contract is stated where the model reads it, not only in code.
     expect(tool.description).toContain('A failed submit is NOT re-sent')
   })
@@ -1561,5 +2160,117 @@ describe('minimax_generate_video', () => {
       // not come back, because it named 2K - the value that model always refuses.
       expect(description).not.toContain('inference')
     })
+  })
+})
+
+describe('the extended submit surface', () => {
+  // These cover the wiring the two halves of the extended work meet in: the
+  // argument names the model types, the field names the service reads, the
+  // ratio the rules decide, and the one-submit guard that keeps a retry from
+  // paying twice.
+
+  it('sends the media under the SERVICE field names, not the argument names', async () => {
+    const { fetchFn, calls } = queuedFetch(successPlan())
+    await generateTool(fetchFn).execute(
+      {
+        prompt: 'a cat',
+        model: 'MiniMax-H3',
+        durationSeconds: 4,
+        inputImagePath: 'https://cdn.hailuoai.com/mcp/u1/general/a.png',
+        referenceImagePaths: ['https://cdn.hailuoai.com/mcp/u1/general/b.png'],
+      },
+      execution(),
+    )
+    const body = JSON.parse(String(calls[0]?.init?.body))
+    // The argument names are NOT the field names.
+    expect(body).not.toHaveProperty('inputImagePath')
+    expect(body).not.toHaveProperty('referenceImagePaths')
+    expect(body.input_image).toEqual({ url: 'https://cdn.hailuoai.com/mcp/u1/general/a.png', mime_type: 'image/png' })
+    expect(body.reference_images).toEqual([
+      { url: 'https://cdn.hailuoai.com/mcp/u1/general/b.png', mime_type: 'image/png' },
+    ])
+    // A frame was given, so the service is told which reference type it is.
+    expect(body.reference_type).toBe('first_frame')
+  })
+
+  it('forces adaptive when a frame is given, whatever the caller asked for', async () => {
+    const { fetchFn, calls } = queuedFetch(successPlan())
+    await generateTool(fetchFn).execute(
+      {
+        prompt: 'a cat',
+        model: 'MiniMax-H3',
+        durationSeconds: 4,
+        ratio: '16:9',
+        inputImagePath: 'https://cdn.hailuoai.com/mcp/u1/general/a.png',
+      },
+      execution(),
+    )
+    const body = JSON.parse(String(calls[0]?.init?.body))
+    expect(body.ratio).toBe('adaptive')
+  })
+
+  it('defaults a text-only generation to 16:9 and sends the 2K the H3 family wants', async () => {
+    const { fetchFn, calls } = queuedFetch(successPlan())
+    await generateTool(fetchFn).execute({ prompt: 'a cat', model: 'MiniMax-H3', durationSeconds: 4 }, execution())
+    const body = JSON.parse(String(calls[0]?.init?.body))
+    expect(body.ratio).toBe('16:9')
+    expect(body.resolution).toBe('2K')
+  })
+
+  it('refuses adaptive for a text-only generation, without sending anything', async () => {
+    const { fetchFn, calls } = queuedFetch(successPlan())
+    await expect(generateTool(fetchFn).execute(
+      { prompt: 'a cat', model: 'MiniMax-H3', durationSeconds: 4, ratio: 'adaptive' },
+      execution(),
+    )).rejects.toThrow(/adaptive/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a reference set on Hailuo, without sending anything', async () => {
+    const { fetchFn, calls } = queuedFetch(successPlan())
+    await expect(generateTool(fetchFn).execute(
+      {
+        prompt: 'a cat',
+        model: 'MiniMax-Hailuo-2.3',
+        durationSeconds: 6,
+        referenceImagePaths: ['https://cdn.hailuoai.com/mcp/u1/general/b.png'],
+      },
+      execution(),
+    )).rejects.toThrow(/reference/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses a second identical submission in the same turn, without sending it', async () => {
+    const { fetchFn, calls } = queuedFetch(successPlan())
+    const tool = generateTool(fetchFn)
+    // The guard needs a session identity to mean anything: without one the key
+    // degrades to the body alone and two DIFFERENT generations would look
+    // alike. So the guard is exercised with a session that HAS an id.
+    const withSession = () => {
+      const base = execution()
+      return { ...base, agent: { ...base.agent, id: 'session-1' } }
+    }
+    await tool.execute({ prompt: 'a cat', model: 'MiniMax-H3', durationSeconds: 4 }, withSession())
+    const before = calls.length
+    await expect(tool.execute(
+      { prompt: 'a cat', model: 'MiniMax-H3', durationSeconds: 4 },
+      withSession(),
+    )).rejects.toThrow(/already submitted/)
+    expect(calls).toHaveLength(before)
+  })
+
+  it('does NOT refuse a second generation that differs, in the same session', async () => {
+    // Two plans, so the second call has answers to consume: a DIFFERENT prompt
+    // is a different intention and must be sent, not refused as a duplicate.
+    const { fetchFn, calls } = queuedFetch([...successPlan(), ...successPlan()])
+    const tool = generateTool(fetchFn)
+    const withSession = () => {
+      const base = execution()
+      return { ...base, agent: { ...base.agent, id: 'session-2' } }
+    }
+    await tool.execute({ prompt: 'a cat', model: 'MiniMax-H3', durationSeconds: 4 }, withSession())
+    const before = calls.length
+    await tool.execute({ prompt: 'a dog', model: 'MiniMax-H3', durationSeconds: 4 }, withSession())
+    expect(calls.length).toBeGreaterThan(before)
   })
 })

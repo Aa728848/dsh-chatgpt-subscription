@@ -78,6 +78,7 @@ import {
   resetCardHttpStatus,
   useResetCard,
 } from './reset-card.ts'
+import { minimaxVideoHistory, type MinimaxVideoHistoryPort } from './video-history.ts'
 import type { MinimaxCodeResetResultDto } from '../../shared/minimax-code-contracts.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 
@@ -297,6 +298,10 @@ export function registerMinimaxCodeRoutes(
   const accountsHandler = createMinimaxCodeAccountsHandler(options.accountPool, {
     readStatus: () => getMinimaxCodeWebStatus(store, options, settings),
   })
+  // Resolved per request, not captured: the video tool may install its own store
+  // (or a test may swap one in) after this registration ran, and a captured
+  // instance would keep answering from the one that existed at startup.
+  const minimaxVideoHistoryInstance = (): MinimaxVideoHistoryPort => minimaxVideoHistory()
 
   /**
    * Refresh the Token Plan usage snapshot, returning the fresh value.
@@ -388,6 +393,32 @@ export function registerMinimaxCodeRoutes(
 
     try {
       if (path === 'accounts') return accountsHandler(request, response)
+
+      // The generation ledger the settings card's history section renders.
+      //
+      // READ-ONLY ON PURPOSE: the rows are written by the video tool itself, right
+      // after the clip lands on disk, so this route has no POST half. A browser
+      // that could append a row could claim a generation never made, and the row
+      // would then describe a file that does not exist.
+      //
+      // A missing or unreadable history answers `{ ok: true, value: { entries: [] } }`
+      // rather than an error: the section renders "nothing yet" either way, and a
+      // 500 here would make an empty ledger look like a broken plugin.
+      if (path === 'video-history') {
+        if (method !== 'GET') return sendMethodNotAllowed(response)
+        const history = minimaxVideoHistoryInstance()
+        const entries = await history.list()
+        return sendJson(response, 200, {
+          ok: true,
+          value: {
+            entries,
+            // The card says where the ledger lives, so a user looking for the file
+            // is not left guessing at a path the plugin never names.
+            storagePath: history.path(),
+            encryptedAtRest: history.encryptedAtRest(),
+          },
+        })
+      }
 
       if (path === '' || path === 'status') {
         if (method !== 'GET') return sendMethodNotAllowed(response)
