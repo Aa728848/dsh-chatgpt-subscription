@@ -84,12 +84,60 @@ describe('投影单元：折叠 tool/call 事件', () => {
     expect(state.updates.map(update => update.message)).toEqual(['第一条', '第二条'])
   })
 
+  it('PTC 形态：run_code 里发出的 progress_update（tool/ptc-dispatch）也折得出来', () => {
+    // 线上默认是 PTC 模式：模型只看得见 run_code，progress_update 作为程序里的
+    // 子调用发出，日志里落的是 tool/ptc-dispatch（参数**已解析成对象**）。
+    // 只认 tool/call 的话，最常见的那条路径会一条都折不出来。
+    const unit = progressUpdatesProjection()
+    const event = {
+      type: 'tool/ptc-dispatch',
+      seq: 42,
+      time: 1_700_000_000_000,
+      data: {
+        rootCallId: 'root',
+        parentCallId: 'root',
+        subCallId: 'root:ptc:1',
+        name: NOTIFY_USER_TOOL,
+        arguments: { title: '  阶段结论  ', message: '正文' },
+        isError: false,
+        content: [],
+      },
+    }
+    const state = unit.apply(unit.init({ id: 'root' }, 0), event as never)
+    expect(state.updates).toHaveLength(1)
+    expect(state.updates[0]).toMatchObject({
+      id: 'pu-42-root',
+      title: '阶段结论',
+      message: '正文',
+      at: 1_700_000_000_000,
+      source: 'root',
+    })
+  })
+
+  it('PTC 形态：arguments 不是对象 / message 不是字符串时返回同一引用且不抛错', () => {
+    const unit = progressUpdatesProjection()
+    const base = unit.init({ id: 'root' }, 0)
+    const bad = [
+      { type: 'tool/ptc-dispatch', seq: 1, time: 1, data: { name: NOTIFY_USER_TOOL, arguments: '{"message":"x"}' } },
+      { type: 'tool/ptc-dispatch', seq: 2, time: 1, data: { name: NOTIFY_USER_TOOL, arguments: null } },
+      { type: 'tool/ptc-dispatch', seq: 3, time: 1, data: { name: NOTIFY_USER_TOOL, arguments: { message: 42 } } },
+      { type: 'tool/ptc-dispatch', seq: 4, time: 1, data: { name: NOTIFY_USER_TOOL, arguments: [{ message: 'x' }] } },
+      { type: 'tool/ptc-dispatch', seq: 5, time: 1, data: { name: 'run_code', arguments: { message: 'x' } } },
+    ]
+    for (const event of bad) {
+      expect(() => unit.apply(base, event as never)).not.toThrow()
+      expect(unit.apply(base, event as never)).toBe(base)
+    }
+  })
+
   it('投影键与状态版本是冻结契约（缓存按这两个值寻址）', () => {
     const unit = progressUpdatesProjection()
     expect(unit.key).toBe(PROGRESS_UPDATES_PROJECTION_KEY)
     expect(unit.key).toBe('progressUpdates')
     expect(unit.stateVersion).toBe(PROGRESS_UPDATES_STATE_VERSION)
-    expect(unit.stateVersion).toBe(1)
+    // 2：多认了 PTC 的 tool/ptc-dispatch 形状。这个数字只在折叠语义真的变了时
+    // 才该动 —— 它同时是缓存里那一行的失效开关（版本不符会被丢弃重折）。
+    expect(unit.stateVersion).toBe(2)
   })
 
   it('init 从会话头取 source；没有会话头时也能折（只是没有 source）', () => {

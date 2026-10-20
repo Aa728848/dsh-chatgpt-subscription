@@ -49,7 +49,7 @@ export const PROGRESS_UPDATES_PROJECTION_KEY = 'progressUpdates'
  * 投影缓存按 `(sessionId, key, ver, seq, val)` 落盘。字段结构或折叠语义一变就
  * +1：版本对不上的旧行会被丢弃重折，而不是被续折成一份混着两套语义的垃圾。
  */
-export const PROGRESS_UPDATES_STATE_VERSION = 1
+export const PROGRESS_UPDATES_STATE_VERSION = 2
 
 /**
  * 折叠出来的状态。
@@ -232,6 +232,23 @@ function parseArguments(raw: unknown): { message: string, title?: string } | und
 }
 
 /**
+ * 把 PTC 子调用里的 `arguments`（**已解析的对象**）读成进展内容。
+ *
+ * 与 {@link parseArguments} 只差一层：那条路径拿到的是模型吐出的 JSON 原文，
+ * 这条拿到的是宿主已经归一化过的对象（见 `dsh-tools` 的 `PtcDispatchEventData`）。
+ * 同样是"任何一点不对就返回 undefined"，同样不抛错。
+ * @param raw - 已归一化的入参对象。
+ * @returns 正文与（去空白后的）可选标题。
+ */
+function parseDispatchedArguments(raw: unknown): { message: string, title?: string } | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const record = raw as { title?: unknown, message?: unknown }
+  if (typeof record.message !== 'string') return undefined
+  const title = typeof record.title === 'string' ? record.title.trim() : ''
+  return title === '' ? { message: record.message } : { message: record.message, title }
+}
+
+/**
  * 造一个进展折叠单元。
  *
  * 每次登记都要一份**新的**定义对象：它是纯函数集合，没有跨会话的状态，但把
@@ -251,13 +268,25 @@ export function progressUpdatesProjection(): ProgressUpdatesProjectionDefinition
     },
 
     apply(state, event) {
-      if (event?.type !== 'tool/call') return state
+      // 两代调用形态都要认。**PTC 模式（本仓库默认）下模型看到的是 run_code**，
+      // 它把 progress_update 当成程序里的一个子调用发出去：日志里落的是
+      // `tool/ptc-dispatch`（name 在 `data.name`、参数已解析成对象），而
+      // `tool/call` 那一条的 name 是 `run_code`。只认 `tool/call` 会让面板在
+      // 最常用的这条路径上一条都折不出来 —— 线上真出现过：左栏进展行都在，
+      // 右侧面板全空。
+      const isNative = event?.type === 'tool/call'
+      const isDispatch = event?.type === 'tool/ptc-dispatch'
+      if (!isNative && !isDispatch) return state
 
       const data = event.data as { name?: unknown, arguments?: unknown } | null | undefined
       if (typeof data !== 'object' || data === null) return state
       if (data.name !== NOTIFY_USER_TOOL) return state
 
-      const body = parseArguments(data.arguments)
+      // 两代事件的参数形状不同：原生调用是**未解析的 JSON 原文**，PTC 子调用是
+      // **已 JSON 归一化的对象**（见 dsh-tools 的 PtcDispatchEventData）。
+      const body = isNative
+        ? parseArguments(data.arguments)
+        : parseDispatchedArguments(data.arguments)
       if (body === undefined) return state
 
       // seq 与 time 缺一不可：没有 seq 就没有稳定 id，没有 time 就排不出整棵树。
