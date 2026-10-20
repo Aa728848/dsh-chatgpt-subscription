@@ -31,17 +31,20 @@ function thinkingLabel(mode: MinimaxCodeModelOption['thinking'], t: Translate): 
 }
 
 /**
- * Hours still left on the access token, or null once it has run out.
+ * Minutes still left on the access token, or null once it has run out.
  *
- * MiniMax Code's token lives about 24 hours, so hours are the unit the card
- * reports; a value worth a fraction of an hour keeps one decimal instead of
- * rounding down to 0.
+ * MiniMax Code's token lives about ONE HOUR — measured, not the day an earlier
+ * note assumed — so minutes are the unit the card reports: hours would turn the
+ * whole remaining life into a single digit and hide the point at which the Host
+ * renews the credential. One decimal is kept, so a countdown that is running
+ * out reads as 0.4 rather than as nothing; below one minute the token is
+ * treated as already gone.
  */
-export function remainingHours(expiresAtMs: number | undefined): string | null {
+export function remainingMinutes(expiresAtMs: number | undefined): string | null {
   if (expiresAtMs === undefined || !Number.isFinite(expiresAtMs) || expiresAtMs <= 0) return null
-  const hours = (expiresAtMs - Date.now()) / 3_600_000
-  if (hours <= 0) return null
-  return hours >= 10 ? hours.toFixed(0) : hours.toFixed(1)
+  const minutes = (expiresAtMs - Date.now()) / 60_000
+  if (minutes < 1) return null
+  return minutes.toFixed(1)
 }
 
 export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): React.JSX.Element {
@@ -71,7 +74,7 @@ export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): 
     )
   }
 
-  const hours = remainingHours(account?.expiresAtMs)
+  const minutes = remainingMinutes(account?.expiresAtMs)
 
   return (
     <div className="dsha-page">
@@ -170,9 +173,9 @@ export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): 
               <span className="dsha-label">{t('expiresAt')}</span>
               <span className="dsha-value">
                 {formatDate(account?.expiresAtMs)}
-                {hours === null
+                {minutes === null
                   ? ` · ${t('expiresExpired')}`
-                  : ` · ${t('expiresRemaining').replace('{hours}', hours)}`}
+                  : ` · ${t('expiresRemaining').replace('{minutes}', minutes)}`}
               </span>
             </div>
           </>
