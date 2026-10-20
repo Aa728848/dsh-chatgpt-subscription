@@ -391,8 +391,7 @@ export function isRegion(value: unknown): value is MinimaxCodeRegion {
 
 /** Reasoning levels the whole route understands, for route-level validation. */
 export function isMinimaxCodeReasoningEffort(value: unknown): value is MinimaxCodeReasoningEffort {
-  return value === 'default'
-    || value === 'low'
+  return value === 'low'
     || value === 'medium'
     || value === 'high'
     || value === 'xhigh'

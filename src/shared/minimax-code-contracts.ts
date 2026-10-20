@@ -16,8 +16,22 @@ export const MINIMAX_CODE_PROVIDER_NAME = 'MiniMax Code（编程订阅）'
 /** 区域。cn 用 account.minimax.cn / agent.minimax.cn；global 用对应 .io 域名。 */
 export type MinimaxCodeRegion = 'cn' | 'global'
 
-/** M3.1 的思考档位；M2.7 恒定开启，M3 为开关二态。 */
-export type MinimaxCodeReasoningEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+/**
+ * 思考档位；M2.7 恒定开启且没有档位，M3 为开关二态，M3.1 强制开启并可选档位。
+ *
+ * **这里没有 `default` 档**，是重新基线后的结论，不是遗漏：
+ *
+ * - 上游的模型目录（models.dev 快照，`filecdn.minimax.chat/public/models-dev/api.json`）
+ *   里 MiniMax 的 `reasoning_options` 对 M3 只写 `[{"type":"toggle"}]`，对 M2.7 系列是
+ *   `[]`，**任何模型都没有名为 default 的档位**；
+ * - harness 自己的档位词表（`off|minimal|low|medium|high|xhigh|max`）同样没有它。
+ *
+ * 插件曾经自造过一个本地拼写来表达「调用方没选」，但它从不上线——官方文档说
+ * 省略 effort 即 max——于是「没选 = 最贵档」这件事对用户完全不可见，而模型卡片
+ * 上还挂着一个永远选不中的假档位。现在「没选」由每个模型真实的默认档承担
+ * （M3 与 M3.1 都是 max），不再需要假档位。
+ */
+export type MinimaxCodeReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 /**
  * 全线共用的思考档位，按从小到大的顺序排列。
@@ -25,10 +39,10 @@ export type MinimaxCodeReasoningEffort = 'default' | 'low' | 'medium' | 'high' |
  * 设置卡片只渲染这一份列表：档位是线路级的词汇表（`isMinimaxCodeReasoningEffort`
  * 就是按它校验的），而不是单个模型的能力表。某个模型实际接受哪些档位由
  * `MinimaxCodeModelOption.reasoningEfforts` 单独给出——把两者合成一份会让卡片
- * 在给一个只认 `default` 的模型显示 `max` 时无从判断是模型不支持还是文案没写。
+ * 在给一个只认 high 的模型显示 max 时无从判断是模型不支持还是文案没写。
  */
 export const MINIMAX_CODE_REASONING_EFFORTS: readonly MinimaxCodeReasoningEffort[] =
-  ['default', 'low', 'medium', 'high', 'xhigh', 'max']
+  ['low', 'medium', 'high', 'xhigh', 'max']
 
 /**
  * 路由前缀（host 暴露、client 消费）。

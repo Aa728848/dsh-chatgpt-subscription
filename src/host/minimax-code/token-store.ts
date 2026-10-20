@@ -1142,7 +1142,13 @@ export function registerMinimaxCodePreferenceStore(
         enabled: value.enabled !== false,
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
-        defaultReasoningEffort: value.defaultReasoningEffort,
+        // Normalized on the way out, because the scope may still hold a
+        // document written by an older build: the retired 'default' spelling
+        // meant "no choice", which is what null means now. Without this, a
+        // legacy value would keep naming a tier the route no longer accepts.
+        defaultReasoningEffort: isReasoningEffort(value.defaultReasoningEffort)
+          ? value.defaultReasoningEffort
+          : null,
         checkin: { enabled: value.checkin?.enabled !== false },
       }
     },

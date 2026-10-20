@@ -405,10 +405,14 @@ function modalitiesForModel(modelId: string): Array<'text' | 'image' | 'video'> 
  * thinking, so the picker must not offer a state the wire cannot express.
  */
 function resolveDefaultEffort(
-  model: { reasoningEfforts: readonly string[]; defaultReasoningEffort: string; thinking: string },
+  model: { reasoningEfforts: readonly string[]; defaultReasoningEffort: MinimaxCodeReasoningEffort | null; thinking: string },
   globalEffort: MinimaxCodeReasoningEffort | null | undefined,
 ): string | undefined {
   const efforts = model.reasoningEfforts
+  // No global choice means the caller picked nothing, and DSH already has a
+  // first-class spelling for that: a model that advertises no `defaultEffort`.
+  // The catalog still decides what goes on the wire - `effortForModel` resolves
+  // the model's own default - so nothing is lost by not repeating it here.
   if (globalEffort === null || globalEffort === undefined) return undefined
   if (model.thinking !== 'always-on' && isThinkingDisabledEffort(globalEffort)) return 'none'
   return efforts.includes(globalEffort) ? globalEffort : undefined
@@ -722,6 +726,11 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // ranking it above `max` made DSH's picker present it as the strongest
     // thinking level. A model that offers no `defaultEffort` already says
     // "the caller picked nothing", which is the same thing.
+    //
+    // Since the re-baseline it is not a level at all: the vocabulary has no
+    // such member (the upstream models.dev snapshot names none, and neither
+    // does the harness's own ladder), so the strength table below is the whole
+    // list of levels this line can put on the wire.
     const efforts = orderReasoningEfforts(effortsForModel(modelId), ['low', 'medium', 'high', 'xhigh', 'max'])
     const contextWindow = contextWindowForModel(modelId, settings.contextWindowOverrides)
     const defaultEffort = entry === undefined

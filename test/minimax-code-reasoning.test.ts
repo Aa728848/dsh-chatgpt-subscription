@@ -8,6 +8,9 @@ describe('MiniMax Code reasoning metadata', () => {
     } as never)
 
     const resolved = await adapter.resolveModel('minimax-code', 'MiniMax-M3.1-Flash')
+    // The invented 'default' tier is gone: the upstream model catalog
+    // (models.dev snapshot) has no such level for any MiniMax model, and the
+    // harness's own vocabulary has none either.
     expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual([
       'low', 'medium', 'high', 'xhigh', 'max',
     ])

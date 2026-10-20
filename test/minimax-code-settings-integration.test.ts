@@ -110,6 +110,23 @@ describe('MiniMax Code settings surface', () => {
     expect(JSON.stringify(captured.body)).not.toMatch(/accessToken|refreshToken/)
   })
 
+  it('reads a retired effort spelling as "no choice" instead of failing', async () => {
+    // The invented 'default' tier was a legal choice in an earlier build, so a
+    // stored settings document can still name it. It meant "no choice", which
+    // is what null means now - so the line keeps working instead of the
+    // document becoming unreadable.
+    await fs.mkdir(path.join(dshHome, 'storages'), { recursive: true })
+    await fs.writeFile(
+      path.join(dshHome, 'storages', 'minimax-code-models.json'),
+      JSON.stringify({ enabled: true, defaultReasoningEffort: 'default' }),
+    )
+    const { handler } = harness()
+    const { response, captured } = exchange()
+    await handler(request({ url: '/minimax-code/api/status' }), response)
+    expect(captured.status).toBe(200)
+    expect(captured.body.value.defaultReasoningEffort).toBeNull()
+  })
+
   it('narrows the selection through /models', async () => {
     const { handler } = harness()
     const narrowed = exchange()

@@ -40,7 +40,7 @@ describe('the MiniMax M3.1 Flash rename', () => {
     const retired = minimaxCodeModelDef(RETIRED)
     const current = minimaxCodeModelDef(CURRENT)
     expect(retired).toBe(current)
-    expect(retired?.contextWindow).toBe(1_000_000)
+    expect(retired?.contextWindow).toBe(512_000)
     expect(retired?.thinking).toBe('forced-effort')
     expect(retired?.inputModalities).toContain('image')
     expect(minimaxCodeModelName(RETIRED)).toBe('MiniMax M3.1 Flash')
@@ -77,7 +77,10 @@ describe('the MiniMax M3.1 Flash rename', () => {
   it('keeps a window override that was stored under the retired id', () => {
     expect(contextWindowForModel(CURRENT, { [RETIRED]: 200_000 })).toBe(200_000)
     expect(contextWindowForModel(CURRENT, { [CURRENT]: 300_000 })).toBe(300_000)
-    expect(contextWindowForModel(CURRENT, {})).toBe(1_000_000)
+    // The re-baselined window: 512K by default, 1M as the option that
+    // costs more (upstream's table lists 1M under a "higher_usage" hint, and
+    // the models.dev price tiers double above 200K of context).
+    expect(contextWindowForModel(CURRENT, {})).toBe(512_000)
   })
 
   it('renders the settings card with the current id enabled', () => {

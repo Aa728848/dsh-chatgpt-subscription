@@ -621,31 +621,61 @@ function catalogEntry(modelId: string): MinimaxCodeCatalogModel | undefined {
 }
 
 /**
- * The thinking control for one request, as documented by MiniMax.
+ * The `thinking` object one request carries, and the only thing that decides
+ * WHICH CHANNEL the reasoning comes back in.
  *
- * The official "Model Invocation" page settles the shape, and it is NOT a
- * `thinking` object:
+ * The official "Model Invocation" page says thinking is on by default and needs
+ * no configuration, and that the depth field is a top-level
+ * `output_config.effort`. Both are true - and they were read as "the request
+ * never carries a `thinking` key". Measured on this subscription endpoint on
+ * 2026-10-20 (`scripts/probe-minimax-thinking-channels.probe.ts`):
  *
- * > Thinking is **on by default and needs no configuration**.
+ * | request | response block | where the reasoning lands |
+ * | --- | --- | --- |
+ * | no `thinking` field | `content_block.type = "text"` | **in the answer text** |
+ * | `thinking: { type: 'adaptive' }` | `content_block.type = "thinking"` | **in a thinking block** |
  *
- * > Protocol | Thinking depth field | Where thinking content is returned
- * > Anthropic-compatible | `output_config.effort` | `thinking` content block
- * > OpenAI-compatible  | `reasoning_effort` | `reasoning_content` field
+ * The same model, the same prompt, the same reasoning - but without the object
+ * the service streams it as ordinary assistant text, so the model visibly
+ * thinks out loud inside the answer. That also means the harness never sees a
+ * reasoning block, and the interleaved-thinking replay has nothing to replay.
  *
- * Three consequences, each replacing something this function used to do:
+ * M3.1 needs no object: measured, a forced-on model answers in the thinking
+ * channel either way, which is why the upstream managed path deletes the
+ * `thinking` key for forced-on models and keeps it for switchable ones.
  *
- * 1. No `thinking` key is ever sent. The field was inferred, never documented,
- *    and a request that thinks is exactly a request that says nothing - which is
- *    why the field could sit here for months with nothing contradicting it.
- * 2. The depth level belongs at the TOP level, in `output_config.effort`, not
- *    inside a thinking object. Anywhere else is a field the service does not read.
- * 3. `effort` accepts low, medium, high, xhigh and max. There is no `default`
- *    member: the page says omitting the field means max, so `default` must not
- *    reach the wire, and neither must an explicit `max` for the same reason.
+ * The off state is the same object with `disabled`, which is what the upstream
+ * managed path sends and what this endpoint measured as thinking off (10 output
+ * tokens, no thinking block).
  *
- * The off switch is a separate question the docs only answer for M3.1, where turning
- * thinking off returns a 400. `toggle` models keep theirs because the
- * subscription's own model table still names a none-thinking state for them.
+ * @returns the value for `thinking`, or undefined when the request should
+ *   carry no thinking object at all.
+ */
+export function thinkingFieldFor(
+  modelId: string,
+  requestedEffort: string | undefined | null,
+): { type: 'adaptive' | 'disabled' } | undefined {
+  const model = catalogEntry(modelId)
+  if (model === undefined) return undefined
+  // Only a switchable model has a switch to state. An always-on model is on
+  // whatever the request says, and a forced-on model cannot be turned off, so
+  // for both the object is not a field the service needs.
+  if (model.thinking !== 'toggle') return undefined
+  return { type: isThinkingDisabledEffort(requestedEffort) ? 'disabled' : 'adaptive' }
+}
+
+/**
+ * The depth level one request carries, as `output_config`.
+ *
+ * The level belongs at the TOP level - `output_config.effort` - and accepts
+ * low, medium, high, xhigh and max. There is no `default` member: the page
+ * says omitting the field means max, so the old local `default` spelling never
+ * reached the wire. This line no longer leans on that: every model that has
+ * levels states its default out loud, and a request that asks for nothing
+ * resolves to that default instead of to an omission.
+ *
+ * The level is the DEPTH, not the channel: measured, low and max differ by
+ * about 3x thinking and 4x latency, and it composes with the `thinking` object.
  *
  * @returns the value for `output_config`, or undefined when the request should
  *   carry no thinking control at all.
@@ -659,16 +689,13 @@ export function outputConfigFor(
   // always-on: nothing selectable, nothing to disable, and the model thinks by
   // default, so the honest request is the one that says nothing.
   if (model.thinking === 'always-on') return undefined
-  // toggle: a request that says nothing is already the on state, so only the off
-  // state is worth a field.
-  if (model.thinking === 'toggle') {
-    return isThinkingDisabledEffort(requestedEffort) ? { effort: 'none' } : undefined
-  }
-  // forced-effort: the level is the only control. `none` is not an effort
-  // level here - the documented disable for M3.1 is a 400 - so a request that asks
-  // to turn thinking off gets no level and therefore the service default.
-  const effort = effortForModel(modelId, requestedEffort ?? null)
-  return effort === 'default' ? undefined : { effort }
+  // A request that turns thinking off carries no level: the off state is the
+  // `thinking` object's job, and a level next to it would contradict it. For a
+  // forced-on model this leaves the request saying nothing at all, which is the
+  // measured behaviour: M3.1 keeps thinking whatever `none` says.
+  if (isThinkingDisabledEffort(requestedEffort)) return undefined
+  const effort = effortForModel(modelId, requestedEffort)
+  return effort === null ? undefined : { effort }
 }
 
 /**
@@ -906,7 +933,14 @@ export function buildMinimaxRequest(
 
   const system = leadingSystemText(options)
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
-  const outputConfig = outputConfigFor(options.model, options.reasoningEffort === undefined ? null : String(options.reasoningEffort))
+  const requestedEffort = options.reasoningEffort === undefined ? null : String(options.reasoningEffort)
+  const outputConfig = outputConfigFor(options.model, requestedEffort)
+  const thinking = thinkingFieldFor(options.model, requestedEffort)
+  // Thinking and an explicit temperature are mutually exclusive on this
+  // protocol. "Engaged" means the request actually asks for thinking: a
+  // `disabled` object is the other side of the switch, and a request that
+  // turns thinking off may still carry a temperature.
+  const thinkingEngaged = outputConfig !== undefined || thinking?.type === 'adaptive'
   const caching = request.cacheControl !== false
 
   const body: Record<string, unknown> = {
@@ -928,9 +962,7 @@ export function buildMinimaxRequest(
     // explicit-caching page marks - and stays the measured string when it is
     // off.
     ...(system === undefined ? {} : { system: caching ? [{ type: 'text', text: system }] : system }),
-    // Thinking and an explicit temperature are mutually exclusive on this
-    // protocol, so the temperature is dropped whenever thinking is engaged.
-    ...(options.temperature === undefined || outputConfig !== undefined ? {} : { temperature: options.temperature }),
+    ...(options.temperature === undefined || thinkingEngaged ? {} : { temperature: options.temperature }),
     ...(options.stop && options.stop.length > 0 ? { stop_sequences: options.stop } : {}),
     ...(options.tools && options.tools.length > 0
       ? {
@@ -941,6 +973,9 @@ export function buildMinimaxRequest(
           })),
         }
       : {}),
+    // The `thinking` object picks the channel the reasoning comes back in
+    // (see thinkingFieldFor); the `output_config` carries the depth.
+    ...(thinking === undefined ? {} : { thinking }),
     ...(outputConfig === undefined ? {} : { output_config: outputConfig }),
   }
 

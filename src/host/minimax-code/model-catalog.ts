@@ -75,8 +75,14 @@ export interface MinimaxCodeCatalogModel {
    * not document.
    */
   reasoningEfforts: readonly MinimaxCodeReasoningEffort[]
-  /** Level used when the conversation does not pick one. */
-  defaultReasoningEffort: MinimaxCodeReasoningEffort
+  /**
+   * Level used when the conversation does not pick one.
+   *
+   * Null for a model with no selectable level (an always-on one): there is
+   * nothing to put on the wire, and a value here would be a promise the route
+   * cannot keep.
+   */
+  defaultReasoningEffort: MinimaxCodeReasoningEffort | null
   /**
    * Attachments the model's FILES API accepts, when it states a bound.
    *
@@ -126,8 +132,11 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxTokens: 128_000,
     inputModalities: ['text'],
     thinking: 'always-on',
-    reasoningEfforts: ['default'],
-    defaultReasoningEffort: 'default',
+    // No level at all: the upstream catalog lists `reasoning_options: []` for the
+    // M2.7 family, and the endpoint has no field to set. An always-on model
+    // publishes no levels rather than a fake one.
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
     maxAttachments: null,
     maxImageBytes: null,
     maxVideoBytes: null,
@@ -142,8 +151,8 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxTokens: 128_000,
     inputModalities: ['text'],
     thinking: 'always-on',
-    reasoningEfforts: ['default'],
-    defaultReasoningEffort: 'default',
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
     maxAttachments: null,
     maxImageBytes: null,
     maxVideoBytes: null,
@@ -158,12 +167,18 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     maxTokens: 128_000,
     inputModalities: ['text', 'image', 'video'],
     thinking: 'toggle',
-    // The model's thinking is a two-state switch, not a gradient: the table names
-    // it "none-thinking / thinking, default thinking". Exposing one always-on
-    // entry is the honest projection of that
-    // into DSH's effort list, which has no "off" member.
-    reasoningEfforts: ['default'],
-    defaultReasoningEffort: 'default',
+    // The upstream catalog (the models.dev snapshot) lists M3 as a pure toggle
+    // with no depth levels - but this endpoint MEASURED honours
+    // `output_config.effort` on M3: low and max differ by about 3x thinking
+    // and 4x latency (2026-10-05, re-measured 2026-10-20). The measurement
+    // outranks the catalog, so the levels are exposed.
+    //
+    // The default is stated out loud rather than left implicit: "omitted" means
+    // max on the server, so an unstated level was silently the most expensive
+    // one - and with the invented `default` tier in place, a caller asking for
+    // `low` was quietly clamped back to it.
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultReasoningEffort: 'max',
     maxAttachments: 9,
     maxImageBytes: 10 * 1024 * 1024,
     maxVideoBytes: 50 * 1024 * 1024,
@@ -173,24 +188,26 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
   {
     id: 'MiniMax-M3.1-Flash',
     name: 'MiniMax M3.1 Flash',
-    contextWindow: 1_000_000,
-    optionalContextWindow: null,
+    contextWindow: 512_000,
+    optionalContextWindow: 1_000_000,
     maxTokens: 128_000,
     inputModalities: ['text', 'image', 'video'],
     thinking: 'forced-effort',
-    // The documented depth levels. `default` is deliberately NOT a wire value:
-    // the docs say omitting `effort` means max, so it is a local spelling for
-    // "the caller picked nothing" and `outputConfigFor` drops it before sending.
+    // The documented depth levels, and the default is one of them.
     //
-    // It is therefore not a LEVEL either, and listing it here put it at the top
-    // of the ladder: `orderReasoningEfforts` ranks by strength, so `default`
-    // was advertised above `max` and DSH's picker showed it as the strongest
-    // thinking level. DSH already has a first-class spelling for "the caller
-    // picked nothing" - a model that advertises no `defaultEffort` - and that
-    // is what this model now uses. The kimi-code line does the same: its
-    // strength table names no `default` either.
+    // `default` is gone from the vocabulary entirely: it was never a wire
+    // value (the docs say omitting `effort` means max), and it was never a
+    // LEVEL either - listing it here put it at the top of the ladder, where
+    // `orderReasoningEfforts` ranked it above `max` and DSH's picker showed
+    // it as the strongest thinking level. The upstream models.dev snapshot
+    // names no such level for any MiniMax model, and neither does the
+    // harness's own ladder (the kimi-code line agrees).
+    //
+    // So the default is stated out loud instead: "omitted" means max on the
+    // server, so an unstated level was silently the most expensive one, and a
+    // caller asking for `low` was quietly clamped back to the fake tier.
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    defaultReasoningEffort: 'default',
+    defaultReasoningEffort: 'max',
     maxAttachments: 4,
     maxImageBytes: 10 * 1024 * 1024,
     maxVideoBytes: 50 * 1024 * 1024,
@@ -292,9 +309,12 @@ export function isThinkingDisabledEffort(value: unknown): boolean {
 export function effortForModel(
   modelId: string,
   requested: string | undefined | null,
-): MinimaxCodeReasoningEffort {
+): MinimaxCodeReasoningEffort | null {
   const model = minimaxCodeModelDef(modelId)
-  if (model === undefined) return 'default'
+  if (model === undefined) return null
+  // A model with no selectable level has nothing to put on the wire; saying
+  // otherwise would send a level the model does not accept.
+  if (model.reasoningEfforts.length === 0) return null
   if (requested === undefined || requested === null) return model.defaultReasoningEffort
   const normalized = requested.trim().toLowerCase()
   const match = model.reasoningEfforts.find((effort) => effort === normalized)
@@ -403,7 +423,9 @@ export function buildMinimaxCodeModelOptions(
       // more output than the window it was measured against can hold.
       defaultMaxTokens: maxOutputTokensFor(model.id, contextWindow),
       reasoningEfforts: [...model.reasoningEfforts],
-      defaultReasoningEffort: model.defaultReasoningEffort,
+      // A model with no level publishes no level: the field is absent rather
+      // than null, because the client renders it as "this model has no ladder".
+      defaultReasoningEffort: model.defaultReasoningEffort ?? undefined,
       thinking: model.thinking as MinimaxCodeThinkingModeDto,
       description: model.description,
     }
