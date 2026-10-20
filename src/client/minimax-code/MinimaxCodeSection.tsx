@@ -22,6 +22,9 @@ import {
   type MinimaxCodeSectionProps,
   type Translate,
 } from './useMinimaxCodeSection.ts'
+import { VideoDefaultsSection, VideoHistorySection } from './VideoSettingsSections.tsx'
+import { readVideoDefaults, writeVideoDefaults } from './video-defaults-store.ts'
+import type { VideoDefaults } from './video-form-rules.ts'
 
 /** Human label per thinking mode, so the card states what the model does. */
 function thinkingLabel(mode: MinimaxCodeModelOption['thinking'], t: Translate): string {
@@ -65,6 +68,24 @@ export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): 
   } = actions
 
   const t: Translate = fallbackTranslate
+
+  /*
+   * The video defaults are read ONCE on the first render and kept in a ref rather
+   * than a state: they are the form's starting values, not a live value, and
+   * re-reading localStorage on every render would both cost work and reset the
+   * section's own controls mid-edit (the section holds its own state).
+   *
+   * A lazy initializer inside the section would re-read on every remount and lose
+   * an unsaved pick; holding it here means the section always starts from what was
+   * last saved successfully.
+   */
+  const videoDefaultsRef = React.useRef<VideoDefaults | null>(null)
+  if (videoDefaultsRef.current === null) videoDefaultsRef.current = readVideoDefaults()
+  const saveVideoDefaults = React.useCallback((next: VideoDefaults): boolean => {
+    if (!writeVideoDefaults(next)) return false
+    videoDefaultsRef.current = next
+    return true
+  }, [])
 
   if (loading) {
     return (
@@ -512,6 +533,19 @@ export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): 
             ))}
         </section>
       )}
+
+      {/*
+        The video half of this line: what /video starts from, and what has been
+        generated so far. Both sections read only local facts — the defaults from
+        this browser, the history from the host ledger — so neither can fail the
+        rest of the card.
+      */}
+      <VideoDefaultsSection
+        t={t}
+        initial={videoDefaultsRef.current}
+        onSave={saveVideoDefaults}
+      />
+      <VideoHistorySection t={t} />
 
       {error !== null && (
         <div className="dsha-error">

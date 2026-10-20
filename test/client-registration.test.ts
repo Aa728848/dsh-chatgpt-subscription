@@ -313,6 +313,10 @@ describe('client registration', () => {
       'sidebar.right.pane.tab',
       'sidebar.right.pane.tab.title',
       'settings.section',
+      // MiniMax 视频的 `/video` 参数弹窗：渲染座位挂在输入框的 overlay 槽上。
+      // 弹窗本身是全局的（命令回调在一段没有 React 树的代码里，靠模块级句柄
+      // 打开它），但 overlay 是宿主唯一为「盖在输入框上的层」准备的槽位。
+      'conversation.input.overlay',
     ])
     // Every provider, MiniMax Code included, lives behind one tabbed settings
     // page, so the hub is the one subscription settings.section entry. Progress
@@ -332,6 +336,11 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'claude-quota', order: 41 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'step-code-quota', order: 43 }),
+    ])
+    // 视频参数弹窗的那一格：与设置卡片同一种「插件自己的一格」写法，插在输入框
+    // 浮层里、排在那条反馈弹窗（order 2）之后。
+    expect(registrations.filter((registration) => registration.name === 'conversation.input.overlay')).toEqual([
+      expect.objectContaining({ name: 'conversation.input.overlay', id: 'minimax-video-form', order: 3 }),
     ])
     expect(registrations.filter((registration) => registration.name === 'tool.call.toolview')).toEqual([
       expect.objectContaining({ key: CODEX_IMAGE_TOOL_NAME }),

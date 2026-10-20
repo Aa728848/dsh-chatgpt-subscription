@@ -48,6 +48,7 @@ import { StepCodeComposerQuota } from './step-code/StepCodeComposerQuota.tsx'
 import { dictionaries as stepCodeDicts, NS_STEP_CODE, type StepCodeLocaleKey } from './step-code/locales.ts'
 import { installStepCodeStyles } from './step-code/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
+import { createVideoCommandHost, installVideoCommand } from './minimax-code/video-command-host.tsx'
 import { installProgressUpdatesClient } from './progress-updates/index.ts'
 import { installProgressUpdatesStyles } from './progress-updates/styles.ts'
 import { dictionaries as progressUpdatesDicts, NS_PROGRESS_UPDATES, type ProgressUpdatesLocaleKey } from './progress-updates/locales.ts'
@@ -254,6 +255,30 @@ export function apply(ctx: ClientContext): void {
   // 单独一个子模块（./progress-updates/），与 kimi-code / workbuddy 这些线路同一种
   // 组织方式：入口只负责调用，注册细节留在子模块里。
   installProgressUpdatesClient(ctx)
+
+  // MiniMax 视频的第二个用户入口：`/video` 斜杠命令 + 参数弹窗。
+  //
+  // 视频工具是模型自主调用的，用户唯一的入口是自然语言，于是他既不知道有哪些参数，
+  // 也无从知道那些参数会怎么被联动规则改写。命令给出参数，弹窗给出表单，提交只把
+  // 参数**填进输入框**——用户看一眼再发送（详见 ./minimax-code/video-command.ts）。
+  //
+  // 两段分开注册，理由与「进展更新」那段相同：命令挂在宿主的 commandUi 上，弹窗
+  // 容器挂在 conversation.input.overlay 上，任何一段缺席都只该少一个功能，而不是
+  // 让整个插件 apply 失败。
+  ctx.effect(() => installVideoCommand(ctx), 'dsh-minimax-code: /video command')
+  const VideoCommandHost = createVideoCommandHost(ctx)
+  ctx.slots.inject('conversation.input.overlay', () => {
+    try {
+      return ctx.slots.register({
+        name: 'conversation.input.overlay',
+        id: 'minimax-video-form',
+        order: 3,
+        locale: NS_MINIMAX_CODE,
+      }, VideoCommandHost)
+    } catch {
+      return () => {}
+    }
+  })
 }
 
 type ImageUrlResolver = (sessionId: string, attachment: ImageAttachmentRef) => Promise<string>
