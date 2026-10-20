@@ -6,6 +6,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { BrandTile } from '../src/client/hub/brand-icons.tsx'
 import { ClinePassSection } from '../src/client/cline-pass/ClinePassSection.tsx'
 import { selectClinePassFacts } from '../src/client/cline-pass/ClinePassComposerQuota.tsx'
 import { zh } from '../src/client/cline-pass/locales.ts'
@@ -186,6 +188,16 @@ describe('ClinePassSection', () => {
     const el = await render()
     expect(el.innerHTML).not.toContain('sk-')
     expect(el.textContent).toContain('主号')
+  })
+})
+
+describe('the hub card mark', () => {
+  it('uses the official Cline glyph rather than a monogram', () => {
+    const markup = renderToStaticMarkup(<BrandTile id="cline-pass" />)
+    // The official white icon's viewBox and single currentColor path.
+    expect(markup).toContain('viewBox="0 0 113 113"')
+    expect(markup).toContain('fill="currentColor"')
+    expect(markup).not.toContain('dsh-hub-brand-mono')
   })
 })
 

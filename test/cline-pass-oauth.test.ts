@@ -7,7 +7,7 @@ import {
   registerClinePassTokens,
   ClinePassOAuthError,
 } from '../src/host/cline-pass/oauth.ts'
-import { bearerFor, isOAuthCredentials, parseClinePassCredentials } from '../src/host/cline-pass/token-store.ts'
+import { bearerFor, isOAuthCredentials, parseClinePassCredentials, type ClinePassOAuthCredentials } from '../src/host/cline-pass/token-store.ts'
 
 const NOW = new Date('2026-10-20T06:00:00Z').getTime()
 
@@ -85,13 +85,7 @@ describe('Cline Pass WorkOS OAuth', () => {
     expect(complete.status).toBe('complete')
     expect(complete.accountAlias).toBe('user@example.com')
     expect(added).toHaveLength(1)
-    const credentials = added[0] as {
-      kind: string
-      access: string
-      refresh: string
-      email: string
-      accountId: string
-    }
+    const credentials = added[0] as ClinePassOAuthCredentials
     expect(credentials).toMatchObject({
       kind: 'oauth',
       access: 'cline-access',
@@ -99,7 +93,7 @@ describe('Cline Pass WorkOS OAuth', () => {
       email: 'user@example.com',
       accountId: 'user-1',
     })
-    expect(bearerFor(credentials as never)).toBe('workos:cline-access')
+    expect(bearerFor(credentials)).toBe('workos:cline-access')
     expect(calls.some((url) => url.endsWith('/api/v1/auth/register'))).toBe(true)
     manager.dispose()
   })

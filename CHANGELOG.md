@@ -6,9 +6,10 @@
   - **登录**：Cline 账号走 **WorkOS 设备码 OAuth**（与官方 CLI 的 `cline` / `cline-pass` 同一条链），浏览器确认后账号自动入池；access token 以 `Bearer workos:<token>` 发送，到期前自动 refresh，轮换后的 refresh token 先落盘再使用；`invalid_grant` 标记账号失效并要求重新登录，网络/5xx 不误登出。静态 API Key 保留为兼容回退。端点、client id 与 `workos:` 前缀转录自 Cline 官方开源仓库（`sdk/packages/core/src/auth/cline.ts`、`auth/provider-auth-registry.ts`、`sdk/packages/shared/src/runtime/cline-environment.ts`，commit `ca7402c`，2026-10-20）。
   - **能力**：OpenAI Chat Completions 流式（文本 / reasoning / 工具调用 / 图片）；多账号（OAuth）或 API Key 顺序 / 轮询 / 粘性调度、429 冷却、401/403 失效标记与换号；**上游渠道探测 / 逐渠道校验 / 钉住 / 排除**，`strict` 与 `preferred` 两种模式，首个 token 前故障转移；两种管线写法默认都写（`provider.*` 与 `providerOptions.gateway.*`），并以响应回读的实际渠道判定钉住是否被采纳；官方目录（`recommended-models` + models.dev + 上游网关）刷新；按账号读取 5 小时 / 周 / 月额度；进程内请求历史（含失败尝试链与 token 用量）；8 个 `cline_pass_*` 管理工具默认不注册，卡片内可开启（重启生效）。
   - **注册点**：`src/index.ts`（线路工厂 / 路由 / hub 摘要 / dispose / 导出尾部）、`CONTROLLED_PROVIDERS`、`DIAGNOSTIC_PROVIDERS`、`hub/providers.tsx`、`hub/brand-icons.tsx`、`client/index.tsx`（locale / 样式 / 胶囊 order 44），以及既有计数断言各追加一项。
+  - **传输**：对"请求尚未发出"的 TLS/connect 失败自动重试 2 次，并在最终错误里说明"未到达网关、钉住未生效"；实测本机到 `api.cline.bot` 的 Node TLS 握手会间歇失败（同一时刻 curl 正常、IPv6 不可达），这与上游钉住无关。流中段断流不重试，避免重复计费。
   - **安全**：OAuth access / refresh token 与 API Key 只进平台加密凭据库（DPAPI / Keychain / Secret Service），响应与日志均不出现原文；登录流程 DTO 逐字段投影；所有写路由同源校验；错误信息最多回显上游一行原因。
-  - **文档**：新增 [`docs/cline-pass-line-plan.md`](docs/cline-pass-line-plan.md)（每个常量的出处、决策、**未验证清单**）；README 增加线路章节与路由表；协议证据矩阵增加一行。
-  - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **261 文件 / 4139 passed**（基线 253 / 4074，新增 8 个测试文件、65 例）；`npm run build` 与 `npm pack --dry-run` 通过，`lib/types/host/cline-pass/*` 已进包。
+  - **文档与品牌**：新增 [`docs/cline-pass-line-plan.md`](docs/cline-pass-line-plan.md)（每个常量的出处、决策、**未验证清单**）；README 增加线路章节与路由表；协议证据矩阵增加一行；hub 卡片改用 Cline 官方标记（`assets/branding/logos/cline-icon-white.svg` + 官方 app icon 的 `#343B42` 底砖），不再用字母占位。
+  - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **261 文件 / 4142 passed**（基线 253 / 4074，新增 8 个测试文件、68 例）；`npm run build` 与 `npm pack --dry-run` 通过，`lib/types/host/cline-pass/*` 已进包。
 
 ## 0.31.0 - 2026-10-20
 - **[minimax-code] 视频生成现在能带素材、选比例：首/尾帧、参考图/视频/音频、任意比例与 AIGC 水印**
