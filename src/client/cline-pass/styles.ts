@@ -7,6 +7,8 @@ import { installPluginStyle } from '../common/plugin-style.ts'
  */
 export function installClinePassStyles(): void {
   installPluginStyle('cline-pass', `
+.dshcp-login-row{align-items:center;display:flex;gap:12px;flex-wrap:wrap;margin:8px 0}
+.dshcp-login-code{border:0.5px solid var(--dsw-alias-brand-primary);border-radius:8px;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:20px;font-weight:700;letter-spacing:.18em;padding:6px 14px}
 .dshcp-keyform{display:flex;flex-direction:column;gap:8px;flex-direction:column;align-items:stretch}
 .dshcp-keyrow{display:flex;gap:8px;flex-wrap:wrap}
 .dshcp-keyrow .dsha-input{flex:1;min-width:180px}

@@ -22,7 +22,7 @@ const STATUS: ClinePassWebStatus = {
   authenticated: true,
   pool: {
     accounts: [
-      { id: 'a1', alias: '主号', isPrimary: true },
+      { id: 'a1', alias: '主号', isPrimary: true, authKind: 'oauth' },
       { id: 'a2', alias: '备用号', isPrimary: false, cooldownUntil: Date.now() + 600_000 },
     ],
     activeAccountId: 'a1',
@@ -69,6 +69,7 @@ const STATUS: ClinePassWebStatus = {
     fetchedAt: Date.now(),
   },
   historySize: 0,
+  login: null,
   settings: {
     baseURL: 'https://api.cline.bot/api/v1',
     defaultContextWindow: 128_000,
@@ -134,6 +135,15 @@ describe('ClinePassSection', () => {
     expect(el.querySelectorAll('.dsha-account-card')).toHaveLength(2)
     expect(el.querySelectorAll('.dsh-mcl-option')).toHaveLength(1)
     expect(el.textContent).toContain('GLM-5.3')
+  })
+
+  it('offers device sign-in as the primary action and keeps a key fallback', async () => {
+    const el = await render()
+    const headerButtons = [...el.querySelectorAll('.dsha-grouphead button')].map((button) => button.textContent)
+    expect(headerButtons).toContain(zh.login)
+    expect(headerButtons).toContain(zh.useApiKey)
+    // The account row says how it signed in, without exposing a token.
+    expect(el.textContent).toContain(zh.oauthAccount)
   })
 
   it('renders the discovered channels as chips with their verdicts', async () => {

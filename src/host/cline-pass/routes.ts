@@ -19,7 +19,8 @@ import { pinWarnings, normalizePinMode } from './protocol.ts'
 import type { ClinePassAccountPool } from './account-pool.ts'
 import type { ClinePassEngine } from './engine.ts'
 import type { ClinePassStore } from './store.ts'
-import type { ClinePassModelSettings, ClinePassModelSettingsStore } from './token-store.ts'
+import type { ClinePassLoginManager } from './oauth.ts'
+import { bearerFor, type ClinePassModelSettings, type ClinePassModelSettingsStore } from './token-store.ts'
 import { DEFAULT_MODELS, PROVIDER_ID, defaultPin, type ClinePassPinSettings } from './types.ts'
 import {
   CLINE_PASS_ROUTE_PREFIX,
@@ -29,6 +30,7 @@ import {
   type ClinePassAuthResult,
   type ClinePassChannelVerdictDto,
   type ClinePassHistoryRowDto,
+  type ClinePassLoginFlowDto,
   type ClinePassModelDto,
   type ClinePassPoolStatusDto,
   type ClinePassProbeResultDto,
@@ -146,6 +148,8 @@ export interface ClinePassRouteOptions {
   engine: ClinePassEngine
   /** Proxy-aware fetch for account verification and quota reads. */
   fetchFn: typeof fetch
+  /** Device-code sign-in state, when the composition installed one. */
+  login?: ClinePassLoginManager
   serving(): boolean
   conflict(): string | null
 }
@@ -182,6 +186,7 @@ export async function getClinePassWebStatus(options: ClinePassRouteOptions): Pro
     catalogCount: settings.catalogModels.length,
     usage: store.usage().accounts.length === 0 ? null : store.usage(),
     historySize: store.historySize(),
+    login: options.login?.current() ?? null,
     settings: {
       baseURL: settings.baseURL,
       defaultContextWindow: settings.defaultContextWindow,
@@ -200,6 +205,9 @@ const ROUTES = {
   status: 'GET',
   settings: 'POST',
   accounts: 'GET|POST',
+  'login/start': 'POST',
+  'login/status': 'GET',
+  'login/cancel': 'POST',
   models: 'GET|POST',
   'models/pin': 'POST',
   'models/reset': 'POST',
@@ -304,7 +312,7 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
               let baseURL = typeof body.baseURL === 'string' && body.baseURL.trim() !== '' ? body.baseURL.trim() : undefined
               if (key === '' && accountId !== undefined) {
                 const credentials = await accountPool.getFreshCredential(accountId, fetchFn)
-                key = credentials.apiKey
+                key = bearerFor(credentials)
                 baseURL = credentials.baseURL ?? baseURL
               }
               if (key === '') return sendJson(response, 400, { ok: false, error: 'Provide an API key or a stored account to test.' })
@@ -338,6 +346,41 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             return sendJson(response, 400, { ok: false, error: message })
           }
           return sendJson(response, 200, { ok: true, value: await status() })
+        }
+
+        if (path === 'login/start') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          if (options.login === undefined) return sendJson(response, 503, { ok: false, error: 'Cline sign-in is unavailable in this composition.' })
+          try {
+            const flow: ClinePassLoginFlowDto = await options.login.begin()
+            return sendJson(response, 200, { ok: true, value: flow })
+          } catch (error) {
+            return sendJson(response, 502, { ok: false, error: firstLine(error instanceof Error ? error.message : error, 300) })
+          }
+        }
+
+        if (path === 'login/status') {
+          if (method !== 'GET') return sendMethodNotAllowed(response)
+          if (options.login === undefined) return sendJson(response, 503, { ok: false, error: 'Cline sign-in is unavailable in this composition.' })
+          const id = url.searchParams.get('id') ?? ''
+          if (id === '') return sendJson(response, 400, { ok: false, error: 'login id is required.' })
+          try {
+            const flow: ClinePassLoginFlowDto = await options.login.status(id)
+            return sendJson(response, 200, { ok: true, value: flow })
+          } catch (error) {
+            return sendJson(response, 404, { ok: false, error: firstLine(error instanceof Error ? error.message : error, 300) })
+          }
+        }
+
+        if (path === 'login/cancel') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          if (options.login === undefined) return sendJson(response, 503, { ok: false, error: 'Cline sign-in is unavailable in this composition.' })
+          const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
+          const id = typeof body.id === 'string' ? body.id : ''
+          if (id === '') return sendJson(response, 400, { ok: false, error: 'login id is required.' })
+          return sendJson(response, 200, { ok: true, value: { cancelled: options.login.cancel(id) } })
         }
 
         if (path === 'models') {
@@ -585,7 +628,7 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             try {
               const credentials = await accountPool.getFreshCredential(account.id, fetchFn)
               const baseURL = credentials.baseURL && credentials.baseURL.trim() !== '' ? credentials.baseURL.trim() : settings.baseURL
-              const result = await fetchUsageLimits({ fetchFn, baseURL, apiKey: credentials.apiKey })
+              const result = await fetchUsageLimits({ fetchFn, baseURL, apiKey: bearerFor(credentials) })
               return {
                 accountId: account.id,
                 alias: account.alias,

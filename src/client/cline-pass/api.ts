@@ -4,6 +4,7 @@ import {
   type ClinePassAccountAction,
   type ClinePassAuthResult,
   type ClinePassHistoryRowDto,
+  type ClinePassLoginFlowDto,
   type ClinePassProbeResultDto,
   type ClinePassSettingsUpdateDto,
   type ClinePassTestResultDto,
@@ -46,6 +47,20 @@ export class ClinePassApi {
   /** Verify a key without storing it; the host answers the verdict directly. */
   testKey(body: { apiKey?: string; accountId?: string; baseURL?: string }): Promise<ClinePassAuthResult> {
     return api.post<ClinePassAuthResult>('/accounts', { action: 'test', ...body })
+  }
+
+  /** Start the Cline device-code sign-in. */
+  startLogin(): Promise<ClinePassLoginFlowDto> {
+    return api.post<ClinePassLoginFlowDto>('/login/start', {})
+  }
+
+  /** One poll of the pending sign-in; the host throttles it to WorkOS's interval. */
+  loginStatus(id: string): Promise<ClinePassLoginFlowDto> {
+    return api.get(`/login/status?id=${encodeURIComponent(id)}`)
+  }
+
+  cancelLogin(id: string): Promise<{ cancelled: boolean }> {
+    return api.post<{ cancelled: boolean }>('/login/cancel', { id })
   }
 
   setEnabledModels(enabledModelIds: string[] | null): Promise<ClinePassWebStatus> {

@@ -15,6 +15,7 @@ import { registerClinePassRoutes, type ClinePassRouteOptions } from '../src/host
 import { ClinePassAccountPool } from '../src/host/cline-pass/account-pool.ts'
 import { createClinePassStore } from '../src/host/cline-pass/store.ts'
 import { ClinePassModelSettingsStore, FileCredentialStore, type ClinePassCredentials } from '../src/host/cline-pass/token-store.ts'
+import { ClinePassLoginManager } from '../src/host/cline-pass/oauth.ts'
 import { createClinePassEngine } from './cline-pass-test-helpers.ts'
 import { DEFAULT_MODELS } from '../src/host/cline-pass/types.ts'
 import type { ClinePassWebStatus } from '../src/shared/cline-pass-contracts.ts'
@@ -76,6 +77,8 @@ let store: ReturnType<typeof createClinePassStore>
 let handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>
 let emit: ReturnType<typeof vi.fn>
 let dispose: () => void
+let login: ClinePassLoginManager
+let loginFetch: typeof fetch
 
 beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cline-pass-routes-'))
@@ -98,12 +101,21 @@ beforeEach(async () => {
     },
     emit,
   } as unknown as Context
+  loginFetch = (async () => { throw new Error('login fetch not stubbed') }) as typeof fetch
+  login = new ClinePassLoginManager({
+    fetchFn: (...args) => loginFetch(...args),
+    baseURL: () => 'https://api.cline.bot/api/v1',
+    onLogin: async (credentials) => {
+      await pool.addAccount(credentials, credentials.email ?? credentials.name)
+    },
+  })
   const options: ClinePassRouteOptions = {
     settings,
     accountPool: pool,
     store,
     engine,
     fetchFn: (async () => new Response('{}')) as typeof fetch,
+    login,
     serving: () => true,
     conflict: () => null,
   }
@@ -112,7 +124,9 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  login.dispose()
   dispose()
+  vi.useRealTimers()
   await fs.rm(dir, { recursive: true, force: true })
 })
 
@@ -207,6 +221,66 @@ describe('Cline Pass settings API', () => {
   it('answers method and path refusals in the same envelope', async () => {
     expect((await call({ url: '/cline-pass/api/settings' })).status).toBe(405)
     expect((await call({ url: '/cline-pass/api/nope' })).status).toBe(404)
+  })
+
+  it('starts a device sign-in, polls it, and adds the account', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const now = new Date('2026-10-20T06:00:00Z').getTime()
+    vi.setSystemTime(now)
+    let authenticate = 0
+    loginFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/user_management/authorize/device')) {
+        return Response.json({
+          device_code: 'device-1',
+          user_code: 'WXYZ-1234',
+          verification_uri: 'https://app.cline.bot/device',
+          verification_uri_complete: 'https://app.cline.bot/device?code=WXYZ-1234',
+          expires_in: 300,
+          interval: 5,
+        })
+      }
+      if (url.endsWith('/user_management/authenticate')) {
+        authenticate += 1
+        return authenticate === 1
+          ? Response.json({ error: 'authorization_pending' }, { status: 400 })
+          : Response.json({ access_token: 'workos-a', refresh_token: 'workos-r' })
+      }
+      if (url.endsWith('/api/v1/auth/register')) {
+        return Response.json({
+          success: true,
+          data: {
+            accessToken: 'cline-a',
+            refreshToken: 'cline-r',
+            expiresAt: new Date(now + 3_600_000).toISOString(),
+            userInfo: { email: 'signed@example.com', clineUserId: 'user-9' },
+          },
+        })
+      }
+      throw new Error('Unexpected login request ' + url)
+    }) as typeof fetch
+
+    const started = await call({ url: '/cline-pass/api/login/start', method: 'POST', body: {} })
+    expect(started.status).toBe(200)
+    const flow = started.body.value as { id: string; userCode: string; status: string }
+    expect(flow).toMatchObject({ userCode: 'WXYZ-1234', status: 'pending' })
+
+    // Too early: the host must not spend a WorkOS poll.
+    const early = await call({ url: '/cline-pass/api/login/status?id=' + encodeURIComponent(flow.id) })
+    expect((early.body.value as { status: string }).status).toBe('pending')
+    expect(authenticate).toBe(0)
+
+    vi.setSystemTime(now + 5_000)
+    await call({ url: '/cline-pass/api/login/status?id=' + encodeURIComponent(flow.id) })
+    vi.setSystemTime(now + 10_000)
+    const complete = await call({ url: '/cline-pass/api/login/status?id=' + encodeURIComponent(flow.id) })
+    expect((complete.body.value as { status: string }).status).toBe('complete')
+    const accounts = await pool.listAccounts()
+    expect(accounts).toHaveLength(1)
+    expect(accounts[0]).toMatchObject({ alias: 'signed@example.com', authKind: 'oauth' })
+    const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
+    expect(status.login?.status).toBe('complete')
+    expect(status.pool.accounts[0]?.authKind).toBe('oauth')
   })
 
   it('serves the in-process history newest first', async () => {

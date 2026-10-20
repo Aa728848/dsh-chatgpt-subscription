@@ -91,8 +91,27 @@ export interface ClinePassUsageDto {
   fetchedAt: number
 }
 
-/** One pooled key as the shared account card renders it. Never carries the key. */
-export type ClinePassAccountSummaryDto = PoolAccountSummaryDto
+/** One pooled account as the shared card renders it. Never carries a secret. */
+export interface ClinePassAccountSummaryDto extends PoolAccountSummaryDto {
+  /** How this account signed in; absent on a legacy row. */
+  authKind?: 'oauth' | 'api-key'
+}
+
+/** State of the device-code sign-in flow, as the card renders it. */
+export interface ClinePassLoginFlowDto {
+  id: string
+  status: 'idle' | 'pending' | 'complete' | 'failed' | 'cancelled'
+  /** Short code the user enters at `verificationUri`. */
+  userCode: string
+  verificationUri: string
+  /** Unix milliseconds the device code expires. */
+  expiresAt: number
+  /** Seconds between polls, as WorkOS asked. */
+  intervalSeconds: number
+  error: string
+  /** Account label once the flow completes. */
+  accountAlias: string
+}
 
 export interface ClinePassPoolStatusDto {
   accounts: ClinePassAccountSummaryDto[]
@@ -123,6 +142,8 @@ export interface ClinePassWebStatus {
   catalogCount: number
   usage: ClinePassUsageDto | null
   historySize: number
+  /** Latest device-code flow in this process, or null when none was started. */
+  login: ClinePassLoginFlowDto | null
   settings: ClinePassSettingsDto
 }
 

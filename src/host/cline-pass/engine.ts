@@ -41,6 +41,7 @@ import {
 import { DEFAULT_BASE_URL, VALIDATE_CONCURRENCY, type ClinePassCatalogScan, type ClinePassPinSettings } from './types.ts'
 import type { ClinePassStore } from './store.ts'
 import type { ClinePassAccountPool } from './account-pool.ts'
+import { bearerFor } from './token-store.ts'
 
 /** One resolved account, as the engine hands it to a request or a probe. */
 export interface ClinePassAccount {
@@ -100,7 +101,7 @@ export class ClinePassEngine {
     return {
       id: effective.account.id,
       name: effective.account.alias || effective.account.id,
-      key: credentials.apiKey,
+      key: bearerFor(credentials),
       // An account's own gateway wins; an empty one means the route's default.
       baseURL: credentials.baseURL && credentials.baseURL.trim() !== '' ? credentials.baseURL.trim() : this.options.baseURL(),
     }
