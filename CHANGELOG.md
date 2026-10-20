@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **[qoder] 看板上的 Qoder 卡片用的是字母 Q，不是官方标志——现在换成官方那张 412×412 应用图标**
+  - **现象**：设置页订阅列表里其余线路都是自家标志，只有 Qoder 是一个灰底字母方块。
+  - **真因**：[brand-icons.tsx](../src/client/hub/brand-icons.tsx) 里那条注释给出的理由是「官方 favicon 是一枚 73 KB 的复合字形，体量不适合内联」。那个 73 KB 确实存在——但 `https://qoder.com/favIcon.svg` 现在返回的是**整站 HTML**（73,379 字节，HTML 长度不是图标大小），页面真正挂的图标是 `<link rel="icon" type="image/png">` 指向的一张 alicdn PNG。于是「太大所以不做」这个判断建立在一次看错的抓取上。
+  - **改法**：`ProviderBrand` 新增 `image` 形态（data URI + `fit`），`BrandTile` 在它有值时画 `<img>` 并铺满底砖；Qoder 用官方 412×412 PNG（4,990 字节，sha256 `2276f0f8…26f3d`，2026-10-21 抓取 HTTP 200），base64 后 6.6 KB。旧注释连同 monogram 一起删掉，换成带 URL / 抓取时间 / 字节数 / 校验和的出处。
+  - **验证**：`npm run typecheck` 0 错误；`test/hub-overview-ui.test.tsx` 新增一例断言 Qoder 卡渲染 data URI 且不再出现 `dsh-hub-brand-mono`；全量 `npx vitest run` **280 文件 / 4572 passed / 7 skipped**。
 - **[workbuddy] 会话一长就整轮失败、红条只有一句「必须以 system 提示词开头」——真因是上游 WAF 在按竞品客户端身份做指纹拦截**
   - **现象**：截图那次是国际区账号第 2 轮起每轮必挂，报错前缀写着 `rejected the message history: the conversation must open with a system prompt`，与正文 `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}` 自相矛盾（历史首条本来就是 system）。同一账号发一句 `ping` 却可能正常，像是「聊着聊着就坏」。
   - **真因**：`11128` 被上游复用给了至少两种拒绝，而 `unapproved channel` 这一种是**内容侧的 WAF**——网关对 `system`、`assistant.content` 以及 `assistant.tool_calls[].function.arguments` 里出现的第三方 Agent 身份声明做**精确短语匹配**，命中即整单拒绝，与鉴权、额度、模型、区域都无关；又因为每轮都全量重放历史，一条 assistant 消息或一次工具参数中毒，此后每轮必挂。本机对失败会话的 1,552 行系统提示词做行级二分，定位出**唯一触发行**是首行 `You are an AI agent powered by DeepSeek Harness.`（国内区在 `system`/`assistant` 中原样出现即 400，把 `AI agent` 改成 `AI assistant` 后同一份提示词 200）；`Claude Code`、`Codex CLI`、`OhMyOpenCode`、`x-anthropic-billing-header` 则两区都会触发。

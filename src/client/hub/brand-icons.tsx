@@ -101,9 +101,26 @@ function artworkOf(mark: ProviderMarkKey): BrandMarkSvg {
   return mark in BRAND_MARKS ? BRAND_MARKS[mark as BrandMarkKey] : LOCAL_MARKS[mark]
 }
 
+/**
+ * A brand image carried as a data URI rather than as inline SVG geometry.
+ *
+ * Used where the official artwork is a raster asset whose vector form is a
+ * 36 KB path — inlining the geometry would cost five times the pixels and buy
+ * nothing at a 23 px box. The bytes are the vendor's own file, so the mark is
+ * still the official one rather than a redraw of it.
+ */
+interface BrandImage {
+  /** Data URI of the official asset. */
+  src: string
+  /** How the image fills the tile; 'cover' hides the artwork's own rounded base. */
+  fit: 'cover' | 'contain'
+}
+
 interface ProviderBrand {
   /** Key into BRAND_MARKS (or LOCAL_MARKS); absent for monogram-only providers. */
   mark?: ProviderMarkKey
+  /** Official raster artwork; takes precedence over `mark` when both are set. */
+  image?: BrandImage
   /**
    * Text color for artwork that draws in currentColor (OpenAI's knot, Kimi's
    * K, Claude's mark). Self-colored artwork (gradients, multi-fill marks)
@@ -135,12 +152,19 @@ export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   // 底砖取自 Cline 官方 app icon 的圆角底（#343B42），标记用官方 white 变体，
   // 两者合起来就是 Cline 自己的应用图标；标记画成 currentColor，所以配白字。
   'cline-pass': { mark: 'cline-pass', color: '#ffffff', tile: '#343B42' },
-  // Qoder：官方 favicon（https://qoder.com/favIcon.svg，2026-06-26 抓取，HTTP 200，
-  // 73,379 字节，sha256 5e1843cb…1dd0）是一枚 73KB 的复合字形，体量不适合内联
-  // 转录（GLM/Step 的标记都只取了几条 path）；所以这张卡用 monogram 'Q'，
-  // 两个颜色值都有出处：底砖 #F3F3F3 取自该 favicon 的圆角底 rect，
-  // 字形色 #141414 取自 qoder.com 站内全部内联图标的 fill。
-  qoder: { monogram: 'Q', color: '#141414', tile: '#F3F3F3' },
+  // Qoder：官方应用图标，逐字节取自 qoder.com 首页 `<link rel="icon" type="image/png">`
+  // 指向的那张 412×412 PNG（https://img.alicdn.com/imgextra/i4/O1CN01QkSxiCocd3D0prc8_!!6000000008124-2-tps-412-412.png，
+  // 2026-10-21 抓取，HTTP 200，4,990 字节，sha256 2276f0f8…26f3d）。
+  //
+  // 这里换掉了原来那个 monogram 'Q'。换的理由不是「字母不好看」，而是**上一版
+  // 的注释是错的**：它说官方 favicon 是一枚 73 KB 的复合字形、不适合内联。那份
+  // 73 KB 确实是 https://qoder.com/favIcon.svg 今天的应答——但那个 URL 现在返回的
+  // 是整站 HTML，不是图标；页面真正挂的图标是这个 alicdn 地址（SVG 版同源，
+  // 内含一条 36 KB 的 path，内联进去要 73 KB，不如用这张 5 KB 的 PNG）。
+  //
+  // image.fit='cover'：PNG 自带 #F3F3F3 圆角底，铺满 40px 底砖正好与官方图标
+  // 同一个比例，四角由 tile 的 border-radius 裁圆。底砖色仍是同一个 #F3F3F3。
+  qoder: { image: { src: 'data:image/png;base64,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', fit: 'cover' }, tile: '#F3F3F3' },
 }
 
 /** One brand mark at a given box size; the artwork is decorative. */
@@ -168,9 +192,21 @@ export function BrandTile({ id, size = 40 }: { id: HubProviderId; size?: number 
     aria-hidden="true"
     style={{ width: size, height: size, ['--dsh-hub-brand' as string]: brand.tile }}
   >
-    {brand.mark !== undefined
-      ? <BrandMark mark={brand.mark} color={brand.color} size={Math.round(size * 0.58)} />
-      : <span className="dsh-hub-brand-mono" style={brand.color === undefined ? undefined : { color: brand.color }}>{brand.monogram}</span>}
+    {brand.image !== undefined
+      // An official raster asset fills the tile at its own scale: the artwork
+      // already carries the rounded base the SVG marks get from `.tile`, so
+      // shrinking it to the 0.58 mark box would read as a shrunken app icon.
+      ? <img
+          className="dsh-hub-brand-image"
+          src={brand.image.src}
+          alt=""
+          width={size}
+          height={size}
+          style={{ objectFit: brand.image.fit }}
+        />
+      : brand.mark !== undefined
+        ? <BrandMark mark={brand.mark} color={brand.color} size={Math.round(size * 0.58)} />
+        : <span className="dsh-hub-brand-mono" style={brand.color === undefined ? undefined : { color: brand.color }}>{brand.monogram}</span>}
   </span>
 }
 

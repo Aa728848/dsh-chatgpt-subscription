@@ -2,7 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { HubOverview, cardAnnotation } from '../src/client/hub/HubOverview.tsx'
+import { BrandTile } from '../src/client/hub/brand-icons.tsx'
 import { HUB_PROVIDERS } from '../src/client/hub/providers.tsx'
 import { zh } from '../src/client/locales.ts'
 import type { HubOverviewDto, HubProviderSummaryDto } from '../src/shared/hub-contracts.ts'
@@ -55,6 +57,20 @@ describe('hub overview card annotation', () => {
     expect(cardAnnotation(summary('minimax-code', { error: true }), descriptor('minimax-code'), t)).toBe(zh.hubStatusFailed)
     // Nothing loaded yet: a quiet placeholder, not a lie.
     expect(cardAnnotation(undefined, descriptor('chatgpt'), t)).toBe('…')
+  })
+})
+
+describe('the Qoder card mark', () => {
+  it('renders the official app icon instead of the old monogram', () => {
+    const markup = renderToStaticMarkup(<BrandTile id="qoder" />)
+    // The vendor's own 412×412 PNG, inlined as a data URI. The previous version
+    // drew a letter Q because a 73 KB favicon "was too big to inline" — that
+    // reading was of a URL that now serves the site's HTML, and the real icon is
+    // 5 KB, so the fallback no longer has a reason to exist.
+    expect(markup).toContain('data:image/png;base64,')
+    expect(markup).toContain('dsh-hub-brand-image')
+    expect(markup).not.toContain('dsh-hub-brand-mono')
+    expect(markup).toContain('#F3F3F3')
   })
 })
 

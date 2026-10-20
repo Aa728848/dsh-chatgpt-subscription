@@ -23,6 +23,7 @@ const CSS = `
 .dsh-hub-chevron{color:var(--dsw-alias-label-caption,#a6a094);display:inline-flex;flex:none}
 .dsh-hub-brand-tile{align-items:center;background:color-mix(in srgb,var(--dsh-hub-brand,#888) 10%,transparent);border-radius:10px;display:inline-flex;flex:none;justify-content:center;overflow:hidden}
 .dsh-hub-brand-tile>svg{display:block}
+.dsh-hub-brand-image{display:block;height:100%;width:100%}
 .dsh-hub-brand-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:15px;font-weight:700;line-height:1}
 .dsh-hub-switch{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:999px;box-sizing:border-box;cursor:pointer;flex:none;height:24px;padding:2px;position:relative;transition:background .15s ease,border-color .15s ease;width:44px}
 .dsh-hub-switch::after{background:var(--dsw-alias-bg-layer-1,#fff);border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.28);content:"";display:block;height:19px;transition:transform .15s ease;width:19px}
