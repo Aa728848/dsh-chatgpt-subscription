@@ -15,14 +15,22 @@
  * `binaryExtensions` 必须与 `extensions` 是同一组后缀：`register` 会拒绝
  * `binaryExtensions` 里出现在 `extensions` 之外的项。
  *
- * ## 字节从哪来
+ * ## 字节从哪来：宿主读好的那一段
  *
- * 宿主的内置图像渲染器不自己取字节——文档预览插件读好了通过 `content` 发下来。
- * 我们的定义是**后注册的外部实现**，拿不到那条 `bytes-complete` 通路，
- * 所以按任务要求自己取：`ctx.remote.workspaceFiles.readBytes`，与宿主
- * `ReadDocumentBytes` 调的是同一个远端。会话 id 取自页签的
- * `resourceAddress`（`dsh-resource://file/session/<id>/<path>`），路径就是地址里
- * 那一段——它已经按该会话的工作区根解析过。
+ * 定义声明的是 `loading: 'bytes-complete'`，所以**宿主替这个实现把整段文件读
+ * 出来**，再通过 keyed 槽的 `content` 交下来——与内置的图像渲染器同一条路
+ * （宿主 `ui-sidebar-documentpreview/src/client/TextPreview.tsx`：
+ * `content = { kind: 'bytes', data }`）。
+ *
+ * 这里**不再自己读一遍**，理由有三：
+ *
+ * - 自己读要把同一段字节在 RPC 上再传一次，视频动辄几十 MB；
+ * - 宿主读的那一份带着它自己的整文件上限与失败文案，读一次就够；
+ * - 两个快照可能不是同一个文件版本，屏幕上会是一段旧片子。
+ *
+ * 之前这里自己读远端（`ctx.remote.workspaceFiles.readBytes`），而那条远端
+ * **不抛异常**：它把结果装成 `{ ok, value }` / `{ ok, error }`。于是字节永远
+ * 是 `undefined`，视频台就一直停在「正在读取视频」，右侧栏也放不出画面。
  *
  * ## 为什么和对话流卡片长得一样
  *
@@ -33,22 +41,30 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/minimax-code/MinimaxVideoDocumentBody
  */
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { type ReactNode } from 'react'
 import { zh, type MinimaxCodeLocaleKey } from './locales.ts'
-import {
-  formatBytes, videoReadFailureOf, videoReadLimitOf, videoTooLargeText,
-  type ReadVideoBytes, type VideoReadFailure,
-} from './video-contract.ts'
+import { formatBytes } from './video-contract.ts'
 import { useObjectUrl, VideoStage, type VideoStagePlaceholder } from './video-media.tsx'
+
+/**
+ * 宿主下发的那份内容，这里只认 `bytes` 一支。
+ *
+ * 宿主的内容是一个三分支的并集（文本 / 字节 / 渲染器自管），但视频只可能落在
+ * `bytes` 一支上；其余分支对这个渲染器没有意义，所以这里只声明用到的那一支。
+ */
+export interface DocumentContentLike {
+  /** 内容形态；视频只认 `bytes`。 */
+  readonly kind?: string
+  /** `bytes` 一支的整段字节。 */
+  readonly data?: Uint8Array
+}
 
 /** 本渲染器真正读到的 props（只声明用到的字段，理由同对话流卡片）。 */
 export interface MinimaxVideoDocumentBodyProps {
   /** 页签的内容地址：`dsh-resource://file/session/<sessionId>/<path>`。 */
   readonly resourceAddress?: string | undefined
-  /** 会话 id；缺省时从 `resourceAddress` 里解析。 */
-  readonly sessionId?: string | undefined
-  /** 取字节的通道；缺席时视频台退回占位块。 */
-  readonly readVideo?: ReadVideoBytes | undefined
+  /** 宿主读好的内容；`bytes` 一支带整段字节。 */
+  readonly content?: DocumentContentLike | undefined
   /** 命名空间化的翻译；缺席时用本文件的中文字典兜底。 */
   readonly t?: ((key: MinimaxCodeLocaleKey) => string) | undefined
   /** 兼容槽位交来的其余座位，本视图不读。 */
@@ -63,7 +79,7 @@ function translate(key: MinimaxCodeLocaleKey): string {
 /**
  * 一个文件地址里的会话与路径。
  *
- * 只认 `session` 作用域：`absolute` 地址没有会话，取字节通道需要会话身份，
+ * 只认 `session` 作用域：`absolute` 地址没有会话，宿主读那一段时需要会话身份，
  * 所以那种地址这里当作「没有可读的文件」，由视频台画占位块。
  * @param address - `dsh-resource://file/…` 地址。
  * @returns 会话 id 与路径；不是会话地址时 undefined。
@@ -82,19 +98,19 @@ export function sessionFileOf(address: string | undefined): { readonly sessionId
 
 /**
  * 侧边栏视频正文。
- * @param props - 地址、会话、取字节通道与文案。
+ * @param props - 地址、宿主下发的内容与文案。
  * @returns 16:9 视频台与下方一行元数据。
  */
 export function MinimaxVideoDocumentBody(props: MinimaxVideoDocumentBodyProps): ReactNode {
   const t = props.t ?? translate
   const file = sessionFileOf(props.resourceAddress)
-  const sessionId = props.sessionId ?? file?.sessionId
   const path = file?.path
-  const data = useDocumentBytes({ readVideo: props.readVideo, sessionId, path })
+  // 宿主交下来的字节：`bytes` 一支才有，其余分支（文本、渲染器自管）与视频无关。
+  const data = props.content?.kind === 'bytes' ? props.content.data : undefined
   const mediaType = mediaTypeOf(path)
-  const source = useObjectUrl(data.kind === 'ready' ? data.data : undefined, mediaType)
-  const placeholder = placeholderFor(data, t)
-  const bytes = data.kind === 'ready' ? data.data.byteLength : undefined
+  const source = useObjectUrl(data, mediaType)
+  const placeholder = placeholderFor(data, source.failed, t)
+  const bytes = data?.byteLength
   const name = path === undefined ? undefined : fileName(path)
   return (
     <div className="dshm-video-document">
@@ -111,71 +127,27 @@ export function MinimaxVideoDocumentBody(props: MinimaxVideoDocumentBodyProps): 
   )
 }
 
-/** 字节通道的三种结果；失败带着原因，好让视频台把「太大」和「读不到」分开说。 */
-type DocumentBytes =
-  | { readonly kind: 'idle' }
-  | { readonly kind: 'ready', readonly data: Uint8Array }
-  | { readonly kind: 'failed', readonly reason: VideoReadFailure, readonly limit: number | undefined }
-
-/**
- * 取一次整段视频字节。
- *
- * 没有「加载中」这一态：视频台在拿到字节前本来就是虚线占位，多一个中间态只是
- * 多一次重渲染。卸载或换文件时 abort。
- * @param input - 通道、会话与路径。
- * @returns 当前字节状态。
- */
-function useDocumentBytes(input: {
-  readonly readVideo: ReadVideoBytes | undefined
-  readonly sessionId: string | undefined
-  readonly path: string | undefined
-}): DocumentBytes {
-  const { readVideo, sessionId, path } = input
-  const [state, setState] = useState<DocumentBytes>({ kind: 'idle' })
-  useEffect(() => {
-    if (readVideo === undefined || sessionId === undefined || path === undefined) {
-      setState({ kind: 'idle' })
-      return
-    }
-    const controller = new AbortController()
-    let live = true
-    readVideo(sessionId, path, controller.signal).then((data) => {
-      if (live) setState({ kind: 'ready', data })
-    }, (error: unknown) => {
-      // 与对话流卡片同一套判定：只读错误上的 `code`，不猜 `message`。
-      if (live) setState({ kind: 'failed', reason: videoReadFailureOf(error), limit: videoReadLimitOf(error) })
-    })
-    return () => {
-      live = false
-      controller.abort()
-    }
-  }, [readVideo, sessionId, path])
-  return state
-}
-
 /**
  * 视频台此刻该说什么。
  *
- * 与对话流卡片的同名字面同一套措辞，但这里只有字节这一条信息：侧边栏的地址就是
- * 用户点开的那个文件，没有「还在生成」这个阶段。**中文最多两句、结尾不加句号**
- * （DSH 文案规则）。
+ * 只有两句话：对象 URL 还没建出来（安静地说在读），或者建不出来（这个容器浏览器
+ * 不认）。**中文最多两句、结尾不加句号**（DSH 文案规则），英文同理用句点收尾。
  *
- * `too-large` 是唯一一个「文件没坏、只是不交给浏览器」的失败：那时说成「可能被
- * 移动或删除」是错的，所以单独一句，并带上宿主报的上限。
+ * 读不到文件这一支**不归这里说**：宿主读失败时根本不渲染正文，它自己那行失败
+ * 文案带着原因码（文件太大 / 不在工作区 / 不是普通文件）。
  *
- * @param data - 当前字节状态。
+ * @param data - 宿主下发的字节；`undefined` 表示还在路上。
+ * @param failed - 对象 URL 是否建不出来。
  * @param t - 命名空间化的翻译。
  * @returns 占位文案与色调。
  */
 function placeholderFor(
-  data: DocumentBytes,
+  data: Uint8Array | undefined,
+  failed: boolean,
   t: (key: MinimaxCodeLocaleKey) => string,
 ): VideoStagePlaceholder {
-  if (data.kind === 'failed') {
-    if (data.reason === 'too-large') return { text: videoTooLargeText((key) => t(key), data.limit), tone: 'danger' }
-    return { text: t('videoUnreadable'), tone: 'danger' }
-  }
-  if (data.kind === 'ready') return { text: t('videoUnplayable'), tone: 'danger' }
+  if (failed) return { text: t('videoUnplayable'), tone: 'danger' }
+  // 字节到了但对象 URL 还在建（建 URL 是一次 effect）：那不是失败，是在读。
   return { text: t('videoReading'), tone: 'quiet' }
 }
 
@@ -197,7 +169,7 @@ function mediaTypeOf(path: string | undefined): string {
 
 /**
  * 路径里的文件名。
- * @param path - 文件路径。
+ * @param path - 绝对或相对路径。
  * @returns 最后一个分隔符之后的部分。
  */
 function fileName(path: string): string {

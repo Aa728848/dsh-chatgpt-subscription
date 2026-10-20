@@ -25,6 +25,8 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/minimax-code/video-contract
  */
 
+import type { RemoteBytes, RemoteResult } from './video-slots.ts'
+
 /**
  * `minimax_generate_video` 的线上工具名。
  *
@@ -127,6 +129,55 @@ export function absoluteVideoPath(cwd: string | undefined, videoPath: string): s
  * @returns 整段文件字节。
  */
 export type ReadVideoBytes = (sessionId: string, path: string, signal?: AbortSignal) => Promise<Uint8Array>
+
+/**
+ * 一次远端取字节的结果 → 字节。
+ *
+ * 远端调用**不抛异常**：它把结果装成 `{ ok: true, value }` 或
+ * `{ ok: false, error }`（见 `@deepseek-ai/dsh-typert-protocol` 的
+ * `RemoteResult`）。所以字节在 `value.data`，而不是结果对象的 `data`——
+ * 直接读 `(await call()).data` 拿到的是 `undefined`，界面会把它显示成
+ * 「一直在读」。
+ *
+ * 失败那一支**抛出去**：卡片按 `code` 与 `details.limit` 区分「文件太大」和
+ * 「读不到」，那需要一条真正的异常（`RemoteError` 本身就是带这两个字段的
+ * `Error`）。
+ *
+ * **载荷有两代形状**：≤0.1.6 的宿主给 base64 字符串，≥0.1.7 的宿主给
+ * `Uint8Array`。两种都认，否则旧世代会拿到一串 base64 而不是字节。
+ *
+ * @param result - 远端返回的结果。
+ * @returns 整段文件字节。
+ * @throws 远端声明的失败，或一份「成功却没有字节」的结果。
+ */
+export function unwrapVideoBytes(result: RemoteResult<{ readonly data: RemoteBytes }>): Uint8Array {
+  if (!result.ok) throw result.error
+  return decodeVideoBytes(result.value.data)
+}
+
+/**
+ * 宿主的字节载荷 → 浏览器要用的字节。
+ *
+ * ≥0.1.7 的宿主直接给 `Uint8Array`；≤0.1.6 的宿主给 base64 字符串，
+ * 宿主自己的预览也是用 `atob` 解的（`ui-sidebar-documentpreview/src/client/rpc.ts`
+ * 的 `documentFileBytes`）。这里照抄同一套判定。
+ *
+ * @param data - 远端交回的载荷。
+ * @returns 整段文件字节。
+ * @throws 载荷既不是字节也不是可解的 base64。
+ */
+export function decodeVideoBytes(data: RemoteBytes): Uint8Array {
+  if (data instanceof Uint8Array) return data
+  if (typeof data === 'string') {
+    try {
+      return Uint8Array.from(atob(data), character => character.charCodeAt(0))
+    } catch {
+      throw new Error('workspaceFiles returned bytes that are not decodable')
+    }
+  }
+  // 「成功但没有字节」与失败同义：不能让它悄悄变成空画面或永远在读。
+  throw new Error('workspaceFiles returned no bytes')
+}
 
 /**
  * 一次取字节失败的原因。

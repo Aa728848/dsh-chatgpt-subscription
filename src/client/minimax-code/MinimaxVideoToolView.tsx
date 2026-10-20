@@ -166,7 +166,11 @@ function useVideoBytes(input: {
     let live = true
     setState({ kind: 'loading' })
     readVideo(sessionId, path, controller.signal).then((data) => {
-      if (live) setState({ kind: 'ready', data })
+      if (!live) return
+      // 一份「成功但没有字节」的结果与失败同义：它不能变成「永远在读」——
+      // 那正是这张卡片曾经一直停在「正在读取视频」的原因。
+      if (data instanceof Uint8Array) setState({ kind: 'ready', data })
+      else setState({ kind: 'failed', reason: 'unreadable', limit: undefined })
     }, (error: unknown) => {
       // 失败要带着**原因**回到界面上：宿主说「太大」和「找不到」是两回事，
       // 前者文件好好的，只是不交给浏览器。
@@ -211,7 +215,9 @@ function placeholderFor(input: {
     return { text: t('videoUnreadable'), tone: 'danger' }
   }
   if (data.kind === 'idle') return { text: t('videoChannelOff'), tone: 'danger' }
-  return { text: t('videoReading'), tone: 'quiet' }
+  if (data.kind === 'loading') return { text: t('videoReading'), tone: 'quiet' }
+  // 字节到手却建不出对象 URL：这是「解不开」，不是「还在读」。
+  return { text: t('videoUnplayable'), tone: 'danger' }
 }
 
 /**

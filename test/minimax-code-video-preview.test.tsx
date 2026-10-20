@@ -6,7 +6,9 @@
  * `binaryExtensions` 漏一个后缀，`register` 就会直接抛（它要求前者是
  * `extensions` 的子集）。所以这里逐项断言形状，而不是只断言「注册过」。
  *
- * 组件那一半只有两个会失败的地方：地址解析与字节通道。两者都钉住。
+ * 组件那一半只有两个会失败的地方：地址解析与字节的**来路**。字节由宿主读好
+ * 再从 keyed 槽的 `content` 交下来（定义声明的是 `loading: 'bytes-complete'`），
+ * 所以这里钉的是「消费宿主交下来的那一段」，而不是「自己去读一遍」。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, createElement } from 'react'
@@ -14,21 +16,9 @@ import { createRoot } from 'react-dom/client'
 import { MinimaxVideoDocumentBody, sessionFileOf } from '../src/client/minimax-code/MinimaxVideoDocumentBody.tsx'
 import { MINIMAX_VIDEO_EXTENSIONS, MINIMAX_VIDEO_PREVIEW_ID, minimaxVideoPreviewDefinition } from '../src/client/minimax-code/document-preview.ts'
 import { zh } from '../src/client/minimax-code/locales.ts'
-import { MINIMAX_VIDEO_TOOL_NAME, WORKSPACE_FILE_TOO_LARGE } from '../src/client/minimax-code/video-contract.ts'
+import { MINIMAX_VIDEO_TOOL_NAME } from '../src/client/minimax-code/video-contract.ts'
 
 const ADDRESS = 'dsh-resource://file/session/session-1/clips/out.mp4'
-
-/**
- * 远端失败的形状：`{ code, details }`，与宿主 `RemoteError` 一致（它就是个带
- * `code` / `details` 的 `Error`）。判定方只看字段，所以这里也用字段拼。
- *
- * @param code - 远端码。
- * @param details - 该码的结构化载荷。
- * @returns 一次失败的替身。
- */
-function remoteFailure(code: string, details: Record<string, unknown> = {}): Error {
-  return Object.assign(new Error(code), { code, details })
-}
 
 describe('minimax video document preview definition', () => {
   it('declares the four suffixes and the external-priority band', () => {
@@ -107,18 +97,25 @@ describe('MinimaxVideoDocumentBody', () => {
     URL.revokeObjectURL = originalRevoke
   })
 
-  async function render(readVideo: (sessionId: string, path: string, signal?: AbortSignal) => Promise<Uint8Array>) {
+  /**
+   * 渲染一次。
+   *
+   * `content` 就是宿主交下来的那段内容：定义声明 `loading: 'bytes-complete'`，
+   * 所以宿主替这个实现把整段文件读好，再从 keyed 槽的 `content` 交下来。
+   * 正文**不再自己读**——自己读要把同一段字节在 RPC 上再传一次。
+   */
+  async function render(content?: { readonly kind?: string, readonly data?: Uint8Array }) {
     await act(async () => {
       root.render(createElement(MinimaxVideoDocumentBody, {
         resourceAddress: ADDRESS,
-        readVideo,
+        content,
         t: (key: keyof typeof zh) => zh[key],
       }))
     })
   }
 
   it('renders the 16:9 stage with a controllable video element', async () => {
-    await render(async () => new Uint8Array([0, 1, 2, 3]))
+    await render({ kind: 'bytes', data: new Uint8Array([0, 1, 2, 3]) })
     const stage = container.querySelector('.dshm-video-stage')
     expect(stage?.getAttribute('data-state')).toBe('ready')
     const video = container.querySelector('video')
@@ -130,62 +127,36 @@ describe('MinimaxVideoDocumentBody', () => {
     expect(container.querySelector('.dshm-video-doc-size')?.textContent).toBe('4 B')
   })
 
-  it('reads through the session and path the address names', async () => {
-    const readVideo = vi.fn(async () => new Uint8Array([1]))
-    await render(readVideo)
-    expect(readVideo).toHaveBeenCalledWith('session-1', 'clips/out.mp4', expect.anything())
+  it('reads no file of its own: the Host already delivered the bytes', async () => {
+    // 曾经这里自己去读 `workspaceFiles.readBytes`，而那条远端把结果装成
+    // { ok, value }：字节永远是 undefined，右侧栏于是放不出画面。
+    await render({ kind: 'bytes', data: new Uint8Array([1]) })
+    expect(container.querySelector('video')).not.toBeNull()
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the stage and shows the failure when the bytes cannot be read', async () => {
-    await render(async () => { throw new Error('workspace-file/not-found') })
-    expect(container.querySelector('video')).toBeNull()
-    const stage = container.querySelector('.dshm-video-stage')
-    expect(stage?.getAttribute('data-state')).toBe('empty')
-    expect(container.querySelector('.dshm-video-placeholder')?.getAttribute('data-tone')).toBe('danger')
-    expect(container.textContent).toContain(zh.videoUnreadable)
-  })
-
-
-  it('says the video is too large, with the cap, instead of "missing"', async () => {
-    // The sidebar used to print the exact same line for a 40 MB file as for a
-    // deleted one: the read failed, so the file must have moved. It had not.
-    await render(async () => { throw remoteFailure(WORKSPACE_FILE_TOO_LARGE, { path: 'clips/out.mp4', limit: 33_554_432 }) })
-    const placeholder = container.querySelector('.dshm-video-placeholder')
-    expect(placeholder?.getAttribute('data-tone')).toBe('danger')
-    expect(placeholder?.textContent).toBe(zh.videoTooLarge.replace('{limit}', '32 MB'))
-    expect(placeholder?.textContent).toContain('32 MB')
-    expect(container.textContent).not.toContain(zh.videoUnreadable)
-    expect(container.textContent).not.toMatch(/moved or deleted|移动或删除/)
-    // The stage survives either way; only the line changes.
-    expect(container.querySelector('.dshm-video-stage')?.getAttribute('data-state')).toBe('empty')
-  })
-
-  it('keeps the "moved or deleted" line for every other failure code', async () => {
-    for (const code of ['workspace-file/not-found', 'workspace-file/not-regular-file', 'gateway/internal']) {
-      await act(async () => root.unmount())
-      root = createRoot(container)
-      await render(async () => { throw remoteFailure(code) })
-      expect(container.querySelector('.dshm-video-placeholder')?.textContent).toBe(zh.videoUnreadable)
-    }
-  })
-
-  it('shows a dash rather than a wrong cap when the failure omits the limit', async () => {
-    // A malformed failure must never be reclassified, and above all must not
-    // print an invented number where the Host’s cap belongs.
-    await render(async () => { throw remoteFailure(WORKSPACE_FILE_TOO_LARGE) })
-    expect(container.querySelector('.dshm-video-placeholder')?.textContent)
-      .toBe(zh.videoTooLarge.replace('{limit}', '—'))
-  })
   it('shows the quiet reading line while the bytes are still on the way', async () => {
-    // A reader that never settles: the stage must not sit blank or spin.
-    await render(() => new Promise<Uint8Array>(() => {}))
+    // 宿主还没把字节交下来：视频台不能空着，也不能装作已经拿到了。
+    await render(undefined)
     expect(container.querySelector('.dshm-video-placeholder')?.getAttribute('data-tone')).toBe('quiet')
     expect(container.textContent).toContain(zh.videoReading)
     expect(container.querySelector('.dshm-video-doc-meta')).toBeNull()
+    expect(container.querySelector('video')).toBeNull()
+  })
+
+  it('keeps the stage and says the bytes cannot be opened when the blob fails', async () => {
+    URL.createObjectURL = vi.fn(() => { throw new Error('blob refused') })
+    await render({ kind: 'bytes', data: new Uint8Array([1]) })
+    expect(container.querySelector('video')).toBeNull()
+    const stage = container.querySelector('.dshm-video-stage')
+    expect(stage?.getAttribute('data-state')).toBe('empty')
+    const placeholder = container.querySelector('.dshm-video-placeholder')
+    expect(placeholder?.getAttribute('data-tone')).toBe('danger')
+    expect(placeholder?.textContent).toBe(zh.videoUnplayable)
   })
 
   it('revokes the object URL when the tab closes', async () => {
-    await render(async () => new Uint8Array([9]))
+    await render({ kind: 'bytes', data: new Uint8Array([9]) })
     expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
     await act(async () => root.unmount())
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-preview')

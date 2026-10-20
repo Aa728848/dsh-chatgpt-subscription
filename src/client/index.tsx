@@ -35,7 +35,7 @@ import { MinimaxVideoToolView } from './minimax-code/MinimaxVideoToolView.tsx'
 import { MINIMAX_VIDEO_PREVIEW_ID, minimaxVideoPreviewDefinition } from './minimax-code/document-preview.ts'
 import { dictionaries as minimaxCodeDicts, NS_MINIMAX_CODE, type MinimaxCodeLocaleKey } from './minimax-code/locales.ts'
 import { installMinimaxCodeStyles } from './minimax-code/styles.ts'
-import { MINIMAX_VIDEO_TOOL_NAME, type ReadVideoBytes } from './minimax-code/video-contract.ts'
+import { MINIMAX_VIDEO_TOOL_NAME, type ReadVideoBytes, unwrapVideoBytes } from './minimax-code/video-contract.ts'
 import type { DocumentPreviewRegistryService, WorkspaceFilesRemote } from './minimax-code/video-slots.ts'
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY, type WorkBuddyLocaleKey } from './workbuddy/locales.ts'
@@ -387,12 +387,29 @@ function resolveWorkspaceFiles(ctx: ClientContext): WorkspaceFilesRemote['worksp
 }
 
 /**
- * 取视频字节：把 `ctx.remote.workspaceFiles.readBytes` 收成一条窄通道。
+ * 取视频字节：把 `ctx.remote.workspaceFiles` 的整文件读取收成一条窄通道。
  *
  * 视频在浏览器里**没有别的取字节方式**：`loadImage` 是附件专用的，`<video src>`
  * 也读不到工作区。宿主侧边栏的图像预览走的正是这条远端
  * （`ui-sidebar-documentpreview/src/client/rpc.ts` 的 `ReadDocumentBytes`），
- * 这里照抄同一调用：不传 `range` 即整文件，上限由宿主 `maxFileBytes` 决定。
+ * 这里照抄同一调用：整文件读取，上限由宿主 `maxFileBytes` 决定。
+ *
+ * ## 结果要先看 `ok`
+ *
+ * 远端调用**不抛异常**：宿主把它声明的失败装进结果里，成功是
+ * `{ ok: true, value }`，失败是 `{ ok: false, error }`（见
+ * `@deepseek-ai/dsh-typert-protocol` 的 `RemoteResult`）。所以字节在
+ * `value.data`，直接读 `(await call()).data` 拿到的是 `undefined`——
+ * 界面会把它当成「还在读」，于是视频永远停在「正在读取视频」。
+ * 失败那一支要**抛出去**：卡片按 `code` 与 `details.limit` 区分
+ * 「文件太大」和「读不到」，那需要一条真正的异常。
+ *
+ * ## 两代宿主，两种取法
+ *
+ * ≥0.1.7 的宿主把整文件读取放在 `readBytes` 的 `options` 形态上；
+ * ≤0.1.6 的宿主把它叫 `readAll`，而那一代的 `readBytes` 收的是**字节窗口**
+ * （拿它读整文件只会读到 `maxBytes` 那么多）。两者都试，载荷形状的差别由
+ * {@link unwrapVideoBytes} 收口。
  *
  * 远端是**可选的**且按需解析：不在 `apply(ctx)` 瞬间把服务抓死，以免
  * `remote.workspaceFiles` 晚于本插件挂载时读到空值；取不到就拒绝这次读取——
@@ -404,11 +421,21 @@ function resolveWorkspaceFiles(ctx: ClientContext): WorkspaceFilesRemote['worksp
 function videoBytesLoader(ctx: ClientContext): ReadVideoBytes {
   return async (sessionId, path, signal) => {
     const workspaceFiles = resolveWorkspaceFiles(ctx)
-    if (typeof workspaceFiles?.readBytes !== 'function') {
+    if (workspaceFiles === undefined) {
+      throw new Error('no remote workspaceFiles reader is mounted')
+    }
+    // ≤0.1.6 那一代把整文件读取放在 readAll 上；≥0.1.7 把它并进了
+    // readBytes 的 options 形态。旧世代的 readBytes 收的是**字节窗口**，
+    // 拿它读整文件只会读到 maxBytes 那么多，所以那一代走 readAll。
+    if (typeof workspaceFiles.readAll === 'function') {
+      const readAll = workspaceFiles.readAll.bind(workspaceFiles)
+      return unwrapVideoBytes(await readAll(sessionId, path, signal))
+    }
+    if (typeof workspaceFiles.readBytes !== 'function') {
       throw new Error('no remote workspaceFiles reader is mounted')
     }
     const readBytes = workspaceFiles.readBytes.bind(workspaceFiles)
-    return (await readBytes(sessionId, path, {}, signal)).data
+    return unwrapVideoBytes(await readBytes(sessionId, path, {}, signal))
   }
 }
 
@@ -449,7 +476,6 @@ function documentPreviewsOf(scope: ClientContext): DocumentPreviewRegistryServic
  * @param ctx - 浏览器根上下文。
  */
 function installVideoDocumentPreview(ctx: ClientContext): void {
-  const readVideo = videoBytesLoader(ctx)
   const registerPreview = (scope: ClientContext): (() => void) => {
     const registry = documentPreviewsOf(scope)
     if (typeof registry?.register !== 'function') return () => {}
@@ -473,11 +499,13 @@ function installVideoDocumentPreview(ctx: ClientContext): void {
       scope.effect(() => registerPreview(scope), 'dsh-minimax-code: video preview definition')
     })
   }
+  // 正文不注入取字节通道：定义的 `loading: 'bytes-complete'` 已经让宿主把整段
+  // 文件读好，再通过 keyed 槽的 `content` 交下来（内置的图像渲染器同一条路）。
+  // 自己再读一遍等于把同一段字节在 RPC 上传两次。
   ctx.slots.inject('sidebar.right.tab.document', () => ctx.slots.register({
     name: 'sidebar.right.tab.document',
     key: MINIMAX_VIDEO_PREVIEW_ID,
     locale: NS_MINIMAX_CODE,
-    inject: () => ({ readVideo }),
   }, MinimaxVideoDocumentBody))
 }
 

@@ -17,7 +17,7 @@ import { MinimaxVideoToolView, type MinimaxVideoBlock } from '../src/client/mini
 import { zh } from '../src/client/minimax-code/locales.ts'
 import {
   MINIMAX_VIDEO_TOOL_NAME, WORKSPACE_FILE_TOO_LARGE, absoluteVideoPath, formatBytes, formatDuration, readVideoMeta,
-  videoReadFailureOf, videoReadLimitOf, videoTooLargeText, type MinimaxVideoPresentationMeta,
+  unwrapVideoBytes, videoReadFailureOf, videoReadLimitOf, videoTooLargeText, type MinimaxVideoPresentationMeta,
 } from '../src/client/minimax-code/video-contract.ts'
 
 const CWD = 'C:/work/ws'
@@ -27,7 +27,7 @@ const VIDEO = 'clips/out.mp4'
  * 远端失败的形状：`{ code, details }`。与宿主 `RemoteError` 一致（它就是个带
  * `code` / `details` 的 `Error`），但这里刻意**不** instanceof——判定方只看字段。
  */
-function remoteFailure(code: string, details: Record<string, unknown> = {}): Error {
+function remoteFailure(code: string, details: Record<string, unknown> = {}): Error & { code: string, details: Record<string, unknown> } {
   return Object.assign(new Error(code), { code, details })
 }
 
@@ -119,6 +119,45 @@ describe('video read failure vocabulary', () => {
     expect(videoTooLargeText(t, 33_554_432)).toBe(zh.videoTooLarge.replace('{limit}', '32 MB'))
     // A missing cap leaves the dash formatBytes already uses for nonsense input.
     expect(videoTooLargeText(t, undefined)).toBe(zh.videoTooLarge.replace('{limit}', '—'))
+  })
+})
+
+describe('remote byte result', () => {
+  it('takes the bytes out of a successful result', () => {
+    const data = new Uint8Array([1, 2, 3])
+    expect(unwrapVideoBytes({ ok: true, value: { data } })).toBe(data)
+  })
+
+  it('throws the failure the Host declared, keeping its code and cap', () => {
+    // 远端调用**不抛异常**：它把结果装成 { ok, value } 或 { ok, error }。
+    // 字节在 value.data，直接读 (await call()).data 拿到的是 undefined——
+    // 卡片于是永远停在「正在读取视频」。失败那一支必须变成真正的异常，
+    // 卡片才能按 code 与 details.limit 区分「太大」和「读不到」。
+    const failure = remoteFailure(WORKSPACE_FILE_TOO_LARGE, { path: VIDEO, limit: 32 * 1024 * 1024 })
+    expect(() => unwrapVideoBytes({ ok: false, error: failure })).toThrow(failure)
+    try {
+      unwrapVideoBytes({ ok: false, error: failure })
+      expect.unreachable('the declared failure must be thrown')
+    } catch (error) {
+      expect(videoReadFailureOf(error)).toBe('too-large')
+      expect(videoReadLimitOf(error)).toBe(32 * 1024 * 1024)
+    }
+  })
+
+  it('refuses a successful result that carries no bytes', () => {
+    expect(() => unwrapVideoBytes({ ok: true, value: { data: undefined as unknown as Uint8Array } })).toThrow()
+  })
+
+  it('decodes the base64 payload the older harness generation sends', () => {
+    // ≤0.1.6 的宿主把字节编成 base64 字符串（宿主自己的预览也是用 atob 解的）。
+    // 不认这一支，旧世代拿到的就是一串 base64 而不是字节。
+    const bytes = new Uint8Array([1, 2, 3, 250])
+    const base64 = Buffer.from(bytes).toString('base64')
+    expect(unwrapVideoBytes({ ok: true, value: { data: base64 } })).toEqual(bytes)
+  })
+
+  it('refuses a payload that is neither bytes nor decodable base64', () => {
+    expect(() => unwrapVideoBytes({ ok: true, value: { data: 'not base64!!' } })).toThrow()
   })
 })
 
@@ -225,6 +264,24 @@ describe('MinimaxVideoToolView', () => {
     expect(placeholder?.textContent).toBe(zh.videoUnreadable)
     // The path chip survives the failure: the file is still worth opening.
     expect(container.querySelector('.dshm-video-path')?.textContent).toBe(VIDEO)
+  })
+
+  it('never sits on the reading line once the channel has settled', async () => {
+    // 曾经正是这一支让卡片永远停在「正在读取视频」：远端把结果装成
+    // { ok, value }，读 .data 拿到的是 undefined，而状态却已经是「拿到了」。
+    await render(settled({ ...META }), { readVideo: async () => undefined as unknown as Uint8Array })
+    expect(container.querySelector('video')).toBeNull()
+    const placeholder = container.querySelector('.dshm-video-placeholder')
+    expect(placeholder?.getAttribute('data-tone')).toBe('danger')
+    expect(placeholder?.textContent).toBe(zh.videoUnreadable)
+    expect(container.textContent).not.toContain(zh.videoReading)
+  })
+
+  it('shows the quiet reading line while the bytes are still on the way', async () => {
+    await render(settled({ ...META }), { readVideo: () => new Promise<Uint8Array>(() => {}) })
+    const placeholder = container.querySelector('.dshm-video-placeholder')
+    expect(placeholder?.getAttribute('data-tone')).toBe('quiet')
+    expect(container.textContent).toContain(zh.videoReading)
   })
 
 

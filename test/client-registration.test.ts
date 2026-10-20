@@ -663,7 +663,8 @@ describe('client registration', () => {
         super(ctx, 'remote.workspaceFiles')
       }
       async readBytes(_sessionId: string, _path: string) {
-        return { data: new Uint8Array([1, 2, 3, 4]) }
+        // 远端不抛异常：成功是 { ok: true, value }，字节在 value.data。
+        return { ok: true as const, value: { data: new Uint8Array([1, 2, 3, 4]) } }
       }
     }
     const registeredCommands: unknown[] = []
@@ -713,13 +714,22 @@ describe('client registration', () => {
     expect(registeredPreviews).toHaveLength(1)
 
     // And the video byte reader must resolve `remote.workspaceFiles` without
-    // tripping Cordis's property guard.
+    // tripping Cordis's property guard. The tool card reads the file itself:
+    // the conversation stream has no host-delivered bytes.
+    const toolEntry = slotRegistrations.find(
+      (entry) => entry.name === 'tool.call.toolview' && entry.key === 'minimax_generate_video',
+    ) as { inject?: (sessionId: string) => { readVideo: (sessionId: string, path: string, signal?: AbortSignal) => Promise<Uint8Array> } } | undefined
+    expect(toolEntry?.inject).toBeTypeOf('function')
+    const { readVideo } = toolEntry!.inject!('s1')
+    await expect(readVideo('s1', '/tmp/clip.mp4')).resolves.toEqual(new Uint8Array([1, 2, 3, 4]))
+
+    // The sidebar body reads nothing: the Host already read the file (the
+    // definition declares `loading: 'bytes-complete'`) and hands the bytes
+    // down through the keyed slot's `content`.
     const docEntry = slotRegistrations.find(
       (entry) => entry.name === 'sidebar.right.tab.document',
-    ) as { inject?: () => { readVideo: (sessionId: string, path: string, signal?: AbortSignal) => Promise<Uint8Array> } } | undefined
-    expect(docEntry?.inject).toBeTypeOf('function')
-    const { readVideo } = docEntry!.inject!()
-    await expect(readVideo('s1', '/tmp/clip.mp4')).resolves.toEqual(new Uint8Array([1, 2, 3, 4]))
+    ) as { inject?: () => unknown } | undefined
+    expect(docEntry?.inject).toBeUndefined()
   })
 
   it('allows accessing remote.session through client context inject', async () => {
