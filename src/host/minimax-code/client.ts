@@ -584,8 +584,17 @@ export function parseTokenPlanQuota(payload: unknown, now: number = Date.now()):
     })
   }
   if (entries.length === 0) return null
-  // `general` is the bucket that covers chat and coding. The others (video, …) are
-  // separate resources whose numbers would make a single headline bar meaningless.
+  // `general` is the only resource this endpoint reports, so reading it alone drops
+  // nothing. Measured against the live document: `model_remains` carries exactly ONE
+  // row and its `model_name` is `general` — no video row, no hailuo row, no second
+  // bucket of any name (docs/minimax-video-free-checks.md, item A). The
+  // `?? entries[0]` fallback stays because it is what keeps this choice sound if the
+  // service ever adds a row: the first row is then still the closest thing to a
+  // headline, and `find` prefers the named one whenever it is present.
+  //
+  // What this read CANNOT answer: how much quota one video generation spends. It is
+  // not that this parser ignores such a number — the bucket does not exist on this
+  // endpoint at all, so the consumption is invisible here and must not be invented.
   const primary = entries.find((entry) => entry.name === 'general') ?? entries[0]!
   const head = primary.windows[0]!
   return {

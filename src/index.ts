@@ -63,6 +63,7 @@ import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
 import { KimiCodeAccountPool } from './host/kimi-code/account-pool.ts'
 import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
 import { createKimiVideoTool } from './host/kimi-code/video-tool.ts'
+import { createMinimaxGenerateVideoTool, createMinimaxUnderstandVideoTool } from './host/minimax-code/video-tool.ts'
 import { readVideoBytes } from './host/kimi-code/video-store.ts'
 import type { VideoAttachmentRef } from './host/kimi-code/modalities.ts'
 import {
@@ -1154,6 +1155,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // needs the plugin context to resolve the calling session's route before it
     // agrees to attach anything.
     const disposeVideoTool = ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetch }))
+    // The two media tools for the MiniMax Code route. They ride the Matrix
+    // gateway beside the Messages route (host/minimax-code/matrix-client.ts)
+    // and present this line's own subscription credential, which is why the
+    // pool — not the bare credential store — is what they read: the native
+    // ~/.minimax directory this route once shared is gone on a fresh install,
+    // and only a pooled account still holds a live session.
+    const disposeMinimaxUnderstandVideoTool = ctx.tools.register(
+      createMinimaxUnderstandVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
+    )
+    const disposeMinimaxGenerateVideoTool = ctx.tools.register(
+      createMinimaxGenerateVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
+    )
 
     // 「进展更新」：不结束回合的 `progress_update` 工具 + 系统提示词引导 +
     // `tools/post-execute` 上的 8 轮催促 + 客户端唯一的取数路由。挂载是无条件
@@ -1222,6 +1235,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeImageTool()
       disposeAntigravityImageTool()
       disposeVideoTool()
+      disposeMinimaxUnderstandVideoTool()
+      disposeMinimaxGenerateVideoTool()
       disposeProgressUpdates()
       disposeAdapter()
       disposeRoutes()
