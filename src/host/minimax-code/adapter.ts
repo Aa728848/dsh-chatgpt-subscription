@@ -718,7 +718,11 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     if (signal?.aborted === true) throw new LlmError('MiniMax Code model resolution aborted', 'ABORTED')
     const settings = await this.settings()
     const entry = minimaxCodeModelDef(modelId)
-    const efforts = orderReasoningEfforts(effortsForModel(modelId), ['low', 'medium', 'high', 'xhigh', 'max', 'default'])
+    // `default` is not a strength level: it is the absence of one, and
+    // ranking it above `max` made DSH's picker present it as the strongest
+    // thinking level. A model that offers no `defaultEffort` already says
+    // "the caller picked nothing", which is the same thing.
+    const efforts = orderReasoningEfforts(effortsForModel(modelId), ['low', 'medium', 'high', 'xhigh', 'max'])
     const contextWindow = contextWindowForModel(modelId, settings.contextWindowOverrides)
     const defaultEffort = entry === undefined
       ? undefined
