@@ -61,8 +61,11 @@ export interface MinimaxCodeCatalogModel {
    *
    * The inline path still tops out well below the documented 50 MB per clip,
    * because base64 grows bytes by 4/3 against a 64 MB request body; the budget is
-   * `MAX_REQUEST_VIDEO_BYTES` in ./types.ts, and a longer clip needs the Files
-   * API, which this line does not implement.
+   * `MAX_REQUEST_VIDEO_BYTES` in ./types.ts. Media above that inline ceiling is
+   * not refused — it is uploaded: this line implements the Files API
+   * (./files-api.ts), and the adapter posts the bytes to
+   * `{messagesBase}/files/upload` and rewrites the block as an
+   * `mm_file://<file_id>` reference before the request goes out.
    */
   inputModalities: readonly ('text' | 'image' | 'video')[]
   /** How thinking behaves on this model. */
@@ -87,12 +90,19 @@ export interface MinimaxCodeCatalogModel {
    * Attachments the model's FILES API accepts, when it states a bound.
    *
    * This is the max_attachments_count that ships with the model's file-API
-   * capability block, NOT a limit on the inline images this line sends. A live
-   * probe of the subscription endpoint served 4, 5, 8, 9, 10, 12, 20 and 48
-   * inline images on M3 with HTTP 200, so enforcing this number on the inline
-   * path would drop images the service accepts. It is reported because the
-   * Files API question is real, and for the same reason as filesApiDocumented:
-   * this line uploads nothing.
+   * capability block, and it describes the UPLOAD path's attachment ceiling,
+   * NOT a limit on the inline images this line sends: a live probe of the
+   * subscription endpoint served 4, 5, 8, 9, 10, 12, 20 and 48 inline images on
+   * M3 with HTTP 200, so enforcing this number inline would drop images the
+   * service accepts. The inline bound is the request-body budget instead.
+   *
+   * The value is also not settled. The model's current file-API capability
+   * block states `max_attachments_count: 4` for BOTH M3 and M3.1-Flash, while
+   * the M3 entry below still carries 9, inherited from the earlier snapshot it
+   * was transcribed from. One of the two is a stale number and which one needs a
+   * probe against the upload path, not another reading of the docs — so the
+   * figure is left as is, on purpose, rather than quietly rounded to the
+   * documented one. See the M3 entry's own note.
    */
   maxAttachments: number | null
   /** Largest single image the model accepts, in bytes. */
@@ -100,10 +110,19 @@ export interface MinimaxCodeCatalogModel {
   /** Largest single video the model accepts, in bytes. */
   maxVideoBytes: number | null
   /**
-   * Whether the subscription documents a files API for this model. Documentation
-   * only: the plugin sends every attachment inline and implements no upload, TTL,
-   * account isolation or deletion, so this flag never means the Files API is
-   * delivered here.
+   * Whether this line actually serves a files API for this model.
+   *
+   * Not documentation only. ./files-api.ts implements the upload (the adapter
+   * posts to `{messagesBase}/files/upload` and sends an `mm_file://<file_id>`
+   * reference back), a 12-hour assumed TTL on every stored id, isolation of
+   * those ids per uploading account, and a cache that reuses an id for bytes
+   * already uploaded. The adapter calls it wherever media outgrows the inline
+   * ceiling.
+   *
+   * The one capability it lacks is deletion, and the service gives it no way to
+   * have one: there is no list or delete route on this surface (`GET /files`
+   * answers 503 `direct_route_not_configured`), so an expired id is inferred
+   * locally from the TTL and can never be confirmed or reclaimed server-side.
    */
   filesApiDocumented: boolean
   /** One-line description, from the model table. */
@@ -164,6 +183,23 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     name: 'MiniMax M3',
     contextWindow: 512_000,
     optionalContextWindow: 1_000_000,
+    // MEASURED ceiling: 524288, and 128_000 here is the CONSERVATIVE value, not the
+    // limit. The endpoint states its own threshold in the rejection message — the
+    // 2026-10-28 probe (scripts/probe-minimax-capabilities.probe.ts, evidence in
+    // docs/minimax-code-probe-capabilities.md) sent max_tokens 128000 (200), 512000
+    // (200) and 999999999 (400 "invalid params, model[MiniMax-M3] does not support
+    // max tokens > 524288 (2013)"), which brackets the boundary at 524288 = 512*1024.
+    // max_tokens 0 is accepted too (200) — it is NOT an illegal argument, so a zero
+    // is not evidence of anything.
+    //
+    // The number stays at 128_000 on purpose. It matches the upstream fallback table
+    // (models.dev says 512000, which is merely a value that passes, not the ceiling);
+    // raising it is a product decision, not a correction — this catalog is not the
+    // place for it.
+    //
+    // ACCEPTED != CAPABLE: the probe proved these are legal REQUESTS and aborted after
+    // the first bytes. Nobody has generated 524288 output tokens on this line, and
+    // deliberately so — that would burn the quota the probe exists to protect.
     maxTokens: 128_000,
     inputModalities: ['text', 'image', 'video'],
     thinking: 'toggle',
@@ -179,6 +215,20 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     // `low` was quietly clamped back to it.
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'max',
+    // PENDING: this 9 is inherited from the snapshot this entry was transcribed
+    // from, and the model's current file-API capability block says
+    // `max_attachments_count: 4` — the same 4 M3.1-Flash carries. The value is
+    // left alone deliberately: it describes the UPLOAD path (the inline path has
+    // no attachment-count bound at all, see the field's doc), and deciding
+    // between 9 and 4 needs a probe of that path rather than a re-reading of the
+    // docs. Do not "fix" it to 4 on the strength of the doc alone.
+    //
+    // Measured alongside that question (2026-10-28 probe, same evidence file): this
+    // route does NOT report a model it cannot serve. An unrecognised id is silently
+    // replaced by M3 and answers HTTP 200 with a normal stream — so "the model was
+    // retired" produces no error payload at all, and no error-based delisting check
+    // can ever fire here. The only signal is the stream header: a
+    // message_start.message.model that differs from the requested id.
     maxAttachments: 9,
     maxImageBytes: 10 * 1024 * 1024,
     maxVideoBytes: 50 * 1024 * 1024,
