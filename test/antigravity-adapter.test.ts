@@ -445,9 +445,31 @@ describe('AntigravityAdapter', () => {
     }
 
     // The prod endpoint's permanent 429 must not be reported over the first
-    // endpoint's failure.
-    await expect(run()).rejects.toMatchObject({ code: 'PROVIDER_ERROR', failure: { status: 503 } })
+    // endpoint's failure. The first endpoint's 5xx is a transient server-side
+    // failure, so it surfaces under the code the harness retries.
+    await expect(run()).rejects.toMatchObject({ code: 'SERVER', failure: { status: 503 } })
     expect(pool.familyCoolingAccountIds('gemini').size).toBe(0)
+  })
+
+  it('reports a connection-level failure as a retryable TRANSPORT, not a fabricated 500', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const cause = new TypeError('fetch failed')
+    const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(cause)
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+    const run = async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'antigravity', model: 'gemini-3.8-flash',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'test transport' }] }],
+      } as unknown as GenerateOptions)) { /* drain */ }
+    }
+
+    // Every endpoint rejected, so no status was ever received: a 500 here would
+    // be a number this adapter made up.
+    await expect(run()).rejects.toMatchObject({ code: 'TRANSPORT' })
   })
 
   it('treats a 429 without a stated reset time as a transient rate limit, not a spent quota', async () => {

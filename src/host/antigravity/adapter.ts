@@ -331,6 +331,10 @@ export class AntigravityAdapter extends LlmAdapter {
     let recoveredValidatedToolCalling = false
     const triedAccountIds = new Set<string>()
     let response: Response | undefined
+    // The last connection-level rejection. Kept so a failure where no endpoint
+    // ever answered is reported as the transport failure it is, instead of a
+    // 500 no endpoint sent.
+    let transportError: unknown
     // The session this request belongs to, and the pooled account the successful
     // attempt was served by. Both are read back when the stream reports usage:
     // the tokens describe a cache those two identify, and the cache is the
@@ -444,6 +448,7 @@ export class AntigravityAdapter extends LlmAdapter {
           response = firstResponse
         } catch (err) {
           if (signal.aborted) throw new LlmError('Antigravity request aborted', 'ABORTED', { cause: err })
+          transportError = err
         }
       }
 
@@ -476,9 +481,22 @@ export class AntigravityAdapter extends LlmAdapter {
     }
 
     if (!response || !response.ok) {
-      const status = response?.status ?? 500
       const errText = await response?.text().catch(() => '') ?? ''
-      if (response && response.status === 429) {
+      if (response === undefined) {
+        // No endpoint ever answered: every fetch rejected, so there is no HTTP
+        // status to report and nothing here says this request was refused. A
+        // connection-level failure is exactly what the harness retries.
+        const detail = transportError instanceof Error
+          ? transportError.message
+          : transportError === undefined ? '' : String(transportError)
+        throw new LlmError(
+          `Antigravity request failed before any endpoint answered: ${detail || 'No response'}`,
+          'TRANSPORT',
+          transportError === undefined ? {} : { cause: transportError },
+        )
+      }
+      const status = response.status
+      if (status === 429) {
         // A 429 that states a reset time is a spent allowance: the verdict is
         // the account's, and the wait the service named is the real one.
         if (retryDelayMs(response.headers, errText) !== undefined) {
@@ -497,6 +515,16 @@ export class AntigravityAdapter extends LlmAdapter {
           'SERVER',
           { status: 429 },
         )
+      }
+      if (status >= 500) {
+        // A 5xx says nothing about this request or this credential: it is a
+        // transient server-side failure, so it is reported under the code the
+        // harness retries instead of ending the turn. Reporting it as a
+        // terminal provider error was the reason a bare upstream 500 killed a
+        // turn that a plain resend satisfied.
+        throw new LlmError(`Antigravity upstream server error (${status}): ${errText || 'No response'}`, 'SERVER', {
+          status,
+        })
       }
       throw new LlmError(`Antigravity API error (${status}): ${errText || 'No response'}`, isHttpContextOverflow(status, errText) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR', {
         status,
