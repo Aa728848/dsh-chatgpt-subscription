@@ -21,6 +21,12 @@ const overflow = [
   { message: 'prompt is too long: 210000 tokens > 200000 maximum' },
   { message: 'Your request exceeded model token limit: 262144' },
   { message: 'input exceeds the model context window' },
+  // MiniMax's own wording, recorded by the upstream client: an over-window
+  // prompt comes back as "invalid params, context window exceeds limit (2013)".
+  // The bare 2013 is a generic invalid-params code - this plugin uses it for
+  // the reset-card route and the Files API - so the words are the judge.
+  { message: 'invalid params, context window exceeds limit (2013)' },
+  { error: { errorCode: 2013, errorReason: 'invalid params, context window exceeds limit' } },
 ]
 const unrelated = [
   'quota exceeded', 'tokens per minute limit exceeded', 'request body too large',
