@@ -14,7 +14,7 @@ import { BRAND_MARKS, type BrandMarkKey, type BrandMarkSvg } from './brand-svg.t
 export type HubProviderId =
   | 'chatgpt' | 'antigravity' | 'command-code' | 'kimi-code'
   | 'workbuddy' | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
-  | 'step-code'
+  | 'step-code' | 'cline-pass'
 
 /**
  * GLM（ZCode 账号）这张卡自带的标记：智谱官方 logo.svg 里那个方形标记，逐字转录。
@@ -112,6 +112,10 @@ export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   // 它现在有出处了，上面那句「Step 没有可核验的品牌色取值来源」随之作废。标记画成
   // currentColor，所以这里配 #ffffff，白字压深砖才读得出来。
   'step-code': { mark: 'step-code', color: '#ffffff', tile: '#1d1d1d' },
+  // Cline publishes no vendored mark this plugin can verify, so the card gets a
+  // monogram rather than an invented logo: a wrong vendor's mark reads as a
+  // wrong answer, a monogram reads as a card.
+  'cline-pass': { monogram: 'CL', color: '#ffffff', tile: '#1F2937' },
 }
 
 /** One brand mark at a given box size; the artwork is decorative. */

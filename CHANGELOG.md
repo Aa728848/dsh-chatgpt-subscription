@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- **[cline-pass] 新增第 10 条订阅线路：Cline Pass（API Key 号池 + 上游渠道钉住）**
+  - **范围**：把 MIT 许可的 [`dsh-cline-pass`](https://github.com/yhshzh/dsh-cline-pass) 的功能按本仓库的线路规范兼容移植为独立线路 `cline-pass`，复用共享内核（`AccountPoolCore`、并发闸、空闲看门狗、请求图片预算、`claimProviderRoute`、账号卡片 / 模型清单 / 上下文编辑器 / composer 胶囊），**不改动任何既有线路的行为**。
+  - **能力**：OpenAI Chat Completions 流式（文本 / reasoning / 工具调用 / 图片）；多 API Key 顺序 / 轮询 / 粘性调度、429 冷却、401/403 失效标记与换号；**上游渠道探测 / 逐渠道校验 / 钉住 / 排除**，`strict` 与 `preferred` 两种模式，首个 token 前故障转移；两种管线写法默认都写（`provider.*` 与 `providerOptions.gateway.*`），并以响应回读的实际渠道判定钉住是否被采纳；官方目录（`recommended-models` + models.dev + 上游网关）刷新；按账号读取 5 小时 / 周 / 月额度；进程内请求历史（含失败尝试链与 token 用量）；8 个 `cline_pass_*` 管理工具默认不注册，卡片内可开启（重启生效）。
+  - **注册点**：`src/index.ts`（线路工厂 / 路由 / hub 摘要 / dispose / 导出尾部）、`CONTROLLED_PROVIDERS`、`DIAGNOSTIC_PROVIDERS`、`hub/providers.tsx`、`hub/brand-icons.tsx`、`client/index.tsx`（locale / 样式 / 胶囊 order 44），以及既有计数断言各追加一项。
+  - **安全**：Key 只进平台加密凭据库（DPAPI / Keychain / Secret Service），响应与日志均不出现原文；所有写路由同源校验；错误信息最多回显上游一行原因。
+  - **文档**：新增 [`docs/cline-pass-line-plan.md`](docs/cline-pass-line-plan.md)（每个常量的出处、决策、**未验证清单**）；README 增加线路章节与路由表；协议证据矩阵增加一行。
+  - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **259 文件 / 4129 passed**（基线 253 / 4074，新增 6 个测试文件、55 例）；`npm run build` 与 `npm pack --dry-run` 通过，`lib/types/host/cline-pass/*` 已进包。
 
 ## 0.31.0 - 2026-10-20
 - **[minimax-code] 视频生成现在能带素材、选比例：首/尾帧、参考图/视频/音频、任意比例与 AIGC 水印**

@@ -29,6 +29,8 @@ import { GlmCodingPlanSection } from '../glm-coding-plan/GlmCodingPlanSection.ts
 import { ClaudeSection } from '../claude/ClaudeSection.tsx'
 import { OllamaSection } from '../ollama/OllamaSection.tsx'
 import { StepCodeSection } from '../step-code/StepCodeSection.tsx'
+import { ClinePassSection } from '../cline-pass/ClinePassSection.tsx'
+import { CLINE_PASS_PROVIDER_NAME, CLINE_PASS_ROUTE_PREFIX } from '../../shared/cline-pass-contracts.ts'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -145,6 +147,13 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: STEP_CODE_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(STEP_CODE_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <StepCodeSection onModelChange={onModelChange} />,
+  },
+  {
+    // Cline Pass（API Key 订阅）：再往后追加一格，既有线路的卡片顺序保持不动。
+    id: 'cline-pass',
+    name: CLINE_PASS_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(CLINE_PASS_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <ClinePassSection onModelChange={onModelChange} />,
   },
 ]
 

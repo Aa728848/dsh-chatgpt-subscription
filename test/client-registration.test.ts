@@ -299,6 +299,8 @@ describe('client registration', () => {
       'conversation.input.right',
       // Step Code 的胶囊同样只是又一个槽位，顺序接在 GLM 那条之后（order 43）。
       'conversation.input.right',
+      // Cline Pass 的胶囊接在 Step Code 之后（order 44）。
+      'conversation.input.right',
       'tool.call.toolview',
       // Antigravity 生图工具复用同一张生图卡片，按工具名再注册一次。
       'tool.call.toolview',
@@ -336,6 +338,7 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'claude-quota', order: 41 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'step-code-quota', order: 43 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'cline-pass-quota', order: 44 }),
     ])
     // 视频参数弹窗的那一格：与设置卡片同一种「插件自己的一格」写法，插在输入框
     // 浮层里、排在那条反馈弹窗（order 2）之后。
@@ -353,7 +356,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code'] as const
+    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -519,13 +522,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none. Step Code joins the toggleable
       // side (it posts enabled to its own /settings like every other line).
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(9)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(10)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.
