@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **[minimax-code] 请求的模型与实际回答的模型不一致时，这一轮立刻失败——而不是替用户按最贵档付费**
+  - **现象**：这条路由**不拒绝**它路由不了的模型 id。2026-10-28 实测：乱写串与空串都回 HTTP 200，实际由 `MiniMax-M3` 代答；同一个乱写 id 带 `reasoningEffort:'none'` 重发，回答的 M3 真的少了 thinking 块——是**真替换**，不是把名字写回去的壳。
+  - **为什么要紧**：我们的模型目录是硬编码的（`/v1/models` 对订阅流量是 503 `direct_route_not_configured`，那是路由裁决不是路径拼错）。若 MiniMax 下架了 M2.7 而用户仍选着它，请求**不会报错**，会被 M3 代跑——用户以为在用便宜模型，实际按最贵档计费（我们自己的实测：M3 的 max 档思考量约 3 倍、延迟约 4 倍）。**这是钱包问题，不是可用性问题**，而且**没有错误报文可依**。
+  - **改法**：[mapper.ts](../src/host/minimax-code/mapper.ts) 读流头的 `message_start.message.model`（此前只取 usage 与 stop_reason）；[adapter.ts](../src/host/minimax-code/adapter.ts) 把它与**真正上线的那串 id** 比对（从即将发送的请求体读回，不是目录解析名），不一致则抛 `MODEL_SUBSTITUTED`。
+  - **判定点与代价**：判定在 `processMinimaxStreamLine` 之后、**任何 `yield` 之前**——`message_start` 是流的第一个事件，排在所有 `content_block_start` 之前，所以**没有任何内容块送达调用方**，无需回收、不会有重试重复输出。新码**不在** `retryableCodes` 里：重发同一 body 只会再被替换一次，并按替身计费。
+  - **验证**：`npm run typecheck` 0 错误；全量 **250 passed | 1 skipped（251 文件）、4050 passed | 7 skipped、0 failed**；`npm run build` 通过。新增 5 条守卫（一致 / 不一致且零内容块 / 无 model 字段 / 大小写双向 / mapper 层单测）。
+- **[minimax-code] 每日签到锁定在它开始的那一个账号上：池行被重绑就重新认，attempt 中途换号就拒绝**
+  - **现象**：签到读面板用 A 的 `realUserID`、领取用 B 的凭据是可能的——网关把 `accessToken` 与 `realUserID` 当两个独立入参，彼此没有绑定校验，而 `realUserID` 是按池行缓存的。
+  - **两个真实窗口**：① 状态文件钉着 A、池里那一行已被换成 B；② 401 强制续期后 `renewCredential` 返回**另一个账号**的凭据，重试即以别人的账号领取。
+  - **两者性质不同，处理也不同**：① **重绑是合法的状态变化**——一行 = 插件替用户管理的一个账号，跟着走才是对的，所以**用当前凭据重新解析身份、重新钉住、照常签到**（老状态文件也会在第一次运行时自愈）；② **attempt 中途的漂移与 401 续期换号必须硬拒绝**（`MinimaxCodeCheckinAccountMismatchError`），不自愈。
+  - **记一个容易骗人的地方**：`native:<region>:<recordKey>` 里的 `recordKey` 是**记录槽位**键，**不是账号 id**——用户在桌面端把另一个账号签进同一槽位时它不变。所以它只是「尽力而为的护栏」，这条线账号的**权威标识**是从身份接口解析出来的 `realUserID`。
+  - **验证**：签到相关 5 套件 **113 passed**；两次**变异验证**（关掉钉校验 → 两条用例红；关掉漂移守卫 → 漂移用例红），均已还原。
+- **[minimax-code] 额度耗尽改按上游数字码判定，措辞表留作兜底；并纠正我们文档里的过度声称**
+  - **改法**：[adapter.ts](../src/host/minimax-code/adapter.ts) 的 `statusCodeIn` 读三处信封（`base_resp.status_code` → `errorCode` → **顶层 `code`**），命中上游的 `2056`/`2067` 即判账号级额度耗尽；403 与 429 两个入口读**同一个**谓词、汇进**同一个**判决，形状天然一致。**2013 明确排除**（通用「参数非法」码，本仓库在 reset-card 与 Files API 上另有语义）。
+  - **实测订正**：Messages 路由的错误信封**没有 `base_resp`**——400 是 `{type,error{type,message}}`（无任何数字字段），401 是 `{code,message}`。所以这条路由上**当前真正 operative 的仍是措辞表**，数字码臂是**跨信封的前向兼容臂**。README 里那段把它写成首要判据的话已改正。
+  - **验证**：新增 8 条（数字码 / 措辞 / 两者同形 / 2013 不判 / 顶层 401 不判 / 流内继承），邻近 6 套件 133 passed。
+- **[minimax-code] 令牌时长从「约 24 小时」纠正为「约 1 小时」，设置卡改用分钟显示**
+  - **现象**：卡片上写着访问令牌约 24 小时有效，而实测是**一小时**（`types.ts`）——一句用户会读到的错话；余量又以「小时」报，一小时寿命的令牌因此看不出 Host 何时会续期。
+  - **改法**：`remainingHours` → `remainingMinutes`，单位改分钟（恒定一位小数，不足一分钟视为已过期），中英文案同步改为「约 1 小时」。
+- **[minimax-code] 能力说明与上游差分归档：七处过期表述 + 活体探针 + 差分文档**
+  - **代码早于文档**：Files API 早就实现了（上传 / 12 小时 TTL / 账号隔离 / 去重缓存），视频也早已声明，而 `model-catalog.ts` 的三处注释与 README 仍在描述实现之前的世界——这会让人误判这条线路的能力边界，包括下一次做差分分析的人。
+  - **新产物**：`scripts/probe-minimax-capabilities.probe.ts`（16 个 case 的活体探针）与 `docs/minimax-code-probe-capabilities.md`（原始证据），以及 `docs/minimax-code-upstream-delta-v2.md`（本轮上游差分、明确否掉的项、待办）。
+  - **顺带量出**：服务侧 `max_tokens` 真阈值是 **524288**（128000 / 512000 都接受，999999999 回 400）——我们写的 128000 是保守值（与上游兜底表一致），**数值未改**；并确认那条 400 文案**不会**误触发上下文超限检测，不存在「压缩→重试→再压缩」的死循环。
+- **[Codex 搜索] 读出活体搜索真正的答案字段，并给代理一个连接超时**
+  - **现象**：活体 `/alpha/search` 的回答在顶层 `output` 字段，而 `readContent` 只看 `content` / `output_text` / `summary`——于是每次真实搜索都**没有答案正文**，工具只报一串来源，读起来像「搜索能用，只是没搜到东西」。
+  - **代理**：undici 默认 10s 连接超时覆盖的是到**源站**的 TLS 握手而非到代理的那一跳；实测某条到 chatgpt.com 的慢路由仅握手就 1.2s–18s、请求整体 31s，默认值把本该几秒后成功的请求杀掉，而且是以一句不点名的 `fetch failed` 杀掉。代理 agent 改为 60s 连接超时，并用 undici 真正接受的 options 对象形式传入（第二个位置参数会被静默丢弃）。
 ## 0.29.0 - 2026-10-19
 - **[Antigravity] 429 不再被当成「配额耗尽」：裸 429 不冷却账号、不换账号，也不再把上游原因藏起来**
   - **现象**：账号配额还很充足（实测 Gemini 5h 桶剩余 95.95%、周桶剩余 84.67%，Claude/GPT 100%），插件却报「账号配额已耗尽」，并把该账号的 Gemini 配额族冷却 15 分钟；此后每次重试都被账号池直接挡下，连一次网络请求都不发。
