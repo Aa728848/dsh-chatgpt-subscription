@@ -185,7 +185,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     optionalContextWindow: 1_000_000,
     // MEASURED ceiling: 524288, and 128_000 here is the CONSERVATIVE value, not the
     // limit. The endpoint states its own threshold in the rejection message — the
-    // 2026-10-28 probe (scripts/probe-minimax-capabilities.probe.ts, evidence in
+    // 2026-10-20 probe (scripts/probe-minimax-capabilities.probe.ts, evidence in
     // docs/minimax-code-probe-capabilities.md) sent max_tokens 128000 (200), 512000
     // (200) and 999999999 (400 "invalid params, model[MiniMax-M3] does not support
     // max tokens > 524288 (2013)"), which brackets the boundary at 524288 = 512*1024.
@@ -223,7 +223,7 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     // between 9 and 4 needs a probe of that path rather than a re-reading of the
     // docs. Do not "fix" it to 4 on the strength of the doc alone.
     //
-    // Measured alongside that question (2026-10-28 probe, same evidence file): this
+    // Measured alongside that question (2026-10-20 probe, same evidence file): this
     // route does NOT report a model it cannot serve. An unrecognised id is silently
     // replaced by M3 and answers HTTP 200 with a normal stream — so "the model was
     // retired" produces no error payload at all, and no error-based delisting check

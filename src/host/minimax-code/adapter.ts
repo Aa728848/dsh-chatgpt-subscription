@@ -289,7 +289,7 @@ function integerOrUndefined(value: unknown): number | undefined {
  *  · the client envelope — `{"errorCode":…,"errorReason":…}` — as types.ts:22 and
  *    model-catalog.ts:6 document it;
  *  · the Messages envelope — `{"code":…,"message":…}` — which is the ONLY numeric
- *    field this route's own error bodies carry. Measured on 2026-10-28 (see
+ *    field this route's own error bodies carry. Measured on 2026-10-20 (see
  *    docs/minimax-code-probe-capabilities.md): a 400 on /messages carries no
  *    base_resp and no errorCode at all, and its 2013 sits in the message TEXT
  *    alone; the 401 that shares that text says `{"code":401,"message":"auth

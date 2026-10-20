@@ -1,4 +1,4 @@
-# minimax-code 线路：能力边界活体探针（2026-10-28）
+# minimax-code 线路：能力边界活体探针（2026-10-20）
 
 - **探针**：`scripts/probe-minimax-capabilities.probe.ts`
 - **跑法**：`npx vitest run --config vitest.probe.config.ts probe-minimax-capabilities`

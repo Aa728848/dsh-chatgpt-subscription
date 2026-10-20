@@ -1,4 +1,4 @@
-# minimax-code 线路：第二轮上游差分（2026-10-28）
+# minimax-code 线路：第二轮上游差分（2026-10-20）
 
 - **我们**：`src/host/minimax-code/`
 - **上游**：`MiniMax-AI/minimax-code`（MIT 开源）　**npm**：`@minimax-ai/code@0.6.12`（2026-10-15）
@@ -29,7 +29,7 @@
 
 ## 一、探针测穿的第一个前提：端点不拒绝它路由不了的 id
 
-### 实测（`scripts/probe-minimax-capabilities.probe.ts`，2026-10-28，cn 区，账号池取凭据）
+### 实测（`scripts/probe-minimax-capabilities.probe.ts`，2026-10-20，cn 区，账号池取凭据）
 
 | 请求 model | HTTP | `message_start.message.model`（谁在回答） |
 | :- | :-: | :- |

@@ -3,7 +3,7 @@
 ## Unreleased
 
 - **[minimax-code] 请求的模型与实际回答的模型不一致时，这一轮立刻失败——而不是替用户按最贵档付费**
-  - **现象**：这条路由**不拒绝**它路由不了的模型 id。2026-10-28 实测：乱写串与空串都回 HTTP 200，实际由 `MiniMax-M3` 代答；同一个乱写 id 带 `reasoningEffort:'none'` 重发，回答的 M3 真的少了 thinking 块——是**真替换**，不是把名字写回去的壳。
+  - **现象**：这条路由**不拒绝**它路由不了的模型 id。2026-10-20 实测：乱写串与空串都回 HTTP 200，实际由 `MiniMax-M3` 代答；同一个乱写 id 带 `reasoningEffort:'none'` 重发，回答的 M3 真的少了 thinking 块——是**真替换**，不是把名字写回去的壳。
   - **为什么要紧**：我们的模型目录是硬编码的（`/v1/models` 对订阅流量是 503 `direct_route_not_configured`，那是路由裁决不是路径拼错）。若 MiniMax 下架了 M2.7 而用户仍选着它，请求**不会报错**，会被 M3 代跑——用户以为在用便宜模型，实际按最贵档计费（我们自己的实测：M3 的 max 档思考量约 3 倍、延迟约 4 倍）。**这是钱包问题，不是可用性问题**，而且**没有错误报文可依**。
   - **改法**：[mapper.ts](../src/host/minimax-code/mapper.ts) 读流头的 `message_start.message.model`（此前只取 usage 与 stop_reason）；[adapter.ts](../src/host/minimax-code/adapter.ts) 把它与**真正上线的那串 id** 比对（从即将发送的请求体读回，不是目录解析名），不一致则抛 `MODEL_SUBSTITUTED`。
   - **判定点与代价**：判定在 `processMinimaxStreamLine` 之后、**任何 `yield` 之前**——`message_start` 是流的第一个事件，排在所有 `content_block_start` 之前，所以**没有任何内容块送达调用方**，无需回收、不会有重试重复输出。新码**不在** `retryableCodes` 里：重发同一 body 只会再被替换一次，并按替身计费。

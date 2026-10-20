@@ -10,7 +10,7 @@ import { PROVIDER_NAME } from '../src/host/minimax-code/types.ts'
  * probe — `{"base_resp":{"status_code":…}}` and `{"errorCode":…}` — and this one covers
  * the third, which it did not.
  *
- * Measured on 2026-10-28 (docs/minimax-code-probe-capabilities.md):
+ * Measured on 2026-10-20 (docs/minimax-code-probe-capabilities.md):
  *
  *  · a 400 on /messages carries NO numeric field at all —
  *    `{"type":"error","error":{"type":"invalid_request_error","message":"…(2013)…"}}` —
