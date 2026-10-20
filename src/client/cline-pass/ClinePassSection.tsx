@@ -787,74 +787,95 @@ export function ClinePassSection(props: Props): React.ReactElement {
           <div className="dsha-grouphead">
             <h3>{t.advancedSection}</h3>
           </div>
-          <div className="dshcp-field">
-            <label htmlFor="cline-pass-baseurl-setting">{t.baseURL}</label>
+          <div className="dsha-row">
+            <label className="dsha-label" htmlFor="cline-pass-baseurl-setting">{t.baseURL}</label>
             <input
               id="cline-pass-baseurl-setting"
-              className="dsha-input"
+              className="dsha-input dshcp-adv-control dshcp-adv-mono"
               value={settingsForm.baseURL}
               onChange={(event) => setSettingsForm({ ...settingsForm, baseURL: event.target.value })}
             />
-            <label htmlFor="cline-pass-default-window">{t.defaultContextWindow}</label>
+          </div>
+          <div className="dsha-row">
+            <label className="dsha-label" htmlFor="cline-pass-default-window">{t.defaultContextWindow}</label>
             <input
               id="cline-pass-default-window"
-              className="dsha-input"
+              className="dsha-input dshcp-adv-control dshcp-adv-num"
               value={settingsForm.defaultContextWindow}
               onChange={(event) => setSettingsForm({ ...settingsForm, defaultContextWindow: event.target.value })}
             />
-            <label htmlFor="cline-pass-default-max">{t.defaultMaxTokens}</label>
+          </div>
+          <div className="dsha-row">
+            <label className="dsha-label" htmlFor="cline-pass-default-max">{t.defaultMaxTokens}</label>
             <input
               id="cline-pass-default-max"
-              className="dsha-input"
+              className="dsha-input dshcp-adv-control dshcp-adv-num"
               value={settingsForm.defaultMaxTokens}
               onChange={(event) => setSettingsForm({ ...settingsForm, defaultMaxTokens: event.target.value })}
             />
-            <label htmlFor="cline-pass-concurrency">{t.maxConcurrentRequests}</label>
+          </div>
+          <div className="dsha-row">
+            <label className="dsha-label" htmlFor="cline-pass-concurrency">{t.maxConcurrentRequests}</label>
             <input
               id="cline-pass-concurrency"
-              className="dsha-input"
+              className="dsha-input dshcp-adv-control dshcp-adv-num"
               value={settingsForm.maxConcurrentRequests}
               onChange={(event) => setSettingsForm({ ...settingsForm, maxConcurrentRequests: event.target.value })}
             />
-            <label htmlFor="cline-pass-idle">{t.streamIdleTimeoutMs}</label>
+          </div>
+          <div className="dsha-row">
+            <label className="dsha-label" htmlFor="cline-pass-idle">{t.streamIdleTimeoutMs}</label>
             <input
               id="cline-pass-idle"
-              className="dsha-input"
+              className="dsha-input dshcp-adv-control dshcp-adv-num"
               value={settingsForm.streamIdleTimeoutMs}
               onChange={(event) => setSettingsForm({ ...settingsForm, streamIdleTimeoutMs: event.target.value })}
             />
-            <label htmlFor="cline-pass-history-limit">{t.historyLimit}</label>
+          </div>
+          <div className="dsha-row">
+            <label className="dsha-label" htmlFor="cline-pass-history-limit">{t.historyLimit}</label>
             <input
               id="cline-pass-history-limit"
-              className="dsha-input"
+              className="dsha-input dshcp-adv-control dshcp-adv-num"
               value={settingsForm.historyLimit}
               onChange={(event) => setSettingsForm({ ...settingsForm, historyLimit: event.target.value })}
             />
-            <label htmlFor="cline-pass-pin-spelling">{t.pinSpelling}</label>
+          </div>
+          <div className="dsha-pref-row">
+            <div>
+              <label htmlFor="cline-pass-pin-spelling"><strong>{t.pinSpelling}</strong></label>
+              <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.pinSpellingHint}</p>
+            </div>
             <select
               id="cline-pass-pin-spelling"
-              className="dsha-select"
+              className="dsha-select dshcp-adv-control"
               value={settingsForm.pinSpelling}
               onChange={(event) => setSettingsForm({ ...settingsForm, pinSpelling: event.target.value })}
             >
               <option value="both">{t.pinSpellingBoth}</option>
               <option value="detected">{t.pinSpellingDetected}</option>
             </select>
-            <label htmlFor="cline-pass-expose-catalog">{t.exposeCatalog}</label>
+          </div>
+          <div className="dsha-pref-row">
+            <div>
+              <label htmlFor="cline-pass-expose-catalog"><strong>{t.exposeCatalog}</strong></label>
+              <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.exposeCatalogHint}</p>
+            </div>
             <input
               id="cline-pass-expose-catalog"
+              className="dshcp-check"
               type="checkbox"
               checked={settingsForm.exposeCatalog}
               onChange={(event) => setSettingsForm({ ...settingsForm, exposeCatalog: event.target.checked })}
             />
           </div>
-          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.pinSpellingHint}</p>
           <div className="dsha-pref-row">
             <div>
               <strong>{t.exposeTools}</strong>
-              <p className="dsha-muted">{t.exposeToolsHint}</p>
+              <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.exposeToolsHint}</p>
             </div>
             <input
+              className="dshcp-check"
               type="checkbox"
               aria-label={t.exposeTools}
               checked={status?.exposeTools === true}
@@ -862,7 +883,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
               onChange={toggleTools}
             />
           </div>
-          <div className="dshcp-field-actions">
+          <div className="dsha-actions">
             <button className="dsha-btn dsha-btn-primary" disabled={busyAny} onClick={saveSettings}>
               {busy === 'settings' ? t.savingSettings : t.saveSettings}
             </button>

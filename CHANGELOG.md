@@ -1,6 +1,19 @@
 # Changelog
 
 ## Unreleased
+- **[cline-pass] 高级设置与整站版式对齐：输入框终于有主题样式，六行数值与三行开关各归其位**
+  - **现象**：设置页「高级设置」里的六个输入框是**浏览器原生外观**（白色实心框 + 粗边框），与旁边 `.dsha-select` 的深色圆角控件格格不入；原因是 [styles.ts](../src/client/cline-pass/styles.ts) 用了 `.dsha-input` 这个类名，而**全站样式表从未定义过它**——其他线路的输入框都自带各自的 `-control input` 规则，本线路抄了类名没抄规则。
+  - **错位**：原布局用一张双列 Grid（`.dshcp-field`）把所有控件塞在右半屏，而 `<select>` 被 `.dsha-select` 的 `max-width:220px` 卡住，于是**输入框顶到最右、下拉框缩在中间**；「在模型选择器中列出网关目录的额外模型」的复选框被 Grid 推到距左 240px 处，与下方「注册 `cline_pass_*` 管理工具」那个贴右的复选框**不在同一条竖线**上。
+  - **说明串了行**：`t.pinSpellingHint`（「网关可能在两次请求间切换管线…」）被写在整张 Grid **下方**，视觉上成了「列出网关目录额外模型」的副标题，而它真正的 `t.exposeCatalogHint` 根本没渲染。
+  - **改法**：① 补上 `.dsha-input` 的主题样式（`--dsw-alias-bg-layer-2` 底、`0.5px` 边框、`7px` 圆角、`focus-visible` 描边），与 `.dsha-select` 同一套 token；② 六个数值行改用共享 `.dsha-row`（左标签右控件），右侧统一 `240px` 定宽（`.dshcp-adv-control`），数值与地址分别用等宽字体（`.dshcp-adv-num` 右对齐 / `.dshcp-adv-mono`）；③ 三行开关改用共享 `.dsha-pref-row`（左侧粗体标题 + 灰字说明、右侧 `.dshcp-check` 复选框），三枚复选框在右侧对齐；④ 每句提示归位到它自己那一行的标题下，并补回漏掉的 `t.exposeCatalogHint`。
+  - **验证**：`npm run typecheck` 0 错误；`test/cline-pass-section.test.tsx` **12 passed**（新增一例断言 6 行 `.dsha-row` + 3 行 `.dsha-pref-row` 且每行副标题与自己的标题配对）；`npm run build` 通过。
+- **[进展更新] 面板正文终于能画代码块、公式与 mermaid：不再把源码原样摊在读者面前**
+  - **现象**：进展正文走的是本插件自己的 `MarkdownLite` 渲染器（平台那个 `MarkdownText` 的 lib 是浏览器构建，顶层 `import css from X.module.css` 会让任何 Node/vitest 导入方直接失败），而它只认段落、列表、GFM 表格、行内代码、粗体与标题——于是正文里只要出现围栏代码块或公式，**源码就逐字显示出来**。
+  - **改法（[markdown-lite.tsx](../src/client/progress-updates/markdown-lite.tsx)）**：加围栏代码块（按 CommonMark 的闭合规则，**未闭合的围栏吞掉剩余全文**，所以流式输出永远不会漏出反引号）与 KaTeX 公式（行内 `$..$` / `\(..\)`、块级 `$$..$$` / `\[..\]`）。KaTeX 的 HTML 经 `DOMParser` 映射成 React 元素，**不走 `dangerouslySetInnerHTML`**，渲染器「无注入」的性质得以保持；美元符号的判定照抄平台语法守卫，因此「prices $5 to $10」仍然是散文。
+  - **改法（[renderer.ts](../src/client/mermaid/renderer.ts)）**：语法关键字表从 10 种扩到 mermaid 11 能识别的 **47 种**（journey、quadrantChart、C4Context、sankey-beta 等此前**根本看不见**）；并且旧代码只匹配**行首**关键字，于是非常常见的 `%%{init}%%`、注释与 frontmatter 前言会把一张本来合法的图判死——新增 `stripMermaidPreamble` 在匹配前剥掉它们。横幅语言标签改读文档化的 `[data-code-block-banner]` 钩子，而不是 `firstElementChild`（后者的 `textContent` 是语言名加复制按钮文案）。
+  - **一个容易踩空的点**：平台对 mermaid 围栏**不会**打印 "mermaid"（高亮器没有 mermaid 语法，`CodeToolbar` 回落到 `codeBlock.title` 占位符）。所以那个标签对特定语言是**否决票**、对 mermaid 是**显式放行**，而占位符的含义是「没有标签」，此时由关键字表说了算。
+  - **依赖**：`katex` 进 `dependencies`（`^0.18.7`，平台基线钉的同一个版本）；它的 CSS 与字体仍来自宿主页面，所以 bundle 只是变大，不会多打包一份样式表。
+  - **验证**：`npm run typecheck` 0 错误；新增 [`test/markdown-lite.test.tsx`](../test/markdown-lite.test.tsx) 与扩写的 [`test/mermaid-renderer.test.ts`](../test/mermaid-renderer.test.ts)；全量 `npm test` **268 文件 / 4452 passed / 7 skipped**。
 - **[antigravity] 上游 5xx 与「根本没连上」不再判本轮死刑：按可重试码上报，交给宿主的退避重试**
   - **现象与真因**：个别轮次直接失败并显示 `Antigravity API error (500): No response`（徽标 `PROVIDER_ERROR`），手动重发立刻能过。上游那次 500 确实是瞬时抖动，但**这条线路把它归成了终局错误码**：`adapter.ts` 里非 429 的非 2xx 一律抛 `PROVIDER_ERROR`，而这条线路的 `providerRetryPolicy()` 返回 `undefined`，宿主因此套用默认策略，默认可重试码只有 `EMPTY_RESPONSE / RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT` —— `PROVIDER_ERROR` 不在其中，`llm-retry` 一次都不会退避重试，直接把这一轮判死。
   - **还有一个会撒谎的状态码**：`fetch` 在**每个**端点上都抛错（DNS / TLS / 连接被重置）时根本没有 `response` 对象，而旧代码用 `response?.status ?? 500` 补了一个 **500**，于是"根本没连上"和"上游真的回了 500"在界面上长得一模一样。

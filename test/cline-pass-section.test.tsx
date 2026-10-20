@@ -227,6 +227,24 @@ describe('ClinePassSection', () => {
     expect(el.innerHTML).not.toContain('sk-')
     expect(el.textContent).toContain('主号')
   })
+
+  it('aligns advanced settings into shared dsha-row and dsha-pref-row rows with matching hints', async () => {
+    const el = await render()
+    const advGroup = [...el.querySelectorAll('section.dsha-group')].find(
+      (section) => section.querySelector('.dsha-grouphead h3')?.textContent === zh.advancedSection,
+    )!
+    expect(advGroup).toBeDefined()
+    expect(advGroup.querySelectorAll('.dsha-row')).toHaveLength(6)
+    const prefRows = [...advGroup.querySelectorAll('.dsha-pref-row')]
+    expect(prefRows).toHaveLength(3)
+    // Each preference row pairs its own heading and hint.
+    expect(prefRows[0]?.textContent).toContain(zh.pinSpelling)
+    expect(prefRows[0]?.textContent).toContain(zh.pinSpellingHint)
+    expect(prefRows[1]?.textContent).toContain(zh.exposeCatalog)
+    expect(prefRows[1]?.textContent).toContain(zh.exposeCatalogHint)
+    expect(prefRows[2]?.textContent).toContain(zh.exposeTools)
+    expect(prefRows[2]?.textContent).toContain(zh.exposeToolsHint)
+  })
 })
 
 describe('the hub card mark', () => {

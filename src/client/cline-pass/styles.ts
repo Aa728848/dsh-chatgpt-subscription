@@ -15,8 +15,11 @@ export function installClinePassStyles(): void {
 .dshcp-details{margin-top:8px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .dshcp-details>summary{cursor:pointer;color:var(--dsw-alias-label-secondary);user-select:none}
 .dshcp-details ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.dsha-input{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;padding:7px 10px;box-sizing:border-box}
+.dsha-input:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:1px}
+.dsha-input:disabled{opacity:.5}
 .dshcp-keyform{display:flex;flex-direction:column;gap:8px;align-items:stretch;margin-top:8px}
-.dshcp-keyrow{display:flex;gap:8px;flex-wrap:wrap}
+.dshcp-keyrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
 .dshcp-keyrow .dsha-input{flex:1;min-width:180px}
 .dshcp-model{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;margin-top:8px;padding:0 12px}
 .dshcp-model>summary{cursor:pointer;display:flex;align-items:center;gap:10px;list-style:none;padding:10px 0}
@@ -48,13 +51,15 @@ export function installClinePassStyles(): void {
 .dshcp-history-head{color:var(--dsw-alias-label-tertiary);font-size:11px;text-transform:none}
 .dshcp-history-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshcp-history-error{color:var(--dsw-alias-label-danger,#d94b4b);grid-column:1/-1}
-.dshcp-field{display:grid;grid-template-columns:minmax(160px,240px) minmax(0,1fr);gap:8px 14px;align-items:center;font-size:12.5px}
-.dshcp-field .dsha-input{width:100%}
-.dshcp-field-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+.dshcp-adv-control{width:240px;max-width:100%;flex:none}
+.dshcp-adv-control.dsha-select{max-width:240px;min-width:240px;width:240px}
+.dshcp-adv-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.dshcp-adv-num{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;text-align:right;font-variant-numeric:tabular-nums}
+.dshcp-check{flex:none;width:16px;height:16px;margin:0;cursor:pointer;accent-color:var(--dsw-alias-button-info-fill,#397ee8)}
 @media(max-width:720px){
   .dshcp-history-row{grid-template-columns:110px minmax(90px,1fr) 100px}
   .dshcp-history-row>:nth-child(4){display:none}
-  .dshcp-field{grid-template-columns:1fr}
+  .dshcp-adv-control,.dshcp-adv-control.dsha-select{width:100%;max-width:none;min-width:0}
 }
 `)
 }
