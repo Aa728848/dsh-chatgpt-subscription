@@ -134,6 +134,7 @@
   },
   "dependencies": {
     "mermaid": "^11.17.2",
-    "undici": "^8.10.0"
+    "undici": "^8.10.0",
+    "zod": "4.4.3"
   }
 }

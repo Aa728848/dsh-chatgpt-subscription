@@ -11,6 +11,12 @@
  *    追加一条提醒（additionalContexts）；
  * 4. `GET /api/dsh-progress-updates/updates` 只读路由 —— 浏览器半边唯一的取数通道。
  *
+ * 另外登记一个**会话投影**（`./projection.ts`），把日志里的 `progress_update`
+ * 调用折叠成进展。日志是唯一真源：进程内的 `stores` 一重启就没了，而投影是照着
+ * 已持久化的事件折出来的，重开对话、刷新页面、宿主重启之后照样读得回来。
+ * `stores` 因此降级成两件今天必须留着的事 —— 催促计数，以及投影服务缺席时的
+ * 降级路径。
+ *
  * **可选服务一律走 `ctx.get()`**：Cordis 里没写进 `inject` 的服务名不能直接当
  * 属性读，否则 apply 当场抛 `cannot get property "..." without inject`，整个插件
  * 降级。`sessions`、`sessionProjections`、`systemPrompt`、`webServer` 在本插件
@@ -33,6 +39,12 @@ import {
   type TurnBoundaryLookup,
 } from './nudge.ts'
 import { PROGRESS_SECTION_NAME, PROGRESS_SECTION_ORDER, progressSectionText } from './prompt.ts'
+import {
+  mergeProjectedUpdates,
+  progressUpdatesProjection,
+  readProjectedUpdates,
+  type SessionProjectionServiceLike,
+} from './projection.ts'
 import { makeProgressUpdatesRoute, type ProgressUpdatesReader } from './routes.ts'
 import {
   NUDGE_THRESHOLD,
@@ -147,6 +159,85 @@ interface LoggerService {
 }
 
 /**
+ * 会话服务里本模块会读的部分（结构化类型，不绑定具体 SDK 版本）。
+ *
+ * 比 `nudge.ts` 的 {@link NudgeSessionLookup} 多两样：`get` 交出**会话对象**
+ * （投影要拿它当入参，而不只是读 `header`），`list` 交出活跃会话，用来把子孙
+ * 找回来。两个成员都按可选声明：少哪个就少一条路径，而不是让插件挂不上。
+ */
+interface SessionsLookup {
+  /** 查一个活跃会话。 */
+  get?(id: string): SessionLike | undefined
+  /** 当前活跃的全部会话。 */
+  list?(): readonly SessionLike[]
+}
+
+/** 一条会话记录里本模块会读的部分（投影按对象寻址，血缘按 header 走）。 */
+interface SessionLike {
+  /** 不可变元数据：id 与父会话。 */
+  readonly header?: {
+    readonly id?: unknown
+    readonly parentSession?: unknown
+  }
+}
+
+/** 血缘回溯的深度上限：与 `nudge.ts` 的 `counterSessionIdOf` 同一个数。 */
+const LINEAGE_DEPTH_LIMIT = 16
+
+/**
+ * 找出一个会话的全部子孙（广度优先，只看 `sessions.list()` 里活跃的那些）。
+ *
+ * 重开对话之后历史子孙并不在 `list()` 里 —— 那时它们各自的进展本来就取不到，
+ * 这里能做的只是把**当前活跃**的那几支合进来，剩下的等它们 attach。
+ * @param rootId - 祖先会话 id。
+ * @param sessions - 会话服务。
+ * @returns 子孙会话（不含根自己），按发现顺序。
+ */
+function descendantSessionsOf(rootId: string, sessions: SessionsLookup): SessionLike[] {
+  const list = sessions.list
+  if (typeof list !== 'function') return []
+  let all: readonly SessionLike[]
+  try {
+    all = list.call(sessions)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(all) || all.length === 0) return []
+
+  /** 父会话 id → 直接子会话。 */
+  const childrenOf = new Map<string, SessionLike[]>()
+  for (const session of all) {
+    const parent = typeof session?.header?.parentSession === 'string' ? session.header.parentSession : undefined
+    if (parent === undefined) continue
+    const bucket = childrenOf.get(parent)
+    if (bucket === undefined) childrenOf.set(parent, [session])
+    else bucket.push(session)
+  }
+
+  const found: SessionLike[] = []
+  const seen = new Set<string>([rootId])
+  let frontier: string[] = [rootId]
+  // 血缘深度天然有限；上限只是防一条损坏的日志把这里变成死循环。
+  for (let depth = 0; depth < LINEAGE_DEPTH_LIMIT && frontier.length > 0; depth += 1) {
+    const next: string[] = []
+    for (const parentId of frontier) {
+      for (const child of childrenOf.get(parentId) ?? []) {
+        const childId = typeof child.header?.id === 'string' ? child.header.id : undefined
+        // 没有 id 的会话进不了下一层，也去不了重；直接收进结果即可。
+        if (childId !== undefined) {
+          if (seen.has(childId)) continue
+          seen.add(childId)
+          next.push(childId)
+        }
+        found.push(child)
+      }
+    }
+    frontier = next
+  }
+  return found
+}
+
+/**
  * 已挂载的模块登记表，走一个 global symbol：同一个包的两份模块实例（npm 拷贝与
  * 仓库 link）仍然共享一次判定，而重复注册同名工具或同名提示词分节会让宿主启动
  * 失败。
@@ -224,6 +315,34 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
   /** 会话投影服务：只用来读 turnBoundary，把同一个模型步里的多条工具结果合并成一轮。 */
   const projectionsOf = (): TurnBoundaryLookup | undefined => serviceOf<TurnBoundaryLookup>('sessionProjections')
 
+  /**
+   * 会话投影服务：登记/读取进展折叠。
+   *
+   * 与 {@link projectionsOf} 是同一个服务的两份结构化视图（`nudge` 那边只读
+   * `turnBoundary`，这里读写进展键），分开写是为了让各自的类型面只声明自己真正
+   * 用到的成员。服务缺席（老宿主、没装 agent-loop）时是 undefined。
+   */
+  const sessionProjectionsOf = (): SessionProjectionServiceLike | undefined =>
+    serviceOf<SessionProjectionServiceLike>('sessionProjections')
+
+  /**
+   * 登记进展折叠单元。服务缺席时**安静跳过**：这是可选服务，缺了只是回到内存
+   * 实现（今天的行为），不是一次安装失败。
+   */
+  track(() => {
+    const projections = sessionProjectionsOf()
+    if (typeof projections?.register !== 'function') return () => undefined
+    try {
+      return projections.register(progressUpdatesProjection())
+    } catch (error) {
+      // 同一个键被另一份模块实例登记过、服务正在拆除：都只是"这次没登记上"。
+      serviceOf<LoggerService>('logger')?.warn(
+        '[dsh-chatgpt-subscription] progress updates projection not registered: ' + String(error),
+      )
+      return () => undefined
+    }
+  }, 'dsh-chatgpt-subscription: progress update projection')
+
   /** 会话维度状态；键是计数会话 id（子会话已归并到顶层祖先）。 */
   const stores = new Map<string, ProgressUpdateStore>()
 
@@ -253,13 +372,61 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
     counterSessionIdOf((exec as { agent?: NudgeAgent } | undefined)?.agent, sessionsOf()) ?? 'session'
 
   /**
+   * 从会话日志折叠出来的进展 —— 面板的**首选**取数路径。
+   *
+   * 读三样东西，任缺其一就返回 undefined，让调用方回退到内存实现：
+   * 会话服务、投影服务，以及"这个 id 对应的会话对象"。最后一件事在重开对话之后
+   * 并不必然成立：`sessions` 里只有**活跃**会话，历史会话要等宿主 attach 上来
+   * 才读得到 —— 那之前面板显示的是内存里那一份（通常为空），attach 之后同一个
+   * 轮询请求就能读到完整历史。
+   *
+   * 合并范围是**整棵委派树**：今天的语义是一个子会话的进展归并到顶层祖先的桶里，
+   * 折叠之后靠 `header.parentSession` 把子孙找回来（与 `nudge.ts` 的 lineage
+   * 走法同一套，深度上限 16 是防一条损坏的日志把这里变成死循环），按 `at` 升序
+   * 排 —— 子会话汇报的进展因此落在它真正发生的那个时间点上，而不是全排在最后。
+   * @param sessionId - 浏览器问的会话 id。
+   * @returns 合并后的进展；这条路径不可用时 undefined。
+   */
+  const projectionUpdatesOf = (sessionId: string): readonly ProgressUpdate[] | undefined => {
+    if (sessionId === '') return undefined
+    const sessions = sessionsOf() as SessionsLookup | undefined
+    if (sessions === undefined) return undefined
+    const projections = sessionProjectionsOf()
+    if (projections === undefined) return undefined
+
+    let own: unknown
+    try {
+      own = sessions.get?.(sessionId)
+    } catch {
+      return undefined
+    }
+    if (own === undefined) return undefined
+    const updates = readProjectedUpdates(projections, own)
+    if (updates === undefined) return undefined
+
+    const lists: (readonly ProgressUpdate[])[] = [updates]
+    for (const child of descendantSessionsOf(sessionId, sessions)) {
+      // 单个子孙读不起来只是少一份历史，不该让整次读取降级。
+      const childUpdates = readProjectedUpdates(projections, child)
+      if (childUpdates !== undefined) lists.push(childUpdates)
+    }
+    return lists.length === 1 ? updates : mergeProjectedUpdates(lists)
+  }
+
+  /**
    * 浏览器半边的读取面：给定会话 id 就交出那个会话的进展快照。
+   *
+   * **先投影、后内存**：投影是从已持久化的会话日志折出来的，重开对话、刷新页面、
+   * 宿主重启之后都还在；内存 `stores` 只在投影这条路不可用时兜底（老宿主没有
+   * 投影服务、会话还没 attach、或者压根没装会话服务）。
    *
    * 请求不带 session（或带一个本进程没见过的 id）时，回退到那个"合成会话桶"：
    * 这是单会话部署里的常态，也是插件第一次被调用、祖先血缘还没建立时的落点。
    */
   const reader: ProgressUpdatesReader = {
     updatesOf: (sessionId: string) => {
+      const projected = projectionUpdatesOf(sessionId)
+      if (projected !== undefined) return projected
       const direct = stores.get(sessionId)
       if (direct !== undefined) return direct.state().updates
       if (sessionId !== '') {
