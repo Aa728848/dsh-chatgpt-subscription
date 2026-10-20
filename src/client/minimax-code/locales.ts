@@ -115,6 +115,22 @@ export const zh = {
   capImage: '图片',
   loading: '加载中...',
   unknown: '—',
+  // --- 视频工具（对话流卡片 + 侧边栏视频台）---
+  // 中文提示最多两句、结尾不加句号（DSH 文案规则）。
+  videoToolTitle: '视频',
+  videoToolRunning: '正在生成视频',
+  videoToolDone: '视频已生成',
+  videoToolFailed: '视频生成失败',
+  videoGenerating: '上游还在生成，完成后会自动出现',
+  videoReading: '正在读取视频',
+  videoTooLarge: '这个视频超出了 {limit} 的整文件读取上限，用系统播放器打开仍然可以看',
+  videoUnreadable: '读不到这个视频的字节，文件可能已经被移动或删除',
+  videoUnplayable: '这个视频的字节解不开，无法播放',
+  videoNoMeta: '这次调用没有留下视频信息，无法定位文件',
+  videoChannelOff: '当前环境没有打开文件读取通道，暂时无法播放',
+  videoFailed: '这次生成没有成功，没有可播放的文件',
+  videoSize: '{size}',
+  videoTitle: '视频',
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
@@ -226,6 +242,20 @@ export const en: Record<keyof typeof zh, string> = {
   capImage: 'Image',
   loading: 'Loading...',
   unknown: '—',
+  videoToolTitle: 'Video',
+  videoToolRunning: 'Generating video',
+  videoToolDone: 'Video generated',
+  videoToolFailed: 'Video generation failed',
+  videoGenerating: 'Still generating upstream; the video appears here once it lands.',
+  videoReading: 'Reading the video',
+  videoTooLarge: 'This video is past the {limit} full-file read cap; your system player can still open it.',
+  videoUnreadable: 'The video bytes could not be read — the file may have been moved or deleted.',
+  videoUnplayable: 'The video bytes could not be opened for playback.',
+  videoNoMeta: 'This call recorded no video metadata, so the file cannot be located.',
+  videoChannelOff: 'No file-read channel is available here, so playback is unavailable.',
+  videoFailed: 'This generation did not succeed, so there is no file to play.',
+  videoSize: '{size}',
+  videoTitle: 'Video',
 }
 
 export const dictionaries = {

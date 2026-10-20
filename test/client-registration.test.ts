@@ -302,6 +302,10 @@ describe('client registration', () => {
       'tool.call.toolview',
       // Antigravity 生图工具复用同一张生图卡片，按工具名再注册一次。
       'tool.call.toolview',
+      // MiniMax 生成视频：第三张工具卡片，同一个 keyed 槽，按工具名再注册一次。
+      'tool.call.toolview',
+      // MiniMax 视频的侧边栏渲染器：正文注册在宿主的文档页签槽上。
+      'sidebar.right.tab.document',
       // 进展更新子模块（./progress-updates/）：对话流进展行、侧栏页签的正文与
       // 标题（阶段二的 keyed 槽位）、以及它自己那一格设置页。页签**类型**的注册走
       // ctx.sidebarRightTabs（服务，不是槽位），所以这里看不到第四类槽位。
@@ -332,6 +336,7 @@ describe('client registration', () => {
     expect(registrations.filter((registration) => registration.name === 'tool.call.toolview')).toEqual([
       expect.objectContaining({ key: CODEX_IMAGE_TOOL_NAME }),
       expect.objectContaining({ key: ANTIGRAVITY_IMAGE_TOOL_NAME }),
+      expect.objectContaining({ key: 'minimax_generate_video' }),
       expect.objectContaining({ key: 'progress_update' }),
     ])
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
