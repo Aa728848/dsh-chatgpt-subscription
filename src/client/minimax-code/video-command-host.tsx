@@ -108,8 +108,40 @@ export function createVideoCommandHost(ctx: ClientContext): () => React.JSX.Elem
   }
 }
 
+/** 宿主 `ctx.commandUi` 的最小注册面。 */
+interface CommandUiRegistry {
+  register?: (contribution: unknown) => () => void
+}
+
+/**
+ * 从上下文里取 `commandUi`。
+ *
+ * 属性读只在 `'commandUi'` 已写进当前 scope 的 `inject` 名单时合法；本插件的静态
+ * `inject` 不包含它（以免无 `ui-commands` 的旧宿主卡在 pending），直接读
+ * `ctx.commandUi` 会被 Cordis 的属性守卫当场抛错、使整个插件 fiber 落入
+ * `failed`。因此这里先试属性（供 `ctx.inject(['commandUi'], scope => …)` 的子
+ * scope 与测试替身使用）、失败再退回 `get('commandUi')`。
+ */
+function commandUiOf(scope: ClientContext): CommandUiRegistry | undefined {
+  try {
+    const direct = (scope as unknown as { commandUi?: CommandUiRegistry }).commandUi
+    if (direct !== undefined) return direct
+  } catch {
+    // Cordis 拒绝未声明 inject 的属性读：退回 get('commandUi')。
+  }
+  try {
+    return (scope as unknown as { get?: (name: string) => unknown }).get?.('commandUi') as CommandUiRegistry | undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * 把 `/video` 命令挂到宿主的命令服务上。
+ *
+ * 与宿主 `ui-message-feedback` 的 `/feedback` 装饰同一种接线方式：若 `commandUi`
+ * 已经在位（或当前是无 `inject` 能力的测试替身），就地注册；若 `commandUi` 晚于
+ * 本插件激活，则经 `ctx.inject(['commandUi'], scope => …)` 在它上线时补注册。
  *
  * 注册失败只吞掉：宿主这一版可能没有 `commandUi`（它由 `ui-commands` 提供），一个
  * 可选依赖缺席不该让整个插件 apply 失败。
@@ -118,19 +150,32 @@ export function createVideoCommandHost(ctx: ClientContext): () => React.JSX.Elem
  * @returns 卸载函数；服务缺席时是一个空操作。
  */
 export function installVideoCommand(ctx: ClientContext): () => void {
-  const commandUi = (ctx as unknown as {
-    commandUi?: { register?: (contribution: unknown) => () => void }
-  }).commandUi
-  if (typeof commandUi?.register !== 'function') return () => {}
-  try {
-    return commandUi.register(createVideoCommand(ctx, {
-      openForm: openVideoForm,
-      // 每次打开菜单现读：用户可能刚在设置页改过。
-      defaults: () => readVideoDefaults(),
-      translate: fallbackTranslate,
-    }))
-  } catch {
-    // 一个命令名撞车（宿主已有 /video）就是这里抛的；吞掉比整页启动失败好。
-    return () => {}
+  const registerOn = (scope: ClientContext): (() => void) => {
+    const commandUi = commandUiOf(scope)
+    if (typeof commandUi?.register !== 'function') return () => {}
+    try {
+      return commandUi.register(createVideoCommand(ctx, {
+        openForm: openVideoForm,
+        // 每次打开菜单现读：用户可能刚在设置页改过。
+        defaults: () => readVideoDefaults(),
+        translate: fallbackTranslate,
+      }))
+    } catch {
+      // 一个命令名撞车（宿主已有 /video）就是这里抛的；吞掉比整页启动失败好。
+      return () => {}
+    }
+  }
+  const immediate = commandUiOf(ctx)
+  const injectService = (ctx as unknown as {
+    inject?: (deps: readonly string[], callback: (scope: ClientContext) => void) => { dispose?: () => void } | undefined
+  }).inject
+  if (typeof immediate?.register === 'function' || typeof injectService !== 'function') {
+    return registerOn(ctx)
+  }
+  const child = injectService.call(ctx, ['commandUi'], (scope) => {
+    scope.effect(() => registerOn(scope), 'dsh-minimax-code: /video command')
+  })
+  return () => {
+    child?.dispose?.()
   }
 }

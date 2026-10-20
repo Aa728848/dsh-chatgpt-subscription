@@ -611,12 +611,115 @@ describe('client registration', () => {
     rootCtx.provide('remote', { session: {} } as any)
     rootCtx.provide('remote.session', {} as any)
 
-    expect(() => {
-      rootCtx.plugin({
-        inject,
-        apply,
-      })
-    }).not.toThrow()
+    const errors: unknown[] = []
+    ;(rootCtx as any).on('internal/error', (err: unknown) => { errors.push(err) })
+    const fiber = rootCtx.plugin({
+      inject,
+      apply,
+    })
+    await fiber
+    expect(errors).toEqual([])
+    expect(fiber.state).toBe(2)
+  })
+
+  it('activates cleanly in a real Cordis Context when optional services (commandUi, remote.workspaceFiles, documentPreviews) are guarded Cordis Services', async () => {
+    const { Context, Service } = await import('@deepseek-ai/cordis')
+    const rootCtx = new Context()
+    const errors: unknown[] = []
+    ;(rootCtx as any).on('internal/error', (err: unknown) => { errors.push(err) })
+
+    const slotRegistrations: Array<Record<string, unknown>> = []
+    rootCtx.provide('slots', {
+      inject: (_name: string, cb: () => () => void) => cb(),
+      register: (options: Record<string, unknown>) => {
+        slotRegistrations.push(options)
+        return () => undefined
+      },
+    })
+    rootCtx.provide('locale', {
+      register: () => () => undefined,
+      bind: () => (key: string) => key,
+    })
+    rootCtx.provide('modelDirectories', {
+      directoryFor: () => ({ store: {}, load: async () => {} }),
+    })
+    rootCtx.provide('conversation', {
+      resolveImage: async () => '',
+    })
+    rootCtx.provide('sessions', {} as any)
+
+    class MockRemoteService extends Service {
+      constructor(ctx: any) {
+        super(ctx, 'remote')
+      }
+    }
+    class MockRemoteSessionService extends Service {
+      constructor(ctx: any) {
+        super(ctx, 'remote.session')
+      }
+    }
+    class MockWorkspaceFilesService extends Service {
+      constructor(ctx: any) {
+        super(ctx, 'remote.workspaceFiles')
+      }
+      async readBytes(_sessionId: string, _path: string) {
+        return { data: new Uint8Array([1, 2, 3, 4]) }
+      }
+    }
+    const registeredCommands: unknown[] = []
+    class MockCommandUiService extends Service {
+      constructor(ctx: any) {
+        super(ctx, 'commandUi')
+      }
+      register(contribution: unknown) {
+        registeredCommands.push(contribution)
+        return () => undefined
+      }
+    }
+    const registeredPreviews: unknown[] = []
+    class MockDocumentPreviewsService extends Service {
+      constructor(ctx: any) {
+        super(ctx, 'documentPreviews')
+      }
+      register(definition: unknown) {
+        registeredPreviews.push(definition)
+        return () => undefined
+      }
+    }
+
+    await rootCtx.plugin(MockRemoteService)
+    await rootCtx.plugin(MockRemoteSessionService)
+    await rootCtx.plugin(MockWorkspaceFilesService)
+    await rootCtx.plugin(MockCommandUiService)
+
+    const fiber = rootCtx.plugin({
+      inject,
+      apply,
+    })
+    await fiber
+
+    // Regression check: uninjected property reads (`ctx.commandUi`,
+    // `ctx.remote.workspaceFiles`) on real Cordis Services throw synchronously in
+    // `apply` and put the plugin fiber into state 3 (FAILED), which fails
+    // `bootClient` with `web boot: 1 entry did not activate`.
+    expect(errors).toEqual([])
+    expect(fiber.state).toBe(2)
+    expect(registeredCommands).toHaveLength(1)
+
+    // `documentPreviews` typically activates AFTER this plugin in the browser
+    // because `ui-sidebar-documentpreview` waits on extra services; late
+    // mounting must still register the video preview definition.
+    await rootCtx.plugin(MockDocumentPreviewsService)
+    expect(registeredPreviews).toHaveLength(1)
+
+    // And the video byte reader must resolve `remote.workspaceFiles` without
+    // tripping Cordis's property guard.
+    const docEntry = slotRegistrations.find(
+      (entry) => entry.name === 'sidebar.right.tab.document',
+    ) as { inject?: () => { readVideo: (sessionId: string, path: string, signal?: AbortSignal) => Promise<Uint8Array> } } | undefined
+    expect(docEntry?.inject).toBeTypeOf('function')
+    const { readVideo } = docEntry!.inject!()
+    await expect(readVideo('s1', '/tmp/clip.mp4')).resolves.toEqual(new Uint8Array([1, 2, 3, 4]))
   })
 
   it('allows accessing remote.session through client context inject', async () => {

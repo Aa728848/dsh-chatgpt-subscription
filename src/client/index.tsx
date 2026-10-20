@@ -363,6 +363,30 @@ function optionalService(ctx: ClientContext, name: string): unknown {
 }
 
 /**
+ * 从上下文里解析 `remote.workspaceFiles` 命名空间。
+ *
+ * 在真实宿主中，`remote.workspaceFiles` 是 `ClientRemoteService` 通过
+ * `new RemoteNamespaceService(ctx, 'workspaceFiles')` 注册的独立 Cordis 服务
+ * （服务名 `'remote.workspaceFiles'`）。由于本插件的静态 `inject` 只声明了
+ * `'remote'` 与 `'remote.session'`，直接读 `ctx.remote.workspaceFiles` 属性会触发
+ * Cordis 的属性守卫并抛出 `cannot get property "remote.workspaceFiles" without inject`。
+ * 因此这里优先走 `optionalService(ctx, 'remote.workspaceFiles')`（即 `ctx.get`），
+ * 仅在测试替身把 `workspaceFiles` 挂成普通对象属性时才在 `try/catch` 内回退读取。
+ */
+function resolveWorkspaceFiles(ctx: ClientContext): WorkspaceFilesRemote['workspaceFiles'] | undefined {
+  const direct = optionalService(ctx, 'remote.workspaceFiles') as WorkspaceFilesRemote['workspaceFiles'] | undefined
+  if (typeof direct?.readBytes === 'function') return direct
+  try {
+    const remote = optionalService(ctx, 'remote') as WorkspaceFilesRemote | undefined
+    const nested = remote?.workspaceFiles
+    if (typeof nested?.readBytes === 'function') return nested
+  } catch {
+    // Cordis 拒绝未声明 inject 的 `remote.workspaceFiles` 属性读：按缺失处理。
+  }
+  return undefined
+}
+
+/**
  * 取视频字节：把 `ctx.remote.workspaceFiles.readBytes` 收成一条窄通道。
  *
  * 视频在浏览器里**没有别的取字节方式**：`loadImage` 是附件专用的，`<video src>`
@@ -370,21 +394,38 @@ function optionalService(ctx: ClientContext, name: string): unknown {
  * （`ui-sidebar-documentpreview/src/client/rpc.ts` 的 `ReadDocumentBytes`），
  * 这里照抄同一调用：不传 `range` 即整文件，上限由宿主 `maxFileBytes` 决定。
  *
- * 远端是**可选的**：本插件的 `inject` 只声明了 `remote`，没有声明
- * `remote.workspaceFiles` 这个命名空间，而那个命名空间由客户端装配决定装不装。
- * 取不到就交回一条恒失败的通道——两个界面都会把它显示成占位块，而不是崩掉。
+ * 远端是**可选的**且按需解析：不在 `apply(ctx)` 瞬间把服务抓死，以免
+ * `remote.workspaceFiles` 晚于本插件挂载时读到空值；取不到就拒绝这次读取——
+ * 两个界面都会把它显示成占位块，而不是崩掉。
  *
  * @param ctx - 浏览器根上下文。
  * @returns 与 `readBytes` 同形的取字节通道。
  */
 function videoBytesLoader(ctx: ClientContext): ReadVideoBytes {
-  const remote = optionalService(ctx, 'remote') as WorkspaceFilesRemote | undefined
-  const workspaceFiles = remote?.workspaceFiles
-  if (typeof workspaceFiles?.readBytes !== 'function') {
-    return () => Promise.reject(new Error('no remote workspaceFiles reader is mounted'))
+  return async (sessionId, path, signal) => {
+    const workspaceFiles = resolveWorkspaceFiles(ctx)
+    if (typeof workspaceFiles?.readBytes !== 'function') {
+      throw new Error('no remote workspaceFiles reader is mounted')
+    }
+    const readBytes = workspaceFiles.readBytes.bind(workspaceFiles)
+    return (await readBytes(sessionId, path, {}, signal)).data
   }
-  const readBytes = workspaceFiles.readBytes.bind(workspaceFiles)
-  return async (sessionId, path, signal) => (await readBytes(sessionId, path, {}, signal)).data
+}
+
+/**
+ * 从上下文里取 `documentPreviews` 注册表。
+ *
+ * 先试属性读（供 `ctx.inject(['documentPreviews'], scope => …)` 的子 scope 与测试
+ * 替身使用），被 Cordis 拒绝时退回 `optionalService`（`ctx.get`）。
+ */
+function documentPreviewsOf(scope: ClientContext): DocumentPreviewRegistryService | undefined {
+  try {
+    const direct = (scope as unknown as { documentPreviews?: DocumentPreviewRegistryService }).documentPreviews
+    if (direct !== undefined) return direct
+  } catch {
+    // Cordis 拒绝未声明 inject 的属性读：退回 optionalService。
+  }
+  return optionalService(scope, 'documentPreviews') as DocumentPreviewRegistryService | undefined
 }
 
 /**
@@ -400,22 +441,37 @@ function videoBytesLoader(ctx: ClientContext): ReadVideoBytes {
  * 两段都包在 `ctx.effect` 里，返回注册器给的幂等卸载函数：插件行被禁用时定义与
  * 正文一起消失，不会留下一个注册了却渲染不出的实现。
  *
- * `documentPreviews` 是宿主文档预览插件通过 `ctx.reflect.provide` 给的服务，而那个
- * 包不是本插件的编译期依赖。**它缺席时正文那一段仍然注册**：槽位键是任意的，
- * 命中不了只是没人渲染；而定义缺席时多注册一段也无害。把两者绑在一起反而会让
- * 「宿主还没装好」和「本插件坏了」变成同一件事。
+ * `documentPreviews` 是宿主文档预览插件通过 `ctx.reflect.provide` 给的服务，它的
+ * `inject` 比本插件多 `sidebarRightTabs` / `remote.workspaceFiles` / `resources`，
+ * 因此在浏览器启动时通常晚于本插件激活。若它在 `apply(ctx)` 瞬间尚未上线，则通过
+ * `ctx.inject(['documentPreviews'], …)` 在它上线时自动补注册。
  *
  * @param ctx - 浏览器根上下文。
  */
 function installVideoDocumentPreview(ctx: ClientContext): void {
-  const registry = optionalService(ctx, 'documentPreviews') as DocumentPreviewRegistryService | undefined
   const readVideo = videoBytesLoader(ctx)
-  if (typeof registry?.register === 'function') {
-    const t = ctx.locale.bind(NS_MINIMAX_CODE)
-    ctx.effect(
-      () => registry.register(minimaxVideoPreviewDefinition(() => t('videoTitle'))),
-      'dsh-minimax-code: video preview definition',
-    )
+  const registerPreview = (scope: ClientContext): (() => void) => {
+    const registry = documentPreviewsOf(scope)
+    if (typeof registry?.register !== 'function') return () => {}
+    try {
+      const t = ctx.locale.bind(NS_MINIMAX_CODE)
+      return registry.register(minimaxVideoPreviewDefinition(() => t('videoTitle')))
+    } catch {
+      return () => {}
+    }
+  }
+  const immediate = documentPreviewsOf(ctx)
+  const injectService = (ctx as unknown as {
+    inject?: (deps: readonly string[], callback: (scope: ClientContext) => void) => void
+  }).inject
+  if (typeof immediate?.register === 'function' || typeof injectService !== 'function') {
+    if (typeof immediate?.register === 'function') {
+      ctx.effect(() => registerPreview(ctx), 'dsh-minimax-code: video preview definition')
+    }
+  } else {
+    injectService.call(ctx, ['documentPreviews'], (scope) => {
+      scope.effect(() => registerPreview(scope), 'dsh-minimax-code: video preview definition')
+    })
   }
   ctx.slots.inject('sidebar.right.tab.document', () => ctx.slots.register({
     name: 'sidebar.right.tab.document',
