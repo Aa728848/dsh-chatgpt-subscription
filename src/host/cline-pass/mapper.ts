@@ -24,7 +24,9 @@ import {
   unavailableImageText,
   type ResolvedRequestImages,
 } from '../common/request-images.ts'
+import { NO_ANSWER_PHRASE } from '../minimax-code/mapper.ts'
 import { errorText, isAuthenticationError, isRecord, unwrapEnvelope } from './protocol.ts'
+import { PROVIDER_NAME } from './types.ts'
 
 /** One OpenAI wire message. */
 export interface ClinePassWireMessage {
@@ -393,11 +395,14 @@ export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): A
       for (const block of order) yield { type: 'block-end', index: block.index, block: closeBlock(block) }
       if (pendingUsage !== undefined) yield { type: 'usage', usage: pendingUsage }
       const reason = pendingFinish ?? { type: 'finish' as const, reason: { kind: 'stop' as const } }
+      const hasVisibleAnswer = toolBlocks.size > 0 || (textBlock !== undefined && textBlock.text.trim() !== '')
       yield {
         type: 'finish',
         reason: reason.reason.kind === 'stop' && order.length === 0
           ? { kind: 'error', failure: { message: 'model returned a completed response with no content', code: EMPTY_RESPONSE_CODE } }
-          : reason.reason,
+          : reason.reason.kind === 'stop' && !hasVisibleAnswer
+            ? { kind: 'error', failure: { message: PROVIDER_NAME + ' ' + NO_ANSWER_PHRASE + ' — the response stopped before it did anything', code: 'PROVIDER_ERROR' } }
+            : reason.reason,
       }
       return
     }

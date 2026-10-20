@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **[antigravity] 上游 5xx 与「根本没连上」不再判本轮死刑：按可重试码上报，交给宿主的退避重试**
+  - **现象与真因**：个别轮次直接失败并显示 `Antigravity API error (500): No response`（徽标 `PROVIDER_ERROR`），手动重发立刻能过。上游那次 500 确实是瞬时抖动，但**这条线路把它归成了终局错误码**：`adapter.ts` 里非 429 的非 2xx 一律抛 `PROVIDER_ERROR`，而这条线路的 `providerRetryPolicy()` 返回 `undefined`，宿主因此套用默认策略，默认可重试码只有 `EMPTY_RESPONSE / RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT` —— `PROVIDER_ERROR` 不在其中，`llm-retry` 一次都不会退避重试，直接把这一轮判死。
+  - **还有一个会撒谎的状态码**：`fetch` 在**每个**端点上都抛错（DNS / TLS / 连接被重置）时根本没有 `response` 对象，而旧代码用 `response?.status ?? 500` 补了一个 **500**，于是"根本没连上"和"上游真的回了 500"在界面上长得一模一样。
+  - **改法**：① 所有端点都没拿到 HTTP 响应 → `TRANSPORT`（带 `cause`），不再伪造 500；② `status >= 500` → `SERVER`；③ 400 / 401 / 403 / 404 仍是 `PROVIDER_ERROR` 终局，429 的两条既有判决不变。瞬时故障从此由宿主的 5 次退避重试（500ms 起、上限 10s）接管，真正被拒的请求仍然当场失败。
+  - **验证**：`npm run typecheck` 0 错误；`npm test` **268 文件 / 4429 passed / 7 skipped**。`test/antigravity-adapter.test.ts` 新增 1 例（全端点 `fetch` 拒绝 → `TRANSPORT`），503 那条断言的 code 由 `PROVIDER_ERROR` 改为 `SERVER`，其"端点优先级"的本意不变。
 - **[cline-pass] 新增第 10 条订阅线路：Cline Pass（WorkOS OAuth 登录 + 上游渠道钉住）**
   - **范围**：把 MIT 许可的 [`dsh-cline-pass`](https://github.com/yhshzh/dsh-cline-pass) 的功能按本仓库的线路规范兼容移植为独立线路 `cline-pass`，复用共享内核（`AccountPoolCore`、并发闸、空闲看门狗、请求图片预算、`claimProviderRoute`、账号卡片 / 模型清单 / 上下文编辑器 / composer 胶囊），**不改动任何既有线路的行为**。
   - **登录**：Cline 账号走 **WorkOS 设备码 OAuth**（与官方 CLI 的 `cline` / `cline-pass` 同一条链），浏览器确认后账号自动入池；access token 以 `Bearer workos:<token>` 发送，到期前自动 refresh，轮换后的 refresh token 先落盘再使用；`invalid_grant` 标记账号失效并要求重新登录，网络/5xx 不误登出。静态 API Key 保留为兼容回退。端点、client id 与 `workos:` 前缀转录自 Cline 官方开源仓库（`sdk/packages/core/src/auth/cline.ts`、`auth/provider-auth-registry.ts`、`sdk/packages/shared/src/runtime/cline-environment.ts`，commit `ca7402c`，2026-10-20）。

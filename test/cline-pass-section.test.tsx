@@ -84,7 +84,10 @@ const STATUS: ClinePassWebStatus = {
   },
 }
 
+import type { Root } from 'react-dom/client'
+
 let container: HTMLDivElement | null = null
+let root: Root | null = null
 
 beforeEach(() => {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -92,7 +95,11 @@ beforeEach(() => {
   document.body.appendChild(container)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await act(async () => {
+    root?.unmount()
+  })
+  root = null
   vi.unstubAllGlobals()
   container?.remove()
   container = null
@@ -124,9 +131,12 @@ async function render(overrides: Partial<ClinePassWebStatus> = {}, onPost?: (url
     }
     return Response.json({ ok: true, value: { ...STATUS, ...overrides } })
   }))
-  const root = createRoot(container as HTMLDivElement)
   await act(async () => {
-    root.render(<ClinePassSection />)
+    root?.unmount()
+  })
+  root = createRoot(container as HTMLDivElement)
+  await act(async () => {
+    root!.render(<ClinePassSection />)
   })
   return container as HTMLDivElement
 }
@@ -171,14 +181,42 @@ describe('ClinePassSection', () => {
     })
   })
 
-  it('shows each account its own quota window', async () => {
+  it('shows each account its own quota window inside the shared account card', async () => {
     const el = await render()
+    const row = el.querySelector('.dsha-account-quota-row')
+    expect(row).not.toBeNull()
+    expect(row?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('42')
     expect(el.textContent).toContain('5 小时')
     expect(el.textContent).toContain('42%')
   })
 
-  it('states the capability boundaries on the tab', async () => {
+  it('renders the three-state idle note and keeps login progress inside the account card', async () => {
+    const populated = await render()
+    expect(populated.textContent).toContain(zh.loginHaveAccounts.replace('{count}', '2'))
+    const empty = await render({ authenticated: false, usable: false, pool: { accounts: [], rotationStrategy: 'sequential' } })
+    expect(empty.textContent).toContain(zh.loginIdle)
+    const pending = await render({
+      login: {
+        id: 'flow-1',
+        status: 'pending',
+        userCode: 'ABCD-1234',
+        verificationUri: 'https://app.cline.bot/device?code=ABCD-1234',
+        expiresAt: Date.now() + 300_000,
+        intervalSeconds: 5,
+        error: '',
+        accountAlias: '',
+      },
+    })
+    expect(pending.querySelector('.dshcp-flow')?.textContent).toContain('ABCD-1234')
+    // No separate h3 section for sign-in.
+    const headings = [...pending.querySelectorAll('.dsha-grouphead h3')].map((h) => h.textContent)
+    expect(headings).not.toContain(zh.loginTitle)
+  })
+
+  it('states the capability boundaries inside a collapsed details block', async () => {
     const el = await render()
+    const details = el.querySelector('details.dshcp-details')
+    expect(details).not.toBeNull()
     expect(el.textContent).toContain(zh.limitKey)
     expect(el.textContent).toContain(zh.limitGateway)
     expect(el.textContent).toContain(zh.limitQuota)

@@ -131,6 +131,24 @@ describe('Cline Pass stream translation', () => {
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: 'EMPTY_RESPONSE' } } })
   })
 
+  it('reports a reasoning-only completion with NO_ANSWER_PHRASE so no-answer-resume can continue the turn', async () => {
+    const chunks = []
+    for await (const chunk of translate(frames(
+      { choices: [{ delta: { reasoning_content: 'thinking only' }, finish_reason: 'stop' }] },
+      '[DONE]',
+    ))) chunks.push(chunk)
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          code: 'PROVIDER_ERROR',
+          message: expect.stringContaining('ended the turn without an answer or a tool call'),
+        },
+      },
+    })
+  })
+
   it('rejects a 200 body that is actually an error payload', async () => {
     const generator = translate(frames({ error: { message: 'no available providers' } }))
     await expect(generator.next()).rejects.toThrow('no available providers')

@@ -68,6 +68,8 @@ export interface ClinePassAttemptOutcome {
 
 export interface ClinePassEngineOptions {
   fetchFn: typeof fetch
+  /** Controlled/diagnostic fetch used only for live chat streams; defaults to fetchFn. */
+  streamFetchFn?: typeof fetch
   accountPool: ClinePassAccountPool
   store: ClinePassStore
   /** The stored pin plus the route-wide spelling policy. */
@@ -631,7 +633,7 @@ export class ClinePassEngine {
     signal?: AbortSignal,
   ): Promise<Response> {
     return await openChatStream({
-      fetchFn: this.fetchFn,
+      fetchFn: this.options.streamFetchFn ?? this.fetchFn,
       baseURL: account.baseURL || DEFAULT_BASE_URL,
       apiKey: account.key,
       body,

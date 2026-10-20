@@ -7,9 +7,15 @@ import { installPluginStyle } from '../common/plugin-style.ts'
  */
 export function installClinePassStyles(): void {
   installPluginStyle('cline-pass', `
-.dshcp-login-row{align-items:center;display:flex;gap:12px;flex-wrap:wrap;margin:8px 0}
+.dshcp-flow{border-top:0.5px solid var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px}
+.dshcp-login-row{align-items:center;display:flex;gap:12px;flex-wrap:wrap;margin:4px 0}
 .dshcp-login-code{border:0.5px solid var(--dsw-alias-brand-primary);border-radius:8px;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:20px;font-weight:700;letter-spacing:.18em;padding:6px 14px}
-.dshcp-keyform{display:flex;flex-direction:column;gap:8px;flex-direction:column;align-items:stretch}
+.dshcp-paste{align-items:center;display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;margin-top:8px}
+.dshcp-paste-note{font-size:12px}
+.dshcp-details{margin-top:8px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.dshcp-details>summary{cursor:pointer;color:var(--dsw-alias-label-secondary);user-select:none}
+.dshcp-details ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.dshcp-keyform{display:flex;flex-direction:column;gap:8px;align-items:stretch;margin-top:8px}
 .dshcp-keyrow{display:flex;gap:8px;flex-wrap:wrap}
 .dshcp-keyrow .dsha-input{flex:1;min-width:180px}
 .dshcp-model{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;margin-top:8px;padding:0 12px}
@@ -36,16 +42,7 @@ export function installClinePassStyles(): void {
 .dshcp-actions{display:flex;gap:8px;flex-wrap:wrap}
 .dshcp-warning{color:var(--dsw-alias-label-warning,#d9913b);font-size:12px}
 .dshcp-trace{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;background:var(--dsw-alias-bg-layer-2);border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:2px}
-.dshcp-usage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:8px}
-.dshcp-usage-card{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
-.dshcp-usage-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12.5px}
-.dshcp-usage-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dshcp-usage-track{background:color-mix(in srgb,var(--dsw-alias-label-tertiary,#8a8a8a) 16%,transparent);border-radius:999px;height:6px;overflow:hidden}
-.dshcp-usage-fill{background:var(--dsw-alias-button-info-fill,#397ee8);display:block;height:100%;border-radius:999px}
-.dshcp-usage-fill[data-level=warning]{background:var(--dsw-alias-label-warning,#d9913b)}
-.dshcp-usage-fill[data-level=danger]{background:var(--dsw-alias-label-danger,#d94b4b)}
-.dshcp-usage-row{display:flex;flex-direction:column;gap:4px;font-size:12px}
-.dshcp-usage-row-head{display:flex;justify-content:space-between;gap:8px}
+
 .dshcp-history{display:flex;flex-direction:column;gap:4px;margin-top:8px}
 .dshcp-history-row{display:grid;grid-template-columns:150px minmax(120px,1fr) 130px 120px;gap:10px;font-size:12px;padding:5px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
 .dshcp-history-head{color:var(--dsw-alias-label-tertiary);font-size:11px;text-transform:none}

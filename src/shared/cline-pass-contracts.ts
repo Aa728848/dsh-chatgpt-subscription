@@ -1,6 +1,8 @@
 import type {
   AccountPoolStatusDto,
   AccountRotationStrategy,
+  PoolAccountQuotaDto,
+  PoolAccountQuotaWindowDto,
   PoolAccountSummaryDto,
 } from './account-pool-contracts.ts'
 
@@ -38,6 +40,8 @@ export interface ClinePassChannelVerdictDto {
 export interface ClinePassModelDto {
   id: string
   name: string
+  /** One-line capability summary built on the host for ModelChecklist. */
+  hint?: string
   contextWindow: number
   /** The published/default window, before the user's override. */
   defaultContextWindow: number
@@ -283,5 +287,40 @@ export function clinePassWindowLabel(type: string): string {
     case 'weekly': return '每周'
     case 'monthly': return '每月'
     default: return type
+  }
+}
+
+/** Window length in minutes for the shared AccountQuota formatter. */
+export function clinePassWindowDurationMins(type: string): number | undefined {
+  switch (type) {
+    case 'five_hour': return 300
+    case 'weekly': return 7 * 1440
+    case 'monthly': return 30 * 1440
+    default: return undefined
+  }
+}
+
+/**
+ * Project one account's Cline Pass usage reading into the shared
+ * {@link PoolAccountQuotaDto} shape that AccountPoolSection renders inside the
+ * account row. A failed reading returns undefined so the card does not draw
+ * fabricated zero bars.
+ */
+export function clinePassAccountQuota(reading: ClinePassUsageAccountDto | undefined): PoolAccountQuotaDto | undefined {
+  if (reading === undefined || !reading.ok) return undefined
+  const windows: PoolAccountQuotaWindowDto[] = reading.windows.map((window) => {
+    const duration = clinePassWindowDurationMins(window.type)
+    const parsedReset = window.resetsAt === '' ? Number.NaN : Date.parse(window.resetsAt)
+    const resetsAt = Number.isFinite(parsedReset) && parsedReset > 0 ? parsedReset : null
+    return {
+      label: window.label || clinePassWindowLabel(window.type),
+      usedPercent: window.percentUsed,
+      ...(duration === undefined ? {} : { windowDurationMins: duration }),
+      resetsAt,
+    }
+  })
+  return {
+    fetchedAt: reading.fetchedAt,
+    windows,
   }
 }

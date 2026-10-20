@@ -25,8 +25,10 @@ import { DEFAULT_MODELS, PROVIDER_ID, PROVIDER_NAME, defaultPin } from './types.
 import type { HubSummarySource } from '../hub-overview.ts'
 
 export interface ClinePassLineOptions {
-  /** Proxy-aware, diagnostic fetch the route and every upstream call use. */
+  /** Proxy-aware fetch that routes, OAuth, quota reads and catalog sync use. */
   fetchFn: typeof fetch
+  /** Controlled/diagnostic fetch that live adapter chat streams use; defaults to fetchFn. */
+  modelFetchFn?: typeof fetch
   /** Durable attachment service, for image input. */
   attachments?: Pick<AttachmentStore, 'readImage' | 'readImageRequest'>
   /** Test seam: skip tools even when the stored settings ask for them. */
@@ -76,6 +78,7 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
 
   const engine = new ClinePassEngine({
     fetchFn: options.fetchFn,
+    ...(options.modelFetchFn === undefined ? {} : { streamFetchFn: options.modelFetchFn }),
     accountPool,
     store,
     pinFor: (model) => ({

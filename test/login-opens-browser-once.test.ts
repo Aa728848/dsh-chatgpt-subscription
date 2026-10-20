@@ -61,6 +61,12 @@ const CommandCodeStores = await import('../src/host/command-code/token-store.ts'
 const glmOauth = await import('../src/host/glm-coding-plan/oauth.ts')
 const { registerGlmCodingPlanRoutes } = await import('../src/host/glm-coding-plan/routes.ts')
 const { GLM_CODING_PLAN_ROUTE_PREFIX: GLM_PREFIX } = await import('../src/shared/glm-coding-plan-contracts.ts')
+const { ClinePassLoginManager } = await import('../src/host/cline-pass/oauth.ts')
+const { registerClinePassRoutes } = await import('../src/host/cline-pass/routes.ts')
+const { ClinePassAccountPool } = await import('../src/host/cline-pass/account-pool.ts')
+const { createClinePassStore } = await import('../src/host/cline-pass/store.ts')
+const { ClinePassModelSettingsStore, FileCredentialStore: ClinePassCredentialStore } = await import('../src/host/cline-pass/token-store.ts')
+const { CLINE_PASS_ROUTE_PREFIX: CLINE_PASS_PREFIX } = await import('../src/shared/cline-pass-contracts.ts')
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>
 
@@ -87,7 +93,7 @@ function capture(register: (ctx: Context) => void): Handler {
 }
 
 /** A same-origin JSON POST whose body is replayed to late listeners. */
-async function post(handler: Handler, url: string): Promise<{ status: number; body: { ok: boolean; value?: { authUrl?: string; authorizeUrl?: string } } }> {
+async function post(handler: Handler, url: string): Promise<{ status: number; body: { ok: boolean; value?: { authUrl?: string; authorizeUrl?: string; verificationUri?: string } } }> {
   const chunks = [Buffer.from('{}')]
   const request = {
     url,
@@ -100,7 +106,7 @@ async function post(handler: Handler, url: string): Promise<{ status: number; bo
     },
     destroy() {},
   } as unknown as IncomingMessage
-  const captured = { status: 0, body: { ok: false } as { ok: boolean; value?: { authUrl?: string; authorizeUrl?: string } } }
+  const captured = { status: 0, body: { ok: false } as { ok: boolean; value?: { authUrl?: string; authorizeUrl?: string; verificationUri?: string } } }
   const response = {
     writeHead(status: number) { captured.status = status; return response },
     end(raw?: string) { if (raw !== undefined) captured.body = JSON.parse(raw) },
@@ -182,6 +188,40 @@ describe('a sign-in opens the login page once', () => {
     // Absent would mean the flow's own default, which spawns the system browser.
     expect(options.openBrowser).toBeTypeOf('function')
     options.openBrowser!('https://chat.z.ai/api/oauth/authorize?client_id=x')
+    expect(browserLaunches()).toEqual([])
+  })
+
+  it('Cline Pass: /login/start answers the verification URL for the card and launches no browser of its own', async () => {
+    const fetchFn = (async () => Response.json({
+      device_code: 'dev-1',
+      user_code: 'ABCD-1234',
+      verification_uri: 'https://app.cline.bot/device',
+      verification_uri_complete: 'https://app.cline.bot/device?code=ABCD-1234',
+      expires_in: 300,
+      interval: 5,
+    })) as unknown as typeof fetch
+    const credStore = new ClinePassCredentialStore(tmpFile('cp-cred'), new MemoryBackend() as never)
+    const accountPool = new ClinePassAccountPool({ store: credStore, backend: new MemoryBackend() as never })
+    const settings = new ClinePassModelSettingsStore(tmpFile('cp-models'))
+    const store = createClinePassStore()
+    const login = new ClinePassLoginManager({
+      fetchFn,
+      baseURL: () => 'https://api.cline.bot/api/v1',
+      onLogin: async () => undefined,
+    })
+    const handler = capture((ctx) => registerClinePassRoutes(ctx, {
+      settings,
+      accountPool,
+      store,
+      engine: {} as never,
+      fetchFn,
+      login,
+      serving: () => true,
+      conflict: () => null,
+    }))
+    const result = await post(handler, CLINE_PASS_PREFIX + '/login/start')
+    expect(result.status).toBe(200)
+    expect(result.body.value?.verificationUri).toMatch(/^https:\/\//)
     expect(browserLaunches()).toEqual([])
   })
 })

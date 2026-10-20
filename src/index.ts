@@ -834,7 +834,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // adapter and settings routes are assembled inside the line module; this
     // wiring only registers the claim and keeps the disposers together.
     const clinePassLine = createClinePassLine(ctx, {
-      fetchFn: modelFetch['cline-pass'],
+      fetchFn: proxyFetch,
+      modelFetchFn: modelFetch['cline-pass'],
       attachments: ctx.attachments,
     })
 
@@ -1952,6 +1953,8 @@ export {
   CLINE_PASS_PROVIDER_ID as CLINE_PASS_ROUTE_PROVIDER_ID,
   CLINE_PASS_PROVIDER_NAME as CLINE_PASS_ROUTE_PROVIDER_NAME,
   CLINE_PASS_ROUTE_PREFIX,
+  clinePassAccountQuota,
+  clinePassWindowDurationMins,
   clinePassWindowLabel,
   isClinePassPinMode,
   type ClinePassAccountAction,

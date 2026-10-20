@@ -22,8 +22,10 @@ import type { ClinePassStore } from './store.ts'
 import type { ClinePassLoginManager } from './oauth.ts'
 import { bearerFor, type ClinePassModelSettings, type ClinePassModelSettingsStore } from './token-store.ts'
 import { DEFAULT_MODELS, PROVIDER_ID, defaultPin, type ClinePassPinSettings } from './types.ts'
+import { openPlatformBrowser } from '../step-code/routes.ts'
 import {
   CLINE_PASS_ROUTE_PREFIX,
+  clinePassAccountQuota,
   clinePassWindowLabel,
   isClinePassPinMode,
   type ClinePassAccountAction,
@@ -78,6 +80,17 @@ function isUsable(account: { cooldownUntil?: number; authStatus?: string }, now:
   return true
 }
 
+function formatModelCapacity(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens <= 0) return '0'
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return (tokens / 1_000_000) + 'M'
+  if (tokens >= 1_000 && tokens % 1_000 === 0) return (tokens / 1_000) + 'k'
+  return String(tokens)
+}
+
+function formatModelHint(contextWindow: number, input: readonly string[], reasoning: boolean): string {
+  return formatModelCapacity(contextWindow) + ' · ' + input.join('+') + (reasoning ? ' · reasoning' : '')
+}
+
 function uniqueModels(settings: ClinePassModelSettings, catalogIds: readonly string[]): string[] {
   const ids = new Set<string>(DEFAULT_MODELS)
   for (const model of settings.catalogModels) ids.add(model.id)
@@ -118,6 +131,7 @@ function projectModels(settings: ClinePassModelSettings, store: ClinePassStore):
     return {
       id,
       name: info.displayName,
+      hint: formatModelHint(info.contextWindow, info.input, info.reasoning),
       contextWindow: info.contextWindow,
       defaultContextWindow: base.contextWindow,
       maxTokens: info.maxTokens,
@@ -150,16 +164,29 @@ export interface ClinePassRouteOptions {
   fetchFn: typeof fetch
   /** Device-code sign-in state, when the composition installed one. */
   login?: ClinePassLoginManager
+  /**
+   * Browser opener for `/login/start`; defaults to a no-op because the settings
+   * card opens the verification URL itself via `window.open`.
+   */
+  openBrowser?: (url: string) => void
   serving(): boolean
   conflict(): string | null
 }
 
+/** Named browser opener for deployments that want the host to launch the verification URL. */
+export const openClinePassBrowser = openPlatformBrowser
+
 /** Assemble the whole status payload the Cline Pass tab renders. */
 export async function getClinePassWebStatus(options: ClinePassRouteOptions): Promise<ClinePassWebStatus> {
-  const { settings: settingsStore, accountPool, store, engine } = options
+  const { settings: settingsStore, accountPool, store } = options
   const settings = await settingsStore.read().catch(() => settingsStore.status())
   const data = await accountPool.read().catch(() => null)
-  const accounts = await accountPool.listAccounts().catch(() => [])
+  const rawAccounts = await accountPool.listAccounts().catch(() => [])
+  const usageByAccount = new Map(store.usage().accounts.map((entry) => [entry.accountId, entry]))
+  const accounts = rawAccounts.map((account) => {
+    const quota = account.quota ?? clinePassAccountQuota(usageByAccount.get(account.id))
+    return quota === undefined ? account : { ...account, quota }
+  })
   const now = Date.now()
   const pool: ClinePassPoolStatusDto = {
     accounts,
@@ -234,6 +261,9 @@ export const CLINE_PASS_ROUTES = ROUTES
  */
 export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOptions): () => void {
   const { settings: settingsStore, accountPool, store, engine, fetchFn } = options
+  // Default to a no-op opener: the settings card calls window.open itself, so
+  // launching from the host as well would open two identical verification tabs.
+  const openBrowser = options.openBrowser ?? (() => undefined)
 
   const emitModelsUpdated = (): void => {
     ctx.emit?.('llm/adapters-updated')
@@ -354,6 +384,7 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           if (options.login === undefined) return sendJson(response, 503, { ok: false, error: 'Cline sign-in is unavailable in this composition.' })
           try {
             const flow: ClinePassLoginFlowDto = await options.login.begin()
+            if (flow.verificationUri !== '') openBrowser(flow.verificationUri)
             return sendJson(response, 200, { ok: true, value: flow })
           } catch (error) {
             return sendJson(response, 502, { ok: false, error: firstLine(error instanceof Error ? error.message : error, 300) })

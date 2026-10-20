@@ -4,14 +4,16 @@ import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
-import type {
-  ClinePassHistoryRowDto,
-  ClinePassLoginFlowDto,
-  ClinePassModelDto,
-  ClinePassProbeResultDto,
-  ClinePassTestResultDto,
-  ClinePassValidateResultDto,
-  ClinePassWebStatus,
+import {
+  clinePassAccountQuota,
+  type ClinePassAccountSummaryDto,
+  type ClinePassHistoryRowDto,
+  type ClinePassLoginFlowDto,
+  type ClinePassModelDto,
+  type ClinePassProbeResultDto,
+  type ClinePassTestResultDto,
+  type ClinePassValidateResultDto,
+  type ClinePassWebStatus,
 } from '../../shared/cline-pass-contracts.ts'
 import { ClinePassApi } from './api.ts'
 import { zh } from './locales.ts'
@@ -171,7 +173,16 @@ export function ClinePassSection(props: Props): React.ReactElement {
     setBusy('login')
     setError(null)
     setNotice(null)
-    void API.startLogin().then(setLoginFlow).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
+    void API.startLogin().then((flow) => {
+      setLoginFlow(flow)
+      if (flow.verificationUri !== '' && typeof window !== 'undefined' && typeof window.open === 'function') {
+        try {
+          window.open(flow.verificationUri, '_blank', 'noopener,noreferrer')
+        } catch {
+          // The link is also rendered in the pending block for manual click.
+        }
+      }
+    }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
   }, [])
 
   const cancelLogin = useCallback(() => {
@@ -362,6 +373,14 @@ export function ClinePassSection(props: Props): React.ReactElement {
 
   const t = zh
   const pool = status?.pool
+  const accounts = useMemo((): ClinePassAccountSummaryDto[] => {
+    const raw = pool?.accounts ?? []
+    const usageByAccount = new Map((status?.usage?.accounts ?? []).map((entry) => [entry.accountId, entry]))
+    return raw.map((account) => {
+      const quota = account.quota ?? clinePassAccountQuota(usageByAccount.get(account.id))
+      return quota === undefined ? account : { ...account, quota }
+    })
+  }, [pool, status?.usage])
   const models = status?.models ?? []
   const busyAny = busy !== null
 
@@ -409,12 +428,13 @@ export function ClinePassSection(props: Props): React.ReactElement {
   }, [applyStatus])
 
   return (
-    <div>
-      <div className="dsha-group">
+    <div className="dsha-page">
+      <p className="dsha-muted">{t.pageDesc}</p>
+
+      <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.title}</h3>
         </div>
-        <p className="dsha-notice">{t.pageDesc}</p>
         <p className="dsha-muted" style={{ fontSize: 12 }}>
           {status?.serving === false && status.conflict !== null
             ? t.routeConflict.replace('{detail}', status.conflict)
@@ -422,30 +442,25 @@ export function ClinePassSection(props: Props): React.ReactElement {
         </p>
         {error !== null && <p className="dsha-notice" style={{ color: 'var(--dsha-danger, #c0392b)' }}>{ERROR_DETAIL}{error}</p>}
         {notice !== null && notice !== '' && <p className="dsha-notice">{notice}</p>}
-      </div>
-
-      {loginFlow !== null && loginFlow.status === 'pending' && (
-        <div className="dsha-group dshcp-login">
-          <div className="dsha-grouphead">
-            <h3>{t.loginTitle}</h3>
-            <button className="dsha-btn" disabled={busyAny} onClick={cancelLogin}>{t.loginCancel}</button>
-          </div>
-          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.loginHint}</p>
-          <div className="dshcp-login-row">
-            <span className="dshcp-login-code" aria-label={t.loginCode}>{loginFlow.userCode}</span>
-            <a className="dsha-btn" href={loginFlow.verificationUri} target="_blank" rel="noreferrer">{t.loginOpen}</a>
-          </div>
-          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.loginWaiting}</p>
-        </div>
-      )}
+        <details className="dshcp-details">
+          <summary>{t.limitsSection}</summary>
+          <ul>
+            <li>{t.limitKey}</li>
+            <li>{t.limitGateway}</li>
+            <li>{t.limitRoute}</li>
+            <li>{t.limitQuota}</li>
+          </ul>
+        </details>
+      </section>
 
       {pool !== undefined && (
         <AccountPoolSection
-          accounts={pool.accounts}
+          accounts={accounts}
           activeAccountId={pool.activeAccountId}
           rotationStrategy={pool.rotationStrategy}
           labels={t}
           busy={busy}
+          showQuota
           onLogin={startLogin}
           loginBusyLabel={t.loggingIn}
           onRelogin={startLogin}
@@ -466,7 +481,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
             <span>{account.authKind === 'oauth' ? t.oauthAccount : t.apiKeyAccount}</span>
           )}
           renderLoginActions={() => (
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="dsha-account-add-actions" style={{ display: 'flex', gap: 8 }}>
               <button
                 className="dsha-btn dsha-btn-primary"
                 disabled={busyAny || loginFlow?.status === 'pending'}
@@ -480,6 +495,40 @@ export function ClinePassSection(props: Props): React.ReactElement {
             </div>
           )}
         >
+          {loginFlow !== null && loginFlow.status !== 'idle' && loginFlow.status !== 'cancelled' && (
+            <div className="dshcp-flow">
+              {loginFlow.status === 'pending' && (
+                <>
+                  <p className="dsha-muted" style={{ fontSize: 12 }}>{t.loginHint}</p>
+                  <div className="dshcp-login-row">
+                    <span className="dshcp-login-code" aria-label={t.loginCode}>{loginFlow.userCode}</span>
+                    <a className="dsha-btn" href={loginFlow.verificationUri} target="_blank" rel="noreferrer">{t.loginOpen}</a>
+                    <button className="dsha-btn" disabled={busyAny} onClick={cancelLogin}>{t.loginCancel}</button>
+                  </div>
+                  <p className="dsha-muted" style={{ fontSize: 12 }}>{t.loginWaiting}</p>
+                </>
+              )}
+              {loginFlow.status === 'complete' && (
+                <p className="dsha-muted" style={{ fontSize: 12 }}>
+                  {accounts.length > 0
+                    ? t.loginComplete.replace('{account}', loginFlow.accountAlias === '' ? 'Cline Pass' : loginFlow.accountAlias)
+                    : t.loginCompleteNoAccount}
+                </p>
+              )}
+              {loginFlow.status === 'failed' && (
+                <p className="dshcp-warning">{t.loginFailed.replace('{detail}', loginFlow.error)}</p>
+              )}
+            </div>
+          )}
+          {(loginFlow === null || loginFlow.status === 'idle' || loginFlow.status === 'cancelled') && (
+            <div className="dshcp-paste">
+              <span className="dsha-muted dshcp-paste-note">
+                {accounts.length > 0
+                  ? t.loginHaveAccounts.replace('{count}', String(accounts.length))
+                  : t.loginIdle}
+              </span>
+            </div>
+          )}
           {showKeyForm && (
             <div className="dshcp-keyform">
               <label className="dsha-label" htmlFor="cline-pass-key">{t.keySection}</label>
@@ -530,7 +579,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
         </AccountPoolSection>
       )}
 
-      <div className="dsha-group">
+      <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.modelsSection}</h3>
           <button className="dsha-btn" disabled={busyAny} onClick={refreshCatalog}>
@@ -543,28 +592,24 @@ export function ClinePassSection(props: Props): React.ReactElement {
         )}
         {status !== null && models.length > 0 && (
           <>
-            <p className="dsha-muted" style={{ fontSize: 12 }}>
-              {t.modelCount.replace('{count}', String(models.length))}
-              {status.catalogSynced ? ` · ${t.catalogSources.replace('{sources}', 'cline-api')}` : ''}
-            </p>
             <ModelChecklist
               items={models.map((model) => ({
                 id: model.id,
                 name: model.name,
-                hint: `${formatCapacity(model.contextWindow)} · ${model.input.join('+')}${model.reasoning ? ' · reasoning' : ''}`,
+                hint: model.hint ?? `${formatCapacity(model.contextWindow)} · ${model.input.join('+')}${model.reasoning ? ' · reasoning' : ''}`,
                 enabled: model.enabled,
               }))}
               busy={busyAny}
               onToggle={(id, enabled) => toggleModel(id, enabled)}
               onToggleAll={(enabled) => setAllModels(enabled)}
-              labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
+              labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, countTemplate: t.modelChecklistCount, list: t.modelsSection }}
             />
             {enabledCount === 0 && <p className="dsha-muted" style={{ fontSize: 12 }}>{t.noModels}</p>}
           </>
         )}
-      </div>
+      </section>
 
-      <div className="dsha-group">
+      <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.contextSection}</h3>
         </div>
@@ -593,9 +638,9 @@ export function ClinePassSection(props: Props): React.ReactElement {
           onReset={resetContext}
           onResetAll={resetAllContext}
         />
-      </div>
+      </section>
 
-      <div className="dsha-group">
+      <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.routingSection}</h3>
         </div>
@@ -670,9 +715,9 @@ export function ClinePassSection(props: Props): React.ReactElement {
             />
           </details>
         ))}
-      </div>
+      </section>
 
-      <div className="dsha-group">
+      <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.usageSection}</h3>
           <button className="dsha-btn" disabled={busyAny} onClick={refreshUsage}>
@@ -682,46 +727,18 @@ export function ClinePassSection(props: Props): React.ReactElement {
         <p className="dsha-muted" style={{ fontSize: 12 }}>{t.usageHint}</p>
         {status?.usage === null && <div className="dsha-empty">{t.usageEmpty}</div>}
         {status?.usage !== null && status?.usage !== undefined && (
-          <div className="dshcp-usage-grid">
-            {status.usage.accounts.map((account) => (
-              <div className="dshcp-usage-card" key={account.accountId}>
-                <div className="dshcp-usage-head">
-                  <span className="dshcp-usage-name">{account.alias}</span>
-                  <span className="dsha-muted" style={{ fontSize: 11 }}>{formatDate(account.fetchedAt)}</span>
-                </div>
-                {!account.ok && (
-                  <p className="dshcp-warning">{t.usageUnavailable.replace('{detail}', account.error)}</p>
-                )}
-                {account.ok && account.windows.length === 0 && (
-                  <p className="dsha-muted" style={{ fontSize: 12 }}>{t.usageNone}</p>
-                )}
-                {account.windows.map((window) => (
-                  <div className="dshcp-usage-row" key={window.type}>
-                    <div className="dshcp-usage-row-head">
-                      <span>{window.label}</span>
-                      <span>{Math.round(window.percentUsed)}%</span>
-                    </div>
-                    <div className="dshcp-usage-track">
-                      <span
-                        className="dshcp-usage-fill"
-                        data-level={window.percentUsed >= 90 ? 'danger' : window.percentUsed >= 70 ? 'warning' : 'normal'}
-                        style={{ width: `${Math.min(100, Math.max(0, window.percentUsed))}%` }}
-                      />
-                    </div>
-                    {window.resetsAt !== '' && (
-                      <span className="dsha-muted" style={{ fontSize: 11 }}>
-                        {t.usageResets.replace('{when}', window.resetsAt)}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
+          <>
+            <p className="dsha-muted" style={{ fontSize: 12 }}>{t.quotaFactsScope}</p>
+            {status.usage.accounts.filter((account) => !account.ok).map((account) => (
+              <p className="dshcp-warning" key={account.accountId}>
+                {account.alias}: {t.usageUnavailable.replace('{detail}', account.error)}
+              </p>
             ))}
-          </div>
+          </>
         )}
-      </div>
+      </section>
 
-      <div className="dsha-group">
+      <section className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.historySection}</h3>
           <button className="dsha-btn" disabled={busyAny} onClick={loadHistory}>
@@ -763,10 +780,10 @@ export function ClinePassSection(props: Props): React.ReactElement {
             </div>
           </>
         )}
-      </div>
+      </section>
 
       {settingsForm !== null && (
-        <div className="dsha-group">
+        <section className="dsha-group">
           <div className="dsha-grouphead">
             <h3>{t.advancedSection}</h3>
           </div>
@@ -850,20 +867,8 @@ export function ClinePassSection(props: Props): React.ReactElement {
               {busy === 'settings' ? t.savingSettings : t.saveSettings}
             </button>
           </div>
-        </div>
+        </section>
       )}
-
-      <div className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>{t.limitsSection}</h3>
-        </div>
-        <ul className="dsha-notice" style={{ paddingLeft: 18 }}>
-          <li>{t.limitKey}</li>
-          <li>{t.limitGateway}</li>
-          <li>{t.limitRoute}</li>
-          <li>{t.limitQuota}</li>
-        </ul>
-      </div>
     </div>
   )
 }
