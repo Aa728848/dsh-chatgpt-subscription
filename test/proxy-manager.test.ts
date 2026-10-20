@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -289,5 +290,49 @@ describe('ProxyManager', () => {
     expect(manager.getSystemProxy(true)).toBe('http://127.0.0.1:7890')
 
     manager.dispose()
+  })
+
+  it('waits out a slow TLS handshake to the origin behind the proxy', async () => {
+    // A proxy that opens the tunnel and then stalls, so the TLS handshake
+    // with the origin never completes.
+    //
+    // undici's default connect budget is 10s, and it covers that handshake,
+    // not merely the hop to the proxy: a proxy whose route to chatgpt.com
+    // went through a slow node measured 1.2s to 18s for it, so the default
+    // killed requests that would have succeeded seconds later - and killed
+    // them as an opaque 'fetch failed' that never named the proxy.
+    const sockets: net.Socket[] = []
+    const server = net.createServer((socket) => {
+      sockets.push(socket)
+      let tunnelled = false
+      socket.on('data', () => {
+        if (tunnelled) return
+        tunnelled = true
+        // Answer the CONNECT, then go silent so the handshake stalls.
+        socket.write('HTTP/1.1 200 Connection established\r\n\r\n')
+        setTimeout(() => socket.destroy(), 11_500)
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as net.AddressInfo).port
+
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: 'http://127.0.0.1:' + port }),
+    })
+
+    const started = Date.now()
+    const error = await manager.createFetch()('https://example.com/').then(() => null, (caught: unknown) => caught)
+    const elapsed = Date.now() - started
+
+    manager.dispose()
+    for (const socket of sockets) socket.destroy()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+
+    expect(error).toBeTruthy()
+    // The stall, not a timeout: the budget outlived undici's 10s default, so
+    // the handshake was still in flight when the proxy tore the tunnel down.
+    expect(elapsed).toBeGreaterThan(10_000)
+    const code = (error as { cause?: { code?: string } }).cause?.code
+    expect(code).not.toBe('UND_ERR_CONNECT_TIMEOUT')
   })
 })

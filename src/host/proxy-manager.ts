@@ -9,6 +9,23 @@ export type FetchLike = typeof fetch
 
 const SYSTEM_PROXY_CACHE_TTL_MS = 5_000
 
+/**
+ * How long a proxied connection may take to establish.
+ *
+ * undici's default is 10 seconds, and it covers the TLS handshake with the
+ * ORIGIN, not merely the hop to the proxy: a proxy whose route to
+ * chatgpt.com goes through a slow node measured 1.2s to 18s for that
+ * handshake alone, and the request after it took 31s end to end. The default
+ * therefore killed requests that would have succeeded seconds later, and it
+ * killed them as an opaque `fetch failed` - the underlying
+ * `UND_ERR_CONNECT_TIMEOUT` never named the proxy, so the failure read as
+ * "the search is broken" rather than "the line was slow".
+ *
+ * 60 seconds covers the measured worst case with room to spare. It bounds the
+ * CONNECT phase only; the request itself keeps undici's own timeouts.
+ */
+const PROXY_CONNECT_TIMEOUT_MS = 60_000
+
 export function normalizeProxyUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim()
   if (!trimmed) return ''
@@ -242,7 +259,12 @@ export class ProxyManager {
   private getOrCreateAgent(proxyUrl: string): ProxyAgent {
     let agent = this.agents.get(proxyUrl)
     if (!agent) {
-      agent = new ProxyAgent(proxyUrl)
+      // The options-object form, and deliberately not `new ProxyAgent(url, options)`:
+      // undici's ProxyAgent constructor takes ONE argument, so a second one is
+      // dropped silently and the connect timeout would never be applied - the
+      // agent would fall back to the 10s default and fail the same way it
+      // always did, with nothing in the code to show why.
+      agent = new ProxyAgent({ uri: proxyUrl, connectTimeout: PROXY_CONNECT_TIMEOUT_MS })
       this.agents.set(proxyUrl, agent)
     }
     return agent

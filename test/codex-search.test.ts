@@ -20,6 +20,44 @@ describe('createCodexSearchProvider', () => {
     expect(result.sources[0].url).toBe('https://example.com/item1')
   })
 
+  // The response shape the live endpoint actually returns, captured from
+  // /alpha/search. It has three top-level fields - 'encrypted_output' (an
+  // opaque blob), 'output' (the answer, with inline citation markers) and
+  // 'results' (the source list) - and NOT the 'output_text' the mock above
+  // uses.
+  //
+  // Reading only the mocked shape meant every real search came back with NO
+  // answer text: the sources arrived, the summary did not, and the harness
+  // tool reported a bare source list that reads like a search which simply
+  // found nothing to say.
+  it('reads the answer and the sources out of the live response shape', async () => {
+    const oauth = { credentials: vi.fn(async () => ({ accessToken: 'secret', expiresAt: Date.now() + 10_000 })) } as never
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      encrypted_output: 'gAAAAA-encrypted-blob',
+      output: 'DeepSeek | DeepSeek-V3.2 (https://www.deepseek.com/en/news/deepseek-v3-2/)\ncite turn0search0 [wordlim: 200]',
+      results: [
+        {
+          type: 'text_result',
+          domain: 'www.deepseek.com',
+          ref_id: 'turn0search0',
+          snippet: '# DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models',
+          title: 'DeepSeek | DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models',
+          url: 'https://www.deepseek.com/en/news/deepseek-v3-2/',
+        },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+
+    const result = await createCodexSearchProvider(oauth, { fetchFn: fetchFn as never }).search({ query: 'DeepSeek V3.2 release date' })
+
+    expect(result.content ?? '').toContain('DeepSeek-V3.2')
+    // The encrypted counterpart of the answer is not a fallback for it.
+    expect(result.content ?? '').not.toContain('encrypted-blob')
+    expect(result.sources).toHaveLength(1)
+    expect(result.sources[0].url).toBe('https://www.deepseek.com/en/news/deepseek-v3-2/')
+    expect(result.sources[0].title).toContain('DeepSeek-V3.2')
+    expect(result.sources[0].snippet).toContain('Pushing the Frontier')
+  })
+
   // The request body IS the contract with /alpha/search, and that endpoint
   // rejects unknown parameters rather than ignoring them. A field added here
   // for a reason that has since expired is not a no-op: it is a 400 on every

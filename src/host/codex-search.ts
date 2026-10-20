@@ -189,12 +189,27 @@ function readSource(value: unknown): WebSearchSource | null {
   }
 }
 
+/**
+ * The answer text, as the endpoint actually returns it.
+ *
+ * The live `/alpha/search` response carries three top-level fields:
+ * `encrypted_output` (an opaque blob), `output` (the answer, with inline
+ * citation markers) and `results` (the source list). The names above are the
+ * older shapes the endpoint has used; `output` is the one it uses now, and
+ * leaving it out meant every real search came back with NO answer text - the
+ * harness tool then reported a bare source list, which reads as a working
+ * search that simply found nothing to say.
+ *
+ * `encrypted_output` is deliberately not consulted: it is the encrypted
+ * counterpart of `output`, not a fallback for it.
+ */
 function readContent(data: unknown): string | undefined {
   const root = record(data)
   if (root === null) return undefined
   return string(root.content)
     ?? string(root.output_text)
     ?? string(root.summary)
+    ?? string(root.output)
     ?? undefined
 }
 
