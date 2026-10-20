@@ -92,6 +92,18 @@ describe('Cline Pass line mount', () => {
     expect(stored).toBeNull()
   })
 
+  it('still projects the ambient key when the credential backend cannot answer', async () => {
+    // A bare Linux runner has no Secret Service, so the platform store throws on
+    // read; the environment key is an independent source and must survive that.
+    vi.stubEnv('CLINE_PASS_API_KEY', 'sk-ambient')
+    const { line } = mountLine()
+    const store = line.accountPool.mirrorStore()
+    vi.spyOn(store, 'read').mockRejectedValue(new Error('secret-tool is unavailable'))
+    const accounts = await line.accountPool.listAccounts()
+    expect(accounts).toHaveLength(1)
+    expect(accounts[0]?.id).toBe('acc_primary')
+  })
+
   it('reports itself on the hub summary without touching an upstream', async () => {
     const { line } = mountLine()
     const summary = await line.hubSource.read()

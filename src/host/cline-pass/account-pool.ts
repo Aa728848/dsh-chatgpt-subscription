@@ -186,7 +186,12 @@ export class ClinePassAccountPool extends AccountPoolCore<
       // CLINE_PASS_API_KEY (what the standalone dsh-cline-pass plugin reads) gets
       // the same projection without pasting the key first; it is not persisted.
       legacyAccount: async () => {
-        const stored = await store.read()
+        // A platform credential backend that cannot answer (no Secret Service
+        // on a bare Linux CI runner, for example) must not take the ambient
+        // CLINE_PASS_API_KEY projection down with it: the store and the
+        // environment are two independent sources, and the second one does not
+        // need the keyring to be readable.
+        const stored = await store.read().catch(() => null)
         const ambient = stored ?? ambientCredentials()
         if (ambient === null) return null
         return {

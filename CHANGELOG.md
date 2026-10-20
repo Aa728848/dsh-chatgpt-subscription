@@ -3,6 +3,11 @@
 ## Unreleased
 
 ## 0.32.0 - 2026-10-20
+- **[cline-pass] 凭据后端读不出来时不再吞掉 `CLINE_PASS_API_KEY`：环境变量与密钥环是两条独立来源**
+  - **现象**：在**没有 Secret Service 的 Linux 环境**（裸 CI runner 最典型）里，`cline-pass` 的账号列表是空的，即使显式导出了 `CLINE_PASS_API_KEY`——于是「随包内置的密钥改用环境变量注入」这条文档化的用法在这些环境里**静默失效**。
+  - **真因**：`account-pool.ts` 的 `legacyAccount` 投影第一行就是 `await store.read()`。读取平台加密后端在 Linux 上要有个解锁的 keyring；没有就**抛错**，而这一抛把后面那句 `ambientCredentials()`（读环境变量）一起带走了——**两个本来互不相干的来源被串成了一条链**。Windows 有 DPAPI、macOS 有 Keychain，所以本机从未暴露，只有 CI 红。
+  - **改法**：`store.read().catch(() => null)`——密钥环答不上来就当作「没有已存凭据」，环境变量照常投影。**不是妥协**：环境变量本来就不需要密钥环可读，它从来没有依赖过存储。
+  - **验证**：`test/cline-pass-plugin.test.ts` 新增一例把 `store.read` 打桩成 reject 并断言环境变量投影仍然生效（**5 passed**）；同线路另外 2 个套件（`account-refresh` / `routes`）一并回归通过。
 - **[cline-pass] 高级设置与整站版式对齐：输入框终于有主题样式，六行数值与三行开关各归其位**
   - **现象**：设置页「高级设置」里的六个输入框是**浏览器原生外观**（白色实心框 + 粗边框），与旁边 `.dsha-select` 的深色圆角控件格格不入；原因是 [styles.ts](../src/client/cline-pass/styles.ts) 用了 `.dsha-input` 这个类名，而**全站样式表从未定义过它**——其他线路的输入框都自带各自的 `-control input` 规则，本线路抄了类名没抄规则。
   - **错位**：原布局用一张双列 Grid（`.dshcp-field`）把所有控件塞在右半屏，而 `<select>` 被 `.dsha-select` 的 `max-width:220px` 卡住，于是**输入框顶到最右、下拉框缩在中间**；「在模型选择器中列出网关目录的额外模型」的复选框被 Grid 推到距左 240px 处，与下方「注册 `cline_pass_*` 管理工具」那个贴右的复选框**不在同一条竖线**上。
