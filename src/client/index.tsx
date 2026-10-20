@@ -47,6 +47,9 @@ import { dictionaries as ollamaDicts, NS_OLLAMA, type OllamaLocaleKey } from './
 import { StepCodeComposerQuota } from './step-code/StepCodeComposerQuota.tsx'
 import { dictionaries as stepCodeDicts, NS_STEP_CODE, type StepCodeLocaleKey } from './step-code/locales.ts'
 import { installStepCodeStyles } from './step-code/styles.ts'
+import { ClinePassComposerQuota } from './cline-pass/ClinePassComposerQuota.tsx'
+import { dictionaries as clinePassDicts, NS_CLINE_PASS, type ClinePassLocaleKey } from './cline-pass/locales.ts'
+import { installClinePassStyles } from './cline-pass/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 import { createVideoCommandHost, installVideoCommand } from './minimax-code/video-command-host.tsx'
 import { installProgressUpdatesClient } from './progress-updates/index.ts'
@@ -73,6 +76,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-glm-coding-plan': GlmCodingPlanLocaleKey
     'dsh-ollama': OllamaLocaleKey
     'dsh-step-code': StepCodeLocaleKey
+    'dsh-cline-pass': ClinePassLocaleKey
     'dsh-progress-updates': ProgressUpdatesLocaleKey
   }
 }
@@ -137,6 +141,11 @@ export function apply(ctx: ClientContext): void {
     installStepCodeStyles()
     return () => {}
   }, 'dsh-step-code: styles')
+  ctx.effect(() => ctx.locale.register(NS_CLINE_PASS, clinePassDicts), 'dsh-cline-pass: dictionaries')
+  ctx.effect(() => {
+    installClinePassStyles()
+    return () => {}
+  }, 'dsh-cline-pass: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -217,6 +226,11 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.right', id: 'step-code-quota', order: 43, locale: NS_STEP_CODE,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, StepCodeComposerQuota))
+  // 顺序 44：同样接在既有线路之后顺延，不动 35–43 任何一格。
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'cline-pass-quota', order: 44, locale: NS_CLINE_PASS,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, ClinePassComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

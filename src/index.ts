@@ -125,6 +125,7 @@ import {
   registerStepCodePreferenceStore,
 } from './host/step-code/token-store.ts'
 import { PROVIDER_ID as STEP_CODE_PROVIDER_ID, PROVIDER_NAME as STEP_CODE_PROVIDER_NAME } from './host/step-code/types.ts'
+import { createClinePassLine } from './host/cline-pass/line.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
@@ -829,6 +830,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       },
     )
 
+    // Cline Pass: the API-key subscription line. Its stores, pool, engine,
+    // adapter and settings routes are assembled inside the line module; this
+    // wiring only registers the claim and keeps the disposers together.
+    const clinePassLine = createClinePassLine(ctx, {
+      fetchFn: modelFetch['cline-pass'],
+      attachments: ctx.attachments,
+    })
+
     // The IDE can sign in or out on its own; adopting whatever its directory
     // currently holds keeps the pool in step without a manual rescan.
     void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
@@ -1139,6 +1148,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
         },
       },
+      // Cline Pass: appended last, like every line added after the first one, so
+      // no existing card position moves.
+      clinePassLine.hubSource,
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
@@ -1263,6 +1275,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       proxyManager.dispose()
       disposeStepCodeRoutes()
       stepCodeClaim.dispose()
+      clinePassLine.dispose()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -1832,3 +1845,132 @@ export {
   type StepCodeReasoningEffort,
   type StepCodeStatusDto,
 } from './shared/step-code-contracts.ts'
+// --- Cline Pass（API Key 订阅线路）------------------------------------------------
+export {
+  ClinePassAdapter,
+  type ClinePassAdapterOptions,
+} from './host/cline-pass/adapter.ts'
+export {
+  ClinePassEngine,
+  type ClinePassAccount,
+  type ClinePassAttemptOutcome,
+  type ClinePassEngineOptions,
+} from './host/cline-pass/engine.ts'
+export {
+  CLINE_PASS_API_KEY_ENV,
+  ClinePassAccountPool,
+  clinePassAccountKey,
+  clinePassPoolPath,
+  parseClinePassPoolData,
+  type ClinePassPoolAccount,
+} from './host/cline-pass/account-pool.ts'
+export {
+  CLINE_PASS_ROUTES,
+  getClinePassWebStatus,
+  registerClinePassRoutes,
+  type ClinePassRouteOptions,
+} from './host/cline-pass/routes.ts'
+export {
+  ClinePassModelSettingsStore,
+  FileCredentialStore as ClinePassCredentialStore,
+  credentialPath as clinePassCredentialPath,
+  modelSettingsPath as clinePassModelSettingsPath,
+  parseClinePassCredentials,
+  parseClinePassModelSettings,
+  type ClinePassCatalogModel,
+  type ClinePassCredentials,
+  type ClinePassModelSettings,
+  type ClinePassPreferenceStore,
+} from './host/cline-pass/token-store.ts'
+export {
+  createClinePassLine,
+  clinePassKnownModelIds,
+  clinePassVisibleModelIds,
+  type ClinePassLine,
+  type ClinePassLineOptions,
+} from './host/cline-pass/line.ts'
+export { createClinePassStore, type ClinePassStore } from './host/cline-pass/store.ts'
+export {
+  chatCompletion as clinePassChatCompletion,
+  chatURL as clinePassChatURL,
+  fetchGatewayCatalog as fetchClinePassGatewayCatalog,
+  fetchOfficialModels as fetchClinePassOfficialModels,
+  fetchUsageLimits as fetchClinePassUsageLimits,
+  openChatStream as openClinePassChatStream,
+  sendJSON as sendClinePassJSON,
+  trimBase as trimClinePassBase,
+  type ClinePassHttpResult,
+  type ClinePassRawUsageLimit,
+} from './host/cline-pass/client.ts'
+export {
+  buildClinePassBody,
+  mapFinishReason,
+  mapUsage,
+  parseServerSentEvents,
+  reasoningOf,
+  serializeMessages,
+  streamErrorCode,
+  translate,
+  type ClinePassWireBody,
+  type ClinePassWireMessage,
+} from './host/cline-pass/mapper.ts'
+export {
+  CHANNEL_ALIASES,
+  buildAttempts,
+  channelNameFor,
+  classifyUpstreamError,
+  extractAvailableProviders,
+  injectPrefs,
+  isAdherenceOk,
+  mergeUpstreams,
+  normalizePinMode,
+  normalizeSort,
+  parseRouting,
+  parseTier0,
+  pinAdherence,
+  pinWarnings,
+  type PinAttempt,
+  type PinConfig,
+  type RoutingFacts,
+} from './host/cline-pass/protocol.ts'
+export {
+  DEFAULT_BASE_URL as CLINE_PASS_DEFAULT_BASE_URL,
+  DEFAULT_MODELS as CLINE_PASS_DEFAULT_MODELS,
+  MAX_UPSTREAMS as CLINE_PASS_MAX_UPSTREAMS,
+  MODEL_CATALOG as CLINE_PASS_MODEL_CATALOG,
+  POOL_COOLDOWN_MS as CLINE_PASS_POOL_COOLDOWN_MS,
+  REASONING_EFFORTS as CLINE_PASS_REASONING_EFFORTS,
+  catalogEntry as clinePassCatalogEntry,
+  defaultPin as clinePassDefaultPin,
+  type ClinePassConnection,
+  type ClinePassModelInfo,
+  type ClinePassModelMeta,
+  type ClinePassPinSettings,
+  type ClinePassReasoningEffort,
+} from './host/cline-pass/types.ts'
+export {
+  CLINE_PASS_PROVIDER_ID as CLINE_PASS_ROUTE_PROVIDER_ID,
+  CLINE_PASS_PROVIDER_NAME as CLINE_PASS_ROUTE_PROVIDER_NAME,
+  CLINE_PASS_ROUTE_PREFIX,
+  clinePassWindowLabel,
+  isClinePassPinMode,
+  type ClinePassAccountAction,
+  type ClinePassAccountSummaryDto,
+  type ClinePassAttemptTraceDto,
+  type ClinePassAuthResult,
+  type ClinePassChannelVerdictDto,
+  type ClinePassHistoryRowDto,
+  type ClinePassModelDto,
+  type ClinePassPinMode,
+  type ClinePassPoolStatusDto,
+  type ClinePassProbeResultDto,
+  type ClinePassSettingsDto,
+  type ClinePassSettingsUpdateDto,
+  type ClinePassTestResultDto,
+  type ClinePassUsageAccountDto,
+  type ClinePassUsageDto,
+  type ClinePassUsageWindowDto,
+  type ClinePassValidateResultDto,
+  type ClinePassWebStatus,
+} from './shared/cline-pass-contracts.ts'
+

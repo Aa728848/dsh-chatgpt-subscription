@@ -33,6 +33,8 @@ export const DIAGNOSTIC_PROVIDERS = [
   // 第十条线路：Step Code（Step Plan 订阅）。同样是注册点——不写在这里，
   // 本线路就静默失去 [provider-diagnostics] 日志与它的指纹/用量诊断。
   'step-code',
+  // 第十一条：Cline Pass（API Key 订阅）。
+  'cline-pass',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]
