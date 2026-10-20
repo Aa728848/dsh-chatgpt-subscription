@@ -19,6 +19,7 @@
 - [GLM（ZCode 账号）线路](#glmzcode-账号线路)
 - [Step Code（Step Plan 订阅）线路](#step-codestep-plan-订阅线路)
 - [Cline Pass（OAuth 订阅）线路](#cline-passoauth-订阅线路)
+- [Qoder（订阅）线路](#qoder订阅线路)
 - [子代理模型授权](#子代理模型授权0215-起032-起强制指定模型)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [本机登录](#本机登录)
@@ -29,7 +30,7 @@
 
 ## 线路总览
 
-本插件同时接入 **10 条订阅线路**，每条各自独立注册 Provider、独立登录、独立额度卡片。
+本插件同时接入 **11 条订阅线路**，每条各自独立注册 Provider、独立登录、独立额度卡片。
 
 | Provider ID | 订阅 | 协议 | 登录方式 | 模型目录来源 |
 | --- | --- | --- | --- | --- |
@@ -43,6 +44,7 @@
 | `glm-coding-plan` | GLM Coding Plan（ZCode 账号，国区 BigModel / 国际区 Z.ai） | Anthropic Messages + OpenAI Chat Completions（按模型声明） | ZCode 账号 OAuth（浏览器中转轮询）+ 可选导入本机 ZCode 登录态 | 随包目录（源自官方 `zcode-builtin.json`） |
 | `step-code` | StepFun Step Plan 订阅（国区 api.stepfun.com / 国际区 api.stepfun.ai）或开放平台 API Key | OpenAI Chat Completions | **云端轮询**浏览器授权（不开本地回调端口）/ 手工粘贴 Platform API Key / 只读导入本机 `~/.stepcode/auth.json` | **实时运行时发现**（随包表刻意为空） |
 | `cline-pass` | Cline Pass | OpenAI Chat Completions | **浏览器设备码 OAuth**（WorkOS，账号入池、自动续期）；API Key 仅作兼容回退 | 随包表兜底 + 官方 `recommended-models` / models.dev / 上游网关目录补全 |
+| `qoder` | Qoder 订阅（全球区 qoder.com / 中国站 qoder.com.cn） | Qoder 自有（COSY 签名 + 信封 SSE） | **浏览器设备流**（仅全球区）/ 手工粘贴 PAT（两区）/ 只读导入本机 `~/.qoder/.auth/user` | **实时运行时发现**（COSY 签名 GET）+ 随包能力兜底表 |
 
 > **只有 minimax-code 是硬编码目录，而且是有意的**：该端点的 `GET /v1/models` **未对订阅流量开放**（返回 503 `direct_route_not_configured`），任何「实时目录」都只会是一个必然失败的请求。其取值转录自本机官方客户端的 `config.yaml`。
 >
@@ -1015,6 +1017,52 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 | POST | `/quota/credential` | `mode: 'password' | 'manual' | 'clear'`。**非公开的开发者中心接口**；凭据只在提交时的请求体里过一趟，永远不回读 |
 
 与其它线路一样，所有修改状态的路由只接受同源 JSON POST 并校验 `Origin` 与 `Host`。**响应里永远不含 api_key、`Oasis-Token` 或账号密码的原文**——下发的只有「有没有凭据、从哪来、大概什么时候过期、上次读它出了什么问题」。
+
+## Qoder（订阅）线路
+
+\`qoder\`（显示名 **Qoder（订阅）**）接入 **Qoder 订阅**（全球区 \`qoder.com\` / 中国站 \`qoder.com.cn\`）。两个区域是**两套互不通用**的部署：一个区铸造的凭据打另一个区的端点会被上游直接拒绝。因此**区域是凭据的属性而不是请求的属性**，号池里可以同时持有两区账号且互不串用。
+
+> ⚠️ **这条线路的协议面是逆向工程成果，不是官方公开契约，这是本线路唯一的合规与稳定性风险点。** COSY 签名、body codec、额度端点都来自开源实现（[pi-provider-qoder](https://github.com/simonsmh/pi-provider-qoder)，live 验证）与 [qodercli2api](https://github.com/Liki4/qodercli2api) 对官方 Qoder CLI v1.1.34 的全合成 frozen fixtures——本插件把每一步**逐字节**锁在测试里（\`test/fixtures/qoder/\` vendored），但上游随时可能改协议或收紧风控。额度端点（\`/api/v2/quota/usage\`）更是**非公开的个人接口**：它的失败绝不影响模型请求，卡片把它画成尽力而为的读数，不是账单。COSY 版本跟随官方 CLI 的 release feed（落后会拿到**缩减的**模型目录），拉取失败回落随包版本。
+
+**登录**（三条路，任选其一，互不替代）：
+
+1. **浏览器设备流**（仅全球区）：本线路**不开本地回调端口**，流程跑在 host 上，你在浏览器里人工确认，卡片每 2 秒跟随一次进度。授权页地址始终显示在卡片上——host 不自行开浏览器，即使自动打开失败你也能自己复制打开；
+2. **手工粘贴 PAT**（两区都支持）：在账号的 Integrations 页生成一个 Personal Access Token（\`pt-...\`）粘贴进来。它先被兑换成短期 job token（\`jt-...\`）使用；**PAT 本体只存在 host 的加密存储里**，用途只有一个：过期后重新兑换；
+3. **只读导入本机 \`qodercli\` 登录态**（可选）：读 \`~/.qoder/.auth/user\`（AES-128-CBC 信封，key 是 \`machine_id\` 前 16 个字符——格式逐字来自协议文档，且有 frozen fixture 锁定）。**只读**，从不创建、修改或删除 qodercli 的任何文件。文件不记录区域，所以导入时对两区的 userinfo 各探一次（只读 GET），哪区认账就是哪区；两区都不认（token 已过期/被撤销）就如实告知，**不替你猜一个必然 401 的区域**。
+
+**凭据会过期、可刷新**（与 step-code 的静态凭据相反）：号池在 \`expiresAt - 1 小时\` 前自动续期——PAT 来源拿存下的 PAT 重兑换，其余走 \`refresh_token\` 轮换（轮换的新对先落盘再使用）。刷新被上游判 401/403 时账号标记为失效并提示重新登录；网络/5xx 只算瞬时失败，不会误登出。
+
+**能力**：Qoder 自有对话面（OpenAI 形状的消息数组包在 \`RemoteChatAsk\` 信封里，过自定义 body codec，COSY 头签名，应答是信封 SSE）。模型目录**运行时发现**（COSY 签名的 \`GET /algo/api/v2/model/list?Encode=1\`）+ 随包能力兜底表；能力（上下文窗口 / 图片输入 / 思考档位）全部来自目录字段（\`context_config\` / \`is_vl\` / \`thinking_config\`），**不从模型名推断**，目录里那个 \`max_input_tokens\` 陈旧地板值明确不信。档位在本地先收敛到**模型真实梯子**再发出去；toggle 形态的模型只发开关。输出上限取上游文档化的 128K（目录不报输出上限）。
+
+**缓存与用量**：响应 usage 里读缓存命中（\`prompt_tokens_details.cached_tokens\`，顶层 \`cached_tokens\` 兜底），缓存写入读 \`cache_write_tokens\`（上游不报就是 0，不做「恒零」声明）。**整页不出现任何金额**：订阅没有公开的 token 单价，Credits 与金额之间没有官方汇率——只显示 token 与 Credits 数字。
+
+**已知限制**：
+
+- **未用真实账号联调**：全部验收来自 mock + frozen fixtures（\`docs/qoder-line-plan.md\` §9 是联调清单与逐项风险）。上线时的实际置信度就是这句话，不打包成「已验证」；
+- **中国站没有设备流**：它只接受 PAT 粘贴或导入本机 qodercli 登录态（卡片在选中国站时不显示浏览器登录按钮，host 侧同样拒绝）；
+- **额度端点是非公开个人接口**（见开头的风险提示）；三只桶分开渲染，缺桶不画，没有总额的桶不参与任何百分比；
+- **品牌标记是 monogram**：官方 favicon 是一枚 73KB 的复合字形，不适合内联转录；卡片用字母 Q，底砖与字形色的取值都取自官方站点资产（出处记在 \`brand-icons.tsx\` 注释里）；
+- **\`chat_context\` 按官方 fixture 发最小形态** \`{}\`：若实测发现模型路由异常，对照 pi-provider 的 \`extra.modelConfig\` 补上（计划 §9 风险 10）。
+
+### 插件路由（Qoder）
+
+所有路由都以 \`/qoder/api\` 为前缀：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | \`/status\` | 区域、号池、模型目录、额度快照、缓存统计与登录流程；页面唯一的读口 |
+| POST | \`/settings\` | 启用开关、勾选模型、上下文窗口覆盖、默认思考档位、手选账号 |
+| POST | \`/accounts\` | 号池动作：\`set-primary\` / \`clear-cooldown\` / \`delete\` / \`relogin\` / \`strategy\` |
+| POST | \`/login/start\` | 开一次设备流登录（仅全球区），立即返回流程状态（不阻塞、不开本地回调端口、host 不自行开浏览器） |
+| GET | \`/login/status\` | 轮询登录流程状态；host 在后台轮询上游 |
+| POST | \`/login/cancel\` | 取消登录流程 |
+| POST | \`/login/manual\` | 手工粘贴 PAT（**请求体必然带凭据，刻意不在冻结契约里声明**） |
+| POST | \`/adopt\` | 只读导入本机 qodercli 登录态；失败**永不阻断**，每种失败都是契约里的一个 reason |
+| POST | \`/connection/test\` | 对目录端点做一次 COSY 签名的探测（**裸 DTO，不走信封**）；它答「这个账号能不能读目录」，答不了「这个具体模型会不会成功」 |
+| POST | \`/quota\` | 强制刷新额度；一次失败的额度读不是一次失败的请求，卡片照旧渲染 |
+| POST | \`/catalog/refresh\` | 强制刷新模型目录 |
+
+与其它线路一样，所有修改状态的路由只接受同源 JSON POST 并校验 \`Origin\` 与 \`Host\`。**响应里永远不含 job token、PAT 或刷新令牌的原文**——下发的只有「有没有凭据、从哪来、大概什么时候过期」。
 
 ## Cline Pass（OAuth 订阅）线路
 

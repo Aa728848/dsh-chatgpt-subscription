@@ -35,6 +35,9 @@ export const DIAGNOSTIC_PROVIDERS = [
   'step-code',
   // 第十一条：Cline Pass（API Key 订阅）。
   'cline-pass',
+  // 第十二条：Qoder（订阅）。同样是注册点——不写在这里，
+  // 本线路就静默失去 [provider-diagnostics] 日志与它的指纹/用量诊断。
+  'qoder',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

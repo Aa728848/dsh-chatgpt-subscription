@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- **[qoder] 新增第十二条订阅线路：Qoder（全球区 qoder.com / 中国站 qoder.com.cn）**
+  - **协议面**：Qoder 自有的 COSY 签名对话协议（`POST {base}/algo/api/v2/service/pro/sse/agent_chat_generation`）——AES-128-CBC 加密的 UserInfo + RSA-1024 包裹的会话密钥 + canonical MD5 签名、自定义 Base64 alphabet + 三段交换的 body codec、外层信封包 inner JSON 的明文 SSE。全部算法按 Liki4/qodercli2api 的全合成 frozen fixtures（qodercli v1.1.34 互操作基线）**逐字节锁定**（`test/fixtures/qoder/` vendored，`test/qoder-cosy.test.ts` 8 例），并与 simonsmh/pi-provider-qoder 的 live 验证实现互相印证。
+  - **登录三路径**：浏览器设备流（仅全球区，challenge/verifier 轮询，不开本地回调端口，host 不自行开浏览器——`test/login-opens-browser-once.test.ts` 钉住）、手动粘贴 PAT（`jobToken/exchange` 兑换，PAT 本体留在 host 加密存储里供过期重兑换）、adopt 只读导入本机 qodercli 登录态（`~/.qoder/.auth/user`，AES 解密由 fixture 锁定；**区域不猜，是对两区 userinfo 各探一次探出来的**）。
+  - **账号模型**：多账号号池，凭据**会过期、可刷新**（提前 1 小时，逐字上游文档；PAT 来源重兑换、其余走 refresh_token 轮换），两区账号可同池共存（区域是凭据的属性）。
+  - **模型与额度**：目录实时发现（COSY 签名的 `/algo/api/v2/model/list`）+ 随包能力兜底表；COSY 版本每日跟随官方 CLI release feed（落后会拿到缩减目录）；能力一律来自目录字段（`max_input_tokens` 那个陈旧地板不信）。额度卡片读 `/api/v2/quota/usage`（**非公开个人端点**，失败绝不影响模型请求），三只桶（个人/加购/组织包）分开画绝对量；订阅无公开单价，整页只有 token 与 Credits 数字，没有金额。
+  - **验证**：`npm run typecheck` 0 错误；新增 9 个 qoder 套件；全量测试与 build 通过。**未用真实账号联调**（mock + frozen fixtures 验收），联调清单见 `docs/qoder-line-plan.md` §9。
 - **[kimi-code] K3 跑到一半突然整轮失败，红条上只有一个 `terminated` 配 `UNKNOWN`——现在它是可重试的 `TRANSPORT`**
   - **现象**：`k3` 的长回答（截图那次已经执行 27 次思考、调用 30 次工具）偶发中断，界面是「本轮运行失败 terminated」，右侧徽标 `UNKNOWN`；手动重发一次立刻恢复。
   - **真因**：连接在响应体中途被掐断时 undici 抛的是裸 `TypeError: terminated`——它自身不带任何错误码，真原因（ECONNRESET、对端关闭、body timeout）只挂在 `.cause` 上。[adapter.ts](../src/host/kimi-code/adapter.ts) 的读流循环只改写 mapper 已经定性的 in-band 错误，其余原样 `throw error`，于是这个裸值一路漏到 harness：`normalizeLlmFailure` 对它只能归一成 `UNKNOWN`，而 `UNKNOWN` 不在本线路的 `retryableCodes`（RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT）里——一次断连就把整轮判死，连一次自动重试都没有，同时还把 `.cause` 丢掉，报告里连发生过什么都说不出来。

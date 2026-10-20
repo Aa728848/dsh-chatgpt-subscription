@@ -14,7 +14,7 @@ import { BRAND_MARKS, type BrandMarkKey, type BrandMarkSvg } from './brand-svg.t
 export type HubProviderId =
   | 'chatgpt' | 'antigravity' | 'command-code' | 'kimi-code'
   | 'workbuddy' | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
-  | 'step-code' | 'cline-pass'
+  | 'step-code' | 'cline-pass' | 'qoder'
 
 /**
  * GLM（ZCode 账号）这张卡自带的标记：智谱官方 logo.svg 里那个方形标记，逐字转录。
@@ -135,6 +135,12 @@ export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   // 底砖取自 Cline 官方 app icon 的圆角底（#343B42），标记用官方 white 变体，
   // 两者合起来就是 Cline 自己的应用图标；标记画成 currentColor，所以配白字。
   'cline-pass': { mark: 'cline-pass', color: '#ffffff', tile: '#343B42' },
+  // Qoder：官方 favicon（https://qoder.com/favIcon.svg，2026-06-26 抓取，HTTP 200，
+  // 73,379 字节，sha256 5e1843cb…1dd0）是一枚 73KB 的复合字形，体量不适合内联
+  // 转录（GLM/Step 的标记都只取了几条 path）；所以这张卡用 monogram 'Q'，
+  // 两个颜色值都有出处：底砖 #F3F3F3 取自该 favicon 的圆角底 rect，
+  // 字形色 #141414 取自 qoder.com 站内全部内联图标的 fill。
+  qoder: { monogram: 'Q', color: '#141414', tile: '#F3F3F3' },
 }
 
 /** One brand mark at a given box size; the artwork is decorative. */

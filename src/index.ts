@@ -126,6 +126,15 @@ import {
 } from './host/step-code/token-store.ts'
 import { PROVIDER_ID as STEP_CODE_PROVIDER_ID, PROVIDER_NAME as STEP_CODE_PROVIDER_NAME } from './host/step-code/types.ts'
 import { createClinePassLine } from './host/cline-pass/line.ts'
+import { QoderAdapter, qoderCatalogSize } from './host/qoder/adapter.ts'
+import { QoderAccountPool } from './host/qoder/account-pool.ts'
+import { registerQoderRoutes, qoderSettingsSource } from './host/qoder/routes.ts'
+import {
+  QoderCredentialStore,
+  QoderModelSettingsStore,
+  registerQoderPreferenceStore,
+} from './host/qoder/token-store.ts'
+import { PROVIDER_ID as QODER_PROVIDER_ID, PROVIDER_NAME as QODER_PROVIDER_NAME } from './host/qoder/types.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
@@ -440,6 +449,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const stepCodeAccountPool = new StepCodeAccountPool({
     // 卡片可以钉住一个账号，而它能在适配器服务请求期间改变，所以每次选号都读一次。
     preferAccountId: () => stepCodePreferences.status().selectedAccountId,
+  })
+
+  // Qoder（订阅）：全球区与中国站可以同时在池里，区域由凭据唯一决定
+  // （一个区的 token 打另一区的端点会被拒，所以去重键里带着区域）。
+  // 与 step-code 不同，这条线路的凭据会过期、可刷新，号池的 refresh 钩子是活的。
+  const qoderStore = new QoderCredentialStore()
+  const qoderModelSettings = new QoderModelSettingsStore()
+  const qoderPreferences = registerQoderPreferenceStore(ctx.settings, qoderModelSettings)
+  const qoderAccountPool = new QoderAccountPool({
+    // 卡片可以钉住一个账号，而它能在适配器服务请求期间改变，所以每次选号都读一次。
+    preferAccountId: () => qoderPreferences.status().selectedAccountId,
   })
 
   // The allowlist a Session recorded outranks the current settings document,
@@ -839,6 +859,35 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       attachments: ctx.attachments,
     })
 
+    const qoderAdapter = new QoderAdapter(
+      qoderStore,
+      qoderModelSettings,
+      qoderPreferences,
+      {
+        fetchFn: modelFetch[QODER_PROVIDER_ID],
+        attachments: ctx.attachments,
+        accountPool: qoderAccountPool,
+      },
+    )
+    const qoderClaim = claimProviderRoute(ctx, {
+      providerId: QODER_PROVIDER_ID,
+      label: QODER_PROVIDER_NAME,
+      adapter: qoderAdapter,
+    })
+    // Registered unconditionally: the card is how a user signs in for the first
+    // time, so gating it on winning the route would leave a contested id with no
+    // way to configure it at all.
+    const disposeQoderRoutes = registerQoderRoutes(
+      ctx,
+      qoderSettingsSource(qoderPreferences, qoderModelSettings),
+      {
+        fetchFn: proxyFetch,
+        serving: () => qoderClaim.serving(),
+        conflict: () => qoderClaim.conflict(),
+        accountPool: qoderAccountPool,
+      },
+    )
+
     // The IDE can sign in or out on its own; adopting whatever its directory
     // currently holds keeps the pool in step without a manual rescan.
     void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
@@ -1152,6 +1201,25 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       // Cline Pass: appended last, like every line added after the first one, so
       // no existing card position moves.
       clinePassLine.hubSource,
+      // Qoder（订阅）：再往后追加一格，既有线路的卡片顺序保持不动。
+      {
+        id: 'qoder',
+        providerId: QODER_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = qoderPreferences.status()
+          const accounts = await qoderAccountPool.listAccounts().catch(() => [])
+          // 运行时目录优先，随包兜底表垫底（登录前卡片上的模型计数来自兜底表）。
+          const total = catalogTotal(qoderCatalogSize())
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
@@ -1277,6 +1345,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeStepCodeRoutes()
       stepCodeClaim.dispose()
       clinePassLine.dispose()
+      disposeQoderRoutes()
+      qoderClaim.dispose()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -1976,3 +2046,66 @@ export {
   type ClinePassValidateResultDto,
   type ClinePassWebStatus,
 } from './shared/cline-pass-contracts.ts'
+
+export {
+  QoderAdapter,
+  QODER_POOL_COOLDOWN_MS,
+  QODER_RETRY_POLICY_CONFIG,
+  cachedQoderModelCatalog,
+  qoderCatalogSize,
+  readQoderCacheStats,
+  rememberQoderCacheUsage,
+  type QoderAdapterOptions,
+  type QoderPickedCredential,
+} from './host/qoder/adapter.ts'
+export {
+  QoderAccountPool,
+  qoderPoolIdentity,
+  qoderPoolPath,
+  qoderPoolQuota,
+  qoderPoolStatus,
+  qoderPoolStatusSlice,
+  qoderRefreshFailureStatus,
+  type QoderPoolAccount,
+  type QoderPoolStatus,
+} from './host/qoder/account-pool.ts'
+export {
+  getQoderStatus,
+  qoderSettingsSource,
+  qoderSubPathOf,
+  registerQoderRoutes,
+  type QoderPoolSlice,
+  type QoderRouteOptions,
+  type QoderSettingsSource,
+  type QoderStatusSources,
+} from './host/qoder/routes.ts'
+export {
+  QoderCredentialStore,
+  QoderModelSettingsStore,
+  credentialPath as qoderCredentialPath,
+  modelSettingsPath as qoderModelSettingsPath,
+  parseQoderCredentials,
+  qoderCredentialsExpireAt,
+  qoderCredentialsNeedRefresh,
+  registerQoderPreferenceStore,
+  type QoderCredentials,
+  type QoderModelSettings,
+  type QoderPreferenceStore,
+  type QoderSettingsPatch,
+} from './host/qoder/token-store.ts'
+export {
+  QODER_PROVIDER_ID,
+  QODER_PROVIDER_NAME,
+  QODER_ROUTE_PREFIX,
+  QODER_REGIONS,
+  type QoderAccountSummaryDto,
+  type QoderAdoptResultDto,
+  type QoderCacheStatsDto,
+  type QoderConnectionDto,
+  type QoderLoginFlowStatus,
+  type QoderModelOption,
+  type QoderQuotaSnapshotDto,
+  type QoderReasoningEffort,
+  type QoderRegion,
+  type QoderStatusDto,
+} from './shared/qoder-contracts.ts'

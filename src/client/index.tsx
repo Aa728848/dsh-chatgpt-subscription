@@ -50,6 +50,9 @@ import { installStepCodeStyles } from './step-code/styles.ts'
 import { ClinePassComposerQuota } from './cline-pass/ClinePassComposerQuota.tsx'
 import { dictionaries as clinePassDicts, NS_CLINE_PASS, type ClinePassLocaleKey } from './cline-pass/locales.ts'
 import { installClinePassStyles } from './cline-pass/styles.ts'
+import { QoderComposerQuota } from './qoder/QoderComposerQuota.tsx'
+import { dictionaries as qoderDicts, NS_QODER, type QoderLocaleKey } from './qoder/locales.ts'
+import { installQoderStyles } from './qoder/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 import { createVideoCommandHost, installVideoCommand } from './minimax-code/video-command-host.tsx'
 import { installProgressUpdatesClient } from './progress-updates/index.ts'
@@ -77,6 +80,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-ollama': OllamaLocaleKey
     'dsh-step-code': StepCodeLocaleKey
     'dsh-cline-pass': ClinePassLocaleKey
+    'dsh-qoder': QoderLocaleKey
     'dsh-progress-updates': ProgressUpdatesLocaleKey
   }
 }
@@ -146,6 +150,11 @@ export function apply(ctx: ClientContext): void {
     installClinePassStyles()
     return () => {}
   }, 'dsh-cline-pass: styles')
+  ctx.effect(() => ctx.locale.register(NS_QODER, qoderDicts), 'dsh-qoder: dictionaries')
+  ctx.effect(() => {
+    installQoderStyles()
+    return () => {}
+  }, 'dsh-qoder: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -231,6 +240,11 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.right', id: 'cline-pass-quota', order: 44, locale: NS_CLINE_PASS,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, ClinePassComposerQuota))
+  // 顺序 45：接在 cline-pass-quota(44) 之后顺延，理由同上——既有槽位一个 order 都不动。
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'qoder-quota', order: 45, locale: NS_QODER,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, QoderComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

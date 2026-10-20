@@ -61,6 +61,9 @@ const CommandCodeStores = await import('../src/host/command-code/token-store.ts'
 const glmOauth = await import('../src/host/glm-coding-plan/oauth.ts')
 const { registerGlmCodingPlanRoutes } = await import('../src/host/glm-coding-plan/routes.ts')
 const { GLM_CODING_PLAN_ROUTE_PREFIX: GLM_PREFIX } = await import('../src/shared/glm-coding-plan-contracts.ts')
+const qoderOauth = await import('../src/host/qoder/oauth.ts')
+const { registerQoderRoutes } = await import('../src/host/qoder/routes.ts')
+const { QODER_ROUTE_PREFIX: QODER_PREFIX } = await import('../src/shared/qoder-contracts.ts')
 const { ClinePassLoginManager } = await import('../src/host/cline-pass/oauth.ts')
 const { registerClinePassRoutes } = await import('../src/host/cline-pass/routes.ts')
 const { ClinePassAccountPool } = await import('../src/host/cline-pass/account-pool.ts')
@@ -223,5 +226,22 @@ describe('a sign-in opens the login page once', () => {
     expect(result.status).toBe(200)
     expect(result.body.value?.verificationUri).toMatch(/^https:\/\//)
     expect(browserLaunches()).toEqual([])
+  })
+
+  it('Qoder: /login/start answers the authorize URL for the card and launches no browser of its own', async () => {
+    // 设备流会一直轮询：fetch 回答 404（pending），让流程停在 pending——
+    // 这个用例钉的是「路由自己不启动浏览器」，不是流程本身。
+    const fetchFn = (async () => new Response('{}', { status: 404 })) as unknown as typeof fetch
+    const handler = capture((ctx) => registerQoderRoutes(
+      ctx,
+      // 这条路由只读登录状态与设置：设置源给最小形状即可。
+      { status: () => ({}) as never, update: () => ({}) as never },
+      { fetchFn },
+    ))
+    const result = await post(handler, QODER_PREFIX + '/login/start')
+    expect(result.status).toBe(200)
+    expect(result.body.value?.authorizeUrl).toMatch(/^https:\/\//)
+    expect(browserLaunches()).toEqual([])
+    qoderOauth.resetQoderLogin()
   })
 })

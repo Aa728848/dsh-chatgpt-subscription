@@ -31,6 +31,8 @@ import { OllamaSection } from '../ollama/OllamaSection.tsx'
 import { StepCodeSection } from '../step-code/StepCodeSection.tsx'
 import { ClinePassSection } from '../cline-pass/ClinePassSection.tsx'
 import { CLINE_PASS_PROVIDER_NAME, CLINE_PASS_ROUTE_PREFIX } from '../../shared/cline-pass-contracts.ts'
+import { QoderSection } from '../qoder/QoderSection.tsx'
+import { QODER_PROVIDER_NAME, QODER_ROUTE_PREFIX } from '../../shared/qoder-contracts.ts'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -154,6 +156,14 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: CLINE_PASS_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(CLINE_PASS_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <ClinePassSection onModelChange={onModelChange} />,
+  },
+  {
+    // Qoder（订阅）：追加在最后，与 host 侧注册顺序一致（cline-pass 之后）。
+    // 既有条目一个字符都没有移动——给已上线的线路重排卡片位置没有收益，只有风险。
+    id: 'qoder',
+    name: QODER_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(QODER_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <QoderSection onModelChange={onModelChange} />,
   },
 ]
 
