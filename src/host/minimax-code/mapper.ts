@@ -1054,6 +1054,18 @@ export interface MinimaxStreamState {
    * while nothing has.
    */
   streamError?: Record<string, unknown>
+  /**
+   * The model id the service says it ANSWERED with, from
+   * `message_start.message.model`.
+   *
+   * Optional and one-way: a stream whose header omits the field simply leaves it
+   * undefined, and nothing here decides anything from it — the adapter compares it
+   * with the id the request carried. It is recorded rather than judged because the
+   * mapper cannot know what was asked for; see the adapter's check for why the
+   * comparison is the whole point of this route (this endpoint does not refuse an
+   * id it cannot route, it substitutes one).
+   */
+  answeredModel?: string
   done: boolean
   finished: boolean
   inputTokens: number
@@ -1287,6 +1299,12 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
     }
     const stop = message === undefined ? undefined : asString(message.stop_reason)
     if (stop !== undefined) state.finishReason = stop
+    // The only signal this endpoint gives that it did NOT route the requested id:
+    // measured, an unknown or retired model id is answered 200 by a substituted
+    // model, and `message.model` in this header is where the substitution shows.
+    // Read, not judged - an absent field stays undefined and fails nothing.
+    const answered = message === undefined ? undefined : asString(message.model)
+    if (answered !== undefined) state.answeredModel = answered
     return out
   }
 

@@ -196,6 +196,11 @@ function quotaCooldownMs(bodyText: string): number {
  * the other — so a body whose chosen field says "rate limit" while its sibling says
  * 额度不足 must still be read as the quota verdict it is. Same reasoning, same raw-text
  * match, as the sibling line's plan-scope test (kimi-code/adapter.ts:838).
+ *
+ * This table is the FALLBACK, not the only verdict: the service states the same
+ * condition as a number too, and {@link namesSpentWindow} asks that first. The entries
+ * stay because a Chinese sentence arrives with no code at all, and because a body that
+ * is not JSON has nothing but its wording to read.
  */
 const QUOTA_EXHAUSTED_PATTERNS = [
   // English, as this service and the gateways in front of it word it. Every entry
@@ -230,13 +235,123 @@ function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
 }
 
 /**
+ * The upstream status codes that mean this account's usage window is spent.
+ *
+ * The official MiniMax Code client settles this verdict on a NUMBER and not on
+ * wording — `LLM_USAGE_LIMIT_UPSTREAM_STATUS_CODES = [2056, 2067]` in
+ * packages/shared/src/llm-error-classifier.ts — and until this table existed this
+ * line had only the phrase regexes above. A phrase table is the brittle half of the
+ * same rule: every phrasing the service invents needs a new entry, and every entry
+ * added is another chance to file ordinary back-pressure as a terminal verdict (the
+ * `/quota/i` → `rate_limit_exceeded` regression the table itself records). The code
+ * is what the service already decided; reading it is reading the verdict rather
+ * than guessing at it.
+ *
+ * Both codes are the same verdict as the wording path: the account's window is
+ * gone until it resets, so the failure is terminal (no retry can refill a window)
+ * and it belongs to ONE account (the pool cools it for the window the body names —
+ * five hours or a week — and lets the next account answer).
+ *
+ * 2013 is deliberately absent. Upstream calls it a generic invalid-params code and
+ * this repo already reads it that way on the reset-card and Files API paths, so a
+ * 2013 must never become a quota verdict no matter which envelope carries it.
+ */
+const USAGE_LIMIT_UPSTREAM_STATUS_CODES: ReadonlySet<number> = new Set([2056, 2067])
+
+function isUsageLimitStatusCode(code: number | undefined): boolean {
+  return code !== undefined && USAGE_LIMIT_UPSTREAM_STATUS_CODES.has(code)
+}
+
+/** A JSON object, or undefined for anything else (including a failed parse). */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/** The whole number one field holds, or undefined when it holds anything else. */
+function integerOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined
+}
+
+/**
+ * The numeric status code one envelope carries, read from the field that envelope
+ * documents.
+ *
+ * The two envelopes this line already parses put the code in different places, and
+ * both are read here for the same reason `QUOTA_EXHAUSTED_PATTERNS` matches the raw
+ * body: a body that carries only `base_resp.status_code` carries no sentence at all,
+ * so an extractor keyed on one field would judge an envelope it never saw.
+ *
+ *  · the platform envelope — `{"base_resp":{"status_code":…,"status_msg":…}}` — as
+ *    every platform route in this line already reads it (client.ts:131,
+ *    reset-card.ts:182-188, files-api.ts:373-375, checkin-gateway.ts:402-406);
+ *  · the client envelope — `{"errorCode":…,"errorReason":…}` — as types.ts:22 and
+ *    model-catalog.ts:6 document it;
+ *  · the Messages envelope — `{"code":…,"message":…}` — which is the ONLY numeric
+ *    field this route's own error bodies carry. Measured on 2026-10-28 (see
+ *    docs/minimax-code-probe-capabilities.md): a 400 on /messages carries no
+ *    base_resp and no errorCode at all, and its 2013 sits in the message TEXT
+ *    alone; the 401 that shares that text says `{"code":401,"message":"auth
+ *    failed"}`. Without this arm the numeric branch below could never fire on
+ *    this route, which is what left every /messages refusal to the phrase table.
+ */
+function statusCodeIn(record: Record<string, unknown> | undefined): number | undefined {
+  if (record === undefined) return undefined
+  return integerOrUndefined(asRecord(record.base_resp)?.status_code)
+    ?? integerOrUndefined(record.errorCode)
+    ?? integerOrUndefined(record.code)
+}
+
+/**
+ * Whether this body NAMES a spent usage window by its status code.
+ *
+ * Read from the raw body, in both envelopes, exactly as the phrase table is — with
+ * one arm more: the in-band body this adapter itself builds (`{ error: <the stream's
+ * own error object> }`, see the reclassification in `generate`) is one level down,
+ * so the same two fields are read inside it as well. That is what lets an in-band
+ * failure inherit this verdict instead of needing a second copy of the rule.
+ *
+ * A body that is not JSON answers false and falls through to the phrase table: a
+ * truncated or plain-text body has no field to read, and the wording is the only
+ * evidence it carries.
+ */
+function namesUsageLimitStatusCode(bodyText: string): boolean {
+  const text = bodyText.trim()
+  if (text === '') return false
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text) as unknown
+  } catch {
+    return false
+  }
+  const record = asRecord(parsed)
+  if (record === undefined) return false
+  return isUsageLimitStatusCode(statusCodeIn(record))
+    || isUsageLimitStatusCode(statusCodeIn(asRecord(record.error)))
+}
+
+/**
+ * Whether this body names a spent usage window at all — by number or by wording.
+ *
+ * The number is the service's own verdict and the wording is the fallback, which is
+ * the order the two are asked in rather than two copies of the same question: a
+ * Chinese sentence has no code, and a bare code has no sentence, so both arms exist
+ * and both answer into the ONE verdict {@link quotaExhaustedFailure} builds.
+ */
+function namesSpentWindow(bodyText: string): boolean {
+  return namesUsageLimitStatusCode(bodyText) || matchesAny(bodyText, QUOTA_EXHAUSTED_PATTERNS)
+}
+
+/**
  * Whether this refusal is a spent window rather than a refused credential.
  *
- * The same raw-body match classifyMinimaxFailure performs, hoisted into its own name
+ * The same raw-body test classifyMinimaxFailure performs, hoisted into its own name
  * because it now answers a second question too, and one the status alone cannot: is
  * renewing this credential worth attempting at all (see the recovery loop in this
  * adapter). A verdict the pool acts on and a verdict the user is shown have to be the
- * SAME verdict, so both read this one predicate against the same table rather than
+ * SAME verdict, so both read this one predicate — {@link namesSpentWindow}, which asks
+ * the upstream usage-limit code first and the wording table second — rather than
  * keeping two copies of the condition that could drift apart.
  *
  * The status is inside on purpose. 403 is the only status a spent window arrives as,
@@ -246,7 +361,7 @@ function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
  * into it would send a working token off to be renewed.
  */
 function isSpentWindow403(status: number, bodyText: string): boolean {
-  return status === 403 && matchesAny(bodyText, QUOTA_EXHAUSTED_PATTERNS)
+  return status === 403 && namesSpentWindow(bodyText)
 }
 
 /**
@@ -316,7 +431,10 @@ export function classifyMinimaxFailure(status: number, bodyText: string): Minima
   }
 
   if (status === 429) {
-    if (matchesAny(bodyText, QUOTA_EXHAUSTED_PATTERNS)) {
+    // Same question as the 403 above and the same answer, from the same predicate:
+    // the upstream usage-limit CODE first, the wording table as the fallback for the
+    // envelopes that carry a sentence and no number.
+    if (namesSpentWindow(bodyText)) {
       return quotaExhaustedFailure(detail)
     }
     // Back-pressure: every account behind the same plan would be refused the same
@@ -562,6 +680,61 @@ async function uploadOversizedMedia(
       return changed ? { ...message, content } : message
     }),
   }
+}
+
+/**
+ * The error code for "the model this request named is not the model that answered".
+ *
+ * Deliberately NOT in `MINIMAX_CODE_RETRY_POLICY_CONFIG.retryableCodes` (which is
+ * RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT), so the harness never retries it:
+ * re-issuing the SAME body against the SAME substitution answers the SAME wrong
+ * model, and each attempt is billed at the substituted model's price. The failure
+ * is terminal until a human changes the model, which is exactly what the retry
+ * policy is keyed on.
+ *
+ * Exported so a test (and any later caller) can name it instead of copying the
+ * literal, the same way NO_ANSWER_PHRASE is.
+ */
+export const MODEL_SUBSTITUTED_CODE = 'MODEL_SUBSTITUTED'
+
+/**
+ * Whether the id the service ANSWERED with is the id the request asked for.
+ *
+ * Case-insensitive equality is the whole rule: this line already accepts a case
+ * variant of an id as the same model (the catalog and the stored settings compare
+ * ids the same way), and nothing else is normalized. A REQUESTED id is whatever
+ * the catalog spells; an ANSWERED id is whatever the service spells; the two
+ * differing only in letter case is not a substitution, and refusing to answer over
+ * one would fail a turn that is being served the model it asked for.
+ *
+ * Everything else is a mismatch: a different id, a retired spelling, an id the
+ * service does not route at all. That is the substitution this check exists for.
+ */
+function sameModelId(requested: string, answered: string): boolean {
+  return requested.trim().toLowerCase() === answered.trim().toLowerCase()
+}
+
+/**
+ * The failure a substituted model gets, worded so the reader can act on it.
+ *
+ * Both ids are named because both are the facts: the catalogue-facing id the user
+ * selected, and the one the service actually ran. Neither is a secret — they are
+ * model names — and nothing else from the request (token, account, body) goes in.
+ * The remedy is spelled out because the check cannot pick one for the user: the
+ * substitution means this id no longer routes, so the selection has to change.
+ */
+function modelSubstitutedFailure(requested: string, answered: string): LlmError {
+  return new LlmError(
+    PROVIDER_NAME + ' answered with a different model than the one requested: '
+    + 'the request asked for "' + requested + '", and the service answered as "' + answered + '". '
+    + 'This endpoint does not reject a model id it cannot route — it silently runs another one — '
+    + 'so the id "' + requested + '" is not being served and the request was billed at the '
+    + 'answering model\'s rate instead. Nothing was retried, because the same request would be '
+    + 'answered the same way. Pick a different model for this line, or check whether '
+    + '"' + requested + '" is still offered, then send the request again.',
+    MODEL_SUBSTITUTED_CODE,
+    { status: 200 },
+  )
 }
 
 export class MinimaxCodeAdapter extends LlmAdapter {
@@ -880,6 +1053,24 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // exactly as it did before any pool existed.
     let accountId: string | undefined
     let response: Response
+    /**
+     * The model id this request actually PUT ON THE WIRE — the comparison basis for
+     * the served-model check further down.
+     *
+     * Read back out of the serialized body rather than taken from `options.model`
+     * directly: `buildMinimaxRequest` writes `model: options.model` today, so the two
+     * agree, but the thing that must be compared is by definition what left the
+     * socket. The catalogue's renames (model-catalog.ts:269-282) never touch it —
+     * "The WIRE still carries whatever id the caller asked for ... Only the LOOKUP is
+     * renamed" — so a retired spelling is compared AS the retired spelling, which is
+     * exactly the id the service substitutes a different model for.
+     *
+     * Hoisted here because the body is built (and rebuilt, by the 401 recovery)
+     * inside the rotation loop while the stream is read after it. A body carrying no
+     * model string leaves it undefined and turns the check off for the round — the
+     * same "nothing to verify" outcome as a header with no model in it.
+     */
+    let wireModel: string | undefined
     //
     // Hoisted beside them because BOTH account-level failure paths below need it —
     // the non-2xx response and the in-band error event — and the second is inside
@@ -933,6 +1124,15 @@ export class MinimaxCodeAdapter extends LlmAdapter {
         signal,
       )
 
+      /**
+       * Build one body, and record the model id it carries as this round's
+       * comparison basis.
+       *
+       * The two are set together because they cannot disagree: `wireModel` is read
+       * back out of the body that is about to be sent, so the id the answered-model
+       * check compares against is by construction the id on the wire — not the
+       * catalogue name, not a renamed lookup.
+       */
       const buildBodyForOwner = (owner: string): string => {
         const built = buildMinimaxRequest(
           { ...withUploads, maxTokens: effectiveMax },
@@ -945,7 +1145,9 @@ export class MinimaxCodeAdapter extends LlmAdapter {
             route: PROVIDER_ID,
           },
         )
-        return assertRequestBodyFits(built)
+        const serialized = assertRequestBodyFits(built)
+        wireModel = typeof built.model === 'string' ? built.model : undefined
+        return serialized
       }
 
       let body = buildBodyForOwner(authOwner)
@@ -1155,6 +1357,41 @@ export class MinimaxCodeAdapter extends LlmAdapter {
      * in-band reclassification below pre-output only.
      */
     let outputStarted = false
+    /**
+     * Whether the served-model check has already been decided for this stream.
+     *
+     * One decision per stream, made on the round `message_start` arrives: the field
+     * cannot change afterwards, and re-deciding on every later frame would re-run two
+     * string comparisons per SSE line for an answer that is already known.
+     */
+    let answeredVerified = false
+    /**
+     * Compare the model the service ANSWERED with against the one this request put on
+     * the wire, and refuse the turn when they differ.
+     *
+     * Measured fact this exists for (docs/minimax-code-probe-capabilities.md): the
+     * /messages endpoint answers 200 with a normal stream for a model id it cannot
+     * route, substituting a default model — `modelless-probe-id-zzz` and the empty
+     * string both came back as MiniMax-M3, and an unlisted but real id came back as
+     * itself. There is no "unknown model" error payload to react to, so this header is
+     * the ONLY evidence that the id the user selected is not the id that ran, which on
+     * this line is a wallet problem (M3 at max effort costs about 3x the thinking and
+     * 4x the latency of the cheaper tiers).
+     *
+     * Two "no verdict" cases, both deliberate: a stream whose header carries no model
+     * (undefined) and a request whose body carried none (also undefined). Neither is
+     * evidence of substitution, and failing a turn over an unverifiable one would turn
+     * a protocol variation into an outage.
+     */
+    const verifyAnsweredModel = (): void => {
+      if (answeredVerified) return
+      const answered = state.answeredModel
+      if (answered === undefined) return
+      answeredVerified = true
+      if (wireModel === undefined) return
+      if (sameModelId(wireModel, answered)) return
+      throw modelSubstitutedFailure(wireModel, answered)
+    }
 
     try {
       try {
@@ -1173,7 +1410,16 @@ export class MinimaxCodeAdapter extends LlmAdapter {
             // by a newline, and a pure comment frame (": ping", ": keep-alive") is
             // exactly the case the display-layer timer used to misread as silence.
             activity?.pulse()
-            for (const chunk of processMinimaxStreamLine(line, state)) {
+            const chunks = processMinimaxStreamLine(line, state)
+            // Checked BEFORE any chunk is yielded, and that ordering is the whole
+            // guarantee: `message_start` is the first event of the stream, so on the
+            // round where it arrives this loop has produced no content chunk yet, and
+            // the throw below therefore lands before the first `block-start` — which
+            // in turn precedes every text, reasoning and tool-call delta. Nothing
+            // reaches the caller, so nothing has to be taken back and no retry can
+            // duplicate output.
+            verifyAnsweredModel()
+            for (const chunk of chunks) {
               outputStarted = true
               yield chunk
             }
@@ -1184,7 +1430,12 @@ export class MinimaxCodeAdapter extends LlmAdapter {
         buffer += decoder.decode()
         if (buffer.trim() !== '') {
           for (const line of buffer.split('\n')) {
-            for (const chunk of processMinimaxStreamLine(line, state)) {
+            const tailChunks = processMinimaxStreamLine(line, state)
+            // The same check as the loop above, for the same reason: the tail holds a
+            // frame the connection closed without a trailing newline, and that frame
+            // is not assumed to be harmless just because it arrived last.
+            verifyAnsweredModel()
+            for (const chunk of tailChunks) {
               outputStarted = true
               yield chunk
             }
