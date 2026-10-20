@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+:root{--dsw-alias-label-primary:#1c1c1e;--dsw-alias-label-secondary:#6b6b70;--dsw-alias-label-tertiary:#9a9aa0;--dsw-alias-border-l2:rgba(0,0,0,.10);--dsw-alias-bg-layer-1:rgba(127,127,127,.12);--dsw-alias-bg-layer-2:rgba(127,127,127,.08);--dsw-alias-button-info-fill:#397ee8;--dsw-alias-label-danger:#d94b4b;--dsw-alias-interactive-bg-hover:rgba(127,127,127,.14)}
+.dark{--dsw-alias-label-primary:#ececee;--dsw-alias-label-secondary:#a8a8ae;--dsw-alias-label-tertiary:#76767c;--dsw-alias-border-l2:rgba(255,255,255,.12);--dsw-alias-bg-layer-1:rgba(255,255,255,.06);--dsw-alias-bg-layer-2:rgba(255,255,255,.08);--dsw-alias-interactive-bg-hover:rgba(255,255,255,.12)}
+body{margin:0;background:#f6f6f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;padding:24px}
+.dark body{background:#161617}
+.wrap{display:flex;gap:24px;align-items:flex-start}
+.col{flex:1;min-width:0}
+h4{margin:0 0 12px;font-size:12px;font-weight:500;color:var(--dsw-alias-label-tertiary)}
+.card{background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.dark .card{background:#1e1e20;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.dshm-video-tool{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;flex-direction:column;gap:8px;margin:4px 0 4px 4px;max-width:520px;min-width:0;padding:10px 12px}
+.dshm-video-head{align-items:center;display:flex;font-size:13px;gap:8px;min-width:0}
+.dshm-video-dot{background:var(--dsw-alias-button-info-fill,#397ee8);border-radius:50%;display:inline-block;flex:none;height:8px;width:8px}
+.dshm-video-tool[data-state=error] .dshm-video-dot{background:var(--dsw-alias-label-danger,#d94b4b)}
+.dshm-video-title{font-weight:500;white-space:nowrap}
+.dshm-video-summary{color:var(--dsw-alias-label-tertiary);font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshm-video-stage{aspect-ratio:16/9;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;min-width:0;overflow:hidden;position:relative;width:100%}
+.dshm-video-stage[data-state=empty]{align-items:center;border-style:dashed;border-width:1px;justify-content:center;padding:16px}
+.dshm-video-el{background:var(--dsw-alias-bg-layer-1,#000);display:block;height:100%;object-fit:contain;width:100%}
+.dshm-video-placeholder{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5;text-align:center}
+.dshm-video-placeholder[data-tone=danger]{color:var(--dsw-alias-label-danger,#d94b4b)}
+.dshm-video-foot{align-items:center;display:flex;font-size:11px;gap:10px;justify-content:space-between;min-width:0}
+.dshm-video-path{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:0 1 auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.35;min-width:0;overflow:hidden;padding:3px 7px;text-align:left;text-overflow:ellipsis;white-space:nowrap}
+.dshm-video-path:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dshm-video-meta{color:var(--dsw-alias-label-tertiary);display:flex;flex:none;font-size:11px;font-variant-numeric:tabular-nums;gap:8px;white-space:nowrap}
+.spacer{height:14px}
+.cap{color:var(--dsw-alias-label-tertiary);font-size:11px;margin:10px 0 0}
+</style></head><body>
+<div class="wrap">
+  <div class="col">
+    <h4>浅色</h4>
+    <div class="card">
+      <div class="dshm-video-tool" data-state="running">
+        <div class="dshm-video-head"><span class="dshm-video-dot"></span><span class="dshm-video-title">正在生成视频</span><span class="dshm-video-summary">一只猫在雨中的霓虹街道上奔跑，镜头缓慢推进</span></div>
+        <div class="dshm-video-stage" data-state="empty"><span class="dshm-video-placeholder">上游还在生成，完成后会自动出现</span></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="dshm-video-tool" data-state="done">
+        <div class="dshm-video-head"><span class="dshm-video-dot"></span><span class="dshm-video-title">视频已生成</span><span class="dshm-video-summary">一只猫在雨中的霓虹街道上奔跑</span></div>
+        <div class="dshm-video-stage" data-state="ready"><video class="dshm-video-el" src="data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjAAAAAAAAAzZtb292AAAAAAAAAAAAAAAAAAAAbQAAAHYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAhmcmVlAAAC1G1kYXQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==" controls preload="metadata"></video></div>
+        <div class="dshm-video-foot">
+          <button type="button" class="dshm-video-path">minimax-videos/clip.mp4</button>
+          <span class="dshm-video-meta"><span>4.0 s</span><span>12.9 KB</span></span>
+        </div>
+        <p class="cap">「已完成」这一格里放的是探针真实生成的那段纯黑视频（1.5 KB 合成 mp4）</p>
+      </div>
+      <div class="spacer"></div>
+      <div class="dshm-video-tool" data-state="error">
+        <div class="dshm-video-head"><span class="dshm-video-dot"></span><span class="dshm-video-title">视频生成失败</span></div>
+        <div class="dshm-video-stage" data-state="empty"><span class="dshm-video-placeholder" data-tone="danger">这次生成没有成功，没有可播放的文件</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="col dark">
+    <h4>深色</h4>
+    <div class="card">
+      <div class="dshm-video-tool" data-state="running">
+        <div class="dshm-video-head"><span class="dshm-video-dot"></span><span class="dshm-video-title">正在生成视频</span><span class="dshm-video-summary">一只猫在雨中的霓虹街道上奔跑，镜头缓慢推进</span></div>
+        <div class="dshm-video-stage" data-state="empty"><span class="dshm-video-placeholder">上游还在生成，完成后会自动出现</span></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="dshm-video-tool" data-state="done">
+        <div class="dshm-video-head"><span class="dshm-video-dot"></span><span class="dshm-video-title">视频已生成</span><span class="dshm-video-summary">一只猫在雨中的霓虹街道上奔跑</span></div>
+        <div class="dshm-video-stage" data-state="ready"><video class="dshm-video-el" src="data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjAAAAAAAAAzZtb292AAAAAAAAAAAAAAAAAAAAbQAAAHYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAhmcmVlAAAC1G1kYXQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==" controls preload="metadata"></video></div>
+        <div class="dshm-video-foot">
+          <button type="button" class="dshm-video-path">minimax-videos/clip.mp4</button>
+          <span class="dshm-video-meta"><span>4.0 s</span><span>12.9 KB</span></span>
+        </div>
+        <p class="cap">「已完成」这一格里放的是探针真实生成的那段纯黑视频（1.5 KB 合成 mp4）</p>
+      </div>
+      <div class="spacer"></div>
+      <div class="dshm-video-tool" data-state="error">
+        <div class="dshm-video-head"><span class="dshm-video-dot"></span><span class="dshm-video-title">视频生成失败</span></div>
+        <div class="dshm-video-stage" data-state="empty"><span class="dshm-video-placeholder" data-tone="danger">这次生成没有成功，没有可播放的文件</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>
