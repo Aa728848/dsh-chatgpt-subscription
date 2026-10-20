@@ -53,7 +53,9 @@
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-model-selection",
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-tool"
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
       ],
       "platform": "web"
     }
@@ -68,6 +70,8 @@
     "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.2-alpha.5 || ^0.1.2-rc.1 || ^0.1.2 || ^0.1.3 || ^0.1.4 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.1.2-alpha.5 || ^0.1.2-rc.1 || ^0.1.2 || ^0.1.3 || ^0.1.4 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.2-alpha.5 || ^0.1.2-rc.1 || ^0.1.2 || ^0.1.3 || ^0.1.4 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": "^0.1.5-alpha.2 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar-right": "^0.1.5-alpha.1 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.2-alpha.5 || ^0.1.2-rc.1 || ^0.1.2 || ^0.1.3 || ^0.1.4 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-tool": "^0.1.2-alpha.5 || ^0.1.2-rc.1 || ^0.1.2 || ^0.1.3 || ^0.1.4 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
     "@deepseek-ai/dsh-host-webserver": "^0.1.2-alpha.5 || ^0.1.2-rc.1 || ^0.1.2 || ^0.1.3 || ^0.1.4 || ^0.1.5-rc.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.1 || ^0.2.0-rc.2 || 0.2.1-alpha.5 || ^0.2.1-rc.1",
@@ -89,6 +93,8 @@
     "@deepseek-ai/dsh-client-ui-model-selection": "^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-settings": "^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": "^0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar-right": "^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.1-rc.1",
     "@deepseek-ai/dsh-client-ui-tool": "^0.2.1-rc.1",
     "@deepseek-ai/dsh-host-webserver": "^0.2.1-rc.1",
@@ -130,7 +136,7 @@
     "prepack": "npm run build",
     "release": "node .dsh/skills/release-plugin/scripts/release.mjs",
     "test": "vitest run",
-    "typecheck": "tsc -b --pretty false && tsc -p test/tsconfig.json --pretty false"
+    "typecheck": "tsc -b --pretty false && tsc -p test/tsconfig.json --pretty false && tsc -p scripts/tsconfig.json --pretty false"
   },
   "dependencies": {
     "mermaid": "^11.17.2",
