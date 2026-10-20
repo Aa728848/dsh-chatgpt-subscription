@@ -66,7 +66,7 @@ The model table in `src/host/cline-pass/types.ts` is a literal transcription of 
 ## 4. Verification
 
 - `npm run typecheck`: host + client + tests, 0 errors.
-- `npx vitest run`: 261 files / 4142 passed, 9 skipped (baseline before this line: 253 / 4074).
+- `npx vitest run`: 267 files / 4390 passed, 9 skipped (rebased onto upstream 0.31.0; this line adds 8 test files / 68 cases).
 - `npm run build` and `npm pack --dry-run`: `lib/types/host/cline-pass/*` present in the tarball.
 - New tests:
   - `test/cline-pass-protocol.test.ts` — attempt expansion, both spellings, aliases, adherence, exclusions, channel recovery.

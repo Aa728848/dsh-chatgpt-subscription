@@ -9,7 +9,7 @@
   - **传输**：对"请求尚未发出"的 TLS/connect 失败自动重试 2 次，并在最终错误里说明"未到达网关、钉住未生效"；实测本机到 `api.cline.bot` 的 Node TLS 握手会间歇失败（同一时刻 curl 正常、IPv6 不可达），这与上游钉住无关。流中段断流不重试，避免重复计费。
   - **安全**：OAuth access / refresh token 与 API Key 只进平台加密凭据库（DPAPI / Keychain / Secret Service），响应与日志均不出现原文；登录流程 DTO 逐字段投影；所有写路由同源校验；错误信息最多回显上游一行原因。
   - **文档与品牌**：新增 [`docs/cline-pass-line-plan.md`](docs/cline-pass-line-plan.md)（每个常量的出处、决策、**未验证清单**）；README 增加线路章节与路由表；协议证据矩阵增加一行；hub 卡片改用 Cline 官方标记（`assets/branding/logos/cline-icon-white.svg` + 官方 app icon 的 `#343B42` 底砖），不再用字母占位。
-  - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **261 文件 / 4142 passed**（基线 253 / 4074，新增 8 个测试文件、68 例）；`npm run build` 与 `npm pack --dry-run` 通过，`lib/types/host/cline-pass/*` 已进包。
+  - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **267 文件 / 4390 passed**（在 upstream 0.31.0 之上新增 8 个测试文件、68 例）；`npm run build` 与 `npm pack --dry-run` 通过，`lib/types/host/cline-pass/*` 已进包。
 
 ## 0.31.0 - 2026-10-20
 - **[minimax-code] 视频生成现在能带素材、选比例：首/尾帧、参考图/视频/音频、任意比例与 AIGC 水印**
