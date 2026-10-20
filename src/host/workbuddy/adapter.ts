@@ -696,14 +696,16 @@ export function classifyFailure(
 
   if (code === 11128) {
     // The code is overloaded upstream and the message says which reading is
-    // meant: "conversation id missing" is the gateway refusing the request's
-    // channel verification, while the system-first wording is the history
-    // check. Naming only the latter sends the reader down the wrong path.
-    const channelRejected = /conversation id/i.test(detail)
+    // meant: "conversation id missing" or "Illegal API invocation from an
+    // unapproved channel" is the gateway refusing the request's channel or
+    // client-fingerprint verification, while the system-first wording is the
+    // history check. Naming only the latter sends the reader down the wrong path.
+    const channelRejected = /conversation id|unapproved channel/i.test(detail)
     return new LlmError(
       channelRejected
         ? `${PROVIDER_NAME} blocked the request at its channel check (11128): the gateway did not `
           + 'accept it as an official client request. This is a plugin-side gap, not an account problem.'
+          + `${detail ? ` ${detail}` : ''}`
         : `${PROVIDER_NAME} rejected the message history: the conversation must open with a system prompt.`
           + `${detail ? ` ${detail}` : ''}`,
       'PROVIDER_ERROR',

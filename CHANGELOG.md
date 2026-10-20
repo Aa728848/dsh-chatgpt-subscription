@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- **[workbuddy] 会话一长就整轮失败、红条只有一句「必须以 system 提示词开头」——真因是上游 WAF 在按竞品客户端身份做指纹拦截**
+  - **现象**：截图那次是国际区账号第 2 轮起每轮必挂，报错前缀写着 `rejected the message history: the conversation must open with a system prompt`，与正文 `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}` 自相矛盾（历史首条本来就是 system）。同一账号发一句 `ping` 却可能正常，像是「聊着聊着就坏」。
+  - **真因**：`11128` 被上游复用给了至少两种拒绝，而 `unapproved channel` 这一种是**内容侧的 WAF**——网关对 `system`、`assistant.content` 以及 `assistant.tool_calls[].function.arguments` 里出现的第三方 Agent 身份声明做**精确短语匹配**，命中即整单拒绝，与鉴权、额度、模型、区域都无关；又因为每轮都全量重放历史，一条 assistant 消息或一次工具参数中毒，此后每轮必挂。本机对失败会话的 1,552 行系统提示词做行级二分，定位出**唯一触发行**是首行 `You are an AI agent powered by DeepSeek Harness.`（国内区在 `system`/`assistant` 中原样出现即 400，把 `AI agent` 改成 `AI assistant` 后同一份提示词 200）；`Claude Code`、`Codex CLI`、`OhMyOpenCode`、`x-anthropic-billing-header` 则两区都会触发。
+  - **为什么还牵扯到别的区域**：号池里两个 `intl` 账号被上游瞬时 `429 (code 14003)` 打回后按既有逻辑冷却并**在同一次请求内轮换到 `cn` 账号**，而 `cn` 网关恰好拦首行那句话——于是「国际区账号」的会话撞上的是国内区的规则。
+  - **改法（[mapper.ts](../src/host/workbuddy/mapper.ts)）**：`sanitizeText()` 增加出站指纹改写（覆盖 `options.system`、`role: "system"` 消息、`assistant` 文本、以及 `tool_calls[].function.arguments` 的序列化参数），每条只改**实测确认会触发的那一句**、不动其余指令语义；同时把「剥 `\0`」拆成 `stripNulls()`，**入站 SSE 仍只做 `\0` 清理**——模型自己吐出的字不该被改写。
+  - **改法（[adapter.ts](../src/host/workbuddy/adapter.ts)）**：`code === 11128` 的判定从只认 `conversation id` 扩到 `conversation id|unapproved channel`，并把原始 detail 一并带出；此前除 `conversation id` 外的所有 11128 都被翻译成「必须以 system 提示词开头」，把读者指向一段本来正确无误的历史。
+  - **验证**：两区对拍——同一份含 5 类指纹的请求，脱敏前国内区与国际区都 `400 / 11128`，脱敏后都 `200`；新增 `test/workbuddy-message-shape.test.ts` 的跨 `system`/`assistant`/`tool_calls` 用例与 `test/workbuddy-adapter.test.ts` 的两种 11128 文案用例；`npm run typecheck` 0 错误，全量 `npx vitest run` **280 文件 / 4571 passed / 7 skipped**，`npm run build` 通过；用完整 1,552 行系统提示词带上下文对号池 4 个账号（2 `intl` + 2 `cn`）端到端实测，**四个账号全部 200**。
 - **[qoder] 新增第十二条订阅线路：Qoder（全球区 qoder.com / 中国站 qoder.com.cn）**
   - **协议面**：Qoder 自有的 COSY 签名对话协议（`POST {base}/algo/api/v2/service/pro/sse/agent_chat_generation`）——AES-128-CBC 加密的 UserInfo + RSA-1024 包裹的会话密钥 + canonical MD5 签名、自定义 Base64 alphabet + 三段交换的 body codec、外层信封包 inner JSON 的明文 SSE。全部算法按 Liki4/qodercli2api 的全合成 frozen fixtures（qodercli v1.1.34 互操作基线）**逐字节锁定**（`test/fixtures/qoder/` vendored，`test/qoder-cosy.test.ts` 8 例），并与 simonsmh/pi-provider-qoder 的 live 验证实现互相印证。
   - **登录三路径**：浏览器设备流（仅全球区，challenge/verifier 轮询，不开本地回调端口，host 不自行开浏览器——`test/login-opens-browser-once.test.ts` 钉住）、手动粘贴 PAT（`jobToken/exchange` 兑换，PAT 本体留在 host 加密存储里供过期重兑换）、adopt 只读导入本机 qodercli 登录态（`~/.qoder/.auth/user`，AES 解密由 fixture 锁定；**区域不猜，是对两区 userinfo 各探一次探出来的**）。

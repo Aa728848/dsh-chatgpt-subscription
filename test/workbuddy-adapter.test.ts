@@ -198,16 +198,18 @@ describe('WorkBuddy failure classification', () => {
     expect(error.message).toMatch(/system prompt/i)
   })
 
-  it('reads the same code as the channel check when the gateway says the conversation id is missing', () => {
+  it('reads the same code as the channel check when the gateway says the conversation id is missing or channel is unapproved', () => {
     // The code is overloaded upstream. Reporting the system-prompt reading here
     // would send the reader looking at a message history that is already correct.
-    const error = classifyFailure(
-      400,
+    for (const detail of [
       '{"code":11128,"msg":"conversation id missing","displayTips":{"en":"This call failed channel verification"}}',
-    )
-    expect(error.code).toBe('PROVIDER_ERROR')
-    expect(error.message).toMatch(/channel/i)
-    expect(error.message).not.toMatch(/system prompt/i)
+      '{"code":11128,"msg":"Illegal API invocation from an unapproved channel","displayTips":{"en":"This call failed channel verification"}}',
+    ]) {
+      const error = classifyFailure(400, detail)
+      expect(error.code).toBe('PROVIDER_ERROR')
+      expect(error.message).toMatch(/channel/i)
+      expect(error.message).not.toMatch(/system prompt/i)
+    }
   })
 
   it('classifies 5xx and the upstream vendor code as a retryable server failure', () => {

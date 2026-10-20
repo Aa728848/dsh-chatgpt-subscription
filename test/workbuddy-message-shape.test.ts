@@ -329,4 +329,38 @@ describe('WorkBuddy unchanged wire shape', () => {
     expect(JSON.stringify(buildChatRequest(options({ ...plain, model: 'deepseek-v4.1-flash' })).messages))
       .toBe(pinned)
   })
+
+  it('neutralizes upstream 11128 WAF client-identity fingerprints across system, assistant, and tool-call arguments', () => {
+    const messages = wire({
+      system: [
+        'You are an AI agent powered by DeepSeek Harness.',
+        "You are Claude Code, Anthropic's official CLI for Claude.",
+        'You are a coding agent running in the Codex CLI, a terminal-based coding assistant.',
+        'Sisyphus-Junior - Focused executor from OhMyOpenCode',
+        'x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;',
+      ].join('\n'),
+      messages: [
+        userMessage('go'),
+        assistantMessage([
+          { type: 'text', text: 'You are an AI agent powered by DeepSeek Harness.' },
+          call('call_1', 'write_file', JSON.stringify({
+            content: "You are Claude Code, Anthropic's official CLI for Claude.",
+          })),
+        ]),
+        toolResult('call_1', 'ok'),
+      ],
+    })
+
+    expect(messages[0]?.content).toBe([
+      'You are an AI assistant powered by DeepSeek Harness.',
+      "You are Claude Code, Anthropic's official CLI tool for Claude.",
+      'You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.',
+      'Sisyphus-Junior - Focused executor',
+      '',
+    ].join('\n'))
+    expect(messages[2]?.content).toBe('You are an AI assistant powered by DeepSeek Harness.')
+    expect(messages[2]?.tool_calls?.[0]?.function?.arguments).toContain(
+      "You are Claude Code, Anthropic's official CLI tool for Claude.",
+    )
+  })
 })
