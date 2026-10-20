@@ -141,6 +141,7 @@
     "typecheck": "tsc -b --pretty false && tsc -p test/tsconfig.json --pretty false && tsc -p scripts/tsconfig.json --pretty false"
   },
   "dependencies": {
+    "katex": "^0.18.7",
     "mermaid": "^11.17.2",
     "undici": "^8.10.0",
     "zod": "4.4.3"
