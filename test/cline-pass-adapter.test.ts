@@ -58,7 +58,7 @@ function adapterWith(fetchFn: typeof fetch): ClinePassAdapter {
   // The test's fetch is the whole transport; the engine's own seam is replaced
   // through the adapter's engine, so one double answers both probe and request.
   ;(engine as unknown as { options: { fetchFn: typeof fetch } }).options.fetchFn = fetchFn
-  return new ClinePassAdapter(engine, store, settings, pool, { fetchFn })
+  return new ClinePassAdapter(engine, store, settings, pool)
 }
 
 describe('ClinePassAdapter', () => {
@@ -92,6 +92,48 @@ describe('ClinePassAdapter', () => {
     // The history names both attempts, so a failover is visible after the fact.
     const history = store.readHistory(5)
     expect(history[0]?.attempts).toEqual(['baseten', 'deepseek'])
+  })
+
+  it('retries a failure that happened before the request was sent', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      if (calls <= 2) {
+        throw new TypeError('fetch failed: Client network socket disconnected before secure TLS connection was established')
+      }
+      return new Response(SSE_OK, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const chunks = []
+    for await (const chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    } as never)) chunks.push(chunk)
+    expect(calls).toBe(3)
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta')).toHaveLength(1)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('does not retry an ambiguous mid-request reset', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      throw new TypeError('fetch failed: other side closed')
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    await expect((async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'cline-pass',
+        model: MODEL,
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as never)) { /* no chunk */ }
+    })()).rejects.toBeTruthy()
+    expect(calls).toBe(1)
   })
 
   it('rotates to another account when the first one rejects its key', async () => {

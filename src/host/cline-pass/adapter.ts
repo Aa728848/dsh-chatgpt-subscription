@@ -22,6 +22,7 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import { setTimeout as sleep } from 'node:timers/promises'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { normalizeGenerateOptions, type GenerateOptions } from '../common/llm-compat.ts'
 import {
@@ -71,8 +72,20 @@ const RETRY_POLICY = resolveRetryPolicy({
 /** How long one attempt may wait for response headers before it is abandoned. */
 const ATTEMPT_TIMEOUT_MS = 180_000
 
+/**
+ * Retries for a failure that happened BEFORE the request was sent.
+ *
+ * A TLS handshake to the gateway can fail intermittently on a network path
+ * where curl succeeds (the pinned upstream is never contacted: the body with
+ * `provider.only` has not left the host). Retrying is safe because no HTTP
+ * request reached the server, and it turns a one-in-two TLS failure into a rare
+ * one. Errors after headers, or ambiguously mid-request, are never retried here.
+ */
+const TRANSPORT_RETRIES = 2
+const TRANSPORT_RETRY_BASE_MS = 400
+
 export interface ClinePassAdapterOptions {
-  fetchFn?: typeof fetch
+  /** Durable attachment service, for request images. */
   attachments?: AttachmentImageReader
 }
 
@@ -262,15 +275,37 @@ export class ClinePassAdapter extends LlmAdapter {
       const attemptLabel = attempt.upstream ?? '(auto)'
       try {
         const pinned = injectPrefs(body as unknown as Record<string, unknown>, meta, attempt)
-        let response: Response
-        try {
-          response = await this.engine.openStream(account, pinned, withAttemptTimeout(upstream))
-        } catch (error) {
-          if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: error })
-          const note = errorChain(error)
+        let response: Response | undefined
+        let transportError: unknown
+        for (let transportTry = 0; transportTry <= TRANSPORT_RETRIES; transportTry += 1) {
+          try {
+            response = await this.engine.openStream(account, pinned, withAttemptTimeout(upstream))
+            break
+          } catch (error) {
+            if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: error })
+            transportError = error
+            // Only a failure that happened before the request was sent is safe
+            // to replay. A mid-request reset might already have been served.
+            if (transportTry < TRANSPORT_RETRIES && isPreConnectionFailure(error)) {
+              try {
+                await sleep(TRANSPORT_RETRY_BASE_MS * (transportTry + 1), undefined, { signal: upstream })
+              } catch (waitError) {
+                if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: waitError })
+                throw waitError
+              }
+              continue
+            }
+            break
+          }
+        }
+        if (response === undefined) {
+          const note = errorChain(transportError)
+          const hint = isPreConnectionFailure(transportError)
+            ? ` The request never reached the gateway, so the pinned upstream was not contacted: ${account.baseURL} failed during TLS/connect. Check the network, proxy or TUN, or set a custom proxy in the plugin.`
+            : ''
           trace.push(attemptLabel)
           this.store.learnUpstream(options.model, attempt.upstream, 'unknown', note, Date.now() - attemptStarted)
-          lastError = new LlmError(note, 'TRANSPORT', { cause: error })
+          lastError = new LlmError(note + hint, 'TRANSPORT', { cause: transportError })
           continue
         }
         if (!response.ok) {
@@ -445,6 +480,18 @@ export class ClinePassAdapter extends LlmAdapter {
 /** A caller signal combined with the attempt's header deadline. */
 function withAttemptTimeout(signal: AbortSignal): AbortSignal {
   return AbortSignal.any([signal, AbortSignal.timeout(ATTEMPT_TIMEOUT_MS)])
+}
+
+/**
+ * Whether a transport failure happened before any request was sent.
+ *
+ * Deliberately narrow: `other side closed`/`ECONNRESET` can happen after the
+ * body was accepted, and replaying those is not safe. These are the handshake
+ * and connect failures only.
+ */
+function isPreConnectionFailure(error: unknown): boolean {
+  const text = errorChain(error)
+  return /Client network socket disconnected before secure TLS connection|Connect Timeout Error|UND_ERR_CONNECT_TIMEOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text)
 }
 
 /** Password-style redaction is not needed here; the chain is transport-only. */

@@ -92,7 +92,6 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
     modelSettings,
     accountPool,
     {
-      fetchFn: options.fetchFn,
       ...(options.attachments === undefined ? {} : { attachments: options.attachments as AttachmentImageReader }),
     },
   )

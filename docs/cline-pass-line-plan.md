@@ -47,6 +47,7 @@ Not ported, deliberately:
 | Cline token register | `POST https://api.cline.bot/api/v1/auth/register` `{accessToken, refreshToken}` | same |
 | Cline token refresh | `POST https://api.cline.bot/api/v1/auth/refresh` `{refreshToken, grantType:'refresh_token'}` | same |
 | OAuth bearer | `workos:<accessToken>` | Cline repo `sdk/packages/core/src/auth/provider-auth-registry.ts` `formatClineApiKey`; sent as `Bearer` by `sdk/packages/llms/src/providers/vendors/cline.ts` |
+| Hub card mark | Official Cline glyph, `viewBox="0 0 113 113"`, `#343B42` tile | Cline repo `assets/branding/logos/cline-icon-white.svg` and `assets/branding/cline-app-icon.svg` (commit `ca7402c`, 2026-10-20); the white variant's single fill is `currentColor` |
 
 The model table in `src/host/cline-pass/types.ts` is a literal transcription of `lib/catalog.js` `MODEL_CATALOG` (15 entries, with per-model context window, output ceiling, modalities and effort ladder). No number was guessed during the port; a model the table does not know is adopted from the live scan with conservative metadata.
 
@@ -59,12 +60,13 @@ The model table in `src/host/cline-pass/types.ts` is a literal transcription of 
 5. **Tools are off by default**, matching the source's shipped default. The setting is read when the line starts; the card says a restart is required because a registered tool cannot be withdrawn from a live conversation.
 6. **Sign-in is OAuth, not a pasted key.** The Cline clients use WorkOS device authorization for `cline` / `cline-pass`; this line follows that flow and stores the rotating refresh token in the pool, so a session survives a host restart and refreshes before expiry. The standalone plugin's static key remains a secondary, documented fallback. Polling is card-driven and host-throttled to WorkOS's advertised interval; a cancelled flow can never persist late-arriving credentials.
 7. **Refresh failures are classified, not collapsed.** `invalid_grant` (and 400/401/403 with invalid-token wording) marks the account `invalid` and asks for a new sign-in; a network or 5xx failure is wrapped as `TRANSPORT` and leaves the account in the pool. This is the same distinction Cline's own `getValidClineCredentials` makes.
-8. **No sibling line was edited.** Shared additions are appends only: one id in `CONTROLLED_PROVIDERS`, one in `DIAGNOSTIC_PROVIDERS`, one hub entry, one brand entry, one locale/style/slot registration, and one item in each existing count assertion.
+8. **A pre-request transport failure is retried twice.** Host-to-gateway TLS handshakes can fail intermittently on a path where curl succeeds; the request body (and therefore the pin) has not left the host, so replaying is safe. The retry is deliberately limited to connect/handshake errors; a mid-stream reset is never replayed. The error text says the pin was not contacted, because blaming the pin for a TLS failure is misleading.
+9. **No sibling line was edited.** Shared additions are appends only: one id in `CONTROLLED_PROVIDERS`, one in `DIAGNOSTIC_PROVIDERS`, one hub entry, one brand entry, one locale/style/slot registration, and one item in each existing count assertion.
 
 ## 4. Verification
 
 - `npm run typecheck`: host + client + tests, 0 errors.
-- `npx vitest run`: 261 files / 4139 passed, 9 skipped (baseline before this line: 253 / 4074).
+- `npx vitest run`: 261 files / 4142 passed, 9 skipped (baseline before this line: 253 / 4074).
 - `npm run build` and `npm pack --dry-run`: `lib/types/host/cline-pass/*` present in the tarball.
 - New tests:
   - `test/cline-pass-protocol.test.ts` — attempt expansion, both spellings, aliases, adherence, exclusions, channel recovery.

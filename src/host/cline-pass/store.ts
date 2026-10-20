@@ -140,7 +140,29 @@ export function createClinePassStore({ historyLimit = DEFAULT_HISTORY_LIMIT }: {
     /** Append one request-history row (newest first, bounded). */
     record(entry: ClinePassHistoryInput): void {
       historyRevision += 1
-      history.unshift({ ts: Date.now(), ...entry } as ClinePassHistoryEntry)
+      // A caller records only the facts it has (a transport failure has no
+      // usage frame and no serving channel). Normalize here so every reader gets
+      // the full row shape instead of a field that is present on some rows and
+      // absent on others.
+      const row: ClinePassHistoryEntry = {
+        ts: Date.now(),
+        model: entry.model,
+        provider: entry.provider ?? '',
+        canonical: entry.canonical ?? '',
+        account: entry.account ?? '',
+        ms: entry.ms ?? 0,
+        ttfb: entry.ttfb ?? 0,
+        ttft: entry.ttft ?? 0,
+        stream: entry.stream === true,
+        effort: entry.effort ?? '',
+        usage: entry.usage ?? null,
+        error: entry.error ?? '',
+        attempts: entry.attempts ?? [],
+        adherence: entry.adherence ?? '',
+        warnings: entry.warnings ?? [],
+        ...(entry.code === undefined ? {} : { code: entry.code }),
+      }
+      history.unshift(row)
       if (history.length > limit) history.length = limit
     },
     /** Adopt a changed retention budget from the settings file. */
