@@ -1,6 +1,19 @@
 # Changelog
 
 ## Unreleased
+- **[client] 新增俄语语言包（`ru`）：插件自己的设置界面可以选择俄语，未翻译的键回落到英文**
+  - **背景**：`@deepseek-ai/dsh-client-locale` 的字典注册有两种形态——整本双语 `register(ns, { zh, en })`（内置两种语言都必须给全），以及给语言包用的单语言 `register(ns, locale, dict)`；语言本身由 `addLanguage({ id, label, fallback })` 加进目录。俄语走第二条路，**不是**给每个命名空间加第三列。
+  - **改法**：新增 `src/client/locales-ru/`——13 份字典（每条线路一份，共 1440 个键，键集与 `zh`/`en` 逐一对应）+ `account-pool.ts`（12 条线路共用的账号卡片文案）+ `index.ts` 的 `installRussianLocale(ctx)`：先 `addLanguage({ id: 'ru', label: 'Русский', fallback: 'en' })`，再按命名空间逐个 `register(ns, 'ru', dict)`，每个注册各持一个 disposer。客户端入口 `apply` 调用一次。
+  - **回落语义**：声明的 `fallback` 是 `en`，所以本包漏掉的键读作英文而不是键名；宿主自身的界面只有 `zh`/`en`，因此「插件俄语 + 宿主英文」是预期形态，DSH 本体要俄语是另一个语言包的事。
+  - **旧宿主兼容**：`addLanguage` 是语言包那半边契约才有的接口。没有它的宿主/测试替身直接跳过整个包（此时语言根本不可选，字典也就无从取用），而不是让客户端插件在缺一个 seam 的服务上崩掉。
+  - **测试**：新增 `test/russian-locale.test.tsx`（41 例）——13 个命名空间 × 三条断言（键集与 `zh`/`en` 完全一致、每个 `{placeholder}` 逐字保留、值里没有中日韩字符且不是整份照抄英文），另外钉住 `installRussianLocale` 注册一次语言 + 每条线路一次字典（disposer 数量 = 13 + 1），以及同一张 Claude 卡在 `ru` 下渲染俄语且不回落到 `zh`。
+  - **验证**：`npm run typecheck` 0 错误；`npm run build` 通过；全量 `npx vitest run` 4436 passed / 4 failed——同样是与本改动无关的 4 条 `Intl` 用例（俄语默认 locale 下 `1,200` → `1 200`、日期变俄文），在改动前就红。
+- **[client] 除 ChatGPT 外，所有供应商详情页在英文界面下仍是中文——卡片直接渲染自己的 `zh` 字典，从不问本地化服务**
+  - **现象**：设置 › 订阅服务里点开 Claude（以及 Antigravity / Command Code / Kimi Code / MiniMax Code / GLM / Ollama / Step Code / Cline Pass / Qoder / OpenDesign），整页文案都是中文，即使界面语言是 English；只有 ChatGPT 那张卡是英文。每个命名空间的 `dictionaries` 里 `en` 早就齐全，且键集与 `zh` 完全一致，缺的从来不是翻译。
+  - **根因**：12 处 `const t = zh`（`claude/ClaudeSection.tsx`、`claude/useClaudeSection.ts`、`antigravity`、`command-code`、`glm-coding-plan`、`kimi-code` 两处、`ollama`、`cline-pass`、`step-code`、`qoder`、`opendesign`）把字典对象在渲染时直接捕获；`ctx.locale` 一次都没被读过。ChatGPT 卡片能用英文，只因为它渲染的是 hub 注入的 `t` 座位。
+  - **改法**：新增 `src/client/common/line-locale.ts`——`installLineLocale(ctx.locale)` 在客户端入口调用一次；`useLineDict(ns, zh)` 返回该命名空间的**字典形状视图**：属性访问不变（`t.signIn`）、键集与回退字典一致，但每个值在渲染时经 `ctx.locale.bind(ns)` 读取，并订阅 locale revision，所以切换语言会重渲染当前卡片而无需重挂载。没有 locale 服务时（单测裸挂卡片、只提供 `register`/`bind` 的旧宿主）退回回退字典，即改动前行为。
+  - **顺带修掉的冻结**：模块级捕获 `zh` 的四处表（Kimi 的思考档位、cline-pass 与 opendesign 的服务端错误前缀、GLM 的区域名、`qoderModelRowHint`）改为使用渲染期解析出的字典，否则这几行会一直说中文。
+  - **验证**：新增 `test/line-locale.test.tsx`（4 例）——同一张 Claude 卡在 `en` 下渲染英文、在 `zh` 下渲染中文、切换语言不重挂载即可换文案，并钉住 zh/en 键集一致这条前提；`npm run typecheck` 0 错误；`npm run build` 通过；全量 `npx vitest run` 4395 passed / 4 failed，与改动前（`git stash` 对照）完全相同的 4 条——它们断言英文 `Intl` 格式（`1,200`、`12:03`），在俄语默认 locale 的机器上必然失败，与本改动无关。
 
 ## 0.35.0 - 2026-10-21
 - **【BREAKING】移除 WorkBuddy（CodeBuddy 订阅）线路及其全部残留**

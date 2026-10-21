@@ -1,0 +1,105 @@
+/**
+ * Russian wording for the OpenDesign namespace.
+ *
+ * Key set and order follow the `zh` object key for key; the meaning is taken
+ * from `en`. Shared account-pool labels come from `account-pool.ts`; only the
+ * keys this line overrides are repeated here.
+ */
+import type { OpenDesignLocaleKey } from '../opendesign/locales.ts'
+import { accountPoolRu } from './account-pool.ts'
+
+export const dictionary: Record<OpenDesignLocaleKey, string> = {
+  ...accountPoolRu,
+  relogin: 'Добавить заново',
+  needsRelogin: 'API-ключ недействителен',
+  addAccount: 'Добавить API-ключ',
+  noAccounts: 'Аккаунтов пока нет. Нажмите «Добавить API-ключ» и вставьте ключ, созданный в консоли OpenDesign Cloud.',
+
+  title: 'OpenDesign',
+  pageDesc: 'Подключите подписку OpenDesign: создайте API-ключ в консоли Cloud и вставьте его сюда, чтобы вызывать её шлюз моделей за счёт кредитов тарифа. Аккаунты в пуле ротируются автоматически.',
+
+  login: 'Войти в аккаунт OpenDesign',
+  loggingIn: 'Вход…',
+  loginHint: 'Откройте страницу активации в браузере и подтвердите код ниже; аккаунт сам добавится в пул, вставлять ключ не нужно.',
+  loginCode: 'Код авторизации',
+  loginOpen: 'Открыть страницу активации',
+  loginWaiting: 'Ждём подтверждения в браузере…',
+  loginCancel: 'Отменить вход',
+  loginIdle: 'В этом процессе вход ещё не начинался.',
+  loginHaveAccounts: 'В пуле уже {count} рабочих аккаунтов.',
+  loginComplete: 'Вход выполнен: {account}',
+  loginCompleteNoAccount: 'Прошлый вход завершился, но рабочих аккаунтов в пуле сейчас нет.',
+  loginFailed: 'Вход не выполнен: {detail}',
+  useApiKey: 'Добавить API-ключ',
+  oauthAccount: 'Вход через браузер',
+  apiKeyAccount: 'API-ключ',
+
+  routeOwned: 'Маршрут моделей обслуживает этот плагин',
+  routeConflict: 'Маршрут моделей уже занят другим провайдером: {detail}',
+  error: 'Действие не выполнено: {detail}',
+  saved: 'Сохранено',
+
+  keySection: 'Добавить API-ключ',
+  keyHint: 'Создайте ключ в консоли OpenDesign Cloud (рабочее пространство → API Keys) и вставьте его сюда.',
+  keyConsoleLink: 'Открыть консоль OpenDesign Cloud',
+  keyPlaceholder: 'Вставьте API-ключ OpenDesign',
+  keyAliasLabel: 'Метка (необязательно)',
+  keyAliasPlaceholder: 'например, основной, резервный',
+  keyAliasHint: 'Шлюз не сообщает, какому аккаунту принадлежит ключ, поэтому ключи различают по метке.',
+  keyBaseUrlLabel: 'Свой адрес шлюза (необязательно)',
+  keyBaseUrlPlaceholder: 'по умолчанию: https://amr-link.open-design.ai/v1',
+  keySave: 'Добавить',
+  keySaving: 'Добавление…',
+  keyTest: 'Проверить ключ',
+  cancel: 'Отмена',
+  keyTesting: 'Проверка…',
+  keyTestOk: 'Ключ работает ({ms} мс, моделей доступно: {count})',
+  keyTestFailed: 'Ключ отклонён: {detail}',
+  testSavedKey: 'Проверить',
+
+  modelsSection: 'Модели',
+  modelsHint: 'Список начинается со встроенной таблицы; добавление ключа один раз синхронизирует живой каталог, доступный этому ключу, а кнопка обновления синхронизирует его снова. Неотмеченные модели в выборе моделей не появляются.',
+  modelChecklistCount: 'Выбрано {count} из {total}',
+  selectAll: 'Выбрать все',
+  unselectAll: 'Снять все',
+  catalogSync: 'Обновить каталог',
+  catalogSyncing: 'Обновление…',
+  catalogNeverSynced: 'Живой каталог ещё не синхронизирован, показана встроенная таблица. Добавление ключа синхронизирует его один раз автоматически; кнопка обновления — ещё раз.',
+  catalogSyncedNote: 'Живой каталог синхронизирован: моделей {count}.',
+  noModels: 'Доступных моделей нет.',
+  pricingNote: 'Цены — официальный публичный прайс (доллары США за 1 млн токенов, вход / выход).',
+
+  contextSection: 'Контекстные окна',
+  contextHint: 'Производитель не публикует контекстные окна по моделям, поэтому по умолчанию берётся 128k; здесь любую модель можно поправить. Неверное значение не сохраняется, а показывается ошибкой; восстановление сбрасывает переопределение.',
+  tokens: 'токены',
+  contextSave: 'Сохранить',
+  contextOverridden: 'переопределено',
+  contextSaving: 'Сохранение',
+  contextReset: 'Вернуть значение по умолчанию',
+  contextResetAll: 'Вернуть все значения',
+  contextEmpty: 'Отметьте хотя бы одну модель, чтобы настроить её контекстное окно.',
+
+  advancedSection: 'Дополнительно',
+  baseURL: 'Шлюз по умолчанию',
+  defaultContextWindow: 'Контекстное окно по умолчанию',
+  defaultMaxTokens: 'Бюджет вывода по умолчанию',
+  maxConcurrentRequests: 'Потоков на аккаунт (0 — без ограничения)',
+  streamIdleTimeoutMs: 'Таймаут простоя потока (мс)',
+  saveSettings: 'Сохранить настройки',
+  savingSettings: 'Сохранение…',
+
+  limitsSection: 'Примечания',
+  usageSection: 'Баланс кошелька',
+  usageHint: 'Баланс принадлежит аккаунту. Аккаунты, вошедшие через браузер, несут контрольный ключ, и баланс читается здесь; у вставленного API-ключа его нет — смотрите баланс в консоли. Обновление отправляет по одному запросу на каждый читаемый OAuth-аккаунт.',
+  usageRefresh: 'Обновить баланс',
+  usageRefreshing: 'Обновление…',
+  usageEmpty: 'Баланс ещё не читался.',
+  usageUnavailable: 'Не удалось прочитать баланс: {detail}',
+  usageBalance: 'Баланс ${amount}',
+  usageReadAt: 'Прочитано {time}',
+
+  limitKey: 'API-ключи хранятся в системном хранилище учётных данных; карточка никогда не показывает сам ключ.',
+  limitGateway: 'Запросы обслуживает шлюз OpenDesign, он же выбирает фактического провайдера.',
+  limitRoute: 'Маршрут занимается по provider id: если opendesign уже обслуживает другой плагин, эта карточка по-прежнему настраивает линию, но запросы выполняет тот провайдер.',
+  limitQuota: 'Баланс читается только у аккаунтов, вошедших через браузер; для вставленного API-ключа расход смотрите в консоли OpenDesign Cloud.',
+}
