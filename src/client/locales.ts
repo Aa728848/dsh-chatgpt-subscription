@@ -153,6 +153,28 @@ export const zh = {
   hubSwitchOn: '启用 {name}',
   hubSwitchOff: '停用 {name}',
   hubCardLabel: '{name}，{annotation}',
+  // The overview's update control, at the right end of the hint line. The button
+  // says what it will do next; the small line under it says what the last answer
+  // meant. {version} is the published version and {current} the one running.
+  hubUpdateCheck: '检测更新',
+  hubUpdateChecking: '检测中…',
+  hubUpdateApply: '更新到 v{version}',
+  hubUpdateApplying: '更新中…',
+  hubUpdateUpToDate: '已是最新版本 {version}',
+  hubUpdateLatestWithUnknownCurrent: '最新版本 {version}，当前版本未知',
+  hubUpdateAvailable: '有新版本 {version}，当前 {current}',
+  hubUpdateInstalled: '已安装 v{version}，重启宿主后生效',
+  hubUpdateInstalledReplaced: '已移除旧版并安装 v{version}，重启宿主后生效',
+  hubUpdateInstalledLive: '已安装 v{version}，当前已生效，无需重启',
+  hubUpdateInstalledReplacedLive: '已移除旧版并安装 v{version}，当前已生效，无需重启',
+  hubUpdateFailedRestored: '更新失败，已恢复 v{version}',
+  hubUpdateFailedRollbackFailed: '更新失败，且旧版本也没能重新装回来——插件可能已不可用',
+  hubUpdateFailedRollbackSkipped: '更新失败，且无法自动恢复原版本——插件可能已被移除',
+  hubUpdateDevelopmentInstall: '有新版本 {version}；当前是本地链接安装，无法自动更新',
+  hubUpdatePluginManagerMissing: '有新版本 {version}；宿主未提供 pluginManager，无法自动更新',
+  hubUpdateManualOnly: '有新版本 {version}；当前安装方式无法自动更新',
+  hubUpdateCheckFailed: '检测失败：无法连接 npm 源，请检查网络或代理',
+  hubUpdateCommandLabel: '手动更新命令',
   // The import button that sits beside 登录 in the account pool's login row.
   // Two labels and nothing else: the button says what it does, the row it sits in
   // says where it goes, and the Claude section's own import button is worded the
@@ -318,6 +340,28 @@ export const en: Record<keyof typeof zh, string> = {
   hubSwitchOn: 'Enable {name}',
   hubSwitchOff: 'Disable {name}',
   hubCardLabel: '{name}, {annotation}',
+  // The overview's update control, at the right end of the hint line. The button
+  // says what it will do next; the small line under it says what the last answer
+  // meant. {version} is the published version and {current} the one running.
+  hubUpdateCheck: 'Check for updates',
+  hubUpdateChecking: 'Checking…',
+  hubUpdateApply: 'Update to v{version}',
+  hubUpdateApplying: 'Updating…',
+  hubUpdateUpToDate: 'Up to date ({version})',
+  hubUpdateLatestWithUnknownCurrent: 'Latest is {version}; the running version is unknown',
+  hubUpdateAvailable: '{version} is available — you have {current}',
+  hubUpdateInstalled: 'Installed v{version} — restart the Host to apply it',
+  hubUpdateInstalledReplaced: 'Removed the old copy and installed v{version} — restart the Host to apply it',
+  hubUpdateInstalledLive: 'Installed v{version} — active now, no restart needed',
+  hubUpdateInstalledReplacedLive: 'Removed the old copy and installed v{version} — active now, no restart needed',
+  hubUpdateFailedRestored: 'Update failed; v{version} was restored',
+  hubUpdateFailedRollbackFailed: 'Update failed, and the previous version could not be reinstalled — the plugin may no longer be available',
+  hubUpdateFailedRollbackSkipped: 'Update failed, and the previous version could not be restored — the plugin may have been removed',
+  hubUpdateDevelopmentInstall: '{version} is available, but this copy is a local link and cannot update itself',
+  hubUpdatePluginManagerMissing: '{version} is available, but this Host exposes no pluginManager to install it',
+  hubUpdateManualOnly: '{version} is available, but this install cannot update itself',
+  hubUpdateCheckFailed: 'Check failed: the npm registry could not be reached — check the network or proxy',
+  hubUpdateCommandLabel: 'Manual update command',
   // The import button that sits beside 登录 in the account pool's login row.
   // Two labels and nothing else: the button says what it does, the row it sits in
   // says where it goes, and the Claude section's own import button is worded the

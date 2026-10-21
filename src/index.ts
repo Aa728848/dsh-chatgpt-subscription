@@ -28,6 +28,7 @@ import { createDiagnosticFetch } from './host/common/request-diagnostics.ts'
 import { registerPreferenceStore } from './host/preferences.ts'
 import { ResponsesClient } from './host/responses-client.ts'
 import { registerHubOverviewRoutes, type HubSummarySource } from './host/hub-overview.ts'
+import { registerUpdateRoutes } from './host/update-check.ts'
 import { registerRoutes } from './host/routes.ts'
 import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
@@ -1152,6 +1153,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       openDesignLine.hubSource,
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
+    // 概览页右端的「检测更新 / 更新插件」。注册在这里而不是 routes.ts：它不属于任何
+    // 一条订阅线路，而是整页的一个事实。fetch 用宿主的代理 fetch——本部署走本地代理，
+    // 裸 fetch 在这里连不上 npm 源；一键安装走宿主的 pluginManager（pnpm），
+    // 服务不可用时路由自己降级为「只给命令」。
+    const disposeUpdateRoutes = registerUpdateRoutes(ctx, { fetchFn: proxyFetch })
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
     // gemini-3.1-flash-image is served as a tool, not a chat model: the harness
@@ -1252,6 +1258,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeAdapter()
       disposeRoutes()
       disposeHubOverview()
+      disposeUpdateRoutes()
       disposeAntigravityRoutes()
       antigravityClaim.dispose()
       disposeOllamaRoutes()

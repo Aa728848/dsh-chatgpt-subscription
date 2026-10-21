@@ -36,6 +36,23 @@ const CSS = `
 .dsh-hub-skeleton span{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border-radius:5px;display:block;height:12px}
 .dsh-hub-skeleton .dsh-hub-skel-name{width:120px;margin-bottom:6px}
 .dsh-hub-skeleton .dsh-hub-skel-note{width:180px;height:10px}
+/* The hint line and the update control share one row: hint left, control
+   right. The row owns the bottom gap the paragraph used to carry, so the cards
+   below start exactly where they did before. */
+.dsh-hub-hintrow{align-items:flex-start;display:flex;flex-wrap:wrap;gap:10px 18px;justify-content:space-between;margin:0 0 14px}
+.dsh-hub-hintrow .dsh-hub-hint{margin:0}
+.dsh-hub-update{align-items:flex-end;display:flex;flex:none;flex-direction:column;gap:3px;min-width:0}
+.dsh-hub-update-button{background:transparent;border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:6px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;font:inherit;font-size:12px;font-weight:550;line-height:1.2;padding:5px 10px;white-space:nowrap}
+.dsh-hub-update-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-primary,#141413)}
+.dsh-hub-update-button:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
+.dsh-hub-update-button:disabled{cursor:default;opacity:.5}
+/* 11px, like the cards' annotation line, so the control reads as a note about
+   the page rather than a second call to action. */
+.dsh-hub-update-state{color:var(--dsw-alias-label-tertiary,#8f8d84);font-size:11px;line-height:1.45;max-width:280px;text-align:right}
+.dsh-hub-update-state.dsh-hub-note-danger{color:var(--dsw-alias-label-danger,#d94b4b)}
+/* The escape hatch when the button cannot act. user-select:all makes one click
+   take the whole command, which is the only clipboard the page needs. */
+.dsh-hub-update-command{border-radius:4px;color:var(--dsw-alias-label-tertiary,#8f8d84);display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;max-width:280px;overflow-wrap:anywhere;text-align:right;user-select:all}
 .dsh-hub-backbar{align-items:center;display:flex;gap:10px;margin-bottom:14px;min-height:32px}
 .dsh-hub-back{align-items:center;background:transparent;border:none;border-radius:6px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;display:inline-flex;font:inherit;font-size:13px;font-weight:550;gap:2px;padding:5px 8px 5px 2px}
 .dsh-hub-back:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-primary,#141413)}

@@ -19,6 +19,7 @@ import { formatPoolLabel } from '../common/account-pool-labels.ts'
 import type { NS } from '../locales.ts'
 import { BrandTile } from './brand-icons.tsx'
 import { HUB_PROVIDERS, type HubProviderDescriptor } from './providers.tsx'
+import { UpdateCheck } from './UpdateCheck.tsx'
 
 export type HubTranslate = PropsLocale<typeof NS>['t']
 
@@ -98,7 +99,14 @@ export function HubOverview({ t, onOpen }: Props): React.JSX.Element {
   }, [load])
 
   return <div className="dsh-hub-overview">
-    <p className="dsh-hub-hint">{t('hubOverviewHint')}</p>
+    {/* The update control sits at the right end of the hint line rather than in a
+        card of its own: it is a page-level fact about the plugin, not one of the
+        provider lines the cards below enumerate, and a card would rank it beside
+        them. The row keeps the hint on the left exactly as it was. */}
+    <div className="dsh-hub-hintrow">
+      <p className="dsh-hub-hint">{t('hubOverviewHint')}</p>
+      <UpdateCheck t={t} />
+    </div>
     {loadError !== null && summaries === null ? (
       <div className="dsh-codex-errorbar" role="alert">
         <span>{loadError}</span>
