@@ -14,12 +14,12 @@
 - [使用](#使用)
 - [推理塌缩守卫（熔断，默认关闭）](#推理塌缩守卫熔断默认关闭)
 - [Command Code 线路](#command-code-线路)
-- [WorkBuddy 线路](#workbuddy-线路)
 - [Claude（订阅）线路](#claude订阅线路)
 - [GLM（ZCode 账号）线路](#glmzcode-账号线路)
 - [Step Code（Step Plan 订阅）线路](#step-codestep-plan-订阅线路)
 - [Cline Pass（OAuth 订阅）线路](#cline-passoauth-订阅线路)
 - [Qoder（订阅）线路](#qoder订阅线路)
+- [OpenDesign（订阅，API Key / 浏览器授权）线路](#opendesign订阅api-key--浏览器授权线路)
 - [子代理模型授权](#子代理模型授权0215-起032-起强制指定模型)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [本机登录](#本机登录)
@@ -37,7 +37,6 @@
 | `codex-chatgpt` | ChatGPT（Plus / Pro / Business…） | Responses | 浏览器 OAuth（localhost:1455 回调），或导入本机 Codex CLI 登录 | **实时** `/backend-api/codex/models` |
 | `kimi-code` | Kimi 会员 | Anthropic Messages | **设备码**（RFC 8628） | 实时 `/v1/models` + 本地兜底 |
 | `command-code` | Command Code | Anthropic / OpenAI 双轨 | 浏览器 OAuth 或粘贴 API Key | 实时 `/provider/v1/models` |
-| `workbuddy-subscription` | 腾讯 WorkBuddy / CodeBuddy | OpenAI 兼容（仅流式） | 扫描桌面端凭据或官方浏览器授权 | 实时 `/v3/config` |
 | `claude-subscription` | Claude Pro / Max | Anthropic Messages | 手动粘贴 / loopback 回调 | 实时 `/v1/models` + 本地兜底 |
 | `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | **复用桌面端登录态** 或设备码 | **硬编码**（见下） |
 | `antigravity` | Google Antigravity | Gemini | Google OAuth | 内置表 |
@@ -45,6 +44,7 @@
 | `step-code` | StepFun Step Plan 订阅（国区 api.stepfun.com / 国际区 api.stepfun.ai）或开放平台 API Key | OpenAI Chat Completions | **云端轮询**浏览器授权（不开本地回调端口）/ 手工粘贴 Platform API Key / 只读导入本机 `~/.stepcode/auth.json` | **实时运行时发现**（随包表刻意为空） |
 | `cline-pass` | Cline Pass | OpenAI Chat Completions | **浏览器设备码 OAuth**（WorkOS，账号入池、自动续期）；API Key 仅作兼容回退 | 随包表兜底 + 官方 `recommended-models` / models.dev / 上游网关目录补全 |
 | `qoder` | Qoder 订阅（全球区 qoder.com / 中国站 qoder.com.cn） | Qoder 自有（COSY 签名 + 信封 SSE） | **浏览器设备流**（仅全球区）/ 手工粘贴 PAT（两区）/ 只读导入本机 `~/.qoder/.auth/user` | **实时运行时发现**（COSY 签名 GET）+ 随包能力兜底表 |
+| `opendesign` | OpenDesign 订阅（Go / Plus / Pro / Max） | OpenAI Chat Completions | **浏览器设备授权**（AMR 设备流，签发控制 Key + 运行时 Key）；粘贴 Cloud 控制台的 API Key 作回退 | 随包表兜底（源自官方公开价目）+ 实时 `GET /v1/models` |
 
 > **只有 minimax-code 是硬编码目录，而且是有意的**：该端点的 `GET /v1/models` **未对订阅流量开放**（返回 503 `direct_route_not_configured`），任何「实时目录」都只会是一个必然失败的请求。其取值转录自本机官方客户端的 `config.yaml`。
 >
@@ -142,42 +142,6 @@
 - **`dynamically_loaded_tools`（仅 K3）已实现**：K3 接受**消息级工具声明**（`messages[].tools`），可在会话中途用「无 `content` 字段的 system 消息」注入完整工具定义。官方把「保持顶层 `tools` 字节稳定」列为该特性的目的之一——中途修改/删除已发出的声明会使缓存从该点起失效，而在末尾追加不影响已缓存前缀，所以这是提升缓存命中的正道。声明按请求重发（服务端不保留），且仅在模型声明该能力时发送；
 - 额度卡片区分 **5 小时 / 7 天 / 月度（会员共享池）/ 月度（Kimi Code 池）** 四个窗口并显示重置时间，另可显示加油包余额；设置页为「设置 → 订阅服务 → Kimi Code」标签页，对话输入框右侧有该线路的额度胶囊。
 
-### WorkBuddy 线路
-
-- 注册 `workbuddy-subscription` Provider，接入腾讯 **WorkBuddy / CodeBuddy 订阅**。
-  - 该 ID 特意与用户常用的自定义 OpenAI 兼容线路 `workbuddy` 分开，安装插件不会覆盖或隐藏原有自定义 API；
-  - 可直接扫描 CodeBuddy 桌面端已登录的 `*.info` 凭据，也可从设置页选择国区/国际区并通过官方浏览器授权添加账号；
-  - 插件添加的凭据保存在系统加密存储中（Windows DPAPI / macOS Keychain / Linux Secret Service），token 只留在 Host 进程内，不进入浏览器；
-- **多账号号池，与其它线路同源**：走共享内核 `AccountPoolCore` 并复用同一张设置卡片，具备顺序耗尽 / 轮询调度 / 粘性会话、429 冷却换号、账号级失效保留、设为主账号与备注；
-  - **账号身份是两层**：不可变的 `internalId` 是唯一路由键，`identityKeys`（uuid / email / 派生 seed）是**只增不换**的别名集，同一账号再次登录会**合并**而不是产生幽灵账号；
-  - **唯一例外的诚实说明**：当服务端既没返回 uuid 也没返回 email 时无法自动识别同一账号，卡片会把该账号标注出来并提供**手动合并**；
-  - **顺序耗尽 / 轮询调度 / 粘性会话**三种策略；
-  - 429 冷却换号、401/403 账号级失效（保留账号、重新登录即恢复）；
-  - 设为主账号、账号备注、清除冷却与重新登录；
-  - 桌面端扫描到的账号与插件内添加的账号**在同一号池里参与调度**；
-- **桌面账号归 IDE 所有，不可删除**：卡片只对插件自己添加的账号显示「删除」，桌面账号显示「隐藏 / 恢复」——隐藏只把它移出本插件的调度，绝不改动 CodeBuddy 的凭据文件；号池层同样拒绝删除桌面账号（双保险，均有测试）；
-- **续期后原子写回**原凭据文件（只改 `auth` 块），以免桌面端掉线——桌面账号的 refresh token 会轮换，若只写进插件自己的加密存储，IDE 手里就只剩一个已作废的 token。同一进程内的并发调用**共用一次刷新**，且不会二次刷新；
-- 上游是 OpenAI 兼容的 `POST {backend}/v2/chat/completions`，但有两条硬约束：**只支持流式**（`stream:false` → 400 `code 11101`），且**首条消息必须是 system**（否则国际区返回 400 `code 11128`）。因此请求构造器始终发送 `stream:true`，并在调用方没给系统提示时补一条中性的，避免手搓的一次性请求踩到这条规则；
-- **区域是凭据属性，不是请求属性**：`*.workbuddy.ai` / `*.codebuddy.ai` 走国际区 `https://www.<apex>`，其余走国区 `https://copilot.tencent.com`；
-  - 账号卡片逐条标注每个账号的**国区 / 国际区**并允许选择；切换后，模型目录、额度和后续对话都使用该账号；历史凭据快照按账号身份自动去重；
-  - 插件托管账号可真正删除；桌面扫描账号只能从本插件隐藏/恢复，永不删除 CodeBuddy 的原文件；
-  - 两区模型清单不同，把模型发到不服务它的区会返回 400 `code 11102`，因此模型选择器**按当前账号区域过滤**；
-- **模型目录取自网关自己的 `/v3/config`**（官方 CLI 启动时读的就是它）：每个模型的真实上下文上限、输出上限、是否接受图片、以及可用的思考档位都在这里，不做任何按模型名猜测。`/v1/models` 在这条线路上是 404，所以此前只能靠内置表——现在内置表只作为离线兜底，且是**从真实 `/v3/config` 转录**的（早期手写版本把 `glm-5.3`、`kimi-k3` 的窗口猜成 200K/256K，实际都是 1M）；
-- **目录不是服务全集，模型必须实测**：实测国际区的 `gpt-6-sol`、`gpt-6-luna`、`gemini-3.8-flash` 都能正常返回 200，却**完全不在 `/v3/config` 里**（该接口只公布 `gpt-6-astra`）。而联网时目录会**整体替换**内置表，只加进内置表等于加了个看不见的模型——所以这三个单列一份实测表（`UNPUBLISHED_MODELS`），并合并进实时目录。存在性、思考档位、图片支持是**打接口量出来的**（`gpt-6-sol` 只收 `low`/`medium`/`high`/`xhigh`/`max`，`minimal` 被拒）；上下文与输出上限**继承同族已公布的兄弟模型**（`gpt-6-astra` / `gemini-3.5-flash`），因为网关对这些 id 不公布任何信息，而 `max_tokens` 也不受窗口约束（连 `gpt-6-astra` 自己都接受远超其公布上限的值），无从反推。三者仍可在设置页逐模型覆盖；判定一个 id 是否存在只有一条路——直接问：`code 11102` 是没有这个模型，`code 11133` 是模型存在但参数被拒；
-- 目录同时区分**默认服务的上下文长度**与**模型上限**（如 `deepseek-v4.1-flash` 默认 300K、最大 1M）。本线路不发送显式长度参数，所以 DSH 的压缩与溢出判断按**默认服务长度**计算，不会让请求越过后端实际接受的窗口；
-- 思考档位**逐模型**取目录声明的档位表，回落顺序为「调用方显式指定 → 用户配置的默认档 → 目录为该模型声明的默认档」；
-  - **最后一档不能省**：上游在请求不带 `reasoning_effort` 时返回**空的 `reasoning_content`**（实测同一提示：不带字段 0 字符，带字段 130–215 字符）——不发送等于静默丢弃模型的思考；
-  - 目录里的单个 `effort` 字段是**默认值**，既不是完整档位表也不是「只此一档」：实测这类模型接受 `low` / `high` / `max`（其余取值被上游收敛到最近档），因此使用这三档的标准表（`WORKBUDDY_STANDARD_EFFORTS`）；显式声明了 `supportedEfforts` 的模型则原样采信；
-  - 目录给出的**默认档也可能落在档位表之外**（`minimax-m3`、`kimi-k3`、国区 `glm-5.3` 都报 `medium` 却只有三档），这种值会收敛到最近档——否则默认档被判不支持而丢弃，退化成上一条的空 `reasoning_content`；
-  - 不在该模型档位集合内的取值会被**忽略而不是发出去**（上游对不支持的档位返回 `code 11150`）；
-- **瞬时失败按错误类别重试**（`src/host/workbuddy/adapter.ts`）：
-  - 上游 5xx 与 `code 11134` 归为 `SERVER` 并走有界退避（最多 3 次，1.5s 起步、15s 上限、0.2 抖动）；
-  - 额度耗尽（429 / `code 6004` / `code 14003`，其中 6004 的正文带重置时刻）归为 `RATE_LIMIT` 并遵守 `Retry-After`；
-  - 401/403、跨区模型、不可用图片、历史形状错误都**不重试**，并给出可操作的提示（换模型 / 换图片 / 重新登录桌面端）；
-- **流中断即失败**：上游必然以 `finish_reason` 或 `data: [DONE]` 结束，两者都缺失说明连接中途断开，此时抛出错误而不是把半截文本当成完整回答；
-- 额度来自 `/billing/meter/get-user-resource`，卡片展示套餐名、本周期已用/上限、剩余额度与重置时间；设置页为「设置 → 订阅服务 → WorkBuddy」标签页，对话输入框右侧有该线路的额度胶囊。
-
-
 ### MiniMax Code（编程订阅）线路
 
 - 注册 `minimax-code` Provider，接入 **MiniMax Code 编程订阅**。它与 MiniMax 开放平台（按量计费的 API Key）是两套互不通用的系统：
@@ -189,7 +153,7 @@
   - **不创建、不删除、不等待** `auth.lock`（那是桌面端自己的刷新锁，第二方碰它就可能打断官方客户端的刷新）；
 - **两种登录来源互不覆盖**：
   - 桌面端的 `auth.json` 归桌面端所有，本插件只读；若本机没有它，才在设置页用 **RFC 8628 设备码流程**（PKCE S256）登录，凭据存到本插件自己的 `$DSH_HOME/storages/minimax-code-credentials.json`；
-  - **登出只作用于本插件自己那份凭据**：桌面端的登录态会被续期写回（只读优先），但**绝不撤销、绝不删除**，登出请求对它会被拒绝并说明原因（撤销它等于把你从正在跑的 MiniMax Code 里踢下线），这也是 WorkBuddy 对桌面账号的既有做法；
+  - **登出只作用于本插件自己那份凭据**：桌面端的登录态会被续期写回（只读优先），但**绝不撤销、绝不删除**，登出请求对它会被拒绝并说明原因（撤销它等于把你从正在跑的 MiniMax Code 里踢下线）；
 - **区域是凭据属性**：`cn` 用 `account.minimax.cn` / `agent.minimax.cn`，`global` 用对应 `.io` 域名。两个区域的目录都会被探测，因此国际区账号不会因为没有国区文件而「未登录」；读回凭据时**以记录里存的区域为准**，而不是拿默认区域覆盖它；
 - **模型目录是硬编码的，而且必须硬编码**（`src/host/minimax-code/model-catalog.ts`）：
   - 该端点的 `GET /v1/models` **未对订阅流量开放**（503 `"{\"errorCode\":50115,\"errorReason\":\"direct_route_not_configured\"}"`），所以任何「实时目录」都只会是一个必然失败的请求；
@@ -678,69 +642,6 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 与 `codex-chatgpt` 线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
 
-## WorkBuddy 线路
-
-1. 重启 DSH，让 Host 加载本插件；
-2. 打开 **设置 → WorkBuddy**；
-3. 二选一：登录 CodeBuddy 桌面端后点「重新扫描」，或点「账号管理」右上角的「添加国区账号 / 添加国际区账号」并在官方页面完成浏览器授权；
-4. 在「账号管理」里选择账号（每条都标注国区 / 国际区），再按需勾选模型、设置默认思考深度与上下文窗口。
-
-`workbuddy-subscription` 会像其他 Provider 一样出现在 DSH 模型选择器中，并可与名为 `workbuddy` 的自定义 API 同时存在。**上下文窗口**默认取网关 `/v3/config` 声明的**默认服务长度**，可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 `1M` / `300K` / `200000` 等写法）；**默认思考深度**逐模型生效，选项由当前账号各模型**实际声明的档位**取并集（仅部分模型支持的档位会标注数量），档位不在该模型集合内时不会被发送。
-
-**消耗倍率**也来自同一份目录：每个模型在 `/v3/config` 里带一个 `credits` 字符串（如 `x0.79 credits`、`x6.67`），就是该模型消耗套餐额度的相对速率——官方 CodeBuddy 客户端把它渲染成 `6.67x` 显示在模型下拉里。设置页的模型行末尾会以 `倍率 0.79x` 的形式给出，**两区不一致时把两区都写出来**（实测国际区 `deepseek-v4.1-flash` 是 `0.00`、国区是 `0.11`），账号区域已知时只显示该区的值，**绝不拿另一个区的数字顶上**（跨区调用本来就会被上游以 400 `code 11102` 拒绝）。`x0.00` 是真实声明（该模型不消耗额度），照常显示；网关没给倍率的模型（如 `default-model`）则**整项不出现在提示里**，而不是编一个 0。
-
-**凭据目录**按平台解析，可用 `CODEBUDDY_AUTH_DIR` 覆盖（与官方工具链一致）：
-
-| 平台 | 默认目录 |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth` |
-| macOS | `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth` |
-| Linux | `$XDG_DATA_HOME/CodeBuddyExtension/Data/Public/auth`（默认 `~/.local/share`） |
-
-目录里通常同时存在当前凭据与若干带时间戳的历史快照。插件**优先取 `workbuddy-desktop.info` / `codebuddy-desktop.info` 这类规范文件名**，其余按 token 剩余有效期取最长的一个——只按文件 mtime 选会选到过期快照。卡片会列出目录里所有可用凭据，标明各自区域。
-
-**失败分类与重试**：这条线路把失败分成「换号能解决」与「换号也一样」两类，判据不是状态码本身。
-
-- **401 不等于凭据失效**：实测同一枚 bearer 在 `GET /v3/config` 上是 200、在 `POST /v2/chat/completions` 上是 401（APISIX 生成的 HTML 拒绝页）。本线路的 access token 有效期约 28 天，本地时钟**几乎永远不会**在 401 时触发续期，因此这类 401 多半是会话被顶掉或网关/路由层拒绝。收到 401 时先对**同一个账号**强制续期一次（`POST /v2/plugin/auth/token/refresh`）并用新 token **原样重放同一份请求体**：续期成功即说明凭据还活着，不写任何账号状态；**只有续期本身被上游拒绝**才把该账号记为需要重新登录，此时才换号。
-- **请求期不写「需要重新登录」**：401 只让该账号退出**本次请求**的轮换，不写号池状态。此前一次 lane 级的 401 会在同一个请求里把每一个账号依次写成 `expired`，而号池没有任何清除路径，于是整条线路要求全部重新登录。
-- **自愈**：被标记的账号在**每个请求前**与卡片列表前都会重新对照权威存储（桌面账号看 CodeBuddy 自己的凭据文件、托管账号看插件的加密存储）；换了另一枚**未过期** token 就清掉标记并采用新凭据，仍持着被拒那枚的账号保留标记。
-- **429 冷却换号**：按 `Retry-After`（缺省 5 分钟，上限 10 分钟）冷却该账号，并用同一份 body 换下一个账号重试。
-
-**上游接口**：
-
-| 用途 | 路径（前缀为区域后端） |
-| --- | --- |
-| 模型生成 | `POST /v2/chat/completions`（仅流式） |
-| 模型目录 | `GET /v3/config` |
-| 浏览器授权 | `POST /v2/plugin/auth/state` + `GET /v2/plugin/auth/token` |
-| 令牌续期 | `POST /v2/plugin/auth/token/refresh` |
-| 额度 | `POST /billing/meter/get-user-resource` |
-| 签到状态 | `POST /billing/meter/checkin-activity-status`（仅国区） |
-| 每日签到 | `POST /billing/meter/daily-checkin`（仅国区） |
-
-两区后端分别是 `https://copilot.tencent.com`（国区）与 `https://www.workbuddy.ai` / `https://www.codebuddy.ai`（国际区）。**请求身份统一使用 CLI UA**（`CLI/2.63.2 CodeBuddy/2.63.2`）：实测 `CodeBuddyIDE` 被 `/v3/config` 以 400 `code 12403` 拒绝，国际区对话端点也直接返回 401，因此不做按端点切换。
-
-**每日自动签到**（仅国区；语义与 workbuddy2api 的 `daily_checkin.py` 对齐）：DSH 启动时自动签到一轮，运行期间每 10 分钟幂等补检（当日已签的账号不再发请求）；签到前先查签到状态，token 过期会自动续期并回写（桌面账号写回 CodeBuddy 自己的凭据文件）。失败当天最多自动重试 3 次；**活动尚未开启的账号不会当天放弃**——首次签到状态若报无权益，之后每小时复查一次，避免开机早于活动开放时间就错过当天。国际区账号不参与（国际后端没有签到活动）。**DSH 没开机的当天不会签到**——插件不是常驻服务。设置页「每日签到」区块可开关自动签到、查看「今日已签 x/y · 无活动 z · 失败 w」并手动「立即签到」（手动会重跑一轮并绕过开关与重试上限）。签到状态存在 `storages/workbuddy-checkin.json`，token 不出 Host。
-
-### 插件路由（WorkBuddy）
-所有路由都以 `/workbuddy/api` 为前缀：
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/status` | 账号、额度、模型目录与路由归属（每次都重扫凭据目录） |
-| GET | `/accounts` | 列出桌面扫描及插件托管账号（不含 token） |
-| POST | `/accounts/login` | 按国区/国际区启动官方浏览器授权 |
-| GET | `/accounts/login/status` | 读取授权轮询状态（不含 token） |
-| POST | `/accounts/action` | 删除插件托管账号，或隐藏/恢复桌面账号 |
-| POST | `/rescan` | 清缓存并重扫凭据目录 |
-| GET / POST | `/quota` | 强制刷新额度（POST）或读取当前状态（GET） |
-| GET / POST | `/models`、`/settings` | 读取或更新勾选模型、上下文窗口与默认思考深度 |
-| POST | `/catalog/refresh` | 强制刷新网关模型目录 |
-| POST | `/connection/test` | 用已识别凭据向上游发一次最小请求测试连接 |
-| POST | `/checkin/now` | 立即执行一轮每日签到（忽略开关与重试上限、不受无活动复查节流限制；当日已签的账号仍跳过） |
-
-与其它线路一样，所有修改状态的路由只接受同源 JSON POST，并校验 `Origin` 与 `Host`。
-
 ## Claude（订阅）线路
 
 ### 风险须知（请先读）
@@ -848,7 +749,7 @@ adaptive 分支对这类模型额外发送 `block_binding: drop_block`（**不**
 ### 插件路由（MiniMax Code）
 
 所有路由都挂在本线路自己的 `/minimax-code/api` 前缀下（与 antigravity / claude / command-code /
-kimi-code / workbuddy 一致），**不**占用 Codex 那条线路的 `/api/dsh-chatgpt-subscription` 前缀。
+kimi-code 一致），**不**占用 Codex 那条线路的 `/api/dsh-chatgpt-subscription` 前缀。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -858,7 +759,7 @@ kimi-code / workbuddy 一致），**不**占用 Codex 那条线路的 `/api/dsh-
 | POST | `/login/cancel` | 取消授权 |
 | POST | `/logout` | 注销**本插件自己那份**凭据；桌面端的登录态会拒绝并说明原因 |
 | POST | `/test` | 向上游发一次最小 Messages 请求测试连接 |
-| GET / POST | `/models`、`/settings` | 读取或更新启用开关、勾选模型、上下文窗口覆盖与默认思考深度；两个路径等价（kimi/claude 叫 `/models`，workbuddy/command-code 叫 `/settings`） |
+| GET / POST | `/models`、`/settings` | 读取或更新启用开关、勾选模型、上下文窗口覆盖与默认思考深度；两个路径等价（kimi/claude 叫 `/models`，command-code 叫 `/settings`） |
 | GET / POST | `/accounts` | 号池动作：`set-primary` / `set-alias` / `delete` / `clear-cooldown` / `strategy` / `relogin` / `adopt`（`adopt` = 把桌面端当前登录态导入号池，只读、不改动官方客户端文件） |
 | GET / POST | `/quota` | 读取用量快照（POST 强制刷新）：Token Plan 的 5 小时与每周窗口。**上游读失败不算请求失败**——`quota` 是可选字段，失败时卡片显示“暂无数据”，对话不受任何影响 |
 
@@ -1034,6 +935,9 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 
 **能力**：Qoder 自有对话面（OpenAI 形状的消息数组包在 \`RemoteChatAsk\` 信封里，过自定义 body codec，COSY 头签名，应答是信封 SSE）。模型目录**运行时发现**（COSY 签名的 \`GET /algo/api/v2/model/list?Encode=1\`）+ 随包能力兜底表；能力（上下文窗口 / 图片输入 / 思考档位）全部来自目录字段（\`context_config\` / \`is_vl\` / \`thinking_config\`），**不从模型名推断**，目录里那个 \`max_input_tokens\` 陈旧地板值明确不信。档位在本地先收敛到**模型真实梯子**再发出去；toggle 形态的模型只发开关。输出上限取上游文档化的 128K（目录不报输出上限）。
 
+
+**模型行**：勾选行下面一行写清能力——上下文窗口、是否收图、思考档位、输出预算（例：`1M · text+image · 档位 low/high · 输出 131k`），全部取自目录字段（`context_config` / `is_vl` / `thinking_config`）与随包兜底表的逐模型事实，客户端不按模型名推断。
+
 **缓存与用量**：响应 usage 里读缓存命中（\`prompt_tokens_details.cached_tokens\`，顶层 \`cached_tokens\` 兜底），缓存写入读 \`cache_write_tokens\`（上游不报就是 0，不做「恒零」声明）。**整页不出现任何金额**：订阅没有公开的 token 单价，Credits 与金额之间没有官方汇率——只显示 token 与 Credits 数字。
 
 **已知限制**：
@@ -1125,6 +1029,43 @@ OAuth 是默认入口；「使用 API Key」按钮保留为兼容回退，部署
 
 见上表；与其它线路一样，路由表在 `src/host/cline-pass/routes.ts` 与客户端 `api.ts` 各有一份手写副本，集成结束时逐条对照。设置卡在「设置 → 订阅服务 → Cline Pass」，对话输入框右侧有该线路的额度胶囊（显示当前已读账号中最紧张的窗口）。
 
+## OpenDesign（订阅，API Key / 浏览器授权）线路
+
+`opendesign`（显示名 **OpenDesign**）接入 [OpenDesign](https://open-design.ai/) 订阅（开源项目 [nexu-io/open-design](https://github.com/nexu-io/open-design)）。OpenDesign 的付费计划（Go / Plus / Pro / Max）含模型额度，官方明确支持第三方 Agent 使用其 API，并点名支持 Codex、Claude Code、**DSH**、OpenCode 等客户端。
+
+**登录有两条路，共用同一个号池**：
+
+1. **浏览器授权（推荐）** — 点「登录 OpenDesign 账号」，宿主向 `POST /api/v1/cli/device-authorizations` 申请一次设备授权并给出激活地址与授权代码；在浏览器确认后，查询接口 `POST /api/v1/cli/device-authorizations/{deviceId}/token` 会返回一对 Key：`vela_ctrl_…` 控制 Key 与 `sk-amr-…` 运行时 Key，外加账号身份（邮箱 / 名称 / 套餐）。运行时 Key 走对话，控制 Key 读钱包余额。签发的 Key 不过期，失效只能重新登录；**宿主自身不打开浏览器**，由卡片 `window.open` 打开激活页（与本插件其它线路同一条规则）。
+2. **粘贴 API Key（回退）** — 在 Cloud 控制台（工作区 → API Keys）创建后粘贴，仅用于对话（没有控制 Key，因此读不了余额）。
+
+号池支持多账号轮换；部署也可以用 `OPENDESIGN_API_KEY` 提供第一把 Key（号池为空时投射为首要账号，不写入凭据库）。
+
+**能力**：OpenAI Chat Completions 流式对话（官方给 DeepSeek Harness 推荐的正是这个协议形态），工具调用、图片输入、推理档位透传。网关是 `https://amr-link.open-design.ai/v1`，Bearer 鉴权。
+
+**模型目录**：随包内置 37 个聊天模型，每个都带 id、显示名、美元单价，以及**上下文窗口、最大输出、输入模态（是否收图）与推理档位**——价目来自官方公开价目接口，能力字段转录自本仓库已核对过的同族模型表（command-code 官方注册表、cline-pass、Claude 与 Antigravity 目录；两处冲突以 cline-pass 为准）。登录成功或添加 Key 后自动同步实时目录：**浏览器授权账号（带控制 Key）还会读 AMR 控制面目录**，那里有上游真实的 `metadata.contextWindowTokens`，会覆盖随包表；网关自己的 `/v1/models` 提供该 Key 实际可见的模型清单。同步条目持久化在设置文档里，重启无需网络即可恢复。**`minimax-m3.1-flash` 与 `muse-wonder` 没有任何同族表可核对**，按 128k / 默认三档处理并在文档里列名，不猜数字；任何模型都能在卡片的「上下文窗口」里按模型修正，覆盖值优先于以上全部来源。
+
+**额度（钱包余额）**：只有浏览器授权登录的账号带控制 Key，因此只有它们能读余额（`GET /api/v1/wallet/balance`，返回 `balanceUsd` 字符串）；粘贴的 API Key 没有控制 Key，卡片会说明并建议去控制台查看。余额按账号显示在账号行，对话输入框右侧的胶囊显示主账号的余额；读不到时显示原因而不是 0。**本线路不画百分比额度条**——上游只给当前余额，没有可对照的总额，编一个比例就是编数据。
+
+### 插件路由（OpenDesign）
+
+所有路由都以 `/opendesign/api` 为前缀：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/status` | 卡片状态：开关、号池、模型、目录同步、余额读数、登录流程 |
+| POST | `/settings` | 线路开关与高级设置（网关地址、默认窗口、并发、空闲超时） |
+| GET\|POST | `/accounts` | 账号增删、主账号、别名、轮换策略、Key 测试（用免费的目录读取验证，不花额度） |
+| POST | `/login/start` | 申请设备授权，应答激活地址与授权代码（不含 deviceSecret） |
+| GET | `/login/status?id=` | 轮询一次登录流程（宿主按服务给出的间隔节流） |
+| POST | `/login/cancel` | 取消登录；迟到的确认不会落号 |
+| GET\|POST | `/models` | 模型勾选（三态：不筛选 / 显式清单 / 全不选） |
+| POST | `/models/visibility`、`/models/visibility-all` | 单个/批量隐藏 |
+| POST | `/models/context-window` | 单模型上下文窗口覆盖 |
+| POST | `/catalog/refresh` | 用号池里可用的 Key 同步实时目录；目录真的变了才通知模型选择器重建 |
+| GET\|POST | `/usage` | 读取每个 OAuth 账号的钱包余额（每账号一次请求）；失败作为数据显示，绝不标记账号 |
+
+协议事实与未验证项的完整证据记录见 `docs/opendesign-line-plan.md`：设备授权的创建与轮询响应是**实测**的，批准后的字段名来自上游 issue #8870；本次接入没有真实订阅账号，对话链路未与真实 Key 联调。
+
 ## 本机登录
 
 **每条线路只在自己的详情页里回答关于本机的问题**。ChatGPT（Codex）线路的 ChatGPT 卡片里，「登录」按钮**旁边**就是「导入本机 Codex CLI 登录」——与 Claude 页面上那个收编按钮同样的位置、同样的次要样式；点它可以省掉再走一次 ChatGPT 授权。Claude Code 与 MiniMax Code 各自的设置页里本来就各有一个导入入口，不在这里重复。
@@ -1169,8 +1110,6 @@ OAuth 是默认入口；「使用 API Key」按钮保留为兼容回退，部署
 ## 安全边界
 
 Antigravity 的 access token / refresh token 使用独立的系统凭据存储：Windows 使用 CurrentUser DPAPI（`$DSH_HOME/storages/antigravity-oauth.json.dpapi`），macOS 使用登录钥匙串，Linux 使用 Secret Service。macOS / Linux 的服务名为 `dsh-antigravity`，账号键按旧凭据文件的绝对路径生成，隔离不同的 `DSH_HOME`。
-
-**WorkBuddy token 仅在 Host 内处理，从不进入浏览器**（`/workbuddy/api` 响应不含 `accessToken` / `refreshToken`，有测试锁定）。桌面扫描账号仍使用 CodeBuddy 自己的登录态文件：续期只原子写回其 `auth` 块；从本插件删除时只隐藏/恢复，绝不删除原文件。通过浏览器授权添加的账号归本插件所有，保存在独立系统凭据存储中：Windows CurrentUser DPAPI（`$DSH_HOME/storages/workbuddy-accounts.json.dpapi`）、macOS 登录钥匙串、Linux Secret Service；这类账号可在设置页真正删除。
 
 **MiniMax Code 的 access token / refresh token 同样只在 Host 内处理，从不进入浏览器**（`/minimax-code/api` 的响应只含非机密事实，有测试锁定）。号池的**身份键也刻意不含机密**：桌面端凭据用 `recordKey`（路径摘要）、插件凭据用 `loginEpoch`，**不是**刷新令牌的哈希——用令牌做键在每次轮换后都会把同一账号看成新账号。它的凭据**不是本插件自持的**：正常路径是**只读复用** MiniMax Code 桌面端自己的 `~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json`，续期时通过「同目录临时文件 + `rename`」原子写回，**不创建、不删除、不等待**桌面端的 `auth.lock`，也**不留任何旁路副本**——不会在桌面端的目录里写出明文 `.dsh-bak` 之类的第二份凭据。只有本机没有桌面端凭据时，本插件才把设备码登录得到的凭据存到自己的 `$DSH_HOME/storages/minimax-code-credentials.json`；**登出只删这一份**，桌面端的登录态绝不撤销、绝不删除（撤销它等于把用户从正在运行的官方客户端踢下线）。诊断中提及令牌时只输出 SHA-256 指纹前缀，不含令牌原文。
 
@@ -1238,9 +1177,9 @@ npm pack --dry-run
 
 ### 压缩失败
 
-Kimi Code、MiniMax Code、Command Code、Claude、WorkBuddy 遇到“输入加输出预留超限”时，插件可在 HTTP 400/422 的完整 token 计数证明输入仍能放下、且上游确实采用了请求输出上限的情况下，仅降低输出上限重试一次。消息、工具和历史保持不变，摘要请求也适用。降低后的输出仍可能截断，截断不会冒充完整摘要。Codex 不支持该输出参数，不走此恢复；输入本身超限、模糊错误或流内错误仍交给 Harness 处理。这不是对所有压缩故障的通用修复。
+Kimi Code、MiniMax Code、Command Code、Claude 遇到“输入加输出预留超限”时，插件可在 HTTP 400/422 的完整 token 计数证明输入仍能放下、且上游确实采用了请求输出上限的情况下，仅降低输出上限重试一次。消息、工具和历史保持不变，摘要请求也适用。降低后的输出仍可能截断，截断不会冒充完整摘要。Codex 不支持该输出参数，不走此恢复；输入本身超限、模糊错误或流内错误仍交给 Harness 处理。这不是对所有压缩故障的通用修复。
 
-MiniMax、Kimi、Codex、Claude、Command Code、WorkBuddy 和 Antigravity 的错误处理会将明确的上下文超限错误交给 Harness 的溢出恢复机制。该机制需要宿主启用压缩后端；它不是无条件重发同一个超限请求。认证、配额、请求体字节限制和输出截断不会因此被当作上下文超限。手动压缩仍需生成完整摘要；如果摘要请求本身超限、被截断或缺少正文，修正错误分类也不能保证它成功。请保留失败会话中的 `compaction/end` 错误、provider/model、宿主及插件版本，以便定位。
+MiniMax、Kimi、Codex、Claude、Command Code 和 Antigravity 的错误处理会将明确的上下文超限错误交给 Harness 的溢出恢复机制。该机制需要宿主启用压缩后端；它不是无条件重发同一个超限请求。认证、配额、请求体字节限制和输出截断不会因此被当作上下文超限。手动压缩仍需生成完整摘要；如果摘要请求本身超限、被截断或缺少正文，修正错误分类也不能保证它成功。请保留失败会话中的 `compaction/end` 错误、provider/model、宿主及插件版本，以便定位。
 
 | 现象 | 处理 |
 | --- | --- |

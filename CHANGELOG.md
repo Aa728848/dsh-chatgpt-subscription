@@ -16,6 +16,22 @@
   - **改法（自动取目录）**：`GET /status` 在应答背后自动触发一次目录刷新（复用 `QuotaRefresh`，用 `force: false` 让 30 分钟 TTL 与 in-flight 去重生效）；客户端首屏拿到 `catalogRefreshing` 就静默补拉一次，最多一次，不设 busy、不弹错。「刷新目录」按钮保留为强制出口。
   - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **282 文件 / 4626 passed / 7 skipped**；`npm run build` 通过。冷启动回归用例**验证过先红后绿**（把规则改回旧实现时它报 `expected 0 to be greater than 0`）；快照读写不对称用真实文件对拍过（旧解析器 0 条 / 新解析器 2 条）；三态迁移用真实落盘文件跑过完整往返（迁移 → 幂等 → 全关不被翻回 → 全选回到 `null`）。
 
+- **[qoder] 模型行只有名字：窗口、是否收图、思考档位、输出预算现在逐行写在勾选行下面**
+  - **现象**：Qoder 卡的模型清单每一行只有一个模型名，用户勾选时看不出这个模型能收多长的上下文、收不收图、有几档思考——与同一屏里的 OpenDesign 卡形成反差（那边一行写全）。
+  - **真因**：不是 host 没数据。[useQoderSection](../src/client/qoder/useQoderSection.ts) 拿到的 `QoderModelOption` 里 `contextWindow` / `supportsImages` / `reasoningEfforts` / `defaultMaxTokens` 都在（能力字段一律来自目录端点，随包兜底表也有逐模型事实），而是 [QoderSection.tsx](../src/client/qoder/QoderSection.tsx) 当时**刻意不把 hint 传给 ModelChecklist**——那次的需求是「模型行下面不需要介绍文字」，被误读成了「不要任何能力行」。
+  - **改法**：新增 `qoderModelRowHint()`，由 DTO 字段生成一行**数据**（`1M · text+image · 档位 low/high · 输出 131k`）并传给共享 ModelChecklist；散文式介绍仍然不进这一行。目录不给档位的模型写「无档位」而不是留空或套默认三档。共用新增的 `formatTokenCount()`（百万位保留两位、千位取整），二进制窗口不再渲染成 `1048576` 或 `131.1k`。
+  - **顺带修掉一个真 bug**：落盘快照的写入侧只写了 `is_reasoning`，没写 `thinking_config`，而回读侧的档位只从 `thinking_config.enabled.efforts` 取——于是**重启后所有推理模型都变成「无档位」**（模型是真推理模型，档位在磁盘上被丢了；重启前一切正常，所以只在冷启动那一眼看得出来）。现在写入侧按上游 effort 形态把梯子写回去（toggle 形态写 `enabled: {}`，不可关闭的写不带 `disabled`），读写仍是同一个 `readQoderThinkingConfig`，互为反函数。
+  - **验证**：`test/qoder-ui.test.tsx` 新增一例，钉住三行不同能力的摘要（单模态两档 / 多模态两档 / 无档位）与用户覆盖窗口按覆盖值显示；`test/qoder-model-catalog.test.ts` 新增两例，用生产写入侧 → 生产读取侧往返，断言梯子、可关闭性、图片与窗口都不丢（老快照缺字段时仍是原来的兜底，不炸）；全量 typecheck 与 vitest 通过。
+
+- **[opendesign] 新增第十三条订阅线路：OpenDesign（open-design.ai 订阅，浏览器设备授权 + API Key）**
+  - **协议面**：OpenAI Chat Completions 流式对话，网关 `https://amr-link.open-design.ai/v1`，`Authorization: Bearer` 鉴权。网关主机与 `/v1` 拼写转录自官方 Cloud 控制台的 quick-setup 包（它给 DeepSeek Harness 推荐的正是 Chat Completions），四个协议端点均经未认证探测确认（401 包络符合各自协议）。
+  - **登录一：浏览器设备授权（主路径）**。按官方 `vela login` 的公开 HTTP 契约重写：`POST /api/v1/cli/device-authorizations`（`{host, profile, cliVersion}`，**实测** 201 返回 deviceId / userCode / deviceSecret / activationUrl / pollIntervalSeconds），用户在浏览器确认后 `POST …/{deviceId}/token` 轮询取回 `vela_ctrl_…` 控制 Key + `sk-amr-…` 运行时 Key + 账号身份（字段名据上游 issue #8870；pending 帧的 null 形状也是实测的）。判定凭证「到位」看**字段在不在**，不看 status 字符串；取消过的流程绝不因迟到的确认而落号；宿主自身不打开浏览器（`test/login-opens-browser-once.test.ts` 钉住）。
+  - **登录二：粘贴 API Key（回退）**。控制台（工作区 → API Keys）签发，仅用于对话。`OPENDESIGN_API_KEY` 环境变量可投射首个账号；Key 测试读免费的目录端点，不花额度。
+  - **模型目录**：随包 37 个聊天模型（id、显示名、美元单价逐字转录自官方公开价目接口 `/api/v1/public/model-prices`），登录成功或添加 Key 后自动同步一次实时目录（`GET /v1/models`），同步条目持久化进设置文档，重启无需网络；目录真的变了才发 `llm/adapters-updated`。官方不公布各模型上下文窗口，默认 128k，卡片可按模型覆盖。
+  - **每模型能力（窗口 / 输出上限 / 是否收图 / 推理档位）**：原先一律 128k + 固定三档，现在随包表按模型带上真实取值——转录自本仓库已核对的同族模型表（command-code 官方注册表、cline-pass、Claude、Antigravity；冲突以 cline-pass 为准，注册表的 `off` 译成 DSH 的 `none`）。**浏览器授权账号还会读 AMR 控制面目录**（`GET /api/v1/models`，`metadata.contextWindowTokens`，`public_model_*` id 按字母数字归一），把上游真实窗口写回；用户覆盖值 > 实时目录 > 随包表 > 默认。`minimax-m3.1-flash`、`muse-wonder` 无同族表可核对，保留默认并在计划文档列名，不猜。
+  - **额度（钱包余额）**：只有浏览器授权账号带控制 Key，故只有它们能读 `GET /api/v1/wallet/balance`（`balanceUsd` 字符串）；余额显示在账号行与输入框胶囊（胶囊只显示主账号，$0 才转红）。上游只给当前余额、没有可对照的总额，所以**不画百分比额度条**；钱包 401/403 按上游语义（OPEND-3553）只作「读不到」显示，绝不标记账号、绝不影响对话。粘贴 Key 的账号没有控制 Key，卡片会说明并指向控制台。
+  - **验证**：`npm run typecheck` 0 错误；新增 7 个 opendesign 套件（设备流 / 路由 / 适配器 / 映射 / 目录 / 契约 / UI）并给 `login-opens-browser-once` 与既有计数断言（TAB_IDS、卡片名、开关数、槽位 order 46）各追加一项；全量 `npx vitest run` 与 `npm run build` 通过。**未用真实订阅联调**：设备授权的创建/轮询响应是实测的，批准后的帧未观察到（据 #8870 推断且以字段存在为准），对话链路未与真实 Key 联调——清单见 `docs/opendesign-line-plan.md` §5。
+
 ## 0.33.0 - 2026-10-20
 - **[qoder] 看板上的 Qoder 卡片用的是字母 Q，不是官方标志——现在换成官方那张 412×412 应用图标**
   - **现象**：设置页订阅列表里其余线路都是自家标志，只有 Qoder 是一个灰底字母方块。
