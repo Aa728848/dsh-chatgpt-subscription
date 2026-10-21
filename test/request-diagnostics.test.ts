@@ -415,29 +415,29 @@ describe('request-diagnostics', () => {
     const mockFetch: FetchLike = vi.fn().mockImplementation(async () => new Response('ok', { status: 200 }))
 
     const diagFetch = createDiagnosticFetch(mockFetch, {
-      provider: 'workbuddy-subscription',
+      provider: 'glm-coding-plan',
       enabled: true,
       onRecord: (rec) => {
         records.push(rec)
       },
     })
 
-    // Session 1 on workbuddy chat
+    // Session 1 on the GLM Coding Plan chat face
     await (
-      await diagFetch('https://api.workbuddy.ai/chat/completions', {
+      await diagFetch('https://api.z.ai/api/coding/paas/v4/chat/completions', {
         method: 'POST',
         headers: { 'x-session-id': 'session-100' },
-        body: JSON.stringify({ model: 'wb-model-1' }),
+        body: JSON.stringify({ model: 'glm-5.3' }),
       })
     ).text()
     expect(records[0].fingerprints?.modelChanged).toBeUndefined()
 
-    // Same session on workbuddy chat, model unchanged
+    // Same session on the same GLM chat face, model unchanged
     await (
-      await diagFetch('https://api.workbuddy.ai/chat/completions', {
+      await diagFetch('https://api.z.ai/api/coding/paas/v4/chat/completions', {
         method: 'POST',
         headers: { 'x-session-id': 'session-100' },
-        body: JSON.stringify({ model: 'wb-model-1' }),
+        body: JSON.stringify({ model: 'glm-5.3' }),
       })
     ).text()
     expect(records[1].fingerprints?.modelChanged).toBe(false)
@@ -474,14 +474,14 @@ describe('request-diagnostics', () => {
     })
 
     const diagFetch = createDiagnosticFetch(mockFetch, {
-      provider: 'workbuddy-subscription',
+      provider: 'glm-coding-plan',
       enabled: true,
       onRecord: () => {
         throw new Error('Sink storage crashed')
       },
     })
 
-    const res = await diagFetch('https://api.workbuddy.ai/chat/completions', {
+    const res = await diagFetch('https://api.z.ai/api/coding/paas/v4/chat/completions', {
       method: 'POST',
     })
 

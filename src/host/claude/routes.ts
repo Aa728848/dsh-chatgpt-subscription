@@ -4,7 +4,7 @@
  * The route set, the '{ok,value}' / '{ok,error}' envelope, the 64 KiB body cap,
  * the 405/404/500 conventions and the same-origin requirement on every mutation
  * are all mirrors of the sibling lines' route modules ('src/host/kimi-code/routes.ts',
- * 'src/host/command-code/routes.ts', 'src/host/workbuddy/routes.ts') — deliberately,
+ * 'src/host/command-code/routes.ts') — deliberately,
  * because the card that renders this line is the same card whose shape those lines
  * established, and a further dialect would be another bug surface for no gain.
  *

@@ -1,13 +1,12 @@
 /**
  * Daily check-in scheduler for the MiniMax Code line.
  *
- * Modeled on the sibling WorkBuddy scheduler and kept semantically identical
- * where the two services face the same problem; the wire half lives in
- * ./checkin-gateway.ts (official-client recipe, verified live).
+ * The wire half lives in ./checkin-gateway.ts (official-client recipe,
+ * verified live); this module is the host-owned daily pass around it.
  *
  * - **Both regions.** The official client's public gateway has an origin per
  *   region, so an account signs in against its own region's origin. There is
- *   no CN-only carve-out like WorkBuddy's: the CLI ships the same surface
+ *   no CN-only carve-out: the CLI ships the same surface
  *   worldwide.
  * - **Idempotent.** The panel is read first; an account whose today is already
  *   claimed (by anyone) is only recorded. A duplicate claim answers
@@ -18,8 +17,8 @@
  *   usually boots before it does.
  * - **Bounded.** A failing account is retried at most {@link CHECKIN_ATTEMPT_CAP}
  *   times a day, so a broken account cannot turn the ten-minute tick into a
- *   request loop. A manual run ignores the cap and the toggle, like the
- *   workbuddy card's "check in now", and is queued behind an in-flight run.
+ *   request loop. A manual run ignores the cap and the toggle, like the card's
+ *   "check in now", and is queued behind an in-flight run.
  *
  * Credentials stay host-side: the only write beyond the state file is the
  * account pool's own refresh write-back, reused here unchanged through
@@ -55,8 +54,8 @@ export const CHECKIN_TICK_MS = 10 * 60 * 1000
 export const CHECKIN_ATTEMPT_CAP = 3
 /**
  * How long a not-yet-claimable today waits before the panel is polled again.
- * Same reasoning as the workbuddy scheduler: the activity opens on its own
- * schedule, and the first answer of the day is frequently "not open yet".
+ * The activity opens on its own schedule, and the first answer of the day is
+ * frequently "not open yet".
  */
 export const CHECKIN_INACTIVE_RECHECK_MS = 60 * 60 * 1000
 
@@ -308,7 +307,7 @@ export class MinimaxCodeCheckinService {
     // The preference store warms up asynchronously on harnesses without the
     // register seam. Reading `settings()` before that read settles answers
     // from shipped defaults, which is how a user who had turned check-in off
-    // still got signed in once on every restart on the workbuddy line.
+    // still got signed in once on every restart.
     await this.ready()
     const settings = this.options.settings()
     if (!manual && !settings.enabled) return

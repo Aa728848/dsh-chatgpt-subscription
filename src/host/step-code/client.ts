@@ -68,7 +68,7 @@ import {
 } from './types.ts'
 
 // ---------------------------------------------------------------------------
-// 小工具（与 workbuddy/client.ts 同一套：纯、只读、无副作用）
+// 小工具（与本仓库其余线路同一套：纯、只读、无副作用）
 // ---------------------------------------------------------------------------
 
 export interface StepCodeRequestOptions {
@@ -393,7 +393,7 @@ export async function fetchStepModelCatalog(
 let cachedCatalog:
   | { profile: StepCodeProfile; entries: StepCodeCatalogEntry[]; fetchedAt: number }
   | undefined
-/** 每次清缓存都推进它，好让已经在飞的请求不发布结果（照抄 workbuddy/client.ts）。 */
+/** 每次清缓存都推进它，好让已经在飞的请求不发布结果。 */
 let catalogCacheEpoch = 0
 let catalogInFlight: Promise<StepCodeCatalogEntry[]> | null = null
 let catalogInFlightProfile: StepCodeProfile | null = null
@@ -418,7 +418,7 @@ export function clearCachedStepModelCatalog(): void {
 /**
  * TTL 缓存 + in-flight 去重 + 磁盘快照的目录读取。
  *
- * 三层各解决一件事，照抄 workbuddy/client.ts:397-491：
+ * 三层各解决一件事：
  *
  * - **TTL**：目录不是快变数据，半小时的陈旧比一次网络往返划算。
  * - **in-flight 去重**：同一个 profile 上并发的两个调用共用一次请求。

@@ -6,7 +6,7 @@
  * answers `{base}/v1/chat/completions` with the standard SSE frames (official
  * `step-provider/index.ts:88` pins one dialect, `STEP_MODEL_API =
  * "openai-completions"`, for every model). This module therefore looks like its
- * WorkBuddy / GLM siblings and exists to absorb the places where Step is not
+ * GLM sibling and exists to absorb the places where Step is not
  * OpenAI:
  *
  * 1. **The output cap is `max_tokens`, never `max_completion_tokens`.**
@@ -177,8 +177,8 @@ export const STEP_CODE_PRICE_PER_MILLION_TOKENS = MODEL_DEFAULTS.cost.input
  * Base64 image payload one request may carry on this route.
  *
  * Step publishes no per-request image ceiling, so this is a defensive budget
- * rather than a documented limit: it mirrors the sibling OpenAI-shaped WorkBuddy
- * route (12 MB) and exists so a runaway conversation degrades to placeholders
+ * rather than a documented limit: it mirrors the sibling OpenAI-shaped routes'
+ * budget (12 MB) and exists so a runaway conversation degrades to placeholders
  * instead of growing a body the transport has to carry. Lower it once a real
  * Step ceiling has been measured — the offload mechanism itself is shared.
  */
@@ -507,8 +507,8 @@ export function buildChatRequest(
 ): Record<string, unknown> {
   const supportsImages = request.supportsImages === true
   const messages: OpenAIMessage[] = []
-  // A leading system turn is optional on this endpoint (unlike WorkBuddy's
-  // international backend), so a request without a prompt simply omits it rather
+  // A leading system turn is optional on this endpoint, so a request without a
+  // prompt simply omits it rather
   // than inventing a neutral one that would change model behaviour.
   const system = leadingSystemText(options)
   if (system !== undefined) messages.push({ role: 'system', content: system })

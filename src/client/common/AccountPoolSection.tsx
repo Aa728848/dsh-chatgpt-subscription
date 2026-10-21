@@ -24,8 +24,9 @@ export interface AccountPoolSectionProps<
   /**
    * Replaces the single header button with the provider's own entry points.
    *
-   * WorkBuddy signs in against two regional deployments, so one "add account"
-   * button cannot express it; every other line keeps the default button.
+   * A line whose sign-in has more than one entry point (two regional deployments,
+   * a second sign-in method) replaces the default button with its own; a line that
+   * has exactly one keeps the default button.
    */
   renderLoginActions?(): ReactNode
   onSetPrimary(accountId: string): void
@@ -122,10 +123,7 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
   const anyQuota = accounts.some((account) => account.quota !== undefined)
 
   // Whether anything on this card is counting down right now.
-  const counting = accounts.some((account) => (
-    isCoolingDown(account, now)
-    || (account.modelCooldowns ?? []).some((park) => park.cooldownUntil > now)
-  ))
+  const counting = accounts.some((account) => isCoolingDown(account, now))
 
   // The tick.
   //
@@ -192,13 +190,6 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
           {accounts.map((account) => {
             const isActive = account.id === props.activeAccountId
             const cooling = isCoolingDown(account, now)
-            // The models this account is parked on, right now.
-            //
-            // A model park is a different fact from the account's own cooldown:
-            // the account keeps serving every model that is not named here, so a
-            // card that only drew the account cooldown reported the account as
-            // available while the model the request wanted was the one refused.
-            const modelParks = (account.modelCooldowns ?? []).filter((park) => park.cooldownUntil > now)
             const needsRelogin = account.authStatus !== undefined && account.authStatus !== 'ok'
             return (
               <div key={account.id} className={`dsha-account-card ${isActive ? 'active' : ''}`}>
@@ -272,19 +263,6 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
                   {account.expiresAt !== undefined && <span>{t.expires}: {formatAccountDate(account.expiresAt)}</span>}
                   {account.lastUsedAt !== undefined && <span>{t.lastUsed}: {formatAccountDate(account.lastUsedAt)}</span>}
                 </div>
-                {modelParks.length > 0 && (
-                  <div className="dsha-account-model-cooldowns">
-                    {modelParks.map((park) => (
-                      <div key={park.model} className="dsha-account-model-cooldown-row">
-                        <span className="dsha-account-model-cooldown-tag">{t.modelCooldown}</span>
-                        <span className="dsha-account-model-cooldown-name" title={park.model}>{park.model}</span>
-                        <span className="dsha-account-model-cooldown-time">
-                          {formatCooldownRemaining(park.cooldownUntil - now, t)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
 
                 <AccountQuota
                   quota={account.quota}

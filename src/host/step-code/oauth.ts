@@ -3,7 +3,7 @@
  *
  * 逐字照抄官方三件套：`login-client.ts`（init/poll 的协议与重试）、
  * `login-polling.ts`（轮询循环与截止）、`step-provider/index.ts:268-309`（登录整体）。
- * 状态机外壳照抄 `workbuddy/oauth.ts`（flow / controller / getWebLoginStatus / resetWebLogin），
+ * 状态机外壳是 flow / controller / getWebLoginStatus / resetWebLogin 四个入口，
  * 因为设置卡片跟随的是同一组四个入口。
  *
  * ---------------------------------------------------------------------------
@@ -693,7 +693,7 @@ export function refreshStepCodeCredential(
 }
 
 // ---------------------------------------------------------------------------
-// 流程状态机（照抄 workbuddy/oauth.ts 的 flow / controller / 四个入口）
+// 流程状态机（flow / controller / 四个入口）
 // ---------------------------------------------------------------------------
 
 /** 一次登录流程跑完时留在内存里的凭据（接入层没给 onSave 时的去处）。 */

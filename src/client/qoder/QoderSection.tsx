@@ -2,7 +2,7 @@
  * Qoder（订阅）设置卡片。
  *
  * 纯渲染：状态、副作用与请求都在 'useQoderSection.ts'，两者之间只通过一个具名结构
- * 交接（GLM / WorkBuddy / Step Code 同款分工）。
+ * 交接（GLM / Step Code 同款分工）。
  *
  * 本文件没有新建任何 UI 组件：进入入口（hub 卡片）在 hub/providers.tsx，账号池与它的
  * 配额条在 AccountPoolSection，模型勾选在 ModelChecklist，上下文窗口在

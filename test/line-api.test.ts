@@ -43,8 +43,8 @@ describe('line api', () => {
     // A route that is not mounted answers with an empty body, which is exactly
     // what a browser bundle newer than the host process produces.
     respond('', { status: 404 })
-    const api = createLineApi('/workbuddy/api', 'WorkBuddy')
-    await expect(api.get('/status')).rejects.toThrow(/WorkBuddy settings route did not answer.*restart DSH/)
+    const api = createLineApi('/kimi-code/api', 'Kimi Code')
+    await expect(api.get('/status')).rejects.toThrow(/Kimi Code settings route did not answer.*restart DSH/)
   })
 
   it('reports a non-JSON body with the beginning of what arrived', async () => {

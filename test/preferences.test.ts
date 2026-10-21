@@ -19,9 +19,9 @@ import {
   registerKimiCodePreferenceStore,
 } from '../src/host/kimi-code/token-store.ts'
 import {
-  FileModelSettingsStore as WorkBuddyModelSettingsStore,
-  registerWorkBuddyPreferenceStore,
-} from '../src/host/workbuddy/token-store.ts'
+  GlmCodingPlanModelSettingsStore,
+  registerGlmCodingPlanPreferenceStore,
+} from '../src/host/glm-coding-plan/token-store.ts'
 import type { SubscriptionPreferencesDto } from '../src/shared/contracts.ts'
 
 type PreferenceSettings = Omit<SubscriptionPreferencesDto, 'writable'>
@@ -190,25 +190,23 @@ describe('subscription preferences', () => {
       enabledModelIds: ['kimi-code-pick'],
     }))
 
-    await new WorkBuddyModelSettingsStore().updateSettings({
+    await new GlmCodingPlanModelSettingsStore().updateSettings({
       enabled: false,
-      enabledModelIds: ['workbuddy-pick'],
+      enabledModelIds: ['glm-pick'],
       selectedAccountId: 'intl:account',
-      hiddenAccountIds: ['intl:hidden'],
     })
-    const workBuddy = registerWorkBuddyPreferenceStore(emptySettings)
-    await vi.waitFor(() => expect(workBuddy.status()).toMatchObject({
+    const glm = registerGlmCodingPlanPreferenceStore(emptySettings)
+    await vi.waitFor(() => expect(glm.status()).toMatchObject({
       enabled: false,
-      enabledModelIds: ['workbuddy-pick'],
+      enabledModelIds: ['glm-pick'],
       selectedAccountId: 'intl:account',
-      hiddenAccountIds: ['intl:hidden'],
     }))
 
     // An update both writes through the file and refreshes the snapshot.
-    const updated = await workBuddy.update({ selectedAccountId: null, hiddenAccountIds: [] })
+    const updated = await glm.update({ selectedAccountId: null })
     expect(updated.selectedAccountId).toBeNull()
-    expect(workBuddy.status().hiddenAccountIds).toEqual([])
-    expect((await new WorkBuddyModelSettingsStore().read()).selectedAccountId).toBeNull()
+    expect(glm.status().selectedAccountId).toBeNull()
+    expect((await new GlmCodingPlanModelSettingsStore().read()).selectedAccountId).toBeNull()
   })
 
   it('keeps the settings namespace path for a harness that still registers', async () => {

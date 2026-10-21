@@ -22,9 +22,6 @@ import { AccountPoolStore as AntigravityPool } from '../src/host/antigravity/acc
 import { antigravityHeaders, endpointCandidates } from '../src/host/antigravity/client.ts'
 import { buildRequest } from '../src/host/antigravity/mapper.ts'
 import { MODELS } from '../src/host/antigravity/types.ts'
-import { WorkBuddyAccountPool } from '../src/host/workbuddy/account-pool.ts'
-import { workBuddyHeaders, refreshCredentials } from '../src/host/workbuddy/client.ts'
-import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
 
 const TIMEOUT_MS = 45_000
 const proxy = new ProxyManager({ getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }) })
@@ -262,64 +259,12 @@ async function antigravityProbeModel(): Promise<string> {
   return 'gemini-3.1-pro-high'
 }
 
-async function probeWorkBuddy(): Promise<void> {
-  // Explicit: this binding is assigned inside `try` and read after `catch`, and an
-  // un-annotated `let` there infers `any` (TS7034), which hid every typo on the
-  // credential fields the rest of the function reads.
-  let credentials: WorkBuddyCredentials | undefined
-  try {
-    const pool = new WorkBuddyAccountPool()
-    const data = await pool.read()
-    const account = data.accounts[0]
-    if (!account) {
-      note('workbuddy:search', 'no-credentials', 'no pooled WorkBuddy account')
-      return
-    }
-    credentials = account.credentials
-    if (credentials.expiresAt && credentials.expiresAt < Date.now() + 60_000) {
-      credentials = await refreshCredentials(credentials, { fetchFn }).catch(() => credentials)
-    }
-  } catch (error) {
-    note('workbuddy:credentials', 'error', error instanceof Error ? error.message : String(error))
-    return
-  }
-
-  // Unreachable in practice — the `catch` above returns, and so does the branch that
-  // finds no account — but a `let` assigned inside `try` is never narrowed as
-  // definitely-assigned, and spelling the invariant out is cheaper than a `!`.
-  if (credentials === undefined) {
-    note('workbuddy:credentials', 'error', 'no credential survived the read')
-    return
-  }
-  const backend = credentials.backend
-  for (const path of ['/agenttool/v1/search', '/v1/web_search', '/v1/search']) {
-    try {
-      const { status, text } = await post(`${backend}${path}`, workBuddyHeaders(credentials), { query: 'dsh probe', keyword: 'dsh probe' })
-      note(`workbuddy:${path}`, status === 200 ? 'ok' : 'rejected', `http=${status} body=${snippet(text)}`, status)
-      if (status === 200) break
-    } catch (error) {
-      note(`workbuddy:${path}`, 'error', error instanceof Error ? error.message : String(error))
-    }
-  }
-
-  // A reader/fetch sibling of the search endpoint, if this backend has one.
-  for (const path of ['/agenttool/v1/fetch', '/agenttool/v1/reader', '/agenttool/v1/web_fetch', '/agenttool/v1/browse']) {
-    try {
-      const { status, text } = await post(`${backend}${path}`, workBuddyHeaders(credentials), { url: 'https://example.com', urls: ['https://example.com'] })
-      note(`workbuddy:${path}`, status === 200 ? 'ok' : 'rejected', `http=${status} body=${snippet(text)}`, status)
-    } catch (error) {
-      note(`workbuddy:${path}`, 'error', error instanceof Error ? error.message : String(error))
-    }
-  }
-}
-
 test('probe sibling search channels', async () => {
   const only = (process.env.PROBE_ONLY ?? '').split(',').map((entry) => entry.trim()).filter((entry) => entry !== '')
   const wanted = (name: string): boolean => only.length === 0 || only.includes(name)
 
   if (wanted('kimi')) await probeKimi()
   if (wanted('antigravity')) await probeAntigravity()
-  if (wanted('workbuddy')) await probeWorkBuddy()
 
   proxy.dispose()
   for (const result of results) console.log(JSON.stringify(result))

@@ -1,22 +1,21 @@
 /**
  * MiniMax Code 号池：the account pool for the MiniMax Code (编程订阅) line.
  *
- * This is the second line in this package that pools a credential it does not
- * own (WorkBuddy was the first), and that one fact decides every shape below:
+ * This line pools a credential it does not own, and that one fact decides every
+ * shape below:
  *
  * 1. MiniMax Code's normal credential is the desktop application's own
  *    \`~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json\`. The plugin
- *    reads it so a user already signed in to the app never signs in twice, which
- *    is exactly the WorkBuddy precedent for the CodeBuddy client's \`*.info\`
- *    files.
+ *    reads it so a user already signed in to the app never signs in twice,
+ *    instead of asking for a second sign-in of its own.
  * 2. ADOPTED MEANS NEVER DESTROYED. That file belongs to an application the
  *    user is running. The pool may read it, may adopt it into its own account
  *    list, and may write a rotated token back through the store's atomic
  *    replacement — but no path in this file may revoke it or delete it. A
  *    deleted \`auth.json\` signs the user out of MiniMax Code itself, so such an
  *    account is reported as \`removable: false\` and deletion is refused
- *    ({@link MinimaxCodeAccountPool.deleteAccount}), mirroring WorkBuddy's
- *    desktop accounts.
+ *    ({@link MinimaxCodeAccountPool.deleteAccount}), like every other adopted
+ *    desktop account.
  * 3. What the pool adds on top of the single-credential line is rotation: more
  *    than one sign-in can serve requests, a 429 cools one account down instead
  *    of taking the line offline, and the settings card can list, alias, promote

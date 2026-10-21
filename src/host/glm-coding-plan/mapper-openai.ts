@@ -216,7 +216,7 @@ const NO_RESOLVED_IMAGES: ResolvedRequestImages = new Map()
 /**
  * 一次请求允许携带的 base64 图片上限：12 MB。
  *
- * 取本仓库其余 OpenAI 形状线路的同一个值（`workbuddy` / `zhipu` 的同名常量），
+ * 取本仓库其余 OpenAI 形状线路的同一个值（`zhipu` 的同名常量），
  * 理由是让图文与工具 schema 留在同一个 body 里。
  *
  * **未验证**：GLM Coding Plan 这个面对单请求图片字节的真实上限没有实测样本，

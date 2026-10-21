@@ -39,8 +39,8 @@ export type MinimaxCodePoolStatus = Pick<AccountPoolStatusDto, 'accounts' | 'rot
  *
  * The provider hub hosts every provider tab inside one settings section whose
  * injected `t` seat is bound to the hub's own namespace, and every sibling tab
- * therefore renders its own dictionary instead of that seat (see KimiCodeSection,
- * WorkBuddySection and CommandCodeSection, none of which declare a locale prop).
+ * therefore renders its own dictionary instead of that seat (see KimiCodeSection
+ * and CommandCodeSection, none of which declare a locale prop).
  * This card must do the same: its keys are not a subset of the hub's, so using the
  * hub's seat resolves the overlap to ChatGPT wording ("使用 ChatGPT 登录" on the
  * MiniMax tab) and every other key to the literal key text.
@@ -73,7 +73,6 @@ function accountPoolLabelsFor(t: Translate): AccountPoolLabels {
     cooldownLeft: t('cooldownLeft'),
     cooldownRemaining: t('cooldownRemaining'),
     cooldownRemainingSeconds: t('cooldownRemainingSeconds'),
-    modelCooldown: t('modelCooldown'),
     clearCooldown: t('clearCooldown'),
     needsRelogin: t('needsRelogin'),
     relogin: t('relogin'),

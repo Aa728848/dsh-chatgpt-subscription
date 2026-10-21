@@ -930,8 +930,7 @@ export class ClaudeAccountPool extends AccountPoolCore<
           source: account.source,
           // Deleting the row is the card's action for an account this plugin
           // owns. A borrowed snapshot is not this plugin's file to delete, so the
-          // card offers its own remove-import action instead — the WorkBuddy
-          // pool's precedent for accounts it did not sign in.
+          // card offers its own remove-import action instead.
           removable: !adopted,
           ...(account.sourcePath === undefined ? {} : { sourcePath: account.sourcePath }),
           ...(quota === undefined ? {} : { quota }),
@@ -1325,8 +1324,8 @@ export class ClaudeAccountPool extends AccountPoolCore<
   /**
    * Delete one plugin-owned account.
    *
-   * Refused for an imported snapshot, following the WorkBuddy pool's precedent
-   * for accounts it did not sign in: the card offers
+   * Refused for an imported snapshot, which this plugin did not sign in: the
+   * card offers
    * {@link removeImportedAccount} there instead. A managed account is removed
    * from the credential document as well, so the two stores cannot disagree
    * about which accounts exist — the pre-pool projection would otherwise hand

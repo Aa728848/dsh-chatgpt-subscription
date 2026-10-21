@@ -16,7 +16,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import { offloadOldestRequestImages as claudeOffload, MAX_REQUEST_IMAGE_BYTES as CLAUDE_MAX } from '../src/host/claude/mapper.ts'
 import { offloadOldestRequestImages as commandCodeOffload, MAX_REQUEST_IMAGE_BYTES as COMMAND_CODE_MAX } from '../src/host/command-code/mapper.ts'
-import { offloadOldestRequestImages as workbuddyOffload, MAX_REQUEST_IMAGE_BYTES as WORKBUDDY_MAX } from '../src/host/workbuddy/mapper.ts'
+import { offloadOldestRequestImages as glmOffload, MAX_REQUEST_IMAGE_BYTES as GLM_MAX } from '../src/host/glm-coding-plan/mapper-openai.ts'
 import { offloadOldestRequestImages as antigravityOffload, MAX_REQUEST_IMAGE_BYTES as ANTIGRAVITY_MAX } from '../src/host/antigravity/mapper.ts'
 
 interface Ref {
@@ -88,7 +88,7 @@ function omitted(messages: Message[]): number {
 const LINES = [
   { name: 'claude', offload: claudeOffload, max: CLAUDE_MAX },
   { name: 'command-code', offload: commandCodeOffload, max: COMMAND_CODE_MAX },
-  { name: 'workbuddy', offload: workbuddyOffload, max: WORKBUDDY_MAX },
+  { name: 'glm-coding-plan', offload: glmOffload, max: GLM_MAX },
   { name: 'antigravity', offload: antigravityOffload, max: ANTIGRAVITY_MAX },
 ] as const
 

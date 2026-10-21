@@ -288,7 +288,7 @@ describe('client registration', () => {
 
     expect(injectedSlots).toEqual([
       'settings.section',
-      'conversation.input.right',
+      // order 35-41 这一段：ChatGPT 自己的胶囊，加上每一条线路各一格。
       'conversation.input.right',
       'conversation.input.right',
       'conversation.input.right',
@@ -337,7 +337,6 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'antigravity-quota', order: 36 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'command-code-quota', order: 37 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'kimi-code-quota', order: 38 }),
-      expect.objectContaining({ name: 'conversation.input.right', id: 'workbuddy-quota', order: 39 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'minimax-code-quota', order: 40 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'claude-quota', order: 41 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'glm-coding-plan-quota', order: 42 }),
@@ -362,7 +361,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'workbuddy', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign'] as const
+    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -485,7 +484,7 @@ describe('client registration', () => {
           conflict: null,
         } })
       }
-      if (url.startsWith('/antigravity/api') || url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api') || url.startsWith('/workbuddy/api')) {
+      if (url.startsWith('/antigravity/api') || url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api')) {
         return Response.json({ ok: true, value: {
           authenticated: false,
           account: null,
@@ -528,13 +527,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'WorkBuddy', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none. Step Code joins the toggleable
       // side (it posts enabled to its own /settings like every other line).
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(12)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(11)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.
@@ -542,7 +541,7 @@ describe('client registration', () => {
 
       // Drilling in replaces the overview with that line's section, mounted
       // under the back bar; leaving the page means the section unmounts.
-      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/workbuddy/api/status'], [5, '/minimax-code/api/status'], [6, '/glm-coding-plan/api/status'], [7, '/claude/api/status']] as const) {
+      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/minimax-code/api/status'], [5, '/glm-coding-plan/api/status'], [6, '/claude/api/status']] as const) {
         const id: string = TAB_IDS[index]
         fetchMock.mockClear()
         await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[index]?.click() })
@@ -570,7 +569,7 @@ describe('client registration', () => {
       // and 8 others to ChatGPT wording (the sign-in button literally read
       // "使用 ChatGPT 登录"). Resolve `t` the way the real LocaleFace does — an
       // unknown key falls through to the key itself — and assert no key leaks.
-      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[5]?.click() })
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[4]?.click() })
       const minimaxText = container.querySelector('.dsh-hub-detail .dsha-page')?.textContent ?? ''
       expect(minimaxText).not.toContain('使用 ChatGPT 登录')
       expect(minimaxText).not.toContain(zh.signIn)
@@ -582,7 +581,7 @@ describe('client registration', () => {
       await act(async () => { container.querySelector<HTMLButtonElement>('.dsh-hub-back')?.click() })
 
       // The detail the user was last on survives a remount of the settings page.
-      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[7]?.click() })
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[6]?.click() })
       expect(container.querySelector('.dsh-hub-backbar-name')?.textContent).toBe('Claude')
       await act(async () => root.unmount())
       const remountRoot = createRoot(container)

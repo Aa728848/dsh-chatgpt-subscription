@@ -15,18 +15,17 @@ fallback and prompt clamp remain unchanged. Other providers retain safe defaults
 and omit unsafe ones through common/output-reservation.ts. That helper models
 only the stock policy, not user policy: constants must be reviewed on upgrades.
 Wire defaults remain provider-owned, not reduced to make compaction pass.
-Claude and WorkBuddy retain catalog-derived caps on the request path; Antigravity
+Claude retains catalog-derived caps on the request path; Antigravity
 retains the model cap before runtime-model clamping. Codex sends no output cap.
 Ollama retains its 8192 wire fallback.
 
 ## Audit
 
 Additional failing shipped defaults: Command Code moonshotai/Kimi-K2.6,
-xai/grok-4.5, xai/grok-4.6; WorkBuddy deepseek-v3-2-volc.
-WorkBuddy default (56000 context) is intrinsically too small for stock headroom,
-even without output reservation. Do not increase the advertised window to hide
-that error; configure a smaller compaction headroom/summary budget or use a
-larger supported model. Custom policy and explicit caps remain caller-owned.
+xai/grok-4.5, xai/grok-4.6. A shipped default window that is intrinsically too
+small for stock headroom must not be hidden by inflating the advertised window;
+configure a smaller compaction headroom/summary budget or use a larger supported
+model. Custom policy and explicit caps remain caller-owned.
 Claude, Antigravity and Codex shipped defaults fit; smaller overrides/live
 windows are guarded too. Ollama's catalog is live, so tests use synthetic windows.
 At W=262144 the exact stock integer retention boundary is R=184124, not the

@@ -35,8 +35,6 @@ export interface AccountPoolLabels {
    * under a minute the seconds are the only honest thing to show.
    */
   cooldownRemainingSeconds: string
-  /** Names the row of one model parked on an account. */
-  modelCooldown: string
   clearCooldown: string
   needsRelogin: string
   relogin: string
@@ -82,7 +80,6 @@ export const accountPoolZh: AccountPoolLabels = {
   cooldownLeft: '剩 {minutes} 分',
   cooldownRemaining: '剩 {minutes} 分 {seconds} 秒',
   cooldownRemainingSeconds: '剩 {seconds} 秒',
-  modelCooldown: '模型冷却',
   clearCooldown: '重置冷却',
   needsRelogin: '需重新登录',
   relogin: '重新登录',
@@ -119,7 +116,6 @@ export const accountPoolEn: AccountPoolLabels = {
   cooldownLeft: '{minutes} min left',
   cooldownRemaining: '{minutes} min {seconds}s left',
   cooldownRemainingSeconds: '{seconds}s left',
-  modelCooldown: 'Model cooldown',
   clearCooldown: 'Clear Cooldown',
   needsRelogin: 'Sign-in required',
   relogin: 'Sign in again',

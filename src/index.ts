@@ -75,8 +75,8 @@ import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVID
 import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
 import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
 import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
-// The two lines that do not persist their model catalog in model settings keep
-// it in memory; the overview reads the size from there (see `catalogTotal`).
+// The line that does not persist its model catalog in model settings keeps it
+// in memory; the overview reads the size from there (see `catalogTotal`).
 import { catalogSize as minimaxCodeCatalogSize } from './host/minimax-code/client.ts'
 import {
   MinimaxCodeCredentialStore,
@@ -84,18 +84,6 @@ import {
   registerMinimaxCodePreferenceStore,
 } from './host/minimax-code/token-store.ts'
 import { PROVIDER_ID as MINIMAX_CODE_PROVIDER_ID, PROVIDER_NAME as MINIMAX_CODE_PROVIDER_NAME } from './host/minimax-code/types.ts'
-import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
-import { WorkBuddyAccountPool } from './host/workbuddy/account-pool.ts'
-import { registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
-import { getCachedCatalog as getCachedWorkBuddyCatalog } from './host/workbuddy/client.ts'
-import {
-  FileCredentialStore as WorkBuddyCredentialStore,
-  FileModelSettingsStore as WorkBuddyModelSettingsStore,
-  WorkBuddyAtRestKeyStore,
-  registerWorkBuddyPreferenceStore,
-} from './host/workbuddy/token-store.ts'
-import { WorkBuddyUsageLedger } from './host/workbuddy/guardrails.ts'
-import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
 import { ClaudeAdapter } from './host/claude/adapter.ts'
 import { ClaudeAccountPool } from './host/claude/account-pool.ts'
 import { registerClaudeRoutes } from './host/claude/routes.ts'
@@ -137,7 +125,6 @@ import {
 import { qoderCatalogIsLive } from './host/qoder/client.ts'
 import { PROVIDER_ID as QODER_PROVIDER_ID, PROVIDER_NAME as QODER_PROVIDER_NAME } from './host/qoder/types.ts'
 import { createOpenDesignLine } from './host/opendesign/line.ts'
-import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
   MinimaxCodeCheckinService,
@@ -382,43 +369,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // model pick and the next request both see.
   const minimaxCodeModelSettings = new MinimaxCodeModelSettingsStore()
   const minimaxCodePreferences = registerMinimaxCodePreferenceStore(ctx.settings, minimaxCodeModelSettings)
-  // The account pool. This is the second line that pools a credential it does not
-  // own (WorkBuddy was the first): MiniMax Code's own `auth.json` is adopted and
-  // renewed in place but never deleted, which is what lets a user who is already
-  // signed in to the desktop app rotate between accounts without signing in twice.
+  // The account pool. This line pools a credential it does not own: MiniMax
+  // Code's own `auth.json` is adopted and renewed in place but never deleted,
+  // which is what lets a user who is already signed in to the desktop app
+  // rotate between accounts without signing in twice.
   const minimaxCodeAccountPool = new MinimaxCodeAccountPool({ store: minimaxCodeStore })
-
-  const workBuddyStore = new WorkBuddyCredentialStore()
-  // The at-rest key that opens the desktop client's `$wbEncrypted` tokens is
-  // loaded into the process before anything scans for accounts: a sealed
-  // credential is otherwise indistinguishable from a broken one.
-  // The daily token counters behind the local guardrails. Loaded up front for the
-  // same reason the at-rest key is: a guardrail that started from zero on every
-  // boot would be one a restart walks around.
-  const workBuddyUsageLedger = new WorkBuddyUsageLedger()
-  void workBuddyUsageLedger.load().catch(() => undefined)
-  const workBuddyAtRestKey = new WorkBuddyAtRestKeyStore()
-  // Loading is async and this wiring is synchronous, so it is kicked off here
-  // and awaited by every surface that is about to read credentials (the status
-  // route calls `load()`, which answers from the cache once settled).
-  void workBuddyAtRestKey.load().catch(() => null)
-  const workBuddyModelSettings = new WorkBuddyModelSettingsStore()
-  const workBuddyPreferences = registerWorkBuddyPreferenceStore(ctx.settings, workBuddyModelSettings)
-  // WorkBuddy is the line that adopts accounts it does not own: the IDE's own
-  // sign-ins join the pool beside the ones added here, so both take part in
-  // rotation, 429 cooldowns and account-level auth failures like every other
-  // line. The settings selection is read on each pick, because the card can
-  // pin or hide an account while the adapter is serving requests.
-  const workBuddyAccountPool = new WorkBuddyAccountPool({
-    store: workBuddyStore,
-    selection: () => {
-      const current = workBuddyPreferences.status()
-      return {
-        selectedAccountId: current.selectedAccountId,
-        hiddenAccountIds: current.hiddenAccountIds,
-      }
-    },
-  })
 
   const claudeStore = new ClaudeCredentialStore()
   const claudeModelSettings = new ClaudeModelSettingsStore()
@@ -702,9 +657,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       adapter: minimaxCodeAdapter,
     })
 
-    // The daily check-in scheduler (official-client recipe; both regions).
-    // Same host-owned cadence as the workbuddy line: the startup pass is the
-    // daily run, the interval covers a process that survives midnight.
+    // The daily check-in scheduler (official-client recipe; both regions). The
+    // host owns the cadence: the startup pass is the daily run, the interval
+    // covers a process that survives midnight.
     let minimaxCodeAppVersion: string | undefined
     try {
       const requireFn = createRequire(import.meta.url)
@@ -738,61 +693,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       accountPool: minimaxCodeAccountPool,
       checkin: minimaxCodeCheckin,
     }, minimaxCodeModelSettings, minimaxCodePreferences)
-
-    // WorkBuddy is the CodeBuddy subscription: this plugin reads the desktop
-    // client's own credential files, so its route is claimed like the rest.
-    const workBuddyAdapter = new WorkBuddyAdapter(
-      workBuddyStore,
-      workBuddyModelSettings,
-      workBuddyPreferences,
-      {
-        fetchFn: modelFetch.workbuddy,
-        attachments: ctx.attachments,
-        accountPool: workBuddyAccountPool,
-        usageLedger: workBuddyUsageLedger,
-      },
-    )
-    const workBuddyClaim = claimProviderRoute(ctx, {
-      providerId: WORKBUDDY_PROVIDER_ID,
-      label: WORKBUDDY_PROVIDER_NAME,
-      adapter: workBuddyAdapter,
-    })
-
-    // The daily check-in scheduler (CN billing activity). The host owns the
-    // interval; a day the process never runs is a day nothing signs in.
-    const workBuddyCheckin = new WorkBuddyCheckinService(workBuddyStore, {
-      fetchFn: proxyFetch,
-      settings: () => workBuddyPreferences.status().checkin,
-      // The preference store may still be warming up on a harness without the
-      // register seam; without this the startup pass reads shipped defaults and
-      // signs in even though the user had switched check-in off.
-      ready: () => workBuddyPreferences.ready(),
-      logger: ctx.logger,
-    })
-    const checkinTick = (): void => {
-      void workBuddyCheckin.tick().catch((error) => {
-        ctx.logger.warn(`[dsh-chatgpt-subscription] WorkBuddy check-in tick failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }
-    const checkinTimer = setInterval(checkinTick, CHECKIN_TICK_MS)
-    // The startup pass is the daily run; the day state makes a same-day
-    // restart free, and the interval covers a process that survives midnight.
-    checkinTick()
-
-    const disposeWorkBuddyRoutes = registerWorkBuddyRoutes(
-      ctx,
-      workBuddyStore,
-      workBuddyModelSettings,
-      workBuddyPreferences,
-      {
-        fetchFn: proxyFetch,
-        serving: () => workBuddyClaim.serving(),
-        conflict: () => workBuddyClaim.conflict(),
-        accountPool: workBuddyAccountPool,
-        checkin: workBuddyCheckin,
-        atRestKey: workBuddyAtRestKey,
-      },
-    )
 
     const claudeAdapter = new ClaudeAdapter(
       claudeStore,
@@ -918,10 +818,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       attachments: ctx.attachments,
     })
 
-    // The IDE can sign in or out on its own; adopting whatever its directory
-    // currently holds keeps the pool in step without a manual rescan.
-    void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
-
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -1042,8 +938,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       accounts.some((account) => account.authStatus === undefined || account.authStatus === 'ok')
     // What the overview card's "N/M models" counts. Every line already holds its
     // catalog: Antigravity, Command Code, Kimi Code and Ollama persist the last
-    // successful sync in their model settings, while Claude, WorkBuddy and
-    // MiniMax Code keep it in memory. All of these are reads of what the line
+    // successful sync in their model settings, while Claude and MiniMax Code
+    // keep it in memory. All of these are reads of what the line
     // already has — opening the settings page must not trigger a catalog fetch —
     // and a line that has never synced one reports null rather than a zero that
     // would read as "this line has no models".
@@ -1106,25 +1002,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const current = kimiCodePreferences.status()
           const accounts = await kimiCodeAccountPool.listAccounts().catch(() => [])
           const total = catalogTotal((await kimiCodeModelSettings.read()).catalogModels.length)
-          return {
-            enabled: current.enabled !== false,
-            accountCount: accounts.length,
-            authenticated: routable(accounts),
-            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
-            totalModelCount: total,
-          }
-        },
-      },
-      {
-        id: 'workbuddy',
-        providerId: WORKBUDDY_PROVIDER_ID,
-        canToggle: true,
-        read: async () => {
-          const current = workBuddyPreferences.status()
-          const accounts = await workBuddyAccountPool.listAccounts().catch(() => [])
-          // This line does not persist its catalog in model settings, so the
-          // in-memory cache is the one that knows how many models exist.
-          const total = catalogTotal(getCachedWorkBuddyCatalog().length)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
@@ -1386,9 +1263,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeMinimaxCodeRoutes()
       minimaxCodeClaim.dispose()
       clearInterval(minimaxCodeCheckinTimer)
-      clearInterval(checkinTimer)
-      disposeWorkBuddyRoutes()
-      workBuddyClaim.dispose()
       disposeClaudeRoutes()
       claudeClaim.dispose()
       disposeGlmCodingPlanRoutes()
@@ -1559,35 +1433,7 @@ export {
   getCachedQuota as getKimiCodeQuota,
 } from './host/kimi-code/client.ts'
 export { getKimiCodeWebStatus, registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
-export { WorkBuddyAdapter, classifyFailure as classifyWorkBuddyFailure } from './host/workbuddy/adapter.ts'
-export {
-  FileCredentialStore as WorkBuddyCredentialStore,
-  FileModelSettingsStore as WorkBuddyModelSettingsStore,
-  codeBuddyAuthDir,
-  modelSettingsPath as workBuddyModelSettingsPath,
-  parseCredentialFile as parseWorkBuddyCredential,
-  registerWorkBuddyPreferenceStore,
-  scanCredentials as scanWorkBuddyCredentials,
-} from './host/workbuddy/token-store.ts'
-export {
-  fetchAccountQuota as fetchWorkBuddyQuota,
-  clearCachedQuota as clearWorkBuddyQuota,
-  getCachedQuota as getWorkBuddyQuota,
-  clearCachedCatalog as clearWorkBuddyCatalog,
-  loadConfigCatalog as loadWorkBuddyModels,
-  parseConfigModels as parseWorkBuddyConfigModels,
-  refreshCredentials as refreshWorkBuddyCredentials,
-  parseBilling as parseWorkBuddyBilling,
-} from './host/workbuddy/client.ts'
-export { getWorkBuddyWebStatus, registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
-export { WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 export { MinimaxCodeCheckinService } from './host/minimax-code/checkin.ts'
-export {
-  FALLBACK_MODELS as WORKBUDDY_MODELS,
-  WORKBUDDY_MODEL_IDS,
-  resolveWorkBuddyModel,
-  modelsForRegion as workBuddyModelsForRegion,
-} from './host/workbuddy/model-catalog.ts'
 export {
   ClaudeAdapter,
   codeForFailure as claudeCodeForFailure,

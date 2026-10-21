@@ -945,7 +945,7 @@ export function processGlmAnthropicStreamLine(
     }
 
     // GLM 家族在兼容网关上可能用 `reasoning_content` 而不是 thinking 块
-    // （同族两条线的 OpenAI 面都走这个字段，见 `../workbuddy/mapper.ts:627`）。
+    // （同族线路的 OpenAI 面都走这个字段）。
     // 本面到底发哪一种没有实测样本（**未验证**），所以两种都认：
     // 认错方向的代价是把思考文本当正文显示。
     const reasoningField = asString(delta.reasoning_content) ?? asString(delta.reasoning)

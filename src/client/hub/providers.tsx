@@ -23,7 +23,6 @@ import { CodexSubscriptionSection } from '../CodexSubscriptionSection.tsx'
 import { AntigravitySection } from '../antigravity/AntigravitySection.tsx'
 import { CommandCodeSection } from '../command-code/CommandCodeSection.tsx'
 import { KimiCodeSection } from '../kimi-code/KimiCodeSection.tsx'
-import { WorkBuddySection } from '../workbuddy/WorkBuddySection.tsx'
 import { MinimaxCodeSection } from '../minimax-code/MinimaxCodeSection.tsx'
 import { GlmCodingPlanSection } from '../glm-coding-plan/GlmCodingPlanSection.tsx'
 import { ClaudeSection } from '../claude/ClaudeSection.tsx'
@@ -112,12 +111,6 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: 'Kimi Code',
     setEnabled: (enabled) => postLineSettings('/kimi-code/api', { enabled }),
     renderDetail: ({ onModelChange }) => <KimiCodeSection onModelChange={onModelChange} />,
-  },
-  {
-    id: 'workbuddy',
-    name: 'WorkBuddy',
-    setEnabled: (enabled) => postLineSettings('/workbuddy/api', { enabled }),
-    renderDetail: ({ onModelChange }) => <WorkBuddySection onModelChange={onModelChange} />,
   },
   {
     id: 'minimax-code',

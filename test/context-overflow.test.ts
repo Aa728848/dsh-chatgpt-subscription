@@ -6,8 +6,7 @@ import { createStreamState as minimaxState, processMinimaxStreamLine } from '../
 import { createStreamState as kimiState, processOpenAIStreamLine, processAnthropicStreamLine } from '../src/host/kimi-code/mapper.ts'
 
 import { createStreamState as commandState, processOpenAIStreamLine as commandOpenAI, processAnthropicStreamLine as commandAnthropic, processResponsesStreamLine } from '../src/host/command-code/mapper.ts'
-import { createStreamState as buddyState, processStreamLine as buddyStream } from '../src/host/workbuddy/mapper.ts'
-import { classifyFailure as buddyFailure } from '../src/host/workbuddy/adapter.ts'
+import { createStreamState as stepState, processStreamLine as stepStream, classifyStepCodeFailure as stepFailure } from '../src/host/step-code/mapper.ts'
 import { createStreamState as claudeState, processStreamLine as claudeStream } from '../src/host/claude/mapper.ts'
 import { toLlmError } from '../src/host/claude/adapter.ts'
 import { classifyFailure as claudeFailure } from '../src/host/claude/client.ts'
@@ -59,7 +58,7 @@ describe('provider context overflow classification', () => {
   })
   it.each(overflow)('preserves structured SSE overflow %j', error => {
     const frame = 'data: ' + JSON.stringify({ type: 'error', error })
-    expect(buddyFailure(400, JSON.stringify({ error })).code).toBe('CONTEXT_WINDOW_EXCEEDED')
+    expect(stepFailure(400, JSON.stringify({ error })).code).toBe('CONTEXT_WINDOW_EXCEEDED')
     if ('message' in error && error.message !== 'invalid request') {
       expect(toLlmError(claudeFailure(400, JSON.stringify({ error }))).code).toBe('CONTEXT_WINDOW_EXCEEDED')
     }
@@ -67,7 +66,7 @@ describe('provider context overflow classification', () => {
       () => commandOpenAI(frame, commandState('openai')),
       () => commandAnthropic(frame, commandState('anthropic')),
       () => processResponsesStreamLine(frame, commandState('responses')),
-      () => buddyStream(frame, buddyState()),
+      () => stepStream(frame, stepState()),
       () => antiStream(frame, antiState()),
       () => antiStream('data: ' + JSON.stringify({ response: { error } }), antiState()),
       () => claudeStream(frame, claudeState()),

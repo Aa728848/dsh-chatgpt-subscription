@@ -147,37 +147,6 @@ describe('AccountPoolSection', () => {
     expect(badge()).toBe('')
   })
 
-  it('draws each parked model its own row, and none when nothing is parked', () => {
-    const html = render({
-      accounts: [account({
-        modelCooldowns: [
-          { model: 'glm-5.3', cooldownUntil: now + 4 * 60_000 + 32_000 },
-          { model: 'kimi-k3', cooldownUntil: now + 42_000 },
-        ],
-      })],
-    })
-    // One row per parked model, each with its own remaining time: a model park
-    // is not the account's own cooldown, and the account keeps serving the
-    // models that are not parked.
-    expect(html.match(/dsha-account-model-cooldown-row/g)).toHaveLength(2)
-    expect(html).toContain('glm-5.3')
-    expect(html).toContain('kimi-k3')
-    expect(html).toContain('剩 4 分 32 秒')
-    expect(html).toContain('剩 42 秒')
-    expect(html).toContain(accountPoolZh.modelCooldown)
-
-    // An account that parks nothing grows no row at all.
-    const plain = render({ accounts: [account()] })
-    expect(plain).not.toContain('dsha-account-model-cooldown-row')
-    expect(plain).not.toContain(accountPoolZh.modelCooldown)
-
-    // A park that has already lifted is not drawn either.
-    const lifted = render({
-      accounts: [account({ modelCooldowns: [{ model: 'glm-5.3', cooldownUntil: now - 1_000 }] })],
-    })
-    expect(lifted).not.toContain('glm-5.3')
-  })
-
   it('flags an account that needs another sign-in and only offers relogin when handled', () => {
     const withoutHandler = render({
       accounts: [account({ authStatus: 'expired', authFailedReason: 'Refresh token rejected' })],
@@ -228,9 +197,9 @@ describe('AccountPoolSection', () => {
     expect(html).toContain('disabled=""')
   })
   it('never offers Delete for an account the plugin does not own', () => {
-    // WorkBuddy adopts the CodeBuddy desktop client's own accounts. Deleting
-    // one would strand the IDE's session, so the card must not offer it and the
-    // provider supplies its own action instead.
+    // A line that adopts a desktop client's own accounts is not their owner.
+    // Deleting one would strand that client's session, so the card must not
+    // offer it and the provider supplies its own action instead.
     const foreign = render({ accounts: [account({ removable: false })] })
     expect(foreign).not.toContain(accountPoolZh.deleteAccount)
 

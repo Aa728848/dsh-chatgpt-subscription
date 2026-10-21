@@ -1,7 +1,7 @@
 /**
  * Step Code（Step Plan 订阅）设置卡片的状态、副作用与动作。
  *
- * 与 GLM / WorkBuddy / MiniMax Code 同样的分工：这个文件是行为，StepCodeSection.tsx
+ * 与 GLM / MiniMax Code 同样的分工：这个文件是行为，StepCodeSection.tsx
  * 是渲染，两者之间只通过下面这一个具名结构交接，卡片因此保持「只画」的状态。
  *
  * 一条设计约束贯穿全文件：**能力与文案都不在本文件重算**。模型行的一句话描述来自
@@ -65,7 +65,6 @@ function accountPoolLabelsFor(t: Translate): AccountPoolLabels {
     cooldownLeft: t('cooldownLeft'),
     cooldownRemaining: t('cooldownRemaining'),
     cooldownRemainingSeconds: t('cooldownRemainingSeconds'),
-    modelCooldown: t('modelCooldown'),
     clearCooldown: t('clearCooldown'),
     needsRelogin: t('needsRelogin'),
     relogin: t('relogin'),

@@ -83,8 +83,8 @@ export function selectBadgeFacts(
  * 输入框右侧的额度胶囊本体。
  *
  * **槽位号由波次 4 注册，本文件不注册任何槽位**：conversation.input.right 现有
- * 35–42（codex → antigravity → command-code → kimi-code → workbuddy → minimax-code →
- * claude → glm-coding-plan），本线路取下一个号 43，id 沿用命名习惯
+ * 35–42（codex → antigravity → command-code → kimi-code → minimax-code → claude →
+ * glm-coding-plan，39 号空出），本线路取下一个号 43，id 沿用命名习惯
  * 'step-code-quota'，locale 为 NS_STEP_CODE。顺延而不是插号：给新线路重排既有号会让
  * 已上线线路的槽位位置无谓地变一次。
  */

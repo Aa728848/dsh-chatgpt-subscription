@@ -4,8 +4,8 @@ import { CommandCodeAdapter } from '../src/host/command-code/adapter.ts'
 import { FALLBACK_MODELS as COMMAND, maxOutputTokensFor as commandCap } from '../src/host/command-code/types.ts'
 import { ClaudeAdapter } from '../src/host/claude/adapter.ts'
 import { CLAUDE_MODELS } from '../src/host/claude/model-catalog.ts'
-import { WorkBuddyAdapter } from '../src/host/workbuddy/adapter.ts'
-import { FALLBACK_MODELS as WORKBUDDY } from '../src/host/workbuddy/model-catalog.ts'
+import { GlmCodingPlanAdapter } from '../src/host/glm-coding-plan/adapter.ts'
+import { GLM_MODEL_CATALOG as GLM } from '../src/host/glm-coding-plan/model-catalog.ts'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import { MODELS as ANTIGRAVITY } from '../src/host/antigravity/types.ts'
 import { OllamaAdapter } from '../src/host/ollama/adapter.ts'
@@ -24,7 +24,7 @@ function valid(window: number, cap: number) {
 const rows = [
   ...COMMAND.map(m => ({ provider: 'command', model: m.id, window: m.contextWindow, cap: commandCap(m.id) })),
   ...CLAUDE_MODELS.map(m => ({ provider: 'claude', model: m.id, window: m.contextWindow, cap: m.maxTokens })),
-  ...WORKBUDDY.map(m => ({ provider: 'workbuddy', model: m.id, window: m.contextWindow, cap: m.maxTokens })),
+  ...GLM.map(m => ({ provider: 'glm', model: m.id, window: m.defaultContextWindow, cap: m.defaultMaxTokens })),
   ...ANTIGRAVITY.map(m => ({ provider: 'antigravity', model: m.id, window: m.contextWindow, cap: m.maxTokens })),
   ...CODEX_MODEL_CATALOG.map(m => ({ provider: 'codex', model: m.id, window: m.contextWindow, cap: codexModelMaxTokens(m.id) })),
   ...[80_000, 128_000, 262_144].map(window => ({ provider: 'ollama', model: 'live-model', window, cap: 8192 })),
@@ -41,14 +41,14 @@ async function resolve(row: typeof rows[number], window = row.window) {
   }
   const adapter = row.provider === 'command' ? new CommandCodeAdapter()
     : row.provider === 'claude' ? new ClaudeAdapter()
-      : row.provider === 'workbuddy' ? new WorkBuddyAdapter() : new OllamaAdapter()
+      : row.provider === 'glm' ? new GlmCodingPlanAdapter() : new OllamaAdapter()
   // Isolate metadata resolution from disk, credentials and network. Real methods
   // under test are resolveModel/prepareCall, including every provider boundary.
   const seam = adapter as any
   if (row.provider !== 'ollama') vi.spyOn(seam, 'settings').mockResolvedValue(settings)
   if (row.provider === 'command') vi.spyOn(seam, 'catalog').mockResolvedValue(COMMAND)
   if (row.provider === 'claude') vi.spyOn(seam, 'primaryAccount').mockResolvedValue(null)
-  if (row.provider === 'workbuddy') vi.spyOn(seam, 'credentials').mockResolvedValue(null)
+  if (row.provider === 'glm') vi.spyOn(seam, 'credentialFor').mockResolvedValue(null)
   if (row.provider === 'ollama') vi.spyOn(seam, 'catalog').mockResolvedValue([{ id: row.model, contextWindow: window }])
   return (await adapter.prepareCall(row.provider, row.model)).model
 }
@@ -61,7 +61,7 @@ describe('all provider fixed output reservations', () => {
     if (valid(row.window, 0)) expect(valid(row.window, info.defaultMaxTokens ?? 0)).toBe(true)
   })
 
-  it.each(['command', 'claude', 'workbuddy', 'antigravity', 'codex', 'ollama'])(
+  it.each(['command', 'claude', 'glm', 'antigravity', 'codex', 'ollama'])(
     '%s handles a smaller effective window without inventing capacity', async provider => {
       const row = rows.find(r => r.provider === provider)!
       const window = 80_000

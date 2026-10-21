@@ -64,7 +64,6 @@ describe('Step Code 线路身份', () => {
       'command-code',
       'claude-subscription',
       'kimi-code',
-      'workbuddy-subscription',
       'antigravity',
       'ollama',
       'minimax-code',
@@ -72,7 +71,7 @@ describe('Step Code 线路身份', () => {
     ]
     for (const other of existing) expect(STEP_CODE_PROVIDER_ID).not.toBe(other)
     // 线路的短名也不能撞：注册 id 撞车会让适配器抢占同一条 Provider 路由。
-    for (const short of ['claude', 'workbuddy', 'step', 'stepfun']) {
+    for (const short of ['claude', 'step', 'stepfun']) {
       expect(STEP_CODE_PROVIDER_ID).not.toBe(short)
     }
   })

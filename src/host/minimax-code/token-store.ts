@@ -981,7 +981,7 @@ function parseMinimaxCodeModelSettings(value: unknown): MinimaxCodeModelSettings
  * Normalize the check-in half of the settings document.
  *
  * Absent means enabled, matching the sibling lines' scheduler default: a user
- * who never opened the card gets the same behaviour a fresh workbuddy install
+ * who never opened the card gets the same behaviour a fresh install
  * has, and only an explicit `false` parks the scheduler.
  */
 function parseCheckinSettings(value: unknown): { enabled: boolean } {

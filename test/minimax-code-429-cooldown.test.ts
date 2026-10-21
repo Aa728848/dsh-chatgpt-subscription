@@ -26,7 +26,7 @@ import { resetRefreshRejections } from '../src/host/minimax-code/oauth.ts'
  * touching the pool, so once one account's Token Plan ran out EVERY later request kept
  * being served by that same account — the pool selected it each time and had no way to
  * learn it had been refused. Every sibling line cools the account first
- * (command-code:513-518, ollama:318-322, workbuddy:376-388, kimi-code:834-863,
+ * (command-code:513-518, ollama:318-322, kimi-code:834-863,
  * responses-client:280-292, claude:761-774); these cases pin that the same reaction
  * happens here now, and pin the two places it must NOT happen.
  *
@@ -302,7 +302,7 @@ describe('a 429 the pool never heard about', () => {
     const thrown = await failureOf(adapter)
 
     // The judgment, stated: every sibling line cools on ANY 429 — the wording does
-    // not gate the cooldown (command-code:513, ollama:318, workbuddy:378,
+    // not gate the cooldown (command-code:513, ollama:318,
     // responses-client:280). Back-pressure is short-lived, 15 minutes is the length
     // all of them agree on, and leaving an account IN rotation while the service is
     // refusing it is what produced the bug. What the wording DOES decide is
@@ -423,9 +423,9 @@ describe('the same 429 on a line with no pool', () => {
 /**
  * A pool that refused one account and had another one answer the SAME request.
  *
- * The seven sibling lines all cool a refused account and then rotate onto another
+ * The six sibling lines all cool a refused account and then rotate onto another
  * one inside the caller's single request (command-code:513-518, kimi-code:834-863,
- * ollama:315-322, workbuddy:376-388, responses-client:276-292, claude:761-774).
+ * ollama:315-322, responses-client:276-292, claude:761-774).
  * This line cooled the account and then threw, so a pool of two accounts could
  * never use the second one to answer a turn the first one refused: the user was
  * shown one account's quota error while the pool sat there with an account left.

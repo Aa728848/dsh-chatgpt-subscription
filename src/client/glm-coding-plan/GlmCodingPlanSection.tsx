@@ -2,7 +2,7 @@
  * GLM（ZCode 账号）设置卡片。
  *
  * 纯渲染：状态、副作用与请求都在 'useGlmCodingPlanSection.ts'，两者之间只通过
- * 一个具名结构交接（WorkBuddySection / MinimaxCodeSection 同款分工）。
+ * 一个具名结构交接（MinimaxCodeSection / StepCodeSection 同款分工）。
  *
  * 三条需求方的 UI 硬要求由现成共享组件承担，本文件没有新建任何 UI 组件：
  *

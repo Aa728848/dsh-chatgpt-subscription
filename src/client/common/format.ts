@@ -6,8 +6,8 @@
  * 1K floor and so rendered a zero as "0K" while its siblings rendered "0". The
  * parse has to mean the same thing on every line — it takes free-text user input
  * that feeds the overflow judgement — so this is the one place it lives. The
- * date helpers were copied the same way; WorkBuddy's countdown is here for the
- * same reason.
+ * date helpers were copied the same way; the countdown to a reset instant is
+ * here for the same reason.
  */
 
 /**

@@ -5,14 +5,14 @@
  * model, a free-text capacity input, a save button, a restore button, and a
  * batch restore. Only these things ever differed between them —
  *
- *   - the words (each card's dictionary, plus WorkBuddy's hardcoded `tokens`
- *     and the hardcoded English `context window` input label four of them carry);
+ *   - the words (each card's dictionary, plus a hardcoded `tokens` unit and the
+ *     hardcoded English `context window` input label four of them carry);
  *   - whether a row shows the model's effective window beside the name when it
  *     exceeds the model's default, and which stylesheet class that figure wears;
  *   - whether the capacity input carries an `aria-label` at all (Antigravity's
  *     does not);
  *   - how a save or a restore is carried out, which stays in each card because
- *     WorkBuddy normalizes its status payload and Antigravity confirms the batch
+ *     one line normalizes its status payload and Antigravity confirms the batch
  *     restore first.
  *
  * Everything the rows and callbacks need is therefore the whole interface: the

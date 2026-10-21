@@ -13,7 +13,7 @@ import { BRAND_MARKS, type BrandMarkKey, type BrandMarkSvg } from './brand-svg.t
 
 export type HubProviderId =
   | 'chatgpt' | 'antigravity' | 'command-code' | 'kimi-code'
-  | 'workbuddy' | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
+  | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
   | 'step-code' | 'cline-pass' | 'qoder' | 'opendesign'
 
 /**
@@ -154,7 +154,6 @@ export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   antigravity: { mark: 'gemini', tile: '#3186FF' },
   'command-code': { monogram: '>_', color: '#7C6AEF', tile: '#7C6AEF' },
   'kimi-code': { mark: 'kimi', color: '#1F1F1F', tile: '#1783FF' },
-  workbuddy: { mark: 'tencent', tile: '#0055E9' },
   'minimax-code': { mark: 'minimax', tile: '#E2167E' },
   // 底砖色仍是既有那块品牌色；标记换成官方那三条 path 之后它是 currentColor，
   // 所以补一个白字压砖，否则深蓝底上那枚标记读不出来。

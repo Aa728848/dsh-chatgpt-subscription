@@ -21,7 +21,7 @@
  * \`/models\` and \`/settings\` are the model-settings half every sibling line has and
  * this one shipped without. They are two names for one route because the sibling
  * cards disagree about which to call: kimi-code and claude call it \`/models\`,
- * workbuddy and command-code call it \`/settings\`. Serving both costs one string
+ * command-code calls it \`/settings\`. Serving both costs one string
  * comparison and removes a client-side special case.
  */
 
@@ -82,7 +82,7 @@ import { minimaxVideoHistory, type MinimaxVideoHistoryPort } from './video-histo
 import type { MinimaxCodeResetResultDto } from '../../shared/minimax-code-contracts.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 
-/** Path the sibling lines register (\`/kimi-code/api\`, \`/workbuddy/api\`). */
+/** Path the sibling lines register (\`/kimi-code/api\`, \`/claude/api\`). */
 const MAX_BODY_BYTES = 64 * 1024
 
 /** The last sign-in this process started, so /status can render it. */
@@ -635,9 +635,9 @@ export function registerMinimaxCodeRoutes(
         // Sign-out is scoped to what this plugin owns. MiniMax Code's own
         // `auth.json` is the desktop app's session, not this plugin's: revoking
         // its refresh token would sign the user out of the application they are
-        // running, and deleting the file would do the same. That is the
-        // WorkBuddy precedent for a credential this plugin reads but does not
-        // own (desktop accounts there are hidden, never deleted). So a sign-out
+        // running, and deleting the file would do the same — and so would
+        // revoking a credential this plugin reads but does not own (such
+        // accounts are hidden, never deleted). A sign-out
         // revokes and deletes only when the credential in force is the plugin's
         // own file; a native credential is reported as still in force instead of
         // being silently destroyed.

@@ -132,12 +132,12 @@ export function extractTurn18() {
   const s = readSession(FILE)
   const events = s.events.filter((e) => e.obj && typeof e.obj.seq === 'number').sort((a, b) => a.obj.seq - b.obj.seq)
 
-  // The workbuddy request header: exact config + the exact tools array.
+  // The historical request header: exact config + the exact tools array.
   let header = null
   for (const e of events) {
-    if (e.obj.type === 'request/header' && e.obj.data?.header?.config?.provider === 'workbuddy-subscription') header = e.obj.data.header
+    if (e.obj.type === 'request/header') header = e.obj.data.header
   }
-  if (!header) throw new Error('no workbuddy request/header found')
+  if (!header) throw new Error('no request/header found')
 
   // turn/start seq for turn 18, and its system message.
   const turn18Start = events.find((e) => e.obj.type === 'turn/start' && e.obj.data?.turn === 18)

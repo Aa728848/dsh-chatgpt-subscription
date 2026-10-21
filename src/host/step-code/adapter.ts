@@ -1,7 +1,7 @@
 /**
  * Step Code（Step Plan 订阅）线路的 DSH 适配器。
  *
- * 形状与 GLM / WorkBuddy 同构（`extends LlmAdapter`：`listModels` / `resolveModel` /
+ * 形状与 GLM 同构（`extends LlmAdapter`：`listModels` / `resolveModel` /
  * `prepareCall` / `stream` / `catalog` / `credentialFor`），但它**不碰任何协议细节**：
  *
  * - 请求体、流解析、用量与错误分类全部来自 `./mapper.ts`；

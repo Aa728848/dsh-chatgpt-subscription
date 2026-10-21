@@ -23,10 +23,8 @@ export const DIAGNOSTIC_PROVIDERS = [
   'kimi-code',
   'minimax-code',
   'command-code',
-  'workbuddy-subscription',
   'ollama',
   'claude',
-  'workbuddy',
   'codex',
   // 第九条线路：与 CONTROLLED_PROVIDERS 一样，「诊断里认识这条线路」是一条注册点。
   'glm-coding-plan',
@@ -52,7 +50,6 @@ export const KNOWN_WIRE_ENDPOINTS = [
   'stream_generate_content',
   'ollama_chat',
   'ollama_generate',
-  'workbuddy_chat',
   'unknown',
 ] as const
 

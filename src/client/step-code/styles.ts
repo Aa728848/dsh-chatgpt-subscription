@@ -9,7 +9,7 @@ export const STYLE_ID = 'dsh-step-code-settings-style'
  * 负责，账号卡与其配额条（.dsha-account-*）由 common/styles.ts 负责，基础控件
  * （.dsha-page / .dsha-group / .dsha-row / 计量条 .dsha-meter-* 等）由兄弟线路的安装器
  * 负责；本卡直接用它们，不在这里再写一遍。.dsha-account-add-actions 同样沿用
- * workbuddy/styles.ts 的那份声明。
+ * glm-coding-plan/styles.ts 随安装器带出的那份共享声明。
  *
  * 本文件只声明三样别处没有的东西：
  *

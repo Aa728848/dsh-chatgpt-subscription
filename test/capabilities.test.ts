@@ -31,7 +31,6 @@ describe('provider capability matrix (legacy inventory compatibility)', () => {
       'kimi-code',
       'minimax-code',
       'ollama',
-      'workbuddy',
     ])
   })
 

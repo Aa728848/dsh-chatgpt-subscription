@@ -44,7 +44,6 @@ const SHARED_COOLDOWN_KEYS = [
   'cooldownLeft',
   'cooldownRemaining',
   'cooldownRemainingSeconds',
-  'modelCooldown',
 ] as const satisfies readonly (keyof AccountPoolLabels)[]
 
 /** Every shared label the card renders, in the order the two lists name them. */
@@ -53,12 +52,11 @@ const SHARED_KEYS = [...SHARED_QUOTA_KEYS, ...SHARED_COOLDOWN_KEYS]
 /**
  * Tabs whose locale dictionary carries the shared set (spread in `locales.ts`).
  *
- * WorkBuddy is deliberately absent: its tab is Chinese-only and it spreads the
- * shared set inside its own card instead — the module-private `accountPoolLabels`
- * in `useWorkBuddySection.ts` (where the card's state and actions live), which
- * overrides four keys on purpose. A locale entry there cannot shadow a shared
- * label, and the four overrides sit in one small function where they are
- * visible.
+ * A tab that does not spread the shared set there is deliberately absent from
+ * this table: it keeps its labels module-private inside its own card instead
+ * (where the card's state and actions already live) and overrides the few keys
+ * it means to override. A locale entry there cannot shadow a shared label, and
+ * the overrides sit in one small function where they are visible.
  */
 const TABS: Record<string, { zh: Record<string, string>; en: Record<string, string> }> = {
   chatgpt: { zh: chatgptZh, en: chatgptEn },

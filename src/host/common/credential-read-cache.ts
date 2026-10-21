@@ -31,9 +31,8 @@ export async function fileCredentialIdentity(path: string): Promise<string | nul
  *
  * A time bucket is the honest substitute: a burst of reads inside one bucket
  * shares a single keyring lookup, and the bucket bounds how long a write from
- * another process can go unnoticed. Fifteen seconds matches the scan cache the
- * WorkBuddy store already keeps, and stays far below the polling interval of
- * every surface that reads these credentials.
+ * another process can go unnoticed. Fifteen seconds stays far below the polling
+ * interval of every surface that reads these credentials.
  */
 export async function keyringCredentialIdentity(ttlMs: number): Promise<string> {
   return `bucket:${Math.floor(Date.now() / ttlMs)}`

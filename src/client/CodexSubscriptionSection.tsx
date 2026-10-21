@@ -220,7 +220,6 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     cooldownLeft: t('cooldownLeft'),
     cooldownRemaining: t('cooldownRemaining'),
     cooldownRemainingSeconds: t('cooldownRemainingSeconds'),
-    modelCooldown: t('modelCooldown'),
     clearCooldown: t('clearCooldown'),
     needsRelogin: t('needsRelogin'),
     relogin: t('relogin'),

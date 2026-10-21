@@ -48,7 +48,7 @@ export const MINIMAX_CODE_REASONING_EFFORTS: readonly MinimaxCodeReasoningEffort
  * 路由前缀（host 暴露、client 消费）。
  *
  * 与其余各订阅线路一致：每条线路把自己的设置面挂在 `/<line>/api` 下
- * （antigravity / claude / command-code / kimi-code / workbuddy 都是如此），
+ * （antigravity / claude / command-code / kimi-code 都是如此），
  * 而不是挂到 Codex 那条线路的 `/api/dsh-chatgpt-subscription` 前缀下面。
  * 唯一的 `/api/dsh-chatgpt-subscription` 前缀属于 Codex 自己的路由表。
  */
@@ -144,7 +144,7 @@ export interface MinimaxCodeModelOption {
  * 每日签到偏好。
  *
  * 签到面同时覆盖 cn 与 global 两个区域（官方 CLI 的 public-gateway 对两个
- * region 各有源站），因此这里不像 workbuddy 那样只限国区：账号自己的
+ * region 各有源站），因此这里不只限国区：账号自己的
  * region 决定走哪个源站。没有可配置的窗口：宿主启动后的第一次 tick
  * 就是当天签到。
  */

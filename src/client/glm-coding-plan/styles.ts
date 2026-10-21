@@ -11,8 +11,9 @@ export const STYLE_ID = 'dsh-glm-coding-plan-settings-style'
  * 本文件只声明没有兄弟线路共用过的东西：登录流程块、兜底入口行与手工粘贴面板、
  * 等宽文本、模型行右侧的窗口数字，以及「导入的登录态」徽标。
  *
- * 两区登录入口复用的 .dsha-account-add-actions 由 workbuddy/styles.ts 声明；
- * Claude 卡片同样直接用它而不在自己文件里重复声明，本卡沿用同一做法。
+ * 两区登录入口复用的 .dsha-account-add-actions 是跨线路共享的声明，现在随本文件
+ * 一起安装；Claude / Step Code / Qoder / Cline Pass / OpenDesign / Codex 卡片都直接
+ * 用它而不在自己文件里重复声明，本卡沿用同一做法。
  */
 export function installGlmCodingPlanStyles(): void {
   installPluginStyle('glm-coding-plan', `
@@ -31,5 +32,12 @@ export function installGlmCodingPlanStyles(): void {
 .dshglm-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
 .dshglm-model-meta{color:var(--dsw-alias-label-tertiary);font-size:11px;margin-left:5px}
 .dsha-badge.glm-adopted{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 16%,var(--dsw-alias-bg-layer-1));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 45%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary)}
+
+/* 跨线路共享的登录入口按钮行：两区登录入口把多个「添加账号」按钮排进同一行，
+   按钮沿用基础 .dsha-btn 的形状，只在这里统一换成信息色填充。原先是另一张卡片的
+   样式表带出来的，那张卡片下线后这份声明移到这里，选择器与取值一字未改。 */
+.dsha-account-add-actions{display:flex;flex-wrap:wrap;gap:8px}
+.dsha-account-add-actions .dsha-btn{background:var(--dsw-alias-button-info-fill,#397ee8);border-color:transparent;color:var(--dsw-alias-button-info-label,#fff)}
+.dsha-account-add-actions .dsha-btn:hover:not(:disabled){opacity:.9;background:var(--dsw-alias-button-info-fill,#397ee8)}
 `, STYLE_ID)
 }

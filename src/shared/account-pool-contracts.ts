@@ -23,21 +23,6 @@ export type AccountRotationStrategy = 'sequential' | 'round-robin' | 'sticky'
  */
 export type AccountAuthStatus = 'ok' | 'expired' | 'invalid'
 
-/**
- * One model parked on one account, with the instant the park lifts.
- *
- * A provider that meters an account and a MODEL over a window parks the
- * MODEL rather than the whole account, so the account keeps serving every
- * other model it has. The card cannot draw that from the account's own
- * cooldown - the account is eligible - so the park is reported on its own.
- */
-export interface PoolAccountModelCooldownDto {
-  /** Model id, as the provider names it. */
-  model: string
-  /** Unix milliseconds the park lifts. */
-  cooldownUntil: number
-}
-
 /** One account as the settings card renders it. Never carries a secret. */
 export interface PoolAccountSummaryDto {
   id: string
@@ -50,16 +35,6 @@ export interface PoolAccountSummaryDto {
   /** Unix milliseconds a 429 cooldown lifts; absent when the account is eligible. */
   cooldownUntil?: number
   cooldownReason?: string
-  /**
-   * Models this account is currently parked on.
-   *
-   * Distinct from the account's own cooldown above: the account can still
-   * serve every model that is not named here, so a card that only drew the
-   * account cooldown would report the account as available while the model
-   * the request wants is the one that is refused. Absent means the account
-   * has no parked model.
-   */
-  modelCooldowns?: PoolAccountModelCooldownDto[]
   /** Permanent auth state; `ok` or absent means routable. */
   authStatus?: AccountAuthStatus
   authFailedReason?: string

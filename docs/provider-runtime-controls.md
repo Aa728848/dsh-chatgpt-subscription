@@ -12,7 +12,7 @@ $env:DSH_COMMAND_CODE_ZDR = '1'
 
 ### Concurrency
 
-`DSH_PROVIDER_CONCURRENCY` accepts a JSON object with `default`, `queueTimeoutMs`, and any of: `codex-chatgpt`, `claude`, `antigravity`, `kimi-code`, `minimax-code`, `command-code`, `workbuddy`, `ollama`. Values are nonnegative integers. A zero/missing limit disables limiting; a zero queue timeout disables that timeout. Unknown keys and invalid values fail configuration validation.
+`DSH_PROVIDER_CONCURRENCY` accepts a JSON object with `default`, `queueTimeoutMs`, and any of: `codex-chatgpt`, `claude`, `antigravity`, `kimi-code`, `minimax-code`, `command-code`, `ollama`. Values are nonnegative integers. A zero/missing limit disables limiting; a zero queue timeout disables that timeout. Unknown keys and invalid values fail configuration validation.
 
 Limits apply per provider and credential fingerprint to generation POST requests, across models using the same credential. Slots remain held until response EOF, cancellation, abort, or error. Auth/token refresh/catalog/quota requests bypass the gate. Credentials are not logged; token rotation creates a new scope, so this is deliberately credential-scoped, not a guaranteed account-wide ceiling across refreshed tokens or separate host processes.
 

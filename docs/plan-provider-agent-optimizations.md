@@ -2,7 +2,7 @@
 
 ## 1. 目标与范围
 
-以审计基线 fd501cb 为起点，覆盖 ChatGPT/Codex、Claude、Antigravity、Kimi Code、MiniMax Code、Command Code、WorkBuddy、Ollama 八条线路。优先修复协议正确性，再优化模型状态回放、缓存、传输及多 Agent 调度。
+以审计基线 fd501cb 为起点，覆盖 ChatGPT/Codex、Claude、Antigravity、Kimi Code、MiniMax Code、Command Code、Ollama 七条线路。优先修复协议正确性，再优化模型状态回放、缓存、传输及多 Agent 调度。
 
 本文件是实施计划，不代表能力已实现或线上验证通过。本轮审计未发送账号探测请求。实施前重新核对最新源码，避免重复建设。
 
@@ -160,12 +160,10 @@
 | Kimi | 两种 wire 差异提示、动态工具历史一致性 | 不声称协议等价；不盲补被拒采样参数 |
 | MiniMax | 回放与缓存验证产品化 | 先完成 W4，不照搬 Claude 签名要求 |
 | Command Code | 缓存透传、模型级 thinking 策略 | 目录驱动，观察 usage，不无条件加旧 beta 头 |
-| WorkBuddy | 工具历史配对、错误分类、动态目录 | 社区错误码需核实，不伪造工具成功结果 |
 | Ollama | thinking 与能力发现 | Cloud 和 Local 接口分别确认 |
 
 关键限制：
 
-- WorkBuddy 已忽略空 finish_reason，不重复修复，见[现有处理](../src/host/workbuddy/mapper.ts#L619-L624)。
 - run_code SDK 说明可能在提示文本而不是原生 tools 内；工具搜索收益必须基于真实载荷测量。
 - 为稳定前缀移动 system/developer 指令前，验证指令优先级与权限语义不变。
 - 原生压缩需保存合法状态及来源，不等于普通摘要。
@@ -282,7 +280,6 @@
 - [Kosong Kimi provider](https://moonshotai.github.io/kosong/kosong/chat_provider/kimi.html)
 - [MiniMax Interleaved Thinking](https://www.minimax.io/news/why-is-interleaved-thinking-important-for-m2)
 - [Command Code 官方 Pi provider](https://github.com/CommandCodeAI/pi-commandcode-provider)
-- [WorkBuddy 社区 gateway：待验证参考](https://github.com/CangShui/workbuddy-gateway)
 - [Ollama Thinking](https://github.com/ollama/ollama/blob/main/docs/capabilities/thinking.mdx)
 - [Pi](https://github.com/badlogic/pi-mono)
 - [OpenCode provider transform](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/provider/transform.ts)

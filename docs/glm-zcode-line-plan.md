@@ -26,7 +26,7 @@
 ### 非目标
 
 - **不做 Agent 行为层映射**（ZCode 的 `/mode plan|build|edit|yolo|guarded`、工具契约、`~/.zcode/AGENTS.md` 生态复用）——本轮只做线路层。
-- 不改动 command-code / workbuddy 里已有的 GLM 模型行（那是它们各自上游的模型，与本线路无关）。
+- 不改动 command-code 里已有的 GLM 模型行（那是它自己上游的模型，与本线路无关）。
 - 不绕过套餐限制，不把公开 API 能力自动等同于订阅网关能力。
 - 不重建 DSH 已有的子 Agent、授权与路由审计。
 - 不实现 `refresh_token` 交换（**上游没有这个接口**，见 3.6）。
@@ -137,14 +137,14 @@ OAuth access_token
 
 | # | 决策 | 取值 | 理由 |
 |---|---|---|---|
-| D1 | provider id / 显示名 | `glm-coding-plan` / 「GLM（ZCode 账号）」 | 与用户自己的 `zai`/`zhipu` 兼容路由区分；不与已退役的 `zhipu-coding-plan` 混淆；不与 command-code/workbuddy 里已有的 GLM 模型行冲突 |
+| D1 | provider id / 显示名 | `glm-coding-plan` / 「GLM（ZCode 账号）」 | 与用户自己的 `zai`/`zhipu` 兼容路由区分；不与已退役的 `zhipu-coding-plan` 混淆；不与 command-code 里已有的 GLM 模型行冲突 |
 | D2 | 登录形态 | **浏览器 OAuth 账号授权 + adopt**，不做 API Key 粘贴 | 用户明确要求账号登录；两者产出同一种凭据，下游共用 |
 | D3 | 上游协议 | **双协议**，目录逐模型声明 | 用户选择；未知模型不猜协议（沿用 command-code 的 `supported_endpoints` 思路） |
 | D4 | Wire B 认证 | **OAuth 换出 `id.secret` 的 Coding Plan Key**，再打 `/api/anthropic` | 三个成熟桥接实现一致；凭据可复用（配额接口本来就用同一把裸 Key）；access_token 过期不影响模型调用。**修正**了首轮「直用 access_token」的选择 |
 | D5 | 签名层 | **实现 Client Signing V4，默认关闭，能力门控** | 唯一有实测记录的项目做了 A/B 对照：带签名与不带签名响应**完全一致**（都是 429/1113），从未观察到服务端因缺签名而拒绝。属 C 级证据，不得进默认路径 |
 | D6 | adopt 范围 | **解密 credentials.json 的 access_token + zcodejwttoken，走同一套兑换** | 与 `codex-adopt.ts` / `claude/adopt.ts` 既有先例一致：只读不写、先探测存在性、失败可回落浏览器登录 |
 | D7 | 特化范围 | **仅线路层** | 用户选择；Agent 行为层（权限模式/工具/生态配置）超出本轮 |
-| D8 | 落地方式 | **复活 `7e40fce` 的 zhipu 骨架 + 补今天缺的八项** | 省约 6000 行重写。**只挑 `9ad8a53` 的 oauth/contracts/routes/Section hunk，不整条 cherry-pick**（那条提交混进了大量 workbuddy/checkin 改动，共 +4338/-779） |
+| D8 | 落地方式 | **复活 `7e40fce` 的 zhipu 骨架 + 补今天缺的八项** | 省约 6000 行重写。**只挑 `9ad8a53` 的 oauth/contracts/routes/Section hunk，不整条 cherry-pick**（那条提交混进了大量其它线路/checkin 改动，共 +4338/-779） |
 | D9 | 实机验证 | **无账号，全部照官方源码 + 文档 + mock 验收** | 无 live 验证能力，所有未验证项必须在文档中显式标注，不得当作已验证事实 |
 
 > **D5 已在后续版本中被推翻。** 签名层**整层删除**：不再是「默认关闭」，也没有可显式打开的能力门控或环境变量入口。理由与证据：唯一有实测记录的项目做过 A/B 对照，**带签名与不带签名的响应归一化后完全一致**（都是 429/1113）；而官方那个本可当作开关信号的 feature gate 端点 `/api/v1/agent/configs` **根本不校验凭据**（两类凭据拿到逐字相同的响应），因此无法用它判断签名是否启用。服务端因缺签名而拒绝**从未被观察到**——这是「从未验证过」，不是「已验证不需要签名」。上表其余历史结论原样保留，本条只标注 D5 已失效。
@@ -257,9 +257,9 @@ test/glm-coding-plan-*.test.ts
 | 进入入口（卡片：图标 + 「N 个账号 / M/N 个模型可用」+ 开关 + chevron） | HUB_PROVIDERS descriptor + BrandMark | `src/client/hub/providers.tsx:75-128` | 卡片出现在「订阅服务」列表，开关 POST `/glm-coding-plan/api/settings`，点进详情页 |
 | 模型选择（图标 + 名称 + 一句话描述 + 行尾勾） | ModelChecklist | `src/client/common/ModelChecklist.tsx:48-84` | 每行 modelBrandMark(id) 图标、name、hint、role="checkbox" 行尾勾；表头 `{count}/{total}` + 全选/全不选 |
 | 配额显示额度（标签 + 进度条 + 百分比 + 重置时间） | AccountPoolSection + AccountQuota | `common/AccountPoolSection.tsx:90`、`common/account-quota.tsx:105-151` | 每窗口一行：5h/week/month 标签、role="progressbar"、百分比（>=100 显示「已用尽」）、N 天后重置 |
-| 多区域登录入口 | AccountPoolSection.renderLoginActions | 同上 :29 | WorkBuddy 已有两区先例，GLM 同样两区，复用该扩展点 |
+| 多区域登录入口 | AccountPoolSection.renderLoginActions | 同上 :29 | 已有双区线路先例，GLM 同样两区，复用该扩展点 |
 
-**模型能力表文案要求**（对齐 MiniMax/WorkBuddy 的做法）：每行 hint 说明「思考是否恒定开启 / 无档位」「可关闭 / 强制开启（可选档位）」「接受 text, image」「上下文窗口」。**能力不得从模型名推断** —— 历史草案已明确记录 `glm-5.3-flash` 收图而 `glm-5.3` 不收、`glm-5.2` 两个档位而 `glm-5.3` 三个。
+**模型能力表文案要求**（对齐 MiniMax 的做法）：每行 hint 说明「思考是否恒定开启 / 无档位」「可关闭 / 强制开启（可选档位）」「接受 text, image」「上下文窗口」。**能力不得从模型名推断** —— 历史草案已明确记录 `glm-5.3-flash` 收图而 `glm-5.3` 不收、`glm-5.2` 两个档位而 `glm-5.3` 三个。
 
 ---
 
@@ -337,5 +337,5 @@ test/glm-coding-plan-*.test.ts
 - 7eb3ee2 Revert "GLM"、fb07c2e feat: replace the GLM line with a Claude subscription line
 
 **本项目既有模板**
-- src/host/kimi-code/（14 文件骨架）、src/host/workbuddy/（两区账户池先例）、src/host/claude/adopt.ts（只读 adopt 先例）
+- src/host/kimi-code/（14 文件骨架）、src/host/claude/adopt.ts（只读 adopt 先例）
 - docs/plan-provider-agent-optimizations.md（证据分级）、docs/kimi-code-gap-analysis.md（文档形式）

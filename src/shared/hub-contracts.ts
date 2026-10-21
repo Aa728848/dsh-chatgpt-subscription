@@ -15,7 +15,7 @@ export const HUB_OVERVIEW_PATH = `${ROUTE_PREFIX}/hub/overview` as const
 export interface HubProviderSummaryDto {
   /** Client descriptor key, e.g. 'chatgpt', 'kimi-code', 'ollama'. */
   id: string
-  /** LLM route id the line serves, e.g. 'codex-chatgpt', 'workbuddy-subscription'. */
+  /** LLM route id the line serves, e.g. 'codex-chatgpt', 'claude-subscription'. */
   providerId: string
   /**
    * Whether the line has an "enable this provider" switch at all.

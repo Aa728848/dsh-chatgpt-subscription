@@ -37,9 +37,6 @@ import { dictionaries as minimaxCodeDicts, NS_MINIMAX_CODE, type MinimaxCodeLoca
 import { installMinimaxCodeStyles } from './minimax-code/styles.ts'
 import { MINIMAX_VIDEO_TOOL_NAME, type ReadVideoBytes, unwrapVideoBytes } from './minimax-code/video-contract.ts'
 import type { DocumentPreviewRegistryService, WorkspaceFilesRemote } from './minimax-code/video-slots.ts'
-import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
-import { dictionaries as workBuddyDicts, NS_WORKBUDDY, type WorkBuddyLocaleKey } from './workbuddy/locales.ts'
-import { installWorkBuddyStyles } from './workbuddy/styles.ts'
 import { GlmCodingPlanComposerQuota } from './glm-coding-plan/GlmCodingPlanComposerQuota.tsx'
 import { dictionaries as glmCodingPlanDicts, NS_GLM_CODING_PLAN, type GlmCodingPlanLocaleKey } from './glm-coding-plan/locales.ts'
 import { installGlmCodingPlanStyles } from './glm-coding-plan/styles.ts'
@@ -78,7 +75,6 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-command-code': CommandCodeLocaleKey
     'dsh-kimi-code': KimiCodeLocaleKey
     'dsh-minimax-code': MinimaxCodeLocaleKey
-    'dsh-workbuddy': WorkBuddyLocaleKey
     'dsh-glm-coding-plan': GlmCodingPlanLocaleKey
     'dsh-ollama': OllamaLocaleKey
     'dsh-step-code': StepCodeLocaleKey
@@ -128,17 +124,12 @@ export function apply(ctx: ClientContext): void {
     installMinimaxCodeStyles()
     return () => {}
   }, 'dsh-minimax-code: styles')
-  ctx.effect(() => ctx.locale.register(NS_WORKBUDDY, workBuddyDicts), 'dsh-workbuddy: dictionaries')
   ctx.effect(() => ctx.locale.register(NS_GLM_CODING_PLAN, glmCodingPlanDicts), 'dsh-glm-coding-plan: dictionaries')
   ctx.effect(() => {
     installGlmCodingPlanStyles()
     return () => {}
   }, 'dsh-glm-coding-plan: styles')
   ctx.effect(() => ctx.locale.register(NS_OLLAMA, ollamaDicts), 'dsh-ollama: dictionaries')
-  ctx.effect(() => {
-    installWorkBuddyStyles()
-    return () => {}
-  }, 'dsh-workbuddy: styles')
   ctx.effect(() => ctx.locale.register(NS_PROGRESS_UPDATES, progressUpdatesDicts), 'dsh-progress-updates: dictionaries')
   ctx.effect(() => {
     installProgressUpdatesStyles()
@@ -220,10 +211,6 @@ export function apply(ctx: ClientContext): void {
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, KimiCodeComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right', id: 'workbuddy-quota', order: 39, locale: NS_WORKBUDDY,
-    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
-  }, WorkBuddyComposerQuota))
-  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right', id: 'minimax-code-quota', order: 40, locale: NS_MINIMAX_CODE,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, MinimaxCodeComposerQuota))
@@ -231,7 +218,7 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.right', id: 'claude-quota', order: 41, locale: NS_CLAUDE,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, ClaudeComposerQuota))
-  // 顺序 42：接在 claude-quota(41) 之后顺延，而不是插进 38/39 之间。
+  // 顺序 42：接在 claude-quota(41) 之后顺延，而不是插进既有号之间。
   // 这串 order 只要求互不撞号且保持递增；给新线路重排既有线路的号，会让一条已经
   // 上线的线路的槽位位置无谓地变一次，顺延则旧号全部不动。
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
@@ -294,7 +281,7 @@ export function apply(ctx: ClientContext): void {
   installVideoDocumentPreview(ctx)
 
   // 「进展更新」客户端半边：对话流进展行、侧栏面板、以及它自己的设置分区。
-  // 单独一个子模块（./progress-updates/），与 kimi-code / workbuddy 这些线路同一种
+  // 单独一个子模块（./progress-updates/），与 kimi-code 这些线路同一种
   // 组织方式：入口只负责调用，注册细节留在子模块里。
   installProgressUpdatesClient(ctx)
 

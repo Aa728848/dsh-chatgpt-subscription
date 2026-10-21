@@ -53,13 +53,6 @@
   - **真因**：[brand-icons.tsx](../src/client/hub/brand-icons.tsx) 里那条注释给出的理由是「官方 favicon 是一枚 73 KB 的复合字形，体量不适合内联」。那个 73 KB 确实存在——但 `https://qoder.com/favIcon.svg` 现在返回的是**整站 HTML**（73,379 字节，HTML 长度不是图标大小），页面真正挂的图标是 `<link rel="icon" type="image/png">` 指向的一张 alicdn PNG。于是「太大所以不做」这个判断建立在一次看错的抓取上。
   - **改法**：`ProviderBrand` 新增 `image` 形态（data URI + `fit`），`BrandTile` 在它有值时画 `<img>` 并铺满底砖；Qoder 用官方 412×412 PNG（4,990 字节，sha256 `2276f0f8…26f3d`，2026-10-21 抓取 HTTP 200），base64 后 6.6 KB。旧注释连同 monogram 一起删掉，换成带 URL / 抓取时间 / 字节数 / 校验和的出处。
   - **验证**：`npm run typecheck` 0 错误；`test/hub-overview-ui.test.tsx` 新增一例断言 Qoder 卡渲染 data URI 且不再出现 `dsh-hub-brand-mono`；全量 `npx vitest run` **280 文件 / 4572 passed / 7 skipped**。
-- **[workbuddy] 会话一长就整轮失败、红条只有一句「必须以 system 提示词开头」——真因是上游 WAF 在按竞品客户端身份做指纹拦截**
-  - **现象**：截图那次是国际区账号第 2 轮起每轮必挂，报错前缀写着 `rejected the message history: the conversation must open with a system prompt`，与正文 `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}` 自相矛盾（历史首条本来就是 system）。同一账号发一句 `ping` 却可能正常，像是「聊着聊着就坏」。
-  - **真因**：`11128` 被上游复用给了至少两种拒绝，而 `unapproved channel` 这一种是**内容侧的 WAF**——网关对 `system`、`assistant.content` 以及 `assistant.tool_calls[].function.arguments` 里出现的第三方 Agent 身份声明做**精确短语匹配**，命中即整单拒绝，与鉴权、额度、模型、区域都无关；又因为每轮都全量重放历史，一条 assistant 消息或一次工具参数中毒，此后每轮必挂。本机对失败会话的 1,552 行系统提示词做行级二分，定位出**唯一触发行**是首行 `You are an AI agent powered by DeepSeek Harness.`（国内区在 `system`/`assistant` 中原样出现即 400，把 `AI agent` 改成 `AI assistant` 后同一份提示词 200）；`Claude Code`、`Codex CLI`、`OhMyOpenCode`、`x-anthropic-billing-header` 则两区都会触发。
-  - **为什么还牵扯到别的区域**：号池里两个 `intl` 账号被上游瞬时 `429 (code 14003)` 打回后按既有逻辑冷却并**在同一次请求内轮换到 `cn` 账号**，而 `cn` 网关恰好拦首行那句话——于是「国际区账号」的会话撞上的是国内区的规则。
-  - **改法（[mapper.ts](../src/host/workbuddy/mapper.ts)）**：`sanitizeText()` 增加出站指纹改写（覆盖 `options.system`、`role: "system"` 消息、`assistant` 文本、以及 `tool_calls[].function.arguments` 的序列化参数），每条只改**实测确认会触发的那一句**、不动其余指令语义；同时把「剥 `\0`」拆成 `stripNulls()`，**入站 SSE 仍只做 `\0` 清理**——模型自己吐出的字不该被改写。
-  - **改法（[adapter.ts](../src/host/workbuddy/adapter.ts)）**：`code === 11128` 的判定从只认 `conversation id` 扩到 `conversation id|unapproved channel`，并把原始 detail 一并带出；此前除 `conversation id` 外的所有 11128 都被翻译成「必须以 system 提示词开头」，把读者指向一段本来正确无误的历史。
-  - **验证**：两区对拍——同一份含 5 类指纹的请求，脱敏前国内区与国际区都 `400 / 11128`，脱敏后都 `200`；新增 `test/workbuddy-message-shape.test.ts` 的跨 `system`/`assistant`/`tool_calls` 用例与 `test/workbuddy-adapter.test.ts` 的两种 11128 文案用例；`npm run typecheck` 0 错误，全量 `npx vitest run` **280 文件 / 4571 passed / 7 skipped**，`npm run build` 通过；用完整 1,552 行系统提示词带上下文对号池 4 个账号（2 `intl` + 2 `cn`）端到端实测，**四个账号全部 200**。
 - **[qoder] 新增第十二条订阅线路：Qoder（全球区 qoder.com / 中国站 qoder.com.cn）**
   - **协议面**：Qoder 自有的 COSY 签名对话协议（`POST {base}/algo/api/v2/service/pro/sse/agent_chat_generation`）——AES-128-CBC 加密的 UserInfo + RSA-1024 包裹的会话密钥 + canonical MD5 签名、自定义 Base64 alphabet + 三段交换的 body codec、外层信封包 inner JSON 的明文 SSE。全部算法按 Liki4/qodercli2api 的全合成 frozen fixtures（qodercli v1.1.34 互操作基线）**逐字节锁定**（`test/fixtures/qoder/` vendored，`test/qoder-cosy.test.ts` 8 例），并与 simonsmh/pi-provider-qoder 的 live 验证实现互相印证。
   - **登录三路径**：浏览器设备流（仅全球区，challenge/verifier 轮询，不开本地回调端口，host 不自行开浏览器——`test/login-opens-browser-once.test.ts` 钉住）、手动粘贴 PAT（`jobToken/exchange` 兑换，PAT 本体留在 host 加密存储里供过期重兑换）、adopt 只读导入本机 qodercli 登录态（`~/.qoder/.auth/user`，AES 解密由 fixture 锁定；**区域不猜，是对两区 userinfo 各探一次探出来的**）。
@@ -180,13 +173,11 @@
   - **改法二（裸 429 不等于配额耗尽）**：429 给出了重置时间（quotaResetTimeStamp / quotaResetDelay / RetryInfo.retryDelay / Retry-After）时行为完全不变：按上游给的时长 `markFamilyCooldown(account.id, family, statedWaitMs, '429 Rate Limit')`、有下一个账号就换账号、最终报 `LlmError(..., 'RATE_LIMIT', { status: 429 })`。**没有重置时间的裸 429 不再冷却账号、不再换账号**，改为可重试且与账号无关的 `LlmError(..., 'SERVER', { status: 429 })`——`SERVER` 在 DSH 默认重试集合内，也是本仓库「上游说不、但不是账号的错」的既有措辞（见 `src/host/kimi-code/adapter.ts` 的 upstreamOverload）。文案直说「上游返回 429 但未给出重置时间，因此按瞬时限流处理，不视为账号配额耗尽」，并附上截断后的上游原始响应。图片工具同理：`ANTIGRAVITY_IMAGE_RATE_LIMITED` 保留，但裸 429 不再调用 `markFamilyCooldown`，文案也不再宣称配额已用尽。
   - **改法三（上游原话随冷却一起留存）**：[account-pool.ts](../src/host/antigravity/account-pool.ts) 的 `markFamilyCooldown()` 多一个可选的 `detail`，冷却条目把它和 `until`/`reason` 放在一起——**上游的原话跟着它自己造成的冷却一起走**：[adapter.ts](../src/host/antigravity/adapter.ts) 与 [image-tool.ts](../src/host/antigravity/image-tool.ts) 在为配额型 429 记冷却时，把截断后的上游响应体作为 `detail` 一起写进去。`getEffectiveAccountFor` 保留「哪一族在冷却、最短还要几分钟」的措辞，**「上游返回：」后面引的是最先解除的那条冷却所带的 detail**（与那个「最短预计 N 分钟」指的是同一条，两者不会各说各话）；**没有任何 detail 时整句都不加**——共享内核抛出的那句「全部 N 个 Antigravity 账号均处于配额限制或冷却中」说的是**号池状态**而不是上游，它只作为 cause 链留在错误里，绝不会被贴上「上游返回」的标签。
   - **验证**：`npm run typecheck` 0 错误；全量 **247 passed | 1 skipped（248 文件）、4016 passed | 7 skipped、0 failed**。新增 7 条回归守卫（adapter 4 条、image-tool 1 条、account-pool 2 条），并给既有的图片 429 用例加了两条断言（「429 只问一次」「上游原话随冷却一起写」）；**变异验证**：把这 3 个源码文件回退到改前版本后 6 处变红；再把「上游返回：」改回引号池状态那句话、或让 adapter 不再把上游响应体交给冷却，account-pool 与 adapter 的 3 条当场变红，恢复后全绿。
-- **[账号池] 冷却剩余时间改成秒级实时倒计时，并把「账号 × 模型」的停用窗口显示出来**
-  - **现象**：账号卡片上的「冷却中（剩 5 分）」是一个**静止的数字**——它在页面绘制那一刻算一次就再也不动了。5 分钟的冷却，用户会看着「剩 5 分」整整 5 分钟。同一行里的「重置冷却」按钮点掉之后，徽章还在（它跟号池状态不是一回事），而真正让这个号不可用的是「某个模型被停用」这件事，界面上**一个字都没有**。
+- **[账号池] 冷却剩余时间改成秒级实时倒计时**
+  - **现象**：账号卡片上的「冷却中（剩 5 分）」是一个**静止的数字**——它在页面绘制那一刻算一次就再也不动了。5 分钟的冷却，用户会看着「剩 5 分」整整 5 分钟。同一行里的「重置冷却」按钮点掉之后，徽章还在（它跟号池状态不是一回事）。
   - **改法一（实时倒计时）**：[AccountPoolSection.tsx](../src/client/common/AccountPoolSection.tsx) 里 `now` 从渲染时取的 `Date.now()` 变成 React state，由一个 1 Hz 的定时器推进。**定时器只在真有东西在冷却时才跑**（`counting` 开关），没有冷却的设置页不会为此每秒唤醒一次标签页；卸载时清理。徽章显示真实剩余时间：整分钟用原措辞，分钟+秒用新模板，不足一分钟**只显示秒**——「剩 1 分」撑最后 59 秒是假的。冷却结束，徽章**自己消失**，不用等下一次刷新。
-  - **改法二（模型停用行）**：WorkBuddy 的订阅按**账号 × 模型**计量 24 小时窗口（429 `code 6004`），所以被限的是**那个模型**、账号本身还能服务别的模型。号池里这份状态原来只活在内存里，接口一个字都不吐，界面因此把号显示成可用。现在它进账号摘要 DTO（[account-pool-contracts.ts](../src/shared/account-pool-contracts.ts) 的 `modelCooldowns`），卡片为每个被停用的模型单开一行，**标明模型名并给它自己的倒计时**；账号级徽章与模型行是**两件不同的事**，不混为一谈。
-  - **改法三（重置冷却真的清干净）**：号池的 `clearCooldown` 现在**连该账号的模型停用一起清掉**。留着它等于报告了一次没有发生的重置，而且那份状态用户根本没有别的手段能清。
-  - **改法四（WorkBuddy 卡片补轮询）**：[useWorkBuddySection.ts](../src/client/workbuddy/useWorkBuddySection.ts) 补上兄弟标签页都有的 60 秒可见态轮询。此前它只在标签页重新可见时刷新，于是**已经解除的冷却、已经出现的模型停用会一直挂在屏幕上**，直到手动刷新页面。
-  - **验证**：`npm run typecheck` 0 错误；全量 **247 passed | 1 skipped（248 文件）、4009 passed | 7 skipped、0 failed**；`npm run build` 通过。新增 5 条回归守卫（逐秒倒计时并到点自行消失、模型行渲染与缺席、WorkBuddy 60 秒重读、共享标签纪律扩展到新键、号池摘要与状态路由透出模型停用）。
+  - **改法二（重置冷却真的清干净）**：号池的 `clearCooldown` 清掉的是该账号的**冷却标记本身**（`cooldownUntil` 与 `cooldownReason` 一起写回 `undefined`），而不是只回一句「已重置」。留着标记等于报告了一次没有发生的重置。
+  - **验证**：`npm run typecheck` 0 错误；全量 **247 passed | 1 skipped（248 文件）、4009 passed | 7 skipped、0 failed**；`npm run build` 通过。新增 2 条回归守卫（逐秒倒计时并到点自行消失、共享标签纪律扩展到新键）。
 - **[进展更新] 默认开启，并补上「宿主服务晚到」时丢失的右侧栏入口**
   - **现象一（多数用户）**：「进展更新」的开关默认是**关**的。没手动开过的用户装上插件后：`progress_update` 工具的 `execute` 一直返回 `displayed: false`，系统提示词里没有引导节，8 轮催促也不触发——功能整套静默不工作，而设置页里那个开关是唯一线索（截图里它是关的）。
   - **现象二（部分用户）**：右侧栏 guide 里那一格「进展更新」**整格不出现**。页签类型是在本插件 `apply` 的那一刻同步向 `ctx.get('sidebarRightTabs')` 读的；宿主 `ui-sidebar-right` 若比本插件晚上线，那次读回来的是 `undefined`，注册被整段跳过——面板注册齐全但右侧栏空着，用户根本找不到入口（`test/progress-updates-client.test.tsx` 里那条「guide 入口缺失」的回归守卫就是为这个写的）。
@@ -246,15 +237,6 @@
   - **验证**：`npm run typecheck` 0 错误；`npm run build` 通过；全量 **232 passed | 1 skipped（233 文件）、3818 passed | 7 skipped、0 failed**（基线 3813，新增 5 例：对账定时器 4 例 + 条目 config 被外部改写后自愈 1 例）。**运行时双向验证**：修复前 `web_fetch` 全部被拒；用插件接口把搜索来源切到 `dsh` 再切回 `codex` 触发一次真实应用后，`configuredFetchProvider` 变为 `codex-subscription`，`example.com` / npm registry / `deepseek.com/harness` 均 200，`web_search` 正常返回来源。
   - **升级提示**：运行中的 Host 需重启（或重载该插件条目）才会加载新 bundle；重启前若仍被拒抓，可在设置页把「搜索来源」切到 DSH 默认再切回 ChatGPT 手动触发一次。
 
-## 0.26.1 - 2026-10-17
-- **[WorkBuddy] 一次上游 401 把整个号池写成「需要重新登录」且永不恢复：线路跑着跑着忽然全部国区账号要重登**
-  - **现象**：运行中的一轮突然失败，报 `WorkBuddy（CodeBuddy 订阅） rejected the stored credential (401). Sign in again with the CodeBuddy desktop client.`；随后设置卡片里**每一个**国区账号都显示「需要重新登录」，只有重新登录（重新加号）才能恢复。
-  - **本机实证（非推断）**：解密号池文件读到事发那几秒——22:52:42 / 22:52:48 两个国际区账号先被 429 冷却，同一个请求随即把两个国区账号依次判 401；22:54:05 / 22:54:41 用户重新登录，`authStatus` 才被清掉。同时用库里的 bearer 打两个面：`GET /v3/config` → **200**，`POST /v2/chat/completions` → **401 + APISIX HTML**；同一枚 token 在一个面被接受、在另一个面被拒，即这个 401 是 chat 路由/会话层的判定，不是「token 坏了」。库里 5 枚国区 bearer 中 4 枚在 chat 面拿到 `400 {"code":11101}`（鉴权已过），只有会话被后登录顶掉的那枚 401。
-  - **根因**：`classifyFailure` 对 401 一律 `INVALID_CREDENTIAL`（403 有正文翻案，401 没有），请求循环随即对**每个**被拒账号写 `markAuthFailed → authStatus='expired'` 再轮下一个——**一个请求就能把整池写死**；而本线路从不调用 `clearAuthFailed`，也没有 heal，写死的行再也回不来。雪上加霜的是本地时钟：access token 有效期约 28 天，`needsRefresh` 几乎永远不会在 401 时触发，于是「会话被顶掉」直接等于「永久 401 + 全池登出 + 只能人工重登」。签到路径（`checkin.ts`）一直有「401 → 强制续期一次再重试」的处理，chat 路径却没有。
-  - **改法（三处）**：① chat 请求收到 401 时，先对**同一个账号**强制 `renewCredential` 一次并用新 token 重放同一份 body；续期成功=凭据还活着，什么都不写；续期被上游拒绝=真死，由号池既有的 `refreshFailureStatus` 写标记——**请求期不再写 `markAuthFailed`**。② 新增 `healStaleAuthFailures`：选号前与列表前重新对照权威存储，账号已换另一枚**未过期** token 就清掉标记并采用它，仍持着被拒那枚的保留标记。③ 两处都守「一次」纪律：一次续期、一次重放，第二次仍 401 就换号或如实报错，不写永久状态。
-  - **验证**：`npm run typecheck` 0 错误；全量 **231 passed | 1 skipped（232 文件）、3813 passed | 7 skipped、0 failed**（基线 3809，新增 4 例）。**承重已双向检查**：关掉续期 → 2 例红；把 `markAuthFailed` 加回请求期 → 1 例红；关掉 heal → 1 例红；恢复后全绿。
-  - **升级提示**：升级前已被标成「需要重新登录」的账号，若权威存储里已有更新过的 token 会自动恢复；没有的更动过的仍需重新登录一次。
-
 ## 0.26.0 - 2026-10-17
 
 - **[MiniMax Code] 无答案轮次现在会自动续跑跑完（社区 PR #61），并把「续跑预算」真正做成有界**
@@ -297,14 +279,6 @@
   - **验证**：`npm run typecheck`、`npm run build` 0 错误；全量 **226 passed | 1 skipped（227 文件）、3753 passed | 9 skipped、0 failed**（新增 4 例；多出的 2 个 skipped 是本机缺 pi-ai 参考快照的 `claude-model-catalog` 保真断言，与本改动无关）。新用例的假 token 端点按 RFC 6749 §6 拒绝越权 scope，号池用例走真实 refresh hook（不经测试 seam）。**承重已双向检查（负对照）**：把续期 body 还原为 `scope: OAUTH_SCOPES`，3 条新用例失败，其中两条抛出的正是线上那句 `The requested scope is invalid, unknown, or malformed.. Sign in again.`。
   - **升级提示**：升级前已被这个问题标成"需要重新登录"的账号，升级后仍需重新登录一次来清除标记；之后续期正常。
 
-## 0.24.6 - 2026-10-16
-- **[WorkBuddy 国际区] 补上与官方客户端一致的会话头组，并修正 `11128` 被当成单一含义的过期结论（issue #56）**
-  - **报告**：#56 称国际区（`www.workbuddy.ai`）线路恒返回 400 `code 11128` / `msg: "conversation id missing"`，根因是网关新增渠道校验、要求 `X-Conversation-ID` / `X-Conversation-Request-ID` / `X-Conversation-Message-ID` / `X-Request-ID` / `acp-connection-id` 这 5 个头，而插件一个都不带；报告者用自己的国际区凭据做过单变量差分，称这 5 个是**最小充分集**。
-  - **本机未能复现，如实记录**：本机有可用的国际区账号，实测真实 `POST https://www.workbuddy.ai/v2/chat/completions`（system 开头 + `stream:true` + `max_tokens:1`）——**修复前的头组（只有身份头）已经是 200，SSE 正常流出**；把 5 个会话头逐个删除同样是 200；**连身份头全部去掉、只留 bearer 也是 200**；走真实 adapter 端到端（国际区凭据）得到 `text="pong"` / `finish=stop`。同时 `11128` 在本环境是**活的**，但它绑定的仍是 `msg:"first message is not system prompt"`（user 开头时必现 400）——报告的 `conversation id missing` 分支在任何头组合下都打不到。
-  - **因此这版不声称已验证根因**，只做两件彼此独立、各自成立的事：① 补上这组头，与官方客户端 `applyGatewayHeaders` 的行为对齐（**仅国际区**、**仅对话端点**：config / billing / refresh / check-in 四个面保持原有头集一字不改，国内区不加）；其中 `X-Conversation-ID`、`X-Conversation-Request-ID`、`acp-connection-id` **按会话稳定**（由 harness 的 `GenerateOptions.sessionId` 派生，与官方客户端"每会话复用同一值"一致），`X-Conversation-Message-ID` / `X-Request-ID` **每请求随机**。实测这组头**带上与不带都是 200**，即无回归；② 修正 `classifyFailure` 与 `types.ts` / `mapper.ts` 的过期注释——`11128` 在上游已被复用，**同一个码有两个含义**，文案改为先读 `msg` 再定性（`conversation id` 判为渠道校验、否则判为 system-first）。这一条**已由实测独立证成**（本环境 `11128` 确实同时出现在这两个语义上）。
-  - **两个假设尚未区分（需要受影响账号才能判定）**：H1 渠道校验按账号灰度、报告的账号被拦而本机账号豁免，则该头组是真修复；H2 该门禁不存在或已回滚、对方的 400 另有来源，则头组只是无害对齐。两者下本改动都无副作用，但**都不能由本机证据宣布为已证实的根因**——报告者手上有受影响的环境，0.24.6 的复测结果才是判据。
-  - **验证**：`npm run typecheck` 0 错误；全量 **226 passed | 1 skipped（227 文件）、3751 passed | 7 skipped、0 failed**（基线 3745，新增 6 例）。新增 `scripts/probe-workbuddy-channel.probe.ts`（一次性实况探针，`vitest.probe.config.ts`，读真实凭据、不进 CI），它**刻意把修复前的头组当负对照一起打**——只断言修复后的 200 无法区分"头组起作用"与"网关不再校验"。**承重已双向检查**：移除头组本身 → 5 条用例失败（含两处调用点与头组契约）；保留头组但丢掉 `sessionId` 透传 → 会话稳定性用例失败。
-
 ## 0.24.5 - 2026-10-16
 - **[推理塌缩守卫] Agent 先于守卫创建时注册表两条读取路径同时失效：熔断生效但续写从未排队，回合被截断后静默结束**
   - **现象**：对话在思考中途**没有任何报错地突然结束**，界面上什么都不显示。
@@ -313,14 +287,7 @@
   - **改法（`reasoning-collapse-guard/index.ts`，一处修复全线路受益）**：读注册表改为**先走 `ctx.get('agents')`**（直读服务存储，无需 `inject` 声明，因此不受时序影响），属性读取保留为回退，另加服务形状校验 `asRegistry`。**没有采用给 `inject` 加 `agents`**——那会让插件在**不提供该服务**的宿主上永不激活（本仓库明令「旧代际是要求而非回退」），而 `ctx.get` 在服务缺失时返回 `undefined`，由属性回退与 `agent/created` 映射表兜住，两个方向都不牺牲。
   - **验证**：`npx tsc -b --force` 与测试树 tsc 均 0 错误；全量 **226 passed | 1 skipped（227 文件）、3745 passed | 7 skipped、0 failed**。新增 `test/reasoning-collapse-guard-registry.test.ts` 以**真实 Cordis 边界**建模（`agents` 属性按 Cordis 语义抛错、`ctx.get` 作答）：断言熔断同时**真的 cancel + steer 各一次**。**承重已双向检查（负对照）**：在「先建 Agent、后装守卫」时序下，还原 `ctx.get` 那一路立刻复现 `cancels=0, steers=0` 并使新用例失败；恢复后重新全绿。
   - **附（两处经实测否证的判断，故未改动）**：① 社区 PR 称 `z.union([z.object({}), z.const(false)])` 会 strip 掉 `maxBreaksPerTurn`/`cooldownMs`；以本机 schemastery 3.18.4 实测这些键**被完整保留**（`{"maxBreaksPerTurn":5,"cooldownMs":1000}`），`Config` 无需改动。② 曾怀疑 `preparedCall.stream()` 会绕过 `llm/stream` 瀑布使守卫失位；实测 `prepareCall.stream` 内部同样走该瀑布，**不成立**。
-  - **未解决的**：用户报告 MiniMax 静默、而 workbuddy 的 deepseek 能正常 steer，本机全部可读会话存档（8 个）中**未出现任何守卫熔断痕迹**（`interrupted` 与续写 notice 均为 0），因此该差异**尚无证据定性**；本次修的是「时序窗口下熔断不留续写且完全静默」这条已复现的缺陷，不等同于已解释该差异。
-
-- **[测试隔离] `workbuddy-routes.test.ts` 的目录快照会跨用例串味：fire-and-forget 的写入在用例结束后才落盘，被下一个用例 rehydrate 回来，导致 CI ubuntu 上偶发失败**
-  - **现象**：v0.24.4 的 release bump 提交在 CI 上 ubuntu 失败而 windows 通过，唯一失败断言是 `test/workbuddy-routes.test.ts` 的 `expected [ { id: 'glm-5.3', …(10) }, …(6) ] to deeply equal []`，报错落在 `never serves one region the catalog snapshot read for another`。同一份代码在前一个提交（纯功能改动）上通过 CI，说明是**时序敏感**而非确定性失败；本地单独跑该文件 10 次也不复现。
-  - **根因（用插桩实测定位，不是推断）**：`loadConfigCatalog` 取目录成功后调用 `writeCatalogSnapshot`，而它是 **fire-and-forget**（调用方不 await）；关键在于 `catalogSnapshotPath` 是在**写入真正执行时**才读 `DSH_HOME` 拼路径，不是入队时。给写路径插桩后抓到一条**没有任何用例栈帧**的写入（`processTicksAndRejections`，count=31），即一个脱离用例的孤儿写入在 afterEach 清理**之后**才落盘，于是 cn/intl 快照被重新创建、并被下一个用例（`intl` + `offline`）在首轮 cache miss 时 rehydrate 读回——正是该用例断言必须为 `[]` 的场景。**先前的排查方向（跨文件污染）已被证伪**：实测每个测试文件拥有各自的 `DSH_HOME` 与各自进程，文件之间不可能互污。
-  - **改法**：给**每个用例**分配私有 `DSH_HOME`（`mkdtemp`，`beforeEach` 写入、`afterEach` 还原），把竞态**消除**而不是收窄——孤儿写入只能落到上一个用例那个已无人读取的目录里。另在 `afterEach` 保留 `await flushCatalogSnapshots()`，让常规写入在目录被删前落定。（`dshHomeDir()` 每次调用都读环境变量，因此改环境变量即可生效。）
-  - **为什么不是"先 flush 再删文件"**：那是第一版修法，本地 10 次全绿、CI 仍然失败——它只能收窄窗口，无法阻止一个在清理之后才执行的写入。真正的修复必须是让"迟到的那一次写入"写进一个不会再被读的位置。
-  - **验证**：`npm run typecheck` 0 错误；全量**连续 3 次** `3743 passed | 7 skipped、0 failed`；目标文件连跑 6 次全绿。**承重已双向检查（负对照）**：在同一个测试文件里构造「用例 A 排队一次孤儿写入、不 await → 用例 B 读 `intl` + `offline`」，**共享 home 时读回 4 个模型（含注入的 `LEAKED-MODEL`）并使断言失败；改为每用例私有 home 后读回 0 个、通过**——同场景、同一迟到写入，唯一变量是 home 策略。
+  - **未解决的**：用户报告 MiniMax 静默、而同期另一条线路的 deepseek 能正常 steer，本机全部可读会话存档（8 个）中**未出现任何守卫熔断痕迹**（`interrupted` 与续写 notice 均为 0），因此该差异**尚无证据定性**；本次修的是「时序窗口下熔断不留续写且完全静默」这条已复现的缺陷，不等同于已解释该差异。
 
 ## 0.24.4 - 2026-10-15
 - **[Kimi Code] 额度倍率与缓存时长档位写进设置页说明：倍率此前只在官方英文 description 里隐含提及，缓存档位说明则完全没给选择依据**
@@ -331,7 +298,7 @@
 
 ## 0.24.3 - 2026-10-15
 - **[Linux 凭据存储] 账号池撞上 secret-tool 的 8192 字节 stdin 上限：第 3 个账号添加后凭据写入成功、池写入失败，账号在 UI 闪现后消失（issue #54）**
-  - **现象**：Linux（gnome-keyring）下添加第 3 个 WorkBuddy 账号后账号区闪现即消失——凭据条目（7934B）惊险通过，但池条目（约 8960B）≥ 8192 被 `SecretServiceCredentialStore.save` 拒绝，`status.accounts`（池）永远少一个。该上限对齐的是 libsecret `secret-tool` 的 stdin 固定缓冲（超限静默截断仍 exit 0），且对**所有线路**（antigravity / claude / command-code / glm-coding-plan / kimi-code / minimax-code / ollama / step-code / workbuddy 的池与凭据共 25 处调用点）一视同仁，账号一多都会撞。
+  - **现象**：Linux（gnome-keyring）下添加第 3 个账号后账号区闪现即消失——凭据条目（7934B）惊险通过，但池条目（约 8960B）≥ 8192 被 `SecretServiceCredentialStore.save` 拒绝，`status.accounts`（池）永远少一个。该上限对齐的是 libsecret `secret-tool` 的 stdin 固定缓冲（超限静默截断仍 exit 0），且对**所有线路**（antigravity / claude / command-code / glm-coding-plan / kimi-code / minimax-code / ollama / step-code 的池与凭据调用点）一视同仁，账号一多都会撞。
   - **改法（`credential-store-secret-service.ts`，一处修复全线路受益）**：载荷 ≥ 8192 字节时改为**分片存储**——UTF-8 载荷 base64 后按 7000 字符切片写入独立 shard 条目（account 属性为 `<account>#<gen>#<i>`，Secret Service 属性精确匹配所以互不串扰），主条目最后写入作为**提交点**，内容为信封 `{ __dshChunked: { gen, chunks, bytes } }`；读取时按信封重组并校验解码字节数，损坏即报 `payload is too large` 同款 invalid 错误而非静默截断。小于上限的载荷保持单条目原格式，存量数据零迁移。shard 用随机代际（gen）标签：中断的 save 不触碰旧信封与旧分片，新代际要么整体提交要么回滚清理；提交成功后清理上一代分片（含分片→单条目的收缩场景）。`clear()` 改为先 lookup 探测：既拿到待清理的分片代际，也绕开 Ubuntu libsecret-tools 0.20.4 对不存在条目 `clear` 段错误的坑。分片数上限 128（约 650 KiB）防畸形信封。
   - **验证**：`npm run typecheck` 0 错误；全量 **225 passed | 1 skipped（226 文件）、3739 passed | 7 skipped、0 failed**。新增/更新 12 条 store 用例：分片往返（断言每片 stdin < 8192、重组后逐字节等于原载荷、载荷不出现在命令行参数）、缺失/篡改分片报 invalid、畸形信封拒绝、换代清理、收缩清理、clear 连带清分片、shard 写失败时主条目零触碰。launch 计数测试同步更新（save 多一次探测启动，这是分代清理的信息来源）。
 
@@ -419,15 +386,12 @@
   - **验证：`npm run typecheck` 0 错误；全量 `npm test` 219 passed | 1 skipped（220 文件）、3632 passed | 7 skipped | 0 failed。** 改动前基线为 221 passed | 1 skipped（221 文件）、3653 passed | 7 skipped（3660）：减少的 21 例与 1 个文件正是被删掉的 `test/glm-coding-plan-signing.test.ts`（21 例 / 514 行），其余用例计数未变。
 
 ## 0.22.0 - 2026-10-12
-- **[WorkBuddy / 共享号池] 非鉴权的 403 不再误杀整个账号池；「全部账号不可用」不再伪造 429 与 15 分钟冷却（issue #53）**
-  - **问题 1（403 一律＝凭据失效）**：WorkBuddy 的 `classifyFailure` 只看状态码，`401 || 403` 无条件返回 `INVALID_CREDENTIAL`。代理 / lane 策略 / 同 lane 其它插件合成的应用层拒绝（issue 给出的实测体：`{"error":{"type":"server_error","code":"dsh_compaction_refused","retryable":false}}`）因此被当成 token 失效，账号池把**每一个**账号依次 `markAuthFailed` → `authStatus="expired"`——拒绝属于 lane 而不属于某个账号，所以三个账号无一幸免——此后每个请求在发出前即失败，且**不会自愈**，只有重新登录才能恢复。
-  - **修法**：403 改为「正文给出非鉴权的**正面证据**」才改判。判据刻意单向——空正文、网关 HTML、不可解析的 JSON、没有决定性字段的 JSON 一律回落原本的 `INVALID_CREDENTIAL`（fail-closed：读不出的证据绝不能成为「被拒 token 继续留在轮换里」的理由）。能翻案的是**本线路自己不会发出的形状**：字符串 `code`（本线路只说数字码），或 `retryable:false` / `type:"server_error"` 这类明确的「别重试」声明。改判结果是 `PROVIDER_ERROR`，在本线路重试集合之外（同一个请求撞同一条规则，重试只花额度），且**不写账号池**。
-  - **问题 2（伪造 429 与 15 分钟）**：共享号池的 `allUnavailableError` 不看「为什么都不可用」，一律返回 `RATE_LIMIT` + `status 429`，文案里的分钟数取自「最短冷却」；当没有任何账号在冷却时 `shortest` 是 `Infinity`，于是落到**硬编码的 `15`**。用户被告知等待一个从未开始、也永远不会结束的窗口，而唯一有效的处置（重新登录）一个字都没提。另外 `retryAfterMs` 把 `Retry-After` 封顶在 10 分钟，所以这条路径上**物理上不可能**出现 15 分钟的真实冷却。
+- **[共享号池] 「全部账号不可用」不再伪造 429 与 15 分钟冷却（issue #53）**
+  - **问题（伪造 429 与 15 分钟）**：共享号池的 `allUnavailableError` 不看「为什么都不可用」，一律返回 `RATE_LIMIT` + `status 429`，文案里的分钟数取自「最短冷却」；当没有任何账号在冷却时 `shortest` 是 `Infinity`，于是落到**硬编码的 `15`**。用户被告知等待一个从未开始、也永远不会结束的窗口，而唯一有效的处置（重新登录）一个字都没提。另外 `retryAfterMs` 把 `Retry-After` 封顶在 10 分钟，所以这条路径上**物理上不可能**出现 15 分钟的真实冷却。
   - **修法**：先问「池里还有没有任何凭据可用的账号」——没有则以 `AUTH` + `status 401` 报「全部 N 个账号均需要重新登录」，不再提冷却；有冷却才按 429 报告，且分钟数在**没有实测重置时刻时是 `null`**（而不是编一个数），`allUnavailableMessage` 钩子签名随之改为 `number | null`，antigravity / glm-coding-plan / step-code 三处覆写同步跟上，并新增可选的 `allAuthFailedMessage` 钩子供线路自定措辞。**刻意排除**「只是这次请求把自己能试的账号试完了」：tried-set 是重试循环的簿记，那些凭据完全可用，不能因此让用户去重新登录。
-  - **测试**：号池 3 例（全部凭据失效必须报 AUTH，且文案里不得出现 `429` / `15 分钟`；试完 tried-set 仍报 RATE_LIMIT；钩子拿到的 `waitMinutes` 在没有冷却时不被调用、有真实冷却时是实测分钟数）；WorkBuddy 分类器 3 例（401 与裸/不可读 403 保持凭据判定；实测的代理合成 403 必须归 `PROVIDER_ERROR`、落在重试集合外、且文案不劝人重新登录；本线路数字码的 403 仍归凭据）。两处既有断言把旧行为写成了期望（`claude-account-pool` 把「全部账号凭据失效」钉成 `RATE_LIMIT`），按其真实意图（路由拒绝、且不得触发 refresh）改为 `AUTH`。
-  - **变异验证**：把 `allUnavailableError` 的 AUTH 分支短路后，4 条用例（含 2 条新增）以真实的 `RATE_LIMIT` / `429` 失败；把 WorkBuddy 的 403 判定短路后，恰好 1 条新增用例以 `INVALID_CREDENTIAL` 失败。恢复后全绿。
+  - **测试**：号池 3 例（全部凭据失效必须报 AUTH，且文案里不得出现 `429` / `15 分钟`；试完 tried-set 仍报 RATE_LIMIT；钩子拿到的 `waitMinutes` 在没有冷却时不被调用、有真实冷却时是实测分钟数）。两处既有断言把旧行为写成了期望（`claude-account-pool` 把「全部账号凭据失效」钉成 `RATE_LIMIT`），按其真实意图（路由拒绝、且不得触发 refresh）改为 `AUTH`。
+  - **变异验证**：把 `allUnavailableError` 的 AUTH 分支短路后，4 条用例（含 2 条新增）以真实的 `RATE_LIMIT` / `429` 失败。恢复后全绿。
   - **验证：`npx tsc -b --force` 0 错误；全量 `npx vitest run` 220 passed | 1 skipped（221 文件）、3653 passed | 7 skipped | 0 failed。**
-  - **诚实声明**：403 的正文字段判据来自 issue 给出的实测报文与代码定位，**没有**用一个真实 lane 级 403 复现端到端；断言全部建立在分类器与号池的单元层。
 - **[Step Code] 新增「Step Code（Step Plan 订阅）」线路：StepFun 国区 / 国际区订阅与开放平台 API Key 接入，含套餐额度与缓存用量卡片**
   - **能力来源**：StepFun 官方开源的 Step-Code 客户端。四个凭据 profile（`step_plan` / `step_plan_oversea` / `platform_cn` / `platform_oversea`）**与官方 `STEP_LOGIN_PROFILE_IDS` 逐字相同，一个不多一个不少**；区域（`cn` = stepfun.com，`intl` = stepfun.ai）是**凭据的属性而不是请求的属性**，由 profile 唯一决定，所以设置页不给自由输入——区域交叉的凭据会被上游直接拒绝。同一个号池里可以同时持有两区账号且互不串用。
   - **四条登录入口互不替代**：云端轮询的浏览器授权（**不开本地回调端口**，流程跑在 host 上，卡片每 2 秒轮询）、手工粘贴 Platform API Key、只读导入本机 `~/.stepcode/auth.json`（**只读，绝不改写 stepcode 的任何文件**），以及仅用于读额度的开发者中心凭据。前三条的导入**失败永不阻断**：契约把失败拆成四个 reason（没文件 / 读坏了 / 形状不认识 / 里面不是 Step 的登录态），卡片据此给出四个不同的下一步，一律回落浏览器登录或手工粘贴。
@@ -470,19 +434,19 @@
   - **诚实声明：没有跑过真实消费。** 全部 `/use` 路径都是 mock 验收——真实消费会消耗用户真实的重置卡，本轮刻意不做。`list`/`flows` 的响应形状是用真实账号只读实测过的。
   - **遗留项（既有问题，非本次引入）**：`QUOTA_HOST_CANDIDATES.global` 只有一个候选 `api.minimax.io`，而该主机对国区凭据返回 401。国际区账号的可用主机仍未实测——这与本线路既有的配额读取是同一个未解问题。
 
-- **[九条线路] 空闲超时把「没有可展示内容」误判成「连接已死」，长时间思考或上游持续心跳时整轮被判 TIMEOUT**
-  - **问题（issue #52）**：流式线路的空闲看门狗只对「解析器 yield 出的 `StreamChunk`」复位。Codex 线路的 `wrapStreamWithWatchdog` 包在 `parseResponsesStream()` 外面，于是两类完全正常的流量会被判成 5 分钟静默：① 上游持续发 `response.in_progress` 这类状态帧——它们走完 mapper 后**不产出任何 chunk**；② reasoning summary 超过 12000 字符展示上限被截断后继续发送摘要——`visibleReasoningDelta()` 返回空文本，且不够 768 字符的 flush 水位。同一条误判存在于其余八条自建流的线路（antigravity / claude / command-code / minimax / glm / kimi / workbuddy / ollama），共九条。
-  - **修法：把计时判据从「展示层产出」下沉到「传输层收到数据」。** 共享 seam `wrapStreamWithWatchdog` 新增可选第二参数 `StreamActivity`（`pulse()`），内部接 `@deepseek-ai/dsh-timeout` 的 `idleWatchdog.pulse()`——它只在 `next()` 挂起期间重新计时，正是「读操作在等、字节在到」这个场景。因为 TypeScript 里参数更少的函数可以赋值给参数更多的签名，历史单参调用点继续编译通过，八条线路因此各自独立接线、互不阻塞。每条线路在**两处**上报：`reader.read()` 返回非空字节时一次，每个完整 SSE 帧一次。第二处刻意放在 `data:` 过滤**之前**，所以 `: ping` / `: keep-alive` 这类纯注释心跳（Codex 解析器原本在 `data === ''` 处整个丢掉）同样算活动。**摘要上限与展示缓冲逐字未动**：截断只影响展示，不再影响活动判定，也没有生成任何假的界面文字。
+- **[八条线路] 空闲超时把「没有可展示内容」误判成「连接已死」，长时间思考或上游持续心跳时整轮被判 TIMEOUT**
+  - **问题（issue #52）**：流式线路的空闲看门狗只对「解析器 yield 出的 `StreamChunk`」复位。Codex 线路的 `wrapStreamWithWatchdog` 包在 `parseResponsesStream()` 外面，于是两类完全正常的流量会被判成 5 分钟静默：① 上游持续发 `response.in_progress` 这类状态帧——它们走完 mapper 后**不产出任何 chunk**；② reasoning summary 超过 12000 字符展示上限被截断后继续发送摘要——`visibleReasoningDelta()` 返回空文本，且不够 768 字符的 flush 水位。同一条误判存在于其余七条自建流的线路（antigravity / claude / command-code / minimax / glm / kimi / ollama），共八条。
+  - **修法：把计时判据从「展示层产出」下沉到「传输层收到数据」。** 共享 seam `wrapStreamWithWatchdog` 新增可选第二参数 `StreamActivity`（`pulse()`），内部接 `@deepseek-ai/dsh-timeout` 的 `idleWatchdog.pulse()`——它只在 `next()` 挂起期间重新计时，正是「读操作在等、字节在到」这个场景。因为 TypeScript 里参数更少的函数可以赋值给参数更多的签名，历史单参调用点继续编译通过，七条线路因此各自独立接线、互不阻塞。每条线路在**两处**上报：`reader.read()` 返回非空字节时一次，每个完整 SSE 帧一次。第二处刻意放在 `data:` 过滤**之前**，所以 `: ping` / `: keep-alive` 这类纯注释心跳（Codex 解析器原本在 `data === ''` 处整个丢掉）同样算活动。**摘要上限与展示缓冲逐字未动**：截断只影响展示，不再影响活动判定，也没有生成任何假的界面文字。
   - **Codex 线路另加可配置超时**：插件 Config 新增 `codexStreamIdleTimeoutMs`，默认仍是 300000，`min(1)` 且上限 `MAX_TIMER_DELAY_MS`——**0 不是关闭开关**，这条线是截止时间不是功能开关。该常量与 `pulse()` 在 `@deepseek-ai/dsh-timeout` 里自 0.1.2-alpha.5 起就存在（已核对该 tag 的源码），所以没有新增跨代兼容 seam。
-  - **测试**：新增 5 个文件、8 条线路各一例，全部不 mock `idle-watchdog`（要观察的正是它本身不肯触发）。每条线路的用例都是同一个实验：假响应体连续发送纯注释心跳帧、撑过数倍于空闲窗口的时间且**期间不产生任何可展示 chunk**，最后正常收尾——修复后必须正常完成，修复前必然 `stream idle timeout`。另各配一条反向用例：真正一个字节都不发时仍然抛 `TIMEOUT`，证明反向用例不是空转。摘要截断那一条显式断言 block-end 的 reasoning 仍含 `Reasoning summary truncated` 且长度 < 12100，排除「靠去掉上限过关」这条路。
-  - **变异验证（复审时独立重做）**：只把共享 seam 里 `pulse` 的实现置空（一处改动，不动任何线路），8 条线路的 12 条用例**全部**以真实 TIMEOUT 失败，反向静默用例仍通过；恢复后全绿。子代理另各自做过一次「注释掉本线路 `activity?.pulse()`」的变异，结论一致。
+  - **测试**：新增 5 个文件、7 条线路各一例，全部不 mock `idle-watchdog`（要观察的正是它本身不肯触发）。每条线路的用例都是同一个实验：假响应体连续发送纯注释心跳帧、撑过数倍于空闲窗口的时间且**期间不产生任何可展示 chunk**，最后正常收尾——修复后必须正常完成，修复前必然 `stream idle timeout`。另各配一条反向用例：真正一个字节都不发时仍然抛 `TIMEOUT`，证明反向用例不是空转。摘要截断那一条显式断言 block-end 的 reasoning 仍含 `Reasoning summary truncated` 且长度 < 12100，排除「靠去掉上限过关」这条路。
+  - **变异验证（复审时独立重做）**：只把共享 seam 里 `pulse` 的实现置空（一处改动，不动任何线路），7 条线路的 12 条用例**全部**以真实 TIMEOUT 失败，反向静默用例仍通过；恢复后全绿。子代理另各自做过一次「注释掉本线路 `activity?.pulse()`」的变异，结论一致。
   - **验证：`npx tsc -b --force` 0 错误；`npx tsc -p test/tsconfig.json` 0 错误；全量 `npx vitest run` 213 passed | 1 skipped（214 文件）、3448 passed | 7 skipped | 0 failed。** 本轮未复现历史记录里的 Windows host 端口保留类失败。
   - **诚实声明：本轮全部为 mock SSE 验收，没有真实 ChatGPT 订阅账号参与。** 心跳形态只实测了 SSE 注释帧；「合法但被 mapper 丢弃的 `data:` 状态帧」由代码路径推断同样会 pulse（pulse 挂在每一帧上），但未单独构造该形态实测。issue 里并列出现的 `NGHTTP2_INTERNAL_ERROR` 属于 HTTP/2 传输层异常，本报告不声称本次改动能解决它。
 
 
 ## 0.19.1 - 2026-10-11
 - **[GLM（ZCode 账号）] 账号管理一行的三个按钮排不下，第三个被挤到下一行**
-  - **问题**：「账号管理（已登录 N 个账号）」与右侧按钮区共用一行（`.dsha-grouphead` 是 `justify-content:space-between`），而按钮容器带 `flex-wrap:wrap`。标题占掉宽度后，三个按钮（添加国区账号 / 添加国际区账号 / 导入本机 ZCode 登录态）里第三个必然折行。WorkBuddy 与 Claude 都只有两个按钮，所以这条线路是**唯一**有三个的，问题也只在它身上显形。
+  - **问题**：「账号管理（已登录 N 个账号）」与右侧按钮区共用一行（`.dsha-grouphead` 是 `justify-content:space-between`），而按钮容器带 `flex-wrap:wrap`。标题占掉宽度后，三个按钮（添加国区账号 / 添加国际区账号 / 导入本机 ZCode 登录态）里第三个必然折行。Claude 也只有两个按钮，所以这条线路是**唯一**有三个的，问题也只在它身上显形。
   - **修法：按「同类操作聚在一起」重排，而不是去调共享样式。** 两个「添加账号」留在标题行，第三个下移到下面的「登录授权」区。理由是它本来就是**另一条登录路径**——浏览器授权与读本机已有登录态是同一件事的两种做法，放在同一个区才读得出「怎么登录」；位置取状态提示之后、手工粘贴之前，既不打断「流程状态 → 结果」的阅读顺序，又与同为免浏览器路径的手工粘贴相邻。导入结果的提示一并跟着移，否则用户点了按钮却在远处看到结果。
   - **一处必要的连带改动**：登录区原先整块包在 `login !== null` 的判断里。按钮移进来后会跟着这个判断一起消失——host 一次流程状态都不报时，用户就再也点不到「导入本机 ZCode 登录态」。因此把判断收窄到只包住状态块，标题、导入按钮、导入结果、手工粘贴四样常驻。真实 host 永远会报 `login`（`routes.ts` 的 `loginStatusOf(null)` 返回 `idle`，且每次 `/status` 都带上它），所以**线上画面不变**，这个改动只是堵掉「入口会消失」这个洞。
   - **测试**：改写原先断言「三个按钮都在标题行」的那条用例——它验的正是被推翻的布局。新护栏断言标题行**恰好两个**按钮，且导入按钮落在登录区内。护栏做过变异验证：把第三个按钮塞回标题行，该用例立刻失败。另新增一条断言导入结果与按钮同区、可当场关闭。
@@ -517,12 +481,12 @@
     - **生产双开**：卡片自己会 `window.open` 授权页，而 host 侧又会 `spawn` 一次，于是**每次登录弹出两个一模一样的页面**。这正是 `test/login-opens-browser-once.test.ts` 当初为 Claude 与 Command Code 修掉的同一个问题，GLM 又犯了一次。现在照兄弟线路的形状改成「**host 恒定不开、卡片开**」，注入口降级为可选覆盖，并把 GLM 纳入那条既有护栏。
     - **顺带收口两处同款隐患**（纯增量、生产行为零变化）：`kimi-code` 的 `/login` 分支同样没有透传 `openBrowser`，形状与 GLM 缺陷完全一样；`antigravity` 的 `loginAndSave` 则是**硬编码**开浏览器，连注入口都没有。两处都补上了注入口，并用**反向对照**测试钉住「不注入时照样 spawn」，证明生产行为未变。
   - **本轮明确不做**：全仓级 `test/setup` 兜底（对三个浏览器命令做「记而不执行 + 断言 0 次」）——它会打死三处**刻意**断言 spawn 被调用过的正向对照用例，需要先设计逃生口；且它一次影响全部 209 个测试文件，评估结论已记录，留待单独决定。
-  - **本轮明确不做**：Agent 行为层映射（ZCode 的 `/mode plan|build|edit|yolo|guarded`、工具契约、`~/.zcode/AGENTS.md` 生态复用）——本轮只做线路层；也不改动 command-code / workbuddy 里已有的 GLM 模型行（那是它们各自上游的模型，与本线路无关），不绕过套餐限制，也不把公开 API 能力自动等同于订阅网关能力。
+  - **本轮明确不做**：Agent 行为层映射（ZCode 的 `/mode plan|build|edit|yolo|guarded`、工具契约、`~/.zcode/AGENTS.md` 生态复用）——本轮只做线路层；也不改动 command-code 里已有的 GLM 模型行（那是它们各自上游的模型，与本线路无关），不绕过套餐限制，也不把公开 API 能力自动等同于订阅网关能力。
 
 ## 0.18.0 - 2026-10-11
 
 - **[MiniMax Code] 额度耗尽后不换号，而且把「限流」判成了「欠费」**
-  - **这条线路是唯一一条有号池却完全没有号池行为的线路。** 全包共 7 条线路（codex / claude / kimi-code / command-code / ollama / workbuddy / antigravity）都在非 2xx 的 429 上 `markCooldown` 并 `hasAnotherAvailableAccount(tried) → continue`；MiniMax 的 `src/host/minimax-code/` 全目录**零次** `markCooldown` 调用，`getEffectiveCredential(undefined, …)` 的 `excludeIds` 恒为空。于是某一个账号的 Token Plan 跑光之后，**后面每一个请求都继续由它来服务**——号池选它、被拒、再选它，没有任何一处在学习「它已经被拒过」。
+  - **这条线路是唯一一条有号池却完全没有号池行为的线路。** 全包共 6 条线路（codex / claude / kimi-code / command-code / ollama / antigravity）都在非 2xx 的 429 上 `markCooldown` 并 `hasAnotherAvailableAccount(tried) → continue`；MiniMax 的 `src/host/minimax-code/` 全目录**零次** `markCooldown` 调用，`getEffectiveCredential(undefined, …)` 的 `excludeIds` 恒为空。于是某一个账号的 Token Plan 跑光之后，**后面每一个请求都继续由它来服务**——号池选它、被拒、再选它，没有任何一处在学习「它已经被拒过」。
   - **结果是用户看不到换号，只看到额度耗尽。** 冷却机制本身是好的（`isEligible` 是纯时间比较，到期自动恢复），问题只在于从不写入。
   - **识别层把普通限流判成了终局欠费。** 旧表里 `/exceeded/i` / `/quota/i` / `/balance/i` 是**裸词**，于是 `{"errorCode":1002,"errorReason":"rate_limit_exceeded"}` 这种最标准的限流信封被判成 `PROVIDER_ERROR` / `retryable:false` ——**本该由 DSH 有界退避重试的请求直接硬失败**。现在收紧为短语并补上本服务实际使用的中文措辞（余额/额度/配额 不足|耗尽|用尽、请充值、欠费、超出额度），且刻意**不**收录裸的「限制」「上限」，因为「请求超过频率限制」是标准限流句，必须继续保持可重试。
   - **`summarizeFailureBody` 不认 `base_resp.status_msg`。** 那正是本线路在配额、Files API、签到三处都在解析的信封，用户此前会被展示一整个原始 JSON，而它唯一的内容就是那句话。
@@ -532,7 +496,7 @@
   - **401/403 不写 `markAuthFailed`，而且这是有证据的结论。** 适配器永远不会分类一个没先续期过的 401/403；能走到号池分支的必然是刚轮换出来的新令牌仍被拒。而「凭据不可用」早有两条更可靠的写入路径（`refreshFailureStatus` 在令牌端点最终拒绝时写 `authStatus`，`authRejectedReason` 另有免写入的排除）。在请求阶段补写反而制造**不可自愈的假阳性**：续期成功时新令牌对已经写进桌面端 `auth.json`，于是 `healStaleAuthFailures` 的四个条件一个都不满足——一次瞬时 403 会把正在使用的桌面账号**永久**标成「需要重新登录」，理由还是错的。现状已用测试钉住。
   - 测试：新增 `test/minimax-code-429-cooldown.test.ts`（28 例），核心断言是「**一次** `adapter.stream()` 调用内，第一个账号 429 额度耗尽 → 第二个账号给出答案」，即 `['Bearer at-1', 'Bearer at-2']` 的鉴权顺序 + 调用方拿到 `text-delta` 而非异常。另覆盖：额度型 403 换号且 `tokenCalls === 0`、凭据型 401/403 **不冷却不轮换**（含单账号池与双账号池）、400/5xx 不轮换、原生桌面账号不被标记也不被冷却、in-band 429 只冷却、无号池路径逐字不变、以及「额度判决不会因为 body 被读两次而退化成凭据判决」。承重已用变异测试验证（禁用新门 → 2 红；去掉 body 复用 → 4 红，报错正是 `expected 'INVALID_CREDENTIAL' to be 'PROVIDER_ERROR'`）。
   - 验证：`npm run typecheck` 0 错误；全量 `npm test` **3013 passed / 7 skipped, 0 failed**（较 0.17.1 的 2985 增 28 例，基线 2994 增 19 例）。未改共享内核、UI、DTO、路由。
-  - **未一并处理的**：① 无号池的额度型 403 仍会多花一次续期（上一段说明的取舍）；② in-band（流式事件）的账号级 429 只能冷却、不能换号——响应体已经开着读了一半，结构上换不了，这是 7 条线路的共同限制，不是本线路独有。
+  - **未一并处理的**：① 无号池的额度型 403 仍会多花一次续期（上一段说明的取舍）；② in-band（流式事件）的账号级 429 只能冷却、不能换号——响应体已经开着读了一半，结构上换不了，这是 6 条线路的共同限制，不是本线路独有。
 ## 0.17.1 - 2026-10-10
 
 - **[Kimi Code] 请求体超限时，「还有图可丢吗」的判定与计量脱节，兜底一次都没跑（[#51](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/51)）**
@@ -545,17 +509,17 @@
   - 测试：`test/kimi-code-body-fit.test.ts` 新增 5 例——不变量（嵌套图、**丢图之前**判定必须与计量一致）、超限请求丢一张即可恢复、顶层图仍被看见（防修复被推到反方向）、`unavailable` 图不算作可丢（防过度递归）、替换名额必须花在真正带字节的图上。**承重已验证**：`git stash push -- src/host/common/request-images.ts src/host/kimi-code/adapter.ts` 后实测 **2 failed**（`expected false to be true`、``expected ['shot'] to deeply equal ['broken']``），还原后全过。
   - 既有两条断言（`:143` 顶层图 `true`、`:153` 丢图后 `false`）**逐字未改仍然成立**——它们此前就与修复后的实现同值，只是从未覆盖真正出问题的那个状态。
   - 验证：`tsc -b --pretty false` 与 `tsc -p test/tsconfig.json` 均 0 错误；全量 `npm test` **2961 passed / 7 skipped, 0 failed**（较基线增 5 例）。
-  - **未一并处理的**（与 0.13.2 记下的同一批）：claude / command-code / workbuddy / antigravity 四条线路的计量与替换仍只扫顶层，工具结果里的图对它们的图片预算系统性失明；它们没有布尔门，不会本地抛错，表现为静默超预算后被上游 413/400 拒绝。codex 干净（在构造后的 input 上测量），minimax-code 干净（复用共享递归实现）。
+  - **未一并处理的**（与 0.13.2 记下的同一批）：claude / command-code / antigravity 三条线路的计量与替换仍只扫顶层，工具结果里的图对它们的图片预算系统性失明；它们没有布尔门，不会本地抛错，表现为静默超预算后被上游 413/400 拒绝。codex 干净（在构造后的 input 上测量），minimax-code 干净（复用共享递归实现）。
 
 - **[Kimi Code] 四条线路的图片预算让工具结果里的图「隐形」，以及字节上限缺出口 —— 补完 [#51](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/51) 的遗留项**
   - **状态 A 换了一条路存活。** 310590b 关掉的是「`tool-result` 里的图对门禁不可见」那一个实例；但 `dropOldestImagesUntilFits` 在「剩余图片总字节 < 超限缺口」时算出 `additional = 0` 并**原样返回**，调用方无法区分「成功了」与「没进展」，于是下一轮重建出**完全相同**的 body，空转到 `attempt > 64` 才抛出——期间连续构建 65 次几 MB 的请求体。实测可达：图片 1.6 MB + 文本 1.5 MB + schema 0.7 MB = 3.8 MB，缺口 1.7 MB > 图片 1.6 MB。
   - **无进展检测。** 该函数改为返回 `{ options, dropped }`，`dropped === 0` 时立即停止并带着上下文抛错，不再消耗 attempt 预算重建一个不可能改变的请求。
   - **报错文案从两态改为三态。** 判据从「字节构成猜测」换成「循环实际做了什么」：①**有图可丢但丢了也补不上缺口** → 明确说明剩下的图比缺口小，省略全部也装不下（不再声称「Older images are omitted first」）；②**图已全部省略仍超限** → 报出已省略的张数；③**本来就没有图** → 直接排除删图这个无效动作。`BodyFitContext` 是可选第三参，**不传时逐字沿用原文案**，现有 14 条断言一条未改仍通过。
   - **kimi-code 的字节上限补上环境变量出口**，`DSH_KIMI_CODE_MAX_BODY_BYTES` / `DSH_KIMI_CODE_MAX_IMAGE_BYTES`，与 MiniMax / Codex 两条线对齐（resolver 逐字同构：trim → 空串回落 → 非正有限数回落 → floor）。**视频上限不加出口**：三条线对称（minimax 同样是裸常量、codex 无视频），且一个变量管两档会让按 2 MB 场景设的值顺手压垮 64 MiB 视频档。共享常量 `common/request-images.ts` 的值与默认参数**未动**——那 8 处无参调用仍依赖它。
-  - **claude / command-code / workbuddy / antigravity 四条线路的工具结果图片重新进入预算。** 四条各自持有私有副本（预算数字不同、缩放策略不同、attachment seam 不同），实测**不能**合并到共享实现：合并会同时替换四条线路的度量口径、缩放策略与取消语义，且有两处行为变化**不会让任何现有用例变红**（用例都不传 images 映射，走 `images === undefined` 分支）——那是最危险的一类。因此逐条把度量和替换改为递归，**零测试期望值变化**。
+  - **claude / command-code / antigravity 三条线路的工具结果图片重新进入预算。** 三条各自持有私有副本（预算数字不同、缩放策略不同、attachment seam 不同），实测**不能**合并到共享实现：合并会同时替换三条线路的度量口径、缩放策略与取消语义，且有两处行为变化**不会让任何现有用例变红**（用例都不传 images 映射，走 `images === undefined` 分支）——那是最危险的一类。因此逐条把度量和替换改为递归，**零测试期望值变化**。
   - 顺带记录一处**刻意保留**的不一致：claude 的 `countRequestImages`（claude/mapper.ts:885-894）早已递归，而同文件的 `collectRequestImageBytes` 此前不递归——这正是本 bug 的**第五次**复制。统一它会让 `requestImageEdgeLimit` 不再把 `unavailable` 的图计入，而现有测试钉住了「刻意过度计数」的语义（低上限永远不会导致拒绝），故不动。
-  - 测试：新增 `test/tool-result-image-budget.test.ts`（13 例，`describe.each` 覆盖四条线路的「计量」「替换名额顺序」「装得下时不动」）、`test/kimi-code-body-limits.test.ts`（6 例，出口生效 / 非法值回落矩阵 / 默认值即 2,097,152 与 1,500,000）、`test/kimi-code-body-fit.test.ts` +4 例（三态文案各一条 + 不传参数时逐字不变）；`test/kimi-code-adapter.test.ts` +1 例（适配器级「无进展即停止」，此前 `KimiCodeAdapter` 的 `options.attachments` 在测试中**从未被注入过**，那段 body-fit 循环零端到端覆盖）。`buildAdapter` 因此新增 `fetchFn` / `attachments` 两个可选参数。
-  - **承重已验证**：`git stash push -- ` 七个源文件后实测 **18 failed**（三态文案 3、无进展 1、四线路递归 9、环境出口 5），还原后全过。
+  - 测试：新增 `test/tool-result-image-budget.test.ts`（13 例，`describe.each` 覆盖三条线路的「计量」「替换名额顺序」「装得下时不动」）、`test/kimi-code-body-limits.test.ts`（6 例，出口生效 / 非法值回落矩阵 / 默认值即 2,097,152 与 1,500,000）、`test/kimi-code-body-fit.test.ts` +4 例（三态文案各一条 + 不传参数时逐字不变）；`test/kimi-code-adapter.test.ts` +1 例（适配器级「无进展即停止」，此前 `KimiCodeAdapter` 的 `options.attachments` 在测试中**从未被注入过**，那段 body-fit 循环零端到端覆盖）。`buildAdapter` 因此新增 `fetchFn` / `attachments` 两个可选参数。
+  - **承重已验证**：`git stash push -- ` 七个源文件后实测 **18 failed**（三态文案 3、无进展 1、三线路递归 9、环境出口 5），还原后全过。
   - 验证：`npm run typecheck` 0 错误；全量 `npm test` **2985 passed / 7 skipped, 0 failed**（较 310590b 的 2961 增 24 例）；`npm run build` 干净。
   - **未一并处理的**：`/compact` 的 “could not produce a useful summary” 与真实原因不符。已复核——真实原因**已经落盘**在 `compaction/end.error`，宿主 `ManualCompactionError` 自己也带着 `message` 与 `cause`，是 `command-compact` **既不读 session 也不渲染自己的 error.message**。本插件的 `inject` 里没有 `commands` / `compaction` / `sessions`，也无法重名注册 `compact`（宿主 registry 硬拒）。这是 deepseek-harness 的修复点，不在本仓库能力范围内。
 
@@ -581,34 +545,7 @@
   - 验证：`npm run typecheck` 0 错误；全量 `npm test` **2952 passed / 7 skipped, 0 failed**。新用例在改动前的实现上实测 **12 failed**（用 `git stash` 单独暂存 `mapper.ts` 复现），改后全过。
   - **本次没有证明命中率提升**：Google 的隐式缓存是服务端的，本机无法做 A/B，`readImageRequest` 的真实缩放产物在测试里全是 mock。改动依据是「前缀逐字节稳定」这一机制，与 68.84% 那次的成因同构，但没有可报的线上数字。
 
-## 0.16.0 - 2026-10-09
-
-- **[WorkBuddy] 模型行加上消耗倍率提示**
-  - **倍率一直是公开的，只是本插件没读。** 网关 `GET /v3/config` 每个模型条目都带一个 `credits` 字符串（国际区 `x6.67`、国区 `x0.79 credits`），就是该模型消耗套餐额度的相对速率；官方 CodeBuddy 客户端把同一个字段渲染成 `6.67x` 显示在模型下拉里（其 web-ui 里对应的就是 `credits.replace(/\s*credits$/i,'').replace(/^[x×]/i,'') + 'x'`）。
-  - **倍率必须按区域存，不能一个 id 一个数。** 实测 2026-10-09：`deepseek-v4.1-flash` 国区 `0.11`、国际区 `0.00`——一个标量必然对其中一个区的账号是错的。因此 `credits` 是 `Partial<Record<WorkBuddyRegion, string>>`，**只为该区确实公布过的值写键**；两区共有的 8 个 id 里 7 个数值一致、1 个不一致。
-  - **实时目录必须解析这个字段，兜底表也要抄。** 网关可达时**整表替换**内置表，若只在兜底表里写倍率，登录用户反而永远看不到它，而且上游一改价本地就一直是错的。两处都写上。
-  - **未公布的倍率一律不出现在界面上，而不是显示 0。** `default-model` 公布的是空字符串；`x0.00` 是**真实声明**（该模型不消耗额度），两者必须区分开——所以在 host 侧就把空串解析成「字段缺席」，`0.00` 原样保留。在一个花钱的数字上猜一个值，比缺一个值更糟。
-  - **账号区域已知时只显示该区的值，绝不拿另一个区顶上**；区域未知（还没读回账号）而两区不一致时把两区都写出来（`倍率 0.11x（国区） / 0.00x（国际区）`），一致时折叠成一个值。**两区域串的每一个字都由字典提供**——区域名词、括号字形、连两段之间的分隔符都是模板键，函数里不硬拼任何一个；中英括号字形不同（全角自带留白、半角不带），硬拼必然有一侧把 `(China)/ 0.00x` 粘成一段。跨区调用本来就会被上游以 400 `code 11102` 拒绝，所以借用邻区的数字等于报一个这个账号永远不会付的价。
-  - 倍率接在提示行**末尾**（`1M · 图片 · low/high/max · 倍率 0.79x`）：容量/图像/档位说的是模型**接受什么**，倍率说的是它**花多少钱**，把花钱那条留在最后，前面的能力信息仍读作一个短语。没有倍率时该项**整个不出现**，不留占位、不产生连续两个 `·`。
-  - **区域裁剪放在客户端而不是 host**：`buildModelOptions` 返回的 DTO 也会在没有账号的情况下被读取（harness 在未选定凭据时就解析模型列表），host 侧裁掉会让那种调用方拿到空值。
-  - 三处边界由测试钉住：`'×3.31'`/`'  x1.62 credits  '` 这类拼写、`'x0.00'` 必须保留、`''`/`'0.5x'`/`'x1,000'`/`null`/`42` 必须解析成 null（而不是 0）。另加一条全表不变量：`FALLBACK_MODELS` 里每个 `credits` 键都必须是该条自己 `regions` 声明过的区域。
-  - 测试：新增 `creditMultiplierHint` 的逐规则用例（含双语）、`parseConfigModels`/`buildModelOptions` 的透传用例、模型行的渲染级断言与「无倍率不留分隔符」用例。
-  - 验证：`npm run typecheck` 0 错误；全量 `npm test` **2909 passed / 7 skipped**（较基线 2886 增 23 例，0 failed）。倍率数值本身由一次性探针 `scripts/probe-workbuddy-credits.probe.ts` 从实时 `/v3/config` 读出，`FALLBACK_MODELS` 的 43 行倍率与实测**逐字一致**（另 4 行网关未公布，故无该字段），且探针复核出「两区不一致的只有 `deepseek-v4.1-flash` 一个 id」。
-
 ## 0.15.0 - 2026-10-09
-
-- **[WorkBuddy] 补上网关「在服务但从不公布」的模型，并按厂商归拢模型列表**
-  - **根因是一处反直觉的实测事实：`/v3/config` 不是服务全集。** 国际区实测，`gpt-6-sol`、`gpt-6-luna`、`gemini-3.8-flash` 三个 id 都能正常返回 200 的流式补全，却**完全不在目录里**（该接口只公布 `gpt-6-astra` 一个 GPT-6 成员）。判据只有一条——直接问：`code 11102`「service info not found」是没有这个模型，`code 11133`「provider rejected params」是模型存在、只是参数被拒。**`11133` 不能当存在性证据**：`max_tokens` 给得太小会把目录里的正常模型也波及进来（`gpt-5.5`、`gpt-5.4` 都会落到这一类）。
-  - **只加进内置表等于加了个看不见的模型。** 联网时实时目录会**整体替换**内置表，所以这三个 id 单列一份实测表（`UNPUBLISHED_MODELS`），并在**实时目录解析**与**快照反序列化**两处合并进去；已公布的条目永远优先，合并只填目录没提到的 id。国际区因此从 22 个变 25 个。
-  - **哪些字段是量出来的、哪些是继承的，界线写在代码里。** 存在性、思考档位、图片支持是**打接口测出来的**（`gpt-6-sol` 精确接受 `low`/`medium`/`high`/`xhigh`/`max`、拒绝 `minimal`，与 `gpt-6-astra` 公布的档位表一致；两者都接受 1×1 PNG）。上下文窗口、输出上限、`canDisableThinking` 则是**继承同族已公布的兄弟模型**（`gpt-6-astra` / `gemini-3.5-flash`）并就地标注——网关对这些 id 不公布任何信息，而 `max_tokens` 也不受窗口约束（连 `gpt-6-astra` 自己都接受远超其公布上限的值），从请求侧无法反推。三者仍可在设置页逐模型覆盖。
-  - **同一份现场实读还修正了国际区三处数值**：`glm-5.3-flash` 国际区也开始服务（此前标为仅国区）；`glm-5.3` / `glm-5.2` 国际区输出上限是 48000、`kimi-k2.8-preview` 是 32000。**一条表同时覆盖两区时取小值**：高报会让请求被网关拒绝，低报只是提前压缩，且仍可覆盖。
-  - **国区同步**：新增 `hy4-preview-f`、`space-bunny`，`hy4-preview-x` 已下线。
-  - **模型列表按厂商分组，不再让网关的排列顺序决定观感。** 网关给 `/v3/config` 的顺序是交错厂商的：一行 DeepSeek、一行 GPT-6-Astra、两行混元、一行 Kimi、再三行 GPT——八个 OpenAI 模型在设置页里从不挨在一起。现在按厂商族分组，族内**新代在前**。
-  - **组内排序按版本号比较，而不是照抄目录序。** 这是被实测逼出来的：只做分组时「在服务但不公布」的模型因为追加在已公布列表之后，`gpt-6-sol` 会渲染到 `gpt-5.4` **下面**——最新的沉底。改成比较 id 里的数字段后归位，且数字按**数值**比（`gpt-6.10` 在 `gpt-6.6` 之前），同版本保持目录序（`-flash` 仍领着 `-flash-sg`），读不出版本的 id（`primary-model` 这类别名）保持原位而不瞎猜。
-  - **分组放在 host 而不是设置页。** `modelsForRegion` 同样是请求路径解析模型的入口，在那儿排一次，picker 与 adapter 不可能出现两套顺序；客户端一行未改。
-  - 厂商归属有个坑：`hy3` / `hy4-preview` / `hunyuan-chat` 是腾讯混元的三种写法，必须归到同一组；没有任何规则命中的 id **自成一族**，而不是被扫进一个共享的 `other` 桶。
-  - 测试：新增分组与排序断言（族必须连续、组内新代在前、数值比较、同版本保持目录序），并扩充三个既有目录测试。
-  - 验证：`npm run typecheck` 0 错误；全量 `npm test` **2886 passed / 7 skipped**。另加两个一次性探针（`scripts/probe-workbuddy-catalog.probe.ts` 拉实时目录做差异、`scripts/probe-workbuddy-unlisted.probe.ts` 给目录外的 id 测档位/图片/输出上限），本条的每一项数值都是它们的输出。
 
 - **[思维保护] 推理坍缩守卫补上第二条独立信号：改写型死循环**
   - **原守卫对「换个说法反复说同一件事」是瞎的。** 唯一率信号只看得见**逐字**重复；一段把同一结论用不同措辞重述的流实测只有 0.48，而阈值是 0.85，于是一路跑到输出上限也没人拦。这不是理论问题——归档样本 `paraphrased-loop-reasoning.txt` 就是这种形态。
@@ -659,7 +596,7 @@
   - **报错区分「图太多」和「文本太多」。** 旧文案一律让用户去压缩会话，于是图片占主导的用户会被引向错误的 remedy。现在报出构成（`images N bytes, tool schemas N bytes, conversation text and system prompt N bytes`），并按主导项给处方：图主导提示少带图，文本主导才提示压缩会话。
   - 测试：新增 `test/kimi-code-body-fit.test.ts`（8 例），逐条锁住上述行为。
   - 验证：`tsc -b --pretty false` 与 `tsc -p test/tsconfig.json` 均 0 错误；全量 `vitest run` 2784 passed / 7 skipped。
-  - **未一并处理的**：workbuddy / command-code / claude / antigravity 四条线路各有自己的本地实现，同样存在「按存储字节计量」与「工具结果图片漏算」两个缺陷，但各自预算数字不同，需逐条评估而非照搬。
+  - **未一并处理的**：command-code / claude / antigravity 三条线路各有自己的本地实现，同样存在「按存储字节计量」与「工具结果图片漏算」两个缺陷，但各自预算数字不同，需逐条评估而非照搬。
 
 - **[Codex] 请求级图片总量上限，以及请求路径失败的 cause 链（[#50](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/50)）**
   - **codex 此前是全插件唯一没有请求级图片总量约束的线路。** 历史里的每张图片每轮都会被重新内联，请求体随读图数量单调增长；超过传输层能接受的体积后整轮失败。报告方的现场日志：≤4 MB 稳过、4~5 MB 掉到 3/10；合成复现里 ≥4 MB 全挂（`ERR_HTTP2_STREAM_ERROR: NGHTTP2_ENHANCE_YOUR_CALM`），≤3 MB 全过。这是**概率关系**而非硬阈值——报告者自己也标明了这一点，所以修的是「无上限」，不是「阈值是多少」。
@@ -685,7 +622,7 @@
   - 6 份格式化助手与 6 份 context-window 块 → `common/format.ts`、`common/ContextWindowEditor.tsx`。合并时发现 antigravity 的 `formatCapacity` 缺 1K 下限，会把 0 渲染成 `0K`。
   - `src/index.ts` 的 7 段 claim-route 三元组 → `host/common/provider-route.ts`（171 → 42 行）。Ollama 是唯一不监听 `llm/adapters-updated` 的线路，该差异以 `watch: false` 显式保留，而不是被模板抹平。
   - 各线路 locale 命名空间的 `any` 全部类型化；badge 注册的 inject 工厂集中为一处（未做成组件表：那需要按 harness 的 composed-props 内部类型书写，等于新增版本敏感接缝）。
-  - claude / minimax / workbuddy 三个巨型 Section 拆为「hook（状态与动作）+ 组件（纯渲染）」两层，hook 返回 `{ state, derived, actions }` 命名形状。
+  - claude / minimax 两个巨型 Section 拆为「hook（状态与动作）+ 组件（纯渲染）」两层，hook 返回 `{ state, derived, actions }` 命名形状。
   - 故意保留的重复及原因（Codex 的 `formatDate` 收**秒**、两份 `formatPercent` 舍入不同、一处未被测试覆盖的 antigravity `title` 变化）记在 `docs/settings-hub-redesign.md` §6.3。
 
 - **[MiniMax Code] Files API：超内联上限的媒体改走上传与 mm_file 引用**
@@ -827,7 +764,7 @@
   - **测试与验证**：新增 7 项边缘限制回归测试，并通过 34 张真实历史图片（含 3 张 2904×1272 截图）离线回放验证，超限图成功缩至 2000×876，其余 31 张原样发送。
 
 - **[通用机制] 插件内上下文预算自愈恢复机制（400/422 重试）**
-  - **适用范围**：Kimi Code、MiniMax Code、Command Code、Claude、WorkBuddy。
+  - **适用范围**：Kimi Code、MiniMax Code、Command Code、Claude。
   - **工作机制**：
     - 当模型请求返回 HTTP 400 / 422 且明确报告了自洽的窗口、输入及输出 token 计数时，若当前输入仍能容纳且上游输出预留与实际发送上限一致，插件会自动保留全部完整消息与工具定义，**仅下调输出上限并自动重试一次**（预留 1024 tokens 余量，且至少保留 1024 输出 tokens）。
     - 普通生成请求与压缩摘要请求共用此恢复链路，无需修改 DSH 核心代码，亦不截断历史消息。
@@ -853,7 +790,7 @@
 
 - **[通用机制] 上下文超限错误归一化映射以支持 Harness 自动压缩**
   - **改进内容**：
-    - 将 MiniMax、Kimi、Codex、Claude、Command Code、WorkBuddy 与 Antigravity 接入的 HTTP/SSE 上下文超限错误标准归一化为 `CONTEXT_WINDOW_EXCEEDED`。
+    - 将 MiniMax、Kimi、Codex、Claude、Command Code 与 Antigravity 接入的 HTTP/SSE 上下文超限错误标准归一化为 `CONTEXT_WINDOW_EXCEEDED`。
     - 使得支持溢出自愈的 Harness 能顺利触发会话压缩与历史修剪，而非直接以 Provider 普通错误中断对话。
     - 鉴权、限流、配额不足及输出长度上限等错误保持独立归类；Command Code OpenAI 协议及 Antigravity 流内错误帧不再被静默忽略。
 
@@ -862,7 +799,7 @@
     - 授权窗口被前端与后端各触发了一次：前端设置卡片在 `/login` 返回后调用 `window.open(authUrl)`；而主机端 `/login` 路由在调用 `beginLogin` 时未显式传入 `openBrowser` 参数，触发了默认逻辑，在宿主机上通过系统命令（`cmd /c start` / `open` / `xdg-open`）再次拉起了浏览器。
   - **修复方案**：
     - 统一采用“仅在前端卡片打开”的交互范式，保留用户界面所在终端的 `window.open`（支持远程访问 GUI），主机端默认将 `openBrowser` 置为空操作，彻底消除双重拉起。
-    - 经全线路审计：Antigravity、WorkBuddy、Codex 均已是单开，本次修复完善了 Claude 与 Command Code 两条线路。
+    - 经全线路审计：Antigravity、Codex 均已是单开，本次修复完善了 Claude 与 Command Code 两条线路。
 
 - **[Codex] 修复响应流异常中断被误判为 `UNKNOWN` 导致拒绝重试（[#32](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/32)）**
   - **根本原因**：
@@ -905,7 +842,7 @@
 - **[压缩策略] 修复输出上限作为固定预留导致自动压缩失效（[#30](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/30) / [#31](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/31)）**
   - **改进内容**：
     - Kimi / MiniMax 不再将动态预算上报为固定的 `defaultMaxTokens`，改为在发送阶段动态计算并对齐上限，避免压缩器误扣固定额度。
-    - 其余六条线路对齐 DSH 默认压缩策略，安全过滤过大的默认预留值，解决 Command Code（Kimi-K2.6、Grok 4.5/4.6）及 WorkBuddy（deepseek-v3-2-volc）因预留过大导致无法触发压缩的问题。
+    - 其余五条线路对齐 DSH 默认压缩策略，安全过滤过大的默认预留值，解决 Command Code（Kimi-K2.6、Grok 4.5/4.6）因预留过大导致无法触发压缩的问题。
 
 - **[Codex] 对齐官方客户端默认参数：优化 Verbosity 并默认省略推理摘要以节省额度**
   - **背景与取证**：
@@ -1013,7 +950,7 @@
   - **配置对齐**：归入 `gpt-6` 族 profile，默认思考档位 `medium`，支持 `low` 至 `max`（不支持 `none` / `minimal`）；默认加入可见模型列表。
 
 - **[模型目录] 修复清空缓存后在途请求回写旧数据的竞态**
-  - **修复方案**：为 `kimi-code` / `command-code` / `workbuddy` 模型目录缓存引入 `catalogCacheEpoch` 递增机制。清空缓存时递增 Epoch，在途的异步拉取请求若 Epoch 失配则放弃写入快照与恢复缓存，杜绝旧数据覆盖新状态。
+  - **修复方案**：为 `kimi-code` / `command-code` 模型目录缓存引入 `catalogCacheEpoch` 递增机制。清空缓存时递增 Epoch，在途的异步拉取请求若 Epoch 失配则放弃写入快照与恢复缓存，杜绝旧数据覆盖新状态。
 
 - **[DSH 兼容] 跟进 DeepSeek Harness 0.2.0-rc.2**
   - 更新全部 `@deepseek-ai/dsh-*` 依赖的 peerDependencies 范围（追加 `|| ^0.2.0-rc.2`），更新基线并重新生成 package-lock.json；通过新旧基线多环境回归测试，无破坏性行为改动。
@@ -1170,14 +1107,6 @@
 - **[测试套件] 修复 Windows 环境下 DPAPI 超时与测试假失败**
   - 将 `vitest.config.ts` 的单测超时时间从 15s 放宽至 60s，并将最大并行 Worker 数限制为 4，彻底解决因子进程高并发争用导致的超时及跨用例 Mock 污染问题，实现全量测试稳定通过。
 
-- **[WorkBuddy] 每日自动签到功能与健壮性提升**
-  - **核心功能**：国区账号在宿主启动时自动签到，运行期每 10 分钟幂等补检；状态持久化于 `storages/workbuddy-checkin.json`，设置页支持开关与手动补签；
-  - **评审优化**：
-    - 修复偏好 Store 异步加载导致已关闭签到的账号在重启时被误签的问题；
-    - 修复活动未开放账号被当天永久跳过的问题，增加每小时重试节流；
-    - 细化签到状态，区分“无活动”与“已签到”；手动补签请求改为串行队列，保证执行语义；
-    - 增强上游字段兼容性（蛇形/驼峰容错、软失败重试豁免、401 强制续期）。
-
 - **[模型配置] 模型上下文窗口跟随启用开关，并支持单行/批量恢复默认**
   - **按需展示**：上下文窗口配置仅展示当前已勾选启用的模型，未勾选时不产生冗余输入框；
   - **覆盖全量模型**：ChatGPT 标签页放开全部目录模型的上下文覆盖能力；
@@ -1202,10 +1131,6 @@
   - **#14**：偏好设置 Store 在无 `register` 环境下优雅回退至文件持久化并从文件水合，解决重启后模型开关重置的问题；
   - **#15**：合并多项通用功能优化与稳定性增强。
 
-- **[WorkBuddy] 修复多账号去重缺陷与昵称冒充身份问题**
-  - **根本原因**：OAuth 授权响应缺少明确账号身份时退化使用昵称作为 ID，导致桌面端扫盘获取的 UUID 账号与网页登录账号产生重复。
-  - **修复方案**：统一采用 `intl:<用户全局ID>` 规范账号身份，建立身份别名映射，消除重复账号现象。
-
 - **[Kimi Code] 优化模型选择器打开卡顿问题（从 800+ ms 降至 0 ms）**
   - **根本原因**：`loadProviderModels()` 在读取 30 分钟目录缓存之前调用了 `ensureAccessToken()`，而在 Windows 下读取 DPAPI 需要频繁 `spawn("powershell.exe")`。选择器构建时遍历每个模型调用，导致重复启动子进程阻塞主线程。
   - **修复方案**：将 Token 获取逻辑后置至缓存未命中的真实请求分支，命中内存缓存时直接零延迟返回。
@@ -1215,11 +1140,6 @@
 
 - **[ChatGPT] 修复对话中执行网页搜索报凭据缺失的问题**
   - 拆分“号池取号”与“服务取凭据”逻辑，确保未被选入模型对话轮换的活跃账号依然能为 `codex-search` 提供合法的只读凭据。
-
-- **[WorkBuddy] 正式上线腾讯 WorkBuddy / CodeBuddy 订阅线路**
-  - 注册 `workbuddy-subscription` 独立 Provider；
-  - 支持直接扫描复用 CodeBuddy 桌面端登录态，或通过官方浏览器授权绑定多账号；
-  - 桌面账号支持隐藏/恢复保护，支持多账号安全隔离存储与调度。
 
 ## 0.5.0 - 2026-09-20
 

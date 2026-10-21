@@ -28,9 +28,7 @@ const { catalogSnapshotName, catalogSnapshotPath, catalogTotal, readCatalogSnaps
 )
 const commandCode = await import('../src/host/command-code/client.ts')
 const kimi = await import('../src/host/kimi-code/client.ts')
-const workbuddy = await import('../src/host/workbuddy/client.ts')
 const { FileCredentialStore } = await import('../src/host/kimi-code/token-store.ts')
-const { workBuddyModelCredits } = await import('../src/host/workbuddy/model-catalog.ts')
 
 const home = () => process.env.DSH_HOME ?? path.join(os.tmpdir(), 'dsh-catalog-snapshot-fallback')
 const storages = () => path.join(home(), 'storages')
@@ -70,7 +68,6 @@ beforeEach(async () => {
 afterEach(async () => {
   commandCode.clearCachedCatalog()
   kimi.clearCachedCatalog()
-  workbuddy.clearCachedCatalog()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   // The catalog write inside loadProviderModels is fire-and-forget; let any
@@ -198,85 +195,27 @@ describe('kimi-code persisted catalog', () => {
     const sameRegion = await kimi.loadProviderModels({ fetchFn, region: 'mainland-cn' })
     expect(sameRegion.map((m) => m.id)).toEqual(['cn-only'])
   })
-})
 
-describe('workbuddy persisted catalog', () => {
-  const credentials = {
-    accessToken: 'at',
-    refreshToken: 'rt',
-    region: 'intl' as const,
-    domain: 'intl.example.com',
-    backend: 'https://intl.example.com',
-    expiresAt: 0,
-    source: 'managed' as const,
-    sourceFile: 'managed',
-    sourceMtimeMs: 0,
-  }
-
-  it('persists a fetched listing and serves it to the next process', async () => {
-    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
-      data: { models: [{ id: 'wb-1', name: 'WB 1', maxAllowedSize: 200_000 }] },
-    }), { status: 200 }))
-
-    const first = await workbuddy.loadConfigCatalog(credentials, { fetchFn })
-    expect(first.map((m) => m.id)).toContain('wb-1')
-    // The snapshot write inside loadConfigCatalog is fire-and-forget.
-    await vi.waitFor(async () => {
-      expect((await readCatalogSnapshot(catalogSnapshotName('workbuddy', 'intl'), countModels))?.fetchedAt).toBeGreaterThan(0)
-    })
-
-    workbuddy.clearCachedCatalog()
-    const fetchFn2 = vi.fn(async () => new Response('{}', { status: 500 }))
-    const second = await workbuddy.loadConfigCatalog(credentials, { fetchFn: fetchFn2 })
-    // The snapshot carries the fetched entry and the models the gateway serves
-    // without publishing are merged on read, so the next process answers with
-    // exactly the listing the first one did.
-    expect(second.map((m) => m.id)).toEqual(first.map((m) => m.id))
-    expect(second.map((m) => m.id)).toContain('gpt-6-sol')
-  })
-
-  it('never serves one region a snapshot fetched for another', async () => {
-    // A snapshot written under the *cn* scope, which the intl caller must not
-    // even look at: it falls back rather than offering cn-only models.
-    await writeRaw(catalogSnapshotName('workbuddy', 'cn'), {
+  it('serves a snapshot written before a newer catalog column existed', async () => {
+    // Forward compatibility for a column the entry type gained later:
+    // `parsePersistedCatalogModels` keeps only the entries carrying the two
+    // required keys (an id and a positive context window) before casting the
+    // rest, so a snapshot from an older install rehydrates with the newer
+    // column simply absent. The required behavior is "this entry carries no
+    // value for that column" — not a throw, and not a fabricated one — so the
+    // picker keeps working across an upgrade.
+    await writeRaw(catalogSnapshotName('kimi-code', 'global'), {
       fetchedAt: Date.now(),
-      models: [{ id: 'cn-only', name: 'CN', region: 'cn', contextWindow: 1 }],
+      models: [{ id: 'kimi-legacy', name: 'Legacy', contextWindow: 100_000 }],
     })
     const fetchFn = vi.fn(async () => new Response('{}', { status: 500 }))
-    const result = await workbuddy.loadConfigCatalog(credentials, { fetchFn })
-    expect(result).toEqual([])
-  })
-
-  it('serves a snapshot written before the multiplier column existed', async () => {
-    // Forward/backward compatibility for the `credits` field added to
-    // `WorkBuddyModelEntry` later: a snapshot on disk from an older install has
-    // no such key, and the rehydrate path casts the JSON entry straight to the
-    // entry type rather than validating field by field. The required behavior is
-    // "this entry carries no multiplier hint" — not a throw, and not a
-    // fabricated rate — so the picker keeps working across an upgrade.
-    await writeRaw(catalogSnapshotName('workbuddy', 'intl'), {
-      fetchedAt: Date.now(),
-      models: [{
-        id: 'wb-legacy',
-        name: 'Legacy',
-        regions: ['intl'],
-        contextWindow: 100_000,
-        maxContextWindow: 100_000,
-        maxTokens: 1_000,
-        supportsImage: false,
-        reasoningEfforts: [],
-        defaultReasoningEffort: null,
-        canDisableThinking: false,
-        description: '',
-      }],
-    })
-    const fetchFn = vi.fn(async () => new Response('{}', { status: 500 }))
-    const models = await workbuddy.loadConfigCatalog(credentials, { fetchFn })
-    const legacy = models.find((model) => model.id === 'wb-legacy')!
+    const models = await kimi.loadProviderModels({ fetchFn, region: 'global' })
+    const legacy = models.find((model) => model.id === 'kimi-legacy')!
     expect(legacy).toBeDefined()
-    expect(legacy.credits).toBeUndefined()
-    // The accessor a caller reads it through reports "nothing published".
-    expect(workBuddyModelCredits('wb-legacy', models)).toEqual({})
+    expect(legacy.contextWindow).toBe(100_000)
+    // The columns that arrived later, and that the old document never had.
+    expect(legacy.minimumPlan).toBeUndefined()
+    expect(legacy.supportsVideo).toBeUndefined()
   })
 })
 
@@ -284,7 +223,6 @@ describe('catalogSnapshotName', () => {
   it('keeps each scope in its own file under storages', () => {
     expect(catalogSnapshotName('kimi-code', 'global')).not.toBe(catalogSnapshotName('kimi-code', 'mainland-cn'))
     expect(catalogSnapshotName('command-code', 'prod')).not.toBe(catalogSnapshotName('command-code', 'staging'))
-    expect(catalogSnapshotName('workbuddy', 'intl')).not.toBe(catalogSnapshotName('workbuddy', 'cn'))
   })
 
   it('folds a scope that could not be a file name into one that is', () => {

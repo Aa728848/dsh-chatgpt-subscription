@@ -553,7 +553,7 @@ describe('错误码分类', () => {
     // 在已用尽的窗口上继续失败并多烧一次额度。这个性质由「QUOTA 不在下面这份
     // 可重试集合里」自动成立，所以把它钉死，而不是靠某处记得别重试。
     // 取值来自各线路 adapter 的 retryableCodes（minimax-code / kimi-code /
-    // command-code / workbuddy 都是这一份）。
+    // command-code 都是这一份）。
     const RETRYABLE_CODES = ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']
     expect(RETRYABLE_CODES).not.toContain('QUOTA')
     for (const code of QUOTA_CODES) {

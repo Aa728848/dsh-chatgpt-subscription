@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseResponsesStream } from '../src/host/responses-client.ts'
-import { closeStream, createStreamState, processStreamLine } from '../src/host/workbuddy/mapper.ts'
+import { closeStream, createStreamState, processStreamLine } from '../src/host/step-code/mapper.ts'
 
 async function usage(response: unknown): Promise<{ inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }> {
   const body = 'data: ' + JSON.stringify({ type: 'response.completed', response: { usage: response } }) + '\n\n'
@@ -37,7 +37,7 @@ describe('cache accounting stays disjoint', () => {
     expect('cacheWriteTokens' in reported).toBe(false)
   })
 
-  it('reports workbuddy cache writes as their own bucket', () => {
+  it('reports step-code cache writes as their own bucket', () => {
     const state = createStreamState()
     const out = [
       ...processStreamLine(
