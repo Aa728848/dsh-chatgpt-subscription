@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.34.0 - 2026-10-21
 - **[Kimi Code] 长会话撞 2 MB 请求体上限整轮失败——现在撞墙交给压缩恢复，窗口折算降为可选**
   - **现象**：中文长会话在 K3 线上整轮失败，报 `Kimi Code rejected the request before sending: the serialized body is 2107355 bytes, above the 2097152-byte limit this route enforces. Composition: images 0 bytes, tool schemas 2531 bytes, conversation text and system prompt 2104824 bytes`。图片 0 字节，也就是说这**不是读图问题**，上一版的「丢最旧的图」回收路径在这里丢无可丢，只能报错并建议压缩——而用户真正要做的是让这一轮活下来。
   - **根因一（错误码不对，宿主接不上自愈）**：[mapper.ts](../src/host/kimi-code/mapper.ts) 的 `assertRequestBodyFits` 抛的是 `PROVIDER_ERROR`，而 DSH 的溢出恢复**只对 `CONTEXT_WINDOW_EXCEEDED` 生效**（`compaction-basic` 的 `agent/request-error` 监听器按该码强制压缩本轮历史、再重试同一步，重试上限默认 1 次）。于是唯一还能靠压缩救回来的场景——正文太大、图已丢完——恰好是唯一不会被救的那个。本线路服务端真返回 400 溢出的路径（`classifyKimiFailure`）早就用对了这个码，只有本地守卫没接上。
