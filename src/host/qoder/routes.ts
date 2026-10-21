@@ -48,6 +48,7 @@ import {
 } from '../../shared/qoder-contracts.ts'
 import {
   cachedQoderModelCatalog,
+  convergeQoderSelection,
   readQoderCacheStats,
 } from './adapter.ts'
 import { adoptQoderSignIn, type QoderAdoptedCredential } from './adopt.ts'
@@ -58,12 +59,20 @@ import {
 import {
   loadQoderModelCatalog,
   loadQoderQuota,
+  qoderCatalogFingerprint,
+  qoderCatalogIsLive,
+  qoderCatalogNeedsRefresh,
   qoderCosyIdentityOf,
   qoderModelListUrl,
+  warmQoderModelCatalog,
   type QoderUpstreamCredential,
 } from './client.ts'
 import { buildQoderCosyHeaders } from './cosy.ts'
-import { catalogModelOptions, parseQoderModelListing, type QoderModelEntry } from './model-catalog.ts'
+import {
+  catalogModelOptions,
+  parseQoderModelListing,
+  type QoderModelEntry,
+} from './model-catalog.ts'
 import {
   beginQoderLogin,
   getQoderLoginStatus,
@@ -81,6 +90,20 @@ import {
 import { DISCOVERY_TIMEOUT_MS, PROVIDER_NAME, regionSupportsDeviceLogin } from './types.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
+
+/**
+ * 启动预热之后盯「后台刷新有没有换掉目录」的时间上限。
+ *
+ * 只影响一次事件**什么时候**发出，不影响任何请求：没有变化时它一次都不会发，
+ * 有变化时它让已经在跑的选择器重读一份新的目录。上游打不回来时到点就放弃，
+ * 预热本身早已返回（预热从不等待网络）。
+ *
+ * 上限压在上游那一次目录请求的超时**之内**：正常情况下刷新一定在它之前落地
+ * （或失败回落），超过这个窗口只可能是上游彻底不可达，再等也没有意义。
+ */
+const QODER_CATALOG_OBSERVE_MS = DISCOVERY_TIMEOUT_MS + 5_000
+/** 上面那个等待的轮询间隔：目录刷新落地没有可订阅的完成信号，只能轻轮询。 */
+const QODER_CATALOG_OBSERVE_POLL_MS = 100
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json' })
@@ -219,6 +242,8 @@ export interface QoderStatusSources {
   quota: QoderQuotaSnapshotDto | null
   /** 本次应答背后是否正在刷新额度。 */
   quotaRefreshing: boolean
+  /** 本次应答背后是否正在刷新模型目录（客户端据此排一次补读）。 */
+  catalogRefreshing: boolean
   /** 上一次额度读失败的原因；没有快照可渲染时为 null。 */
   quotaError: string | null
   /** 本进程累计的缓存用量；尚无样本时为 undefined（客户端据此渲染占位符）。 */
@@ -236,6 +261,17 @@ export async function getQoderStatus(sources: QoderStatusSources): Promise<Qoder
   const quota = sources.quota
   const cacheStats = sources.cacheStats
   const accountCount = sources.pool.accounts.length
+  // 勾选标记与适配器的过滤读**同一份**收敛结果（adapter.ts 的 convergeQoderSelection）：
+  // 残留 id 在这里也不该再被算成「可用」，否则卡片会说「已选 3 / 2」而选择器里只有两个模型。
+  //
+  // 而且必须与适配器**同一条规则**：兜底表阶段不按白名单筛。否则冷启动时卡片会显示
+  // 「一个都没勾」（白名单是实时目录的词汇，筛兜底表必然收敛成空），而选择器里却是全部
+  // 可用的——同一个状态在两张面上说两句话，用户没法据此判断该不该重勾。
+  const enabledModelIds = convergeQoderSelection(
+    settingsValue.enabledModelIds,
+    qoderCatalogIsLive(sources.region),
+    sources.catalog,
+  )
   return {
     ...sources.pool,
     enabled: settingsValue.enabled !== false,
@@ -249,11 +285,15 @@ export async function getQoderStatus(sources: QoderStatusSources): Promise<Qoder
     quota,
     lastFetchedAt: quota === null ? null : quota.fetchedAt,
     quotaRefreshing: sources.quotaRefreshing,
+    // 与 quotaRefreshing 同一条约定：应答先出去，刷新跑在它背后。
+    catalogRefreshing: sources.catalogRefreshing,
     quotaError: sources.quotaError,
     models: catalogModelOptions(sources.catalog, {
-      enabledModelIds: settingsValue.enabledModelIds,
+      enabledModelIds,
       contextWindowOverrides: settingsValue.contextWindowOverrides,
     }),
+    // 三态如实下发：null 也是一个值（客户端据此区分「没挑过」与「全关」）。
+    enabledModelIds,
     contextWindowOverrides: settingsValue.contextWindowOverrides,
     defaultReasoningEffort: settingsValue.defaultReasoningEffort,
     // 登录流程的公开状态（凭据不出这一层）。
@@ -269,7 +309,10 @@ export async function getQoderStatus(sources: QoderStatusSources): Promise<Qoder
 function patchFromBody(body: Record<string, unknown>): QoderSettingsPatch {
   const patch: QoderSettingsPatch = {}
   if (typeof body.enabled === 'boolean') patch.enabled = body.enabled
-  if (Array.isArray(body.enabledModelIds)) {
+  // 三态：`null` 是「回到不过滤」，数组（含空数组 = 全关）是显式选择。
+  if (body.enabledModelIds === null) {
+    patch.enabledModelIds = null
+  } else if (Array.isArray(body.enabledModelIds)) {
     patch.enabledModelIds = body.enabledModelIds.filter((id): id is string => typeof id === 'string')
   }
   if (typeof body.contextWindowOverrides === 'object' && body.contextWindowOverrides !== null) {
@@ -310,6 +353,16 @@ export function registerQoderRoutes(
   const fetchFn = options.fetchFn ?? fetch
   const accountPool = options.accountPool
   const quotaRefresh = new QuotaRefresh()
+  /**
+   * 目录的「应答背后刷新」器，与 `quotaRefresh` 逐字同一套模式。
+   *
+   * 分开建而不是复用同一个实例：两者在飞的时机不同（额度 TTL 2 分钟、目录 TTL
+   * 30 分钟），共用一个 pending 会让「目录正在拉」把一次该发生的额度刷新挡掉。
+   *
+   * 它的 `lastError` **不下发**：目录是可降级的，取不到时选择器走随包兜底表，
+   * 卡片不该因此显示一句错误（见 refreshCatalog 的注释）。
+   */
+  const catalogRefresh = new QuotaRefresh()
 
   /** 上一次成功读到、属于当前账号的额度快照（纯内存）。 */
   let quotaSnapshot: QoderQuotaSnapshotDto | null = null
@@ -380,16 +433,61 @@ export function registerQoderRoutes(
     }
   }
 
-  /** 一次目录读：凭据来自号池，目录按区域缓存（client.ts 的注释即此意）。 */
-  const refreshCatalog = async (force: boolean): Promise<void> => {
-    if (accountPool === undefined) return
+  /**
+   * 一次目录读：凭据来自号池，目录按区域缓存（client.ts 的注释即此意）。
+   *
+   * `force` 只有用户按下「刷新目录」时才为 true：那是一个显式请求，必须真的
+   * 重取。自动路径一律传 false，让 `loadQoderModelCatalog` 的 TTL 与 in-flight
+   * 去重生效——否则「每次打开设置页」就等于「每次打一次上游」，而这张卡片本来
+   * 每 60 秒轮询一次。
+   *
+   * 失败一律吞掉：目录是可降级的，选择器回落随包兜底表比让卡片报错有用。
+   *
+   * @returns 这次读有没有**真的换掉**进程内的实时目录。调用方据此决定要不要发
+   *          `llm/adapters-updated`：目录没换就没有任何订阅方需要重读，每 60 秒
+   *          轮询都发一次只会让选择器每拍重建一遍。
+   */
+  const refreshCatalog = async (force: boolean): Promise<boolean> => {
+    if (accountPool === undefined) return false
     const target = await accountPool.getQuotaReadTarget(fetchFn).catch(() => null)
-    if (target === null) return
+    if (target === null) return false
+    const region = target.credentials.region
+    // 刷新**之前**那一份的指纹：只有内容真的换了才算「目录变了」。口径在 client.ts
+    // 的 {@link qoderCatalogFingerprint} 里只有一处（启动预热也读它）。
+    const before = qoderCatalogFingerprint(region)
     await loadQoderModelCatalog(upstreamCredentialOf(target.credentials), {
       fetchFn,
       force,
       ...(options.env === undefined ? {} : { env: options.env }),
     }).catch(() => undefined)
+    return qoderCatalogFingerprint(region) !== before
+  }
+
+  /**
+   * 一次目录刷新的完整副作用：读目录，真的换了就通知 DSH 重建模型选择器。
+   *
+   * 事件只能在这里发（目录真的换掉之后），不能放在 `POST /catalog/refresh` 的应答
+   * 路径上无条件发：应答背后那次自动刷新走的也是这条路径，而它每 60 秒轮询都会被
+   * 考虑一次——无条件发就等于让选择器每拍重读一次目录。
+   */
+  const refreshCatalogAndAnnounce = async (force: boolean): Promise<boolean> => {
+    const changed = await refreshCatalog(force)
+    if (changed) ctx.emit?.('llm/adapters-updated')
+    return changed
+  }
+
+  /**
+   * 这个部署当前要不要在应答背后顺手拉一次目录。
+   *
+   * 三个条件缺一不可：有号池（没有号池就没有刷新入口，`refreshCatalog` 会直接
+   * 返回）、池里有账号（没有账号时上游一定会拒，白打一次）、以及缓存确实空/过期
+   * （判定留在 client.ts 的 {@link qoderCatalogNeedsRefresh}，口径只有一处）。
+   *
+   * 区域取号池当前该展示的那一行——它与一次真实模型请求读的是同一个区域的目录。
+   */
+  const catalogNeedsRefresh = (pool: QoderPoolSlice, region: QoderRegion): boolean => {
+    if (accountPool === undefined || pool.accounts.length === 0) return false
+    return qoderCatalogNeedsRefresh(region)
   }
 
   /** 号池里当前该展示的那一行（active → primary → 第一行）。 */
@@ -411,11 +509,25 @@ export function registerQoderRoutes(
     }
   }
 
-  const readStatus = async (): Promise<QoderStatusDto> => {
+  /**
+   * 组装一次状态，并顺带回答「这一次应答背后该不该拉目录」。
+   *
+   * 两件事刻意由同一次读决定：判定要用的号池切片与区域只有这里面有，分开再算
+   * 一遍就是两次读池，而两次之间池可以变（删账号、换 active），结论就可能与
+   * 这一次应答对不上。返回值而不是靠闭包变量，是因为中间隔着 await，闭包变量
+   * 会被并发进来的另一次请求改写。
+   */
+  const readStatusWithCatalogDecision = async (): Promise<{
+    status: QoderStatusDto
+    catalogWanted: boolean
+  }> => {
     const pool = await poolSlice()
     const account = pickAccount(pool)
     const region = account?.region ?? 'global'
-    return await getQoderStatus({
+    // 在读 catalog **之前**判定：cachedQoderModelCatalog 在缓存为空时会回落
+    // 随包表，读完之后就再也看不出「空」了。
+    const catalogWanted = catalogNeedsRefresh(pool, region)
+    const status = await getQoderStatus({
       options: accountPool === undefined ? { ...options, accountPool: undefined } : options,
       settings,
       region,
@@ -424,11 +536,17 @@ export function registerQoderRoutes(
       catalog: cachedQoderModelCatalog(region),
       quota: quotaSnapshot,
       quotaRefreshing: quotaRefresh.refreshing,
+      // 「正在拉」或「这次应答背后就要拉」——对客户端是同一句话：选择器里的
+      // 兜底行马上会被真实目录顶掉，该排一次补读。真正的启动在应答之后。
+      catalogRefreshing: catalogRefresh.refreshing || (catalogWanted && accountPool !== undefined),
       // 池里没有账号时不存在「额度读失败」这回事：探活会先报「号池中没有账号」。
       quotaError: pool.accounts.length === 0 ? null : quotaError,
       cacheStats: readQoderCacheStats(),
     })
+    return { status, catalogWanted }
   }
+
+  const readStatus = async (): Promise<QoderStatusDto> => (await readStatusWithCatalogDecision()).status
 
   /**
    * 登录完成后把凭据收进池，并顺手同步一次目录。
@@ -438,7 +556,9 @@ export function registerQoderRoutes(
    */
   const onLoginComplete = async (credentials: QoderCredentials): Promise<void> => {
     await saveLoginCredential(credentials)
-    await refreshCatalog(true)
+    // 登录之后目录一定换了一批（之前可能还是另一把凭据的、或者根本是兜底表），
+    // 真的换了就通知选择器重读——否则用户登录完还得手动刷新一次页面才看到模型。
+    await refreshCatalogAndAnnounce(true)
   }
 
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -454,7 +574,25 @@ export function registerQoderRoutes(
           if (quotaSnapshot === null) await quotaRefresh.run(() => refreshQuota(false))
           else quotaRefresh.start(() => refreshQuota(false))
         }
-        return sendJson(response, 200, { ok: true, value: await readStatus() })
+        // 状态先组装（目录此时读的是缓存/兜底表），应答再发出去，目录的刷新
+        // 排在应答**背后**：
+        //
+        // - await 进来等于把上游目录接口的超时塞进每一次 60 秒轮询，而打开设置页
+        //   的人要的是「马上看到一张卡」；目录取不到时选择器本来就有随包兜底表，
+        //   晚一两秒被真实目录顶掉完全可接受。
+        // - 用 `refreshCatalog(false)` 而不是 `force: true`：force 会跳过缓存与
+        //   磁盘快照，于是每进一次页面就打一次上游；false 让 TTL 与 in-flight 去重
+        //   生效，绝大多数轮询因此根本不发请求（这一条由测试钉住）。
+        // - 判定在 readStatus 里做（它才拿得到号池切片与区域），这里只负责按结论
+        //   启动。`catalogRefresh.start` 自带在飞去重，重复调用不会再发一次。
+        const {
+          status,
+          catalogWanted,
+        } = await readStatusWithCatalogDecision()
+        if (catalogWanted && accountPool !== undefined) {
+          catalogRefresh.start(() => refreshCatalogAndAnnounce(false))
+        }
+        return sendJson(response, 200, { ok: true, value: status })
       }
 
       if (path === 'settings') {
@@ -559,7 +697,7 @@ export function registerQoderRoutes(
           return sendJson(response, 400, { ok: false, error: credentials.error })
         }
         await saveLoginCredential(credentials)
-        await refreshCatalog(true)
+        await refreshCatalogAndAnnounce(true)
         return sendJson(response, 200, { ok: true, value: await readStatus() })
       }
 
@@ -573,7 +711,7 @@ export function registerQoderRoutes(
         })
         if (outcome.adopted !== undefined) {
           await saveAdoptedCredential(outcome.adopted)
-          await refreshCatalog(true)
+          await refreshCatalogAndAnnounce(true)
         }
         // adopt 失败**永不阻断**，所以这一条直接返回裸 DTO（信封会把它误判成一次失败）。
         return sendJson(response, 200, outcome.result as QoderAdoptResultDto)
@@ -598,7 +736,9 @@ export function registerQoderRoutes(
       if (path === 'catalog/refresh') {
         if (method !== 'POST') return sendMethodNotAllowed(response)
         if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
-        await refreshCatalog(true)
+        // 事件在**目录真的换掉之后**发（refreshCatalogAndAnnounce 里），不是无条件发：
+        // 一次没换到新东西的刷新不该让选择器重建一遍。
+        await refreshCatalogAndAnnounce(true)
         return sendJson(response, 200, { ok: true, value: await readStatus() })
       }
 
@@ -612,6 +752,83 @@ export function registerQoderRoutes(
   return () => {
     dispose()
   }
+}
+
+/**
+ * 插件启动时的一次目录预热（**非阻塞**，调用方不许 await）。
+ *
+ * 解决的问题见 client.ts 的 {@link warmQoderModelCatalog}：`cachedCatalog` 是进程内
+ * 的，宿主重启后它是空的，而磁盘快照里明明躺着上一次的真实目录；在用户第一次打开
+ * 设置页之前，`adapter.listModels` 读到的就是随包兜底表（15 条缺省模型），模型
+ * 选择器于是先把这一大片假模型摊出来，点一下设置页才恢复正常。
+ *
+ * 这里是**宿主侧的那一层**，它做三件 client.ts 不该知道的事：
+ *
+ * 1. **凭据从号池来**（`getQuotaReadTarget`，与 `refreshCatalog` 同一个入口）：
+ *    目录是区域的属性，而哪个区域要看池里当前该展示的那一行。没有池、池里没有账号、
+ *    取凭据失败——三种情况都安静返回，不预热，**不报错**。
+ * 2. **对比预热前后的指纹**，只有目录真的换了才发 `llm/adapters-updated`：这条与
+ *    `refreshCatalogAndAnnounce` 是同一条判词（client.ts 的 qoderCatalogFingerprint），
+ *    否则「目录变了没有」会在两条路径上给出两个答案。绝大多数启动里快照与上游一致，
+ *    一次事件都不发。没有快照时变化当场就发生；有快照时预热不等网络，变化是晚到的，
+ *    由 {@link observeQoderCatalogChange} 补发（两边都以同一份指纹为基线，不会重复）。
+ * 3. **全程吞错**：预热是尽力而为，它没有资格让插件装载或首次状态应答失败。
+ */
+export async function warmQoderCatalogOnStartup(
+  ctx: Context,
+  options: QoderRouteOptions = {},
+): Promise<void> {
+  const accountPool = options.accountPool
+  if (accountPool === undefined) return
+  const fetchFn = options.fetchFn ?? fetch
+  // 池里没有账号时上游一定会拒：白打一次，而且启动时连凭据都读不出来。
+  const target = await accountPool.getQuotaReadTarget(fetchFn).catch(() => null)
+  if (target === null) return
+  const region = target.credentials.region
+  // 基线与结果都取自**同一个**指纹函数（client.ts 的 qoderCatalogFingerprint），
+  // 与 refreshCatalogAndAnnounce 是同一条判词：目录没换就没有任何订阅方需要重读，
+  // 每一拍都发只会让模型选择器反复重建。
+  const baseline = await warmQoderModelCatalog(upstreamCredentialOf(target.credentials), {
+    fetchFn,
+    ...(options.env === undefined ? {} : { env: options.env }),
+  })
+  // 没有快照时预热已经把上游那一版取回来了：这一刻就是「真的变了」。
+  // 有快照时预热**不等网络**，变化是晚到的（落在下面那次后台刷新里），这里不发。
+  if (qoderCatalogFingerprint(region) !== baseline) ctx.emit?.('llm/adapters-updated')
+  // 晚到的那一半：以**此刻**的指纹为基线，后台刷新真的换了目录才补发一次。
+  // 用此刻而不是 baseline，是为了让上面已经发过的那一次不会被重发。
+  void observeQoderCatalogChange(ctx, region, qoderCatalogFingerprint(region))
+}
+
+/**
+ * 盯一次「后台刷新有没有真的换掉目录」，换了就发一次 `llm/adapters-updated`。
+ *
+ * 存在的理由是**预热不等网络**：启动那一刻缓存里是磁盘快照，上游那一版要等后台刷新
+ * 落地才知道。用户此时可能已经打开了模型选择器，而它读到的还是快照那一版——目录真的
+ * 变了却没人通知，选择器就会一直停在旧的一版上，直到下一拍轮询。
+ *
+ * 三种结局都不额外联网，也都不重复发事件：
+ *
+ * - 目录已经新鲜（没有快照的那条路已经把刷新跑完了）→ `qoderCatalogNeedsRefresh` 为
+ *   false，直接返回；
+ * - 后台刷新在飞 → 等它落地（缓存是落地才更新）再比指纹；
+ * - 上游答的还是同一批 id（绝大多数启动）→ 指纹相同，**一次都不发**。
+ */
+async function observeQoderCatalogChange(
+  ctx: Context,
+  region: QoderRegion,
+  before: string,
+): Promise<void> {
+  const deadline = Date.now() + QODER_CATALOG_OBSERVE_MS
+  // 只在「确实还有一次刷新没落地或还没跑」时等：判定口径留在 client.ts，不在这里另写。
+  while (qoderCatalogNeedsRefresh(region, Date.now()) && Date.now() < deadline) {
+    // unref：宿主在等待窗口内退出时，这个定时器不该把进程多留 25 秒。
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, QODER_CATALOG_OBSERVE_POLL_MS)
+      timer.unref?.()
+    })
+  }
+  if (qoderCatalogFingerprint(region) !== before) ctx.emit?.('llm/adapters-updated')
 }
 
 /**

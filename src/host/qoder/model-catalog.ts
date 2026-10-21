@@ -196,6 +196,62 @@ export function readQoderThinkingConfig(record: QoderUpstreamModelRecord): {
 }
 
 /**
+ * 一行能力 → 落盘快照的条目：**快照读取侧的反格式**。
+ *
+ * 写成一处而不是各写一遍，是因为写入侧（client.ts 的 refreshQoderModelCatalog）与
+ * 读取侧（rehydrateQoderCatalogFromSnapshot）必须**互为反函数**。这两侧曾经对不上，
+ * 后果是静默的：写入侧存的是上游原始形状（`display_name` / `context_config`），
+ * 读取侧却拿 {@link parseQoderModelListing} 去解析它——那个解析器只认 `payload.chat`，
+ * 于是**任何**快照都解析成空数组，被当作「没有可用的快照」丢掉。冷启动于是永远
+ * 从兜底表起步，而磁盘上那份真实目录一次都没被读回来过。
+ *
+ * 形状与 {@link entryFromQoderRecord} 的输入完全对齐（`key` + `display_name` +
+ * `context_config.token_count`），所以真实载荷与快照走的是同一个解析器，字段缺了
+ * 也走同一套兜底。
+ */
+export function persistedQoderModelRecord(entry: QoderModelEntry): QoderUpstreamModelRecord {
+  return {
+    key: entry.upstreamKey,
+    display_name: entry.name,
+    enable: true,
+    source: entry.source,
+    is_vl: entry.supportsImages,
+    // 取 `reasoning` 而不是 `reasoningEfforts.length > 0`：toggle 形态的推理模型
+    // （只有开/关、没有档位梯子）的 efforts 本来就是空数组，按梯子写会把它的
+    // 推理能力在快照里抹掉，回读出来就变成一个「不推理」的模型。
+    is_reasoning: entry.reasoning,
+    context_config: { default: { token_count: entry.defaultContextWindow, is_default: true } },
+    ...(entry.description === null ? {} : { description: entry.description }),
+  }
+}
+
+/**
+ * 解析**落盘快照**的 `models` 字段（`persistedQoderModelRecord` 写出去的那一组）。
+ *
+ * 单独一个函数而不是把 {@link parseQoderModelListing} 放宽成「也认得裸数组」：
+ * 那个函数读的是上游应答（`{ chat: [...] }`）的契约，让它同时接受另一种形状，
+ * 下一次有人改上游解析规则时就会顺手改坏快照的回读。两个形状，两个入口，一处口径。
+ *
+ * @returns 解析出的能力行；一个都解析不出时是空数组（调用方据此判「没有可用快照」）。
+ */
+export function parsePersistedQoderModelEntries(
+  value: unknown,
+  region: QoderRegion,
+): QoderModelEntry[] {
+  if (!Array.isArray(value)) return []
+  const entries: QoderModelEntry[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!isRecord(item)) continue
+    const entry = entryFromQoderRecord(item, region)
+    if (entry === null || seen.has(entry.id)) continue
+    seen.add(entry.id)
+    entries.push(entry)
+  }
+  return entries
+}
+
+/**
  * 上游一个条目 → 一行能力。
  *
  * 每一个字段都按「端点说了就用，没说就走兜底」的顺序取值（计划 §4）：
@@ -350,7 +406,12 @@ export function bundledQoderCatalog(region: QoderRegion): readonly QoderModelEnt
   return region === 'cn' ? QODER_MODEL_CATALOG_CN : QODER_MODEL_CATALOG_GLOBAL
 }
 
-/** 首次安装默认勾选的模型：空数组 = 不过滤（与 step-code 同一语义，见 token-store 的注释）。 */
+/**
+ * 首次安装默认勾选的模型。
+ *
+ * 本线路的三态里「没挑过」是 `null`（不过滤），不是一张 id 表，所以这里刻意是
+ * 空数组、且**不再**参与设置装配——它只是历史常量，保留是为了不打断已有的导入面。
+ */
 export const DEFAULT_VISIBLE_MODEL_IDS: readonly string[] = []
 
 // ---------------------------------------------------------------------------
@@ -434,6 +495,38 @@ export function listModelIds(catalog: readonly QoderModelEntry[]): string[] {
   return catalog.map((model) => model.id)
 }
 
+/**
+ * 把用户存下来的白名单收敛到「这个部署此刻真的有的模型」上。
+ *
+ * 为什么必须收敛：白名单是用户昨天在**昨天的目录**上勾的，而本线路的目录是登录后
+ * 从上游实时发现的（随包表只是兜底）。上游下线一个模型、或用户换了一个区登录，
+ * 残留的 id 就会一直留在设置里——它既让「已选 N / M」的分子大于目录条目数，
+ * 也让卡片上出现一个勾着却根本不存在的行。
+ *
+ * 口径只有这一处：适配器的过滤（listModels）与状态面的勾选标记（getQoderStatus）
+ * 都从这里读，避免两边各写一份「什么算可用」而慢慢漂移。
+ *
+ * @param stored - 存下来的选择：`null` = 不过滤（原样返回 null），否则是白名单。
+ * @param available - 当前目录里真实存在的 id。
+ * @returns `null`（不过滤）或收敛后的白名单；保持 `stored` 的顺序并去重。
+ */
+export function convergeQoderEnabledModelIds(
+  stored: readonly string[] | null,
+  available: readonly string[],
+): string[] | null {
+  // 「不过滤」不是一张空表，它必须原样活下来：折成 [] 会变成「全关」。
+  if (stored === null) return null
+  const known = new Set(available)
+  const seen = new Set<string>()
+  const converged: string[] = []
+  for (const id of stored) {
+    if (!known.has(id) || seen.has(id)) continue
+    seen.add(id)
+    converged.push(id)
+  }
+  return converged
+}
+
 /** 目录条目数，供 hub 概览显示「M 个模型可用」。 */
 export function catalogSize(catalog: readonly QoderModelEntry[]): number {
   return catalog.length
@@ -467,13 +560,13 @@ export function describeQoderModel(entry: QoderModelEntry, prefix?: string): str
 /** 用户设置对目录装配的两处覆盖。 */
 export interface QoderCatalogOptionOverrides {
   /**
-   * 用户勾选的模型 id。
+   * 用户勾选的模型 id，**三态**（与 token-store 的 `QoderModelSettings` 同源）：
    *
-   * **缺省或空数组 = 不过滤（全选）**；非空 = 显式选择（含只有一项）。
-   * 语义逐字照抄 step-code：schemastery 会把缺省的 `z.array(z.string())` 归一化成 `[]`，
-   * 所以没有「null = 不过滤」的第三态。真要把模型全关，关线路总开关是明确且语义正确的动作。
+   * - `null` / 缺省 = 不过滤，目录里的每一行都勾上；
+   * - `[]` = 用户明确全关，一个都不勾；
+   * - 非空 = 白名单，只有列出的那些勾上。
    */
-  enabledModelIds?: readonly string[]
+  enabledModelIds?: readonly string[] | null
   /** 逐模型上下文窗口覆盖；null / 非正数表示用目录默认值。 */
   contextWindowOverrides?: Readonly<Record<string, number | null | undefined>>
 }
@@ -495,7 +588,8 @@ export function catalogModelOptions(
   overrides: QoderCatalogOptionOverrides = {},
 ): QoderModelOption[] {
   const selected = overrides.enabledModelIds
-  const noFilter = selected === undefined || selected.length === 0
+  // 只有「没挑过」（null / undefined）才是不过滤；`[]` 是用户明确全关，不能折成不过滤。
+  const picked = selected === null || selected === undefined ? null : new Set(selected)
   return catalog.map((entry) => {
     const override = overrides.contextWindowOverrides?.[entry.id]
     const contextWindow = positiveInt(override) ?? entry.defaultContextWindow
@@ -503,7 +597,7 @@ export function catalogModelOptions(
       id: entry.id,
       name: entry.name,
       hint: entry.hint === '' ? describeQoderModel(entry) : entry.hint,
-      enabled: noFilter || selected.includes(entry.id),
+      enabled: picked === null || picked.has(entry.id),
       defaultContextWindow: entry.defaultContextWindow,
       contextWindow,
       defaultMaxTokens: entry.defaultMaxTokens,

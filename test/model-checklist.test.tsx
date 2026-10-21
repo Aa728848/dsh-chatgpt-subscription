@@ -90,16 +90,19 @@ describe('ModelChecklist', () => {
     expect(onToggleAll).toHaveBeenCalledWith(false)
   })
 
-  it('disables clear-all when nothing is enabled and select-all when everything is', async () => {
+  it('disables select-all when everything is enabled, and keeps clear-all live at zero', async () => {
     await render({ items: ITEMS.map((item) => ({ ...item, enabled: true })) })
     let [selectAll, clearAll] = [...container.querySelectorAll<HTMLButtonElement>('.dsh-mcl-action')]
     expect(selectAll!.disabled).toBe(true)
     expect(clearAll!.disabled).toBe(false)
 
+    // "All off" is a legal terminal state (an explicit empty selection), not a
+    // no-op: clear-all stays clickable so the commit that produced it is
+    // repeatable, and select-all is the way back.
     await render({ items: ITEMS.map((item) => ({ ...item, enabled: false })) })
     ;[selectAll, clearAll] = [...container.querySelectorAll<HTMLButtonElement>('.dsh-mcl-action')]
     expect(selectAll!.disabled).toBe(false)
-    expect(clearAll!.disabled).toBe(true)
+    expect(clearAll!.disabled).toBe(false)
   })
 
   it('disables every control while a commit is in flight', async () => {

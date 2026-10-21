@@ -243,6 +243,40 @@ export function useQoderSection({ onModelChange }: QoderSectionProps = {}): Qode
   const regionTouched = useRef(false)
   // 上游在应答背后刷新配额时的补读，一次只挂一个。
   const quotaFollowUp = useRef<QuotaFollowUp | undefined>(undefined)
+  /**
+   * 首屏那次目录补拉是否已经试过。**一次就够，且只试一次**。
+   *
+   * 用 ref 而不是 state：这个判断要在异步回调里立刻生效，state 的下一次渲染
+   * 之前读到的还是旧值，那一拍足以让 60 秒轮询与首屏各拉一次。
+   *
+   * 为什么需要它而不是靠 catalogRefreshing：那个字段是**当下这一刻**的事实，
+   * 一次失败的补拉之后它仍会是 true（缓存依然是空的），没有这个 ref 就会变成
+   * 「每一拍都补拉一次」——把一次静默优化做成了对上游的压测。
+   */
+  const catalogPullAttempted = useRef(false)
+
+  /**
+   * 静默补拉一次模型目录。
+   *
+   * host 的 GET /status 只读缓存（缓存为空时选择器显示随包兜底表），真实目录
+   * 的刷新排在应答背后——**这是对的**，但它意味着首屏拿到的很可能是兜底表，
+   * 而要等 60 秒轮询才会被顶掉。这里补一次，让用户打开页面就看到真实目录。
+   *
+   * 与手动「刷新目录」按钮的唯一区别是**没有** busy 与 error：这条路径没有
+   * 用户在看，失败时选择器继续用兜底表就够了（兜底表存在的理由就是这个）。
+   * 失败也不重试：重试的责任在 60 秒轮询与用户手上的按钮。
+   */
+  const pullCatalogQuietly = useCallback(async (): Promise<void> => {
+    if (catalogPullAttempted.current) return
+    catalogPullAttempted.current = true
+    try {
+      const next = await post<QoderStatusDto>('/catalog/refresh', {})
+      setStatus(next)
+      setContextDrafts(contextDraftsFor(next))
+    } catch {
+      // 静默：目录拿不到时选择器继续用兜底表，卡片不因此报错。
+    }
+  }, [])
 
   const loadStatus = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
@@ -253,12 +287,16 @@ export function useQoderSection({ onModelChange }: QoderSectionProps = {}): Qode
       if (!regionTouched.current && isQoderRegion(next.region)) setRegionState(next.region)
       quotaFollowUp.current ??= createQuotaFollowUp()
       quotaFollowUp.current.observe(next.quotaRefreshing === true, () => { void loadStatus(true) })
+      // 首屏（以及任何一次）拿到「目录正在/将要刷新」= 你看到的还是兜底表，
+      // 补拉一次把它换掉。catalogPullAttempted 保证这在整个挂载期内只发生一次，
+      // 所以这里不需要判断是不是第一次渲染。
+      if (next.catalogRefreshing === true) void pullCatalogQuietly()
     } catch (cause) {
       if (!quiet) setError(messageOf(cause))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [pullCatalogQuietly])
 
   useEffect(() => {
     void loadStatus()
@@ -415,10 +453,11 @@ export function useQoderSection({ onModelChange }: QoderSectionProps = {}): Qode
   /**
    * 一个模型勾选补丁；host 回整份新状态，卡片因此不必猜哪些 id 最终生效。
    *
-   * 语义：**缺省或空数组 = 不过滤（全部可用），非空 = 显式选择**。所以「全不选」
-   * 提交的是空数组，它的含义是**清除显式选择、回到不过滤**，而不是「一个模型都不可用」。
+   * 语义是**三态**：`null` = 不过滤（全部可用），`[]` = 用户明确全关，
+   * 非空 = 白名单。所以「全不选」提交的是空数组，它真的意味着**一个模型都不可用**；
+   * 要恢复全部请点「全选」（提交目录里的全部 id）。
    */
-  const applyEnabledModels = async (enabledModelIds: string[]): Promise<void> => {
+  const applyEnabledModels = async (enabledModelIds: string[] | null): Promise<void> => {
     try {
       setError(null)
       const updated = await post<QoderStatusDto>('/settings', { enabledModelIds })
@@ -432,6 +471,8 @@ export function useQoderSection({ onModelChange }: QoderSectionProps = {}): Qode
 
   const toggleModel = (modelId: string, enabled: boolean): void => {
     if (status === null) return
+    // 当前是「不过滤」（null）时先物化成目录里的全部 id：只关掉一个模型也得写成
+    // 显式白名单，否则 null 会被 host 读成「仍然全开」，这一勾就白点了。
     const current = status.models.filter((model) => model.enabled).map((model) => model.id)
     const next = enabled ? [...new Set([...current, modelId])] : current.filter((id) => id !== modelId)
     void applyEnabledModels(next)
@@ -439,6 +480,8 @@ export function useQoderSection({ onModelChange }: QoderSectionProps = {}): Qode
 
   const setAllModels = (enabled: boolean): void => {
     if (status === null || status.models.length === 0) return
+    // 「全不选」提交空数组 = 全部不可用（不是「回到不过滤」，那是三态之前的老语义）；
+    // 「全选」提交全部 id = 显式白名单，等价于不过滤但读得出来是用户按的。
     void applyEnabledModels(enabled ? status.models.map((model) => model.id) : [])
   }
 

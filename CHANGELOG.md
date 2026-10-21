@@ -1,6 +1,20 @@
 # Changelog
 
 ## Unreleased
+- **[qoder] 模型选择里 Qoder 整条线路消失、「全不选」等于「全选」、重启后先出现一大堆用不上的模型——三件事都出在「哪些模型算可用」这一条链上**
+  - **现象一（最严重）**：重启宿主后，模型快捷选择栏里**根本没有 Qoder 这个供应商**；要打开一次设置页才会出现。
+  - **现象二**：设置卡片上的「全不选」点下去与「全选」效果完全相同；计数行还字面显示「已选 {selected} / 2」（占位符没被替换）。
+  - **现象三**：进设置页先看到 15 个模型，其中大部分是当前套餐根本没有的，必须点一次「刷新目录」才缩到自己账号真实的 2 个。
+  - **真因一（白名单词汇表错配）**：[adapter.ts](../src/host/qoder/adapter.ts) 的 `listModels` 拿用户白名单去收敛随包兜底表，而两者**不是同一套 id**——白名单是实时目录的 `display_name` 去空白（`DeepSeek-Flash`），兜底表照录 pi-provider 的静态表（`DeepSeek-V4-Flash`）。冷启动时进程里没有实时目录，收敛结果必然是空数组，`listModels` 返回 0 个模型，DSH 于是把整个 provider 分组过滤掉。实测：白名单 `['DeepSeek-Flash']` + 兜底表 → 0 个模型。
+  - **真因二（三态缺失）**：`enabledModelIds` 只有「缺省或空数组 = 不过滤」一种读法，而旧版 `defaultQoderModelSettings()` 的出厂值**恰好就是 `[]`**。于是「全不选」提交的 `[]` 被读成「不过滤」，同时也意味着**每一个老用户的落盘文件里都写着 `[]`**——直接改语义会让他们升级后一个模型都不剩。
+  - **真因三（快照读写不互逆）**：目录快照的写入侧存上游原始条目（`{ key, display_name, context_config }`），读取侧却用只认 `{ chat: [...] }` 的 `parseQoderModelListing` 去解析它，**任何快照都解析成空数组**并被当作「没有可用快照」丢掉。那份 `qoder-global-catalog.json` 一直都在、内容也是对的，却从来没有被成功读回来过一次——所谓「打开设置页就恢复」，真相是「等了一次真实的上游刷新」。
+  - **真因四（刷新不发事件）**：目录刷新成功后没有发 `llm/adapters-updated`，所以即使真实目录已经到手，模型选择器的快照也不会重读，停在空分组上。
+  - **改法（三态）**：`enabledModelIds` 改成 `string[] | null`——`null` = 不过滤（出厂）、`[]` = 用户明确全关、非空 = 白名单。存储、适配器过滤、状态下发、hub 概览、客户端五处同步；`ModelChecklist` 的「全不选」不再在自己已是 0 时禁用（全关是合法终态）。
+  - **改法（迁移）**：新增 `selectionVersion` 迁移标记。无标记 + `[]` → 按旧版出厂值迁移成 `null` 并落盘；有标记 + `[]` → 尊重用户真实的全关。幂等，且 register 后端的 schema 缺省刻意写成 `0`（旧 `update()` 写的是 `?? []`，那个后端同样会留下无标记的 `[]`）。
+  - **改法（收敛口径）**：新增 `convergeQoderSelection(stored, live, catalog)`——**收敛只在实时目录上做**，兜底表阶段不按白名单筛（它是能力占位，且与白名单不是同一套词汇）；`[]` 在两种阶段下都生效。`listModels`、状态面勾选标记、hub 概览三处读同一个函数。
+  - **改法（预热与事件）**：新增 `persistedQoderModelRecord` / `parsePersistedQoderModelEntries` 这一对互为反函数的序列化器（顺带修掉 `is_reasoning` 按 `reasoningEfforts.length > 0` 写、会把 toggle 形态推理模型抹成不推理的问题）；启动时 `void warmQoderCatalogOnStartup(...)` 非阻塞预热，先读磁盘快照回填、再让上游刷新跑在背后；`refreshCatalog` 改为返回「目录有没有真的换掉」，只有变了才 `ctx.emit('llm/adapters-updated')`。
+  - **改法（自动取目录）**：`GET /status` 在应答背后自动触发一次目录刷新（复用 `QuotaRefresh`，用 `force: false` 让 30 分钟 TTL 与 in-flight 去重生效）；客户端首屏拿到 `catalogRefreshing` 就静默补拉一次，最多一次，不设 busy、不弹错。「刷新目录」按钮保留为强制出口。
+  - **验证**：`npm run typecheck` 0 错误；全量 `npx vitest run` **282 文件 / 4626 passed / 7 skipped**；`npm run build` 通过。冷启动回归用例**验证过先红后绿**（把规则改回旧实现时它报 `expected 0 to be greater than 0`）；快照读写不对称用真实文件对拍过（旧解析器 0 条 / 新解析器 2 条）；三态迁移用真实落盘文件跑过完整往返（迁移 → 幂等 → 全关不被翻回 → 全选回到 `null`）。
 
 ## 0.33.0 - 2026-10-20
 - **[qoder] 看板上的 Qoder 卡片用的是字母 Q，不是官方标志——现在换成官方那张 412×412 应用图标**

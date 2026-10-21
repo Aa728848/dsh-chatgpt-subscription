@@ -84,8 +84,8 @@ export const zh = {
   refreshingCatalog: '刷新中…',
   selectAll: '全选',
   unselectAll: '全不选',
-  modelChecklistCount: '已选 {selected} / {total}',
-  enabledModelIdsSemantics: '清空勾选等于「不过滤（全部可用）」，而不是「一个都不可用」；要停用整条线路请用 hub 卡片上的总开关。',
+  modelChecklistCount: '已选 {count} / {total}',
+  enabledModelIdsSemantics: '勾选全清 = 全部模型都不可用（不是「不过滤」）；要恢复全部请点「全选」。',
 
   defaultEffort: '默认思考档位',
   defaultEffortHint: '会话没指定档位时用的档位；各模型有自己的默认时以模型为准。',
@@ -213,8 +213,8 @@ export const en: Record<QoderLocaleKey, string> = {
   refreshingCatalog: 'Refreshing…',
   selectAll: 'All',
   unselectAll: 'None',
-  modelChecklistCount: '{selected} / {total} selected',
-  enabledModelIdsSemantics: 'Clearing every checkbox means "no filter (all available)", not "none available"; to switch the line off use the toggle on the hub card.',
+  modelChecklistCount: '{count} / {total} selected',
+  enabledModelIdsSemantics: 'Clearing every checkbox makes every model unavailable (it is not "no filter"); to bring them all back, use "All".',
 
   defaultEffort: 'Default thinking effort',
   defaultEffortHint: 'Used when the session does not name one; a model\'s own default wins when it has one.',

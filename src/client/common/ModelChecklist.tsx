@@ -55,7 +55,7 @@ export function ModelChecklist({ items, busy, onToggle, onToggleAll, labels }: P
       <span className="dsh-mcl-count">{count}</span>
       <span className="dsh-mcl-head-actions">
         <button type="button" className="dsh-mcl-action" disabled={busy || enabledCount === items.length} onClick={() => onToggleAll(true)}>{labels.selectAll}</button>
-        <button type="button" className="dsh-mcl-action" disabled={busy || enabledCount === 0} onClick={() => onToggleAll(false)}>{labels.clearAll}</button>
+        <button type="button" className="dsh-mcl-action" disabled={busy} onClick={() => onToggleAll(false)}>{labels.clearAll}</button>
       </span>
     </div>
     <div className="dsh-mcl-list" role="group" aria-label={labels.list}>

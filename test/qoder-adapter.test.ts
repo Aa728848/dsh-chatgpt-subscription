@@ -6,9 +6,11 @@
  * 这是把 cosy.ts 与 mapper.ts 缝在一起的那一层测试：请求侧的签名形状与
  * 响应侧的信封解析在同一拍里被看见。
  */
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { QoderAdapter } from '../src/host/qoder/adapter.ts'
 import { QoderAccountPool } from '../src/host/qoder/account-pool.ts'
+import { clearCachedQoderModelCatalog, loadQoderModelCatalog } from '../src/host/qoder/client.ts'
+import { bundledQoderCatalog } from '../src/host/qoder/model-catalog.ts'
 import { QoderCredentialStore, QoderModelSettingsStore, type QoderCredentials } from '../src/host/qoder/token-store.ts'
 import { mkdtempSync } from 'node:fs'
 import os from 'node:os'
@@ -156,5 +158,136 @@ describe('QoderAdapter 端到端（mock fetch）', () => {
 
     await settingsStore.updateSettings({ enabled: false })
     expect(await adapter.listModels('qoder')).toEqual([])
+  })
+
+  it('listModels：三态 —— null 全部可用、[] 一个都不给、非空白名单', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'qoder-adapter-tri-'))
+    const pool = new QoderAccountPool({ backend: new MemoryBackend() as never })
+    await pool.addAccount(credentials())
+    const settingsStore = new QoderModelSettingsStore(path.join(dir, 'models.json'))
+    const adapter = new QoderAdapter(
+      new QoderCredentialStore(path.join(dir, 'credentials.json'), new MemoryBackend() as never),
+      settingsStore,
+      undefined,
+      { accountPool: pool, fetchFn: (async () => new Response('{}')) as unknown as typeof fetch },
+    )
+
+    // 出厂：null = 不过滤，兜底目录里的每一行都在。
+    expect((await settingsStore.read()).enabledModelIds).toBeNull()
+    const all = await adapter.listModels('qoder')
+    expect(all.length).toBeGreaterThan(0)
+
+    // [] = 用户明确全关：一个模型都不暴露（这正是旧语义下点不出来的状态）。
+    await settingsStore.updateSettings({ enabledModelIds: [] })
+    expect(await adapter.listModels('qoder')).toEqual([])
+
+    // 白名单在**兜底表阶段**不负责过滤：这里没有实时目录，白名单是另一套词汇，
+    // 拿它筛兜底表只会把这一行整个筛没（见下面「白名单只在实时目录上收敛」那一组，
+    // 那里钉的是实时目录存在时照旧收敛过滤）。
+    await settingsStore.updateSettings({ enabledModelIds: ['Lite', 'gone-from-upstream'] })
+    expect((await adapter.listModels('qoder')).length).toBe(all.length)
+
+    // 回到 null：又变成全部可用。
+    await settingsStore.updateSettings({ enabledModelIds: null })
+    expect((await adapter.listModels('qoder')).length).toBe(all.length)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 冷启动回归：兜底表阶段不按白名单收敛
+// ---------------------------------------------------------------------------
+
+/**
+ * 一个里外都自洽的适配器 + 设置存储：凭据在号池里，目录缓存由用例自己决定。
+ *
+ * `fetchFn` 只答「模型目录」这一个端点，别的 URL 一律 404（COSY 版本跟随走的是
+ * GitHub releases，那条路径是尽力而为的，404 会被安静吞掉）。
+ */
+async function listModelsRig(options: { modelIds?: string[] } = {}) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'qoder-adapter-live-'))
+  const modelIds = options.modelIds ?? ['Lite', 'DeepSeek-Flash']
+  const fetchFn = (async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/model/list')) {
+      return Response.json({
+        chat: modelIds.map((id) => ({ key: id.toLowerCase(), display_name: id, enable: true })),
+      })
+    }
+    return new Response('', { status: 404 })
+  }) as unknown as typeof fetch
+  const pool = new QoderAccountPool({ backend: new MemoryBackend() as never })
+  const settingsStore = new QoderModelSettingsStore(path.join(dir, 'models.json'))
+  const adapter = new QoderAdapter(
+    new QoderCredentialStore(path.join(dir, 'credentials.json'), new MemoryBackend() as never),
+    settingsStore,
+    undefined,
+    { accountPool: pool, fetchFn },
+  )
+  // 有账号才拿得到凭据，`listModels` 才走得进目录那一段（没有凭据时它按契约返回空表）。
+  await pool.addAccount(credentials())
+  return { adapter, settingsStore, pool, fetchFn, modelIds }
+}
+
+describe('QoderAdapter.listModels：白名单只在实时目录上收敛', () => {
+  // 目录缓存是进程级的：每条用例都必须从「冷启动（只有随包兜底表）」开始，
+  // 否则上一条留下的实时目录会让「兜底阶段」根本走不到。
+  beforeEach(() => {
+    clearCachedQoderModelCatalog()
+  })
+
+  /**
+   * 冷启动回归（这一条是本轮修的缺陷本身）。
+   *
+   * 白名单里的 `DeepSeek-Flash` 来自**实时目录**的词汇表（上游 display_name 去空白），
+   * 而随包兜底表把同一批模型叫 `DeepSeek-V4-Flash`。旧实现在冷启动时拿白名单去收敛
+   * 兜底表，两边 id 对不上 → 收敛成 `[]` → listModels 返回 0 个模型 → DSH 把整个
+   * provider 分组过滤掉，模型选择器里连 Qoder 都不剩。
+   *
+   * 兜底表是能力占位，不是这个账号真实可用的集合，不该被一份只对某一版目录有意义的
+   * 白名单筛掉：占位期间全部返回，实时目录一到再收敛成真实集合。
+   */
+  it('冷启动回归：无实时目录 + 白名单是实时目录词汇 → 返回兜底表全部模型，不为空', async () => {
+    const { adapter, settingsStore } = await listModelsRig()
+    await settingsStore.updateSettings({ enabledModelIds: ['DeepSeek-Flash'] })
+
+    const listed = await adapter.listModels('qoder')
+    // 变红的那条断言就是这一行：旧实现这里是 0。
+    expect(listed.length).toBeGreaterThan(0)
+    expect(listed.length).toBe(bundledQoderCatalog('global').length)
+    expect(listed.map((model) => model.id)).toEqual(bundledQoderCatalog('global').map((entry) => entry.id))
+    // 兜底表里那一行真的在（白名单里的另一个词汇不会把它顶掉）。
+    expect(listed.some((model) => model.id === 'DeepSeek-V4-Flash')).toBe(true)
+  })
+
+  it('[] 在兜底表阶段同样生效：用户明确全关，一个都不返回', async () => {
+    const { adapter, settingsStore } = await listModelsRig()
+    await settingsStore.updateSettings({ enabledModelIds: [] })
+
+    expect(await adapter.listModels('qoder')).toEqual([])
+  })
+
+  it('实时目录存在时照旧收敛过滤：白名单里目录没有的 id 被丢掉', async () => {
+    const { adapter, settingsStore, fetchFn, modelIds } = await listModelsRig()
+    await settingsStore.updateSettings({ enabledModelIds: ['Lite', 'gone-from-upstream'] })
+
+    // 把实时目录灌进进程内缓存（登录/adopt，或应答背后那次自动刷新，都是这个效果）。
+    // 兜底表里根本没有 'DeepSeek-Flash' 这个名字，所以下面那条断言顺带证明了
+    // 「这时的目录确实来自上游」——它只能是实时目录。
+    await loadQoderModelCatalog(
+      { accessToken: 'jt-test', region: 'global', uid: 'u-1', email: null, accountName: null },
+      { fetchFn },
+    )
+
+    // 实时目录就是 [Lite, DeepSeek-Flash]：上线后残留的 id 被收敛掉，只剩真实存在的那一个。
+    expect((await adapter.listModels('qoder')).map((model) => model.id)).toEqual(['Lite'])
+    expect(modelIds).toContain('DeepSeek-Flash')
+    expect(bundledQoderCatalog('global').some((entry) => entry.id === 'DeepSeek-Flash')).toBe(false)
+  })
+
+  it('冷启动的 null（不过滤）与实时目录的 null 走同一条路：都是全部可用', async () => {
+    const { adapter, settingsStore } = await listModelsRig()
+    // 出厂值就是 null。
+    expect((await settingsStore.read()).enabledModelIds).toBeNull()
+    expect((await adapter.listModels('qoder')).length).toBe(bundledQoderCatalog('global').length)
   })
 })

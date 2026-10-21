@@ -54,6 +54,7 @@ import {
   clearCachedQoderModelCatalog,
   getCachedQoderModelCatalog,
   getQoderCosyVersion,
+  qoderCatalogIsLive,
   qoderChatUrl,
   qoderCosyIdentityOf,
   type QoderUpstreamCredential,
@@ -62,6 +63,7 @@ import { buildQoderCosyHeaders, encodeQoderBody } from './cosy.ts'
 import {
   bundledQoderCatalog,
   catalogSize,
+  convergeQoderEnabledModelIds,
   defaultContextWindowFor,
   maxOutputTokensFor,
   resolveQoderModel,
@@ -118,7 +120,8 @@ export const QODER_POOL_COOLDOWN_MS = 5 * 60 * 1000
 /**
  * 这个部署能调的模型：**进程内缓存优先、随包目录兜底，请求路径上绝不联网**。
  *
- * 实时目录只由 \`/catalog/refresh\` 与登录/adopt 产生（见 routes.ts）；
+ * 实时目录由 \`/catalog/refresh\`、登录/adopt，以及 \`GET /status\` **应答背后**
+ * 的那次自动刷新产生（见 routes.ts）；本函数自己一次请求都不发——
  * 让每一次模型解析都去打上游只会把设置页变成一条压测。
  */
 export function cachedQoderModelCatalog(region: QoderRegion): readonly QoderModelEntry[] {
@@ -126,7 +129,44 @@ export function cachedQoderModelCatalog(region: QoderRegion): readonly QoderMode
   return runtime.length > 0 ? runtime : bundledQoderCatalog(region)
 }
 
-/** 设置卡片渲染的模型总数（hub 概览与状态共用同一份读数；取两区随包表的较大者）。 */
+/**
+ * 一行的白名单该按哪一套规则收敛；**口径只有这一处**。
+ *
+ * 适配器的过滤（listModels）与状态面的勾选标记（getQoderStatus）都从这里读，
+ * 免得两边各写一份「兜底阶段要不要按白名单筛」而慢慢漂开。
+ *
+ * - 实时目录：按白名单收敛 + 过滤（上游下线一个模型后，那份残留 id 不该再占名额，
+ *   也不该让「已选 N / M」的分子大于目录条目数）；
+ * - 兜底表：**不按白名单筛**，全部返回（它是能力占位，且与白名单不是同一套 id
+ *   词汇表——见 client.ts 的 qoderCatalogIsLive）；
+ * - `[]`（用户明确全关）与 `null`（不过滤）在两种阶段下的含义都不变：全关就是全关。
+ *
+ * @param stored 用户存下来的选择（三态）。
+ * @param live   当前拿到的是实时目录（true）还是随包兜底表（false）。
+ * @param catalog 当前这一份目录（兜底阶段它只用来决定「有没有条目可给」）。
+ * @returns 收敛后的白名单；`null` = 不过滤。
+ */
+export function convergeQoderSelection(
+  stored: readonly string[] | null,
+  live: boolean,
+  catalog: readonly QoderModelEntry[],
+): string[] | null {
+  if (live) return convergeQoderEnabledModelIds(stored, catalog.map((entry) => entry.id))
+  // 兜底表阶段只有 `[]` 还能表达出确定的意思（全关），其余一律当成「不过滤」：
+  //
+  // - `null`（没挑过）本来就是不过滤，原样返回 null；
+  // - 非空白名单**不能**拿去筛兜底表，也不能原样交回给调用方去筛——两种写法结果一样，
+  //   都是「按一套错词汇过滤」，于是本函数的下游（listModels）返回 0 个模型，
+  //   DSH 把整个 provider 分组过滤掉。所以这里直接返回 null：占位期间全部可用。
+  return stored === null || stored.length > 0 ? null : []
+}
+
+/**
+ * 设置卡片渲染的模型总数（hub 概览用；取两区随包表的较大者）。
+ *
+ * ⚠ 它**不带区域**，所以只适合当「这条线路大概有几个模型」的量级读数。
+ * 需要与勾选收敛对齐时用 {@link cachedQoderModelCatalog}（按区取，分子分母同源）。
+ */
 export function qoderCatalogSize(): number {
   return catalogSize(getCachedQoderModelCatalog().length > 0
     ? getCachedQoderModelCatalog()
@@ -308,12 +348,31 @@ export class QoderAdapter extends LlmAdapter {
     if (settings.enabled === false) return []
     const picked = await this.credentialFor().catch(() => null)
     if (picked === null) return []
-    const available = this.catalog(picked.credentials.region)
-    // 缺省或空数组 = 不过滤（全选），非空 = 显式选择。见 token-store 的同一段注释。
-    const selected = settings.enabledModelIds ?? []
-    const noFilter = selected.length === 0
+    const region = picked.credentials.region
+    const available = this.catalog(region)
+    // 三态：null / undefined = 不过滤（全选），[] = 用户全关，非空 = 白名单。
+    //
+    // **收敛只在实时目录上做，兜底表不做白名单过滤。** 理由是两套 id 词汇表不是同一套：
+    // 白名单是用户对着**某一版实时目录**勾出来的 id（= 上游 display_name 去空白），而随包
+    // 兜底表照录 pi-provider 的静态表，同一批模型在两边叫法不同（`DeepSeek-Flash` 对
+    // `DeepSeek-V4-Flash`、`Qwen3.8-Flash` 对 `Qwen3.8-Max`/Plus，证据见
+    // client.ts 的 qoderCatalogIsLive）。冷启动时进程里没有实时目录、只有兜底表，拿白名单
+    // 去筛它必然收敛成 `[]`，于是本函数返回 0 个模型——DSH 会把整个 provider 分组过滤掉，
+    // 模型选择器里连 Qoder 都不剩（这就是「重启后 Qoder 整个消失」）。
+    //
+    // 兜底表是**能力占位**，不是这个账号此刻真实可用的集合，用一份只对某一版目录有意义的
+    // 白名单去筛它没有意义：占位期间让全部模型都能被选中是可接受的，实时目录一到就收敛成
+    // 真实集合（那时白名单与目录同源，收敛才有内容）。
+    //
+    // 唯一的例外是 `[]`：全关是**用户明确的意图**，与词汇表无关，兜底阶段同样生效。
+    const selected = convergeQoderSelection(
+      settings.enabledModelIds ?? null,
+      qoderCatalogIsLive(region),
+      available,
+    )
+    const allow = selected === null ? null : new Set(selected)
     return available
-      .filter((model) => noFilter || selected.includes(model.id))
+      .filter((model) => allow === null || allow.has(model.id))
       .map((model) => ({
         provider: prov,
         id: model.id,

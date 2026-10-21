@@ -4,13 +4,22 @@
  * 字段语义逐字对照 pi-provider \`catalog.ts\`：\`max_input_tokens\` 是陈旧的 180K 地板
  * （不可信），窗口只信 \`context_config\` 的最大 \`token_count\`。
  */
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
+import {
+  clearCachedQoderModelCatalog,
+  loadQoderModelCatalog,
+  qoderCatalogIsLive,
+  qoderCatalogNeedsRefresh,
+  type QoderUpstreamCredential,
+} from '../src/host/qoder/client.ts'
+import { CATALOG_CACHE_TTL_MS } from '../src/host/qoder/types.ts'
 import {
   QODER_MODEL_CATALOG_CN,
   QODER_MODEL_CATALOG_GLOBAL,
   bundledQoderCatalog,
   catalogModelOptions,
   contextWindowFromRecord,
+  convergeQoderEnabledModelIds,
   parseQoderModelListing,
   readQoderThinkingConfig,
   resolveQoderModel,
@@ -18,6 +27,24 @@ import {
   undeclaredQoderModelEntry,
 } from '../src/host/qoder/model-catalog.ts'
 import { convergeQoderEffort, QODER_MAX_OUTPUT_TOKENS } from '../src/host/qoder/types.ts'
+
+/**
+ * 一份只答「模型目录」的假 fetch。
+ *
+ * 别的 URL（COSY 版本跟随走的是 GitHub releases）一律回 404——那条路径是
+ * 尽力而为的，404 会被安静地吞掉，正好让这里只数真正关心的那一次请求。
+ */
+function mockCatalogFetch(modelIds: string[]): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/model/list')) {
+      return Response.json({
+        chat: modelIds.map((id) => ({ key: id.toLowerCase(), display_name: id, enable: true })),
+      })
+    }
+    return new Response('', { status: 404 })
+  }) as unknown as typeof fetch
+}
 
 describe('parseQoderModelListing', () => {
   it('读 { chat: [...] } 形状；缺 key / 缺 display_name / enable:false 的条目被丢弃', () => {
@@ -111,15 +138,157 @@ describe('随包兜底表与未声明行', () => {
     expect(resolveQoderModel('nope', QODER_MODEL_CATALOG_CN, 'cn').hint).toContain('未声明模型')
   })
 
-  it('catalogModelOptions：空勾选 = 不过滤；覆盖窗口生效', () => {
+  it('catalogModelOptions：null/缺省 = 不过滤；覆盖窗口生效', () => {
     const options = catalogModelOptions(QODER_MODEL_CATALOG_GLOBAL, {})
     expect(options.every((model) => model.enabled)).toBe(true)
+    const explicitNull = catalogModelOptions(QODER_MODEL_CATALOG_GLOBAL, { enabledModelIds: null })
+    expect(explicitNull.every((model) => model.enabled)).toBe(true)
     const picked = catalogModelOptions(QODER_MODEL_CATALOG_GLOBAL, {
       enabledModelIds: ['Lite'],
       contextWindowOverrides: { Lite: 512_000 },
     })
     expect(picked.find((model) => model.id === 'Lite')).toMatchObject({ enabled: true, contextWindow: 512_000 })
     expect(picked.find((model) => model.id !== 'Lite')?.enabled).toBe(false)
+  })
+
+  it('catalogModelOptions：空勾选是「全关」而不是「不过滤」（三态的 []）', () => {
+    const options = catalogModelOptions(QODER_MODEL_CATALOG_GLOBAL, { enabledModelIds: [] })
+    // 目录非空，却一行都不勾：这正是旧语义里点不出来的那个状态。
+    expect(options.length).toBeGreaterThan(0)
+    expect(options.every((model) => model.enabled)).toBe(false)
+  })
+})
+
+describe('convergeQoderEnabledModelIds（白名单收敛到当前目录）', () => {
+  it('null 原样返回 null：不过滤不是一张空表', () => {
+    expect(convergeQoderEnabledModelIds(null, ['a', 'b'])).toBeNull()
+    // 目录为空时也一样：null 依旧是 null，不会被折成「全关」。
+    expect(convergeQoderEnabledModelIds(null, [])).toBeNull()
+  })
+
+  it('空数组原样返回空数组：用户明确全关', () => {
+    expect(convergeQoderEnabledModelIds([], ['a', 'b'])).toEqual([])
+  })
+
+  it('只留下目录里真实存在的 id，并保持 stored 的顺序', () => {
+    expect(convergeQoderEnabledModelIds(['b', 'gone', 'a'], ['a', 'b', 'c'])).toEqual(['b', 'a'])
+    // 全部残留 = 收敛成空表（此刻确实一个都不可用，而不是回到不过滤）。
+    expect(convergeQoderEnabledModelIds(['gone', 'also-gone'], ['a', 'b'])).toEqual([])
+  })
+
+  it('去重，且不改动 stored 本身', () => {
+    const stored = ['a', 'b', 'a', 'b']
+    expect(convergeQoderEnabledModelIds(stored, ['a', 'b'])).toEqual(['a', 'b'])
+    expect(stored).toEqual(['a', 'b', 'a', 'b'])
+  })
+})
+
+/**
+ * 目录缓存「该不该拉一次」的判定。
+ *
+ * 这条判定是 host 在 GET /status 应答背后是否启动刷新的**唯一**口径，所以三态
+ * 必须逐条钉住：空缓存要拉、未过期不拉、过期要拉。判错的方向只有两种，两种都
+ * 很难在界面上看出来——把「该拉」判成「不拉」，选择器就永远停在随包兜底表上；
+ * 把「不该拉」判成「该拉」，每一次 60 秒轮询都是一次上游请求。
+ */
+/** 一份够用的上游凭据切片：这条判定只看区域，其余字段按契约补齐即可。 */
+function catalogCredential(region: 'global' | 'cn' = 'global'): QoderUpstreamCredential {
+  return { accessToken: 'jt-1', region, uid: null, email: null, accountName: null }
+}
+
+/**
+ * 拉一次真实目录并留下缓存，返回**缓存建立之后**的时刻。
+ *
+ * 这个顺序是要紧的：缓存里的 `fetchedAt` 是拉取落地的那一刻，只有在它之后取的
+ * now 才一定满足 `now >= fetchedAt`。反过来先取 now 再去拉，fetchedAt 会比 now
+ * 晚几毫秒，「now + TTL」就落在 TTL 之内，一条本该证明「过期了」的断言会安静地
+ * 变成「还没过期」——这一条正是这么红过两次的。
+ */
+async function warmCatalog(region: 'global' | 'cn' = 'global'): Promise<number> {
+  await loadQoderModelCatalog(catalogCredential(region), { fetchFn: mockCatalogFetch(['Lite']) })
+  return Date.now()
+}
+
+describe('qoderCatalogNeedsRefresh（答复背后要不要拉目录）', () => {
+  beforeEach(() => {
+    clearCachedQoderModelCatalog()
+  })
+
+  it('空缓存：需要拉（冷启动的第一条 status 就该触发）', () => {
+    expect(qoderCatalogNeedsRefresh('global')).toBe(true)
+  })
+
+  it('刚拉到的缓存：不需要拉（60 秒轮询在 TTL 内绝大多数拍都走这条）', async () => {
+    // 目录取不到时 loadQoderModelCatalog 走空目录、不写缓存，所以假 fetch 必须
+    // 供一份真能被解析的载荷，缓存才会真的被建立起来。
+    const after = await warmCatalog()
+    expect(qoderCatalogNeedsRefresh('global', after)).toBe(false)
+    // 差一毫秒到期：仍然算新鲜（判定是 >= TTL 才算过期）。
+    expect(qoderCatalogNeedsRefresh('global', after + CATALOG_CACHE_TTL_MS - 1)).toBe(false)
+  })
+
+  it('过了 TTL：需要拉（这是「进页面能自动更新」的那一半）', async () => {
+    const after = await warmCatalog()
+    expect(qoderCatalogNeedsRefresh('global', after + CATALOG_CACHE_TTL_MS)).toBe(true)
+  })
+
+  it('别的区域的缓存不算数：目录是区域的属性', async () => {
+    await warmCatalog('global')
+    expect(qoderCatalogNeedsRefresh('cn')).toBe(true)
+  })
+})
+
+
+/**
+ * 兜底表阶段不做白名单过滤的那条规则的**词汇表证据**与判定本身。
+ *
+ * 这一组钉的是缺陷 1 的前提：用户的白名单来自实时目录（上游 `display_name` 去空白），
+ * 随包兜底表来自 pi-provider 的静态表，同一批模型在两边**叫法不同**。只要这条前提
+ * 还在，「用白名单筛兜底表」就必然收敛成空集。
+ */
+describe('qoderCatalogIsLive（这一份目录是实时的还是兜底表）', () => {
+  beforeEach(() => {
+    clearCachedQoderModelCatalog()
+  })
+
+  it('冷启动：进程里没有实时目录 → false（调用方据此不做白名单过滤）', () => {
+    expect(qoderCatalogIsLive('global')).toBe(false)
+    expect(qoderCatalogIsLive('cn')).toBe(false)
+  })
+
+  it('实时目录落地之后 → true；别的区域仍然 false（目录是区域的属性）', async () => {
+    await loadQoderModelCatalog(catalogCredential('global'), { fetchFn: mockCatalogFetch(['Lite']) })
+    expect(qoderCatalogIsLive('global')).toBe(true)
+    expect(qoderCatalogIsLive('cn')).toBe(false)
+  })
+
+  it('与 qoderCatalogNeedsRefresh 同一条口径：说「不是实时」就等于说「该拉一次」', async () => {
+    // 冷启动：两者是同一个判断的两面，不可能出现「不需要拉但又没有实时目录」。
+    expect(qoderCatalogIsLive('global')).toBe(false)
+    expect(qoderCatalogNeedsRefresh('global')).toBe(true)
+    const after = await warmCatalog()
+    expect(qoderCatalogIsLive('global')).toBe(true)
+    expect(qoderCatalogNeedsRefresh('global', after)).toBe(false)
+  })
+})
+
+/**
+ * 两套 id 词汇表的证据（就写在测试里，别只写在注释里）。
+ *
+ * 实时目录的公开 id 是上游 `display_name` 去空白，兜底表照录 pi-provider 的静态表：
+ * `DeepSeek-Flash` / `Qwen3.8-Flash` 这种名字只存在于实时目录那一套，兜底表里
+ * 对应的一行叫 `DeepSeek-V4-Flash` / `Qwen3.8-Max`。所以白名单里出现前者时，
+ * 拿它去筛后者一定是空集。
+ */
+describe('两套 id 词汇表（白名单来自实时目录，兜底表是另一套名字）', () => {
+  it('实时目录词汇里的 id 在兜底表里根本不存在', () => {
+    const liveIds = ['DeepSeek-Flash', 'Qwen3.8-Flash']
+    const bundledIds = bundledQoderCatalog('global').map((entry) => entry.id)
+    for (const id of liveIds) expect(bundledIds).not.toContain(id)
+    // 而旧实现正是拿这份白名单去 converge 这份兜底表——必然收敛成空表。
+    expect(convergeQoderEnabledModelIds(liveIds, bundledIds)).toEqual([])
+    // 兜底表里与之对应的行叫另一个名字（同一个模型，两种词汇）。
+    expect(bundledIds).toContain('DeepSeek-V4-Flash')
   })
 })
 

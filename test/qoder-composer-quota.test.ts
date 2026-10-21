@@ -19,6 +19,7 @@ function status(quota: QoderStatusDto['quota']): QoderStatusDto {
     quota,
     lastFetchedAt: null,
     models: [],
+    enabledModelIds: null,
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
     serving: true,

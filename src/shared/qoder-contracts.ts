@@ -217,7 +217,22 @@ export interface QoderLoginFlowStatus {
 /** 设置面接受的补丁。 */
 export interface QoderSettingsUpdateDto {
   enabled?: boolean
-  enabledModelIds?: string[]
+  /**
+   * 模型勾选，**三态**（与 host 的 `QoderModelSettings` 同源）：
+   *
+   * - `null` = 不过滤，目录里的每一个模型都可用（出厂状态）；
+   * - `[]` = 用户明确把每一个模型都关掉；
+   * - 非空 = 白名单，只有列出的那些可用。
+   *
+   * 三态而不是「空数组即不过滤」：后者让「全不选」与「全选」提交同一个值，
+   * 卡片上那个按钮就永远点不出效果。
+   *
+   * 白名单是**对着某一版实时目录**勾出来的 id（上游 `display_name` 去空白），
+   * 与随包兜底表不是同一套词汇（`DeepSeek-Flash` 对 `DeepSeek-V4-Flash`）。
+   * 所以它只在实时目录上收敛生效；进程里还只有兜底表时不按它过滤，
+   * 但 `[]`（全关）仍然照旧生效——那是明确的用户意图，与词汇表无关。
+   */
+  enabledModelIds?: string[] | null
   /** 数字表示为该模型设置覆盖值；`null` 恢复目录默认。 */
   contextWindowOverrides?: Record<string, number | null>
   /** `null` 表示各模型用自己的默认档位。 */
@@ -308,7 +323,31 @@ export interface QoderStatusDto extends Partial<AccountPoolStatusDto> {
   quotaRefreshing?: boolean
   /** 额度读取失败的原因；与快照并列给出，而不是互相取代。 */
   quotaError?: string | null
+  /**
+   * 本次应答背后是否正在刷新**模型目录**。
+   *
+   * 形状与 {@link quotaRefreshing} 同一条约定：host 先拿缓存（或随包兜底表）把
+   * 应答发出去，源头上那次刷新跑在应答背后。客户端据此知道「选择器里的兜底行
+   * 马上会被真实目录顶掉」，从而排一次补读——60 秒轮询太慢，用户等不到。
+   *
+   * 它与「用户有没有点刷新」无关：手动刷新是 POST /catalog/refresh，在应答
+   * 之前就完成了，不靠这个字段。
+   */
+  catalogRefreshing?: boolean
   models: QoderModelOption[]
+  /**
+   * 用户存下来的模型勾选，**三态**：`null` = 不过滤（全部可用）、
+   * `[]` = 全关、非空 = 白名单。
+   *
+   * 如实下发（`null` 也是一个要下发的值）：客户端要靠它区分「没挑过」与
+   * 「挑完又全清」，两者在 `models[].enabled` 上看起来是一样的。
+   *
+   * 它是**生效**的选择，不是落盘的原文：进程里还只有随包兜底表（没有实时目录）
+   * 时，白名单与那份目录不是同一套 id 词汇，按它筛只会把每一行都筛掉，所以这个
+   * 字段此时收敛成 `null`（不过滤、全部可用），勾选标记跟着全部亮起；
+   * `[]`（全关）不受影响。实时目录一到，它立刻变回真实的收敛结果。
+   */
+  enabledModelIds: string[] | null
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: QoderReasoningEffort | null
   /** 当前进行中的登录流程；无流程时为 null。 */

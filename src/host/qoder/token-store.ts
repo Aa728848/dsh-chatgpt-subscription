@@ -44,7 +44,7 @@ import {
   isQoderReasoningEffort,
   isQoderRegion,
 } from '../../shared/qoder-contracts.ts'
-import { DEFAULT_VISIBLE_MODEL_IDS, listModelIds } from './model-catalog.ts'
+import { listModelIds } from './model-catalog.ts'
 import {
   PROVIDER_ID,
   QODER_DEFAULT_TOKEN_TTL_MS,
@@ -373,23 +373,52 @@ export interface QoderModelSettings {
   /** 线路总开关。只有显式 false 才是关闭。 */
   enabled?: boolean
   /**
-   * 用户勾选的模型 id；缺省或空数组 = **不过滤（全选）**，非空 = 显式选择。
-   * （语义逐字照抄 step-code：schemastery 会把缺省的 `z.array(z.string())` 归一化成
-   * `[]`，所以没有「null = 不过滤」的第三态。）
+   * 用户勾选的模型 id，**三态**：
+   *
+   * - `null` = 不过滤（全部可用）——出厂默认，也是「这条线路没被挑过」的状态；
+   * - `[]` = 用户明确把每一个模型都关掉（一个都不可用）；
+   * - 非空 = 白名单，只有列出的那些可用。
+   *
+   * 为什么必须有第三态：schemastery 会把缺省的 `z.array(z.string())` 归一化成 `[]`，
+   * 一旦「空数组」同时表示「没挑过」，卡片上的「全不选」提交 `[]` 就与「全选」
+   * 完全等价——那是实测出来的真 bug，不是风格问题。
    */
-  enabledModelIds?: string[]
+  enabledModelIds: string[] | null
   /** 逐模型上下文窗口覆盖；缺省用目录声明值。 */
   contextWindowOverrides: Record<string, number>
   /** 会话没指定档位时用的档位；null 表示各模型用自己的默认。 */
   defaultReasoningEffort: QoderReasoningEffort | null
   /** 手动指定下一个请求使用的账号；null 交回号池调度。 */
   selectedAccountId: string | null
+  /**
+   * 勾选语义的**迁移标记**：`QODER_SELECTION_VERSION` 表示「这份文档由三态代码写过」。
+   *
+   * 为什么需要它（删掉它等于升级即坏）：三态之前，`defaultQoderModelSettings()` 返回的是
+   * `enabledModelIds: [...DEFAULT_VISIBLE_MODEL_IDS]`，而 qoder 的
+   * `DEFAULT_VISIBLE_MODEL_IDS` 就是 `[]`。所以**每一个老用户的落盘文件里都写着
+   * `"enabledModelIds": []`**，而旧语义下那个 `[]` 的意思是「不过滤（全部可用）」。
+   * 新语义里 `[]` 是「用户明确全关」。两者字面完全一样，只靠 `enabledModelIds`
+   * 本身分不开——没有这个标记，所有老用户升级后都会一个模型都不剩，而他们从没点过
+   * 「全不选」。
+   *
+   * 有了它，读文档时才能区分「旧版本的默认空表」与「用户真的点了全不选」：
+   * 无标记 + `[]` → 迁移成 `null`；有标记 + `[]` → 如实保留。
+   */
+  selectionVersion: number
 }
+
+/**
+ * 当前勾选语义的版本号。1 = 三态（null / [] / 白名单）。
+ *
+ * 只增不减：以后若再改语义，把它 +1 并补一条新的迁移分支，而不是复用旧编号。
+ */
+export const QODER_SELECTION_VERSION = 1
 
 /** 一个设置补丁。 */
 export interface QoderSettingsPatch {
   enabled?: boolean
-  enabledModelIds?: string[]
+  /** 三态补丁：`null` 是**值**（回到不过滤），`[]` 也是值（全关），不是「没带这个字段」。 */
+  enabledModelIds?: string[] | null
   /** 补丁而不是整张表：`null` 必须能作为一个**值**活下来（卡片的「恢复目录默认」）。 */
   contextWindowOverrides?: ContextWindowOverridePatch
   defaultReasoningEffort?: QoderReasoningEffort | null
@@ -405,18 +434,36 @@ export interface QoderPreferenceStore {
   update(patch: QoderSettingsPatch): Promise<QoderModelSettings>
 }
 
-const DEFAULT_ENABLED_MODEL_IDS: string[] = [...DEFAULT_VISIBLE_MODEL_IDS]
-
 /** 一次全新安装的设置：全开、无过滤、无覆盖、无指定账号。 */
 export function defaultQoderModelSettings(): QoderModelSettings {
   return {
     enabled: true,
-    // 出厂值取自**随包**目录（空数组 = 不过滤），不取自运行时目录（同 step-code 的理由）。
-    enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
+    // 出厂值是 `null`（不过滤），而不是「随包目录里那些 id 的数组」：目录要登录后
+    // 才从上游发现，出厂就写死一份白名单会把后来新增的模型挡在外面。
+    enabledModelIds: null,
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
     selectedAccountId: null,
+    // 全新安装直接就是当前语义：`[]` 从第一天起就意味着「全关」。
+    selectionVersion: QODER_SELECTION_VERSION,
   }
+}
+
+/**
+ * 这份**原始**设置文档是否还停在旧语义上、需要一次迁移落盘。
+ *
+ * 判据只有一条：没有当前版本的迁移标记，且 `enabledModelIds` 是空数组。
+ * 旧版本把「没挑过」写成 `[]`（出厂值就是 `[]`，见 `QoderModelSettings.selectionVersion`
+ * 那段证据），所以这种文档必须被改写成 `null` 并盖上标记。
+ *
+ * 单独抽出来是因为落盘那一侧要先问「要不要迁移」再决定写不写，而
+ * {@link parseQoderModelSettings} 只负责给出解析后的值。
+ */
+export function needsQoderSelectionMigration(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const version = typeof value.selectionVersion === 'number' ? value.selectionVersion : 0
+  if (version >= QODER_SELECTION_VERSION) return false
+  return Array.isArray(value.enabledModelIds) && value.enabledModelIds.length === 0
 }
 
 /**
@@ -425,9 +472,21 @@ export function defaultQoderModelSettings(): QoderModelSettings {
  */
 export function parseQoderModelSettings(value: unknown): QoderModelSettings {
   if (!isRecord(value)) return defaultQoderModelSettings()
-  const enabledModelIds = Array.isArray(value.enabledModelIds)
+  // 数组（**包括空数组**）是用户的选择，如实保留；缺失或不是数组 = 没挑过 = 不过滤。
+  const stored = Array.isArray(value.enabledModelIds)
     ? value.enabledModelIds.filter((id): id is string => typeof id === 'string')
-    : [...DEFAULT_ENABLED_MODEL_IDS]
+    : null
+  // 迁移：没有标记的文档是三态之前的版本，那里的 `[]` 是**出厂默认**（旧
+  // `defaultQoderModelSettings()` 就返回 `[...DEFAULT_VISIBLE_MODEL_IDS]`，而它是
+  // `[]`），语义是「不过滤」。照新语义读成「全关」会让每一个老用户升级后一个
+  // 模型都不剩，所以这里把它翻成 `null`。
+  //
+  // 幂等性靠标记本身：迁移后写回的文档带着 `selectionVersion`，下次读到就走
+  // 「有标记」那条路，用户后来真的点的「全不选」（`[]`）不会被第二次翻回不过滤。
+  const selectionVersion = typeof value.selectionVersion === 'number' ? value.selectionVersion : 0
+  const enabledModelIds = selectionVersion < QODER_SELECTION_VERSION && stored !== null && stored.length === 0
+    ? null
+    : stored
   const contextWindowOverrides: Record<string, number> = {}
   if (isRecord(value.contextWindowOverrides)) {
     for (const [modelId, raw] of Object.entries(value.contextWindowOverrides)) {
@@ -445,6 +504,9 @@ export function parseQoderModelSettings(value: unknown): QoderModelSettings {
       ? value.defaultReasoningEffort
       : null,
     selectedAccountId: asString(value.selectedAccountId) ?? null,
+    // 读出来的文档一律算「已迁移」：下一次落盘就会把这个标记写进文件，
+    // 迁移因此只发生一次（见上面 enabledModelIds 那段）。
+    selectionVersion: QODER_SELECTION_VERSION,
   }
 }
 
@@ -455,7 +517,8 @@ export function mergeQoderSettings(
 ): QoderModelSettings {
   return {
     enabled: patch.enabled !== undefined ? patch.enabled : current.enabled !== false,
-    // 空数组是一个**真实值**（= 不过滤），不是「这个补丁没带这个字段」。
+    // `null` 与 `[]` 都是**真实值**（不过滤 / 全关），不是「这个补丁没带这个字段」；
+    // 只有 `undefined` 才是没带。
     enabledModelIds: patch.enabledModelIds !== undefined
       ? patch.enabledModelIds
       : current.enabledModelIds,
@@ -468,6 +531,9 @@ export function mergeQoderSettings(
     selectedAccountId: patch.selectedAccountId !== undefined
       ? patch.selectedAccountId
       : current.selectedAccountId ?? null,
+    // 合并出来的文档始终是当前语义：它下一步就要被写回，写回后必须带标记，
+    // 否则那份文件会在下次读取时被当成「旧版本默认 `[]`」再迁移一遍。
+    selectionVersion: QODER_SELECTION_VERSION,
   }
 }
 
@@ -486,21 +552,48 @@ export class QoderModelSettingsStore {
     return this.filePath
   }
 
-  async read(): Promise<QoderModelSettings> {
+  /**
+   * 读一份设置，**并顺手完成一次性迁移**。
+   *
+   * 迁移必须落盘（否则下一次读到的还是同一份旧文档），所以整个「读 → 判断 → 写回」
+   * 跑在 {@link serialize} 的同一条按路径队列里：与 `updateSettings` 的读-改-写互斥，
+   * 不会出现「迁移写把用户刚提交的选择覆盖回去」这种顺序问题。
+   */
+  read(): Promise<QoderModelSettings> {
+    return serialize(this.filePath, async () => {
+      const raw = await this.readRaw()
+      const parsed = parseQoderModelSettings(raw)
+      if (needsQoderSelectionMigration(raw)) {
+        try {
+          await this.write(parsed)
+        } catch {
+          // 迁移落盘失败不该让设置读不出来：内存里的结果已经是迁移后的值，
+          // 而且下次读取会再试一次（迁移是幂等的）。
+        }
+      }
+      return parsed
+    })
+  }
+
+  /** 不做迁移的裸读；只给已经在队列里的调用方用（避免 serialize 自我嵌套死锁）。 */
+  private async readRaw(): Promise<unknown> {
     try {
-      return parseQoderModelSettings(JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown)
+      return JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown
     } catch {
-      return defaultQoderModelSettings()
+      return undefined
     }
   }
 
   async write(settings: QoderModelSettings): Promise<void> {
+    // 写出去的一律是当前语义：`selectionVersion` 是「这份文件已被新代码写过」的凭证，
+    // 少了它，一份真的「全关」（`[]`）下次读取时会被当成旧版本默认值翻成不过滤。
+    const document: QoderModelSettings = { ...settings, selectionVersion: QODER_SELECTION_VERSION }
     await fs.mkdir(path.dirname(this.filePath), { recursive: true })
     const temporary = this.filePath + '.tmp.' + Date.now()
-    await fs.writeFile(temporary, JSON.stringify(settings, null, 2) + '\n', 'utf8')
+    await fs.writeFile(temporary, JSON.stringify(document, null, 2) + '\n', 'utf8')
     await fs.rename(temporary, this.filePath)
     const restored = parseQoderModelSettings(JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown)
-    if (!isDeepStrictEqual(restored, settings)) {
+    if (!isDeepStrictEqual(restored, document)) {
       throw new Error('Qoder 模型设置写入失败：落盘的选择与刚写入的不一致')
     }
   }
@@ -508,7 +601,9 @@ export class QoderModelSettingsStore {
   /** 在与凭据写入同一条按路径排队的锁里做「读-改-写」。 */
   updateSettings(patch: QoderSettingsPatch): Promise<QoderModelSettings> {
     return serialize(this.filePath, async () => {
-      const next = mergeQoderSettings(await this.read(), patch)
+      // 这里不能再走公开的 read()：它自己也去抢同一条队列，会把队列卡死。
+      // 裸读 + parse 已经包含迁移语义（旧 `[]` 读成 `null`），写回时再盖上标记。
+      const next = mergeQoderSettings(parseQoderModelSettings(await this.readRaw()), patch)
       await this.write(next)
       return next
     })
@@ -519,8 +614,9 @@ export class QoderModelSettingsStore {
  * 把模型选择绑到 DSH 设置文档（harness 还提供 register 接缝时），
  * 否则绑到凭据旁边的 JSON 文件。
  *
- * ⚠ `enabledModelIds` 不给 `.default()`（与 step-code 同一处实测：
- * schemastery 会把缺省的数组归一化成 `[]`，而 `[]` 与「不过滤」同义）。
+ * ⚠ `enabledModelIds` 是三态，schema 必须**显式**声明 `null` 这一格并把缺省值定成
+ * `null`：只写 `z.array(z.string())` 时 schemastery 会把缺省归一化成 `[]`，
+ * 那正好把「没挑过」翻译成「用户全关」，卡片上就再也点不出全关了。
  */
 export function registerQoderPreferenceStore(
   settings?: unknown,
@@ -541,8 +637,8 @@ export function registerQoderPreferenceStore(
 
   const scope = settings.register(resolveSettingsNamespace(QODER_PREFERENCES_NAMESPACE), z.object({
     enabled: z.boolean().default(true),
-    // 刻意不给 .default()：见本函数上方那段注释。
-    enabledModelIds: z.array(z.string()),
+    // 三态：null = 不过滤（缺省），[] = 全关，非空 = 白名单。见本函数上方那段注释。
+    enabledModelIds: z.union([z.array(z.string()), z.const(null)]).default(null),
     contextWindowOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z
       .union([
@@ -551,29 +647,28 @@ export function registerQoderPreferenceStore(
       ])
       .default(null),
     selectedAccountId: z.union([z.string(), z.const(null)]).default(null),
+    // 迁移标记：`[]` 与「旧版本的默认空表」只靠它分得开。
+    //
+    // 缺省**必须是 0 而不是当前版本**：旧代码的 `update()` 写的是
+    // `enabledModelIds: normalized.enabledModelIds ?? []`，所以 register 文档里
+    // 同样会留下没有标记的 `[]`。缺省给当前版本就等于宣布「这份文档已经是新语义」，
+    // 那些文档会被读成「全关」——升级即坏的同一个坑，只是换了个后端。
+    selectionVersion: z.number().default(0),
   })) as SettingsScope<{
     enabled?: boolean
-    enabledModelIds?: string[]
+    enabledModelIds?: string[] | null
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: QoderReasoningEffort | null
     selectedAccountId: string | null
+    selectionVersion?: number
   }>
 
   const currentValue = (): QoderModelSettings => {
-    const value = scope.get()
-    const settings: QoderModelSettings = {
-      enabled: value.enabled !== false,
-      contextWindowOverrides: value.contextWindowOverrides,
-      defaultReasoningEffort: isQoderReasoningEffort(value.defaultReasoningEffort)
-        ? value.defaultReasoningEffort
-        : null,
-      selectedAccountId: value.selectedAccountId ?? null,
-    }
-    // 空数组与缺省同义（不过滤），所以这里不制造一次「用户选了空集」的假象。
-    if (Array.isArray(value.enabledModelIds) && value.enabledModelIds.length > 0) {
-      settings.enabledModelIds = value.enabledModelIds
-    }
-    return settings
+    // 与文件后端走**同一个**解析函数：三态与迁移规则只有一份实现，
+    // 两条后端不可能各读各的（那正是「文件修好了、register 还坏着」的来路）。
+    // 三种状态在这里如实透传：**不许**再把空数组折成缺省——那正是
+    // 「全不选 = 全选」那个 bug 的落点。
+    return parseQoderModelSettings(scope.get())
   }
 
   return {
@@ -583,10 +678,13 @@ export function registerQoderPreferenceStore(
       const normalized = mergeQoderSettings(currentValue(), patch)
       await scope.update({
         enabled: normalized.enabled !== false,
-        enabledModelIds: normalized.enabledModelIds ?? [],
+        // 如实写：`null` 就是不过滤，**不要**折成 `[]`（那会被读成「全关」）。
+        enabledModelIds: normalized.enabledModelIds,
         contextWindowOverrides: normalized.contextWindowOverrides,
         defaultReasoningEffort: normalized.defaultReasoningEffort,
         selectedAccountId: normalized.selectedAccountId,
+        // 迁移标记：有了它，这份文档里的 `[]` 从此只表示「用户点了全不选」。
+        selectionVersion: QODER_SELECTION_VERSION,
       })
       // 同时镜像进文件（下一次跑在没有 register 接缝的 harness 上时用户的选择还在）。
       void fallbackStore.updateSettings(patch).catch(() => undefined)

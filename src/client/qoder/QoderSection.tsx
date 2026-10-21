@@ -436,7 +436,7 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
                 list: t.modelsSection,
               }}
             />
-            {/* 选择语义必须写在按钮旁边：清空勾选等于不过滤，而不是「一个都不可用」。 */}
+            {/* 选择语义必须写在按钮旁边：清空勾选 = 全部模型都不可用（三态里的 []）。 */}
             <p className="dsha-muted">{t.enabledModelIdsSemantics}</p>
           </>
         )}

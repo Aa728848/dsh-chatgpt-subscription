@@ -126,14 +126,15 @@ import {
 } from './host/step-code/token-store.ts'
 import { PROVIDER_ID as STEP_CODE_PROVIDER_ID, PROVIDER_NAME as STEP_CODE_PROVIDER_NAME } from './host/step-code/types.ts'
 import { createClinePassLine } from './host/cline-pass/line.ts'
-import { QoderAdapter, qoderCatalogSize } from './host/qoder/adapter.ts'
+import { QoderAdapter, cachedQoderModelCatalog, convergeQoderSelection } from './host/qoder/adapter.ts'
 import { QoderAccountPool } from './host/qoder/account-pool.ts'
-import { registerQoderRoutes, qoderSettingsSource } from './host/qoder/routes.ts'
+import { registerQoderRoutes, qoderSettingsSource, warmQoderCatalogOnStartup } from './host/qoder/routes.ts'
 import {
   QoderCredentialStore,
   QoderModelSettingsStore,
   registerQoderPreferenceStore,
 } from './host/qoder/token-store.ts'
+import { qoderCatalogIsLive } from './host/qoder/client.ts'
 import { PROVIDER_ID as QODER_PROVIDER_ID, PROVIDER_NAME as QODER_PROVIDER_NAME } from './host/qoder/types.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import {
@@ -887,6 +888,23 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         accountPool: qoderAccountPool,
       },
     )
+    // 启动时预热 Qoder 的模型目录，跑在插件装载**背后**。
+    //
+    // 为什么要在启动时预热：进程内的 cachedCatalog 在宿主重启后是空的，可磁盘快照
+    // （~/.dsh/storages/qoder-global-catalog.json）里躺着上一次的真实目录。原先唯一
+    // 回填它的入口是设置页的 GET /status / 登录 / adopt / POST /catalog/refresh，
+    // 于是「重启之后、第一次打开设置页之前」，adapter.listModels 读到的是随包兜底表
+    // （全球区 15 条缺省模型），模型选择器先把这一大片假模型摊出来，打开一次设置页
+    // 才恢复正常。预热把这段空窗压到进程启动的第一拍（快照是本地读，几十毫秒）。
+    //
+    // 为什么不能 await：没有快照的机器上，预热就是一次真实的上游请求（COSY 版本 +
+    // 签名 + 目录端点，上限 DISCOVERY_TIMEOUT_MS）。await 在装配里等于让整个插件的
+    // 装载挂在一条可降级的网络请求上——离线、上游抽风都会变成「插件装不上」，而这条
+    // 线路在没有目录时本来就有一张随包兜底表可用。所以：不等待，失败一律吞掉。
+    void warmQoderCatalogOnStartup(ctx, {
+      fetchFn: proxyFetch,
+      accountPool: qoderAccountPool,
+    }).catch(() => undefined)
 
     // The IDE can sign in or out on its own; adopting whatever its directory
     // currently holds keeps the pool in step without a manual rescan.
@@ -1209,13 +1227,34 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         read: async () => {
           const current = qoderPreferences.status()
           const accounts = await qoderAccountPool.listAccounts().catch(() => [])
-          // 运行时目录优先，随包兜底表垫底（登录前卡片上的模型计数来自兜底表）。
-          const total = catalogTotal(qoderCatalogSize())
+          // 目录与适配器同一个读口（运行时目录优先、随包兜底表垫底）。分子分母必须
+          // 取自**同一份**目录：两区的随包表条目数不同（全球区 15、中国站 9），
+          // 混用会让卡片显示一个根本不存在的总数。
+          const region = accounts.find((account) => account.isPrimary)?.region
+            ?? accounts[0]?.region
+            ?? 'global'
+          const catalog = cachedQoderModelCatalog(region)
+          const total = catalogTotal(catalog.length)
+          // 勾选是三态：null = 不过滤（可用模型数就是目录总数），数组 = 白名单。
+          // 白名单里残留的 id 不算可用——它们在上游已经不存在了，把它们计进分子
+          // 会让卡片显示「3/2 个模型可用」。
+          //
+          // 口径与适配器、状态面**同一处**（convergeQoderSelection）：兜底表阶段不按
+          // 白名单筛。否则冷启动时这张卡会说「0 个可用」，而选择器里明明有模型。
+          const selected = convergeQoderSelection(
+            current.enabledModelIds,
+            qoderCatalogIsLive(region),
+            catalog,
+          )
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
-            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            enabledModelCount: total === null
+              ? null
+              : selected === null
+                ? total
+                : Math.min(selected.length, total),
             totalModelCount: total,
           }
         },
@@ -2074,6 +2113,7 @@ export {
   qoderSettingsSource,
   qoderSubPathOf,
   registerQoderRoutes,
+  warmQoderCatalogOnStartup,
   type QoderPoolSlice,
   type QoderRouteOptions,
   type QoderSettingsSource,

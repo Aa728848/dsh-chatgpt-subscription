@@ -58,7 +58,12 @@ import {
   COSY_CLIENT_TYPE,
 } from './types.ts'
 import { buildQoderCosyHeaders, resolveQoderMachineId, type QoderCosyIdentity } from './cosy.ts'
-import { parseQoderModelListing, type QoderModelEntry } from './model-catalog.ts'
+import {
+  parsePersistedQoderModelEntries,
+  parseQoderModelListing,
+  persistedQoderModelRecord,
+  type QoderModelEntry,
+} from './model-catalog.ts'
 import { qoderExpiresAtFrom, type QoderCredentials } from './token-store.ts'
 import path from 'node:path'
 import { dshHomeDir } from '../common/home.ts'
@@ -355,6 +360,40 @@ export function getCachedQoderModelCatalog(region?: QoderRegion): readonly Qoder
   return cachedCatalog?.entries ?? []
 }
 
+/**
+ * 本进程此刻拿到的目录是**实时目录**（上游真的答过）还是**随包兜底表**。
+ *
+ * 这条判定必须单独导出、口径只有一处，因为下游对它有两个消费者而两处的后果都很具体：
+ *
+ * - `adapter.listModels` 与状态面的勾选标记要知道「这一份目录是不是这个账号真实可用的
+ *   集合」，才知道用不用用户的白名单去筛它（见下面的「两套 id 词汇表」）；
+ * - 任何自己拼「缓存有没有 / 是不是空」的地方都会与它漂：一处按 `undefined` 判空、
+ *   另一处按「条目数为 0」判空，兜底表就会被当成本账号的真实目录。
+ *
+ * -------------------------------------------------------------------------
+ * 两套 id 词汇表（这是缺陷 1 的证据，别再合并它们）
+ * -------------------------------------------------------------------------
+ * 用户的白名单是在设置卡片上对着**实时目录**勾出来的 id，而实时目录的 id 就是上游
+ * `display_name` 去空白（model-catalog.ts `toQoderModelId`）；随包兜底表照录
+ * pi-provider 的静态表，同一批模型在两边**叫法不同**：
+ *
+ * | 实时目录（用户勾的） | 随包兜底表 |
+ * | --- | --- |
+ * | `DeepSeek-Flash` | `DeepSeek-V4-Flash` |
+ * | `Qwen3.8-Flash` | `Qwen3.8-Max` / `Qwen3.7-Plus` |
+ * | `Ultimate` | `Ultimate`（少数恰好同名） |
+ *
+ * 所以「用白名单去筛兜底表」这件事在冷启动时必然收敛成空集，而 `listModels` 返回空
+ * 会让 DSH 把整个 provider 分组过滤掉——选择器里连 Qoder 都不剩。
+ *
+ * @param region 要判定的区域（目录是区域的属性，别的区域的缓存不算数）。
+ */
+export function qoderCatalogIsLive(region: QoderRegion): boolean {
+  return cachedCatalog !== undefined
+    && cachedCatalog.region === region
+    && cachedCatalog.entries.length > 0
+}
+
 /** 清掉内存目录、快照 scope 与在飞的去重。 */
 export function clearCachedQoderModelCatalog(): void {
   cachedCatalog = undefined
@@ -362,6 +401,146 @@ export function clearCachedQoderModelCatalog(): void {
   catalogInFlight = null
   catalogInFlightRegion = null
   catalogSnapshotScopesLoaded.clear()
+}
+
+/**
+ * 当前进程的目录缓存是否「需要（或应该）拉一次」：空缓存、别的区域的缓存、
+ * 或者已经旧到过了 {@link CATALOG_CACHE_TTL_MS}。
+ *
+ * 之所以把这条判定单独导出，是因为它有两个消费者而只能有一份口径：设置卡片的
+ * `GET /status` 要在应答背后决定「这次要不要顺手拉一次」，而不是每条路径
+ * 各写一遍「有没有缓存 / 过没过期」。判定口径分叉的那种后果很具体——一处按
+ * `undefined` 判空、另一处按「条目数为 0」判空，于是空数组缓存永远被判成
+ * 「有缓存，不用拉」，选择器就永远停在兜底表上。
+ *
+ * 读的是与 {@link loadQoderModelCatalog} **同一个** `cachedCatalog` 与其
+ * `fetchedAt`，所以「这里说不用拉」与「那边会直接命中缓存」是同一件事。
+ * 纯读：不联网、不写缓存、不改任何状态，因此可以在应答路径上随手调用。
+ *
+ * @param region 要判定的区域（目录是区域的属性，别的区域的缓存不算数）。
+ * @param now    当前时刻；显式传入是为了让「过期」这件事在测试里可确定。
+ */
+export function qoderCatalogNeedsRefresh(region: QoderRegion, now: number = Date.now()): boolean {
+  // 判定与 {@link qoderCatalogIsLive} **同一口径**：反过来读那一个函数，两处就不会漂。
+  if (!qoderCatalogIsLive(region)) return true
+  return now - cachedCatalog!.fetchedAt >= CATALOG_CACHE_TTL_MS
+}
+
+/**
+ * 进程内实时目录的指纹：还没有实时目录（只有随包兜底表）时是空数组的序列化。
+ *
+ * 「这次刷新有没有真的换掉目录」的判定**只有这一处**。它有两个调用方，而两处
+ * 判错的后果都很具体：
+ *
+ * - `routes.ts` 的刷新路径在这一条上决定发不发 `llm/adapters-updated`：这张卡片
+ *   每 60 秒轮询一次，无条件发就等于让模型选择器每拍重建一遍；
+ * - `index.ts` 的**启动预热**同样要发一次，而且启动那一刻根本没有任何订阅方在等，
+ *   发早发晚都不影响正确性——但它与刷新路径必须是同一句判词，否则「目录变了没有」
+ *   在两条路径上会给出两个答案。
+ *
+ * 用 id 序列而不是数组引用：{@link loadQoderModelCatalog} 命中缓存时会把**同一个
+ * 数组**交回来，按引用比较永远相等，那样「目录真的变了」就永远判不出来。
+ *
+ * @param region 要取指纹的区域（目录是区域的属性，别的区域的缓存不算数）。
+ */
+export function qoderCatalogFingerprint(region: QoderRegion): string {
+  return JSON.stringify(getCachedQoderModelCatalog(region).map((entry) => entry.id))
+}
+
+/**
+ * 快照回填：本进程第一次碰到这个区域时，把上一次落盘的真实目录读回内存。
+ *
+ * 抽成一处是因为它有**两个入口**，而两个入口必须落进同一份状态：启动预热
+ * （{@link warmQoderModelCatalog}）与懒加载（{@link loadQoderModelCatalog}）。
+ * `catalogSnapshotScopesLoaded` 让「每个区域只读一次盘」这件事在两条路径之间
+ * 共享——预热读过的区域，第一次 `loadQoderModelCatalog` 就不会再读一遍。
+ *
+ * @returns 回填成功时快照的 `fetchedAt`，没有可用快照时为 0（调用方照旧取上游）。
+ */
+async function rehydrateQoderCatalogFromSnapshot(region: QoderRegion): Promise<number> {
+  if (catalogSnapshotScopesLoaded.has(region)) return 0
+  catalogSnapshotScopesLoaded.add(region)
+  const rehydratedAt = await rehydrateCatalogCache(
+    catalogSnapshotName('qoder', region),
+    // 快照的读取侧必须与写入侧（refreshQoderModelCatalog 的 persistedQoderModelRecord）
+    // 互为反函数。这里曾经错用 parseQoderModelListing（它只认上游的 { chat } 载荷），
+    // 于是任何快照都解析成空数组被丢掉——磁盘上明明有真实目录，冷启动却永远从兜底表
+    // 起步。形状对不上时是静默的，所以这条注释与那一对函数必须一起存在。
+    (value) => {
+      const entries = parsePersistedQoderModelEntries(value, region)
+      return entries.length > 0 ? entries : undefined
+    },
+    (fetchedAt, entries) => {
+      cachedCatalog = { region, entries, fetchedAt }
+    },
+    0,
+  )
+  // accept 收到的 fetchedAt 就是快照写入时刻（= 上一次上游真的答过的时刻），
+  // 所以回填出来的缓存天然带着正确的 TTL 起点，不会被立刻判成过期。
+  return rehydratedAt
+}
+
+/**
+ * 启动预热：把上一次落盘的真实目录**立刻**放回进程内缓存，再让上游刷新跑在背后。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么要在启动时预热
+ * ---------------------------------------------------------------------------
+ * `cachedCatalog` 是进程内的，宿主一重启它就是空的；而此时磁盘快照
+ * （`<DSH_HOME>/storages/qoder-global-catalog.json`）里明明躺着上一次的真实目录。
+ * 没有预热时，唯一把它读回来的入口是 `loadQoderModelCatalog`，而它只被设置页的
+ * `GET /status` / 登录 / adopt / `POST /catalog/refresh` 调用——于是**启动之后、
+ * 用户第一次打开设置页之前**，`adapter.listModels` 读到的是随包兜底表（全球区
+ * 15 条），模型选择器就把这一大片缺省模型摊在用户面前；等设置页被打开、那次
+ * 应答背后的刷新落地，它才换成真实的两条。用户看到的是「重启后先冒出一堆假模型，
+ * 点一下设置页才正常」。
+ *
+ * 预热把这段空窗压到进程启动的第一拍：快照是本地读，几十毫秒内就位。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么不能 await（调用方必须 `void ... .catch()`）
+ * ---------------------------------------------------------------------------
+ * 第二段（`loadQoderModelCatalog`）在**没有快照**的机器上就是一次真实的上游请求：
+ * 它会跟随 COSY 版本、签一次名、打一次目录端点，超时上限是 `DISCOVERY_TIMEOUT_MS`。
+ * 把它 await 在插件装配里，等于让整个宿主插件的装载挂在一条可降级的网络请求上——
+ * 离线、上游抽风、代理没起来，都会变成「插件装不上」，而这条线路在没有目录时本来
+ * 就有一张随包兜底表可用。所以：预热是**尽力而为**，失败一律吞掉，调用方不等待。
+ *
+ * 有快照时它不会等网络：快照回填之后 `loadQoderModelCatalog` 走的是「陈旧缓存
+ * 立刻返回 + 后台刷新」那条路（见该函数），所以正常机器的预热是毫秒级的。
+ *
+ * @param credentials 预热用的凭据切片。没有账号时调用方不该调用本函数。
+ * @param options     与其它上游函数同一套注入缝（fetchFn / env）。
+ * @returns **快照回填之后、网络刷新之前**那份目录的指纹，也就是这次预热里「上游那一版
+ *   将要顶替掉的是什么」。调用方拿它当比较基线：与它不同才算「目录真的变了」。
+ *   只为发一次事件而返回它，而不是让调用方自己再取一次——那样它取到的是回填**之前**
+ *   的空目录，冷启动时永远「变了」，等于每次启动都无条件发事件。
+ *   预热失败时返回回填后（可能仍为空）的指纹。
+ */
+export async function warmQoderModelCatalog(
+  credentials: QoderUpstreamCredential,
+  options: QoderRequestOptions = {},
+): Promise<string> {
+  const region = credentials.region
+  let baseline = qoderCatalogFingerprint(region)
+  try {
+    const rehydratedAt = await rehydrateQoderCatalogFromSnapshot(region)
+    // 基线取在**回填之后**：没有快照时它仍是空数组的序列化（这一次上游取到什么就是
+    // 什么变化），有快照时它是快照那一版（上游与它不同才是真的变化）。
+    baseline = qoderCatalogFingerprint(region)
+    if (rehydratedAt > 0) {
+      // 快照已经就位：这一次调用**不等网络**，它只让上游刷新跑在背后
+      // （陈旧缓存分支：立刻返回旧值 + fire-and-forget 刷新）。
+      void loadQoderModelCatalog(credentials, options).catch(() => undefined)
+      return baseline
+    }
+    // 没有快照：这一次取上游是唯一能拿到真实目录的路径，值得把它做完。
+    // 失败在 loadQoderModelCatalog 内部已经收敛成「旧值或空」，这里再兜一层。
+    await loadQoderModelCatalog(credentials, options)
+  } catch {
+    // 预热没有资格让任何东西失败：插件装载、模型选择器、设置页都不等它。
+  }
+  return baseline
 }
 
 /**
@@ -390,23 +569,13 @@ export async function loadQoderModelCatalog(
     void refreshQoderModelCatalog(credentials, options).catch(() => undefined)
     return cachedCatalog.entries
   }
-  if (!catalogSnapshotScopesLoaded.has(region)) {
-    catalogSnapshotScopesLoaded.add(region)
-    const rehydratedAt = await rehydrateCatalogCache(
-      catalogSnapshotName('qoder', region),
-      (value) => {
-        const entries = parseQoderModelListing(value, region)
-        return entries.length > 0 ? entries : undefined
-      },
-      (fetchedAt, entries) => {
-        cachedCatalog = { region, entries, fetchedAt }
-      },
-      0,
-    )
-    if (rehydratedAt > 0) {
-      void refreshQoderModelCatalog(credentials, options).catch(() => undefined)
-      return cachedCatalog === undefined ? [] : cachedCatalog.entries
-    }
+  // 快照回填与启动预热**同一处实现**（rehydrateQoderCatalogFromSnapshot）：
+  // 预热已经读过的区域这里直接返回 0，不会再读一次盘。
+  const rehydratedAt = await rehydrateQoderCatalogFromSnapshot(region)
+  if (rehydratedAt > 0) {
+    // 陈旧缓存立刻返回旧值 + 后台刷新：冷启动的第一拍就不等网络。
+    void refreshQoderModelCatalog(credentials, options).catch(() => undefined)
+    return cachedCatalog === undefined ? [] : cachedCatalog.entries
   }
   return refreshQoderModelCatalog(credentials, options)
 }
@@ -429,16 +598,12 @@ function refreshQoderModelCatalog(
         const fetchedAt = Date.now()
         cachedCatalog = { region, entries, fetchedAt }
         // 快照存**上游原始载荷**的还原（条目是解析结果；写回条目本身——快照的读取侧
-        // 用同一个解析器再过一遍，字段缺了走兜底，与首次解析一致）。
-        void writeCatalogSnapshot(catalogSnapshotName('qoder', region), entries.map((entry) => ({
-          key: entry.upstreamKey,
-          display_name: entry.name,
-          enable: true,
-          source: entry.source,
-          is_vl: entry.supportsImages,
-          is_reasoning: entry.reasoningEfforts.length > 0,
-          context_config: { default: { token_count: entry.defaultContextWindow, is_default: true } },
-        })), fetchedAt)
+        // 用 parsePersistedQoderModelEntries 再过一遍，字段缺了走兜底，与首次解析一致）。
+        void writeCatalogSnapshot(
+          catalogSnapshotName('qoder', region),
+          entries.map(persistedQoderModelRecord),
+          fetchedAt,
+        )
         return entries
       }
       return sameRegion()
