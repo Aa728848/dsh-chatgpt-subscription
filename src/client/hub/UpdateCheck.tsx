@@ -1,7 +1,9 @@
 /**
- * The hub overview's update control: one quiet secondary button at the right end
- * of the hint line, and a line of 11px text under it saying which version is
- * running and what the last check found.
+ * The hub's update control: one 28px ring-icon button at the right end of the
+ * section header, with a line of 11px text to its left saying which version is
+ * running and what the last check found. The icon carries no text label — its
+ * name is the state-dependent `aria-label`, which the button also mirrors as a
+ * hover title — so the control stays quiet until the pointer is on it.
  *
  * Nothing is requested on mount. Opening the settings page costs exactly the one
  * overview request it always did, and the registry is asked only when the user
@@ -37,6 +39,14 @@ interface Props {
 
 /** Where the control is in its own cycle. */
 type Phase = 'idle' | 'checking' | 'checked' | 'applying' | 'applied'
+
+/**
+ * The button's whole face: a ring arrow, drawn in `currentColor` so the button's
+ * own color (tertiary, primary on hover) is the only color it ever has. The class
+ * is what the busy state animates, so the rotation is a stylesheet fact rather
+ * than an inline style on the icon.
+ */
+const REFRESH_SVG = '<svg class="dsh-hub-update-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 8a6 6 0 1 1-6-6c1.68 0 3.29.67 4.49 1.83L14 5.33"/><path d="M14 2v3.33h-3.33"/></svg>'
 
 /** A refused update, carrying the route's machine-readable code so the card can word it. */
 class UpdateApplyError extends Error {
@@ -120,7 +130,7 @@ function failureText(failure: unknown, t: Translate): string {
   return failure.message
 }
 
-/** The one line of text under the button: what the last answer means. */
+/** The one line of text beside the icon: what the last answer means. */
 function statusOf(check: UpdateCheckDto, applied: UpdateApplyDto | null, t: Translate): { text: string; danger: boolean } | null {
   if (applied !== null) return { text: appliedText(applied, t), danger: false }
   if (check.reason === 'registry-unreachable') return { text: t('hubUpdateCheckFailed'), danger: true }
@@ -182,6 +192,8 @@ export function UpdateCheck({ t }: Props): React.JSX.Element {
     }
   }, [t])
 
+  // The icon has no text, so its accessible name (and hover title) is the only
+  // place the state is named: it follows the same four outcomes the label did.
   const label = phase === 'checking'
     ? t('hubUpdateChecking')
     : phase === 'applying'
@@ -197,19 +209,28 @@ export function UpdateCheck({ t }: Props): React.JSX.Element {
   const showCommand = check !== null && check.updateAvailable && !check.canApply
     && check.reason !== 'registry-unreachable'
 
+  // Everything that can grow sits to the left of the icon, and the icon is the
+  // row's last element: the header row is right-aligned, so the icon keeps the
+  // row's right edge whether there is no answer yet, a short "up to date" line,
+  // or a long error, and that text grows leftwards into the space instead.
   return <div className="dsh-hub-update">
-    <button
-      type="button"
-      className="dsh-hub-update-button"
-      disabled={busy}
-      onClick={() => { void (canOfferApply ? runApply() : runCheck()) }}
-    >
-      {label}
-    </button>
-    {status === null ? null : (
-      <span className={`dsh-hub-update-state${status.danger ? ' dsh-hub-note-danger' : ''}`}>{status.text}</span>
-    )}
-    {error === null ? null : <span className="dsh-hub-update-state dsh-hub-note-danger" role="alert">{error}</span>}
+    <div className="dsh-hub-update-row">
+      {status === null ? null : (
+        <span className={`dsh-hub-update-state${status.danger ? ' dsh-hub-note-danger' : ''}`} role="status">{status.text}</span>
+      )}
+      {error === null ? null : <span className="dsh-hub-update-state dsh-hub-note-danger" role="alert">{error}</span>}
+      <button
+        type="button"
+        className={`dsh-hub-update-button${busy ? ' dsh-hub-update-busy' : ''}`}
+        aria-label={label}
+        title={label}
+        disabled={busy}
+        onClick={() => { void (canOfferApply ? runApply() : runCheck()) }}
+      >
+        <span aria-hidden="true" dangerouslySetInnerHTML={{ __html: REFRESH_SVG }} />
+        {canOfferApply ? <span className="dsh-hub-update-dot" aria-hidden="true" /> : null}
+      </button>
+    </div>
     {showCommand ? <code className="dsh-hub-update-command" aria-label={t('hubUpdateCommandLabel')}>{check.command}</code> : null}
   </div>
 }

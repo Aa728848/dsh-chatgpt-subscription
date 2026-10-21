@@ -3,6 +3,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import { NS } from './locales.ts'
 import { HubOverview } from './hub/HubOverview.tsx'
 import { hubProviderDescriptor, HUB_PROVIDERS } from './hub/providers.tsx'
+import { UpdateCheck } from './hub/UpdateCheck.tsx'
 import type { HubProviderId } from './hub/brand-icons.tsx'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS> & {
@@ -68,8 +69,13 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
 
   if (view.view === 'overview') {
     return <section className="dsh-codex-page" aria-labelledby="dsh-hub-title">
-      <header>
-        <h2 id="dsh-hub-title" className="dsh-codex-title">{t('hubTitle')}</h2>
+      {/* The title and the page's one control share a header row: status text and
+          its icon button on the right, the section title on the left. The control
+          reports on the plugin as a whole, which is the section's scope, not one
+          of the provider lines the cards below enumerate. */}
+      <header className="dsh-hub-head">
+        <h2 id="dsh-hub-title" className="dsh-codex-title dsh-hub-head-title">{t('hubTitle')}</h2>
+        <UpdateCheck t={t} />
       </header>
       {/* The overview's whole job is the cards. A local sign-in belongs to the
           ONE provider whose account pool it would join, so it lives on that

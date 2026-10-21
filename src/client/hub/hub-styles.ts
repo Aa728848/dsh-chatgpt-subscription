@@ -36,23 +36,43 @@ const CSS = `
 .dsh-hub-skeleton span{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border-radius:5px;display:block;height:12px}
 .dsh-hub-skeleton .dsh-hub-skel-name{width:120px;margin-bottom:6px}
 .dsh-hub-skeleton .dsh-hub-skel-note{width:180px;height:10px}
-/* The hint line and the update control share one row: hint left, control
-   right. The row owns the bottom gap the paragraph used to carry, so the cards
-   below start exactly where they did before. */
-.dsh-hub-hintrow{align-items:flex-start;display:flex;flex-wrap:wrap;gap:10px 18px;justify-content:space-between;margin:0 0 14px}
-.dsh-hub-hintrow .dsh-hub-hint{margin:0}
-.dsh-hub-update{align-items:flex-end;display:flex;flex:none;flex-direction:column;gap:3px;min-width:0}
-.dsh-hub-update-button{background:transparent;border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:6px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;font:inherit;font-size:12px;font-weight:550;line-height:1.2;padding:5px 10px;white-space:nowrap}
+/* The section header carries the title and the one page-level control: title
+   left, control right, nothing else. A space-between row gives its LAST item the
+   row's right edge, and every line that can appear lives to the left of the icon,
+   so the icon owns that edge in all four states. */
+.dsh-hub-head{align-items:center;display:flex;gap:12px;justify-content:space-between;min-width:0}
+/* On a narrow window the title gives way (ellipsis) rather than the icon, which
+   the control keeps at a fixed size. */
+.dsh-hub-head .dsh-hub-head-title{flex:0 1 auto;margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Inside the control the status text shrinks and the icon does not, so a long
+   error or a version sentence grows leftwards instead of moving the icon. */
+.dsh-hub-update{align-items:flex-end;display:flex;flex:0 1 auto;flex-direction:column;gap:4px;min-width:0}
+.dsh-hub-update-row{align-items:center;display:flex;gap:10px;justify-content:flex-end;min-width:0}
+/* A 28px icon button: no frame, no label. Quiet until hovered, which is why the
+   section header can carry it without turning into a toolbar. */
+.dsh-hub-update-button{align-items:center;background:transparent;border:none;border-radius:8px;color:var(--dsw-alias-label-tertiary,#8f8d84);cursor:pointer;display:inline-flex;flex:none;height:28px;justify-content:center;padding:0;position:relative;transition:background .15s ease,color .15s ease;width:28px}
 .dsh-hub-update-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-primary,#141413)}
 .dsh-hub-update-button:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
 .dsh-hub-update-button:disabled{cursor:default;opacity:.5}
+.dsh-hub-update-icon{display:block}
+/* A check or an install is a wait with no progress to report, so the ring turns
+   instead of the control growing a spinner and changing size. */
+.dsh-hub-update-button.dsh-hub-update-busy .dsh-hub-update-icon{animation:dsh-hub-update-spin .9s linear infinite}
+@keyframes dsh-hub-update-spin{to{transform:rotate(360deg)}}
+/* One accent dot instead of a wider button: the offer stays visible and the icon
+   keeps both its size and its position. */
+.dsh-hub-update-dot{background:var(--dsw-alias-button-info-fill,#397ee8);border-radius:50%;height:6px;position:absolute;right:2px;top:2px;width:6px}
 /* 11px, like the cards' annotation line, so the control reads as a note about
-   the page rather than a second call to action. */
-.dsh-hub-update-state{color:var(--dsw-alias-label-tertiary,#8f8d84);font-size:11px;line-height:1.45;max-width:280px;text-align:right}
+   the page rather than a second call to action. Right-aligned, because a wrapped
+   line then stays against the icon it belongs to; shrinkable, so its length can
+   never move that icon. */
+.dsh-hub-update-state{color:var(--dsw-alias-label-tertiary,#8f8d84);flex:0 1 auto;font-size:11px;line-height:1.45;max-width:320px;min-width:0;text-align:right}
 .dsh-hub-update-state.dsh-hub-note-danger{color:var(--dsw-alias-label-danger,#d94b4b)}
-/* The escape hatch when the button cannot act. user-select:all makes one click
-   take the whole command, which is the only clipboard the page needs. */
-.dsh-hub-update-command{border-radius:4px;color:var(--dsw-alias-label-tertiary,#8f8d84);display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;max-width:280px;overflow-wrap:anywhere;text-align:right;user-select:all}
+/* The escape hatch when the icon cannot act. It sits on its own line under the
+   header row, inside the control, so it never widens the row it belongs to.
+   user-select:all makes one click take the whole command, which is the only
+   clipboard the page needs. */
+.dsh-hub-update-command{color:var(--dsw-alias-label-tertiary,#8f8d84);display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;margin:0 0 10px;max-width:320px;overflow-wrap:anywhere;text-align:right;user-select:all}
 .dsh-hub-backbar{align-items:center;display:flex;gap:10px;margin-bottom:14px;min-height:32px}
 .dsh-hub-back{align-items:center;background:transparent;border:none;border-radius:6px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;display:inline-flex;font:inherit;font-size:13px;font-weight:550;gap:2px;padding:5px 8px 5px 2px}
 .dsh-hub-back:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-primary,#141413)}
