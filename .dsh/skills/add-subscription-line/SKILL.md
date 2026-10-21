@@ -1,6 +1,6 @@
 ---
 name: add-subscription-line
-description: Use when adding a new subscription line (a new provider id with its own sign-in, account pool, model catalog, quota card and settings page) to this plugin, or when extending an existing line to a second deployment/region. Covers the seam list, the freeze-then-parallel order, the shared-kernel reuse rules, and the traps this repo has already paid for once.
+description: Use when adding a new subscription line (a new provider id with its own sign-in, account pool, model catalog, quota card and settings page) to this plugin, or when extending an existing line to a second deployment/region. Covers the seam list, the freeze-then-parallel order, the shared-kernel reuse rules, the catalog snapshot codec, the whitelist/fallback id-vocabulary split, tri-state settings migrations, and the traps this repo has already paid for once.
 ---
 
 # Adding a subscription line
@@ -65,7 +65,7 @@ Miss one and the feature is silently absent — there is no error, just a line t
 | `src/host/common/model-request-control.ts` | one id in `CONTROLLED_PROVIDERS` | no concurrency gate / queueing |
 | `src/host/common/request-diagnostics.ts` | one id in `DIAGNOSTIC_PROVIDERS` | no `[provider-diagnostics]` logs |
 | `src/client/hub/providers.tsx` | one `HUB_PROVIDERS` entry | no card, no settings page |
-| `src/client/hub/brand-icons.tsx` | `HubProviderId` union + `PROVIDER_BRANDS` entry (+ a local mark if no vendored artwork) | blank/generic tile |
+| `src/client/hub/brand-icons.tsx` | `HubProviderId` union + `PROVIDER_BRANDS` entry carrying the vendor's **official** mark (§6.7) | blank/generic tile, or a monogram next to real vendor artwork |
 | `src/client/index.tsx` | import, `LocaleNamespaceMap`, `locale.register`, style install, `conversation.input.right` slot | no badge, untyped locale keys |
 | existing count assertions | append one item (`TAB_IDS`, card-name array, slot order, prefix poll list) | the suite goes red |
 
@@ -127,8 +127,18 @@ line whose upstream publishes no prices: show tokens, or show nothing — never 
 ### 5.6 Schema defaults can erase a tri-state
 
 If a settings schema normalizes a missing array to `[]`, "unset" and "empty" become the same value.
-Decide the semantic accordingly (`[]` = no filter) and write it down, instead of writing a comment
-that the runtime does not honour.
+A multi-select list wants **three** states — unset, empty, explicit — and `z.array()` can only hold
+two. Declare the third explicitly (`z.union([z.array(z.string()), z.const(null)]).default(null)`)
+rather than writing a comment that the runtime does not honour.
+
+**Never take "unset means no filter, so the shipped default is `[]`" as the easy way out.** That
+advice reads fine until someone wants "none selected" to mean none, at which point the same `[]`
+means the opposite and §5.11 becomes mandatory.
+
+The client half of this is easy to miss: the shared checklist's "clear all" used to disable itself
+once the count reached zero, which is exactly the state a broken tri-state produces — the button
+looked inert rather than wrong, and the bug stayed invisible. A control that disables itself in a
+suspicious state hides that state.
 
 ### 5.7 Do not restructure the DOM a test selects through
 
@@ -140,6 +150,85 @@ to make a row prettier breaks the tests, and the fix is the markup, not the test
 `model-request-control.ts` owns a single-line literal array; `request-diagnostics.ts` a union list.
 Appending an id rewrites that one line — that is not "editing someone else's logic". Anything beyond
 an append means the change belongs in your own directory instead.
+
+### 5.9 A catalog snapshot must be written and read by the same codec
+
+`common/catalog-snapshot.ts` persists whatever you hand it and parses it back with the function you
+hand it. Those two are the whole contract, and nothing checks that they are inverses. Qoder's snapshot
+wrote raw upstream records (`{ key, display_name, context_config }`) and read them back with the
+parser for the **live listing envelope** (`{ chat: [...] }`), so every snapshot parsed to `[]`, was
+judged "no usable snapshot", and was discarded. The file was always present and always correct; the
+rehydration path had simply never once succeeded, which made every cold start begin from the bundled
+table.
+
+Write the pair together and test them as a pair. `persistedQoderModelRecord` /
+`parsePersistedQoderModelEntries` in `host/qoder/model-catalog.ts` is the shape to copy.
+
+**Write the test with the production serializer, never with hand-written JSON.** A hand-built fixture
+proves that the fixture round-trips; it cannot prove that what the writer emits is what the reader
+accepts. The hand-written version passed while the real path was broken.
+
+### 5.10 A whitelist and a fallback table are not the same id vocabulary
+
+The user's checked-model list is captured against the **live catalog** (ids derived from upstream
+`display_name`). The shipped fallback table mirrors a vendor's static list. For the same model the two
+can disagree, and nothing makes them agree:
+
+| live catalog (what the user ticked) | bundled fallback |
+|---|---|
+| `DeepSeek-Flash` | `DeepSeek-V4-Flash` |
+| `Qwen3.8-Flash` | `Qwen3.8-Max` / `Qwen3.7-Plus` |
+
+So **never filter the fallback table through the whitelist.** On a cold start there is no live catalog,
+the intersection is empty, `listModels` returns zero models, and the harness drops the entire provider
+group — the line vanishes from the model picker with no error anywhere. Filter only when the catalog is
+live; treat the fallback as an unfiltered placeholder. An explicit "everything off" (`[]`) still wins
+in both phases, because that intent does not depend on a vocabulary.
+
+Grep for it before you ship: `listModels`, the settings-card enabled flags, and the hub model counts
+must all read one shared rule (`convergeQoderSelection`), not three private ones.
+
+### 5.11 Changing a default that is already on disk is a migration, not an edit
+
+If the old shipped default was `[]` and you change `[]` to mean "all off", every existing install
+reads its stored default as a deliberate choice and ends up with **zero models**. The old Qoder
+`defaultQoderModelSettings()` returned `[...DEFAULT_VISIBLE_MODEL_IDS]` and that constant was `[]`, so
+this was true for literally every user.
+
+Ship a version marker in the same document (`selectionVersion`), treat "no marker" as the old
+semantics, rewrite once, and write the marker back. Three rules:
+
+1. **The migration must be idempotent.** The marker is what stops a genuine all-off from being flipped
+   back on the next read.
+2. **The marker's schema default must be the OLD version, not the current one.** A register-backed
+   backend that defaults it to the current version declares stale documents as already-migrated —
+   the same upgrade-breaks-everyone bug, just on the other storage path.
+3. **Both backends must share one parser.** Qoder had a file store and a `settings.register` scope
+   with separate value-shaping code; fixing one left the other broken.
+
+The decision is worth an explicit note in `CHANGELOG.md`: users need to know their previous selection
+was reinterpreted, not lost.
+
+### 5.12 A refresh that changes the catalog must announce it, and a cold start must not wait
+
+Two halves of one user-visible symptom ("the line is missing / stale until I open the settings page"):
+
+- **Announce.** Updating the in-process catalog does nothing for a picker that has already read a
+  snapshot. Emit `llm/adapters-updated` — but **only when the catalog actually changed**. Emitting on
+  every 60-second status poll rebuilds the picker continuously. Compare an id-sequence fingerprint
+  before and after; compare the array by content, because a cache hit returns the *same array* and a
+  reference comparison never sees a change.
+- **Warm.** Do not let the first read wait on the network. Rehydrate the persisted snapshot at startup
+  (a local read, milliseconds) and let the upstream refresh run behind it. `void warm...().catch(() => undefined)`
+  — never `await` it in plugin setup, and never let its failure bubble into plugin loading.
+
+Put the automatic refresh **behind** the status answer (`QuotaRefresh.start`, not `run`) and call it
+with `force: false` so the catalog TTL and in-flight deduplication still apply. A status route that
+awaits a network catalog read turns a 60-second poll into a load test.
+
+One more thing worth copying: have the warm-up **return the post-rehydration fingerprint**. If the
+caller computes its own baseline first, it gets the pre-rehydration (empty) catalog, concludes the
+catalog always changed, and emits unconditionally on every start.
 
 ## 6. UI coherence: a new line must look like it belongs to the set
 
@@ -198,6 +287,27 @@ Restructuring the markup to "look tidier" can break them, and the correct respon
 markup** (keep the control inside the container the test names) rather than relax the test. Read that
 line's test file before restyling its card.
 
+### 6.7 Use the vendor's official mark, not a letter
+
+Every card in this set carries the vendor's real artwork; a monogram tile reads as an unfinished
+placeholder next to them. Fetch the vendor's own icon (usually the `<link rel="icon">` target on their
+home page), inline it as a data URI on `ProviderBrand.image` with `fit`, and record the provenance in
+the entry: the URL, the fetch date, the byte count and the sha256.
+
+Three rules, learned the hard way:
+
+1. **Never infer the icon from a URL's response size.** Qoder's `/favIcon.svg` answered with the whole
+   HTML page (73 KB), and an earlier note concluded "the icon is 73 KB, too large to inline". A size
+   that large for an SVG is a symptom of the request returning something that is not the icon: check
+   the `Content-Type` / the first bytes, and follow the `<link rel="icon">` the page actually uses.
+2. **Delete the old monogram, do not keep it as a fallback.** A leftover `monogram` string in the entry
+   makes it ambiguous which one is the brand, and a future reader will "restore" it.
+3. **Pin it with an assertion**, e.g. the card renders a data URI and no longer contains
+   `dsh-hub-brand-mono`. A screenshot cannot stop the next person from reverting to a letter.
+
+If the vendor really ships no usable mark, say so in a comment with what you looked at — that is a
+different statement from "a letter looks fine here".
+
 ## 7. Verification
 
 The line is done when all of these pass, and the recorded baseline is unchanged except for your
@@ -213,6 +323,18 @@ git diff --numstat src/host/common/ src/client/common/   # must show only append
 
 Record the **baseline counts** before starting (`test files / tests passed`) and compare after; a
 line that adds features while dropping tests is a regression that looks like progress.
+
+Three verification habits this repo paid for the hard way:
+
+- **Prove the guard can fail.** Flip the implementation back to the broken version and watch the new
+  test go red before you accept it as green. A regression test that passes against both versions is
+  decoration. (`expected 0 to be greater than 0` was the Qoder cold-start guard failing correctly.)
+- **Run the real artifact, not a reconstruction.** Where a file someone else wrote is involved (a
+  persisted snapshot, a credentials file, a settings document), test against a real one or one written
+  by the production writer. Hand-built fixtures pass while the real path is broken.
+- **Re-read the response, do not just start the process.** After fixing a host-side bug, restart the
+  host and check the actual payload (`curl` the route, read the JSON) for a field only the new code
+  emits. A rebuilt bundle is not a loaded bundle, and "it works now" without that check is a guess.
 
 For a visual change, the durable guard is an assertion, not a screenshot: assert that the removed
 section is gone (`expect(node.textContent).not.toContain(<heading>)`), so the next person cannot
