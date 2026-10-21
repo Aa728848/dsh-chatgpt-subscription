@@ -248,9 +248,24 @@ describe('KimiCodeAdapter retry policy', () => {
 
   it('does not retry a 400 request-format error', () => {
     const failure = classifyKimiFailure(400, JSON.stringify({
-      error: { message: 'Invalid request: total message size 5943865 exceeds limit 2097152' },
+      error: { message: 'Invalid request: unsupported value for messages[0].role' },
     }))
     expect(failure.code).toBe('PROVIDER_ERROR')
+    expect(failure.retryable).toBe(false)
+  })
+
+  it('files the gateway 2 MB refusal as a context overflow rather than a dead end', () => {
+    // The body a long session actually gets back. It used to be classified as a
+    // plain 400, which DSH does not recover from: the turn ended and the
+    // conversation that caused it was never compacted. CONTEXT_WINDOW_EXCEEDED
+    // is the only code the host runs its forced compaction on, and compaction is
+    // what shrinks a body, so the byte refusal belongs there.
+    const failure = classifyKimiFailure(400, JSON.stringify({
+      error: { message: 'Invalid request: total message size 5943865 exceeds limit 2097152' },
+    }))
+    expect(failure.code).toBe('CONTEXT_WINDOW_EXCEEDED')
+    // Not retried either: the same bytes would be refused again. The recovery is
+    // the compaction-then-retry the host performs, not a blind backoff.
     expect(failure.retryable).toBe(false)
   })
 
@@ -409,6 +424,11 @@ describe('KimiCodeAdapter catalog and models', () => {
       defaultReasoningEffort: 'max',
     })
     const resolved = await adapter.resolveModel('kimi-code', 'k3')
+    // The override IS the window: folding against the 2 MB byte ceiling is opt-in
+    // (DSH_KIMI_CODE_BYTES_PER_TOKEN), so by default the 1M this user chose is
+    // published as 1M — the number the settings card shows and the harness
+    // computes its compaction threshold from. A session that outgrows the wire is
+    // recovered at the wall (CONTEXT_OVERFLOW_CODE), not pre-emptively summarized.
     expect(resolved.context).toEqual({ contextWindow: 1_048_576 })
     // Video is a declared modality on this route, not display-only metadata.
     expect(resolved.inputModalities).toEqual(['text', 'image', 'video'])

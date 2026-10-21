@@ -24,6 +24,7 @@ import {
   STREAM_IDLE_TIMEOUT_MS,
   clampOutputToContext,
   codingBaseUrl,
+  effectiveContextWindow,
   maxMessageBodyBytes,
   maxOutputTokensFor,
   maxRequestImageBytes,
@@ -355,6 +356,21 @@ export function summarizeFailureBody(raw: string): string {
 }
 
 /**
+ * Whether one failure detail is the gateway refusing a body for its SIZE.
+ *
+ * The managed gateway answers an oversized request with
+ * `total message size 5943865 exceeds limit 2097152` and no status beyond 400:
+ * the figures are bytes, and the wording matches nothing the shared overflow
+ * detector looks for. It is recognized HERE rather than in
+ * `common/context-overflow.ts` on purpose — that detector is shared by every
+ * route in this plugin, so a Kimi-specific sentence added there would
+ * reclassify other lines' failures on wording they never send.
+ */
+export function isKimiBodySizeRefusal(detail: string): boolean {
+  return /\btotal message size\b[^;]{0,64}?\bexceed(?:s|ed)?\b[^;]{0,64}?\blimit\b/i.test(detail)
+}
+
+/**
  * Classify one non-2xx response for the retry policy.
  *
  * @param status - HTTP status the service answered with.
@@ -364,6 +380,22 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
   const detail = summarizeFailureBody(bodyText)
   if (isHttpContextOverflow(status, bodyText)) {
     return { code: CONTEXT_OVERFLOW_CODE, retryable: false, accountScoped: false, upstreamOverload: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+  }
+
+  if (status === 400 && isKimiBodySizeRefusal(detail)) {
+    // The byte ceiling and the token window need the same recovery even though
+    // they quote different numbers: DSH's answer to CONTEXT_WINDOW_EXCEEDED is to
+    // compact the conversation, which is exactly what shrinks a body. Filed as
+    // PROVIDER_ERROR this read as a dead end, so a session that merely grew too
+    // large ended its turn instead of compacting and retrying. The message says
+    // bytes, because a byte refusal is what happened.
+    return {
+      code: CONTEXT_OVERFLOW_CODE,
+      retryable: false,
+      accountScoped: false,
+      upstreamOverload: false,
+      message: `${PROVIDER_NAME} rejected the request body (400): it is larger than the number of bytes this endpoint accepts, which is a byte ceiling rather than the model's token window.${detail === '' ? '' : ` ${detail}.`} Compact the conversation or start a new session.`,
+    }
   }
 
   if (status === 402) {
@@ -653,14 +685,35 @@ export class KimiCodeAdapter extends LlmAdapter {
     }))
   }
 
+  /**
+   * The single window this line reports AND budgets against.
+   *
+   * The resolution lives here, in the one place both readers go through, rather
+   * than at each call site: `resolveModel` publishes this number to DSH (which
+   * computes its compaction threshold from it) and `requestStream` sizes the
+   * completion budget with it, so two independent resolutions would let the
+   * promise and the budget drift apart.
+   *
+   * By default the window is published exactly as declared, and a user override
+   * is an ordinary declared window: an explicit 1M is the model's advertised
+   * capacity as this user chose it, and silently shrinking it would take away
+   * the context they asked for. A session that outgrows the byte ceiling is
+   * recovered at the wall (CONTEXT_OVERFLOW_CODE), not pre-emptively summarized.
+   *
+   * A deployment that would rather compact BEFORE the wall sets
+   * DSH_KIMI_CODE_BYTES_PER_TOKEN, and then the override is bounded like every
+   * other window — see {@link effectiveContextWindow}.
+   */
   private contextWindowFor(
     modelId: string,
     entry: KimiCodeCatalogModel | undefined,
     overrides: Record<string, number>,
   ): number {
     const override = overrides[modelId]
-    if (typeof override === 'number' && Number.isFinite(override) && override > 0) return override
-    return entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+    const declared = typeof override === 'number' && Number.isFinite(override) && override > 0
+      ? override
+      : entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+    return effectiveContextWindow(declared)
   }
 
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {

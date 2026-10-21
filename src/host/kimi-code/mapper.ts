@@ -1266,6 +1266,14 @@ export function buildRequest(
  * sent at all. The measured size is the real serialized body, so it accounts
  * for tool schemas and inlined images the caller cannot easily estimate.
  *
+ * The error code is CONTEXT_OVERFLOW_CODE, not PROVIDER_ERROR, because naming the
+ * remedy in prose is not the same as being able to act on it: DSH forces a
+ * compaction and retries the same step only for that one code, and every other
+ * 400-shaped failure ends the turn. A byte ceiling is answered by the same
+ * compression a token ceiling is — the conversation shrinks either way — so the
+ * body of the message stays as specific as it was while the code becomes one the
+ * host can recover from.
+ *
  * @returns the serialized body, so a caller that is about to send it does not
  * serialize a body of up to tens of megabytes a second time.
  */
@@ -1302,7 +1310,7 @@ export function assertRequestBodyFits(
   // text containing that literal widen the text/image guard.
   const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : maxMessageBodyBytes()
   if (bytes <= limit) return serialized
-  throw new LlmError(oversizedBodyMessage(bytes, limit, body, context), 'PROVIDER_ERROR')
+  throw new LlmError(oversizedBodyMessage(bytes, limit, body, context), CONTEXT_OVERFLOW_CODE)
 }
 
 /**

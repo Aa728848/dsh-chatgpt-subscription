@@ -242,7 +242,10 @@ describe('assertRequestBodyFits', () => {
     try {
       assertRequestBodyFits(huge)
     } catch (error) {
-      expect((error as { code?: string }).code).toBe('PROVIDER_ERROR')
+      // CONTEXT_WINDOW_EXCEEDED rather than PROVIDER_ERROR: DSH forces the
+      // compaction the message recommends only for that code, so the old one
+      // named the remedy and then ended the turn anyway.
+      expect((error as { code?: string }).code).toBe('CONTEXT_WINDOW_EXCEEDED')
     }
   })
 })

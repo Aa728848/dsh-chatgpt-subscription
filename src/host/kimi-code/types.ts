@@ -189,6 +189,124 @@ export function maxMessageBodyBytes(env: NodeJS.ProcessEnv = process.env): numbe
 }
 
 /**
+ * Bytes one METERED token is assumed to occupy when a deployment asks this route
+ * to fold its published window against the byte ceiling.
+ *
+ * The unit is not "bytes per real token" but "bytes per token as the host COUNTS
+ * it": DSH prices text at a fixed four characters per token
+ * (`@deepseek-ai/dsh-token-meter`'s estimate.ts, CHARS_PER_TOKEN = 4) whatever
+ * those characters weigh on the wire. So the figure is four characters per token
+ * times the bytes of one character, and each density lands somewhere different:
+ *
+ * | density                                    | bytes/metered token | 2 MB wall |
+ * | ------------------------------------------ | ------------------- | --------- |
+ * | ASCII: code, patches, JSON tool results    | 4                   | 524_288   |
+ * | CJK prose mixed with English code and JSON | 8                   | 262_144   |
+ * | dense CJK                                  | 12                  | 174_763   |
+ *
+ * These are the values DSH_KIMI_CODE_BYTES_PER_TOKEN accepts, and what each buys.
+ * Folding is a choice about WHERE compaction fires, never about safety: with a
+ * wall at N metered tokens the host's threshold is
+ * `floor(min(0.8 x window, window - 65_536))` (this route declares no
+ * `defaultMaxTokens`, so nothing is reserved), and the table says which densities
+ * sit above it.
+ *
+ * - unset: no folding at all. The window the model declares — or the one the user
+ *   explicitly overrode — is published exactly as it is. A long session reaches
+ *   the 2 MB wall and recovers there, because the refusal carries
+ *   CONTEXT_OVERFLOW_CODE; nothing is silently given up up front;
+ * - 4: publish 524_288, threshold 419_430. Code-dominated sessions compact
+ *   BEFORE the wall with 104_858 metered tokens of slack, which is the point of
+ *   the setting; mixed and CJK traffic still meets the wall first;
+ * - 5: publish 419_430, threshold 335_544. Same shape, a little less slack;
+ * - 8: publish 262_144, threshold 196_608. ASCII and mixed text both compact in
+ *   time; dense CJK does not;
+ * - 12: publish 174_762, threshold 109_226. All three densities compact in time,
+ *   at the cost of publishing a small window (a CJK-first deployment's choice).
+ *
+ * Anything smaller than 4 makes the published window larger than the byte ceiling
+ * can ever fill (2 -> 1_048_576 against a 524_288-token ASCII wall), so the
+ * threshold sits above even the ASCII wall and the setting buys nothing but a
+ * window every session is refused before filling.
+ *
+ * Bytes per metered token in this process, or undefined when folding is off.
+ *
+ * DSH_KIMI_CODE_BYTES_PER_TOKEN is an OPTIONAL early-compaction switch, not a
+ * safety guard, and the distinction decides what a bad value must do. A typo
+ * cannot weaken anything here — the recovery code on an oversized refusal is the
+ * safety net and it is always armed — so an empty, unparsable, zero or negative
+ * value simply means "no folding", the same as leaving the variable out. (The
+ * byte CEILING keeps the opposite rule, because THAT is a guard:
+ * `maxMessageBodyBytes` falls back to the real limit rather than to no limit.)
+ *
+ * Undefined rather than a sentinel number on purpose: every caller has to decide
+ * what "no ceiling" means for it, and a magic value like Infinity would silently
+ * flow into arithmetic instead of forcing that decision.
+ */
+export function wireBytesPerToken(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = (env.DSH_KIMI_CODE_BYTES_PER_TOKEN ?? '').trim()
+  if (raw === '') return undefined
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+  // Never 0: a fractional value floors to zero, and dividing the ceiling by zero
+  // would turn a preference into an unbounded (or meaningless) window.
+  return Math.max(1, Math.floor(parsed))
+}
+
+/**
+ * Token ceiling the body limit implies at the configured density, or undefined
+ * when folding is off.
+ *
+ * The gateway in front of this route counts BYTES while DSH's compaction
+ * thresholds count metered tokens taken from the window an adapter declares, and
+ * the two never meet on their own. Expressing the byte ceiling in the unit the
+ * host acts on is the same budget-first rule the official kimi-cli applies in
+ * `soul/compaction.py::should_auto_compact` — it compacts at 85% of the window or
+ * with 50K tokens left and never special-cases 2097152. This route applies that
+ * rule only when a deployment asks for it, because "smaller window" is a
+ * behaviour change to the model's advertised capacity, not a bug fix.
+ */
+export function byteDerivedTokenCap(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const bytesPerToken = wireBytesPerToken(env)
+  if (bytesPerToken === undefined) return undefined
+  // Never 0: an override small enough to floor to zero must still leave a usable
+  // window rather than dividing the budget away.
+  return Math.max(1, Math.floor(maxMessageBodyBytes(env) / bytesPerToken))
+}
+
+/**
+ * Context window this route will actually honour for one model.
+ *
+ * Both what `resolveModel` reports to DSH — which is where the compaction
+ * threshold is computed — and what the request builder budgets against, so the
+ * promise and the budget cannot drift apart.
+ *
+ * With folding OFF, which is the default, this is the declared window itself,
+ * including a window the user overrode by hand: the vendor's figure and the
+ * user's explicit choice are both respected, and a session that outgrows them is
+ * recovered at the byte wall rather than pre-emptively summarized.
+ *
+ * With folding ON it is the smaller of the declared window and
+ * {@link byteDerivedTokenCap}: one number for both readers, so what the host
+ * believes the model can hold is what the guard lets it send.
+ *
+ * A window that is missing, zero, negative or not finite is not trusted. It falls
+ * back to {@link DEFAULT_CONTEXT_WINDOW} (or to the byte-derived cap when that is
+ * smaller), and the result never drops below 1 so no caller ends up with an empty
+ * window.
+ */
+export function effectiveContextWindow(
+  tokenWindow: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const declared = Number.isFinite(tokenWindow) && tokenWindow > 0
+    ? Math.floor(tokenWindow)
+    : DEFAULT_CONTEXT_WINDOW
+  const cap = byteDerivedTokenCap(env)
+  return Math.max(1, cap === undefined ? declared : Math.min(declared, cap))
+}
+
+/**
  * Base64 image payload one request on this route may carry.
  *
  * Sized to leave room for the conversation inside the body ceiling above, which

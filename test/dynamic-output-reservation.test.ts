@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { KimiCodeAdapter } from '../src/host/kimi-code/adapter.ts'
+import { byteDerivedTokenCap } from '../src/host/kimi-code/types.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/kimi-code/token-store.ts'
 import { KIMI_CODE_MODELS } from '../src/host/kimi-code/model-catalog.ts'
 import { MinimaxCodeAdapter } from '../src/host/minimax-code/adapter.ts'
@@ -63,8 +64,19 @@ async function runtime(provider: string, adapter: KimiCodeAdapter | MinimaxCodeA
   return ctx.llm
 }
 
+// The window each route PUBLISHES, which is what DSH computes its compaction
+// pressure from. Kimi Code publishes the declared window unchanged unless the
+// deployment opted into early compaction with DSH_KIMI_CODE_BYTES_PER_TOKEN;
+// with it set, the published window is min(declared, byte-derived cap). The
+// expectation follows the same rule instead of hardcoding either number, so this
+// table stays honest whether the knob is off (the normal case) or on.
+const publishedWindow = (declared: number): number => {
+  const cap = byteDerivedTokenCap()
+  return cap === undefined ? declared : Math.min(declared, cap)
+}
 const models = [
-  ...KIMI_CODE_MODELS.map(m => ({ provider: 'kimi-code', model: m.id, window: m.contextWindow })),
+  ...KIMI_CODE_MODELS.map(m => ({ provider: 'kimi-code', model: m.id,
+    window: publishedWindow(m.contextWindow) })),
   ...MINIMAX_CODE_MODELS.map(m => ({ provider: 'minimax-code', model: m.id, window: m.contextWindow })),
 ]
 

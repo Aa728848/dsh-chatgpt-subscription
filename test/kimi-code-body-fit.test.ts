@@ -206,6 +206,24 @@ describe('composing an oversized-body diagnostic', () => {
     expect(() => assertRequestBodyFits(textBody)).not.toThrow(/Older images/)
   })
 
+  it('raises the code the host recovers from, not a plain provider error', () => {
+    // Naming the remedy in prose is only half the fix. DSH forces a compaction
+    // and retries the same step for CONTEXT_WINDOW_EXCEEDED alone, so a guard
+    // that threw PROVIDER_ERROR told the user to compact and then ended the turn
+    // with the conversation still intact.
+    const code = (body: Record<string, unknown>): string | undefined => {
+      try {
+        assertRequestBodyFits(body)
+      } catch (error) {
+        return (error as { code?: string }).code
+      }
+      throw new Error('expected the guard to throw')
+    }
+    expect(code(imageBody)).toBe('CONTEXT_WINDOW_EXCEEDED')
+    expect(code({ messages: [{ role: 'user', content: 'x'.repeat(2_400_000) }], tools: [] }))
+      .toBe('CONTEXT_WINDOW_EXCEEDED')
+  })
+
   it('does not count a user message that merely mentions data URLs', () => {
     const decoy = {
       messages: [{ role: 'user', content: 'data:image/png;base64,AAAA and video_url in prose' }],
