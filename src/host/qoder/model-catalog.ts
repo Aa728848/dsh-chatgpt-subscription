@@ -220,8 +220,28 @@ export function persistedQoderModelRecord(entry: QoderModelEntry): QoderUpstream
     // （只有开/关、没有档位梯子）的 efforts 本来就是空数组，按梯子写会把它的
     // 推理能力在快照里抹掉，回读出来就变成一个「不推理」的模型。
     is_reasoning: entry.reasoning,
+    // 梯子也必须落盘。早先这一侧只写 `is_reasoning`，而回读侧的梯子只从
+    // `thinking_config.enabled.efforts` 取——于是重启后快照里的推理模型全部变成
+    // 「无档位」：模型是真推理模型，档位却在磁盘上被丢了。这里按上游的 effort
+    // 形态把它写回去，读侧仍是同一个 readQoderThinkingConfig，读写互为反函数。
+    ...(entry.reasoning ? { thinking_config: thinkingConfigOf(entry) } : {}),
     context_config: { default: { token_count: entry.defaultContextWindow, is_default: true } },
     ...(entry.description === null ? {} : { description: entry.description }),
+  }
+}
+
+/**
+ * 一行能力 → 上游 `thinking_config` 形状（快照写入侧用）。
+ *
+ * effort 形态：`enabled.efforts` 的键集就是完整档位集合；`disabled` 存在即
+ * 可关闭。toggle 形态（推理但无档位）写成 `enabled: {}`，与读侧的判定一致。
+ */
+function thinkingConfigOf(entry: QoderModelEntry): Record<string, unknown> {
+  const efforts: Record<string, boolean> = {}
+  for (const effort of entry.reasoningEfforts) efforts[effort] = true
+  return {
+    enabled: entry.reasoningEfforts.length > 0 ? { efforts } : {},
+    ...(entry.thinkingDisableable ? { disabled: {} } : {}),
   }
 }
 

@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   clearCachedQoderModelCatalog,
   loadQoderModelCatalog,
+  qoderCatalogFetchedAt,
   qoderCatalogIsLive,
   qoderCatalogNeedsRefresh,
   type QoderUpstreamCredential,
@@ -21,6 +22,8 @@ import {
   contextWindowFromRecord,
   convergeQoderEnabledModelIds,
   parseQoderModelListing,
+  parsePersistedQoderModelEntries,
+  persistedQoderModelRecord,
   readQoderThinkingConfig,
   resolveQoderModel,
   toQoderModelId,
@@ -221,15 +224,19 @@ describe('qoderCatalogNeedsRefresh（答复背后要不要拉目录）', () => {
   it('刚拉到的缓存：不需要拉（60 秒轮询在 TTL 内绝大多数拍都走这条）', async () => {
     // 目录取不到时 loadQoderModelCatalog 走空目录、不写缓存，所以假 fetch 必须
     // 供一份真能被解析的载荷，缓存才会真的被建立起来。
-    const after = await warmCatalog()
-    expect(qoderCatalogNeedsRefresh('global', after)).toBe(false)
+    await warmCatalog()
+    // 基准取缓存**自己**记下的 fetchedAt：拿 await 返回后的 Date.now() 去推边界，
+    // 两次读时钟之间的毫秒差会让下面这条「差一毫秒仍新鲜」偶发翻车。
+    const fetchedAt = qoderCatalogFetchedAt('global')!
+    expect(qoderCatalogNeedsRefresh('global', fetchedAt)).toBe(false)
     // 差一毫秒到期：仍然算新鲜（判定是 >= TTL 才算过期）。
-    expect(qoderCatalogNeedsRefresh('global', after + CATALOG_CACHE_TTL_MS - 1)).toBe(false)
+    expect(qoderCatalogNeedsRefresh('global', fetchedAt + CATALOG_CACHE_TTL_MS - 1)).toBe(false)
   })
 
   it('过了 TTL：需要拉（这是「进页面能自动更新」的那一半）', async () => {
-    const after = await warmCatalog()
-    expect(qoderCatalogNeedsRefresh('global', after + CATALOG_CACHE_TTL_MS)).toBe(true)
+    await warmCatalog()
+    const fetchedAt = qoderCatalogFetchedAt('global')!
+    expect(qoderCatalogNeedsRefresh('global', fetchedAt + CATALOG_CACHE_TTL_MS)).toBe(true)
   })
 
   it('别的区域的缓存不算数：目录是区域的属性', async () => {
@@ -302,5 +309,72 @@ describe('convergeQoderEffort（档位收敛到模型真实梯子）', () => {
     expect(convergeQoderEffort('bogus', ['low', 'high'])).toBe('high')
     expect(convergeQoderEffort('low', ['low', 'high'])).toBe('low')
     expect(convergeQoderEffort('max', ['low', 'high'])).toBe('high')
+  })
+})
+
+describe('落盘快照必须带回档位梯子', () => {
+  it('写入侧写出的 thinking_config 能被读取侧解析回同一套能力', () => {
+    // 上游 effort 形态：五档 + 可关闭；另一个 toggle 形态：能推理但没有档位。
+    const [ladder, toggle] = parseQoderModelListing({
+      chat: [
+        {
+          key: 'umodel',
+          display_name: 'Ultimate',
+          enable: true,
+          source: 'system',
+          is_vl: true,
+          is_reasoning: true,
+          context_config: { default: { token_count: 1_048_576, is_default: true } },
+          thinking_config: { enabled: { efforts: { low: {}, medium: {}, high: {}, max: {} } }, disabled: {} },
+        },
+        {
+          key: 'cmodel',
+          display_name: 'Cantus',
+          enable: true,
+          source: 'system',
+          is_vl: false,
+          is_reasoning: true,
+          context_config: { default: { token_count: 200_000, is_default: true } },
+          thinking_config: { enabled: {} },
+        },
+      ],
+    }, 'global')
+
+    // 生产写入侧 → 生产读取侧。
+    const restored = parsePersistedQoderModelEntries(
+      [ladder!, toggle!].map(persistedQoderModelRecord),
+      'global',
+    )
+    expect(restored).toHaveLength(2)
+    const [restoredLadder, restoredToggle] = restored
+    expect(restoredLadder!.reasoning).toBe(true)
+    expect(restoredLadder!.reasoningEfforts).toEqual(['low', 'medium', 'high', 'max'])
+    expect(restoredLadder!.thinkingDisableable).toBe(true)
+    expect(restoredLadder!.supportsImages).toBe(true)
+    expect(restoredLadder!.defaultContextWindow).toBe(1_048_576)
+    // toggle 形态：推理仍在，但没有档位——不能被回读成「不推理」。
+    expect(restoredToggle!.reasoning).toBe(true)
+    expect(restoredToggle!.reasoningEfforts).toEqual([])
+    // 上游那条 toggle 形态没写 disabled：不可关闭这件事同样必须原样回读。
+    expect(restoredToggle!.thinkingDisableable).toBe(false)
+    expect(restoredToggle!.supportsImages).toBe(false)
+    expect(restoredToggle!.defaultContextWindow).toBe(200_000)
+  })
+
+  it('不可关闭的模型回读后仍然不可关闭', () => {
+    const [entry] = parseQoderModelListing({
+      chat: [{
+        key: 'kmodel',
+        display_name: 'Kimi-K3',
+        enable: true,
+        is_vl: true,
+        is_reasoning: true,
+        context_config: { default: { token_count: 1_000_000, is_default: true } },
+        thinking_config: { enabled: { efforts: { low: {}, high: {} } } },
+      }],
+    }, 'global')
+    const [restored] = parsePersistedQoderModelEntries([persistedQoderModelRecord(entry!)], 'global')
+    expect(restored!.thinkingDisableable).toBe(false)
+    expect(restored!.reasoningEfforts).toEqual(['low', 'high'])
   })
 })

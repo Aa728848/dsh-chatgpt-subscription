@@ -191,6 +191,28 @@ describe('Qoder 设置卡片', () => {
     expect(calls.every((call) => call.url.startsWith(PREFIX))).toBe(true)
   })
 
+  it('每一行模型都带能力摘要：窗口 · 输入模态 · 档位 · 输出预算', async () => {
+    const payload = status({
+      models: [
+        model('Lite', { enabled: true }),
+        model('Ultimate', { enabled: true, supportsImages: true }),
+        model('Efficient', { reasoningEfforts: [], thinkingDisableable: false }),
+        // 用户覆盖过的窗口按覆盖值显示（defaultContextWindow 仍是目录值）。
+        model('Overridden', { defaultContextWindow: 1_000_000, contextWindow: 200_000 }),
+      ],
+    })
+    const { node } = await mountSection(payload)
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsh-mcl-option')]
+    const hintOf = (id: string) => rows.find((row) => row.title === id)!.querySelector('.dsh-mcl-hint')?.textContent
+    // 文本模型：窗口 1M、单模态、两档、输出 131k。
+    expect(hintOf('Lite')).toBe('1M · text · 档位 low/high · 输出 131k')
+    // 收图的模型如实写 text+image；不按模型名推断。
+    expect(hintOf('Ultimate')).toBe('1M · text+image · 档位 low/high · 输出 131k')
+    // 目录没给档位的模型说「无档位」，不是留空也不是套默认三档。
+    expect(hintOf('Efficient')).toBe('1M · text · 无档位 · 输出 131k')
+    expect(hintOf('Overridden')).toContain('200k ·')
+  })
+
   it('模型勾选走三态：「全不选」提交空数组（全关），「全选」提交全部 id', async () => {
     // 出厂 null = 不过滤：目录里的每一行都勾着，所以「全不选」必须可点。
     const payload = status({ models: ['Lite', 'Ultimate', 'Efficient'].map((id) => model(id, { enabled: true })) })

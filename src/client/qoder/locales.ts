@@ -14,6 +14,10 @@ import type {
 export const NS_QODER = 'dsh-qoder'
 
 export const zh = {
+  // 模型行的一句话能力（与 OpenDesign 卡同一习惯：数据，不是散文）。
+  modelRowEfforts: '档位 {list}',
+  modelRowNoEfforts: '无档位',
+  modelRowOutput: '输出 {cap}',
   // 账号池卡片与其配额条是共享组件，文案统一由 account-pool-labels 提供，本文件不重复硬编码。
   ...accountPoolZh,
   title: 'Qoder（订阅）',
@@ -146,6 +150,9 @@ export const zh = {
 export type QoderLocaleKey = keyof typeof zh
 
 export const en: Record<QoderLocaleKey, string> = {
+  modelRowEfforts: 'efforts {list}',
+  modelRowNoEfforts: 'no efforts',
+  modelRowOutput: 'out {cap}',
   ...accountPoolEn,
   title: 'Qoder (Subscription)',
   pageDesc: 'Connect your Qoder subscription (Global qoder.com / China qoder.com.cn): manage the account pool, plan quota, cache usage and model selection. Region is a property of the credential; the two regions do not accept each other\'s tokens, so the pool may hold accounts from both.',

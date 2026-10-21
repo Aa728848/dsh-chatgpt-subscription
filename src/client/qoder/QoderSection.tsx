@@ -10,8 +10,9 @@
  *
  * 两条它自己负责的渲染规则：
  *
- *   1. **能力只画契约里的字段**：图片输入、思考档位、上下文窗口全部来自 host 生成的
- *      hint，客户端不按模型名推断任何一项；同一事实只呈现一次；
+ *   1. **能力只画契约里的字段**：图片输入、思考档位、上下文窗口、输出预算全部来自
+ *      DTO 字段（`supportsImages` / `reasoningEfforts` / `contextWindow` /
+ *      `defaultMaxTokens`），客户端不按模型名推断任何一项；同一事实只呈现一次；
  *   2. **额度画绝对量，缓存画 token 维度**：额度是三只桶的总量/已用/剩余（上游自述的
  *      单位），缺桶不画；缓存只有读入/写入/样本，没数据就是占位符；单价未公开，
  *      整页不出现任何金额。
@@ -32,7 +33,7 @@ import {
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
-import { formatCapacity, formatDate } from '../common/format.ts'
+import { formatCapacity, formatDate, formatTokenCount } from '../common/format.ts'
 import {
   adoptReasonText,
   quotaBucketText,
@@ -98,6 +99,23 @@ function moreNotes(summary: string, paragraphs: ReadonlyArray<string | null>): R
       {kept.map((line, index) => <p key={'note:' + index}>{line}</p>)}
     </details>
   )
+}
+
+/**
+ * 一行模型的能力摘要：`1M · text+image · 档位 low/high/max · 输出 131k`。
+ *
+ * 全部取自契约字段（窗口、`supportsImages`、`reasoningEfforts`、
+ * `defaultMaxTokens`），客户端不按模型名推断任何一项。与 OpenDesign 卡同一写法：
+ * 数据一行，散文进折叠区。
+ */
+export function qoderModelRowHint(model: QoderModelOption): string {
+  const capacity = formatTokenCount(model.contextWindow)
+  const input = model.supportsImages ? 'text+image' : 'text'
+  const efforts = model.reasoningEfforts.length === 0
+    ? zh.modelRowNoEfforts
+    : zh.modelRowEfforts.replace('{list}', model.reasoningEfforts.join('/'))
+  const output = zh.modelRowOutput.replace('{cap}', formatTokenCount(model.defaultMaxTokens))
+  return `${capacity} · ${input} · ${efforts} · ${output}`
 }
 
 export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.JSX.Element {
@@ -421,9 +439,11 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
               items={models.map((model: QoderModelOption) => ({
                 id: model.id,
                 name: model.name,
-                // hint 仍在契约里，但这一行**不传**（需求方实测反馈「模型行下面不需要
-                // 介绍文字」）；能力事实写在标题下那一行，逐模型的细节由默认档位与
-                // 上下文窗口两组如实呈现。
+                // 逐模型的一行能力：窗口 · 输入模态 · 档位 · 输出预算。曾经不画
+                // （「模型行下面不需要介绍文字」指的是 host 那段散文式 hint），
+                // 但一行数据与一段介绍不是同一件事——用户要在勾选时就知道这个
+                // 模型能收多大的上下文、收不收图、有几档思考。
+                hint: qoderModelRowHint(model),
                 enabled: model.enabled,
               }))}
               busy={busy !== null}

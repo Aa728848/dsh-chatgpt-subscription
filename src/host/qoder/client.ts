@@ -420,6 +420,20 @@ export function clearCachedQoderModelCatalog(): void {
  * @param region 要判定的区域（目录是区域的属性，别的区域的缓存不算数）。
  * @param now    当前时刻；显式传入是为了让「过期」这件事在测试里可确定。
  */
+/**
+ * 缓存目录的写入时刻（Unix 毫秒），没有缓存时为 undefined。
+ *
+ * 给「过期判定」的测试一个**确定**的基准：测试原先在 await 返回后用
+ * `Date.now()` 去推边界，而缓存里的 `fetchedAt` 是稍早一次 `Date.now()`，
+ * 两次读时钟之间的毫秒差会让「差一毫秒到期仍算新鲜」这条断言偶发翻车。
+ * 读的是与 {@link qoderCatalogNeedsRefresh} 同一个字段，纯读、无副作用。
+ */
+export function qoderCatalogFetchedAt(region: QoderRegion): number | undefined {
+  const cached = cachedCatalog
+  if (cached === undefined || cached === null || cached.region !== region) return undefined
+  return cached.fetchedAt
+}
+
 export function qoderCatalogNeedsRefresh(region: QoderRegion, now: number = Date.now()): boolean {
   // 判定与 {@link qoderCatalogIsLive} **同一口径**：反过来读那一个函数，两处就不会漂。
   if (!qoderCatalogIsLive(region)) return true

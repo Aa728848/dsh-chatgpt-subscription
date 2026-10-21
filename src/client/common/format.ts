@@ -33,6 +33,25 @@ export function formatCapacity(value: number): string {
   return String(value)
 }
 
+/**
+ * Render a token count as the compact figure a capability line carries.
+ *
+ * `formatCapacity` above is the capacity FIELD's seeder: it prints only exact
+ * multiples, so 131072 seeds the input as "131072" (a precise draft for an
+ * editable number, which is right). A summary line is a different job — vendor
+ * windows and output caps are binary multiples and raw digits turn the line into
+ * soup. One decimal tells 1M from 1.05M without pretending the figure is exact.
+ */
+export function formatTokenCount(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0'
+  // Millions keep two decimals (1.05M must not become 1.1M); thousands are
+  // whole numbers (131,072 reads as 131k — a tenth there is noise).
+  const trim = (text: string): string => text.replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')
+  if (value >= 1_000_000) return trim((value / 1_000_000).toFixed(2)) + 'M'
+  if (value >= 1_000) return Math.round(value / 1_000) + 'k'
+  return String(value)
+}
+
 /** A stamp in the reader's own locale, or an em dash when there is none. */
 export function formatDate(ms?: number | null): string {
   if (ms === undefined || ms === null || !Number.isFinite(ms) || ms <= 0) return '—'
