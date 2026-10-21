@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+
+## 0.35.0 - 2026-10-21
+- **【BREAKING】移除 WorkBuddy（CodeBuddy 订阅）线路及其全部残留**
+  - 该线路的上游已经失效，因此整条移除，而不是藏在开关后面：`src/host/workbuddy/`（15 文件）、`src/client/workbuddy/`（5 文件）、`src/shared/workbuddy-contracts.ts`、21 个专属测试与夹具、7 个一次性实况探针、其专属文档，以及它在共享词汇表里的那几项（`CONTROLLED_PROVIDERS`、能力表、请求诊断的 provider/route/wire 三处、hub 卡片与品牌图标、composer 配额槽位）一并删除；`src/index.ts` 里 85 处注册全部摘除。
+  - **用户可见的影响**：provider id `workbuddy` 与路由 id `workbuddy-subscription` 不再存在——设置页那张卡片、模型选择器里它的模型、`/workbuddy/api/*` 路由都随之消失。其余 12 条线路的行为没有任何变化；`~/.dsh/storages` 下 7 个 `workbuddy-*.json(.dpapi)` 已成惰性文件，可以自行删除，引用了 `workbuddy-subscription` 的外部配置（例如 LLM Verifier 的 provider/model）需要改指向其它线路。
+  - **顺带移除的死管道**：账号摘要 DTO 的 `modelCooldowns` 及其客户端渲染、5 条只服务它的 CSS 与 `modelCooldown` 标签键——它唯一的生产者就是被删的号池，删完只剩读端，那段 UI 永远不会显示。
+  - **没有跟着一起死的覆盖**：11 处「借这条线路当载体测共享实现」的用例被移植到幸存线路（缓存记账与上下文超限 → step-code，输出预留与图片预算与偏好 seam 与请求诊断 → glm-coding-plan，旧快照缺字段兼容 → kimi-code），只有真正随线路消失的机制（双区目录、`code 6004` 按账号×模型停用、签到、atrest 密钥、CodeBuddy 账号采纳）才整条删除。
+  - **验证**：三工程 `tsc` 0 错误；全量测试 4352 用例通过、0 失败；`npm run build` 通过且 `lib/index.js` 与 `lib/client.js` 内 0 处命中；重启宿主后 `GET /workbuddy/api/status` 返回 404 而 `/claude/api/status` 与 `/glm-coding-plan/api/status` 仍是 200，hub overview 只剩 12 条线路。
 - **【hub】订阅服务标题行右侧新增一枚「检测更新 / 更新插件」图标按钮——安静、四种结局各自说得清，本地链接安装与没有 pluginManager 的宿主降级为「只给命令」**
   - **现象**：这个插件的用户在设置页里看不到自己装的是哪个版本，也不知道有没有新版；升级只能靠自己去 npm 搜一遍再敲命令。手动更新又有一个坑：从源码 checkout 用 `link:`/`file:` 装上的人，一旦让工具「一键更新」，pnpm 会把链接覆盖成一份 registry 副本，作者的编辑目录当场变成一份旧包。
   - **改法（位置与形态：标题行右侧的一枚图标按钮）**：控件挂在 [ProviderHubSection.tsx](../src/client/ProviderHubSection.tsx) 的 overview 分支里——`<header class="dsh-hub-head">` 用 `space-between` 把 `<h2>` 放左、[UpdateCheck.tsx](../src/client/hub/UpdateCheck.tsx) 放右，`HubOverview` 只剩它原本那行 `<p class="dsh-hub-hint">`。按钮本体是一枚 28×28 的环形刷新图标（16×16 内联 SVG，`stroke="currentColor"`、1.5 描边）：透明底、无描边、圆角 8px，常态只是三级色图标，hover 才出现 `--dsw-alias-interactive-bg-hover` 并转主文字色，`:focus-visible` 是 2px 描边焦点环；检测/安装中图标按 `@keyframes dsh-hub-update-spin` 旋转并置 disabled；「有新版本且可一键装」时在图标右上角点一个 6px 的 `--dsw-alias-button-info-fill` 圆点，而不是把按钮撑长。状态文字 11px、右对齐，排在图标**之前**（DOM 顺序），命令（本地链接等只能用命令的情形）落在 header 行下方单独一行。样式全部追加进既有的 [hub-styles.ts](../src/client/hub/hub-styles.ts) 那一个 CSS 字符串——`test/client-style-ownership.test.ts` 枚举的是安装器而不是表，新增一张表会牵动它；颜色一律 `var(--dsw-alias-*, 兜底)`，深浅色不分支。
