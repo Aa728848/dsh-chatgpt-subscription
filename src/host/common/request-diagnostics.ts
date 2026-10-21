@@ -38,6 +38,8 @@ export const DIAGNOSTIC_PROVIDERS = [
   // 第十二条：Qoder（订阅）。同样是注册点——不写在这里，
   // 本线路就静默失去 [provider-diagnostics] 日志与它的指纹/用量诊断。
   'qoder',
+  // 第十三条：OpenDesign（订阅，API Key）。同上——注册点，追加在末尾。
+  'opendesign',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

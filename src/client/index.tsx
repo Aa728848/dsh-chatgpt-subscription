@@ -53,6 +53,9 @@ import { installClinePassStyles } from './cline-pass/styles.ts'
 import { QoderComposerQuota } from './qoder/QoderComposerQuota.tsx'
 import { dictionaries as qoderDicts, NS_QODER, type QoderLocaleKey } from './qoder/locales.ts'
 import { installQoderStyles } from './qoder/styles.ts'
+import { OpenDesignComposerQuota } from './opendesign/OpenDesignComposerQuota.tsx'
+import { dictionaries as openDesignDicts, NS_OPENDESIGN, type OpenDesignLocaleKey } from './opendesign/locales.ts'
+import { installOpenDesignStyles } from './opendesign/styles.ts'
 import { setupMermaidObserver } from './mermaid/renderer.ts'
 import { createVideoCommandHost, installVideoCommand } from './minimax-code/video-command-host.tsx'
 import { installProgressUpdatesClient } from './progress-updates/index.ts'
@@ -81,6 +84,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-step-code': StepCodeLocaleKey
     'dsh-cline-pass': ClinePassLocaleKey
     'dsh-qoder': QoderLocaleKey
+    'dsh-opendesign': OpenDesignLocaleKey
     'dsh-progress-updates': ProgressUpdatesLocaleKey
   }
 }
@@ -155,6 +159,11 @@ export function apply(ctx: ClientContext): void {
     installQoderStyles()
     return () => {}
   }, 'dsh-qoder: styles')
+  ctx.effect(() => ctx.locale.register(NS_OPENDESIGN, openDesignDicts), 'dsh-opendesign: dictionaries')
+  ctx.effect(() => {
+    installOpenDesignStyles()
+    return () => {}
+  }, 'dsh-opendesign: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -245,6 +254,11 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.right', id: 'qoder-quota', order: 45, locale: NS_QODER,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, QoderComposerQuota))
+  // 顺序 46：接在 qoder-quota(45) 之后顺延，理由同上——既有槽位一个 order 都不动。
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'opendesign-quota', order: 46, locale: NS_OPENDESIGN,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, OpenDesignComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

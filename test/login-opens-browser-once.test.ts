@@ -70,6 +70,11 @@ const { ClinePassAccountPool } = await import('../src/host/cline-pass/account-po
 const { createClinePassStore } = await import('../src/host/cline-pass/store.ts')
 const { ClinePassModelSettingsStore, FileCredentialStore: ClinePassCredentialStore } = await import('../src/host/cline-pass/token-store.ts')
 const { CLINE_PASS_ROUTE_PREFIX: CLINE_PASS_PREFIX } = await import('../src/shared/cline-pass-contracts.ts')
+const { OpenDesignLoginManager } = await import('../src/host/opendesign/oauth.ts')
+const { registerOpenDesignRoutes } = await import('../src/host/opendesign/routes.ts')
+const { OpenDesignAccountPool } = await import('../src/host/opendesign/account-pool.ts')
+const { OpenDesignModelSettingsStore, FileCredentialStore: OpenDesignCredentialStore } = await import('../src/host/opendesign/token-store.ts')
+const { OPENDESIGN_ROUTE_PREFIX: OPENDESIGN_PREFIX } = await import('../src/shared/opendesign-contracts.ts')
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>
 
@@ -244,4 +249,38 @@ describe('a sign-in opens the login page once', () => {
     expect(browserLaunches()).toEqual([])
     qoderOauth.resetQoderLogin()
   })
-})
+
+  it('OpenDesign: /login/start answers the activation URL for the card and launches no browser of its own', async () => {
+    const fetchFn = (async () => Response.json({
+      deviceId: 'dev-1',
+      userCode: 'AB12CD',
+      status: 'pending',
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      deviceSecret: 'secret-1',
+      activationUrl: 'https://open-design.ai/cloud/cli/activate?deviceId=dev-1&userCode=AB12CD',
+      pollIntervalSeconds: 2,
+    }, { status: 201 })) as unknown as typeof fetch
+    const credStore = new OpenDesignCredentialStore(tmpFile('od-cred'), new MemoryBackend() as never)
+    const accountPool = new OpenDesignAccountPool({ store: credStore, backend: new MemoryBackend() as never })
+    const settings = new OpenDesignModelSettingsStore(tmpFile('od-models'))
+    const login = new OpenDesignLoginManager({
+      fetchFn,
+      host: () => 'test-host',
+      onLogin: async () => undefined,
+    })
+    const handler = capture((ctx) => registerOpenDesignRoutes(ctx, {
+      settings,
+      accountPool,
+      fetchFn,
+      // NO `openBrowser` override: this is the production wiring.
+      login,
+      serving: () => true,
+      conflict: () => null,
+    }))
+    const result = await post(handler, OPENDESIGN_PREFIX + '/login/start')
+    expect(result.status).toBe(200)
+    expect(result.body.value?.verificationUri).toMatch(/^https:\/\//)
+    expect(browserLaunches()).toEqual([])
+    login.dispose()
+  })
+});

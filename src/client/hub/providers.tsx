@@ -33,6 +33,8 @@ import { ClinePassSection } from '../cline-pass/ClinePassSection.tsx'
 import { CLINE_PASS_PROVIDER_NAME, CLINE_PASS_ROUTE_PREFIX } from '../../shared/cline-pass-contracts.ts'
 import { QoderSection } from '../qoder/QoderSection.tsx'
 import { QODER_PROVIDER_NAME, QODER_ROUTE_PREFIX } from '../../shared/qoder-contracts.ts'
+import { OpenDesignSection } from '../opendesign/OpenDesignSection.tsx'
+import { OPENDESIGN_PROVIDER_NAME, OPENDESIGN_ROUTE_PREFIX } from '../../shared/opendesign-contracts.ts'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -164,6 +166,13 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: QODER_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(QODER_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <QoderSection onModelChange={onModelChange} />,
+  },
+  {
+    // OpenDesign（订阅，API Key）：再往后追加一格，既有线路的卡片顺序保持不动。
+    id: 'opendesign',
+    name: OPENDESIGN_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(OPENDESIGN_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <OpenDesignSection onModelChange={onModelChange} />,
   },
 ]
 

@@ -136,6 +136,7 @@ import {
 } from './host/qoder/token-store.ts'
 import { qoderCatalogIsLive } from './host/qoder/client.ts'
 import { PROVIDER_ID as QODER_PROVIDER_ID, PROVIDER_NAME as QODER_PROVIDER_NAME } from './host/qoder/types.ts'
+import { createOpenDesignLine } from './host/opendesign/line.ts'
 import { CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
@@ -906,6 +907,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       accountPool: qoderAccountPool,
     }).catch(() => undefined)
 
+    // OpenDesign: the API-key subscription line. Its stores, pool, adapter and
+    // settings routes are assembled inside the line module; this wiring only
+    // keeps the disposers together. The live catalog needs no warm-up call here:
+    // synced entries persist in the line's own settings document, so a restart
+    // rehydrates them from a local read with no network in the path.
+    const openDesignLine = createOpenDesignLine(ctx, {
+      fetchFn: proxyFetch,
+      modelFetchFn: modelFetch['opendesign'],
+      attachments: ctx.attachments,
+    })
+
     // The IDE can sign in or out on its own; adopting whatever its directory
     // currently holds keeps the pool in step without a manual rescan.
     void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
@@ -1259,6 +1271,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
         },
       },
+      // OpenDesign（订阅，API Key）：再往后追加一格，既有线路的卡片顺序保持不动。
+      openDesignLine.hubSource,
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
@@ -1386,6 +1400,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       clinePassLine.dispose()
       disposeQoderRoutes()
       qoderClaim.dispose()
+      openDesignLine.dispose()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -2149,3 +2164,109 @@ export {
   type QoderRegion,
   type QoderStatusDto,
 } from './shared/qoder-contracts.ts'
+export {
+  OpenDesignAdapter,
+  REASONING_EFFORT_IDS as OPENDESIGN_REASONING_EFFORT_IDS,
+  type OpenDesignAdapterOptions,
+} from './host/opendesign/adapter.ts'
+export {
+  OpenDesignAccountPool,
+  OPENDESIGN_API_KEY_ENV,
+  opendesignAccountKey,
+  opendesignPoolPath,
+  parseOpenDesignPoolData,
+  type OpenDesignAccountPoolOptions,
+  type OpenDesignPoolAccount,
+  type OpenDesignPoolStatusDto,
+} from './host/opendesign/account-pool.ts'
+export {
+  resolveModelInfo as resolveOpenDesignModelInfo,
+  resolveOutputBudget as resolveOpenDesignOutputBudget,
+} from './host/opendesign/catalog.ts'
+export {
+  chatURL as openDesignChatURL,
+  fetchGatewayCatalog as fetchOpenDesignGatewayCatalog,
+  firstMessage as openDesignFirstMessage,
+  modelsURL as openDesignModelsURL,
+  openChatStream as openOpenDesignChatStream,
+  sendJSON as sendOpenDesignJSON,
+  testApiKey as testOpenDesignApiKey,
+  trimBase as trimOpenDesignBase,
+  withTimeout as withOpenDesignTimeout,
+  type OpenDesignHttpResult,
+} from './host/opendesign/client.ts'
+export {
+  buildOpenDesignBody,
+  isAuthenticationError as isOpenDesignAuthenticationError,
+  mapFinishReason as mapOpenDesignFinishReason,
+  mapUsage as mapOpenDesignUsage,
+  NO_ANSWER_PHRASE as OPENDESIGN_NO_ANSWER_PHRASE,
+  parseServerSentEvents as parseOpenDesignServerSentEvents,
+  reasoningOf as openDesignReasoningOf,
+  serializeMessages as serializeOpenDesignMessages,
+  streamErrorCode as openDesignStreamErrorCode,
+  translate as translateOpenDesignStream,
+  type OpenDesignWireBody,
+  type OpenDesignWireMessage,
+} from './host/opendesign/mapper.ts'
+export {
+  getOpenDesignWebStatus,
+  OPENDESIGN_ROUTES,
+  registerOpenDesignRoutes,
+  type OpenDesignRouteOptions,
+} from './host/opendesign/routes.ts'
+export {
+  bearerFor as openDesignBearerFor,
+  credentialPath as openDesignCredentialPath,
+  credentialsIdentity as openDesignCredentialsIdentity,
+  defaultOpenDesignModelSettings,
+  FileCredentialStore as OpenDesignCredentialStore,
+  modelSettingsPath as openDesignModelSettingsPath,
+  OpenDesignModelSettingsStore,
+  parseOpenDesignCredentials,
+  parseOpenDesignModelSettings,
+  type OpenDesignApiKeyCredentials,
+  type OpenDesignCatalogModel,
+  type OpenDesignCredentials,
+  type OpenDesignModelSettings,
+  type OpenDesignPreferenceStore,
+} from './host/opendesign/token-store.ts'
+export {
+  createOpenDesignLine,
+  openDesignKnownModelIds,
+  openDesignVisibleModelIds,
+  type OpenDesignLine,
+  type OpenDesignLineOptions,
+} from './host/opendesign/line.ts'
+export {
+  catalogEntry as openDesignCatalogEntry,
+  DEFAULT_BASE_URL as OPENDESIGN_DEFAULT_BASE_URL,
+  DEFAULT_CONTEXT_WINDOW as OPENDESIGN_DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_CONCURRENT_REQUESTS as OPENDESIGN_DEFAULT_MAX_CONCURRENT_REQUESTS,
+  DEFAULT_MAX_TOKENS as OPENDESIGN_DEFAULT_MAX_TOKENS,
+  DEFAULT_MODELS as OPENDESIGN_DEFAULT_MODELS,
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS as OPENDESIGN_DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MODEL_CATALOG as OPENDESIGN_MODEL_CATALOG,
+  MODEL_PRICES_URL as OPENDESIGN_MODEL_PRICES_URL,
+  POOL_COOLDOWN_MS as OPENDESIGN_POOL_COOLDOWN_MS,
+  PROVIDER_ID as OPENDESIGN_HOST_PROVIDER_ID,
+  PROVIDER_NAME as OPENDESIGN_HOST_PROVIDER_NAME,
+  type OpenDesignDiscoveredModel,
+  type OpenDesignModelInfo,
+  type OpenDesignModelMeta,
+} from './host/opendesign/types.ts'
+export {
+  OPENDESIGN_CONSOLE_URL,
+  OPENDESIGN_PROVIDER_ID,
+  OPENDESIGN_PROVIDER_NAME,
+  OPENDESIGN_ROUTE_PREFIX,
+  type OpenDesignAccountAction,
+  type OpenDesignAccountSummaryDto,
+  type OpenDesignAuthResult,
+  type OpenDesignModelDto,
+  type OpenDesignModelPricingDto,
+  type OpenDesignPoolStatusDto as OpenDesignPoolStatusDtoContract,
+  type OpenDesignSettingsDto,
+  type OpenDesignSettingsUpdateDto,
+  type OpenDesignWebStatus,
+} from './shared/opendesign-contracts.ts'
