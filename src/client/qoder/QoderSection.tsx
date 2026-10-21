@@ -34,14 +34,9 @@ import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate, formatTokenCount } from '../common/format.ts'
-import {
-  adoptReasonText,
-  quotaBucketText,
-  regionText,
-  zh,
-  type QoderLocaleKey,
-} from './locales.ts'
+import { adoptReasonText, quotaBucketText, regionText, zh, type QoderLocaleKey, NS_QODER } from './locales.ts'
 import { useQoderSection, type QoderSectionProps } from './useQoderSection.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 /** 百分比，最多一位小数；调用方已经排除了非有限值。 */
 function percentText(ratio: number): string {
@@ -108,13 +103,13 @@ function moreNotes(summary: string, paragraphs: ReadonlyArray<string | null>): R
  * `defaultMaxTokens`），客户端不按模型名推断任何一项。与 OpenDesign 卡同一写法：
  * 数据一行，散文进折叠区。
  */
-export function qoderModelRowHint(model: QoderModelOption): string {
+export function qoderModelRowHint(model: QoderModelOption, t: typeof zh = zh): string {
   const capacity = formatTokenCount(model.contextWindow)
   const input = model.supportsImages ? 'text+image' : 'text'
   const efforts = model.reasoningEfforts.length === 0
-    ? zh.modelRowNoEfforts
-    : zh.modelRowEfforts.replace('{list}', model.reasoningEfforts.join('/'))
-  const output = zh.modelRowOutput.replace('{cap}', formatTokenCount(model.defaultMaxTokens))
+    ? t.modelRowNoEfforts
+    : t.modelRowEfforts.replace('{list}', model.reasoningEfforts.join('/'))
+  const output = t.modelRowOutput.replace('{cap}', formatTokenCount(model.defaultMaxTokens))
   return `${capacity} · ${input} · ${efforts} · ${output}`
 }
 
@@ -135,7 +130,7 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
     refreshQuota, refreshCatalog, testConnection,
   } = actions
 
-  const t = zh
+  const t = useLineDict(NS_QODER, zh)
 
   if (loading) {
     return (
@@ -443,7 +438,7 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
                 // （「模型行下面不需要介绍文字」指的是 host 那段散文式 hint），
                 // 但一行数据与一段介绍不是同一件事——用户要在勾选时就知道这个
                 // 模型能收多大的上下文、收不收图、有几档思考。
-                hint: qoderModelRowHint(model),
+                hint: qoderModelRowHint(model, t),
                 enabled: model.enabled,
               }))}
               busy={busy !== null}

@@ -8,7 +8,8 @@ import {
   type OllamaWebStatus,
 } from '../../shared/ollama-contracts.ts'
 import { OllamaApi } from './api.ts'
-import { zh } from './locales.ts'
+import { zh, NS_OLLAMA } from './locales.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 const API = new OllamaApi()
 
@@ -157,7 +158,7 @@ export function OllamaSection(props: Props): React.ReactElement {
     void run('effort', () => API.setDefaultReasoningEffort(value === '' ? null : value))
   }, [run])
 
-  const t = zh
+  const t = useLineDict(NS_OLLAMA, zh)
   const pool = status?.pool
   // A partial status payload (a host build whose action answer is not the full
   // status) must degrade to empty blocks, never crash the settings page.

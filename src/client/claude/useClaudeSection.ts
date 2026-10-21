@@ -24,7 +24,8 @@ import { contextDraftsFor } from '../common/ContextWindowEditor.tsx'
 import { formatCapacity, parsePositiveCapacity } from '../common/format.ts'
 import { createLineApi } from '../common/line-api.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
-import { zh } from './locales.ts'
+import { zh, NS_CLAUDE } from './locales.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 const API = '/claude/api'
 const api = createLineApi(API, 'Claude')
@@ -145,7 +146,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
 
-  const t = zh
+  const t = useLineDict(NS_CLAUDE, zh)
 
   const notifyChange = useCallback(() => {
     onModelChange?.()

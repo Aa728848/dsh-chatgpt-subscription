@@ -11,7 +11,8 @@ import {
   type OpenDesignWebStatus,
 } from '../../shared/opendesign-contracts.ts'
 import { OpenDesignApi } from './api.ts'
-import { zh } from './locales.ts'
+import { zh, NS_OPENDESIGN } from './locales.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 const API = new OpenDesignApi()
 
@@ -27,8 +28,6 @@ interface SettingsForm {
   maxConcurrentRequests: string
   streamIdleTimeoutMs: string
 }
-
-const ERROR_DETAIL = zh.error.split('{detail}')[0] ?? ''
 
 function detail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -323,7 +322,10 @@ const refreshUsage = useCallback(() => {
     }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
   }, [settingsForm, applyStatus])
 
-  const t = zh
+  const t = useLineDict(NS_OPENDESIGN, zh)
+  // The server's error detail is appended to the dictionary's own prefix, so the
+  // sentence a user reads follows the active locale instead of the shipped one.
+  const errorPrefix = t.error.split('{detail}')[0] ?? ''
   const pool = status?.pool
   const accounts: OpenDesignAccountSummaryDto[] = pool?.accounts ?? []
   const models = status?.models ?? []
@@ -343,7 +345,7 @@ const refreshUsage = useCallback(() => {
             ? t.routeConflict.replace('{detail}', status.conflict)
             : t.routeOwned}
         </p>
-        {error !== null && <p className="dsha-notice" style={{ color: 'var(--dsha-danger, #c0392b)' }}>{ERROR_DETAIL}{error}</p>}
+        {error !== null && <p className="dsha-notice" style={{ color: 'var(--dsha-danger, #c0392b)' }}>{errorPrefix}{error}</p>}
         {notice !== null && notice !== '' && <p className="dsha-notice">{notice}</p>}
         <details className="dshod-details">
           <summary>{t.limitsSection}</summary>

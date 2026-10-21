@@ -22,12 +22,13 @@ import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate } from '../common/format.ts'
-import { adoptReasonText, allowanceKindText, zh } from './locales.ts'
+import { adoptReasonText, allowanceKindText, zh, NS_GLM_CODING_PLAN } from './locales.ts'
 import { useGlmCodingPlanSection, type GlmCodingPlanSectionProps } from './useGlmCodingPlanSection.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 /** 区域的人类可读名，登录与 adopt 两条入口的结果都要说清楚落在哪一区。 */
-function regionLabel(region: GlmRegion): string {
-  return region === 'cn' ? zh.regionCn : zh.regionIntl
+function regionLabel(region: GlmRegion, t: typeof zh): string {
+  return region === 'cn' ? t.regionCn : t.regionIntl
 }
 
 export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProps = {}): React.JSX.Element {
@@ -42,7 +43,7 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
     resetAllContextWindows, updateContextDraft, refreshQuota, refreshCatalog, testConnection,
   } = actions
 
-  const t = zh
+  const t = useLineDict(NS_GLM_CODING_PLAN, zh)
 
   if (loading) {
     return (
@@ -107,7 +108,7 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
             <button
               className="dsha-btn dsha-btn-primary"
               disabled={busy !== null}
-              aria-label={`${t.addAccount}（${regionLabel(region)}）`}
+              aria-label={`${t.addAccount}（${regionLabel(region, t)}）`}
               onClick={() => void startLogin(region)}
             >
               {busy === `login:${region}` ? t.authorizing : t.addAccount}
@@ -126,7 +127,7 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
         )}
         renderDetails={(account) => (
           <>
-            <span>{t.region}: {regionLabel(account.region)}</span>
+            <span>{t.region}: {regionLabel(account.region, t)}</span>
             {account.accountName ? <span>{account.accountName}</span> : null}
             {account.organizationId ? (
               <span className="dshglm-mono" title={account.organizationId}>{account.organizationId}</span>
@@ -223,7 +224,7 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
           <div className="dsha-row">
             <span className="dsha-value">
               {adoptResult.adopted
-                ? t.adoptAdopted.replace('{region}', regionLabel(adoptResult.region ?? region))
+                ? t.adoptAdopted.replace('{region}', regionLabel(adoptResult.region ?? region, t))
                 : (adoptResult.reason === undefined
                   ? t.adoptNoAttempt
                   : `${adoptReasonText(adoptResult.reason, t)} ${t.adoptFallback}`)}

@@ -14,6 +14,7 @@ import { CodexImageToolView, type ImageLoader } from './CodexImageToolView.tsx'
 import { ProviderHubSection } from './ProviderHubSection.tsx'
 import { SubscriptionApi } from './api.ts'
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
+import { installLineLocale } from './common/line-locale.ts'
 import { installStyles } from './styles.ts'
 import { installHubStyles } from './hub/hub-styles.ts'
 import { installModelChecklistStyles } from './common/model-checklist-styles.ts'
@@ -96,6 +97,9 @@ export const inject = [
 ]
 
 export function apply(ctx: ClientContext): void {
+  // The provider cards resolve their copy through this runtime instead of their
+  // own dictionary object, so their text follows the active locale.
+  installLineLocale(ctx.locale)
   ctx.effect(() => ctx.locale.register(NS, dictionaries), 'dsh-chatgpt-subscription: dictionaries')
   ctx.effect(() => installStyles(), 'dsh-chatgpt-subscription: styles')
   ctx.effect(() => {

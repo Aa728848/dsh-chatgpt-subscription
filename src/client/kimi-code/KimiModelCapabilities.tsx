@@ -9,9 +9,8 @@
  */
 import React from 'react'
 import type { KimiCodeModelOption } from '../../shared/kimi-code-contracts.ts'
-import { zh } from './locales.ts'
-
-const t = zh
+import { useLineDict } from '../common/line-locale.ts'
+import { NS_KIMI_CODE, zh } from './locales.ts'
 
 /**
  * Render one quota multiplier the way the official table states it: "2x", "3x".
@@ -28,6 +27,7 @@ export interface KimiModelCapabilitiesProps {
 }
 
 export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): React.ReactElement {
+  const t = useLineDict(NS_KIMI_CODE, zh)
   return (
     <div className="dsha-cap-table">
       <table>

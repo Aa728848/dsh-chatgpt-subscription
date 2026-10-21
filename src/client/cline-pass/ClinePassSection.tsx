@@ -16,7 +16,8 @@ import {
   type ClinePassWebStatus,
 } from '../../shared/cline-pass-contracts.ts'
 import { ClinePassApi } from './api.ts'
-import { zh } from './locales.ts'
+import { zh, NS_CLINE_PASS } from './locales.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 const API = new ClinePassApi()
 
@@ -50,8 +51,6 @@ interface SettingsForm {
   exposeCatalog: boolean
   pinSpelling: string
 }
-
-const ERROR_DETAIL = zh.error.split('{detail}')[0] ?? ''
 
 function detail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -371,7 +370,9 @@ export function ClinePassSection(props: Props): React.ReactElement {
     }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
   }, [status, applyStatus])
 
-  const t = zh
+  const t = useLineDict(NS_CLINE_PASS, zh)
+  // Prefix of the server-error sentence, resolved through the active locale.
+  const errorPrefix = t.error.split('{detail}')[0] ?? ''
   const pool = status?.pool
   const accounts = useMemo((): ClinePassAccountSummaryDto[] => {
     const raw = pool?.accounts ?? []
@@ -440,7 +441,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
             ? t.routeConflict.replace('{detail}', status.conflict)
             : t.routeOwned}
         </p>
-        {error !== null && <p className="dsha-notice" style={{ color: 'var(--dsha-danger, #c0392b)' }}>{ERROR_DETAIL}{error}</p>}
+        {error !== null && <p className="dsha-notice" style={{ color: 'var(--dsha-danger, #c0392b)' }}>{errorPrefix}{error}</p>}
         {notice !== null && notice !== '' && <p className="dsha-notice">{notice}</p>}
         <details className="dshcp-details">
           <summary>{t.limitsSection}</summary>

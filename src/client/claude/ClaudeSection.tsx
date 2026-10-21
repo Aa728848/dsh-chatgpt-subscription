@@ -19,7 +19,8 @@ import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate } from '../common/format.ts'
 import { useClaudeSection, type ClaudeSectionProps } from './useClaudeSection.ts'
-import { zh } from './locales.ts'
+import { zh, NS_CLAUDE } from './locales.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 /**
  * Display label per thinking level.
@@ -64,7 +65,7 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
     updateContextDraft, setPasteValue,
   } = actions
 
-  const t = zh
+  const t = useLineDict(NS_CLAUDE, zh)
 
   if (loading) {
     return (
