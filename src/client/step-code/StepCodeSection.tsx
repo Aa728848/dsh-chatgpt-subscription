@@ -39,15 +39,8 @@ import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate } from '../common/format.ts'
-import {
-  adoptReasonText,
-  profileText,
-  quotaCredentialSourceText,
-  quotaKindText,
-  quotaWindowKeyText,
-  zh,
-  type StepCodeLocaleKey,
-} from './locales.ts'
+import { adoptReasonText, profileText, quotaCredentialSourceText, quotaKindText, quotaWindowKeyText, zh, type StepCodeLocaleKey, NS_STEP_CODE } from './locales.ts'
+import { useLineDict } from '../common/line-locale.ts'
 import {
   CACHE_WRITE_NOTE,
   useStepCodeSection,
@@ -190,7 +183,7 @@ export function StepCodeSection({ onModelChange }: StepCodeSectionProps = {}): R
     setQuotaPassword, setQuotaToken, submitQuotaPassword, submitQuotaToken, clearQuotaCredential,
   } = actions
 
-  const t = zh
+  const t = useLineDict(NS_STEP_CODE, zh)
 
   if (loading) {
     return (

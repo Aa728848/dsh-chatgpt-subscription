@@ -10,7 +10,8 @@ import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { createLineApi } from '../common/line-api.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import { formatCapacity, parsePositiveCapacity } from '../common/format.ts'
-import { zh } from './locales.ts'
+import { zh, NS_ANTIGRAVITY } from './locales.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 const API = '/antigravity/api'
 const api = createLineApi(API, 'Antigravity')
@@ -55,7 +56,7 @@ export function AntigravitySection({ onModelChange, loadModelDirectory }: Props)
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
 
-  const t = zh
+  const t = useLineDict(NS_ANTIGRAVITY, zh)
 
   const notifyChange = useCallback(() => {
     onModelChange?.()

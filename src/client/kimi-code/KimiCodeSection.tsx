@@ -14,8 +14,9 @@ import { createLineApi } from '../common/line-api.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
-import { zh } from './locales.ts'
+import { zh, NS_KIMI_CODE } from './locales.ts'
 import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
+import { useLineDict } from '../common/line-locale.ts'
 
 const API = '/kimi-code/api'
 const api = createLineApi(API, 'Kimi Code')
@@ -36,11 +37,14 @@ function formatMoney(cents: number | null, currency: string | null): string {
   }
 }
 
-const EFFORT_LABEL: Record<KimiCodeReasoningEffort, string> = {
-  low: zh.effortLow,
-  high: zh.effortHigh,
-  max: zh.effortMax,
-  none: zh.effortNone,
+function effortLabel(effort: KimiCodeReasoningEffort, t: typeof zh): string {
+  switch (effort) {
+    case 'low': return t.effortLow
+    case 'high': return t.effortHigh
+    case 'max': return t.effortMax
+    case 'none': return t.effortNone
+    default: return effort
+  }
 }
 
 /** Human label for the last request's prefix-drift cause. */
@@ -75,7 +79,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
 
-  const t = zh
+  const t = useLineDict(NS_KIMI_CODE, zh)
 
   const notifyChange = useCallback(() => {
     onModelChange?.()
@@ -616,7 +620,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           >
             <option value="">{t.defaultEffortAuto}</option>
             {KIMI_CODE_REASONING_EFFORTS.map((effort) => (
-              <option key={effort} value={effort}>{EFFORT_LABEL[effort]}</option>
+              <option key={effort} value={effort}>{effortLabel(effort, t)}</option>
             ))}
           </select>
         </div>

@@ -7,6 +7,7 @@ import type {
 } from '../../shared/command-code-contracts.ts'
 import { COMMAND_CODE_REASONING_EFFORTS } from '../../shared/command-code-contracts.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
+import { useLineDict } from '../common/line-locale.ts'
 
 /**
  * Display label per reasoning level. The locale dictionary only accepts flat
@@ -27,7 +28,7 @@ import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { createLineApi } from '../common/line-api.ts'
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
-import { zh } from './locales.ts'
+import { zh, NS_COMMAND_CODE } from './locales.ts'
 
 const API = '/command-code/api'
 const api = createLineApi(API, 'Command Code')
@@ -70,7 +71,7 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
 
-  const t = zh
+  const t = useLineDict(NS_COMMAND_CODE, zh)
 
   const notifyChange = useCallback(() => {
     onModelChange?.()
