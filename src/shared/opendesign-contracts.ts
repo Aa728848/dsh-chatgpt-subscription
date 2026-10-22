@@ -88,20 +88,54 @@ export interface OpenDesignLoginFlowDto {
   accountAlias: string
 }
 
-/** One account's latest wallet reading (OAuth accounts only have one to read). */
+/**
+ * One account's plan and credit state, as `/billing/summary` states it.
+ *
+ * This is where the paid tier actually lives. The device-authorization user
+ * object carries a `plan` field too, but it answers `free` for a subscribed
+ * account and never updates after sign-in, so it is a profile flag and not the
+ * tier. Credits keep the service's own spelling; USD figures are the readable
+ * companions the service ships beside them.
+ */
+export interface OpenDesignBillingDto {
+  /** Paid tier: `go`, `plus`, `pro` or `max` as the service names it. */
+  plan: string
+  /** `active`, `trialing`, `canceled`, … as served. */
+  status: string
+  entitlementStatus: string
+  billingInterval: string
+  periodStart: string | null
+  periodEnd: string | null
+  subscriptionCredits: string | null
+  rechargeCredits: string | null
+  totalAvailableCredits: string | null
+  subscriptionCreditsUsd: string | null
+  rechargeCreditsUsd: string | null
+  totalAvailableCreditsUsd: string | null
+  totalConsumedUsd: string | null
+  todayConsumedUsd: string | null
+  usageCount: number | null
+  updatedAt: string | null
+}
+
+/** One account's latest wallet + billing reading (OAuth accounts only). */
 export interface OpenDesignUsageAccountDto {
   accountId: string
   alias: string
   ok: boolean
   /**
    * Current wallet balance in USD, exactly as the service strings it. Null when
-   * unread or unreadable — a failed read is not a zero balance.
+   * unread or unreadable — a failed read is not a zero balance. When the wallet
+   * read fails but the billing summary succeeds, this carries the summary's own
+   * total-available figure so the card still states what is left.
    */
   balanceUsd: string | null
   /** ISO instant the service stamped on the reading, when it sent one. */
   updatedAt: string | null
   error: string
   fetchedAt: number
+  /** Plan + credits, absent when the billing read failed or named no tier. */
+  billing?: OpenDesignBillingDto
 }
 
 /** Latest wallet snapshot, one entry per account read. Never a live call. */

@@ -390,22 +390,118 @@ describe('OpenDesign sign-in and wallet routes', () => {
     await pool.addAccount({ kind: 'api-key', apiKey: 'od_pasted' }, 'pasted')
     upstreamFetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input)
-      expect(url).toBe('https://amr-api.open-design.ai/api/v1/wallet/balance')
       const auth = new Headers(init?.headers).get('authorization') ?? ''
       expect(auth).toBe('Bearer vela_ctrl_ok')
-      return Response.json({ balanceUsd: '12.34', updatedAt: '2026-10-21T05:00:00Z' })
+      if (url.endsWith('/wallet/balance')) {
+        return Response.json({ balanceUsd: '12.34', updatedAt: '2026-10-21T05:00:00Z' })
+      }
+      if (url.endsWith('/billing/summary')) {
+        return Response.json({
+          balanceUsd: '12.3400',
+          balances: { subscriptionCredits: '100000', rechargeCredits: '23400', totalAvailableCredits: '123400' },
+          membershipTier: 'pro',
+          billingInterval: 'monthly',
+          subscriptionStatus: 'active',
+          subscriptionEntitlementStatus: 'active',
+          subscriptionCurrentPeriodStart: '2026-10-01T00:00:00.000Z',
+          subscriptionCurrentPeriodEnd: '2026-11-01T00:00:00.000Z',
+          subscriptionCreditsUsd: '10.0000',
+          rechargeCreditsUsd: '2.3400',
+          totalAvailableCreditsUsd: '12.3400',
+          totalConsumedUsd: '0.4200',
+          todayConsumedUsd: '0.0100',
+          usageCount: 42,
+          updatedAt: '2026-10-21T05:00:00.000Z',
+        })
+      }
+      throw new Error('unexpected upstream: ' + url)
     }) as unknown as typeof fetch
     const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
     expect(captured.status).toBe(200)
-    const value = captured.body.value as { usage: { accounts: Array<{ alias: string; ok: boolean; balanceUsd: string | null }> } }
+    const value = captured.body.value as { usage: { accounts: Array<{ alias: string; ok: boolean; balanceUsd: string | null; billing?: { plan: string; subscriptionCredits: string } }> } }
     // The pasted key is skipped, not failed: it has no control key to read with.
     expect(value.usage.accounts).toHaveLength(1)
     expect(value.usage.accounts[0]).toMatchObject({ alias: 'Dev', ok: true, balanceUsd: '12.34' })
+    expect(value.usage.accounts[0]!.billing).toMatchObject({ plan: 'pro', subscriptionCredits: '100000' })
     // The status now carries the reading, and still no secret.
     expect(captured.raw).not.toContain('vela_ctrl_ok')
     const status = await call({ url: '/opendesign/api/status' })
     const body = status.body.value as OpenDesignWebStatus
     expect(body.usage?.accounts[0]?.balanceUsd).toBe('12.34')
+  })
+
+
+  it('lets the billing summary name the tier, not the sign-in snapshot', async () => {
+    await pool.addAccount({
+      kind: 'oauth',
+      controlKey: 'vela_ctrl_plan',
+      runtimeKey: 'sk-amr_plan',
+      user: { name: 'Dev', plan: 'free' },
+    }, 'Dev')
+    upstreamFetch = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/wallet/balance')) return Response.json({ balanceUsd: '1.5000' })
+      if (url.endsWith('/billing/summary')) {
+        return Response.json({
+          balances: { subscriptionCredits: '10000', rechargeCredits: '5000', totalAvailableCredits: '15000' },
+          membershipTier: 'go',
+          subscriptionStatus: 'active',
+          subscriptionEntitlementStatus: 'active',
+          subscriptionCurrentPeriodStart: '2026-10-21T03:33:15.000Z',
+          subscriptionCurrentPeriodEnd: '2026-11-21T03:33:15.000Z',
+          totalAvailableCreditsUsd: '1.5000',
+          totalConsumedUsd: '0.0000',
+          todayConsumedUsd: '0.0000',
+        })
+      }
+      throw new Error('unexpected upstream: ' + url)
+    }) as unknown as typeof fetch
+    const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
+    expect(captured.status).toBe(200)
+    const value = captured.body.value as {
+      usage: { accounts: Array<{ billing?: { plan: string; status: string; periodEnd: string | null } }> }
+      status: OpenDesignWebStatus
+    }
+    expect(value.usage.accounts[0]!.billing).toMatchObject({
+      plan: 'go',
+      status: 'active',
+      periodEnd: '2026-11-21T03:33:15.000Z',
+    })
+    // The stale sign-in snapshot said "free"; one summary read corrects the
+    // account everywhere the pool is projected.
+    expect(value.status.pool.accounts[0]!.plan).toBe('go')
+  })
+
+  it('keeps the credits available when the wallet read is refused', async () => {
+    await pool.addAccount({
+      kind: 'oauth',
+      controlKey: 'vela_ctrl_fallback',
+      runtimeKey: 'sk-amr_fallback',
+      user: { name: 'Dev' },
+    }, 'Dev')
+    upstreamFetch = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/wallet/balance')) return Response.json({ error: 'billing unavailable' }, { status: 403 })
+      if (url.endsWith('/billing/summary')) {
+        return Response.json({
+          balances: { totalAvailableCredits: '15000' },
+          membershipTier: 'go',
+          subscriptionStatus: 'active',
+          totalAvailableCreditsUsd: '1.5000',
+        })
+      }
+      throw new Error('unexpected upstream: ' + url)
+    }) as unknown as typeof fetch
+    const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
+    expect(captured.status).toBe(200)
+    const value = captured.body.value as {
+      usage: { accounts: Array<{ ok: boolean; balanceUsd: string | null; error: string; billing?: { plan: string } }> }
+    }
+    // One surface refusing is not the reading failing: the summary's total is
+    // the balance, and the wallet's refusal stays attached as diagnostics.
+    expect(value.usage.accounts[0]).toMatchObject({ ok: true, balanceUsd: '1.5000' })
+    expect(value.usage.accounts[0]!.billing).toMatchObject({ plan: 'go' })
+    expect(value.usage.accounts[0]!.error).toContain('HTTP 403')
   })
 
   it('refuses the usage read plainly when no OAuth account exists', async () => {

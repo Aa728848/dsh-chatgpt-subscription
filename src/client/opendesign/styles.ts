@@ -27,6 +27,13 @@ export function installOpenDesignStyles(): void {
 .dshod-paste{align-items:center;display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;margin-top:8px}
 .dshod-paste-note{font-size:12px}
 .dshod-warning{color:var(--dsw-alias-label-warning,#d9913b);font-size:12px}
+.dshod-quota{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;flex-direction:column;gap:6px;margin-top:8px;padding:10px 12px}
+.dshod-quota-head{align-items:baseline;display:flex;flex-wrap:wrap;gap:8px}
+.dshod-quota-account{color:var(--dsw-alias-label-primary);font-weight:600}
+.dshod-quota-plan{color:var(--dsw-alias-label-primary);font-size:12px}
+.dshod-quota-status{color:var(--dsw-alias-label-secondary);font-size:12px}
+.dshod-quota-meta{color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dshod-quota-grid{color:var(--dsw-alias-label-secondary);display:grid;font-size:12px;gap:4px 16px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
 .dshod-adv-control{width:240px;max-width:100%;flex:none}
 .dshod-adv-control.dsha-select{max-width:240px;min-width:240px;width:240px}
 .dshod-adv-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}

@@ -46,6 +46,16 @@ export const AMR_API_BASE = 'https://amr-api.open-design.ai/api/v1'
 /** Device-authorization endpoints under {@link AMR_API_BASE}. */
 export const DEVICE_AUTHORIZATIONS_PATH = '/cli/device-authorizations'
 export const WALLET_BALANCE_PATH = '/wallet/balance'
+/**
+ * The account's plan + credits summary.
+ *
+ * The only endpoint that states the paid tier: `/me` carries a `plan` field, but
+ * it answers `free` for a subscribed account (probed 2026-10-21 against a Go
+ * account whose billing period was active), so it is a rough profile flag and
+ * never the tier. This one reports `membershipTier` plus the credit buckets the
+ * plan grants, the amounts consumed, and the current billing period.
+ */
+export const BILLING_SUMMARY_PATH = '/billing/summary'
 
 /**
  * What the create call says about this client. The service stores host /

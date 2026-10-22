@@ -3,18 +3,19 @@
  *
  * The surface is the one every sibling line exposes — status, accounts, models —
  * plus the controls this line genuinely has: device-authorization sign-in, an
- * explicit catalog sync, and the wallet-balance read an OAuth account's control
- * key can make.
+ * explicit catalog sync, and the plan/credit read an OAuth account's control
+ * key can make (`/wallet/balance` and `/billing/summary`).
  *
  * Reads never trigger an upstream call; the catalog is synced by its own action
- * and behind a successful sign-in, and quota is refreshed by its own action.
+ * and behind a successful sign-in, and plan/credits are refreshed by the usage
+ * action (the settings card fires it once when it opens).
  *
  * @module dsh-chatgpt-subscription/opendesign-routes
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isSameOriginMutation } from '../common/same-origin.ts'
-import { fetchControlPlaneCatalog, fetchGatewayCatalog, fetchWalletBalance, testApiKey } from './client.ts'
+import { fetchBillingSummary, fetchControlPlaneCatalog, fetchGatewayCatalog, fetchWalletBalance, testApiKey } from './client.ts'
 import { resolveModelInfo } from './catalog.ts'
 import type { OpenDesignAccountPool } from './account-pool.ts'
 import {
@@ -179,14 +180,31 @@ export async function getOpenDesignWebStatus(
   const settings = await settingsStore.read().catch(() => settingsStore.status())
   const data = await accountPool.read().catch(() => null)
   const accounts = await accountPool.listAccounts().catch(() => [])
+  // The tier lives on the billing summary, not on the sign-in snapshot (that
+  // one answers "free" for a paid account, see docs/opendesign-line-plan.md).
+  // A summary read for an account therefore speaks for it everywhere the pool
+  // is projected — and only for that account, never for the line.
+  const billedPlans = new Map<string, string>()
+  if (usageStore !== undefined) {
+    for (const reading of usageStore.readings.values()) {
+      const plan = reading.billing?.plan
+      if (plan !== undefined && plan !== '') billedPlans.set(reading.accountId, plan)
+    }
+  }
+  const projectedAccounts = billedPlans.size === 0
+    ? accounts
+    : accounts.map((account) => {
+        const plan = billedPlans.get(account.id)
+        return plan === undefined ? account : { ...account, plan }
+      })
   const now = Date.now()
   const pool: OpenDesignPoolStatusDto = {
-    accounts,
+    accounts: projectedAccounts,
     rotationStrategy: data?.rotationStrategy ?? 'sequential',
     ...(data?.activeAccountId === undefined ? {} : { activeAccountId: data.activeAccountId }),
   }
   const models = projectModels(settings)
-  const usable = accounts.some((account) => isUsable(account, now))
+  const usable = projectedAccounts.some((account) => isUsable(account, now))
   // The badge contract reads `authenticated`; a disabled line must not leave
   // one up, even though its accounts are still usable.
   const authenticated = usable && settings.enabled
@@ -588,7 +606,7 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
             isUsable(account, now) && isOpenDesignOAuthCredentials(account.credentials)
           ))
           if (readable.length === 0) {
-            return sendJson(response, 400, { ok: false, error: 'No OAuth-signed-in account can be read. Wallet balances come from the control key a browser sign-in issues; a pasted API key has none.' })
+            return sendJson(response, 400, { ok: false, error: 'No OAuth-signed-in account can be read. Plan, credits and wallet balances come from the control key a browser sign-in issues; a pasted API key has none.' })
           }
           const readings: OpenDesignUsageAccountDto[] = await Promise.all(readable.map(async (account) => {
             const fetchedAt = Date.now()
@@ -598,15 +616,28 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
               if (controlKey === undefined) {
                 return { accountId: account.id, alias: account.alias, ok: false, balanceUsd: null, updatedAt: null, error: 'no control key on this account', fetchedAt }
               }
-              const result = await fetchWalletBalance({ fetchFn, controlKey })
+              // Wallet and billing are two independent reads of different
+              // surfaces; one refusal must not hide the other. The summary is
+              // what names the plan and the credits, the wallet what states the
+              // spendable figure, and a failed wallet falls back to the
+              // summary's own total so the card still says what is left.
+              const [wallet, billing] = await Promise.all([
+                fetchWalletBalance({ fetchFn, controlKey }),
+                fetchBillingSummary({ fetchFn, controlKey }),
+              ])
+              const balanceUsd = wallet.balanceUsd ?? billing.billing?.totalAvailableCreditsUsd ?? null
               return {
                 accountId: account.id,
                 alias: account.alias,
-                ok: result.ok,
-                balanceUsd: result.balanceUsd,
-                updatedAt: result.updatedAt,
-                error: result.error,
+                // Readable when either surface answered: a billing summary that
+                // states the tier and credits is a successful reading even if
+                // the wallet endpoint refused.
+                ok: wallet.ok || billing.ok,
+                balanceUsd,
+                updatedAt: wallet.updatedAt,
+                error: wallet.error,
                 fetchedAt,
+                ...(billing.billing === null ? {} : { billing: billing.billing }),
               }
             } catch (error) {
               return {

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AccountPoolSection, formatAccountDate } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
@@ -7,7 +7,9 @@ import type { AccountRotationStrategy } from '../../shared/account-pool-contract
 import {
   OPENDESIGN_CONSOLE_URL,
   type OpenDesignAccountSummaryDto,
+  type OpenDesignBillingDto,
   type OpenDesignLoginFlowDto,
+  type OpenDesignUsageAccountDto,
   type OpenDesignWebStatus,
 } from '../../shared/opendesign-contracts.ts'
 import { OpenDesignApi } from './api.ts'
@@ -33,6 +35,49 @@ function detail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * The tier as the card spells it.
+ *
+ * The service answers lower case (`go`, `plus`, …); a single capitalized word
+ * is what the plan cards on the pricing page use, and it keeps the row from
+ * reading like a machine token next to "浏览器授权".
+ */
+function planName(plan: string | undefined): string {
+  if (plan === undefined || plan === '') return ''
+  return plan.slice(0, 1).toUpperCase() + plan.slice(1)
+}
+
+/** Integer credits with digit grouping; an absent figure stays absent. */
+function formatCredits(value: string | null): string {
+  if (value === null) return '—'
+  const amount = Number(value)
+  if (!Number.isSafeInteger(amount)) return value
+  try {
+    return amount.toLocaleString()
+  } catch {
+    return value
+  }
+}
+
+/** A USD figure the service already strings, or the honest dash. */
+function formatUsd(value: string | null): string {
+  return value === null ? '—' : value
+}
+
+/** ISO instant as the card's date, or the honest dash. */
+function formatIso(value: string | null): string {
+  if (value === null) return '—'
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? formatAccountDate(parsed) : '—'
+}
+
+/** Subscription state in words; `active` is the one state worth naming plainly. */
+function planState(billing: OpenDesignBillingDto, labels: typeof zh): string {
+  const status = billing.status !== '' ? billing.status : billing.entitlementStatus
+  if (status === '' || status === 'active') return labels.usagePlanActive
+  return labels.usagePlanInactive.replace('{status}', status)
+}
+
 function settingsFormOf(status: OpenDesignWebStatus): SettingsForm {
   return {
     baseURL: status.settings.baseURL,
@@ -44,14 +89,88 @@ function settingsFormOf(status: OpenDesignWebStatus): SettingsForm {
 }
 
 /**
+ * One account's plan and credit facts.
+ *
+ * Deliberately numbers, not a percentage bar: the summary states what is left
+ * (subscription credits, top-up credits) and what was consumed, but not the
+ * grant those figures are a share of, and this card does not invent a total to
+ * divide by. A failed wallet read still shows the billing figures, because they
+ * are different surfaces of the same account.
+ */
+function UsageCard(props: { entry: OpenDesignUsageAccountDto; labels: typeof zh }): React.ReactElement {
+  const { entry, labels } = props
+  const billing = entry.billing
+  const credits = (creditsValue: string | null, usdValue: string | null): { credits: string; usd: string } => ({
+    credits: formatCredits(creditsValue),
+    usd: formatUsd(usdValue),
+  })
+  return (
+    <div className="dshod-quota">
+      <div className="dshod-quota-head">
+        <span className="dshod-quota-account">{entry.alias}</span>
+        {billing !== undefined && (
+          <>
+            <span className="dshod-quota-plan">{labels.usagePlan.replace('{plan}', planName(billing.plan))}</span>
+            <span className="dshod-quota-status">{planState(billing, labels)}</span>
+          </>
+        )}
+        {billing === undefined && entry.ok && <span className="dshod-quota-status">{labels.usagePlanUnknown}</span>}
+      </div>
+      {billing !== undefined && (
+        <>
+          {(billing.periodStart !== null || billing.periodEnd !== null) && (
+            <span className="dshod-quota-meta">
+              {labels.usagePeriod
+                .replace('{start}', formatIso(billing.periodStart))
+                .replace('{end}', formatIso(billing.periodEnd))}
+            </span>
+          )}
+          <div className="dshod-quota-grid">
+            {(() => {
+              const value = credits(billing.subscriptionCredits, billing.subscriptionCreditsUsd)
+              return <span>{labels.usageSubscriptionCredits.replace('{credits}', value.credits).replace('{usd}', value.usd)}</span>
+            })()}
+            {(() => {
+              const value = credits(billing.rechargeCredits, billing.rechargeCreditsUsd)
+              return <span>{labels.usageRechargeCredits.replace('{credits}', value.credits).replace('{usd}', value.usd)}</span>
+            })()}
+            {(() => {
+              const value = credits(billing.totalAvailableCredits, billing.totalAvailableCreditsUsd)
+              return <span>{labels.usageTotalCredits.replace('{credits}', value.credits).replace('{usd}', value.usd)}</span>
+            })()}
+            {billing.todayConsumedUsd !== null && (
+              <span>{labels.usageTodayConsumed.replace('{amount}', billing.todayConsumedUsd)}</span>
+            )}
+            {billing.totalConsumedUsd !== null && (
+              <span>{labels.usageTotalConsumed.replace('{amount}', billing.totalConsumedUsd)}</span>
+            )}
+            {billing.usageCount !== null && (
+              <span>{labels.usageUsageCount.replace('{count}', String(billing.usageCount))}</span>
+            )}
+          </div>
+        </>
+      )}
+      <span className="dshod-quota-meta">
+        {entry.balanceUsd !== null && (
+          <>{labels.usageBalance.replace('{amount}', entry.balanceUsd)}{' · '}</>
+        )}
+        {labels.usageReadAt.replace('{time}', formatAccountDate(entry.fetchedAt))}
+      </span>
+      {!entry.ok && <p className="dshod-warning">{labels.usageUnavailable.replace('{detail}', entry.error)}</p>}
+    </div>
+  )
+}
+
+/**
  * The OpenDesign tab.
  *
  * The account card, its badges and the rotation picker are the shared
  * {@link AccountPoolSection}, so this line looks like every other provider tab
  * by construction. What is written here is only what is genuinely OpenDesign's:
- * pasting a console-issued API key and the catalog sync. There is deliberately
- * no quota block: the gateway answers an API key no balance, and a card that
- * drew one would be inventing it.
+ * pasting a console-issued API key, the catalog sync, and the plan/credit card
+ * fed by the billing summary. That summary needs a control key, which only a
+ * browser sign-in issues: a pasted key gets the explanation, never an invented
+ * figure.
  */
 export function OpenDesignSection(props: Props): React.ReactElement {
   const [status, setStatus] = useState<OpenDesignWebStatus | null>(null)
@@ -82,6 +201,39 @@ export function OpenDesignSection(props: Props): React.ReactElement {
   useEffect(() => {
     void reload()
   }, [reload])
+
+  const autoUsageRead = useRef(false)
+
+  /**
+   * Read plan/credits + wallet for every account that has a control key.
+   *
+   * The card fires this once when it opens. Status only carries readings taken
+   * during this host process, so without it a fresh page shows "尚未读取" until
+   * the user finds the refresh button — which is exactly how the plan and the
+   * credits came to look missing. Silent mode raises no banner: a pool whose
+   * only account is a pasted key has nothing to read, and that is already
+   * explained in the section hint.
+   */
+  const loadUsage = useCallback(async (silent: boolean) => {
+    try {
+      const outcome = await API.readUsage()
+      setStatus(outcome.status)
+      if (!silent) {
+        setNotice(outcome.usage.accounts.some((account) => account.ok) ? '' : zh.usageEmpty)
+      }
+    } catch (cause) {
+      if (!silent) setError(detail(cause))
+    }
+  }, [])
+
+  useEffect(() => {
+    if (status === null || autoUsageRead.current) return
+    // A pasted key carries no control key: asking would only answer 400.
+    if (!status.pool.accounts.some((account) => account.authKind === 'oauth')) return
+    autoUsageRead.current = true
+    if (status.usage !== null) return
+    void loadUsage(true)
+  }, [status, loadUsage])
 
   // Seed a draft per model without overwriting one the user is typing into: a
   // status refresh after an unrelated action must not reset a half-typed value.
@@ -383,9 +535,14 @@ const refreshUsage = useCallback(() => {
           )}
           renderDetails={(account) => {
             const reading = status?.usage?.accounts.find((entry) => entry.accountId === account.id)
+            // The billing summary is the tier's authority; the sign-in snapshot
+            // is only the fallback before the first read (it says "free" even
+            // for a paid account, and never updates).
+            const plan = planName(reading?.billing?.plan ?? account.plan)
+            const state = reading?.billing === undefined ? '' : ` · ${planState(reading.billing, t)}`
             return (
               <>
-                <span>{account.authKind === 'oauth' ? t.oauthAccount : t.apiKeyAccount}{account.plan !== undefined && account.plan !== '' ? ` · ${account.plan}` : ''}</span>
+                <span>{account.authKind === 'oauth' ? t.oauthAccount : t.apiKeyAccount}{plan !== '' ? ` · ${plan}${state}` : ''}</span>
                 {reading !== undefined && reading.ok && reading.balanceUsd !== null && (
                   <span>{t.usageBalance.replace('{amount}', reading.balanceUsd)}{' · '}{t.usageReadAt.replace('{time}', formatAccountDate(reading.fetchedAt))}</span>
                 )}
@@ -497,6 +654,20 @@ const refreshUsage = useCallback(() => {
 
       <section className="dsha-group">
         <div className="dsha-grouphead">
+          <h3>{t.usageSection}</h3>
+          <button className="dsha-btn" disabled={busyAny} onClick={refreshUsage}>
+            {busy === 'usage' ? t.usageRefreshing : t.usageRefresh}
+          </button>
+        </div>
+        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.usageHint}</p>
+        {(status?.usage === null || status?.usage === undefined) && <div className="dsha-empty">{t.usageEmpty}</div>}
+        {(status?.usage?.accounts ?? []).map((entry) => (
+          <UsageCard key={entry.accountId} entry={entry} labels={t} />
+        ))}
+      </section>
+
+      <section className="dsha-group">
+        <div className="dsha-grouphead">
           <h3>{t.modelsSection}</h3>
           <button className="dsha-btn" disabled={busyAny} onClick={refreshCatalog}>
             {busy === 'catalog' ? t.catalogSyncing : t.catalogSync}
@@ -558,26 +729,6 @@ const refreshUsage = useCallback(() => {
           onReset={resetContext}
           onResetAll={resetAllContext}
         />
-      </section>
-
-      <section className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>{t.usageSection}</h3>
-          <button className="dsha-btn" disabled={busyAny} onClick={refreshUsage}>
-            {busy === 'usage' ? t.usageRefreshing : t.usageRefresh}
-          </button>
-        </div>
-        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.usageHint}</p>
-        {(status?.usage === null || status?.usage === undefined) && <div className="dsha-empty">{t.usageEmpty}</div>}
-        {status?.usage !== null && status?.usage !== undefined && (
-          <>
-            {status.usage.accounts.filter((account) => !account.ok).map((account) => (
-              <p className="dshod-warning" key={account.accountId}>
-                {account.alias}: {t.usageUnavailable.replace('{detail}', account.error)}
-              </p>
-            ))}
-          </>
-        )}
       </section>
 
       {settingsForm !== null && (
