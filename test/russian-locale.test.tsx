@@ -125,6 +125,32 @@ describe('Russian language pack', () => {
     // One language registration + one per namespace, each owning its disposer.
     expect(disposers).toHaveLength(NAMESPACES.length + 1)
   })
+
+  it('tolerates addLanguage or register collisions if another plugin already installed Russian', () => {
+    const dictionaries: string[] = []
+    const ctx = {
+      effect(factory: () => () => void) {
+        factory()
+      },
+      locale: {
+        addLanguage() {
+          throw new Error('locale "ru" is already registered')
+        },
+        register(ns: string) {
+          if (ns === NS) {
+            throw new Error(`dictionary for ${ns} is already registered`)
+          }
+          dictionaries.push(ns)
+          return () => undefined
+        },
+      },
+    }
+
+    expect(() => installRussianLocale(ctx as never)).not.toThrow()
+    // Even though NS threw, the remaining namespaces should still be registered
+    expect(dictionaries).toHaveLength(NAMESPACES.length - 1)
+    expect(dictionaries).not.toContain(NS)
+  })
 })
 
 const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT

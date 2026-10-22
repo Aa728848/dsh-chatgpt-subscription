@@ -44,8 +44,8 @@ export function installLineLocale(locale: LocaleRuntime): void {
   // card. A harness or a test double that installs only the first half still
   // renders — the card just keeps the text it has until something else
   // re-renders it, which is the pre-existing behaviour.
-  subscribe = typeof locale.subscribe === 'function' ? (listener) => locale.subscribe(listener) : NOOP_SUBSCRIBE
-  revision = typeof locale.getSnapshot === 'function' ? () => locale.getSnapshot().revision : ZERO_REVISION
+  subscribe = typeof locale?.subscribe === 'function' ? (listener) => locale.subscribe(listener) : NOOP_SUBSCRIBE
+  revision = typeof locale?.getSnapshot === 'function' ? () => locale.getSnapshot().revision : ZERO_REVISION
   bound.clear()
 }
 

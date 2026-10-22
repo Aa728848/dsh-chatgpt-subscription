@@ -57,10 +57,18 @@ export function installRussianLocale(ctx: ClientContext): void {
   // harness generation without it cannot offer the language at all, so the
   // dictionaries would be unreachable — skip the pack instead of failing the
   // whole client plugin on a service that simply lacks the seam.
-  if (typeof ctx.locale.addLanguage !== 'function') return
+  if (typeof ctx.locale?.addLanguage !== 'function') return
 
   ctx.effect(
-    () => ctx.locale.addLanguage({ id: RU_LOCALE, label: 'Русский', fallback: 'en' }),
+    () => {
+      try {
+        return ctx.locale.addLanguage({ id: RU_LOCALE, label: 'Русский', fallback: 'en' })
+      } catch {
+        // Another language pack (such as @linxin666/dsh-i18n) may have already
+        // registered Russian; keep going so our provider dictionaries still attach.
+        return () => {}
+      }
+    },
     'dsh-chatgpt-subscription: ru language',
   )
 
@@ -84,7 +92,14 @@ export function installRussianLocale(ctx: ClientContext): void {
 
   for (const [ns, dictionary] of dictionaries) {
     ctx.effect(
-      () => ctx.locale.register(ns, RU_LOCALE, dictionary),
+      () => {
+        try {
+          return ctx.locale.register(ns, RU_LOCALE, dictionary)
+        } catch {
+          // In case another pack already contributed this namespace's Russian text.
+          return () => {}
+        }
+      },
       `dsh-chatgpt-subscription: ru dictionary ${ns}`,
     )
   }
