@@ -9,7 +9,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { OpenDesignSection } from '../src/client/opendesign/OpenDesignSection.tsx'
 import { zh } from '../src/client/opendesign/locales.ts'
-import type { OpenDesignUsageDto, OpenDesignWebStatus } from '../src/shared/opendesign-contracts.ts'
+import type { OpenDesignCodingPlanDto, OpenDesignUsageDto, OpenDesignWebStatus } from '../src/shared/opendesign-contracts.ts'
 
 const STATUS: OpenDesignWebStatus = {
   enabled: true,
@@ -351,5 +351,129 @@ describe('OpenDesignSection sign-in', () => {
     }, (url, body) => posts.push({ url, body }))
     // No control key exists on a pasted key: the request would only answer 400.
     expect(posts.some((post) => post.url === '/opendesign/api/usage')).toBe(false)
+  })
+})
+
+describe('OpenDesignSection design plan windows', () => {
+  const BILLING = {
+    plan: 'go',
+    status: 'active',
+    entitlementStatus: 'active',
+    billingInterval: 'monthly',
+    periodStart: null,
+    periodEnd: null,
+    subscriptionCredits: '10000',
+    rechargeCredits: '5000',
+    totalAvailableCredits: '15000',
+    subscriptionCreditsUsd: '2.0000',
+    rechargeCreditsUsd: '6.0000',
+    totalAvailableCreditsUsd: '8.0000',
+    totalConsumedUsd: '2.0000',
+    todayConsumedUsd: '0.0000',
+    usageCount: 12,
+    updatedAt: null,
+  }
+
+  /** One readable account; `codingPlan` is what the window bars are built from. */
+  function usageWith(codingPlan: OpenDesignCodingPlanDto | undefined): OpenDesignUsageDto {
+    return {
+      accounts: [{
+        accountId: 'a3',
+        alias: 'Dev',
+        ok: true,
+        balanceUsd: '8.0000',
+        updatedAt: null,
+        error: '',
+        fetchedAt: Date.now(),
+        billing: BILLING,
+        codingPlan,
+      }],
+      fetchedAt: Date.now(),
+    }
+  }
+
+  it('draws one bar per Design Plan window, with the share each window has spent', async () => {
+    const node = await render({}, undefined, usageWith({
+      tier: 'go',
+      error: '',
+      windows: [
+        { policyId: 'five-hour', durationSeconds: 18_000, limitCredits: '1000', remainingCredits: '900', resetsAt: '2026-10-22T01:06:22.615Z' },
+        { policyId: 'seven-day', durationSeconds: 604_800, limitCredits: '1000', remainingCredits: '810', resetsAt: null },
+      ],
+    }))
+    expect(node.textContent).toContain(zh.usageWindowsTitle)
+    // The name comes from the window's own length, not from its policy id.
+    expect([...node.querySelectorAll<HTMLElement>('.dshod-plan-window-name')].map((element) => element.textContent))
+      .toEqual([
+        zh.usageWindowHours.replace('{count}', '5'),
+        zh.usageWindowDays.replace('{count}', '7'),
+      ])
+    // 900 of 1000 left is 10% spent; 810 of 1000 left is 19% spent.
+    expect(node.textContent).toContain(zh.usageWindowUsed.replace('{used}', '10'))
+    expect(node.textContent).toContain(zh.usageWindowRemaining.replace('{remaining}', '90'))
+    expect(node.textContent).toContain(zh.usageWindowUsed.replace('{used}', '19'))
+    expect(node.textContent).toContain(zh.usageWindowRemaining.replace('{remaining}', '81'))
+    const tracks = [...node.querySelectorAll<HTMLElement>('.dshod-meter-track')]
+    expect(tracks).toHaveLength(2)
+    expect(tracks.map((track) => track.getAttribute('role'))).toEqual(['progressbar', 'progressbar'])
+    expect(tracks.map((track) => track.getAttribute('aria-valuenow'))).toEqual(['10', '19'])
+    expect([...node.querySelectorAll<HTMLElement>('.dshod-meter-fill')].map((fill) => fill.style.width))
+      .toEqual(['10%', '19%'])
+    // The window that states a reset says when; the one that does not stays quiet.
+    const resets = [...node.querySelectorAll<HTMLElement>('.dshod-plan-resets')]
+    expect(resets).toHaveLength(1)
+    expect(resets[0]!.textContent!.endsWith('重置')).toBe(true)
+    expect(node.textContent).not.toContain(zh.usageWindowsUnavailable)
+  })
+
+  it('draws no bar and says so when the plan configures no window', async () => {
+    const node = await render({}, undefined, usageWith({ tier: 'go', error: '', windows: [] }))
+    expect(node.querySelector('.dshod-plan')).toBeNull()
+    expect(node.querySelector('.dshod-meter-track')).toBeNull()
+    expect(node.textContent).toContain(zh.usageWindowsUnavailable)
+    // The numeric grid is untouched: the figures the summary did send remain.
+    expect(node.textContent).toContain(zh.usageTotalCredits.replace('{credits}', '15,000').replace('{usd}', '8.0000'))
+    expect(node.textContent).toContain(zh.usageTotalConsumed.replace('{amount}', '2.0000'))
+  })
+
+  it('draws no bar when the window read failed, even if a window list came with it', async () => {
+    const node = await render({}, undefined, usageWith({
+      tier: 'go',
+      error: 'HTTP 502',
+      windows: [{ policyId: 'five-hour', durationSeconds: 18_000, limitCredits: '1000', remainingCredits: '900', resetsAt: null }],
+    }))
+    expect(node.querySelector('.dshod-plan')).toBeNull()
+    expect(node.querySelector('.dshod-meter-track')).toBeNull()
+    expect(node.textContent).toContain(zh.usageWindowsUnavailable)
+  })
+
+  it('says the windows are unavailable when the account carries no plan reading', async () => {
+    const node = await render({}, undefined, usageWith(undefined))
+    expect(node.querySelector('.dshod-plan')).toBeNull()
+    expect(node.textContent).toContain(zh.usageWindowsUnavailable)
+  })
+
+  it('names the console, not a failed read, when the endpoint refuses plugin credentials', async () => {
+    const node = await render({}, undefined, usageWith({
+      tier: 'go',
+      error: 'HTTP 401: unauthenticated (tried: bearer control key; bearer runtime key; x-api-key runtime key)',
+      windows: [],
+    }))
+    expect(node.querySelector('.dshod-meter-track')).toBeNull()
+    expect(node.textContent).toContain(zh.usageWindowsConsoleOnly)
+    // The windows are configured; blaming the read would send the user to retry
+    // something that can never succeed from here.
+    expect(node.textContent).not.toContain(zh.usageWindowsUnavailable)
+  })
+
+  it('still blames the read for a status that is not about credentials', async () => {
+    const node = await render({}, undefined, usageWith({
+      tier: 'go',
+      error: 'HTTP 404: coding_plan_configuration_unavailable',
+      windows: [],
+    }))
+    expect(node.querySelector('.dshod-meter-track')).toBeNull()
+    expect(node.textContent).toContain(zh.usageWindowsUnavailable)
+    expect(node.textContent).not.toContain(zh.usageWindowsConsoleOnly)
   })
 })

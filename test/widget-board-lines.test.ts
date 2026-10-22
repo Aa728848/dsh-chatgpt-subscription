@@ -245,9 +245,97 @@ describe('line quota normalizers', () => {
         ],
       },
     })
+    // No codingPlan on the reading is no window: the balance is what this line
+    // can state, and an empty list is the honest way to say "unmeasured".
     expect(facts.quota?.windows).toEqual([])
     expect(facts.quota?.credits).toEqual({ unlimited: false, balance: '12.34 USD' })
     expect(facts.planLabel).toBe('free')
+  })
+
+  it('draws the Design Plan windows and keeps the wallet on the credit figure', () => {
+    const facts = normalizeOpenDesignQuota({
+      authenticated: true,
+      pool: { activeAccountId: 'acc_1' },
+      usage: {
+        fetchedAt: 5,
+        accounts: [
+          {
+            accountId: 'acc_1',
+            alias: 'For SK',
+            ok: true,
+            balanceUsd: '1.5000',
+            updatedAt: null,
+            error: '',
+            fetchedAt: 5,
+            billing: { plan: 'go' },
+            // The real allowance: two integer amounts per window, lengths in
+            // SECONDS, resets as ISO.
+            codingPlan: {
+              tier: 'go',
+              error: '',
+              windows: [
+                { policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '900', limitCredits: '1000', resetsAt: '2026-10-21T08:00:00.000Z' },
+                { policyId: 'seven_day', durationSeconds: 604800, remainingCredits: '8100', limitCredits: '10000', resetsAt: '2026-10-27T00:00:00.000Z' },
+              ],
+            },
+          },
+        ],
+      },
+    })
+    expect(facts.quota?.windows).toEqual([
+      // 100 of 1000 spent is 10 % USED — the console's 90 % remaining is
+      // 100 − this, derived by whoever prints it. The label stays empty: the
+      // card words the window from its length.
+      { label: '', usedPercent: 10, windowMinutes: 300, resetsAt: Date.parse('2026-10-21T08:00:00.000Z') },
+      { label: '', usedPercent: 19, windowMinutes: 10080, resetsAt: Date.parse('2026-10-27T00:00:00.000Z') },
+    ])
+    // The wallet balance is a different quantity from a window's allowance.
+    expect(facts.quota?.credits).toEqual({ unlimited: false, balance: '1.5000 USD' })
+    expect(facts.quota?.error).toBe(null)
+    expect(facts.planLabel).toBe('go')
+  })
+
+  it('states no window when the Design Plan could not be read, and says why', () => {
+    const facts = normalizeOpenDesignQuota({
+      authenticated: true,
+      pool: { activeAccountId: 'acc_1' },
+      usage: {
+        fetchedAt: 5,
+        accounts: [
+          {
+            accountId: 'acc_1',
+            alias: 'For SK',
+            ok: true,
+            balanceUsd: '1.5000',
+            updatedAt: null,
+            error: '',
+            fetchedAt: 5,
+            billing: { plan: 'go' },
+            codingPlan: { tier: null, windows: [], error: 'HTTP 404: coding_plan_configuration_unavailable' },
+          },
+        ],
+      },
+    })
+    // No padded 0 % bar: an empty list plus the reason is the whole answer.
+    expect(facts.quota?.windows).toEqual([])
+    expect(facts.quota?.error).toContain('coding_plan_configuration_unavailable')
+    // The wallet read is unaffected by the plan's refusal.
+    expect(facts.quota?.credits).toEqual({ unlimited: false, balance: '1.5000 USD' })
+  })
+
+  it('keeps the OpenDesign balance when no billing read ever arrived', () => {
+    const facts = normalizeOpenDesignQuota({
+      authenticated: true,
+      pool: { activeAccountId: 'acc_1' },
+      usage: {
+        fetchedAt: 5,
+        accounts: [{ accountId: 'acc_1', alias: 'For SK', ok: true, balanceUsd: '7.00', updatedAt: null, error: '', fetchedAt: 5 }],
+      },
+    })
+    // An unread plan is no window, not 0 %: the credits figure itself is still
+    // real and must survive.
+    expect(facts.quota?.windows).toEqual([])
+    expect(facts.quota?.credits).toEqual({ unlimited: false, balance: '7.00 USD' })
   })
 
   it('derives a share some lines only state as a remainder', () => {

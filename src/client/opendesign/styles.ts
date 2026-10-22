@@ -5,6 +5,11 @@ import { installPluginStyle } from '../common/plugin-style.ts'
  * controls, which the shared `.dsha-*` vocabulary has no expression for.
  * Everything else on the tab reuses the shared card.
  *
+ * The composer meter is the one shared-markup rule kept here: every line feeds
+ * the shared badge differently, and this line is the only one that hands it a
+ * remaining share to draw, so the rule lives beside the card that produces the
+ * figure instead of being repeated in every line's sheet.
+ *
  * `.dshod-input` mirrors the input styling another line declares under an
  * unprefixed name on purpose: that class is that line's own, and a prefix of
  * ours keeps this card's look from drifting with someone else's sheet.
@@ -34,6 +39,17 @@ export function installOpenDesignStyles(): void {
 .dshod-quota-status{color:var(--dsw-alias-label-secondary);font-size:12px}
 .dshod-quota-meta{color:var(--dsw-alias-label-tertiary);font-size:12px}
 .dshod-quota-grid{color:var(--dsw-alias-label-secondary);display:grid;font-size:12px;gap:4px 16px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.dshod-plan{display:flex;flex-direction:column;gap:6px;margin-top:2px}
+.dshod-plan-title{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600}
+.dshod-plan-window{display:flex;flex-direction:column;gap:4px}
+.dshod-plan-window-head{align-items:baseline;display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between}
+.dshod-plan-window-name{color:var(--dsw-alias-label-primary);font-size:12px}
+.dshod-plan-window-figures{color:var(--dsw-alias-label-secondary);font-size:12px;font-variant-numeric:tabular-nums}
+.dshod-plan-resets{color:var(--dsw-alias-label-tertiary);font-size:11px}
+.dshod-meter-track{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;display:block;height:6px;overflow:hidden}
+.dshod-meter-fill{background:var(--dsw-alias-brand-primary);display:block;height:100%;transition:width .2s ease}
+.dsha-composer-quota-meter{align-self:center;background:var(--dsw-alias-border-l2);border-radius:999px;display:inline-block;flex:none;height:3px;overflow:hidden;width:24px}
+.dsha-composer-quota-meter-fill{background:var(--dsw-alias-brand-primary);display:block;height:100%}
 .dshod-adv-control{width:240px;max-width:100%;flex:none}
 .dshod-adv-control.dsha-select{max-width:240px;min-width:240px;width:240px}
 .dshod-adv-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}

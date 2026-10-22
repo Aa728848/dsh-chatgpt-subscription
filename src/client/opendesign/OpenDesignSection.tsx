@@ -8,6 +8,7 @@ import {
   OPENDESIGN_CONSOLE_URL,
   type OpenDesignAccountSummaryDto,
   type OpenDesignBillingDto,
+  type OpenDesignCodingPlanDto,
   type OpenDesignLoginFlowDto,
   type OpenDesignUsageAccountDto,
   type OpenDesignWebStatus,
@@ -64,6 +65,80 @@ function formatUsd(value: string | null): string {
   return value === null ? '—' : value
 }
 
+/** A number the card prints bare: the surrounding label already carries the unit. */
+function formatDecimal(value: number): string {
+  try {
+    return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)
+  } catch {
+    return String(value)
+  }
+}
+
+/** The width a share may draw: inside its own track even if the figure is not. */
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value))
+}
+
+/**
+ * A window's length in the words the service sold it in.
+ *
+ * A policy states seconds, and the tier's windows are round days and hours:
+ * naming 604800 seconds "168 小时" would describe the window differently from
+ * the console the user reads it in. A whole day stays a day; anything shorter
+ * counts hours, then minutes.
+ */
+function planWindowName(seconds: number, labels: typeof zh): string {
+  if (seconds >= 86_400 && seconds % 86_400 === 0) {
+    return labels.usageWindowDays.replace('{count}', String(seconds / 86_400))
+  }
+  if (seconds >= 3_600) {
+    return labels.usageWindowHours.replace('{count}', formatDecimal(seconds / 3_600))
+  }
+  return labels.usageWindowMinutes.replace('{count}', formatDecimal(seconds / 60))
+}
+
+/**
+ * One Design Plan window as the card draws it.
+ *
+ * `used` is derived here rather than served: the endpoint states each window's
+ * own grant and what is left of it, so the share is measurable — and a window
+ * that cannot state one carries null so no bar is invented for it.
+ */
+interface PlanWindowRow {
+  key: string
+  name: string
+  used: number | null
+  remaining: number | null
+  resetsAt: number | null
+}
+
+/**
+ * The windows worth drawing, or none at all.
+ *
+ * A failed window read and a workspace that configures no window mean the same
+ * thing here: there is no measurement to draw, so the caller says that in words
+ * instead of showing an empty bar.
+ */
+function planWindowRows(plan: OpenDesignCodingPlanDto | undefined, labels: typeof zh): PlanWindowRow[] {
+  if (plan === undefined || plan.error !== '') return []
+  return plan.windows.map((window, index) => {
+    const limit = Number(window.limitCredits)
+    const left = Number(window.remainingCredits)
+    const measurable = Number.isFinite(limit) && Number.isFinite(left) && limit > 0
+    const used = measurable ? clampPercent(Math.round(((limit - left) / limit) * 1000) / 10) : null
+    const resetAt = window.resetsAt === null ? Number.NaN : Date.parse(window.resetsAt)
+    return {
+      // The index keeps a duplicated or absent policy id from collapsing two
+      // windows into one React key.
+      key: `${window.policyId}-${index}`,
+      name: planWindowName(window.durationSeconds, labels),
+      used,
+      remaining: used === null ? null : clampPercent(Math.round((100 - used) * 10) / 10),
+      resetsAt: Number.isFinite(resetAt) ? resetAt : null,
+    }
+  })
+}
+
 /** ISO instant as the card's date, or the honest dash. */
 function formatIso(value: string | null): string {
   if (value === null) return '—'
@@ -91,15 +166,32 @@ function settingsFormOf(status: OpenDesignWebStatus): SettingsForm {
 /**
  * One account's plan and credit facts.
  *
- * Deliberately numbers, not a percentage bar: the summary states what is left
- * (subscription credits, top-up credits) and what was consumed, but not the
- * grant those figures are a share of, and this card does not invent a total to
- * divide by. A failed wallet read still shows the billing figures, because they
- * are different surfaces of the same account.
+ * The billing summary prices what is left and what was consumed but omits the
+ * grant, so nothing on it can be drawn as "percent of the period used". The
+ * Design Plan endpoint does state a grant per window — five hours, seven days —
+ * beside what is left of it, so those windows are the only bars drawn here, each
+ * measured against its own policy. A failed window read, or a workspace with no
+ * window configured, gets one weak line instead of an empty bar, and the numeric
+ * grid still carries every figure the summary did send. A failed wallet read
+ * still shows the billing figures, because they are different surfaces of the
+ * same account.
  */
 function UsageCard(props: { entry: OpenDesignUsageAccountDto; labels: typeof zh }): React.ReactElement {
   const { entry, labels } = props
   const billing = entry.billing
+  // A window is drawn only when its share is measurable, so a card whose plan
+  // read failed states that in words rather than filling a bar with zero.
+  const planWindows = planWindowRows(entry.codingPlan, labels)
+  const planHasBar = planWindows.some((window) => window.used !== null)
+  // A 401/403 from this endpoint is not a transient read failure: it refuses
+  // every credential this plugin can hold, so the windows exist and only the
+  // console can show them. Saying "could not read" there would blame the read
+  // for what is a fact about the surface.
+  const planHint = planHasBar
+    ? null
+    : /401|403/.test(entry.codingPlan?.error ?? '')
+      ? labels.usageWindowsConsoleOnly
+      : labels.usageWindowsUnavailable
   const credits = (creditsValue: string | null, usdValue: string | null): { credits: string; usd: string } => ({
     credits: formatCredits(creditsValue),
     usd: formatUsd(usdValue),
@@ -148,6 +240,42 @@ function UsageCard(props: { entry: OpenDesignUsageAccountDto; labels: typeof zh 
               <span>{labels.usageUsageCount.replace('{count}', String(billing.usageCount))}</span>
             )}
           </div>
+          {planHasBar && (
+            <div className="dshod-plan">
+              <span className="dshod-plan-title">{labels.usageWindowsTitle}</span>
+              {planWindows.map((window) => (
+                <div className="dshod-plan-window" key={window.key}>
+                  <div className="dshod-plan-window-head">
+                    <span className="dshod-plan-window-name">{window.name}</span>
+                    {window.used !== null && window.remaining !== null && (
+                      <span className="dshod-plan-window-figures">
+                        {labels.usageWindowUsed.replace('{used}', formatDecimal(window.used))}
+                        {' · '}
+                        {labels.usageWindowRemaining.replace('{remaining}', formatDecimal(window.remaining))}
+                      </span>
+                    )}
+                  </div>
+                  {window.used !== null && (
+                    <span
+                      className="dshod-meter-track"
+                      role="progressbar"
+                      aria-label={`${window.name} · ${labels.usageWindowUsed.replace('{used}', formatDecimal(window.used))}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={window.used}
+                    >
+                      <i className="dshod-meter-fill" style={{ width: `${clampPercent(window.used)}%` }} />
+                    </span>
+                  )}
+                  {window.resetsAt !== null && (
+                    <span className="dshod-plan-resets">
+                      {labels.usageWindowResetsAt.replace('{time}', formatAccountDate(window.resetsAt))}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </>
       )}
       <span className="dshod-quota-meta">
@@ -155,6 +283,7 @@ function UsageCard(props: { entry: OpenDesignUsageAccountDto; labels: typeof zh 
           <>{labels.usageBalance.replace('{amount}', entry.balanceUsd)}{' · '}</>
         )}
         {labels.usageReadAt.replace('{time}', formatAccountDate(entry.fetchedAt))}
+        {planHint !== null && <>{' · '}{planHint}</>}
       </span>
       {!entry.ok && <p className="dshod-warning">{labels.usageUnavailable.replace('{detail}', entry.error)}</p>}
     </div>

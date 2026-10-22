@@ -141,7 +141,169 @@ export function parseEnvProxy(
   return null
 }
 
-export function detectSystemProxy(platform: NodeJS.Platform = process.platform, env: Record<string, string | undefined> = process.env): string | null {
+export interface ParseNoProxyOptions {
+  /**
+   * `$DSH_HOME/.env`, consulted after the process environment; `null` disables
+   * the file fallback, exactly like {@link ParseEnvProxyOptions}.
+   */
+  envFile?: string | null
+}
+
+/**
+ * The raw `NO_PROXY` list, or an empty string when none is configured.
+ *
+ * Read next to the proxy itself on purpose: a proxy that a line is *told* to use
+ * and a bypass list that lives somewhere else are how "the local gateway
+ * suddenly goes through Clash" happens.
+ */
+export function parseNoProxy(
+  env: Record<string, string | undefined> = process.env,
+  options: ParseNoProxyOptions = {},
+): string {
+  const direct = env.NO_PROXY ?? env.no_proxy
+  if (direct && direct.trim()) return direct.trim()
+  if (options.envFile === null) return ''
+
+  try {
+    const dshHome = env.DSH_HOME || path.join(os.homedir(), '.dsh')
+    const envFile = options.envFile ?? path.join(dshHome, '.env')
+    if (fs.existsSync(envFile)) {
+      const content = fs.readFileSync(envFile, 'utf8')
+      const match = content.match(/^(?:export\s+)?(?:NO_PROXY|no_proxy)\s*=\s*["']?([^"'\r\n]*)["']?/m)
+      if (match) return (match[1] ?? '').trim()
+    }
+  } catch {
+    // best-effort fallback
+  }
+
+  return ''
+}
+
+/** {@link shouldBypassProxy} needs a port to honor a `host:port` entry. */
+function defaultPortFor(protocol: string): string {
+  if (protocol === 'http:') return '80'
+  if (protocol === 'https:') return '443'
+  return ''
+}
+
+function normalizeHostForMatch(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+}
+
+/**
+ * Whether a host is loopback, and therefore never worth a proxy hop.
+ *
+ * The whole `127.0.0.0/8` block, not just `127.0.0.1`: a second loopback alias
+ * is a normal way to run a local gateway, and a proxy cannot reach it any
+ * better than the process itself can.
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+  const host = normalizeHostForMatch(hostname)
+  if (host === 'localhost' || host.endsWith('.localhost')) return true
+  if (host === '::1') return true
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  return v4 !== null && v4[1] === '127'
+}
+
+/**
+ * Standard `NO_PROXY` matching: `*`, exact hosts, domain suffixes, `host:port`.
+ *
+ * Deliberately not CIDR: a proxy configured for this plugin is a local GUI
+ * proxy, and the entries that matter are the ones a user types.
+ */
+export function noProxyBypasses(hostname: string, port: string, list: string): boolean {
+  const host = normalizeHostForMatch(hostname)
+  for (const raw of list.split(',')) {
+    const entry = raw.trim().toLowerCase()
+    if (!entry) continue
+    if (entry === '*') return true
+
+    const withoutScheme = entry.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/\/.*$/, '')
+    let entryHost = withoutScheme
+    let entryPort = ''
+    const bracketed = withoutScheme.match(/^\[([^\]]+)\](?::(\d+))?$/)
+    if (bracketed) {
+      entryHost = bracketed[1]
+      entryPort = bracketed[2] ?? ''
+    } else if (withoutScheme.split(':').length === 2) {
+      const [name, candidate] = withoutScheme.split(':')
+      if (/^\d+$/.test(candidate)) {
+        entryHost = name
+        entryPort = candidate
+      }
+    }
+
+    const suffix = entryHost.replace(/^\./, '').replace(/\.$/, '')
+    if (!suffix) continue
+    if (entryPort && entryPort !== port) continue
+    if (host === suffix || host.endsWith('.' + suffix)) return true
+  }
+  return false
+}
+
+/**
+ * Whether a request target must skip the proxy.
+ *
+ * Loopback first: a local gateway behind a proxy hop is a request the proxy has
+ * to refuse (or worse, forwards to itself), and the plugin's own loopback reads
+ * already use a bare fetch for the same reason.
+ */
+export function shouldBypassProxy(target: URL | string, noProxyList = ''): boolean {
+  let url: URL
+  try {
+    url = typeof target === 'string' ? new URL(target) : target
+  } catch {
+    return false
+  }
+  if (isLoopbackHostname(url.hostname)) return true
+  if (!noProxyList) return false
+  return noProxyBypasses(url.hostname, url.port || defaultPortFor(url.protocol), noProxyList)
+}
+
+/**
+ * Read one GNOME proxy setting; `null` when `gsettings` is absent or the key is
+ * unreadable (headless box, no dconf session).
+ */
+function readGsettings(key: string): string | null {
+  try {
+    const stdout = execSync(`gsettings get ${key}`, { timeout: 1500, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+    return stdout.trim()
+  } catch {
+    return null
+  }
+}
+
+/** gsettings prints strings single-quoted, ports bare, and absent keys as ''. */
+function gsettingsString(value: string | null): string {
+  if (value === null) return ''
+  return value.replace(/^['"]|['"]$/g, '').trim()
+}
+
+/**
+ * GNOME's manual proxy, the Linux equivalent of the Windows registry read.
+ *
+ * `auto` is a PAC URL, which cannot be applied by posting through an agent, and
+ * `none` means no system proxy; both fall through to the environment.
+ */
+export function parseLinuxSystemProxy(read: (key: string) => string | null): string | null {
+  if (gsettingsString(read('org.gnome.system.proxy mode')).toLowerCase() !== 'manual') return null
+
+  const scheme = (name: 'https' | 'http' | 'socks'): string | null => {
+    const host = gsettingsString(read(`org.gnome.system.proxy.${name} host`))
+    const port = Number(gsettingsString(read(`org.gnome.system.proxy.${name} port`)))
+    if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
+    const authority = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+    return `${name === 'socks' ? 'socks5' : 'http'}://${authority}:${port}`
+  }
+
+  return scheme('https') ?? scheme('http') ?? scheme('socks')
+}
+
+export function detectSystemProxy(
+  platform: NodeJS.Platform = process.platform,
+  env: Record<string, string | undefined> = process.env,
+  readSettings: (key: string) => string | null = readGsettings,
+): string | null {
   try {
     if (platform === 'win32') {
       const stdout = execSync(
@@ -158,12 +320,26 @@ export function detectSystemProxy(platform: NodeJS.Platform = process.platform, 
       })
       const detected = parseMacOsScutilProxy(stdout)
       if (detected) return detected
+    } else if (platform === 'linux') {
+      const detected = parseLinuxSystemProxy(readSettings)
+      if (detected) return detected
     }
   } catch {
     // If system registry or scutil fails (e.g. restricted sandbox/permission), fall through to environment variables
   }
 
   return parseEnvProxy(env)
+}
+
+/**
+ * The URL a fetch call targets, for the bypass decision.
+ *
+ * A `Request` exposes its URL without consuming the body, so reading it here
+ * costs the request nothing.
+ */
+function requestTarget(input: Parameters<FetchLike>[0]): string | URL {
+  if (typeof input === 'string' || input instanceof URL) return input
+  return (input as Request).url
 }
 
 /** Called with the proxy URL the first time detection reports one after a `null`. */
@@ -173,6 +349,12 @@ export interface ProxyFetchOptions {
   getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>
   baseFetch?: FetchLike
   systemProxyDetector?: () => string | null
+  /**
+   * The `NO_PROXY` list, read per request (subject to the same TTL as the system
+   * proxy) so an edit takes effect without a restart. A test injects this rather
+   * than inheriting the machine's own bypass list.
+   */
+  noProxyReader?: () => string
   logger?: Pick<Console, 'info' | 'warn' | 'error'>
 }
 
@@ -180,10 +362,13 @@ export class ProxyManager {
   private readonly getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>
   private readonly baseFetch: FetchLike
   private readonly systemProxyDetector: () => string | null
+  private readonly noProxyReader: () => string
   private readonly logger?: Pick<Console, 'info' | 'warn' | 'error'>
 
   private cachedSystemProxy: string | null = null
   private lastSystemProxyCheck = 0
+  private cachedNoProxy = ''
+  private lastNoProxyCheck = 0
   private detected = false
   private readonly proxyListeners = new Set<SystemProxyListener>()
   private readonly agents = new Map<string, ProxyAgent>()
@@ -192,6 +377,7 @@ export class ProxyManager {
     this.getPreferences = options.getPreferences
     this.baseFetch = options.baseFetch ?? fetch
     this.systemProxyDetector = options.systemProxyDetector ?? (() => detectSystemProxy())
+    this.noProxyReader = options.noProxyReader ?? (() => parseNoProxy())
     this.logger = options.logger
   }
 
@@ -223,6 +409,25 @@ export class ProxyManager {
       }
     }
     return this.cachedSystemProxy
+  }
+
+  /**
+   * The active `NO_PROXY` list, re-read at most once per TTL.
+   *
+   * A reader that throws (an unreadable `$DSH_HOME/.env`) reads as "no bypass
+   * list", never as "bypass everything": the wrong guess in that direction would
+   * take an active proxy away from every line at once.
+   */
+  getNoProxyList(force = false): string {
+    const now = Date.now()
+    if (!force && now - this.lastNoProxyCheck < SYSTEM_PROXY_CACHE_TTL_MS) return this.cachedNoProxy
+    this.lastNoProxyCheck = now
+    try {
+      this.cachedNoProxy = this.noProxyReader().trim()
+    } catch {
+      this.cachedNoProxy = ''
+    }
+    return this.cachedNoProxy
   }
 
   /**
@@ -275,6 +480,14 @@ export class ProxyManager {
       const activeProxy = this.resolveActiveProxyUrl()
 
       if (!activeProxy) {
+        return this.baseFetch(input, init)
+      }
+
+      // A loopback target or a `NO_PROXY` host is reached better by this process
+      // than through a proxy hop: the plugin's own loopback reads already use a
+      // bare fetch for that reason, and a proxy whose DNS answers with its own
+      // fake-ip range (Clash/Mihomo) cannot be used to reach its own host at all.
+      if (shouldBypassProxy(requestTarget(input), this.getNoProxyList())) {
         return this.baseFetch(input, init)
       }
 

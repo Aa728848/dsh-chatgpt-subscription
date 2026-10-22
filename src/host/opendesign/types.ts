@@ -58,6 +58,40 @@ export const WALLET_BALANCE_PATH = '/wallet/balance'
 export const BILLING_SUMMARY_PATH = '/billing/summary'
 
 /**
+ * The workspace the signed-in account is CURRENTLY on.
+ *
+ * This is what the console itself reads to pick "the active workspace": its
+ * response object carries `activeWorkspaceId` beside `workspaceType` and `role`.
+ * It is the first place the coding-plan read looks for an id, because it answers
+ * "where is this account right now" rather than "where could it go".
+ */
+export const CURRENT_WORKSPACE_PATH = '/workspaces/current'
+
+/**
+ * The workspace list: the FALLBACK source of that id.
+ *
+ * `GET {amr}/workspaces` with the same control key answers every workspace the
+ * account can see. It is only consulted when {@link CURRENT_WORKSPACE_PATH} does
+ * not state an id — a listing describes what the account could switch to, while
+ * the coding-plan read needs the one workspace it is on. The device flow returns
+ * neither, so these two reads are the only way to learn an id at all.
+ */
+export const WORKSPACES_PATH = '/workspaces'
+
+/**
+ * The Design Plan's real allowance, per workspace: the 5-hour and 7-day windows
+ * the console draws.
+ *
+ * Appended to `{WORKSPACES_PATH}/{workspaceId}`. It is the only surface of this
+ * line that states a bounded window — `/billing/summary` states credits and the
+ * tier but never a rolling allowance — and it authenticates with the control key
+ * as a Bearer token plus `x-vela-workspace-id`, exactly like the wallet read.
+ * The console itself calls it with a browser session, so a control-key Bearer is
+ * unverified: a refusal is reported as data, never as a reason to guess.
+ */
+export const CODING_PLAN_USAGE_SUFFIX = '/billing/coding-plan-usage'
+
+/**
  * What the create call says about this client. The service stores host /
  * profile / cliVersion per authorization (its console lists devices by them);
  * the profile vocabulary is 'prod' | 'test' | 'feature-test' | 'local' per the

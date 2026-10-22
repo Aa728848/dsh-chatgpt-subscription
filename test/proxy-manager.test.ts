@@ -5,10 +5,14 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ProxyManager,
+  detectSystemProxy,
   normalizeProxyUrl,
   parseEnvProxy,
+  parseLinuxSystemProxy,
   parseMacOsScutilProxy,
+  parseNoProxy,
   parseWindowsProxyRegistry,
+  shouldBypassProxy,
 } from '../src/host/proxy-manager.ts'
 
 describe('Proxy URL Normalization', () => {
@@ -334,5 +338,197 @@ describe('ProxyManager', () => {
     expect(elapsed).toBeGreaterThan(10_000)
     const code = (error as { cause?: { code?: string } }).cause?.code
     expect(code).not.toBe('UND_ERR_CONNECT_TIMEOUT')
+  })
+})
+
+describe('Linux GNOME Proxy Parser', () => {
+  function reader(values: Record<string, string>) {
+    return (key: string): string | null => values[key] ?? null
+  }
+
+  it('reads the manual https proxy, the way gsettings prints it', () => {
+    expect(parseLinuxSystemProxy(reader({
+      'org.gnome.system.proxy mode': "'manual'",
+      'org.gnome.system.proxy.https host': "'127.0.0.1'",
+      'org.gnome.system.proxy.https port': '7890',
+    }))).toBe('http://127.0.0.1:7890')
+  })
+
+  it('prefers https over http over socks', () => {
+    const values = {
+      'org.gnome.system.proxy mode': "'manual'",
+      'org.gnome.system.proxy.https host': "'127.0.0.1'",
+      'org.gnome.system.proxy.https port': '8443',
+      'org.gnome.system.proxy.http host': "'127.0.0.1'",
+      'org.gnome.system.proxy.http port': '8080',
+      'org.gnome.system.proxy.socks host': "'127.0.0.1'",
+      'org.gnome.system.proxy.socks port': '1080',
+    }
+    expect(parseLinuxSystemProxy(reader(values))).toBe('http://127.0.0.1:8443')
+    expect(parseLinuxSystemProxy(reader({ ...values, 'org.gnome.system.proxy.https host': "''" }))).toBe('http://127.0.0.1:8080')
+    expect(parseLinuxSystemProxy(reader({
+      'org.gnome.system.proxy mode': "'manual'",
+      'org.gnome.system.proxy.socks host': "'127.0.0.1'",
+      'org.gnome.system.proxy.socks port': '1080',
+    }))).toBe('socks5://127.0.0.1:1080')
+  })
+
+  it('ignores a PAC URL, a disabled proxy, and an unreadable gsettings', () => {
+    expect(parseLinuxSystemProxy(reader({ 'org.gnome.system.proxy mode': "'auto'" }))).toBeNull()
+    expect(parseLinuxSystemProxy(reader({ 'org.gnome.system.proxy mode': "'none'" }))).toBeNull()
+    // The headless case: no dconf session to ask, and gsettings is not installed.
+    expect(parseLinuxSystemProxy(() => null)).toBeNull()
+  })
+
+  it('refuses a host without a usable port, and brackets an IPv6 host', () => {
+    expect(parseLinuxSystemProxy(reader({
+      'org.gnome.system.proxy mode': "'manual'",
+      'org.gnome.system.proxy.https host': "'127.0.0.1'",
+      'org.gnome.system.proxy.https port': '0',
+    }))).toBeNull()
+    expect(parseLinuxSystemProxy(reader({
+      'org.gnome.system.proxy mode': "'manual'",
+      'org.gnome.system.proxy.https host': "''",
+      'org.gnome.system.proxy.https port': '7890',
+    }))).toBeNull()
+    expect(parseLinuxSystemProxy(reader({
+      'org.gnome.system.proxy mode': "'manual'",
+      'org.gnome.system.proxy.https host': "'::1'",
+      'org.gnome.system.proxy.https port': '7890',
+    }))).toBe('http://[::1]:7890')
+  })
+})
+
+describe('Linux system proxy detection', () => {
+  it('asks gsettings before the environment on linux', () => {
+    const detected = detectSystemProxy('linux', { HTTPS_PROXY: 'http://127.0.0.1:9999' }, (key) => ({
+      'org.gnome.system.proxy mode': "'manual'",
+      'org.gnome.system.proxy.https host': "'127.0.0.1'",
+      'org.gnome.system.proxy.https port': '7890',
+    } as Record<string, string>)[key] ?? null)
+    expect(detected).toBe('http://127.0.0.1:7890')
+  })
+
+  it('falls back to the environment when the desktop reports nothing', () => {
+    expect(detectSystemProxy('linux', { HTTPS_PROXY: 'http://127.0.0.1:8888' }, () => null)).toBe('http://127.0.0.1:8888')
+  })
+})
+
+describe('NO_PROXY reading and matching', () => {
+  it('reads either spelling from the environment', () => {
+    expect(parseNoProxy({ NO_PROXY: ' .corp.example ' }, { envFile: null })).toBe('.corp.example')
+    expect(parseNoProxy({ no_proxy: '*' }, { envFile: null })).toBe('*')
+    expect(parseNoProxy({}, { envFile: null })).toBe('')
+  })
+
+  it('reads the list from $DSH_HOME/.env when the environment has none', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-noproxy-'))
+    const envFile = path.join(dir, '.env')
+    fs.writeFileSync(envFile, "export NO_PROXY='.corp.example,localhost:9090'\n", 'utf8')
+    try {
+      expect(parseNoProxy({}, { envFile })).toBe('.corp.example,localhost:9090')
+      // An empty assignment is not a list, and neither is a commented one.
+      fs.writeFileSync(envFile, '# NO_PROXY=everything\nNO_PROXY=\n', 'utf8')
+      expect(parseNoProxy({}, { envFile })).toBe('')
+    } finally {
+      fs.rmSync(envFile, { force: true })
+      fs.rmdirSync(dir)
+    }
+  })
+
+  it('bypasses loopback whatever the list says', () => {
+    expect(shouldBypassProxy('http://127.0.0.1:9090/v1/messages')).toBe(true)
+    expect(shouldBypassProxy('http://127.42.0.9:8080/')).toBe(true)
+    expect(shouldBypassProxy('http://localhost:11434/api/chat')).toBe(true)
+    expect(shouldBypassProxy('http://[::1]:3000/')).toBe(true)
+    // A public host keeps the proxy: cline / ollama / opendesign all live there.
+    expect(shouldBypassProxy('https://api.cline.bot/api/v1')).toBe(false)
+    expect(shouldBypassProxy('https://ollama.com/api/tags')).toBe(false)
+  })
+
+  it('matches *, suffixes, exact hosts and host:port entries', () => {
+    expect(shouldBypassProxy('https://api.corp.example/v1', '*')).toBe(true)
+    expect(shouldBypassProxy('https://api.corp.example/v1', '.corp.example')).toBe(true)
+    expect(shouldBypassProxy('https://corp.example/v1', 'corp.example')).toBe(true)
+    expect(shouldBypassProxy('https://api.corp.example/v1', 'other.example')).toBe(false)
+    expect(shouldBypassProxy('http://gateway.lan:8080/', 'gateway.lan:8080')).toBe(true)
+    expect(shouldBypassProxy('http://gateway.lan:9090/', 'gateway.lan:8080')).toBe(false)
+    expect(shouldBypassProxy('https://api.openai.com/', 'http://api.openai.com/')).toBe(true)
+    expect(shouldBypassProxy('https://api.openai.com/', ' not-a-host , \napi.openai.com')).toBe(true)
+  })
+
+  it('does not bypass a target it cannot parse', () => {
+    expect(shouldBypassProxy('/relative/path')).toBe(false)
+  })
+})
+
+describe('ProxyManager bypass path', () => {
+  it('sends a loopback request straight to baseFetch while a proxy is active', async () => {
+    const baseFetch = vi.fn(async () => new Response('local', { status: 200 }))
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: 'http://127.0.0.1:1' }),
+      baseFetch: baseFetch as any,
+      noProxyReader: () => '',
+    })
+
+    const response = await manager.createFetch()('http://127.0.0.1:9090/admin', { method: 'POST' })
+    expect(await response.text()).toBe('local')
+    expect(baseFetch).toHaveBeenCalledTimes(1)
+
+    // A Request carries the same URL and must bypass just the same.
+    await manager.createFetch()(new Request('http://localhost:11434/api/chat'))
+    expect(baseFetch).toHaveBeenCalledTimes(2)
+
+    manager.dispose()
+  })
+
+  it('honors NO_PROXY for a host that would otherwise be proxied', async () => {
+    const baseFetch = vi.fn(async () => new Response('direct', { status: 200 }))
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: 'http://127.0.0.1:1' }),
+      baseFetch: baseFetch as any,
+      noProxyReader: () => ' .corp.example ,gateway.lan:8080 ',
+    })
+
+    expect(await (await manager.createFetch()('https://api.corp.example/v1')).text()).toBe('direct')
+    expect(baseFetch).toHaveBeenCalledTimes(1)
+
+    manager.dispose()
+  })
+
+  it('keeps the proxy for a host the list does not name', async () => {
+    const baseFetch = vi.fn(async () => new Response('should not run', { status: 200 }))
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: 'http://127.0.0.1:1' }),
+      baseFetch: baseFetch as any,
+      noProxyReader: () => 'corp.example',
+    })
+
+    await expect(manager.createFetch()('https://api.example.com/v1')).rejects.toThrow()
+    expect(baseFetch).not.toHaveBeenCalled()
+
+    manager.dispose()
+  })
+
+  it('re-reads the list after the TTL and treats a throwing reader as empty', () => {
+    let list = 'corp.example'
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }),
+      systemProxyDetector: () => 'http://127.0.0.1:7890',
+      noProxyReader: () => list,
+    })
+    expect(manager.getNoProxyList()).toBe('corp.example')
+    list = 'other.example'
+    // Cached for the TTL, so the new value is invisible until a forced read.
+    expect(manager.getNoProxyList()).toBe('corp.example')
+    expect(manager.getNoProxyList(true)).toBe('other.example')
+
+    const broken = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }),
+      noProxyReader: () => { throw new Error('unreadable') },
+    })
+    expect(broken.getNoProxyList()).toBe('')
+    broken.dispose()
+    manager.dispose()
   })
 })

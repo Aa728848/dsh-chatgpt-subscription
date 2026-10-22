@@ -118,6 +118,46 @@ export interface OpenDesignBillingDto {
   updatedAt: string | null
 }
 
+/**
+ * One window of the Design Plan, as the coding-plan endpoint states it.
+ *
+ * Amounts are integer credit STRINGS (`remainingCredits` / `limitCredits`), the
+ * service's own spelling: the card derives a used share from the two, so both
+ * have to survive the trip verbatim. `durationSeconds` is what names the window
+ * — 18000 is the 5-hour one, 604800 the 7-day one — and the wording for those
+ * belongs to the card, not to this contract.
+ */
+export interface OpenDesignCodingPlanWindowDto {
+  /** The window's own policy id, as served. */
+  policyId: string
+  /** Nominal window length in SECONDS. */
+  durationSeconds: number
+  /** Credits the window still has (integer string). */
+  remainingCredits: string
+  /** Credits the window is granted (integer string, always positive). */
+  limitCredits: string
+  /** ISO instant the window reopens, when the service stated one. */
+  resetsAt: string | null
+}
+
+/**
+ * One account's Design Plan allowance: the real, bounded windows.
+ *
+ * `error` is the honest half of this contract. The endpoint is unknown to a
+ * control-key Bearer (the console calls it with a browser session), so a read
+ * can legitimately fail; when it does, `tier` is null, `windows` is empty and
+ * `error` says why. Nothing here is ever backfilled with a zero: an empty window
+ * list means "nobody measured a window", never "0 % used".
+ */
+export interface OpenDesignCodingPlanDto {
+  /** Paid tier of the workspace: `go` / `plus` / `pro` / `max`, else null. */
+  tier: string | null
+  /** The windows that survived validation; empty when none could be read. */
+  windows: OpenDesignCodingPlanWindowDto[]
+  /** Why the plan could not be read; the empty string when it was. */
+  error: string
+}
+
 /** One account's latest wallet + billing reading (OAuth accounts only). */
 export interface OpenDesignUsageAccountDto {
   accountId: string
@@ -136,6 +176,15 @@ export interface OpenDesignUsageAccountDto {
   fetchedAt: number
   /** Plan + credits, absent when the billing read failed or named no tier. */
   billing?: OpenDesignBillingDto
+  /**
+   * The Design Plan's 5-hour / 7-day windows, or the reason there are none.
+   *
+   * Present whenever the account carried a control key, including on failure —
+   * that is the point: a card has to be able to say "the plan could not be read"
+   * instead of drawing an empty frame. It never makes the reading itself fail: a
+   * coding-plan refusal says nothing about the wallet beside it.
+   */
+  codingPlan?: OpenDesignCodingPlanDto
 }
 
 /** Latest wallet snapshot, one entry per account read. Never a live call. */

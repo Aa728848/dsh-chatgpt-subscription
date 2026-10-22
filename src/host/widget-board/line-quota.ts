@@ -931,12 +931,91 @@ export function normalizeClinePassQuota(status: unknown): LineQuotaFacts {
 }
 
 /**
+ * An integer credit amount the service states as a STRING.
+ *
+ * `/billing/coding-plan-usage` strings its amounts (`"1000"`), and a number-shaped
+ * field of any other type is not one: reading a float as credits would let a
+ * rounded value become a denominator.
+ *
+ * @param value - Candidate.
+ * @returns The amount, or null when it is not an integer string.
+ */
+function asCreditAmount(value: unknown): number | null {
+  const text = asText(value)
+  if (text === null || !/^\d+$/.test(text)) return null
+  const amount = Number(text)
+  return Number.isFinite(amount) ? amount : null
+}
+
+/**
+ * The used share of one window, from the two amounts that bound it.
+ *
+ * `(limit − remaining) / limit` in percent, rounded to the one decimal the bar is
+ * drawn at and clamped into 0-100. A remainder larger than the limit (a top-up
+ * rides outside the window upstream) clamps to 0 rather than reporting a bar
+ * running backwards, and nothing left is exactly a full bar. The REMAINING
+ * percentage the console shows is `100 − this`; no second derivation exists.
+ *
+ * @param limit - Credits the window grants; positive, which the caller checks.
+ * @param remaining - Credits the window still has.
+ * @returns The used share in 0-100 with one decimal.
+ */
+function usedSharePercent(limit: number, remaining: number): number {
+  const share = ((limit - remaining) / limit) * 100
+  return Math.min(100, Math.max(0, Math.round(share * 10) / 10))
+}
+
+/**
+ * Every Design Plan window one account stated, in the card's own vocabulary.
+ *
+ * Two amounts and one length make a bar; a window that states less is dropped
+ * rather than patched, because a guessed denominator is a progress bar claiming
+ * a limit nobody measured. `durationSeconds` is the service's own unit (18000 is
+ * the 5-hour window, 604800 the 7-day one) and becomes minutes here because that
+ * is what every other line's card already reads.
+ *
+ * The LABEL stays empty on purpose: the length is the fact, and the card words it
+ * (`5 小时` / `7 天`). Writing that wording here would put a second, competing
+ * vocabulary in the host for the same window.
+ *
+ * @param codingPlan - The account's `codingPlan` object, when it had one.
+ * @returns The windows, shortest first; empty when the read stated none.
+ */
+function codingPlanWindows(codingPlan: JsonRecord | null): LineCardWindow[] {
+  const windows: LineCardWindow[] = []
+  for (const window of asRecords(codingPlan?.windows)) {
+    const limit = asCreditAmount(window.limitCredits)
+    const remaining = asCreditAmount(window.remainingCredits)
+    if (limit === null || limit <= 0 || remaining === null) continue
+    const seconds = asNumber(window.durationSeconds)
+    windows.push({
+      label: '',
+      usedPercent: usedSharePercent(limit, remaining),
+      windowMinutes: seconds === null || seconds <= 0 ? null : Math.round(seconds / 60),
+      resetsAt: asIsoToMs(window.resetsAt),
+    })
+  }
+  return windows.sort(byWindowLength)
+}
+
+/**
  * The OpenDesign line's quota.
  *
- * Units: the odd one out — this line has NO percentage windows at all. Its
- * `usage` is a wallet reading per account: a USD balance string plus the
- * billing tier. So the card gets `windows: []` and a credit figure, and the
- * plan label comes from billing when the service named a tier.
+ * Units: this line's REAL allowance is the "Design Plan" window pair the console
+ * renders as a remaining percentage — a 5-hour window and a 7-day one, each
+ * stating an integer credit LIMIT and what is LEFT of it, plus an ISO reset
+ * instant. A bar is therefore the USED share, `(limit − remaining) / limit`;
+ * the remaining percentage is `100 − used` and is derived by whoever prints it.
+ *
+ * `quota.credits` keeps the WALLET balance, and only that: the spendable USD
+ * figure is a different quantity from a window's allowance, and folding one into
+ * the other is how a card ends up stating a percentage of the wrong thing.
+ *
+ * Absence is the honest half of this reader. The endpoint is only known to accept
+ * a browser session, so a control-key read may be refused; `codingPlan.error`
+ * then carries the reason and `windows` is empty. An empty list is reported as
+ * exactly that — never padded with a 0 % bar, which would claim a limit nobody
+ * observed — and the reason rides along so the card can say why.
  *
  * @param status - The route's `value`.
  * @returns The facts.
@@ -954,14 +1033,21 @@ export function normalizeOpenDesignQuota(status: unknown): LineQuotaFacts {
   const credits: LineCardCredits | null = balance === null
     ? null
     : { unlimited: false, balance: balance + ' USD' }
+  const codingPlan = asRecord(reading?.codingPlan)
   return factsOf({
-    windows: [],
+    windows: codingPlanWindows(codingPlan),
     credits,
     resetCredits: null,
     fetchedAt: asMs(reading?.fetchedAt) ?? asMs(usage?.fetchedAt),
     refreshing: root.quotaRefreshing === true,
-    error: firstText([root.quotaError, reading?.error]),
-    planLabel: firstText([asRecord(reading?.billing)?.plan]),
+    // The coding-plan refusal is the answer to "why is there no bar", so it
+    // belongs in the chain: a wallet that read fine still leaves the windows
+    // unexplained otherwise. An empty string (a successful read) contributes
+    // nothing, exactly like an absent field.
+    error: firstText([root.quotaError, reading?.error, codingPlan?.error]),
+    // Billing names the tier; the coding plan states the same fact on its own
+    // surface, so it is the fallback when the summary could not be read.
+    planLabel: firstText([asRecord(reading?.billing)?.plan, codingPlan?.tier]),
     accountLabel: null,
     signedIn: root.authenticated,
   })

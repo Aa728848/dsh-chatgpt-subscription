@@ -15,7 +15,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isSameOriginMutation } from '../common/same-origin.ts'
-import { fetchBillingSummary, fetchControlPlaneCatalog, fetchGatewayCatalog, fetchWalletBalance, testApiKey } from './client.ts'
+import {
+  fetchBillingSummary,
+  fetchCodingPlanUsage,
+  fetchControlPlaneCatalog,
+  fetchGatewayCatalog,
+  fetchWalletBalance,
+  fetchWorkspaceId,
+  testApiKey,
+  type OpenDesignWorkspaceIdRead,
+} from './client.ts'
 import { resolveModelInfo } from './catalog.ts'
 import type { OpenDesignAccountPool } from './account-pool.ts'
 import {
@@ -32,6 +41,7 @@ import {
   OPENDESIGN_ROUTE_PREFIX,
   type OpenDesignAccountAction,
   type OpenDesignAuthResult,
+  type OpenDesignCodingPlanDto,
   type OpenDesignLoginFlowDto,
   type OpenDesignModelDto,
   type OpenDesignPoolStatusDto,
@@ -608,22 +618,70 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
           if (readable.length === 0) {
             return sendJson(response, 400, { ok: false, error: 'No OAuth-signed-in account can be read. Plan, credits and wallet balances come from the control key a browser sign-in issues; a pasted API key has none.' })
           }
+          /**
+           * The workspace id, resolved ONCE for this request and reused.
+           *
+           * Every account here asks the same control-plane question — "which
+           * workspace is this key signed into" — and the coding-plan read needs
+           * the answer only as an address. The first account to need it settles
+           * the lookup; the rest await that same promise, so a request with four
+           * readable accounts makes one `/workspaces/current` call rather than four.
+           *
+           * The settled answer is reused even when it FAILED: every account then
+           * carries the same `error` in its own `codingPlan`, which is what a
+           * user needs to see ("the workspace cannot be resolved") instead of
+           * four identical timeouts. A failure never reaches the reading itself —
+           * the wallet and billing halves are unaffected.
+           */
+          let workspaceLookup: Promise<OpenDesignWorkspaceIdRead> | null = null
+          const readCodingPlan = async (controlKey: string, runtimeKey: string): Promise<OpenDesignCodingPlanDto> => {
+            if (workspaceLookup === null) workspaceLookup = fetchWorkspaceId({ fetchFn, controlKey })
+            const workspace = await workspaceLookup
+            if (!workspace.ok || workspace.id === null) {
+              return {
+                tier: null,
+                windows: [],
+                error: workspace.error === '' ? 'no workspace id for the coding-plan read' : workspace.error,
+              }
+            }
+            // Both keys go in, never out: the reader tries them as credential
+            // SHAPES and reports which shapes it tried by NAME, so no key ever
+            // reaches a reading, a card or an error text.
+            return await fetchCodingPlanUsage({ fetchFn, controlKey, runtimeKey, workspaceId: workspace.id })
+          }
+
           const readings: OpenDesignUsageAccountDto[] = await Promise.all(readable.map(async (account) => {
             const fetchedAt = Date.now()
             try {
               const credentials = await accountPool.getFreshCredential(account.id, fetchFn)
               const controlKey = controlKeyFor(credentials)
               if (controlKey === undefined) {
-                return { accountId: account.id, alias: account.alias, ok: false, balanceUsd: null, updatedAt: null, error: 'no control key on this account', fetchedAt }
+                return {
+                  accountId: account.id,
+                  alias: account.alias,
+                  ok: false,
+                  balanceUsd: null,
+                  updatedAt: null,
+                  error: 'no control key on this account',
+                  fetchedAt,
+                  codingPlan: { tier: null, windows: [], error: 'no control key on this account' },
+                }
               }
-              // Wallet and billing are two independent reads of different
-              // surfaces; one refusal must not hide the other. The summary is
-              // what names the plan and the credits, the wallet what states the
-              // spendable figure, and a failed wallet falls back to the
-              // summary's own total so the card still says what is left.
-              const [wallet, billing] = await Promise.all([
+              // Wallet, billing and the coding plan are three independent reads
+              // of different surfaces; one refusal must not hide the others. The
+              // summary is what names the plan and the credits, the wallet what
+              // states the spendable figure, and the coding plan what states the
+              // real 5-hour / 7-day windows. A failed wallet falls back to the
+              // summary's own total so the card still says what is left, and a
+              // failed coding plan stays a sentence on its own field.
+              // The chat bearer is the runtime key (`sk-amr-…`); it is the second
+              // credential shape the coding-plan read tries, because the console
+              // signs that endpoint with a browser session and a control key was
+              // refused live.
+              const [wallet, billing, codingPlan] = await Promise.all([
                 fetchWalletBalance({ fetchFn, controlKey }),
                 fetchBillingSummary({ fetchFn, controlKey }),
+                readCodingPlan(controlKey, bearerFor(credentials)),
               ])
               const balanceUsd = wallet.balanceUsd ?? billing.billing?.totalAvailableCreditsUsd ?? null
               return {
@@ -638,6 +696,10 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
                 error: wallet.error,
                 fetchedAt,
                 ...(billing.billing === null ? {} : { billing: billing.billing }),
+                // Always present, failure included: the card has to be able to
+                // say why no window bar is drawn, and an empty list alone would
+                // read as "this plan has no windows".
+                codingPlan,
               }
             } catch (error) {
               return {
@@ -648,6 +710,7 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
                 updatedAt: null,
                 error: firstLine(error instanceof Error ? error.message : error, 240),
                 fetchedAt,
+                codingPlan: { tier: null, windows: [], error: 'the account could not be read, so its coding plan was not read either' },
               }
             }
           }))

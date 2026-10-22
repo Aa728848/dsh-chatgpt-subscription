@@ -12,6 +12,7 @@ import fs from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { registerOpenDesignRoutes, type OpenDesignRouteOptions } from '../src/host/opendesign/routes.ts'
+import { fetchCodingPlanUsage, fetchWorkspaceId } from '../src/host/opendesign/client.ts'
 import { OpenDesignAccountPool } from '../src/host/opendesign/account-pool.ts'
 import { FileCredentialStore, OpenDesignModelSettingsStore, type OpenDesignCredentials } from '../src/host/opendesign/token-store.ts'
 import { DEFAULT_MODELS } from '../src/host/opendesign/types.ts'
@@ -418,11 +419,15 @@ describe('OpenDesign sign-in and wallet routes', () => {
     }) as unknown as typeof fetch
     const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
     expect(captured.status).toBe(200)
-    const value = captured.body.value as { usage: { accounts: Array<{ alias: string; ok: boolean; balanceUsd: string | null; billing?: { plan: string; subscriptionCredits: string } }> } }
+    const value = captured.body.value as { usage: { accounts: Array<{ alias: string; ok: boolean; balanceUsd: string | null; billing?: { plan: string; subscriptionCredits: string }; codingPlan?: { tier: string | null; windows: unknown[]; error: string } }> } }
     // The pasted key is skipped, not failed: it has no control key to read with.
     expect(value.usage.accounts).toHaveLength(1)
     expect(value.usage.accounts[0]).toMatchObject({ alias: 'Dev', ok: true, balanceUsd: '12.34' })
     expect(value.usage.accounts[0]!.billing).toMatchObject({ plan: 'pro', subscriptionCredits: '100000' })
+    // This fake answers nothing for /workspaces, so the coding-plan half fails
+    // on its own field — the wallet and billing readings above stay untouched.
+    expect(value.usage.accounts[0]!.codingPlan?.error).not.toBe('')
+    expect(value.usage.accounts[0]!.codingPlan?.windows).toEqual([])
     // The status now carries the reading, and still no secret.
     expect(captured.raw).not.toContain('vela_ctrl_ok')
     const status = await call({ url: '/opendesign/api/status' })
@@ -504,6 +509,135 @@ describe('OpenDesign sign-in and wallet routes', () => {
     expect(value.usage.accounts[0]!.error).toContain('HTTP 403')
   })
 
+  it('reads the Design Plan windows, resolving the workspace id once per request', async () => {
+    await pool.addAccount({
+      kind: 'oauth',
+      controlKey: 'vela_ctrl_plan_a',
+      runtimeKey: 'sk-amr_plan_a',
+      user: { name: 'A', email: 'a@example.com' },
+    }, 'A')
+    await pool.addAccount({
+      kind: 'oauth',
+      controlKey: 'vela_ctrl_plan_b',
+      runtimeKey: 'sk-amr_plan_b',
+      user: { name: 'B', email: 'b@example.com' },
+    }, 'B')
+    let currentCalls = 0
+    let listCalls = 0
+    let planCalls = 0
+    upstreamFetch = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/wallet/balance')) return Response.json({ balanceUsd: '1.5000' })
+      if (url.endsWith('/billing/summary')) {
+        return Response.json({ membershipTier: 'go', balances: { totalAvailableCredits: '15000' }, totalAvailableCreditsUsd: '1.5000' })
+      }
+      // The console's own current-workspace read: this is the id source.
+      if (url.endsWith('/api/v1/workspaces/current')) {
+        currentCalls += 1
+        return Response.json({ activeWorkspaceId: 'ws_dev', workspaceType: 'personal', role: 'owner' })
+      }
+      if (url.endsWith('/api/v1/workspaces')) {
+        listCalls += 1
+        return Response.json({ workspaces: [{ id: 'ws_dev' }] })
+      }
+      if (url.endsWith('/workspaces/ws_dev/billing/coding-plan-usage')) {
+        planCalls += 1
+        return Response.json({
+          tier: 'go',
+          eligible: true,
+          windows: [
+            { policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '900', limitCredits: '1000', resetsAt: '2026-10-21T08:00:00.000Z' },
+            { policyId: 'seven_day', durationSeconds: 604800, remainingCredits: '8100', limitCredits: '10000', resetsAt: '2026-10-27T00:00:00.000Z' },
+          ],
+        })
+      }
+      throw new Error('unexpected upstream: ' + url)
+    }) as unknown as typeof fetch
+
+    const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
+    expect(captured.status).toBe(200)
+    const value = captured.body.value as {
+      usage: { accounts: Array<{ alias: string; codingPlan?: { tier: string | null; windows: Array<{ policyId: string }>; error: string } }> }
+    }
+    expect(value.usage.accounts).toHaveLength(2)
+    for (const account of value.usage.accounts) {
+      expect(account.codingPlan?.error).toBe('')
+      expect(account.codingPlan?.tier).toBe('go')
+      expect(account.codingPlan?.windows.map((window) => window.policyId)).toEqual(['five_hour', 'seven_day'])
+    }
+    // One lookup for the whole request, one plan read per account: the id is an
+    // address every account shares, and asking for it once is the point.
+    expect(currentCalls).toBe(1)
+    expect(listCalls).toBe(0)
+    expect(planCalls).toBe(2)
+    expect(captured.raw).not.toContain('vela_ctrl_plan_a')
+
+    // The card reads the same object through /status.
+    const answered = await call({ url: '/opendesign/api/status' })
+    const statusBody = answered.body.value as OpenDesignWebStatus
+    expect(statusBody.usage?.accounts[0]?.codingPlan?.windows).toHaveLength(2)
+  })
+
+  it('keeps the wallet when the coding-plan read is refused', async () => {
+    await pool.addAccount({
+      kind: 'oauth',
+      controlKey: 'vela_ctrl_noplan',
+      runtimeKey: 'sk-amr_noplan',
+      user: { name: 'Dev' },
+    }, 'Dev')
+    upstreamFetch = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/wallet/balance')) return Response.json({ balanceUsd: '1.5000' })
+      if (url.endsWith('/billing/summary')) return Response.json({ membershipTier: 'go', totalAvailableCreditsUsd: '1.5000' })
+      if (url.endsWith('/api/v1/workspaces/current')) return Response.json({ activeWorkspaceId: 'ws_dev', role: 'owner' })
+      if (url.endsWith('/billing/coding-plan-usage')) {
+        return Response.json({ code: 'coding_plan_configuration_unavailable' }, { status: 404 })
+      }
+      throw new Error('unexpected upstream: ' + url)
+    }) as unknown as typeof fetch
+
+    const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
+    expect(captured.status).toBe(200)
+    const value = captured.body.value as {
+      usage: { accounts: Array<{ ok: boolean; balanceUsd: string | null; codingPlan?: { tier: string | null; windows: unknown[]; error: string } }> }
+    }
+    // The plan's refusal is a sentence on its own field; the reading stands.
+    expect(value.usage.accounts[0]).toMatchObject({ ok: true, balanceUsd: '1.5000' })
+    expect(value.usage.accounts[0]!.codingPlan?.tier).toBe(null)
+    expect(value.usage.accounts[0]!.codingPlan?.windows).toEqual([])
+    expect(value.usage.accounts[0]!.codingPlan?.error).toContain('coding_plan_configuration_unavailable')
+  })
+
+  it('keeps the wallet when no workspace id can be resolved', async () => {
+    await pool.addAccount({
+      kind: 'oauth',
+      controlKey: 'vela_ctrl_nows',
+      runtimeKey: 'sk-amr_nows',
+      user: { name: 'Dev' },
+    }, 'Dev')
+    upstreamFetch = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/wallet/balance')) return Response.json({ balanceUsd: '2.0000' })
+      if (url.endsWith('/billing/summary')) return Response.json({ membershipTier: 'go', totalAvailableCreditsUsd: '2.0000' })
+      // The current read answers 200 but states no id; the listing is refused.
+      if (url.endsWith('/api/v1/workspaces/current')) return Response.json({ workspaceType: 'personal', role: 'owner' })
+      if (url.endsWith('/api/v1/workspaces')) return Response.json({ error: 'unauthenticated' }, { status: 401 })
+      throw new Error('unexpected upstream: ' + url)
+    }) as unknown as typeof fetch
+
+    const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
+    const value = captured.body.value as {
+      usage: { accounts: Array<{ ok: boolean; balanceUsd: string | null; codingPlan?: { windows: unknown[]; error: string } }> }
+    }
+    // The degradation path this whole change is built around: no address, no
+    // windows, and the reason carried as data.
+    expect(value.usage.accounts[0]).toMatchObject({ ok: true, balanceUsd: '2.0000' })
+    expect(value.usage.accounts[0]!.codingPlan?.windows).toEqual([])
+    expect(value.usage.accounts[0]!.codingPlan?.error).toContain('HTTP 401')
+    // The diagnosis names BOTH reads, so the next live attempt is not blind.
+    expect(value.usage.accounts[0]!.codingPlan?.error).toContain('GET /workspaces/current HTTP 200')
+  })
+
   it('refuses the usage read plainly when no OAuth account exists', async () => {
     await pool.addAccount({ kind: 'api-key', apiKey: 'od_x' }, 'pasted')
     const captured = await call({ url: '/opendesign/api/usage', method: 'POST', body: {} })
@@ -569,5 +703,266 @@ describe('OpenDesign catalog metadata', () => {
     expect(captured.status).toBe(200)
     const status = (captured.body.value as { status: OpenDesignWebStatus }).status
     expect(status.models.find((model) => model.id === 'kimi-k3')!.contextWindow).toBe(2_000_000)
+  })
+})
+
+/**
+ * The workspace id, on its own.
+ *
+ * It is an ADDRESS, not a credential: the coding-plan endpoint takes it in the
+ * path and repeats it in a header, so the lookup's only jobs are "find the id a
+ * control key can see" and "say why not, without throwing".
+ */
+describe('OpenDesign workspace lookup', () => {
+  it('reads the active workspace first, and does not list when it answered', async () => {
+    const urls: string[] = []
+    const fetchFn = (async (input: unknown) => {
+      urls.push(String(input))
+      // The console's own "current workspace" object.
+      return Response.json({ activeWorkspaceId: 'ws_live', workspaceType: 'personal', role: 'owner' })
+    }) as unknown as typeof fetch
+    await expect(fetchWorkspaceId({ fetchFn, controlKey: 'vela_ctrl_w' })).resolves.toEqual({
+      ok: true,
+      id: 'ws_live',
+      error: '',
+    })
+    // One read, at the endpoint the console uses; the listing is never touched.
+    expect(urls).toEqual(['https://amr-api.open-design.ai/api/v1/workspaces/current'])
+  })
+
+  it('accepts the id nested under workspace, and under a data wrapper', async () => {
+    const nested = (async () => Response.json({ workspace: { id: 'ws_nested' }, role: 'owner' })) as unknown as typeof fetch
+    await expect(fetchWorkspaceId({ fetchFn: nested, controlKey: 'k' })).resolves.toEqual({
+      ok: true,
+      id: 'ws_nested',
+      error: '',
+    })
+    const wrapped = (async () => Response.json({ data: { activeWorkspaceId: 'ws_data' } })) as unknown as typeof fetch
+    await expect(fetchWorkspaceId({ fetchFn: wrapped, controlKey: 'k' })).resolves.toEqual({
+      ok: true,
+      id: 'ws_data',
+      error: '',
+    })
+  })
+
+  it('falls back to the listing when the current read states no id', async () => {
+    const urls: string[] = []
+    const fetchFn = (async (input: unknown) => {
+      const url = String(input)
+      urls.push(url.replace('https://amr-api.open-design.ai/api/v1', ''))
+      if (url.endsWith('/workspaces/current')) return Response.json({ workspaceType: 'personal', role: 'owner' })
+      // An `items` wrapper: the listing is not consistent about its envelope, so
+      // every shape it has been seen in has to be accepted.
+      return Response.json({ items: [{ name: 'A' }, { id: 'ws_listed' }] })
+    }) as unknown as typeof fetch
+    await expect(fetchWorkspaceId({ fetchFn, controlKey: 'k' })).resolves.toEqual({
+      ok: true,
+      id: 'ws_listed',
+      error: '',
+    })
+    expect(urls).toEqual(['/workspaces/current', '/workspaces'])
+  })
+
+  it('names both endpoints and their shapes when neither states an id', async () => {
+    const fetchFn = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/workspaces/current')) {
+        return Response.json({ role: 'owner', workspaceType: 'personal', activeWorkspace: 'x' })
+      }
+      return Response.json({ items: [] })
+    }) as unknown as typeof fetch
+    const failed = await fetchWorkspaceId({ fetchFn, controlKey: 'k' })
+    expect(failed.ok).toBe(false)
+    expect(failed.id).toBe(null)
+    // Which endpoint, which status, and what the body actually looked like: the
+    // only thing that makes the next live attempt debuggable.
+    expect(failed.error).toContain('GET /workspaces/current HTTP 200')
+    expect(failed.error).toContain('keys: activeWorkspace, role, workspaceType')
+    expect(failed.error).toContain('GET /workspaces HTTP 200')
+    expect(failed.error).toContain('the workspaces endpoint listed no workspace id')
+    // Keys only: no value from the body ever reaches the message.
+    expect(failed.error).not.toContain('owner')
+  })
+
+  it('reports a refusal as data instead of throwing', async () => {
+    const fetchFn = (async () => Response.json({ code: 'unauthenticated' }, { status: 401 })) as unknown as typeof fetch
+    const failed = await fetchWorkspaceId({ fetchFn, controlKey: 'k' })
+    expect(failed.ok).toBe(false)
+    expect(failed.id).toBe(null)
+    // Both reads were refused, and both refusals are in the one sentence.
+    expect(failed.error).toContain('GET /workspaces/current HTTP 401: unauthenticated')
+    expect(failed.error).toContain('GET /workspaces HTTP 401: unauthenticated')
+    // A transport failure is the same kind of answer, and does not stop the
+    // fallback from being attempted.
+    const broken = (async () => { throw new Error('connect ECONNREFUSED') }) as unknown as typeof fetch
+    const error = await fetchWorkspaceId({ fetchFn: broken, controlKey: 'k' })
+    expect(error.ok).toBe(false)
+    expect(error.error).toContain('GET /workspaces/current failed: connect ECONNREFUSED')
+  })
+})
+
+/**
+ * The Design Plan's real allowance, on its own.
+ *
+ * The endpoint is the one the console draws "剩余 90 % / 81 %" from, and whether a
+ * control-key Bearer is accepted there is UNVERIFIED — so every assertion below is
+ * about either a field that survived validation or the refusal that did not.
+ */
+describe('OpenDesign Design Plan usage', () => {
+  it('reads both windows and sends the headers the console sends', async () => {
+    const seen: Array<{ url: string; init?: RequestInit }> = []
+    const fetchFn = (async (input: unknown, init?: RequestInit) => {
+      seen.push({ url: String(input), init })
+      return Response.json({
+        tier: 'go',
+        eligible: true,
+        windows: [
+          { policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '900', limitCredits: '1000', resetsAt: '2026-10-21T08:00:00.000Z' },
+          { policyId: 'seven_day', durationSeconds: 604800, remainingCredits: '8100', limitCredits: '10000', resetsAt: '2026-10-27T00:00:00.000Z' },
+        ],
+      })
+    }) as unknown as typeof fetch
+    const plan = await fetchCodingPlanUsage({
+      fetchFn,
+      controlKey: 'vela_ctrl_plan',
+      runtimeKey: 'sk-amr_plan',
+      workspaceId: 'ws_1',
+    })
+    expect(plan.error).toBe('')
+    // The first shape answered, so the runtime key was never tried.
+    expect(seen).toHaveLength(1)
+    expect(plan.tier).toBe('go')
+    expect(plan.windows).toEqual([
+      { policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '900', limitCredits: '1000', resetsAt: '2026-10-21T08:00:00.000Z' },
+      { policyId: 'seven_day', durationSeconds: 604800, remainingCredits: '8100', limitCredits: '10000', resetsAt: '2026-10-27T00:00:00.000Z' },
+    ])
+    expect(seen[0]!.url).toBe('https://amr-api.open-design.ai/api/v1/workspaces/ws_1/billing/coding-plan-usage')
+    const headers = new Headers(seen[0]!.init?.headers)
+    expect(headers.get('authorization')).toBe('Bearer vela_ctrl_plan')
+    expect(headers.get('accept')).toBe('application/json')
+    // The workspace is addressed twice on purpose: in the path AND in this
+    // header, exactly as the console sends it.
+    expect(headers.get('x-vela-workspace-id')).toBe('ws_1')
+  })
+
+  it('drops a window whose fields do not state a bounded amount', async () => {
+    const fetchFn = (async () => Response.json({
+      tier: 'platinum',
+      windows: [
+        { policyId: '', durationSeconds: 18000, remainingCredits: '1', limitCredits: '2' },
+        { policyId: 'no-length', durationSeconds: 0, remainingCredits: '1', limitCredits: '2' },
+        { policyId: 'float', durationSeconds: 18000, remainingCredits: '1.5', limitCredits: '2' },
+        { policyId: 'zero-limit', durationSeconds: 18000, remainingCredits: '1', limitCredits: '0' },
+        { policyId: 'bad-reset', durationSeconds: 18000, remainingCredits: '1', limitCredits: '2', resetsAt: 'soon' },
+        'not a window',
+        { policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '1', limitCredits: '2', resetsAt: null },
+      ],
+    })) as unknown as typeof fetch
+    const plan = await fetchCodingPlanUsage({ fetchFn, controlKey: 'k', runtimeKey: 'sk-amr_k', workspaceId: 'w' })
+    // Every unreadable shape is DROPPED, never patched with a plausible number.
+    expect(plan.windows).toEqual([
+      { policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '1', limitCredits: '2', resetsAt: null },
+    ])
+    // "platinum" is not one of the four tiers this line names.
+    expect(plan.tier).toBe(null)
+    expect(plan.error).toBe('')
+  })
+
+  it('keeps the coding-plan refusal code as data', async () => {
+    const fetchFn = (async () => Response.json(
+      { code: 'coding_plan_configuration_unavailable', message: 'no plan configured' },
+      { status: 404 },
+    )) as unknown as typeof fetch
+    const plan = await fetchCodingPlanUsage({ fetchFn, controlKey: 'k', runtimeKey: 'sk-amr_k', workspaceId: 'w' })
+    // The code goes out verbatim: it is the one thing a user can act on.
+    expect(plan).toEqual({ tier: null, windows: [], error: 'HTTP 404: coding_plan_configuration_unavailable' })
+    const broken = (async () => { throw new Error('socket hang up') }) as unknown as typeof fetch
+    const failed = await fetchCodingPlanUsage({ fetchFn: broken, controlKey: 'k', runtimeKey: 'sk-amr_k', workspaceId: 'w' })
+    expect(failed).toEqual({ tier: null, windows: [], error: 'socket hang up' })
+  })
+
+  it('tries the runtime key when the control key is refused', async () => {
+    const seen: Array<{ auth: string; apiKeyHeader: string }> = []
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      seen.push({ auth: headers.get('authorization') ?? '', apiKeyHeader: headers.get('x-api-key') ?? '' })
+      // Exactly the live result this rework answers: the control key is refused.
+      if (seen.length === 1) return Response.json({ code: 'unauthenticated' }, { status: 401 })
+      return Response.json({
+        tier: 'go',
+        windows: [{ policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '900', limitCredits: '1000', resetsAt: null }],
+      })
+    }) as unknown as typeof fetch
+    const plan = await fetchCodingPlanUsage({
+      fetchFn,
+      controlKey: 'vela_ctrl_x',
+      runtimeKey: 'sk-amr_x',
+      workspaceId: 'ws_1',
+    })
+    // Success carries no trace of WHICH credential worked.
+    expect(plan).toEqual({
+      tier: 'go',
+      windows: [{ policyId: 'five_hour', durationSeconds: 18000, remainingCredits: '900', limitCredits: '1000', resetsAt: null }],
+      error: '',
+    })
+    // One extra request, with the runtime key as the Bearer.
+    expect(seen).toHaveLength(2)
+    expect(seen[1]!.auth).toBe('Bearer sk-amr_x')
+    expect(seen[1]!.apiKeyHeader).toBe('')
+  })
+
+  it('records every shape it tried when all of them are refused', async () => {
+    const seen: Array<{ auth: string; apiKeyHeader: string }> = []
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      seen.push({ auth: headers.get('authorization') ?? '', apiKeyHeader: headers.get('x-api-key') ?? '' })
+      return Response.json({ code: 'unauthenticated' }, { status: 401 })
+    }) as unknown as typeof fetch
+    const plan = await fetchCodingPlanUsage({
+      fetchFn,
+      controlKey: 'vela_ctrl_x',
+      runtimeKey: 'sk-amr_x',
+      workspaceId: 'ws_1',
+    })
+    // One sentence: the last refusal plus the shapes that produced it. Key
+    // MATERIAL never appears — only the shape names.
+    expect(plan.error).toBe('HTTP 401: unauthenticated (tried: bearer control key; bearer runtime key; x-api-key runtime key)')
+    expect(plan.error).not.toContain('vela_ctrl_x')
+    expect(plan.error).not.toContain('sk-amr_x')
+    expect(plan.windows).toEqual([])
+    expect(plan.tier).toBe(null)
+    expect(seen).toHaveLength(3)
+    // The third shape sends NO Authorization at all, only x-api-key.
+    expect(seen[2]!.auth).toBe('')
+    expect(seen[2]!.apiKeyHeader).toBe('sk-amr_x')
+  })
+
+  it('stops at a status a different credential cannot fix', async () => {
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      return Response.json({ code: 'coding_plan_configuration_unavailable' }, { status: 404 })
+    }) as unknown as typeof fetch
+    const plan = await fetchCodingPlanUsage({
+      fetchFn,
+      controlKey: 'vela_ctrl_x',
+      runtimeKey: 'sk-amr_x',
+      workspaceId: 'ws_1',
+    })
+    // 404 means 'no such endpoint / no plan configured', not 'wrong key': one
+    // request, no retry, and no tried-list attached.
+    expect(calls).toBe(1)
+    expect(plan.error).toBe('HTTP 404: coding_plan_configuration_unavailable')
+  })
+
+  it('tries only the control key when the account has no runtime key', async () => {
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      return Response.json({ code: 'unauthenticated' }, { status: 401 })
+    }) as unknown as typeof fetch
+    const plan = await fetchCodingPlanUsage({ fetchFn, controlKey: 'vela_ctrl_only', runtimeKey: '', workspaceId: 'ws_1' })
+    expect(calls).toBe(1)
+    expect(plan.error).toBe('HTTP 401: unauthenticated (tried: bearer control key)')
   })
 })

@@ -348,7 +348,11 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 
 DSH 模型选择器应显示 **“Codex（ChatGPT 订阅）”**。GPT-6 系列与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（Subagent 卡片授权的模型清单，以及 `agent-default-model` 的默认路由；该卡片 0.1.5 及以前在「设置」页，0.1.6 起在 **Plugins** 页）；最大嵌套深度由 DSH 侧决定（0.1.5 及以前取 preset 中 `tool-subagent` 的 `maxDepth`，默认 3；0.1.6 起取 `subagent` 服务的设置，默认 1）。
 
-**设置 → Codex 订阅 → 网络代理** 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。
+**设置 → Codex 订阅 → 网络代理** 是本插件**全部供应线路共用**的一份代理设置（ChatGPT、Claude、Antigravity、Kimi Code、MiniMax Code、Command Code、Ollama、GLM Coding Plan、Step、Cline Pass、Qoder、OpenDesign），可选择系统代理（自动检测）、自定义代理或直连。各线路的模型生成、登录与令牌交换/续期、账号信息、项目发现、配额与模型目录查询，以及插件自带的工具与网页抓取，都使用此设置；修改后对后续请求生效，无需重启 DSH。
+
+系统代理自动检测按平台分流：Windows 读注册表（同一份输出里的 `ProxyEnable`/`ProxyServer`）、macOS 读 `scutil --proxy`、Linux 读 GNOME 的 `gsettings`（`org.gnome.system.proxy` 的 mode/host/port；PAC 模式不支持，因为代理只能经代理端口转发，无法施用自动代理脚本）；都拿不到时回落到 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 环境变量与 `$DSH_HOME/.env`。
+
+代理生效时，**回环地址**（整个 `127.0.0.0/8`、`::1`、`localhost`）与 **`NO_PROXY` / `no_proxy` 列表**里的主机仍然直连——把某条线路的 baseURL 指向本机网关（例如 `http://127.0.0.1:9090`）时不会被塞进代理。`NO_PROXY` 与代理同源读取（进程环境变量优先，其次 `$DSH_HOME/.env`），支持 `*`、域名后缀（`example.com` 与 `.example.com` 都匹配子域）以及 `host:port`；不支持 CIDR。浏览器中的授权页面使用浏览器自己的网络设置。
 
 已经用官方 Codex CLI 登录过的用户可以跳过第 3 步的 OAuth：**设置 → 订阅服务 → ChatGPT**，在账号池卡片里点「登录」**旁边**的「导入本机 Codex CLI 登录」即可（见「本机登录」）。
 
@@ -1065,9 +1069,9 @@ OAuth 是默认入口；「使用 API Key」按钮保留为兼容回退，部署
 | POST | `/models/visibility`、`/models/visibility-all` | 单个/批量隐藏 |
 | POST | `/models/context-window` | 单模型上下文窗口覆盖 |
 | POST | `/catalog/refresh` | 用号池里可用的 Key 同步实时目录；目录真的变了才通知模型选择器重建 |
-| GET\|POST | `/usage` | 读取每个 OAuth 账号的钱包余额与账单摘要（套餐、credits、周期；每账号各一次请求）；两项独立，失败作为数据显示，绝不标记账号 |
+| GET\|POST | `/usage` | 读取每个 OAuth 账号的钱包余额、账单摘要（套餐、credits、周期）与 **Design Plan 额度窗口**（5 小时 / 7 天，各自的 limit 与剩余；工作区 id 每个请求只解析一次）；三路相互独立，失败作为数据显示，绝不标记账号 |
 
-协议事实与未验证项的完整证据记录见 `docs/opendesign-line-plan.md`：设备授权的创建与轮询响应是**实测**的，批准后的字段名来自上游 issue #8870；钱包与账单摘要在真实订阅账号上实测过，对话链路仍未与真实 Key 联调。
+协议事实与未验证项的完整证据记录见 `docs/opendesign-line-plan.md`：设备授权的创建与轮询响应是**实测**的，批准后的字段名来自上游 issue #8870；钱包与账单摘要在真实订阅账号上实测过，对话链路仍未与真实 Key 联调。**额度窗口**走控制台自己的 `GET /api/v1/workspaces/{workspaceId}/billing/coding-plan-usage`（带 `x-vela-workspace-id`）。**实测结论（2026-10-22，真实 Go 账号）**：该端点只认控制台会话，插件持有的三种凭据形状——`Bearer vela_ctrl_…`、`Bearer sk-amr-…`、`x-api-key: sk-amr-…`——**全部 401**；工作区 id 本身能正常解析，所以不是地址问题。因此设置页显示「额度窗口仅在 OpenDesign 控制台可见」，看板卡只写一句原因、绝不画 0% 的条；读取逻辑保留，上游哪天放开 key 就会自动生效。
 
 ## 本机登录
 

@@ -12,7 +12,16 @@
  *
  * @module dsh-chatgpt-subscription/opendesign-client
  */
-import { AMR_API_BASE, BILLING_SUMMARY_PATH, WALLET_BALANCE_PATH, type OpenDesignDiscoveredModel } from './types.ts'
+import {
+  AMR_API_BASE,
+  BILLING_SUMMARY_PATH,
+  CODING_PLAN_USAGE_SUFFIX,
+  CURRENT_WORKSPACE_PATH,
+  WALLET_BALANCE_PATH,
+  WORKSPACES_PATH,
+  type OpenDesignDiscoveredModel,
+} from './types.ts'
+import type { OpenDesignCodingPlanDto, OpenDesignCodingPlanWindowDto } from '../../shared/opendesign-contracts.ts'
 
 export interface OpenDesignHttpResult {
   status: number
@@ -554,5 +563,436 @@ export async function fetchBillingSummary({
     }
   } catch (error) {
     return { ...refusal, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * The Design Plan's two DTOs are DEFINED beside this line's other wire contracts
+ * (src/shared/opendesign-contracts.ts) and re-exported here.
+ *
+ * The card in the browser reads the same objects, so the declaration has to live
+ * where both halves of the plugin can reach it. A `import type` from the shared
+ * file back into the host would point the client's type-check program at host
+ * sources; re-exporting the other way round keeps the direction of every existing
+ * import (host → shared) intact and still lets a host-side caller import the DTO
+ * from the module that produced it.
+ */
+export type { OpenDesignCodingPlanDto, OpenDesignCodingPlanWindowDto } from '../../shared/opendesign-contracts.ts'
+
+/** One workspace lookup: the id a coding-plan read is addressed by, or why not. */
+export interface OpenDesignWorkspaceIdRead {
+  ok: boolean
+  /** The workspace id to address; null whenever the lookup did not land on one. */
+  id: string | null
+  /** Why no id was read; the empty string on success. */
+  error: string
+}
+
+/**
+ * The refusal one endpoint stated, as one line.
+ *
+ * The machine `code` comes first because that is the only part a caller can act
+ * on — `coding_plan_configuration_unavailable` means "this workspace has no
+ * coding plan", which is a fact about the account rather than a fault. Both
+ * `{ code }` and `{ error: { code } }` are read (the control plane uses both
+ * spellings across its surfaces), then the usual `error`/`message` prose, then
+ * the raw body. Nothing is invented when the body says nothing: that case stays
+ * empty and the caller prints the status alone.
+ */
+function refusalDetail(json: unknown, text: string): string {
+  if (isRecord(json)) {
+    const code = pickString(json, ['code'])
+    if (code !== undefined) return code
+    if (isRecord(json.error)) {
+      const nested = pickString(json.error, ['code', 'message'])
+      if (nested !== undefined) return nested
+    }
+    const message = firstMessage(json)
+    if (message !== '') return message
+  }
+  return text.trim().slice(0, 120)
+}
+
+/** `HTTP <status>: <code or first message>`, or the bare status when nothing was said. */
+function httpRefusal(status: number, json: unknown, text: string): string {
+  const detail = refusalDetail(json, text)
+  return detail === '' ? `HTTP ${status}` : `HTTP ${status}: ${detail}`
+}
+
+/**
+ * The keys a workspace id travels under, in the order the console's payloads
+ * spell them.
+ *
+ * `activeWorkspaceId` is what the current-workspace read answers; `workspaceId`
+ * and `id` are how a listing entry or a nested `workspace` object names the same
+ * fact.
+ */
+const WORKSPACE_ID_KEYS: readonly string[] = ['activeWorkspaceId', 'workspaceId', 'id']
+
+/**
+ * One id out of one object: the direct keys first, then a nested `workspace`.
+ *
+ * @param record - Candidate object.
+ * @returns The id, or null when nothing in it states one.
+ */
+function workspaceIdIn(record: Record<string, unknown>): string | null {
+  const direct = pickString(record, WORKSPACE_ID_KEYS)
+  if (direct !== undefined) return direct
+  const nested = record.workspace
+  if (isRecord(nested)) return pickString(nested, WORKSPACE_ID_KEYS) ?? null
+  return null
+}
+
+/**
+ * The entries a listing endpoint answered, whatever wrapper it used.
+ *
+ * The wrapper is not worth trusting: the same control-plane family answers a bare
+ * array, `{ workspaces }`, `{ items }`, `{ data }` and `{ data: { items | workspaces } }`
+ * on its own different surfaces, and a lookup that guesses one of them reports
+ * "no workspace" on a response that carried several.
+ *
+ * @param body - The decoded response.
+ * @returns The candidate entries; empty when none of the shapes matched.
+ */
+function listedWorkspaces(body: unknown): unknown[] {
+  if (Array.isArray(body)) return body
+  if (!isRecord(body)) return []
+  if (Array.isArray(body.workspaces)) return body.workspaces
+  if (Array.isArray(body.items)) return body.items
+  if (Array.isArray(body.data)) return body.data
+  if (isRecord(body.data)) {
+    if (Array.isArray(body.data.items)) return body.data.items
+    if (Array.isArray(body.data.workspaces)) return body.data.workspaces
+  }
+  return []
+}
+
+/**
+ * The first id a listing states.
+ *
+ * @param body - The decoded response.
+ * @returns The id, or null when no entry states one.
+ */
+function listedWorkspaceId(body: unknown): string | null {
+  for (const entry of listedWorkspaces(body)) {
+    if (!isRecord(entry)) continue
+    // A listing entry names its own workspace, never somebody's active one: the
+    // keys are `id` then `workspaceId`, then the same pair under `workspace`.
+    // `activeWorkspaceId` is deliberately NOT read here — on a listing it would
+    // point at a different row.
+    const direct = pickString(entry, ['id', 'workspaceId'])
+    if (direct !== undefined) return direct
+    const nested = isRecord(entry.workspace) ? pickString(entry.workspace, ['id', 'workspaceId']) : undefined
+    if (nested !== undefined) return nested
+  }
+  return null
+}
+
+/**
+ * The SHAPE of a response body — never its content.
+ *
+ * Diagnostic only. A failed lookup has to say what the endpoint actually answered
+ * without leaking a single value: the top-level keys, sorted and capped, are the
+ * one thing that makes the next live attempt debuggable while an id, a workspace
+ * name or a token stays out of the log and out of the card.
+ *
+ * @param json - The decoded response.
+ * @returns A key summary such as `keys: activeWorkspaceId, role, workspaceType`.
+ */
+function bodyShape(json: unknown): string {
+  if (Array.isArray(json)) return `a bare array of ${json.length}`
+  if (!isRecord(json)) return 'no object body'
+  const keys = Object.keys(json).sort().slice(0, 8)
+  return keys.length === 0 ? 'an empty object' : `keys: ${keys.join(', ')}`
+}
+
+/**
+ * Read the workspace id the coding-plan endpoint is addressed by.
+ *
+ * TWO READS, in this order, because the console itself does not use one:
+ *
+ * 1. `GET {amr}/workspaces/current` — the workspace this account is on right now,
+ *    the object the console's own switcher starts from. The id is read from
+ *    `activeWorkspaceId`, then `workspaceId`, then `id`, then the same keys under
+ *    a nested `workspace`, then the same order again under a `data` wrapper.
+ * 2. Only when that states NO id, `GET {amr}/workspaces` — the listing, which
+ *    answers what the account could switch to rather than where it is. Its
+ *    first entry with an id wins, and every wrapper shape it has been seen in is
+ *    accepted (bare array, `{ workspaces }`, `{ items }`, `{ data }`,
+ *    `{ data: { items | workspaces } }`).
+ *
+ * The listing used to be the ONLY read here, and on a live account it answered
+ * 200 with a body whose entries carried no id: the lookup must therefore say
+ * WHICH endpoint failed and what it looked like, or the next attempt is blind.
+ * A failure reports the endpoint, its HTTP status (or the transport error) and a
+ * keys-only shape summary; no value and no id ever appears in it.
+ *
+ * Pure data in, data out: a refusal, a timeout or a malformed body is returned as
+ * `error`, never thrown, and a transport failure on the first read does not stop
+ * the second from answering. The caller composes the result into the account
+ * reading, so one unreadable surface cannot take the whole quota read down.
+ *
+ * @param options.fetchFn - Injected fetch (tests never reach the network).
+ * @param options.controlKey - The OAuth account's `vela_ctrl_…` key.
+ * @param options.apiBase - Control-plane base; overridable for a deployment.
+ * @param options.signal - Caller cancellation.
+ * @param options.timeoutMs - Per-request budget.
+ * @returns The id, or the reason neither endpoint stated one.
+ */
+export async function fetchWorkspaceId({
+  fetchFn,
+  controlKey,
+  apiBase = AMR_API_BASE,
+  signal,
+  timeoutMs = 15_000,
+}: {
+  fetchFn: typeof fetch
+  controlKey: string
+  apiBase?: string
+  signal?: AbortSignal
+  timeoutMs?: number
+}): Promise<OpenDesignWorkspaceIdRead> {
+  const base = trimBase(apiBase)
+  const notes: string[] = []
+  /** One read, with its outcome kept as a NOTE: a throw here must not hide the next one. */
+  const probe = async (path: string): Promise<OpenDesignHttpResult | null> => {
+    try {
+      return await sendJSON(fetchFn, `${base}${path}`, { apiKey: controlKey, signal, timeoutMs })
+    } catch (error) {
+      notes.push(`GET ${path} failed: ${error instanceof Error ? error.message : String(error)}`)
+      return null
+    }
+  }
+  /** One endpoint's diagnostic line: what was called, what it answered, what shape. */
+  const noteOf = (path: string, result: OpenDesignHttpResult): string => (
+    result.ok
+      ? `GET ${path} HTTP ${result.status}, ${bodyShape(result.json)}`
+      : `GET ${path} ${httpRefusal(result.status, result.json, result.text)}, ${bodyShape(result.json)}`
+  )
+  try {
+    // 1. The active workspace. Its id is the answer; nothing else is needed.
+    const current = await probe(CURRENT_WORKSPACE_PATH)
+    if (current !== null) {
+      if (current.ok) {
+        const body = current.json
+        const id = isRecord(body)
+          ? workspaceIdIn(body) ?? (isRecord(body.data) ? workspaceIdIn(body.data) : null)
+          : null
+        if (id !== null) return { ok: true, id, error: '' }
+      }
+      notes.push(noteOf(CURRENT_WORKSPACE_PATH, current))
+    }
+    // 2. The listing, only when the read above stated no id.
+    const list = await probe(WORKSPACES_PATH)
+    if (list !== null) {
+      if (list.ok) {
+        const id = listedWorkspaceId(list.json)
+        if (id !== null) return { ok: true, id, error: '' }
+      }
+      notes.push(noteOf(WORKSPACES_PATH, list))
+    }
+    return {
+      ok: false,
+      id: null,
+      error: `the workspaces endpoint listed no workspace id (${notes.join('; ')})`,
+    }
+  } catch (error) {
+    return { ok: false, id: null, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** The tiers this line knows how to name; anything else is "unknown", never a guess. */
+const CODING_PLAN_TIERS: readonly string[] = ['go', 'plus', 'pro', 'max']
+
+/**
+ * One window read strictly: a field that does not state what the card needs
+ * makes the whole window unreadable, and an unreadable window is dropped rather
+ * than patched with a plausible default. A guessed `limitCredits` is a made-up
+ * denominator on a progress bar, which is precisely the failure this contract
+ * exists to prevent.
+ *
+ * @param raw - One entry of the response's `windows`.
+ * @returns The window, or null when any field it needs was not stated.
+ */
+function codingPlanWindowOf(raw: unknown): OpenDesignCodingPlanWindowDto | null {
+  if (!isRecord(raw)) return null
+  const policyId = pickString(raw, ['policyId'])
+  if (policyId === undefined) return null
+  const durationSeconds = raw.durationSeconds
+  if (typeof durationSeconds !== 'number' || !Number.isSafeInteger(durationSeconds) || durationSeconds <= 0) return null
+  const remainingCredits = raw.remainingCredits
+  if (typeof remainingCredits !== 'string' || !/^\d+$/.test(remainingCredits)) return null
+  const limitCredits = raw.limitCredits
+  if (typeof limitCredits !== 'string' || !/^\d+$/.test(limitCredits)) return null
+  // Both sides have to be real amounts: a digit string that overflows to
+  // Infinity cannot be divided by, and a zero limit is no denominator at all.
+  const limit = Number(limitCredits)
+  if (!Number.isFinite(limit) || limit <= 0) return null
+  if (!Number.isFinite(Number(remainingCredits))) return null
+  const reset = codingPlanResetOf(raw.resetsAt)
+  if (reset === undefined) return null
+  return { policyId, durationSeconds, remainingCredits, limitCredits, resetsAt: reset }
+}
+
+/**
+ * A window's reset instant as the DTO states it.
+ *
+ * Absent and `null` both mean "the service stated no reset" and are kept as
+ * null; a string has to parse as an instant, and anything else (a number, a
+ * sentence) is `undefined` — the sentinel that makes the window unreadable.
+ *
+ * @param value - The raw field.
+ * @returns The ISO string, null for "not stated", or undefined for "unreadable".
+ */
+function codingPlanResetOf(value: unknown): string | null | undefined {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return Number.isFinite(Date.parse(trimmed)) ? trimmed : undefined
+}
+
+/**
+ * One credential shape to try against the coding-plan endpoint.
+ *
+ * `label` is the only part allowed to reach a message, a card or a log: it names
+ * the SHAPE (which header carried which kind of key), never the key itself.
+ */
+interface CodingPlanCredentialAttempt {
+  /** How a failure record names this shape. */
+  label: string
+  /** The Bearer this request carries; the empty string means no Authorization. */
+  apiKey: string
+  /** Extra headers this shape needs. */
+  headers: Record<string, string>
+}
+
+/**
+ * The credential shapes to try, in order, for one coding-plan read.
+ *
+ * The console signs this call with a browser SESSION (`credentials: "include"`),
+ * so which of this line's two keys the endpoint accepts is not public: a control
+ * key returned 401 live, which is exactly the ambiguity this list settles by
+ * trying rather than by guessing. The order is "most likely intended first":
+ * the control key already reads the rest of the control plane, the runtime key is
+ * the gateway's own, and `x-api-key` is the spelling some routes use instead of
+ * a Bearer.
+ *
+ * A runtime key of `''` (a pasted key account, or a credential that never got
+ * one) leaves the first shape alone rather than sending an empty header.
+ *
+ * @param controlKey - The account's `vela_ctrl_…` key.
+ * @param runtimeKey - The account's `sk-amr-…` key, or ''.
+ * @returns The shapes to try, one to three.
+ */
+function codingPlanAttempts(controlKey: string, runtimeKey: string): CodingPlanCredentialAttempt[] {
+  const attempts: CodingPlanCredentialAttempt[] = [
+    { label: 'bearer control key', apiKey: controlKey, headers: {} },
+  ]
+  const runtime = runtimeKey.trim()
+  if (runtime === '') return attempts
+  attempts.push({ label: 'bearer runtime key', apiKey: runtime, headers: {} })
+  // No Authorization at all here: a route that reads `x-api-key` may reject a
+  // Bearer it did not ask for, so this shape must not send one.
+  attempts.push({ label: 'x-api-key runtime key', apiKey: '', headers: { 'x-api-key': runtime } })
+  return attempts
+}
+
+/**
+ * A successful response body as the DTO.
+ *
+ * @param json - The decoded body.
+ * @returns The plan, with `error` empty and only the windows that survived.
+ */
+function codingPlanOf(json: unknown): OpenDesignCodingPlanDto {
+  const body = isRecord(json) ? json : {}
+  const windows: OpenDesignCodingPlanWindowDto[] = []
+  for (const row of Array.isArray(body.windows) ? body.windows : []) {
+    const window = codingPlanWindowOf(row)
+    if (window !== null) windows.push(window)
+  }
+  const tierText = typeof body.tier === 'string' ? body.tier.trim().toLowerCase() : ''
+  return {
+    tier: CODING_PLAN_TIERS.includes(tierText) ? tierText : null,
+    windows,
+    error: '',
+  }
+}
+
+/**
+ * Read one account's Design Plan allowance.
+ *
+ * This is the line's REAL quota surface — the 5-hour and 7-day windows the
+ * console draws as "剩余 90% / 81%" — and it is the only endpoint that states a
+ * bounded window at all: `/billing/summary` states credits and a tier, never a
+ * rolling allowance.
+ *
+ * `GET {amr}/workspaces/{id}/billing/coding-plan-usage`, always the same URL with
+ * the same `x-vela-workspace-id`, tried once per credential SHAPE (see
+ * {@link codingPlanAttempts}). The retry rule is the important half: only
+ * `401` / `403` — "these credentials are not accepted" — moves on to the next
+ * shape, because that is the only verdict a different key could change. A `404` or
+ * a `500`, and in particular `coding_plan_configuration_unavailable`, is the
+ * endpoint's own verdict about the WORKSPACE, so it stops the search and travels
+ * out verbatim.
+ *
+ * Exhausting every shape yields one sentence a user can act on: the last refusal
+ * plus the shapes that were tried. A success carries NO trace of which credential
+ * worked — the shape of a credential is not the card's business.
+ *
+ * It never throws and never fills a window nobody measured.
+ *
+ * @param options.fetchFn - Injected fetch.
+ * @param options.controlKey - The account's `vela_ctrl_…` key.
+ * @param options.runtimeKey - The account's `sk-amr-…` key; `''` skips the two
+ *   shapes that need one.
+ * @param options.workspaceId - From {@link fetchWorkspaceId}.
+ * @param options.apiBase - Control-plane base.
+ * @param options.signal - Caller cancellation.
+ * @param options.timeoutMs - Per-request budget.
+ * @returns The plan, or the reason every shape it knew failed.
+ */
+export async function fetchCodingPlanUsage({
+  fetchFn,
+  controlKey,
+  runtimeKey,
+  workspaceId,
+  apiBase = AMR_API_BASE,
+  signal,
+  timeoutMs = 15_000,
+}: {
+  fetchFn: typeof fetch
+  controlKey: string
+  runtimeKey: string
+  workspaceId: string
+  apiBase?: string
+  signal?: AbortSignal
+  timeoutMs?: number
+}): Promise<OpenDesignCodingPlanDto> {
+  const url = `${trimBase(apiBase)}${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}${CODING_PLAN_USAGE_SUFFIX}`
+  const tried: string[] = []
+  let refusal = ''
+  try {
+    for (const attempt of codingPlanAttempts(controlKey, runtimeKey)) {
+      const result = await sendJSON(fetchFn, url, {
+        apiKey: attempt.apiKey,
+        signal,
+        timeoutMs,
+        headers: { 'x-vela-workspace-id': workspaceId, ...attempt.headers },
+      })
+      if (result.ok) return codingPlanOf(result.json)
+      refusal = httpRefusal(result.status, result.json, result.text)
+      // A credential refusal is the one answer another shape could change.
+      if (result.status !== 401 && result.status !== 403) {
+        return { tier: null, windows: [], error: refusal }
+      }
+      tried.push(attempt.label)
+    }
+    return {
+      tier: null,
+      windows: [],
+      error: (refusal === '' ? 'the coding plan could not be read' : refusal) + ` (tried: ${tried.join('; ')})`,
+    }
+  } catch (error) {
+    return { tier: null, windows: [], error: error instanceof Error ? error.message : String(error) }
   }
 }

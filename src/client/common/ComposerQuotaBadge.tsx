@@ -28,6 +28,13 @@ export interface ComposerQuotaFacts {
   /** What the hover and the screen reader say. */
   tooltip: string
   level: 'normal' | 'warning' | 'danger'
+  /**
+   * The remaining share (0–100) to draw beside the number, for a line whose
+   * status states one. It is optional on purpose: most lines report only a
+   * number, and the badge then renders exactly the markup it always did — the
+   * bar exists for the lines that can state a remaining share, not as a default.
+   */
+  percent?: number | null
 }
 
 /** The shared grading: 5% or less is critical, 20% or less warns. */
@@ -124,5 +131,12 @@ export function ComposerQuotaBadge<Status extends { authenticated: boolean }>(
   >
     <span className="dsha-composer-quota-label">{label}</span>
     <strong className="dsha-composer-quota-val">{loading ? '…' : facts.text}</strong>
+    {/* The tooltip already states the share in words, so the bar is decoration
+        for sighted users only and stays out of the accessibility tree. */}
+    {typeof facts.percent === 'number' && Number.isFinite(facts.percent) && (
+      <span className="dsha-composer-quota-meter" aria-hidden="true">
+        <i className="dsha-composer-quota-meter-fill" style={{ width: `${Math.min(100, Math.max(0, facts.percent))}%` }} />
+      </span>
+    )}
   </span>
 }
