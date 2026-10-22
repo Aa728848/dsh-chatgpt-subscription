@@ -1,0 +1,555 @@
+{
+  "id": "line-flip",
+  "title": {
+    "zh": "线路额度",
+    "en": "Line quota"
+  },
+  "description": {
+    "zh": "一张自己会翻面的线路卡：正面是这条订阅线路的额度窗口、进度条与重置倒计时，背面是它的账号池、当前账号与三档轮换策略。",
+    "en": "A self-flipping line card: the front shows this subscription line's quota windows, meters and reset countdowns; the back shows its account pool, the active account and the three rotation strategies."
+  },
+  "author": "dsh-chatgpt-subscription",
+  "version": "0.1.0",
+  "sizes": [
+    "s",
+    "m",
+    "l"
+  ],
+  "source": "dsh-chatgpt-subscription:line-card",
+  "capabilities": [
+    "dsh-chatgpt-subscription:line-refresh",
+    "dsh-chatgpt-subscription:line-account-switch",
+    "dsh-chatgpt-subscription:line-account-strategy"
+  ],
+  "refresh": {
+    "mode": "interval",
+    "everyMs": 60000
+  },
+  "minBox": {
+    "w": 1,
+    "h": 14
+  },
+  "defaultBox": {
+    "w": 2,
+    "h": 20
+  },
+  "props": {
+    "type": "object",
+    "required": [
+      "line"
+    ],
+    "properties": {
+      "line": {
+        "type": "string",
+        "enum": [
+          "codex",
+          "kimi-code",
+          "minimax-code",
+          "antigravity",
+          "command-code",
+          "claude",
+          "glm-coding-plan",
+          "step-code",
+          "qoder",
+          "cline-pass",
+          "opendesign"
+        ]
+      }
+    }
+  },
+  "data": {
+    "type": "object",
+    "properties": {
+      "line": {
+        "type": "string"
+      },
+      "label": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "signedIn": {
+        "type": "boolean"
+      },
+      "installed": {
+        "type": "boolean"
+      },
+      "planLabel": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "accountLabel": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "accounts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "email": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "primary": {
+              "type": "boolean"
+            },
+            "plan": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cooldownUntil": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "authStatus": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "usedPercent": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "resetsAt": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "windows": {
+              "type": "array",
+              "description": "Every window this account's own reading stated, shortest first. Absent on a line with no per-account read; [] means the read was made and measured nothing.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "usedPercent": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "windowMinutes": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "resetsAt": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "activeAccountId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "strategy": {
+        "type": "string"
+      },
+      "quota": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "windows": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "usedPercent": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "windowMinutes": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "resetsAt": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              },
+              "credits": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "unlimited": {
+                        "type": "boolean"
+                      },
+                      "balance": {
+                        "type": [
+                          "string",
+                          "number",
+                          "null"
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "resetCredits": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "available": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "expiresAt": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "fetchedAt": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "refreshing": {
+                "type": "boolean"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    }
+  },
+  "text": {
+    "title": {
+      "zh": "线路额度",
+      "en": "Line quota"
+    },
+    "props.line.label": {
+      "zh": "线路",
+      "en": "Line"
+    },
+    "props.line.hint": {
+      "zh": "这张卡显示哪条订阅线路：codex=ChatGPT · kimi-code=Kimi 会员 · minimax-code=MiniMax Code · antigravity=Antigravity · command-code=Command Code · claude=Claude · glm-coding-plan=GLM 编程套餐 · step-code=Step Code · qoder=Qoder · cline-pass=Cline Pass · opendesign=OpenDesign",
+      "en": "Which subscription line this card shows: codex=ChatGPT · kimi-code=Kimi · minimax-code=MiniMax Code · antigravity=Antigravity · command-code=Command Code · claude=Claude · glm-coding-plan=GLM coding plan · step-code=Step Code · qoder=Qoder · cline-pass=Cline Pass · opendesign=OpenDesign"
+    },
+    "line.codex": {
+      "zh": "ChatGPT",
+      "en": "ChatGPT"
+    },
+    "line.kimi-code": {
+      "zh": "Kimi Code",
+      "en": "Kimi Code"
+    },
+    "line.minimax-code": {
+      "zh": "MiniMax Code",
+      "en": "MiniMax Code"
+    },
+    "line.antigravity": {
+      "zh": "Antigravity",
+      "en": "Antigravity"
+    },
+    "line.command-code": {
+      "zh": "Command Code",
+      "en": "Command Code"
+    },
+    "line.claude": {
+      "zh": "Claude",
+      "en": "Claude"
+    },
+    "line.glm-coding-plan": {
+      "zh": "GLM 编程套餐",
+      "en": "GLM coding plan"
+    },
+    "line.step-code": {
+      "zh": "Step Code",
+      "en": "Step Code"
+    },
+    "line.qoder": {
+      "zh": "Qoder",
+      "en": "Qoder"
+    },
+    "line.cline-pass": {
+      "zh": "Cline Pass",
+      "en": "Cline Pass"
+    },
+    "line.opendesign": {
+      "zh": "OpenDesign",
+      "en": "OpenDesign"
+    },
+    "refresh": {
+      "zh": "刷新额度",
+      "en": "Refresh quota"
+    },
+    "flipToBack": {
+      "zh": "翻到背面看账号",
+      "en": "Show the accounts"
+    },
+    "flipToFront": {
+      "zh": "翻回正面看额度",
+      "en": "Show the quota"
+    },
+    "loading": {
+      "zh": "正在读取额度…",
+      "en": "Reading quota…"
+    },
+    "signedOut": {
+      "zh": "未登录",
+      "en": "Not signed in"
+    },
+    "notInstalled": {
+      "zh": "这条线路的插件还没装",
+      "en": "This line's plugin is not installed"
+    },
+    "noQuota": {
+      "zh": "这条线路还没有额度记录，点刷新或去设置页打开一次",
+      "en": "This line has no quota recorded yet — refresh, or open it once on the settings page"
+    },
+    "empty": {
+      "zh": "这条线路没有额度窗口",
+      "en": "This line has no quota windows"
+    },
+    "refreshing": {
+      "zh": "正在刷新额度…",
+      "en": "Refreshing quota…"
+    },
+    "failed": {
+      "zh": "读不到额度",
+      "en": "Quota unavailable"
+    },
+    "accountsFailed": {
+      "zh": "读不到账号",
+      "en": "Accounts unavailable"
+    },
+    "updatedAt": {
+      "zh": "更新于 {time}",
+      "en": "Updated {time}"
+    },
+    "quota": {
+      "zh": "额度",
+      "en": "Quota"
+    },
+    "accountQuota": {
+      "zh": "{name} 的额度",
+      "en": "Quota for {name}"
+    },
+    "minutes": {
+      "zh": "{n} 分钟",
+      "en": "{n} min"
+    },
+    "hours": {
+      "zh": "{n} 小时",
+      "en": "{n} h"
+    },
+    "days": {
+      "zh": "{n} 天",
+      "en": "{n} d"
+    },
+    "resetMinutes": {
+      "zh": "{n} 分钟后重置",
+      "en": "Resets in {n} min"
+    },
+    "resetHours": {
+      "zh": "{a} 小时 {b} 分后重置",
+      "en": "Resets in {a} h {b} min"
+    },
+    "resetHoursExact": {
+      "zh": "{a} 小时后重置",
+      "en": "Resets in {a} h"
+    },
+    "resetDays": {
+      "zh": "{a} 天 {b} 小时后重置",
+      "en": "Resets in {a} d {b} h"
+    },
+    "resetDaysExact": {
+      "zh": "{a} 天后重置",
+      "en": "Resets in {a} d"
+    },
+    "resetting": {
+      "zh": "即将重置",
+      "en": "Resetting soon"
+    },
+    "credits": {
+      "zh": "赠额",
+      "en": "Credits"
+    },
+    "balanceAvailable": {
+      "zh": "可用余额 {v}",
+      "en": "Available {v}"
+    },
+    "creditsOnlyHint": {
+      "zh": "这条线路按额度计量，没有百分比窗口",
+      "en": "Metered by credits, no % windows"
+    },
+    "unlimited": {
+      "zh": "无限",
+      "en": "Unlimited"
+    },
+    "resetsAvailable": {
+      "zh": "{n} 次可用重置",
+      "en": "{n} resets available"
+    },
+    "resetsOne": {
+      "zh": "1 次可用重置",
+      "en": "1 reset available"
+    },
+    "resetsExpires": {
+      "zh": "{date} 到期",
+      "en": "expires {date}"
+    },
+    "noAccount": {
+      "zh": "还没有当前账号",
+      "en": "No current account yet"
+    },
+    "metaAccountOne": {
+      "zh": "1 个账号",
+      "en": "1 account"
+    },
+    "metaAccounts": {
+      "zh": "{n} 个账号",
+      "en": "{n} accounts"
+    },
+    "rotation": {
+      "zh": "轮换策略",
+      "en": "Rotation strategy"
+    },
+    "strategySequential": {
+      "zh": "顺序使用",
+      "en": "one at a time"
+    },
+    "strategyRoundRobin": {
+      "zh": "轮流使用",
+      "en": "take turns"
+    },
+    "strategySticky": {
+      "zh": "固定当前",
+      "en": "stay put"
+    },
+    "quotaUnread": {
+      "zh": "额度未读",
+      "en": "quota unread"
+    },
+    "emptyAccounts": {
+      "zh": "账号池是空的",
+      "en": "The account pool is empty"
+    },
+    "emptyAccountsHint": {
+      "zh": "添加账号后可以在这里切换",
+      "en": "Add an account to switch between them here"
+    },
+    "switching": {
+      "zh": "切换中…",
+      "en": "Switching…"
+    },
+    "current": {
+      "zh": "当前",
+      "en": "Current"
+    },
+    "switchTo": {
+      "zh": "切换到 {name}",
+      "en": "Switch to {name}"
+    },
+    "srPrimary": {
+      "zh": "主账号",
+      "en": "primary account"
+    },
+    "srCooling": {
+      "zh": "冷却中",
+      "en": "cooling down"
+    },
+    "srExpired": {
+      "zh": "登录已失效",
+      "en": "sign-in expired"
+    },
+    "srInvalid": {
+      "zh": "登录无效",
+      "en": "sign-in invalid"
+    },
+    "srBlocked": {
+      "zh": "登录需要处理",
+      "en": "sign-in needs attention"
+    },
+    "srReady": {
+      "zh": "可用",
+      "en": "available"
+    }
+  }
+}

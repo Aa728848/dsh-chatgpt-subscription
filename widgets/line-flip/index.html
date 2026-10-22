@@ -1,0 +1,58 @@
+<div class="t-flip-card line-flip" data-t-flip role="button" tabindex="0" aria-pressed="false" data-state="loading" data-busy="false">
+  <!--
+    刷新放在翻转容器里、但不在旋转的内层：悬停翻面时它不跟着转，两块脸也都压不到它，
+    所以无论停在哪一面，这只按钮都点得到。
+  -->
+  <button class="line-flip__refresh t-pressable" type="button" data-field="refresh" title="刷新额度" aria-label="刷新额度">
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5V6h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+  <div class="t-flip-card__inner">
+    <section class="t-flip-card__face t-data line-flip__face">
+      <header class="t-data__head line-flip__head">
+        <div class="line-flip__head-main">
+          <h2 class="t-data__title line-flip__title" data-field="frontTitle">线路额度</h2>
+        </div>
+        <span class="t-data__meta line-flip__meta" data-field="frontMeta"><span data-field="frontPlan"></span><span class="w-hide-narrow" data-field="frontUpdated"></span></span>
+      </header>
+      <div class="t-data__body line-flip__body">
+        <div class="line-flip__windows w-scroll" data-field="windows"></div>
+        <p class="line-flip__blank" data-field="frontBlank" hidden></p>
+        <p class="line-flip__error" data-field="frontError" role="status" hidden></p>
+        <footer class="line-flip__foot" data-field="foot" hidden>
+          <span class="line-flip__fact" data-field="credits" hidden></span>
+          <span class="line-flip__fact" data-field="resets" hidden></span>
+        </footer>
+      </div>
+    </section>
+    <section class="t-flip-card__face t-flip-card__back t-data line-flip__face">
+      <header class="t-data__head line-flip__head">
+        <div class="line-flip__head-main">
+          <p class="t-data__kicker line-flip__kicker" data-field="backKicker"></p>
+          <h2 class="t-data__title line-flip__title" data-field="backTitle">还没有当前账号</h2>
+        </div>
+        <span class="t-data__meta line-flip__meta" data-field="backMeta"><span data-field="backCount"></span><span class="w-hide-narrow" data-field="backStrategy"></span></span>
+      </header>
+      <div class="t-data__body line-flip__body">
+        <div class="line-flip__strategy" data-field="strategy" role="group" aria-label="轮换策略">
+          <button class="line-flip__chip" type="button" data-strategy="sequential" aria-pressed="false" title="sequential">
+            <span class="line-flip__chip-label" data-label="strategySequential">顺序使用</span>
+          </button>
+          <button class="line-flip__chip" type="button" data-strategy="round-robin" aria-pressed="false" title="round-robin">
+            <span class="line-flip__chip-label" data-label="strategyRoundRobin">轮流使用</span>
+          </button>
+          <button class="line-flip__chip" type="button" data-strategy="sticky" aria-pressed="false" title="sticky">
+            <span class="line-flip__chip-label" data-label="strategySticky">固定当前</span>
+          </button>
+        </div>
+        <p class="line-flip__blank" data-field="backBlank" hidden>
+          <span class="line-flip__blank-text" data-field="backBlankText"></span>
+          <span class="line-flip__blank-hint" data-field="backBlankHint" hidden></span>
+        </p>
+        <p class="line-flip__error" data-field="backError" role="status" hidden></p>
+        <ul class="line-flip__list w-scroll" data-field="list"></ul>
+      </div>
+    </section>
+  </div>
+</div>

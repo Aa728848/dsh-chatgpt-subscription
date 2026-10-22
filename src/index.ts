@@ -35,6 +35,7 @@ import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
 import { startWebProviderReconciler } from './host/web-provider-reconciler.ts'
 import { UsageService } from './host/usage-service.ts'
+import { registerWidgetBoard, type WidgetBoardContext } from './host/widget-board/provider.ts'
 import { AntigravityAdapter } from './host/antigravity/adapter.ts'
 import { registerAntigravityRoutes } from './host/antigravity/routes.ts'
 import {
@@ -78,7 +79,12 @@ import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
 import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
 // The line that does not persist its model catalog in model settings keeps it
 // in memory; the overview reads the size from there (see `catalogTotal`).
-import { catalogSize as minimaxCodeCatalogSize } from './host/minimax-code/client.ts'
+// The quota reader rides the same import because the board's per-account hook
+// needs the line's OWN client (see the `accountQuotaClients` wiring below).
+import {
+  catalogSize as minimaxCodeCatalogSize,
+  fetchTokenPlanQuota as fetchMinimaxTokenPlanQuota,
+} from './host/minimax-code/client.ts'
 import {
   MinimaxCodeCredentialStore,
   MinimaxCodeModelSettingsStore,
@@ -123,7 +129,7 @@ import {
   QoderModelSettingsStore,
   registerQoderPreferenceStore,
 } from './host/qoder/token-store.ts'
-import { qoderCatalogIsLive } from './host/qoder/client.ts'
+import { loadQoderQuota, qoderCatalogIsLive } from './host/qoder/client.ts'
 import { PROVIDER_ID as QODER_PROVIDER_ID, PROVIDER_NAME as QODER_PROVIDER_NAME } from './host/qoder/types.ts'
 import { createOpenDesignLine } from './host/opendesign/line.ts'
 import {
@@ -836,6 +842,71 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     codexAccountPool.setQuotaSnapshot((account) => {
       const snapshot = usage.snapshotFor(account.id, account.credentials)
       return snapshot === undefined ? undefined : codexAccountQuota(snapshot)
+    })
+    // The widget board's half of this plugin: one widget-type directory, one
+    // `line-card` data source and three line capabilities, all registered under
+    // one handle that is dropped when this plugin unloads. The board is optional
+    // and the service is absent on every host that does not have it, in which
+    // case this is a no-op and the plugin behaves exactly as it did before the
+    // call existed. The ChatGPT line contributes through `lines` like every other
+    // line; there is no ChatGPT-only quota/account source any more, so nothing
+    // here has to hand over `usage`, `oauth` or the pool object.
+    registerWidgetBoard(ctx as unknown as WidgetBoardContext, {
+      // The line registry's line → pool mapping. It lives HERE because this is
+      // the one scope that holds every pool; the registry itself imports no
+      // concrete pool class and learns a line only through this table. The
+      // quota half reaches each line over loopback HTTP through its own route,
+      // so the origin is resolved per read rather than captured now: the
+      // listener may not have bound a port yet at this point in the load.
+      lines: {
+        origin: () => webServerOrigin(ctx.webServer),
+        pools: {
+          codex: codexAccountPool,
+          claude: claudeAccountPool,
+          'glm-coding-plan': glmCodingPlanAccountPool,
+          'step-code': stepCodeAccountPool,
+          qoder: qoderAccountPool,
+          'cline-pass': clinePassLine.accountPool,
+          opendesign: openDesignLine.accountPool,
+          'kimi-code': kimiCodeAccountPool,
+          'minimax-code': minimaxCodeAccountPool,
+          antigravity: antigravityAccountPool,
+          'command-code': commandCodeAccountPool,
+        },
+        // The two lines whose card shows a quota PER ACCOUNT. A pool row carries
+        // a snapshot only for the account that was actually read, so on a
+        // two-account line the second row had nothing to draw; these clients let
+        // the registry ask each account for its own numbers instead.
+        //
+        // Injected HERE because this is the one scope that holds both clients —
+        // the registry itself imports no line, which is what keeps it a
+        // description of eleven lines rather than a twelfth implementation.
+        // Every other line is absent on purpose and keeps the behaviour it had.
+        //
+        // Neither client is called with a "force": the registry caches one
+        // reading per (line, account) for a minute, and both clients cache too,
+        // so a board polling every 60 s costs at most one upstream read per
+        // account per minute.
+        accountQuotaClients: {
+          qoder: async (credentials, { fetchFn, accountId }) => {
+            const read = await loadQoderQuota(
+              credentials as Parameters<typeof loadQoderQuota>[0],
+              {
+                fetchFn,
+                // The snapshot is remembered against the POOL ACCOUNT, not the
+                // line: quota follows the account, and keying it by the line is
+                // how one row ends up drawing another row's numbers.
+                cacheKey: accountId,
+              },
+            )
+            return read.ok ? read.snapshot : null
+          },
+          'minimax-code': async (credentials, { fetchFn, accountId }) => await fetchMinimaxTokenPlanQuota(
+            credentials as Parameters<typeof fetchMinimaxTokenPlanQuota>[0],
+            { fetchFn, accountId },
+          ),
+        },
+      },
     })
     const responses = new ResponsesClient(oauth, ctx.attachments, {
       fetchFn: modelFetch['codex-chatgpt'],

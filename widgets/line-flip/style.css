@@ -1,0 +1,729 @@
+/*
+ * 线路额度卡的样式。
+ *
+ * 翻转的几何与时长来自套件的 `.t-flip-card`（透视、内层 rotateY、两面 backface-visibility），底色与
+ * 标题区来自 `.t-data`：这里只排两张脸的内容，并给它们同一套间距、字号与按钮语言——与 Codex 额度卡、
+ * 账号轮换卡是同一句话。颜色、间距、字号与动效全部从套件令牌读，不写颜色字面值。
+ *
+ * 两张脸都是 `.t-data`，各自带自己的底色与描边，所以转到哪一面，看到的就是那一面的完整卡片；
+ * `.t-data` 的 `height: 100vh` 在这里被改回 100%——脸是绝对定位的，高度要跟盒子，不是跟视口。
+ *
+ * 刷新按钮在翻转容器里、但不在旋转的内层：悬停翻面时它不跟着转，两块脸也都压不到它。正面的按钮
+ * 因此永远点得到，不会因为鼠标悬停把卡片翻到背面而失效。
+ *
+ * 进度条与 chip 是本卡自己写的：套件的原语里只有 `.w-frame`、`.w-actions`、`.w-scroll`、`.w-sr`，
+ * `.w-meter` 与 `.w-chip` 并不存在，写下来也只是一条不生效的类名。
+ */
+.line-flip {
+  box-sizing: border-box;
+  height: 100vh;
+  overflow: hidden;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.line-flip *,
+.line-flip *::before,
+.line-flip *::after {
+  box-sizing: border-box;
+}
+
+.line-flip__face {
+  height: 100%;
+  gap: var(--w-space-sm);
+}
+
+/* 标题区右上角给刷新按钮让位：按钮 24px 宽，再加一点呼吸。 */
+.line-flip__head {
+  padding-right: var(--w-space-2xl);
+}
+
+.line-flip__head-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.line-flip__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 右侧事实（套餐名、账号数）先保完整，让标题先省略：两个都可伸缩时，窄盒子里会两边各截一半，
+ * 变成「7 个…」这种读不出意思的东西。
+ */
+.line-flip__meta {
+  min-width: 0;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.line-flip__kicker {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 刷新按钮：与额度卡的刷新、账号卡的切换同一种描边圆钮。 */
+.line-flip__refresh {
+  position: absolute;
+  z-index: 2;
+  top: var(--w-space-lg);
+  right: var(--w-space-lg);
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--w-color-border) 90%, transparent);
+  border-radius: 50%;
+  background: var(--w-color-surface);
+  color: var(--w-color-muted);
+  cursor: pointer;
+  transition: color var(--w-motion-fast) linear, border-color var(--w-motion-fast) linear;
+}
+
+.line-flip__refresh svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.line-flip__refresh:hover {
+  border-color: var(--w-color-border);
+  color: var(--w-color-fg);
+}
+
+.line-flip__refresh:focus-visible {
+  outline: 2px solid var(--w-color-accent);
+  outline-offset: 2px;
+}
+
+.line-flip__refresh:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* 在途：图标转一圈；按钮停用由脚本控制在「这一次调用」上，别人家的读取只让它转、不禁用。 */
+.line-flip[data-busy="true"] .line-flip__refresh svg {
+  animation: line-flip-spin calc(var(--w-motion-base) * 4) linear infinite;
+}
+
+@keyframes line-flip-spin {
+  to { transform: rotate(360deg); }
+}
+
+.line-flip__body {
+  gap: var(--w-space-sm);
+}
+
+/*
+ * 窗口区就是那块可滚动的纵向区域：.w-scroll 给 overflow，这里补上 flex 布局里的 min-height: 0——
+ * 少了它，行数一多整块会把正文撑出去，滚不动也压住页脚。行再多也只在这块里滚，卡片高度仍由
+ * 用户给的盒子决定；页脚是 flex: none 的兄弟，永远贴底、不参与滚动。
+ *
+ * 居中只对「行少到装得下」的盒子生效：safe center 在内容溢出时退回起点对齐。只用 center 的话，
+ * 溢出到盒子上方的那几行既滚不到、也不计入 scrollHeight——窗口会凭空消失，正是这次要修掉的毛病。
+ */
+.line-flip__windows {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--w-space-sm);
+  min-height: 0;
+  /* 行少时在正文里居中；行多时 safe 会退回起点对齐，保证第一行与最后一行都滚得到。 */
+  justify-content: center;
+  justify-content: safe center;
+}
+
+.line-flip__win {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--w-space-xs);
+}
+
+.line-flip__win-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--w-space-sm);
+}
+
+.line-flip__win-label {
+  /* 标签是这个窗口的第一身份：可以省略，但不许把整行顶出盒子。 */
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--w-color-fg);
+  font-size: var(--w-type-body);
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-flip__win-used {
+  flex: none;
+  color: var(--w-color-fg);
+  font-size: var(--w-type-body);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.line-flip__win-reset {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 进度条：底是前景色的一层薄纱，填充读行上的百分比（`--line-used`），接近满额换成警告色。 */
+.line-flip__meter {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--w-color-fg) 10%, transparent);
+}
+
+.line-flip__fill {
+  display: block;
+  width: var(--line-used, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--w-color-accent);
+  transition: width var(--w-motion-base) var(--w-motion-ease-smooth);
+}
+
+.line-flip__win[data-high="true"] .line-flip__fill,
+.line-flip__row[data-high="true"] .line-flip__fill {
+  background: var(--w-tone-warn);
+}
+
+/*
+ * 正面按账号分组（≥2 个账号各自带着非空窗口时才出现）：一个账号一块，块头是一行 caption 级的弱化标题，
+ * 下面再是这个账号自己的窗口行。
+ *
+ * 标题行按 16px 的行高排，比一行窗口（20px 标签 + 4px 条）还矮——它只负责说清「这一块是谁」，
+ * 不该跟窗口抢注意力；块与块之间的距离由窗口区自己的 gap 给，块内窗口之间用更小的一档。
+ */
+.line-flip__group {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--w-space-xs);
+}
+
+.line-flip__group-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--w-space-xs);
+  margin: 0;
+}
+
+/* 小标题本身弱化一档：它是分组的路标，不是内容。 */
+.line-flip__group-title {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  font-weight: 600;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 撞名的区分符：与背面那一行同一套规则，不参与收缩，先让标题省。 */
+.line-flip__group-tag {
+  min-width: 0;
+  max-width: 50%;
+  flex: 0 0 auto;
+  overflow: hidden;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 计划名与「当前」标记贴在标题行最右；挤不下时先省它，标题的完整不交给它决定。 */
+.line-flip__group-note {
+  min-width: 0;
+  flex: 0 1 auto;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-flip__foot {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--w-space-sm);
+}
+
+.line-flip__fact {
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.line-flip__blank {
+  display: flex;
+  margin: auto;
+  padding: var(--w-space-sm) 0;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--w-space-xs);
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  line-height: 18px;
+  text-align: center;
+}
+
+.line-flip__blank-text {
+  max-width: 30rem;
+  overflow-wrap: anywhere;
+}
+
+.line-flip__blank-hint {
+  max-width: 30rem;
+  overflow-wrap: anywhere;
+}
+
+.line-flip .line-flip__error {
+  flex: none;
+  margin: 0;
+  color: var(--w-tone-danger);
+  font-size: var(--w-type-caption);
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* 整张卡级别的失败（线路接口不可达）：描边走一层危险色，原因写在正面正文里。 */
+.line-flip[data-state="error"] .line-flip__face {
+  border-color: color-mix(in srgb, var(--w-tone-danger) 40%, transparent);
+}
+
+/* 三档轮换策略：每档就一句看得懂的中文，策略 id 放在按钮的 title 里备查；三档等宽，一行放得下。 */
+.line-flip__strategy {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: var(--w-space-xs);
+}
+
+.line-flip__strategy[data-busy="true"] {
+  opacity: 0.65;
+}
+
+.line-flip__chip {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  padding: var(--w-space-xs) var(--w-space-sm);
+  border: 1px solid color-mix(in srgb, var(--w-color-border) 90%, transparent);
+  border-radius: var(--w-radius-card);
+  background: transparent;
+  color: var(--w-color-muted);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background-color var(--w-motion-fast) linear,
+    border-color var(--w-motion-fast) linear,
+    color var(--w-motion-fast) linear,
+    transform var(--w-motion-press) var(--w-motion-ease-smooth);
+}
+
+/* 一行文案：未选中时是弱化的说明色，选中时由下面那条提到前景色。 */
+.line-flip__chip-label {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--w-type-caption);
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-flip__chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--w-color-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--w-color-accent) 9%, transparent);
+}
+
+.line-flip__chip[aria-pressed="true"] .line-flip__chip-label {
+  color: var(--w-color-fg);
+  font-weight: 600;
+}
+
+.line-flip__chip:is(:active, .is-pressed) {
+  transform: scale(var(--w-motion-press-scale));
+}
+
+.line-flip__chip:focus-visible {
+  outline: 2px solid var(--w-color-accent);
+  outline-offset: 2px;
+}
+
+.line-flip__chip:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .line-flip__chip:not(:disabled):not([aria-pressed="true"]):hover {
+    border-color: var(--w-color-border);
+    background: color-mix(in srgb, var(--w-color-fg) 5%, transparent);
+  }
+}
+
+/* 账号列表：一行一个账号，整行就是切换按钮——状态点、名字与邮箱、该账号自己的迷你额度条。 */
+.line-flip__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.line-flip__item {
+  flex: none;
+}
+
+.line-flip__item + .line-flip__item {
+  border-top: 1px solid color-mix(in srgb, var(--w-color-border) 55%, transparent);
+}
+
+.line-flip__row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--w-space-sm);
+  padding: var(--w-space-xs) var(--w-space-xs);
+  border: 0;
+  border-radius: var(--w-space-xs);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background-color var(--w-motion-fast) linear,
+    transform var(--w-motion-press) var(--w-motion-ease-smooth);
+}
+
+.line-flip__row:is(:active, .is-pressed) {
+  transform: scale(var(--w-motion-press-scale));
+}
+
+.line-flip__row:focus-visible {
+  outline: 2px solid var(--w-color-accent);
+  outline-offset: -2px;
+}
+
+.line-flip__row:disabled {
+  cursor: default;
+}
+
+.line-flip__row[data-busy="true"] {
+  opacity: 0.85;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .line-flip__row:not(:disabled):hover {
+    background: color-mix(in srgb, var(--w-color-fg) 6%, transparent);
+  }
+}
+
+/* 状态点：颜色只是辅助，读屏文字在同一个行里（.w-sr）。 */
+.line-flip__dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--w-tone-idle);
+}
+
+.line-flip__row[data-tone="brand"] .line-flip__dot { background: var(--w-color-accent); }
+.line-flip__row[data-tone="warn"] .line-flip__dot { background: var(--w-tone-warn); }
+.line-flip__row[data-tone="danger"] .line-flip__dot { background: var(--w-tone-danger); }
+
+.line-flip__row[data-busy="true"] .line-flip__dot {
+  animation: line-flip-pulse calc(var(--w-motion-base) * 2) var(--w-motion-ease-standard) infinite;
+}
+
+@keyframes line-flip-pulse {
+  50% { opacity: 0.3; }
+}
+
+.line-flip__id {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+/*
+ * 标题这一行放「名字 + 可选的短区分符」。同一张卡里两个账号标签一样时，区分符就是这两行唯一分开的地方，
+ * 所以它不参与省略、名字先让；窄盒子里邮箱副标题被 .w-hide-narrow 收掉之后，这一行仍然分得清。
+ */
+.line-flip__name {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--w-space-xs);
+}
+
+.line-flip__label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--w-color-fg);
+  font-size: var(--w-type-body);
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-flip__tag {
+  min-width: 0;
+  max-width: 60%;
+  /* 区分符不参与收缩：撞名的那两行全靠它分开，宁可让名字先省略到只剩几个字。 */
+  flex: 0 0 auto;
+  overflow: hidden;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-flip__email {
+  overflow: hidden;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 该账号自己最近一次快照的主窗口：迷你进度条加百分比，没有快照时不画。 */
+.line-flip__gauge {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--w-space-xs);
+}
+
+.line-flip__meter--mini {
+  width: 40px;
+}
+
+/*
+ * 这一个账号还没有额度快照：不画 0% 的空条（空条会被读成「用完了」），只留一句弱化的小字。
+ * 卡片里没有 host 的额度数据时，这句话比一条零进度条诚实。
+ */
+.line-flip__gauge-missing {
+  flex: none;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.line-flip__pct {
+  flex: none;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+/*
+ * 撞名的行在窄盒子里只剩区分符当标题（脚本给这一行 data-tagged，并在这里放一份 .line-flip__alias）。
+ * 「名字 + 区分符」在 288px 里两半都只能剩几个字，读完谁也不是谁；换成只写区分符，标题就只有它一个，
+ * 读得完整。名字没有丢：它在行的 aria-label 里，也在这一格的 title 上，悬停还能看到。
+ */
+.line-flip__alias {
+  display: none;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--w-color-fg);
+  font-size: var(--w-type-body);
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-box-width="narrow"] .line-flip__row[data-tagged="true"] .line-flip__name {
+  display: none;
+}
+
+:root[data-box-width="narrow"] .line-flip__row[data-tagged="true"] .line-flip__alias {
+  display: block;
+}
+
+/* 百分比默认一位小数；窄盒子里行内宽度紧张，收成整数，不去挤标题。 */
+.line-flip__pct-int {
+  display: none;
+}
+
+:root[data-box-width="narrow"] .line-flip__pct-full {
+  display: none;
+}
+
+:root[data-box-width="narrow"] .line-flip__pct-int {
+  display: inline;
+}
+
+/* 当前账号与切换中的标记：位置固定在行尾，文字比名字弱一档。 */
+.line-flip__marker {
+  flex: none;
+  color: var(--w-color-muted);
+  font-size: var(--w-type-caption);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.line-flip__row[aria-current="true"] .line-flip__marker {
+  color: var(--w-color-fg);
+  font-weight: 500;
+}
+
+/* 组件库的缩略画面不放按钮。 */
+:root[data-placement="preview"] .line-flip__refresh {
+  display: none;
+}
+
+/* 窄盒子：窗口与账号的标注降到说明字号，邮箱与倒计时由 .w-hide-narrow 收掉。 */
+:root[data-box-width="narrow"] .line-flip__win-label,
+:root[data-box-width="narrow"] .line-flip__win-used {
+  font-size: var(--w-type-caption);
+}
+
+:root[data-box-width="narrow"] .line-flip__meter--mini {
+  width: 28px;
+}
+
+:root[data-box-width="narrow"] .line-flip__head {
+  /* 窄盒子里按钮缩到 22px、离边 12px，标题区仍要让出整数宽度，meta 才不会被压在按钮底下。 */
+  padding-right: var(--w-space-2xl);
+}
+
+:root[data-box-width="narrow"] .line-flip__refresh {
+  top: var(--w-space-md);
+  right: var(--w-space-md);
+  width: 22px;
+  height: 22px;
+}
+
+/*
+ * 矮盒子：窗口与页脚一条都不收——正文本来就是可滚动的（.line-flip__windows 上带着 .w-scroll），
+ * 高度由用户给的盒子决定，多出来的窗口在窗口区里滚，页脚照旧贴底不跟着滚。这里只把间距收紧。
+ */
+:root[data-box-height="short"] .line-flip__body {
+  gap: var(--w-space-xs);
+}
+
+:root[data-box-height="short"] .line-flip__row {
+  padding: 0 var(--w-space-xs);
+}
+
+:root[data-box-height="short"] .line-flip__head {
+  padding-right: var(--w-space-2xl);
+}
+
+:root[data-box-height="short"] .line-flip__refresh {
+  top: var(--w-space-md);
+  right: var(--w-space-md);
+}
+
+/* 高盒子：窗口长到标题字号，进度条加厚，窗口之间松一点。 */
+:root[data-box-height="tall"] .line-flip__windows {
+  gap: var(--w-space-md);
+}
+
+:root[data-box-height="tall"] .line-flip__group {
+  gap: var(--w-space-sm);
+}
+
+:root[data-box-height="tall"] .line-flip__win-label,
+:root[data-box-height="tall"] .line-flip__win-used {
+  font-size: var(--w-type-title);
+  line-height: 24px;
+}
+
+:root[data-box-height="tall"] .line-flip__meter {
+  height: 6px;
+}
+
+:root[data-box-height="tall"] .line-flip__fact,
+:root[data-box-height="tall"] .line-flip__win-reset {
+  font-size: var(--w-type-body);
+  line-height: 20px;
+}
+
+:root[data-box-height="tall"] .line-flip__row {
+  padding: var(--w-space-sm) var(--w-space-xs);
+}
+
+:root[data-box-height="tall"] .line-flip__label,
+:root[data-box-height="tall"] .line-flip__alias {
+  font-size: var(--w-type-title);
+  line-height: 24px;
+}
+
+/* 减弱动效：翻面由套件直接换面、不做过渡；这里的进度条、按钮与忙碌圆点同样停下。 */
+:root[data-motion="reduced"] .line-flip__fill {
+  transition: none;
+}
+
+:root[data-motion="reduced"] .line-flip[data-busy="true"] .line-flip__refresh svg {
+  animation: none;
+  opacity: 0.5;
+}
+
+:root[data-motion="reduced"] .line-flip__row[data-busy="true"] .line-flip__dot {
+  animation: none;
+}
+
+:root[data-motion="reduced"] .line-flip__chip,
+:root[data-motion="reduced"] .line-flip__chip:is(:active, .is-pressed),
+:root[data-motion="reduced"] .line-flip__row,
+:root[data-motion="reduced"] .line-flip__row:is(:active, .is-pressed) {
+  transition: none;
+  transform: none;
+}

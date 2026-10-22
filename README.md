@@ -25,6 +25,7 @@
 - [本机登录](#本机登录)
 - [安全边界](#安全边界)
 - [插件路由](#插件路由)
+- [组件看板卡片（dsh-widget-board）](#组件看板卡片dsh-widget-board)
 - [开发与验证](#开发与验证)
 - [故障排查](#故障排查)
 
@@ -1159,6 +1160,21 @@ Antigravity 的 Gemini 用量以流结束时的上游累计计数为准，缓存
 | POST | `/adopt/disable` | 停止导入：清掉插件这边记录的导入快照；**不删除也不改写 Codex CLI 的文件** |
 
 状态响应只包含脱敏 email、套餐、账号 ID 后四位、token 到期时间和额度 DTO。
+
+## 组件看板卡片（dsh-widget-board）
+
+装了 `dsh-widget-board` 的 Host 上，本插件往组件库里放一张卡片 `line-flip`（**线路额度**）：**一条线路一张卡**，同一份组件摆多张、每张在 `props.line` 里写自己那条线路，不需要额外配置。
+
+| 卡片 | 数据源 | 能力 |
+| --- | --- | --- |
+| **线路额度** `line-flip` | `dsh-chatgpt-subscription:line-card`（60 秒轮询，读 `props.line` 指的那一条线路） | `dsh-chatgpt-subscription:line-refresh`（让这条线路向上游强制读一次额度，等它返回）、`dsh-chatgpt-subscription:line-account-switch`、`dsh-chatgpt-subscription:line-account-strategy` |
+
+- 卡片自己会翻面：正面是这条线路的额度窗口、进度条与重置倒计时；背面是它的号池、当前账号与三档轮换策略（顺序 / 轮询 / 粘住）。`props.line` 取 `codex`、`claude`、`kimi-code`、`minimax-code`、`antigravity`、`command-code`、`glm-coding-plan`、`step-code`、`qoder`、`cline-pass`、`opendesign` 之一，想看哪条线路就摆哪一张。
+- 注册走看板发布的 `widgetBoard` 服务（注册时带服务自己报的 `apiVersion` 协商），组件目录 `widgets/` 随包发布；看板没装时这段什么都不做，看板拒绝注册时只记一条 warn，不影响插件装载；卸载时一次 `handle.dispose()` 把组件目录、数据源与能力一起撤掉。
+- 数据源与三个能力都**不声明 `permission`**：它们只读本机这条线路自己的 `GET /status`、只写本插件持有的号池文档，不跑命令、不访问卡片指定的主机，所以不会弹授权按钮。
+- 数据源与能力名都以 `dsh-chatgpt-subscription:` 为前缀（**不带** `@eddyskywalker/` 的 scope）：看板 manifest 的 id 正则不接受 `@` 与 `/`，带 scope 的名字在 manifest 里根本写不出来。
+- 卡片里的时间戳一律是**毫秒**：各条线路在 wire 上的单位并不统一（codex 是 Unix 秒，antigravity / cline-pass 是 ISO 字符串，其余是毫秒），换算在 `src/host/widget-board/line-quota.ts` 里每条线路各做一次，卡片不按数量级猜单位。
+- 插件更新后要**重启一次 Host**：看板没有插件热重载，新的组件目录只在装载时进组件库。
 
 ## 开发与验证
 

@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **[board] 组件看板上一张卡看一条线路：`line-flip`，一条线路一张会翻面的卡**
+  - **形态**：看板插件在宿主上发布 cordis 服务 `widgetBoard`（apiVersion 3）。本插件在 `apply` 顶部无条件接线，经 `ctx.inject(['widgetBoard'])` 注册一个组件目录（`widgets/`，随包发布）、一个数据源（`line-card`）与三个能力（`line-refresh` / `line-account-switch` / `line-account-strategy`）。看板缺席时整段是 no-op；注册失败只 warn，绝不影响插件装载；卸载时一次 `handle.dispose()` 全撤。
+  - **一张卡一条线路**：`widgets/line-flip` 在 `props.line` 里写线路 id（`codex`、`claude`、`kimi-code`、`minimax-code`、`antigravity`、`command-code`、`glm-coding-plan`、`step-code`、`qoder`、`cline-pass`、`opendesign`），`line-card` 就照着它读那一条线路：正面是额度窗口的已用百分比、进度条与重置倒计时，背面是这条线路的号池、当前账号与三档轮换 chip。刷新、切号、改策略都走能力（`widget.action` 拿不到返回值），并用能力返回值重画。同一份组件摆多张就是多条线路，加一条线路只需在 `src/index.ts` 的 `lines.pools` 里加一行。
+  - **单位**：各线路在 wire 上的时间表示并不统一（codex 是 Unix **秒**，antigravity / cline-pass 是 ISO 字符串，其余是**毫秒**），换算在 `src/host/widget-board/line-quota.ts` 的每线 normalizer 里各做一次，卡片数据一律毫秒，且不按数量级猜单位。
+  - **命名**：看板 manifest 的 `source`/`capabilities` 只接受 `[a-z][a-z0-9.-]{1,39}(?::…)?`，带 scope 的包名进不去，所以注册用的 provider 取 `dsh-chatgpt-subscription`，与 manifest 逐字相同才能解析；`test/widget-board.test.ts` 现在照着真实注册结果，逐条比对 `widgets/*/widget.json` 的 `source` 与 `capabilities`。
+  - **数据源与能力都不声明 permission**：它们只读本机线路自己的 `GET /status`、只写本插件持有的号池文档，不跑命令、不访问组件指定的主机，没有需要人批准的东西。
+  - **测试**：`test/widget-board.test.ts`（11 例）只测仍然存在的边界——组件目录注册（provider 名、apiVersion 透传、id 语法）、看板缺席是 no-op、注册失败只 warn、卸载时 dispose（含迟到的注册被退回）、无 capabilities 的看板只注册数据源、没有线路注册表时不注册任何东西，以及 manifest 与注册 id 的逐字对齐。
+  - **验证**：`npm run typecheck` 三个工程 0 错误；`npx vitest run test/widget-board.test.ts test/widget-board-lines.test.ts` 42 例全绿（11 + 31）；全量 `npx vitest run` 277 文件通过 / 2 skipped，4519 passed / 8 skipped / 0 failed。
 
 ## 0.36.2 - 2026-10-22
 - **[claude] 设置卡不再拿一枚已死的 access token 请求上游：status / 额度 / 测试连接 / 目录刷新统一走号池续期，托管账号闲置一夜后不再诱导用户重新登录（#66）**
