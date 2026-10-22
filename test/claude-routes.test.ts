@@ -19,6 +19,12 @@
  * 5. The envelope matches the sibling lines: '{ok,value}' / '{ok,error}', 405 for
  *    a wrong method, 404 for an unknown path, and a failure reported as
  *    'quotaError' rather than as a failed request.
+ * 6. THE CARD NEVER SPENDS A DEAD TOKEN. Every card path (status, quota, the
+ *    connection probe, the catalog refresh) renews through the pool's seam
+ *    before it calls upstream, so a managed account idle for longer than one
+ *    access-token lifetime is refreshed instead of being reported as a sign-in
+ *    the user has to repeat. A borrowed Claude Code snapshot is still never
+ *    refreshed, and two concurrent callers share one exchange.
  *
  * WHAT THIS FILE DOES NOT PROVE. Nothing here reaches Anthropic, Claude Code, or
  * a browser: the fetch seam is a double, the sign-in flow is started with
@@ -47,7 +53,7 @@ import {
 import { ClaudeAccountPool } from '../src/host/claude/account-pool.ts'
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/claude/client.ts'
 import { getLoginStatus } from '../src/host/claude/oauth.ts'
-import { CLAUDE_CONFIG_DIR_ENV, CLAUDE_CODE_CREDENTIAL_KEY } from '../src/host/claude/adopt.ts'
+import { CLAUDE_CONFIG_DIR_ENV, CLAUDE_CODE_CREDENTIAL_KEY, CLAUDE_CODE_CREDENTIAL_SOURCE } from '../src/host/claude/adopt.ts'
 import { CLAUDE_REASONING_EFFORTS, type ClaudeWebStatus } from '../src/shared/claude-contracts.ts'
 
 /** Every adoption read goes through this spy, so "was it read" is observable. */
@@ -667,6 +673,235 @@ describe('Claude settings routes', () => {
       expect(rows[0]!.authStatus).not.toBe('expired')
       const effective = await pool.getEffectiveAccount(new Set(), tokenEndpoint as unknown as typeof fetch)
       expect(effective.credentials.accessToken).toBe('fresh-access')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // 5b. A dead access token is renewed, not reported as "sign in again"
+  // -------------------------------------------------------------------------
+
+  /**
+   * The bug these tests pin: the card paths read the credential the POOL STORED
+   * and spent it unchanged. An access token lives for hours, not days, so a
+   * managed account left idle overnight presented a dead bearer to the usage
+   * endpoint and to the probe, was answered 401, and the card rendered that as a
+   * sign-in the user had to repeat — while the refresh token was still good and
+   * the model request path renewed by itself.
+   */
+  describe('credential renewal on the card paths', () => {
+    /** What the injected refresh seam hands back; greppable in the outbound log. */
+    const RENEWED_ACCESS_TOKEN = 'renewed-access-token'
+
+    interface RenewalHarness {
+      pool: ClaudeAccountPool
+      /** The double standing in for the upstream token endpoint. */
+      refresh: ReturnType<typeof vi.fn>
+      /** Every outbound request the surface made, with the bearer it presented. */
+      outbound: Array<{ url: string; authorization: string | null }>
+      call: (endpoint: string, method?: string) => Promise<Captured>
+    }
+
+    /**
+     * A registration whose pool has an INJECTED refresh seam.
+     *
+     * Nothing here can reach Anthropic: 'refresh' is a double, and the fetch
+     * double records the bearer it was handed, which is what makes "the renewed
+     * token was actually spent" observable rather than asserted in prose.
+     */
+    async function renewalHarness(options: {
+      /** Held open by a test that wants to observe a refresh in flight. */
+      gate?: Promise<void>
+    } = {}): Promise<RenewalHarness> {
+      const renewalStore = new FileCredentialStore(tmpFile('claude-renewal-doc'), new MemoryBackend() as never)
+      const renewalSettings = new FileModelSettingsStore(tmpFile('claude-renewal-models'))
+      const outbound: RenewalHarness['outbound'] = []
+      const fetchFn = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+        outbound.push({ url: String(url), authorization: new Headers(init?.headers).get('authorization') })
+        return fetchImpl(url)
+      }
+      const refresh = vi.fn(async (credentials: ClaudeCredentials): Promise<ClaudeCredentials> => {
+        // The rotating pair is spent once; the gate lets a test hold the exchange
+        // open and see who else arrives while it is in flight.
+        if (options.gate !== undefined) await options.gate
+        return {
+          ...credentials,
+          accessToken: RENEWED_ACCESS_TOKEN,
+          refreshToken: 'rotated-refresh-token',
+          expiresAt: Date.now() + 3_600_000,
+        }
+      })
+      const renewalPool = new ClaudeAccountPool({
+        store: renewalStore,
+        backend: new MemoryBackend() as never,
+        refreshCredentials: refresh as unknown as never,
+      })
+      const routes: Array<{ handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+      const ctx = {
+        webServer: { register(route: { handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) { routes.push(route); return () => undefined } },
+        emit: () => undefined,
+      } as unknown as Context
+      registerClaudeRoutes(ctx, renewalStore, renewalSettings, undefined, {
+        fetchFn: fetchFn as unknown as typeof fetch,
+        accountPool: renewalPool,
+        // No adoption scan: these tests are about the credential the pool holds,
+        // and the real Claude Code path is another test's subject.
+        adoptPaths: [],
+        login: { openBrowser: () => undefined },
+      })
+      return {
+        pool: renewalPool,
+        refresh,
+        outbound,
+        call: async (endpoint, method = 'GET') => {
+          const { response, captured } = fakeExchange()
+          await routes[0]!.handler(fakeRequest({ url: ROUTE_PREFIX + endpoint, method }), response)
+          return captured
+        },
+      }
+    }
+
+    /** A managed (plugin-owned) credential whose access token has already died. */
+    function expiredManaged(overrides: Partial<ClaudeCredentials> = {}): ClaudeCredentials {
+      return credential({
+        accessToken: 'dead-access-token',
+        refreshToken: 'live-refresh-token',
+        expiresAt: Date.now() - 60_000,
+        ...overrides,
+      })
+    }
+
+    /** A borrowed Claude Code snapshot, in this pool's flattened shape. */
+    function expiredAdopted(): ClaudeCredentials {
+      return {
+        accessToken: 'adopted-access-token',
+        refreshToken: 'adopted-refresh-token',
+        expiresAt: Date.now() - 60_000,
+        adopted: true,
+        source: CLAUDE_CODE_CREDENTIAL_SOURCE,
+        sourcePath: 'C:/Users/example/.claude/.credentials.json',
+      } as ClaudeCredentials
+    }
+
+    /** One event-loop turn, so a racing caller can reach the pool before a gate opens. */
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+    it('renews an expired managed access token before the status card reads its quota', async () => {
+      const harness = await renewalHarness()
+      await harness.pool.addAccount(expiredManaged())
+
+      const result = await harness.call('/status')
+      expect(result.status).toBe(200)
+      expect(harness.refresh).toHaveBeenCalledTimes(1)
+
+      // The renewal was COMMITTED, so the card's own account list carries the new
+      // expiry, and no failure was recorded against a credential that works.
+      const rows = await harness.pool.listAccounts()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.expiresAt).toBeGreaterThan(Date.now())
+      expect(rows[0]!.authStatus).toBeUndefined()
+
+      const value = result.body.value as unknown as ClaudeWebStatus
+      expect(value.accounts).toHaveLength(1)
+      expect(value.accounts![0]!.expiresAt).toBe(rows[0]!.expiresAt)
+      expect(value.accounts![0]!.authStatus).toBeUndefined()
+      // The meter read spent the RENEWED token, and it succeeded.
+      expect(harness.outbound.some((request) => request.url.includes('/api/oauth/usage')
+        && request.authorization === 'Bearer ' + RENEWED_ACCESS_TOKEN)).toBe(true)
+      expect(value.quota).not.toBeNull()
+      expect(value.quotaError).toBeNull()
+    })
+
+    it('renews an expired managed access token before an explicit quota read', async () => {
+      const harness = await renewalHarness()
+      await harness.pool.addAccount(expiredManaged())
+
+      const result = await harness.call('/quota', 'POST')
+      expect(result.status).toBe(200)
+      expect(harness.refresh).toHaveBeenCalledTimes(1)
+      expect(harness.outbound.some((request) => request.url.includes('/api/oauth/usage')
+        && request.authorization === 'Bearer ' + RENEWED_ACCESS_TOKEN)).toBe(true)
+      const value = result.body.value as unknown as ClaudeWebStatus
+      expect(value.quota).not.toBeNull()
+      expect(value.quotaError).toBeNull()
+    })
+
+    it('renews before the connection probe and before the catalog refresh', async () => {
+      // One harness per route: after the first route runs, the pool row is
+      // already renewed, so a second route would have nothing left to renew and
+      // would prove nothing about its own seam.
+      const probeHarness = await renewalHarness()
+      await probeHarness.pool.addAccount(expiredManaged())
+      expect((await probeHarness.call('/connection/test', 'POST')).status).toBe(200)
+      expect(probeHarness.refresh).toHaveBeenCalledTimes(1)
+      expect(probeHarness.outbound.some((request) => request.url.includes('/v1/messages')
+        && request.authorization === 'Bearer ' + RENEWED_ACCESS_TOKEN)).toBe(true)
+
+      const catalogHarness = await renewalHarness()
+      await catalogHarness.pool.addAccount(expiredManaged())
+      expect((await catalogHarness.call('/catalog/refresh', 'POST')).status).toBe(200)
+      expect(catalogHarness.refresh).toHaveBeenCalledTimes(1)
+      expect(catalogHarness.outbound.some((request) => request.url.includes('/v1/models')
+        && request.authorization === 'Bearer ' + RENEWED_ACCESS_TOKEN)).toBe(true)
+    })
+
+    it('never refreshes an adopted snapshot, even one that has already expired', async () => {
+      const harness = await renewalHarness()
+      await harness.pool.addAccount(expiredAdopted())
+
+      const result = await harness.call('/status')
+      expect(result.status).toBe(200)
+      // The invariant: a borrowed snapshot is Claude Code's to rotate. The pool
+      // refuses it before a request is made, so the card falls back to the
+      // stored credential instead of spending a refresh token that is not ours.
+      expect(harness.refresh).toHaveBeenCalledTimes(0)
+      const rows = await harness.pool.listAccounts()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.adopted).toBe(true)
+      expect((await harness.pool.read()).accounts[0]!.credentials.accessToken).toBe('adopted-access-token')
+      // The card still renders, and the row still explains itself.
+      const value = result.body.value as unknown as ClaudeWebStatus
+      expect(value.accounts![0]!.authStatus).toBe('expired')
+      expect(value.hasCredentials).toBe(true)
+    })
+
+    it('renews once when the card and a model request race for the same account', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const harness = await renewalHarness({ gate })
+      await harness.pool.addAccount(expiredManaged())
+
+      const card = harness.call('/status')
+      // The flight is registered BEFORE the seam runs (see the pool's
+      // 'freshAccount'), so an observed seam call is the instant a second caller
+      // can join it — and a missing one fails here instead of hanging.
+      await vi.waitFor(() => expect(harness.refresh).toHaveBeenCalledTimes(1))
+      const model = harness.pool.getCredentialAccount(fetchImpl as unknown as typeof fetch)
+      await settle()
+      release()
+
+      const [cardResult, modelResult] = await Promise.all([card, model])
+      // A rotating refresh token is spent ONCE: two exchanges would fail one of
+      // them and record a dead sign-in right after a refresh that succeeded.
+      expect(harness.refresh).toHaveBeenCalledTimes(1)
+      expect(cardResult.status).toBe(200)
+      expect(modelResult.credentials.accessToken).toBe(RENEWED_ACCESS_TOKEN)
+    })
+
+    it('renews once when two card polls race for the same account', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const harness = await renewalHarness({ gate })
+      await harness.pool.addAccount(expiredManaged())
+
+      const first = harness.call('/status')
+      await vi.waitFor(() => expect(harness.refresh).toHaveBeenCalledTimes(1))
+      const second = harness.call('/status')
+      await settle()
+      release()
+
+      const results = await Promise.all([first, second])
+      expect(harness.refresh).toHaveBeenCalledTimes(1)
+      for (const result of results) expect(result.status).toBe(200)
     })
   })
 
