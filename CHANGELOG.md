@@ -1,6 +1,18 @@
 # Changelog
 
 ## Unreleased
+
+## 0.36.0 - 2026-10-22
+- **[client] 修复俄语语言包与 `@linxin666/dsh-i18n` 等已安装语言包冲突导致插件客户端激活失败崩溃的问题**
+  - **现象**：Web 界面启动失败，提示 `web boot: 1 entry did not activate`，`@eddyskywalker/dsh-chatgpt-subscription: failed`。
+  - **根因**：环境中其它插件若先于本插件注册了 `'ru'` 语言，`ctx.locale.addLanguage` 会直接抛出 `Error: locale "ru" is already registered`；未被捕获的错误导致 Cordis 插件生命周期被标记为 FAILED，从而阻断了整个客户端加载。
+  - **改法**：在 `installRussianLocale` 中使用 `try-catch` 保护 `addLanguage` 与 `register` 调用，发生冲突时平滑捕获并返回 no-op disposer，继续注册本插件的各个 provider 命名空间字典；并在 `installLineLocale` 增加对 `locale` 对象的空值安全防御。
+  - **验证**：新增冲突用例（`addLanguage` 抛错且某个命名空间 `register` 抛错时，安装不抛错、其余命名空间仍注册）；三工程 `tsc` 0 错误；全量 vitest 4452 passed / 7 skipped / 0 failed；`npm run build` 通过。
+- **[opendesign] 套餐档位与额度改读 `/billing/summary`——订阅后不再显示 `free`，额度打开设置页即自动读取**
+  - **现象**：已订阅 Go 的账号，账号行仍显示 `free`；「钱包余额」区打开时永远停在「尚未读取余额」，必须手动点刷新才出现一个美元数字，看不到套餐、周期与 credits。
+  - **根因**：档位抄的是设备授权应答里的 `user.plan`，登录后永不更新，而上游对已订阅账号也返回 `"free"`（本机实测）；额度只读 `GET /wallet/balance`，且只在显式刷新时读、只存在进程内存。真正的档位与额度在控制 Key 可读的 `GET /billing/summary` 里：`membershipTier`（go/plus/pro/max）、订阅状态、本周期、订阅/充值/合计 credits 及美元、今日与累计消耗。
+  - **改法**：`/usage` 并行读钱包与账单摘要，钱包被拒时用账单总额兜底，两个面各自失败不互相掩盖；账单档位覆盖登录快照，读一次就纠正账号行。设置页打开时自动读一次（仅当号池里有浏览器授权账号；粘贴的 API Key 没有控制 Key，不发请求）。「套餐与额度」区块移到账号卡下方，展示档位、状态、本周期、三类 credits 与美元、今日/累计消耗、计费请求数。仍然不画百分比条：摘要只说剩余，不说配额上限，卡片不臆造分母。
+  - **验证**：三工程 `tsc` 0 错误；全量 vitest 4451 passed / 7 skipped / 0 failed；`npm run build` 通过；用真实控制 Key 请求 `/billing/summary` 返回 `go` / `active` / 15000 credits（$1.50），经 `/usage` 后 status 的 `plan` 由 `free` 变为 `go`。
 - **[client] 新增俄语语言包（`ru`）：插件自己的设置界面可以选择俄语，未翻译的键回落到英文**
   - **背景**：`@deepseek-ai/dsh-client-locale` 的字典注册有两种形态——整本双语 `register(ns, { zh, en })`（内置两种语言都必须给全），以及给语言包用的单语言 `register(ns, locale, dict)`；语言本身由 `addLanguage({ id, label, fallback })` 加进目录。俄语走第二条路，**不是**给每个命名空间加第三列。
   - **改法**：新增 `src/client/locales-ru/`——13 份字典（每条线路一份，共 1440 个键，键集与 `zh`/`en` 逐一对应）+ `account-pool.ts`（12 条线路共用的账号卡片文案）+ `index.ts` 的 `installRussianLocale(ctx)`：先 `addLanguage({ id: 'ru', label: 'Русский', fallback: 'en' })`，再按命名空间逐个 `register(ns, 'ru', dict)`，每个注册各持一个 disposer。客户端入口 `apply` 调用一次。
