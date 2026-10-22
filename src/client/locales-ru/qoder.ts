@@ -1,0 +1,142 @@
+/**
+ * Russian dictionary for the Qoder (subscription) tab.
+ *
+ * Mirrors `qoder/locales.ts` key for key, wording taken from `en`. The three
+ * one-line model-row labels lead, then the shared account-pool card, and the two
+ * labels the Qoder card rewrites (the composer badge and the window fallback) are
+ * overridden at the tail, exactly where the source rewrites them.
+ */
+import type { QoderLocaleKey } from '../qoder/locales.ts'
+import { accountPoolRu } from './account-pool.ts'
+
+export const dictionary: Record<QoderLocaleKey, string> = {
+  // One-line capability per model row (data, not prose — same habit as OpenDesign).
+  modelRowEfforts: 'уровни {list}',
+  modelRowNoEfforts: 'без уровней',
+  modelRowOutput: 'вывод {cap}',
+  // The account-pool card and its quota bar are shared components.
+  ...accountPoolRu,
+  title: 'Qoder (подписка)',
+  pageDesc: 'Подключение подписки Qoder (глобальная зона qoder.com / китайский сайт qoder.com.cn): пул аккаунтов, квота тарифа, расход кеша и выбор моделей. Регион — свойство учётных данных, токены двух регионов не взаимозаменяемы, поэтому в пуле могут быть аккаунты обоих.',
+  loading: 'Загрузка…',
+  moreNotes: 'Подробнее',
+
+  region: 'Регион',
+  regionGlobal: 'Глобальная зона (qoder.com)',
+  regionCn: 'Китайский сайт (qoder.com.cn)',
+  regionHint: 'Регион определяется только учётными данными; этот выбор задаёт лишь то, куда попадёт следующий вход. Эндпоинты двух регионов не взаимозаменяемы.',
+  regionHintExtra: 'В глобальной зоне есть вход по коду устройства в браузере и PAT; на китайском сайте потока устройства нет — только вставка PAT или импорт локальной сессии qodercli.',
+
+  authorizing: 'Авторизация…',
+
+  loginIdle: 'Вход ещё не начинался.',
+  loginHaveAccounts: 'В пуле уже {count} аккаунтов. Чтобы добавить ещё один, нажмите «Добавить аккаунт» выше.',
+  loginPending: 'Подтвердите авторизацию в браузере вручную — дальше карточка продолжит сама. Поток устройства не открывает локальный порт обратного вызова, процесс идёт на хосте.',
+  loginComplete: 'Вход выполнен, аккаунт добавлен в пул.',
+  loginCompletedAt: 'Завершено: {time}',
+  loginCompleteNoAccount: 'Вход завершился, но этого аккаунта в пуле уже нет (возможно, он удалён).',
+  loginError: 'Вход не выполнен.',
+  loginRetryable: 'Сбой можно повторить (ошибка транспорта или таймаут) — просто начните вход заново.',
+  loginNotRetryable: 'Сам этот сбой не пройдёт (нарушение протокола или отказ); проверьте сеть и выбранный регион, затем начните заново.',
+  authorizeUrl: 'Страница авторизации',
+  openAuthorizeUrl: 'Открыть страницу авторизации',
+  pollEvery: 'Статус входа опрашивается каждые {seconds} с.',
+  loginExpiresAt: 'Эта авторизация действует до {time}; после истечения вход нужно начать заново.',
+  progress: 'Прогресс',
+  cancelLogin: 'Отменить вход',
+  cancelLoginBusy: 'Отмена…',
+
+  adopt: 'Импортировать локальную сессию qodercli',
+  adopting: 'Импорт…',
+  adoptAdopted: 'Локальная сессия qodercli импортирована (регион: {region}).',
+  adoptNoAttempt: 'Импорт не выполнялся.',
+  adoptFallback: 'Вместо этого можно войти через браузер (глобальная зона) или вставить PAT.',
+  adoptNoCredentialsFile: 'На этой машине не найден файл учётных данных qodercli.',
+  adoptInvalidCredentials: 'Файл учётных данных qodercli не читается (пустой, повреждён или не расшифровался).',
+  adoptUnsupportedShape: 'Сохранённая сессия расшифровалась, но набор полей незнаком (апстрим мог измениться).',
+  adoptNotAQoderLogin: 'В этом файле нет рабочей сессии Qoder (нет access_token).',
+  adoptRegionUnresolved: 'Сессия расшифровалась, но userinfo ни одного региона не принимает этот токен (возможно, он истёк).',
+  dismiss: 'Понятно',
+
+  manualPasteSection: 'Вставить PAT вручную',
+  manualPasteHint: 'Создайте Personal Access Token (pt-…) на странице Integrations в аккаунте Qoder и вставьте его здесь. Он обменивается на короткоживущий job token; сам PAT хранится только в зашифрованном хранилище хоста и нужен для повторного обмена после истечения.',
+  manualPastePlaceholder: 'pt-…',
+  manualPasteSubmit: 'Вставить и войти',
+  manualPasteSubmitting: 'Обмен…',
+  manualPasteEmpty: 'Сначала вставьте PAT.',
+
+  connection: 'Подключение',
+  routeOwned: 'Маршрут провайдера обслуживает этот плагин.',
+  routeConflict: 'Маршрут провайдера занят другим адаптером: {detail}',
+  testConnection: 'Проверить подключение',
+  testingConnection: 'Проверка…',
+  testSuccess: 'Подключение в порядке',
+  testLatency: '{ms} мс',
+  testFailedDetail: 'Подключение не удалось: {detail}',
+
+  modelsSection: 'Модели',
+  modelsHint: 'Каталог обнаруживается с апстрима сразу после входа; до входа показывается встроенная таблица возможностей.',
+  modelsHintExtra: 'Возможности (контекстное окно / ввод изображений / уровни рассуждений) берутся только из полей каталога, а не из имени модели; поле max_input_tokens в каталоге — устаревшее нижнее значение апстрима, и эта линия ему не верит: окно берётся из максимального варианта context_config.',
+  modelsUnavailable: 'Каталога моделей пока нет. Войдите и нажмите «Обновить каталог» выше.',
+  refreshCatalog: 'Обновить каталог',
+  refreshingCatalog: 'Обновление…',
+  selectAll: 'Все',
+  unselectAll: 'Ничего',
+  modelChecklistCount: 'Выбрано {count} из {total}',
+  enabledModelIdsSemantics: 'Если снять все отметки, все модели станут недоступны (это не «без фильтра»); чтобы вернуть все, нажмите «Все».',
+
+  defaultEffort: 'Уровень рассуждений по умолчанию',
+  defaultEffortHint: 'Используется, когда сессия не задаёт уровень; если у модели есть свой по умолчанию, главнее он.',
+  defaultEffortHintExtra: 'Апстрим объявляет уровни для каждой модели отдельно (ключи thinking_config в каталоге); выбранный здесь уровень сначала приводится к той лестнице, которую модель действительно принимает, поэтому неподдерживаемое значение не отправляется никогда.',
+  defaultEffortModel: 'Как у модели по умолчанию',
+  effortMinimal: 'minimal',
+  effortLow: 'low',
+  effortMedium: 'medium',
+  effortHigh: 'high',
+  effortXHigh: 'xhigh',
+  effortMax: 'max',
+
+  contextWindowSection: 'Контекстное окно',
+  contextWindowHint: 'Значения по умолчанию берутся из каталога (максимальный вариант context_config); здесь задаётся переопределение для отдельной модели.',
+  contextWindowHintExtra: 'Переопределение влияет только на локальное планирование (когда сжимать сессию) и не меняет реальное окно модели на апстриме.',
+  contextWindowReset: 'Вернуть по умолчанию',
+  contextWindowResetAll: 'Вернуть все по умолчанию',
+  contextWindowNoneEnabled: 'Отмеченных моделей нет.',
+  tokens: 'токенов',
+  save: 'Сохранить',
+  saving: 'Сохранение…',
+  invalidCapacity: 'Недопустимая ёмкость: {value}',
+
+  quotaSection: 'Квота',
+  quotaDesc: 'Квота читается из аккаунтного эндпоинта Qoder (непубличный личный эндпоинт, апстрим может его изменить). За период аккаунта он отдаёт три ёмкости: личная квота, докупленные Credits и ресурсный пакет организации.',
+  quotaBucketPersonal: 'Личная квота',
+  quotaBucketAddOn: 'Докупленные Credits',
+  quotaBucketOrg: 'Пакет организации',
+  quotaRemaining: 'остаток',
+  quotaUsed: 'использовано',
+  quotaTotal: 'всего',
+  quotaExpiresAt: 'Конец периода',
+  quotaReadAt: 'Прочитано',
+  quotaRegion: 'Регион',
+  quotaRefresh: 'Обновить квоту',
+  quotaRefreshing: 'Обновление…',
+  quotaRefreshingNote: 'Обновляем квоту в фоне…',
+  quotaEmpty: 'Квота ещё не прочитана.',
+  quotaSignedOut: 'Войдите, чтобы увидеть здесь квоту аккаунта.',
+  quotaErrorLabel: 'Не удалось прочитать квоту',
+  quotaNoUnit: '',
+
+  cacheSection: 'Расход кеша',
+  cacheStatScope: 'Локальная статистика (в токенах, с начала работы процесса): она отвечает, насколько помог кеш, и не является счётом апстрима.',
+  cacheDesc: 'Qoder кеширует префиксы на сервере автоматически; попадания читаются из usage.prompt_tokens_details.cached_tokens (при отсутствии — из верхнеуровневого cached_tokens). У подписки нет публичной цены за токен, поэтому страница показывает только токены, без денег.',
+  cacheEmpty: 'Примеров пока нет. Отправьте сообщение — статистика появится здесь.',
+  cacheHitRatio: 'Доля попаданий в кеш',
+  cacheHitRatioUnavailable: '—',
+  cacheReadTokens: 'Чтение из кеша',
+  cacheMissedTokens: 'Ввод без кеша',
+  cacheWriteTokens: 'Запись в кеш',
+  cacheRequests: 'Запросов в выборке',
+
+  composerLabel: 'Остаток квоты',
+  quotaWindow: 'Окно лимита',
+}
