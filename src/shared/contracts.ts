@@ -39,6 +39,14 @@ export interface PluginStatusDto {
     active: boolean
     loginId: string | null
     expiresAt: number | null
+    /**
+     * The device code of the sign-in in progress, when that is what is running.
+     *
+     * Carried on the status so a card reloaded mid-flow can still show the code
+     * the user has to type: losing it would strand a sign-in that is still
+     * waiting upstream. Absent for the browser flow and when nothing is running.
+     */
+    device?: DeviceLoginDto | null
   }
   quota: QuotaStatusDto
   /**
@@ -187,6 +195,34 @@ export interface LoginStartDto {
   loginId: string
   authUrl: string
   expiresAt: number
+}
+
+/**
+ * A device-code sign-in the user is completing on another machine.
+ *
+ * The card needs the code, the page to type it on and a countdown, nothing else:
+ * the grant's own identifiers (`device_auth_id`) and the PKCE verifier stay on
+ * the host, because they are the parts that can redeem the sign-in.
+ */
+export interface DeviceLoginDto {
+  userCode: string
+  verificationUrl: string
+  /** Grant deadline, Unix **seconds** (the unit the status DTO uses). */
+  expiresAt: number
+  /**
+   * The host's clock when this answer was built, Unix **seconds**.
+   *
+   * The countdown is `expiresAt - now`, measured with the browser's own elapsed
+   * time. Comparing `expiresAt` against the browser's wall clock instead would
+   * render a wrong countdown whenever the two clocks disagree — the normal case
+   * for this feature, whose whole reason to exist is a remote host.
+   */
+  now: number
+}
+
+/** What starting a device-code sign-in answers: the flow id plus the panel's data. */
+export interface DeviceLoginStartDto extends DeviceLoginDto {
+  loginId: string
 }
 
 export type LoginEventDto =

@@ -1152,7 +1152,8 @@ Antigravity 的 Gemini 用量以流结束时的上游累计计数为准，缓存
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/status` | 查询账号、连接状态与额度；另带 `codexCliSignInAvailable`（本机是否有可导入的 Codex CLI 登录，**只 `stat` 不读取**）与 `codexCliSignInPath`（为此查看过的那个文件路径） |
-| POST | `/login/start` | 开始 OAuth 登录 |
+| POST | `/login/start` | 开始 OAuth 登录（浏览器回调，需要本机能监听 `localhost:1455`） |
+| POST | `/login/device/start` | 开始设备码登录：立即答 `{loginId, userCode, verificationUrl, expiresAt, now}`，确认在后台等，进度走同一条 SSE；与 `/login/start` 互斥，同一时刻只允许一个 |
 | GET | `/login/events?loginId=...` | SSE 订阅登录进度 |
 | POST | `/login/cancel` | 取消登录任务 |
 | POST | `/logout` | 注销并清除凭据与额度缓存 |
@@ -1163,7 +1164,7 @@ Antigravity 的 Gemini 用量以流结束时的上游累计计数为准，缓存
 | POST | `/adopt` | 导入本机登录（body `{source:'codex'}`），**只读**：快照作为一行加入 ChatGPT 号池，不触碰当前登录，也不触碰 Codex CLI 的文件 |
 | POST | `/adopt/disable` | 停止导入：清掉插件这边记录的导入快照；**不删除也不改写 Codex CLI 的文件** |
 
-状态响应只包含脱敏 email、套餐、账号 ID 后四位、token 到期时间和额度 DTO。
+状态响应只包含脱敏 email、套餐、账号 ID 后四位、token 到期时间和额度 DTO。设备码登录在进行中时，`login.device` 还带**待输入的设备码** `userCode`、确认页地址、授权截止时刻与宿主当前的 `now`——这三样本来就是写在用户屏幕上的东西，用来兑换登录的 `device_auth_id` 与 PKCE `code_verifier` 始终留在宿主，不进 DTO、不进浏览器。
 
 ## 组件看板卡片（dsh-widget-board）
 

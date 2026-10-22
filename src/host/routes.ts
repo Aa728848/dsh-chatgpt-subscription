@@ -161,6 +161,12 @@ export function registerRoutes(
         case `${ROUTE_PREFIX}/login/start`:
           json(response, { ok: true, value: await oauth.startLogin() })
           return
+        case `${ROUTE_PREFIX}/login/device/start`:
+          // The same service, the same event stream and the same cancel route as
+          // the browser flow: only how the authorization code is obtained
+          // differs, and that difference never leaves the host.
+          json(response, { ok: true, value: await oauth.startDeviceLogin() })
+          return
         case `${ROUTE_PREFIX}/login/cancel`: {
           const loginId = field(body, 'loginId')
           if (loginId === null) throw new Error('missing loginId')
