@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
+import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
@@ -15,11 +16,20 @@ import {
   type ClinePassValidateResultDto,
   type ClinePassWebStatus,
 } from '../../shared/cline-pass-contracts.ts'
-import { ClinePassApi } from './api.ts'
+import { ClinePassApi, quotaRefreshingOf } from './api.ts'
 import { zh, NS_CLINE_PASS } from './locales.ts'
 import { useLineDict } from '../common/line-locale.ts'
 
 const API = new ClinePassApi()
+
+/**
+ * How often an open card re-reads the quota.
+ *
+ * The same 60 s every other line's card and composer badge uses: a window that
+ * moves on a multi-hour scale does not need a faster poll, and a slower one
+ * would leave a card visibly stale after the user spends a request.
+ */
+const QUOTA_POLL_MS = 60_000
 
 interface Props {
   onModelChange?: () => void
@@ -101,22 +111,58 @@ export function ClinePassSection(props: Props): React.ReactElement {
   const [history, setHistory] = useState<{ total: number; entries: ClinePassHistoryRowDto[] } | null>(null)
   const [loginFlow, setLoginFlow] = useState<ClinePassLoginFlowDto | null>(null)
 
-  const reload = useCallback(async () => {
+  /** Follow-up poll owed while the host refreshes the quota behind an answer. */
+  const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
+
+  /**
+   * One status read; `quiet` is every read nobody pressed a button for.
+   *
+   * A quiet read is silent on purpose: it never paints an error and never clears
+   * one, so a poll that fails while a user reads the page, or types into a
+   * settings field, does not change what is on screen. The manual actions below
+   * still report their own failures loudly. The draft guards inside the two
+   * setters are what keep a background answer from overwriting typed text.
+   */
+  const loadStatus = useCallback(async (quiet = false) => {
     try {
       const next = await API.status()
       setStatus(next)
       // A host from before this field existed must degrade to "settings not
       // editable", not take the whole settings page down.
       setSettingsForm((current) => current ?? (next.settings === undefined ? null : settingsFormOf(next)))
-      setError(null)
+      if (!quiet) setError(null)
+      // An answer that refreshed the quota behind itself is followed up shortly,
+      // so the fresh numbers land without waiting for the next poll.
+      quotaFollowUp.current ??= createQuotaFollowUp()
+      quotaFollowUp.current.observe(quotaRefreshingOf(next), () => { void loadStatus(true) })
     } catch (cause) {
-      setError(detail(cause))
+      // Best-effort: see the note above. The next tick, a manual refresh or the
+      // composer badge is still there to surface a genuinely broken host.
+      if (!quiet) setError(detail(cause))
     }
   }, [])
 
   useEffect(() => {
-    void reload()
-  }, [reload])
+    void loadStatus()
+  }, [loadStatus])
+
+  // Keep an open card current without making the user press anything. The poll
+  // only ticks while the tab is visible — a hidden tab has nobody to show the
+  // numbers to — and switching back is itself a reason to read, since the tab
+  // may have been hidden for hours. `loadStatus` is stable, so this interval is
+  // never torn down by a re-render.
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void loadStatus(true)
+    }
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    const timer = window.setInterval(refreshWhenVisible, QUOTA_POLL_MS)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+      quotaFollowUp.current?.cancel()
+    }
+  }, [loadStatus])
 
   // Seed a draft per model without overwriting one the user is typing into: a
   // status refresh after an unrelated action must not reset a half-typed value.
@@ -159,14 +205,14 @@ export function ClinePassSection(props: Props): React.ReactElement {
         if (next.status === 'complete') {
           setNotice(zh.loginComplete.replace('{account}', next.accountAlias === '' ? 'Cline Pass' : next.accountAlias))
           setShowKeyForm(false)
-          void reload()
+          void loadStatus()
         } else if (next.status === 'failed') {
           setError(zh.loginFailed.replace('{detail}', next.error))
         }
       }).catch((cause) => setError(detail(cause)))
     }, Math.max(2, flow.intervalSeconds) * 1000)
     return () => window.clearInterval(timer)
-  }, [loginFlow, reload])
+  }, [loginFlow, loadStatus])
 
   const startLogin = useCallback(() => {
     setBusy('login')

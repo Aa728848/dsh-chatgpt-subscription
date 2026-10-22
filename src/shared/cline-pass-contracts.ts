@@ -145,6 +145,13 @@ export interface ClinePassWebStatus {
   catalogSynced: boolean
   catalogCount: number
   usage: ClinePassUsageDto | null
+  /**
+   * Whether a quota refresh is running behind this answer.
+   *
+   * `usage` above is the cache, not a live read; a client that sees this should
+   * read the status again shortly rather than treat the numbers as final.
+   */
+  quotaRefreshing?: boolean
   historySize: number
   /** Latest device-code flow in this process, or null when none was started. */
   login: ClinePassLoginFlowDto | null

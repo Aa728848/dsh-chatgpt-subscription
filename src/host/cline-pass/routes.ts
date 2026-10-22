@@ -6,13 +6,17 @@
  * a channel probe/validate/test pair, the official quota reading and the
  * in-process request history.
  *
- * Reads never trigger an upstream call; quota is refreshed by its own action.
+ * A status read never waits on Cline: it answers the cached quota snapshot and,
+ * when that snapshot is missing or older than the line's TTL, schedules one
+ * refresh behind the answer. The explicit refresh action still runs now, but
+ * through the same single flight, so the two cannot fan out twice at once.
  *
  * @module dsh-chatgpt-subscription/cline-pass-routes
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isSameOriginMutation } from '../common/same-origin.ts'
+import { QuotaRefresh } from '../common/quota-refresh.ts'
 import { fetchUsageLimits } from './client.ts'
 import { resolveModelInfo } from './catalog.ts'
 import { pinWarnings, normalizePinMode } from './protocol.ts'
@@ -71,6 +75,25 @@ async function readRequestJson(request: IncomingMessage): Promise<Record<string,
 
 function firstLine(value: unknown, max = 200): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+/**
+ * How long a quota snapshot may answer a status read before it is re-read.
+ *
+ * The card polls status, so this is what keeps the meters moving without a
+ * per-poll upstream call: a stale snapshot answers now and is replaced behind
+ * the answer.
+ */
+export const CLINE_PASS_QUOTA_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Whether the cached snapshot is too old to be trusted as the card's numbers.
+ *
+ * `fetchedAt` is 0 until the first read lands, which counts as stale on
+ * purpose: a card with no numbers at all is the case that most needs the read.
+ */
+function usageStale(reading: ClinePassUsageDto, now: number, ttlMs: number): boolean {
+  return reading.fetchedAt <= 0 || now - reading.fetchedAt > ttlMs
 }
 
 /** Whether one account can serve a request right now. */
@@ -171,13 +194,28 @@ export interface ClinePassRouteOptions {
   openBrowser?: (url: string) => void
   serving(): boolean
   conflict(): string | null
+  /**
+   * How old a cached quota snapshot may get before a status read refreshes it
+   * behind the answer; defaults to {@link CLINE_PASS_QUOTA_TTL_MS}.
+   */
+  quotaTtlMs?: number
 }
 
 /** Named browser opener for deployments that want the host to launch the verification URL. */
 export const openClinePassBrowser = openPlatformBrowser
 
-/** Assemble the whole status payload the Cline Pass tab renders. */
-export async function getClinePassWebStatus(options: ClinePassRouteOptions): Promise<ClinePassWebStatus> {
+/**
+ * Assemble the whole status payload the Cline Pass tab renders.
+ *
+ * `quotaRefresh` is the single flight the caller refreshes through, when it has
+ * one: passing it is what lets the answer say a refresh is still running behind
+ * it. A caller that only reads (the management tools are one) omits it and gets
+ * the cache alone, which keeps a tool call from spending the line's quota reads.
+ */
+export async function getClinePassWebStatus(
+  options: ClinePassRouteOptions,
+  quotaRefresh?: QuotaRefresh,
+): Promise<ClinePassWebStatus> {
   const { settings: settingsStore, accountPool, store } = options
   const settings = await settingsStore.read().catch(() => settingsStore.status())
   const data = await accountPool.read().catch(() => null)
@@ -212,6 +250,9 @@ export async function getClinePassWebStatus(options: ClinePassRouteOptions): Pro
     catalogSynced: settings.catalogModels.length > 0,
     catalogCount: settings.catalogModels.length,
     usage: store.usage().accounts.length === 0 ? null : store.usage(),
+    // The snapshot above answered; a read it scheduled is still in flight, so the
+    // card has a reason to come back for the numbers it is replacing.
+    quotaRefreshing: quotaRefresh?.refreshing === true,
     historySize: store.historySize(),
     login: options.login?.current() ?? null,
     settings: {
@@ -265,11 +306,62 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
   // launching from the host as well would open two identical verification tabs.
   const openBrowser = options.openBrowser ?? (() => undefined)
 
+  const quotaTtlMs = options.quotaTtlMs ?? CLINE_PASS_QUOTA_TTL_MS
+  // One per registration: the refresh belongs to the line this route serves, and
+  // the flag it reports must not leak between instances.
+  const quotaRefresh = new QuotaRefresh()
+
   const emitModelsUpdated = (): void => {
     ctx.emit?.('llm/adapters-updated')
   }
 
-  const status = async (): Promise<ClinePassWebStatus> => await getClinePassWebStatus(options)
+  /**
+   * Read every usable account's official quota and replace the snapshot.
+   *
+   * Shared by the explicit refresh action and the background one a status read
+   * schedules, so both fan out over the same accounts and write the same shape.
+   * Null means no account can serve right now, which only the explicit action
+   * reports: a background refresh has nobody to tell.
+   */
+  const refreshUsage = async (): Promise<ClinePassUsageDto | null> => {
+    const data = await accountPool.read().catch(() => null)
+    const enabled = (data?.accounts ?? []).filter((account) => isUsable(account, Date.now()))
+    if (enabled.length === 0) return null
+    const settings = await settingsStore.read()
+    const readings: ClinePassUsageAccountDto[] = await Promise.all(enabled.map(async (account) => {
+      const fetchedAt = Date.now()
+      try {
+        const credentials = await accountPool.getFreshCredential(account.id, fetchFn)
+        const baseURL = credentials.baseURL && credentials.baseURL.trim() !== '' ? credentials.baseURL.trim() : settings.baseURL
+        const result = await fetchUsageLimits({ fetchFn, baseURL, apiKey: bearerFor(credentials) })
+        return {
+          accountId: account.id,
+          alias: account.alias,
+          ok: result.ok,
+          windows: result.limits.map((limit) => ({
+            type: limit.type,
+            label: clinePassWindowLabel(limit.type),
+            percentUsed: limit.percentUsed,
+            resetsAt: limit.resetsAt,
+          })),
+          error: result.error,
+          fetchedAt,
+        }
+      } catch (error) {
+        return {
+          accountId: account.id,
+          alias: account.alias,
+          ok: false,
+          windows: [],
+          error: firstLine(error instanceof Error ? error.message : error, 240),
+          fetchedAt,
+        }
+      }
+    }))
+    return store.setUsage({ accounts: readings })
+  }
+
+  const status = async (): Promise<ClinePassWebStatus> => await getClinePassWebStatus(options, quotaRefresh)
 
   return ctx.webServer.register({
     kind: 'prefix',
@@ -280,6 +372,15 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
       const method = request.method ?? 'GET'
       try {
         if (path === '' || path === 'status') {
+          // The card polls this, so the cached snapshot answers immediately and a
+          // missing or aged one schedules the upstream read behind the answer.
+          // `start` is the single-flight gate: repeated polls join the refresh
+          // that is already running instead of fanning out one per poll. Only a
+          // GET schedules it; this branch still answers every method with the
+          // cache, so a POST here refreshes nothing.
+          if (method === 'GET' && usageStale(store.usage(), Date.now(), quotaTtlMs)) {
+            quotaRefresh.start(refreshUsage)
+          }
           return sendJson(response, 200, { ok: true, value: await status() })
         }
 
@@ -648,43 +749,32 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           }
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const data = await accountPool.read().catch(() => null)
-          const enabled = (data?.accounts ?? []).filter((account) => isUsable(account, Date.now()))
-          if (enabled.length === 0) {
+          // The explicit action refreshes through the same bookkeeping a status
+          // read uses, but the two do not exclude each other: `run` awaits its own
+          // call and never consults `pending`, so a click that lands while a
+          // background refresh is in flight still fans out a second round.
+          // Deliberately left that way — both rounds write the same shape, the
+          // later `setUsage` is the one that stays, and the cost is a single extra
+          // upstream request. Real joining means giving `QuotaRefresh` a `wait`
+          // that every line sharing it would have to adopt, so it is not a change
+          // this route can make on its own.
+          const outcome: { reading: ClinePassUsageDto | null; cause: unknown } = { reading: null, cause: null }
+          await quotaRefresh.run(async () => {
+            try {
+              outcome.reading = await refreshUsage()
+            } catch (error) {
+              // `run` reports a failure through `lastError` rather than throwing,
+              // but this route answers the caller in its own envelope: keep the
+              // reason and re-throw so the response is the 500 it always was.
+              outcome.cause = error
+              throw error
+            }
+          })
+          if (outcome.cause !== null) throw outcome.cause
+          const reading = outcome.reading
+          if (reading === null) {
             return sendJson(response, 400, { ok: false, error: 'Every Cline Pass account is disabled, cooling down, or unusable. Enable one first.' })
           }
-          const settings = await settingsStore.read()
-          const readings: ClinePassUsageAccountDto[] = await Promise.all(enabled.map(async (account) => {
-            const fetchedAt = Date.now()
-            try {
-              const credentials = await accountPool.getFreshCredential(account.id, fetchFn)
-              const baseURL = credentials.baseURL && credentials.baseURL.trim() !== '' ? credentials.baseURL.trim() : settings.baseURL
-              const result = await fetchUsageLimits({ fetchFn, baseURL, apiKey: bearerFor(credentials) })
-              return {
-                accountId: account.id,
-                alias: account.alias,
-                ok: result.ok,
-                windows: result.limits.map((limit) => ({
-                  type: limit.type,
-                  label: clinePassWindowLabel(limit.type),
-                  percentUsed: limit.percentUsed,
-                  resetsAt: limit.resetsAt,
-                })),
-                error: result.error,
-                fetchedAt,
-              }
-            } catch (error) {
-              return {
-                accountId: account.id,
-                alias: account.alias,
-                ok: false,
-                windows: [],
-                error: firstLine(error instanceof Error ? error.message : error, 240),
-                fetchedAt,
-              }
-            }
-          }))
-          const reading: ClinePassUsageDto = store.setUsage({ accounts: readings })
           return sendJson(response, 200, { ok: true, value: { usage: reading, status: await status() } })
         }
 

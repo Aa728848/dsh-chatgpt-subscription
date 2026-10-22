@@ -17,8 +17,11 @@ export interface ClinePassComposerQuotaProps {
  *
  * Quota follows the ACCOUNT, and a pool has several. The badge therefore shows
  * the most-consumed window across the accounts the host has already read, which
- * is the one that will stop the next request first; it never triggers a quota
- * read of its own, so a poll cannot fan out one upstream call per account.
+ * is the one that will stop the next request first. Its own 60 s poll is a plain
+ * read, so a poll never fans out one upstream call per account; only an explicit
+ * click on the badge asks the host for the forced refresh, the same POST the
+ * card's own "refresh usage" button drives — which is exactly what the shared
+ * badge's `refresh` argument is for, and what this line used to drop.
  */
 export function ClinePassComposerQuota(props: ClinePassComposerQuotaProps): React.JSX.Element {
   return <ComposerQuotaBadge
@@ -26,7 +29,7 @@ export function ClinePassComposerQuota(props: ClinePassComposerQuotaProps): Reac
     loadModelDirectory={props.loadModelDirectory}
     providerId="cline-pass"
     label={zh.composerLabel}
-    readStatus={() => API.status()}
+    readStatus={(refresh) => API.status(refresh)}
     selectFacts={selectClinePassFacts}
   />
 }

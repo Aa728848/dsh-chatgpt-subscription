@@ -23,14 +23,40 @@ export interface ClinePassPinResult {
 }
 
 /**
+ * Whether the host is refreshing the quota behind this answer.
+ *
+ * The field is optional by contract, because a host built before it existed
+ * answers without it. Every caller only ever compares it to `true`, so "absent"
+ * and "false" read the same — nothing is in flight — and a stale host degrades to
+ * plain polling instead of crashing. Kept as one reader so that convention lives
+ * in a single place rather than being re-derived at each call site.
+ */
+export function quotaRefreshingOf(status: ClinePassWebStatus): boolean {
+  return status.quotaRefreshing === true
+}
+
+/**
  * The Cline Pass settings API, as the card uses it.
  *
  * Deliberately the same envelope and the same fetch shape every other provider
  * section uses, so the shared account-pool card and this helper read alike.
  */
 export class ClinePassApi {
-  status(): Promise<ClinePassWebStatus> {
-    return api.get<ClinePassWebStatus>('/status')
+  /**
+   * One status read.
+   *
+   * A plain call is the GET the first paint, the 60 s poll and the composer
+   * badge use: it is cheap and never fans out one upstream request per account.
+   * `refresh` is the forced path — the same POST /usage the card's own button
+   * drives — and the host answers it with `{ usage, status }`; only the status
+   * half is returned, because every caller renders a status card rather than the
+   * raw quota payload.
+   */
+  status(refresh = false): Promise<ClinePassWebStatus> {
+    if (!refresh) return api.get<ClinePassWebStatus>('/status')
+    return api
+      .post<{ usage: ClinePassUsageDto; status: ClinePassWebStatus }>('/usage', {})
+      .then((outcome) => outcome.status)
   }
 
   updateSettings(patch: ClinePassSettingsUpdateDto): Promise<ClinePassWebStatus> {
