@@ -1,16 +1,15 @@
 // @vitest-environment jsdom
 /**
- * The OpenDesign tab renders the shared account card and the two things this
- * line owns: the paste-key form and the catalog sync button. There is no quota
- * block — the gateway answers an API key no balance, so the card must not draw
- * one — and no credential ever reaches the DOM.
+ * The OpenDesign tab renders the shared account card and the things this line
+ * owns: the paste-key form, the catalog sync button, and the plan/credit card
+ * the billing summary feeds. No credential ever reaches the DOM.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { OpenDesignSection } from '../src/client/opendesign/OpenDesignSection.tsx'
 import { zh } from '../src/client/opendesign/locales.ts'
-import type { OpenDesignWebStatus } from '../src/shared/opendesign-contracts.ts'
+import type { OpenDesignUsageDto, OpenDesignWebStatus } from '../src/shared/opendesign-contracts.ts'
 
 const STATUS: OpenDesignWebStatus = {
   enabled: true,
@@ -93,6 +92,7 @@ function statusPayload(overrides: Partial<OpenDesignWebStatus> = {}): OpenDesign
 async function render(
   overrides: Partial<OpenDesignWebStatus> = {},
   onPost?: (url: string, body: unknown) => void,
+  usageForRead?: OpenDesignUsageDto,
 ): Promise<HTMLDivElement> {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -105,6 +105,15 @@ async function render(
         if (body.action === 'test') {
           return Response.json({ ok: true, value: { ok: true, authorized: true, ms: 42, error: '', modelCount: 2 } })
         }
+      }
+      // The card reads plan/credits once when it opens; the answer carries the
+      // reading plus the refreshed status, exactly like the host route.
+      if (url === '/opendesign/api/usage') {
+        const usage = usageForRead ?? overrides.usage ?? { accounts: [], fetchedAt: Date.now() }
+        return Response.json({
+          ok: true,
+          value: { usage, status: statusPayload({ ...overrides, usage }) },
+        })
       }
     }
     return Response.json({ ok: true, value: statusPayload(overrides) })
@@ -284,5 +293,63 @@ describe('OpenDesignSection sign-in', () => {
     expect(node.textContent).toContain('pro')
     expect(node.textContent).toContain('$12.34')
     expect(node.textContent).toContain(zh.apiKeyAccount)
+  })
+
+  it('shows the billed tier and credits, not the sign-in plan string', async () => {
+    const posts: Array<{ url: string; body: unknown }> = []
+    const billed = {
+      accounts: [{
+        accountId: 'a3',
+        alias: 'Dev',
+        ok: true,
+        balanceUsd: '1.5000',
+        updatedAt: null,
+        error: '',
+        fetchedAt: Date.now(),
+        billing: {
+          plan: 'go',
+          status: 'active',
+          entitlementStatus: 'active',
+          billingInterval: 'monthly',
+          periodStart: '2026-10-21T03:33:15.000Z',
+          periodEnd: '2026-11-21T03:33:15.000Z',
+          subscriptionCredits: '10000',
+          rechargeCredits: '5000',
+          totalAvailableCredits: '15000',
+          subscriptionCreditsUsd: '1.0000',
+          rechargeCreditsUsd: '0.5000',
+          totalAvailableCreditsUsd: '1.5000',
+          totalConsumedUsd: '0.0000',
+          todayConsumedUsd: '0.0000',
+          usageCount: 1429,
+          updatedAt: '2026-10-22T01:06:22.615Z',
+        },
+      }],
+      fetchedAt: Date.now(),
+    }
+    const node = await render({}, (url, body) => posts.push({ url, body }), billed)
+    // Opening the card reads them itself; the section is not a button away.
+    expect(posts.some((post) => post.url === '/opendesign/api/usage')).toBe(true)
+    // The billing tier wins over the sign-in snapshot (`plan: 'pro'` above).
+    expect(node.textContent).toContain(zh.usagePlan.replace('{plan}', 'Go'))
+    expect(node.textContent).toContain(zh.usagePlanActive)
+    expect(node.textContent).toContain(zh.usageSubscriptionCredits.replace('{credits}', '10,000').replace('{usd}', '1.0000'))
+    expect(node.textContent).toContain(zh.usageTotalCredits.replace('{credits}', '15,000').replace('{usd}', '1.5000'))
+    expect(node.textContent).toContain(zh.usageTodayConsumed.replace('{amount}', '0.0000'))
+    expect(node.textContent).toContain(zh.usageUsageCount.replace('{count}', '1429'))
+    expect(node.textContent).not.toContain('· pro')
+  })
+
+  it('does not ask for plan and credits when only a pasted key is pooled', async () => {
+    const posts: Array<{ url: string; body: unknown }> = []
+    await render({
+      pool: {
+        accounts: [{ id: 'a1', alias: '主号', isPrimary: true, authKind: 'api-key' }],
+        activeAccountId: 'a1',
+        rotationStrategy: 'sequential',
+      },
+    }, (url, body) => posts.push({ url, body }))
+    // No control key exists on a pasted key: the request would only answer 400.
+    expect(posts.some((post) => post.url === '/opendesign/api/usage')).toBe(false)
   })
 })

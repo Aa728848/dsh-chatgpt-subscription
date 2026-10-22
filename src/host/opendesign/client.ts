@@ -12,7 +12,7 @@
  *
  * @module dsh-chatgpt-subscription/opendesign-client
  */
-import { AMR_API_BASE, WALLET_BALANCE_PATH, type OpenDesignDiscoveredModel } from './types.ts'
+import { AMR_API_BASE, BILLING_SUMMARY_PATH, WALLET_BALANCE_PATH, type OpenDesignDiscoveredModel } from './types.ts'
 
 export interface OpenDesignHttpResult {
   status: number
@@ -428,6 +428,128 @@ export async function fetchWalletBalance({
       ok: true,
       balanceUsd: balance,
       updatedAt: typeof body.updatedAt === 'string' ? body.updatedAt : null,
+      error: '',
+    }
+  } catch (error) {
+    return { ...refusal, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * One account's plan and credit state, as `/billing/summary` states it.
+ *
+ * Balance strings keep the service's own spelling. `plan` is the paid tier
+ * (`go` / `plus` / `pro` / `max`) and is the only field that answers "which
+ * subscription is this"; `/me.plan` answers `free` even for an active paid
+ * account and is deliberately not used as a tier.
+ */
+export interface OpenDesignBillingSummary {
+  plan: string
+  /** `active`, `trialing`, `canceled`, ... as served. */
+  status: string
+  entitlementStatus: string
+  billingInterval: string
+  periodStart: string | null
+  periodEnd: string | null
+  /** Credits the subscription grants and has left, in integer credits. */
+  subscriptionCredits: string | null
+  /** Purchased top-up credits left. */
+  rechargeCredits: string | null
+  totalAvailableCredits: string | null
+  subscriptionCreditsUsd: string | null
+  rechargeCreditsUsd: string | null
+  totalAvailableCreditsUsd: string | null
+  totalConsumedUsd: string | null
+  todayConsumedUsd: string | null
+  /** How many spent requests the service counted (a diagnostic, not a quota). */
+  usageCount: number | null
+  /** ISO instant the service stamped on the summary. */
+  updatedAt: string | null
+}
+
+/** One billing read: the parsed summary, or the refusal as data. */
+export interface OpenDesignBillingRead {
+  ok: boolean
+  billing: OpenDesignBillingSummary | null
+  error: string
+}
+
+function usdString(value: unknown): string | null {
+  return typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) ? value : null
+}
+
+function creditString(value: unknown): string | null {
+  return typeof value === 'string' && /^\d+$/.test(value) ? value : null
+}
+
+function isoString(value: unknown): string | null {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null
+}
+
+function textString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
+ * Read one OAuth account's plan and credits with its control key.
+ *
+ * The summary is display data: a refusal is returned as data, never thrown, and
+ * must never mark the account (billing 401/403 is display-only upstream —
+ * OPEND-3553 — exactly like the wallet read). A summary with no
+ * `membershipTier` is not treated as a plan: "the tier is unknown" and "the plan
+ * is free" are different statements.
+ */
+export async function fetchBillingSummary({
+  fetchFn,
+  controlKey,
+  apiBase = AMR_API_BASE,
+  signal,
+  timeoutMs = 15_000,
+}: {
+  fetchFn: typeof fetch
+  controlKey: string
+  apiBase?: string
+  signal?: AbortSignal
+  timeoutMs?: number
+}): Promise<OpenDesignBillingRead> {
+  const refusal: OpenDesignBillingRead = { ok: false, billing: null, error: '' }
+  try {
+    const result = await sendJSON(fetchFn, trimBase(apiBase) + BILLING_SUMMARY_PATH, { apiKey: controlKey, signal, timeoutMs })
+    if (!result.ok) {
+      const detail = firstMessage(result.json) || result.text.slice(0, 120)
+      return {
+        ...refusal,
+        error: 'the billing summary answered HTTP ' + result.status + (detail === '' ? '' : ': ' + detail),
+      }
+    }
+    const body = isRecord(result.json) ? result.json : {}
+    const plan = textString(body.membershipTier)
+    if (plan === '') {
+      return { ...refusal, error: 'the billing summary named no membershipTier' }
+    }
+    const balances = isRecord(body.balances) ? body.balances : {}
+    return {
+      ok: true,
+      billing: {
+        plan,
+        status: textString(body.subscriptionStatus),
+        entitlementStatus: textString(body.subscriptionEntitlementStatus),
+        billingInterval: textString(body.billingInterval),
+        periodStart: isoString(body.subscriptionCurrentPeriodStart),
+        periodEnd: isoString(body.subscriptionCurrentPeriodEnd),
+        subscriptionCredits: creditString(balances.subscriptionCredits),
+        rechargeCredits: creditString(balances.rechargeCredits),
+        totalAvailableCredits: creditString(balances.totalAvailableCredits),
+        subscriptionCreditsUsd: usdString(body.subscriptionCreditsUsd),
+        rechargeCreditsUsd: usdString(body.rechargeCreditsUsd),
+        totalAvailableCreditsUsd: usdString(body.totalAvailableCreditsUsd),
+        totalConsumedUsd: usdString(body.totalConsumedUsd),
+        todayConsumedUsd: usdString(body.todayConsumedUsd),
+        usageCount: typeof body.usageCount === 'number' && Number.isSafeInteger(body.usageCount) && body.usageCount >= 0
+          ? body.usageCount
+          : null,
+        updatedAt: isoString(body.updatedAt),
+      },
       error: '',
     }
   } catch (error) {
