@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.36.2 - 2026-10-22
+- **[claude] 设置卡不再拿一枚已死的 access token 请求上游：status / 额度 / 测试连接 / 目录刷新统一走号池续期，托管账号闲置一夜后不再诱导用户重新登录（#66）**
+  - **现象**：Claude 订阅的 access token 只有约 8 小时寿命。卡片上的「令牌到期」、额度读取与「测试连接」在托管（managed）账号闲置一夜后全部出错——到期时间显示为过去时间、额度区报错、连接测试失败，看起来像「登录每天失效」，用户于是每天重新登录一次；而重登只是把到期时间刷成新的 8 小时，第二天照旧。
+  - **根因**：续期只发生在模型请求路径（`adapter` → `pool.getEffectiveAccount()` → `freshAccount()`，由 `claudeNeedsRefresh()` 在到期前 5 分钟内触发）。`/claude/api` 的 `status`、`quota`、`connection/test`、`catalog/refresh` 则直接用 `activeAccount()` 从号池读出的**存储值**请求上游，从不续期：卡片永远只看到「最后一枚被存下来的 access token」，8 小时后必然过期。相邻的 Kimi Code 线路早有 `effectiveCredentials()` 解决此事，Claude 线路缺这一段。
+  - **改法**：`registerClaudeRoutes()` 新增与 Kimi 同形的 `effectiveCredentials(target)` —— 无 pool 或无 `target.id` 时返回存储凭据，否则经 `pool.getFreshCredential(target.id, fetchFn)` 续期，续期失败时回落存储凭据（卡片仍能渲染账号列表，真实原因由那次请求报告）。四条卡片路径统一改用它；`status` 先续期、再读额度、再构建响应，所以 `accounts[].expiresAt`（读自号池行，续期会写回）就是续期后的新值。`readStatus()` 增加可选第二参，让额度读取、catalog 加载与 `accounts[]` 描述同一枚已消费的凭据。
+  - **不变量**：adopted（Claude Code 快照）仍然永不刷新——号池对 adopted 恒不续期、并在发网络请求前就拒绝，正好落进上面的回落分支，卡片只展示快照自身的 `authStatus`；只有续期被上游**拒绝**（`refreshFailureStatus` 仅对 `ClaudeUnauthorizedError` 写入）时，账号行才显示「需重新登录」，临时网络失败不会把账号标死。单飞由号池内核 `freshAccount()` 负责，同一枚 refresh token 不会被花两次，路由层没有另做互斥。
+  - **测试**：`test/claude-routes.test.ts` 新增 `describe('credential renewal on the card paths')`（6 例，注入假 refresh seam 与记录 `Authorization` 的 fetch double，全程无网络）——`GET /status` 恰好续期 1 次且池内 `expiresAt` 变未来、不写 `authStatus`、usage 请求带新 bearer、`accounts[].expiresAt` 与池内一致、`quotaError: null`；`POST /quota` 同理；`connection/test` 与 `catalog/refresh` 分别以新 bearer 请求 `/v1/messages` 与 `/v1/models`；过期 adopted 快照刷新 0 次且仍渲染 `authStatus='expired'`；卡片与模型请求并发、两次卡片轮询并发都只续期一次。反向验证：把 `routes.ts` 退回基线后 6 条中 5 条失败（adopted 那条按设计通过）。
+  - **验证**：`npm run typecheck` 三个工程 0 错误；全量 `npm test` 275 文件通过 / 1 跳过，4477 passed / 7 skipped / 0 failed；`npm run build` 通过。
+  - **已知边界**：卡片路径的续期与模型请求共用同一续期入口，因此一次续期失败（例如离线）会让下一次状态轮询再次尝试续期；这与模型请求路径的既有行为一致，未在路由层另加冷却。
 ## 0.36.1 - 2026-10-22
 - **[cline-pass] 额度不再只在手动刷新时动：状态读取按 TTL 在答背后刷新，设置卡与输入框徽标 60 秒自动更新**
   - **现象**：Cline Pass 设置页打开后额度数字就定住了——同一次会话里消耗掉的部分，要重新打开页面或点一次「刷新额度」才会反映；输入框旁的额度徽标同样停在首次读到的数字。
