@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.36.1 - 2026-10-22
+- **[cline-pass] 额度不再只在手动刷新时动：状态读取按 TTL 在答背后刷新，设置卡与输入框徽标 60 秒自动更新**
+  - **现象**：Cline Pass 设置页打开后额度数字就定住了——同一次会话里消耗掉的部分，要重新打开页面或点一次「刷新额度」才会反映；输入框旁的额度徽标同样停在首次读到的数字。
+  - **根因**：两层各缺一半。宿主侧 `GET /cline-pass/api/status` 只答 `store.usage()` 的内存快照，只有显式 `POST /usage` 才真正向上游读（模块注释还写着「读取不触发上游调用」）；客户端侧设置页只在挂载时读一次 status，而共享徽标虽然自带 60 秒轮询，cline 这一行的 `readStatus` 却把 `refresh` 参数丢掉了，点击于是退化成又一次廉价 GET。
+  - **改法（宿主）**：新增 `CLINE_PASS_QUOTA_TTL_MS`（5 分钟）与 `usageStale()`（`fetchedAt <= 0` 同样算过期）；`GET /status` 先答缓存，快照缺失或过期时用 `QuotaRefresh` 在答背后起一轮刷新，并把 `quotaRefreshing` 放进状态 DTO，让客户端知道该立刻补读；扇出逻辑抽成 `refreshUsage()`，显式 `POST /usage` 与后台刷新共用同一份实现，同源校验、400 文案、凭据零外泄全部保持不变。单飞由 `start()` 的 `pending` 保证：N 次轮询只扇出一轮。另给路由选项加了 `quotaTtlMs` 测试缝。
+  - **改法（客户端）**：`ClinePassApi.status(refresh)` 分流——`false` 走 `GET /status`，`true` 走 `POST /usage` 并只取其中的 status 半边；设置页补上 60 秒可见轮询 + `visibilitychange` + `createQuotaFollowUp`（读到 `quotaRefreshing: true` 就 1.5 秒后补读，最多 3 次）；轮询是静默的——失败既不刷红字也不清掉用户正在看的红字，半输入的草稿由既有两道闸保护；徽标把 `refresh` 转发出去，点击才真正强制刷新。
+  - **测试**：新增 `test/cline-pass-quota-poll.test.ts`（9 例）与 `test/cline-pass-quota-poll.test.tsx`（10 例）——冷缓存即排刷新并回 `quotaRefreshing`、新鲜快照 0 次上游调用、假 Date 拨过 TTL 后缓存照答而背后替换、2 账号 3 次轮询只扇出 2 次、显式动作立即刷新且 400/403 原样、徽标点击走 POST /usage、隐藏标签页不读、轮询失败静默、卸载清理定时器与监听。
+  - **验证**：`npm run typecheck` 三工程 0 错误；`npm test` 274 文件 / 4470 例通过（1 条 `minimax-code-video-history` 的 Windows `rename EPERM` 抖动，单跑 22/22 通过，与本改动无关）；`npm run build` 通过。
+  - **已知边界**：`QuotaRefresh.run()` 不与正在跑的 `start()` 合流，所以「手动刷新正好撞上后台刷新」这一步仍会多扇出一轮；两轮写入形状相同、后写的 `setUsage` 生效，代价是一次多余上游请求。真正合流要给共享 helper 加 `wait`，会牵动另外六条线路，本次不做，代码里按此写明。
 ## 0.36.0 - 2026-10-22
 - **[client] 修复俄语语言包与 `@linxin666/dsh-i18n` 等已安装语言包冲突导致插件客户端激活失败崩溃的问题**
   - **现象**：Web 界面启动失败，提示 `web boot: 1 entry did not activate`，`@eddyskywalker/dsh-chatgpt-subscription: failed`。
