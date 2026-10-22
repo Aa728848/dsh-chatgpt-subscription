@@ -499,6 +499,40 @@ export function registerClaudeRoutes(
   }
 
   /**
+   * The credential the card should spend right now, renewed when a pool is in
+   * charge.
+   *
+   * Every card path below (status, quota, the connection probe, the catalog
+   * refresh) used to hand out {@link activeAccount}'s STORED value. An access
+   * token lives for hours, not days, so a managed account left idle overnight
+   * presented a token that had already died: the usage read and the probe were
+   * answered 401, and the card rendered that as a credential the user had to
+   * replace by signing in again — for a refresh token that was still good, and
+   * for a model request path that renews by itself.
+   *
+   * The pool owns both the rotation and the write-back, so asking it here also
+   * updates the expiry the card displays (the account list is read from the pool
+   * rows). Without a pool there is no rotation to consult: the single-credential
+   * store keeps its own behaviour. A borrowed Claude Code snapshot keeps its
+   * never-refresh invariant for free — the pool's own guard refuses it before a
+   * request is made — and simply answers with the stored credential.
+   */
+  const effectiveCredentials = async (
+    target: { id: string | undefined; credentials: ClaudeCredentials | undefined },
+  ): Promise<ClaudeCredentials | undefined> => {
+    if (pool === undefined) return target.credentials
+    if (target.id === undefined) return target.credentials
+    try {
+      return await pool.getFreshCredential(target.id, fetchFn)
+    } catch {
+      // Rendering the card must survive a credential it cannot renew: the
+      // account list and the stored identity still have to be shown, and the
+      // request the credential was for reports the real reason it failed.
+      return target.credentials
+    }
+  }
+
+  /**
    * The store the sign-in flow writes through.
    *
    * With a pool the write goes through the pool, because the pool is the routing
@@ -544,8 +578,19 @@ export function registerClaudeRoutes(
    */
   const loginOptions: BeginLoginOptions = { openBrowser: () => undefined, ...(options.login ?? {}), fetchFn }
 
-  const readStatus = (quotaError: string | null = null): Promise<ClaudeWebStatus> =>
-    activeAccount().then((active) => getClaudeWebStatus(store, modelSettings, preferences, options, quotaError, active))
+  const readStatus = (
+    quotaError: string | null = null,
+    /**
+     * Credential this request already resolved — and renewed — for itself.
+     *
+     * Passed by the status route so the payload and the quota read describe the
+     * credential that was actually spent. Omitted means "read the active one",
+     * which is what every route that only renders the result needs.
+     */
+    resolved?: { id: string | undefined; credentials: ClaudeCredentials | undefined },
+  ): Promise<ClaudeWebStatus> =>
+    (resolved === undefined ? activeAccount() : Promise.resolve(resolved))
+      .then((active) => getClaudeWebStatus(store, modelSettings, preferences, options, quotaError, active))
 
   return ctx.webServer.register({
     kind: 'prefix',
@@ -558,7 +603,12 @@ export function registerClaudeRoutes(
       try {
         if (path === '' || path === 'status') {
           if (method !== 'GET') return sendMethodNotAllowed(response)
-          const active = await activeAccount()
+          // Renewed FIRST: the meters below must not be the request that
+          // discovers a dead access token, and the expiry this payload reports
+          // comes from the pool rows, so the write-back has to have happened
+          // before the payload is built.
+          const stored = await activeAccount()
+          const active = { id: stored.id, credentials: await effectiveCredentials(stored) }
           const cached = active.credentials === undefined ? null : cachedQuotaForPool(active.id, active.credentials)
           const stale = cached === null || Date.now() - (cached.fetchedAt || 0) > QUOTA_CACHE_TTL_MS
           // A failure is reported alongside the status rather than failing the
@@ -573,7 +623,7 @@ export function registerClaudeRoutes(
             if (cached === null) await quotaRefresh.run(refresh)
             else quotaRefresh.start(refresh)
           }
-          const value = await readStatus(quotaRefresh.lastError())
+          const value = await readStatus(quotaRefresh.lastError(), active)
           return sendJson(response, 200, {
             ok: true,
             value: { ...value, quotaRefreshing: quotaRefresh.refreshing },
@@ -628,10 +678,14 @@ export function registerClaudeRoutes(
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const active = await activeAccount()
-          if (active.credentials === undefined) return sendJson(response, 400, { ok: false, error: 'Not signed in.' })
+          // Renewed before the probe: a dead token answers 401, and the probe
+          // would then report an authentication failure the card shows as "sign
+          // in again" — about a sign-in that is still perfectly good.
+          const credentials = active.credentials === undefined ? undefined : await effectiveCredentials(active)
+          if (credentials === undefined) return sendJson(response, 400, { ok: false, error: 'Not signed in.' })
           // The probe RETURNS its verdict rather than throwing, so a refusal is
           // rendered by the card instead of being flattened into a 500.
-          const probe = await probeConnection(active.credentials, { fetchFn })
+          const probe = await probeConnection(credentials, { fetchFn })
           const value: ClaudeConnectionDto = probe.ok
             ? {
                 connected: true,
@@ -662,8 +716,8 @@ export function registerClaudeRoutes(
             return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           }
           const active = await activeAccount()
-          if (active.credentials === undefined) return sendJson(response, 400, { ok: false, error: 'Not signed in to Claude.' })
-          const credentials = active.credentials
+          const credentials = active.credentials === undefined ? undefined : await effectiveCredentials(active)
+          if (credentials === undefined) return sendJson(response, 400, { ok: false, error: 'Not signed in to Claude.' })
           let quotaError: string | null = null
           try {
             await fetchAccountQuota(credentials, {
@@ -687,8 +741,11 @@ export function registerClaudeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           clearCachedCatalog()
           const active = await activeAccount()
-          if (active.credentials !== undefined) {
-            const credentials = active.credentials
+          // The listing is read with the same renewed credential the status poll
+          // uses; a stale token here was answered 401 and the catalog silently
+          // fell back to the shipped table.
+          const credentials = active.credentials === undefined ? undefined : await effectiveCredentials(active)
+          if (credentials !== undefined) {
             const load = options.loadCatalog ?? ((current: ClaudeCredentials) => loadCatalog(current, { fetchFn, force: true }))
             await load(credentials).catch(() => undefined)
           }
