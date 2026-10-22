@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { TokenStore, StoredOAuthCredentials } from './token-store.ts'
-import { parseStoredCredentials } from './token-store.ts'
+import { CorruptStoredDocumentError, parseStoredCredentials } from './token-store.ts'
 
 const DIRECTORY_MODE = 0o700
 const FILE_MODE = 0o600
@@ -50,7 +50,10 @@ export class LinuxFileTokenStore implements TokenStore {
       const payload = await handle.readFile({ encoding: 'utf8' })
       return parseStoredCredentials(JSON.parse(payload) as unknown)
     } catch (error) {
-      throw new Error('Linux credential payload is invalid or insecure', { cause: error })
+      // A document that does not parse (or a file whose ownership / mode is
+      // wrong) is corrupt data, not an unreachable store: the pool may repair it
+      // with a write, and must not treat the read as "no accounts".
+      throw new CorruptStoredDocumentError('Linux credential payload is invalid or insecure', { cause: error })
     } finally {
       await handle.close()
     }

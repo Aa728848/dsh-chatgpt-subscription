@@ -10,6 +10,7 @@
 - [功能特性](#功能特性)
 - [模型目录](#模型目录)
 - [环境要求](#环境要求)
+- [号池存储后端（`poolStorage`）](#号池存储后端poolstorage)
 - [安装](#安装)
 - [使用](#使用)
 - [推理塌缩守卫（熔断，默认关闭）](#推理塌缩守卫熔断默认关闭)
@@ -291,6 +292,38 @@ GPT-6 系列（6.1 Sol / 6 Astra / 6 Sol / 6 Luna）支持文本、图片输入�
   - **0.1.6** 把 workflow 引擎改了包名，插件在 preset 同步时按当前安装自动适配（见「随包分发的 Agent Preset」）。
   - 0.1.1-rc.2 不再声明支持——它既没有 preset 用到的 `present` 工具，`mode` 枚举那时也还写作 `code`。
 - Node.js 与 npm。
+
+### 号池存储后端（`poolStorage`）
+
+号池（每个供应线路的账号文档）存在哪里是**一项配置**，不再由平台写死。原先 Linux 上恒为 Secret Service（libsecret / `org.freedesktop.secrets`）：桌面机没问题，**服务器上通常根本没有 secret service**，令牌换成功了、凭据却存不下来，登录报「ChatGPT credentials could not be saved securely」。唯一的老办法是装 `gnome-keyring` 并用空密码解锁去跑——那除了文件权限之外没有任何加密，还把一整套桌面栈拖上了服务器。
+
+| 值 | 存储位置 | 静态加密 |
+| --- | --- | --- |
+| `keyring`（默认） | 桌面密钥环：Windows 上是 DPAPI，macOS 上是钥匙串，Linux 上是 Secret Service | 是 |
+| `credentials` | **DSH 自己的凭据库**：`$DSH_HOME/.credentials.yaml`（由 DSH 的 `dsh-credentials-local` 提供；POSIX 上强制 `0600`，文件对他人可读时该 provider 拒绝启动；**Windows 上没有权限位可强制**，只有 profile ACL） | 否（权限保护） |
+
+**没有自动模式**：一个会按「守护进程是否应答」自己挑存储的 `auto`，等于让同一个号池在两个存储之间漂移，而漂移看起来和「账号全没了」一模一样。选错了就**如实报错**——卡片写明当前实际使用的存储、为什么选中的那个不可用，并把切换开关放在同一处；留在另一个存储里的账号仍然在（切回去就能看到），**不做迁移**。
+
+- **默认 `keyring`**：现有安装零变化，桌面凭据路径完全没动。Linux 上如果密钥环不可达（没有 `secret-tool`、没有会话总线、或密钥环锁着），保存会失败，但报的是一句明确的、告诉你把「账号存储位置」改成 DSH 凭据库的话，而不是静默换地方、也不是一句没有上下文的错误。
+- **服务器安装推荐 `poolStorage: "credentials"`**：唯一让本插件的账号和 DeepSeek、Telegram 等其它密钥躺在**同一个** DSH 凭据文档里的模式，不需要任何外部守护进程。
+- **两个平台都可用**：`credentials` 不绑定平台，Windows / macOS 服务器也可以选；选它时 DPAPI 与钥匙串完全不参与。
+- 该键只管**号池文档**；单凭据镜像（登录态预览用的那份）仍走平台存储，Linux 上本来就是 `0600` 文件。
+- **改 profile 里的 `poolStorage` 要重新挂载插件才生效**（约等于重启）：这个值在 `apply` 时读一次，池子只在插件重新应用时按它解析。设置页卡片上的选择是另一条路——它写进插件自己的存储文档、并立刻让所有池重新解析，所以两个入口的生效时机不同，别把它们当成一回事。
+- 号池在 DSH 凭据库里的地址是 `dsh-chatgpt-subscription/pool-<路径的 sha256>`。`pool-` 前缀是必须的：seam 要求每段匹配 `/^[a-z][a-z0-9-]*$/`，而裸摘要里有 62.5% 以数字开头，那样的 key 会在**下一次启动**解析整份凭据文档时被判非法，把宿主上所有凭据一起带走。
+- **如果曾经用本 PR 的未发布构建选过 `credentials`，旧的无前缀 key 要手工改一次**，自动迁移做不到：key 非法时 DSH 的凭据 provider 自己就起不来，插件手里根本没有可以拿来做迁移的 seam，而背着 provider 去改它的 `$DSH_HOME/.credentials.yaml` 比这个 bug 更危险。修法是改名，改完重启即可（账号一条不丢）：
+  ```sh
+  sed -i -E 's#(dsh-chatgpt-subscription)/([0-9a-f]{64})#\1/pool-\2#g' "$DSH_HOME/.credentials.yaml"
+  ```
+  没有任何发布版本写过无前缀形态，所以这条只影响跑过本分支本地构建的机器。
+- **设置页的账号卡片**里就是这条设置的界面：`Account storage` 选择器（带每个选项的说明）、一行「当前实际使用：…」、以及一句「另一个存储里的账号留在那里，切回去之前不显示，不做迁移」。选完立刻写进插件自己的存储文档（`<dshHome>/storages/dsh-chatgpt-subscription-pool-storage.json`），并以这份文档为准——profile 里的 `poolStorage` 只作为没有在卡片里选过时的默认值。
+
+```yaml
+# 服务器（主机专用于 DSH、没有桌面密钥环）
+poolStorage: credentials
+
+# 带桌面会话、密钥环已解锁的机器：保持默认即可
+poolStorage: keyring
+```
 
 ## 安装
 

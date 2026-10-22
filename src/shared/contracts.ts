@@ -19,6 +19,54 @@ export interface CredentialStorageDto {
   available: boolean
 }
 
+/**
+ * The configured account-pool storage choice (`poolStorage`).
+ *
+ * Two values and no automatic mode: which store holds the account pool is a
+ * deployment fact, and inferring it from whatever the host happens to answer is
+ * how a pool silently moves between stores. `keyring` is the default because it
+ * is what every desktop install already had.
+ */
+export type PoolStorageMode = 'keyring' | 'credentials'
+
+/**
+ * The backend that actually holds the pool document on this host.
+ *
+ * `keyring` resolves to DPAPI on Windows and the Keychain on macOS, so the card
+ * has to name the store a user got rather than the value they picked.
+ */
+export type PoolStorageBackend = 'keyring' | 'credentials' | 'dpapi' | 'keychain'
+
+/** Which backend stores the account pool, and whether it encrypts the document at rest. */
+export interface PoolStorageDto {
+  /** The configured value this host was resolved with. */
+  mode: PoolStorageMode
+  /** The backend in use. */
+  backend: PoolStorageBackend
+  /** Whether the document is encrypted at rest by this backend. */
+  encrypted: boolean
+  /**
+   * Why the configured backend cannot be used here. Absent means it works.
+   *
+   * A reason CODE rather than a sentence: the card translates it, and a host
+   * sentence travelling through the wire would reach a Russian page in English.
+   */
+  unavailable?: PoolStorageUnavailableReason
+}
+
+/**
+ * Why the pool cannot be read or written here.
+ *
+ * `keyring-unreachable` is a server without a desktop keyring (or with a locked
+ * one) — the state this option exists for; `no-credentials-service` is a host
+ * older than DSH's credential seam, which cannot honour an explicit
+ * `credentials` choice; `store-unreadable` is a store that IS configured and
+ * usable but did not answer this time (a keyring that refused, a process that
+ * timed out). It exists because that failure used to render as "no accounts",
+ * which reads as data loss over a document that is still intact.
+ */
+export type PoolStorageUnavailableReason = 'keyring-unreachable' | 'no-credentials-service' | 'store-unreadable'
+
 export interface FetchConfigurationDto {
   fetchProvider: 'auto' | 'plugin' | 'dsh'
   fetchMaxBodyChars: number
@@ -55,6 +103,14 @@ export interface PluginStatusDto {
   /** Account the next request would use. */
   activeAccountId?: string
   rotationStrategy?: AccountRotationStrategy
+  /**
+   * Where the account pool document actually lives on this host.
+   *
+   * `storage` above describes the single-credential mirror; this describes the
+   * pool, which `poolStorage` may have put in a different store. Absent when the
+   * pool is not installed, or while the backend has not been resolved yet.
+   */
+  poolStorage?: PoolStorageDto
   /**
    * Whether a local Codex CLI sign-in exists to import.
    *

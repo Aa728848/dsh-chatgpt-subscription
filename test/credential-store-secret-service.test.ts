@@ -55,7 +55,7 @@ describe('Linux Secret Service credential backend', () => {
     await store().save(credentials)
     expect(stdin()).toBe(JSON.stringify(credentials))
     expect(spawn.mock.calls[1][1]).toEqual([
-      'store', '--label=DSH Antigravity OAuth', 'service', 'dsh-antigravity', 'account', 'test-account',
+      'store', '--label=DSH dsh-antigravity', 'service', 'dsh-antigravity', 'account', 'test-account',
     ])
     expect(JSON.stringify(spawn.mock.calls)).not.toContain('secret-access')
     commandResult(0, JSON.stringify(credentials))
@@ -116,7 +116,7 @@ describe('Linux Secret Service credential backend', () => {
     // Shards are addressed under the generation the envelope names.
     for (let index = 0; index < envelope.chunks; index += 1) {
       expect(spawn.mock.calls[1 + index][1]).toEqual([
-        'store', '--label=DSH Antigravity OAuth',
+        'store', '--label=DSH dsh-antigravity',
         'service', 'dsh-antigravity', 'account', `test-account#${envelope.gen}#${index}`,
       ])
     }

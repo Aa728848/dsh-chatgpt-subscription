@@ -2,15 +2,23 @@ import path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { CredentialStore } from '../token-store.ts'
-import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
-import { MacKeychainCredentialStore } from '../token-store-macos.ts'
-import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
+import { isCorruptStoredDocument, type CredentialStore } from '../token-store.ts'
+import {
+  DEFAULT_POOL_STORAGE_MODE,
+  describePoolStoragePath,
+  poolStorageBackendForPlatform,
+  poolStorageEncrypted,
+  poolStorageRevision,
+  resolvePoolStorage,
+  type PoolStorageResolution,
+  type ProbeableKeyringStore,
+} from './pool-storage.ts'
 import type {
   AccountAuthStatus,
   AccountRotationStrategy,
   PoolAccountSummaryDto,
 } from '../../shared/account-pool-contracts.ts'
+import type { PoolStorageDto, PoolStorageMode } from '../../shared/contracts.ts'
 
 /** Refresh an access token this many milliseconds before it expires. */
 export const POOL_REFRESH_MARGIN_MS = 60_000
@@ -179,16 +187,38 @@ export interface AccountPoolHooks<
    * take the line offline.
    */
   preferAccountId?(): string | null
-  /** Test seam; production builds the platform backend from the paths above. */
+  /** Test seam; production resolves the backend from the paths above. */
   backend?: CredentialStore<PoolData<TAccount>>
+  /**
+   * Backend the test seam above stands in for, reported by {@link AccountPoolCore.poolStorage}.
+   *
+   * Only meaningful together with {@link backend}: a caller that supplies its own
+   * store has already made the choice, and the card must be told what that choice
+   * is instead of being shown the platform default.
+   */
+  storage?: PoolStorageDto
+  /** Override of the deployment-wide `poolStorage`, for one pool. */
+  poolStorage?: PoolStorageMode
+  /** Platform the backend is resolved for; defaults to `process.platform`, pinned in tests. */
+  platform?: NodeJS.Platform
+  /** Test seam: the keyring the `keyring` backend probes, instead of the real `secret-tool`. */
+  keyring?: ProbeableKeyringStore<PoolData<TAccount>>
 }
 
-/** Stable keychain account name for one pool file, isolated per `DSH_HOME`. */
 /** Accept a stored rotation strategy, or fall back to sequential. */
 export function normalizeRotationStrategy(value: unknown): AccountRotationStrategy {
   return value === 'round-robin' || value === 'sticky' ? value : 'sequential'
 }
 
+/**
+ * Stable keychain account name for one pool file, isolated per `DSH_HOME`.
+ *
+ * A bare sha256 hex digest: that is what the Secret Service entry, the DPAPI file
+ * suffix and the Keychain account all address, and what survives a restart. It is
+ * NOT a legal credential-record id on its own — see `poolRecordKey` in
+ * `pool-storage.ts`, which prefixes it — so nothing may hand this value to the
+ * `ctx.credentials` seam directly.
+ */
 export function poolCredentialAccount(filePath: string): string {
   return createHash('sha256').update(path.resolve(filePath)).digest('hex')
 }
@@ -224,7 +254,11 @@ export class AccountPoolCore<
 > {
   protected readonly hooks: AccountPoolHooks<TCredentials, TAccount, TSummary>
   private readonly filePath: string
-  private readonly backend: CredentialStore<PoolData<TAccount>>
+  /** The resolved backend, and the promise that resolves it (see {@link backendStore}). */
+  private readonly backendRef: { current?: PoolStorageResolution<PoolData<TAccount>> } = {}
+  private backendPromise?: Promise<PoolStorageResolution<PoolData<TAccount>>>
+  /** Choice revision {@link backendPromise} was resolved under. */
+  private backendRevision = -1
   /**
    * Bumped by every write that can move which account serves a request.
    *
@@ -240,7 +274,6 @@ export class AccountPoolCore<
   constructor(hooks: AccountPoolHooks<TCredentials, TAccount, TSummary>) {
     this.hooks = hooks
     this.filePath = hooks.poolFile
-    this.backend = hooks.backend ?? createPoolBackend(hooks)
     const resolved = path.resolve(this.filePath)
     // Windows paths are case-insensitive: two spellings are one pool file.
     this.operationKey = process.platform === 'win32' ? resolved.toLowerCase() : resolved
@@ -263,11 +296,88 @@ export class AccountPoolCore<
     return poolIdentityRevisions.get(this.operationKey) ?? 0
   }
 
-  /** Human description of where this pool's credentials live. */
+  /**
+   * Human description of where this pool's credentials live.
+   *
+   * Derived from the backend that was resolved, not from the platform: on a
+   * server that answered `poolStorage` with the credential store or a file, the
+   * old sentence named a keyring entry that does not exist.
+   */
   path(): string {
-    if (process.platform === 'win32') return `${this.filePath}.dpapi`
-    const kind = process.platform === 'darwin' ? 'Keychain' : 'Secret Service'
-    return `${kind}: ${this.hooks.keychainService}/${poolCredentialAccount(this.filePath)}`
+    const selected = this.backendRef.current
+    return selected === undefined
+      ? defaultPoolStoragePath(process.platform, this.filePath, this.hooks.keychainService)
+      : describePoolStoragePath(
+        process.platform,
+        this.filePath,
+        selected.storage,
+        this.hooks.keychainService,
+        poolCredentialAccount(this.filePath),
+      )
+  }
+
+  /**
+   * The backend holding this pool, and why it was chosen, for the settings surface.
+   *
+   * Resolves the store on first call, exactly as a read does: a card opened before
+   * any request has to be able to answer "where are my accounts?" as well.
+   */
+  async poolStorage(): Promise<PoolStorageDto | undefined> {
+    return (await this.backendStore()).storage
+  }
+
+  /**
+   * The pool store: resolved once, and re-resolved only when the setting changes.
+   *
+   * Lazy because the choice is a question about the host — does the keyring answer
+   * — and a pool is built from a constructor, which cannot await. CACHED for the
+   * life of the process on purpose: a read that re-detected the store on every
+   * model request would pay a `secret-tool` launch per request, and could hand two
+   * requests of one turn two different stores. The only thing that invalidates the
+   * cache is {@link poolStorageRevision} moving, which happens when the settings
+   * card writes a new choice.
+   */
+  private backendStore(): Promise<PoolStorageResolution<PoolData<TAccount>>> {
+    const revision = poolStorageRevision()
+    if (this.backendPromise === undefined || this.backendRevision !== revision) {
+      this.backendRevision = revision
+      this.backendPromise = this.resolveBackend()
+    }
+    return this.backendPromise
+  }
+
+  private async resolveBackend(): Promise<PoolStorageResolution<PoolData<TAccount>>> {
+    if (this.hooks.backend !== undefined) {
+      // A caller that supplied its own store has already made the choice, so that
+      // is what the card is told; `poolStorage()` is absent otherwise rather than
+      // claiming a backend nobody resolved. Without a `storage` the backend is the
+      // one this platform's keyring is — not a hardcoded `keyring`/`encrypted:
+      // false` pair, which named the wrong store on Windows and macOS and an
+      // unencrypted "keyring" that never exists.
+      const backend = poolStorageBackendForPlatform(this.hooks.platform ?? process.platform)
+      const resolution: PoolStorageResolution<PoolData<TAccount>> = {
+        store: this.hooks.backend,
+        storage: this.hooks.storage ?? {
+          mode: this.hooks.poolStorage ?? DEFAULT_POOL_STORAGE_MODE,
+          backend,
+          encrypted: poolStorageEncrypted(backend),
+        },
+      }
+      this.backendRef.current = resolution
+      return resolution
+    }
+    const resolution = await resolvePoolStorage<PoolData<TAccount>>({
+      displayName: this.hooks.displayName,
+      ...(this.hooks.poolStorage === undefined ? {} : { mode: this.hooks.poolStorage }),
+      poolFile: this.filePath,
+      keychainService: this.hooks.keychainService,
+      account: poolCredentialAccount(this.filePath),
+      parsePoolData: this.hooks.parsePoolData,
+      ...(this.hooks.platform === undefined ? {} : { platform: this.hooks.platform }),
+      ...(this.hooks.keyring === undefined ? {} : { keyring: this.hooks.keyring }),
+    })
+    this.backendRef.current = resolution
+    return resolution
   }
 
   /**
@@ -289,10 +399,18 @@ export class AccountPoolCore<
 
   private async saveVerified(data: PoolData<TAccount>): Promise<void> {
     const normalized = this.hooks.parsePoolData(data)
-    await this.backend.save(normalized)
-    const restored = await this.backend.load()
+    const { store } = await this.backendStore()
+    // Read BEFORE writing. A store that cannot be read must not be written: the
+    // caller's document came from that failed read, and saving it replaces a live
+    // pool with what the failure produced. A corrupt document is the one case that
+    // may be overwritten — that write is the repair.
+    await store.load().catch((error: unknown) => {
+      if (!isCorruptStoredDocument(error)) throw error
+    })
+    await store.save(normalized)
+    const restored = await store.load()
     if (!isDeepStrictEqual(restored, normalized)) {
-      throw new Error(`${this.hooks.displayName} pool encrypted verification failed`)
+      throw new Error(`${this.hooks.displayName} pool storage verification failed`)
     }
   }
 
@@ -317,10 +435,27 @@ export class AccountPoolCore<
    */
   protected async loadPoolData(): Promise<PoolData<TAccount>> {
     let current: PoolData<TAccount> | null = null
+    let resolution: PoolStorageResolution<PoolData<TAccount>> | undefined
     try {
-      current = await this.backend.load()
-    } catch {
-      // Corrupt file recovery: fall through to the legacy projection.
+      resolution = await this.backendStore()
+      current = await resolution.store.load()
+    } catch (error) {
+      if (isCorruptStoredDocument(error)) {
+        // The document does not parse: recover below and let the next write repair it.
+      } else if (resolution?.storage.unavailable === undefined) {
+        // An unreadable store is NOT an empty pool: `updatePool` writes back the
+        // document it just read, so treating a transient failure (a keyring that
+        // answered at resolve time and refused here, a `powershell` that timed out)
+        // as "no accounts" meant the very next settings toggle persisted an empty
+        // pool over a live one — and the user saw only the read error. The reason
+        // travels to the caller; the status call reports it as `store-unreadable`.
+        throw error
+      }
+      // A store the resolver ALREADY declared unusable has a documented reading:
+      // the line still shows what it has outside the pool (an ambient API key, the
+      // pre-pool single credential), because that projection is what keeps a
+      // server install's line usable at all. The card names the reason, and no
+      // write may be built from this read — `saveVerified` reads before it writes.
     }
 
     if (current !== null && Array.isArray(current.accounts) && current.accounts.length > 0) {
@@ -1029,21 +1164,14 @@ export class AccountPoolCore<
   }
 }
 
-/** Build the encrypted platform backend one pool file uses. */
-function createPoolBackend<
-  TCredentials,
-  TAccount extends PoolAccountShape<TCredentials>,
-  TSummary extends PoolAccountSummaryDto,
->(hooks: AccountPoolHooks<TCredentials, TAccount, TSummary>): CredentialStore<PoolData<TAccount>> {
-  const filePath = hooks.poolFile
-  if (process.platform === 'win32') {
-    return new WindowsDpapiCredentialStore(`${filePath}.dpapi`, hooks.parsePoolData)
-  }
-  if (process.platform === 'darwin') {
-    return new MacKeychainCredentialStore(hooks.keychainService, poolCredentialAccount(filePath), hooks.parsePoolData)
-  }
-  if (process.platform === 'linux') {
-    return new SecretServiceCredentialStore(hooks.keychainService, poolCredentialAccount(filePath), hooks.parsePoolData)
-  }
-  throw new Error(`${hooks.displayName} pool encrypted storage requires Windows, macOS, or Linux.`)
+/**
+ * Where the pool would live on this platform before anything is resolved.
+ *
+ * Only used for the diagnostic sentence while the backend is still being
+ * resolved; {@link AccountPoolCore.path} switches to the real answer afterwards.
+ */
+function defaultPoolStoragePath(platform: NodeJS.Platform, filePath: string, keychainService: string): string {
+  if (platform === 'win32') return `${filePath}.dpapi`
+  if (platform === 'darwin') return `Keychain: ${keychainService}/${poolCredentialAccount(filePath)}`
+  return `Secret Service: ${keychainService}/${poolCredentialAccount(filePath)}`
 }
