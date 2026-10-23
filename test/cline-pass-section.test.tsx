@@ -195,6 +195,32 @@ describe('ClinePassSection', () => {
     expect(el.textContent).toContain('可能被用于训练')
   })
 
+  it('pins a channel typed by hand when the probe discovered nothing', async () => {
+    const model = STATUS.models[0]!
+    const posts: Array<{ url: string; body: unknown }> = []
+    const el = await render({
+      models: [{ ...model, upstreams: [], upstreamStatus: [], pinned: [] }],
+    }, (url, body) => posts.push({ url, body }))
+    const input = el.querySelector<HTMLInputElement>('.dshcp-body input[list]')!
+    expect(input).not.toBeNull()
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, 'deepseek')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const add = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.addChannel)!
+    await act(async () => add.click())
+    const chips = [...el.querySelectorAll<HTMLElement>('.dshcp-channel')]
+    expect(chips.map((chip) => chip.firstChild?.textContent)).toContain('deepseek')
+    expect(chips[0]?.getAttribute('data-pinned')).toBe('true')
+    const save = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.savePin)!
+    await act(async () => save.click())
+    expect(posts.find((entry) => entry.url.endsWith('/models/pin'))?.body).toMatchObject({
+      model: 'cline-pass/glm-5.3',
+      upstreams: ['deepseek'],
+    })
+  })
+
   it('shows each account its own quota window inside the shared account card', async () => {
     const el = await render()
     const row = el.querySelector('.dsha-account-quota-row')
