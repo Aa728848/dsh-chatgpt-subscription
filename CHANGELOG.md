@@ -13,6 +13,7 @@
     - 请求历史与 probe/test 结果新增 `fingerprint` / `anonymous` 字段，strict 未采纳或落在匿名路由时写入 `pinNotAdopted:` / `anonymousServed:` 警告。
   - **第一方指纹**：`RoutingFacts.fingerprint` 只认 `provider_metadata.deepseek.systemFingerprint`（顶层 `system_fingerprint` 是网关每请求现铸的，不算证据）；适配器把最近一次指纹学到模型观察上，测试结果页直接展示。
   - **模型目录**：`cline-pass/deepseek-v4.1-flash-1017` 快照 id 进入内置目录（921600 / 384000，数值转录自参考插件的实测卡片），不再只依赖实时扫描领养——网关对别名与快照的钉选行为不同，用户必须能选到那个刚被探针证明可钉的 id。
+  - **手动渠道钉选入口**：探测依赖网关在被不可能的 `only` 钉住时报错列出渠道；当模型被改指匿名路由时探测拿不到任何列表（实测 1017 只剩 `openai-compatible-private` 一枚芯片），此前 UI 上连「钉 deepseek 试试」都做不到。渠道名是**网关级词汇**（任何模型探测到的名字都是合法候选），钉选面板新增手动输入框（联想全模型已发现渠道），输入即可钉、可存、可用「测试」回读验证——这正是参考插件的做法：从不探测渠道列表，按名字钉、按指纹验。
   - **不做的**：不在流中段按路由帧掐断响应（路由帧在内容之后才到，掐不断已交付内容），与参考插件「观察并如实报告、不改写请求」的立场一致。
   - **测试**：`cline-pass-protocol.test.ts` +4 例（delta 帧读取、递归搜捕、指纹/匿名判定、两条新警告）、`cline-pass-adapter.test.ts` +2 例（采纳 + 指纹落库；匿名路由未采纳 + 警告 + 不误标渠道可用）、`cline-pass-routes.test.ts` +1 例（钉匿名路由返回警告）、`cline-pass-section.test.tsx` +1 例（芯片 ⚠ 标记与警告行）。
 

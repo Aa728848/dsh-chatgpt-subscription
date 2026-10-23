@@ -710,6 +710,10 @@ export function ClinePassSection(props: Props): React.ReactElement {
               result={results[model.id] ?? {}}
               busy={busy}
               t={t}
+              // Channel names are a gateway-wide vocabulary: a name any other
+              // model discovered is a valid candidate here, which is how a
+              // channel can be pinned while this model's probe finds nothing.
+              suggestions={[...new Set(models.flatMap((entry) => entry.upstreams))]}
               onToggleChannel={(upstream) => {
                 const draft = pinDraftFor(model)
                 editPin(model, {
@@ -948,6 +952,8 @@ interface ChannelEditorProps {
   result: ModelResult
   busy: string | null
   t: typeof zh
+  /** Gateway-wide channel vocabulary discovered across all models, for manual entry. */
+  suggestions: string[]
   onToggleChannel(upstream: string): void
   onToggleExclude(upstream: string): void
   onPinMode(mode: 'strict' | 'preferred'): void
@@ -963,6 +969,7 @@ interface ChannelEditorProps {
 function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
   const { model, draft, result, t } = props
   const busyAny = props.busy !== null
+  const [manualChannel, setManualChannel] = useState('')
   const verdicts = new Map(model.upstreamStatus.map((entry) => [entry.upstream, entry]))
   // Configured names that the last probe did not discover are still shown: a pin
   // the gateway silently drops is exactly what this panel exists to expose.
@@ -1021,6 +1028,40 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
           </div>
         </>
       )}
+      <div className="dshcp-pin-row">
+        <input
+          className="dsha-input"
+          style={{ minWidth: 220 }}
+          list={`dshcp-known-${model.id}`}
+          placeholder={t.manualChannelPlaceholder}
+          value={manualChannel}
+          disabled={busyAny}
+          onChange={(event) => setManualChannel(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            const name = manualChannel.trim().toLowerCase()
+            if (name === '') return
+            if (!draft.upstreams.includes(name)) props.onToggleChannel(name)
+            setManualChannel('')
+          }}
+        />
+        <datalist id={`dshcp-known-${model.id}`}>
+          {props.suggestions.map((name) => <option key={name} value={name} />)}
+        </datalist>
+        <button
+          className="dsha-btn"
+          disabled={busyAny || manualChannel.trim() === ''}
+          onClick={() => {
+            const name = manualChannel.trim().toLowerCase()
+            if (name === '') return
+            if (!draft.upstreams.includes(name)) props.onToggleChannel(name)
+            setManualChannel('')
+          }}
+        >
+          {t.addChannel}
+        </button>
+      </div>
+      <p className="dsha-muted" style={{ fontSize: 12 }}>{t.manualChannelHint}</p>
       <div className="dshcp-pin-row">
         <label>
           {t.pinMode}
