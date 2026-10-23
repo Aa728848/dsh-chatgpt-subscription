@@ -4,6 +4,13 @@
  * 文本用函数形式提供（而不是静态字符串）：开关关闭时返回空串，装配期就地
  * 抹掉引导，不需要重启会话、也不需要重挂插件行。
  *
+ * ## 为什么是英文
+ *
+ * 提示词是写给模型看的，不是写给用户看的：同一段要求在英文下最短、歧义最少，
+ * 也和工具描述（`tool.ts` 的 `PROGRESS_UPDATE_DESCRIPTION`，本来就是英文）保持
+ * 同一套措辞。用户看到的语言由 {@link progressLanguageDirective} 单独钉住——
+ * 「指令用英文」与「输出用中文」是两件事，不要混在一起。
+ *
  * @module dsh-chatgpt-subscription/host/progress-updates/prompt
  */
 
@@ -23,36 +30,81 @@ export const PROGRESS_SECTION_NAME = 'plugin:progress-updates'
 export const PROGRESS_SECTION_ORDER = 220
 
 /**
+ * 进展更新的输出语言。
+ *
+ * - `auto`：跟随对话语言（默认）；
+ * - `zh`：一律中文；
+ * - `en`：一律英文。
+ *
+ * 只管 `progress_update` 的标题与正文，不影响会话里其它任何输出。
+ */
+export type ProgressUpdateLanguage = 'auto' | 'zh' | 'en'
+
+/** 允许的取值，供设置解析做白名单校验（配置里写错就等于没写）。 */
+export const PROGRESS_UPDATE_LANGUAGES: readonly ProgressUpdateLanguage[] = ['auto', 'zh', 'en']
+
+/**
  * 引导词正文。写法对齐 Kimi 的「进展更新」：先说清多步任务早期的思路，再报
  * 有意义的结论、阶段判断、长等待与阻塞；每条给一行标题，细节放正文；不重复
- * 没有变化的状态。
+ * 没有变化的状态。开头与结尾两条被提成硬要求——没有它们，面板在任务的两端
+ * 都是空的。
  */
 export const PROGRESS_GUIDANCE = [
-  '## 进展更新',
+  '## Progress updates',
   '',
-  '在多步任务里，你可以调用 `progress_update` 向用户主动汇报进展。它不会结束你的回合，也不消耗一次问答：报告完继续干活即可。',
+  'During multi-step work you can call `progress_update` to report progress without ending your turn and without spending a question: report, then keep working.',
   '',
-  '什么时候用：',
-  '- **任务早期**：先说清你打算怎么做（拆成哪几步、先动哪里），让用户在你埋头执行之前就能纠正方向。',
-  '- **有意义的结论**：查到关键事实、定位到根因、验证了一个假设——报结论本身，不要报「我刚读了一个文件」。',
-  '- **阶段判断**：一步做完、进入下一步之前，用一句话说明现在的状态和接下来要做什么。',
-  '- **长等待之前**：跑测试、装依赖、等构建这类要花上一阵子的操作，先说清你在等什么、大概要等多久。',
-  '- **被阻塞时**：缺信息、缺权限、外部依赖失败——说清卡在哪、你打算怎么绕过去，或者需要用户做什么。',
+  '**Two updates are mandatory — missing either one means the job is not finished:**',
   '',
-  '怎么写：',
-  '- 每条给一行短标题（title，纯文本，不带 Markdown，不加结尾句号），细节放进正文（message）。',
-  '- 正文用轻 Markdown：一段话说清发生了什么，必要时跟少量 bullet 列出要点。**有几行数据要对照时，用 GFM 管道符表格**（表头行 + `| --- |` 分隔行），不要写成排成一列的纯文本。',
-  '- 不要重复没有变化的状态：上一条报过的还在进行中，就不用再报一遍。',
-  '- 进展更新是给用户看的，不是给日志看的：写人话，别复述工具调用参数。',
+  '- **Opening**: before the first tool call of the task, send one update stating the plan (which steps, what you touch first). The user must be able to redirect you before you disappear into execution.',
+  '- **Closing**: after the work is done and before your final answer, send one update stating the result (what changed, what was verified, what is left). The panel and the conversation both close on this line.',
   '',
-  '作为 subagent 运行时：只描述你自己的子任务进展。你的子任务完成不等于整体任务完成，不要把整体进度写成已完成。',
+  'Beyond those two, these moments are worth a report:',
+  '- **Early planning**: the opening update covers it; report again only when the plan really changes (different approach, smaller scope, a broken premise).',
+  '- **A meaningful conclusion**: a key fact, a root cause, a verified assumption — report the conclusion itself, not "I just read a file".',
+  '- **A stage judgement**: one phase ends and the next begins — one line on where things stand and what happens next.',
+  '- **Before a long wait**: a test run, an install, a build — say what you are waiting for and roughly how long.',
+  '- **When blocked**: missing information, missing permission, an external failure — say where you are stuck, what you will try next, or what you need from the user.',
+  '',
+  'How to write one:',
+  '- One short title line (plain text, no Markdown, no trailing period); the details go in the message body.',
+  '- The body uses light Markdown: one paragraph of prose plus a few bullets. **When several rows share fields, use a GFM pipe table** (header row plus a `| --- |` separator row) instead of one item per line.',
+  '- Do not repeat a status that has not changed: if the last update already said it is running, it needs no second report.',
+  '- A progress update is for the user, not for the log: write it in human words, do not restate tool arguments.',
+  '',
+  'When you run as a subagent: describe only your own subtask progress. Finishing your subtask is not the same as finishing the overall task — do not report the overall progress as done.',
 ].join('\n')
+
+/**
+ * 每个语言档位对应的一句指令。
+ *
+ * 只约束输出的标题与正文，不约束引导词本身；三条都必须自洽——`auto` 不许在
+ * 用户说中文时滑回英文，`zh`/`en` 则明确压过对话语言。
+ */
+export const PROGRESS_LANGUAGE_DIRECTIVES: Readonly<Record<ProgressUpdateLanguage, string>> = {
+  auto: 'Write the title and the message of every progress update in the language the user is writing in, whatever it is. Follow the conversation; do not fall back to English unless the user does.',
+  zh: 'Write the title and the message of every progress update in Simplified Chinese, even when the conversation is in another language.',
+  en: 'Write the title and the message of every progress update in English, even when the conversation is in another language.',
+}
+
+/**
+ * 取一个语言档位的指令文本；未知取值按 `auto` 处理。
+ * @param language - 配置里读到的语言档位。
+ * @returns 追加到引导词末尾的一句指令。
+ */
+export function progressLanguageDirective(language: ProgressUpdateLanguage): string {
+  return PROGRESS_LANGUAGE_DIRECTIVES[language] ?? PROGRESS_LANGUAGE_DIRECTIVES.auto
+}
 
 /**
  * 生成提示词分节的文本提供者。
  * @param isEnabled - 读取当前开关状态的函数（每次装配重新求值）。
- * @returns 开关打开时返回引导词，关闭时返回空串。
+ * @param language - 读取当前输出语言的函数；缺省按 `auto` 处理。
+ * @returns 开关打开时返回引导词加语言指令，关闭时返回空串。
  */
-export function progressSectionText(isEnabled: () => boolean): () => string {
-  return () => (isEnabled() ? PROGRESS_GUIDANCE : '')
+export function progressSectionText(
+  isEnabled: () => boolean,
+  language: () => ProgressUpdateLanguage = () => 'auto',
+): () => string {
+  return () => (isEnabled() ? PROGRESS_GUIDANCE + '\n\n' + progressLanguageDirective(language()) : '')
 }

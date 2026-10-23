@@ -23,7 +23,9 @@ export const DISABLED_OUTPUT_TEXT = 'Progress updates are disabled; the update w
 /** 工具描述的最终全文。 */
 export const PROGRESS_UPDATE_DESCRIPTION = [
   'Report progress to the user without ending your turn.',
-  'Use it during multi-step work so the user can follow along and correct course early:',
+  'Two updates are part of the job, not optional narration: send one BEFORE your first tool call of a multi-step task (the plan),'
+    + ' and one BEFORE your final answer (what was done and what was verified).',
+  'Use it during the rest of the work so the user can follow along and correct course early:',
   'state your plan near the beginning of the task (what you will do, and in what order);',
   'report a meaningful conclusion the moment you have it (a key fact, the root cause, a verified assumption) rather than narrating every step;',
   'give a stage judgement when one phase ends and the next begins (where things stand, what happens next);',

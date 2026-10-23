@@ -37,10 +37,24 @@ export interface ProgressUpdatesSettingsValues {
   progressUpdates?: boolean
   /** 催促阈值：连续多少轮无进展就提醒一次。 */
   progressUpdatesNudgeThreshold?: number
+  /**
+   * 输出语言：auto 跟随对话、zh 中文、en 英文。
+   *
+   * 这里手写这三个字面量而不是从宿主侧 import 类型：浏览器半边是另一个运行时
+   * 的独立 bundle，把宿主模块拉进来只为拿一个联合类型不值得。两边的取值必须
+   * 逐字一致（宿主 Config schema 里的枚举就是这三个）。
+   */
+  progressUpdatesLanguage?: 'auto' | 'zh' | 'en'
 }
 
-/** 表单可写的那两个字段名（联合类型，写错名字编译期就报）。 */
-export type ProgressUpdatesField = keyof ProgressUpdatesSettingsValues & ('progressUpdates' | 'progressUpdatesNudgeThreshold')
+/** 输出语言的三种取值，供界面侧声明变量类型。 */
+export type ProgressUpdatesLanguage = NonNullable<ProgressUpdatesSettingsValues['progressUpdatesLanguage']>
+
+/** 表单可写的那三个字段名（联合类型，写错名字编译期就报）。 */
+export type ProgressUpdatesField =
+  | 'progressUpdates'
+  | 'progressUpdatesNudgeThreshold'
+  | 'progressUpdatesLanguage'
 
 /**
  * 候选条目 id，按可能性从高到低。
@@ -62,7 +76,7 @@ export interface ProgressSettingsForm {
   /** 订阅快照变化。 */
   subscribe(listener: () => void): () => void
   /** 写一个根字段；返回宿主是否接受。 */
-  set(field: ProgressUpdatesField, value: boolean | number): Promise<boolean>
+  set(field: ProgressUpdatesField, value: boolean | number | string): Promise<boolean>
   /** 释放镜像订阅与内部表单订阅（插件卸载时调用）。 */
   dispose(): void
 }

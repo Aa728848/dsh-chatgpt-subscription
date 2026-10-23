@@ -54,6 +54,9 @@ const CSS = `
 .dsh-progress-number{background:var(--dsw-alias-bg-layer-1,#fff);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:8px;box-sizing:border-box;color:var(--dsw-alias-label-primary,#141413);font:inherit;font-size:13px;height:30px;padding:0 8px;text-align:center;width:64px}
 .dsh-progress-number:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:1px}
 .dsh-progress-number:disabled{cursor:default;opacity:.5}
+.dsh-progress-select{background:var(--dsw-alias-bg-layer-1,#fff);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:8px;box-sizing:border-box;color:var(--dsw-alias-label-primary,#141413);cursor:pointer;font:inherit;font-size:13px;height:30px;padding:0 6px}
+.dsh-progress-select:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:1px}
+.dsh-progress-select:disabled{cursor:default;opacity:.5}
 .dsh-progress-open{align-items:center;background:transparent;border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:8px;color:var(--dsw-alias-label-primary,#141413);cursor:pointer;display:inline-flex;font:inherit;font-size:12px;gap:2px;padding:5px 8px}
 .dsh-progress-open:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04))}
 .dsh-progress-open:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}

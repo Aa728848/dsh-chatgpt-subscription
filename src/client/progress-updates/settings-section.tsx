@@ -1,5 +1,5 @@
 /**
- * 设置页里的「进展更新」分区：一句说明 + 三行卡片（开关 / 催促阈值 / 进展面板）。
+ * 设置页里的「进展更新」分区：一句说明 + 四行卡片（开关 / 催促阈值 / 输出语言 / 进展面板）。
  *
  * ## 视觉来源
  *
@@ -9,14 +9,14 @@
  *
  * ## 单级，没有二级页面
  *
- * 三行都停在当前页：开关和数字输入直接写设置，第三行是「打开」按钮 + chevron，
+ * 四行都停在当前页：开关、数字输入和语言下拉直接写设置，最后一行是「打开」按钮 + chevron，
  * 点它按 kind 打开右侧栏的进展面板，然后把设置弹层收起来——面板在设置弹层底下，
  * 不关掉的话用户还是看不见它。
  *
  * ## 数据
  *
- * 开关与阈值经 {@link ProgressSettingsForm} 读写（见 `./settings-binding.ts`）：写入
- * 走宿主共享设置表单，两条字段在宿主 `Config` schema 里都是 `volatile()`，保存即
+ * 开关、阈值与输出语言经 {@link ProgressSettingsForm} 读写（见 `./settings-binding.ts`）：写入
+ * 走宿主共享设置表单，三条字段在宿主 `Config` schema 里都是 `volatile()`，保存即
  * 生效，不需要重启插件行。表单通道缺席（没有设置服务的部署）时控件渲染成禁用态，
  * 并在说明行写明原因——宁可不给点，也不做一个存不住的假开关。
  *
@@ -29,7 +29,12 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type { ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { fallbackTranslate, type CopySeat } from './updates-panel.tsx'
-import type { ProgressSettingsForm, ProgressUpdatesField, ProgressUpdatesSettingsValues } from './settings-binding.ts'
+import type {
+  ProgressSettingsForm,
+  ProgressUpdatesField,
+  ProgressUpdatesLanguage,
+  ProgressUpdatesSettingsValues,
+} from './settings-binding.ts'
 
 /** 入口注入给设置页的座位：按 kind 打开侧栏面板。 */
 export interface ProgressUpdatesSettingsInjected {
@@ -105,7 +110,18 @@ function ThresholdMark(): ReactNode {
   )
 }
 
-/** 第三行的标记：一块右侧栏面板。 */
+/** 第三行的标记：一个地球，对应「输出语言」。 */
+function LanguageMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="10" cy="10" r="7" />
+      <path d="M3 10h14" />
+      <ellipse cx="10" cy="10" rx="3.2" ry="7" />
+    </svg>
+  )
+}
+
+/** 第四行的标记：一块右侧栏面板。 */
 function PanelMark(): ReactNode {
   return (
     <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -164,7 +180,7 @@ function CardRow(props: {
 }
 
 /**
- * 进展更新的设置分区：三行卡片。
+ * 进展更新的设置分区：四行卡片。
  * @param props - 壳的关闭回调、注入的打开动作与表单、文案座位。
  * @returns 设置页里的这一页。
  */
@@ -182,7 +198,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -191,6 +207,10 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT
+  // 语言只有三个合法取值；读不到（老配置）就是 auto，与宿主 schema 的默认一致。
+  const language: ProgressUpdatesLanguage = value.progressUpdatesLanguage === 'zh' || value.progressUpdatesLanguage === 'en'
+    ? value.progressUpdatesLanguage
+    : 'auto'
 
   // 输入框的草稿文本：宿主没有立刻接受时（例如打了个超出范围的半截数字），
   // 输入框仍要显示用户敲的东西，而不是弹回旧值。宿主值一变就重新同步。
@@ -203,7 +223,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold', field: ProgressUpdatesField, next: boolean | number): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -306,6 +326,28 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             onChange={(event) => { editThreshold(event.target.value) }}
             onBlur={() => { setDraft(String(threshold)) }}
           />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-language"
+          brand="#c26d2f"
+          mark={<LanguageMark />}
+          name={translate('settingsLanguageName')}
+          note={failure?.row === 'language' ? failure.text : translate('settingsLanguageNote')}
+          danger={failure?.row === 'language'}
+        >
+          <select
+            className="dsh-progress-select"
+            data-dsh-part="settings-language"
+            aria-label={translate('settingsLanguageName')}
+            value={language}
+            disabled={!writable}
+            onChange={(event) => { write('language', 'progressUpdatesLanguage', event.target.value) }}
+          >
+            <option value="auto">{translate('settingsLanguageAuto')}</option>
+            <option value="zh">{translate('settingsLanguageZh')}</option>
+            <option value="en">{translate('settingsLanguageEn')}</option>
+          </select>
         </CardRow>
 
         <CardRow

@@ -38,7 +38,13 @@ import {
   type NudgeSessionLookup,
   type TurnBoundaryLookup,
 } from './nudge.ts'
-import { PROGRESS_SECTION_NAME, PROGRESS_SECTION_ORDER, progressSectionText } from './prompt.ts'
+import {
+  PROGRESS_SECTION_NAME,
+  PROGRESS_SECTION_ORDER,
+  PROGRESS_UPDATE_LANGUAGES,
+  progressSectionText,
+  type ProgressUpdateLanguage,
+} from './prompt.ts'
 import {
   mergeProjectedUpdates,
   progressUpdatesProjection,
@@ -61,6 +67,8 @@ export interface ProgressUpdatesSettings {
   enabled: boolean
   /** 催促阈值：连续多少轮带工具调用却没有进展更新就提醒一次。 */
   nudgeThreshold: number
+  /** 进展更新的输出语言（只管标题与正文，不影响提示词本身的语言）。 */
+  language: ProgressUpdateLanguage
 }
 
 /**
@@ -84,6 +92,8 @@ export interface ProgressUpdatesConfigFields {
   progressUpdates?: ProgressUpdatesConfigField<boolean>
   /** 催促阈值得字段。 */
   progressUpdatesNudgeThreshold?: ProgressUpdatesConfigField<number>
+  /** 输出语言字段。 */
+  progressUpdatesLanguage?: ProgressUpdatesConfigField<ProgressUpdateLanguage>
 }
 
 /**
@@ -107,12 +117,16 @@ export function readProgressConfigField<T>(field: ProgressUpdatesConfigField<T>)
 export function resolveProgressUpdatesSettings(config?: ProgressUpdatesConfigFields): ProgressUpdatesSettings {
   const enabled = readProgressConfigField(config?.progressUpdates)
   const threshold = readProgressConfigField(config?.progressUpdatesNudgeThreshold)
+  const language = readProgressConfigField(config?.progressUpdatesLanguage)
   return {
     enabled: enabled !== false,
     // 缺省就是 store 里那个冻结的 NUDGE_THRESHOLD（8），两处永远不会漂移。
     nudgeThreshold: typeof threshold === 'number' && Number.isSafeInteger(threshold) && threshold > 0
       ? threshold
       : NUDGE_THRESHOLD,
+    // 白名单校验：配置里写了个不认识的字符串，等于没写（按 auto 处理），
+    // 而不是把这串东西原样拼进提示词。
+    language: language !== undefined && PROGRESS_UPDATE_LANGUAGES.includes(language) ? language : 'auto',
   }
 }
 
@@ -473,7 +487,7 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
     return systemPrompt.section({
       name: PROGRESS_SECTION_NAME,
       order: PROGRESS_SECTION_ORDER,
-      text: progressSectionText(() => options.settings().enabled),
+      text: progressSectionText(() => options.settings().enabled, () => options.settings().language),
     })
   }, 'dsh-chatgpt-subscription: progress update prompt section')
 

@@ -336,7 +336,7 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(sections[0]!.locale).toBe(NS_PROGRESS_UPDATES)
   })
 
-  it('三行卡片都渲染：开关、阈值、打开面板', async () => {
+  it('四行卡片都渲染：开关、阈值、输出语言、打开面板', async () => {
     // Given 一份就绪的表单与一个假侧栏
     const form = fakeForm({ progressUpdates: false, progressUpdatesNudgeThreshold: 8 })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
@@ -345,14 +345,16 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     // Then 三行都在
     expect(container.querySelector('[data-dsh-part="settings-row-enabled"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-panel"]')).not.toBeNull()
     // And 名称与说明用的是本插件的文案
     expect(container.textContent).toContain(zh.settingsEnabledName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
+    expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(3)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(4)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -401,6 +403,24 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(form.writes).toEqual([['progressUpdates', true], ['progressUpdatesNudgeThreshold', 12]])
   })
 
+  it('输出语言下拉写的是 progressUpdatesLanguage，选项就是 schema 的三个取值', async () => {
+    // Given 一份可写表单，语言停在默认 auto
+    const form = fakeForm({ progressUpdates: true, progressUpdatesLanguage: 'auto' })
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const select = container.querySelector<HTMLSelectElement>('[data-dsh-part="settings-language"]')!
+    // Then 下拉里只有三项，取值与宿主 Config 的枚举逐字一致
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['auto', 'zh', 'en'])
+    // When 用户选了 English
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(select, 'en')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    // Then 写的是本插件 Config 的根字段，不是别处的同名设置
+    expect(form.writes).toEqual([['progressUpdatesLanguage', 'en']])
+  })
+
   it('没有设置服务时控件只读，说明行写明原因', async () => {
     // Given 一个没有 configForms 的部署
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
@@ -409,6 +429,7 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     // Then 开关与输入框都是禁用的
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLInputElement>('[data-dsh-part="settings-threshold"]')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLSelectElement>('[data-dsh-part="settings-language"]')?.disabled).toBe(true)
     // And 说明行说清了为什么
     expect(container.textContent).toContain(zh.settingsUnavailable)
   })

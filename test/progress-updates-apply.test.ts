@@ -178,17 +178,20 @@ afterEach(() => {
  * 按本插件 Config 字段的形状挂载一次（与 src/index.ts 的调用处一致）。
  * @param enabled - 总开关，可以是活引用。
  * @param nudgeThreshold - 催促阈值，可以是活引用。
+ * @param language - 输出语言，可以是活引用。
  * @returns 假 ctx 与探针。
  */
 function mount(
   enabled: boolean | { get(): boolean } = true,
   nudgeThreshold?: number | { get(): number },
+  language?: string | { get(): string },
 ) {
   const fake = makeCtx()
   installProgressUpdates(fake.ctx as never, {
     settings: () => resolveProgressUpdatesSettings({
       progressUpdates: enabled as never,
       progressUpdatesNudgeThreshold: nudgeThreshold as never,
+      progressUpdatesLanguage: language as never,
     }),
   })
   return fake
@@ -237,13 +240,38 @@ describe('apply: 提示词引导', () => {
   it('引导词讲清什么时候用、标题与正文的分工，以及 subagent 的边界', () => {
     const fake = mount(volatileField(true))
     const text = (fake.sections.get(PROGRESS_SECTION_NAME)!.text as () => string)()
-    expect(text).toContain('任务早期')
-    expect(text).toContain('有意义的结论')
-    expect(text).toContain('长等待')
-    expect(text).toContain('被阻塞')
-    expect(text).toContain('不要重复没有变化的状态')
-    expect(text).toContain('作为 subagent 运行时')
-    expect(text).toContain('你的子任务完成不等于整体任务完成')
+    expect(text).toContain('Opening')
+    expect(text).toContain('Closing')
+    expect(text).toContain('A meaningful conclusion')
+    expect(text).toContain('Before a long wait')
+    expect(text).toContain('When blocked')
+    expect(text).toContain('Do not repeat a status that has not changed')
+    expect(text).toContain('When you run as a subagent')
+    expect(text).toContain('not the same as finishing the overall task')
+  })
+
+  it('输出语言追加在引导词末尾：auto 跟随对话，zh/en 压过对话语言', () => {
+    const read = (fake: ReturnType<typeof mount>): string =>
+      (fake.sections.get(PROGRESS_SECTION_NAME)!.text as () => string)()
+    // 单实例守卫：同一个进程里第二次挂载是空操作，所以读一次就卸一次。
+    const auto = read(mount(true))
+    disposeAll()
+    const chinese = read(mount(true, undefined, 'zh'))
+    disposeAll()
+    const english = read(mount(true, undefined, 'en'))
+    disposeAll()
+    expect(auto).toContain('the language the user is writing in')
+    expect(chinese).toContain('Simplified Chinese')
+    expect(english).toContain('every progress update in English')
+    // 活引用：同一个引用就地换值，不重挂插件行
+    const live = {
+      value: 'auto' as string,
+      get() { return this.value },
+    }
+    const fake = mount(true, undefined, live)
+    expect(read(fake)).toContain('the language the user is writing in')
+    live.value = 'en'
+    expect(read(fake)).toContain('every progress update in English')
   })
 })
 
@@ -486,13 +514,19 @@ describe('设置：loader 的活引用', () => {
 
   it('resolveProgressUpdatesSettings 缺省时给出 8 轮阈值', () => {
     // 缺省即**开启**：没配置过的用户装上插件就能用进展更新，不必先去设置里翻开关。
-    expect(resolveProgressUpdatesSettings()).toEqual({ enabled: true, nudgeThreshold: NUDGE_THRESHOLD })
-    expect(resolveProgressUpdatesSettings({ progressUpdates: true })).toEqual({ enabled: true, nudgeThreshold: NUDGE_THRESHOLD })
+    expect(resolveProgressUpdatesSettings()).toEqual({ enabled: true, nudgeThreshold: NUDGE_THRESHOLD, language: 'auto' })
+    expect(resolveProgressUpdatesSettings({ progressUpdates: true })).toEqual({ enabled: true, nudgeThreshold: NUDGE_THRESHOLD, language: 'auto' })
   })
 
   it('显式写 false 才是关闭：默认值改成 true 之后，关闭必须由用户自己做', () => {
     // 回归守卫：`enabled` 的判定不能写回 `=== true`，否则 undefined（缺省）会被
     // 读成关闭，默认开启的改动就只落在一半的地方。
-    expect(resolveProgressUpdatesSettings({ progressUpdates: false })).toEqual({ enabled: false, nudgeThreshold: NUDGE_THRESHOLD })
+    expect(resolveProgressUpdatesSettings({ progressUpdates: false })).toEqual({ enabled: false, nudgeThreshold: NUDGE_THRESHOLD, language: 'auto' })
+  })
+
+  it('语言缺省 auto；配置里写了不认识的取值也退回 auto', () => {
+    expect(resolveProgressUpdatesSettings().language).toBe('auto')
+    expect(resolveProgressUpdatesSettings({ progressUpdatesLanguage: 'en' }).language).toBe('en')
+    expect(resolveProgressUpdatesSettings({ progressUpdatesLanguage: 'klingon' as never }).language).toBe('auto')
   })
 })

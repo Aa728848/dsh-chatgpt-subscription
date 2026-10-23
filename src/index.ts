@@ -175,6 +175,7 @@ import {
   resolveProgressUpdatesSettings,
   type ProgressUpdatesContext,
 } from './host/progress-updates/index.ts'
+import type { ProgressUpdateLanguage } from './host/progress-updates/prompt.ts'
 import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/progress-updates/store.ts'
 
 /**
@@ -256,6 +257,13 @@ export interface Config {
    * 条提醒。默认 8（与 `NUDGE_THRESHOLD` 同一个数，两处不会漂移）。
    */
   progressUpdatesNudgeThreshold?: Volatile<number>
+  /**
+   * 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文。
+   *
+   * 只约束 `progress_update` 的标题与正文——提示词本身固定英文，用户看到的
+   * 文字才跟着这个字段走。同样是 `volatile()`：设置一保存就生效，不重挂插件行。
+   */
+  progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
 }
 
 /**
@@ -294,6 +302,8 @@ export interface ConfigInput {
   progressUpdates?: boolean
   /** 进展更新的催促阈值（默认 8）。 */
   progressUpdatesNudgeThreshold?: number
+  /** 进展更新的输出语言（默认 auto：跟随对话）。 */
+  progressUpdatesLanguage?: ProgressUpdateLanguage
 }
 
 export const Config: z<ConfigInput, Config> = z.object({
@@ -325,6 +335,10 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。'),
   progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
     .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
+  // 输出语言：`auto` 跟随对话（默认），`zh`/`en` 强制压过对话语言。
+  // 枚举而不是自由字符串：写错一个值就等于没写，且设置页的下拉只可能出现这三项。
+  progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default('auto').volatile()
+    .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文。'),
 })
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']

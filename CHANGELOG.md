@@ -1,6 +1,18 @@
 # Changelog
 
 ## Unreleased
+- **[progress-updates] 进展更新补上「开局」与「收尾」两条硬要求**
+  - **现象**：任务开始和结束都没有进展条目，整场只在被催到的时候冒出两三条；面板看着像「只有出结论才有动静」。
+  - **根因**：整条链路只折叠模型显式调用 `progress_update` 的事件（`projection.apply` 对其它名字的 `tool/call`、`tool/ptc-dispatch` 原样返回），没有任何从工具活动自动推导的路径；而模型侧唯一的正向纠偏是「8 轮催促」，它在 `tools/post-execute` 上从 0 数到 8 才响，结构上不可能在 t=0 触发；收尾时模型输出的是最终答复正文而不是工具调用，`post-execute` 不触发，于是也没有收口那一条。实测本会话日志：三条进展分别紧跟三次催促（seq 86→94、160→168、252→260），首条出现在第 8 轮之后，`turn/end`（seq 347）之前的 87 个事件里一条都没有。
+  - **改法**：`prompt.ts` 的引导词把「开局（第一批工具调用之前）」与「收尾（最终答复之前）」提成两条硬要求，原来的「任务早期」条目降级为「计划真的变了才补」；`tool.ts` 的工具描述在首句后同步一句书挡要求——描述是模型每次调用都会读到、离调用最近的一段文本。催促阈值不动默认值（仍是 8，`NUDGE_THRESHOLD` 是测试守着的冻结契约），本机在 profile 配置里设成 4。
+  - **验证**：`npm run typecheck` 三工程 0 错误；全量 `npm test` 277 文件 / 4586 passed / 8 skipped / 0 failed（工具描述的子串断言一条没改）；`npm run build` 通过，`lib/index.js` 里能搜到新文案。
+  - **留档**：结构层面的锚点（`agent/pre-step` 做开局、`agent/turn-stopping` + `steer` 做收尾）这次刻意没做，纯文本仍是软约束，模型可以不照做。
+- **[progress-updates] 提示词整段转英文，并新增「输出语言」设置（auto / 中文 / English）**
+  - **现象**：进展更新的系统提示词是中文的，而工具描述本来就是英文——同一件事两套语言；用户也无法指定进展本身用哪种语言写。
+  - **改法（提示词）**：`prompt.ts` 的 `PROGRESS_GUIDANCE` 整段换成英文，与工具描述统一措辞。新增 `ProgressUpdateLanguage = 'auto' | 'zh' | 'en'` 与 `PROGRESS_LANGUAGE_DIRECTIVES`：把「标题与正文用哪种语言写」做成一句追加在引导词末尾的指令——`auto` 跟随对话语言（日、俄等其它语言自动跟随），`zh`/`en` 明确压过对话语言。**「指令用英文」与「输出用中文」是两件互不影响的事**，这正是把语言单独拆成一个开关的原因。
+  - **改法（设置）**：宿主 `Config` 新增 `progressUpdatesLanguage`（`z.union([z.const('auto'), z.const('zh'), z.const('en')])` + `default('auto')` + `volatile()`，与另两个字段同一套：保存即生效、不重挂插件行）；`resolveProgressUpdatesSettings` 用白名单校验，配置里写了个不认识的字符串等于没写（退回 auto），而不是把它原样拼进提示词。设置页从三行变四行，第三行是原生 `<select>`（`data-dsh-part="settings-language"`），三个选项就是 schema 的三个取值；中/英/俄三份字典同时补齐（俄语里语言名用 Китайский，因为 `russian-locale.test.tsx` 明令俄语包里不许出现 CJK）。
+  - **测试**：`progress-updates-apply` 新增「语言指令追加在引导词末尾」（含活引用就地换值，单实例守卫下读一次卸一次）与「未知取值退回 auto」；`live-ref-and-route` 补 schema 默认值；`progress-updates-client` 新增「下拉写的是 progressUpdatesLanguage，选项就是三个取值」，行数断言 3→4，控件禁用态补一条；中文断言同步换成英文。9 个进展更新测试文件 150 例全绿。
+  - **验证**：`npm run typecheck` 三工程 0 错误；全量 `npm test` 277 文件 / 4590 passed / 8 skipped / 0 failed；`npm run build` 通过。
 - **[opendesign] 额度卡终于有进度条了：吃的是控制台同源的 Design Plan 窗口（5 小时 / 7 天），不是钱包余额**
   - **现象**：OpenDesign 线路的卡与设置页只有金额（「可用余额 $1.50」），没有任何百分比进度条；而 OpenDesign 控制台的计费卡明明画着「Design Plan · 5 小时额度 剩余 90%」「7 天额度 剩余 81%」两条带重置倒计时的进度条。
   - **根因（两层）**：一是**读错了面**。插件一直只读 `/billing/summary` 与 `/wallet/balance`——前者给套餐档位与「还剩多少 credits」，后者给钱包余额，**两者都没有「这一期一共给了多少」**，所以「已用/总量」这个分母根本不存在，代码里那句「本卡不发明一个总数去除」是对的。二是**真源在另一个端点**：从控制台 SPA 的 bundle 反查出 `GET {amr}/workspaces/{workspaceId}/billing/coding-plan-usage`（带 `x-vela-workspace-id`），返回 `{ tier, eligible, windows: [{ policyId, durationSeconds, remainingCredits, limitCredits, resetsAt }] }`；控制台自己的过滤逻辑是 `durationSeconds === 604800`（7 天）加 go 档的 `18000`（5 小时），百分比就是 `remainingCredits / limitCredits`。该路径实测存在（未鉴权 401；此前猜的 `/billing/windows`、`/billing/coding-plan`、`/billing/preflight` 全是 404），工作区 id 来自 `GET {amr}/workspaces`。

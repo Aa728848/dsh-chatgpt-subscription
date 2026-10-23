@@ -148,6 +148,11 @@ describe('插件 Config：两个字段都是活引用', () => {
     expect(parsed.progressUpdatesNudgeThreshold?.get()).toBe(NUDGE_THRESHOLD)
   })
 
+  it('输出语言默认 auto，显式值原样读回', () => {
+    expect(Config({}).progressUpdatesLanguage?.get()).toBe('auto')
+    expect(Config({ progressUpdatesLanguage: 'zh' }).progressUpdatesLanguage?.get()).toBe('zh')
+  })
+
   it('显式写 false 时解析出来是关闭（默认值改了不等于关不掉）', () => {
     const parsed = Config({ progressUpdates: false })
     expect(parsed.progressUpdates?.get()).toBe(false)
@@ -155,7 +160,7 @@ describe('插件 Config：两个字段都是活引用', () => {
 
   it('解析出来的引用正是挂载函数认识的形状', () => {
     const parsed = Config({ progressUpdates: true, progressUpdatesNudgeThreshold: 3 })
-    expect(resolveProgressUpdatesSettings(parsed)).toEqual({ enabled: true, nudgeThreshold: 3 })
+    expect(resolveProgressUpdatesSettings(parsed)).toEqual({ enabled: true, nudgeThreshold: 3, language: 'auto' })
   })
 
   it('阈值有下界：0 与负数被 schema 拒绝，而不是变成"每轮都催"', () => {
