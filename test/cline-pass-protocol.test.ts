@@ -148,6 +148,60 @@ describe('Cline Pass pin adherence', () => {
     expect(pinWarnings({ upstream: null, excludeList: ['a', 'b'] }, { upstreams: ['a', 'b'] })[0]).toContain('every known channel')
     expect(pinWarnings({ upstream: 'a', excludeList: [] }, { upstreams: [] })).toEqual([])
   })
+
+  it('reads the routing block off a streaming delta frame', () => {
+    // The gateway appends `delta.provider_metadata.gateway.routing` to a
+    // terminal stream frame, after the content: reading only `message` leaves
+    // every streamed request unjudged.
+    const routing = parseRouting({
+      choices: [{ index: 0, delta: { provider_metadata: { gateway: { routing: {
+        finalProvider: 'deepseek', canonicalSlug: 'deepseek/deepseek-v4-pro', fallbacksAvailable: [],
+      } } } }, finish_reason: null }],
+    })
+    expect(routing.pipeline).toBe('planner')
+    expect(routing.finalProvider).toBe('deepseek')
+    expect(routing.canonicalSlug).toBe('deepseek/deepseek-v4-pro')
+    expect(pinAdherence({ upstream: 'deepseek', orderRest: [], excludeList: [], strict: true, sort: null }, routing)).toBe('adopted')
+  })
+
+  it('hunts a routing block nested off the fast paths', () => {
+    const routing = parseRouting({
+      choices: [{ message: { content: 'ok', extra: { wrapper: { gateway: { routing: { finalProvider: 'fireworks' } } } } } }],
+    })
+    expect(routing.finalProvider).toBe('fireworks')
+    expect(routing.pipeline).toBe('planner')
+  })
+
+  it('proves first-party DeepSeek only by the deepseek namespace fingerprint', () => {
+    const firstParty = parseRouting({
+      system_fingerprint: 'fp_gateway_minted',
+      choices: [{ message: { provider_metadata: {
+        deepseek: { systemFingerprint: 'fp_first_party' },
+        gateway: { routing: { finalProvider: 'deepseek' } },
+      } } }],
+    })
+    expect(firstParty.fingerprint).toBe('fp_first_party')
+    expect(firstParty.anonymous).toBe(false)
+    // A gateway-minted top-level fingerprint is not evidence of the upstream.
+    const anonymous = parseRouting({
+      system_fingerprint: 'fp_gateway_minted',
+      choices: [{ delta: { provider_metadata: { gateway: { routing: {
+        finalProvider: 'openai-compatible-private', canonicalSlug: 'private/deepseek-v4p1-flash-1017-contributor',
+      } } } } }],
+    })
+    expect(anonymous.fingerprint).toBeNull()
+    expect(anonymous.anonymous).toBe(true)
+    expect(anonymous.finalProvider).toBe('openai-compatible-private')
+  })
+
+  it('warns when a pin targets the anonymous contributor route', () => {
+    const pinned = pinWarnings({ upstream: 'openai-compatible-private', excludeList: [] }, { upstreams: ['openai-compatible-private'] })
+    expect(pinned.some((warning) => warning.startsWith('anonymousUpstream:'))).toBe(true)
+    const likely = pinWarnings({ upstream: 'deepseek', excludeList: [] }, { upstreams: ['openai-compatible-private'] })
+    expect(likely.some((warning) => warning.startsWith('pinLikelyIgnored:'))).toBe(true)
+    const fine = pinWarnings({ upstream: 'deepseek', excludeList: [] }, { upstreams: ['deepseek', 'fireworks'] })
+    expect(fine).toEqual([])
+  })
 })
 
 describe('Cline Pass channel recovery', () => {

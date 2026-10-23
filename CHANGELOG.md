@@ -15,6 +15,20 @@
   - **验证**：`rc.3` 三工程强制类型检查、构建、`npm ci --dry-run` 与打包通过，全量 **282 文件通过 / 2 skipped，4649 passed / 8 skipped / 0 failed**；精确 `rc.2` 隔离房间结果完全相同。`0.1.5-rc.1` 隔离房间强制类型检查通过，其余可运行套件 **281 文件通过 / 2 skipped，4644 passed / 9 skipped / 0 failed**；唯一不能加载的是该世代没有 `@deepseek-ai/dsh-ptc-runtime` 的 `subagent-model-authorization-ptc.test.ts`，与既有世代限定约定一致。
   - **实机**：用 npm 发布的 `@deepseek-ai/dsh@0.2.1-rc.3` 在隔离 `DSH_HOME` 安装本次 tarball，启动无条目激活警告；插件管理页显示 1 个组件运行中，设置页确认版本为 `0.2.1-rc.3`，12 条订阅线路与进展更新设置均正常渲染。未使用真实订阅凭据或发起模型请求。
 
+## 0.38.2 - 2026-10-24 (本地构建：官方 0.38.1 + cline-pass 钉选修复)
+- **[cline-pass] 上游钉选可读性大修：流式帧终于能读出真实服务渠道，匿名贡献者路由全链路标记**
+  - **现象**：钉选 deepseek「好像失效」——本机实测（2026-10-23，两个账号）：`cline-pass/deepseek-v4.1-flash-1017` 被网关改指 VMC 匿名贡献者路由，`only: [deepseek]` 被静默忽略（连假渠道也返回 200）；而同一时刻 `cline-pass/deepseek-v4-pro` 的 `only: [deepseek]` 被采纳（`Provider set restricted to: deepseek`）。网关按**模型 id** 分流且随时间翻转，插件无法左右；但插件侧有两个真实缺陷把「失效」放大了。
+  - **缺陷一：流式下钉选判定永远 `unresolved`**。网关把路由块放在**流式收尾帧**的 `choices[].delta.provider_metadata.gateway.routing`（内容之后、`[DONE]` 之前），而 `parseRouting` 只读 `message.provider_metadata`——本机 history 里 19 条真实流式记录全部 `unresolved`，`provider` 字段只是钉选回显。改法：同时读 `delta` / `message` / 顶层，并对整块做**深度受限递归搜捕**（对齐 MIT 参考插件 `dsh-clinepass-deepseek` 的 `collectRouting` 行为）；首个非空读取生效。
+  - **缺陷二：匿名路由无任何标记**。`openai-compatible-private`（VMC 贡献者回退网，回答可能用于训练、无 ZDR）此前被当成普通渠道芯片，用户甚至把它存成了钉选。改法：
+    - 新增共享判定 `isClinePassAnonymousUpstream()`（渠道名 + `private/…-contributor` 解析 slug）；
+    - `pinWarnings` 新增两条：钉选**指向**匿名路由（`anonymousUpstream:`）、模型**只发现**匿名路由却钉了别的（`pinLikelyIgnored:`，即「钉了也会被静默忽略」）；
+    - 渠道芯片带 `⚠` 与警示色、tooltip 说明；钉选区在「钉了匿名路由」或「该模型只剩匿名路由」时给出警告行；
+    - 请求历史与 probe/test 结果新增 `fingerprint` / `anonymous` 字段，strict 未采纳或落在匿名路由时写入 `pinNotAdopted:` / `anonymousServed:` 警告。
+  - **第一方指纹**：`RoutingFacts.fingerprint` 只认 `provider_metadata.deepseek.systemFingerprint`（顶层 `system_fingerprint` 是网关每请求现铸的，不算证据）；适配器把最近一次指纹学到模型观察上，测试结果页直接展示。
+  - **模型目录**：`cline-pass/deepseek-v4.1-flash-1017` 快照 id 进入内置目录（921600 / 384000，数值转录自参考插件的实测卡片），不再只依赖实时扫描领养——网关对别名与快照的钉选行为不同，用户必须能选到那个刚被探针证明可钉的 id。
+  - **不做的**：不在流中段按路由帧掐断响应（路由帧在内容之后才到，掐不断已交付内容），与参考插件「观察并如实报告、不改写请求」的立场一致。
+  - **测试**：`cline-pass-protocol.test.ts` +4 例（delta 帧读取、递归搜捕、指纹/匿名判定、两条新警告）、`cline-pass-adapter.test.ts` +2 例（采纳 + 指纹落库；匿名路由未采纳 + 警告 + 不误标渠道可用）、`cline-pass-routes.test.ts` +1 例（钉匿名路由返回警告）、`cline-pass-section.test.tsx` +1 例（芯片 ⚠ 标记与警告行）。
+
 ## 0.38.1 - 2026-10-24
 - **[kimi-code] 请求体上限改成按模型分档：1M 档 8 MiB、256K 档 2 MiB（`DSH_KIMI_CODE_MAX_BODY_BYTES` 仍是全局强制覆盖）**
   - **现象**：1M 上下文档位（`k3` / `k3.1-pro` / `k3.1-pro-highspeed` / `kimi-for-coding`）的会话把中文正文写到 3–4 MB 就被本线路的本地字节守卫拒绝，请求根本没发出去；宿主压缩也救不回来——压缩请求自己同样超过那个上限，于是长会话表现为「压缩一次后仍然失败」，而服务端从未拒绝过这个体积。

@@ -21,6 +21,20 @@ const SSE_OK = [
   '',
 ].join('\n\n')
 
+/** The gateway's real frame order: content, flush, THEN the routing frame. */
+function sseWithRouting(routing: Record<string, unknown>, metadata: Record<string, unknown> = {}): string {
+  const terminal = {
+    choices: [{ index: 0, delta: { provider_metadata: { gateway: { routing }, ...metadata } }, finish_reason: null }],
+  }
+  return [
+    'data: {"choices":[{"delta":{"content":"hello"}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}',
+    `data: ${JSON.stringify(terminal)}`,
+    'data: [DONE]',
+    '',
+  ].join('\n\n')
+}
+
 class MemoryBackend<T> {
   private data: unknown = null
   async load(): Promise<T | null> {
@@ -159,5 +173,66 @@ describe('ClinePassAdapter', () => {
     // The cooldown constant is exported for the quota path; keep it referenced so
     // a future change that drops it is visible here rather than in a dead export.
     expect(POOL_COOLDOWN_MS).toBeGreaterThan(0)
+  })
+
+  it('reads the serving channel off the terminal stream frame and marks the pin adopted', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    const fetchFn = (async () => new Response(
+      sseWithRouting(
+        { finalProvider: 'deepseek', canonicalSlug: 'deepseek/deepseek-v4-pro', fallbacksAvailable: [] },
+        { deepseek: { systemFingerprint: 'fp_first_party' } },
+      ),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    for await (const _chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    } as never)) { /* drain */ }
+    const row = store.readHistory(1)[0]
+    expect(row?.provider).toBe('deepseek')
+    expect(row?.adherence).toBe('adopted')
+    expect(row?.fingerprint).toBe('fp_first_party')
+    expect(row?.anonymous).toBe(false)
+    expect(row?.warnings).toEqual([])
+    // A first-party answer proves the pinned channel works.
+    expect(store.metaOf(MODEL).upstreamStatus?.deepseek?.status).toBe('ok')
+    expect(store.metaOf(MODEL).lastFingerprint).toBe('fp_first_party')
+  })
+
+  it('says when a strict pin is silently served by the anonymous contributor route', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    const fetchFn = (async () => new Response(
+      sseWithRouting({
+        finalProvider: 'openai-compatible-private',
+        canonicalSlug: 'private/deepseek-v4p1-flash-1017-contributor',
+        fallbacksAvailable: [],
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const chunks = []
+    for await (const chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    } as never)) chunks.push(chunk)
+    // The routing frame trails the content, so delivery already happened — the
+    // record is where the truth is told.
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta')).toHaveLength(1)
+    const row = store.readHistory(1)[0]
+    expect(row?.provider).toBe('openai-compatible-private')
+    expect(row?.adherence).toBe('not-adopted')
+    expect(row?.anonymous).toBe(true)
+    expect(row?.fingerprint).toBe('')
+    expect(row?.warnings.some((warning) => warning.startsWith('pinNotAdopted:'))).toBe(true)
+    expect(row?.warnings.some((warning) => warning.startsWith('anonymousServed:'))).toBe(true)
+    // A channel the pin never proved is not marked usable.
+    expect(store.metaOf(MODEL).upstreamStatus?.deepseek).toBeUndefined()
   })
 })

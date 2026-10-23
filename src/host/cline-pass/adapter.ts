@@ -347,7 +347,7 @@ export class ClinePassAdapter extends LlmAdapter {
           lastError = new LlmError('gateway returned no response body', 'EMPTY_RESPONSE', { status: response.status })
           continue
         }
-        const observed: { provider: string | null; canonical: string | null; pipeline: ClinePipeline | null } = { provider: null, canonical: null, pipeline: null }
+        const observed: { provider: string | null; canonical: string | null; pipeline: ClinePipeline | null; fingerprint: string | null; anonymous: boolean } = { provider: null, canonical: null, pipeline: null, fingerprint: null, anonymous: false }
         const responseBody = tapChunks(response.body, () => {
           activity?.pulse()
           if (firstByteMs === 0) firstByteMs = Date.now() - startedAt
@@ -419,6 +419,18 @@ export class ClinePassAdapter extends LlmAdapter {
         delivered = true
         const adherence = pinAdherence(attempt, { finalProvider: observed.provider })
         const warnings = pinWarnings({ upstream: attempt.upstream, excludeList: attempt.excludeList }, meta)
+        // The pin verdict is only readable after the stream ends (the routing
+        // frame trails the content), so an ignored pin cannot be failed over —
+        // but it must be SAID, or a strict pin silently becomes the anonymous
+        // contributor route's answer.
+        if (adherence === 'not-adopted') {
+          warnings.push(`pinNotAdopted: the gateway served ${observed.provider ?? '(unknown)'} instead of the pinned ${attempt.upstream ?? '(auto)'}`)
+        } else if (adherence === 'violated') {
+          warnings.push(`pinViolated: an excluded channel served this request: ${observed.provider ?? '(unknown)'}`)
+        }
+        if (observed.anonymous) {
+          warnings.push(`anonymousServed: this answer came from the gateway's anonymous contributor route (${observed.provider ?? 'openai-compatible-private'}) — it may be used for training and carries no zero-data-retention guarantee`)
+        }
         const ms = Date.now() - attemptStarted
         trace.push(attemptLabel)
         this.store.record({
@@ -434,10 +446,20 @@ export class ClinePassAdapter extends LlmAdapter {
           code: finishFailure?.code ?? '',
           account: account.name,
           adherence,
+          fingerprint: observed.fingerprint ?? '',
+          anonymous: observed.anonymous,
           warnings,
           ...(usage === undefined ? {} : { usage }),
           effort: options.reasoningEffort === undefined ? '' : String(options.reasoningEffort),
         })
+        // The fingerprint is the only proof of a first-party DeepSeek answer;
+        // keep the freshest reading on the model so the card can show it.
+        if (observed.fingerprint !== null || observed.provider !== null) {
+          this.store.learn(options.model, {
+            ...(observed.provider === null ? {} : { lastProvider: observed.provider }),
+            ...(observed.fingerprint === null ? {} : { lastFingerprint: observed.fingerprint }),
+          })
+        }
         void this.accountPool.recordModel(account.id, options.model)
         // Only a pin the router actually honored proves the channel works.
         // Marking it usable no matter who answered is how a false "available"
@@ -545,7 +567,7 @@ function tapChunks(body: ReadableStream<Uint8Array>, onChunk: () => void): Reada
  */
 async function* tapRouting(
   payloads: AsyncIterable<unknown | '[DONE]'>,
-  observed: { provider: string | null; canonical: string | null; pipeline: ClinePipeline | null },
+  observed: { provider: string | null; canonical: string | null; pipeline: ClinePipeline | null; fingerprint: string | null; anonymous: boolean },
 ): AsyncGenerator<unknown | '[DONE]'> {
   for await (const payload of payloads) {
     if (payload !== '[DONE]') {
@@ -553,8 +575,12 @@ async function* tapRouting(
       if (routing.finalProvider !== null) {
         observed.provider = routing.finalProvider
         observed.pipeline = routing.pipeline
+        observed.anonymous = routing.anonymous
         if (routing.canonicalSlug !== null) observed.canonical = routing.canonicalSlug
       }
+      // A frame can carry the first-party fingerprint without repeating the
+      // routing block; whichever frame carries it, the last reading wins.
+      if (routing.fingerprint !== null) observed.fingerprint = routing.fingerprint
     }
     yield payload
   }

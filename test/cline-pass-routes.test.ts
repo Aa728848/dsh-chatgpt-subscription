@@ -177,6 +177,18 @@ describe('Cline Pass settings API', () => {
     expect(status.models.find((entry) => entry.id === model)?.pinned).toEqual(['baseten'])
   })
 
+  it('warns when a pin targets the anonymous contributor route', async () => {
+    const model = DEFAULT_MODELS[0]!
+    const captured = await call({
+      url: '/cline-pass/api/models/pin',
+      method: 'POST',
+      body: { model, upstreams: ['openai-compatible-private'] },
+    })
+    expect(captured.status).toBe(200)
+    const value = captured.body.value as { warnings: string[] }
+    expect(value.warnings.some((warning) => warning.startsWith('anonymousUpstream:'))).toBe(true)
+  })
+
   it('shows and hides models without forgetting them', async () => {
     const model = DEFAULT_MODELS[0]!
     await call({ url: '/cline-pass/api/models/visibility', method: 'POST', body: { model, visible: false } })

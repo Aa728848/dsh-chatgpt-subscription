@@ -7,6 +7,7 @@ import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/for
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import {
   clinePassAccountQuota,
+  isClinePassAnonymousUpstream,
   type ClinePassAccountSummaryDto,
   type ClinePassHistoryRowDto,
   type ClinePassLoginFlowDto,
@@ -972,6 +973,7 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
         {t.pipeline.replace('{pipeline}', model.pipeline === '' ? '—' : model.pipeline)}
         {model.pinnable ? '' : ` · ${t.notPinnable}`}
         {model.lastProvider !== '' ? ` · ${t.lastServed.replace('{provider}', model.lastProvider).replace('{ms}', String(model.lastMs))}` : ''}
+        {isClinePassAnonymousUpstream(model.lastProvider) ? ` · ⚠ ${t.anonymousChannel}` : ''}
         {model.probedAt > 0 ? ` · ${t.probedAt.replace('{time}', formatDate(model.probedAt))}` : ''}
       </p>
       {channels.length === 0 && <p className="dsha-muted" style={{ fontSize: 12 }}>{t.noChannels}</p>}
@@ -983,6 +985,8 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
               const verdict = verdicts.get(upstream)
               const pinned = draft.upstreams.includes(upstream)
               const excluded = draft.exclude.includes(upstream)
+              const anonymous = isClinePassAnonymousUpstream(upstream)
+              const baseTitle = verdict === undefined ? upstream : `${upstream}: ${verdict.status}${verdict.note === '' ? '' : ` — ${verdict.note}`}`
               return (
                 <span
                   key={upstream}
@@ -990,15 +994,16 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
                   data-pinned={pinned}
                   data-excluded={excluded}
                   data-status={verdict?.status ?? 'unknown'}
+                  data-anonymous={anonymous}
                   role="button"
                   tabIndex={0}
-                  title={verdict === undefined ? upstream : `${upstream}: ${verdict.status}${verdict.note === '' ? '' : ` — ${verdict.note}`}`}
+                  title={anonymous ? `${baseTitle} — ${t.anonymousChannelHint}` : baseTitle}
                   onClick={() => props.onToggleChannel(upstream)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') props.onToggleChannel(upstream)
                   }}
                 >
-                  {upstream}
+                  {anonymous ? `⚠ ${upstream}` : upstream}
                   <button
                     type="button"
                     className="dshcp-exclude"
@@ -1048,6 +1053,15 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
         {draft.upstreams.length === 0 ? t.pinAuto : t.pinPinned.replace('{list}', draft.upstreams.join(' > '))}
         {draft.exclude.length === 0 ? '' : ` · ${t.pinExcluded.replace('{list}', draft.exclude.join(', '))}`}
       </p>
+      {draft.upstreams.some((name) => isClinePassAnonymousUpstream(name)) && (
+        <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', draft.upstreams.find((name) => isClinePassAnonymousUpstream(name)) ?? '')}</p>
+      )}
+      {draft.upstreams.length > 0
+        && !draft.upstreams.some((name) => isClinePassAnonymousUpstream(name))
+        && model.upstreams.length > 0
+        && model.upstreams.every((name) => isClinePassAnonymousUpstream(name)) && (
+        <p className="dshcp-warning">{t.pinLikelyIgnored}</p>
+      )}
       <div className="dshcp-actions">
         <button className="dsha-btn" disabled={busyAny} onClick={props.onProbe}>
           {props.busy === 'probe:' + model.id ? t.probing : t.probe}
@@ -1100,6 +1114,12 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
               ? t.testServed.replace('{provider}', result.test.actual || '—').replace('{ms}', String(result.test.ms))
               : t.testFailed.replace('{detail}', result.test.error)}
           </p>
+          {result.test.anonymous && (
+            <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', result.test.actual || 'openai-compatible-private')}</p>
+          )}
+          {result.test.fingerprint !== '' && (
+            <p className="dshcp-meta">{t.fingerprintOk.replace('{fingerprint}', result.test.fingerprint)}</p>
+          )}
           {result.test.warnings.length > 0 && result.test.warnings.map((warning) => <p className="dshcp-warning" key={warning}>{warning}</p>)}
           {result.test.trace.length > 0 && (
             <>

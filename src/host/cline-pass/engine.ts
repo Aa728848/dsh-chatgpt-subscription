@@ -12,6 +12,7 @@
  * @module dsh-chatgpt-subscription/cline-pass-engine
  */
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import { isClinePassAnonymousUpstream } from '../../shared/cline-pass-contracts.ts'
 import {
   chatCompletion,
   fetchGatewayCatalog,
@@ -258,6 +259,8 @@ export class ClinePassEngine {
     upstreams: string[]
     availableProviders: string[]
     tier0: string[]
+    fingerprint: string
+    anonymous: boolean
   }> {
     const account = await this.resolveAccount()
     const started = Date.now()
@@ -274,7 +277,7 @@ export class ClinePassEngine {
     if (!result.ok || (payload.error !== undefined && payload.choices === undefined) || !Array.isArray(payload.choices) || payload.choices.length === 0) {
       const message = errorText(payload.error) || String(payload.message ?? '') || result.text.slice(0, 400) || (result.ok ? 'gateway returned no completion' : `HTTP ${result.status}`)
       this.store.learn(model, { ok: false, lastError: message, lastMs: ms })
-      return { ok: false, ms, model, error: message, pipeline: '', pinnable: false, canonicalSlug: '', lastProvider: '', upstreams: [], availableProviders: [], tier0: [] }
+      return { ok: false, ms, model, error: message, pipeline: '', pinnable: false, canonicalSlug: '', lastProvider: '', upstreams: [], availableProviders: [], tier0: [], fingerprint: '', anonymous: false }
     }
     const routing = parseRouting(payload)
     const pipeline = routing.pipeline
@@ -326,6 +329,7 @@ export class ClinePassEngine {
       staleAt: combined.length === 0 && upstreams.length > 0 ? Date.now() : 0,
       tier0,
       lastProvider: routing.finalProvider ?? previous.lastProvider ?? null,
+      lastFingerprint: routing.fingerprint ?? previous.lastFingerprint ?? null,
       lastMs: ms,
       probedAt: Date.now(),
       lastError: '',
@@ -342,6 +346,8 @@ export class ClinePassEngine {
       upstreams: meta.upstreams ?? [],
       availableProviders: meta.availableProviders ?? [],
       tier0: meta.tier0 ?? [],
+      fingerprint: meta.lastFingerprint ?? '',
+      anonymous: isClinePassAnonymousUpstream(meta.lastProvider ?? '', meta.canonicalSlug ?? ''),
     }
   }
 
@@ -482,6 +488,8 @@ export class ClinePassEngine {
     adopted: boolean
     adherence: string
     plan: string
+    fingerprint: string
+    anonymous: boolean
     warnings: string[]
   }> {
     const stored = this.pinOf(model)
@@ -528,6 +536,8 @@ export class ClinePassEngine {
         adopted: false,
         adherence: outcome.result?.adherence ?? '',
         plan: routing?.plan ?? '',
+        fingerprint: routing?.fingerprint ?? '',
+        anonymous: isClinePassAnonymousUpstream(routing?.finalProvider ?? '', routing?.canonicalSlug ?? ''),
         warnings,
       }
     }
@@ -562,6 +572,8 @@ export class ClinePassEngine {
       // `Provider set restricted to: <provider>`, which is the confirmation a pin
       // was applied rather than merely not contradicted.
       plan: routing?.plan ?? '',
+      fingerprint: routing?.fingerprint ?? '',
+      anonymous: isClinePassAnonymousUpstream(routing?.finalProvider ?? '', routing?.canonicalSlug ?? ''),
       warnings,
     }
   }

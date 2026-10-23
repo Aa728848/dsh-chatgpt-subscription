@@ -11,6 +11,7 @@
  *
  * @module dsh-chatgpt-subscription/cline-pass-protocol
  */
+import { isClinePassAnonymousUpstream } from '../../shared/cline-pass-contracts.ts'
 import { MAX_UPSTREAMS } from './types.ts'
 
 /** Which pipeline the gateway routed one request through. */
@@ -52,6 +53,17 @@ export interface RoutingFacts {
   finalProviderName: string | null
   fallbacks: string[]
   plan: string
+  /**
+   * First-party DeepSeek fingerprint, when the answer carries one.
+   *
+   * `provider_metadata.deepseek.systemFingerprint` is the only field that
+   * proves the answer came from first-party DeepSeek; the top-level
+   * `system_fingerprint` is minted by the gateway per request and says
+   * nothing about the upstream.
+   */
+  fingerprint: string | null
+  /** Whether the serving channel is the gateway's anonymous contributor route. */
+  anonymous: boolean
 }
 
 /** Written into the model observation store, so probe results are kept apart by pipeline. */
@@ -59,6 +71,10 @@ export interface PinModelMeta {
   upstreams?: string[]
   channels?: Partial<Record<ClinePipeline, string[]>>
   pipeline?: ClinePipeline | null
+  /** The channel the last observed answer actually came from, when known. */
+  lastProvider?: string | null
+  /** The last answer's first-party DeepSeek fingerprint, when it carried one. */
+  lastFingerprint?: string | null
 }
 
 /** One attempt's replayed identity. */
@@ -110,27 +126,103 @@ export function parseRouting(json: unknown): RoutingFacts {
   const choices = Array.isArray(payload.choices) ? payload.choices : []
   const first = isRecord(choices[0]) ? choices[0] : {}
   const message = isRecord(first.message) ? first.message : {}
-  const metadata = isRecord(message.provider_metadata)
-    ? message.provider_metadata
-    : isRecord(payload.provider_metadata) ? payload.provider_metadata : {}
+  // A non-streaming answer carries the routing block on `message`; a streaming
+  // frame carries it on `delta` (the gateway appends it to a terminal frame,
+  // after the content). Reading only `message` leaves every streamed request
+  // with no serving-channel reading at all.
+  const delta = isRecord(first.delta) ? first.delta : {}
+  const metadata = [message, delta, payload].map(providerMetadataOf).find((entry) => entry !== null) ?? {}
   const gateway = isRecord(metadata.gateway) ? metadata.gateway : {}
-  const routing = isRecord(gateway.routing) ? gateway.routing : {}
   const direct = typeof payload.provider === 'string' ? payload.provider : null
+  let routing: Record<string, unknown> = isRecord(gateway.routing) ? gateway.routing : {}
+  if (typeof routing.finalProvider !== 'string') {
+    // The gateway has moved this block between nestings before; hunt for it
+    // rather than grow one case per observed shape. Wire JSON is acyclic, so
+    // the depth cap is the only guard the walk needs.
+    routing = huntRouting(payload) ?? routing
+  }
+  const finalProvider = typeof routing.finalProvider === 'string'
+    ? routing.finalProvider
+    : (direct === null ? null : slugify(direct))
+  const canonicalSlug = typeof routing.canonicalSlug === 'string'
+    ? routing.canonicalSlug
+    : (typeof payload.model === 'string' && payload.model.includes('/') ? payload.model : null)
   return {
-    content: typeof message.content === 'string' ? message.content : null,
-    toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls : [],
+    content: typeof message.content === 'string' ? message.content : (typeof delta.content === 'string' ? delta.content : null),
+    toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls : (Array.isArray(delta.tool_calls) ? delta.tool_calls : []),
     usage: payload.usage ?? null,
     pipeline: typeof routing.finalProvider === 'string' ? 'planner' : (direct === null ? null : 'direct'),
-    canonicalSlug: typeof routing.canonicalSlug === 'string'
-      ? routing.canonicalSlug
-      : (typeof payload.model === 'string' && payload.model.includes('/') ? payload.model : null),
-    finalProvider: typeof routing.finalProvider === 'string'
-      ? routing.finalProvider
-      : (direct === null ? null : slugify(direct)),
+    canonicalSlug,
+    finalProvider,
     finalProviderName: typeof routing.finalProvider === 'string' ? routing.finalProvider : direct,
     fallbacks: Array.isArray(routing.fallbacksAvailable) ? routing.fallbacksAvailable.map(String) : [],
     plan: typeof routing.planningReasoning === 'string' ? routing.planningReasoning : '',
+    fingerprint: huntFingerprint(payload),
+    anonymous: isClinePassAnonymousUpstream(finalProvider ?? '', canonicalSlug ?? ''),
   }
+}
+
+/** `provider_metadata` of one node, when present. */
+function providerMetadataOf(node: Record<string, unknown>): Record<string, unknown> | null {
+  return isRecord(node.provider_metadata) ? node.provider_metadata : null
+}
+
+/**
+ * Depth-bounded hunt for the gateway's routing block anywhere in one payload.
+ *
+ * The fast paths (`message`/`delta`/`payload.provider_metadata.gateway`) are
+ * checked by the caller first; this walk covers the nestings between the shapes
+ * seen so far, so a frame the fast path does not know still yields its routing.
+ */
+function huntRouting(node: unknown, depth = 0): Record<string, unknown> | null {
+  if (depth > 8 || node === null || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const entry of node) {
+      const found = huntRouting(entry, depth + 1)
+      if (found !== null) return found
+    }
+    return null
+  }
+  const record = node as Record<string, unknown>
+  const gateway = isRecord(record.gateway) ? record.gateway : null
+  const routing = gateway !== null && isRecord(gateway.routing)
+    ? gateway.routing
+    : (isRecord(record.routing) ? record.routing : null)
+  if (routing !== null && typeof routing.finalProvider === 'string') return routing
+  for (const value of Object.values(record)) {
+    const found = huntRouting(value, depth + 1)
+    if (found !== null) return found
+  }
+  return null
+}
+
+/**
+ * Read the first-party DeepSeek fingerprint wherever `provider_metadata`
+ * carries it. Absent means the answer did not prove a first-party upstream —
+ * the anonymous contributor route carries no `deepseek` namespace at all.
+ */
+function huntFingerprint(node: unknown, depth = 0): string | null {
+  if (depth > 8 || node === null || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const entry of node) {
+      const found = huntFingerprint(entry, depth + 1)
+      if (found !== null) return found
+    }
+    return null
+  }
+  const record = node as Record<string, unknown>
+  const metadata = providerMetadataOf(record)
+  if (metadata !== null) {
+    const deepseek = isRecord(metadata.deepseek) ? metadata.deepseek : null
+    if (deepseek !== null && typeof deepseek.systemFingerprint === 'string' && deepseek.systemFingerprint !== '') {
+      return deepseek.systemFingerprint
+    }
+  }
+  for (const value of Object.values(record)) {
+    const found = huntFingerprint(value, depth + 1)
+    if (found !== null) return found
+  }
+  return null
 }
 
 /** Lowercase a display name into an upstream slug. */
@@ -315,18 +407,29 @@ export function isAdherenceOk(adherence: PinAdherence): boolean {
  */
 export function pinWarnings(attempt: Pick<PinAttempt, 'upstream'> & { excludeList?: string[] }, meta: PinModelMeta | undefined): string[] {
   const upstream = attempt.upstream ?? null
+  const warnings: string[] = []
+  if (upstream !== null && upstream !== undefined && String(upstream).length > 0 && isClinePassAnonymousUpstream(upstream)) {
+    warnings.push(`anonymousUpstream: ${upstream} is the gateway's anonymous contributor route — answers from it may be used for training and carry no zero-data-retention guarantee; pin it only when that is acceptable`)
+  }
+  const known = Array.isArray(meta?.upstreams) ? meta.upstreams : []
+  if (
+    upstream !== null && upstream !== undefined && String(upstream).length > 0
+    && !isClinePassAnonymousUpstream(upstream)
+    && known.length > 0 && known.every((name) => isClinePassAnonymousUpstream(name))
+  ) {
+    warnings.push(`pinLikelyIgnored: every channel discovered for this model is the anonymous contributor route (${known.join(', ')}), which silently drops a pin and answers anyway — the request will likely be served by it regardless of ${upstream}`)
+  }
   const excluded = (attempt.excludeList ?? []).filter((name) => normalizeSlug(name) !== normalizeSlug(upstream ?? ''))
   const excludedIds = new Set(excluded.map(normalizeSlug))
-  if (excluded.length === 0) return []
-  const known = Array.isArray(meta?.upstreams) ? meta.upstreams : []
+  if (excluded.length === 0) return warnings
   if (known.length === 0) {
-    return [`excludeUnresolved: this model has no channel list yet, so ${excluded.join(', ')} could not be compiled into an allow-list — run cline_pass_probe for it`]
+    return [...warnings, `excludeUnresolved: this model has no channel list yet, so ${excluded.join(', ')} could not be compiled into an allow-list — run cline_pass_probe for it`]
   }
   const remaining = known.filter((name) => !excludedIds.has(normalizeSlug(name)))
   if (remaining.length === 0 && upstream === null) {
-    return [`PIN_UNRESOLVED: every known channel is excluded (${known.join(', ')}), so the request falls back to the gateway's own routing`]
+    return [...warnings, `PIN_UNRESOLVED: every known channel is excluded (${known.join(', ')}), so the request falls back to the gateway's own routing`]
   }
-  return []
+  return warnings
 }
 
 /**
