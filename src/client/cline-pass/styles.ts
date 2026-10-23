@@ -38,6 +38,7 @@ export function installClinePassStyles(): void {
 .dshcp-channel[data-status=ok]{box-shadow:inset 3px 0 0 var(--dsw-alias-label-success,#2e8b57)}
 .dshcp-channel[data-status=limited]{box-shadow:inset 3px 0 0 var(--dsw-alias-label-warning,#d9913b)}
 .dshcp-channel[data-status=bad],.dshcp-channel[data-status=auth]{box-shadow:inset 3px 0 0 var(--dsw-alias-label-danger,#d94b4b)}
+.dshcp-channel[data-anonymous=true]{border-color:color-mix(in srgb,var(--dsw-alias-label-warning,#d9913b) 60%,transparent);color:var(--dsw-alias-label-warning,#d9913b)}
 .dshcp-exclude{border:0;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;font-size:12px;line-height:1;padding:0 2px}
 .dshcp-exclude:hover{color:var(--dsw-alias-label-danger,#d94b4b)}
 .dshcp-pin-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}

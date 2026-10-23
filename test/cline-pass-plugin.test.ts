@@ -114,8 +114,8 @@ describe('Cline Pass line mount', () => {
       enabled: true,
       accountCount: 0,
       authenticated: false,
-      totalModelCount: 15,
+      totalModelCount: 16,
     })
-    expect(summary.enabledModelCount).toBe(15)
+    expect(summary.enabledModelCount).toBe(16)
   })
 })

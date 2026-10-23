@@ -181,6 +181,20 @@ describe('ClinePassSection', () => {
     })
   })
 
+  it('marks the anonymous contributor route on the channel chips and warns on pin', async () => {
+    const model = STATUS.models[0]!
+    const el = await render({
+      models: [{ ...model, upstreams: ['openai-compatible-private', 'deepseek'], pinned: ['openai-compatible-private'] }],
+    })
+    const chips = [...el.querySelectorAll<HTMLElement>('.dshcp-channel')]
+    expect(chips[0]?.getAttribute('data-anonymous')).toBe('true')
+    expect(chips[0]?.textContent).toContain('⚠')
+    expect(chips[0]?.getAttribute('title')).toContain(zh.anonymousChannelHint)
+    expect(chips[1]?.getAttribute('data-anonymous')).toBe('false')
+    // The stored pin loads into the draft, so the no-ZDR warning shows at once.
+    expect(el.textContent).toContain('可能被用于训练')
+  })
+
   it('shows each account its own quota window inside the shared account card', async () => {
     const el = await render()
     const row = el.querySelector('.dsha-account-quota-row')

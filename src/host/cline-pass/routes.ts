@@ -597,6 +597,8 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             upstreams: result.upstreams,
             availableProviders: result.availableProviders,
             tier0: result.tier0,
+            fingerprint: result.fingerprint,
+            anonymous: result.anonymous,
           }
           return sendJson(response, 200, { ok: true, value: { result: value, status: await status() } })
         }
@@ -650,6 +652,8 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             adopted: result.adopted,
             adherence: result.adherence,
             plan: firstLine(result.plan, 300),
+            fingerprint: result.fingerprint,
+            anonymous: result.anonymous,
             warnings: result.warnings,
             trace: result.trace,
           }
@@ -804,6 +808,8 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             error: entry.error,
             attempts: entry.attempts,
             adherence: entry.adherence,
+            fingerprint: entry.fingerprint,
+            anonymous: entry.anonymous,
             warnings: entry.warnings,
           }))
           return sendJson(response, 200, { ok: true, value: { total: store.historySize(), entries } })

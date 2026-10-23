@@ -50,6 +50,8 @@ export interface ClinePassModelObservation {
   availableProviders?: string[]
   tier0?: string[]
   lastProvider?: string | null
+  /** The last answer's first-party DeepSeek fingerprint, when it carried one. */
+  lastFingerprint?: string | null
   lastMs?: number
   probedAt?: number
   validatedAt?: number
@@ -159,6 +161,8 @@ export function createClinePassStore({ historyLimit = DEFAULT_HISTORY_LIMIT }: {
         error: entry.error ?? '',
         attempts: entry.attempts ?? [],
         adherence: entry.adherence ?? '',
+        fingerprint: entry.fingerprint ?? '',
+        anonymous: entry.anonymous === true,
         warnings: entry.warnings ?? [],
         ...(entry.code === undefined ? {} : { code: entry.code }),
       }
