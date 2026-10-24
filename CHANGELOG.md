@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.39.2 - 2026-10-24
+- **[codex] 账号卡登录行不再换行：三个入口改用短标签，完整语义留在 aria-label，窄宽度下省略而不是折行**
+  - **现象**：ChatGPT 订阅页账号卡右上角那一行有三个按钮（添加账号 / 用设备代码添加账号 / 导入本机 Codex CLI 登录），在正常设置面板宽度下第三个被挤到下一行，右边还被裁掉一截。
+  - **根因**：`.dsha-btn` 自带 `white-space:nowrap`，而 `.dsha-account-add-actions` 是 `flex-wrap:wrap`。两个长标签（`用设备代码添加账号` 9 字、`导入本机 Codex CLI 登录` 14 字符）加起来放不进那一行的剩余宽度，于是容器按 `wrap` 换行——换行不是兜底，它把这个行读成了两块内容。
+  - **改法（短标签 + 完整语义）**：`deviceCodeLogin` 由 `用设备代码添加账号` 改为 `设备代码登录`，`localCodexLoginImport` 由 `导入本机 Codex CLI 登录` 改为 `导入本机登录`；新增 `deviceCodeLoginDetail` 键专门存完整句子（`用设备代码添加账号`），接到设备的 `aria-label` 与 `title` 上。中文、英文（`Device-code sign-in` / `Import local sign-in`）、俄文（`Вход по коду устройства` / `Импорт локального входа`）三份语言包同步。可见文字只说机制，完整含义仍在读屏器与 tooltip 里，没有丢信息。
+  - **改法（窄宽度兜底）**：`src/client/styles.ts` 为本页的 `.dsha-account-add-actions` 增加两条声明——`flex-wrap:nowrap` + `min-width:0`，子按钮 `flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis`。这样即使将来文案再变长，也是三个按钮等分宽度、超长省略，而不是某个按钮整块掉到下一行。选择器用 `:where()` 裹住以保持低特异性，且只作用于 `.dsh-codex-page` 之内——Claude / GLM / Cline Pass / OpenDesign 等共用同一个类名的线路不受影响。
+  - **测试**：`test/codex-local-signin-ui.test.tsx` 由 7 例增至 8 例——新增「完整句子在 accessible name 里而不是可见标签里」（钉住两个按钮的 `aria-label` 与 `title` 都等于 `deviceCodeLoginDetail` / `localCodexLoginImport`），并在原有行内用例补一条长度上限（两个短标签 ≤ 8 字），把「以后改词又变长、再次破版」变成会红的断言。设备码用例里对 `aria-label` 的断言随之更新为 `deviceCodeLoginDetail`。
+  - **验证**：`npm run typecheck` 三工程 0 错误；全量 `LANG=C.UTF-8 npm test` **287 文件通过 / 2 skipped，4757 passed / 8 skipped / 0 failed**（比上一版多 1 例即本轮新增）；`npm run build` 后核对产物：`设备代码登录` 进入 `lib/client.js`，`用设备代码添加账号` 仅作为 `deviceCodeLoginDetail` 的句子保留。
+  - **为什么上一版没生效**：`lib/` 是 `prepack` 里重建的构建产物，`src/` 改完不构建则 DSH 加载的还是旧 bundle。本轮已重新构建；npm 包由 `prepack` 触发重建，不依赖本地 `lib/` 状态。
+
 ## 0.39.1 - 2026-10-24
 - **[dispatch] 0.39.0 自审修补：R2 补齐降级路径，plan-mode 访谈上限与 R0 对齐，全插件通用的空清单提示去掉设置推广语**
   - **R2 补“标注缺失”这一读法（`presets/dispatch/agent.cordis.yml` / `src/host/agent-preset.ts`）**：0.39.0 让 R2 从 `list_subagent_models` 的输出里**读**路由姿态，但那段标注是 `tools/post-execute` 写的，而 `src/index.ts:508-520` 里守卫有三条不入场的路径——`subagentModelAuthorization: false`、宿主没有 `sessions` 服务、`tools.guard` 不是函数。三种情况下输出里既没有授权路由块、也没有「No allowlist is in force」，而 0.39.0 的 R2 只写了三态、没写“什么都没读到”怎么办。现在补一段：行为上按 `[State: Unlisted]` 处理（照常派发、不要把缺参数指望守卫来拦），但不得声称任一姿态、只能说「未确认」，且不得据此把任何路由报成「已授权」。这是“把状态塞进工具结果”和“断言工具一定在场”之间的差别，前一版的措辞把后者当成了前提。
