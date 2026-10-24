@@ -195,15 +195,16 @@ export const zh = {
   hubUpdateManualOnly: '有新版本 {version}；当前安装方式无法自动更新',
   hubUpdateCheckFailed: '检测失败：无法连接 npm 源，请检查网络或代理',
   hubUpdateCommandLabel: '手动更新命令',
-  // The import button that sits beside 登录 in the account pool's login row.
-  // Two labels and nothing else: the button says what it does, the row it sits in
-  // says where it goes, and the Claude section's own import button is worded the
-  // same way because the two are the same decision.
-  localCodexLoginImport: '导入本机 Codex CLI 登录',
+  // The row carries three entries side by side, so these two labels are kept
+  // short enough to fit: the visible text names the mechanism, and the full
+  // sentence lives in the aria-label (see CodexSubscriptionSection). A row that
+  // wraps stops reading as a row of alternatives.
+  localCodexLoginImport: '导入本机登录',
   localCodexLoginImporting: '导入中…',
   // The device-code sign-in, for a host that cannot open a localhost callback.
-  deviceCodeLogin: '用设备代码添加账号',
-  deviceCodeLoginStarting: '正在获取代码…',
+  deviceCodeLogin: '设备代码登录',
+  deviceCodeLoginStarting: '获取代码…',
+  deviceCodeLoginDetail: '用设备代码添加账号',
   deviceCodeHint: '在任意设备上打开下面的链接并输入这个代码，本页会自动完成登录：这条路不需要浏览器回调到本机端口。',
   deviceCodeLabel: '设备代码',
   deviceCodeOpen: '打开确认页面',
@@ -412,12 +413,13 @@ export const en: Record<keyof typeof zh, string> = {
   // Two labels and nothing else: the button says what it does, the row it sits in
   // says where it goes, and the Claude section's own import button is worded the
   // same way because the two are the same decision.
-  localCodexLoginImport: 'Import the local Codex CLI sign-in',
+  localCodexLoginImport: 'Import local sign-in',
   localCodexLoginImporting: 'Importing…',
   // The same sign-in as the button above, obtained without a localhost
   // callback: the only path a server or a headless host can finish.
-  deviceCodeLogin: 'Add account with device code',
+  deviceCodeLogin: 'Device-code sign-in',
   deviceCodeLoginStarting: 'Requesting code…',
+  deviceCodeLoginDetail: 'Add account with device code',
   deviceCodeHint: 'Open the link below on any device and enter this code. This page finishes the sign-in by itself: nothing has to call back to a local port.',
   deviceCodeLabel: 'Device code',
   deviceCodeOpen: 'Open the confirmation page',

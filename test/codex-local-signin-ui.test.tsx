@@ -141,6 +141,23 @@ describe('the local sign-in import button, beside the login button', () => {
     expect(buttons[0]!.textContent).toBe(zh.addAccount)
     expect(buttons[1]!.textContent).toBe(zh.deviceCodeLogin)
     expect(buttons[2]!.textContent).toBe(zh.localCodexLoginImport)
+    // The row has to fit on one line. The full sentence lives in aria-label, so
+    // the visible text is the short form and must stay short: these bounds are
+    // what keeps a future reword from silently reintroducing the wrap.
+    for (const label of [zh.deviceCodeLogin, zh.localCodexLoginImport]) {
+      expect(label.length).toBeLessThanOrEqual(8)
+    }
+  })
+
+  it('keeps the full sentence in the accessible name, not in the visible label', async () => {
+    await mount()
+    const [, device, importBtn] = loginRowButtons()
+    // The short visible text is not a loss of meaning: the complete sentence is
+    // still announced and still available as a tooltip.
+    expect(device!.getAttribute('aria-label')).toBe(zh.deviceCodeLoginDetail)
+    expect(device!.getAttribute('title')).toBe(zh.deviceCodeLoginDetail)
+    expect(importBtn!.getAttribute('aria-label')).toBe(zh.localCodexLoginImport)
+    expect(importBtn!.getAttribute('title')).toBe(zh.localCodexLoginImport)
   })
 
   it('keeps the login button primary and the import button secondary', async () => {
@@ -160,7 +177,7 @@ describe('the local sign-in import button, beside the login button', () => {
 
   it('opens the device panel from its own route, not the browser one', async () => {
     const calls = await mount()
-    expect(deviceButton().getAttribute('aria-label')).toBe(zh.deviceCodeLogin)
+    expect(deviceButton().getAttribute('aria-label')).toBe(zh.deviceCodeLoginDetail)
 
     await act(async () => deviceButton().click())
     await act(async () => Promise.resolve())

@@ -3,6 +3,15 @@ import { installPluginStyle } from './common/plugin-style.ts'
 const CSS = `
 .dsh-codex-page{box-sizing:border-box;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:20px;max-width:780px;min-width:0;padding:2px 0 30px}
 .dsh-codex-page *{box-sizing:border-box}
+/* The pool card's login row holds three entries. They must stay on ONE line: a
+   wrapped row stops reading as a set of alternatives, and the third entry is the
+   one that gets pushed out. .dsha-btn carries white-space:nowrap, so shrinking
+   the row means letting the buttons shrink and ellipsizing the label inside —
+   the accessible name stays whole in aria-label/title, which is where the full
+   sentence lives. flex-basis 0 keeps the three of them sharing the width evenly
+   instead of the longest one claiming it. */
+.dsh-codex-page :where(.dsha-account-add-actions){flex-wrap:nowrap;min-width:0}
+.dsh-codex-page :where(.dsha-account-add-actions) > .dsha-btn{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dsh-codex-title{font-size:15px;font-weight:650;line-height:1.4;margin:0 0 5px}
 .dsh-codex-intro,.dsh-codex-muted{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.55;margin:0}
 .dsh-codex-group{border-top:0.5px solid var(--dsw-alias-border-l2);min-width:0}

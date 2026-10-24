@@ -603,10 +603,15 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
                 starts are mutually exclusive on the host, and a button that
                 stays clickable while its request is in flight is a second
                 request nobody meant to send. */}
+            {/* Three entries share one row, so each one's visible text is the
+                short form and its aria-label keeps the full sentence: the row
+                has to fit without wrapping on a normal settings pane, and a row
+                that wraps stops reading as a set of alternatives. */}
             <button
               className="dsha-btn"
               disabled={busy !== null}
-              aria-label={t('deviceCodeLogin')}
+              aria-label={t('deviceCodeLoginDetail')}
+              title={t('deviceCodeLoginDetail')}
               onClick={() => void startDeviceLogin()}
             >
               {busy === 'device-login' ? t('deviceCodeLoginStarting') : t('deviceCodeLogin')}
@@ -615,6 +620,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
               className="dsha-btn"
               disabled={busy !== null}
               aria-label={t('localCodexLoginImport')}
+              title={t('localCodexLoginImport')}
               onClick={() => void importLocalSignIn()}
             >
               {busy === 'adopt' ? t('localCodexLoginImporting') : t('localCodexLoginImport')}

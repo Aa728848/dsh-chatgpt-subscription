@@ -197,12 +197,13 @@ export const dictionary: Record<LocaleKey, string> = {
   hubUpdateCheckFailed: 'Проверка не удалась: реестр npm недоступен, проверьте сеть или прокси',
   hubUpdateCommandLabel: 'Команда для ручного обновления',
   // The import button in the account pool's login row.
-  localCodexLoginImport: 'Импортировать вход локального Codex CLI',
+  localCodexLoginImport: 'Импорт локального входа',
   localCodexLoginImporting: 'Импорт…',
   // Вход по коду устройства: тот же вход, но без обратного вызова на localhost,
   // поэтому он работает на сервере и на headless-хосте.
-  deviceCodeLogin: 'Добавить аккаунт по коду устройства',
+  deviceCodeLogin: 'Вход по коду устройства',
   deviceCodeLoginStarting: 'Получаем код…',
+  deviceCodeLoginDetail: 'Добавить аккаунт по коду устройства',
   deviceCodeHint: 'Открой ссылку ниже на любом устройстве и введи этот код. Эта страница завершит вход сама: обращаться к локальному порту не нужно.',
   deviceCodeLabel: 'Код устройства',
   deviceCodeOpen: 'Открыть страницу подтверждения',
