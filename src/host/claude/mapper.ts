@@ -515,23 +515,20 @@ export interface ClaudeThinkingFields {
  * This is what decides whether the response ceiling is inflated by the level's
  * budget, and getting it wrong in the generous direction is not harmless: a
  * non-thinking model whose ceiling was raised by a budget it never had would
- * ask the server for tokens it cannot produce. mid-convo thinks whatever the
- * caller asked for; the other forms think unless the disable request is going
- * to be sent and the model allows one.
+ * ask the server for tokens it cannot produce. Every form thinks unless the
+ * caller asked for thinking off on a model that accepts a disabled request.
  */
 export function claudeRequestThinks(model: string, effort: string | undefined | null): boolean {
   const mode = claudeThinkingMode(model)
   if (mode === 'none') return false
-  if (mode === 'mid-convo') return true
   return !(thinkingRequestedOff(effort) && claudeModelCanDisableThinking(model))
 }
 /**
  * Dispatch the four thinking cases for one model and effort.
  *
- * The guard order is the catalog's and is load-bearing: mid-convo is checked
- * first and unconditionally, so a caller asking for thinking off on a managed
- * effort model still gets the adaptive form with its block_binding. See the
- * module doc for what each form is and why.
+ * The disable request is checked first. A mid-convo model that cannot disable
+ * still gets the adaptive form with its block_binding; one that can disable
+ * takes that form without an effort override. See the module doc for the cases.
  *
  * @param model - exact model id, resolved through the frozen catalog.
  * @param effort - the caller's raw effort, passed through as-is.
@@ -553,10 +550,14 @@ export function claudeThinking(
   const namedEffort = effort !== undefined && effort !== '' && !thinkingRequestedOff(effort) ? effort : undefined
   const off = thinkingRequestedOff(effort)
 
-  // Case 1, and the guard order matters: mid-convo is unconditional. A caller
-  // asking for thinking off still gets the adaptive form with its block_binding,
-  // because suppressing the block_binding is exactly how the persistent 400 the
-  // reference documents comes back.
+  // A caller who asked for thinking off gets the disable request only where the
+  // model allows it. On a model that forbids it the model's own form is used
+  // instead: 'off: null' means the model always thinks.
+  if (off && claudeModelCanDisableThinking(model)) return { thinking: { type: 'disabled' } }
+
+  // A mid-convo model that cannot disable gets the adaptive form with its
+  // block_binding, because suppressing that binding is how the persistent 400
+  // the reference documents comes back.
   if (mode === 'mid-convo') {
     return {
       thinking: {
@@ -569,12 +570,6 @@ export function claudeThinking(
       outputConfig: { effort: namedEffort ?? 'high' },
     }
   }
-
-  // A caller who asked for thinking off gets the disable request only where the
-  // model allows it (cases 2 and 3 below would otherwise always outrank it). On
-  // a model that forbids it the model's own form is used instead: 'off: null'
-  // means the model always thinks, and the honest request is the normal one.
-  if (off && claudeModelCanDisableThinking(model)) return { thinking: { type: 'disabled' } }
 
   if (mode === 'adaptive') {
     // A prefix-check model gets the binding WITHOUT mid-convo's forced effort:

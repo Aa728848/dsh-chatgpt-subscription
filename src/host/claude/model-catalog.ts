@@ -532,7 +532,8 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     supportsTemperature: false,
     thinkingMode: 'mid-convo',
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    canDisableThinking: false,
+    // Accepted at high or below; the disabled path leaves effort unset.
+    canDisableThinking: true,
   },
   // TRANSCRIBED row that keeps ONE field from the vendor's documentation. The
   // reference snapshot (pi-ai >= 0.87.1) DOES carry this model, and the
@@ -588,10 +589,11 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     // lets it stay 'adaptive' (no forced effort) and still send block_binding.
     bindsThinkingToPrefix: true,
   },
+  // Sonnet 4.5 has a 200k standard window; this adapter does not request the 1M beta.
   {
     id: 'claude-sonnet-4-5',
     name: 'Claude Sonnet 4.5 (latest)',
-    contextWindow: 1000000,
+    contextWindow: 200000,
     maxTokens: 64000,
     supportsImage: true,
     supportsTemperature: true,
@@ -602,7 +604,7 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
   {
     id: 'claude-sonnet-4-5-20250929',
     name: 'Claude Sonnet 4.5',
-    contextWindow: 1000000,
+    contextWindow: 200000,
     maxTokens: 64000,
     supportsImage: true,
     supportsTemperature: true,

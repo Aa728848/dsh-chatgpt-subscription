@@ -188,7 +188,7 @@ describe('the dispatch definition', () => {
   })
 
   it('strips persona.config.suffix on >=0.2.1 where @deepseek-ai/dsh-working-directory replaces {{cwd}}', async () => {
-    expect(resolveDispatchPreset(() => false)).toBe(DISPATCH_PRESET)
+    expect(resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-subagent-control/list-agents')).toBe(DISPATCH_PRESET)
     const resolved021 = resolveDispatchPreset(specifier => specifier === WORKING_DIRECTORY_PACKAGE)
     const personaRow = resolved021.plugins.find(row => row.id === 'persona')
     expect(personaRow?.config).toBeDefined()
@@ -215,6 +215,18 @@ describe('the dispatch definition', () => {
     } finally {
       await ctx.fiber.dispose()
     }
+  })
+
+  it('drops the standalone list-agents row only when its export is absent', () => {
+    const legacyEntry = '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+    const legacy = resolveDispatchPreset(specifier => specifier === WORKING_DIRECTORY_PACKAGE || specifier === legacyEntry)
+    expect(allRows(legacy.plugins).map(row => row.id)).toContain('tool-subagent-list-agents')
+
+    const current = resolveDispatchPreset(specifier => specifier === WORKING_DIRECTORY_PACKAGE)
+    const ids = allRows(current.plugins).map(row => row.id)
+    expect(ids).not.toContain('tool-subagent-list-agents')
+    expect(ids).toContain('tool-subagent-control')
+    expect(ids).toContain('tool-subagent')
   })
 
   it('mounts the harness 0.1.7 spelling of the renamed workflow package', () => {
@@ -253,7 +265,8 @@ describe('declaring the preset to the running harness', () => {
     const pre021 = fakeRegistry()
     const pre021Host = fakeHost({ agentPresets: pre021.registry })
 
-    expect(installDispatchPreset(pre021Host.host, specifier => specifier === PRESET_REGISTRY_PACKAGE)).toBe('registered')
+    expect(installDispatchPreset(pre021Host.host, specifier => specifier === PRESET_REGISTRY_PACKAGE
+      || specifier === '@deepseek-ai/dsh-tool-subagent-control/list-agents')).toBe('registered')
     expect(pre021Host.effects).toHaveLength(1)
     expect(pre021.register).not.toHaveBeenCalled()
 

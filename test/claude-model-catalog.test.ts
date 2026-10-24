@@ -142,13 +142,11 @@ const REFERENCE_ENTRY_COUNT = 17
  * `SNAPSHOT_AGREES_BUT_CURATED_WINS` below. Keeping them on this list is what
  * makes those exceptions visible and lets a stale declaration fail loudly.
  *
- * `claude-haiku-5-5` (released 2026-10-07) is also the row whose documented
- * `canDisableThinking` is true while the snapshot sets `off: null`: the vendor
+ * `claude-haiku-5-5` also documents `canDisableThinking` as true: the vendor
  * accepts `thinking: { type: 'disabled' }` at low/medium/high effort (including
- * the server default `medium`) and refuses it only at xhigh/max. That is asserted
- * below rather than asserted away, because a reader who takes "400 above xhigh"
- * to mean "cannot be disabled" would take the off switch away from the levels
- * that accept it.
+ * the server default `medium`) and refuses it only at xhigh/max. pi-ai 1.1.0
+ * disagreed with that row through `off: null`; pi-ai 1.3.0 omits `off`, so the
+ * snapshot now agrees and no exception remains for this field.
  *
  * The deliberate exceptions are explained where they are declared, below.
  */
@@ -176,11 +174,10 @@ const LOCALLY_CURATED_MODEL_IDS: readonly string[] = [
  *   and think — and bill — harder than they asked, which is the precise failure
  *   the curated 'adaptive' rows (with `bindsThinkingToPrefix: true`) exist to
  *   prevent.
- * - `claude-haiku-5-5` - `canDisableThinking`. Newer pi-ai sets
- *   `thinkingLevelMap.off: null`, which `referenceCanDisableThinking` reads as
- *   `false`, whereas the vendor documents `thinking: { type: 'disabled' }` as
- *   accepted at low/medium/high (including the server default `medium` when no
- *   effort is named).
+ *
+ * `claude-haiku-5-5` no longer needs a `canDisableThinking` exception: pi-ai
+ * 1.3.0 removed the old `off: null` marker, so `referenceCanDisableThinking`
+ * returns true just like the curated row.
  *
  * Before removing an entry here, re-check the vendor's extended-thinking effort
  * page for the model's documented DEFAULT effort (`high` is the only value for
@@ -189,7 +186,6 @@ const LOCALLY_CURATED_MODEL_IDS: readonly string[] = [
 const SNAPSHOT_AGREES_BUT_CURATED_WINS: readonly { id: string; field: string }[] = [
   { id: 'claude-opus-5-5', field: 'thinkingMode' },
   { id: 'claude-haiku-5-5', field: 'thinkingMode' },
-  { id: 'claude-haiku-5-5', field: 'canDisableThinking' },
 ]
 /** Whether a curated row deliberately keeps `field` against a snapshot that carries it. */
 function hasCuratedField(id: string, field: string): boolean {

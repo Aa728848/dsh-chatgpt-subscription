@@ -144,18 +144,28 @@ export function candidatePackageRoots(entryScript: string | undefined = process.
 }
 
 /**
- * Whether a package is installed in any candidate node_modules tree.
- * Matches DSH agent-presets' own discovery check.
+ * Whether a package or exported subpath is installed in any candidate node_modules tree.
+ * A subpath needs its own exact `exports` key; the package root alone is not enough.
  */
 export function packageInstalled(
   specifier: string,
   roots: readonly string[] = candidatePackageRoots(),
 ): boolean {
   const pkg = specifier.split('/').slice(0, specifier.startsWith('@') ? 2 : 1).join('/')
+  const subpath = specifier.slice(pkg.length)
   for (const root of roots) {
     let dir = root
     for (;;) {
-      if (existsSync(join(dir, 'node_modules', pkg, 'package.json'))) return true
+      const manifestPath = join(dir, 'node_modules', pkg, 'package.json')
+      if (existsSync(manifestPath)) {
+        if (subpath === '') return true
+        try {
+          const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { exports?: Record<string, unknown> }
+          if (manifest.exports !== undefined && Object.prototype.hasOwnProperty.call(manifest.exports, `.${subpath}`)) return true
+        } catch {
+          continue
+        }
+      }
       const parent = dirname(dir)
       if (parent === dir) break
       dir = parent

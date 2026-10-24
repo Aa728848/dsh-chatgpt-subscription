@@ -41,7 +41,7 @@ keeps generations comparable. Each seam has one file:
 |---|---|---|
 | Conversation model | `src/host/common/llm-compat.ts` | The harness request is normalized **once** at the adapter boundary (`responses-client.stream`, each provider's `offloadOldestRequest*` call). Mappers, tests, and fixtures read the canonical vocabulary — the pre-0.1.7 spelling — so mapper logic never forks per generation. |
 | Settings | `src/host/common/settings-compat.ts`, `file-preferences.ts`, `legacy-preferences.ts`, `src/host/preferences.ts` | `settings.register` when the harness still offers it (≤0.1.6); otherwise a plugin-owned JSON document under `$DSH_HOME/storages`, seeded once from the section earlier releases wrote into the harness settings document. Provider stores hydrate from their own model files. |
-| Agent presets | `src/host/agent-preset.ts`, `src/host/preset-sync.ts` | Runtime registration when the harness ships the declaration-row package (`@deepseek-ai/dsh-agent-preset`) and an `agentPresets` service; the `$DSH_HOME/.agent-presets` copy below that. On ≥0.2.1 (when `@deepseek-ai/dsh-working-directory` resolves), `resolveDispatchPreset` strips `persona.config.suffix` (`Your working directory is {{cwd}}.`) because the `cwd` prompt variable was replaced by the `working-directory` section. **Never** a static declaration row in `cordis.patch.yml` (see traps). |
+| Agent presets | `src/host/agent-preset.ts`, `src/host/preset-sync.ts` | Runtime registration when the harness ships the declaration-row package (`@deepseek-ai/dsh-agent-preset`) and an `agentPresets` service; the `$DSH_HOME/.agent-presets` copy below that. On ≥0.2.1 (when `@deepseek-ai/dsh-working-directory` resolves), `resolveDispatchPreset` strips `persona.config.suffix` (`Your working directory is {{cwd}}.`) because the `cwd` prompt variable was replaced by the `working-directory` section. When `@deepseek-ai/dsh-tool-subagent-control/list-agents` no longer resolves, `resolveDispatchPreset` omits that standalone row because the main control entry registers the tool; older exports keep it. **Never** a static declaration row in `cordis.patch.yml` (see traps). |
 | Web search provider | `src/host/search-provider-switcher.ts` | Unwraps `fiber.config.searchProvider` whether it is a plain string (≤0.2.1-rc.1) or a Cordis `Volatile<string>` wrapper (≥0.2.1-rc.2), preventing unnecessary forced fiber reloads on hot updates. |
 | Client services | `src/client/index.tsx` (`export const inject`), `package.json` `dsh.client.inject` | Cordis resolves a service method's own `this.ctx` through a shadow that points back at the **service's** fiber, so a caller declares only what *it* reads — not what the callee reads. Check `packages/client/*/src/client/index.ts` in the harness for the current first-party spelling. |
 | Provenance and names | `src/host/codex-images.ts`, `src/host/kimi-code/video-tool.ts`, `src/host/preset-sync.ts` | Message source kinds are merge-extensible: declare your own (`declare module '@deepseek-ai/dsh-llm'` → `MessageSourceMap`, kind `dsh-chatgpt-subscription`) instead of relying on a catch-all. Package renames are reconciled by probing resolution (`import.meta.resolve`), never by hard-coding a harness version. |
@@ -207,10 +207,10 @@ next upgrade starts by reading the newest file in `references/`.
 ## 7. Current state
 
 - Tested baseline: **0.2.1-rc.3** (`^0.2.1-rc.3` in `devDependencies` and `peerDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded rc.3 run: forced three-project typecheck + build, **4649 tests passed / 8 skipped / 0 failed**
-  (282 files passed, 2 skipped); the exact-rc.2 clean room has identical counts. The 0.1.5-rc.1 clean room passes its
-  supported suite with **4644 tests passed / 9 skipped / 0 failed** (281 files passed, 2 skipped); its one generation-bound
-  PTC file that cannot load is identified in `references/0.2.1-rc.3.md`.
+  onwards. Latest recorded full rc.3 run: forced three-project typecheck + build, **4651 tests passed / 8 skipped / 0 failed**
+  (282 files passed, 2 skipped). The original exact-rc.2 clean room had identical counts (282 files, 4649 tests, 8 skipped).
+  The 0.1.5-rc.1 clean room passes its supported suite with **4644 tests passed / 9 skipped / 0 failed** (281 files passed,
+  2 skipped); its one generation-bound PTC file that cannot load is identified in `references/0.2.1-rc.3.md`.
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
   covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
@@ -247,8 +247,12 @@ next upgrade starts by reading the newest file in `references/`.
   `references/0.2.1-rc.3.md` covers rc.3: Conversation View and right-guide pin/More
   customization is additive and needs no runtime bridge. It also records the old-generation
   structural type fixes for volatile config, command contributions, and config forms, the
-  exact transitive clean-room closure, and the real npm-rc.3 host/client smoke. The local
-  source-linked rc.2 `lib/` is explicitly not used as rc.3 evidence.
+  exact transitive clean-room closure, and the real npm-rc.3 host/client smoke. A follow-up
+  bridges the removed `dsh-tool-subagent-control/list-agents` export in `resolveDispatchPreset`,
+  with two failing-first regression cases and a real dispatch-session creation. A final
+  evidence review also resolves the `pi-ai@1.3.0` Claude baseline: Opus 5 accepts disabled
+  thinking at high or below, Sonnet 4.5 uses its standard 200k window, and the final full
+  suite is **4651 passed / 8 skipped / 0 failed**.
   `references/codex-wire-surface.md` is not a harness round but belongs in this
   list because it rewrites a compatibility seam: the Codex subscription line now
   sends the `openai-beta` gate the backend requires, presents ONE `originator`

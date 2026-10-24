@@ -13,8 +13,8 @@
  *      dropping it breaks multi-turn tool use under extended thinking;
  *   3. input_json_delta fragments are concatenated and parsed ONCE, at block
  *      stop - parsing per fragment silently invents tool arguments;
- *   4. the thinking dispatch is four cases in a fixed order, and mid-convo
- *      outranks a caller asking for thinking off;
+ *   4. the thinking dispatch honors a disable request only where the catalog
+ *      allows it, and otherwise keeps the model's normal form;
  *   5. the budget arithmetic is transcribed, not re-derived, and its two traps
  *      (an undefined cap coerced to 0, an unresolved cap) both produce a
  *      request with no room for an answer;
@@ -451,17 +451,11 @@ describe('Thinking dispatch - the four catalog cases', () => {
     expect(outputConfigOf(built)).toEqual({ effort: 'medium' })
   })
 
-  it('mid-convo outranks a caller asking for thinking off, and defaults the effort to high', () => {
-    // The disable request must NOT be sent: suppressing the block_binding is how
-    // the persistent 400 the reference documents comes back.
+  it('honors thinking off on a mid-convo model that accepts it, and defaults other efforts to high', () => {
+    // Opus 5 accepts disabled at high or below; no effort is sent on that path.
     const off = body({ model: 'claude-opus-5', reasoningEffort: 'none' as ReasoningEffortId })
-    expect(thinkingOf(off)).toEqual({
-      type: 'adaptive',
-      display: 'summarized',
-      block_binding: { prefix_mismatch_behavior: 'drop_block' },
-    })
-    expect(outputConfigOf(off)).toEqual({ effort: 'high' })
-    expect(JSON.stringify(off)).not.toContain('disabled')
+    expect(thinkingOf(off)).toEqual({ type: 'disabled' })
+    expect(outputConfigOf(off)).toBeUndefined()
 
     const unnamed = body({ model: 'claude-opus-5' })
     expect(outputConfigOf(unnamed)).toEqual({ effort: 'high' })
@@ -668,13 +662,11 @@ describe('The response ceiling', () => {
     // grows even though the caller asked for no thinking.
     const forced = body({ model: 'claude-sonnet-4-6', reasoningEffort: 'none' as ReasoningEffortId, maxTokens: 4096 })
     expect(thinkingOf(forced)).toEqual({ type: 'disabled' })
-    // A mid-convo model thinks even when the caller asked it not to, so its
-    // ceiling is inflated anyway - the adaptive form has no budget to spend, so
-    // the inflation is the only thing the mid-convo branch does to max_tokens.
+    // Opus 5 accepts the disable request, so its ceiling is not inflated.
     const midConvo = body({ model: 'claude-opus-5', reasoningEffort: 'none' as ReasoningEffortId, maxTokens: 4096 })
-    expect(midConvo.max_tokens).toBe(12_288)
-    expect(thinkingOf(midConvo)!.type).toBe('adaptive')
-    expect(claudeRequestThinks('claude-opus-5', 'none')).toBe(true)
+    expect(midConvo.max_tokens).toBe(4096)
+    expect(thinkingOf(midConvo)!.type).toBe('disabled')
+    expect(claudeRequestThinks('claude-opus-5', 'none')).toBe(false)
   })
 
   it('never lets the ceiling exceed the model cap or fall below the caller cap', () => {

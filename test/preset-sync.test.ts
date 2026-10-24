@@ -231,6 +231,21 @@ describe('package name reconciliation', () => {
     expect(packageInstalled('@deepseek-ai/dsh-missing-pkg', [root])).toBe(false)
   })
 
+  it('distinguishes a removed subpath export from the installed package root', () => {
+    const root = tempDir()
+    const pkgDir = join(root, 'node_modules', '@deepseek-ai', 'dsh-sample-pkg')
+    const manifest = join(pkgDir, 'package.json')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(manifest, JSON.stringify({
+      exports: { '.': './lib/index.js', './list-agents': './lib/list-agents.js' },
+    }))
+    expect(packageInstalled('@deepseek-ai/dsh-sample-pkg/list-agents', [root])).toBe(true)
+
+    writeFileSync(manifest, JSON.stringify({ exports: { '.': './lib/index.js' } }))
+    expect(packageInstalled('@deepseek-ai/dsh-sample-pkg/list-agents', [root])).toBe(false)
+    expect(packageInstalled('@deepseek-ai/dsh-sample-pkg', [root])).toBe(true)
+  })
+
   it('ships the row the harness renamed, under its pre-0.1.6 name', () => {
     const bundled = readFileSync(join(bundledPresetsRoot(), 'dispatch', 'agent.cordis.yml'), 'utf8')
     expect(bundled).toContain(`name: '${RENAMED}'`)

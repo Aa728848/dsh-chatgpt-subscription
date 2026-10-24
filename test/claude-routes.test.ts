@@ -540,11 +540,10 @@ describe('Claude settings routes', () => {
       expect(opus46!.thinkingMode).toBe('adaptive')
       expect(opus46!.supportsImage).toBe(true)
       expect(opus46!.reasoningEfforts).toEqual(['low', 'medium', 'high', 'max'])
-      // A model whose catalog entry maps 'off: null' must report both facts,
-      // and they must disagree with the naive derivation from the ladder.
+      // Opus 5 accepts disabled at high or below, independently of its full ladder.
       const opus5 = value.models.find((model) => model.id === 'claude-opus-5')
       expect(opus5!.reasoningEfforts.length).toBeGreaterThan(0)
-      expect(opus5!.canDisableThinking).toBe(false)
+      expect(opus5!.canDisableThinking).toBe(true)
       // And the temperature capability, which three catalog rows deny.
       const opus47 = value.models.find((model) => model.id === 'claude-opus-4-7')
       expect(opus47!.supportsTemperature).toBe(false)

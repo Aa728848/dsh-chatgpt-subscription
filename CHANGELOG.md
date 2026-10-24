@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **[claude] 按官方文档修正 Opus 5 关闭思考和 Sonnet 4.5 标准上下文窗口**
+  - **Opus 5**：官方 thinking 故障表允许 `high` 及更低档位发送 `thinking: { type: 'disabled' }`。目录中的 `canDisableThinking` 改为 `true`，`mid-convo` 分支在该请求下返回不带 effort 的 `disabled`，并不再抬高 `max_tokens`；其它 `mid-convo` 模型仍保持 adaptive 与 block binding。同步移除 `pi-ai@1.3.0` 已失效的 Haiku 5.5 测试例外，Claude 相关 **144/144** 用例通过。
+  - **Sonnet 4.5**：官方上下文表给出的标准窗口为 **200K**，1M 属于另一项 beta 能力，而本适配器没有请求该能力。`claude-sonnet-4-5` 与 `claude-sonnet-4-5-20250929` 的默认窗口均由 1M 改为 **200K**，保留用户显式覆盖通道。
+  - **验证**：字段级参考比较全部一致，全量 **282 文件通过 / 2 skipped，4651 passed / 8 skipped / 0 failed**；三工程强制类型检查、构建、`npm ci --dry-run` 与打包通过。
+- **[agent-preset] 修复 DSH 0.2.1-rc.3 下 dispatch 新建会话报 `tool-subagent-list-agents: never started`**
+  - **根因**：Harness 提交 `4df09d37d5` 删除 `@deepseek-ai/dsh-tool-subagent-control/list-agents` 导出，改由主入口统一注册 `list_agents`；本插件的 `dispatch` 仍保留旧的独立行，预设挂载因此失败，创建会话时报 `agent-preset/invalid`。
+  - **改法**：`resolveDispatchPreset` 按实际导出是否存在决定行集合——旧导出存在时原样保留，缺失时删除 `tool-subagent-list-agents`，主控制行和其它委派工具不变；`packageInstalled` 的回退探测同步改为检查精确的 `exports` 子路径，避免把“包存在”误判成“旧导出存在”。旧世代行为不变。
+  - **验证**：新增 2 个回归用例，均在修复前失败、修复后通过；预设相关 **69/69** 通过，三工程强制类型检查和构建通过。真实本地 `0.2.1-rc.3-22ddee3` 下新建 `dispatch` 会话成功，未再出现 `agent-preset/invalid` 或 `never started`。最终全量套件为 **4651 passed / 8 skipped / 0 failed**。
 - **[harness] 新增 DSH 0.2.1-rc.3 支持，并补齐旧世代的客户端类型兼容**
   - **基线**：18 个直接 DSH `devDependencies` 提升到 `^0.2.1-rc.3`，对应 peer 联合范围追加同项，npm 与 pnpm 锁文件同步更新；0.1.2-alpha.5 以来的旧范围全部保留。`rc.3` 对插件导入面的变化集中在 Conversation View 与右侧指南卡片的固定 / More 菜单，以及草稿初始化的追加模式；现有插槽、`setDraft`、LLM / 工具 / 设置 / WebServer 等接口无破坏变化，因此不新增版本分支，也不改变任何供应线路的请求行为。
   - **旧世代类型桥**：`src/index.ts` 用本地结构类型表示 volatile 配置，避免直接依赖 Cordis 4.0.2 尚未导出的 `Volatile`；`minimax-code/commands-contract.ts` 在既有命令类型边界补充 `label` / `icon` / `SelectOptionGroup` 的兼容形状；进展更新设置改用本地 `ConfigForm` / `ConfigFormSnapshot` 结构类型，旧版没有 `configForms` 服务时仍按原逻辑降级，新版仍使用真实服务。以上均为类型适配，无运行时协议变化。

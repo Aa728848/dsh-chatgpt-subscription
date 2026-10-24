@@ -397,15 +397,28 @@ Reset: fallback applies only to the current task. When the next task begins, alw
  * `unknown prompt variable "{{cwd}}"` at render time. On 0.1.7–0.2.0 that package
  * is absent and `{{cwd}}` is still the only way the persona states the workspace,
  * so the unmodified {@link DISPATCH_PRESET} is returned unchanged.
+ *
+ * Newer harnesses also register `list_agents` from the main subagent-control entry
+ * and remove its standalone `./list-agents` export. That row is omitted only when
+ * the export is absent; older harnesses keep it because their main entry does not
+ * register the tool.
  * @param resolves - whether a bare specifier resolves in this installation.
  * @returns the preset definition for the running harness generation.
  */
 export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFromHere): PresetDefinition {
-  if (!resolves(WORKING_DIRECTORY_PACKAGE)) return DISPATCH_PRESET
+  const hasWorkingDirectory = resolves(WORKING_DIRECTORY_PACKAGE)
+  const hasLegacyListAgents = resolves('@deepseek-ai/dsh-tool-subagent-control/list-agents')
+  if (!hasWorkingDirectory && hasLegacyListAgents) return DISPATCH_PRESET
   return {
     ...DISPATCH_PRESET,
     plugins: DISPATCH_PRESET.plugins.map((row) => {
-      if (row.id !== 'persona' || typeof row.config !== 'object' || row.config === null) return row
+      if (row.id === 'delegation' && !hasLegacyListAgents && Array.isArray(row.config)) {
+        return {
+          ...row,
+          config: (row.config as PresetRow[]).filter(nested => nested.id !== 'tool-subagent-list-agents'),
+        }
+      }
+      if (row.id !== 'persona' || !hasWorkingDirectory || typeof row.config !== 'object' || row.config === null) return row
       const { suffix: _omitted, ...rest } = row.config as Record<string, unknown>
       return { ...row, config: rest }
     }),
