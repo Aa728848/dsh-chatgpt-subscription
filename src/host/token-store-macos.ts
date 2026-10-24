@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { CredentialReadCache, keyringCredentialIdentity } from './common/credential-read-cache.ts'
 import type { CredentialStore, TokenStore, StoredOAuthCredentials } from './token-store.ts'
-import { parseStoredCredentials } from './token-store.ts'
+import { CorruptStoredDocumentError, parseStoredCredentials } from './token-store.ts'
 
 const DEFAULT_SERVICE = 'dsh-chatgpt-subscription'
 const DEFAULT_ACCOUNT = 'oauth'
@@ -50,7 +50,7 @@ export class MacKeychainCredentialStore<T> implements CredentialStore<T> {
       try {
         return this.parse(parseSecurityPayload(result.stdout))
       } catch {
-        throw new Error('Keychain credential payload is invalid')
+        throw new CorruptStoredDocumentError('Keychain credential payload is invalid')
       }
     })
   }

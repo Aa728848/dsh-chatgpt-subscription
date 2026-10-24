@@ -46,6 +46,26 @@ export const zh = {
   proxyDetectedEffective: '（已自动生效）',
   proxyNoneDetected: '未检测到系统代理，将使用直连',
   proxyDirectHint: '本插件的全部请求将直接连接，不经过任何代理服务器。',
+  // Where the account pool is stored: the selection control and everything that
+  // explains it. The card names the store this host actually resolved — `keyring`
+  // is three different stores depending on the platform — because an account that
+  // cannot be saved is the failure this whole control exists to fix. A change made
+  // here takes effect at once; a `poolStorage` written into the profile only takes
+  // effect on the next plugin apply.
+  poolStorageTitle: '账号存储位置',
+  poolStorageKeyring: '桌面密钥环',
+  poolStorageCredentials: 'DSH 凭据库',
+  poolStorageKeyringHint: '仅限桌面安装：使用操作系统密钥环（DPAPI / 钥匙串 / Secret Service）。在服务器或无桌面的 Linux 主机上密钥环通常不可用，登录会失败——请改选 DSH 凭据库。',
+  poolStorageCredentialsHint: 'DSH 的标准密钥存储（$DSH_HOME/.credentials.yaml）。POSIX 上强制 0600、创建者独占；Windows 上只有 profile ACL，没有权限位可强制。服务器以及任何没有桌面密钥环的主机都用它。静态不加密，靠宿主权限保护。',
+  poolStorageEffective: '当前实际使用：{storage}',
+  poolStorageBackendKeyring: '桌面密钥环（Secret Service），静态加密',
+  poolStorageBackendDpapi: 'Windows DPAPI，静态加密',
+  poolStorageBackendKeychain: 'macOS 钥匙串，静态加密',
+  poolStorageBackendCredentials: 'DSH 凭据库（.credentials.yaml），由文件权限保护',
+  poolStorageSwitchWarning: '已保存在另一个存储里的账号会留在原处，切回去之前不会显示。不会做迁移。',
+  poolStorageUnavailableKeyring: '这台主机上没有可用的桌面密钥环，因此号池无法读写。请把「账号存储位置」改成 DSH 凭据库。',
+  poolStorageUnavailableCredentials: '这个 harness 没有凭据库（ctx.credentials），因此号池无法读写。请把「账号存储位置」改成桌面密钥环。',
+  poolStorageUnavailableStore: '号池存储这次没有应答，所以这里没有列出账号——账号并没有被删除，存储恢复后重新打开本页即可。',
   enhancements: '增强功能',
   fastMode: '快速模式（1.5x 速度）',
   fastModeHint: '提升 Token 生成速度至约 1.5 倍；将以约 2x–2.5x 速度消耗 Codex 订阅额度。',
@@ -241,6 +261,24 @@ export const en: Record<keyof typeof zh, string> = {
   proxyDetectedEffective: ' (active)',
   proxyNoneDetected: 'No system proxy detected; connecting directly',
   proxyDirectHint: 'Every request from this plugin connects directly without using any proxy server.',
+  // Where the account pool lives: the selector and every sentence that explains
+  // it. The card names the store this host actually resolved — `keyring` is three
+  // different stores depending on the platform — because an account that cannot be
+  // saved is the failure this control exists to fix.
+  poolStorageTitle: 'Account storage',
+  poolStorageKeyring: 'Desktop keyring',
+  poolStorageCredentials: 'DSH credential store',
+  poolStorageKeyringHint: 'Desktop installs only: uses the OS keyring (DPAPI / Keychain / Secret Service). On a server or a headless Linux host the keyring is usually unavailable and sign-in will fail — pick the DSH credential store instead.',
+  poolStorageCredentialsHint: 'The standard DSH secret store ($DSH_HOME/.credentials.yaml). POSIX: 0600 enforced, owner-only; Windows: profile ACL, no mode enforcement. Use this on servers and any host without a desktop keyring. Stored unencrypted at rest, protected by the host.',
+  poolStorageEffective: 'In use now: {storage}',
+  poolStorageBackendKeyring: 'desktop keyring (Secret Service), encrypted at rest',
+  poolStorageBackendDpapi: 'Windows DPAPI, encrypted at rest',
+  poolStorageBackendKeychain: 'macOS Keychain, encrypted at rest',
+  poolStorageBackendCredentials: 'DSH credential store (.credentials.yaml), protected by file permissions',
+  poolStorageSwitchWarning: 'Accounts saved in the other store stay there and are not shown until you switch back. There is no migration.',
+  poolStorageUnavailableKeyring: 'This host has no usable desktop keyring, so the account pool cannot be read or written. Switch Account storage to the DSH credential store.',
+  poolStorageUnavailableCredentials: 'This harness has no credential store (ctx.credentials), so the account pool cannot be read or written. Switch Account storage to the desktop keyring.',
+  poolStorageUnavailableStore: 'The pool store did not answer this time, so no accounts are listed here — none were deleted; reopen this page once the store answers again.',
   enhancements: 'Enhancements',
   fastMode: 'Fast mode (1.5x speed)',
   fastModeHint: 'Generates tokens ~1.5x faster; consumes Codex subscription quota at ~2x–2.5x the normal rate.',

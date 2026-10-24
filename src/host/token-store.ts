@@ -42,6 +42,29 @@ export interface CredentialStore<T> {
   clear(): Promise<void>
 }
 
+/**
+ * A stored document that cannot be read back as one.
+ *
+ * Distinct from a store that did not answer, on purpose. A corrupt document is
+ * something the NEXT WRITE repairs; an unreadable store is not, and recovering
+ * from it as if the pool were empty is how a transient keyring failure erases
+ * every account: the read comes back empty, the caller mutates the empty pool and
+ * saves it. Stores throw this class for their own "payload is invalid" case and
+ * leave availability failures as plain errors, which is the only distinction the
+ * pool core needs (see `AccountPoolCore.loadPoolData`).
+ */
+export class CorruptStoredDocumentError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'CorruptStoredDocumentError'
+  }
+}
+
+/** Whether a store failure means "this document does not parse", not "the store is unreachable". */
+export function isCorruptStoredDocument(error: unknown): error is CorruptStoredDocumentError {
+  return error instanceof CorruptStoredDocumentError
+}
+
 export interface TokenStore extends CredentialStore<StoredOAuthCredentials> {
   readonly storage: Omit<CredentialStorageDto, 'available'>
 }

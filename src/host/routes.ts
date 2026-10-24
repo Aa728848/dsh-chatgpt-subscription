@@ -19,6 +19,7 @@ import type { CodexAccountPool } from './codex-account-pool.ts'
 import { isSameOriginMutation } from './common/same-origin.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
+import type { PoolStorageSettings } from './common/pool-storage-settings.ts'
 import type { ProxyManager } from './proxy-manager.ts'
 import type { SearchProviderSwitcher } from './search-provider-switcher.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
@@ -38,6 +39,15 @@ export type RouteAuditReader = (sessionId: string) => Promise<SubagentRouteAudit
  */
 export interface RouteAdoptOptions {
   adoptPaths?: readonly string[]
+  /**
+   * Where the account-storage choice is persisted, when this host has a place.
+   *
+   * Absent means the route is not served at all: a host that did not wire the
+   * setting answers 404 for `POST /storage` — it answers that in the handler
+   * itself, because a bare `Error` thrown from there is mapped to `internal` and
+   * would report a 500 for a route that simply does not exist here.
+   */
+  storage?: PoolStorageSettings
 }
 
 export function registerRoutes(
@@ -172,6 +182,29 @@ export function registerRoutes(
           if (loginId === null) throw new Error('missing loginId')
           oauth.cancelLogin(loginId)
           json(response, { ok: true, value: { cancelled: true } })
+          return
+        }
+        case `${ROUTE_PREFIX}/storage`: {
+          const storage = adopt?.storage
+          if (storage === undefined) {
+            // 404, not 500: this host does not serve the setting at all, which is
+            // what the route map already answers for an unknown path — a host that
+            // cannot remember a choice must not look like one that broke.
+            jsonError(response, 404, {
+              code: 'bad-request',
+              message: 'The account storage setting is not available on this host.',
+            })
+            return
+          }
+          const mode = field(body, 'mode')
+          if (mode !== 'keyring' && mode !== 'credentials') {
+            throw new PreferenceError('mode must be "keyring" or "credentials".')
+          }
+          // Persisted first, then announced: the pools resolve their backend on
+          // the next read, so the refreshed status below already names the new
+          // store — and a failure here leaves the previous choice in place.
+          await storage.update(mode)
+          json(response, { ok: true, value: await refreshedStatus() })
           return
         }
         case `${ROUTE_PREFIX}/accounts`: {

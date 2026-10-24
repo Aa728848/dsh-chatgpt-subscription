@@ -68,6 +68,16 @@ export class SubscriptionApi {
     return post<PluginStatusDto>(`${ROUTE_PREFIX}/adopt/disable`, {})
   }
 
+  /**
+   * Choose the account-pool store, answering with the refreshed status.
+   *
+   * The host persists the choice before resolving again, so the status that comes
+   * back already names the store the pools will read and write from here on.
+   */
+  setPoolStorage(mode: 'keyring' | 'credentials'): Promise<PluginStatusDto> {
+    return post<PluginStatusDto>(`${ROUTE_PREFIX}/storage`, { mode })
+  }
+
   refresh(): Promise<PluginStatusDto> {
     return post(`${ROUTE_PREFIX}/token/refresh`, {})
   }

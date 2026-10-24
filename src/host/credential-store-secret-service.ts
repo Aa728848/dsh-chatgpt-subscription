@@ -1,10 +1,18 @@
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { CorruptStoredDocumentError } from './token-store.ts'
 import { CredentialReadCache, keyringCredentialIdentity } from './common/credential-read-cache.ts'
 import type { CredentialStore } from './token-store.ts'
 
 const UNAVAILABLE = 'Linux encrypted credential storage requires secret-tool (libsecret) and an unlocked Secret Service keyring.'
 const INVALID = 'Secret Service credential payload is invalid'
+
+/** The verdict of {@link SecretServiceCredentialStore.ping}: usable, or why not. */
+export interface SecretServiceAvailability {
+  available: boolean
+  /** Why the keyring cannot be used, present exactly when `available` is false. */
+  reason?: string
+}
 
 /**
  * How long one Secret Service read may stand in for the stored value.
@@ -64,12 +72,12 @@ function envelopeFrom(parsed: unknown): ChunkEnvelope | null {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
   const marker = (parsed as Record<string, unknown>)[ENVELOPE_KEY]
   if (marker === undefined) return null
-  if (typeof marker !== 'object' || marker === null) throw new Error(INVALID)
+  if (typeof marker !== 'object' || marker === null) throw new CorruptStoredDocumentError(INVALID)
   const { gen, chunks, bytes } = marker as Record<string, unknown>
   if (typeof gen !== 'string' || gen === ''
     || typeof chunks !== 'number' || !Number.isInteger(chunks) || chunks < 1 || chunks > MAX_SHARDS
     || typeof bytes !== 'number' || !Number.isInteger(bytes) || bytes < 0) {
-    throw new Error(INVALID)
+    throw new CorruptStoredDocumentError(INVALID)
   }
   return { gen, chunks, bytes }
 }
@@ -86,6 +94,19 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
     private readonly parse: (value: unknown) => T,
   ) {}
 
+  /**
+   * Label the desktop keyring manager shows for this entry.
+   *
+   * Derived from the entry's own `service` attribute: it used to be a hardcoded
+   * 'DSH Antigravity OAuth' for every caller, so the ChatGPT, Claude, Qoder and
+   * Minimax pools all appeared in seahorse under Antigravity's name and a user
+   * could not tell which secret they were looking at. The label is display-only,
+   * so entries stored under the old one keep working.
+   */
+  private get label(): string {
+    return `DSH ${this.service}`
+  }
+
   private attributes(): string[] {
     return ['service', this.service, 'account', this.account]
   }
@@ -99,6 +120,26 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
     return ['service', this.service, 'account', `${this.account}#${gen}#${index}`]
   }
 
+  /**
+   * Whether this host has a usable Secret Service at all.
+   *
+   * One lookup is the whole question, and its ANSWER is not the point: an entry
+   * that is not there exits 1 with empty stderr, which still proves the daemon
+   * answered. A host with no `secret-tool`, no session bus, no
+   * `org.freedesktop.secrets` or a locked keyring fails instead — by refusing the
+   * spawn, or by exiting non-zero with a message. Never throws, because it is
+   * asked by a fallback chain whose next step is the answer to "no".
+   */
+  async ping(): Promise<SecretServiceAvailability> {
+    try {
+      const result = await runSecretTool(['lookup', ...this.attributes()])
+      if (result.code === 0 || (result.code === 1 && !result.hasStderr)) return { available: true }
+      return { available: false, reason: UNAVAILABLE }
+    } catch (error) {
+      return { available: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   async load(): Promise<T | null> {
     return this.cache.load(async () => {
       const result = await runSecretTool(['lookup', ...this.attributes()])
@@ -108,20 +149,20 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
       try {
         parsed = JSON.parse(result.stdout) as unknown
       } catch {
-        throw new Error(INVALID)
+        throw new CorruptStoredDocumentError(INVALID)
       }
       const envelope = envelopeFrom(parsed)
       if (envelope === null) {
         try {
           return this.parse(parsed)
         } catch {
-          throw new Error(INVALID)
+          throw new CorruptStoredDocumentError(INVALID)
         }
       }
       const pieces: string[] = []
       for (let index = 0; index < envelope.chunks; index += 1) {
         const shard = await runSecretTool(['lookup', ...this.shardAttributes(envelope.gen, index)])
-        if (shard.code !== 0) throw new Error(INVALID)
+        if (shard.code !== 0) throw new CorruptStoredDocumentError(INVALID)
         pieces.push(shard.stdout)
       }
       try {
@@ -131,7 +172,7 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
         if (decoded.length !== envelope.bytes) throw new Error('shard byte count mismatch')
         return this.parse(JSON.parse(decoded.toString('utf8')) as unknown)
       } catch {
-        throw new Error(INVALID)
+        throw new CorruptStoredDocumentError(INVALID)
       }
     })
   }
@@ -143,7 +184,7 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
     // the moment the new content lands; read it before overwriting anything.
     const stale = await this.storedEnvelope()
     if (bytes < SECRET_TOOL_STDIN_LIMIT) {
-      const result = await runSecretTool(['store', '--label=DSH Antigravity OAuth', ...this.attributes()], payload)
+      const result = await runSecretTool(['store', '--label=' + this.label, ...this.attributes()], payload)
       if (result.code !== 0) throw new Error(UNAVAILABLE)
     } else {
       await this.saveChunked(payload, bytes)
@@ -167,7 +208,7 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
     for (let index = 0; index < chunks; index += 1) {
       const piece = encoded.slice(index * SHARD_PAYLOAD_SIZE, (index + 1) * SHARD_PAYLOAD_SIZE)
       const shard = await runSecretTool(
-        ['store', '--label=DSH Antigravity OAuth', ...this.shardAttributes(gen, index)],
+        ['store', '--label=' + this.label, ...this.shardAttributes(gen, index)],
         piece,
       )
       if (shard.code !== 0) {
@@ -177,7 +218,7 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
     }
     const envelope: ChunkEnvelope = { gen, chunks, bytes }
     const commit = await runSecretTool(
-      ['store', '--label=DSH Antigravity OAuth', ...this.attributes()],
+      ['store', '--label=' + this.label, ...this.attributes()],
       JSON.stringify({ [ENVELOPE_KEY]: envelope }),
     )
     if (commit.code !== 0) {

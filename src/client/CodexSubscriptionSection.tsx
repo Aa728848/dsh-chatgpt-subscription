@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CodexReasoningSummary, DeviceLoginDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { CodexReasoningSummary, DeviceLoginDto, PluginStatusDto, PoolStorageDto, PoolStorageMode, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
@@ -14,7 +14,7 @@ import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
 type BusyAction = 'login' | 'device-login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences'
-  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt' | 'adopt-disable' | null
+  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt' | 'adopt-disable' | 'storage' | null
 type Translate = Props['t']
 
 /**
@@ -35,6 +35,35 @@ interface DevicePanel {
 /** The grant's deadline, moved onto this browser's clock. */
 function panelDeadlineMs(login: DeviceLoginDto): number {
   return Date.now() + (login.expiresAt - login.now) * 1000
+}
+
+/**
+ * The sentence the card shows about where the pool actually lives.
+ *
+ * One key per BACKEND, not per configured value: `keyring` resolves to the Secret
+ * Service on Linux, DPAPI on Windows and the Keychain on macOS, so a user looking
+ * at "saving failed" needs to know which store answered, not which one was asked
+ * for. Every branch is spelled out, so a new backend cannot reach the card as an
+ * untranslated fallback.
+ */
+function poolStorageBackendLabel(storage: PoolStorageDto, t: Translate): string {
+  switch (storage.backend) {
+    case 'keyring': return t('poolStorageBackendKeyring')
+    case 'credentials': return t('poolStorageBackendCredentials')
+    case 'dpapi': return t('poolStorageBackendDpapi')
+    case 'keychain': return t('poolStorageBackendKeychain')
+  }
+}
+
+/** Why the configured store is not usable here, in the reader's language. */
+function poolStorageUnavailableLabel(storage: PoolStorageDto, t: Translate): string | null {
+  switch (storage.unavailable) {
+    case undefined: return null
+    case 'keyring-unreachable': return t('poolStorageUnavailableKeyring')
+    case 'no-credentials-service': return t('poolStorageUnavailableCredentials')
+    case 'store-unreadable': return t('poolStorageUnavailableStore')
+  }
+  return null
 }
 
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
@@ -436,6 +465,21 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   }
 
   /**
+   * Move the pool to the other store.
+   *
+   * Nothing is copied: the accounts saved in the store being left stay there and
+   * reappear if the choice is switched back, which is what the warning under the
+   * select says. The route answers with the refreshed status, so the card renames
+   * the store in use in the same render.
+   */
+  const changePoolStorage = async (mode: PoolStorageMode): Promise<void> => {
+    await run('storage', async () => {
+      const next = await apiRef.current.setPoolStorage(mode)
+      setStatus(next)
+    })
+  }
+
+  /**
    * Re-authorize one account.
    *
    * The failure marker is cleared first and nothing is deleted: the account
@@ -487,6 +531,11 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const preferences = status?.preferences
   const quota = status?.quota
   const login = status?.login
+  // Resolved once per render: the same sentence is rendered in one place and
+  // compared against null to decide whether it is rendered at all.
+  const poolStorageUnavailable = status?.poolStorage === undefined
+    ? null
+    : poolStorageUnavailableLabel(status.poolStorage, t)
   const visibleModelIds = preferences?.visibleModelIds ?? DEFAULT_VISIBLE_CODEX_MODEL_IDS
   // Only checked models get a context row, in catalog order.
   const contextModels = CODEX_MODEL_CATALOG.filter((entry) => visibleModelIds.some((id) => id === entry.id))
@@ -632,6 +681,44 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
               >{busy === 'adopt-disable' ? t('stopImportingBusy') : t('stopImporting')}</button>
             </div>
           </>
+        ) : null}
+        {/* Where the pool is kept — and the one control in this card that can fix
+            the failure a user cannot diagnose from it: the token exchange succeeds,
+            the write does not, and the store the pool tried is the answer.
+
+            The select states the CONFIGURED choice; the line under it states the
+            store this host actually resolved, because `keyring` is three different
+            stores depending on the platform, and because a configured store that is
+            not there (a server with no secret service) has to say so where the
+            switch is, not in a log. */}
+        {status?.poolStorage !== undefined ? (
+          <div data-dsh-pool-storage={status.poolStorage.backend}>
+            <div className="dsha-pref-row">
+              <div>
+                <strong>{t('poolStorageTitle')}</strong>
+                <p className="dsha-muted">
+                  {status.poolStorage.mode === 'keyring' ? t('poolStorageKeyringHint') : t('poolStorageCredentialsHint')}
+                </p>
+              </div>
+              <select
+                className="dsha-select"
+                aria-label={t('poolStorageTitle')}
+                value={status.poolStorage.mode}
+                disabled={busy !== null}
+                onChange={(event) => void changePoolStorage(event.currentTarget.value as PoolStorageMode)}
+              >
+                <option value="keyring">{t('poolStorageKeyring')}</option>
+                <option value="credentials">{t('poolStorageCredentials')}</option>
+              </select>
+            </div>
+            <p className="dsha-muted">
+              {formatPoolLabel(t('poolStorageEffective'), { storage: poolStorageBackendLabel(status.poolStorage, t) })}
+            </p>
+            {poolStorageUnavailable === null ? null : (
+              <p className="dsh-codex-error" role="status">{poolStorageUnavailable}</p>
+            )}
+            <p className="dsha-muted">{t('poolStorageSwitchWarning')}</p>
+          </div>
         ) : null}
       </AccountPoolSection>
 

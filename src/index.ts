@@ -46,6 +46,9 @@ import {
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
 import { AccountPoolStore } from './host/antigravity/account-pool.ts'
+import { configurePoolStorage } from './host/common/pool-storage.ts'
+import { PoolStorageSettings } from './host/common/pool-storage-settings.ts'
+import { asCredentialsSeam } from './host/common/credentials-compat.ts'
 import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_PROVIDER_NAME } from './host/antigravity/types.ts'
 import { CommandCodeAdapter } from './host/command-code/adapter.ts'
 import { CommandCodeAccountPool } from './host/command-code/account-pool.ts'
@@ -151,7 +154,7 @@ import {
   auditedRoutesOf,
   type AuditedSessions,
 } from './host/subagent-route-audit.ts'
-import type { SubagentRouteAuditDto } from './shared/contracts.ts'
+import type { PoolStorageMode, SubagentRouteAuditDto } from './shared/contracts.ts'
 import {
   createFileRelayProbeSink,
   installRelayProbe,
@@ -248,6 +251,20 @@ export interface Config {
    */
   codexStreamIdleTimeoutMs?: number
   /**
+   * Where every provider line's account pool is stored.
+   *
+   * `keyring` (default) is the platform store — DPAPI on Windows, the Keychain on
+   * macOS, the Secret Service on Linux — which is what every existing install has.
+   * `credentials` puts the pool in DSH's own credential store through the
+   * credentials seam, which is the value a server without a desktop keyring needs:
+   * there the keyring is absent, and the account could not be saved at all.
+   *
+   * The settings card writes its own choice into the plugin's storage document,
+   * which then takes precedence over this value; a profile that never mentions the
+   * key keeps the default.
+   */
+  poolStorage?: PoolStorageMode
+  /**
    * 「进展更新」总开关。打开后 agent 可以用 `progress_update` 工具在不结束回
    * 合的前提下主动汇报多步任务的进展，网页在对话流里显示成一行，右侧栏面板汇
    * 总。默认开启：安装插件后默认启用，用户可在设置中按需关闭。
@@ -308,6 +325,13 @@ export interface ConfigInput {
   progressUpdatesNudgeThreshold?: number
   /** 进展更新的输出语言（默认 auto：跟随对话）。 */
   progressUpdatesLanguage?: ProgressUpdateLanguage
+  /**
+   * 号池存储后端：`keyring`（默认，平台密钥环）或 `credentials`（DSH 凭据库，服务器推荐）。
+   *
+   * 没有 `auto`：按探测结果换存储会让一个号池在两份存储之间来回搬，而「号池搬家了」
+   * 和「号池里的账号丢了」在界面上长得一模一样。不可用的选择照实报错，不替换。
+   */
+  poolStorage?: PoolStorageMode
 }
 
 export const Config: z<ConfigInput, Config> = z.object({
@@ -335,6 +359,13 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 行——开关必须在同一个会话里立刻生效，否则用户要为了打开它重开一次对话。
   // `progressUpdates` 默认开启：安装插件后开箱即用，用户可在设置页随时关闭；
   // `progressUpdatesNudgeThreshold` 默认就是冻结在 store 里的 8，两处共用同一个常量。
+  // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
+  // Service），现有安装零变化；没有桌面密钥环的服务器要显式选 `credentials`，
+  // 把号池放进 DSH 自己的凭据库——原先这里在 Linux 上硬编码 Secret Service，
+  // 那种主机上令牌换成功了却存不下来。设置卡把选择写进插件自己的存储文档，
+  // 并优先于这里的值。
+  poolStorage: z.union([z.const('keyring'), z.const('credentials')]).default('keyring')
+    .description('号池存储后端：keyring（默认，桌面平台的系统密钥环）或 credentials（DSH 凭据库，服务器推荐）。'),
   progressUpdates: z.boolean().default(true).volatile()
     .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。'),
   progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
@@ -349,6 +380,32 @@ export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', '
 
 export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const fetchConfiguration = resolveFetchConfiguration(pluginConfig)
+  // Where every line's account pool lives. Read here, once, because the choice is
+  // one per deployment: the eleven pools are built below from that one value.
+  //
+  // Two sources, in this order: the settings card's own document (written by
+  // `POST /storage`, remembered across restarts) and the profile's `poolStorage`.
+  // The getter is a function rather than a captured value because the card may
+  // change it while the host runs — `PoolStorageSettings.update` bumps the
+  // revision every pool checks before using its cached backend.
+  //
+  // The credential store is OPTIONAL and read through `get`: harnesses before 0.2
+  // have no such service, and declaring it in `inject` would make the whole plugin
+  // fail to mount on those hosts — turning "your pools go somewhere else here"
+  // into "this plugin does not load".
+  const poolStorageSettings = new PoolStorageSettings()
+  void poolStorageSettings.hydrate().catch(() => undefined)
+  configurePoolStorage({
+    mode: () => poolStorageSettings.effective(pluginConfig.poolStorage),
+    ready: () => poolStorageSettings.hydrate().catch(() => undefined),
+    // A getter, not a captured value: `credentials` is not in `inject`, so nothing
+    // orders it before this `apply`, and a service captured here would stay
+    // `undefined` for the life of the process on a host that mounts it a moment
+    // later — `poolStorage: 'credentials'` would report `no-credentials-service`
+    // forever, with no retry on the revision the settings card bumps.
+    credentials: () => asCredentialsSeam(ctx.get('credentials')),
+    logger: ctx.logger,
+  })
   // Ship the bundled agent presets. Harness 0.1.7 registers presets from a
   // plugin row instead of reading the harness-home root, so the runtime
   // declaration is preferred and the home copy stays the mechanism for every
@@ -1017,7 +1074,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // route. Nothing aggregates them here, so no collaborator is threaded through
     // this wiring just to produce a row of stats about someone else's file.
     const disposeRoutes = registerRoutes(
-      ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool, fetchConfiguration)
+      ctx, oauth, usage, preferences, proxyManager, searchSwitcher, readRouteAudit, codexAccountPool, fetchConfiguration,
+      // The one mutable deployment choice this table owns; the object is the
+      // writer, so the route cannot store a mode without invalidating the pools.
+      { storage: poolStorageSettings })
 
     // The hub overview's one-request summary of every subscription line. Each
     // line's read closure stays beside the stores it reads; the aggregation

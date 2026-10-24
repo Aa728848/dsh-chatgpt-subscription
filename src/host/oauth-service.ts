@@ -25,6 +25,7 @@ import type {
   PublicErrorDto,
 } from '../shared/contracts.ts'
 import type { AccountRotationStrategy, PoolAccountSummaryDto } from '../shared/account-pool-contracts.ts'
+import type { PoolStorageDto } from '../shared/contracts.ts'
 import { OAuthCallbackServer } from './callback-server.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
 import type { StoredOAuthCredentials, TokenStore } from './token-store.ts'
@@ -180,17 +181,31 @@ export class OAuthService {
     accounts: PoolAccountSummaryDto[]
     activeAccountId?: string
     rotationStrategy: AccountRotationStrategy
+    poolStorage?: PoolStorageDto
   }> {
     const pool = this.pool
     if (pool === null) return { accounts: [], rotationStrategy: 'sequential' }
-    const [accounts, data] = await Promise.all([
-      pool.listAccounts().catch(() => []),
-      pool.read().catch(() => null),
+    // A pool whose read FAILED is not an empty pool. The card gets an empty list
+    // for want of anything better, but it must say why — otherwise a transient
+    // keyring refusal looks exactly like "your accounts are gone".
+    let readFailed = false
+    const [accounts, data, poolStorage] = await Promise.all([
+      pool.listAccounts().catch(() => { readFailed = true; return [] }),
+      pool.read().catch(() => { readFailed = true; return null }),
+      // Reported by the pool itself: the card has to name the store a user GOT,
+      // which on a server that chose `credentials` is not the platform default.
+      pool.poolStorage().catch(() => undefined),
     ])
+    // A reason the storage resolver already stated wins: it knows WHY the store
+    // cannot be used, which is more than "the read failed".
+    const reason = readFailed && poolStorage !== undefined && poolStorage.unavailable === undefined
+      ? { ...poolStorage, unavailable: 'store-unreadable' as const }
+      : poolStorage
     return {
       accounts,
       ...(data?.activeAccountId === undefined ? {} : { activeAccountId: data.activeAccountId }),
       rotationStrategy: data?.rotationStrategy ?? 'sequential',
+      ...(reason === undefined ? {} : { poolStorage: reason }),
     }
   }
 
@@ -723,7 +738,12 @@ export class OAuthService {
   private statusFromCredentials(
     credentials: StoredOAuthCredentials | null,
     storageAvailable = true,
-    poolStatus: { accounts: PoolAccountSummaryDto[]; activeAccountId?: string; rotationStrategy: AccountRotationStrategy } = {
+    poolStatus: {
+      accounts: PoolAccountSummaryDto[]
+      activeAccountId?: string
+      rotationStrategy: AccountRotationStrategy
+      poolStorage?: PoolStorageDto
+    } = {
       accounts: [],
       rotationStrategy: 'sequential',
     },
