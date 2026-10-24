@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { CredentialReadCache, fileCredentialIdentity } from './common/credential-read-cache.ts'
 import type { CredentialStore, TokenStore, StoredOAuthCredentials } from './token-store.ts'
-import { parseStoredCredentials } from './token-store.ts'
+import { CorruptStoredDocumentError, parseStoredCredentials } from './token-store.ts'
 
 const PROTECT_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -78,7 +78,7 @@ export class WindowsDpapiCredentialStore<T> implements CredentialStore<T> {
       try {
         return this.parse(JSON.parse(result.stdout) as unknown)
       } catch {
-        throw new Error('DPAPI credential payload is invalid')
+        throw new CorruptStoredDocumentError('DPAPI credential payload is invalid')
       }
     })
   }

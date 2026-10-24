@@ -112,6 +112,36 @@ describe('CredentialReadCache', () => {
   })
 })
 
+describe('a write that lands while a read is in flight', () => {
+  it('does not cache the value the read started before the write', async () => {
+    // The 15-second keyring bucket makes this reachable: a save inside the bucket
+    // invalidates the snapshot, and a read that started BEFORE the save must not
+    // put its older bytes back. Otherwise the next `load()` answers with a refresh
+    // token the pool has already spent — the double spend the single-flight in
+    // `freshAccount` exists to prevent, and the account gets marked dead for it.
+    let stored = 'old'
+    const cache = new CredentialReadCache<string>(async () => 'bucket:1')
+    let release!: (value: string) => void
+    const read = vi.fn(() => new Promise<string>((resolve) => { release = resolve }))
+
+    const inFlight = cache.load(read)
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1))
+
+    // The save lands while the read is still running.
+    stored = 'new'
+    cache.invalidate()
+    release('old')
+    expect(await inFlight).toBe('old')
+
+    // Nothing cached: the next read consults storage and sees the new value.
+    const after = vi.fn(async () => stored)
+    expect(await cache.load(after)).toBe('new')
+    expect(after).toHaveBeenCalledTimes(1)
+    expect(await cache.load(after)).toBe('new')
+    expect(after).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('credential identities', () => {
   it('keys a file on its mtime and size, and reports an absent file', async () => {
     const path = await temporaryFile()

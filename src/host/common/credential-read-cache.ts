@@ -66,6 +66,16 @@ export async function keyringCredentialIdentity(ttlMs: number): Promise<string> 
 export class CredentialReadCache<T> {
   private entry: { identity: string; value: T | null } | null = null
   private pending: { identity: string; promise: Promise<T | null> } | null = null
+  /**
+   * Bumped by every {@link invalidate}.
+   *
+   * A read that was already in flight when the value changed must not fill the
+   * snapshot: with a 15-second keyring identity bucket, its bytes are the ones
+   * that were just replaced, and the next `load()` would answer with a refresh
+   * token the pool has already spent — up to fifteen seconds of exactly the
+   * double spend the single-flight path in `freshAccount` exists to prevent.
+   */
+  private generation = 0
 
   /**
    * @param identity - cheap identity of the stored value; `null` disables
@@ -92,11 +102,13 @@ export class CredentialReadCache<T> {
     }
     if (this.pending !== null && this.pending.identity === identity) return this.pending.promise
 
+    const generation = this.generation
     const promise = read()
     this.pending = { identity, promise }
     const settle = (value: T | null): void => {
       if (this.pending !== null && this.pending.promise === promise) this.pending = null
-      this.entry = { identity, value }
+      // Started before the invalidation: what it read is no longer what is stored.
+      if (generation === this.generation) this.entry = { identity, value }
     }
     promise.then(settle, () => {
       if (this.pending !== null && this.pending.promise === promise) this.pending = null
@@ -104,8 +116,9 @@ export class CredentialReadCache<T> {
     return promise
   }
 
-  /** Drop the snapshot; the next read consults storage again. */
+  /** Drop the snapshot; the next read consults storage again and in-flight ones stop filling it. */
   invalidate(): void {
+    this.generation += 1
     this.entry = null
     this.pending = null
   }

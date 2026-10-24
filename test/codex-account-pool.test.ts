@@ -249,8 +249,11 @@ describe('an adopted snapshot is borrowed, never owned', () => {
   })
 
   it('takes an expired snapshot out of rotation WITHOUT a write, and says where to re-sign in', async () => {
-    const { pool } = harness()
-    const save = vi.spyOn((pool as unknown as { backend: { save: (data: unknown) => Promise<void> } }).backend, 'save')
+    const { backend, pool } = harness()
+    // The seam the pool writes through, not a field on the pool: the backend is
+    // resolved lazily now (`poolStorage`), so the object to watch is the one the
+    // harness supplied.
+    const save = vi.spyOn(backend, 'save')
     const managed = await pool.addAccount(credential(1))
     // Already expired on arrival: the snapshot was imported, and the CLI's own
     // token lapsed while it sat there.

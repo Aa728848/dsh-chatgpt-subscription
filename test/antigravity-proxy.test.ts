@@ -77,6 +77,12 @@ function useMemoryPlatformStores(): void {
       saved.delete(keyOf(this))
     })
   }
+  // The pool asks the Secret Service whether it answers BEFORE it accepts the
+  // store, and that probe really spawns `secret-tool`. A CI runner has none, so
+  // the probe would report "no keyring", the pool would refuse writes by design,
+  // and a refresh would fail for a reason that has nothing to do with routing —
+  // the exact class of failure this helper exists to keep out of this file.
+  vi.spyOn(SecretServiceCredentialStore.prototype, 'ping').mockResolvedValue({ available: true })
 }
 
 async function mountPlugin() {

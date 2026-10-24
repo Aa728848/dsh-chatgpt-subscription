@@ -1,10 +1,6 @@
 import path from 'node:path'
-import { createHash } from 'node:crypto'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { CredentialStore } from '../token-store.ts'
-import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
-import { MacKeychainCredentialStore } from '../token-store-macos.ts'
-import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
 import { AccountPoolCore, type AccountPoolHooks } from '../common/account-pool.ts'
 import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { dshHomeDir } from '../common/home.ts'
@@ -118,23 +114,6 @@ export function parseAntigravityPoolData(value: unknown): AntigravityPoolData {
   return res
 }
 
-function poolCredentialAccount(filePath: string): string {
-  return createHash('sha256').update(path.resolve(filePath)).digest('hex')
-}
-
-function createPoolCredentialBackend(filePath: string): CredentialStore<AntigravityPoolData> {
-  if (process.platform === 'win32') {
-    return new WindowsDpapiCredentialStore(`${filePath}.dpapi`, parseAntigravityPoolData)
-  }
-  if (process.platform === 'darwin') {
-    return new MacKeychainCredentialStore('dsh-antigravity-pool', poolCredentialAccount(filePath), parseAntigravityPoolData)
-  }
-  if (process.platform === 'linux') {
-    return new SecretServiceCredentialStore('dsh-antigravity-pool', poolCredentialAccount(filePath), parseAntigravityPoolData)
-  }
-  throw new Error('Antigravity pool encrypted storage requires Windows, macOS, or Linux.')
-}
-
 /**
  * One bucket's reset moment as Unix milliseconds, when it parses as a date.
  *
@@ -214,7 +193,7 @@ export class AccountPoolStore {
 
   constructor(
     filePath = poolPath(),
-    backend: CredentialStore<AntigravityPoolData> = createPoolCredentialBackend(filePath),
+    backend?: CredentialStore<AntigravityPoolData>,
     legacyStore = new FileCredentialStore(),
   ) {
     this.legacyStore = legacyStore
@@ -305,7 +284,10 @@ export class AccountPoolStore {
           : `最短预计在 ${waitMinutes} 分钟后解除冷却。`),
       allAuthFailedMessage: (count) =>
         `全部 ${count} 个 Antigravity 账号均需要重新登录。`,
-      backend,
+      // Absent by default: the shared core resolves the backend from
+      // `poolStorage`, the keychain service above and this pool's own file, which
+      // is exactly the choice the other lines get.
+      ...(backend === undefined ? {} : { backend }),
     }
     this.core = new AccountPoolCore(hooks)
   }

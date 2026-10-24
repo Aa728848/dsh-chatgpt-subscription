@@ -1,5 +1,5 @@
 import http from 'node:http'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +7,8 @@ import { ROUTE_PREFIX } from '../src/compat.ts'
 import { CodexAccountPool, parseCodexPoolData } from '../src/host/codex-account-pool.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { registerRoutes } from '../src/host/routes.ts'
+import { PoolStorageSettings } from '../src/host/common/pool-storage-settings.ts'
+import { configurePoolStorage, resetPoolStorage } from '../src/host/common/pool-storage.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 import { UsageService } from '../src/host/usage-service.ts'
 import type { SubscriptionPreferenceStore } from '../src/host/preferences.ts'
@@ -354,6 +356,104 @@ async function adoptHarness(options: {
     dispose: () => { disposeRoutes(); oauth.dispose() },
   }
 }
+
+describe('choosing the account storage', () => {
+  /** A keyring stand-in, so the route test does not depend on the host's libsecret. */
+  class StubKeyring {
+    async ping() { return { available: true } }
+    async load() { return null }
+    async save() { return undefined }
+    async clear() { return undefined }
+  }
+
+  async function harness(storagePath: string): Promise<{
+    origin: string
+    dispose: () => void
+  }> {
+    const mirror = new MemoryTokenStore()
+    // No `backend` seam: the pool resolves its store exactly as production does,
+    // which is what this route has to invalidate.
+    const pool = new CodexAccountPool({ store: mirror, keyring: new StubKeyring() as never })
+    const oauth = new OAuthService(mirror, { pool, logger: { info: () => undefined, warn: () => undefined } })
+    const usage = new UsageService(oauth, {
+      fetchFn: (async () => Response.json({ rate_limit: {} })) as unknown as typeof fetch,
+    })
+    const routes: Array<{ kind: string; path: string; handler: http.RequestListener }> = []
+    const ctx = {
+      emit: () => undefined,
+      webServer: {
+        register(route: { kind: string; path: string; handler: http.RequestListener }) {
+          routes.push(route)
+          return () => undefined
+        },
+      },
+    }
+    const storage = new PoolStorageSettings(storagePath)
+    await storage.hydrate()
+    // The same wiring `apply` does: the pools read the mode from this document.
+    configurePoolStorage({ mode: () => storage.effective(), logger: { info: () => undefined, warn: () => undefined } })
+    const disposeRoutes = registerRoutes(
+      ctx as never, oauth, usage, minimalPreferences, undefined, undefined, undefined, pool, undefined,
+      { storage },
+    )
+    const served = await serve(routes.find((route) => route.kind === 'prefix')!.handler)
+    servers.push(served.server)
+    return {
+      origin: served.origin,
+      dispose: () => { disposeRoutes(); oauth.dispose() },
+    }
+  }
+
+  afterEach(() => { resetPoolStorage() })
+
+  async function post(origin: string, route: string, body: unknown): Promise<Response> {
+    return fetch(origin + ROUTE_PREFIX + route, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify(body),
+    })
+  }
+
+  it('persists the choice and answers with the store now in use', async () => {
+    const directory = await fixtureDir()
+    const storagePath = join(directory, 'pool-storage.json')
+    const { origin, dispose } = await harness(storagePath)
+    try {
+      const response = await post(origin, '/storage', { mode: 'credentials' })
+      expect(response.status).toBe(200)
+      const value = (await response.json()).value
+      // The status comes back with the pool slice already resolved under the new
+      // choice, so the card renames the store without a second request.
+      expect(value.poolStorage).toMatchObject({ mode: 'credentials', backend: 'credentials' })
+      // This host has no credential seam, so the honest report is "asked for it,
+      // cannot have it" rather than a silent success in the keyring.
+      expect(value.poolStorage.unavailable).toBe('no-credentials-service')
+
+      expect(JSON.parse(await readFile(storagePath, 'utf8'))).toEqual({ mode: 'credentials' })
+
+      // And it survives a restart: a fresh settings object reads the same answer.
+      const reloaded = new PoolStorageSettings(storagePath)
+      await reloaded.hydrate()
+      expect(reloaded.chosen()).toBe('credentials')
+    } finally {
+      dispose()
+    }
+  })
+
+  it('refuses a mode it does not have and leaves the stored choice alone', async () => {
+    const directory = await fixtureDir()
+    const storagePath = join(directory, 'pool-storage.json')
+    const { origin, dispose } = await harness(storagePath)
+    try {
+      expect((await post(origin, '/storage', { mode: 'file' })).status).toBe(400)
+      expect((await post(origin, '/storage', {})).status).toBe(400)
+      // Nothing was written, so a host keeps the store it had.
+      await expect(readFile(storagePath, 'utf8')).rejects.toThrow()
+    } finally {
+      dispose()
+    }
+  })
+})
 
 describe('adopting a local sign-in', () => {
   /** A same-origin JSON POST, which is what every mutating case requires. */

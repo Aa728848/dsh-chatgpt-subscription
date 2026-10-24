@@ -8,6 +8,7 @@ import {
   type OAuthServiceOptions,
 } from '../src/host/oauth-service.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
+import { CodexAccountPool } from '../src/host/codex-account-pool.ts'
 
 const services: OAuthService[] = []
 
@@ -177,6 +178,63 @@ describe('OAuthService', () => {
     await service.logout()
     expect(await store.load()).toBeNull()
     expect((await service.status()).authenticated).toBe(false)
+  })
+
+  it('reports a pool write failure as a failed sign-in, never as a saved account', async () => {
+    // The bug the `poolStorage` option exists for: the token exchange succeeds and
+    // the write does not. Whatever the backend is, the answer to the user must stay
+    // this one sentence — a sign-in that claims success and stores nothing is worse
+    // than a refusal.
+    const pool = new CodexAccountPool({
+      store: new MemoryTokenStore(),
+      backend: {
+        load: async () => null,
+        save: async () => { throw new Error('no writable store on this host') },
+        clear: async () => undefined,
+      },
+    })
+    const service = tracked(new OAuthService(new MemoryTokenStore(), {
+      logger: silentLogger,
+      pool,
+      fetchFn: async () => Response.json({
+        access_token: jwt({ email: 'plus@example.com' }),
+        refresh_token: 'refresh-sensitive',
+        expires_in: 3600,
+      }),
+    }))
+
+    const login = await service.startLogin()
+    const state = new URL(login.authUrl).searchParams.get('state')
+    const terminal = waitForTerminalEvent(service, login.loginId)
+    // 500 is the browser-side answer to a failed exchange; the card learns the
+    // reason from the event below.
+    expect(await getStatus(`http://localhost:1455/auth/callback?code=code-sensitive&state=${encodeURIComponent(state!)}`)).toBe(500)
+
+    await expect(terminal).resolves.toMatchObject({
+      type: 'failed',
+      error: { code: 'storage-failed', message: 'ChatGPT credentials could not be saved securely.' },
+    })
+    expect(await pool.read()).toMatchObject({ accounts: [] })
+    expect((await service.status()).error).toMatchObject({ code: 'storage-failed' })
+  })
+
+  it('reports a store that did not answer instead of an empty pool', async () => {
+    // An empty account list with no explanation reads as "my accounts are gone".
+    // The read failure has to reach the card as a reason code the card translates,
+    // while the store itself stays a perfectly ordinary keyring.
+    const pool = new CodexAccountPool({
+      store: new MemoryTokenStore(),
+      backend: {
+        load: async () => { throw new Error('keyring did not answer') },
+        save: async () => undefined,
+        clear: async () => undefined,
+      },
+    })
+    const service = tracked(new OAuthService(new MemoryTokenStore(), { logger: silentLogger, pool }))
+
+    const status = await service.status()
+    expect(status.poolStorage).toMatchObject({ mode: 'keyring', unavailable: 'store-unreadable' })
+    expect(status.accounts).toEqual([])
   })
 
   it('times out an unfinished login and releases the active task', async () => {

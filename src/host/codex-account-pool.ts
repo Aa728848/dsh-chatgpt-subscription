@@ -43,6 +43,7 @@ import {
   type PoolAccountShape,
   type PoolData,
 } from './common/account-pool.ts'
+import type { ProbeableKeyringStore } from './common/pool-storage.ts'
 import {
   parseStoredCredentials,
   type CredentialStore,
@@ -239,6 +240,8 @@ export interface CodexAccountPoolOptions {
   store?: TokenStore
   /** Test seam; production builds the platform backend from the pool path. */
   backend?: CredentialStore<PoolData<CodexPoolAccount>>
+  /** Test seam: the keyring the resolver probes, instead of the real `secret-tool`. */
+  keyring?: ProbeableKeyringStore<PoolData<CodexPoolAccount>>
   /** Accounts this pool accepts; defaults to the core's limit. */
   maxAccounts?: number
 }
@@ -413,6 +416,7 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
       },
       emptyMessage: '未登录 ChatGPT 账号，请在「设置 → 订阅服务 → ChatGPT」中添加并登录账号。',
       ...(options.backend === undefined ? {} : { backend: options.backend }),
+      ...(options.keyring === undefined ? {} : { keyring: options.keyring }),
       ...(options.maxAccounts === undefined ? {} : { maxAccounts: options.maxAccounts }),
     }
     super(hooks)
