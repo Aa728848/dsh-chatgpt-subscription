@@ -17,7 +17,7 @@ const api = createLineApi(CLINE_PASS_ROUTE_PREFIX, 'Cline Pass')
 
 /** What one pin write answers with. */
 export interface ClinePassPinResult {
-  pin: { upstreams: string[]; exclude: string[]; pinMode: 'strict' | 'preferred'; sort: string }
+  pin: { upstreams: string[]; exclude: string[]; pinMode: 'strict' | 'preferred'; sort: string; has: string[] }
   warnings: string[]
   status: ClinePassWebStatus
 }
@@ -99,7 +99,7 @@ export class ClinePassApi {
 
   pinModel(
     model: string,
-    pin: { upstreams?: string[]; exclude?: string[]; pinMode?: string; sort?: string },
+    pin: { upstreams?: string[]; exclude?: string[]; pinMode?: string; sort?: string; has?: string[] },
   ): Promise<ClinePassPinResult> {
     return api.post<ClinePassPinResult>('/models/pin', { model, ...pin })
   }
@@ -116,7 +116,7 @@ export class ClinePassApi {
     return api.post('/models/validate', { model })
   }
 
-  test(model: string, pin: { upstreams?: string[]; exclude?: string[] } = {}): Promise<{ result: ClinePassTestResultDto; status: ClinePassWebStatus }> {
+  test(model: string, pin: { upstreams?: string[]; exclude?: string[]; has?: string[] } = {}): Promise<{ result: ClinePassTestResultDto; status: ClinePassWebStatus }> {
     return api.post('/models/test', { model, ...pin })
   }
 

@@ -77,6 +77,8 @@ export interface ClinePassModelDto {
   excluded: string[]
   pinMode: ClinePassPinMode
   sort: string
+  /** `providerOptions.gateway.has` capability filter stored with this pin. */
+  has: string[]
   /** Discovered channels, highest confidence first. */
   upstreams: string[]
   upstreamStatus: ClinePassChannelVerdictDto[]
@@ -262,6 +264,8 @@ export interface ClinePassTestResultDto {
   fingerprint: string
   /** Whether the serving channel is the anonymous contributor route. */
   anonymous: boolean
+  /** The capability filter this test actually sent. */
+  has: string[]
   warnings: string[]
   trace: ClinePassAttemptTraceDto[]
 }

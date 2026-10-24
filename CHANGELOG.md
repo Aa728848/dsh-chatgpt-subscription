@@ -15,6 +15,15 @@
   - **验证**：`rc.3` 三工程强制类型检查、构建、`npm ci --dry-run` 与打包通过，全量 **282 文件通过 / 2 skipped，4649 passed / 8 skipped / 0 failed**；精确 `rc.2` 隔离房间结果完全相同。`0.1.5-rc.1` 隔离房间强制类型检查通过，其余可运行套件 **281 文件通过 / 2 skipped，4644 passed / 9 skipped / 0 failed**；唯一不能加载的是该世代没有 `@deepseek-ai/dsh-ptc-runtime` 的 `subagent-model-authorization-ptc.test.ts`，与既有世代限定约定一致。
   - **实机**：用 npm 发布的 `@deepseek-ai/dsh@0.2.1-rc.3` 在隔离 `DSH_HOME` 安装本次 tarball，启动无条目激活警告；插件管理页显示 1 个组件运行中，设置页确认版本为 `0.2.1-rc.3`，12 条订阅线路与进展更新设置均正常渲染。未使用真实订阅凭据或发起模型请求。
 
+## 0.38.3 - 2026-10-24 (本地构建：官方 0.38.1 + cline-pass `has` 钉选修复)
+- **[cline-pass] `only` 之外补上模型能力过滤 `has`：1017 的钉选与渠道探测恢复**
+  - **实测结论（本机真实账号，2026-10-24）**：同一个 `cline-pass/deepseek-v4.1-flash-1017`、同一把账号、交替对照两遍：只发 `providerOptions.gateway.only:[deepseek]` 都落 `openai-compatible-private` 且无第一方指纹；追加 `has:[vision,implicit-caching]` 后都落 **`deepseek`**，`canonicalSlug=deepseek/deepseek-v4.1-flash-1017`，并带 `provider_metadata.deepseek.systemFingerprint`。假渠道加 `has` 会正确报错并列出可用渠道，不再被静默兜到匿名路由。
+  - **请求链路**：`ClinePassPinSettings` / `PinConfig` / `PinAttempt` 新增 `has`；`injectPrefs` 只把它写进 **Vercel 的 `providerOptions.gateway.has`**，不污染 OpenRouter 的 `provider` 字段。真实流式请求、非流式 Test、逐渠道 Validate、Probe 的 `__probe__` harvest 全部使用同一份过滤配置。
+  - **旧设置无缝继承**：1017 在内置目录声明 `gatewayHas:[vision,implicit-caching]`；读取缺少 `has` 的旧钉选时自动补该默认值，**显式保存的空数组仍表示用户主动清空**，其他模型默认完全不变。
+  - **可配置**：设置卡的钉选面板新增「能力过滤 (has)」输入框（逗号/空格分隔），保存与临时 Test 都可覆盖；HTTP `/models/pin`、`/models/test` 和 `cline_pass_pin` / `cline_pass_test` 管理工具同步支持；Test 结果回显实际发送的过滤。
+  - **集成实测**：用新引擎读取现有旧设置，Probe 从「只有匿名路由」恢复为发现 **18 个渠道**（含 deepseek/fireworks/baseten 等）；Test 返回 `actual=deepseek`、`adherence=adopted`、`anonymous=false`、第一方指纹。
+  - **测试**：新增 `test/cline-pass-has.test.ts` 5 例（只写 Vercel 字段、无钉选也可过滤、其他模型不受影响、旧设置继承/显式清空、默认值按模型隔离）；适配器新增真实 body 断言；路由新增持久化断言；设置卡新增 has 编辑/保存用例。另保留 `scripts/probe-cline-pass-has.probe.ts` 作为可重复的本机对照探针（不打印凭据）。
+
 ## 0.38.2 - 2026-10-24 (本地构建：官方 0.38.1 + cline-pass 钉选修复)
 - **[cline-pass] 上游钉选可读性大修：流式帧终于能读出真实服务渠道，匿名贡献者路由全链路标记**
   - **现象**：钉选 deepseek「好像失效」——本机实测（2026-10-23，两个账号）：`cline-pass/deepseek-v4.1-flash-1017` 被网关改指 VMC 匿名贡献者路由，`only: [deepseek]` 被静默忽略（连假渠道也返回 200）；而同一时刻 `cline-pass/deepseek-v4-pro` 的 `only: [deepseek]` 被采纳（`Provider set restricted to: deepseek`）。网关按**模型 id** 分流且随时间翻转，插件无法左右；但插件侧有两个真实缺陷把「失效」放大了。

@@ -29,6 +29,8 @@ export interface PinAttempt {
   strict: boolean
   /** Normalized sort metric, or null for none. */
   sort: string | null
+  /** Required model capabilities, written only to the Vercel gateway spelling. */
+  has?: readonly string[]
   /** `detected` restores the old single-spelling behavior. */
   spelling?: string
 }
@@ -39,6 +41,7 @@ export interface PinConfig {
   exclude?: readonly string[]
   pinMode?: string
   sort?: string
+  has?: readonly string[]
   spelling?: string
 }
 
@@ -319,6 +322,7 @@ export function injectPrefs(body: WireBody, meta: PinModelMeta | undefined, atte
   const excludeList = attempt.excludeList ?? []
   const strict = attempt.strict !== false
   const sort = normalizeSort(attempt.sort)
+  const has = (attempt.has ?? []).filter((name) => typeof name === 'string' && name.trim() !== '').map((name) => name.trim())
   const excluded = excludeList.filter((name) => normalizeSlug(name) !== normalizeSlug(upstream ?? ''))
   const excludedIds = new Set(excluded.map(normalizeSlug))
   const spell = (names: readonly string[], pipeline: ClinePipeline): string[] => names.map((name) => channelNameFor(name, pipeline))
@@ -328,7 +332,7 @@ export function injectPrefs(body: WireBody, meta: PinModelMeta | undefined, atte
   const both = attempt.spelling !== 'detected'
   const useGateway = both || pipeline === 'planner' || pipeline === null
   const useOpenRouter = both || pipeline === 'direct' || pipeline === null
-  const gatewayUsable = useGateway && (upstream !== null || sort !== null || (gatewayAllow !== null && gatewayAllow.length > 0))
+  const gatewayUsable = useGateway && (upstream !== null || sort !== null || has.length > 0 || (gatewayAllow !== null && gatewayAllow.length > 0))
   // `ignore` is OpenRouter's own exclusion field: written alongside the
   // allow-list so an exclusion still bites when the allow-list cannot be
   // computed (no channel list yet) or has gone stale.
@@ -346,6 +350,10 @@ export function injectPrefs(body: WireBody, meta: PinModelMeta | undefined, atte
       gateway.only = spell(gatewayAllow, 'planner')
     }
     if (sort !== null) gateway.sort = sort
+    // `has` is a Vercel AI Gateway capability filter, not an OpenRouter field.
+    // On models whose unfiltered pin is diverted to the anonymous fallback it
+    // is also what makes the router honor `only` and name its providers again.
+    if (has.length > 0) gateway.has = [...has]
     const providerOptions = isRecord(next.providerOptions) ? next.providerOptions : {}
     const currentGateway = isRecord(providerOptions.gateway) ? providerOptions.gateway : {}
     next.providerOptions = { ...providerOptions, gateway: { ...currentGateway, ...gateway } }
@@ -447,6 +455,8 @@ export function buildAttempts(config: PinConfig): PinAttempt[] {
   const strict = normalizePinMode(config.pinMode) === 'strict'
   const sort = normalizeSort(config.sort)
   const base: Omit<PinAttempt, 'upstream' | 'orderRest'> = { strict, sort, excludeList: exclude }
+  const has = (config.has ?? []).filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
+  if (has.length > 0) base.has = [...has]
   if (typeof config.spelling === 'string' && config.spelling.length > 0) base.spelling = config.spelling
   if (wanted.length > 0) {
     return wanted.map((upstream, index) => ({

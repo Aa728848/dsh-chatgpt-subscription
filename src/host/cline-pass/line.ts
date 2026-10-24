@@ -82,7 +82,7 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
     accountPool,
     store,
     pinFor: (model) => ({
-      ...(modelSettings.status().pins[model] ?? defaultPin()),
+      ...(modelSettings.status().pins[model] ?? defaultPin(model)),
       spelling: modelSettings.status().pinSpelling,
     }),
     baseURL: () => modelSettings.status().baseURL,

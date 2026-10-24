@@ -128,7 +128,7 @@ function projectModels(settings: ClinePassModelSettings, store: ClinePassStore):
   const enabledSet = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
   return known.map((id) => {
     const meta = store.metaOf(id)
-    const pin = settings.pins[id] ?? defaultPin()
+    const pin = settings.pins[id] ?? defaultPin(id)
     const base = resolveModelInfo(id, {
       displayName: 'Cline Pass',
       synced: settings.catalogModels,
@@ -167,6 +167,7 @@ function projectModels(settings: ClinePassModelSettings, store: ClinePassStore):
       excluded: pin.exclude,
       pinMode: normalizePinMode(pin.pinMode),
       sort: pin.sort,
+      has: [...pin.has],
       upstreams: (meta.upstreams ?? []).map(String),
       upstreamStatus: verdicts,
       lastProvider: String(meta.lastProvider ?? ''),
@@ -545,12 +546,13 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
           const model = typeof body.model === 'string' ? body.model.trim() : ''
           if (model === '') return sendJson(response, 400, { ok: false, error: 'this action needs a model id' })
-          const current = (await settingsStore.read()).pins[model] ?? defaultPin()
+          const current = (await settingsStore.read()).pins[model] ?? defaultPin(model)
           const next: ClinePassPinSettings = {
             upstreams: Array.isArray(body.upstreams) ? body.upstreams.map(String) : current.upstreams,
             exclude: Array.isArray(body.exclude) ? body.exclude.map(String) : current.exclude,
             pinMode: isClinePassPinMode(body.pinMode) ? body.pinMode : current.pinMode,
             sort: body.sort === undefined ? current.sort : (body.sort === 'none' ? '' : String(body.sort)),
+            has: Array.isArray(body.has) ? body.has.map(String).map((name) => name.trim()).filter((name) => name !== '') : current.has,
           }
           await settingsStore.setPin(model, next)
           const meta = store.metaOf(model)
@@ -634,6 +636,7 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           const result = await engine.test(model, {
             upstreams: Array.isArray(body.upstreams) ? body.upstreams.map(String) : undefined,
             exclude: Array.isArray(body.exclude) ? body.exclude.map(String) : undefined,
+            has: Array.isArray(body.has) ? body.has.map(String).map((name) => name.trim()).filter((name) => name !== '') : undefined,
           })
           const value: ClinePassTestResultDto = {
             ok: result.ok,
@@ -654,6 +657,7 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             plan: firstLine(result.plan, 300),
             fingerprint: result.fingerprint,
             anonymous: result.anonymous,
+            has: result.has,
             warnings: result.warnings,
             trace: result.trace,
           }

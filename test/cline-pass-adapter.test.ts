@@ -78,7 +78,7 @@ function adapterWith(fetchFn: typeof fetch): ClinePassAdapter {
 describe('ClinePassAdapter', () => {
   it('fails over from a refused pinned channel before the first chunk', async () => {
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
-    await settings.setPin(MODEL, { upstreams: ['baseten', 'deepseek'], exclude: [], pinMode: 'strict', sort: '' })
+    await settings.setPin(MODEL, { upstreams: ['baseten', 'deepseek'], exclude: [], pinMode: 'strict', sort: '', has: [] })
     await settings.update({ enabledModelIds: [MODEL] })
     const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -177,21 +177,27 @@ describe('ClinePassAdapter', () => {
 
   it('reads the serving channel off the terminal stream frame and marks the pin adopted', async () => {
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
-    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '' })
+    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '', has: ['vision', 'implicit-caching'] })
     await settings.update({ enabledModelIds: [MODEL] })
-    const fetchFn = (async () => new Response(
-      sseWithRouting(
-        { finalProvider: 'deepseek', canonicalSlug: 'deepseek/deepseek-v4-pro', fallbacksAvailable: [] },
-        { deepseek: { systemFingerprint: 'fp_first_party' } },
-      ),
-      { status: 200, headers: { 'content-type': 'text/event-stream' } },
-    )) as typeof fetch
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return new Response(
+        sseWithRouting(
+          { finalProvider: 'deepseek', canonicalSlug: 'deepseek/deepseek-v4-pro', fallbacksAvailable: [] },
+          { deepseek: { systemFingerprint: 'fp_first_party' } },
+        ),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )
+    }) as typeof fetch
     const adapter = adapterWith(fetchFn)
     for await (const _chunk of adapter.stream({
       provider: 'cline-pass',
       model: MODEL,
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
     } as never)) { /* drain */ }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.providerOptions).toEqual({ gateway: { only: ['deepseek'], has: ['vision', 'implicit-caching'] } })
+    expect(calls[0]?.provider).toEqual({ only: ['deepseek'] })
     const row = store.readHistory(1)[0]
     expect(row?.provider).toBe('deepseek')
     expect(row?.adherence).toBe('adopted')
@@ -205,7 +211,7 @@ describe('ClinePassAdapter', () => {
 
   it('says when a strict pin is silently served by the anonymous contributor route', async () => {
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
-    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '' })
+    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '', has: [] })
     await settings.update({ enabledModelIds: [MODEL] })
     const fetchFn = (async () => new Response(
       sseWithRouting({

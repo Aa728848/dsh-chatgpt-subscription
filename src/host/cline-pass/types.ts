@@ -97,6 +97,8 @@ export interface ClinePassModelMeta {
   /** Levels this model offers; absent keeps the whole vocabulary. */
   efforts?: readonly string[]
   input: readonly string[]
+  /** Vercel gateway capability filter needed to make its pin/harvest path answer. */
+  gatewayHas?: readonly string[]
 }
 
 /**
@@ -111,7 +113,7 @@ export const MODEL_CATALOG: Readonly<Record<string, ClinePassModelMeta>> = Objec
   // gateway's pin handling is decided per model id and has differed between
   // the stable alias and the snapshot, so the user must be able to pick the
   // exact id a probe just proved pinnable.
-  'cline-pass/deepseek-v4.1-flash-1017': { name: 'DeepSeek V4.1 Flash (1017)', contextWindow: 921_600, maxTokens: 384_000, reasoning: true, efforts: ['none', 'low', 'high', 'max'], input: ['text', 'image'] },
+  'cline-pass/deepseek-v4.1-flash-1017': { name: 'DeepSeek V4.1 Flash (1017)', contextWindow: 921_600, maxTokens: 384_000, reasoning: true, efforts: ['none', 'low', 'high', 'max'], input: ['text', 'image'], gatewayHas: ['vision', 'implicit-caching'] },
   'cline-pass/deepseek-v4.1-flash': { name: 'DeepSeek V4.1 Flash', contextWindow: 1_000_000, maxTokens: 384_000, reasoning: true, efforts: ['none', 'low', 'high', 'max'], input: ['text', 'image'] },
   'cline-pass/deepseek-v4-flash': { name: 'DeepSeek V4 Flash', contextWindow: 1_000_000, maxTokens: 384_000, reasoning: true, efforts: ['none', 'low', 'medium', 'high'], input: ['text'] },
   'cline-pass/deepseek-v4-pro': { name: 'DeepSeek V4 Pro', contextWindow: 1_000_000, maxTokens: 384_000, reasoning: true, efforts: ['none', 'low', 'high', 'max'], input: ['text'] },
@@ -143,11 +145,18 @@ export interface ClinePassPinSettings {
   exclude: string[]
   pinMode: ClinePassPinMode
   sort: string
+  /** `providerOptions.gateway.has`: required model capabilities for this pin. */
+  has: string[]
 }
 
-/** The default pin: automatic routing, no exclusions. */
-export function defaultPin(): ClinePassPinSettings {
-  return { upstreams: [], exclude: [], pinMode: 'strict', sort: '' }
+/** The capability filter a model needs by default; empty for all others. */
+export function defaultGatewayHas(model: string): string[] {
+  return [...(catalogEntry(model)?.gatewayHas ?? [])]
+}
+
+/** The default pin: automatic routing, no exclusions, model-default capabilities. */
+export function defaultPin(model = ''): ClinePassPinSettings {
+  return { upstreams: [], exclude: [], pinMode: 'strict', sort: '', has: defaultGatewayHas(model) }
 }
 
 /**
