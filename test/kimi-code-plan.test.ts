@@ -187,6 +187,10 @@ describe('buildModelOptions capabilities', () => {
     expect(byId).toEqual({
       'k3': 2,
       'k3-256k': 1,
+      // The K3.1 Pro pair publishes no multiplier against the cheapest model,
+      // so both report null rather than an invented 1x.
+      'k3.1-pro': null,
+      'k3.1-pro-highspeed': null,
       'kimi-for-coding': 1,
       'kimi-for-coding-highspeed': 3,
     })

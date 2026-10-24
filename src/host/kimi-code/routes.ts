@@ -263,7 +263,17 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   return {
     ...stats,
     ...(lastDrift === undefined ? {} : { lastDrift }),
-    cacheWriteTokensNote: 'always-zero-on-this-route',
+    // The three write counters are real values now, from two places the mapper
+    // owns: the TOTAL comes from the wire's own usage field
+    // (cache_creation_input_tokens on Anthropic, prompt_tokens_details.
+    // cache_write_tokens on chat-completions), and the 5m/1h SPLIT comes from
+    // the Msh-Usage-Cache-Write-Tokens-5m / -1h response headers — the body
+    // never states the split. All three are already rolling totals in `stats`;
+    // they are named here so the DTO's write counters stay visible in one place
+    // instead of two of them hiding in a spread.
+    cacheWriteTokens: stats.cacheWriteTokens,
+    cacheWrite5mTokens: stats.cacheWrite5mTokens,
+    cacheWrite1hTokens: stats.cacheWrite1hTokens,
   }
 }
 

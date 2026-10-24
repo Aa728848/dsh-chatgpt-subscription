@@ -99,6 +99,14 @@ export interface KimiCodeModelOption {
   reasoningEfforts?: string[]
   /** Thinking level used when the conversation does not pick one. */
   defaultReasoningEffort?: string
+  /**
+   * How the model handles thinking, when anything states it.
+   *
+   * `only` is the one value that changes what the card may offer: the model
+   * reasons at every level and rejects a disabled-thinking request outright, so
+   * the effort list it publishes must never contain `none`.
+   */
+  thinkingType?: KimiCodeThinkingType
   /** Request/response dialect the adapter uses on the wire. */
   wire: KimiCodeWire
   /** Human description from the official model table. */
@@ -276,14 +284,30 @@ export interface KimiCodeCacheStatsDto {
    */
   lastDrift?: 'first-request' | 'stable' | 'system-prompt' | 'tools' | 'cache-key' | 'cold-key'
   /**
-   * Always 0 on this route: the endpoint writes cache entries without counting
-   * them, so there is no write cost to track.
+   * Cache-write tokens the service reported for these requests.
    *
-   * Reported rather than dropped so the shape stays aligned with the sibling
-   * providers that DO report writes, and so a route that starts counting them
-   * needs no contract change.
+   * A field of its own rather than part of the prompt totals: a cache write is
+   * billed differently from a fresh prompt token, and folding it into
+   * {@link freshTokens} would make the hit ratio describe something other than
+   * what it says. 0 when the service reported no write.
    */
-  cacheWriteTokensNote?: 'always-zero-on-this-route'
+  cacheWriteTokens: number
+  /**
+   * Share of {@link cacheWriteTokens} the service attributed to the 5m tier.
+   *
+   * Read from the `Msh-Usage-Cache-Write-Tokens-5m` response header, which the
+   * write is split across because the tier a prefix was written with decides
+   * how long it stays reusable. Recorded as 0 when the header is absent — an
+   * absent header is silence, not a claim that nothing was written to the tier.
+   */
+  cacheWrite5mTokens: number
+  /**
+   * Share of {@link cacheWriteTokens} the service attributed to the 1h tier.
+   *
+   * Read from the `Msh-Usage-Cache-Write-Tokens-1h` response header; 0 when it
+   * is absent, under the same rule as {@link cacheWrite5mTokens}.
+   */
+  cacheWrite1hTokens: number
 }
 
 /**

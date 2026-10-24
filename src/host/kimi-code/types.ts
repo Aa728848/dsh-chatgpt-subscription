@@ -18,7 +18,12 @@
  * https://www.kimi.com/code/docs/en/kimi-code/error-reference.html
  */
 
-import type { KimiCodeReasoningEffort, KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
+import type {
+  KimiCodeReasoningEffort,
+  KimiCodeRegion,
+  KimiCodeThinkingType,
+  KimiCodeWire,
+} from '../../shared/kimi-code-contracts.ts'
 import { KIMI_CODE_MODELS, kimiCodeModelDef } from './model-catalog.ts'
 import { MAX_MESSAGE_BODY_BYTES, MAX_REQUEST_IMAGE_BYTES } from '../common/request-images.ts'
 
@@ -330,18 +335,79 @@ export const ANTHROPIC_VERSION = '2023-06-01'
 /**
  * Which wire dialect a model id is served over.
  *
- * The managed service speaks both protocols for every model, so the choice is a
- * client preference rather than a per-model constraint. The OpenAI dialect is
- * the default because that is what the official CLI configures for the managed
- * provider.
+ * Always the OpenAI-compatible chat completions dialect: this line uses that one
+ * protocol for every model, K3.1 Pro included, which is what the official agent
+ * configures for the managed provider (`type = "kimi"`). The Anthropic Messages
+ * dialect remains reachable only when a live listing declares it for an id
+ * (see `wireForCatalogEntry`), so the answer here is a constant rather than a
+ * per-model table.
  */
 export function wireForModel(_modelId: string): KimiCodeWire {
   return 'openai'
 }
 
-/** Thinking levels one model advertises, from the static registry. */
+/**
+ * Thinking levels one model advertises, from the static registry.
+ *
+ * A registry row that declares `thinkingType: 'only'` cannot be asked to stop
+ * reasoning — the service answers HTTP 400 for a disabled-thinking request — so
+ * `none` is filtered out of the list it publishes.
+ */
 export function reasoningEffortsFor(modelId: string): string[] {
-  return [...(kimiCodeModelDef(modelId)?.reasoningEfforts ?? [])]
+  const declared = kimiCodeModelDef(modelId)?.reasoningEfforts ?? []
+  if (kimiCodeModelDef(modelId)?.thinkingType === 'only') {
+    return declared.filter((effort) => effort !== 'none')
+  }
+  return [...declared]
+}
+
+/**
+ * Thinking level one model uses when the conversation does not pick one.
+ *
+ * A declared default that the resolved effort list no longer contains is
+ * dropped rather than carried through: with `only` in force the list can lose
+ * `none`, and a default naming a level the model can no longer be asked for
+ * would fail on the first turn that relied on it.
+ */
+export function defaultReasoningEffortFor(modelId: string): KimiCodeReasoningEffort | undefined {
+  const declared = kimiCodeModelDef(modelId)?.defaultReasoningEffort ?? undefined
+  if (declared === null || declared === undefined) return undefined
+  return reasoningEffortsFor(modelId).includes(declared) ? declared : undefined
+}
+
+/**
+ * How a model handles thinking, from the static registry.
+ *
+ * Exposed so the request builder and the settings card read the same row rather
+ * than each re-deriving the rule; `undefined` means the registry says nothing
+ * about this id, which is not the same as "thinking can be switched off".
+ */
+export function thinkingTypeFor(modelId: string): KimiCodeThinkingType | undefined {
+  return kimiCodeModelDef(modelId)?.thinkingType
+}
+
+/**
+ * Raise a disabled-thinking request to a level the model can actually run.
+ *
+ * Asking a thinking-only model for `none` is refused by the service with
+ * HTTP 400 ("K3.1 Pro does not support disabled thinking mode"), and the user's
+ * real intent there is "don't spend my quota on thinking", not "fail the turn".
+ * So the effort is lifted to the model's own default — `max` for the K3.1 pair —
+ * and the lift is REPORTED through `coercedFrom` so a caller can tell the user
+ * what happened instead of silently spending more than they asked for.
+ *
+ * A model that does not declare `only`, and any effort other than `none`, is
+ * returned untouched. When a thinking-only row declares no default the effort
+ * becomes `undefined`, which sends no level at all and leaves the service on its
+ * own default — still never a disabled-thinking request.
+ */
+export function coerceThinkingEffort(
+  modelId: string,
+  effort: KimiCodeReasoningEffort | undefined,
+): { effort: KimiCodeReasoningEffort | undefined; coercedFrom: 'none' | null } {
+  if (effort !== 'none') return { effort, coercedFrom: null }
+  if (thinkingTypeFor(modelId) !== 'only') return { effort, coercedFrom: null }
+  return { effort: defaultReasoningEffortFor(modelId), coercedFrom: 'none' }
 }
 
 /**

@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- **[kimi-code] 新增 K3.1 Pro 系列（与其它模型同一 OpenAI 兼容 chat completions）、只支持思考的档位、以及缓存写入这个计费项**
+  - **现象**：`k3.1-pro` / `k3.1-pro-highspeed` 不在模型目录、设置卡与能力表里；「默认思考档位」永远列着 `low` / `high` / `max` 与「关闭思考」，而 K3.1 Pro 根本关不掉（服务端 400）；缓存区块只有命中率、命中 / 新处理 / 输出 tokens 与请求数，**写入**这个独立计费项一个数字都没有，看不出 5m / 1h 两档各写了多少。
+  - **模型目录**：两条新条目按官方型号表写入（`k3.1-pro` 默认 256K、可覆盖到 1M；`k3.1-pro-highspeed` 1M），含 `thinkingType: 'only'`、`defaultReasoningEffort: 'max'` 与 `quotaMultiplier: null`（官方未公布相对倍率，卡片显示「未公布」而不是猜成 1×）。**协议不新增分支**：本线路对全部模型只走 OpenAI 兼容 chat completions（与官方 agent 的 `type = "kimi"` 一致），因此 K3.1 Pro 的请求照常发往 `/v1/chat/completions`，视频输入按型号表声明可用。
+  - **thinking-only**：`types.ts` 增 `thinkingTypeFor` / `defaultReasoningEffortFor` / `coerceThinkingEffort`，`reasoningEffortsFor` 对 `only` 行剔除 `none`；`adapter.ts` 在构建 body 之前加一道闸门（THE THINKING GATE）：被禁的 `none` 抬到模型默认档并通过 `recordThinkingCoercion` 记录（`KIMI_CODE_THINKING_COERCED` 警告），而不是让整轮失败。
+  - **缓存写入**：总量读 `usage.prompt_tokens_details.cache_write_tokens`（chat）与 `cache_creation_input_tokens`（Anthropic），5m / 1h 分档读 `Msh-Usage-Cache-Write-Tokens-5m/-1h` 响应头；`KimiCodeCacheStatsDto` 的 `cacheWriteTokens` / `cacheWrite5mTokens` / `cacheWrite1hTokens` 由 `routes.ts` 填真值（原 `cacheWriteTokensNote: 'always-zero-on-this-route'` 占位删除）。chat wire 的新处理量改为 `total − cached − written`（三者互斥），Anthropic 的 `input_tokens` 仍不减——它本身不含缓存。
+  - **改法（客户端）**：新增 `src/client/kimi-code/labels.ts`——`wireLabel`、`effortLadder`（读模型声明的档位，`thinkingType === 'only'` 时剔除 `none`）、`canDisableThinking`、`effortOptions`（取已勾选模型的并集；「关闭思考」是开关不是档位，任一勾选模型允许它就保留），两张卡片都从这里取标签。档位下拉改由 `effortOptions` 驱动；存着的档位若所有勾选模型都不接受，仍保留该选项并标注「当前勾选的模型不接受」。只支持思考的模型在档位旁给一句说明（含模型名与 400），能力表新增「只支持思考」标记与脚注。缓存区块新增一行 `缓存写入 = 总量 · 5 分钟档 · 1 小时档`，**0 也照实显示**（空白会被读成「没有测量」）。
+  - **改法（三语）**：`kimi-code/locales.ts`（zh + en）与 `locales-ru/kimi-code.ts` 同步新增 `capThinkingOnly` / `capEfforts` / `capThinkingOnlyFootnote` / `effortThinkingOnlyNote` / `effortNotOffered` / `quotaUnknown` / `cacheWrite` / `cacheWrite5m` / `cacheWrite1h` / `cacheWriteHint` / `unknownMetric`，并按官方口径重写 `cacheTtlHint`、`cacheTtlDefault`、`defaultReasoningEffortHint`；俄语包键集由 `Record<KimiCodeLocaleKey, string>` 在编译期强制，缺一个键 `tsc` 就红。
+  - **测试**：新增 `test/kimi-code-k31.test.ts`（17 例：两条条目的全部字段、thinking-only 语义、双值 wire 与视频按声明保留、卡片契约字段）、`test/kimi-code-k31-card-ui.test.tsx`（8 例）、`test/kimi-code-effort-ladder.test.ts`（6 例）与 `test/kimi-code-cache-write.test.ts`（9 例：chat wire 的 usage 三分解、Anthropic 不减、响应头分档、以及 thinking 闸门在 chat / Anthropic 两条 wire 上的行为）；`test/kimi-code-capability-ui.test.tsx` 补「未公布倍率」与「只支持思考 + 400 脚注」两例。
+  - **验证**：`npm run typecheck` 三工程 0 错误；全量 `npm test` 281 文件通过 / 2 skipped，4633 passed / 8 skipped / 0 failed（删掉的用例全部只属于已撤除的 Responses 分支）。
+  - **文档**：README 的线路总览把 Kimi 的协议列改为「OpenAI 兼容 Chat Completions（可选 Anthropic Messages）」，模型目录由四款改为六款，补缓存写入那一行、倍率表里的两个「未公布」，并明确「本线路对全部模型使用 OpenAI 兼容 chat completions（与官方 agent 的 `type = "kimi"` 一致）」、视频清单加入 `k3.1-pro`，以及设置步骤里「默认思考档位跟随模型声明」。
 
 ## 0.37.0 - 2026-10-23
 - **[progress-updates] 进展更新补上「开局」与「收尾」两条硬要求**

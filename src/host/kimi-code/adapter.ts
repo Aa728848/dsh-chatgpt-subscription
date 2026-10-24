@@ -24,6 +24,7 @@ import {
   STREAM_IDLE_TIMEOUT_MS,
   clampOutputToContext,
   codingBaseUrl,
+  coerceThinkingEffort,
   effectiveContextWindow,
   maxMessageBodyBytes,
   maxOutputTokensFor,
@@ -54,16 +55,19 @@ import {
   wireForCatalogEntry,
 } from './client.ts'
 import {
+  applyCacheWriteTiers,
   assertRequestBodyFits,
   assertStreamComplete,
   buildRequest,
   closeStream,
   createStreamState,
   estimatedInputTokens,
+  mapReasoningEffort,
   MAX_REQUEST_VIDEO_BYTES,
   offloadOldestRequestVideos,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
+  recordThinkingCoercion,
   requestHasVideo,
   resolveRequestImages,
   resolveRequestVideos,
@@ -820,7 +824,31 @@ export class KimiCodeAdapter extends LlmAdapter {
       maxRequestImageBytes(),
       images,
     )
-    const requestOptions = offloadOldestRequestVideos(imageTrimmed, MAX_REQUEST_VIDEO_BYTES)
+    // THE THINKING GATE, for every wire.
+    //
+    // The service answers HTTP 400 for a disabled-thinking request on a model
+    // that cannot stop reasoning ("K3.1 Pro does not support disabled thinking
+    // mode"), and no wire can express "off" for such a model at all. The
+    // caller's real intent is "spend less", not "fail", so the level is lifted
+    // to the model's own default and the lift is recorded rather than swallowed.
+    // Applied here, before the body is built, so no builder can be reached with a
+    // level the service would refuse.
+    const gatedEffort = coerceThinkingEffort(
+      options.model,
+      mapReasoningEffort(options.reasoningEffort === undefined || options.reasoningEffort === null
+        ? undefined
+        : String(options.reasoningEffort)),
+    )
+    if (gatedEffort.coercedFrom !== null) {
+      recordThinkingCoercion(
+        { model: options.model, wire, from: gatedEffort.coercedFrom, to: gatedEffort.effort },
+        options.sessionId,
+      )
+    }
+    const videoTrimmed = offloadOldestRequestVideos(imageTrimmed, MAX_REQUEST_VIDEO_BYTES)
+    const requestOptions: NormalizedGenerateOptions = gatedEffort.effort === undefined
+      ? videoTrimmed
+      : { ...videoTrimmed, reasoningEffort: ReasoningEffortId(gatedEffort.effort) }
     const videos = await resolveRequestVideos(requestOptions, this.options.videos, signal)
     const settings = await this.settings()
     const media = {
@@ -1035,6 +1063,10 @@ export class KimiCodeAdapter extends LlmAdapter {
     // conversation when the stream closes; the account is passed separately
     // below, once rotation has settled on one.
     const state = createStreamState(wire, requestOptions.sessionId)
+    // The per-tier split of the cache write exists ONLY in the response headers
+    // (the body states the total), so it is read here — the one place the
+    // Response is in hand — and filed with the rest of the usage at close time.
+    applyCacheWriteTiers(state, response.headers)
     // Recorded after the turn is built and sent, so the timestamp answers when
     // this conversation last ran — the input the cache-expiry hint needs.
     markSessionActive(requestOptions.sessionId)

@@ -6,7 +6,6 @@ import type {
   KimiCodeReasoningEffort,
   KimiCodeWebStatus,
 } from '../../shared/kimi-code-contracts.ts'
-import { KIMI_CODE_REASONING_EFFORTS } from '../../shared/kimi-code-contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor, contextDraftsFor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
@@ -15,6 +14,7 @@ import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh, NS_KIMI_CODE } from './locales.ts'
+import { effortLabel, effortOptions, thinkingOnlyModels, wireLabel } from './labels.ts'
 import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
 import { useLineDict } from '../common/line-locale.ts'
 
@@ -37,14 +37,15 @@ function formatMoney(cents: number | null, currency: string | null): string {
   }
 }
 
-function effortLabel(effort: KimiCodeReasoningEffort, t: typeof zh): string {
-  switch (effort) {
-    case 'low': return t.effortLow
-    case 'high': return t.effortHigh
-    case 'max': return t.effortMax
-    case 'none': return t.effortNone
-    default: return effort
-  }
+/**
+ * One token count as the card prints it.
+ *
+ * A reported zero prints as "0": zero writes is a reading, while a blank cell
+ * reads as "nothing was measured", and the two are different claims. Only a
+ * number this build cannot read at all falls back to "暂无".
+ */
+function tokenCount(value: number | undefined, t: typeof zh): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : t.unknownMetric
 }
 
 /** Human label for the last request's prefix-drift cause. */
@@ -427,8 +428,18 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
 
   const quota = status?.quota
   const account = status?.account
-  const visibleCount = status?.models.filter((model) => model.enabled).length || 0
+  const models = status?.models ?? []
+  const visibleCount = models.filter((model) => model.enabled).length || 0
   const loginPending = flow?.status === 'pending'
+  // The effort menu follows what the CHECKED models declare (see `labels.ts`),
+  // so a model that only thinks simply leaves no "thinking off" to pick.
+  const offeredEfforts = effortOptions(models)
+  const savedEffort = status?.defaultReasoningEffort ?? null
+  // A level the checked models no longer accept stays visible and flagged: the
+  // stored setting is still there, and an option that vanished would leave the
+  // select rendering nothing at all.
+  const staleEffort = savedEffort !== null && !offeredEfforts.includes(savedEffort) ? savedEffort : null
+  const thinkingOnly = thinkingOnlyModels(models.filter((model) => model.enabled))
 
   return (
     <div className="dsha-page">
@@ -566,6 +577,22 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
                 <span className="dsha-value">{driftLabel(status.cache.lastDrift, t)}</span>
               </div>
             )}
+            {/* The write side gets its own row rather than a slot in the meter:
+                a write is billed separately from a fresh prompt token, and
+                folding it into the fresh count would make the hit ratio above
+                describe something other than what it says. Zero still renders —
+                see `tokenCount`. */}
+            <div className="dsha-row">
+              <span className="dsha-label">{t.cacheWrite}</span>
+              <span className="dsha-value">
+                {tokenCount(status.cache.cacheWriteTokens, t)}
+                {' · '}
+                {t.cacheWrite5m} {tokenCount(status.cache.cacheWrite5mTokens, t)}
+                {' · '}
+                {t.cacheWrite1h} {tokenCount(status.cache.cacheWrite1hTokens, t)}
+              </span>
+            </div>
+            <p className="dsha-muted">{t.cacheWriteHint}</p>
             <p className="dsha-muted">{t.cacheHint}</p>
           </div>
         )}
@@ -580,11 +607,12 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         </div>
         <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
         <ModelChecklist
-          items={(status?.models ?? []).map((model: KimiCodeModelOption) => ({
+          items={models.map((model: KimiCodeModelOption) => ({
             id: model.id,
             name: model.name,
             hint: [
-              model.wire === 'anthropic' ? t.wireAnthropic : t.wireOpenai,
+              wireLabel(model.wire, t),
+              ...(model.thinkingType === 'only' ? [t.capThinkingOnly] : []),
               ...(model.supportsVideo ? [t.capVideo] : []),
               ...(model.supportsDynamicTools ? [t.capDynamicTools] : []),
               ...(model.minimumPlan ? [t.capPlan.replace('{plan}', model.minimumPlan)] : []),
@@ -596,7 +624,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           onToggleAll={setAllModels}
           labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
         />
-        {status !== null && status.models.length > 0 && <KimiModelCapabilities models={status.models} />}
+        {status !== null && models.length > 0 && <KimiModelCapabilities models={models} />}
       </section>
 
       <section className="dsha-group">
@@ -619,11 +647,24 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
             }}
           >
             <option value="">{t.defaultEffortAuto}</option>
-            {KIMI_CODE_REASONING_EFFORTS.map((effort) => (
+            {offeredEfforts.map((effort) => (
               <option key={effort} value={effort}>{effortLabel(effort, t)}</option>
             ))}
+            {staleEffort !== null && (
+              <option value={staleEffort}>
+                {effortLabel(staleEffort, t)} · {t.effortNotOffered}
+              </option>
+            )}
           </select>
         </div>
+        {thinkingOnly.length > 0 && (
+          // Said on the card rather than left to the missing option: the next
+          // question a user asks is "why is thinking off gone", and the answer
+          // is that the service rejects it with HTTP 400.
+          <p className="dsha-notice">
+            {t.effortThinkingOnlyNote.replace('{models}', thinkingOnly.map((model) => model.name).join(' · '))}
+          </p>
+        )}
         <div className="dsha-pref-row">
           <div>
             <strong>{t.cacheTtl}</strong>

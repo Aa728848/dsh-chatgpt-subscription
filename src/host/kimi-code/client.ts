@@ -9,6 +9,7 @@ import {
   maxOutputTokensFor,
   openAIUrl,
   reasoningEffortsFor,
+  thinkingTypeFor,
   wireForModel,
 } from './types.ts'
 import {
@@ -577,7 +578,12 @@ export function wireForCatalogEntry(modelId: string, catalog: readonly KimiCodeC
 export function reasoningEffortsForEntry(modelId: string, catalog: readonly KimiCodeCatalogModel[]): string[] {
   const entry = catalog.find((model) => model.id === modelId)
   const declared = entry?.reasoningEfforts ?? reasoningEffortsFor(modelId)
-  switch (entry?.thinkingType) {
+  // Precedence is the live listing, then the shipped registry: a server that
+  // says nothing about thinking must not turn a thinking-only model into a
+  // switchable one. Without the static half a cold start — or an offline
+  // settings card — offered `none` for an id whose 400 the registry already
+  // documents.
+  switch (entry?.thinkingType ?? thinkingTypeFor(modelId)) {
     case 'no':
       return []
     case 'only':
@@ -675,6 +681,7 @@ export function buildModelOptions(
       : model.contextWindow ?? DEFAULT_CONTEXT_WINDOW
     const efforts = reasoningEffortsForEntry(model.id, catalog)
     const defaultEffort = defaultReasoningEffortForEntry(model.id, catalog)
+    const thinkingType = model.thinkingType ?? thinkingTypeFor(model.id)
     // The window bounds the completion budget; the input cap, when the service
     // states one, bounds the prompt. A model declaring a lower input limit is
     // reported at that limit so a caller sizes the turn against the number the
@@ -694,6 +701,7 @@ export function buildModelOptions(
       defaultMaxTokens: maxOutputTokensFor(model.id, contextWindow),
       ...(efforts.length === 0 ? {} : { reasoningEfforts: [...efforts] }),
       ...(defaultEffort === undefined ? {} : { defaultReasoningEffort: defaultEffort }),
+      ...(thinkingType === undefined ? {} : { thinkingType }),
       wire: model.protocol ?? wireForModel(model.id),
       // The live catalog carries capabilities but not the marketing copy, so
       // the static registry fills the gaps rather than the card showing blanks.

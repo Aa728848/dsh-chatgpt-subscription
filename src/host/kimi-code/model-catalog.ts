@@ -7,7 +7,7 @@
  * a request body, or the service answers 401 "Your model id does not exist".
  */
 
-import type { KimiCodeReasoningEffort } from '../../shared/kimi-code-contracts.ts'
+import type { KimiCodeReasoningEffort, KimiCodeThinkingType } from '../../shared/kimi-code-contracts.ts'
 
 /** One model the Kimi Code endpoint serves to subscription accounts. */
 export interface KimiCodeCatalogModel {
@@ -37,6 +37,15 @@ export interface KimiCodeCatalogModel {
   reasoningEfforts: readonly KimiCodeReasoningEffort[]
   /** Thinking level used when the conversation does not pick one. */
   defaultReasoningEffort: KimiCodeReasoningEffort | null
+  /**
+   * How the model handles thinking, when the official table states it.
+   *
+   * `only` means the model reasons at every level and the service rejects a
+   * disabled-thinking request with HTTP 400, so its effort list must never be
+   * offered with `none` in it. Absent for every model whose table entry does
+   * not say, which is not the same as "can be switched off".
+   */
+  thinkingType?: KimiCodeThinkingType
   /** Subscription tier needed for the full model, when not every member has it. */
   minimumPlan: string | null
   /** Subscription tier needed for the full context window, when it differs. */
@@ -57,14 +66,21 @@ export interface KimiCodeCatalogModel {
    * `supports_dynamic_tools` overrides this flag, including to turn it off.
    */
   supportsDynamicTools: boolean
-  /** Relative quota cost of this model against the cheapest one. */
-  quotaMultiplier: number
+  /**
+   * Relative quota cost of this model against the cheapest one.
+   *
+   * `null` where the official table publishes no multiplier for the id. The
+   * number is never guessed: this field is the only place a user can see why
+   * one model spends quota faster than another, so an invented 1x would
+   * understate a model that is really 2x or 3x.
+   */
+  quotaMultiplier: number | null
   /** How fast the model emits output. */
   speed: 'regular' | 'highspeed'
 }
 
 /**
- * The four ids the subscription serves today.
+ * The ids the subscription serves today.
  *
  * `kimi-for-coding` is the alias that never changes: Moonshot upgrades the model
  * behind it in place (K2.7 Code became K2.8 Preview without a config change), so
@@ -140,6 +156,65 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     description: 'The high-speed version of K2.7 Code with the same coding ability and roughly 5-6x faster output, at 3x quota usage. Requires the Allegretto plan or above.',
     supportsDynamicTools: false,
     quotaMultiplier: 3,
+    speed: 'highspeed',
+  },
+  // The K3.1 Pro pair is appended rather than inserted: the rows above are the
+  // ids a user already has selected, and their order is what a picker built
+  // from this array shows first.
+  {
+    id: 'k3.1-pro',
+    name: 'K3.1 Pro',
+    version: 'K3.1 Pro',
+    // Same shape as k3 and for the same reason: the published default is the
+    // Plus/Moderato 256K bound, and a Moderato session that silently grew to 1M
+    // would be refused instead of compacting. That refusal is an account-limit
+    // 403 carrying "Your current plan supports only k3.1-pro up to 256K context"
+    // (error-reference.html), which is a plan bound rather than a bad request.
+    // Pro/Allegretto and above raise it with the context-window override.
+    contextWindow: 262_144,
+    maxContextWindow: 1_048_576,
+    maxTokens: 32_768,
+    inputModalities: ['text', 'image', 'video'],
+    reasoningEfforts: ['low', 'high', 'max'],
+    // The official table states thinking defaults to max for this family.
+    defaultReasoningEffort: 'max',
+    // "K3.1 Pro does not support disabled thinking mode" (HTTP 400, see
+    // error-reference.html): thinking cannot be turned off, so 'none' is never
+    // offered for this id.
+    thinkingType: 'only',
+    minimumPlan: 'Moderato',
+    contextPlan: 'Allegretto',
+    description: 'The K3.1 Pro flagship: 3T parameters, a 256K context window on Plus/Moderato and 1M on Pro/Allegretto and above. Thinking runs at low/high/max, defaults to max, and cannot be disabled.',
+    supportsDynamicTools: true,
+    // UNPUBLISHED: the official pages state no quota multiplier for this id
+    // relative to k3-256k, so it is reported as unknown rather than guessed.
+    quotaMultiplier: null,
+    speed: 'regular',
+  },
+  {
+    id: 'k3.1-pro-highspeed',
+    name: 'K3.1 Pro Highspeed',
+    version: 'K3.1 Pro Highspeed',
+    // 1M is the only context this model is offered with, on Pro/Allegretto and
+    // above; there is no smaller tier to fall back to, so no maxContextWindow.
+    contextWindow: 1_048_576,
+    maxContextWindow: null,
+    maxTokens: 32_768,
+    inputModalities: ['text', 'image', 'video'],
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'max',
+    // Same official statement as k3.1-pro: "K3.1 Pro does not support disabled
+    // thinking mode" (HTTP 400), so 'none' is never offered for this id either.
+    thinkingType: 'only',
+    minimumPlan: 'Allegretto',
+    contextPlan: null,
+    description: 'The high-speed K3.1 Pro with a 1M context window and faster output, at about twice the quota of the regular version. Requires the Pro/Allegretto plan or above.',
+    supportsDynamicTools: true,
+    // UNPUBLISHED: the only quota statement is the qualitative "about 2x the
+    // regular version", which is a comparison inside the K3.1 pair rather than
+    // the multiplier-against-the-cheapest-model this field carries. Reported as
+    // unknown here and stated in the description instead of being guessed.
+    quotaMultiplier: null,
     speed: 'highspeed',
   },
 ]

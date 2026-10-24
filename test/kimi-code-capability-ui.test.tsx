@@ -89,6 +89,24 @@ describe('Kimi capability table', () => {
     expect(none).not.toContain('dsha-cap-footnote')
   })
 
+  it('marks a thinking-only model and states the 400 behind the missing level', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[
+      model({
+        id: 'k3.1-pro',
+        name: 'K3.1 Pro',
+        thinkingType: 'only',
+        reasoningEfforts: ['low', 'high', 'max'],
+        defaultReasoningEffort: 'max',
+      }),
+    ]} />)
+    const title = /title="([^"]*)"/.exec(html)?.[1] ?? ''
+    expect(title).toContain('只支持思考')
+    // The ladder is read from the model, not assumed from the wire or the id.
+    expect(title).toContain('档位 low / high / max')
+    expect(html).toContain('只支持思考」的模型不能关闭思考')
+    expect(html).toContain('400')
+  })
+
   it('renders an empty notes cell rather than the word null', () => {
     const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ description: null })]} />)
     expect(html).not.toContain('null')
@@ -102,12 +120,20 @@ describe('Kimi capability table', () => {
     expect(/title="([^"]*)"/.exec(html)?.[1] ?? '').toContain('额度倍率: 2x')
   })
 
-  it('omits the multiplier for an id the registry has no row for', () => {
+  it('states an unpublished multiplier rather than leaving the cell blank', () => {
     // The live catalog publishes no multiplier, so a model it adds is reported
     // as unknown. Rendering a guessed 1x would understate a 2x model on the one
-    // page whose whole purpose is telling the user what costs more.
+    // page whose whole purpose is telling the user what costs more — but a cell
+    // with no cost line at all reads as a row the table skipped, so the absence
+    // is named. The facts hover keeps its shape and does not repeat it.
     const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ quotaMultiplier: null })]} />)
-    expect(html).not.toContain('额度倍率')
-    expect(html).not.toContain('dsha-cap-cost')
+    // Its own line, in the tertiary class a value that is NOT published gets
+    // rather than the primary class a real multiplier gets: stated, but never
+    // dressed up as a number.
+    expect(html).toContain('<div class="dsha-cap-off">额度倍率 未公布</div>')
+    expect(html).not.toMatch(/额度倍率\s*\d/)
+    const title = /title="([^"]*)"/.exec(html)?.[1] ?? ''
+    expect(title).not.toContain('额度倍率')
+    expect(title).not.toContain('未公布')
   })
 })

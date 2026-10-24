@@ -1484,6 +1484,18 @@ export interface KimiCodeStreamState {
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+  /**
+   * How the cache write above splits across the two TTL tiers.
+   *
+   * Read from the RESPONSE HEADERS rather than from the body: the service states
+   * the totals in `usage`, and the per-tier split only in
+   * `Msh-Usage-Cache-Write-Tokens-5m` / `...-1h`. The adapter reads them off the
+   * `Response` it just received (the only place they exist) and writes them here,
+   * so the rolling totals below have both halves. Absent headers leave both at
+   * 0, which the contract defines as silence rather than as a claim.
+   */
+  cacheWrite5mTokens: number
+  cacheWrite1hTokens: number
   reasoningTokens: number
   sawUsage: boolean
   /**
@@ -1521,6 +1533,8 @@ export function createStreamState(wire: KimiCodeWire, sessionId?: string): KimiC
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    cacheWrite5mTokens: 0,
+    cacheWrite1hTokens: 0,
     reasoningTokens: 0,
     sawUsage: false,
     toolCallIds: new ToolCallIdNormalizer(),
@@ -1602,8 +1616,16 @@ export function processOpenAIStreamLine(line: string, state: KimiCodeStreamState
     const prompt = numberOr(usage.prompt_tokens, 0)
     const details = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined
     const cached = details ? numberOr(details.cached_tokens, 0) : 0
-    state.inputTokens = Math.max(0, prompt - cached)
+    // `prompt_tokens` on this dialect is the TOTAL input: the hit and the write
+    // are both inside it, and the three parts are disjoint
+    // ("`cached_tokens`、`cache_write_tokens` 与未缓存部分互斥，三者之和等于
+    // `input_tokens`"). A fresh count that subtracts only the hit would report the written
+    // tokens a second time, so both are taken out — and `max(0, …)` guards a
+    // service whose parts do not add up rather than emitting a negative count.
+    const written = details ? numberOr(details.cache_write_tokens, 0) : 0
+    state.inputTokens = Math.max(0, prompt - cached - written)
     state.cacheReadTokens = cached
+    state.cacheWriteTokens = written
     state.outputTokens = numberOr(usage.completion_tokens, state.outputTokens)
     if (isRecord(usage.completion_tokens_details)) {
       state.reasoningTokens = numberOr(usage.completion_tokens_details.reasoning_tokens, state.reasoningTokens)
@@ -2023,6 +2045,108 @@ export function getLastDriftCause(sessionId?: string): PrefixDriftCause | undefi
 }
 
 /**
+ * One request whose disabled-thinking level had to be raised.
+ *
+ * The service answers HTTP 400 for "thinking off" on a model that cannot stop
+ * reasoning, and the user's real intent there is "spend less", not "fail the
+ * turn" — so the latch lifts the level to the model's own default (see
+ * coerceThinkingEffort). Lifting it silently would spend more quota than was
+ * asked for with nothing saying why, which is why the lift is both RECORDED here
+ * (so a caller can read it back per session, the way the drift cause is read
+ * back) and ANNOUNCED on the process warning channel.
+ */
+export interface KimiCodeThinkingCoercion {
+  /** Model whose declaration forbade the requested level. */
+  model: string
+  /** Wire the request was built for, since the gate runs for both. */
+  wire: KimiCodeWire
+  /** The level that could not be sent. Only 'none' is ever lifted. */
+  from: 'none'
+  /** The level actually sent; undefined means "no level at all". */
+  to: KimiCodeReasoningEffort | undefined
+}
+
+/** Last lift per session. */
+const thinkingCoercions = new Map<string, KimiCodeThinkingCoercion>()
+
+/**
+ * Record one lift, and make it visible.
+ *
+ * `process.emitWarning` rather than a thrown error or a silently swallowed
+ * value: the request must still go out (that is the whole point of the lift),
+ * but a diagnostic that reaches stderr with a stable code is what keeps it from
+ * being invisible. It is emitted once per turn, and only for a model that
+ * actually declares thinking-only, so a deployment that never asks for 'none'
+ * never sees one.
+ */
+export function recordThinkingCoercion(coercion: KimiCodeThinkingCoercion, sessionId?: string): void {
+  rememberScoped(thinkingCoercions, cacheScopeKey(sessionId), coercion)
+  const target = coercion.to === undefined ? 'the service default' : '"' + coercion.to + '"'
+  process.emitWarning(
+    '[kimi-code] model "' + coercion.model + '" cannot disable thinking; sending ' + target
+      + ' instead of "none" on the ' + coercion.wire + ' wire.',
+    { code: 'KIMI_CODE_THINKING_COERCED' },
+  )
+}
+
+/**
+ * The lift recorded for one session, if any.
+ *
+ * `undefined` for a session that never asked for a disabled level, rather than a
+ * default value: "no lift happened" and "a lift happened to the same value" are
+ * different facts and only the absent case can say the first.
+ */
+export function getLastThinkingCoercion(sessionId?: string): KimiCodeThinkingCoercion | undefined {
+  return thinkingCoercions.get(cacheScopeKey(sessionId))
+}
+
+/**
+ * Response headers that split a cache write across its two TTL tiers.
+ *
+ * The service states the write TOTAL in 'usage' and the per-tier split only in
+ * these headers, so the split has to be read off the HTTP response — there is no
+ * body field for it. Both are decimal integers; a missing or non-numeric value
+ * means the header said nothing, which is recorded as 0 rather than guessed at
+ * (see KimiCodeCacheStatsDto.cacheWrite5mTokens: an absent header is silence,
+ * not a claim that nothing was written to that tier).
+ */
+export const CACHE_WRITE_5M_HEADER = 'Msh-Usage-Cache-Write-Tokens-5m'
+export const CACHE_WRITE_1H_HEADER = 'Msh-Usage-Cache-Write-Tokens-1h'
+
+/** Decimal whole-token count from one response header, or 0 when it is silent. */
+function headerCount(headers: Headers, name: string): number {
+  const raw = headers.get(name)
+  if (raw === null) return 0
+  const text = raw.trim()
+  // A strict integer spelling only: Number('') is 0 and Number('1e3') is 1000,
+  // and neither describes a token count the service meant to state.
+  if (!/^\d+$/.test(text)) return 0
+  const value = Number(text)
+  return Number.isSafeInteger(value) ? value : 0
+}
+
+/** The two tier counts one response's headers state. */
+export function cacheWriteTiers(headers: Headers): { write5m: number; write1h: number } {
+  return {
+    write5m: headerCount(headers, CACHE_WRITE_5M_HEADER),
+    write1h: headerCount(headers, CACHE_WRITE_1H_HEADER),
+  }
+}
+
+/**
+ * File one response's tier counts on the stream state that will close it.
+ *
+ * Called by the adapter on the Response itself, which is the only place the
+ * headers exist; the totals are then filed with the rest of the usage when the
+ * stream closes, so one turn's numbers stay one turn's numbers.
+ */
+export function applyCacheWriteTiers(state: KimiCodeStreamState, headers: Headers): void {
+  const tiers = cacheWriteTiers(headers)
+  state.cacheWrite5mTokens = tiers.write5m
+  state.cacheWrite1hTokens = tiers.write1h
+}
+
+/**
  * Rolling per-process view of how well the prefix cache is working.
  *
  * Kimi's cache is automatic and content-hash based, so the only way to know
@@ -2038,8 +2162,19 @@ export interface KimiCodeCacheStats {
   freshTokens: number
   /** Output tokens, which reasoning is billed against. */
   outputTokens: number
-  /** Prompt tokens the provider counted as cache writes (always 0 on this route). */
+  /**
+   * Prompt tokens the provider counted as cache writes.
+   *
+   * Reported by both wires this line speaks: `cache_creation_input_tokens` on
+   * the Anthropic surface and `prompt_tokens_details.cache_write_tokens` on
+   * chat-completions. Never derived from the read count — a write is a
+   * different billed event.
+   */
   cacheWriteTokens: number
+  /** Share of the writes above the service attributed to the 5m tier (headers). */
+  cacheWrite5mTokens: number
+  /** Share of the writes above the service attributed to the 1h tier (headers). */
+  cacheWrite1hTokens: number
 }
 
 /**
@@ -2057,6 +2192,8 @@ const EMPTY_CACHE_STATS: KimiCodeCacheStats = {
   freshTokens: 0,
   outputTokens: 0,
   cacheWriteTokens: 0,
+  cacheWrite5mTokens: 0,
+  cacheWrite1hTokens: 0,
 }
 
 /** Record one request's usage into its own session's totals. */
@@ -2070,6 +2207,8 @@ export function recordCacheStats(state: KimiCodeStreamState, sessionId?: string,
     freshTokens: previous.freshTokens + state.inputTokens,
     outputTokens: previous.outputTokens + state.outputTokens,
     cacheWriteTokens: previous.cacheWriteTokens + state.cacheWriteTokens,
+    cacheWrite5mTokens: previous.cacheWrite5mTokens + state.cacheWrite5mTokens,
+    cacheWrite1hTokens: previous.cacheWrite1hTokens + state.cacheWrite1hTokens,
   })
 }
 
@@ -2080,6 +2219,8 @@ function accumulate(totals: KimiCodeCacheStats, stats: KimiCodeCacheStats): void
   totals.freshTokens += stats.freshTokens
   totals.outputTokens += stats.outputTokens
   totals.cacheWriteTokens += stats.cacheWriteTokens
+  totals.cacheWrite5mTokens += stats.cacheWrite5mTokens
+  totals.cacheWrite1hTokens += stats.cacheWrite1hTokens
 }
 
 /**
@@ -2130,11 +2271,13 @@ export function resetCacheStats(sessionId?: string): void {
     cacheStatsByScope.clear()
     prefixSnapshots.clear()
     driftCauses.clear()
+    thinkingCoercions.clear()
     return
   }
   dropSession(cacheStatsByScope, sessionId)
   dropSession(prefixSnapshots, sessionId)
   dropSession(driftCauses, sessionId)
+  dropSession(thinkingCoercions, sessionId)
 }
 
 function tokenUsage(state: KimiCodeStreamState): TokenUsage {

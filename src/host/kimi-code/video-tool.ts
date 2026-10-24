@@ -75,7 +75,7 @@ async function assertVideoCapableRoute(ctx: Context, exec: { signal?: AbortSigna
   const active = await llm.resolveModelInfo(provider, model, exec.signal)
   if (active.inputModalities === undefined || !active.inputModalities.includes('video')) {
     throw new HarnessError(
-      `cannot attach "${source}": model "${model}" does not accept video input; switch to k3 or kimi-for-coding`,
+      `cannot attach "${source}": model "${model}" does not accept video input; switch to k3, k3.1-pro, kimi-for-coding or kimi-for-coding-highspeed`,
       'KIMI_VIDEO_MODEL_UNSUPPORTED',
     )
   }
@@ -172,10 +172,10 @@ export function createKimiVideoTool(ctx: Context, options: KimiVideoToolOptions 
   return defineTool({
     name: KIMI_VIDEO_TOOL_NAME,
     description:
-      'Attach a video to the conversation for models that accept video input (Kimi k3 and '
-      + 'kimi-for-coding). Use this when the user asks about a video file or a video URL: pass an '
-      + 'absolute local path or an http(s) URL. The video is sent to the model on the next request; '
-      + 'it does not work on image-only models such as k3-256k.',
+      'Attach a video to the conversation for models that accept video input (Kimi k3, k3.1-pro, '
+      + 'kimi-for-coding and kimi-for-coding-highspeed). Use this when the user asks about a video file '
+      + 'or a video URL: pass an absolute local path or an http(s) URL. The video is sent to the model '
+      + 'on the next request; it does not work on image-only models such as k3-256k.',
     parameters: {
       source: {
         type: 'string',

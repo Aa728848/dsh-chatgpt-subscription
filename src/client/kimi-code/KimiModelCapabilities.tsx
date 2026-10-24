@@ -10,6 +10,7 @@
 import React from 'react'
 import type { KimiCodeModelOption } from '../../shared/kimi-code-contracts.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { effortLadder, wireLabel } from './labels.ts'
 import { NS_KIMI_CODE, zh } from './locales.ts'
 
 /**
@@ -42,12 +43,18 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
         <tbody>
           {models.map((model) => {
             // Hover text keeps the per-model facts that would otherwise bloat
-            // the table: wire, default effort, input cap, required plan and the
-            // quota multiplier (which is also shown in the notes cell, because
-            // it is the one cost fact a user compares across rows).
+            // the table: wire, the thinking declaration and ladder, default
+            // effort, input cap, required plan and the quota multiplier (also
+            // shown in the notes cell, because it is the one cost fact a user
+            // compares across rows).
+            const ladder = effortLadder(model)
             const facts = [
               model.id,
-              model.wire === 'anthropic' ? t.wireAnthropic : t.wireOpenai,
+              wireLabel(model.wire, t),
+              // The declaration, not a guess: a thinking-only row is named as
+              // such because its own entry says so, never because of its id.
+              ...(model.thinkingType === 'only' ? [t.capThinkingOnly] : []),
+              ...(ladder.length === 0 ? [] : [t.capEfforts.replace('{list}', ladder.join(' / '))]),
               ...(model.defaultReasoningEffort ? [t.defaultReasoningEffort + ': ' + model.defaultReasoningEffort] : []),
               ...(model.maxInputTokens === undefined
                 ? []
@@ -76,11 +83,19 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
                       : <span className="dsha-cap-off">{t.capNoTools}</span>}
                 </td>
                 <td className="dsha-cap-notes">
-                  {model.quotaMultiplier === null ? null : (
-                    <span className="dsha-cap-cost">
-                      {t.quotaCost} {formatMultiplier(model.quotaMultiplier)}
-                    </span>
-                  )}
+                  {model.quotaMultiplier === null
+                    // An unpublished multiplier is stated, not left blank: this
+                    // line is the only cost fact the table carries, so a missing
+                    // line would read as a row that was skipped. No number is
+                    // invented — the official table publishes none for these ids.
+                    // Its own line like a published multiplier, in the tertiary
+                    // "off" tone rather than the primary tone a real value gets.
+                    ? <div className="dsha-cap-off">{t.quotaCost} {t.quotaUnknown}</div>
+                    : (
+                      <span className="dsha-cap-cost">
+                        {t.quotaCost} {formatMultiplier(model.quotaMultiplier)}
+                      </span>
+                    )}
                   {model.description ?? ''}
                 </td>
               </tr>
@@ -90,6 +105,11 @@ export function KimiModelCapabilities({ models }: KimiModelCapabilitiesProps): R
       </table>
       {models.some((model) => model.supportsVideo) && (
         <p className="dsha-muted dsha-cap-footnote">{t.capVideoFootnote}</p>
+      )}
+      {models.some((model) => model.thinkingType === 'only') && (
+        // Why the level "thinking off" is missing from the settings menu for
+        // those models: the service refuses it with HTTP 400.
+        <p className="dsha-muted dsha-cap-footnote">{t.capThinkingOnlyFootnote}</p>
       )}
     </div>
   )
