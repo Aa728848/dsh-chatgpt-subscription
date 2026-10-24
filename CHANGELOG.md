@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.39.1 - 2026-10-24
+- **[dispatch] 0.39.0 自审修补：R2 补齐降级路径，plan-mode 访谈上限与 R0 对齐，全插件通用的空清单提示去掉设置推广语**
+  - **R2 补“标注缺失”这一读法（`presets/dispatch/agent.cordis.yml` / `src/host/agent-preset.ts`）**：0.39.0 让 R2 从 `list_subagent_models` 的输出里**读**路由姿态，但那段标注是 `tools/post-execute` 写的，而 `src/index.ts:508-520` 里守卫有三条不入场的路径——`subagentModelAuthorization: false`、宿主没有 `sessions` 服务、`tools.guard` 不是函数。三种情况下输出里既没有授权路由块、也没有「No allowlist is in force」，而 0.39.0 的 R2 只写了三态、没写“什么都没读到”怎么办。现在补一段：行为上按 `[State: Unlisted]` 处理（照常派发、不要把缺参数指望守卫来拦），但不得声称任一姿态、只能说「未确认」，且不得据此把任何路由报成「已授权」。这是“把状态塞进工具结果”和“断言工具一定在场”之间的差别，前一版的措辞把后者当成了前提。
+  - **plan-mode 访谈上限与 R0 对齐**：`plan-mode` 段仍写 `keep the interview to the 1–2 questions`，而同一次改动把 R0 的对应项改成了 `at most 2 key questions (2 is the cap)`——同一份提示词里两个上限两种写法，正是本次要消掉的那类歧义。改为 `at most 2 questions`，两份拷贝同步。
+  - **空清单提示不再推广设置（`src/host/subagent-model-authorization.ts`）**：`UNRESTRICTED_ROUTING_NOTICE` 原来结尾带一句「如需按任务治理，请在 Settings → Subagents 启用并新建会话」。这个监听器挂在 host 级工具注册表上，**对使用本插件的所有会话生效**，而默认 `subagentModelScope = 'session'` 下绝大多数会话根本没勾选模型、也用不到 dispatch preset——那句话在那些会话里是噪音，还会被模型当成指令抄进无关的交付摘要。提示现在只留两条事实（没有允许清单生效、省略路由是正当的）；「按任务治理」的建议只留在 dispatch 的 R2 里，按需说一句。
+  - **顺带修掉一个自己引入的语法错误**：给 R2 补降级段时在 `agent-preset.ts` 的模板字符串里写了裸反引号（`` `subagentModelAuthorization: false` ``），把模板字符串截断成语法错误；同时该符号名撞上既有断言「persona 里不得出现内部符号名」（那条断言的本意是防止提示词诱使模型去 grep 源码），改为不含符号名的措辞 `the plugin's authorization setting`。
+  - **测试**：`test/agent-preset.test.ts` 38 例内扩充——R2 用例新增三条钉住降级段（`If the output says neither` / `the annotation is absent and you cannot read the posture` / `say "unconfirmed" rather than claiming either posture`），plan-mode 字节一致性用例新增两条钉住 `at most 2 questions` 且 `1–2 questions` 不得回归。`test/subagent-model-authorization.test.ts` 27 例内扩充——新增三条断言 `UNRESTRICTED_ROUTING_NOTICE` 不含 `Settings` / `Subagents` / `enable`，把“这条提示不得推广设置”变成可执行约束（该常量是全插件通用的，改坏会波及所有会话）。
+  - **验证**：`npm run typecheck` 三工程 0 错误；`npx vitest run test/agent-preset.test.ts test/subagent-model-authorization.test.ts` 65 例全绿；全量 `LANG=C.UTF-8 npm test` **287 文件通过 / 2 skipped，4756 passed / 8 skipped / 0 failed**；`npx tsc -p tsconfig.host.json --noEmit` 单独复核模板字符串语法 0 错误。
+  - **边界**：本轮只改措辞与一处提示文本，不改任何运行时判定——`enrichListSubagentModelsOutput` 的分支条件、`delegationDenialReason` 的判定、守卫的安装条件都未动。
+
 ## 0.39.0 - 2026-10-24
 - **[dispatch] 调度模式按行为实测重写纪律：限额写成上限、任务书带限额台账、注意到风险必须处置、路由三态可读**
   - **背景**：一份对 `deepseek-v4.1-flash-1017` 的路口调度基准对比报告（三局均值 567.98 vs 旧版 687.30）连同其后的定向行为探针（超市盲盒、路口日志复演、团队采购荷兰拍，共三个 POV、86 局以上）把结论收敛成几条可迁移的行为事实：规则写明时照做、没写明的取最严解读且不去验证；写明的代价会提前处理，要从环境动态推出来的二阶后果不处理；预算靠心算且几乎总是零余量收尾；把事后才到的信号当事前保护。本 preset 是一份纯提示词契约，这些点逐条落在它上面。
