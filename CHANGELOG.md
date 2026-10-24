@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **[harness] 新增 DSH 0.2.1-rc.3 支持，并补齐旧世代的客户端类型兼容**
+  - **基线**：18 个直接 DSH `devDependencies` 提升到 `^0.2.1-rc.3`，对应 peer 联合范围追加同项，npm 与 pnpm 锁文件同步更新；0.1.2-alpha.5 以来的旧范围全部保留。`rc.3` 对插件导入面的变化集中在 Conversation View 与右侧指南卡片的固定 / More 菜单，以及草稿初始化的追加模式；现有插槽、`setDraft`、LLM / 工具 / 设置 / WebServer 等接口无破坏变化，因此不新增版本分支，也不改变任何供应线路的请求行为。
+  - **旧世代类型桥**：`src/index.ts` 用本地结构类型表示 volatile 配置，避免直接依赖 Cordis 4.0.2 尚未导出的 `Volatile`；`minimax-code/commands-contract.ts` 在既有命令类型边界补充 `label` / `icon` / `SelectOptionGroup` 的兼容形状；进展更新设置改用本地 `ConfigForm` / `ConfigFormSnapshot` 结构类型，旧版没有 `configForms` 服务时仍按原逻辑降级，新版仍使用真实服务。以上均为类型适配，无运行时协议变化。
+  - **验证**：`rc.3` 三工程强制类型检查、构建、`npm ci --dry-run` 与打包通过，全量 **282 文件通过 / 2 skipped，4649 passed / 8 skipped / 0 failed**；精确 `rc.2` 隔离房间结果完全相同。`0.1.5-rc.1` 隔离房间强制类型检查通过，其余可运行套件 **281 文件通过 / 2 skipped，4644 passed / 9 skipped / 0 failed**；唯一不能加载的是该世代没有 `@deepseek-ai/dsh-ptc-runtime` 的 `subagent-model-authorization-ptc.test.ts`，与既有世代限定约定一致。
+  - **实机**：用 npm 发布的 `@deepseek-ai/dsh@0.2.1-rc.3` 在隔离 `DSH_HOME` 安装本次 tarball，启动无条目激活警告；插件管理页显示 1 个组件运行中，设置页确认版本为 `0.2.1-rc.3`，12 条订阅线路与进展更新设置均正常渲染。未使用真实订阅凭据或发起模型请求。
 
 ## 0.38.1 - 2026-10-24
 - **[kimi-code] 请求体上限改成按模型分档：1M 档 8 MiB、256K 档 2 MiB（`DSH_KIMI_CODE_MAX_BODY_BYTES` 仍是全局强制覆盖）**

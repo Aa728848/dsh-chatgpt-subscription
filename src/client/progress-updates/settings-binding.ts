@@ -24,7 +24,20 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/progress-updates/settings-binding
  */
 
-import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
+export interface ConfigFormSnapshot<T> {
+  status: 'loading' | 'ready' | 'unavailable'
+  value: T | undefined
+  base: unknown
+  user: unknown
+  revision: number | undefined
+  writable: boolean
+}
+
+interface ConfigForm<T> {
+  getSnapshot(): ConfigFormSnapshot<T>
+  subscribe(listener: () => void): () => void
+  set(field: string, value: unknown): Promise<boolean>
+}
 
 /**
  * 本卡片驱动的两个字段。

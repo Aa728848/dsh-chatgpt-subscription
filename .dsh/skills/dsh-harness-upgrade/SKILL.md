@@ -6,7 +6,7 @@ description: Use when the DSH harness this plugin supports moves to a new releas
 # Keeping this plugin working across DSH generations
 
 This plugin ships **one code base for every supported harness generation**
-(0.1.2-alpha.5 through 0.2.1-rc.2 today). Users are
+(0.1.2-alpha.5 through 0.2.1-rc.3 today). Users are
 spread across `latest` / `next` / `alpha`, so a new harness release never licenses
 dropping an old one: every breaking change gets bridged at a boundary, and both
 generations keep passing tests. This skill is the procedure, the seams, and the
@@ -92,16 +92,29 @@ generation's dependency closure and produces fake failures:
 
 ```bash
 ROOM=/tmp/plugin-old && rm -rf $ROOM && mkdir -p $ROOM
-cd <repo> && cp -r src test presets bin lib cordis.patch.yml package.json \
-  tsconfig.json tsconfig.client.json tsconfig.host.json vitest.config.ts $ROOM/
+cd <repo> && cp -r src test presets bin lib widgets cordis.patch.yml package.json \
+  tsconfig.json tsconfig.client.json tsconfig.host.json vitest.config.ts \
+  icon.svg README.md CHANGELOG.md LICENSE $ROOM/
 cd $ROOM
 node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));\
-for(const k of Object.keys(p.devDependencies)){if(k.startsWith('@deepseek-ai/dsh-'))p.devDependencies[k]='^0.1.5-rc.1'}\
+for(const k of Object.keys(p.devDependencies)){if(k.startsWith('@deepseek-ai/dsh-')){\
+p.devDependencies[k]='0.1.5-rc.1';p.peerDependencies[k]+=' || 0.1.5-rc.1'}}\
 fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
 npm install --no-audit --no-fund      # never --legacy-peer-deps here
-npx tsc -b --pretty false             # the shipped host + client code
+npx tsc -b --force --pretty false     # the shipped host + client code
 npx vitest run
 ```
+
+Keep the room outside the repository: Node resolution from a room under the repo can
+silently fall through to the root `node_modules` and turn a missing old package into a
+mixed-generation false positive. Pin every **reachable transitive DSH sibling** exactly
+through `overrides` as well as the direct dependencies; npm's package metadata can
+recursively enumerate that closure. Direct pins alone let later prereleases drift in
+through caret peers. For 0.1.5-rc.1, the verified vendor closure is `cordis@4.0.2` and
+`cordis-plugin-loader@1.0.3`; keep the room's dev/peer invariant when pinning vendors.
+If the full run's only failure is a documented generation-bound import (currently the
+PTC authorization test on 0.1.5), rerun with exactly that file excluded and record both
+results rather than hiding the initial failure or contorting the test.
 
 Run a **third** room for the previous baseline when the round claims "no
 behavioural change": pinning the previous generation on the same source and
@@ -193,9 +206,11 @@ next upgrade starts by reading the newest file in `references/`.
 
 ## 7. Current state
 
-- Tested baseline: **0.2.1-rc.1 / 0.2.1-rc.2** (`^0.2.1-rc.1` in `devDependencies` and `peerDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded run: forced typecheck + clean build, **3787 tests passed / 7 skipped / 0 failed**
-  (230 files passed, 1 skipped).
+- Tested baseline: **0.2.1-rc.3** (`^0.2.1-rc.3` in `devDependencies` and `peerDependencies`); peer support 0.1.2-alpha.5
+  onwards. Latest recorded rc.3 run: forced three-project typecheck + build, **4649 tests passed / 8 skipped / 0 failed**
+  (282 files passed, 2 skipped); the exact-rc.2 clean room has identical counts. The 0.1.5-rc.1 clean room passes its
+  supported suite with **4644 tests passed / 9 skipped / 0 failed** (281 files passed, 2 skipped); its one generation-bound
+  PTC file that cannot load is identified in `references/0.2.1-rc.3.md`.
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
   covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
@@ -229,6 +244,11 @@ next upgrade starts by reading the newest file in `references/`.
   where `@deepseek-ai/dsh-working-directory` replaces the `cwd` template variable,
   `SearchProviderSwitcher` unwraps `Volatile<string>` on `fiber.config.searchProvider`
   introduced in 0.2.1-rc.2, and the Claude model catalog aligns with `pi-ai@1.1.0`.
+  `references/0.2.1-rc.3.md` covers rc.3: Conversation View and right-guide pin/More
+  customization is additive and needs no runtime bridge. It also records the old-generation
+  structural type fixes for volatile config, command contributions, and config forms, the
+  exact transitive clean-room closure, and the real npm-rc.3 host/client smoke. The local
+  source-linked rc.2 `lib/` is explicitly not used as rc.3 evidence.
   `references/codex-wire-surface.md` is not a harness round but belongs in this
   list because it rewrites a compatibility seam: the Codex subscription line now
   sends the `openai-beta` gate the backend requires, presents ONE `originator`

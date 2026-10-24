@@ -27,9 +27,9 @@
  */
 
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
-import type { ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { fallbackTranslate, type CopySeat } from './updates-panel.tsx'
 import type {
+  ConfigFormSnapshot,
   ProgressSettingsForm,
   ProgressUpdatesField,
   ProgressUpdatesLanguage,

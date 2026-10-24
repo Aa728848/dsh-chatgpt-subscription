@@ -1,4 +1,4 @@
-import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { createRequire } from 'node:module'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -177,6 +177,10 @@ import {
 } from './host/progress-updates/index.ts'
 import type { ProgressUpdateLanguage } from './host/progress-updates/prompt.ts'
 import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/progress-updates/store.ts'
+
+interface Volatile<T> {
+  get(): T
+}
 
 /**
  * 运行期配置形状：标了 `volatile()` 的字段在 loader 解析之后是**活引用**。

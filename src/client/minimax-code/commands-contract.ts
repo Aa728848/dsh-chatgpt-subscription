@@ -9,27 +9,38 @@
  * 被打进本插件自己的 `lib/client.js`**，两个副本注册同一个服务名是比编译错误难查
  * 得多的问题。
  *
- * 转发而不是在各文件里直接 import，是为了让「本插件只依赖这些类型」这件事有一个
- * 可以一眼看完的地方。
+ * 基础形状集中转发，后续世代新增的可选字段在这里补结构类型，旧世代无需导出它们。
  *
  * ## 依赖声明
  *
  * `package.json` 里它同时出现在 `peerDependencies`（宽范围，与其余六个
- * `dsh-client-*` 相同的写法）和 `devDependencies`（`^0.2.1-rc.1`，编译期需要）。
+ * `dsh-client-*` 相同的写法）和 `devDependencies`（`^0.2.1-rc.3`，编译期需要）。
  * 运行时不从这里取任何东西。
  *
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/minimax-code/commands-contract
  */
 
+import type { ComponentType } from 'react'
+import type { CommandContribution as HarnessCommandContribution } from '@deepseek-ai/dsh-client-ui-commands/client'
+import type { CommandIconProps } from './video-command-icon.tsx'
+
 export type {
   ActionSpec,
-  CommandContribution,
   CommandUiContract,
   CommandUiSpec,
   PopupSelectSpec,
   SelectOption,
-  SelectOptionGroup,
 } from '@deepseek-ai/dsh-client-ui-commands/client'
+
+export interface SelectOptionGroup {
+  readonly name: string
+  readonly label: string
+}
+
+export type CommandContribution = HarnessCommandContribution & {
+  readonly label?: () => string
+  readonly icon?: ComponentType<CommandIconProps>
+}
 
 /**
  * 命令回调拿到的会话投影。
