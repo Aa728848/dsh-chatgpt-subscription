@@ -525,9 +525,7 @@ export function effectiveAllowedRoutes(
 }
 
 /**
- * Append the Session's authorized `{ provider, model }` pairs to a successful
- * `list_subagent_models` result when the calling Session is governed by an
- * allowlist.
+ * State a Session's routing posture in the `list_subagent_models` result.
  *
  * Calling `list_subagent_models({})` upstream returns only provider names
  * (`minimax-code — MiniMax Code`), and calling it with `provider` prints
@@ -536,15 +534,27 @@ export function effectiveAllowedRoutes(
  * here lets even a single `list_subagent_models({})` call hand the model every
  * authorized route in the form `subagent` expects, eliminating any reason to
  * search local config files or source code for the allowlist.
+ *
+ * The empty case states the opposite fact rather than staying silent, because
+ * silence is what makes a model infer that a mounted tool implies enforcement.
+ * It does not: the tool row and the route parameters are static, while whether
+ * anything is enforced is decided by the allowlist the Session recorded. The
+ * two facts differ, so the model has to be able to read the second one instead
+ * of deriving it from the first.
  * @param output - Original text returned by `list_subagent_models`.
- * @param allowed - Routes the calling Session authorizes.
- * @returns the output with the Session allowlist summary appended.
+ * @param allowed - Routes the calling Session authorizes, empty when none is in force.
+ * @returns the output with the Session routing posture appended.
  */
 export function enrichListSubagentModelsOutput(
   output: string,
   allowed: readonly AllowedModelRoute[],
 ): string {
-  if (allowed.length === 0) return output
+  if (allowed.length === 0) {
+    if (output.includes(UNRESTRICTED_ROUTING_NOTICE)) return output
+    return output.trim().length === 0
+      ? UNRESTRICTED_ROUTING_NOTICE
+      : `${output}\n\n${UNRESTRICTED_ROUTING_NOTICE}`
+  }
   const header = 'Authorized child routes for this Session (already filtered by the Session allowlist; '
     + 'only these routes are accepted, and `provider` and `model` must be passed as separate fields):'
   if (output.includes(header)) return output
@@ -554,6 +564,20 @@ export function enrichListSubagentModelsOutput(
   const suffix = `${header}\n${lines.join('\n')}`
   return output.trim().length === 0 ? suffix : `${output}\n\n${suffix}`
 }
+
+/**
+ * The statement appended to `list_subagent_models` when no allowlist governs the
+ * calling Session.
+ *
+ * It names the three consequences a reading model would otherwise have to guess
+ * at: nothing is enforced, omitting the route is legitimate, and "authorized" is
+ * not a word that can be used about any route here. It also names the one action
+ * that changes the state, without asking the user to stop and do it.
+ */
+export const UNRESTRICTED_ROUTING_NOTICE = 'No allowlist is in force for this Session: subagent routing is '
+  + 'unrestricted, no route is validated against any list, and omitting provider/model is legitimate rather '
+  + 'than a rule breach. To govern routing per task, enable subagent model selection under '
+  + '"Settings -> Subagents" and start a new session; this one keeps its current posture.'
 
 /**
  * Rewrite the upstream `list_subagent_models` and `subagent` tool/parameter
@@ -926,7 +950,10 @@ export function installSubagentModelAuthorization(
         sessions,
         scope,
       )
-      if (allowed.length === 0) return decision
+      // Both postures are stated: a governed Session gets its routes, an
+      // ungoverned one gets the fact that nothing is enforced. Staying silent in
+      // the second case is what lets a mounted tool be mistaken for an active
+      // allowlist.
       const currentValue = decision.value !== undefined ? decision.value : result.value
       if (typeof currentValue === 'string') {
         const enriched = enrichListSubagentModelsOutput(currentValue, allowed)

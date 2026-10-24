@@ -570,6 +570,8 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 改动只在设置卡片里保存过的勾选生效：设置改动只影响之后新建的会话（DSH 的会话快照语义），已运行的会话继续使用它自己记录的那份列表。
 
+> **调度模式如何知道自己是哪种姿态。** `list_subagent_models` 与 `provider`/`model` 参数由 preset 行静态挂载（`modelSelectionSettings: true`），所以**工具在场不等于校验生效**——真正决定校验的是会话记录的那份允许列表，没有记录时守卫对一切放行。为了让模型**读到**这个事实而不是从「工具在」推断出「已生效」，`list_subagent_models` 的返回被 `tools/post-execute` 原地补一段：有列表时附上本会话全部 `{ provider, model }` 拆解对，没有列表时附上 `UNRESTRICTED_ROUTING_NOTICE`（写明「本会话没有允许清单生效、路由不受限、省略路由是正当的」）。调度模式的 R2 据此分成三态——`[State: Listed]` / `[State: Unlisted]` / `[State: Unmounted]`，只有 `[State: Unmounted]` 能作为 R8 fallback 的理由。
+
 > 升级提示：从 0.3.2 起，带有允许列表的会话里**任何**未写明 `provider` + `model` 的委派都会被拒绝（此前只有写明且不在列表内的路由会被拒绝）。这是有意的行为变更——它消除了「子代理悄悄继承主代理模型」的漏洞；把 `subagentModelAuthorization` 设为 `false` 可回到 DSH 原始行为。
 
 ### Kimi Code

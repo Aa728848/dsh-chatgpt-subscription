@@ -480,7 +480,10 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('Fallback is a task-scoped, non-session-wide exception')
       expect(persona).toContain('covers only the single task that triggered it')
       expect(persona).toContain('When the next task begins, always return to R0 to triage anew')
-      expect(persona).toContain('the same task brief still fails after two re-dispatches under R6')
+      expect(persona).toContain('the same task brief has still not passed review after its third run under R6')
+      // An empty/unlisted allowlist no longer qualifies: delegation works there,
+      // it is only unrestricted, so it cannot be a fallback excuse (R2 state).
+      expect(persona).toContain('An unmounted tool is the only routing condition that permits fallback')
       // The anti-patterns that made the stale fallback self-reinforcing.
       expect(persona).toContain('Carrying a one-off fallback forward as the default for the rest of the session')
       expect(persona).toContain('Using a tool hard-rejection as a fallback excuse instead of fixing its trigger condition')
@@ -585,6 +588,114 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('the runtime output is already filtered to this session\'s allowlist')
       expect(persona).toContain('Second-guessing list_subagent_models output by hunting through local config or source files just to check which subagent models are allowed')
       expect(persona).not.toContain('subagentModelAuthorization')
+    }
+  })
+
+  it('reads the routing posture instead of inferring it from a mounted tool', () => {
+    // The preset used to claim one signal was sufficient: "its presence and the
+    // exposure of provider / model ... always appear or disappear together".
+    // That is false. The tool row and the route parameters are mounted
+    // statically (modelSelectionSettings: true), so they exist even in a session
+    // that recorded no allowlist, while the guard reads the recorded policy
+    // (effectiveAllowedRoutes) and enforces nothing without one. Both copies must
+    // name all three states, say which of them permits fallback, and drop the
+    // single-signal claim.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('[State: Listed]')
+      expect(persona).toContain('[State: Unlisted]')
+      expect(persona).toContain('[State: Unmounted]')
+      // The mechanism, stated as a fact rather than as a preference.
+      expect(persona).toContain('mounted statically, so they are present even in a session that authorized no route at all')
+      expect(persona).toContain('Read that fact instead of inferring it')
+      expect(persona).toContain('Never claim per-task routing is in force here')
+      // The single-signal claim and the vocabulary that depended on it are gone.
+      expect(persona).not.toContain('so this single signal is sufficient')
+      expect(persona).not.toContain('[When Available]')
+      expect(persona).not.toContain('[When Unavailable]')
+      expect(persona).not.toContain('allowlist is empty and the user has not enabled it')
+      expect(persona).toContain('Reporting a route as "authorized", or claiming per-task routing is in force')
+    }
+  })
+
+  it('writes caps where a range would be read as a floor', () => {
+    // Behaviour probe result: a limit written as a range or as "at most N per
+    // cycle" was read as its strictest meaning and never verified — 9/9 runs,
+    // 18/18 cycles. The triage bounds and the re-dispatch budget must therefore
+    // be written as caps with their unit and their counting rule, never as
+    // ranges and never with two incompatible phrasings.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('edits at most 5 files (5 is a cap, not a range and not a target)')
+      expect(persona).toContain('Ask at most 2 key questions (no full interview; 2 is the cap)')
+      expect(persona).toContain('1 first attempt + at most 2 re-dispatches = at most 3 runs total')
+      expect(persona).toContain('Count runs, not failures')
+      // The old range/bare forms are gone from both copies.
+      expect(persona).not.toContain('L1 Moderate: 2–5 files')
+      expect(persona).not.toContain('Ask at most 1–2 key questions')
+      expect(persona).not.toContain('Re-dispatch the same task brief at most twice')
+      expect(persona).toContain('Writing a task brief with a range where a cap belongs')
+    }
+  })
+
+  it('puts a limits ledger in every task brief', () => {
+    // A subagent is a fresh instance of the same model and reads an ambiguous
+    // limit the same way: strictest meaning, no verification. Five brief elements
+    // named no limits at all, so every numeric bound in a brief was written in
+    // whatever shape the dispatcher happened to use — and the blind-box probe
+    // measured a ~240-point gap between an ambiguous rule set and a written-out
+    // one. Both copies must require the sixth element, the four fields per limit,
+    // the explicit "unlimited", and must forbid the restatement ritual that
+    // reproduces a misreading instead of catching it.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('six elements: Goal / Boundary')
+      expect(persona).toContain('Limits (see below)')
+      expect(persona).toContain('what it bounds, in what unit, the cap, and whether it accumulates')
+      expect(persona).toContain('silence is read as a limit of zero')
+      expect(persona).toContain('a quota that resets per cycle is lost, not banked')
+      expect(persona).toContain('Do not ask the child to restate your rules back as a correctness check')
+      expect(persona).toContain('Asking a subagent to restate its rules as a correctness check')
+      // The five-element form is gone from both copies.
+      expect(persona).not.toContain('must contain five elements')
+    }
+  })
+
+  it('routes a noticed risk instead of only recording it', () => {
+    // The路口 field report's largest single loss: vehicles it named as
+    // red-light runners and then never released, all of which crashed. In this
+    // mode the equivalent is a defect found in review, written into the delivery
+    // summary, and shipped anyway. Both copies must give the two legal exits, deny
+    // the summary-only exit, and treat the completion notification as the
+    // post-hoc signal it is.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('[Noticed but not handled]')
+      expect(persona).toContain('Writing it into the delivery summary and shipping anyway is not an available outcome')
+      expect(persona).toContain('the defect goes back out on a re-dispatch with evidence')
+      expect(persona).toContain('Shipping a defect you already named in the review')
+      // The notification is a post-hoc signal, in both rules that touch it.
+      expect(persona).toContain('The notification is a post-hoc signal')
+      expect(persona).toContain('The completion notification is a post-hoc signal')
+      expect(persona).toContain('Treat it as "there is now something to review", never as "this passed"')
+    }
+  })
+
+  it('scans for escalating items before each turn', () => {
+    // The one prompt that measurably worked in the behaviour probe: "find the
+    // items that will escalate, expire or time out this turn and handle those
+    // first" took escalations from 3.67 per run to 0. Without it a
+    // low-priority backlog is what eventually turns into the incident.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('[Before every turn]')
+      expect(persona).toContain('will escalate, expire, or time out if you do nothing this turn')
+      expect(persona).toContain('handle those before the items that are merely large')
+      expect(persona).toContain('an item that is fine')
+      expect(persona).toContain('listed with its age in turns')
+      // The run count lives in the task list, not in the coordinator's memory.
+      expect(persona).toContain('Each task item carries its own run count')
+      expect(persona).toContain('the number belongs in the task list item for that brief')
     }
   })
 

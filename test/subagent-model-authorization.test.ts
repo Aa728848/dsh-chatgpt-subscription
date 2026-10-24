@@ -7,6 +7,7 @@ import {
   type SessionsResolver,
   type SubagentModelSelectionPreference,
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
+  UNRESTRICTED_ROUTING_NOTICE,
   authorizedRoutesFor,
   createSubagentAuthorization,
   delegationDenialReason,
@@ -533,9 +534,21 @@ describe('subagent model authorization', () => {
     expect(enriched).toContain('minimax-code — MiniMax Code')
     expect(enriched).toContain('already filtered by the Session allowlist')
     expect(enriched).toContain('- minimax-code/MiniMax-M3.1-Flash -> provider: "minimax-code", model: "MiniMax-M3.1-Flash"')
-    // Idempotent when called twice and a no-op when no allowlist applies.
+    // Idempotent when called twice.
     expect(enrichListSubagentModelsOutput(enriched, [MINIMAX])).toBe(enriched)
-    expect(enrichListSubagentModelsOutput(rawProviderList, [])).toBe(rawProviderList)
+    // With no allowlist the output states the opposite fact instead of staying
+    // silent: the tool row is mounted statically, so a mounted tool must not be
+    // readable as an active allowlist.
+    const unlisted = enrichListSubagentModelsOutput(rawProviderList, [])
+    expect(unlisted).toContain('minimax-code — MiniMax Code')
+    expect(unlisted).toContain('No allowlist is in force for this Session')
+    expect(unlisted).toContain('subagent routing is unrestricted')
+    expect(unlisted).toContain('omitting provider/model is legitimate')
+    expect(unlisted).not.toContain('Authorized child routes for this Session')
+    // Idempotent there too, and a bare empty output becomes the notice alone.
+    expect(enrichListSubagentModelsOutput(unlisted, [])).toBe(unlisted)
+    expect(enrichListSubagentModelsOutput('', [])).toBe(UNRESTRICTED_ROUTING_NOTICE)
+    expect(enrichListSubagentModelsOutput('', [MINIMAX])).not.toContain('No allowlist is in force')
 
     const upstreamListDesc = 'Discover LLM routes for subagents without changing the current Agent. '
       + 'Catalog membership is advisory: an adapter may accept an unlisted model id.'
@@ -608,6 +621,18 @@ describe('subagent model authorization', () => {
     ) as { kind: string; value: string }
     expect(postDecision.kind).toBe('accept')
     expect(postDecision.value).toContain('provider: "minimax-code", model: "MiniMax-M3.1-Flash"')
+
+    // The unlisted posture reaches the model through the same hook: a Session
+    // that recorded no allowlist gets the fact that nothing is enforced, instead
+    // of silence that would read as "the mounted tool is the allowlist".
+    const unlistedDecision = await postExecute(
+      { name: 'list_subagent_models', agent: recordingAgent([]) },
+      { isError: false, value: rawProviderList },
+      async () => ({ kind: 'accept' }),
+    ) as { kind: string; value: string }
+    expect(unlistedDecision.kind).toBe('accept')
+    expect(unlistedDecision.value).toContain(UNRESTRICTED_ROUTING_NOTICE)
+    expect(unlistedDecision.value).toContain(rawProviderList)
 
     const assembleHook = listeners.get('system-prompt/assemble')!
     const assembledOut = await assembleHook(
