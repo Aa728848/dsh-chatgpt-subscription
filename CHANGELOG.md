@@ -1,6 +1,23 @@
 # Changelog
 
 ## Unreleased
+
+## 0.38.6 - 2026-10-24 (本地构建：官方 0.38.1 + 计费区分与目录迁移)
+- **[cline-pass] 区分订阅模型与 marketplace 模型的计费，避免误扣 credits**
+  - **背景**：`catalog/search` 会把整个网关目录（含 `deepseek/…` 这类 marketplace id）当作普通候选；添加后立即启用，而这类 id 按 **Cline Credits** 计费、不占订阅额度，余额不足时上游返回 402。本机实测：添加 `deepseek/deepseek-v4.1-flash-1017` 后余额被扣到 **-$0.04**，同一账号的订阅模型不受影响。
+  - **契约**：`ClinePassCatalogSearchItemDto` 新增 `billing: 'subscription' | 'credits'`（`cline-pass/*` 为订阅，其余为 credits）；新增 `ClinePassCatalogAddResultDto`。
+  - **服务端**：`POST /catalog/add` 对 credits 模型返回 **409 `credits_billing`**，必须带 `acknowledgeBilling: true` 才写入，返回体带 `billing`。
+  - **客户端**：搜索结果逐条显示计费标签；credits 模型第一次点击只展开警告，第二次才提交；`catalogSearchHint` 说明两种计费。
+  - **附带**：添加自定义模型时从已扫描目录复制 `name` / `contextWindow` / `maxTokens` / `input` / `efforts`，不再只写 id。
+- **[cline-pass] 升级不再丢掉用户已启用的网关模型**
+  - 旧目录行没有 `origin`；原先一律按 gateway 收起，已在 `enabledModelIds`、`pins` 或 `contextWindowOverrides` 中的模型会从选择器消失。
+  - 读取设置时把这些行提升为 `origin: 'custom'`，其余仍作为隐藏搜索索引保留。
+- **[cline-pass] 其他修复**
+  - Probe 的 `__probe__` 被网关忽略并返回 200 时，从响应 routing 学习实际渠道，而不是报告「没有渠道」。
+  - routing / fingerprint 的递归搜捕增加节点预算（4000），异常 payload 不再是无界遍历。
+  - 钉选失败且带能力过滤时，错误信息指出 `has` 并提示清空以放宽路由。
+  - 移除已失效的 `exposeCatalog` 客户端字段、locale 文案与 status DTO 字段（配置文件字段仍读取以兼容旧版本）。
+  - 补充 catalog 迁移、计费确认与搜索/添加测试。
 - **[claude] 按官方文档修正 Opus 5 关闭思考和 Sonnet 4.5 标准上下文窗口**
   - **Opus 5**：官方 thinking 故障表允许 `high` 及更低档位发送 `thinking: { type: 'disabled' }`。目录中的 `canDisableThinking` 改为 `true`，`mid-convo` 分支在该请求下返回不带 effort 的 `disabled`，并不再抬高 `max_tokens`；其它 `mid-convo` 模型仍保持 adaptive 与 block binding。同步移除 `pi-ai@1.3.0` 已失效的 Haiku 5.5 测试例外，Claude 相关 **144/144** 用例通过。
   - **Sonnet 4.5**：官方上下文表给出的标准窗口为 **200K**，1M 属于另一项 beta 能力，而本适配器没有请求该能力。`claude-sonnet-4-5` 与 `claude-sonnet-4-5-20250929` 的默认窗口均由 1M 改为 **200K**，保留用户显式覆盖通道。
