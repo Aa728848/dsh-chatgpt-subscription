@@ -569,15 +569,16 @@ export function enrichListSubagentModelsOutput(
  * The statement appended to `list_subagent_models` when no allowlist governs the
  * calling Session.
  *
- * It names the three consequences a reading model would otherwise have to guess
- * at: nothing is enforced, omitting the route is legitimate, and "authorized" is
- * not a word that can be used about any route here. It also names the one action
- * that changes the state, without asking the user to stop and do it.
+ * Two facts, and nothing more: nothing is enforced, and omitting the route is
+ * legitimate here. It deliberately does not recommend a setting. This notice is
+ * attached for every Session the plugin's authorization listener reaches—which
+ * includes sessions with no interest in the dispatch preset—so a sentence telling
+ * the reader to go enable model selection would be noise in most of them, and a
+ * model that reads it as an instruction will repeat it in an unrelated summary.
  */
 export const UNRESTRICTED_ROUTING_NOTICE = 'No allowlist is in force for this Session: subagent routing is '
   + 'unrestricted, no route is validated against any list, and omitting provider/model is legitimate rather '
-  + 'than a rule breach. To govern routing per task, enable subagent model selection under '
-  + '"Settings -> Subagents" and start a new session; this one keeps its current posture.'
+  + 'than a rule breach.'
 
 /**
  * Rewrite the upstream `list_subagent_models` and `subagent` tool/parameter

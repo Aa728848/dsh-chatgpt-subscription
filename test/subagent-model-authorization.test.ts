@@ -549,6 +549,13 @@ describe('subagent model authorization', () => {
     expect(enrichListSubagentModelsOutput(unlisted, [])).toBe(unlisted)
     expect(enrichListSubagentModelsOutput('', [])).toBe(UNRESTRICTED_ROUTING_NOTICE)
     expect(enrichListSubagentModelsOutput('', [MINIMAX])).not.toContain('No allowlist is in force')
+    // The notice stays a statement of two facts. This listener is host-level and
+    // reaches Sessions that never touch the dispatch preset, so a recommendation
+    // to change a setting would be noise in most of them — and a model that reads
+    // it as an instruction repeats it in unrelated summaries.
+    expect(UNRESTRICTED_ROUTING_NOTICE).not.toContain('Settings')
+    expect(UNRESTRICTED_ROUTING_NOTICE).not.toContain('Subagents')
+    expect(UNRESTRICTED_ROUTING_NOTICE).not.toContain('enable')
 
     const upstreamListDesc = 'Discover LLM routes for subagents without changing the current Agent. '
       + 'Catalog membership is advisory: an adapter may accept an unlisted model id.'

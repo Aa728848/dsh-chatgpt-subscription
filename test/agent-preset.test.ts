@@ -605,6 +605,12 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('[State: Listed]')
       expect(persona).toContain('[State: Unlisted]')
       expect(persona).toContain('[State: Unmounted]')
+      // A deployment whose guard was never installed appends nothing at all, so
+      // the rule needs a reading for "the annotation is absent": fall back to the
+      // unlisted behaviour without claiming either posture.
+      expect(persona).toContain('If the output says neither')
+      expect(persona).toContain('the annotation is absent and you cannot read the posture')
+      expect(persona).toContain('say "unconfirmed" rather than claiming either posture')
       // The mechanism, stated as a fact rather than as a preference.
       expect(persona).toContain('mounted statically, so they are present even in a session that authorized no route at all')
       expect(persona).toContain('Read that fact instead of inferring it')
@@ -729,6 +735,10 @@ describe('the persona block the declaration transcribes', () => {
       expect(section).toContain('[Read-Only Exploration & Clarification Interview]')
       expect(section).toContain('using the routes returned directly by list_subagent_models')
       expect(section).toContain('exit_plan_mode')
+      // The plan-mode interview bound must agree with R0's cap, and must not
+      // reintroduce the range form that reads as a floor.
+      expect(section).toContain('keep the interview to at most 2 questions')
+      expect(section).not.toContain('1–2 questions')
     }
   })
 })
