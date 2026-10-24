@@ -43,7 +43,7 @@ import {
 } from './mapper.ts'
 import type { ClinePassEngine } from './engine.ts'
 import type { ClinePassStore } from './store.ts'
-import type { ClinePassModelSettings, ClinePassModelSettingsStore } from './token-store.ts'
+import { listedClinePassCatalogModels, type ClinePassModelSettings, type ClinePassModelSettingsStore } from './token-store.ts'
 import type { ClinePassAccountPool } from './account-pool.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
@@ -125,10 +125,7 @@ export class ClinePassAdapter extends LlmAdapter {
    */
   private async availableModelIds(settings: ClinePassModelSettings): Promise<string[]> {
     const ids = new Set<string>(DEFAULT_MODELS)
-    for (const model of settings.catalogModels) ids.add(model.id)
-    if (settings.exposeCatalog === true) {
-      for (const id of this.store.catalog().ids) ids.add(id)
-    }
+    for (const model of listedClinePassCatalogModels(settings)) ids.add(model.id)
     const hidden = new Set(settings.hiddenModels)
     const enabled = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
     return [...ids].filter((id) => !hidden.has(id) && (enabled === null || enabled.has(id)))

@@ -111,6 +111,15 @@ async function render(overrides: Partial<ClinePassWebStatus> = {}, onPost?: (url
     const url = String(input)
     const body = init?.body === undefined ? undefined : JSON.parse(String(init.body)) as unknown
     if (init?.method === 'POST') onPost?.(url, body)
+    if (url.includes('/cline-pass/api/catalog/search')) {
+      return Response.json({ ok: true, value: { results: [{ id: 'deepseek/deepseek-v4-pro', added: false }] } })
+    }
+    if (url.endsWith('/cline-pass/api/catalog/add')) {
+      const currentModels = overrides.models ?? STATUS.models
+      const template = currentModels[0]!
+      const addedModel = { ...template, id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true, has: [] }
+      return Response.json({ ok: true, value: { added: true, status: { ...STATUS, ...overrides, models: [...currentModels, addedModel] } } })
+    }
     if (url.endsWith('/cline-pass/api/models/pin')) {
       const posted = body as { model: string; upstreams?: string[]; exclude?: string[]; pinMode?: string; sort?: string }
       return Response.json({
@@ -244,6 +253,26 @@ describe('ClinePassSection', () => {
     })
   })
 
+  it('searches the gateway catalog and adds one model without listing the rest', async () => {
+    const posts: Array<{ url: string; body: unknown }> = []
+    const el = await render({}, (url, body) => posts.push({ url, body }))
+    expect(el.querySelectorAll('.dsh-mcl-option')).toHaveLength(1)
+    const input = el.querySelector<HTMLInputElement>(`input[placeholder="${zh.catalogSearchPlaceholder}"]`)!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, 'v4-pro')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const search = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.catalogSearch)!
+    await act(async () => search.click())
+    const result = [...el.querySelectorAll<HTMLElement>('.dshcp-channel')].find((chip) => chip.textContent?.includes('deepseek/deepseek-v4-pro'))!
+    expect(result).toBeDefined()
+    await act(async () => result.querySelector('button')!.click())
+    expect(posts.find((entry) => entry.url.endsWith('/catalog/add'))?.body).toEqual({ model: 'deepseek/deepseek-v4-pro' })
+    expect(el.querySelectorAll('.dsh-mcl-option')).toHaveLength(2)
+    expect(el.textContent).toContain('DeepSeek V4 Pro')
+  })
+
   it('shows each account its own quota window inside the shared account card', async () => {
     const el = await render()
     const row = el.querySelector('.dsha-account-quota-row')
@@ -299,14 +328,12 @@ describe('ClinePassSection', () => {
     expect(advGroup).toBeDefined()
     expect(advGroup.querySelectorAll('.dsha-row')).toHaveLength(6)
     const prefRows = [...advGroup.querySelectorAll('.dsha-pref-row')]
-    expect(prefRows).toHaveLength(3)
+    expect(prefRows).toHaveLength(2)
     // Each preference row pairs its own heading and hint.
     expect(prefRows[0]?.textContent).toContain(zh.pinSpelling)
     expect(prefRows[0]?.textContent).toContain(zh.pinSpellingHint)
-    expect(prefRows[1]?.textContent).toContain(zh.exposeCatalog)
-    expect(prefRows[1]?.textContent).toContain(zh.exposeCatalogHint)
-    expect(prefRows[2]?.textContent).toContain(zh.exposeTools)
-    expect(prefRows[2]?.textContent).toContain(zh.exposeToolsHint)
+    expect(prefRows[1]?.textContent).toContain(zh.exposeTools)
+    expect(prefRows[1]?.textContent).toContain(zh.exposeToolsHint)
   })
 })
 

@@ -16,6 +16,12 @@ import {
 const api = createLineApi(CLINE_PASS_ROUTE_PREFIX, 'Cline Pass')
 
 /** What one pin write answers with. */
+export interface ClinePassCatalogSearchItem {
+  id: string
+  /** Already present in the compact model list (built-in, official, or custom). */
+  added: boolean
+}
+
 export interface ClinePassPinResult {
   pin: { upstreams: string[]; exclude: string[]; pinMode: 'strict' | 'preferred'; sort: string; has: string[] }
   warnings: string[]
@@ -130,6 +136,14 @@ export class ClinePassApi {
 
   refreshCatalog(): Promise<{ added: string[]; sources: string[]; status: ClinePassWebStatus }> {
     return api.post('/catalog/refresh', {})
+  }
+
+  searchCatalog(query: string): Promise<{ results: ClinePassCatalogSearchItem[] }> {
+    return api.get('/catalog/search?q=' + encodeURIComponent(query))
+  }
+
+  addCatalogModel(model: string): Promise<{ added: boolean; status: ClinePassWebStatus }> {
+    return api.post('/catalog/add', { model })
   }
 
   readUsage(): Promise<{ usage: ClinePassUsageDto; status: ClinePassWebStatus }> {

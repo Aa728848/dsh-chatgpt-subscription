@@ -112,6 +112,9 @@ export function ClinePassSection(props: Props): React.ReactElement {
   const [settingsForm, setSettingsForm] = useState<SettingsForm | null>(null)
   const [history, setHistory] = useState<{ total: number; entries: ClinePassHistoryRowDto[] } | null>(null)
   const [loginFlow, setLoginFlow] = useState<ClinePassLoginFlowDto | null>(null)
+  const [catalogQuery, setCatalogQuery] = useState('')
+  const [catalogResults, setCatalogResults] = useState<Array<{ id: string; added: boolean }>>([])
+  const [catalogSearched, setCatalogSearched] = useState(false)
 
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
@@ -363,6 +366,26 @@ export function ClinePassSection(props: Props): React.ReactElement {
   const refreshCatalog = useCallback(() => {
     void run('catalog', async () => (await API.refreshCatalog()).status)
   }, [run])
+
+  const searchCatalog = useCallback(() => {
+    const query = catalogQuery.trim()
+    if (query === '') return
+    setBusy('catalog-search')
+    setError(null)
+    void API.searchCatalog(query).then((outcome) => {
+      setCatalogResults(outcome.results)
+      setCatalogSearched(true)
+    }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
+  }, [catalogQuery])
+
+  const addCatalogModel = useCallback((id: string) => {
+    setBusy('catalog-add:' + id)
+    setError(null)
+    void API.addCatalogModel(id).then((outcome) => {
+      applyStatus(outcome.status)
+      setCatalogResults((current) => current.map((entry) => entry.id === id ? { ...entry, added: true } : entry))
+    }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
+  }, [applyStatus])
 
   const refreshUsage = useCallback(() => {
     void run('usage', async () => {
@@ -637,6 +660,46 @@ export function ClinePassSection(props: Props): React.ReactElement {
           </button>
         </div>
         <p className="dsha-muted" style={{ fontSize: 12 }}>{t.modelsHint}</p>
+        <form
+          className="dshcp-pin-row"
+          onSubmit={(event) => {
+            event.preventDefault()
+            searchCatalog()
+          }}
+        >
+          <input
+            className="dsha-input"
+            style={{ flex: 1, minWidth: 240 }}
+            value={catalogQuery}
+            placeholder={t.catalogSearchPlaceholder}
+            disabled={busyAny}
+            onChange={(event) => setCatalogQuery(event.target.value)}
+          />
+          <button className="dsha-btn" type="submit" disabled={busyAny || catalogQuery.trim() === ''}>
+            {busy === 'catalog-search' ? t.catalogSearching : t.catalogSearch}
+          </button>
+        </form>
+        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.catalogSearchHint}</p>
+        {catalogSearched && catalogResults.length === 0 && busy !== 'catalog-search' && (
+          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.catalogSearchEmpty}</p>
+        )}
+        {catalogResults.length > 0 && (
+          <div className="dshcp-channels">
+            {catalogResults.map((entry) => (
+              <span className="dshcp-channel" key={entry.id} data-added={entry.added} title={entry.id}>
+                {entry.id}
+                <button
+                  type="button"
+                  className="dshcp-exclude"
+                  disabled={busyAny || entry.added}
+                  onClick={() => addCatalogModel(entry.id)}
+                >
+                  {entry.added ? t.catalogAdded : (busy === 'catalog-add:' + entry.id ? '…' : t.catalogAdd)}
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {status !== null && models.length === 0 && (
           <div className="dsha-empty">{status.catalogSynced ? t.catalogEmpty : t.catalogNeverSynced}</div>
         )}
@@ -911,19 +974,6 @@ export function ClinePassSection(props: Props): React.ReactElement {
               <option value="both">{t.pinSpellingBoth}</option>
               <option value="detected">{t.pinSpellingDetected}</option>
             </select>
-          </div>
-          <div className="dsha-pref-row">
-            <div>
-              <label htmlFor="cline-pass-expose-catalog"><strong>{t.exposeCatalog}</strong></label>
-              <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.exposeCatalogHint}</p>
-            </div>
-            <input
-              id="cline-pass-expose-catalog"
-              className="dshcp-check"
-              type="checkbox"
-              checked={settingsForm.exposeCatalog}
-              onChange={(event) => setSettingsForm({ ...settingsForm, exposeCatalog: event.target.checked })}
-            />
           </div>
           <div className="dsha-pref-row">
             <div>

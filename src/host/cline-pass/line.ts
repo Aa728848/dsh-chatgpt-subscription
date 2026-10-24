@@ -19,7 +19,7 @@ import { ClinePassEngine } from './engine.ts'
 import { ClinePassLoginManager } from './oauth.ts'
 import { getClinePassWebStatus, registerClinePassRoutes, CLINE_PASS_ROUTES } from './routes.ts'
 import { createClinePassStore, type ClinePassStore } from './store.ts'
-import { ClinePassModelSettingsStore, type ClinePassModelSettings } from './token-store.ts'
+import { ClinePassModelSettingsStore, listedClinePassCatalogModels, type ClinePassModelSettings } from './token-store.ts'
 import { registerClinePassTools } from './tools.ts'
 import { DEFAULT_MODELS, PROVIDER_ID, PROVIDER_NAME, defaultPin } from './types.ts'
 import type { HubSummarySource } from '../hub-overview.ts'
@@ -50,10 +50,9 @@ export interface ClinePassLine {
 }
 
 /** Every id the line knows, before the visibility selection is applied. */
-export function clinePassKnownModelIds(settings: ClinePassModelSettings, catalogIds: readonly string[]): string[] {
+export function clinePassKnownModelIds(settings: ClinePassModelSettings, _catalogIds: readonly string[] = []): string[] {
   const ids = new Set<string>(DEFAULT_MODELS)
-  for (const model of settings.catalogModels) ids.add(model.id)
-  if (settings.exposeCatalog) for (const id of catalogIds) ids.add(id)
+  for (const model of listedClinePassCatalogModels(settings)) ids.add(model.id)
   return [...ids]
 }
 
