@@ -3,6 +3,8 @@ import {
   CLINE_PASS_ROUTE_PREFIX,
   type ClinePassAccountAction,
   type ClinePassAuthResult,
+  type ClinePassCatalogAddResultDto,
+  type ClinePassCatalogSearchItemDto,
   type ClinePassHistoryRowDto,
   type ClinePassLoginFlowDto,
   type ClinePassProbeResultDto,
@@ -15,13 +17,10 @@ import {
 
 const api = createLineApi(CLINE_PASS_ROUTE_PREFIX, 'Cline Pass')
 
-/** What one pin write answers with. */
-export interface ClinePassCatalogSearchItem {
-  id: string
-  /** Already present in the compact model list (built-in, official, or custom). */
-  added: boolean
-}
+/** One gateway-catalog search hit, as the card renders it. */
+export type ClinePassCatalogSearchItem = ClinePassCatalogSearchItemDto
 
+/** What one pin write answers with. */
 export interface ClinePassPinResult {
   pin: { upstreams: string[]; exclude: string[]; pinMode: 'strict' | 'preferred'; sort: string; has: string[] }
   warnings: string[]
@@ -142,8 +141,14 @@ export class ClinePassApi {
     return api.get('/catalog/search?q=' + encodeURIComponent(query))
   }
 
-  addCatalogModel(model: string): Promise<{ added: boolean; status: ClinePassWebStatus }> {
-    return api.post('/catalog/add', { model })
+  /**
+   * Add one search hit.
+   *
+   * A marketplace id is billed against the Cline Credits balance, so the host
+   * refuses it until the caller acknowledges that (`acknowledgeBilling`).
+   */
+  addCatalogModel(model: string, acknowledgeBilling = false): Promise<ClinePassCatalogAddResultDto> {
+    return api.post('/catalog/add', acknowledgeBilling ? { model, acknowledgeBilling: true } : { model })
   }
 
   readUsage(): Promise<{ usage: ClinePassUsageDto; status: ClinePassWebStatus }> {

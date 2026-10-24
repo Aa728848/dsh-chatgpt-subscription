@@ -18,7 +18,7 @@ import { ClinePassModelSettingsStore, FileCredentialStore, type ClinePassCredent
 import { ClinePassLoginManager } from '../src/host/cline-pass/oauth.ts'
 import { createClinePassEngine } from './cline-pass-test-helpers.ts'
 import { DEFAULT_MODELS } from '../src/host/cline-pass/types.ts'
-import type { ClinePassWebStatus } from '../src/shared/cline-pass-contracts.ts'
+import type { ClinePassCatalogAddResultDto, ClinePassWebStatus } from '../src/shared/cline-pass-contracts.ts'
 
 interface Captured {
   status: number
@@ -190,7 +190,7 @@ describe('Cline Pass settings API', () => {
       catalog: { 'cline-pass/official-new': { name: 'Official New' } },
       sources: ['cline.api'],
     })
-    vi.spyOn(engine, 'gatewayCatalog').mockResolvedValue(['deepseek/legacy-extra', 'deepseek/deepseek-v4-pro', 'openai/gpt-new'])
+    vi.spyOn(engine, 'gatewayCatalog').mockResolvedValue(['deepseek/legacy-extra', 'deepseek/deepseek-v4-pro', 'cline-pass/sub-extra', 'openai/gpt-new'])
     const refreshed = await call({ url: '/cline-pass/api/catalog/refresh', method: 'POST', body: {} })
     expect(refreshed.status).toBe(200)
     const stored = await settings.read()
@@ -205,14 +205,27 @@ describe('Cline Pass settings API', () => {
 
     const found = await call({ url: '/cline-pass/api/catalog/search?q=v4-pro' })
     expect(found.status).toBe(200)
-    expect(found.body.value).toEqual({ results: [{ id: 'deepseek/deepseek-v4-pro', added: false }] })
-    const added = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'deepseek/deepseek-v4-pro' } })
+    expect(found.body.value).toEqual({ results: [{ id: 'deepseek/deepseek-v4-pro', added: false, billing: 'credits' }] })
+    // A marketplace id draws on the Cline Credits balance, so it is refused
+    // until the caller acknowledges that.
+    const refused = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'deepseek/deepseek-v4-pro' } })
+    expect(refused.status).toBe(409)
+    expect((refused.body as { code?: string }).code).toBe('credits_billing')
+    const added = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'deepseek/deepseek-v4-pro', acknowledgeBilling: true } })
     expect(added.status).toBe(200)
+    expect((added.body.value as ClinePassCatalogAddResultDto).billing).toBe('credits')
     const after = await settings.read()
     expect(after.catalogModels).toContainEqual(expect.objectContaining({ id: 'deepseek/deepseek-v4-pro', origin: 'custom' }))
     expect(after.enabledModelIds).toEqual(['deepseek/deepseek-v4-pro'])
     const visible = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
     expect(visible.models.find((entry) => entry.id === 'deepseek/deepseek-v4-pro')?.enabled).toBe(true)
+
+    // A subscription id stays one-click: it is the plan quota, not credits.
+    const subFound = await call({ url: '/cline-pass/api/catalog/search?q=sub-extra' })
+    expect(subFound.body.value).toEqual({ results: [{ id: 'cline-pass/sub-extra', added: false, billing: 'subscription' }] })
+    const subAdded = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'cline-pass/sub-extra' } })
+    expect(subAdded.status).toBe(200)
+    expect((subAdded.body.value as ClinePassCatalogAddResultDto).billing).toBe('subscription')
   })
 
   it('warns when a pin targets the anonymous contributor route', async () => {

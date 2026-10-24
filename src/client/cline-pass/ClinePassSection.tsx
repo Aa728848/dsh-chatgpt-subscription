@@ -17,7 +17,7 @@ import {
   type ClinePassValidateResultDto,
   type ClinePassWebStatus,
 } from '../../shared/cline-pass-contracts.ts'
-import { ClinePassApi, quotaRefreshingOf } from './api.ts'
+import { ClinePassApi, quotaRefreshingOf, type ClinePassCatalogSearchItem } from './api.ts'
 import { zh, NS_CLINE_PASS } from './locales.ts'
 import { useLineDict } from '../common/line-locale.ts'
 
@@ -60,7 +60,6 @@ interface SettingsForm {
   maxConcurrentRequests: string
   streamIdleTimeoutMs: string
   historyLimit: string
-  exposeCatalog: boolean
   pinSpelling: string
 }
 
@@ -83,7 +82,6 @@ function settingsFormOf(status: ClinePassWebStatus): SettingsForm {
     maxConcurrentRequests: String(status.settings.maxConcurrentRequests),
     streamIdleTimeoutMs: String(status.settings.streamIdleTimeoutMs),
     historyLimit: String(status.settings.historyLimit),
-    exposeCatalog: status.settings.exposeCatalog,
     pinSpelling: status.settings.pinSpelling,
   }
 }
@@ -113,8 +111,10 @@ export function ClinePassSection(props: Props): React.ReactElement {
   const [history, setHistory] = useState<{ total: number; entries: ClinePassHistoryRowDto[] } | null>(null)
   const [loginFlow, setLoginFlow] = useState<ClinePassLoginFlowDto | null>(null)
   const [catalogQuery, setCatalogQuery] = useState('')
-  const [catalogResults, setCatalogResults] = useState<Array<{ id: string; added: boolean }>>([])
+  const [catalogResults, setCatalogResults] = useState<ClinePassCatalogSearchItem[]>([])
   const [catalogSearched, setCatalogSearched] = useState(false)
+  /** Ids the user has already been told are credit-billed; the second click adds them. */
+  const [catalogCreditsAck, setCatalogCreditsAck] = useState<Record<string, boolean>>({})
 
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
@@ -375,13 +375,14 @@ export function ClinePassSection(props: Props): React.ReactElement {
     void API.searchCatalog(query).then((outcome) => {
       setCatalogResults(outcome.results)
       setCatalogSearched(true)
+      setCatalogCreditsAck({})
     }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
   }, [catalogQuery])
 
-  const addCatalogModel = useCallback((id: string) => {
+  const addCatalogModel = useCallback((id: string, acknowledgeBilling = false) => {
     setBusy('catalog-add:' + id)
     setError(null)
-    void API.addCatalogModel(id).then((outcome) => {
+    void API.addCatalogModel(id, acknowledgeBilling).then((outcome) => {
       applyStatus(outcome.status)
       setCatalogResults((current) => current.map((entry) => entry.id === id ? { ...entry, added: true } : entry))
     }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
@@ -420,7 +421,6 @@ export function ClinePassSection(props: Props): React.ReactElement {
     void API.updateSettings({
       baseURL: settingsForm.baseURL,
       ...numbers,
-      exposeCatalog: settingsForm.exposeCatalog,
       pinSpelling: settingsForm.pinSpelling,
     }).then((next) => {
       applyStatus(next)
@@ -685,19 +685,44 @@ export function ClinePassSection(props: Props): React.ReactElement {
         )}
         {catalogResults.length > 0 && (
           <div className="dshcp-channels">
-            {catalogResults.map((entry) => (
-              <span className="dshcp-channel" key={entry.id} data-added={entry.added} title={entry.id}>
-                {entry.id}
-                <button
-                  type="button"
-                  className="dshcp-exclude"
-                  disabled={busyAny || entry.added}
-                  onClick={() => addCatalogModel(entry.id)}
-                >
-                  {entry.added ? t.catalogAdded : (busy === 'catalog-add:' + entry.id ? '…' : t.catalogAdd)}
-                </button>
-              </span>
-            ))}
+            {catalogResults.map((entry) => {
+              const acknowledged = catalogCreditsAck[entry.id] === true
+              return (
+                <span className="dshcp-channel" key={entry.id} data-added={entry.added} title={entry.id}>
+                  {entry.id}
+                  <span className="dsha-muted" style={{ fontSize: 11 }}>
+                    {entry.billing === 'credits' ? t.catalogBillingCredits : t.catalogBillingSubscription}
+                  </span>
+                  {entry.billing === 'credits' && !entry.added && acknowledged && (
+                    <span className="dsha-muted" style={{ fontSize: 11 }}>{t.catalogCreditsWarning}</span>
+                  )}
+                  <button
+                    type="button"
+                    className="dshcp-exclude"
+                    disabled={busyAny || entry.added}
+                    onClick={() => {
+                      // A marketplace id spends the Credits balance, so the
+                      // first click only explains that; the second one adds it.
+                      if (entry.billing === 'credits' && !acknowledged) {
+                        setCatalogCreditsAck((current) => ({ ...current, [entry.id]: true }))
+                        return
+                      }
+                      addCatalogModel(entry.id, entry.billing === 'credits')
+                    }}
+                  >
+                    {entry.added
+                      ? t.catalogAdded
+                      : busy === 'catalog-add:' + entry.id
+                        ? '…'
+                        : entry.billing === 'credits' && !acknowledged
+                          ? t.catalogAdd
+                          : entry.billing === 'credits'
+                            ? t.catalogAddCredits
+                            : t.catalogAdd}
+                  </button>
+                </span>
+              )
+            })}
           </div>
         )}
         {status !== null && models.length === 0 && (

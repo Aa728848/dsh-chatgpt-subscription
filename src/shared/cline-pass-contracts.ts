@@ -187,7 +187,6 @@ export interface ClinePassSettingsDto {
   maxConcurrentRequests: number
   streamIdleTimeoutMs: number
   historyLimit: number
-  exposeCatalog: boolean
   pinSpelling: string
 }
 
@@ -200,9 +199,31 @@ export interface ClinePassSettingsUpdateDto {
   maxConcurrentRequests?: number
   streamIdleTimeoutMs?: number
   historyLimit?: number
-  exposeCatalog?: boolean
   pinSpelling?: string
   exposeTools?: boolean
+}
+
+/** How one gateway model id is billed on this account. */
+export type ClinePassCatalogBilling = 'subscription' | 'credits'
+
+/** One gateway-catalog search hit, as the settings card renders it. */
+export interface ClinePassCatalogSearchItemDto {
+  id: string
+  /** Already present in the compact model list (built-in, official, or custom). */
+  added: boolean
+  /**
+   * `subscription` for a `cline-pass/*` id the plan covers; `credits` for a
+   * marketplace id billed against the Cline Credits balance. Adding the second
+   * kind needs an explicit acknowledgement: it never draws on the plan quota.
+   */
+  billing: ClinePassCatalogBilling
+}
+
+/** Outcome of adding one catalog model to the picker. */
+export interface ClinePassCatalogAddResultDto {
+  added: boolean
+  billing: ClinePassCatalogBilling
+  status: ClinePassWebStatus
 }
 
 /** Outcome of probing one model's routing pipeline and channel list. */

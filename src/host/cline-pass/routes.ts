@@ -32,6 +32,7 @@ import {
   clinePassAccountQuota,
   clinePassWindowLabel,
   isClinePassPinMode,
+  type ClinePassCatalogBilling,
   type ClinePassAccountAction,
   type ClinePassAuthResult,
   type ClinePassChannelVerdictDto,
@@ -110,11 +111,31 @@ function formatModelCapacity(tokens: number): string {
   return String(tokens)
 }
 
+/** `cline-pass/*` is the subscription catalogue; every other id is marketplace credit billing. */
+function catalogBilling(id: string): ClinePassCatalogBilling {
+  return id.startsWith('cline-pass/') ? 'subscription' : 'credits'
+}
+
+/** Published metadata for an id the store already scanned, so an added row keeps its real facts. */
+function publishedCatalogMeta(store: ClinePassStore, id: string): Record<string, unknown> {
+  const entry = store.catalog().models[id]
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return {}
+  const record = entry as Record<string, unknown>
+  const meta: Record<string, unknown> = {}
+  if (typeof record.name === 'string') meta.name = record.name
+  if (typeof record.contextWindow === 'number') meta.contextWindow = record.contextWindow
+  if (typeof record.maxTokens === 'number') meta.maxTokens = record.maxTokens
+  if (typeof record.reasoning === 'boolean') meta.reasoning = record.reasoning
+  if (Array.isArray(record.input)) meta.input = record.input.filter((item): item is string => typeof item === 'string')
+  if (Array.isArray(record.efforts)) meta.efforts = record.efforts.filter((item): item is string => typeof item === 'string')
+  return meta
+}
+
 function formatModelHint(contextWindow: number, input: readonly string[], reasoning: boolean): string {
   return formatModelCapacity(contextWindow) + ' · ' + input.join('+') + (reasoning ? ' · reasoning' : '')
 }
 
-function uniqueModels(settings: ClinePassModelSettings, _catalogIds: readonly string[] = []): string[] {
+function uniqueModels(settings: ClinePassModelSettings): string[] {
   const ids = new Set<string>(DEFAULT_MODELS)
   for (const model of listedClinePassCatalogModels(settings)) ids.add(model.id)
   return [...ids]
@@ -122,7 +143,7 @@ function uniqueModels(settings: ClinePassModelSettings, _catalogIds: readonly st
 
 /** Every model the card should render, whether or not it is advertised. */
 function projectModels(settings: ClinePassModelSettings, store: ClinePassStore): ClinePassModelDto[] {
-  const known = uniqueModels(settings, store.catalog().ids)
+  const known = uniqueModels(settings)
   const hidden = new Set(settings.hiddenModels)
   const enabledSet = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
   return known.map((id) => {
@@ -262,7 +283,6 @@ export async function getClinePassWebStatus(
       maxConcurrentRequests: settings.maxConcurrentRequests,
       streamIdleTimeoutMs: settings.streamIdleTimeoutMs,
       historyLimit: settings.historyLimit,
-      exposeCatalog: settings.exposeCatalog,
       pinSpelling: settings.pinSpelling,
     },
   }
@@ -679,7 +699,7 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
           const current = await settingsStore.read()
-          const known = uniqueModels(current, store.catalog().ids)
+          const known = uniqueModels(current)
           const hidden = new Set(current.hiddenModels)
           if (path === 'models/visibility') {
             const model = typeof body.model === 'string' ? body.model.trim() : ''
@@ -734,7 +754,7 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           const results = ids
             .filter((id) => id.toLowerCase().includes(query))
             .slice(0, 30)
-            .map((id) => ({ id, added: listed.has(id) }))
+            .map((id) => ({ id, added: listed.has(id), billing: catalogBilling(id) }))
           return sendJson(response, 200, { ok: true, value: { results } })
         }
 
@@ -751,16 +771,29 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             return sendJson(response, 502, { ok: false, error: firstLine(error instanceof Error ? error.message : error, 240) })
           }
           if (!ids.includes(model)) return sendJson(response, 404, { ok: false, error: `${model} is not in the gateway catalog; refresh or search again.` })
+          // A marketplace id draws on the Cline Credits balance, never on the
+          // plan quota. Adding one is allowed but must be acknowledged, so a
+          // search hit cannot silently start spending credits.
+          const billing = catalogBilling(model)
+          if (billing === 'credits' && body.acknowledgeBilling !== true) {
+            return sendJson(response, 409, {
+              ok: false,
+              code: 'credits_billing',
+              billing,
+              error: `${model} is a marketplace model billed against the Cline Credits balance, not the Cline Pass plan. Retry with acknowledgeBilling:true to add it anyway.`,
+            })
+          }
           const current = await settingsStore.read()
+          const published = publishedCatalogMeta(store, model)
           const exists = current.catalogModels.some((entry) => entry.id === model)
           const catalogModels = exists
-            ? current.catalogModels.map((entry) => entry.id === model ? { ...entry, origin: 'custom' as const } : entry)
-            : [...current.catalogModels, { id: model, origin: 'custom' as const }]
+            ? current.catalogModels.map((entry) => entry.id === model ? { ...entry, ...published, origin: 'custom' as const } : entry)
+            : [...current.catalogModels, { id: model, ...published, origin: 'custom' as const }]
           const enabledModelIds = current.enabledModelIds === null ? null : [...new Set([...current.enabledModelIds, model])]
           const hiddenModels = current.hiddenModels.filter((id) => id !== model)
           await settingsStore.update({ catalogModels, enabledModelIds, hiddenModels })
           emitModelsUpdated()
-          return sendJson(response, 200, { ok: true, value: { added: !exists, status: await status() } })
+          return sendJson(response, 200, { ok: true, value: { added: !exists, billing, status: await status() } })
         }
 
         if (path === 'catalog/refresh') {
