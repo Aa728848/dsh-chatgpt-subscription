@@ -185,7 +185,21 @@ function effortsFromOptions(options: unknown): string[] | undefined {
   return ordered.length > 0 ? ordered : undefined
 }
 
-/** List the gateway's own catalog ids; an empty array when the call fails. */
+/**
+ * The gateway's own catalog: ids with whatever metadata the endpoint publishes.
+ *
+ * The metadata is the reason this is not an id list. A marketplace model that
+ * exists only in this catalog has no other source, so an id-only answer left it
+ * sized by the 128k default — an 8x under-estimate on a 1M model, which the
+ * harness then fills with a matching completion reserve and compacts far too
+ * early.
+ */
+export interface ClinePassGatewayCatalog {
+  ids: string[]
+  models: Record<string, ClinePassDiscoveredModel>
+}
+
+/** List the gateway's own catalog; empty when the call fails. */
 export async function fetchGatewayCatalog({
   fetchFn,
   baseURL,
@@ -198,13 +212,21 @@ export async function fetchGatewayCatalog({
   apiKey: string
   signal?: AbortSignal
   timeoutMs?: number
-}): Promise<string[]> {
+}): Promise<ClinePassGatewayCatalog> {
   try {
     const result = await sendJSON(fetchFn, `${trimBase(baseURL)}/models`, { apiKey, signal, timeoutMs })
     const data = isRecord(result.json) && Array.isArray(result.json.data) ? result.json.data : []
-    return data.map((model) => (isRecord(model) ? model.id : undefined)).filter((id): id is string => typeof id === 'string')
+    const ids: string[] = []
+    const models: Record<string, ClinePassDiscoveredModel> = {}
+    for (const model of data) {
+      if (!isRecord(model) || typeof model.id !== 'string') continue
+      ids.push(model.id)
+      const meta = modelMetadata(model)
+      if (Object.keys(meta).length > 0) models[model.id] = meta
+    }
+    return { ids, models }
   } catch {
-    return []
+    return { ids: [], models: {} }
   }
 }
 

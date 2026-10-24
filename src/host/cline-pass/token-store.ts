@@ -15,7 +15,10 @@ import {
   DEFAULT_MAX_CONCURRENT_REQUESTS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_GATEWAY_HAS,
+  MAX_GATEWAY_HAS_LENGTH,
   PROVIDER_ID,
+  capGatewayHas,
   defaultGatewayHas,
   defaultPin,
   type ClinePassPinSettings,
@@ -326,7 +329,7 @@ function readPin(value: unknown, model: string): ClinePassPinSettings {
     // Legacy pins predate `has`: inherit the model's measured default. An
     // explicitly saved empty array stays empty, so clearing it is respected.
     has: Array.isArray(record.has)
-      ? record.has.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim())
+      ? capGatewayHas(record.has.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim()))
       : defaultGatewayHas(model),
   }
 }
@@ -392,7 +395,11 @@ function promoteInUseCatalogRows(
   contextWindowOverrides: Record<string, number>,
 ): ClinePassCatalogModel[] {
   const inUse = new Set<string>([
-    ...(Array.isArray(enabledModelIds) ? enabledModelIds : []),
+    // `null` is "no filter": every catalogued model is enabled, so every legacy
+    // gateway row is one the user was using. Treating it as an empty selection
+    // left the exact cohort this migration exists for — an `exposeCatalog` user
+    // who never touched the checklist — with every row still hidden.
+    ...(enabledModelIds === null ? models.map((model) => model.id) : enabledModelIds),
     ...Object.keys(pins),
     ...Object.keys(contextWindowOverrides),
   ])

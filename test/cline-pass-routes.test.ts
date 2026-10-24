@@ -179,6 +179,29 @@ describe('Cline Pass settings API', () => {
     expect(status.models.find((entry) => entry.id === model)?.has).toEqual(['vision', 'implicit-caching'])
   })
 
+  it('sizes a searched marketplace model from the gateway, without a refresh first', async () => {
+    // The path a user actually takes: type a name, add the hit. Nothing has run
+    // `catalog/refresh`, so the only source for this id is the gateway itself.
+    vi.spyOn(engine, 'gatewayCatalog').mockResolvedValue({
+      ids: ['deepseek/deepseek-v4.1-flash-1017'],
+      models: { 'deepseek/deepseek-v4.1-flash-1017': { name: 'DeepSeek V4.1 Flash 1017', contextWindow: 1_048_576 } },
+    })
+    expect((await call({ url: '/cline-pass/api/catalog/search?q=1017' })).status).toBe(200)
+    const added = await call({
+      url: '/cline-pass/api/catalog/add',
+      method: 'POST',
+      body: { model: 'deepseek/deepseek-v4.1-flash-1017', acknowledgeBilling: true },
+    })
+    expect(added.status).toBe(200)
+    const stored = await settings.read()
+    // Without the gateway's metadata the row would fall back to 128k, an 8x
+    // under-estimate that makes the harness compact far too early.
+    expect(stored.catalogModels).toContainEqual(expect.objectContaining({
+      id: 'deepseek/deepseek-v4.1-flash-1017',
+      contextWindow: 1_048_576,
+    }))
+  })
+
   it('keeps the full gateway catalog out of the model list and searches it on demand', async () => {
     await settings.update({
       catalogModels: [{ id: 'cline-pass/official-old' }, { id: 'deepseek/legacy-extra' }],
@@ -190,7 +213,13 @@ describe('Cline Pass settings API', () => {
       catalog: { 'cline-pass/official-new': { name: 'Official New' } },
       sources: ['cline.api'],
     })
-    vi.spyOn(engine, 'gatewayCatalog').mockResolvedValue(['deepseek/legacy-extra', 'deepseek/deepseek-v4-pro', 'cline-pass/sub-extra', 'openai/gpt-new'])
+    vi.spyOn(engine, 'gatewayCatalog').mockResolvedValue({
+      ids: ['deepseek/legacy-extra', 'deepseek/deepseek-v4-pro', 'cline-pass/sub-extra', 'openai/gpt-new'],
+      // The gateway publishes real capacity for a marketplace id that the official
+      // scan never lists. An added row has to keep it: the 128k default would
+      // under-size a 1M model by 8x and make the harness compact far too early.
+      models: { 'deepseek/deepseek-v4-pro': { name: 'DeepSeek V4 Pro', contextWindow: 1_048_576, maxTokens: 384_000 } },
+    })
     const refreshed = await call({ url: '/cline-pass/api/catalog/refresh', method: 'POST', body: {} })
     expect(refreshed.status).toBe(200)
     const stored = await settings.read()
@@ -215,7 +244,12 @@ describe('Cline Pass settings API', () => {
     expect(added.status).toBe(200)
     expect((added.body.value as ClinePassCatalogAddResultDto).billing).toBe('credits')
     const after = await settings.read()
-    expect(after.catalogModels).toContainEqual(expect.objectContaining({ id: 'deepseek/deepseek-v4-pro', origin: 'custom' }))
+    expect(after.catalogModels).toContainEqual(expect.objectContaining({
+      id: 'deepseek/deepseek-v4-pro',
+      origin: 'custom',
+      name: 'DeepSeek V4 Pro',
+      contextWindow: 1_048_576,
+    }))
     expect(after.enabledModelIds).toEqual(['deepseek/deepseek-v4-pro'])
     const visible = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
     expect(visible.models.find((entry) => entry.id === 'deepseek/deepseek-v4-pro')?.enabled).toBe(true)

@@ -198,13 +198,26 @@ describe('the ChatGPT device-code panel', () => {
       const link = box!.querySelector<HTMLAnchorElement>('a')!
       expect(link.getAttribute('href')).toBe('https://auth.openai.com/codex/device')
       expect(link.textContent).toBe(zh.deviceCodeOpen)
-      // The countdown, from the grant's own deadline — about 15 minutes, and a
-      // second under it because the deadline was floored to the second.
+      // The countdown, from the grant's own deadline: about 15 minutes. Both
+      // ends of the host's pair are whole seconds, so the remaining time lands
+      // within a second of 900 — the exact value depends on how much of a
+      // second passed between the answer and the first render, which is not the
+      // behaviour worth pinning. What is: it starts near the grant lifetime.
       const waiting = zh.deviceCodeWaiting.replace('{time}', '')
-      expect(box!.textContent).toMatch(new RegExp(`${escapeRegExp(waiting)}14:5\\d`))
+      const readRemaining = (): number => {
+        const match = new RegExp(`${escapeRegExp(waiting)}(\\d+):(\\d\\d)`).exec(panel()!.textContent ?? '')
+        expect(match).not.toBeNull()
+        return Number(match![1]) * 60 + Number(match![2])
+      }
+      const initial = readRemaining()
+      expect(initial).toBeGreaterThanOrEqual(895)
+      expect(initial).toBeLessThanOrEqual(900)
       await act(async () => { vi.advanceTimersByTime(61_000) })
-      // It moves: a minute later the panel is a minute closer to the deadline.
-      expect(panel()!.textContent).toMatch(new RegExp(`${escapeRegExp(waiting)}13:5\\d`))
+      // It moves: a minute of wall clock takes a minute off the countdown, which
+      // is what proves the panel is a clock and not a snapshot.
+      const later = readRemaining()
+      expect(later).toBeGreaterThanOrEqual(initial - 62)
+      expect(later).toBeLessThanOrEqual(initial - 60)
       // Cancel is on the panel, not only in the card's shared action row.
       expect([...box!.querySelectorAll('button')].map((button) => button.textContent))
         .toContain(zh.cancel)

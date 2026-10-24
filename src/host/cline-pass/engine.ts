@@ -19,6 +19,7 @@ import {
   fetchOfficialModels,
   openChatStream,
   openRouterEndpoints,
+  type ClinePassGatewayCatalog,
 } from './client.ts'
 import {
   buildAttempts,
@@ -650,8 +651,8 @@ export class ClinePassEngine {
     }
   }
 
-  /** Refresh the gateway's own catalog ids. */
-  async gatewayCatalog({ signal, timeoutMs }: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<string[]> {
+  /** Refresh the gateway's own catalog: ids plus published metadata. */
+  async gatewayCatalog({ signal, timeoutMs }: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<ClinePassGatewayCatalog> {
     const account = await this.resolveAccount()
     return await fetchGatewayCatalog({ fetchFn: this.fetchFn, baseURL: account.baseURL || DEFAULT_BASE_URL, apiKey: account.key, signal, timeoutMs })
   }

@@ -45,4 +45,24 @@ describe('Cline Pass gateway capability filters', () => {
     expect(defaultPin('cline-pass/glm-5.3').has).toEqual([])
     expect(defaultPin().has).toEqual([])
   })
+
+  it('bounds a stored filter list so it cannot become request payload on every turn', () => {
+    // `has` is copied into every chat request body. Channels were already capped
+    // this way; an uncapped capability list made a large settings document a
+    // large request forever.
+    const many = Array.from({ length: 40 }, (_, index) => `capability-${index}`)
+    const parsed = parseClinePassModelSettings({ pins: { [MODEL]: { upstreams: ['deepseek'], has: many } } })
+    expect(parsed.pins[MODEL]?.has).toHaveLength(16)
+    expect(parsed.pins[MODEL]?.has[0]).toBe('capability-0')
+    const long = parseClinePassModelSettings({ pins: { [MODEL]: { upstreams: [], has: ['x'.repeat(200), 'vision'] } } })
+    expect(long.pins[MODEL]?.has).toEqual(['vision'])
+  })
+
+  it('bounds the filter again on the wire, whatever the caller passes', () => {
+    const many = Array.from({ length: 40 }, (_, index) => `capability-${index}`)
+    const body = injectPrefs({ model: MODEL }, {}, {
+      upstream: null, orderRest: [], excludeList: [], strict: true, sort: null, has: many,
+    })
+    expect((body.providerOptions as { gateway: { has: string[] } }).gateway.has).toHaveLength(16)
+  })
 })

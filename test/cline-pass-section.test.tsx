@@ -140,7 +140,7 @@ async function render(overrides: Partial<ClinePassWebStatus> = {}, onPost?: (url
             sort: posted.sort ?? '',
           },
           warnings: [],
-          status: STATUS,
+          status: { ...STATUS, ...overrides },
         },
       })
     }
@@ -259,6 +259,46 @@ describe('ClinePassSection', () => {
       upstreams: ['deepseek'],
       has: ['vision'],
     })
+  })
+
+  it('survives a host older than the capability filter, which sends no has at all', async () => {
+    // A newer client bundle can meet an older host: the browser loads client
+    // assets on demand while the host loaded them at startup. Spreading an
+    // absent `has` used to throw during render and unmount the whole card.
+    const model = STATUS.models[0]!
+    const olderHostModel: Record<string, unknown> = { ...model }
+    delete olderHostModel.has
+    expect('has' in olderHostModel).toBe(false)
+    // The DTO type requires `has`; the point is that a host which predates it
+    // sends a payload the type does not describe, so the cast has to go through
+    // `unknown` rather than claiming the two shapes overlap.
+    const el = await render({ models: [olderHostModel as unknown as typeof model] })
+    const box = el.querySelector<HTMLInputElement>('input[placeholder="vision, implicit-caching"]')
+    expect(box?.value).toBe('')
+  })
+
+  it('does not reset a half-typed filter when an unrelated status answer arrives', async () => {
+    // `projectModels` builds a fresh `has` array on every status answer, so
+    // keying the reseed effect on the array identity rewrote a half-typed value
+    // on each poll. Only a changed VALUE may reseed the box.
+    const model = STATUS.models[0]!
+    // A getter that hands back a NEW array each read, exactly what a fresh
+    // status projection does.
+    const modelWithFreshArray = { ...model, pinned: ['deepseek'], has: ['vision'] }
+    Object.defineProperty(modelWithFreshArray, 'has', { get: () => ['vision'], enumerable: true })
+    const el = await render({ models: [modelWithFreshArray] })
+    const box = el.querySelector<HTMLInputElement>('input[placeholder="vision, implicit-caching"]')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(box, 'vision, ')
+      box.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(box.value).toBe('vision, ')
+    // Saving the pin is an unrelated action whose answer replaces the whole
+    // status, so the model object (and its `has` array) is new again.
+    const save = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.savePin)!
+    await act(async () => save.click())
+    expect(box.value).toBe('vision, ')
   })
 
   it('adds a subscription hit in one click and a marketplace hit only after acknowledging credits', async () => {

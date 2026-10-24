@@ -337,13 +337,19 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
     ctx.emit?.('llm/adapters-updated')
   }
 
-  /** The full gateway catalog, cached only as the search index for manual add. */
+  /**
+   * The full gateway catalog, cached as the search index for manual add.
+   *
+   * The metadata is kept alongside the ids: an id the official scan never saw
+   * has no other source, and `catalog/add` copies what this call learned so the
+   * added row is sized by the gateway rather than by the 128k default.
+   */
   const searchCatalogIds = async (): Promise<string[]> => {
     const cached = store.catalog().ids
     if (cached.length > 0) return cached
     const gateway = await engine.gatewayCatalog()
-    store.setCatalog({ ids: gateway, sources: ['gateway'], models: store.catalog().models })
-    return gateway
+    store.setCatalog({ ids: gateway.ids, sources: ['gateway'], models: { ...store.catalog().models, ...gateway.models } })
+    return gateway.ids
   }
 
   /**
@@ -826,12 +832,16 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           // The full gateway list is only a search index, never a settings
           // catalog page. Fetch it even when the legacy exposeCatalog flag is
           // set, but do not merge its hundreds of ids into catalogModels.
-          const gateway = await engine.gatewayCatalog().catch(() => [])
+          const gateway = await engine.gatewayCatalog().catch(() => ({ ids: [], models: {} }))
           await settingsStore.storeCatalog([...existing.values()])
           store.setCatalog({
-            ids: [...new Set([...scan.models, ...gateway])],
-            sources: [...scan.sources, ...(gateway.length > 0 ? ['gateway'] : [])],
-            models: scan.catalog as Record<string, unknown>,
+            ids: [...new Set([...scan.models, ...gateway.ids])],
+            sources: [...scan.sources, ...(gateway.ids.length > 0 ? ['gateway'] : [])],
+            // The official scan wins on any id it also lists; the gateway fills in
+            // the marketplace ids that exist nowhere else, so a model added from
+            // search keeps the context window the gateway published instead of
+            // falling back to the 128k default.
+            models: { ...gateway.models, ...scan.catalog } as Record<string, unknown>,
           })
           emitModelsUpdated()
           return sendJson(response, 200, { ok: true, value: { added, sources: scan.sources, status: await status() } })

@@ -12,7 +12,7 @@
  * @module dsh-chatgpt-subscription/cline-pass-protocol
  */
 import { isClinePassAnonymousUpstream } from '../../shared/cline-pass-contracts.ts'
-import { MAX_UPSTREAMS } from './types.ts'
+import { MAX_UPSTREAMS, capGatewayHas } from './types.ts'
 
 /** Which pipeline the gateway routed one request through. */
 export type ClinePipeline = 'direct' | 'planner'
@@ -332,7 +332,7 @@ export function injectPrefs(body: WireBody, meta: PinModelMeta | undefined, atte
   const excludeList = attempt.excludeList ?? []
   const strict = attempt.strict !== false
   const sort = normalizeSort(attempt.sort)
-  const has = (attempt.has ?? []).filter((name) => typeof name === 'string' && name.trim() !== '').map((name) => name.trim())
+  const has = capGatewayHas((attempt.has ?? []).filter((name): name is string => typeof name === 'string'))
   const excluded = excludeList.filter((name) => normalizeSlug(name) !== normalizeSlug(upstream ?? ''))
   const excludedIds = new Set(excluded.map(normalizeSlug))
   const spell = (names: readonly string[], pipeline: ClinePipeline): string[] => names.map((name) => channelNameFor(name, pipeline))

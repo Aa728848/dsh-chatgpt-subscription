@@ -72,6 +72,16 @@ export const AUTH_COOLDOWN_MS = 30 * 60_000
 /** How many channels one model's list may hold. */
 export const MAX_UPSTREAMS = 64
 
+/**
+ * How many capability filters one pin may hold, and how long each may be.
+ *
+ * `has` is copied into every chat request body, so an unread bound let a large
+ * settings document become a large request on every turn. Channels were already
+ * bounded this way; capabilities need the same treatment for the same reason.
+ */
+export const MAX_GATEWAY_HAS = 16
+export const MAX_GATEWAY_HAS_LENGTH = 64
+
 /** How many channels one validation run tests concurrently. */
 export const VALIDATE_CONCURRENCY = 5
 
@@ -152,6 +162,23 @@ export interface ClinePassPinSettings {
 /** The capability filter a model needs by default; empty for all others. */
 export function defaultGatewayHas(model: string): string[] {
   return [...(catalogEntry(model)?.gatewayHas ?? [])]
+}
+
+/**
+ * Bound one pin's capability filter, the way channels are bounded.
+ *
+ * Applied on read and again on the wire: `has` is copied into every chat request
+ * body, so a filter list is request payload on every turn, not a private note.
+ */
+export function capGatewayHas(names: readonly string[]): string[] {
+  const capped: string[] = []
+  for (const name of names) {
+    const trimmed = name.trim()
+    if (trimmed === '' || trimmed.length > MAX_GATEWAY_HAS_LENGTH) continue
+    if (!capped.includes(trimmed)) capped.push(trimmed)
+    if (capped.length >= MAX_GATEWAY_HAS) break
+  }
+  return capped
 }
 
 /** The default pin: automatic routing, no exclusions, model-default capabilities. */

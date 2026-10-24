@@ -461,7 +461,10 @@ export function ClinePassSection(props: Props): React.ReactElement {
     exclude: [...model.excluded],
     pinMode: model.pinMode,
     sort: model.sort,
-    has: [...model.has],
+    // Absent on a host older than the `has` filter, which a newer client bundle
+    // can meet: the browser loads client assets on demand while the host loaded
+    // them at startup. Spreading an absent field would unmount the whole card.
+    has: [...(model.has ?? [])],
   }, [pinDrafts])
 
   const editPin = useCallback((model: ClinePassModelDto, patch: Partial<PinDraft>) => {
@@ -1051,7 +1054,11 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
   const busyAny = props.busy !== null
   const [manualChannel, setManualChannel] = useState('')
   const [hasText, setHasText] = useState(draft.has.join(', '))
-  useEffect(() => setHasText(draft.has.join(', ')), [model.id, model.has])
+  // Keyed on the VALUE, not the array identity: `projectModels` builds a fresh
+  // array on every status answer, so a 60-second poll used to rewrite a
+  // half-typed "vision, " back to "vision".
+  const hasValue = draft.has.join(', ')
+  useEffect(() => setHasText(hasValue), [model.id, hasValue])
   const verdicts = new Map(model.upstreamStatus.map((entry) => [entry.upstream, entry]))
   // Configured names that the last probe did not discover are still shown: a pin
   // the gateway silently drops is exactly what this panel exists to expose.
@@ -1257,8 +1264,8 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
           {result.test.anonymous && (
             <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', result.test.actual || 'openai-compatible-private')}</p>
           )}
-          {result.test.has.length > 0 && (
-            <p className="dshcp-meta">{t.testHas.replace('{list}', result.test.has.join(', '))}</p>
+          {(result.test.has ?? []).length > 0 && (
+            <p className="dshcp-meta">{t.testHas.replace('{list}', (result.test.has ?? []).join(', '))}</p>
           )}
           {result.test.fingerprint !== '' && (
             <p className="dshcp-meta">{t.fingerprintOk.replace('{fingerprint}', result.test.fingerprint)}</p>

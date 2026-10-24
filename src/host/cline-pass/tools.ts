@@ -286,11 +286,13 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           })
         }
         await settings.storeCatalog(merged)
-        const gateway = await engine.gatewayCatalog().catch(() => [])
+        const gateway = await engine.gatewayCatalog().catch(() => ({ ids: [], models: {} }))
         store.setCatalog({
-          ids: [...new Set([...scan.models, ...gateway])],
-          sources: [...scan.sources, ...(gateway.length > 0 ? ['gateway'] : [])],
-          models: scan.catalog as Record<string, unknown>,
+          ids: [...new Set([...scan.models, ...gateway.ids])],
+          sources: [...scan.sources, ...(gateway.ids.length > 0 ? ['gateway'] : [])],
+          // Gateway metadata fills the marketplace ids the official scan does not
+          // publish; the official scan wins where both describe the same id.
+          models: { ...gateway.models, ...scan.catalog } as Record<string, unknown>,
         })
       }
       const current = await settings.read()
@@ -320,7 +322,11 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
       const catalog = store.catalog()
       return {
         models,
-        catalogCount: catalog.ids.length,
+        // The catalog the user can pick from, not the search index: `ids` now
+        // also holds the whole gateway catalog, and reporting its size here made
+        // this surface disagree with the status route (and claim ~492 "official"
+        // models).
+        catalogCount: listedClinePassCatalogModels(await settings.read()).length,
         catalogSources: catalog.sources,
         catalogFetchedAt: Math.round(catalog.fetchedAt),
         added,
