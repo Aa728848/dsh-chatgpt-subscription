@@ -67,7 +67,6 @@ function status(overrides: Partial<KimiCodeWebStatus> = {}): KimiCodeWebStatus {
     models: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
-    cacheTtl: null,
     accounts: [
       {
         id: 'acc_a', alias: 'user1@example.com', isPrimary: true, email: 'user1@example.com',

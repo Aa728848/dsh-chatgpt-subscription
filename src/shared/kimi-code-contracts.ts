@@ -42,16 +42,6 @@ export type KimiCodeWire = 'openai' | 'anthropic'
 export type KimiCodeReasoningEffort = 'low' | 'high' | 'max' | 'none'
 
 /**
- * Prompt-cache TTL the Kimi subscription accepts.
- *
- * The two wires spell the request differently (`prompt_cache_options` on the
- * OpenAI one, a TOP-LEVEL `cache_control` on the Anthropic one), but the tier
- * names are the same. `null` in the settings means "send neither", which is
- * the service's own default behaviour.
- */
-export type KimiCodeCacheTtl = '5m' | '1h'
-
-/**
  * How the service says a model handles thinking, when it says so at all.
  *
  * The three-state declaration is strictly more informative than a boolean:
@@ -243,11 +233,6 @@ export interface KimiCodeWebStatus {
   models: KimiCodeModelOption[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: KimiCodeReasoningEffort | null
-  /**
-   * Prompt-cache tier this line asks for. `null` means "send no cache field",
-   * which is Kimi's own default behaviour.
-   */
-  cacheTtl: KimiCodeCacheTtl | null
   /** Signed-in accounts; empty or absent when no pool is installed. */
   accounts?: KimiCodeAccountSummaryDto[]
   /** Account the next request would use. */
@@ -333,8 +318,6 @@ export interface KimiCodeSettingsUpdateDto {
   /** A number sets an override for that model; `null` restores the catalog default. */
   contextWindowOverrides?: Record<string, number | null>
   defaultReasoningEffort?: KimiCodeReasoningEffort | null
-  /** `null` clears the tier, returning to "send no cache field". */
-  cacheTtl?: KimiCodeCacheTtl | null
 }
 
 /** One pooled Kimi Code account as the settings card renders it; never carries a token. */

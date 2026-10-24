@@ -80,7 +80,7 @@ export {
   type ResolvedRequestImage,
   type ResolvedRequestImages,
 }
-import { maxMessageBodyBytes, maxOutputTokensFor, type KimiCacheTtl } from './types.ts'
+import { maxMessageBodyBytes, maxOutputTokensFor } from './types.ts'
 import { base64LengthOf, videoBlockLabel, videoDataUrl, videoOmissionText } from './modalities.ts'
 // The traversal, byte budgeting and base64 encoding are provider-neutral and are
 // shared with the MiniMax Code line; see ../common/video-request.ts.
@@ -408,29 +408,6 @@ export function thinkingBudgetFor(effort: KimiCodeReasoningEffort | undefined, m
  * signature the existing callers already bind.
  */
 
-/**
- * The cache field for the Anthropic-compatible wire.
- *
- * TOP LEVEL, not per block: the service documents that a `cache_control` inside
- * a message is ignored, and omitting the field means "read a 5m entry but do
- * not write one" — which is why this is only attached when the caller asked
- * for a tier.
- */
-function kimiAnthropicCacheControl(ttl: KimiCacheTtl): Record<string, unknown> {
-  return { cache_control: { type: 'ephemeral', ttl } }
-}
-
-/**
- * The cache field for the OpenAI-compatible wire.
- *
- * `mode: 'implicit'` is the only mode the service supports — it identifies the
- * prefix itself, so this is not a request to break the cache but a request to
- * write it at a chosen TTL.
- */
-function kimiOpenAICacheOptions(ttl: KimiCacheTtl): Record<string, unknown> {
-  return { prompt_cache_options: { mode: 'implicit', ttl } }
-}
-
 export interface RequestMediaOptions {
   /** Videos read for this request; absent means none are readable. */
   videos?: ResolvedRequestVideos
@@ -441,17 +418,6 @@ export interface RequestMediaOptions {
    * (`messages[].tools`), Kimi's `dynamically_loaded_tools` capability.
    */
   messageTools?: boolean
-  /**
-   * Prompt-cache tier to request, or `null` to leave the service default.
-   *
-   * Kimi documents two separate fields for this and they are NOT interchangeable:
-   * the OpenAI-compatible wire takes `prompt_cache_options`, and the
-   * Anthropic wire takes a TOP-LEVEL `cache_control` (a marker inside a message
-   * is explicitly ignored by the service). `null` sends neither, which is what
-   * this line did before and remains the safe default: a caller that states
-   * nothing gets the service's own 5m behaviour.
-   */
-  cacheTtl?: KimiCacheTtl | null
 }
 
 // ---------------------------------------------------------------------------
@@ -996,12 +962,6 @@ export function buildOpenAIRequest(
     // The managed endpoint documents max_completion_tokens; the legacy field is
     // normalized away by the service, so it is never sent.
     max_completion_tokens: maxTokens,
-    // Prompt-cache tier on this wire; see kimiOpenAICacheOptions. Sent only
-    // when a tier was asked for, so the default request is byte-identical to
-    // what this line sent before the setting existed.
-    ...(media.cacheTtl === null || media.cacheTtl === undefined
-      ? {}
-      : kimiOpenAICacheOptions(media.cacheTtl)),
     // Sampling is fixed per model (temperature 1.0, top_p 0.95, n 1) and the
     // service rejects an explicit value rather than clamping it, so a caller's
     // temperature is deliberately dropped instead of forwarded.
@@ -1161,7 +1121,6 @@ export function buildAnthropicRequest(
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   media: RequestMediaOptions = {},
 ): Record<string, unknown> {
-  const cacheTtl = media.cacheTtl ?? null
   // Shared across the whole request; see buildOpenAIRequest for why.
   const toolCallIds = new ToolCallIdNormalizer()
   // Message-level tool declarations are an OpenAI-surface feature this protocol
@@ -1212,8 +1171,6 @@ export function buildAnthropicRequest(
     model: options.model,
     max_tokens: maxTokens,
     messages: mergeAnthropicMessages(entries),
-    // TOP-LEVEL cache_control on this wire; see kimiAnthropicCacheControl.
-    ...(cacheTtl === null || cacheTtl === undefined ? {} : kimiAnthropicCacheControl(cacheTtl)),
     ...(system === undefined ? {} : { system }),
     // Thinking and an explicit temperature are mutually exclusive on this wire.
     ...(options.temperature === undefined || budget !== undefined ? {} : { temperature: options.temperature }),

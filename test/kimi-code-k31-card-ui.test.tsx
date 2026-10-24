@@ -85,7 +85,6 @@ function status(overrides: Partial<KimiCodeWebStatus> = {}): KimiCodeWebStatus {
     models: [K31_PRO, K31_HIGHSPEED],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
-    cacheTtl: null,
     accounts: [],
     activeAccountId: undefined,
     rotationStrategy: 'sequential',

@@ -172,8 +172,7 @@ differently. This is the map — it is the part most easily got wrong twice.
 | Line | Protocol | How the tier is requested | Beta needed |
 | --- | --- | --- | --- |
 | `claude-subscription` | Anthropic Messages | `cache_control: { type: 'ephemeral', ttl }` on up to 3 breakpoints | **`extended-cache-ttl-2025-04-11`** for `1h` |
-| `kimi-code` (openai wire) | Chat Completions | `prompt_cache_options: { mode: 'implicit', ttl }` | none |
-| `kimi-code` (anthropic wire) | Anthropic Messages | **top-level** `cache_control` | none |
+| `kimi-code` | either wire | **nothing** — no cache-duration field is sent (see below) | none |
 | `codex-chatgpt` | Responses | `prompt_cache_key` only — no TTL surface | — |
 
 Load-bearing details that cost a round to establish:
@@ -187,18 +186,32 @@ Load-bearing details that cost a round to establish:
   bill against usage credits. That is the default this plugin now uses, so a
   user comparing it with Claude Code sees the same cache lifetime. The 1h
   write costs more, so the setting can override it.
-- **Kimi's `cache_control` only works at the request TOP LEVEL** — a marker
-  inside a message is explicitly ignored by the service. Do not "fix" this by
-  pushing the marker onto the last system or message block.
-- **Kimi locks the tier on first write.** A later request cannot move an
-  existing entry to the other TTL; entries only expire. Unset means the field is
-  not sent at all, which keeps the pre-setting request byte-identical.
-- **Cache IDENTITY and cache TTL are different mechanisms.** Kimi's own
+- **Kimi Code has no TTL surface and this line no longer sends one.** The
+  5m/1h tiers are documented only for the Moonshot **Open Platform**
+  (`docs/api/chat`, `platform.kimi.com/docs/guide/context-caching`); the
+  subscription endpoint `api.kimi.com/coding` documents nothing about cache
+  lifetime, and Kimi Code CLI 2.0.0 emits `prompt_cache_key` but **no**
+  `prompt_cache_options` anywhere in its client path — so no third party has a
+  sample to copy. `MoonshotAI/kimi-code#3942` asks for the tier to be exposed
+  and explicitly asks the maintainers to say so if the coding endpoint ignores
+  the field; it is open with zero comments. A `5m`/`1h` selector was shipped
+  here once and has been **removed**: sending an unverified field on a
+  subscription route was an assertion the evidence could not carry.
+- **Do not treat the `5m` tier name as the lifetime.** Measured on this
+  endpoint, the default tier stays warm far longer than five minutes: one probe
+  brackets `[300s, 1800s)`, and a stricter sweep (3 replicas per age, one fresh
+  prefix per age so the probe cannot renew what it is timing) gives 3/3 warm
+  through 25 minutes, 1/3 at 30, 0/3 at 35. The expiry notice therefore uses
+  **30 minutes**, not 5 — a 5-minute threshold fired from minute 6 onward while
+  the entry was still warm for another 19, which is exactly the false positive
+  the hint's own "skip on doubt" rule exists to prevent.
+- **Cache IDENTITY and cache lifetime are different mechanisms.** Kimi's own
   measurements (pi-provider-kimi-code, 14 controlled suites) show the identity
   is the content prefix hash and that neither `prompt_cache_key` nor
-  `cache_control` influences it. That is NOT a reason to omit the TTL field —
-  the TTL controls how long a write lives. Conflating the two made this look
-  unsupported when it was merely unexposed by the official CLI.
+  `cache_control` influences it. If a future round ever establishes that the
+  coding endpoint honours a TTL field, that is a NEW finding and the field can
+  come back — but it must be measured, not inferred from the Open Platform
+  docs of a different product.
 - **Deliberately NOT adopted**: `context_management` / `clear_tool_uses`
   (Anthropic's server-side context editing). The official Claude Code CLI has
   open feature requests for it (issues #44521, #26215), so it is not yet

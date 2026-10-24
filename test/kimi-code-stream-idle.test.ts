@@ -57,7 +57,6 @@ function buildAdapter(fetchFn: typeof fetch): KimiCodeAdapter {
     catalogModels: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
-    cacheTtl: null,
   })
   return new KimiCodeAdapter(store, modelSettings, undefined, {
     fetchFn,

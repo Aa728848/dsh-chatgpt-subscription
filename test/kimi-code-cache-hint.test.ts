@@ -15,10 +15,10 @@ beforeEach(() => {
 })
 
 describe('evaluateCacheHint', () => {
-  it('warns when a large context sat idle beyond the tier', () => {
+  it('warns when a large context sat idle beyond the lifetime', () => {
     const decision = evaluateCacheHint({
       now: NOW,
-      lastActiveAt: NOW - CACHE_TTL_MS['5m'] - 1,
+      lastActiveAt: NOW - CACHE_TTL_MS - 1,
       totalTokens: 200_000,
     })
     expect(decision.kind).toBe('hint')
@@ -32,27 +32,37 @@ describe('evaluateCacheHint', () => {
     }).kind).toBe('skip')
   })
 
-  it('stays silent at exactly the tier lifetime', () => {
+  it('stays silent at exactly the lifetime', () => {
     // Strictly-greater: an entry alive to its TTL has not expired.
     expect(evaluateCacheHint({
       now: NOW,
-      lastActiveAt: NOW - CACHE_TTL_MS['5m'],
+      lastActiveAt: NOW - CACHE_TTL_MS,
       totalTokens: 200_000,
     }).kind).toBe('skip')
   })
 
-  it('uses the stated tier rather than always assuming five minutes', () => {
-    const idle = CACHE_TTL_MS['1h'] - 1
-    expect(evaluateCacheHint({ now: NOW, lastActiveAt: NOW - idle, totalTokens: 200_000, cacheTtl: '1h' }).kind)
-      .toBe('skip')
-    expect(evaluateCacheHint({ now: NOW, lastActiveAt: NOW - idle, totalTokens: 200_000, cacheTtl: '5m' }).kind)
-      .toBe('hint')
+  it('pins the lifetime to the measured 30 minutes, not the "5m" tier name', () => {
+    // Measured on the coding endpoint (three replicas per age, one fresh prefix
+    // per age): 3/3 warm through 25 minutes, 1/3 at 30, 0/3 at 35. The old
+    // 5-minute value was the write tier's NAME, and it warned from minute 6
+    // while the entry stayed warm for another 19.
+    expect(CACHE_TTL_MS).toBe(30 * 60 * 1000)
+  })
+
+  it('does not warn during the window the measurement kept warm', () => {
+    // 25 minutes was 3/3 warm. Warning here would be the false positive the
+    // "skip on doubt" rule exists to prevent.
+    expect(evaluateCacheHint({
+      now: NOW,
+      lastActiveAt: NOW - 25 * 60 * 1000,
+      totalTokens: 200_000,
+    }).kind).toBe('skip')
   })
 
   it('stays silent for a small context, where reprocessing is free', () => {
     expect(evaluateCacheHint({
       now: NOW,
-      lastActiveAt: NOW - CACHE_TTL_MS['1h'] * 10,
+      lastActiveAt: NOW - CACHE_TTL_MS * 10,
       totalTokens: MIN_TOKENS_TO_HINT - 1,
     }).kind).toBe('skip')
   })

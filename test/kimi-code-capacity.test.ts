@@ -98,7 +98,6 @@ async function buildAdapter(options: {
     catalogModels: [],
     contextWindowOverrides: options.contextWindowOverrides ?? {},
     defaultReasoningEffort: null,
-    cacheTtl: null,
   })
   const adapter = new KimiCodeAdapter(store, modelSettings, undefined, {
     fetchFn: options.fetchFn,

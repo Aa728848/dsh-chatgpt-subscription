@@ -36,10 +36,10 @@ function status(): ClaudeWebStatus {
     models: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
-    cacheTtl: null,
     selectedAccountId: null,
     accounts: [],
     rotationStrategy: 'sequential',
+    cacheTtl: null,
   }
 }
 

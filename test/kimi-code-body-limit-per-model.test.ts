@@ -91,7 +91,6 @@ async function buildAdapter(options: { fetchFn?: typeof fetch; videoBytes?: numb
     catalogModels: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
-    cacheTtl: null,
   })
   const videoBytes = options.videoBytes
   const videos = videoBytes === undefined

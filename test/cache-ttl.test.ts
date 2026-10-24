@@ -3,7 +3,6 @@ import { claudeBetas } from '../src/host/claude/client.ts'
 import { buildClaudeRequestBody } from '../src/host/claude/mapper.ts'
 import { EXTENDED_CACHE_TTL_BETA, cacheControlFor } from '../src/host/claude/types.ts'
 import { buildRequest } from '../src/host/kimi-code/mapper.ts'
-import { isKimiCacheTtl } from '../src/host/kimi-code/types.ts'
 import { isClaudeCacheTtl } from '../src/shared/claude-contracts.ts'
 import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
 
@@ -61,37 +60,26 @@ describe('claude prompt-cache TTL', () => {
   })
 })
 
-describe('kimi prompt-cache TTL', () => {
-  it('sends nothing when no tier is stored', () => {
-    // The default request must stay byte-identical to what this line sent
-    // before the setting existed: Kimi's own default, no cache field at all.
+describe('kimi prompt-cache fields', () => {
+  it('sends no cache field on either wire', () => {
+    // The tier setting is gone: the coding endpoint documents no cache TTL, the
+    // official CLI cannot emit one, and the measured lifetime belongs to the
+    // service's own default. These assertions are the guard that the field does
+    // not creep back in.
     for (const wire of ['openai', 'anthropic'] as const) {
-      const body = buildRequest(empty, wire, undefined, undefined, { cacheTtl: null })
+      const body = buildRequest(empty, wire, undefined, undefined, {})
       expect(body).not.toHaveProperty('prompt_cache_options')
       expect(body).not.toHaveProperty('cache_control')
     }
   })
 
-  it('uses prompt_cache_options on the OpenAI wire', () => {
-    const body = buildRequest(empty, 'openai', undefined, undefined, { cacheTtl: '1h' })
-
-    expect(body.prompt_cache_options).toEqual({ mode: 'implicit', ttl: '1h' })
-    expect(body).not.toHaveProperty('cache_control')
-  })
-
-  it('uses a TOP-LEVEL cache_control on the Anthropic wire', () => {
-    // The service documents that a marker inside a message is ignored, so this
-    // must be top level — not pushed onto the last system or message block.
-    const body = buildRequest(empty, 'anthropic', undefined, undefined, { cacheTtl: '5m' })
-
-    expect(body.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
-    expect(body).not.toHaveProperty('prompt_cache_options')
-  })
-
-  it('refuses a tier the service does not accept', () => {
-    expect(isKimiCacheTtl('1h')).toBe(true)
-    expect(isKimiCacheTtl('5m')).toBe(true)
-    expect(isKimiCacheTtl('24h')).toBe(false)
-    expect(isKimiCacheTtl(undefined)).toBe(false)
+  it('sends no cache field even when other media options are passed', () => {
+    // Message-level tools are the only other member of this object; asking for
+    // them must not drag a cache field along.
+    for (const wire of ['openai', 'anthropic'] as const) {
+      const body = buildRequest(empty, wire, undefined, undefined, { messageTools: true })
+      expect(body).not.toHaveProperty('prompt_cache_options')
+      expect(body).not.toHaveProperty('cache_control')
+    }
   })
 })

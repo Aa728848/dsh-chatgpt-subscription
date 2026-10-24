@@ -8,7 +8,6 @@ import {
   PROVIDER_NAME,
   QUOTA_CACHE_TTL_MS,
   codingBaseUrl,
-  isKimiCacheTtl,
   oauthHost,
 } from './types.ts'
 import {
@@ -40,7 +39,6 @@ import {
   type KimiCodeAccount,
   type KimiCodeCacheHintDto,
   type KimiCodeCacheStatsDto,
-  type KimiCodeCacheTtl,
   type KimiCodeReasoningEffort,
   type KimiCodeRegion,
   type KimiCodeWebStatus,
@@ -235,12 +233,11 @@ export async function getKimiCodeWebStatus(
     lastFetchedAt: quota?.fetchedAt ?? null,
     credentialsRejected: active !== null && active !== undefined && isRefreshTokenRejected(active.refreshToken),
     cache: cacheStatsOrNull(options.sessionId),
-    cacheHint: cacheHintOrNull(options.sessionId, settings.cacheTtl),
+    cacheHint: cacheHintOrNull(options.sessionId),
     preserveThinking: preserveThinkingEnabled(),
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort,
-    cacheTtl: settings.cacheTtl,
     loginRegion: region,
     serving: readOption(options.serving, true),
     conflict: readOption(options.conflict, null),
@@ -285,16 +282,12 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
  * the hint describes the conversation the card is actually showing rather than
  * some global figure.
  */
-function cacheHintOrNull(
-  sessionId: string | undefined,
-  cacheTtl: KimiCodeCacheTtl | null | undefined,
-): KimiCodeCacheHintDto | null {
+function cacheHintOrNull(sessionId: string | undefined): KimiCodeCacheHintDto | null {
   const lastActiveAt = sessionLastActiveAt(sessionId)
   const decision = evaluateCacheHint({
     now: Date.now(),
     lastActiveAt,
     totalTokens: getCacheStats(sessionId).cachedTokens + getCacheStats(sessionId).freshTokens,
-    cacheTtl,
   })
   if (decision.kind !== 'hint') return null
   return { idleMs: decision.idleMs, totalTokens: decision.totalTokens }
@@ -537,14 +530,6 @@ export function registerKimiCodeRoutes(
             const effort = body.defaultReasoningEffort
             if (effort === null || isKimiCodeEffort(effort)) {
               patch.defaultReasoningEffort = effort
-            }
-          }
-          if (body.cacheTtl !== undefined) {
-            // `null` is a real value here: it clears the tier and returns the
-            // request to sending no cache field at all.
-            const ttl = body.cacheTtl
-            if (ttl === null || isKimiCacheTtl(ttl)) {
-              patch.cacheTtl = ttl
             }
           }
           if (preferences) await preferences.update(patch)

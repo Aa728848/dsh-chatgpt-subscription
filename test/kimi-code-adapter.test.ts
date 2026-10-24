@@ -60,7 +60,6 @@ async function buildAdapter(options: {
     catalogModels: [],
     contextWindowOverrides: options.contextWindowOverrides ?? {},
     defaultReasoningEffort: options.defaultReasoningEffort ?? null,
-    cacheTtl: null,
   })
   const adapter = new KimiCodeAdapter(store, modelSettings, undefined, {
     loadCatalog: async () => options.catalog ?? CATALOG,
@@ -362,7 +361,6 @@ describe('KimiCodeAdapter upstream failures', () => {
       catalogModels: [],
       contextWindowOverrides: {},
       defaultReasoningEffort: null,
-      cacheTtl: null,
     })
 
     const stream = failing.stream(generateOptions('k3'))
@@ -379,7 +377,6 @@ describe('KimiCodeAdapter upstream failures', () => {
     const modelSettings = new FileModelSettingsStore(tmp('kc-models-429'))
     vi.spyOn(modelSettings, 'read').mockResolvedValue({
       enabledModelIds: ['k3'], catalogModels: [], contextWindowOverrides: {}, defaultReasoningEffort: null,
-      cacheTtl: null,
     })
     const adapter = new KimiCodeAdapter(store, modelSettings, undefined, {
       fetchFn: fetchMock,
@@ -534,7 +531,6 @@ async function adapterFor(
     catalogModels: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
-    cacheTtl: null,
   })
   const calls: string[] = []
   const fetchFn = vi.fn(async (input: RequestInfo | URL) => {

@@ -32,7 +32,7 @@ function fixture(provider: string, anthropic = false, overrides: Record<string, 
       oauthHost: 'https://auth.kimi.com', baseUrl: 'https://api.kimi.com/coding' })
     const settings = new FileModelSettingsStore('unused-kimi-models.json')
     vi.spyOn(settings, 'read').mockResolvedValue({ enabledModelIds: KIMI_CODE_MODELS.map(m => m.id),
-      catalogModels: [], contextWindowOverrides: overrides, defaultReasoningEffort: null, cacheTtl: null })
+      catalogModels: [], contextWindowOverrides: overrides, defaultReasoningEffort: null })
     return { bodies, adapter: new KimiCodeAdapter(store, settings, undefined, { fetchFn,
       loadCatalog: async () => KIMI_CODE_MODELS.map(m => ({ id: m.id, contextWindow: m.contextWindow,
         ...(anthropic ? { protocol: 'anthropic' as const } : {}) })) }) }

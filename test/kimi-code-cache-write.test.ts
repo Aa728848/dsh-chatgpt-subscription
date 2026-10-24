@@ -149,7 +149,6 @@ const CHAT_TURN = [
 
 async function buildAdapter(options: {
   catalog?: KimiCodeCatalogModel[]
-  cacheTtl?: '5m' | '1h' | null
   fetchFn?: typeof fetch
 } = {}) {
   const store = new FileCredentialStore(tmp('kc-cache-cred'))
@@ -162,7 +161,6 @@ async function buildAdapter(options: {
     catalogModels: [],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
-    cacheTtl: options.cacheTtl ?? null,
   })
   const adapter = new KimiCodeAdapter(store, modelSettings, undefined, {
     loadCatalog: async () => options.catalog ?? CATALOG,
@@ -206,16 +204,16 @@ describe('the chat-completions wire through the adapter', () => {
     expect(requestUrl('openai', 'mainland-cn')).toBe('https://api.kimi.com/coding/v1/chat/completions')
   })
 
-  it('carries the configured cache tier onto the request', async () => {
+  it('sends no cache tier field, leaving the lifetime to the service', async () => {
     const bodies: Array<Record<string, unknown>> = []
     const fetchFn = (async (_url: string, init: RequestInit) => {
       bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>)
       return sseResponse(CHAT_TURN)
     }) as unknown as typeof fetch
 
-    const { adapter } = await buildAdapter({ fetchFn, cacheTtl: '1h' })
+    const { adapter } = await buildAdapter({ fetchFn })
     await drain(adapter.stream(generateOptions('k3.1-pro')))
-    expect(bodies[0]!.prompt_cache_options).toEqual({ mode: 'implicit', ttl: '1h' })
+    expect(bodies[0]).not.toHaveProperty('prompt_cache_options')
   })
 
   it('turns the tier headers into non-zero cacheWrite5m / 1h totals, all the way to the card', async () => {

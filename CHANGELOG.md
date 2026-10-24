@@ -1,6 +1,18 @@
 # Changelog
 
 ## Unreleased
+- **[kimi-code] 撤除缓存 TTL 选择，缓存过期提示改用实测的 30 分钟**
+  - **现象**：设置页让用户在 5 分钟 / 1 小时两档之间选缓存写入时长，并把「1h 写入单价约 5m 的两倍」当既定事实写进说明；而缓存过期提示在空闲第 6 分钟就开始报「缓存已过期」。
+  - **根因（两层）**：一是**档位本身没有依据**。5m / 1h 只写在 Moonshot **开放平台**文档（`docs/api/chat`、`platform.kimi.com/docs/guide/context-caching`），Kimi Code 订阅端点（`api.kimi.com/coding`）没有任何缓存 TTL 文档；官方 CLI 2.0.0 的代码路径里只有 `prompt_cache_key`、**没有** `prompt_cache_options`，第三方因此没有可抄的样本。`MoonshotAI/kimi-code#3942` 专门请求暴露该档位，并附带问「如果 coding 端点不认这个字段，请明确写出来」——该 issue 至今 open、0 评论、无标签。二是**阈值取的是档位的名字而不是寿命**：`CACHE_TTL_MS['5m']` 被当成 5 分钟，而该端点的默认档实测能热约 25 分钟。
+  - **实测依据**：两份独立数据互相印证。`pi-provider-kimi-code` 给出 `[300s, 1800s)`（300s 命中、1800s / 3600s / 7200s 全部未命中）；更严格的一份（11 个端点横评，每个年龄 3 个副本、**每条前缀只探一次**以免探针自己续命）给出 Kimi coding plan 的存活曲线 —— 5–25 分钟 3/3 命中、30 分钟 1/3、35 分钟 0/3。两份在 30 分钟这个边界上对上了。
+  - **改法（撤档位）**：`cacheTtl` 从存储层（`token-store.ts` 的 schema 与文件存储）、`KimiCodeModelSettings` / `KimiCodeWebStatus` / `KimiCodeSettingsUpdateDto` 三个契约、`RequestMediaOptions`、`routes.ts` 的 status 与 settings 分支、`adapter.ts` 的请求构建、以及设置页的下拉框里**全部移除**；`KimiCacheTtl` / `KimiCodeCacheTtl` / `isKimiCacheTtl` 与 mapper 的两个缓存字段构造函数一并删除。两条 wire 现在都**不发任何缓存字段**，`buildRequest` 的返回值与引入该设置之前逐字节相同。
+  - **改法（阈值）**：`CACHE_TTL_MS` 由 `Record<'5m'|'1h', number>` 改为单个常量 `30 * 60 * 1000`；`CacheHintInput` 去掉 `cacheTtl`，`evaluateCacheHint` 不再按档位查表。取 30 分钟（首个多数副本已失效的年龄）而不是 25 分钟（最后一个全热年龄），因为该模块自己的原则是宁漏报不误报：25 分钟会在缓存仍更可能有效时开火，代价是真正过期后最长晚 5 分钟提示。
+  - **改法（文案三语）**：`locales.ts`（zh + en）与 `locales-ru/kimi-code.ts` 的 `cacheTtl` / `cacheTtlHint` / `cacheTtlDefault` / `cacheTtl5m` / `cacheTtl1h` 五个键合并为 `cacheNote` / `cacheNoteHint` 两个，写明「不发送任何缓存时长字段、档位无从选择、过期提示按 30 分钟判定」；俄语键集仍由 `Record<KimiCodeLocaleKey, string>` 在编译期强制。
+  - **测试**：`test/kimi-code-cache-hint.test.ts` 由 14 例增至 15 例——新增两条把实测值钉住：`CACHE_TTL_MS` 逐值等于 30 分钟（改回 5 分钟立刻红），以及空闲 25 分钟**不得**报警（该年龄实测 3/3 命中，报警即误报）；原「按档位区分 5m / 1h」的用例随档位一并删除。`test/cache-ttl.test.ts` 的 Kimi 段由「各线路如何发档位」改写为「两条 wire 都不发缓存字段」的回归守卫（含「传了其它 media 选项也不能捎带缓存字段」），Claude 段一行未动——那条线路的 1h 有官方文档与 beta 头背书。`test/kimi-code-cache-write.test.ts` 的「把配置的档位带上请求」改为「不发送缓存字段」。10 个测试夹具里的 `cacheTtl: null` 随之清理（脚本误删了 `line-locale.test.tsx` / `russian-locale.test.tsx` 两处 **Claude** 状态里的同名字段，已恢复）。
+  - **验证**：`npx tsc -b --force` 与 `tsc -p test/tsconfig.json` 均 0 错误；`npm test` **282 文件通过 / 2 skipped，4657 passed / 8 skipped / 0 failed**；`test/kimi-code*` + `cache-ttl` 35 文件 **522 例全绿**。
+  - **文档**：README 的 Kimi 缓存小节把「TTL 实测在 300–1800 秒之间」改为「实测约 25–35 分钟」并写明两份实测的方法与数值，删掉「写入时长可手动选择」与「1h 写入约为 5m 两倍价」两条无依据表述，新增「本线路不发送任何缓存时长字段」及其依据（含 #3942）、「过期提示按 30 分钟判定」及其取舍，并标注写入分档响应头同样只有开放平台文档背书、订阅端点无实测样本。
+  - **仍未验证**：显式带 `ttl: '1h'` 在订阅端点是否生效，公开数据里不存在（官方 CLI 发不出这个字段，第三方无样本可抄）。若将来需要定论，四次请求即可：同一固定前缀带 `ttl: '1h'` 写一次，在 6 / 16 / 40 分钟各重放一次。
+
 - **[qoder] 修掉 PAT 兑换永远 400 `BadRequest`：区域选错时自动改试另一区，并让 `machine_id` 按官方 CLI 的形状发出去**
   - **现象**：设置卡片里粘贴 PAT 点「粘贴并登录」，只得到一句 `Qoder（订阅） PAT 兑换失败（HTTP 400）：{"errorCode":"BadRequest","errorMessage":"Bad request","requestId":"…"}`。上游没有说任何一句可行动的话，用户只能反复重新生成 PAT。
   - **根因一（区域）**：区域是凭据的属性，`pt-` 串本身不自述区域，而卡片上的区域选择器默认停在全球区。中国站的 PAT 拿到 `openapi.qoder.sh` 兑换，上游回的就是这个不带 `rawMessage` 的 400——它已经读完了 `personal_token`（缺字段、字段名拼错、空体同样是 400，但那种响应带 `rawMessage`），只是不认这把 token。原来的实现**只试用户点的那个区**，于是「选错一次」等于「永久失败」。

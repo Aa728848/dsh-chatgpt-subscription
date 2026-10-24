@@ -856,10 +856,6 @@ export class KimiCodeAdapter extends LlmAdapter {
       videoAccepted: inputModalitiesForEntry(options.model, catalog).includes('video'),
       // Same resolver the settings card uses, so UI and wire cannot disagree.
       messageTools: dynamicToolsForEntry(options.model, catalog),
-      // `null` (nothing stored) sends NO cache field, which is the request this
-      // line made before the setting existed — Kimi's own default, byte for
-      // byte. A stored tier adds the field for whichever wire is in use.
-      cacheTtl: settings.cacheTtl,
     }
 
     const contextWindow = this.contextWindowFor(
