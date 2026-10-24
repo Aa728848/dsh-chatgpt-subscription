@@ -79,6 +79,10 @@ describe('Cline Pass line mount', () => {
     expect(resolved.context?.contextWindow).toBe(1_000_000)
     expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['low', 'high', 'max'])
     expect(resolved.defaultMaxTokens).toBe(64_000)
+    const flash1017 = models.find((model) => model.id === 'cline-pass/deepseek-v4.1-flash-1017')
+    expect(flash1017).toMatchObject({ name: 'DeepSeek V4.1 Flash 1017' })
+    const resolved1017 = await line.adapter.resolveModel(PROVIDER_ID, 'cline-pass/deepseek-v4.1-flash-1017')
+    expect(resolved1017.context?.contextWindow).toBe(1_048_576)
   })
 
   it('projects CLINE_PASS_API_KEY as the primary account while the pool is empty', async () => {

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.38.5 - 2026-10-24 (本地构建：官方 0.38.1 + cline-pass 修复与 1017 元数据校正)
+- **[cline-pass] 按官方网关校正 `deepseek-v4.1-flash-1017` 的显示名和上下文，不改模型 id**
+  - **官方核对**：`recommended-models` 同时包含 `cline-pass/deepseek-v4.1-flash-1017` 和稳定别名；网关模型目录包含 `deepseek/deepseek-v4.1-flash-1017`；真实请求返回 `canonicalSlug=deepseek/deepseek-v4.1-flash-1017`，且在 `only + has` 下 `actual=deepseek`、`adherence=adopted`、有第一方指纹。说明 1017 是有效快照 id，不是探测误写。
+  - **真正写错的是内置元数据**：上一版从参考插件转录了 `DeepSeek V4.1 Flash (1017)` / 921600，而当前 Vercel 网关目录公布的是 **`DeepSeek V4.1 Flash 1017` / 1048576**。由于 `resolveModelInfo` 的内置表优先于同步目录，旧内置值覆盖了已经同步到本地的官方 1048576。
+  - **修正**：内置显示名去掉括号，`contextWindow` 改为 1048576；模型 id 保持 `cline-pass/deepseek-v4.1-flash-1017` 不变，现有钉选与启用列表无需迁移。`maxTokens` 继续沿用线路既有的 384000 输出预算上限，不把 Vercel 的 `max_tokens` 直接等同于订阅输出上限。
+  - **测试**：`cline-pass-plugin.test.ts` 新增 1017 官方显示名和上下文断言，防止内置表再次覆盖错官方值。
+
 ## 0.38.4 - 2026-10-24 (本地构建：官方 0.38.1 + cline-pass 钉选修复与模型清单收敛)
 - **[cline-pass] 模型清单只保留内置 + 官方订阅 + 手动添加，完整网关目录改为搜索数据源**
   - **原因**：此前 `catalog/refresh` 在 `exposeCatalog=true` 时把整个网关目录合并进 `catalogModels`，设置页和模型选择器因此铺开几百个模型。当前本机旧设置实测有 **492 条目录行**。
