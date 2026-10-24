@@ -181,6 +181,15 @@ export const dictionary: Record<LocaleKey, string> = {
   // The import button in the account pool's login row.
   localCodexLoginImport: 'Импортировать вход локального Codex CLI',
   localCodexLoginImporting: 'Импорт…',
+  // Вход по коду устройства: тот же вход, но без обратного вызова на localhost,
+  // поэтому он работает на сервере и на headless-хосте.
+  deviceCodeLogin: 'Добавить аккаунт по коду устройства',
+  deviceCodeLoginStarting: 'Получаем код…',
+  deviceCodeHint: 'Открой ссылку ниже на любом устройстве и введи этот код. Эта страница завершит вход сама: обращаться к локальному порту не нужно.',
+  deviceCodeLabel: 'Код устройства',
+  deviceCodeOpen: 'Открыть страницу подтверждения',
+  deviceCodeCopy: 'Копировать в буфер обмена',
+  deviceCodeWaiting: 'Ждём подтверждения… осталось {time}',
   // The pool's undo for the imported local sign-in: the host clears every row at once.
   stopImporting: 'Остановить импорт всех локальных входов',
   stopImportingLabel: 'Остановить импорт всех локальных входов (сейчас {count})',

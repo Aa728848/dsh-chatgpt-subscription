@@ -1,6 +1,7 @@
 import { ROUTE_PREFIX } from '../compat.ts'
 import type {
   ApiEnvelope,
+  DeviceLoginStartDto,
   LoginEventDto,
   LoginStartDto,
   PluginStatusDto,
@@ -17,6 +18,17 @@ export class SubscriptionApi {
 
   startLogin(): Promise<LoginStartDto> {
     return post<LoginStartDto>(`${ROUTE_PREFIX}/login/start`, {})
+  }
+
+  /**
+   * Start a device-code sign-in instead of the browser callback.
+   *
+   * The answer already carries what the panel shows — the code, the page, the
+   * deadline — so the card does not have to ask the status route for it, and the
+   * wait for confirmation arrives on the same event stream as any other login.
+   */
+  startDeviceLogin(): Promise<DeviceLoginStartDto> {
+    return post<DeviceLoginStartDto>(`${ROUTE_PREFIX}/login/device/start`, {})
   }
 
   cancelLogin(loginId: string): Promise<{ cancelled: boolean }> {
