@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- **[kimi-code] 请求体上限改成按模型分档：1M 档 8 MiB、256K 档 2 MiB（`DSH_KIMI_CODE_MAX_BODY_BYTES` 仍是全局强制覆盖）**
+  - **现象**：1M 上下文档位（`k3` / `k3.1-pro` / `k3.1-pro-highspeed` / `kimi-for-coding`）的会话把中文正文写到 3–4 MB 就被本线路的本地字节守卫拒绝，请求根本没发出去；宿主压缩也救不回来——压缩请求自己同样超过那个上限，于是长会话表现为「压缩一次后仍然失败」，而服务端从未拒绝过这个体积。
+  - **根因**：这条线路对**所有**模型套用同一个 `MAX_MESSAGE_BODY_BYTES`（2,097,152）。该数字来自官方错误参考里的通用示例（`total message size N exceeds limit 2097152`），**从未针对 1M 上下文档位实测**；而 1M 窗口的正文按英文约 4 MB、按密集中文约 4.5 MB，2 MB 必然先到。官方 `kimi-cli` 全仓库没有字节守卫，说明这个上限至少不是客户端必需的。
+  - **改法（分档）**：`model-catalog.ts` 的 `KimiCodeCatalogModel` 新增必填字段 `maxRequestBodyBytes`：`k3` / `k3.1-pro` / `k3.1-pro-highspeed` / `kimi-for-coding` = **8 MiB（8,388,608）**，`k3-256k` / `kimi-for-coding-highspeed` = **2 MiB（2,097,152，保持原值）**。8 MiB 的依据是「1M 窗口的正文大小」：一个 1M token 的请求体按英文约 4 MB、按密集中文约 4.5 MB，8 MiB 留出近一倍余量，所以**字节上限不会成为 1M 会话的实际瓶颈**；真正先到的是模型自身的 token 窗口——服务端回 `Your request exceeded model token limit`，该措辞已被 `common/context-overflow.ts` 归一到 `CONTEXT_WINDOW_EXCEEDED`，压缩与重试照旧生效。8 MiB 仍是**待实测的上界**，不是文档写明的网关上限。
+  - **改法（代码）**：`types.ts` 新增 `LONG_CONTEXT_MESSAGE_BODY_BYTES`（8 × 1024 × 1024，常量定义在 `model-catalog.ts`、由 `types.ts` 重新导出，避免 ESM 循环）与 `maxRequestBodyBytesFor(model, env)`，优先级为 **env → `model.maxRequestBodyBytes` → `DEFAULT_MAX_MESSAGE_BODY_BYTES`**（注册表不认识的 id 走最保守的 2 MiB）；`maxMessageBodyBytes(env)` 与其语义**原样保留**（无模型上下文的调用方仍拿 2 MiB）。`mapper.ts` 的 `assertRequestBodyFits(body, carriesVideo = false, context?, limit?)` 新增可选 `limit`，拒绝文案引用生效上限，不传时逐字节等于旧行为。`adapter.ts` 的 `bodyLimit` 改为 `carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : maxRequestBodyBytesFor(<该模型的注册表行>, process.env)`，并把这个 `bodyLimit` **显式传给两处** `assertRequestBodyFits`——此前这两处各自又算一遍上限，模型档位根本到不了守卫。注册表行按 id 从 `model-catalog.ts` 取，而不是直接用线上 `/v1/models` 的条目：线上目录只报能力、从不报字节额度。
+  - **改法（env）**：`DSH_KIMI_CODE_MAX_BODY_BYTES` 仍是**全局强制覆盖、优先级最高**；空串、非有限、`0`、负数一律回落到**该模型的默认值**而不是关闭守卫（合法值会 floor，前后空格容忍）。视频档 `MAX_VIDEO_MESSAGE_BODY_BYTES`（64 MiB）不受影响。
+  - **测试**：新增 `test/kimi-code-body-limit-per-model.test.ts`（16 例）——六个条目的 `maxRequestBodyBytes` 逐一切值（8 MiB ×4 / 2 MiB ×2）、8 MiB 对两种 1M 正文密度都留有余量、resolver 的三级优先级（env 双向覆盖、模型行、未知 id 回落 2 MiB、小数 floor、空白容忍）、非法值（`''`、纯空白、`abc`、`0`、`-1`、`-2097152`、`NaN`、`huge`）回落到模型默认值而不关守卫、端到端 3.5 MB 在 `k3.1-pro` 上**能发出**（fetch 调用 1 次）而在 `k3-256k` 上被拒（fetch 0 次、文案含 `2097152`、码为 `CONTEXT_WINDOW_EXCEEDED`）、4.5 MB 能发、8.5 MB 被拒且文案含 `8388608`、env 强制把 1M 档按回 2 MiB、env 拼错仍拒、13 MB 视频照旧走 64 MiB 档、以及 `assertRequestBodyFits(body)` 无参调用仍按 2 MiB 抛错。另修正两处**依赖旧的全局 2 MB**的既有用例（**没有删任何断言**）：`kimi-code-capacity.test.ts` 的「2.1 MB 请求本地即拒」与 `kimi-code-adapter.test.ts` 的「不做没做过的省略」改跑 `k3-256k`——那两处的体积仍在该档 2 MB 之上，测的行为（本地拒绝、码、文案、fetch 零调用）一条未减。
+  - **验证**：`npm run typecheck` 三工程 0 错误（退出码 0）；`npx vitest run test/kimi-code**` 34 文件 / 512 例全绿；全量 `npm test` 282 文件通过 / 2 skipped、4649 passed / 8 skipped / 0 failed；`npm run build` 通过。
+  - **文档**：README 的 Kimi Code 小节把「请求体超 2 MB 本地即拒绝」改写成「按模型分档：1M 档 8 MiB / 256K 档 2 MiB」，写明 8 MiB 是待实测上界与该口径的推导、env 仍为全局覆盖且非法值回落，「上下文窗口」段落与错误处理总表里的 2 MB 措辞同步更新，并注明 `DSH_KIMI_CODE_BYTES_PER_TOKEN` 的折算基准**刻意仍是不随模型变动的 2 MiB**。
+  - **已知边界**：`DSH_KIMI_CODE_BYTES_PER_TOKEN` 的窗口折算仍以那个与模型无关的 2 MiB（设了 env 则取 env）为基准，不跟随按模型档位——它是可选的提前压缩开关而不是守卫，本次刻意不动；不想提前压缩时不设该变量即可（默认就是不设）。
 
 ## 0.38.0 - 2026-10-24
 - **[kimi-code] 新增 K3.1 Pro 系列（与其它模型同一 OpenAI 兼容 chat completions）、只支持思考的档位、以及缓存写入这个计费项**

@@ -24,7 +24,12 @@ import type {
   KimiCodeThinkingType,
   KimiCodeWire,
 } from '../../shared/kimi-code-contracts.ts'
-import { KIMI_CODE_MODELS, kimiCodeModelDef } from './model-catalog.ts'
+import {
+  KIMI_CODE_MODELS,
+  LONG_CONTEXT_MESSAGE_BODY_BYTES,
+  kimiCodeModelDef,
+  type KimiCodeCatalogModel,
+} from './model-catalog.ts'
 import { MAX_MESSAGE_BODY_BYTES, MAX_REQUEST_IMAGE_BYTES } from '../common/request-images.ts'
 
 export const PROVIDER_ID = 'kimi-code'
@@ -181,10 +186,23 @@ export const ANTHROPIC_MESSAGES_PATH = '/v1/messages?beta=true'
  * spanning both tiers could not express "relax the text ceiling, leave the video
  * one alone", and a value chosen for a 2 MB conversation would collapse the video
  * tier with it. MiniMax's video budget is likewise a bare constant.
+ *
+ * The text/image tier is now graded by model: this constant is what the 256K
+ * models keep and what an unknown model falls back to, while the 1M models
+ * declare their own, larger ceiling in the registry. {@link maxRequestBodyBytesFor}
+ * is the resolver that applies that grade.
  */
 export const DEFAULT_MAX_MESSAGE_BODY_BYTES = MAX_MESSAGE_BODY_BYTES
 
-/** Ceiling this process enforces, honouring the deployment override. */
+/**
+ * Ceiling this process enforces when the caller has no model to key on.
+ *
+ * Kept alongside {@link maxRequestBodyBytesFor} rather than folded into it: this
+ * is the answer for "what does this deployment allow at all", which the video
+ * budget and the settings reporting paths need without naming a model. A request
+ * that DOES name one goes through the per-model resolver below, so a 1M-tier
+ * session gets its own tier instead of this floor.
+ */
 export function maxMessageBodyBytes(env: NodeJS.ProcessEnv = process.env): number {
   const raw = (env.DSH_KIMI_CODE_MAX_BODY_BYTES ?? '').trim()
   if (raw === '') return DEFAULT_MAX_MESSAGE_BODY_BYTES
@@ -192,6 +210,41 @@ export function maxMessageBodyBytes(env: NodeJS.ProcessEnv = process.env): numbe
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_MESSAGE_BODY_BYTES
   return Math.floor(parsed)
 }
+
+/**
+ * Request-body ceiling for one model, in precedence order.
+ *
+ * The middleware gateway that rejects a body is shared and the sessions are not:
+ * a 1M-tier session produces several megabytes of conversation the 256K tier
+ * cannot, so one number for both either starves the long tier or leaves the
+ * short one unguarded. Hence three sources, highest priority first:
+ *
+ * 1. DSH_KIMI_CODE_MAX_BODY_BYTES — a measured figure for THIS deployment, so it
+ *    wins over every per-model default. It still has to be a positive integer:
+ *    a typo falls through to the model's own default rather than switching the
+ *    guard off, which is the one failure this variable must never cause;
+ * 2. the model's {@link KimiCodeCatalogModel.maxRequestBodyBytes};
+ * 3. {@link DEFAULT_MAX_MESSAGE_BODY_BYTES}, for a model the registry does not
+ *    know — an unknown id keeps the most conservative ceiling rather than
+ *    inheriting a long-context allowance nothing has vouched for.
+ *
+ * @param model the registry row for the model being called, or undefined when
+ * the id is not one this route ships.
+ * @param env environment the override is read from, injectable for tests.
+ */
+export function maxRequestBodyBytesFor(
+  model: KimiCodeCatalogModel | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = (env.DSH_KIMI_CODE_MAX_BODY_BYTES ?? '').trim()
+  if (raw !== '') {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed)
+  }
+  return model?.maxRequestBodyBytes ?? DEFAULT_MAX_MESSAGE_BODY_BYTES
+}
+
+export { LONG_CONTEXT_MESSAGE_BODY_BYTES }
 
 /**
  * Bytes one METERED token is assumed to occupy when a deployment asks this route

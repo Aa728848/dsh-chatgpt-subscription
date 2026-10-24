@@ -571,11 +571,16 @@ describe('the local body guard refuses in the code the host acts on', () => {
     // The end-to-end shape of the reported failure: the adapter measures the
     // body, refuses locally, and DSH sees a code it can compact for. Before the
     // change this surfaced as PROVIDER_ERROR and ended the turn.
+    //
+    // Run on the 256K tier on purpose: 2.1 MB is over that tier's 2 MB ceiling,
+    // while the 1M tier raised its own ceiling to 12 MiB, where this body fits
+    // (see kimi-code-body-limit-per-model.test.ts). The behaviour under test —
+    // refuse locally, with the recovery code, before fetch — is unchanged.
     const fetchMock = vi.fn<typeof fetch>(async () => {
       throw new Error('the guard must refuse before any request is sent')
     })
     const { adapter } = await buildAdapter({ fetchFn: fetchMock })
-    const failure = await streamFailure(adapter.stream(generateOptions('kimi-for-coding', {
+    const failure = await streamFailure(adapter.stream(generateOptions('k3-256k', {
       messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(2_107_355) }] } as never],
     })))
     expect(failure.code).toBe(CONTEXT_OVERFLOW_CODE)

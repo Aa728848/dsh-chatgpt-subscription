@@ -921,6 +921,10 @@ describe('the body-fit loop gives up on the first turn it cannot improve', () =>
     // One small image plus enough text to clear the 2 MB ceiling. The overflow is
     // wider than the image, so dropping it could never fit the request — the loop
     // has nothing to gain from a second turn.
+    //
+    // The 256K tier is named deliberately: 2.4 MB clears its 2 MB ceiling, while
+    // the 1M tier raised its own to 12 MiB and would accept this body. The loop
+    // behaviour under test does not depend on which tier supplied the ceiling.
     const image = new Uint8Array(64 * 1024)
     const fetchCalls: number[] = []
     const { adapter } = await buildAdapter({
@@ -940,7 +944,7 @@ describe('the body-fit loop gives up on the first turn it cannot improve', () =>
       } as never,
     })
 
-    const options = generateOptions(CATALOG[0].id, {
+    const options = generateOptions('k3-256k', {
       messages: [
         { role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'small', mediaType: 'image/png', bytes: image.length, width: 1, height: 1 } }] },
         { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(2_400_000) }] },

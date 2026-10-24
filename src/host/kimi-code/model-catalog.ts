@@ -8,6 +8,30 @@
  */
 
 import type { KimiCodeReasoningEffort, KimiCodeThinkingType } from '../../shared/kimi-code-contracts.ts'
+import { MAX_MESSAGE_BODY_BYTES } from '../common/request-images.ts'
+
+/**
+ * Request-body ceiling the 1M-context tier defaults to.
+ *
+ * The 2 MB figure this line used to apply to every model comes from the gateway's
+ * generic error example and was never measured against a 1M window, while a real
+ * 1M session (3-4 MB of Chinese prose) hits it long before the window is full.
+ * The official kimi-cli ships no byte guard at all, so the ceiling is this
+ * plugin's own safety net rather than a client requirement.
+ *
+ * 8 MiB is sized so bytes never become the binding limit for a 1M session: that
+ * window's body is roughly 4 MB of English or 4.5 MB of dense Chinese, so 8 MiB
+ * leaves nearly double the headroom. What binds first is the model's own token
+ * window — the service answers "Your request exceeded model token limit", which
+ * common/context-overflow.ts already normalizes to CONTEXT_WINDOW_EXCEEDED, so
+ * compaction and retry behave exactly as they did before.
+ *
+ * The number is still an UPPER BOUND pending measurement, not a documented
+ * gateway limit: a deployment that has measured its own gateway pins the real
+ * figure with DSH_KIMI_CODE_MAX_BODY_BYTES. The 256K tier keeps 2 MB, where the
+ * old ceiling and the window line up.
+ */
+export const LONG_CONTEXT_MESSAGE_BODY_BYTES = 8 * 1024 * 1024
 
 /** One model the Kimi Code endpoint serves to subscription accounts. */
 export interface KimiCodeCatalogModel {
@@ -31,6 +55,16 @@ export interface KimiCodeCatalogModel {
   maxContextWindow: number | null
   /** Floor for the dynamic wire budget, NOT a ceiling or DSH defaultMaxTokens. */
   maxTokens: number
+  /**
+   * Local default for the gateway request-body ceiling, graded by context tier.
+   *
+   * This is the per-model default {@link maxRequestBodyBytesFor} returns when no
+   * environment override is set. It is NOT a documented gateway limit: the 1M
+   * tier's 8 MiB is a still-unmeasured upper bound (see
+   * {@link LONG_CONTEXT_MESSAGE_BODY_BYTES}), and the 256K tier keeps the 2 MiB
+   * figure this line applied to every model before the split.
+   */
+  maxRequestBodyBytes: number
   /** Input the model accepts; DSH only maps the text and image entries. */
   inputModalities: readonly ('text' | 'image' | 'video')[]
   /** Thinking levels the model accepts, in escalating order. */
@@ -94,6 +128,8 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextWindow: 262_144,
     maxContextWindow: 1_048_576,
     maxTokens: 32_768,
+    // 1M tier: the window this id can reach is why the ceiling is raised.
+    maxRequestBodyBytes: LONG_CONTEXT_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image', 'video'],
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -111,6 +147,8 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextWindow: 262_144,
     maxContextWindow: null,
     maxTokens: 32_768,
+    // 256K tier: no 1M session can fill here, so the old 2 MB ceiling stays.
+    maxRequestBodyBytes: MAX_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image'],
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
@@ -128,6 +166,9 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextWindow: 1_048_576,
     maxContextWindow: null,
     maxTokens: 32_768,
+    // 1M tier: a full 1M session overruns 2 MB before the window is anywhere
+    // near full, so the ceiling tracks the window rather than the generic figure.
+    maxRequestBodyBytes: LONG_CONTEXT_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image', 'video'],
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'max',
@@ -145,6 +186,8 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextWindow: 262_144,
     maxContextWindow: null,
     maxTokens: 32_768,
+    // 256K tier: the window, not the byte ceiling, is what bounds a session.
+    maxRequestBodyBytes: MAX_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image', 'video'],
     // The table states "Thinking: ON" with no selectable level, so the only
     // honest exposure is the always-on default; sending low/none would ask for
@@ -174,6 +217,9 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextWindow: 262_144,
     maxContextWindow: 1_048_576,
     maxTokens: 32_768,
+    // 1M tier: same reasoning as k3 — the raised window is what the ceiling
+    // follows, and 2 MB would refuse a full 1M session before compaction helps.
+    maxRequestBodyBytes: LONG_CONTEXT_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image', 'video'],
     reasoningEfforts: ['low', 'high', 'max'],
     // The official table states thinking defaults to max for this family.
@@ -200,6 +246,9 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextWindow: 1_048_576,
     maxContextWindow: null,
     maxTokens: 32_768,
+    // 1M tier: 1M is the only window this id is offered with, so the ceiling
+    // has no smaller tier to fall back to.
+    maxRequestBodyBytes: LONG_CONTEXT_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image', 'video'],
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'max',

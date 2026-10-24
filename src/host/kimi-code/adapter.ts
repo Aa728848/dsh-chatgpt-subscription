@@ -26,8 +26,8 @@ import {
   codingBaseUrl,
   coerceThinkingEffort,
   effectiveContextWindow,
-  maxMessageBodyBytes,
   maxOutputTokensFor,
+  maxRequestBodyBytesFor,
   maxRequestImageBytes,
   reasoningEffortsFor,
 } from './types.ts'
@@ -892,7 +892,14 @@ export class KimiCodeAdapter extends LlmAdapter {
     // omission. It stops as soon as the body fits, so a request that already fit
     // is serialized exactly once and unchanged.
     const carriesVideo = requestHasVideo(requestOptions)
-    const bodyLimit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : maxMessageBodyBytes()
+    // The text/image tier is graded by model, and the tier lives on the STATIC
+    // registry row: the live /v1/models entry reports capabilities and never this
+    // deployment's byte headroom, and a row the listing omits would otherwise
+    // fall back to the 2 MB floor for a 1M model. Resolving by id keeps the
+    // ceiling right on the live path, the fallback path and an unknown id alike.
+    const bodyLimit = carriesVideo
+      ? MAX_VIDEO_MESSAGE_BODY_BYTES
+      : maxRequestBodyBytesFor(kimiCodeModelDef(entry?.id ?? options.model), process.env)
     let buildOptions = boundedOptions
     let body = ''
     for (let attempt = 0; ; attempt++) {
@@ -914,7 +921,7 @@ export class KimiCodeAdapter extends LlmAdapter {
         excessBytes: bytes - bodyLimit,
       })
       if (attempt > MAX_BODY_FIT_ATTEMPTS || !requestHasSendableImage(buildOptions, images)) {
-        assertRequestBodyFits(built, carriesVideo, context())
+        assertRequestBodyFits(built, carriesVideo, context(), bodyLimit)
         throw new Error('unreachable: assertRequestBodyFits returns or throws')
       }
       const drop = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, requestOptions)
@@ -923,7 +930,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       // identical body. Stop here instead of spending the attempt budget
       // re-serializing a multi-megabyte request that cannot change.
       if (drop.dropped === 0) {
-        assertRequestBodyFits(built, carriesVideo, context())
+        assertRequestBodyFits(built, carriesVideo, context(), bodyLimit)
         throw new Error('unreachable: assertRequestBodyFits returns or throws')
       }
       buildOptions = drop.options

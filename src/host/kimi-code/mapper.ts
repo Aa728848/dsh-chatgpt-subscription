@@ -1258,26 +1258,6 @@ export function buildRequest(
 }
 
 /**
- * Reject a request the service would answer with its 2 MB body 400.
- *
- * This is the most frequently reported 400 on the coding endpoint, and it is
- * worth catching locally for two reasons: the message can name the actual
- * remedy (DSH's compaction), and a request that cannot succeed should not be
- * sent at all. The measured size is the real serialized body, so it accounts
- * for tool schemas and inlined images the caller cannot easily estimate.
- *
- * The error code is CONTEXT_OVERFLOW_CODE, not PROVIDER_ERROR, because naming the
- * remedy in prose is not the same as being able to act on it: DSH forces a
- * compaction and retries the same step only for that one code, and every other
- * 400-shaped failure ends the turn. A byte ceiling is answered by the same
- * compression a token ceiling is — the conversation shrinks either way — so the
- * body of the message stays as specific as it was while the code becomes one the
- * host can recover from.
- *
- * @returns the serialized body, so a caller that is about to send it does not
- * serialize a body of up to tens of megabytes a second time.
- */
-/**
  * What the body-fit loop actually did, so the remedy can describe it.
  *
  * Optional by design: a caller that has not run the loop leaves it undefined and
@@ -1293,10 +1273,39 @@ export interface BodyFitContext {
   readonly excessBytes: number
 }
 
+/**
+ * Reject a request the service would refuse for its size.
+ *
+ * This is the most frequently reported 400 on the coding endpoint, and it is
+ * worth catching locally for two reasons: the message can name the actual
+ * remedy (DSH's compaction), and a request that cannot succeed should not be
+ * sent at all. The measured size is the real serialized body, so it accounts
+ * for tool schemas and inlined images the caller cannot easily estimate.
+ *
+ * The ceiling is the caller's when it passes one, because the text/image tier is
+ * graded by model and only the caller knows which model the turn is for; omitted,
+ * the guard resolves the model-less default (or the video tier) itself.
+ *
+ * The error code is CONTEXT_OVERFLOW_CODE, not PROVIDER_ERROR, because naming the
+ * remedy in prose is not the same as being able to act on it: DSH forces a
+ * compaction and retries the same step only for that one code, and every other
+ * 400-shaped failure ends the turn. A byte ceiling is answered by the same
+ * compression a token ceiling is — the conversation shrinks either way — so the
+ * body of the message stays as specific as it was while the code becomes one the
+ * host can recover from.
+ *
+ * @param body the request body about to be serialized and sent.
+ * @param carriesVideo whether the request attaches video, which has its own tier.
+ * @param context what the body-fit loop already did, when it ran.
+ * @param limit the ceiling already resolved for this request's model.
+ * @returns the serialized body, so a caller that is about to send it does not
+ * serialize a body of up to tens of megabytes a second time.
+ */
 export function assertRequestBodyFits(
   body: Record<string, unknown>,
   carriesVideo = false,
   context?: BodyFitContext,
+  limit?: number,
 ): string {
   const serialized = JSON.stringify(body)
   const bytes = Buffer.byteLength(serialized, 'utf8')
@@ -1308,16 +1317,25 @@ export function assertRequestBodyFits(
   // the serialized JSON for a "video_url" substring both paid for a second
   // full serialization of a body that can reach tens of megabytes and let user
   // text containing that literal widen the text/image guard.
-  const limit = carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : maxMessageBodyBytes()
-  if (bytes <= limit) return serialized
-  throw new LlmError(oversizedBodyMessage(bytes, limit, body, context), CONTEXT_OVERFLOW_CODE)
+  //
+  // `limit` is the caller's own already-resolved ceiling, and it is preferred
+  // over re-deriving one here because the text/image tier is graded by model: a
+  // caller that asked maxRequestBodyBytesFor for THAT model must not have the
+  // answer replaced by the model-less fallback, and the refusal has to quote the
+  // number the request was really measured against. Omitted, the derivation
+  // below is exactly what this guard always did, so every existing caller keeps
+  // its behaviour byte for byte.
+  const ceiling = limit ?? (carriesVideo ? MAX_VIDEO_MESSAGE_BODY_BYTES : maxMessageBodyBytes())
+  if (bytes <= ceiling) return serialized
+  throw new LlmError(oversizedBodyMessage(bytes, ceiling, body, context), CONTEXT_OVERFLOW_CODE)
 }
 
 /**
  * How a request body splits into the parts that share the ceiling.
  *
- * The 2 MB limit covers images, conversation text, tool schemas and the system
- * prompt together, but only the first is compressible by dropping something. A
+ * The body ceiling — 2 MB on the 256K tier, larger on the 1M tier — covers
+ * images, conversation text, tool schemas and the system prompt together, but
+ * only the first is compressible by dropping something. A
  * message that names which part dominates is the difference between a user who
  * compacts the conversation and a user who deletes images and fails again.
  */
