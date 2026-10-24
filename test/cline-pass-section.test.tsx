@@ -46,6 +46,7 @@ const STATUS: ClinePassWebStatus = {
       excluded: [],
       pinMode: 'strict',
       sort: '',
+      has: [],
       upstreams: ['baseten', 'deepseek'],
       upstreamStatus: [
         { upstream: 'baseten', status: 'ok', ms: 120, note: '', checkedAt: Date.now() },
@@ -218,6 +219,28 @@ describe('ClinePassSection', () => {
     expect(posts.find((entry) => entry.url.endsWith('/models/pin'))?.body).toMatchObject({
       model: 'cline-pass/glm-5.3',
       upstreams: ['deepseek'],
+    })
+  })
+
+  it('edits and saves the gateway capability filter', async () => {
+    const model = STATUS.models[0]!
+    const posts: Array<{ url: string; body: unknown }> = []
+    const el = await render({
+      models: [{ ...model, pinned: ['deepseek'], has: ['vision', 'implicit-caching'] }],
+    }, (url, body) => posts.push({ url, body }))
+    const input = el.querySelector<HTMLInputElement>('input[placeholder="vision, implicit-caching"]')!
+    expect(input.value).toBe('vision, implicit-caching')
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, 'vision')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const save = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.savePin)!
+    await act(async () => save.click())
+    expect(posts.find((entry) => entry.url.endsWith('/models/pin'))?.body).toMatchObject({
+      model: 'cline-pass/glm-5.3',
+      upstreams: ['deepseek'],
+      has: ['vision'],
     })
   })
 

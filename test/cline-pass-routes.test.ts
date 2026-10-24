@@ -168,13 +168,14 @@ describe('Cline Pass settings API', () => {
     const captured = await call({
       url: '/cline-pass/api/models/pin',
       method: 'POST',
-      body: { model, upstreams: ['baseten'], exclude: ['deepseek'], pinMode: 'preferred', sort: 'cost' },
+      body: { model, upstreams: ['baseten'], exclude: ['deepseek'], pinMode: 'preferred', sort: 'cost', has: ['vision', 'implicit-caching'] },
     })
     expect(captured.status).toBe(200)
     const value = captured.body.value as { pin: { upstreams: string[]; pinMode: string }; status: ClinePassWebStatus }
     expect(value.pin).toMatchObject({ upstreams: ['baseten'], pinMode: 'preferred' })
     const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
     expect(status.models.find((entry) => entry.id === model)?.pinned).toEqual(['baseten'])
+    expect(status.models.find((entry) => entry.id === model)?.has).toEqual(['vision', 'implicit-caching'])
   })
 
   it('warns when a pin targets the anonymous contributor route', async () => {

@@ -42,6 +42,7 @@ interface PinDraft {
   exclude: string[]
   pinMode: 'strict' | 'preferred'
   sort: string
+  has: string[]
 }
 
 interface ModelResult {
@@ -437,6 +438,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
     exclude: [...model.excluded],
     pinMode: model.pinMode,
     sort: model.sort,
+    has: [...model.has],
   }, [pinDrafts])
 
   const editPin = useCallback((model: ClinePassModelDto, patch: Partial<PinDraft>) => {
@@ -734,6 +736,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
               }}
               onPinMode={(pinMode) => editPin(model, { pinMode })}
               onSort={(sort) => editPin(model, { sort })}
+              onHas={(has) => editPin(model, { has })}
               onProbe={() => {
                 setBusy('probe:' + model.id)
                 setError(null)
@@ -757,6 +760,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
                 void API.test(model.id, {
                   ...(draft.upstreams.length === 0 ? {} : { upstreams: draft.upstreams }),
                   ...(draft.exclude.length === 0 ? {} : { exclude: draft.exclude }),
+                  has: draft.has,
                 }).then((outcome) => {
                   applyStatus(outcome.status)
                   setResults((current) => ({ ...current, [model.id]: { ...current[model.id], test: outcome.result } }))
@@ -958,6 +962,7 @@ interface ChannelEditorProps {
   onToggleExclude(upstream: string): void
   onPinMode(mode: 'strict' | 'preferred'): void
   onSort(sort: string): void
+  onHas(has: string[]): void
   onProbe(): void
   onValidate(): void
   onTest(): void
@@ -970,6 +975,8 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
   const { model, draft, result, t } = props
   const busyAny = props.busy !== null
   const [manualChannel, setManualChannel] = useState('')
+  const [hasText, setHasText] = useState(draft.has.join(', '))
+  useEffect(() => setHasText(draft.has.join(', ')), [model.id, model.has])
   const verdicts = new Map(model.upstreamStatus.map((entry) => [entry.upstream, entry]))
   // Configured names that the last probe did not discover are still shown: a pin
   // the gateway silently drops is exactly what this panel exists to expose.
@@ -1089,10 +1096,27 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
             <option value="tps">{t.sortTps}</option>
           </select>
         </label>
+        <label style={{ flex: 1, minWidth: 260 }}>
+          {t.hasLabel}
+          <input
+            className="dsha-input"
+            style={{ flex: 1, minWidth: 180 }}
+            value={hasText}
+            disabled={busyAny}
+            placeholder="vision, implicit-caching"
+            onChange={(event) => {
+              const text = event.target.value
+              setHasText(text)
+              props.onHas([...new Set(text.split(/[\s,]+/).map((name) => name.trim()).filter((name) => name !== ''))])
+            }}
+          />
+        </label>
       </div>
+      <p className="dsha-muted" style={{ fontSize: 12 }}>{t.hasHint}</p>
       <p className="dshcp-meta">
         {draft.upstreams.length === 0 ? t.pinAuto : t.pinPinned.replace('{list}', draft.upstreams.join(' > '))}
         {draft.exclude.length === 0 ? '' : ` · ${t.pinExcluded.replace('{list}', draft.exclude.join(', '))}`}
+        {draft.has.length === 0 ? '' : ` · ${t.pinHas.replace('{list}', draft.has.join(', '))}`}
       </p>
       {draft.upstreams.some((name) => isClinePassAnonymousUpstream(name)) && (
         <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', draft.upstreams.find((name) => isClinePassAnonymousUpstream(name)) ?? '')}</p>
@@ -1157,6 +1181,9 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
           </p>
           {result.test.anonymous && (
             <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', result.test.actual || 'openai-compatible-private')}</p>
+          )}
+          {result.test.has.length > 0 && (
+            <p className="dshcp-meta">{t.testHas.replace('{list}', result.test.has.join(', '))}</p>
           )}
           {result.test.fingerprint !== '' && (
             <p className="dshcp-meta">{t.fingerprintOk.replace('{fingerprint}', result.test.fingerprint)}</p>
