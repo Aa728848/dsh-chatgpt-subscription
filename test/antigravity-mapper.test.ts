@@ -13,7 +13,6 @@ import {
 } from '../src/host/antigravity/mapper.ts'
 import {
   ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
-  ANTIGRAVITY_PROGRESS_INSTRUCTION,
   ANTIGRAVITY_SYSTEM_INSTRUCTION,
   MODELS,
 } from '../src/host/antigravity/types.ts'
@@ -68,12 +67,7 @@ describe('Antigravity Mapper', () => {
     const sysInst = reqData.systemInstruction as { parts: Array<{ text: string }> }
     expect(sysInst.parts.some((p) => p.text.includes(ANTIGRAVITY_SYSTEM_INSTRUCTION))).toBe(true)
     expect(sysInst.parts.some((p) => p.text.includes(ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION))).toBe(true)
-    expect(sysInst.parts.some((p) => p.text.includes(ANTIGRAVITY_PROGRESS_INSTRUCTION))).toBe(true)
     expect(sysInst.parts.some((p) => p.text.includes('Custom developer instructions'))).toBe(true)
-    // The progress rule must come after the caller system prompt so it is the
-    // most recent instruction the model sees.
-    expect(sysInst.parts.findIndex((p) => p.text.includes(ANTIGRAVITY_PROGRESS_INSTRUCTION)))
-      .toBeGreaterThan(sysInst.parts.findIndex((p) => p.text.includes('Custom developer instructions')))
 
     const tools = reqData.tools as Array<{ functionDeclarations: Array<{ name: string }> }>
     expect(tools[0].functionDeclarations[0].name).toBe('get_weather')
@@ -133,7 +127,7 @@ describe('Antigravity Mapper', () => {
     expect(declared((wire.request as Record<string, unknown>).tools as never)).toEqual(folded)
   })
 
-  it('injects progress and tool execution rule when tools are present, omits when absent', () => {
+  it('does not inject progress text instructions when tools are present', () => {
     const withoutTools = {
       provider: 'antigravity',
       model: 'gemini-3.7-flash',
@@ -141,7 +135,6 @@ describe('Antigravity Mapper', () => {
     } as unknown as GenerateOptions
     const reqWithoutTools = buildRequest(withoutTools, testModel, 'test-project', 'gemini-3.7-flash')
     const sysWithoutTools = (reqWithoutTools.request as Record<string, unknown>).systemInstruction as { parts: Array<{ text: string }> }
-    expect(sysWithoutTools.parts.some((p) => p.text.includes(ANTIGRAVITY_PROGRESS_INSTRUCTION))).toBe(false)
 
     const withTools = {
       provider: 'antigravity',
@@ -151,7 +144,8 @@ describe('Antigravity Mapper', () => {
     } as unknown as GenerateOptions
     const reqWithTools = buildRequest(withTools, testModel, 'test-project', 'gemini-3.7-flash')
     const sysWithTools = (reqWithTools.request as Record<string, unknown>).systemInstruction as { parts: Array<{ text: string }> }
-    expect(sysWithTools.parts.some((p) => p.text.includes(ANTIGRAVITY_PROGRESS_INSTRUCTION))).toBe(true)
+    expect(sysWithTools).toEqual(sysWithoutTools)
+    expect(sysWithTools.parts.some((p) => p.text.includes('Progress and tool execution rule'))).toBe(false)
   })
 
   it('configures thinkingConfig correctly across Gemini 3.x and Gemini 2.5 models', () => {

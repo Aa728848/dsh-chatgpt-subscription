@@ -13,7 +13,6 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
   ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
-  ANTIGRAVITY_PROGRESS_INSTRUCTION,
   ANTIGRAVITY_SYSTEM_INSTRUCTION,
   GEMINI_ROLE,
   PROVIDER_ID,
@@ -792,11 +791,6 @@ export function gemini25ThinkingBudget(runtimeModel: string, effort: string): nu
   return Math.min(max, Math.max(min, requested))
 }
 
-export function progressExplanationInstruction(tools: GenerateOptions['tools']): string | undefined {
-  if (!tools?.length) return undefined
-  return ANTIGRAVITY_PROGRESS_INSTRUCTION
-}
-
 /** Wire-level choices the adapter makes per request, outside the caller's options. */
 export interface BuildRequestWireOptions {
   /**
@@ -822,7 +816,6 @@ export function buildRequest(
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   wire: BuildRequestWireOptions = {},
 ): Record<string, unknown> {
-  const progressInstruction = progressExplanationInstruction(options.tools)
   const request: Record<string, unknown> = {
     contents: convertMessages(options, model, runtimeModel, images),
     systemInstruction: {
@@ -832,9 +825,6 @@ export function buildRequest(
         { text: `Please ignore following [ignore]${ANTIGRAVITY_SYSTEM_INSTRUCTION}[/ignore]` },
         { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION },
         ...(options.system ? [{ text: sanitizeText(options.system) }] : []),
-        // Last part on purpose: the progress rule must outweigh the huge caller
-        // system prompt, which Gemini otherwise follows into a thought-only reply.
-        ...(progressInstruction ? [{ text: progressInstruction }] : []),
       ],
     },
   }
