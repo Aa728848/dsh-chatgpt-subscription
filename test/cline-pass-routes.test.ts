@@ -18,7 +18,7 @@ import { ClinePassModelSettingsStore, FileCredentialStore, type ClinePassCredent
 import { ClinePassLoginManager } from '../src/host/cline-pass/oauth.ts'
 import { createClinePassEngine } from './cline-pass-test-helpers.ts'
 import { DEFAULT_MODELS } from '../src/host/cline-pass/types.ts'
-import type { ClinePassWebStatus } from '../src/shared/cline-pass-contracts.ts'
+import type { ClinePassCatalogAddResultDto, ClinePassWebStatus } from '../src/shared/cline-pass-contracts.ts'
 
 interface Captured {
   status: number
@@ -74,6 +74,7 @@ let dir = ''
 let pool: ClinePassAccountPool
 let settings: ClinePassModelSettingsStore
 let store: ReturnType<typeof createClinePassStore>
+let engine: ReturnType<typeof createClinePassEngine>
 let handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>
 let emit: ReturnType<typeof vi.fn>
 let dispose: () => void
@@ -89,7 +90,7 @@ beforeEach(async () => {
   })
   settings = new ClinePassModelSettingsStore(path.join(dir, 'models.json'))
   store = createClinePassStore()
-  const engine = createClinePassEngine({ pool, store, settings })
+  engine = createClinePassEngine({ pool, store, settings })
   const registrations: Array<{ kind: string; path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
   emit = vi.fn()
   const ctx = {
@@ -168,13 +169,75 @@ describe('Cline Pass settings API', () => {
     const captured = await call({
       url: '/cline-pass/api/models/pin',
       method: 'POST',
-      body: { model, upstreams: ['baseten'], exclude: ['deepseek'], pinMode: 'preferred', sort: 'cost' },
+      body: { model, upstreams: ['baseten'], exclude: ['deepseek'], pinMode: 'preferred', sort: 'cost', has: ['vision', 'implicit-caching'] },
     })
     expect(captured.status).toBe(200)
     const value = captured.body.value as { pin: { upstreams: string[]; pinMode: string }; status: ClinePassWebStatus }
     expect(value.pin).toMatchObject({ upstreams: ['baseten'], pinMode: 'preferred' })
     const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
     expect(status.models.find((entry) => entry.id === model)?.pinned).toEqual(['baseten'])
+    expect(status.models.find((entry) => entry.id === model)?.has).toEqual(['vision', 'implicit-caching'])
+  })
+
+  it('keeps the full gateway catalog out of the model list and searches it on demand', async () => {
+    await settings.update({
+      catalogModels: [{ id: 'cline-pass/official-old' }, { id: 'deepseek/legacy-extra' }],
+      exposeCatalog: true,
+      enabledModelIds: [],
+    })
+    vi.spyOn(engine, 'officialModels').mockResolvedValue({
+      models: ['cline-pass/official-new'],
+      catalog: { 'cline-pass/official-new': { name: 'Official New' } },
+      sources: ['cline.api'],
+    })
+    vi.spyOn(engine, 'gatewayCatalog').mockResolvedValue(['deepseek/legacy-extra', 'deepseek/deepseek-v4-pro', 'cline-pass/sub-extra', 'openai/gpt-new'])
+    const refreshed = await call({ url: '/cline-pass/api/catalog/refresh', method: 'POST', body: {} })
+    expect(refreshed.status).toBe(200)
+    const stored = await settings.read()
+    expect(stored.catalogModels.map((entry) => entry.id)).not.toContain('openai/gpt-new')
+    expect(stored.catalogModels).toContainEqual(expect.objectContaining({ id: 'cline-pass/official-new', origin: 'official' }))
+    // The complete list survives only as a search index.
+    expect(store.catalog().ids).toContain('openai/gpt-new')
+    const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
+    expect(status.models.map((entry) => entry.id)).not.toContain('deepseek/legacy-extra')
+    expect(status.models.map((entry) => entry.id)).not.toContain('openai/gpt-new')
+    expect(status.models.map((entry) => entry.id)).toContain('cline-pass/official-new')
+
+    const found = await call({ url: '/cline-pass/api/catalog/search?q=v4-pro' })
+    expect(found.status).toBe(200)
+    expect(found.body.value).toEqual({ results: [{ id: 'deepseek/deepseek-v4-pro', added: false, billing: 'credits' }] })
+    // A marketplace id draws on the Cline Credits balance, so it is refused
+    // until the caller acknowledges that.
+    const refused = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'deepseek/deepseek-v4-pro' } })
+    expect(refused.status).toBe(409)
+    expect((refused.body as { code?: string }).code).toBe('credits_billing')
+    const added = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'deepseek/deepseek-v4-pro', acknowledgeBilling: true } })
+    expect(added.status).toBe(200)
+    expect((added.body.value as ClinePassCatalogAddResultDto).billing).toBe('credits')
+    const after = await settings.read()
+    expect(after.catalogModels).toContainEqual(expect.objectContaining({ id: 'deepseek/deepseek-v4-pro', origin: 'custom' }))
+    expect(after.enabledModelIds).toEqual(['deepseek/deepseek-v4-pro'])
+    const visible = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
+    expect(visible.models.find((entry) => entry.id === 'deepseek/deepseek-v4-pro')?.enabled).toBe(true)
+
+    // A subscription id stays one-click: it is the plan quota, not credits.
+    const subFound = await call({ url: '/cline-pass/api/catalog/search?q=sub-extra' })
+    expect(subFound.body.value).toEqual({ results: [{ id: 'cline-pass/sub-extra', added: false, billing: 'subscription' }] })
+    const subAdded = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'cline-pass/sub-extra' } })
+    expect(subAdded.status).toBe(200)
+    expect((subAdded.body.value as ClinePassCatalogAddResultDto).billing).toBe('subscription')
+  })
+
+  it('warns when a pin targets the anonymous contributor route', async () => {
+    const model = DEFAULT_MODELS[0]!
+    const captured = await call({
+      url: '/cline-pass/api/models/pin',
+      method: 'POST',
+      body: { model, upstreams: ['openai-compatible-private'] },
+    })
+    expect(captured.status).toBe(200)
+    const value = captured.body.value as { warnings: string[] }
+    expect(value.warnings.some((warning) => warning.startsWith('anonymousUpstream:'))).toBe(true)
   })
 
   it('shows and hides models without forgetting them', async () => {

@@ -36,6 +36,58 @@
   - **真实上游探测（本次修法的判据，可复现）**：`{"personal_token":…,"machine_id":…}` 与只发 `{"personal_token":…}` 对同一把 token 在两个区都返回 `HTTP 400` 且响应**不含** `rawMessage`；而 `{}`、`{"token":…}`、`{"personal_token":…}` 之外的字段名、以及 form 编码的请求**都带** `rawMessage`。这条差异证明服务端是「读完 `personal_token` 之后拒绝这把 token」，而不是「不认识这个请求形状」——所以修法针对的是 token 与区域的归属，不是编码。
   - **未验证的边界**：真实账号的兑换成功路径仍未联调（本仓库测试全部走 mock，探测用的是合成 token）；用户需要用自己的 PAT 实测一次。若换了两个区仍是同样的 400，那这把 PAT 本身已失效或生成在了第三个部署上。
 
+- **[cline-pass] 上游钉选可读性大修：流式帧终于能读出真实服务渠道，匿名贡献者路由全链路标记**
+  - **现象**：钉选 deepseek「好像失效」——本机实测（2026-10-23，两个账号）：`cline-pass/deepseek-v4.1-flash-1017` 被网关改指 VMC 匿名贡献者路由，`only: [deepseek]` 被静默忽略（连假渠道也返回 200）；而同一时刻 `cline-pass/deepseek-v4-pro` 的 `only: [deepseek]` 被采纳（`Provider set restricted to: deepseek`）。网关按**模型 id** 分流且随时间翻转，插件无法左右；但插件侧有两个真实缺陷把「失效」放大了。
+  - **缺陷一：流式下钉选判定永远 `unresolved`**。网关把路由块放在**流式收尾帧**的 `choices[].delta.provider_metadata.gateway.routing`（内容之后、`[DONE]` 之前），而 `parseRouting` 只读 `message.provider_metadata`——本机 history 里 19 条真实流式记录全部 `unresolved`，`provider` 字段只是钉选回显。改法：同时读 `delta` / `message` / 顶层，并对整块做**深度受限递归搜捕**（对齐 MIT 参考插件 `dsh-clinepass-deepseek` 的 `collectRouting` 行为）；首个非空读取生效。
+  - **缺陷二：匿名路由无任何标记**。`openai-compatible-private`（VMC 贡献者回退网，回答可能用于训练、无 ZDR）此前被当成普通渠道芯片，用户甚至把它存成了钉选。改法：
+    - 新增共享判定 `isClinePassAnonymousUpstream()`（渠道名 + `private/…-contributor` 解析 slug）；
+    - `pinWarnings` 新增两条：钉选**指向**匿名路由（`anonymousUpstream:`）、模型**只发现**匿名路由却钉了别的（`pinLikelyIgnored:`，即「钉了也会被静默忽略」）；
+    - 渠道芯片带 `⚠` 与警示色、tooltip 说明；钉选区在「钉了匿名路由」或「该模型只剩匿名路由」时给出警告行；
+    - 请求历史与 probe/test 结果新增 `fingerprint` / `anonymous` 字段，strict 未采纳或落在匿名路由时写入 `pinNotAdopted:` / `anonymousServed:` 警告。
+  - **第一方指纹**：`RoutingFacts.fingerprint` 只认 `provider_metadata.deepseek.systemFingerprint`（顶层 `system_fingerprint` 是网关每请求现铸的，不算证据）；适配器把最近一次指纹学到模型观察上，测试结果页直接展示。
+  - **模型目录**：`cline-pass/deepseek-v4.1-flash-1017` 快照 id 进入内置目录（921600 / 384000，数值转录自参考插件的实测卡片），不再只依赖实时扫描领养——网关对别名与快照的钉选行为不同，用户必须能选到那个刚被探针证明可钉的 id。
+  - **手动渠道钉选入口**：探测依赖网关在被不可能的 `only` 钉住时报错列出渠道；当模型被改指匿名路由时探测拿不到任何列表（实测 1017 只剩 `openai-compatible-private` 一枚芯片），此前 UI 上连「钉 deepseek 试试」都做不到。渠道名是**网关级词汇**（任何模型探测到的名字都是合法候选），钉选面板新增手动输入框（联想全模型已发现渠道），输入即可钉、可存、可用「测试」回读验证——这正是参考插件的做法：从不探测渠道列表，按名字钉、按指纹验。
+  - **不做的**：不在流中段按路由帧掐断响应（路由帧在内容之后才到，掐不断已交付内容），与参考插件「观察并如实报告、不改写请求」的立场一致。
+  - **测试**：`cline-pass-protocol.test.ts` +4 例（delta 帧读取、递归搜捕、指纹/匿名判定、两条新警告）、`cline-pass-adapter.test.ts` +2 例（采纳 + 指纹落库；匿名路由未采纳 + 警告 + 不误标渠道可用）、`cline-pass-routes.test.ts` +1 例（钉匿名路由返回警告）、`cline-pass-section.test.tsx` +1 例（芯片 ⚠ 标记与警告行）。
+
+- **[cline-pass] `only` 之外补上模型能力过滤 `has`：1017 的钉选与渠道探测恢复**
+  - **实测结论（本机真实账号，2026-10-24）**：同一个 `cline-pass/deepseek-v4.1-flash-1017`、同一把账号、交替对照两遍：只发 `providerOptions.gateway.only:[deepseek]` 都落 `openai-compatible-private` 且无第一方指纹；追加 `has:[vision,implicit-caching]` 后都落 **`deepseek`**，`canonicalSlug=deepseek/deepseek-v4.1-flash-1017`，并带 `provider_metadata.deepseek.systemFingerprint`。假渠道加 `has` 会正确报错并列出可用渠道，不再被静默兜到匿名路由。
+  - **请求链路**：`ClinePassPinSettings` / `PinConfig` / `PinAttempt` 新增 `has`；`injectPrefs` 只把它写进 **Vercel 的 `providerOptions.gateway.has`**，不污染 OpenRouter 的 `provider` 字段。真实流式请求、非流式 Test、逐渠道 Validate、Probe 的 `__probe__` harvest 全部使用同一份过滤配置。
+  - **旧设置无缝继承**：1017 在内置目录声明 `gatewayHas:[vision,implicit-caching]`；读取缺少 `has` 的旧钉选时自动补该默认值，**显式保存的空数组仍表示用户主动清空**，其他模型默认完全不变。
+  - **可配置**：设置卡的钉选面板新增「能力过滤 (has)」输入框（逗号/空格分隔），保存与临时 Test 都可覆盖；HTTP `/models/pin`、`/models/test` 和 `cline_pass_pin` / `cline_pass_test` 管理工具同步支持；Test 结果回显实际发送的过滤。
+  - **集成实测**：用新引擎读取现有旧设置，Probe 从「只有匿名路由」恢复为发现 **18 个渠道**（含 deepseek/fireworks/baseten 等）；Test 返回 `actual=deepseek`、`adherence=adopted`、`anonymous=false`、第一方指纹。
+  - **测试**：新增 `test/cline-pass-has.test.ts` 5 例（只写 Vercel 字段、无钉选也可过滤、其他模型不受影响、旧设置继承/显式清空、默认值按模型隔离）；适配器新增真实 body 断言；路由新增持久化断言；设置卡新增 has 编辑/保存用例。另保留 `scripts/probe-cline-pass-has.probe.ts` 作为可重复的本机对照探针（不打印凭据）。
+
+- **[cline-pass] 模型清单只保留内置 + 官方订阅 + 手动添加，完整网关目录改为搜索数据源**
+  - **原因**：此前 `catalog/refresh` 在 `exposeCatalog=true` 时把整个网关目录合并进 `catalogModels`，设置页和模型选择器因此铺开几百个模型。当前本机旧设置实测有 **492 条目录行**。
+  - **展示与选择器同步收敛**：`catalogModels` 新增 `origin: official | custom | gateway`；旧行没有 origin 时仅 `cline-pass/*` 视为官方订阅，其他旧网关行默认收起。`listedClinePassCatalogModels()` 统一应用到设置页、adapter 的模型广告、hub 与可见性工具；旧 `exposeCatalog` 即使仍为 true 也不再展开全量目录。
+  - **不删配置**：旧的目录行、启用列表、隐藏列表、钉选和上下文覆盖都保留，只是不再展示；本次实算 492 行中 472 行收起、20 行保留，另有随包内置表。
+  - **刷新只合并官方订阅**：`catalog/refresh` 和管理工具的 refresh 仍拉取完整网关目录，但只写入 `store.catalog()` 作为搜索索引；只有 `recommended-models` / models.dev 的订阅模型进入 `catalogModels` 并标记 `origin: official`。
+  - **按需搜索添加**：新增 `GET /cline-pass/api/catalog/search?q=...`（空查询不返回全量，最多 30 条）和 `POST /catalog/add`。添加时写入 `origin: custom`，从隐藏列表移除，并在显式启用列表存在时自动加入启用列表；设置页新增搜索框和紧凑结果行。
+  - **兼容清理**：高级设置里移除已经无意义的「展示完整网关目录」开关；配置字段保留以读取旧文件，但不再影响清单。
+  - **测试**：路由新增「全量目录不进入清单 + 搜索/添加 + 自动启用」用例；设置卡新增搜索添加用例；高级设置行数断言同步更新。全量 283 文件、4664 通过、0 失败。
+
+- **[cline-pass] 按官方网关校正 `deepseek-v4.1-flash-1017` 的显示名和上下文，不改模型 id**
+  - **官方核对**：`recommended-models` 同时包含 `cline-pass/deepseek-v4.1-flash-1017` 和稳定别名；网关模型目录包含 `deepseek/deepseek-v4.1-flash-1017`；真实请求返回 `canonicalSlug=deepseek/deepseek-v4.1-flash-1017`，且在 `only + has` 下 `actual=deepseek`、`adherence=adopted`、有第一方指纹。说明 1017 是有效快照 id，不是探测误写。
+  - **真正写错的是内置元数据**：上一版从参考插件转录了 `DeepSeek V4.1 Flash (1017)` / 921600，而当前 Vercel 网关目录公布的是 **`DeepSeek V4.1 Flash 1017` / 1048576**。由于 `resolveModelInfo` 的内置表优先于同步目录，旧内置值覆盖了已经同步到本地的官方 1048576。
+  - **修正**：内置显示名去掉括号，`contextWindow` 改为 1048576；模型 id 保持 `cline-pass/deepseek-v4.1-flash-1017` 不变，现有钉选与启用列表无需迁移。`maxTokens` 继续沿用线路既有的 384000 输出预算上限，不把 Vercel 的 `max_tokens` 直接等同于订阅输出上限。
+  - **测试**：`cline-pass-plugin.test.ts` 新增 1017 官方显示名和上下文断言，防止内置表再次覆盖错官方值。
+
+- **[cline-pass] 区分订阅模型与 marketplace 模型的计费，避免误扣 credits**
+  - **背景**：`catalog/search` 会把整个网关目录（含 `deepseek/…` 这类 marketplace id）当作普通候选；添加后立即启用，而这类 id 按 **Cline Credits** 计费、不占订阅额度，余额不足时上游返回 402。本机实测：添加 `deepseek/deepseek-v4.1-flash-1017` 后余额被扣到 **-$0.04**，同一账号的订阅模型不受影响。
+  - **契约**：`ClinePassCatalogSearchItemDto` 新增 `billing: 'subscription' | 'credits'`（`cline-pass/*` 为订阅，其余为 credits）；新增 `ClinePassCatalogAddResultDto`。
+  - **服务端**：`POST /catalog/add` 对 credits 模型返回 **409 `credits_billing`**，必须带 `acknowledgeBilling: true` 才写入，返回体带 `billing`。
+  - **客户端**：搜索结果逐条显示计费标签；credits 模型第一次点击只展开警告，第二次才提交；`catalogSearchHint` 说明两种计费。
+  - **附带**：添加自定义模型时从已扫描目录复制 `name` / `contextWindow` / `maxTokens` / `input` / `efforts`，不再只写 id。
+- **[cline-pass] 升级不再丢掉用户已启用的网关模型**
+  - 旧目录行没有 `origin`；原先一律按 gateway 收起，已在 `enabledModelIds`、`pins` 或 `contextWindowOverrides` 中的模型会从选择器消失。
+  - 读取设置时把这些行提升为 `origin: 'custom'`，其余仍作为隐藏搜索索引保留。
+- **[cline-pass] 其他修复**
+  - Probe 的 `__probe__` 被网关忽略并返回 200 时，从响应 routing 学习实际渠道，而不是报告「没有渠道」。
+  - routing / fingerprint 的递归搜捕增加节点预算（4000），异常 payload 不再是无界遍历。
+  - 钉选失败且带能力过滤时，错误信息指出 `has` 并提示清空以放宽路由。
+  - 移除已失效的 `exposeCatalog` 客户端字段、locale 文案与 status DTO 字段（配置文件字段仍读取以兼容旧版本）。
+  - 补充 catalog 迁移、计费确认与搜索/添加测试。
 - **[claude] 按官方文档修正 Opus 5 关闭思考和 Sonnet 4.5 标准上下文窗口**
   - **Opus 5**：官方 thinking 故障表允许 `high` 及更低档位发送 `thinking: { type: 'disabled' }`。目录中的 `canDisableThinking` 改为 `true`，`mid-convo` 分支在该请求下返回不带 effort 的 `disabled`，并不再抬高 `max_tokens`；其它 `mid-convo` 模型仍保持 adaptive 与 block binding。同步移除 `pi-ai@1.3.0` 已失效的 Haiku 5.5 测试例外，Claude 相关 **144/144** 用例通过。
   - **Sonnet 4.5**：官方上下文表给出的标准窗口为 **200K**，1M 属于另一项 beta 能力，而本适配器没有请求该能力。`claude-sonnet-4-5` 与 `claude-sonnet-4-5-20250929` 的默认窗口均由 1M 改为 **200K**，保留用户显式覆盖通道。

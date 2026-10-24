@@ -16,6 +16,7 @@ import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   PROVIDER_ID,
+  defaultGatewayHas,
   defaultPin,
   type ClinePassPinSettings,
 } from './types.ts'
@@ -137,6 +138,23 @@ export interface ClinePassCatalogModel {
   reasoning?: boolean
   input?: string[]
   efforts?: string[]
+  /**
+   * Where this row came from. Missing means a legacy row: `cline-pass/*`
+   * counts as the official subscription list, anything else as gateway-only.
+   */
+  origin?: 'official' | 'custom' | 'gateway'
+}
+
+/** Whether a catalog row belongs in the compact, built-in + official + added list. */
+export function isListedClinePassCatalogModel(model: ClinePassCatalogModel): boolean {
+  if (model.origin === 'official' || model.origin === 'custom') return true
+  if (model.origin === 'gateway') return false
+  return model.id.startsWith('cline-pass/')
+}
+
+/** The catalog rows to display/advertise, never the whole gateway search index. */
+export function listedClinePassCatalogModels(settings: { catalogModels: ClinePassCatalogModel[] }): ClinePassCatalogModel[] {
+  return settings.catalogModels.filter(isListedClinePassCatalogModel)
 }
 
 /**
@@ -293,8 +311,8 @@ export class FileCredentialStore {
 }
 
 /** One pin as stored, validated; a malformed row falls back to the default. */
-function readPin(value: unknown): ClinePassPinSettings {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return defaultPin()
+function readPin(value: unknown, model: string): ClinePassPinSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return defaultPin(model)
   const record = value as Record<string, unknown>
   return {
     upstreams: Array.isArray(record.upstreams)
@@ -305,6 +323,11 @@ function readPin(value: unknown): ClinePassPinSettings {
       : [],
     pinMode: record.pinMode === 'preferred' ? 'preferred' : 'strict',
     sort: typeof record.sort === 'string' ? record.sort : '',
+    // Legacy pins predate `has`: inherit the model's measured default. An
+    // explicitly saved empty array stays empty, so clearing it is respected.
+    has: Array.isArray(record.has)
+      ? record.has.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim())
+      : defaultGatewayHas(model),
   }
 }
 
@@ -313,7 +336,7 @@ function readPins(value: unknown): Record<string, ClinePassPinSettings> {
   const pins: Record<string, ClinePassPinSettings> = {}
   for (const [model, pin] of Object.entries(value as Record<string, unknown>)) {
     if (typeof model !== 'string' || model.length === 0) continue
-    pins[model] = readPin(pin)
+    pins[model] = readPin(pin, model)
   }
   return pins
 }
@@ -342,6 +365,7 @@ function readCatalogModels(value: unknown): ClinePassCatalogModel[] {
     if (typeof record.reasoning === 'boolean') model.reasoning = record.reasoning
     if (Array.isArray(record.input)) model.input = record.input.filter((item): item is string => typeof item === 'string')
     if (Array.isArray(record.efforts)) model.efforts = record.efforts.filter((item): item is string => typeof item === 'string')
+    if (record.origin === 'official' || record.origin === 'custom' || record.origin === 'gateway') model.origin = record.origin
     models.push(model)
   }
   return models
@@ -350,6 +374,32 @@ function readCatalogModels(value: unknown): ClinePassCatalogModel[] {
 function positiveInteger(value: unknown, fallback: number, allowZero = false): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) return fallback
   return value
+}
+
+/**
+ * Keep a legacy gateway row the user is demonstrably using.
+ *
+ * Rows written before `origin` existed carry none, and the compact list hides
+ * every unmarked non-`cline-pass/*` row. A row that is enabled, pinned or given
+ * a context override is one the user already selected, so hiding it would drop
+ * a working model out of the picker on upgrade; those rows become `custom`
+ * instead. Everything else stays hidden as a search-index row.
+ */
+function promoteInUseCatalogRows(
+  models: ClinePassCatalogModel[],
+  enabledModelIds: string[] | null,
+  pins: Record<string, unknown>,
+  contextWindowOverrides: Record<string, number>,
+): ClinePassCatalogModel[] {
+  const inUse = new Set<string>([
+    ...(Array.isArray(enabledModelIds) ? enabledModelIds : []),
+    ...Object.keys(pins),
+    ...Object.keys(contextWindowOverrides),
+  ])
+  if (inUse.size === 0) return models
+  return models.map((model) => model.origin !== undefined || model.id.startsWith('cline-pass/') || !inUse.has(model.id)
+    ? model
+    : { ...model, origin: 'custom' as const })
 }
 
 /** Parse one whole settings document. */
@@ -362,16 +412,18 @@ export function parseClinePassModelSettings(value: unknown): ClinePassModelSetti
     : Array.isArray(record.enabledModelIds)
       ? record.enabledModelIds.filter((id): id is string => typeof id === 'string')
       : null
+  const pins = readPins(record.pins)
+  const contextWindowOverrides = readNumberOverrides(record.contextWindowOverrides)
   return {
     enabled: record.enabled !== false,
     baseURL: typeof record.baseURL === 'string' && record.baseURL.trim() !== '' ? record.baseURL.trim() : DEFAULT_BASE_URL,
     enabledModelIds,
-    catalogModels: readCatalogModels(record.catalogModels),
-    pins: readPins(record.pins),
+    catalogModels: promoteInUseCatalogRows(readCatalogModels(record.catalogModels), enabledModelIds, pins, contextWindowOverrides),
+    pins,
     hiddenModels: Array.isArray(record.hiddenModels)
       ? record.hiddenModels.filter((id): id is string => typeof id === 'string')
       : [],
-    contextWindowOverrides: readNumberOverrides(record.contextWindowOverrides),
+    contextWindowOverrides,
     defaultContextWindow: positiveInteger(record.defaultContextWindow, DEFAULT_CONTEXT_WINDOW),
     defaultMaxTokens: positiveInteger(record.defaultMaxTokens, DEFAULT_MAX_TOKENS),
     maxConcurrentRequests: positiveInteger(record.maxConcurrentRequests, DEFAULT_MAX_CONCURRENT_REQUESTS, true),

@@ -20,6 +20,25 @@ export const CLINE_PASS_PROVIDER_ID = 'cline-pass'
 export const CLINE_PASS_PROVIDER_NAME = 'Cline Pass'
 export const CLINE_PASS_ROUTE_PREFIX = '/cline-pass/api'
 
+/**
+ * The gateway's anonymous contributor-route label.
+ *
+ * When Cline routes a model id onto the VMC fallback net, the serving channel
+ * reports itself as `openai-compatible-private` and the resolved slug moves
+ * under `private/…-contributor`. Answers from it may be used for training and
+ * carry no zero-data-retention guarantee, so a pin landing there is a fact the
+ * user must see, not a channel like any other.
+ */
+export const CLINE_PASS_ANONYMOUS_UPSTREAMS: readonly string[] = Object.freeze(['openai-compatible-private'])
+
+/** Whether a channel name or resolved slug names the anonymous contributor route. */
+export function isClinePassAnonymousUpstream(name: unknown, canonicalSlug?: unknown): boolean {
+  const value = String(name ?? '').toLowerCase()
+  if (CLINE_PASS_ANONYMOUS_UPSTREAMS.includes(value)) return true
+  const slug = String(canonicalSlug ?? '').toLowerCase()
+  return slug.startsWith('private/') || slug.includes('-contributor')
+}
+
 /** Authentication UI surface for this line: a pasted static key. */
 export type ClinePassPinMode = 'strict' | 'preferred'
 
@@ -58,6 +77,8 @@ export interface ClinePassModelDto {
   excluded: string[]
   pinMode: ClinePassPinMode
   sort: string
+  /** `providerOptions.gateway.has` capability filter stored with this pin. */
+  has: string[]
   /** Discovered channels, highest confidence first. */
   upstreams: string[]
   upstreamStatus: ClinePassChannelVerdictDto[]
@@ -166,7 +187,6 @@ export interface ClinePassSettingsDto {
   maxConcurrentRequests: number
   streamIdleTimeoutMs: number
   historyLimit: number
-  exposeCatalog: boolean
   pinSpelling: string
 }
 
@@ -179,9 +199,31 @@ export interface ClinePassSettingsUpdateDto {
   maxConcurrentRequests?: number
   streamIdleTimeoutMs?: number
   historyLimit?: number
-  exposeCatalog?: boolean
   pinSpelling?: string
   exposeTools?: boolean
+}
+
+/** How one gateway model id is billed on this account. */
+export type ClinePassCatalogBilling = 'subscription' | 'credits'
+
+/** One gateway-catalog search hit, as the settings card renders it. */
+export interface ClinePassCatalogSearchItemDto {
+  id: string
+  /** Already present in the compact model list (built-in, official, or custom). */
+  added: boolean
+  /**
+   * `subscription` for a `cline-pass/*` id the plan covers; `credits` for a
+   * marketplace id billed against the Cline Credits balance. Adding the second
+   * kind needs an explicit acknowledgement: it never draws on the plan quota.
+   */
+  billing: ClinePassCatalogBilling
+}
+
+/** Outcome of adding one catalog model to the picker. */
+export interface ClinePassCatalogAddResultDto {
+  added: boolean
+  billing: ClinePassCatalogBilling
+  status: ClinePassWebStatus
 }
 
 /** Outcome of probing one model's routing pipeline and channel list. */
@@ -197,6 +239,10 @@ export interface ClinePassProbeResultDto {
   upstreams: string[]
   availableProviders: string[]
   tier0: string[]
+  /** First-party DeepSeek fingerprint when the probe's answer carried one. */
+  fingerprint: string
+  /** Whether the probe's answer was served by the anonymous contributor route. */
+  anonymous: boolean
 }
 
 /** Outcome of testing every known channel of one model. */
@@ -235,6 +281,12 @@ export interface ClinePassTestResultDto {
   adopted: boolean
   adherence: string
   plan: string
+  /** First-party DeepSeek fingerprint when the serving answer carried one. */
+  fingerprint: string
+  /** Whether the serving channel is the anonymous contributor route. */
+  anonymous: boolean
+  /** The capability filter this test actually sent. */
+  has: string[]
   warnings: string[]
   trace: ClinePassAttemptTraceDto[]
 }
@@ -261,6 +313,10 @@ export interface ClinePassHistoryRowDto {
   error: string
   attempts: string[]
   adherence: string
+  /** First-party DeepSeek fingerprint observed on the serving answer, if any. */
+  fingerprint: string
+  /** Whether the serving channel was the anonymous contributor route. */
+  anonymous: boolean
   warnings: string[]
 }
 
