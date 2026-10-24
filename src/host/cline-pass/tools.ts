@@ -17,7 +17,7 @@ import type { ClinePassAccountPool } from './account-pool.ts'
 import type { ClinePassEngine } from './engine.ts'
 import type { ClinePassStore } from './store.ts'
 import type { ClinePassModelSettingsStore } from './token-store.ts'
-import { bearerFor } from './token-store.ts'
+import { bearerFor, listedClinePassCatalogModels } from './token-store.ts'
 import { DEFAULT_MODELS, defaultPin, type ClinePassPinSettings } from './types.ts'
 import type { ClinePassWebStatus } from '../../shared/cline-pass-contracts.ts'
 
@@ -87,6 +87,7 @@ const MODEL_SCHEMA = {
     hidden: { type: 'boolean', required: true },
     pinMode: { type: 'string', required: true },
     sort: { type: 'string', required: true },
+    has: { type: 'array', required: true, items: { type: 'string' } },
     pinned: { type: 'array', required: true, items: { type: 'string' } },
     excluded: { type: 'array', required: true, items: { type: 'string' } },
     upstreams: { type: 'array', required: true, items: { type: 'string' } },
@@ -124,6 +125,7 @@ function projectModel(status: ClinePassWebStatus, model: string) {
     hidden: !entry.enabled,
     pinMode: normalizePinMode(entry.pinMode),
     sort: entry.sort,
+    has: entry.has,
     pinned: entry.pinned,
     excluded: entry.excluded,
     upstreams: entry.upstreams,
@@ -158,7 +160,7 @@ export interface ClinePassToolsOptions {
 export function registerClinePassTools(ctx: Context, options: ClinePassToolsOptions): Array<() => void> {
   const { settings, accountPool, store, engine, status, serving } = options
   const disposers: Array<() => void> = []
-  const pinOf = async (model: string): Promise<ClinePassPinSettings> => (await settings.read()).pins[model] ?? defaultPin()
+  const pinOf = async (model: string): Promise<ClinePassPinSettings> => (await settings.read()).pins[model] ?? defaultPin(model)
 
   // ── cline_pass_status ─────────────────────────────────────────────────────
 
@@ -274,6 +276,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           const published = scan.catalog[id] ?? {}
           merged.push({
             id,
+            origin: 'official',
             ...(published.name === undefined ? {} : { name: published.name }),
             ...(published.contextWindow === undefined ? {} : { contextWindow: published.contextWindow }),
             ...(published.maxTokens === undefined ? {} : { maxTokens: published.maxTokens }),
@@ -283,7 +286,12 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           })
         }
         await settings.storeCatalog(merged)
-        store.setCatalog({ ids: scan.models, sources: scan.sources, models: scan.catalog as Record<string, unknown> })
+        const gateway = await engine.gatewayCatalog().catch(() => [])
+        store.setCatalog({
+          ids: [...new Set([...scan.models, ...gateway])],
+          sources: [...scan.sources, ...(gateway.length > 0 ? ['gateway'] : [])],
+          models: scan.catalog as Record<string, unknown>,
+        })
       }
       const current = await settings.read()
       if (typeof args.mode === 'string' && args.mode !== '') {
@@ -449,6 +457,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
       model: { type: 'string', required: true, description: 'Model id, e.g. "cline-pass/glm-5.2".' },
       upstreams: { type: 'array', items: { type: 'string' }, description: 'Ordered upstream candidates for this call only.' },
       exclude: { type: 'array', items: { type: 'string' }, description: 'Upstream channels to exclude for this call only.' },
+      has: { type: 'array', items: { type: 'string' }, description: 'Vercel gateway capability filter for this call only.' },
     },
     timeoutMs: 600_000,
     output: {
@@ -464,6 +473,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           pipeline: { type: 'string', required: true },
           account: { type: 'string', required: true },
           adherence: { type: 'string', required: true },
+          has: { type: 'array', required: true, items: { type: 'string' } },
           warnings: { type: 'array', required: true, items: { type: 'string' } },
           trace: { type: 'array', required: true, items: TRACE_SCHEMA },
         },
@@ -483,6 +493,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
       const result = await engine.test(model, {
         upstreams: Array.isArray(args.upstreams) ? args.upstreams.map(String) : undefined,
         exclude: Array.isArray(args.exclude) ? args.exclude.map(String) : undefined,
+        has: Array.isArray(args.has) ? args.has.map(String) : undefined,
         signal: exec.signal,
       })
       return {
@@ -494,6 +505,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
         pipeline: result.pipeline,
         account: result.account,
         adherence: result.adherence,
+        has: result.has,
         warnings: result.warnings,
         trace: result.trace.map((entry) => ({ upstream: entry.upstream, status: entry.status, ms: Math.round(entry.ms), note: entry.note.slice(0, 160) })),
       }
@@ -511,6 +523,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
       exclude: { type: 'array', items: { type: 'string' }, description: 'Channels that must never be used.' },
       pinMode: { type: 'string', enum: ['strict', 'preferred'], description: 'How strictly to honor the pin list.' },
       sort: { type: 'string', enum: ['cost', 'ttft', 'tps', 'none'], description: 'Reorder candidates by this metric; "none" clears it.' },
+      has: { type: 'array', items: { type: 'string' }, description: 'Vercel gateway capability filter; omit to keep the stored value, or pass an empty array to clear it.' },
     },
     timeoutMs: 30_000,
     output: {
@@ -524,6 +537,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           excluded: { type: 'array', required: true, items: { type: 'string' } },
           pinMode: { type: 'string', required: true },
           sort: { type: 'string', required: true },
+          has: { type: 'array', required: true, items: { type: 'string' } },
           warnings: { type: 'array', required: true, items: { type: 'string' } },
         },
       },
@@ -531,7 +545,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
         `pinned ${value.model}`,
         `upstreams: ${value.pinned.length === 0 ? '(auto)' : value.pinned.join(' > ')}`,
         `exclude: ${value.excluded.length === 0 ? '(none)' : value.excluded.join(', ')}`,
-        `pinMode=${value.pinMode} sort=${value.sort === '' ? 'none' : value.sort}`,
+        `pinMode=${value.pinMode} sort=${value.sort === '' ? 'none' : value.sort} has=${value.has.length === 0 ? '(none)' : value.has.join(',')}`,
         ...value.warnings.map((warning) => `⚠ ${warning}`),
       ].join('\n')),
     },
@@ -543,6 +557,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
         exclude: Array.isArray(args.exclude) ? args.exclude.map(String) : current.exclude,
         pinMode: args.pinMode !== undefined ? (args.pinMode === 'preferred' ? 'preferred' : 'strict') : current.pinMode,
         sort: args.sort === undefined ? current.sort : (args.sort === 'none' ? '' : String(args.sort)),
+        has: Array.isArray(args.has) ? args.has.map(String).map((name) => name.trim()).filter((name) => name !== '') : current.has,
       }
       await settings.setPin(model, next)
       const meta = store.metaOf(model)
@@ -564,6 +579,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
         excluded: next.exclude,
         pinMode: normalizePinMode(next.pinMode),
         sort: next.sort,
+        has: next.has,
         warnings,
       }
     },
@@ -732,8 +748,8 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
 }
 
 /** Every id the visibility toggle may act on, including shipped ones. */
-function currentModelsForVisibility(settings: { catalogModels: Array<{ id: string }>; hiddenModels: string[] }): string[] {
+function currentModelsForVisibility(settings: { catalogModels: Array<{ id: string; origin?: 'official' | 'custom' | 'gateway' }>; hiddenModels: string[] }): string[] {
   const ids = new Set<string>(DEFAULT_MODELS)
-  for (const model of settings.catalogModels) ids.add(model.id)
+  for (const model of listedClinePassCatalogModels(settings)) ids.add(model.id)
   return [...ids]
 }

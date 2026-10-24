@@ -86,3 +86,31 @@ The model table in `src/host/cline-pass/types.ts` is a literal transcription of 
 - **Catalog drift.** The shipped table is a snapshot. A model published after this release is adopted from the live scan; if every source is unreachable, it is simply absent rather than invented.
 - **No migration from the standalone plugin.** Its settings section (`cline-pass`) and credential references are not read; a user re-adds the key in this card. `CLINE_PASS_API_KEY` is projected as the primary account while the pool is empty, which covers the environment-variable workflow but not a multi-account settings document.
 - **Concurrency separation**: `src/index.ts` passes `proxyFetch` for routes, OAuth, quota reads and catalog sync, and `modelFetch['cline-pass']` (`streamFetchFn`) only for live adapter chat streams, matching the sibling lines.
+
+## 6. Gateway behaviour measured since (2026-10-23)
+
+Cross-checked against the MIT-licensed observer plugin [`dsh-clinepass-deepseek`](https://github.com/BreakFree003/dsh-clinepass-deepseek) and re-measured live on two accounts:
+
+- **Pin honoring is decided per model id and flips over time.** On 2026-10-23 the gateway redirected `cline-pass/deepseek-v4.1-flash-1017` onto the VMC contributor fallback: `only: [deepseek]` was silently ignored (even a nonexistent channel answered 200), and the plan line read `Routed via VMC 'deepseek-v4p1-flash-1017-contributor-fallbacks' → private/deepseek-v4p1-flash-1017-contributor`. At the same moment `cline-pass/deepseek-v4-pro` honored `only: [deepseek]` (`Provider set restricted to: deepseek`). Neither account choice nor quota moved this. The line therefore treats adherence as a per-id, per-moment reading, never a property of the mechanism.
+- **The anonymous contributor route reports itself as `openai-compatible-private`** and resolves to a `private/…-contributor` slug. Answers from it may be used for training and carry no ZDR guarantee; the line now flags it on the channel chips, in pin warnings, in test results and in request history instead of rendering it as a channel like any other.
+- **Only `provider_metadata.deepseek.systemFingerprint` proves a first-party DeepSeek answer.** The top-level `system_fingerprint` is minted by the gateway per request. The fingerprint is read off both `message` and `delta` metadata and recorded per model and per request.
+- **Streaming frames carry the routing block on `choices[].delta.provider_metadata` in a terminal frame after the content.** Earlier this line read only `message.provider_metadata`, so every streamed request recorded `adherence: unresolved`. `parseRouting` now reads `delta` too and hunts the routing block recursively (depth-capped), matching the observer plugin's `collectRouting` behaviour. Because the frame trails the content, an ignored strict pin cannot be failed over mid-stream; it is recorded and surfaced instead.
+- **The dated snapshot id `cline-pass/deepseek-v4.1-flash-1017` is a first-class catalog entry** (921600/384000, transcribed from the observer plugin's measured card), so the pinnable id does not depend on a live scan adopting it.
+
+## 7. The missing capability filter (measured 2026-10-24)
+
+A pin on 1017 needs more than `only`. Live A/B on the same model and account, repeated twice: `providerOptions.gateway.only:[deepseek]` alone answered through `openai-compatible-private` with no first-party fingerprint; adding `has:[vision,implicit-caching]` answered through `deepseek` with `provider_metadata.deepseek.systemFingerprint`. With the same `has`, an impossible `only` once again fails and names the available providers instead of silently returning the anonymous route.
+
+The line therefore stores `has` beside each pin and sends it only as `providerOptions.gateway.has` (never as an OpenRouter `provider` field). Live streams, Test, Validate and Probe's `__probe__` harvest share the same value. The 1017 catalog entry declares the measured default; a legacy pin that predates the field inherits it, an explicitly saved empty array means the user cleared it, and every other model stays unchanged. An engine-level live run against the existing settings discovered 18 channels and returned `adopted` with the first-party fingerprint. The reproducible, credential-redacting probe is `scripts/probe-cline-pass-has.probe.ts`.
+
+## 8. Compact model list with search-to-add (2026-10-24)
+
+The gateway's full model list is a search index, not a settings page. Earlier `catalog/refresh` merged that list into `catalogModels` whenever the legacy `exposeCatalog` flag was on, which made the card and the model picker hundreds of rows long. Refresh now adopts only official subscription entries into settings and keeps the complete gateway list solely in `store.catalog()`.
+
+Catalog rows carry `origin: official | custom | gateway`; a legacy row without an origin is listed only when its id starts with `cline-pass/`. The same `listedClinePassCatalogModels()` filter feeds the settings card, adapter advertisement and visibility tools, so a hidden gateway row cannot reappear in the picker. Nothing is deleted: pins, enabled/hidden selections and metadata remain in the file. On the live settings at the time of the change, 492 stored rows became 20 listed rows (472 legacy gateway rows folded away), plus the bundled table.
+
+`GET /catalog/search?q=` returns at most 30 matches and never an unfiltered dump; `POST /catalog/add` marks the chosen row `origin: custom`, unhides it and appends it to an explicit enabled-id selection. Both the HTTP refresh and the management-tool refresh preserve the gateway search index.
+
+## 9. Official 1017 id versus stale bundled metadata (2026-10-24)
+
+The 1017 id is real, not a probe-created alias: the official `recommended-models` response includes `cline-pass/deepseek-v4.1-flash-1017`, and a live pinned request returns `canonicalSlug=deepseek/deepseek-v4.1-flash-1017` with the first-party fingerprint. The stale part was the bundled metadata introduced in §6. The reference card said `DeepSeek V4.1 Flash (1017)` / 921600; the current Vercel model catalog says `DeepSeek V4.1 Flash 1017` / 1048576. Because the shipped table outranks synced metadata, the stale values hid the correct official ones. The bundled name and context window now follow the current official catalog; the id and existing pins are unchanged.

@@ -994,9 +994,10 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 **能力**
 
 - OpenAI Chat Completions 协议，流式输出；透传工具 schema、工具调用/结果，图片按 `image_url` 内联，`reasoning_effort` 原样下发；支持 `temperature`、`stop` 与 `max_tokens`；
-- 模型目录：随包 15 个 Cline Pass 模型是**兜底**。点「刷新模型目录」会读官方 `/ai/cline/recommended-models`、models.dev 与上游网关目录，只增不减，并把每个模型的能力（上下文窗口、输出上限、图片、推理档位）一起补上；新发布、本版本不认识的模型按保守值录取，不会被隐藏；
+- 模型目录：随包 16 个 Cline Pass 模型是**兜底**（含 `deepseek-v4.1-flash-1017` 快照 id——网关对别名与快照的钉选行为不同）。点「刷新模型目录」会读官方 `/ai/cline/recommended-models`、models.dev 与上游网关目录，只增不减，并把每个模型的能力（上下文窗口、输出上限、图片、推理档位）一起补上；新发布、本版本不认识的模型按保守值录取，不会被隐藏；**设置页与模型选择器只列内置 + 官方订阅 + 手动添加的模型**，完整网关目录仅作为搜索索引（旧的 exposeCatalog 配置不再展开），其他模型可在卡片里按 id 搜索并添加，添加后自动启用；
 - **上游渠道可观测、可钉住**：同一模型可能由 OpenRouter（direct 管线）或 Vercel AI Gateway（planner 管线）转发。卡片可以对单个模型「探测」渠道、逐个「校验」、按顺序钉住或排除，并在**首个 token 之前**失败切换到下一个渠道；`strict` 只发允许列表，`preferred` 按顺序尝试。钉住字段默认**两种写法都写**（`provider.only/order/sort` 与 `providerOptions.gateway.*`），因为网关可以在两次请求之间换管线，只写一种会让钉住悄悄失效；
-- **钉住是否被采纳以响应为准**：网关对未知/不可用的 `only` 不报错，直接从别的渠道服务。因此探测、校验与真实请求都会回读响应里的实际服务渠道；「请求 baseten、实际 deepseek」会被明确标成未被采纳，而不是当成成功；
+- **钉住是否被采纳以响应为准**：网关对未知/不可用的 `only` 不报错，直接从别的渠道服务。因此探测、校验与真实请求都会回读响应里的实际服务渠道（流式帧的路由块在 `delta.provider_metadata` 的收尾帧上，本线路也会读）；「请求 baseten、实际 deepseek」会被明确标成未被采纳，而不是当成成功；
+- **匿名贡献者路由会被单独标记**：`openai-compatible-private`（VMC 回退网，回答可能用于训练、无 ZDR）在渠道芯片上是 `⚠` 警示色，钉选它或模型只发现它时卡片会给出警告；**探测不到渠道时可手动输入渠道名钉选**（渠道名是网关级词汇，输入框会联想其他模型已发现的渠道），是否生效以「测试」与历史回读为准；**1017 还需 `providerOptions.gateway.has:[vision,implicit-caching]` 能力过滤才会采纳钉选并恢复渠道探测**（本线路已默认补上，面板可编辑，其他模型默认不添加）；第一方 DeepSeek 回答以 `provider_metadata.deepseek.systemFingerprint` 为准（顶层 `system_fingerprint` 是网关现铸的，不算证据），指纹会记录在测试结果与请求历史里。注意**钉选是否生效由网关按模型 id 决定且随时间变化**（实测 2026-10-23：`deepseek-v4.1-flash-1017` 被改指匿名路由忽略钉选，同刻 `deepseek-v4-pro` 正常采纳）——被忽略时历史与测试会明说，而不是静默兜底；
 - **登录态**：设备码确认后账号自动入池；access token 以 `workos:` 前缀发送，到期前 5 分钟自动 refresh（refresh token 轮换并先落盘再使用）；refresh 被上游判 `invalid_grant` 时账号标记为失效并提示重新登录，网络/5xx 只算瞬时失败，不会误登出；
 - **号池**：多账号（OAuth）或 API Key、顺序/轮询/粘性三种调度、429 冷却、401/403 标记失效后换号；额度耗尽（`QUOTA`）与鉴权失败是**账号级**失败，会换账号；普通 429 是**渠道级**，只换渠道，不牺牲账号容量；
 - **额度**：`GET /users/me/plan/usage-limits` 的 `five_hour` / `weekly` / `monthly` 三个窗口，**按账号**读取并显示；读取失败只报原因，不阻断请求；

@@ -12,6 +12,7 @@
  * @module dsh-chatgpt-subscription/cline-pass-engine
  */
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import { isClinePassAnonymousUpstream } from '../../shared/cline-pass-contracts.ts'
 import {
   chatCompletion,
   fetchGatewayCatalog,
@@ -38,7 +39,7 @@ import {
   type PinConfig,
   type PinModelMeta,
 } from './protocol.ts'
-import { DEFAULT_BASE_URL, VALIDATE_CONCURRENCY, type ClinePassCatalogScan, type ClinePassPinSettings } from './types.ts'
+import { DEFAULT_BASE_URL, VALIDATE_CONCURRENCY, defaultGatewayHas, type ClinePassCatalogScan, type ClinePassPinSettings } from './types.ts'
 import type { ClinePassStore } from './store.ts'
 import type { ClinePassAccountPool } from './account-pool.ts'
 import { bearerFor } from './token-store.ts'
@@ -116,6 +117,7 @@ export class ClinePassEngine {
       exclude: this.pinOf(model).exclude,
       pinMode: this.pinOf(model).pinMode,
       sort: this.pinOf(model).sort,
+      has: this.pinOf(model).has,
       spelling: this.options.pinFor(model).spelling,
     }
   }
@@ -128,6 +130,7 @@ export class ClinePassEngine {
       exclude: (pin.exclude ?? []).map(String),
       pinMode: pin.pinMode === 'preferred' ? 'preferred' : 'strict',
       sort: typeof pin.sort === 'string' ? pin.sort : '',
+      has: Array.isArray(pin.has) ? pin.has.map(String) : defaultGatewayHas(model),
     }
   }
 
@@ -258,6 +261,8 @@ export class ClinePassEngine {
     upstreams: string[]
     availableProviders: string[]
     tier0: string[]
+    fingerprint: string
+    anonymous: boolean
   }> {
     const account = await this.resolveAccount()
     const started = Date.now()
@@ -274,15 +279,16 @@ export class ClinePassEngine {
     if (!result.ok || (payload.error !== undefined && payload.choices === undefined) || !Array.isArray(payload.choices) || payload.choices.length === 0) {
       const message = errorText(payload.error) || String(payload.message ?? '') || result.text.slice(0, 400) || (result.ok ? 'gateway returned no completion' : `HTTP ${result.status}`)
       this.store.learn(model, { ok: false, lastError: message, lastMs: ms })
-      return { ok: false, ms, model, error: message, pipeline: '', pinnable: false, canonicalSlug: '', lastProvider: '', upstreams: [], availableProviders: [], tier0: [] }
+      return { ok: false, ms, model, error: message, pipeline: '', pinnable: false, canonicalSlug: '', lastProvider: '', upstreams: [], availableProviders: [], tier0: [], fingerprint: '', anonymous: false }
     }
     const routing = parseRouting(payload)
     const pipeline = routing.pipeline
     const otherPipeline = pipeline === 'planner' ? 'direct' : pipeline === 'direct' ? 'planner' : null
+    const has = this.pinOf(model).has
     let harvested: string[] | null = null
-    if (pipeline !== null) harvested = await this.harvest(model, pipeline, account, { signal, timeoutMs: this.options.probeTimeoutMs })
+    if (pipeline !== null) harvested = await this.harvest(model, pipeline, account, { signal, timeoutMs: this.options.probeTimeoutMs, has })
     let otherHarvested: string[] | null = null
-    if (otherPipeline !== null) otherHarvested = await this.harvest(model, otherPipeline, account, { signal, timeoutMs: this.options.probeTimeoutMs })
+    if (otherPipeline !== null) otherHarvested = await this.harvest(model, otherPipeline, account, { signal, timeoutMs: this.options.probeTimeoutMs, has })
     let endpoints: Awaited<ReturnType<typeof openRouterEndpoints>>['endpoints'] = []
     let openrouterSlug: string | null = null
     if (pipeline !== 'planner' && typeof routing.canonicalSlug === 'string') {
@@ -326,6 +332,7 @@ export class ClinePassEngine {
       staleAt: combined.length === 0 && upstreams.length > 0 ? Date.now() : 0,
       tier0,
       lastProvider: routing.finalProvider ?? previous.lastProvider ?? null,
+      lastFingerprint: routing.fingerprint ?? previous.lastFingerprint ?? null,
       lastMs: ms,
       probedAt: Date.now(),
       lastError: '',
@@ -342,6 +349,8 @@ export class ClinePassEngine {
       upstreams: meta.upstreams ?? [],
       availableProviders: meta.availableProviders ?? [],
       tier0: meta.tier0 ?? [],
+      fingerprint: meta.lastFingerprint ?? '',
+      anonymous: isClinePassAnonymousUpstream(meta.lastProvider ?? '', meta.canonicalSlug ?? ''),
     }
   }
 
@@ -354,11 +363,11 @@ export class ClinePassEngine {
     model: string,
     pipeline: 'direct' | 'planner',
     account: ClinePassAccount,
-    { signal, timeoutMs }: { signal?: AbortSignal; timeoutMs?: number },
+    { signal, timeoutMs, has = [] }: { signal?: AbortSignal; timeoutMs?: number; has?: readonly string[] },
   ): Promise<string[] | null> {
     const base = { model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }
     const body = pipeline === 'planner'
-      ? { ...base, providerOptions: { gateway: { only: ['__probe__'] } } }
+      ? { ...base, providerOptions: { gateway: { only: ['__probe__'], ...(has.length > 0 ? { has: [...has] } : {}) } } }
       : { ...base, provider: { only: ['__probe__'] } }
     try {
       const result = await chatCompletion({
@@ -394,13 +403,14 @@ export class ClinePassEngine {
   }> {
     const meta = this.store.metaOf(model) as PinModelMeta
     const list = Array.isArray(meta.upstreams) ? meta.upstreams : []
+    const has = this.pinOf(model).has
     const results: Array<{ upstream: string; status: string; ms: number; note: string }> = []
     for (let index = 0; index < list.length; index += VALIDATE_CONCURRENCY) {
       if (signal?.aborted === true) break
       const batch = list.slice(index, index + VALIDATE_CONCURRENCY)
       const settled = await Promise.all(batch.map(async (upstream) => {
         const started = Date.now()
-        const attempt: PinAttempt = { upstream, strict: true, sort: null, orderRest: [], excludeList: [] }
+        const attempt: PinAttempt = { upstream, strict: true, sort: null, orderRest: [], excludeList: [], has }
         const base = { model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }
         // The same injection the live path uses, so a verdict describes the pin
         // this plugin would really send.
@@ -463,7 +473,7 @@ export class ClinePassEngine {
    */
   async test(
     model: string,
-    { upstreams, exclude, signal }: { upstreams?: string[]; exclude?: string[]; signal?: AbortSignal } = {},
+    { upstreams, exclude, has, signal }: { upstreams?: string[]; exclude?: string[]; has?: string[]; signal?: AbortSignal } = {},
   ): Promise<{
     ok: boolean
     ms: number
@@ -482,6 +492,10 @@ export class ClinePassEngine {
     adopted: boolean
     adherence: string
     plan: string
+    fingerprint: string
+    anonymous: boolean
+    /** The capability filter this test actually sent. */
+    has: string[]
     warnings: string[]
   }> {
     const stored = this.pinOf(model)
@@ -490,6 +504,7 @@ export class ClinePassEngine {
       exclude: Array.isArray(exclude) ? exclude : stored.exclude,
       pinMode: stored.pinMode,
       sort: stored.sort,
+      has: Array.isArray(has) ? has : stored.has,
       spelling: this.options.pinFor(model).spelling,
     }
     const started = Date.now()
@@ -528,6 +543,9 @@ export class ClinePassEngine {
         adopted: false,
         adherence: outcome.result?.adherence ?? '',
         plan: routing?.plan ?? '',
+        fingerprint: routing?.fingerprint ?? '',
+        anonymous: isClinePassAnonymousUpstream(routing?.finalProvider ?? '', routing?.canonicalSlug ?? ''),
+        has: [...(pin.has ?? [])],
         warnings,
       }
     }
@@ -562,6 +580,9 @@ export class ClinePassEngine {
       // `Provider set restricted to: <provider>`, which is the confirmation a pin
       // was applied rather than merely not contradicted.
       plan: routing?.plan ?? '',
+      fingerprint: routing?.fingerprint ?? '',
+      anonymous: isClinePassAnonymousUpstream(routing?.finalProvider ?? '', routing?.canonicalSlug ?? ''),
+      has: [...(pin.has ?? [])],
       warnings,
     }
   }

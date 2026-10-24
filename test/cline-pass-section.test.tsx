@@ -46,6 +46,7 @@ const STATUS: ClinePassWebStatus = {
       excluded: [],
       pinMode: 'strict',
       sort: '',
+      has: [],
       upstreams: ['baseten', 'deepseek'],
       upstreamStatus: [
         { upstream: 'baseten', status: 'ok', ms: 120, note: '', checkedAt: Date.now() },
@@ -110,6 +111,15 @@ async function render(overrides: Partial<ClinePassWebStatus> = {}, onPost?: (url
     const url = String(input)
     const body = init?.body === undefined ? undefined : JSON.parse(String(init.body)) as unknown
     if (init?.method === 'POST') onPost?.(url, body)
+    if (url.includes('/cline-pass/api/catalog/search')) {
+      return Response.json({ ok: true, value: { results: [{ id: 'deepseek/deepseek-v4-pro', added: false }] } })
+    }
+    if (url.endsWith('/cline-pass/api/catalog/add')) {
+      const currentModels = overrides.models ?? STATUS.models
+      const template = currentModels[0]!
+      const addedModel = { ...template, id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true, has: [] }
+      return Response.json({ ok: true, value: { added: true, status: { ...STATUS, ...overrides, models: [...currentModels, addedModel] } } })
+    }
     if (url.endsWith('/cline-pass/api/models/pin')) {
       const posted = body as { model: string; upstreams?: string[]; exclude?: string[]; pinMode?: string; sort?: string }
       return Response.json({
@@ -181,6 +191,88 @@ describe('ClinePassSection', () => {
     })
   })
 
+  it('marks the anonymous contributor route on the channel chips and warns on pin', async () => {
+    const model = STATUS.models[0]!
+    const el = await render({
+      models: [{ ...model, upstreams: ['openai-compatible-private', 'deepseek'], pinned: ['openai-compatible-private'] }],
+    })
+    const chips = [...el.querySelectorAll<HTMLElement>('.dshcp-channel')]
+    expect(chips[0]?.getAttribute('data-anonymous')).toBe('true')
+    expect(chips[0]?.textContent).toContain('⚠')
+    expect(chips[0]?.getAttribute('title')).toContain(zh.anonymousChannelHint)
+    expect(chips[1]?.getAttribute('data-anonymous')).toBe('false')
+    // The stored pin loads into the draft, so the no-ZDR warning shows at once.
+    expect(el.textContent).toContain('可能被用于训练')
+  })
+
+  it('pins a channel typed by hand when the probe discovered nothing', async () => {
+    const model = STATUS.models[0]!
+    const posts: Array<{ url: string; body: unknown }> = []
+    const el = await render({
+      models: [{ ...model, upstreams: [], upstreamStatus: [], pinned: [] }],
+    }, (url, body) => posts.push({ url, body }))
+    const input = el.querySelector<HTMLInputElement>('.dshcp-body input[list]')!
+    expect(input).not.toBeNull()
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, 'deepseek')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const add = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.addChannel)!
+    await act(async () => add.click())
+    const chips = [...el.querySelectorAll<HTMLElement>('.dshcp-channel')]
+    expect(chips.map((chip) => chip.firstChild?.textContent)).toContain('deepseek')
+    expect(chips[0]?.getAttribute('data-pinned')).toBe('true')
+    const save = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.savePin)!
+    await act(async () => save.click())
+    expect(posts.find((entry) => entry.url.endsWith('/models/pin'))?.body).toMatchObject({
+      model: 'cline-pass/glm-5.3',
+      upstreams: ['deepseek'],
+    })
+  })
+
+  it('edits and saves the gateway capability filter', async () => {
+    const model = STATUS.models[0]!
+    const posts: Array<{ url: string; body: unknown }> = []
+    const el = await render({
+      models: [{ ...model, pinned: ['deepseek'], has: ['vision', 'implicit-caching'] }],
+    }, (url, body) => posts.push({ url, body }))
+    const input = el.querySelector<HTMLInputElement>('input[placeholder="vision, implicit-caching"]')!
+    expect(input.value).toBe('vision, implicit-caching')
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, 'vision')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const save = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.savePin)!
+    await act(async () => save.click())
+    expect(posts.find((entry) => entry.url.endsWith('/models/pin'))?.body).toMatchObject({
+      model: 'cline-pass/glm-5.3',
+      upstreams: ['deepseek'],
+      has: ['vision'],
+    })
+  })
+
+  it('searches the gateway catalog and adds one model without listing the rest', async () => {
+    const posts: Array<{ url: string; body: unknown }> = []
+    const el = await render({}, (url, body) => posts.push({ url, body }))
+    expect(el.querySelectorAll('.dsh-mcl-option')).toHaveLength(1)
+    const input = el.querySelector<HTMLInputElement>(`input[placeholder="${zh.catalogSearchPlaceholder}"]`)!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, 'v4-pro')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const search = [...el.querySelectorAll('button')].find((button) => button.textContent === zh.catalogSearch)!
+    await act(async () => search.click())
+    const result = [...el.querySelectorAll<HTMLElement>('.dshcp-channel')].find((chip) => chip.textContent?.includes('deepseek/deepseek-v4-pro'))!
+    expect(result).toBeDefined()
+    await act(async () => result.querySelector('button')!.click())
+    expect(posts.find((entry) => entry.url.endsWith('/catalog/add'))?.body).toEqual({ model: 'deepseek/deepseek-v4-pro' })
+    expect(el.querySelectorAll('.dsh-mcl-option')).toHaveLength(2)
+    expect(el.textContent).toContain('DeepSeek V4 Pro')
+  })
+
   it('shows each account its own quota window inside the shared account card', async () => {
     const el = await render()
     const row = el.querySelector('.dsha-account-quota-row')
@@ -236,14 +328,12 @@ describe('ClinePassSection', () => {
     expect(advGroup).toBeDefined()
     expect(advGroup.querySelectorAll('.dsha-row')).toHaveLength(6)
     const prefRows = [...advGroup.querySelectorAll('.dsha-pref-row')]
-    expect(prefRows).toHaveLength(3)
+    expect(prefRows).toHaveLength(2)
     // Each preference row pairs its own heading and hint.
     expect(prefRows[0]?.textContent).toContain(zh.pinSpelling)
     expect(prefRows[0]?.textContent).toContain(zh.pinSpellingHint)
-    expect(prefRows[1]?.textContent).toContain(zh.exposeCatalog)
-    expect(prefRows[1]?.textContent).toContain(zh.exposeCatalogHint)
-    expect(prefRows[2]?.textContent).toContain(zh.exposeTools)
-    expect(prefRows[2]?.textContent).toContain(zh.exposeToolsHint)
+    expect(prefRows[1]?.textContent).toContain(zh.exposeTools)
+    expect(prefRows[1]?.textContent).toContain(zh.exposeToolsHint)
   })
 })
 

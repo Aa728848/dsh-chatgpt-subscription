@@ -7,6 +7,7 @@ import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/for
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import {
   clinePassAccountQuota,
+  isClinePassAnonymousUpstream,
   type ClinePassAccountSummaryDto,
   type ClinePassHistoryRowDto,
   type ClinePassLoginFlowDto,
@@ -41,6 +42,7 @@ interface PinDraft {
   exclude: string[]
   pinMode: 'strict' | 'preferred'
   sort: string
+  has: string[]
 }
 
 interface ModelResult {
@@ -110,6 +112,9 @@ export function ClinePassSection(props: Props): React.ReactElement {
   const [settingsForm, setSettingsForm] = useState<SettingsForm | null>(null)
   const [history, setHistory] = useState<{ total: number; entries: ClinePassHistoryRowDto[] } | null>(null)
   const [loginFlow, setLoginFlow] = useState<ClinePassLoginFlowDto | null>(null)
+  const [catalogQuery, setCatalogQuery] = useState('')
+  const [catalogResults, setCatalogResults] = useState<Array<{ id: string; added: boolean }>>([])
+  const [catalogSearched, setCatalogSearched] = useState(false)
 
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
@@ -362,6 +367,26 @@ export function ClinePassSection(props: Props): React.ReactElement {
     void run('catalog', async () => (await API.refreshCatalog()).status)
   }, [run])
 
+  const searchCatalog = useCallback(() => {
+    const query = catalogQuery.trim()
+    if (query === '') return
+    setBusy('catalog-search')
+    setError(null)
+    void API.searchCatalog(query).then((outcome) => {
+      setCatalogResults(outcome.results)
+      setCatalogSearched(true)
+    }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
+  }, [catalogQuery])
+
+  const addCatalogModel = useCallback((id: string) => {
+    setBusy('catalog-add:' + id)
+    setError(null)
+    void API.addCatalogModel(id).then((outcome) => {
+      applyStatus(outcome.status)
+      setCatalogResults((current) => current.map((entry) => entry.id === id ? { ...entry, added: true } : entry))
+    }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
+  }, [applyStatus])
+
   const refreshUsage = useCallback(() => {
     void run('usage', async () => {
       const outcome = await API.readUsage()
@@ -436,6 +461,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
     exclude: [...model.excluded],
     pinMode: model.pinMode,
     sort: model.sort,
+    has: [...model.has],
   }, [pinDrafts])
 
   const editPin = useCallback((model: ClinePassModelDto, patch: Partial<PinDraft>) => {
@@ -634,6 +660,46 @@ export function ClinePassSection(props: Props): React.ReactElement {
           </button>
         </div>
         <p className="dsha-muted" style={{ fontSize: 12 }}>{t.modelsHint}</p>
+        <form
+          className="dshcp-pin-row"
+          onSubmit={(event) => {
+            event.preventDefault()
+            searchCatalog()
+          }}
+        >
+          <input
+            className="dsha-input"
+            style={{ flex: 1, minWidth: 240 }}
+            value={catalogQuery}
+            placeholder={t.catalogSearchPlaceholder}
+            disabled={busyAny}
+            onChange={(event) => setCatalogQuery(event.target.value)}
+          />
+          <button className="dsha-btn" type="submit" disabled={busyAny || catalogQuery.trim() === ''}>
+            {busy === 'catalog-search' ? t.catalogSearching : t.catalogSearch}
+          </button>
+        </form>
+        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.catalogSearchHint}</p>
+        {catalogSearched && catalogResults.length === 0 && busy !== 'catalog-search' && (
+          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.catalogSearchEmpty}</p>
+        )}
+        {catalogResults.length > 0 && (
+          <div className="dshcp-channels">
+            {catalogResults.map((entry) => (
+              <span className="dshcp-channel" key={entry.id} data-added={entry.added} title={entry.id}>
+                {entry.id}
+                <button
+                  type="button"
+                  className="dshcp-exclude"
+                  disabled={busyAny || entry.added}
+                  onClick={() => addCatalogModel(entry.id)}
+                >
+                  {entry.added ? t.catalogAdded : (busy === 'catalog-add:' + entry.id ? '…' : t.catalogAdd)}
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {status !== null && models.length === 0 && (
           <div className="dsha-empty">{status.catalogSynced ? t.catalogEmpty : t.catalogNeverSynced}</div>
         )}
@@ -709,6 +775,10 @@ export function ClinePassSection(props: Props): React.ReactElement {
               result={results[model.id] ?? {}}
               busy={busy}
               t={t}
+              // Channel names are a gateway-wide vocabulary: a name any other
+              // model discovered is a valid candidate here, which is how a
+              // channel can be pinned while this model's probe finds nothing.
+              suggestions={[...new Set(models.flatMap((entry) => entry.upstreams))]}
               onToggleChannel={(upstream) => {
                 const draft = pinDraftFor(model)
                 editPin(model, {
@@ -729,6 +799,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
               }}
               onPinMode={(pinMode) => editPin(model, { pinMode })}
               onSort={(sort) => editPin(model, { sort })}
+              onHas={(has) => editPin(model, { has })}
               onProbe={() => {
                 setBusy('probe:' + model.id)
                 setError(null)
@@ -752,6 +823,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
                 void API.test(model.id, {
                   ...(draft.upstreams.length === 0 ? {} : { upstreams: draft.upstreams }),
                   ...(draft.exclude.length === 0 ? {} : { exclude: draft.exclude }),
+                  has: draft.has,
                 }).then((outcome) => {
                   applyStatus(outcome.status)
                   setResults((current) => ({ ...current, [model.id]: { ...current[model.id], test: outcome.result } }))
@@ -905,19 +977,6 @@ export function ClinePassSection(props: Props): React.ReactElement {
           </div>
           <div className="dsha-pref-row">
             <div>
-              <label htmlFor="cline-pass-expose-catalog"><strong>{t.exposeCatalog}</strong></label>
-              <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.exposeCatalogHint}</p>
-            </div>
-            <input
-              id="cline-pass-expose-catalog"
-              className="dshcp-check"
-              type="checkbox"
-              checked={settingsForm.exposeCatalog}
-              onChange={(event) => setSettingsForm({ ...settingsForm, exposeCatalog: event.target.checked })}
-            />
-          </div>
-          <div className="dsha-pref-row">
-            <div>
               <strong>{t.exposeTools}</strong>
               <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.exposeToolsHint}</p>
             </div>
@@ -947,10 +1006,13 @@ interface ChannelEditorProps {
   result: ModelResult
   busy: string | null
   t: typeof zh
+  /** Gateway-wide channel vocabulary discovered across all models, for manual entry. */
+  suggestions: string[]
   onToggleChannel(upstream: string): void
   onToggleExclude(upstream: string): void
   onPinMode(mode: 'strict' | 'preferred'): void
   onSort(sort: string): void
+  onHas(has: string[]): void
   onProbe(): void
   onValidate(): void
   onTest(): void
@@ -962,6 +1024,9 @@ interface ChannelEditorProps {
 function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
   const { model, draft, result, t } = props
   const busyAny = props.busy !== null
+  const [manualChannel, setManualChannel] = useState('')
+  const [hasText, setHasText] = useState(draft.has.join(', '))
+  useEffect(() => setHasText(draft.has.join(', ')), [model.id, model.has])
   const verdicts = new Map(model.upstreamStatus.map((entry) => [entry.upstream, entry]))
   // Configured names that the last probe did not discover are still shown: a pin
   // the gateway silently drops is exactly what this panel exists to expose.
@@ -972,6 +1037,7 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
         {t.pipeline.replace('{pipeline}', model.pipeline === '' ? '—' : model.pipeline)}
         {model.pinnable ? '' : ` · ${t.notPinnable}`}
         {model.lastProvider !== '' ? ` · ${t.lastServed.replace('{provider}', model.lastProvider).replace('{ms}', String(model.lastMs))}` : ''}
+        {isClinePassAnonymousUpstream(model.lastProvider) ? ` · ⚠ ${t.anonymousChannel}` : ''}
         {model.probedAt > 0 ? ` · ${t.probedAt.replace('{time}', formatDate(model.probedAt))}` : ''}
       </p>
       {channels.length === 0 && <p className="dsha-muted" style={{ fontSize: 12 }}>{t.noChannels}</p>}
@@ -983,6 +1049,8 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
               const verdict = verdicts.get(upstream)
               const pinned = draft.upstreams.includes(upstream)
               const excluded = draft.exclude.includes(upstream)
+              const anonymous = isClinePassAnonymousUpstream(upstream)
+              const baseTitle = verdict === undefined ? upstream : `${upstream}: ${verdict.status}${verdict.note === '' ? '' : ` — ${verdict.note}`}`
               return (
                 <span
                   key={upstream}
@@ -990,15 +1058,16 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
                   data-pinned={pinned}
                   data-excluded={excluded}
                   data-status={verdict?.status ?? 'unknown'}
+                  data-anonymous={anonymous}
                   role="button"
                   tabIndex={0}
-                  title={verdict === undefined ? upstream : `${upstream}: ${verdict.status}${verdict.note === '' ? '' : ` — ${verdict.note}`}`}
+                  title={anonymous ? `${baseTitle} — ${t.anonymousChannelHint}` : baseTitle}
                   onClick={() => props.onToggleChannel(upstream)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') props.onToggleChannel(upstream)
                   }}
                 >
-                  {upstream}
+                  {anonymous ? `⚠ ${upstream}` : upstream}
                   <button
                     type="button"
                     className="dshcp-exclude"
@@ -1016,6 +1085,40 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
           </div>
         </>
       )}
+      <div className="dshcp-pin-row">
+        <input
+          className="dsha-input"
+          style={{ minWidth: 220 }}
+          list={`dshcp-known-${model.id}`}
+          placeholder={t.manualChannelPlaceholder}
+          value={manualChannel}
+          disabled={busyAny}
+          onChange={(event) => setManualChannel(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            const name = manualChannel.trim().toLowerCase()
+            if (name === '') return
+            if (!draft.upstreams.includes(name)) props.onToggleChannel(name)
+            setManualChannel('')
+          }}
+        />
+        <datalist id={`dshcp-known-${model.id}`}>
+          {props.suggestions.map((name) => <option key={name} value={name} />)}
+        </datalist>
+        <button
+          className="dsha-btn"
+          disabled={busyAny || manualChannel.trim() === ''}
+          onClick={() => {
+            const name = manualChannel.trim().toLowerCase()
+            if (name === '') return
+            if (!draft.upstreams.includes(name)) props.onToggleChannel(name)
+            setManualChannel('')
+          }}
+        >
+          {t.addChannel}
+        </button>
+      </div>
+      <p className="dsha-muted" style={{ fontSize: 12 }}>{t.manualChannelHint}</p>
       <div className="dshcp-pin-row">
         <label>
           {t.pinMode}
@@ -1043,11 +1146,37 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
             <option value="tps">{t.sortTps}</option>
           </select>
         </label>
+        <label style={{ flex: 1, minWidth: 260 }}>
+          {t.hasLabel}
+          <input
+            className="dsha-input"
+            style={{ flex: 1, minWidth: 180 }}
+            value={hasText}
+            disabled={busyAny}
+            placeholder="vision, implicit-caching"
+            onChange={(event) => {
+              const text = event.target.value
+              setHasText(text)
+              props.onHas([...new Set(text.split(/[\s,]+/).map((name) => name.trim()).filter((name) => name !== ''))])
+            }}
+          />
+        </label>
       </div>
+      <p className="dsha-muted" style={{ fontSize: 12 }}>{t.hasHint}</p>
       <p className="dshcp-meta">
         {draft.upstreams.length === 0 ? t.pinAuto : t.pinPinned.replace('{list}', draft.upstreams.join(' > '))}
         {draft.exclude.length === 0 ? '' : ` · ${t.pinExcluded.replace('{list}', draft.exclude.join(', '))}`}
+        {draft.has.length === 0 ? '' : ` · ${t.pinHas.replace('{list}', draft.has.join(', '))}`}
       </p>
+      {draft.upstreams.some((name) => isClinePassAnonymousUpstream(name)) && (
+        <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', draft.upstreams.find((name) => isClinePassAnonymousUpstream(name)) ?? '')}</p>
+      )}
+      {draft.upstreams.length > 0
+        && !draft.upstreams.some((name) => isClinePassAnonymousUpstream(name))
+        && model.upstreams.length > 0
+        && model.upstreams.every((name) => isClinePassAnonymousUpstream(name)) && (
+        <p className="dshcp-warning">{t.pinLikelyIgnored}</p>
+      )}
       <div className="dshcp-actions">
         <button className="dsha-btn" disabled={busyAny} onClick={props.onProbe}>
           {props.busy === 'probe:' + model.id ? t.probing : t.probe}
@@ -1100,6 +1229,15 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
               ? t.testServed.replace('{provider}', result.test.actual || '—').replace('{ms}', String(result.test.ms))
               : t.testFailed.replace('{detail}', result.test.error)}
           </p>
+          {result.test.anonymous && (
+            <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', result.test.actual || 'openai-compatible-private')}</p>
+          )}
+          {result.test.has.length > 0 && (
+            <p className="dshcp-meta">{t.testHas.replace('{list}', result.test.has.join(', '))}</p>
+          )}
+          {result.test.fingerprint !== '' && (
+            <p className="dshcp-meta">{t.fingerprintOk.replace('{fingerprint}', result.test.fingerprint)}</p>
+          )}
           {result.test.warnings.length > 0 && result.test.warnings.map((warning) => <p className="dshcp-warning" key={warning}>{warning}</p>)}
           {result.test.trace.length > 0 && (
             <>
