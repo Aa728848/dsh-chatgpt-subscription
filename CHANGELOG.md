@@ -1,6 +1,19 @@
 # Changelog
 
 ## Unreleased
+- **[qoder] 修掉 PAT 兑换永远 400 `BadRequest`：区域选错时自动改试另一区，并让 `machine_id` 按官方 CLI 的形状发出去**
+  - **现象**：设置卡片里粘贴 PAT 点「粘贴并登录」，只得到一句 `Qoder（订阅） PAT 兑换失败（HTTP 400）：{"errorCode":"BadRequest","errorMessage":"Bad request","requestId":"…"}`。上游没有说任何一句可行动的话，用户只能反复重新生成 PAT。
+  - **根因一（区域）**：区域是凭据的属性，`pt-` 串本身不自述区域，而卡片上的区域选择器默认停在全球区。中国站的 PAT 拿到 `openapi.qoder.sh` 兑换，上游回的就是这个不带 `rawMessage` 的 400——它已经读完了 `personal_token`（缺字段、字段名拼错、空体同样是 400，但那种响应带 `rawMessage`），只是不认这把 token。原来的实现**只试用户点的那个区**，于是「选错一次」等于「永久失败」。
+  - **根因二（请求体形状）**：请求体只发 `personal_token`，而官方 CLI 1.1.74 的 `getMachineIdentityRequestFields` 会给 exchange/refresh 一并带上既有 `machine_id`（qodercli2api `docs/oauth.md` §3；同一节明确「没有真实 UMID 时省略 `machine_token`，不用 `machine_id` 冒充它」）。实测两种形状对同一把 token 的回答相同，所以这不是这次 400 的直接原因，但没有理由继续少发一个官方字段。
+  - **改法（区域自愈）**：`qoderCredentialsFromPat` 把首选区域排在候选表首位、另一区紧随其后，仅在**明确的 token 被拒状态**（400 / 401 / 403 / 404，见 `qoderPatRejectionStatus`）下换区重试；429 / 5xx / 网络错误一律如实上抛——那些是瞬时故障，换区只会把一次可重试的问题变成两次打上游。命中的区域写进凭据，`region` 因此反映**真正认账的那一区**而不是用户点的那个。
+  - **改法（刷新同步自愈）**：`refreshQoderCredential` 的 PAT 分支走同一个函数，所以落盘里区域记错的旧账号会在下一次刷新时自己搬到正确区域——只修首次登录的话，那些账号会一直刷不上。
+  - **改法（可行动的错误）**：兑换失败不再只回上游 JSON。两个区都拒时文案先给下一步（「最可能已撤销或过期，请到 Integrations 页重新生成」）再附技术详情；`pt-` 前缀的形状检查提前到发请求之前，粘贴时带上引号或多余空白会在本地就被点出来，不必等一次往返。
+  - **改法（凭据分类）**：`qoderRefreshFailureStatus` 认识 `QoderPatExchangeError` 的被拒状态，PAT 来源的 400 现在也归为 `'expired'`（这个账号需要重新登录），而不是当成瞬时故障一直重试。
+  - **改法（文案）**：设置卡片的区域说明（zh / en / ru 三语）补一句「粘贴 PAT 时不用纠结区域，会自动改试另一区，落盘的是真正认这把 PAT 的那一区」——否则用户看到账号行显示中国站而选择器停在全球区，会以为记错了。
+  - **验证**：`npx tsc -b` 与 `npx tsc -p test/tsconfig.json` 均 0 错误；`test/qoder-oauth.test.ts` 新增 4 例（首选区被拒 → 改试另一区且凭据记的是认账那一区、两区都拒 → 文案含「重新生成」并保留上游详情、429 不触发换区且只打一次上游、非 `pt-` 前缀在发请求前被拒），原有 PAT 用例的请求体断言改为 `personal_token` + `machine_id` 形状；全量 `npx vitest run` **282 文件通过 / 2 skipped，4655 passed / 8 skipped / 0 failed**；`npm run build` 通过。
+  - **真实上游探测（本次修法的判据，可复现）**：`{"personal_token":…,"machine_id":…}` 与只发 `{"personal_token":…}` 对同一把 token 在两个区都返回 `HTTP 400` 且响应**不含** `rawMessage`；而 `{}`、`{"token":…}`、`{"personal_token":…}` 之外的字段名、以及 form 编码的请求**都带** `rawMessage`。这条差异证明服务端是「读完 `personal_token` 之后拒绝这把 token」，而不是「不认识这个请求形状」——所以修法针对的是 token 与区域的归属，不是编码。
+  - **未验证的边界**：真实账号的兑换成功路径仍未联调（本仓库测试全部走 mock，探测用的是合成 token）；用户需要用自己的 PAT 实测一次。若换了两个区仍是同样的 400，那这把 PAT 本身已失效或生成在了第三个部署上。
+
 - **[claude] 按官方文档修正 Opus 5 关闭思考和 Sonnet 4.5 标准上下文窗口**
   - **Opus 5**：官方 thinking 故障表允许 `high` 及更低档位发送 `thinking: { type: 'disabled' }`。目录中的 `canDisableThinking` 改为 `true`，`mid-convo` 分支在该请求下返回不带 effort 的 `disabled`，并不再抬高 `max_tokens`；其它 `mid-convo` 模型仍保持 adaptive 与 block binding。同步移除 `pi-ai@1.3.0` 已失效的 Haiku 5.5 测试例外，Claude 相关 **144/144** 用例通过。
   - **Sonnet 4.5**：官方上下文表给出的标准窗口为 **200K**，1M 属于另一项 beta 能力，而本适配器没有请求该能力。`claude-sonnet-4-5` 与 `claude-sonnet-4-5-20250929` 的默认窗口均由 1M 改为 **200K**，保留用户显式覆盖通道。

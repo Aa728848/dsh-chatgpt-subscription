@@ -37,7 +37,7 @@ import type {
   QoderRegion,
   QoderStatusDto,
 } from '../../shared/qoder-contracts.ts'
-import { getCachedQoderQuotaFor } from './client.ts'
+import { getCachedQoderQuotaFor, QoderPatExchangeError, qoderPatRejectionStatus } from './client.ts'
 import { PROVIDER_ID, PROVIDER_NAME } from './types.ts'
 import { refreshQoderCredential } from './oauth.ts'
 import {
@@ -212,8 +212,13 @@ export interface QoderAccountPoolOptions {
  *
  * 401/403 → \`'expired'\`（上游明说这把 token 不行了，这个账号要重登）；
  * 其余（网络故障、5xx、形状变了）→ undefined：瞬时故障不该把一个账号判死。
+ *
+ * PAT 来源的刷新是「拿存下的 PAT 重兑换」，它的 400 同样是终局：上游读完了
+ * `personal_token` 才拒绝（见 client.ts 的 {@link QoderPatExchangeError}），
+ * 重试不会变好，只有重新生成 PAT 能救这个账号。
  */
 export function qoderRefreshFailureStatus(error: unknown): 'expired' | 'invalid' | undefined {
+  if (error instanceof QoderPatExchangeError && qoderPatRejectionStatus(error.status)) return 'expired'
   const status = (error as { status?: unknown } | null)?.status
   if (status === 401 || status === 403) return 'expired'
   const message = error instanceof Error ? error.message : ''

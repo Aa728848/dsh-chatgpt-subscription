@@ -33,13 +33,16 @@ import {
   regionSupportsDeviceLogin,
 } from './types.ts'
 import {
+  QoderPatExchangeError,
   exchangeQoderJobToken,
   fetchQoderUserInfo,
   qoderErrorDetail,
+  qoderPatRejectionStatus,
   refreshQoderAccessToken,
   type QoderRequestOptions,
 } from './client.ts'
 import { resolveQoderMachineId } from './cosy.ts'
+import { QODER_REGIONS } from '../../shared/qoder-contracts.ts'
 import { qoderExpiresAtFrom, type QoderCredentials } from './token-store.ts'
 
 // ---------------------------------------------------------------------------
@@ -203,6 +206,18 @@ export async function qoderCredentialsFromDevicePoll(
  * 兑换 + userinfo 补齐；**PAT 本体留在凭据里**（host-only），因为 PAT 的「刷新」
  * 就是拿它重新兑换一把 job token（pi-provider 把 PAT 编进 refresh 字段，
  * 本线路把它放进一个具名字段——同一件事，更好读）。
+ *
+ * ---------------------------------------------------------------------------
+ * 自动补认区域
+ * ---------------------------------------------------------------------------
+ * 区域是**凭据的属性**，但 PAT 字符串本身不自述区域，而卡片上的区域选择器默认停在
+ * 全球区。中国站的 PAT 拿去全球区端点兑换，上游回的是 400 `BadRequest`——没有
+ * 任何一句说明「你打错了区」，用户看到的只有一串 requestId。这一步因此不是
+ * 「多试一次」，而是**把选错区域的这个必然失败翻译成一次成功的登录**。
+ *
+ * 只在明确的 token 被拒状态下换区（{@link qoderPatRejectionStatus}）：HTTP 429、
+ * 5xx、网络错误都不换——那些是瞬时故障，换区重发只会把一个可重试的问题变成两次
+ * 打上游。首次命中的区域写进凭据，之后刷新照它走。
  */
 export async function qoderCredentialsFromPat(
   personalToken: string,
@@ -211,7 +226,50 @@ export async function qoderCredentialsFromPat(
 ): Promise<QoderCredentials> {
   const pat = personalToken.trim()
   if (pat === '') throw new Error(PROVIDER_NAME + ' 的 PAT 是空的。')
-  const exchanged = await exchangeQoderJobToken(pat, region, options)
+  // 形状检查在发网络请求之前：粘贴时多带了引号/换行（从网页或终端复制最常见），
+  // 上游只会回一句 BadRequest，白白让用户以为是 token 失效。
+  if (!pat.startsWith('pt-')) {
+    throw new Error(
+      PROVIDER_NAME + ' 的 PAT 格式不对：它必须以 `pt-` 开头，粘贴时不要带引号或多余空白。'
+      + '令牌在 https://qoder.com/account/integrations（中国站是 https://qoder.com.cn/account/integrations）生成。',
+    )
+  }
+  // 首选区域打头，其余区作为「区域猜错」的候选跟在后面；顺序稳定，首个成功者即区域。
+  const candidates: readonly QoderRegion[] = [region, ...QODER_REGIONS.filter((other) => other !== region)]
+  let resolved: QoderRegion = region
+  let exchanged: Awaited<ReturnType<typeof exchangeQoderJobToken>> | null = null
+  let rejection: unknown = null
+  for (const candidate of candidates) {
+    try {
+      exchanged = await exchangeQoderJobToken(pat, candidate, options)
+      resolved = candidate
+      rejection = null
+      break
+    } catch (error) {
+      rejection = error
+      // 只有「这把 token 不认」才值得换区再试；其余（限流、5xx、超时）如实上抛。
+      if (!(error instanceof QoderPatExchangeError) || !qoderPatRejectionStatus(error.status)) throw error
+    }
+  }
+  if (exchanged === null) {
+    // 所有区都拒了：保留上游那句技术详情（排查要用），但先把能照做的下一步说清楚——
+    // 用户看到 `{"errorCode":"BadRequest","errorMessage":"Bad request"}` 是没法行动的。
+    //
+    // 抛的仍是 QoderPatExchangeError（不是普通 Error）：号池的 refreshFailureStatus 按类型与
+    // status 分类，换成普通 Error 会让一个「该重新登录」的账号被当成瞬时故障一直重试。
+    const primary = rejection instanceof Error ? rejection.message : String(rejection)
+    const tried = candidates.length > 1
+      ? regionLabel(candidates[0]!) + '与' + regionLabel(candidates[1]!) + '两个区域都试过'
+      : regionLabel(region) + '区域试过'
+    const status = rejection instanceof QoderPatExchangeError ? rejection.status : 400
+    throw new QoderPatExchangeError(
+      '这把 PAT 被上游拒了（' + tried + '，都会在兑换时被拒）。'
+      + '最可能的原因是它已经被撤销或过期——请到 Integrations 页重新生成一个再粘贴。'
+      + '技术详情：' + primary,
+      status,
+      region,
+    )
+  }
   let uid: string | null = null
   let email: string | null = null
   let name: string | null = null
@@ -219,7 +277,7 @@ export async function qoderCredentialsFromPat(
   let organizationTags: string[] = []
   let dataPolicyAgreed = false
   try {
-    const info = await fetchQoderUserInfo(exchanged.token, region, options)
+    const info = await fetchQoderUserInfo(exchanged.token, resolved, options)
     uid = info.userID === '' ? null : info.userID
     email = info.email === '' ? null : info.email
     name = info.name === '' ? null : info.name
@@ -233,7 +291,7 @@ export async function qoderCredentialsFromPat(
     accessToken: exchanged.token,
     refreshToken: exchanged.refreshToken,
     expiresAt: exchanged.expiresAt,
-    region,
+    region: resolved,
     origin: 'pat',
     uid,
     email,
@@ -244,6 +302,11 @@ export async function qoderCredentialsFromPat(
     dataPolicyAgreed,
     authenticatedAt: Date.now(),
   }
+}
+
+/** 区域的短名（只用于拼给人看的一句话，卡片另有自己的文案）。 */
+function regionLabel(region: QoderRegion): string {
+  return REGION_HOSTS[region].title
 }
 
 /**
@@ -257,6 +320,11 @@ export async function qoderCredentialsFromPat(
  *
  * 失败带上 \`status\`（有 HTTP 状态时），号池据此分类「这个账号要重登」还是
  * 「瞬时故障，别判死」。
+ *
+ * PAT 分支走的是 {@link qoderCredentialsFromPat}，因此**也和首次登录一样会补认区域**：
+ * 一份区域记错了的旧凭据，会在下一次刷新时自己搬到真正认它的那一区（区域本来就是
+ * 凭据的属性，而 PAT 是唯一能问出它归属的原料）。这是修好「区域选错 → 永远 400」
+ * 的第二半——只修首次登录的话，落盘里已有的错区账号会一直刷不上。
  */
 export async function refreshQoderCredential(
   credentials: QoderCredentials,

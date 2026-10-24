@@ -16,6 +16,7 @@ import {
   resetQoderLogin,
 } from '../src/host/qoder/oauth.ts'
 import { QODER_DEVICE_CLIENT_ID } from '../src/host/qoder/types.ts'
+import { qoderRefreshFailureStatus } from '../src/host/qoder/account-pool.ts'
 import type { QoderCredentials } from '../src/host/qoder/token-store.ts'
 
 /** 一条 fetch 脚本：按顺序回答，每次调用记录 url 与 body。 */
@@ -128,7 +129,10 @@ describe('PAT 兑换与刷新', () => {
     ])
     const credentials = await qoderCredentialsFromPat('pt-secret', 'cn', { fetchFn })
     expect(calls[0]!.url).toBe('https://openapi.qoder.com.cn/api/v1/jobToken/exchange')
-    expect(calls[0]!.body).toEqual({ personal_token: 'pt-secret' })
+    // 请求体形状逐字对齐官方 CLI 1.1.74（qodercli2api docs/oauth.md §3）：
+    // personal_token + machine_id，machine_id 是本机既有那把。
+    expect(calls[0]!.body).toMatchObject({ personal_token: 'pt-secret' })
+    expect((calls[0]!.body as { machine_id?: string }).machine_id).toMatch(/^[0-9a-f-]{36}$/)
     expect(calls[1]!.url).toBe('https://openapi.qoder.com.cn/api/v1/userinfo')
     expect(credentials).toMatchObject({
       accessToken: 'jt-9',
@@ -138,6 +142,119 @@ describe('PAT 兑换与刷新', () => {
       uid: 'u-9',
       personalToken: 'pt-secret',
     })
+  })
+
+  it('首选区域被拒时自动改试另一区，落盘凭据记的是真正认账的那一区', async () => {
+    const calls: string[] = []
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.startsWith('https://openapi.qoder.sh/')) {
+        // 全球区端点：中国站的 PAT 在这里只会得到一句 BadRequest。
+        return Response.json(
+          { errorCode: 'BadRequest', errorMessage: 'Bad request', requestId: 'r-1' },
+          { status: 400 },
+        )
+      }
+      if (url.includes('/jobToken/exchange')) return Response.json({ token: 'jt-cn', refresh_token: 'jrt-cn' })
+      return Response.json({ id: 'u-cn', name: 'CN User' })
+    }) as unknown as typeof fetch
+    const credentials = await qoderCredentialsFromPat('pt-cn-token', 'global', { fetchFn })
+    expect(calls[0]).toBe('https://openapi.qoder.sh/api/v1/jobToken/exchange')
+    expect(calls[1]).toBe('https://openapi.qoder.com.cn/api/v1/jobToken/exchange')
+    // 区域跟着谁认账走，而不是跟着用户点的那个。
+    expect(credentials.region).toBe('cn')
+    expect(credentials.accessToken).toBe('jt-cn')
+  })
+
+  it('两个区都拒 → 一句话说清「重新生成 PAT」，并保留上游技术详情', async () => {
+    const fetchFn = (async () => Response.json(
+      { errorCode: 'BadRequest', errorMessage: 'Bad request', requestId: 'r-2' },
+      { status: 400 },
+    )) as unknown as typeof fetch
+    await expect(qoderCredentialsFromPat('pt-dead', 'global', { fetchFn })).rejects.toThrow(
+      /重新生成一个再粘贴.*BadRequest/s,
+    )
+  })
+
+  it('限流（429）不触发换区：瞬时故障不该变成两次打上游', async () => {
+    const calls: string[] = []
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return Response.json({ errorCode: 'TooManyRequests' }, { status: 429 })
+    }) as unknown as typeof fetch
+    await expect(qoderCredentialsFromPat('pt-live', 'global', { fetchFn })).rejects.toThrow(/HTTP 429/)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('不是 pt- 开头的令牌在发网络请求之前就被拒（粘贴常见错误）', async () => {
+    const calls: string[] = []
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return Response.json({})
+    }) as unknown as typeof fetch
+    await expect(qoderCredentialsFromPat('"pt-quoted"', 'global', { fetchFn })).rejects.toThrow(/格式不对/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('PAT 来源的刷新会自我纠正区域：错区的旧账号搬到真正认账的那一区', async () => {
+    // 落盘凭据的区域记成 global，但这把 PAT 只有 CN 认——刷新必须把它搬到 cn。
+    const old = await qoderCredentialsFromPat('pt-secret', 'cn', {
+      fetchFn: fetchScript([
+        { status: 200, body: { token: 'jt-old' } },
+        { status: 200, body: { id: 'u-9' } },
+      ]).fetchFn,
+    })
+    const movedFrom: QoderCredentials = { ...old, region: 'global' }
+    const calls: string[] = []
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.startsWith('https://openapi.qoder.sh/')) {
+        return Response.json({ errorCode: 'BadRequest', errorMessage: 'Bad request' }, { status: 400 })
+      }
+      if (url.includes('/jobToken/exchange')) return Response.json({ token: 'jt-cn', refresh_token: 'jrt-cn' })
+      return Response.json({ id: 'u-9' })
+    }) as unknown as typeof fetch
+    const refreshed = await refreshQoderCredential(movedFrom, fetchFn)
+    expect(calls[0]).toBe('https://openapi.qoder.sh/api/v1/jobToken/exchange')
+    expect(calls[1]).toBe('https://openapi.qoder.com.cn/api/v1/jobToken/exchange')
+    expect(refreshed.region).toBe('cn')
+    expect(refreshed.accessToken).toBe('jt-cn')
+    // 刷新不改的身份事实仍然保持原样。
+    expect(refreshed.authenticatedAt).toBe(movedFrom.authenticatedAt)
+  })
+
+  it('PAT 来源的刷新：两个区都被拒 → 分类为「要重新登录」而不是瞬时故障', async () => {
+    const old = await qoderCredentialsFromPat('pt-secret', 'cn', {
+      fetchFn: fetchScript([
+        { status: 200, body: { token: 'jt-old' } },
+        { status: 200, body: { id: 'u-9' } },
+      ]).fetchFn,
+    })
+    const fetchFn = (async () => Response.json(
+      { errorCode: 'BadRequest', errorMessage: 'Bad request' },
+      { status: 400 },
+    )) as unknown as typeof fetch
+    const error = await refreshQoderCredential(old, fetchFn).catch((cause: unknown) => cause)
+    expect(qoderRefreshFailureStatus(error)).toBe('expired')
+  })
+
+  it('PAT 来源的刷新：5xx 不换区，也不算「要重新登录」', async () => {
+    const old = await qoderCredentialsFromPat('pt-secret', 'cn', {
+      fetchFn: fetchScript([
+        { status: 200, body: { token: 'jt-old' } },
+        { status: 200, body: { id: 'u-9' } },
+      ]).fetchFn,
+    })
+    const calls: string[] = []
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return Response.json({}, { status: 503 })
+    }) as unknown as typeof fetch
+    const error = await refreshQoderCredential(old, fetchFn).catch((cause: unknown) => cause)
+    expect(calls).toHaveLength(1)
+    expect(qoderRefreshFailureStatus(error)).toBeUndefined()
   })
 
   it('PAT 来源的刷新 = 拿存下的 PAT 重兑换', async () => {

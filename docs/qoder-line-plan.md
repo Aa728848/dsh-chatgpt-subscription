@@ -36,7 +36,7 @@
 | --- | --- | --- | --- |
 | 对话 | POST | `{base}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1` | qodercli2api `docs/inference-protocol.md` §1（frozen fixture `infer-user-no-org.json` 锁定 URL 逐字） |
 | 模型列表 | GET | `{base}/algo/api/v2/model/list?Encode=1`（COSY 签名，无 body） | pi-provider `src/region.ts` `getQoderModelListURL` |
-| PAT 兑换 | POST | `{openapi}/api/v1/jobToken/exchange`，体 `{"personal_token":"<pt-...>"}` | docs.qoder.com/cli/authentication + pi-provider `src/auth/pat.ts` |
+| PAT 兑换 | POST | `{openapi}/api/v1/jobToken/exchange`，体 `{"personal_token":"<pt-...>","machine_id":"<本机 UUID>"}` | docs.qoder.com/cli/authentication + qodercli2api `docs/oauth.md` §3（官方 CLI 1.1.74 的 `getMachineIdentityRequestFields` 给 exchange/refresh 补既有 machine_id；pi-provider `src/auth/pat.ts` 的旧形状被服务端容忍但少一个官方字段） |
 | 用户信息 | GET | `{openapi}/api/v1/userinfo`（Bearer job token） | pi-provider `src/auth/pat.ts` `fetchUserInfo` |
 | 额度 | GET | `{openapi}/api/v2/quota/usage`（Bearer job token） | pi-provider `src/auth/usage.ts`（live 验证）；**非公开个人端点** |
 | 刷新 | POST | `{center}/algo/api/v3/user/refresh_token`，体 `{"refreshToken"}`，头 `Authorization: Bearer <access>` | pi-provider `src/auth/oauth.ts` `refreshQoderTokenForMode`（live 验证） |
@@ -54,8 +54,14 @@
    host 轮询 `deviceToken/poll`（404=pending，1-2 秒间隔，总超时=min(服务端截止, 本地 10 分钟)）。
    响应 `{token, user_id, refresh_token, expires_at?|expires_in?}`。
 2. **PAT 粘贴**（两区）：用户在 qoder.com/account/integrations（CN 同路径）生成 `pt-...` →
-   `jobToken/exchange` 换短期 job token（`jt-...`）。**PAT 本体留在凭据里（host-only）**，
-   过期后按 pi-provider 的做法用 PAT 重新兑换。
+   `jobToken/exchange`（体带 `personal_token` 与既有 `machine_id`）换短期 job token（`jt-...`）。
+   **PAT 本体留在凭据里（host-only）**，过期后按 pi-provider 的做法用 PAT 重新兑换。
+   **区域不靠用户选对**：`pt-` 串不自述区域，而卡片的选择器默认停在全球区，中国站的 PAT 拿去
+   全球区端点只会得到一句不带 `rawMessage` 的 400 `BadRequest`。所以兑换按「首选区 → 另一区」
+   依次尝试，**只在明确的 token 被拒状态**（400/401/403/404）换区；429、5xx 与网络错误如实上抛
+   （瞬时故障换区重发只会打两次上游）。命中的区域写进凭据，刷新走同一函数因此也会自我纠正。
+   判据是实测的响应差异：带 `personal_token` 的 400 没有 `rawMessage`（服务端读完了 token 才拒），
+   缺字段/拼错字段名/空体/form 编码的 400 才有 `rawMessage`（形状级拒绝）。
 3. **adopt 本机 qodercli 登录态**（只读）：`~/.qoder/.auth/machine_id`（36 字符 UUID）+
    `~/.qoder/.auth/user`（strict padded Base64 信封，AES-128-CBC，key=IV=machine_id 前 16 个字符的
    原始 UTF-8 字节，PKCS#7）。格式逐字见 qodercli2api `docs/oauth.md` §4，且其 frozen fixture

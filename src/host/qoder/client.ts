@@ -697,10 +697,42 @@ export interface QoderJobTokenExchange {
 }
 
 /**
- * POST {openapi}/api/v1/jobToken/exchange，体 \`{"personal_token":"<pt-...>"}\`。
+ * 一次 PAT 兑换的失败，带 HTTP 状态（调用方据此分类「token 被拒」与「瞬时故障」）。
+ */
+export class QoderPatExchangeError extends Error {
+  readonly status: number
+  /** 兑换打的是哪个区（区域猜错是这类 400 最常见的真因）。 */
+  readonly region: QoderRegion
+
+  constructor(message: string, status: number, region: QoderRegion) {
+    super(message)
+    this.name = 'QoderPatExchangeError'
+    this.status = status
+    this.region = region
+  }
+}
+
+/**
+ * 上游对这个状态的回答是否在说「这把 token 不认」。
+ *
+ * 四个区共用一套语义：400 BadRequest 是服务端读完了 `personal_token` 才发现它
+ * 不被接受（缺字段、写错字段名、空体也是 400，但那种请求来自别的实现，不来自这里）；
+ * 401/403 是鉴权拒绝；404 是这套部署上没有这个 token。
+ */
+export function qoderPatRejectionStatus(status: number): boolean {
+  return status === 400 || status === 401 || status === 403 || status === 404
+}
+
+/**
+ * POST {openapi}/api/v1/jobToken/exchange，体 \`{"personal_token":"<pt-...>","machine_id":…}\`。
  *
  * PAT 不能直接鉴权，必须先兑换（docs.qoder.com/cli/authentication + pi-provider pat.ts）。
- * 失败抛错（登录路径要如实告诉用户 PAT 被拒）。
+ * 失败抛 {@link QoderPatExchangeError}（登录路径要如实告诉用户 PAT 被拒）。
+ *
+ * **`machine_id` 是官方 CLI 1.1.74 的请求体字段**（qodercli2api `docs/oauth.md` §3：
+ * `getMachineIdentityRequestFields` 为 exchange/refresh 补上既有 machine_id，
+ * 没有 UMID 时不补 machine_token，也不拿 machine_id 冒充它）。早先按 pi-provider
+ * 只发 `personal_token` 的形状在实测里仍可能被服务端接受，但没有理由不发这个官方字段。
  */
 export async function exchangeQoderJobToken(
   personalToken: string,
@@ -718,12 +750,16 @@ export async function exchangeQoderJobToken(
       'cosy-clienttype': COSY_CLIENT_TYPE,
       'user-agent': USER_AGENT,
     },
-    body: JSON.stringify({ personal_token: personalToken }),
+    body: JSON.stringify({ personal_token: personalToken, machine_id: resolveQoderMachineId(env) }),
     signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
   })
   if (!response.ok) {
     const detail = qoderErrorDetail(await response.text().catch(() => ''), 160)
-    throw new Error(PROVIDER_NAME + ' PAT 兑换失败（HTTP ' + response.status + '）' + (detail === '' ? '' : '：' + detail))
+    throw new QoderPatExchangeError(
+      PROVIDER_NAME + ' PAT 兑换失败（HTTP ' + response.status + '）' + (detail === '' ? '' : '：' + detail),
+      response.status,
+      region,
+    )
   }
   const payload = (await response.json().catch(() => undefined)) as unknown
   if (!isRecord(payload)) throw new Error(PROVIDER_NAME + ' PAT 兑换响应不是 JSON 对象')

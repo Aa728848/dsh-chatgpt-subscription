@@ -30,7 +30,7 @@ export const zh = {
   regionGlobal: '全球区（qoder.com）',
   regionCn: '中国站（qoder.com.cn）',
   regionHint: '区域由凭据唯一决定，本页只决定「下一次登录」落在哪一区；两区端点互不通用。',
-  regionHintExtra: '全球区支持浏览器设备流登录与 PAT；中国站没有设备流，只支持 PAT 粘贴或导入本机 qodercli 登录态。',
+  regionHintExtra: '全球区支持浏览器设备流登录与 PAT；中国站没有设备流，只支持 PAT 粘贴或导入本机 qodercli 登录态。粘贴 PAT 时不用纠结区域：一个区拒了，插件会自动改试另一个区，落盘的是真正认这把 PAT 的那一区。',
 
   authorizing: '授权中…',
 
@@ -163,7 +163,7 @@ export const en: Record<QoderLocaleKey, string> = {
   regionGlobal: 'Global (qoder.com)',
   regionCn: 'China (qoder.com.cn)',
   regionHint: 'Region is a property of the credential; this picker only decides where the NEXT sign-in lands.',
-  regionHintExtra: 'Global supports browser device sign-in and PAT; the China site has no device flow — paste a PAT or import the local qodercli session.',
+  regionHintExtra: 'Global supports browser device sign-in and PAT; the China site has no device flow — paste a PAT or import the local qodercli session. When pasting a PAT you need not get the region right: if one region rejects it, the plugin retries the other and stores whichever region actually accepts it.',
 
   authorizing: 'Authorizing…',
 

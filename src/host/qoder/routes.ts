@@ -334,7 +334,13 @@ function patchFromBody(body: Record<string, unknown>): QoderSettingsPatch {
   return patch
 }
 
-/** 请求体里的区域（认不出时回落全球区——它是唯一支持设备流的，选错时上游明确拒）。 */
+/**
+ * 请求体里的区域。
+ *
+ * 认不出时回落全球区（它是唯一支持设备流的，且是卡片默认值），但**只对设备流成立**：
+ * 设备流本来就只有全球区。PAT 粘贴的兜底不靠这一层——`qoderCredentialsFromPat`
+ * 会把「区域猜错」这件事自己修好（见该函数的注释），所以这里不需要猜得更聪明。
+ */
 function regionFromBody(body: Record<string, unknown>): QoderRegion {
   return isQoderRegion(body.region) ? body.region : 'global'
 }
