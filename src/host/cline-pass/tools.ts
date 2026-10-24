@@ -17,7 +17,7 @@ import type { ClinePassAccountPool } from './account-pool.ts'
 import type { ClinePassEngine } from './engine.ts'
 import type { ClinePassStore } from './store.ts'
 import type { ClinePassModelSettingsStore } from './token-store.ts'
-import { bearerFor } from './token-store.ts'
+import { bearerFor, listedClinePassCatalogModels } from './token-store.ts'
 import { DEFAULT_MODELS, defaultPin, type ClinePassPinSettings } from './types.ts'
 import type { ClinePassWebStatus } from '../../shared/cline-pass-contracts.ts'
 
@@ -276,6 +276,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           const published = scan.catalog[id] ?? {}
           merged.push({
             id,
+            origin: 'official',
             ...(published.name === undefined ? {} : { name: published.name }),
             ...(published.contextWindow === undefined ? {} : { contextWindow: published.contextWindow }),
             ...(published.maxTokens === undefined ? {} : { maxTokens: published.maxTokens }),
@@ -285,7 +286,12 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           })
         }
         await settings.storeCatalog(merged)
-        store.setCatalog({ ids: scan.models, sources: scan.sources, models: scan.catalog as Record<string, unknown> })
+        const gateway = await engine.gatewayCatalog().catch(() => [])
+        store.setCatalog({
+          ids: [...new Set([...scan.models, ...gateway])],
+          sources: [...scan.sources, ...(gateway.length > 0 ? ['gateway'] : [])],
+          models: scan.catalog as Record<string, unknown>,
+        })
       }
       const current = await settings.read()
       if (typeof args.mode === 'string' && args.mode !== '') {
@@ -742,8 +748,8 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
 }
 
 /** Every id the visibility toggle may act on, including shipped ones. */
-function currentModelsForVisibility(settings: { catalogModels: Array<{ id: string }>; hiddenModels: string[] }): string[] {
+function currentModelsForVisibility(settings: { catalogModels: Array<{ id: string; origin?: 'official' | 'custom' | 'gateway' }>; hiddenModels: string[] }): string[] {
   const ids = new Set<string>(DEFAULT_MODELS)
-  for (const model of settings.catalogModels) ids.add(model.id)
+  for (const model of listedClinePassCatalogModels(settings)) ids.add(model.id)
   return [...ids]
 }

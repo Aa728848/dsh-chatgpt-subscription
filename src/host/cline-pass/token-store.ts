@@ -138,6 +138,23 @@ export interface ClinePassCatalogModel {
   reasoning?: boolean
   input?: string[]
   efforts?: string[]
+  /**
+   * Where this row came from. Missing means a legacy row: `cline-pass/*`
+   * counts as the official subscription list, anything else as gateway-only.
+   */
+  origin?: 'official' | 'custom' | 'gateway'
+}
+
+/** Whether a catalog row belongs in the compact, built-in + official + added list. */
+export function isListedClinePassCatalogModel(model: ClinePassCatalogModel): boolean {
+  if (model.origin === 'official' || model.origin === 'custom') return true
+  if (model.origin === 'gateway') return false
+  return model.id.startsWith('cline-pass/')
+}
+
+/** The catalog rows to display/advertise, never the whole gateway search index. */
+export function listedClinePassCatalogModels(settings: { catalogModels: ClinePassCatalogModel[] }): ClinePassCatalogModel[] {
+  return settings.catalogModels.filter(isListedClinePassCatalogModel)
 }
 
 /**
@@ -348,6 +365,7 @@ function readCatalogModels(value: unknown): ClinePassCatalogModel[] {
     if (typeof record.reasoning === 'boolean') model.reasoning = record.reasoning
     if (Array.isArray(record.input)) model.input = record.input.filter((item): item is string => typeof item === 'string')
     if (Array.isArray(record.efforts)) model.efforts = record.efforts.filter((item): item is string => typeof item === 'string')
+    if (record.origin === 'official' || record.origin === 'custom' || record.origin === 'gateway') model.origin = record.origin
     models.push(model)
   }
   return models

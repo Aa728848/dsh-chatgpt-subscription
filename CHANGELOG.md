@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.38.4 - 2026-10-24 (本地构建：官方 0.38.1 + cline-pass 钉选修复与模型清单收敛)
+- **[cline-pass] 模型清单只保留内置 + 官方订阅 + 手动添加，完整网关目录改为搜索数据源**
+  - **原因**：此前 `catalog/refresh` 在 `exposeCatalog=true` 时把整个网关目录合并进 `catalogModels`，设置页和模型选择器因此铺开几百个模型。当前本机旧设置实测有 **492 条目录行**。
+  - **展示与选择器同步收敛**：`catalogModels` 新增 `origin: official | custom | gateway`；旧行没有 origin 时仅 `cline-pass/*` 视为官方订阅，其他旧网关行默认收起。`listedClinePassCatalogModels()` 统一应用到设置页、adapter 的模型广告、hub 与可见性工具；旧 `exposeCatalog` 即使仍为 true 也不再展开全量目录。
+  - **不删配置**：旧的目录行、启用列表、隐藏列表、钉选和上下文覆盖都保留，只是不再展示；本次实算 492 行中 472 行收起、20 行保留，另有随包内置表。
+  - **刷新只合并官方订阅**：`catalog/refresh` 和管理工具的 refresh 仍拉取完整网关目录，但只写入 `store.catalog()` 作为搜索索引；只有 `recommended-models` / models.dev 的订阅模型进入 `catalogModels` 并标记 `origin: official`。
+  - **按需搜索添加**：新增 `GET /cline-pass/api/catalog/search?q=...`（空查询不返回全量，最多 30 条）和 `POST /catalog/add`。添加时写入 `origin: custom`，从隐藏列表移除，并在显式启用列表存在时自动加入启用列表；设置页新增搜索框和紧凑结果行。
+  - **兼容清理**：高级设置里移除已经无意义的「展示完整网关目录」开关；配置字段保留以读取旧文件，但不再影响清单。
+  - **测试**：路由新增「全量目录不进入清单 + 搜索/添加 + 自动启用」用例；设置卡新增搜索添加用例；高级设置行数断言同步更新。全量 283 文件、4664 通过、0 失败。
+
 ## 0.38.3 - 2026-10-24 (本地构建：官方 0.38.1 + cline-pass `has` 钉选修复)
 - **[cline-pass] `only` 之外补上模型能力过滤 `has`：1017 的钉选与渠道探测恢复**
   - **实测结论（本机真实账号，2026-10-24）**：同一个 `cline-pass/deepseek-v4.1-flash-1017`、同一把账号、交替对照两遍：只发 `providerOptions.gateway.only:[deepseek]` 都落 `openai-compatible-private` 且无第一方指纹；追加 `has:[vision,implicit-caching]` 后都落 **`deepseek`**，`canonicalSlug=deepseek/deepseek-v4.1-flash-1017`，并带 `provider_metadata.deepseek.systemFingerprint`。假渠道加 `has` 会正确报错并列出可用渠道，不再被静默兜到匿名路由。

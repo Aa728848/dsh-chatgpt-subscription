@@ -74,6 +74,7 @@ let dir = ''
 let pool: ClinePassAccountPool
 let settings: ClinePassModelSettingsStore
 let store: ReturnType<typeof createClinePassStore>
+let engine: ReturnType<typeof createClinePassEngine>
 let handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>
 let emit: ReturnType<typeof vi.fn>
 let dispose: () => void
@@ -89,7 +90,7 @@ beforeEach(async () => {
   })
   settings = new ClinePassModelSettingsStore(path.join(dir, 'models.json'))
   store = createClinePassStore()
-  const engine = createClinePassEngine({ pool, store, settings })
+  engine = createClinePassEngine({ pool, store, settings })
   const registrations: Array<{ kind: string; path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
   emit = vi.fn()
   const ctx = {
@@ -176,6 +177,42 @@ describe('Cline Pass settings API', () => {
     const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
     expect(status.models.find((entry) => entry.id === model)?.pinned).toEqual(['baseten'])
     expect(status.models.find((entry) => entry.id === model)?.has).toEqual(['vision', 'implicit-caching'])
+  })
+
+  it('keeps the full gateway catalog out of the model list and searches it on demand', async () => {
+    await settings.update({
+      catalogModels: [{ id: 'cline-pass/official-old' }, { id: 'deepseek/legacy-extra' }],
+      exposeCatalog: true,
+      enabledModelIds: [],
+    })
+    vi.spyOn(engine, 'officialModels').mockResolvedValue({
+      models: ['cline-pass/official-new'],
+      catalog: { 'cline-pass/official-new': { name: 'Official New' } },
+      sources: ['cline.api'],
+    })
+    vi.spyOn(engine, 'gatewayCatalog').mockResolvedValue(['deepseek/legacy-extra', 'deepseek/deepseek-v4-pro', 'openai/gpt-new'])
+    const refreshed = await call({ url: '/cline-pass/api/catalog/refresh', method: 'POST', body: {} })
+    expect(refreshed.status).toBe(200)
+    const stored = await settings.read()
+    expect(stored.catalogModels.map((entry) => entry.id)).not.toContain('openai/gpt-new')
+    expect(stored.catalogModels).toContainEqual(expect.objectContaining({ id: 'cline-pass/official-new', origin: 'official' }))
+    // The complete list survives only as a search index.
+    expect(store.catalog().ids).toContain('openai/gpt-new')
+    const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
+    expect(status.models.map((entry) => entry.id)).not.toContain('deepseek/legacy-extra')
+    expect(status.models.map((entry) => entry.id)).not.toContain('openai/gpt-new')
+    expect(status.models.map((entry) => entry.id)).toContain('cline-pass/official-new')
+
+    const found = await call({ url: '/cline-pass/api/catalog/search?q=v4-pro' })
+    expect(found.status).toBe(200)
+    expect(found.body.value).toEqual({ results: [{ id: 'deepseek/deepseek-v4-pro', added: false }] })
+    const added = await call({ url: '/cline-pass/api/catalog/add', method: 'POST', body: { model: 'deepseek/deepseek-v4-pro' } })
+    expect(added.status).toBe(200)
+    const after = await settings.read()
+    expect(after.catalogModels).toContainEqual(expect.objectContaining({ id: 'deepseek/deepseek-v4-pro', origin: 'custom' }))
+    expect(after.enabledModelIds).toEqual(['deepseek/deepseek-v4-pro'])
+    const visible = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
+    expect(visible.models.find((entry) => entry.id === 'deepseek/deepseek-v4-pro')?.enabled).toBe(true)
   })
 
   it('warns when a pin targets the anonymous contributor route', async () => {
