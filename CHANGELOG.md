@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.38.0 - 2026-10-24
 - **[kimi-code] 新增 K3.1 Pro 系列（与其它模型同一 OpenAI 兼容 chat completions）、只支持思考的档位、以及缓存写入这个计费项**
   - **现象**：`k3.1-pro` / `k3.1-pro-highspeed` 不在模型目录、设置卡与能力表里；「默认思考档位」永远列着 `low` / `high` / `max` 与「关闭思考」，而 K3.1 Pro 根本关不掉（服务端 400）；缓存区块只有命中率、命中 / 新处理 / 输出 tokens 与请求数，**写入**这个独立计费项一个数字都没有，看不出 5m / 1h 两档各写了多少。
   - **模型目录**：两条新条目按官方型号表写入（`k3.1-pro` 默认 256K、可覆盖到 1M；`k3.1-pro-highspeed` 1M），含 `thinkingType: 'only'`、`defaultReasoningEffort: 'max'` 与 `quotaMultiplier: null`（官方未公布相对倍率，卡片显示「未公布」而不是猜成 1×）。**协议不新增分支**：本线路对全部模型只走 OpenAI 兼容 chat completions（与官方 agent 的 `type = "kimi"` 一致），因此 K3.1 Pro 的请求照常发往 `/v1/chat/completions`，视频输入按型号表声明可用。
