@@ -24,6 +24,16 @@ const CSS = `
 .dsh-codex-success{color:var(--dsw-alias-label-success,#2e9b62)}
 .dsh-codex-errorbar{align-items:center;background:color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 9%,transparent);border:0.5px solid color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 28%,transparent);border-radius:7px;color:var(--dsw-alias-label-danger,#d94b4b);display:flex;font-size:13px;gap:12px;justify-content:space-between;padding:10px 12px}
 .dsh-codex-link{color:var(--dsw-alias-label-link,#3278d4);display:inline-block;font-size:13px;margin-top:8px}
+.dsh-codex-device{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;flex-direction:column;gap:6px;margin-top:12px;padding:10px 12px}
+.dsh-codex-device-row{align-items:center;display:flex;flex-wrap:wrap;gap:10px}
+.dsh-codex-device-value{align-items:center;display:inline-flex;gap:8px;min-width:0}
+/* One class, one size: the icon beside the code and the one beside the link are
+   the same control, so a later tweak cannot leave them different heights. */
+.dsh-codex-copy{align-items:center;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-secondary);cursor:pointer;display:inline-flex;flex:0 0 auto;height:22px;justify-content:center;padding:0;vertical-align:middle;width:22px}
+.dsh-codex-copy:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsh-codex-copy:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:1px}
+.dsh-codex-copy-done,.dsh-codex-copy-done:hover{color:var(--dsw-alias-label-success,#2e9b62)}
+.dsh-codex-device-code{border:0.5px solid var(--dsw-alias-brand-primary);border-radius:8px;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:18px;font-weight:700;letter-spacing:.14em;padding:6px 12px}
 .dsh-codex-pref-row{align-items:center;border-bottom:0.5px solid var(--dsw-alias-border-l2);display:flex;gap:16px;justify-content:space-between;min-height:58px;padding:10px 0}
 .dsh-codex-pref-row strong,.dsh-codex-check strong{display:block;font-size:13px;font-weight:600;line-height:1.35}
 .dsh-codex-segments{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:inline-flex;flex-wrap:nowrap;gap:3px;padding:3px}

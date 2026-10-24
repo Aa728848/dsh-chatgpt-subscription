@@ -105,14 +105,26 @@ function loginRow(): HTMLElement {
   return row!
 }
 
-/** The two entries in the login row, in order. */
+/**
+ * Every entry in the login row, in order.
+ *
+ * Three of them since the device-code sign-in landed: the browser login, the
+ * same sign-in without a loopback listener, and the local CLI import.
+ */
 function loginRowButtons(): HTMLButtonElement[] {
   return [...loginRow().querySelectorAll<HTMLButtonElement>('button')]
 }
 
-/** The import button, the second entry: login first, then the other way in. */
-function importButton(): HTMLButtonElement {
+/** The device-code entry, the second one: the same sign-in, headless. */
+function deviceButton(): HTMLButtonElement {
   const button = loginRowButtons()[1]
+  expect(button).toBeDefined()
+  return button!
+}
+
+/** The import button, the last entry: login first, then the other ways in. */
+function importButton(): HTMLButtonElement {
+  const button = loginRowButtons()[2]
   expect(button).toBeDefined()
   return button!
 }
@@ -121,24 +133,42 @@ describe('the local sign-in import button, beside the login button', () => {
   it('sits in the pool card login row, beside the login button', async () => {
     await mount()
     const buttons = loginRowButtons()
-    // Exactly two entries, side by side — the login and the import. This is the
-    // Claude layout, not a block of its own with a heading above it.
-    expect(buttons).toHaveLength(2)
+    // Three entries, side by side and in this order: the browser login, the
+    // device-code login (the same sign-in, for a host with no reachable
+    // localhost), then the import. A row, not a block of its own with a heading
+    // above it — which is the Claude layout.
+    expect(buttons).toHaveLength(3)
     expect(buttons[0]!.textContent).toBe(zh.addAccount)
-    expect(buttons[1]!.textContent).toBe(zh.localCodexLoginImport)
+    expect(buttons[1]!.textContent).toBe(zh.deviceCodeLogin)
+    expect(buttons[2]!.textContent).toBe(zh.localCodexLoginImport)
   })
 
   it('keeps the login button primary and the import button secondary', async () => {
     await mount()
-    const [login, importBtn] = loginRowButtons()
+    const [login, device, importBtn] = loginRowButtons()
     // The shared card's default login button is primary; taking the row over
     // reproduces it rather than restyling it.
     expect(login!.className).toContain('dsha-btn-primary')
     expect(importBtn!.className).toContain('dsha-btn')
-    // The import button must NOT claim to be the primary action, exactly as on
-    // the Claude page.
+    // Neither alternative claims to be the primary action: they are the same
+    // sign-in and another way in, not two competing defaults.
+    expect(device!.className).toContain('dsha-btn')
+    expect(device!.className).not.toContain('dsha-btn-primary')
     expect(importBtn!.className).not.toContain('dsha-btn-primary')
     expect(importBtn!.getAttribute('aria-label')).toBe(zh.localCodexLoginImport)
+  })
+
+  it('opens the device panel from its own route, not the browser one', async () => {
+    const calls = await mount()
+    expect(deviceButton().getAttribute('aria-label')).toBe(zh.deviceCodeLogin)
+
+    await act(async () => deviceButton().click())
+    await act(async () => Promise.resolve())
+
+    // The device route was asked for the code; the callback flow's own route
+    // (`/login/start`) was not touched, because this path needs no listener.
+    expect(calls.some((call) => call.url === `${ROUTE_PREFIX}/login/device/start` && call.method === 'POST')).toBe(true)
+    expect(calls.some((call) => call.url === `${ROUTE_PREFIX}/login/start`)).toBe(false)
   })
 
   it('adds no heading, title or explanatory text of its own', async () => {
@@ -148,7 +178,7 @@ describe('the local sign-in import button, beside the login button', () => {
     const headings = [...harness.container!.querySelectorAll<HTMLElement>('strong, h3, h4')]
       .map((element) => element.textContent ?? '')
     expect(headings.some((text) => text.includes('本机 Codex CLI'))).toBe(false)
-    // The login row holds the two buttons and no prose between them.
+    // The login row holds the buttons and no prose between them.
     expect(loginRow().querySelectorAll('p')).toHaveLength(0)
     expect(loginRow().textContent).not.toContain('查找位置')
   })

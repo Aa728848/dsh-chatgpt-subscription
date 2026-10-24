@@ -28,6 +28,39 @@ export const CODEX_ORIGINATOR = 'opencode' as const
 /** OAuth presents the same identity the request path does (see above). */
 export const OAUTH_ORIGINATOR = CODEX_ORIGINATOR
 export const OAUTH_LOGIN_TIMEOUT_MS = 5 * 60_000
+/**
+ * The device-code grant: the one sign-in path a headless host can finish.
+ *
+ * The browser flow redirects to a *fixed* `http://localhost:1455/auth/callback`
+ * registered against this OAuth client, so it cannot be completed from a server:
+ * nothing listens on that loopback port there, and an HTTPS page cannot reach it
+ * anyway (mixed content). The device grant takes the redirect out of the
+ * picture — the user types a short code on a page on their own machine and this
+ * process polls for the result.
+ *
+ * Same client id as the browser flow, because it is the same registration. These
+ * are that registration's device endpoints, verified against the live service.
+ */
+export const OAUTH_DEVICE_USERCODE_URL = `${CHATGPT_OAUTH_ISSUER}/api/accounts/deviceauth/usercode` as const
+export const OAUTH_DEVICE_TOKEN_URL = `${CHATGPT_OAUTH_ISSUER}/api/accounts/deviceauth/token` as const
+export const OAUTH_DEVICE_VERIFY_URL = `${CHATGPT_OAUTH_ISSUER}/codex/device` as const
+/**
+ * The redirect the device grant redeems its authorization code against.
+ *
+ * Nothing listens on it: the device endpoint hands the code to this process
+ * directly and the token endpoint only checks it against the grant.
+ */
+export const OAUTH_DEVICE_REDIRECT_URI = `${CHATGPT_OAUTH_ISSUER}/deviceauth/callback` as const
+/** Deadline used when a grant states no usable `expires_at` (the live one is ~15 min out). */
+export const OAUTH_DEVICE_GRANT_LIFETIME_MS = 15 * 60_000
+/** Poll interval used when a grant states no usable `interval` (the live one answers `"5"`). */
+export const OAUTH_DEVICE_POLL_INTERVAL_SECONDS = 5
+/**
+ * Floor for a fractional poll interval (a grant answering `"0.2"`), so it cannot
+ * turn the loop into a spin. `"0"`, a negative or an unparseable value never get
+ * this far: `parseGrantInterval` already replaced them with the 5 s default.
+ */
+export const OAUTH_DEVICE_MIN_POLL_INTERVAL_MS = 1_000
 export const TOKEN_REFRESH_MARGIN_MS = 60_000
 export const ROUTE_PREFIX = '/api/dsh-chatgpt-subscription' as const
 export const PLUGIN_VERSION = '0.1.0-alpha.0' as const

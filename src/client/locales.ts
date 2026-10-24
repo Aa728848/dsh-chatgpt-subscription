@@ -181,6 +181,14 @@ export const zh = {
   // same way because the two are the same decision.
   localCodexLoginImport: '导入本机 Codex CLI 登录',
   localCodexLoginImporting: '导入中…',
+  // The device-code sign-in, for a host that cannot open a localhost callback.
+  deviceCodeLogin: '用设备代码添加账号',
+  deviceCodeLoginStarting: '正在获取代码…',
+  deviceCodeHint: '在任意设备上打开下面的链接并输入这个代码，本页会自动完成登录：这条路不需要浏览器回调到本机端口。',
+  deviceCodeLabel: '设备代码',
+  deviceCodeOpen: '打开确认页面',
+  deviceCodeCopy: '复制到剪贴板',
+  deviceCodeWaiting: '等待确认… 剩余 {time}',
   // The account pool's undo for the local sign-in imported just above it. The
   // wording says "all" because the host's route clears every imported row at once:
   // a label reading like a per-row action would promise something the pool forbids.
@@ -368,6 +376,15 @@ export const en: Record<keyof typeof zh, string> = {
   // same way because the two are the same decision.
   localCodexLoginImport: 'Import the local Codex CLI sign-in',
   localCodexLoginImporting: 'Importing…',
+  // The same sign-in as the button above, obtained without a localhost
+  // callback: the only path a server or a headless host can finish.
+  deviceCodeLogin: 'Add account with device code',
+  deviceCodeLoginStarting: 'Requesting code…',
+  deviceCodeHint: 'Open the link below on any device and enter this code. This page finishes the sign-in by itself: nothing has to call back to a local port.',
+  deviceCodeLabel: 'Device code',
+  deviceCodeOpen: 'Open the confirmation page',
+  deviceCodeCopy: 'Copy to clipboard',
+  deviceCodeWaiting: 'Waiting for confirmation… {time} remaining',
   // The account pool's undo for the local sign-in imported just above it. The
   // wording says "all" because the host's route clears every imported row at once:
   // a label reading like a per-row action would promise something the pool forbids.

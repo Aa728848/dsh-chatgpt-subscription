@@ -2,6 +2,13 @@ import { createHash, randomBytes } from 'node:crypto'
 import {
   CHATGPT_OAUTH_CLIENT_ID,
   OAUTH_AUTHORIZE_URL,
+  OAUTH_DEVICE_GRANT_LIFETIME_MS,
+  OAUTH_DEVICE_MIN_POLL_INTERVAL_MS,
+  OAUTH_DEVICE_POLL_INTERVAL_SECONDS,
+  OAUTH_DEVICE_REDIRECT_URI,
+  OAUTH_DEVICE_TOKEN_URL,
+  OAUTH_DEVICE_USERCODE_URL,
+  OAUTH_DEVICE_VERIFY_URL,
   OAUTH_LOGIN_TIMEOUT_MS,
   OAUTH_ORIGINATOR,
   OAUTH_REDIRECT_URI,
@@ -10,6 +17,8 @@ import {
   TOKEN_REFRESH_MARGIN_MS,
 } from '../compat.ts'
 import type {
+  DeviceLoginDto,
+  DeviceLoginStartDto,
   LoginEventDto,
   LoginStartDto,
   OAuthStatusDto,
@@ -45,8 +54,10 @@ interface OAuthClaims {
 interface ActiveLogin {
   id: string
   expiresAt: number
-  server: OAuthCallbackServer
-  timeout: NodeJS.Timeout
+  /** Tears down whatever this flow waits on: the localhost listener or the poll loop. */
+  stop: () => void
+  /** The device code, when the running flow is the device grant. */
+  device?: DeviceLoginDto
 }
 
 export class OAuthServiceError extends Error {
@@ -106,6 +117,18 @@ export class OAuthService {
   private readonly loginEvents = new Map<string, LoginEventDto>()
   private readonly listeners = new Map<string, Set<LoginListener>>()
   private activeLogin: ActiveLogin | null = null
+  /**
+   * True between taking the login slot and having something to put in
+   * {@link activeLogin}.
+   *
+   * Both starts have work to do before the login exists (a storage read, the
+   * device grant), and that work is awaited. A check made before the first
+   * `await` and an assignment made after it do not exclude each other: two
+   * overlapping calls both pass the check, the second overwrites the first, and
+   * the first flow's `AbortController` becomes unreachable — Cancel stops the
+   * wrong flow and the abandoned one keeps polling until its grant expires.
+   */
+  private startPending = false
   private refreshPromise: Promise<StoredOAuthCredentials> | null = null
   private lastLoginError: PublicErrorDto | undefined
   private disposed = false
@@ -171,14 +194,36 @@ export class OAuthService {
     }
   }
 
+  /**
+   * Take the one login slot, or say that it is taken.
+   *
+   * Called synchronously, before the first `await` of the start it belongs to:
+   * nothing can suspend between the check and the flag, so two overlapping
+   * starts cannot both get through. The caller's `finally` releases the flag once
+   * the login itself is in {@link activeLogin} (or the start has failed).
+   */
+  private beginStart(): void {
+    if (this.startPending || this.activeLogin !== null) {
+      throw new OAuthServiceError('login-active', 'A ChatGPT sign-in is already in progress.')
+    }
+    this.startPending = true
+  }
+
   async startLogin(): Promise<LoginStartDto> {
     this.assertAvailable()
+    this.beginStart()
+    try {
+      return await this.startBrowserLogin()
+    } finally {
+      this.startPending = false
+    }
+  }
+
+  /** The body of {@link startLogin}, with the slot already taken. */
+  private async startBrowserLogin(): Promise<LoginStartDto> {
     await this.store.load().catch(() => {
       throw new OAuthServiceError('storage-failed', 'Secure credential storage is unavailable. Fix its ownership or permissions before signing in.')
     })
-    if (this.activeLogin !== null) {
-      throw new OAuthServiceError('login-active', 'A ChatGPT sign-in is already in progress.')
-    }
     this.lastLoginError = undefined
     const loginId = this.random(24).toString('base64url')
     const verifier = this.random(48).toString('base64url')
@@ -199,7 +244,14 @@ export class OAuthService {
       this.cancelActive(new OAuthServiceError('login-expired', 'ChatGPT sign-in timed out.'), 'failed')
     }, this.loginTimeoutMs)
     timeout.unref?.()
-    this.activeLogin = { id: loginId, expiresAt, server, timeout }
+    this.activeLogin = {
+      id: loginId,
+      expiresAt,
+      stop: () => {
+        clearTimeout(timeout)
+        server.cancel(new OAuthServiceError('login-cancelled', 'ChatGPT sign-in was cancelled.'))
+      },
+    }
     this.publish({ type: 'pending', loginId })
     void server.completion.then(() => {
       this.completeLogin(loginId)
@@ -215,6 +267,55 @@ export class OAuthService {
       throw new OAuthServiceError('bad-request', 'The requested sign-in is not active.')
     }
     this.cancelActive(new OAuthServiceError('login-cancelled', 'ChatGPT sign-in was cancelled.'), 'cancelled')
+  }
+
+  /**
+   * Start a device-code sign-in, the path a headless host can finish.
+   *
+   * Answers as soon as the grant exists, with the code the user has to type and
+   * the page to type it on; the wait for confirmation runs in the background and
+   * reports through the same event stream the browser flow uses, so the card
+   * needs no second mechanism and cancellation is the same call.
+   */
+  async startDeviceLogin(): Promise<DeviceLoginStartDto> {
+    this.assertAvailable()
+    this.beginStart()
+    try {
+      return await this.startDeviceLoginInner()
+    } finally {
+      this.startPending = false
+    }
+  }
+
+  /** The body of {@link startDeviceLogin}, with the slot already taken. */
+  private async startDeviceLoginInner(): Promise<DeviceLoginStartDto> {
+    await this.store.load().catch(() => {
+      throw new OAuthServiceError('storage-failed', 'Secure credential storage is unavailable. Fix its ownership or permissions before signing in.')
+    })
+    this.lastLoginError = undefined
+    const controller = new AbortController()
+    const grant = await this.requestDeviceGrant(controller.signal)
+    const loginId = this.random(24).toString('base64url')
+    const device: DeviceLoginDto = {
+      userCode: grant.userCode,
+      verificationUrl: OAUTH_DEVICE_VERIFY_URL,
+      expiresAt: Math.floor(grant.expiresAt / 1000),
+      now: Math.floor(this.now() / 1000),
+    }
+    this.activeLogin = {
+      id: loginId,
+      expiresAt: grant.expiresAt,
+      stop: () => controller.abort(),
+      device,
+    }
+    this.publish({ type: 'pending', loginId })
+    void this.pollDeviceGrant(loginId, device, grant, controller.signal).catch((error: unknown) => {
+      this.failLogin(loginId, error)
+    })
+    // No code, verifier or grant id in this line: it records that a sign-in
+    // started, not what could redeem it.
+    this.logger.info('[dsh-chatgpt-subscription] device-code login started')
+    return { loginId, ...device }
   }
 
   subscribe(loginId: string, listener: LoginListener): (() => void) | null {
@@ -354,14 +455,19 @@ export class OAuthService {
     this.loginEvents.clear()
   }
 
-  private async exchangeCode(code: string, verifier: string, signal: AbortSignal): Promise<void> {
+  private async exchangeCode(
+    code: string,
+    verifier: string,
+    signal: AbortSignal,
+    redirectUri: string = OAUTH_REDIRECT_URI,
+  ): Promise<void> {
     const response = await this.fetchFn(OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code,
-        redirect_uri: OAUTH_REDIRECT_URI,
+        redirect_uri: redirectUri,
         client_id: CHATGPT_OAUTH_CLIENT_ID,
         code_verifier: verifier,
       }).toString(),
@@ -375,6 +481,23 @@ export class OAuthService {
     }
     const tokens = await response.json() as OAuthTokenResponse
     const credentials = credentialsFromTokenResponse(tokens, this.now())
+    await this.persistCredentials(credentials, signal)
+  }
+
+  /**
+   * Write freshly redeemed credentials into the pool, unless the sign-in was
+   * cancelled while the token answer was on its way.
+   *
+   * The abort check used to live only in the poll loop, *after* the exchange, so
+   * a Cancel landing between the token `200` and the write left the host having
+   * answered `{cancelled:true}` and published `cancelled` while the pool quietly
+   * gained an account. The check belongs at the last moment before the write —
+   * the narrower the window, the fewer writes it misses.
+   */
+  private async persistCredentials(credentials: StoredOAuthCredentials, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+      throw new OAuthServiceError('login-cancelled', 'ChatGPT sign-in was cancelled.')
+    }
     if (this.pool !== null) {
       // The pool stores every account and mirrors only the primary one into the
       // single-credential store, so signing in a second account cannot displace
@@ -388,6 +511,129 @@ export class OAuthService {
       throw new OAuthServiceError('storage-failed', 'ChatGPT credentials could not be saved securely.')
     })
     this.credentialRevision += 1
+  }
+
+  /**
+   * Ask for a device code, and normalise what the grant says about itself.
+   *
+   * `interval` arrives as a *string* (`"5"`) on the live service and
+   * `expires_at` as an ISO timestamp, so both are parsed rather than trusted to
+   * be the type they should be. A grant that states neither still works: the
+   * defaults are the values the service actually uses.
+   */
+  private async requestDeviceGrant(signal: AbortSignal): Promise<DeviceGrant> {
+    const response = await this.fetchFn(OAUTH_DEVICE_USERCODE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_id: CHATGPT_OAUTH_CLIENT_ID }),
+      signal,
+    }).catch(() => {
+      throw new OAuthServiceError('oauth-token-exchange-failed', 'The ChatGPT device-code request could not be reached.')
+    })
+    if (!response.ok) {
+      const detail = await oauthErrorIdentifier(response)
+      throw new OAuthServiceError(
+        'oauth-token-exchange-failed',
+        `The ChatGPT device code could not be issued (${response.status}${detail === null ? '' : `, ${detail}`}).`,
+        response.status,
+      )
+    }
+    const payload = await response.json().catch(() => null) as unknown
+    const record = isRecord(payload) ? payload : {}
+    const authId = nonEmptyString(record.device_auth_id)
+    // `usercode` is the alias: both spellings have been seen on this endpoint,
+    // and refusing one of them turns a working grant into "no code returned".
+    const userCode = nonEmptyString(record.user_code) ?? nonEmptyString(record.usercode)
+    if (authId === undefined || userCode === undefined) {
+      throw new OAuthServiceError('oauth-token-exchange-failed', 'ChatGPT returned no device code.')
+    }
+    return {
+      authId,
+      userCode,
+      interval: parseGrantInterval(record.interval),
+      expiresAt: parseGrantDeadline(record.expires_at, this.now()),
+    }
+  }
+
+  /**
+   * Wait for the user to confirm the code, then redeem the grant.
+   *
+   * Three rules, and each one is a way this loop goes wrong if it is dropped:
+   * the wait between polls is the grant's own `interval` (clamped, see
+   * {@link pollDelayMs}); no single wait runs past the deadline; and nothing is
+   * accepted at or after the deadline, because a grant that expired upstream is
+   * not a sign-in — redeeming it would surface the server's error as if the
+   * user's code had failed.
+   */
+  private async pollDeviceGrant(
+    loginId: string,
+    device: DeviceLoginDto,
+    grant: DeviceGrant,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const deadline = grant.expiresAt
+    const interval = grant.interval
+    for (;;) {
+      if (signal.aborted) return
+      const remaining = deadline - this.now()
+      if (remaining <= 0) {
+        throw new OAuthServiceError('login-expired', 'The device code expired before it was confirmed. Start the sign-in again for a fresh code.')
+      }
+      await sleep(Math.min(pollDelayMs(interval, deadline - this.now()), remaining), signal)
+      if (signal.aborted) return
+      if (this.now() >= deadline) {
+        throw new OAuthServiceError('login-expired', 'The device code expired before it was confirmed. Start the sign-in again for a fresh code.')
+      }
+      const outcome = await this.pollDeviceToken(grant, signal)
+      if (outcome === 'pending') continue
+      // Re-checked before spending the exchange: a Cancel that lands while the
+      // confirmation is being read must not be followed by a token request.
+      if (signal.aborted) return
+      // Redeemed against the device redirect, not the loopback one: this code was
+      // not issued to a browser callback and the token endpoint checks the pair.
+      // The write inside refuses to happen once the signal is aborted.
+      await this.exchangeCode(outcome.authorizationCode, outcome.codeVerifier, signal, OAUTH_DEVICE_REDIRECT_URI)
+      if (signal.aborted) return
+      this.completeLogin(loginId)
+      return
+    }
+  }
+
+  /**
+   * One confirmation check.
+   *
+   * `403`/`404` (and any payload whose status says pending) mean "not yet" — the
+   * user has not typed the code or has not confirmed it. Everything else is
+   * terminal and carries the status with any error code the service named, so
+   * the card can say what happened instead of polling until the deadline.
+   */
+  private async pollDeviceToken(grant: DeviceGrant, signal: AbortSignal): Promise<DeviceTokenOutcome> {
+    const response = await this.fetchFn(OAUTH_DEVICE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_auth_id: grant.authId, user_code: grant.userCode }),
+      signal,
+    }).catch(() => {
+      if (signal.aborted) throw new OAuthServiceError('login-cancelled', 'ChatGPT sign-in was cancelled.')
+      throw new OAuthServiceError('oauth-token-exchange-failed', 'The ChatGPT device confirmation could not be reached.')
+    })
+    const payload = await response.json().catch(() => null) as unknown
+    if (isPendingDeviceAnswer(response, payload)) return 'pending'
+    if (!response.ok) {
+      const detail = deviceErrorIdentifier(payload)
+      throw new OAuthServiceError(
+        'oauth-token-exchange-failed',
+        `The ChatGPT device confirmation was refused (${response.status}${detail === undefined ? '' : `, ${detail}`}).`,
+        response.status,
+      )
+    }
+    const record = isRecord(payload) ? payload : {}
+    const authorizationCode = nonEmptyString(record.authorization_code)
+    const codeVerifier = nonEmptyString(record.code_verifier)
+    if (authorizationCode === undefined || codeVerifier === undefined) {
+      throw new OAuthServiceError('oauth-token-exchange-failed', 'ChatGPT confirmed the device code but returned no authorization code.')
+    }
+    return { authorizationCode, codeVerifier }
   }
 
   private refreshCredentials(stored: StoredOAuthCredentials): Promise<StoredOAuthCredentials> {
@@ -489,11 +735,7 @@ export class OAuthService {
         account: null,
         ...poolStatus,
         storage: { ...this.store.storage, available: storageAvailable },
-        login: {
-          active: active !== null,
-          loginId: active?.id ?? null,
-          expiresAt: active === null ? null : Math.floor(active.expiresAt / 1000),
-        },
+        login: this.loginStatus(active),
         ...(this.lastLoginError === undefined ? {} : { error: this.lastLoginError }),
       }
     }
@@ -508,18 +750,34 @@ export class OAuthService {
       },
       ...poolStatus,
       storage: { ...this.store.storage, available: storageAvailable },
-      login: {
-        active: active !== null,
-        loginId: active?.id ?? null,
-        expiresAt: active === null ? null : Math.floor(active.expiresAt / 1000),
-      },
+      login: this.loginStatus(active),
       ...(this.lastLoginError === undefined ? {} : { error: this.lastLoginError }),
+    }
+  }
+
+  /**
+   * The `login` slice of the status, shared by both branches above.
+   *
+   * A device flow also carries its code: the card is the only place the user can
+   * read it, and a settings page opened a second time (or reloaded) would
+   * otherwise show "waiting" with nothing to type anywhere on it.
+   */
+  private loginStatus(active: ActiveLogin | null): OAuthStatusDto['login'] {
+    const device = active?.device
+    return {
+      active: active !== null,
+      loginId: active?.id ?? null,
+      expiresAt: active === null ? null : Math.floor(active.expiresAt / 1000),
+      // `now` is this host's clock at the moment the answer is built, not at the
+      // start of the flow: the card counts `expiresAt - now` against its own
+      // elapsed time, so a browser with a skewed clock still counts correctly.
+      ...(device === undefined ? {} : { device: { ...device, now: Math.floor(this.now() / 1000) } }),
     }
   }
 
   private completeLogin(loginId: string): void {
     if (this.activeLogin?.id !== loginId) return
-    clearTimeout(this.activeLogin.timeout)
+    this.activeLogin.stop()
     this.activeLogin = null
     this.lastLoginError = undefined
     this.publish({ type: 'completed', loginId })
@@ -528,7 +786,7 @@ export class OAuthService {
 
   private failLogin(loginId: string, error: unknown): void {
     if (this.activeLogin?.id !== loginId) return
-    clearTimeout(this.activeLogin.timeout)
+    this.activeLogin.stop()
     this.activeLogin = null
     const mapped = publicError(error, 'oauth-callback-invalid')
     this.lastLoginError = mapped
@@ -539,9 +797,10 @@ export class OAuthService {
   private cancelActive(error: OAuthServiceError, outcome: 'cancelled' | 'failed'): void {
     const active = this.activeLogin
     if (active === null) return
-    clearTimeout(active.timeout)
+    // Nulled before the teardown runs: aborting the poll loop makes it reject,
+    // and that rejection must not be published a second time as a failure.
     this.activeLogin = null
-    active.server.cancel(error)
+    active.stop()
     this.publish(outcome === 'cancelled'
       ? { type: 'cancelled', loginId: active.id }
       : { type: 'failed', loginId: active.id, error: publicError(error) })
@@ -661,6 +920,142 @@ function maskEmail(email: string | undefined): string | null {
 function maskAccountId(accountId: string | undefined): string | null {
   if (accountId === undefined) return null
   return `…${accountId.slice(-4)}`
+}
+
+/** A device grant as the poll loop needs it: the wire fields, already parsed. */
+interface DeviceGrant {
+  authId: string
+  userCode: string
+  /** Seconds the grant asks to wait between confirmation checks. */
+  interval: number
+  /** Deadline, Unix milliseconds. */
+  expiresAt: number
+}
+
+/** One confirmation check: still waiting, or the pair that redeems the grant. */
+type DeviceTokenOutcome = 'pending' | { authorizationCode: string; codeVerifier: string }
+
+/**
+ * How long to wait before the next confirmation check.
+ *
+ * Two clamps, for two different bad values. A floor keeps a fractional interval
+ * (a grant answering `"0.2"`) from turning the loop into a spin against the
+ * service — `"0"`, a negative and anything unparseable never reach it, because
+ * {@link parseGrantInterval} already turns those into the 5 s default. The
+ * deadline keeps an absurd interval from sleeping past the point where the grant
+ * dies, which would leave the card "waiting" for a code that can no longer be
+ * redeemed. The normal value — `"5"` — passes through untouched.
+ */
+function pollDelayMs(intervalSeconds: number, remainingMs: number): number {
+  const requested = intervalSeconds * 1000
+  const capped = Math.min(requested, Math.max(remainingMs, 0))
+  return Math.max(OAUTH_DEVICE_MIN_POLL_INTERVAL_MS, capped)
+}
+
+/** The grant's `interval`, which arrives as a string on the live service. */
+function parseGrantInterval(value: unknown): number {
+  const seconds = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : OAUTH_DEVICE_POLL_INTERVAL_SECONDS
+}
+
+/**
+ * The grant's `expires_at`, which the live service sends as an ISO timestamp.
+ *
+ * A number is accepted too, and its magnitude decides the unit: a Unix timestamp
+ * in seconds and one in milliseconds differ by three orders of magnitude, so
+ * guessing is safe here in a way it is not for a field that could be either by a
+ * factor of a thousand. Anything unparseable falls back to the grant lifetime
+ * this client expects — the deadline still exists, it just is not the grant's.
+ */
+function parseGrantDeadline(value: unknown, now: number): number {
+  if (typeof value === 'string' && value !== '') {
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value < 1_000_000_000_000 ? value * 1000 : value
+  }
+  return now + OAUTH_DEVICE_GRANT_LIFETIME_MS
+}
+
+/**
+ * Wait `ms`, or less if the sign-in is cancelled first.
+ *
+ * Resolves rather than rejects on abort: the caller already knows it was
+ * cancelled and checks the signal, so a rejected promise here would only add an
+ * unhandled path that says the same thing a second time.
+ */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const done = (): void => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    timer.unref?.()
+    signal.addEventListener('abort', done, { once: true })
+  })
+}
+
+/** Status values that mean "the user has not confirmed yet", not a failure. */
+const DEVICE_PENDING_STATUSES = new Set(['pending', 'authorization_pending', 'deviceauth_pending', 'not_found'])
+
+/**
+ * Whether one confirmation check was the grant saying "not yet".
+ *
+ * Two ways to say it, and the second is deliberately narrow. The live service
+ * answers `403`/`404` while waiting, and those statuses mean "not yet" whatever
+ * the body says. A body that merely *looks* pending counts only on a status that
+ * could carry it — a `200`, or the `400` some builds answer — because honouring it
+ * everywhere let a `401`/`429`/`500` that happened to mention `status: "pending"`
+ * retry an invalid user code until the deadline, hiding a reason the user could
+ * have been told at once. Every other status is a failure, read by its code.
+ */
+function isPendingDeviceAnswer(response: Response, payload: unknown): boolean {
+  if (response.status === 403 || response.status === 404) return true
+  if (!response.ok && response.status !== 400) return false
+  if (!isRecord(payload)) return false
+  const status = payload.status
+  if (typeof status === 'string' && DEVICE_PENDING_STATUSES.has(status.toLowerCase())) return true
+  const error = payload.error
+  if (isRecord(error)) {
+    const code = error.code
+    if (typeof code === 'string' && DEVICE_PENDING_STATUSES.has(code.toLowerCase())) return true
+  }
+  return false
+}
+
+/**
+ * The error code a device endpoint named, if it named one.
+ *
+ * A named `error.code` is read before the top-level `status`, so a status word
+ * (`pending`) cannot be quoted as the reason when the body also says what went
+ * wrong.
+ */
+function deviceErrorIdentifier(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined
+  const candidates: unknown[] = [payload.code]
+  const error = payload.error
+  if (typeof error === 'string') candidates.push(error)
+  else if (isRecord(error)) candidates.push(error.code, error.type)
+  candidates.push(payload.status)
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && /^[a-z0-9_.-]{1,64}$/i.test(candidate)) return candidate
+  }
+  return undefined
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function oauthErrorIdentifier(response: Response): Promise<string | null> {

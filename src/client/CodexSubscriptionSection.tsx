@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CodexReasoningSummary, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
+import type { CodexReasoningSummary, DeviceLoginDto, PluginStatusDto, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
@@ -13,13 +13,42 @@ import { NS } from './locales.ts'
 import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
-type BusyAction = 'login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences'
+type BusyAction = 'login' | 'device-login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences'
   | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt' | 'adopt-disable' | null
 type Translate = Props['t']
+
+/**
+ * The device panel: the host's answer, plus the grant's deadline on this
+ * browser's clock.
+ *
+ * The host states the deadline together with its own `now`, so the remaining
+ * time is `expiresAt - now` — measured from the moment the answer arrived, with
+ * this browser's elapsed time. Comparing the host's `expiresAt` against the
+ * browser's wall clock instead rendered a wrong countdown whenever the two
+ * clocks disagreed, which is the normal case for a remote/headless host.
+ */
+interface DevicePanel {
+  login: DeviceLoginDto
+  deadlineMs: number
+}
+
+/** The grant's deadline, moved onto this browser's clock. */
+function panelDeadlineMs(login: DeviceLoginDto): number {
+  return Date.now() + (login.expiresAt - login.now) * 1000
+}
 
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const apiRef = useRef(new SubscriptionApi())
   const eventSourceRef = useRef<EventSource | null>(null)
+  /**
+   * The flow the card knows it started.
+   *
+   * Cancel used to read the id from the last status answer, which is a race the
+   * user could lose: the panel is on screen the instant the host answers, and a
+   * Cancel pressed before the status reload finished went nowhere. The id the
+   * start route just returned is the truth about what is running.
+   */
+  const loginIdRef = useRef<string | null>(null)
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
   const [status, setStatus] = useState<PluginStatusDto | null>(null)
@@ -27,6 +56,15 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [authUrl, setAuthUrl] = useState<string | null>(null)
   const [popupBlocked, setPopupBlocked] = useState(false)
+  /** The device code on screen. Non-null means the device panel is what is open. */
+  const [deviceLogin, setDeviceLogin] = useState<DevicePanel | null>(null)
+  const [deviceError, setDeviceError] = useState<string | null>(null)
+  /** Which of the two panel values was copied a moment ago: the code or the link. */
+  const [copiedField, setCopiedField] = useState<'code' | 'link' | null>(null)
+  /** Cleared on unmount, so a panel closed inside 1.5 s leaves no timer behind. */
+  const copiedTimerRef = useRef<number | null>(null)
+  /** Ticked once a second, so the panel's countdown is a clock and not a snapshot. */
+  const [now, setNow] = useState(() => Date.now())
   const [resetCreditNotice, setResetCreditNotice] = useState<string | null>(null)
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
@@ -59,19 +97,30 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
       document.removeEventListener('visibilitychange', refreshWhenVisible)
       quotaFollowUp.current?.cancel()
       eventSourceRef.current?.close()
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current)
     }
   }, [load])
 
-  const watchLogin = useCallback((loginId: string) => {
+  const watchLogin = useCallback((loginId: string, mode: 'browser' | 'device' = 'browser') => {
+    loginIdRef.current = loginId
     eventSourceRef.current?.close()
     const source = apiRef.current.events(loginId)
     eventSourceRef.current = source
     const finish = async (message?: string): Promise<void> => {
       source.close()
       eventSourceRef.current = null
+      loginIdRef.current = null
       setBusy(null)
       setAuthUrl(null)
-      if (message !== undefined) setError(message)
+      if (mode === 'device') {
+        // A terminal failure leaves the panel open with the reason on it: the
+        // code itself is still on screen, and closing would take away the only
+        // thing that explains what the user was doing.
+        if (message === undefined) setDeviceLogin(null)
+        else setDeviceError(message)
+      } else if (message !== undefined) {
+        setError(message)
+      }
       // Preserve the terminal OAuth error while refreshing the account DTO.
       await load(true)
     }
@@ -88,8 +137,24 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
 
   useEffect(() => {
     const loginId = status?.login.active ? status.login.loginId : null
-    if (loginId !== null && loginId !== undefined && eventSourceRef.current === null) watchLogin(loginId)
-  }, [status?.login.active, status?.login.loginId, watchLogin])
+    if (loginId === null || loginId === undefined) return
+    const device = status?.login.device
+    loginIdRef.current = loginId
+    if (eventSourceRef.current === null) watchLogin(loginId, device === undefined || device === null ? 'browser' : 'device')
+    // A card opened (or reloaded) mid-flow takes the code from the host: the
+    // grant is still waiting upstream, and the code is the only way to finish it.
+    if (device !== undefined && device !== null) {
+      setDeviceLogin((current) => current ?? { login: device, deadlineMs: panelDeadlineMs(device) })
+    }
+  }, [status?.login.active, status?.login.loginId, status?.login.device, watchLogin])
+
+  // The countdown runs only while a device panel is open.
+  useEffect(() => {
+    if (deviceLogin === null) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [deviceLogin])
 
   const startLogin = async (): Promise<void> => {
     setBusy('login')
@@ -110,15 +175,91 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     }
   }
 
+  /**
+   * The third way in: a code the user types on their own machine.
+   *
+   * Nothing is opened and nothing is listened on locally — that is the whole
+   * point of this path on a server — so the answer is immediately shown instead
+   * of being handed to a popup.
+   */
+  const startDeviceLogin = async (): Promise<void> => {
+    setBusy('device-login')
+    setError(null)
+    setDeviceError(null)
+    setCopiedField(null)
+    try {
+      const login = await apiRef.current.startDeviceLogin()
+      setDeviceLogin({ login, deadlineMs: panelDeadlineMs(login) })
+      watchLogin(login.loginId, 'device')
+      // The wait is the host's now, not this button's: the panel holds the code
+      // and its own Cancel, which must be pressable while the flow is pending.
+      setBusy(null)
+      await load(true)
+    } catch (cause) {
+      // No panel exists to hold the reason when the grant itself could not be
+      // requested, so it goes to the card's strip. A retry from an OPEN panel
+      // keeps its answer on the panel, beside the code it is about.
+      if (deviceLogin === null) setError(messageOf(cause))
+      else setDeviceError(messageOf(cause))
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Copy one of the panel's two values.
+   *
+   * One handler for both buttons, because they are the same action and must look
+   * and behave identically. The code is stripped of whitespace on the way out:
+   * what the panel renders is a code in a box, and a copied value with a stray
+   * space or line break is refused by the page the user pastes it into.
+   */
+  const copyDeviceValue = async (field: 'code' | 'link'): Promise<void> => {
+    if (deviceLogin === null) return
+    const value = field === 'code' ? deviceLogin.login.userCode.replace(/\s+/g, '') : deviceLogin.login.verificationUrl
+    if (value === '') return
+    // No clipboard at all (insecure origin, an old browser): silent no-op rather
+    // than a crash. Both values stay on screen and can be copied by hand.
+    if (typeof navigator === 'undefined' || navigator.clipboard === undefined) return
+    try {
+      await navigator.clipboard.writeText(value)
+    } catch {
+      // Denied permission is the same situation as no clipboard: nothing is lost,
+      // so nothing is reported.
+      return
+    }
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current)
+    setCopiedField(field)
+    copiedTimerRef.current = window.setTimeout(() => {
+      copiedTimerRef.current = null
+      setCopiedField(null)
+    }, 1_500)
+  }
+
+  /**
+   * Stop the running sign-in, or close a panel that has nothing left to stop.
+   *
+   * A terminal failure ends the flow on the host (`activeLogin` is empty) and the
+   * card forgets the id with it — but the panel stays open on purpose, because
+   * the code is still the only thing that explains what happened. Cancel is the
+   * only control on it, so with nothing to cancel it has to mean "close", or an
+   * expired code could only be got rid of by starting a new sign-in.
+   */
   const cancelLogin = async (): Promise<void> => {
-    const loginId = status?.login.loginId
-    if (loginId === null || loginId === undefined) return
+    const loginId = loginIdRef.current ?? status?.login.loginId
+    if (loginId === null || loginId === undefined) {
+      setDeviceLogin(null)
+      setDeviceError(null)
+      return
+    }
     setBusy('login')
     try {
       await apiRef.current.cancelLogin(loginId)
       eventSourceRef.current?.close()
       eventSourceRef.current = null
+      loginIdRef.current = null
       setAuthUrl(null)
+      setDeviceLogin(null)
+      setDeviceError(null)
       await load()
     } catch (cause) {
       setError(messageOf(cause))
@@ -319,6 +460,8 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     eventSourceRef.current = null
     setAuthUrl(null)
     setConnection(null)
+    setDeviceLogin(null)
+    setDeviceError(null)
     await load()
   })
 
@@ -401,6 +544,24 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
                 answer. Clicking it with nothing there is not a dead end and needs
                 no substitute prose: the host refuses in a sentence, and that
                 sentence lands in the card's existing error strip. */}
+            {/* The device-code path, kept between the two existing entries: it is
+                the same sign-in as the primary button, obtained without a
+                loopback listener, so a host with no browser on it (or a page
+                served over HTTPS, which cannot reach localhost:1455 at all) can
+                still add an account.
+
+                Disabled for EVERY busy action, including its own: the two
+                starts are mutually exclusive on the host, and a button that
+                stays clickable while its request is in flight is a second
+                request nobody meant to send. */}
+            <button
+              className="dsha-btn"
+              disabled={busy !== null}
+              aria-label={t('deviceCodeLogin')}
+              onClick={() => void startDeviceLogin()}
+            >
+              {busy === 'device-login' ? t('deviceCodeLoginStarting') : t('deviceCodeLogin')}
+            </button>
             <button
               className="dsha-btn"
               disabled={busy !== null}
@@ -417,7 +578,37 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           </>
         )}
       >
-        {login?.active ? <p className="dsha-muted" role="status">{t('pending')}</p> : null}
+        {login?.active && deviceLogin === null ? <p className="dsha-muted" role="status">{t('pending')}</p> : null}
+        {deviceLogin !== null ? (
+          <div className="dsh-codex-device" role="group" aria-label={t('deviceCodeLogin')}>
+            <p className="dsha-muted">{t('deviceCodeHint')}</p>
+            <div className="dsh-codex-device-row">
+              <span className="dsh-codex-device-value">
+                <code className="dsh-codex-device-code" aria-label={t('deviceCodeLabel')}>{deviceLogin.login.userCode}</code>
+                <CopyButton
+                  copied={copiedField === 'code'}
+                  label={t('deviceCodeCopy')}
+                  onClick={() => void copyDeviceValue('code')}
+                />
+              </span>
+              <span className="dsh-codex-device-value">
+                <a className="dsh-codex-link" href={deviceLogin.login.verificationUrl} target="_blank" rel="noreferrer">{t('deviceCodeOpen')}</a>
+                <CopyButton
+                  copied={copiedField === 'link'}
+                  label={t('deviceCodeCopy')}
+                  onClick={() => void copyDeviceValue('link')}
+                />
+              </span>
+            </div>
+            <p className="dsha-muted" role="status">
+              {t('deviceCodeWaiting').replace('{time}', formatRemaining(deviceLogin.deadlineMs, now))}
+            </p>
+            {deviceError !== null ? <p className="dsh-codex-error" role="alert">{deviceError}</p> : null}
+            <div className="dsha-actions">
+              <Button disabled={busy !== null} onClick={cancelLogin}>{t('cancel')}</Button>
+            </div>
+          </div>
+        ) : null}
         {popupBlocked ? <p className="dsh-codex-error">{t('popupBlocked')}</p> : null}
         {authUrl !== null ? <a className="dsh-codex-link" href={authUrl} target="_blank" rel="noreferrer">{t('continueLogin')}</a> : null}
         <div className="dsha-actions">
@@ -834,6 +1025,60 @@ function individualLimitLabel(limit: NonNullable<PluginStatusDto['quota']['indiv
     limit.resetsAt !== null && limit.resetsAt !== undefined ? `${t('resets')}: ${formatReset(limit.resetsAt)}` : null,
   ].filter((part): part is string => part !== null)
   return parts.length > 0 ? parts.join(' · ') : t('unknown')
+}
+
+/**
+ * `m:ss` left on the grant, floored at zero — the panel's countdown.
+ *
+ * Both arguments are on the same clock: `deadlineMs` was derived from the host's
+ * `expiresAt - now` pair when the answer arrived (see {@link panelDeadlineMs}),
+ * so this subtraction never mixes a host timestamp with a browser one.
+ */
+function formatRemaining(deadlineMs: number, nowMs: number): string {
+  const total = Math.max(0, Math.floor(deadlineMs - nowMs) / 1000)
+  const minutes = Math.floor(total / 60)
+  const seconds = Math.floor(total % 60)
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+/**
+ * The panel's copy control, used twice.
+ *
+ * One component rather than two buttons with the same classes: the two icons sat
+ * at different sizes in the first version, and the only durable fix is that there
+ * is exactly one of them. The tooltip never changes — the tick is the feedback,
+ * so the affordance keeps saying what it does.
+ */
+function CopyButton({ copied, label, onClick }: { copied: boolean; label: string; onClick: () => void }): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className={copied ? 'dsh-codex-copy dsh-codex-copy-done' : 'dsh-codex-copy'}
+      title={label}
+      aria-label={label}
+      data-copied={copied ? 'true' : 'false'}
+      onClick={onClick}
+    >
+      {copied ? <CheckIcon /> : <CopyIcon />}
+    </button>
+  )
+}
+
+function CopyIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <rect x="5.6" y="5.6" width="8" height="8" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M10.4 5.6V4.2A1.6 1.6 0 0 0 8.8 2.6H4.2A1.6 1.6 0 0 0 2.6 4.2v4.6A1.6 1.6 0 0 0 4.2 10.4h1.4" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  )
+}
+
+function CheckIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <path d="M3 8.4l3.3 3.3L13 4.8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
 }
 
 function formatDate(seconds: number | undefined | null): string {
