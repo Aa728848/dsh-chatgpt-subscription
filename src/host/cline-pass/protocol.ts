@@ -165,6 +165,14 @@ export function parseRouting(json: unknown): RoutingFacts {
   }
 }
 
+/**
+ * Nodes one payload walk may visit before giving up.
+ *
+ * The hunts run per streamed frame, and a frame is small, but a pathological
+ * payload must not turn a cheap re-read into an unbounded walk.
+ */
+const HUNT_NODE_BUDGET = 4_000
+
 /** `provider_metadata` of one node, when present. */
 function providerMetadataOf(node: Record<string, unknown>): Record<string, unknown> | null {
   return isRecord(node.provider_metadata) ? node.provider_metadata : null
@@ -177,11 +185,12 @@ function providerMetadataOf(node: Record<string, unknown>): Record<string, unkno
  * checked by the caller first; this walk covers the nestings between the shapes
  * seen so far, so a frame the fast path does not know still yields its routing.
  */
-function huntRouting(node: unknown, depth = 0): Record<string, unknown> | null {
-  if (depth > 8 || node === null || typeof node !== 'object') return null
+function huntRouting(node: unknown, depth = 0, budget: { left: number } = { left: HUNT_NODE_BUDGET }): Record<string, unknown> | null {
+  if (depth > 8 || budget.left <= 0 || node === null || typeof node !== 'object') return null
+  budget.left -= 1
   if (Array.isArray(node)) {
     for (const entry of node) {
-      const found = huntRouting(entry, depth + 1)
+      const found = huntRouting(entry, depth + 1, budget)
       if (found !== null) return found
     }
     return null
@@ -193,7 +202,7 @@ function huntRouting(node: unknown, depth = 0): Record<string, unknown> | null {
     : (isRecord(record.routing) ? record.routing : null)
   if (routing !== null && typeof routing.finalProvider === 'string') return routing
   for (const value of Object.values(record)) {
-    const found = huntRouting(value, depth + 1)
+    const found = huntRouting(value, depth + 1, budget)
     if (found !== null) return found
   }
   return null
@@ -204,11 +213,12 @@ function huntRouting(node: unknown, depth = 0): Record<string, unknown> | null {
  * carries it. Absent means the answer did not prove a first-party upstream —
  * the anonymous contributor route carries no `deepseek` namespace at all.
  */
-function huntFingerprint(node: unknown, depth = 0): string | null {
-  if (depth > 8 || node === null || typeof node !== 'object') return null
+function huntFingerprint(node: unknown, depth = 0, budget: { left: number } = { left: HUNT_NODE_BUDGET }): string | null {
+  if (depth > 8 || budget.left <= 0 || node === null || typeof node !== 'object') return null
+  budget.left -= 1
   if (Array.isArray(node)) {
     for (const entry of node) {
-      const found = huntFingerprint(entry, depth + 1)
+      const found = huntFingerprint(entry, depth + 1, budget)
       if (found !== null) return found
     }
     return null
@@ -222,7 +232,7 @@ function huntFingerprint(node: unknown, depth = 0): string | null {
     }
   }
   for (const value of Object.values(record)) {
-    const found = huntFingerprint(value, depth + 1)
+    const found = huntFingerprint(value, depth + 1, budget)
     if (found !== null) return found
   }
   return null

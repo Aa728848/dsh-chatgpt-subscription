@@ -217,13 +217,20 @@ export class ClinePassEngine {
         if (attempt.upstream === null && attempt.excludeList.length > 0 && outcome.error !== '') this.learnFromError(model, outcome.error)
       }
     }
-    const error = last === null
+    const failure = last === null
       ? 'no candidate succeeded'
       : last.ok !== true
         ? last.error
         : last.adherence === 'violated'
           ? `an excluded channel served the request: ${last.routing.finalProvider ?? '(unknown)'}`
           : `the gateway ignored the pin: served by ${last.routing.finalProvider ?? '(unknown)'}`
+    // A capability filter is applied to every attempt, so a routing refusal is
+    // otherwise indistinguishable from "no provider is up". Name the filter in
+    // the failure so the pin editor is an obvious next step.
+    const has = (pinConfig.has ?? []).filter((name) => typeof name === 'string' && name.trim() !== '')
+    const error = has.length > 0 && /provider|capabilit|filter/i.test(failure)
+      ? `${failure} (this pin also requires capabilities [${has.join(', ')}]; clear them in the pin editor to widen routing)`
+      : failure
     return { ok: false, result: last, trace, error, warnings: last?.warnings ?? [] }
   }
 
@@ -380,7 +387,14 @@ export class ClinePassEngine {
       })
       const payload = unwrapEnvelope(result.json)
       const message = errorText(payload.error) || result.text
-      return extractAvailableProviders(message, pipeline)
+      const listed = extractAvailableProviders(message, pipeline)
+      if (listed !== null && listed.length > 0) return listed
+      // The `__probe__` sentinel is occasionally ignored and answered with a
+      // completion. That answer still names the channel that served it, so learn
+      // that one instead of reporting "no channels discovered".
+      const routing = parseRouting(payload)
+      if (routing.finalProvider !== null && routing.finalProvider !== '') return [routing.finalProvider]
+      return listed
     } catch {
       return null
     }

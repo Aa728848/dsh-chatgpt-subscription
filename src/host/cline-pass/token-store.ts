@@ -376,6 +376,32 @@ function positiveInteger(value: unknown, fallback: number, allowZero = false): n
   return value
 }
 
+/**
+ * Keep a legacy gateway row the user is demonstrably using.
+ *
+ * Rows written before `origin` existed carry none, and the compact list hides
+ * every unmarked non-`cline-pass/*` row. A row that is enabled, pinned or given
+ * a context override is one the user already selected, so hiding it would drop
+ * a working model out of the picker on upgrade; those rows become `custom`
+ * instead. Everything else stays hidden as a search-index row.
+ */
+function promoteInUseCatalogRows(
+  models: ClinePassCatalogModel[],
+  enabledModelIds: string[] | null,
+  pins: Record<string, unknown>,
+  contextWindowOverrides: Record<string, number>,
+): ClinePassCatalogModel[] {
+  const inUse = new Set<string>([
+    ...(Array.isArray(enabledModelIds) ? enabledModelIds : []),
+    ...Object.keys(pins),
+    ...Object.keys(contextWindowOverrides),
+  ])
+  if (inUse.size === 0) return models
+  return models.map((model) => model.origin !== undefined || model.id.startsWith('cline-pass/') || !inUse.has(model.id)
+    ? model
+    : { ...model, origin: 'custom' as const })
+}
+
 /** Parse one whole settings document. */
 export function parseClinePassModelSettings(value: unknown): ClinePassModelSettings {
   const record = typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -386,16 +412,18 @@ export function parseClinePassModelSettings(value: unknown): ClinePassModelSetti
     : Array.isArray(record.enabledModelIds)
       ? record.enabledModelIds.filter((id): id is string => typeof id === 'string')
       : null
+  const pins = readPins(record.pins)
+  const contextWindowOverrides = readNumberOverrides(record.contextWindowOverrides)
   return {
     enabled: record.enabled !== false,
     baseURL: typeof record.baseURL === 'string' && record.baseURL.trim() !== '' ? record.baseURL.trim() : DEFAULT_BASE_URL,
     enabledModelIds,
-    catalogModels: readCatalogModels(record.catalogModels),
-    pins: readPins(record.pins),
+    catalogModels: promoteInUseCatalogRows(readCatalogModels(record.catalogModels), enabledModelIds, pins, contextWindowOverrides),
+    pins,
     hiddenModels: Array.isArray(record.hiddenModels)
       ? record.hiddenModels.filter((id): id is string => typeof id === 'string')
       : [],
-    contextWindowOverrides: readNumberOverrides(record.contextWindowOverrides),
+    contextWindowOverrides,
     defaultContextWindow: positiveInteger(record.defaultContextWindow, DEFAULT_CONTEXT_WINDOW),
     defaultMaxTokens: positiveInteger(record.defaultMaxTokens, DEFAULT_MAX_TOKENS),
     maxConcurrentRequests: positiveInteger(record.maxConcurrentRequests, DEFAULT_MAX_CONCURRENT_REQUESTS, true),
