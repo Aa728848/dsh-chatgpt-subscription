@@ -826,13 +826,18 @@ export function delegationDenialReason(
   // the branch — never the absence of an argument — and an undeclared-route tool
   // is still enforced, through the route its child would inherit.
   if (declaresRouteParameters?.(agent, toolName) === false) {
-    if (requestedProvider !== undefined && requestedModel !== undefined) {
-      return inheritOverrideReason(toolName, requestedProvider, requestedModel)
+    // A complete pair is never reclassified here. The probe resolves the registry
+    // view from the call, which can be a scope that does not carry the preset's
+    // delegation registration; answering "no route parameters" for a tool the
+    // model was shown WITH them denied every explicit dispatch with a reason no
+    // call could satisfy. The pair still faces the allowlist check below, so this
+    // branch can only soften an impossible denial — never an authorization.
+    if (requestedProvider === undefined && requestedModel === undefined) {
+      return inheritedRouteDenial(agent, toolName, allowed)
     }
-    if (requestedProvider !== undefined || requestedModel !== undefined) {
+    if (requestedProvider === undefined || requestedModel === undefined) {
       return routeFieldsUnavailableReason(toolName, inheritedRouteOf(agent), allowed)
     }
-    return inheritedRouteDenial(agent, toolName, allowed)
   }
   // The route is explicit only when the model named a complete pair. A call that
   // omits either half would let the built-in tool fall back to the configured
@@ -1010,6 +1015,14 @@ export function routeParameterProbe(ctx: Context): RouteParameterProbe | undefin
     if (definition === undefined) return undefined
     const parameters = asRecord(definition.parameters)
     if (parameters === undefined) return undefined
+    // The registry hands over the model-facing JSON Schema, whose argument names
+    // live under `properties`: `{ type: 'object', properties: { provider, model } }`.
+    // Reading only the flat form answered `false` for every real tool, which sent
+    // each explicit dispatch down the inherit branch and denied it with a reason
+    // the call could not satisfy. A hand-built definition may still flatten the
+    // names onto the parameter object, so both readings are honoured.
+    const properties = asRecord(parameters['properties'])
+    if (properties !== undefined) return 'provider' in properties || 'model' in properties
     return 'provider' in parameters || 'model' in parameters
   }
 }

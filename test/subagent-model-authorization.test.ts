@@ -676,12 +676,20 @@ describe('route-parameter adaptivity', () => {
     )).toBeUndefined()
   })
 
-  it('refuses a route a parameterless tool cannot accept, and says which problem it is', () => {
+  it('authorizes a complete pair even when the probe says the tool has no parameters', () => {
+    // A false probe answer must never make an explicit dispatch impossible to
+    // satisfy: the pair is still judged against the allowlist, and an
+    // unauthorized one is refused for THAT reason rather than for its shape.
     const agent = recordingAgent([GEMINI, OPUS])
     expect(delegationDenialReason(
       agent, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' },
       PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
-    )).toContain('accepts no')
+    )).toBeUndefined()
+    expect(delegationDenialReason(
+      agent, 'subagent', { provider: 'minimax-code', model: 'MiniMax-M3.1-Flash' },
+      PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
+    )).toContain('is not on the Session allowlist')
+    // A half-named route still gets the diagnostic that names the real problem.
     const partial = delegationDenialReason(
       agent, 'subagent', { provider: 'antigravity' }, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
     )
@@ -699,13 +707,23 @@ describe('route-parameter adaptivity', () => {
   })
 
   it('reads the live parameter table through the tools registry', () => {
+    // The registry serves the model-facing JSON Schema, so the argument names sit
+    // under `properties`. A probe that read the parameter object directly would
+    // answer `false` for every real tool and deny each explicit dispatch, which is
+    // exactly the regression this shape guards.
     const withRoutes = routeParameterProbe({ tools: { definitions: () => [
-      { name: 'subagent', parameters: { provider: {}, model: {}, prompt: {} } },
+      { name: 'subagent', parameters: { type: 'object', properties: { provider: {}, model: {}, prompt: {} } } },
     ] } } as never)
     expect(withRoutes?.({}, 'subagent')).toBe(true)
 
+    // A definition that flattens the names onto the parameter object is still read.
+    const flattened = routeParameterProbe({ tools: { definitions: () => [
+      { name: 'subagent', parameters: { provider: {}, model: {}, prompt: {} } },
+    ] } } as never)
+    expect(flattened?.({}, 'subagent')).toBe(true)
+
     const withoutRoutes = routeParameterProbe({ tools: { definitions: () => [
-      { name: 'subagent', parameters: { prompt: {}, description: {} } },
+      { name: 'subagent', parameters: { type: 'object', properties: { prompt: {}, description: {} } } },
     ] } } as never)
     expect(withoutRoutes?.({}, 'subagent')).toBe(false)
     expect(withoutRoutes?.({}, 'absent')).toBeUndefined()
