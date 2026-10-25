@@ -135,8 +135,14 @@ function generateOptions(
 interface TurnResult {
   readonly failure?: { message: string; code?: string }
   readonly fetchMock: ReturnType<typeof vi.fn>
-  /** Serialized size of every body that reached fetch, in send order. */
+  /** Serialized size of every CHAT body that reached fetch, in send order. */
   readonly sentBytes: number[]
+  /** How many hosted-file upload attempts the turn made. */
+  readonly filesCalls: number
+  /** How many chat requests the turn made. */
+  readonly chatCalls: number
+  /** Raw chat bodies, in send order. */
+  readonly chatBodies: string[]
 }
 
 /**
@@ -151,8 +157,24 @@ async function runTurn(
 ): Promise<TurnResult> {
   for (const [name, value] of Object.entries(size.env ?? {})) vi.stubEnv(name, value)
   const sentBytes: number[] = []
-  const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
-    sentBytes.push(Buffer.byteLength(String(init?.body ?? ''), 'utf8'))
+  const chatBodies: string[] = []
+  let filesCalls = 0
+  let chatCalls = 0
+  const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+    // A turn that carries media offers it to the hosted-file route FIRST. That call
+    // is answered separately here rather than counted as a chat turn, so the size
+    // assertions below describe the CHAT body — and so a test can state whether the
+    // clip travelled as a reference or inline.
+    if (String(input).endsWith('/v1/files')) {
+      filesCalls += 1
+      // Refused, which is the fallback this file's ceiling tests are about: the
+      // chat request then has to carry the media itself.
+      return new Response(JSON.stringify({ error: { message: 'The requested resource was not found' } }), { status: 404 })
+    }
+    chatCalls += 1
+    const raw = String(init?.body ?? '')
+    chatBodies.push(raw)
+    sentBytes.push(Buffer.byteLength(raw, 'utf8'))
     return sseResponse([
       { choices: [{ delta: { content: 'ok' } }] },
       { choices: [{ delta: {}, finish_reason: 'stop' }] },
@@ -162,7 +184,7 @@ async function runTurn(
   const request = generateOptions(model, size)
   try {
     for await (const _chunk of adapter.stream(request)) { /* the verdict is the point */ }
-    return { fetchMock, sentBytes }
+    return { fetchMock, sentBytes, filesCalls, chatCalls, chatBodies }
   } catch (error) {
     const failure = error as { message?: unknown; code?: unknown }
     return {
@@ -172,6 +194,9 @@ async function runTurn(
       },
       fetchMock,
       sentBytes,
+      filesCalls,
+      chatCalls,
+      chatBodies,
     }
   }
 }
@@ -327,10 +352,18 @@ describe('a video request keeps its own 64 MiB tier', () => {
   it('sends a 13 MB clip on the 1M tier, which the text ceiling would refuse', async () => {
     const turn = await runTurn('k3.1-pro', { videoBytes: 13 * MIB })
     expect(turn.failure).toBeUndefined()
-    expect(turn.fetchMock).toHaveBeenCalledTimes(1)
-    // Base64 inflates by 4/3, so the serialized body is far past BOTH text tiers:
-    // only the video budget can have accepted it.
+    // The clip is offered to the hosted-file route first and refused there, so the
+    // CLIP ITSELF is what travels: one files call, then exactly one chat request.
+    expect(turn.filesCalls).toBe(1)
+    expect(turn.chatCalls).toBe(1)
+    expect(turn.fetchMock).toHaveBeenCalledTimes(2)
+    // Base64 inflates by 4/3, so the serialized chat body is far past BOTH text
+    // tiers AND carries the clip inline — only the 64 MiB video budget can have
+    // accepted it. Asserting the body were merely smaller would lose exactly the
+    // property this test exists to prove.
     expect(turn.sentBytes[0]).toBeGreaterThan(8 * MIB)
+    expect(turn.chatBodies[0]).toContain('data:video/mp4;base64,')
+    expect(turn.chatBodies[0]).not.toContain('ms://')
     expect(MAX_VIDEO_MESSAGE_BODY_BYTES).toBe(64 * MIB)
   })
 

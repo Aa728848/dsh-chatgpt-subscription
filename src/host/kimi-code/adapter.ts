@@ -76,19 +76,28 @@ import {
   type BodyFitContext,
   type KimiCodeInBandStreamError,
   type KimiCodeStreamState,
+  type RequestMediaOptions,
 } from './mapper.ts'
+import {
+  createMediaFilesUploader,
+  type KimiMediaFilesUploader,
+} from './media-files.ts'
 import {
   imagesToOffloadCount,
   offloadOldestRequestImages,
   replaceOldestRequestImages,
   requestHasSendableImage,
   requestImagePayloadLengths,
-  requestImageTargetOrOriginal,
+  requestImageTarget,
   MAX_MESSAGE_BODY_BYTES,
   MAX_REQUEST_IMAGE_BYTES,
   MAX_VIDEO_MESSAGE_BODY_BYTES,
   type ResolvedRequestImages,
 } from '../common/request-images.ts';
+// The declaring module, the same way {@link ResolvedRequestImages} comes from its
+// own: mapper.ts re-exports both, but importing a type from where it is declared
+// keeps the two media kinds symmetric and the dependency one hop shorter.
+import type { ResolvedRequestVideos } from '../common/video-request.ts'
 import { orderReasoningEfforts } from '../common/reasoning-efforts.ts'
 
 /**
@@ -334,6 +343,27 @@ function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text))
 }
 
+/**
+ * Cache scope for the single stored credential.
+ *
+ * The user id the sign-in reported is the only stable identity that file has, and
+ * the constant covers a credential stored before any id was recorded — or one
+ * whose sign-in never answered with one. It must stay constant for an account:
+ * a scope that drifted would re-upload every clip on the next turn, while a scope
+ * shared between two accounts would hand one account's file id to another.
+ */
+const LEGACY_ACCOUNT_SCOPE = 'legacy'
+
+function legacyAccountScope(credentials: KimiCodeCredentials): string {
+  const userId = credentials.userId?.trim()
+  return userId === undefined || userId === '' ? LEGACY_ACCOUNT_SCOPE : userId
+}
+
+/** Whether one rejection is a cancellation rather than a failure to report. */
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
+}
+
 /** Short, single-line excerpt of one error body, safe to show a user. */
 export function summarizeFailureBody(raw: string): string {
   const text = raw.replace(/[\r\n\t]+/g, ' ').trim()
@@ -372,6 +402,157 @@ export function summarizeFailureBody(raw: string): string {
  */
 export function isKimiBodySizeRefusal(detail: string): boolean {
   return /\btotal message size\b[^;]{0,64}?\bexceed(?:s|ed)?\b[^;]{0,64}?\blimit\b/i.test(detail)
+}
+
+/**
+ * The sentence the service answers with when a cited hosted file is GONE.
+ *
+ * Measured on this line: a chat body that cites `ms://<id>` for a file the
+ * store no longer holds is refused with HTTP 404 and exactly this text. It is
+ * checked as a case-insensitive substring rather than as an exact body so a JSON
+ * wrapper (`{"error":{"message":"The requested resource was not found"}}`) and a
+ * trailing hash match too.
+ *
+ * DELIBERATELY NARROW, because 404 also means "no such model" and "no such
+ * route" on this endpoint, and neither of those is fixed by resending the same
+ * conversation with inline media. Only this sentence, on a request that really
+ * cited a reference, opens the one inline retry.
+ */
+const MISSING_RESOURCE_PATTERN = /\bthe requested resource was not found\b/i
+
+/** Whether one 404 body is the service refusing a cited file rather than the model. */
+export function isMissingResourceBody(bodyText: string): boolean {
+  return MISSING_RESOURCE_PATTERN.test(bodyText)
+}
+
+/** One readable media occurrence this request intends to upload. */
+export interface PlannedMediaReference {
+  /** Durable attachment id the block cites; the key the mapper looks it up by. */
+  readonly attachmentId: string
+  /** Which wire field cites it afterwards. */
+  readonly kind: 'image' | 'video'
+  /** Media type the upload states as its purpose-carrying type. */
+  readonly mediaType: string
+  /** Decoded bytes, ready to upload. */
+  readonly data: Uint8Array
+}
+
+/**
+ * Body length assumed for one reference while the request is measured.
+ *
+ * The body is measured BEFORE anything is uploaded, so the real id does not
+ * exist yet. 68 characters is longer than an id the uploaded-file route is
+ * documented to mint, and it is deliberately on the long side: a measurement
+ * that over-estimates sends nothing it cannot fit, while one that
+ * under-estimates would discover the overflow only after the upload was already
+ * paid for.
+ */
+const PLANNED_MEDIA_REFERENCE = 'ms://' + '0'.repeat(64)
+
+/**
+ * Which occurrences of one request would be uploaded, if any.
+ *
+ * Nothing is uploaded here and no network is touched: this only decides WHICH
+ * readable occurrences the reference path would cover, so the body-fit guard can
+ * measure the body that will actually be sent instead of measuring an inline
+ * body the reference path would never produce.
+ *
+ * An occurrence is eligible when all four hold, and each exclusion is load
+ * bearing:
+ *
+ * - the wire is OpenAI-compatible — the Anthropic surface documents no hosted
+ *   media and must upload nothing at all;
+ * - the selected model declares the matching modality — sending a purpose the
+ *   model cannot read uploads bytes nobody will look at;
+ * - the occurrence resolved to `inline`, i.e. its bytes were actually read —
+ *   an unreadable media has nothing to upload and keeps its placeholder;
+ * - the occurrence cites a durable attachment, because only that is what a
+ *   reference can be keyed by.
+ */
+export function planMediaReferences(input: {
+  wire: KimiCodeWire
+  imageAccepted: boolean
+  videoAccepted: boolean
+  images: ResolvedRequestImages
+  videos: ResolvedRequestVideos
+}): PlannedMediaReference[] {
+  if (input.wire !== 'openai') return []
+  const planned: PlannedMediaReference[] = []
+  const collect = (
+    resolved: ResolvedRequestImages | ResolvedRequestVideos,
+    kind: 'image' | 'video',
+  ): void => {
+    for (const [attachmentId, occurrence] of resolved) {
+      if (occurrence.kind !== 'inline') continue
+      const data = Buffer.from(occurrence.data, 'base64')
+      if (data.byteLength === 0) continue
+      planned.push({ attachmentId, kind, mediaType: occurrence.mediaType, data })
+    }
+  }
+  if (input.imageAccepted) collect(input.images, 'image')
+  if (input.videoAccepted) collect(input.videos, 'video')
+  return planned
+}
+
+/**
+ * Attachment ids one built request STILL sends as media occurrences.
+ *
+ * Two stages can take an occurrence away, and both run before a reference could
+ * be cited:
+ *
+ * - the image/video budget pass replaces the oldest occurrences with a text
+ *   placeholder, and
+ * - the body-fit loop replaces more of them when the real serialized body is over
+ *   the ceiling.
+ *
+ * An occurrence either stage removed is no longer part of the request, so
+ * uploading it would pay for bytes nobody reads and mint a reference nothing
+ * cites. The upload set is therefore read off the FINAL build rather than off
+ * what was merely readable when the request was planned.
+ *
+ * Tool results nest their own content, and a `read_image` result carries its
+ * pixels there, so the traversal recurses exactly the way the budget does.
+ */
+export function mediaAttachmentIdsIn(options: NormalizedGenerateOptions): Set<string> {
+  const ids = new Set<string>()
+  const visit = (content: unknown): void => {
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (typeof block !== 'object' || block === null) continue
+      const record = block as Record<string, unknown>
+      if (record.type === 'tool-result') {
+        visit(record.content)
+        continue
+      }
+      if (record.type !== 'image' && record.type !== 'video') continue
+      const attachment = typeof record.attachment === 'object' && record.attachment !== null
+        ? record.attachment as Record<string, unknown>
+        : undefined
+      const id = attachment?.attachmentId
+      if (typeof id === 'string' && id !== '') ids.add(id)
+    }
+  }
+  for (const message of options.messages) visit(message.content)
+  return ids
+}
+
+/**
+ * The placeholder reference maps one planned set measures the body with.
+ *
+ * Returned separately for images and videos because the mapper keys them by
+ * field, not by kind.
+ */
+export function plannedReferenceMaps(planned: readonly PlannedMediaReference[]): {
+  imageReferences: Map<string, string>
+  videoReferences: Map<string, string>
+} {
+  const imageReferences = new Map<string, string>()
+  const videoReferences = new Map<string, string>()
+  for (const item of planned) {
+    const target = item.kind === 'image' ? imageReferences : videoReferences
+    target.set(item.attachmentId, PLANNED_MEDIA_REFERENCE)
+  }
+  return { imageReferences, videoReferences }
 }
 
 /**
@@ -589,6 +770,19 @@ export interface KimiCodeAdapterOptions {
   videos?: AttachmentVideoReader
   /** Live catalog loader seam; defaults to the managed `/models` call. */
   loadCatalog?: () => Promise<KimiCodeCatalogModel[]>
+  /**
+   * Hosted-file uploader seam.
+   *
+   * Production builds one through {@link createMediaFilesUploader} with THIS
+   * adapter's transport, so an upload and the chat request that cites it travel
+   * the same fetchFn — a test or a deployment that swaps the transport must not
+   * be bypassed by a module-level singleton holding its own.
+   *
+   * The cache is the point of the seam being shared across requests: one
+   * instance lives for the adapter's lifetime, so the same clip is uploaded once
+   * per account rather than once per turn.
+   */
+  mediaFiles?: KimiMediaFilesUploader
 }
 
 /**
@@ -618,6 +812,20 @@ const BILLING_CYCLE_COOLDOWN_MS = 30 * 24 * 60 * 60_000
 /** Ceiling, so a malformed reset time cannot park an account for years. */
 const MAX_ACCOUNT_LIMIT_COOLDOWN_MS = BILLING_CYCLE_COOLDOWN_MS
 
+/**
+ * Longest edge of the request version this route asks the attachment store for.
+ *
+ * Kimi's own CLI downscales an oversized image to a 2000 px long edge by default,
+ * so a screenshot its client would send at 2000 px must not be handed to this
+ * route at the shared 1024 px ceiling: that kept a screenshot the model could
+ * read at 2000 px legible-sized only by dropping and re-reading it. The
+ * encoded-byte target is deliberately NOT raised with it — 256 KiB per request
+ * version still fits four images inside the shared 1.5 MB budget — and an image
+ * already inside this edge is still sent as stored, so small images, references
+ * without dimensions and the body-fit ceiling all behave exactly as before.
+ */
+export const KIMI_CODE_REQUEST_IMAGE_MAX_EDGE = 2000
+
 export class KimiCodeAdapter extends LlmAdapter {
   /**
    * Rotation pool, or null for the single stored credential.
@@ -639,6 +847,89 @@ export class KimiCodeAdapter extends LlmAdapter {
     this.accountPool = accountPool ?? null
   }
 
+  /**
+   * The uploader this adapter cites files through, built on first use.
+   *
+   * Built lazily for two reasons: a turn with no media pays nothing, and a test
+   * that stubs the global transport before the first request still reaches the
+   * default uploader, because the transport is read at construction rather than
+   * at module load.
+   *
+   * Deliberately NOT {@link kimiMediaFiles}, the module-level singleton: that one
+   * captured the global `fetch` when this module was imported, so an adapter
+   * given its own transport would upload through a different one than it chats
+   * through — the one thing this route must not do, since the reference it gets
+   * back is only meaningful to the endpoint the chat request goes to.
+   */
+  private mediaUploader: KimiMediaFilesUploader | undefined
+
+  /** The shared uploader, created on first use with THIS adapter's transport. */
+  private mediaFiles(): KimiMediaFilesUploader {
+    if (this.mediaUploader === undefined) {
+      this.mediaUploader = this.options.mediaFiles
+        ?? createMediaFilesUploader(this.options.fetchFn === undefined ? {} : { fetchFn: this.options.fetchFn })
+    }
+    return this.mediaUploader
+  }
+
+  /**
+   * Upload every planned occurrence under ONE account and collect its references.
+   *
+   * The credential, base URL and scope are the ones the chat request about to be
+   * sent will use, which is what makes a reference citable at all: an id minted
+   * for another account or another deployment is not assumed to be readable.
+   *
+   * A failure is contained per occurrence. Uploading is an optimisation — the
+   * inline path always works — so a refused, overloaded or unreachable upload
+   * endpoint leaves THAT media inline and the turn runs. What is never
+   * contained is a cancellation: `signal` aborted, or an AbortError out of the
+   * transport, is a turn the caller deliberately stopped, and continuing to send
+   * the chat request would answer it anyway.
+   *
+   * This deliberately touches no account state: a 401/403/404/405/413/5xx or a
+   * network failure of the UPLOAD is a fact about the hosted-file endpoint, not
+   * a verdict on this account's quota, so it neither cools nor retires the
+   * account. The chat request's own classification owns that decision.
+   */
+  private async uploadPlannedReferences(input: {
+    planned: readonly PlannedMediaReference[]
+    accessToken: string
+    baseUrl: string
+    accountScope: string
+    signal: AbortSignal
+  }): Promise<{
+    imageReferences: Map<string, string>
+    videoReferences: Map<string, string>
+    cited: PlannedMediaReference[]
+  }> {
+    const uploader = this.mediaFiles()
+    const imageReferences = new Map<string, string>()
+    const videoReferences = new Map<string, string>()
+    const cited: PlannedMediaReference[] = []
+    await Promise.all(input.planned.map(async (item) => {
+      try {
+        const reference = await uploader.upload({
+          accessToken: input.accessToken,
+          baseUrl: input.baseUrl,
+          accountScope: input.accountScope,
+          data: item.data,
+          mediaType: item.mediaType,
+          signal: input.signal,
+        })
+        const target = item.kind === 'image' ? imageReferences : videoReferences
+        target.set(item.attachmentId, reference)
+        cited.push(item)
+      } catch (error) {
+        if (input.signal.aborted || isAbortError(error)) {
+          throw new LlmError('Kimi Code media upload aborted', 'ABORTED', { cause: error })
+        }
+        // Any other failure leaves this media inline; the mapper sends it the
+        // way it always did and the turn proceeds.
+      }
+    }))
+    return { imageReferences, videoReferences, cited }
+  }
+
   providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: PROVIDER_NAME }
   }
@@ -652,7 +943,11 @@ export class KimiCodeAdapter extends LlmAdapter {
   }
 
   imageRequestTarget(_provider: string, _model: string, image: ImageAttachmentRef) {
-    return requestImageTargetOrOriginal(image)
+    // `edge` is the reuse seam: the shared helper already takes the ceiling, so
+    // this route passes its own instead of moving the shared constant every
+    // other provider is calibrated against.
+    return requestImageTarget(image, KIMI_CODE_REQUEST_IMAGE_MAX_EDGE)
+      ?? { width: image.width, height: image.height, maxBytes: image.bytes }
   }
 
   private settings() {
@@ -818,7 +1113,15 @@ export class KimiCodeAdapter extends LlmAdapter {
     // route did — reported every scaled screenshot as several megabytes and
     // dropped images that were about to fit in ~256 KiB each.
     const normalized = normalizeGenerateOptions(options)
-    const images = await resolveRequestImages(normalized, this.options.attachments, signal)
+    // The route's own ceiling, not the shared one: the wire version this request
+    // carries has to be the same 2000 px long edge `imageRequestTarget()` reports
+    // to screenshot callers, or the declaration and the bytes disagree.
+    const images = await resolveRequestImages(
+      normalized,
+      this.options.attachments,
+      signal,
+      KIMI_CODE_REQUEST_IMAGE_MAX_EDGE,
+    )
     const imageTrimmed = offloadOldestRequestImages(
       normalized,
       maxRequestImageBytes(),
@@ -851,12 +1154,34 @@ export class KimiCodeAdapter extends LlmAdapter {
       : { ...videoTrimmed, reasoningEffort: ReasoningEffortId(gatedEffort.effort) }
     const videos = await resolveRequestVideos(requestOptions, this.options.videos, signal)
     const settings = await this.settings()
-    const media = {
+    const modalities = inputModalitiesForEntry(options.model, catalog)
+    /**
+     * Everything every attempt shares: the media reads and the capability gates.
+     *
+     * Account-specific references are merged on top of this per attempt, so the
+     * gate is applied once and a reference can never be cited for a modality the
+     * model does not declare.
+     */
+    const baseMedia: RequestMediaOptions = {
       videos,
-      videoAccepted: inputModalitiesForEntry(options.model, catalog).includes('video'),
+      videoAccepted: modalities.includes('video'),
       // Same resolver the settings card uses, so UI and wire cannot disagree.
       messageTools: dynamicToolsForEntry(options.model, catalog),
     }
+    /**
+     * Which readable occurrences the reference path would cover.
+     *
+     * Decided here so the body-fit guard can measure the body that will actually
+     * be sent; nothing is uploaded, and no network is touched, until that guard
+     * has accepted the request (see the rotation loop).
+     */
+    const planned = planMediaReferences({
+      wire,
+      imageAccepted: modalities.includes('image'),
+      videoAccepted: baseMedia.videoAccepted === true,
+      images,
+      videos,
+    })
 
     const contextWindow = this.contextWindowFor(
       options.model,
@@ -896,41 +1221,72 @@ export class KimiCodeAdapter extends LlmAdapter {
     const bodyLimit = carriesVideo
       ? MAX_VIDEO_MESSAGE_BODY_BYTES
       : maxRequestBodyBytesFor(kimiCodeModelDef(entry?.id ?? options.model), process.env)
-    let buildOptions = boundedOptions
-    let body = ''
-    for (let attempt = 0; ; attempt++) {
-      const built = buildRequest(buildOptions, wire, images, undefined, media)
-      // The guard returns the serialized body it measured, so the multi-megabyte
-      // string is built once instead of twice.
-      body = JSON.stringify(built)
-      const bytes = Buffer.byteLength(body, 'utf8')
-      if (bytes <= bodyLimit) break
-      // Nothing left to give back: the remainder is conversation text, tool
-      // schemas or video, none of which this route may silently discard. The
-      // guard then reports the composition so the remedy names the real cause.
-      // What the loop DID, which is not what the byte composition suggests. A
-      // guard answering from the composition alone promises an omission a
-      // stalled loop never performed.
-      const context = (): BodyFitContext => ({
-        droppedImages: countOmitted(buildOptions, requestOptions, images),
-        sendableImagesRemaining: requestImagePayloadLengths(buildOptions, images).length,
-        excessBytes: bytes - bodyLimit,
-      })
-      if (attempt > MAX_BODY_FIT_ATTEMPTS || !requestHasSendableImage(buildOptions, images)) {
-        assertRequestBodyFits(built, carriesVideo, context(), bodyLimit)
-        throw new Error('unreachable: assertRequestBodyFits returns or throws')
+    /**
+     * Run the greedy body-fit loop for ONE set of media references.
+     *
+     * A function rather than a loop in place because the same loop now serves
+     * every build of one request: the pre-upload MEASUREMENT (placeholder
+     * references), the real reference build after the upload, and the all-inline
+     * rebuild the missing-resource fallback re-sends.
+     *
+     * Every call restarts from `boundedOptions`. That is load bearing rather than
+     * tidy: the inline fallback has to re-fit the inline body from scratch and
+     * stay inside the same ceiling instead of inheriting an omission the
+     * reference path made to fit a different, much smaller body.
+     */
+    const buildBodyWithinLimit = (
+      media: RequestMediaOptions,
+    ): { body: string; options: NormalizedGenerateOptions } => {
+      let buildOptions = boundedOptions
+      for (let attempt = 0; ; attempt++) {
+        const built = buildRequest(buildOptions, wire, images, undefined, media)
+        // The guard returns the serialized body it measured, so the multi-megabyte
+        // string is built once instead of twice.
+        const body = JSON.stringify(built)
+        const bytes = Buffer.byteLength(body, 'utf8')
+        // The options come back WITH the body because they are what the upload set
+        // is read off: an occurrence the loop dropped here is no longer sent, so it
+        // must not be uploaded either.
+        if (bytes <= bodyLimit) return { body, options: buildOptions }
+        // Nothing left to give back: the remainder is conversation text, tool
+        // schemas or video, none of which this route may silently discard. The
+        // guard then reports the composition so the remedy names the real cause.
+        // What the loop DID, which is not what the byte composition suggests. A
+        // guard answering from the composition alone promises an omission a
+        // stalled loop never performed.
+        const context = (): BodyFitContext => ({
+          droppedImages: countOmitted(buildOptions, requestOptions, images),
+          sendableImagesRemaining: requestImagePayloadLengths(buildOptions, images).length,
+          excessBytes: bytes - bodyLimit,
+        })
+        if (attempt > MAX_BODY_FIT_ATTEMPTS || !requestHasSendableImage(buildOptions, images)) {
+          assertRequestBodyFits(built, carriesVideo, context(), bodyLimit)
+          throw new Error('unreachable: assertRequestBodyFits returns or throws')
+        }
+        const drop = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, requestOptions)
+        // Nothing was droppable even though an image is still attached: the images
+        // left weigh less than the overflow, so another turn would rebuild the
+        // identical body. Stop here instead of spending the attempt budget
+        // re-serializing a multi-megabyte request that cannot change.
+        if (drop.dropped === 0) {
+          assertRequestBodyFits(built, carriesVideo, context(), bodyLimit)
+          throw new Error('unreachable: assertRequestBodyFits returns or throws')
+        }
+        buildOptions = drop.options
       }
-      const drop = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, requestOptions)
-      // Nothing was droppable even though an image is still attached: the images
-      // left weigh less than the overflow, so another turn would rebuild the
-      // identical body. Stop here instead of spending the attempt budget
-      // re-serializing a multi-megabyte request that cannot change.
-      if (drop.dropped === 0) {
-        assertRequestBodyFits(built, carriesVideo, context(), bodyLimit)
-        throw new Error('unreachable: assertRequestBodyFits returns or throws')
-      }
-      buildOptions = drop.options
     }
+
+    /**
+     * The measured build for the reference path, done at most once.
+     *
+     * Held across rotation attempts because it is account-independent: it decides
+     * whether this request can be sent at all, and that answer cannot change
+     * because a different account answered.
+     *
+     * The OPTIONS travel with the body because they, not the plan, name the media
+     * this request still carries: see {@link mediaAttachmentIdsIn}.
+     */
+    let measured: { body: string; options: NormalizedGenerateOptions } | undefined
 
     const pool = this.accountPool
     const tried = new Set<string>()
@@ -991,24 +1347,123 @@ export class KimiCodeAdapter extends LlmAdapter {
         ? `${base}/v1/messages?beta=true`
         : `${base}/v1/chat/completions`
       const headers = await modelRequestHeaders(apiCredentials.accessToken, wire)
+      /**
+       * Which account's file store this attempt writes to and cites from.
+       *
+       * A pooled account's own id, because that is the only identity a reference
+       * may be cached under; a single stored credential uses the user id its
+       * sign-in reported, or a constant when it reported none. The access token is
+       * never used, here or anywhere a cache key is built.
+       */
+      const accountScope = accountId ?? legacyAccountScope(apiCredentials)
 
-      try {
-        response = await fetchWithContextBudgetRecovery(fetchFn)(endpoint, { method: 'POST', headers, body, signal })
-      } catch (error) {
-        if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED', { cause: error })
-        // A connection that never produced a response is a transport failure, not
-        // a verdict from the provider: the same request is eligible for the
-        // bounded backoff above instead of failing the turn outright.
-        throw new LlmError(
-          `Kimi Code request failed: ${error instanceof Error ? error.message : String(error)}`,
-          'TRANSPORT',
-          { cause: error },
-        )
+      // MEASURED BEFORE ANYTHING IS UPLOADED. Two pressures meet here and both
+      // decide the order:
+      //
+      // - the reference path sends a far smaller body than the inline one, so the
+      //   body-fit guard has to measure what will actually be sent. Measuring the
+      //   inline body would refuse a request the reference path comfortably fits,
+      //   which is the whole reason this route uploads at all.
+      // - an upload is a real, billable request, so the ceiling must be checked
+      //   before paying for it. Measuring afterwards would upload media for a
+      //   request that can never be sent.
+      //
+      // Placeholder references resolve both: the measured body has the shape and
+      // roughly the length of the real one, and nothing here touches the network.
+      if (measured === undefined) {
+        measured = buildBodyWithinLimit(planned.length === 0
+          ? baseMedia
+          : { ...baseMedia, ...plannedReferenceMaps(planned) })
+      }
+
+      // Only the media the MEASURED build still sends are uploaded.
+      //
+      // Planning reads every readable occurrence, which is strictly more than the
+      // request will carry: the budget passes and the body-fit loop both replace
+      // occurrences with a text placeholder when they have to free bytes. Uploading
+      // those would buy a reference nothing cites and, for a clip, a real upload of
+      // a file the service is never asked to read. The final build is the authority,
+      // so the difference between the plan and it is dropped here.
+      const stillSent = mediaAttachmentIdsIn(measured.options)
+      const uploadable = planned.filter((item) => stillSent.has(item.attachmentId))
+
+      // Uploads run under THIS account's credential, base URL and scope, so the
+      // reference the chat body cites belongs to the account that will read it.
+      const uploads = uploadable.length === 0
+        ? undefined
+        : await this.uploadPlannedReferences({
+            planned: uploadable,
+            accessToken: apiCredentials.accessToken,
+            baseUrl: base,
+            accountScope,
+            signal,
+          })
+      // Rebuilt from the references that really exist, not from the plan: an
+      // occurrence whose upload failed is sent inline while its siblings are
+      // cited, so one refused clip does not cost the request its images.
+      let body = uploads === undefined
+        ? measured.body
+        : buildBodyWithinLimit({
+            ...baseMedia,
+            imageReferences: uploads.imageReferences,
+            videoReferences: uploads.videoReferences,
+          }).body
+
+      const post = async (payload: string): Promise<Response> => {
+        try {
+          return await fetchWithContextBudgetRecovery(fetchFn)(endpoint, { method: 'POST', headers, body: payload, signal })
+        } catch (error) {
+          if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED', { cause: error })
+          // A connection that never produced a response is a transport failure, not
+          // a verdict from the provider: the same request is eligible for the
+          // bounded backoff above instead of failing the turn outright.
+          throw new LlmError(
+            `Kimi Code request failed: ${error instanceof Error ? error.message : String(error)}`,
+            'TRANSPORT',
+            { cause: error },
+          )
+        }
+      }
+
+      response = await post(body)
+      let detail = response.ok ? '' : (await response.text().catch(() => '')).slice(0, 2_000)
+
+      // A CITED FILE THE STORE NO LONGER HOLDS.
+      //
+      // This is the one 404 a resend can fix, and the conditions are deliberately
+      // narrow: the status, the measured sentence, and a request that really cited
+      // a reference. A 404 naming an unknown model or a missing route carries
+      // neither, and resending it inline would spend a whole turn to learn that.
+      //
+      // The dead references are dropped from the cache first, so the next turn
+      // uploads again instead of replaying an id that is already known to be gone.
+      // The re-send is all-inline, on the SAME account, and attempted once: this
+      // code path runs once per rotation attempt and falls through to the ordinary
+      // classification below rather than looping.
+      if (response.status === 404 && uploads !== undefined && uploads.cited.length > 0
+        && isMissingResourceBody(detail)) {
+        const uploader = this.mediaFiles()
+        for (const item of uploads.cited) {
+          uploader.forget({ baseUrl: base, accountScope, mediaType: item.mediaType, data: item.data })
+        }
+        let inline: string | undefined
+        try {
+          inline = buildBodyWithinLimit(baseMedia).body
+        } catch {
+          // The inline body cannot fit this ceiling, so the reference path was the
+          // only one that could send this request; the 404 is reported as it stands
+          // rather than replaced by an overflow the caller cannot act on.
+          inline = undefined
+        }
+        if (inline !== undefined) {
+          body = inline
+          response = await post(body)
+          detail = response.ok ? '' : (await response.text().catch(() => '')).slice(0, 2_000)
+        }
       }
 
       if (response.ok) break
 
-      const detail = (await response.text().catch(() => '')).slice(0, 2_000)
       const failure = classifyKimiFailure(response.status, detail)
       const after = response.status === 429 ? retryAfterMs(response.headers) : undefined
 

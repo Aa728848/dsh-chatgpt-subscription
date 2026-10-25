@@ -156,6 +156,148 @@ export const KNOWN_REASONING_KEYS = ['reasoning_content', 'reasoning_details', '
 export const DEFAULT_REASONING_KEY: string = KNOWN_REASONING_KEYS[0]
 
 /**
+ * How one `reasoning_details` fragment arrived on the wire.
+ *
+ * - `string` — the older bare-string spelling of the whole field;
+ * - `summary` — a visible summary element: official `type: 'summary'`, no
+ *   `type` at all, or the `reasoning.summary` gateway spelling;
+ * - `encrypted` — official opaque provider state, which carries no visible text;
+ * - `text` — the `reasoning.text` compatibility spelling.
+ *
+ * The form is recorded because the same text has to be written back in the shape
+ * it arrived in: a bare string must not become an array, and an official
+ * encrypted element must stay one.
+ */
+export type ReasoningForm = 'string' | 'text' | 'summary' | 'encrypted'
+
+/**
+ * One reasoning fragment, together with how it arrived.
+ *
+ * The key is carried per fragment rather than per message because one delta can
+ * legitimately carry several at once: Kimi answers under `reasoning_content`,
+ * gateways add `reasoning_details`, and newer vLLM builds reply under
+ * `reasoning`. Stopping at the first field loses text the service already
+ * charged for, and flattening every field onto one outbound key is what makes a
+ * replay read as a field the peer never sent.
+ *
+ * An encrypted fragment is the one shape with no visible text: its `text` is ''
+ * and its payload stays in `encrypted`, which is opaque provider state and is
+ * never decoded, rendered, or logged.
+ */
+export interface ReasoningFragment {
+  /** Wire field the fragment arrived under. */
+  readonly key: string
+  /** Wire form, only meaningful when `key` is `reasoning_details`. */
+  readonly form?: ReasoningForm
+  /** Element `type` exactly as received; absent when the element carried none. */
+  readonly wireType?: string
+  /** Element index: the wire's own number, else the element's position. */
+  readonly index?: number
+  /** Opaque encrypted provider state (`form: 'encrypted'`); never text. */
+  readonly encrypted?: string
+  /** Visible text; always '' for an encrypted fragment. */
+  readonly text: string
+}
+
+/**
+ * One `reasoning_details` element, in an official or a compatibility shape.
+ *
+ * The official shapes are the ones agent-core-v2's
+ * `bases/openai/reasoning-key.ts` reads: `type` is absent or `'summary'` for a
+ * visible summary (payload in `summary`), or `'encrypted'` for opaque provider
+ * state (payload in `encrypted`). Its `toReasoningDetailsElement` keeps
+ * `record.index` when that is a number and otherwise the element's position, so
+ * every element has an index; this function does the same, and replays it.
+ *
+ * Its `convertReasoningDetails` then walks each element twice, in this order:
+ * a non-encrypted element with a `summary` produces visible thinking, and a
+ * non-summary element with `encrypted` produces opaque thinking. A type-less
+ * element carrying BOTH therefore yields two fragments — the visible summary
+ * first, then the opaque state. An encrypted payload is never text: it is
+ * provider state, and printing it would show a blob as if the model had thought
+ * it.
+ *
+ * The `reasoning.text` / `reasoning.summary` gateway spellings this route
+ * already accepted stay readable, and are replayed under the type they arrived
+ * with. Anything else — an unknown `type`, a missing payload, a non-object — is
+ * ignored rather than mistaken for body text.
+ */
+function reasoningDetailElement(entry: Record<string, unknown>, position: number): ReasoningFragment[] {
+  const type = asString(entry.type)
+  const rawIndex = entry.index
+  const index = typeof rawIndex === 'number' && Number.isInteger(rawIndex) && rawIndex >= 0
+    ? rawIndex
+    : position
+  const shape = { key: 'reasoning_details', ...(type === undefined ? {} : { wireType: type }), index }
+  if (type === 'reasoning.text') {
+    const text = asString(entry.text)
+    return text === undefined || text === '' ? [] : [{ ...shape, form: 'text', text }]
+  }
+  const summary = asString(entry.summary)
+  const encrypted = asString(entry.encrypted)
+  const fragments: ReasoningFragment[] = []
+  // The official two-step read, restricted to the shapes it defines: a summary
+  // unless this IS the encrypted shape, then the opaque state unless this IS the
+  // summary shape. Unknown types reach neither step.
+  if (type === undefined || type === 'summary' || type === 'reasoning.summary') {
+    if (summary !== undefined && summary !== '') fragments.push({ ...shape, form: 'summary', text: summary })
+  }
+  if (type === undefined || type === 'encrypted') {
+    if (encrypted !== undefined && encrypted !== '') {
+      fragments.push({ ...shape, form: 'encrypted', encrypted, text: '' })
+    }
+  }
+  return fragments
+}
+
+/**
+ * Fragments carried by one `reasoning_details` value.
+ *
+ * A bare string — the older gateway spelling, and already a learned dialect here
+ * — is one `string` fragment. An array keeps its arrival order, exactly as the
+ * official `extractReasoningDetails` does: elements are pushed in the order they
+ * appear and nothing is re-sorted. `index` is metadata (defaulted to the
+ * position), never an ordering key here.
+ */
+function reasoningDetailFragments(value: unknown): ReasoningFragment[] {
+  if (typeof value === 'string') return value === '' ? [] : [{ key: 'reasoning_details', form: 'string', text: value }]
+  if (!Array.isArray(value)) return []
+  const fragments: ReasoningFragment[] = []
+  value.forEach((entry, position) => {
+    if (!isRecord(entry)) return
+    fragments.push(...reasoningDetailElement(entry, position))
+  })
+  return fragments
+}
+
+/**
+ * Every reasoning fragment one inbound object (a stream delta or a message)
+ * carries, in a fixed, documented order.
+ *
+ * `reasoning_content` comes first and `reasoning` last because that is the
+ * order of {@link KNOWN_REASONING_KEYS}: the Kimi field is the one this route is
+ * documented against and `reasoning` is the newer vLLM rename, so a delta
+ * carrying both keeps its text in the order a single-key endpoint would have
+ * produced it in. A `reasoning_details` array keeps its arrival order; `index` is
+ * carried as metadata and never reorders it (see reasoningDetailFragments).
+ */
+export function reasoningFragmentsOf(source: unknown): ReasoningFragment[] {
+  if (typeof source !== 'object' || source === null) return []
+  const record = source as Record<string, unknown>
+  const fragments: ReasoningFragment[] = []
+  for (const key of KNOWN_REASONING_KEYS) {
+    const value = record[key]
+    if (key === 'reasoning_details') {
+      fragments.push(...reasoningDetailFragments(value))
+      continue
+    }
+    if (typeof value !== 'string' || value === '') continue
+    fragments.push({ key, text: value })
+  }
+  return fragments
+}
+
+/**
  * Per-endpoint reasoning-field dialect: observes what the endpoint actually
  * sends, and echoes thinking back under the same key.
  *
@@ -168,20 +310,48 @@ export const DEFAULT_REASONING_KEY: string = KNOWN_REASONING_KEYS[0]
 export class ReasoningKeyDialect {
   private detected: string | undefined
 
-  /** Reasoning text on an inbound message or delta, remembering its key. */
-  observe(source: unknown): string | undefined {
-    if (typeof source !== 'object' || source === null) return undefined
-    const record = source as Record<string, unknown>
-    for (const key of KNOWN_REASONING_KEYS) {
-      const value = record[key]
-      // Non-string values are skipped on purpose: vLLM emits a compatibility
-      // placeholder `reasoning_content: null`, and OpenRouter's
-      // `reasoning_details` is an array.
-      if (typeof value !== 'string') continue
-      this.detected = key
-      return value
+  /**
+   * Every reasoning fragment one inbound delta carries, remembering the dialect.
+   *
+   * The FIRST string-shaped fragment names the key this endpoint speaks, which is
+   * exactly the field the earlier single-match read picked: an endpoint answering
+   * under `reasoning_content` keeps that outbound key even when the same delta
+   * also carries a sibling field, so learning does not change just because a peer
+   * became chattier.
+   *
+   * An element of a `reasoning_details` ARRAY never teaches the dialect: the
+   * outbound key must be a field that takes a plain string, and array elements
+   * could only teach `reasoning_details`, which on that wire is an array. A bare
+   * string `reasoning_details` still teaches it, because that spelling really is
+   * a string.
+   */
+  observeAll(source: unknown): ReasoningFragment[] {
+    const fragments = reasoningFragmentsOf(source)
+    const teaching = fragments.find((fragment) => fragment.form === undefined || fragment.form === 'string')
+    if (teaching !== undefined) {
+      this.detected = teaching.key
+      return fragments
     }
-    return undefined
+    // An empty string is still evidence of the field this endpoint uses, so the
+    // dialect keeps learning from a delta whose only reasoning is blank - and
+    // non-string values are still skipped: vLLM emits a compatibility
+    // placeholder `reasoning_content: null`, and `reasoning_details` is
+    // usually an array.
+    if (typeof source === 'object' && source !== null) {
+      const record = source as Record<string, unknown>
+      for (const key of KNOWN_REASONING_KEYS) {
+        if (typeof record[key] === 'string') {
+          this.detected = key
+          break
+        }
+      }
+    }
+    return fragments
+  }
+
+  /** First reasoning fragment on an inbound message or delta, remembering its key. */
+  observe(source: unknown): string | undefined {
+    return this.observeAll(source)[0]?.text
   }
 
   /** The key to serialize thinking into on an outbound assistant message. */
@@ -418,6 +588,22 @@ export interface RequestMediaOptions {
    * (`messages[].tools`), Kimi's `dynamically_loaded_tools` capability.
    */
   messageTools?: boolean
+  /**
+   * Hosted references this request already uploaded, keyed by ATTACHMENT ID.
+   *
+   * The value is the `ms://<id>` reference the upload returned, and citing it
+   * instead of the bytes is the whole point: the service reads the stored file,
+   * so the body carries a ~20-byte URL where it used to carry a megabyte of
+   * base64. Only the OpenAI-compatible surface documents this; the Anthropic
+   * one keeps its inline block (see anthropicUserContent).
+   *
+   * A miss is not an error: an occurrence with no entry here is sent exactly as
+   * it always was (inline when readable, the unavailable placeholder when not),
+   * which is what makes a per-media upload failure degrade instead of fail.
+   */
+  imageReferences?: ReadonlyMap<string, string>
+  /** Hosted video references, keyed by attachment id; see imageReferences. */
+  videoReferences?: ReadonlyMap<string, string>
 }
 
 // ---------------------------------------------------------------------------
@@ -499,16 +685,28 @@ function toolResultBlocks(
  * OpenAI `image_url` blocks for one tool result. A `role: "tool"` message can
  * only carry text, so these ride on a `user` message appended after the run of
  * tool messages rather than inside it.
+ *
+ * A hosted reference is honoured here too, because a `read_image` result or a
+ * screenshot is exactly the kind of image that would otherwise inline a
+ * megabyte into a request the conversation already made large. Sending base64
+ * for an image this request uploaded would also contradict the reference it
+ * cites elsewhere.
  */
 function toolResultImageBlocks(
   blocks: unknown,
   images: ResolvedRequestImages,
+  media: RequestMediaOptions = {},
 ): OpenAIMessage[] {
   if (!Array.isArray(blocks)) return []
   const out: OpenAIMessage[] = []
   for (const block of blocks) {
     if (!isRecord(block)) continue
     if (block.type === 'image') {
+      const reference = hostedReference(media.imageReferences, block)
+      if (reference !== undefined) {
+        out.push({ type: 'image_url', image_url: { url: reference } })
+        continue
+      }
       const inline = imageBlockToInline(block, images)
       if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
         out.push({ type: 'image_url', image_url: { url: `data:${inline.mediaType};base64,${inline.data}` } })
@@ -517,9 +715,48 @@ function toolResultImageBlocks(
       }
       continue
     }
-    if (block.type === 'tool-result') out.push(...toolResultImageBlocks(block.content, images))
+    if (block.type === 'tool-result') out.push(...toolResultImageBlocks(block.content, images, media))
   }
   return out
+}
+
+/** Scheme under which this route cites a file it uploaded. */
+const HOSTED_FILE_SCHEME = 'ms://'
+
+/**
+ * The attachment id one block cites, when it cites a durable attachment.
+ *
+ * Only a durable occurrence can have been uploaded: a block carrying its own
+ * `data:` URL has no id, so it is never looked up here and always keeps its
+ * bytes.
+ */
+function attachmentIdOf(block: Record<string, unknown>): string | undefined {
+  const attachment = isRecord(block.attachment) ? block.attachment : undefined
+  const id = attachment === undefined ? undefined : asString(attachment.attachmentId)
+  return id === undefined || id === '' ? undefined : id
+}
+
+/**
+ * The hosted reference for one block, when this request uploaded it.
+ *
+ * A value that is not an `ms://` reference is IGNORED rather than sent. This is
+ * the one place a per-account cache key could reach the wire, so a bare id, an
+ * empty string or an http URL is dropped instead of being trusted; the
+ * occurrence then falls back to its inline bytes, which always work.
+ */
+function hostedReference(
+  references: ReadonlyMap<string, string> | undefined,
+  block: Record<string, unknown>,
+): string | undefined {
+  if (references === undefined) return undefined
+  const id = attachmentIdOf(block)
+  if (id === undefined) return undefined
+  const reference = references.get(id)
+  if (reference === undefined) return undefined
+  const trimmed = reference.trim()
+  return trimmed.startsWith(HOSTED_FILE_SCHEME) && trimmed.length > HOSTED_FILE_SCHEME.length
+    ? trimmed
+    : undefined
 }
 
 function toolCallArguments(raw: unknown): string {
@@ -578,16 +815,170 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
 }
 
 
-/** Concatenated reasoning text one assistant message carries, when it has any. */
-function reasoningText(message: Message): string {
-  if (!Array.isArray(message.content)) return ''
-  const parts: string[] = []
-  for (const block of message.content) {
-    if (isRecord(block) && block.type === 'reasoning' && typeof block.text === 'string') {
-      parts.push(sanitizeText(block.text))
+/**
+ * One `reasoning_details` element, rebuilt from the provenance the stream
+ * recorded.
+ *
+ * Each variant is written back in the shape it arrived in: `text` and `summary`
+ * keep the wire `type` they were sent with (a summary may legitimately have
+ * none), `encrypted` keeps the opaque payload verbatim, and no variant invents
+ * an `index` the wire did not carry.
+ */
+export type ReplayedReasoningDetail =
+  | { readonly form: 'text'; readonly text: string; readonly index?: number }
+  | { readonly form: 'summary'; readonly summary: string; readonly wireType?: string; readonly index?: number }
+  | { readonly form: 'encrypted'; readonly encrypted: string; readonly wireType?: string; readonly index?: number }
+
+/**
+ * Reasoning of one assistant message, split by the wire shape it arrived in.
+ *
+ * `fields` holds text that belongs under a plain string field, `detailsString`
+ * is the older bare-string `reasoning_details` value (which must stay a
+ * string), and `details` holds array elements; `joined` is everything
+ * concatenated, which is what a message with no provenance still sends.
+ */
+export interface ReplayedReasoning {
+  /** Text per plain string field, in first-seen order. */
+  readonly fields: ReadonlyArray<{ readonly key: string; readonly text: string }>
+  /** The legacy bare-string `reasoning_details` value, when one was recorded. */
+  readonly detailsString?: string
+  /** `reasoning_details` elements rebuilt from their provenance, in wire order. */
+  readonly details: ReadonlyArray<ReplayedReasoningDetail>
+  /** Every reasoning block concatenated, used when no provenance survives. */
+  readonly joined: string
+}
+
+const NO_REASONING: ReplayedReasoning = { fields: [], details: [], joined: '' }
+
+/** Form tag read back from persisted provenance; undefined for an unknown one. */
+function readReasoningForm(value: unknown): ReasoningForm | undefined {
+  return value === 'string' || value === 'text' || value === 'summary' || value === 'encrypted'
+    ? value
+    : undefined
+}
+
+/**
+ * Provenance recorded for one reasoning block by the stream.
+ *
+ * Every shape that cannot be verified returns undefined, so a block written by
+ * an older generation of this file - or one whose metadata was lost in transit -
+ * falls back to the single dialect key instead of being split on a guess.
+ */
+function reasoningRunsAt(message: Message, blockIndex: number): ReasoningRun[] | undefined {
+  const state = message.source?.replayState
+  if (!isRecord(state) || !Array.isArray(state.blocks)) return undefined
+  const entry = state.blocks[blockIndex]
+  if (!isRecord(entry) || !Array.isArray(entry.reasoning)) return undefined
+  const runs: ReasoningRun[] = []
+  for (const raw of entry.reasoning) {
+    if (!isRecord(raw)) return undefined
+    const key = asString(raw.key)
+    const length = raw.length
+    if (key === undefined || typeof length !== 'number' || !Number.isInteger(length) || length < 0) return undefined
+    const form = readReasoningForm(raw.form)
+    const wireType = asString(raw.wireType)
+    const index = typeof raw.index === 'number' && Number.isInteger(raw.index) && raw.index >= 0
+      ? raw.index
+      : undefined
+    const encrypted = asString(raw.encrypted)
+    runs.push({
+      key,
+      ...(form === undefined ? {} : { form }),
+      ...(wireType === undefined ? {} : { wireType }),
+      ...(index === undefined ? {} : { index }),
+      ...(encrypted === undefined ? {} : { encrypted }),
+      length,
+    })
+  }
+  return runs.length === 0 ? undefined : runs
+}
+
+/**
+ * Split one message's reasoning back onto the shapes it arrived in.
+ *
+ * The block text stays authoritative: the recorded runs only say where its
+ * slices belong. Their total must equal the block's length exactly, and one
+ * mismatch abandons the split for that block rather than writing a truncated
+ * prefix under the wrong field. An encrypted run has length 0, so it changes
+ * neither the total nor the offsets while still producing its element.
+ *
+ * `fallbackKey` is the learned dialect, used for reasoning with no surviving
+ * provenance - every message written before this provenance existed, and any
+ * message whose metadata was dropped in transit.
+ */
+function replayedReasoning(message: Message, fallbackKey: string): ReplayedReasoning {
+  if (!Array.isArray(message.content)) return NO_REASONING
+  const order: string[] = []
+  const byKey = new Map<string, string[]>()
+  const details: ReplayedReasoningDetail[] = []
+  let detailsString: string | undefined
+  let joined = ''
+  const put = (key: string, text: string): void => {
+    let parts = byKey.get(key)
+    if (parts === undefined) {
+      parts = []
+      order.push(key)
+      byKey.set(key, parts)
+    }
+    parts.push(text)
+  }
+  for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+    const block = message.content[blockIndex]
+    if (!isRecord(block) || block.type !== 'reasoning' || typeof block.text !== 'string') continue
+    const text = sanitizeText(block.text)
+    joined += text
+    const runs = reasoningRunsAt(message, blockIndex)
+    const total = runs === undefined ? -1 : runs.reduce((sum, run) => sum + run.length, 0)
+    if (runs === undefined || total !== text.length) {
+      if (text !== '') put(fallbackKey, text)
+      continue
+    }
+    let offset = 0
+    for (const run of runs) {
+      const slice = text.slice(offset, offset + run.length)
+      offset += run.length
+      if (run.key !== 'reasoning_details') {
+        if (slice !== '') put(run.key, slice)
+        continue
+      }
+      if (run.form === 'encrypted') {
+        // No text to slice: the payload IS the fragment, which is why an
+        // encrypted-only block still replays even with an empty text.
+        if (run.encrypted !== undefined && run.encrypted !== '') {
+          details.push({
+            form: 'encrypted',
+            encrypted: run.encrypted,
+            ...(run.wireType === undefined ? {} : { wireType: run.wireType }),
+            ...(run.index === undefined ? {} : { index: run.index }),
+          })
+        }
+        continue
+      }
+      if (slice === '') continue
+      if (run.form === 'text') {
+        details.push({ form: 'text', text: slice, ...(run.index === undefined ? {} : { index: run.index }) })
+        continue
+      }
+      if (run.form === 'summary') {
+        details.push({
+          form: 'summary',
+          summary: slice,
+          ...(run.wireType === undefined ? {} : { wireType: run.wireType }),
+          ...(run.index === undefined ? {} : { index: run.index }),
+        })
+        continue
+      }
+      // A run with no recorded form is read as the bare-string spelling rather
+      // than invented as an element.
+      detailsString = (detailsString ?? '') + slice
     }
   }
-  return parts.join('')
+  return {
+    fields: order.map((key) => ({ key, text: byKey.get(key)!.join('') })),
+    ...(detailsString === undefined ? {} : { detailsString }),
+    details,
+    joined,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,18 +1109,39 @@ function openAIUserContent(
       const text = sanitizeText(block.text)
       if (text !== '') parts.push({ type: 'text', text })
     } else if (block.type === 'image') {
-      const inline = imageBlockToInline(block, images)
-      if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
+      // A reference this account already uploaded is cited INSTEAD of the
+      // bytes, never alongside them: the service reads the stored file, and
+      // sending both would charge the request for the megabyte it was trying to
+      // avoid while asking the model to read the picture twice.
+      const reference = hostedReference(media.imageReferences, block)
+      if (reference !== undefined) {
         hasRichPart = true
-        parts.push({ type: 'image_url', image_url: { url: `data:${inline.mediaType};base64,${inline.data}` } })
+        parts.push({ type: 'image_url', image_url: { url: reference } })
       } else {
-        parts.push({ type: 'text', text: unavailableImageText(block) })
+        const inline = imageBlockToInline(block, images)
+        if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
+          hasRichPart = true
+          parts.push({ type: 'image_url', image_url: { url: `data:${inline.mediaType};base64,${inline.data}` } })
+        } else {
+          parts.push({ type: 'text', text: unavailableImageText(block) })
+        }
       }
     } else if (block.type === 'video') {
       // The OpenAI-compatible surface carries video as a sibling of image_url.
       // A clip the selected model or protocol cannot take degrades to the
       // ordinary text fallback, so the turn still runs and the model learns why
       // the video is absent instead of answering about an empty message.
+      //
+      // A hosted reference short-circuits the inline resolution for the same
+      // reason as an image: a single clip inlined as base64 is what the body
+      // ceiling cannot survive, and this route uploaded it precisely to avoid
+      // that. A miss falls through to the unchanged path below.
+      const reference = hostedReference(media.videoReferences, block)
+      if (reference !== undefined) {
+        hasRichPart = true
+        parts.push({ type: 'video_url', video_url: { url: reference } })
+        continue
+      }
       const outcome = resolveVideoBlock(
         block,
         media.videos ?? new Map(),
@@ -754,7 +1166,8 @@ function openAIUserContent(
 function openAIAssistantContent(
   message: Message,
   toolCallIds: ToolCallIdNormalizer,
-): { content: string; toolCalls: OpenAIMessage[]; reasoning: string } {
+  reasoningKey: string,
+): { content: string; toolCalls: OpenAIMessage[]; reasoning: ReplayedReasoning } {
   const textParts: string[] = []
   const toolCalls: OpenAIMessage[] = []
   for (const block of message.content) {
@@ -768,7 +1181,7 @@ function openAIAssistantContent(
       })
     }
   }
-  return { content: textParts.join(''), toolCalls, reasoning: reasoningText(message) }
+  return { content: textParts.join(''), toolCalls, reasoning: replayedReasoning(message, reasoningKey) }
 }
 
 
@@ -848,6 +1261,68 @@ function declarationSlots(
   return slots
 }
 
+/**
+ * Write one assistant turn's reasoning under the field it arrived under.
+ *
+ * Two rules are in tension here and both matter:
+ *
+ * - Preserved Thinking requires a reasoning field on every assistant message, so
+ *   the learned dialect key is ALWAYS written, with an empty string when the
+ *   turn produced no reasoning. Omitting it is the documented cause of
+ *   "thinking is enabled but reasoning_content is missing in assistant tool call
+ *   message at index N".
+ * - A replayed fragment must not be written under a key it did not come from, so
+ *   each surviving field is written on its own and nothing is concatenated onto
+ *   the dialect key. `reasoning_details` goes back in the shape it arrived in: a
+ *   bare string stays a string, elements stay an array.
+ */
+function applyReplayedReasoning(
+  entry: OpenAIMessage,
+  reasoning: ReplayedReasoning,
+  dialectKey: string,
+): void {
+  const fields = reasoning.fields.length === 0
+    ? [{ key: dialectKey, text: '' }]
+    : reasoning.fields
+  for (const field of fields) entry[field.key] = field.text
+  // The dialect key stays present even when this turn's reasoning was replayed
+  // under another field: the service demands its own field, and an empty string
+  // is the value it asks for when a turn carried no reasoning.
+  if (fields.every((field) => field.key !== dialectKey)) entry[dialectKey] = ''
+  if (reasoning.details.length > 0) {
+    const elements = reasoning.details.map(replayedDetailElement)
+    // A message that mixed the bare-string spelling with element form keeps its
+    // text: the string is projected into an official type-less summary element,
+    // which is the shape a summary without a `type` already has - no `index` and
+    // no `type` is invented for it.
+    if (reasoning.detailsString !== undefined && reasoning.detailsString !== '') {
+      elements.unshift({ summary: reasoning.detailsString })
+    }
+    entry.reasoning_details = elements
+  } else if (reasoning.detailsString !== undefined) {
+    entry.reasoning_details = reasoning.detailsString
+  }
+}
+
+/**
+ * One replayed element, in the shape the peer sent it in.
+ *
+ * `type` is echoed only when the wire carried one (a summary may have none), and
+ * `index` is echoed only when the wire carried one - neither is invented.
+ */
+function replayedDetailElement(detail: ReplayedReasoningDetail): Record<string, unknown> {
+  const index = detail.index === undefined ? {} : { index: detail.index }
+  // An element that carried no `type` keeps none: the opaque shape is recognized
+  // by its `encrypted` payload, so adding a type here would invent one.
+  if (detail.form === 'encrypted') {
+    return { ...(detail.wireType === undefined ? {} : { type: detail.wireType }), encrypted: detail.encrypted, ...index }
+  }
+  if (detail.form === 'summary') {
+    return { ...(detail.wireType === undefined ? {} : { type: detail.wireType }), summary: detail.summary, ...index }
+  }
+  return { type: 'reasoning.text', text: detail.text, ...index }
+}
+
 /** Build one `/chat/completions` body. */
 export function buildOpenAIRequest(
   options: GenerateOptions,
@@ -908,7 +1383,7 @@ export function buildOpenAIRequest(
         const block = current.content[0]
         const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
         messages.push({ role: 'tool', tool_call_id: toolCallIds.normalize(callId), content: toolResultText(current.content) })
-        imageBlocks.push(...toolResultImageBlocks(current.content, images))
+        imageBlocks.push(...toolResultImageBlocks(current.content, images, media))
         index += 1
       }
       index -= 1
@@ -916,9 +1391,13 @@ export function buildOpenAIRequest(
       continue
     }
     if (message.role === 'assistant') {
-      const { content, toolCalls, reasoning } = openAIAssistantContent(message, toolCallIds)
+      // The dialect key is read once per request: it is process-wide state, and
+      // reading it per message could change it mid-build if another turn closes
+      // a stream concurrently, which would send one request under two spellings.
+      const reasoningKey = reasoningDialect.outboundKey()
+      const { content, toolCalls, reasoning } = openAIAssistantContent(message, toolCallIds, reasoningKey)
       // An assistant turn with neither text, nor calls, nor reasoning carries nothing on this wire.
-      if (content === '' && toolCalls.length === 0 && reasoning === '') continue
+      if (content === '' && toolCalls.length === 0 && reasoning.fields.length === 0 && reasoning.details.length === 0) continue
       const entry: OpenAIMessage = { role: 'assistant' }
       // Per Moonshot / Kimi Code official provider conventions (see kosong/kimi.ts & agent-core-v2 trait):
       // When an assistant message has tool_calls and no text content, the `content` field is omitted,
@@ -941,7 +1420,7 @@ export function buildOpenAIRequest(
       // the reasoning chain of prior turns readable to it; hard-coding
       // `reasoning_content` silently breaks the chain against a newer vLLM,
       // which accepts only `reasoning` on the request side.
-      if (thinkingOn) entry[reasoningDialect.outboundKey()] = reasoning
+      if (thinkingOn) applyReplayedReasoning(entry, reasoning, reasoningKey)
       messages.push(entry)
       continue
     }
@@ -1431,10 +1910,45 @@ export interface KimiCodeInBandStreamError {
   message: string
 }
 
+/**
+ * One run of reasoning and how it arrived.
+ *
+ * Length, not text: the run describes where a slice of the block came from
+ * without storing the thinking twice, which keeps the persisted replay state
+ * small and keeps it a plain JSON value. An encrypted run has `length: 0` — it
+ * carries no visible text, only the opaque payload that must be handed back.
+ */
+export interface ReasoningRun {
+  /** Wire field the slice arrived under. */
+  readonly key: string
+  /** Wire form, only meaningful when `key` is `reasoning_details`. */
+  readonly form?: ReasoningForm
+  /** Element `type` exactly as received; absent when the element carried none. */
+  readonly wireType?: string
+  /** Element index: the wire's own number, else the element's position. */
+  readonly index?: number
+  /** Opaque encrypted provider state (`form: 'encrypted'`); never text. */
+  readonly encrypted?: string
+  /** Length of the slice in the assembled block's text; 0 when there is none. */
+  readonly length: number
+}
+
 export interface KimiCodeStreamState {
   wire: KimiCodeWire
   blocks: OutboundContentBlock[]
   current: { index: number; type: 'text' | 'reasoning'; text: string } | null
+  /**
+   * Which wire field the reasoning text of each block arrived under.
+   *
+   * One block can mix fields: a delta may carry `reasoning_content` and
+   * `reasoning` together, and consecutive deltas may alternate spellings without
+   * the block boundary moving. Each run records the key and the LENGTH of its
+   * slice rather than the slice itself, so the provenance never duplicates the
+   * thinking it describes and a replay can put every slice back under the field
+   * it came from. Keyed by block index and serialized by
+   * {@link reasoningReplayState}.
+   */
+  reasoningRuns: Map<number, ReasoningRun[]>
   /** wire tool index -> accumulating call (OpenAI route). */
   toolCalls: Map<number, PendingToolCall>
   /** anthropic content-block index -> our block index. */
@@ -1496,6 +2010,7 @@ export function createStreamState(wire: KimiCodeWire, sessionId?: string): KimiC
     sessionId: typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : undefined,
     blocks: [],
     current: null,
+    reasoningRuns: new Map(),
     toolCalls: new Map(),
     contentIndexes: new Map(),
     openContentIndex: null,
@@ -1612,17 +2127,41 @@ export function processOpenAIStreamLine(line: string, state: KimiCodeStreamState
   const delta = isRecord(choice?.delta) ? (choice as Record<string, unknown>).delta as Record<string, unknown> : undefined
 
   if (delta) {
-    // Learn which reasoning key this endpoint speaks, and read it under that
-    // key. `reasoning_content` is Kimi's, `reasoning` is newer vLLM's, and
-    // `reasoning_details` is the gateway spelling; all three are accepted and
-    // the observed one is echoed back on the next request.
-    const reasoning = reasoningDialect.observe(delta)
-    if (reasoning !== undefined && reasoning !== '') {
+    // Read EVERY reasoning field this delta carries, in a fixed order, instead
+    // of stopping at the first one. `reasoning_content` is Kimi's,
+    // `reasoning_details` is the gateway spelling (an array of text/summary/
+    // encrypted elements, or a bare string on older gateways), and `reasoning`
+    // is newer vLLM's; a peer that sends two of them is stating two pieces of
+    // thinking, so dropping the later one silently loses text the service
+    // already charged for. Reading them all also keeps the learned dialect
+    // pointing at the field the endpoint leads with, which is what the outbound
+    // key still echoes.
+    for (const fragment of reasoningDialect.observeAll(delta)) {
+      const text = sanitizeText(fragment.text)
+      // An encrypted fragment has no text at all, but it still has to own a
+      // block: its opaque payload is replayed from that block's provenance, so a
+      // turn whose only reasoning is encrypted must still produce the record.
+      if (text === '' && fragment.form !== 'encrypted') continue
       out.push(...closeToolCalls(state))
       if (state.current === null || state.current.type !== 'reasoning') out.push(...openTextBlock(state, 'reasoning'))
-      state.current!.text += sanitizeText(reasoning)
-      state.hasContent = true
-      out.push({ type: 'reasoning-delta', index: state.current!.index, text: sanitizeText(reasoning) })
+      if (text !== '') {
+        state.current!.text += text
+        state.hasContent = true
+        out.push({ type: 'reasoning-delta', index: state.current!.index, text })
+      }
+      // Record how this slice arrived, so a later replay can write it back in the
+      // same shape instead of collapsing the block onto one key. The payload of
+      // an encrypted fragment is recorded verbatim; it never becomes text.
+      const runs = state.reasoningRuns.get(state.current!.index) ?? []
+      runs.push({
+        key: fragment.key,
+        ...(fragment.form === undefined ? {} : { form: fragment.form }),
+        ...(fragment.wireType === undefined ? {} : { wireType: fragment.wireType }),
+        ...(fragment.index === undefined ? {} : { index: fragment.index }),
+        ...(fragment.encrypted === undefined ? {} : { encrypted: fragment.encrypted }),
+        length: text.length,
+      })
+      state.reasoningRuns.set(state.current!.index, runs)
     }
 
     const content = asString(delta.content)
@@ -2272,6 +2811,48 @@ function finishReasonFor(state: KimiCodeStreamState): FinishReason {
   return { kind: 'stop' }
 }
 
+/**
+ * Replay metadata: which wire field every reasoning slice arrived under.
+ *
+ * The envelope is the only channel this route has for provenance. The harness's
+ * `ReasoningBlock` is `{type, text}`, and its assembler rebuilds a streamed
+ * reasoning block from the accumulated deltas, so a field added to the block
+ * would be dropped before the message is stored. A terminal `finish` chunk's
+ * `replayState` is persisted verbatim onto the assembled message's model
+ * source, which is where the request builder reads it back - the Claude route in
+ * this package relies on the same seam.
+ *
+ * Shape: one entry per emitted block, because assembly discards an envelope
+ * whose block list does not match the emitted block count. A text or tool-call
+ * block is therefore an explicit `null` rather than a skipped slot, and a
+ * reasoning block is `{ reasoning: [{key, form?, wireType?, index?, encrypted?,
+ * length}] }`. Only lengths are stored, never the text, and an encrypted run
+ * carries `length: 0` plus the opaque payload — the one thing that must be
+ * handed back to the provider unchanged. Everything here is plain JSON (strings,
+ * numbers, arrays, nulls), which is what the harness's lossless-JSON check
+ * requires.
+ */
+function reasoningReplayState(
+  state: KimiCodeStreamState,
+): { response: unknown; blocks: unknown[] } | undefined {
+  if (state.reasoningRuns.size === 0) return undefined
+  const blocks = state.blocks.map((block, index) => {
+    const runs = state.reasoningRuns.get(index)
+    if (runs === undefined || runs.length === 0 || block.type !== 'reasoning') return null
+    return {
+      reasoning: runs.map((run) => ({
+        key: run.key,
+        ...(run.form === undefined ? {} : { form: run.form }),
+        ...(run.wireType === undefined ? {} : { wireType: run.wireType }),
+        ...(run.index === undefined ? {} : { index: run.index }),
+        ...(run.encrypted === undefined ? {} : { encrypted: run.encrypted }),
+        length: run.length,
+      })),
+    }
+  })
+  return { response: { wire: state.wire }, blocks }
+}
+
 /** Flush every open block, then emit usage and the terminal finish. */
 export function closeStream(state: KimiCodeStreamState, accountId?: string): StreamChunk[] {
   if (state.finished) return []
@@ -2282,7 +2863,12 @@ export function closeStream(state: KimiCodeStreamState, accountId?: string): Str
     recordCacheStats(state, state.sessionId, accountId)
     out.push({ type: 'usage', usage: tokenUsage(state) })
   }
-  out.push({ type: 'finish', reason: finishReasonFor(state) })
+  const replayState = reasoningReplayState(state)
+  out.push({
+    type: 'finish',
+    reason: finishReasonFor(state),
+    ...(replayState === undefined ? {} : { replayState }),
+  })
   return out
 }
 

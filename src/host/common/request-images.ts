@@ -374,10 +374,20 @@ export function requestHasSendableImage(options: GenerateOptions, images?: Resol
  * An unreadable image resolves to `unavailable` rather than disappearing, so
  * the model is told the picture is missing instead of answering about a blank.
  *
- * An image whose long edge is over {@link REQUEST_IMAGE_MAX_EDGE} is sent as the
- * harness's downscaled request version (see {@link requestImageTarget}). The
- * stored image and durable history do not change, and an image that already
- * fits is sent byte-for-byte as stored.
+ * An image whose long edge is over the ceiling is sent as the harness's
+ * downscaled request version (see {@link requestImageTarget}). The stored image
+ * and durable history do not change, and an image that already fits is sent
+ * byte-for-byte as stored.
+ *
+ * The ceiling is a PARAMETER because it belongs to the upstream route, exactly
+ * like the image budget: `edge` defaults to the shared
+ * {@link REQUEST_IMAGE_MAX_EDGE}, so every caller that does not name one keeps
+ * the ceiling it always had. A route whose own CLI downscales to a different
+ * long edge passes its value here and gets the same number in both places that
+ * matter — the target it asks the attachment store for AND the check that the
+ * version handed back really is that target. Deriving the target from one
+ * constant and validating it against another is how a 2000 px request gets
+ * discarded as if the store had ignored it.
  *
  * WHY scale instead of drop. `offloadOldestRequestImages` has to drop an image
  * once the request exceeds `MAX_REQUEST_IMAGE_BYTES`, and the number it drops
@@ -391,6 +401,7 @@ export async function resolveRequestImages(
   options: GenerateOptions,
   attachments: AttachmentImageReader | undefined,
   signal?: AbortSignal,
+  edge: number = REQUEST_IMAGE_MAX_EDGE,
 ): Promise<ResolvedRequestImages> {
   const refs = new Map<string, ImageAttachmentRef>()
   for (const message of options.messages) collectImageRefs(message.content, refs)
@@ -403,10 +414,12 @@ export async function resolveRequestImages(
       return
     }
     try {
-      const target = requestImageTarget(ref)
+      const target = requestImageTarget(ref, edge)
       if (target !== undefined) {
         const version = await attachments.readImageRequest(ref, target, signal)
-        resolved.set(attachmentId, Math.max(version.width, version.height) > REQUEST_IMAGE_MAX_EDGE
+        // The SAME effective ceiling that shaped the target: a version over it is
+        // a store that ignored the request, not a targeted downscale.
+        resolved.set(attachmentId, Math.max(version.width, version.height) > edge
           ? { kind: 'unavailable' }
           : { kind: 'inline', mediaType: version.mediaType, data: Buffer.from(version.data).toString('base64') })
         return
