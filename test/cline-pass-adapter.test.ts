@@ -2,7 +2,7 @@
  * The Cline Pass request loop: a pinned channel is abandoned only before the
  * first delivered chunk, and the next candidate serves the turn.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
@@ -64,15 +64,17 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-function adapterWith(fetchFn: typeof fetch): ClinePassAdapter {
+function adapterWith(fetchFn: typeof fetch, attemptTimeoutMs?: number): ClinePassAdapter {
   const engine = createClinePassEngine({ pool, store, settings })
   // The test's fetch is the whole transport; the engine's own seam is replaced
   // through the adapter's engine, so one double answers both probe and request.
   ;(engine as unknown as { options: { fetchFn: typeof fetch } }).options.fetchFn = fetchFn
-  return new ClinePassAdapter(engine, store, settings, pool)
+  return new ClinePassAdapter(engine, store, settings, pool, attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs })
 }
 
 describe('ClinePassAdapter', () => {
@@ -240,5 +242,66 @@ describe('ClinePassAdapter', () => {
     expect(row?.warnings.some((warning) => warning.startsWith('anonymousServed:'))).toBe(true)
     // A channel the pin never proved is not marked usable.
     expect(store.metaOf(MODEL).upstreamStatus?.deepseek).toBeUndefined()
+  })
+
+  it('clears the header deadline once the response starts streaming', async () => {
+    const nativeTimeout = AbortSignal.timeout
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => nativeTimeout.call(AbortSignal, 20))
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    const encoder = new TextEncoder()
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const [first, ...rest] = SSE_OK.split('\n\n')
+      let aborted = false
+      return new Response(new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () => {
+            aborted = true
+            controller.error(new Error('The operation was aborted due to timeout'))
+          })
+          controller.enqueue(encoder.encode(first + '\n\n'))
+          // The body finishes after the old whole-attempt budget. A live stream
+          // must not be aborted by a timer meant only for response headers.
+          setTimeout(() => {
+            if (aborted) return
+            controller.enqueue(encoder.encode(rest.join('\n\n')))
+            controller.close()
+          }, 60)
+        },
+      }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn, 20)
+    const chunks = []
+    for await (const chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    } as never)) chunks.push(chunk)
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta')).toHaveLength(1)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('keeps the header deadline when the gateway never answers', async () => {
+    const nativeTimeout = AbortSignal.timeout
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => nativeTimeout.call(AbortSignal, 20))
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      return await new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(new Response(SSE_OK, { status: 200, headers: { 'content-type': 'text/event-stream' } })), 100)
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(new Error('The operation was aborted due to timeout'))
+        })
+      })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn, 20)
+    await expect((async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'cline-pass',
+        model: MODEL,
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as never)) { /* no chunk */ }
+    })()).rejects.toThrow(/timeout|aborted/i)
   })
 })

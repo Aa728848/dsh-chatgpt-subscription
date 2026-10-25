@@ -87,6 +87,8 @@ const TRANSPORT_RETRY_BASE_MS = 400
 export interface ClinePassAdapterOptions {
   /** Durable attachment service, for request images. */
   attachments?: AttachmentImageReader
+  /** Response-header deadline override, used by focused transport tests. */
+  attemptTimeoutMs?: number
 }
 
 export class ClinePassAdapter extends LlmAdapter {
@@ -275,10 +277,16 @@ export class ClinePassAdapter extends LlmAdapter {
         let response: Response | undefined
         let transportError: unknown
         for (let transportTry = 0; transportTry <= TRANSPORT_RETRIES; transportTry += 1) {
+          const headerDeadline = withAttemptTimeout(upstream, this.options.attemptTimeoutMs)
           try {
-            response = await this.engine.openStream(account, pinned, withAttemptTimeout(upstream))
+            response = await this.engine.openStream(account, pinned, headerDeadline.signal)
+            // The 180 s budget belongs to the response-header wait only. Once the
+            // gateway has answered, the stream's own idle watchdog takes over;
+            // leaving this timer armed would kill a healthy long reasoning pass.
+            headerDeadline.clear()
             break
           } catch (error) {
+            headerDeadline.clear()
             if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: error })
             transportError = error
             // Only a failure that happened before the request was sent is safe
@@ -496,9 +504,16 @@ export class ClinePassAdapter extends LlmAdapter {
   }
 }
 
-/** A caller signal combined with the attempt's header deadline. */
-function withAttemptTimeout(signal: AbortSignal): AbortSignal {
-  return AbortSignal.any([signal, AbortSignal.timeout(ATTEMPT_TIMEOUT_MS)])
+/** A caller signal combined with a clearable response-header deadline. */
+function withAttemptTimeout(signal: AbortSignal, timeoutMs = ATTEMPT_TIMEOUT_MS): { signal: AbortSignal; clear: () => void } {
+  const deadline = new AbortController()
+  const timer = setTimeout(() => {
+    deadline.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+  }, timeoutMs)
+  return {
+    signal: AbortSignal.any([signal, deadline.signal]),
+    clear: () => clearTimeout(timer),
+  }
 }
 
 /**
