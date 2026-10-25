@@ -69,12 +69,12 @@ afterEach(async () => {
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-function adapterWith(fetchFn: typeof fetch, attemptTimeoutMs?: number): ClinePassAdapter {
+function adapterWith(fetchFn: typeof fetch, headerTimeoutMs?: number): ClinePassAdapter {
   const engine = createClinePassEngine({ pool, store, settings })
   // The test's fetch is the whole transport; the engine's own seam is replaced
   // through the adapter's engine, so one double answers both probe and request.
   ;(engine as unknown as { options: { fetchFn: typeof fetch } }).options.fetchFn = fetchFn
-  return new ClinePassAdapter(engine, store, settings, pool, attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs })
+  return new ClinePassAdapter(engine, store, settings, pool, headerTimeoutMs === undefined ? {} : { headerTimeoutMs })
 }
 
 describe('ClinePassAdapter', () => {
@@ -245,8 +245,6 @@ describe('ClinePassAdapter', () => {
   })
 
   it('clears the header deadline once the response starts streaming', async () => {
-    const nativeTimeout = AbortSignal.timeout
-    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => nativeTimeout.call(AbortSignal, 20))
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
     await settings.update({ enabledModelIds: [MODEL] })
     const encoder = new TextEncoder()
@@ -282,8 +280,6 @@ describe('ClinePassAdapter', () => {
   })
 
   it('keeps the header deadline when the gateway never answers', async () => {
-    const nativeTimeout = AbortSignal.timeout
-    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => nativeTimeout.call(AbortSignal, 20))
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
     await settings.update({ enabledModelIds: [MODEL] })
     const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {

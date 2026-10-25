@@ -88,7 +88,7 @@ export interface ClinePassAdapterOptions {
   /** Durable attachment service, for request images. */
   attachments?: AttachmentImageReader
   /** Response-header deadline override, used by focused transport tests. */
-  attemptTimeoutMs?: number
+  headerTimeoutMs?: number
 }
 
 export class ClinePassAdapter extends LlmAdapter {
@@ -277,7 +277,7 @@ export class ClinePassAdapter extends LlmAdapter {
         let response: Response | undefined
         let transportError: unknown
         for (let transportTry = 0; transportTry <= TRANSPORT_RETRIES; transportTry += 1) {
-          const headerDeadline = withAttemptTimeout(upstream, this.options.attemptTimeoutMs)
+          const headerDeadline = withAttemptTimeout(upstream, this.options.headerTimeoutMs)
           try {
             response = await this.engine.openStream(account, pinned, headerDeadline.signal)
             // The 180 s budget belongs to the response-header wait only. Once the
