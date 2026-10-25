@@ -207,7 +207,15 @@ describe('Antigravity final usage and thought replay', () => {
   it('does not turn a broken connection into a successful tool invocation', () => {
     const state = createStreamState()
     processStreamLine(line(frame([{ functionCall: { name: 'run_code', args: {} } }])), state)
-    expect(() => closeStream(state)).toThrow('before its terminal response')
+    const thrown = (() => {
+      try { closeStream(state) } catch (error) { return error }
+      return undefined
+    })()
+    // EOF with neither `finishReason` nor `[DONE]` is a severed connection, so
+    // it must carry the code DSH retries instead of an unretryable provider
+    // verdict: this is the long answer the user was reading when it died.
+    expect(thrown).toMatchObject({ code: 'TRANSPORT' })
+    expect(String((thrown as Error).message)).toContain('before its terminal response')
   })
 
   it('requests thought summaries for Gemini agent aliases, direct runtimes, and every configured thinking route', () => {

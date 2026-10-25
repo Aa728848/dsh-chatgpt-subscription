@@ -4,6 +4,7 @@ import {
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
+  errorChain,
   type GenerateOptions,
   type LlmModelInfo,
   type LlmProviderInfo,
@@ -175,6 +176,38 @@ export function withoutValidatedToolConfig(body: string): string | undefined {
   if (parsed.request?.toolConfig?.functionCallingConfig?.mode !== TOOL_CALLING_MODE.validated) return undefined
   delete parsed.request.toolConfig
   return JSON.stringify(parsed)
+}
+
+/**
+ * The failure a stream that died mid-body is reported as.
+ *
+ * Everything above the response body is already typed: a connection that never
+ * produced a response raises TRANSPORT, a non-2xx raises its status verdict, and
+ * the mapper raises its own protocol or provider one. The body itself was the
+ * gap: a connection that ends before the response does arrives as undici's bare
+ * `TypeError: terminated`, which carries no code of its own, so the harness
+ * normalizes it to UNKNOWN — and UNKNOWN is not a code DSH retries, so one
+ * severed connection ended the long answer the user was reading with no second
+ * attempt at all. The real reason (ECONNRESET, a socket closed by the far side,
+ * a body timeout) sat on `.cause`, which the harness drops before the failure is
+ * persisted, so the report could not even say what had happened.
+ *
+ * So the transport is named here and its cause chain is kept in the message, and
+ * only what the route already typed is left alone: an `LlmError` is this line's
+ * own verdict (an in-band provider error, a stream truncated before its terminal
+ * frame), and a caller abort is a cancellation rather than a fault.
+ *
+ * The code is TRANSPORT even once chunks have been yielded. DSH settles a failed
+ * attempt as a discarded `assistant/attempt` and starts a fresh one on retry, and
+ * a tool call only runs after its stream finishes, so retrying can neither
+ * repeat committed output nor re-run a tool.
+ */
+function streamFailure(error: unknown, signal: AbortSignal): LlmError {
+  if (error instanceof LlmError) return error
+  if (signal.aborted) return new LlmError('Antigravity stream aborted', 'ABORTED', { cause: error })
+  const chain = errorChain(error).trim()
+  const detail = chain === '' ? 'the response stream ended unexpectedly' : chain.slice(0, 500)
+  return new LlmError(`Antigravity stream failed: ${detail}`, 'TRANSPORT', { cause: error })
 }
 
 export class AntigravityAdapter extends LlmAdapter {
@@ -540,7 +573,15 @@ export class AntigravityAdapter extends LlmAdapter {
 
     try {
       while (true) {
-        const { done, value } = await reader.read()
+        const read = await reader.read().catch((error: unknown) => {
+          // A body that dies mid-stream arrives as undici's bare
+          // `TypeError: terminated`, which carries no code of its own: the
+          // harness normalizes it to UNKNOWN, and UNKNOWN is not a code DSH
+          // retries. Name the transport here instead, with the cause chain kept
+          // in the message (see {@link streamFailure}).
+          throw streamFailure(error, signal)
+        })
+        const { done, value } = read
         if (done) break
         // Transport received bytes, whether or not a parser turns them into a
         // visible chunk: a heartbeat frame is proof the connection is alive.

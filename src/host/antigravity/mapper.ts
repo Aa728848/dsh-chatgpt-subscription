@@ -1133,7 +1133,12 @@ function finishReasonFor(state: StreamState): FinishReason {
 export function closeStream(state: StreamState): StreamChunk[] {
   if (state.finished) return []
   if (!state.finishReason && !state.done) {
-    throw new LlmError('Antigravity stream ended before its terminal response', 'PROVIDER_ERROR')
+    // A body that stops without `finishReason` and without `[DONE]` is a
+    // severed connection, not a provider verdict: the reader saw EOF, not a
+    // terminal frame. TRANSPORT is the code DSH retries, so a long answer whose
+    // connection dropped gets the second attempt it needs instead of ending the
+    // turn as an unretryable provider failure.
+    throw new LlmError('Antigravity stream ended before its terminal response', 'TRANSPORT')
   }
   state.finished = true
   const out = closeCurrentBlock(state)

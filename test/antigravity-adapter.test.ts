@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import { AccountPoolStore } from '../src/host/antigravity/account-pool.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/antigravity/token-store.ts'
-import { BlockAssembler, createAssistantMessage, createToolResultMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, LlmError, createAssistantMessage, createToolResultMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 import os from 'node:os'
@@ -470,6 +470,187 @@ describe('AntigravityAdapter', () => {
     // Every endpoint rejected, so no status was ever received: a 500 here would
     // be a number this adapter made up.
     await expect(run()).rejects.toMatchObject({ code: 'TRANSPORT' })
+  })
+
+  it('reports a body severed after a valid chunk as a retryable TRANSPORT with its cause chain', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const frame = { response: { candidates: [{ content: { parts: [{ text: 'a long answer, cut off' }] } }] } }
+    const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`)
+    // The shape undici raises when the far side drops the connection mid-body.
+    const cause = new Error('read ECONNRESET')
+    const severed = new TypeError('terminated', { cause })
+    let sent = false
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({
+      pull(controller) {
+        // The first pull serves a real frame; the second one is the connection
+        // dying, so the reader dies after at least one chunk reached the caller.
+        if (sent) {
+          controller.error(severed)
+          return
+        }
+        sent = true
+        controller.enqueue(bytes)
+      },
+    })))
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+
+    const chunks: StreamChunk[] = []
+    const failure = await (async () => {
+      try {
+        for await (const chunk of adapter.stream({
+          provider: 'antigravity', model: 'gemini-3.8-flash',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'test severed body' }] }],
+        } as unknown as GenerateOptions)) chunks.push(chunk)
+      } catch (error) {
+        return error as LlmError
+      }
+      return undefined
+    })()
+
+    // The partial answer did reach the caller before the connection died.
+    expect(chunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
+    expect(failure).toBeInstanceOf(LlmError)
+    // UNKNOWN was the whole bug: it is not a code DSH retries, so one severed
+    // connection ended the turn instead of getting a second attempt.
+    expect(failure).toMatchObject({ code: 'TRANSPORT' })
+    expect(failure?.message).toContain('terminated')
+    expect(failure?.message).toContain('ECONNRESET')
+    // The real reason travels as the cause, not only quoted in the message.
+    expect((failure as { cause?: unknown }).cause).toBe(severed)
+  })
+
+  it('keeps a caller cancellation as ABORTED while the body is severed', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const frame = { response: { candidates: [{ content: { parts: [{ text: 'a long answer, cut off' }] } }] } }
+    const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`)
+    let sent = false
+    const fetchFn = vi.fn<typeof fetch>(async (_url: unknown, init?: RequestInit) => {
+      const requestSignal = init?.signal ?? undefined
+      return new Response(new ReadableStream({
+        start(controller) {
+          // A real abort severs the body: nothing further arrives and the read
+          // rejects. Modelled on the signal fetch was handed, not on a timer.
+          requestSignal?.addEventListener('abort', () => {
+            controller.error(new Error('the operation was aborted'))
+          }, { once: true })
+        },
+        pull(controller) {
+          if (sent) return new Promise<void>(() => { /* the abort settles the read */ })
+          sent = true
+          controller.enqueue(bytes)
+        },
+      }))
+    })
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+    const controller = new AbortController()
+
+    const chunks: StreamChunk[] = []
+    const failure = await (async () => {
+      try {
+        for await (const chunk of adapter.stream({
+          provider: 'antigravity', model: 'gemini-3.8-flash',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'test aborted body' }] }],
+          signal: controller.signal,
+        } as unknown as GenerateOptions)) {
+          chunks.push(chunk)
+          // Cancelled mid-answer, exactly the gesture that must not be retried.
+          controller.abort()
+        }
+      } catch (error) {
+        return error as LlmError
+      }
+      return undefined
+    })()
+
+    expect(chunks.length).toBeGreaterThan(0)
+    expect(failure).toMatchObject({ code: 'ABORTED' })
+  })
+
+  it('keeps an in-band stream error as the provider verdict it already was', async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const frame = { error: { code: 503, status: 'UNAVAILABLE', message: 'backend unavailable' } }
+    const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`)
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes)
+        controller.close()
+      },
+    })))
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+
+    const failure = await (async () => {
+      try {
+        for await (const _chunk of adapter.stream({
+          provider: 'antigravity', model: 'gemini-3.8-flash',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'test in-band error' }] }],
+        } as unknown as GenerateOptions)) { /* drain */ }
+      } catch (error) {
+        return error as LlmError
+      }
+      return undefined
+    })()
+
+    // The mapper's own verdict is not reclassified as a transport failure.
+    expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(failure?.message).toContain('backend unavailable')
+  })
+
+  it("passes a severed body's own LlmError through streamFailure unchanged", async () => {
+    const store = new FileCredentialStore()
+    vi.spyOn(store, 'read').mockResolvedValue({ access: 'mock-access-token', expires: Date.now() + 3_600_000 })
+    const modelSettings = new FileModelSettingsStore()
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [] })
+    const frame = { response: { candidates: [{ content: { parts: [{ text: 'a long answer, cut off' }] } }] } }
+    const bytes = new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`)
+    // An already-typed verdict raised by the READER itself, once a real frame
+    // has reached the caller. This is the path the catch around `reader.read()`
+    // owns, so it must pass the object through untouched: no reclassification,
+    // no copy, no rewritten message.
+    const marker = new LlmError('the reader already typed this failure', 'RATE_LIMIT', { status: 429 })
+    let sent = false
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({
+      pull(controller) {
+        if (sent) {
+          controller.error(marker)
+          return
+        }
+        sent = true
+        controller.enqueue(bytes)
+      },
+    })))
+    const pool = poolWithLegacyAccount(store)
+    const adapter = new AntigravityAdapter(store, modelSettings, undefined, { fetchFn }, pool)
+
+    const chunks: StreamChunk[] = []
+    const failure = await (async () => {
+      try {
+        for await (const chunk of adapter.stream({
+          provider: 'antigravity', model: 'gemini-3.8-flash',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'test typed reader failure' }] }],
+        } as unknown as GenerateOptions)) chunks.push(chunk)
+      } catch (error) {
+        return error
+      }
+      return undefined
+    })()
+
+    expect(chunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
+    // Identity, not equality: the very object the read rejected with.
+    expect(failure).toBe(marker)
+    expect((failure as LlmError).code).toBe('RATE_LIMIT')
+    expect((failure as LlmError).message).toBe('the reader already typed this failure')
   })
 
   it('treats a 429 without a stated reset time as a transient rate limit, not a spent quota', async () => {
