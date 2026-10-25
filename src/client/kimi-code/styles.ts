@@ -84,6 +84,54 @@ const BASE = `
 .dsha-cap-cost{color:var(--dsw-alias-label-primary);display:block;font-weight:500;margin-bottom:3px}
 .dsha-cap-footnote{font-size:11px;line-height:1.55;margin:8px 0 0}
 .dsha-warn{border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;line-height:1.55;margin:0 0 10px;padding:8px 10px}
+
+/* ---------- Kimi Code 账号卡片里的额度区（KimiQuotaCard） ----------
+   档位名用 Georgia 字标，右侧压一条五线谱；音符按档位换插图，悬停时逐笔浮入。
+   总使用量是 Kimi 池与 Code 池的堆叠条，5 小时与 7 天各一条单行进度。 */
+/* ---------- 卡面：圆角、细边与顶部一道极淡的高光 ----------
+   形状与层次照搬 index.html 里那张卡；颜色仍走 dsw 令牌，浅色主题下同一套规则也成立。 */
+.dsha-account-card.dsha-account-card--kimi{border-radius:14px;border-width:1px;background-image:linear-gradient(180deg,color-mix(in srgb,var(--dsw-alias-label-primary) 4%,transparent),transparent 46%);transition:border-color .3s ease,box-shadow .3s ease}
+.dsha-account-card.dsha-account-card--kimi:hover{border-color:color-mix(in srgb,var(--dsw-alias-label-primary) 22%,var(--dsw-alias-border-l2));box-shadow:0 8px 24px rgba(0,0,0,.16)}
+
+.dsha-kq{--kq-fg:var(--dsw-alias-label-primary);--kq-fg-2:var(--dsw-alias-label-secondary);--kq-fg-3:var(--dsw-alias-label-tertiary);--kq-line:var(--dsw-alias-border-l2);--kq-track:color-mix(in srgb,var(--dsw-alias-label-primary) 9%,transparent);--kq-rest:var(--dsw-alias-label-primary,#1a1a19);--kq-code:var(--dsw-alias-button-info-fill,#397ee8);--kq-tip-bg:var(--dsw-alias-label-primary,#2f2f2d);color:var(--kq-fg);display:flex;flex-direction:column;min-width:0}
+.dsha-kq-head{align-items:center;display:flex;gap:6px}
+.dsha-kq-tier{font-family:Georgia,"Times New Roman",serif;font-size:24px;font-weight:400;letter-spacing:-1.4px;line-height:1.4;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsha-kq-staff{display:flex;flex:1;flex-direction:column;gap:4px;height:21px;margin-right:-6px;min-width:48px;position:relative}
+.dsha-kq-staff>i{background:var(--kq-line);display:block;height:1px;width:100%}
+.dsha-kq-art{overflow:visible;position:absolute;right:6px;top:50%;transform:translateY(-50%)}
+.dsha-kq-art path{opacity:0;transform:scale(.8) translateY(16px);transform-origin:bottom;transition:opacity .2s ease-in-out,transform .2s ease-in-out}
+.dsha-account-card:hover .dsha-kq-art path,.dsha-kq:focus-within .dsha-kq-art path{opacity:1;transform:scale(1) translateY(0);transition:opacity .6s ease-in-out,transform .6s ease-in-out;transition-delay:calc(var(--i,0) * 80ms)}
+.dsha-kq-total{margin-top:14px}
+.dsha-kq-row{align-items:baseline;column-gap:10px;display:flex;flex-wrap:wrap;min-width:0;row-gap:2px}
+.dsha-kq-label{color:var(--kq-fg);font-size:14px;white-space:nowrap}
+.dsha-kq-value{color:var(--kq-fg);font-size:14px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsha-kq-barwrap{margin-top:11px;position:relative}
+.dsha-kq-meter{background:var(--kq-track);border-radius:999px;display:flex;gap:2px;height:8px;overflow:hidden}
+.dsha-kq-meter--total{border-radius:4px;height:12px}
+.dsha-kq-meter--total .dsha-kq-seg{border-radius:2px}
+.dsha-kq-seg{border-radius:999px;display:block;height:100%;transition:width .9s cubic-bezier(.22,.61,.36,1)}
+.dsha-kq-seg--recent{background:var(--kq-code)}
+.dsha-kq-seg--rest{background:var(--kq-rest)}
+.dsha-kq-tip{background:var(--kq-tip-bg);border-radius:10px;bottom:calc(100% + 10px);color:var(--dsw-alias-bg-base,#fff);font-size:13px;line-height:1;opacity:0;padding:9px 14px;pointer-events:none;position:absolute;right:0;transform:translateY(4px);transition:opacity .16s ease-out,transform .16s ease-out;white-space:nowrap}
+.dsha-kq-tip::after{border:6px solid transparent;border-top-color:var(--kq-tip-bg);content:"";position:absolute;right:34px;top:100%}
+.dsha-kq-barwrap:hover .dsha-kq-tip{opacity:1;transform:translateY(0)}
+.dsha-kq-legend{align-items:center;color:var(--kq-fg-2);column-gap:16px;display:flex;flex-wrap:wrap;font-size:13px;margin-top:11px;row-gap:6px}
+.dsha-kq-legend-item{align-items:center;display:inline-flex;gap:6px;white-space:nowrap}
+.dsha-kq-legend-note{color:var(--kq-fg-3);white-space:nowrap}
+.dsha-kq-dot{border-radius:2px;display:block;height:8px;width:8px}
+.dsha-kq-dot--recent{background:var(--kq-code)}
+.dsha-kq-dot--rest{background:var(--kq-rest)}
+.dsha-kq-reset{color:var(--kq-fg-3);font-size:12px;font-variant-numeric:tabular-nums;margin-left:auto;white-space:nowrap}
+.dsha-kq-sep{border:0;border-top:0.5px solid var(--kq-line);height:0;margin:16px 0}
+.dsha-kq-window+.dsha-kq-window{margin-top:16px}
+.dsha-kq-window-label{color:var(--kq-fg);font-size:14px}
+.dsha-kq-window-pct{color:var(--kq-fg);font-size:14px;font-variant-numeric:tabular-nums}
+.dsha-kq-window .dsha-kq-meter{margin-top:8px}
+.dsha-kq-foot{align-items:baseline;color:var(--kq-fg-3);column-gap:12px;display:flex;flex-wrap:wrap;font-size:11px;font-variant-numeric:tabular-nums;justify-content:space-between;margin-top:14px;row-gap:4px}
+.dsha-kq-foot-left{align-items:baseline;column-gap:10px;display:inline-flex;flex-wrap:wrap;min-width:0;row-gap:2px}
+.dsha-kq-foot-left>span{white-space:nowrap}
+.dsha-kq-expires{text-align:right;white-space:nowrap}
+.dsha-kq-blank{margin:12px 0 0}
 `
 
 /** Kimi-specific rules layered on top of the shared control styles. */

@@ -16,7 +16,6 @@ import type { PoolAccountQuotaDto } from '../src/shared/account-pool-contracts.t
 import type { KimiCodeWebStatus } from '../src/shared/kimi-code-contracts.ts'
 import { KimiCodeSection } from '../src/client/kimi-code/KimiCodeSection.tsx'
 import { zh } from '../src/client/kimi-code/locales.ts'
-import { accountPoolZh } from '../src/client/common/account-pool-labels.ts'
 
 const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
 
@@ -125,7 +124,7 @@ function quotaBlock(node: HTMLElement): HTMLElement {
 }
 
 describe('kimi-code quota, drawn in the account rows', () => {
-  it('draws the bar for the account that has a reading, and says so for one that does not', async () => {
+  it('draws the Kimi card for the account that has a reading, and says so for one that does not', async () => {
     const node = await mount(status())
     const cards = [...node.querySelectorAll<HTMLElement>('.dsha-account-card')]
     expect(cards).toHaveLength(2)
@@ -133,15 +132,76 @@ describe('kimi-code quota, drawn in the account rows', () => {
     const withQuota = cards.find((card) => card.querySelector('.dsha-account-title')?.textContent === 'user1@example.com')!
     const without = cards.find((card) => card.querySelector('.dsha-account-title')?.textContent === 'user2@example.com')!
 
-    const bar = withQuota.querySelector('[role="progressbar"]')!
-    expect(bar.getAttribute('aria-valuenow')).toBe('42')
-    expect(bar.getAttribute('aria-label')).toContain(accountPoolZh.quotaUsed)
-    expect(withQuota.querySelector('.dsha-account-quota-name')?.textContent).toBe('5-hour')
+    // The Kimi card, not the shared one: the plan name is the wordmark, and the
+    // quota is ONE bar — the 5-hour and 7-day rows are gone.
+    const kq = withQuota.querySelector('.dsha-kq')!
+    expect(kq).not.toBeNull()
+    expect(kq.querySelector('.dsha-kq-tier')?.textContent).toBe('GOAT')
+    expect(kq.querySelector('.dsha-kq-window-label')).toBeNull()
+    // Only a 5-hour window is on the wire, so the headline names that window
+    // rather than claiming to be a whole-period total.
+    expect(kq.querySelector('.dsha-kq-label')?.textContent).toBe(zh.kqWindow5h)
+    expect(kq.querySelector('.dsha-kq-value')?.textContent).toBe('42%')
+
+    // With only a 5-hour window there is nothing to divide into, so the whole
+    // consumed share is the recent one.
+    // The bar grows in from zero: the strip is laid out at 0 and the target is
+    // carried alongside it, so the transition has somewhere to start.
+    const recent = kq.querySelector<HTMLElement>('.dsha-kq-seg--recent')!
+    const rest = kq.querySelector<HTMLElement>('.dsha-kq-seg--rest')!
+    expect(recent.dataset.target).toBe('42')
+    expect(rest.dataset.target).toBe('0')
+    expect(recent.style.width).toBe('0%')
+
+    // The shared block is gone from this line's rows. The footer carries no
+    // account label: the card header already names the account, so what is worth
+    // the space is when it last served a request and how fresh this reading is.
+    expect(withQuota.querySelector('.dsha-account-quota')).toBeNull()
+    expect(kq.querySelector('.dsha-kq-foot')?.textContent).toContain('更新')
 
     // The account nobody has read says exactly that. "Never read" and "nothing
     // used" are different claims, and only one of them is true here.
-    expect(without.querySelector('[role="progressbar"]')).toBeNull()
-    expect(without.querySelector('.dsha-account-quota-empty')?.textContent).toBe(accountPoolZh.quotaNone)
+    expect(without.querySelector('.dsha-kq-seg')).toBeNull()
+    expect(without.querySelector('.dsha-kq-blank')?.textContent).toBe(zh.quotaNone)
+  })
+
+  it('folds the 5-hour share into the 7-day bar instead of stacking two bars', async () => {
+    // An old-plan account: the wire reports 5-hour and Weekly, and one 7-day
+    // quota is worth five 5-hour quotas. 89% of a 5-hour window is 17.8% of the
+    // 7-day one, so the blue stretch is capped by the 18% the week states.
+    const node = await mount(status({
+      accounts: [{
+        id: 'acc_a', alias: 'user1@example.com', isPrimary: true, email: 'user1@example.com',
+        nickname: 'Kimi 1', planName: 'Allegretto', region: 'mainland-cn',
+        lastUsedAt: Date.now() - 60_000,
+        expiresAt: Date.parse('2026-11-05T04:00:00Z'),
+        quota: {
+          fetchedAt: Date.now(),
+          windows: [
+            { label: '5-hour', usedPercent: 89, windowDurationMins: 300, resetsAt: Date.now() + 60_000 },
+            { label: 'Weekly (7-day)', usedPercent: 18, windowDurationMins: 10_080, resetsAt: Date.now() + 6 * 86_400_000 },
+          ],
+        },
+      }],
+      activeAccountId: 'acc_a',
+    }))
+    const kq = node.querySelector('.dsha-kq')!
+
+    // The bar IS the 7-day window here, so it says so.
+    expect(kq.querySelector('.dsha-kq-label')?.textContent).toBe(zh.kqWindow7d)
+    expect(kq.querySelector('.dsha-kq-value')?.textContent).toBe('18%')
+    expect(kq.querySelector<HTMLElement>('.dsha-kq-seg--recent')!.dataset.target).toBe('17.8')
+    expect(kq.querySelector<HTMLElement>('.dsha-kq-seg--rest')!.dataset.target).toBe('0.2')
+    // The blue item names the window it stands for, keeps the wire's own
+    // percentage, and counts down to that window's own reset.
+    expect(kq.textContent).toContain(zh.kqShortWindow.replace('{pct}', '89%'))
+    expect(kq.textContent).toContain('后重置')
+    expect(kq.textContent).toContain(zh.kqRestUsed)
+
+    // The token expiry sits at the bottom-right of the card, not among the
+    // shared detail rows above the quota.
+    expect(kq.querySelector('.dsha-kq-expires')?.textContent).toContain('令牌到期')
+    expect(kq.querySelector('.dsha-kq-foot-left')?.textContent).toContain('最后调用')
   })
 
   it('keeps the page-level facts and stops drawing progress bars there', async () => {

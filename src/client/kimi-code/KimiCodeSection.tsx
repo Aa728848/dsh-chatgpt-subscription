@@ -15,6 +15,7 @@ import type { AccountRotationStrategy } from '../../shared/account-pool-contract
 import { zh, NS_KIMI_CODE } from './locales.ts'
 import { effortLabel, effortOptions, thinkingOnlyModels, wireLabel } from './labels.ts'
 import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
+import { KimiQuotaCard } from './KimiQuotaCard.tsx'
 import { useLineDict } from '../common/line-locale.ts'
 
 const API = '/kimi-code/api'
@@ -443,13 +444,19 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         onRelogin={(accountId) => handleRelogin(accountId)}
         onSetStrategy={(strategy) => void handleSetStrategy(strategy)}
         showQuota
-        renderDetails={(entry) => (
-          <>
-            {entry.planName && <span>{t.plan}: {entry.planName}</span>}
-            {entry.region && (
-              <span>{t.region}: {entry.region === 'global' ? t.regionGlobal : t.regionMainland}</span>
-            )}
-          </>
+        accountCardClassName="dsha-account-card--kimi"
+        omitDetails={['lastUsed', 'expires']}
+        renderQuota={(entry, _index, now) => (
+          <KimiQuotaCard
+            quota={entry.quota}
+            // 账号自己的档位名常常是空的（号池条目建于服务端还没回过 level 的时候），
+            // 往线路级快照与凭据里退一级，字标才不至于空着。
+            planName={entry.planName ?? entry.planLabel ?? quota?.planName ?? status?.account?.planName ?? null}
+            lastUsedAt={entry.lastUsedAt}
+            expiresAt={entry.expiresAt}
+            now={now}
+            labels={t}
+          />
         )}
       >
         {loginPending && (

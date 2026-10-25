@@ -53,6 +53,25 @@ export interface AccountPoolSectionProps<
    * an externally-managed account replaces the delete it must never offer.
    */
   renderAccountActions?(account: TAccount): ReactNode
+  /**
+   * Replaces the shared per-account quota block with the line's own.
+   *
+   * The shared block draws one labelled bar per window, which is right for most
+   * lines. Kimi's membership splits into two independent monthly pools and a
+   * two-tier staff of windows, and it reads better with the plan's own artwork;
+   * that line supplies this instead of teaching the shared block its vocabulary.
+   */
+  renderQuota?(account: TAccount, index: number, now: number): ReactNode
+  /**
+   * Shared detail rows to leave out for this line.
+   *
+   * A line that draws its own footer already states when the account last served
+   * a request, so repeating the same fact one line above it reads like two
+   * different readings of the same thing.
+   */
+  omitDetails?: ReadonlyArray<'email' | 'expires' | 'lastUsed'>
+  /** Extra class on the account card, so a line can restyle its own shell. */
+  accountCardClassName?: string
   /** Extra controls inside the group, after the account list. */
   children?: ReactNode
 }
@@ -187,12 +206,17 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
         <div className="dsha-empty">{t.noAccounts}</div>
       ) : (
         <div className="dsha-accounts-list">
-          {accounts.map((account) => {
+          {accounts.map((account, index) => {
             const isActive = account.id === props.activeAccountId
             const cooling = isCoolingDown(account, now)
             const needsRelogin = account.authStatus !== undefined && account.authStatus !== 'ok'
             return (
-              <div key={account.id} className={`dsha-account-card ${isActive ? 'active' : ''}`}>
+              <div
+                key={account.id}
+                className={`dsha-account-card ${isActive ? 'active' : ''}${
+                  props.accountCardClassName === undefined ? '' : ` ${props.accountCardClassName}`
+                }`}
+              >
                 <div className="dsha-account-header">
                   <div className="dsha-account-identity">
                     <span className="dsha-account-title">{account.alias || account.email || account.id}</span>
@@ -259,17 +283,24 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
                       e-mail, expiry or last-used itself. */}
                   {props.renderDetails?.(account)}
                   {account.email !== undefined && account.email !== account.alias
+                    && props.omitDetails?.includes('email') !== true
                     && <span>{t.email}: {account.email}</span>}
-                  {account.expiresAt !== undefined && <span>{t.expires}: {formatAccountDate(account.expiresAt)}</span>}
-                  {account.lastUsedAt !== undefined && <span>{t.lastUsed}: {formatAccountDate(account.lastUsedAt)}</span>}
+                  {account.expiresAt !== undefined && props.omitDetails?.includes('expires') !== true
+                    && <span>{t.expires}: {formatAccountDate(account.expiresAt)}</span>}
+                  {account.lastUsedAt !== undefined && props.omitDetails?.includes('lastUsed') !== true
+                    && <span>{t.lastUsed}: {formatAccountDate(account.lastUsedAt)}</span>}
                 </div>
 
-                <AccountQuota
-                  quota={account.quota}
-                  labels={t}
-                  showEmpty={props.showQuota === true || anyQuota}
-                  now={now}
-                />
+                {props.renderQuota !== undefined ? (
+                  props.renderQuota(account, index, now)
+                ) : (
+                  <AccountQuota
+                    quota={account.quota}
+                    labels={t}
+                    showEmpty={props.showQuota === true || anyQuota}
+                    now={now}
+                  />
+                )}
                 {needsRelogin && account.authFailedReason && (
                   <div className="dsha-account-details">
                     <span>{account.authFailedReason}</span>
