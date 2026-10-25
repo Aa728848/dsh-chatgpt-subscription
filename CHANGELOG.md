@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.40.1 - 2026-10-25
+
+- **[dispatch] 修掉「路由能力从未真正生效」：守卫的探测一次答 `false`，就把完整的成对路由判成改路由请求并拒绝**
+  - **现象**：开了「设置 → 子代理」并授权了路由之后，调度模式带 `provider`+`model` 派发子代理，恒定收到 `subagent model selection: "subagent" always runs on the calling agent's own route and accepts no provider/model`；去掉路由参数反而能派出去（继承父路由）。也就是说配置一直是对的，被拦的是「按任务指定子代理模型」这件事本身。
+  - **根因（我们自己的守卫）**：`delegationDenialReason` 里 `declaresRouteParameters` 一旦答 `false`，就把这次调用改判成 inherit 模式，再把成对路由当成「试图把继承式工具改道」拒绝。而探测读的是 `tools.definitions(agent)` 里那份 `subagent` 定义——那份视图有可能不携带本部署 preset 的委派注册，于是它看到的是一份没有 `provider`/`model` 参数的定义，答 `false`。这个 `false` 造成的拒绝**没有任何调用能满足**，比它想避免的「向没有路由参数的工具索要路由」更糟。
+  - **改法（`src/host/subagent-model-authorization.ts`）**：完整成对路由**一律**进白名单校验（未授权仍拒，理由变成「不在本会话授权名单里」这种能照做的说法）；只有「没给」和「只给一半」才走继承路由分支与相应诊断。探测本身也补了一层容错：先读 `parameters.properties`，读不到才退回原来的扁平读法，两种定义形状都不再被误读成「没有字段」。
+  - **测试**：`test/subagent-model-authorization.test.ts` 的 adaptivity 用例原本伪造的是 `{ provider: {}, model: {} }` 这种真实宿主从不产生的扁平形状，所以一直是绿的、也就一直没抓到问题；现在主用例改用真实 JSON Schema 形状，扁平形状保留为兼容用例，并新增「授权路由对在探测答 false 时放行」「未授权路由对仍以名单为由拒绝」两条。全量 4789 passed / 8 skipped / 0 failed（较上一版 +1）。
+
+- **[compat] `PLUGIN_VERSION` 从 `0.1.0-alpha.0` 对齐到实际版本，并把「漂移」变成会红的断言**
+  - **现象**：这个常量自首次提交起一直没动过，而包已经发到 0.40.0；它被 `wire-auth.ts` 拼进 `user-agent`，于是每一次 Codex 请求都在宣告一个从未发布过的插件版本。
+  - **改法**：常量改为与包版本一致；`test/responses-client.test.ts` 里写死的旧字符串改为跟随常量，并新增一条断言——`PLUGIN_VERSION` 必须等于 `package.json` 的 `version`。这样下次发版忘了改常量，测试会红，而不是悄悄发出去。
+  - **为什么不用「发布清单加一条」**：靠人记的步骤会把同一个错误再犯一次；能执行的断言不会。
+
+- **[docs] 缝隙表补三行、README 的支持区间更正**
+  - `.dsh/skills/dsh-harness-upgrade/SKILL.md` §2 的缝隙表原本 8 条，漏了 `src/compat.ts`、`src/host/common/credentials-compat.ts`、`src/host/common/brand-compat.ts` 三处同样是跨 harness 代际的桥接，现已各自补上 invariant（`compat.ts` 的 `PLUGIN_VERSION` 一条写明必须跟包版本一致）。
+  - `README.md` 仍写「一直到 0.2.0-rc.2、以 0.2.0-rc.2 为基线」，而 `peerDependencies` 早已覆盖 `0.2.1-rc.3`；已更正。
+
 ## 0.40.0 - 2026-10-25
 
 - **[compaction] 新增「压缩路由」：把上下文压缩的摘要请求改派到指定 provider/model**
