@@ -9,6 +9,7 @@ import type {
   ConnectionTestDto,
   SubscriptionPreferencesDto,
   SubscriptionPreferencesUpdateDto,
+  CompactionCandidatesDto,
 } from '../shared/contracts.ts'
 
 export class SubscriptionApi {
@@ -96,6 +97,11 @@ export class SubscriptionApi {
 
   updatePreferences(patch: SubscriptionPreferencesUpdateDto): Promise<SubscriptionPreferencesDto> {
     return post(`${ROUTE_PREFIX}/preferences/update`, patch)
+  }
+
+  /** Every route a compaction summary may be pointed at, read per call. */
+  compactionCandidates(): Promise<CompactionCandidatesDto> {
+    return post<CompactionCandidatesDto>(`${ROUTE_PREFIX}/compaction/candidates`, {})
   }
 
   events(loginId: string): EventSource {

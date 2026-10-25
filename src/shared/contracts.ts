@@ -1,4 +1,5 @@
 import type { AccountRotationStrategy, PoolAccountSummaryDto } from './account-pool-contracts.ts'
+import type { CompactionRouteTarget } from './compaction-route.ts'
 
 export interface SanitizedAccountDto {
   email: string | null
@@ -171,6 +172,12 @@ export interface SubscriptionPreferencesDto {
   contextWindowOverrides: CodexContextWindowOverridesDto
   proxyMode: ProxyMode
   customProxyUrl: string | null
+  /**
+   * Where an automatic compaction summary is computed. `null` keeps the
+   * conversation's own model, which is what every deployment does until an
+   * operator opts in: the summary then costs that line's quota.
+   */
+  compactionRoute?: CompactionRouteTarget | null
   writable: boolean
 }
 
@@ -185,6 +192,28 @@ export interface SubscriptionPreferencesUpdateDto {
   contextWindowOverrides?: CodexContextWindowOverridesUpdateDto
   proxyMode?: ProxyMode
   customProxyUrl?: string | null
+  /** Set a target, or `null` to route compaction back to the conversation's model. */
+  compactionRoute?: CompactionRouteTarget | null
+}
+
+/** One model a compaction target may be pointed at. */
+export interface CompactionCandidateModelDto {
+  id: string
+  name: string
+  /** Declared input types; empty when the route discloses none. */
+  modalities: string[]
+}
+
+/** One provider route, with the models it currently offers. */
+export interface CompactionCandidateProviderDto {
+  id: string
+  name: string
+  models: CompactionCandidateModelDto[]
+}
+
+/** Every route a compaction target may be chosen from. */
+export interface CompactionCandidatesDto {
+  providers: CompactionCandidateProviderDto[]
 }
 
 export interface QuotaWindowDto {

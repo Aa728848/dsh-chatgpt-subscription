@@ -16,6 +16,9 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   contextWindowOverrides: {},
   proxyMode: 'auto',
   customProxyUrl: null,
+  // Off by default: every deployment summarizes on the model that built the
+  // conversation until an operator picks another route.
+  compactionRoute: null,
 }
 
 export const SEARCH_PROVIDER_DSH: SearchProviderPreference = 'dsh'
@@ -36,3 +39,6 @@ export function isCodexReasoningSummary(value: unknown): value is CodexReasoning
 export function isProxyMode(value: unknown): value is ProxyMode {
   return value === 'auto' || value === 'custom' || value === 'direct'
 }
+
+/** Re-exported so the host parsers share one definition with the DTO. */
+export { isCompactionRouteTarget } from './compaction-route.ts'

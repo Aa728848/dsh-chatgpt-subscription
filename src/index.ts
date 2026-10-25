@@ -169,6 +169,13 @@ import {
   type ReasoningCollapseContext,
 } from './host/reasoning-collapse-guard/index.ts'
 import {
+  installCompactionRoute,
+  type CompactionChunk,
+  type CompactionModelInfo,
+  type CompactionRouteContext,
+  type CompactionStreamOptions,
+} from './host/compaction-route/index.ts'
+import {
   installNoAnswerResume,
   type NoAnswerResumeContext,
   type NoAnswerResumeOptions,
@@ -422,6 +429,34 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // The fallback document is read off the plugin-load path: the store reports
   // the shipped defaults until the file lands, and a read failure is harmless.
   void preferences.hydrate().catch(() => undefined)
+
+  // A host summarizes a compaction on the conversation's own model unless its
+  // preset names another route, and that preset is not this plugin's to edit.
+  // Re-routing the call at `llm/stream` turns the choice into a setting and
+  // covers every preset rather than only the one this plugin ships. Inert while
+  // no target is configured.
+  ctx.effect(() => {
+    const llm = ctx.llm as unknown as {
+      stream(options: CompactionStreamOptions): AsyncIterable<CompactionChunk>
+      listModels(provider: string): Promise<readonly CompactionModelInfo[]>
+    }
+    const handle = installCompactionRoute(
+      {
+        on: (event, listener, options) => (ctx as unknown as CompactionRouteContext).on?.(event, listener, options),
+        logger: ctx.logger,
+      },
+      {
+        stream: (options) => llm.stream(options),
+        listModels: (provider) => llm.listModels(provider),
+        readTarget: () => preferences.status().compactionRoute ?? null,
+      },
+    )
+    if (handle === undefined) {
+      ctx.logger.warn('[dsh-chatgpt-subscription] compaction route skipped: this harness exposes no event bus')
+      return () => undefined
+    }
+    return () => handle.dispose()
+  }, 'dsh-chatgpt-subscription: compaction route')
 
   const antigravityStore = new FileCredentialStore()
   const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)

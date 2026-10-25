@@ -14,7 +14,8 @@ import type {
   SubscriptionPreferencesUpdateDto,
 } from '../shared/contracts.ts'
 import { contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
-import { isCodexReasoningSummary } from '../shared/preferences.ts'
+import { isCodexReasoningSummary, isCompactionRouteTarget } from '../shared/preferences.ts'
+import type { CompactionCandidatesDto } from '../shared/contracts.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
 import { isSameOriginMutation } from './common/same-origin.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
@@ -332,6 +333,11 @@ export function registerRoutes(
         case `${ROUTE_PREFIX}/connection/test`:
           json(response, { ok: true, value: await usage.testConnection() })
           return
+        case `${ROUTE_PREFIX}/compaction/candidates`:
+          // Read per request rather than cached: a route that was signed out
+          // when the card loaded but is signed in now must still be offered.
+          json(response, { ok: true, value: await compactionCandidates(ctx) })
+          return
         case `${ROUTE_PREFIX}/preferences/update`: {
           const patch = readPreferencesUpdate(body, preferences.status())
           const value = await preferences.update(patch)
@@ -444,6 +450,36 @@ function field(value: Record<string, unknown>, name: string): string | null {
   return typeof candidate === 'string' && candidate !== '' ? candidate : null
 }
 
+/** The provider and model directory a compaction target is chosen from. */
+async function compactionCandidates(ctx: Context): Promise<CompactionCandidatesDto> {
+  const llm = (ctx as unknown as { llm?: CompactionDirectory }).llm
+  if (llm === undefined || typeof llm.listProviders !== 'function') return { providers: [] }
+  const providers = await Promise.all(llm.listProviders().map(async (provider) => {
+    // One line being signed out (or slow) must not blank the whole list: an
+    // empty model list is dropped below, and the other routes still show.
+    const models = await llm.listModels(provider.id).catch(() => [])
+    return {
+      id: provider.id,
+      name: provider.name,
+      models: models.map((model) => ({
+        id: model.id,
+        name: model.name,
+        modalities: [...(model.inputModalities ?? [])],
+      })),
+    }
+  }))
+  return { providers: providers.filter((provider) => provider.models.length > 0) }
+}
+
+interface CompactionDirectory {
+  listProviders(): Array<{ id: string; name: string }>
+  listModels(provider: string): Promise<Array<{
+    id: string
+    name: string
+    inputModalities?: readonly string[]
+  }>>
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -477,6 +513,14 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
   if ('searchProvider' in value) {
     if (value.searchProvider !== 'dsh' && value.searchProvider !== 'codex') throw new PreferenceError('searchProvider must be dsh or codex.')
     patch.searchProvider = value.searchProvider
+  }
+  if ('compactionRoute' in value) {
+    if (value.compactionRoute !== null && !isCompactionRouteTarget(value.compactionRoute)) {
+      throw new PreferenceError('compactionRoute must be null or an object with provider and model.')
+    }
+    patch.compactionRoute = value.compactionRoute === null
+      ? null
+      : { provider: value.compactionRoute.provider.trim(), model: value.compactionRoute.model.trim() }
   }
   if ('contextWindowOverrides' in value) {
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')

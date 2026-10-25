@@ -13,6 +13,7 @@ import {
   isCodexReasoningSummary,
   isProxyMode,
   isSearchProviderPreference,
+  isCompactionRouteTarget,
 } from '../shared/preferences.ts'
 import type {
   SubscriptionPreferencesDto,
@@ -66,6 +67,12 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
     contextWindowOverrides,
     proxyMode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]).default(DEFAULT_PREFERENCES.proxyMode),
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
+    // Stored as an object rather than two sibling strings so "no target" is one
+    // absent value instead of two that can disagree with each other.
+    compactionRoute: z.union([
+      z.object({ provider: z.string(), model: z.string() }),
+      z.const(null),
+    ]).default(DEFAULT_PREFERENCES.compactionRoute ?? null),
   })
 
   // Harness 0.1.7 replaced the register seam, so the plugin owns the storage:
@@ -131,6 +138,14 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
     if (patch.proxyMode !== undefined) {
       if (!isProxyMode(patch.proxyMode)) throw new PreferenceError('Unsupported proxy mode preference.')
       normalized.proxyMode = patch.proxyMode
+    }
+    if (patch.compactionRoute !== undefined) {
+      if (patch.compactionRoute !== null && !isCompactionRouteTarget(patch.compactionRoute)) {
+        throw new PreferenceError('Unsupported compaction route.')
+      }
+      normalized.compactionRoute = patch.compactionRoute === null
+        ? null
+        : { provider: patch.compactionRoute.provider.trim(), model: patch.compactionRoute.model.trim() }
     }
     if (patch.customProxyUrl !== undefined) {
       if (patch.customProxyUrl !== null) {

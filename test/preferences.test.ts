@@ -75,6 +75,20 @@ describe('subscription preferences', () => {
     })
   })
 
+  it('stores and clears the compaction route, and rejects a half-written one', async () => {
+    const store = createPreferenceStore({})
+    // Absent means "summarize on the conversation's own model".
+    expect(store.status().compactionRoute ?? null).toBeNull()
+    expect(await store.update({ compactionRoute: { provider: 'opendesign', model: 'deepseek-v4.1-flash' } }))
+      .toMatchObject({ compactionRoute: { provider: 'opendesign', model: 'deepseek-v4.1-flash' } })
+    // The route is trimmed on the way in, so a pasted id with spaces still matches.
+    expect(await store.update({ compactionRoute: { provider: ' opendesign ', model: ' deepseek-v4.1-flash ' } }))
+      .toMatchObject({ compactionRoute: { provider: 'opendesign', model: 'deepseek-v4.1-flash' } })
+    await expect(store.update({ compactionRoute: { provider: 'opendesign' } as never }))
+      .rejects.toThrow('Unsupported compaction route.')
+    expect(await store.update({ compactionRoute: null })).toMatchObject({ compactionRoute: null })
+  })
+
   it('clears one override back to the absent state a restored default leaves behind', async () => {
     const store = createPreferenceStore({ contextWindowOverrides: { 'gpt-6-astra': 512_000 } })
     expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(512_000)
