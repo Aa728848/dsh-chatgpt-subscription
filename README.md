@@ -13,6 +13,7 @@
 - [号池存储后端（`poolStorage`）](#号池存储后端poolstorage)
 - [安装](#安装)
 - [使用](#使用)
+- [压缩模型（可选，默认关闭）](#压缩模型可选默认关闭)
 - [推理塌缩守卫（熔断，默认关闭）](#推理塌缩守卫熔断默认关闭)
 - [Command Code 线路](#command-code-线路)
 - [Claude（订阅）线路](#claude订阅线路)
@@ -555,6 +556,18 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 **inherit 模式（`subagentModelInheritTools`，默认 `['subagent_fork', 'spawn_teammate']`）**：有些委派工具**按设计**就没有路由参数，子代理必然跑在调用者自己的路由上——`subagent_fork`（复用对话与 KV Cache）与 Agent Teams 的 `spawn_teammate`（成员一律继承 Lead 的路由）都是这一类。「工具不能选」不等于「这个选择被授权」，所以守卫改为校验它**实际继承到的路由**：允许清单内有该路由就放行，没有就拒绝，并说明该工具无法改路由、要么改用能显式指定路由的 `subagent`、要么先把本会话切到清单内的模型。设为 `[]` 可关闭 inherit 模式的全部校验。
 
+**fork 的准入与发现工具无关**，这是它最重要的性质：`subagent_fork` 不需要 `provider`/`model`，也不需要 `list_subagent_models`，判据只有「调用者当前实际在跑的路由是否在允许清单内」（取会话最新一次请求头，中途换模型判定随之更新）。
+
+| 会话状态 | `subagent_fork` | 说明 |
+|---|---|---|
+| 没有记录允许清单 | 可用，且不校验 | `allowed.length === 0` 时守卫直接放行 |
+| 有清单，父路由在清单内 | 可用 | 主代理本身就是被勾选的模型即为这一类 |
+| 有清单，父路由不在清单内 | 拒绝，且不可自救 | 换 `subagent` 显式指定清单内路由，或先把会话切到清单内模型 |
+
+因此「发现工具缺失」或「委派工具不暴露路由参数」都**不构成**派不出子代理的理由：先试一次 fork，拒绝理由会直接写出父路由与授权清单。反过来，fork 也不该被当成通用更优解——它不能换模型，且继承整段已完成的轮次，只适合需要主代理上下文的复审与接续。
+
+**自适应：工具到底有没有路由参数，是运行时读出来的，不是配置里假设的。** 上面两种模式是配置，而工具的参数是事实——harness 改键、或 preset 写错一个键，都会让一个被当作 explicit 的工具根本没有 `provider`/`model`（典型是 0.2.1-rc.1 把 `modelSelectionSettings` 拆成 `modelSelection` + `modelDiscovery` 之后，仍带旧键的 preset）。此时若继续要求显式路由，模型拿到的理由无法照做，而工具自己还会抛 `child model selection is disabled for this tool instance`。守卫因此会在拒绝前通过宿主工具注册表的 `definitions(agent)` 读一次该工具的参数表：**没有路由参数就按 inherit 模式校验它实际继承到的路由**（该拒绝照样拒绝，只是理由变成可执行的），**有就维持 explicit 模式**；注册表读不到定义时退回配置模式，不退化成放行。
+
 守卫装在 DSH 工具注册表的调度入口上，因此 **`run_code`（代码模式 / PTC）里通过 SDK 调用的 `tools["subagent"]` 同样被拦截**：该子调用走的是与直接调用相同的 `prepare → guard → dispatch` 流水线，拒绝理由以 `ToolCallError` 抛回程序。也就是说模型无法靠把委派写进代码里绕过白名单（`test/subagent-model-authorization-ptc.test.ts` 用真实 `ToolRuntime` + 假 code runtime 验证了放行、缺省拒绝与越权拒绝三条路径）。
 
 配置项（插件行 `config`，全部可省略）：
@@ -570,7 +583,7 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 
 改动只在设置卡片里保存过的勾选生效：设置改动只影响之后新建的会话（DSH 的会话快照语义），已运行的会话继续使用它自己记录的那份列表。
 
-> **调度模式如何知道自己是哪种姿态。** `list_subagent_models` 与 `provider`/`model` 参数由 preset 行静态挂载（`modelSelectionSettings: true`），所以**工具在场不等于校验生效**——真正决定校验的是会话记录的那份允许列表，没有记录时守卫对一切放行。为了让模型**读到**这个事实而不是从「工具在」推断出「已生效」，`list_subagent_models` 的返回被 `tools/post-execute` 原地补一段：有列表时附上本会话全部 `{ provider, model }` 拆解对，没有列表时附上 `UNRESTRICTED_ROUTING_NOTICE`（写明「本会话没有允许清单生效、路由不受限、省略路由是正当的」）。调度模式的 R2 据此分成三态——`[State: Listed]` / `[State: Unlisted]` / `[State: Unmounted]`，只有 `[State: Unmounted]` 能作为 R8 fallback 的理由。
+> **调度模式如何知道自己是哪种姿态。** `list_subagent_models` 与 `provider`/`model` 参数由 preset 行静态挂载（`modelSelection: true` + `modelDiscovery: true`），所以**工具在场不等于校验生效**——真正决定校验的是会话记录的那份允许列表，没有记录时守卫对一切放行。为了让模型**读到**这个事实而不是从「工具在」推断出「已生效」，`list_subagent_models` 的返回被 `tools/post-execute` 原地补一段：有列表时附上本会话全部 `{ provider, model }` 拆解对，没有列表时附上 `UNRESTRICTED_ROUTING_NOTICE`（写明「本会话没有允许清单生效、路由不受限、省略路由是正当的」）。调度模式的 R2 据此分成三态——`[State: Listed]` / `[State: Unlisted]` / `[State: Unmounted]`，只有 `[State: Unmounted]` 能作为 R8 fallback 的理由。
 
 > 升级提示：从 0.3.2 起，带有允许列表的会话里**任何**未写明 `provider` + `model` 的委派都会被拒绝（此前只有写明且不在列表内的路由会被拒绝）。这是有意的行为变更——它消除了「子代理悄悄继承主代理模型」的漏洞；把 `subagentModelAuthorization` 设为 `false` 可回到 DSH 原始行为。
 
@@ -588,6 +601,25 @@ DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允�
 **额度倍率**取自官方模型表并显示在设置页模型能力表的「说明」列（悬停可一并看到）：`k3` = **2×**、`k3-256k` = **1×**、`kimi-for-coding` = **1×**、`kimi-for-coding-highspeed` = **3×**；`k3.1-pro` 与 `k3.1-pro-highspeed` 官方未公布相对倍率（后者只说了「约为常规版 2 倍」），因此显示为**未知**而不是猜成 2×。倍率绑定**模型 id**，与上下文长度、缓存命中率都无关——选 `k3` 就是 2×，哪怕只用几千 token。注册表不认识的新模型 id 显示为**未知**而不是猜成 1×。
 
 **区域**：默认使用中国大陆主机（`auth.kimi.com` / `api.kimi.com`）。国际账号可设置 `DSH_KIMI_CODE_OAUTH_HOST=https://auth.kimi.ai` 与 `DSH_KIMI_CODE_BASE_URL=https://api.kimi.ai/coding` 后重新登录；环境变量同时会钉住区域，设置页会显示当前解析到的主机。
+
+## 压缩模型（可选，默认关闭）
+
+上下文压缩的**摘要**默认由会话自己的模型写，也就继续消耗那条线路的额度。想在压缩时改用另一个更快/更便宜的模型，用设置页的「压缩模型」卡片；留空即跟随会话模型，路由完全不动。
+
+**为什么不直接在宿主里配。** 在 DSH 里「压缩用哪个模型」属于 preset 的压缩配置，那份配置随 preset 分发、不是本插件能暴露的设置项。所以本插件改在 `llm/stream` 瀑布层按 `purpose: 'compaction'` 识别摘要调用再改派——一处生效即覆盖**所有** preset，而不只是本插件自带的那一份。
+
+**四条刻意的行为：**
+
+| 行为 | 原因 |
+|---|---|
+| 目标模型不接受**视频**、而待压上下文里有视频块时**不发送**，仍由会话模型完成压缩 | 视频块在没有视频能力的线路上没有 wire 兜底，发出去只会先付费再失败 |
+| 目标模型不接受**图片**时，摘要里的截图被替换为占位文本 | 摘要本身不需要像素，替换比整段回退更省 |
+| 替代线路的摘要**先收完整再下发**，半截摘要丢弃并回退会话模型 | 宿主会把适配器异常变成终止 `finish` 块而不是抛错，半截摘要没有价值 |
+| 改派时**去掉宿主默认的输出上限**（65 536 token） | 官方客户端不传上限，交给线路自己决定 |
+
+每次回退都会记日志——看不见的回退就是没人同意的成本。
+
+**选择列表**来自运行时目录且**每次请求现读**：加载页面时未登录、之后才登录的线路照样会出现；单条线路未登录或超时只会让该线路缺席，不会把整张列表清空。
 
 ## 推理塌缩守卫（熔断，默认关闭）
 

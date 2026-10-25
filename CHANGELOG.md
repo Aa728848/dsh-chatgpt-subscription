@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.40.0 - 2026-10-25
+
+- **[compaction] 新增「压缩路由」：把上下文压缩的摘要请求改派到指定 provider/model**
+  - **为什么在宿主层改道**：自动压缩的摘要默认用对话自身的模型生成，而「换模型」在宿主里属于 preset 的压缩配置——那份配置归 preset 所有，本插件不能把它变成设置项。因此改为在 `llm/stream` 瀑布层按 `purpose: 'compaction'` 识别并改派，一处生效即覆盖所有 preset，而不只是本插件自带的那一份。
+  - **三条行为约束**：① **发之前先拒** —— 目标模型不接受视频、而待压上下文里含视频块时，请求先被拦下、仍由对话模型执行，避免先付费再失败；② **先缓冲再回退** —— 替代线路的摘要先收集完整，只有完整的一份才下发，半截摘要一律丢弃并回退到对话模型，同时记录这次回退（运维看不见的回退就是没人同意的成本）；③ **不施加输出上限** —— 宿主默认索要 65 536 token 的摘要，而官方客户端根本不传上限，改派时该上限被去掉，交由线路自己决定。
+  - **设置面**：新增选择卡与只读结果（`CompactionRouteCard` / `CompactionRouteBundleConfig`），目录来自运行时的 `llm.listProviders` / `llm.listModels` 且**每次请求现读**——加载时未登录、之后才登录的线路仍然会出现；单条线路未登录或超时只会让该线路缺席，不会把整张列表清空。偏好存成单个对象（无目标 = 一个缺失值，而不是两个可能互相矛盾的字符串），目标为 `null` 时路由完全不介入。
+  - **端点**：新增 `GET …/compaction/candidates`，返回可选的 provider/model 目录（含各模型的输入模态）。
+  - **测试**：新增 `test/compaction-route.test.ts`、`test/compaction-route-card.test.tsx`、`test/compaction-route-bundle-config.test.tsx`，并扩充 `test/preferences.test.ts` 与 `test/client-registration.test.ts`。
+
+- **[dispatch] 修好「配置了子代理却派不出子代理」的死锁：preset 用着 harness 已改名的旧键，守卫再补上按工具实际参数的自适应判定**
+  - **现象**：在开了「设置 → 子代理 → 允许 Agent 为 Subagent 选择模型」的机器上，调度模式（dispatch preset）无论怎么写都被拒：不写 `provider`/`model` → 守卫回「this Session requires an explicit child model」并点名父路由；写了 → `tool-subagent` 回 `child model selection is disabled for this tool instance`；而 `list_subagent_models` 在 PTC 的 `run_code` 里根本不是函数，连授权清单都取不到。三个出口同时堵死。
+  - **根因（一处配置 + 一处假设）**：harness **0.2.1-rc.1** 把 `@deepseek-ai/dsh-tool-subagent` 的 `modelSelectionSettings` 拆成了两个键——`modelSelection`（才暴露 `provider`/`model`/`reasoning_effort`）与 `modelDiscovery`（才注册 `list_subagent_models`），两者默认都 false 且不再互相隐含。本插件的 dispatch 模板与 bundled preset 仍写旧键，在被测安装（`dsh-tool-subagent@0.2.1-rc.3`）里该键**整个包里 0 命中**，于是被配置层丢弃、两个开关同时留在关闭态：工具既没有路由参数、也没有发现工具。而守卫把它记在 explicit 模式下（`DEFAULT_DELEGATION_TOOLS`），对未写明成对路由的调用一律拒绝——它无从知道「这个工具压根没有那两个参数」，因为这个模式来自配置而不是工具。
+  - **改法（配置，三处同步）**：`presets/dispatch/agent.cordis.yml`、模板 `src/host/agent-preset.ts`、以及已安装的 `~/.dsh/.agent-presets/dispatch/agent.cordis.yml` 都把 `modelSelectionSettings: true` 换成 `modelSelection: true` + `modelDiscovery: true`，并在文件头注释里记下这次改名与「只写一个就会变成哑的」。因为 `syncOnePreset` 是内容比对（`src/host/preset-sync.ts:345-351`），下次 Host 启动会把旧安装的 preset 自动刷成正确版本，不需要单独的迁移代码。
+  - **改法（守卫自适应，`src/host/subagent-model-authorization.ts`）**：新增 `RouteParameterProbe` 与 `routeParameterProbe(ctx)`，在拒绝前通过宿主的 `tools.definitions(agent)` 读一次该工具当前参数表。**没有 `provider`/`model` → 按 inherit 模式校验它实际继承到的路由**（该拒绝照样拒绝，只是理由变成模型能照做的：`inheritRouteDenialReason`），完整成对路由 → `inheritOverrideReason`，只给一半 → 新增 `routeFieldsUnavailableReason`（明说这是挂载配置问题、不是参数问题，并给出会发生什么）；**有 → 维持 explicit 模式**；注册表读不到定义或该 scope 抛错 → 退回配置模式，不退化成放行。inherited 校验抽成 `inheritedRouteDenial` 供两条分支共用，避免两份实现漂移。
+  - **测试**：`test/subagent-model-authorization.test.ts` 由 27 例增至 32 例，新增 `route-parameter adaptivity` 五条——无路由参数时按继承路由拒绝且理由不含「requires an explicit child model」、继承路由合法时放行、成对与半对路由各自给出对应理由、注册表答不出/声明有路由时维持 explicit、以及 `routeParameterProbe` 对参数表、缺失工具、无注册表、抛错 scope 的四种读法。`test/agent-preset.test.ts` 的行断言改为 `{ modelSelection: true, modelDiscovery: true }`。
+  - **文档**：根 `README.md` 补「自适应」一段并把 preset 键名改对；`presets/dispatch/README.md` 的「依赖的设置」补上「两个键必须成对写入、漏一个会让本模式变哑」。
+  - **补一条被漏掉的事实（R2 与 README）**：`subagent_fork` 的准入判据是**父子代理实际在跑的路由是否在允许清单内**（`inheritedRouteOf` 取会话最新请求头），与 `list_subagent_models` 是否存在、委派工具是否暴露 `provider`/`model` **都无关**。这意味着上面那个死锁状态下 fork 一直可用，而本轮最初的判断「派不出子代理」把 spawn 的故障扩大成了全部委派失效。R2 两份拷贝同字节补三句：父路由已授权时 fork 无需路由参数与发现工具、该优先用 fork 的条件（需要本对话上下文）与不该用的条件（要换模型或要干净上下文）、以及**不得从一条坏掉的显式路由路径推出「无法委派」——先试一次 fork,拒绝理由会写出父路由与授权清单**。根 `README.md` 的 inherit 段补一张三态表。测试：`test/agent-preset.test.ts` 的 R2 用例新增三条断言钉住这三句。
+
 ## 0.39.2 - 2026-10-24
 - **[codex] 账号卡登录行不再换行：三个入口改用短标签，完整语义留在 aria-label，窄宽度下省略而不是折行**
   - **现象**：ChatGPT 订阅页账号卡右上角那一行有三个按钮（添加账号 / 用设备代码添加账号 / 导入本机 Codex CLI 登录），在正常设置面板宽度下第三个被挤到下一行，右边还被裁掉一截。
