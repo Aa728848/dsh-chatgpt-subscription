@@ -63,7 +63,15 @@ export const OAUTH_DEVICE_POLL_INTERVAL_SECONDS = 5
 export const OAUTH_DEVICE_MIN_POLL_INTERVAL_MS = 1_000
 export const TOKEN_REFRESH_MARGIN_MS = 60_000
 export const ROUTE_PREFIX = '/api/dsh-chatgpt-subscription' as const
-export const PLUGIN_VERSION = '0.1.0-alpha.0' as const
+/**
+ * Version this line presents to the Codex backend in its `user-agent`.
+ *
+ * It must equal `package.json`'s version: a stale value here reports a plugin
+ * version that no release ever shipped, and nothing else in the build notices.
+ * `test/responses-client.test.ts` asserts the two agree, so a release that
+ * forgets this constant fails the suite instead of shipping quietly.
+ */
+export const PLUGIN_VERSION = '0.40.0' as const
 export const CODEX_CHATGPT_PROVIDER_ID = 'codex-chatgpt' as const
 
 //

@@ -1,10 +1,20 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CODEX_RESPONSES_URL } from '../src/compat.ts'
+import { CODEX_RESPONSES_URL, PLUGIN_VERSION } from '../src/compat.ts'
 import { CodexChatGptAdapter } from '../src/host/adapter.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { ResponsesClient, parseResponsesStream } from '../src/host/responses-client.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
+
+describe('user-agent version', () => {
+  it('reports the version package.json ships', () => {
+    // The constant is hand-maintained, so nothing but this assertion keeps it from
+    // reporting a release that never existed.
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string }
+    expect(PLUGIN_VERSION).toBe(manifest.version)
+  })
+})
 
 describe('Responses streaming', () => {
   it.each(['response.failed', 'error'])('normalizes context overflow in %s', async type => {
@@ -157,7 +167,7 @@ describe('Responses streaming', () => {
     expect(JSON.parse(String(second.body)).model).toBe(model)
     expect(second.headers).toMatchObject({ authorization: 'Bearer fresh', 'chatgpt-account-id': 'acct', originator: 'opencode' })
     expect((second.headers as Record<string, string>)['session-id']).toMatch(/^dsh-[a-f0-9]{32}$/)
-    expect((second.headers as Record<string, string>)['user-agent']).toContain('dsh-chatgpt-subscription/0.1.0-alpha.0')
+    expect((second.headers as Record<string, string>)['user-agent']).toContain(`dsh-chatgpt-subscription/${PLUGIN_VERSION}`)
     oauth.dispose()
   })
 
