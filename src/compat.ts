@@ -71,7 +71,7 @@ export const ROUTE_PREFIX = '/api/dsh-chatgpt-subscription' as const
  * `test/responses-client.test.ts` asserts the two agree, so a release that
  * forgets this constant fails the suite instead of shipping quietly.
  */
-export const PLUGIN_VERSION = '0.40.1' as const
+export const PLUGIN_VERSION = '0.40.2' as const
 export const CODEX_CHATGPT_PROVIDER_ID = 'codex-chatgpt' as const
 
 //
