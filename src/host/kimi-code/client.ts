@@ -872,7 +872,10 @@ function usageWindow(
     id,
     label: descriptor?.label ?? humanizeWindowKey(id),
     usedFraction,
-    usedPercent: Math.round(usedFraction * 100),
+    // Kept to two decimals rather than rounded to a whole percent: the card
+    // shows what the service stated (88.55%), and rounding here would make a
+    // 0.4% change invisible while the website beside it still moved.
+    usedPercent: Math.round(usedFraction * 10_000) / 100,
     windowDurationMins: descriptor?.minutes ?? null,
     resetsAt: parseTimestamp(record.reset_time ?? record.resetTime ?? record.resetsAt),
     limit: formatAmount(limit),
