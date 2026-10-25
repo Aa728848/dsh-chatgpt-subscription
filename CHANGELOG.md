@@ -4,10 +4,26 @@
 
 ## 0.40.2 - 2026-10-25
 
+- **[antigravity] 响应体中途断流归为可重试的传输失败，长回答不再一次断线就作废**
+  - **现象**：连接在读取响应体的途中被掐断时，undici 只抛一个不带错误码的 `TypeError: terminated`，宿主据此归一成 `UNKNOWN`——而 `UNKNOWN` 不在重试码表里，于是用户正在读的长回答就此结束；真实原因（`ECONNRESET`、对端关 socket、body 超时）挂在 `.cause` 上，落盘前已被丢弃，事后连发生了什么都说不出。
+  - **改法**：读取阶段的失败改判为 `TRANSPORT`（DSH 会重试的码），并把 cause 链写进错误消息（截断到 500 字符）；没有终止帧的 EOF（既无 `finishReason` 也无 `[DONE]`）同样由 `PROVIDER_ERROR` 改为 `TRANSPORT`——那是连接被切断，不是上游的判定。线路自己已经给出的结论（带内 provider 错误、已构造的 `LlmError`）原样保留，不被降级成传输失败。
+  - **取消仍是取消**：调用方主动中止继续报 `ABORTED`，不会被当成可重试的传输故障。
+  - **为什么重试安全**：DSH 把失败的那次尝试记为 `assistant/attempt` 并丢弃，重试时重新开始；工具调用只在其流结束后才执行，所以重试既不会重复已提交的输出，也不会重复执行工具。
+  - **测试**：`test/antigravity-adapter.test.ts`、`test/antigravity-stream.test.ts` 新增 4 例——中途 `terminated` → `TRANSPORT` 且消息带 cause 链、无终止帧 EOF → `TRANSPORT`、主动取消 → `ABORTED`、以及上游返回的带内错误不被改写。
+
+- **[kimi-code] 媒体与推理对齐官方 CLI：截图按 2000px 发送、图片与视频改走文件引用、混合推理字段与密文原样回放**
+  - **图片尺寸**：本线路请求版本的最长边改为 2000px（官方 CLI 默认也是 2000），此前沿用共享的 1024 上限，截图必须放下再重读才看得清；其它线路仍是 1024，编码字节上限（单张 256 KiB）没有跟着抬高，小图原样直发、无尺寸的引用与 body 装不下时的淘汰行为都不变。
+  - **文件引用**：新增 `src/host/kimi-code/media-files.ts`——`POST {coding base}/v1/files`，`multipart/form-data` 的 `purpose` 取 `image` 或 `video`，带本线路既有的 bearer 与 `X-Msh-*` 身份头，响应里的 id 之后以 `ms://<id>` 引用。这条路径避免 base64 带来的请求体膨胀，减少大媒体被 inline 体积护栏淘汰的情况。
+  - **缓存、回退与 404**：引用按「账号 + 内容」缓存并 single-flight（同一份字节并发只上传一次，缓存上限 256 条）；上传失败、或内容被 body-fit 淘汰而根本没上传时，仍按原来的 inline 方式发送；服务以 404 拒绝被引用的文件时清掉该条缓存、在同一账号上改用 inline 重发，而指向模型或路由的 404 如实上抛。Anthropic 线路的图片行为一字未动。
+  - **推理字段**：`reasoning_content` / `reasoning` / `reasoning_details` 同时出现时全部收取（此前取到一个就停，丢掉服务已经给出的文本）；`reasoning_details` 按官方读法分类——`summary` 是可见摘要、`encrypted` 是不透明密文状态（`text` 为空，载荷只留在 `encrypted`）、`index` 只作元数据而不改变顺序；回放时可见摘要当思考、密文作为不透明状态原样回传，且密文只被保存与回传，永不进入可见文本。`replayState` 按来源分别记录，不同来源的推理不会互相冒充。
+  - **活体验证**：`scripts/probe-kimi-files.probe.ts` 在本线路账号上跑通「上传 → 引用 → 对话」，图片与视频两条路径模型都如实描述了画面内容。
+  - **测试与验证**：新增 `test/kimi-code-media-files.test.ts`、`test/kimi-code-media-integration.test.ts`、`test/kimi-code-reasoning-dialect.test.ts`、`test/kimi-code-image-target.test.ts`，并扩充既有图片目标与 body 上限用例，共 83 例；`npm run typecheck` 三个 TS 项目 0 错误，全量 `LANG=C.UTF-8 npm test` **4878 passed / 8 skipped / 0 failed**。
+
 - **[cline-pass] 修复长推理被 180 秒硬超时截断重试**
   - **原因**：`withAttemptTimeout` 把 180 秒的 `AbortSignal.timeout()` 同时用于响应头等待和整个流式读取，导致模型已经开始正常响应后，仍在 180 秒处被中止并触发重试，长任务表现为突然截断重来。
   - **修复**：响应头返回后立即清除该计时器，180 秒只负责响应头阶段；后续流式响应继续由现有 `streamIdleTimeoutMs` 空闲看门狗处理，用户主动取消仍然有效。
   - **回归测试**：模拟响应头快速返回、正文 60ms 后才结束，旧实现会在 20ms 测试预算处截断，新实现可完整读完；网关 100ms 仍不返回响应头时，20ms 测试预算仍会正确报超时。
+  - **命名与测试清理**：`ClinePassAdapter` 的响应头超时覆盖项原名 `attemptTimeoutMs`，实际只管响应头等待，容易被读成整次尝试的超时，现更名为 `headerTimeoutMs`；同一轮删掉了两条用例里对 `AbortSignal.timeout` 的全局 mock——它们对新实现不再生效，真正的预算由 `headerTimeoutMs` 注入，用例语义不变。
 
 ## 0.40.1 - 2026-10-25
 
