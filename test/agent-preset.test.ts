@@ -181,7 +181,10 @@ describe('the dispatch definition', () => {
   it('keeps the rows the dispatch contract depends on', () => {
     // The route rules in the persona exist only because the delegation tools
     // expose a model choice; the PTC presentation is the mode this preset is for.
-    expect(rowById('tool-subagent').config).toMatchObject({ modelSelectionSettings: true })
+    // Both keys, not the retired `modelSelectionSettings`: harness 0.2.1-rc.1
+    // split that switch, and a row still carrying the old name mounts the tool
+    // with no route parameter and no discovery tool at all.
+    expect(rowById('tool-subagent').config).toMatchObject({ modelSelection: true, modelDiscovery: true })
     expect(rowById('tool-presentation').config).toEqual({ mode: 'ptc' })
     expect(rowById('persona').config).toMatchObject({ suffix: 'Your working directory is {{cwd}}.' })
     expect((rowById('persona').config as { prefix: string }).prefix).not.toContain('{{cwd}}')
@@ -595,7 +598,7 @@ describe('the persona block the declaration transcribes', () => {
     // The preset used to claim one signal was sufficient: "its presence and the
     // exposure of provider / model ... always appear or disappear together".
     // That is false. The tool row and the route parameters are mounted
-    // statically (modelSelectionSettings: true), so they exist even in a session
+    // statically (modelSelection: true, modelDiscovery: true), so they exist even in a session
     // that recorded no allowlist, while the guard reads the recorded policy
     // (effectiveAllowedRoutes) and enforces nothing without one. Both copies must
     // name all three states, say which of them permits fallback, and drop the
@@ -614,6 +617,11 @@ describe('the persona block the declaration transcribes', () => {
       // The mechanism, stated as a fact rather than as a preference.
       expect(persona).toContain('mounted statically, so they are present even in a session that authorized no route at all')
       expect(persona).toContain('Read that fact instead of inferring it')
+      // Fork's admission is the parent route, not the discovery tool: that is why
+      // it survives the state where list_subagent_models is absent.
+      expect(persona).toContain('its admission is decided by the route the calling session is actually running')
+      expect(persona).toContain('so it still works when list_subagent_models is absent')
+      expect(persona).toContain('try subagent_fork once and read the denial')
       expect(persona).toContain('Never claim per-task routing is in force here')
       // The single-signal claim and the vocabulary that depended on it are gone.
       expect(persona).not.toContain('so this single signal is sufficient')
@@ -622,6 +630,23 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).not.toContain('allowlist is empty and the user has not enabled it')
       expect(persona).toContain('Reporting a route as "authorized", or claiming per-task routing is in force')
     }
+  })
+
+  it('ships the two keys the current harness exposes route selection through', () => {
+    // Harness 0.2.1-rc.1 renamed `modelSelectionSettings` into `modelSelection`
+    // (route parameters) and `modelDiscovery` (list_subagent_models), and no
+    // longer implies one from the other. A preset left on the retired name mounts
+    // the delegation tool with BOTH off — no provider/model parameter and no
+    // discovery tool — so the guard demands a route the tool cannot accept and
+    // the model cannot even list what is authorized. That was a live deadlock:
+    // restore the old key here and the shipped preset goes mute again.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    expect(yml).not.toContain('modelSelectionSettings: true')
+    // Config rows, not the header comment that also names both keys.
+    expect(/^ {8}modelSelection: true$/mu.test(yml)).toBe(true)
+    expect(/^ {8}modelDiscovery: true$/mu.test(yml)).toBe(true)
+    // The generated template must agree with the bundled file.
+    expect(declaredPrefix()).toBeTypeOf('string')
   })
 
   it('writes caps where a range would be read as a floor', () => {

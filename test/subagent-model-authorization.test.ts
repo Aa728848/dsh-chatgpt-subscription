@@ -25,6 +25,7 @@ import {
   policyRoutesOf,
   rewriteAuthorizedPromptAssembly,
   rewriteAuthorizedToolDescriptions,
+  routeParameterProbe,
   subagentModelSelectionPreference,
   unauthorizedRouteReason,
   validateAuthorizationScope,
@@ -651,6 +652,68 @@ describe('subagent model authorization', () => {
 
     dispose()
     expect(disposedEvents).toBe(2)
+  })
+})
+
+describe('route-parameter adaptivity', () => {
+  const undeclared = () => false
+  const declared = () => true
+  const unanswerable = () => undefined
+
+  it('enforces the inherited route instead of demanding a parameter the tool lacks', () => {
+    const reason = delegationDenialReason(
+      recordingAgent([GEMINI, OPUS]), 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
+    )
+    expect(reason).toContain('keeps its child on')
+    expect(reason).toContain('deepseek-official/deepseek-flash')
+    expect(reason).not.toContain('requires an explicit child model')
+  })
+
+  it('lets a parameterless delegation through when the inherited route is authorized', () => {
+    const agent = recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' })
+    expect(delegationDenialReason(
+      agent, 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
+    )).toBeUndefined()
+  })
+
+  it('refuses a route a parameterless tool cannot accept, and says which problem it is', () => {
+    const agent = recordingAgent([GEMINI, OPUS])
+    expect(delegationDenialReason(
+      agent, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' },
+      PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
+    )).toContain('accepts no')
+    const partial = delegationDenialReason(
+      agent, 'subagent', { provider: 'antigravity' }, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
+    )
+    expect(partial).toContain('exposes no provider/model parameter')
+    expect(partial).not.toContain('requires an explicit child model')
+  })
+
+  it('keeps the configured mode when the registry cannot answer', () => {
+    const agent = recordingAgent([GEMINI, OPUS])
+    for (const probe of [unanswerable, declared]) {
+      expect(delegationDenialReason(
+        agent, 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], probe,
+      )).toContain('requires an explicit child model')
+    }
+  })
+
+  it('reads the live parameter table through the tools registry', () => {
+    const withRoutes = routeParameterProbe({ tools: { definitions: () => [
+      { name: 'subagent', parameters: { provider: {}, model: {}, prompt: {} } },
+    ] } } as never)
+    expect(withRoutes?.({}, 'subagent')).toBe(true)
+
+    const withoutRoutes = routeParameterProbe({ tools: { definitions: () => [
+      { name: 'subagent', parameters: { prompt: {}, description: {} } },
+    ] } } as never)
+    expect(withoutRoutes?.({}, 'subagent')).toBe(false)
+    expect(withoutRoutes?.({}, 'absent')).toBeUndefined()
+
+    expect(routeParameterProbe({} as never)).toBeUndefined()
+    expect(routeParameterProbe({ tools: {} } as never)).toBeUndefined()
+    const throwing = routeParameterProbe({ tools: { definitions: () => { throw new Error('no scope') } } } as never)
+    expect(throwing?.({}, 'subagent')).toBeUndefined()
   })
 })
 

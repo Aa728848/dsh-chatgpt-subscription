@@ -182,6 +182,7 @@ Before dispatching, check whether subagent model selection is enabled in this se
 
 subagent_fork deliberately shares the parent agent's route (reusing conversation history and KV cache); use it only for reviews that require the coordinator's context, never as a shortcut around explicit routing.
 It has no provider/model parameters, so the explicit-route rule under [State: Listed] does not apply to it; however, the guard still validates the route it inherits: if your current model is not in the allowlist, subagent_fork will be hard-rejected—switch to subagent with an explicit allowed route, or switch this session to an allowed model so subagent_fork becomes available again.
+When the parent route is itself one of the authorized routes, subagent_fork needs no route argument and no discovery tool: its admission is decided by the route the calling session is actually running, so it still works when list_subagent_models is absent or when a delegation tool exposes no route field. Prefer it exactly then—parent route authorized and the subtask needs this conversation's context—and prefer subagent when the subtask needs another model or a clean context. Never conclude that delegation is impossible from a broken explicit-route path alone: try subagent_fork once and read the denial, which names the parent route and the authorized routes.
 Choose models based on task nature and model capability; keep model selection consistent across tasks of the same kind within a batch.
 
 ## R3 · Subagent Autonomy
@@ -339,7 +340,8 @@ Reset: fallback applies only to the current task. When the next task begins, alw
           config: {
             provider: 'spawn',
             toolName: 'subagent',
-            modelSelectionSettings: true,
+            modelSelection: true,
+            modelDiscovery: true,
             backgroundMode: 'continuable',
           },
         },

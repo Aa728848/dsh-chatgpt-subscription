@@ -119,6 +119,31 @@ export interface InheritedRoute {
 }
 
 /**
+ * Answer whether one delegation tool currently exposes `provider`/`model` to
+ * the model.
+ *
+ * The mode a tool is policed in is configuration, but the tool's PARAMETERS are
+ * a runtime fact: `@deepseek-ai/dsh-tool-subagent@0.2.1-rc.1` renamed
+ * `modelSelectionSettings` to `modelSelection` and split discovery into
+ * `modelDiscovery`, so a preset written for an older harness silently mounts
+ * the tool with neither. Demanding an explicit pair from a tool that has no
+ * such parameter is a denial no call can satisfy, which is why the guard asks
+ * instead of assuming.
+ *
+ * Removing the pair from the enforce path must not remove enforcement: an
+ * undeclared-route tool falls back to inherit mode, whose inherited route is
+ * checked against the same allowlist.
+ * @param agent - Calling agent, whose scope decides which registry view applies.
+ * @param toolName - Tool being dispatched.
+ * @returns whether the tool declares a route field; undefined when the registry
+ *   cannot answer, which keeps the configured mode in charge.
+ */
+export type RouteParameterProbe = (
+  agent: AuthorizationAgent | undefined,
+  toolName: string,
+) => boolean | undefined
+
+/**
  * Read one deployment event field as a string.
  * @param value - Candidate field value from a durable event.
  * @returns the string value, or undefined for any other type.
@@ -467,6 +492,51 @@ export function inheritRouteDenialReason(
     + `continue on an authorized model for this session, after which ${toolName} works again.`
 }
 
+/**
+ * Enforce the allowlist against the route an inherit-mode child would run on.
+ * @param agent - Calling agent whose route the child inherits.
+ * @param toolName - the tool the model called.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns a denial reason when the inherited route is unauthorized.
+ */
+function inheritedRouteDenial(
+  agent: AuthorizationAgent | undefined,
+  toolName: string,
+  allowed: readonly AllowedModelRoute[],
+): string | undefined {
+  const inherited = inheritedRouteOf(agent)
+  if (inherited.provider !== undefined && inherited.model !== undefined
+    && routesInclude(allowed, inherited.provider, inherited.model)) return undefined
+  return inheritRouteDenialReason(
+    toolName, inherited.provider, inherited.model, allowed, inherited.reasoningEffort)
+}
+
+/**
+ * Build the denial reason for a half-specified route aimed at a tool that
+ * exposes no route field at all.
+ *
+ * This is the one denial whose cause is not the call: the delegation tool was
+ * mounted without model selection, so no argument can name a child route. The
+ * reason states the configuration defect and the route the child would inherit,
+ * because "call list_subagent_models and pass a route" would be unactionable.
+ * @param toolName - the tool the model called.
+ * @param inherited - the route the child would inherit from the caller.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function routeFieldsUnavailableReason(
+  toolName: string,
+  inherited: InheritedRoute,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  const route = inherited.provider === undefined || inherited.model === undefined
+    ? 'the calling agent\'s own route'
+    : `"${inherited.provider}/${inherited.model}"`
+  return `subagent model selection: "${toolName}" exposes no provider/model parameter in this deployment, so no `
+    + 'call can name a child route — the delegation tool is mounted without model selection enabled. '
+    + `The child would run on ${route}; authorized routes are ${authorizedRoutesText(allowed)}.`
+}
+
 /** Which Session's recorded allowlist a delegation must respect. */
 export type AuthorizationScope =
   /**
@@ -724,6 +794,7 @@ export function delegationDenialReason(
   toolNames: readonly string[] = DEFAULT_DELEGATION_TOOLS,
   scope: AuthorizationScope = 'session',
   inheritToolNames: readonly string[] = [],
+  declaresRouteParameters?: RouteParameterProbe,
 ): string | undefined {
   const mode = delegationModeOf(
     [
@@ -746,11 +817,22 @@ export function delegationDenialReason(
     if (requestedProvider !== undefined && requestedModel !== undefined) {
       return inheritOverrideReason(toolName, requestedProvider, requestedModel)
     }
-    const inherited = inheritedRouteOf(agent)
-    if (inherited.provider !== undefined && inherited.model !== undefined
-      && routesInclude(allowed, inherited.provider, inherited.model)) return undefined
-    return inheritRouteDenialReason(
-      toolName, inherited.provider, inherited.model, allowed, inherited.reasoningEffort)
+    return inheritedRouteDenial(agent, toolName, allowed)
+  }
+  // A tool mounted without model selection exposes no `provider`/`model` field,
+  // so "require an explicit pair" would be a denial the model cannot act on: the
+  // tool itself rejects any selection field ("child model selection is disabled
+  // for this tool instance"). Only the FACT of the tool's parameters may change
+  // the branch — never the absence of an argument — and an undeclared-route tool
+  // is still enforced, through the route its child would inherit.
+  if (declaresRouteParameters?.(agent, toolName) === false) {
+    if (requestedProvider !== undefined && requestedModel !== undefined) {
+      return inheritOverrideReason(toolName, requestedProvider, requestedModel)
+    }
+    if (requestedProvider !== undefined || requestedModel !== undefined) {
+      return routeFieldsUnavailableReason(toolName, inheritedRouteOf(agent), allowed)
+    }
+    return inheritedRouteDenial(agent, toolName, allowed)
   }
   // The route is explicit only when the model named a complete pair. A call that
   // omits either half would let the built-in tool fall back to the configured
@@ -791,6 +873,12 @@ export interface SubagentAuthorizationOptions {
   readonly inheritToolNames?: readonly string[]
   /** Whether an unrecorded Session falls back to the current preference. */
   readonly scope?: AuthorizationScope
+  /**
+   * Live answer to "does this tool expose `provider`/`model`?". Omitted keeps
+   * the configured mode authoritative, which is what an older Host without a
+   * definitions seam does.
+   */
+  readonly declaresRouteParameters?: RouteParameterProbe
 }
 
 /** The exact guard signature the Host tool registry evaluates. */
@@ -819,6 +907,7 @@ export function createSubagentAuthorization(
     options.toolNames,
     options.scope ?? 'session',
     options.inheritToolNames ?? [],
+    options.declaresRouteParameters,
   )
 }
 
@@ -894,6 +983,38 @@ interface EventHost {
 }
 
 /**
+ * Build the live route-parameter probe from the Host tool registry.
+ *
+ * The registry is read per call rather than snapshotted: an HMR replacement or a
+ * preset change can remount the delegation tool, and a stale answer would put
+ * the guard back on the impossible branch.
+ * @param ctx - Host context carrying the `tools` registry.
+ * @returns a probe over the registry, or undefined when it exposes no readable
+ *   definitions (older harness generations), which keeps the configured mode.
+ */
+export function routeParameterProbe(ctx: Context): RouteParameterProbe | undefined {
+  const registry = (ctx as unknown as {
+    tools?: { definitions?(scope?: unknown): readonly { readonly name?: unknown; readonly parameters?: unknown }[] }
+  }).tools
+  if (typeof registry?.definitions !== 'function') return undefined
+  const definitions = registry.definitions.bind(registry)
+  return (agent, toolName) => {
+    let visible: readonly { readonly name?: unknown; readonly parameters?: unknown }[]
+    try {
+      visible = definitions(agent)
+    } catch {
+      // A scope the registry cannot resolve says nothing about the tool.
+      return undefined
+    }
+    const definition = visible.find(entry => entry?.name === toolName)
+    if (definition === undefined) return undefined
+    const parameters = asRecord(definition.parameters)
+    if (parameters === undefined) return undefined
+    return 'provider' in parameters || 'model' in parameters
+  }
+}
+
+/**
  * Register the monotonic guard on the Host tool registry, and — when the Host
  * context exposes Cordis events — enrich `list_subagent_models` output with the
  * Session's split `{ provider, model }` routes and rewrite the misleading
@@ -920,7 +1041,14 @@ export function installSubagentModelAuthorization(
   // A 0.1.7 `SettingsForms` service has no register seam; the preference read
   // below checks for it and leaves recorded policies in charge when it is gone.
   const settings = (ctx as unknown as { get?(name: string): unknown }).get?.('settings') as SettingsService | undefined
-  const authorize = createSubagentAuthorization({ settings, sessions, toolNames, inheritToolNames, scope })
+  const authorize = createSubagentAuthorization({
+    settings,
+    sessions,
+    toolNames,
+    inheritToolNames,
+    scope,
+    declaresRouteParameters: routeParameterProbe(ctx),
+  })
   const disposeGuard = ctx.tools.guard(exec =>
     authorize(exec.agent as AuthorizationAgent | undefined, exec.name, exec.arguments))
 

@@ -51,11 +51,17 @@
 
 **DSH 设置 → 子代理 → 允许 Agent 为 Subagent 选择模型** 必须开启，并至少勾选一个模型
 （即右上角开关打开 + 清单里勾选）。这是 R2 生效的运行时前提：`tool-subagent` 的
-`modelSelectionSettings: true` 会采样该设置并在运行时把子代理路由限制在勾选清单内；
+`modelSelection: true` 会采样该设置并在运行时把子代理路由限制在勾选清单内；
 未开启时模型仍可传路由参数，但会直接报错。
 
+> **`modelSelection` 必须与 `modelDiscovery` 成对写入 preset 行。** harness 0.2.1-rc.1 把旧的
+> `modelSelectionSettings` 拆成两个键：`modelSelection` 才暴露 `provider`/`model` 参数，
+> `modelDiscovery` 才注册 `list_subagent_models`，两者默认都是 false，且不再互相隐含。
+> 漏掉任一个都会让本模式变成哑的：守卫（默认开）要求显式路由，而工具不接受路由参数、
+> 也没有发现工具可查——两条路一起堵死，模型连清单都拿不到。
+
 被拒绝时，理由里会直接列出授权路由，并提示调用 `list_subagent_models` 查看各模型的能力与
-推理强度——该工具由 `modelSelectionSettings: true` 自动注册，且其可见范围恰好被限制在你勾选的
+推理强度——该工具由 `modelDiscovery: true` 注册，且其可见范围恰好被限制在你勾选的
 清单内。为消除上游工具自带英文说明（`"Catalog membership is advisory"`、`"Child LLM selection is optional..."`）与需要两步调用的盲区，本插件在运行时做了双重机制级增强：① 通过 `system-prompt/assemble` 原位重写 `list_subagent_models` 与 `subagent` 的工具描述（覆盖 PTC `tools:sdk` 与 Native 工具定义），直接写明强制显式路由与本会话允许清单；② 通过 `tools/post-execute` 在每次 `list_subagent_models` 返回末尾直接附上本会话全部已授权的 `{ provider, model }` 拆解对。R2 与 `plan-mode` 提示词也同步写明 `list_subagent_models` 是允许清单的**唯一真源**，直接采信其输出即可，无需仅为了确认哪些子代理模型可用去翻本地配置或代码（Anti-Pattern 16）。
 
 
