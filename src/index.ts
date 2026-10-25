@@ -1362,12 +1362,29 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // pool — not the bare credential store — is what they read: the native
     // ~/.minimax directory this route once shared is gone on a fresh install,
     // and only a pooled account still holds a live session.
-    const disposeMinimaxUnderstandVideoTool = ctx.tools.register(
-      createMinimaxUnderstandVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
-    )
-    const disposeMinimaxGenerateVideoTool = ctx.tools.register(
-      createMinimaxGenerateVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
-    )
+    //
+    // Both are registered ONLY while this line is enabled. A user who turned the
+    // line off never calls either one, yet their schemas cost ≈2000 tokens of
+    // context on every request (generate 1442 + understand 571) — 74% of what
+    // this plugin's always-on tool list spends, paid by deployments that cannot
+    // use it. Registration happens during load and reads the synchronous
+    // `status()` snapshot: a registered tool cannot be pulled back out of a
+    // conversation's tool list, so the switch takes effect on the next start —
+    // the same trade cline-pass/line.ts makes for `exposeTools`. On a harness
+    // with no settings seam `status()` answers the shipped default
+    // (`enabled: true`) until its disk read lands, which keeps the pre-change
+    // behaviour there rather than silently dropping the tools.
+    const minimaxMediaToolsEnabled = minimaxCodePreferences.status().enabled
+    const disposeMinimaxUnderstandVideoTool = minimaxMediaToolsEnabled
+      ? ctx.tools.register(
+        createMinimaxUnderstandVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
+      )
+      : () => undefined
+    const disposeMinimaxGenerateVideoTool = minimaxMediaToolsEnabled
+      ? ctx.tools.register(
+        createMinimaxGenerateVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
+      )
+      : () => undefined
 
     // 「进展更新」：不结束回合的 `progress_update` 工具 + 系统提示词引导 +
     // `tools/post-execute` 上的 8 轮催促 + 客户端唯一的取数路由。挂载是无条件
