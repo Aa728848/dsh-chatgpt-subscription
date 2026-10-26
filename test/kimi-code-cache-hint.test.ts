@@ -41,12 +41,14 @@ describe('evaluateCacheHint', () => {
     }).kind).toBe('skip')
   })
 
-  it('pins the lifetime to the measured 30 minutes, not the "5m" tier name', () => {
+  it('pins the lifetime to the last reliably warm age, not the "5m" tier name', () => {
     // Measured on the coding endpoint (three replicas per age, one fresh prefix
     // per age): 3/3 warm through 25 minutes, 1/3 at 30, 0/3 at 35. The old
     // 5-minute value was the write tier's NAME, and it warned from minute 6
-    // while the entry stayed warm for another 19.
-    expect(CACHE_TTL_MS).toBe(30 * 60 * 1000)
+    // while the entry stayed warm for another 19. The notice fires at 25 rather
+    // than 30 because a warning that arrives once most replicas are already
+    // cold describes the bill instead of preventing it.
+    expect(CACHE_TTL_MS).toBe(25 * 60 * 1000)
   })
 
   it('does not warn during the window the measurement kept warm', () => {

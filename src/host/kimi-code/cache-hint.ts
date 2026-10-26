@@ -28,17 +28,17 @@
  * 3/3 warm through 25 minutes, 1/3 at 30 minutes, and 0/3 at 35 minutes — a
  * 25–35 minute bracket around a fuzzy edge.
  *
- * 30 minutes is the first age at which most replicas are already cold, which is
- * what this notice needs: it must not fire while the entry is reliably alive.
- * The alternative — the last fully-warm age of 25 minutes — would warn during
- * the five minutes in which the entry still survives more often than not, and a
- * notice that cries wolf is worse than a late one.
+ * 25 minutes is the last age at which every replica was still warm, and that is
+ * what this notice needs: it must arrive BEFORE the entry is surely gone. The
+ * 30-minute point where most replicas had gone cold is too late — by then the
+ * user has already paid for the reprocessed prefix, so a notice there describes
+ * the bill instead of preventing it.
  *
  * The old value was 5 minutes, taken from the `5m` write tier's NAME. On this
  * endpoint the name is not the lifetime: that estimate warned from minute 6
  * onward while the entry was still warm for another 19.
  */
-export const CACHE_TTL_MS = 30 * 60 * 1000
+export const CACHE_TTL_MS = 25 * 60 * 1000
 
 /**
  * Context below which a cold cache is not worth mentioning.

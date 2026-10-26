@@ -67,6 +67,8 @@ import {
   offloadOldestRequestVideos,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
+  getCacheStats,
+  getLastDriftCause,
   recordThinkingCoercion,
   requestHasVideo,
   resolveRequestImages,
@@ -78,6 +80,7 @@ import {
   type KimiCodeStreamState,
   type RequestMediaOptions,
 } from './mapper.ts'
+import { sessionCacheState } from './session-cache-state.ts'
 import {
   createMediaFilesUploader,
   type KimiMediaFilesUploader,
@@ -826,6 +829,90 @@ const MAX_ACCOUNT_LIMIT_COOLDOWN_MS = BILLING_CYCLE_COOLDOWN_MS
  */
 export const KIMI_CODE_REQUEST_IMAGE_MAX_EDGE = 2000
 
+/**
+ * Persist the cache facts a status card needs to survive a restart.
+ *
+ * Written at the end of every request, from the same numbers the in-memory
+ * totals just recorded. The process forgets them at exit, and the expiry hint
+ * depends on knowing how long a conversation sat idle before it was resumed —
+ * the moment the hint matters is the moment memory no longer has the answer.
+ *
+ * The prompt size is this request's own (cache read + fresh input), not the
+ * rolling sum: the hint describes what the NEXT turn would have to reprocess.
+ */
+/**
+ * How this route carries a mid-conversation tool change, or undefined for none.
+ *
+ * Three gates decide whether the route gets one at all: the model accepts
+ * message-level declarations, the request travels the OpenAI-compatible surface
+ * (the Anthropic one documents no such field), and no operator opted out. A
+ * model that fails any gate keeps the old shape, in which every request carries
+ * the complete tool list.
+ *
+ * The mode is `in-history`, not `addition-only`: both append an addition, but
+ * only `in-history` also expresses a removal by appending a note. Under
+ * `addition-only` a revoked tool is deleted from the declaration list, the
+ * top-level `tools` array shrinks, and the prefix cache is thrown away.
+ * @param modelId - exact model id.
+ * @param catalog - live catalog, possibly empty when offline.
+ * @returns the tool-update mode, or undefined when this route must resend everything.
+ */
+export function toolUpdateMode(
+  modelId: string,
+  catalog: readonly KimiCodeCatalogModel[],
+): 'in-history' | undefined {
+  if (!dynamicToolsForEntry(modelId, catalog)) return undefined
+  if (wireForCatalogEntry(modelId, catalog) !== 'openai') return undefined
+  const raw = (process.env.DSH_KIMI_CODE_TOOL_UPDATE ?? '').trim().toLowerCase()
+  if (raw !== '' && ['0', 'false', 'no', 'off', 'none'].includes(raw)) return undefined
+  return 'in-history'
+}
+
+/** Sessions already told that their prefix broke, so the log stays readable. */
+const driftWarned = new Set<string>()
+
+/**
+ * Say once per session when the prefix cache was rebuilt by a change we made.
+ *
+ * The cost of a rebuild is invisible in the transcript — it shows up as a
+ * slower turn and a larger bill — so the one place it can be seen is here.
+ * Deliberately not a per-request notice: a repeated warning is a warning people
+ * stop reading.
+ */
+function reportDriftCause(sessionId: string, cause: string | undefined): void {
+  if (cause !== 'tools' && cause !== 'system-prompt') return
+  const key = sessionId + ':' + cause
+  if (driftWarned.has(key)) return
+  driftWarned.add(key)
+  if (driftWarned.size > 256) driftWarned.clear()
+  console.warn(
+    '[kimi-code] prompt cache rebuilt for session ' + sessionId
+    + ': the ' + cause + ' changed mid-conversation, so the whole prompt was reprocessed once.',
+  )
+}
+
+function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStreamState): void {
+  if (sessionId === undefined || sessionId.trim() === '') return
+  const stats = getCacheStats(sessionId)
+  if (stats.requests === 0) return
+  const lastDrift = getLastDriftCause(sessionId)
+  reportDriftCause(sessionId, lastDrift)
+  const now = Date.now()
+  sessionCacheState.write(sessionId, {
+    lastActiveAt: now,
+    totalTokens: state.cacheReadTokens + state.inputTokens,
+    requests: stats.requests,
+    cachedTokens: stats.cachedTokens,
+    freshTokens: stats.freshTokens,
+    outputTokens: stats.outputTokens,
+    cacheWriteTokens: stats.cacheWriteTokens,
+    cacheWrite5mTokens: stats.cacheWrite5mTokens,
+    cacheWrite1hTokens: stats.cacheWrite1hTokens,
+    ...(lastDrift === undefined ? {} : { lastDrift }),
+    updatedAt: now,
+  })
+}
+
 export class KimiCodeAdapter extends LlmAdapter {
   /**
    * Rotation pool, or null for the single stored credential.
@@ -1052,6 +1139,17 @@ export class KimiCodeAdapter extends LlmAdapter {
       id: modelId,
       name: entry?.name ?? modelId,
       inputModalities: inputModalitiesForEntry(modelId, catalog),
+      // Mid-conversation tool changes travel as message-level declarations
+      // instead of a rewritten top-level list. The service matches prefixes, so
+      // rewriting `tools` reprocesses the whole conversation; replaying the
+      // change at its history position reprocesses nothing before it. The mode
+      // is `in-history` rather than `addition-only` because only that one can
+      // express a REMOVAL without shrinking the declaration list — with
+      // addition-only a revoked tool is deleted from the list, which rewrites
+      // the prefix and pays for the whole prompt again.
+      ...(toolUpdateMode(modelId, catalog) === undefined
+        ? {}
+        : { toolUpdate: toolUpdateMode(modelId, catalog) }),
       context: { contextWindow: this.contextWindowFor(modelId, entry, settings.contextWindowOverrides) },
       // Deliberately omit defaultMaxTokens: DSH materializes it into requests
       // and reserves it in compaction. Our window-sized cap is dynamic, not a
@@ -1605,6 +1703,10 @@ export class KimiCodeAdapter extends LlmAdapter {
         throw streamFailure(error, signal)
       }
     } finally {
+      // Filed before the reader is released: the record is what lets a status
+      // card still say "this conversation sat idle past the cache lifetime"
+      // after the process that ran it is gone.
+      if (state.sawUsage) noteSessionCacheState(requestOptions.sessionId ?? state.sessionId, state)
       void reader.cancel().catch(() => undefined)
     }
   }

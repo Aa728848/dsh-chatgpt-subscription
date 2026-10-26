@@ -1077,6 +1077,82 @@ export function rehydrateMessageTools<T extends Message>(message: T): T {
   return message
 }
 
+/**
+ * Names of the tools one developer message adds at its own history position.
+ *
+ * The harness states an addition as a name only; the definition it activates
+ * lives in the request's declaration list, which is why the two are resolved
+ * together rather than the block carrying a schema of its own.
+ */
+function toolAdditionNames(message: Message): string[] {
+  const names: string[] = []
+  for (const block of message.content as unknown as readonly Record<string, unknown>[]) {
+    if (block.type !== 'tool-addition') continue
+    const name = block.toolName
+    if (typeof name !== 'string' || name.trim() === '') continue
+    names.push(name.trim())
+  }
+  return names
+}
+
+/**
+ * Names of the tools one developer message revokes at its own history position.
+ *
+ * `in-history` is the only mode that emits these; a route declaring
+ * `addition-only` never sees one, because the harness removes the declaration
+ * from the list instead.
+ */
+function toolRemovalNames(message: Message): string[] {
+  const names: string[] = []
+  for (const block of message.content as unknown as readonly Record<string, unknown>[]) {
+    if (block.type !== 'tool-removal') continue
+    const name = block.toolName
+    if (typeof name !== 'string' || name.trim() === '') continue
+    names.push(name.trim())
+  }
+  return names
+}
+
+/**
+ * The model-facing note that revokes one or more tools.
+ *
+ * Imperative and unambiguous on purpose: the tool is still in the declaration
+ * list (that is what keeps the prefix intact), so the only thing standing
+ * between the model and a call that would fail is this sentence.
+ */
+function removalNotice(names: readonly string[]): string {
+  const list = names.map((name) => '"' + name + '"').join(', ')
+  return names.length === 1
+    ? '[' + list + ' is no longer available. Do not call it again: any call will fail.]'
+    : '[' + list + ' are no longer available. Do not call them again: any call will fail.]'
+}
+
+/**
+ * Resolve additions against the declaration list the harness sent.
+ *
+ * A deferred definition keeps `deferLoading` for the top-level filter and loses
+ * it here: a message-level declaration has no such field, and passing it on
+ * would be a property the service documented a stricter shape for.
+ */
+function declarationsFor(
+  names: readonly string[],
+  tools: GenerateOptions['tools'],
+): DynamicToolDeclaration[] {
+  if (tools === undefined || names.length === 0) return []
+  const byName = new Map(tools.map((tool) => [tool.name, tool]))
+  const declarations: DynamicToolDeclaration[] = []
+  for (const name of names) {
+    const tool = byName.get(name)
+    if (tool === undefined) continue
+    declarations.push({
+      name: tool.name,
+      description: tool.description ?? '',
+      parameters: stripMetaSchema(tool.parameters) as Record<string, unknown>,
+    })
+  }
+  return declarations
+}
+
 /** One declaration in the wire shape Kimi documents for `messages[].tools`. */
 function openAIDynamicTool(tool: DynamicToolDeclaration): OpenAIMessage {
   return {
@@ -1234,6 +1310,28 @@ function declarationSlots(
   const slots: DeclarationSlot[] = []
   let beforeIndex = 0
   for (const message of options.messages) {
+    if (message.role === 'developer') {
+      // The harness appends a tool change as a developer message at the point in
+      // history where it happened, which is exactly where it must be replayed:
+      // Kimi matches prefixes, so a change kept at its original position leaves
+      // everything before it cached.
+      const additions = declarationsFor(toolAdditionNames(message), options.tools)
+      const entries: OpenAIMessage[] = []
+      if (additions.length > 0) {
+        entries.push(media.messageTools === true
+          ? { role: 'system', tools: additions.map(openAIDynamicTool) }
+          : { role: 'system', content: declarationNotice(options.model, additions.length, 'capability') })
+      }
+      // A removal has no wire form of its own — the dynamic-tool schema defines
+      // no "revoke" — so it travels as the note the `in-history` mode is for.
+      // The declaration stays in the top-level list (dropping it would rewrite
+      // the prefix); the note is what tells the model the tool is gone.
+      const removals = toolRemovalNames(message)
+      if (removals.length > 0) entries.push({ role: 'system', content: removalNotice(removals) })
+      if (entries.length > 0) slots.push({ beforeIndex, entries })
+      beforeIndex += 1
+      continue
+    }
     if (message.role !== 'system') {
       beforeIndex += 1
       continue
@@ -1432,6 +1530,10 @@ export function buildOpenAIRequest(
   // append, which is the cache-preserving case this feature is built for.
   flushSlots(nonSystemIndex)
 
+  // A deferred definition travels through a message-level addition instead.
+  // Leaving it in the top-level list would put it back inside the very prefix
+  // this route is holding still, which is the entire cost being avoided.
+  const topLevelTools = (options.tools ?? []).filter((tool) => tool.deferLoading !== true)
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
   const body: Record<string, unknown> = {
     model: options.model,
@@ -1445,9 +1547,9 @@ export function buildOpenAIRequest(
     // service rejects an explicit value rather than clamping it, so a caller's
     // temperature is deliberately dropped instead of forwarded.
     ...(stopSequences(options.stop).length > 0 ? { stop: stopSequences(options.stop) } : {}),
-    ...(options.tools && options.tools.length > 0
+    ...(topLevelTools.length > 0
       ? {
-          tools: options.tools.map((tool) => ({
+          tools: topLevelTools.map((tool) => ({
             type: 'function',
             function: { name: tool.name, description: tool.description, parameters: stripMetaSchema(tool.parameters) },
           })),

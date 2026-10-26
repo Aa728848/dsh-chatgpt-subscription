@@ -33,6 +33,7 @@ import {
 } from './client.ts'
 import { getCacheStats, getLastDriftCause, preserveThinkingEnabled } from './mapper.ts'
 import { evaluateCacheHint, sessionLastActiveAt } from './cache-hint.ts'
+import { resolveSessionCacheView, sessionCacheState } from './session-cache-state.ts'
 import { beginWebLogin, getWebLoginStatus, isRefreshTokenRejected, resetWebLogin } from './oauth.ts'
 import {
   KIMI_CODE_REASONING_EFFORTS,
@@ -255,7 +256,10 @@ export async function getKimiCodeWebStatus(
  */
 function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const stats = getCacheStats(sessionId)
-  if (stats.requests === 0) return null
+  // A process that just started has no totals, and answering "nothing yet" for
+  // a conversation that ran for hours is exactly the blank card a restart used
+  // to produce. The durable record describes the last run on this machine.
+  if (stats.requests === 0) return durableCacheStats(sessionId)
   const lastDrift = getLastDriftCause(sessionId)
   return {
     ...stats,
@@ -283,14 +287,76 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
  * some global figure.
  */
 function cacheHintOrNull(sessionId: string | undefined): KimiCodeCacheHintDto | null {
-  const lastActiveAt = sessionLastActiveAt(sessionId)
+  // Both inputs must survive a restart, or the hint is silent exactly when it
+  // matters: the process forgets when this conversation last ran (and answers
+  // "no data") the moment the app is closed and reopened.
+  const stats = getCacheStats(sessionId)
+  const view = resolveSessionCacheView(
+    sessionId,
+    {
+      memoryLastActiveAt: sessionLastActiveAt(sessionId),
+      memoryTotalTokens: stats.cachedTokens + stats.freshTokens,
+    },
+    sessionCacheState.read(sessionId),
+  )
   const decision = evaluateCacheHint({
     now: Date.now(),
-    lastActiveAt,
-    totalTokens: getCacheStats(sessionId).cachedTokens + getCacheStats(sessionId).freshTokens,
+    lastActiveAt: view.lastActiveAt,
+    totalTokens: view.totalTokens,
   })
   if (decision.kind !== 'hint') return null
   return { idleMs: decision.idleMs, totalTokens: decision.totalTokens }
+}
+
+/**
+ * The card built from the durable record, for a process that has served nothing.
+ *
+ * Only reached when the in-memory totals are empty, which after a restart is the
+ * normal case rather than an error: the previous run wrote this record at every
+ * turn close, so it still describes the conversation the card was showing.
+ */
+function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
+  const durable = sessionCacheState.read(sessionId)
+  if (durable === undefined || durable.requests === 0) return null
+  const lastDrift = driftCauseOf(durable.lastDrift)
+  return {
+    requests: durable.requests,
+    cachedTokens: durable.cachedTokens,
+    freshTokens: durable.freshTokens,
+    outputTokens: durable.outputTokens,
+    hitRatio: hitRatioOf(durable.cachedTokens, durable.freshTokens),
+    cacheWriteTokens: durable.cacheWriteTokens,
+    cacheWrite5mTokens: durable.cacheWrite5mTokens,
+    cacheWrite1hTokens: durable.cacheWrite1hTokens,
+    ...(lastDrift === undefined ? {} : { lastDrift }),
+  }
+}
+
+/**
+ * The drift cause a durable record names, when it is one the DTO can carry.
+ *
+ * The record stores the cause as a string because it outlives the module that
+ * produced it; an unrecognized value is dropped rather than forwarded, so a
+ * downgraded plugin cannot render a cause this build has no label for.
+ */
+function driftCauseOf(value: string | undefined): KimiCodeCacheStatsDto['lastDrift'] {
+  switch (value) {
+    case 'first-request':
+    case 'stable':
+    case 'system-prompt':
+    case 'tools':
+    case 'cache-key':
+    case 'cold-key':
+      return value
+    default:
+      return undefined
+  }
+}
+
+/** Cached / (cached + fresh), or null before any prompt token was counted. */
+function hitRatioOf(cached: number, fresh: number): number | null {
+  const total = cached + fresh
+  return total > 0 ? cached / total : null
 }
 
 /** Register the Kimi Code settings routes under `/kimi-code/api`. */
