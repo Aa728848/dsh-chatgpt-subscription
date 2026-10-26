@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **[opendesign] DeepSeek 系列模型默认推理强度设为 `high`**
+  - `deepseek-v4.1-flash`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`deepseek-v4-pro` 现在通过适配器向宿主声明默认 `high` 推理强度；其它模型不显式覆盖宿主默认值。
+  - 实时目录的档位列表不再包含 `high` 时，会丢弃随包默认值，而不是把已经失效的默认档位继续传给宿主。适配器与目录测试覆盖四款模型及这一降级路径。
+
+- **[dispatch] 新旧子代理模型选择开关双写，恢复发布版 rc.3 的授权模型派发**
+  - **现象**：发布版 Harness rc.3 搭配插件 0.41.0 时，调度模式能看到授权模型，却不能按 `provider` + `model` 派出子代理；包含后续子代理改动的本地同号 HEAD 正常。
+  - **根因**：npm 发布包 `@deepseek-ai/dsh-tool-subagent@0.2.1-rc.3` 仍只读取 `modelSelectionSettings`，并由它控制路由参数、模型发现和 Session 策略记录；`modelSelection` / `modelDiscovery` 是本地 HEAD 的后续契约，相关提交 `8fa8e9167db`、`1448360b669` 均不在发布标签中。插件 0.41.0 只写两个新键，发布版因此把旧开关留在默认 `false`。
+  - **改法**：运行时 dispatch 声明与 bundled YAML 同时写入 `modelSelectionSettings: true`、`modelSelection: true`、`modelDiscovery: true`，不增加版本分支。发布版读取旧键，后续 Harness 读取新键；守卫和供应商代码不变。
+  - **回归**：`test/agent-preset.test.ts` 现在要求运行时配置和 bundled YAML 都携带三个键，防止再次把未发布 HEAD 的契约当成发布版 rc.3 的契约。
+  - **验证**：dispatch/authorization 针对性测试 **71/71**；三工程强制 TypeScript 检查、`npm run build`、全量 Vitest、`npm ci --dry-run`、`npm pack --dry-run` 均以 exit 0 完成，`git diff --check` 通过。发布版 rc.3 上“显式选择授权模型并检查子代理实际路由”的端到端验收未在本轮执行，不能用此前的会话创建 smoke 代替。
+
+- **[subagent-audit] 路由审计改读真实 Session 的 `snapshotEvents()`，不再把授权和违规记录读空**
+  - **现象与边界**：只读路由审计在真实 Session 上可能返回空授权、空违规；它不参与子代理创建，不影响 dispatch 派发或授权守卫。
+  - **根因**：审计直接读取 `session.events`，但发布版 rc.3 的 Session 原型没有这个公开字段，只提供 `snapshotEvents()`；既有测试全部使用 `{ events }` 替身，因此覆盖了错误的数据形状。
+  - **改法与回归**：新增统一 `eventsOf()`，轻量替身继续使用 `events`，真实 Session 回退到 `snapshotEvents()`，授权、catalog 和 descriptor 三处读取共用。新增 snapshot-only 回归先在旧实现上以 `undefined` 失败，修复后 **10/10** 通过；发布包原型探针确认 `events` 缺席而 `snapshotEvents` 存在。守卫本身另以真实发布版 ToolRuntime/SystemPrompt 跑通 **45/45**（含 PTC），没有发现第二处派发阻断。
+  - **合并验证**：上述 dispatch 与 audit 修复合并后，三工程强制 TypeScript 检查、`npm run build`、全量 Vitest、`npm ci --dry-run`、`npm pack --dry-run` 均通过。全量结果为 **299 文件通过 / 2 跳过，4904 测试通过 / 8 跳过 / 0 失败**；`git diff --check` 通过。
+
 ## 0.41.0 - 2026-10-26
 
 - **[kimi-code] 前缀缓存不再因为工具集变化整段重建：改走消息级工具声明，加/撤工具只动历史尾部**
