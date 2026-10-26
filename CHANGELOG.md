@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.41.1 - 2026-10-26
+
 - **[opendesign] DeepSeek 系列模型默认推理强度设为 `high`**
   - `deepseek-v4.1-flash`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`deepseek-v4-pro` 现在通过适配器向宿主声明默认 `high` 推理强度；其它模型不显式覆盖宿主默认值。
   - 实时目录的档位列表不再包含 `high` 时，会丢弃随包默认值，而不是把已经失效的默认档位继续传给宿主。适配器与目录测试覆盖四款模型及这一降级路径。
