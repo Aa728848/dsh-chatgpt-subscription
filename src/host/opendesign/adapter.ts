@@ -194,6 +194,7 @@ export class OpenDesignAdapter extends LlmAdapter {
         ? {
             reasoning: {
               efforts: info.efforts.map((effort) => ({ id: ReasoningEffortId(effort), name: effort })),
+              ...(info.defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(info.defaultEffort) }),
             },
           }
         : {}),
