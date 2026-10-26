@@ -223,18 +223,18 @@ describe('apply: 提示词引导', () => {
     expect(PROGRESS_SECTION_NAME).toBe('plugin:progress-updates')
   })
 
-  it('text 是函数形式，开关关闭时返回空串，打开时返回引导词', () => {
+  it('text 是函数形式，且不随开关变化：系统提示属于缓存前缀，会话中途改字会把整段前缀作废', () => {
     const enabled = volatileField(false)
     const fake = mount(enabled)
     const section = fake.sections.get(PROGRESS_SECTION_NAME)!
     expect(typeof section.text).toBe('function')
     const render = section.text as (context: unknown) => string
-    expect(render(undefined)).toBe('')
+    const stable = render(undefined)
+    expect(stable).toContain('progress_update')
     enabled.set(true)
-    // 关掉开关再打开，不需要重挂插件行：同一个 provider 重新求值即可。
-    expect(render(undefined)).toContain('progress_update')
+    expect(render(undefined)).toBe(stable)
     enabled.set(false)
-    expect(render(undefined)).toBe('')
+    expect(render(undefined)).toBe(stable)
   })
 
   it('引导词讲清什么时候用、标题与正文的分工，以及 subagent 的边界', () => {

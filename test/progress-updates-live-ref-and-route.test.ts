@@ -183,16 +183,17 @@ describe('开关：loader 的活引用', () => {
     expect(await tool.execute({ message: '第三条' } as never, {} as never)).toEqual({ displayed: true })
   })
 
-  it('同样的活引用也驱动提示词引导：关掉就返回空串', () => {
+  it('活引用驱动工具行为，但不驱动提示词文本：提示词必须恒定，否则每次切开关都会废掉前缀缓存', () => {
     const enabled = liveRef(false)
     const fake = mount(enabled)
     const section = fake.sections.get('plugin:progress-updates')!
     const render = section.text as () => string
-    expect(render()).toBe('')
+    const stable = render()
+    expect(stable).toContain('progress_update')
     enabled.set(true)
-    expect(render()).toContain('progress_update')
+    expect(render()).toBe(stable)
     enabled.set(false)
-    expect(render()).toBe('')
+    expect(render()).toBe(stable)
   })
 
   it('普通值（没有 get 的裸布尔）也照常工作，供测试与手工上下文使用', async () => {

@@ -98,13 +98,15 @@ export function progressLanguageDirective(language: ProgressUpdateLanguage): str
 
 /**
  * 生成提示词分节的文本提供者。
- * @param isEnabled - 读取当前开关状态的函数（每次装配重新求值）。
+ *
+ * 文本与开关无关，这是刻意的：系统提示是缓存前缀的第一段，会话中途改一个字
+ * 就会让整段前缀失效、整段重新计费（Kimi 的缓存是内容前缀匹配）。开关的语义
+ * 因此只留给工具自己——关闭时 `execute` 直接返回 `displayed:false`。
  * @param language - 读取当前输出语言的函数；缺省按 `auto` 处理。
- * @returns 开关打开时返回引导词加语言指令，关闭时返回空串。
+ * @returns 引导词加语言指令。
  */
 export function progressSectionText(
-  isEnabled: () => boolean,
   language: () => ProgressUpdateLanguage = () => 'auto',
 ): () => string {
-  return () => (isEnabled() ? PROGRESS_GUIDANCE + '\n\n' + progressLanguageDirective(language()) : '')
+  return () => PROGRESS_GUIDANCE + '\n\n' + progressLanguageDirective(language())
 }

@@ -479,15 +479,17 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
     return tools.register(tool)
   }, 'dsh-chatgpt-subscription: progress update tool')
 
-  // 提示词引导：文本用函数形式，开关关闭时返回空串。systemPrompt 是可选服务：
-  // 没装 system-prompt 的宿主上，这条引导只是不存在，插件照样工作。
+  // 提示词引导：文本恒定，不随开关变化——系统提示属于缓存前缀，会话中途改字
+  // 会让整段前缀失效并重新计费；开关的语义交给工具（关闭时 execute 返回
+  // displayed:false）。systemPrompt 是可选服务：没装它的宿主上这条引导不存在，
+  // 插件照样工作。
   track(() => {
     const systemPrompt = serviceOf<SystemPromptService>('systemPrompt')
     if (systemPrompt === undefined) return () => undefined
     return systemPrompt.section({
       name: PROGRESS_SECTION_NAME,
       order: PROGRESS_SECTION_ORDER,
-      text: progressSectionText(() => options.settings().enabled, () => options.settings().language),
+      text: progressSectionText(() => options.settings().language),
     })
   }, 'dsh-chatgpt-subscription: progress update prompt section')
 
