@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **[qoder] 上游排队不再被说成「API 密钥无效」；额度用尽与排队分成两条路**
+  - **现象**：Qoder 线路发消息立刻失败，界面只显示「本轮运行失败 · API 密钥无效 · AUTH」，于是去重建 PAT、重新登录、换区域——而凭据一直是好的（同一把 token 调 `GET /api/v1/userinfo` 返回 200）。另一条路同样的话：额度真的用尽时（上游 code 112 + pricingUrl）显示的也是「API 密钥无效」，两条完全不同的失败在用户眼里是同一句。
+  - **为什么**：上游把「排队中」装在 **HTTP 200 的 SSE 错误信封**里（`statusCodeValue: 403`，body 带 `code 10605` / `subCode: RESOURCE_LIMIT` / `queueCount 3239` / `retryAfterSeconds 30` / `serviceAvailable false`）。插件在 mapper 里解出 `statusCodeValue` 后交给 `classifyQoderFailure`，而它把任何 403 一刀切成 AUTH；DSH 收到 AUTH 就显示通用文案「API 密钥无效」（`message.failure.auth`）。插件也不认识 `RESOURCE_LIMIT` / `10605` / `isQueued` / `retryAfterSeconds` 这几个字段，信息在整条链路上被丢弃。额度快照同样只映射三只桶，`isQuotaExceeded` 与 `upgradeUrl` 一次都没出现过——于是三只桶全是 0 时卡片显示「还有额度」，而上游其实已经把请求拒了。
+  - **改法**：(1) 分类器改为**按上游事实**判定：新增一份逐层扫描的事实集合（信封外层 + body + body 里的 `error` 对象），排队/资源不足（`RESOURCE_LIMIT`、`10605`，或 403 配容量信号）归 `SERVER`（上游容量，换账号与重新登录都救不了，只有退避重试有意义——与 kimi-code 的「引擎过载」同一判断），额度用尽（code `112`，或 403 配 `isQuotaExceeded` / `pricingUrl`）归 `QUOTA`（DSH 显示「当前请求的额度已用尽」），401 与 code `105` 仍是 `AUTH`，认不出原因的 403 仍保守归 AUTH；上游给了 `retryAfterSeconds` 就照它说（`providerRetryAfterMs`）。(2) 信封路径把**信封层与 body 一起**送进分类器——上游把事实放在哪一层并不确定，只读 body 会把「排队」读成「凭据被拒」。(3) 额度快照补上 `quotaExceeded` / `upgradeUrl`，设置页额度卡在上游说用尽时先说这件事并给出升级页（zh/en/ru 三语）。
+  - **测试**：`test/qoder-mapper.test.ts` 新增 4 例（排队归 SERVER 且带 `providerRetryAfterMs`、额度用尽归 QUOTA、认不出的 403 仍是 AUTH、429 的含义不被弱信号改写）与 4 例信封路径；`test/qoder-adapter.test.ts` 新增 1 例端到端（HTTP 200 + 错误信封 → `SERVER` 而非 `AUTH`，且账号没有被判成「要重新登录」）；新增 `test/qoder-quota.test.ts`（4 例）钉住两个新字段的归一化；`test/qoder-ui.test.tsx` 新增 2 例（说用尽时额度区给出升级页，没说时不出现）。
 ## 0.43.0 - 2026-10-27
 
 - **[opendesign] MiMo V2.6 与 Qwen3.7 Max 拿回思考深度选择**

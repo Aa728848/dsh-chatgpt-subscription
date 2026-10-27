@@ -163,6 +163,41 @@ DSH 计数互斥，所以 `input = prompt - cacheRead - cacheWrite`（pi-provide
 `usage.credits` / `billable` 是 Qoder 的计费字段，**不进 DSH 的 TokenUsage**（没有对应格子；
 记入诊断日志，不虚构金额——订阅单价未公开）。
 
+### 3.7 失败分类：上游的「排队」与「额度用尽」都不是认证失败
+
+失败有两种送达方式，**第二种不经过 `!response.ok` 那一支**：
+
+1. HTTP 非 2xx（body 直接是错误 JSON）；
+2. **HTTP 200 + SSE 错误信封**（`statusCodeValue: 403`）——「排队中」走的是这一条。
+   它因此**不会**调用 `markAuthFailed`（账号不会被误判成「要重新登录」），但它同样要
+   分类对：分错就是 DSH 的通用文案「API 密钥无效」（`message.failure.auth`）。
+
+上游在失败里报的事实（字段名逐字）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `code` | 业务码（码链：HTTP 403 → 10605） |
+| `subCode` | `RESOURCE_LIMIT` = 上游资源不足 / 排队 |
+| `queueCount` | 排队人数 |
+| `retryAfterSeconds` | 上游建议的等待秒数 |
+| `serviceAvailable` | 上游当下的服务可用性 |
+| `isQueued` | 这次请求是否被排队 |
+| `modelKey` | 被排队的模型（上游的 key，不是 DSH 的公开 id） |
+| `pricingUrl` / `upgradeUrl` | 额度用尽时的购买 / 升级页 |
+
+分类口径（`classifyQoderFailure` 与 `classifyQoderEnvelopeFailure` 共用一份事实扫描）：
+
+- **排队 / 资源不足**（`RESOURCE_LIMIT`、`10605`，或 403 配容量信号）→ `SERVER`。
+  它描述的是上游容量：换账号与重新登录都救不了，退避重试才有意义（与 kimi-code 的
+  「引擎过载」同一判断）。上游给了 `retryAfterSeconds` 就照它说（`providerRetryAfterMs`）。
+- **额度用尽**（业务码 `112`，或 403 配 `isQuotaExceeded` / `pricingUrl`）→ `QUOTA`。
+  DSH 用这个码显示「当前请求的额度已用尽」。
+- **登录失效**（401，或业务码 `105` Login expired）→ `AUTH`。
+- 认不出原因的 403 仍然归 `AUTH`（凭据被拒是上游最常见的那一种），但上面两条必须先判掉：
+  把一次排队说成「API 密钥无效」会让人去重建一把根本没坏的令牌。
+- 事实**逐层扫**（信封外层 + body + body 里的 `error` 对象）：上游把这些字段放在哪一层
+  并不确定，只读 body 会把「排队」读成「凭据被拒」。
+
 ---
 
 ## 4. 模型目录与能力
@@ -193,6 +228,9 @@ DSH 计数互斥，所以 `input = prompt - cacheRead - cacheWrite`（pi-provide
 - 三个桶**分开渲染**（个人 / 加购 / 组织包），单位照上游原样；缺桶不画；`expiresAt` 是账号周期
   截止（Unix 毫秒）。
 - 额度失败（含上游改版）**绝不影响模型请求**；失败原因与快照并列下发，不互相取代。
+- 上游另外报两个**账号层面**的事实：`isQuotaExceeded`（额度已用尽）与 `upgradeUrl`
+  （升级 / 购买页）。三只桶全是 0 时它们是唯一的线索——插件不认识这两个字段时，卡片显示
+  「还有额度」而上游其实已经把请求拒了（见 §3.7）。
 - 输入框胶囊：从有 `total>0` 的桶里选已用比例最高的一只，显示剩余百分比；没有可计量的桶就
   **不渲染胶囊**（占位数字比不显示更像坏了——step-code 同一条规则）。
 - 单价未公开（Credits 与美元无公开汇率），整页**只显示 token/Credits 数字，不显示金额**。

@@ -35,6 +35,8 @@ describe('selectBadgeFacts（Qoder 胶囊）', () => {
         { kind: 'add-on', total: 500, used: 450, remaining: 50, unit: 'Credits' },
       ],
       expiresAt: null,
+      quotaExceeded: false,
+      upgradeUrl: null,
       fetchedAt: Date.now(),
       region: 'global',
     }))
@@ -48,17 +50,23 @@ describe('selectBadgeFacts（Qoder 胶囊）', () => {
   it('没有快照 / 没有桶 / 桶都没有总额时返回 null（不渲染）', () => {
     expect(selectBadgeFacts(null)).toBeNull()
     expect(selectBadgeFacts(status(null))).toBeNull()
-    expect(selectBadgeFacts(status({ buckets: [], expiresAt: null, fetchedAt: 1, region: 'global' }))).toBeNull()
+    expect(selectBadgeFacts(status({
+      buckets: [], expiresAt: null, quotaExceeded: false, upgradeUrl: null, fetchedAt: 1, region: 'global',
+    }))).toBeNull()
     // 总额缺失或归 0：「上游没报」不是「用完了」。
     expect(selectBadgeFacts(status({
       buckets: [{ kind: 'personal', total: null, used: 5, remaining: 5, unit: null }],
       expiresAt: null,
+      quotaExceeded: false,
+      upgradeUrl: null,
       fetchedAt: 1,
       region: 'global',
     }))).toBeNull()
     expect(selectBadgeFacts(status({
       buckets: [{ kind: 'personal', total: 0, used: 0, remaining: 0, unit: 'Credits' }],
       expiresAt: null,
+      quotaExceeded: false,
+      upgradeUrl: null,
       fetchedAt: 1,
       region: 'global',
     }))).toBeNull()
