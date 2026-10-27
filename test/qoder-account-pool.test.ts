@@ -110,6 +110,8 @@ describe('qoderPoolQuota（账号卡的进度条只装个人桶）', () => {
   const snapshot = (buckets: QoderQuotaSnapshotDto['buckets']): QoderQuotaSnapshotDto => ({
     buckets,
     expiresAt: null,
+    quotaExceeded: false,
+    upgradeUrl: null,
     fetchedAt,
     region: 'global',
   })

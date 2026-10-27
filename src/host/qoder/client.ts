@@ -859,12 +859,20 @@ export function normalizeQoderQuotaSnapshot(
   if (addOn !== undefined) buckets.push(addOn)
   const org = normalizeQoderBucket(value.orgResourcePackage, 'org')
   if (org !== undefined) buckets.push(org)
-  if (buckets.length === 0) return undefined
+  // 上游另外报的两个字段：额度用尽（isQuotaExceeded）与升级页（upgradeUrl）。
+  // 它们是**账号层面的事实**，不是某只桶的数字：三只桶全是 0 时上游也会说
+  // 「额度已用尽」，而卡片此前只看得见 0/0，于是「额度看着还在」与「请求被拒」
+  // 同时成立（issue #74）。
+  const quotaExceeded = value.isQuotaExceeded === true
+  const upgradeUrl = asText(value.upgradeUrl) ?? null
+  // 一只桶都不认识时快照不下发（卡片显示「读不出来」而不是一张全空的卡）——
+  // 但上游明说额度已用尽时除外：那是一条真事实，丢掉它卡片就会继续显示「有额度」。
+  if (buckets.length === 0 && !quotaExceeded) return undefined
   // expiresAt 是 Unix 毫秒（pi-provider usage.ts 的契约注释）；越界值丢弃而不是让
   // 格式化炸掉（8.64e15 是 JS Date 的上界）。
   const expiresRaw = asQuotaNumber(value.expiresAt) ?? null
   const expiresAt = expiresRaw !== null && expiresRaw <= 8.64e15 ? expiresRaw : null
-  return { buckets, expiresAt, fetchedAt, region }
+  return { buckets, expiresAt, quotaExceeded, upgradeUrl, fetchedAt, region }
 }
 
 /** 按账号记住的额度快照与在飞去重。 */

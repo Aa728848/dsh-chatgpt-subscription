@@ -541,6 +541,17 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
           <div className="dsha-empty">{busy === 'quota' ? t.quotaRefreshing : t.quotaEmpty}</div>
         ) : (
           <div className="dsha-quota-card">
+            {/* 上游明说额度用尽时先说这件事：三只桶全是 0 时，它是唯一的线索
+                （桶的数字全是 0 时「看起来还有额度」，而请求其实会被拒）。 */}
+            {quota.quotaExceeded && (
+              <div className="dshq-quota-exhausted">
+                <div className="dshq-quota-exhausted-title">{t.quotaExceeded}</div>
+                <div className="dshq-quota-exhausted-hint">{t.quotaExceededHint}</div>
+                {quota.upgradeUrl !== null && (
+                  <a href={quota.upgradeUrl} target="_blank" rel="noreferrer noopener">{t.quotaUpgradeLink}</a>
+                )}
+              </div>
+            )}
             {/* 事实走紧凑网格：一格一件事、行高一致。 */}
             <div className="dshq-fact-grid">
               <div className="dshq-fact">

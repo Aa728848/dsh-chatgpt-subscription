@@ -68,6 +68,8 @@ function quota(overrides: Partial<QoderQuotaSnapshotDto> = {}): QoderQuotaSnapsh
       { kind: 'add-on', total: 500, used: null, remaining: 500, unit: 'Credits' },
     ],
     expiresAt: Date.now() + 20 * 24 * 3_600_000,
+    quotaExceeded: false,
+    upgradeUrl: null,
     fetchedAt: Date.now(),
     region: 'global',
     ...overrides,
@@ -189,6 +191,30 @@ describe('Qoder 设置卡片', () => {
     // 一个网络包都不许发到本线路的前缀之外。
     expect(calls.length).toBeGreaterThan(0)
     expect(calls.every((call) => call.url.startsWith(PREFIX))).toBe(true)
+  })
+
+  it('上游说额度已用尽时，额度区先说这件事，并给出上游给的升级页', async () => {
+    const payload = status({
+      quota: quota({
+        // 三只桶都是 0：数字上看不出「用尽了」，只有上游明说的那个事实能说清。
+        buckets: [{ kind: 'personal', total: 0, used: 0, remaining: 0, unit: 'Credits' }],
+        quotaExceeded: true,
+        upgradeUrl: 'https://qoder.com/pricing?client=qoder',
+      }),
+    })
+    const { node } = await mountSection(payload)
+    const quotaGroup = groupOf(node, zh.quotaSection)
+    expect(quotaGroup.textContent).toContain(zh.quotaExceeded)
+    const link = quotaGroup.querySelector<HTMLAnchorElement>('a[href="https://qoder.com/pricing?client=qoder"]')
+    expect(link).not.toBeNull()
+    expect(link!.textContent).toBe(zh.quotaUpgradeLink)
+  })
+
+  it('上游没说额度用尽时，额度区不多这句话', async () => {
+    const { node } = await mountSection(status())
+    const quotaGroup = groupOf(node, zh.quotaSection)
+    expect(quotaGroup.textContent).not.toContain(zh.quotaExceeded)
+    expect(quotaGroup.querySelector('a')).toBeNull()
   })
 
   it('每一行模型都带能力摘要：窗口 · 输入模态 · 档位 · 输出预算', async () => {
