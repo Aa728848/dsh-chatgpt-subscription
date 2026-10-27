@@ -10,6 +10,13 @@
   - **验证**：`npm run typecheck` 0 错误；全量 Vitest **4906 passed / 10 skipped**（唯一失败仍是 GLM adopt 那个环境用例）；`npm run build` 产出 `lib/index.js` + `lib/progress-updates.js`；`npm pack --dry-run` 含 `lib/progress-updates.js`、`locale/progress-updates/{zh,en}.json`、`progress-updates.svg`；直接 import 构建产物确认 `name / apply / Config` 三项齐全、默认值解析为 `true / 8 / auto`。
   - **未验证**：插件管理页上真的出现两个开关需要重启 DSH（bundle patch 在启动时应用），本轮没有重启你的实例。
 
+- **[proxy] 代理连接池被销毁不再让回答卡死：死连接自动换新，卸载时优雅关闭**
+  - **现象**：长思考进行到一半，界面出现「已重试模型请求（1/3）」与 `terminated: The client is destroyed`，随后「已停止」。与 0.43.0 修的 180 秒超时是两个不同的故障。
+  - **为什么**：`terminated` 是 undici 的包装错误，`The client is destroyed` 是它的 `ClientDestroyedError`——请求还在流式读取时，脚下的连接池已经不存在了。这条线还有两处会把「一次事故」放大成「持续故障」：`ProxyManager.dispose()` 用 `destroy()` 立刻拆连接（任何插件卸载都会掐断在途回答），以及被销毁的 agent 仍留在按 URL 缓存的表里，之后每个请求都复用它并在瞬间失败。
+  - **改法**：卸载改为 `close()`——等在建请求跑完再释放 socket；代理请求遇到 destroyed-client 家族的错误时，把该 URL 的缓存 agent 摘掉、换一个新连接**重试一次**；错误判定只认这一族，普通的连接失败仍然不重放（那是另一种决定）。
+  - **测试**：`test/proxy-manager.test.ts` 新增两例——销毁后换新连接并成功（断言第二次的 dispatcher 不是第一次那个）、普通传输失败只跑一次。
+
+
 ## 0.43.1 - 2026-10-27
 
 - **[qoder] 上游排队不再被说成「API 密钥无效」；额度用尽与排队分成两条路**

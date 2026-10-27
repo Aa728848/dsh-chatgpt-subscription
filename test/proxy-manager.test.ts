@@ -532,3 +532,41 @@ describe('ProxyManager bypass path', () => {
     manager.dispose()
   })
 })
+
+describe('ProxyManager destroyed-client recovery', () => {
+  const destroyedError = () => new TypeError('terminated', { cause: new Error('The client is destroyed') })
+
+  function managerWith(proxyFetchFn: unknown): ProxyManager {
+    return new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: 'http://127.0.0.1:7890' }),
+      baseFetch: (async () => new Response('direct', { status: 200 })) as never,
+      proxyFetchFn: proxyFetchFn as never,
+      noProxyReader: () => '',
+    })
+  }
+
+  it('evicts a destroyed client and retries once on a fresh connection', async () => {
+    const dispatchers: unknown[] = []
+    const proxyFetchFn = vi.fn(async (_input: unknown, init?: { dispatcher?: unknown }) => {
+      dispatchers.push(init?.dispatcher)
+      if (dispatchers.length === 1) throw destroyedError()
+      return new Response('ok', { status: 200 })
+    })
+    const manager = managerWith(proxyFetchFn)
+    const response = await manager.createFetch()('https://api.example.com/v1/chat/completions')
+    expect(await response.text()).toBe('ok')
+    // One replay, on a NEW agent: reusing the cached one is what would keep the
+    // line broken until a restart.
+    expect(proxyFetchFn).toHaveBeenCalledTimes(2)
+    expect(dispatchers[0]).not.toBe(dispatchers[1])
+    manager.dispose()
+  })
+
+  it('does not replay an ordinary transport failure', async () => {
+    const proxyFetchFn = vi.fn(async () => { throw new TypeError('fetch failed') })
+    const manager = managerWith(proxyFetchFn)
+    await expect(manager.createFetch()('https://api.example.com/v1')).rejects.toThrow('fetch failed')
+    expect(proxyFetchFn).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+})

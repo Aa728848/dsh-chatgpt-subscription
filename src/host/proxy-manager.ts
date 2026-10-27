@@ -342,6 +342,25 @@ function requestTarget(input: Parameters<FetchLike>[0]): string | URL {
   return (input as Request).url
 }
 
+/**
+ * Whether an error is undici saying the pooled client under this request was
+ * destroyed — the host surfaces it as `terminated: The client is destroyed`.
+ *
+ * Only that family qualifies: an ordinary connect failure belongs to the other
+ * decision (the agent is healthy, the path is not), so it must not be replayed
+ * here.
+ */
+function isDestroyedClientError(error: unknown): boolean {
+  let current: unknown = error
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current === 'string') return /client is destroyed/i.test(current)
+    if (!(current instanceof Error)) return false
+    if (/client is destroyed|UND_ERR_DESTROYED/i.test(current.name + ': ' + current.message)) return true
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
 /** Called with the proxy URL the first time detection reports one after a `null`. */
 export type SystemProxyListener = (proxyUrl: string) => void
 
@@ -356,11 +375,17 @@ export interface ProxyFetchOptions {
    */
   noProxyReader?: () => string
   logger?: Pick<Console, 'info' | 'warn' | 'error'>
+  /**
+   * The proxied transport. Defaults to undici's own `fetch`; a test injects one
+   * so the "destroyed client" recovery below can be exercised without a proxy.
+   */
+  proxyFetchFn?: FetchLike
 }
 
 export class ProxyManager {
   private readonly getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>
   private readonly baseFetch: FetchLike
+  private readonly proxyFetchFn: FetchLike
   private readonly systemProxyDetector: () => string | null
   private readonly noProxyReader: () => string
   private readonly logger?: Pick<Console, 'info' | 'warn' | 'error'>
@@ -376,6 +401,7 @@ export class ProxyManager {
   constructor(options: ProxyFetchOptions) {
     this.getPreferences = options.getPreferences
     this.baseFetch = options.baseFetch ?? fetch
+    this.proxyFetchFn = options.proxyFetchFn ?? (undiciFetch as unknown as FetchLike)
     this.systemProxyDetector = options.systemProxyDetector ?? (() => detectSystemProxy())
     this.noProxyReader = options.noProxyReader ?? (() => parseNoProxy())
     this.logger = options.logger
@@ -491,16 +517,26 @@ export class ProxyManager {
         return this.baseFetch(input, init)
       }
 
-      try {
-        const agent = this.getOrCreateAgent(activeProxy)
-        // undiciFetch supports dispatcher option
-        return (await undiciFetch(input as any, {
-          ...(init as any),
-          dispatcher: agent,
-        })) as unknown as Response
-      } catch (error) {
-        // Fall back to base fetch if undici fetch encounters an unexpected error
-        throw error
+      // One retry, and only for a client undici has already destroyed: the
+      // per-URL cache then holds a dead client, so every later request through
+      // this proxy fails instantly with "terminated: The client is destroyed".
+      // Evicting it and opening a fresh connection is the difference between a
+      // recovered answer and a line that stays broken until the process restarts.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const agent = this.getOrCreateAgent(activeProxy)
+          // undiciFetch supports dispatcher option
+          return (await this.proxyFetchFn(input, {
+            ...(init as any),
+            dispatcher: agent,
+          } as any)) as unknown as Response
+        } catch (error) {
+          if (attempt === 0 && isDestroyedClientError(error)) {
+            this.agents.delete(activeProxy)
+            continue
+          }
+          throw error
+        }
       }
     }
   }
@@ -508,7 +544,11 @@ export class ProxyManager {
   dispose(): void {
     this.proxyListeners.clear()
     for (const agent of this.agents.values()) {
-      void agent.destroy().catch(() => undefined)
+      // close(), not destroy(): destroy() tears the pooled connection out from
+      // under any answer still streaming through it, and the host reports that
+      // as "terminated: The client is destroyed" mid-thinking. close() lets the
+      // in-flight request finish and then releases the sockets.
+      void agent.close().catch(() => undefined)
     }
     this.agents.clear()
   }
