@@ -112,9 +112,11 @@ const BASE = `
 .dsha-kq-seg{border-radius:999px;display:block;height:100%;transition:width .9s cubic-bezier(.22,.61,.36,1)}
 .dsha-kq-seg--recent{background:var(--kq-code)}
 .dsha-kq-seg--rest{background:var(--kq-rest)}
-.dsha-kq-tip{background:var(--kq-tip-bg);border-radius:10px;bottom:calc(100% + 10px);color:var(--dsw-alias-bg-base,#fff);font-size:13px;line-height:1;opacity:0;padding:9px 14px;pointer-events:none;position:absolute;right:0;transform:translateY(4px);transition:opacity .16s ease-out,transform .16s ease-out;white-space:nowrap}
-.dsha-kq-tip::after{border:6px solid transparent;border-top-color:var(--kq-tip-bg);content:"";position:absolute;right:34px;top:100%}
-.dsha-kq-barwrap:hover .dsha-kq-tip{opacity:1;transform:translateY(0)}
+.dsha-kq-tip{background:var(--kq-tip-bg);border-radius:10px;bottom:calc(100% + 10px);color:var(--dsw-alias-bg-base,#fff);font-size:13px;line-height:1;left:var(--kq-tip-x,50%);opacity:0;padding:9px 14px;pointer-events:none;position:absolute;transform:translate(calc(-50% + var(--kq-tip-shift,0px)),4px);transition:opacity .16s ease-out,transform .16s ease-out;white-space:nowrap}
+/* 箭头不跟气泡的位移走：气泡被 --kq-tip-shift 收回卡片内时，箭头按
+   --kq-tip-arrow 单独挪回「已用段末端」在气泡里的位置，所以它指的一直是那个数字。 */
+.dsha-kq-tip::after{border:6px solid transparent;border-top-color:var(--kq-tip-bg);content:"";left:var(--kq-tip-arrow,50%);margin-left:-6px;position:absolute;top:100%}
+.dsha-kq-barwrap:hover .dsha-kq-tip{opacity:1;transform:translate(calc(-50% + var(--kq-tip-shift,0px)),0)}
 .dsha-kq-legend{align-items:center;color:var(--kq-fg-2);column-gap:16px;display:flex;flex-wrap:wrap;font-size:13px;margin-top:11px;row-gap:6px}
 .dsha-kq-legend-item{align-items:center;display:inline-flex;gap:6px;white-space:nowrap}
 .dsha-kq-legend-note{color:var(--kq-fg-3);white-space:nowrap}

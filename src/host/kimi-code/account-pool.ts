@@ -19,6 +19,7 @@ import { cachedQuotaFor } from './client.ts'
 import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import type { PoolAccountQuotaDto } from '../../shared/account-pool-contracts.ts'
 import type {
+  KimiCodeAccount,
   KimiCodeAccountQuota,
   KimiCodeAccountSummaryDto,
   KimiCodeRegion,
@@ -36,6 +37,50 @@ export interface KimiCodePoolAccount extends PoolAccountShape<KimiCodeCredential
 /** Encrypted pool file this line owns; the pre-pool credential file stays the mirror. */
 export function kimiCodePoolPath(): string {
   return path.join(dshHomeDir(), 'storages', 'kimi-code-pool.json')
+}
+
+/**
+ * Aliases that name nobody: the placeholder this pool mints at sign-in.
+ *
+ * `defaultAlias` writes `账号 N` when the credential carried neither an address
+ * nor a name (a phone-signed-in account carries neither), and the legacy
+ * single-credential mirror wrote `主账号`. Both mean "no name learned yet", so
+ * both may be upgraded once the profile reports one — while anything else is a
+ * name someone chose or an address already on the card, and stays put.
+ */
+const PLACEHOLDER_ALIAS = /^(?:账号|帐号|account)\s*\d*$|^主账号$|^primary$/i
+
+/**
+ * Whether an alias is still the placeholder a sign-in mints, rather than a name
+ * somebody recognises.
+ *
+ * Exported because the routes decide whether one more profile read is worth it:
+ * a row still titled `账号 N` is exactly the row whose name nobody has learned.
+ */
+export function isPlaceholderAlias(alias: string): boolean {
+  return PLACEHOLDER_ALIAS.test(alias.trim())
+}
+
+/** A field worth storing, or undefined when the service left it blank. */
+function learnedField(value: string | null | undefined): string | undefined {
+  const text = (value ?? '').trim()
+  return text === '' ? undefined : text
+}
+
+/**
+ * The alias one sign-in should leave the row with.
+ *
+ * A fresh sign-in computes one from the credential it just produced, and that is
+ * the truth when it names something (an address, or a nickname in the token). It
+ * names nothing for a phone account, though, while the row may already carry the
+ * nickname a profile read learned or a title the user typed — dropping those
+ * back to `账号 N` on a re-sign-in would undo both. So a minted placeholder only
+ * beats another placeholder; anything that names somebody is kept.
+ */
+function aliasForSignIn(minted: string, previous: string | undefined): string {
+  if (!isPlaceholderAlias(minted)) return minted
+  if (previous !== undefined && !isPlaceholderAlias(previous)) return previous
+  return minted
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
@@ -155,9 +200,13 @@ export class KimiCodeAccountPool extends AccountPoolCore<
       defaultAlias: (credentials, position) => credentials.email
         ?? credentials.nickname
         ?? `账号 ${position}`,
-      createAccount: ({ id, alias, credentials, addedAt, isPrimary }) => ({
+      createAccount: ({ id, alias, credentials, addedAt, isPrimary, existing }) => ({
         id,
-        alias,
+        // A re-sign-in mints the alias from the credential handed in, and that
+        // credential is as nameless as the first one for a phone account — so
+        // without this, signing in again would throw the learned name away and
+        // put `账号 N` back. The row's existing title wins over a placeholder.
+        alias: aliasForSignIn(alias, existing?.alias),
         credentials,
         addedAt,
         isPrimary,
@@ -264,5 +313,52 @@ export class KimiCodeAccountPool extends AccountPoolCore<
   /** The pre-pool credential file this pool mirrors its primary account into. */
   mirrorStore(): FileCredentialStore {
     return this.store
+  }
+
+  /**
+   * Remember who the service says one pooled account is.
+   *
+   * Sign-in can only name an account through its token, which carries an id and
+   * — for an account with a mailbox — an address. That is why a phone-signed-in
+   * row is titled `账号 N` and never changes on its own: the nickname lives on
+   * `/me`, which only the quota read asks, and nothing used to carry the answer
+   * back to the row. Every reading now calls this with what the profile said, so
+   * the card can name its own account without a re-sign-in.
+   *
+   * Only the placeholder yields: a name someone chose stays, because silently
+   * renaming a row a user named is worse than leaving a default in place. The
+   * learned facts also go into the mirrored credential, so a later re-sign-in
+   * (which mints the alias from the credential) keeps the name, and so do the
+   * single-account fallbacks that read that copy.
+   */
+  async learnAccount(accountId: string, account: KimiCodeAccount): Promise<void> {
+    const nickname = learnedField(account.nickname)
+    const email = learnedField(account.email)?.toLowerCase()
+    const userId = learnedField(account.userId)
+    const planName = learnedField(account.planName)
+    if (nickname === undefined && email === undefined && userId === undefined && planName === undefined) {
+      return
+    }
+    await this.updatePool((data) => {
+      const target = data.accounts.find((entry) => entry.id === accountId)
+      if (target === undefined) return
+      if (nickname !== undefined) target.nickname = nickname
+      if (email !== undefined) target.email = email
+      if (userId !== undefined) target.userId = userId
+      if (planName !== undefined) target.planName = planName
+      // The credential is the pool's own copy of the identity, and the next
+      // sign-in mints the alias from it: keep the two in step rather than
+      // storing the name only on the row. Token fields are copied through.
+      const next = { ...target.credentials }
+      if (nickname !== undefined) next.nickname = nickname
+      if (email !== undefined) next.email = email
+      if (userId !== undefined) next.userId = userId
+      if (planName !== undefined) next.planName = planName
+      target.credentials = next
+      if (isPlaceholderAlias(target.alias)) {
+        const name = nickname ?? email
+        if (name !== undefined) target.alias = name
+      }
+    })
   }
 }

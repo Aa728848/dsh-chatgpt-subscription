@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PoolAccountQuotaDto } from '../src/shared/account-pool-contracts.ts'
 import type { KimiCodeWebStatus } from '../src/shared/kimi-code-contracts.ts'
 import { KimiCodeSection } from '../src/client/kimi-code/KimiCodeSection.tsx'
+import { installKimiCodeStyles } from '../src/client/kimi-code/styles.ts'
 import { zh } from '../src/client/kimi-code/locales.ts'
 
 const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
@@ -116,13 +117,6 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-/** The page-level quota block, found by its heading rather than by class. */
-function quotaBlock(node: HTMLElement): HTMLElement {
-  const section = [...node.querySelectorAll('section.dsha-group')]
-    .find((candidate) => candidate.querySelector('h3')?.textContent === zh.quotaSection)
-  return section as HTMLElement
-}
-
 describe('kimi-code quota, drawn in the account rows', () => {
   it('draws the Kimi card for the account that has a reading, and says so for one that does not', async () => {
     const node = await mount(status())
@@ -204,19 +198,76 @@ describe('kimi-code quota, drawn in the account rows', () => {
     expect(kq.querySelector('.dsha-kq-foot-left')?.textContent).toContain('最后调用')
   })
 
-  it('keeps the page-level facts and stops drawing progress bars there', async () => {
+  it('draws no page-level quota block: every fact lives in an account card', async () => {
+    // The block that used to sit at the bottom of the page repeated the plan,
+    // the windows and the reading time that the cards already carry — its prose
+    // ("these facts describe the current account") only existed to explain a
+    // split that is gone. What must survive is the manual re-read, because a
+    // failing quota read has no other way back.
     const node = await mount(status())
-    const block = quotaBlock(node)
-    expect(block).toBeDefined()
 
-    // The wallet facts stay; the window's own bar does not, because it belongs
-    // to an account rather than to the page.
-    expect(block.querySelectorAll('.dsha-meter')).toHaveLength(0)
-    expect(block.querySelectorAll('[role="progressbar"]')).toHaveLength(0)
-    expect(block.textContent).toContain(zh.quotaWallet)
-    expect(block.textContent).toContain(zh.quotaPlan)
+    const headings = [...node.querySelectorAll('section.dsha-group h3')].map((heading) => heading.textContent)
+    expect(headings).not.toContain(zh.quotaSection)
+    expect(node.textContent).not.toContain(zh.quotaFactsScope)
+    expect(node.textContent).not.toContain(zh.quotaDesc)
+    expect(node.textContent).not.toContain(zh.quotaWallet)
 
-    // And the note explains that these facts belong to the current account only.
-    expect(node.textContent).toContain(zh.quotaFactsScope)
+    // One progress bar per account card, and nothing outside them.
+    const bars = [...node.querySelectorAll('.dsha-kq-meter')]
+    expect(bars.every((bar) => bar.closest('.dsha-account-card') !== null)).toBe(true)
+
+    const refresh = [...node.querySelectorAll('button')]
+      .find((button) => button.textContent === zh.refreshQuota)
+    expect(refresh).toBeDefined()
+    // The retry sits with the accounts it refreshes, not in a group of its own.
+    expect(refresh!.closest('section.dsha-group')).toBe(
+      node.querySelector('.dsha-account-card')!.closest('section.dsha-group'),
+    )
+  })
+
+  it('keeps the reason a quota read failed, beside the accounts it describes', async () => {
+    const node = await mount(status({ quotaError: 'Kimi Code usage request failed (500).' }))
+    const notice = [...node.querySelectorAll('.dsha-notice')]
+      .find((element) => element.textContent?.includes('usage request failed'))
+    expect(notice).toBeDefined()
+    expect(notice!.closest('section.dsha-group')).toBe(
+      node.querySelector('.dsha-account-card')!.closest('section.dsha-group'),
+    )
+  })
+})
+
+/**
+ * The hover tip belongs to the bar it describes.
+ *
+ * It used to be pinned to the bar's right edge with its arrow 34px in from that
+ * edge, so on a 41%-used bar it hung over an empty stretch and pointed at 92%:
+ * above the bar, but aligned with nothing. It now travels with the fill.
+ */
+describe('kimi-code quota tip placement', () => {
+  it('anchors the tip to the used share instead of the bar edge', async () => {
+    const node = await mount(status())
+    const wrap = node.querySelector<HTMLElement>('.dsha-kq-barwrap')!
+    const tip = node.querySelector<HTMLElement>('.dsha-kq-tip')!
+
+    // The card reads 42% used, and 42% is what the bubble hangs over.
+    expect(wrap.style.getPropertyValue('--kq-tip-x')).toBe('42%')
+    // jsdom lays nothing out, so the clamp is a no-op rather than a NaN.
+    expect(tip.style.getPropertyValue('--kq-tip-shift')).toBe('0px')
+  })
+
+  it('positions the bubble from that anchor, with the arrow on its centre', () => {
+    installKimiCodeStyles()
+    const css = [...document.querySelectorAll<HTMLStyleElement>('style')]
+      .map((tag) => tag.textContent ?? '')
+      .find((text) => text.includes('.dsha-kq-tip{')) ?? ''
+    const ruleStart = css.indexOf('.dsha-kq-tip{')
+    const rule = css.slice(ruleStart, css.indexOf('}', ruleStart))
+    expect(rule).toContain('left:var(--kq-tip-x')
+    expect(rule).toContain('translate(calc(-50% + var(--kq-tip-shift,0px))')
+    expect(rule).not.toContain('right:0')
+    const arrowStart = css.indexOf('.dsha-kq-tip::after{')
+    const arrow = css.slice(arrowStart, css.indexOf('}', arrowStart))
+    expect(arrow).toContain('left:var(--kq-tip-arrow')
+    expect(arrow).not.toContain('right:34px')
   })
 })

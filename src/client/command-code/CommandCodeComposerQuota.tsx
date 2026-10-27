@@ -2,6 +2,7 @@ import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selec
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CommandCodeWebStatus } from '../../shared/command-code-contracts.ts'
 import { ComposerQuotaBadge, quotaLevel, type ComposerQuotaFacts } from '../common/ComposerQuotaBadge.tsx'
+import { formatPercent } from '../common/format.ts'
 import { createLineApi } from '../common/line-api.ts'
 import type { SnapshotStore } from '../store.ts'
 import { NS_COMMAND_CODE } from './locales.ts'
@@ -27,10 +28,13 @@ export function selectBadgeFacts(status: CommandCodeWebStatus | null): ComposerQ
 
   const window = [...(quota.windows ?? [])].sort((a, b) => (a.windowDurationMins ?? Infinity) - (b.windowDurationMins ?? Infinity))[0]
   if (window !== undefined) {
+    // Same remainder problem as every other badge: 100 - 8.04 is a binary tail,
+    // and interpolating it printed a long decimal a third of the time.
     const remaining = Math.max(0, 100 - window.usedPercent)
+    const remainingText = formatPercent(remaining)
     return {
-      text: `${remaining}%`,
-      tooltip: `[Command Code] ${window.label}: ${remaining}% left`,
+      text: `${remainingText}%`,
+      tooltip: `[Command Code] ${window.label}: ${remainingText}% left`,
       level: quotaLevel(remaining),
     }
   }

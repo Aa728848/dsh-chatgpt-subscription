@@ -29,17 +29,6 @@ interface Props {
   loadModelDirectory?: () => void
 }
 
-/** Money the service reports in minor units, rendered in its own currency. */
-function formatMoney(cents: number | null, currency: string | null): string {
-  if (cents === null) return '—'
-  const code = currency ?? 'USD'
-  try {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency: code }).format(cents / 100)
-  } catch {
-    return `${(cents / 100).toFixed(2)} ${code}`
-  }
-}
-
 /**
  * One token count as the card prints it.
  *
@@ -524,6 +513,20 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
             </div>
           </div>
         )}
+
+        {/* 用量与额度那一整段已经并进上面的账号卡片：套餐是卡片的字标，窗口是卡片里
+            那一条进度条，读取时间在页脚。这里只剩两样没有别处可放的东西——读失败的原因，
+            和再读一次的手动入口。 */}
+        {status?.quotaError != null && <p className="dsha-notice">{status.quotaError}</p>}
+        <div className="dsha-actions">
+          <button
+            className="dsha-btn"
+            disabled={busy !== null || !status?.authenticated}
+            onClick={() => void handleRefreshQuota()}
+          >
+            {busy === 'quota' ? t.refreshingQuota : t.refreshQuota}
+          </button>
+        </div>
       </AccountPoolSection>
 
       <section className="dsha-group">
@@ -741,66 +744,6 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           onReset={(id) => void handleResetContextWindow(id)}
           onResetAll={() => void handleResetAllContextWindows()}
         />
-      </section>
-
-      <section className="dsha-group">
-        <div className="dsha-grouphead">
-          <h3>{t.quotaSection}</h3>
-          <button
-            className="dsha-btn"
-            disabled={busy !== null || !status?.authenticated}
-            onClick={() => void handleRefreshQuota()}
-          >
-            {busy === 'quota' ? t.refreshingQuota : t.refreshQuota}
-          </button>
-        </div>
-        <p className="dsha-muted">{t.quotaDesc}</p>
-        {/* The progress bars moved into each account card: quota follows the
-            account, so a bar here could only ever describe whichever account
-            happened to be active when the snapshot was read. What stays is what
-            has no per-account bar to live in — the plan, the pay-as-you-go
-            wallet, the errors and the freshness of this reading. */}
-        <p className="dsha-muted">{t.quotaFactsScope}</p>
-
-        {status?.quotaError && <p className="dsha-notice">{status.quotaError}</p>}
-
-        {!status?.authenticated ? (
-          <div className="dsha-empty">{t.signedOut}</div>
-        ) : quota === null || quota === undefined ? (
-          <div className="dsha-empty">{busy === 'quota' ? t.refreshingQuota : t.quotaEmpty}</div>
-        ) : (
-          <div className="dsha-quota-card">
-            <div className="dsha-quota-title">
-              <strong>{t.quotaPlan}</strong>
-              <span>{quota.planName || t.planUnknown}</span>
-            </div>
-
-            {quota.extraUsage !== null && (
-              <div className="dsha-meter-wrap">
-                <div className="dsha-meter-label">
-                  <span>{t.quotaWallet}</span>
-                  <strong>{formatMoney(quota.extraUsage.balanceCents, quota.extraUsage.currency)}</strong>
-                </div>
-                <div className="dsha-meter-meta">
-                  <span>{formatMoney(quota.extraUsage.totalCents, quota.extraUsage.currency)}</span>
-                  {quota.extraUsage.monthlyChargeLimitEnabled && quota.extraUsage.monthlyChargeLimitCents !== null && (
-                    <span>
-                      {t.quotaWalletLimit}: {formatMoney(quota.extraUsage.monthlyChargeLimitCents, quota.extraUsage.currency)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {quota.windows.length === 0 && quota.extraUsage === null && (
-              <div className="dsha-empty">{t.quotaEmpty}</div>
-            )}
-
-            <div className="dsha-timestamp">
-              {t.updatedAt.replace('{time}', new Date(quota.fetchedAt).toLocaleString())}
-            </div>
-          </div>
-        )}
       </section>
 
       {error && (

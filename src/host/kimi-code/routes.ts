@@ -19,14 +19,16 @@ import {
   type KimiCodeModelSettings,
   type KimiCodePreferenceStore,
 } from './token-store.ts'
-import { KimiCodeAccountPool } from './account-pool.ts'
+import { KimiCodeAccountPool, isPlaceholderAlias } from './account-pool.ts'
 import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import {
   accountFromCredentials,
   buildModelOptions,
   clearCachedCatalog,
   clearCachedQuota,
+  credentialsWithProfile,
   fetchAccountQuota,
+  fetchProfile,
   getCachedQuotaFor,
   loadProviderModels,
   testConnection,
@@ -407,6 +409,61 @@ export function registerKimiCodeRoutes(
   }
 
   /**
+   * Learning seam for the quota fetch, bound to one pool account.
+   *
+   * The reading is the only thing that asks `/me`, so it is also the only place
+   * the account's nickname can be found. The pool owns the row, so the facts go
+   * there: without this the card stayed titled `账号 N` forever, because nothing
+   * ever carried the profile back to the account it describes.
+   */
+  const learnFor = (accountId: string | undefined) => {
+    const pool = accountPool
+    if (pool === undefined || accountId === undefined) return undefined
+    return (account: KimiCodeAccount) => pool.learnAccount(accountId, account)
+  }
+
+  /**
+   * Accounts whose name has already been asked for, once per process.
+   *
+   * A row titled `账号 N` needs exactly one `/me`; retrying on every status poll
+   * (the card asks every minute) would spend a request a minute on an account
+   * whose profile simply has no nickname to give.
+   */
+  const nameProbes = new Set<string>()
+
+  /**
+   * One profile read for a row still carrying the sign-in placeholder.
+   *
+   * The quota read is the natural place to learn a name, but it happens only
+   * when the snapshot is stale — and not at all while the usage call is failing
+   * — so a fresh cache could hold the card at `账号 N` for as long as the TTL
+   * lasts. This reads `/me` with the token the status call already holds, once
+   * per account, and reports whether the row was renamed.
+   */
+  const probeName = async (
+    target: { id: string | undefined; credentials: KimiCodeCredentials | undefined },
+    rows: readonly { id: string; alias: string }[],
+  ): Promise<boolean> => {
+    const pool = accountPool
+    if (pool === undefined || target.id === undefined) return false
+    const row = rows.find((entry) => entry.id === target.id)
+    if (row === undefined || !isPlaceholderAlias(row.alias)) return false
+    if (nameProbes.has(target.id)) return false
+    nameProbes.add(target.id)
+    try {
+      const credentials = await effectiveCredentials(target)
+      if (credentials === undefined) return false
+      const profile = await fetchProfile(store, { fetchFn, credentials })
+      if (profile === null) return false
+      await pool.learnAccount(target.id, accountFromCredentials(credentials, undefined, profile))
+      return true
+    } catch {
+      // A profile is enrichment: an unreachable `/me` leaves the row as it was.
+      return false
+    }
+  }
+
+  /**
    * The credential the active account should be used with right now.
    *
    * Every card path goes through the pool here. A pool owns both the rotation
@@ -463,13 +520,24 @@ export function registerKimiCodeRoutes(
                 fetchFn,
                 ...(accountPool === undefined
                   ? {}
-                  : { credentials, accountId: poolActive.id, renewFn: renewFor(poolActive.id) }),
+                  : {
+                      credentials,
+                      accountId: poolActive.id,
+                      renewFn: renewFor(poolActive.id),
+                      onAccount: learnFor(poolActive.id),
+                    }),
               })
             }
             if (cached === null) await quotaRefresh.run(refresh)
             else quotaRefresh.start(refresh)
           }
-          const value = await readStatus(url.searchParams.get('sessionId') ?? undefined)
+          let value = await readStatus(url.searchParams.get('sessionId') ?? undefined)
+          // A row can be named the moment the profile answers, and neither the
+          // quota cache nor a failing usage call may gate that: ask once, then
+          // re-read so the answer carries the name instead of the placeholder.
+          if (await probeName(poolActive, value.accounts ?? [])) {
+            value = await readStatus(url.searchParams.get('sessionId') ?? undefined)
+          }
           return sendJson(response, 200, {
             ok: true,
             value: {
@@ -489,6 +557,14 @@ export function registerKimiCodeRoutes(
             fetchFn,
             region: requested,
             openBrowser: options.openBrowser,
+            // The token pair names an id and, at best, an address; the name
+            // the account goes by is served by `/me`. Read it once here so the
+            // pool titles the new row immediately, instead of `账号 N` until
+            // the first quota refresh happens to correct it.
+            enrich: async (credentials) => {
+              const profile = await fetchProfile(store, { fetchFn, credentials }).catch(() => null)
+              return profile === null ? credentials : credentialsWithProfile(credentials, profile)
+            },
             // 显式注入了就用注入的那一份；没注入就是 undefined，oauth.ts 那边
             // 「注入的 ?? 平台默认」取到的还是平台默认——与改动之前逐字一样。
             ...(accountPool === undefined ? {} : { onSave: (credentials) => accountPool.addAccount(credentials) }),
@@ -521,6 +597,7 @@ export function registerKimiCodeRoutes(
                   credentials: await effectiveCredentials(poolActive),
                   accountId: poolActive.id,
                   renewFn: renewFor(poolActive.id),
+                  onAccount: learnFor(poolActive.id),
                 }),
           })
           // A reachable service with no usable account still means the request
@@ -554,6 +631,7 @@ export function registerKimiCodeRoutes(
                     credentials: await effectiveCredentials(quotaActive),
                     accountId: quotaActive.id,
                     renewFn: renewFor(quotaActive.id),
+                    onAccount: learnFor(quotaActive.id),
                   }),
             })
             if (quota === null) {

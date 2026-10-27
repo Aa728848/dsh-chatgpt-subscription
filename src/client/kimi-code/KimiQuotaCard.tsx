@@ -11,8 +11,9 @@
  * 大窗口的取法：有月额度就用月额度，否则用 7 天；只有 5 小时一条线的账号就直接以它为准。
  * 接口给的是「已用比例」，各窗口各自算各自的，不能相加。
  */
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { PoolAccountQuotaDto, PoolAccountQuotaWindowDto } from '../../shared/account-pool-contracts.ts'
+import { formatPercent } from '../common/format.ts'
 import { STAFF_ART, TIER_ART, type StaffArtKey } from './staff-art.ts'
 import type { KimiCodeDict } from './locales.ts'
 
@@ -34,11 +35,13 @@ export interface KimiQuotaCardProps {
 const SHORT_PER_WEEK = 5
 /** 5 小时窗口在月额度里的份数。 */
 const SHORT_PER_MONTH = 25
+/** 提示条箭头离气泡两端的最小距离，免得圆角把三角切掉。 */
+const ARROW_INSET = 12
 
-/** 百分比，最多两位小数；非有限数不画。 */
+/** 百分比，最多两位小数；非有限数不画。舍入规则放在共享的 `formatPercent`。 */
 function percentText(value: number): string {
   if (!Number.isFinite(value)) return '0%'
-  return `${Math.round(value * 100) / 100}%`
+  return `${formatPercent(value)}%`
 }
 
 /** `YYYY-MM-DD HH:mm`，本地时区；令牌到期用它，年份不能省。 */
@@ -100,7 +103,8 @@ function durationText(labels: KimiCodeDict, remainingMs: number): string {
 }
 
 /** 「3 分钟前」这类相对距离，用当前语言的说法拼出来。 */
-function agoLabel(labels: KimiCodeDict, ms: number, now: number): string {  const minutes = Math.floor(Math.max(0, now - ms) / 60_000)
+function agoLabel(labels: KimiCodeDict, ms: number, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - ms) / 60_000)
   if (minutes < 1) return labels.kqJustNow
   if (minutes < 60) return labels.kqMinutesAgo.replace('{n}', String(minutes))
   const hours = Math.floor(minutes / 60)
@@ -172,6 +176,47 @@ export function KimiQuotaCard(props: KimiQuotaCardProps): React.ReactElement {
     return () => window.clearInterval(timer)
   }, [shortReset])
 
+  // 提示条挂在这条进度条上，而不是挂在卡片边上：它说的是这条条子的数字，
+  // 所以压在「已用」那一段的末端——原先固定右对齐，箭头落在 41% 满的条子的
+  // 92% 处，指向哪里都不对。靠近两端时半截气泡会跑出卡片，于是按气泡宽度
+  // 往回收；箭头不跟着回，它单独挪到「已用段末端」在气泡里的位置，所以哪怕
+  // 气泡被推回来，指的还是那个数字所在的地方。
+  const tipPercent = Math.max(0, Math.min(100, totalPercent))
+  const barRef = useRef<HTMLDivElement | null>(null)
+  const tipRef = useRef<HTMLSpanElement | null>(null)
+  const [tipPlacement, setTipPlacement] = useState({ shift: 0, arrowPx: null as number | null })
+  useEffect(() => {
+    const wrap = barRef.current
+    const tip = tipRef.current
+    if (wrap === null || tip === null) return undefined
+    const place = (): void => {
+      const width = wrap.clientWidth
+      const bubble = tip.offsetWidth
+      // 布局还没发生（首帧、jsdom）时不做推断：0 位移就是「压在末端」，箭头走
+      // CSS 里的 50% 兜底，也就是气泡正中。
+      if (width <= 0 || bubble <= 0) {
+        setTipPlacement({ shift: 0, arrowPx: null })
+        return
+      }
+      const half = bubble / 2
+      const anchor = (width * tipPercent) / 100
+      const clamped = Math.min(Math.max(anchor, half), Math.max(half, width - half))
+      // 箭头离气泡两端至少留 ARROW_INSET，否则圆角会把三角切掉。
+      const arrow = Math.min(Math.max(anchor - (clamped - half), ARROW_INSET), bubble - ARROW_INSET)
+      // 十位小数取整：亚像素抖动会让 effect 反复触发，视觉上却毫无差别。
+      setTipPlacement({
+        shift: Math.round((clamped - anchor) * 10) / 10,
+        arrowPx: Math.round(arrow * 10) / 10,
+      })
+    }
+    place()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(place)
+    observer.observe(wrap)
+    observer.observe(tip)
+    return () => observer.disconnect()
+  }, [tipPercent])
+
   return (
     <div className="dsha-kq">
       <div className="dsha-kq-head">
@@ -200,7 +245,11 @@ export function KimiQuotaCard(props: KimiQuotaCardProps): React.ReactElement {
             <span className="dsha-kq-label">{headline}</span>
             <span className="dsha-kq-value">{percentText(totalPercent)}</span>
           </div>
-          <div className="dsha-kq-barwrap">
+          <div
+            className="dsha-kq-barwrap"
+            ref={barRef}
+            style={{ '--kq-tip-x': `${tipPercent}%` } as React.CSSProperties}
+          >
             <div className="dsha-kq-meter dsha-kq-meter--total">
               <span
                 className="dsha-kq-seg dsha-kq-seg--recent"
@@ -213,7 +262,15 @@ export function KimiQuotaCard(props: KimiQuotaCardProps): React.ReactElement {
                 style={{ width: `${grown ? Math.max(0, Math.min(100, restPercent)) : 0}%` }}
               />
             </div>
-            <span className="dsha-kq-tip" role="tooltip">
+            <span
+              className="dsha-kq-tip"
+              role="tooltip"
+              ref={tipRef}
+              style={{
+                '--kq-tip-shift': `${tipPlacement.shift}px`,
+                ...(tipPlacement.arrowPx === null ? {} : { '--kq-tip-arrow': `${tipPlacement.arrowPx}px` }),
+              } as React.CSSProperties}
+            >
               {t.kqTip.replace('{pct}', percentText(totalPercent))}
             </span>
           </div>

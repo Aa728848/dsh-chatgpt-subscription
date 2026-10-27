@@ -28,6 +28,7 @@ import {
   getCachedQuotaFor,
 } from '../src/host/kimi-code/client.ts'
 import { registerKimiCodeRoutes } from '../src/host/kimi-code/routes.ts'
+import type { KimiCodeAccount } from '../src/shared/kimi-code-contracts.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -866,3 +867,86 @@ function fakeRequest(input: { url: string; method?: string; headers?: Record<str
   }
   return request
 }
+
+/**
+ * The card's title is the row's alias, and sign-in can only mint that alias
+ * from what the token carries. A phone-signed-in account carries no address at
+ * all, which is exactly the row that read `账号 N` forever: the nickname lives
+ * on `/me`, only the quota read asks, and nothing used to carry the answer back
+ * to the row. These pin the seam that does.
+ */
+describe('KimiCodeAccountPool learning the profile', () => {
+
+  function profile(overrides: Partial<KimiCodeAccount> = {}): KimiCodeAccount {
+    return {
+      userId: 'user-1',
+      nickname: '月光',
+      email: 'moon@example.com',
+      planName: 'Allegretto',
+      planLevel: null,
+      region: 'mainland-cn',
+      authenticatedAt: null,
+      ...overrides,
+    }
+  }
+
+  it('titles a placeholder row with the nickname the profile reported', async () => {
+    const { pool } = harness()
+    // No address and no name: what a phone sign-in leaves on the credential.
+    const added = await pool.addAccount(credential(1, { email: undefined, nickname: undefined }))
+    expect(added.alias).toBe('账号 1')
+
+    await pool.learnAccount(added.id, profile())
+
+    const row = (await pool.listAccounts())[0]!
+    expect(row.alias).toBe('月光')
+    expect(row.nickname).toBe('月光')
+    expect(row.email).toBe('moon@example.com')
+    expect(row.planLabel).toBe('Allegretto')
+  })
+
+  it('leaves a name the user chose alone', async () => {
+    const { pool } = harness()
+    const added = await pool.addAccount(credential(1, { email: undefined, nickname: undefined }))
+    await pool.setAlias(added.id, '我的小号')
+
+    await pool.learnAccount(added.id, profile())
+
+    const row = (await pool.listAccounts())[0]!
+    expect(row.alias).toBe('我的小号')
+    // The facts are still learned; only the title is the user's.
+    expect(row.nickname).toBe('月光')
+  })
+
+  it('keeps the learned name on the credential so signing in again keeps it', async () => {
+    const { pool } = harness()
+    const added = await pool.addAccount(credential(1, { email: undefined, nickname: undefined }))
+    await pool.learnAccount(added.id, profile())
+
+    // The same account signs in again with a fresh pair that names nobody; the
+    // alias is minted from the credential, so the stored name is what survives.
+    const again = await pool.addAccount(credential(1, { email: undefined, nickname: undefined }))
+    expect(again.id).toBe(added.id)
+    expect(again.alias).toBe('月光')
+  })
+
+  it('takes a name a later sign-in does bring', async () => {
+    const { pool } = harness()
+    const added = await pool.addAccount(credential(1, { email: undefined, nickname: undefined }))
+    expect(added.alias).toBe('账号 1')
+
+    // This time the token carries an address: a minted name beats a placeholder.
+    const again = await pool.addAccount(credential(1, { nickname: undefined }))
+    expect(again.alias).toBe('user1@example.com')
+  })
+
+  it('keeps an address the row already showed rather than inventing a name', async () => {
+    const { pool } = harness()
+    const added = await pool.addAccount(credential(1, { nickname: undefined }))
+    expect(added.alias).toBe('user1@example.com')
+
+    await pool.learnAccount(added.id, profile({ nickname: null }))
+
+    expect((await pool.listAccounts())[0]!.alias).toBe('user1@example.com')
+  })
+})
