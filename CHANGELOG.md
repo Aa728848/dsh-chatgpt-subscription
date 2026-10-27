@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.43.0 - 2026-10-27
+
+- **[opendesign] MiMo V2.6 与 Qwen3.7 Max 拿回思考深度选择**
+  - **现象**：OpenDesign 线路里 MiMo V2.6 Flash / Pro 的模型下拉没有任何思考档位；按同一原则把 37 行逐条比对后，`qwen3.7-max` 也一样缺。
+  - **为什么**：这三行的能力表里写着 `reasoning: false`，依据是 command-code 注册表把同族模型的档位标注为空。但「空档位」只说明没有来源声明档位，不等于模型不思考——仓库自己的规则（`docs/opendesign-line-plan.md` §3 决策 8）就是「无档位声明的模型沿用默认三档」；而同族的 cline-pass 行（`mimo-v2.5`、`mimo-v2.5-pro`、`qwen3.7-max`）明确写作 `reasoning: true`，§2 规定两表冲突时 cline-pass 的 DSH 拼写胜出。
+  - **改法**：三行去掉 `reasoning` 字段，落到 `DEFAULT_EFFORTS` 的 `low / medium / high`；其余 34 行一字未动。
+  - **测试**：`test/opendesign-catalog.test.ts` 与 `test/opendesign-adapter.test.ts` 钉住三行的 `reasoning === true` 与三档档位。
+
+- **[opendesign] 套餐不提供的模型不再出现在模型选择器里；设置卡里可见、可强制显示**
+  - **现象**：套餐里根本没有的模型照样出现在选择器中，选中后只会换来一次拒绝。
+  - **为什么**：网关 `GET /v1/models` 返回的其实就是「这个 Key 的套餐真正提供的 id」，但同步只把它合并进 `catalogModels`，**没有把成员关系记住**，于是投影时无从判断。
+  - **改法**：设置文档新增三态的 `servedModelIds`（`null` = 从未测量，不隐藏任何模型；数组 = 最后一次成功扫描的**并集**），同步改为遍历**所有可用账号**（每次最多 8 个）取并集，任一账号失败只损失它自己那一半，全部失败则保留旧值而不是清空；适配器与状态投影共用 `line.ts` 的唯一一份可见性规则（此前 hub 卡片自己另算一份，会把套餐外模型算进「可用」）。设置卡照常列出这些模型、hint 后缀「套餐不支持」，勾选即写入 `forceVisibleModels`（强制显示），取消勾选随选择集合一起裁剪。
+  - **三语**：`unservedBadge` / `unservedHint` 补进 zh、en、ru 三份字典。
+  - **测试**：新增 `test/opendesign-line.test.ts`（整条线挂载，hub 计数等于选择器条目数），并在 catalog / adapter / routes / model-settings / section 五个套件里补并集、拒绝一侧、从未测量、强制显示、`none` 清空与 `invert` 保留、老文档兼容等用例。
+
+- **[opendesign] 设置文档的写入串行化，并发不再互相抹字段**
+  - **为什么**：每个 mutator 都从「读到的那份整文档」派生出整份新文档，两个并发写必然有一个人把对方刚写的字段抹掉；而目录同步是 fire-and-forget（加 Key、登录完成时都会触发），它真的能落在一次勾选的「读 → 写」之间。
+  - **改法**：`OpenDesignModelSettingsStore` 用一条 Promise 队列把 `write` / `update` / `storeCatalog` / `selectModels` / `setContextWindowOverride` 的整个读→算→写串起来，公开 `write()` 拆出 `writeUnlocked()` 供内部调用以免自锁；失败只 reject 自己的调用方、队列尾被压平，一次失败不会毒化后续写入；`read()` 仍在队列之外（热路径，且排队期间早先的写都已落盘）。
+  - **证据**：红-绿——去掉队列后，`storeCatalog` 与 `selectModels` 并发**确定性**丢字段（两次红丢的还是不同字段，正是「后写者整份覆盖」的样子），顺序性用例同时失败；加锁后连跑三次皆绿。
+
+- **[opendesign] 长思考不再在 180 秒处被掐断**
+  - **现象**：一段较长的思考之后请求被中止，界面显示「已重试模型请求（2/3）」与 `The operation was aborted due to timeout`，最终「已停止」。
+  - **为什么**：`withAttemptTimeout` 把 `AbortSignal.timeout(180_000)` 挂到 fetch 的 signal 上**从不解除**。`AbortSignal.timeout` 是绝对计时，会跟着响应体（也就是整条思考流）走，于是它实际变成了「整条回答必须在 180 秒内结束」。本机会话记录里两次尝试分别流式了 155 秒与 173 秒，都精确地在请求发出后 180 秒整被掐断，随后重试两次同样死掉。
+  - **改法**：截止改为真正的**响应头截止**——用 `AbortController` + `setTimeout` 实现并在拿到响应头（成功或失败）时立即 `clear()`，之后流量的存活交给活动可重置的空闲看门狗（300 秒**静默**，每个 chunk 重置）；新增 `headerTimeoutMs` 选项，使测试能用毫秒级预算验证这一区别。
+  - **同类排查**：全仓 85 处 `AbortSignal.timeout` / 自建 `withTimeout` / `setTimeout` / `Promise.race` 逐条核对后，只有 opendesign 这一条线路把绝对计时器挂在流式请求上（cline-pass 本来就在拿到响应头后 `clear()`，其余 10 条线路的流式路径没有绝对上限）；四个从未被使用的 `CHAT_TIMEOUT_MS = 300_000` 常量补上注释，写明不得用于流式请求。
+  - **测试**：`test/opendesign-adapter.test.ts` 新增两条——截止之后才开始的流仍能跑完、响应头始终不来仍会放弃（已用红-绿证明）。
+
 - **[kimi-code] 额度徽标不再偶尔显示一长串小数**
   - **现象**：编写器旁的「额度 xx%」有时是 `91.96000000000001%` 这种数字，而且只在**部分**读数上出现。
   - **为什么**：徽标显示的是「剩余」，算法是 `100 - usedPercent`。`100 - 8.04` 在二进制浮点里等于 `91.96000000000001`，而代码直接把这个差值插进字符串——两位小数的 used 里约 **三分之一** 会落在这种不友好的邻居上，所以看起来「有时候」；这不是显示精度没设够，四舍五入 used 也没用，必须在**算完之后**格式化。
