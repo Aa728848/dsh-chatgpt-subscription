@@ -10,6 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { OpenDesignAdapter } from '../src/host/opendesign/adapter.ts'
+import { DEFAULT_MODELS } from '../src/host/opendesign/types.ts'
 import { OpenDesignAccountPool } from '../src/host/opendesign/account-pool.ts'
 import {
   FileCredentialStore,
@@ -87,7 +88,7 @@ describe('OpenDesignAdapter', () => {
     expect(resolved.defaultMaxTokens).toBe(64_000)
   })
 
-  it('advertises the ladder the table publishes per model, and none where it publishes none', async () => {
+  it('advertises the ladder the table publishes per model, and the default trio where it publishes none', async () => {
     const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
     const deepseek = await adapter.resolveModel('opendesign', 'deepseek-v4.1-flash')
     expect(deepseek.reasoning?.efforts.map((effort) => effort.name)).toEqual(['none', 'low', 'high', 'max'])
@@ -96,8 +97,10 @@ describe('OpenDesignAdapter', () => {
       const model = await adapter.resolveModel('opendesign', id)
       expect(model.reasoning?.defaultEffort).toBe('high')
     }
+    // MiMo's rows publish no ladder of their own, and a missing ladder is a fact
+    // about the SOURCE rather than a non-reasoning model: the default trio applies.
     const mimo = await adapter.resolveModel('opendesign', 'mimo-v2.6-flash')
-    expect(mimo.reasoning).toBeUndefined()
+    expect(mimo.reasoning?.efforts.map((effort) => effort.name)).toEqual(['low', 'medium', 'high'])
     expect(mimo.context?.contextWindow).toBe(1_048_576)
   })
 
@@ -118,6 +121,76 @@ describe('OpenDesignAdapter', () => {
     // The account remembers what it served.
     const accounts = await pool.listAccounts()
     expect(accounts[0]!.planLabel).toBe('gpt-6-luna')
+  })
+
+  /**
+   * The header deadline is a HEADER deadline.
+   *
+   * A thinking-heavy answer can run for minutes, and the failure it used to
+   * cause was silent and repeatable: the deadline stayed armed on the fetch
+   * signal, so at 180s the body was aborted mid-reasoning with "The operation
+   * was aborted due to timeout", the host retried, and the retry died at the
+   * same wall clock. Here the budget is 30ms and the answer starts after 40ms,
+   * so an armed deadline fails this test while a cleared one passes.
+   */
+  it('keeps streaming past the header deadline once the headers arrived', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'main')
+    const encoder = new TextEncoder()
+    const frames = [
+      'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":" again"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    ]
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => {
+      const signal = init?.signal ?? undefined
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let settled = false
+          signal?.addEventListener('abort', () => {
+            if (settled) return
+            settled = true
+            try {
+              controller.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+            } catch { /* already closed */ }
+          })
+          let index = 0
+          const push = (): void => {
+            if (settled) return
+            if (index >= frames.length) {
+              settled = true
+              controller.close()
+              return
+            }
+            controller.enqueue(encoder.encode(frames[index]!))
+            index += 1
+            setTimeout(push, 25)
+          }
+          // Longer than the 30ms header budget, so nothing but the clear() keeps
+          // this answer alive.
+          setTimeout(push, 40)
+        },
+      })
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as unknown as typeof fetch
+    const adapter = new OpenDesignAdapter(settings, { fetchFn, accountPool: pool, headerTimeoutMs: 30 })
+    const chunks = await collect(adapter, options())
+    const text = chunks
+      .filter((chunk) => (chunk as { type: string }).type === 'text-delta')
+      .map((chunk) => (chunk as { text: string }).text)
+      .join('')
+    expect(text).toBe('hello again')
+    expect((chunks[chunks.length - 1] as { type: string }).type).toBe('finish')
+  })
+
+  it('still gives up when the headers never arrive', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'main')
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      })
+    })) as unknown as typeof fetch
+    const adapter = new OpenDesignAdapter(settings, { fetchFn, accountPool: pool, headerTimeoutMs: 30 })
+    await expect(collect(adapter, options())).rejects.toThrow(/aborted due to timeout/i)
   })
 
   it('rotates past a rejected key and marks it invalid', async () => {
@@ -200,5 +273,58 @@ describe('OpenDesignAdapter', () => {
   it('names the fix when the pool is empty', async () => {
     const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
     await expect(collect(adapter, options())).rejects.toThrow(/no usable account/)
+  })
+})
+
+/**
+ * The plan filter: what the subscription actually serves, once somebody measured
+ * it, narrows the picker — and nothing else does. The measurement lives in
+ * `servedModelIds`; the user's override lives in `forceVisibleModels`.
+ */
+describe('OpenDesignAdapter plan filter', () => {
+  it('hides nothing when no scan has ever succeeded', async () => {
+    const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
+    expect((await settings.read()).servedModelIds).toBeNull()
+    const listed = (await adapter.listModels('opendesign')).map((model) => model.id)
+    expect(listed).toContain('claude-sonnet-5.5')
+    expect(listed).toContain('mimo-v2.6-flash')
+    expect(listed).toHaveLength(DEFAULT_MODELS.length)
+  })
+
+  it('drops an id the last scan did not list, and keeps the ones it did', async () => {
+    await settings.update({ servedModelIds: ['gpt-6-luna', 'kimi-k3'] })
+    const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
+    const listed = (await adapter.listModels('opendesign')).map((model) => model.id)
+    expect(listed).toEqual(['gpt-6-luna', 'kimi-k3'])
+  })
+
+  it('brings a forced id back without un-hiding anything else', async () => {
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
+    const listed = (await adapter.listModels('opendesign')).map((model) => model.id)
+    expect(listed).toContain('claude-sonnet-5.5')
+    expect(listed).toContain('gpt-6-luna')
+    expect(listed).not.toContain('kimi-k3')
+  })
+
+  it('leaves a plan-omitted model resolvable, so a forced pick still answers', async () => {
+    // The filter narrows what is OFFERED, never whether the model can be resolved:
+    // a model the user forced visible — or a session that already named it — must
+    // still produce a descriptor rather than a "no such model" error.
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
+    const resolved = await adapter.resolveModel('opendesign', 'claude-sonnet-5.5')
+    expect(resolved.name).toBe('Claude Sonnet 5.5')
+    expect(resolved.context?.contextWindow).toBe(1_000_000)
+  })
+
+  it('keeps the tick list and the hidden list in charge of the served models', async () => {
+    await settings.update({
+      servedModelIds: ['gpt-6-luna', 'kimi-k3', 'claude-sonnet-5.5'],
+      enabledModelIds: ['gpt-6-luna', 'kimi-k3'],
+      hiddenModels: ['kimi-k3'],
+    })
+    const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
+    expect((await adapter.listModels('opendesign')).map((model) => model.id)).toEqual(['gpt-6-luna'])
   })
 })

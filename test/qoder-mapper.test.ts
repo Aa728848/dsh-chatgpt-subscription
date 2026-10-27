@@ -265,4 +265,100 @@ describe('classifyQoderFailure', () => {
     // code 103（重复 request_id）不是可安全自动重试的状态。
     expect(classifyQoderFailure(400, '{"code":"103"}').code).toBe('PROVIDER_ERROR')
   })
+
+  it('上游排队（403 + RESOURCE_LIMIT）归 SERVER：凭据是好的，别说成「API 密钥无效」', () => {
+    const detail = JSON.stringify({
+      code: 10605,
+      subCode: 'RESOURCE_LIMIT',
+      modelKey: 'dfmodel',
+      queueCount: 3239,
+      retryAfterSeconds: 30,
+      serviceAvailable: false,
+    })
+    const failure = classifyQoderFailure(403, detail)
+    expect(failure.code).toBe('SERVER')
+    expect(failure.message).toContain('排队')
+    expect(failure.message).toContain('3239')
+    expect(failure.message).toContain('不需要重新登录')
+    // 上游给了等待秒数，就照它说（交给 harness 的重试策略）。
+    expect(failure.failure.providerRetryAfterMs).toBe(30_000)
+  })
+
+  it('额度用尽（403 + code 112 / pricingUrl）归 QUOTA：与排队是两条不同的路', () => {
+    const failure = classifyQoderFailure(403, JSON.stringify({
+      code: 112,
+      message: 'quota exceeded',
+      pricingUrl: 'https://qoder.com/pricing?client=qoder',
+    }))
+    expect(failure.code).toBe('QUOTA')
+    expect(failure.message).toContain('额度已用尽')
+    expect(failure.message).toContain('https://qoder.com/pricing?client=qoder')
+  })
+
+  it('认不出原因的 403 仍然是 AUTH（保守：凭据被拒是上游最常见的那一种）', () => {
+    expect(classifyQoderFailure(403, '{"message":"forbidden"}').code).toBe('AUTH')
+  })
+
+  it('429 的含义不被排队事实改写，除非上游点名 RESOURCE_LIMIT', () => {
+    // 弱信号（只有排队人数）：429 仍然是「这个账号被限流」，号池照旧冷却与轮转。
+    expect(classifyQoderFailure(429, JSON.stringify({ queueCount: 12 })).code).toBe('RATE_LIMIT')
+    // 点了名：上游说的是「没容量」，不是「这个账号被限流」。
+    expect(classifyQoderFailure(429, JSON.stringify({ subCode: 'RESOURCE_LIMIT' })).code).toBe('SERVER')
+  })
+})
+
+describe('错误信封里的失败事实（issue #74）', () => {
+  /** 包一帧错误信封（statusCodeValue != 200）。 */
+  function errorEnvelope(body: unknown, statusCodeValue: number, extra: Record<string, unknown> = {}): string {
+    return 'data:' + JSON.stringify({
+      headers: { 'Content-Type': ['application/json'] },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+      statusCodeValue,
+      statusCode: 'FORBIDDEN',
+      ...extra,
+    })
+  }
+
+  /** 跑一帧并把抛出的错误抓回来（没抛就是 undefined）。 */
+  function catchOf(line: string): { code?: string; message?: string } | undefined {
+    try {
+      processQoderStreamLine(line, createQoderStreamState())
+      return undefined
+    } catch (error) {
+      return error as { code?: string; message?: string }
+    }
+  }
+
+  it('body 里的排队事实（403）归 SERVER，而不是 AUTH', () => {
+    const caught = catchOf(errorEnvelope({
+      code: 10605,
+      subCode: 'RESOURCE_LIMIT',
+      queueCount: 3239,
+      retryAfterSeconds: 30,
+      serviceAvailable: false,
+    }, 403))
+    expect(caught?.code).toBe('SERVER')
+    expect(caught?.message).toContain('排队')
+  })
+
+  it('事实放在信封外层时也照样认出来', () => {
+    const caught = catchOf(errorEnvelope({ message: 'resource limit' }, 403, {
+      subCode: 'RESOURCE_LIMIT',
+      queueCount: 12,
+    }))
+    expect(caught?.code).toBe('SERVER')
+  })
+
+  it('额度用尽（403 + code 112）归 QUOTA', () => {
+    const caught = catchOf(errorEnvelope(
+      { code: 112, pricingUrl: 'https://qoder.com/pricing' },
+      403,
+    ))
+    expect(caught?.code).toBe('QUOTA')
+  })
+
+  it('真的登录失效（401 + code 105）仍然是 AUTH', () => {
+    const caught = catchOf(errorEnvelope({ message: 'Login expired', code: '105' }, 401))
+    expect(caught?.code).toBe('AUTH')
+  })
 })

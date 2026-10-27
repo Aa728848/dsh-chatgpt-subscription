@@ -10,6 +10,7 @@ import {
   type OpenDesignBillingDto,
   type OpenDesignCodingPlanDto,
   type OpenDesignLoginFlowDto,
+  type OpenDesignModelDto,
   type OpenDesignUsageAccountDto,
   type OpenDesignWebStatus,
 } from '../../shared/opendesign-contracts.ts'
@@ -77,6 +78,20 @@ function formatDecimal(value: number): string {
 /** The width a share may draw: inside its own track even if the figure is not. */
 function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value))
+}
+
+/**
+ * Whether the plan the gateway bills for withholds this model.
+ *
+ * The host adds `served: false` to a catalog entry the current plan does not
+ * provide. Such a row stays listed — unchecking it is what hides it, and
+ * checking it is how a user forces it visible — so the card labels it rather
+ * than dropping it. The field is optional: `true` and an absent field both mean
+ * served, so the badge and the note never appear for them and every row renders
+ * exactly as it did before this marker existed.
+ */
+function unserved(model: OpenDesignModelDto): boolean {
+  return model.served === false
 }
 
 /**
@@ -803,6 +818,7 @@ const refreshUsage = useCallback(() => {
           </button>
         </div>
         <p className="dsha-muted" style={{ fontSize: 12 }}>{t.modelsHint}</p>
+        {models.some(unserved) && <p className="dsha-muted" style={{ fontSize: 12 }}>{t.unservedHint}</p>}
         {status !== null && models.length === 0 && (
           <div className="dsha-empty">{t.noModels}</div>
         )}
@@ -812,12 +828,17 @@ const refreshUsage = useCallback(() => {
               <p className="dsha-muted" style={{ fontSize: 12 }}>{t.catalogNeverSynced}</p>
             )}
             <ModelChecklist
-              items={models.map((model) => ({
-                id: model.id,
-                name: model.name,
-                hint: model.hint ?? `${formatCapacity(model.contextWindow)} · ${model.input.join('+')}${model.reasoning ? ' · reasoning' : ''}`,
-                enabled: model.enabled,
-              }))}
+              items={models.map((model) => {
+                const hint = model.hint ?? `${formatCapacity(model.contextWindow)} · ${model.input.join('+')}${model.reasoning ? ' · reasoning' : ''}`
+                return {
+                  id: model.id,
+                  name: model.name,
+                  // Every other row keeps its hint verbatim: the badge is the only
+                  // addition, and only for a model the plan does not provide.
+                  hint: unserved(model) ? `${hint} · ${t.unservedBadge}` : hint,
+                  enabled: model.enabled,
+                }
+              })}
               busy={busyAny}
               onToggle={(id, enabled) => toggleModel(id, enabled)}
               onToggleAll={(enabled) => setAllModels(enabled)}

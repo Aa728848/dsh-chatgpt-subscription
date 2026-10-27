@@ -55,8 +55,31 @@ export interface OpenDesignModelDto {
   maxTokens: number
   reasoning: boolean
   input: string[]
-  /** Whether the route advertises this model to the picker. */
+  /**
+   * Whether the card's checklist row is checked, which is also what the picker
+   * does with the model.
+   *
+   * Two rules, because the two states are different questions:
+   *
+   * - `served !== false` (the plan serves it, or nothing was measured yet): the
+   *   user's tick list minus the hidden list, exactly as before.
+   * - `served === false`: the tick IS the force switch. Such a row reads as
+   *   checked exactly when it is in `forceVisibleModels`, because the card marks
+   *   it "not in this plan, tick to force it" — a row that said "checked" while
+   *   the adapter refused to advertise it would contradict itself.
+   */
   enabled: boolean
+  /**
+   * Whether the plan's last successful catalog scan listed this model.
+   *
+   * Always `true` before the first sync: with nothing measured, nothing is
+   * filtered. `false` means the plan does not serve the model, so the adapter
+   * stops advertising it — the card keeps rendering it so the user can still
+   * choose, which is what {@link forcedVisible} records.
+   */
+  served?: boolean
+  /** Whether the user force-shows this model even though the plan omits it. */
+  forcedVisible?: boolean
   /** The model's published price, when the public price list carries one. */
   pricing?: OpenDesignModelPricingDto
   /** Stored context-window override, absent when the default applies. */

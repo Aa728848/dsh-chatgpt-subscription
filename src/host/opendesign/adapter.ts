@@ -25,8 +25,9 @@ import {
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { normalizeGenerateOptions, type GenerateOptions } from '../common/llm-compat.ts'
-import { DEFAULT_EFFORTS, DEFAULT_MODELS, POOL_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME } from './types.ts'
+import { DEFAULT_EFFORTS, POOL_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME } from './types.ts'
 import { resolveModelInfo } from './catalog.ts'
+import { openDesignVisibleModelIds } from './line.ts'
 import {
   buildOpenDesignBody,
   parseServerSentEvents,
@@ -93,6 +94,17 @@ export interface OpenDesignAdapterOptions {
   attachments?: AttachmentImageReader
   /** The account pool this adapter rotates over. */
   accountPool: OpenDesignAccountPool
+  /**
+   * How long one attempt may wait for response HEADERS, before the path is
+   * declared dead (`ATTEMPT_TIMEOUT_MS` by default).
+   *
+   * This is a header deadline, not a request deadline: it is cleared the moment
+   * the response arrives, because what bounds an answer's length afterwards is
+   * the stream idle watchdog (activity-based, resettable) and not a clock. The
+   * option exists so a test can prove that distinction with a 30ms budget
+   * instead of waiting three minutes.
+   */
+  headerTimeoutMs?: number
 }
 
 interface PickedAccount {
@@ -130,28 +142,13 @@ export class OpenDesignAdapter extends LlmAdapter {
     return this.modelSettings.read()
   }
 
-  /** Every id the line knows: the shipped table plus the synced live catalog. */
-  private knownModelIds(settings: OpenDesignModelSettings): string[] {
-    const ids = new Set<string>(DEFAULT_MODELS)
-    for (const model of settings.catalogModels) ids.add(model.id)
-    return [...ids]
-  }
-
-  /**
-   * The ids the route advertises, narrowed by the user's selection and hidden
-   * list.
-   *
-   * The selection is captured against this same id vocabulary (the gateway's
-   * own wire ids), so a cold start filters the shipped table through it without
-   * the empty-intersection trap a foreign-vocabulary whitelist would spring —
-   * and an explicit "everything off" (`[]`) still wins, because that intent
-   * does not depend on a vocabulary at all.
+  /*
+   * There is deliberately no visibility rule here: the ids the picker is offered
+   * come from `openDesignVisibleModelIds` in ./line.ts, shared with the status
+   * route and the hub card. A private copy is what let the hub card count models
+   * the picker refused to show, so this adapter reads the one implementation
+   * instead of keeping a second with the same intent.
    */
-  private visibleModelIds(settings: OpenDesignModelSettings): string[] {
-    const hidden = new Set(settings.hiddenModels)
-    const enabled = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
-    return this.knownModelIds(settings).filter((id) => !hidden.has(id) && (enabled === null || enabled.has(id)))
-  }
 
   /** One model's resolved descriptor, from the shipped table plus live data. */
   private async modelInfo(modelId: string): Promise<ReturnType<typeof resolveModelInfo>> {
@@ -168,7 +165,7 @@ export class OpenDesignAdapter extends LlmAdapter {
     const prov = provider || PROVIDER_ID
     const settings = await this.settings()
     if (settings.enabled === false) return []
-    const ids = this.visibleModelIds(settings)
+    const ids = openDesignVisibleModelIds(settings)
     return await Promise.all(ids.map(async (id) => {
       const info = await this.modelInfo(id)
       return {
@@ -276,16 +273,22 @@ export class OpenDesignAdapter extends LlmAdapter {
         let response: Response | undefined
         let transportError: unknown
         for (let transportTry = 0; transportTry <= TRANSPORT_RETRIES; transportTry += 1) {
+          // One HEADER deadline per attempt, cleared the instant the response is
+          // in hand: the clock bounds the wait for the gateway, never the length
+          // of the answer it then streams back.
+          const headerDeadline = withAttemptTimeout(upstream, this.options.headerTimeoutMs)
           try {
             response = await openChatStream({
               fetchFn: this.options.fetchFn,
               baseURL,
               apiKey,
               body,
-              signal: withAttemptTimeout(upstream),
+              signal: headerDeadline.signal,
             })
+            headerDeadline.clear()
             break
           } catch (error) {
+            headerDeadline.clear()
             if (signal.aborted) throw new LlmError('OpenDesign request aborted by caller', 'ABORTED', { cause: error })
             transportError = error
             // Only a failure that happened before the request was sent is safe
@@ -387,9 +390,31 @@ export class OpenDesignAdapter extends LlmAdapter {
   }
 }
 
-/** A caller signal combined with the attempt's header deadline. */
-function withAttemptTimeout(signal: AbortSignal): AbortSignal {
-  return AbortSignal.any([signal, AbortSignal.timeout(ATTEMPT_TIMEOUT_MS)])
+/**
+ * A caller signal combined with the attempt's CLEARABLE header deadline.
+ *
+ * The clear is not a nicety, it is the difference between a header deadline and
+ * a request deadline. `AbortSignal.timeout` is absolute and cannot be disarmed,
+ * so attaching one to the fetch signal and leaving it there keeps counting
+ * through the whole response body — a model that thinks for more than
+ * `ATTEMPT_TIMEOUT_MS` then dies mid-answer with "The operation was aborted due
+ * to timeout", is retried by the host, and dies again at the same wall clock.
+ * That is exactly what happened here: two attempts streamed reasoning for 155s
+ * and 173s and both were cut 180s after their request went out.
+ *
+ * Cleared after the headers (see the transport loop), at which point the stream
+ * idle watchdog owns liveness: it watches for SILENCE and resets on every
+ * chunk, so a long thinking pass is fine and a dead socket is still caught.
+ */
+function withAttemptTimeout(signal: AbortSignal, timeoutMs = ATTEMPT_TIMEOUT_MS): { signal: AbortSignal; clear: () => void } {
+  const deadline = new AbortController()
+  const timer = setTimeout(() => {
+    deadline.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+  }, timeoutMs)
+  return {
+    signal: AbortSignal.any([signal, deadline.signal]),
+    clear: () => clearTimeout(timer),
+  }
 }
 
 /**

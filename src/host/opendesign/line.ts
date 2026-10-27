@@ -13,6 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { claimProviderRoute, type ProviderRouteClaim } from '../common/provider-route.ts'
 import { catalogTotal } from '../common/catalog-snapshot.ts'
+import { isModelServed } from './catalog.ts'
 import type { AttachmentImageReader } from '../common/request-images.ts'
 import { OpenDesignAccountPool } from './account-pool.ts'
 import { OpenDesignAdapter } from './adapter.ts'
@@ -52,18 +53,34 @@ export function openDesignKnownModelIds(settings: OpenDesignModelSettings): stri
 }
 
 /**
- * Every id the line advertises right now.
+ * Every id the line advertises right now — THE one visibility rule.
  *
- * The selection rule is shared by the adapter, the status route and the hub
- * card — they must all read this one function, not three private copies: the
- * user's tick list and the shipped table speak the same id vocabulary here (the
- * gateway's own wire ids), so a cold-start intersection cannot empty the picker,
- * and an explicit "everything off" (`[]`) still wins.
+ * The adapter (what the picker is offered), the status route (what each checklist
+ * row reports as checked) and the hub card (how many models the line advertises)
+ * all read this function and nothing else. Three private copies is how the hub
+ * card ended up counting models the picker refused to show, which is exactly the
+ * contradiction this rule exists to make impossible.
+ *
+ * Three layers, applied in this order:
+ *
+ * 1. the user's hidden list;
+ * 2. the user's tick list — unset means every known model, an explicit `[]` means
+ *    everything off (the tick list and the shipped table speak the same wire ids,
+ *    so a cold-start intersection cannot empty the picker);
+ * 3. the PLAN, once somebody measured it: an id the last successful scan did not
+ *    list is not served, and only a forced reveal (`forceVisibleModels`) keeps it.
+ *    Before that first scan `servedModelIds` is `null` and this layer hides
+ *    nothing — an unmeasured plan is not a denial.
  */
 export function openDesignVisibleModelIds(settings: OpenDesignModelSettings): string[] {
   const hidden = new Set(settings.hiddenModels)
   const enabled = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
-  return openDesignKnownModelIds(settings).filter((id) => !hidden.has(id) && (enabled === null || enabled.has(id)))
+  const forced = new Set(settings.forceVisibleModels)
+  return openDesignKnownModelIds(settings).filter((id) => (
+    !hidden.has(id)
+    && (enabled === null || enabled.has(id))
+    && (isModelServed(id, settings.servedModelIds) || forced.has(id))
+  ))
 }
 
 /**

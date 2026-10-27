@@ -127,6 +127,16 @@ export interface QoderQuotaSnapshotDto {
   buckets: QoderQuotaBucketDto[]
   /** 账号周期截止（Unix 毫秒）；上游未给出时为 null。 */
   expiresAt: number | null
+  /**
+   * 上游明说「额度已用尽」。
+   *
+   * 它是**账号层面的事实**，不是某只桶的数字：三只桶全是 0 时上游也会这么报，
+   * 而卡片此前只看得见 0/0，于是「额度看着还在」与「请求被拒」同时成立。
+   * 上游没报这个字段时为 false（快照里的桶仍然是事实）。
+   */
+  quotaExceeded: boolean
+  /** 额度用尽时的升级/购买页（上游给的）；上游没给时为 null。 */
+  upgradeUrl: string | null
   /** 本次读取时刻（Unix 毫秒），卡片据此判断数据新旧。 */
   fetchedAt: number
   /** 这份快照是在哪个区域读到的（额度跟着账号走，账号的区域即快照的区域）。 */

@@ -845,11 +845,12 @@ export function processQoderStreamLine(line: string, state: QoderStreamState): S
   const envelope = safeJsonParse(payload)
   if (!isRecord(envelope)) return []
 
-  // 错误信封：状态非 200 的外层。body 里的 code/message 如实上浮。
+  // 错误信封：状态非 200 的外层。**信封层与 body 里的事实一起参与分类**——
+  // 上游把「排队中」（403 + RESOURCE_LIMIT）这些事实放在哪一层并不确定，只读 body
+  // 会把它读成「凭据被拒」（AUTH），界面于是显示成「API 密钥无效」。
   const statusCode = optionalNumber(envelope.statusCodeValue)
   if (statusCode !== undefined && statusCode !== 200) {
-    const bodyText = asString(envelope.body) ?? ''
-    throw classifyQoderFailure(statusCode, bodyText)
+    throw classifyQoderEnvelopeFailure(statusCode, envelope)
   }
 
   const innerStr = asString(envelope.body)
@@ -867,6 +868,12 @@ export function processQoderStreamLine(line: string, state: QoderStreamState): S
   // 内层也可能直接带一个 error 对象（失败以帧的形态到达）。
   const errorPayload = isRecord(inner.error) ? inner.error : undefined
   if (errorPayload !== undefined) {
+    // 内层的 error 对象同样可能带着排队/额度的事实：按事实分类，
+    // 别一律记成 PROVIDER_ERROR（更不能记成 AUTH）。
+    const innerFacts = qoderFailureFacts([errorPayload])
+    if (isQoderQuotaExhausted(innerFacts, undefined) || isQoderResourceLimited(innerFacts, undefined)) {
+      throw classifyQoderFailureFacts(undefined, '', innerFacts)
+    }
     throw new LlmError(
       PROVIDER_NAME + ' stream error: ' + (asString(errorPayload.message) ?? 'unknown error'),
       isContextOverflow(errorPayload) ? CONTEXT_OVERFLOW_CODE : 'PROVIDER_ERROR',
@@ -963,14 +970,209 @@ export function assertQoderStreamComplete(state: QoderStreamState): void {
 /** 错误体里引用回消息的最大长度。 */
 const MAX_FAILURE_DETAIL_LENGTH = 600
 
-/** 从错误体里尽量读一个业务错误码（字符串 \`code\`，顶层或 \`error\` 里）。 */
-function qoderErrorCode(detail: string): string | undefined {
-  const parsed = safeJsonParse(detail)
-  if (!isRecord(parsed)) return undefined
-  const code = parsed.code ?? (isRecord(parsed.error) ? parsed.error.code : undefined)
-  return typeof code === 'string' && code !== '' ? code
-    : typeof code === 'number' ? String(code)
-    : undefined
+/**
+ * 上游「资源不足 / 排队中」的业务码与 subCode。
+ *
+ * 上游把它作为 **HTTP 200 + SSE 错误信封** 送达（\`statusCodeValue: 403\`），
+ * body 里带着 403 → 10605 的码链、\`subCode: RESOURCE_LIMIT\`、排队人数与
+ * \`retryAfterSeconds\`。它描述的是**上游容量**，不是凭据——把它分类成 AUTH
+ * 会把用户引向「重建令牌 / 重新登录」的死路，而那把令牌根本没坏。
+ */
+export const QODER_ERROR_RESOURCE_LIMIT = '10605'
+
+/** 上游排队时的 subCode（与 {@link QODER_ERROR_RESOURCE_LIMIT} 成对出现）。 */
+export const QODER_ERROR_SUB_RESOURCE_LIMIT = 'RESOURCE_LIMIT'
+
+/**
+ * 上游「额度用尽」的业务码（另一种 403，body 里带 \`pricingUrl\`）。
+ *
+ * 它与排队是**两回事**：排队等一会儿就好，额度用尽只能等周期重置或加购。
+ */
+export const QODER_ERROR_QUOTA_EXCEEDED = '112'
+
+/**
+ * 一次失败里上游报出来的事实（信封层与 body 层都扫，所以字段在哪一层都不丢）。
+ *
+ * 这些字段是上游自己的词汇：\`queueCount\` / \`retryAfterSeconds\` /
+ * \`serviceAvailable\` / \`isQueued\` 描述的是上游当下的容量状态。
+ */
+export interface QoderFailureFacts {
+  /** 出现过的业务码（字符串化；码链可能不止一个，如 403 → 10605）。 */
+  codes: string[]
+  /** 出现过的 subCode。 */
+  subCodes: string[]
+  /** 排队人数（上游报「前面还有多少人在等」）。 */
+  queueCount?: number
+  /** 上游建议的重试等待秒数。 */
+  retryAfterSeconds?: number
+  /** 上游报的服务可用性。 */
+  serviceAvailable?: boolean
+  /** 上游报「本次请求被排队」。 */
+  isQueued?: boolean
+  /** 被排队的模型 key（上游的模型标识，不是 DSH 的公开 id）。 */
+  modelKey?: string
+  /** 额度用尽时的购买页。 */
+  pricingUrl?: string
+  /** 额度用尽时的升级页。 */
+  upgradeUrl?: string
+  /** 上游报「额度已用尽」。 */
+  quotaExceeded?: boolean
+}
+
+/** 事实扫描的深度与节点上限：上游的错误体很小，但别让它变成一次无界的走树。 */
+const FAILURE_FACT_MAX_DEPTH = 6
+const FAILURE_FACT_MAX_NODES = 200
+
+/** 一个码字段的值（字符串或数字）转成字符串。 */
+function qoderCodeText(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed === '' ? undefined : trimmed
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return undefined
+}
+
+/** 一个 URL 字段的值。 */
+function qoderUrlText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+/**
+ * 扫一遍上游的失败载荷，把认得的字段收成事实。
+ *
+ * 为什么要扫而不是只取顶层：上游把这几个字段放在**不同层**（信封外层 / body /
+ * body 里的 error 对象），而码是**一条链**（403 → 10605）。逐层找比猜位置可靠：
+ * 猜错位置就等于把「排队」读成「凭据被拒」。
+ */
+export function qoderFailureFacts(roots: readonly unknown[]): QoderFailureFacts {
+  const facts: QoderFailureFacts = { codes: [], subCodes: [] }
+  const budget = { nodes: FAILURE_FACT_MAX_NODES }
+  for (const root of roots) collectQoderFailureFacts(root, facts, 0, budget)
+  return facts
+}
+
+function collectQoderFailureFacts(
+  node: unknown,
+  facts: QoderFailureFacts,
+  depth: number,
+  budget: { nodes: number },
+): void {
+  if (depth > FAILURE_FACT_MAX_DEPTH || budget.nodes <= 0) return
+  if (Array.isArray(node)) {
+    for (const item of node) collectQoderFailureFacts(item, facts, depth + 1, budget)
+    return
+  }
+  if (!isRecord(node)) return
+  budget.nodes -= 1
+  for (const [key, value] of Object.entries(node)) {
+    switch (key) {
+      case 'code':
+      case 'errorCode':
+      case 'error_code': {
+        const text = qoderCodeText(value)
+        if (text !== undefined) facts.codes.push(text)
+        break
+      }
+      case 'subCode':
+      case 'sub_code': {
+        const text = qoderCodeText(value)
+        if (text !== undefined) facts.subCodes.push(text)
+        break
+      }
+      case 'queueCount':
+      case 'queue_count':
+        facts.queueCount ??= optionalNumber(value)
+        break
+      case 'retryAfterSeconds':
+      case 'retry_after_seconds':
+        facts.retryAfterSeconds ??= optionalNumber(value)
+        break
+      case 'serviceAvailable':
+      case 'service_available':
+        if (typeof value === 'boolean') facts.serviceAvailable ??= value
+        break
+      case 'isQueued':
+      case 'is_queued':
+        if (typeof value === 'boolean') facts.isQueued ??= value
+        break
+      case 'modelKey':
+      case 'model_key':
+        facts.modelKey ??= qoderCodeText(value)
+        break
+      case 'pricingUrl':
+      case 'pricing_url':
+        facts.pricingUrl ??= qoderUrlText(value)
+        break
+      case 'upgradeUrl':
+      case 'upgrade_url':
+        facts.upgradeUrl ??= qoderUrlText(value)
+        break
+      case 'isQuotaExceeded':
+      case 'is_quota_exceeded':
+        if (typeof value === 'boolean') facts.quotaExceeded ??= value
+        break
+      default:
+        break
+    }
+    collectQoderFailureFacts(value, facts, depth + 1, budget)
+  }
+}
+
+/**
+ * 上游是不是在说「资源不足 / 排队中」。
+ *
+ * 认两种凭据：上游**点名**的（\`RESOURCE_LIMIT\` / 10605）与 403 搭配的容量信号
+ * （服务不可用 / 这次在排队 / 前面排了人）。点名的凭据压过状态码——429 带上
+ * RESOURCE_LIMIT 说的是「上游没容量」，不是「这个账号被限流」（与 kimi-code 把
+ * 「引擎过载」从 429 里分出来是同一判断）；只有排队人数这种弱信号时，429 的含义
+ * 不变，号池照旧冷却账号并轮转。
+ */
+function isQoderResourceLimited(facts: QoderFailureFacts, status: number | undefined): boolean {
+  if (facts.subCodes.some((code) => code.toUpperCase() === QODER_ERROR_SUB_RESOURCE_LIMIT)) return true
+  if (facts.codes.includes(QODER_ERROR_RESOURCE_LIMIT)) return true
+  if (status !== 403) return false
+  return facts.serviceAvailable === false
+    || facts.isQueued === true
+    || (facts.queueCount !== undefined && facts.queueCount > 0)
+}
+
+/**
+ * 上游是不是在说「额度用尽」。
+ *
+ * 认两种凭据：业务码 112，以及 403 搭配的额度信号（\`isQuotaExceeded\` / 购买页）。
+ * 额度用尽不是「这个账号坏了」，所以它归 QUOTA 而不是 AUTH——它只能等周期重置或加购。
+ */
+function isQoderQuotaExhausted(facts: QoderFailureFacts, status: number | undefined): boolean {
+  if (facts.codes.includes(QODER_ERROR_QUOTA_EXCEEDED)) return true
+  if (status !== 403) return false
+  return facts.quotaExceeded === true || facts.pricingUrl !== undefined
+}
+
+/** 上游排队 / 资源不足的文案：说清「不是凭据问题」，并带上上游给的排队事实。 */
+function qoderResourceLimitMessage(facts: QoderFailureFacts, status: number | undefined): string {
+  const details: string[] = []
+  const codes = [...facts.subCodes, ...facts.codes]
+    .filter((code) => code !== '' && code !== String(status))
+  if (codes.length > 0) details.push('code ' + codes.join(' / '))
+  if (facts.queueCount !== undefined) details.push('队列 ' + facts.queueCount + ' 人')
+  if (facts.retryAfterSeconds !== undefined) details.push('上游建议 ' + facts.retryAfterSeconds + ' 秒后再试')
+  if (facts.modelKey !== undefined) details.push('modelKey ' + facts.modelKey)
+  const tail = details.length === 0 ? '' : '：' + details.join('，')
+  return PROVIDER_NAME + ' 上游资源不足，这个模型正在排队' + tail
+    + '。这是上游容量问题，不是凭据问题——账号仍是登录状态，不需要重新登录；稍后重试即可。'
+}
+
+/** 上游额度用尽的文案：额度恢复前这一请求不会成功，并给出上游给的购买/升级页。 */
+function qoderQuotaExhaustedMessage(facts: QoderFailureFacts, status: number | undefined): string {
+  const details: string[] = []
+  const codes = facts.codes.filter((code) => code !== '' && code !== String(status))
+  if (codes.length > 0) details.push('code ' + codes.join(' / '))
+  const url = facts.pricingUrl ?? facts.upgradeUrl
+  if (url !== undefined) details.push(url)
+  const tail = details.length === 0 ? '' : '：' + details.join('，')
+  return PROVIDER_NAME + ' 额度已用尽，当前请求被上游拒绝' + tail
+    + '。额度恢复之前这一请求不会成功；可以等周期重置，或在额度页升级套餐。'
 }
 
 /**
@@ -978,47 +1180,109 @@ function qoderErrorCode(detail: string): string | undefined {
  *
  * 错误码是 harness 的共享词汇而不是本线路自己的：号池认得 \`AUTH\`
  * （「这个账号必须重新登录」），而重试集合不会捡起一次套餐拒绝。
- * Qoder 的两个业务码有自己的归处：\`103\`（重复 request_id）不是可安全
- * 自动重试的状态（qodercli2api §8 原话）；\`105\`（Login expired）归为 AUTH。
+ * Qoder 的业务码各有归处：
+ *
+ * - \`103\`（重复 request_id）不是可安全自动重试的状态（qodercli2api §8 原话）；
+ * - \`105\`（Login expired）归 AUTH；
+ * - \`10605\` / \`RESOURCE_LIMIT\`（上游排队、资源不足）归 **SERVER**——它描述的是
+ *   上游容量，换账号与重新登录都救不了，退避重试才有意义（与 kimi-code 的
+ *   「引擎过载」同一判断：过载不是账号被限流，所以不借 RATE_LIMIT 的语义）；
+ * - \`112\`（额度用尽，带 pricingUrl）归 **QUOTA**——额度恢复前这一请求不可能成功，
+ *   而 DSH 正是用这个码显示「当前请求的额度已用尽」。
+ *
+ * 剩下认不出原因的 403 仍然归 AUTH：那时「凭据被拒」是上游最常见的那一种。
+ * 但把一次排队误报成「API 密钥无效」会让人去重建一把根本没坏的令牌，
+ * 所以上面两条必须先于它判掉。
  */
 export function classifyQoderFailure(status: number, detail: string): LlmError {
   const trimmed = detail.trim().slice(0, MAX_FAILURE_DETAIL_LENGTH)
-  const suffix = trimmed === '' ? '' : ': ' + trimmed
-  const code = qoderErrorCode(trimmed)
+  return classifyQoderFailureFacts(status, trimmed, qoderFailureFacts([safeJsonParse(detail)]))
+}
 
-  if (status === 401 || status === 403 || code === QODER_ERROR_LOGIN_EXPIRED) {
+/**
+ * 信封路径的失败分类。
+ *
+ * 上游把排队人数、\`subCode\` 这些事实放在**信封层**还是 body 里都可能（body 本身
+ * 还是一段 JSON 字符串，要再解析一次），所以两处都扫：只读 body 会把「排队」读成
+ * 「凭据被拒」。
+ */
+export function classifyQoderEnvelopeFailure(status: number, envelope: Record<string, unknown>): LlmError {
+  const bodyText = asString(envelope.body) ?? ''
+  const trimmed = bodyText.trim().slice(0, MAX_FAILURE_DETAIL_LENGTH)
+  return classifyQoderFailureFacts(status, trimmed, qoderFailureFacts([envelope, safeJsonParse(bodyText)]))
+}
+
+/** 事实齐了以后的那次判定（AUTH / QUOTA / SERVER 的先后是硬要求）。 */
+function classifyQoderFailureFacts(
+  status: number | undefined,
+  detail: string,
+  facts: QoderFailureFacts,
+): LlmError {
+  const suffix = detail === '' ? '' : ': ' + detail
+  const code = facts.codes.length > 0 ? facts.codes[0] : undefined
+  const options = status === undefined ? {} : { status }
+
+  if (status === 401 || facts.codes.includes(QODER_ERROR_LOGIN_EXPIRED)) {
     return new LlmError(
-      PROVIDER_NAME + ' rejected the credential (' + status + (code === undefined ? '' : ', code ' + code) + '). Sign the account in again.' + suffix,
+      PROVIDER_NAME + ' rejected the credential (' + (status ?? 'no status')
+        + (code === undefined ? '' : ', code ' + code) + '). Sign the account in again.' + suffix,
       'AUTH',
-      { status },
+      options,
+    )
+  }
+  if (isQoderQuotaExhausted(facts, status)) {
+    return new LlmError(qoderQuotaExhaustedMessage(facts, status) + suffix, 'QUOTA', options)
+  }
+  if (isQoderResourceLimited(facts, status)) {
+    // 上游自己给了等待秒数就照它说：交给 harness 的重试策略（超过本线路的
+    // maxDelayMs 时 harness 就不再自动重试，直接把这条事实呈现给用户）。
+    const after = facts.retryAfterSeconds
+    return new LlmError(
+      qoderResourceLimitMessage(facts, status) + suffix,
+      'SERVER',
+      after === undefined || after <= 0
+        ? options
+        : { ...options, providerRetryAfterMs: after * 1000 },
+    )
+  }
+  if (status === 403) {
+    return new LlmError(
+      PROVIDER_NAME + ' rejected the credential (' + status
+        + (code === undefined ? '' : ', code ' + code) + '). Sign the account in again.' + suffix,
+      'AUTH',
+      options,
     )
   }
   if (code === QODER_ERROR_DUPLICATE_REQUEST_ID) {
     return new LlmError(
       PROVIDER_NAME + ' rejected a duplicated request id (code 103).' + suffix,
       'PROVIDER_ERROR',
-      { status },
+      options,
     )
   }
   if (status === 429) {
-    return new LlmError(PROVIDER_NAME + ' rate limit or plan limit (' + status + ').' + suffix, 'RATE_LIMIT', { status })
+    return new LlmError(PROVIDER_NAME + ' rate limit or plan limit (' + status + ').' + suffix, 'RATE_LIMIT', options)
   }
-  if (isHttpContextOverflow(status, detail)) {
+  if (status !== undefined && isHttpContextOverflow(status, detail)) {
     return new LlmError(
       PROVIDER_NAME + ' says the conversation no longer fits the model window.' + suffix,
       CONTEXT_OVERFLOW_CODE,
-      { status },
+      options,
     )
   }
   if (status === 404) {
     return new LlmError(
       PROVIDER_NAME + ' does not know this model or route (' + status + ').' + suffix,
       'NOT_FOUND',
-      { status },
+      options,
     )
   }
-  if (status >= 500) {
-    return new LlmError(PROVIDER_NAME + ' upstream error (' + status + ').' + suffix, 'SERVER', { status })
+  if (status !== undefined && status >= 500) {
+    return new LlmError(PROVIDER_NAME + ' upstream error (' + status + ').' + suffix, 'SERVER', options)
   }
-  return new LlmError(PROVIDER_NAME + ' request failed (' + status + ').' + suffix, 'PROVIDER_ERROR', { status })
+  return new LlmError(
+    PROVIDER_NAME + ' request failed (' + (status ?? 'no status') + ').' + suffix,
+    'PROVIDER_ERROR',
+    options,
+  )
 }

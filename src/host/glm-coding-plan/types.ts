@@ -329,7 +329,11 @@ export const POLL_MIN_INTERVAL_MS = 1_000
 /** 单次 OAuth HTTP 请求的超时（沿用 `9ad8a53` 的 `ZAI_OAUTH_REQUEST_TIMEOUT_MS`）。 */
 export const OAUTH_REQUEST_TIMEOUT_MS = 30_000
 
-/** 单次上游业务/模型请求的超时（沿用 `9ad8a53` 的 `CHAT_TIMEOUT_MS`）。 */
+/** 单次上游 **非流式** 业务/模型请求的超时（沿用 `9ad8a53` 的 `CHAT_TIMEOUT_MS`）。
+ *
+ * 刻意不挂到流式请求上：绝对计时的 `AbortSignal.timeout` 会跟着响应体走完，
+ * 把长时间思考从中间掐断（opendesign 就是这么在 180 秒上翻车的，见
+ * `docs/opendesign-line-plan.md` §5）。 */
 export const CHAT_TIMEOUT_MS = 300_000
 
 /** 模型目录 / 配额发现阶段的超时（沿用 `9ad8a53` 的 `DISCOVERY_TIMEOUT_MS`）。 */

@@ -25,7 +25,7 @@ import {
   testApiKey,
   type OpenDesignWorkspaceIdRead,
 } from './client.ts'
-import { resolveModelInfo } from './catalog.ts'
+import { isModelServed, resolveModelInfo } from './catalog.ts'
 import type { OpenDesignAccountPool } from './account-pool.ts'
 import {
   bearerFor,
@@ -34,7 +34,8 @@ import {
   type OpenDesignModelSettings,
   type OpenDesignModelSettingsStore,
 } from './token-store.ts'
-import { DEFAULT_BASE_URL, DEFAULT_MODELS, PROVIDER_ID, type OpenDesignDiscoveredModel } from './types.ts'
+import { DEFAULT_BASE_URL, PROVIDER_ID, type OpenDesignDiscoveredModel } from './types.ts'
+import { openDesignKnownModelIds, openDesignVisibleModelIds } from './line.ts'
 import type { OpenDesignLoginManager } from './oauth.ts'
 import { openPlatformBrowser } from '../step-code/routes.ts'
 import {
@@ -49,6 +50,16 @@ import {
   type OpenDesignUsageDto,
   type OpenDesignWebStatus,
 } from '../../shared/opendesign-contracts.ts'
+
+/**
+ * Accounts one catalog sync asks at most.
+ *
+ * Each account costs up to two upstream reads, so this is what stands between a
+ * twenty-key pool and forty requests behind one button. It bounds the SCAN, not
+ * the pool: an account beyond the cap contributes nothing to the union, because
+ * the cap is a hard bound on the measurement rather than a rotating window.
+ */
+const MAX_SYNC_ACCOUNTS = 8
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -110,18 +121,20 @@ function formatModelHint(contextWindow: number, input: readonly string[], reason
   return pricing === undefined ? base : `${base} · $${pricing.input}/$${pricing.output}`
 }
 
-/** Every id the line knows: the shipped table plus the synced live catalog. */
-function uniqueModels(settings: OpenDesignModelSettings): string[] {
-  const ids = new Set<string>(DEFAULT_MODELS)
-  for (const model of settings.catalogModels) ids.add(model.id)
-  return [...ids]
-}
-
-/** Every model the card should render, whether or not it is advertised. */
+/**
+ * Every model the card should render, whether or not it is advertised.
+ *
+ * `enabled` is the state of the card's checklist row, and it is read from the ONE
+ * visibility rule (`openDesignVisibleModelIds` in ./line.ts) — the very function
+ * the adapter offers the picker with. A row that reads "checked" while no picker
+ * offers it is the contradiction this projection must not be able to produce, so
+ * the two are not two calculations: a model the plan withholds reads as unchecked
+ * until the user forces it, because that is what the picker does with it.
+ */
 function projectModels(settings: OpenDesignModelSettings): OpenDesignModelDto[] {
-  const known = uniqueModels(settings)
-  const hidden = new Set(settings.hiddenModels)
-  const enabledSet = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
+  const known = openDesignKnownModelIds(settings)
+  const visible = new Set(openDesignVisibleModelIds(settings))
+  const forcedVisible = new Set(settings.forceVisibleModels)
   return known.map((id) => {
     const base = resolveModelInfo(id, {
       synced: settings.catalogModels,
@@ -134,6 +147,7 @@ function projectModels(settings: OpenDesignModelSettings): OpenDesignModelDto[] 
       defaultMaxTokens: settings.defaultMaxTokens,
       contextWindowOverride: settings.contextWindowOverrides[id],
     })
+    const served = isModelServed(id, settings.servedModelIds)
     return {
       id,
       name: info.displayName,
@@ -143,7 +157,9 @@ function projectModels(settings: OpenDesignModelSettings): OpenDesignModelDto[] 
       maxTokens: info.maxTokens,
       reasoning: info.reasoning,
       input: [...info.input],
-      enabled: (enabledSet === null || enabledSet.has(id)) && !hidden.has(id),
+      enabled: visible.has(id),
+      served,
+      forcedVisible: forcedVisible.has(id),
       ...(info.pricing === undefined ? {} : { pricing: info.pricing }),
       ...(settings.contextWindowOverrides[id] === undefined ? {} : { contextWindowOverride: settings.contextWindowOverrides[id] }),
     }
@@ -284,16 +300,22 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
   const status = async (): Promise<OpenDesignWebStatus> => await getOpenDesignWebStatus(options, usageStore)
 
   /**
-   * Sync the live catalog with the first usable account's key.
+   * Sync the live catalog with every usable account's key.
    *
-   * The gateway's listing is the authority on what this key's plan serves; a
-   * failed or refused read changes nothing (the shipped table still stands in),
-   * and the sync's answer says which happened. Announces only a real change:
-   * the picker rebuilds on `llm/adapters-updated`, so a no-change sync must
-   * stay silent.
+   * The gateway's listing is the authority on what a key's plan serves, and a plan
+   * belongs to an ACCOUNT rather than to the line: two pooled keys can serve two
+   * different model sets, so every account is asked and the union is what gets
+   * remembered. That union is persisted as `servedModelIds` — the fact the picker
+   * needs and the one this sync used to throw away — and it is written only when a
+   * scan really succeeded, so a network failure cannot switch the filter off.
+   *
+   * A failed or refused read changes nothing (the shipped table still stands in),
+   * and the sync's answer says which happened. Announces only a real change: the
+   * picker rebuilds on `llm/adapters-updated`, so a no-change sync must stay
+   * silent.
    */
   const syncCatalog = async (): Promise<{ added: string[]; synced: boolean; error: string }> => {
-    const known = uniqueModels(await settingsStore.read())
+    const known = openDesignKnownModelIds(await settingsStore.read())
     const data = await accountPool.read().catch(() => null)
     const now = Date.now()
     const accounts = (data?.accounts ?? []).filter((account) => isUsable(account, now))
@@ -301,31 +323,36 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
       return { added: [], synced: false, error: 'no usable account: add an API key or sign in first' }
     }
 
-    // Two listings, merged. The AMR control-plane catalog carries the metadata
-    // (contextWindowTokens and friends) but only answers a CONTROL key — i.e.
-    // an OAuth-signed-in account; the link gateway's own listing answers the
-    // runtime key and supplies the ids this key's plan really serves. Either
-    // may be refused: a failed listing changes nothing, and the shipped table
-    // still stands in for what it published.
+    // Two listings PER ACCOUNT, merged. The AMR control-plane catalog carries the
+    // metadata (contextWindowTokens and friends) but only answers a CONTROL key —
+    // i.e. an OAuth-signed-in account; the link gateway's own listing answers the
+    // runtime key and supplies the ids this key's plan really serves. Either may
+    // be refused for one account without touching another's answer: the union
+    // below is built from whatever actually answered.
     const scans: Array<{ ids: string[]; catalog: Record<string, OpenDesignDiscoveredModel> }> = []
     let controlRefused = false
-    for (const account of accounts) {
+    const settings = await settingsStore.read()
+    for (const account of accounts.slice(0, MAX_SYNC_ACCOUNTS)) {
       const controlKey = controlKeyFor(account.credentials)
-      if (controlKey === undefined) continue
-      const scan = await fetchControlPlaneCatalog({ fetchFn, controlKey, knownIds: known })
-      if (scan === null) { controlRefused = true; continue }
-      if (scan.ids.length > 0) scans.push(scan)
-      break
-    }
-    {
-      const settings = await settingsStore.read()
+      if (controlKey !== undefined) {
+        const scan = await fetchControlPlaneCatalog({ fetchFn, controlKey, knownIds: known })
+        if (scan === null) controlRefused = true
+        else if (scan.ids.length > 0) scans.push(scan)
+      }
+      // Every account is asked, pasted key or sign-in: the gateway listing is the
+      // only statement of what THIS key's plan serves, and with several pooled keys
+      // the honest answer is the union of those statements.
       const gateway = await fetchGatewayCatalog({
         fetchFn,
         baseURL: settings.baseURL,
-        apiKey: bearerFor(accounts[0]!.credentials),
+        apiKey: bearerFor(account.credentials),
       })
       if (gateway !== null && gateway.ids.length > 0) scans.push(gateway)
     }
+    // Nothing answered — or every answer was an empty listing. Both are read as a
+    // FAILED read that keeps the previous measurement, never as "this plan serves
+    // zero models": collapsing the two would hide the entire picker behind one bad
+    // response, while keeping the old union merely leaves a stale one in place.
     if (scans.length === 0) {
       return {
         added: [],
@@ -363,9 +390,16 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
       const wasSynced = current.catalogModels.some((old) => old.id === entry.id)
       return !wasSynced || syncedIds.has(entry.id)
     })
+    // The union of what the accounts answered is the durable fact: an id in it is a
+    // model this subscription serves, an id outside it one it demonstrably does
+    // not. A scan that returned nothing contributes nothing, so one account serving
+    // no models never shrinks a union another account established — and a sync in
+    // which nothing at all answered returned above WITHOUT writing, leaving the
+    // previous measurement standing instead of clearing the filter.
+    const served = [...new Set(scans.flatMap((scan) => scan.ids))]
     const fingerprintBefore = current.catalogModels.map((entry) => entry.id).join('\n')
     const fingerprintAfter = merged.map((entry) => entry.id).join('\n')
-    await settingsStore.storeCatalog(merged)
+    await settingsStore.storeCatalog(merged, served)
     if (fingerprintBefore !== fingerprintAfter) emitModelsUpdated()
     return { added, synced: true, error: '' }
   }
@@ -530,10 +564,13 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
           const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
           let touched = false
           if (body.enabledModelIds === null || Array.isArray(body.enabledModelIds)) {
-            const ids = body.enabledModelIds === null
+            // This is THE ONLY un-tick path the card has (it removes the id from the
+            // selection and never posts `models/visibility {visible:false}`), so
+            // `selectModels` also drops a forced reveal the new selection excludes —
+            // otherwise the reveal would outlive the tick that asked for it.
+            await settingsStore.selectModels(body.enabledModelIds === null
               ? null
-              : body.enabledModelIds.filter((id): id is string => typeof id === 'string')
-            await settingsStore.update({ enabledModelIds: ids })
+              : body.enabledModelIds.filter((id): id is string => typeof id === 'string'))
             touched = true
           }
           if (typeof body.enabled === 'boolean') {
@@ -549,13 +586,29 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
           const current = await settingsStore.read()
-          const known = uniqueModels(current)
+          const known = openDesignKnownModelIds(current)
           const hidden = new Set(current.hiddenModels)
+          // Ticking a model the plan's last scan did not list is a request to see it
+          // ANYWAY, so it has to be recorded here: the tick list and the hidden list
+          // both describe the user's wishes, while "served" is the plan's answer, and
+          // only an explicit force keeps a served=false id in the picker.
+          const forced = new Set(current.forceVisibleModels)
           if (path === 'models/visibility') {
             const model = typeof body.model === 'string' ? body.model.trim() : ''
             if (!known.includes(model)) return sendJson(response, 400, { ok: false, error: `${JSON.stringify(model)} is not one of this route's models` })
-            if (body.visible === false) hidden.add(model)
-            else hidden.delete(model)
+            const served = isModelServed(model, current.servedModelIds)
+            if (body.visible === false) {
+              // "Do not force this" is not "hide this for ever": the hidden list is
+              // the user's own veto over a model the plan DOES serve, and writing a
+              // plan-omitted id into it would silently hide that model the day the
+              // plan starts serving it.
+              if (served) hidden.add(model)
+              forced.delete(model)
+            } else {
+              hidden.delete(model)
+              if (served) forced.delete(model)
+              else forced.add(model)
+            }
           } else {
             const mode = body.mode
             if (mode !== 'all' && mode !== 'none' && mode !== 'invert') {
@@ -569,7 +622,14 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
                 return mode === 'all' ? false : mode === 'none' ? true : !wasHidden
               })
             : [...hidden]
-          await settingsStore.update({ hiddenModels: nextHidden })
+          // Both resets drop the force list: "everything on" leaves nothing for it to
+          // rescue, and "everything off" must not leave a forced row checked and still
+          // offered — "show nothing" means nothing. `invert` is a per-row toggle
+          // rather than a reset, so it keeps the forced entries it did not flip.
+          const nextForced = path !== 'models/visibility-all'
+            ? [...forced]
+            : body.mode === 'invert' ? current.forceVisibleModels : []
+          await settingsStore.update({ hiddenModels: nextHidden, forceVisibleModels: nextForced })
           emitModelsUpdated()
           return sendJson(response, 200, { ok: true, value: await status() })
         }

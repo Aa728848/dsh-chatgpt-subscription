@@ -255,7 +255,13 @@ export const STREAM_IDLE_TIMEOUT_MS = 300_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 /** Ceiling for a model-listing or usage fetch. */
 export const DISCOVERY_TIMEOUT_MS = 20_000
-/** Whole-request ceiling for one non-streaming chat call. */
+/** Whole-request ceiling for one NON-STREAMING chat call.
+ *
+ * Deliberately never attached to a stream: an absolute `AbortSignal.timeout` on
+ * a streaming fetch keeps counting through the body and kills a long thinking
+ * pass mid-answer (opendesign shipped exactly that bug, at 180 s — see
+ * `docs/opendesign-line-plan.md` §5). A stream's liveness belongs to
+ * `STREAM_IDLE_TIMEOUT_MS`, which resets on every chunk. */
 export const CHAT_TIMEOUT_MS = 300_000
 /** How long a usage reading is served from cache before it is refetched. */
 export const QUOTA_CACHE_TTL_MS = 120_000

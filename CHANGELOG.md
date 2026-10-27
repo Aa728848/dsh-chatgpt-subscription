@@ -10,6 +10,41 @@
   - **验证**：`npm run typecheck` 0 错误；全量 Vitest **4906 passed / 10 skipped**（唯一失败仍是 GLM adopt 那个环境用例）；`npm run build` 产出 `lib/index.js` + `lib/progress-updates.js`；`npm pack --dry-run` 含 `lib/progress-updates.js`、`locale/progress-updates/{zh,en}.json`、`progress-updates.svg`；直接 import 构建产物确认 `name / apply / Config` 三项齐全、默认值解析为 `true / 8 / auto`。
   - **未验证**：插件管理页上真的出现两个开关需要重启 DSH（bundle patch 在启动时应用），本轮没有重启你的实例。
 
+## 0.43.1 - 2026-10-27
+
+- **[qoder] 上游排队不再被说成「API 密钥无效」；额度用尽与排队分成两条路**
+  - **现象**：Qoder 线路发消息立刻失败，界面只显示「本轮运行失败 · API 密钥无效 · AUTH」，于是去重建 PAT、重新登录、换区域——而凭据一直是好的（同一把 token 调 `GET /api/v1/userinfo` 返回 200）。另一条路同样的话：额度真的用尽时（上游 code 112 + pricingUrl）显示的也是「API 密钥无效」，两条完全不同的失败在用户眼里是同一句。
+  - **为什么**：上游把「排队中」装在 **HTTP 200 的 SSE 错误信封**里（`statusCodeValue: 403`，body 带 `code 10605` / `subCode: RESOURCE_LIMIT` / `queueCount 3239` / `retryAfterSeconds 30` / `serviceAvailable false`）。插件在 mapper 里解出 `statusCodeValue` 后交给 `classifyQoderFailure`，而它把任何 403 一刀切成 AUTH；DSH 收到 AUTH 就显示通用文案「API 密钥无效」（`message.failure.auth`）。插件也不认识 `RESOURCE_LIMIT` / `10605` / `isQueued` / `retryAfterSeconds` 这几个字段，信息在整条链路上被丢弃。额度快照同样只映射三只桶，`isQuotaExceeded` 与 `upgradeUrl` 一次都没出现过——于是三只桶全是 0 时卡片显示「还有额度」，而上游其实已经把请求拒了。
+  - **改法**：(1) 分类器改为**按上游事实**判定：新增一份逐层扫描的事实集合（信封外层 + body + body 里的 `error` 对象），排队/资源不足（`RESOURCE_LIMIT`、`10605`，或 403 配容量信号）归 `SERVER`（上游容量，换账号与重新登录都救不了，只有退避重试有意义——与 kimi-code 的「引擎过载」同一判断），额度用尽（code `112`，或 403 配 `isQuotaExceeded` / `pricingUrl`）归 `QUOTA`（DSH 显示「当前请求的额度已用尽」），401 与 code `105` 仍是 `AUTH`，认不出原因的 403 仍保守归 AUTH；上游给了 `retryAfterSeconds` 就照它说（`providerRetryAfterMs`）。(2) 信封路径把**信封层与 body 一起**送进分类器——上游把事实放在哪一层并不确定，只读 body 会把「排队」读成「凭据被拒」。(3) 额度快照补上 `quotaExceeded` / `upgradeUrl`，设置页额度卡在上游说用尽时先说这件事并给出升级页（zh/en/ru 三语）。
+  - **测试**：`test/qoder-mapper.test.ts` 新增 4 例（排队归 SERVER 且带 `providerRetryAfterMs`、额度用尽归 QUOTA、认不出的 403 仍是 AUTH、429 的含义不被弱信号改写）与 4 例信封路径；`test/qoder-adapter.test.ts` 新增 1 例端到端（HTTP 200 + 错误信封 → `SERVER` 而非 `AUTH`，且账号没有被判成「要重新登录」）；新增 `test/qoder-quota.test.ts`（4 例）钉住两个新字段的归一化；`test/qoder-ui.test.tsx` 新增 2 例（说用尽时额度区给出升级页，没说时不出现）。
+
+## 0.43.0 - 2026-10-27
+
+- **[opendesign] MiMo V2.6 与 Qwen3.7 Max 拿回思考深度选择**
+  - **现象**：OpenDesign 线路里 MiMo V2.6 Flash / Pro 的模型下拉没有任何思考档位；按同一原则把 37 行逐条比对后，`qwen3.7-max` 也一样缺。
+  - **为什么**：这三行的能力表里写着 `reasoning: false`，依据是 command-code 注册表把同族模型的档位标注为空。但「空档位」只说明没有来源声明档位，不等于模型不思考——仓库自己的规则（`docs/opendesign-line-plan.md` §3 决策 8）就是「无档位声明的模型沿用默认三档」；而同族的 cline-pass 行（`mimo-v2.5`、`mimo-v2.5-pro`、`qwen3.7-max`）明确写作 `reasoning: true`，§2 规定两表冲突时 cline-pass 的 DSH 拼写胜出。
+  - **改法**：三行去掉 `reasoning` 字段，落到 `DEFAULT_EFFORTS` 的 `low / medium / high`；其余 34 行一字未动。
+  - **测试**：`test/opendesign-catalog.test.ts` 与 `test/opendesign-adapter.test.ts` 钉住三行的 `reasoning === true` 与三档档位。
+
+- **[opendesign] 套餐不提供的模型不再出现在模型选择器里；设置卡里可见、可强制显示**
+  - **现象**：套餐里根本没有的模型照样出现在选择器中，选中后只会换来一次拒绝。
+  - **为什么**：网关 `GET /v1/models` 返回的其实就是「这个 Key 的套餐真正提供的 id」，但同步只把它合并进 `catalogModels`，**没有把成员关系记住**，于是投影时无从判断。
+  - **改法**：设置文档新增三态的 `servedModelIds`（`null` = 从未测量，不隐藏任何模型；数组 = 最后一次成功扫描的**并集**），同步改为遍历**所有可用账号**（每次最多 8 个）取并集，任一账号失败只损失它自己那一半，全部失败则保留旧值而不是清空；适配器与状态投影共用 `line.ts` 的唯一一份可见性规则（此前 hub 卡片自己另算一份，会把套餐外模型算进「可用」）。设置卡照常列出这些模型、hint 后缀「套餐不支持」，勾选即写入 `forceVisibleModels`（强制显示），取消勾选随选择集合一起裁剪。
+  - **三语**：`unservedBadge` / `unservedHint` 补进 zh、en、ru 三份字典。
+  - **测试**：新增 `test/opendesign-line.test.ts`（整条线挂载，hub 计数等于选择器条目数），并在 catalog / adapter / routes / model-settings / section 五个套件里补并集、拒绝一侧、从未测量、强制显示、`none` 清空与 `invert` 保留、老文档兼容等用例。
+
+- **[opendesign] 设置文档的写入串行化，并发不再互相抹字段**
+  - **为什么**：每个 mutator 都从「读到的那份整文档」派生出整份新文档，两个并发写必然有一个人把对方刚写的字段抹掉；而目录同步是 fire-and-forget（加 Key、登录完成时都会触发），它真的能落在一次勾选的「读 → 写」之间。
+  - **改法**：`OpenDesignModelSettingsStore` 用一条 Promise 队列把 `write` / `update` / `storeCatalog` / `selectModels` / `setContextWindowOverride` 的整个读→算→写串起来，公开 `write()` 拆出 `writeUnlocked()` 供内部调用以免自锁；失败只 reject 自己的调用方、队列尾被压平，一次失败不会毒化后续写入；`read()` 仍在队列之外（热路径，且排队期间早先的写都已落盘）。
+  - **证据**：红-绿——去掉队列后，`storeCatalog` 与 `selectModels` 并发**确定性**丢字段（两次红丢的还是不同字段，正是「后写者整份覆盖」的样子），顺序性用例同时失败；加锁后连跑三次皆绿。
+
+- **[opendesign] 长思考不再在 180 秒处被掐断**
+  - **现象**：一段较长的思考之后请求被中止，界面显示「已重试模型请求（2/3）」与 `The operation was aborted due to timeout`，最终「已停止」。
+  - **为什么**：`withAttemptTimeout` 把 `AbortSignal.timeout(180_000)` 挂到 fetch 的 signal 上**从不解除**。`AbortSignal.timeout` 是绝对计时，会跟着响应体（也就是整条思考流）走，于是它实际变成了「整条回答必须在 180 秒内结束」。本机会话记录里两次尝试分别流式了 155 秒与 173 秒，都精确地在请求发出后 180 秒整被掐断，随后重试两次同样死掉。
+  - **改法**：截止改为真正的**响应头截止**——用 `AbortController` + `setTimeout` 实现并在拿到响应头（成功或失败）时立即 `clear()`，之后流量的存活交给活动可重置的空闲看门狗（300 秒**静默**，每个 chunk 重置）；新增 `headerTimeoutMs` 选项，使测试能用毫秒级预算验证这一区别。
+  - **同类排查**：全仓 85 处 `AbortSignal.timeout` / 自建 `withTimeout` / `setTimeout` / `Promise.race` 逐条核对后，只有 opendesign 这一条线路把绝对计时器挂在流式请求上（cline-pass 本来就在拿到响应头后 `clear()`，其余 10 条线路的流式路径没有绝对上限）；四个从未被使用的 `CHAT_TIMEOUT_MS = 300_000` 常量补上注释，写明不得用于流式请求。
+  - **测试**：`test/opendesign-adapter.test.ts` 新增两条——截止之后才开始的流仍能跑完、响应头始终不来仍会放弃（已用红-绿证明）。
+
 - **[kimi-code] 额度徽标不再偶尔显示一长串小数**
   - **现象**：编写器旁的「额度 xx%」有时是 `91.96000000000001%` 这种数字，而且只在**部分**读数上出现。
   - **为什么**：徽标显示的是「剩余」，算法是 `100 - usedPercent`。`100 - 8.04` 在二进制浮点里等于 `91.96000000000001`，而代码直接把这个差值插进字符串——两位小数的 used 里约 **三分之一** 会落在这种不友好的邻居上，所以看起来「有时候」；这不是显示精度没设够，四舍五入 used 也没用，必须在**算完之后**格式化。

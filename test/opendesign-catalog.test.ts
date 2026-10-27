@@ -4,7 +4,7 @@
  * cold-start guard that keeps the fallback table unfiltered.
  */
 import { describe, expect, it } from 'vitest'
-import { resolveModelInfo, resolveOutputBudget } from '../src/host/opendesign/catalog.ts'
+import { isModelServed, resolveModelInfo, resolveOutputBudget } from '../src/host/opendesign/catalog.ts'
 import { openDesignKnownModelIds, openDesignVisibleModelIds } from '../src/host/opendesign/line.ts'
 import { defaultOpenDesignModelSettings } from '../src/host/opendesign/token-store.ts'
 import { DEFAULT_MODELS } from '../src/host/opendesign/types.ts'
@@ -58,10 +58,23 @@ describe('resolveModelInfo', () => {
     expect(info.pricing).toBeUndefined()
   })
 
-  it('an empty published ladder is a statement, not an absence', () => {
-    // MiMo's rows publish no ladder at all: no effort knob is offered, rather
-    // than the default trio being claimed for a model that has none.
-    const info = resolveModelInfo('mimo-v2.6-pro', { synced: [] })
+  it('a row with no ladder keeps the default trio rather than being called a non-reasoner', () => {
+    // These three rows shipped as `reasoning: false` on the strength of an empty
+    // ladder in the command-code registry. That is a statement about the SOURCE
+    // (it publishes no ladder), not about the model: the cline-pass table writes
+    // the same family as `reasoning: true` and wins on a conflict, and a missing
+    // ladder falls through to the line's default trio.
+    for (const id of ['mimo-v2.6-flash', 'mimo-v2.6-pro', 'qwen3.7-max']) {
+      const info = resolveModelInfo(id, { synced: [] })
+      expect(info.reasoning, id).toBe(true)
+      expect(info.efforts, id).toEqual(['low', 'medium', 'high'])
+    }
+  })
+
+  it('a live listing that declares no reasoning is still honoured', () => {
+    // The correction above is about the shipped table's unsupported claim, never
+    // about overriding what a listing actually publishes.
+    const info = resolveModelInfo('mimo-v2.6-pro', { synced: [{ id: 'mimo-v2.6-pro', reasoning: false }] })
     expect(info.reasoning).toBe(false)
     expect(info.efforts).toEqual([])
   })
@@ -97,6 +110,22 @@ describe('resolveModelInfo', () => {
   })
 })
 
+describe('isModelServed', () => {
+  it('nothing measured means nothing hidden', () => {
+    // `null` is "no scan ever succeeded": the absence of a fact is not a denial,
+    // so a fresh install advertises the shipped table instead of an empty picker.
+    expect(isModelServed('gpt-6-luna', null)).toBe(true)
+    expect(isModelServed('a-model-nobody-listed', null)).toBe(true)
+  })
+
+  it('a measurement hides the ids it did not list', () => {
+    expect(isModelServed('gpt-6-luna', ['gpt-6-luna', 'kimi-k3'])).toBe(true)
+    expect(isModelServed('gpt-6-luna', ['kimi-k3'])).toBe(false)
+    // An empty measurement is a measurement: it must not decay into "never synced".
+    expect(isModelServed('gpt-6-luna', [])).toBe(false)
+  })
+})
+
 describe('the visible-model rule', () => {
   it('a cold start with an explicit whitelist still lists the fallback table', () => {
     // The selection is captured against the gateway's wire ids and the shipped
@@ -120,6 +149,20 @@ describe('the visible-model rule', () => {
   it('an explicit empty selection still wins: nothing is advertised', () => {
     const settings = { ...defaultOpenDesignModelSettings(), enabledModelIds: [] as string[] }
     expect(openDesignVisibleModelIds(settings)).toEqual([])
+  })
+
+  it('a model the plan withholds is not advertised, unless it is forced', () => {
+    // Both the card's numbers and the picker's own list come from this one function,
+    // so the plan layer lives here rather than in the adapter.
+    const base = defaultOpenDesignModelSettings()
+    expect(openDesignVisibleModelIds(base)).toEqual(openDesignKnownModelIds(base))
+    const measured = { ...base, servedModelIds: ['gpt-6-luna'] }
+    expect(openDesignVisibleModelIds(measured)).toEqual(['gpt-6-luna'])
+    const forced = { ...measured, forceVisibleModels: ['kimi-k3'] }
+    expect(openDesignVisibleModelIds(forced)).toEqual(['gpt-6-luna', 'kimi-k3'])
+    // The force list cannot rescue an id the hidden list or the tick list vetoed.
+    const vetoed = { ...forced, hiddenModels: ['kimi-k3'], enabledModelIds: ['gpt-6-luna'] }
+    expect(openDesignVisibleModelIds(vetoed)).toEqual(['gpt-6-luna'])
   })
 
   it('a hidden model stays out even when selected', () => {

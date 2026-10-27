@@ -36,6 +36,12 @@ export function installQoderStyles(): void {
 .dshq-quota-name{color:var(--dsw-alias-label-primary);font-size:12px;min-width:104px}
 .dshq-quota-value{color:var(--dsw-alias-label-secondary);font-size:12px}
 .dshq-quota-meta{color:var(--dsw-alias-label-tertiary);font-size:11px}
+/* 额度用尽：账号层面的一条事实（上游明说），与三只桶的数字并排给出。 */
+.dshq-quota-exhausted{margin-top:11px}
+.dshq-quota-exhausted-title{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600}
+.dshq-quota-exhausted-hint{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5;margin-top:4px}
+.dshq-quota-exhausted a{color:var(--dsw-alias-label-link,#397ee8);font-size:12px;text-decoration:none}
+.dshq-quota-exhausted a:hover{text-decoration:underline}
 /* 快照卡里的几行事实：紧凑网格，一格一件事，行高一致。 */
 .dshq-fact-grid{display:grid;gap:9px 20px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-top:11px}
 .dshq-fact{display:flex;flex-direction:column;gap:3px;min-width:0}

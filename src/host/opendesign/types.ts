@@ -224,8 +224,15 @@ export const MODEL_CATALOG: Readonly<Record<string, OpenDesignModelMeta>> = Obje
   'hy4-preview': { name: 'Hunyuan H4 Preview', pricing: { input: 0.834, output: 2.501 }, contextWindow: 1_048_576, input: ['text'], efforts: ['low', 'medium', 'high'] },
   'kimi-k2.7-code': { name: 'Kimi K2.7 Code', pricing: { input: 0.95, output: 4 }, contextWindow: 262_144, maxTokens: 262_144, input: ['text', 'image'], efforts: ['none', 'low', 'medium', 'high'] },
   'kimi-k3': { name: 'Kimi K3', pricing: { input: 3, output: 15 }, contextWindow: 1_048_576, maxTokens: 131_072, input: ['text', 'image'], efforts: ['low', 'high', 'max'] },
-  'mimo-v2.6-flash': { name: 'MiMo V2.6 Flash', pricing: { input: 0.14, output: 0.28 }, contextWindow: 1_048_576, input: ['text', 'image'], reasoning: false },
-  'mimo-v2.6-pro': { name: 'MiMo V2.6 Pro', pricing: { input: 0.435, output: 0.87 }, contextWindow: 1_048_576, input: ['text', 'image'], reasoning: false },
+  // 下面三行曾写作 `reasoning: false`，依据是 command-code 注册表里同族条目的
+  // 空档位标注。该依据不成立：空档位只说明没有来源声明档位，不等于非推理模型
+  // （docs/opendesign-line-plan.md §3 决策 8），而同族的 cline-pass 行
+  // （cline-pass/mimo-v2.5、cline-pass/mimo-v2.5-pro、cline-pass/qwen3.7-max）
+  // 在 src/host/cline-pass/types.ts 里都写作 `reasoning: true`，§2 规定两表
+  // 冲突时 cline-pass 的 DSH 拼写胜出。因此这里不写 `reasoning` 字段：字段缺失
+  // 走「无档位声明 → DEFAULT_EFFORTS 三档」的既有路径，而不是被判定成非推理。
+  'mimo-v2.6-flash': { name: 'MiMo V2.6 Flash', pricing: { input: 0.14, output: 0.28 }, contextWindow: 1_048_576, input: ['text', 'image'] },
+  'mimo-v2.6-pro': { name: 'MiMo V2.6 Pro', pricing: { input: 0.435, output: 0.87 }, contextWindow: 1_048_576, input: ['text', 'image'] },
   // No sibling table documents this model: its window, output cap and ladder
   // stay unset and the line's defaults apply (the editor can override).
   'minimax-m3.1-flash': { name: 'MiniMax M3.1 Flash', pricing: { input: 0.15, output: 0.6 }, reasoning: true, input: ['text'] },
@@ -233,7 +240,9 @@ export const MODEL_CATALOG: Readonly<Record<string, OpenDesignModelMeta>> = Obje
   // No sibling table documents this model: its window, output cap and ladder
   // stay unset and the line's defaults apply (the editor can override).
   'muse-wonder': { name: 'Muse Wonder', pricing: { input: 4, output: 20 }, reasoning: true, input: ['text'] },
-  'qwen3.7-max': { name: 'Qwen3.7 Max', pricing: { input: 2.5, output: 7.5 }, contextWindow: 1_000_000, maxTokens: 65_536, input: ['text'], reasoning: false },
+  // 同 mimo 两行的依据：cline-pass 的同族行写作 `reasoning: true`，空档位不是
+  // 非推理的声明，所以这里同样不写 `reasoning` 字段（默认三档）。
+  'qwen3.7-max': { name: 'Qwen3.7 Max', pricing: { input: 2.5, output: 7.5 }, contextWindow: 1_000_000, maxTokens: 65_536, input: ['text'] },
 })
 
 /** Subscription models current at release time; the live catalog extends this. */

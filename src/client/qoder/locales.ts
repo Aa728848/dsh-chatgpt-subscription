@@ -131,6 +131,10 @@ export const zh = {
   quotaSignedOut: '登录后这里显示账号的额度。',
   quotaErrorLabel: '额度读取失败',
   quotaNoUnit: '',
+  /** 上游明说额度用尽：它是账号层面的事实，三只桶全是 0 时只有它能说清为什么被拒。 */
+  quotaExceeded: '额度已用尽',
+  quotaExceededHint: '上游说这个账号的额度已经用尽，请求会被拒。额度恢复之前发消息会失败：可以等周期重置，或在额度页升级套餐。',
+  quotaUpgradeLink: '打开升级页面',
 
   cacheSection: '缓存用量',
   cacheStatScope: '本机统计（token 维度，自本进程启动累计）：它回答「缓存帮了多少忙」，不是上游账单。',
@@ -263,6 +267,9 @@ export const en: Record<QoderLocaleKey, string> = {
   quotaSignedOut: 'Sign in to see the account\'s quota here.',
   quotaErrorLabel: 'Quota read failed',
   quotaNoUnit: '',
+  quotaExceeded: 'Quota exhausted',
+  quotaExceededHint: 'Upstream says this account\'s quota is exhausted, so requests get rejected. Sending a message fails until the quota resets: wait for the period to reset, or upgrade the plan on the quota page.',
+  quotaUpgradeLink: 'Open the upgrade page',
 
   cacheSection: 'Cache usage',
   cacheStatScope: 'Local statistics (tokens, accumulated since this process started): it answers "how much the cache helped", not the upstream bill.',

@@ -191,6 +191,53 @@ describe('QoderAdapter 端到端（mock fetch）', () => {
     await settingsStore.updateSettings({ enabledModelIds: null })
     expect((await adapter.listModels('qoder')).length).toBe(all.length)
   })
+
+  it('上游排队（HTTP 200 + 错误信封）不再被说成「API 密钥无效」，账号也不被判成要重新登录', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'qoder-adapter-queue-'))
+    const pool = new QoderAccountPool({ backend: new MemoryBackend() as never })
+    await pool.addAccount(credentials())
+    // 上游把排队信息装在 **HTTP 200 的 SSE 错误信封** 里（statusCodeValue: 403）。
+    const fetchFn = (async () => new Response(
+      'data:' + JSON.stringify({
+        headers: { 'Content-Type': ['application/json'] },
+        body: JSON.stringify({
+          code: 10605,
+          subCode: 'RESOURCE_LIMIT',
+          modelKey: 'dfmodel',
+          queueCount: 3239,
+          retryAfterSeconds: 30,
+          serviceAvailable: false,
+        }),
+        statusCodeValue: 403,
+        statusCode: 'FORBIDDEN',
+      }) + '\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )) as unknown as typeof fetch
+    const adapter = new QoderAdapter(
+      new QoderCredentialStore(path.join(dir, 'credentials.json'), new MemoryBackend() as never),
+      new QoderModelSettingsStore(path.join(dir, 'models.json')),
+      undefined,
+      { accountPool: pool, fetchFn },
+    )
+
+    const prepared = await adapter.prepareCall('qoder', 'Lite')
+    let caught: { code?: string; message?: string } | undefined
+    try {
+      for await (const chunk of prepared.stream({
+        provider: 'qoder',
+        model: 'Lite',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      } as never)) void chunk
+    } catch (error) {
+      caught = error as { code?: string; message?: string }
+    }
+    // 排队说的是上游容量：归 SERVER，不归 AUTH（DSH 只在 AUTH 时显示「API 密钥无效」）。
+    expect(caught?.code).toBe('SERVER')
+    expect(caught?.message).toContain('排队')
+    // 凭据是好的：账号没有被判成「要重新登录」。
+    const accounts = await pool.listAccounts()
+    expect(accounts.every((account) => account.authStatus !== 'expired')).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------

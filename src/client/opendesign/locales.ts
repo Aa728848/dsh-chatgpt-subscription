@@ -63,6 +63,10 @@ export const zh = {
   catalogSyncedNote: '实时目录已同步 {count} 个模型。',
   noModels: '暂无可用模型。',
   pricingNote: '价格为官方公开价目（美元 / 每百万 token，输入 / 输出）。',
+  // Rows the current plan withholds stay listed: hidden by default, force-shown
+  // once checked, and labelled so the exception is visible before it is made.
+  unservedBadge: '套餐不支持',
+  unservedHint: '当前套餐不提供的模型默认隐藏，勾选后会强制显示。',
 
   contextSection: '上下文窗口',
   contextHint: '官方未公布各模型的上下文窗口：默认按 128k 处理，可在这里按模型修正。留空或保存无效值会提示错误；恢复默认会清掉覆盖值。',
@@ -178,6 +182,8 @@ export const en = {
   catalogSyncedNote: 'Live catalog synced: {count} model(s).',
   noModels: 'No models available.',
   pricingNote: 'Prices are the official public list (USD per 1M tokens, input / output).',
+  unservedBadge: 'Not in plan',
+  unservedHint: 'Models the current plan does not serve stay hidden by default; checking one here forces it to show.',
 
   contextSection: 'Context windows',
   contextHint: 'The vendor publishes no per-model context windows, so models default to 128k; correct any model here. An invalid value is reported rather than saved; restoring clears the override.',

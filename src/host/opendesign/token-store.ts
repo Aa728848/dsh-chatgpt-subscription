@@ -134,6 +134,29 @@ export interface OpenDesignModelSettings {
   catalogModels: OpenDesignCatalogModel[]
   /** Models the route must not advertise even though it still knows them. */
   hiddenModels: string[]
+  /**
+   * The ids the last successful catalog scan really returned; `null` before one.
+   *
+   * The PLAN, not the line, decides which models are served, and the ids a scan
+   * returns ARE that decision — the gateway listing "supplies the ids this key's
+   * plan really serves" (see the sync's own comment in routes.ts). Three states,
+   * kept apart on purpose:
+   *
+   * - `null`: no scan has ever succeeded. Nobody measured anything, so nothing is
+   *   filtered on this ground and a fresh install advertises the shipped table.
+   * - an array: the union of every id the last successful scan returned. An id
+   *   outside it is not served by this plan and is not advertised, unless the user
+   *   forced it visible ({@link forceVisibleModels}).
+   * - `[]` stays an array for the same reason an empty `enabledModelIds` does: a
+   *   measurement that returned nothing must not decay into "never measured",
+   *   which would silently re-show every model.
+   *
+   * A failed scan never clears it — the previous measurement stands rather than a
+   * network error switching the filter off.
+   */
+  servedModelIds: string[] | null
+  /** Ids the user force-shows even though the plan's last scan did not list them. */
+  forceVisibleModels: string[]
   /** Per-model context-window override; absent uses the resolved window. */
   contextWindowOverrides: Record<string, number>
   defaultContextWindow: number
@@ -295,6 +318,25 @@ function readCatalogModels(value: unknown): OpenDesignCatalogModel[] {
   return models
 }
 
+/**
+ * One stored id list, normalized: non-empty strings only, deduplicated, and
+ * `null` when the value is not a list at all.
+ *
+ * `null` and `[]` stay distinct here; see the tri-state note on
+ * {@link OpenDesignModelSettings.servedModelIds}.
+ */
+function readIdList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const ids: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const id = entry.trim()
+    if (id === '' || ids.includes(id)) continue
+    ids.push(id)
+  }
+  return ids
+}
+
 function positiveInteger(value: unknown, fallback: number, allowZero = false): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) return fallback
   return value
@@ -318,6 +360,11 @@ export function parseOpenDesignModelSettings(value: unknown): OpenDesignModelSet
     hiddenModels: Array.isArray(record.hiddenModels)
       ? record.hiddenModels.filter((id): id is string => typeof id === 'string')
       : [],
+    // A document written before this fact existed states neither field; it reads
+    // as "never synced" (null) and "nothing forced" ([]), which is exactly the
+    // behaviour it had before, so an upgrade hides no model.
+    servedModelIds: readIdList(record.servedModelIds),
+    forceVisibleModels: readIdList(record.forceVisibleModels) ?? [],
     contextWindowOverrides: readNumberOverrides(record.contextWindowOverrides),
     defaultContextWindow: positiveInteger(record.defaultContextWindow, DEFAULT_CONTEXT_WINDOW),
     defaultMaxTokens: positiveInteger(record.defaultMaxTokens, DEFAULT_MAX_TOKENS),
@@ -337,11 +384,29 @@ export function defaultOpenDesignModelSettings(): OpenDesignModelSettings {
  *
  * The file is written atomically (temp + rename) so a crash mid-write leaves the
  * previous document intact rather than a truncated one that reads as "reset all
- * settings".
+ * settings", and writes are SERIALIZED behind one queue so two read→compute→write
+ * cycles can never interleave and erase each other's fields. Reads do not queue:
+ * see {@link OpenDesignModelSettingsStore.pending}.
  */
 export class OpenDesignModelSettingsStore implements OpenDesignPreferenceStore {
   private cached: OpenDesignModelSettings | null = null
   private loadPromise: Promise<OpenDesignModelSettings> | null = null
+  /**
+   * Tail of the write queue.
+   *
+   * Every mutator derives a WHOLE document from the one it read, so two of them in
+   * flight at once each erase the other's fields. That is not hypothetical here:
+   * the catalog sync is fire-and-forget (`void syncCatalog()` on account add and on
+   * a completed sign-in), so it really can land between a selection change's read
+   * and its write. Each mutation therefore runs its entire read → compute → write
+   * inside one turn of this queue.
+   *
+   * `read()` stays OUTSIDE the queue on purpose: it is the hot path (every status
+   * request, every keystroke-driven checkbox), and waiting behind a write would buy
+   * nothing — by the time a queued operation runs, every write queued before it has
+   * already landed, so the plain read it performs IS the in-lock read.
+   */
+  private pending: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly filePath = modelSettingsPath()) {}
 
@@ -353,7 +418,14 @@ export class OpenDesignModelSettingsStore implements OpenDesignPreferenceStore {
     return this.cached ?? defaultOpenDesignModelSettings()
   }
 
-  /** Read the document at activation time, synchronously. */
+  /**
+   * Read the document at activation time, synchronously.
+   *
+   * Synchronous by contract, so it cannot join the write queue — and it does not
+   * need to: it only READS, a rename makes the file either the old or the new
+   * document (never a half-written one), and a queued write assigns `cached` after
+   * that rename, so a reading taken mid-write is superseded by the write's own.
+   */
   readSync(): OpenDesignModelSettings {
     if (this.cached !== null) return this.cached
     try {
@@ -389,7 +461,32 @@ export class OpenDesignModelSettingsStore implements OpenDesignPreferenceStore {
     return this.cached
   }
 
+  /**
+   * Run one operation with exclusive access to the document.
+   *
+   * The queue's tail never carries a rejection: an operation that throws rejects
+   * its OWN caller only, and the tail is flattened to a fulfilled promise right
+   * afterwards, so a failed write cannot poison the writes queued behind it.
+   */
+  private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.pending.then(operation)
+    this.pending = result.then(() => undefined, () => undefined)
+    return await result
+  }
+
+  /** Replace the whole document, queued behind any write already in flight. */
   async write(settings: OpenDesignModelSettings): Promise<OpenDesignModelSettings> {
+    return await this.exclusive(() => this.writeUnlocked(settings))
+  }
+
+  /**
+   * The file half of a write, for callers that ALREADY hold the queue.
+   *
+   * No public mutator may call another one: awaiting a queued mutator from inside
+   * `exclusive` would wait for a queue position behind itself and deadlock. That is
+   * why every mutator below composes `read()` with THIS, never with `write()`.
+   */
+  private async writeUnlocked(settings: OpenDesignModelSettings): Promise<OpenDesignModelSettings> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true })
     const tmp = `${this.filePath}.tmp.${Date.now()}`
     await fs.writeFile(tmp, JSON.stringify({ version: 1, ...settings }, null, 2), 'utf8')
@@ -399,32 +496,69 @@ export class OpenDesignModelSettingsStore implements OpenDesignPreferenceStore {
   }
 
   async update(patch: Partial<OpenDesignModelSettings>): Promise<OpenDesignModelSettings> {
-    const current = await this.read()
-    const next: OpenDesignModelSettings = {
-      ...current,
-      ...patch,
-      // Collections are replaced as a whole rather than merged, so a caller can
-      // delete an override by passing the next map.
-      contextWindowOverrides: patch.contextWindowOverrides === undefined
-        ? current.contextWindowOverrides
-        : patch.contextWindowOverrides,
-    }
-    await this.write(next)
-    return next
+    return await this.exclusive(async () => {
+      const current = await this.read()
+      const next: OpenDesignModelSettings = {
+        ...current,
+        ...patch,
+        // Collections are replaced as a whole rather than merged, so a caller can
+        // delete an override by passing the next map.
+        contextWindowOverrides: patch.contextWindowOverrides === undefined
+          ? current.contextWindowOverrides
+          : patch.contextWindowOverrides,
+      }
+      return await this.writeUnlocked(next)
+    })
   }
 
-  /** Record a catalog sync without touching the user's selection. */
-  async storeCatalog(models: OpenDesignCatalogModel[]): Promise<OpenDesignModelSettings> {
-    const current = await this.read()
-    return await this.write({ ...current, catalogModels: models })
+  /**
+   * Record a catalog sync without touching the user's selection.
+   *
+   * `servedModelIds` is written only when the caller actually measured it: a sync
+   * in which every scan failed must leave the previous measurement standing rather
+   * than clearing the filter, so `undefined` keeps the stored value while an array
+   * (including an empty one) replaces it.
+   */
+  async storeCatalog(models: OpenDesignCatalogModel[], servedModelIds?: string[] | null): Promise<OpenDesignModelSettings> {
+    return await this.exclusive(async () => {
+      const current = await this.read()
+      return await this.writeUnlocked(servedModelIds === undefined
+        ? { ...current, catalogModels: models }
+        : { ...current, catalogModels: models, servedModelIds })
+    })
+  }
+
+  /**
+   * Replace the model selection, dropping any forced reveal it excludes.
+   *
+   * One `read` for both the prune input and the write baseline, so the two cannot
+   * disagree: computing the prune outside and then patching would read the document
+   * twice, and a forced reveal added in that gap would be recorded and then erased
+   * by the second read's snapshot.
+   *
+   * The prune belongs to the selection rather than to `models/visibility` because
+   * the card's only un-tick path is the selection patch: it removes the id from the
+   * whitelist and never posts `{visible:false}`, so a forced reveal would otherwise
+   * outlive the tick that asked for it. `null` is "no filter" — not a "keep only
+   * these" statement — so it prunes nothing.
+   */
+  async selectModels(ids: string[] | null): Promise<OpenDesignModelSettings> {
+    return await this.exclusive(async () => {
+      const current = await this.read()
+      return await this.writeUnlocked(ids === null
+        ? { ...current, enabledModelIds: null }
+        : { ...current, enabledModelIds: ids, forceVisibleModels: current.forceVisibleModels.filter((id) => ids.includes(id)) })
+    })
   }
 
   /** Store or clear (null) one model's context-window override. */
   async setContextWindowOverride(model: string, contextWindow: number | null): Promise<OpenDesignModelSettings> {
-    const current = await this.read()
-    const overrides = { ...current.contextWindowOverrides }
-    if (contextWindow === null) delete overrides[model]
-    else overrides[model] = contextWindow
-    return await this.write({ ...current, contextWindowOverrides: overrides })
+    return await this.exclusive(async () => {
+      const current = await this.read()
+      const overrides = { ...current.contextWindowOverrides }
+      if (contextWindow === null) delete overrides[model]
+      else overrides[model] = contextWindow
+      return await this.writeUnlocked({ ...current, contextWindowOverrides: overrides })
+    })
   }
 }

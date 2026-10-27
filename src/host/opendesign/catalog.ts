@@ -51,6 +51,23 @@ export function resolveOutputBudget(budget: number | undefined, ceiling: number 
 }
 
 /**
+ * Whether the subscription is known to serve one model.
+ *
+ * `servedModelIds === null` is "nobody has ever measured this plan": the absence
+ * of a fact is not a denial, so nothing is hidden on its strength and the shipped
+ * table stands in exactly as it did before this fact existed. An array is a
+ * measurement taken from a successful scan, and an id outside it is a model this
+ * plan does not serve — it stays in the editor as a described model, it just stops
+ * being advertised.
+ *
+ * The user's own override lives one layer up (`forceVisibleModels`): this function
+ * answers what the plan said, never what the user decided.
+ */
+export function isModelServed(model: string, servedModelIds: readonly string[] | null): boolean {
+  return servedModelIds === null || servedModelIds.includes(model)
+}
+
+/**
  * Resolve the metadata one model is advertised with.
  *
  * Precedence per field: the user's override, then the last gateway listing,
