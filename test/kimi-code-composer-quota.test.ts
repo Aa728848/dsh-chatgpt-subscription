@@ -9,10 +9,21 @@
  * using the raw share.
  */
 import { describe, expect, it } from 'vitest'
-import type { KimiCodeWebStatus } from '../src/shared/kimi-code-contracts.ts'
+import type { KimiCodeAccount, KimiCodeWebStatus } from '../src/shared/kimi-code-contracts.ts'
 import { selectBadgeFacts } from '../src/client/kimi-code/KimiCodeComposerQuota.tsx'
 
 function status(usedPercent: number | null, windows = true): KimiCodeWebStatus {
+  // A full status object rather than a cast: the badge reads only `quota`, but a
+  // partial fixture silently stops matching the DTO the moment a field is added.
+  const account: KimiCodeAccount = {
+    userId: 'u_1',
+    nickname: 'kimi',
+    email: null,
+    planName: 'Allegretto',
+    planLevel: null,
+    region: 'mainland-cn',
+    authenticatedAt: null,
+  }
   return {
     authenticated: true,
     hasCredentials: true,
@@ -20,14 +31,21 @@ function status(usedPercent: number | null, windows = true): KimiCodeWebStatus {
     region: 'mainland-cn',
     oauthHost: 'https://auth.kimi.com',
     codingBaseUrl: 'https://api.kimi.com/coding',
+    account,
+    lastFetchedAt: Date.now(),
+    credentialsRejected: false,
+    quotaError: null,
+    cache: null,
+    preserveThinking: false,
+    models: [],
+    contextWindowOverrides: {},
+    defaultReasoningEffort: null,
+    loginRegion: 'mainland-cn',
     serving: true,
     conflict: null,
     quota: windows
       ? {
-          account: {
-            userId: 'u_1', nickname: 'kimi', email: null,
-            planName: 'Allegretto', planLevel: null, region: 'mainland-cn', authenticatedAt: null,
-          },
+          account,
           planName: 'Allegretto',
           windows: [{
             id: 'limit_5h', label: '5-hour', usedFraction: (usedPercent ?? 0) / 100,
@@ -39,10 +57,7 @@ function status(usedPercent: number | null, windows = true): KimiCodeWebStatus {
           sources: [],
         }
       : {
-          account: {
-            userId: 'u_1', nickname: 'kimi', email: null,
-            planName: 'Allegretto', planLevel: null, region: 'mainland-cn', authenticatedAt: null,
-          },
+          account,
           planName: 'Allegretto',
           windows: [],
           extraUsage: {
@@ -52,7 +67,7 @@ function status(usedPercent: number | null, windows = true): KimiCodeWebStatus {
           fetchedAt: Date.now(),
           sources: [],
         },
-  } as KimiCodeWebStatus
+  }
 }
 
 describe('Kimi composer badge', () => {

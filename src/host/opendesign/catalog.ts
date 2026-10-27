@@ -92,6 +92,9 @@ export function resolveModelInfo(
   // distinct from absence; only absence falls through to the default trio.
   const publishedEfforts = Array.isArray(published.efforts) && published.efforts.length > 0 ? published.efforts : undefined
   const efforts = publishedEfforts ?? (shipped?.efforts !== undefined && shipped.efforts.length > 0 ? [...shipped.efforts] : DEFAULT_EFFORTS)
+  const defaultEffort = reasoning && shipped?.defaultEffort !== undefined && efforts.includes(shipped.defaultEffort)
+    ? shipped.defaultEffort
+    : undefined
   const declaredInput = Array.isArray(published.input) && published.input.length > 0
     ? published.input
     : shipped?.input ?? ['text']
@@ -104,6 +107,7 @@ export function resolveModelInfo(
     maxTokens: maxTokens ?? (options.defaultMaxTokens ?? DEFAULT_MAX_TOKENS),
     reasoning,
     ...(reasoning ? { efforts } : { efforts: [] }),
+    ...(defaultEffort === undefined ? {} : { defaultEffort }),
     input: input.length > 0 ? input : ['text'],
     ...(shipped?.pricing === undefined ? {} : { pricing: shipped.pricing }),
   }

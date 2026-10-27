@@ -101,11 +101,7 @@ export const zh = {
   cacheOutput: '输出 tokens',
   cacheRequests: '请求数',
   cacheWrite: '缓存写入',
-  cacheWrite5m: '5 分钟档',
-  cacheWrite1h: '1 小时档',
-  cacheWriteHint: '写入是独立计费项：1h 写入单价约为 5m 的两倍，命中后会按原 TTL 续期。分档显示 0 表示服务端没有回报该档的写入数（响应头缺失就是静默），不等于该档确实没写入。',
   unknownMetric: '暂无',
-  cacheHint: '同一会话内：系统提示与工具列表一旦变化会使缓存整体失效，因此保持工具集合稳定、把新增内容追加在末尾，命中率最高。',
   cacheExpired: '本会话已空闲超过缓存有效期，下一轮将重新处理约 {tokens} 个 token。',
   cacheDrift: '最近前缀状态',
   cacheDriftFirst: '首个请求（缓存为空）',
@@ -157,6 +153,21 @@ export const zh = {
   loginFailed: '登录失败',
   requests: '次请求',
   tokens: 'tokens',
+  // Compaction model — offered on this tab only, and scoped to this line's
+  // sessions. The candidate directory still spans every line on purpose.
+  compactionRoute: '压缩模型',
+  compactionRouteHint: '自动压缩时由哪个模型来写摘要（仅对本线路的会话生效）。留空则继续用会话自己的模型，也就继续消耗这条线路的额度。',
+  compactionRouteProvider: '线路',
+  compactionRouteModel: '模型',
+  compactionRouteSave: '保存',
+  compactionRouteClear: '恢复会话模型',
+  compactionRouteChange: '设置',
+  compactionRouteFollow: '跟随会话模型（默认）',
+  compactionRouteSaved: '已保存，下次压缩生效。',
+  compactionRouteFailed: '保存失败',
+  compactionRouteNoVideo: '该模型不接受视频：含视频的会话会回落到会话模型完成压缩。',
+  compactionRouteNoImage: '该模型不接受图片：摘要里的截图会被替换为占位文本。',
+  compactionRouteEmpty: '没有可用的线路——先登录任意一条线路再回来设置。',
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
@@ -258,11 +269,7 @@ export const en: Record<keyof typeof zh, string> = {
   cacheOutput: 'Output tokens',
   cacheRequests: 'Requests',
   cacheWrite: 'Cache writes',
-  cacheWrite5m: '5-minute tier',
-  cacheWrite1h: '1-hour tier',
-  cacheWriteHint: 'A write is billed separately: a 1h write costs about twice a 5m one, and a hit renews the entry under its original TTL. A tier showing 0 means the service did not report a write for it (a missing response header is silence), not that nothing was written there.',
   unknownMetric: 'n/a',
-  cacheHint: 'Within one session: any change to the system prompt or the tool list invalidates the whole prefix cache, so keep the tool set stable and append new material at the tail for the best hit rate.',
   cacheDrift: 'Last prefix state',
   cacheDriftFirst: 'First request (cache cold)',
   cacheDriftStable: 'Stable (prefix unchanged)',
@@ -313,6 +320,20 @@ export const en: Record<keyof typeof zh, string> = {
   loginFailed: 'Sign-in failed',
   requests: 'requests',
   tokens: 'tokens',
+  // Compaction model — this tab only, this line's sessions only.
+  compactionRoute: 'Compaction model',
+  compactionRouteHint: 'Which model writes the summary when the context is compacted — it applies to sessions on this line only. Leave it unset to keep the conversation\'s own model, and this line\'s quota.',
+  compactionRouteProvider: 'Line',
+  compactionRouteModel: 'Model',
+  compactionRouteSave: 'Save',
+  compactionRouteClear: 'Use the conversation model',
+  compactionRouteChange: 'Change',
+  compactionRouteFollow: 'Follows the conversation model (default)',
+  compactionRouteSaved: 'Saved; it applies to the next compaction.',
+  compactionRouteFailed: 'Save failed',
+  compactionRouteNoVideo: 'This model takes no video: a session that carries video falls back to the conversation model.',
+  compactionRouteNoImage: 'This model takes no images: screenshots become placeholder text in the summary.',
+  compactionRouteEmpty: 'No route is available — sign in to one first.',
 } as const
 
 export const dictionaries = {

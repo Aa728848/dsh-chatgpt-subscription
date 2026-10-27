@@ -181,10 +181,13 @@ describe('the dispatch definition', () => {
   it('keeps the rows the dispatch contract depends on', () => {
     // The route rules in the persona exist only because the delegation tools
     // expose a model choice; the PTC presentation is the mode this preset is for.
-    // Both keys, not the retired `modelSelectionSettings`: harness 0.2.1-rc.1
-    // split that switch, and a row still carrying the old name mounts the tool
-    // with no route parameter and no discovery tool at all.
-    expect(rowById('tool-subagent').config).toMatchObject({ modelSelection: true, modelDiscovery: true })
+    // Released Harnesses through 0.2.1-rc.3 read `modelSelectionSettings`; later
+    // generations read `modelSelection` + `modelDiscovery`. Keep both contracts.
+    expect(rowById('tool-subagent').config).toMatchObject({
+      modelSelectionSettings: true,
+      modelSelection: true,
+      modelDiscovery: true,
+    })
     expect(rowById('tool-presentation').config).toEqual({ mode: 'ptc' })
     expect(rowById('persona').config).toMatchObject({ suffix: 'Your working directory is {{cwd}}.' })
     expect((rowById('persona').config as { prefix: string }).prefix).not.toContain('{{cwd}}')
@@ -632,17 +635,13 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
-  it('ships the two keys the current harness exposes route selection through', () => {
-    // Harness 0.2.1-rc.1 renamed `modelSelectionSettings` into `modelSelection`
-    // (route parameters) and `modelDiscovery` (list_subagent_models), and no
-    // longer implies one from the other. A preset left on the retired name mounts
-    // the delegation tool with BOTH off — no provider/model parameter and no
-    // discovery tool — so the guard demands a route the tool cannot accept and
-    // the model cannot even list what is authorized. That was a live deadlock:
-    // restore the old key here and the shipped preset goes mute again.
+  it('ships both the released and current model-selection switches', () => {
+    // The published 0.2.1-rc.3 package still reads only `modelSelectionSettings`;
+    // the later source tree reads `modelSelection` and `modelDiscovery`. Removing
+    // any of these rows disables dispatch on one side of that boundary.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
-    expect(yml).not.toContain('modelSelectionSettings: true')
-    // Config rows, not the header comment that also names both keys.
+    // Config rows, not the header comment that also names all three keys.
+    expect(/^ {8}modelSelectionSettings: true$/mu.test(yml)).toBe(true)
     expect(/^ {8}modelSelection: true$/mu.test(yml)).toBe(true)
     expect(/^ {8}modelDiscovery: true$/mu.test(yml)).toBe(true)
     // The generated template must agree with the bundled file.

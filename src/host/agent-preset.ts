@@ -340,6 +340,9 @@ Reset: fallback applies only to the current task. When the next task begins, alw
           config: {
             provider: 'spawn',
             toolName: 'subagent',
+            // Released Harnesses through 0.2.1-rc.3 read the legacy key; later
+            // generations read the split keys. Keep all three for both contracts.
+            modelSelectionSettings: true,
             modelSelection: true,
             modelDiscovery: true,
             backgroundMode: 'continuable',

@@ -82,6 +82,7 @@ describe('OpenDesignAdapter', () => {
     expect(resolved.name).toBe('GPT-6 Luna')
     expect(resolved.context?.contextWindow).toBe(1_050_000)
     expect(resolved.reasoning?.efforts.map((effort) => effort.name)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(resolved.reasoning?.defaultEffort).toBeUndefined()
     // The context slot still reserves the configured budget, not the window.
     expect(resolved.defaultMaxTokens).toBe(64_000)
   })
@@ -91,6 +92,10 @@ describe('OpenDesignAdapter', () => {
     const deepseek = await adapter.resolveModel('opendesign', 'deepseek-v4.1-flash')
     expect(deepseek.reasoning?.efforts.map((effort) => effort.name)).toEqual(['none', 'low', 'high', 'max'])
     expect(deepseek.context?.contextWindow).toBe(1_000_000)
+    for (const id of ['deepseek-v4.1-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro']) {
+      const model = await adapter.resolveModel('opendesign', id)
+      expect(model.reasoning?.defaultEffort).toBe('high')
+    }
     const mimo = await adapter.resolveModel('opendesign', 'mimo-v2.6-flash')
     expect(mimo.reasoning).toBeUndefined()
     expect(mimo.context?.contextWindow).toBe(1_048_576)

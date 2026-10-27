@@ -16,14 +16,12 @@
 #     the rule that every delegation names its model explicitly.
 #   * `tool-subagent.config.persona` — setting it would force one persona on
 #     every child, violating "subagents use the DSH default subagent role".
-#   * `modelSelection: true` IS kept: it is the only runtime switch that makes a
-#     model-facing route choice legal. It is deliberately paired with
-#     `modelDiscovery: true`, which registers `list_subagent_models` — the tool
-#     that lists the authorized routes. Harness 0.2.1-rc.1 renamed the old
-#     `modelSelectionSettings` switch into these two keys and stopped implying
-#     discovery from it; a preset still carrying the retired name mounts the tool
-#     with BOTH off, which exposes no provider/model parameter and no discovery
-#     tool, so every route-aware dispatch becomes impossible.
+#   * Model routing IS enabled by THREE coexisting keys:
+#     `modelSelectionSettings: true` for released Harnesses through 0.2.1-rc.3,
+#     plus `modelSelection: true` and `modelDiscovery: true` for later ones.
+#     Each generation reads only its own key(s), so dropping the legacy key
+#     disables route parameters, discovery, and Session policy capture on the
+#     published rc.3 core.
 #
 # This file is an AGENT-PLANE composition. It is mounted under one agent's
 # scope context, so every tool and prompt section it registers belongs to that
@@ -336,6 +334,7 @@
       config:
         provider: spawn
         toolName: subagent
+        modelSelectionSettings: true
         modelSelection: true
         modelDiscovery: true
         backgroundMode: continuable

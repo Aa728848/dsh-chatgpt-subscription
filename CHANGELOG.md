@@ -27,6 +27,49 @@
   - **改法**：气泡改成压住「已用段末端」（`--kq-tip-x` 由百分比给出），靠近两端时按气泡宽度收回来、不越出卡片；箭头改用独立的 `--kq-tip-arrow` 偏移，哪怕气泡被推回来也仍指在已用段的末端。布局尚未发生时（首帧、jsdom）两者都退回 50% 居中。
   - **测试**：`test/kimi-code-quota-ui.test.tsx` 新增 2 例——`--kq-tip-x` 必须等于已用比例、样式规则必须从左锚点定位且箭头不写死 `right:34px`。
 
+## 0.42.0 - 2026-10-27
+
+- **[kimi-code] K3.1 Pro 与 Highspeed 的额度倍率由「未公布」改为记录 2x / 4x**
+  - **背景**：官方模型表里 K3.1 Pro 这一行没有任何消耗倍数表述（「速度」列只写「常规速度」），K3.1 Pro Highspeed 写的是「消耗约为普速版两倍」「高速版（约 2–3 倍速，2 倍消耗）」。官方所有倍数都是兄弟型号之间的比例，从未写过「普速版等于 K3」；第三方受控实测给出的反而是「K3.1 Pro 比 K3 输入多约 50%、输出多约 82%，Highspeed 正好是 Pro 的 2 倍」。
+  - **改法**：按维护者判定，普速版与 K3 同耗（官方原文「k3（1M）消耗约为 k3-256k 两倍」，故 K3 为 2），`k3.1-pro` 记 **2**；高速版按官方「2 倍消耗」相对普速版折算，`k3.1-pro-highspeed` 记 **4**。字段语义仍是「相对最便宜模型」，DTO/契约未改，卡片那一列因此可以横向比较。
+  - **留痕**：两个条目的注释写明数字来自判定而非官方转录，并标注第三方实测的冲突区间，防止后来者把它当成官方数字引用。
+  - **回归**：`kimi-code-k31`、`kimi-code-plan`、`kimi-code-k31-card-ui` 三处原先钉住 `null` 与「未公布」的断言改为 2x / 4x；卡片用例改读 `.dsha-cap-cost`，并断言两行分别渲染 `额度倍率 2x` / `4x`。
+  - **验证**：`npm run typecheck` exit 0；针对性 `kimi-code-k31` / `kimi-code-plan` / `kimi-code-k31-card-ui` / `kimi-code-capability-ui` 共 **56/56**；全量 Vitest **298 文件通过 / 2 跳过，4903 测试通过 / 8 跳过 / 0 失败**；`npm run build` exit 0，`git diff --check` 无输出。
+
+- **[kimi-code] 压缩模型设置收窄为本线路专属，卡片从插件管理页搬进 Kimi Code 设置页**
+  - **作用域收窄**：`llm/stream` 上的压缩重路由监听器新增必填的 `scopeProvider`（`CompactionRouteDeps`）。只有 `options.provider` 等于该值的会话才会被重路由，判断排在 `purpose` / `rerouted` / `target === null` 之后、读取模型目录之前——其他线路的会话一律原样放行，不读目录、不发试探请求、不动 `status()`。插件入口传入 `KIMI_CODE_PROVIDER_ID`，模块内不硬编码 provider 字符串。
+  - **候选不变**：下拉仍然列出全部线路的模型（kimi 会话的摘要允许交给别家写），`compactionCandidates` 与 `shared/compaction-route.ts` 的能力判定未改动。
+  - **入口搬家**：删除 `src/client/CompactionRouteBundleConfig.tsx` 与它在 `src/client/index.tsx` 的 `plugins.bundle.config`（`COMPACTION_ROUTE_PACKAGE`）注册，插件管理页不再留任何入口；`CompactionRouteCard` 原样复用，作为独立一节插在 Kimi Code 页「缓存与 K3 调优」之后、「模型」之前，排版沿用卡片自带的 `dsha-group` / `dsha-pref-row` / `dsha-select` / `dsha-actions`。
+  - **三语同步**：`kimi-code/locales.ts`（zh + en）与 `locales-ru/kimi-code.ts` 各新增 13 个 `compactionRoute*` 键，提示语改为「仅对本线路的会话生效」；插件级 `locales.ts`（zh + en）与 `locales-ru/hub.ts` 删除同名的 13 个键（俄语词典按 `LocaleKey` 实现，残留即编译报错）。
+  - **回归**：`test/compaction-route.test.ts` 的 `install` 助手补上 `scopeProvider`，新增负向用例「目标已配置但会话在别的线路 → 不重路由、`status()` 仍为 null」；`test/compaction-route-card.test.tsx` 的标签改从 kimi 词典取；`test/kimi-code-k31-card-ui.test.tsx` 新增断言：kimi 页渲染该节的标题、提示、已保存的 `provider / model` 与「设置」按钮。
+  - **验证**：`npm run typecheck` exit 0；针对性 `compaction-route` / `compaction-route-card` / `kimi-code-k31-card-ui` / `client-registration` 共 **48/48**；全量 Vitest **298 文件通过 / 2 跳过，4903 测试通过 / 8 跳过 / 0 失败**；`npm run build` exit 0，`git diff --check` 无输出。压缩模型在发布版 Harness 上的端到端行为（真实 kimi 会话触发一次跨线路摘要、再触发一次非 kimi 会话确认不被重路由）未在本轮执行，以单测覆盖替代。
+
+- **[kimi-code] 缓存卡片只画写侧总量，5m / 1h 分档与两段常驻说明删除**
+  - **改法**：设置页「缓存与 K3 调优」里写侧那一行原来拼成「总量 · 5 分钟档 n · 1 小时档 n」，下面还跟两段说明（写侧为什么独立计费、以及系统提示与工具列表变化会作废前缀）。这两段讲的是响应头怎么上报、缓存为什么会失效，而不是这张卡片要比较的东西，因此整段删除，写侧只留总写入数。
+  - **三语同步**：`kimi-code/locales.ts`（zh + en）与 `locales-ru/kimi-code.ts` 删除 `cacheWrite5m` / `cacheWrite1h` / `cacheWriteHint` / `cacheHint` 四个键。`KimiCodeLocaleKey` 由 zh 推导、俄语词典按同一 key 集合实现，缺键会在编译期报错。
+  - **保留的部分**：宿主仍照常解析 `Msh-Usage-Cache-Write-Tokens-5m` / `-1h` 响应头，`cacheWrite5mTokens` / `cacheWrite1hTokens` 留在 DTO 里，只是前端不再展示——这是已经验证过的采信路径，删字段等于顺带废掉一条有用的上报数据。
+  - **回归**：`test/kimi-code-k31-card-ui.test.tsx` 原先断言整行拼串，改为断言单一总量，并断言缓存卡片内不再有说明段落（`p.dsha-muted` 计数为 0）。
+  - **验证**：`npm run typecheck` exit 0；针对性 `kimi-code-k31-card-ui` / `kimi-code-k31` / `kimi-code-cache-write` 共 **34/34**；全量 Vitest **299 文件通过 / 2 跳过，4904 测试通过 / 8 跳过 / 0 失败**，`git diff --check` 通过。
+
+## 0.41.1 - 2026-10-26
+
+- **[opendesign] DeepSeek 系列模型默认推理强度设为 `high`**
+  - `deepseek-v4.1-flash`、`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`deepseek-v4-pro` 现在通过适配器向宿主声明默认 `high` 推理强度；其它模型不显式覆盖宿主默认值。
+  - 实时目录的档位列表不再包含 `high` 时，会丢弃随包默认值，而不是把已经失效的默认档位继续传给宿主。适配器与目录测试覆盖四款模型及这一降级路径。
+
+- **[dispatch] 新旧子代理模型选择开关双写，恢复发布版 rc.3 的授权模型派发**
+  - **现象**：发布版 Harness rc.3 搭配插件 0.41.0 时，调度模式能看到授权模型，却不能按 `provider` + `model` 派出子代理；包含后续子代理改动的本地同号 HEAD 正常。
+  - **根因**：npm 发布包 `@deepseek-ai/dsh-tool-subagent@0.2.1-rc.3` 仍只读取 `modelSelectionSettings`，并由它控制路由参数、模型发现和 Session 策略记录；`modelSelection` / `modelDiscovery` 是本地 HEAD 的后续契约，相关提交 `8fa8e9167db`、`1448360b669` 均不在发布标签中。插件 0.41.0 只写两个新键，发布版因此把旧开关留在默认 `false`。
+  - **改法**：运行时 dispatch 声明与 bundled YAML 同时写入 `modelSelectionSettings: true`、`modelSelection: true`、`modelDiscovery: true`，不增加版本分支。发布版读取旧键，后续 Harness 读取新键；守卫和供应商代码不变。
+  - **回归**：`test/agent-preset.test.ts` 现在要求运行时配置和 bundled YAML 都携带三个键，防止再次把未发布 HEAD 的契约当成发布版 rc.3 的契约。
+  - **验证**：dispatch/authorization 针对性测试 **71/71**；三工程强制 TypeScript 检查、`npm run build`、全量 Vitest、`npm ci --dry-run`、`npm pack --dry-run` 均以 exit 0 完成，`git diff --check` 通过。发布版 rc.3 上“显式选择授权模型并检查子代理实际路由”的端到端验收未在本轮执行，不能用此前的会话创建 smoke 代替。
+
+- **[subagent-audit] 路由审计改读真实 Session 的 `snapshotEvents()`，不再把授权和违规记录读空**
+  - **现象与边界**：只读路由审计在真实 Session 上可能返回空授权、空违规；它不参与子代理创建，不影响 dispatch 派发或授权守卫。
+  - **根因**：审计直接读取 `session.events`，但发布版 rc.3 的 Session 原型没有这个公开字段，只提供 `snapshotEvents()`；既有测试全部使用 `{ events }` 替身，因此覆盖了错误的数据形状。
+  - **改法与回归**：新增统一 `eventsOf()`，轻量替身继续使用 `events`，真实 Session 回退到 `snapshotEvents()`，授权、catalog 和 descriptor 三处读取共用。新增 snapshot-only 回归先在旧实现上以 `undefined` 失败，修复后 **10/10** 通过；发布包原型探针确认 `events` 缺席而 `snapshotEvents` 存在。守卫本身另以真实发布版 ToolRuntime/SystemPrompt 跑通 **45/45**（含 PTC），没有发现第二处派发阻断。
+  - **合并验证**：上述 dispatch 与 audit 修复合并后，三工程强制 TypeScript 检查、`npm run build`、全量 Vitest、`npm ci --dry-run`、`npm pack --dry-run` 均通过。全量结果为 **299 文件通过 / 2 跳过，4904 测试通过 / 8 跳过 / 0 失败**；`git diff --check` 通过。
+
 ## 0.41.0 - 2026-10-26
 
 

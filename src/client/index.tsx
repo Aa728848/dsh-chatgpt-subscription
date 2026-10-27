@@ -12,7 +12,6 @@ import { ANTIGRAVITY_IMAGE_TOOL_NAME, CODEX_IMAGE_TOOL_NAME } from '../compat.ts
 import { CodexComposerQuota } from './CodexComposerQuota.tsx'
 import { CodexImageToolView, type ImageLoader } from './CodexImageToolView.tsx'
 import { ProviderHubSection } from './ProviderHubSection.tsx'
-import { COMPACTION_ROUTE_PACKAGE, CompactionRouteBundleConfig } from './CompactionRouteBundleConfig.tsx'
 import { SubscriptionApi } from './api.ts'
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
 import { installLineLocale } from './common/line-locale.ts'
@@ -202,17 +201,6 @@ export function apply(ctx: ClientContext): void {
     label: () => t('hubTitle'),
     locale: NS,
   }, ProviderHubSectionWrapper))
-
-  // The compaction model is a cross-line setting, so it lives on this plugin's
-  // own page in the DSH plugin manager rather than inside any one provider tab.
-  // The slot is declared by the plugin-manager entry and keyed by package name,
-  // so the page dispatches it for this bundle only; `inject` keeps this a no-op
-  // on a host that does not mount that page.
-  ctx.slots.inject('plugins.bundle.config' as never, () => ctx.slots.register({
-    name: 'plugins.bundle.config' as never,
-    key: COMPACTION_ROUTE_PACKAGE,
-    locale: NS,
-  } as never, CompactionRouteBundleConfig as never))
 
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right', id: 'codex-subscription-quota', order: 35, locale: NS,

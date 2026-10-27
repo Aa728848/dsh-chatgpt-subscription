@@ -448,6 +448,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       {
         stream: (options) => llm.stream(options),
         listModels: (provider) => llm.listModels(provider),
+        // Scoped to the line whose settings page offers the card: a session on
+        // any other provider keeps its own model for compaction, so configuring
+        // this never changes what another line produces or spends.
+        scopeProvider: KIMI_CODE_PROVIDER_ID,
         readTarget: () => preferences.status().compactionRoute ?? null,
       },
     )

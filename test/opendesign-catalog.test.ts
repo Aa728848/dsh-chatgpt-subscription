@@ -42,6 +42,13 @@ describe('resolveModelInfo', () => {
     expect(info.displayName).toBe('GPT-6 Luna')
   })
 
+  it('drops a shipped default when the live ladder no longer offers it', () => {
+    const info = resolveModelInfo('deepseek-v4.1-flash', {
+      synced: [{ id: 'deepseek-v4.1-flash', efforts: ['none', 'low', 'max'] }],
+    })
+    expect(info.defaultEffort).toBeUndefined()
+  })
+
   it('adopts a model only the live catalog knows, rather than hiding it', () => {
     const info = resolveModelInfo('brand-new-model', {
       synced: [{ id: 'brand-new-model', name: 'Brand New', contextWindow: 200_000 }],

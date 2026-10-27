@@ -73,6 +73,8 @@ function install(options: {
   target?: { provider: string; model: string } | null
   models?: readonly CompactionModelInfo[]
   attempt?: () => AsyncIterable<CompactionChunk>
+  /** The line the setting is scoped to; kimi-code unless a case says otherwise. */
+  scope?: string
 }) {
   const probe = harness()
   const issued: CompactionStreamOptions[] = []
@@ -84,6 +86,7 @@ function install(options: {
         : options.attempt()
     },
     listModels: async () => options.models ?? [],
+    scopeProvider: options.scope ?? SESSION.provider,
     readTarget: () => options.target ?? null,
   })
   return { probe, handle, issued }
@@ -185,6 +188,20 @@ describe('compaction routing listener', () => {
     const seen = await collect(probe.listener()!(compactionOptions(), () => chunks(OK_FINISH)))
     expect(seen).toEqual([OK_FINISH])
     expect(handle?.status()).toMatchObject({ kind: 'fell-back', reason: 'quota exhausted' })
+  })
+
+  it('leaves a compaction on another line alone even when a target is configured', async () => {
+    // The setting is offered on the kimi-code tab only, so a session on another
+    // line must keep its own model: re-routing it would spend a quota its owner
+    // never configured anything for.
+    const { probe, issued, handle } = install({ target: TARGET })
+    const seen = await collect(probe.listener()!(
+      compactionOptions({ provider: 'other-line', model: 'other-model' }),
+      () => chunks(OK_FINISH),
+    ))
+    expect(seen).toEqual([OK_FINISH])
+    expect(issued).toHaveLength(0)
+    expect(handle?.status()).toBeNull()
   })
 
   it('refuses to send a video payload to a target that discloses no video support', async () => {

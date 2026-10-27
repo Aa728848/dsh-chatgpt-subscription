@@ -97,12 +97,13 @@ describe('the K3.1 Pro registry rows', () => {
     expect(row.speed).toBe('highspeed')
   })
 
-  it('reports the quota multiplier as unknown instead of guessing one', () => {
-    // The official pages publish no multiplier against the cheapest model for
-    // either id, so both rows say null; the highspeed row carries the only
-    // statement that exists (about 2x the regular version) in its description.
-    expect(kimiCodeModelDef('k3.1-pro')!.quotaMultiplier).toBeNull()
-    expect(kimiCodeModelDef('k3.1-pro-highspeed')!.quotaMultiplier).toBeNull()
+  it('reports the multiplier ruled for the K3.1 Pro pair', () => {
+    // Neither id has an official figure against the cheapest model. The pair is
+    // recorded from the ruling that the regular version consumes what K3 does
+    // (2x), with the highspeed one at "twice the regular version" (4x). The
+    // description keeps the official wording either way.
+    expect(kimiCodeModelDef('k3.1-pro')!.quotaMultiplier).toBe(2)
+    expect(kimiCodeModelDef('k3.1-pro-highspeed')!.quotaMultiplier).toBe(4)
     expect(kimiCodeModelDef('k3.1-pro-highspeed')!.description).toMatch(/twice the quota/i)
   })
 })
@@ -233,7 +234,7 @@ describe('the chat-completions wire', () => {
     expect(option.reasoningEfforts).toEqual(['low', 'high', 'max'])
     expect(option.defaultReasoningEffort).toBe('max')
     expect(option.minimumPlan).toBe('Moderato')
-    expect(option.quotaMultiplier).toBeNull()
+    expect(option.quotaMultiplier).toBe(2)
     // The registry says nothing about thinking for this id, so nothing is claimed.
     expect(optionFor('k3').thinkingType).toBeUndefined()
   })

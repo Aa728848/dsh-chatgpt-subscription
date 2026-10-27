@@ -50,7 +50,7 @@ const K31_PRO = model({
   // Same chat-completions wire as every other model on this line.
   wire: 'openai',
   supportsVideo: true,
-  quotaMultiplier: null,
+  quotaMultiplier: 2,
 })
 
 const K31_HIGHSPEED = model({
@@ -63,7 +63,7 @@ const K31_HIGHSPEED = model({
   defaultContextWindow: 1_048_576,
   contextWindow: 1_048_576,
   promptBudget: 1_048_576,
-  quotaMultiplier: null,
+  quotaMultiplier: 4,
 })
 
 function status(overrides: Partial<KimiCodeWebStatus> = {}): KimiCodeWebStatus {
@@ -99,10 +99,20 @@ let root: Root | null = null
 let container: HTMLDivElement | null = null
 let realFetch: typeof fetch | undefined
 
-async function mount(payload: KimiCodeWebStatus): Promise<HTMLDivElement> {
+async function mount(
+  payload: KimiCodeWebStatus,
+  route: { provider: string; model: string } | null = null,
+): Promise<HTMLDivElement> {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
   realFetch ??= globalThis.fetch
-  globalThis.fetch = vi.fn(async () => Response.json({ ok: true, value: payload })) as unknown as typeof fetch
+  // Two readers hit two endpoints on this page: the line's own status and this
+  // plugin's preferences, which the compaction card reads. One canned answer
+  // would hand the second one a document it cannot read.
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/kimi-code/api')) return Response.json({ ok: true, value: payload })
+    return Response.json({ ok: true, value: { preferences: { compactionRoute: route } } })
+  }) as unknown as typeof fetch
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -186,20 +196,21 @@ describe('kimi-code K3.1 Pro card', () => {
     expect(pro?.querySelector('.dsh-mcl-hint')?.textContent).toContain(zh.capVideo)
   })
 
-  it('states the unpublished quota multiplier for both rows instead of a blank', async () => {
+  it('states the recorded multiplier on each K3.1 Pro row', async () => {
     const node = await mount(status())
-    // The official table publishes no multiplier for these two ids, so none is
-    // invented — but the cost line is the one fact compared down that column,
-    // and a missing line read as an omission rather than as an absence.
+    // Both rows printed "未公布" while no figure existed. They now carry the
+    // recorded multipliers — 2x for the regular version, 4x for the highspeed
+    // one — and the cost line is still drawn as a real value, in the same cell
+    // the rest of the column is compared down.
     const costs = [...node.querySelectorAll<HTMLElement>('.dsha-cap-notes')]
-      .map((cell) => cell.querySelector('.dsha-cap-off')?.textContent)
+      .map((cell) => cell.querySelector('.dsha-cap-cost')?.textContent)
     expect(costs).toEqual([
-      `${zh.quotaCost} ${zh.quotaUnknown}`,
-      `${zh.quotaCost} ${zh.quotaUnknown}`,
+      `${zh.quotaCost} 2x`,
+      `${zh.quotaCost} 4x`,
     ])
   })
 
-  it('draws the cache write row with its tier split, zero included', async () => {
+  it('draws the cache write row as one total, zero included', async () => {
     const node = await mount(status({
       cache: {
         requests: 4,
@@ -217,9 +228,25 @@ describe('kimi-code K3.1 Pro card', () => {
     expect(writeRow).toBeDefined()
     // A reported zero is a reading, so it prints as 0 — never as a blank cell
     // and never as the "暂无" used for a number this build cannot read.
-    expect(writeRow!.querySelector('.dsha-value')?.textContent)
-      .toBe(`${(1_200).toLocaleString()} · ${zh.cacheWrite5m} ${(1_200).toLocaleString()} · ${zh.cacheWrite1h} 0`)
-    expect(node.textContent).toContain(zh.cacheWriteHint)
+    expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe((1_200).toLocaleString())
+    // The hint paragraphs that used to sit under this row are gone with the tier
+    // wording, so the cache card carries data rows only.
+    expect(writeRow!.closest('.dsha-quota-card')?.querySelectorAll('p.dsha-muted').length).toBe(0)
+  })
+
+  it('offers the compaction model on this tab, showing the saved route', async () => {
+    const node = await mount(status(), { provider: 'opendesign', model: 'k3' })
+    // The preferences read resolves after the first render, so the state update
+    // it carries is flushed before anything is read off the DOM.
+    await act(async () => undefined)
+    const section = [...node.querySelectorAll<HTMLElement>('section.dsha-group')]
+      .find((entry) => entry.querySelector('h3')?.textContent === zh.compactionRoute)
+    expect(section).toBeDefined()
+    expect(section!.textContent).toContain(zh.compactionRouteHint)
+    // What is configured reads off the saved pair, not off an empty picker.
+    expect(section!.textContent).toContain('opendesign / k3')
+    expect([...section!.querySelectorAll('button')].map((button) => button.textContent))
+      .toContain(zh.compactionRouteChange)
   })
 
   it('still shows the write row when nothing was written', async () => {
@@ -237,7 +264,6 @@ describe('kimi-code K3.1 Pro card', () => {
     }))
     const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
     const writeRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWrite)
-    expect(writeRow!.querySelector('.dsha-value')?.textContent)
-      .toBe(`0 · ${zh.cacheWrite5m} 0 · ${zh.cacheWrite1h} 0`)
+    expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe('0')
   })
 })

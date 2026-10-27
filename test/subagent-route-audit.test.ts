@@ -37,6 +37,19 @@ function session(
   } as AuditedSession
 }
 
+/** A real-Session-shaped double: no public events field, only snapshotEvents(). */
+function snapshotSession(
+  id: string,
+  events: unknown[],
+  header: { parentSession?: string; origin?: string } = {},
+): AuditedSession {
+  return {
+    id,
+    header,
+    snapshotEvents: () => events as { type?: unknown; data?: unknown }[],
+  } as AuditedSession
+}
+
 /** Registry double backed by an id map, with the listing the audit sweeps. */
 function registry(entries: AuditedSession[]): AuditedSessions & { list(): AuditedSession[] } {
   const byId = new Map(entries.map(entry => [String(entry.id), entry]))
@@ -58,6 +71,24 @@ describe('subagent route audit', () => {
     expect(auditedRoutesOf(session('p', [
       { type: 'subagent/model-selection-policy', data: { allowedModels: [{ provider: 'a' }, 7] } },
     ]))).toBeUndefined()
+  })
+
+  it('reads policy, catalog, and descriptors from real Session snapshots', () => {
+    // The published Session prototype has snapshotEvents(), not an events field.
+    // Keep these doubles snapshot-only so the old implementation goes empty.
+    const parent = snapshotSession('p', [policyEvent, catalogEvent('c1')])
+    const child = snapshotSession('c1', [descriptorEvent({
+      provider: 'spawn', agentProvider: 'codex-chatgpt', agentModel: 'gpt-6-astra', label: 'routed',
+    })], { parentSession: 'p', origin: 'subagent' })
+    const sessions = registry([parent, child])
+
+    expect(auditedRoutesOf(parent)).toEqual(ALLOWED)
+    const violations = auditChildRoutes(parent, sessions, ALLOWED)
+    expect(violations).toHaveLength(1)
+    expect(violations[0]).toMatchObject({
+      finding: { childId: 'c1', label: 'routed' },
+      route: { provider: 'codex-chatgpt', model: 'gpt-6-astra' },
+    })
   })
 
   it('parses a descriptor only when it carries something to report', () => {

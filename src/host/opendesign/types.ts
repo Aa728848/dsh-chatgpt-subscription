@@ -169,6 +169,8 @@ export interface OpenDesignModelMeta {
    * means "use the line default"; an empty array means the model exposes none.
    */
   efforts?: readonly string[]
+  /** Default reasoning level; omitted leaves the host's own default in place. */
+  defaultEffort?: string
   /**
    * Whether the model takes an effort knob at all. Absent means yes; `false`
    * marks the rows whose source publishes no ladder.
@@ -199,10 +201,10 @@ export const MODEL_CATALOG: Readonly<Record<string, OpenDesignModelMeta>> = Obje
   'claude-opus-5.5': { name: 'Claude Opus 5.5', pricing: { input: 4, output: 20 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'claude-sonnet-5': { name: 'Claude Sonnet 5', pricing: { input: 2, output: 10 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'claude-sonnet-5.5': { name: 'Claude Sonnet 5.5', pricing: { input: 2, output: 10 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  'deepseek-v4.1-flash': { name: 'DeepSeek V4.1 Flash', pricing: { input: 0.3, output: 1.2 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text', 'image'], efforts: ['none', 'low', 'high', 'max'] },
-  'deepseek-v4-flash': { name: 'DeepSeek V4 Flash', pricing: { input: 0.44, output: 1.32 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], efforts: ['none', 'low', 'medium', 'high'] },
-  'deepseek-v4-flash-vision-exp': { name: 'DeepSeek V4 Flash Vision Exp', pricing: { input: 0.44, output: 1.32 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['none', 'high', 'max'] },
-  'deepseek-v4-pro': { name: 'DeepSeek V4 Pro', pricing: { input: 1.32, output: 3.96 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], efforts: ['none', 'low', 'high', 'max'] },
+  'deepseek-v4.1-flash': { name: 'DeepSeek V4.1 Flash', pricing: { input: 0.3, output: 1.2 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text', 'image'], efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' },
+  'deepseek-v4-flash': { name: 'DeepSeek V4 Flash', pricing: { input: 0.44, output: 1.32 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], efforts: ['none', 'low', 'medium', 'high'], defaultEffort: 'high' },
+  'deepseek-v4-flash-vision-exp': { name: 'DeepSeek V4 Flash Vision Exp', pricing: { input: 0.44, output: 1.32 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['none', 'high', 'max'], defaultEffort: 'high' },
+  'deepseek-v4-pro': { name: 'DeepSeek V4 Pro', pricing: { input: 1.32, output: 3.96 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' },
   'gemini-3.7-flash': { name: 'Gemini 3.7 Flash', pricing: { input: 0.75, output: 3.75 }, contextWindow: 1_048_576, input: ['text', 'image'], efforts: ['low', 'medium', 'high'] },
   'gemini-3.8-flash': { name: 'Gemini 3.8 Flash', pricing: { input: 0.75, output: 3.75 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high'] },
   'gemini-4-argon': { name: 'Gemini 4 Argon', pricing: { input: 2, output: 10 }, contextWindow: 1_048_576, maxTokens: 65_536, input: ['text', 'image'], efforts: ['low', 'medium', 'high'] },
@@ -263,6 +265,8 @@ export interface OpenDesignModelInfo {
   reasoning: boolean
   /** Selectable effort ladder; empty when the model exposes none. */
   efforts: readonly string[]
+  /** Default level, present only when it belongs to the effective ladder. */
+  defaultEffort?: string
   input: readonly string[]
   pricing?: { input: number; output: number }
 }

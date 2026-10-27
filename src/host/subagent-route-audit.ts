@@ -78,6 +78,13 @@ export interface AuditedSession {
     readonly origin?: unknown
   }
   readonly events?: readonly { readonly type?: unknown; readonly data?: unknown }[]
+  /** The real Session reader; lightweight fixtures may use `events` instead. */
+  snapshotEvents?(): readonly { readonly type?: unknown; readonly data?: unknown }[]
+}
+
+/** Read the ordered log from either a real Session or a lightweight fixture. */
+function eventsOf(session: AuditedSession): readonly { readonly type?: unknown; readonly data?: unknown }[] {
+  return session.events ?? session.snapshotEvents?.() ?? []
 }
 
 /** Session lookup used to resolve a child's parent for inherited-route attribution. */
@@ -136,7 +143,7 @@ export function readChildDescriptor(data: unknown): Omit<ChildRouteFinding, 'chi
  * @returns the authorized routes, or undefined when the session recorded none.
  */
 export function auditedRoutesOf(session: AuditedSession): AuditedRoute[] | undefined {
-  for (const event of session.events ?? []) {
+  for (const event of eventsOf(session)) {
     if (event.type !== 'subagent/model-selection-policy') continue
     const allowed = asRecord(event.data)?.['allowedModels']
     if (!Array.isArray(allowed)) continue
@@ -170,8 +177,8 @@ export function childRoutesOf(parent: AuditedSession, sessions: AuditedSessions)
   const inspect = (child: AuditedSession | undefined, childId: string): void => {
     if (child === undefined || seen.has(childId)) return
     seen.add(childId)
-    const descriptor = child.events
-      ?.map(event => event.type === 'subagent/descriptor' ? readChildDescriptor(event.data) : undefined)
+    const descriptor = eventsOf(child)
+      .map(event => event.type === 'subagent/descriptor' ? readChildDescriptor(event.data) : undefined)
       .find(entry => entry !== undefined)
     if (descriptor === undefined) return
     const headerParent = asString(child.header?.parentSession)
@@ -182,7 +189,7 @@ export function childRoutesOf(parent: AuditedSession, sessions: AuditedSessions)
     })
   }
 
-  for (const event of parent.events ?? []) {
+  for (const event of eventsOf(parent)) {
     if (event.type !== 'subagent/catalog') continue
     const childId = asString(asRecord(event.data)?.['childId'])
     if (childId === undefined) continue
