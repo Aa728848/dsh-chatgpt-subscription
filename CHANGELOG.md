@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.44.0 - 2026-10-27
+
 - **[packaging] 「进展更新」拆成独立组件：同包第二行，可在插件管理页单独关闭**
   - **机制**：`cordis.patch.yml` 现在插两行 loader 条目；新增 `src/entry-progress-updates.ts` 作为第二个宿主入口（自带 `Config`、`inject` 与 `apply`），`package.json` 增加 `exports["./progress-updates"]` 与子路径行的 `locale/*.json` / `icon`，构建多入口产出 `lib/progress-updates.js`。管理页的「包含的组件」因此从 1 变成 2。
   - **设置字段留在核心行**：三个 `volatile` 字段仍声明在 `src/index.ts` 的 `Config`，由核心在 `apply` 时通过 `attachProgressSettings()` 把读取器交给新行（两行的挂载顺序两种都兜住）。不能搬走的原因很实在：profile 的 patch 层按 id 定位**替换整行 config**，而用户 profile 早就在核心行写了 `progressUpdates: true`——字段搬去新行，那条 patch 会把新行配置整体抹掉、schema 默认值填回 false，于是「设置显示打开、实际是关的」。
@@ -15,7 +17,6 @@
   - **为什么**：`terminated` 是 undici 的包装错误，`The client is destroyed` 是它的 `ClientDestroyedError`——请求还在流式读取时，脚下的连接池已经不存在了。这条线还有两处会把「一次事故」放大成「持续故障」：`ProxyManager.dispose()` 用 `destroy()` 立刻拆连接（任何插件卸载都会掐断在途回答），以及被销毁的 agent 仍留在按 URL 缓存的表里，之后每个请求都复用它并在瞬间失败。
   - **改法**：卸载改为 `close()`——等在建请求跑完再释放 socket；代理请求遇到 destroyed-client 家族的错误时，把该 URL 的缓存 agent 摘掉、换一个新连接**重试一次**；错误判定只认这一族，普通的连接失败仍然不重放（那是另一种决定）。
   - **测试**：`test/proxy-manager.test.ts` 新增两例——销毁后换新连接并成功（断言第二次的 dispatcher 不是第一次那个）、普通传输失败只跑一次。
-
 
 ## 0.43.1 - 2026-10-27
 
