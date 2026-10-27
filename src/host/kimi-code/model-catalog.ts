@@ -232,9 +232,12 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextPlan: 'Allegretto',
     description: 'The K3.1 Pro flagship: 3T parameters, a 256K context window on Plus/Moderato and 1M on Pro/Allegretto and above. Thinking runs at low/high/max, defaults to max, and cannot be disabled.',
     supportsDynamicTools: true,
-    // UNPUBLISHED: the official pages state no quota multiplier for this id
-    // relative to k3-256k, so it is reported as unknown rather than guessed.
-    quotaMultiplier: null,
+    // The official pages state no figure for this id. Recorded as 2 by decision:
+    // the regular version is treated as consuming what K3 consumes, which the
+    // models page states as "k3 (1M) 消耗约为 k3-256k 两倍". A third-party
+    // measurement puts K3.1 Pro about 1.5-1.8x above K3, so this is a ruling
+    // about what to display rather than a transcription of the table.
+    quotaMultiplier: 2,
     speed: 'regular',
   },
   {
@@ -259,11 +262,10 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     contextPlan: null,
     description: 'The high-speed K3.1 Pro with a 1M context window and faster output, at about twice the quota of the regular version. Requires the Pro/Allegretto plan or above.',
     supportsDynamicTools: true,
-    // UNPUBLISHED: the only quota statement is the qualitative "about 2x the
-    // regular version", which is a comparison inside the K3.1 pair rather than
-    // the multiplier-against-the-cheapest-model this field carries. Reported as
-    // unknown here and stated in the description instead of being guessed.
-    quotaMultiplier: null,
+    // The only official statement is "消耗约为普速版两倍" — a comparison inside
+    // the K3.1 pair. With the regular version recorded as 2, the multiplier
+    // against k3-256k is 2 x 2 = 4.
+    quotaMultiplier: 4,
     speed: 'highspeed',
   },
 ]

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **[kimi-code] K3.1 Pro 与 Highspeed 的额度倍率由「未公布」改为记录 2x / 4x**
+  - **背景**：官方模型表里 K3.1 Pro 这一行没有任何消耗倍数表述（「速度」列只写「常规速度」），K3.1 Pro Highspeed 写的是「消耗约为普速版两倍」「高速版（约 2–3 倍速，2 倍消耗）」。官方所有倍数都是兄弟型号之间的比例，从未写过「普速版等于 K3」；第三方受控实测给出的反而是「K3.1 Pro 比 K3 输入多约 50%、输出多约 82%，Highspeed 正好是 Pro 的 2 倍」。
+  - **改法**：按维护者判定，普速版与 K3 同耗（官方原文「k3（1M）消耗约为 k3-256k 两倍」，故 K3 为 2），`k3.1-pro` 记 **2**；高速版按官方「2 倍消耗」相对普速版折算，`k3.1-pro-highspeed` 记 **4**。字段语义仍是「相对最便宜模型」，DTO/契约未改，卡片那一列因此可以横向比较。
+  - **留痕**：两个条目的注释写明数字来自判定而非官方转录，并标注第三方实测的冲突区间，防止后来者把它当成官方数字引用。
+  - **回归**：`kimi-code-k31`、`kimi-code-plan`、`kimi-code-k31-card-ui` 三处原先钉住 `null` 与「未公布」的断言改为 2x / 4x；卡片用例改读 `.dsha-cap-cost`，并断言两行分别渲染 `额度倍率 2x` / `4x`。
+  - **验证**：`npm run typecheck` exit 0；针对性 `kimi-code-k31` / `kimi-code-plan` / `kimi-code-k31-card-ui` / `kimi-code-capability-ui` 共 **56/56**；全量 Vitest **298 文件通过 / 2 跳过，4903 测试通过 / 8 跳过 / 0 失败**；`npm run build` exit 0，`git diff --check` 无输出。
+
+- **[kimi-code] 压缩模型设置收窄为本线路专属，卡片从插件管理页搬进 Kimi Code 设置页**
+  - **作用域收窄**：`llm/stream` 上的压缩重路由监听器新增必填的 `scopeProvider`（`CompactionRouteDeps`）。只有 `options.provider` 等于该值的会话才会被重路由，判断排在 `purpose` / `rerouted` / `target === null` 之后、读取模型目录之前——其他线路的会话一律原样放行，不读目录、不发试探请求、不动 `status()`。插件入口传入 `KIMI_CODE_PROVIDER_ID`，模块内不硬编码 provider 字符串。
+  - **候选不变**：下拉仍然列出全部线路的模型（kimi 会话的摘要允许交给别家写），`compactionCandidates` 与 `shared/compaction-route.ts` 的能力判定未改动。
+  - **入口搬家**：删除 `src/client/CompactionRouteBundleConfig.tsx` 与它在 `src/client/index.tsx` 的 `plugins.bundle.config`（`COMPACTION_ROUTE_PACKAGE`）注册，插件管理页不再留任何入口；`CompactionRouteCard` 原样复用，作为独立一节插在 Kimi Code 页「缓存与 K3 调优」之后、「模型」之前，排版沿用卡片自带的 `dsha-group` / `dsha-pref-row` / `dsha-select` / `dsha-actions`。
+  - **三语同步**：`kimi-code/locales.ts`（zh + en）与 `locales-ru/kimi-code.ts` 各新增 13 个 `compactionRoute*` 键，提示语改为「仅对本线路的会话生效」；插件级 `locales.ts`（zh + en）与 `locales-ru/hub.ts` 删除同名的 13 个键（俄语词典按 `LocaleKey` 实现，残留即编译报错）。
+  - **回归**：`test/compaction-route.test.ts` 的 `install` 助手补上 `scopeProvider`，新增负向用例「目标已配置但会话在别的线路 → 不重路由、`status()` 仍为 null」；`test/compaction-route-card.test.tsx` 的标签改从 kimi 词典取；`test/kimi-code-k31-card-ui.test.tsx` 新增断言：kimi 页渲染该节的标题、提示、已保存的 `provider / model` 与「设置」按钮。
+  - **验证**：`npm run typecheck` exit 0；针对性 `compaction-route` / `compaction-route-card` / `kimi-code-k31-card-ui` / `client-registration` 共 **48/48**；全量 Vitest **298 文件通过 / 2 跳过，4903 测试通过 / 8 跳过 / 0 失败**；`npm run build` exit 0，`git diff --check` 无输出。压缩模型在发布版 Harness 上的端到端行为（真实 kimi 会话触发一次跨线路摘要、再触发一次非 kimi 会话确认不被重路由）未在本轮执行，以单测覆盖替代。
+
+- **[kimi-code] 缓存卡片只画写侧总量，5m / 1h 分档与两段常驻说明删除**
+  - **改法**：设置页「缓存与 K3 调优」里写侧那一行原来拼成「总量 · 5 分钟档 n · 1 小时档 n」，下面还跟两段说明（写侧为什么独立计费、以及系统提示与工具列表变化会作废前缀）。这两段讲的是响应头怎么上报、缓存为什么会失效，而不是这张卡片要比较的东西，因此整段删除，写侧只留总写入数。
+  - **三语同步**：`kimi-code/locales.ts`（zh + en）与 `locales-ru/kimi-code.ts` 删除 `cacheWrite5m` / `cacheWrite1h` / `cacheWriteHint` / `cacheHint` 四个键。`KimiCodeLocaleKey` 由 zh 推导、俄语词典按同一 key 集合实现，缺键会在编译期报错。
+  - **保留的部分**：宿主仍照常解析 `Msh-Usage-Cache-Write-Tokens-5m` / `-1h` 响应头，`cacheWrite5mTokens` / `cacheWrite1hTokens` 留在 DTO 里，只是前端不再展示——这是已经验证过的采信路径，删字段等于顺带废掉一条有用的上报数据。
+  - **回归**：`test/kimi-code-k31-card-ui.test.tsx` 原先断言整行拼串，改为断言单一总量，并断言缓存卡片内不再有说明段落（`p.dsha-muted` 计数为 0）。
+  - **验证**：`npm run typecheck` exit 0；针对性 `kimi-code-k31-card-ui` / `kimi-code-k31` / `kimi-code-cache-write` 共 **34/34**；全量 Vitest **299 文件通过 / 2 跳过，4904 测试通过 / 8 跳过 / 0 失败**，`git diff --check` 通过。
+
 ## 0.41.1 - 2026-10-26
 
 - **[opendesign] DeepSeek 系列模型默认推理强度设为 `high`**

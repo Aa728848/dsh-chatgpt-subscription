@@ -16,7 +16,9 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CompactionRouteCard, type CompactionRouteCardLabels } from '../src/client/CompactionRouteCard.tsx'
-import { zh } from '../src/client/locales.ts'
+// The card is offered on the Kimi Code tab, so its labels come from that tab's
+// dictionary rather than from the plugin-level one it used to read.
+import { zh } from '../src/client/kimi-code/locales.ts'
 import type {
   CompactionCandidatesDto,
   SubscriptionPreferencesDto,

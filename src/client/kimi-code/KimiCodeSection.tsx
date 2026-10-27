@@ -5,10 +5,13 @@ import type {
   KimiCodeReasoningEffort,
   KimiCodeWebStatus,
 } from '../../shared/kimi-code-contracts.ts'
+import type { SubscriptionPreferencesDto } from '../../shared/contracts.ts'
 import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor, contextDraftsFor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { createLineApi } from '../common/line-api.ts'
+import { SubscriptionApi } from '../api.ts'
+import { CompactionRouteCard } from '../CompactionRouteCard.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
@@ -76,6 +79,11 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   // Result of an explicit connection test. The button used to end silently on
   // success, which is indistinguishable from a click that never registered.
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null)
+  // The compaction card below reads this plugin's own preferences rather than
+  // this line's status: the route is a plugin-level setting, scoped by the host
+  // to kimi-code sessions.
+  const [subscriptionApi] = useState(() => new SubscriptionApi())
+  const [compactionPreferences, setCompactionPreferences] = useState<SubscriptionPreferencesDto | null>(null)
 
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
@@ -103,6 +111,20 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       setLoading(false)
     }
   }, [])
+
+  // Read the saved compaction route once, on mount. A status this build cannot
+  // read leaves the card at "follows the conversation model" instead of failing
+  // the whole tab, which is how the card fails elsewhere too.
+  useEffect(() => {
+    let live = true
+    void subscriptionApi.status()
+      .then((answer) => {
+        const preferences = answer?.preferences
+        if (live && preferences !== undefined && preferences !== null) setCompactionPreferences(preferences)
+      })
+      .catch(() => undefined)
+    return () => { live = false }
+  }, [subscriptionApi])
 
   useEffect(() => {
     void loadStatus()
@@ -574,22 +596,42 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
                 a write is billed separately from a fresh prompt token, and
                 folding it into the fresh count would make the hit ratio above
                 describe something other than what it says. Zero still renders —
-                see `tokenCount`. */}
+                see `tokenCount`. Only the total is drawn: the 5m/1h split the
+                response headers carry is still reported by the host, but the
+                number a user acts on is the sum, and the tier wording invited
+                more questions than it answered. */}
             <div className="dsha-row">
               <span className="dsha-label">{t.cacheWrite}</span>
-              <span className="dsha-value">
-                {tokenCount(status.cache.cacheWriteTokens, t)}
-                {' · '}
-                {t.cacheWrite5m} {tokenCount(status.cache.cacheWrite5mTokens, t)}
-                {' · '}
-                {t.cacheWrite1h} {tokenCount(status.cache.cacheWrite1hTokens, t)}
-              </span>
+              <span className="dsha-value">{tokenCount(status.cache.cacheWriteTokens, t)}</span>
             </div>
-            <p className="dsha-muted">{t.cacheWriteHint}</p>
-            <p className="dsha-muted">{t.cacheHint}</p>
           </div>
         )}
       </section>
+
+      {/* The compaction model is the one setting on this tab that is not the
+          line's own: the host re-routes a compaction only for kimi-code
+          sessions. The card draws its own `dsha-group` section, so nothing is
+          wrapped around it here. */}
+      <CompactionRouteCard
+        api={subscriptionApi}
+        preferences={compactionPreferences}
+        labels={{
+          title: t.compactionRoute,
+          hint: t.compactionRouteHint,
+          provider: t.compactionRouteProvider,
+          model: t.compactionRouteModel,
+          save: t.compactionRouteSave,
+          clear: t.compactionRouteClear,
+          change: t.compactionRouteChange,
+          follow: t.compactionRouteFollow,
+          saved: t.compactionRouteSaved,
+          failed: t.compactionRouteFailed,
+          noVideo: t.compactionRouteNoVideo,
+          noImage: t.compactionRouteNoImage,
+          empty: t.compactionRouteEmpty,
+        }}
+        onSaved={setCompactionPreferences}
+      />
 
       <section className="dsha-group">
         <div className="dsha-grouphead">

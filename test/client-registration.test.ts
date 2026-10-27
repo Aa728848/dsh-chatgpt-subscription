@@ -288,8 +288,6 @@ describe('client registration', () => {
 
     expect(injectedSlots).toEqual([
       'settings.section',
-      // 压缩模型是本插件的跨线路设置，挂在插件管理页按包名寻址的 bundle 配置槽上。
-      'plugins.bundle.config',
       // order 35-41 这一段：ChatGPT 自己的胶囊，加上每一条线路各一格。
       'conversation.input.right',
       'conversation.input.right',

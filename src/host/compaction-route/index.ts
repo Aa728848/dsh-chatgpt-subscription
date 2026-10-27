@@ -24,6 +24,12 @@
  *   by default; the official client sends no cap at all and lets the route
  *   decide, so the cap is dropped for the re-routed call.
  *
+ * The setting itself is now scoped to one line. It is presented on the Kimi Code
+ * tab, so only a session whose own provider is `scopeProvider` (kimi-code) is
+ * ever re-routed: every other line's compaction passes through untouched, no
+ * matter what target is configured. The candidate directory still spans every
+ * line, because a kimi-code summary may legitimately be written elsewhere.
+ *
  * @module dsh-chatgpt-subscription/compaction-route
  */
 
@@ -106,6 +112,14 @@ export type CompactionRouteOutcome =
 export interface CompactionRouteDeps {
   /** Issue one request through the LLM service, re-entering the waterfall. */
   readonly stream: (options: CompactionStreamOptions) => AsyncIterable<CompactionChunk>
+  /**
+   * The only provider whose sessions may be re-routed.
+   *
+   * A session on any other provider is released untouched, whatever
+   * `readTarget` reports: this setting is offered on one line's settings page,
+   * so it must not spend another line's quota or change another line's output.
+   */
+  readonly scopeProvider: string
   /** The live target; read per request so a settings change applies at once. */
   readonly readTarget: () => CompactionRouteTarget | null
   /** Provider directory lookup; absent leaves every target admissible. */
@@ -138,7 +152,8 @@ const MODEL_CACHE_MS = 60_000
  * installation instead of failing the plugin's load.
  *
  * @param ctx - structural context: the event bus and a logger.
- * @param deps - the LLM stream, the live target, and the optional directory.
+ * @param deps - the LLM stream, the scoped provider, the live target, and the
+ *   optional directory.
  * @returns the live handle, or `undefined` on a host without an event bus.
  */
 export function installCompactionRoute(
@@ -172,6 +187,9 @@ export function installCompactionRoute(
     const target = deps.readTarget()
     if (target === null) return yield* next()
     if (target.provider === options.provider && target.model === options.model) return yield* next()
+    // Scope gate: a session on another line is released here, before the
+    // directory is read, so the setting costs that line nothing at all.
+    if (options.provider !== deps.scopeProvider) return yield* next()
     const facts = await factsFor(target)
     const needs = payloadNeeds(options)
     const skip = compactionSkipReason(facts, needs)
