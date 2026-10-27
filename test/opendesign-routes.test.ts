@@ -17,6 +17,7 @@ import { OpenDesignAccountPool } from '../src/host/opendesign/account-pool.ts'
 import { FileCredentialStore, OpenDesignModelSettingsStore, type OpenDesignCredentials } from '../src/host/opendesign/token-store.ts'
 import { DEFAULT_MODELS } from '../src/host/opendesign/types.ts'
 import { OpenDesignLoginManager } from '../src/host/opendesign/oauth.ts'
+import { OpenDesignAdapter } from '../src/host/opendesign/adapter.ts'
 import type { OpenDesignWebStatus } from '../src/shared/opendesign-contracts.ts'
 
 interface Captured {
@@ -233,14 +234,108 @@ describe('OpenDesign settings API', () => {
     expect((unset.body.value as OpenDesignWebStatus).models.every((model) => model.enabled)).toBe(true)
   })
 
+  it('drops a forced reveal when the model leaves the selection', async () => {
+    // The card's un-tick posts only `enabledModelIds`; "not selected" must therefore
+    // also mean "no longer force-shown", or the record would outlive the tick.
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    const kept = await call({ url: '/opendesign/api/models', method: 'POST', body: { enabledModelIds: ['gpt-6-luna', 'claude-sonnet-5.5'] } })
+    expect((kept.body.value as OpenDesignWebStatus).models.find((model) => model.id === 'claude-sonnet-5.5')!.forcedVisible).toBe(true)
+
+    const dropped = await call({ url: '/opendesign/api/models', method: 'POST', body: { enabledModelIds: ['gpt-6-luna'] } })
+    expect((await settings.read()).forceVisibleModels).toEqual([])
+    const row = (dropped.body.value as OpenDesignWebStatus).models.find((model) => model.id === 'claude-sonnet-5.5')!
+    expect(row.forcedVisible).toBe(false)
+    expect(row.enabled).toBe(false)
+  })
+
+  it('leaves no forced reveal behind when nothing is selected', async () => {
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    const none = await call({ url: '/opendesign/api/models', method: 'POST', body: { enabledModelIds: [] } })
+    expect((await settings.read()).forceVisibleModels).toEqual([])
+    expect((none.body.value as OpenDesignWebStatus).models.every((model) => !model.forcedVisible)).toBe(true)
+  })
+
+  it('keeps the forced reveals when the selection is cleared to "all"', async () => {
+    // `null` says "no filter", not "keep only these": pruning it would delete a
+    // reveal nobody withdrew.
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    await call({ url: '/opendesign/api/models', method: 'POST', body: { enabledModelIds: null } })
+    expect((await settings.read()).forceVisibleModels).toEqual(['claude-sonnet-5.5'])
+  })
+
   it('hides and restores a model through the visibility routes', async () => {
     const hidden = await call({ url: '/opendesign/api/models/visibility', method: 'POST', body: { model: 'gpt-6-luna', visible: false } })
     const status = hidden.body.value as OpenDesignWebStatus
     expect(status.models.find((model) => model.id === 'gpt-6-luna')!.enabled).toBe(false)
+    expect((await settings.read()).hiddenModels).toEqual(['gpt-6-luna'])
     const unknown = await call({ url: '/opendesign/api/models/visibility', method: 'POST', body: { model: 'not-a-model', visible: false } })
     expect(unknown.status).toBe(400)
     const restored = await call({ url: '/opendesign/api/models/visibility-all', method: 'POST', body: { mode: 'all' } })
     expect((restored.body.value as OpenDesignWebStatus).models.every((model) => model.enabled)).toBe(true)
+  })
+
+  it('turns a plan-omitted row from unchecked into a forced reveal, and back', async () => {
+    // The card marks a `served === false` row "not in this plan, tick to force it",
+    // so its tick state IS the force list — hence an omitted row must project as
+    // unchecked, and ticking it must actually reach the picker.
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_sync' }, 'main')
+    upstreamFetch = (async () => Response.json({ data: [{ id: 'gpt-6-luna' }] })) as unknown as typeof fetch
+    const synced = await call({ url: '/opendesign/api/catalog/refresh', method: 'POST', body: {} })
+    let status = (synced.body.value as { status: OpenDesignWebStatus }).status
+    let row = status.models.find((model) => model.id === 'claude-sonnet-5.5')!
+    expect(row.served).toBe(false)
+    expect(row.forcedVisible).toBe(false)
+    expect(row.enabled).toBe(false)
+
+    const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
+    expect((await adapter.listModels('opendesign')).map((model) => model.id)).not.toContain('claude-sonnet-5.5')
+
+    const ticked = await call({ url: '/opendesign/api/models/visibility', method: 'POST', body: { model: 'claude-sonnet-5.5', visible: true } })
+    status = ticked.body.value as OpenDesignWebStatus
+    row = status.models.find((model) => model.id === 'claude-sonnet-5.5')!
+    expect(row.forcedVisible).toBe(true)
+    expect(row.enabled).toBe(true)
+    expect((await adapter.listModels('opendesign')).map((model) => model.id)).toContain('claude-sonnet-5.5')
+
+    const unticked = await call({ url: '/opendesign/api/models/visibility', method: 'POST', body: { model: 'claude-sonnet-5.5', visible: false } })
+    status = unticked.body.value as OpenDesignWebStatus
+    row = status.models.find((model) => model.id === 'claude-sonnet-5.5')!
+    expect(row.forcedVisible).toBe(false)
+    expect(row.enabled).toBe(false)
+    const after = await settings.read()
+    expect(after.forceVisibleModels).toEqual([])
+    // Un-forcing is not hiding: the hidden list is the user's veto over a model the
+    // plan DOES serve, and this one is not in that business.
+    expect(after.hiddenModels).not.toContain('claude-sonnet-5.5')
+  })
+
+  it('clears the force list when everything is turned on, and leaves a served row to the old rule', async () => {
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    const status = (await call({ url: '/opendesign/api/status' })).body.value as OpenDesignWebStatus
+    // A served model keeps the tick-list rule, untouched by this feature.
+    expect(status.models.find((model) => model.id === 'gpt-6-luna')!.enabled).toBe(true)
+    expect(status.models.find((model) => model.id === 'claude-sonnet-5.5')!.enabled).toBe(true)
+    const all = await call({ url: '/opendesign/api/models/visibility-all', method: 'POST', body: { mode: 'all' } })
+    expect((all.body.value as OpenDesignWebStatus).models.every((model) => !model.forcedVisible)).toBe(true)
+    expect((await settings.read()).forceVisibleModels).toEqual([])
+  })
+
+  it('clears the force list when everything is turned off, so nothing stays offered', async () => {
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    const adapter = new OpenDesignAdapter(settings, { fetchFn: (async () => new Response('{}')) as typeof fetch, accountPool: pool })
+    expect((await adapter.listModels('opendesign')).map((model) => model.id)).toEqual(['claude-sonnet-5.5', 'gpt-6-luna'])
+    const none = await call({ url: '/opendesign/api/models/visibility-all', method: 'POST', body: { mode: 'none' } })
+    const status = none.body.value as OpenDesignWebStatus
+    expect((await settings.read()).forceVisibleModels).toEqual([])
+    expect(status.models.find((model) => model.id === 'claude-sonnet-5.5')!.forcedVisible).toBe(false)
+    // "Show nothing" means nothing: the forced row must not survive it.
+    expect(await adapter.listModels('opendesign')).toEqual([])
+  })
+
+  it('keeps the force list on an invert, which is a per-row flip rather than a reset', async () => {
+    await settings.update({ servedModelIds: ['gpt-6-luna'], forceVisibleModels: ['claude-sonnet-5.5'] })
+    await call({ url: '/opendesign/api/models/visibility-all', method: 'POST', body: { mode: 'invert' } })
+    expect((await settings.read()).forceVisibleModels).toEqual(['claude-sonnet-5.5'])
   })
 
   it('stores and clears a context-window override', async () => {
@@ -285,6 +380,54 @@ describe('OpenDesign settings API', () => {
     expect(again.status).toBe(200)
     expect((again.body.value as { added: string[] }).added).toEqual([])
     expect(emit.mock.calls.filter((args) => args[0] === 'llm/adapters-updated')).toHaveLength(1)
+  })
+
+  it('asks every pooled account and remembers the union of what they serve', async () => {
+    // A plan belongs to the ACCOUNT: two pooled keys can serve two different model
+    // sets, and the picker needs the union — asking only the first key would hide
+    // every model the second one serves.
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_one' }, 'one')
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_two' }, 'two')
+    upstreamFetch = (async (_input: unknown, init?: RequestInit) => {
+      const key = new Headers(init?.headers).get('authorization') ?? ''
+      if (key === 'Bearer od_one') return Response.json({ data: [{ id: 'gpt-6-luna' }] })
+      if (key === 'Bearer od_two') return Response.json({ data: [{ id: 'kimi-k3' }] })
+      throw new Error('unexpected key ' + key)
+    }) as unknown as typeof fetch
+    const captured = await call({ url: '/opendesign/api/catalog/refresh', method: 'POST', body: {} })
+    expect(captured.status).toBe(200)
+    const status = (captured.body.value as { status: OpenDesignWebStatus }).status
+    expect(status.models.find((model) => model.id === 'gpt-6-luna')!.served).toBe(true)
+    expect(status.models.find((model) => model.id === 'kimi-k3')!.served).toBe(true)
+    // An id neither key listed is measured as NOT served, and says so.
+    expect(status.models.find((model) => model.id === 'claude-sonnet-5.5')!.served).toBe(false)
+    expect((await settings.read()).servedModelIds?.sort()).toEqual(['gpt-6-luna', 'kimi-k3'])
+  })
+
+  it('lets a refused account cost only its own half of the union', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_refused' }, 'refused')
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'good')
+    upstreamFetch = (async (_input: unknown, init?: RequestInit) => {
+      const key = new Headers(init?.headers).get('authorization') ?? ''
+      if (key === 'Bearer od_refused') return Response.json({ error: { message: 'nope' } }, { status: 401 })
+      return Response.json({ data: [{ id: 'kimi-k3' }] })
+    }) as unknown as typeof fetch
+    const captured = await call({ url: '/opendesign/api/catalog/refresh', method: 'POST', body: {} })
+    expect(captured.status).toBe(200)
+    const status = (captured.body.value as { status: OpenDesignWebStatus }).status
+    expect(status.models.find((model) => model.id === 'kimi-k3')!.served).toBe(true)
+    expect((await settings.read()).servedModelIds).toEqual(['kimi-k3'])
+  })
+
+  it('never clears the measurement when every account fails', async () => {
+    // A network failure is not a plan that serves nothing: the previous measurement
+    // stands, rather than the filter switching itself off behind an error.
+    await settings.update({ servedModelIds: ['gpt-6-luna'] })
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_down' }, 'down')
+    upstreamFetch = (async () => { throw new Error('network down') }) as unknown as typeof fetch
+    const captured = await call({ url: '/opendesign/api/catalog/refresh', method: 'POST', body: {} })
+    expect(captured.status).toBe(502)
+    expect((await settings.read()).servedModelIds).toEqual(['gpt-6-luna'])
   })
 
   it('refuses a sync honestly when no account can read the catalog', async () => {

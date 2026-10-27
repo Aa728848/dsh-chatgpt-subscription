@@ -25,8 +25,9 @@ import {
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { normalizeGenerateOptions, type GenerateOptions } from '../common/llm-compat.ts'
-import { DEFAULT_EFFORTS, DEFAULT_MODELS, POOL_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME } from './types.ts'
+import { DEFAULT_EFFORTS, POOL_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME } from './types.ts'
 import { resolveModelInfo } from './catalog.ts'
+import { openDesignVisibleModelIds } from './line.ts'
 import {
   buildOpenDesignBody,
   parseServerSentEvents,
@@ -130,28 +131,13 @@ export class OpenDesignAdapter extends LlmAdapter {
     return this.modelSettings.read()
   }
 
-  /** Every id the line knows: the shipped table plus the synced live catalog. */
-  private knownModelIds(settings: OpenDesignModelSettings): string[] {
-    const ids = new Set<string>(DEFAULT_MODELS)
-    for (const model of settings.catalogModels) ids.add(model.id)
-    return [...ids]
-  }
-
-  /**
-   * The ids the route advertises, narrowed by the user's selection and hidden
-   * list.
-   *
-   * The selection is captured against this same id vocabulary (the gateway's
-   * own wire ids), so a cold start filters the shipped table through it without
-   * the empty-intersection trap a foreign-vocabulary whitelist would spring —
-   * and an explicit "everything off" (`[]`) still wins, because that intent
-   * does not depend on a vocabulary at all.
+  /*
+   * There is deliberately no visibility rule here: the ids the picker is offered
+   * come from `openDesignVisibleModelIds` in ./line.ts, shared with the status
+   * route and the hub card. A private copy is what let the hub card count models
+   * the picker refused to show, so this adapter reads the one implementation
+   * instead of keeping a second with the same intent.
    */
-  private visibleModelIds(settings: OpenDesignModelSettings): string[] {
-    const hidden = new Set(settings.hiddenModels)
-    const enabled = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
-    return this.knownModelIds(settings).filter((id) => !hidden.has(id) && (enabled === null || enabled.has(id)))
-  }
 
   /** One model's resolved descriptor, from the shipped table plus live data. */
   private async modelInfo(modelId: string): Promise<ReturnType<typeof resolveModelInfo>> {
@@ -168,7 +154,7 @@ export class OpenDesignAdapter extends LlmAdapter {
     const prov = provider || PROVIDER_ID
     const settings = await this.settings()
     if (settings.enabled === false) return []
-    const ids = this.visibleModelIds(settings)
+    const ids = openDesignVisibleModelIds(settings)
     return await Promise.all(ids.map(async (id) => {
       const info = await this.modelInfo(id)
       return {

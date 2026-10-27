@@ -9,7 +9,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { OpenDesignSection } from '../src/client/opendesign/OpenDesignSection.tsx'
 import { zh } from '../src/client/opendesign/locales.ts'
-import type { OpenDesignCodingPlanDto, OpenDesignUsageDto, OpenDesignWebStatus } from '../src/shared/opendesign-contracts.ts'
+import type { OpenDesignCodingPlanDto, OpenDesignModelDto, OpenDesignUsageDto, OpenDesignWebStatus } from '../src/shared/opendesign-contracts.ts'
 
 const STATUS: OpenDesignWebStatus = {
   enabled: true,
@@ -475,5 +475,59 @@ describe('OpenDesignSection design plan windows', () => {
     expect(node.querySelector('.dshod-meter-track')).toBeNull()
     expect(node.textContent).toContain(zh.usageWindowsUnavailable)
     expect(node.textContent).not.toContain(zh.usageWindowsConsoleOnly)
+  })
+})
+
+/** A complete model row, with every field the card needs already filled in. */
+function modelFixture(overrides: Partial<OpenDesignModelDto>): OpenDesignModelDto {
+  return {
+    id: 'model',
+    name: 'Model',
+    contextWindow: 128_000,
+    defaultContextWindow: 128_000,
+    maxTokens: 64_000,
+    reasoning: false,
+    input: ['text'],
+    enabled: true,
+    ...overrides,
+  }
+}
+
+/** The one quiet hint line the row naming this model carries. */
+function hintOf(node: HTMLDivElement, name: string): string {
+  const row = [...node.querySelectorAll<HTMLElement>('.dsh-mcl-option')]
+    .find((option) => option.textContent?.includes(name))!
+  return row.querySelector<HTMLElement>('.dsh-mcl-hint')!.textContent!
+}
+
+describe('OpenDesignSection models the plan withholds', () => {
+  const SERVED = modelFixture({ id: 'gpt-6-luna', name: 'GPT-6 Luna', hint: '128k · text · reasoning · $0.1/$0.5', reasoning: true })
+  const UNMARKED = modelFixture({ id: 'kimi-k3', name: 'Kimi K3', hint: '128k · text · reasoning · $3/$15', reasoning: true })
+  const WITHHELD = modelFixture({ id: 'llama-unserved', name: 'Llama Unserved', hint: '128k · text', served: false })
+
+  it('labels the withheld row and leaves the served and unmarked rows verbatim', async () => {
+    const node = await render({ models: [SERVED, UNMARKED, WITHHELD] })
+    // The badge is appended behind the same separator the hint itself uses.
+    expect(hintOf(node, 'Llama Unserved')).toBe('128k · text · ' + zh.unservedBadge)
+    // A row stating served: true and a row stating nothing keep their hint.
+    expect(hintOf(node, 'GPT-6 Luna')).toBe('128k · text · reasoning · $0.1/$0.5')
+    expect(hintOf(node, 'Kimi K3')).toBe('128k · text · reasoning · $3/$15')
+    const labelled = [...node.querySelectorAll<HTMLElement>('.dsh-mcl-hint')]
+      .filter((hint) => hint.textContent?.includes(zh.unservedBadge))
+    expect(labelled).toHaveLength(1)
+  })
+
+  it('explains the withheld rows beside the model hint while one is listed', async () => {
+    const node = await render({ models: [SERVED, WITHHELD] })
+    expect(node.textContent).toContain(zh.modelsHint)
+    expect(node.textContent).toContain(zh.unservedHint)
+  })
+
+  it('says nothing extra when every listed model is served', async () => {
+    // The default status states no plan marker on either model, which means
+    // served: the card renders exactly the hint block it always did.
+    const node = await render()
+    expect(node.textContent).not.toContain(zh.unservedHint)
+    expect(node.textContent).not.toContain(zh.unservedBadge)
   })
 })
