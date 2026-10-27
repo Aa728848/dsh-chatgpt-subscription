@@ -123,6 +123,76 @@ describe('OpenDesignAdapter', () => {
     expect(accounts[0]!.planLabel).toBe('gpt-6-luna')
   })
 
+  /**
+   * The header deadline is a HEADER deadline.
+   *
+   * A thinking-heavy answer can run for minutes, and the failure it used to
+   * cause was silent and repeatable: the deadline stayed armed on the fetch
+   * signal, so at 180s the body was aborted mid-reasoning with "The operation
+   * was aborted due to timeout", the host retried, and the retry died at the
+   * same wall clock. Here the budget is 30ms and the answer starts after 40ms,
+   * so an armed deadline fails this test while a cleared one passes.
+   */
+  it('keeps streaming past the header deadline once the headers arrived', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'main')
+    const encoder = new TextEncoder()
+    const frames = [
+      'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":" again"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    ]
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => {
+      const signal = init?.signal ?? undefined
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let settled = false
+          signal?.addEventListener('abort', () => {
+            if (settled) return
+            settled = true
+            try {
+              controller.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+            } catch { /* already closed */ }
+          })
+          let index = 0
+          const push = (): void => {
+            if (settled) return
+            if (index >= frames.length) {
+              settled = true
+              controller.close()
+              return
+            }
+            controller.enqueue(encoder.encode(frames[index]!))
+            index += 1
+            setTimeout(push, 25)
+          }
+          // Longer than the 30ms header budget, so nothing but the clear() keeps
+          // this answer alive.
+          setTimeout(push, 40)
+        },
+      })
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as unknown as typeof fetch
+    const adapter = new OpenDesignAdapter(settings, { fetchFn, accountPool: pool, headerTimeoutMs: 30 })
+    const chunks = await collect(adapter, options())
+    const text = chunks
+      .filter((chunk) => (chunk as { type: string }).type === 'text-delta')
+      .map((chunk) => (chunk as { text: string }).text)
+      .join('')
+    expect(text).toBe('hello again')
+    expect((chunks[chunks.length - 1] as { type: string }).type).toBe('finish')
+  })
+
+  it('still gives up when the headers never arrive', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'main')
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      })
+    })) as unknown as typeof fetch
+    const adapter = new OpenDesignAdapter(settings, { fetchFn, accountPool: pool, headerTimeoutMs: 30 })
+    await expect(collect(adapter, options())).rejects.toThrow(/aborted due to timeout/i)
+  })
+
   it('rotates past a rejected key and marks it invalid', async () => {
     await pool.addAccount({ kind: 'api-key', apiKey: 'od_bad' }, 'bad')
     await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'good')

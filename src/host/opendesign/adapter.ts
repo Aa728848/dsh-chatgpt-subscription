@@ -94,6 +94,17 @@ export interface OpenDesignAdapterOptions {
   attachments?: AttachmentImageReader
   /** The account pool this adapter rotates over. */
   accountPool: OpenDesignAccountPool
+  /**
+   * How long one attempt may wait for response HEADERS, before the path is
+   * declared dead (`ATTEMPT_TIMEOUT_MS` by default).
+   *
+   * This is a header deadline, not a request deadline: it is cleared the moment
+   * the response arrives, because what bounds an answer's length afterwards is
+   * the stream idle watchdog (activity-based, resettable) and not a clock. The
+   * option exists so a test can prove that distinction with a 30ms budget
+   * instead of waiting three minutes.
+   */
+  headerTimeoutMs?: number
 }
 
 interface PickedAccount {
@@ -262,16 +273,22 @@ export class OpenDesignAdapter extends LlmAdapter {
         let response: Response | undefined
         let transportError: unknown
         for (let transportTry = 0; transportTry <= TRANSPORT_RETRIES; transportTry += 1) {
+          // One HEADER deadline per attempt, cleared the instant the response is
+          // in hand: the clock bounds the wait for the gateway, never the length
+          // of the answer it then streams back.
+          const headerDeadline = withAttemptTimeout(upstream, this.options.headerTimeoutMs)
           try {
             response = await openChatStream({
               fetchFn: this.options.fetchFn,
               baseURL,
               apiKey,
               body,
-              signal: withAttemptTimeout(upstream),
+              signal: headerDeadline.signal,
             })
+            headerDeadline.clear()
             break
           } catch (error) {
+            headerDeadline.clear()
             if (signal.aborted) throw new LlmError('OpenDesign request aborted by caller', 'ABORTED', { cause: error })
             transportError = error
             // Only a failure that happened before the request was sent is safe
@@ -373,9 +390,31 @@ export class OpenDesignAdapter extends LlmAdapter {
   }
 }
 
-/** A caller signal combined with the attempt's header deadline. */
-function withAttemptTimeout(signal: AbortSignal): AbortSignal {
-  return AbortSignal.any([signal, AbortSignal.timeout(ATTEMPT_TIMEOUT_MS)])
+/**
+ * A caller signal combined with the attempt's CLEARABLE header deadline.
+ *
+ * The clear is not a nicety, it is the difference between a header deadline and
+ * a request deadline. `AbortSignal.timeout` is absolute and cannot be disarmed,
+ * so attaching one to the fetch signal and leaving it there keeps counting
+ * through the whole response body — a model that thinks for more than
+ * `ATTEMPT_TIMEOUT_MS` then dies mid-answer with "The operation was aborted due
+ * to timeout", is retried by the host, and dies again at the same wall clock.
+ * That is exactly what happened here: two attempts streamed reasoning for 155s
+ * and 173s and both were cut 180s after their request went out.
+ *
+ * Cleared after the headers (see the transport loop), at which point the stream
+ * idle watchdog owns liveness: it watches for SILENCE and resets on every
+ * chunk, so a long thinking pass is fine and a dead socket is still caught.
+ */
+function withAttemptTimeout(signal: AbortSignal, timeoutMs = ATTEMPT_TIMEOUT_MS): { signal: AbortSignal; clear: () => void } {
+  const deadline = new AbortController()
+  const timer = setTimeout(() => {
+    deadline.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+  }, timeoutMs)
+  return {
+    signal: AbortSignal.any([signal, deadline.signal]),
+    clear: () => clearTimeout(timer),
+  }
 }
 
 /**

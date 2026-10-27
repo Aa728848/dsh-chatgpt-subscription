@@ -288,7 +288,12 @@ export const QODER_DEFAULT_CONTEXT_WINDOW: Readonly<Record<QoderRegion, number>>
   cn: 200_000,
 }
 
-/** 单次上游业务 / 模型请求的超时（空闲看门狗拥有真实 deadline，这只是一个上限）。 */
+/** 单次上游 **非流式** 业务 / 模型请求的超时。
+ *
+ * 刻意不挂到流式请求上：`AbortSignal.timeout` 是绝对计时，会跟着响应体一直走，
+ * 把一次长时间思考从中间掐断（opendesign 就是这么在 180 秒上翻车的，见
+ * `docs/opendesign-line-plan.md` §5）。流式请求的存活由 `STREAM_IDLE_TIMEOUT_MS`
+ * 负责——它每个 chunk 重置。 */
 export const CHAT_TIMEOUT_MS = 300_000
 
 /** 模型目录 / 额度 / userinfo 等发现阶段请求的超时。 */

@@ -514,7 +514,11 @@ export const STEPCODE_AUTH_FILE_MODE = 0o600
 // 超时与缓存
 // ---------------------------------------------------------------------------
 
-/** 单次上游业务 / 模型请求的超时。 */
+/** 单次上游 **非流式** 业务 / 模型请求的超时。
+ *
+ * 刻意不挂到流式请求上：绝对计时的 `AbortSignal.timeout` 会跟着响应体走完，
+ * 把长时间思考从中间掐断（opendesign 就是这么在 180 秒上翻车的，见
+ * `docs/opendesign-line-plan.md` §5）。流的存活由 `STREAM_IDLE_TIMEOUT_MS` 负责。 */
 export const CHAT_TIMEOUT_MS = 300_000
 
 /** 模型目录 / 额度发现阶段的超时。 */
