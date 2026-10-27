@@ -40,7 +40,13 @@
       "default": "./lib/client.js"
     },
     "./package.json": "./package.json",
-    "./presets/*": "./presets/*"
+    "./presets/*": "./presets/*",
+    "./progress-updates": {
+      "types": "./lib/types/entry-progress-updates.d.ts",
+      "default": "./lib/progress-updates.js"
+    },
+    "./progress-updates/locale/*.json": "./locale/progress-updates/*.json",
+    "./progress-updates/icon": "./progress-updates.svg"
   },
   "dsh": {
     "bundle": {
@@ -131,7 +137,11 @@
     "widgets",
     "cordis.patch.yml",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "lib/progress-updates.js",
+    "locale",
+    "progress-updates.svg",
+    "lib/*.js"
   ],
   "license": "MIT",
   "scripts": {

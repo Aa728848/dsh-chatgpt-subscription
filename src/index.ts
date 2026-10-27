@@ -1,4 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { attachProgressSettings } from './entry-progress-updates.ts'
+import { resolveProgressUpdatesSettings } from './host/progress-updates/index.ts'
+import type { ProgressUpdateLanguage } from './host/progress-updates/prompt.ts'
+import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/progress-updates/store.ts'
 import { createRequire } from 'node:module'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -180,13 +184,6 @@ import {
   type NoAnswerResumeContext,
   type NoAnswerResumeOptions,
 } from './host/no-answer-resume/index.ts'
-import {
-  installProgressUpdates,
-  resolveProgressUpdatesSettings,
-  type ProgressUpdatesContext,
-} from './host/progress-updates/index.ts'
-import type { ProgressUpdateLanguage } from './host/progress-updates/prompt.ts'
-import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/progress-updates/store.ts'
 
 interface Volatile<T> {
   get(): T
@@ -199,6 +196,23 @@ interface Volatile<T> {
  * 类型；{@link ConfigInput} 才是 profile 里写的普通值。
  */
 export interface Config {
+  /**
+   * 「进展更新」总开关。打开后 agent 可以用 `progress_update` 工具在不结束回
+   * 合的前提下主动汇报多步任务的进展，网页在对话流里显示成一行，右侧栏面板汇
+   * 总。默认开启。
+   *
+   * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：loader 把这个字段
+   * 解析成一个活引用交进 `apply`，设置一保存就就地写新值、不重挂插件行。
+   *
+   * **实现搬到了独立的 loader 行**（`src/entry-progress-updates.ts`），但字段留在
+   * 这里：profile 的 patch 层按 id 替换整行 config，用户的 profile 早就在这一行写过
+   * `progressUpdates`；字段若搬去新行，那条 patch 会把新行的配置整体抹掉。
+   */
+  progressUpdates?: Volatile<boolean>
+  /** 进展更新的催促阈值：连续这么多轮带工具调用却没有进展更新时提醒一次。默认 8。 */
+  progressUpdatesNudgeThreshold?: Volatile<number>
+  /** 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文。 */
+  progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
   fetchProvider?: 'auto' | 'plugin' | 'dsh'
@@ -271,27 +285,6 @@ export interface Config {
    * key keeps the default.
    */
   poolStorage?: PoolStorageMode
-  /**
-   * 「进展更新」总开关。打开后 agent 可以用 `progress_update` 工具在不结束回
-   * 合的前提下主动汇报多步任务的进展，网页在对话流里显示成一行，右侧栏面板汇
-   * 总。默认开启：安装插件后默认启用，用户可在设置中按需关闭。
-   *
-   * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：loader 把这个字段
-   * 解析成一个活引用交进 `apply`，设置一保存就就地写新值、不重挂插件行。
-   */
-  progressUpdates?: Volatile<boolean>
-  /**
-   * 进展更新的催促阈值：连续这么多轮带工具调用却没有进展更新时，给模型追加一
-   * 条提醒。默认 8（与 `NUDGE_THRESHOLD` 同一个数，两处不会漂移）。
-   */
-  progressUpdatesNudgeThreshold?: Volatile<number>
-  /**
-   * 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文。
-   *
-   * 只约束 `progress_update` 的标题与正文——提示词本身固定英文，用户看到的
-   * 文字才跟着这个字段走。同样是 `volatile()`：设置一保存就生效，不重挂插件行。
-   */
-  progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
 }
 
 /**
@@ -324,14 +317,14 @@ export interface ConfigInput {
   reasoningCollapseGuard?: GuardOptions | false
   /** Resume a turn that ended without an answer or a tool call; `false` leaves it failed. */
   noAnswerResume?: NoAnswerResumeOptions | false
-  /** Idle budget for one Codex Responses stream, in milliseconds. */
-  codexStreamIdleTimeoutMs?: number
-  /** 「进展更新」总开关（默认开启，打开后往系统提示词里加入引导节）。 */
+  /** 「进展更新」总开关（默认开启）。 */
   progressUpdates?: boolean
   /** 进展更新的催促阈值（默认 8）。 */
   progressUpdatesNudgeThreshold?: number
   /** 进展更新的输出语言（默认 auto：跟随对话）。 */
   progressUpdatesLanguage?: ProgressUpdateLanguage
+  /** Idle budget for one Codex Responses stream, in milliseconds. */
+  codexStreamIdleTimeoutMs?: number
   /**
    * 号池存储后端：`keyring`（默认，平台密钥环）或 `credentials`（DSH 凭据库，服务器推荐）。
    *
@@ -359,13 +352,17 @@ export const Config: z<ConfigInput, Config> = z.object({
   // Same shape as the guard above: the resume hook validates its own numbers
   // fail-loud, and `false` opts out.
   noAnswerResume: z.union([z.object({}), z.const(false)]).default({}),
+  // 进展更新：实现挂在独立的 loader 行上，但**字段留在这里**（见运行期 Config 的
+  // 同名注释）。三个都是 `volatile()`：设置面板保存时直接提交进正在运行的实例，
+  // 不重挂任何行，开关因此在同一个会话里立刻生效。
+  progressUpdates: z.boolean().default(true).volatile()
+    .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。'),
+  progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
+    .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
+  progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default('auto').volatile()
+    .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文。'),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
-  // 进展更新：两个字段都是 `volatile()`，设置面板里保存时直接被提交进正在运行的
-  // 实例（loader 把字段换成活引用并广播 `loader/volatile-update`），不重挂插件
-  // 行——开关必须在同一个会话里立刻生效，否则用户要为了打开它重开一次对话。
-  // `progressUpdates` 默认开启：安装插件后开箱即用，用户可在设置页随时关闭；
-  // `progressUpdatesNudgeThreshold` 默认就是冻结在 store 里的 8，两处共用同一个常量。
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
   // Service），现有安装零变化；没有桌面密钥环的服务器要显式选 `credentials`，
   // 把号池放进 DSH 自己的凭据库——原先这里在 Linux 上硬编码 Secret Service，
@@ -373,14 +370,6 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 并优先于这里的值。
   poolStorage: z.union([z.const('keyring'), z.const('credentials')]).default('keyring')
     .description('号池存储后端：keyring（默认，桌面平台的系统密钥环）或 credentials（DSH 凭据库，服务器推荐）。'),
-  progressUpdates: z.boolean().default(true).volatile()
-    .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。'),
-  progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
-    .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
-  // 输出语言：`auto` 跟随对话（默认），`zh`/`en` 强制压过对话语言。
-  // 枚举而不是自由字符串：写错一个值就等于没写，且设置页的下拉只可能出现这三项。
-  progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default('auto').volatile()
-    .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文。'),
 })
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
@@ -423,6 +412,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       'dsh-chatgpt-subscription: agent preset sync',
     )
   }
+
+  // 进展更新的实现跑在自己的 loader 行上，设置却声明在这里（见 Config）。
+  // 两行的挂载顺序不归任何一方管，所以两边都留了座位：先挂的一方等另一方来交。
+  attachProgressSettings(() => resolveProgressUpdatesSettings(pluginConfig))
 
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
@@ -1390,20 +1383,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       )
       : () => undefined
 
-    // 「进展更新」：不结束回合的 `progress_update` 工具 + 系统提示词引导 +
-    // `tools/post-execute` 上的 8 轮催促 + 客户端唯一的取数路由。挂载是无条件
-    // 的——工具清单不能在会话中途变化，所以开关关闭时工具照样注册、execute 直接
-    // 返回 displayed:false（见 host/progress-updates/tool.ts）。
-    //
-    // 交进去的是**配置本身**而不是解析后的值：两个字段在 loader 里是 volatile
-    // 活引用，设置面板一保存就把新值写进同一个引用，子模块每次用到都重读一次，
-    // 于是开关在同一个会话里立刻生效、不必重开对话。
-    const disposeProgressUpdates = installProgressUpdates(
-      ctx as unknown as ProgressUpdatesContext,
-      { settings: () => resolveProgressUpdatesSettings(pluginConfig) },
-    )
-
-    // Rebind providers when web reloads without resetting the saved default provider selection.
+    // Rebind providers when web reloads    // Rebind providers when web reloads without resetting the saved default provider selection.
     ctx.inject(['web'], ctx => {
       ctx.web.registerSearchProvider(createCodexSearchProvider(oauth, { fetchFn: proxyFetch }))
       ctx.web.registerFetchProvider(createCodexFetchProvider({
@@ -1459,7 +1439,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeVideoTool()
       disposeMinimaxUnderstandVideoTool()
       disposeMinimaxGenerateVideoTool()
-      disposeProgressUpdates()
       disposeAdapter()
       disposeRoutes()
       disposeHubOverview()

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[packaging] 「进展更新」拆成独立组件：同包第二行，可在插件管理页单独关闭**
+  - **机制**：`cordis.patch.yml` 现在插两行 loader 条目；新增 `src/entry-progress-updates.ts` 作为第二个宿主入口（自带 `Config`、`inject` 与 `apply`），`package.json` 增加 `exports["./progress-updates"]` 与子路径行的 `locale/*.json` / `icon`，构建多入口产出 `lib/progress-updates.js`。管理页的「包含的组件」因此从 1 变成 2。
+  - **设置字段留在核心行**：三个 `volatile` 字段仍声明在 `src/index.ts` 的 `Config`，由核心在 `apply` 时通过 `attachProgressSettings()` 把读取器交给新行（两行的挂载顺序两种都兜住）。不能搬走的原因很实在：profile 的 patch 层按 id 定位**替换整行 config**，而用户 profile 早就在核心行写了 `progressUpdates: true`——字段搬去新行，那条 patch 会把新行配置整体抹掉、schema 默认值填回 false，于是「设置显示打开、实际是关的」。
+  - **前端自隐**：同包多行只拆宿主——浏览器半边仍按包加载。客户端挂载时探一次 `GET api/dsh-progress-updates/updates`：**只有路由自己回的 JSON 404／405** 才说明那一行没装（网关兜底的纯文本 `not found` 也是 404，第一版据此把装着它的实例的 UI 也撤了），网络错误按「装着」处理。
+  - **回归**：`progress-updates-live-ref-and-route` 改为读新入口的 `Config`；新增 3 例（宿主不在时撤注册、宿主在时不动、探测失败按装着）；`minimax-media-tool-registration` 改为断言 `progress_update` 不再属于核心行。
+  - **验证**：`npm run typecheck` 0 错误；全量 Vitest **4906 passed / 10 skipped**（唯一失败仍是 GLM adopt 那个环境用例）；`npm run build` 产出 `lib/index.js` + `lib/progress-updates.js`；`npm pack --dry-run` 含 `lib/progress-updates.js`、`locale/progress-updates/{zh,en}.json`、`progress-updates.svg`；直接 import 构建产物确认 `name / apply / Config` 三项齐全、默认值解析为 `true / 8 / auto`。
+  - **未验证**：插件管理页上真的出现两个开关需要重启 DSH（bundle patch 在启动时应用），本轮没有重启你的实例。
+
 - **[kimi-code] 额度徽标不再偶尔显示一长串小数**
   - **现象**：编写器旁的「额度 xx%」有时是 `91.96000000000001%` 这种数字，而且只在**部分**读数上出现。
   - **为什么**：徽标显示的是「剩余」，算法是 `100 - usedPercent`。`100 - 8.04` 在二进制浮点里等于 `91.96000000000001`，而代码直接把这个差值插进字符串——两位小数的 used 里约 **三分之一** 会落在这种不友好的邻居上，所以看起来「有时候」；这不是显示精度没设够，四舍五入 used 也没用，必须在**算完之后**格式化。

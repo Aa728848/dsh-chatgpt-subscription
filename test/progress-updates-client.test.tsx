@@ -446,6 +446,22 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
   })
 })
 
+/**
+ * 只数**会话轮询**的那些请求。
+ *
+ * 客户端挂载时会先发一次宿主探针，URL 与数据请求相同（只是不带 session）：组件
+ * 可以被单独关掉，面板与设置分区要跟着宿主一起消失。探针永远是第一次调用，所以
+ * 取它的后面那几次。
+ * @param fakeFetch - 用例里的假 fetch。
+ * @returns 探针之后的调用。
+ */
+function dataCalls(fakeFetch: { mock: { calls: unknown[][] } }): unknown[][] {
+  const calls = fakeFetch.mock.calls
+  const first = calls[0]
+  const isProbe = first !== undefined && String(first[0]) === PROGRESS_UPDATES_PATH
+  return isProbe ? calls.slice(1) : calls
+}
+
 describe('C. 取数：真的请求宿主路由', () => {
   const FIXTURE: ProgressUpdate = { id: 'pu-1', title: '读仓库结构', message: '已读完 packages 目录。', at: 1_700_000_000_000 }
 
@@ -484,8 +500,8 @@ describe('C. 取数：真的请求宿主路由', () => {
     const unsubscribe = inject('session-abc').source.subscribe(() => {})
     await flush()
     // Then —— 这一行就是「取数客户端真的发请求到那条路由」的证据
-    expect(fakeFetch).toHaveBeenCalled()
-    const [url] = fakeFetch.mock.calls[0] as unknown as [string]
+    expect(dataCalls(fakeFetch)).not.toHaveLength(0)
+    const [url] = dataCalls(fakeFetch)[0] as unknown as [string]
     expect(String(url)).toContain(PROGRESS_UPDATES_PATH)
     expect(String(url)).toBe(`${PROGRESS_UPDATES_PATH}?session=session-abc`)
     // And 路径是文档相对的（子路径部署时靠它解析到入口目录）
@@ -562,13 +578,13 @@ describe('C. 取数：真的请求宿主路由', () => {
     const source = inject('session-abc').source
     const unsubscribe = source.subscribe(() => {})
     await flush()
-    expect(fakeFetch).toHaveBeenCalledTimes(1)
+    expect(dataCalls(fakeFetch)).toHaveLength(1)
     // When 插件行被卸载（effect 的清理函数全部执行）
     for (const dispose of disposers) dispose()
     // Then 原来那份源已经停掉：它后续的订阅者只登记监听，不再发请求
     //      （stop() 是终态——卸载路径上的一次迟到重订阅不能给插件留下常驻定时器）
     expect(() => source.subscribe(() => {})).not.toThrow()
-    expect(fakeFetch).toHaveBeenCalledTimes(1)
+    expect(dataCalls(fakeFetch)).toHaveLength(1)
     unsubscribe()
   })
 })
@@ -873,5 +889,77 @@ describe('F. 面板的三个已修问题（回归守卫）', () => {
     const count = container.querySelector('[data-dsh-part="updates-count"]')!.textContent ?? ''
     expect(count).not.toContain('{n}')
     expect(count).toContain('2')
+  })
+})
+
+/**
+ * 同包多组件之后，「进展更新」可以被单独关掉。
+ *
+ * 关掉只卸掉宿主那一行，浏览器半边仍随本包的 bundle 加载；因此面板、页签与设置
+ * 分区必须自己发现宿主不在并撤掉——否则插件管理页上写着「已关闭」，页面上却还
+ * 挂着一格永远空的「进展更新」。
+ */
+describe('E. 宿主那一行被单独关掉', () => {
+  /** 让已经排队的微任务跑完（探测的回调挂在这些微任务上）。 */
+  const flush = async (): Promise<void> => {
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  /** 一个会记住谁还活着的槽位面：disposer 真的把注册摘掉。 */
+  function trackingCtx(): { ctx: never; live: Set<string> } {
+    const live = new Set<string>()
+    const noop = (): void => {}
+    const ctx = {
+      effect: (fn: () => unknown) => { fn(); return noop },
+      get: () => undefined,
+      inject: () => noop,
+      locale: { register: () => noop, bind: () => (key: string) => key },
+      slots: {
+        inject: (_key: string, callback: () => () => void) => callback(),
+        register: (options: { name: string, key?: string, id?: string }) => {
+          const id = options.key ?? options.id ?? options.name
+          live.add(id)
+          return () => { live.delete(id) }
+        },
+      },
+    }
+    return { ctx: ctx as never, live }
+  }
+
+  it('探针说宿主不在时，注册过的槽位全部撤掉', async () => {
+    // 路由自己回 JSON 404 才是「没装」；网关的纯文本 404 不算。
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(
+      { ok: false, error: 'not found' },
+      { status: 404, headers: { 'content-type': 'application/json' } },
+    )))
+    const { ctx, live } = trackingCtx()
+    installProgressUpdatesClient(ctx)
+    // 探测是异步的：先按「装着」乐观注册，探测回来再决定。
+    expect(live.size).toBeGreaterThan(0)
+    await flush()
+    expect(live.size).toBe(0)
+  })
+
+  it('探针说宿主在时，槽位一个不动', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ updates: [] })))
+    const { ctx, live } = trackingCtx()
+    installProgressUpdatesClient(ctx)
+    const before = new Set(live)
+    await flush()
+    expect(live).toEqual(before)
+    expect(live.size).toBeGreaterThan(0)
+  })
+
+  it('探测失败（网络错误）按「装着」处理，不把功能误判成没装', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
+    const { ctx, live } = trackingCtx()
+    installProgressUpdatesClient(ctx)
+    const before = new Set(live)
+    await flush()
+    expect(live).toEqual(before)
   })
 })

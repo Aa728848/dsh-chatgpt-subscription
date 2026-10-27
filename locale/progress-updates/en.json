@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Progress updates",
+    "description": "Lets the agent report progress during multi-step work: the progress_update tool, its prompt guidance, and the sidebar panel. Independent of any subscription line."
+  }
+}

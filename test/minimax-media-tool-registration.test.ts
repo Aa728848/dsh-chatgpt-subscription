@@ -98,8 +98,10 @@ describe('MiniMax media tools follow the line switch', () => {
     const tools = mountPlugin({ enabled: true })
     expect(tools).toContain('minimax_generate_video')
     expect(tools).toContain('minimax_understand_video')
-    // The other always-on tools are independent of this switch.
-    expect(tools).toContain('progress_update')
+    // The other always-on tools are independent of this switch. `progress_update`
+    // is NOT among them any more: it moved to its own component row
+    // (`entry-progress-updates.ts`), so this row must not claim it.
+    expect(tools).not.toContain('progress_update')
     expect(tools).toContain('codex_image_generate')
   })
 
@@ -108,8 +110,8 @@ describe('MiniMax media tools follow the line switch', () => {
     expect(tools).not.toContain('minimax_generate_video')
     expect(tools).not.toContain('minimax_understand_video')
     // A disabled line must cost nothing, but it must not take the rest with it:
-    // progress_update and the server-side image routes serve every deployment.
-    expect(tools).toContain('progress_update')
+    // The server-side image routes serve every deployment.
+    expect(tools).not.toContain('progress_update')
     expect(tools).toContain('codex_image_generate')
     expect(tools).toContain('antigravity_image_generate')
     expect(tools).toContain('kimi_attach_video')

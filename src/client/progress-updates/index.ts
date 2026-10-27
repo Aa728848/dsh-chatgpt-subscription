@@ -42,7 +42,7 @@ import { ProgressRow } from './progress-row.tsx'
 import { ProgressUpdatesSettingsSection } from './settings-section.tsx'
 import { ProgressUpdatesTab, ProgressUpdatesTabTitle, type ProgressSnapshotSource } from './updates-panel.tsx'
 import { PROGRESS_UPDATE_TOOL_NAME } from './tool-name.ts'
-import { createHostProgressSource, type HostProgressSource } from './host-source.ts'
+import { createHostProgressSource, isProgressUpdatesHostPresent, type HostProgressSource } from './host-source.ts'
 import { createProgressSettingsForm, type ProgressSettingsForm } from './settings-binding.ts'
 import { NS_PROGRESS_UPDATES, zh } from './locales.ts'
 
@@ -149,6 +149,35 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
    * 调用方显式给的数据源：给了就一直用它，不再发任何 HTTP（测试与将来替换用）。
    */
   const explicitSource = options.source
+
+  /**
+   * 宿主那一行是不是装着。
+   *
+   * 同包多组件之后，关掉「进展更新」只会卸掉宿主那一行：浏览器半边仍随本包的
+   * bundle 加载，面板与设置分区就会变成永远空的壳。启动时问一次宿主的只读路由，
+   * 缺了就撤掉已经注册的槽位、并且不再响应后续出现的槽位。
+   *
+   * 显式给了数据源（测试与将来替换实现）时不探测：那时宿主根本不在链路里。
+   */
+  let hostPresent = true
+  const registrations: Array<() => void> = []
+  const keep = (dispose: () => void): () => void => {
+    registrations.push(dispose)
+    return dispose
+  }
+  if (explicitSource === undefined) {
+    void isProgressUpdatesHostPresent().then((present) => {
+      if (present) return
+      hostPresent = false
+      for (const dispose of registrations.splice(0)) {
+        try {
+          dispose()
+        } catch {
+          // 槽位服务已经卸载：没有东西可撤。
+        }
+      }
+    })
+  }
 
   /**
    * 默认数据源：每个会话一份轮询源。
@@ -297,12 +326,13 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
    * 这是本特写的主形态——不依赖侧栏，也不依赖宿主路由，只看工具调用的参数。
    */
   ctx.slots.inject('tool.call.toolview', () => {
+    if (!hostPresent) return () => {}
     try {
-      return ctx.slots.register({
+      return keep(ctx.slots.register({
         name: 'tool.call.toolview',
         key: PROGRESS_UPDATE_TOOL_NAME,
         locale: NS_PROGRESS_UPDATES,
-      }, ProgressRow)
+      }, ProgressRow))
     } catch {
       return () => {}
     }
@@ -310,8 +340,9 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
 
   /** 阶段二：同一个 id 下渲染页签正文。 */
   ctx.slots.inject('sidebar.right.pane.tab', () => {
+    if (!hostPresent) return () => {}
     try {
-      return ctx.slots.register({
+      return keep(ctx.slots.register({
         name: 'sidebar.right.pane.tab',
         key: PANEL_TAB_ID,
         locale: NS_PROGRESS_UPDATES,
@@ -319,7 +350,7 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
         inject: (sessionId: string) => ({
           source: explicitSource ?? hostSourceOf(sessionId),
         }),
-      }, ProgressUpdatesTab)
+      }, ProgressUpdatesTab))
     } catch {
       return () => {}
     }
@@ -327,12 +358,13 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
 
   /** 阶段二：同一个 id 下渲染页签条上的标题。 */
   ctx.slots.inject('sidebar.right.pane.tab.title', () => {
+    if (!hostPresent) return () => {}
     try {
-      return ctx.slots.register({
+      return keep(ctx.slots.register({
         name: 'sidebar.right.pane.tab.title',
         key: PANEL_TAB_ID,
         locale: NS_PROGRESS_UPDATES,
-      }, ProgressUpdatesTabTitle)
+      }, ProgressUpdatesTabTitle))
     } catch {
       return () => {}
     }
@@ -344,9 +376,10 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
    * 没有这一格，面板就是注册好了也永远点不开——类型和正文都不会自己长出入口。
    */
   ctx.slots.inject('settings.section', () => {
+    if (!hostPresent) return () => {}
     try {
       const openPanel = openPanelAction(ctx, options.openPanel)
-      return ctx.slots.register({
+      return keep(ctx.slots.register({
         name: 'settings.section',
         id: SETTINGS_SECTION_ID,
         order: SETTINGS_SECTION_ORDER,
@@ -362,7 +395,7 @@ export function installProgressUpdatesClient(ctx: ClientContext, options: Progre
           const currentSettings = resolveSettings()
           return currentSettings === undefined ? { openPanel } : { openPanel, settings: currentSettings }
         },
-      }, ProgressUpdatesSettingsSection)
+      }, ProgressUpdatesSettingsSection))
     } catch {
       return () => {}
     }

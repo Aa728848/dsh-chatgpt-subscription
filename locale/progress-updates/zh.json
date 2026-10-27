@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "进展更新",
+    "description": "让 agent 在多步任务中主动汇报进展：progress_update 工具、提示词引导与侧栏面板。与订阅线路无关，可单独关闭。"
+  }
+}

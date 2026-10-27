@@ -4,3 +4,8 @@
 - insert:
     - id: dsh-chatgpt-subscription
       name: '@eddyskywalker/dsh-chatgpt-subscription'
+    # 第二个组件：「进展更新」。同包多行 = 两个独立的 loader 条目，管理页各有一
+    # 个开关；浏览器半边仍只有一份 bundle（`dsh.client` 按包声明），所以它自己
+    # 探测这一行的路由在不在，不在就不注册面板与设置分区。
+    - id: dsh-chatgpt-subscription-progress-updates
+      name: '@eddyskywalker/dsh-chatgpt-subscription/progress-updates'

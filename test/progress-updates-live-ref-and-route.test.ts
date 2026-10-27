@@ -140,6 +140,11 @@ function mount(enabled: boolean | { get(): boolean }) {
   return fake
 }
 
+/**
+ * 三个设置字段仍声明在**核心入口**：实现搬到了独立的 loader 行，字段却留在
+ * `src/index.ts` 的 Config 里——profile 的 patch 层按 id 替换整行 config，用户的
+ * profile 早就在核心行写了 `progressUpdates`，字段搬走就会被那条 patch 抹成默认值。
+ */
 describe('插件 Config：两个字段都是活引用', () => {
   it('解析出来的就是 { get() } 引用，默认开启、阈值 8', () => {
     // 默认开启：装上插件即开箱可用，用户可随时在设置里关掉。

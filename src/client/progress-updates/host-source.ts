@@ -42,6 +42,49 @@ import type { ProgressSnapshotSource } from './updates-panel.tsx'
  */
 export const PROGRESS_UPDATES_PATH = 'api/dsh-progress-updates/updates'
 
+/**
+ * 宿主那一行今天装没装。
+ *
+ * 这个包的浏览器半边按**包**加载：即使「进展更新」那一行被关掉，本 bundle 照样
+ * 会跑，面板与设置分区就会变成两个永远空的壳。所以挂载前问一次宿主的只读路由。
+ *
+ * **只在路由自己说不存在时判「没装」**：本路由的 403（非 loopback）与 200 都说明
+ * 它在；而网关对一个不认识的路径回的那句 `not found`（纯文本或 HTML）也常常是
+ * 404，把「任何 404」当成没装会让装着它的实例把 UI 自己撤掉——第一版就是这么写的，
+ * 实测踩到了。
+ *
+ * 探测失败（网络错误、超时、无法判断）一律按「装着」处理：宁可多一格外壳，也不能
+ * 因为一次抖动把装着的功能判成没装。
+ * @returns 宿主半边是否在线。
+ */
+export async function isProgressUpdatesHostPresent(): Promise<boolean> {
+  if (typeof fetch !== 'function') return true
+  let response: Response
+  try {
+    response = await fetch(PROGRESS_UPDATES_PATH, {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+    })
+  } catch {
+    // 网络错误不等于没装：宁可留一格外壳，也不能把装着的功能判成没装。
+    return true
+  }
+  if (response.status !== 404 && response.status !== 405) return true
+  // 路由自己说不存在时回 JSON；网关的兜底是纯文本（实测 `not found`），不能当成
+  // 「那一行没装」——第一版就是那样，把装着的实例的 UI 自己撤掉了。
+  const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
+  if (!contentType.includes('json')) return true
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return true
+  }
+  if (body === null || typeof body !== 'object') return true
+  const ok = (body as { ok?: unknown }).ok
+  return typeof ok === 'boolean' ? ok : true
+}
+
 /** 轮询间隔（毫秒）。进展更新是人读的一行行文字，2 秒足够跟手，也不至于压宿主。 */
 export const PROGRESS_POLL_MS = 2_000
 

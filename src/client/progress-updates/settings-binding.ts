@@ -75,6 +75,11 @@ export type ProgressUpdatesField =
  * 第一项来自 `cordis.patch.yml` 的行 id（独立安装的唯一形态）；后两项是聚合安装
  * 可能套的前缀。镜像答上来之后不再用这张表的顺序，改用"值里带 `progressUpdates`
  * 的那一条"。
+ *
+ * 这三个字段挂在**核心那一行**（`src/index.ts` 的 Config）而不是「进展更新」那一行：
+ * 用户/profile 早就在核心行的 config 里写过 `progressUpdates`，而 loader 的 profile
+ * 层是按 id 替换整行 config 的——字段若搬去新行，profile 一写就等于把那行的开关
+ * 抹成默认值，于是「设置里显示打开」和「实际是关的」同时成立。
  */
 export const PROGRESS_SETTINGS_ENTRY_IDS: readonly string[] = [
   'dsh-chatgpt-subscription',
@@ -148,6 +153,10 @@ function isConfigForms(value: unknown): value is ConfigFormsFace {
 
 /**
  * 判断一个条目的解析值是不是本插件的 Config 切片。
+ *
+ * 按**键**认领而不是按行 id：聚合安装会给条目套家族前缀，而字段名是唯一稳定的。
+ * 认领对象是核心行（进度更新的实现行现在没有这些字段了），所以「值里带
+ * `progressUpdates` 的那一条」就正好是设置该写进去的那一条。
  * @param value - describe 交来的解析值。
  * @returns 是否带 `progressUpdates` 这个键。
  */
