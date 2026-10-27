@@ -7,7 +7,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { registerKimiCodeRoutes } from '../src/host/kimi-code/routes.ts'
 import { FileCredentialStore, FileModelSettingsStore, registerKimiCodePreferenceStore, type KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/kimi-code/client.ts'
-import { resetRefreshRejections } from '../src/host/kimi-code/oauth.ts'
+import { KimiCodeAccountPool, parseKimiCodePoolData } from '../src/host/kimi-code/account-pool.ts'
+import { resetRefreshRejections, resetWebLogin } from '../src/host/kimi-code/oauth.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -27,6 +28,16 @@ class MemoryCredentialBackend {
   private data: KimiCodeCredentials | null = null
   async load() { return this.data === null ? null : JSON.parse(JSON.stringify(this.data)) as KimiCodeCredentials }
   async save(data: KimiCodeCredentials) { this.data = JSON.parse(JSON.stringify(data)) as KimiCodeCredentials }
+  async clear() { this.data = null }
+}
+
+/** In-memory pool document, parsed exactly as a real backend would. */
+class MemoryPoolBackend {
+  private data: unknown = null
+  async load() {
+    return this.data === null ? null : parseKimiCodePoolData(JSON.parse(JSON.stringify(this.data)))
+  }
+  async save(data: unknown) { this.data = JSON.parse(JSON.stringify(data)) }
   async clear() { this.data = null }
 }
 
@@ -343,5 +354,225 @@ describe('Kimi Code settings routes', () => {
       const written = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as { contextWindowOverrides: unknown }
       expect(written.contextWindowOverrides).toEqual({ 'kimi-for-coding': 500_000 })
     })
+  })
+})
+
+/**
+ * The name shown on the account card.
+ *
+ * Sign-in can only title a row from its token, and a phone-signed-in account
+ * carries no address, so the row read `账号 N` for good: the nickname exists
+ * only on `/me`, which the quota read asks, and nothing carried the answer back.
+ * This drives the real route so the whole chain is pinned — refresh → profile →
+ * pool row → the list the card renders.
+ */
+describe('Kimi Code routes learn the account name', () => {
+  it('titles a placeholder row with the nickname the status refresh read', async () => {
+    clearCachedCatalog()
+    clearCachedQuota()
+    resetRefreshRejections()
+    const store = new FileCredentialStore(tmp('kc-cred-learn'), new MemoryCredentialBackend())
+    const modelSettings = new FileModelSettingsStore(tmp('kc-models-learn'))
+    const pool = new KimiCodeAccountPool({ store, backend: new MemoryPoolBackend() as never })
+    const added = await pool.addAccount({
+      accessToken: jwt({ user_id: 'u_123' }),
+      refreshToken: jwt({}),
+      expiresAt: Date.now() + 24 * 3_600_000,
+      expiresIn: 86_400,
+      region: 'mainland-cn',
+      oauthHost: 'https://auth.kimi.com',
+      baseUrl: 'https://api.kimi.com/coding',
+    })
+    // What a phone sign-in leaves behind: an id, no address, no name.
+    expect(added.alias).toBe('账号 1')
+
+    const routes: Array<{ path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    const ctx = {
+      webServer: {
+        register(route: { path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) {
+          routes.push(route)
+          return () => undefined
+        },
+      },
+    } as unknown as Context
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      const target = String(url)
+      if (target.endsWith('/me')) {
+        // The envelope the gateway wraps the profile in.
+        return Response.json({ data: { userInfo: { nickname: '月光' } } })
+      }
+      if (target.includes('/usages')) return Response.json(USAGES)
+      return Response.json(CATALOG)
+    })
+    registerKimiCodeRoutes(ctx, store, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      accountPool: pool,
+    })
+
+    const { response, captured } = fakeExchange()
+    await routes[0]!.handler(fakeRequest({ url: '/kimi-code/api/status' }), response)
+    expect(captured.status).toBe(200)
+
+    const value = (captured.body as { value: { accounts: Array<{ alias: string; nickname?: string }> } }).value
+    expect(value.accounts[0]).toMatchObject({ alias: '月光', nickname: '月光' })
+
+    clearCachedCatalog()
+    clearCachedQuota()
+    resetRefreshRejections()
+  })
+})
+
+/**
+ * A brand-new sign-in, end to end through the route.
+ *
+ * The pool mints a row's alias as it is created, from nothing but the token, so
+ * waiting for the first quota read would show `账号 N` in between. The login
+ * route reads `/me` before the row exists instead; this drives the real device
+ * flow mock to prove the name is there from the start.
+ */
+describe('Kimi Code sign-in learns the account name', () => {
+  it('titles a fresh account from /me before the row is created', async () => {
+    resetWebLogin()
+    const store = new FileCredentialStore(tmp('kc-cred-login'), new MemoryCredentialBackend())
+    const modelSettings = new FileModelSettingsStore(tmp('kc-models-login'))
+    const poolBackend = new (class {
+      private data: unknown = null
+      async load() {
+        return this.data === null ? null : parseKimiCodePoolData(JSON.parse(JSON.stringify(this.data)))
+      }
+      async save(data: unknown) { this.data = JSON.parse(JSON.stringify(data)) }
+      async clear() { this.data = null }
+    })()
+    const pool = new KimiCodeAccountPool({ store, backend: poolBackend as never })
+
+    const routes: Array<{ path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    const ctx = {
+      webServer: {
+        register(route: { path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) {
+          routes.push(route)
+          return () => undefined
+        },
+      },
+    } as unknown as Context
+    const seen: string[] = []
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      const target = String(url)
+      seen.push(target)
+      if (target.includes('/device_authorization')) {
+        return Response.json({
+          device_code: 'device-1',
+          user_code: 'ABCD-EFGH',
+          verification_uri: 'https://auth.kimi.com/device',
+          verification_uri_complete: 'https://auth.kimi.com/device?user_code=ABCD-EFGH',
+          expires_in: 600,
+          interval: 1,
+        })
+      }
+      if (target.includes('/oauth/token')) {
+        return Response.json({
+          // A JWT, as the real service issues: the id is what the pool dedupes on.
+          access_token: jwt({ user_id: 'u_fresh' }),
+          refresh_token: 'rt-fresh',
+          expires_in: 3_600,
+          token_type: 'Bearer',
+          scope: 'kimi-code',
+        })
+      }
+      if (target.endsWith('/me')) {
+        return Response.json({ data: { userInfo: { nickname: '月光' } } })
+      }
+      return Response.json(CATALOG)
+    })
+    registerKimiCodeRoutes(ctx, store, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      accountPool: pool,
+      // Never launch a browser from a test run.
+      openBrowser: () => undefined,
+    })
+
+    const { response, captured } = fakeExchange()
+    await routes[0]!.handler(fakeRequest({ url: '/kimi-code/api/login', method: 'POST', body: {} }), response)
+    expect(captured.status).toBe(200)
+
+    // The flow completes in the background; the pool row appears when it does.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if ((await pool.listAccounts()).length > 0) break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    const rows = await pool.listAccounts()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.alias).toBe('月光')
+    expect(rows[0]!.nickname).toBe('月光')
+    // The profile is what named it, and the stored credential keeps the name.
+    expect(seen.some((url) => url.endsWith('/me'))).toBe(true)
+    expect((await store.read())?.nickname).toBe('月光')
+
+    resetWebLogin()
+    resetRefreshRejections()
+  })
+
+  it('names a placeholder row even when the usage call is failing', async () => {
+    // The quota read is where the profile is normally learned, but it does not
+    // run while the snapshot is fresh — and never completes while `/usages`
+    // errors. The name must not wait for either: the card asks for it directly.
+    clearCachedCatalog()
+    clearCachedQuota()
+    resetRefreshRejections()
+    const store = new FileCredentialStore(tmp('kc-cred-probe'), new MemoryCredentialBackend())
+    const modelSettings = new FileModelSettingsStore(tmp('kc-models-probe'))
+    const pool = new KimiCodeAccountPool({ store, backend: new MemoryPoolBackend() as never })
+    const added = await pool.addAccount({
+      accessToken: jwt({ user_id: 'u_probe' }),
+      refreshToken: jwt({}),
+      expiresAt: Date.now() + 24 * 3_600_000,
+      expiresIn: 86_400,
+      region: 'mainland-cn',
+      oauthHost: 'https://auth.kimi.com',
+      baseUrl: 'https://api.kimi.com/coding',
+    })
+    expect(added.alias).toBe('账号 1')
+
+    const routes: Array<{ path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }> = []
+    const ctx = {
+      webServer: {
+        register(route: { path: string; handler: (request: IncomingMessage, response: ServerResponse) => Promise<void> }) {
+          routes.push(route)
+          return () => undefined
+        },
+      },
+    } as unknown as Context
+    let profileReads = 0
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      const target = String(url)
+      if (target.endsWith('/me')) {
+        profileReads += 1
+        return Response.json({ nickname: '登月者0498' })
+      }
+      if (target.includes('/usages')) return new Response('boom', { status: 500 })
+      return Response.json(CATALOG)
+    })
+    registerKimiCodeRoutes(ctx, store, modelSettings, undefined, {
+      fetchFn: fetchMock as unknown as typeof fetch,
+      accountPool: pool,
+      openBrowser: () => undefined,
+    })
+
+    const first = fakeExchange()
+    await routes[0]!.handler(fakeRequest({ url: '/kimi-code/api/status' }), first.response)
+    expect(first.captured.status).toBe(200)
+    const firstValue = (first.captured.body as { value: { accounts: Array<{ alias: string }>; quotaError: unknown } }).value
+    expect(firstValue.accounts[0]!.alias).toBe('登月者0498')
+    // The quota failure is still reported as such; learning a name must not hide it.
+    expect(String(firstValue.quotaError)).toMatch(/usage request failed/i)
+
+    // One profile read per account per process: the card polls every minute and
+    // must not spend a request a minute on the same answer.
+    const second = fakeExchange()
+    await routes[0]!.handler(fakeRequest({ url: '/kimi-code/api/status' }), second.response)
+    expect(profileReads).toBe(1)
+
+    clearCachedCatalog()
+    clearCachedQuota()
+    resetRefreshRejections()
   })
 })

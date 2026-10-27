@@ -1061,6 +1061,54 @@ export function parsePlanLevel(payload: unknown): string | null {
 }
 
 /**
+ * Field names the service uses for the account's own name.
+ *
+ * `/me` documents a nickname; the platform also echoes a display name, and a
+ * gateway envelope adds nothing but depth. All of them are the same fact: what
+ * to title the account's card with, and what a `账号 N` placeholder should
+ * become.
+ */
+const PROFILE_NAME_KEYS = [
+  'nickname',
+  'name',
+  'username',
+  'display_name',
+  'displayName',
+  'preferred_username',
+] as const
+
+/**
+ * Every record a profile payload may keep the identity in, outermost first.
+ *
+ * The endpoint has answered flat (`{ nickname, email, ... }`) and nested
+ * (`{ data: { userInfo: { ... } } }`) on different gateway versions, and a
+ * nested envelope may hold credentials-adjacent siblings at the top level too,
+ * so the search never commits to one shape: each container is tried in turn and
+ * the first one that names a field wins.
+ */
+function profileRecords(payload: unknown): Array<Record<string, unknown>> {
+  const root = asRecord(payload)
+  if (root === undefined) return []
+  const data = asRecord(root.data)
+  const containers = [
+    root,
+    data,
+    asRecord(root.userInfo) ?? asRecord(data?.userInfo),
+    asRecord(root.user) ?? asRecord(data?.user),
+  ]
+  return containers.filter((record): record is Record<string, unknown> => record !== undefined)
+}
+
+/** First value among `keys` found in any profile container, outermost first. */
+function profileString(payload: unknown, keys: readonly string[]): string | undefined {
+  for (const record of profileRecords(payload)) {
+    const found = firstString(record, keys)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+/**
  * Turn a `/me` payload into the public account DTO.
  *
  * The endpoint answers with snake_case fields while the card consumes
@@ -1068,18 +1116,57 @@ export function parsePlanLevel(payload: unknown): string | null {
  * spellings are accepted.
  */
 export function parseUserInfo(payload: unknown, fallback: Partial<KimiCodeAccount> = {}): KimiCodeAccount {
-  const root = asRecord(payload) ?? {}
-  const data = asRecord(root.data) ?? root
-  const record = asRecord(data.userInfo) ?? data
   return {
-    userId: firstString(record, ['user_id', 'userId', 'global_id', 'globalId']) ?? fallback.userId ?? null,
-    nickname: firstString(record, ['nickname', 'name', 'username']) ?? fallback.nickname ?? null,
-    email: firstString(record, ['email']) ?? fallback.email ?? null,
-    planName: firstString(record, ['user_level_name', 'userLevelName']) ?? fallback.planName ?? null,
-    planLevel: firstString(record, ['user_level', 'userLevel']) ?? fallback.planLevel ?? null,
-    region: (asString(record.region) as KimiCodeRegion | undefined) ?? fallback.region ?? null,
+    userId: profileString(payload, ['user_id', 'userId', 'global_id', 'globalId']) ?? fallback.userId ?? null,
+    nickname: profileString(payload, PROFILE_NAME_KEYS) ?? fallback.nickname ?? null,
+    email: profileString(payload, ['email']) ?? fallback.email ?? null,
+    planName: parsePlanName(payload) ?? fallback.planName ?? null,
+    planLevel: parsePlanLevel(payload) ?? fallback.planLevel ?? null,
+    region: (profileString(payload, ['region']) as KimiCodeRegion | undefined) ?? fallback.region ?? null,
     authenticatedAt: fallback.authenticatedAt ?? null,
   }
+}
+
+/**
+ * Fold the facts a `/me` read established into a credential.
+ *
+ * Sign-in only names the account through its token, which carries an id and —
+ * for an account with a mailbox — an address. The nickname lives on `/me` and
+ * nowhere else, so the caller reads it once and stores it here; without this,
+ * a phone-signed-in account could never be called anything but `账号 N`.
+ *
+ * Only fields the profile actually names are written: a gateway that drops the
+ * nickname must not blank one learned earlier, and the token pair is copied
+ * through untouched. Returns the same object when nothing new was learned, so a
+ * caller can tell "nothing to store" from "store this".
+ */
+export function credentialsWithProfile(
+  credentials: KimiCodeCredentials,
+  profile: unknown,
+): KimiCodeCredentials {
+  const nickname = profileString(profile, PROFILE_NAME_KEYS)
+  const email = profileString(profile, ['email'])?.toLowerCase()
+  const userId = profileString(profile, ['user_id', 'userId', 'global_id', 'globalId'])
+  const planName = parsePlanName(profile) ?? undefined
+  const next: KimiCodeCredentials = { ...credentials }
+  let changed = false
+  if (nickname !== undefined && next.nickname !== nickname) {
+    next.nickname = nickname
+    changed = true
+  }
+  if (email !== undefined && next.email !== email) {
+    next.email = email
+    changed = true
+  }
+  if (userId !== undefined && next.userId !== userId) {
+    next.userId = userId
+    changed = true
+  }
+  if (planName !== undefined && next.planName !== planName) {
+    next.planName = planName
+    changed = true
+  }
+  return changed ? next : credentials
 }
 
 export interface QuotaFetchOptions {
@@ -1113,6 +1200,16 @@ export interface QuotaFetchOptions {
    * rotated refresh token can actually be persisted.
    */
   renewFn?: (credentials: KimiCodeCredentials) => Promise<KimiCodeCredentials | undefined>
+  /**
+   * Called with the account this reading describes, once it has been assembled.
+   *
+   * A pool owns the account rows, so it is the pool that persists what `/me`
+   * taught: the nickname, the address, the tier — and, for a row still titled
+   * with the placeholder minted at sign-in, the name the card should carry.
+   * This runs on the pooled path too, where the credential write-back below is
+   * deliberately skipped because the pool, not this function, owns that file.
+   */
+  onAccount?: (account: KimiCodeAccount, credentials: KimiCodeCredentials) => void | Promise<void>
 }
 
 /**
@@ -1200,6 +1297,16 @@ export async function fetchAccountQuota(
   if (!pooled && Object.keys(learned).length > 0) {
     void store.write({ ...credentials, ...learned }).catch(() => undefined)
   }
+  // The same facts, handed to whoever owns the credential: for a pool that is
+  // the row's owner, which is where a name learned here becomes the card title.
+  if (options.onAccount !== undefined) {
+    try {
+      await options.onAccount(account, credentials)
+    } catch {
+      // Learning who the account is must never cost the quota reading it came
+      // with; the row keeps its previous name until the next read.
+    }
+  }
 
   const snapshot: KimiCodeAccountQuota = {
     account,
@@ -1270,12 +1377,19 @@ export function accountFromCredentials(
     ?? (payload === undefined ? null : parsePlanLevel(payload))
   return {
     userId: credentials.userId ?? identity.userId ?? null,
-    nickname: (profile === undefined ? null : firstString(asRecord(profile) ?? {}, ['nickname', 'username', 'name']))
+    // The profile is the only place the nickname exists at all (the token
+    // carries an id, not a name), and it may wrap the record in an envelope.
+    nickname: (profile === undefined ? undefined : profileString(profile, PROFILE_NAME_KEYS))
       ?? credentials.nickname
       ?? null,
     // A claim decoded from the live token outranks the stored copy, so a
     // credential written before the claims were read still shows the account.
-    email: credentials.email ?? identity.email ?? null,
+    // The profile is the last resort: a phone-signed-in account has no address
+    // in its token at all, and `/me` is the only place that names one.
+    email: credentials.email
+      ?? identity.email
+      ?? (profile === undefined ? undefined : profileString(profile, ['email'])?.toLowerCase())
+      ?? null,
     planName,
     planLevel,
     region: credentials.region,

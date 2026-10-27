@@ -52,6 +52,29 @@ export function formatTokenCount(value: number): string {
   return String(value)
 }
 
+/**
+ * A share as a person reads it: at most `digits` decimals, no trailing zeros.
+ *
+ * The formatting has to happen on the RESULT rather than on its inputs. Most
+ * percentages on these cards are a remainder — `100 - used` — and that
+ * subtraction is exactly where binary floating point shows up: `100 - 8.04` is
+ * `91.96000000000001`, `100 - 0.0007 * 100` is `99.93` but `100 - 0.0014 * 100`
+ * is `99.86` only because it happens to land on a friendly neighbour. String
+ * interpolation of the difference therefore prints a long tail for roughly a
+ * third of all two-decimal inputs, which reads as "sometimes" — and no amount of
+ * rounding the used share beforehand fixes a subtraction done afterwards.
+ *
+ * Anything non-finite renders as `0`, because every caller has already decided
+ * the window is measured; this is the last line of defence, not a claim.
+ */
+export function formatPercent(value: number, digits = 2): string {
+  if (!Number.isFinite(value)) return '0'
+  const factor = 10 ** Math.min(6, Math.max(0, Math.trunc(digits)))
+  // Dividing an integer by a power of ten gives a double whose shortest
+  // representation is that decimal, so this cannot reintroduce a tail.
+  return String(Math.round(value * factor) / factor)
+}
+
 /** A stamp in the reader's own locale, or an em dash when there is none. */
 export function formatDate(ms?: number | null): string {
   if (ms === undefined || ms === null || !Number.isFinite(ms) || ms <= 0) return '—'

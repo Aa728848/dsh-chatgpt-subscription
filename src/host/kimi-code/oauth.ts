@@ -342,6 +342,14 @@ async function pollDeviceToken(
 export interface KimiTokenIdentity {
   userId?: string
   email?: string
+  /**
+   * Display name, when the issuer puts one in the token.
+   *
+   * It usually does not — the nickname is served by `/me` — but a token that
+   * names the account should be believed over the fallback the pool would
+   * otherwise mint (`账号 N`), and reading it here costs no request.
+   */
+  nickname?: string
 }
 
 /**
@@ -386,9 +394,16 @@ export function identityFromTokens(accessToken: string, refreshToken?: string): 
     ?? claimString(access?.sub)
     ?? claimString(refresh?.sub)
   const email = (claimString(access?.email) ?? claimString(refresh?.email))?.toLowerCase()
+  const nickname = claimString(access?.nickname)
+    ?? claimString(refresh?.nickname)
+    ?? claimString(access?.name)
+    ?? claimString(refresh?.name)
+    ?? claimString(access?.preferred_username)
+    ?? claimString(refresh?.preferred_username)
   return {
     ...(userId === undefined ? {} : { userId }),
     ...(email === undefined ? {} : { email }),
+    ...(nickname === undefined ? {} : { nickname }),
   }
 }
 
@@ -627,6 +642,15 @@ async function runDeviceLogin(options: {
   open: (url: string) => void
   /** Called with the validated credential so a pool can keep every sign-in. */
   onSave?: (credentials: KimiCodeCredentials) => Promise<unknown>
+  /**
+   * Best-effort enrichment of a fresh credential before it is stored.
+   *
+   * The token pair is the whole credential as far as the OAuth flow is
+   * concerned; anything the account is *called* (the nickname on `/me`) is
+   * outside this file's wire. The caller supplies that read here, and a failure
+   * returns the credential untouched — sign-in has already succeeded.
+   */
+  enrich?: (credentials: KimiCodeCredentials) => Promise<KimiCodeCredentials>
 }): Promise<KimiCodeCredentials> {
   const deadline = Date.now() + LOGIN_TIMEOUT_MS
 
@@ -666,7 +690,7 @@ async function runDeviceLogin(options: {
         // The token is the only source of the account identity, so it is
         // decoded once here and persisted for the card to render.
         const identity = identityFromTokens(outcome.token.accessToken, outcome.token.refreshToken)
-        const credentials: KimiCodeCredentials = {
+        const signedIn: KimiCodeCredentials = {
           accessToken: outcome.token.accessToken,
           refreshToken: outcome.token.refreshToken,
           expiresAt: outcome.token.expiresAt,
@@ -679,7 +703,14 @@ async function runDeviceLogin(options: {
           authenticatedAt: Date.now(),
           ...(identity.userId === undefined ? {} : { userId: identity.userId }),
           ...(identity.email === undefined ? {} : { email: identity.email }),
+          ...(identity.nickname === undefined ? {} : { nickname: identity.nickname }),
         }
+        // The name the account is known by is not in the token pair on most
+        // accounts, so the caller may read it once now: the pool names the row
+        // as it is created instead of showing `账号 N` until the next refresh.
+        const credentials = options.enrich === undefined
+          ? signedIn
+          : await options.enrich(signedIn).catch(() => signedIn)
         await options.store.write(credentials)
         if (options.onSave) await options.onSave(credentials).catch(() => undefined)
         await persistRegion(options.region)
@@ -717,6 +748,14 @@ export async function beginWebLogin(
     region?: KimiCodeRegion
     /** Called with the validated credential so a pool can keep every sign-in. */
     onSave?: (credentials: KimiCodeCredentials) => Promise<unknown>
+    /**
+     * Best-effort read of who the account is, before the credential is stored.
+     *
+     * Sign-in itself only proves the token pair; the account's name lives on
+     * `/me`. The caller supplies that read here so the first card already shows
+     * a name, and a failure leaves the credential exactly as the flow built it.
+     */
+    enrich?: (credentials: KimiCodeCredentials) => Promise<KimiCodeCredentials>
   } = {},
 ): Promise<KimiCodeLoginFlowStatus> {
   if (webLoginFlow.status === 'pending') return { ...webLoginFlow }
@@ -737,6 +776,7 @@ export async function beginWebLogin(
         signal: controller.signal,
         open,
         ...(options.onSave === undefined ? {} : { onSave: options.onSave }),
+        ...(options.enrich === undefined ? {} : { enrich: options.enrich }),
       })
       webLoginFlow = { ...webLoginFlow, status: 'complete', completedAt: Date.now(), progress: 'Signed in' }
       resetRefreshRejections()

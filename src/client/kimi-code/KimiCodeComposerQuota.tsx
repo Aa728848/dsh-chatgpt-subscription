@@ -2,6 +2,7 @@ import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selec
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { KimiCodeWebStatus } from '../../shared/kimi-code-contracts.ts'
 import { ComposerQuotaBadge, quotaLevel, type ComposerQuotaFacts } from '../common/ComposerQuotaBadge.tsx'
+import { formatPercent } from '../common/format.ts'
 import { createLineApi } from '../common/line-api.ts'
 import type { SnapshotStore } from '../store.ts'
 import { NS_KIMI_CODE } from './locales.ts'
@@ -32,10 +33,14 @@ export function selectBadgeFacts(status: KimiCodeWebStatus | null): ComposerQuot
     ?? quota.windows[0]
 
   if (window !== undefined) {
+    // The remainder of a two-decimal share is usually a binary tail
+    // (`100 - 8.04` is `91.96000000000001`), so the number is formatted once,
+    // here, and the same text is used by the badge and by its tooltip.
     const remaining = Math.max(0, 100 - window.usedPercent)
+    const remainingText = formatPercent(remaining)
     return {
-      text: `${remaining}%`,
-      tooltip: `[Kimi Code] ${window.label}: ${remaining}% left`,
+      text: `${remainingText}%`,
+      tooltip: `[Kimi Code] ${window.label}: ${remainingText}% left`,
       level: quotaLevel(remaining),
     }
   }

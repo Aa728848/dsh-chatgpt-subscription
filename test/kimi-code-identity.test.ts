@@ -14,9 +14,11 @@ import {
 import {
   accountFromCredentials,
   clearCachedQuota,
+  credentialsWithProfile,
   fetchAccountQuota,
   testConnection,
 } from '../src/host/kimi-code/client.ts'
+import type { KimiCodeAccount } from '../src/shared/kimi-code-contracts.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -246,5 +248,79 @@ describe('ensureAccessToken keeps identity fresh', () => {
     expect(updated.userId).toBe('u_new')
     expect(updated.email).toBe('new@example.com')
     expect(write).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u_new' }))
+  })
+})
+
+/**
+ * The nickname is the one fact a token usually does not carry, and the account
+ * card's title is exactly that: a name. `/me` is the only place it exists, and
+ * it has answered at more than one depth, so these pin both the shapes it has
+ * used and the hand-off that gets the learned name into the account row.
+ */
+describe('profile nickname', () => {
+  it('reads the name from the flat profile and from every envelope it has used', () => {
+    expect(accountFromCredentials(creds(), undefined, { nickname: 'flat' }).nickname).toBe('flat')
+    expect(accountFromCredentials(creds(), undefined, { data: { nickname: 'in-data' } }).nickname).toBe('in-data')
+    expect(accountFromCredentials(creds(), undefined, { data: { userInfo: { nickname: 'in-userInfo' } } }).nickname)
+      .toBe('in-userInfo')
+    expect(accountFromCredentials(creds(), undefined, { user: { nickname: 'in-user' } }).nickname).toBe('in-user')
+  })
+
+  it('folds a profile into a credential without touching the token pair', () => {
+    const before = creds()
+    const next = credentialsWithProfile(before, {
+      data: { userInfo: { nickname: '月光', email: 'Moon@Example.com', user_id: 'u_9' } },
+      user_level_name: 'Allegretto',
+    })
+    expect(next.nickname).toBe('月光')
+    expect(next.email).toBe('moon@example.com')
+    expect(next.userId).toBe('u_9')
+    expect(next.planName).toBe('Allegretto')
+    expect(next.accessToken).toBe(before.accessToken)
+    expect(next.refreshToken).toBe(before.refreshToken)
+  })
+
+  it('returns the credential unchanged when the profile names nothing new', () => {
+    const before = creds({ nickname: '月光' })
+    // The same object, so a caller can tell "nothing learned" from "write this".
+    expect(credentialsWithProfile(before, { data: {} })).toBe(before)
+  })
+
+  it('hands the reading to the pool, which is the only party that can rename the row', async () => {
+    const store = new FileCredentialStore(tmp('kc-on-account'))
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      if (String(url).endsWith('/me')) {
+        return Response.json({ data: { userInfo: { nickname: '月光', email: 'Moon@Example.com' } } })
+      }
+      return Response.json({ usages: { limit_5h: { used_ratio: 0.1 } } })
+    }) as unknown as typeof fetch
+
+    const learned: KimiCodeAccount[] = []
+    const quota = await fetchAccountQuota(store, {
+      fetchFn: fetchMock,
+      force: true,
+      // A pooled call never writes the single-credential file; the hook is the
+      // pool's only way to hear what the profile said.
+      credentials: creds(),
+      accountId: 'acc_learn',
+      onAccount: (account) => { learned.push(account) },
+    })
+
+    expect(learned).toHaveLength(1)
+    expect(learned[0]).toMatchObject({ nickname: '月光', email: 'moon@example.com' })
+    expect(quota?.account.nickname).toBe('月光')
+  })
+
+  it('keeps the quota reading even when learning about the account fails', async () => {
+    const store = new FileCredentialStore(tmp('kc-on-account-fail'))
+    const fetchMock = vi.fn(async () => Response.json({ usages: { limit_5h: { used_ratio: 0.1 } } })) as unknown as typeof fetch
+    const quota = await fetchAccountQuota(store, {
+      fetchFn: fetchMock,
+      force: true,
+      credentials: creds(),
+      accountId: 'acc_learn_fail',
+      onAccount: () => { throw new Error('pool write failed') },
+    })
+    expect(quota?.windows.length).toBeGreaterThan(0)
   })
 })
