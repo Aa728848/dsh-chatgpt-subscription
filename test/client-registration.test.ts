@@ -108,6 +108,7 @@ describe('client registration', () => {
     ['gpt-5.6-sol', '5.6 Sol'],
     ['gpt-6-astra', '6 Astra'],
     ['gpt-6.1-sol', '6.1 Sol'],
+    ['gpt-6.1-terra', '6.1 Terra'],
     ['gpt-6-sol', '6 Sol'],
     ['gpt-6-luna', '6 Luna'],
   ] as const)('keeps %s context options rendered while typing a numeric draft', async (model, modelName) => {
