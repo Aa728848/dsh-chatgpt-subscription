@@ -10,6 +10,7 @@ describe('CodexChatGptAdapter', () => {
       { id: 'gpt-5.6-sol', name: '5.6 Sol', inputModalities: ['text', 'image'] },
       { id: 'gpt-6-astra', name: '6 Astra', inputModalities: ['text', 'image'] },
       { id: 'gpt-6.1-sol', name: '6.1 Sol', inputModalities: ['text', 'image'] },
+      { id: 'gpt-6.1-terra', name: '6.1 Terra', inputModalities: ['text', 'image'] },
       { id: 'gpt-6-sol', name: '6 Sol', inputModalities: ['text', 'image'] },
       { id: 'gpt-6-luna', name: '6 Luna', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.6-terra', name: '5.6 Terra', inputModalities: ['text', 'image'] },
@@ -96,7 +97,7 @@ describe('CodexChatGptAdapter', () => {
     const adapter = new CodexChatGptAdapter({ stream: () => { throw new Error('unused') } } as never, {
       status: () => preferences,
     } as never)
-    for (const [model, name] of [['gpt-6-astra', '6 Astra'], ['gpt-6-sol', '6 Sol'], ['gpt-6-luna', '6 Luna']] as const) {
+    for (const [model, name] of [['gpt-6-astra', '6 Astra'], ['gpt-6.1-terra', '6.1 Terra'], ['gpt-6-sol', '6 Sol'], ['gpt-6-luna', '6 Luna']] as const) {
       expect(await adapter.listModels()).toContainEqual({
         provider: PROVIDER_ID, id: model, name, inputModalities: ['text', 'image'],
       })
