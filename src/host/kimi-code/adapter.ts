@@ -1,3 +1,4 @@
+import { recordCacheWarmupUsage } from '../cache-warmup/index.ts'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
@@ -910,6 +911,18 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
     cacheWrite1hTokens: stats.cacheWrite1hTokens,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     updatedAt: now,
+  })
+  // Observation only: hand the cache-warmup registry the same numbers this
+  // record just took. No request is written, no state owned here changes, and
+  // the drift cause passes through unclassified rather than being re-derived.
+  recordCacheWarmupUsage({
+    sessionId,
+    inputTokens: state.inputTokens,
+    cacheReadTokens: state.cacheReadTokens,
+    outputTokens: state.outputTokens,
+    totalTokens: state.cacheReadTokens + state.inputTokens,
+    at: now,
+    ...(lastDrift === undefined ? {} : { driftCause: lastDrift }),
   })
 }
 

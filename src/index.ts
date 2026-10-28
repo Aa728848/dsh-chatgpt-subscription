@@ -184,6 +184,14 @@ import {
   type NoAnswerResumeContext,
   type NoAnswerResumeOptions,
 } from './host/no-answer-resume/index.ts'
+import {
+  installCacheWarmup,
+  type CacheWarmupContext,
+} from './host/cache-warmup/install.ts'
+import {
+  CACHE_WARMUP_SETTING_DESCRIPTION,
+  resolveCacheWarmupSettings,
+} from './host/cache-warmup/settings.ts'
 
 interface Volatile<T> {
   get(): T
@@ -213,6 +221,15 @@ export interface Config {
   progressUpdatesNudgeThreshold?: Volatile<number>
   /** 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文。 */
   progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
+  /**
+   * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
+   * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
+   *
+   * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：设置一保存就地写
+   * 新值、不重挂插件行。语义上它**只影响之后产生的新结果**——已经进入历史的
+   * preview 与 refId 是历史的一部分，不随开关变化。
+   */
+  cacheWarmup?: Volatile<boolean>
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
   fetchProvider?: 'auto' | 'plugin' | 'dsh'
@@ -323,6 +340,8 @@ export interface ConfigInput {
   progressUpdatesNudgeThreshold?: number
   /** 进展更新的输出语言（默认 auto：跟随对话）。 */
   progressUpdatesLanguage?: ProgressUpdateLanguage
+  /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
+  cacheWarmup?: boolean
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
   /**
@@ -361,6 +380,11 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
   progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default('auto').volatile()
     .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文。'),
+  // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
+  // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
+  // 正在运行的实例，不重挂任何行。
+  cacheWarmup: z.boolean().default(true).volatile()
+    .description(CACHE_WARMUP_SETTING_DESCRIPTION),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
@@ -589,6 +613,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       return dispose
     }, 'dsh-chatgpt-subscription: no-answer resume')
   }
+
+  // 结果预览：把 Kimi 线路上可结构化提取的超大 `run_code` 结果换成带 `ref://`
+  // 引用的预览，原文由 `cache_warmup_result` 精确补读。
+  //
+  // 与上面两个钩子不同，这里**没有** `if (config.cacheWarmup !== false)` 的门：
+  // 开关是 volatile 活引用，apply 时读到的值不是最终值，真正的判定在每次投影时
+  // 重读（见 `install.ts` 的 `projectDecision`）。所以"关掉"不是一个安装参数，
+  // 而是每次投影前重新求值的一次判断。
+  ctx.effect(() => installCacheWarmup(ctx as unknown as CacheWarmupContext, {
+    // 函数而不是快照：设置卡保存后就地写新值，不重挂插件行。
+    settings: () => resolveCacheWarmupSettings(pluginConfig),
+  }), 'dsh-chatgpt-subscription: cache warmup')
 
   // One read-only diagnostic probe, inert unless the deployment enables it.
   // It answers "what did the parent side do with the child's completion

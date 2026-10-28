@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[kimi-code] 新增 `cache-warmup` 子包：稳定前缀下快速预热、保守结果投影与原文引用**
+  - **实现**：新增 `src/host/cache-warmup/`，提供内容寻址原文存储、UTF-8/结构化分页、完整失败集与日志投影、预热预算、真实 Kimi 用量观测、`cache_warmup_result` 精确补读、设置开关及脱敏结构化日志；`cacheWarmup` 默认开启且只影响新结果。
+  - **保护**：不改 promptCacheKey、replay、动态工具 in-history 或漂移保护；旧历史永不回写，原始 `value` 保留，`stable`/`first-request` 不再被误判为漂移，真实 drift 仍立即收回预算。
+  - **准确性**：源码、契约、完整或被截断的 JSON、混合证据与未知大文本保持原样；只有可完整提取的日志/结构化结果生成 preview，完整失败集装不下时回退原文。
+  - **验证**：六份相关测试 104 passed / 1 skipped；全量 Vitest 309 files / 5093 tests passed（9 skipped）；typecheck、build、pack dry-run、npm ci dry-run 全过。真实 110 条工具结果重放仅 1 条测试日志被投影。
+  - **真实 Kimi**：k3.1-pro 第二次请求命中率 97.66%（达到 97% 目标，但仅一次达标，未满足连续两次），第三次 95.52%，控制器保持保守预算；三次额度内未证明进入稳态，详见 `docs/cache-warmup.md`。
+
 ## 0.44.0 - 2026-10-27
 
 - **[packaging] 「进展更新」拆成独立组件：同包第二行，可在插件管理页单独关闭**
