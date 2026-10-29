@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow, isHttpContextOverflow } from './common/context-overflow.ts'
 import { toToolCallId } from './common/brand-compat.ts'
 
@@ -24,6 +25,13 @@ import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/cont
 
 type FetchLike = typeof fetch
 const MAX_VISIBLE_REASONING_CHARS = 12_000
+/**
+ * A handshake/connect failure happens before any request bytes reach ChatGPT,
+ * so only that narrow family is safe to replay here. Two short retries ride out
+ * the intermittent proxy/VPN paths that otherwise fail a whole model request.
+ */
+const PRE_CONNECTION_RETRIES = 2
+const PRE_CONNECTION_RETRY_BASE_MS = 400
 /** Cooldown a rotated account takes when the provider states no retry delay. */
 const DEFAULT_POOL_COOLDOWN_MS = 15 * 60_000
 const REASONING_DELTA_FLUSH_CHARS = 768
@@ -324,32 +332,56 @@ export class ResponsesClient {
     turnKey: string,
     signal?: AbortSignal,
   ): Promise<Response> {
-    try {
-      return await this.fetchFn(CODEX_RESPONSES_URL, {
-        method: 'POST',
-        headers: {
-          ...codexHeaders(credentials, sessionId, { turnState: this.turnStateFor(turnKey, credentials) }),
-          'content-type': 'application/json',
-          accept: 'text/event-stream',
-        },
-        body: JSON.stringify(payload),
-        signal,
-      })
-    } catch (cause) {
-      if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
-      // The cause chain goes into the message, not just onto `.cause`. DSH
-      // persists only `{message, code}` for a failed attempt, so an
-      // `ERR_HTTP2_STREAM_ERROR: NGHTTP2_ENHANCE_YOUR_CALM`, an `ECONNRESET`
-      // and an `UND_ERR_SOCKET` were all reported to the user and to the log as
-      // one information-free sentence. That is issue #50's first finding: the
-      // request body had grown past what the transport accepts, and the report
-      // could not say so. Same treatment `streamFailure` already gives a
-      // mid-body death.
-      const chain = errorChain(cause).trim()
-      const detail = chain === '' ? 'the connection failed before any response arrived' : chain.slice(0, 500)
-      throw new LlmError(`Codex request failed: ${detail}`, 'NETWORK', { cause })
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.fetchFn(CODEX_RESPONSES_URL, {
+          method: 'POST',
+          headers: {
+            ...codexHeaders(credentials, sessionId, { turnState: this.turnStateFor(turnKey, credentials) }),
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+          },
+          body: JSON.stringify(payload),
+          signal,
+        })
+      } catch (cause) {
+        if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+        if (attempt < PRE_CONNECTION_RETRIES && isPreConnectionFailure(cause)) {
+          try {
+            await sleep(PRE_CONNECTION_RETRY_BASE_MS * (attempt + 1), undefined, { signal })
+          } catch (waitError) {
+            if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+            throw waitError
+          }
+          continue
+        }
+        // The cause chain goes into the message, not just onto `.cause`. DSH
+        // persists only `{message, code}` for a failed attempt, so an
+        // `ERR_HTTP2_STREAM_ERROR: NGHTTP2_ENHANCE_YOUR_CALM`, an `ECONNRESET`
+        // and an `UND_ERR_SOCKET` were all reported to the user and to the log as
+        // one information-free sentence. That is issue #50's first finding: the
+        // request body had grown past what the transport accepts, and the report
+        // could not say so. Same treatment `streamFailure` already gives a
+        // mid-body death.
+        const chain = errorChain(cause).trim()
+        const detail = chain === '' ? 'the connection failed before any response arrived' : chain.slice(0, 500)
+        const hint = isPreConnectionFailure(cause)
+          ? ' The request never reached ChatGPT. Check the network, proxy/VPN/TUN, or the plugin proxy settings.'
+          : ''
+        throw new LlmError(`Codex request failed: ${detail}${hint}`, 'NETWORK', { cause })
+      }
     }
   }
+}
+
+/**
+ * Whether the transport failed before the request could reach ChatGPT.
+ *
+ * Deliberately exclude `ECONNRESET` and generic socket deaths: either can happen
+ * after the server accepted the body, where replaying a POST would be ambiguous.
+ */
+function isPreConnectionFailure(error: unknown): boolean {
+  return /Client network socket disconnected before secure TLS connection|Connect Timeout Error|UND_ERR_CONNECT_TIMEOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(errorChain(error))
 }
 
 /**

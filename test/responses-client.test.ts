@@ -189,6 +189,64 @@ describe('Responses streaming', () => {
     oauth.dispose()
   })
 
+  it('retries a pre-TLS disconnect before any request reaches ChatGPT', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 3_600_000 })
+    const oauth = new OAuthService(store)
+    let calls = 0
+    const responseFetch = vi.fn(async () => {
+      calls += 1
+      if (calls <= 2) {
+        throw new TypeError('fetch failed', {
+          cause: new Error('Client network socket disconnected before secure TLS connection was established'),
+        })
+      }
+      return sse([{ type: 'response.completed', response: { usage: { input_tokens: 0, output_tokens: 0 } } }])
+    })
+    const client = new ResponsesClient(oauth, { readImage: async () => { throw new Error('unused') } }, { fetchFn: responseFetch as typeof fetch })
+
+    const chunks = await collect(client.stream({ provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions))
+
+    expect(responseFetch).toHaveBeenCalledTimes(3)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    oauth.dispose()
+  })
+
+  it('caps pre-connection retries and reports the proxy/TLS checkpoint', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 3_600_000 })
+    const oauth = new OAuthService(store)
+    const responseFetch = vi.fn(async () => {
+      throw new TypeError('fetch failed', {
+        cause: new Error('Client network socket disconnected before secure TLS connection was established'),
+      })
+    })
+    const client = new ResponsesClient(oauth, { readImage: async () => { throw new Error('unused') } }, { fetchFn: responseFetch as typeof fetch })
+
+    await expect(collect(client.stream({ provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions)))
+      .rejects.toMatchObject({
+        code: 'NETWORK',
+        message: expect.stringContaining('The request never reached ChatGPT. Check the network, proxy/VPN/TUN'),
+      })
+    expect(responseFetch).toHaveBeenCalledTimes(3)
+    oauth.dispose()
+  })
+
+  it('does not replay an ambiguous failure that may have reached ChatGPT', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 3_600_000 })
+    const oauth = new OAuthService(store)
+    const responseFetch = vi.fn(async () => {
+      throw new TypeError('fetch failed', { cause: new Error('other side closed') })
+    })
+    const client = new ResponsesClient(oauth, { readImage: async () => { throw new Error('unused') } }, { fetchFn: responseFetch as typeof fetch })
+
+    await expect(collect(client.stream({ provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [] } as unknown as GenerateOptions)))
+      .rejects.toMatchObject({ code: 'NETWORK' })
+    expect(responseFetch).toHaveBeenCalledTimes(1)
+    oauth.dispose()
+  })
+
   it('sends service_tier priority when fastMode option returns true', async () => {
     const store = new MemoryTokenStore()
     await store.save({ accessToken: 'test-token', refreshToken: 'refresh', expiresAt: Date.now() + 3_600_000 })

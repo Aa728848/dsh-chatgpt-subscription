@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.46.1 - 2026-10-29
+
+- **[codex-chatgpt] Codex 请求在 TLS 握手/连接建立前失败时最多重试两次**
+  - **重试与上限**：`ResponsesClient` 对握手前失败（TLS 会话建立前断开、连接超时、`ECONNREFUSED`、`ENOTFOUND`/`EAI_AGAIN` 等 DNS 失败）最多重试 2 次，退避 400 ms / 800 ms；`AbortSignal` 触发时立即中止，不再重试。
+  - **不重放歧义失败**：`ECONNRESET`、`other side closed` 这类可能发生在请求已抵达 ChatGPT 之后的失败不在本层重放，保持原样报 `NETWORK`，避免重复提交 POST。
+  - **失败指引**：重试耗尽后错误信息附带「请求未抵达 ChatGPT」的提示，指向网络、代理/VPN/TUN 与插件代理设置，并继续保留完整 cause 链。
+  - **测试**：新增 3 例覆盖握手前失败后恢复、重试次数上限与歧义失败零重放。
+
 ## 0.46.0 - 2026-10-29
 
 - **[kimi-code] `cache-warmup` 预热与结果投影全面增强：双轨稳态判据、空闲 TTL 回退、JSON 转义全链路加固与 59 个真实会话重放纠偏**
