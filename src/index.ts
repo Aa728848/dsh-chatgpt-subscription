@@ -217,6 +217,9 @@ export interface Config {
    * **实现搬到了独立的 loader 行**（`src/entry-progress-updates.ts`），但字段留在
    * 这里：profile 的 patch 层按 id 替换整行 config，用户的 profile 早就在这一行写过
    * `progressUpdates`；字段若搬去新行，那条 patch 会把新行的配置整体抹掉。
+   *
+   * 与「缓存预热」不同，这一项**不挑线路**：工具、提示词与催促都挂在插件自己的
+   * loader 行上，任何线路的 agent 都能用。
    */
   progressUpdates?: Volatile<boolean>
   /** 进展更新的催促阈值：连续这么多轮带工具调用却没有进展更新时提醒一次。默认 8。 */
@@ -227,12 +230,19 @@ export interface Config {
    * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
    *
+   * **只对 Kimi Code 线路生效**（见 `cache-warmup/install.ts` 的
+   * `CACHE_WARMUP_PROVIDER`）：别的线路上这个开关开着关着都一样。
+   *
    * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：设置一保存就地写
    * 新值、不重挂插件行。语义上它**只影响之后产生的新结果**——已经进入历史的
    * preview 与 refId 是历史的一部分，不随开关变化。
    */
   cacheWarmup?: Volatile<boolean>
-  /** 检索型结果投影独立开关：默认开启，只影响明确导航任务之后的新结果。 */
+  /**
+   * 检索型结果投影独立开关：默认开启，只影响明确导航任务之后的新结果。
+   *
+   * 与总开关一样**只对 Kimi Code 线路生效**，其他线路不受影响。
+   */
   cacheWarmupRetrieval?: Volatile<boolean>
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
@@ -381,7 +391,7 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 同名注释）。三个都是 `volatile()`：设置面板保存时直接提交进正在运行的实例，
   // 不重挂任何行，开关因此在同一个会话里立刻生效。
   progressUpdates: z.boolean().default(true).volatile()
-    .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。'),
+    .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。本插件的所有线路都可用。'),
   progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
     .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
   progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default('auto').volatile()

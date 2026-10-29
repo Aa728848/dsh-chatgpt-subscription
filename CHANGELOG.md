@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **[progress-updates] 设置页三行副标题补上线路归属：缓存预热与检索结果投影标注「Kimi Code 专用」**
+  - 「缓存预热」「检索结果投影」两行补上「Kimi Code 专用」与「非 Kimi 线路开关无影响」：这两个开关的生效范围由 `cache-warmup/install.ts` 的 `CACHE_WARMUP_PROVIDER = 'kimi-code'` 写死，其他线路上开关开着关着都一样。
+  - 「进展更新」按事实写「本插件的所有线路都可用」：`progress_update` 工具、提示词分节与催促都挂在插件自己的 loader 行上，不看线路，因此不写 Kimi 专用。
+  - 三语（zh/en/ru）界面文案与设置 schema 描述（`src/index.ts`、`src/host/cache-warmup/settings.ts`）同步改写，避免设置页与设置卡说法不一致。
+
 - **[kimi-code] 新增默认开启的检索型结果投影，并将缓存开关统一放入「进展更新」设置页**
   - `cacheWarmupRetrieval` 独立控制 `read` / `web_fetch` / `grep` / `glob`：只有明确导航任务才考虑投影；文件保留完整顶层声明及行号，网页保留完整 title/heading 大纲，编辑、审查、验证与未知意图保持原决策和原文。
   - 兼容 PTC 把 `read` 包在 `run_code` 里的规范 JSON Envelope；只解析连续、唯一、完整的 lines 数组，混合输出和契约仍保持原文。

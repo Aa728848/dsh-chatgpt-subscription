@@ -34,12 +34,14 @@ export const CACHE_WARMUP_RETRIEVAL_SETTING = 'cacheWarmupRetrieval'
  * 迟早变成「卡片说只影响新结果、schema 说立刻生效」这种自相矛盾。
  */
 export const CACHE_WARMUP_SETTING_DESCRIPTION =
-  '启用缓存预热的结果投影：Kimi 线路上可以可靠结构化提取的超大工具结果会被替换成带 ref:// 引用的预览，'
+  'Kimi Code 专用：启用缓存预热的结果投影——Kimi 线路上可以可靠结构化提取的超大工具结果会被替换成带 ref:// 引用的预览，'
   + '需要原文时由 cache_warmup_result 精确补读。关闭只影响之后产生的新结果，已进入历史的内容不变。'
+  + '本开关只对 Kimi Code 线路生效，其他线路开着关着都没有区别。'
 
 export const CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION =
-  '启用检索型结果投影：明确导航任务中的大文件、网页和搜索结果可显示为大纲或分布预览，原文由 cache_warmup_result 补读。'
+  'Kimi Code 专用：启用检索型结果投影——明确导航任务中的大文件、网页和搜索结果可显示为大纲或分布预览，原文由 cache_warmup_result 补读。'
   + '编辑、审查和意图不明的读取保持原文。默认开启，只影响之后的新结果。'
+  + '本开关只对 Kimi Code 线路生效，其他线路开着关着都没有区别。'
 
 /** 一次挂载读到的有效设置。 */
 export interface CacheWarmupSettings {
