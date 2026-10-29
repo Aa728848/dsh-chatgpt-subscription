@@ -24,6 +24,9 @@
  */
 export const CACHE_WARMUP_SETTING = 'cacheWarmup'
 
+/** 检索型结果投影的独立开关；默认关闭，不影响既有 cacheWarmup 行为。 */
+export const CACHE_WARMUP_RETRIEVAL_SETTING = 'cacheWarmupRetrieval'
+
 /**
  * 设置卡上这一行的说明文字。
  *
@@ -34,14 +37,20 @@ export const CACHE_WARMUP_SETTING_DESCRIPTION =
   '启用缓存预热的结果投影：Kimi 线路上可以可靠结构化提取的超大工具结果会被替换成带 ref:// 引用的预览，'
   + '需要原文时由 cache_warmup_result 精确补读。关闭只影响之后产生的新结果，已进入历史的内容不变。'
 
+export const CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION =
+  '启用检索型结果投影：明确导航任务中的大文件、网页和搜索结果可显示为大纲或分布预览，原文由 cache_warmup_result 补读。'
+  + '编辑、审查和意图不明的读取保持原文。默认开启，只影响之后的新结果。'
+
 /** 一次挂载读到的有效设置。 */
 export interface CacheWarmupSettings {
-  /** 总开关。关闭后新的工具结果原样返回，已有结果与引用不动。 */
+  /** 总开关。关闭后新的日志类工具结果原样返回，已有结果与引用不动。 */
   enabled: boolean
+  /** 检索型投影开关。独立于总开关，默认开启，只影响之后的新结果。 */
+  retrievalEnabled?: boolean
 }
 
-/** 缺省设置：开启。 */
-export const DEFAULT_CACHE_WARMUP_SETTINGS: CacheWarmupSettings = { enabled: true }
+/** 缺省设置：日志投影与检索投影均开启。 */
+export const DEFAULT_CACHE_WARMUP_SETTINGS: CacheWarmupSettings = { enabled: true, retrievalEnabled: true }
 
 /**
  * 设置字段在运行时可能是活引用（volatile）或普通值（手工构造的上下文、测试）。
@@ -62,6 +71,8 @@ export type CacheWarmupConfigField<T> = ConfigRef<T> | T | undefined
 export interface CacheWarmupConfigFields {
   /** 总开关字段。 */
   cacheWarmup?: CacheWarmupConfigField<boolean>
+  /** 检索型投影的独立开关字段。 */
+  cacheWarmupRetrieval?: CacheWarmupConfigField<boolean>
 }
 
 /**
@@ -87,7 +98,7 @@ export function readCacheWarmupConfigField<T>(field: CacheWarmupConfigField<T>):
  */
 export function resolveCacheWarmupSettings(config?: CacheWarmupConfigFields): CacheWarmupSettings {
   const enabled = readCacheWarmupConfigField(config?.cacheWarmup)
-  // 只有明确的 `false` 才关：字段缺失、形状不认识（比如配置里写了字符串）都按
-  // 缺省处理。一个存心写错的配置值不该静默关掉一个默认开启的功能。
-  return { enabled: enabled !== false }
+  const retrievalEnabled = readCacheWarmupConfigField(config?.cacheWarmupRetrieval)
+  // 两个开关都只有明确 false 才关闭；未声明字段时按默认开启处理。
+  return { enabled: enabled !== false, retrievalEnabled: retrievalEnabled !== false }
 }

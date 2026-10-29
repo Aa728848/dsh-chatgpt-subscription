@@ -51,6 +51,7 @@ import {
   type CacheWarmupLogger,
 } from './logging.ts'
 import { createCacheWarmupResultTool } from './result-tool.ts'
+import { CACHE_WARMUP_RETRIEVAL_TOOLS, cacheWarmupNavigationIntentOf } from './retrieval-intent.ts'
 import type { CacheWarmupSettings } from './settings.ts'
 
 /**
@@ -455,10 +456,21 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     decision: PostToolDecision,
   ): Promise<PostToolDecision> => {
     if (decision.kind !== 'accept') return decision
-    if (decision.value !== undefined) return decision
-    if (!CACHE_WARMUP_SOURCE_TOOLS.has(exec.name)) return decision
-    // 开关每次重读：关闭只影响之后的新结果，历史的 preview 不重新投影。
-    if (!options.settings().enabled) return decision
+    const sourceTool = CACHE_WARMUP_SOURCE_TOOLS.has(exec.name)
+    const retrievalTool = CACHE_WARMUP_RETRIEVAL_TOOLS.has(exec.name)
+    if (!sourceTool && !retrievalTool) return decision
+    const settings = options.settings()
+    // 两组开关独立：原日志路径行为不变；检索路径只有显式 true 才开启。
+    const ptcRetrieval = exec.name === 'run_code' && settings.retrievalEnabled === true
+    if (sourceTool && !settings.enabled && !ptcRetrieval) return decision
+    if (retrievalTool && settings.retrievalEnabled !== true) return decision
+    const navigation = retrievalTool || ptcRetrieval ? cacheWarmupNavigationIntentOf(exec.agent) : undefined
+    // 不确定、编辑或审查：连核心都不调用，原 value/content 决策逐字交回。
+    if (retrievalTool && navigation !== true) return decision
+    if (sourceTool && !settings.enabled && navigation !== true) return decision
+    // 原路径绝不改 canonical value；只有明确导航的 PTC 检索才允许越过这道门，
+    // 且核心未真正生成 preview 时仍在末尾返回原 value 决策。
+    if (sourceTool && decision.value !== undefined && navigation !== true) return decision
     const route = cacheWarmupRouteOf(exec.agent)
     if (route.provider !== CACHE_WARMUP_PROVIDER) return decision
     const sessionId = route.sessionId
@@ -491,6 +503,8 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
       sessionId,
       content,
       isError: result.isError === true,
+      ...(navigation === undefined ? {} : { navigation }),
+      ...(sourceTool && !settings.enabled && ptcRetrieval ? { retrievalOnly: true } : {}),
       budget,
       store,
     }).catch((error: unknown): ProjectionResult | undefined => {

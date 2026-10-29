@@ -107,6 +107,7 @@ export type ProjectionStrategy =
   | 'verbatim-source-code'
   | 'verbatim-contract'
   | 'verbatim-subagent-report'
+  | 'verbatim-intent'
   | 'verbatim-budget'
   | 'store-unavailable'
   | 'test-failure'
@@ -114,6 +115,8 @@ export type ProjectionStrategy =
   | 'grep-results'
   | 'glob-results'
   | 'structured-rows'
+  | 'file-outline'
+  | 'web-outline'
 
 /** 投影度量。契约要求前四个字段。 */
 export interface ProjectionMetrics {
@@ -161,6 +164,10 @@ export interface ProjectToolResultInput {
   content: ToolResultContent
   /** 是否为失败结果；失败结果的失败集必须完整保留。 */
   isError?: boolean
+  /** 是否已明确判定为导航任务；直接 read/web_fetch/grep/glob 只有 true 才考虑投影。 */
+  navigation?: boolean
+  /** 原日志开关关闭时，PTC 仅允许文件大纲，不得落回日志投影。 */
+  retrievalOnly?: boolean
   /** 预览预算；不传则按 `cacheWarmupBudget(sessionId)` 取当前预算。 */
   budget?: PreviewBudget
   /** 原文存储；不传则保持原样（没有 ref 的预览等于丢数据）。 */

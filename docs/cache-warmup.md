@@ -20,13 +20,14 @@
 | `usage.ts` | 有界记录真实 input/cacheRead，命中率与生命周期状态 |
 | `budget.ts` | 预热预算、稳态预算和只读快照 |
 | `install.ts` | `tools/post-execute`、静态提示、设置与安装释放 |
+| `retrieval-intent.ts` | 直接检索工具的保守导航意图判定；编辑、审查与未知意图回退 |
 | `result-tool.ts` | `cache_warmup_result` 精确补读与释放 |
 | `logging.ts` | 不含原文、凭据、路径或异常 message 的结构化指标 |
 
 ## 缓存安全不变量
 
 1. 只处理当前新产生的工具结果，不回改旧历史。
-2. 原始 `value` 不变，只替换模型可见的 `content` 投影。
+2. 原日志路径的 `value` 不变，只替换模型可见的 `content`。独立检索开关开启且明确为导航任务时，`read` / `web_fetch` / `grep` / `glob` 若实际生成 preview，可以把结构化 `value` 转为内容预览；未生成 preview 时原决策逐字返回，原文始终先存入 ref。
 3. preview 和 refId 一旦写入历史就不再变化；原文过期、淘汰或释放不会改写 preview。
 4. 非文本块原样保留；非 Kimi 线路、非受控执行/日志工具（`run_code`、`win_bash`、`bash`、`pwsh`、`job_output`）、无法确认会话的结果不变。
 5. 不自动重热、不重写前缀、不因为命中率下降而重建会话。
@@ -40,6 +41,8 @@
 - Shell / TypeScript 构建日志：退出码与完整错误集合（含 `error TSxxxx` 紧随其后的缩进类型差异详情行）。
 - PTC `run_code` JSON Envelope：若外层是轻量 JSON 对象且仅包含单一超长白名单日志字段（`stdout`/`stderr`/`output`/`logs`/`log`），只将该字段值替换为 preview 并保留外层 JSON 结构；含多份源码或被截断的混合证据保持原样。
 - grep/glob：计数、分布和有限样本，完整原文通过 ref 补读。
+- 文件导航：只在明确导航意图下，列出可识别声明的完整集合与原始行号；编辑、审查和未知意图保持原文。PTC 的 Read JSON Envelope 必须具有唯一、连续、完整的 lines 数组，混合输出与契约仍保持原文。
+- 网页导航：只在明确导航意图下，列出完整 title 与 h1-h3 / Markdown heading 集合，不做任务相关性事实摘要。
 - JSON Lines / TSV：字段、行数与分页信息。
 
 以下内容不改写：
@@ -47,7 +50,8 @@
 - 源码、接口和类型定义；
 - 含批量源码/契约的 JSON 文档及被宿主截断的 JSON 对象；
 - 子代理报告、混合证据和无法可靠解析的大文本；
-- 含 `value` 的后续决策、非 `accept` 决策和非文本块。
+- 原日志路径中含 `value` 的后续决策，以及所有非 `accept` 决策和非文本块。
+- 直接检索工具的编辑、审查、验证、全量审计和无法判断意图的结果。
 
 这套策略优先保证信息准确，不追求对所有大结果都压缩。对最初分析的 110 条真实工具结果，最终只有一条真实测试失败日志被投影，其余源码和混合证据均保持原文。
 
@@ -87,20 +91,19 @@ cacheReadTokens / (inputTokens + cacheReadTokens)
 
 ## 设置与日志
 
-现有设置页新增 `cacheWarmup`，默认开启。开关只影响之后的新结果，既有历史不变。
+「进展更新」设置页提供两个独立开关：`cacheWarmup` 默认开启，控制日志/命令结果投影；`cacheWarmupRetrieval` 默认开启，控制直接文件、网页与搜索结果的导航投影。两个开关都只影响之后的新结果，既有历史不变。配置字段仍留在核心入口，避免旧 profile 的整行配置替换造成迁移。
 
 结构化日志记录投影策略、输入/输出字符数、ref 补读和预热退出。异常只记录稳定的 name/code，不记录异常 message、原文、凭据或文件路径。
 
 ## 验证
 
-- 六份相关测试：104 passed / 1 skipped（Windows 不保留 Unix mode 位）。
 - 完整类型检查：通过。
-- 全套 Vitest：309 files passed / 2 skipped，5093 passed / 9 skipped。
-- `npm run build`、`npm pack --dry-run`、`npm ci --dry-run`：通过。
-- 真实会话 110 条工具结果重放：只有一条测试失败日志被投影，混合证据不再误分类。
-- 最多三次真实 k3.1-pro 请求：
-  - 第一次：1794 uncached input tokens；
-  - 第二次：43 uncached + 1792 cached，命中率 97.66%，达到 97% 目标，但只形成一次连续达标，未满足连续两次；
-  - 第三次：84 uncached + 1792 cached，命中率 95.52%，控制器继续保持保守预算。
+- 全套 Vitest：310 files passed / 2 skipped，5164 passed / 9 skipped。
+- `npm run build`、`npm pack --dry-run`、`git diff --check`：通过。
+- 检索投影的真实 Kimi 对照严格使用 4 次请求（A/B/C/D，无重试）：
+  - 原始组：冷启动 687 fresh；加入原始文件结果时 512 cached + 1251 fresh；
+  - 大纲组：冷启动 687 fresh；加入大纲结果时 512 cached + 317 fresh；
+  - 两组续写都读到首轮缓存，受控样本的新增输入由 1251 降至 317（约 74.7%）。
+- 运行时 PTC 验收：真实探针文件生成 `strategy=file-outline`，包含 8 个顶层声明与 ref；审查请求之后 `outlinesAfterReview: 0`，读取结果为原始 JSON。
 
-真实测试未在三次额度内证明进入稳态；稳态退出逻辑由单元测试覆盖。不得把这组结果描述为“已实测进入稳态”。
+真实对照只证明这组输入上的缓存复用与新增量差异，不证明所有任务都有相同收益；编辑、审查与未知意图仍应以原文和正确性优先。

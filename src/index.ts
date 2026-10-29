@@ -191,6 +191,7 @@ import {
 import { sessionCacheState } from './host/kimi-code/session-cache-state.ts'
 import {
   CACHE_WARMUP_SETTING_DESCRIPTION,
+  CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION,
   resolveCacheWarmupSettings,
 } from './host/cache-warmup/settings.ts'
 
@@ -231,6 +232,8 @@ export interface Config {
    * preview 与 refId 是历史的一部分，不随开关变化。
    */
   cacheWarmup?: Volatile<boolean>
+  /** 检索型结果投影独立开关：默认开启，只影响明确导航任务之后的新结果。 */
+  cacheWarmupRetrieval?: Volatile<boolean>
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
   fetchProvider?: 'auto' | 'plugin' | 'dsh'
@@ -343,6 +346,8 @@ export interface ConfigInput {
   progressUpdatesLanguage?: ProgressUpdateLanguage
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
+  /** 检索型结果投影独立开关（默认开启；只影响之后产生的新结果）。 */
+  cacheWarmupRetrieval?: boolean
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
   /**
@@ -386,6 +391,8 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 正在运行的实例，不重挂任何行。
   cacheWarmup: z.boolean().default(true).volatile()
     .description(CACHE_WARMUP_SETTING_DESCRIPTION),
+  cacheWarmupRetrieval: z.boolean().default(true).volatile()
+    .description(CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret

@@ -340,6 +340,21 @@ describe('projectToolResult 结构化投影', () => {
     expect(result.preview).toContain('ELIFECYCLE')
   })
 
+  it('npm notice 文件清单不会把 stream-error.d.ts 误计为构建错误', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const lines = ['$ npm pack --dry-run']
+    for (let index = 0; index < 60; index += 1) lines.push(`npm notice ${index + 1}kB lib/types/host/mod-${index}.d.ts`)
+    lines.push('npm notice 5.2kB lib/types/host/common/stream-error.d.ts')
+    lines.push('npm notice 917B lib/types/host/common/stream-error.d.ts.map')
+    lines.push('[exit code: 0]')
+    const result = await projectToolResult({ toolName: 'run_code', sessionId: 's', content: lines.join('\n'), budget: WARMUP, store })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('shell-output')
+    expect(result.preview).toContain('exit code: 0')
+    expect(result.preview).toContain('errors: 0 (complete set)')
+    expect(result.preview).not.toContain('errors: 2 (complete set)')
+  })
+
   it('TypeScript 多行诊断块：保留紧随其后的缩进类型差异详情，且错误计数按诊断块而非缩进行数累加', async () => {
     const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
     const lines = ['$ npm run typecheck']

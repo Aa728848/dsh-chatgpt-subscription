@@ -336,7 +336,7 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(sections[0]!.locale).toBe(NS_PROGRESS_UPDATES)
   })
 
-  it('四行卡片都渲染：开关、阈值、输出语言、打开面板', async () => {
+  it('六行卡片都渲染：进展、两个缓存开关、阈值、语言与面板', async () => {
     // Given 一份就绪的表单与一个假侧栏
     const form = fakeForm({ progressUpdates: false, progressUpdatesNudgeThreshold: 8 })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
@@ -344,17 +344,21 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     } as never)))
     // Then 三行都在
     expect(container.querySelector('[data-dsh-part="settings-row-enabled"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-cache-warmup"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-retrieval"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-panel"]')).not.toBeNull()
     // And 名称与说明用的是本插件的文案
     expect(container.textContent).toContain(zh.settingsEnabledName)
+    expect(container.textContent).toContain(zh.settingsCacheWarmupName)
+    expect(container.textContent).toContain(zh.settingsRetrievalName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
     expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(4)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(6)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -403,6 +407,28 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(form.writes).toEqual([['progressUpdates', true], ['progressUpdatesNudgeThreshold', 12]])
   })
 
+  it('缓存开关分别写 cacheWarmup 与 cacheWarmupRetrieval，显式关闭时回显关闭', async () => {
+    const form = fakeForm({ cacheWarmup: true, cacheWarmupRetrieval: false })
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const cache = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-cache-warmup-switch"]')!
+    const retrieval = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-retrieval-switch"]')!
+    expect(cache.getAttribute('aria-checked')).toBe('true')
+    expect(retrieval.getAttribute('aria-checked')).toBe('false')
+    await act(async () => { cache.click() })
+    await act(async () => { retrieval.click() })
+    expect(form.writes).toEqual([['cacheWarmup', false], ['cacheWarmupRetrieval', true]])
+  })
+
+  it('未声明检索字段时设置页默认开启', async () => {
+    const form = fakeForm({ cacheWarmup: true })
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-retrieval-switch"]')?.getAttribute('aria-checked')).toBe('true')
+  })
+
   it('输出语言下拉写的是 progressUpdatesLanguage，选项就是 schema 的三个取值', async () => {
     // Given 一份可写表单，语言停在默认 auto
     const form = fakeForm({ progressUpdates: true, progressUpdatesLanguage: 'auto' })
@@ -428,6 +454,8 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     } as never)))
     // Then 开关与输入框都是禁用的
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-switch"]')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-cache-warmup-switch"]')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-retrieval-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLInputElement>('[data-dsh-part="settings-threshold"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLSelectElement>('[data-dsh-part="settings-language"]')?.disabled).toBe(true)
     // And 说明行说清了为什么

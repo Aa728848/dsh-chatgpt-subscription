@@ -58,6 +58,10 @@ export interface ProgressUpdatesSettingsValues {
    * 逐字一致（宿主 Config schema 里的枚举就是这三个）。
    */
   progressUpdatesLanguage?: 'auto' | 'zh' | 'en'
+  /** 既有日志/命令结果投影开关（默认开启）。 */
+  cacheWarmup?: boolean
+  /** 检索型结果投影独立开关（默认开启）。 */
+  cacheWarmupRetrieval?: boolean
 }
 
 /** 输出语言的三种取值，供界面侧声明变量类型。 */
@@ -68,6 +72,8 @@ export type ProgressUpdatesField =
   | 'progressUpdates'
   | 'progressUpdatesNudgeThreshold'
   | 'progressUpdatesLanguage'
+  | 'cacheWarmup'
+  | 'cacheWarmupRetrieval'
 
 /**
  * 候选条目 id，按可能性从高到低。

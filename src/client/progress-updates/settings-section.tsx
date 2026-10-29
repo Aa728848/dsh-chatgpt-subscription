@@ -1,5 +1,5 @@
 /**
- * 设置页里的「进展更新」分区：一句说明 + 四行卡片（开关 / 催促阈值 / 输出语言 / 进展面板）。
+ * 设置页里的「进展更新」分区：说明 + 六行卡片（进展 / 两个缓存开关 / 阈值 / 语言 / 面板）。
  *
  * ## 视觉来源
  *
@@ -122,6 +122,24 @@ function LanguageMark(): ReactNode {
 }
 
 /** 第四行的标记：一块右侧栏面板。 */
+function CacheWarmupMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <ellipse cx="10" cy="5" rx="6" ry="2.5" />
+      <path d="M4 5v5c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V5M4 10v5c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5v-5" />
+    </svg>
+  )
+}
+
+function RetrievalMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="8.5" cy="8.5" r="4.5" />
+      <path d="m12 12 4 4M4 3h5M3 16h5" />
+    </svg>
+  )
+}
+
 function PanelMark(): ReactNode {
   return (
     <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -198,12 +216,14 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
   const writable = settings !== undefined && snapshot.status === 'ready' && snapshot.writable
   const enabled = value.progressUpdates !== false
+  const cacheWarmup = value.cacheWarmup !== false
+  const retrieval = value.cacheWarmupRetrieval !== false
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT
@@ -223,7 +243,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -301,6 +321,48 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-switch"
             disabled={!writable}
             onClick={() => { write('enabled', 'progressUpdates', !enabled) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-cache-warmup"
+          brand="#2f9e6e"
+          mark={<CacheWarmupMark />}
+          name={translate('settingsCacheWarmupName')}
+          note={failure?.row === 'cacheWarmup' ? failure.text : translate('settingsCacheWarmupNote')}
+          danger={failure?.row === 'cacheWarmup'}
+          enabled={cacheWarmup}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={cacheWarmup}
+            aria-label={translate('settingsCacheWarmupName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-cache-warmup-switch"
+            disabled={!writable}
+            onClick={() => { write('cacheWarmup', 'cacheWarmup', !cacheWarmup) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-retrieval"
+          brand="#168a9c"
+          mark={<RetrievalMark />}
+          name={translate('settingsRetrievalName')}
+          note={failure?.row === 'retrieval' ? failure.text : translate('settingsRetrievalNote')}
+          danger={failure?.row === 'retrieval'}
+          enabled={retrieval}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={retrieval}
+            aria-label={translate('settingsRetrievalName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-retrieval-switch"
+            disabled={!writable}
+            onClick={() => { write('retrieval', 'cacheWarmupRetrieval', !retrieval) }}
           />
         </CardRow>
 

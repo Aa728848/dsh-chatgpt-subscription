@@ -32,6 +32,9 @@ const TOOL_SUBAGENT = /(?:^|[-_/])(?:subagent|agent|task|delegate|ralph|teammate
 /** 源码读取/写入类工具：一律原样。 */
 const TOOL_SOURCE = /(?:^|[-_/])(?:read|view|cat|open|edit|write|patch|apply_patch|notebook|document|diff)(?:[-_/]|$)/i
 
+/** 独立开关覆盖的检索工具；只有明确导航任务才允许进入新投影。 */
+const TOOL_RETRIEVAL = /^(?:read|web_fetch|grep|glob)$/
+
 /** 一行文本的裁剪（超长行才裁剪，并留下省略号）。 */
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`
@@ -249,6 +252,8 @@ function looksLikeShellOutput(text: string): boolean {
   for (const line of lines) {
     const trimmed = line.trim()
     if (trimmed === '') continue
+    // npm pack 的文件清单只是元数据；stream-error.d.ts 之类文件名不是构建错误。
+    if (/^npm notice\s/.test(trimmed)) continue
     if (/^(?:PASS\b|[✓✔]|ok\s+\d+\b)/.test(trimmed)) continue
     if (/^stdout\s+\|\s+/.test(trimmed)) continue
     if (/^\(node:\d+\)\s+\[\w+\]\s+Warning:/.test(trimmed)) continue
@@ -272,6 +277,7 @@ function buildShellSections(text: string): PreviewSection[] | undefined {
     const raw = lines[index]!
     const trimmed = raw.trim()
     if (trimmed === '') continue
+    if (/^npm notice\s/.test(trimmed)) continue
     if (/^\[exit code: -?\d+\]/i.test(trimmed)) continue
     if (/^\s*(?:0|no)\s+(?:errors?|failures?|failed)\b/i.test(trimmed)) continue
     if (/^(?:PASS\b|[✓✔]|ok\s+\d+\b)/.test(trimmed)) continue
@@ -403,6 +409,135 @@ const LINE_NUMBER_PREFIX = /^\s*\d+(?::(?:\s|$)|-\s{2,}|\t|\|(?:\s|$)|→\s?)/
 
 function stripLineNumberPrefix(line: string): string {
   return line.replace(LINE_NUMBER_PREFIX, '')
+}
+
+/* 读取工具的带行号正文：捕获原始行号与声明文本。 */
+const READ_NUMBERED_LINE = /^\s*(\d+)(?::(?:\s|$)|\t|\|(?:\s|$)|→\s?)(.*)$/
+
+/* 可在导航大纲里可靠识别的声明；不猜方法体、调用关系或符号语义。 */
+const OUTLINE_DECLARATION = /^(?:(?:export|default|declare|async|public|private|protected|static|readonly|abstract)\s+)*(?:function|class|interface|type|enum|const|let|var|def)\s+[A-Za-z_$][\w$]*/
+
+/* 文件导航大纲：只列可识别声明的完整集合；结构不足时交给原文回退。 */
+function buildFileOutlineSections(text: string): PreviewSection[] | undefined {
+  const declarations: string[] = []
+  let numberedLines = 0
+  let previousLine = 0
+  for (const raw of text.split('\n')) {
+    if (raw.trim() === '') continue
+    const matched = READ_NUMBERED_LINE.exec(raw)
+    // PTC 混合输出、命令行、分节头与多文件拼接都不是单一 read 结果。
+    if (matched === null) return undefined
+    const lineNumber = Number(matched[1])
+    if (!Number.isSafeInteger(lineNumber) || lineNumber <= previousLine) return undefined
+    previousLine = lineNumber
+    numberedLines += 1
+    // 只要顶层声明；函数体里的局部 const/let/var 既不是导航符号，也会撑爆预算。
+    if (/^\s/.test(matched[2]!)) continue
+    const code = matched[2]!.trim()
+    if (!OUTLINE_DECLARATION.test(code)) continue
+    declarations.push('  L' + matched[1] + ' ' + clip(code, 180))
+    if (declarations.length > 200) return undefined
+  }
+  if (numberedLines < 5 || declarations.length === 0) return undefined
+  return [
+    { lines: ['declarations: ' + declarations.length + ' (recognized set; complete)'] },
+    { lines: declarations },
+  ]
+}
+
+
+/* 宿主 read 的规范 JSON：只有完整 lines 数组、连续行号和文本字段才可识别。 */
+function buildJsonReadOutlineSections(text: string): PreviewSection[] | undefined {
+  let value: unknown
+  try { value = JSON.parse(text) } catch { return undefined }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const lines = record.lines
+  if (!Array.isArray(lines) || lines.length < 5) return undefined
+  const numbered: string[] = []
+  let previousLine = 0
+  for (const entry of lines) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return undefined
+    const item = entry as Record<string, unknown>
+    if (!Number.isSafeInteger(item.number) || typeof item.text !== 'string') return undefined
+    const number = item.number as number
+    if (number <= previousLine) return undefined
+    previousLine = number
+    numbered.push(String(number) + ': ' + item.text)
+  }
+  const reconstructed = numbered.join('\n')
+  if (looksLikeContract(reconstructed)) return undefined
+  const sections = buildFileOutlineSections(reconstructed)
+  if (sections === undefined) return undefined
+  if (typeof record.path !== 'string' || record.path.trim() === '') return sections
+  return [
+    // 路径是可选元数据；绝对路径装不下时省略它，不能因此丢掉完整声明集合。
+    { lines: ['path: ' + clip(record.path, 180)], optional: true },
+    ...sections,
+  ]
+}
+
+/* 解码 heading 内常见的 HTML 实体；无法识别的实体原样保留。 */
+function decodeOutlineEntities(text: string): string {
+  return text.replace(/&(?:#(\d+)|#x([\da-f]+)|amp|lt|gt|quot|apos);/gi, (whole, decimal, hex) => {
+    if (decimal !== undefined || hex !== undefined) {
+      const point = Number.parseInt(decimal ?? hex, decimal !== undefined ? 10 : 16)
+      if (Number.isSafeInteger(point) && point >= 0 && point <= 0x10FFFF) {
+        try { return String.fromCodePoint(point) } catch { return whole }
+      }
+      return whole
+    }
+    const key = whole.slice(1, -1).toLowerCase()
+    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[key] ?? whole
+  })
+}
+
+/* 清理 heading 内联标签，不处理正文，也不对网页内容做相关性摘要。 */
+function cleanOutlineHeading(text: string): string {
+  return decodeOutlineEntities(text.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim()
+}
+
+/* 网页导航大纲：完整 title 与 h1-h3 / Markdown heading 集合；没有完整结构就放弃。 */
+function buildWebOutlineSections(text: string): PreviewSection[] | undefined {
+  let title = ''
+  const headings: Array<{ level: number, text: string }> = []
+  if (/<(?:html|head|body|h[1-3])(?:\s|>)/i.test(text)) {
+    const titleMatch = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(text)
+    if (titleMatch !== null) title = cleanOutlineHeading(titleMatch[1]!)
+    const pattern = /<h([1-3])\b[^>]*>([\s\S]*?)<\/h\1>/gi
+    for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+      const heading = cleanOutlineHeading(match[2]!)
+      if (heading !== '') headings.push({ level: Number(match[1]), text: heading })
+      if (headings.length > 100) return undefined
+    }
+  } else {
+    const pattern = /^ {0,3}(#{1,3})\s+(.+?)\s*#*\s*$/gm
+    for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+      const heading = match[2]!.trim()
+      if (heading !== '') headings.push({ level: match[1]!.length, text: clip(heading, 180) })
+      if (headings.length > 100) return undefined
+    }
+  }
+  if (title === '' && headings.length === 0) return undefined
+  const lines = ['headings: ' + headings.length + ' (complete set)']
+  if (title !== '') lines.push('title: ' + clip(title, 180))
+  return [
+    { lines },
+    { lines: headings.map((heading) => '  H' + heading.level + ' ' + clip(heading.text, 180)) },
+  ]
+}
+
+/* 直接文件/网页读取的大纲入口；grep/glob 由已有的完整计数策略处理。 */
+function planRetrievalOutline(text: string, toolName: string): Extract<ProjectionPlan, { kind: 'preview' }> | undefined {
+  if (toolName === 'read') {
+    const sections = buildJsonReadOutlineSections(text) ?? buildFileOutlineSections(text)
+    return sections === undefined ? undefined : { kind: 'preview', strategy: 'file-outline', sections }
+  }
+  if (toolName === 'web_fetch') {
+    const sections = buildWebOutlineSections(text)
+    return sections === undefined ? undefined : { kind: 'preview', strategy: 'web-outline', sections }
+  }
+  return undefined
 }
 
 /** 契约/类型定义：命中两行以上声明就当它是契约，保持原样。 */
@@ -646,10 +781,23 @@ function planPlainTextProjection(rawText: string, toolName: string): ProjectionP
  * 接着是测试失败集、grep、结构化、glob、shell 这些有明确形状的，
  * 最后落到「无法解析 → 原样」。
  */
-function planProjection(text: string, toolName: string): ProjectionPlan {
+function planProjection(text: string, toolName: string, navigation?: boolean, retrievalOnly?: boolean): ProjectionPlan {
   if (TOOL_SUBAGENT.test(toolName)) return { kind: 'verbatim', strategy: 'verbatim-subagent-report' }
-  if (TOOL_SOURCE.test(toolName)) return { kind: 'verbatim', strategy: 'verbatim-source-code' }
+  const retrieval = TOOL_RETRIEVAL.test(toolName)
+  // 宿主明确给出 false 才按新意图门控回退；核心旧调用不传该字段时保留原策略。
+  if (retrieval && navigation === false) return { kind: 'verbatim', strategy: 'verbatim-intent' }
+  if (TOOL_SOURCE.test(toolName) && navigation !== true) return { kind: 'verbatim', strategy: 'verbatim-source-code' }
   if (looksLikeContract(text)) return { kind: 'verbatim', strategy: 'verbatim-contract' }
+  // PTC 把 read 包在 run_code 里：只接受严格单一行号文件，混合输出继续原样/原日志策略。
+  if (toolName === 'run_code' && navigation === true) {
+    const outline = planRetrievalOutline(text, 'read')
+    if (outline !== undefined) return outline
+    if (retrievalOnly === true) return { kind: 'verbatim', strategy: 'verbatim-intent' }
+  }
+  if (retrieval) {
+    const outline = planRetrievalOutline(text, toolName)
+    if (outline !== undefined) return outline
+  }
   // run_code 常返回 JSON envelope 或 JSON 序列化字符串：若只是轻量状态配一个超长日志字段
   // （stdout/stderr/output/logs）或纯日志字符串，只替换日志部分；若含多份源码或被截断，则整份保持原样。
   if (isJsonDocument(text)) {
@@ -692,7 +840,7 @@ async function decide(args: {
   const { text, input, budget } = args
   if (text.length <= budget.maxChars) return { reason: 'verbatim-small' }
 
-  const plan = planProjection(text, input.toolName)
+  const plan = planProjection(text, input.toolName, input.navigation, input.retrievalOnly)
   if (plan.kind === 'verbatim') return { reason: plan.strategy }
 
   // 失败结果只允许「完整失败集」型预览，计数型摘要一律不换。

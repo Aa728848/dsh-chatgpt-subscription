@@ -102,7 +102,7 @@ type PostExecuteListener = (
 let disposers: Array<() => void> = []
 
 /** 当前设置；对象本身可变，用来模拟 volatile 活引用在会话中途被改写。 */
-let settings: { enabled: boolean }
+let settings: { enabled: boolean, retrievalEnabled?: boolean }
 
 /** 断言"投影没有被调用"用的计数。 */
 const projectionCalls = (): number => core.calls.length
@@ -130,6 +130,21 @@ const runCodeExec = (provider = 'kimi-code', sessionId: string | undefined = 'se
       requestHeader: () => ({ config: { provider } }),
     },
     options: { provider },
+  },
+} as unknown as ToolExecution)
+
+/** 造一次带最新用户意图的直接检索执行。 */
+const retrievalExec = (name: string, userText: string): ToolExecution => ({
+  name,
+  arguments: {},
+  agent: {
+    id: 'sess-1',
+    session: {
+      header: { id: 'sess-1' },
+      requestHeader: () => ({ config: { provider: 'kimi-code' } }),
+      events: [{ type: 'user/message', data: { content: [{ type: 'text', text: userText }] } }],
+    },
+    options: { provider: 'kimi-code' },
   },
 } as unknown as ToolExecution)
 
@@ -246,7 +261,7 @@ const acceptAll = (decision: PostToolDecision) => () => Promise.resolve(decision
 
 beforeEach(() => {
   disposers = []
-  settings = { enabled: true }
+  settings = { enabled: true, retrievalEnabled: false }
   core.calls.length = 0
   core.state.throwOnProject = false
   core.state.throwOnConstruct = false
@@ -280,6 +295,60 @@ describe('cache warmup host integration', () => {
     const returned = await listener(runCodeExec(), fullResult(), acceptAll(decision))
     expect(returned).toBe(decision)
     expect(projectionCalls()).toBe(0)
+  })
+
+  it('keeps direct retrieval values untouched while the independent switch is off', async () => {
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', value: { path: 'src/a.ts', lines: [] } }
+    const returned = await listener(retrievalExec('read', '请定位相关函数'), fullResult(), acceptAll(decision))
+    expect(returned).toBe(decision)
+    expect(projectionCalls()).toBe(0)
+  })
+
+  it('projects a value-carrying retrieval result only for explicit navigation', async () => {
+    settings = { enabled: true, retrievalEnabled: true }
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', value: { path: 'src/a.ts', lines: [] } }
+    const returned = await listener(retrievalExec('read', '请定位相关函数'), fullResult(), acceptAll(decision))
+    expect(JSON.stringify(returned)).toContain('PREVIEW')
+    expect(returned.kind === 'accept' ? returned.value : undefined).toBeUndefined()
+    expect(core.calls[0]?.navigation).toBe(true)
+    const editing = await listener(retrievalExec('read', '请查找并修复这个函数'), fullResult(), acceptAll(decision))
+    expect(editing).toBe(decision)
+    expect(projectionCalls()).toBe(1)
+  })
+
+  it('keeps retrieval projection independent from the legacy log switch', async () => {
+    settings = { enabled: false, retrievalEnabled: true }
+    const { listener } = install()
+    const returned = await listener(retrievalExec('web_fetch', 'list the page sections'), fullResult(), acceptAll({ kind: 'accept', value: { body: {} } }))
+    expect(JSON.stringify(returned)).toContain('PREVIEW')
+    expect(projectionCalls()).toBe(1)
+  })
+
+  it('allows PTC outlines independently and rejects PTC editing intent', async () => {
+    settings = { enabled: false, retrievalEnabled: true }
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', content: [{ type: 'text', text: 'NUMBERED-FILE' }] }
+    const projected = await listener(retrievalExec('run_code', '请定位并列出函数'), fullResult(), acceptAll(decision))
+    expect(JSON.stringify(projected)).toContain('PREVIEW')
+    expect(core.calls[0]?.navigation).toBe(true)
+    expect(core.calls[0]?.retrievalOnly).toBe(true)
+    const editing = await listener(retrievalExec('run_code', '请读取并修复这个文件'), fullResult(), acceptAll(decision))
+    expect(editing).toBe(decision)
+    expect(projectionCalls()).toBe(1)
+  })
+
+  it('admits a value-carrying PTC read only for navigation', async () => {
+    settings = { enabled: true, retrievalEnabled: true }
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', value: { path: 'src/a.ts', lines: [] } }
+    const projected = await listener(retrievalExec('run_code', '请定位并列出函数'), fullResult(), acceptAll(decision))
+    expect(JSON.stringify(projected)).toContain('PREVIEW')
+    expect(core.calls[0]?.navigation).toBe(true)
+    const editing = await listener(retrievalExec('run_code', '请读取并修复这个文件'), fullResult(), acceptAll(decision))
+    expect(editing).toBe(decision)
+    expect(projectionCalls()).toBe(1)
   })
 
   it('leaves a blocked decision untouched', async () => {

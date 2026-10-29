@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **[kimi-code] 新增默认开启的检索型结果投影，并将缓存开关统一放入「进展更新」设置页**
+  - `cacheWarmupRetrieval` 独立控制 `read` / `web_fetch` / `grep` / `glob`：只有明确导航任务才考虑投影；文件保留完整顶层声明及行号，网页保留完整 title/heading 大纲，编辑、审查、验证与未知意图保持原决策和原文。
+  - 兼容 PTC 把 `read` 包在 `run_code` 里的规范 JSON Envelope；只解析连续、唯一、完整的 lines 数组，混合输出和契约仍保持原文。
+  - 跳过真实请求后的 reminder-only `user/message`，继续向前识别最近一条真实用户意图；绝对路径仅作可选元数据，函数内局部变量不再挤占大纲预算。
+  - 运行时验收：真实文件生成 `strategy=file-outline`（8 个顶层声明、12,472 字符原文及 ref）；审查请求后无新增大纲，读取结果保留原始 JSON。
+  - 「进展更新」设置页新增「缓存预热」与「检索结果投影」两行，沿用现有卡片、开关、三语和保存失败状态；配置字段仍留在核心入口，未声明该字段的旧 profile 默认开启新行为，显式 false 仍关闭。
+  - 真实 Kimi 四次请求对照：两组续写均读取 512 cached tokens，原始结果新增 1251 fresh tokens，大纲结果新增 317 fresh tokens；仅证明该受控样本，不外推所有任务。
+
+- **[cache-warmup] `npm notice` 文件清单不再把 `stream-error.d.ts` 误计为构建错误**
+  - Shell 判定与错误集构造同步忽略 npm 打包元数据；真正的 `npm ERR!` 与编译错误仍完整保留。
+
 ## 0.46.1 - 2026-10-29
 
 - **[codex-chatgpt] Codex 请求在 TLS 握手/连接建立前失败时最多重试两次**
