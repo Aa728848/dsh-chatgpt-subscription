@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.46.0 - 2026-10-29
+
+- **[kimi-code] `cache-warmup` 预热与结果投影全面增强：双轨稳态判据、空闲 TTL 回退、JSON 转义全链路加固与 59 个真实会话重放纠偏**
+  - **双轨稳态判据与空闲 TTL 回退**：新增 `isWarmupHitReport` 双轨命中判定——除原有的 `hitRatio >= 0.97` 外，当已缓存前缀 $\ge 1024$ tokens、相比紧邻上一轮无漂移报告一字未缩水（`cached >= prev.cached`）且单轮新增未命中 `inputTokens <= 256`（对齐 Kimi 256-token 缓存块）时同样计入连续命中，解决短会话因分母小无法退出预热期的问题；同时新增 `cacheTtlMs = 25 * 60 * 1000`，空闲超过 25 分钟时自动将预算退回 `1200` 字符。
+  - **拦截工具扩展与细粒度投影**：`CACHE_WARMUP_SOURCE_TOOLS` 扩展覆盖 `run_code`、`win_bash`、`bash`、`pwsh`、`job_output`；支持 PTC `run_code` JSON Envelope 白名单日志字段（`stdout`/`stderr`/`output`/`logs`/`log`）局部替换为 preview 并保留外层 JSON 结构；`buildShellSections` 支持连带提取 TypeScript `error TSxxxx` 紧随其后的最多 6 行缩进类型差异详情。
+  - **JSON 转义全链路与单行 JSON 分页**：使用 `JSON.stringify(line).length` 精确计量 JSON Envelope 内嵌行的转义膨胀宽度并在落盘前校验总长度；解码后自动剥离终端 ANSI 颜色控制符与 `\r`；支持顶层 JSON 字符串与双重 JSON 序列化解包；`store.ts` 对无真实换行的单行 minified JSON 按奇偶反斜杠回溯识别逻辑转义换行 `\n`，使 `limit: 64` 行上限生效且多页拼接后与原文逐字节相等。
+  - **真实会话重放防误伤加固**：经 59 个真实会话（2,903 条工具结果）全量重放检验，新增带行号源码切片（`1: `、`1\t`、`1| `、`50-  `）与 `git diff` 补丁保护、内嵌 JSON/混合证据识别、Tab/竖线分隔 `grep` 识别、TSV 表头符号校验、JSONL 最小 5 行同构键校验，以及单纯文件路径行（如 `stream-error.ts`）与测试通过行（`PASS` / `✓` / `✔`）过滤，实现源码、契约与混合证据 **0 误压**。
+  - **预热状态持久化与设置页展示**：`SessionCacheStateStore.noteWarmupStreak` 原地持久化 `warmupConsecutiveHits`，重启且未满 25 分钟时通过 `durableHint` 自动恢复稳态；Kimi 设置页「缓存与 K3 调优」卡片新增「结果预览预算」行（中/英/俄三语对齐）。
+
+- **[opendesign / cline-pass] 流式解析与错误分类加固**
+  - 加固 OpenDesign 与 Cline Pass 线路的流式 SSE 帧解析、空闲/中断边界处理及测试覆盖（`5031549`）。
+
 ## 0.45.0 - 2026-10-28
 
 - **[kimi-code] 新增 `cache-warmup` 子包：稳定前缀下快速预热、保守结果投影与原文引用**
