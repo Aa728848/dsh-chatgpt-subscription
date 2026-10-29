@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   buildClinePassBody,
   mapFinishReason,
   mapUsage,
+  parseServerSentEvents,
   reasoningOf,
   serializeMessages,
   streamErrorCode,
@@ -172,5 +173,128 @@ describe('Cline Pass stream translation', () => {
     expect(streamErrorCode('weekly plan quota exhausted', 429)).toBe('QUOTA')
     expect(streamErrorCode('too many requests', 429)).toBe('RATE_LIMIT')
     expect(streamErrorCode('bad request', 400)).toBe('INVALID_REQUEST')
+  })
+})
+
+/**
+ * The confirmed Cline Pass fixes, one targeted case each.
+ *
+ * Wire shapes are written as literals on purpose: a shared generation-bound
+ * factory would let a passing test say more about the factory than about the
+ * bytes this route sends.
+ */
+describe('Cline Pass DeepSeek thinking switch', () => {
+  function wireBody(model: string, reasoningEffort: string): ClinePassWireBody {
+    return buildClinePassBody({
+      provider: 'cline-pass',
+      model,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      stream: true,
+      reasoningEffort,
+    } as unknown as GenerateOptions, { maxTokens: 1024 }, new Map())
+  }
+
+  it('sends thinking disabled and no reasoning_effort for effort none on a DeepSeek model', () => {
+    const body = wireBody('cline-pass/deepseek-v4.1-flash-1017', 'none')
+    expect(body.thinking).toEqual({ type: 'disabled' })
+    expect('reasoning_effort' in body).toBe(false)
+  })
+
+  it('leaves a named DeepSeek level, and a non-DeepSeek model, exactly as they were', () => {
+    const high = wireBody('cline-pass/deepseek-v4-pro', 'high')
+    expect(high.reasoning_effort).toBe('high')
+    expect(high.thinking).toBeUndefined()
+    const other = wireBody('cline-pass/glm-5.2', 'none')
+    expect(other.reasoning_effort).toBe('none')
+    expect(other.thinking).toBeUndefined()
+  })
+})
+
+describe('Cline Pass mid-conversation tool changes', () => {
+  it('renders an addition and a removal as system text and never emits an empty system message', () => {
+    const wire = serializeMessages(messagesOf(
+      { role: 'developer', content: [{ type: 'tool-addition', toolName: 'read_file' }] },
+      { role: 'developer', content: [{ type: 'tool-removal', toolName: 'old_search' }] },
+      { role: 'developer', content: [{ type: 'text', text: 'plain notice' }] },
+      { role: 'user', content: [{ type: 'text', text: 'go' }] },
+    ), new Map())
+    expect(wire.map((message) => message.role)).toEqual(['system', 'system', 'system', 'user'])
+    expect(String(wire[0]?.content)).toContain('read_file')
+    expect(String(wire[0]?.content)).toMatch(/now available/)
+    expect(String(wire[1]?.content)).toContain('old_search')
+    expect(String(wire[1]?.content)).toMatch(/no longer available/)
+    // Ordinary developer text is preserved verbatim, and no empty system survives.
+    expect(wire[2]).toEqual({ role: 'system', content: 'plain notice' })
+    expect(wire.filter((message) => String(message.content).trim() === '')).toEqual([])
+  })
+})
+
+describe('Cline Pass request-order guards', () => {
+  it('never sends a user message with neither text nor an image, and still sends pure tool results', () => {
+    const wire = serializeMessages(messagesOf(
+      { role: 'user', content: [] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'read', arguments: '{}' }],
+      },
+      { role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_1', content: [{ type: 'text', text: 'body' }] }] },
+    ), new Map())
+    expect(wire.map((message) => message.role)).toEqual(['assistant', 'tool'])
+    expect(wire.filter((message) => message.role === 'user')).toEqual([])
+  })
+
+  it('refuses an orphan tool result before the request is built, naming the call id', () => {
+    const orphanOptions = {
+      provider: 'cline-pass',
+      model: 'cline-pass/glm-5.3',
+      messages: messagesOf(
+        { role: 'user', content: [{ type: 'text', text: 'go' }] },
+        { role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_orphan', content: [{ type: 'text', text: 'body' }] }] },
+      ),
+      stream: true,
+    } as unknown as GenerateOptions
+    let thrown: unknown
+    try {
+      buildClinePassBody(orphanOptions, { maxTokens: 1024 }, new Map())
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(LlmError)
+    expect((thrown as { code?: string }).code).toBe('INVALID_REQUEST')
+    expect((thrown as Error).message).toContain('call_orphan')
+  })
+})
+
+/** One SSE body, delivered in a single chunk and then closed cleanly. */
+function sseBody(text: string): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(text)
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+}
+
+describe('Cline Pass missing [DONE]', () => {
+  it('completes a clean EOF that already carried a finish_reason, keeping block ends, usage and finish', async () => {
+    const chunks = []
+    for await (const chunk of translate(parseServerSentEvents(sseBody([
+      'data: {"choices":[{"delta":{"content":"hello"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1}}',
+      '',
+    ].join('\n\n'))))) chunks.push(chunk)
+    expect(chunks.filter((chunk) => chunk.type === 'block-end')).toHaveLength(1)
+    expect(chunks.find((chunk) => chunk.type === 'usage')).toMatchObject({ usage: { inputTokens: 4, outputTokens: 1 } })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('still rejects a truncated stream that carried content but no finish_reason', async () => {
+    await expect((async () => {
+      for await (const _chunk of translate(parseServerSentEvents(sseBody([
+        'data: {"choices":[{"delta":{"content":"partial"}}]}',
+        '',
+      ].join('\n\n'))))) { /* drain */ }
+    })()).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
   })
 })

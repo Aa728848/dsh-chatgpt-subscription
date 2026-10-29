@@ -45,7 +45,13 @@ import {
   type StreamActivity,
 } from '../common/idle-watchdog.ts'
 import { ConcurrencyGate } from '../common/concurrency-gate.ts'
-import { resolveRequestImages, NO_RESOLVED_IMAGES, type AttachmentImageReader } from '../common/request-images.ts'
+import {
+  MAX_REQUEST_IMAGE_BYTES,
+  offloadOldestRequestImages,
+  resolveRequestImages,
+  NO_RESOLVED_IMAGES,
+  type AttachmentImageReader,
+} from '../common/request-images.ts'
 
 /**
  * Retry policy for the `opendesign` route.
@@ -86,6 +92,24 @@ const TRANSPORT_RETRY_BASE_MS = 400
  * but the ladder still prefers published data for anything the tables know.
  */
 export const REASONING_EFFORT_IDS = DEFAULT_EFFORTS
+
+/**
+ * How this route carries a mid-conversation tool change, or undefined for none.
+ *
+ * `in-history`, not `addition-only`: both append an addition, but only
+ * `in-history` can also express a REMOVAL. Under `addition-only` a revoked
+ * tool is deleted from the declaration list, the top-level `tools` array
+ * shrinks, and the gateway's prefix match is thrown away for the whole prompt.
+ *
+ * The field is spread into the descriptor only when this route wants one, so a
+ * harness generation that does not know it simply never reads it — no version
+ * check, and no change to the message shape either way: mapper.ts renders each
+ * change as a system sentence and never introduces a native dynamic-tool
+ * declaration, which an OpenAI-compatible gateway has no field for.
+ */
+export function toolUpdateMode(): 'in-history' | undefined {
+  return 'in-history'
+}
 
 export interface OpenDesignAdapterOptions {
   /** Proxy-aware fetch for live chat streams. */
@@ -185,6 +209,7 @@ export class OpenDesignAdapter extends LlmAdapter {
       id: modelId,
       name: info.displayName,
       inputModalities: info.input as LlmResolvedModelInfo['inputModalities'],
+      ...(toolUpdateMode() === undefined ? {} : { toolUpdate: toolUpdateMode() }),
       context: { contextWindow: info.contextWindow },
       ...outputReservation(info.contextWindow, info.maxTokens),
       ...(info.reasoning && info.efforts.length > 0
@@ -235,15 +260,32 @@ export class OpenDesignAdapter extends LlmAdapter {
     if (settings.enabled === false) {
       throw new LlmError(`${PROVIDER_NAME} is disabled in Settings > Subscription. Enable the line there, then retry.`, 'INVALID_REQUEST')
     }
-    const options: GenerateOptions = normalizeGenerateOptions(rawOptions)
+    // ONE normalization, then ONE attachment resolution, then the image budget
+    // measured on that resolution, then the body — in that order, because the
+    // budget is about the bytes that are SENT and only the resolution knows
+    // them. An oversized image travels as a downscaled request version (a 5 MB
+    // screenshot reaches the wire as ~270 KB), so budgeting the STORED bytes
+    // first over-counted every scaled image by megabytes and replaced pictures
+    // that fitted comfortably.
+    //
+    // The two steps share ONE map: the same resolution that measured the payload
+    // builds the body, so nothing is read twice and index N still names the Nth
+    // occurrence for both the measurement and the replacement.
+    //
+    // The budget is the shared default (1.5 MiB), not a number of this line's
+    // own: it bounds the body the gateway accepts, which is a property of the
+    // deployment rather than of this endpoint. Durable history is untouched —
+    // only the request about to be sent changes.
+    const normalized: GenerateOptions = normalizeGenerateOptions(rawOptions)
     const images = await resolveRequestImages(
-      options,
+      normalized,
       this.options.attachments as AttachmentImageReader | undefined,
       signal,
     ).catch((error) => {
       if (signal.aborted) throw new LlmError('OpenDesign request aborted by caller', 'ABORTED', { cause: error })
       return NO_RESOLVED_IMAGES
     })
+    const options: GenerateOptions = offloadOldestRequestImages(normalized, MAX_REQUEST_IMAGE_BYTES, images)
     const info = await this.modelInfo(options.model)
     const body = buildOpenDesignBody(options, { maxTokens: info.maxTokens }, images)
     const refused = new Set<string>()

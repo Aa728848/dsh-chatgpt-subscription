@@ -50,6 +50,11 @@ export interface OpenDesignWireBody {
   max_tokens?: number
   stop?: readonly string[]
   reasoning_effort?: string
+  /**
+   * DeepSeek's own spelling for "do not think". Sent INSTEAD of
+   * `reasoning_effort`, never beside it.
+   */
+  thinking?: { type: 'disabled' }
 }
 
 /** Lead-in text for the user message that carries images recovered from tool results. */
@@ -97,6 +102,60 @@ function collectImageParts(blocks: unknown, images: ResolvedRequestImages, targe
   return target
 }
 
+/** Names of the tools one developer message adds at its own history position. */
+function toolAdditionNames(message: Message): string[] {
+  const names: string[] = []
+  for (const block of message.content as unknown as readonly Record<string, unknown>[]) {
+    if (block.type !== 'tool-addition') continue
+    const name = block.toolName
+    if (typeof name !== 'string' || name.trim() === '') continue
+    names.push(name.trim())
+  }
+  return names
+}
+
+/** Names of the tools one developer message revokes at its own history position. */
+function toolRemovalNames(message: Message): string[] {
+  const names: string[] = []
+  for (const block of message.content as unknown as readonly Record<string, unknown>[]) {
+    if (block.type !== 'tool-removal') continue
+    const name = block.toolName
+    if (typeof name !== 'string' || name.trim() === '') continue
+    names.push(name.trim())
+  }
+  return names
+}
+
+/**
+ * The model-facing note that announces tools a conversation just gained.
+ *
+ * This route declares `toolUpdate: 'in-history'`, so the harness states an
+ * addition as a block at its own history position instead of rewriting the whole
+ * request's tool list. OpenAI has no message-level tool declaration, so the
+ * change travels as this sentence: it costs one short system turn and leaves the
+ * top-level `tools` array — and therefore the prefix cache — intact.
+ */
+function additionNotice(names: readonly string[]): string {
+  const list = names.map((name) => '"' + name + '"').join(', ')
+  return names.length === 1
+    ? '[' + list + ' is now available. Call it when it helps with the task.]'
+    : '[' + list + ' are now available. Call them when they help with the task.]'
+}
+
+/**
+ * The model-facing note that revokes one or more tools.
+ *
+ * Imperative and unambiguous on purpose: the tool is still in the declaration
+ * list, so this sentence is the only thing between the model and a call that
+ * would fail.
+ */
+function removalNotice(names: readonly string[]): string {
+  const list = names.map((name) => '"' + name + '"').join(', ')
+  return names.length === 1
+    ? '[' + list + ' is no longer available. Do not call it again: any call will fail.]'
+    : '[' + list + ' are no longer available. Do not call them again: any call will fail.]'
+}
+
 /**
  * Convert the harness conversation to wire messages.
  *
@@ -108,7 +167,15 @@ function collectImageParts(blocks: unknown, images: ResolvedRequestImages, targe
  * message keeps a parallel group's answers contiguous.
  *
  * `developer` becomes `system`: the newer OpenAI spelling is not accepted by
- * every OpenAI-compatible gateway, while `system` is.
+ * every OpenAI-compatible gateway, while `system` is. A tool addition or
+ * removal carried by such a message is replayed as its own system sentence —
+ * the `in-history` shape this route declares — and ordinary text is kept
+ * beside it. A message that contributes neither is dropped rather than sent as
+ * an empty system turn.
+ *
+ * A user message that carries no text and no image contributes nothing to a
+ * chat request, so it is dropped too; a pure tool-result message never took that
+ * path, because its answers travel as `tool` messages.
  */
 export function serializeMessages(messages: readonly Message[], images: ResolvedRequestImages): OpenDesignWireMessage[] {
   const wire: OpenDesignWireMessage[] = []
@@ -139,6 +206,18 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
   }
   /** A tool answer: it closes its own id, and the group when it was the last. */
   const answer = (callId: string, content: readonly CompatContentBlock[] | undefined): void => {
+    // A `tool` message no assistant `tool_calls` introduced is an illegal
+    // OpenAI sequence: a validating gateway rejects the whole request with an
+    // error that names no cause. Refuse it here, before anything is sent, and
+    // name the id — durable history is not touched, exactly as it is not
+    // touched when an image is dropped for the image budget.
+    if (!awaiting.includes(callId)) {
+      throw new LlmError(
+        `OpenDesign request is invalid: the tool result for call id "${callId}" has no pending tool call to answer, `
+        + 'so the message list would carry a tool message that no assistant tool_calls message introduced. Nothing was sent.',
+        'INVALID_REQUEST',
+      )
+    }
     wire.push({ role: 'tool', tool_call_id: callId, content: flattenText(content) || '(no output)' })
     collectImageParts(content, images, pendingToolImages)
     awaiting = awaiting.filter((id) => id !== callId)
@@ -148,7 +227,12 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
   for (const message of messages) {
     if (message.role === 'system' || message.role === 'developer') {
       flushToolImages()
-      emit({ role: 'system', content: flattenText(message.content) })
+      const text = flattenText(message.content)
+      if (text.length > 0) emit({ role: 'system', content: text })
+      const additions = toolAdditionNames(message)
+      if (additions.length > 0) emit({ role: 'system', content: additionNotice(additions) })
+      const removals = toolRemovalNames(message)
+      if (removals.length > 0) emit({ role: 'system', content: removalNotice(removals) })
       continue
     }
     if (message.role === 'assistant') {
@@ -168,7 +252,9 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
     }
     const hasImage = parts.some((part) => part.type === 'image_url')
     const text = parts.filter((part) => part.type === 'text').map((part) => String(part.text)).join('')
-    if (hasImage || text.length > 0 || toolResults.length === 0) {
+    // Neither text nor an image means there is nothing a chat request can say
+    // here; the answers below still travel as `tool` messages.
+    if (hasImage || text.length > 0) {
       flushToolImages()
       emit({ role: 'user', content: hasImage ? parts : text })
     }
@@ -181,6 +267,23 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
   // held still belongs in the request, just after the answers that do exist.
   flushDeferred()
   return wire
+}
+
+/**
+ * Whether one model id is a DeepSeek model.
+ *
+ * The vendor prefix is stripped before the compare, so the bare wire id this
+ * line ships (`deepseek-v4.1-flash`) and a vendor-qualified spelling
+ * (`deepseek/deepseek-v4-pro`, as a sibling registry writes it) both match,
+ * while an id that merely mentions the word — a gateway alias such as
+ * `my-deepseek-proxy` — does not. Only DeepSeek's own chat endpoint documents
+ * the `thinking` field, which is why the translation below is scoped to it
+ * rather than applied to every model that offers a `none` level.
+ */
+export function isDeepSeekModel(model: string): boolean {
+  const id = String(model ?? '').trim().toLowerCase()
+  const bare = id.slice(Math.max(id.lastIndexOf('/'), id.lastIndexOf(':')) + 1)
+  return bare.startsWith('deepseek')
 }
 
 /**
@@ -202,6 +305,15 @@ export function buildOpenDesignBody(
     function: { name: tool.name, description: tool.description, parameters: tool.parameters },
   }))
   const maxTokens = options.maxTokens ?? connection.maxTokens
+  const reasoningEffort = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
+  // DeepSeek's own Chat Completions contract spells "do not think" as
+  // `thinking: { type: 'disabled' }`, so the DSH `none` level is translated into
+  // that field and `reasoning_effort` is left out of the same body instead of
+  // being forwarded beside it. Every other model — and every other level on a
+  // DeepSeek one — keeps the spelling it always had.
+  const thinkingOff = reasoningEffort !== undefined
+    && reasoningEffort.toLowerCase() === 'none'
+    && isDeepSeekModel(options.model)
   return {
     model: options.model,
     messages,
@@ -211,7 +323,8 @@ export function buildOpenDesignBody(
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(maxTokens === undefined || maxTokens <= 0 ? {} : { max_tokens: maxTokens }),
     ...(options.stop === undefined ? {} : { stop: options.stop }),
-    ...(options.reasoningEffort === undefined ? {} : { reasoning_effort: String(options.reasoningEffort) }),
+    ...(thinkingOff || reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
+    ...(thinkingOff ? { thinking: { type: 'disabled' as const } } : {}),
   }
 }
 
@@ -326,8 +439,16 @@ export function streamErrorCode(message: string, status?: number): string {
 
 /**
  * Parse an SSE body into decoded JSON frames.
+ *
+ * The parser's contract is the sibling line's and stays unsoftened: a body that
+ * ends without `[DONE]` is reported by THROWING `STREAM_CLOSED` after its last
+ * frame. An SSE parser cannot tell a gateway that closes politely after the
+ * terminal frame from a truncated response, because it never interprets
+ * `finish_reason` — so it must not decide that question for its callers either.
+ * That verdict belongs to {@link translate}, which has the frames, and absorbs
+ * this one code from its input.
  * @param body - a web ReadableStream of UTF-8 bytes.
- * @returns every `data:` payload up to `[DONE]`.
+ * @returns every `data:` payload up to `[DONE]`, then throws `STREAM_CLOSED`.
  */
 export async function* parseServerSentEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown | '[DONE]'> {
   const decoder = new TextDecoder()
@@ -374,6 +495,40 @@ export async function* parseServerSentEvents(body: ReadableStream<Uint8Array>): 
   throw new LlmError('stream ended without [DONE]', 'STREAM_CLOSED')
 }
 
+/**
+ * Whether one failure is the SSE parser's own "the body ended without [DONE]".
+ *
+ * Structural rather than `instanceof`: what has to match is the CODE the parser
+ * assigns, and a second copy of this module (or a harness generation that ships
+ * its own LlmError class) would fail an identity test on a value that is
+ * otherwise exactly the signal this decision is about.
+ */
+function isMissingSentinel(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'STREAM_CLOSED'
+}
+
+/**
+ * End the payload iteration instead of throwing when a body stops without the
+ * sentinel.
+ *
+ * The parser can only report "no [DONE] arrived" by throwing, and that is NOT a
+ * failure on its own: the gateway sometimes closes the response right after the
+ * terminal frame. Whether the response actually completed is decided by the
+ * frames that were seen, which is knowledge this generator does not have — so it
+ * only removes the transport signal and leaves the verdict to {@link translate}.
+ * Every other failure passes through untouched, including the error frames a 200
+ * body can carry.
+ */
+async function* tolerateMissingSentinel(
+  payloads: AsyncIterable<unknown | '[DONE]'>,
+): AsyncGenerator<unknown | '[DONE]'> {
+  try {
+    for await (const payload of payloads) yield payload
+  } catch (error) {
+    if (!isMissingSentinel(error)) throw error
+  }
+}
+
 /** Assemble the terminal content block for one open block. */
 function closeBlock(block: { kind: 'text' | 'reasoning' | 'tool-call'; text: string; callId?: string; name?: string }): ContentBlock {
   switch (block.kind) {
@@ -390,9 +545,21 @@ function closeBlock(block: { kind: 'text' | 'reasoning' | 'tool-call'; text: str
  * Translate decoded SSE payloads into harness stream chunks.
  *
  * Deltas stream through as they arrive; block ends, usage and the finish reason
- * are all deferred to the `[DONE]` sentinel, so no chunk ever follows `finish`.
+ * are all deferred to the end of the answer, so no chunk ever follows `finish`.
  * A completion with no content at all becomes an `EMPTY_RESPONSE` error finish
  * rather than a silent empty message.
+ *
+ * The end of the answer is either the `[DONE]` sentinel or the end of the body
+ * AFTER a terminal `finish_reason` arrived. Some gateways close the socket
+ * instead of writing the sentinel, and failing such an answer threw away content
+ * the caller had already received.
+ *
+ * The parser still raises `STREAM_CLOSED` for a body with no sentinel — that is
+ * its contract and it is not widened here. The signal is absorbed where the
+ * frames are available instead (see {@link tolerateMissingSentinel}), and only
+ * then does the finish reason decide: a body that stated one closes like any
+ * other, and a body that never stated one is truncation and still fails with
+ * `STREAM_CLOSED`. No other input failure is absorbed.
  */
 export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): AsyncGenerator<StreamChunk> {
   let nextIndex = 0
@@ -415,20 +582,26 @@ export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): A
     order.push(block)
     return block
   }
-  for await (const payload of payloads) {
+  /** The terminal chunks of one completed answer, in the order the harness accepts. */
+  const terminal = (reason: StreamChunk & { type: 'finish' }): StreamChunk[] => {
+    const chunks: StreamChunk[] = []
+    for (const block of order) chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
+    if (pendingUsage !== undefined) chunks.push({ type: 'usage', usage: pendingUsage })
+    const hasVisibleAnswer = toolBlocks.size > 0 || (textBlock !== undefined && textBlock.text.trim() !== '')
+    chunks.push({
+      type: 'finish',
+      reason: reason.reason.kind === 'stop' && order.length === 0
+        ? { kind: 'error', failure: { message: 'model returned a completed response with no content', code: EMPTY_RESPONSE_CODE } }
+        : reason.reason.kind === 'stop' && !hasVisibleAnswer
+          ? { kind: 'error', failure: { message: PROVIDER_NAME + ' ' + NO_ANSWER_PHRASE + ' — the response stopped before it did anything', code: 'PROVIDER_ERROR' } }
+          : reason.reason,
+    })
+    return chunks
+  }
+  for await (const payload of tolerateMissingSentinel(payloads)) {
     if (payload === '[DONE]') {
-      for (const block of order) yield { type: 'block-end', index: block.index, block: closeBlock(block) }
-      if (pendingUsage !== undefined) yield { type: 'usage', usage: pendingUsage }
       const reason = pendingFinish ?? { type: 'finish' as const, reason: { kind: 'stop' as const } }
-      const hasVisibleAnswer = toolBlocks.size > 0 || (textBlock !== undefined && textBlock.text.trim() !== '')
-      yield {
-        type: 'finish',
-        reason: reason.reason.kind === 'stop' && order.length === 0
-          ? { kind: 'error', failure: { message: 'model returned a completed response with no content', code: EMPTY_RESPONSE_CODE } }
-          : reason.reason.kind === 'stop' && !hasVisibleAnswer
-            ? { kind: 'error', failure: { message: PROVIDER_NAME + ' ' + NO_ANSWER_PHRASE + ' — the response stopped before it did anything', code: 'PROVIDER_ERROR' } }
-            : reason.reason,
-      }
+      for (const chunk of terminal(reason)) yield chunk
       return
     }
     // A 200 response whose body is an error object must fail the attempt: a
@@ -488,5 +661,16 @@ export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): A
     }
     if (isRecord(chunk.usage)) pendingUsage = mapUsage(chunk.usage)
   }
+  // The body ended without the sentinel. A response that already named its
+  // finish reason is complete — only the sentinel was missing — so it closes
+  // like any other. This also covers an input that ends without throwing at all
+  // (a caller that hands over its own frames), which is why the EOF decision
+  // lives here rather than only in the absorbed parser signal.
+  if (pendingFinish !== undefined) {
+    for (const chunk of terminal(pendingFinish)) yield chunk
+    return
+  }
+  // No finish_reason was ever stated, so there is nothing that says the answer
+  // finished — this is the truncation the code has always meant.
   throw new LlmError('stream ended without [DONE]', 'STREAM_CLOSED')
 }

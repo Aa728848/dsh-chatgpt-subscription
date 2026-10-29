@@ -52,7 +52,12 @@ import {
   type StreamActivity,
 } from '../common/idle-watchdog.ts'
 import { ConcurrencyGate } from '../common/concurrency-gate.ts'
-import { resolveRequestImages, NO_RESOLVED_IMAGES, type AttachmentImageReader } from '../common/request-images.ts'
+import {
+  offloadOldestRequestImages,
+  resolveRequestImages,
+  NO_RESOLVED_IMAGES,
+  type AttachmentImageReader,
+} from '../common/request-images.ts'
 
 /**
  * Retry policy for the `cline-pass` route.
@@ -183,6 +188,14 @@ export class ClinePassAdapter extends LlmAdapter {
       id: modelId,
       name: info.displayName,
       inputModalities: info.input as LlmResolvedModelInfo['inputModalities'],
+      // Mid-conversation tool changes travel in the history instead of a
+      // rewritten declaration list. 'in-history' rather than 'addition-only'
+      // because only that mode can express a REMOVAL without shrinking tools:
+      // under addition-only the revoked tool is deleted from the list, which
+      // rewrites the cached prefix and pays for the whole prompt again. The
+      // mapper renders both changes as system text (see toolUpdateNotice); no
+      // native dynamic-tools schema is sent. An older harness ignores the field.
+      toolUpdate: 'in-history',
       context: { contextWindow: info.contextWindow },
       ...outputReservation(info.contextWindow, info.maxTokens),
       ...(info.reasoning
@@ -222,15 +235,35 @@ export class ClinePassAdapter extends LlmAdapter {
     if (settings.enabled === false) {
       throw new LlmError(`${PROVIDER_NAME} is disabled in Settings > Subscription. Enable the line there, then retry.`, 'INVALID_REQUEST')
     }
-    const options: GenerateOptions = normalizeGenerateOptions(rawOptions)
+    const normalized = normalizeGenerateOptions(rawOptions)
+    // RESOLVE FIRST, THEN MEASURE, THEN TRIM. The order is a correctness
+    // condition, not a preference: the budget counts base64 PAYLOAD, and for a
+    // durable image that payload is the downscaled request version the store
+    // derives — a 2 MB screenshot travels as a ~256 KiB version. Measuring an
+    // unresolved block falls back to attachment.bytes, which over-counts every
+    // scaled image, so trimming before resolution dropped images that fitted the
+    // budget with room to spare (see request-images.ts:133-143).
+    //
+    // The cost is a read of an image that is then dropped, and that is the
+    // accepted trade: an image dropped by mistake cannot be recovered from the
+    // request at all. Durable history is never rewritten either way.
     const images = await resolveRequestImages(
-      options,
+      normalized,
       this.options.attachments as AttachmentImageReader | undefined,
       signal,
     ).catch((error) => {
       if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: error })
       return NO_RESOLVED_IMAGES
     })
+    // The oldest inline images become a visible placeholder once one request
+    // would carry more than the SHARED image budget (1.5 MiB). The budget stays
+    // shared on purpose: two lines that budget differently send different bytes
+    // for the same picture — so the second argument stays undefined and the
+    // shared default applies. The SAME resolved map reaches both the
+    // measurement and the replacement, so index N keeps naming the Nth measured
+    // occurrence, and it is the one buildClinePassBody reads below: no second
+    // resolution exists to disagree with.
+    const options: GenerateOptions = offloadOldestRequestImages(normalized, undefined, images)
     const connection: ClinePassConnection = {
       baseURL: settings.baseURL,
       displayName: PROVIDER_NAME,

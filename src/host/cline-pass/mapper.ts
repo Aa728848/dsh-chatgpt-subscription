@@ -48,6 +48,8 @@ export interface ClinePassWireBody {
   max_tokens?: number
   stop?: readonly string[]
   reasoning_effort?: string
+  /** Explicit thinking switch: the OpenAI-compatible spelling for a disabled reasoning level. */
+  thinking?: { type: 'disabled' }
   provider?: Record<string, unknown>
   providerOptions?: Record<string, unknown>
 }
@@ -84,6 +86,64 @@ function imagePart(block: unknown, images: ResolvedRequestImages): Record<string
   const inline = imageBlockToInline(record, images)
   if (inline === undefined) return { type: 'text', text: unavailableImageText(record) }
   return { type: 'image_url', image_url: { url: `data:${inline.mediaType};base64,${inline.data}` } }
+}
+
+/**
+ * Whether one model id names a DeepSeek model.
+ *
+ * DeepSeek's own Chat Completions contract carries a disabled reasoning level as
+ * `thinking: { type: 'disabled' }` rather than as a `reasoning_effort` value, so
+ * the translation below is scoped to this model family. Read from the model id's
+ * own segment so a provider-prefixed spelling (`cline-pass/...`, or a canonical
+ * `deepseek/...` slug) is recognised either way.
+ */
+function isDeepSeekModel(modelId: string): boolean {
+  const bare = modelId.slice(modelId.lastIndexOf('/') + 1).trim()
+  return /^deepseek/i.test(bare)
+}
+
+/** The names one developer message declares or revokes, in history order. */
+function toolNamesOf(blocks: readonly CompatContentBlock[] | undefined, type: 'tool-addition' | 'tool-removal'): string[] {
+  const names: string[] = []
+  for (const block of blocks ?? []) {
+    const record = block as unknown as Record<string, unknown>
+    if (record.type !== type) continue
+    const name = record.toolName
+    if (typeof name !== 'string' || name.trim().length === 0) continue
+    names.push(name.trim())
+  }
+  return names
+}
+
+/** One quoted, comma-joined list of tool names. */
+function quotedList(names: readonly string[]): string {
+  return names.map((name) => '"' + name + '"').join(', ')
+}
+
+/**
+ * The model-facing text of a mid-conversation tool change, or '' when there is none.
+ *
+ * `in-history` means the harness stopped rewriting the declaration list: an
+ * added tool still travels in `tools`, and a removed one keeps its declaration
+ * so the prefix survives. The history note is therefore the only thing that
+ * tells the model a removal happened, which is why the removal sentence is
+ * imperative rather than descriptive.
+ */
+function toolUpdateNotice(blocks: readonly CompatContentBlock[] | undefined): string {
+  const added = toolNamesOf(blocks, 'tool-addition')
+  const removed = toolNamesOf(blocks, 'tool-removal')
+  const notices: string[] = []
+  if (added.length > 0) {
+    notices.push(added.length === 1
+      ? '[The tool ' + quotedList(added) + ' is now available.]'
+      : '[The tools ' + quotedList(added) + ' are now available.]')
+  }
+  if (removed.length > 0) {
+    notices.push(removed.length === 1
+      ? '[' + quotedList(removed) + ' is no longer available. Do not call it again: any call will fail.]'
+      : '[' + quotedList(removed) + ' are no longer available. Do not call them again: any call will fail.]')
+  }
+  return notices.join('\n')
 }
 
 /** Recursively collect image parts from blocks, including nested tool results. */
@@ -137,8 +197,22 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
     pendingToolImages = []
     emit(message)
   }
-  /** A tool answer: it closes its own id, and the group when it was the last. */
+  /**
+   * A tool answer: it closes its own id, and the group when it was the last.
+   *
+   * An answer whose call id has no pending `tool_call` is refused here, before
+   * anything is sent. Forwarding it produces an OpenAI message sequence the
+   * gateway rejects (a `tool` message with no declaration in front of it), and
+   * the gateway's 400 names neither the call nor the turn, so the failure is
+   * raised locally with the id that has no question.
+   */
   const answer = (callId: string, content: readonly CompatContentBlock[] | undefined): void => {
+    if (!awaiting.includes(callId)) {
+      throw new LlmError(
+        `tool result for call "${callId}" has no tool_call awaiting it: the conversation cannot be expressed as a valid OpenAI message sequence`,
+        'INVALID_REQUEST',
+      )
+    }
     wire.push({ role: 'tool', tool_call_id: callId, content: flattenText(content) || '(no output)' })
     collectImageParts(content, images, pendingToolImages)
     awaiting = awaiting.filter((id) => id !== callId)
@@ -148,7 +222,15 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
   for (const message of messages) {
     if (message.role === 'system' || message.role === 'developer') {
       flushToolImages()
-      emit({ role: 'system', content: flattenText(message.content) })
+      // A developer message carries the mid-conversation tool change as blocks
+      // rather than prose, so its text is the notice PLUS whatever the harness
+      // wrote. A message with neither is dropped: an empty system message is
+      // payload the model gains nothing from, and some gateways reject it.
+      const content = [toolUpdateNotice(message.content), flattenText(message.content)]
+        .filter((part) => part.length > 0)
+        .join('\n')
+      if (content.length === 0) continue
+      emit({ role: 'system', content })
       continue
     }
     if (message.role === 'assistant') {
@@ -168,7 +250,11 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
     }
     const hasImage = parts.some((part) => part.type === 'image_url')
     const text = parts.filter((part) => part.type === 'text').map((part) => String(part.text)).join('')
-    if (hasImage || text.length > 0 || toolResults.length === 0) {
+    // A user turn that carries neither text nor an image has nothing to say on
+    // this wire, and an empty `content: ''` message is worse than absent. A
+    // tool-result-only message is untouched by this: its answers travel as the
+    // `tool` messages below, which is the shape the gateway validates.
+    if (hasImage || text.length > 0) {
       flushToolImages()
       emit({ role: 'user', content: hasImage ? parts : text })
     }
@@ -202,6 +288,13 @@ export function buildClinePassBody(
     function: { name: tool.name, description: tool.description, parameters: tool.parameters },
   }))
   const maxTokens = options.maxTokens ?? connection.maxTokens
+  // DeepSeek's Chat Completions contract spells a disabled reasoning level as
+  // `thinking: { type: 'disabled' }` rather than as a `reasoning_effort` value,
+  // so the level is translated rather than forwarded. Scoped to DeepSeek ids on
+  // purpose: every other model keeps the level verbatim, including 'none'.
+  const thinkingOff = options.reasoningEffort !== undefined
+    && String(options.reasoningEffort) === 'none'
+    && isDeepSeekModel(options.model)
   return {
     model: options.model,
     messages,
@@ -211,7 +304,8 @@ export function buildClinePassBody(
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(maxTokens === undefined || maxTokens <= 0 ? {} : { max_tokens: maxTokens }),
     ...(options.stop === undefined ? {} : { stop: options.stop }),
-    ...(options.reasoningEffort === undefined ? {} : { reasoning_effort: String(options.reasoningEffort) }),
+    ...(options.reasoningEffort === undefined || thinkingOff ? {} : { reasoning_effort: String(options.reasoningEffort) }),
+    ...(thinkingOff ? { thinking: { type: 'disabled' as const } } : {}),
   }
 }
 
@@ -362,12 +456,51 @@ function closeBlock(block: { kind: 'text' | 'reasoning' | 'tool-call'; text: str
 }
 
 /**
+ * Whether one failure is the SSE parser's own "the body ended without [DONE]".
+ *
+ * Structural rather than `instanceof`: what has to match is the code the parser
+ * assigns, and a second copy of this module (or a harness generation that ships
+ * its own LlmError class) would fail an identity test on a value that is
+ * otherwise exactly the signal this decision is about.
+ */
+function isMissingSentinel(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'STREAM_CLOSED'
+}
+
+/**
+ * End the payload iteration instead of throwing when a body stops cleanly.
+ *
+ * The parser can only report "no [DONE] arrived" by throwing, and that is NOT a
+ * failure on its own: the gateway sometimes closes the response right after the
+ * terminal frame. Whether the response actually completed is decided by the
+ * frames that were seen, which is knowledge this generator does not have — so it
+ * only removes the transport signal and leaves the verdict to {@link translate}.
+ * Every other failure passes through untouched, including the error frames a 200
+ * body can carry.
+ */
+async function* tolerateMissingSentinel(
+  payloads: AsyncIterable<unknown | '[DONE]'>,
+): AsyncGenerator<unknown | '[DONE]'> {
+  try {
+    for await (const payload of payloads) yield payload
+  } catch (error) {
+    if (!isMissingSentinel(error)) throw error
+  }
+}
+
+/**
  * Translate decoded SSE payloads into harness stream chunks.
  *
  * Deltas stream through as they arrive; block ends, usage and the finish reason
  * are all deferred to the `[DONE]` sentinel, so no chunk ever follows `finish`.
  * A completion with no content at all becomes an `EMPTY_RESPONSE` error finish
  * rather than a silent empty message.
+ *
+ * A missing `[DONE]` is not a failure by itself. Once a valid `finish_reason`
+ * has been seen the response IS complete, and it closes exactly as a `[DONE]`
+ * one does — block ends, usage and finish all preserved. A body that carried
+ * content but never named a finish reason is a truncation, and still fails with
+ * `STREAM_CLOSED`.
  */
 export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): AsyncGenerator<StreamChunk> {
   let nextIndex = 0
@@ -390,20 +523,30 @@ export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): A
     order.push(block)
     return block
   }
-  for await (const payload of payloads) {
+  /**
+   * The chunks that close a completed response: every open block, then usage,
+   * then the single finish. Both terminal paths use this one assembly, so a
+   * response read from a clean EOF and one read from `[DONE]` cannot drift.
+   */
+  const closing = (): StreamChunk[] => {
+    const chunks: StreamChunk[] = []
+    for (const block of order) chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
+    if (pendingUsage !== undefined) chunks.push({ type: 'usage', usage: pendingUsage })
+    const reason = pendingFinish ?? { type: 'finish' as const, reason: { kind: 'stop' as const } }
+    const hasVisibleAnswer = toolBlocks.size > 0 || (textBlock !== undefined && textBlock.text.trim() !== '')
+    chunks.push({
+      type: 'finish',
+      reason: reason.reason.kind === 'stop' && order.length === 0
+        ? { kind: 'error', failure: { message: 'model returned a completed response with no content', code: EMPTY_RESPONSE_CODE } }
+        : reason.reason.kind === 'stop' && !hasVisibleAnswer
+          ? { kind: 'error', failure: { message: PROVIDER_NAME + ' ' + NO_ANSWER_PHRASE + ' — the response stopped before it did anything', code: 'PROVIDER_ERROR' } }
+          : reason.reason,
+    })
+    return chunks
+  }
+  for await (const payload of tolerateMissingSentinel(payloads)) {
     if (payload === '[DONE]') {
-      for (const block of order) yield { type: 'block-end', index: block.index, block: closeBlock(block) }
-      if (pendingUsage !== undefined) yield { type: 'usage', usage: pendingUsage }
-      const reason = pendingFinish ?? { type: 'finish' as const, reason: { kind: 'stop' as const } }
-      const hasVisibleAnswer = toolBlocks.size > 0 || (textBlock !== undefined && textBlock.text.trim() !== '')
-      yield {
-        type: 'finish',
-        reason: reason.reason.kind === 'stop' && order.length === 0
-          ? { kind: 'error', failure: { message: 'model returned a completed response with no content', code: EMPTY_RESPONSE_CODE } }
-          : reason.reason.kind === 'stop' && !hasVisibleAnswer
-            ? { kind: 'error', failure: { message: PROVIDER_NAME + ' ' + NO_ANSWER_PHRASE + ' — the response stopped before it did anything', code: 'PROVIDER_ERROR' } }
-            : reason.reason,
-      }
+      for (const chunk of closing()) yield chunk
       return
     }
     const chunk = unwrapEnvelope(payload)
@@ -463,6 +606,14 @@ export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): A
       if (typeof choice.finish_reason === 'string') pendingFinish = mapFinishReason(choice.finish_reason)
     }
     if (isRecord(chunk.usage)) pendingUsage = mapUsage(chunk.usage)
+  }
+  // The body ended without `[DONE]`. A response that already named its finish
+  // reason is complete — only the sentinel was missing — so it closes like any
+  // other. Content with no finish reason is a truncated turn and must fail, or a
+  // half-written answer would be handed to the caller as a finished one.
+  if (pendingFinish !== undefined) {
+    for (const chunk of closing()) yield chunk
+    return
   }
   throw new LlmError('stream ended without [DONE]', 'STREAM_CLOSED')
 }

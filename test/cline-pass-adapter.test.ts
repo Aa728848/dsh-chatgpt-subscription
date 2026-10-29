@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
-import { ClinePassAdapter } from '../src/host/cline-pass/adapter.ts'
+import { ClinePassAdapter, type ClinePassAdapterOptions } from '../src/host/cline-pass/adapter.ts'
 import { ClinePassAccountPool } from '../src/host/cline-pass/account-pool.ts'
 import { createClinePassStore } from '../src/host/cline-pass/store.ts'
 import { ClinePassModelSettingsStore, FileCredentialStore, type ClinePassCredentials } from '../src/host/cline-pass/token-store.ts'
@@ -69,12 +69,19 @@ afterEach(async () => {
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-function adapterWith(fetchFn: typeof fetch, headerTimeoutMs?: number): ClinePassAdapter {
+function adapterWith(
+  fetchFn: typeof fetch,
+  headerTimeoutMs?: number,
+  attachments?: ClinePassAdapterOptions['attachments'],
+): ClinePassAdapter {
   const engine = createClinePassEngine({ pool, store, settings })
   // The test's fetch is the whole transport; the engine's own seam is replaced
   // through the adapter's engine, so one double answers both probe and request.
   ;(engine as unknown as { options: { fetchFn: typeof fetch } }).options.fetchFn = fetchFn
-  return new ClinePassAdapter(engine, store, settings, pool, headerTimeoutMs === undefined ? {} : { headerTimeoutMs })
+  return new ClinePassAdapter(engine, store, settings, pool, {
+    ...(headerTimeoutMs === undefined ? {} : { headerTimeoutMs }),
+    ...(attachments === undefined ? {} : { attachments }),
+  })
 }
 
 describe('ClinePassAdapter', () => {
@@ -299,5 +306,165 @@ describe('ClinePassAdapter', () => {
         messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
       } as never)) { /* no chunk */ }
     })()).rejects.toThrow(/timeout|aborted/i)
+  })
+})
+
+describe('ClinePassAdapter confirmed fixes', () => {
+  it('declares in-history tool updates so a mid-conversation tool change can travel in history', async () => {
+    await settings.update({ enabledModelIds: [MODEL] })
+    const fetchFn = (async () => new Response(SSE_OK, { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const resolved = await adapter.resolveModel('cline-pass', MODEL)
+    expect(resolved.toolUpdate).toBe('in-history')
+  })
+
+  it('offloads the oldest image at the shared 1.5 MiB budget without touching the caller history', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return new Response(SSE_OK, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const oldest = { type: 'image', data: 'A'.repeat(800_000) }
+    const newest = { type: 'image', data: 'B'.repeat(800_000) }
+    const history: Array<{ role: string; content: Array<Record<string, unknown>> }> = [
+      { role: 'user', content: [{ type: 'text', text: 'first' }, oldest] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      { role: 'user', content: [{ type: 'text', text: 'second' }, newest] },
+    ]
+    const adapter = adapterWith(fetchFn)
+    for await (const _chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: history,
+    } as never)) { /* drain */ }
+    const wire = calls[0]?.messages as Array<{ role: string; content: unknown }>
+    const imageParts = wire
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .filter((part) => (part as { type?: string }).type === 'image_url')
+    // 800_000 + 800_000 over the 1.5 MiB budget: only the oldest occurrence goes.
+    expect(imageParts).toHaveLength(1)
+    expect(JSON.stringify(wire)).toContain('image omitted to keep the request within its size limit')
+    // The budget rewrites the request only; durable history keeps both images.
+    expect(history[0]?.content[1]).toBe(oldest)
+    expect(history[2]?.content[1]).toBe(newest)
+  })
+})
+
+/**
+ * The stored size is NOT the wire size, and the budget is measured on the wire.
+ *
+ * `requestImagePayloadLength` counts the base64 an image block actually sends, and
+ * with a resolved map it takes that length from the request version the harness
+ * derived: a 2 MB screenshot leaves the host as a ~256 KiB request version. The
+ * adapter used to offload BEFORE resolving, so the only number available was
+ * `attachment.bytes` — which over-counts every scaled image (see
+ * request-images.ts:133-143), so an image that fitted the shared budget with room
+ * to spare was dropped as if it were megabytes over it.
+ */
+describe('ClinePassAdapter image budget', () => {
+  /** One durable `{ type: 'image', attachment }` block: no inline data, so only the store can answer. */
+  function attachmentImage(attachmentId: string, storedBytes: number): Record<string, unknown> {
+    return {
+      type: 'image',
+      attachment: { attachmentId, mediaType: 'image/png', bytes: storedBytes, width: 4000, height: 3000 },
+    }
+  }
+
+  /**
+   * Stored images whose REQUEST VERSIONS are what the wire carries. `readImage`
+   * throws rather than answering: a scaled image must never be sent as stored, so
+   * a call to it means the request carried the wrong bytes.
+   */
+  function scalingReader(versions: ReadonlyMap<string, { fill: number; bytes: number }>) {
+    const readImage = vi.fn(async (): Promise<never> => {
+      throw new Error('the stored bytes must not be read for a scaled image')
+    })
+    const readImageRequest = vi.fn(async (ref: { attachmentId: string }) => {
+      const version = versions.get(ref.attachmentId)
+      if (version === undefined) throw new Error(`no request version for ${ref.attachmentId}`)
+      return {
+        attachment: { attachmentId: ref.attachmentId, mediaType: 'image/png', bytes: version.bytes, width: 1024, height: 768 },
+        variantId: `variant-${ref.attachmentId}`,
+        data: new Uint8Array(version.bytes).fill(version.fill),
+        mediaType: 'image/png',
+        bytes: version.bytes,
+        width: 1024,
+        height: 768,
+        depth: 'uchar',
+        space: 'srgb',
+        hasAlpha: false,
+      }
+    })
+    return { readImage, readImageRequest }
+  }
+
+  /** Every `image_url` part the request actually put on the wire. */
+  function wireImages(): Array<{ url: string }> {
+    const wire = (calls[0]?.messages ?? []) as Array<{ content: unknown }>
+    return wire
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .filter((part) => (part as { type?: string }).type === 'image_url')
+      .map((part) => ({ url: String((part as { image_url?: { url?: string } }).image_url?.url) }))
+  }
+
+  function recordingFetch(): typeof fetch {
+    return (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return new Response(SSE_OK, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+  }
+
+  it('keeps an image whose STORED bytes exceed the budget once its request version fits', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    // 2 MB stored — over the 1.5 MiB budget on its own — but 200 000 bytes on the
+    // wire (266 668 base64 characters), comfortably inside it.
+    const { readImage, readImageRequest } = scalingReader(new Map([['big', { fill: 0x41, bytes: 200_000 }]]))
+    const adapter = adapterWith(recordingFetch(), undefined, { readImage, readImageRequest } as never)
+    const history = [{ role: 'user', content: [{ type: 'text', text: 'look' }, attachmentImage('big', 2_000_000)] }]
+    for await (const _chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: history,
+    } as never)) { /* drain */ }
+    expect(readImageRequest).toHaveBeenCalledTimes(1)
+    // The stored bytes are never sent for an image that has a request version.
+    expect(readImage).not.toHaveBeenCalled()
+    const sent = wireImages()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.url.startsWith('data:image/png;base64,')).toBe(true)
+    expect(JSON.stringify(calls[0]?.messages)).not.toContain('image omitted')
+  })
+
+  it('still offloads the oldest image when the resolved versions really exceed the budget', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    // Two 2 MB images, each an 800 000-byte request version (1 066 668 base64
+    // characters): 2 133 336 > 1 500 000, so the oldest occurrence goes and the
+    // newest stays. Measuring the resolved bytes is what keeps this at ONE drop.
+    const { readImage, readImageRequest } = scalingReader(new Map([
+      ['old', { fill: 0x41, bytes: 800_000 }],
+      ['new', { fill: 0x42, bytes: 800_000 }],
+    ]))
+    const adapter = adapterWith(recordingFetch(), undefined, { readImage, readImageRequest } as never)
+    const history = [
+      { role: 'user', content: [{ type: 'text', text: 'first' }, attachmentImage('old', 2_000_000)] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      { role: 'user', content: [{ type: 'text', text: 'second' }, attachmentImage('new', 2_000_000)] },
+    ]
+    for await (const _chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: history,
+    } as never)) { /* drain */ }
+    const sent = wireImages()
+    expect(sent).toHaveLength(1)
+    // 0x42 repeats to 'QkJC' and 0x41 to 'QUFB': the retained image is the newest.
+    expect(sent[0]?.url).toContain('QkJC')
+    expect(JSON.stringify(calls[0]?.messages)).toContain('image omitted to keep the request within its size limit')
+    // The trim rewrites the request only; durable history keeps both images.
+    expect((history[0]?.content[1] as { type?: string }).type).toBe('image')
+    expect((history[2]?.content[1] as { type?: string }).type).toBe('image')
   })
 })
