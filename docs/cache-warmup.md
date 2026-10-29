@@ -98,7 +98,7 @@ cacheReadTokens / (inputTokens + cacheReadTokens)
 ## 验证
 
 - 完整类型检查：通过。
-- 全套 Vitest：310 files passed / 2 skipped，5164 passed / 9 skipped。
+- 全套 Vitest：310 files passed / 2 skipped，5166 passed / 9 skipped；默认开启后的 112 项相关测试另通过。
 - `npm run build`、`npm pack --dry-run`、`git diff --check`：通过。
 - 检索投影的真实 Kimi 对照严格使用 4 次请求（A/B/C/D，无重试）：
   - 原始组：冷启动 687 fresh；加入原始文件结果时 512 cached + 1251 fresh；
