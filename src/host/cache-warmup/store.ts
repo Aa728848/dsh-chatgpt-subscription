@@ -113,12 +113,51 @@ function clampMaxBytes(maxBytes: number | undefined): number {
   return Math.min(rounded, CACHE_WARMUP_DEFAULTS.pageMaxBytesMax)
 }
 
-/** 一段文本的行数（末尾没有换行也算一行）。 */
-function countLines(text: string): number {
+/**
+ * 判断一段文本是否为不含真实换行（或几乎全在一行内）的 JSON 转义文本。
+ *
+ * 当 `run_code` 返回 `JSON.stringify({ stdout: "a\nb\nc..." })` 时，原文逐字保存在
+ * 存储里（不改任何字节），但整份文本里没有真 `\n`，只有字面量两字符序列 `\n`。
+ * 若只数真 `\n`，`limit: 64` 行会退化成一次吐完 `maxBytes`。识别出这种形态后，
+ * `pageText` 和 `countLines` 把未转义的 `\n`（即前面有奇数个 `\` 的 `n`）也算作逻辑换行，
+ * 既 100% 保持「翻页拼起来逐字节等于原文」，又让 `limit` 行上限对单行 JSON 同样生效。
+ */
+function usesEscapedNewlines(text: string): boolean {
+  if (text.length < 4) return false
+  let realNewlines = 0
+  for (let i = 0; i < text.length; i += 1) {
+    if (text.charCodeAt(i) === 10) {
+      realNewlines += 1
+      if (realNewlines > 2) return false
+    }
+  }
+  return text.includes('\\n')
+}
+
+/** 判断 `text[index]`（已知为 `'n'`）是否构成一个 JSON 转义换行 `\n`（前面紧邻奇数个 `\`）。 */
+function isEscapedNewlineAt(text: string, index: number): boolean {
+  let backslashes = 0
+  for (let cursor = index - 1; cursor >= 0 && text.charCodeAt(cursor) === 92; cursor -= 1) {
+    backslashes += 1
+  }
+  return (backslashes & 1) === 1
+}
+
+/** 一段文本的行数（末尾没有换行也算一行；支持单行 JSON 内的转义 `\n`）。 */
+function countLines(text: string, escapedMode = usesEscapedNewlines(text)): number {
   if (text === '') return 0
   let lines = 0
-  for (const char of text) if (char === '\n') lines += 1
-  return text.endsWith('\n') ? lines : lines + 1
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index)
+    if (code === 10) {
+      lines += 1
+    } else if (escapedMode && code === 110 && isEscapedNewlineAt(text, index)) {
+      lines += 1
+    }
+  }
+  const endsWithNewline =
+    text.endsWith('\n') || (escapedMode && text.endsWith('n') && isEscapedNewlineAt(text, text.length - 1))
+  return endsWithNewline ? lines : lines + 1
 }
 
 /**
@@ -150,6 +189,7 @@ function pageText(args: {
     throw new CacheWarmupStoreError('offset is not on a UTF-8 character boundary', 'OFFSET_INVALID')
   }
 
+  const escapedMode = usesEscapedNewlines(text)
   const rest = offset === 0 ? text : new TextDecoder('utf-8').decode(buffer.subarray(offset))
   let content = ''
   let contentBytes = 0
@@ -173,7 +213,11 @@ function pageText(args: {
     }
     content += char
     contentBytes += charBytes
-    if (char === '\n') lines += 1
+    if (char === '\n') {
+      lines += 1
+    } else if (escapedMode && char === 'n' && isEscapedNewlineAt(content, content.length - 1)) {
+      lines += 1
+    }
   }
 
   const consumedBytes = Buffer.byteLength(content, 'utf8')
@@ -191,7 +235,7 @@ function pageText(args: {
     omitted: {
       reason: complete ? 'none' : stoppedByBytes ? 'bytes' : stoppedByLines ? 'lines' : 'bytes',
       chars: remaining.length,
-      lines: countLines(remaining),
+      lines: countLines(remaining, escapedMode),
       rows: 0,
       bytes: Buffer.byteLength(remaining, 'utf8'),
     },

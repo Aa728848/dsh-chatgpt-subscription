@@ -266,4 +266,34 @@ describe('kimi-code K3.1 Pro card', () => {
     const writeRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWrite)
     expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe('0')
   })
+
+  it('renders the cache warmup budget row when warmup status is reported', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 3,
+        cachedTokens: 2_000,
+        freshTokens: 50,
+        outputTokens: 40,
+        hitRatio: 2_000 / 2_050,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        warmup: {
+          warmup: false,
+          maxChars: 8_000,
+          consecutiveHits: 2,
+          requiredHits: 2,
+        },
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const warmupRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWarmupLabel)
+    expect(warmupRow).toBeDefined()
+    expect(warmupRow!.querySelector('.dsha-value')?.textContent).toBe(
+      zh.cacheWarmupSettled
+        .replace('{hits}', '2')
+        .replace('{required}', '2')
+        .replace('{chars}', (8_000).toLocaleString()),
+    )
+  })
 })

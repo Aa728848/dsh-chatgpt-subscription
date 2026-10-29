@@ -28,7 +28,7 @@
 1. 只处理当前新产生的工具结果，不回改旧历史。
 2. 原始 `value` 不变，只替换模型可见的 `content` 投影。
 3. preview 和 refId 一旦写入历史就不再变化；原文过期、淘汰或释放不会改写 preview。
-4. 非文本块原样保留；非 Kimi 线路、非 `run_code`、无法确认会话的结果不变。
+4. 非文本块原样保留；非 Kimi 线路、非受控执行/日志工具（`run_code`、`win_bash`、`bash`、`pwsh`、`job_output`）、无法确认会话的结果不变。
 5. 不自动重热、不重写前缀、不因为命中率下降而重建会话。
 6. `stable` 与 `first-request` 是正常生命周期状态，不是漂移；`tools`、`system-prompt` 等真实漂移会重置连续命中。
 
@@ -37,14 +37,15 @@
 小结果原样通过。大结果只有在能可靠提取时才生成 preview：
 
 - 测试日志：完整失败集合与汇总；装不下完整失败集合时回退原文。
-- Shell 日志：退出码与完整错误集合。
+- Shell / TypeScript 构建日志：退出码与完整错误集合（含 `error TSxxxx` 紧随其后的缩进类型差异详情行）。
+- PTC `run_code` JSON Envelope：若外层是轻量 JSON 对象且仅包含单一超长白名单日志字段（`stdout`/`stderr`/`output`/`logs`/`log`），只将该字段值替换为 preview 并保留外层 JSON 结构；含多份源码或被截断的混合证据保持原样。
 - grep/glob：计数、分布和有限样本，完整原文通过 ref 补读。
 - JSON Lines / TSV：字段、行数与分页信息。
 
 以下内容不改写：
 
 - 源码、接口和类型定义；
-- 完整 JSON 文档及被宿主截断的 JSON 对象；
+- 含批量源码/契约的 JSON 文档及被宿主截断的 JSON 对象；
 - 子代理报告、混合证据和无法可靠解析的大文本；
 - 含 `value` 的后续决策、非 `accept` 决策和非文本块。
 
@@ -59,7 +60,8 @@ cacheReadTokens / (inputTokens + cacheReadTokens)
 ```
 
 - 预热期：`maxChars = 1200`，约 512–1024 tokens 的保守新增预算。
-- 连续两次请求命中率达到 97%，且没有真实漂移后，进入 `maxChars = 8000` 的稳态预算。
+- **双轨稳态判据**：连续两次请求满足（1）命中率达到 97%，或（2）已缓存前缀 $\ge 1024$ tokens、相比上一轮一字未掉（`cacheReadTokens >= prev.cacheReadTokens`）且本轮新增 `inputTokens <= 256` tokens，并且期间没有真实漂移后，进入 `maxChars = 8000` 的稳态预算。
+- **空闲 TTL 预判与持久化恢复**：若距离最近一次请求已超过 25 分钟（`cacheTtlMs`），无需等待下一轮请求失败，当场退回 `1200` 字符的预热期预算；进程重启且未满 25 分钟时，可从 `session-cache-state` 持久化的 `warmupConsecutiveHits` 恢复稳态，并在 Kimi 设置页展示当前预热状态与预算上限。
 - 真实漂移立即清零连续命中，下一条结果回到保守预算。
 - 控制器只读用量，不发请求、不改消息；登记和读侧均为非抛出路径，避免影响 adapter 的 `finally`。
 

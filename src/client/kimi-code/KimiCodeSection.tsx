@@ -607,6 +607,17 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
               <span className="dsha-label">{t.cacheWrite}</span>
               <span className="dsha-value">{tokenCount(status.cache.cacheWriteTokens, t)}</span>
             </div>
+            {status.cache.warmup !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.cacheWarmupLabel}</span>
+                <span className="dsha-value">
+                  {(status.cache.warmup.warmup ? t.cacheWarmupWarming : t.cacheWarmupSettled)
+                    .replace('{hits}', String(status.cache.warmup.consecutiveHits))
+                    .replace('{required}', String(status.cache.warmup.requiredHits))
+                    .replace('{chars}', status.cache.warmup.maxChars.toLocaleString())}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </section>

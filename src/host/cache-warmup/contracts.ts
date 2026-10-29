@@ -25,6 +25,19 @@ export const CACHE_WARMUP_DEFAULTS = {
   hitRatioThreshold: 0.97,
   /** 退出预热期需要连续命中的报告条数。 */
   consecutiveHitsRequired: 2,
+  /**
+   * 稳态第二轨（短会话分母效应兜底）：已命中的缓存前缀至少达到该 token 规模，
+   * 且相比上一条报告一字未掉（`cacheReadTokens >= prev.cacheReadTokens`），
+   * 同时本轮新增未命中部分不超过 `retainedPrefixMaxFreshTokens` 时，同样计为一次有效命中。
+   */
+  retainedPrefixMinCachedTokens: 1024,
+  /** 稳态第二轨允许的单轮最大新增未命中 token 数（与 Kimi 256-token 缓存块对齐）。 */
+  retainedPrefixMaxFreshTokens: 256,
+  /**
+   * 缓存存活窗口（毫秒，25 分钟，与 Kimi 实测全热上限一致）。
+   * 距离最近一次报告超过该时长时，预算计算自动预判缓存已冷、退回预热期保守预算。
+   */
+  cacheTtlMs: 25 * 60 * 1000,
   /** 单结果原文上限（字节）。 */
   maxResultBytes: 8 * 1024 * 1024,
   /** 每 session 原文总量上限（字节）。 */
@@ -340,12 +353,13 @@ function cellOf(value: unknown): string {
   }
 }
 
-/** JSON Lines：每一行都是一个对象，且至少两行。 */
+/** JSON Lines：每一行都是一个结构一致的表格式对象，且至少 5 行（防止 2~3 个异构 tool 结果对象被当成一张表压掉）。 */
 function parseJsonLines(lines: readonly string[]): StructuredResultRows | undefined {
-  if (lines.length < 2) return undefined
+  if (lines.length < 5) return undefined
   const fields: string[] = []
   const seen = new Set<string>()
   const rows: Array<Record<string, string>> = []
+  let firstKeySet: Set<string> | undefined
   for (const line of lines) {
     let parsed: unknown
     try {
@@ -355,6 +369,15 @@ function parseJsonLines(lines: readonly string[]): StructuredResultRows | undefi
     }
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
     const record = parsed as Record<string, unknown>
+    const keys = Object.keys(record)
+    if (keys.length === 0) return undefined
+    if (firstKeySet === undefined) {
+      firstKeySet = new Set(keys)
+    } else {
+      // 要求每行至少与首行共享一个键，防止完全异构的 JSON 对象（如 read + bash 结果）被拼成稀疏宽表。
+      const overlap = keys.some((k) => firstKeySet!.has(k))
+      if (!overlap) return undefined
+    }
     const row: Record<string, string> = {}
     for (const [key, value] of Object.entries(record)) {
       if (!seen.has(key)) {
@@ -369,7 +392,7 @@ function parseJsonLines(lines: readonly string[]): StructuredResultRows | undefi
   return { fields, rows }
 }
 
-/** 分隔符表格：首行表头 + 至少两行同列数的数据。 */
+/** 分隔符表格：首行合法表头（标识符列名，非 grep 路径行号或代码行）+ 至少两行同列数的数据。 */
 function parseDelimitedRows(lines: readonly string[]): StructuredResultRows | undefined {
   if (lines.length < 3) return undefined
   const header = lines[0]!
@@ -377,6 +400,17 @@ function parseDelimitedRows(lines: readonly string[]): StructuredResultRows | un
   if (delimiter === undefined) return undefined
   const fields = splitDelimitedLine(header, delimiter).map((cell) => cell.trim())
   if (fields.length < 2 || fields.some((field) => field === '')) return undefined
+  // 表头单元格必须是简短列名（<= 64 字符，不含路径冒号行号、引号、花括号、分号或代码注释），防止把含 \t 的 grep 输出当成表头。
+  if (
+    fields.some(
+      (field) =>
+        field.length > 64 ||
+        /[:;{}()[\]\\/*'"`]/.test(field) ||
+        /^\d+$/.test(field),
+    )
+  ) {
+    return undefined
+  }
   if (new Set(fields).size !== fields.length) return undefined
   const rows: Array<Record<string, string>> = []
   for (const line of lines.slice(1)) {

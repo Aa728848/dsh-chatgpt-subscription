@@ -50,6 +50,13 @@ export interface KimiCodeSessionCacheRecord {
   cacheWrite1hTokens: number
   /** Cause attributed to the most recent request's prefix break, when there was one. */
   lastDrift?: string
+  /**
+   * Consecutive warmup-qualified hits recorded for this session, when non-zero.
+   *
+   * Optional and only persisted on secondary/explicit state updates so the
+   * initial turn record shape stays byte-identical when no warmup streak exists.
+   */
+  warmupConsecutiveHits?: number
   /** When any field above last changed, epoch ms. Used for pruning and ordering. */
   updatedAt: number
 }
@@ -147,6 +154,28 @@ export class SessionCacheStateStore {
   }
 
   /**
+   * Update the warmup consecutive-hit streak on an already-written session record
+   * in place, without issuing a second `write()` call.
+   */
+  noteWarmupStreak(sessionId: string, consecutiveHits: number): void {
+    const key = sessionId.trim()
+    if (key === '') return
+    const document = this.load()
+    const existing = document.sessions[key]
+    if (existing === undefined) return
+    const normalized = count(consecutiveHits)
+    if (normalized > 0) {
+      document.sessions[key] = { ...existing, warmupConsecutiveHits: normalized }
+    } else if (existing.warmupConsecutiveHits !== undefined) {
+      const { warmupConsecutiveHits: _dropped, ...rest } = existing
+      document.sessions[key] = rest
+    } else {
+      return
+    }
+    this.schedule()
+  }
+
+  /**
    * Write the document now, synchronously.
    *
    * Exposed for tests and for a caller that is about to lose the process; the
@@ -229,6 +258,7 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
   const updatedAt = finite(value.updatedAt)
   if (lastActiveAt === undefined || updatedAt === undefined) return undefined
   const drift = typeof value.lastDrift === 'string' && value.lastDrift !== '' ? value.lastDrift : undefined
+  const warmupStreak = count(value.warmupConsecutiveHits)
   return {
     lastActiveAt,
     updatedAt,
@@ -241,6 +271,7 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
     cacheWrite5mTokens: count(value.cacheWrite5mTokens),
     cacheWrite1hTokens: count(value.cacheWrite1hTokens),
     ...(drift === undefined ? {} : { lastDrift: drift }),
+    ...(warmupStreak > 0 ? { warmupConsecutiveHits: warmupStreak } : {}),
   }
 }
 

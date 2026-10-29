@@ -36,6 +36,11 @@ import {
 import { getCacheStats, getLastDriftCause, preserveThinkingEnabled } from './mapper.ts'
 import { evaluateCacheHint, sessionLastActiveAt } from './cache-hint.ts'
 import { resolveSessionCacheView, sessionCacheState } from './session-cache-state.ts'
+import {
+  CACHE_WARMUP_DEFAULTS,
+  cacheWarmupBudget,
+  cacheWarmupUsageSessions,
+} from '../cache-warmup/index.ts'
 import { beginWebLogin, getWebLoginStatus, isRefreshTokenRejected, resetWebLogin } from './oauth.ts'
 import {
   KIMI_CODE_REASONING_EFFORTS,
@@ -256,6 +261,28 @@ export async function getKimiCodeWebStatus(
  * answers with the process aggregate, which is the right answer for a settings
  * card that is not showing a specific conversation.
  */
+function warmupStatusOf(sessionId?: string): KimiCodeCacheStatsDto['warmup'] {
+  const targetSession = sessionId?.trim() || cacheWarmupUsageSessions()[0]?.sessionId
+  const durable = sessionCacheState.read(targetSession)
+  const hint = durable === undefined
+    ? undefined
+    : {
+        lastActiveAt: durable.lastActiveAt,
+        consecutiveHits: durable.warmupConsecutiveHits ?? 0,
+        hitRatio: (durable.cachedTokens + durable.freshTokens) > 0
+          ? durable.cachedTokens / (durable.cachedTokens + durable.freshTokens)
+          : 0,
+      }
+  if (targetSession === undefined && hint === undefined) return undefined
+  const budget = cacheWarmupBudget(targetSession ?? 'durable-latest', Date.now(), hint)
+  return {
+    warmup: budget.warmup,
+    maxChars: budget.maxChars,
+    consecutiveHits: budget.consecutiveHits,
+    requiredHits: CACHE_WARMUP_DEFAULTS.consecutiveHitsRequired,
+  }
+}
+
 function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const stats = getCacheStats(sessionId)
   // A process that just started has no totals, and answering "nothing yet" for
@@ -263,9 +290,11 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   // to produce. The durable record describes the last run on this machine.
   if (stats.requests === 0) return durableCacheStats(sessionId)
   const lastDrift = getLastDriftCause(sessionId)
+  const warmup = warmupStatusOf(sessionId)
   return {
     ...stats,
     ...(lastDrift === undefined ? {} : { lastDrift }),
+    ...(warmup === undefined ? {} : { warmup }),
     // The three write counters are real values now, from two places the mapper
     // owns: the TOTAL comes from the wire's own usage field
     // (cache_creation_input_tokens on Anthropic, prompt_tokens_details.
@@ -321,6 +350,7 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
   const durable = sessionCacheState.read(sessionId)
   if (durable === undefined || durable.requests === 0) return null
   const lastDrift = driftCauseOf(durable.lastDrift)
+  const warmup = warmupStatusOf(sessionId)
   return {
     requests: durable.requests,
     cachedTokens: durable.cachedTokens,
@@ -331,6 +361,7 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
     cacheWrite5mTokens: durable.cacheWrite5mTokens,
     cacheWrite1hTokens: durable.cacheWrite1hTokens,
     ...(lastDrift === undefined ? {} : { lastDrift }),
+    ...(warmup === undefined ? {} : { warmup }),
   }
 }
 

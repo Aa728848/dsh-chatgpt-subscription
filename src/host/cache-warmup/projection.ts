@@ -37,6 +37,30 @@ function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`
 }
 
+/**
+ * 剥离终端 ANSI/CSI 转义序列（如 `\x1b[31mFAIL\x1b[0m`）与回车符 `\r`。
+ *
+ * JSON 解码后，原先源码/日志里的 `\u001b[31m` 会还原成控制字符 `\x1b`；
+ * 如果不剥离，`^FAIL` 锚点匹配会被颜色码挡住，而再次 `JSON.stringify` 时每个
+ * `\x1b` 又会膨胀成 6 个字符 `\u001b`。
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g
+
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE, '').replace(/\r/g, '')
+}
+
+/**
+ * 计算一行文本在最终输出里占用的精确字符宽度：
+ * - 普通纯文本模式：`line.length + 1`（含换行符 `\n`）；
+ * - JSON 字符串内嵌模式：`JSON.stringify(line).length`（去首尾引号后 `+ 2` 个字符的 `\\n` 换行转义，
+ *   恰好等于 `JSON.stringify(line).length`，对 `"`、`\`、`\t`、`\u00xx` 的转义膨胀 100% 精确）。
+ */
+function lineCost(line: string, jsonEscaped: boolean): number {
+  return jsonEscaped ? JSON.stringify(line).length : line.length + 1
+}
+
 /** 预览里的一个段落：`optional` 的段落整段装得下才放，绝不半截。 */
 interface PreviewSection {
   lines: string[]
@@ -49,21 +73,22 @@ interface PreviewSection {
  * 必需段落要么整段进来，要么整体装不下就返回 undefined（调用方据此保持原文）；
  * 可选段落逐段尝试，装不下就整段跳过。这样任何输出都不会出现「半截失败清单」。
  */
-function fitSections(sections: readonly PreviewSection[], maxChars: number): string | undefined {
+function fitSections(sections: readonly PreviewSection[], maxChars: number, jsonEscaped = false): string | undefined {
   const lines: string[] = []
   let used = 0
+  const trailingNewlineAllowance = jsonEscaped ? 2 : 1
   for (const section of sections) {
     if (section.optional === true) continue
     for (const line of section.lines) {
-      used += line.length + 1
+      used += lineCost(line, jsonEscaped)
       lines.push(line)
     }
   }
-  if (used > maxChars + 1) return undefined
+  if (used > maxChars + trailingNewlineAllowance) return undefined
   for (const section of sections) {
     if (section.optional !== true) continue
-    const size = section.lines.reduce((sum, line) => sum + line.length + 1, 0)
-    if (used + size > maxChars + 1) continue
+    const size = section.lines.reduce((sum, line) => sum + lineCost(line, jsonEscaped), 0)
+    if (used + size > maxChars + trailingNewlineAllowance) continue
     for (const line of section.lines) lines.push(line)
     used += size
   }
@@ -126,56 +151,163 @@ function buildTestSections(evidence: TestEvidence): PreviewSection[] {
 const SHELL_ERROR_LINE =
   /(?:error|fatal|panic|traceback|exception|EACCES|EPERM|ENOENT|EEXIST|ELIFECYCLE|ERR!|FAILED|permission denied|cannot |could not |not found)/i
 
-/** 一行 glob 结果的判定：无空白、像路径。 */
+/** TypeScript 编译器报错首行：`path(line,col): error TSxxxx:` 或 `path:line:col - error TSxxxx:`。 */
+const TS_DIAGNOSTIC_HEADER = /^(?:.+?\(\d+,\d+\):\s+error\s+TS\d+:|.+?:\d+:\d+\s+-\s+error\s+TS\d+:)/
+
+/**
+ * 紧跟在 TypeScript 诊断首行后面的续行（缩进的类型比对、代码高亮行、波浪线指示行），
+ * 最多连带收集 6 行，使模型无需补读就能看全 `Type A is not assignable to Type B` 的完整原因。
+ */
+function isTsDiagnosticDetailLine(raw: string): boolean {
+  if (/^\s{2,}\S/.test(raw)) return true
+  if (/^\d+\s+\|/.test(raw.trimStart())) return true
+  if (/^~+$/.test(raw.trim())) return true
+  return false
+}
+
+/** 一行 glob 结果的判定：无空白、像文件路径（至少 80% 含路径分隔符或文件扩展名，不含引号/括号/冒号行号）。 */
 function looksLikeGlobResult(text: string): boolean {
   const lines = text.split('\n').filter((line) => line.trim() !== '')
   if (lines.length < 10) return false
   let paths = 0
+  let pathWithSepOrExt = 0
   for (const line of lines) {
     const trimmed = line.trim()
-    if (trimmed.length === 0 || trimmed.length > 400) continue
+    if (trimmed.length === 0 || trimmed.length > 400) return false
+    if (GREP_LINE.test(trimmed)) return false
+    if (/^===.*===$/.test(trimmed)) return false
+    if (/['"[\]{}()]/.test(trimmed)) return false
     if (/\s/.test(trimmed)) continue
     if (/^[-*+]$/.test(trimmed)) continue
     paths += 1
+    if (/[\\/]/.test(trimmed) || /\.[A-Za-z0-9]{1,8}$/.test(trimmed)) pathWithSepOrExt += 1
   }
-  return paths / lines.length >= 0.9
+  return paths / lines.length >= 0.9 && pathWithSepOrExt / lines.length >= 0.8
 }
 
-/** shell 输出判定：有退出码标记，或至少一行错误。 */
-function looksLikeShellOutput(text: string): boolean {
-  if (/(?:exit code|exited with code|process exited with code)[:=\s]+-?\d+/i.test(text)) return true
-  if (/\[exit code: -?\d+\]/i.test(text)) return true
-  if (/^Traceback \(most recent call last\):/m.test(text)) return true
+/** 判断一行是否只是单纯的文件路径（含可选引号/逗号，如 `"test\\stream-error.test.ts",`），而非报错消息。 */
+function isBareFilePathLine(trimmed: string): boolean {
+  const unquoted = trimmed.replace(/^['"]|['"],?$/g, '').trim()
+  if (unquoted.length === 0 || unquoted.length > 300 || /\s/.test(unquoted)) return false
+  return /[\\/]/.test(unquoted) && /\.[A-Za-z0-9]{1,8}$/.test(unquoted) && !/:(\d+)/.test(unquoted)
+}
+
+/**
+ * 判断文本是否为混合证据（如包含已投影的 `[cache-warmup preview]`、内嵌大型 JSON 对象行、
+ * 多行 pretty-printed JSON 块、`util.inspect` 字符串拼接对象、分节头等）。
+ */
+function isMixedEvidenceOutput(text: string): boolean {
+  if (text.includes('[cache-warmup preview]')) return true
+  if (/^(?:===|---)\s+.+?(?:\s+(?:===|---))?$/m.test(text) || /^###\s+\S/m.test(text) || /^--\s+.+\s+--$/m.test(text)) {
+    return true
+  }
   const lines = text.split('\n')
-  let errors = 0
-  for (const line of lines) {
-    if (line.trim() === '') continue
-    if (/^\s*(?:0|no)\s+(?:errors?|failures?|failed)\b/i.test(line.trim())) continue
-    if (SHELL_ERROR_LINE.test(line)) errors += 1
-    if (errors >= 1) return true
+  let inspectStringConcat = 0
+  let jsonPropertyLines = 0
+  for (const raw of lines.slice(0, 200)) {
+    const trimmed = raw.trim()
+    if (trimmed === '') continue
+    // 内嵌单行 JSON 对象/数组（如 console.log(JSON.stringify(r)) 与其它日志混打）：
+    if (
+      trimmed.length > 80 &&
+      ((trimmed.startsWith('{"') && (trimmed.endsWith('}') || trimmed.includes('":'))) ||
+        (trimmed.startsWith('[{"') && trimmed.includes('":')))
+    ) {
+      return true
+    }
+    // 多行 pretty-printed JSON 属性行（如 `"path": "..."`, `"root": "."`）：
+    if (/^"[A-Za-z0-9_$-]+"\s*:/.test(trimmed)) {
+      jsonPropertyLines += 1
+      if (jsonPropertyLines >= 2) return true
+    }
+    // util.inspect 打印长字符串属性时的 `'...\n' +` 拼接行：
+    if (/^['"].*\\n['"]\s*\+$/.test(trimmed)) {
+      inspectStringConcat += 1
+      if (inspectStringConcat >= 2) return true
+    }
   }
   return false
 }
 
-/** shell 预览：退出码 + 完整错误集（必需），首尾片段（可选）。 */
+/**
+ * shell 输出判定：
+ * - 排除混合证据输出（内嵌 JSON 行、`[cache-warmup preview]`、分节头、`util.inspect` 对象）；
+ * - 有明确的退出码标记（`[exit code: N]`、`exit code: N`、`EXIT=N`）；
+ * - 有 Python `Traceback (most recent call last):` 或 JS 异常头 + 堆栈行（`^\s+at\s+`）；
+ * - 若没有任何退出码或堆栈，只有纯文本行时，要求不存在 grep 行，且错误行不是单纯的文件名。
+ */
+function looksLikeShellOutput(text: string): boolean {
+  if (isMixedEvidenceOutput(text)) return false
+  if (/(?:exit code|exited with code|process exited with code)[:=\s]+-?\d+/i.test(text)) return true
+  if (/\[exit code: -?\d+\]/i.test(text)) return true
+  if (/^EXIT=-?\d+$/m.test(text)) return true
+  if (/^Traceback \(most recent call last\):/m.test(text)) return true
+  if (/^(?:[A-Za-z]*Error|Exception): /m.test(text) && /^\s+at\s+\S/m.test(text)) return true
+  const lines = text.split('\n')
+  let grepLikes = 0
+  let errors = 0
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    if (/^(?:PASS\b|[✓✔]|ok\s+\d+\b)/.test(trimmed)) continue
+    if (/^stdout\s+\|\s+/.test(trimmed)) continue
+    if (/^\(node:\d+\)\s+\[\w+\]\s+Warning:/.test(trimmed)) continue
+    if (isBareFilePathLine(trimmed)) continue
+    if (GREP_LINE.test(trimmed) && !TS_DIAGNOSTIC_HEADER.test(trimmed)) {
+      grepLikes += 1
+      if (grepLikes >= 2) return false
+    }
+    if (/^\s*(?:0|no)\s+(?:errors?|failures?|failed)\b/i.test(trimmed)) continue
+    if (SHELL_ERROR_LINE.test(line)) errors += 1
+  }
+  return errors >= 1
+}
+
+/** shell 预览：退出码 + 完整错误集（必需，含 TS 多行诊断上下文），首尾片段（可选）。 */
 function buildShellSections(text: string): PreviewSection[] | undefined {
   const lines = text.split('\n')
   const errors: string[] = []
-  for (const raw of lines) {
+  let errorCount = 0
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index]!
     const trimmed = raw.trim()
     if (trimmed === '') continue
     if (/^\[exit code: -?\d+\]/i.test(trimmed)) continue
     if (/^\s*(?:0|no)\s+(?:errors?|failures?|failed)\b/i.test(trimmed)) continue
-    if (SHELL_ERROR_LINE.test(trimmed)) errors.push(`  ${clip(trimmed, 240)}`)
+    if (/^(?:PASS\b|[✓✔]|ok\s+\d+\b)/.test(trimmed)) continue
+    if (/^stdout\s+\|\s+/.test(trimmed)) continue
+    if (/^\(node:\d+\)\s+\[\w+\]\s+Warning:/.test(trimmed)) continue
+    if (isBareFilePathLine(trimmed)) continue
+    if (TS_DIAGNOSTIC_HEADER.test(trimmed)) {
+      errorCount += 1
+      errors.push(`  ${clip(trimmed, 240)}`)
+      let details = 0
+      while (index + 1 < lines.length && details < 6) {
+        const nextRaw = lines[index + 1]!
+        const nextTrimmed = nextRaw.trim()
+        if (nextTrimmed === '' || TS_DIAGNOSTIC_HEADER.test(nextTrimmed) || /^\[exit code: -?\d+\]/i.test(nextTrimmed)) {
+          break
+        }
+        if (!isTsDiagnosticDetailLine(nextRaw)) break
+        errors.push(`    ${clip(nextTrimmed, 240)}`)
+        index += 1
+        details += 1
+      }
+      continue
+    }
+    if (SHELL_ERROR_LINE.test(trimmed)) {
+      errorCount += 1
+      errors.push(`  ${clip(trimmed, 360)}`)
+    }
   }
   // 错误集本身装不进一次预览时，宁可整段原样：半截错误清单比没有更危险。
-  if (errors.length > 300) return undefined
+  if (errorCount > 300 || errors.length > 600) return undefined
   const exitMatch =
     /(?:exit code|exited with code|process exited with code)[:=\s]+(-?\d+)/i.exec(text) ??
     /\[exit code: (-?\d+)\]/i.exec(text)
   const sections: PreviewSection[] = []
   if (exitMatch !== null) sections.push({ lines: [`exit code: ${exitMatch[1]}`] })
-  sections.push({ lines: [`errors: ${errors.length} (complete set)`] })
+  sections.push({ lines: [`errors: ${errorCount} (complete set)`] })
   if (errors.length > 0) sections.push({ lines: errors })
   const nonEmpty = lines.map((line) => line.trimEnd()).filter((line) => line.trim() !== '')
   const head = nonEmpty.slice(0, 5).map((line) => `  ${clip(line.trim(), 160)}`)
@@ -191,8 +323,8 @@ interface GrepEvidence {
   total: number
 }
 
-/** 一行 grep 结果：`<path>:<line>[:<column>]:<text>`。 */
-const GREP_LINE = /^(.+?):(\d+):(?:\d+:)?(.*)$/
+/** 一行 grep 结果：`<path>:<line>[:<column>]:<text>` 或 `<path>:<line>(?:\t|\||\s{2,})<text>`。 */
+const GREP_LINE = /^(.+?):(\d+)(?::(?:\d+:)?|\t|\|\s?|\s{2,})(.*)$/
 
 /** 抽取 grep 证据；命中线占比不到 80% 就当它不是 grep 输出。 */
 function extractGrepEvidence(text: string): GrepEvidence | undefined {
@@ -266,27 +398,45 @@ function buildStructuredSections(text: string): PreviewSection[] | undefined {
   ]
 }
 
+/** 剥离 `read` 工具或 `grep -C` 常见的行号前缀（如 `1: `、`1-  `、`1\t`、`1| `、`  12→`）。 */
+const LINE_NUMBER_PREFIX = /^\s*\d+(?::(?:\s|$)|-\s{2,}|\t|\|(?:\s|$)|→\s?)/
+
+function stripLineNumberPrefix(line: string): string {
+  return line.replace(LINE_NUMBER_PREFIX, '')
+}
+
 /** 契约/类型定义：命中两行以上声明就当它是契约，保持原样。 */
 function looksLikeContract(text: string): boolean {
   let declarations = 0
-  for (const line of text.split('\n').slice(0, 800)) {
+  for (const raw of text.split('\n').slice(0, 800)) {
+    const line = stripLineNumberPrefix(raw)
     if (/^\s*(?:export\s+)?(?:declare\s+)?(?:interface|type)\s+[A-Za-z_$][\w$]*/.test(line)) declarations += 1
     if (declarations >= 2) return true
   }
   return false
 }
 
-/** 源码判定：代码行占比过半（或含多处 markdown 代码围栏）。 */
+/**
+ * 源码或混合证据判定：
+ * - 含多处 markdown 代码围栏；
+ * - 含 `git diff` 补丁块（`diff --git` / `@@ -x,y +x,y @@`）；
+ * - 含至少 5 行带行号的源码切片（`1: ...` 或 `1\t...`），说明是单文件或多文件混合读取输出；
+ * - 代码行占比 >= 45%。
+ */
 function looksLikeSourceCode(text: string): boolean {
+  if (/^diff --git\s+/m.test(text) || /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(text)) return true
   let fences = 0
   for (const line of text.split('\n').slice(0, 600)) {
-    if (line.trim().startsWith('```')) fences += 1
+    if (stripLineNumberPrefix(line).trim().startsWith('```')) fences += 1
   }
   if (fences >= 4) return true
   let code = 0
+  let numbered = 0
   let nonEmpty = 0
   for (const raw of text.split('\n').slice(0, 600)) {
-    const trimmed = raw.trim()
+    if (raw.trim() === '') continue
+    if (LINE_NUMBER_PREFIX.test(raw)) numbered += 1
+    const trimmed = stripLineNumberPrefix(raw).trim()
     if (trimmed === '') continue
     nonEmpty += 1
     if (
@@ -294,20 +444,29 @@ function looksLikeSourceCode(text: string): boolean {
         trimmed,
       ) ||
       /^[})\];]/.test(trimmed) ||
-      /^(?:\/\/|\/\*|\*)/.test(trimmed)
+      /^(?:\/\/|\/\*|\*)/.test(trimmed) ||
+      /^<\/?[A-Za-z][\w.-]*/.test(trimmed)
     ) {
       code += 1
     }
   }
+  if (numbered >= 5) return true
   return nonEmpty >= 10 && code / nonEmpty >= 0.45
 }
 
-/** 完整 JSON 文档或被截断的 JSON 对象：可能是批量源码/混合证据，不按裸日志猜测。 */
+/** 完整 JSON 文档（对象、数组、JSON 字符串）或被截断的 JSON 对象：不按裸日志猜测。 */
 function isJsonDocument(text: string): boolean {
   const trimmed = text.trim()
   if (trimmed.length < 2) return false
   const first = trimmed[0]
   const last = trimmed[trimmed.length - 1]
+  if (first === '"' && last === '"') {
+    try {
+      return typeof JSON.parse(trimmed) === 'string'
+    } catch {
+      return false
+    }
+  }
   if (first !== '{' && first !== '[') return false
   if ((first === '{' && last === '}') || (first === '[' && last === ']')) {
     try {
@@ -329,30 +488,138 @@ function isJsonDocument(text: string): boolean {
   return false
 }
 
-/** 投影计划：要么给一段预览，要么明确为什么保持原样。 */
-type ProjectionPlan =
-  | { kind: 'preview'; strategy: ProjectionStrategy; sections: PreviewSection[] }
-  | { kind: 'verbatim'; strategy: ProjectionStrategy }
+/** PTC `run_code` JSON envelope 中允许独立投影日志的字段白名单。 */
+const JSON_ENVELOPE_LOG_KEYS = ['stdout', 'stderr', 'output', 'logs', 'log'] as const
+
+/** JSON envelope 其余字段允许占用的最大序列化字符数（防止把含批量源码的混合 envelope 压掉）。 */
+const JSON_ENVELOPE_MAX_OTHER_CHARS = 800
 
 /**
- * 决定这一段文本该怎么处理。
- *
- * 顺序就是「可证明性」的顺序：子代理报告/源码工具/契约先被判成原样，
- * 然后是测试失败集、grep、结构化、glob、shell 这些有明确形状的，
- * 最后落到「无法解析 → 原样」。
+ * 解开一层或两层 JSON 包装（支持顶层 JSON 字符串 `"..."` 或双重序列化的 `"{...}"`）。
  */
-function planProjection(text: string, toolName: string): ProjectionPlan {
-  if (TOOL_SUBAGENT.test(toolName)) return { kind: 'verbatim', strategy: 'verbatim-subagent-report' }
-  if (TOOL_SOURCE.test(toolName)) return { kind: 'verbatim', strategy: 'verbatim-source-code' }
+function parseJsonCandidate(text: string):
+  | { kind: 'string'; decoded: string }
+  | { kind: 'object'; record: Record<string, unknown>; wrappedInString: boolean }
+  | undefined {
+  const trimmed = text.trim()
+  if (trimmed.length < 2) return undefined
+  const first = trimmed[0]
+  const last = trimmed[trimmed.length - 1]
+  if (first === '"' && last === '"') {
+    try {
+      const inner: unknown = JSON.parse(trimmed)
+      if (typeof inner !== 'string') return undefined
+      const innerTrimmed = inner.trim()
+      if (innerTrimmed.startsWith('{') && innerTrimmed.endsWith('}')) {
+        try {
+          const innerObj: unknown = JSON.parse(innerTrimmed)
+          if (innerObj !== null && typeof innerObj === 'object' && !Array.isArray(innerObj)) {
+            return { kind: 'object', record: innerObj as Record<string, unknown>, wrappedInString: true }
+          }
+        } catch {
+          // 内部不是 JSON 对象，按普通序列化字符串处理。
+        }
+      }
+      return { kind: 'string', decoded: inner }
+    } catch {
+      return undefined
+    }
+  }
+  if (first === '{' && last === '}') {
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { kind: 'object', record: parsed as Record<string, unknown>, wrappedInString: false }
+      }
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+/**
+ * 尝试从完整 JSON（顶层 JSON 字符串或对象 envelope）中解出可结构化投影的日志正文。
+ *
+ * 规则刻意保守：
+ * - 截断 JSON、数组一律返回 undefined；
+ * - 对象 envelope 除白名单字段外，其余字段序列化后的总长度不超过 `JSON_ENVELOPE_MAX_OTHER_CHARS`；
+ * - 解码并剥离 ANSI 后的日志文本自身必须能通过非源码/非契约的结构化日志投影计划；
+ * - 返回的 `storeContent` 把解码后的多行日志直接展开（对象 envelope 还会把其余元数据缩进在头部），
+ *   彻底避免单行 minified JSON 因没有真实 `\n` 导致 `store.page` 的按行分页失效。
+ */
+function extractJsonEnvelopeLogField(
+  text: string,
+  toolName: string,
+): {
+  envelope?: { record: Record<string, unknown>; key: string }
+  plan: Extract<ProjectionPlan, { kind: 'preview' }>
+} | undefined {
+  const candidate = parseJsonCandidate(text)
+  if (candidate === undefined) return undefined
+
+  if (candidate.kind === 'string') {
+    const clean = stripAnsi(candidate.decoded)
+    if (isJsonDocument(clean) || isMixedEvidenceOutput(clean)) return undefined
+    const plan = planPlainTextProjection(clean, toolName)
+    if (plan.kind !== 'preview') return undefined
+    return { plan }
+  }
+
+  const { record } = candidate
+  let candidateKey: string | undefined
+  let candidateText = ''
+  for (const key of JSON_ENVELOPE_LOG_KEYS) {
+    const val = record[key]
+    if (typeof val === 'string' && val.length > candidateText.length) {
+      candidateKey = key
+      candidateText = val
+    }
+  }
+  if (candidateKey === undefined || candidateText.length === 0) return undefined
+
+  const rest: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(record)) {
+    if (key === candidateKey) continue
+    // 其余字段若包含长段源码或契约，视为混合证据，整体保持原样。
+    if (typeof value === 'string' && (value.length > 400 || looksLikeSourceCode(value) || looksLikeContract(value))) {
+      return undefined
+    }
+    rest[key] = value
+  }
+  const restJson = JSON.stringify(rest)
+  if (restJson.length > JSON_ENVELOPE_MAX_OTHER_CHARS) return undefined
+
+  const cleanField = stripAnsi(candidateText)
+  if (isJsonDocument(cleanField) || isMixedEvidenceOutput(cleanField)) return undefined
+  const plan = planPlainTextProjection(cleanField, toolName)
+  if (plan.kind !== 'preview') return undefined
+  return {
+    envelope: { record, key: candidateKey },
+    plan,
+  }
+}
+
+/** 投影计划：要么给一段预览，要么明确为什么保持原样。 */
+type ProjectionPlan =
+  | {
+      kind: 'preview'
+      strategy: ProjectionStrategy
+      sections: PreviewSection[]
+      envelope?: { record: Record<string, unknown>; key: string }
+    }
+  | { kind: 'verbatim'; strategy: ProjectionStrategy }
+
+/** 对一段纯文本（非 JSON 文档）做投影计划判定。 */
+function planPlainTextProjection(rawText: string, toolName: string): ProjectionPlan {
+  const text = stripAnsi(rawText)
   if (looksLikeContract(text)) return { kind: 'verbatim', strategy: 'verbatim-contract' }
-  // run_code 常返回 JSON envelope，里面可能同时装多份源码和日志。先识别完整文档，
-  // 绝不让字符串里的 error/cannot/path 把整批证据误当成一份 shell 或 glob 输出。
-  if (isJsonDocument(text)) return { kind: 'verbatim', strategy: 'verbatim-unparsed' }
-  // 源码中的错误字符串同样不是 shell 证据；源码保护必须早于所有日志分类器。
   if (looksLikeSourceCode(text)) return { kind: 'verbatim', strategy: 'verbatim-source-code' }
 
   const test = extractTestEvidence(text)
-  if (test !== undefined) return { kind: 'preview', strategy: 'test-failure', sections: buildTestSections(test) }
+  if (test !== undefined && test.failures.length > 0) {
+    return { kind: 'preview', strategy: 'test-failure', sections: buildTestSections(test) }
+  }
 
   const grep = extractGrepEvidence(text)
   if (grep !== undefined) return { kind: 'preview', strategy: 'grep-results', sections: buildGrepSections(grep) }
@@ -369,6 +636,35 @@ function planProjection(text: string, toolName: string): ProjectionPlan {
   }
 
   return { kind: 'verbatim', strategy: 'verbatim-unparsed' }
+}
+
+/**
+ * 决定这一段文本该怎么处理。
+ *
+ * 顺序就是「可证明性」的顺序：子代理报告/源码工具/契约先被判成原样，
+ * 然后是 JSON envelope（只允许纯日志字段投影，混合证据一律原样），
+ * 接着是测试失败集、grep、结构化、glob、shell 这些有明确形状的，
+ * 最后落到「无法解析 → 原样」。
+ */
+function planProjection(text: string, toolName: string): ProjectionPlan {
+  if (TOOL_SUBAGENT.test(toolName)) return { kind: 'verbatim', strategy: 'verbatim-subagent-report' }
+  if (TOOL_SOURCE.test(toolName)) return { kind: 'verbatim', strategy: 'verbatim-source-code' }
+  if (looksLikeContract(text)) return { kind: 'verbatim', strategy: 'verbatim-contract' }
+  // run_code 常返回 JSON envelope 或 JSON 序列化字符串：若只是轻量状态配一个超长日志字段
+  // （stdout/stderr/output/logs）或纯日志字符串，只替换日志部分；若含多份源码或被截断，则整份保持原样。
+  if (isJsonDocument(text)) {
+    const extracted = extractJsonEnvelopeLogField(text, toolName)
+    if (extracted !== undefined) {
+      return {
+        kind: 'preview',
+        strategy: extracted.plan.strategy,
+        sections: extracted.plan.sections,
+        ...(extracted.envelope === undefined ? {} : { envelope: extracted.envelope }),
+      }
+    }
+    return { kind: 'verbatim', strategy: 'verbatim-unparsed' }
+  }
+  return planPlainTextProjection(text, toolName)
 }
 
 /** 预览尾部：把「怎么读全文」写死在预览里，模型不用猜。 */
@@ -406,20 +702,35 @@ async function decide(args: {
 
   const header = `[cache-warmup preview] strategy=${plan.strategy} input=${text.length}ch`
   const footerBudget = footerFor(`ref://${input.sessionId}/${'0'.repeat(64)}`).length
-  const bodyBudget = budget.maxChars - header.length - footerBudget - 2
+  const jsonEscaped = plan.envelope !== undefined
+  // JSON envelope 投影时，除日志字段外的壳以及 header/footer 的转义换行（2 个 \\n 各多 1 字符）精确扣除。
+  const envelopeShellLength = plan.envelope === undefined
+    ? 0
+    : JSON.stringify({ ...plan.envelope.record, [plan.envelope.key]: '' }).length
+  const bodyBudget = budget.maxChars - header.length - footerBudget - envelopeShellLength - (jsonEscaped ? 4 : 2)
   if (bodyBudget <= 0) return { reason: 'verbatim-budget' }
-  const body = fitSections(plan.sections, bodyBudget)
+  const body = fitSections(plan.sections, bodyBudget, jsonEscaped)
   if (body === undefined) return { reason: 'verbatim-budget' }
 
   const store = input.store
   if (store === undefined) return { reason: 'store-unavailable' }
+  const placeholderFooter = footerFor(`ref://${input.sessionId}/${'0'.repeat(64)}`)
+  const placeholderInner = `${header}\n${body}\n${placeholderFooter}`
+  const placeholderPreview = plan.envelope === undefined
+    ? placeholderInner
+    : JSON.stringify({ ...plan.envelope.record, [plan.envelope.key]: placeholderInner })
+  if (placeholderPreview.length > budget.maxChars) return { reason: 'verbatim-budget' }
+
   let reference: StoredResultReference
   try {
     reference = await store.put({ sessionId: input.sessionId, content: text, toolName: input.toolName, at: args.at })
   } catch {
     return { reason: 'store-unavailable' }
   }
-  const preview = `${header}\n${body}\n${footerFor(reference.refId)}`
+  const innerPreview = `${header}\n${body}\n${footerFor(reference.refId)}`
+  const preview = plan.envelope === undefined
+    ? innerPreview
+    : JSON.stringify({ ...plan.envelope.record, [plan.envelope.key]: innerPreview })
   if (preview.length > budget.maxChars) return { reason: 'verbatim-budget' }
   return { preview, refId: reference.refId, strategy: plan.strategy }
 }

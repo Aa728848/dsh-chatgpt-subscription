@@ -99,6 +99,20 @@ describe('SessionCacheStateStore', () => {
     expect(store.read('broken')).toBeUndefined()
     expect(store.read('healthy')).toMatchObject({ totalTokens: 7 })
   })
+
+  it('persists and clears warmupConsecutiveHits via noteWarmupStreak without an extra write()', () => {
+    const store = new SessionCacheStateStore(file)
+    store.write('session-a', record())
+    store.noteWarmupStreak('session-a', 2)
+    store.flush()
+
+    const reopened = new SessionCacheStateStore(file)
+    expect(reopened.read('session-a')?.warmupConsecutiveHits).toBe(2)
+
+    reopened.noteWarmupStreak('session-a', 0)
+    reopened.flush()
+    expect(new SessionCacheStateStore(file).read('session-a')?.warmupConsecutiveHits).toBeUndefined()
+  })
 })
 
 describe('resolveSessionCacheView', () => {

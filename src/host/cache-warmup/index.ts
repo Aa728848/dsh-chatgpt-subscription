@@ -46,13 +46,14 @@ export type { FileResultReferenceStoreOptions } from './store.ts'
 export { projectToolResult, defaultPreviewBudget } from './projection.ts'
 
 export { cacheWarmupBudget, cacheWarmupSnapshot } from './budget.ts'
-export type { CacheWarmupSnapshot, CacheWarmupUsageTotals } from './budget.ts'
+export type { CacheWarmupDurableHint, CacheWarmupSnapshot, CacheWarmupUsageTotals } from './budget.ts'
 
 export {
   cacheWarmupHitRatio,
   cacheWarmupUsageReports,
   cacheWarmupUsageSessions,
   consecutiveWarmupHits,
+  isWarmupHitReport,
   recordCacheWarmupUsage,
   resetCacheWarmupForTests,
 } from './usage.ts'

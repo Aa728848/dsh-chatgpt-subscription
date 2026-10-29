@@ -95,6 +95,34 @@ export function cacheWarmupHitRatio(usage: { inputTokens: number; cacheReadToken
 /** Kimi 对每个请求都会报告的生命周期状态；只有其余值才表示真实前缀漂移。 */
 const BENIGN_LIFECYCLE_CAUSES = new Set(['stable', 'first-request'])
 
+/**
+ * 判断一条报告是否算作「预热命中」（双轨判据）：
+ *
+ * 1. **第一轨（比例轨）**：`hitRatio >= 0.97`；
+ * 2. **第二轨（前缀完整延续轨）**：解决短会话的分母效应（如 `1792 cached + 84 input = 95.52%`）。
+ *    当本轮 `cacheReadTokens >= 1024`（已形成实质缓存前缀）、存在紧邻的上一条无真实漂移报告、
+ *    本轮命中缓存没有比上一轮缩水（`cacheReadTokens >= previous.cacheReadTokens`），
+ *    且本轮新增未命中部分 `inputTokens <= 256`（一个缓存块的正常尾巴）时，同样视为有效命中。
+ */
+export function isWarmupHitReport(
+  report: CacheWarmupUsage,
+  previous?: CacheWarmupUsage,
+): boolean {
+  if (cacheWarmupHitRatio(report) >= CACHE_WARMUP_DEFAULTS.hitRatioThreshold) return true
+  if (previous === undefined || previous === null) return false
+  const prevDrift = previous.driftCause
+  if (typeof prevDrift === 'string' && prevDrift.trim() !== '' && !BENIGN_LIFECYCLE_CAUSES.has(prevDrift)) {
+    return false
+  }
+  const cached = finiteCount(report.cacheReadTokens)
+  const prevCached = finiteCount(previous.cacheReadTokens)
+  const fresh = finiteCount(report.inputTokens)
+  if (cached < CACHE_WARMUP_DEFAULTS.retainedPrefixMinCachedTokens) return false
+  if (prevCached < CACHE_WARMUP_DEFAULTS.retainedPrefixMinCachedTokens) return false
+  if (cached < prevCached) return false
+  return fresh <= CACHE_WARMUP_DEFAULTS.retainedPrefixMaxFreshTokens
+}
+
 export function consecutiveWarmupHits(reports: readonly CacheWarmupUsage[]): number {
   try {
     if (!Array.isArray(reports)) return 0
@@ -104,7 +132,8 @@ export function consecutiveWarmupHits(reports: readonly CacheWarmupUsage[]): num
       if (report === undefined || report === null) break
       const drift = report.driftCause
       if (typeof drift === 'string' && drift.trim() !== '' && !BENIGN_LIFECYCLE_CAUSES.has(drift)) break
-      if (cacheWarmupHitRatio(report) < CACHE_WARMUP_DEFAULTS.hitRatioThreshold) break
+      const previous = index > 0 ? reports[index - 1] : undefined
+      if (!isWarmupHitReport(report, previous)) break
       hits += 1
     }
     return hits

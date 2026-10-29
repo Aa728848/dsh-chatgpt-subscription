@@ -250,6 +250,37 @@ describe('projectToolResult 保持原样的判定', () => {
     expect(result.content).toBe(content)
   })
 
+  it('run_code 内调用 tools.read 打印的带行号（1: / 1\\t / 1|）源码切片与 git diff 补丁保持原样', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const numberedTsx = Array.from(
+      { length: 80 },
+      (_, idx) => `${idx + 1}: <p className="dsh-notice--error">{failure ?? "line-${idx}"}</p>`,
+    ).join('\n')
+    const res1 = await projectToolResult({ toolName: 'run_code', sessionId: 's', content: numberedTsx, budget: WARMUP, store })
+    expect(res1.changed).toBe(false)
+    expect(res1.metrics.strategy).toBe('verbatim-source-code')
+
+    const pipeNumbered = Array.from(
+      { length: 60 },
+      (_, idx) => `${idx + 1}|   if (!ok) throw new Error("missing item ${idx}")`,
+    ).join('\n')
+    const res2 = await projectToolResult({ toolName: 'run_code', sessionId: 's', content: pipeNumbered, budget: WARMUP, store })
+    expect(res2.changed).toBe(false)
+    expect(res2.metrics.strategy).toBe('verbatim-source-code')
+
+    const gitDiff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      'index 30a03a1..87b0704 100644',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -10,6 +10,20 @@ const COPY = {',
+      ...Array.from({ length: 60 }, (_, idx) => `+  lastError${idx}: { zh: "错误 ${idx}", en: "Error ${idx}" },`),
+    ].join('\n')
+    const res3 = await projectToolResult({ toolName: 'run_code', sessionId: 's', content: gitDiff, budget: WARMUP, store })
+    expect(res3.changed).toBe(false)
+    expect(res3.metrics.strategy).toBe('verbatim-source-code')
+  })
+
   it('没有存储就不投影：拿不到 ref 的预览等于丢原文', async () => {
     const content = failingTestLog()
     const result = await projectToolResult({ toolName: 'bash', sessionId: 's', content, budget: WARMUP })
@@ -307,6 +338,101 @@ describe('projectToolResult 结构化投影', () => {
     expect(result.preview).toContain('error TS2322')
     expect(result.preview).toContain('error TS1005')
     expect(result.preview).toContain('ELIFECYCLE')
+  })
+
+  it('TypeScript 多行诊断块：保留紧随其后的缩进类型差异详情，且错误计数按诊断块而非缩进行数累加', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const lines = ['$ npm run typecheck']
+    for (let index = 0; index < 60; index += 1) lines.push(`[tsc] checking module ${index}.ts`)
+    lines.push('src/host/foo.ts(18,5): error TS2322: Type "{ a: string }" is not assignable to type "{ a: number }".')
+    lines.push('  Types of property "a" are incompatible.')
+    lines.push('    Type "string" is not assignable to type "number".')
+    lines.push('[exit code: 2]')
+    const content = lines.join('\n')
+    const result = await projectToolResult({
+      toolName: 'win_bash',
+      sessionId: 's',
+      content,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('shell-output')
+    expect(result.preview).toContain('exit code: 2')
+    expect(result.preview).toContain('errors: 1 (complete set)')
+    expect(result.preview).toContain('error TS2322')
+    expect(result.preview).toContain('Types of property "a" are incompatible.')
+    expect(result.preview).toContain('Type "string" is not assignable to type "number".')
+  })
+
+  it('PTC run_code JSON envelope：只替换白名单日志字段（stdout/stderr/output），保留其余轻量字段并能读回完整 JSON 原文', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const rawEnvelope = JSON.stringify({
+      exitCode: 1,
+      command: 'vitest run',
+      stdout: failingTestLog(3),
+    })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'session-env',
+      content: rawEnvelope,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('test-failure')
+    const parsed = JSON.parse(result.preview!) as { exitCode: number; command: string; stdout: string }
+    expect(parsed.exitCode).toBe(1)
+    expect(parsed.command).toBe('vitest run')
+    expect(parsed.stdout).toContain('failures: 3 (complete set)')
+    expect(parsed.stdout).toContain(result.refId!)
+
+    const page = await store.page({ sessionId: 'session-env', refId: result.refId!, limit: 512, maxBytes: 65_536 })
+    expect(page.complete).toBe(true)
+    expect(page.content).toBe(rawEnvelope)
+  })
+
+  it('含 ANSI 颜色码、Windows 路径反斜杠、双引号及双重 JSON 序列化的日志能被精确识别与预算装配', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const ansiLog = [
+      '\x1b[32m RUN \x1b[0m v4.1.8 C:\\Users\\A\\repo',
+      ...Array.from({ length: 50 }, (_, index) => `\x1b[32m ✓\x1b[0m test\\case-${index}.test.ts > "works" ${index}\r`),
+      '\x1b[31m FAIL \x1b[0m test\\broken-quote.test.ts > "quoted \\"suite\\"" > case 1\r',
+      ' Test Files  1 failed | 50 passed (51)',
+      '      Tests  1 failed | 50 passed (51)',
+    ].join('\n')
+
+    // 场景 A：双重 JSON 序列化字符串 JSON.stringify(JSON.stringify({ stdout: ansiLog }))
+    const doubleStringified = JSON.stringify(JSON.stringify({ exitCode: 1, stdout: ansiLog }))
+    const resA = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'session-ansi',
+      content: doubleStringified,
+      budget: WARMUP,
+      store,
+    })
+    expect(resA.changed).toBe(true)
+    expect(resA.metrics.strategy).toBe('test-failure')
+    expect(resA.preview!.length).toBeLessThanOrEqual(WARMUP.maxChars)
+    const parsedA = JSON.parse(resA.preview!) as { exitCode: number; stdout: string }
+    expect(parsedA.exitCode).toBe(1)
+    expect(parsedA.stdout).toContain('failures: 1 (complete set)')
+    expect(parsedA.stdout).toContain('test\\broken-quote.test.ts > "quoted \\"suite\\"" > case 1')
+    // ANSI 控制字符已被清理，不会在 JSON 里变成 \u001b
+    expect(resA.preview).not.toContain('\\u001b')
+
+    // 场景 B：顶层直接是 JSON.stringify(ansiLog) 字符串
+    const singleStringified = JSON.stringify(ansiLog)
+    const resB = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'session-ansi',
+      content: singleStringified,
+      budget: WARMUP,
+      store,
+    })
+    expect(resB.changed).toBe(true)
+    expect(resB.metrics.strategy).toBe('test-failure')
+    expect(resB.preview).toContain('failures: 1 (complete set)')
   })
 
   it('grep 结果按文件计数，总数与文件数都对得上', async () => {

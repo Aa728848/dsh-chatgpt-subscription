@@ -38,6 +38,7 @@ import {
   cacheWarmupBudget,
   cacheWarmupSnapshot,
   projectToolResult,
+  type CacheWarmupDurableHint,
   type PreviewBudget,
   type ProjectionResult,
   type ResultReferenceStore,
@@ -61,13 +62,24 @@ import type { CacheWarmupSettings } from './settings.ts'
 export const CACHE_WARMUP_PROVIDER = 'kimi-code'
 
 /**
- * 被投影的工具名。
- *
- * 只有 `run_code` 的结果会走这张表：它的结果常常是一整屏的结构化输出，也正是
- * 「换成预览 + 精确补读」唯一划得来的场景。别的工具（`read` 的源码、`grep` 的
- * 契约定义）必须原样到达模型，核心侧的保守策略也建立在"调用方只喂该喂的"之上。
+ * 默认被投影的主工具名（保留导出供向后兼容）。
  */
 export const CACHE_WARMUP_SOURCE_TOOL = 'run_code'
+
+/**
+ * 允许进入结果投影的工具集合。
+ *
+ * 除了 PTC 的 `run_code`，宿主的独立 Shell 与后台任务输出工具（`win_bash`、
+ * `bash`、`pwsh`、`job_output`）同样经常吐出整屏测试/构建日志。源码读取/编辑类
+ * 工具（`read`、`edit`、`grep`、`glob`、CodeGraph 等）不在此列，保持 100% 原样。
+ */
+export const CACHE_WARMUP_SOURCE_TOOLS: ReadonlySet<string> = new Set([
+  'run_code',
+  'win_bash',
+  'bash',
+  'pwsh',
+  'job_output',
+])
 
 /** 提示词分节名，全局唯一（重复注册会抛错）。 */
 export const CACHE_WARMUP_SECTION_NAME = 'plugin:cache-warmup'
@@ -167,6 +179,10 @@ export interface CacheWarmupOptions {
    * 提供其余默认值）；注入一个工厂是为了让测试与别的部署换掉存储，而不必改这里。
    */
   store?: () => ResultReferenceStore | undefined
+  /**
+   * 进程重启后尚无内存报告时的持久化预热状态回退读取器（可选）。
+   */
+  durableHint?: (sessionId: string) => CacheWarmupDurableHint | undefined
 }
 
 /** 本模块读得到的宿主上下文（Cordis Context 结构上满足；测试可用假对象）。 */
@@ -440,7 +456,7 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
   ): Promise<PostToolDecision> => {
     if (decision.kind !== 'accept') return decision
     if (decision.value !== undefined) return decision
-    if (exec.name !== CACHE_WARMUP_SOURCE_TOOL) return decision
+    if (!CACHE_WARMUP_SOURCE_TOOLS.has(exec.name)) return decision
     // 开关每次重读：关闭只影响之后的新结果，历史的 preview 不重新投影。
     if (!options.settings().enabled) return decision
     const route = cacheWarmupRouteOf(exec.agent)
@@ -458,7 +474,15 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     if (blocks.length === 0) return decision
     const content = blocks as unknown as ProjectionResult['content']
 
-    const budget: PreviewBudget = cacheWarmupBudget(sessionId)
+    let durable: CacheWarmupDurableHint | undefined
+    try {
+      durable = options.durableHint?.(sessionId)
+    } catch {
+      durable = undefined
+    }
+    const budget: PreviewBudget = durable === undefined
+      ? cacheWarmupBudget(sessionId)
+      : cacheWarmupBudget(sessionId, Date.now(), durable)
     // 投影是锦上添花：它抛一次错，不能让一条本来成功的工具结果变成失败，所以
     // 用 `catch` 收成 undefined 而不是让异常冒到宿主的事件瀑布上。
     const projected = await projectToolResult({

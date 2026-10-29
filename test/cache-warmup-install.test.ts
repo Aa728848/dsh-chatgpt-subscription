@@ -46,6 +46,9 @@ vi.mock('../src/host/cache-warmup/index.ts', () => ({
     steadyStateMaxChars: 8000,
     hitRatioThreshold: 0.97,
     consecutiveHitsRequired: 2,
+    retainedPrefixMinCachedTokens: 1024,
+    retainedPrefixMaxFreshTokens: 256,
+    cacheTtlMs: 25 * 60 * 1000,
     maxResultBytes: 8 * 1024 * 1024,
     maxSessionBytes: 64 * 1024 * 1024,
     pageLimitDefault: 64,
@@ -287,13 +290,24 @@ describe('cache warmup host integration', () => {
     expect(projectionCalls()).toBe(0)
   })
 
-  it('leaves a tool other than run_code untouched', async () => {
+  it('leaves a tool other than run_code/shell untouched', async () => {
     const { listener } = install()
     const decision: PostToolDecision = { kind: 'accept' }
     const exec = { ...runCodeExec(), name: 'read' } as ToolExecution
     const returned = await listener(exec, fullResult(), acceptAll(decision))
     expect(returned).toBe(decision)
     expect(projectionCalls()).toBe(0)
+  })
+
+  it('projects standalone shell and job_output tools on Kimi line', async () => {
+    const { listener } = install()
+    for (const toolName of ['win_bash', 'bash', 'pwsh', 'job_output']) {
+      const exec = { ...runCodeExec(), name: toolName } as ToolExecution
+      const returned = await listener(exec, fullResult(), acceptAll({ kind: 'accept' }))
+      expect(returned.kind).toBe('accept')
+      expect(JSON.stringify(returned)).toContain('PREVIEW')
+    }
+    expect(projectionCalls()).toBe(4)
   })
 
   it('projects a Kimi run_code result by replacing content only', async () => {

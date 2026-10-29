@@ -293,6 +293,19 @@ export interface KimiCodeCacheStatsDto {
    * is absent, under the same rule as {@link cacheWrite5mTokens}.
    */
   cacheWrite1hTokens: number
+  /**
+   * Current cache-warmup budget state for the displayed session, when known.
+   *
+   * Shows whether tool-result projection is still in the conservative warmup
+   * window (`maxChars = 1200`) or has settled into the steady-state budget
+   * (`maxChars = 8000`) after consecutive high-hit turns.
+   */
+  warmup?: {
+    warmup: boolean
+    maxChars: number
+    consecutiveHits: number
+    requiredHits: number
+  }
 }
 
 /**

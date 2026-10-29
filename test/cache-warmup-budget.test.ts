@@ -200,6 +200,68 @@ describe('cacheWarmupBudget 预热期判定', () => {
     cacheWarmupBudget('s')
     expect(JSON.stringify(cacheWarmupUsageReports('s'))).toBe(before)
   })
+
+  it('第二轨（短会话前缀完整延续）：1792 cached + 43 input 后紧接 1792 cached + 84 input（95.52%）仍计为连续命中进入稳态', () => {
+    const t0 = 1_000_000
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 1792, inputTokens: 43, at: t0 }))
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 1792, inputTokens: 84, at: t0 + 5_000 }))
+    const budget = cacheWarmupBudget('s', t0 + 10_000)
+    expect(budget.warmup).toBe(false)
+    expect(budget.maxChars).toBe(8000)
+    expect(budget.consecutiveHits).toBe(2)
+    expect(budget.hitRatio).toBeCloseTo(1792 / (1792 + 84), 5)
+  })
+
+  it('第二轨边界：若缓存前缀比上一轮缩水或单轮新增超过 256 tokens，则不触发第二轨兜底', () => {
+    const t0 = 1_000_000
+    // 前缀从 1792 缩水到 1536：说明部分前缀失效，不算命中
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 1792, inputTokens: 43, at: t0 }))
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 1536, inputTokens: 84, at: t0 + 5_000 }))
+    expect(cacheWarmupBudget('s', t0 + 10_000).warmup).toBe(true)
+
+    // 新增 inputTokens = 300 > 256 且比例 < 0.97：不算命中
+    resetCacheWarmupForTests()
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 1792, inputTokens: 43, at: t0 }))
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 1792, inputTokens: 300, at: t0 + 5_000 }))
+    expect(cacheWarmupBudget('s', t0 + 10_000).warmup).toBe(true)
+  })
+
+  it('空闲超过 25 分钟（cacheTtlMs）自动预判缓存已冷，预算当场退回预热期 1200', () => {
+    const t0 = 1_000_000
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 2000, inputTokens: 10, at: t0 }))
+    recordCacheWarmupUsage(usage({ sessionId: 's', cached: 2010, inputTokens: 10, at: t0 + 10_000 }))
+    // 25 分钟整仍在有效期内：稳态 8000
+    const warm = cacheWarmupBudget('s', t0 + 10_000 + CACHE_WARMUP_DEFAULTS.cacheTtlMs)
+    expect(warm.warmup).toBe(false)
+    expect(warm.maxChars).toBe(8000)
+
+    // 超过 25 分钟 1 毫秒：自动回退预热期 1200
+    const cold = cacheWarmupBudget('s', t0 + 10_000 + CACHE_WARMUP_DEFAULTS.cacheTtlMs + 1)
+    expect(cold.warmup).toBe(true)
+    expect(cold.maxChars).toBe(CACHE_WARMUP_DEFAULTS.warmupMaxChars)
+    expect(cold.consecutiveHits).toBe(0)
+  })
+
+  it('进程重启后内存无报告时，可从持久化 durable 摘要恢复稳态（未超时）或在超时后保持预热', () => {
+    const now = 5_000_000
+    const settled = cacheWarmupBudget('s-restarted', now, {
+      lastActiveAt: now - 60_000,
+      consecutiveHits: 2,
+      hitRatio: 0.98,
+    })
+    expect(settled.warmup).toBe(false)
+    expect(settled.maxChars).toBe(8000)
+    expect(settled.consecutiveHits).toBe(2)
+
+    const expired = cacheWarmupBudget('s-restarted', now, {
+      lastActiveAt: now - CACHE_WARMUP_DEFAULTS.cacheTtlMs - 1_000,
+      consecutiveHits: 3,
+      hitRatio: 0.99,
+    })
+    expect(expired.warmup).toBe(true)
+    expect(expired.maxChars).toBe(CACHE_WARMUP_DEFAULTS.warmupMaxChars)
+    expect(expired.consecutiveHits).toBe(0)
+  })
 })
 
 describe('recordCacheWarmupUsage 有界与健壮', () => {

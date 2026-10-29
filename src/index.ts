@@ -188,6 +188,7 @@ import {
   installCacheWarmup,
   type CacheWarmupContext,
 } from './host/cache-warmup/install.ts'
+import { sessionCacheState } from './host/kimi-code/session-cache-state.ts'
 import {
   CACHE_WARMUP_SETTING_DESCRIPTION,
   resolveCacheWarmupSettings,
@@ -624,6 +625,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => installCacheWarmup(ctx as unknown as CacheWarmupContext, {
     // 函数而不是快照：设置卡保存后就地写新值，不重挂插件行。
     settings: () => resolveCacheWarmupSettings(pluginConfig),
+    durableHint: (sessionId) => {
+      const record = sessionCacheState.read(sessionId)
+      if (record === undefined) return undefined
+      const total = record.cachedTokens + record.freshTokens
+      return {
+        lastActiveAt: record.lastActiveAt,
+        consecutiveHits: record.warmupConsecutiveHits ?? 0,
+        hitRatio: total > 0 ? record.cachedTokens / total : 0,
+      }
+    },
   }), 'dsh-chatgpt-subscription: cache warmup')
 
   // One read-only diagnostic probe, inert unless the deployment enables it.

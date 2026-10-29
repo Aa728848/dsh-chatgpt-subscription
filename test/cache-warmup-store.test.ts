@@ -310,6 +310,30 @@ describe('FileResultReferenceStore 字节安全分页', () => {
     expect(capped.limit).toBe(512)
     expect(capped.maxBytes).toBe(65_536)
   })
+
+  it('单行 minified JSON（仅含转义 \\n，无真实换行）：按逻辑转义换行受 limit 行数约束，且拼合后与原文逐字相等', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    // 构造含字面量 \\n（双反斜杠+n，不应断行）与真转义 \n（单反斜杠+n，应断行）的单行 JSON
+    const lines = Array.from({ length: 10 }, (_, idx) => `line-${idx} literal-escaped-\\\\n-stay`)
+    const minifiedJson = JSON.stringify({ exitCode: 1, stdout: lines.join('\n') })
+    expect(minifiedJson.includes('\n')).toBe(false)
+    expect(minifiedJson.includes('\\n')).toBe(true)
+
+    const reference = await store.put({ sessionId: 'session-a', content: minifiedJson })
+    const p1 = await store.page({ sessionId: 'session-a', refId: reference.refId, limit: 4 })
+    expect(p1.complete).toBe(false)
+    expect(p1.omitted.reason).toBe('lines')
+    expect(p1.omitted.lines).toBe(6)
+
+    const p2 = await store.page({ sessionId: 'session-a', refId: reference.refId, offset: p1.nextOffset!, limit: 4 })
+    expect(p2.complete).toBe(false)
+    expect(p2.omitted.lines).toBe(2)
+
+    const p3 = await store.page({ sessionId: 'session-a', refId: reference.refId, offset: p2.nextOffset!, limit: 4 })
+    expect(p3.complete).toBe(true)
+    expect(p3.nextOffset).toBeNull()
+    expect(p1.content + p2.content + p3.content).toBe(minifiedJson)
+  })
 })
 
 describe('FileResultReferenceStore 结构化分页', () => {

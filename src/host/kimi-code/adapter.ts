@@ -915,7 +915,7 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
   // Observation only: hand the cache-warmup registry the same numbers this
   // record just took. No request is written, no state owned here changes, and
   // the drift cause passes through unclassified rather than being re-derived.
-  recordCacheWarmupUsage({
+  const warmupState = recordCacheWarmupUsage({
     sessionId,
     inputTokens: state.inputTokens,
     cacheReadTokens: state.cacheReadTokens,
@@ -924,6 +924,7 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
     at: now,
     ...(lastDrift === undefined ? {} : { driftCause: lastDrift }),
   })
+  sessionCacheState.noteWarmupStreak(sessionId, warmupState.consecutiveHits)
 }
 
 export class KimiCodeAdapter extends LlmAdapter {

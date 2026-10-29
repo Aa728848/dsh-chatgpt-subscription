@@ -24,25 +24,75 @@ const WARMUP_BUDGET: PreviewBudget = Object.freeze({
   hitRatio: 0,
 })
 
+export interface CacheWarmupDurableHint {
+  /** 持久化的最近活跃时间（毫秒）。 */
+  lastActiveAt?: number
+  /** 持久化的连续命中次数。 */
+  consecutiveHits?: number
+  /** 持久化的最近一次命中率（0-1）。 */
+  hitRatio?: number
+}
+
 /**
  * 当前会话的预览预算。
  *
  * 规则（约束 4）：预热期 `maxChars = 1200`（约 600-750 tokens）；连续
- * `consecutiveHitsRequired`(2) 次命中率 ≥ 0.97 且期间没有 drift，才进入稳态
- * `maxChars = 8000`。任何一次 drift 都清零连续计数，于是下一条请求立刻回落到预热预算。
+ * `consecutiveHitsRequired`(2) 次命中（比例 ≥ 0.97 或前缀完整延续且新增 ≤ 256 tokens）
+ * 且期间没有 drift，才进入稳态 `maxChars = 8000`。任何一次 drift 都清零连续计数，
+ * 于是下一条请求立刻回落到预热预算。
+ *
+ * 空闲 TTL 预判：若距离最近一条报告已超过 `cacheTtlMs`（25 分钟，Kimi 实测缓存
+ * 全热上限），说明上游缓存大概率已冷，无需等下一轮请求失败，当场退回预热期保守预算。
  *
  * **不抛出**：没有会话、没有报告、登记表异常，一律返回预热期的保守预算。
  * @param sessionId - 会话 id；不传则按最保守的预热预算处理。
+ * @param now - 当前时间戳（毫秒），默认 `Date.now()`；测试可注入。
+ * @param durable - 进程重启后尚无内存报告时的持久化回退摘要（可选）。
  * @returns 本次投影可用的预算。
  */
-export function cacheWarmupBudget(sessionId?: string): PreviewBudget {
+export function cacheWarmupBudget(
+  sessionId?: string,
+  now: number = Date.now(),
+  durable?: CacheWarmupDurableHint,
+): PreviewBudget {
   try {
     if (typeof sessionId !== 'string' || sessionId.trim() === '') return { ...WARMUP_BUDGET }
     const reports = cacheWarmupUsageReports(sessionId)
-    if (reports.length === 0) return { ...WARMUP_BUDGET }
-    const consecutiveHits = consecutiveWarmupHits(reports)
+    if (reports.length === 0) {
+      if (durable !== undefined && durable !== null && typeof durable === 'object') {
+        const lastAt = durable.lastActiveAt
+        const notExpired =
+          typeof lastAt === 'number' &&
+          Number.isFinite(lastAt) &&
+          Number.isFinite(now) &&
+          now - lastAt <= CACHE_WARMUP_DEFAULTS.cacheTtlMs
+        const hits =
+          notExpired && typeof durable.consecutiveHits === 'number' && Number.isFinite(durable.consecutiveHits) && durable.consecutiveHits > 0
+            ? Math.floor(durable.consecutiveHits)
+            : 0
+        const hitRatio =
+          typeof durable.hitRatio === 'number' && Number.isFinite(durable.hitRatio) && durable.hitRatio >= 0
+            ? Math.min(1, durable.hitRatio)
+            : 0
+        const warmup = hits < CACHE_WARMUP_DEFAULTS.consecutiveHitsRequired
+        return {
+          maxChars: warmup ? CACHE_WARMUP_DEFAULTS.warmupMaxChars : CACHE_WARMUP_DEFAULTS.steadyStateMaxChars,
+          warmup,
+          consecutiveHits: hits,
+          hitRatio,
+        }
+      }
+      return { ...WARMUP_BUDGET }
+    }
     const last = reports[reports.length - 1]
     const hitRatio = last === undefined ? 0 : cacheWarmupHitRatio(last)
+    const expired =
+      last !== undefined &&
+      typeof last.at === 'number' &&
+      Number.isFinite(last.at) &&
+      Number.isFinite(now) &&
+      now - last.at > CACHE_WARMUP_DEFAULTS.cacheTtlMs
+    const consecutiveHits = expired ? 0 : consecutiveWarmupHits(reports)
     const warmup = consecutiveHits < CACHE_WARMUP_DEFAULTS.consecutiveHitsRequired
     return {
       maxChars: warmup ? CACHE_WARMUP_DEFAULTS.warmupMaxChars : CACHE_WARMUP_DEFAULTS.steadyStateMaxChars,
@@ -95,9 +145,10 @@ export interface CacheWarmupSnapshot {
 /**
  * 一份可读快照。**不抛出**，且完全无副作用（只读登记表）。
  * @param sessionId - 会话 id；不传则给全局汇总。
+ * @param now - 当前时间戳（毫秒），默认 `Date.now()`。
  * @returns 快照。
  */
-export function cacheWarmupSnapshot(sessionId?: string): CacheWarmupSnapshot {
+export function cacheWarmupSnapshot(sessionId?: string, now: number = Date.now()): CacheWarmupSnapshot {
   const fallback: CacheWarmupSnapshot = {
     budget: { ...WARMUP_BUDGET },
     defaults: CACHE_WARMUP_DEFAULTS,
@@ -110,7 +161,7 @@ export function cacheWarmupSnapshot(sessionId?: string): CacheWarmupSnapshot {
     sessions: 0,
   }
   try {
-    const budget = cacheWarmupBudget(sessionId)
+    const budget = cacheWarmupBudget(sessionId, now)
     const reports = typeof sessionId === 'string' && sessionId.trim() !== ''
       ? cacheWarmupUsageReports(sessionId)
       : []
