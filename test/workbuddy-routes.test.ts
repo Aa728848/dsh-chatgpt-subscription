@@ -1,0 +1,1377 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import {
+  billingMeters,
+  clearCachedCatalog,
+  clearCachedQuota,
+  fetchAccountQuota,
+  parseBilling,
+  parseConfigModels,
+  loadConfigCatalog,
+  parseCycleTime,
+  refreshCredentials,
+  workBuddyHeaders,
+} from '../src/host/workbuddy/client.ts'
+import {
+  buildModelOptions,
+  getWorkBuddyWebStatus,
+  registerWorkBuddyRoutes,
+  resolveEnabledModelIds,
+} from '../src/host/workbuddy/routes.ts'
+import type { WorkBuddyCredentials } from '../src/host/workbuddy/token-store.ts'
+import { FileModelSettingsStore, registerWorkBuddyPreferenceStore } from '../src/host/workbuddy/token-store.ts'
+import { flushCatalogSnapshots } from '../src/host/common/catalog-snapshot.ts'
+import { createWorkBuddyStore } from './support/workbuddy-fixtures.ts'
+import { WorkBuddyAccountPool, parseWorkBuddyPoolData } from '../src/host/workbuddy/account-pool.ts'
+import {
+  DEFAULT_VISIBLE_MODEL_IDS,
+  FALLBACK_MODELS,
+  workBuddyModelCredits,
+} from '../src/host/workbuddy/model-catalog.ts'
+import type { WorkBuddyModelEntry } from '../src/host/workbuddy/model-catalog.ts'
+import { parseWorkBuddyCreditMultiplier } from '../src/shared/workbuddy-contracts.ts'
+
+const temporaryDirs: string[] = []
+
+/** Shape the official client's conversation ids take on the wire. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+/** Build an unsigned JWT-shaped token carrying the claims under test. */
+function jwtToken(claims: Record<string, unknown>): string {
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8')
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode(claims)}.signature`
+}
+
+async function makeAuthDir(options: { domain?: string; expiresAt?: number } = {}): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-routes-'))
+  temporaryDirs.push(dir)
+  await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({
+    account: { uid: 'uid-1', nickname: 'tester', uin: '100000000001', type: 'personal' },
+    auth: {
+      accessToken: 'token-abc',
+      refreshToken: 'refresh-abc',
+      expiresAt: options.expiresAt ?? Date.now() + 3_600_000,
+      domain: options.domain ?? 'copilot.tencent.com',
+    },
+  }), 'utf8')
+  return dir
+}
+
+/** In-memory pool storage, so a test never touches the encrypted platform store. */
+function makePoolBackend(): any {
+  let data: unknown = null
+  return {
+    async load() { return data === null ? null : parseWorkBuddyPoolData(JSON.parse(JSON.stringify(data))) },
+    async save(value: unknown) { data = JSON.parse(JSON.stringify(value)) },
+    async clear() { data = null },
+  }
+}
+
+async function makeSettings(): Promise<FileModelSettingsStore> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-set-'))
+  temporaryDirs.push(dir)
+  return new FileModelSettingsStore(path.join(dir, 'models.json'))
+}
+
+/**
+ * Point this test's storage at a private home, so no snapshot can cross over.
+ *
+ * `loadConfigCatalog` persists its catalog with a fire-and-forget write, and
+ * `catalogSnapshotPath` resolves `DSH_HOME` when that write *runs*, not when it
+ * is queued. A write still in flight when a test ends therefore lands after any
+ * cleanup — a delete alone cannot win that race, which is why the region test
+ * failed on CI: it expects `[]` for intl+offline, but an earlier case's intl
+ * listing was written back to disk and rehydrated by its first cache miss.
+ *
+ * Giving every test its own home removes the race instead of narrowing it: a
+ * late write can only recreate a file under the *previous* test's directory,
+ * which nothing reads again. `dshHomeDir()` reads the variable per call, so
+ * pointing it here is enough.
+ *
+ * The public-catalog tests below read `DSH_HOME` too, so this is scoped to the
+ * whole file rather than to one case.
+ */
+let homeBefore: string | undefined
+
+beforeEach(async () => {
+  homeBefore = process.env.DSH_HOME
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-routes-home-'))
+  temporaryDirs.push(home)
+  process.env.DSH_HOME = home
+})
+
+afterEach(async () => {
+  clearCachedQuota()
+  clearCachedCatalog()
+  vi.restoreAllMocks()
+  // Let pending writes settle before the tree goes, so an ordinary one lands in
+  // the directory about to be removed rather than in the next test's.
+  await flushCatalogSnapshots()
+  for (const dir of temporaryDirs.splice(0)) {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+  if (homeBefore === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = homeBefore
+})
+
+/** A /v3/config payload shaped exactly like the live gateway's. */
+const CONFIG = {
+  code: 0,
+  data: {
+    models: [
+      {
+        id: 'glm-5.3',
+        name: 'GLM-5.3',
+        maxAllowedSize: 1_000_000,
+        maxInputTokens: 1_000_000,
+        maxOutputTokens: 48_000,
+        supportsImages: true,
+        supportsReasoning: true,
+        reasoning: { canDisableThinking: true, defaultEffort: 'high', supportedEfforts: ['low', 'high', 'max'] },
+        descriptionZh: '能力均衡，适合日常使用',
+      },
+      {
+        id: 'deepseek-v4.1-flash',
+        name: 'Deepseek-V4.1-Flash',
+        maxAllowedSize: 1_000_000,
+        maxOutputTokens: 128_000,
+        supportsImages: true,
+        supportsReasoning: true,
+        contextWindow: { defaultLength: 300_000, supportedLengths: [300_000, 1_000_000] },
+        reasoning: { effort: 'high' },
+      },
+      {
+        // Reports a default its own ladder does not contain, exactly as the
+        // live gateway does for minimax-m3 / kimi-k3 / cn glm-5.3.
+        id: 'minimax-m3',
+        name: 'MiniMax-M3',
+        maxAllowedSize: 200_000,
+        maxOutputTokens: 32_000,
+        supportsImages: false,
+        supportsReasoning: true,
+        reasoning: { effort: 'medium' },
+      },
+      {
+        id: 'kimi-k2-thinking',
+        name: 'Kimi-K2-Thinking',
+        maxAllowedSize: 164_000,
+        maxOutputTokens: 32_000,
+        supportsImages: false,
+        supportsReasoning: true,
+        reasoning: { effort: 'high' },
+      },
+      // Image-generation tools carry no chat capabilities and must be skipped.
+      { id: 'hunyuan-image-alpha', name: 'Hunyuan Image Alpha', tags: ['text-to-image'] },
+    ],
+  },
+}
+
+describe('WorkBuddy config catalog parsing', () => {
+  it('reads the gateway fields without inferring anything from the model name', () => {
+    const models = parseConfigModels(CONFIG, 'cn')
+    const glm = models.find((m) => m.id === 'glm-5.3')!
+    expect(glm.contextWindow).toBe(1_000_000)
+    expect(glm.maxTokens).toBe(48_000)
+    expect(glm.supportsImage).toBe(true)
+    expect(glm.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(glm.defaultReasoningEffort).toBe('high')
+    expect(glm.canDisableThinking).toBe(true)
+    expect(glm.regions).toEqual(['cn'])
+  })
+
+  it('uses the served default length rather than the model maximum', () => {
+    const models = parseConfigModels(CONFIG, 'cn')
+    const deepseek = models.find((m) => m.id === 'deepseek-v4.1-flash')!
+    // The gateway serves 300K by default while allowing 1M; DSH must size its
+    // overflow decisions against what the backend actually serves.
+    expect(deepseek.contextWindow).toBe(300_000)
+    expect(deepseek.maxContextWindow).toBe(1_000_000)
+  })
+
+  it('treats a lone `effort` field as a DEFAULT over the standard ladder', () => {
+    // Regression, both directions. `{ effort: 'high' }` first became a one-entry
+    // ladder, so a caller's explicit `low` was rejected as unsupported and
+    // silently replaced by the default; widening it instead to every level this
+    // route can name then put `minimal`/`xhigh` in DSH's picker on a model that
+    // has neither. Measured on `deepseek-v4.1-flash`, which reports exactly this
+    // shape, the model accepts `low`/`high`/`max` and routes every other value
+    // into the nearest of them.
+    const models = parseConfigModels(CONFIG, 'cn')
+    const deepseek = models.find((m) => m.id === 'deepseek-v4.1-flash')!
+    expect(deepseek.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(deepseek.defaultReasoningEffort).toBe('high')
+    // The same shape on a text-only model behaves identically.
+    const kimi = models.find((m) => m.id === 'kimi-k2-thinking')!
+    expect(kimi.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(kimi.defaultReasoningEffort).toBe('high')
+    expect(kimi.supportsImage).toBe(false)
+  })
+
+  it('keeps a declared ladder exactly as the gateway states it', () => {
+    const models = parseConfigModels(CONFIG, 'cn')
+    const glm = models.find((m) => m.id === 'glm-5.3')!
+    // A `supportedEfforts` list is authoritative and must not be widened.
+    expect(glm.reasoningEfforts).toEqual(['low', 'high', 'max'])
+  })
+
+  it('converges a declared default the model ladder does not contain', () => {
+    // Regression: the gateway names a default from a wider vocabulary than the
+    // ladder it publishes. `minimax-m3` reports `effort: 'medium'` while
+    // exposing only low/high/max. Left unconverged, the level-resolution step
+    // drops it, no `reasoning_effort` is sent, and the model answers with an
+    // EMPTY `reasoning_content` (measured: 0 characters over three samples,
+    // versus 282-659 with the field).
+    const models = parseConfigModels(CONFIG, 'cn')
+    const medium = models.find((m) => m.id === 'minimax-m3')!
+    expect(medium.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(medium.defaultReasoningEffort).toBe('high')
+    // A default the ladder does contain is left exactly as declared.
+    const glm = models.find((m) => m.id === 'glm-5.3')!
+    expect(glm.defaultReasoningEffort).toBe('high')
+  })
+
+  it('skips image-generation tools and entries with no context window', () => {
+    const ids = parseConfigModels(CONFIG, 'cn').map((m) => m.id)
+    expect(ids).not.toContain('hunyuan-image-alpha')
+  })
+
+  it('tolerates a malformed payload', () => {
+    expect(parseConfigModels(null, 'cn')).toEqual([])
+    expect(parseConfigModels({ data: {} }, 'cn')).toEqual([])
+    expect(parseConfigModels({ data: { models: 'nope' } }, 'cn')).toEqual([])
+  })
+})
+
+/**
+ * The consumption multiplier `/v3/config` publishes per model, as a string:
+ * `x0.79 credits` on cn and `x6.67` on intl were both measured live. It is the
+ * rate a model draws down the package allowance, and the official CodeBuddy
+ * client renders it beside the model in its picker.
+ */
+describe('WorkBuddy credit multiplier parsing', () => {
+  it('reads both measured wire spellings into the bare number', () => {
+    expect(parseWorkBuddyCreditMultiplier('x6.67')).toBe('6.67')
+    expect(parseWorkBuddyCreditMultiplier('x0.79 credits')).toBe('0.79')
+    // The cn payload spells the prefix with U+00D7, not ASCII 'x'.
+    expect(parseWorkBuddyCreditMultiplier('×3.31')).toBe('3.31')
+    expect(parseWorkBuddyCreditMultiplier('  x1.62 credits  ')).toBe('1.62')
+  })
+
+  it('keeps a declared zero, which is a rate and not a missing value', () => {
+    // 'x0.00' means "this model consumes no allowance". Collapsing it into the
+    // same bucket as the empty string would turn a published price into silence.
+    expect(parseWorkBuddyCreditMultiplier('x0.00')).toBe('0.00')
+  })
+
+  it('reports nothing for a value that names no rate', () => {
+    // '' is what `default-model` ships: the publisher declared no rate at all.
+    expect(parseWorkBuddyCreditMultiplier('')).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier('credits')).toBeNull()
+    // A suffix the gateway does not use, a thousands separator Number() would
+    // read as NaN, a non-string, and an absent field.
+    expect(parseWorkBuddyCreditMultiplier('0.5x')).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier('x1,000')).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier(null)).toBeNull()
+    expect(parseWorkBuddyCreditMultiplier(42)).toBeNull()
+  })
+
+  it('keys the multiplier by the region the entry was fetched for', () => {
+    const payload = {
+      data: {
+        models: [
+          { id: 'glm-5.3', maxAllowedSize: 1_000_000, credits: 'x0.79 credits' },
+          { id: 'gpt-5.5', maxAllowedSize: 1_000_000, credits: 'x3.31' },
+        ],
+      },
+    }
+    expect(parseConfigModels(payload, 'cn').map((m) => m.credits)).toEqual([{ cn: '0.79' }, { cn: '3.31' }])
+    expect(parseConfigModels(payload, 'intl').map((m) => m.credits)).toEqual([{ intl: '0.79' }, { intl: '3.31' }])
+  })
+
+  it('leaves the field off rather than writing a placeholder', () => {
+    // `default-model` publishes an empty string, and a model may omit the field
+    // entirely. Either way the entry must carry NO `credits` key — the card
+    // renders "no rate published" from its absence, and a zeroed placeholder
+    // would read as "free".
+    const models = parseConfigModels({
+      data: {
+        models: [
+          { id: 'default-model', maxAllowedSize: 1_000_000, credits: '' },
+          { id: 'no-field', maxAllowedSize: 1_000_000 },
+        ],
+      },
+    }, 'intl')
+    expect(models).toHaveLength(2)
+    for (const model of models) {
+      expect('credits' in model).toBe(false)
+      expect(model.credits).toBeUndefined()
+    }
+  })
+})
+
+describe('WorkBuddy request headers', () => {
+  it('sends the CLI identity, which is the only one the gateway accepts everywhere', () => {
+    const headers = workBuddyHeaders({
+      accessToken: 't', domain: 'copilot.tencent.com', uid: 'u1', enterpriseId: 'e1', backend: 'https://copilot.tencent.com',
+    })
+    // Measured: the IDE identity is rejected by /v3/config with code 12403.
+    expect(headers['user-agent']).toBe('CLI/2.63.2 CodeBuddy/2.63.2')
+    expect(headers.authorization).toBe('Bearer t')
+    expect(headers['x-user-id']).toBe('u1')
+    expect(headers['x-domain']).toBe('copilot.tencent.com')
+    // The domestic backend must not receive a foreign origin.
+    expect(headers.origin).toBeUndefined()
+  })
+
+  it('adds the matching origin and referer for the international backend', () => {
+    const headers = workBuddyHeaders({
+      accessToken: 't', domain: 'www.workbuddy.ai', uid: 'u1', backend: 'https://www.workbuddy.ai',
+    })
+    // The international gateway validates the browser origin the IDE would send.
+    expect(headers.origin).toBe('https://www.workbuddy.ai')
+    expect(headers.referer).toBe('https://www.workbuddy.ai/')
+  })
+
+  it('sends the conversation header group the international gateway verifies', () => {
+    const headers = workBuddyHeaders(
+      { accessToken: 't', domain: 'www.workbuddy.ai', uid: 'u1', backend: 'https://www.workbuddy.ai' },
+      {},
+      { sessionId: 'session-1' },
+    )
+    // Measured: without exactly this group the chat endpoint answers 400 code
+    // 11128 regardless of the message shape.
+    expect(headers['x-conversation-id']).toMatch(UUID_SHAPE)
+    expect(headers['x-conversation-request-id']).toMatch(UUID_SHAPE)
+    expect(headers['x-conversation-message-id']).toMatch(UUID_SHAPE)
+    expect(headers['x-request-id']).toMatch(UUID_SHAPE)
+    expect(headers['acp-connection-id']).toMatch(UUID_SHAPE)
+  })
+
+  it('keeps the conversation identity stable per session and turn, with fresh per-message ids', () => {
+    const credentials = {
+      accessToken: 't', domain: 'www.workbuddy.ai', uid: 'u1', backend: 'https://www.workbuddy.ai',
+    }
+    const first = workBuddyHeaders(credentials, {}, { sessionId: 'session-1', turnKey: 'turn-1' })
+    const second = workBuddyHeaders(credentials, {}, { sessionId: 'session-1', turnKey: 'turn-1' })
+    const other = workBuddyHeaders(credentials, {}, { sessionId: 'session-2', turnKey: 'turn-1' })
+
+    // The official client reuses one conversation id for the whole conversation,
+    // so two turns of the same session must agree on the scoped three.
+    expect(second['x-conversation-id']).toBe(first['x-conversation-id'])
+    expect(second['x-conversation-request-id']).toBe(first['x-conversation-request-id'])
+    expect(second['acp-connection-id']).toBe(first['acp-connection-id'])
+    // A different session must not reuse them.
+    expect(other['x-conversation-id']).not.toBe(first['x-conversation-id'])
+
+    // The per-message ids are the ones the official client randomizes.
+    expect(second['x-conversation-message-id']).not.toBe(first['x-conversation-message-id'])
+    expect(second['x-request-id']).not.toBe(first['x-request-id'])
+  })
+
+  it('sends the conversation group on domestic chat, but leaves non-chat surfaces without it', () => {
+    const cn = workBuddyHeaders(
+      { accessToken: 't', domain: 'copilot.tencent.com', uid: 'u1', backend: 'https://copilot.tencent.com' },
+      {},
+      { sessionId: 'session-1' },
+    )
+    // The desktop client carries the same conversation group on both builds.
+    expect(cn['x-conversation-id']).toMatch(UUID_SHAPE)
+    expect(cn['acp-connection-id']).toMatch(UUID_SHAPE)
+
+    const intl = workBuddyHeaders(
+      { accessToken: 't', domain: 'www.workbuddy.ai', uid: 'u1', backend: 'https://www.workbuddy.ai' },
+    )
+    // Only the chat endpoint enforces the group: config, billing, refresh and
+    // check-in calls pass no session and must stay byte-identical to before.
+    expect(intl['x-conversation-id']).toBeUndefined()
+    expect(intl['x-request-id']).toBeUndefined()
+  })
+})
+
+describe('WorkBuddy token refresh', () => {
+  it('merges the new auth block over the stored one', async () => {
+    const credentials = {
+      accessToken: 'old', refreshToken: 'old-refresh', expiresAt: 1,
+      region: 'cn' as const, domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com',
+      uid: 'u1', sourceFile: '/tmp/a.info', sourceMtimeMs: 0, source: 'desktop' as const,
+    }
+    const fetchFn = (async () => new Response(JSON.stringify({
+      code: 0,
+      data: { accessToken: 'new', refreshToken: 'new-refresh', expiresIn: 3600 },
+    }), { status: 200 })) as unknown as typeof fetch
+
+    const refreshed = await refreshCredentials(credentials, { fetchFn })
+    expect(refreshed.accessToken).toBe('new')
+    expect(refreshed.refreshToken).toBe('new-refresh')
+    // The endpoint omits the domain; losing it would strand the next refresh.
+    expect(refreshed.domain).toBe('copilot.tencent.com')
+    expect(refreshed.expiresAt).toBeGreaterThan(Date.now())
+  })
+
+  it('rejects a refresh the service refused', async () => {
+    const credentials = {
+      accessToken: 'old', refreshToken: 'r', expiresAt: 1,
+      region: 'cn' as const, domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com',
+      sourceFile: '/tmp/a.info', sourceMtimeMs: 0, source: 'desktop' as const,
+    }
+    const fetchFn = (async () => new Response(JSON.stringify({ code: 40001, msg: 'invalid refresh token' }), { status: 200 })) as unknown as typeof fetch
+    await expect(refreshCredentials(credentials, { fetchFn })).rejects.toThrow(/invalid refresh token/)
+  })
+})
+
+describe('WorkBuddy billing parsing', () => {
+  const BILLING = {
+    code: 0,
+    data: {
+      Response: {
+        Data: {
+          TotalCount: 7,
+          Accounts: [
+            {
+              PackageName: 'Free Plan Subscription',
+              CapacitySize: 100,
+              CapacityRemain: 93,
+              CycleCapacityUsed: 7,
+              CycleCapacitySize: 100,
+              CycleStartTime: '2026-09-01 00:00:00',
+              CycleEndTime: '2026-09-30 23:59:59',
+            },
+          ],
+        },
+      },
+    },
+  }
+
+  it('reads the nested account block', () => {
+    const billing = parseBilling(BILLING)
+    expect(billing.packageName).toBe('Free Plan Subscription')
+    expect(billing.totalCredits).toBe(100)
+    expect(billing.remainingCredits).toBe(93)
+    expect(billing.cycleUsedCredits).toBe(7)
+    expect(billing.cycleCredits).toBe(100)
+    expect(billing.cycleEndsAt).toBeGreaterThan(0)
+  })
+
+  it('sums several packages rather than reporting only the first', () => {
+    const two = {
+      data: {
+        Response: {
+          Data: {
+            Accounts: [
+              { PackageName: 'A', CapacitySize: 100, CapacityRemain: 50, CycleCapacityUsed: 5, CycleCapacitySize: 100 },
+              { PackageName: 'B', CapacitySize: 200, CapacityRemain: 150, CycleCapacityUsed: 10, CycleCapacitySize: 200 },
+            ],
+          },
+        },
+      },
+    }
+    const billing = parseBilling(two)
+    expect(billing.totalCredits).toBe(300)
+    expect(billing.remainingCredits).toBe(200)
+    expect(billing.cycleUsedCredits).toBe(15)
+  })
+
+  it('reports nothing rather than a fabricated zero for an unknown payload', () => {
+    const billing = parseBilling({ data: {} })
+    expect(billing.totalCredits).toBeNull()
+    expect(billing.remainingCredits).toBeNull()
+    expect(billingMeters(billing)).toEqual([])
+  })
+
+  it('parses the zone-less cycle timestamps the service sends', () => {
+    expect(parseCycleTime('2026-09-01 00:00:00')).toBe(new Date('2026-09-01T00:00:00').getTime())
+    expect(parseCycleTime(1_788_000_000_000)).toBe(1_788_000_000_000)
+    expect(parseCycleTime('')).toBeNull()
+    expect(parseCycleTime(undefined)).toBeNull()
+  })
+
+  it('builds a bounded cycle meter and a package-balance meter', () => {
+    const meters = billingMeters(parseBilling(BILLING))
+    const cycle = meters.find((m) => m.id === 'cycle')!
+    expect(cycle.usedFraction).toBeCloseTo(0.07)
+    expect(cycle.remainingFraction).toBeCloseTo(0.93)
+    expect(cycle.used).toBe('7')
+    expect(cycle.limit).toBe('100')
+    const pkg = meters.find((m) => m.id === 'package')!
+    expect(pkg.label).toBe('Free Plan Subscription')
+    expect(pkg.limit).toBe('100')
+  })
+})
+
+describe('WorkBuddy quota fetch', () => {
+  it('reads the allowance through the credential store', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const fetchFn = (async (url: any) => {
+      expect(String(url)).toBe('https://copilot.tencent.com/billing/meter/get-user-resource')
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { Response: { Data: { Accounts: [{ PackageName: 'Free', CapacitySize: 100, CapacityRemain: 90 }] } } },
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const quota = await fetchAccountQuota(store, fetchFn, true)
+    expect(quota.packageName).toBe('Free')
+    expect(quota.account.region).toBe('cn')
+    expect(quota.meters.length).toBeGreaterThan(0)
+  })
+
+  it('refuses to report a quota without a credential', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
+    temporaryDirs.push(dir)
+    await expect(fetchAccountQuota(createWorkBuddyStore(dir), fetch, true)).rejects.toThrow(/Not signed in/)
+  })
+
+  it('surfaces a billing rejection rather than reporting an empty allowance', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const fetchFn = (async () => new Response(JSON.stringify({ code: 12403, msg: 'check ua' }), { status: 200 })) as unknown as typeof fetch
+    await expect(fetchAccountQuota(store, fetchFn, true)).rejects.toThrow(/check ua/)
+  })
+})
+
+describe('WorkBuddy model selection', () => {
+  it('expands an untouched default to everything the account can call', () => {
+    const available = ['glm-5.3', 'kimi-k3', 'deepseek-v4.1-flash', 'hy4-preview', 'gpt-6-astra']
+    // The shipped default is a short list; a first run must not hide the rest.
+    const resolved = resolveEnabledModelIds([...DEFAULT_VISIBLE_MODEL_IDS], available, true)
+    expect(resolved).toEqual(available)
+  })
+
+  it('honours an explicit selection exactly, dropping ids the region lost', () => {
+    const available = ['glm-5.3', 'kimi-k3']
+    expect(resolveEnabledModelIds(['glm-5.3', 'gemini-3.5-flash'], available, true)).toEqual(['glm-5.3'])
+  })
+
+  it('selects nothing when the provider is disabled', () => {
+    expect(resolveEnabledModelIds(['glm-5.3'], ['glm-5.3'], false)).toEqual([])
+  })
+
+  it('reports the catalog context window and lets an override win', () => {
+    const options = buildModelOptions(FALLBACK_MODELS, ['glm-5.3'], ['glm-5.3'], { 'glm-5.3': 500_000 })
+    const glm = options[0]!
+    expect(glm.defaultContextWindow).toBe(1_000_000)
+    expect(glm.contextWindow).toBe(500_000)
+    expect(glm.supportsImage).toBe(true)
+    // The card offers what the model ACCEPTS plus, because the entry allows it,
+    // the level that switches the trace off entirely.
+    expect(glm.reasoningEfforts).toEqual(['none', 'low', 'high', 'max'])
+  })
+
+  it('passes the published multiplier through, every region the entry carries', () => {
+    // Whole-table passthrough, deliberately not trimmed to one account's
+    // region: this DTO is also read with no account in hand, and such a caller
+    // would otherwise be told nothing. Measured 2026-10-09, the one id the two
+    // backends rate differently must reach the card with both keys.
+    const options = buildModelOptions(
+      FALLBACK_MODELS,
+      ['deepseek-v4.1-flash', 'gpt-6-astra'],
+      ['deepseek-v4.1-flash', 'gpt-6-astra'],
+      {},
+    )
+    expect(options.find((o) => o.id === 'deepseek-v4.1-flash')?.credits)
+      .toEqual({ cn: '0.11', intl: '0.00' })
+    expect(options.find((o) => o.id === 'gpt-6-astra')?.credits).toEqual({ intl: '6.67' })
+  })
+
+  it('omits the field for a model the catalog did not rate', () => {
+    // `default-model` publishes an empty string, so it has no rate to pass
+    // on; an id no catalog describes resolves to a synthetic entry with none
+    // either.
+    const options = buildModelOptions(
+      FALLBACK_MODELS,
+      ['default-model', 'never-heard-of-it'],
+      ['default-model', 'never-heard-of-it'],
+      {},
+    )
+    for (const option of options) {
+      expect('credits' in option).toBe(false)
+      expect(option.credits).toBeUndefined()
+    }
+  })
+
+  it('reads a multiplier through the accessor and reports none for an unknown id', () => {
+    // The accessor is what the request path and the card both go through, so
+    // an id no catalog describes must answer `no rate published` rather than throw
+    // or invent one.
+    expect(workBuddyModelCredits('deepseek-v4.1-flash')).toEqual({ cn: '0.11', intl: '0.00' })
+    expect(workBuddyModelCredits('hy3')).toEqual({ cn: '0.00', intl: '0.00' })
+    expect(workBuddyModelCredits('default-model')).toEqual({})
+    expect(workBuddyModelCredits('never-heard-of-it')).toEqual({})
+  })
+})
+
+describe('WorkBuddy catalog credit invariants', () => {
+  it('keys every shipped multiplier on a region that entry declares', () => {
+    // A rate filed under a region the model is not served by would never be
+    // rendered — the card looks up the reader's own region — so it would be a
+    // silent transcription error rather than a visible one.
+    for (const model of FALLBACK_MODELS) {
+      for (const region of Object.keys(model.credits ?? {})) {
+        const where = model.id + ' rates ' + region
+        expect(model.regions, where).toContain(region)
+      }
+    }
+  })
+
+  it('ships a rate for every model the gateway rated, per the measured table', () => {
+    // The counts below are the transcription's own audit: 43 of the 49 shipped
+    // rows carry a rate, and exactly eight are rated by BOTH regions.
+    const rated = FALLBACK_MODELS.filter((model) => model.credits !== undefined)
+    const bothRegions = rated.filter((model) => Object.keys(model.credits!).length === 2)
+    expect(rated).toHaveLength(43)
+    expect(bothRegions.map((model) => model.id)).toEqual([
+      'glm-5.3',
+      'glm-5.3-flash',
+      'glm-5.2',
+      'kimi-k2.8-preview',
+      'kimi-k2.6',
+      'deepseek-v4.1-flash',
+      'hy4-preview',
+      'hy3',
+    ])
+    // The one measured disagreement: 0.11 on cn against 0.00 on intl.
+    expect(FALLBACK_MODELS.find((m) => m.id === 'deepseek-v4.1-flash')?.credits)
+      .toEqual({ cn: '0.11', intl: '0.00' })
+  })
+
+  it('stores every shipped multiplier as a bare finite non-negative number', () => {
+    // The stored form is the bare number, never the wire spelling: no 'x'
+    // prefix and no 'credits' suffix, and always something Number() reads back
+    // unchanged — a consumer doing arithmetic must not have to re-run the wire
+    // parser, and a rounded or padded value would be a transcription error.
+    for (const model of FALLBACK_MODELS) {
+      for (const [region, value] of Object.entries(model.credits ?? {})) {
+        const where = model.id + ' (' + region + ')'
+        expect(typeof value, where).toBe('string')
+        expect(value, where).not.toContain('x')
+        expect(value, where).not.toContain('credits')
+        const numeric = Number(value)
+        expect(Number.isFinite(numeric), where).toBe(true)
+        expect(numeric >= 0, where).toBe(true)
+        // A plain decimal literal: no sign, no exponent, no padding to trim.
+        // Trailing zeros are KEPT ('2.00', not '2'), because the value is a
+        // verbatim transcription of the published string and re-formatting it
+        // would be the rounding this table exists to avoid.
+        expect(value, where).toMatch(/^\d+(\.\d+)?$/)
+      }
+    }
+  })
+})
+
+describe('WorkBuddy web status', () => {
+  it('renders an unauthenticated card with a usable catalog and no credential leak', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
+    temporaryDirs.push(dir)
+    const store = createWorkBuddyStore(dir)
+    const status = await getWorkBuddyWebStatus(store, await makeSettings())
+    expect(status.authenticated).toBe(false)
+    expect(status.account).toBeNull()
+    // The card still needs a list to render before the first sign-in.
+    expect(status.models.length).toBeGreaterThan(0)
+    expect(status.authDirectory).toBe(dir)
+  })
+
+  it('reports the account and a region-filtered catalog when signed in', async () => {
+    const dir = await makeAuthDir({ domain: 'copilot.tencent.com' })
+    const store = createWorkBuddyStore(dir)
+    const fetchFn = (async (url: any) => {
+      if (String(url).includes('/v3/config')) {
+        return new Response(JSON.stringify(CONFIG), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { Response: { Data: { Accounts: [{ PackageName: 'Free', CapacitySize: 100, CapacityRemain: 90 }] } } },
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const status = await getWorkBuddyWebStatus(store, await makeSettings(), undefined, { fetchFn })
+    expect(status.authenticated).toBe(true)
+    expect(status.account?.region).toBe('cn')
+    // The international-only model must not be offered on a domestic account.
+    expect(status.models.map((m) => m.id)).not.toContain('gemini-3.5-flash')
+    expect(status.models.length).toBeGreaterThan(0)
+  })
+
+  it('never exposes a token or refresh token in the payload', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const status = await getWorkBuddyWebStatus(store, await makeSettings(), undefined, { fetchFn: (async () => new Response('{}', { status: 500 })) as unknown as typeof fetch })
+    const serialized = JSON.stringify(status)
+    expect(serialized).not.toContain('token-abc')
+    expect(serialized).not.toContain('refresh-abc')
+  })
+
+  it('falls back to the shipped catalog when the gateway is unreachable', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const fetchFn = (async () => { throw new Error('offline') }) as unknown as typeof fetch
+    const status = await getWorkBuddyWebStatus(store, await makeSettings(), undefined, { fetchFn })
+    expect(status.models.length).toBeGreaterThan(0)
+  })
+})
+
+/** Minimal IncomingMessage/ServerResponse doubles for the route handler. */
+function makeRequest(method: string, url: string, body?: unknown, origin?: string) {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
+  return {
+    method,
+    url,
+    headers: {
+      host: '127.0.0.1:43120',
+      ...(origin === undefined ? {} : { origin }),
+      'content-type': 'application/json',
+    },
+    on(event: string, handler: any) {
+      if (event === 'data') for (const chunk of chunks) handler(chunk)
+      if (event === 'end') handler()
+      return this
+    },
+    destroy() {},
+  } as any
+}
+
+function makeResponse() {
+  const captured = { status: 0, body: '' }
+  return {
+    captured,
+    writeHead(status: number) { captured.status = status; return this },
+    end(body: string) { captured.body = body },
+  } as any
+}
+
+function makeContext(handlers: any[]): any {
+  return {
+    webServer: {
+      register(route: any) {
+        handlers.push(route)
+        return () => undefined
+      },
+    },
+  }
+}
+
+describe('WorkBuddy routes', () => {
+  it('registers under /workbuddy/api and serves status', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), store, await makeSettings(), undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+    expect(handlers[0]!.path).toBe('/workbuddy/api')
+
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/status'), res)
+    expect(res.captured.status).toBe(200)
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.ok).toBe(true)
+    expect(payload.value.authenticated).toBe(true)
+  })
+
+  it('rejects a cross-origin mutation', async () => {
+    const dir = await makeAuthDir()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/settings', {}, 'https://evil.example'), res)
+    expect(res.captured.status).toBe(403)
+  })
+  it('rejects a cross-origin quota refresh but still serves a same-origin one', async () => {
+    const dir = await makeAuthDir()
+    const handlers: any[] = []
+    const fetchFn = (async (url: any) => {
+      const target = String(url)
+      if (target.includes('/billing/meter/get-user-resource')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { Response: { Data: { Accounts: [{ PackageName: 'Free', CapacitySize: 100, CapacityRemain: 90 }] } } },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify(CONFIG), { status: 200 })
+    }) as unknown as typeof fetch
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, { fetchFn })
+
+    // A POST forces an upstream read and can rotate the refresh token, so it is
+    // gated exactly like the other mutations.
+    const denied = makeResponse()
+    await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/quota', {}, 'https://evil.example'), denied)
+    expect(denied.captured.status).toBe(403)
+
+    const allowed = makeResponse()
+    await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/quota', {}, 'http://127.0.0.1:43120'), allowed)
+    expect(allowed.captured.status).toBe(200)
+    expect(JSON.parse(allowed.captured.body).ok).toBe(true)
+  })
+
+  it('keeps offering the unlisted models once the live catalog loads', async () => {
+    // A reachable gateway replaces the shipped table with the list it publishes,
+    // so a model it serves without listing would disappear from the picker the
+    // moment the catalog arrives. The merge is the only thing preventing that.
+    const online = (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch
+    const credentials: WorkBuddyCredentials = {
+      accessToken: 't',
+      refreshToken: 'r',
+      expiresAt: Date.now() + 3_600_000,
+      region: 'intl',
+      domain: 'www.workbuddy.ai',
+      backend: 'https://www.workbuddy.ai',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'desktop',
+    }
+    const ids = (await loadConfigCatalog(credentials, { fetchFn: online })).map((model) => model.id)
+    for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gemini-3.8-flash']) expect(ids).toContain(id)
+    // The payload is the authority on what it does describe: a published entry
+    // is never overwritten by the fallback row that shadows its id.
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('never serves one region the catalog snapshot read for another', async () => {
+    const offline = (async () => { throw new Error('offline') }) as unknown as typeof fetch
+    const online = (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch
+    const credentials = (region: 'cn' | 'intl'): WorkBuddyCredentials => ({
+      accessToken: 't',
+      refreshToken: 'r',
+      expiresAt: Date.now() + 3_600_000,
+      region,
+      domain: region === 'intl' ? 'www.workbuddy.ai' : 'copilot.tencent.com',
+      backend: region === 'intl' ? 'https://www.workbuddy.ai' : 'https://copilot.tencent.com',
+      sourceFile: '',
+      sourceMtimeMs: 0,
+      source: 'desktop',
+    })
+
+    const cn = await loadConfigCatalog(credentials('cn'), { fetchFn: online })
+    expect(cn.length).toBeGreaterThan(0)
+    // The same region still reuses its own snapshot when the gateway is down.
+    expect(await loadConfigCatalog(credentials('cn'), { fetchFn: offline })).toEqual(cn)
+
+    // The other region must not inherit it: those entries declare only `cn`, so
+    // the picker would filter every model out instead of using the shipped table.
+    expect(await loadConfigCatalog(credentials('intl'), { fetchFn: offline })).toEqual([])
+  })
+  it('renews an expired token before the connection probe', async () => {
+    const dir = await makeAuthDir({ expiresAt: Date.now() - 1000 })
+    const handlers: any[] = []
+    const urls: string[] = []
+    const fetchFn = (async (url: any, init: any) => {
+      urls.push(String(url))
+      if (String(url).includes('/v2/plugin/auth/token/refresh')) {
+        return new Response(JSON.stringify({ code: 0, data: { accessToken: 'fresh-token', expiresIn: 3600 } }), { status: 200 })
+      }
+      expect(init.headers.authorization).toBe('Bearer fresh-token')
+      return new Response('', { status: 200 })
+    }) as unknown as typeof fetch
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, { fetchFn })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'), res)
+    expect(res.captured.status).toBe(200)
+    expect(JSON.parse(res.captured.body).value.connected).toBe(true)
+    expect(urls[0]).toContain('/v2/plugin/auth/token/refresh')
+  })
+
+  it('saves a browser login under the same id the disk scan produces', async () => {
+    // Symptom 1 end to end: a browser login for an account the IDE already
+    // holds must not create a second account. The token response states only
+    // the display name; the id has to come from the account the token names.
+    vi.useFakeTimers()
+    try {
+      const uuid = 'd5721ab0-4d3a-42b4-ade1-f80f7381e2ca'
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-login-dedupe-'))
+      temporaryDirs.push(dir)
+      await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({
+        account: { uid: uuid, nickname: '快跑', uin: '330101607075' },
+        auth: { accessToken: 'file-token', refreshToken: 'file-rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+      }), 'utf8')
+
+      const settings = await makeSettings()
+      const store = createWorkBuddyStore(dir)
+      const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+      const handlers: any[] = []
+      const fetchFn = (async (url: any) => {
+        if (String(url).includes('/auth/state')) {
+          return new Response(JSON.stringify({ code: 0, data: { state: 's', authUrl: 'https://copilot.tencent.com/login?state=s' } }), { status: 200 })
+        }
+        if (String(url).includes('/v2/plugin/account')) {
+          return new Response(JSON.stringify({ code: 0, data: { uid: uuid, nickname: '快跑', uin: '330101607075' } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { accessToken: jwtToken({ sub: uuid, nickname: '快跑' }), refreshToken: 'login-rt', expiresIn: 3600, domain: 'copilot.tencent.com' },
+        }), { status: 200 })
+      }) as unknown as typeof fetch
+
+      registerWorkBuddyRoutes(makeContext(handlers), store, settings, undefined, { fetchFn, accountPool: pool })
+      await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/status'), makeResponse())
+      const started = makeResponse()
+      await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/accounts/login', { region: 'cn' }, 'http://127.0.0.1:43120'), started)
+      await vi.advanceTimersByTimeAsync(1_600)
+
+      const status = makeResponse()
+      await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts/login/status'), status)
+      const flow = JSON.parse(status.captured.body).value
+      expect(flow.status).toBe('complete')
+      expect(flow.accountId).toBe(`cn:${uuid}`)
+
+      // The pool holds the single account the card must render.
+      const accounts = await pool.listAccounts()
+      expect(accounts.map((account) => account.id)).toEqual([`cn:${uuid}`])
+      expect(accounts[0]!.alias).not.toBe('账号 1')
+      expect(accounts[0]!.uin).toBe('330101607075')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops an in-flight browser login when the routes are disposed', async () => {
+    vi.useFakeTimers()
+    try {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-login-'))
+      temporaryDirs.push(dir)
+      const handlers: any[] = []
+      const fetchFn = (async (url: any) => {
+        if (String(url).includes('/auth/state')) {
+          return new Response(JSON.stringify({ code: 0, data: { state: 's', authUrl: 'https://copilot.tencent.com/login' } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ code: 11217, msg: 'login ing...' }), { status: 200 })
+      }) as unknown as typeof fetch
+      const dispose = registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, { fetchFn })
+
+      const started = makeResponse()
+      await handlers[0]!.handler(makeRequest('POST', '/workbuddy/api/accounts/login', { region: 'cn' }, 'http://127.0.0.1:43120'), started)
+      expect(JSON.parse(started.captured.body).value.status).toBe('pending')
+
+      dispose()
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      const status = makeResponse()
+      await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts/login/status'), status)
+      expect(JSON.parse(status.captured.body).value.status).toBe('idle')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('accepts a same-origin settings update and persists it', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    const emit = vi.fn()
+    registerWorkBuddyRoutes({ ...makeContext(handlers), emit }, createWorkBuddyStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { enabledModelIds: ['glm-5.3'], defaultReasoningEffort: 'max' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(200)
+    expect((await settings.read()).enabledModelIds).toEqual(['glm-5.3'])
+    expect((await settings.read()).defaultReasoningEffort).toBe('max')
+    expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
+  })
+
+  it('clears a stored context window override when the card posts null', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    await settings.updateSettings({ contextWindowOverrides: { 'glm-5.3': 500_000 } })
+    const handlers: any[] = []
+    registerWorkBuddyRoutes({ ...makeContext(handlers), emit: vi.fn() }, createWorkBuddyStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { contextWindowOverrides: { 'glm-5.3': null } }, 'http://127.0.0.1:43120'),
+      res,
+    )
+
+    expect(res.captured.status).toBe(200)
+    expect((await settings.read()).contextWindowOverrides).toEqual({})
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.contextWindowOverrides).toEqual({})
+    // Back to the catalog window rather than the deleted override.
+    const glm = payload.value.models.find((model: any) => model.id === 'glm-5.3')
+    expect(glm.contextWindow).toBe(glm.defaultContextWindow)
+  })
+
+  it('writes one override and deletes another in the same patch', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    await settings.updateSettings({ contextWindowOverrides: { 'glm-5.3': 500_000, 'deepseek-v4.1-flash': 900_000 } })
+    const handlers: any[] = []
+    registerWorkBuddyRoutes({ ...makeContext(handlers), emit: vi.fn() }, createWorkBuddyStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest(
+        'POST',
+        '/workbuddy/api/settings',
+        { contextWindowOverrides: { 'glm-5.3': null, 'deepseek-v4.1-flash': 600_000 } },
+        'http://127.0.0.1:43120',
+      ),
+      res,
+    )
+
+    expect(res.captured.status).toBe(200)
+    expect((await settings.read()).contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    const glm = payload.value.models.find((model: any) => model.id === 'glm-5.3')
+    expect(glm.contextWindow).toBe(glm.defaultContextWindow)
+    expect(payload.value.models.find((model: any) => model.id === 'deepseek-v4.1-flash').contextWindow).toBe(600_000)
+  })
+
+  it('deletes through the settings namespace without persisting a null', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    // A harness with the register seam stores into the schema-validated
+    // namespace, which only accepts numbers.
+    let value: Record<string, unknown> = { contextWindowOverrides: { 'glm-5.3': 500_000 } }
+    const preferences = registerWorkBuddyPreferenceStore({
+      register(_namespace: unknown, schema: (input: unknown) => Record<string, unknown>) {
+        value = schema(value)
+        return {
+          get: () => value,
+          update: async (patch: object) => { value = schema({ ...value, ...patch }) },
+        }
+      },
+    }, settings)
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, preferences, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest(
+        'POST',
+        '/workbuddy/api/models',
+        { contextWindowOverrides: { 'glm-5.3': null, 'deepseek-v4.1-flash': 600_000 } },
+        'http://127.0.0.1:43120',
+      ),
+      res,
+    )
+
+    expect(res.captured.status).toBe(200)
+    expect(preferences.status().contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    // The fallback document is written in the background; it must merge the
+    // same way, so the deleted key cannot survive on disk as a null.
+    await vi.waitFor(async () => {
+      const written = JSON.parse(await fs.readFile(settings.path(), 'utf8')) as { contextWindowOverrides: unknown }
+      expect(written.contextWindowOverrides).toEqual({ 'deepseek-v4.1-flash': 600_000 })
+    })
+  })
+
+  it('persists a selected regional account and returns its model catalog', async () => {
+    const dir = await makeAuthDir()
+    await fs.writeFile(path.join(dir, 'intl.info'), JSON.stringify({
+      account: { uid: 'intl-user', nickname: 'international' },
+      auth: { accessToken: 'intl-token', expiresAt: Date.now() + 2_000_000, domain: 'www.workbuddy.ai' },
+    }), 'utf8')
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { selectedAccountId: 'intl:intl-user' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(200)
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.account.id).toBe('intl:intl-user')
+    expect(payload.value.account.region).toBe('intl')
+    expect((await settings.read()).selectedAccountId).toBe('intl:intl-user')
+  })
+
+  it('reports the account pool slice and applies a rotation strategy', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const handlers: any[] = []
+    const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+    await pool.addAccount({
+      accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'u1',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+    registerWorkBuddyRoutes(makeContext(handlers), store, await makeSettings(), undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+      accountPool: pool,
+    })
+
+    const status = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/status'), status)
+    const value = JSON.parse(status.captured.body).value
+    // The card renders the shared pool slice rather than a single account.
+    expect(value.rotationStrategy).toBe('sequential')
+    expect(value.accounts).toHaveLength(1)
+    expect(value.accounts[0]).toMatchObject({ id: 'cn:u1', removable: true, region: 'cn' })
+    // Nothing secret may cross this boundary.
+    expect(JSON.stringify(value)).not.toContain('at-1')
+
+    const strategy = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/strategy', { strategy: 'sticky' }, 'http://127.0.0.1:43120'),
+      strategy,
+    )
+    expect(strategy.captured.status).toBe(200)
+    expect(JSON.parse(strategy.captured.body).value.rotationStrategy).toBe('sticky')
+  })
+
+  it('carries the account model parks in the status payload', async () => {
+    const dir = await makeAuthDir()
+    const store = createWorkBuddyStore(dir)
+    const handlers: any[] = []
+    const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+    await pool.addAccount({
+      accessToken: 'at-park', refreshToken: 'rt-park', expiresAt: Date.now() + 3_600_000, region: 'cn',
+      domain: 'copilot.tencent.com', backend: 'https://copilot.tencent.com', uid: 'u1',
+      sourceFile: '', sourceMtimeMs: 0, source: 'managed',
+    })
+    const accountId = (await pool.listAccounts())[0]!.id
+    const until = pool.markModelCooldown(accountId, 'glm-5.3', 60_000)
+    expect(until).toBeGreaterThan(Date.now())
+    registerWorkBuddyRoutes(makeContext(handlers), store, await makeSettings(), undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+      accountPool: pool,
+    })
+
+    const status = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/status'), status)
+    expect(status.captured.status).toBe(200)
+    const value = JSON.parse(status.captured.body).value
+    // The card draws the parks out of the status payload, so they have to
+    // survive the trip through the route: the model, and the instant its park
+    // lifts.
+    expect(value.accounts[0].modelCooldowns).toEqual([{ model: 'glm-5.3', cooldownUntil: until }])
+  })
+
+  it('refuses to delete a desktop account and only hides it', async () => {
+    const dir = await makeAuthDir()
+    await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({
+      account: { uid: 'desktop-user' },
+      auth: { accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+    }), 'utf8')
+    const store = createWorkBuddyStore(dir)
+    const handlers: any[] = []
+    const settings = await makeSettings()
+    const pool = new WorkBuddyAccountPool({ store, backend: makePoolBackend() })
+    await pool.syncDesktopAccounts()
+    registerWorkBuddyRoutes(makeContext(handlers), store, settings, undefined, { accountPool: pool })
+
+    const accountId = (await pool.listAccounts())[0]!.id
+    const denied = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'delete', accountId }, 'http://127.0.0.1:43120'),
+      denied,
+    )
+    expect(denied.captured.status).toBe(400)
+
+    // Hiding is the supported action, and the IDE's file is left alone.
+    const hidden = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'hide', accountId }, 'http://127.0.0.1:43120'),
+      hidden,
+    )
+    expect(hidden.captured.status).toBe(200)
+    expect((await settings.read()).hiddenAccountIds).toEqual([accountId])
+    expect(await fs.readFile(path.join(dir, 'workbuddy-desktop.info'), 'utf8')).toContain('at')
+  })
+
+  it('rejects an account id that is not present on this machine', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings)
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { selectedAccountId: 'intl:missing' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(400)
+    expect((await settings.read()).selectedAccountId).toBeNull()
+  })
+
+  it('ignores an unknown reasoning level instead of storing it', async () => {
+    const dir = await makeAuthDir()
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings, undefined, {
+      fetchFn: (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch,
+    })
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/settings', { defaultReasoningEffort: 'ultra' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(200)
+    expect((await settings.read()).defaultReasoningEffort).toBeNull()
+  })
+
+  it('rejects a method that does not belong to the route', async () => {
+    const dir = await makeAuthDir()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('DELETE', '/workbuddy/api/status'), res)
+    expect(res.captured.status).toBe(405)
+  })
+
+  it('answers not-found for an unknown subpath', async () => {
+    const dir = await makeAuthDir()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/nope'), res)
+    expect(res.captured.status).toBe(404)
+  })
+
+  it('lists every credential in the auth directory without leaking tokens', async () => {
+    const dir = await makeAuthDir()
+    await fs.writeFile(path.join(dir, 'workbuddy-desktop.2026-01-01T00-00-00-000Z.1.info'), JSON.stringify({
+      account: { uid: 'uid-2', nickname: 'second' },
+      auth: { accessToken: 'other-token', expiresAt: Date.now() + 1_000_000, domain: 'www.workbuddy.ai' },
+    }), 'utf8')
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts'), res)
+    expect(res.captured.status).toBe(200)
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.accounts).toHaveLength(2)
+    expect(payload.value.accounts.map((account: any) => account.id)).toEqual(['cn:uid-1', 'intl:uid-2'])
+    expect(res.captured.body).not.toContain('token')
+  })
+
+  it('hides and restores a desktop account without deleting its source file', async () => {
+    const dir = await makeAuthDir()
+    const source = path.join(dir, 'workbuddy-desktop.info')
+    const settings = await makeSettings()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings)
+    const hide = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'hide', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
+      hide,
+    )
+    expect(hide.captured.status).toBe(200)
+    expect((await settings.read()).hiddenAccountIds).toContain('cn:uid-1')
+    expect(await fs.stat(source)).toBeTruthy()
+    const restore = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'restore', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
+      restore,
+    )
+    expect(restore.captured.status).toBe(200)
+    expect((await settings.read()).hiddenAccountIds).toEqual([])
+    expect(await fs.stat(source)).toBeTruthy()
+  })
+
+  it('reports an account hidden under the pre-fix name-derived key as hidden', async () => {
+    // The account's file states only its display name, so the old code hid it
+    // as `cn:tester`. The heal moves it to its uid; the card must still show
+    // it as hidden rather than silently restoring it into the rotation.
+    const uuid = 'uid-from-token'
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-route-hide-'))
+    temporaryDirs.push(dir)
+    await fs.writeFile(path.join(dir, 'workbuddy-desktop.info'), JSON.stringify({
+      account: { nickname: 'tester', uin: '100000000001' },
+      auth: { accessToken: jwtToken({ sub: uuid, nickname: 'tester' }), refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, domain: 'copilot.tencent.com' },
+    }), 'utf8')
+    const settings = await makeSettings()
+    await settings.updateSettings({ hiddenAccountIds: ['cn:tester'] })
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), settings)
+    const res = makeResponse()
+    await handlers[0]!.handler(makeRequest('GET', '/workbuddy/api/accounts'), res)
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.accounts).toHaveLength(1)
+    expect(payload.value.accounts[0].id).toBe(`cn:${uuid}`)
+    expect(payload.value.accounts[0].hidden).toBe(true)
+  })
+
+  it('refuses to delete a desktop-owned credential', async () => {
+    const dir = await makeAuthDir()
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/accounts/action', { action: 'delete', accountId: 'cn:uid-1' }, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(400)
+    expect(res.captured.body).toContain('cannot be deleted')
+  })
+
+  it('refuses a connection test without a credential', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-empty-'))
+    temporaryDirs.push(dir)
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings())
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(400)
+  })
+
+  it('probes a real model on the connection test', async () => {
+    const dir = await makeAuthDir()
+    const seen: string[] = []
+    const handlers: any[] = []
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, {
+      fetchFn: (async (url: any, init: any) => {
+        seen.push(String(url))
+        if (String(url).includes('/v3/config')) return new Response(JSON.stringify(CONFIG), { status: 200 })
+        const body = JSON.parse(String(init.body))
+        expect(body.messages[0].role).toBe('system')
+        return new Response('data: [DONE]\n\n', { status: 200 })
+      }) as unknown as typeof fetch,
+    })
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'),
+      res,
+    )
+    expect(res.captured.status).toBe(200)
+    const payload = JSON.parse(res.captured.body)
+    expect(payload.value.connected).toBe(true)
+    expect(seen.some((u) => u.includes('/v2/chat/completions'))).toBe(true)
+  })
+
+  it('carries the conversation group on an international connection probe', async () => {
+    const dir = await makeAuthDir({ domain: 'www.workbuddy.ai' })
+    const handlers: any[] = []
+    let probeHeaders: Record<string, string> | undefined
+    registerWorkBuddyRoutes(makeContext(handlers), createWorkBuddyStore(dir), await makeSettings(), undefined, {
+      fetchFn: (async (url: any, init: any) => {
+        if (String(url).includes('/v3/config')) return new Response(JSON.stringify(CONFIG), { status: 200 })
+        probeHeaders = init.headers
+        return new Response('data: [DONE]\n\n', { status: 200 })
+      }) as unknown as typeof fetch,
+    })
+    const res = makeResponse()
+    await handlers[0]!.handler(
+      makeRequest('POST', '/workbuddy/api/connection/test', {}, 'http://127.0.0.1:43120'),
+      res,
+    )
+
+    // The probe posts to the same gated chat endpoint a real turn uses, so it
+    // must clear the same channel check: without the group the international
+    // gateway answers 400 code 11128 and the test reports a healthy line broken.
+    expect(res.captured.status).toBe(200)
+    expect(probeHeaders?.['x-conversation-id']).toMatch(UUID_SHAPE)
+    expect(probeHeaders?.['acp-connection-id']).toMatch(UUID_SHAPE)
+    expect(probeHeaders?.['x-request-id']).toMatch(UUID_SHAPE)
+  })
+})

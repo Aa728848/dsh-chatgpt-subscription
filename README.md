@@ -22,6 +22,7 @@
 - [Cline Pass（OAuth 订阅）线路](#cline-passoauth-订阅线路)
 - [Qoder（订阅）线路](#qoder订阅线路)
 - [OpenDesign（订阅，API Key / 浏览器授权）线路](#opendesign订阅api-key--浏览器授权线路)
+- [WorkBuddy（CodeBuddy 订阅）线路](#workbuddycodebuddy-订阅线路)
 - [子代理模型授权](#子代理模型授权0215-起032-起强制指定模型)
 - [随包分发的 Agent Preset](#随包分发的-agent-preset)
 - [本机登录](#本机登录)
@@ -33,7 +34,7 @@
 
 ## 线路总览
 
-本插件同时接入 **11 条订阅线路**，每条各自独立注册 Provider、独立登录、独立额度卡片。
+本插件同时接入 **13 条订阅线路**，每条各自独立注册 Provider、独立登录、独立额度卡片。
 
 | Provider ID | 订阅 | 协议 | 登录方式 | 模型目录来源 |
 | --- | --- | --- | --- | --- |
@@ -48,6 +49,7 @@
 | `cline-pass` | Cline Pass | OpenAI Chat Completions | **浏览器设备码 OAuth**（WorkOS，账号入池、自动续期）；API Key 仅作兼容回退 | 随包表兜底 + 官方 `recommended-models` / models.dev / 上游网关目录补全 |
 | `qoder` | Qoder 订阅（全球区 qoder.com / 中国站 qoder.com.cn） | Qoder 自有（COSY 签名 + 信封 SSE） | **浏览器设备流**（仅全球区）/ 手工粘贴 PAT（两区）/ 只读导入本机 `~/.qoder/.auth/user` | **实时运行时发现**（COSY 签名 GET）+ 随包能力兜底表 |
 | `opendesign` | OpenDesign 订阅（Go / Plus / Pro / Max） | OpenAI Chat Completions | **浏览器设备授权**（AMR 设备流，签发控制 Key + 运行时 Key）；粘贴 Cloud 控制台的 API Key 作回退 | 随包表兜底（源自官方公开价目）+ 实时 `GET /v1/models` |
+| `workbuddy-subscription` | WorkBuddy（CodeBuddy 订阅，国区 / 国际区） | OpenAI Chat Completions；国区 Claude 走 Anthropic Messages | 浏览器轮询授权，或只读采纳 CodeBuddy 桌面登录态 | 实时 `/v3/config` + 本地快照与随包兜底 |
 
 > **只有 minimax-code 是硬编码目录，而且是有意的**：该端点的 `GET /v1/models` **未对订阅流量开放**（返回 503 `direct_route_not_configured`），任何「实时目录」都只会是一个必然失败的请求。其取值转录自本机官方客户端的 `config.yaml`。
 >
@@ -97,6 +99,15 @@
 - 新增 `codex_image_generate` 工具，生成图片后通过 DSH 附件系统保存并在会话中渲染；
 - 可选 composer 快捷用量徽标，按当前 `codex-chatgpt` 模型显示最紧张窗口的剩余额度。
 
+
+### WorkBuddy（CodeBuddy 订阅）线路
+
+- 注册 `workbuddy-subscription` Provider，设置卡片与 `/workbuddy/api/*` 路由同时恢复；支持国区 `copilot.tencent.com` 与国际区 `www.workbuddy.ai`，区域由凭据的 domain 决定，不能靠换端点跨区调用。
+- 登录沿用浏览器 state/token 轮询，也可只读采纳桌面端现有登录态；桌面账号只能隐藏，插件不会删除它们。自管账号进入同一账号池，支持轮换、配额、credits 倍率、上下文覆盖、每日签到（仅国区）与本地用量护栏。
+- 普通模型走 `/v2/chat/completions`，国区 Claude 走 `/v1/messages` 并保留 signed thinking 与 `output_config.effort`；国际区 Claude 仍走 Chat Completions。请求使用当前桌面客户端身份、每账号会话头与 gzip，目录来自 `/v3/config` 而非不存在的 `/v1/models`。
+- 对上游 11128 渠道校验，先仅改写已核实的窄指纹；仍有拒绝时只允许一次把头部 system 搬进首条 user 的 `<instructions>`，并记住该提示文本，后续会话直接走搬移路径。其它 11128（缺会话头、首消息形状）不会误触发这条重试。
+- 401 只按当前账号续期并重放一次；11140 立即停用该账号并持久化，30 分钟内第二个不同账号也受限时整池暂停 30 分钟，暂停到期后受限账号仍需重新登录。**不新增静态 API Key，不伪造 X-Device-Token。**
+- **风险须知**：该线路依赖非官方、逆向得出的上游行为，WorkBuddy 仍可能继续收紧渠道校验和账号风控；实时可用性以本机最小 live probe 为准，离线测试不承诺上游永久兼容。实施证据与未验证边界见 `docs/workbuddy-line-plan.md` 和 `docs/workbuddy-upstream-hardening.md`。
 
 ### Command Code 线路
 

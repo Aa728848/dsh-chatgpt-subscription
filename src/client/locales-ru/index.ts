@@ -26,6 +26,7 @@ import { NS_OPENDESIGN } from '../opendesign/locales.ts'
 import { NS_PROGRESS_UPDATES } from '../progress-updates/locales.ts'
 import { NS_QODER } from '../qoder/locales.ts'
 import { NS_STEP_CODE } from '../step-code/locales.ts'
+import { NS_WORKBUDDY } from '../workbuddy/locales.ts'
 import { NS } from '../locales.ts'
 import { dictionary as antigravity } from './antigravity.ts'
 import { dictionary as claude } from './claude.ts'
@@ -40,6 +41,7 @@ import { dictionary as openDesign } from './opendesign.ts'
 import { dictionary as progressUpdates } from './progress-updates.ts'
 import { dictionary as qoder } from './qoder.ts'
 import { dictionary as stepCode } from './step-code.ts'
+import { dictionary as workbuddy } from './workbuddy.ts'
 
 /** Language id of this pack: the value stored as `locale.preference`. */
 export const RU_LOCALE = 'ru'
@@ -88,6 +90,9 @@ export function installRussianLocale(ctx: ClientContext): void {
     [NS_QODER, qoder],
     [NS_OPENDESIGN, openDesign],
     [NS_PROGRESS_UPDATES, progressUpdates],
+    // Appended, never inserted: a new line joins the end of the list so the
+    // registration order of the lines that were already shipped never moves.
+    [NS_WORKBUDDY, workbuddy],
   ]
 
   for (const [ns, dictionary] of dictionaries) {

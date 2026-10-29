@@ -1,0 +1,958 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
+import { LlmError } from '@deepseek-ai/dsh-llm'
+import type {
+  WorkBuddyAccount,
+  WorkBuddyAccountQuota,
+  WorkBuddyMeter,
+} from '../../shared/workbuddy-contracts.ts'
+import {
+  outboundIdentity,
+  type WorkBuddyOutboundProduct,
+} from './outbound-identity.ts'
+import {
+  ACCOUNT_PATH,
+  BILLING_PATH,
+  CLIENT_PRODUCT,
+  CLIENT_USER_AGENT,
+  CONFIG_PATH,
+  DEFAULT_DOMAIN,
+  DISCOVERY_TIMEOUT_MS,
+  HEADER_ACP_CONNECTION_ID,
+  HEADER_CONVERSATION_ID,
+  HEADER_CONVERSATION_MESSAGE_ID,
+  HEADER_CONVERSATION_REQUEST_ID,
+  HEADER_DOMAIN,
+  HEADER_ENTERPRISE_ID,
+  HEADER_IDE_NAME,
+  HEADER_PRODUCT,
+  HEADER_REFRESH_SOURCE,
+  HEADER_REFRESH_TOKEN,
+  HEADER_REQUESTED_WITH,
+  HEADER_REQUEST_ID,
+  HEADER_TENANT_ID,
+  HEADER_USER_ID,
+  PROVIDER_ID,
+  PROVIDER_NAME,
+  REFRESH_PATH,
+  QUOTA_CACHE_TTL_MS,
+  isIntlDomain,
+  refreshSourceForDomain,
+} from './types.ts'
+import { FileCredentialStore, workBuddyAccountId, type WorkBuddyCredentials } from './token-store.ts'
+import { ANTHROPIC_VERSION } from './mapper.ts'
+import type { WorkBuddyTokenIdentity } from './identity.ts'
+import { withUnpublishedModels, type WorkBuddyModelEntry } from './model-catalog.ts'
+import {
+  convergeWorkBuddyEffort,
+  parseWorkBuddyCreditMultiplier,
+  WORKBUDDY_STANDARD_EFFORTS,
+} from '../../shared/workbuddy-contracts.ts'
+import { catalogSnapshotName, rehydrateCatalogCache, writeCatalogSnapshot } from '../common/catalog-snapshot.ts'
+
+export interface WorkBuddyRequestOptions {
+  fetchFn?: typeof fetch
+  signal?: AbortSignal
+}
+
+function timeoutSignal(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  return signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined
+}
+
+function asString(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim() !== '') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return undefined
+}
+
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.replace(/[,\s]/g, ''))
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
+
+/**
+ * One UUID-shaped value deterministically derived from a seed.
+ *
+ * Session-scoped conversation headers must keep the same value for the whole
+ * conversation while looking like the v4 UUIDs the official client sends, so
+ * the seed is hashed and the version/variant nibbles are stamped in rather than
+ * taken from the digest. Nothing here is a credential or a secret: it is a
+ * locally derived identifier that happens to travel on the wire.
+ */
+function uuidFromSeed(seed: string): string {
+  const hex = createHash('sha256').update(seed).digest('hex')
+  const variant = ((Number.parseInt(hex[16] ?? '0', 16) & 0x3) | 0x8).toString(16)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+/**
+ * Which chat surface a call is, for the headers only that surface needs.
+ *
+ * Passing this opts the request into the conversation header group. It is
+ * deliberately a separate argument rather than a consequence of `sessionId`
+ * being present: the group belongs to the chat endpoint's channel check, and
+ * the config, billing, refresh and check-in surfaces keep the exact header set
+ * they already worked with.
+ */
+export interface WorkBuddyChannelOptions {
+  /**
+   * Which client identity this request presents.
+   *
+   * Omitted means the line's shipped identity (`cli`). Only the chat call ever
+   * sets it: the config, billing and refresh surfaces are the ones measured to
+   * accept the CLI identity, and the choice exists for the chat fingerprint.
+   */
+  product?: WorkBuddyOutboundProduct
+  /**
+   * Harness session the chat call belongs to.
+   *
+   * Omit it for a call with no conversation behind it (the connection-test
+   * probe). The group is still sent — the gateway requires it either way — but
+   * the scoped ids fall back to random values.
+   */
+  sessionId?: string
+  /**
+   * Stable per-account key the conversation ids are derived from.
+   *
+   * Load-bearing for the pool: two accounts sending the SAME conversation id
+   * would present one device signing in as two identities, which is exactly
+   * what the gateway's channel check exists to catch. Naming the account here is
+   * what keeps every account's ids its own.
+   */
+  accountKey?: string
+  /**
+   * One user send, as `userTurnKey` in `mapper.ts` derives it.
+   *
+   * Every tool step, retry and renewal replay of the SAME user turn keeps this
+   * value, so the gateway reads one send rather than N unrelated requests; the
+   * user's next message changes it. Absent or empty means "no turn to name" and
+   * degrades to a fresh id, which is the behaviour every non-chat surface keeps.
+   */
+  turnKey?: string
+  /**
+   * This call goes to the Anthropic Messages surface.
+   *
+   * Adds its protocol headers. Deliberately explicit rather than inferred from
+   * the URL: the two surfaces want different header sets, and a call that
+   * guessed wrong would be refused for a reason the caller could have stated.
+   */
+  messages?: boolean
+}
+
+/**
+ * Conversation header group the international gateway demands.
+ *
+ * The gateway answers 400 `code 11128` to a chat request that omits these,
+ * whatever its message shape, so they stand between the route and a working
+ * conversation. `X-Conversation-ID`, `X-Conversation-Request-ID` and
+ * `acp-connection-id` are session-scoped — the official client reuses one value
+ * across a conversation — while the message and request ids are fresh per
+ * request. An absent session id degrades to a random value for the scoped
+ * three: measured to pass the check, but it loses the conversation identity the
+ * gateway may tighten around later.
+ */
+function conversationHeaders(channel: WorkBuddyChannelOptions): Record<string, string> {
+  const sessionId = channel.sessionId === undefined || channel.sessionId === '' ? undefined : channel.sessionId
+  const accountKey = channel.accountKey ?? ''
+  // The account is part of every seed, not just of the id: two accounts on one
+  // harness session must not present the same conversation or the same ACP
+  // connection, and a pool routinely runs several accounts inside one session.
+  const base = `${accountKey}\0${sessionId ?? ''}`
+  const seedable = accountKey !== '' || sessionId !== undefined
+  const scoped = (tag: string): string => seedable ? uuidFromSeed(`${base}\0${tag}`) : randomUUID()
+  const turnKey = channel.turnKey ?? ''
+  return {
+    [HEADER_CONVERSATION_ID]: scoped('conversation'),
+    // ONE user send, however many requests it takes: every tool step and every
+    // replay after a renewal repeats this value, and the user's next message is
+    // what changes it. A body with no user turn to name falls back to a fresh id.
+    [HEADER_CONVERSATION_REQUEST_ID]: turnKey === ''
+      ? (seedable ? randomUUID() : randomUUID())
+      : (seedable ? uuidFromSeed(`${base}\0turn\0${turnKey}`) : uuidFromSeed(`turn\0${turnKey}`)),
+    [HEADER_ACP_CONNECTION_ID]: scoped('acp-connection'),
+    // Per REQUEST, never derived: the gateway reads these as the message and the
+    // request they belong to, and repeating one across two requests of a turn is
+    // what makes a retry look like a duplicate send.
+    [HEADER_CONVERSATION_MESSAGE_ID]: randomUUID(),
+    [HEADER_REQUEST_ID]: randomUUID(),
+  }
+}
+
+/**
+ * Protocol headers the Anthropic Messages surface requires.
+ *
+ * `anthropic-version` is mandatory — the surface answers 400 without it rather
+ * than defaulting — and the version is the one the reference implementation
+ * sends. No `x-api-key` here on purpose: this route authenticates with the
+ * account's bearer token, and a static key would be a second, unmanaged
+ * credential (see the "no static API key" rule this line is held to).
+ */
+function messagesHeaders(): Record<string, string> {
+  // The version lives with the Messages mapper, which is the module that owns
+  // that protocol; naming it twice is how the two drift apart.
+  return { 'anthropic-version': ANTHROPIC_VERSION }
+}
+
+/**
+ * Attribution and identity headers for one backend request.
+ *
+ * The gateway gates on this header set: the international deployment answers
+ * 401 without the CLI user agent and matching `Origin`/`Referer`, and both
+ * deployments read the account identity headers rather than deriving it from
+ * the bearer token alone.
+ *
+ * `channel` marks a request to the chat endpoint, which is the only surface
+ * whose channel check wants the {@link conversationHeaders} group.
+ */
+export function workBuddyHeaders(
+  credentials: Pick<WorkBuddyCredentials, 'accessToken' | 'domain' | 'uid' | 'enterpriseId' | 'backend'>,
+  extra: Record<string, string> = {},
+  channel?: WorkBuddyChannelOptions,
+): Record<string, string> {
+  const domain = credentials.domain || DEFAULT_DOMAIN
+  const intl = isIntlDomain(domain)
+  // The group is sent on BOTH deployments now. It was measured necessary on the
+  // international gateway, and the domestic one accepts it either way; the
+  // desktop client's own requests carry the same five headers to both, so a
+  // per-region split was a difference this route invented rather than found.
+  const conversation = channel === undefined ? {} : conversationHeaders(channel)
+  // The identity owns the user agent and the client-shaped header block. The
+  // shipped `cli` product contributes no overrides at all, so an install that
+  // never touches the preference sends exactly the headers it always has.
+  const identity = outboundIdentity(channel?.product ?? 'cli', intl ? 'intl' : 'cn', credentials.uid ?? '')
+  return {
+    'content-type': 'application/json',
+    accept: 'application/json',
+    authorization: `Bearer ${credentials.accessToken}`,
+    [HEADER_USER_ID]: credentials.uid ?? '',
+    [HEADER_ENTERPRISE_ID]: credentials.enterpriseId ?? '',
+    [HEADER_TENANT_ID]: credentials.enterpriseId ?? '',
+    [HEADER_DOMAIN]: domain,
+    [HEADER_PRODUCT]: CLIENT_PRODUCT,
+    [HEADER_IDE_NAME]: 'CodeBuddyIDE',
+    [HEADER_REQUESTED_WITH]: 'XMLHttpRequest',
+    'user-agent': identity.userAgent,
+    // The international backend validates the browser origin the IDE would send.
+    ...(intl ? { origin: credentials.backend, referer: `${credentials.backend}/` } : {}),
+    ...conversation,
+    ...identity.headers(conversation),
+    ...(channel?.messages === true ? messagesHeaders() : {}),
+    ...extra,
+  }
+}
+
+/**
+ * Content coding a chat request's body is sent with.
+ *
+ * Measured: the official CLI's `GzipRequestProcessor` compresses each POST's
+ * body and sets `Content-Encoding: gzip`, and both builds turn that feature on.
+ * The saving is not marginal — a long agent conversation re-sends its whole
+ * history on every step, which plain-JSON uploads made bytes-on-the-wire the
+ * dominant cost of using this route.
+ *
+ * Only a chat completion is compressed: the same fetch also serves surfaces
+ * whose parser reads plain JSON (the images API answers 400 `code 11101`
+ * "invalid character '\\x1f'" to a gzipped body), so the caller opts in by
+ * calling this rather than every request getting it.
+ */
+export const GZIP_CONTENT_ENCODING = 'gzip'
+
+/** One chat body, compact JSON, gzipped for the wire. */
+export function gzipChatBody(body: string): Uint8Array {
+  // The body is already compact (`JSON.stringify` emits no padding); the gzip
+  // is the transport half of the same request form.
+  return new Uint8Array(gzipSync(Buffer.from(body, 'utf8')))
+}
+
+/** Header set that declares one request's body coding. */
+export function encodedBodyHeaders(encoding: string | undefined): Record<string, string> {
+  return encoding === undefined ? {} : { 'content-encoding': encoding }
+}
+
+/**
+ * Refresh an access token against the endpoint the official IDE uses.
+ *
+ * The response carries a whole new `auth` block rather than just a token, so it
+ * is merged over the current one: fields the endpoint omits (the domain, the
+ * refresh lifetime) must survive, or the next refresh would lose its target.
+ */
+export async function refreshCredentials(
+  credentials: WorkBuddyCredentials,
+  options: WorkBuddyRequestOptions = {},
+): Promise<WorkBuddyCredentials> {
+  const fetchFn = options.fetchFn ?? fetch
+  const response = await fetchFn(`${credentials.backend}${REFRESH_PATH}`, {
+    method: 'POST',
+    headers: workBuddyHeaders(credentials, {
+      [HEADER_REFRESH_TOKEN]: credentials.refreshToken,
+      [HEADER_REFRESH_SOURCE]: refreshSourceForDomain(credentials.domain),
+    }),
+    body: '{}',
+    signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
+  })
+
+  const text = await response.text().catch(() => '')
+  // A refresh the service refused is permanent for this account: the pool
+  // records it and routes to another one, while a transport failure stays
+  // transient and must leave the account in place.
+  if (!response.ok) {
+    const detail = text.slice(0, 200)
+    throw new LlmError(
+      `${PROVIDER_NAME} token refresh failed (${response.status})${detail ? `: ${detail}` : ''}`,
+      response.status === 401 || response.status === 403 ? 'INVALID_CREDENTIAL' : 'TRANSPORT',
+      { status: response.status },
+    )
+  }
+
+  const payload = asRecord(JSON.parse(text) as unknown)
+  const data = asRecord(payload?.data)
+  if (payload === undefined || payload.code !== 0 || data === undefined) {
+    throw new LlmError(
+      `${PROVIDER_NAME} token refresh was rejected: ${asString(payload?.msg) ?? 'no detail'}`,
+      'INVALID_CREDENTIAL',
+    )
+  }
+
+  const accessToken = asString(data.accessToken)
+  if (accessToken === undefined) {
+    throw new Error(`${PROVIDER_NAME} token refresh returned no access token`)
+  }
+
+  const expiresIn = asNumber(data.expiresIn)
+  const expiresAt = asNumber(data.expiresAt)
+    ?? (expiresIn === undefined ? credentials.expiresAt : Date.now() + expiresIn * 1000)
+
+  return {
+    ...credentials,
+    accessToken,
+    refreshToken: asString(data.refreshToken) ?? credentials.refreshToken,
+    expiresAt,
+    // The endpoint usually echoes the domain; when it does not, the account
+    // stays on the backend it was already served by.
+    domain: asString(data.domain) ?? credentials.domain,
+  }
+}
+
+/** Public account facts for the settings card. */
+export function accountFromCredentials(credentials: WorkBuddyCredentials): WorkBuddyAccount {
+  return {
+    id: workBuddyAccountId(credentials),
+    uid: credentials.uid ?? null,
+    nickname: credentials.nickname ?? null,
+    uin: credentials.uin ?? null,
+    accountType: credentials.accountType ?? null,
+    enterpriseId: credentials.enterpriseId ?? null,
+    region: credentials.region,
+    backend: credentials.backend,
+    domain: credentials.domain,
+    expiresAt: credentials.expiresAt > 0 ? credentials.expiresAt : null,
+    sourceFile: credentials.sourceFile || null,
+    source: credentials.source,
+    removable: credentials.source === 'managed',
+    hidden: false,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Account identity
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the signed-in account for a credential.
+ *
+ * The browser-authorization token response states the access token and the
+ * refresh token but **not** which account they belong to, so a login that
+ * relied on it alone could only key the account by the display name it also
+ * did not have — which is where the duplicate row and the `账号 1` label came
+ * from. The official client reads the account from this same endpoint right
+ * after polling the token; measured live, it returns the uid, the nickname,
+ * the UIN and the enterprise id for a valid bearer.
+ *
+ * A failure is not fatal to the sign-in: the token is usable, so the caller
+ * keeps the credential it has and lets the token's own claims fill in what
+ * they can.
+ */
+export async function fetchAccountIdentity(
+  credentials: WorkBuddyCredentials,
+  options: WorkBuddyRequestOptions = {},
+): Promise<WorkBuddyTokenIdentity | null> {
+  const fetchFn = options.fetchFn ?? fetch
+  try {
+    const response = await fetchFn(`${credentials.backend}${ACCOUNT_PATH}`, {
+      headers: workBuddyHeaders(credentials),
+      signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
+    })
+    if (!response.ok) return null
+    const payload = asRecord(JSON.parse(await response.text()) as unknown)
+    if (payload === undefined || payload.code !== 0) return null
+    const account = asRecord(payload.data)
+    if (account === undefined) return null
+    const identity: WorkBuddyTokenIdentity = {}
+    const uid = asString(account.uid)
+    if (uid !== undefined) identity.uid = uid
+    const nickname = asString(account.nickname)
+    if (nickname !== undefined) identity.nickname = nickname
+    const uin = asString(account.uin)
+    if (uin !== undefined) identity.uin = uin
+    const enterpriseId = asString(account.enterpriseId)
+    if (enterpriseId !== undefined) identity.enterpriseId = enterpriseId
+    return identity
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live model catalog
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse one `/v3/config` payload's model list.
+ *
+ * Each entry carries the facts this route needs directly, so nothing is
+ * inferred from the model's name. Image-generation tools (`tags` naming
+ * `text-to-image`/`image-to-image`) are skipped: they are not chat models and
+ * carry no context window.
+ *
+ * `credits` is read here rather than left to the shipped table because a
+ * reachable gateway **replaces** that table entirely: a multiplier transcribed
+ * offline would be the only one a signed-in user ever saw, and it would stay
+ * wrong the moment the subscription repriced a model. A string this route cannot
+ * turn into a number (`''`, which `default-model` publishes, or a value a
+ * future gateway invents) leaves the field off the entry altogether instead of
+ * writing a plausible-looking `0` — see `parseWorkBuddyCreditMultiplier`.
+ */
+export function parseConfigModels(payload: unknown, region: WorkBuddyCredentials['region']): WorkBuddyModelEntry[] {
+  const root = asRecord(payload) ?? {}
+  const data = asRecord(root.data) ?? root
+  const list = Array.isArray(data.models) ? data.models : []
+
+  const models: WorkBuddyModelEntry[] = []
+  for (const item of list) {
+    const record = asRecord(item)
+    if (record === undefined) continue
+    const id = asString(record.id)
+    if (id === undefined) continue
+    if (Array.isArray(record.tags) && record.tags.some((tag) => String(tag).includes('image'))) continue
+
+    const maxContextWindow = asNumber(record.maxAllowedSize) ?? asNumber(record.maxInputTokens)
+    if (maxContextWindow === undefined) continue
+
+    const reasoning = asRecord(record.reasoning) ?? {}
+    // The gateway publishes the reasoning ladder in two shapes:
+    //   { supportedEfforts: [...], defaultEffort: 'x' }  -> an explicit ladder
+    //   { effort: 'x' }                                  -> a DEFAULT only
+    // The second shape is neither a one-entry ladder nor a licence to offer
+    // every level this route can name. Measured against the live gateway on
+    // `deepseek-v4.1-flash`, which reports exactly `effort: 'high'`, such a
+    // model accepts `low`/`high`/`max` and routes anything else into the
+    // nearest of them; advertising the wider set put levels in DSH's picker
+    // that the model does not have.
+    const declared = Array.isArray(reasoning.supportedEfforts)
+      ? reasoning.supportedEfforts.filter((effort): effort is string => typeof effort === 'string')
+      : []
+    const single = asString(reasoning.effort)
+    // The parsed ladder stays exactly what the gateway stated. `none` is a
+    // separate fact (`canDisableThinking`) and is added by
+    // `workBuddyReasoningEfforts` at the presentation boundary, so a stored
+    // entry never claims a level the publisher did not list.
+    const efforts = declared.length > 0
+      ? declared
+      : (single === undefined ? [] : [...WORKBUDDY_STANDARD_EFFORTS])
+    // The gateway may name a default the ladder does not contain (measured: an
+    // effort-only model exposes `low`/`high`/`max` while defaulting to
+    // `medium`). Sending that verbatim would leave the card unable to show the
+    // level the request actually carries, so it converges onto the nearest rung
+    // — the same routing the upstream applies to such a value.
+    const declaredDefault = asString(reasoning.defaultEffort) ?? single ?? null
+    const modelDefault = declaredDefault === null || efforts.includes(declaredDefault)
+      ? declaredDefault
+      : convergeWorkBuddyEffort(declaredDefault, efforts)
+
+    // The gateway reports the length it serves by default separately from the
+    // maximum the model allows. This route requests no explicit length, so the
+    // served default is the figure DSH's overflow decisions must use.
+    const contextWindowConfig = asRecord(record.contextWindow)
+    const servedDefault = asNumber(contextWindowConfig?.defaultLength)
+
+    // The entry declares only the region it was fetched for, so the multiplier
+    // is keyed by that region: the two backends do not always agree (measured
+    // 2026-10-09, `deepseek-v4.1-flash` is 0.11 on cn against 0.00 on intl),
+    // and one scalar per id would be wrong for one region's accounts.
+    const multiplier = parseWorkBuddyCreditMultiplier(record.credits)
+
+    models.push({
+      id,
+      name: asString(record.name) ?? id,
+      contextWindow: servedDefault ?? maxContextWindow,
+      maxContextWindow,
+      maxTokens: asNumber(record.maxOutputTokens) ?? 32_768,
+      regions: [region],
+      // Spread rather than a direct field: an unparseable or absent rate must
+      // leave the key OFF the entry, so the card shows no multiplier instead of
+      // a guessed zero.
+      ...(multiplier === null ? {} : { credits: { [region]: multiplier } }),
+      supportsImage: record.supportsImages === true,
+      reasoningEfforts: efforts,
+      defaultReasoningEffort: modelDefault,
+      canDisableThinking: reasoning.canDisableThinking === true,
+      description: asString(record.descriptionZh) ?? asString(record.descriptionEn) ?? '',
+    })
+  }
+  return models
+}
+
+let cachedCatalog: { region: WorkBuddyCredentials['region']; models: WorkBuddyModelEntry[]; fetchedAt: number } | undefined
+/** Bumped by every cache clear so a fetch already in flight cannot publish. */
+let catalogCacheEpoch = 0
+let catalogInFlight: Promise<WorkBuddyModelEntry[]> | null = null
+let catalogInFlightRegion: WorkBuddyCredentials['region'] | null = null
+const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000
+/**
+ * Snapshot scopes already consulted in this process.
+ *
+ * One entry per region rather than a single flag: the persisted file is scoped
+ * to the region it was fetched for (see `catalogSnapshotName`), so each region
+ * consults its own file once, and a scope with no snapshot is not re-read on
+ * every cache miss.
+ */
+const catalogSnapshotScopesLoaded = new Set<WorkBuddyCredentials['region']>()
+
+export function getCachedCatalog(): WorkBuddyModelEntry[] {
+  return cachedCatalog?.models ?? []
+}
+
+export function clearCachedCatalog(): void {
+  cachedCatalog = undefined
+  catalogCacheEpoch += 1
+  catalogInFlight = null
+  catalogInFlightRegion = null
+  catalogSnapshotScopesLoaded.clear()
+}
+
+/**
+ * Fetch the live catalog for one account.
+ *
+ * The gateway is the authority on capabilities, so a successful read replaces
+ * the shipped table entirely; a failure returns an empty list and the caller
+ * falls back, which keeps a first run usable before sign-in.
+ */
+export async function fetchConfigCatalog(
+  credentials: WorkBuddyCredentials,
+  options: WorkBuddyRequestOptions = {},
+): Promise<WorkBuddyModelEntry[]> {
+  const fetchFn = options.fetchFn ?? fetch
+  const response = await fetchFn(`${credentials.backend}${CONFIG_PATH}`, {
+    headers: workBuddyHeaders(credentials),
+    signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
+  })
+  if (!response.ok) {
+    throw new Error(`${PROVIDER_NAME} model catalog failed: ${response.status}`)
+  }
+  const parsed = parseConfigModels(await response.json(), credentials.region)
+  // The gateway serves models it does not list, and this list replaces the
+  // shipped table; without the merge they vanish from the picker at the moment
+  // the catalog loads. See UNPUBLISHED_MODELS for what each row was measured.
+  return withUnpublishedModels(parsed, credentials.region)
+}
+
+/** Cached catalog with a TTL; a failed refresh keeps the previous snapshot.
+ *
+ * On the first cache miss of a process the persisted snapshot is rehydrated
+ * first, so a restart serves the previous listing without waiting on the
+ * network. An expired snapshot still answers immediately (stale) while a
+ * refresh runs in the background — the catalog is not fast-moving data, and
+ * waiting on an unreachable gateway turned a restart into the full discovery
+ * timeout on every model resolution.
+ */
+export async function loadConfigCatalog(
+  credentials: WorkBuddyCredentials,
+  options: WorkBuddyRequestOptions & { force?: boolean } = {},
+): Promise<WorkBuddyModelEntry[]> {
+  if (options.force === true) return refreshConfigCatalog(credentials, options)
+  if (cachedCatalog !== undefined
+    && cachedCatalog.region === credentials.region
+    && Date.now() - cachedCatalog.fetchedAt < CATALOG_CACHE_TTL_MS) {
+    return cachedCatalog.models
+  }
+  // A snapshot read for the other region must never stand in: its entries
+  // declare only the region they came from, so the caller's region filter drops
+  // every one of them and the picker ends up offering nothing instead of
+  // falling back to the shipped table.
+  if (cachedCatalog !== undefined && cachedCatalog.region === credentials.region) {
+    void refreshConfigCatalog(credentials, options).catch(() => undefined)
+    return cachedCatalog.models
+  }
+  // The snapshot is scoped to the region it was fetched for: entries declare
+  // only the region they came from, so a cn snapshot read by an intl account
+  // would leave the picker offering nothing instead of falling back to the
+  // shipped table.
+  if (!catalogSnapshotScopesLoaded.has(credentials.region)) {
+    catalogSnapshotScopesLoaded.add(credentials.region)
+    const rehydratedAt = await rehydrateCatalogCache(
+      catalogSnapshotName('workbuddy', credentials.region),
+      (value) => {
+        if (!Array.isArray(value)) return undefined
+        const models: WorkBuddyModelEntry[] = []
+        for (const entry of value) {
+          if (typeof entry !== 'object' || entry === null) continue
+          const record = entry as Record<string, unknown>
+          if (typeof record.id !== 'string' || record.id === '') continue
+          // Parsed entries carry `regions: [region]` (an array), not a scalar
+          // `region` field; both spellings are accepted so a snapshot written
+          // by either shape stands in.
+          const regions = Array.isArray(record.regions) ? record.regions : [record.region]
+          if (!regions.includes(credentials.region)) continue
+          models.push(entry as WorkBuddyModelEntry)
+        }
+        return models.length > 0 ? models : undefined
+      },
+      (fetchedAt, models) => {
+        // A snapshot written before these models were known carries none of
+        // them; merging on read closes that window instead of leaving the
+        // picker short until the background refresh lands.
+        cachedCatalog = {
+          region: credentials.region,
+          models: withUnpublishedModels(models, credentials.region),
+          fetchedAt,
+        }
+      },
+      0,
+    )
+    if (rehydratedAt > 0) {
+      void refreshConfigCatalog(credentials, options).catch(() => undefined)
+      return cachedCatalog!.models
+    }
+  }
+  return refreshConfigCatalog(credentials, options)
+}
+
+/** One in-flight, single-flighted fetch of the live catalog. */
+function refreshConfigCatalog(
+  credentials: WorkBuddyCredentials,
+  options: WorkBuddyRequestOptions = {},
+): Promise<WorkBuddyModelEntry[]> {
+  if (catalogInFlight && catalogInFlightRegion === credentials.region) return catalogInFlight
+  // Sampled before the fetch: a clear during it must silence the publish below.
+  const epoch = catalogCacheEpoch
+  const sameRegionCache = (): WorkBuddyModelEntry[] =>
+    cachedCatalog?.region === credentials.region ? cachedCatalog.models : []
+  const request = fetchConfigCatalog(credentials, options)
+    .then((models) => {
+      // A clear landed mid-flight: answer the caller but publish nothing, or the
+      // cache and snapshot that clear dropped would be restored by this fetch.
+      if (epoch !== catalogCacheEpoch) return models.length > 0 ? models : sameRegionCache()
+      if (models.length > 0) {
+        const fetchedAt = Date.now()
+        cachedCatalog = { region: credentials.region, models, fetchedAt }
+        void writeCatalogSnapshot(catalogSnapshotName('workbuddy', credentials.region), models, fetchedAt)
+        return models
+      }
+      return sameRegionCache()
+    })
+    .catch(() => sameRegionCache())
+  catalogInFlight = request
+  catalogInFlightRegion = credentials.region
+  return request.finally(() => {
+    if (catalogInFlight === request) {
+      catalogInFlight = null
+      catalogInFlightRegion = null
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Billing / allowance
+// ---------------------------------------------------------------------------
+
+function formatAmount(value: number | undefined): string | null {
+  if (value === undefined || !Number.isFinite(value)) return null
+  return Number.isInteger(value) ? String(value) : value.toFixed(2)
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value))
+}
+
+/** Parse one `Capacity*` account record into the public quota shape. */
+export interface ParsedBilling {
+  packageName: string | null
+  totalCredits: number | null
+  remainingCredits: number | null
+  cycleUsedCredits: number | null
+  cycleCredits: number | null
+  cycleStartsAt: number | null
+  cycleEndsAt: number | null
+}
+
+/**
+ * Parse the billing payload's account list.
+ *
+ * The response nests as `data.Response.Data.Accounts[]`; each entry describes
+ * one purchased package with its own capacity counters. The first entry is the
+ * active subscription, and the totals are summed across all of them because a
+ * user can hold several packages at once.
+ */
+export function parseBilling(payload: unknown): ParsedBilling {
+  const root = asRecord(payload) ?? {}
+  const data = asRecord(root.data) ?? root
+  const response = asRecord(data.Response) ?? data
+  const body = asRecord(response.Data) ?? response
+  const accounts = Array.isArray(body.Accounts) ? body.Accounts : []
+
+  let total: number | undefined
+  let remaining: number | undefined
+  let cycleUsed: number | undefined
+  let cycleTotal: number | undefined
+  let packageName: string | null = null
+  let cycleStart: number | null = null
+  let cycleEnd: number | null = null
+
+  for (const entry of accounts) {
+    const record = asRecord(entry)
+    if (record === undefined) continue
+    if (packageName === null) packageName = asString(record.PackageName) ?? null
+    const size = asNumber(record.CapacitySize)
+    const remain = asNumber(record.CapacityRemain)
+    const used = asNumber(record.CycleCapacityUsed)
+    const cycleSize = asNumber(record.CycleCapacitySize)
+    if (size !== undefined) total = (total ?? 0) + size
+    if (remain !== undefined) remaining = (remaining ?? 0) + remain
+    if (used !== undefined) cycleUsed = (cycleUsed ?? 0) + used
+    if (cycleSize !== undefined) cycleTotal = (cycleTotal ?? 0) + cycleSize
+    cycleStart ??= parseCycleTime(record.CycleStartTime)
+    cycleEnd ??= parseCycleTime(record.CycleEndTime)
+  }
+
+  return {
+    packageName,
+    totalCredits: total ?? null,
+    remainingCredits: remaining ?? null,
+    cycleUsedCredits: cycleUsed ?? null,
+    cycleCredits: cycleTotal ?? null,
+    cycleStartsAt: cycleStart,
+    cycleEndsAt: cycleEnd,
+  }
+}
+
+/**
+ * Parse a cycle boundary.
+ *
+ * The service sends these as local-time strings without a zone
+ * (`2026-09-01 00:00:00`), which `Date.parse` reads as local time — the same
+ * reading the IDE's own panel uses, so the card agrees with it.
+ */
+export function parseCycleTime(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 0 && value < 1e11 ? Math.round(value * 1000) : Math.round(value)
+  }
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const normalized = value.trim().replace(' ', 'T')
+  const parsed = Date.parse(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/** Turn a parsed billing snapshot into the meters the card renders. */
+export function billingMeters(billing: ParsedBilling): WorkBuddyMeter[] {
+  const meters: WorkBuddyMeter[] = []
+  const { cycleCredits, cycleUsedCredits, totalCredits, remainingCredits } = billing
+
+  if (cycleCredits !== null && cycleCredits > 0 && cycleUsedCredits !== null) {
+    const usedFraction = clamp01(cycleUsedCredits / cycleCredits)
+    meters.push({
+      id: 'cycle',
+      label: 'Billing cycle',
+      usedFraction,
+      remainingFraction: Math.max(0, 1 - usedFraction),
+      used: formatAmount(cycleUsedCredits),
+      limit: formatAmount(cycleCredits),
+      resetsAt: billing.cycleEndsAt,
+      description: 'Credits consumed in the current cycle',
+    })
+  }
+
+  // The package capacity is reported separately from the cycle counters, and a
+  // package with no cycle figures still has a meaningful remaining balance.
+  if (totalCredits !== null && totalCredits > 0 && remainingCredits !== null) {
+    const remainingFraction = clamp01(remainingCredits / totalCredits)
+    meters.push({
+      id: 'package',
+      label: billing.packageName ?? 'Package credits',
+      usedFraction: Math.max(0, 1 - remainingFraction),
+      remainingFraction,
+      used: formatAmount(totalCredits - remainingCredits),
+      limit: formatAmount(totalCredits),
+      resetsAt: billing.cycleEndsAt,
+      description: 'Remaining credits in the purchased package',
+    })
+  }
+
+  return meters
+}
+
+/**
+ * One newest snapshot PER ACCOUNT, keyed by the snapshot's own `account.id` —
+ * the same public key the pool addresses an account with.
+ *
+ * Quota follows the account: rotation decides which account spends the next
+ * request, so a single slot only ever described whichever account was read
+ * last. The pool's card draws every account its own reading, so each account
+ * keeps its own entry; past the cap the oldest read is evicted.
+ *
+ * This map is a memory read only. Nothing here fetches — the settings card
+ * builds its account list from it, and that must never cost one upstream
+ * request per pooled account.
+ */
+const cachedQuotaEntries = new Map<string, WorkBuddyAccountQuota>()
+
+/** How many accounts' snapshots are remembered; mirrors the Codex usage service. */
+const QUOTA_CACHE_LIMIT = 20
+
+/** The entry read most recently, whichever account it belongs to. */
+function newestCachedQuota(): WorkBuddyAccountQuota | undefined {
+  let newest: WorkBuddyAccountQuota | undefined
+  for (const snapshot of cachedQuotaEntries.values()) {
+    if (newest === undefined || (snapshot.fetchedAt || 0) > (newest.fetchedAt || 0)) newest = snapshot
+  }
+  return newest
+}
+
+/** Remember one account's newest snapshot, bounded to the accounts in use. */
+function rememberCachedQuota(snapshot: WorkBuddyAccountQuota): void {
+  cachedQuotaEntries.set(snapshot.account.id, snapshot)
+  while (cachedQuotaEntries.size > QUOTA_CACHE_LIMIT) {
+    const oldest = [...cachedQuotaEntries.entries()]
+      .sort((left, right) => (left[1].fetchedAt || 0) - (right[1].fetchedAt || 0))[0]
+    if (oldest === undefined) break
+    cachedQuotaEntries.delete(oldest[0])
+  }
+}
+
+let quotaInFlight: Promise<WorkBuddyAccountQuota> | null = null
+let quotaInFlightAccountId: string | null = null
+let quotaCacheEpoch = 0
+
+/**
+ * The snapshot read most recently, whichever account it belongs to.
+ *
+ * Kept with a no-argument signature for backward compatibility; the page-level
+ * facts use {@link getCachedQuotaFor} instead, because they describe one
+ * account and must never be another account's numbers.
+ */
+export function getCachedQuota(): WorkBuddyAccountQuota | undefined {
+  return newestCachedQuota()
+}
+
+/**
+ * The snapshot remembered for one account, if it was read before.
+ *
+ * This is the lookup the account pool calls while it builds its summaries: a
+ * pure memory read, never a fetch. Passing no account keeps the pre-pool
+ * behavior of returning whatever was fetched last.
+ */
+export function getCachedQuotaFor(accountId?: string | null): WorkBuddyAccountQuota | undefined {
+  if (accountId === undefined || accountId === null) return newestCachedQuota()
+  return cachedQuotaEntries.get(accountId)
+}
+
+export function clearCachedQuota(): void {
+  quotaCacheEpoch += 1
+  cachedQuotaEntries.clear()
+  quotaInFlight = null
+  quotaInFlightAccountId = null
+}
+
+/**
+ * Read the account's credit allowance.
+ *
+ * Only one billing route exists here, so a failure is a real failure rather
+ * than a partially-answered snapshot: the caller decides whether to surface it.
+ */
+export async function fetchAccountQuota(
+  store = new FileCredentialStore(),
+  fetchFn: typeof fetch = fetch,
+  force = false,
+  accountId: string | null = null,
+  hiddenAccountIds: readonly string[] = [],
+): Promise<WorkBuddyAccountQuota> {
+  const credentials = await store.read({ accountId, hiddenAccountIds })
+  if (credentials === null) throw new Error(`Not signed in to ${PROVIDER_NAME}.`)
+  const requestedAccountId = workBuddyAccountId(credentials)
+  const cached = cachedQuotaEntries.get(requestedAccountId)
+  if (!force
+    && cached !== undefined
+    && Date.now() - (cached.fetchedAt || 0) < QUOTA_CACHE_TTL_MS) {
+    return cached
+  }
+  // A poll already serving another account must not be reused after a switch.
+  if (quotaInFlight && quotaInFlightAccountId === requestedAccountId) return quotaInFlight
+
+  const epoch = quotaCacheEpoch
+  const request = (async (): Promise<WorkBuddyAccountQuota> => {
+    const current = await store.read({ accountId: requestedAccountId, hiddenAccountIds })
+    if (current === null) throw new Error(`Not signed in to ${PROVIDER_NAME}.`)
+
+    const fresh = await store.ensureFresh(current, (candidate) => refreshCredentials(candidate, { fetchFn }))
+
+    const response = await fetchFn(`${fresh.backend}${BILLING_PATH}`, {
+      method: 'POST',
+      headers: workBuddyHeaders(fresh),
+      body: '{}',
+      signal: timeoutSignal(undefined, DISCOVERY_TIMEOUT_MS),
+    })
+    const text = await response.text().catch(() => '')
+    if (!response.ok) {
+      throw new Error(`${PROVIDER_NAME} billing lookup failed (${response.status})${text ? `: ${text.slice(0, 200)}` : ''}`)
+    }
+
+    const payload = JSON.parse(text) as unknown
+    const root = asRecord(payload)
+    if (root !== undefined && root.code !== 0) {
+      throw new Error(`${PROVIDER_NAME} billing lookup was rejected: ${asString(root.msg) ?? 'no detail'}`)
+    }
+
+    const billing = parseBilling(payload)
+    const snapshot: WorkBuddyAccountQuota = {
+      account: accountFromCredentials(fresh),
+      packageName: billing.packageName,
+      totalCredits: billing.totalCredits,
+      remainingCredits: billing.remainingCredits,
+      cycleUsedCredits: billing.cycleUsedCredits,
+      cycleCredits: billing.cycleCredits,
+      cycleStartsAt: billing.cycleStartsAt,
+      cycleEndsAt: billing.cycleEndsAt,
+      meters: billingMeters(billing),
+      fetchedAt: Date.now(),
+      sources: ['billing/meter/get-user-resource'],
+    }
+
+    if (epoch !== quotaCacheEpoch) return snapshot
+    rememberCachedQuota(snapshot)
+    return snapshot
+  })()
+
+  quotaInFlight = request
+  quotaInFlightAccountId = requestedAccountId
+  try {
+    return await request
+  } finally {
+    if (quotaInFlight === request) {
+      quotaInFlight = null
+      quotaInFlightAccountId = null
+    }
+  }
+}
+
+export { PROVIDER_ID, PROVIDER_NAME }

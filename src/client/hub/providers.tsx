@@ -34,6 +34,7 @@ import { QoderSection } from '../qoder/QoderSection.tsx'
 import { QODER_PROVIDER_NAME, QODER_ROUTE_PREFIX } from '../../shared/qoder-contracts.ts'
 import { OpenDesignSection } from '../opendesign/OpenDesignSection.tsx'
 import { OPENDESIGN_PROVIDER_NAME, OPENDESIGN_ROUTE_PREFIX } from '../../shared/opendesign-contracts.ts'
+import { WorkBuddySection } from '../workbuddy/WorkBuddySection.tsx'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -166,6 +167,13 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: OPENDESIGN_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(OPENDESIGN_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <OpenDesignSection onModelChange={onModelChange} />,
+  },
+  {
+    // WorkBuddy：追加在既有卡片之后，不回填历史中间位置。
+    id: 'workbuddy',
+    name: 'WorkBuddy',
+    setEnabled: (enabled) => postLineSettings('/workbuddy/api', { enabled }),
+    renderDetail: ({ onModelChange }) => <WorkBuddySection onModelChange={onModelChange} />,
   },
 ]
 

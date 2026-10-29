@@ -194,6 +194,22 @@ import {
   CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION,
   resolveCacheWarmupSettings,
 } from './host/cache-warmup/settings.ts'
+import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
+import { WorkBuddyAccountPool } from './host/workbuddy/account-pool.ts'
+import { registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
+import {
+  fetchAccountQuota as fetchWorkBuddyAccountQuota,
+  getCachedCatalog as getCachedWorkBuddyCatalog,
+} from './host/workbuddy/client.ts'
+import {
+  FileCredentialStore as WorkBuddyCredentialStore,
+  FileModelSettingsStore as WorkBuddyModelSettingsStore,
+  WorkBuddyAtRestKeyStore,
+  registerWorkBuddyPreferenceStore,
+} from './host/workbuddy/token-store.ts'
+import { WorkBuddyUsageLedger } from './host/workbuddy/guardrails.ts'
+import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
+import { CHECKIN_TICK_MS as WORKBUDDY_CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
 
 interface Volatile<T> {
   get(): T
@@ -573,6 +589,24 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const qoderAccountPool = new QoderAccountPool({
     // 卡片可以钉住一个账号，而它能在适配器服务请求期间改变，所以每次选号都读一次。
     preferAccountId: () => qoderPreferences.status().selectedAccountId,
+  })
+
+  const workBuddyStore = new WorkBuddyCredentialStore()
+  const workBuddyUsageLedger = new WorkBuddyUsageLedger()
+  void workBuddyUsageLedger.load().catch(() => undefined)
+  const workBuddyAtRestKey = new WorkBuddyAtRestKeyStore()
+  void workBuddyAtRestKey.load().catch(() => null)
+  const workBuddyModelSettings = new WorkBuddyModelSettingsStore()
+  const workBuddyPreferences = registerWorkBuddyPreferenceStore(ctx.settings, workBuddyModelSettings)
+  const workBuddyAccountPool = new WorkBuddyAccountPool({
+    store: workBuddyStore,
+    selection: () => {
+      const current = workBuddyPreferences.status()
+      return {
+        selectedAccountId: current.selectedAccountId,
+        hiddenAccountIds: current.hiddenAccountIds,
+      }
+    },
   })
 
   // The allowlist a Session recorded outranks the current settings document,
@@ -996,6 +1030,51 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       attachments: ctx.attachments,
     })
 
+    const workBuddyAdapter = new WorkBuddyAdapter(
+      workBuddyStore,
+      workBuddyModelSettings,
+      workBuddyPreferences,
+      {
+        fetchFn: modelFetch[WORKBUDDY_PROVIDER_ID],
+        attachments: ctx.attachments,
+        accountPool: workBuddyAccountPool,
+        usageLedger: workBuddyUsageLedger,
+      },
+    )
+    const workBuddyClaim = claimProviderRoute(ctx, {
+      providerId: WORKBUDDY_PROVIDER_ID,
+      label: WORKBUDDY_PROVIDER_NAME,
+      adapter: workBuddyAdapter,
+    })
+    const workBuddyCheckin = new WorkBuddyCheckinService(workBuddyStore, {
+      fetchFn: proxyFetch,
+      settings: () => workBuddyPreferences.status().checkin,
+      ready: () => workBuddyPreferences.ready(),
+      logger: ctx.logger,
+    })
+    const workBuddyCheckinTick = (): void => {
+      void workBuddyCheckin.tick().catch((error) => {
+        ctx.logger.warn(`[dsh-chatgpt-subscription] WorkBuddy check-in tick failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    const workBuddyCheckinTimer = setInterval(workBuddyCheckinTick, WORKBUDDY_CHECKIN_TICK_MS)
+    workBuddyCheckinTick()
+    const disposeWorkBuddyRoutes = registerWorkBuddyRoutes(
+      ctx,
+      workBuddyStore,
+      workBuddyModelSettings,
+      workBuddyPreferences,
+      {
+        fetchFn: proxyFetch,
+        serving: () => workBuddyClaim.serving(),
+        conflict: () => workBuddyClaim.conflict(),
+        accountPool: workBuddyAccountPool,
+        checkin: workBuddyCheckin,
+        atRestKey: workBuddyAtRestKey,
+      },
+    )
+    void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
+
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -1043,6 +1122,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           'minimax-code': minimaxCodeAccountPool,
           antigravity: antigravityAccountPool,
           'command-code': commandCodeAccountPool,
+          workbuddy: workBuddyAccountPool,
         },
         // The two lines whose card shows a quota PER ACCOUNT. A pool row carries
         // a snapshot only for the account that was actually read, so on a
@@ -1075,6 +1155,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           'minimax-code': async (credentials, { fetchFn, accountId }) => await fetchMinimaxTokenPlanQuota(
             credentials as Parameters<typeof fetchMinimaxTokenPlanQuota>[0],
             { fetchFn, accountId },
+          ),
+          workbuddy: async (_credentials, { fetchFn, accountId }) => await fetchWorkBuddyAccountQuota(
+            workBuddyStore,
+            fetchFn,
+            false,
+            accountId,
+            workBuddyPreferences.status().hiddenAccountIds,
           ),
         },
       },
@@ -1396,6 +1483,23 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       },
       // OpenDesign（订阅，API Key）：再往后追加一格，既有线路的卡片顺序保持不动。
       openDesignLine.hubSource,
+      {
+        id: 'workbuddy',
+        providerId: WORKBUDDY_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = workBuddyPreferences.status()
+          const accounts = await workBuddyAccountPool.listAccounts().catch(() => [])
+          const total = catalogTotal(getCachedWorkBuddyCatalog().length)
+          return {
+            enabled: current.enabled !== false,
+            accountCount: accounts.length,
+            authenticated: routable(accounts),
+            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
+            totalModelCount: total,
+          }
+        },
+      },
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     // 概览页右端的「检测更新 / 更新插件」。注册在这里而不是 routes.ts：它不属于任何
@@ -1530,6 +1634,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeQoderRoutes()
       qoderClaim.dispose()
       openDesignLine.dispose()
+      disposeWorkBuddyRoutes()
+      workBuddyClaim.dispose()
+      clearInterval(workBuddyCheckinTimer)
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -2371,3 +2478,30 @@ export {
   type OpenDesignSettingsUpdateDto,
   type OpenDesignWebStatus,
 } from './shared/opendesign-contracts.ts'
+export { WorkBuddyAdapter, classifyFailure as classifyWorkBuddyFailure } from './host/workbuddy/adapter.ts'
+export {
+  FileCredentialStore as WorkBuddyCredentialStore,
+  FileModelSettingsStore as WorkBuddyModelSettingsStore,
+  modelSettingsPath as workBuddyModelSettingsPath,
+  parseCredentialFile as parseWorkBuddyCredential,
+  registerWorkBuddyPreferenceStore,
+  scanCredentials as scanWorkBuddyCredentials,
+} from './host/workbuddy/token-store.ts'
+export {
+  fetchAccountQuota as fetchWorkBuddyQuota,
+  clearCachedQuota as clearWorkBuddyQuota,
+  getCachedQuota as getWorkBuddyQuota,
+  clearCachedCatalog as clearWorkBuddyCatalog,
+  loadConfigCatalog as loadWorkBuddyModels,
+  parseConfigModels as parseWorkBuddyConfigModels,
+  refreshCredentials as refreshWorkBuddyCredentials,
+  parseBilling as parseWorkBuddyBilling,
+} from './host/workbuddy/client.ts'
+export { getWorkBuddyWebStatus, registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
+export { WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
+export {
+  FALLBACK_MODELS as WORKBUDDY_MODELS,
+  WORKBUDDY_MODEL_IDS,
+  resolveWorkBuddyModel,
+  modelsForRegion as workBuddyModelsForRegion,
+} from './host/workbuddy/model-catalog.ts'

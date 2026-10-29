@@ -11,6 +11,7 @@ import { installPoolStyles } from '../src/client/common/styles.ts'
 import { installMermaidStyles } from '../src/client/mermaid/styles.ts'
 import { installStepCodeStyles } from '../src/client/step-code/styles.ts'
 import { installProgressUpdatesStyles } from '../src/client/progress-updates/styles.ts'
+import { installWorkBuddyStyles } from '../src/client/workbuddy/styles.ts'
 
 /** Every sheet this plugin injects, by its `data-plugin-css` sub-name. */
 const SHEETS = [
@@ -32,6 +33,7 @@ const SHEETS = [
   // src/client/index.tsx 无条件安装，所以这张表漏掉它就等于不再覆盖那张表。
   // 追加在末尾，既有条目一个顺序都没动。
   { name: 'progress-updates', install: installProgressUpdatesStyles },
+  { name: 'workbuddy', install: installWorkBuddyStyles },
 ] as const
 
 const owned = (): HTMLStyleElement[] =>

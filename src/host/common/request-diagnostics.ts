@@ -38,6 +38,8 @@ export const DIAGNOSTIC_PROVIDERS = [
   'qoder',
   // 第十三条：OpenDesign（订阅，API Key）。同上——注册点，追加在末尾。
   'opendesign',
+  // WorkBuddy：与 PROVIDER_ID / CONTROLLED_PROVIDERS 使用同一个路由 id。
+  'workbuddy-subscription',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

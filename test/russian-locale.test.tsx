@@ -26,6 +26,7 @@ import { dictionaries as openDesignDicts, NS_OPENDESIGN } from '../src/client/op
 import { dictionaries as progressUpdatesDicts, NS_PROGRESS_UPDATES } from '../src/client/progress-updates/locales.ts'
 import { dictionaries as qoderDicts, NS_QODER } from '../src/client/qoder/locales.ts'
 import { dictionaries as stepCodeDicts, NS_STEP_CODE } from '../src/client/step-code/locales.ts'
+import { dictionaries as workbuddyDicts, NS_WORKBUDDY } from '../src/client/workbuddy/locales.ts'
 import { dictionaries as hubDicts, NS } from '../src/client/locales.ts'
 import { ClaudeSection } from '../src/client/claude/ClaudeSection.tsx'
 import { installLineLocale } from '../src/client/common/line-locale.ts'
@@ -43,6 +44,7 @@ import { dictionary as openDesignRu } from '../src/client/locales-ru/opendesign.
 import { dictionary as progressUpdatesRu } from '../src/client/locales-ru/progress-updates.ts'
 import { dictionary as qoderRu } from '../src/client/locales-ru/qoder.ts'
 import { dictionary as stepCodeRu } from '../src/client/locales-ru/step-code.ts'
+import { dictionary as workbuddyRu } from '../src/client/locales-ru/workbuddy.ts'
 
 /** Every namespace this pack covers, with all three dictionaries beside each other. */
 const NAMESPACES = [
@@ -59,6 +61,9 @@ const NAMESPACES = [
   { ns: NS_QODER, zh: qoderDicts.zh as Record<string, string>, en: qoderDicts.en as Record<string, string>, ru: qoderRu },
   { ns: NS_OPENDESIGN, zh: openDesignDicts.zh as Record<string, string>, en: openDesignDicts.en as Record<string, string>, ru: openDesignRu },
   { ns: NS_PROGRESS_UPDATES, zh: progressUpdatesDicts.zh as Record<string, string>, en: progressUpdatesDicts.en as Record<string, string>, ru: progressUpdatesRu },
+  // Appended to the end of the list, matching the registration order in
+  // 'locales-ru/index.ts': an insert would shift every line after it.
+  { ns: NS_WORKBUDDY, zh: workbuddyDicts.zh as Record<string, string>, en: workbuddyDicts.en as Record<string, string>, ru: workbuddyRu },
 ]
 
 /** `{name}` placeholders in a template, in the order they appear. */

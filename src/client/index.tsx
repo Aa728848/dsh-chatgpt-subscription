@@ -60,6 +60,9 @@ import { createVideoCommandHost, installVideoCommand } from './minimax-code/vide
 import { installProgressUpdatesClient } from './progress-updates/index.ts'
 import { installProgressUpdatesStyles } from './progress-updates/styles.ts'
 import { dictionaries as progressUpdatesDicts, NS_PROGRESS_UPDATES, type ProgressUpdatesLocaleKey } from './progress-updates/locales.ts'
+import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
+import { dictionaries as workBuddyDicts, NS_WORKBUDDY, type WorkBuddyLocaleKey } from './workbuddy/locales.ts'
+import { installWorkBuddyStyles } from './workbuddy/styles.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   /**
@@ -84,6 +87,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-qoder': QoderLocaleKey
     'dsh-opendesign': OpenDesignLocaleKey
     'dsh-progress-updates': ProgressUpdatesLocaleKey
+    'dsh-workbuddy': WorkBuddyLocaleKey
   }
 }
 
@@ -163,6 +167,11 @@ export function apply(ctx: ClientContext): void {
     installOpenDesignStyles()
     return () => {}
   }, 'dsh-opendesign: styles')
+  ctx.effect(() => ctx.locale.register(NS_WORKBUDDY, workBuddyDicts), 'dsh-workbuddy: dictionaries')
+  ctx.effect(() => {
+    installWorkBuddyStyles()
+    return () => {}
+  }, 'dsh-workbuddy: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -254,6 +263,11 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.right', id: 'opendesign-quota', order: 46, locale: NS_OPENDESIGN,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, OpenDesignComposerQuota))
+  // 顺序 47：WorkBuddy 只取新末尾，历史 39 空位不复用。
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'workbuddy-quota', order: 47, locale: NS_WORKBUDDY,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, WorkBuddyComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

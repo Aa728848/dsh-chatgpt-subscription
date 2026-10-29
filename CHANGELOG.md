@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **【WorkBuddy】恢复整条订阅线路并移植当前上游的 11128、双协议与风控修复**
+  - 从 `2d125f40^` 恢复双区登录、桌面登录态采纳、账号池、目录/配额、签到、护栏、设置 UI、composer、文档与专属测试；保留 `workbuddy-subscription`、旧凭证/设置路径和 Windows DPAPI 兼容，全部共享注册点按末尾追加接线。
+  - 默认身份升级为桌面 WorkBuddy 5.9.3 / CLI 2.165.0，旧 `cli` 默认经带版本号的幂等迁移切换；请求带每账号会话/turn id、X-Agent/X-Stainless 与 gzip。国区 Claude 新增 `/v1/messages`，支持 signed thinking、工具流、output_config.effort 和互斥 usage 计数。
+  - 11128 采用「窄改写 → 一次 systemAsUser 搬移重试 → 最多 256 项提示记忆」；其它 11128 不误重试。401 按 accountId 重读并只续期/重放一次，成功续期后真正 continue 到重放；修复 Messages 后续 output-only usage 帧重复扣缓存、11140 未 await 落盘及 401 跨账号 token 串用风险。
+  - 11140 首个账号持久化停用，30 分钟内第二个不同账号受限时整池暂停 30 分钟；暂停到期仅恢复整池。无静态 API Key、无伪造 X-Device-Token。协议与维护依据记录于 `docs/workbuddy-line-plan.md` 和 `docs/workbuddy-upstream-hardening.md`。
+  - **验证**：恢复前基线 typecheck 0、全量 5166 passed / 9 skipped / 0 failed；恢复后强制三工程 typecheck 0、全量 **5587 passed / 9 skipped / 0 failed**（新增 421 条）；`npm run build`、`npm ci --dry-run` 与发布包检查通过（832 个文件，WorkBuddy host/client/shared 声明齐全）。用户选择不重启当前 Host，因此 live probe 未执行，不把离线结果写成上游实测。
+
 - **[progress-updates] 设置页三行副标题补上线路归属：缓存预热与检索结果投影标注「Kimi Code 专用」**
   - 「缓存预热」「检索结果投影」两行补上「Kimi Code 专用」与「非 Kimi 线路开关无影响」：这两个开关的生效范围由 `cache-warmup/install.ts` 的 `CACHE_WARMUP_PROVIDER = 'kimi-code'` 写死，其他线路上开关开着关着都一样。
   - 「进展更新」按事实写「本插件的所有线路都可用」：`progress_update` 工具、提示词分节与催促都挂在插件自己的 loader 行上，不看线路，因此不写 Kimi 专用。

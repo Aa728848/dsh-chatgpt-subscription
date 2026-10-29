@@ -14,7 +14,7 @@ import { BRAND_MARKS, type BrandMarkKey, type BrandMarkSvg } from './brand-svg.t
 export type HubProviderId =
   | 'chatgpt' | 'antigravity' | 'command-code' | 'kimi-code'
   | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
-  | 'step-code' | 'cline-pass' | 'qoder' | 'opendesign'
+  | 'step-code' | 'cline-pass' | 'qoder' | 'opendesign' | 'workbuddy'
 
 /**
  * GLM（ZCode 账号）这张卡自带的标记：智谱官方 logo.svg 里那个方形标记，逐字转录。
@@ -185,6 +185,7 @@ export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   // 色 #202020；底砖用 open-design.ai 自己样式表里的高亮底色 #EFF8E9（model-credits
   // 页的强调块背景），两者都是官方取值，不是本地选的颜色。
   opendesign: { mark: 'opendesign', color: '#202020', tile: '#EFF8E9' },
+  workbuddy: { mark: 'tencent', tile: '#0055E9' },
 }
 
 /** One brand mark at a given box size; the artwork is decorative. */
