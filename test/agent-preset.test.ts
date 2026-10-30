@@ -153,7 +153,10 @@ describe('the dispatch definition', () => {
 
   it('names the group rows and their nested rows as the bundle does', () => {
     expect(nestedIds('planning')).toEqual(['plan-mode'])
-    expect(nestedIds('compaction')).toEqual(['compaction-basic', 'command-compact', 'tool-result-pruner'])
+    // The pruner row is deliberately absent: rewriting a historical tool result
+    // invalidates the provider's content-prefix cache from there to the end, so
+    // the rebuild it triggers costs more than the context it removes.
+    expect(nestedIds('compaction')).toEqual(['compaction-basic', 'command-compact'])
     expect(nestedIds('delegation')).toEqual([
       'tool-subagent-control',
       'tool-subagent-list-agents',
@@ -173,7 +176,7 @@ describe('the dispatch definition', () => {
     expect(rowById('planning')).toMatchObject({ group: true, isolate: { planMode: true } })
     expect(rowById('compaction')).toMatchObject({
       group: true,
-      isolate: { compaction: true, toolResultPruner: true },
+      isolate: { compaction: true },
     })
     expect(rowById('delegation')).toMatchObject({ group: true, isolate: { workflowEngine: true } })
   })

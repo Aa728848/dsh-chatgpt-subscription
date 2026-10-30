@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **[agent-preset] dispatch 预设不再挂载 tool-result pruner，剪裁让位给摘要压缩**
+  - 结果剪裁会改写**历史里**的工具结果（`surfaceOp: replace`），而内容前缀缓存从被改写的那条起整段失效。真实 838k token 会话实测：一次剪裁移除约 418k token 上下文，但下一次请求为此付了 414k 全价 input token，当次净省不足 4k。
+  - 同一会话内 5 次摘要压缩的实测重建代价只有 20k–28k token——因为摘要把整段历史换成一小段 checkpoint，断点之后要重读的内容只剩几万；剪裁只砍中间几条，前缀却从历史 1% 处就断了。
+  - 因此从 `DISPATCH_PRESET`（`src/host/agent-preset.ts`）与随包 `presets/dispatch/agent.cordis.yml` 中移除 `tool-result-pruner` 行，并同步移除 `isolate.toolResultPruner`。`compaction-basic` 对缺失剪裁器完全容错（压力路径 `if (prune !== undefined)`、溢出路径 `?.`），这是 DSH 原生支持的降级路径。
+  - 影响面仅限 dispatch 预设；宿主平面与 `liangshen` 预设各自持有自己的剪裁配置，不受影响。`test/agent-preset.test.ts` 的两处断言同步更新。
+
 - **【WorkBuddy】恢复整条订阅线路并移植当前上游的 11128、双协议与风控修复**
   - 从 `2d125f40^` 恢复双区登录、桌面登录态采纳、账号池、目录/配额、签到、护栏、设置 UI、composer、文档与专属测试；保留 `workbuddy-subscription`、旧凭证/设置路径和 Windows DPAPI 兼容，全部共享注册点按末尾追加接线。
   - 默认身份升级为桌面 WorkBuddy 5.9.3 / CLI 2.165.0，旧 `cli` 默认经带版本号的幂等迁移切换；请求带每账号会话/turn id、X-Agent/X-Stainless 与 gzip。国区 Claude 新增 `/v1/messages`，支持 signed thinking、工具流、output_config.effort 和互斥 usage 计数。

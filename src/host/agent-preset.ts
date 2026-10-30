@@ -312,15 +312,20 @@ Reset: fallback applies only to the current task. When the next task begins, alw
       id: 'compaction',
       name: 'cordis:group',
       group: true,
-      isolate: { compaction: true, toolResultPruner: true },
+      isolate: { compaction: true },
+      // The tool-result pruner is deliberately absent. Pruning rewrites a
+      // historical tool result, which invalidates the provider's content-prefix
+      // cache from that point to the end of the conversation: measured on a real
+      // 838k-token session, one pass removed ~418k tokens of context but charged
+      // ~414k full-price input tokens to rebuild the prefix. The summary
+      // compaction below reaches the same reduction for ~20-28k tokens of
+      // rebuild, so on a cache-prefix provider the pruner costs more than it
+      // saves. `compaction-basic` treats a missing pruner as "skip the
+      // model-free pass" (`if (prune !== undefined)` and `?.` at both call
+      // sites), so this row is the supported way to opt out.
       config: [
         { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
         { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
-        {
-          id: 'tool-result-pruner',
-          name: '@deepseek-ai/dsh-compaction-tool-result-pruner',
-          config: { thresholdChars: 8192, headChars: 4096, tailChars: 1024 },
-        },
       ],
     },
     {
