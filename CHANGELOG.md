@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[llm-compat] 修复 `role: 'tool'` 消息的 `toolCallId` 读错位置：整轮请求被判 `11148 tool calls and tool results do not match`**
+  - **现象**：某条线路的会话在第 N 轮整轮失败，网关报 `11148` / "tool calls and tool results do not match"，同一条会话重试也无效。工具其实都执行完了，结果也都在历史里。
+  - **根因**：`normalizeMessages()` 只从消息顶层 `raw.toolCallId` 与 `source.callId` 取调用 id。harness 把结果 id 放在**消息体里的 `tool-result` 块**上时（`{ role: 'tool', content: [{ type: 'tool-result', toolCallId }], source: { kind: 'tool' } }`），两处都取不到，`callId` 退成空串。
+  - **连锁**：① mapper 发出 `tool_call_id: ""`，结果成孤儿；② `fillMissingToolResults()` 用 `tool_call_id` 建"已作答"集合，空串匹配不上任何真实 id，于是判定每个调用都没有结果，为每一个补一条伪造的 `[no result: the tool call did not complete]`；③ 网关看到"声明了 N 个调用、回来的全是空 id 且多出 N 条无主占位"，直接拒绝整单。
+  - **两个附加缺陷**（同一次修复）：路由用 `??` 串联，**空串不会被跳过**，一个空的 `raw.toolCallId` 会遮住 `source.callId` 里的真 id；消息体里已经带着 `tool-result` 块时，重包装会再套一层，让网关看到一个"内容是另一个 result"的 result。
+  - **修法**（`src/host/common/llm-compat.ts`）：新增 `firstNonEmptyString()` 按"第一个非空串"依次取 `raw.toolCallId` → `raw.callId` → `source.callId` → 消息体内 `tool-result` 块的 `toolCallId`；体内已带 result 块时复用其 `content` 而不是再包一层，`isError` 同时认消息级与块级两处。
+  - **影响面**：`normalizeMessages` 是 12 条线路共用的归一化入口（antigravity / command-code / ollama / kimi-code / minimax-code / workbuddy / claude / glm-coding-plan / step-code / cline-pass / qoder / responses-client），不是单条线路的补丁。三种形态取到真 id 后产出的归一化消息**逐字节相同**，老形态行为不变。
+  - **验证**：`test/llm-compat.test.ts` 新增 5 例——体内取 id、不重复包裹、空串不遮真 id、块级 `isError` 透传、无体内 block 时回落到消息级 id。**变异验证**：只回退 `src/host/common/llm-compat.ts`、保留新用例，4 例当场变红；恢复后 10 例全绿。`npm run typecheck` 三工程 0 错误；全量 `npx vitest run` **5730 passed / 15 skipped**，失败的 7 条（token-store-linux 3、token-store-macos 2、claude-oauth 1、glm-coding-plan-routes 1）在**未改动的干净工作树上同样失败**（`git stash` 验证），与本次无关。
+
 ## 0.48.2 - 2026-10-30
 
 - **[fix / guards] 修复两个宿主级缓存守卫吞掉 Cordis 瀑布的 `next()`：每一轮都崩成 `Cannot read properties of undefined (reading 'kind')`**

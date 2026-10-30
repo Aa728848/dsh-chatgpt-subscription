@@ -116,12 +116,57 @@ function readBlocks(raw: unknown): ContentBlock[] {
 }
 
 /**
+ * The first value that is a non-empty string.
+ *
+ * Used for fields the two generations spell in different places: a value that
+ * is present but empty must not shadow a real one further down the chain, which
+ * is what `??` alone does.
+ */
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return ''
+}
+
+/**
+ * The result block a `role: 'tool'` message already carries inside its body.
+ *
+ * Some harness generations deliver the call id inside the result block rather
+ * than on the message, and one shape carries both: `role: 'tool'` with a
+ * `tool-result` block holding the id. Reading only the message-level fields
+ * leaves {@link toolCallIdOf} nothing to find.
+ */
+function embeddedToolResult(content: readonly ContentBlock[]): ToolResultBlock | undefined {
+  if (content.length !== 1) return undefined
+  const [block] = content
+  return block?.type === 'tool-result' ? block : undefined
+}
+
+/**
+ * The call id one `role: 'tool'` message associates with its `tool-call`.
+ *
+ * The id is the only thing tying a result to the call it answers: a mapper that
+ * sends it empty makes every result an orphan and tells the repair pass that no
+ * call was answered, which some gateways reject outright (WorkBuddy answers
+ * `11148`, "tool calls and tool results do not match"). It therefore has to be
+ * read from every place the harness generations put it — the message, the
+ * message's source, and the result block inside the body — and an empty string
+ * must not shadow a later, real one.
+ */
+function toolCallIdOf(raw: Record<string, unknown>, source: Record<string, unknown> | undefined, embedded: ToolResultBlock | undefined): string {
+  return firstNonEmptyString(raw.toolCallId, raw.callId, source?.callId, embedded?.toolCallId)
+}
+
+/**
  * Normalize one harness message list into {@link Message}.
  *
  * A 0.1.7 `role: 'tool'` message is re-wrapped as the user-role message holding
  * one {@link ToolResultBlock} that the mappers expect, keeping the tool
  * provenance (`kind: 'tool'`) they use to tell a real tool result from a user
- * turn. Everything a newer harness adds beside that keeps its own shape.
+ * turn. A message that already carries that block keeps its own body instead of
+ * nesting a second `tool-result` around it. Everything a newer harness adds
+ * beside that keeps its own shape.
  * @param messages - Messages straight off the request options, in either generation's shape.
  * @returns The same conversation in the pre-0.1.7 vocabulary.
  */
@@ -132,15 +177,17 @@ export function normalizeMessages(messages: readonly unknown[] | undefined): Mes
     const content = readBlocks(raw.content)
     if (raw.role === 'tool') {
       const source = isRecord(raw.source) ? raw.source : undefined
-      const callId = String(raw.toolCallId ?? source?.callId ?? '')
+      const embedded = embeddedToolResult(content)
+      const callId = toolCallIdOf(raw, source, embedded)
+      const isError = raw.isError === true || embedded?.isError === true
       normalized.push({
         id: raw.id,
         role: 'user',
         content: [{
           type: 'tool-result',
           toolCallId: callId,
-          content,
-          ...(raw.isError === true ? { isError: true } : {}),
+          content: embedded === undefined ? content : embedded.content,
+          ...(isError ? { isError: true } : {}),
         }],
         source: { kind: 'tool', callId },
       })
