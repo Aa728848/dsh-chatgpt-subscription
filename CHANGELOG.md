@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[compaction] 摘要提示词改为面向交接，语言、结构与保真度对齐官方 kimi-code**
+  - DSH 的压缩指令是 `compaction-basic` 的私有常量，不是设置项，任何预设都改不了；本插件在 `llm/stream` 瀑布上把它就地替换（`src/host/compaction-prompt.ts`）。只改**最后一条** user 消息，前面每条消息按引用原样传下去——这是 DSH 复用前缀缓存的前提，改任何更早的消息都会让整段缓存失效。
+  - 三处对齐官方 `MoonshotAI/kimi-code` 的 `fullCompaction/compaction-instruction.md`：① 要求用对话原本的语言写，不再强制「concise English engineering prose」；② 不强制九个固定小节标题，让形状跟随任务；③ 要求保留**命令返回的值**而不只是命令本身，否则下一轮会重跑一遍，而文件可能已经变了。
+  - 保留 DSH 原有的一条规则：遇到已有的 `<compacted-summary>` 块要折叠而不是照抄，否则每次压缩都会复述上一份 checkpoint。
+  - 匹配用首句前缀而不是全文，harness 改词时安静回退到它自己的文案；请求对象被冻结时也保持原样并记一条 warning，而不是强行改写。
+  - 影响面：所有线路的压缩请求（`purpose: 'compaction'`），不限于 Kimi。新增 12 条测试。
+
 - **[agent-preset] dispatch 预设不再挂载 tool-result pruner，剪裁让位给摘要压缩**
   - 结果剪裁会改写**历史里**的工具结果（`surfaceOp: replace`），而内容前缀缓存从被改写的那条起整段失效。真实 838k token 会话实测：一次剪裁移除约 418k token 上下文，但下一次请求为此付了 414k 全价 input token，当次净省不足 4k。
   - 同一会话内 5 次摘要压缩的实测重建代价只有 20k–28k token——因为摘要把整段历史换成一小段 checkpoint，断点之后要重读的内容只剩几万；剪裁只砍中间几条，前缀却从历史 1% 处就断了。

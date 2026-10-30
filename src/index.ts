@@ -151,6 +151,7 @@ import {
   validateDelegationToolNames,
   type SessionsResolver,
 } from './host/subagent-model-authorization.ts'
+import { installCompactionPrompt, type PromptContext as CompactionPromptContext } from './host/compaction-prompt.ts'
 import { installBundledPresets } from './host/preset-sync.ts'
 import { installDispatchPreset } from './host/agent-preset.ts'
 import {
@@ -512,6 +513,19 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     }
     return () => handle.dispose()
   }, 'dsh-chatgpt-subscription: compaction route')
+
+  // The compaction directive is a private constant of the harness's own
+  // summarizer, so no preset can edit it; splicing it at `llm/stream` is the
+  // only seam that reaches it. The rewrite touches the FINAL message only, so
+  // every earlier message stays byte-identical and the cache prefix still
+  // matches — see src/host/compaction-prompt.ts.
+  ctx.effect(() => {
+    const handle = installCompactionPrompt({
+      on: (event, listener, options) => (ctx as unknown as CompactionPromptContext).on?.(event, listener, options),
+      logger: ctx.logger,
+    })
+    return () => handle?.dispose()
+  }, 'dsh-chatgpt-subscription: compaction prompt')
 
   const antigravityStore = new FileCredentialStore()
   const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)
