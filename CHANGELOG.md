@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.48.0 - 2026-10-30
+
+- **[dispatch / plan-mode] Fork 计划模式服务（`./plan-mode`）并新增宿主跨预设缓存守卫，进出计划模式零前缀重建，恢复完整四段式规划指引**
+  - 新增 `src/entry-plan-mode.ts`（导出 `@eddyskywalker/dsh-chatgpt-subscription/plan-mode`）替代 `dispatch` 预设中的 `@deepseek-ai/dsh-plan-mode`：不注册随状态翻转的动态 `plan:policy` 系统提示词分节；`exit_plan_mode` 无条件常驻注册（不挂 `{ when }`），使 native `tools` 与 PTC `tools:sdk` 在进出计划模式时保持逐字节恒定；部署配置的 `section` 改由 `agent/pre-step` 尾部通知消息（`plan-mode-notice`）单次追加，因此恢复 `0.47.0` 之前完整的 2627 字符四段式指引而不再产生每步重发开销；自动协商 `plan` 投影的 `stateVersion`（兼容 ≤0.2.1-rc.5 的 v3 与 ≥0.2.2-alpha 的 v4）。
+  - 新增 `src/host/plan-mode-cache-guard.ts`，在宿主层通过 `system-prompt/assemble`、`agent/pre-step` 与 `tools.register` 将内置 `standard` / `ptc` / `cordis` 预设的计划模式同步压平为零前缀重建。
+
+- **[dispatch / compaction] Fork 工具结果修剪器（`./tool-result-pruner`）并新增宿主跨预设守卫，恢复非 Kimi 线路修剪、整场跳过 `kimi-code`**
+  - 新增 `src/entry-tool-result-pruner.ts`（导出 `@eddyskywalker/dsh-chatgpt-subscription/tool-result-pruner`）重新挂载回 `dispatch` 预设的 `compaction` 隔离组（恢复 `isolate.toolResultPruner`）：对 `kimi-code` 会话整场跳过修剪（返回空结果、不触发 `surfaceOp: replace` 历史改写），对 Codex / Claude / OpenDesign 等其他线路照常执行 `8192 / 4096 / 1024` 码点修剪与 `compaction/prune` 影子计价。
+  - 新增 `src/host/tool-result-pruner-guard.ts`，在宿主 reflect store 与 `agent.ctx.get('toolResultPruner')` 两处自动包装内置预设的修剪器实例。
+
+- **[kimi-code] 新增 PTC `tools:sdk` 冻结守卫与 `compaction-basic` 专属压缩策略守卫**
+  - 新增 `src/host/ptc-sdk-cache-guard.ts`：对 `kimi-code` 会话忽略 `tools.definitions(scope, toolSet)` 的步骤级 `toolSet` 过滤并按未过滤工具集指纹缓存 `tools:sdk` 系统段，消除条件工具显隐导致的 `systemPrompt` 重建，同时保留 `tools.executable` 的步骤准入拦截。
+  - 新增 `src/host/compaction-policy-guard.ts`：跨预设改写 `compaction-basic` 引擎配置，为 `kimi-code` 注入专属压缩预算（`retainTokens: 8192`、`thresholdRatio: 0.85`、`headroomTokens: 32768`、`maxTokens: 32768`），将压缩后保留尾巴的重算开销从 ~41k tokens 压至 ~8k tokens，并在引擎 `summarize` 接缝原生替换交接式压缩提示词。
+
+- **[docs / test] 同步更新 `dsh-harness-upgrade` 维护技能并补齐 85 条专属单测**
+  - `.dsh/skills/dsh-harness-upgrade/SKILL.md` 新增 §2 seam 行与 §3a 跨代升级核查清单；`preset-sync.ts` 将两个新子路径加入 `OPTIONALLY_ABSENT_PACKAGES`；新增 `test/plan-mode-fork.test.ts`（36 例）、`test/tool-result-pruner.test.ts`（23 例）、`test/kimi-cache-guards.test.ts`（26 例）。
+
 ## 0.47.0 - 2026-10-30
 
 - **[agent-preset] dispatch 预设新增计划模式管线：访谈收敛后 `enter_plan_mode`，计划在计划模式内写、经 `exit_plan_mode` 审批**
