@@ -50,6 +50,14 @@
     "./plan-mode-pipeline": {
       "types": "./lib/types/entry-plan-mode-pipeline.d.ts",
       "default": "./lib/plan-mode-pipeline.js"
+    },
+    "./plan-mode": {
+      "types": "./lib/types/entry-plan-mode.d.ts",
+      "default": "./lib/plan-mode.js"
+    },
+    "./tool-result-pruner": {
+      "types": "./lib/types/entry-tool-result-pruner.d.ts",
+      "default": "./lib/tool-result-pruner.js"
     }
   },
   "dsh": {

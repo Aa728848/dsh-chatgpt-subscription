@@ -51,6 +51,7 @@ keeps generations comparable. Each seam has one file:
 | Wire and OAuth constants | `src/compat.ts` | Every backend and OAuth value that is not a public third-party contract lives here, so the whole wire surface is reviewable and rollbackable in one file. `CODEX_ORIGINATOR` and `OAUTH_ORIGINATOR` are deliberately ONE identity: the backend keys behaviour off it, and splitting it per endpoint gave a single account three unrelated failure signatures. Each subscription line's provider id and route prefix are re-exported from its frozen shared contract rather than restated here, and `PLUGIN_VERSION` is what `wire-auth.ts` sends as `user-agent`, so it must equal `package.json`'s version (a test asserts it). |
 | Credential record seam | `src/host/common/credentials-compat.ts` | The record half of DSH's `ctx.credentials` is written as a local structural shape instead of a type-only import of `@deepseek-ai/dsh-credentials`, because that seam exists only from harness 0.2 while this one code base still installs on 0.1.2-alpha.5. A host carrying the seam satisfies the shape structurally and a host without it falls through to the next backend, so the three methods must keep the seam's own names and argument types, and `KEY_SEGMENT_PATTERN` is copied from the shipped builder rather than invented — a key the seam rejects fails the provider's activation on the next start. |
 | Tool-call id brand | `src/host/common/brand-compat.ts` | `toToolCallId` reads the `ToolCallId` brander (or the older `CallId`) off the live `@deepseek-ai/dsh-llm` namespace at call time and falls back to identity, so every mapper still compiles and runs on a generation that ships no brander. The lookup must stay inside the function: a module-level read would freeze whichever generation loaded first and defeat the compatibility it exists for. |
+| Forked preset services & cache guards | `src/entry-plan-mode.ts`, `src/entry-tool-result-pruner.ts`, `src/host/plan-mode-cache-guard.ts`, `src/host/tool-result-pruner-guard.ts`, `src/host/ptc-sdk-cache-guard.ts`, `src/host/compaction-policy-guard.ts` | The `dispatch` preset mounts **this package's** services (`@eddyskywalker/dsh-chatgpt-subscription/plan-mode`, `…/tool-result-pruner`), not the harness ones, because both harness services rebuild the provider's content-prefix cache. Each fork ships as its own subpath export (`./plan-mode`, `./tool-result-pruner`: `package.json` `exports` + `tsdown.config.ts` + `tsconfig.host.json`), so a preset row can name it on every supported generation without a harness package. The plan fork keeps the official behaviour and drops the rebuild: it registers **no** dynamic `plan:policy` system section and registers `exit_plan_mode` **unconditionally** (no `{ when }`), so neither the system prefix nor the tool table changes when Plan Mode is entered or left; the deployment's `section` goes out as a trailing user message instead. The pruner fork is byte-compatible with the official pruner (same marker, same `compaction/prune` shadow-price event, same `surfaceOp: { op: 'replace', startSeq, endSeq }` + `sourceEventSeqs`) except that it skips a provider list (default `['kimi-code']`) whole-session, because rewriting a historical tool result invalidates the provider's content-prefix cache from that point to the end of the conversation. The host-side guards extend both to the presets this package does **not** own and must never become a second implementation: each flattens a seam in place and restores exactly what it wrapped on `dispose()`. The plan-mode guard must be installed **before** the official plan-mode row registers its tool (the tool layer has no "edit one registered entry" API), so a late install may only warn; the pruner guard must find the instance in **both** `ctx.reflect.store` and `agent.ctx.get('toolResultPruner')`, because the preset isolates the pruner into its own realm and the host store does not see it. Two of the four guard seams are **not** extensions of those two forks: the PTC SDK cache guard freezes the `tools:sdk` system section (it wraps `tools.definitions(scope, toolSet)` so the step-level `toolSet` is ignored under the protected providers, and reuses the first non-empty `tools:sdk` text per session until the unfiltered tool set changes), and the compaction policy guard rewrites the compaction engine's `config.modelPolicies` (an explicit user policy still wins; then a frozen Kimi Code policy — `retainTokens: 8192`, `thresholdRatio: 0.85`, `headroomTokens: 32768`, `maxTokens: 32768` — and it replaces the compaction instruction natively inside `summarize`). All four are installed **exactly once** on the host plane: `src/index.ts` gives each guard its own `ctx.effect` and disposes it when the plugin unloads, because a guard's idempotency is per install, not per context. The forked rows are `OPTIONALLY_ABSENT_PACKAGES` in `src/host/preset-sync.ts`, and every forked row must exist in **both** copies of the preset (`src/host/agent-preset.ts` and `presets/dispatch/agent.cordis.yml`) — one edit, two files, or the two sides teach different presets. |
 
 ## 3. Procedure for a new harness release
 
@@ -69,6 +70,71 @@ keeps generations comparable. Each seam has one file:
 5. Implement each bridge in its seam file, with the older generation's behaviour
    preserved by construction rather than by a version check.
 6. Verify (section 4), record (section 5), then commit and push.
+
+### 3a. The forked preset services and the cache guards
+
+The dispatch preset no longer mounts the harness's plan-mode and tool-result-pruner
+services, so **the harness delta that matters is not only in what this plugin
+imports** — it is in what the forks copy. Every harness round must diff these four
+upstream packages against the last baseline and answer one question per package:
+did the official behaviour change in a way the fork has to copy, or in a way the
+fork has to stop copying?
+
+```bash
+git -C <harness> diff dsh-v<old>..dsh-v<new> -- \
+  packages/plan/plan-mode \
+  packages/compaction/compaction-tool-result-pruner \
+  packages/compaction/compaction-basic \
+  packages/core/tools
+```
+
+| Upstream package | What the fork copies from it | What to check in the diff |
+|---|---|---|
+| `packages/plan/plan-mode` | the tool name `exit_plan_mode`, the plan projection key and state machine, the `plan:policy` section name, the `enter_plan_mode` tool result | A **new** dynamic `systemPrompt.section(...)` in the official service is a new prefix rebuild: the fork must not register it, and the plan-mode cache guard must strip it. A **new** `{ when }` on a tool is a second tool-table rebuild: the fork keeps registering `exit_plan_mode` unconditionally and the guard strips the conditional. A change to the plan projection's `stateVersion` is fatal at registration — `sessionProjections.register` refuses a mismatched version, so the fork registers 4 and retries once with the version the "already registered at stateVersion N" error names. |
+| `packages/compaction/compaction-tool-result-pruner` | the prune marker, the config keys and their validation, the `compaction/prune` shadow-price event, the `surfaceOp: { op: 'replace', startSeq, endSeq }` replacement and `sourceEventSeqs` | The fork is byte-compatible on purpose, so a change to the marker text, to the `thresholdChars` / `headChars` / `tailChars` validation, to the event name, or to the `surfaceOp` shape must be mirrored in `src/entry-tool-result-pruner.ts` **and** in `test/tool-result-pruner.test.ts` — that test is the spec comparison, not a convenience. A new key must stay optional: an unknown key must still be rejected. |
+| `packages/compaction/compaction-basic` | the way it reaches the pruner, and the budget keys the compaction policy guard rewrites | `compaction-basic` resolves the pruner with `ctx.get('toolResultPruner')` and treats a missing one as "skip the model-free pass" (`if (prune !== undefined)`, `?.`). If the lookup key, the call sites, or that fallback change, the preset's `isolate` list must follow: the pruner instance has to sit in the same realm as the compaction service, and a missing pruner must stay non-fatal. The compaction policy guard rewrites `config.modelPolicies` of that same service, so a change to the budget keys (`retainRatio`, `thresholdRatio`, `headroomTokens`, `retainTokens`, `maxTokens`), to the `modelPolicies` shape, or to the `compactIfNeeded` / `compactPressure` / `compact` / `summarize` entry points is a change the guard has to follow — an explicit user policy still has to win over the guard's frozen one. |
+| `packages/core/tools` | the `ToolDefinition` contract the guards patch, and the `definitions(scope, toolSet)` signature the PTC SDK cache guard wraps | `when?: (context) => boolean \| Promise<boolean>` is what the plan-mode cache guard removes from `exit_plan_mode`. A change to the tool-registration signature, to the `when` contract, or to how the tool table is published invalidates that seam: the guard must keep finding the registration point, and a late install must warn instead of pretending to have flattened it. The PTC SDK cache guard needs the same package to keep `definitions(scope, toolSet)`: it ignores the step-level `toolSet` under the protected providers and caches the assembled `tools:sdk` section per session, so a rename or a signature change there is a rebuild the guard has to answer. |
+
+The host-side guards (`src/host/plan-mode-cache-guard.ts`,
+`src/host/tool-result-pruner-guard.ts`, `src/host/ptc-sdk-cache-guard.ts`,
+`src/host/compaction-policy-guard.ts`) are the last line of defence, **not** the
+implementation. Each one's own header is the authority on what it flattens, and
+after every harness bump each must still satisfy three properties: it **changes
+nothing** in the harness service it guards beyond the one seam it is responsible
+for, it **restores exactly** what it wrapped (`dispose()`), and it is **idempotent
+within one install** — a repeated scan or a repeated event must not stack a second
+wrapper. Idempotency is *per install*, not *per context*: every guard keeps its own
+`WeakSet`/`WeakMap`, so installing the same guard twice on one `ctx` **would**
+stack a second wrapper (the plan-mode guard says so in its own header and leaves
+the single-install rule to the caller). The host entry therefore installs each
+guard **exactly once** — `src/index.ts` gives all four their own `ctx.effect` and
+disposes them when the plugin unloads. A guard that starts re-implementing the
+service it guards is a second implementation and a second place to drift.
+
+The seam each guard owns, and what a harness bump has to keep answering:
+
+| Guard | The one seam it flattens | What a bump must keep answering |
+|---|---|---|
+| `plan-mode-cache-guard.ts` | the dynamic `plan:policy` system section and the `{ when }` on `exit_plan_mode` | does the official service still register a dynamic section, and is `when` still the conditional-admission key? |
+| `tool-result-pruner-guard.ts` | the pruner instance's `pruneSession` | is the service still called `toolResultPruner`, and is it still reachable from `ctx.reflect.store` **and** from `agent.ctx.get('toolResultPruner')`? |
+| `ptc-sdk-cache-guard.ts` | `tools.definitions(scope, toolSet)` and the `tools:sdk` system section | does the tool layer still expose `definitions` in that shape, and is the PTC section still named `tools:sdk`? The guard deliberately leaves `tools.executable` alone: the tool stays *visible* for cache stability while the step admission still gates the *call*. |
+| `compaction-policy-guard.ts` | the compaction engine's `config.modelPolicies` and the `summarize` entry point | do the budget keys (`retainRatio`, `thresholdRatio`, `headroomTokens`, `retainTokens`, `maxTokens`) still exist, and is `modelPolicies` still resolved by a `find` over `provider`/`model`? |
+
+The compaction policy guard is the one guard that deliberately **rewrites** the
+guarded service instead of only flattening a rebuild: it replaces the engine's
+`config` with a frozen copy whose `modelPolicies` carries a custom `find` (an
+explicit user policy wins, then a frozen Kimi Code policy, then a probe over the
+last observed model), and it wraps `compactIfNeeded` / `compactPressure` /
+`compact` / `summarize` to observe the live provider/model and to replace the
+compaction instruction natively. `dispose()` restores the original `config`
+descriptor and the original methods.
+
+The forked rows are the plugin's **own subpath exports**, so they belong to
+`OPTIONALLY_ABSENT_PACKAGES` in `src/host/preset-sync.ts`: a synced preset tree
+outlives the plugin version that wrote it, and a stale row naming an export nothing
+provides marks the whole preset broken — unselectable and uncopyable — instead of
+losing one row. When a forked row is added or renamed, add it to that set in the
+same change, and make the edit in **both** copies of the preset.
 
 ## 4. Verification recipe
 

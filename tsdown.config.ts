@@ -18,6 +18,8 @@ const host: UserConfig = {
     index: 'src/index.ts',
     'progress-updates': 'src/entry-progress-updates.ts',
     'plan-mode-pipeline': 'src/entry-plan-mode-pipeline.ts',
+    'plan-mode': 'src/entry-plan-mode.ts',
+    'tool-result-pruner': 'src/entry-tool-result-pruner.ts',
   },
   outDir: 'lib',
   format: ['esm'],

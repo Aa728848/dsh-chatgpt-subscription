@@ -305,12 +305,25 @@ The order is fixed: converge the interview, enter Plan Mode, write the plan ther
       isolate: { planMode: true },
       config: [
         {
+          // This plugin's own fork of the plan-mode service, not the harness
+          // package: it keeps the official behaviour but never rebuilds the
+          // provider's content-prefix cache on entering or leaving Plan Mode.
+          // See src/entry-plan-mode.ts for the three differences.
           id: 'plan-mode',
-          name: '@deepseek-ai/dsh-plan-mode',
+          name: '@eddyskywalker/dsh-chatgpt-subscription/plan-mode',
           config: {
             // Verbatim copy of the yml section: on the manual /plan path this
             // string is the only guardrail, so it is never edited on one side.
-            section: `[Plan Mode] Stay in Plan Mode until a plan is submitted via exit_plan_mode: settle requirements per R0/R-G, treat "implement" as "plan it", and treat chat approval as a design decision, not plan approval. Explore read-only (no edits, no commands that rewrite tracked files); implement nothing before approval.`,
+            // The full four-paragraph guidance is kept because this fork sends
+            // the section once, as a trailing notice message, instead of
+            // re-rendering it into `systemPrompt` on every step of Plan Mode.
+            section: `[Plan Mode] Plan Mode is active. Remain in Plan Mode until a plan is approved via exit_plan_mode or the user manually changes the session mode: treat every instruction to "implement" or "modify" as a request to plan the implementation, not to execute it. Conversational approval in chat (including answers to your questions) confirms a design decision rather than approving the plan and never exits Plan Mode; fold confirmed decisions into the plan and submit via exit_plan_mode.
+
+[Read-Only Exploration & Clarification Interview] Inspect the repository first using non-mutating reads, searches, and static checks, preferring existing functions, utilities, and patterns; never edit or write files, mutate config, run formatters/codegen that rewrite tracked files, commit, or otherwise enact the plan. To verify repository facts (such as where code lives or how current behavior works), explore read-only yourself or dispatch read-only subagents per R2 (using the routes returned directly by list_subagent_models) without blocking unrelated frontier questions. Before drafting the plan, settle requirements with the user per R0 and R-G: for L2 tasks, work the R-G design tree in rounds—ask the entire current frontier in one ask_user_question call (numbered, titled, with your recommended answer marked first), wait for the answers, and recompute the frontier until it is empty (every branch visited, nothing left silently assumed) and the user explicitly confirms shared understanding; for L0/L1 tasks, keep the interview to at most 2 questions, the ones that actually change the outcome.
+
+[Plan Completeness] Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; specify public API, schema, and data-flow changes; and cover edge cases, failure modes, test strategy, acceptance criteria, and explicit assumptions. Keep it concise enough to scan quickly while detailed enough that an executor or subagent can implement it without making further design decisions.
+
+[Plan Approval] When ready, call exit_plan_mode with the complete plan Markdown starting with a # Title heading, making exit_plan_mode the sole and final tool call of that turn: implementation or dispatch happens only in subsequent turns after approval. Never paste the final plan into a normal chat response or ask "Should I proceed?" in prose or via ask_user_question. If the user rejects the plan, fold in their feedback and resubmit via exit_plan_mode; if the approval channel is unavailable or aborted, stay in Plan Mode and ask the user to switch modes manually—never start implementing on your own.`,
           },
         },
         {
@@ -327,20 +340,40 @@ The order is fixed: converge the interview, enter Plan Mode, write the plan ther
       id: 'compaction',
       name: 'cordis:group',
       group: true,
-      isolate: { compaction: true },
-      // The tool-result pruner is deliberately absent. Pruning rewrites a
-      // historical tool result, which invalidates the provider's content-prefix
-      // cache from that point to the end of the conversation: measured on a real
-      // 838k-token session, one pass removed ~418k tokens of context but charged
-      // ~414k full-price input tokens to rebuild the prefix. The summary
-      // compaction below reaches the same reduction for ~20-28k tokens of
-      // rebuild, so on a cache-prefix provider the pruner costs more than it
-      // saves. `compaction-basic` treats a missing pruner as "skip the
-      // model-free pass" (`if (prune !== undefined)` and `?.` at both call
-      // sites), so this row is the supported way to opt out.
+      isolate: { compaction: true, toolResultPruner: true },
+      // The pruner is this plugin's own fork (src/entry-tool-result-pruner.ts),
+      // not the harness package: it is byte-compatible with the official
+      // `@deepseek-ai/dsh-compaction-tool-result-pruner` except that it skips
+      // cache-prefix providers instead of rewriting their history.
+      //
+      // The reason the official pruner used to be left out is the reason the
+      // fork exists: pruning rewrites a historical tool result, which
+      // invalidates the provider's content-prefix cache from that point to the
+      // end of the conversation — measured on a real 838k-token session, one
+      // pass removed ~418k tokens of context but charged ~414k full-price input
+      // tokens to rebuild the prefix. The fork therefore skips `kimi-code`
+      // whole-session (the host-level guard enforces that across presets too),
+      // so a cache-prefix provider never pays the rebuild.
+      //
+      // `toolResultPruner` is isolated with the group because
+      // `compaction-basic` reads the pruner through `ctx.get`: the instance
+      // must be reachable from the realm that owns the compaction service.
+      // `compaction-basic` treats a missing pruner as "skip the model-free
+      // pass" (`if (prune !== undefined)` and `?.` at both call sites), so an
+      // installation where this fork's export is absent keeps working — the
+      // sync disables that row instead of marking the preset unresolvable.
       config: [
         { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
         { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
+        {
+          id: 'tool-result-pruner',
+          name: '@eddyskywalker/dsh-chatgpt-subscription/tool-result-pruner',
+          config: {
+            thresholdChars: 8192,
+            headChars: 4096,
+            tailChars: 1024,
+          },
+        },
       ],
     },
     {

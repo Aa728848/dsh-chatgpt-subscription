@@ -153,6 +153,10 @@ import {
   type SessionsResolver,
 } from './host/subagent-model-authorization.ts'
 import { installCompactionPrompt, type PromptContext as CompactionPromptContext } from './host/compaction-prompt.ts'
+import { installToolResultPrunerGuard } from './host/tool-result-pruner-guard.ts'
+import { installPlanModeCacheGuard } from './host/plan-mode-cache-guard.ts'
+import { installPtcSdkCacheGuard } from './host/ptc-sdk-cache-guard.ts'
+import { installCompactionPolicyGuard } from './host/compaction-policy-guard.ts'
 import { installBundledPresets } from './host/preset-sync.ts'
 import { installDispatchPreset } from './host/agent-preset.ts'
 import {
@@ -553,6 +557,39 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     })
     return () => handle?.dispose()
   }, 'dsh-chatgpt-subscription: compaction prompt')
+
+  // The four host-plane guards below extend the forked preset services to the
+  // presets this package does NOT own (the built-in standard / ptc / cordis
+  // ones). Each guard only flattens one seam in place, restores exactly what
+  // it wrapped on dispose(), and is idempotent — none of them is a second
+  // implementation of the service it guards. They live here, on the host
+  // plane, because a preset isolates its own rows into a realm the host store
+  // cannot see.
+  //
+  // The pruner guard has to find the instance in BOTH the host's reflect
+  // store and the agent realm's toolResultPruner lookup, and the plan-mode
+  // guard has to be installed BEFORE the official plan-mode row registers its
+  // tool (the tool layer has no "edit one registered entry" API), so a late
+  // install only warns.
+  ctx.effect(() => {
+    const guard = installToolResultPrunerGuard(ctx)
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: tool result pruner guard')
+
+  ctx.effect(() => {
+    const guard = installPlanModeCacheGuard(ctx)
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: plan mode cache guard')
+
+  ctx.effect(() => {
+    const guard = installPtcSdkCacheGuard(ctx)
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: PTC SDK cache guard')
+
+  ctx.effect(() => {
+    const guard = installCompactionPolicyGuard(ctx)
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: compaction policy guard')
 
   const antigravityStore = new FileCredentialStore()
   const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)

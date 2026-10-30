@@ -86,6 +86,14 @@ const OPTIONALLY_ABSENT_PACKAGES: readonly string[] = [
   // this entry that stale row marks the whole preset broken — unselectable and
   // uncopyable — instead of losing only the plan-mode pipeline.
   '@eddyskywalker/dsh-chatgpt-subscription/plan-mode-pipeline',
+  // The two forked preset services this plugin ships. Same reasoning as the
+  // pipeline row above: a synced preset tree outlives the version that wrote
+  // it, so a downgrade or an older profile copy leaves these rows naming
+  // exports nothing provides. Without these entries that stale row marks the
+  // whole preset broken — unselectable and uncopyable — instead of losing only
+  // the forked plan-mode service or the forked pruner.
+  '@eddyskywalker/dsh-chatgpt-subscription/plan-mode',
+  '@eddyskywalker/dsh-chatgpt-subscription/tool-result-pruner',
 ]
 
 /**

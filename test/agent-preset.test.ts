@@ -153,10 +153,10 @@ describe('the dispatch definition', () => {
 
   it('names the group rows and their nested rows as the bundle does', () => {
     expect(nestedIds('planning')).toEqual(['plan-mode', 'plan-mode-pipeline'])
-    // The pruner row is deliberately absent: rewriting a historical tool result
-    // invalidates the provider's content-prefix cache from there to the end, so
-    // the rebuild it triggers costs more than the context it removes.
-    expect(nestedIds('compaction')).toEqual(['compaction-basic', 'command-compact'])
+    // The pruner row is this plugin's own fork, not the harness package: it
+    // skips cache-prefix providers whole-session, so the rewrite that would
+    // invalidate the provider's content-prefix cache never happens on them.
+    expect(nestedIds('compaction')).toEqual(['compaction-basic', 'command-compact', 'tool-result-pruner'])
     expect(nestedIds('delegation')).toEqual([
       'tool-subagent-control',
       'tool-subagent-list-agents',
@@ -188,14 +188,34 @@ describe('the dispatch definition', () => {
     expect(yml).toContain(`    - id: plan-mode-pipeline\n      name: '${specifier}'`)
   })
 
+  it('mounts the forked plan-mode and pruner rows, in both copies', () => {
+    // Both rows are this plugin's own subpath exports, so no harness
+    // generation ships them: the id/name pair is what the two copies must
+    // agree on, and the preset sync disables a row whose export is absent.
+    const planMode = '@eddyskywalker/dsh-chatgpt-subscription/plan-mode'
+    const pruner = '@eddyskywalker/dsh-chatgpt-subscription/tool-result-pruner'
+    expect(rowById('plan-mode').name).toBe(planMode)
+    expect(rowById('tool-result-pruner').name).toBe(pruner)
+    expect(rowById('tool-result-pruner').config).toEqual({
+      thresholdChars: 8192,
+      headChars: 4096,
+      tailChars: 1024,
+    })
+
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    expect(yml).toContain(`    - id: plan-mode\n      name: '${planMode}'`)
+    expect(yml).toContain(`    - id: tool-result-pruner\n      name: '${pruner}'`)
+  })
+
   it('keeps every group row behind the isolate realms its rows need', () => {
     // The registry refuses a preset whose rows publish a service into the root
     // realm, so these realms are what makes the declaration mountable at all.
     expect(rowById('planning')).toMatchObject({ group: true, isolate: { planMode: true } })
-    expect(rowById('compaction')).toMatchObject({
-      group: true,
-      isolate: { compaction: true },
-    })
+    expect(rowById('compaction')).toMatchObject({ group: true })
+    // `toolResultPruner` shares the realm because `compaction-basic` reads
+    // the pruner through `ctx.get`; an instance outside the realm is
+    // invisible to it.
+    expect(rowById('compaction').isolate).toEqual({ compaction: true, toolResultPruner: true })
     expect(rowById('delegation')).toMatchObject({ group: true, isolate: { workflowEngine: true } })
   })
 
@@ -750,17 +770,15 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
-  it('keeps the plan-mode section one sentence, byte-identical between YAML and declaration, and pointed at R0/R-G', () => {
-    // The section is re-rendered on EVERY step of Plan Mode, so its bytes are a
-    // resident cost; it is compressed to a single sentence. That sentence is
-    // still the only guardrail on the manual /plan path — the path that gets no
-    // tool result — so five rules are asserted on the section itself: stay in
-    // Plan Mode until exit_plan_mode submits, "implement" means "plan it",
-    // chat approval is not plan approval, exploration stays read-only, and
-    // nothing is implemented before approval. The rest of the manual (plan
-    // completeness, exit_plan_mode as the sole and final call, the rejection
-    // loop) moved into the enter_plan_mode tool result, and
-    // test/plan-mode-pipeline.test.ts pins it there.
+  it('keeps the plan-mode section full, byte-identical between YAML and declaration', () => {
+    // The section is delivered ONCE, as a trailing notice message appended at
+    // agent/pre-step (src/entry-plan-mode.ts), not re-rendered into
+    // `systemPrompt` on every step of Plan Mode — so its length is no longer a
+    // per-step resident cost and the full four-paragraph guidance is restored.
+    // It is still the only guardrail on the manual /plan path — the degraded
+    // entry R9 keeps for an older harness or a switched-off plugin row — where
+    // no enter_plan_mode tool result ever arrives, so every paragraph has to
+    // be present here.
     function planModeSectionOf(yml: string): string {
       const lines = yml.split('\n')
       const start = lines.findIndex(line => line.trim() === 'section: |')
@@ -787,34 +805,18 @@ describe('the persona block the declaration transcribes', () => {
     expect(fromYaml).toBe(fromDecl)
     for (const section of [fromYaml, fromDecl]) {
       expect(section).toContain('[Plan Mode]')
-      // One sentence, one line, inside the resident-cost budget.
-      expect(section.split('\n')).toHaveLength(1)
-      // Budget raised from 220 to 360 on purpose: the read-only clause and the
-      // no-implementation-before-approval clause cannot live only in the
-      // enter_plan_mode tool result, because the manual /plan path that R9
-      // keeps as the degraded entry renders this section and nothing else.
-      // The extra ~105 chars (~26 tokens) are paid only while Plan Mode is on.
-      expect(section.length).toBeLessThanOrEqual(360)
-      // Rule 1: stay in Plan Mode until the plan is submitted for approval.
-      expect(section).toContain('Stay in Plan Mode until a plan is submitted via exit_plan_mode')
-      // Rule 2: an instruction to implement is an instruction to plan it.
-      expect(section).toContain('treat "implement" as "plan it"')
-      // Rule 3: conversational confirmation is not approval of the plan.
-      expect(section).toContain('treat chat approval as a design decision, not plan approval')
-      // Rule 4: exploration stays read-only on this path too; no command may
-      // rewrite tracked files.
-      expect(section).toContain('Explore read-only')
-      expect(section).toContain('rewrite tracked files')
-      // Rule 5: nothing is implemented before the plan is approved.
-      expect(section).toContain('implement nothing before approval')
-      // Requirements are settled before planning; the section points at the
-      // rules that own the interview instead of restating them.
-      expect(section).toContain('settle requirements per R0/R-G')
-      // The range form that reads as a floor stays out even in compressed form.
+      expect(section).toContain('[Read-Only Exploration & Clarification Interview]')
+      expect(section).toContain('[Plan Completeness]')
+      expect(section).toContain('[Plan Approval]')
+      // The two clauses the one-sentence version had dropped: the read-only
+      // subagent route rule and the L1 interview cap.
+      expect(section).toContain('using the routes returned directly by list_subagent_models')
+      expect(section).toContain('keep the interview to at most 2 questions')
+      // The range form that reads as a floor stays out even in the full text.
       expect(section).not.toContain('1–2 questions')
     }
     // The intent the old section-only assertions pinned by proxy still holds
-    // where it now lives, so compressing the section cannot silently drop it:
+    // where it now lives, so restoring the section cannot silently drop it:
     // the L1 question cap and the read-only discipline are in the persona, and
     // the subagent route rule is in R2/G4.
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {

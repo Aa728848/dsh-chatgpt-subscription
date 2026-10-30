@@ -320,6 +320,28 @@ describe('rows the installation cannot mount', () => {
     expect(reconcilePreset(PIPELINE_ROW, name => name === PIPELINE)).toBe(PIPELINE_ROW)
   })
 
+  /**
+   * The two forked preset services, backed by this plugin's own subpath
+   * exports. They are absent whenever the *plugin* on disk predates them, so
+   * they belong to the same optional set as the pipeline row above.
+   */
+  const FORKED_ROWS: readonly { id: string; specifier: string }[] = [
+    { id: 'plan-mode', specifier: '@eddyskywalker/dsh-chatgpt-subscription/plan-mode' },
+    { id: 'tool-result-pruner', specifier: '@eddyskywalker/dsh-chatgpt-subscription/tool-result-pruner' },
+  ]
+
+  for (const row of FORKED_ROWS) {
+    it(`disables the ${row.id} row where the plugin on disk predates its export`, () => {
+      const text = `    - id: ${row.id}\n      name: '${row.specifier}'\n`
+      expect(reconcilePreset(text, () => false)).toBe(`${text}      disabled: true\n`)
+    })
+
+    it(`leaves the ${row.id} row enabled where the subpath export resolves`, () => {
+      const text = `    - id: ${row.id}\n      name: '${row.specifier}'\n`
+      expect(reconcilePreset(text, name => name === row.specifier)).toBe(text)
+    })
+  }
+
   it('disables the pipeline row in the bundled composition without touching the row it follows', () => {
     // The two rows share the `planning` group. Disabling the pipeline must be
     // surgical: `plan-mode` carries the approval section, so losing it would
@@ -327,8 +349,8 @@ describe('rows the installation cannot mount', () => {
     const bundled = readFileSync(join(bundledPresetsRoot(), 'dispatch', 'agent.cordis.yml'), 'utf8')
     const reconciled = reconcilePreset(bundled, name => name !== PIPELINE)
     expect(reconciled).toContain(`- id: plan-mode-pipeline\n      name: '${PIPELINE}'\n      disabled: true\n`)
-    expect(reconciled).toContain(`- id: plan-mode\n      name: '@deepseek-ai/dsh-plan-mode'`)
-    expect(reconciled).not.toContain(`- id: plan-mode\n      name: '@deepseek-ai/dsh-plan-mode'\n      disabled: true`)
+    expect(reconciled).toContain(`- id: plan-mode\n      name: '@eddyskywalker/dsh-chatgpt-subscription/plan-mode'`)
+    expect(reconciled).not.toContain(`- id: plan-mode\n      name: '@eddyskywalker/dsh-chatgpt-subscription/plan-mode'\n      disabled: true`)
     // Untouched when the export is there, so the row stays enabled for everyone
     // running the plugin version that ships it.
     const intact = reconcilePreset(bundled, () => true)

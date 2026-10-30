@@ -13,9 +13,24 @@
  * 2. `LEAVE_PLAN_MODE_TOOL` —— `ctx.planMode.set(agent, false)`，语义是
  *    **放弃规划、不交计划**，并且必须说清它不是审批出口。
  *
- * 审批出口是 harness 官方的 `exit_plan_mode`，这一行**不注册**它、不替换它：
- * 它由 `@deepseek-ai/dsh-plan-mode` 自己按需逐步准入，重复注册同名工具会让宿主
- * 启动失败。
+ * 审批出口是 `exit_plan_mode`，这一行**不注册**它、不替换它：在 dispatch preset 里
+ * 它由本包 fork 的 plan-mode 服务注册（`src/entry-plan-mode.ts`），在别的 preset 里
+ * 由 harness 官方实现注册；重复注册同名工具会让宿主启动失败。
+ *
+ * ## 与 fork 的协调：**两参调用是刻意的**
+ *
+ * fork 的 `set(agent, active, options?)` 接受第三个参数 `{ narrate: false }`，用来
+ * 压制「用户切换了模式」那句尾部通知；但这一行**不传**它，原因有两条：
+ *
+ * 1. 那句通知是部署指引唯一的投递口。fork 把 `section` 放在尾部通知里（system 段
+ *    保持恒定才有零缓存重建），压掉它就等于压掉整个计划模式指引；
+ * 2. 老代/官方实现只认两个参数，多给的那个被静默忽略。两参调用在三种服务上都是
+ *    正确行为，不需要按代次分支。
+ *
+ * 官方实现在「进入那一步」会把动态 `plan:policy` 段与 `exit_plan_mode` 一起塞进
+ * 请求，那一步的前缀重建无法避免；fork 把 system 段摘掉、把 `exit_plan_mode` 无条件
+ * 注册，于是这一行在 fork 上进入/离开都不再换来一次重建。这一行本身不参与那件事，
+ * 只负责「进入」与「放弃」两个模型侧动作。
  *
  * ## 静态 `inject` 留空，注册等运行时的 `ctx.inject()`
  *
@@ -195,9 +210,20 @@ interface PlanModeControllerLike {
    * 选择是否处于计划模式。
    * @param agent - 会话所属 agent。
    * @param active - 目标状态。
+   * @param options - 可选：`narrate: false` 表示调用方的工具结果已经把话说完了。
+   *   官方实现与旧代只认前两个参数，多给的那个被 JS 静默忽略；本行**不传**它
+   *   （理由见模块说明：fork 的尾部通知就是计划指引的投递口）。
    * @returns 0.2.x 起是 `'committed' | 'queued' | 'cancelled' | 'noop'`；别的代原样转述。
    */
-  set(agent: unknown, active: boolean): unknown
+  set(agent: unknown, active: boolean, options?: { narrate?: boolean }): unknown
+  /**
+   * 若服务支持，压制下一次尾部通知。
+   *
+   * 只作结构声明存在：本行刻意不调用它，因为那句通知带着部署指引（`section`），
+   * 压掉它等于让模型拿不到计划模式手册。
+   * @param session - 会话。
+   */
+  suppressNextNarration?(session: unknown): void
 }
 
 /** agent 登记里本模块会读的部分。 */
@@ -533,6 +559,8 @@ function registerTools(ctx: Context): void {
       if (!readPlanModePipelineEnabled()) return { active: false, transition: DISABLED_TRANSITION }
       const agent = exec.agent
       assertLiveRoot(ctx, agent)
+      // 两参调用：第三个参数（{ narrate: false }）会压掉 fork 那条承载 section 的
+      // 尾部通知，而官方实现与旧代只认两个参数。见模块说明「与 fork 的协调」。
       const transition = transitionText(requirePlanMode(ctx).set(agent, true))
       // 这四个动作都意味着「目标状态已经达到」：对模型来说只差一句说明，不是失败。
       const active = transition === 'committed' || transition === 'queued'
@@ -571,6 +599,8 @@ function registerTools(ctx: Context): void {
       if (!readPlanModePipelineEnabled()) return { active: false, transition: DISABLED_TRANSITION }
       const agent = exec.agent
       assertLiveRoot(ctx, agent)
+      // 同样两参调用：离开方向的尾部通知不携带 section，但保持与进入方向一致的
+      // 调用形状，老代服务上也不会因为多一个参数而行为不明。
       const transition = transitionText(requirePlanMode(ctx).set(agent, false))
       return { active: false, transition }
     },
