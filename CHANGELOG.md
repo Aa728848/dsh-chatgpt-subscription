@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.48.2 - 2026-10-30
+
+- **[fix / guards] 修复两个宿主级缓存守卫吞掉 Cordis 瀑布的 `next()`：每一轮都崩成 `Cannot read properties of undefined (reading 'kind')`**
+  - 根因：DSH 的 `agent/pre-step` / `agent/request` / `agent/request-error` 是 Cordis **瀑布**事件（`ctx.waterfall`），监听器签名是 `(payload, next)`，而瀑布的返回值是**最外层监听器的返回值**。`src/host/tool-result-pruner-guard.ts` 与 `src/host/compaction-policy-guard.ts` 的 `handleAgentEvent` 只做副作用扫描（包装修剪器实例 / 观测 provider-model），从不调用也不返回尾部的 `next`——于是瀑布在第一步就被短路：后续监听器（含 `compaction-basic` 在 `agent/request-error` 上的溢出重试）一个都不跑，瀑布返回 `undefined`，`agent-loop`（`packages/core/agent-loop/src/agent.ts:290`）读 `decision.kind` 时抛 `TypeError: Cannot read properties of undefined (reading 'kind')`，**每一轮都崩**。
+  - 修复：两个守卫的 `handleAgentEvent` 改成「扫描照旧（失败只吞扫描本身）→ 无条件调用尾部 `next()` → 原样交回它的结果」。`next` 按结构取（最后一个参数且 `typeof === 'function'`）；没有 `next` 的老代 / 替身场景返回 `undefined` 而不抛错。结构探测（`isRecord` / `readContext` / `observeFrom`）本来就以 `typeof value === 'object'` 判定，函数天然被跳过，不会被误当成载荷。
+  - 事件面对齐：修剪器守卫此前只订阅 `agent/pre-step` 与 `agent/request-error`，现在与压缩策略守卫一致地订阅 `agent/pre-step` / `agent/request` / `agent/request-error` 三个瀑布事件。
+  - 回归：`test/tool-result-pruner.test.ts`（29 例）与 `test/kimi-cache-guards.test.ts`（34 例）新增「瀑布事件的 next() 转交」用例——用 `(payload, next)` 派发，断言监听器调用了 `next()` 并**原样**返回 `{ kind: 'enter', messages: [] }`；覆盖「`agent.ctx` 在场」「`agent.ctx` 缺席」「扫描抛错」三条分支，外加「没有 `next` 参数时返回 `undefined`」。把修复回退后这批用例立刻变红（10 例失败）。
+  - 文档：`.dsh/skills/dsh-harness-upgrade/SKILL.md` §3a 新增「Cordis waterfall events: every listener must call and return `next()`」小节，写明这条不变量、四条推导规则与本插件全部瀑布监听器的对照表。
+  - 影响面：自 0.48.0 引入宿主级守卫以来，所有装了这四个守卫的会话**每一轮**都受影响。
+
 ## 0.48.1 - 2026-10-30
 
 - **[fix / guards] 修复四个宿主级缓存守卫丢失调用方作用域的缺陷：`tools.register` 等方法不再被钉到根上下文**
