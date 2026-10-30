@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.47.0 - 2026-10-30
+
+- **[agent-preset] dispatch 预设新增计划模式管线：访谈收敛后 `enter_plan_mode`，计划在计划模式内写、经 `exit_plan_mode` 审批**
+  - 新增 loader 行 `@eddyskywalker/dsh-chatgpt-subscription/plan-mode-pipeline`（`src/entry-plan-mode-pipeline.ts`），在 `planning` 隔离组内注册 `enter_plan_mode` / `leave_plan_mode`，与 `plan-mode` 共用同一个 `planMode` realm、排在其后。缺 `planMode` 或 `tools` 服务时零注册、不抛错，preset 里别的行照常挂载。开关 `planModePipeline` 默认开；设置页「进展更新」卡片新增同名开关行，缺键读成开（与宿主 `default(true)` 一致）。
+  - persona 新增 R9 段与反模式 21/22：只有 L2 且 R-G 访谈收敛后才可调用；进入这一步只完成进入，下一步才只读探索并写出 decision-complete 计划，`exit_plan_mode` 是该轮唯一且最后的调用；`leave_plan_mode` 是放弃计划的出口，不是审批出口。
+  - 存活根校验改为三级降级：`agents` 缺失 → 放行；有 `agents` 但 `roots` 不可用 → 只判存活后放行；`roots` 可用且不含该 agent → 抛 `DELEGATED_CALLER`（该错误码唯一的抛出点）。R9 的子代理条款据此改写为分级口径（新代拒绝、老代放行），并写明「不要依赖这道拒绝」——子代理无论如何都要把未决决定带回调度者，不得自行进入计划模式或提交计划。
+  - `preset-sync` 把本行模块说明符加入 `OPTIONALLY_ABSENT_PACKAGES`：插件版本缺少该 subpath 导出时只禁用这一行，不再让整份 preset 被判 broken。
+  - 计划模式提示词的常驻开销压掉约 88%：`plan-mode` 的 `section` 从 2627 字符压到 309 字符（单行、五条护栏），只读探索与「批准前不实施」两条因为**手动 `/plan` 路径没有工具返回兜底**而必须留在 section 里；决策完备清单、唯一最后调用、打回循环搬进 `enter_plan_mode` 的返回文本（工具结果是末尾追加，不破坏前缀）。两个工具描述从 772/424 压到 352/196。进入计划模式那一次 system 前缀重建仍不可避免；工具表那半在声明 `dynamically_loaded_tools` 的 K3 上本就不重写顶层列表。
+  - 测试：新增 `test/plan-mode-pipeline.test.ts`（25 例，假 ctx 覆盖零注册、开关关闭、三级降级、两个工具的返回值与错误码）；`test/agent-preset.test.ts`、`test/preset-sync.test.ts`、`test/progress-updates-client.test.tsx` 同步更新断言。
+
 - **[compaction] 摘要提示词改为面向交接，语言、结构与保真度对齐官方 kimi-code**
   - DSH 的压缩指令是 `compaction-basic` 的私有常量，不是设置项，任何预设都改不了；本插件在 `llm/stream` 瀑布上把它就地替换（`src/host/compaction-prompt.ts`）。只改**最后一条** user 消息，前面每条消息按引用原样传下去——这是 DSH 复用前缀缓存的前提，改任何更早的消息都会让整段缓存失效。
   - 三处对齐官方 `MoonshotAI/kimi-code` 的 `fullCompaction/compaction-instruction.md`：① 要求用对话原本的语言写，不再强制「concise English engineering prose」；② 不强制九个固定小节标题，让形状跟随任务；③ 要求保留**命令返回的值**而不只是命令本身，否则下一轮会重跑一遍，而文件可能已经变了。
