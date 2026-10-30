@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.48.1 - 2026-10-30
+
+- **[fix / guards] 修复四个宿主级缓存守卫丢失调用方作用域的缺陷：`tools.register` 等方法不再被钉到根上下文**
+  - 根因：Cordis 的 `Service` 代理在读属性时会把方法**绑定到读取它的那一层作用域**。守卫此前用 `const original = tools.register` 取到的是一份**已经绑到根作用域**的函数，再 `original.call(tools, …)` 把根作用域硬塞回每一次注册；`ToolsService.register` 于是按 `scopeOf(this.ctx) === undefined` 落进**全局**工具层，于是第二个 preset 注册同名工具时抛 `tool "list_subagent_models" is already registered (for a per-agent variant, register through that agent's agent.ctx instead)`。
+  - 修复：四个守卫统一用 `resolveMethodTarget()` 定位方法——方法在**原型**上时取**原型那份未绑定实现**、并把包装写到原型；包装器一律 `original.call(this, …)`，把**调用方自己的 receiver** 传下去，`this.ctx` 因此留在调用方的 child scope。只有单测里的普通假对象（方法是自有属性）才退回实例。涉及 `src/host/plan-mode-cache-guard.ts`（`tools.register`）、`src/host/ptc-sdk-cache-guard.ts`（`tools.definitions`）、`src/host/tool-result-pruner-guard.ts`（`pruneSession`）、`src/host/compaction-policy-guard.ts`（`compactIfNeeded` / `compactPressure` / `compact` / `summarize`）。
+  - 去重：原型由同类的所有实例共享，而修剪器与压缩引擎又是**每个 preset realm 一份**，因此「已包装」按（宿主原型 + 方法名）记账，避免第二个实例叠第二层包装；`dispose()` 还原首次包装时捕获的原型描述符。
+  - 回归：新增**真实 Cordis** 多作用域用例——用 `@deepseek-ai/cordis` 的 `Context` / `Service` 造一个按作用域分桶的假工具层，把守卫装在根上下文上，再经 `childA.get('tools').register(…)` 与 `childB.get('tools').register(…)` 注册同名工具，断言 `register` 里的 `this.ctx` 是**调用方**那一层作用域（其原型就是那个子上下文）、两次注册互不撞车（`test/plan-mode-fork.test.ts` 新增 3 例、`test/kimi-cache-guards.test.ts` 新增 2 例）。把 receiver 退回旧的 `original.call(tools, …)` 后这些用例立刻复现现场报错。
+  - 文档：`.dsh/skills/dsh-harness-upgrade/SKILL.md` §3a 新增「原型 vs. 代理 receiver」小节，写明这条规则与它的两个衍生陷阱（原型跨实例共享、不得写 `Object.prototype`）。
+
 ## 0.48.0 - 2026-10-30
 
 - **[dispatch / plan-mode] Fork 计划模式服务（`./plan-mode`）并新增宿主跨预设缓存守卫，进出计划模式零前缀重建，恢复完整四段式规划指引**
