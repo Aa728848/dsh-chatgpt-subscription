@@ -19,9 +19,10 @@ export interface WorkBuddyComposerQuotaProps {
  * The three cases are deliberately distinct, because collapsing any two of them
  * states something the card does not know:
  *
- *   - a BOUNDED allowance is what a user spends down, so a meter reporting a
- *     remaining share wins. The cycle meter is preferred when both exist, since
- *     that is the one that actually resets;
+ *   - a BOUNDED allowance is what a user spends down, so the cycle meter's
+ *     remaining share wins the text slot when both exist, since that is the one
+ *     that actually resets; the number is enough here and the shared badge draws
+ *     no trailing meter, matching every sibling line's compact badge;
  *   - a reported share of ZERO is a measurement ("nothing left"), not a missing
  *     value: it renders `0%` at danger level and must never be confused with the
  *     unavailable case below;
@@ -31,9 +32,9 @@ export interface WorkBuddyComposerQuotaProps {
  *     UNKNOWN: the badge says so and asks for a click, instead of fabricating a
  *     `0` that reads as "you are out of quota".
  *
- * `percent` is only carried when the host actually stated a remaining share —
- * that is what the badge draws its bar from, and a bar filled from a guess is
- * worse than no bar.
+ * `percent` is deliberately never carried: the WorkBuddy badge is text-only so it
+ * matches the other lines' compact badges. A bar filled from a guess would be
+ * worse than no bar, and this line has no sibling that draws one.
  */
 export function selectBadgeFacts(
   status: WorkBuddyWebStatus | null,
@@ -70,7 +71,6 @@ export function selectBadgeFacts(
       text: `${remaining}%`,
       tooltip: `[WorkBuddy] ${meter.label}: ${remaining}% left`,
       level: quotaLevel(remaining),
-      percent: remaining,
     }
   }
 

@@ -151,7 +151,7 @@ describe('WorkBuddy settings card helpers', () => {
 })
 
 describe('WorkBuddy composer badge', () => {
-  it('prefers the billing-cycle meter, which is the one that resets', () => {
+  it('prefers the billing-cycle percentage without drawing a trailing meter', () => {
     const facts = selectBadgeFacts(statusWith({
       account,
       packageName: 'Free',
@@ -171,9 +171,9 @@ describe('WorkBuddy composer badge', () => {
     expect(facts?.text).toBe('99%')
     expect(facts?.level).toBe('normal')
     expect(facts?.tooltip).toContain('Billing cycle')
-    // The share travels with the number: it is what the badge draws its bar
-    // from, and it is the remaining share rather than the consumed one.
-    expect(facts?.percent).toBe(99)
+    // The share stays in the text slot; WorkBuddy deliberately carries no
+    // percent, so the shared badge draws no trailing bar and matches its siblings.
+    expect(facts?.percent).toBeUndefined()
   })
 
   it('escalates the badge level as the allowance runs down', () => {
@@ -183,12 +183,12 @@ describe('WorkBuddy composer badge', () => {
 
   it('reports a reported zero as a measurement, not as an unknown', () => {
     // A share of exactly 0 is the one case where "0%" and "no data" look alike
-    // in the badge's text slot; they are different statements and the tooltip
-    // and the bar have to keep them apart.
+    // in the badge's text slot; they are different statements and the text and
+    // tooltip have to keep them apart.
     const facts = selectBadgeFacts(meterStatus(0))
     expect(facts?.text).toBe('0%')
     expect(facts?.level).toBe('danger')
-    expect(facts?.percent).toBe(0)
+    expect(facts?.percent).toBeUndefined()
     expect(facts?.tooltip).toContain('0% left')
     expect(facts?.tooltip).not.toContain('unavailable')
   })
