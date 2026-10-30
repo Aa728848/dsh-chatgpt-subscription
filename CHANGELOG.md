@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.48.3 - 2026-10-30
+
+- **[WorkBuddy] 修复调整本地额度护栏时设置页白屏**
+  - 护栏输入框此前在延迟执行的状态更新中读取已被 React 清空的 `event.currentTarget`，连续输入会触发空引用并卸载整个设置组件；现改为在事件回调中同步捕获草稿值，保留积分、账号日 token 与模型日 token 均可安全连续输入。
+  - 新增“保留积分”连续输入回归测试，已验证旧代码会复现白屏，修复后输入值与设置页均保持正常。
+
 ## 0.48.2 - 2026-10-30
 
 - **[fix / guards] 修复两个宿主级缓存守卫吞掉 Cordis 瀑布的 `next()`：每一轮都崩成 `Cannot read properties of undefined (reading 'kind')`**

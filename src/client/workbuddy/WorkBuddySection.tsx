@@ -431,7 +431,12 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
                   step={1}
                   disabled={busy !== null}
                   value={guardrailDrafts[field] ?? String(status?.guardrails?.[field] ?? 0)}
-                  onChange={(event) => setGuardrailDrafts((prev) => ({ ...prev, [field]: event.currentTarget.value }))}
+                  onChange={(event) => {
+                    // React clears currentTarget after the event callback, before
+                    // a deferred state updater may run.
+                    const draft = event.currentTarget.value
+                    setGuardrailDrafts((prev) => ({ ...prev, [field]: draft }))
+                  }}
                   onBlur={() => {
                     const draft = guardrailDrafts[field]
                     if (draft === undefined) return

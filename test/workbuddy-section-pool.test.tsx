@@ -367,6 +367,24 @@ describe('WorkBuddy settings card', () => {
       body: { action: 'set-primary', accountId: 'cn:u2' },
     })
   })
+
+  it('keeps the settings card mounted while editing reserve credits', async () => {
+    await render({ guardrails: { reserveCredits: 0, dailyTokens: 0, modelDailyTokens: 0 } })
+    const field = [...container.querySelectorAll<HTMLElement>('.dsh-wb-field')]
+      .find((candidate) => candidate.textContent?.includes(zh.guardrailsReserve))!
+    const input = field.querySelector<HTMLInputElement>('input')!
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+
+    await act(async () => {
+      for (const draft of ['1', '12']) {
+        setValue.call(input, draft)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+    })
+
+    expect(input.value).toBe('12')
+    expect(container.textContent).toContain(zh.guardrailsSection)
+  })
 })
 
 /** The whole-pool banner, which is a div rather than a settings group. */
