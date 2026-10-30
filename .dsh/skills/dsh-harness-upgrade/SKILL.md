@@ -111,6 +111,67 @@ guard **exactly once** — `src/index.ts` gives all four their own `ctx.effect` 
 disposes them when the plugin unloads. A guard that starts re-implementing the
 service it guards is a second implementation and a second place to drift.
 
+#### 3a-1. Wrapping a Cordis `Service` method: prototype vs. proxy receiver
+
+Every one of the four guards wraps a method **on a Cordis `Service`**, and Cordis
+makes that trap easy to fall into. `ctx.get('tools')` hands back a **traceable
+proxy** over the service instance, and that proxy's `get` trap binds the method to
+the scope it was read from:
+
+```ts
+// cordis/src/utils.ts — createTraceable()
+const desc = getPropertyDescriptor(target, prop)      // walks the prototype chain
+const innerValue = desc.value                          // the RAW prototype method
+return createShadowMethod(ctx, innerValue, receiver, shadow)
+```
+
+Two consequences decide whether a guard preserves scope:
+
+1. **`tools.register` is not the method.** Reading it off the proxy returns a
+   *bound* function whose `this` is the scope the read happened in (the **root**
+   scope, for a host-plane guard). Capturing that and calling
+   `original.call(tools, …)` forces **every** registration back into the root
+   scope. `ToolsService.register` then resolves `scopeOf(this.ctx) === undefined`
+   and writes into the **global** tool layer, so the second preset that
+   registers the same tool name dies with
+   `tool "list_subagent_models" is already registered (for a per-agent variant,
+   register through that agent's agent.ctx instead)`.
+2. **The raw method lives on the prototype.** `Object.getPrototypeOf(service)`
+   gives `Service.prototype`, whose `register` is the unbound implementation.
+   Wrapping *that* and calling `original.call(this, …)` forwards the **caller's**
+   receiver, so `this.ctx` inside the service stays in the calling preset's or
+   agent's scope (`childCtx`), and two child scopes can register the same tool
+   name without colliding.
+
+So every guard resolves its method target the same way:
+
+- the method is an **own** property → the target is the instance (this is the
+  plain mock object a unit test uses);
+- the method lives on the **prototype** → the target is the prototype, the
+  captured original is the **unbound** prototype method, and the wrapper calls
+  `original.call(this, …)` with the caller's receiver — never the root proxy.
+
+Two traps ride along with the prototype target:
+
+- **A prototype is shared by every instance of that class.** The pruner and the
+  compaction engine are provided **per preset realm**, so the same class has
+  several instances in one process. Track "already patched" by **(holder, method
+  name)**, not by instance, or the second instance stacks a second wrapper; and
+  restore the prototype descriptor captured at first patch, not the one the
+  second instance saw.
+- **Never patch `Object.prototype` / `Function.prototype`.** A plain mock whose
+  method sits on `Object.prototype` would otherwise get the wrapper written
+  onto every object in the process.
+
+Regression coverage for this rule is **real Cordis**, not mocks: build a
+`class FakeToolsService extends Service` on a real `@deepseek-ai/cordis`
+`Context`, install the guard on the root, then register the same tool name
+through `childA.get('tools')` and `childB.get('tools')` and assert that the
+`this.ctx` seen inside `register` is the **calling** scope, not the root, and
+that the two registrations do not collide (`test/plan-mode-fork.test.ts` and
+`test/kimi-cache-guards.test.ts`). A mock-only test cannot catch this: a plain
+object has no scope, so the receiver never shows up.
+
 The seam each guard owns, and what a harness bump has to keep answering:
 
 | Guard | The one seam it flattens | What a bump must keep answering |

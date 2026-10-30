@@ -9,6 +9,7 @@
  *
  * 两个守卫都只做结构探测，因此这里用假的服务对象代替真实的 harness 服务。
  */
+import { Context, Service } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import {
   KIMI_CODE_PROVIDER,
@@ -16,6 +17,7 @@ import {
   installPtcSdkCacheGuard,
   readScopeProvider,
 } from '../src/host/ptc-sdk-cache-guard.ts'
+import { installPlanModeCacheGuard } from '../src/host/plan-mode-cache-guard.ts'
 import {
   COMPACTION_SERVICE_NAME,
   KIMI_CODE_MODELS,
@@ -573,5 +575,170 @@ describe('installCompactionPolicyGuard', () => {
     })
     expect(retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
     guard.dispose()
+  })
+})
+
+/**
+ * 真实 Cordis 服务上的多作用域回归。
+ *
+ * Cordis 的 `Service` 代理在读属性时会把方法**绑定到读取它的那一层作用域**。守卫若把
+ * 那份绑定版原样传下去（`original.call(tools, …)`），调用方的作用域就丢了：两个子
+ * 作用域注册同一个工具名会一起落进根作用域的全局层，撞上 "already registered"。
+ *
+ * 这里用真实的 `Context` / `Service` 钉住那条规则：包装必须取**原型上那份未绑定的
+ * 实现**，并把**调用方自己的 receiver** 传下去。
+ */
+
+/** 作用域标签：子上下文用自有属性标出自己的作用域。 */
+const SCOPE_KEY = Symbol('dsh-chatgpt-subscription.test.scope')
+
+/** 一次工具注册留下的痕迹。 */
+interface ScopeRegistration {
+  /** 工具名。 */
+  name: string
+  /** register 里的 this.ctx —— 必须是调用方那一层作用域。 */
+  ctx: unknown
+  /** this.ctx 上的作用域标签。 */
+  scope: unknown
+}
+
+/** 一次 definitions 调用留下的痕迹。 */
+interface ScopeDefinitionCall {
+  /** definitions 里的 this.ctx。 */
+  ctx: unknown
+  /** this.ctx 上的作用域标签。 */
+  scope: unknown
+}
+
+/**
+ * 一个真实 Cordis 服务：工具按作用域分桶，同名工具只在同一层撞车。
+ */
+class ScopedCordisToolsService extends Service {
+  /** 每次注册留下的痕迹。 */
+  readonly registrations: ScopeRegistration[] = []
+  /** 每次 definitions 留下的痕迹。 */
+  readonly definitionCalls: ScopeDefinitionCall[] = []
+  /** 全局层已注册的工具名。 */
+  readonly globalNames = new Set<string>()
+  /** 每个作用域已注册的工具名。 */
+  readonly scopedNames = new Map<unknown, Set<string>>()
+
+  /**
+   * @param ctx - 宿主上下文。
+   * @param name - 服务名。
+   */
+  constructor(ctx: Context, name: string) {
+    super(ctx, name)
+  }
+
+  /**
+   * @param definition - 工具定义。
+   * @returns 注销动作。
+   */
+  register(definition: { name: string }): () => void {
+    const scope = (this.ctx as unknown as Record<symbol, unknown>)[SCOPE_KEY]
+    this.registrations.push({ name: definition.name, ctx: this.ctx, scope })
+    const names = scope === undefined ? this.globalNames : this.scopedNamesOf(scope)
+    if (names.has(definition.name)) {
+      throw new Error(scope === undefined
+        ? `tool "${definition.name}" is already registered (for a per-agent variant, register through that agent's agent.ctx instead)`
+        : `tool "${definition.name}" is already registered in this scope`)
+    }
+    names.add(definition.name)
+    return () => { names.delete(definition.name) }
+  }
+
+  /**
+   * @param _scope - 视图片段。
+   * @param toolSet - 步骤准入集。
+   * @returns 可见定义。
+   */
+  definitions(_scope?: unknown, toolSet?: unknown): readonly { name: string }[] {
+    this.definitionCalls.push({
+      ctx: this.ctx,
+      scope: (this.ctx as unknown as Record<symbol, unknown>)[SCOPE_KEY],
+    })
+    const all = [{ name: 'list_subagent_models' }, { name: 'other_tool' }]
+    if (toolSet === undefined) return all
+    const admitted = (toolSet as { admitted?: readonly string[] }).admitted ?? []
+    return all.filter(entry => admitted.includes(entry.name))
+  }
+
+  /**
+   * @param scope - 作用域键。
+   * @returns 该作用域已注册的工具名。
+   */
+  private scopedNamesOf(scope: unknown): Set<string> {
+    let names = this.scopedNames.get(scope)
+    if (names === undefined) {
+      names = new Set<string>()
+      this.scopedNames.set(scope, names)
+    }
+    return names
+  }
+}
+
+/**
+ * 从一个上下文里读出工具服务。
+ *
+ * cordis 的 `ctx.get` 是运行期 mixin，类型声明上没有，所以这里显式收窄。
+ * @param ctx - 上下文。
+ * @returns 工具服务。
+ */
+function cordisToolsOf(ctx: Context): {
+  register(definition: { name: string }): unknown
+  definitions(scope?: unknown, toolSet?: unknown): readonly { name: string }[]
+} {
+  return (ctx as unknown as { get(name: string): unknown }).get('tools') as never
+}
+
+describe('the cache guards on a real Cordis service', () => {
+  it('keeps the calling scope, so two child scopes can register the same tool', () => {
+    const root = new Context()
+    const tools = new ScopedCordisToolsService(root, 'tools')
+    const childA = root.extend({ [SCOPE_KEY]: 'A' })
+    const childB = root.extend({ [SCOPE_KEY]: 'B' })
+
+    const planGuard = installPlanModeCacheGuard(root)
+    const sdkGuard = installPtcSdkCacheGuard(root)
+    try {
+      cordisToolsOf(childA).register({ name: 'list_subagent_models' })
+      cordisToolsOf(childB).register({ name: 'list_subagent_models' })
+
+      expect(tools.registrations).toHaveLength(2)
+      expect(tools.registrations[0].scope).toBe('A')
+      expect(tools.registrations[1].scope).toBe('B')
+      // this.ctx 是调用方那一层作用域的影子（它的原型就是那个子上下文）。
+      expect(Object.getPrototypeOf(tools.registrations[0].ctx)).toBe(childA)
+      expect(Object.getPrototypeOf(tools.registrations[1].ctx)).toBe(childB)
+      // 全局层始终是空的：两次注册没有落到根作用域上去撞车。
+      expect(tools.globalNames.size).toBe(0)
+    } finally {
+      planGuard.dispose()
+      sdkGuard.dispose()
+    }
+  })
+
+  it('keeps the scope on tools.definitions and still ignores the step tool set', () => {
+    const root = new Context()
+    const tools = new ScopedCordisToolsService(root, 'tools')
+    const childA = root.extend({ [SCOPE_KEY]: 'A' })
+
+    const planGuard = installPlanModeCacheGuard(root)
+    const sdkGuard = installPtcSdkCacheGuard(root)
+    try {
+      const scope = createScope(KIMI_CODE_PROVIDER)
+      const definitions = cordisToolsOf(childA).definitions(scope, { admitted: ['other_tool'] })
+
+      // 受保护线路：步骤级 toolSet 被忽略，工具表逐步恒定。
+      expect(definitions.map(entry => entry.name)).toEqual(['list_subagent_models', 'other_tool'])
+      // 作用域没丢：this.ctx 仍在调用方那一层。
+      expect(tools.definitionCalls).toHaveLength(1)
+      expect(tools.definitionCalls[0].scope).toBe('A')
+      expect(Object.getPrototypeOf(tools.definitionCalls[0].ctx)).toBe(childA)
+    } finally {
+      planGuard.dispose()
+      sdkGuard.dispose()
+    }
   })
 })

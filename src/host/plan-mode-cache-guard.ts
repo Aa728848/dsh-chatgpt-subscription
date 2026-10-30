@@ -188,6 +188,8 @@ function subscribe(
 export function installPlanModeCacheGuard(ctx: unknown): PlanModeCacheGuard {
   const states = new WeakMap<object, GuardState>()
   const restores: (() => void)[] = []
+  /** 已包装过的「方法宿主 + 方法名」：同一个原型不叠第二层包装。 */
+  const patchedMethods = new WeakMap<object, Set<string>>()
   let closed = false
 
   /**
@@ -275,26 +277,31 @@ export function installPlanModeCacheGuard(ctx: unknown): PlanModeCacheGuard {
 
   // ── 3. 摘掉 exit_plan_mode 的 { when } ────────────────────────────────────
   const wrap = (tools: ToolsRegistryLike | undefined): void => {
-    if (tools === undefined || typeof tools.register !== 'function') return
-    const original = tools.register
-    const wrapped = function (
-      this: unknown,
-      definition: ToolDefinition,
-      options?: { when?: unknown },
-    ): unknown {
+    if (tools === undefined) return
+    // 关键：原实现必须取**原型上那份未绑定的方法**。
+    // Cordis 的 Service 代理读属性时会把方法绑到读取它的那一层作用域（根作用域），
+    // 那份绑定版一旦再 original.call(tools, …)，每个 preset 的注册都被塞回根作用域，
+    // 全局层于是撞上 "already registered"。
+    const target = resolveMethodTarget(tools, 'register')
+    if (target === undefined) return
+    if (alreadyPatched(patchedMethods, target.holder, target.name)) return
+    const original = target.original
+    const wrapped: UnboundMethod = function (this: unknown, ...args: unknown[]): unknown {
+      // receiver 用**调用方**的 this：Cordis 会把它换成那一层作用域的影子，
+      // 于是 ToolsService 里的 this.ctx 留在调用方自己的作用域里，而不是根上下文。
+      const receiver = this ?? tools
+      const definition = args[0] as ToolDefinition
+      const options = args[1] as { when?: unknown } | undefined
       if (definition?.name === EXIT_PLAN_MODE && options !== undefined && options !== null && 'when' in options) {
         const { when: _dropped, ...rest } = options
-        return original.call(tools, definition, rest)
+        return original.call(receiver, definition, rest)
       }
-      return original.call(tools, definition, options)
+      return original.call(receiver, definition, options)
     }
-    try {
-      tools.register = wrapped
-    } catch {
-      return
-    }
+    if (!installMethod(target, wrapped)) return
+    markPatched(patchedMethods, target.holder, target.name)
     restores.push(() => {
-      if (tools.register === wrapped) tools.register = original
+      restoreMethod(target)
     })
     // 守卫来晚了：那条注册已经带着 { when } 落进工具层，工具层没有公开的改法。
     if (typeof tools.get === 'function') {
@@ -374,6 +381,133 @@ function logWarn(ctx: unknown, message: string): void {
   } catch {
     // 日志失败不影响守卫。
   }
+}
+
+/**
+ * 一个未绑定的方法（`this` 由调用点决定）。
+ */
+type UnboundMethod = (this: unknown, ...args: unknown[]) => unknown
+
+/**
+ * 一个待包装的方法：装它的位置、未绑定的原实现与原描述符。
+ */
+interface MethodTarget {
+  /** 包装写在哪：原型（真实 Cordis `Service`）或实例（单测里的普通假对象）。 */
+  holder: object
+  /** 方法名。 */
+  name: string
+  /** 未绑定的原实现。 */
+  original: UnboundMethod
+  /** 原实现的属性描述符（还原用）。 */
+  descriptor: PropertyDescriptor | undefined
+}
+
+/**
+ * 定位一个待包装的方法。
+ *
+ * Cordis 的 `Service` 代理在读属性时会把方法**绑定到读取它的那一层作用域**
+ * （`Reflect.get(target, prop, receiver).bind(receiver)`）。于是
+ * `const original = tools.register` 拿到的是一份**已经绑到根作用域**的函数；再
+ * `original.call(tools, …)` 就把根作用域硬塞回每一个 preset 的注册里，全局层
+ * 于是撞上 "already registered"。
+ *
+ * 真正要的是**原型上那份未绑定的方法**：包装器用 `original.call(this, …)` 把
+ * 调用方自己的 receiver 传下去，服务里的 `this.ctx` 才留在调用方那一层作用域
+ * （child ctx）里。方法挂在原型上时（真实 Cordis `Service`），包装也写在原型上；
+ * 只有普通假对象（单测）才把方法作为自有属性挂在实例上。
+ *
+ * @param service - 服务实例（可以是 Cordis 的跟踪代理）。
+ * @param name - 方法名。
+ * @returns 目标；方法不存在时为 `undefined`。
+ */
+function resolveMethodTarget(service: unknown, name: string): MethodTarget | undefined {
+  if (typeof service !== 'object' || service === null) return undefined
+  const own = service as Record<string, unknown>
+  if (Object.prototype.hasOwnProperty.call(own, name)) {
+    const original = own[name]
+    if (typeof original !== 'function') return undefined
+    return {
+      holder: own,
+      name,
+      original: original as UnboundMethod,
+      descriptor: Object.getOwnPropertyDescriptor(own, name),
+    }
+  }
+  const proto = Object.getPrototypeOf(service) as object | null
+  if (proto === null) return undefined
+  // 不许动 Object.prototype / Function.prototype：那会把包装写到所有对象身上。
+  if (proto === (Object.prototype as object) || proto === (Function.prototype as object)) return undefined
+  const original = (proto as Record<string, unknown>)[name]
+  if (typeof original !== 'function') return undefined
+  return {
+    holder: proto,
+    name,
+    original: original as UnboundMethod,
+    descriptor: Object.getOwnPropertyDescriptor(proto, name),
+  }
+}
+
+/**
+ * 把一个包装写到方法所在的位置上。
+ *
+ * @param target - 目标。
+ * @param replacement - 包装实现。
+ * @returns 是否装上了。
+ */
+function installMethod(target: MethodTarget, replacement: UnboundMethod): boolean {
+  try {
+    Object.defineProperty(target.holder, target.name, {
+      value: replacement,
+      configurable: true,
+      writable: true,
+      enumerable: target.descriptor?.enumerable ?? false,
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 还原方法所在位置上原来的实现。
+ *
+ * @param target - 目标。
+ */
+function restoreMethod(target: MethodTarget): void {
+  try {
+    if (target.descriptor === undefined) {
+      Reflect.deleteProperty(target.holder, target.name)
+    } else {
+      Object.defineProperty(target.holder, target.name, target.descriptor)
+    }
+  } catch {
+    // 服务已经卸载：忽略。
+  }
+}
+
+/**
+ * 判断某个「方法宿主 + 方法名」是不是已经被本守卫包过。
+ *
+ * @param patched - 已包装记录。
+ * @param holder - 方法宿主。
+ * @param name - 方法名。
+ * @returns 是否已经包过。
+ */
+function alreadyPatched(patched: WeakMap<object, Set<string>>, holder: object, name: string): boolean {
+  return patched.get(holder)?.has(name) === true
+}
+
+/**
+ * 记下某个「方法宿主 + 方法名」已经被本守卫包过。
+ *
+ * @param patched - 已包装记录。
+ * @param holder - 方法宿主。
+ * @param name - 方法名。
+ */
+function markPatched(patched: WeakMap<object, Set<string>>, holder: object, name: string): void {
+  const names = patched.get(holder)
+  if (names === undefined) patched.set(holder, new Set([name]))
+  else names.add(name)
 }
 
 export default installPlanModeCacheGuard

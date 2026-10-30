@@ -1,4 +1,4 @@
-import { Service } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import PlanModeController, {
   APPROVE_LABEL,
@@ -13,6 +13,7 @@ import PlanModeController, {
   resolveConfig,
 } from '../src/entry-plan-mode.ts'
 import { installPlanModeCacheGuard } from '../src/host/plan-mode-cache-guard.ts'
+import { installPtcSdkCacheGuard } from '../src/host/ptc-sdk-cache-guard.ts'
 
 /**
  * fork 版计划模式服务与宿主级缓存守卫的行为面。
@@ -812,5 +813,187 @@ describe('the host-level cache guard', () => {
     const assembly = { contexts: [] }
     const result = await runChain(host, 'system-prompt/assemble', [assembly, {}], assembly)
     expect(result).toBe(assembly)
+  })
+})
+
+/**
+ * 真实 Cordis 服务上的多作用域回归。
+ *
+ * Cordis 的 `Service` 代理在读属性时会把方法**绑定到读取它的那一层作用域**，于是
+ * `const original = tools.register` 拿到的是一份绑到**根作用域**的函数；守卫再
+ * `original.call(tools, …)`，每一个 preset 的注册都被塞回根作用域，全局层于是撞上
+ * `tool "list_subagent_models" is already registered`。
+ *
+ * 这里用真实的 `Context` / `Service` 钉住那条规则：包装必须把**调用方自己的
+ * receiver** 传下去，服务里的 `this.ctx` 留在调用方那一层作用域里。
+ */
+
+/** 作用域标签：子上下文用自有属性标出自己的作用域。 */
+const SCOPE_KEY = Symbol('dsh-chatgpt-subscription.test.scope')
+
+/** 一次工具注册留下的痕迹。 */
+interface ScopeRegistration {
+  /** 工具名。 */
+  name: string
+  /** 注册选项。 */
+  options: unknown
+  /** register 里的 this.ctx —— 必须是调用方那一层作用域。 */
+  ctx: unknown
+  /** this.ctx 上的作用域标签。 */
+  scope: unknown
+}
+
+/**
+ * 一个真实 Cordis 服务：工具按作用域分桶，同名工具只在同一层撞车。
+ *
+ * 这复刻 `ToolsService.register` 的作用域语义（`scopeOf(this.ctx)` 决定落在全局层
+ * 还是该 agent 的层），所以「两个子作用域注册同名工具」在守卫装错时必然撞车。
+ */
+class ScopedToolsService extends Service {
+  /** 每次注册留下的痕迹。 */
+  readonly registrations: ScopeRegistration[] = []
+  /** 每次 definitions 留下的痕迹。 */
+  readonly definitionCalls: { ctx: unknown; scope: unknown }[] = []
+  /** 全局层已注册的工具名。 */
+  readonly globalNames = new Set<string>()
+  /** 每个作用域已注册的工具名。 */
+  readonly scopedNames = new Map<unknown, Set<string>>()
+
+  /**
+   * @param ctx - 宿主上下文。
+   * @param name - 服务名。
+   */
+  constructor(ctx: Context, name: string) {
+    super(ctx, name)
+  }
+
+  /**
+   * @param definition - 工具定义。
+   * @param options - 注册选项。
+   * @returns 注销动作。
+   */
+  register(definition: { name: string }, options?: unknown): () => void {
+    const scope = (this.ctx as unknown as Record<symbol, unknown>)[SCOPE_KEY]
+    this.registrations.push({ name: definition.name, options, ctx: this.ctx, scope })
+    const names = scope === undefined ? this.globalNames : this.scopedNamesOf(scope)
+    if (names.has(definition.name)) {
+      throw new Error(scope === undefined
+        ? `tool "${definition.name}" is already registered (for a per-agent variant, register through that agent's agent.ctx instead)`
+        : `tool "${definition.name}" is already registered in this scope`)
+    }
+    names.add(definition.name)
+    return () => { names.delete(definition.name) }
+  }
+
+  /**
+   * @param _scope - 视图片段。
+   * @param _toolSet - 步骤准入集。
+   * @returns 可见定义。
+   */
+  definitions(_scope?: unknown, _toolSet?: unknown): readonly { name: string }[] {
+    this.definitionCalls.push({
+      ctx: this.ctx,
+      scope: (this.ctx as unknown as Record<symbol, unknown>)[SCOPE_KEY],
+    })
+    return [{ name: 'list_subagent_models' }]
+  }
+
+  /**
+   * @param scope - 作用域键。
+   * @returns 该作用域已注册的工具名。
+   */
+  private scopedNamesOf(scope: unknown): Set<string> {
+    let names = this.scopedNames.get(scope)
+    if (names === undefined) {
+      names = new Set<string>()
+      this.scopedNames.set(scope, names)
+    }
+    return names
+  }
+}
+
+/**
+ * 从一个上下文里读出工具服务。
+ *
+ * cordis 的 `ctx.get` 是运行期 mixin，类型声明上没有，所以这里显式收窄。
+ * @param ctx - 上下文。
+ * @returns 工具服务。
+ */
+function toolsOf(ctx: Context): {
+  register(definition: { name: string }, options?: unknown): unknown
+  definitions(scope?: unknown, toolSet?: unknown): readonly { name: string }[]
+} {
+  return (ctx as unknown as { get(name: string): unknown }).get('tools') as never
+}
+
+describe('the cache guards on a real Cordis service', () => {
+  it('keeps the calling scope, so two child scopes can register the same tool', () => {
+    const root = new Context()
+    const tools = new ScopedToolsService(root, 'tools')
+    const childA = root.extend({ [SCOPE_KEY]: 'A' })
+    const childB = root.extend({ [SCOPE_KEY]: 'B' })
+
+    const planGuard = installPlanModeCacheGuard(root)
+    const sdkGuard = installPtcSdkCacheGuard(root)
+    try {
+      // 同一个工具名，两个子作用域：修好之前第二次会撞上「already registered」。
+      toolsOf(childA).register({ name: 'list_subagent_models' })
+      toolsOf(childB).register({ name: 'list_subagent_models' })
+
+      expect(tools.registrations).toHaveLength(2)
+      expect(tools.registrations[0].scope).toBe('A')
+      expect(tools.registrations[1].scope).toBe('B')
+      // this.ctx 是调用方那一层作用域的影子（它的原型就是那个子上下文），
+      // 不是根上下文。
+      expect(Object.getPrototypeOf(tools.registrations[0].ctx)).toBe(childA)
+      expect(Object.getPrototypeOf(tools.registrations[1].ctx)).toBe(childB)
+      // 全局层始终是空的：两次注册没有落到根作用域上去撞车。
+      expect(tools.globalNames.size).toBe(0)
+    } finally {
+      planGuard.dispose()
+      sdkGuard.dispose()
+    }
+  })
+
+  it('still strips the conditional admission, and definitions keeps the scope too', () => {
+    const root = new Context()
+    const tools = new ScopedToolsService(root, 'tools')
+    const childA = root.extend({ [SCOPE_KEY]: 'A' })
+
+    const planGuard = installPlanModeCacheGuard(root)
+    const sdkGuard = installPtcSdkCacheGuard(root)
+    try {
+      const when = (): boolean => false
+      toolsOf(childA).register({ name: EXIT_PLAN_MODE }, { when })
+      expect('when' in (tools.registrations[0].options as Record<string, unknown>)).toBe(false)
+      expect(tools.registrations[0].scope).toBe('A')
+
+      // tools.definitions 走的是同一个接缝：作用域也不能丢。
+      toolsOf(childA).definitions({ options: { provider: 'kimi-code' } }, { admitted: ['a'] })
+      expect(tools.definitionCalls).toHaveLength(1)
+      expect(tools.definitionCalls[0].scope).toBe('A')
+      expect(Object.getPrototypeOf(tools.definitionCalls[0].ctx)).toBe(childA)
+    } finally {
+      planGuard.dispose()
+      sdkGuard.dispose()
+    }
+  })
+
+  it('restores the prototype methods on dispose', () => {
+    const root = new Context()
+    const tools = new ScopedToolsService(root, 'tools')
+    const originalRegister = ScopedToolsService.prototype.register
+    const originalDefinitions = ScopedToolsService.prototype.definitions
+
+    const planGuard = installPlanModeCacheGuard(root)
+    const sdkGuard = installPtcSdkCacheGuard(root)
+    expect(ScopedToolsService.prototype.register).not.toBe(originalRegister)
+    expect(ScopedToolsService.prototype.definitions).not.toBe(originalDefinitions)
+
+    planGuard.dispose()
+    sdkGuard.dispose()
+    expect(ScopedToolsService.prototype.register).toBe(originalRegister)
+    expect(ScopedToolsService.prototype.definitions).toBe(originalDefinitions)
+    expect(tools.registrations).toHaveLength(0)
   })
 })
