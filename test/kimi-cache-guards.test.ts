@@ -742,3 +742,108 @@ describe('the cache guards on a real Cordis service', () => {
     }
   })
 })
+
+/**
+ * 派发一次瀑布事件，并拿回监听器的返回值。
+ *
+ * Cordis 的 `waterfall` 把**最外层监听器的返回值**当作整条链的结果：一个监听器
+ * 不调用 `next()` 就等于替整条链做了决定（后续监听器与内置默认行为一个都不跑），
+ * 瀑布的返回值也变成它自己的返回值——于是 `agent-loop` 读 `decision.kind` 时拿到
+ * `undefined`，每一轮都炸成
+ * `TypeError: Cannot read properties of undefined (reading 'kind')`。
+ *
+ * @param listeners - 监听器表。
+ * @param event - 事件名。
+ * @param payload - 事件载荷。
+ * @param next - 瀑布的下一棒。
+ * @returns 监听器的返回值。
+ */
+async function emitWaterfall(
+  listeners: Map<string, HostListener>,
+  event: string,
+  payload: unknown,
+  next: () => Promise<unknown>,
+): Promise<unknown> {
+  const listener = listeners.get(event)
+  if (listener === undefined) throw new Error(`no listener registered for ${event}`)
+  return await listener(payload, next)
+}
+
+describe('瀑布事件的 next() 转交', () => {
+  /** 瀑布的默认结果：一次「进入本步」。 */
+  const ENTER = { kind: 'enter', messages: [] }
+
+  it.each(['agent/pre-step', 'agent/request', 'agent/request-error'])(
+    '压缩策略守卫在 %s 上调用 next() 并原样返回它的结果',
+    async (event) => {
+      const { ctx, listeners } = createHost(undefined)
+      const guard = installCompactionPolicyGuard(ctx)
+      let calls = 0
+      const result = await emitWaterfall(
+        listeners,
+        event,
+        { agent: { ctx: { reflect: { store: {} } } } },
+        async () => {
+          calls += 1
+          return ENTER
+        },
+      )
+      expect(calls).toBe(1)
+      expect(result).toBe(ENTER)
+      // `agent-loop` 读的就是 `decision.kind`：拿到 undefined 就是现场那个崩溃。
+      expect((result as { kind?: unknown }).kind).toBe('enter')
+      guard.dispose()
+    },
+  )
+
+  it('压缩策略守卫在 agent.ctx 缺席时也照样转交', async () => {
+    const { ctx, listeners } = createHost(undefined)
+    const guard = installCompactionPolicyGuard(ctx)
+    let calls = 0
+    const result = await emitWaterfall(listeners, 'agent/pre-step', { agent: {} }, async () => {
+      calls += 1
+      return ENTER
+    })
+    expect(calls).toBe(1)
+    expect(result).toBe(ENTER)
+    guard.dispose()
+  })
+
+  it('压缩策略守卫在扫描抛错时也照样转交', async () => {
+    const { ctx, listeners } = createHost(undefined)
+    const guard = installCompactionPolicyGuard(ctx)
+    // 安装完成之后才把扫描弄崩：安装本身要扫一次。
+    Object.defineProperty(ctx, 'reflect', {
+      configurable: true,
+      get() {
+        throw new Error('reflect exploded')
+      },
+    })
+    let calls = 0
+    const result = await emitWaterfall(
+      listeners,
+      'agent/pre-step',
+      { agent: { ctx: { reflect: { store: {} } } } },
+      async () => {
+        calls += 1
+        return ENTER
+      },
+    )
+    expect(calls).toBe(1)
+    expect(result).toBe(ENTER)
+    guard.dispose()
+  })
+
+  it('计划模式缓存守卫在 agent/pre-step 上也转交 next() 的结果', async () => {
+    const { ctx, listeners } = createHost(undefined)
+    const guard = installPlanModeCacheGuard(ctx)
+    let calls = 0
+    const result = await emitWaterfall(listeners, 'agent/pre-step', { agent: {} }, async () => {
+      calls += 1
+      return ENTER
+    })
+    expect(calls).toBe(1)
+    expect(result).toBe(ENTER)
+    guard.dispose()
+  })
+})

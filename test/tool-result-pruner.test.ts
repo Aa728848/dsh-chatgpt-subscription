@@ -630,3 +630,109 @@ describe('宿主级跨 preset 守卫', () => {
     guard.dispose()
   })
 })
+
+/**
+ * 派发一次瀑布事件，并拿回监听器的返回值。
+ *
+ * Cordis 的 `waterfall` 把**最外层监听器的返回值**当作整条链的结果：一个监听器
+ * 不调用 `next()` 就等于替整条链做了决定（后续监听器与内置默认行为一个都不跑），
+ * 瀑布的返回值也变成它自己的返回值。这个替身就是模拟那一次调用。
+ *
+ * @param host - 宿主替身。
+ * @param event - 事件名。
+ * @param payload - 事件载荷。
+ * @param next - 瀑布的下一棒。
+ * @returns 监听器的返回值。
+ */
+async function emitWaterfall(
+  host: FakeHost,
+  event: string,
+  payload: unknown,
+  next: () => Promise<unknown>,
+): Promise<unknown> {
+  const bucket = host.listeners.get(event) ?? []
+  const entry = bucket[bucket.length - 1]
+  if (entry === undefined) throw new Error(`no listener registered for ${event}`)
+  const listener = entry.listener as unknown as (...args: unknown[]) => unknown
+  return await listener(payload, next)
+}
+
+describe('瀑布事件的 next() 转交', () => {
+  /** 瀑布的默认结果：一次「进入本步」。 */
+  const ENTER = { kind: 'enter', messages: [] }
+
+  it.each(['agent/pre-step', 'agent/request', 'agent/request-error'])(
+    '%s 会被调用，并把它的结果原样交回去',
+    async (event) => {
+      const host = createFakeHost()
+      const guard = installToolResultPrunerGuard(host.ctx)
+      let calls = 0
+      const result = await emitWaterfall(
+        host,
+        event,
+        { agent: { ctx: { reflect: { store: {} } } } },
+        async () => {
+          calls += 1
+          return ENTER
+        },
+      )
+      expect(calls).toBe(1)
+      expect(result).toBe(ENTER)
+      // `agent-loop` 读的就是 `decision.kind`：拿到 undefined 就是现场那个崩溃。
+      expect((result as { kind?: unknown }).kind).toBe('enter')
+      guard.dispose()
+    },
+  )
+
+  it('agent.ctx 缺席时也照样转交', async () => {
+    const host = createFakeHost()
+    const guard = installToolResultPrunerGuard(host.ctx)
+    let calls = 0
+    const result = await emitWaterfall(host, 'agent/pre-step', { agent: {} }, async () => {
+      calls += 1
+      return ENTER
+    })
+    expect(calls).toBe(1)
+    expect(result).toBe(ENTER)
+    guard.dispose()
+  })
+
+  it('扫描抛错时也照样转交', async () => {
+    const host = createFakeHost()
+    const guard = installToolResultPrunerGuard(host.ctx)
+    // 安装完成之后才把扫描弄崩：安装本身要扫一次。
+    Object.defineProperty(host.ctx, 'reflect', {
+      configurable: true,
+      get() {
+        throw new Error('reflect exploded')
+      },
+    })
+    host.ctx['get'] = () => {
+      throw new Error('get exploded')
+    }
+    let calls = 0
+    const result = await emitWaterfall(
+      host,
+      'agent/pre-step',
+      { agent: { ctx: { reflect: { store: {} } } } },
+      async () => {
+        calls += 1
+        return ENTER
+      },
+    )
+    expect(calls).toBe(1)
+    expect(result).toBe(ENTER)
+    guard.dispose()
+  })
+
+  it('没有 next 参数时返回 undefined，也不抛错', async () => {
+    const host = createFakeHost()
+    const guard = installToolResultPrunerGuard(host.ctx)
+    const bucket = host.listeners.get('agent/pre-step') ?? []
+    const entry = bucket[bucket.length - 1]
+    if (entry === undefined) throw new Error('no listener registered for agent/pre-step')
+    const listener = entry.listener as unknown as (...args: unknown[]) => unknown
+    expect(await listener({ agent: {} })).toBeUndefined()
+    guard.dispose()
+  })
+})

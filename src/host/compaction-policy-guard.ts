@@ -54,6 +54,17 @@
  * `agent.options`），把确切的 provider/model 登记进来——于是匹配用的是 100%
  * 标准的普通对象，没有一行依赖 Proxy 的巧合。
  *
+ * ## 瀑布事件必须转交 `next()`
+ *
+ * `agent/pre-step` / `agent/request` / `agent/request-error` 是 Cordis **瀑布**事件
+ * （`ctx.waterfall`），最后一个参数就是 `next`。瀑布的返回值是**最外层监听器的
+ * 返回值**：不调用 `next()` 等于替整条链做了决定——后续监听器（连同内置的默认行为）
+ * 一个都不跑，瀑布的返回值也变成监听器自己的返回值。于是 `agent-loop` 读
+ * `decision.kind` / `proposedConfig.provider` 时拿到 `undefined`，每一轮都炸成
+ * `TypeError: Cannot read properties of undefined (reading 'kind')`。
+ * 本守卫是旁路，观测与扫描失败只吞掉它们自己，但 `next()` 在所有分支上都要被调用
+ * 并原样交回去。
+ *
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/compaction-policy-guard
  */
 import { replaceCompactionInstruction, type PromptMessage } from './compaction-prompt.ts'
@@ -131,8 +142,8 @@ interface PolicyLike {
   maxOverflowRetries?: number
 }
 
-/** 事件监听器签名。 */
-type Listener = (...args: never[]) => unknown
+/** 事件监听器签名（瀑布事件要把 `next()` 的结果回传）。 */
+type Listener = (...args: unknown[]) => unknown
 
 /** `ctx.on` 的第三个参数形态（布尔是 `prepend` 的简写）。 */
 type ListenerOptions = boolean | { prepend?: boolean }
@@ -509,9 +520,29 @@ export function installCompactionPolicyGuard(
   /**
    * 事件回调：先观测模型，再扫宿主平面与 agent 自己的 realm。
    *
-   * @param args - 事件参数。
+   * ## 瀑布必须转交
+   *
+   * `agent/pre-step` / `agent/request` / `agent/request-error` 在 DSH 里是
+   * Cordis **瀑布**事件（`ctx.waterfall`），最后一个参数就是 `next`。瀑布的返回值
+   * 是**最外层监听器的返回值**：不调用 `next()` 等于替整条链做了决定——后续监听器
+   * （连同内置的默认行为）一个都不会跑，瀑布的返回值也变成监听器自己的返回值
+   * （这里是 `undefined`）。`agent-loop` 随后读 `decision.kind` 与
+   * `proposedConfig.provider`，于是每一轮都炸成
+   * `TypeError: Cannot read properties of undefined (reading 'kind')`。
+   *
+   * 所以观测与扫描照旧做（失败也只吞掉扫描本身），但 `next()` **必须**在所有分支上
+   * 被调用，并把它的结果原样交回去。
+   *
+   * @param args - 事件参数（最后一个参数可能是 `next`）。
+   * @returns `next()` 的结果；没有 `next` 时为 `undefined`。
    */
   const handleAgentEvent: Listener = (...args) => {
+    // 瀑布的 `next` 永远是最后一个参数；`typeof fn === 'object'` 为假，所以
+    // `observeFrom` / `findAgentContext` / `isRecord` 之类的结构探测本来就认不出
+    // 它，不会把函数当成载荷。
+    const next = args.length > 0 && typeof args[args.length - 1] === 'function'
+      ? (args[args.length - 1] as () => unknown)
+      : undefined
     try {
       for (const arg of args) {
         observeFrom(arg)
@@ -521,12 +552,15 @@ export function installCompactionPolicyGuard(
       }
       scanAndPatch()
       const agentCtx = findAgentContext(args)
-      if (agentCtx === undefined) return
-      scanStore(agentCtx)
-      patchServiceFrom(agentCtx, COMPACTION_SERVICE_NAME)
+      if (agentCtx !== undefined) {
+        scanStore(agentCtx)
+        patchServiceFrom(agentCtx, COMPACTION_SERVICE_NAME)
+      }
     } catch {
       // 守卫是旁路：任何一步失败都不该影响这一步本身。
     }
+    // 瀑布的返回值必须来自 `next()`：短路会让这一步拿到 `undefined`。
+    return next === undefined ? undefined : next()
   }
 
   for (const event of GUARDED_EVENTS) {

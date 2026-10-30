@@ -197,6 +197,77 @@ provides marks the whole preset broken — unselectable and uncopyable — inste
 losing one row. When a forked row is added or renamed, add it to that set in the
 same change, and make the edit in **both** copies of the preset.
 
+#### 3a-2. Cordis waterfall events: every listener must call and return `next()`
+
+Four of the seams this plugin owns are **Cordis waterfall events**, not plain
+`emit` events. A waterfall listener receives the payload **plus a trailing
+`next()`**, and the waterfall's result is the **outermost listener's return
+value**:
+
+```ts
+// packages/core/agent/src/runtime-types.ts
+'agent/pre-step'(this: Scoped<Agent>, payload: {...}, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>
+'agent/request'(this: Scoped<Agent>, payload: {...}, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
+'agent/request-error'(this: Scoped<Agent>, payload: {...}, next: () => Promise<RequestErrorAction>): Promise<RequestErrorAction>
+```
+
+`system-prompt/assemble` is one as well.
+
+A listener that does **not** call `next()` therefore does two things at once:
+it vetoes every later listener (including the built-in default behaviour), and
+it makes the waterfall resolve to that listener's own return value. A guard
+that returns `undefined` there hands the agent loop `undefined`, and the loop
+reads it directly:
+
+```ts
+// packages/core/agent-loop/src/agent.ts
+const decision = await this.dispatch.waterfall('agent/pre-step', payload, () => Promise.resolve({ kind: 'enter', messages }))
+if (decision.kind === 'reject') { ... }   // TypeError: Cannot read properties of undefined (reading 'kind')
+```
+
+That one line is the whole 0.48.2 hotfix: `agent/pre-step` crashed **every**
+turn with `TypeError: Cannot read properties of undefined (reading 'kind')`
+because two host-side guards subscribed to it for their side-effect scans and
+never delegated.
+
+**The invariant, for every waterfall listener in this plugin:**
+
+1. **Call `next()` on every path.** A guard's side-effect work belongs inside
+   `try { ... } catch {}` — the `catch` must not swallow the delegation. The
+   delegation happens *after* the `try`, so a failing scan still delegates.
+2. **Return `next()`'s result.** A guard may transform the result (the
+   plan-mode guard appends a tail message to `decision.messages`), but it must
+   never swallow it, and it must never return `undefined` when `next()`
+   returned a decision.
+3. **Find `next` structurally.** It is the **last** argument and it is a
+   function, so read it as
+   `const next = args.length > 0 && typeof args[args.length - 1] === 'function' ? args[args.length - 1] as () => unknown : undefined`.
+   A variadic listener must not confuse `next` for the payload: every
+   structural probe here is `typeof value === 'object'`, which is false for a
+   function, so `isRecord` / `readContext` / `observeFrom` already skip it.
+4. **Handle the "no `next`" case.** An event dispatched without a trailing
+   function (an older harness generation, or a test double) must not throw: the
+   listener returns `undefined` in that case.
+
+Every waterfall listener this plugin owns, and whether it delegates:
+
+| Listener | Event | Delegates? |
+|---|---|---|
+| `src/host/plan-mode-cache-guard.ts` — `onAssemble` | `system-prompt/assemble` | yes — awaits `next()`, then returns the result |
+| `src/host/plan-mode-cache-guard.ts` — `onPreStep` | `agent/pre-step` | yes — awaits `next()`, then returns the decision |
+| `src/host/ptc-sdk-cache-guard.ts` — `onAssemble` | `system-prompt/assemble` | yes — awaits `next()`, then returns the result |
+| `src/host/tool-result-pruner-guard.ts` — `handleAgentEvent` | `agent/pre-step`, `agent/request`, `agent/request-error` | yes — side-effect scan, then returns `next()` |
+| `src/host/compaction-policy-guard.ts` — `handleAgentEvent` | `agent/pre-step`, `agent/request`, `agent/request-error` | yes — side-effect scan, then returns `next()` |
+| `src/entry-plan-mode.ts` — `subscribePreStep` | `agent/pre-step` | yes — awaits `next()`, then returns the decision |
+
+A harness bump must re-check this table: a **new** waterfall event, or an
+event that *becomes* a waterfall, turns any listener this plugin adds for it
+into the same trap. The regression tests live under the describe block
+"瀑布事件的 next() 转交" in `test/tool-result-pruner.test.ts` and
+`test/kimi-cache-guards.test.ts`: they dispatch `(payload, next)` and assert
+that the listener calls `next()` and returns its exact result — with
+`agent.ctx` present, with `agent.ctx` absent, and with the scan throwing.
+
 ## 4. Verification recipe
 
 New baseline, in the repo:

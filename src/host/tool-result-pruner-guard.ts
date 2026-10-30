@@ -9,10 +9,11 @@
  * realm 的 `ctx.reflect.store` 里，宿主平面根本看不到它，也就没有地方把
  * "这场会话的 provider 该不该修剪" 插进去。
  *
- * 这一层守卫因此待在**宿主平面**：它不替换任何行，只在下述两个时机把已经挂载
+ * 这一层守卫因此待在**宿主平面**：它不替换任何行，只在下述时机把已经挂载
  * 的 `toolResultPruner` 实例的 `pruneSession` 包一层 provider 短路 ——
- * 安装时先扫一遍，此后每个 agent 开始一步（`agent/pre-step`）或撞上上下文溢出
- * （`agent/request-error`）时再扫一遍。两个位置都要看：
+ * 安装时先扫一遍，此后每个 agent 开始一步（`agent/pre-step`）、每次发起请求
+ * （`agent/request`）或撞上上下文溢出（`agent/request-error`）时再扫一遍。
+ * 三个事件都是 Cordis **瀑布**事件，监听器必须转交 `next()`（见下）。两个位置都要看：
  *
  * - `ctx.reflect.store`（宿主平面自己的服务记录，含安装后才挂上的实例）；
  * - `agent.ctx.get('toolResultPruner')` 与 `agent.ctx.reflect.store`
@@ -20,6 +21,17 @@
  *
  * 包装按 `WeakSet` 幂等，重复事件不会叠第二层；`dispose()` 逐条还原原方法并
  * 摘掉监听器。
+ *
+ * ## 瀑布事件必须转交 `next()`
+ *
+ * `agent/pre-step` / `agent/request` / `agent/request-error` 是 Cordis **瀑布**事件
+ * （`ctx.waterfall`），最后一个参数就是 `next`。瀑布的返回值是**最外层监听器的返回值**：不调用 `next()`
+ * 等于替整条链做了决定——后续监听器（连同内置的默认行为）一个都不跑，瀑布的返回值
+ * 也变成监听器自己的返回值。于是 `agent-loop` 读 `decision.kind` 时拿到
+ * `undefined`，每一轮都炸成
+ * `TypeError: Cannot read properties of undefined (reading 'kind')`。
+ * 本守卫是旁路，扫描失败只吞掉扫描本身，但 `next()` 在所有分支上都要被调用并原样
+ * 交回去。
  *
  * ## 只做短路，不改语义
  *
@@ -62,8 +74,8 @@ export interface ToolResultPrunerGuard {
 /** 被包装方法的原签名（`this` 由调用点决定）。 */
 type PruneSessionMethod = (this: unknown, session: unknown) => unknown
 
-/** 事件监听器签名。 */
-type Listener = (...args: unknown[]) => void
+/** 事件监听器签名（瀑布事件要把 `next()` 的结果回传，故返回值不是 `void`）。 */
+type Listener = (...args: unknown[]) => unknown
 
 /** `ctx.on` 的第三个参数形态（布尔是 `prepend` 的简写）。 */
 type ListenerOptions = boolean | { prepend?: boolean }
@@ -90,8 +102,8 @@ interface HostContextLike {
   get?: (name: string, strict?: boolean) => unknown
 }
 
-/** 会先跑一遍扫描的宿主事件。 */
-const GUARDED_EVENTS: readonly string[] = ['agent/pre-step', 'agent/request-error']
+/** 会先跑一遍扫描的宿主事件（全部是 Cordis 瀑布事件，监听器必须转交 `next()`）。 */
+const GUARDED_EVENTS: readonly string[] = ['agent/pre-step', 'agent/request', 'agent/request-error']
 
 /**
  * 安装跨 preset 守卫。
@@ -224,18 +236,39 @@ export function installToolResultPrunerGuard(
   /**
    * 事件回调：先扫宿主平面，再扫事件里那个 agent 自己的 realm。
    *
-   * @param args - 事件参数（通常第一个是 agent 本身）。
+   * ## 瀑布必须转交
+   *
+   * `agent/pre-step` / `agent/request` / `agent/request-error` 在 DSH 里是 Cordis
+   * **瀑布**事件（`ctx.waterfall`），最后一个参数就是 `next`。瀑布的返回值是**最外层监听器
+   * 的返回值**：不调用 `next()` 等于替整条链做了决定——后续监听器（连同内置的
+   * 默认行为）一个都不会跑，瀑布的返回值也变成监听器自己的返回值（这里是
+   * `undefined`）。`agent-loop` 随后读 `decision.kind`，于是每一轮都炸成
+   * `TypeError: Cannot read properties of undefined (reading 'kind')`。
+   *
+   * 所以扫描照旧做（扫描失败也只吞掉扫描本身），但 `next()` **必须**在所有分支上
+   * 被调用，并把它的结果原样交回去。
+   *
+   * @param args - 事件参数（最后一个参数可能是 `next`）。
+   * @returns `next()` 的结果；没有 `next` 时为 `undefined`。
    */
   const handleAgentEvent: Listener = (...args) => {
+    // 瀑布的 `next` 永远是最后一个参数；`typeof fn === 'object'` 为假，所以
+    // `findAgentContext` /`isRecord` 之类的结构探测本来就认不出它，不会误认。
+    const next = args.length > 0 && typeof args[args.length - 1] === 'function'
+      ? (args[args.length - 1] as () => unknown)
+      : undefined
     try {
       scanAndWrap()
       const agentCtx = findAgentContext(args)
-      if (agentCtx === undefined) return
-      scanStore(agentCtx)
-      wrapServiceFrom(agentCtx, PRUNER_SERVICE_NAME)
+      if (agentCtx !== undefined) {
+        scanStore(agentCtx)
+        wrapServiceFrom(agentCtx, PRUNER_SERVICE_NAME)
+      }
     } catch {
       // 守卫是旁路：任何一步失败都不该影响这一步本身。
     }
+    // 瀑布的返回值必须来自 `next()`：短路会让这一步拿到 `undefined`。
+    return next === undefined ? undefined : next()
   }
 
   for (const event of GUARDED_EVENTS) {
