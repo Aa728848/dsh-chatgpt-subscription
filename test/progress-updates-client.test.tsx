@@ -6,7 +6,7 @@
  *
  * A. 对话流 —— 视图注册在 `tool.call.toolview` 上、key 是 `progress_update`，
  *    注册的那个组件渲染出来就是这次调用的进展（三个工具阶段都读得对）；
- * B. 设置页 —— 独立一格 `settings.section`，三行都渲染，点「打开进展面板」
+ * B. 设置页 —— 独立一格 `settings.section`，七行都渲染，点「打开进展面板」
  *    **确实调用了 openTab**（`vi.fn` + 真实 click），并且开关/阈值写的是本插件
  *    Config 的那两个字段；
  * C. 取数 —— 面板真的发请求到 `/api/dsh-progress-updates/updates`，路由返回的
@@ -317,7 +317,7 @@ describe('A. 对话流里的进展行', () => {
   })
 })
 
-describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTab', () => {
+describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTab', () => {
   it('注册成独立的一格：id 是 progress-updates，order 与订阅服务那格不冲突', () => {
     // Given 一个装着侧栏服务的上下文
     const { ctx, registrations } = makeCtx({ sidebarRightTabs: { register: () => () => {} }, sidebarRight: { openTab: vi.fn() } })
@@ -336,16 +336,17 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(sections[0]!.locale).toBe(NS_PROGRESS_UPDATES)
   })
 
-  it('六行卡片都渲染：进展、两个缓存开关、阈值、语言与面板', async () => {
+  it('七行卡片都渲染：进展、两个缓存开关、计划模式管线、阈值、语言与面板', async () => {
     // Given 一份就绪的表单与一个假侧栏
     const form = fakeForm({ progressUpdates: false, progressUpdatesNudgeThreshold: 8 })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
       openPanel: vi.fn(), close: vi.fn(), settings: form,
     } as never)))
-    // Then 三行都在
+    // Then 七行都在
     expect(container.querySelector('[data-dsh-part="settings-row-enabled"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-cache-warmup"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-retrieval"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-plan-mode-pipeline"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-panel"]')).not.toBeNull()
@@ -353,12 +354,13 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(container.textContent).toContain(zh.settingsEnabledName)
     expect(container.textContent).toContain(zh.settingsCacheWarmupName)
     expect(container.textContent).toContain(zh.settingsRetrievalName)
+    expect(container.textContent).toContain(zh.settingsPlanModePipelineName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
     expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(6)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(7)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -421,6 +423,33 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(form.writes).toEqual([['cacheWarmup', false], ['cacheWarmupRetrieval', true]])
   })
 
+  it('计划模式管线开关缺键时读成开，显式关闭时回显关闭', async () => {
+    // 缺键 = 开：宿主 schema 上是 `default(true)`，老配置没有这个键时界面必须
+    // 同样读成开，否则用户看到的是关着、而调度模式其实照旧自动进计划模式。
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: fakeForm({}),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-plan-mode-pipeline-switch"]')?.getAttribute('aria-checked')).toBe('true')
+
+    // 显式 false 才是关：这一行读的是「不等于 false」，不是「等于 true」。
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: fakeForm({ planModePipeline: false }),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-plan-mode-pipeline-switch"]')?.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('计划模式管线开关写回的是本插件 Config 的 planModePipeline', async () => {
+    const form = fakeForm({ planModePipeline: true })
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-plan-mode-pipeline-switch"]')!
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    await act(async () => { toggle.click() })
+    // 落到核心行 Config 的根字段上，与 schedule 里的 planModePipeline 是同一个键
+    expect(form.writes).toEqual([['planModePipeline', false]])
+  })
+
   it('未声明检索字段时设置页默认开启', async () => {
     const form = fakeForm({ cacheWarmup: true })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
@@ -456,6 +485,7 @@ describe('B. 设置页：独立一格，三行都渲染，按钮真的调 openTa
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-cache-warmup-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-retrieval-switch"]')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-plan-mode-pipeline-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLInputElement>('[data-dsh-part="settings-threshold"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLSelectElement>('[data-dsh-part="settings-language"]')?.disabled).toBe(true)
     // And 说明行说清了为什么

@@ -1,5 +1,5 @@
 /**
- * 设置页里的「进展更新」分区：说明 + 六行卡片（进展 / 两个缓存开关 / 阈值 / 语言 / 面板）。
+ * 设置页里的「进展更新」分区：说明 + 七行卡片（进展 / 两个缓存开关 / 计划模式管线 / 阈值 / 语言 / 面板）。
  *
  * ## 视觉来源
  *
@@ -140,6 +140,16 @@ function RetrievalMark(): ReactNode {
   )
 }
 
+/** 计划模式管线那一行的标记：一份带勾的计划（计划先出、再交审批）。 */
+function PlanModeMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="3.5" width="13" height="13" rx="2" />
+      <path d="m7 10 2 2 4-4.5" />
+    </svg>
+  )
+}
+
 function PanelMark(): ReactNode {
   return (
     <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -216,7 +226,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -224,6 +234,9 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   const enabled = value.progressUpdates !== false
   const cacheWarmup = value.cacheWarmup !== false
   const retrieval = value.cacheWarmupRetrieval !== false
+  // 缺键 = 开：宿主 schema 上是 `default(true)`，老配置没有这个键时界面必须同样
+  // 读成开，否则用户看到的是关着、而调度模式其实照旧自动进计划模式。
+  const planModePipeline = value.planModePipeline !== false
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT
@@ -243,7 +256,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -363,6 +376,27 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-retrieval-switch"
             disabled={!writable}
             onClick={() => { write('retrieval', 'cacheWarmupRetrieval', !retrieval) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-plan-mode-pipeline"
+          brand="#566179"
+          mark={<PlanModeMark />}
+          name={translate('settingsPlanModePipelineName')}
+          note={failure?.row === 'planModePipeline' ? failure.text : translate('settingsPlanModePipelineNote')}
+          danger={failure?.row === 'planModePipeline'}
+          enabled={planModePipeline}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={planModePipeline}
+            aria-label={translate('settingsPlanModePipelineName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-plan-mode-pipeline-switch"
+            disabled={!writable}
+            onClick={() => { write('planModePipeline', 'planModePipeline', !planModePipeline) }}
           />
         </CardRow>
 

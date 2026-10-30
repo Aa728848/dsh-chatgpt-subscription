@@ -1,6 +1,6 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
-  "version": "0.46.1",
+  "version": "0.47.0",
   "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
   "icon": "./icon.svg",
   "author": {
@@ -46,7 +46,11 @@
       "default": "./lib/progress-updates.js"
     },
     "./progress-updates/locale/*.json": "./locale/progress-updates/*.json",
-    "./progress-updates/icon": "./progress-updates.svg"
+    "./progress-updates/icon": "./progress-updates.svg",
+    "./plan-mode-pipeline": {
+      "types": "./lib/types/entry-plan-mode-pipeline.d.ts",
+      "default": "./lib/plan-mode-pipeline.js"
+    }
   },
   "dsh": {
     "bundle": {

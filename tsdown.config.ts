@@ -14,7 +14,11 @@ const clientExternals = [
 const host: UserConfig = {
   name: packageId,
   // 两个宿主入口：核心行与「进展更新」行（同包多组件，见 cordis.patch.yml）。
-  entry: { index: 'src/index.ts', 'progress-updates': 'src/entry-progress-updates.ts' },
+  entry: {
+    index: 'src/index.ts',
+    'progress-updates': 'src/entry-progress-updates.ts',
+    'plan-mode-pipeline': 'src/entry-plan-mode-pipeline.ts',
+  },
   outDir: 'lib',
   format: ['esm'],
   fixedExtension: false,

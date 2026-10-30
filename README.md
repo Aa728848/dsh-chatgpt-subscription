@@ -554,6 +554,16 @@ DSH 的 Agent Teams（bundle `@deepseek-ai/dsh-experimental-agent-team-profile`�
 
 不想让插件写 home 目录时，可把 `syncAgentPresets` 设为 `false`，再自行拷贝包内的 `presets/dispatch/` 到 `<dshHome>/.agent-presets/dispatch/`。
 
+### 计划模式管线（R9）
+
+调度模式多给主代理两个工具，把「进入计划模式」和「出计划」拆成两步：
+
+1. **澄清收敛才进入** —— 只有判定 L2 且 R-G 访谈收敛（前沿为空 + 用户明确确认）时才调 `enter_plan_mode`。进入这一步只完成进入：不做只读探索、不写计划、不派发。
+2. **下一步出计划** —— 下一步在计划模式内只读探索并写出 decision-complete 计划，然后以 `exit_plan_mode` 作为该轮**唯一且最后的**工具调用提交审批。`leave_plan_mode` 是**放弃计划**的出口，不是审批出口。
+3. **被打回**就留在计划模式内按反馈修订，再走 `exit_plan_mode`；放弃计划必须由用户明确表示。
+
+两个工具由 preset 的 `planning` 组内 `plan-mode-pipeline` 行注册（与 `plan-mode` 同一个 realm、排在其后），只属于挂载了本 preset 的会话。开关 `planModePipeline` **默认开启**；关闭后它们不再出现在模型可见的工具列表里（新代按逐步准入隐藏；老代的注册面不接受准入参数，此时调用直接返回 `active: false` / `transition: 'disabled'`），调度模式退化为用一次 `ask_user_question` 请用户手动输入 `/plan`，然后按已配置的 `plan-mode` section 继续——不得把计划贴在普通回复里代替审批。设置页「进展更新」卡片里有同名开关，保存即生效。
+
 ## 子代理模型授权（0.2.15 起，0.3.2 起强制指定模型）
 
 DSH 设置页的「Subagent」卡片会把勾选的模型写成会话级的允许列表（会话日志事件 `subagent/model-selection-policy`）。DSH 内置委派工具只拒绝**模型显式填写**且不在列表内的路由；调用里不写 `provider`/`model` 时，子代理会继承父级模型，于是白名单之外的主模型（例如 `deepseek-official/deepseek-flash`）仍会被子代理使用。

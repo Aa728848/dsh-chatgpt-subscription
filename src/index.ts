@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { attachProgressSettings } from './entry-progress-updates.ts'
+import { attachPlanModePipelineSettings, resolvePlanModePipelineEnabled } from './entry-plan-mode-pipeline.ts'
 import { resolveProgressUpdatesSettings } from './host/progress-updates/index.ts'
 import type { ProgressUpdateLanguage } from './host/progress-updates/prompt.ts'
 import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/progress-updates/store.ts'
@@ -244,6 +245,19 @@ export interface Config {
   /** 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文。 */
   progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
   /**
+   * 「计划模式管线」总开关：打开后调度模式可以在 R-G 澄清访谈收敛之后用
+   * `enter_plan_mode` 主动进入计划模式（下一步才开始探索并出计划，计划由官方
+   * `exit_plan_mode` 提交审批），在放弃规划时用 `leave_plan_mode` 退出。默认开启。
+   *
+   * **实现在独立的 loader 行**（`src/entry-plan-mode-pipeline.ts`，由调度模式的
+   * planning 组挂载），字段留在这里的理由与「进展更新」相同：profile 的 patch 层
+   * 按行 id 替换整行 config，字段若写进 preset 行，用户早先在核心行写的键就失效。
+   *
+   * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：设置保存时就地写新值，
+   * 递交下去的读取器每次重读活引用，因此下一步就生效、不重挂任何一行。
+   */
+  planModePipeline?: Volatile<boolean>
+  /**
    * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
    *
@@ -371,6 +385,8 @@ export interface ConfigInput {
   progressUpdatesNudgeThreshold?: number
   /** 进展更新的输出语言（默认 auto：跟随对话）。 */
   progressUpdatesLanguage?: ProgressUpdateLanguage
+  /** 「计划模式管线」总开关（默认开启）：允许调度模式用 enter_plan_mode / leave_plan_mode。 */
+  planModePipeline?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
   /** 检索型结果投影独立开关（默认开启；只影响之后产生的新结果）。 */
@@ -413,6 +429,12 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
   progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default('auto').volatile()
     .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文。'),
+  // 计划模式管线：实现挂在独立的 loader 行上（preset 的 planning 组），字段留在这里
+  // 的理由与进展更新相同。volatile 让设置保存后就地写新值，递交下去的读取器每次都
+  // 重读活引用，因此开关在同一个会话里下一步就生效。
+  planModePipeline: z.boolean().default(true).volatile()
+    .description('启用计划模式管线：允许调度模式在澄清访谈收敛后用 enter_plan_mode 进入计划模式，放弃规划时用 leave_plan_mode 退出。'),
+
   // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
   // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
   // 正在运行的实例，不重挂任何行。
@@ -475,6 +497,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // 进展更新的实现跑在自己的 loader 行上，设置却声明在这里（见 Config）。
   // 两行的挂载顺序不归任何一方管，所以两边都留了座位：先挂的一方等另一方来交。
   attachProgressSettings(() => resolveProgressUpdatesSettings(pluginConfig))
+
+  // 「计划模式管线」的实现跑在 preset 的独立行上，开关声明在这里（见 Config）。
+  // 两行分属 host 面与 agent 面、挂载顺序不归任何一方管，递交下去的是**读取函数**
+  // 而不是一份值：每次都重读 volatile 活引用，设置一保存下一步就生效。
+  attachPlanModePipelineSettings(() => resolvePlanModePipelineEnabled(pluginConfig))
 
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)

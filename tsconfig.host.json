@@ -23,6 +23,7 @@
   "include": [
     "src/index.ts",
     "src/entry-progress-updates.ts",
+    "src/entry-plan-mode-pipeline.ts",
     "src/compat.ts",
     "src/shared/**/*.ts",
     "src/host/**/*.ts"

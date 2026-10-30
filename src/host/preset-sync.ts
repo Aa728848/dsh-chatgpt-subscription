@@ -79,6 +79,13 @@ const OPTIONALLY_ABSENT_PACKAGES: readonly string[] = [
   // Published from harness 0.1.5-alpha.2; the shipped `ptc` preset gained this
   // row in 0.1.5-rc.1, the shape this preset was written against.
   '@deepseek-ai/dsh-tool-present',
+  // This plugin's own subpath export, and the only entry here that is not a
+  // harness package. It is absent whenever the *plugin* on disk predates it: a
+  // synced preset tree outlives the version that wrote it, and a downgrade or an
+  // older profile copy leaves the row naming an export nothing provides. Without
+  // this entry that stale row marks the whole preset broken — unselectable and
+  // uncopyable — instead of losing only the plan-mode pipeline.
+  '@eddyskywalker/dsh-chatgpt-subscription/plan-mode-pipeline',
 ]
 
 /**

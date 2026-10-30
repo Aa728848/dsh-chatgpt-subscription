@@ -303,6 +303,38 @@ describe('rows the installation cannot mount', () => {
     const bundled = readFileSync(join(bundledPresetsRoot(), 'dispatch', 'agent.cordis.yml'), 'utf8')
     expect(bundled).toContain(`- id: present\n  name: '${PRESENT}'`)
   })
+
+  /**
+   * The plan-mode pipeline row, which this plugin's own subpath export backs.
+   * No harness generation ships it, so it is the one entry of the optional set
+   * whose absence comes from the *plugin* version rather than the harness.
+   */
+  const PIPELINE = '@eddyskywalker/dsh-chatgpt-subscription/plan-mode-pipeline'
+  const PIPELINE_ROW = `    - id: plan-mode-pipeline\n      name: '${PIPELINE}'\n`
+
+  it('disables the plan-mode-pipeline row where the plugin on disk predates its export', () => {
+    expect(reconcilePreset(PIPELINE_ROW, () => false)).toBe(`${PIPELINE_ROW}      disabled: true\n`)
+  })
+
+  it('leaves the plan-mode-pipeline row enabled where the subpath export resolves', () => {
+    expect(reconcilePreset(PIPELINE_ROW, name => name === PIPELINE)).toBe(PIPELINE_ROW)
+  })
+
+  it('disables the pipeline row in the bundled composition without touching the row it follows', () => {
+    // The two rows share the `planning` group. Disabling the pipeline must be
+    // surgical: `plan-mode` carries the approval section, so losing it would
+    // change the flow far more than the row that caused the rewrite.
+    const bundled = readFileSync(join(bundledPresetsRoot(), 'dispatch', 'agent.cordis.yml'), 'utf8')
+    const reconciled = reconcilePreset(bundled, name => name !== PIPELINE)
+    expect(reconciled).toContain(`- id: plan-mode-pipeline\n      name: '${PIPELINE}'\n      disabled: true\n`)
+    expect(reconciled).toContain(`- id: plan-mode\n      name: '@deepseek-ai/dsh-plan-mode'`)
+    expect(reconciled).not.toContain(`- id: plan-mode\n      name: '@deepseek-ai/dsh-plan-mode'\n      disabled: true`)
+    // Untouched when the export is there, so the row stays enabled for everyone
+    // running the plugin version that ships it.
+    const intact = reconcilePreset(bundled, () => true)
+    expect(intact).toContain(`- id: plan-mode-pipeline\n      name: '${PIPELINE}'`)
+    expect(intact).not.toContain(`- id: plan-mode-pipeline\n      name: '${PIPELINE}'\n      disabled: true`)
+  })
 })
 
 describe('the bundled composition against the package sets harness generations ship', () => {

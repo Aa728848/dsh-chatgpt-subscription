@@ -10,6 +10,9 @@
 #   2. plan-mode — adds the grilling interview loop (design tree, frontier,
 #      rounds) in front of planning, so a plan is never presented over unmet
 #      requirements.
+#   3. plan-mode-pipeline — enters Plan Mode the moment an L2 interview
+#      converges, so the plan is written inside Plan Mode and approved through
+#      exit_plan_mode instead of being pasted into a normal reply.
 #
 # Deliberately NOT configured here:
 #   * `tool-subagent.config.agentOptions` — binding provider/model would defeat
@@ -161,6 +164,16 @@
       Fix the trigger condition on hard rejections instead of treating them as fallback grounds: on active child limit -> wait for existing children to settle and re-dispatch; on subagent model selection -> specify an explicit provider/model from the authorized routes listed in the error; on route-inheritance rejection -> switch to an explicit-route subagent tool or switch this session to an allowed model. Unless the condition is fixed, the same rejection will recur.
       Reset: fallback applies only to the current task. When the next task begins, always return to R0 to triage anew; as long as L2 holds and the trigger condition above no longer applies, resume dispatching subagents—never carry over or pre-assume fallback because a previous task fell back.
 
+      ## R9 · Plan Pipeline (Converged Interview -> Plan Mode -> Plan -> Approval)
+      The order is fixed: converge the interview, enter Plan Mode, write the plan there, and submit it for approval. A stage is never skipped and never reordered.
+      - Trigger: only when the task is L2 and the R-G interview has converged—the frontier is empty and the user has explicitly confirmed shared understanding. Call enter_plan_mode immediately once that holds, before any read-only exploration or planning for the task itself. Never call it for an L0/L1 task, and never call it while any frontier question is still open.
+      - Entry is the whole step: that step does nothing else. Read-only exploration and the decision-complete plan belong to the next turn, inside Plan Mode, and exit_plan_mode must be the sole and final tool call of the turn that submits the plan—the same wording the plan-mode section carries, so the two never disagree.
+      - Rejection: on "Keep planning", fold the feedback into the plan and submit it again via exit_plan_mode. A rejection is not an exit, so stay in Plan Mode.
+      - Abandon: call leave_plan_mode with a reason only when the user explicitly says no plan is wanted. It is not an approval exit—never use leave_plan_mode to bypass exit_plan_mode approval.
+      - Absent tool: when enter_plan_mode is missing from the tool list (an older harness generation, or the plugin row switched off), the degraded path is one ask_user_question asking the user to enter /plan, then continue under the configured plan-mode section. Never substitute a plan pasted into a normal reply.
+      - Relationship to R-G G5: convergence enters Plan Mode; a plan is never presented from ordinary mode instead of passing through enter_plan_mode and exit_plan_mode.
+      - Subagent: a child spawned from this session inherits this preset, so enter_plan_mode and leave_plan_mode are visible in its tool list—visibility is not permission, and it must treat both as unavailable. What the bridge can enforce depends on the harness generation: where the host exposes the live root set (agents.roots()), a call made by a live child is rejected with DELEGATED_CALLER, while an older generation cannot determine roots at all and the bridge lets the call through. Never rely on that rejection—a subagent neither enters Plan Mode on its own nor submits a plan, and it carries the open decision, including any request to enter Plan Mode, back to its dispatcher in every generation.
+
       ## Anti-Patterns (Any Occurrence Is a Violation)
       1. Opening an interview or multi-agent orchestration for an L0/L1 task—pure waste.
       2. Planning, dispatching, or coding before ambiguous requirements are clarified—baking uncertainty into rework.
@@ -182,6 +195,8 @@
       18. Writing a task brief with a range where a cap belongs ("2–5 files", "1–2 questions", "a few attempts")—the strictest reading wins and the budget shrinks to its lower bound (R0, R5).
       19. Asking a subagent to restate its rules as a correctness check instead of verifying the ambiguous ones with one tool call—restatement reproduces the misreading (R5).
       20. Reporting a route as "authorized", or claiming per-task routing is in force, when the session recorded no allowlist (R2 [State: Unlisted]).
+      21. Entering Plan Mode for an L0/L1 task, or before the R-G interview has converged—Plan Mode is the L2 planning stage, not a place to finish the interview (R9, R-G G5).
+      22. Using leave_plan_mode to bypass exit_plan_mode approval—leaving Plan Mode abandons the plan, it does not approve it (R9).
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
@@ -266,14 +281,26 @@
     - id: plan-mode
       name: '@deepseek-ai/dsh-plan-mode'
       config:
+        # Compressed to ONE sentence on purpose: this section is re-rendered on
+        # EVERY step of Plan Mode, so its bytes are a resident cost (README.md).
+        # It is still the ONLY guardrail on the manual /plan path — the degraded
+        # entry R9 keeps for an older harness or a switched-off plugin row — where
+        # no enter_plan_mode tool result ever arrives. So five rules stay here in
+        # compressed form: stay in Plan Mode until exit_plan_mode submits, treat
+        # "implement" as "plan it", chat approval is not plan approval, explore
+        # read-only, and implement nothing before approval. The rest (plan
+        # completeness, exit_plan_mode as the sole and final call, the rejection
+        # loop) moved to the enter_plan_mode tool result, which is appended AFTER
+        # the cached prefix and therefore invalidates nothing.
         section: |
-              [Plan Mode] Plan Mode is active. Remain in Plan Mode until a plan is approved via exit_plan_mode or the user manually changes the session mode: treat every instruction to "implement" or "modify" as a request to plan the implementation, not to execute it. Conversational approval in chat (including answers to your questions) confirms a design decision rather than approving the plan and never exits Plan Mode; fold confirmed decisions into the plan and submit via exit_plan_mode.
+              [Plan Mode] Stay in Plan Mode until a plan is submitted via exit_plan_mode: settle requirements per R0/R-G, treat "implement" as "plan it", and treat chat approval as a design decision, not plan approval. Explore read-only (no edits, no commands that rewrite tracked files); implement nothing before approval.
 
-              [Read-Only Exploration & Clarification Interview] Inspect the repository first using non-mutating reads, searches, and static checks, preferring existing functions, utilities, and patterns; never edit or write files, mutate config, run formatters/codegen that rewrite tracked files, commit, or otherwise enact the plan. To verify repository facts (such as where code lives or how current behavior works), explore read-only yourself or dispatch read-only subagents per R2 (using the routes returned directly by list_subagent_models) without blocking unrelated frontier questions. Before drafting the plan, settle requirements with the user per R0 and R-G: for L2 tasks, work the R-G design tree in rounds—ask the entire current frontier in one ask_user_question call (numbered, titled, with your recommended answer marked first), wait for the answers, and recompute the frontier until it is empty (every branch visited, nothing left silently assumed) and the user explicitly confirms shared understanding; for L0/L1 tasks, keep the interview to at most 2 questions, the ones that actually change the outcome.
-
-              [Plan Completeness] Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; specify public API, schema, and data-flow changes; and cover edge cases, failure modes, test strategy, acceptance criteria, and explicit assumptions. Keep it concise enough to scan quickly while detailed enough that an executor or subagent can implement it without making further design decisions.
-
-              [Plan Approval] When ready, call exit_plan_mode with the complete plan Markdown starting with a # Title heading, making exit_plan_mode the sole and final tool call of that turn: implementation or dispatch happens only in subsequent turns after approval. Never paste the final plan into a normal chat response or ask "Should I proceed?" in prose or via ask_user_question. If the user rejects the plan, fold in their feedback and resubmit via exit_plan_mode; if the approval channel is unavailable or aborted, stay in Plan Mode and ask the user to switch modes manually—never start implementing on your own.
+    # Enters Plan Mode as soon as the R-G interview converges (R9). The row is
+    # this plugin's own subpath export, so it needs no harness package on any
+    # generation the plugin supports; the row's planModePipeline switch
+    # defaults to true, which is why no config block appears here.
+    - id: plan-mode-pipeline
+      name: '@eddyskywalker/dsh-chatgpt-subscription/plan-mode-pipeline'
 
 # ── compaction ──────────────────────────────────────────────────────────────
 

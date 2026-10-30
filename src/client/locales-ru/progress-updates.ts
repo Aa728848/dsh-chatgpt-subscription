@@ -32,6 +32,8 @@ export const dictionary: Record<ProgressUpdatesLocaleKey, string> = {
   settingsCacheWarmupNote: 'Только Kimi Code: проецировать большие журналы и читать оригинал по ref при необходимости; на других линиях переключатель ничего не меняет',
   settingsRetrievalName: 'Проекция результатов поиска',
   settingsRetrievalNote: 'Только Kimi Code: проецировать файлы, страницы и поиск при навигации; сохранять код при правке и ревью; на других линиях переключатель ничего не меняет',
+  settingsPlanModePipelineName: 'Конвейер режима плана',
+  settingsPlanModePipelineNote: 'После схождения уточняющего интервью автоматически войти в режим плана, подготовить план и отправить его на утверждение (только в режиме диспетчера); если выключено, этот режим попросит пользователя ввести /plan вручную',
   settingsThresholdName: 'Порог напоминания',
   settingsThresholdNote: 'Напомнить агенту после стольких раундов без отчёта',
   settingsLanguageName: 'Язык вывода',

@@ -152,7 +152,7 @@ describe('the dispatch definition', () => {
   })
 
   it('names the group rows and their nested rows as the bundle does', () => {
-    expect(nestedIds('planning')).toEqual(['plan-mode'])
+    expect(nestedIds('planning')).toEqual(['plan-mode', 'plan-mode-pipeline'])
     // The pruner row is deliberately absent: rewriting a historical tool result
     // invalidates the provider's content-prefix cache from there to the end, so
     // the rebuild it triggers costs more than the context it removes.
@@ -168,6 +168,24 @@ describe('the dispatch definition', () => {
       'tool-workflow',
       'tool-ralph',
     ])
+  })
+
+  it('mounts the plan-mode pipeline row inside the planMode realm, in both copies', () => {
+    // The row calls ctx.planMode.set, so it must stay inside the `planning`
+    // group: outside that realm it would resolve no planMode at all and quietly
+    // register nothing. Its specifier is this plugin's own subpath export, so no
+    // harness generation ships it — which is why the id/name pair, not the
+    // package, is what the two copies must agree on.
+    const specifier = '@eddyskywalker/dsh-chatgpt-subscription/plan-mode-pipeline'
+    const declared = rowById('plan-mode-pipeline')
+    expect(declared.id).toBe('plan-mode-pipeline')
+    expect(declared.name).toBe(specifier)
+    // No config block: the planModePipeline switch defaults to on.
+    expect(declared.config).toBeUndefined()
+    expect(nestedIds('planning')).toContain(declared.id)
+
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    expect(yml).toContain(`    - id: plan-mode-pipeline\n      name: '${specifier}'`)
   })
 
   it('keeps every group row behind the isolate realms its rows need', () => {
@@ -732,7 +750,17 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
-  it('keeps the plan-mode section byte-identical between YAML and declaration and aligned with R0/R-G/R2', () => {
+  it('keeps the plan-mode section one sentence, byte-identical between YAML and declaration, and pointed at R0/R-G', () => {
+    // The section is re-rendered on EVERY step of Plan Mode, so its bytes are a
+    // resident cost; it is compressed to a single sentence. That sentence is
+    // still the only guardrail on the manual /plan path — the path that gets no
+    // tool result — so five rules are asserted on the section itself: stay in
+    // Plan Mode until exit_plan_mode submits, "implement" means "plan it",
+    // chat approval is not plan approval, exploration stays read-only, and
+    // nothing is implemented before approval. The rest of the manual (plan
+    // completeness, exit_plan_mode as the sole and final call, the rejection
+    // loop) moved into the enter_plan_mode tool result, and
+    // test/plan-mode-pipeline.test.ts pins it there.
     function planModeSectionOf(yml: string): string {
       const lines = yml.split('\n')
       const start = lines.findIndex(line => line.trim() === 'section: |')
@@ -759,13 +787,71 @@ describe('the persona block the declaration transcribes', () => {
     expect(fromYaml).toBe(fromDecl)
     for (const section of [fromYaml, fromDecl]) {
       expect(section).toContain('[Plan Mode]')
-      expect(section).toContain('[Read-Only Exploration & Clarification Interview]')
-      expect(section).toContain('using the routes returned directly by list_subagent_models')
-      expect(section).toContain('exit_plan_mode')
-      // The plan-mode interview bound must agree with R0's cap, and must not
-      // reintroduce the range form that reads as a floor.
-      expect(section).toContain('keep the interview to at most 2 questions')
+      // One sentence, one line, inside the resident-cost budget.
+      expect(section.split('\n')).toHaveLength(1)
+      // Budget raised from 220 to 360 on purpose: the read-only clause and the
+      // no-implementation-before-approval clause cannot live only in the
+      // enter_plan_mode tool result, because the manual /plan path that R9
+      // keeps as the degraded entry renders this section and nothing else.
+      // The extra ~105 chars (~26 tokens) are paid only while Plan Mode is on.
+      expect(section.length).toBeLessThanOrEqual(360)
+      // Rule 1: stay in Plan Mode until the plan is submitted for approval.
+      expect(section).toContain('Stay in Plan Mode until a plan is submitted via exit_plan_mode')
+      // Rule 2: an instruction to implement is an instruction to plan it.
+      expect(section).toContain('treat "implement" as "plan it"')
+      // Rule 3: conversational confirmation is not approval of the plan.
+      expect(section).toContain('treat chat approval as a design decision, not plan approval')
+      // Rule 4: exploration stays read-only on this path too; no command may
+      // rewrite tracked files.
+      expect(section).toContain('Explore read-only')
+      expect(section).toContain('rewrite tracked files')
+      // Rule 5: nothing is implemented before the plan is approved.
+      expect(section).toContain('implement nothing before approval')
+      // Requirements are settled before planning; the section points at the
+      // rules that own the interview instead of restating them.
+      expect(section).toContain('settle requirements per R0/R-G')
+      // The range form that reads as a floor stays out even in compressed form.
       expect(section).not.toContain('1–2 questions')
+    }
+    // The intent the old section-only assertions pinned by proxy still holds
+    // where it now lives, so compressing the section cannot silently drop it:
+    // the L1 question cap and the read-only discipline are in the persona, and
+    // the subagent route rule is in R2/G4.
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('Ask at most 2 key questions')
+      expect(persona).toContain('2 is the cap')
+      expect(persona).toContain('Read-only exploration and the decision-complete plan belong to the next turn')
+      expect(persona).toContain('subagent model routes are provided directly by list_subagent_models')
+    }
+  })
+
+  it('places the plan pipeline after the interview and states what the subagent gate can enforce', () => {
+    // R9 is the reason the plan-mode-pipeline row exists: convergence enters
+    // Plan Mode, the plan is written there, and approval goes through
+    // exit_plan_mode. Both copies must carry it, or the two sides of the preset
+    // teach different flows.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('## R9 · Plan Pipeline')
+      expect(persona).toContain('enter_plan_mode')
+      expect(persona).toContain('leave_plan_mode')
+      expect(persona).toContain('exit_plan_mode')
+      expect(persona).toContain('Call enter_plan_mode immediately once that holds')
+      expect(persona).toContain('exit_plan_mode must be the sole and final tool call of the turn that submits the plan')
+      // The degraded path when the tool is absent stays a question, never prose.
+      expect(persona).toContain('the degraded path is one ask_user_question asking the user to enter /plan')
+      // Anti-patterns 21 and 22 pin the two ways R9 gets abused.
+      expect(persona).toContain('21. Entering Plan Mode for an L0/L1 task, or before the R-G interview has converged')
+      expect(persona).toContain('22. Using leave_plan_mode to bypass exit_plan_mode approval')
+      // The subagent clause is generation-graded, because the bridge now
+      // degrades to "let it through" where roots cannot be read. An
+      // unconditional promise of DELEGATED_CALLER would be a lie on those hosts.
+      expect(persona).toContain('where the host exposes the live root set (agents.roots()), a call made by a live child is rejected with DELEGATED_CALLER')
+      expect(persona).toContain('an older generation cannot determine roots at all and the bridge lets the call through')
+      expect(persona).toContain('Never rely on that rejection')
+      expect(persona).toContain('it carries the open decision, including any request to enter Plan Mode, back to its dispatcher')
+      // The unconditional claim the three-level fallback made false is gone.
+      expect(persona).not.toContain('The bridge rejects a live child at execution time')
     }
   })
 })
