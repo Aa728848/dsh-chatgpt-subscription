@@ -294,26 +294,19 @@ export const SUBAGENT_CSS = `
 
 .dsh-subagent-target-bar {
   display: grid;
+  align-content: start;
   gap: 8px;
-  padding: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
   border: 0.5px solid var(--dsw-alias-border-l4);
   border-radius: var(--dsw-radius-lg, 10px);
-  background: var(--dsw-alias-bg-layer-2, transparent);
-  min-width: 0;
+  background: transparent;
 }
 
-.dsh-subagent-target-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.dsh-subagent-target-label {
+.dsh-subagent-target-bar > legend {
+  padding: 0 4px;
   font-size: 12px;
-  font-weight: 500;
-  line-height: 1.5;
   color: var(--dsw-alias-label-secondary);
 }
 
@@ -321,9 +314,9 @@ export const SUBAGENT_CSS = `
   height: 34px;
   width: 100%;
   padding: 0 10px;
-  border: 0.5px solid var(--dsw-alias-border-l4);
+  border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: var(--dsw-radius-md, 8px);
-  background: var(--dsw-alias-bg-layer-3);
+  background: var(--dsw-alias-bg-layer-1, transparent);
   color: var(--dsw-alias-label-primary);
   font: inherit;
   font-size: 13px;
@@ -332,9 +325,16 @@ export const SUBAGENT_CSS = `
   cursor: pointer;
 }
 
+@media (hover: hover) {
+  .dsh-subagent-select:hover:not(:disabled) {
+    border-color: var(--dsw-alias-border-l4);
+    background: var(--dsw-alias-bg-layer-2);
+  }
+}
+
 .dsh-subagent-select option,
 .dsh-subagent-select optgroup {
-  background: var(--dsw-alias-bg-layer-3, #1e1e1e);
+  background: var(--dsw-alias-bg-layer-2, #1e1e1e);
   color: var(--dsw-alias-label-primary, #e5e5e5);
 }
 
@@ -360,12 +360,19 @@ export const SUBAGENT_CSS = `
   padding: 3px 10px;
   border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: 999px;
-  background: var(--dsw-alias-bg-layer-3);
+  background: transparent;
   color: var(--dsw-alias-label-secondary);
   font: inherit;
   font-size: 12px;
   line-height: 1.4;
   cursor: pointer;
+}
+
+@media (hover: hover) {
+  .dsh-subagent-chip:hover:not(:disabled):not([aria-pressed='true']) {
+    background: var(--dsw-alias-bg-layer-4);
+    color: var(--dsw-alias-label-primary);
+  }
 }
 
 .dsh-subagent-chip[aria-pressed='true'] {
@@ -387,13 +394,15 @@ export const SUBAGENT_CSS = `
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+  padding-top: 6px;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
 }
 
 .dsh-subagent-reset {
-  padding: 3px 10px;
-  border: 0.5px solid var(--dsw-alias-border-l4);
-  border-radius: var(--dsw-radius-md, 8px);
-  background: var(--dsw-alias-bg-layer-3);
+  padding: 2px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
   color: var(--dsw-alias-label-secondary);
   font: inherit;
   font-size: 12px;

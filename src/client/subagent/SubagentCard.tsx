@@ -292,23 +292,8 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
         {state.enabled
           ? (
             <div className="dsh-subagent-selection" data-dsh-part="subagent-target">
-              <div className="dsh-subagent-target-bar">
-                <div className="dsh-subagent-target-header">
-                  <label className="dsh-subagent-target-label" htmlFor={mainModelId}>{t('subagentMainModelLabel')}</label>
-                  {activeModelKey !== GLOBAL_TARGET && state.activeTargetOverridden
-                    ? (
-                      <button
-                        type="button"
-                        className="dsh-subagent-reset"
-                        data-dsh-part="subagent-reset-to-global"
-                        disabled={disabled}
-                        onClick={() => { props.resetActiveTarget() }}
-                      >
-                        {t('subagentResetToGlobal')}
-                      </button>
-                    )
-                    : null}
-                </div>
+              <fieldset className="dsh-subagent-target-bar">
+                <legend>{t('subagentMainModelLabel')}</legend>
                 <select
                   id={mainModelId}
                   className="dsh-subagent-select"
@@ -377,8 +362,21 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
                         </p>
                       )
                       : <p className="dsh-subagent-hint">{t('subagentTargetFollowGlobalStatus')}</p>}
+                  {activeModelKey !== GLOBAL_TARGET && state.activeTargetOverridden
+                    ? (
+                      <button
+                        type="button"
+                        className="dsh-subagent-reset"
+                        data-dsh-part="subagent-reset-to-global"
+                        disabled={disabled}
+                        onClick={() => { props.resetActiveTarget() }}
+                      >
+                        {t('subagentResetToGlobal')}
+                      </button>
+                    )
+                    : null}
                 </div>
-              </div>
+              </fieldset>
 
               {state.catalogStatus === 'loading'
                 ? <p className="dsh-subagent-notice" role="status">{t('subagentModelSelectionLoading')}</p>
