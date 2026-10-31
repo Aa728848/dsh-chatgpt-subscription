@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.48.4 - 2026-10-31
+
 - **[llm-compat] 修复 `role: 'tool'` 消息的 `toolCallId` 读错位置：整轮请求被判 `11148 tool calls and tool results do not match`**
   - **现象**：某条线路的会话在第 N 轮整轮失败，网关报 `11148` / "tool calls and tool results do not match"，同一条会话重试也无效。工具其实都执行完了，结果也都在历史里。
   - **根因**：`normalizeMessages()` 只从消息顶层 `raw.toolCallId` 与 `source.callId` 取调用 id。harness 把结果 id 放在**消息体里的 `tool-result` 块**上时（`{ role: 'tool', content: [{ type: 'tool-result', toolCallId }], source: { kind: 'tool' } }`），两处都取不到，`callId` 退成空串。
