@@ -103,6 +103,8 @@ async function mount(payload: KimiCodeWebStatus): Promise<HTMLDivElement> {
 
 beforeEach(() => {
   vi.stubGlobal('open', vi.fn())
+  vi.stubGlobal('requestAnimationFrame', () => 0)
+  vi.stubGlobal('cancelAnimationFrame', () => undefined)
 })
 
 afterEach(async () => {

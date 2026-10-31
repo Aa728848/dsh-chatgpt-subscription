@@ -24,6 +24,7 @@ function runCapture(command) {
 
 async function main() {
   const pkgPath = path.join(projectRoot, 'package.json');
+  const compatPath = path.join(projectRoot, 'src/compat.ts');
   const changelogPath = path.join(projectRoot, 'CHANGELOG.md');
 
   if (!fs.existsSync(pkgPath)) {
@@ -53,6 +54,18 @@ async function main() {
     console.log(`[1/5] package.json 版本号已更新为: ${targetVersion}`);
   } else {
     console.log(`[1/5] package.json 版本号已是: ${targetVersion}`);
+  }
+
+  if (fs.existsSync(compatPath)) {
+    const compat = fs.readFileSync(compatPath, 'utf8');
+    const updatedCompat = compat.replace(
+      /export const PLUGIN_VERSION = '[^']+' as const/,
+      `export const PLUGIN_VERSION = '${targetVersion}' as const`,
+    );
+    if (updatedCompat !== compat) {
+      fs.writeFileSync(compatPath, updatedCompat, 'utf8');
+      console.log(`[1/5] src/compat.ts PLUGIN_VERSION 已更新为: ${targetVersion}`);
+    }
   }
 
   // 2. 更新 CHANGELOG.md (归档 Unreleased)
@@ -89,9 +102,9 @@ async function main() {
 
   // 5. Git Commit & Tag
   console.log('\n[5/5] Git 提交与打 Tag...');
-  run('git add package.json CHANGELOG.md');
+  run('git add package.json src/compat.ts CHANGELOG.md');
 
-  const status = runCapture('git status --porcelain package.json CHANGELOG.md');
+  const status = runCapture('git status --porcelain package.json src/compat.ts CHANGELOG.md');
   if (status) {
     run(`git commit -m "chore(release): bump package version to ${targetVersion}"`);
   } else {
