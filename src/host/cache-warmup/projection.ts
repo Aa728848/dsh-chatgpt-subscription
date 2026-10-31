@@ -16,6 +16,7 @@
  */
 
 import {
+  CACHE_WARMUP_DEFAULTS,
   parseStructuredResultRows,
   type PreviewBudget,
   type ProjectionResult,
@@ -35,9 +36,74 @@ const TOOL_SOURCE = /(?:^|[-_/])(?:read|view|cat|open|edit|write|patch|apply_pat
 /** 独立开关覆盖的检索工具；只有明确导航任务才允许进入新投影。 */
 const TOOL_RETRIEVAL = /^(?:read|web_fetch|grep|glob)$/
 
+/**
+ * 多节/多读输出进入新投影的最小长度门槛（字符）。
+ *
+ * 短于这个长度、又没有 spill 的普通源码与契约读一律逐字保留：
+ * 只有「确定已经大到装不进预算」的输出才值得换成摘要。
+ */
+const MULTI_OUTPUT_MIN_CHARS = 20_000
+
 /** 一行文本的裁剪（超长行才裁剪，并留下省略号）。 */
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`
+}
+
+/**
+ * DSH 的输出上限提示：正文被截断，全文落在临时文件里。
+ *
+ * 形态固定：正文 + 换行 + `(Omitted N bytes. Full formatted result stored at: <path>. Use read with offset/limit, or grep this path to search within it.)`。
+ * 路径本身可能带 `.txt` 之类的后缀，所以路径用**非贪婪**捕获，末尾的句点单独留给正则。
+ */
+const SPILL_NOTICE =
+  /\n\n\(Omitted \d+ bytes\. Full formatted result stored at: ([^\r\n]+?)(?:\. Use read with offset\/limit, or grep this path to search within it)?\.\)\s*$/
+
+/**
+ * 读回一个 spill 文件的完整 UTF-8 内容。
+ *
+ * 文件系统依赖在这里动态引入：`contracts.ts` 必须保持零 Node 依赖，而投影是宿主侧代码。
+ * 读不到、不是普通文件、或超过单结果字节上限时一律返回 undefined —— 宁可少投影，
+ * 也不能把一份读了一半的原文当成全文入库。
+ * @param filePath - spill 提示里给出的路径。
+ * @returns 完整内容，或 undefined。
+ */
+async function readSpillFile(filePath: string): Promise<string | undefined> {
+  try {
+    const { stat, readFile } = await import('node:fs/promises')
+    const stats = await stat(filePath)
+    if (!stats.isFile()) return undefined
+    if (stats.size > CACHE_WARMUP_DEFAULTS.maxResultBytes) return undefined
+    return await readFile(filePath, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/** 一次 spill 解析的结果。 */
+interface SpillResolution {
+  /** 用于投影计划与入库的文本。 */
+  text: string
+  /** 是否命中 spill 提示。 */
+  spilled: boolean
+  /** 是否读回了完整原文。 */
+  recovered: boolean
+}
+
+/**
+ * 处理 DSH 的 spill 提示。
+ *
+ * 读得到全文：投影与入库都用全文，`cache_warmup_result` 才能翻到**未截断**的输出。
+ * 读不到：剥掉提示尾部，剩下的正文照常参与投影与入库。
+ * @param raw - 工具结果原文。
+ * @returns 解析结果。
+ */
+async function resolveSpillText(raw: string): Promise<SpillResolution> {
+  const match = SPILL_NOTICE.exec(raw)
+  if (match === null) return { text: raw, spilled: false, recovered: false }
+  const filePath = match[1]!.trim()
+  const full = filePath === '' ? undefined : await readSpillFile(filePath)
+  if (full !== undefined) return { text: full, spilled: true, recovered: true }
+  return { text: raw.slice(0, match.index), spilled: true, recovered: false }
 }
 
 /**
@@ -156,6 +222,12 @@ const SHELL_ERROR_LINE =
 
 /** TypeScript 编译器报错首行：`path(line,col): error TSxxxx:` 或 `path:line:col - error TSxxxx:`。 */
 const TS_DIAGNOSTIC_HEADER = /^(?:.+?\(\d+,\d+\):\s+error\s+TS\d+:|.+?:\d+:\d+\s+-\s+error\s+TS\d+:)/
+
+/** shell 预览里最多列出的错误行数；超出的部分用 ref 提示补读。 */
+const SHELL_ERROR_MAX_LINES = 25
+
+/** shell 预览里错误集最多占用的字符数（行数上限先到，这个只是兜底）。 */
+const SHELL_ERROR_MAX_CHARS = 6_500
 
 /**
  * 紧跟在 TypeScript 诊断首行后面的续行（缩进的类型比对、代码高亮行、波浪线指示行），
@@ -303,7 +375,8 @@ function buildShellSections(text: string): PreviewSection[] | undefined {
     }
     if (SHELL_ERROR_LINE.test(trimmed)) {
       errorCount += 1
-      errors.push(`  ${clip(trimmed, 360)}`)
+      // 每行裁到 240 字符：25 行 ≈ 6050 字符，稳态预算是 8000，装得下。
+      errors.push(`  ${clip(trimmed, 240)}`)
     }
   }
   // 错误集本身装不进一次预览时，宁可整段原样：半截错误清单比没有更危险。
@@ -313,8 +386,32 @@ function buildShellSections(text: string): PreviewSection[] | undefined {
     /\[exit code: (-?\d+)\]/i.exec(text)
   const sections: PreviewSection[] = []
   if (exitMatch !== null) sections.push({ lines: [`exit code: ${exitMatch[1]}`] })
-  sections.push({ lines: [`errors: ${errorCount} (complete set)`] })
-  if (errors.length > 0) sections.push({ lines: errors })
+  // 必需段落的错误集必须**装得进**稳态预算：整份错误清单塞不下时，
+  // 整条结果会退回原样（verbatim-budget），预览等于没有。
+  // 这里只列前面若干行，剩下的明确写出来 —— 模型知道去 ref 里读完整清单，
+  // 而不是拿到一份看不出被截断过的清单。
+  const shownErrors: string[] = []
+  let shownChars = 0
+  for (const line of errors) {
+    if (shownErrors.length >= SHELL_ERROR_MAX_LINES) break
+    if (shownChars + line.length + 1 > SHELL_ERROR_MAX_CHARS) break
+    shownErrors.push(line)
+    shownChars += line.length + 1
+  }
+  const truncated = shownErrors.length < errors.length
+  sections.push({
+    lines: [
+      truncated
+        ? `errors: ${errorCount} (first ${shownErrors.length} shown; full set via ref)`
+        : `errors: ${errorCount} (complete set)`,
+    ],
+  })
+  if (shownErrors.length > 0) {
+    const body = truncated
+      ? [...shownErrors, `  … ${errors.length - shownErrors.length} more error lines (full list via ref)`]
+      : shownErrors
+    sections.push({ lines: body })
+  }
   const nonEmpty = lines.map((line) => line.trimEnd()).filter((line) => line.trim() !== '')
   const head = nonEmpty.slice(0, 5).map((line) => `  ${clip(line.trim(), 160)}`)
   const tail = nonEmpty.slice(-5).map((line) => `  ${clip(line.trim(), 160)}`)
@@ -540,6 +637,61 @@ function planRetrievalOutline(text: string, toolName: string): Extract<Projectio
   return undefined
 }
 
+/**
+ * `job_output` / `win_bash` 信封里的退出码与状态。
+ *
+ * 宿主把退出码放在**同级**元数据里（`job.detail` 写着 "exit code: 1"、`exitCode: 1`），
+ * 正文里反而没有：只看正文会把它误判成普通日志（不是 shell 输出）。
+ */
+interface ShellMetadata {
+  /** 退出码。 */
+  exitCode?: number
+  /** 任务状态。 */
+  status?: string
+}
+
+/**
+ * 读出装着日志字段的那个对象的元数据。
+ * @param holder - 装着日志字段的对象（顶层信封或 1 层嵌套的内层对象）。
+ * @returns 读到的元数据；两者都没有时 undefined。
+ */
+function shellMetadataOf(holder: Record<string, unknown>): ShellMetadata | undefined {
+  const job = isPlainRecord(holder.job) ? holder.job : undefined
+  let exitCode: number | undefined
+  if (typeof holder.exitCode === 'number' && Number.isFinite(holder.exitCode)) {
+    exitCode = holder.exitCode
+  }
+  if (exitCode === undefined && typeof job?.exitCode === 'number' && Number.isFinite(job.exitCode)) {
+    exitCode = job.exitCode as number
+  }
+  if (exitCode === undefined && typeof job?.detail === 'string') {
+    const matched = /(?:exit code|exited with code|process exited with code)\s*[:=]?\s*(-?\d+)/i.exec(job.detail)
+    if (matched !== null) exitCode = Number(matched[1])
+  }
+  const status = typeof job?.status === 'string' ? job.status : undefined
+  if (exitCode === undefined && status === undefined) return undefined
+  return {
+    ...(exitCode === undefined ? {} : { exitCode }),
+    ...(status === undefined ? {} : { status }),
+  }
+}
+
+/**
+ * 把信封里的退出码与状态补到 shell 预览的最前面。
+ * @param sections - `buildShellSections` 交出来的段落。
+ * @param meta - 信封元数据。
+ * @returns 补过元数据的段落。
+ */
+function withShellMetadata(sections: PreviewSection[], meta: ShellMetadata | undefined): PreviewSection[] {
+  if (meta === undefined) return sections
+  const lines: string[] = []
+  const hasExit = sections.some((section) => section.lines[0]?.startsWith('exit code:'))
+  if (meta.exitCode !== undefined && !hasExit) lines.push(`exit code: ${meta.exitCode}`)
+  if (meta.status !== undefined) lines.push(`status: ${meta.status}`)
+  if (lines.length === 0) return sections
+  return [{ lines }, ...sections]
+}
+
 /** 契约/类型定义：命中两行以上声明就当它是契约，保持原样。 */
 function looksLikeContract(text: string): boolean {
   let declarations = 0
@@ -623,11 +775,57 @@ function isJsonDocument(text: string): boolean {
   return false
 }
 
-/** PTC `run_code` JSON envelope 中允许独立投影日志的字段白名单。 */
-const JSON_ENVELOPE_LOG_KEYS = ['stdout', 'stderr', 'output', 'logs', 'log'] as const
+/**
+ * PTC `run_code` JSON envelope 中允许独立投影日志的字段白名单。
+ *
+ * `'text'` 在列：`tools.job_output` 返回的正是 `{ text, job }`，日志正文就叫 `text`。
+ */
+const JSON_ENVELOPE_LOG_KEYS = ['stdout', 'stderr', 'output', 'logs', 'log', 'text'] as const
 
 /** JSON envelope 其余字段允许占用的最大序列化字符数（防止把含批量源码的混合 envelope 压掉）。 */
 const JSON_ENVELOPE_MAX_OTHER_CHARS = 800
+
+/**
+ * 预览要落到 JSON 信封里的哪个位置。
+ *
+ * 一份信封里只换**一个**字段：外层的、内层的其余字段逐字保留，
+ * 这样调用方读到的仍是一份结构没变的结果，只是那个字段变成了预览。
+ */
+interface EnvelopeBinding {
+  /** 顶层记录（整份信封）。 */
+  record: Record<string, unknown>
+  /** 被替换的键（在顶层或内层里）。 */
+  key: string
+  /** 1 层嵌套时的内层记录与外层键。 */
+  nested?: { key: string; record: Record<string, unknown> }
+}
+
+/** 判断一个值是不是普通 JSON 对象（不是数组，也不是 null）。 */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** 重建信封：只把预览写回被替换的键，其余字段原样保留。 */
+function rebuildEnvelope(binding: EnvelopeBinding, innerPreview: string): string {
+  if (binding.nested === undefined) {
+    return JSON.stringify({ ...binding.record, [binding.key]: innerPreview })
+  }
+  return JSON.stringify({
+    ...binding.record,
+    [binding.nested.key]: { ...binding.nested.record, [binding.key]: innerPreview },
+  })
+}
+
+/** 信封外壳的序列化长度：被替换的字段先按空串算。 */
+function envelopeShellLength(binding: EnvelopeBinding): number {
+  if (binding.nested === undefined) {
+    return JSON.stringify({ ...binding.record, [binding.key]: '' }).length
+  }
+  return JSON.stringify({
+    ...binding.record,
+    [binding.nested.key]: { ...binding.nested.record, [binding.key]: '' },
+  }).length
+}
 
 /**
  * 解开一层或两层 JSON 包装（支持顶层 JSON 字符串 `"..."` 或双重序列化的 `"{...}"`）。
@@ -678,16 +876,16 @@ function parseJsonCandidate(text: string):
  *
  * 规则刻意保守：
  * - 截断 JSON、数组一律返回 undefined；
+ * - 白名单字段可以出现在**顶层**（`{ stdout: "..." }`），也可以出现在**1 层嵌套**里
+ *   （`{ testOutput: { text: "...", job: {...} } }`，即 `tools.job_output` 的形状）；
  * - 对象 envelope 除白名单字段外，其余字段序列化后的总长度不超过 `JSON_ENVELOPE_MAX_OTHER_CHARS`；
- * - 解码并剥离 ANSI 后的日志文本自身必须能通过非源码/非契约的结构化日志投影计划；
- * - 返回的 `storeContent` 把解码后的多行日志直接展开（对象 envelope 还会把其余元数据缩进在头部），
- *   彻底避免单行 minified JSON 因没有真实 `\n` 导致 `store.page` 的按行分页失效。
+ * - 解码并剥离 ANSI 后的日志文本自身必须能通过非源码/非契约的结构化日志投影计划。
  */
 function extractJsonEnvelopeLogField(
   text: string,
   toolName: string,
 ): {
-  envelope?: { record: Record<string, unknown>; key: string }
+  envelope?: EnvelopeBinding
   plan: Extract<ProjectionPlan, { kind: 'preview' }>
 } | undefined {
   const candidate = parseJsonCandidate(text)
@@ -702,37 +900,600 @@ function extractJsonEnvelopeLogField(
   }
 
   const { record } = candidate
-  let candidateKey: string | undefined
-  let candidateText = ''
+  const candidates: Array<{ binding: EnvelopeBinding; text: string }> = []
   for (const key of JSON_ENVELOPE_LOG_KEYS) {
-    const val = record[key]
-    if (typeof val === 'string' && val.length > candidateText.length) {
-      candidateKey = key
-      candidateText = val
+    const value = record[key]
+    if (typeof value === 'string' && value.length > 0) {
+      candidates.push({ binding: { record, key }, text: value })
     }
   }
-  if (candidateKey === undefined || candidateText.length === 0) return undefined
+  // 1 层嵌套：顶层某个属性本身是对象，里面带一个白名单字段。
+  for (const [outerKey, outerValue] of Object.entries(record)) {
+    if (!isPlainRecord(outerValue)) continue
+    for (const key of JSON_ENVELOPE_LOG_KEYS) {
+      const value = outerValue[key]
+      if (typeof value === 'string' && value.length > 0) {
+        candidates.push({
+          binding: { record, key, nested: { key: outerKey, record: outerValue } },
+          text: value,
+        })
+      }
+    }
+  }
+  if (candidates.length === 0) return undefined
+  // 取最长的那个白名单字段：要换掉的是**主体**，不是某个附注。
+  // 排序稳定，所以长度相同时顶层字段优先于嵌套字段。
+  candidates.sort((left, right) => right.text.length - left.text.length)
+  const picked = candidates[0]!
+  const binding = picked.binding
+  const candidateText = picked.text
+  const boundKey = binding.key
+  const nested = binding.nested
+  // 装着被绑定日志字段的那个对象：顶层信封，或 1 层嵌套里的内层对象。
+  const holder = nested === undefined ? record : nested.record
 
   const rest: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(record)) {
-    if (key === candidateKey) continue
+    if (nested === undefined ? key === boundKey : key === nested.key) continue
     // 其余字段若包含长段源码或契约，视为混合证据，整体保持原样。
     if (typeof value === 'string' && (value.length > 400 || looksLikeSourceCode(value) || looksLikeContract(value))) {
       return undefined
     }
     rest[key] = value
   }
-  const restJson = JSON.stringify(rest)
+  let restJson: string
+  if (nested === undefined) {
+    restJson = JSON.stringify(rest)
+  } else {
+    const innerRest: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(nested.record)) {
+      if (key === boundKey) continue
+      if (typeof value === 'string' && (value.length > 400 || looksLikeSourceCode(value) || looksLikeContract(value))) {
+        return undefined
+      }
+      innerRest[key] = value
+    }
+    restJson = JSON.stringify({ ...rest, [nested.key]: innerRest })
+  }
   if (restJson.length > JSON_ENVELOPE_MAX_OTHER_CHARS) return undefined
 
   const cleanField = stripAnsi(candidateText)
   if (isJsonDocument(cleanField) || isMixedEvidenceOutput(cleanField)) return undefined
   const plan = planPlainTextProjection(cleanField, toolName)
-  if (plan.kind !== 'preview') return undefined
-  return {
-    envelope: { record, key: candidateKey },
-    plan,
+  if (plan.kind !== 'preview') {
+    // `job_output` / `win_bash` 把退出码放在**同级**元数据里（`job.detail` 写着
+    // "exit code: 1"），正文里没有：正文因此「不像」shell 日志。但信封元数据已经
+    // 证明它来自 shell 工具，按 shell 输出处理（退出码从元数据补进来）。
+    if (plan.strategy === 'verbatim-unparsed') {
+      const meta = shellMetadataOf(holder)
+      if (meta !== undefined) {
+        const sections = buildShellSections(cleanField)
+        if (sections !== undefined) {
+          return {
+            envelope: binding,
+            plan: { kind: 'preview', strategy: 'shell-output', sections: withShellMetadata(sections, meta) },
+          }
+        }
+      }
+    }
+    // 超长的多节正文（分节头 + 若干节）也能结构化。
+    const multiSection = planMultiSectionProjection(cleanField)
+    if (multiSection !== undefined) return { envelope: binding, plan: multiSection }
+    return undefined
   }
+  return { envelope: binding, plan }
+}
+
+/** 规范 grep 命中（`tools.grep` 的 JSON 返回形状）。 */
+interface CanonicalGrepMatch {
+  /** 命中所在文件。 */
+  path: string
+  /** 命中所在行号。 */
+  lineNumber: number
+  /** 命中行的正文。 */
+  line: string
+}
+
+/** 一份规范读取结果（`{ path, offset?, lines }`）。 */
+interface CanonicalReadResult {
+  /** 读到的文件。 */
+  path: string
+  /** 起始行号（可选）。 */
+  offset?: number
+  /** 行数组，每行带原始行号。 */
+  lines: Array<{ number: number; text: string }>
+}
+
+/** 规范 glob 路径表。 */
+function canonicalGlobPaths(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const paths: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') return undefined
+    paths.push(entry)
+  }
+  return paths
+}
+
+/** 规范 grep 命中表。 */
+function canonicalGrepMatches(value: unknown): CanonicalGrepMatch[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const matches: CanonicalGrepMatch[] = []
+  for (const entry of value) {
+    if (!isPlainRecord(entry)) return undefined
+    if (typeof entry.path !== 'string') return undefined
+    if (!Number.isSafeInteger(entry.lineNumber)) return undefined
+    if (typeof entry.line !== 'string') return undefined
+    matches.push({ path: entry.path, lineNumber: entry.lineNumber as number, line: entry.line })
+  }
+  return matches
+}
+
+/** 规范读取结果。 */
+function canonicalReadResult(value: unknown): CanonicalReadResult | undefined {
+  if (!isPlainRecord(value)) return undefined
+  if (typeof value.path !== 'string' || value.path.trim() === '') return undefined
+  if (!Array.isArray(value.lines) || value.lines.length === 0) return undefined
+  const lines: Array<{ number: number; text: string }> = []
+  for (const entry of value.lines) {
+    if (!isPlainRecord(entry)) return undefined
+    if (!Number.isSafeInteger(entry.number)) return undefined
+    if (typeof entry.text !== 'string') return undefined
+    lines.push({ number: entry.number as number, text: entry.text })
+  }
+  return {
+    path: value.path,
+    ...(typeof value.offset === 'number' && Number.isFinite(value.offset) ? { offset: value.offset } : {}),
+    lines,
+  }
+}
+
+/** 在顶层或 1 层嵌套里找规范 grep 命中表。 */
+function findGrepBinding(record: Record<string, unknown>):
+  | { binding: EnvelopeBinding; matches: CanonicalGrepMatch[] }
+  | undefined {
+  const top = canonicalGrepMatches(record.matches)
+  if (top !== undefined) return { binding: { record, key: 'matches' }, matches: top }
+  for (const [outerKey, outerValue] of Object.entries(record)) {
+    if (!isPlainRecord(outerValue)) continue
+    const nested = canonicalGrepMatches(outerValue.matches)
+    if (nested !== undefined) {
+      return {
+        binding: { record, key: 'matches', nested: { key: outerKey, record: outerValue } },
+        matches: nested,
+      }
+    }
+  }
+  return undefined
+}
+
+/** 在顶层或 1 层嵌套里找规范 glob 路径表。 */
+function findGlobBinding(record: Record<string, unknown>):
+  | { binding: EnvelopeBinding; paths: string[]; root?: string }
+  | undefined {
+  const top = canonicalGlobPaths(record.paths)
+  if (top !== undefined) {
+    return {
+      binding: { record, key: 'paths' },
+      paths: top,
+      ...(typeof record.root === 'string' ? { root: record.root } : {}),
+    }
+  }
+  for (const [outerKey, outerValue] of Object.entries(record)) {
+    if (!isPlainRecord(outerValue)) continue
+    const nested = canonicalGlobPaths(outerValue.paths)
+    if (nested !== undefined) {
+      return {
+        binding: { record, key: 'paths', nested: { key: outerKey, record: outerValue } },
+        paths: nested,
+        ...(typeof outerValue.root === 'string' ? { root: outerValue.root } : {}),
+      }
+    }
+  }
+  return undefined
+}
+
+/** grep 信封的预览段落：复用已有的完整计数策略。 */
+function buildGrepEnvelopeSections(matches: readonly CanonicalGrepMatch[]): PreviewSection[] {
+  const files = new Map<string, { count: number; first: string }>()
+  for (const match of matches) {
+    const entry = files.get(match.path)
+    if (entry === undefined) files.set(match.path, { count: 1, first: match.line })
+    else entry.count += 1
+  }
+  return buildGrepSections({ files, total: matches.length })
+}
+
+/** glob 信封的预览段落：复用已有的扩展名分布策略。 */
+function buildGlobEnvelopeSections(paths: readonly string[], root: string | undefined): PreviewSection[] {
+  const sections = buildGlobSections(paths.join('\n'))
+  if (root === undefined) return sections
+  return [{ lines: [`root: ${clip(root, 160)}`] }, ...sections]
+}
+
+/**
+ * PTC 的结构化工具返回信封：`grep` 的 `matches` 与 `glob` 的 `paths`。
+ *
+ * 两种形状都认：顶层 `{ matches }` / `{ root, paths }`，以及 1 层嵌套
+ * `{ batch: { matches } }` / `{ batch: { root, paths } }`。
+ *
+ * 落库用缩进 JSON 而不是原始的 minified 文本：minified 文本里没有真换行，
+ * `store.page` 的「按行翻页」会退化成一次吐完一整行；缩进后每行一个字段，
+ * 翻页干净，而且外层与内层的同级元数据一个不少。
+ */
+function extractStructuredToolEnvelope(text: string): {
+  binding: EnvelopeBinding
+  plan: Extract<ProjectionPlan, { kind: 'preview' }>
+  storeContent: string
+} | undefined {
+  const candidate = parseJsonCandidate(text)
+  if (candidate === undefined || candidate.kind !== 'object') return undefined
+  const { record } = candidate
+
+  // 复合信封（不止一个成员）不能走这条路：只替一个字段会把别的成员留在预览外面，
+  // 而留在外面的成员又会让外壳超预算。复合信封交给复合摘要。
+  if (collectCompositeEntries(record).length !== 1) return undefined
+
+  const grep = findGrepBinding(record)
+  if (grep !== undefined) {
+    // 外壳（信封里其余字段的序列化长度）必须装得下，否则整条结果会退回原样。
+    if (envelopeShellLength(grep.binding) > JSON_ENVELOPE_MAX_OTHER_CHARS) return undefined
+    return {
+      binding: grep.binding,
+      plan: { kind: 'preview', strategy: 'grep-results', sections: buildGrepEnvelopeSections(grep.matches) },
+      storeContent: JSON.stringify(record, null, 2),
+    }
+  }
+  const glob = findGlobBinding(record)
+  if (glob !== undefined) {
+    if (envelopeShellLength(glob.binding) > JSON_ENVELOPE_MAX_OTHER_CHARS) return undefined
+    return {
+      binding: glob.binding,
+      plan: {
+        kind: 'preview',
+        strategy: 'glob-results',
+        sections: buildGlobEnvelopeSections(glob.paths, glob.root),
+      },
+      storeContent: JSON.stringify(record, null, 2),
+    }
+  }
+  return undefined
+}
+
+/** 复合信封里的一个成员：它是什么、它有多大。 */
+interface CompositeEntryBase {
+  /** 该成员所在的键（顶层键、`key[index]`、`key.subKey`；根本身记作 `(root)`）。 */
+  key: string
+  /** 该成员自身的 JSON 长度。 */
+  jsonLength: number
+}
+
+/** 复合信封里的读取结果（`{ path, lines }`）。 */
+interface CompositeReadEntry extends CompositeEntryBase {
+  kind: 'read'
+  /** 读到的文件。 */
+  path: string
+  /** 行数。 */
+  lineCount: number
+  /** 首行行号。 */
+  first: number
+  /** 末行行号。 */
+  last: number
+  /** 前几行正文。 */
+  firstLines: string[]
+}
+
+/** 复合信封里的 grep 结果（`{ matches }`）。 */
+interface CompositeGrepEntry extends CompositeEntryBase {
+  kind: 'grep'
+  /** 命中总数。 */
+  total: number
+  /** 每个文件的命中数（按命中数降序）。 */
+  files: Array<{ path: string; count: number }>
+}
+
+/** 复合信封里的 glob 结果（`{ paths }`）。 */
+interface CompositeGlobEntry extends CompositeEntryBase {
+  kind: 'glob'
+  /** 路径总数。 */
+  count: number
+  /** 搜索根目录。 */
+  root?: string
+  /** 前几条路径。 */
+  sample: string[]
+}
+
+/** 复合信封里的日志结果（`{ text, job }` 或 `{ stdout, stderr, exitCode }`）。 */
+interface CompositeLogEntry extends CompositeEntryBase {
+  kind: 'log'
+  /** 日志正文字符数。 */
+  chars: number
+  /** 退出码。 */
+  exitCode?: number
+  /** 任务状态。 */
+  status?: string
+  /** 错误行数与尾部若干行。 */
+  summary: string[]
+}
+
+/** 复合信封里的一个成员。 */
+type CompositeEntry =
+  | CompositeReadEntry
+  | CompositeGrepEntry
+  | CompositeGlobEntry
+  | CompositeLogEntry
+
+/** 日志正文的错误行数与尾部若干行。 */
+function logSummaryOf(text: string): string[] {
+  const lines = text.split('\n').map((line) => line.trimEnd()).filter((line) => line.trim() !== '')
+  const errorLines = lines.filter((line) => SHELL_ERROR_LINE.test(line)).length
+  const summary: string[] = []
+  if (errorLines > 0) summary.push(`errors: ${errorLines}`)
+  for (const line of lines.slice(-2)) summary.push(clip(line.trim(), 160))
+  return summary
+}
+
+/**
+ * 把一个普通 JSON 对象分类成复合信封里的一个成员。
+ *
+ * 认得四种形状：读取结果、grep 命中表、glob 路径表、日志正文。
+ * 分不出来就返回 undefined —— 宁可少认一个成员，也不把不相干的数据写进摘要。
+ * @param key - 该成员所在的键。
+ * @param value - 该成员的值。
+ * @returns 识别出的成员，或 undefined。
+ */
+function classifyCompositeEntry(key: string, value: Record<string, unknown>): CompositeEntry | undefined {
+  const jsonLength = JSON.stringify(value)?.length ?? 0
+
+  const matches = canonicalGrepMatches(value.matches)
+  if (matches !== undefined) {
+    const counts = new Map<string, number>()
+    for (const match of matches) counts.set(match.path, (counts.get(match.path) ?? 0) + 1)
+    const files = [...counts.entries()]
+      .map(([path, count]) => ({ path, count }))
+      .sort((left, right) => right.count - left.count)
+    return { kind: 'grep', key, jsonLength, total: matches.length, files }
+  }
+
+  const paths = canonicalGlobPaths(value.paths)
+  if (paths !== undefined) {
+    return {
+      kind: 'glob',
+      key,
+      jsonLength,
+      count: paths.length,
+      ...(typeof value.root === 'string' ? { root: value.root } : {}),
+      sample: paths.slice(0, 3),
+    }
+  }
+
+  const read = canonicalReadResult(value)
+  if (read !== undefined) {
+    let first = Number.POSITIVE_INFINITY
+    let last = Number.NEGATIVE_INFINITY
+    for (const line of read.lines) {
+      if (line.number < first) first = line.number
+      if (line.number > last) last = line.number
+    }
+    return {
+      kind: 'read',
+      key,
+      jsonLength,
+      path: read.path,
+      lineCount: read.lines.length,
+      first,
+      last,
+      firstLines: read.lines.slice(0, 2).map((line) => `${line.number}: ${line.text}`),
+    }
+  }
+
+  for (const logKey of JSON_ENVELOPE_LOG_KEYS) {
+    const logText = value[logKey]
+    if (typeof logText !== 'string' || logText.length === 0) continue
+    const meta = shellMetadataOf(value)
+    return {
+      kind: 'log',
+      key,
+      jsonLength,
+      chars: logText.length,
+      ...(meta?.exitCode === undefined ? {} : { exitCode: meta.exitCode }),
+      ...(meta?.status === undefined ? {} : { status: meta.status }),
+      summary: logSummaryOf(logText),
+    }
+  }
+  return undefined
+}
+
+/**
+ * 收集一份 JSON 信封里的全部成员（顶层、1 层嵌套、数组元素）。
+ * @param record - 顶层记录。
+ * @returns 识别出的成员。
+ */
+function collectCompositeEntries(record: Record<string, unknown>): CompositeEntry[] {
+  const entries: CompositeEntry[] = []
+  const push = (key: string, value: Record<string, unknown>): boolean => {
+    const entry = classifyCompositeEntry(key, value)
+    if (entry === undefined) return false
+    entries.push(entry)
+    return true
+  }
+  // 根本身就可能是一个成员（`{ text, job }`、`{ path, lines }`）。
+  const root = classifyCompositeEntry('(root)', record)
+  if (root !== undefined) entries.push(root)
+  for (const [key, value] of Object.entries(record)) {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => {
+        if (isPlainRecord(item)) push(`${key}[${index}]`, item)
+      })
+      continue
+    }
+    if (!isPlainRecord(value)) continue
+    if (push(key, value)) continue
+    // 1 层嵌套：这个对象本身不是成员，但它的属性里可能是。
+    for (const [subKey, subValue] of Object.entries(value)) {
+      if (isPlainRecord(subValue)) push(`${key}.${subKey}`, subValue)
+    }
+  }
+  return entries
+}
+
+/** 复合信封的预览段落：逐个成员给出它是什么、有多大。 */
+function buildCompositeSections(entries: readonly CompositeEntry[]): PreviewSection[] {
+  const allReads = entries.every((entry) => entry.kind === 'read')
+  const shown = entries.slice(0, 20)
+  const summaries: string[] = []
+  const firstLines: string[] = []
+  const details: string[] = []
+  for (const entry of shown) {
+    if (entry.kind === 'read') {
+      summaries.push(`  ${clip(entry.key, 60)}: ${clip(entry.path, 120)} lines ${entry.first}-${entry.last} (${entry.lineCount})`)
+      continue
+    }
+    if (entry.kind === 'grep') {
+      summaries.push(`  ${clip(entry.key, 60)}: grep matches=${entry.total} across ${entry.files.length} files`)
+      for (const file of entry.files.slice(0, 3)) {
+        summaries.push(`    ${clip(file.path, 100)}: ${file.count}`)
+      }
+      continue
+    }
+    if (entry.kind === 'glob') {
+      const root = entry.root === undefined ? '' : ` root=${clip(entry.root, 80)}`
+      summaries.push(`  ${clip(entry.key, 60)}: glob paths=${entry.count}${root}`)
+      for (const sample of entry.sample) summaries.push(`    ${clip(sample, 140)}`)
+      continue
+    }
+    const state = [
+      entry.exitCode === undefined ? '' : `exit code=${entry.exitCode}`,
+      entry.status === undefined ? '' : `status=${entry.status}`,
+    ].filter((part) => part !== '').join(' ')
+    summaries.push(`  ${clip(entry.key, 60)}: log chars=${entry.chars}${state === '' ? '' : ` (${state})`}`)
+    for (const line of entry.summary) details.push(`      ${clip(line, 160)}`)
+  }
+  if (entries.length > shown.length) {
+    summaries.push(`  … ${entries.length - shown.length} more entries (full list via ref)`)
+  }
+  for (const entry of shown.slice(0, 3)) {
+    if (entry.kind !== 'read') continue
+    firstLines.push(`    ${clip(entry.path, 100)}`)
+    for (const line of entry.firstLines) firstLines.push(`      ${clip(line, 160)}`)
+  }
+  const sections: PreviewSection[] = [
+    {
+      lines: [
+        allReads
+          ? `reads: ${entries.length} (complete set)`
+          : `results: ${entries.length} (complete set)`,
+      ],
+    },
+    { lines: summaries },
+  ]
+  const extra = [...firstLines, ...details]
+  if (extra.length > 0) {
+    sections.push({ lines: [allReads ? 'first lines:' : 'detail:', ...extra], optional: true })
+  }
+  return sections
+}
+
+/**
+ * 复合 JSON 信封的投影计划。
+ *
+ * 一份结果里混着多个成员（grep + read + glob + log）时，逐个成员摘要：
+ * 模型要的是「这一趟拿到了什么、各自多大」，而不是某一份成员的完整正文。
+ *
+ * 触发条件：已经超长（或被 spill 截断）、成员不止一个、或单个成员本身就装不下预算。
+ * @param text - 工具结果原文。
+ * @param budgetMaxChars - 当前预览预算的字符上限。
+ * @param oversized - 是否已经超长或被 spill 截断。
+ * @returns 投影计划，或 undefined。
+ */
+function extractCompositeEnvelope(
+  text: string,
+  budgetMaxChars: number,
+  oversized: boolean,
+): Extract<ProjectionPlan, { kind: 'preview' }> | undefined {
+  const candidate = parseJsonCandidate(text)
+  if (candidate === undefined || candidate.kind !== 'object') return undefined
+  const { record } = candidate
+  const entries = collectCompositeEntries(record)
+  if (entries.length === 0) return undefined
+  const trigger =
+    oversized ||
+    entries.length >= 2 ||
+    entries.some((entry) => entry.jsonLength > budgetMaxChars)
+  if (!trigger) return undefined
+  return {
+    kind: 'preview',
+    strategy: 'file-outline',
+    sections: buildCompositeSections(entries),
+    storeContent: JSON.stringify(record, null, 2),
+  }
+}
+
+/** 多节输出的分节头：整行大写，且至少含一个分隔符（空格、斜杠、连字符）。 */
+const MULTI_SECTION_HEADER = /^[A-Z][A-Z0-9]*(?:[ _/()-][A-Z0-9]+)*$/
+
+/** 判断一行是不是分节头；光秃秃一个大写词不算一节。 */
+function isMultiSectionHeader(trimmed: string): boolean {
+  if (trimmed.length < 4) return false
+  if (!MULTI_SECTION_HEADER.test(trimmed)) return false
+  return /[ _/-]/.test(trimmed)
+}
+
+/** 多节输出的预览段落：分了几节、每节多少行与行范围、每节前几行。 */
+function buildMultiSectionSections(text: string): PreviewSection[] | undefined {
+  const lines = text.split('\n')
+  const headers: Array<{ name: string; start: number }> = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index]!.trim()
+    if (!isMultiSectionHeader(trimmed)) continue
+    // 分节头必须紧跟内容：后面是空的说明这只是正文里的一行大字。
+    if ((lines[index + 1] ?? '').trim() === '') continue
+    headers.push({ name: trimmed, start: index })
+  }
+  if (headers.length < 2) return undefined
+  const summaries: string[] = []
+  const firstLines: string[] = []
+  for (let index = 0; index < headers.length; index += 1) {
+    const header = headers[index]!
+    const end = headers[index + 1]?.start ?? lines.length
+    const body = lines
+      .slice(header.start + 1, end)
+      .map((line) => line.trimEnd())
+      .filter((line) => line.trim() !== '')
+    let first = Number.POSITIVE_INFINITY
+    let last = Number.NEGATIVE_INFINITY
+    for (const line of body) {
+      const matched = /^\s*(\d+)(?::|\t|\|)/.exec(line)
+      if (matched === null) continue
+      const number = Number(matched[1])
+      if (number < first) first = number
+      if (number > last) last = number
+    }
+    const range = Number.isFinite(first) && Number.isFinite(last) ? ` (${first}-${last})` : ''
+    summaries.push(`  ${clip(header.name, 80)}: ${body.length} lines${range}`)
+  }
+  for (let index = 0; index < Math.min(headers.length, 3); index += 1) {
+    const header = headers[index]!
+    const end = headers[index + 1]?.start ?? lines.length
+    const body = lines
+      .slice(header.start + 1, end)
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+    firstLines.push(`    ${clip(header.name, 80)}`)
+    for (const line of body.slice(0, 2)) firstLines.push(`      ${clip(line, 160)}`)
+  }
+  return [
+    { lines: [`sections: ${headers.length} (complete set)`] },
+    { lines: summaries },
+    { lines: ['first lines:', ...firstLines], optional: true },
+  ]
+}
+
+/** 多节输出的投影计划。 */
+function planMultiSectionProjection(text: string): Extract<ProjectionPlan, { kind: 'preview' }> | undefined {
+  const sections = buildMultiSectionSections(text)
+  if (sections === undefined) return undefined
+  return { kind: 'preview', strategy: 'structured-rows', sections }
 }
 
 /** 投影计划：要么给一段预览，要么明确为什么保持原样。 */
@@ -741,7 +1502,9 @@ type ProjectionPlan =
       kind: 'preview'
       strategy: ProjectionStrategy
       sections: PreviewSection[]
-      envelope?: { record: Record<string, unknown>; key: string }
+      envelope?: EnvelopeBinding
+      /** 入库时使用的文本；缺省时用被投影的那一段原文。 */
+      storeContent?: string
     }
   | { kind: 'verbatim'; strategy: ProjectionStrategy }
 
@@ -780,13 +1543,37 @@ function planPlainTextProjection(rawText: string, toolName: string): ProjectionP
  * 然后是 JSON envelope（只允许纯日志字段投影，混合证据一律原样），
  * 接着是测试失败集、grep、结构化、glob、shell 这些有明确形状的，
  * 最后落到「无法解析 → 原样」。
+ *
+ * `spilled` 与超长门槛决定多节/多读输出还有没有资格进新投影：
+ * 短于门槛、又没有 spill 的普通源码与契约读一律逐字保留。
  */
-function planProjection(text: string, toolName: string, navigation?: boolean, retrievalOnly?: boolean): ProjectionPlan {
+function planProjection(
+  text: string,
+  toolName: string,
+  navigation?: boolean,
+  retrievalOnly?: boolean,
+  spilled = false,
+  budgetMaxChars = Number.POSITIVE_INFINITY,
+): ProjectionPlan {
   if (TOOL_SUBAGENT.test(toolName)) return { kind: 'verbatim', strategy: 'verbatim-subagent-report' }
   const retrieval = TOOL_RETRIEVAL.test(toolName)
   // 宿主明确给出 false 才按新意图门控回退；核心旧调用不传该字段时保留原策略。
   if (retrieval && navigation === false) return { kind: 'verbatim', strategy: 'verbatim-intent' }
-  if (TOOL_SOURCE.test(toolName) && navigation !== true) return { kind: 'verbatim', strategy: 'verbatim-source-code' }
+  // 超长或被 spill 截断的输出才够格进新的多节/多读投影。
+  const oversized = text.length >= MULTI_OUTPUT_MIN_CHARS || spilled
+  if (TOOL_SOURCE.test(toolName) && navigation !== true) {
+    if (oversized && !isJsonDocument(text)) {
+      const multiSection = planMultiSectionProjection(text)
+      if (multiSection !== undefined) return multiSection
+    }
+    return { kind: 'verbatim', strategy: 'verbatim-source-code' }
+  }
+  // 超长的多节输出先于契约判定：分节输出里偶尔混着两行 `export interface`，
+  // 契约判定会把它整份留下，多节摘要就永远没机会跑。
+  if (oversized && !isJsonDocument(text)) {
+    const multiSection = planMultiSectionProjection(text)
+    if (multiSection !== undefined) return multiSection
+  }
   if (looksLikeContract(text)) return { kind: 'verbatim', strategy: 'verbatim-contract' }
   // PTC 把 read 包在 run_code 里：只接受严格单一行号文件，混合输出继续原样/原日志策略。
   if (toolName === 'run_code' && navigation === true) {
@@ -799,8 +1586,21 @@ function planProjection(text: string, toolName: string, navigation?: boolean, re
     if (outline !== undefined) return outline
   }
   // run_code 常返回 JSON envelope 或 JSON 序列化字符串：若只是轻量状态配一个超长日志字段
-  // （stdout/stderr/output/logs）或纯日志字符串，只替换日志部分；若含多份源码或被截断，则整份保持原样。
+  // （stdout/stderr/output/logs/text）或纯日志字符串，只替换日志部分；若含多份源码或被截断，则整份保持原样。
   if (isJsonDocument(text)) {
+    // PTC 的 grep/glob 结构化返回：换成一节预览，路径表按行分页存回去。
+    // 信封里还坐着别的重成员时这条路会被外壳闸门挡下，交给下面的复合摘要。
+    const structuredTool = extractStructuredToolEnvelope(text)
+    if (structuredTool !== undefined) {
+      return {
+        kind: 'preview',
+        strategy: structuredTool.plan.strategy,
+        sections: structuredTool.plan.sections,
+        envelope: structuredTool.binding,
+        storeContent: structuredTool.storeContent,
+      }
+    }
+    // 日志字段（stdout/stderr/text/...）：只替换那一个字段，其余元数据保留。
     const extracted = extractJsonEnvelopeLogField(text, toolName)
     if (extracted !== undefined) {
       return {
@@ -810,6 +1610,10 @@ function planProjection(text: string, toolName: string, navigation?: boolean, re
         ...(extracted.envelope === undefined ? {} : { envelope: extracted.envelope }),
       }
     }
+    // 复合 JSON 信封：一份结果里混着 grep/glob/read/log 多个成员，
+    // 逐个成员摘要 —— 只挑一个字段换成预览会把别的成员落在预算之外。
+    const composite = extractCompositeEnvelope(text, budgetMaxChars, oversized)
+    if (composite !== undefined) return composite
     return { kind: 'verbatim', strategy: 'verbatim-unparsed' }
   }
   return planPlainTextProjection(text, toolName)
@@ -822,7 +1626,7 @@ function footerFor(refId: string): string {
 
 /** 一次投影的最终判定：要么换成预览，要么给出保持原样的原因。 */
 type Decision =
-  | { preview: string; refId: string; strategy: ProjectionStrategy }
+  | { preview: string; refId: string; strategy: ProjectionStrategy; inputChars: number }
   | { reason: ProjectionStrategy }
 
 /**
@@ -837,10 +1641,20 @@ async function decide(args: {
   budget: PreviewBudget
   at: number
 }): Promise<Decision> {
-  const { text, input, budget } = args
+  const { input, budget } = args
+  // 正文可能已被 DSH 的输出上限截断：先试着读回全文，读不到就剥掉提示尾部。
+  const spill = await resolveSpillText(args.text)
+  const text = spill.text
   if (text.length <= budget.maxChars) return { reason: 'verbatim-small' }
 
-  const plan = planProjection(text, input.toolName, input.navigation, input.retrievalOnly)
+  const plan = planProjection(
+    text,
+    input.toolName,
+    input.navigation,
+    input.retrievalOnly,
+    spill.spilled,
+    budget.maxChars,
+  )
   if (plan.kind === 'verbatim') return { reason: plan.strategy }
 
   // 失败结果只允许「完整失败集」型预览，计数型摘要一律不换。
@@ -852,10 +1666,8 @@ async function decide(args: {
   const footerBudget = footerFor(`ref://${input.sessionId}/${'0'.repeat(64)}`).length
   const jsonEscaped = plan.envelope !== undefined
   // JSON envelope 投影时，除日志字段外的壳以及 header/footer 的转义换行（2 个 \\n 各多 1 字符）精确扣除。
-  const envelopeShellLength = plan.envelope === undefined
-    ? 0
-    : JSON.stringify({ ...plan.envelope.record, [plan.envelope.key]: '' }).length
-  const bodyBudget = budget.maxChars - header.length - footerBudget - envelopeShellLength - (jsonEscaped ? 4 : 2)
+  const envelopeShell = plan.envelope === undefined ? 0 : envelopeShellLength(plan.envelope)
+  const bodyBudget = budget.maxChars - header.length - footerBudget - envelopeShell - (jsonEscaped ? 4 : 2)
   if (bodyBudget <= 0) return { reason: 'verbatim-budget' }
   const body = fitSections(plan.sections, bodyBudget, jsonEscaped)
   if (body === undefined) return { reason: 'verbatim-budget' }
@@ -866,21 +1678,25 @@ async function decide(args: {
   const placeholderInner = `${header}\n${body}\n${placeholderFooter}`
   const placeholderPreview = plan.envelope === undefined
     ? placeholderInner
-    : JSON.stringify({ ...plan.envelope.record, [plan.envelope.key]: placeholderInner })
+    : rebuildEnvelope(plan.envelope, placeholderInner)
   if (placeholderPreview.length > budget.maxChars) return { reason: 'verbatim-budget' }
 
   let reference: StoredResultReference
   try {
-    reference = await store.put({ sessionId: input.sessionId, content: text, toolName: input.toolName, at: args.at })
+    // 入库的是**完整**的原文：spill 读回来的全文，或信封类的缩进 JSON。
+    reference = await store.put({
+      sessionId: input.sessionId,
+      content: plan.storeContent ?? text,
+      toolName: input.toolName,
+      at: args.at,
+    })
   } catch {
     return { reason: 'store-unavailable' }
   }
   const innerPreview = `${header}\n${body}\n${footerFor(reference.refId)}`
-  const preview = plan.envelope === undefined
-    ? innerPreview
-    : JSON.stringify({ ...plan.envelope.record, [plan.envelope.key]: innerPreview })
+  const preview = plan.envelope === undefined ? innerPreview : rebuildEnvelope(plan.envelope, innerPreview)
   if (preview.length > budget.maxChars) return { reason: 'verbatim-budget' }
-  return { preview, refId: reference.refId, strategy: plan.strategy }
+  return { preview, refId: reference.refId, strategy: plan.strategy, inputChars: text.length }
 }
 
 /** 块数组里文本字符数的合计。 */
@@ -909,14 +1725,19 @@ export async function projectToolResult(input: ProjectToolResultInput): Promise<
   }
 
   if (typeof input.content === 'string') {
-    const text = input.content
-    const decision = await decide({ text, input, budget, at })
+    const decision = await decide({ text: input.content, input, budget, at })
     if ('reason' in decision) {
+      // 没有投影：结果逐字交回，什么都没省下。
       return {
         ...base,
         content: input.content,
         changed: false,
-        metrics: { inputChars: text.length, outputChars: text.length, omittedChars: 0, strategy: decision.reason },
+        metrics: {
+          inputChars: input.content.length,
+          outputChars: input.content.length,
+          omittedChars: 0,
+          strategy: decision.reason,
+        },
       }
     }
     return {
@@ -926,9 +1747,11 @@ export async function projectToolResult(input: ProjectToolResultInput): Promise<
       refId: decision.refId,
       preview: decision.preview,
       metrics: {
-        inputChars: text.length,
+        // inputChars 是**真正被投影**的那段文本：spill 读回全文时它就是全文长度，
+        // 这样「省略了多少」才说得清。
+        inputChars: decision.inputChars,
         outputChars: decision.preview.length,
-        omittedChars: Math.max(0, text.length - decision.preview.length),
+        omittedChars: Math.max(0, decision.inputChars - decision.preview.length),
         strategy: decision.strategy,
       },
     }
@@ -972,9 +1795,9 @@ export async function projectToolResult(input: ProjectToolResultInput): Promise<
     refId: decision.refId,
     preview: decision.preview,
     metrics: {
-      inputChars: text.length,
+      inputChars: decision.inputChars,
       outputChars: decision.preview.length,
-      omittedChars: Math.max(0, text.length - decision.preview.length),
+      omittedChars: Math.max(0, decision.inputChars - decision.preview.length),
       strategy: decision.strategy,
     },
   }

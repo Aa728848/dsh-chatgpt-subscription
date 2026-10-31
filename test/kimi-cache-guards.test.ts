@@ -10,7 +10,7 @@
  * 两个守卫都只做结构探测，因此这里用假的服务对象代替真实的 harness 服务。
  */
 import { Context, Service } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   KIMI_CODE_PROVIDER,
   PTC_SDK_SECTION_NAME,
@@ -29,6 +29,15 @@ import {
   COMPACTION_INSTRUCTION,
   SHIPPED_INSTRUCTION_OPENING,
 } from '../src/host/compaction-prompt.ts'
+import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
+import {
+  buildRequest,
+  closeStream,
+  createStreamState,
+  getCacheStats,
+  getLastDriftCause,
+  resetCacheStats,
+} from '../src/host/kimi-code/mapper.ts'
 
 /** 一个假工具。 */
 interface FakeTool {
@@ -845,5 +854,63 @@ describe('瀑布事件的 next() 转交', () => {
     expect(calls).toBe(1)
     expect(result).toBe(ENTER)
     guard.dispose()
+  })
+})
+
+describe('Kimi Code 侧信道标题请求的缓存隔离', () => {
+  beforeEach(() => {
+    resetCacheStats()
+  })
+
+  /**
+   * harness 为「给会话起标题」发出的那个请求。
+   *
+   * 它走同一条线路、借同一个 sessionId，但它是另一场对话：系统提示不同，
+   * 而且根本不带工具。
+   *
+   * @param sessionId - 被起标题的那个会话。
+   * @returns 该请求的 options。
+   */
+  function titleRequest(sessionId: string): GenerateOptions {
+    return {
+      model: 'k3',
+      sessionId: sessionId as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages: []' }],
+        source: { kind: 'dsh-session-title-llm' },
+      }],
+    } as unknown as GenerateOptions
+  }
+
+  it('不会把用量记在被起标题的会话头上', () => {
+    // 先有会话自己的那一轮，让这个会话有属于它自己的数字。
+    const conversation = createStreamState('openai', 'sess-main')
+    conversation.sawUsage = true
+    conversation.inputTokens = 120
+    closeStream(conversation, 'account-1')
+    expect(getCacheStats('sess-main').requests).toBe(1)
+
+    // 标题请求用同一个 sessionId 上报自己的用量，但它是另一场对话。
+    const title = createStreamState('openai', 'sess-main', true)
+    title.sawUsage = true
+    title.inputTokens = 40
+    closeStream(title, 'account-1')
+    expect(getCacheStats('sess-main').requests).toBe(1)
+  })
+
+  it('不会改写被起标题会话的前缀漂移归因', () => {
+    const conversation = {
+      model: 'k3',
+      sessionId: 'sess-main' as never,
+      system: 'the conversation system prompt',
+      messages: [],
+    } as unknown as GenerateOptions
+    buildRequest(conversation, 'openai')
+    expect(getLastDriftCause('sess-main')).toBe('first-request')
+    // 标题请求带着另一套系统提示，若不隔离，下一轮会被说成「前缀被重建」。
+    buildRequest(titleRequest('sess-main'), 'openai')
+    expect(getLastDriftCause('sess-main')).toBe('first-request')
   })
 })

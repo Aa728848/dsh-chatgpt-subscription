@@ -1,14 +1,18 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
+  COLD_START_WARMUP_WAIT_MS,
   KIMI_CODE_RETRY_POLICY_CONFIG,
   KimiCodeAdapter,
   accountLimitCooldownMs,
   classifyKimiFailure,
+  resetColdStartSingleflightForTests,
   resolveDefaultReasoningEffort,
 } from '../src/host/kimi-code/adapter.ts'
+import { sessionCacheState } from '../src/host/kimi-code/session-cache-state.ts'
+import { resetSessionActivity, sessionLastActiveAt } from '../src/host/kimi-code/cache-hint.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/kimi-code/token-store.ts'
 import type { KimiCodeAccountPool } from '../src/host/kimi-code/account-pool.ts'
 import type { KimiCodeWire } from '../src/shared/kimi-code-contracts.ts'
@@ -955,4 +959,167 @@ describe('the body-fit loop gives up on the first turn it cannot improve', () =>
     await expect(drain(adapter.stream(options))).rejects.not.toThrow(/Older images are omitted first/)
     expect(fetchCalls).toEqual([])
   })
+})
+
+describe('the Kimi Code side-channel title request', () => {
+  beforeEach(() => {
+    resetColdStartSingleflightForTests()
+    resetSessionActivity()
+  })
+
+  afterEach(() => {
+    resetColdStartSingleflightForTests()
+  })
+
+  it('files nothing under the conversation it titles', async () => {
+    const { adapter } = await buildAdapter({
+      fetchFn: (async () => sseResponse([
+        { choices: [{ delta: { content: 'hello' } }] },
+        {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          // A near-total cache hit, so the conversation earns a warmup streak
+          // the title request would destroy if it filed its own usage.
+          usage: {
+            prompt_tokens: 1000,
+            completion_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 980 },
+          },
+        },
+      ])) as typeof fetch,
+    })
+    const sessionId = 'kc-side-channel'
+    await drain(adapter.stream(generateOptions('k3', {
+      sessionId: sessionId as never,
+      system: 'the conversation system prompt',
+    })))
+
+    const afterConversation = sessionCacheState.read(sessionId)
+    expect(afterConversation?.requests).toBe(1)
+    expect(afterConversation?.warmupConsecutiveHits).toBe(1)
+    const activeAfterConversation = sessionLastActiveAt(sessionId)
+    expect(activeAfterConversation).toBeTypeOf('number')
+
+    // The title request: the same session id, a different conversation.
+    await drain(adapter.stream(generateOptions('k3', {
+      sessionId: sessionId as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages: []' }],
+      }] as never,
+    })))
+
+    const afterTitle = sessionCacheState.read(sessionId)
+    // The title request must not have touched the session's numbers, its drift
+    // attribution, its warmup streak or its activity timestamp.
+    expect(afterTitle?.requests).toBe(1)
+    expect(afterTitle?.cachedTokens).toBe(afterConversation?.cachedTokens)
+    expect(afterTitle?.lastActiveAt).toBe(afterConversation?.lastActiveAt)
+    expect(afterTitle?.lastDrift).toBe(afterConversation?.lastDrift)
+    expect(afterTitle?.warmupConsecutiveHits).toBe(1)
+    expect(sessionLastActiveAt(sessionId)).toBe(activeAfterConversation)
+  })
+})
+
+describe('the Kimi Code cold-start singleflight', () => {
+  beforeEach(() => {
+    resetColdStartSingleflightForTests()
+  })
+
+  afterEach(() => {
+    resetColdStartSingleflightForTests()
+  })
+
+  /**
+   * Wait until the predicate holds.
+   *
+   * @param predicate - The condition to wait for.
+   * @param timeoutMs - How long to wait before giving up.
+   */
+  async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('timed out waiting for the condition')
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+
+  it('staggers a cold-start follower behind the leader, and sends the next request out with no wait', async () => {
+    const gates: Array<Promise<void>> = []
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      const index = calls
+      calls += 1
+      const gate = gates[index]
+      if (gate !== undefined) await gate
+      return sseResponse([
+        { choices: [{ delta: { content: 'hi' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { adapter } = await buildAdapter({ fetchFn })
+
+    const system = 'a shared conversation system prompt'
+    let releaseLeader: (() => void) | undefined
+    gates[0] = new Promise<void>((resolve) => { releaseLeader = resolve })
+
+    const leader = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-cold-a' as never, system })))
+    await waitUntil(() => calls === 1)
+
+    // The follower shares the prefix, so it waits for the leader instead of
+    // starting a second cold request of its own.
+    const follower = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-cold-b' as never, system })))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(calls).toBe(1)
+
+    // The leader reaches the response headers: the follower may go now.
+    releaseLeader!()
+    await Promise.all([leader, follower])
+    expect(calls).toBe(2)
+
+    // The prefix is warm. Neither of the next two requests waits behind a
+    // leader, because a warm prefix starts no leader at all.
+    let releaseWarm: (() => void) | undefined
+    gates[2] = new Promise<void>((resolve) => { releaseWarm = resolve })
+    const warm = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-cold-c' as never, system })))
+    await waitUntil(() => calls === 3)
+    const warmFollower = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-cold-d' as never, system })))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(calls).toBe(4)
+    releaseWarm!()
+    await Promise.all([warm, warmFollower])
+  })
+
+  it('gives the follower up after the wait budget when the leader never answers', async () => {
+    const gates: Array<Promise<void>> = []
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      const index = calls
+      calls += 1
+      const gate = gates[index]
+      if (gate !== undefined) await gate
+      return sseResponse([
+        { choices: [{ delta: { content: 'hi' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { adapter } = await buildAdapter({ fetchFn })
+
+    const system = 'a shared conversation system prompt'
+    let releaseLeader: (() => void) | undefined
+    gates[0] = new Promise<void>((resolve) => { releaseLeader = resolve })
+
+    const leader = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-timeout-a' as never, system })))
+    await waitUntil(() => calls === 1)
+
+    const started = Date.now()
+    const follower = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-timeout-b' as never, system })))
+    await waitUntil(() => calls === 2, COLD_START_WARMUP_WAIT_MS + 3_000)
+    // The follower waited out the budget and then sent its own request.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(COLD_START_WARMUP_WAIT_MS - 100)
+    expect(calls).toBe(2)
+
+    releaseLeader!()
+    await Promise.all([leader, follower])
+  }, 20_000)
 })

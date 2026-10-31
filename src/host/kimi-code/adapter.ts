@@ -42,7 +42,7 @@ import {
   type KimiCodePreferenceStore,
 } from './token-store.ts'
 import { kimiCodeModelDef } from './model-catalog.ts'
-import { markSessionActive } from './cache-hint.ts'
+import { CACHE_TTL_MS, markSessionActive } from './cache-hint.ts'
 import {
   buildModelOptions,
   clearCachedCatalog,
@@ -67,12 +67,14 @@ import {
   mapReasoningEffort,
   MAX_REQUEST_VIDEO_BYTES,
   offloadOldestRequestVideos,
+  prefixFingerprints,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
   getCacheStats,
   getLastDriftCause,
   getSessionDroppedImageKeys,
   getSessionImageBudgetStats,
+  isSideChannelTitleRequest,
   markPendingImageOffload,
   recordSessionImageBudget,
   recordThinkingCoercion,
@@ -876,6 +878,193 @@ export function toolUpdateMode(
   return 'in-history'
 }
 
+// ---------------------------------------------------------------------------
+// Cold-start singleflight
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a cold-start follower waits for the leader warming the same prefix.
+ *
+ * The leader only has to reach the response headers: past that the service is
+ * already processing the prefix, and a follower that waited out the whole
+ * budget would have lost more than the shared warm-up was worth.
+ */
+export const COLD_START_WARMUP_WAIT_MS = 2_500
+
+/** How many prefix groups are remembered as warm. */
+const MAX_WARM_PREFIX_GROUPS = 256
+
+/**
+ * When each prefix group was last warmed.
+ *
+ * An entry older than the cache lifetime is treated as cold, because the
+ * service's own entry is gone by then too. Bounded, so a long-lived process
+ * cannot accumulate one entry per distinct prefix forever.
+ */
+const warmPrefixTimestamps = new Map<string, number>()
+
+/**
+ * The request currently warming each prefix group.
+ *
+ * The promise is resolved when that leader reaches the response headers, which
+ * is what releases the followers waiting behind it.
+ */
+const inFlightColdLeaders = new Map<string, Promise<void>>()
+
+/**
+ * The resolver belonging to each in-flight leader.
+ *
+ * Kept beside the promise it settles, because a promise cannot be resolved
+ * from the outside.
+ */
+const coldLeaderReleases = new Map<string, () => void>()
+
+/**
+ * Forget every remembered prefix and release every waiting follower.
+ *
+ * Test seam only: these maps are process-wide, and a test that asserts on the
+ * cold-start gate must start from a clean slate.
+ */
+export function resetColdStartSingleflightForTests(): void {
+  for (const release of [...coldLeaderReleases.values()]) release()
+  warmPrefixTimestamps.clear()
+  inFlightColdLeaders.clear()
+  coldLeaderReleases.clear()
+}
+
+/**
+ * One request's place in the cold-start singleflight.
+ */
+interface ColdStartGate {
+  /** Whether this request is the one warming the prefix. */
+  readonly isLeader: boolean
+  /**
+   * Releases the followers waiting behind this leader.
+   *
+   * Idempotent: the leader releases on the response headers and again from the
+   * failure path, and the second call must be harmless.
+   */
+  release(): void
+  /** Records the prefix as warm, so later requests skip the gate entirely. */
+  markWarm(): void
+}
+
+/** The gate of a request that neither waits for nor leads a cold start. */
+const NO_COLD_START_GATE: ColdStartGate = {
+  isLeader: false,
+  release: () => undefined,
+  markWarm: () => undefined,
+}
+
+/**
+ * The group of requests that address the same cached prefix.
+ *
+ * The service derives its cache from the request content, so two requests with
+ * the same model, the same system prompt and the same tool list hit the same
+ * entry. The region is part of the key because each region is a separate
+ * service with a cache of its own.
+ *
+ * A request with no system prompt has no prefix worth warming, and gets no
+ * group at all.
+ *
+ * @param region - The region the request will be answered from.
+ * @param options - The request about to be sent.
+ * @returns The group key, or undefined when the request has no prefix.
+ */
+function coldStartGroupKey(region: string, options: NormalizedGenerateOptions): string | undefined {
+  const { systemPromptHash, toolsHash } = prefixFingerprints(options)
+  if (systemPromptHash === null) return undefined
+  return `${region}:${options.model}:${systemPromptHash}:${toolsHash ?? 'none'}`
+}
+
+/**
+ * Remember that a prefix group is warm.
+ *
+ * @param groupKey - The group that was just warmed.
+ */
+function rememberWarmPrefix(groupKey: string): void {
+  // Re-inserted so iteration order stays least-recently-written first.
+  warmPrefixTimestamps.delete(groupKey)
+  warmPrefixTimestamps.set(groupKey, Date.now())
+  while (warmPrefixTimestamps.size > MAX_WARM_PREFIX_GROUPS) {
+    const oldest = warmPrefixTimestamps.keys().next()
+    if (oldest.done === true) break
+    warmPrefixTimestamps.delete(oldest.value)
+  }
+}
+
+/**
+ * Wait for the leader of a prefix group, for the wait budget, or for an abort.
+ *
+ * The timer and the abort listener are removed whichever way the race ends, so
+ * a follower that proceeds leaves neither behind.
+ *
+ * @param leader - The promise the in-flight leader settles.
+ * @param signal - The caller's abort signal; an abort ends the wait.
+ */
+function raceColdStartLeader(leader: Promise<void>, signal: AbortSignal): Promise<void> {
+  const cleanups: Array<() => void> = []
+  const budget = new Promise<void>((resolve) => {
+    const timer = setTimeout(() => resolve(), COLD_START_WARMUP_WAIT_MS)
+    cleanups.push(() => clearTimeout(timer))
+  })
+  const aborted = new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const onAbort = (): void => resolve()
+    signal.addEventListener('abort', onAbort, { once: true })
+    cleanups.push(() => signal.removeEventListener('abort', onAbort))
+  })
+  return Promise.race([leader, budget, aborted]).finally(() => {
+    for (const cleanup of cleanups) cleanup()
+  })
+}
+
+/**
+ * Join the cold-start singleflight for one prefix group.
+ *
+ * A warm group returns at once. A cold group that already has a leader waits
+ * for that leader — but never longer than {@link COLD_START_WARMUP_WAIT_MS}.
+ * A cold group with no leader becomes the leader itself.
+ *
+ * @param groupKey - The prefix group this request belongs to.
+ * @param signal - The caller's abort signal; an abort ends the wait.
+ * @returns The gate this request holds.
+ */
+async function acquireColdStartWarmup(
+  groupKey: string,
+  signal: AbortSignal,
+): Promise<ColdStartGate> {
+  const warmedAt = warmPrefixTimestamps.get(groupKey)
+  if (warmedAt !== undefined && Date.now() - warmedAt < CACHE_TTL_MS) {
+    // Already warm: no wait at all.
+    return NO_COLD_START_GATE
+  }
+  const leader = inFlightColdLeaders.get(groupKey)
+  if (leader !== undefined) {
+    await raceColdStartLeader(leader, signal)
+    return NO_COLD_START_GATE
+  }
+  let resolveLeader!: () => void
+  const promise = new Promise<void>((resolve) => { resolveLeader = resolve })
+  inFlightColdLeaders.set(groupKey, promise)
+  const release = (): void => {
+    resolveLeader()
+    // A later leader for the same group must not be released by this one.
+    if (coldLeaderReleases.get(groupKey) !== release) return
+    coldLeaderReleases.delete(groupKey)
+    inFlightColdLeaders.delete(groupKey)
+  }
+  coldLeaderReleases.set(groupKey, release)
+  return {
+    isLeader: true,
+    release,
+    markWarm: () => rememberWarmPrefix(groupKey),
+  }
+}
+
 /** Sessions already told that their prefix broke, so the log stays readable. */
 const driftWarned = new Set<string>()
 
@@ -1251,6 +1440,12 @@ export class KimiCodeAdapter extends LlmAdapter {
     // route did — reported every scaled screenshot as several megabytes and
     // dropped images that were about to fit in ~256 KiB each.
     const normalized = normalizeGenerateOptions(options)
+    // The side-channel title request runs on this route, under this session's
+    // identity, and is a DIFFERENT conversation: its prompt, its usage and its
+    // prefix have nothing to do with the session's. Everything that files state
+    // under the session has to know about it, or the title request would be
+    // read as the session's own turn.
+    const sideChannel = isSideChannelTitleRequest(normalized)
     // The route's own ceiling, not the shared one: the wire version this request
     // carries has to be the same 2000 px long edge `imageRequestTarget()` reports
     // to screenshot callers, or the declaration and the bytes disagree.
@@ -1578,7 +1773,46 @@ export class KimiCodeAdapter extends LlmAdapter {
         }
       }
 
-      response = await post(body)
+      // THE COLD-START GATE.
+      //
+      // A prefix nobody has requested yet is COLD on the service, and every
+      // request that shares it would miss. Two such requests that arrive
+      // together miss for the same reason, so one of them goes first and the
+      // other waits for the service to start answering: the wait is what turns
+      // two misses into one miss and one hit.
+      //
+      // The group is the PREFIX, not the session: the cache belongs to the
+      // content, so two conversations with the same system prompt and the same
+      // tools address the same entry.
+      //
+      // A side-channel title request is excluded: it has no prefix of its own
+      // worth warming, and it must not delay the conversation it titles.
+      const coldGroupKey = sideChannel ? undefined : coldStartGroupKey(region, requestOptions)
+      const coldGate = coldGroupKey === undefined
+        ? undefined
+        : await acquireColdStartWarmup(coldGroupKey, signal)
+      let coldGateSettled = false
+      const settleColdGate = (warm: boolean): void => {
+        if (coldGateSettled) return
+        coldGateSettled = true
+        coldGate?.release()
+        if (warm) coldGate?.markWarm()
+      }
+      // The response headers are the hand-off point: the service is already
+      // processing the prefix, so the followers may start. A 2xx answer also
+      // means the prefix is warm from now on, and a failure releases the
+      // followers instead of leaving them to wait out the whole budget.
+      const attemptResponse = await post(body).then(
+        (value) => {
+          settleColdGate(value.ok)
+          return value
+        },
+        (error: unknown) => {
+          settleColdGate(false)
+          throw error
+        },
+      )
+      response = attemptResponse
       let detail = response.ok ? '' : (await response.text().catch(() => '')).slice(0, 2_000)
 
       // A CITED FILE THE STORE NO LONGER HOLDS.
@@ -1690,7 +1924,7 @@ export class KimiCodeAdapter extends LlmAdapter {
         newlyDroppedCount: stickyOffload.newlyDroppedKeys.length + bodyFitDroppedKeys.length,
         requestImageBytes,
         droppedImages: stickyOffload.droppedCount + bodyFitDroppedKeys.length,
-      })
+      }, requestOptions)
     }
 
     if (response.body === null) throw new LlmError('Kimi Code returned an empty response body', 'PROVIDER_ERROR')
@@ -1700,14 +1934,16 @@ export class KimiCodeAdapter extends LlmAdapter {
     // The session travels with the turn so usage is filed under the right
     // conversation when the stream closes; the account is passed separately
     // below, once rotation has settled on one.
-    const state = createStreamState(wire, requestOptions.sessionId)
+    const state = createStreamState(wire, requestOptions.sessionId, sideChannel)
     // The per-tier split of the cache write exists ONLY in the response headers
     // (the body states the total), so it is read here — the one place the
     // Response is in hand — and filed with the rest of the usage at close time.
     applyCacheWriteTiers(state, response.headers)
     // Recorded after the turn is built and sent, so the timestamp answers when
-    // this conversation last ran — the input the cache-expiry hint needs.
-    markSessionActive(requestOptions.sessionId)
+    // this conversation last ran — the input the cache-expiry hint needs. A
+    // side-channel title request is not this conversation, so it must not
+    // refresh the session's timestamp.
+    if (!sideChannel) markSessionActive(requestOptions.sessionId)
     let buffer = ''
     /**
      * Set the moment ANY chunk reaches the caller, and never cleared.
@@ -1788,7 +2024,11 @@ export class KimiCodeAdapter extends LlmAdapter {
       // Filed before the reader is released: the record is what lets a status
       // card still say "this conversation sat idle past the cache lifetime"
       // after the process that ran it is gone.
-      if (state.sawUsage) noteSessionCacheState(requestOptions.sessionId ?? state.sessionId, state)
+      // A side-channel title request files nothing under the session: it is a
+      // different conversation that merely borrowed the session's identity.
+      if (state.sawUsage && !sideChannel) {
+        noteSessionCacheState(requestOptions.sessionId ?? state.sessionId, state)
+      }
       void reader.cancel().catch(() => undefined)
     }
   }

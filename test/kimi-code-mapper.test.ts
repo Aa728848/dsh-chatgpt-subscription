@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import {
   buildAnthropicRequest,
@@ -6,6 +6,7 @@ import {
   clampToolCallId,
   closeStream,
   createStreamState,
+  isSideChannelTitleRequest,
   mapReasoningEffort,
   processAnthropicStreamLine,
   normalizeKimiToolSchema,
@@ -13,6 +14,7 @@ import {
   promptCacheKey,
   buildRequest,
   getLastDriftCause,
+  resetCacheStats,
   thinkingBudgetFor,
 } from '../src/host/kimi-code/mapper.ts'
 
@@ -442,5 +444,107 @@ describe('prefix stability tracking', () => {
 
   it('reports no cause for a session that has not made a request', () => {
     expect(getLastDriftCause('sess-never-seen')).toBeUndefined()
+  })
+})
+
+describe('the side-channel title request', () => {
+  beforeEach(() => {
+    resetCacheStats()
+  })
+
+  /**
+   * The request the harness sends to ask a model for a session title.
+   *
+   * It runs on this route under the conversation's session id, but it is a
+   * DIFFERENT conversation: a different system prompt, and no tools at all.
+   *
+   * @param sessionId - The conversation whose title is being asked for.
+   * @returns The options of that request.
+   */
+  function titleRequest(sessionId: string): GenerateOptions {
+    return options({
+      sessionId: sessionId as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages: [{"role":"user","content":"hi"}]' }],
+        source: { kind: 'dsh-session-title-llm' },
+      } as Message],
+    } as never)
+  }
+
+  it('recognises the request by the provenance the harness stamps on it', () => {
+    expect(isSideChannelTitleRequest(titleRequest('sess-title'))).toBe(true)
+  })
+
+  it('recognises the request by the prompt it opens with, even without the stamp', () => {
+    const unstamped = options({
+      sessionId: 'sess-title' as never,
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages: []' }],
+      } as Message],
+    } as never)
+    expect(isSideChannelTitleRequest(unstamped)).toBe(true)
+  })
+
+  it('recognises the request by its tool-less title system prompt', () => {
+    const untitled = options({
+      sessionId: 'sess-title' as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'summarize' }] } as Message],
+    } as never)
+    expect(isSideChannelTitleRequest(untitled)).toBe(true)
+  })
+
+  it('does not mistake the conversation itself for the title request', () => {
+    expect(isSideChannelTitleRequest(options({
+      sessionId: 'sess-main' as never,
+      system: 'You are helpful.',
+    } as never))).toBe(false)
+    // The same title system prompt WITH tools is the conversation, not the title
+    // request: the real conversation always carries the session's tool list.
+    expect(isSideChannelTitleRequest(options({
+      sessionId: 'sess-main' as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      tools: [{ name: 'read', description: 'r', parameters: { type: 'object' } }],
+    } as never))).toBe(false)
+  })
+
+  it('sends no cache key, so it can never collide with the session it titles', () => {
+    expect(promptCacheKey(titleRequest('sess-title'))).toBeUndefined()
+    expect(promptCacheKey(options({ sessionId: 'sess-main' as never } as never))).toBe('dsh-sess-main')
+  })
+
+  it('keeps prompt_cache_key out of the body it builds', () => {
+    expect(buildRequest(titleRequest('sess-title'), 'openai').prompt_cache_key).toBeUndefined()
+    expect(buildRequest(options({ sessionId: 'sess-main' as never } as never), 'openai').prompt_cache_key)
+      .toBe('dsh-sess-main')
+  })
+
+  it('never rewrites the drift attribution of the session it titles', () => {
+    const conversation = options({
+      sessionId: 'sess-main' as never,
+      system: 'the conversation system prompt',
+    } as never)
+    buildRequest(conversation, 'openai')
+    expect(getLastDriftCause('sess-main')).toBe('first-request')
+    // The title request carries a different system prompt and no tools. Left
+    // alone it would be read as a broken prefix of the conversation.
+    buildRequest(titleRequest('sess-main'), 'openai')
+    expect(getLastDriftCause('sess-main')).toBe('first-request')
+  })
+
+  it('never rewrites the prefix snapshot of the session it titles', () => {
+    const conversation = options({
+      sessionId: 'sess-main' as never,
+      system: 'the conversation system prompt',
+    } as never)
+    buildRequest(conversation, 'openai')
+    buildRequest(titleRequest('sess-main'), 'openai')
+    // The next real turn still matches the snapshot the conversation left, so
+    // it is reported as stable rather than as a broken prefix.
+    buildRequest(conversation, 'openai')
+    expect(getLastDriftCause('sess-main')).toBe('stable')
   })
 })

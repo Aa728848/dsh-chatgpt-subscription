@@ -54,6 +54,31 @@ afterEach(async () => {
 
 /** 预热期预算（1200 字符）。 */
 const WARMUP: PreviewBudget = { maxChars: 1200, warmup: true, consecutiveHits: 0, hitRatio: 0 }
+/** 稳态预算（8000 字符）：真实会话里构建日志走的就是这一档。 */
+const STEADY: PreviewBudget = { maxChars: 8000, warmup: false, consecutiveHits: 2, hitRatio: 0.99 }
+
+/**
+ * 把存储里的原文按页读完并拼回来。
+ * @param store - 引用存储。
+ * @param sessionId - 会话 id。
+ * @param refId - 引用。
+ * @returns 拼起来的完整原文。
+ */
+async function readAllPages(
+  store: FileResultReferenceStore,
+  sessionId: string,
+  refId: string,
+): Promise<string> {
+  let offset = 0
+  let collected = ''
+  for (;;) {
+    const page = await store.page({ sessionId, refId, offset, limit: 512, maxBytes: 65_536 })
+    collected += page.content
+    if (page.complete) return collected
+    expect(page.nextOffset).not.toBeNull()
+    offset = page.nextOffset!
+  }
+}
 /** 收紧到 700 字符的预算：够放下一份小失败集，但放不下长清单。 */
 const TIGHT: PreviewBudget = { maxChars: 700, warmup: true, consecutiveHits: 0, hitRatio: 0 }
 /** 极紧预算：任何完整失败集都装不下。 */
@@ -593,5 +618,544 @@ describe('projectToolResult 预算与保守边界', () => {
     const original = content
     await projectToolResult({ toolName: 'bash', sessionId: 's', content, budget: TIGHT, store })
     expect(content).toBe(original)
+  })
+})
+
+/** 一份 50KB 级的构建日志：足够触发 DSH 的输出上限，但行数仍少于分页上限。 */
+function hugeBuildLog(): string {
+  const lines: string[] = []
+  for (let index = 0; index < 420; index += 1) {
+    lines.push(`[build] compiling module ${index} of the very large package graph with many transitive dependencies and type declarations`)
+    if (index === 4) lines.push(' FAIL  test/broken.test.ts > suite > case')
+  }
+  lines.push(' Test Files  1 failed | 420 passed (421)')
+  lines.push('      Tests  1 failed | 420 passed (421)')
+  return lines.join('\n')
+}
+
+/** DSH 的 spill 提示尾部。 */
+function spillNotice(filePath: string, omitted: number): string {
+  return `\n\n(Omitted ${omitted} bytes. Full formatted result stored at: ${filePath}. Use read with offset/limit, or grep this path to search within it.)`
+}
+
+/** 一份规范 grep 命中表。 */
+function canonicalMatches(): Array<{ path: string; lineNumber: number; line: string }> {
+  const matches: Array<{ path: string; lineNumber: number; line: string }> = []
+  for (let file = 0; file < 12; file += 1) {
+    for (let hit = 0; hit < 5; hit += 1) {
+      matches.push({
+        path: `src/host/mod-${file}.ts`,
+        lineNumber: hit + 1,
+        line: `export function hit${hit}() { return ${hit} }`,
+      })
+    }
+  }
+  return matches
+}
+
+describe('projectToolResult 的 JSON 信封扩展', () => {
+  it('job_output 的 { text, job } 信封：只替换 text，job 元数据原样保留', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({
+      text: failingTestLog(3),
+      job: { id: 'job-1', kind: 'final-output', status: 'completed' },
+    })
+    const result = await projectToolResult({
+      toolName: 'job_output',
+      sessionId: 'job-1',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('test-failure')
+    const parsed = JSON.parse(result.preview!) as { text: string; job: Record<string, unknown> }
+    expect(parsed.job).toEqual({ id: 'job-1', kind: 'final-output', status: 'completed' })
+    expect(parsed.text).toContain('failures: 3 (complete set)')
+    expect(parsed.text).toContain(result.refId!)
+  })
+
+  it('1 层嵌套的日志信封（{ testOutput: { text, job } }）：内层 text 被替换，外层与内层元数据都保留', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({
+      testOutput: {
+        text: failingTestLog(2),
+        job: { id: 'job-2', status: 'completed' },
+      },
+      kind: 'run',
+    })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'nested-1',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('test-failure')
+    const parsed = JSON.parse(result.preview!) as {
+      kind: string
+      testOutput: { text: string; job: Record<string, unknown> }
+    }
+    expect(parsed.kind).toBe('run')
+    expect(parsed.testOutput.job).toEqual({ id: 'job-2', status: 'completed' })
+    expect(parsed.testOutput.text).toContain('failures: 2 (complete set)')
+    expect(parsed.testOutput.text).toContain(result.refId!)
+  })
+
+  it('PTC 的 grep 信封（{ matches: [...] }）投影成 grep-results，并按行分页存回原文', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({ matches: canonicalMatches() })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'grep-1',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('grep-results')
+    const parsed = JSON.parse(result.preview!) as { matches: string }
+    expect(parsed.matches).toContain('matches: 60 across 12 files')
+    expect(parsed.matches).toContain('src/host/mod-0.ts: 5')
+    // 存回去的是缩进 JSON：每行一个字段，store.page 翻页干净。
+    const page = await store.page({ sessionId: 'grep-1', refId: result.refId!, limit: 512, maxBytes: 65_536 })
+    expect(page.complete).toBe(true)
+    expect(page.content).toContain('"lineNumber": 1')
+    expect(page.content).toContain('"path": "src/host/mod-0.ts"')
+  })
+
+  it('PTC 的 grep 信封 1 层嵌套（{ batch: { matches } }）同样被投影', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({ batch: { matches: canonicalMatches() }, note: 'grep done' })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'grep-2',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('grep-results')
+    const parsed = JSON.parse(result.preview!) as { batch: { matches: string }; note: string }
+    expect(parsed.note).toBe('grep done')
+    expect(parsed.batch.matches).toContain('matches: 60 across 12 files')
+  })
+
+  it('PTC 的 glob 信封（{ root, paths }）投影成 glob-results', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const paths = Array.from({ length: 200 }, (_, index) => `src/host/deep/mod-${index}.ts`)
+    const raw = JSON.stringify({ root: 'src/host', paths })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'glob-1',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('glob-results')
+    const parsed = JSON.parse(result.preview!) as { root: string; paths: string }
+    expect(parsed.root).toBe('src/host')
+    expect(parsed.paths).toContain('paths: 200')
+    expect(parsed.paths).toContain('.ts: 200')
+  })
+})
+
+describe('projectToolResult 的 spill 恢复', () => {
+  it('DSH 的 spill 提示：读回临时文件全文，按全文投影，并把全文入库', async () => {
+    const spillPath = path.join(await makeRoot(), 'da010ab69f2b-run_code.txt')
+    const full = hugeBuildLog()
+    await fs.writeFile(spillPath, full, 'utf8')
+    const visible = full.slice(0, 2000)
+    const content = visible + spillNotice(spillPath, full.length - visible.length)
+
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'spill-1',
+      content,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('test-failure')
+    // 度量按全文算：省略的是没进预览的那部分**全文**。
+    expect(result.metrics.inputChars).toBe(full.length)
+    // 入库的是全文，翻页能读回未被截断的输出。
+    const page = await store.page({ sessionId: 'spill-1', refId: result.refId!, limit: 512, maxBytes: 65_536 })
+    expect(page.complete).toBe(true)
+    expect(page.content).toBe(full)
+  })
+
+  it('spill 读回的多读 JSON 信封：即使全文不足 20_000 字符也投影成 file-outline', async () => {
+    // 「超长**或**被 spill 截断」里的第二种情形：全文不到 20_000 字符，
+    // 但它是被截断过的，模型看不到后半段，所以值得换成摘要。
+    const spillPath = path.join(await makeRoot(), 'multi-read-run_code.txt')
+    const lines = Array.from(
+      { length: 120 },
+      (_, index) => ({ number: index + 1, text: `const value${index} = readSomething(${index})` }),
+    )
+    const full = JSON.stringify({
+      first: { path: 'src/a.ts', offset: 1, lines },
+      second: { path: 'src/b.ts', offset: 1, lines: lines.slice(0, 60) },
+    })
+    expect(full.length).toBeLessThan(20_000)
+    await fs.writeFile(spillPath, full, 'utf8')
+    const visible = full.slice(0, 400)
+    const content = visible + spillNotice(spillPath, full.length - visible.length)
+
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'spill-3',
+      content,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('file-outline')
+    expect(result.preview).toContain('reads: 2 (complete set)')
+    expect(result.preview).toContain('first: src/a.ts lines 1-120 (120)')
+    // 入库的是读回来的**完整** JSON，不是被截断的那一段。
+    // 复合信封按设计存缩进 JSON（每行一个字段，翻页干净），所以翻页读完再按语义比较。
+    const collected = await readAllPages(store, 'spill-3', result.refId!)
+    expect(JSON.parse(collected)).toEqual(JSON.parse(full))
+  })
+
+  it('spill 文件读不到时：剥掉提示尾部，按可得的正文投影并入库', async () => {
+    const missing = path.join(await makeRoot(), 'does-not-exist.txt')
+    const body = hugeBuildLog()
+    const visible = body.slice(0, 2000)
+    const content = visible + spillNotice(missing, body.length - visible.length)
+
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'spill-2',
+      content,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('test-failure')
+    expect(result.metrics.inputChars).toBe(visible.length)
+    const page = await store.page({ sessionId: 'spill-2', refId: result.refId!, limit: 512, maxBytes: 65_536 })
+    expect(page.content).toBe(visible)
+    expect(page.content).not.toContain('Omitted')
+  })
+})
+
+describe('projectToolResult 的复合 JSON 信封', () => {
+  it('grep 与 read 混在一份信封里：逐个成员摘要，不再退回 verbatim-budget', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const lines = Array.from(
+      { length: 400 },
+      (_, index) => ({ number: index + 1, text: `const value${index} = readSomething(${index})` }),
+    )
+    const raw = JSON.stringify({
+      batch: { matches: canonicalMatches() },
+      note: { path: 'src/a.ts', offset: 1, lines },
+    })
+    expect(raw.length).toBeGreaterThanOrEqual(20_000)
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'composite-1',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('file-outline')
+    expect(result.preview).toContain('results: 2 (complete set)')
+    expect(result.preview).toContain('batch: grep matches=60 across 12 files')
+    expect(result.preview).toContain('note: src/a.ts lines 1-400 (400)')
+    expect(result.preview).toContain('const value0 = readSomething(0)')
+    expect(result.preview!.length).toBeLessThanOrEqual(STEADY.maxChars)
+  })
+
+  it('单键 grep 信封旁边压着一个超重字段：外壳闸门挡住单键路，改走复合摘要', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({ matches: canonicalMatches(), payload: 'x'.repeat(25_000) })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'composite-2',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('file-outline')
+    expect(result.preview).toContain('results: 1 (complete set)')
+    expect(result.preview).toContain('grep matches=60 across 12 files')
+    expect(result.preview!.length).toBeLessThanOrEqual(STEADY.maxChars)
+  })
+})
+
+describe('projectToolResult 的多节输出不再被契约判定挡住', () => {
+  /** 一份超长的多节输出：分节头 + 大量正文 + 两行 interface 声明。 */
+  function oversizedSectionsWithContract(): string {
+    const rules = Array.from(
+      { length: 600 },
+      (_, index) => `${index + 1}: rule ${index} about how the package must be laid out`,
+    )
+    const extension = Array.from(
+      { length: 600 },
+      (_, index) => `${index + 1}: extension detail line ${index} with quite a lot of text to make it long`,
+    )
+    return [
+      'PACKAGE RULES',
+      ...rules,
+      '',
+      'EXTENSION REST',
+      '300: export interface First { id: string }',
+      '301: export interface Second { name: string }',
+      ...extension,
+    ].join('\n')
+  }
+
+  it('超长的多节输出先于契约判定：分节摘要生效，不再是 verbatim-contract', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = oversizedSectionsWithContract()
+    expect(raw.length).toBeGreaterThanOrEqual(20_000)
+    // 两行 interface 声明足以触发契约判定：契约必须让位给多节摘要。
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'sections-1',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('structured-rows')
+    expect(result.metrics.strategy).not.toBe('verbatim-contract')
+    expect(result.preview).toContain('sections: 2 (complete set)')
+    expect(result.preview).toContain('PACKAGE RULES: 600 lines')
+    expect(result.preview).toContain('EXTENSION REST:')
+  })
+})
+
+describe('projectToolResult 的 job_output 退出码在元数据里', () => {
+  /** 一份中文构建日志：正文里没有任何英文错误词，也不会被当成 shell 输出。 */
+  function chineseBuildLog(): string {
+    const lines: string[] = []
+    for (let index = 0; index < 60; index += 1) {
+      lines.push(`  Shared -> C:/repo/build/out${index}.dll`)
+      lines.push('  72 个警告')
+      lines.push('  0 个错误')
+      lines.push('  已用时间 12 秒')
+    }
+    return lines.join('\n')
+  }
+
+  it('退出码在 job.detail 里：按 shell 输出投影，并把退出码补进预览', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({
+      text: chineseBuildLog(),
+      job: { id: 'win-bash-1', status: 'completed', detail: 'exit code: 1' },
+    })
+    const result = await projectToolResult({
+      toolName: 'job_output',
+      sessionId: 'job-shell-1',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('shell-output')
+    const parsed = JSON.parse(result.preview!) as { text: string; job: Record<string, unknown> }
+    expect(parsed.text).toContain('exit code: 1')
+    expect(parsed.text).toContain('status: completed')
+    expect(parsed.job).toEqual({ id: 'win-bash-1', status: 'completed', detail: 'exit code: 1' })
+  })
+
+  it('1 层嵌套的 job_output 信封同样按 shell 输出投影', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({
+      testOutput: {
+        text: chineseBuildLog(),
+        job: { id: 'win-bash-2', status: 'completed', detail: 'exit code: 1' },
+      },
+    })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'job-shell-2',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('shell-output')
+    const parsed = JSON.parse(result.preview!) as { testOutput: { text: string; job: Record<string, unknown> } }
+    expect(parsed.testOutput.text).toContain('exit code: 1')
+    expect(parsed.testOutput.job).toEqual({ id: 'win-bash-2', status: 'completed', detail: 'exit code: 1' })
+  })
+})
+
+describe('projectToolResult 的错误集不再撑爆预算', () => {
+  /** 一份有 50 条错误行的构建日志：错误集本身就装不进稳态预算。 */
+  function manyErrorBuildLog(): string {
+    const lines = ['$ npm run build']
+    for (let index = 0; index < 50; index += 1) {
+      lines.push(
+        `src/host/mod-${index}.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number' in property field${index} of the very long descriptive type name used in this particular declaration`,
+      )
+    }
+    lines.push('[exit code: 2]')
+    return lines.join('\n')
+  }
+
+  it('50 条错误行：错误集被截断并写明余量，预览不再退回 verbatim-budget', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const content = manyErrorBuildLog()
+    const result = await projectToolResult({
+      toolName: 'win_bash',
+      sessionId: 'shell-1',
+      content,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('shell-output')
+    expect(result.metrics.strategy).not.toBe('verbatim-budget')
+    expect(result.preview).toContain('exit code: 2')
+    expect(result.preview).toContain('errors: 50 (first 25 shown; full set via ref)')
+    expect(result.preview).toContain('more error lines (full list via ref)')
+    expect(result.preview!.length).toBeLessThanOrEqual(STEADY.maxChars)
+  })
+
+  it('错误行不多时仍然是完整错误集', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const lines = ['$ npm run build']
+    // 大量普通输出把日志顶过稳态预算，错误行仍然只有 4 条。
+    for (let index = 0; index < 150; index += 1) {
+      lines.push(`[build] compiled module ${index} of the package graph with many transitive dependencies`)
+    }
+    for (let index = 0; index < 4; index += 1) {
+      lines.push(`src/host/mod-${index}.ts(12,3): error TS2322: Type A is not assignable to type B`)
+    }
+    lines.push('[exit code: 2]')
+    const result = await projectToolResult({
+      toolName: 'win_bash',
+      sessionId: 'shell-2',
+      content: lines.join('\n'),
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('shell-output')
+    expect(result.preview).toContain('errors: 4 (complete set)')
+    for (let index = 0; index < 4; index += 1) {
+      expect(result.preview).toContain(`src/host/mod-${index}.ts(12,3): error TS2322`)
+    }
+    expect(result.preview).not.toContain('more error lines')
+  })
+})
+
+describe('projectToolResult 的超长多读/多节输出', () => {
+  /** 一份多读 JSON 信封：顶层两个键，各是一份 { path, offset, lines }。 */
+  function multiReadEnvelope(): string {
+    const lines = Array.from(
+      { length: 400 },
+      (_, index) => ({ number: index + 1, text: `const value${index} = readSomething(${index})` }),
+    )
+    return JSON.stringify({
+      first: { path: 'src/a.ts', offset: 1, lines },
+      second: { path: 'src/b.ts', offset: 1, lines: lines.slice(0, 200) },
+    })
+  }
+
+  it('超过 20_000 字符的多读 JSON 信封投影成 file-outline 摘要', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = multiReadEnvelope()
+    expect(raw.length).toBeGreaterThanOrEqual(20_000)
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'multi-1',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('file-outline')
+    expect(result.preview).toContain('reads: 2 (complete set)')
+    expect(result.preview).toContain('first: src/a.ts lines 1-400 (400)')
+    expect(result.preview).toContain('second: src/b.ts lines 1-200 (200)')
+    expect(result.preview).toContain('const value0 = readSomething(0)')
+  })
+
+  it('不到 20_000 字符的读取结果逐字保留：源码原样、契约原样', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const source = Array.from({ length: 80 }, (_, index) => `${index + 1}: const value${index} = readSomething(${index})`).join('\n')
+    expect(source.length).toBeLessThan(20_000)
+    const readResult = await projectToolResult({
+      toolName: 'read',
+      sessionId: 'small-1',
+      content: source,
+      budget: WARMUP,
+      store,
+    })
+    expect(readResult.changed).toBe(false)
+    expect(readResult.metrics.strategy).toBe('verbatim-source-code')
+    expect(readResult.content).toBe(source)
+
+    const contract = [
+      'export interface First { id: string }',
+      'export type Second = First',
+      ...Array.from({ length: 80 }, (_, index) => `// filler line ${index} padding padding padding`),
+    ].join('\n')
+    expect(contract.length).toBeLessThan(20_000)
+    const contractResult = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'small-2',
+      content: contract,
+      budget: WARMUP,
+      store,
+    })
+    expect(contractResult.changed).toBe(false)
+    expect(contractResult.metrics.strategy).toBe('verbatim-contract')
+    expect(contractResult.content).toBe(contract)
+  })
+
+  it('不到 20_000 字符的读取 JSON 信封也逐字保留', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const lines = Array.from(
+      { length: 20 },
+      (_, index) => ({ number: index + 1, text: `const value${index} = readSomething(${index})` }),
+    )
+    const raw = JSON.stringify({ path: 'src/a.ts', offset: 1, lines })
+    expect(raw.length).toBeLessThan(20_000)
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'small-3',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(false)
+    expect(result.content).toBe(raw)
+  })
+
+  it('超长的多节输出（PACKAGE FILES / PACKAGE RULES）投影成分节摘要', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const files = Array.from({ length: 500 }, (_, index) => `src/host/deep/module-${index}.ts`)
+    const rules = Array.from(
+      { length: 500 },
+      (_, index) => `${index + 1}: rule ${index} about how the package must be laid out`,
+    )
+    const raw = ['PACKAGE FILES', ...files, '', 'PACKAGE RULES', ...rules].join('\n')
+    expect(raw.length).toBeGreaterThanOrEqual(20_000)
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'multi-2',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('structured-rows')
+    expect(result.preview).toContain('sections: 2 (complete set)')
+    expect(result.preview).toContain('PACKAGE FILES: 500 lines')
+    expect(result.preview).toContain('PACKAGE RULES: 500 lines (1-500)')
   })
 })

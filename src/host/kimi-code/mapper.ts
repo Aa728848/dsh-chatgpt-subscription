@@ -1594,6 +1594,131 @@ export function buildOpenAIRequest(
   return body
 }
 
+// ---------------------------------------------------------------------------
+// Side-channel isolation
+// ---------------------------------------------------------------------------
+
+/**
+ * Provenance kind the harness stamps on the side-channel title request.
+ *
+ * The title request runs on this route and borrows the conversation's session
+ * id, but it is a DIFFERENT conversation: its system prompt and its (empty)
+ * tool list have nothing to do with the prefix the session cached. Naming the
+ * kind is what lets the two be told apart without reading prompt text.
+ */
+export const SESSION_TITLE_SOURCE_KIND = 'dsh-session-title-llm'
+
+/**
+ * How the side-channel title request opens its prompt.
+ *
+ * Matching the opening identifies the request even when the provenance stamp
+ * is absent - a harness generation that does not stamp it still asks for the
+ * title in exactly this wording.
+ */
+const TITLE_REQUEST_PROMPT_PREFIX = 'Generate the session title from this JSON array of human messages:'
+
+/**
+ * How the side-channel title request opens its system prompt.
+ *
+ * Only a request that carries NO tools can be the title request: the real
+ * conversation always carries the session's tool set, so the (absent) tool
+ * list is what separates the two shapes.
+ */
+const TITLE_REQUEST_SYSTEM_PREFIX = 'Create a concise title for an AI coding-assistant session'
+
+/**
+ * The first non-empty text a message body contributes.
+ *
+ * The same ordering {@link textOf} folds a body in, but it stops at the first
+ * contribution instead of joining all of them: a caller that only needs to know
+ * where the text STARTS must not pay for the whole conversation. The join in
+ * {@link textOf} puts the blocks in order and the empty ones contribute
+ * nothing, so the first non-empty contribution is where the joined text begins.
+ *
+ * @param content - The body of one message.
+ * @returns The first non-empty text it contributes, or undefined.
+ */
+function firstTextOf(content: unknown): string | undefined {
+  if (typeof content === 'string') {
+    const text = sanitizeText(content)
+    return text === '' ? undefined : text
+  }
+  if (!Array.isArray(content)) return undefined
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    if (block.type === 'text' && typeof block.text === 'string') {
+      const text = sanitizeText(block.text)
+      if (text !== '') return text
+      continue
+    }
+    if (block.type === 'tool-result') {
+      const nested = firstTextOf(block.content)
+      if (nested !== undefined) return nested
+    }
+  }
+  return undefined
+}
+
+/**
+ * The text the folded system prompt starts with.
+ *
+ * Same ordering as {@link leadingSystemText}: `options.system` leads, and the
+ * system-role messages follow in history order. Only the first contribution
+ * matters here, so the scan stops at it.
+ *
+ * @param options - The request being inspected.
+ * @returns The leading text of the system prompt, or undefined when there is none.
+ */
+function leadingSystemTextStart(options: GenerateOptions): string | undefined {
+  if (typeof options.system === 'string' && options.system.trim() !== '') return options.system
+  for (const message of options.messages) {
+    if (message.role !== 'system') continue
+    if (messageToolsOf(message) !== undefined) continue
+    const text = firstTextOf(message.content)
+    if (text !== undefined) return text
+  }
+  return undefined
+}
+
+/**
+ * Whether this request is the side-channel one that titles a session.
+ *
+ * A title request is asked on the same adapter, under the same session id, and
+ * with the same credential as the conversation it titles - but it shares
+ * nothing else with it. Left alone it would:
+ *
+ * - send the session's prompt cache key, so the service would route the title
+ *   prompt at the entry the conversation cached;
+ * - overwrite the session's prefix snapshot, so the next real turn would be
+ *   told its system prompt or its tool list changed; and
+ * - file its usage under the session, so the session's cache ratio would
+ *   describe a prompt the session never sent.
+ *
+ * The detection is deliberately structural rather than a flag on the options:
+ * the caller is the harness, and the harness states a title request by its
+ * CONTENT, not by anything this route could switch on.
+ *
+ * @param options - The request about to be mapped.
+ * @returns Whether the request is the side-channel title request.
+ */
+export function isSideChannelTitleRequest(options: GenerateOptions): boolean {
+  if (options === undefined || options === null) return false
+  const messages = Array.isArray(options.messages) ? options.messages : []
+  for (const message of messages) {
+    if (!isRecord(message)) continue
+    const kind = (message as { source?: { kind?: unknown } }).source?.kind
+    if (kind === SESSION_TITLE_SOURCE_KIND) return true
+    const text = firstTextOf((message as { content?: unknown }).content)
+    if (text !== undefined && text.startsWith(TITLE_REQUEST_PROMPT_PREFIX)) return true
+  }
+  const tools = options.tools
+  if (tools === undefined || tools.length === 0) {
+    const systemText = leadingSystemTextStart(options)
+    if (systemText !== undefined && systemText.startsWith(TITLE_REQUEST_SYSTEM_PREFIX)) return true
+  }
+  return false
+}
+
 /**
  * Stable identifier for the conversation this request belongs to.
  *
@@ -1607,6 +1732,11 @@ export function buildOpenAIRequest(
  * all rather than a key that will drift.
  */
 export function promptCacheKey(options: GenerateOptions): string | undefined {
+  // The side-channel title request borrows the session's identity but not its
+  // prefix, so it must never be routed at the entry the conversation cached.
+  // No key at all is the honest answer: the service derives its cache from the
+  // request content anyway, and an unkeyed request simply gets its own entry.
+  if (isSideChannelTitleRequest(options)) return undefined
   if (typeof options.sessionId === 'string' && options.sessionId.trim() !== '') {
     return `dsh-${options.sessionId.trim()}`
   }
@@ -1798,6 +1928,16 @@ export function buildRequest(
   preserveThinking: boolean = preserveThinkingEnabled(),
   media: RequestMediaOptions = {},
 ): Record<string, unknown> {
+  // A side-channel title request borrows the session's identity but not its
+  // prefix. It must not become the snapshot the next real turn is diffed
+  // against, and it must not be recorded as the session's drift cause: either
+  // would report the conversation's cache as rebuilt by a request it never
+  // made.
+  if (isSideChannelTitleRequest(options)) {
+    return wire === 'anthropic'
+      ? buildAnthropicRequest(options, images, media)
+      : buildOpenAIRequest(options, images, preserveThinking, media)
+  }
   // Fingerprint the prefix-breaking inputs before building, so the cause is
   // recorded even if the build below throws (an oversized body is itself a turn
   // that never reached the warm cache).
@@ -1810,7 +1950,7 @@ export function buildRequest(
     && (pendingImageOffloads.get(cacheScopeKey(options.sessionId)) ?? 0) > 0
     ? 'image-offload'
     : cause
-  recordDriftCause(drift, options.sessionId)
+  recordDriftCause(drift, options.sessionId, options)
   return wire === 'anthropic'
     ? buildAnthropicRequest(options, images, media)
     : buildOpenAIRequest(options, images, preserveThinking, media)
@@ -2125,12 +2265,25 @@ export interface KimiCodeStreamState {
    * even if the caller does not pass the session again.
    */
   sessionId: string | undefined
+  /**
+   * Whether this turn is the side-channel request that titles a session.
+   *
+   * Such a request runs under the session's identity but is a DIFFERENT
+   * conversation, so its usage must not be filed under the session: the
+   * rolling cache ratio would then describe a prompt the session never sent.
+   */
+  sideChannel: boolean
 }
 
-export function createStreamState(wire: KimiCodeWire, sessionId?: string): KimiCodeStreamState {
+export function createStreamState(
+  wire: KimiCodeWire,
+  sessionId?: string,
+  sideChannel = false,
+): KimiCodeStreamState {
   return {
     wire,
     sessionId: typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : undefined,
+    sideChannel,
     blocks: [],
     current: null,
     reasoningRuns: new Map(),
@@ -2631,17 +2784,48 @@ export type PrefixDriftCause =
   | 'image-offload'
 
 /**
+ * The prefix-breaking inputs of one request, hashed.
+ *
+ * Two requests that share these hashes address the same cached prefix, so the
+ * hashes are also what groups requests that must not start a cold prefix at
+ * the same time. Exposed for that reason; the values are the same ones
+ * {@link trackPrefixStability} diffs.
+ */
+export interface PrefixFingerprints {
+  /** Hash of the system prompt, or null when the request carries none. */
+  readonly systemPromptHash: string | null
+  /** Hash of the tool list, or null when the request carries no tools. */
+  readonly toolsHash: string | null
+}
+
+/**
+ * Hash the prefix-breaking inputs of one request.
+ *
+ * @param options - The request about to be built.
+ * @returns The hashes of its system prompt and its tool list.
+ */
+export function prefixFingerprints(options: GenerateOptions): PrefixFingerprints {
+  const systemText = leadingSystemText(options) ?? ''
+  const tools = options.tools ?? []
+  return {
+    systemPromptHash: systemText === '' ? null : fingerprint(systemText),
+    toolsHash: tools.length === 0
+      ? null
+      : fingerprint(JSON.stringify(tools.map((tool) => [tool.name, tool.description ?? '', tool.parameters ?? {}]))),
+  }
+}
+
+/**
  * Fingerprint the current request's stability inputs and diff them against the
  * last request. Called once per request build; the result is read back when the
  * stream reports usage so a low-or-zero cache read can be explained.
  */
 export function trackPrefixStability(options: GenerateOptions): PrefixDriftCause {
-  const systemText = leadingSystemText(options) ?? ''
-  const systemPromptHash = systemText === '' ? null : fingerprint(systemText)
-  const tools = options.tools ?? []
-  const toolsHash = tools.length === 0
-    ? null
-    : fingerprint(JSON.stringify(tools.map((tool) => [tool.name, tool.description ?? '', tool.parameters ?? {}])))
+  // A side-channel title request is not part of the conversation's prefix, so
+  // it must not become the snapshot the next real turn is diffed against: its
+  // system prompt and its empty tool list would read as a broken prefix.
+  if (isSideChannelTitleRequest(options)) return 'stable'
+  const { systemPromptHash, toolsHash } = prefixFingerprints(options)
   const cacheKey = promptCacheKey(options) ?? null
 
   // Scoped by session only: the prefix inputs are properties of the request
@@ -2666,8 +2850,16 @@ export function trackPrefixStability(options: GenerateOptions): PrefixDriftCause
 /** Drift cause recorded for each session. */
 const driftCauses = new Map<string, PrefixDriftCause>()
 
-/** Record the cause computed for one in-flight request. */
-export function recordDriftCause(cause: PrefixDriftCause, sessionId?: string): void {
+/**
+ * Record the cause computed for one in-flight request.
+ *
+ * The options are optional and only used to recognise a side-channel request:
+ * a title request carries its own prefix, so attributing it to the session
+ * would blame the session's next cache miss on the title request's system
+ * prompt or on its (absent) tool list.
+ */
+export function recordDriftCause(cause: PrefixDriftCause, sessionId?: string, options?: GenerateOptions): void {
+  if (options !== undefined && isSideChannelTitleRequest(options)) return
   rememberScoped(driftCauses, cacheScopeKey(sessionId), cause)
 }
 
@@ -2779,6 +2971,7 @@ export function recordSessionImageBudget(
     requestImageBytes: number
     droppedImages: number
   },
+  options?: GenerateOptions,
 ): void {
   const scope = cacheScopeKey(sessionId)
   // The dropped identities are remembered only for a NAMED session: the budget
@@ -2800,9 +2993,11 @@ export function recordSessionImageBudget(
   })
   markPendingImageOffload(sessionId, input.newlyDroppedCount)
   // An image the budget gave back rewrites the retained prefix, so the miss it
-  // causes is the offload's doing rather than the service's.
+  // causes is the offload's doing rather than the service's. A side-channel
+  // request is not the conversation's own turn, so it may not attribute
+  // anything to it.
   if (input.newlyDroppedCount > 0 && getLastDriftCause(sessionId) === 'stable') {
-    recordDriftCause('image-offload', sessionId)
+    recordDriftCause('image-offload', sessionId, options)
   }
 }
 
@@ -2972,6 +3167,9 @@ const EMPTY_CACHE_STATS: KimiCodeCacheStats = {
 /** Record one request's usage into its own session's totals. */
 export function recordCacheStats(state: KimiCodeStreamState, sessionId?: string, accountId?: string): void {
   if (!state.sawUsage) return
+  // A side-channel title request is not the session's conversation, so its
+  // usage says nothing about the session's cached prefix.
+  if (state.sideChannel) return
   const scope = cacheScopeKey(sessionId ?? state.sessionId, accountId)
   const previous = cacheStatsByScope.get(scope) ?? EMPTY_CACHE_STATS
   rememberScoped(cacheStatsByScope, scope, {

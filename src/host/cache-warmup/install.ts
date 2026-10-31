@@ -440,11 +440,13 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
    *
    * 决策取舍写在代码里，因为它全是「什么时候**不动**」：
    * - 不是 `accept`（`block` 的 feedback 是别人的东西）；
-   * - 已经带 `value`（执行本地的 canonical 值，replay 与结构化消费方读它，
-   *   替换掉等于把一份 JSON 换成字符串）；
    * - 工具名不是 `run_code`、线路不是本线、会话拿不到；
    * - 没有存储、内容为空。
    * 上面任何一条成立就原样返回同一个决策对象。
+   *
+   * 决策带了 `value` 不再是「不动」的理由：核心没真正生成预览时，末尾仍然
+   * 原样交回同一个决策对象（`value` 一点不丢）；只有核心真的换了内容，
+   * 才换成带预览的 `accept` 决策。
    * @param exec - 工具执行上下文。
    * @param result - 归一化后的执行结果。
    * @param decision - `next()` 交回来的决策。
@@ -468,9 +470,6 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     // 不确定、编辑或审查：连核心都不调用，原 value/content 决策逐字交回。
     if (retrievalTool && navigation !== true) return decision
     if (sourceTool && !settings.enabled && navigation !== true) return decision
-    // 原路径绝不改 canonical value；只有明确导航的 PTC 检索才允许越过这道门，
-    // 且核心未真正生成 preview 时仍在末尾返回原 value 决策。
-    if (sourceTool && decision.value !== undefined && navigation !== true) return decision
     const route = cacheWarmupRouteOf(exec.agent)
     if (route.provider !== CACHE_WARMUP_PROVIDER) return decision
     const sessionId = route.sessionId

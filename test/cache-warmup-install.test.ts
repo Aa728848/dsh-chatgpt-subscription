@@ -17,7 +17,7 @@ import type { PostToolDecision, ToolDefinition, ToolExecution, ToolExecutionResu
 /** 核心替身的共享状态；`vi.hoisted` 让 mock 工厂够得着它。 */
 const core = vi.hoisted(() => {
   const calls: Array<Record<string, unknown>> = []
-  const state = { throwOnProject: false, throwOnConstruct: false }
+  const state = { throwOnProject: false, throwOnConstruct: false, changedOnProject: true }
   /** 预算与快照同形：核心约定这两者都描述 maxChars / warmup / 命中率。 */
   const budget = { maxChars: 4000, warmup: false, consecutiveHits: 2, hitRatio: 0.6 }
   /**
@@ -76,7 +76,7 @@ vi.mock('../src/host/cache-warmup/index.ts', () => ({
     if (core.state.throwOnProject) throw new Error(core.sensitiveMessage)
     return {
       content: [{ type: 'text', text: 'PREVIEW' }],
-      changed: true,
+      changed: core.state.changedOnProject,
       metrics: { inputChars: 100, outputChars: 8, omittedChars: 92, strategy: 'preview' },
     }
   },
@@ -265,6 +265,7 @@ beforeEach(() => {
   core.calls.length = 0
   core.state.throwOnProject = false
   core.state.throwOnConstruct = false
+  core.state.changedOnProject = true
   core.budget.warmup = false
 })
 
@@ -289,12 +290,25 @@ describe('cache warmup host integration', () => {
     expect(projectionCalls()).toBe(0)
   })
 
-  it('leaves a value-carrying decision untouched', async () => {
+  it('projects a value-carrying decision: the canonical value is no longer a gate', async () => {
     const { listener } = install()
     const decision: PostToolDecision = { kind: 'accept', value: { ok: true } }
     const returned = await listener(runCodeExec(), fullResult(), acceptAll(decision))
+    // 核心真的换了内容：换成带预览的 accept 决策。
+    expect(projectionCalls()).toBe(1)
+    expect(JSON.stringify(returned)).toContain('PREVIEW')
+    expect(returned.kind === 'accept' ? returned.value : undefined).toBeUndefined()
+  })
+
+  it('keeps decision.value when the core leaves the content alone', async () => {
+    // 核心没生成预览：原决策对象原样交回，value 一点不丢。
+    core.state.changedOnProject = false
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', value: { ok: true } }
+    const returned = await listener(runCodeExec(), fullResult(), acceptAll(decision))
+    expect(projectionCalls()).toBe(1)
     expect(returned).toBe(decision)
-    expect(projectionCalls()).toBe(0)
+    expect(returned.kind === 'accept' ? returned.value : undefined).toEqual({ ok: true })
   })
 
   it('keeps direct retrieval values untouched while the independent switch is off', async () => {
@@ -339,16 +353,37 @@ describe('cache warmup host integration', () => {
     expect(projectionCalls()).toBe(1)
   })
 
-  it('admits a value-carrying PTC read only for navigation', async () => {
+  it('admits a value-carrying PTC read for navigation', async () => {
     settings = { enabled: true, retrievalEnabled: true }
     const { listener } = install()
     const decision: PostToolDecision = { kind: 'accept', value: { path: 'src/a.ts', lines: [] } }
     const projected = await listener(retrievalExec('run_code', '请定位并列出函数'), fullResult(), acceptAll(decision))
     expect(JSON.stringify(projected)).toContain('PREVIEW')
     expect(core.calls[0]?.navigation).toBe(true)
+    expect(projectionCalls()).toBe(1)
+  })
+
+  it('projects a value-carrying run_code even when navigation is false', async () => {
+    // 日志开关开着时，意图是编辑（navigation === false）也不挡：
+    // value 不再是门，核心没换内容时 value 才原样保留。
+    settings = { enabled: true, retrievalEnabled: true }
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', value: { path: 'src/a.ts', lines: [] } }
+    const returned = await listener(retrievalExec('run_code', '请读取并修复这个文件'), fullResult(), acceptAll(decision))
+    expect(projectionCalls()).toBe(1)
+    expect(core.calls[0]?.navigation).toBe(false)
+    expect(JSON.stringify(returned)).toContain('PREVIEW')
+  })
+
+  it('still rejects a value-carrying PTC read with editing intent on the retrieval path alone', async () => {
+    // 只开检索开关时，编辑意图仍然挡住 PTC 检索投影 —— 旧的日志开关关闭，
+    // value 不再是门，但意图仍然是门。
+    settings = { enabled: false, retrievalEnabled: true }
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', value: { path: 'src/a.ts', lines: [] } }
     const editing = await listener(retrievalExec('run_code', '请读取并修复这个文件'), fullResult(), acceptAll(decision))
     expect(editing).toBe(decision)
-    expect(projectionCalls()).toBe(1)
+    expect(projectionCalls()).toBe(0)
   })
 
   it('leaves a blocked decision untouched', async () => {
