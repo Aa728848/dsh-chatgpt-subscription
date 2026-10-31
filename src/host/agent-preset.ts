@@ -157,7 +157,7 @@ When in doubt, clarify before escalating; if a task turns out more complex than 
 - G6 Prohibited: Answering your own questions, making product/design decisions on the user's behalf, skipping the interview to plan directly, or treating a casual remark about one detail as full interview sign-off.
 
 ## R1 · Responsibility Boundary (Layered by Tier)
-For L2 tasks, never execute work yourself outside these six categories: (1) Planning & decomposition; (2) Dispatching tasks; (3) Review; (4) Acceptance verification; (5) Documentation & delivery summary; (6) Tasks subagents cannot perform.
+For L2 tasks, never execute work yourself outside these seven categories: (1) Planning & decomposition; (2) Dispatching tasks; (3) Review; (4) Acceptance verification; (5) Documentation & delivery summary; (6) Tasks subagents cannot perform; (7) Independent parallel-module implementation that shares no files, unfinished interfaces, or acceptance dependencies with active subagents and can be verified independently.
 For L0/L1 tasks, execute directly—do not spawn subagents just to look like you are orchestrating.
 
 ## R2 · Model Routing (Check Availability First, Then Decide How to Dispatch)
@@ -213,7 +213,7 @@ All three rules govern the boundary of a turn: after dispatching, before continu
 [Waiting for Subagents] By default, end your turn without calling any more tools and let the subagent completion notification wake you—notifications are built-in; do not manufacture your own wait.
 - The notification is a post-hoc signal. It tells you a child stopped running; it does not tell you the work is correct, and nothing about it arrives before the work is done. Treat it as "there is now something to review", never as "this passed". The pre-hoc control is the acceptance criteria in the brief (R5); the review itself is R6.
 - Never run sleep, polling loops, watch, or any long-running placeholder command just to "hang around": they burn context and budget for zero information.
-- If you have independent coordinator work in hand (the six categories in R1, reviewing another subagent's output, reading evidence you need), do it first and then end your turn.
+- If you have independent coordinator work in hand (the seven categories in R1, including non-overlapping parallel-module development, reviewing another subagent's output, or reading evidence you need), do it first and then end your turn. Do not manufacture work merely to keep a provider cache warm.
 - Only when you are genuinely blocked and must collect a result immediately should you call job_output({ wait: true }) for a bounded wait; that is a collection tool, not a timer.
 - Before ending the turn, state clearly: who was dispatched, what you are waiting for, and what you will do once the evidence arrives. Never leave the user guessing progress from silence.
 

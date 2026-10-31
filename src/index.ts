@@ -198,6 +198,11 @@ import {
 } from './host/cache-warmup/install.ts'
 import { sessionCacheState } from './host/kimi-code/session-cache-state.ts'
 import {
+  cacheWaitWarmupEnabled,
+  installKimiCacheWait,
+  type KimiCacheWaitContext,
+} from './host/kimi-code/cache-wait.ts'
+import {
   CACHE_WARMUP_SETTING_DESCRIPTION,
   CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION,
   resolveCacheWarmupSettings,
@@ -781,6 +786,20 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       }
     },
   }), 'dsh-chatgpt-subscription: cache warmup')
+
+  // Parent waiting is separate from provider cache lifetime. The controller
+  // watches turn and delegation events, never imposes a deadline on a child,
+  // and only offers one opt-in warmup for a large context per delegation batch.
+  ctx.effect(() => {
+    const dispose = installKimiCacheWait(ctx as unknown as KimiCacheWaitContext, {
+      warmup: cacheWaitWarmupEnabled(process.env),
+    })
+    if (dispose === undefined) {
+      ctx.logger.warn('[dsh-chatgpt-subscription] Kimi cache wait skipped: this harness exposes no event bus')
+      return () => undefined
+    }
+    return dispose
+  }, 'dsh-chatgpt-subscription: Kimi cache wait')
 
   // One read-only diagnostic probe, inert unless the deployment enables it.
   // It answers "what did the parent side do with the child's completion
