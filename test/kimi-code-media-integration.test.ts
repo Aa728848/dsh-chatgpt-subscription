@@ -567,32 +567,48 @@ describe('body fit with references', () => {
   })
 
   it('uploads nothing for a media the body no longer carries, and cites the one it keeps', async () => {
-    // Two ~1 MB images together exceed the route's 1.5 MB image budget, so the
-    // budget pass replaces the OLDEST occurrence with a text placeholder before the
+    // Two ~1 MB images together exceed the route's image budget, so the budget
+    // pass replaces the OLDEST occurrence with a text placeholder before the
     // request is planned. The plan still lists both readings, so unless the upload
     // set is read off the FINAL build the dropped one is uploaded under a reference
     // nothing cites — bytes paid for that no request will ever mention.
-    const dropped = new Uint8Array(1_000_000).fill(7)
-    const kept = new Uint8Array(900_000).fill(9)
-    const { adapter, uploads, chats } = await buildAdapter({
-      imageBytes: (attachmentId) => (attachmentId === 'a' ? dropped : kept),
-      // The minted id names the payload size, so which occurrence was uploaded is
-      // not a guess: only the surviving one is 900,000 bytes.
-      upload: (form) => jsonResponse({ id: 'img-' + (form.get('file') as File).size }),
-      chat: () => sseResponse(),
-    })
+    //
+    // The budget is PINNED for this test. The route's own ceiling is Kimi's 20 MiB
+    // (the official CLI's REQUEST_MEDIA_BUDGET_BYTES), and a test that allocated
+    // twenty megabytes of pixels to reach it would be slow for no gain. The pinned
+    // pair of marks drops exactly the OLDER image: the two images carry 1.33 MB
+    // and 1.20 MB of base64, the ceiling is 2.40 MB and the recovery mark is
+    // 1.20 MB, so the older one goes and the younger one stays.
+    const previousBudget = process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
+    process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = '2400000'
+    try {
+      const dropped = new Uint8Array(1_000_000).fill(7)
+      const kept = new Uint8Array(900_000).fill(9)
+      const { adapter, uploads, chats } = await buildAdapter({
+        imageBytes: (attachmentId) => (attachmentId === 'a' ? dropped : kept),
+        // The minted id names the payload size, so which occurrence was uploaded is
+        // not a guess: only the surviving one is 900,000 bytes.
+        upload: (form) => jsonResponse({ id: 'img-' + (form.get('file') as File).size }),
+        chat: () => sseResponse(),
+      })
 
-    const chunks = await drain(adapter.stream(generateOptions('k3-256k', {
-      messages: [{ role: 'user', content: [imageBlock('a'), imageBlock('b')] }] as never,
-    })))
+      const chunks = await drain(adapter.stream(generateOptions('k3-256k', {
+        messages: [{ role: 'user', content: [imageBlock('a'), imageBlock('b')] }] as never,
+      })))
 
-    expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
-    // Exactly ONE upload: the occurrence that survived the budget pass.
-    expect(uploads).toHaveLength(1)
-    const body = JSON.parse(String(chats[0]!.init.body)) as Record<string, unknown>
-    expect(imageUrls(lastUserParts(body))).toEqual(['ms://img-' + kept.byteLength])
-    // The dropped occurrence contributes neither a reference nor its bytes.
-    expect(JSON.stringify(body)).not.toContain('data:image')
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
+      // Exactly ONE upload: the occurrence that survived the budget pass.
+      expect(uploads).toHaveLength(1)
+      const body = JSON.parse(String(chats[0]!.init.body)) as Record<string, unknown>
+      expect(imageUrls(lastUserParts(body))).toEqual(['ms://img-' + kept.byteLength])
+      // The dropped occurrence contributes neither a reference nor its bytes.
+      expect(JSON.stringify(body)).not.toContain('data:image')
+    } finally {
+      // The pin belongs to THIS test: the next one must see the route's own
+      // ceiling again.
+      if (previousBudget === undefined) delete process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
+      else process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = previousBudget
+    }
   })
 
   it('sends a body the inline form would have overrun, because the reference is smaller', async () => {

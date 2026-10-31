@@ -40,6 +40,23 @@ function tokenCount(value: number | undefined, t: typeof zh): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : t.unknownMetric
 }
 
+/**
+ * One byte count as the card prints it.
+ *
+ * The image budget is a byte budget, so a raw number would be unreadable: the
+ * cap sits in the megabytes while a single image can be in the kilobytes.
+ * A value the card cannot read prints as "0 B" rather than "NaN B" — an
+ * absent measurement is not a measurement of zero bytes.
+ */
+function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 2)} MB`
+  }
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${Math.round(bytes)} B`
+}
+
 /** Human label for the last request's prefix-drift cause. */
 function driftLabel(
   cause: NonNullable<NonNullable<KimiCodeWebStatus['cache']>['lastDrift']>,
@@ -52,6 +69,7 @@ function driftLabel(
     case 'tools': return t.cacheDriftTools
     case 'cache-key': return t.cacheDriftCacheKey
     case 'cold-key': return t.cacheDriftColdKey
+    case 'image-offload': return t.cacheDriftImageOffload
     default: return String(cause)
   }
 }
@@ -615,6 +633,23 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
                     .replace('{hits}', String(status.cache.warmup.consecutiveHits))
                     .replace('{required}', String(status.cache.warmup.requiredHits))
                     .replace('{chars}', status.cache.warmup.maxChars.toLocaleString())}
+                </span>
+              </div>
+            )}
+            {/* The image budget gets its own row: the cap and the low-water
+                mark are set in bytes, and the sticky-offload count is what
+                explains a prefix that keeps rebuilding itself. */}
+            {status.cache.imageBudget !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.cacheImageBudgetLabel}</span>
+                <span className="dsha-value">
+                  {(status.cache.imageBudget.droppedImages > 0
+                    ? t.cacheImageBudgetDropped
+                    : t.cacheImageBudgetValue)
+                    .replace('{used}', formatByteSize(status.cache.imageBudget.requestImageBytes))
+                    .replace('{budget}', formatByteSize(status.cache.imageBudget.budgetBytes))
+                    .replace('{low}', formatByteSize(status.cache.imageBudget.lowBudgetBytes))
+                    .replace('{dropped}', String(status.cache.imageBudget.droppedImages))}
                 </span>
               </div>
             )}

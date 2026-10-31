@@ -100,6 +100,52 @@ describe('SessionCacheStateStore', () => {
     expect(store.read('healthy')).toMatchObject({ totalTokens: 7 })
   })
 
+  it('round-trips the image budget state', () => {
+    // The omissions are STICKY, so they have to survive a restart: a session that
+    // forgot them would send a picture again and rebuild the cached prefix on
+    // the very next turn.
+    const store = new SessionCacheStateStore(file)
+    store.write('session-a', record({
+      lastDrift: 'image-offload',
+      budgetDropped: ['attachment:shot-0', 'inline:abc123'],
+      lastRequestImageBytes: 4096,
+      lastDroppedImages: 2,
+    }))
+    store.flush()
+
+    const reopened = new SessionCacheStateStore(file)
+    expect(reopened.read('session-a')).toMatchObject({
+      lastDrift: 'image-offload',
+      budgetDropped: ['attachment:shot-0', 'inline:abc123'],
+      lastRequestImageBytes: 4096,
+      lastDroppedImages: 2,
+    })
+  })
+
+  it('drops malformed budget entries instead of poisoning the record', () => {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      sessions: {
+        broken: {
+          lastActiveAt: NOW,
+          updatedAt: NOW,
+          totalTokens: 5,
+          // Only real identities survive, and only once each.
+          budgetDropped: ['', 3, null, 'attachment:a', 'attachment:a'],
+          lastRequestImageBytes: -1,
+          lastDroppedImages: 'many',
+        },
+      },
+    }), 'utf8')
+
+    const store = new SessionCacheStateStore(file)
+    expect(store.read('broken')?.budgetDropped).toEqual(['attachment:a'])
+    // A negative byte count and a non-numeric image count are not counts.
+    expect(store.read('broken')?.lastRequestImageBytes).toBeUndefined()
+    expect(store.read('broken')?.lastDroppedImages).toBeUndefined()
+  })
+
   it('persists and clears warmupConsecutiveHits via noteWarmupStreak without an extra write()', () => {
     const store = new SessionCacheStateStore(file)
     store.write('session-a', record())

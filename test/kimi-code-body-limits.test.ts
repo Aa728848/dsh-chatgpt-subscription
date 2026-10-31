@@ -14,8 +14,10 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_LOW_REQUEST_IMAGE_BYTES,
   DEFAULT_MAX_MESSAGE_BODY_BYTES,
   DEFAULT_MAX_REQUEST_IMAGE_BYTES,
+  lowRequestImageBytes,
   maxMessageBodyBytes,
   maxRequestImageBytes,
 } from '../src/host/kimi-code/types.ts'
@@ -48,10 +50,16 @@ describe('maxMessageBodyBytes', () => {
 })
 
 describe('maxRequestImageBytes', () => {
-  it("defaults to Kimi's 1.5 MB budget", () => {
+  it("defaults to Kimi's own 20 MiB media budget", () => {
     expect(maxRequestImageBytes(env({}))).toBe(DEFAULT_MAX_REQUEST_IMAGE_BYTES)
-    expect(DEFAULT_MAX_REQUEST_IMAGE_BYTES).toBe(MAX_REQUEST_IMAGE_BYTES)
-    expect(DEFAULT_MAX_REQUEST_IMAGE_BYTES).toBe(1_500_000)
+    expect(DEFAULT_MAX_REQUEST_IMAGE_BYTES).toBe(20 * 1024 * 1024)
+    expect(DEFAULT_MAX_REQUEST_IMAGE_BYTES).toBe(20_971_520)
+    // The SHARED constant is still Kimi's old text-and-image figure, because the
+    // other provider lines budget against it. This line diverges from it on
+    // purpose: the official CLI budgets request media at 20 MiB, and the 1.5 MB
+    // figure was Kimi's BODY ceiling applied to the images alone.
+    expect(MAX_REQUEST_IMAGE_BYTES).toBe(1_500_000)
+    expect(DEFAULT_MAX_REQUEST_IMAGE_BYTES).not.toBe(MAX_REQUEST_IMAGE_BYTES)
   })
 
   it('honours the deployment override and ignores a value that would disable the guard', () => {
@@ -59,6 +67,31 @@ describe('maxRequestImageBytes', () => {
     for (const raw of ['', 'abc', '0', '-1', 'NaN', 'huge']) {
       expect(maxRequestImageBytes(env({ DSH_KIMI_CODE_MAX_IMAGE_BYTES: raw })), raw)
         .toBe(DEFAULT_MAX_REQUEST_IMAGE_BYTES)
+    }
+  })
+})
+
+describe('lowRequestImageBytes', () => {
+  it("defaults to Kimi's own 10 MiB low-water mark", () => {
+    expect(lowRequestImageBytes(env({}))).toBe(DEFAULT_LOW_REQUEST_IMAGE_BYTES)
+    expect(DEFAULT_LOW_REQUEST_IMAGE_BYTES).toBe(10 * 1024 * 1024)
+    expect(DEFAULT_LOW_REQUEST_IMAGE_BYTES).toBe(10_485_760)
+    // The gap between the two marks is the slack that keeps the number of
+    // retained images — and therefore the cached prefix — stable.
+    expect(DEFAULT_LOW_REQUEST_IMAGE_BYTES * 2).toBe(DEFAULT_MAX_REQUEST_IMAGE_BYTES)
+  })
+
+  it('follows the override, so a pinned ceiling moves both marks together', () => {
+    expect(lowRequestImageBytes(env({ DSH_KIMI_CODE_MAX_IMAGE_BYTES: '2000000' }))).toBe(1_000_000)
+    // A ceiling of one byte still leaves a usable mark: zero would leave the
+    // trimming loop unable to stop anywhere.
+    expect(lowRequestImageBytes(env({ DSH_KIMI_CODE_MAX_IMAGE_BYTES: '1' }))).toBe(1)
+  })
+
+  it('ignores a value that would disable the guard', () => {
+    for (const raw of ['', 'abc', '0', '-1', 'NaN', 'huge']) {
+      expect(lowRequestImageBytes(env({ DSH_KIMI_CODE_MAX_IMAGE_BYTES: raw })), raw)
+        .toBe(DEFAULT_LOW_REQUEST_IMAGE_BYTES)
     }
   })
 })

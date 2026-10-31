@@ -55,14 +55,18 @@ import {
   REQUEST_IMAGE_MAX_EDGE,
   SUPPORTED_IMAGE_MEDIA_TYPES,
   attachmentLabel,
+  collectRemainingImageKeys,
   imageBlockToInline,
   offloadOldestRequestImages,
+  offloadRequestImagesWithStickyBudget,
+  requestImageKey,
   requestImageTarget,
   resolveRequestImages,
   unavailableImageText,
   type AttachmentImageReader,
   type ResolvedRequestImage,
   type ResolvedRequestImages,
+  type StickyImageOffloadResult,
 } from '../common/request-images.ts'
 
 // Re-exported so this line keeps one import surface for its own adapter.
@@ -73,14 +77,22 @@ export {
   MAX_VIDEO_MESSAGE_BODY_BYTES,
   NO_RESOLVED_IMAGES,
   REQUEST_IMAGE_MAX_EDGE,
+  collectRemainingImageKeys,
   offloadOldestRequestImages,
+  offloadRequestImagesWithStickyBudget,
+  requestImageKey,
   requestImageTarget,
   resolveRequestImages,
   type AttachmentImageReader,
   type ResolvedRequestImage,
   type ResolvedRequestImages,
+  type StickyImageOffloadResult,
 }
 import { maxMessageBodyBytes, maxOutputTokensFor } from './types.ts'
+
+// The image budget this route enforces, re-exported so this line keeps one
+// import surface for its own adapter and its own tests.
+export { DEFAULT_LOW_REQUEST_IMAGE_BYTES, lowRequestImageBytes } from './types.ts'
 import { base64LengthOf, videoBlockLabel, videoDataUrl, videoOmissionText } from './modalities.ts'
 // The traversal, byte budgeting and base64 encoding are provider-neutral and are
 // shared with the MiniMax Code line; see ../common/video-request.ts.
@@ -1789,7 +1801,16 @@ export function buildRequest(
   // Fingerprint the prefix-breaking inputs before building, so the cause is
   // recorded even if the build below throws (an oversized body is itself a turn
   // that never reached the warm cache).
-  recordDriftCause(trackPrefixStability(options), options.sessionId)
+  const cause = trackPrefixStability(options)
+  // An image the budget gave back rewrites the retained prefix, so a miss that
+  // would otherwise have been attributed to the service is the offload's doing.
+  // The prefix was otherwise stable, which is the only case this overrides:
+  // a broken system prompt or a changed tool set is the better explanation.
+  const drift: PrefixDriftCause = cause === 'stable'
+    && (pendingImageOffloads.get(cacheScopeKey(options.sessionId)) ?? 0) > 0
+    ? 'image-offload'
+    : cause
+  recordDriftCause(drift, options.sessionId)
   return wire === 'anthropic'
     ? buildAnthropicRequest(options, images, media)
     : buildOpenAIRequest(options, images, preserveThinking, media)
@@ -2607,6 +2628,7 @@ export type PrefixDriftCause =
   | 'tools'
   | 'cache-key'
   | 'cold-key'
+  | 'image-offload'
 
 /**
  * Fingerprint the current request's stability inputs and diff them against the
@@ -2658,6 +2680,141 @@ export function recordDriftCause(cause: PrefixDriftCause, sessionId?: string): v
  */
 export function getLastDriftCause(sessionId?: string): PrefixDriftCause | undefined {
   return driftCauses.get(cacheScopeKey(sessionId))
+}
+
+/**
+ * Image identities this session has given back to the image budget.
+ *
+ * Scoped per session for the same reason the prefix snapshots are: DSH runs
+ * several conversations — and subagents — at once, so one process-wide set
+ * would let one conversation's omission replace another conversation's image.
+ */
+const sessionDroppedImageKeys = new Map<string, Set<string>>()
+
+/**
+ * What the most recent request of one session carried, in image bytes.
+ */
+const sessionImageBudgetStats = new Map<string, KimiCodeSessionImageBudgetStats>()
+
+/**
+ * Images the request CURRENTLY BEING BUILT has already dropped.
+ *
+ * Separate from {@link sessionDroppedImageKeys} because the two answer
+ * different questions: the set is what the session remembers, and this counter
+ * is what the request in flight did. The counter is what lets the drift
+ * attribution name the offload, whichever order the build and the recording
+ * happen in.
+ */
+const pendingImageOffloads = new Map<string, number>()
+
+/**
+ * What one session's last request carried of images.
+ */
+export interface KimiCodeSessionImageBudgetStats {
+  /** Base64 image bytes the most recent request carried. */
+  requestImageBytes: number
+  /** Image occurrences the most recent request replaced with a placeholder. */
+  droppedImages: number
+  /** Every image identity this session has dropped so far. */
+  droppedKeys: string[]
+}
+
+/**
+ * The image identities this session has already dropped.
+ *
+ * `durableDropped` seeds the memory the first time a session is asked about,
+ * so a session that ran before the restart keeps the omissions it made: the
+ * budget is sticky, and a picture that was given back must stay given back.
+ */
+export function getSessionDroppedImageKeys(
+  sessionId?: string,
+  durableDropped?: readonly string[],
+): ReadonlySet<string> {
+  // An UNNAMED request has no session to be sticky within. It drops what its
+  // own budget says and remembers nothing, because a shared unscoped bucket
+  // would let one caller's omission reach another caller's request: a probe
+  // that dropped a picture would silently drop the same picture id from an
+  // unrelated conversation that happened to send no session either.
+  if (sessionId === undefined || sessionId.trim() === '') return new Set<string>()
+  const scope = cacheScopeKey(sessionId)
+  const existing = sessionDroppedImageKeys.get(scope)
+  if (existing !== undefined) return existing
+  const seeded = new Set<string>()
+  for (const key of durableDropped ?? []) {
+    if (typeof key === 'string' && key !== '') seeded.add(key)
+  }
+  rememberScoped(sessionDroppedImageKeys, scope, seeded)
+  return seeded
+}
+
+/**
+ * Note that the request being built has dropped images, before its body is built.
+ *
+ * The drift attribution reads this back when the prefix is fingerprinted, so
+ * the order of the two does not matter: a request that drops an image is
+ * attributed to the offload whether the body was built before or after the
+ * drop was recorded.
+ */
+export function markPendingImageOffload(sessionId: string | undefined, newlyDroppedCount: number): void {
+  const scope = cacheScopeKey(sessionId)
+  if (newlyDroppedCount <= 0) {
+    pendingImageOffloads.delete(scope)
+    return
+  }
+  rememberScoped(pendingImageOffloads, scope, newlyDroppedCount)
+}
+
+/**
+ * Record what one request's image budget did.
+ *
+ * The dropped identities are kept for the whole session: the budget is sticky,
+ * so an image given back stays given back, and the next turn has to know
+ * which ones those are.
+ */
+export function recordSessionImageBudget(
+  sessionId: string | undefined,
+  input: {
+    allDroppedKeys: Iterable<string>
+    newlyDroppedCount: number
+    requestImageBytes: number
+    droppedImages: number
+  },
+): void {
+  const scope = cacheScopeKey(sessionId)
+  // The dropped identities are remembered only for a NAMED session: the budget
+  // is sticky WITHIN a conversation, and an unnamed request has no conversation
+  // to be sticky in. Its own numbers are still recorded, so a status card that
+  // asks about "whatever ran last" can still answer.
+  const named = sessionId !== undefined && sessionId.trim() !== ''
+  const keys = named ? (sessionDroppedImageKeys.get(scope) ?? new Set<string>()) : new Set<string>()
+  if (named) {
+    for (const key of input.allDroppedKeys) {
+      if (typeof key === 'string' && key !== '') keys.add(key)
+    }
+    rememberScoped(sessionDroppedImageKeys, scope, keys)
+  }
+  rememberScoped(sessionImageBudgetStats, scope, {
+    requestImageBytes: input.requestImageBytes,
+    droppedImages: input.droppedImages,
+    droppedKeys: named ? [...keys] : [],
+  })
+  markPendingImageOffload(sessionId, input.newlyDroppedCount)
+  // An image the budget gave back rewrites the retained prefix, so the miss it
+  // causes is the offload's doing rather than the service's.
+  if (input.newlyDroppedCount > 0 && getLastDriftCause(sessionId) === 'stable') {
+    recordDriftCause('image-offload', sessionId)
+  }
+}
+
+/**
+ * What one session's last request carried of images, when it is known.
+ *
+ * `undefined` for a session that has not sent a request, rather than a zeroed
+ * answer: "no request yet" and "a request that carried no images" are
+ * different facts.
+ */
+export function getSessionImageBudgetStats(sessionId?: string): KimiCodeSessionImageBudgetStats | undefined {
+  return sessionImageBudgetStats.get(cacheScopeKey(sessionId))
 }
 
 /**
@@ -2888,12 +3045,18 @@ export function resetCacheStats(sessionId?: string): void {
     prefixSnapshots.clear()
     driftCauses.clear()
     thinkingCoercions.clear()
+    sessionDroppedImageKeys.clear()
+    sessionImageBudgetStats.clear()
+    pendingImageOffloads.clear()
     return
   }
   dropSession(cacheStatsByScope, sessionId)
   dropSession(prefixSnapshots, sessionId)
   dropSession(driftCauses, sessionId)
   dropSession(thinkingCoercions, sessionId)
+  dropSession(sessionDroppedImageKeys, sessionId)
+  dropSession(sessionImageBudgetStats, sessionId)
+  dropSession(pendingImageOffloads, sessionId)
 }
 
 function tokenUsage(state: KimiCodeStreamState): TokenUsage {

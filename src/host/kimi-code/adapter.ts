@@ -28,6 +28,7 @@ import {
   coerceThinkingEffort,
   effectiveContextWindow,
   maxOutputTokensFor,
+  lowRequestImageBytes,
   maxRequestBodyBytesFor,
   maxRequestImageBytes,
   reasoningEffortsFor,
@@ -70,6 +71,10 @@ import {
   processOpenAIStreamLine,
   getCacheStats,
   getLastDriftCause,
+  getSessionDroppedImageKeys,
+  getSessionImageBudgetStats,
+  markPendingImageOffload,
+  recordSessionImageBudget,
   recordThinkingCoercion,
   requestHasVideo,
   resolveRequestImages,
@@ -87,8 +92,10 @@ import {
   type KimiMediaFilesUploader,
 } from './media-files.ts'
 import {
+  collectRemainingImageKeys,
   imagesToOffloadCount,
   offloadOldestRequestImages,
+  offloadRequestImagesWithStickyBudget,
   replaceOldestRequestImages,
   requestHasSendableImage,
   requestImagePayloadLengths,
@@ -899,6 +906,22 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
   const lastDrift = getLastDriftCause(sessionId)
   reportDriftCause(sessionId, lastDrift)
   const now = Date.now()
+  // The image budget state travels with the record: the omissions are sticky,
+  // so a restart that forgot them would send a picture again and rebuild the
+  // cached prefix on the very next turn. The durable record is read as well,
+  // because it is the only source for a session this process has not served.
+  const imageBudget = getSessionImageBudgetStats(sessionId)
+  const priorRecord = sessionCacheState.read(sessionId)
+  const budgetDropped = imageBudget !== undefined && imageBudget.droppedKeys.length > 0
+    ? imageBudget.droppedKeys
+    : priorRecord?.budgetDropped
+  // A turn that carried no image leaves no image budget state behind: the
+  // record of a text-only conversation stays byte-identical to what it always
+  // was, and the value a later turn writes is the one that says something.
+  const liveBytes = imageBudget?.requestImageBytes ?? 0
+  const liveDropped = imageBudget?.droppedImages ?? 0
+  const lastRequestImageBytes = liveBytes > 0 ? liveBytes : priorRecord?.lastRequestImageBytes
+  const lastDroppedImages = liveDropped > 0 ? liveDropped : priorRecord?.lastDroppedImages
   sessionCacheState.write(sessionId, {
     lastActiveAt: now,
     totalTokens: state.cacheReadTokens + state.inputTokens,
@@ -910,6 +933,9 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
     cacheWrite5mTokens: stats.cacheWrite5mTokens,
     cacheWrite1hTokens: stats.cacheWrite1hTokens,
     ...(lastDrift === undefined ? {} : { lastDrift }),
+    ...(budgetDropped === undefined ? {} : { budgetDropped }),
+    ...(lastRequestImageBytes === undefined ? {} : { lastRequestImageBytes }),
+    ...(lastDroppedImages === undefined ? {} : { lastDroppedImages }),
     updatedAt: now,
   })
   // Observation only: hand the cache-warmup registry the same numbers this
@@ -1234,11 +1260,26 @@ export class KimiCodeAdapter extends LlmAdapter {
       signal,
       KIMI_CODE_REQUEST_IMAGE_MAX_EDGE,
     )
-    const imageTrimmed = offloadOldestRequestImages(
+    // The image budget is STICKY: a picture the budget gave back stays given
+    // back for the rest of the conversation, so the retained prefix the service
+    // cached stops changing. The identities of the pictures dropped by earlier
+    // turns come from the process memory first and from the durable record
+    // after a restart, because the session outlives the process.
+    const priorDroppedKeys = getSessionDroppedImageKeys(
+      options.sessionId,
+      options.sessionId === undefined ? undefined : sessionCacheState.read(options.sessionId)?.budgetDropped,
+    )
+    const stickyOffload = offloadRequestImagesWithStickyBudget(
       normalized,
       maxRequestImageBytes(),
+      lowRequestImageBytes(),
       images,
+      priorDroppedKeys,
     )
+    const imageTrimmed = stickyOffload.options
+    // Recorded BEFORE the body is built, so the prefix attribution names the
+    // offload whether the build happens before or after this line.
+    markPendingImageOffload(options.sessionId, stickyOffload.newlyDroppedKeys.length)
     // THE THINKING GATE, for every wire.
     //
     // The service answers HTTP 400 for a disabled-thinking request on a model
@@ -1622,6 +1663,33 @@ export class KimiCodeAdapter extends LlmAdapter {
       throw new LlmError(failure.message, failure.code, {
         status: response.status,
         ...(after === undefined ? {} : { providerRetryAfterMs: after }),
+      })
+    }
+
+    // What the image budget and the body-fit loop between them did, filed so
+    // the status card can name it and so the NEXT turn knows which pictures
+    // stay omitted.
+    //
+    // The body-fit loop runs AFTER the budget pass and can give back images the
+    // budget kept, because the conversation text shares the body ceiling with
+    // the images. Those give-backs are sticky too: a picture that was omitted
+    // to make the body fit must not come back on the next turn, or the prefix
+    // it broke is rebuilt on the turn after that.
+    if (measured !== undefined) {
+      const requestImageBytes = requestImagePayloadLengths(measured.options, images)
+        .reduce((sum, bytes) => sum + bytes, 0)
+      const trimmedKeys = new Set(collectRemainingImageKeys(imageTrimmed, images))
+      const measuredKeys = new Set(collectRemainingImageKeys(measured.options, images))
+      const bodyFitDroppedKeys = [...trimmedKeys].filter((key) => !measuredKeys.has(key))
+      const allDroppedKeys = new Set<string>([
+        ...stickyOffload.allDroppedKeys,
+        ...bodyFitDroppedKeys,
+      ])
+      recordSessionImageBudget(options.sessionId, {
+        allDroppedKeys,
+        newlyDroppedCount: stickyOffload.newlyDroppedKeys.length + bodyFitDroppedKeys.length,
+        requestImageBytes,
+        droppedImages: stickyOffload.droppedCount + bodyFitDroppedKeys.length,
       })
     }
 

@@ -30,7 +30,7 @@ import {
   kimiCodeModelDef,
   type KimiCodeCatalogModel,
 } from './model-catalog.ts'
-import { MAX_MESSAGE_BODY_BYTES, MAX_REQUEST_IMAGE_BYTES } from '../common/request-images.ts'
+import { MAX_MESSAGE_BODY_BYTES } from '../common/request-images.ts'
 
 export const PROVIDER_ID = 'kimi-code'
 export const PROVIDER_NAME = 'Kimi Code'
@@ -367,11 +367,27 @@ export function effectiveContextWindow(
 /**
  * Base64 image payload one request on this route may carry.
  *
- * Sized to leave room for the conversation inside the body ceiling above, which
- * is why it is the smaller of the two. DSH_KIMI_CODE_MAX_IMAGE_BYTES overrides it
- * under the same rules: ignored, never applied as a disabled guard.
+ * Kimi's own CLI budgets request media at 20 MiB (REQUEST_MEDIA_BUDGET_BYTES),
+ * and this route now speaks the same number. The previous 1.5 MB figure was
+ * Kimi's TEXT-and-image body ceiling applied to the images alone, which threw
+ * away pictures the service was perfectly willing to accept: a conversation
+ * that carried three screenshots lost two of them to a limit that never
+ * existed upstream.
+ *
+ * DSH_KIMI_CODE_MAX_IMAGE_BYTES overrides it under the same rules: ignored,
+ * never applied as a disabled guard.
  */
-export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = MAX_REQUEST_IMAGE_BYTES
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+
+/**
+ * The mark the request is brought back under once it has passed the high one.
+ *
+ * Half the high mark, exactly as the official client does
+ * (REQUEST_MEDIA_BUDGET_LOW_BYTES). The gap between the two is the slack that
+ * keeps the number of retained images stable from turn to turn, and a stable
+ * image count is what keeps the cached prefix valid.
+ */
+export const DEFAULT_LOW_REQUEST_IMAGE_BYTES = 10 * 1024 * 1024
 
 /** Image budget this process enforces, honouring the deployment override. */
 export function maxRequestImageBytes(env: NodeJS.ProcessEnv = process.env): number {
@@ -380,6 +396,23 @@ export function maxRequestImageBytes(env: NodeJS.ProcessEnv = process.env): numb
   const parsed = Number(raw)
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_REQUEST_IMAGE_BYTES
   return Math.floor(parsed)
+}
+
+/**
+ * The low-water mark this process enforces, honouring the deployment override.
+ *
+ * Half of whatever the deployment pinned, so an override moves both marks
+ * together: a deployment that lowers the ceiling to 4 MB gets a 2 MB low mark
+ * rather than the built-in 10 MB, which would let every request sit above the
+ * mark it is supposed to recover to. A deployment that pins nothing gets
+ * Kimi's own 10 MiB.
+ */
+export function lowRequestImageBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.DSH_KIMI_CODE_MAX_IMAGE_BYTES ?? '').trim()
+  if (raw === '') return DEFAULT_LOW_REQUEST_IMAGE_BYTES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LOW_REQUEST_IMAGE_BYTES
+  return Math.max(1, Math.floor(Math.floor(parsed) / 2))
 }
 
 /** Anthropic protocol revision the managed service documents. */

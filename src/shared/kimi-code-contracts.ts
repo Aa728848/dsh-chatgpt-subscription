@@ -267,7 +267,7 @@ export interface KimiCodeCacheStatsDto {
    * should have held (so a miss implicates content below the head or the
    * service), while the other values name the input that invalidated the cache.
    */
-  lastDrift?: 'first-request' | 'stable' | 'system-prompt' | 'tools' | 'cache-key' | 'cold-key'
+  lastDrift?: 'first-request' | 'stable' | 'system-prompt' | 'tools' | 'cache-key' | 'cold-key' | 'image-offload'
   /**
    * Cache-write tokens the service reported for these requests.
    *
@@ -305,6 +305,15 @@ export interface KimiCodeCacheStatsDto {
     maxChars: number
     consecutiveHits: number
     requiredHits: number
+  }
+  /**
+   * Per-request image payload budget and the latest turn's image usage, when known.
+   */
+  imageBudget?: {
+    budgetBytes: number
+    lowBudgetBytes: number
+    requestImageBytes: number
+    droppedImages: number
   }
 }
 

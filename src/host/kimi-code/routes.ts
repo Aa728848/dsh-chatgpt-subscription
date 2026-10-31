@@ -8,6 +8,8 @@ import {
   PROVIDER_NAME,
   QUOTA_CACHE_TTL_MS,
   codingBaseUrl,
+  lowRequestImageBytes,
+  maxRequestImageBytes,
   oauthHost,
 } from './types.ts'
 import {
@@ -33,7 +35,12 @@ import {
   loadProviderModels,
   testConnection,
 } from './client.ts'
-import { getCacheStats, getLastDriftCause, preserveThinkingEnabled } from './mapper.ts'
+import {
+  getCacheStats,
+  getLastDriftCause,
+  getSessionImageBudgetStats,
+  preserveThinkingEnabled,
+} from './mapper.ts'
 import { evaluateCacheHint, sessionLastActiveAt } from './cache-hint.ts'
 import { resolveSessionCacheView, sessionCacheState } from './session-cache-state.ts'
 import {
@@ -295,6 +302,10 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
     ...stats,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
+    // What the image budget did on the last turn, next to the ceiling it
+    // enforces: a card that shows the budget without showing what it cost
+    // cannot say whether the conversation is close to losing a picture.
+    imageBudget: imageBudgetOf(sessionId),
     // The three write counters are real values now, from two places the mapper
     // owns: the TOTAL comes from the wire's own usage field
     // (cache_creation_input_tokens on Anthropic, prompt_tokens_details.
@@ -362,6 +373,28 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
     cacheWrite1hTokens: durable.cacheWrite1hTokens,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
+    imageBudget: imageBudgetOf(sessionId),
+  }
+}
+
+/**
+ * The image budget this route enforces and what the last turn of one session
+ * spent of it.
+ *
+ * The live numbers win over the durable ones, because the durable record
+ * describes the last run of this machine and the live numbers describe the
+ * request that actually went out. The ceilings are read from the environment
+ * every time, so a deployment that pinned a different budget sees its own
+ * number rather than the built-in one.
+ */
+function imageBudgetOf(sessionId?: string): NonNullable<KimiCodeCacheStatsDto['imageBudget']> {
+  const live = getSessionImageBudgetStats(sessionId)
+  const durable = sessionCacheState.read(sessionId)
+  return {
+    budgetBytes: maxRequestImageBytes(),
+    lowBudgetBytes: lowRequestImageBytes(),
+    requestImageBytes: live?.requestImageBytes ?? durable?.lastRequestImageBytes ?? 0,
+    droppedImages: live?.droppedImages ?? durable?.lastDroppedImages ?? 0,
   }
 }
 
@@ -380,6 +413,7 @@ function driftCauseOf(value: string | undefined): KimiCodeCacheStatsDto['lastDri
     case 'tools':
     case 'cache-key':
     case 'cold-key':
+    case 'image-offload':
       return value
     default:
       return undefined

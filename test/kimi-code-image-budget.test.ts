@@ -13,8 +13,15 @@ import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import {
   MAX_REQUEST_IMAGE_BYTES,
   REQUEST_IMAGE_MAX_EDGE,
+  buildRequest,
+  collectRemainingImageKeys,
+  getLastDriftCause,
+  markPendingImageOffload,
   offloadOldestRequestImages,
+  offloadRequestImagesWithStickyBudget,
+  requestImageKey,
   requestImageTarget,
+  resetCacheStats,
   resolveRequestImages,
 } from '../src/host/kimi-code/mapper.ts'
 
@@ -200,5 +207,155 @@ describe('resolveRequestImages scales rather than drops', () => {
     const attachments = reader([{ attachmentId: 'shot-0', width: 1440, height: 1000, bytes: 420_000, mediaType: 'image/png' }])
     attachments.readImageRequest = async () => { throw abort }
     await expect(resolveRequestImages(options({ messages: qaScreenshots(1) }), attachments as never)).rejects.toBe(abort)
+  })
+})
+
+/**
+ * One inline image occurrence: the payload travels in the block itself.
+ *
+ * Inline rather than durable because the sticky budget has to be exercised on
+ * the BYTES, and a durable reference is measured against the resolution the
+ * harness derived for it — a second variable this test does not need.
+ */
+function inlineImage(data: string): Message {
+  return {
+    role: 'user',
+    content: [{ type: 'image', data, mediaType: 'image/png' }],
+  } as unknown as Message
+}
+
+/** The image blocks one request still carries, and the placeholders among them. */
+function imageBlocksOf(request: { messages: Array<{ content: unknown }> }): {
+  images: number
+  omitted: number
+} {
+  const blocks = request.messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+  return {
+    images: blocks.filter((block) => (block as { type?: string }).type === 'image').length,
+    omitted: blocks.filter((block) => String((block as { text?: string }).text).startsWith('[image omitted')).length,
+  }
+}
+
+describe('offloadRequestImagesWithStickyBudget', () => {
+  it('leaves a request under the high mark untouched', () => {
+    const request = options({ messages: [inlineImage('A'.repeat(400))] })
+    const result = offloadRequestImagesWithStickyBudget(request, 1_000, 500)
+    // The SAME request comes back: nothing was rewritten, so the cached prefix
+    // of a conversation under its budget is untouched.
+    expect(result.options).toBe(request)
+    expect(result.droppedCount).toBe(0)
+    expect(result.newlyDroppedKeys).toEqual([])
+    expect(result.remainingBytes).toBe(400)
+  })
+
+  it('trims the oldest images back under the low mark', () => {
+    const request = options({
+      messages: [inlineImage('A'.repeat(400)), inlineImage('B'.repeat(400)), inlineImage('C'.repeat(400))],
+    })
+    const result = offloadRequestImagesWithStickyBudget(request, 1_000, 500)
+    // 1200 bytes is over the high mark: the oldest goes, leaving 800, which is
+    // still over the low mark, so the next one goes too. Stopping at the low
+    // mark and not at the high one is what keeps the retained COUNT stable.
+    expect(result.newlyDroppedKeys).toHaveLength(2)
+    expect(result.remainingBytes).toBe(400)
+    expect(result.droppedCount).toBe(2)
+    expect(imageBlocksOf(result.options)).toEqual({ images: 1, omitted: 2 })
+  })
+
+  it('keeps an image an earlier turn dropped dropped, even under the high mark', () => {
+    const request = options({
+      messages: [inlineImage('A'.repeat(400)), inlineImage('B'.repeat(400)), inlineImage('C'.repeat(400))],
+    })
+    const first = offloadRequestImagesWithStickyBudget(request, 1_000, 500)
+    // The next turn replays the DURABLE history — the pictures are still in it,
+    // because a placeholder replaces them only in the request that goes out.
+    // That request is far under its high mark, so nothing NEW is dropped — and
+    // the two pictures the first turn gave back stay given back.
+    const second = offloadRequestImagesWithStickyBudget(
+      request,
+      100_000,
+      50_000,
+      undefined,
+      first.allDroppedKeys,
+    )
+    expect(second.newlyDroppedKeys).toEqual([])
+    expect(second.droppedCount).toBe(2)
+    expect(second.allDroppedKeys.size).toBe(2)
+    expect(imageBlocksOf(second.options)).toEqual({ images: 1, omitted: 2 })
+  })
+
+  it('budgets an image that travels inside a tool result', () => {
+    const request = options({
+      messages: [{
+        role: 'user',
+        content: [{ type: 'tool-result', content: [{ type: 'image', data: 'A'.repeat(400) }] }],
+      } as unknown as Message],
+    })
+    const result = offloadRequestImagesWithStickyBudget(request, 100, 50)
+    expect(result.newlyDroppedKeys).toHaveLength(1)
+    expect(result.droppedCount).toBe(1)
+  })
+})
+
+describe('requestImageKey', () => {
+  it('names a durable attachment by its id', () => {
+    expect(requestImageKey({
+      type: 'image',
+      attachment: { attachmentId: 'shot-0', mediaType: 'image/png', bytes: 10, width: 1, height: 1 },
+    })).toBe('attachment:shot-0')
+  })
+
+  it('names an inline picture by its payload, so the same picture keeps its name', () => {
+    const key = requestImageKey({ type: 'image', data: 'AAAA' })
+    expect(key).toBe(requestImageKey({ type: 'image', data: 'AAAA' }))
+    expect(key).not.toBe(requestImageKey({ type: 'image', data: 'BBBB' }))
+    expect(key?.startsWith('inline:')).toBe(true)
+  })
+
+  it('has no key for a block that carries no image', () => {
+    expect(requestImageKey({ type: 'text', text: 'hello' })).toBeUndefined()
+  })
+})
+
+describe('collectRemainingImageKeys', () => {
+  it('names the images a request still carries', () => {
+    const request = options({ messages: [inlineImage('AAAA'), inlineImage('BBBB')] })
+    expect(collectRemainingImageKeys(request)).toHaveLength(2)
+    // The same picture twice is one identity, not two.
+    expect(collectRemainingImageKeys(options({ messages: [inlineImage('AAAA'), inlineImage('AAAA')] }))).toHaveLength(1)
+  })
+})
+
+describe('the image offload is what breaks the prefix', () => {
+  it('attributes a stable prefix to the offload that caused it', () => {
+    const session = 'sess-image-offload'
+    try {
+      const request = options({ sessionId: session as never })
+      // A session's FIRST request has no prefix to keep, so the cause is the
+      // session's first request and not the offload.
+      buildRequest(request, 'openai')
+      expect(getLastDriftCause(session)).toBe('first-request')
+      // The next one would have been stable, but the request dropped an image
+      // and the drop rewrote the prefix the service had cached.
+      markPendingImageOffload(session, 1)
+      buildRequest(request, 'openai')
+      expect(getLastDriftCause(session)).toBe('image-offload')
+    } finally {
+      resetCacheStats(session)
+    }
+  })
+
+  it('keeps the better explanation when the prefix broke for another reason', () => {
+    const session = 'sess-image-offload-system'
+    try {
+      buildRequest(options({ sessionId: session as never, system: 'one' }), 'openai')
+      // The system prompt changed, which breaks the prefix on its own and says
+      // more about the miss than the offload does.
+      markPendingImageOffload(session, 1)
+      buildRequest(options({ sessionId: session as never, system: 'two' }), 'openai')
+      expect(getLastDriftCause(session)).toBe('system-prompt')
+    } finally {
+      resetCacheStats(session)
+    }
   })
 })

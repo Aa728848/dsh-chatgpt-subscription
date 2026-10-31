@@ -9,6 +9,13 @@ import { FileCredentialStore, FileModelSettingsStore, registerKimiCodePreference
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/kimi-code/client.ts'
 import { KimiCodeAccountPool, parseKimiCodePoolData } from '../src/host/kimi-code/account-pool.ts'
 import { resetRefreshRejections, resetWebLogin } from '../src/host/kimi-code/oauth.ts'
+import {
+  createStreamState,
+  recordCacheStats,
+  recordDriftCause,
+  recordSessionImageBudget,
+  resetCacheStats,
+} from '../src/host/kimi-code/mapper.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -354,6 +361,60 @@ describe('Kimi Code settings routes', () => {
       const written = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as { contextWindowOverrides: unknown }
       expect(written.contextWindowOverrides).toEqual({ 'kimi-for-coding': 500_000 })
     })
+  })
+
+  /**
+   * What the status card says about the image budget.
+   *
+   * The budget is the number of bytes one request may carry in images, and a
+   * conversation that crosses it loses the OLDEST pictures — which rewrites the
+   * cached prefix and shows up as a cache miss the service did not cause. The
+   * card therefore has to name the ceiling AND the cause, or a user reading a
+   * miss has nothing to connect it to.
+   */
+  it('names the ceiling, what the last turn spent of it, and the offload that broke the prefix', async () => {
+    const session = 'session-image-budget-fixture'
+    vi.spyOn(store, 'read').mockResolvedValue(credential() as never)
+    vi.spyOn(store, 'write').mockResolvedValue(undefined)
+
+    try {
+      // One request that reported usage, so the card shows cache numbers at all.
+      const state = createStreamState('openai', session)
+      state.sawUsage = true
+      state.inputTokens = 100
+      state.cacheReadTokens = 900
+      recordCacheStats(state, session)
+      // And the image budget's own verdict on that request.
+      recordSessionImageBudget(session, {
+        allDroppedKeys: ['attachment:shot-0'],
+        newlyDroppedCount: 1,
+        requestImageBytes: 4096,
+        droppedImages: 1,
+      })
+      recordDriftCause('image-offload', session)
+
+      const { response, captured } = fakeExchange()
+      await handler(fakeRequest({ url: '/kimi-code/api/status?sessionId=' + session }), response)
+
+      expect(captured.status).toBe(200)
+      const value = (captured.body as {
+        value: { cache: { imageBudget: Record<string, number>; lastDrift?: string } }
+      }).value
+      // The ceilings are the ones this deployment enforces: Kimi's own 20 MiB
+      // high mark and its 10 MiB low mark.
+      expect(value.cache.imageBudget).toEqual({
+        budgetBytes: 20 * 1024 * 1024,
+        lowBudgetBytes: 10 * 1024 * 1024,
+        requestImageBytes: 4096,
+        droppedImages: 1,
+      })
+      // And the miss is attributed to the offload rather than to the service.
+      expect(value.cache.lastDrift).toBe('image-offload')
+    } finally {
+      // The mapper keeps its numbers for the life of the process, so a fixture
+      // that stayed would answer the NEXT test's status call.
+      resetCacheStats(session)
+    }
   })
 })
 

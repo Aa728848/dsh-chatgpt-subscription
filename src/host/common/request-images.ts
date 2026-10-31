@@ -10,6 +10,7 @@
  * @module dsh-chatgpt-subscription/request-images
  */
 
+import { createHash } from 'node:crypto'
 import type { ContentBlock, GenerateOptions } from "./llm-compat.ts"
 import type { AttachmentStore, ImageAttachmentRef } from "@deepseek-ai/dsh-attachment"
 
@@ -142,10 +143,7 @@ function base64Length(bytes: number): number {
  * the only estimate available, so it stays the fallback and every call site that
  * has no resolved map behaves exactly as before.
  */
-function requestImagePayloadLength(
-  block: Record<string, unknown>,
-  images?: ResolvedRequestImages,
-): number | undefined {
+function inlinePayloadOf(block: Record<string, unknown>): string | undefined {
   let data = asString(block.data) || asString(block.base64)
   const source = isRecord(block.source) ? block.source : undefined
   if (!data && source) data = asString(source.data) || asString(source.base64)
@@ -154,7 +152,17 @@ function requestImagePayloadLength(
     const matched = data.match(/^data:([^;,]+);base64,(.*)$/s)
     if (matched) data = matched[2] ?? ''
   }
-  if (data) return data.length
+  // An empty payload carries no bytes, so it is no payload at all: the block
+  // then describes an image the wire will not carry.
+  return data === undefined || data === '' ? undefined : data
+}
+
+function requestImagePayloadLength(
+  block: Record<string, unknown>,
+  images?: ResolvedRequestImages,
+): number | undefined {
+  const data = inlinePayloadOf(block)
+  if (data !== undefined) return data.length
 
   const attachment = attachmentOf(block)
   if (!attachment) return undefined
@@ -343,6 +351,219 @@ export function offloadOldestRequestImages(
   // The same resolution has to reach the replacement, or index N stops naming
   // the Nth measured occurrence.
   return replaceOldestRequestImages(options, imagesToOffloadCount(lengths, maxBytes), images)
+}
+
+/**
+ * A stable identity for one image occurrence.
+ *
+ * Two occurrences of the SAME picture have to share one identity, and that
+ * identity has to survive the turn: a durable attachment keeps its id, and an
+ * inline payload keeps its bytes, so hashing the payload names the same
+ * picture the same way on every later request.
+ *
+ * `undefined` for a block that carries no sendable payload: an image that
+ * resolved to `unavailable` is serialized as a short text placeholder, so it
+ * is not an image on the wire and has nothing to remember.
+ */
+export function requestImageKey(
+  block: Record<string, unknown>,
+  images?: ResolvedRequestImages,
+): string | undefined {
+  if (requestImagePayloadLength(block, images) === undefined) return undefined
+  const attachment = attachmentOf(block)
+  if (attachment !== undefined) return `attachment:${attachment.attachmentId}`
+  const data = inlinePayloadOf(block)
+  if (data === undefined) return undefined
+  return `inline:${createHash('sha256').update(data).digest('hex')}`
+}
+
+/** One sendable image occurrence, with the identity it is remembered by. */
+interface ImageOccurrence {
+  readonly key: string
+  readonly bytes: number
+}
+
+/**
+ * Every sendable image occurrence one request carries, in request order.
+ *
+ * The traversal is the one `collectRequestImagePayloads` uses, tool results
+ * included: a screenshot inside a tool result reaches the wire, so an
+ * occurrence the budget cannot see is an occurrence it cannot budget for.
+ */
+function collectImageOccurrences(
+  options: GenerateOptions,
+  images?: ResolvedRequestImages,
+): ImageOccurrence[] {
+  const occurrences: ImageOccurrence[] = []
+  const walk = (content: unknown): void => {
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (!isRecord(block)) continue
+      if (block.type === 'image') {
+        const bytes = requestImagePayloadLength(block, images)
+        const key = requestImageKey(block, images)
+        if (bytes !== undefined && key !== undefined) occurrences.push({ key, bytes })
+        continue
+      }
+      if (block.type === 'tool-result') walk(block.content)
+    }
+  }
+  for (const message of options.messages) walk(message.content)
+  return occurrences
+}
+
+/**
+ * The identities of the images one request still carries, each once.
+ *
+ * The caller compares two of these to learn what a later build gave back: the
+ * difference names the images a body-fit pass dropped after the budget pass
+ * had already run.
+ */
+export function collectRemainingImageKeys(
+  options: GenerateOptions,
+  images?: ResolvedRequestImages,
+): string[] {
+  const keys: string[] = []
+  const seen = new Set<string>()
+  for (const occurrence of collectImageOccurrences(options, images)) {
+    if (seen.has(occurrence.key)) continue
+    seen.add(occurrence.key)
+    keys.push(occurrence.key)
+  }
+  return keys
+}
+
+/**
+ * Replace every occurrence of a dropped image with the placeholder.
+ *
+ * Unlike {@link replaceOldestRequestImages} this replaces by IDENTITY rather
+ * than by position: a sticky budget drops a picture, and the picture has to
+ * stay dropped for the rest of the session wherever it appears.
+ */
+function replaceDroppedRequestImages(
+  options: GenerateOptions,
+  droppedKeys: ReadonlySet<string>,
+  images?: ResolvedRequestImages,
+): { options: GenerateOptions; count: number } {
+  if (droppedKeys.size === 0) return { options, count: 0 }
+  let count = 0
+  const replaceIn = (content: unknown): { content: unknown; replaced: boolean } => {
+    if (!Array.isArray(content)) return { content, replaced: false }
+    let replaced = false
+    const next = content.map((block) => {
+      if (!isRecord(block)) return block
+      if (block.type === 'image') {
+        const key = requestImageKey(block, images)
+        if (key === undefined || !droppedKeys.has(key)) return block
+        replaced = true
+        count += 1
+        return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
+      }
+      if (block.type === 'tool-result' && Array.isArray(block.content)) {
+        const inner = replaceIn(block.content)
+        if (!inner.replaced) return block
+        replaced = true
+        return { ...block, content: inner.content }
+      }
+      return block
+    })
+    return { content: next, replaced }
+  }
+
+  let changed = false
+  const messages = options.messages.map((message) => {
+    const result = replaceIn(message.content)
+    if (!result.replaced) return message
+    changed = true
+    return { ...message, content: result.content } as typeof message
+  })
+  return { options: changed ? { ...options, messages } : options, count }
+}
+
+/**
+ * What one sticky image-budget pass did.
+ *
+ * The identities travel out because they are the whole point: a picture the
+ * budget gave back has to stay gone for the rest of the session, and only the
+ * caller can remember that across requests.
+ */
+export interface StickyImageOffloadResult {
+  /** The request to send, with every dropped image replaced. */
+  readonly options: GenerateOptions
+  /** Base64 image bytes the request still carries. */
+  readonly remainingBytes: number
+  /** How many image occurrences were replaced in this request. */
+  readonly droppedCount: number
+  /** Identities this pass dropped, which were not dropped before. */
+  readonly newlyDroppedKeys: string[]
+  /** Every identity dropped so far, this pass included. */
+  readonly allDroppedKeys: Set<string>
+}
+
+/**
+ * Offload images against a budget that RECOVERS instead of a budget that resets.
+ *
+ * WHY THE TWO WATERMARKS. A single ceiling makes the retained prefix depend
+ * on the request: two conversations carrying the same images drop a different
+ * number of them as one more image arrives, so the prefix the service cached
+ * is rewritten on the next turn and the cache is cold again. Native `kimi-cli`
+ * therefore keeps a HIGH mark (20 MiB) and a LOW mark (10 MiB): the request
+ * is allowed to grow to the high mark, and once it passes it, the oldest
+ * images are given back until the request is back under the LOW mark. The gap
+ * between the two is the slack that keeps the number of retained images — and
+ * therefore the cached prefix — stable across turns.
+ *
+ * WHY THE DROPS ARE STICKY. The images a request gives back are replaced for
+ * the REST of the session: `priorDroppedKeys` carries the identities a
+ * previous turn already dropped, and they are replaced again here. A picture
+ * that was omitted stays omitted, so the request the service caches stops
+ * changing once the session has settled under its low mark.
+ *
+ * @param options - the request to budget.
+ * @param maxBytes - high-water mark; images are untouched below it.
+ * @param lowBytes - low-water mark; the trimming stops once the request is back under it.
+ * @param images - the resolution the request will be sent with.
+ * @param priorDroppedKeys - identities dropped by earlier turns.
+ */
+export function offloadRequestImagesWithStickyBudget(
+  options: GenerateOptions,
+  maxBytes: number = MAX_REQUEST_IMAGE_BYTES,
+  lowBytes: number = Math.max(1, Math.floor(maxBytes / 2)),
+  images?: ResolvedRequestImages,
+  priorDroppedKeys?: ReadonlySet<string>,
+): StickyImageOffloadResult {
+  const allDroppedKeys = new Set<string>(priorDroppedKeys ?? [])
+  // Only the images that are still candidates are budgeted: a picture dropped
+  // by an earlier turn is replaced below and never carries bytes again.
+  const pending = new Map<string, number>()
+  for (const occurrence of collectImageOccurrences(options, images)) {
+    if (allDroppedKeys.has(occurrence.key)) continue
+    pending.set(occurrence.key, (pending.get(occurrence.key) ?? 0) + occurrence.bytes)
+  }
+  let total = 0
+  for (const bytes of pending.values()) total += bytes
+
+  const newlyDroppedKeys: string[] = []
+  if (total > maxBytes) {
+    // Oldest first, and only as many as the low mark asks for: the slack
+    // between the two marks is what keeps the retained count stable.
+    for (const [key, bytes] of pending) {
+      if (total <= lowBytes) break
+      if (bytes === 0) continue
+      allDroppedKeys.add(key)
+      newlyDroppedKeys.push(key)
+      total -= bytes
+    }
+  }
+
+  const replaced = replaceDroppedRequestImages(options, allDroppedKeys, images)
+  return {
+    options: replaced.options,
+    remainingBytes: total,
+    droppedCount: replaced.count,
+    newlyDroppedKeys,
+    allDroppedKeys,
+  }
 }
 
 /**

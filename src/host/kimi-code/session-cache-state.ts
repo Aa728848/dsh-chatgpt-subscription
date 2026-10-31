@@ -57,6 +57,20 @@ export interface KimiCodeSessionCacheRecord {
    * initial turn record shape stays byte-identical when no warmup streak exists.
    */
   warmupConsecutiveHits?: number
+  /**
+   * Identities of the images this session has already given back to the image
+   * budget.
+   *
+   * Durable because the budget is STICKY: a picture that was omitted stays
+   * omitted for the rest of the conversation, and a restart that forgot that
+   * would send the picture again and rebuild the cached prefix on the very
+   * next turn.
+   */
+  budgetDropped?: string[]
+  /** Base64 image bytes the most recent request carried. */
+  lastRequestImageBytes?: number
+  /** Image occurrences the most recent request replaced with a placeholder. */
+  lastDroppedImages?: number
   /** When any field above last changed, epoch ms. Used for pruning and ordering. */
   updatedAt: number
 }
@@ -259,6 +273,9 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
   if (lastActiveAt === undefined || updatedAt === undefined) return undefined
   const drift = typeof value.lastDrift === 'string' && value.lastDrift !== '' ? value.lastDrift : undefined
   const warmupStreak = count(value.warmupConsecutiveHits)
+  const budgetDropped = droppedImageKeys(value.budgetDropped)
+  const lastRequestImageBytes = nonNegative(value.lastRequestImageBytes)
+  const lastDroppedImages = nonNegative(value.lastDroppedImages)
   return {
     lastActiveAt,
     updatedAt,
@@ -272,7 +289,46 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
     cacheWrite1hTokens: count(value.cacheWrite1hTokens),
     ...(drift === undefined ? {} : { lastDrift: drift }),
     ...(warmupStreak > 0 ? { warmupConsecutiveHits: warmupStreak } : {}),
+    ...(budgetDropped.length > 0 ? { budgetDropped } : {}),
+    ...(lastRequestImageBytes === undefined ? {} : { lastRequestImageBytes }),
+    ...(lastDroppedImages === undefined ? {} : { lastDroppedImages }),
   }
+}
+
+/**
+ * How many dropped image identities one record keeps.
+ *
+ * A session that pastes hundreds of pictures would otherwise grow this
+ * document without bound, and it is a diagnostic file: the identities that
+ * matter are the ones a later turn still has to replace.
+ */
+const MAX_BUDGET_DROPPED_KEYS = 512
+
+/**
+ * The dropped image identities a stored record carries.
+ *
+ * Only non-empty strings, deduplicated and capped: the file is written from
+ * whatever the process happened to hold, and a malformed entry must not take
+ * the record down with it.
+ */
+function droppedImageKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const keys: string[] = []
+  const seen = new Set<string>()
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry === '') continue
+    if (seen.has(entry)) continue
+    seen.add(entry)
+    keys.push(entry)
+    if (keys.length >= MAX_BUDGET_DROPPED_KEYS) break
+  }
+  return keys
+}
+
+/** A stored byte or image count, or undefined when the field is absent or absurd. */
+function nonNegative(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined
+  return Math.floor(value)
 }
 
 /** What the running process knows about one conversation, before any disk read. */
