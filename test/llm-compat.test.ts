@@ -84,6 +84,99 @@ describe('normalizeMessages', () => {
     expect(normalized?.source).toEqual({ kind: 'tool', callId: 'call_1' })
   })
 
+  // A `role: 'tool'` message whose call id never made it to the message level,
+  // because the harness left it inside the result block. Traced from a live
+  // WorkBuddy session that failed with `11148` ("tool calls and tool results do
+  // not match"): the id read back empty, every result became an orphan, and the
+  // repair pass answered every declared call with a fabricated "[no result]".
+  it('recovers the call id from the result block inside the message body', () => {
+    const [normalized] = normalizeMessages([{
+      id: 'm3',
+      role: 'tool',
+      source: { kind: 'tool' },
+      content: [{
+        type: 'tool-result',
+        toolCallId: 'call_1',
+        content: [{ type: 'text', text: 'exit code 0' }],
+      }],
+    }])
+
+    expect(normalized?.content).toEqual([{
+      type: 'tool-result',
+      toolCallId: 'call_1',
+      content: [{ type: 'text', text: 'exit code 0' }],
+    }])
+    expect(normalized?.source).toEqual({ kind: 'tool', callId: 'call_1' })
+  })
+
+  it('does not nest a second result block around the one already in the body', () => {
+    const [normalized] = normalizeMessages([{
+      id: 'm3',
+      role: 'tool',
+      source: { kind: 'tool' },
+      content: [{ type: 'tool-result', toolCallId: 'call_1', content: [{ type: 'text', text: 'ok' }] }],
+    }])
+
+    // One wrapper, not a wrapper inside a wrapper: nesting would show the
+    // gateway a result whose body is another result.
+    expect(normalized?.content).toHaveLength(1)
+    expect(normalized?.content[0]).toEqual({
+      type: 'tool-result',
+      toolCallId: 'call_1',
+      content: [{ type: 'text', text: 'ok' }],
+    })
+  })
+
+  it('prefers a real call id over an empty one further up the chain', () => {
+    // `??` alone would keep the empty string and lose `call_1`.
+    const [normalized] = normalizeMessages([{
+      id: 'm3',
+      role: 'tool',
+      toolCallId: '',
+      source: { kind: 'tool', callId: 'call_1' },
+      content: [{ type: 'text', text: 'ok' }],
+    }])
+
+    expect(normalized?.source).toEqual({ kind: 'tool', callId: 'call_1' })
+    expect(normalized?.content).toEqual([{
+      type: 'tool-result',
+      toolCallId: 'call_1',
+      content: [{ type: 'text', text: 'ok' }],
+    }])
+  })
+
+  it('carries an error flag the result block holds', () => {
+    const [normalized] = normalizeMessages([{
+      id: 'm3',
+      role: 'tool',
+      source: { kind: 'tool' },
+      content: [{ type: 'tool-result', toolCallId: 'call_1', content: [], isError: true }],
+    }])
+
+    expect(normalized?.content).toEqual([{
+      type: 'tool-result',
+      toolCallId: 'call_1',
+      content: [],
+      isError: true,
+    }])
+  })
+
+  it('falls back to the message-level id when the body holds no result block', () => {
+    const [normalized] = normalizeMessages([{
+      id: 'm3',
+      role: 'tool',
+      source: { kind: 'tool' },
+      toolCallId: 'call_1',
+      content: [{ type: 'text', text: 'exit code 0' }],
+    }])
+
+    expect(normalized?.content).toEqual([{
+      type: 'tool-result',
+      toolCallId: 'call_1',
+      content: [{ type: 'text', text: 'exit code 0' }],
+    }])
+  })
+
   it('maps the 0.1.7 conversation and the legacy one onto the same messages', () => {
     const content = [{ type: 'text', text: 'screenshot taken' }] as const
     const current = normalizeMessages([
