@@ -63,6 +63,9 @@ import { dictionaries as progressUpdatesDicts, NS_PROGRESS_UPDATES, type Progres
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY, type WorkBuddyLocaleKey } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
+import { installSubagentSettingsCard } from './subagent/index.ts'
+import { installSubagentStyles } from './subagent/styles.ts'
+import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './subagent/locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   /**
@@ -88,6 +91,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-opendesign': OpenDesignLocaleKey
     'dsh-progress-updates': ProgressUpdatesLocaleKey
     'dsh-workbuddy': WorkBuddyLocaleKey
+    'dsh-subagent-settings': SubagentLocaleKey
   }
 }
 
@@ -172,6 +176,14 @@ export function apply(ctx: ClientContext): void {
     installWorkBuddyStyles()
     return () => {}
   }, 'dsh-workbuddy: styles')
+  // 「子智能体」设置卡：遮蔽宿主同名卡（同 id、priority -10），并在宿主的授权清单
+  // 之外再记一份「全局默认 + 按主代理模型」的两级列表。样式表无条件安装，
+  // 注册本身在 installSubagentSettingsCard 里按服务是否就绪决定。
+  ctx.effect(() => ctx.locale.register(NS_SUBAGENT, subagentDicts), 'dsh-subagent-settings: dictionaries')
+  ctx.effect(() => {
+    installSubagentStyles()
+    return () => {}
+  }, 'dsh-subagent-settings: styles')
   // Badge variants the shared account-pool card adds on top of each provider's
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
@@ -301,6 +313,10 @@ export function apply(ctx: ClientContext): void {
   // MiniMax 视频的侧边栏渲染器：两段注册（定义 + keyed 正文），id 是同一个字符串。
   // 形状照抄宿主 ui-sidebar-documentpreview 的 image/index.ts。
   installVideoDocumentPreview(ctx)
+
+  // 「子智能体」设置卡：注册进插件页的 `plugins.item`，只在宿主服务这两个命名空间
+  // 时出现。服务缺席时整段是空操作，绝不会让 apply() 抛错。
+  installSubagentSettingsCard(ctx)
 
   // 「进展更新」客户端半边：对话流进展行、侧栏面板、以及它自己的设置分区。
   // 单独一个子模块（./progress-updates/），与 kimi-code 这些线路同一种

@@ -161,6 +161,29 @@ export type CodexContextWindowOverridesUpdateDto = Record<string, number | null>
 
 export type ProxyMode = 'auto' | 'custom' | 'direct'
 
+/** One exact `provider/model` route a subagent may be pointed at. */
+export interface SubagentModelRouteDto {
+  provider: string
+  model: string
+}
+
+/**
+ * Authorized child routes per main agent model, keyed by the main model's
+ * `provider/model`.
+ *
+ * The key is the MAIN agent's route, not the child's: a deployment that wants a
+ * GPT main agent to delegate to one set of models and a DeepSeek main agent to
+ * delegate to another stores one entry per main route. A session whose main
+ * route matches no entry falls back to `subagentDefaultModels`.
+ */
+export type SubagentModelsByMainModelDto = Record<string, SubagentModelRouteDto[]>
+
+/**
+ * An override patch for {@link SubagentModelsByMainModelDto}: an array replaces
+ * that key's routes, `null` (or an empty array) clears the key entirely.
+ */
+export type SubagentModelsByMainModelUpdateDto = Record<string, SubagentModelRouteDto[] | null>
+
 export interface SubscriptionPreferencesDto {
   enabled?: boolean
   quickQuotaVisible: boolean
@@ -178,6 +201,10 @@ export interface SubscriptionPreferencesDto {
    * operator opts in: the summary then costs that line's quota.
    */
   compactionRoute?: CompactionRouteTarget | null
+  /** Routes used when the Session's main model matches no `subagentModelsByMainModel` entry. */
+  subagentDefaultModels?: SubagentModelRouteDto[]
+  /** Authorized child routes per main agent model, keyed by `provider/model`. */
+  subagentModelsByMainModel?: SubagentModelsByMainModelDto
   writable: boolean
 }
 
@@ -194,6 +221,10 @@ export interface SubscriptionPreferencesUpdateDto {
   customProxyUrl?: string | null
   /** Set a target, or `null` to route compaction back to the conversation's model. */
   compactionRoute?: CompactionRouteTarget | null
+  /** Replace the fallback route list wholesale. */
+  subagentDefaultModels?: SubagentModelRouteDto[]
+  /** Merge per-main-model routes; `null` (or `[]`) clears one key. */
+  subagentModelsByMainModel?: SubagentModelsByMainModelUpdateDto
 }
 
 /** One model a compaction target may be pointed at. */

@@ -73,10 +73,36 @@ export interface AllowedModelRoute {
   readonly model: string
 }
 
+/**
+ * Per-main-model routing overrides, as the Settings card stores them.
+ *
+ * These are read LIVE on every guard evaluation rather than sampled into the
+ * Session: which routes a main model may delegate to is a deployment choice,
+ * and a settings edit must take effect without rebuilding a Session. The
+ * Session's own recorded allowlist stays the outer bound — an override can
+ * narrow it, never widen it beyond what the Session authorized.
+ */
+export interface SubagentRoutingOverrides {
+  /** Routes used when the Session's main model matches no `byMainModel` entry. */
+  readonly defaultAllowedModels?: readonly AllowedModelRoute[]
+  /** Authorized child routes per main agent model, keyed by `provider/model`. */
+  readonly byMainModel?: Readonly<Record<string, readonly AllowedModelRoute[]>>
+}
+
 /** Resolved model-selection preference read from the Host settings document. */
 export interface SubagentModelSelectionPreference {
   readonly enabled: boolean
   readonly allowedModels: readonly AllowedModelRoute[]
+  /**
+   * The fallback route list, when the deployment configured one. Absent means
+   * "no per-main-model routing", which leaves `allowedModels` in charge.
+   */
+  readonly defaultAllowedModels?: readonly AllowedModelRoute[]
+  /**
+   * Authorized routes per main agent model. A Session whose main route matches
+   * a key here is governed by that entry instead of the fallback list.
+   */
+  readonly byMainModel?: Readonly<Record<string, readonly AllowedModelRoute[]>>
 }
 
 /** One durable Session record this module reads: its events and its lineage. */
@@ -103,6 +129,11 @@ export interface SessionsResolver {
 export interface AuthorizationAgent {
   readonly session?: PolicySession
   readonly options?: { readonly provider?: unknown; readonly model?: unknown }
+  /**
+   * Live model selection, when the agent exposes one. A root Session's main
+   * route is read from here before the first request has a header to record it.
+   */
+  readonly model?: { current?(): { readonly provider?: unknown; readonly model?: unknown } | undefined }
 }
 
 /** What the delegation tool received from the model. */
@@ -271,6 +302,145 @@ export function subagentModelSelectionPreference(
     // leaves delegations exactly as the built-in tool resolves them.
     return undefined
   }
+}
+
+/**
+ * Main-model route per root Session, locked the first time it is observed.
+ *
+ * Without this, a mid-session model switch would silently re-point a Session's
+ * child allowlist: the guard would start answering with a different main model's
+ * routes, so the routes advertised in the prompt change, the prefix cache is
+ * invalidated, and a model can be handed a list its own earlier turn contradicted.
+ * Locking the FIRST resolved route keeps one Session's delegation policy stable
+ * for its whole life, which is the same promise the durable policy event makes.
+ *
+ * Keyed weakly by the root Session object, so a closed Session's entry goes with
+ * it. A Session object that is not an object (a minimal fixture) is simply not
+ * locked.
+ */
+const lockedRootMainRoutes = new WeakMap<object, AllowedModelRoute>()
+
+/**
+ * Authorized child routes per root Session, locked the first time they are used.
+ *
+ * Locking the main ROUTE is not enough on its own: the route is only the key
+ * into `byMainModel`, and the list it resolves to is read from the live
+ * preference on every step. A Settings edit made at step 5 of a running session
+ * would therefore swap the list under it — the prompt-assembly hook rewrites the
+ * `subagent` tool description and the `tools:sdk` section from that list, so the
+ * next request would carry a different prefix, drop the provider's prefix cache,
+ * and contradict the Settings card's promise that a routing change applies to
+ * new sessions only. The first resolved list is frozen here for the same reason
+ * the durable policy event is a snapshot: one Session is governed by one policy.
+ */
+const lockedRootAllowedRoutes = new WeakMap<object, readonly AllowedModelRoute[]>()
+
+/**
+ * Narrow one candidate route pair into an exact route.
+ * @param provider - Candidate provider id.
+ * @param model - Candidate model id.
+ * @returns the route, or undefined unless both halves are non-empty strings.
+ */
+function routeOf(provider: unknown, model: unknown): AllowedModelRoute | undefined {
+  const providerId = asString(provider)
+  const modelId = asString(model)
+  if (providerId === undefined || modelId === undefined) return undefined
+  if (providerId.length === 0 || modelId.length === 0) return undefined
+  return { provider: providerId, model: modelId }
+}
+
+/**
+ * Read the route a Session's next request uses, when its header names one.
+ * @param session - Session whose request header is read.
+ * @returns the exact route, or undefined when the header is absent or silent.
+ */
+function headerRouteOf(session: PolicySession | undefined): AllowedModelRoute | undefined {
+  let header: { readonly config?: { readonly provider?: unknown; readonly model?: unknown } } | undefined
+  try {
+    header = session?.requestHeader?.()
+  } catch {
+    // A Session whose fold is unavailable simply contributes no route.
+    return undefined
+  }
+  return routeOf(header?.config?.provider, header?.config?.model)
+}
+
+/**
+ * Resolve the top-level Session of one agent's lineage, together with the route
+ * its main model runs on.
+ *
+ * The main model is a property of the ROOT Session: a child subagent's own route
+ * is the child's, and reading it would authorize children by what a child chose
+ * rather than by what the user's main agent is. Walking up through
+ * `header.parentSession` finds that root, and the root's route is read from its
+ * own header (or, for an agent that IS the root, from the live model accessor and
+ * then the delegation hint, which is what an unstarted Session has).
+ *
+ * Once resolved for a Session that has already sent a request, the route is
+ * locked in {@link lockedRootMainRoutes}, so the answer never drifts mid-session.
+ * @param agent - Calling agent.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param modelSelectionHint - Route fields the caller already resolved.
+ * @param lockSnapshot - Lock even a route that has no request header yet; the
+ *   prompt-assembly, post-execute and denial paths pass true, so a Session's
+ *   first turn fixes its policy for the rest of its life.
+ * @returns the root Session (when one exists) and the main route (when known).
+ */
+export function resolveRootSessionAndMainRoute(
+  agent: AuthorizationAgent | undefined,
+  sessions: SessionsResolver,
+  modelSelectionHint?: { readonly provider?: unknown; readonly model?: unknown },
+  lockSnapshot = false,
+): { rootSession?: PolicySession; mainRoute?: AllowedModelRoute } {
+  let rootSession = agent?.session
+  for (let depth = 0; depth < 8 && rootSession !== undefined; depth += 1) {
+    const header = rootSession.header
+    if (header?.origin !== 'subagent') break
+    const parentId = asString(header.parentSession)
+    if (parentId === undefined) break
+    const parent = sessions.get(parentId)
+    if (parent === undefined) break
+    rootSession = parent
+  }
+  if (rootSession === undefined) {
+    // No Session at all (a scope-only call): the caller's own hint is the only
+    // route there is, and there is nothing to lock it against.
+    return { mainRoute: routeOf(modelSelectionHint?.provider, modelSelectionHint?.model) }
+  }
+  // A WeakMap only accepts object keys; a minimal fixture that is not an object
+  // simply never gets a lock, and every read stays live.
+  const lockable = typeof rootSession === 'object' && rootSession !== null
+  const locked = lockable ? lockedRootMainRoutes.get(rootSession) : undefined
+  if (locked !== undefined) return { rootSession, mainRoute: locked }
+
+  let mainRoute: AllowedModelRoute | undefined
+  if (agent?.session === rootSession || agent?.session === undefined) {
+    // The calling agent IS the root, so its live route is the main route. The
+    // header outranks the creation options for the same reason it does in
+    // `inheritedRouteOf`: after a mid-session switch the options are stale.
+    let live: { readonly provider?: unknown; readonly model?: unknown } | undefined
+    try {
+      live = agent?.model?.current?.()
+    } catch {
+      live = undefined
+    }
+    mainRoute = headerRouteOf(rootSession)
+      ?? routeOf(live?.provider, live?.model)
+      ?? routeOf(modelSelectionHint?.provider, modelSelectionHint?.model)
+  } else {
+    // A child is asking: the main model belongs to the root Session, never to
+    // the child, so the root's own recorded route decides.
+    const rootOptions = (rootSession as { readonly options?: { readonly provider?: unknown; readonly model?: unknown } }).options
+    mainRoute = headerRouteOf(rootSession)
+      ?? routeOf(rootOptions?.provider, rootOptions?.model)
+  }
+  if (mainRoute === undefined) return { rootSession }
+  // A route observed before the Session's first request is provisional unless
+  // the caller is on a path that must freeze the policy now.
+  if (lockable && (lockSnapshot || headerRouteOf(rootSession) !== undefined)) {
+    lockedRootMainRoutes.set(rootSession, mainRoute)
+  }
+  return { rootSession, mainRoute }
 }
 
 /**
@@ -586,12 +756,66 @@ export function effectiveAllowedRoutes(
   preference: SubagentModelSelectionPreference | undefined,
   sessions: SessionsResolver,
   scope: AuthorizationScope = 'session',
+  lockSnapshot = false,
 ): readonly AllowedModelRoute[] {
   // An explicit "off" in the Host document suspends enforcement everywhere,
   // matching the preference the Settings card owns.
   if (preference !== undefined && !preference.enabled) return []
-  return authorizedRoutesFor(agent, sessions)
-    ?? (scope === 'preference' ? preference?.allowedModels ?? [] : [])
+  const recorded = authorizedRoutesFor(agent, sessions)
+  const baseRoutes = recorded ?? (scope === 'preference' ? preference?.allowedModels ?? [] : [])
+  // Nothing was authorized for this Session, so no override can invent an
+  // allowlist: a per-main-model entry narrows what a Session already governs.
+  if (baseRoutes.length === 0) return []
+  return mainModelRoutesFor(agent, sessions, preference, baseRoutes, lockSnapshot)
+}
+
+/**
+ * Apply the per-main-model override to a Session's authorized routes.
+ *
+ * Precedence is exact-match, then fallback, then the Session's own list: an
+ * entry for the main model the Session actually runs is the most specific
+ * statement available, the fallback list covers every other main model, and the
+ * Session policy is what governs when the deployment configured neither.
+ * @param agent - Calling agent.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param preference - Current Host preference, when the settings service exists.
+ * @param baseRoutes - Routes the Session itself authorized; never empty here.
+ * @param lockSnapshot - Freeze the resolved main route AND the resolved route
+ *   list for this Session now.
+ * @returns the routes that actually govern this delegation.
+ */
+export function mainModelRoutesFor(
+  agent: AuthorizationAgent | undefined,
+  sessions: SessionsResolver,
+  preference: SubagentModelSelectionPreference | undefined,
+  baseRoutes: readonly AllowedModelRoute[],
+  lockSnapshot = false,
+): readonly AllowedModelRoute[] {
+  const { rootSession, mainRoute } = resolveRootSessionAndMainRoute(agent, sessions, undefined, lockSnapshot)
+  // Same weak-key rule as the main route itself: a fixture that is not an object
+  // is never locked, so every read stays live rather than throwing.
+  const lockable = typeof rootSession === 'object' && rootSession !== null
+  const locked = lockable ? lockedRootAllowedRoutes.get(rootSession) : undefined
+  if (locked !== undefined) return locked
+
+  const overrideRoutes = mainRoute === undefined
+    ? undefined
+    : preference?.byMainModel?.[`${mainRoute.provider}/${mainRoute.model}`]
+  const resolved = overrideRoutes !== undefined && overrideRoutes.length > 0
+    ? overrideRoutes
+    : (preference?.defaultAllowedModels !== undefined && preference.defaultAllowedModels.length > 0
+      ? preference.defaultAllowedModels
+      : baseRoutes)
+  // The route list a Session is judged against must be as stable as its main
+  // route. A Settings edit made while the Session is running would otherwise
+  // change the list mid-conversation: the prompt-assembly hook rewrites the
+  // `subagent` description and the `tools:sdk` section from it, so the next
+  // step would carry a different prefix and lose the provider's prefix cache —
+  // and it would contradict the card's own "applies to new sessions" promise.
+  if (lockable && (lockSnapshot || headerRouteOf(rootSession) !== undefined)) {
+    lockedRootAllowedRoutes.set(rootSession, [...resolved])
+  }
+  return resolved
 }
 
 /**
@@ -628,11 +852,118 @@ export function enrichListSubagentModelsOutput(
   const header = 'Authorized child routes for this Session (already filtered by the Session allowlist; '
     + 'only these routes are accepted, and `provider` and `model` must be passed as separate fields):'
   if (output.includes(header)) return output
+  const filtered = filterListSubagentModelsOutput(output, allowed)
   const lines = allowed.map(
     route => `- ${route.provider}/${route.model} -> provider: "${route.provider}", model: "${route.model}"`,
   )
   const suffix = `${header}\n${lines.join('\n')}`
-  return output.trim().length === 0 ? suffix : `${output}\n\n${suffix}`
+  return filtered.trim().length === 0 ? suffix : `${filtered}\n\n${suffix}`
+}
+
+/** One rendered `provider — Name` line of the upstream provider list. */
+const PROVIDER_LINE = /^([^/\s]+)\s+—\s+.+$/
+
+/** One rendered `provider/model — Name` line of the upstream model list. */
+const MODEL_LINE = /^([^/\s]+)\/([^\s]+)\s+—\s+.+$/
+
+/**
+ * Drop the upstream lines that name a route this Session does not authorize.
+ *
+ * The upstream discovery tool reads the union policy recorded on the Session, so
+ * its raw answer can list a provider or a `provider/model` line that belongs to
+ * another main model's entry and NOT to the routes this main model is governed
+ * by. Leaving those lines in place is worse than a cosmetic mismatch: the
+ * documented way to read this output is to copy a line into `subagent`, so every
+ * stale line is an invitation to a delegation the guard will refuse.
+ *
+ * Only the two known renderings are filtered, and only lines that MATCH one of
+ * them are candidates: any other line (a heading, a hint, an empty answer) is
+ * passed through untouched, so a generation that changes its wording degrades to
+ * the old behavior rather than to an empty answer.
+ * @param output - Original text returned by `list_subagent_models`.
+ * @param allowed - Routes the calling Session authorizes; never empty here.
+ * @returns the output with unauthorized lines removed.
+ */
+export function filterListSubagentModelsOutput(
+  output: string,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  if (allowed.length === 0 || output.length === 0) return output
+  // A model list carries a `Reasoning efforts:` block for the selected route;
+  // filtering it would delete the very detail the call asked for.
+  if (output.includes('\nReasoning efforts:\n')) return output
+  const lines = output.split('\n')
+  // The rendering is decided by the lines themselves: a provider list has no
+  // slash in its first token, a model list always does.
+  const modelList = lines.some(line => MODEL_LINE.test(line))
+  let matched = false
+  const kept: string[] = []
+  for (const line of lines) {
+    if (modelList) {
+      const match = MODEL_LINE.exec(line)
+      if (match === null) {
+        kept.push(line)
+        continue
+      }
+      matched = true
+      if (routesInclude(allowed, match[1]!, match[2]!)) kept.push(line)
+      continue
+    }
+    const match = PROVIDER_LINE.exec(line)
+    if (match === null) {
+      kept.push(line)
+      continue
+    }
+    matched = true
+    if (allowed.some(route => route.provider === match[1])) kept.push(line)
+  }
+  if (!matched) return output
+  const keptText = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  if (keptText.length > 0) return keptText
+  // Every candidate line was filtered out. Saying so beats returning an empty
+  // answer, which reads as "this deployment has no providers at all".
+  if (modelList) {
+    const providerId = MODEL_LINE.exec(output)?.[1] ?? ''
+    return `(no advertised models for ${providerId})`
+  }
+  return '(no LLM providers)'
+}
+
+/**
+ * Merge live per-main-model overrides into a resolved preference.
+ *
+ * The overrides are a separate seam from the settings namespace because they
+ * live in THIS plugin's own preference document, not in the upstream
+ * `subagent-model-selection` namespace. They also have to work on a harness
+ * where that namespace cannot be registered at all (0.1.7 dropped
+ * `settings.register`): there, an override is the only per-main-model statement
+ * available, so it stands up an enabled preference by itself rather than being
+ * dropped for lack of a base to attach to.
+ * @param base - Preference resolved from the settings namespace, when any.
+ * @param overrides - Live overrides read from this plugin's preferences.
+ * @returns the merged preference, or undefined when neither source says anything.
+ */
+export function mergePreferenceOverrides(
+  base: SubagentModelSelectionPreference | undefined,
+  overrides: SubagentRoutingOverrides | undefined,
+): SubagentModelSelectionPreference | undefined {
+  const hasDefault = overrides?.defaultAllowedModels !== undefined
+  const hasByMain = overrides?.byMainModel !== undefined
+  if (base === undefined) {
+    if (!hasDefault && !hasByMain) return undefined
+    return {
+      enabled: true,
+      allowedModels: overrides?.defaultAllowedModels ?? [],
+      ...hasDefault ? { defaultAllowedModels: overrides?.defaultAllowedModels } : {},
+      ...hasByMain ? { byMainModel: overrides?.byMainModel } : {},
+    }
+  }
+  if (!hasDefault && !hasByMain) return base
+  return {
+    ...base,
+    ...hasDefault ? { defaultAllowedModels: overrides?.defaultAllowedModels } : {},
+    ...hasByMain ? { byMainModel: overrides?.byMainModel } : {},
+  }
 }
 
 /**
@@ -795,6 +1126,7 @@ export function delegationDenialReason(
   scope: AuthorizationScope = 'session',
   inheritToolNames: readonly string[] = [],
   declaresRouteParameters?: RouteParameterProbe,
+  lockSnapshot = true,
 ): string | undefined {
   const mode = delegationModeOf(
     [
@@ -804,7 +1136,10 @@ export function delegationDenialReason(
     toolName,
   )
   if (mode === undefined) return undefined
-  const allowed = effectiveAllowedRoutes(agent, preference, sessions, scope)
+  // A denial is answered from the same routes the Session will keep: locking the
+  // snapshot here is what stops the reason from advertising a list the next call
+  // would not be judged against.
+  const allowed = effectiveAllowedRoutes(agent, preference, sessions, scope, lockSnapshot)
   if (allowed.length === 0) return undefined
   const request = asRecord(args) ?? {}
   const requestedProvider = asString(request['provider'])
@@ -884,6 +1219,14 @@ export interface SubagentAuthorizationOptions {
    * definitions seam does.
    */
   readonly declaresRouteParameters?: RouteParameterProbe
+  /**
+   * Live per-main-model overrides, read from this plugin's own preferences.
+   *
+   * A function rather than a value for the same reason the settings document is
+   * sampled per call: a Settings edit must take effect without rebuilding the
+   * guard or the Sessions it governs.
+   */
+  readonly routingOverrides?: () => SubagentRoutingOverrides | undefined
 }
 
 /** The exact guard signature the Host tool registry evaluates. */
@@ -907,13 +1250,37 @@ export function createSubagentAuthorization(
     agent,
     toolName,
     args,
-    subagentModelSelectionPreference(options.settings),
+    mergedPreference(options),
     options.sessions,
     options.toolNames,
     options.scope ?? 'session',
     options.inheritToolNames ?? [],
     options.declaresRouteParameters,
   )
+}
+
+/**
+ * Resolve the preference one guard evaluation uses.
+ *
+ * The namespace preference and this plugin's per-main-model overrides are
+ * separate seams — the override document outlives a harness that cannot register
+ * the namespace at all — so they are merged here, once, rather than at each of
+ * the four call sites that need the result.
+ * @param options - Runtime inputs the guard closed over.
+ * @returns the merged preference, or undefined when neither seam says anything.
+ */
+function mergedPreference(
+  options: { readonly settings?: SettingsService; readonly routingOverrides?: () => SubagentRoutingOverrides | undefined },
+): SubagentModelSelectionPreference | undefined {
+  let overrides: SubagentRoutingOverrides | undefined
+  try {
+    overrides = options.routingOverrides?.()
+  } catch {
+    // An overrides reader that throws leaves the namespace preference in charge,
+    // which is exactly the behavior this guard had before overrides existed.
+    overrides = undefined
+  }
+  return mergePreferenceOverrides(subagentModelSelectionPreference(options.settings), overrides)
 }
 
 /** Delegation names this guard recognizes when configuration omits them. */
@@ -980,6 +1347,13 @@ export interface SubagentModelAuthorizationConfig {
   readonly inheritToolNames?: readonly string[]
   /** Whether an unrecorded Session falls back to the current preference. */
   readonly scope?: AuthorizationScope
+  /**
+   * Live per-main-model overrides read from this plugin's preferences.
+   *
+   * Read on every evaluation instead of sampled once, so a Settings edit applies
+   * to Sessions that are already running.
+   */
+  readonly routingOverrides?: () => SubagentRoutingOverrides | undefined
 }
 
 /** Event-registration surface used when the Host context is a full Cordis context. */
@@ -1061,7 +1435,13 @@ export function installSubagentModelAuthorization(
     inheritToolNames,
     scope,
     declaresRouteParameters: routeParameterProbe(ctx),
+    routingOverrides: config.routingOverrides,
   })
+  // The two listeners below read the preference directly, so they go through the
+  // same merge the guard does; a Session must never be shown one list while being
+  // judged against another.
+  const currentPreference = (): SubagentModelSelectionPreference | undefined =>
+    mergedPreference({ settings, routingOverrides: config.routingOverrides })
   const disposeGuard = ctx.tools.guard(exec =>
     authorize(exec.agent as AuthorizationAgent | undefined, exec.name, exec.arguments))
 
@@ -1088,9 +1468,10 @@ export function installSubagentModelAuthorization(
       }
       const allowed = effectiveAllowedRoutes(
         exec.agent as AuthorizationAgent | undefined,
-        subagentModelSelectionPreference(settings),
+        currentPreference(),
         sessions,
         scope,
+        true,
       )
       // Both postures are stated: a governed Session gets its routes, an
       // ungoverned one gets the fact that nothing is enforced. Staying silent in
@@ -1130,12 +1511,7 @@ export function installSubagentModelAuthorization(
     ) => {
       const assembled = await next()
       const agent = (context?.agent ?? context?.scope) as AuthorizationAgent | undefined
-      const allowed = effectiveAllowedRoutes(
-        agent,
-        subagentModelSelectionPreference(settings),
-        sessions,
-        scope,
-      )
+      const allowed = effectiveAllowedRoutes(agent, currentPreference(), sessions, scope, true)
       return rewriteAuthorizedPromptAssembly(assembled, allowed, toolNames)
     },
   )

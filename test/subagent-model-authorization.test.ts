@@ -15,6 +15,9 @@ import {
   effectiveAllowedRoutes,
   enrichListSubagentModelsOutput,
   explicitRoutePair,
+  filterListSubagentModelsOutput,
+  mergePreferenceOverrides,
+  resolveRootSessionAndMainRoute,
   inheritOverrideReason,
   inheritRouteDenialReason,
   inheritedRouteOf,
@@ -652,6 +655,197 @@ describe('subagent model authorization', () => {
 
     dispose()
     expect(disposedEvents).toBe(2)
+  })
+})
+
+describe('per-main-model subagent routing', () => {
+  const DEEPSEEK: AllowedModelRoute = { provider: 'deepseek-official', model: 'deepseek-flash' }
+  const CODEX: AllowedModelRoute = { provider: 'codex-chatgpt', model: 'gpt-6-astra' }
+  const BY_MAIN: SubagentModelSelectionPreference = {
+    enabled: true,
+    allowedModels: [GEMINI, OPUS],
+    defaultAllowedModels: [MINIMAX],
+    byMainModel: {
+      'codex-chatgpt/gpt-6-astra': [CODEX],
+    },
+  }
+
+  /** A root Session that recorded its policy and whose header names its main route. */
+  function rootSession(
+    routes: readonly AllowedModelRoute[],
+    mainRoute: { provider?: string; model?: string },
+  ): PolicySession {
+    return routedSession(routes, mainRoute)
+  }
+
+  it('applies the entry for the root Session main model, then the fallback list, then the policy', () => {
+    const codexRoot = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    expect(effectiveAllowedRoutes({ session: codexRoot }, BY_MAIN, NO_SESSIONS)).toEqual([CODEX])
+    // An unmatched main model falls back to the deployment's fallback list.
+    const deepseekRoot = rootSession([GEMINI, OPUS], DEEPSEEK)
+    expect(effectiveAllowedRoutes({ session: deepseekRoot }, BY_MAIN, NO_SESSIONS)).toEqual([MINIMAX])
+    // A deployment with no override configured keeps the Session policy.
+    const plain = rootSession([GEMINI, OPUS], DEEPSEEK)
+    expect(effectiveAllowedRoutes({ session: plain }, PREFERENCE, NO_SESSIONS)).toEqual([GEMINI, OPUS])
+    // An override can never invent an allowlist for a Session that governs none.
+    expect(effectiveAllowedRoutes({ session: session([]) }, BY_MAIN, NO_SESSIONS)).toEqual([])
+    expect(effectiveAllowedRoutes({ session: session([]) }, BY_MAIN, NO_SESSIONS, 'preference')).toEqual([MINIMAX])
+    // An explicit "off" still suspends enforcement everywhere.
+    expect(effectiveAllowedRoutes({ session: codexRoot }, { ...BY_MAIN, enabled: false }, NO_SESSIONS)).toEqual([])
+  })
+
+  it('resolves the main model from the ROOT Session, never from the child', () => {
+    const root = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const child = session([policyEvent([GEMINI, OPUS])], { origin: 'subagent', parentSession: 'root' })
+    const sessions = registry({ root })
+    // The child's own route is irrelevant: the main model belongs to the root.
+    const childAgent = { session: child, options: DEEPSEEK }
+    expect(resolveRootSessionAndMainRoute(childAgent, sessions).mainRoute).toEqual({
+      provider: 'codex-chatgpt', model: 'gpt-6-astra',
+    })
+    expect(effectiveAllowedRoutes(childAgent, BY_MAIN, sessions)).toEqual([CODEX])
+  })
+
+  it('reads the main route from the live model accessor and the delegation hint', () => {
+    const live = session([policyEvent([GEMINI, OPUS])])
+    expect(resolveRootSessionAndMainRoute({ session: live, model: { current: () => DEEPSEEK } }, NO_SESSIONS).mainRoute)
+      .toEqual(DEEPSEEK)
+    const hinted = session([policyEvent([GEMINI, OPUS])])
+    expect(resolveRootSessionAndMainRoute({ session: hinted }, NO_SESSIONS, CODEX).mainRoute).toEqual(CODEX)
+    // A header that names the route outranks the creation options, which go stale
+    // after a mid-session switch.
+    const switched = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    expect(resolveRootSessionAndMainRoute({ session: switched, options: DEEPSEEK }, NO_SESSIONS).mainRoute)
+      .toEqual({ provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+  })
+
+  it('locks the first resolved main route so the allowlist never drifts mid-session', () => {
+    // A Session whose main model is switched AFTER its policy was first read
+    // keeps the routes it started with: re-pointing them would change the
+    // prompt-advertised list mid-conversation and invalidate its prefix cache.
+    const events = [policyEvent([GEMINI, OPUS])]
+    let config: { provider?: string; model?: string } = { provider: 'codex-chatgpt', model: 'gpt-6-astra' }
+    const lockable: PolicySession = {
+      eventAt: (seq: number) => events[seq] as { type?: unknown; data?: unknown } | undefined,
+      requestHeader: () => ({ config }),
+    }
+    const agent = { session: lockable }
+    expect(effectiveAllowedRoutes(agent, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([CODEX])
+    config = DEEPSEEK
+    // Locked: the answer is still the entry for the model the Session started on.
+    expect(effectiveAllowedRoutes(agent, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([CODEX])
+    expect(resolveRootSessionAndMainRoute(agent, NO_SESSIONS).mainRoute)
+      .toEqual({ provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    // A different Session object is a different lock.
+    const other = rootSession([GEMINI, OPUS], DEEPSEEK)
+    expect(effectiveAllowedRoutes({ session: other }, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
+  })
+
+  it('locks the resolved route LIST so a Settings edit never rewrites a running session prompt', () => {
+    // The main route is only the key into byMainModel. Editing the list while a
+    // session runs must not change what that session advertises: the
+    // prompt-assembly hook rewrites the subagent description and the tools:sdk
+    // section from it, so a mid-conversation change loses the prefix cache and
+    // contradicts the card's "applies to new sessions" promise.
+    const live = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const agent = { session: live }
+    expect(effectiveAllowedRoutes(agent, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([CODEX])
+
+    // A later step sees an edited preference: the entry is replaced and the
+    // fallback list changes too.
+    const edited: SubagentModelSelectionPreference = {
+      ...BY_MAIN,
+      defaultAllowedModels: [{ provider: 'antigravity', model: 'gemini-3.8-flash' }],
+      byMainModel: { 'codex-chatgpt/gpt-6-astra': [MINIMAX] },
+    }
+    // The running session keeps the list it started with...
+    expect(effectiveAllowedRoutes(agent, edited, NO_SESSIONS, 'session', true)).toEqual([CODEX])
+    expect(effectiveAllowedRoutes(agent, edited, NO_SESSIONS, 'session', true)).not.toEqual([MINIMAX])
+    // ...including through the prompt hook, which must not rewrite a locked
+    // session's description with the new list.
+    const upstreamDesc = 'Delegate a task. Child LLM selection is optional. '
+      + 'Omit `provider`, `model`, and `reasoning_effort` to use configured child defaults and inherit compatible missing values from the parent Agent.'
+    const assembly = {
+      sections: [{ name: 'tools:sdk', text: upstreamDesc }],
+      tools: [{ name: 'subagent', description: upstreamDesc }],
+    }
+    const rewritten = rewriteAuthorizedPromptAssembly(assembly, effectiveAllowedRoutes(agent, edited, NO_SESSIONS, 'session', true))
+    expect(rewritten.sections[0]!.text).toContain('codex-chatgpt/gpt-6-astra')
+    expect(rewritten.sections[0]!.text).not.toContain('minimax-code/MiniMax-M3.1-Flash')
+
+    // A session created AFTER the edit picks the new list up.
+    const fresh = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    expect(effectiveAllowedRoutes({ session: fresh }, edited, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
+    // The fallback list is locked the same way for a main model with no entry.
+    const deepseekLive = rootSession([GEMINI, OPUS], DEEPSEEK)
+    expect(effectiveAllowedRoutes({ session: deepseekLive }, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
+    const editedFallback: SubagentModelSelectionPreference = {
+      ...BY_MAIN,
+      defaultAllowedModels: [CODEX],
+    }
+    expect(effectiveAllowedRoutes({ session: deepseekLive }, editedFallback, NO_SESSIONS, 'session', true))
+      .toEqual([MINIMAX])
+    expect(effectiveAllowedRoutes({ session: rootSession([GEMINI, OPUS], DEEPSEEK) }, editedFallback, NO_SESSIONS, 'session', true))
+      .toEqual([CODEX])
+    // A session with a request header locks on first use even without the flag.
+    const headerLocked = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    expect(effectiveAllowedRoutes({ session: headerLocked }, BY_MAIN, NO_SESSIONS)).toEqual([CODEX])
+    expect(effectiveAllowedRoutes({ session: headerLocked }, edited, NO_SESSIONS)).toEqual([CODEX])
+  })
+
+  it('denies a delegation outside the overridden list with that list in the reason', () => {
+    const codexRoot = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const agent = { session: codexRoot }
+    // GEMINI is on the Session policy but not on this main model's entry.
+    expect(delegationDenialReason(agent, 'subagent', { provider: GEMINI.provider, model: GEMINI.model }, BY_MAIN, NO_SESSIONS))
+      .toContain('codex-chatgpt/gpt-6-astra')
+    expect(delegationDenialReason(agent, 'subagent', { provider: CODEX.provider, model: CODEX.model }, BY_MAIN, NO_SESSIONS))
+      .toBeUndefined()
+  })
+
+  it('merges live overrides into the preference, including without a settings namespace', () => {
+    expect(mergePreferenceOverrides(PREFERENCE, undefined)).toBe(PREFERENCE)
+    expect(mergePreferenceOverrides(undefined, undefined)).toBeUndefined()
+    expect(mergePreferenceOverrides(undefined, { defaultAllowedModels: [MINIMAX] })).toEqual({
+      enabled: true, allowedModels: [MINIMAX], defaultAllowedModels: [MINIMAX],
+    })
+    expect(mergePreferenceOverrides(undefined, { byMainModel: { 'a/b': [CODEX] } })).toEqual({
+      enabled: true, allowedModels: [], byMainModel: { 'a/b': [CODEX] },
+    })
+    expect(mergePreferenceOverrides(PREFERENCE, { byMainModel: { 'a/b': [CODEX] } })).toEqual({
+      enabled: true, allowedModels: [GEMINI, OPUS], byMainModel: { 'a/b': [CODEX] },
+    })
+  })
+
+  it('filters upstream provider and model lines that this Session does not authorize', () => {
+    const providerList = [
+      'minimax-code — MiniMax Code',
+      'codex-chatgpt — ChatGPT Subscription',
+      'antigravity — Antigravity',
+    ].join('\n')
+    const filteredProviders = enrichListSubagentModelsOutput(providerList, [CODEX])
+    expect(filteredProviders).toContain('codex-chatgpt — ChatGPT Subscription')
+    expect(filteredProviders).not.toContain('minimax-code — MiniMax Code')
+    expect(filteredProviders).not.toContain('antigravity — Antigravity')
+    expect(filteredProviders).toContain('codex-chatgpt/gpt-6-astra -> provider: "codex-chatgpt", model: "gpt-6-astra"')
+
+    const modelList = 'codex-chatgpt/gpt-6-astra — GPT-6 Astra\ncodex-chatgpt/gpt-5.6-sol — GPT-5.6 Sol\nminimax-code/MiniMax-M3.1-Flash — MiniMax'
+    const filteredModels = enrichListSubagentModelsOutput(modelList, [CODEX])
+    expect(filteredModels).toContain('codex-chatgpt/gpt-6-astra — GPT-6 Astra')
+    expect(filteredModels).not.toContain('gpt-5.6-sol')
+    expect(filteredModels).not.toContain('minimax-code/MiniMax-M3.1-Flash')
+
+    // Everything filtered out still says something true instead of nothing.
+    expect(enrichListSubagentModelsOutput('minimax-code — MiniMax Code', [CODEX])).toContain('(no LLM providers)')
+    expect(enrichListSubagentModelsOutput('minimax-code/MiniMax-M3.1-Flash — MiniMax', [CODEX]))
+      .toContain('(no advertised models for minimax-code)')
+    // A reasoning-efforts block is detail the call asked for, never filtered.
+    const withEfforts = 'codex-chatgpt/gpt-6-astra — GPT-6 Astra\nReasoning efforts:\n- high\n- low'
+    expect(filterListSubagentModelsOutput(withEfforts, [CODEX])).toBe(withEfforts)
+    // Text that matches neither rendering is passed through untouched.
+    expect(filterListSubagentModelsOutput('Nothing here.', [CODEX])).toBe('Nothing here.')
+    // An unrestricted Session filters nothing at all.
+    expect(filterListSubagentModelsOutput(providerList, [])).toBe(providerList)
   })
 })
 

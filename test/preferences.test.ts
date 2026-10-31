@@ -89,6 +89,57 @@ describe('subscription preferences', () => {
     expect(await store.update({ compactionRoute: null })).toMatchObject({ compactionRoute: null })
   })
 
+  it('stores per-main-model subagent routes, merges one entry, and clears it again', async () => {
+    const store = createPreferenceStore({})
+    // Nothing configured means "the Session's own allowlist governs".
+    expect(store.status().subagentDefaultModels).toEqual([])
+    expect(store.status().subagentModelsByMainModel).toEqual({})
+    const route = { provider: 'minimax-code', model: 'MiniMax-M3.1-Flash' }
+    expect(await store.update({ subagentDefaultModels: [route] }))
+      .toMatchObject({ subagentDefaultModels: [route] })
+    // Routes are trimmed and deduplicated on the way in, and order is preserved.
+    expect(await store.update({
+      subagentDefaultModels: [
+        { provider: ' minimax-code ', model: ' MiniMax-M3.1-Flash ' },
+        route,
+        { provider: 'antigravity', model: 'gemini-3.8-flash' },
+      ],
+    })).toMatchObject({
+      subagentDefaultModels: [route, { provider: 'antigravity', model: 'gemini-3.8-flash' }],
+    })
+    // One entry per main model, merged rather than replaced.
+    expect(await store.update({
+      subagentModelsByMainModel: { 'deepseek-official/deepseek-flash': [route] },
+    })).toMatchObject({ subagentModelsByMainModel: { 'deepseek-official/deepseek-flash': [route] } })
+    const merged = await store.update({
+      subagentModelsByMainModel: { 'codex-chatgpt/gpt-6-astra': [{ provider: 'antigravity', model: 'claude-opus-4-6' }] },
+    })
+    expect(merged.subagentModelsByMainModel).toEqual({
+      'deepseek-official/deepseek-flash': [route],
+      'codex-chatgpt/gpt-6-astra': [{ provider: 'antigravity', model: 'claude-opus-4-6' }],
+    })
+    // A model id that legally contains a slash still round-trips: the split is
+    // at the FIRST slash, so the provider half ends there.
+    expect(await store.update({
+      subagentModelsByMainModel: { 'command-code/deepseek/deepseek-v4.1-flash': [route] },
+    })).toMatchObject({ subagentModelsByMainModel: { 'command-code/deepseek/deepseek-v4.1-flash': [route] } })
+    // `null` (or `[]`) clears exactly one entry and leaves the rest alone.
+    const cleared = await store.update({ subagentModelsByMainModel: { 'deepseek-official/deepseek-flash': null } })
+    expect(cleared.subagentModelsByMainModel).toEqual({
+      'codex-chatgpt/gpt-6-astra': [{ provider: 'antigravity', model: 'claude-opus-4-6' }],
+      'command-code/deepseek/deepseek-v4.1-flash': [route],
+    })
+    expect((await store.update({ subagentModelsByMainModel: { 'codex-chatgpt/gpt-6-astra': [] } }))
+      .subagentModelsByMainModel).toEqual({ 'command-code/deepseek/deepseek-v4.1-flash': [route] })
+    // A malformed route or a key without a provider/model split is refused.
+    await expect(store.update({ subagentDefaultModels: [{ provider: 'minimax-code' }] as never }))
+      .rejects.toThrow('Unsupported subagentDefaultModels preference.')
+    await expect(store.update({ subagentModelsByMainModel: { 'no-slash': [route] } }))
+      .rejects.toThrow('Unsupported subagentModelsByMainModel preference.')
+    await expect(store.update({ subagentModelsByMainModel: { 'a/b': [{ model: 'x' }] } as never }))
+      .rejects.toThrow('Unsupported subagentModelsByMainModel preference.')
+  })
+
   it('clears one override back to the absent state a restored default leaves behind', async () => {
     const store = createPreferenceStore({ contextWindowOverrides: { 'gpt-6-astra': 512_000 } })
     expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(512_000)

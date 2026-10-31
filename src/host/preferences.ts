@@ -14,6 +14,8 @@ import {
   isProxyMode,
   isSearchProviderPreference,
   isCompactionRouteTarget,
+  mergeSubagentModelsByMainModel,
+  normalizeSubagentModelRoutes,
 } from '../shared/preferences.ts'
 import type {
   SubscriptionPreferencesDto,
@@ -53,6 +55,9 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
     z.number().step(1).min(1).max(contextWindowLimitForModel(entry.id)),
   ]))).default({})
 
+  // One route shape, shared by the fallback list and every per-main-model entry.
+  const subagentModelRoutes = z.array(z.object({ provider: z.string(), model: z.string() }))
+
   const schema = z.object({
     enabled: z.boolean().default(DEFAULT_PREFERENCES.enabled ?? true),
     quickQuotaVisible: z.boolean().default(DEFAULT_PREFERENCES.quickQuotaVisible),
@@ -73,6 +78,11 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
       z.object({ provider: z.string(), model: z.string() }),
       z.const(null),
     ]).default(DEFAULT_PREFERENCES.compactionRoute ?? null),
+    // Child-route authorization, keyed by the MAIN agent's route: a deployment
+    // can let a GPT main agent delegate to one set of models and a DeepSeek main
+    // agent to another, with one fallback list for every other main model.
+    subagentDefaultModels: subagentModelRoutes.default([]),
+    subagentModelsByMainModel: z.dict(subagentModelRoutes).default({}),
   })
 
   // Harness 0.1.7 replaced the register seam, so the plugin owns the storage:
@@ -146,6 +156,21 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
       normalized.compactionRoute = patch.compactionRoute === null
         ? null
         : { provider: patch.compactionRoute.provider.trim(), model: patch.compactionRoute.model.trim() }
+    }
+    if (patch.subagentDefaultModels !== undefined) {
+      const routes = normalizeSubagentModelRoutes(patch.subagentDefaultModels)
+      if (routes === null) throw new PreferenceError('Unsupported subagentDefaultModels preference.')
+      normalized.subagentDefaultModels = routes
+    }
+    if (patch.subagentModelsByMainModel !== undefined) {
+      // A merge, not a replace: clearing one main model must not drop every
+      // other entry, and `null`/`[]` is how one entry is cleared.
+      const merged = mergeSubagentModelsByMainModel(
+        this.scope.get().subagentModelsByMainModel,
+        patch.subagentModelsByMainModel,
+      )
+      if (merged === null) throw new PreferenceError('Unsupported subagentModelsByMainModel preference.')
+      normalized.subagentModelsByMainModel = merged
     }
     if (patch.customProxyUrl !== undefined) {
       if (patch.customProxyUrl !== null) {

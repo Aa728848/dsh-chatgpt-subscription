@@ -14,7 +14,12 @@ import type {
   SubscriptionPreferencesUpdateDto,
 } from '../shared/contracts.ts'
 import { contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
-import { isCodexReasoningSummary, isCompactionRouteTarget } from '../shared/preferences.ts'
+import {
+  isCodexReasoningSummary,
+  isCompactionRouteTarget,
+  mergeSubagentModelsByMainModel,
+  normalizeSubagentModelRoutes,
+} from '../shared/preferences.ts'
 import type { CompactionCandidatesDto } from '../shared/contracts.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
 import { isSameOriginMutation } from './common/same-origin.ts'
@@ -521,6 +526,22 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
     patch.compactionRoute = value.compactionRoute === null
       ? null
       : { provider: value.compactionRoute.provider.trim(), model: value.compactionRoute.model.trim() }
+  }
+  if ('subagentDefaultModels' in value) {
+    const routes = normalizeSubagentModelRoutes(value.subagentDefaultModels)
+    if (routes === null) {
+      throw new PreferenceError('subagentDefaultModels must be an array of { provider, model } routes.')
+    }
+    patch.subagentDefaultModels = routes
+  }
+  if ('subagentModelsByMainModel' in value) {
+    // Validated here for a 400 with a precise message, but forwarded as the raw
+    // patch: the store merges it against the LIVE document, and merging twice
+    // would resurrect a key this body asked to clear.
+    if (mergeSubagentModelsByMainModel(current.subagentModelsByMainModel, value.subagentModelsByMainModel) === null) {
+      throw new PreferenceError('subagentModelsByMainModel must map "provider/model" keys to arrays of { provider, model } routes, or null to clear one.')
+    }
+    patch.subagentModelsByMainModel = value.subagentModelsByMainModel as SubscriptionPreferencesUpdateDto['subagentModelsByMainModel']
   }
   if ('contextWindowOverrides' in value) {
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')
