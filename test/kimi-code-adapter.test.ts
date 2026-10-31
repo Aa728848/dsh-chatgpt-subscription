@@ -12,6 +12,13 @@ import {
   resolveDefaultReasoningEffort,
 } from '../src/host/kimi-code/adapter.ts'
 import { sessionCacheState } from '../src/host/kimi-code/session-cache-state.ts'
+import {
+  buildRequest,
+  getLastDriftCause,
+  isSideChannelTitleRequest,
+  markPendingImageOffload,
+  resetCacheStats,
+} from '../src/host/kimi-code/mapper.ts'
 import { resetSessionActivity, sessionLastActiveAt } from '../src/host/kimi-code/cache-hint.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/kimi-code/token-store.ts'
 import type { KimiCodeAccountPool } from '../src/host/kimi-code/account-pool.ts'
@@ -965,10 +972,12 @@ describe('the Kimi Code side-channel title request', () => {
   beforeEach(() => {
     resetColdStartSingleflightForTests()
     resetSessionActivity()
+    resetCacheStats()
   })
 
   afterEach(() => {
     resetColdStartSingleflightForTests()
+    resetCacheStats()
   })
 
   it('files nothing under the conversation it titles', async () => {
@@ -1018,6 +1027,54 @@ describe('the Kimi Code side-channel title request', () => {
     expect(afterTitle?.lastDrift).toBe(afterConversation?.lastDrift)
     expect(afterTitle?.warmupConsecutiveHits).toBe(1)
     expect(sessionLastActiveAt(sessionId)).toBe(activeAfterConversation)
+  })
+
+  it('does not classify a tool result containing the title prompt as a title request', () => {
+    const options = generateOptions('k3', {
+      messages: [{
+        role: 'tool',
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'call-1',
+          content: [{
+            type: 'text',
+            text: 'Generate the session title from this JSON array of human messages: this is quoted evidence',
+          }],
+        }],
+      }] as never,
+      tools: [{ name: 'run_code', description: 'runs code', parameters: { type: 'object' } }] as never,
+    })
+    expect(isSideChannelTitleRequest(options as never)).toBe(false)
+  })
+
+  it('does not let a title request clear the conversation pending image-offload attribution', async () => {
+    const sessionId = 'kc-title-image-race'
+    const conversation = generateOptions('k3', {
+      sessionId: sessionId as never,
+      system: 'the conversation system prompt',
+    })
+    buildRequest(conversation as never, 'openai')
+    // Simulates the main turn having dropped an image and then pausing before
+    // its body build while the title request runs on the same session id.
+    markPendingImageOffload(sessionId, 1)
+
+    const { adapter } = await buildAdapter({
+      fetchFn: (async () => sseResponse([
+        { choices: [{ delta: { content: 'title' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])) as typeof fetch,
+    })
+    await drain(adapter.stream(generateOptions('k3', {
+      sessionId: sessionId as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages: []' }],
+      }] as never,
+    })))
+
+    buildRequest(conversation as never, 'openai')
+    expect(getLastDriftCause(sessionId)).toBe('image-offload')
   })
 })
 
@@ -1121,5 +1178,45 @@ describe('the Kimi Code cold-start singleflight', () => {
 
     releaseLeader!()
     await Promise.all([leader, follower])
+  }, 20_000)
+
+  it('re-elects a leader after a hung leader exceeds the wait budget', async () => {
+    const gates: Array<Promise<void>> = []
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      const index = calls
+      calls += 1
+      const gate = gates[index]
+      if (gate !== undefined) await gate
+      return sseResponse([
+        { choices: [{ delta: { content: 'hi' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { adapter } = await buildAdapter({ fetchFn })
+
+    const system = 'a shared conversation system prompt'
+    let releaseHungLeader: (() => void) | undefined
+    gates[0] = new Promise<void>((resolve) => { releaseHungLeader = resolve })
+    const hungLeader = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-stale-a' as never, system })))
+    await waitUntil(() => calls === 1)
+
+    // The first follower sends after the wait budget, while the original
+    // leader is still stuck before its response headers.
+    const follower = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-stale-b' as never, system })))
+    await waitUntil(() => calls === 2, COLD_START_WARMUP_WAIT_MS + 3_000)
+    await follower
+
+    // Once the old leader is beyond the same budget, the next request must be
+    // allowed to lead immediately instead of paying another follower wait.
+    let releaseNewLeader: (() => void) | undefined
+    gates[2] = new Promise<void>((resolve) => { releaseNewLeader = resolve })
+    const newLeader = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-stale-c' as never, system })))
+    await waitUntil(() => calls === 3, COLD_START_WARMUP_WAIT_MS - 100)
+    releaseNewLeader!()
+    await newLeader
+
+    releaseHungLeader!()
+    await hungLeader
   }, 20_000)
 })

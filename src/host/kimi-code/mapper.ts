@@ -1704,15 +1704,20 @@ function leadingSystemTextStart(options: GenerateOptions): string | undefined {
 export function isSideChannelTitleRequest(options: GenerateOptions): boolean {
   if (options === undefined || options === null) return false
   const messages = Array.isArray(options.messages) ? options.messages : []
+  const tools = options.tools
+  const toolLess = tools === undefined || tools.length === 0
   for (const message of messages) {
     if (!isRecord(message)) continue
     const kind = (message as { source?: { kind?: unknown } }).source?.kind
     if (kind === SESSION_TITLE_SOURCE_KIND) return true
+    // Prompt text is only a compatibility fallback, not proof on its own: a
+    // normal tool result may quote the title instruction verbatim. The real
+    // side-channel request carries no tools, just like the system-prompt
+    // fallback below.
     const text = firstTextOf((message as { content?: unknown }).content)
-    if (text !== undefined && text.startsWith(TITLE_REQUEST_PROMPT_PREFIX)) return true
+    if (toolLess && text !== undefined && text.startsWith(TITLE_REQUEST_PROMPT_PREFIX)) return true
   }
-  const tools = options.tools
-  if (tools === undefined || tools.length === 0) {
+  if (toolLess) {
     const systemText = leadingSystemTextStart(options)
     if (systemText !== undefined && systemText.startsWith(TITLE_REQUEST_SYSTEM_PREFIX)) return true
   }

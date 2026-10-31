@@ -911,6 +911,9 @@ const warmPrefixTimestamps = new Map<string, number>()
  */
 const inFlightColdLeaders = new Map<string, Promise<void>>()
 
+/** When each leader started, so a hung leader does not own its group forever. */
+const inFlightColdLeaderStartedAt = new Map<string, number>()
+
 /**
  * The resolver belonging to each in-flight leader.
  *
@@ -929,6 +932,7 @@ export function resetColdStartSingleflightForTests(): void {
   for (const release of [...coldLeaderReleases.values()]) release()
   warmPrefixTimestamps.clear()
   inFlightColdLeaders.clear()
+  inFlightColdLeaderStartedAt.clear()
   coldLeaderReleases.clear()
 }
 
@@ -1042,6 +1046,18 @@ async function acquireColdStartWarmup(
     // Already warm: no wait at all.
     return NO_COLD_START_GATE
   }
+  const existing = inFlightColdLeaders.get(groupKey)
+  if (existing !== undefined) {
+    const startedAt = inFlightColdLeaderStartedAt.get(groupKey)
+    if (startedAt !== undefined && Date.now() - startedAt >= COLD_START_WARMUP_WAIT_MS) {
+      // The original request is allowed to finish, but it no longer owns the
+      // group. Releasing here wakes its followers and lets this request become
+      // a fresh leader instead of paying the follower timeout on every turn.
+      // The old release's identity guard below prevents it deleting this new
+      // leader when the old request eventually settles.
+      coldLeaderReleases.get(groupKey)?.()
+    }
+  }
   const leader = inFlightColdLeaders.get(groupKey)
   if (leader !== undefined) {
     await raceColdStartLeader(leader, signal)
@@ -1050,12 +1066,14 @@ async function acquireColdStartWarmup(
   let resolveLeader!: () => void
   const promise = new Promise<void>((resolve) => { resolveLeader = resolve })
   inFlightColdLeaders.set(groupKey, promise)
+  inFlightColdLeaderStartedAt.set(groupKey, Date.now())
   const release = (): void => {
     resolveLeader()
     // A later leader for the same group must not be released by this one.
     if (coldLeaderReleases.get(groupKey) !== release) return
     coldLeaderReleases.delete(groupKey)
     inFlightColdLeaders.delete(groupKey)
+    inFlightColdLeaderStartedAt.delete(groupKey)
   }
   coldLeaderReleases.set(groupKey, release)
   return {
@@ -1473,8 +1491,10 @@ export class KimiCodeAdapter extends LlmAdapter {
     )
     const imageTrimmed = stickyOffload.options
     // Recorded BEFORE the body is built, so the prefix attribution names the
-    // offload whether the build happens before or after this line.
-    markPendingImageOffload(options.sessionId, stickyOffload.newlyDroppedKeys.length)
+    // offload whether the build happens before or after this line. A title
+    // request must not clear a main turn's pending marker while the two run
+    // concurrently under the same session id.
+    if (!sideChannel) markPendingImageOffload(options.sessionId, stickyOffload.newlyDroppedKeys.length)
     // THE THINKING GATE, for every wire.
     //
     // The service answers HTTP 400 for a disabled-thinking request on a model
@@ -1909,7 +1929,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     // the images. Those give-backs are sticky too: a picture that was omitted
     // to make the body fit must not come back on the next turn, or the prefix
     // it broke is rebuilt on the turn after that.
-    if (measured !== undefined) {
+    if (measured !== undefined && !sideChannel) {
       const requestImageBytes = requestImagePayloadLengths(measured.options, images)
         .reduce((sum, bytes) => sum + bytes, 0)
       const trimmedKeys = new Set(collectRemainingImageKeys(imageTrimmed, images))

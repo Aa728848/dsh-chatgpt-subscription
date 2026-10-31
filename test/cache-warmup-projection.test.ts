@@ -844,6 +844,30 @@ describe('projectToolResult 的 spill 恢复', () => {
     expect(page.content).toBe(visible)
     expect(page.content).not.toContain('Omitted')
   })
+
+  it('识别带图片省略段和未知字节数的真实 DSH spill 提示', async () => {
+    const full = hugeBuildLog()
+    const visible = full.slice(0, 2000)
+    for (const [sessionId, notice] of [
+      ['spill-images', (filePath: string) => `\n\n(Omitted ${full.length - visible.length} bytes. Omitted 2 images. Full formatted result stored at: ${filePath}. Use read with offset/limit, or grep this path to search within it.)`],
+      ['spill-unknown', (filePath: string) => `\n\n(More bytes were omitted. Full formatted result stored at: ${filePath}. Use read with offset/limit, or grep this path to search within it.)`],
+    ] as const) {
+      const spillPath = path.join(await makeRoot(), `${sessionId}.txt`)
+      await fs.writeFile(spillPath, full, 'utf8')
+      const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+      const result = await projectToolResult({
+        toolName: 'run_code',
+        sessionId,
+        content: visible + notice(spillPath),
+        budget: WARMUP,
+        store,
+      })
+      expect(result.changed).toBe(true)
+      expect(result.metrics.inputChars).toBe(full.length)
+      const collected = await readAllPages(store, sessionId, result.refId!)
+      expect(collected).toBe(full)
+    }
+  })
 })
 
 describe('projectToolResult 的复合 JSON 信封', () => {
@@ -889,6 +913,41 @@ describe('projectToolResult 的复合 JSON 信封', () => {
     expect(result.preview).toContain('results: 1 (complete set)')
     expect(result.preview).toContain('grep matches=60 across 12 files')
     expect(result.preview!.length).toBeLessThanOrEqual(STEADY.maxChars)
+  })
+
+  it('复合信封中的源码仍逐字保留，不退化为日志摘要', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify({ stdout: sourceLog() })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'composite-source',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(false)
+    expect(result.content).toBe(raw)
+    expect(result.metrics.strategy).toBe('verbatim-unparsed')
+  })
+
+  it('复合信封中的契约仍逐字保留，不退化为日志摘要', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const contract = [
+      'export interface First { id: string }',
+      'export type Second = First',
+      ...Array.from({ length: 100 }, (_, index) => `// filler line ${index} padding padding padding`),
+    ].join('\n')
+    const raw = JSON.stringify({ stdout: contract })
+    const result = await projectToolResult({
+      toolName: 'run_code',
+      sessionId: 'composite-contract',
+      content: raw,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(false)
+    expect(result.content).toBe(raw)
+    expect(result.metrics.strategy).toBe('verbatim-unparsed')
   })
 })
 

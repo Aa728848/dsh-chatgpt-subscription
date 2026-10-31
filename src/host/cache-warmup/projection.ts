@@ -52,11 +52,11 @@ function clip(text: string, max: number): string {
 /**
  * DSH 的输出上限提示：正文被截断，全文落在临时文件里。
  *
- * 形态固定：正文 + 换行 + `(Omitted N bytes. Full formatted result stored at: <path>. Use read with offset/limit, or grep this path to search within it.)`。
+ * 省略说明可能是精确或未知字节数，还可能跟着一段图片计数；这些形态都由 DSH 的 formatSpillNotice 产生。
  * 路径本身可能带 `.txt` 之类的后缀，所以路径用**非贪婪**捕获，末尾的句点单独留给正则。
  */
 const SPILL_NOTICE =
-  /\n\n\(Omitted \d+ bytes\. Full formatted result stored at: ([^\r\n]+?)(?:\. Use read with offset\/limit, or grep this path to search within it)?\.\)\s*$/
+  /\n\n\((?:Omitted \d+ bytes\.|More bytes were omitted\.)(?: Omitted \d+ images\.)? Full formatted result stored at: ([^\r\n]+?)(?:\. Use read with offset\/limit, or grep this path to search within it)?\.\)\s*$/
 
 /**
  * 读回一个 spill 文件的完整 UTF-8 内容。
@@ -1290,6 +1290,10 @@ function classifyCompositeEntry(key: string, value: Record<string, unknown>): Co
   for (const logKey of JSON_ENVELOPE_LOG_KEYS) {
     const logText = value[logKey]
     if (typeof logText !== 'string' || logText.length === 0) continue
+    // The composite path must preserve the same verbatim invariant as the
+    // single-log path. A JSON wrapper does not turn source, a contract or mixed
+    // evidence into an ordinary build log that may be replaced by an outline.
+    if (looksLikeSourceCode(logText) || looksLikeContract(logText) || isMixedEvidenceOutput(logText)) return undefined
     const meta = shellMetadataOf(value)
     return {
       kind: 'log',
