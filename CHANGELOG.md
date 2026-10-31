@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.49.0 - 2026-10-31
+
+- **[kimi-code] 图片预算对齐原生 `kimi-cli`（20 MiB 高水位 / 10 MiB 低水位）并实现会话级粘性淘汰（Closes #79）**
+  - **预算提升与双水位迟滞**：`DEFAULT_MAX_REQUEST_IMAGE_BYTES` 从 2 MB 时代的 `1.5 MB` 提升至对齐原生 `kimi-cli`（`REQUEST_MEDIA_BUDGET_BYTES`）的 `20 MiB`（`20,971,520` bytes），触发淘汰时的恢复低水位设为 `10 MiB`（`10,485,760` bytes）；支持 `DSH_KIMI_CODE_MAX_IMAGE_BYTES` 环境变量覆盖（自动以其 50% 作为恢复低水位）。保持 `src/host/common/request-images.ts` 的共享默认常量 `1,500,000` 不变，不影响其他线路。
+  - **会话级粘性淘汰（`budgetDropped`）与持久化**：新增图片身份标识 `requestImageKey`（`attachment:<id>` 或 `inline:<sha256>`）与 `offloadRequestImagesWithStickyBudget`。一旦某张旧图因超预算被替换为占位文本，该会话后续请求始终将其替换为占位文本，不再随每张新图进入而反复重算淘汰集合、打断前缀缓存；淘汰集合同步持久化到 `sessionCacheState`（`dsh-chatgpt-subscription-kimi-cache.json`），跨进程重启后依然保持稳定。
+  - **前缀漂移归因与设置页展示**：`KimiCodeCacheStatsDto['lastDrift']` 新增 `'image-offload'`（当本轮新淘汰了历史图片且前缀原本为 `'stable'` 时归因为「旧图片超预算淘汰（缓存重建）」）；Kimi 设置页「缓存与 K3 调优」卡片新增「请求图片预算」行展示本轮图片体积、预算上限及低水位/已粘性淘汰张数（中/英/俄三语字典同步补齐）。
+
+- **[subagent] 支持按主模型分别配置子代理模型白名单与运行时鉴权**
+  - 设置页「子代理模型授权」卡片支持为不同主模型绑定各自允许派发的子代理模型列表，并在运行时路由守卫中按当前会话主模型精确解析与校验白名单。
+
 ## 0.48.4 - 2026-10-31
 
 - **[llm-compat] 修复 `role: 'tool'` 消息的 `toolCallId` 读错位置：整轮请求被判 `11148 tool calls and tool results do not match`**
