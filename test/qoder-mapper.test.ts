@@ -361,4 +361,40 @@ describe('错误信封里的失败事实（issue #74）', () => {
     const caught = catchOf(errorEnvelope({ message: 'Login expired', code: '105' }, 401))
     expect(caught?.code).toBe('AUTH')
   })
+
+  it('上游拼写变体 REOSURCE_LIMIT 及多层 JSON 字符串嵌套也能识别为排队（SERVER）而非 AUTH', () => {
+    // 1. REOSURCE_LIMIT 拼写变体
+    const typo = catchOf(errorEnvelope({
+      code: 403,
+      subCode: 'REOSURCE_LIMIT',
+    }, 403))
+    expect(typo?.code).toBe('SERVER')
+    expect(typo?.message).toContain('排队')
+
+    // 2. 三层嵌套（body 里某个字段又是 JSON 字符串）
+    const nested = catchOf(errorEnvelope({
+      code: 403,
+      message: JSON.stringify({
+        code: 10605,
+        subCode: 'REOSURCE_LIMIT',
+        queueCount: '512',
+        retryAfterSeconds: '15',
+        serviceAvailable: 'false',
+      }),
+    }, 403))
+    expect(nested?.code).toBe('SERVER')
+    expect(nested?.message).toContain('512')
+
+    // 3. statusCodeValue 仍是 200，但内层直接返回排队错误载荷（无 choices/usage）
+    const inBand200 = catchOf(envelope({
+      code: 403,
+      error: {
+        code: 10605,
+        subCode: 'REOSURCE_LIMIT',
+        queueCount: 88,
+      },
+    }, 200))
+    expect(inBand200?.code).toBe('SERVER')
+    expect(inBand200?.message).toContain('排队')
+  })
 })

@@ -75,6 +75,7 @@ import {
   classifyQoderFailure,
   closeQoderStream,
   createQoderStreamState,
+  isQoderQueueFailure,
   offloadOldestQoderRequestImages,
   processQoderStreamLine,
   qoderRequestOptionsFor,
@@ -439,10 +440,51 @@ export class QoderAdapter extends LlmAdapter {
   }
 
   /**
+   * 当前模型在上游排队（RESOURCE_LIMIT / 10605）时，按已启用模型的环序挑下一个候选。
+   *
+   * 只在实时目录上存在明确多模型时做轮询切换；仅剩兜底表（无实时目录）且没有显式
+   * 白名单时不盲切，避免冷启动在未知目录上空转。
+   */
+  private nextQueuedFallbackModel(
+    currentModel: string,
+    triedModels: ReadonlySet<string>,
+    region: QoderRegion,
+    settings: QoderModelSettings,
+  ): string | undefined {
+    const live = qoderCatalogIsLive(region)
+    const available = this.catalog(region)
+    if (!live && (settings.enabledModelIds === null || settings.enabledModelIds === undefined)) {
+      return undefined
+    }
+    const selected = convergeQoderSelection(settings.enabledModelIds ?? null, live, available)
+    const allow = selected === null ? null : new Set(selected)
+    const enabled = available
+      .filter((model) => allow === null || allow.has(model.id))
+      .map((model) => model.id)
+    if (enabled.length <= 1) return undefined
+
+    const currentIndex = enabled.findIndex(
+      (id) => id === currentModel || id.toLowerCase() === currentModel.toLowerCase(),
+    )
+    const startIndex = currentIndex >= 0 ? currentIndex : 0
+    for (let offset = 1; offset <= enabled.length; offset += 1) {
+      const candidate = enabled[(startIndex + offset) % enabled.length]!
+      if (!triedModels.has(candidate) && candidate.toLowerCase() !== currentModel.toLowerCase()) {
+        return candidate
+      }
+    }
+    return undefined
+  }
+
+  /**
    * 一次请求的完整往返：选账号 → 定目录行 → 编码+签名 → 发 → 解析信封流。
    *
-   * 账号轮转的循环只有一处：一次 429 或一次 AUTH 会把那个账号移出本次请求，
-   * 由另一个账号来发**同一份**请求体。没有池时这个循环只跑一次。
+   * 账号轮转与模型排队轮询都在首包送出前完成：
+   *
+   * - 429 / QUOTA / AUTH（不论来自 HTTP 状态码还是 HTTP 200 的首帧错误信封）会把当前账号
+   *   移出本次请求，由池里下一个可用账号重试；
+   * - 上游报模型排队（10605 / RESOURCE_LIMIT / REOSURCE_LIMIT）时，按本线路已启用模型列表
+   *   顺序轮询切换到下一个可用模型；所有候选都排队时立即上抛，不附带超长退避等待以免卡住手动切换。
    *
    * 编码与签名的顺序是协议事实（inference-protocol.md §3-§4）：先 JSON.stringify
    * 一次拿到字节，codec 编码这同一份字节，签名覆盖编码后的字符串——任何中间的
@@ -459,17 +501,68 @@ export class QoderAdapter extends LlmAdapter {
     const requestOptions = offloadOldestQoderRequestImages(normalizeGenerateOptions(options))
     const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
 
-    const tried = new Set<string>()
-    let response: Response | undefined
-    let picked = await this.credentialFor(tried)
+    const triedAccounts = new Set<string>()
+    const triedModels = new Set<string>([options.model])
+    let currentModel = options.model
+    let picked = await this.credentialFor(triedAccounts)
+
+    const handlePreContentFailure = async (
+      failure: LlmError,
+      responseHeaders?: Headers,
+    ): Promise<boolean> => {
+      if (isQoderQueueFailure(failure)) {
+        const nextModel = this.nextQueuedFallbackModel(
+          currentModel,
+          triedModels,
+          picked.credentials.region,
+          settings,
+        )
+        if (nextModel !== undefined) {
+          triedModels.add(nextModel)
+          currentModel = nextModel
+          return true
+        }
+        if (picked.accountId !== null && this.accountPool !== null) {
+          if (await this.accountPool.hasAnotherAvailableAccount(triedAccounts)) {
+            picked = await this.credentialFor(triedAccounts)
+            return true
+          }
+        }
+        return false
+      }
+
+      if (picked.accountId !== null && this.accountPool !== null) {
+        if (failure.code === 'RATE_LIMIT' || failure.code === 'QUOTA') {
+          const after = responseHeaders === undefined ? undefined : retryAfterMs(responseHeaders)
+          const reason = failure.code === 'QUOTA'
+            ? PROVIDER_NAME + '：当前账号额度已用尽'
+            : PROVIDER_NAME + ' 429：上游限流或额度用尽'
+          await this.accountPool
+            .markCooldown(picked.accountId, after ?? QODER_POOL_COOLDOWN_MS, reason)
+            .catch(() => undefined)
+          if (await this.accountPool.hasAnotherAvailableAccount(triedAccounts)) {
+            picked = await this.credentialFor(triedAccounts)
+            return true
+          }
+        } else if (failure.code === 'AUTH') {
+          // 凭据被拒是**这个账号**的事：保留它（重新授权才恢复），把它移出本次请求。
+          await this.accountPool.markAuthFailed(picked.accountId, failure.message).catch(() => undefined)
+          if (await this.accountPool.hasAnotherAvailableAccount(triedAccounts)) {
+            picked = await this.credentialFor(triedAccounts)
+            return true
+          }
+        }
+      }
+      return false
+    }
 
     while (true) {
-      if (picked.accountId !== null) tried.add(picked.accountId)
+      if (picked.accountId !== null) triedAccounts.add(picked.accountId)
       const region = picked.credentials.region
       const catalog = this.catalog(region)
-      const entry = resolveQoderModel(options.model, catalog, region)
+      const entry = resolveQoderModel(currentModel, catalog, region)
       const wireOptions = qoderRequestOptionsFor(entry, {
-        defaultMaxTokens: maxOutputTokensFor(options.model, catalog),
+        defaultMaxTokens: maxOutputTokensFor(currentModel, catalog),
       })
       // 请求体拼一次、串行化一次；编码与签名都吃这同一份字节。
       const bodyText = JSON.stringify(buildQoderChatRequest(
@@ -495,6 +588,7 @@ export class QoderAdapter extends LlmAdapter {
         modelSource: entry.source,
       })
 
+      let response: Response
       try {
         response = await fetchFn(url, {
           method: 'POST',
@@ -513,82 +607,81 @@ export class QoderAdapter extends LlmAdapter {
         )
       }
 
-      if (response.ok) break
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '')
+        // 错误分类**只在 mapper 里**，本文件不再写第二份：两份分类器一定会漂。
+        const failure = classifyQoderFailure(response.status, detail.slice(0, 600))
+        if (await handlePreContentFailure(failure, response.headers)) {
+          continue
+        }
+        throw failure
+      }
 
-      const detail = await response.text().catch(() => '')
-      // 错误分类**只在 mapper 里**，本文件不再写第二份：两份分类器一定会漂。
-      const failure = classifyQoderFailure(response.status, detail.slice(0, 600))
+      if (response.body === null) throw new LlmError(PROVIDER_NAME + ' 返回了空响应体', 'PROVIDER_ERROR')
 
-      if (picked.accountId !== null && this.accountPool !== null) {
-        if (failure.code === 'RATE_LIMIT') {
-          const after = retryAfterMs(response.headers)
-          await this.accountPool
-            .markCooldown(picked.accountId, after ?? QODER_POOL_COOLDOWN_MS, PROVIDER_NAME + ' 429：上游限流或额度用尽')
-            .catch(() => undefined)
-          if (await this.accountPool.hasAnotherAvailableAccount(tried)) {
-            picked = await this.credentialFor(tried)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      const state = createQoderStreamState()
+      let buffer = ''
+      let yielded = false
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          // 传输层收到字节就是连接还活着的证据：心跳帧不产生任何可展示 chunk，
+          // 计时判据因此下沉到传输层，而不是解析器是否产出。
+          if (value !== undefined && value.byteLength > 0) activity?.pulse()
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            // 每个完整帧各上报一次；纯注释帧正是展示层计时会误判成静默的那种。
+            activity?.pulse()
+            for (const chunk of processQoderStreamLine(line, state)) {
+              yielded = true
+              yield chunk
+            }
+            if (state.finished) return
+          }
+        }
+        buffer += decoder.decode()
+        if (buffer.trim() !== '') {
+          for (const line of buffer.split('\n')) {
+            for (const chunk of processQoderStreamLine(line, state)) {
+              yielded = true
+              yield chunk
+            }
+          }
+        }
+        if (state.finished) return
+        // 没有终止事件的流是被截断的回复，不是一份完整答案。
+        assertQoderStreamComplete(state)
+        for (const chunk of closeQoderStream(state)) {
+          yielded = true
+          yield chunk
+        }
+        return
+      } catch (error) {
+        if (!yielded && error instanceof LlmError) {
+          if (await handlePreContentFailure(error, response.headers)) {
             continue
           }
-        } else if (failure.code === 'AUTH') {
-          // 凭据被拒是**这个账号**的事：保留它（重新授权才恢复），把它移出本次请求。
-          await this.accountPool.markAuthFailed(picked.accountId, failure.message).catch(() => undefined)
-          if (await this.accountPool.hasAnotherAvailableAccount(tried)) {
-            picked = await this.credentialFor(tried)
-            continue
-          }
         }
-      }
-
-      throw failure
-    }
-
-    if (response === undefined) throw new LlmError(PROVIDER_NAME + ' 没有返回任何响应', 'PROVIDER_ERROR')
-    if (response.body === null) throw new LlmError(PROVIDER_NAME + ' 返回了空响应体', 'PROVIDER_ERROR')
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    const state = createQoderStreamState()
-    let buffer = ''
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        // 传输层收到字节就是连接还活着的证据：心跳帧不产生任何可展示 chunk，
-        // 计时判据因此下沉到传输层，而不是解析器是否产出。
-        if (value !== undefined && value.byteLength > 0) activity?.pulse()
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          // 每个完整帧各上报一次；纯注释帧正是展示层计时会误判成静默的那种。
-          activity?.pulse()
-          for (const chunk of processQoderStreamLine(line, state)) yield chunk
-          if (state.finished) return
+        throw error
+      } finally {
+        // 缓存用量在这里记账：流的末端是唯一同时知道「这次请求有没有用量帧」的地方，
+        // 而没有用量帧的一拍不计入样本（否则 requests 会把没报用量的请求算进来）。
+        if (state.sawUsage) {
+          rememberQoderCacheUsage({
+            inputTokens: state.inputTokens,
+            outputTokens: state.outputTokens,
+            cacheReadTokens: state.cacheReadTokens,
+            cacheWriteTokens: state.cacheWriteTokens,
+          })
         }
+        void reader.cancel().catch(() => undefined)
       }
-      buffer += decoder.decode()
-      if (buffer.trim() !== '') {
-        for (const line of buffer.split('\n')) {
-          for (const chunk of processQoderStreamLine(line, state)) yield chunk
-        }
-      }
-      if (state.finished) return
-      // 没有终止事件的流是被截断的回复，不是一份完整答案。
-      assertQoderStreamComplete(state)
-      for (const chunk of closeQoderStream(state)) yield chunk
-    } finally {
-      // 缓存用量在这里记账：流的末端是唯一同时知道「这次请求有没有用量帧」的地方，
-      // 而没有用量帧的一拍不计入样本（否则 requests 会把没报用量的请求算进来）。
-      if (state.sawUsage) {
-        rememberQoderCacheUsage({
-          inputTokens: state.inputTokens,
-          outputTokens: state.outputTokens,
-          cacheReadTokens: state.cacheReadTokens,
-          cacheWriteTokens: state.cacheWriteTokens,
-        })
-      }
-      void reader.cancel().catch(() => undefined)
     }
   }
 }

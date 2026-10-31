@@ -238,6 +238,130 @@ describe('QoderAdapter 端到端（mock fetch）', () => {
     const accounts = await pool.listAccounts()
     expect(accounts.every((account) => account.authStatus !== 'expired')).toBe(true)
   })
+
+  it('模型排队等待时自动按已启用模型列表轮询切换到下一个可用模型', async () => {
+    clearCachedQoderModelCatalog()
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'qoder-adapter-model-rotate-'))
+    const pool = new QoderAccountPool({ backend: new MemoryBackend() as never })
+    await pool.addAccount(credentials())
+    const settingsStore = new QoderModelSettingsStore(path.join(dir, 'models.json'))
+    await settingsStore.updateSettings({
+      enabledModelIds: ['DeepSeek-Flash', 'Qwen3.8-Flash', 'Lite'],
+    })
+
+    const requestedModelKeys: string[] = []
+    const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/model/list')) {
+        return Response.json({
+          chat: [
+            { key: 'dfmodel', display_name: 'DeepSeek-Flash', enable: true },
+            { key: 'qfmodel', display_name: 'Qwen3.8-Flash', enable: true },
+            { key: 'lite', display_name: 'Lite', enable: true },
+          ],
+        })
+      }
+      if (!url.includes('agent_chat_generation')) return new Response('', { status: 404 })
+      const headers = Object.fromEntries(new Headers(init?.headers).entries())
+      const modelKey = headers['x-model-key'] ?? ''
+      requestedModelKeys.push(modelKey)
+      if (modelKey === 'dfmodel') {
+        // 第一个模型返回排队（HTTP 200 + statusCodeValue 403 + REOSURCE_LIMIT）
+        return new Response(
+          'data:' + JSON.stringify({
+            headers: { 'Content-Type': ['application/json'] },
+            body: JSON.stringify({
+              code: 10605,
+              subCode: 'REOSURCE_LIMIT',
+              modelKey: 'dfmodel',
+              queueCount: 3239,
+              retryAfterSeconds: 30,
+              serviceAvailable: false,
+            }),
+            statusCodeValue: 403,
+            statusCode: 'FORBIDDEN',
+          }) + '\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        )
+      }
+      return sseResponse(ANSWER_SSE)
+    }) as unknown as typeof fetch
+
+    await loadQoderModelCatalog(
+      { accessToken: 'jt-test', region: 'global', uid: 'u-1', email: null, accountName: null },
+      { fetchFn },
+    )
+
+    const adapter = new QoderAdapter(
+      new QoderCredentialStore(path.join(dir, 'credentials.json'), new MemoryBackend() as never),
+      settingsStore,
+      undefined,
+      { accountPool: pool, fetchFn },
+    )
+
+    const prepared = await adapter.prepareCall('qoder', 'DeepSeek-Flash')
+    const chunks: Array<Record<string, unknown>> = []
+    for await (const chunk of prepared.stream({
+      provider: 'qoder',
+      model: 'DeepSeek-Flash',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }],
+    } as never)) {
+      chunks.push(chunk as Record<string, unknown>)
+    }
+
+    // 第一次请求 dfmodel 排队后，自动轮询切到下一个已启用模型 qfmodel 并成功返回内容。
+    expect(requestedModelKeys).toEqual(['dfmodel', 'qfmodel'])
+    const text = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
+    expect(text).toBe('你好，世界')
+  })
+
+  it('流内首帧信封返回 AUTH / QUOTA 时支持号池自动轮询切换到下一个可用账号', async () => {
+    clearCachedQoderModelCatalog()
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'qoder-adapter-pool-rotate-'))
+    const pool = new QoderAccountPool({ backend: new MemoryBackend() as never })
+    await pool.addAccount({ ...credentials(), uid: 'u-1', accessToken: 'jt-1' })
+    await pool.addAccount({ ...credentials(), uid: 'u-2', accessToken: 'jt-2' })
+
+    const seenUsers: string[] = []
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = Object.fromEntries(new Headers(init?.headers).entries())
+      const user = headers['cosy-user'] ?? ''
+      seenUsers.push(user)
+      if (user === 'u-1') {
+        return new Response(
+          'data:' + JSON.stringify({
+            headers: { 'Content-Type': ['application/json'] },
+            body: JSON.stringify({ code: 112, pricingUrl: 'https://qoder.com/pricing' }),
+            statusCodeValue: 403,
+            statusCode: 'FORBIDDEN',
+          }) + '\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        )
+      }
+      return sseResponse(ANSWER_SSE)
+    }) as unknown as typeof fetch
+
+    const adapter = new QoderAdapter(
+      new QoderCredentialStore(path.join(dir, 'credentials.json'), new MemoryBackend() as never),
+      new QoderModelSettingsStore(path.join(dir, 'models.json')),
+      undefined,
+      { accountPool: pool, fetchFn },
+    )
+
+    const prepared = await adapter.prepareCall('qoder', 'Lite')
+    const chunks: Array<Record<string, unknown>> = []
+    for await (const chunk of prepared.stream({
+      provider: 'qoder',
+      model: 'Lite',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }],
+    } as never)) {
+      chunks.push(chunk as Record<string, unknown>)
+    }
+
+    expect(seenUsers).toEqual(['u-1', 'u-2'])
+    const text = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
+    expect(text).toBe('你好，世界')
+  })
 })
 
 // ---------------------------------------------------------------------------
