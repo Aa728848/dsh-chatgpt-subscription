@@ -150,6 +150,16 @@ function PlanModeMark(): ReactNode {
   )
 }
 
+/** 调度执行守卫那一行的标记：一面带勾的盾牌（挡住越权调用）。 */
+function DispatchGuardMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 3 4.5 5.2v4.6c0 3.8 2.3 6.4 5.5 7.2 3.2-.8 5.5-3.4 5.5-7.2V5.2L10 3Z" />
+      <path d="m7.5 10 1.8 1.8 3.4-3.6" />
+    </svg>
+  )
+}
+
 function PanelMark(): ReactNode {
   return (
     <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -226,7 +236,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline' | 'dispatchExecutionGuard', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -237,6 +247,9 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   // 缺键 = 开：宿主 schema 上是 `default(true)`，老配置没有这个键时界面必须同样
   // 读成开，否则用户看到的是关着、而调度模式其实照旧自动进计划模式。
   const planModePipeline = value.planModePipeline !== false
+  // 缺键 = 开：宿主 schema 上是 default(true)，老配置没有这个键时界面必须同样读成开，
+  // 否则用户看到的是关着、而守卫其实照旧生效。
+  const dispatchExecutionGuard = value.dispatchExecutionGuard !== false
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT
@@ -256,7 +269,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline' | 'dispatchExecutionGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -397,6 +410,27 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-plan-mode-pipeline-switch"
             disabled={!writable}
             onClick={() => { write('planModePipeline', 'planModePipeline', !planModePipeline) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-dispatch-execution-guard"
+          brand="#3b7a9e"
+          mark={<DispatchGuardMark />}
+          name={translate('settingsDispatchExecutionGuardName')}
+          note={failure?.row === 'dispatchExecutionGuard' ? failure.text : translate('settingsDispatchExecutionGuardNote')}
+          danger={failure?.row === 'dispatchExecutionGuard'}
+          enabled={dispatchExecutionGuard}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={dispatchExecutionGuard}
+            aria-label={translate('settingsDispatchExecutionGuardName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-dispatch-execution-guard-switch"
+            disabled={!writable}
+            onClick={() => { write('dispatchExecutionGuard', 'dispatchExecutionGuard', !dispatchExecutionGuard) }}
           />
         </CardRow>
 

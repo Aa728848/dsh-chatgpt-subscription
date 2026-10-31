@@ -347,6 +347,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.querySelector('[data-dsh-part="settings-row-cache-warmup"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-retrieval"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-plan-mode-pipeline"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-dispatch-execution-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-panel"]')).not.toBeNull()
@@ -355,12 +356,13 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.textContent).toContain(zh.settingsCacheWarmupName)
     expect(container.textContent).toContain(zh.settingsRetrievalName)
     expect(container.textContent).toContain(zh.settingsPlanModePipelineName)
+    expect(container.textContent).toContain(zh.settingsDispatchExecutionGuardName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
     expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(7)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(8)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -448,6 +450,39 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     await act(async () => { toggle.click() })
     // 落到核心行 Config 的根字段上，与 schedule 里的 planModePipeline 是同一个键
     expect(form.writes).toEqual([['planModePipeline', false]])
+  })
+
+  it('调度执行守卫开关缺键时读成开，显式关闭时回显关闭', async () => {
+    // 缺键 = 开：宿主 schema 上是 default(true)，老配置没有这个键时界面必须同样读成开。
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: fakeForm({}),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-dispatch-execution-guard-switch"]')?.getAttribute('aria-checked')).toBe('true')
+
+    // 显式 false 才是关：这一行读的是「不等于 false」，不是「等于 true」。
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: fakeForm({ dispatchExecutionGuard: false }),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-dispatch-execution-guard-switch"]')?.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('调度执行守卫开关写回的是本插件 Config 的 dispatchExecutionGuard', async () => {
+    const form = fakeForm({})
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-dispatch-execution-guard-switch"]')!
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    await act(async () => { toggle.click() })
+    // 缺键读成开，所以点一下写的是 false。
+    expect(form.writes).toEqual([['dispatchExecutionGuard', false]])
+  })
+
+  it('没有设置服务时调度执行守卫开关是禁用的', async () => {
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-dispatch-execution-guard-switch"]')?.disabled).toBe(true)
   })
 
   it('未声明检索字段时设置页默认开启', async () => {

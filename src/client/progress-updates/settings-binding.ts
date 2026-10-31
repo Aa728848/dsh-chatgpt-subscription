@@ -70,6 +70,14 @@ export interface ProgressUpdatesSettingsValues {
    * 否则「设置里显示关着」与「实际是开着的」会同时成立。
    */
   planModePipeline?: boolean
+  /**
+   * 调度执行守卫开关（缺键 = 开）。
+   *
+   * 与宿主 src/index.ts 的 Config 同一个对象里的字段、名字逐字一致；宿主那边是
+   * default(true)，所以老配置没有这个键时界面必须同样读成开，否则「设置里显示
+   * 关着」与「实际是开着的」会同时成立。
+   */
+  dispatchExecutionGuard?: boolean
 }
 
 /** 输出语言的三种取值，供界面侧声明变量类型。 */
@@ -83,6 +91,7 @@ export type ProgressUpdatesField =
   | 'cacheWarmup'
   | 'cacheWarmupRetrieval'
   | 'planModePipeline'
+  | 'dispatchExecutionGuard'
 
 /**
  * 候选条目 id，按可能性从高到低。

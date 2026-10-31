@@ -746,8 +746,8 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('the defect goes back out on a re-dispatch with evidence')
       expect(persona).toContain('Shipping a defect you already named in the review')
       // The notification is a post-hoc signal, in both rules that touch it.
-      expect(persona).toContain('The notification is a post-hoc signal')
       expect(persona).toContain('The completion notification is a post-hoc signal')
+      expect(persona).toContain('post-hoc signal')
       expect(persona).toContain('Treat it as "there is now something to review", never as "this passed"')
     }
   })
@@ -855,6 +855,80 @@ describe('the persona block the declaration transcribes', () => {
       // The unconditional claim the three-level fallback made false is gone.
       expect(persona).not.toContain('The bridge rejects a live child at execution time')
     }
+  })
+
+  it('keeps both shipped copies byte-identical and carries the dispatch upgrades in both', () => {
+    // The preset ships twice: the YAML the legacy sync deploys and the
+    // declaration 0.1.7 registers. A rule that reaches only one of them
+    // teaches two different dispatch modes, and the plan-mode section is the
+    // coordinator's only guardrail on the manual /plan path. So this test pins
+    // the two texts against each other and pins the new rules into them.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+
+    /** One `key: |` block of the YAML, dedented to the text the runtime mounts. */
+    function blockOf(marker: string, indent: number): string {
+      const lines = yml.split('\n')
+      const start = lines.findIndex(line => line.trim() === marker)
+      if (start < 0) throw new Error(`agent.cordis.yml carries no "${marker}" block`)
+      const block: string[] = []
+      for (const line of lines.slice(start + 1)) {
+        if (line.trim() === '') { block.push(''); continue }
+        if (!line.startsWith(' '.repeat(indent))) break
+        block.push(line.slice(indent))
+      }
+      return block.join('\n').replace(/\n+$/, '')
+    }
+
+    /** One declared config string, without its trailing newlines. */
+    function declaredText(id: string, key: 'prefix' | 'section'): string {
+      const row = allRows().find(candidate => candidate.id === id)
+      const config = row?.config as Record<string, unknown> | undefined
+      const value = config?.[key]
+      if (typeof value !== 'string') throw new Error(`the declaration carries no ${id} ${key}`)
+      return value.replace(/\n+$/, '')
+    }
+
+    const prefix = declaredText('persona', 'prefix')
+    const section = declaredText('plan-mode', 'section')
+
+    // Parity: the declaration and the shipped file carry the same text.
+    expect(prefix).toBe(blockOf('prefix: |', 6))
+    expect(section).toBe(blockOf('section: |', 14))
+
+    // The new dispatch rules, in the persona the coordinator actually reads.
+    for (const rule of [
+      'hand_back',
+      'existing-standard',
+      'Stop by Impact, Not by Effort',
+      'Before',
+      'After',
+      'Clause Deletion Test',
+      'DELEGATED_CALLER',
+    ]) {
+      expect(prefix).toContain(rule)
+    }
+    // The standing contract and the report protocol it names.
+    expect(prefix).toContain('[Standing Subagent Contract]')
+    expect(prefix).toContain('[Subagent Report Protocol]')
+    expect(prefix).toContain('[Coordinator-Only Tools]')
+    expect(prefix).toContain('status: ready | hand_back | blocked | failed | dropped')
+    expect(prefix).toContain('hand_back_reason')
+    expect(prefix).toContain('no per-cycle banking')
+    // A clean hand_back is a scope routing event, not a failed run.
+    expect(prefix).toContain('does not increment the brief\u2019s 3-run failure counter')
+    expect(prefix).toContain('send_message({ agent_id })')
+    // The compact brief form and the three new anti-patterns.
+    expect(prefix).toContain('Compact Delta Brief')
+    expect(prefix).toContain('use a Compact Delta Brief by default')
+    expect(prefix.length).toBeLessThan(18500)
+    expect(prefix).toContain('23. Asking the user about an implementation detail an existing-standard in the repository already settles')
+    expect(prefix).toContain('24. Penalizing a clean status: hand_back scope escalation as a failed run')
+    expect(prefix).toContain('25. Accepting a visible UI change without Before & After comparison evidence')
+
+    // The plan-mode section is the coordinator's own guardrail: it carries the
+    // exemption and the visual-evidence gate the plan itself has to name.
+    expect(section).toContain('existing-standard')
+    expect(section).toContain('Before and After visual evidence')
   })
 })
 

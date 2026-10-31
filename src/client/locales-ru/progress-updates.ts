@@ -34,6 +34,8 @@ export const dictionary: Record<ProgressUpdatesLocaleKey, string> = {
   settingsRetrievalNote: 'Только Kimi Code: проецировать файлы, страницы и поиск при навигации; сохранять код при правке и ревью; на других линиях переключатель ничего не меняет',
   settingsPlanModePipelineName: 'Конвейер режима плана',
   settingsPlanModePipelineNote: 'После схождения уточняющего интервью автоматически войти в режим плана, подготовить план и отправить его на утверждение (только в режиме диспетчера); если выключено, этот режим попросит пользователя ввести /plan вручную',
+  settingsDispatchExecutionGuardName: 'Защита выполнения диспетчера',
+  settingsDispatchExecutionGuardNote: 'Блокировать вызовы инструментов диспетчера субагентами во время выполнения и запрещать пустое ожидание sleep при активных дочерних агентах; не меняет объявления инструментов и сохраняет префиксный кеш Kimi',
   settingsThresholdName: 'Порог напоминания',
   settingsThresholdNote: 'Напомнить агенту после стольких раундов без отчёта',
   settingsLanguageName: 'Язык вывода',

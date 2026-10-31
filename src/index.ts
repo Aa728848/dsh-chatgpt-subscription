@@ -159,6 +159,10 @@ import { installToolResultPrunerGuard } from './host/tool-result-pruner-guard.ts
 import { installPlanModeCacheGuard } from './host/plan-mode-cache-guard.ts'
 import { installPtcSdkCacheGuard } from './host/ptc-sdk-cache-guard.ts'
 import { installCompactionPolicyGuard } from './host/compaction-policy-guard.ts'
+import {
+  installDispatchExecutionGuard,
+  resolveDispatchExecutionGuardEnabled,
+} from './host/dispatch-execution-guard.ts'
 import { installBundledPresets } from './host/preset-sync.ts'
 import { installDispatchPreset } from './host/agent-preset.ts'
 import {
@@ -268,6 +272,19 @@ export interface Config {
    * 递交下去的读取器每次重读活引用，因此下一步就生效、不重挂任何一行。
    */
   planModePipeline?: Volatile<boolean>
+  /**
+   * 「调度执行守卫」总开关：打开后在**执行期**拦住两类越界调用——子代理直接调用
+   * 主控专用工具（提问/计划模式/目标/交付），以及子代理还在跑时用 `sleep` 空等。
+   * 默认开启。
+   *
+   * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：设置一保存就地写
+   * 新值，递交下去的读取器每次重读活引用，因此下一步就生效、不重挂任何一行。
+   *
+   * 这个守卫**只**用 `ctx.tools.guard()` 这条执行期接缝：不碰 `tools.definitions`、
+   * 不碰 `tools.register`、不听 `system-prompt/assemble`，所以工具声明面（Kimi Code
+   * 的 `tools:sdk` 段与顶层工具 schema）保持逐字节恒定，前缀缓存零漂移。
+   */
+  dispatchExecutionGuard?: Volatile<boolean>
   /**
    * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
@@ -398,6 +415,8 @@ export interface ConfigInput {
   progressUpdatesLanguage?: ProgressUpdateLanguage
   /** 「计划模式管线」总开关（默认开启）：允许调度模式用 enter_plan_mode / leave_plan_mode。 */
   planModePipeline?: boolean
+  /** 「调度执行守卫」总开关（默认开启）：执行期拦截子代理越权调用与等待期空等。 */
+  dispatchExecutionGuard?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
   /** 检索型结果投影独立开关（默认开启；只影响之后产生的新结果）。 */
@@ -445,6 +464,11 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 重读活引用，因此开关在同一个会话里下一步就生效。
   planModePipeline: z.boolean().default(true).volatile()
     .description('启用计划模式管线：允许调度模式在澄清访谈收敛后用 enter_plan_mode 进入计划模式，放弃规划时用 leave_plan_mode 退出。'),
+
+  // 调度执行守卫：执行期拦截子代理越权调用主控专用工具，以及等待子代理期间的
+  // 纯 sleep 空等。volatile 让设置保存后就地写新值，下一步就生效、不重挂任何行。
+  dispatchExecutionGuard: z.boolean().default(true).volatile()
+    .description('启用调度执行守卫：在执行期拦截子代理越权调用主控专用工具，并拦截等待子代理期间的纯 sleep 空等命令；不修改工具声明面，零损耗保护 Kimi 缓存。'),
 
   // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
   // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
@@ -597,6 +621,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const guard = installCompactionPolicyGuard(ctx)
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: compaction policy guard')
+
+  // 调度执行守卫：执行期拦截子代理越权调用主控专用工具，以及等待子代理期间的纯
+  // sleep 空等。它只走 `ctx.tools.guard()` 这一条接缝，不碰工具声明面，Kimi Code
+  // 的前缀缓存零漂移。开关是 volatile 的，每次执行都重读活引用，因此设置保存后
+  // 下一步就生效，既不重挂这一行，也不重挂插件行。
+  ctx.effect(() => installDispatchExecutionGuard(ctx, {
+    enabled: () => resolveDispatchExecutionGuardEnabled(pluginConfig),
+  }), 'dsh-chatgpt-subscription: dispatch execution guard')
 
   const antigravityStore = new FileCredentialStore()
   const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)
