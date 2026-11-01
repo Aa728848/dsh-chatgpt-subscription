@@ -4,7 +4,9 @@ import {
   buildMinimaxRequest,
   outputConfigFor,
   thinkingFieldFor,
+  TOOL_CALL_PREAMBLE_REMINDER,
 } from '../src/host/minimax-code/mapper.ts'
+import { effortForModel, MINIMAX_CODE_MODELS } from '../src/host/minimax-code/model-catalog.ts'
 
 /**
  * A reasoning effort as the request type wants it.
@@ -76,12 +78,16 @@ describe('the thinking control on the wire', () => {
     expect(body['output_config']).toEqual({ effort: 'xhigh' })
   })
 
-  it('states the default level instead of leaving it to the server', () => {
-    // The docs say an omitted effort means max, so the old local 'default'
-    // spelling was dropped before sending - and every request silently ran at
-    // the most expensive level. The models now name their default outright.
-    expect(buildMinimaxRequest(options())['output_config']).toEqual({ effort: 'max' })
-    expect(buildMinimaxRequest(options({ model: 'MiniMax-M3' }))['output_config']).toEqual({ effort: 'max' })
+  it('leaves the level out of the request when the conversation picked none', () => {
+    // The official catalog names no default effort for these models, and the
+    // official agent sends no `output_config.effort` unless a level was
+    // picked: the server's own default is what an unset level means.
+    //
+    // Spelling out `max` here did two things at once - it put the most
+    // expensive setting on every turn that said nothing, and it said something
+    // the caller never asked for.
+    expect(buildMinimaxRequest(options())['output_config']).toBeUndefined()
+    expect(buildMinimaxRequest(options({ model: 'MiniMax-M3' }))['output_config']).toBeUndefined()
   })
 
   it('turns thinking off with the disabled object, and carries no level beside it', () => {
@@ -104,9 +110,21 @@ describe('the thinking control on the wire', () => {
         .toEqual({ effort: level })
     }
     // A level the model does not document must not reach the wire: it falls
-    // back to the model's own default instead of travelling as itself.
+    // back to the model's own default instead of travelling as itself - and
+    // that default is no level at all, so an invented level is DROPPED rather
+    // than silently answered with the most expensive setting.
     expect(buildMinimaxRequest(options({ reasoningEffort: effort('turbo') }))['output_config'])
-      .toEqual({ effort: 'max' })
+      .toBeUndefined()
+  })
+
+  it('drops the temperature for a model whose thinking cannot be turned off', () => {
+    // M3.1 thinks at every level, so a temperature beside it contradicts the
+    // request. With no level sent, "is thinking on?" can no longer be answered
+    // by the presence of `output_config` - it is answered by the model's own
+    // thinking mode.
+    const body = buildMinimaxRequest(options({ model: 'MiniMax-M3.1-Flash', temperature: 0.2 }))
+    expect(body['temperature']).toBeUndefined()
+    expect(body['output_config']).toBeUndefined()
   })
 
   it('offers no level for a model that has none', () => {
@@ -120,5 +138,60 @@ describe('the thinking control on the wire', () => {
     expect(on['temperature']).toBeUndefined()
     const off = buildMinimaxRequest(options({ model: 'MiniMax-M3', temperature: 0.2, reasoningEffort: effort('none') }))
     expect(off['temperature']).toBe(0.2)
+  })
+})
+
+describe('the level a model resolves to', () => {
+  it('names no default for a model that has levels', () => {
+    // The official catalog (packages/config/src/minimax-model-catalog.ts)
+    // names no default effort, and this catalog now mirrors it: a model with
+    // levels and no default is a model that sends no `output_config` until a
+    // level is picked.
+    for (const model of MINIMAX_CODE_MODELS) {
+      expect(model.defaultReasoningEffort).toBeNull()
+    }
+    expect(MINIMAX_CODE_MODELS.find((model) => model.id === 'MiniMax-M3')?.reasoningEfforts)
+      .toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  it('resolves an unset, empty or unknown request to no level', () => {
+    expect(effortForModel('MiniMax-M3', undefined)).toBeNull()
+    expect(effortForModel('MiniMax-M3', null)).toBeNull()
+    expect(effortForModel('MiniMax-M3', '   ')).toBeNull()
+    expect(effortForModel('MiniMax-M3', 'turbo')).toBeNull()
+    expect(effortForModel('MiniMax-M3.1-Flash', 'low')).toBe('low')
+    expect(effortForModel('MiniMax-M3.1-Flash', 'none')).toBeNull()
+    expect(effortForModel('a-model-this-line-does-not-serve', 'low')).toBeNull()
+  })
+})
+
+describe('the tool shape on the wire', () => {
+  it('asks for the tool arguments to stream eagerly', () => {
+    // The official agent asks for eager input streaming on every tool: the
+    // arguments can start arriving before the model finished describing the
+    // call, so the tool does not wait on the description.
+    const body = buildMinimaxRequest(options({
+      tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }],
+    }))
+    const tools = body.tools as Array<Record<string, unknown>>
+    expect(tools[0]).toMatchObject({ name: 't', eager_input_streaming: true })
+  })
+
+  it('states the tool-call preamble rule in a session that has tools', () => {
+    const body = buildMinimaxRequest(options({
+      system: 'be brief',
+      tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }],
+    }))
+    const system = body.system as Array<{ text: string }>
+    expect(system[0]!.text).toContain(TOOL_CALL_PREAMBLE_REMINDER)
+    // The caller's own prompt keeps the head of the system text: it is the
+    // cached prefix, and the rule is appended after it.
+    expect(system[0]!.text.startsWith('be brief')).toBe(true)
+  })
+
+  it('leaves a session with no tools and no prompt without a system block', () => {
+    const body = buildMinimaxRequest(options())
+    expect(body.system).toBeUndefined()
+    expect(body.tools).toBeUndefined()
   })
 })

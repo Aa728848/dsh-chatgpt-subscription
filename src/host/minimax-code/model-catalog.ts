@@ -213,8 +213,14 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     // max on the server, so an unstated level was silently the most expensive
     // one - and with the invented `default` tier in place, a caller asking for
     // `low` was quietly clamped back to it.
+    //
+    // It is stated as NULL now. The official catalog names no default effort
+    // for this model, and the official agent sends no `output_config.effort`
+    // unless the caller picked a level - so the honest wire state of "the
+    // conversation picked nothing" is NO output_config at all, not a body that
+    // spells out `max` and burns the most expensive setting on every turn.
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    defaultReasoningEffort: 'max',
+    defaultReasoningEffort: null,
     // PENDING: this 9 is inherited from the snapshot this entry was transcribed
     // from, and the model's current file-API capability block says
     // `max_attachments_count: 4` — the same 4 M3.1-Flash carries. The value is
@@ -256,8 +262,14 @@ export const MINIMAX_CODE_MODELS: readonly MinimaxCodeCatalogModel[] = [
     // So the default is stated out loud instead: "omitted" means max on the
     // server, so an unstated level was silently the most expensive one, and a
     // caller asking for `low` was quietly clamped back to the fake tier.
+    //
+    // And it is stated as NULL now, for the same reason M3 states it: the
+    // official catalog names no default effort here, and the official agent
+    // sends no `output_config.effort` unless a level was picked. A forced-on
+    // model that thinks at every level therefore needs no level at all to say
+    // "thinking is on".
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    defaultReasoningEffort: 'max',
+    defaultReasoningEffort: null,
     maxAttachments: 4,
     maxImageBytes: 10 * 1024 * 1024,
     maxVideoBytes: 50 * 1024 * 1024,
@@ -353,8 +365,15 @@ export function isThinkingDisabledEffort(value: unknown): boolean {
 /**
  * The effort level to put on the wire for one model.
  *
- * An unknown or off value falls back to the model's documented default, so a
- * caller cannot talk this route into a level the model does not list.
+ * NULL means "this request carries no `output_config.effort`", which is what
+ * the official agent sends when the conversation picked no level. Every model in
+ * this catalog states null as its default, so a request that names no effort
+ * states no effort.
+ *
+ * An unknown value falls back to the model's documented default, so a caller
+ * cannot talk this route into a level the model does not list - and with that
+ * default being null, an unknown level now means no level rather than the most
+ * expensive one.
  */
 export function effortForModel(
   modelId: string,
@@ -365,7 +384,13 @@ export function effortForModel(
   // A model with no selectable level has nothing to put on the wire; saying
   // otherwise would send a level the model does not accept.
   if (model.reasoningEfforts.length === 0) return null
-  if (requested === undefined || requested === null) return model.defaultReasoningEffort
+  // Thinking turned off is not a level: the off state is the `thinking`
+  // object's job, and a level next to it would contradict it.
+  if (isThinkingDisabledEffort(requested)) return null
+  // Nothing picked is nothing sent. An empty string is nothing picked too.
+  if (requested === undefined || requested === null || requested.trim() === '') {
+    return model.defaultReasoningEffort
+  }
   const normalized = requested.trim().toLowerCase()
   const match = model.reasoningEfforts.find((effort) => effort === normalized)
   return match ?? model.defaultReasoningEffort

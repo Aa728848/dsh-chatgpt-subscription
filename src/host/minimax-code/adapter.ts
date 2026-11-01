@@ -1185,12 +1185,26 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       // and an empty body is not a shorter verdict, it is a DIFFERENT one, because
       // the classifier then falls through to its empty-body defaults. So the text is
       // taken once, kept here, and handed down.
+      // The session identity the managed agent expects on a request that
+      // belongs to a session.
+      //
+      // The harness does not spell these on the request options, so they are read
+      // off the options as untyped extras and taken only when they are real
+      // strings: a request with no session carries none of the three headers,
+      // rather than an empty session id the service would file under.
+      const rawSessionId = (options as { sessionId?: unknown }).sessionId
+      const rawAgentId = (options as { agentId?: unknown }).agentId
+      const requestContext = {
+        sessionId: typeof rawSessionId === 'string' && rawSessionId.trim() !== '' ? rawSessionId : undefined,
+        agentId: typeof rawAgentId === 'string' && rawAgentId.trim() !== '' ? rawAgentId : undefined,
+      }
+
       let refusedBody: string | undefined
       for (let attempt = 0; ; attempt += 1) {
         try {
           response = await fetchWithContextBudgetRecovery(fetchFn)(messagesUrl(credentials.region), {
             method: 'POST',
-            headers: modelRequestHeaders(credentials.accessToken),
+            headers: modelRequestHeaders(credentials.accessToken, requestContext),
             body,
             signal,
           })
@@ -1346,6 +1360,9 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       authOwner,
       route: PROVIDER_ID,
       provider: PROVIDER_ID,
+      // The schemas the model was given, so a tool call whose arguments need
+      // repairing can be repaired against the shape it was promised.
+      tools: requestOptions.tools,
     })
     let buffer = ''
     /**

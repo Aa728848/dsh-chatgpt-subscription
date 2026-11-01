@@ -9,8 +9,8 @@
  *
  * 带 `when` 条件的工具（按步骤准入）会让 `toolSet` 逐步变化：这一步准入了
  * `exit_plan_mode`，下一步又没准入，于是 `tools:sdk` 段逐步重写。system prompt
- * 一旦被改写，前缀缓存从改写处起全部作废——在 Kimi Code 这种按前缀缓存计费的
- * 线路上，一次抖动就是几万 token 的全价重建。
+ * 一旦被改写，前缀缓存从改写处起全部作废——在 Kimi Code、MiniMax Code 这种按
+ * 前缀缓存计费的线路上，一次抖动就是几万 token 的全价重建。
  *
  * ## 做什么、不做什么
  *
@@ -32,8 +32,22 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/ptc-sdk-cache-guard
  */
 
-/** 受保护的 provider：默认只有 Kimi Code 线路。 */
+/** 受保护的 provider：Kimi Code 线路。 */
 export const KIMI_CODE_PROVIDER = 'kimi-code'
+
+/** 受保护的 provider：MiniMax Code 线路。 */
+export const MINIMAX_CODE_PROVIDER = 'minimax-code'
+
+/**
+ * 默认受保护的 provider 名单。
+ *
+ * `kimi-code` 与 `minimax-code` 都按前缀缓存计费：`tools:sdk` 段一旦被改写，
+ * 前缀缓存从改写处起全部作废，所以这两条线路默认都要冻结 SDK 段。
+ */
+export const DEFAULT_PTC_SDK_CACHE_PROVIDERS: readonly string[] = Object.freeze([
+  KIMI_CODE_PROVIDER,
+  MINIMAX_CODE_PROVIDER,
+])
 
 /** PTC 生成的 SDK 段名。 */
 export const PTC_SDK_SECTION_NAME = 'tools:sdk'
@@ -43,7 +57,7 @@ export interface PtcSdkCacheGuardOptions {
   /**
    * 命中即冻结 `tools:sdk` 的 provider 名单。
    *
-   * 省略时用 `['kimi-code']`。
+   * 省略时用 `['kimi-code', 'minimax-code']`。
    */
   providers?: readonly string[]
 }
@@ -190,7 +204,7 @@ export function installPtcSdkCacheGuard(
   options: PtcSdkCacheGuardOptions = {},
 ): PtcSdkCacheGuard {
   const host = isRecord(ctx) ? (ctx as Record<string, unknown>) : undefined
-  const providers = new Set<string>(options.providers ?? [KIMI_CODE_PROVIDER])
+  const providers = new Set<string>(options.providers ?? DEFAULT_PTC_SDK_CACHE_PROVIDERS)
   /** 已包装过的实例（幂等标记）。 */
   const alreadyWrapped = new WeakSet<object>()
   /** 已包装过的「方法宿主 + 方法名」：同一个原型不叠第二层包装。 */

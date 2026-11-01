@@ -85,6 +85,10 @@ import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVID
 import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
 import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
 import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
+import {
+  installMinimaxRuntimeEnhancements,
+  type MinimaxRuntimeEnhancementsContext,
+} from './host/minimax-code/runtime-enhancements.ts'
 // The line that does not persist its model catalog in model settings keeps it
 // in memory; the overview reads the size from there (see `catalogTotal`).
 // The quota reader rides the same import because the board's per-account hook
@@ -624,6 +628,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const guard = installCompactionPolicyGuard(ctx)
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: compaction policy guard')
+
+  // MiniMax Code 的运行时增强：参数修复（edits 的 JSON 字符串、数字/布尔字符串、
+  // {"item": [...]} 拆包）、PTC 直调提醒、工具级失控守卫。三样都只对 MiniMax
+  // Code 这条线路生效，线路判定走结构探测，不碰工具声明面。
+  ctx.effect(
+    () => installMinimaxRuntimeEnhancements(ctx as unknown as MinimaxRuntimeEnhancementsContext),
+    'dsh-chatgpt-subscription: MiniMax runtime enhancements',
+  )
 
   // 调度执行守卫：执行期拦截子代理越权调用主控专用工具，以及等待子代理期间的纯
   // sleep 空等。它只走 `ctx.tools.guard()` 这一条接缝，不碰工具声明面，Kimi Code

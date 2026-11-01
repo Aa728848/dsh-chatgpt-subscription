@@ -9,7 +9,7 @@
  *
  * 与官方实现的两点差别，也正是 "fork" 的全部理由：
  *
- * 1. **provider 感知的跳过**。缓存前缀型 provider（`kimi-code`）上，改写历史工具
+ * 1. **provider 感知的跳过**。缓存前缀型 provider（`kimi-code` 与 `minimax-code`）上，改写历史工具
  *    结果会把 provider 侧的 content-prefix 缓存从被改写点一直作废到对话末尾：
  *    实测 838k token 的会话里，一次修剪省下约 418k token 的上下文，却要按全价
  *    重建约 414k token 的前缀，比摘要式压缩贵得多。所以对这类 provider 直接跳过，
@@ -45,11 +45,15 @@ export const DEFAULTS: ResolvedConfig = deepFreeze({
 /**
  * 默认跳过的 provider。
  *
- * `kimi-code` 是缓存前缀型 provider：改写历史工具结果会让 provider 侧的前缀
- * 缓存从改写点失效到对话末尾，重建成本高于修剪省下的输入。这个名单可以通过
- * 配置 `skipProviders` 整体替换（传空数组即恢复"对所有 provider 都修剪"）。
+ * `kimi-code` 与 `minimax-code` 都是缓存前缀型 provider：改写历史工具结果会让
+ * provider 侧的前缀缓存从改写点失效到对话末尾，重建成本高于修剪省下的输入，
+ * 所以对这两条线路默认一次都不改历史。这个名单可以通过配置 `skipProviders`
+ * 整体替换（传空数组即恢复"对所有 provider 都修剪"）。
  */
-export const DEFAULT_SKIP_PROVIDERS: readonly string[] = deepFreeze(['kimi-code'])
+export const DEFAULT_SKIP_PROVIDERS: readonly string[] = deepFreeze([
+  'kimi-code',
+  'minimax-code',
+])
 
 // ── 配置 ───────────────────────────────────────────────────────────────────
 
@@ -62,7 +66,7 @@ export interface ToolResultPruneConfig {
   /** 保留的最大尾部码点数。默认 1024。 */
   tailChars?: number
   /**
-   * 命中即整场跳过修剪的 provider id 名单。默认 `['kimi-code']`。
+   * 命中即整场跳过修剪的 provider id 名单。默认 `['kimi-code', 'minimax-code']`。
    *
    * 与官方实现的三个数值配置项并列接受，因此把官方配置原样搬过来不会因为
    * "未知键" 报错。
@@ -260,7 +264,7 @@ let defaultSkipProviderSet: ReadonlySet<string> | undefined
 /**
  * 默认跳过集合（惰性单例）。
  *
- * @returns `['kimi-code']` 对应的只读集合。
+ * @returns 默认名单（`kimi-code` 与 `minimax-code`）对应的只读集合。
  */
 function defaultSkipProviders(): ReadonlySet<string> {
   defaultSkipProviderSet ??= new Set(DEFAULT_SKIP_PROVIDERS)
@@ -300,7 +304,7 @@ export function readSessionProvider(session: unknown): string | undefined {
  * 会在任何读写之前直接返回空结果。
  *
  * @param session - 任意会话对象。
- * @param skipProviders - 跳过名单；省略时用默认的 `['kimi-code']`。
+ * @param skipProviders - 跳过名单；省略时用默认的 `['kimi-code', 'minimax-code']`。
  * @returns 命中名单时为 `true`。
  */
 export function shouldSkipPruningForSession(

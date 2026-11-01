@@ -15,6 +15,7 @@ import {
   offloadOldestRequestImages,
   processMinimaxStreamLine,
   streamHasContent,
+  TOOL_CALL_PREAMBLE_REMINDER,
 } from '../src/host/minimax-code/mapper.ts'
 
 function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
@@ -68,7 +69,14 @@ describe('prompt cache breakpoints', () => {
       tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }],
     }))
 
-    expect(body.system).toEqual([{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }])
+    // A session with tools carries the tool-call preamble rule after the
+    // caller's own prompt: the rule is part of the system text, so it is
+    // cached with the rest of it.
+    expect(body.system).toEqual([{
+      type: 'text',
+      text: 'be brief\n\n' + TOOL_CALL_PREAMBLE_REMINDER,
+      cache_control: { type: 'ephemeral' },
+    }])
     const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
     expect(messages[messages.length - 1]!.content.at(-1)).toMatchObject({ cache_control: { type: 'ephemeral' } })
     const tools = body.tools as Array<Record<string, unknown>>
@@ -96,7 +104,7 @@ describe('prompt cache breakpoints', () => {
       tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }],
     }), undefined, { cacheControl: false })
 
-    expect(body.system).toBe('be brief')
+    expect(body.system).toBe('be brief\n\n' + TOOL_CALL_PREAMBLE_REMINDER)
     expect(countMinimaxCacheBreakpoints(body)).toBe(0)
   })
 
@@ -483,5 +491,85 @@ describe('the image budget belongs to this route, not to Kimi Code', () => {
       expect(maxRequestImageBytes({ DSH_MINIMAX_CODE_MAX_IMAGE_BYTES: raw } as NodeJS.ProcessEnv))
         .toBe(DEFAULT_MAX_REQUEST_IMAGE_BYTES)
     }
+  })
+})
+
+describe('streamed tool arguments are repaired before the guard sees them', () => {
+  // The model writes tool arguments in shapes the schema does not accept: a
+  // number as a string, an `edits` array as a JSON string, an array wrapped in
+  // `{"item": [...]}`. DSH's tool guard then refuses the call over a shape the
+  // model had no way to know was wrong - and on DSH 0.2.x the guard runs AFTER
+  // `execution.arguments` has been deep-frozen, so the repair cannot happen
+  // there. It happens here instead, at the end of the stream, where the whole
+  // argument string is finally known.
+  function streamedToolArguments(
+    rawArguments: string,
+    options?: {
+      name?: string
+      tools?: Array<{ name: string; parameters?: unknown }>
+      stop?: boolean
+    },
+  ): string | undefined {
+    const state = createStreamState(options?.tools === undefined ? undefined : { tools: options.tools })
+    const send = (event: unknown) => processMinimaxStreamLine('data: ' + JSON.stringify(event), state)
+    const out = [
+      ...send({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_1', name: options?.name ?? 'read' },
+      }),
+      ...send({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: rawArguments } }),
+      ...(options?.stop === false ? [] : send({ type: 'content_block_stop', index: 0 })),
+      ...send({ type: 'message_stop' }),
+      ...closeMinimaxStream(state),
+    ]
+    const end = out.find(chunk => chunk.type === 'block-end') as
+      | { block?: { arguments?: string } }
+      | undefined
+    return end?.block?.arguments
+  }
+
+  it('turns numbers the model wrote as strings back into numbers', () => {
+    // `offset` and `limit` are numbers in this host's tool surface, so the
+    // strings fail the schema check while being losslessly convertible.
+    expect(streamedToolArguments('{"offset":"10","limit":"25"}')).toBe('{"offset":10,"limit":25}')
+  })
+
+  it('parses an edits array the model wrote as a JSON string', () => {
+    const raw = JSON.stringify({ edits: JSON.stringify([{ old_string: 'a', new_string: 'b' }]) })
+    expect(streamedToolArguments(raw)).toBe('{"edits":[{"old_string":"a","new_string":"b"}]}')
+  })
+
+  it('unwraps the item wrapper the schema says is an array', () => {
+    const tools = [{
+      name: 'multi',
+      parameters: {
+        type: 'object',
+        properties: { values: { type: 'array', items: { type: 'string' } } },
+      },
+    }]
+    expect(streamedToolArguments('{"values":{"item":["a","b"]}}', { name: 'multi', tools }))
+      .toBe('{"values":["a","b"]}')
+  })
+
+  it('repairs the call that never got a content_block_stop', () => {
+    // The other finalization path: the stream ends with the tool call still
+    // open, and the arguments are repaired when the stream is closed.
+    expect(streamedToolArguments('{"limit":"25"}', { stop: false })).toBe('{"limit":25}')
+  })
+
+  it('leaves arguments that are already right byte-for-byte alone', () => {
+    // The formatting is the model's own: a repair that changes nothing must
+    // not rewrite the string.
+    const valid = '{"file_path":"README.md","limit":25}'
+    expect(streamedToolArguments(valid)).toBe(valid)
+  })
+
+  it('leaves arguments that are not an object alone', () => {
+    expect(streamedToolArguments('not json at all')).toBe('not json at all')
+  })
+
+  it('answers an empty argument string with an empty object', () => {
+    expect(streamedToolArguments('')).toBe('{}')
   })
 })

@@ -80,6 +80,7 @@ import {
 } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { stripMetaSchema } from '../common/tool-schema.ts'
+import { repairMinimaxToolArguments } from './runtime-enhancements.ts'
 import { estimatedInputTokens } from '../common/prompt-estimate.ts'
 import {
   offloadOldestRequestImages,
@@ -331,12 +332,33 @@ function isToolResultMessage(message: Message): boolean {
 }
 
 /**
+ * The rule a tool-enabled session must follow before it calls a tool.
+ *
+ * The official agent states it in the system prompt of every session that has
+ * tools: a non-trivial tool step starts with a user-visible assistant text
+ * block. Thinking does not count - a model that reasons and then calls the tool
+ * without saying anything has produced a step the user cannot see, and the
+ * official agent asks for that preamble explicitly.
+ *
+ * It is appended to the assembled system text rather than replacing it: the
+ * caller's own prompt keeps its place at the head (which is the cached prefix),
+ * and this rule lands after it.
+ */
+export const TOOL_CALL_PREAMBLE_REMINDER =
+  'For any non-trivial tool-call step, you MUST first send a non-empty, user-visible assistant text block. Thinking or reasoning content does not count as the preamble.'
+
+/**
  * Concatenated system-prompt text.
  *
  * The system prompt is the head of the prefix the service caches, so this is a
  * pure, order-stable fold of its inputs: options.system always leads and message
  * text follows in history order. Nothing per-turn is added here, because one
  * changed byte at the head invalidates the whole cached prefix.
+ *
+ * The ONE addition is {@link TOOL_CALL_PREAMBLE_REMINDER}, and it is added only
+ * to a session that has both tools and a system prompt - a request with no tools
+ * has no tool-call step to remind the model about, and a request with no system
+ * text at all keeps `system === undefined` rather than gaining one.
  */
 function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
@@ -346,7 +368,13 @@ function leadingSystemText(options: GenerateOptions): string | undefined {
     const text = textOf(message.content)
     if (text !== '') parts.push(text)
   }
-  return parts.length === 0 ? undefined : parts.join('\n\n')
+  if (parts.length === 0) return undefined
+  if (options.tools && options.tools.length > 0) {
+    if (!parts.join('\n\n').includes(TOOL_CALL_PREAMBLE_REMINDER)) {
+      parts.push(TOOL_CALL_PREAMBLE_REMINDER)
+    }
+  }
+  return parts.join('\n\n')
 }
 
 function nonSystemMessages(options: GenerateOptions): Message[] {
@@ -491,13 +519,24 @@ function replayedThinkingBlock(
     return undefined
   }
 
-  // Provenance verification against expectedScope: empty authOwner never creates an accepted scope
+  // Provenance verification against expectedScope: an absent scope never creates
+  // an accepted scope, and the ROUTE and the MODEL must still be the ones the
+  // block was signed under.
   if (expectedScope === undefined) return undefined
   if (expectedScope.route && stateRoute !== expectedScope.route) return undefined
   if (expectedScope.model && stateModel !== expectedScope.model) return undefined
-  if (!expectedScope.authOwner || expectedScope.authOwner.trim() === '' || stateAuthOwner !== expectedScope.authOwner) {
-    return undefined
-  }
+  // The auth owner is deliberately NOT compared.
+  //
+  // The owner hash changes whenever the account pool rotates to another account
+  // or the adapter renews a token - neither of which changes what the model
+  // signed. Rejecting on a difference threw away the model's OWN reasoning
+  // because a pool rotation happened between two turns, and the model then had
+  // to redo the work it had already done (and paid for) in the visible answer.
+  //
+  // What still has to hold is the scope itself: a stored state with no auth
+  // owner is legacy unscoped state and is rejected above, so a block from
+  // before this line tracked provenance still does not replay.
+  if (!expectedScope.authOwner || expectedScope.authOwner.trim() === '') return undefined
 
   // Retrieve native block by block-index mapping, response.blocks, or response.nativeBlocks
   let candidate: AnthropicBlock | undefined
@@ -583,6 +622,25 @@ function anthropicAssistantContent(
       const replay = replayedThinkingBlock(message, index, expectedScope, block)
       if (replay !== undefined) {
         blocks.push(replay)
+        continue
+      }
+      // The block could not be replayed as a signed thinking block: the
+      // signature is missing, the content hash does not match the stored one, or
+      // the history was compacted under the model.
+      //
+      // Dropping it SILENTLY deletes the model's reasoning from the
+      // conversation - and with it the only record of what the model had
+      // already worked out, so the next turn starts from a conversation that
+      // never mentioned it. The official agent degrades such a block to plain
+      // text instead (its `anthropic.ts` and `transform-messages.ts`), which
+      // keeps the reasoning in the turn.
+      //
+      // A redacted block has no visible text to keep, and a redaction marker is
+      // not the model's own words either, so both are still dropped.
+      const fallbackText = sanitizeText(typeof block.text === 'string' ? block.text : '')
+      const trimmed = fallbackText.trim()
+      if (trimmed !== '' && trimmed !== '[Reasoning redacted]') {
+        blocks.push({ type: 'text', text: fallbackText })
       }
       continue
     }
@@ -670,15 +728,17 @@ export function thinkingFieldFor(
  * The level belongs at the TOP level - `output_config.effort` - and accepts
  * low, medium, high, xhigh and max. There is no `default` member: the page
  * says omitting the field means max, so the old local `default` spelling never
- * reached the wire. This line no longer leans on that: every model that has
- * levels states its default out loud, and a request that asks for nothing
- * resolves to that default instead of to an omission.
+ * reached the wire. This line no longer leans on that either: every model that
+ * has levels states its default as NULL, so a request that asks for nothing
+ * resolves to no `output_config` at all - which is what the official agent
+ * sends when the conversation picked no level.
  *
  * The level is the DEPTH, not the channel: measured, low and max differ by
  * about 3x thinking and 4x latency, and it composes with the `thinking` object.
  *
  * @returns the value for `output_config`, or undefined when the request should
- *   carry no thinking control at all.
+ *   carry no thinking control at all - which is the case for an unset, empty or
+ *   unknown level.
  */
 export function outputConfigFor(
   modelId: string,
@@ -936,11 +996,21 @@ export function buildMinimaxRequest(
   const requestedEffort = options.reasoningEffort === undefined ? null : String(options.reasoningEffort)
   const outputConfig = outputConfigFor(options.model, requestedEffort)
   const thinking = thinkingFieldFor(options.model, requestedEffort)
+  const modelDef = catalogEntry(options.model)
   // Thinking and an explicit temperature are mutually exclusive on this
   // protocol. "Engaged" means the request actually asks for thinking: a
   // `disabled` object is the other side of the switch, and a request that
   // turns thinking off may still carry a temperature.
-  const thinkingEngaged = outputConfig !== undefined || thinking?.type === 'adaptive'
+  //
+  // A model whose thinking is always on or forced on is engaged even when the
+  // request names no level at all - which is now the normal case, because an
+  // unset effort sends no `output_config`. Reading the mode off the catalog
+  // is what keeps the temperature out of those bodies: the model thinks
+  // whatever the request says, so a temperature next to it is a contradiction.
+  const thinkingEngaged = outputConfig !== undefined
+    || thinking?.type === 'adaptive'
+    || modelDef?.thinking === 'always-on'
+    || modelDef?.thinking === 'forced-effort'
   const caching = request.cacheControl !== false
 
   const body: Record<string, unknown> = {
@@ -969,6 +1039,11 @@ export function buildMinimaxRequest(
           tools: options.tools.map((tool) => ({
             name: tool.name,
             description: tool.description,
+            // Eager input streaming: the tool's parameters may start arriving
+            // before the model finished describing the call. The official agent
+            // asks for it on every tool, and a tool whose arguments stream in
+            // late is a tool the model waits on.
+            eager_input_streaming: true,
             input_schema: stripMetaSchema(tool.parameters),
           })),
         }
@@ -1073,6 +1148,11 @@ export interface MinimaxStreamState {
   cacheReadTokens: number
   cacheWriteTokens: number
   sawUsage: boolean
+  /**
+   * The request's tool schemas by tool name, used to repair a streamed tool
+   * call's arguments against the schema the model was given.
+   */
+  toolSchemas?: ReadonlyMap<string, unknown>
 }
 
 export interface MinimaxStreamStateOptions {
@@ -1080,6 +1160,11 @@ export interface MinimaxStreamStateOptions {
   authOwner?: string
   route?: string
   provider?: string
+  /**
+   * The request's tools, so a streamed tool call can be repaired against the
+   * schema the model was given.
+   */
+  tools?: ReadonlyArray<{ name: string; parameters?: unknown }>
 }
 
 export function createStreamState(options?: MinimaxStreamStateOptions): MinimaxStreamState {
@@ -1092,8 +1177,13 @@ export function createStreamState(options?: MinimaxStreamStateOptions): MinimaxS
       }
     : undefined
 
+  const toolSchemas = options?.tools && options.tools.length > 0
+    ? new Map(options.tools.map((tool) => [tool.name, tool.parameters]))
+    : undefined
+
   return {
     provenance,
+    toolSchemas,
     replayBlocks: [],
     pendingThinking: new Map(),
     blocks: [],
@@ -1132,6 +1222,32 @@ function openTextBlock(state: MinimaxStreamState, type: 'text' | 'reasoning'): S
   return out
 }
 
+/**
+ * The argument string one finished tool call carries.
+ *
+ * The model writes tool arguments in shapes the schema does not accept: numbers
+ * as strings, an `edits` array as a JSON string, an array wrapped in
+ * `{"item": [...]}`. DSH's tool guard then refuses the call over a shape the
+ * model had no way to know was wrong, so the arguments are repaired here - at
+ * the end of the stream, where the whole argument string is finally known.
+ *
+ * The repair is LOSSLESS, and it only runs when it changes something:
+ * arguments that need no repair come out byte-for-byte as they arrived, and
+ * arguments that do not parse as an object are left exactly as they were.
+ */
+function finalizeToolCallArguments(
+  name: string,
+  rawArguments: string,
+  toolSchemas?: ReadonlyMap<string, unknown>,
+): string {
+  if (rawArguments === '') return '{}'
+  const parsed = safeJsonParse(rawArguments)
+  if (!isRecord(parsed)) return rawArguments
+  const repaired = repairMinimaxToolArguments(name, parsed, toolSchemas?.get(name))
+  if (repaired.fixes.length === 0) return rawArguments
+  return JSON.stringify(repaired.value)
+}
+
 function closeToolCalls(state: MinimaxStreamState): StreamChunk[] {
   const out: StreamChunk[] = []
   for (const [wireIndex, call] of [...state.toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
@@ -1139,7 +1255,7 @@ function closeToolCalls(state: MinimaxStreamState): StreamChunk[] {
       type: 'tool-call',
       id: toToolCallId(call.id),
       name: call.name,
-      arguments: call.arguments === '' ? '{}' : call.arguments,
+      arguments: finalizeToolCallArguments(call.name, call.arguments, state.toolSchemas),
     }
     state.blocks[call.blockIndex] = block
     state.replayBlocks[call.blockIndex] = null
@@ -1440,7 +1556,7 @@ export function processMinimaxStreamLine(line: string, state: MinimaxStreamState
         type: 'tool-call',
         id: toToolCallId(pending.id),
         name: pending.name,
-        arguments: pending.arguments === '' ? '{}' : pending.arguments,
+        arguments: finalizeToolCallArguments(pending.name, pending.arguments, state.toolSchemas),
       }
       state.blocks[pending.blockIndex] = block
       out.push({ type: 'block-end', index: pending.blockIndex, block })

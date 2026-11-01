@@ -29,6 +29,13 @@ import ToolResultPruner, {
 } from '../src/entry-tool-result-pruner.ts'
 import type { ToolResultPruneConfig } from '../src/entry-tool-result-pruner.ts'
 import { installToolResultPrunerGuard } from '../src/host/tool-result-pruner-guard.ts'
+import {
+  DEFAULT_PTC_SDK_CACHE_PROVIDERS,
+  KIMI_CODE_PROVIDER,
+  MINIMAX_CODE_PROVIDER,
+  PTC_SDK_SECTION_NAME,
+  installPtcSdkCacheGuard,
+} from '../src/host/ptc-sdk-cache-guard.ts'
 
 /** 小预算配置：头部 4 + 标记 + 尾部 3，阈值 50。 */
 const SMALL: ToolResultPruneConfig = {
@@ -258,7 +265,7 @@ describe('修剪配置', () => {
     expect(PRUNE_MARKER).toBe('\n\n[... tool result middle pruned ...]\n\n')
     expect(DEFAULTS).toEqual({ thresholdChars: 8192, headChars: 4096, tailChars: 1024 })
     expect(Object.isFrozen(DEFAULTS)).toBe(true)
-    expect(DEFAULT_SKIP_PROVIDERS).toEqual(['kimi-code'])
+    expect(DEFAULT_SKIP_PROVIDERS).toEqual(['kimi-code', 'minimax-code'])
     expect(Object.isFrozen(DEFAULT_SKIP_PROVIDERS)).toBe(true)
     expect(PRUNER_SERVICE_NAME).toBe('toolResultPruner')
   })
@@ -378,6 +385,20 @@ describe('provider 感知的会话修剪', () => {
     })
     expect(pruner.pruneSession(mock.session)).toEqual({ pruned: [], charsRemoved: 0 })
     expect(mock.appended).toEqual([])
+  })
+
+  it('minimax-code 会话整场跳过：默认名单里就有它，一次都不改历史', () => {
+    const pruner = createPruner()
+    const mock = createMockSession({
+      provider: 'minimax-code',
+      results: [{ callId: 'call-minimax', content: [{ type: 'text', text: 'm'.repeat(200) }] }],
+    })
+    const nodesBefore = [...mock.nodes]
+
+    expect(pruner.pruneSession(mock.session)).toEqual({ pruned: [], charsRemoved: 0 })
+    expect(mock.reads).toEqual([])
+    expect(mock.appended).toEqual([])
+    expect(mock.nodes).toEqual(nodesBefore)
   })
 
   it('自定义 skipProviders 覆盖默认名单', () => {
@@ -551,6 +572,25 @@ describe('宿主级跨 preset 守卫', () => {
     expect(spy).toHaveBeenCalledTimes(1)
     expect(result.pruned).toHaveLength(1)
     expect(codex.appended.map(event => event.type)).toEqual(['compaction/prune', 'tool/result'])
+
+    guard.dispose()
+  })
+
+  it('minimax-code 会话在宿主级守卫里也被短路', () => {
+    const host = createFakeHost()
+    const pruner = createPruner()
+    const spy = vi.spyOn(pruner, 'pruneSession')
+    host.store[Symbol('pruner')] = { name: PRUNER_SERVICE_NAME, value: pruner }
+    const guard = installToolResultPrunerGuard(host.ctx)
+
+    const minimax = createMockSession({
+      provider: 'minimax-code',
+      results: [{ callId: 'minimax-call', content: [{ type: 'text', text: 'm'.repeat(200) }] }],
+    })
+
+    expect(pruner.pruneSession(minimax.session)).toEqual({ pruned: [], charsRemoved: 0 })
+    expect(spy).not.toHaveBeenCalled()
+    expect(minimax.appended).toEqual([])
 
     guard.dispose()
   })
@@ -733,6 +773,154 @@ describe('瀑布事件的 next() 转交', () => {
     if (entry === undefined) throw new Error('no listener registered for agent/pre-step')
     const listener = entry.listener as unknown as (...args: unknown[]) => unknown
     expect(await listener({ agent: {} })).toBeUndefined()
+    guard.dispose()
+  })
+})
+
+/** 一条假工具定义。 */
+interface FakeToolEntry {
+  /** 工具名。 */
+  readonly name: string
+}
+
+/** 一个步骤准入集。 */
+interface FakeToolSet {
+  /** 本步准入的工具名。 */
+  readonly admitted: readonly string[]
+}
+
+/** 假工具注册表：`definitions` 尊重步骤准入，与真实工具层的形状一致。 */
+interface FakeToolsService {
+  /** 可见定义。 */
+  definitions(scope?: unknown, toolSet?: unknown): FakeToolEntry[]
+}
+
+/**
+ * 建一个假工具注册表。
+ *
+ * @param entries - 初始工具表。
+ * @returns 工具注册表替身。
+ */
+function createFakeToolsService(entries: FakeToolEntry[]): FakeToolsService {
+  return {
+    definitions(_scope?: unknown, toolSet?: unknown): FakeToolEntry[] {
+      if (toolSet === undefined) return [...entries]
+      const admitted = (toolSet as FakeToolSet).admitted ?? []
+      return entries.filter(entry => admitted.includes(entry.name))
+    },
+  }
+}
+
+/**
+ * 建一个装配 scope：请求头快照里带着 provider id。
+ *
+ * @param provider - provider id。
+ * @returns scope 对象。
+ */
+function createProviderScope(provider: string): Record<string, unknown> {
+  return {
+    session: {
+      requestHeader: () => ({ config: { provider } }),
+    },
+  }
+}
+
+/**
+ * 派发一次 `system-prompt/assemble` 瀑布。
+ *
+ * @param host - 宿主替身。
+ * @param scope - 装配 scope。
+ * @param next - 产出装配结果的下一棒。
+ * @returns 装配结果。
+ */
+async function emitAssemble(
+  host: FakeHost,
+  scope: unknown,
+  next: () => Promise<unknown>,
+): Promise<{ sections: { name?: unknown; text?: unknown }[] }> {
+  const bucket = host.listeners.get('system-prompt/assemble') ?? []
+  const entry = bucket[bucket.length - 1]
+  if (entry === undefined) throw new Error('no listener registered for system-prompt/assemble')
+  const listener = entry.listener as unknown as (
+    assembly: unknown,
+    context: unknown,
+    next: () => Promise<unknown>,
+  ) => Promise<unknown>
+  return await listener({}, { scope }, next) as { sections: { name?: unknown; text?: unknown }[] }
+}
+
+/**
+ * 取装配结果里 `tools:sdk` 段的正文。
+ *
+ * @param assembly - 装配结果。
+ * @returns 段正文。
+ */
+function sdkTextOf(assembly: { sections: { name?: unknown; text?: unknown }[] }): string {
+  const section = assembly.sections.find(entry => entry.name === PTC_SDK_SECTION_NAME)
+  return typeof section?.text === 'string' ? section.text : ''
+}
+
+describe('PTC SDK 段缓存守卫的默认受保护线路', () => {
+  it('默认受保护的 provider 同时包含 kimi-code 与 minimax-code', () => {
+    expect(KIMI_CODE_PROVIDER).toBe('kimi-code')
+    expect(MINIMAX_CODE_PROVIDER).toBe('minimax-code')
+    expect(DEFAULT_PTC_SDK_CACHE_PROVIDERS).toEqual([
+      KIMI_CODE_PROVIDER,
+      MINIMAX_CODE_PROVIDER,
+    ])
+    expect(Object.isFrozen(DEFAULT_PTC_SDK_CACHE_PROVIDERS)).toBe(true)
+  })
+
+  it('minimax-code 的 scope 默认就冻结 tools:sdk 段', async () => {
+    const tools = createFakeToolsService([{ name: 'a' }, { name: 'b' }])
+    const host = createFakeHost()
+    host.store[Symbol('tools')] = { name: 'tools', value: tools }
+    const guard = installPtcSdkCacheGuard(host.ctx)
+    const scope = createProviderScope(MINIMAX_CODE_PROVIDER)
+
+    const first = await emitAssemble(host, scope, async () => ({
+      sections: [{ name: PTC_SDK_SECTION_NAME, text: 'SDK-V1' }],
+    }))
+    const second = await emitAssemble(host, scope, async () => ({
+      sections: [{ name: PTC_SDK_SECTION_NAME, text: 'SDK-V2' }],
+    }))
+
+    // 第二步的声明漂移被换回第一步的字节：前缀缓存不因工具表抖动而重建。
+    expect(sdkTextOf(first)).toBe('SDK-V1')
+    expect(sdkTextOf(second)).toBe('SDK-V1')
+
+    guard.dispose()
+  })
+
+  it('minimax-code 默认忽略步骤级 toolSet（可见工具表不随步骤漂移）', () => {
+    const tools = createFakeToolsService([{ name: 'a' }, { name: 'b' }])
+    const host = createFakeHost()
+    host.store[Symbol('tools')] = { name: 'tools', value: tools }
+    const guard = installPtcSdkCacheGuard(host.ctx)
+    const scope = createProviderScope(MINIMAX_CODE_PROVIDER)
+
+    expect(tools.definitions(scope, { admitted: ['a'] }).map(entry => entry.name))
+      .toEqual(['a', 'b'])
+
+    guard.dispose()
+  })
+
+  it('未受保护的 provider 仍然按步骤过滤，SDK 段照常改写', async () => {
+    const tools = createFakeToolsService([{ name: 'a' }, { name: 'b' }])
+    const host = createFakeHost()
+    host.store[Symbol('tools')] = { name: 'tools', value: tools }
+    const guard = installPtcSdkCacheGuard(host.ctx)
+    const scope = createProviderScope('codex-chatgpt')
+
+    await emitAssemble(host, scope, async () => ({
+      sections: [{ name: PTC_SDK_SECTION_NAME, text: 'SDK-V1' }],
+    }))
+    const second = await emitAssemble(host, scope, async () => ({
+      sections: [{ name: PTC_SDK_SECTION_NAME, text: 'SDK-V2' }],
+    }))
+
+    expect(sdkTextOf(second)).toBe('SDK-V2')
+
     guard.dispose()
   })
 })

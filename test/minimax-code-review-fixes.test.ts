@@ -11,7 +11,7 @@ import { getMinimaxCodeWebStatus, registerMinimaxCodeRoutes, resetLatestLogin, s
 import { MinimaxCodeCredentialStore, authJsonPath, credentialIsFresh, parseMinimaxCodeCredentials } from '../src/host/minimax-code/token-store.ts'
 import { MinimaxCodeAdapter } from '../src/host/minimax-code/adapter.ts'
 import { MINIMAX_CODE_MODELS, minimaxCodeModelIds } from '../src/host/minimax-code/model-catalog.ts'
-import { buildMinimaxRequest } from '../src/host/minimax-code/mapper.ts'
+import { buildMinimaxRequest, TOOL_CALL_PREAMBLE_REMINDER } from '../src/host/minimax-code/mapper.ts'
 import { resetRefreshRejections } from '../src/host/minimax-code/oauth.ts'
 import { redactToken } from '../src/host/minimax-code/types.ts'
 
@@ -251,8 +251,13 @@ describe('MiniMax Code line', () => {
       expect(body.stream).toBe(true)
       expect(body.tools).toBeDefined()
       // Caching is on by default, and a breakpoint cannot sit on a plain string,
-      // so the system text goes out as a marked block array.
-      expect(body.system).toEqual([{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }])
+      // so the system text goes out as a marked block array - carrying the
+      // tool-call preamble rule, because this request has tools.
+      expect(body.system).toEqual([{
+        type: 'text',
+        text: 'be brief\n\n' + TOOL_CALL_PREAMBLE_REMINDER,
+        cache_control: { type: 'ephemeral' },
+      }])
     })
   })
 

@@ -18,6 +18,7 @@
 
 import { createHash } from 'node:crypto'
 import {
+  ANTHROPIC_INTERLEAVED_THINKING_BETA,
   ANTHROPIC_VERSION,
   DEFAULT_DEVICE_INTERVAL_SECONDS,
   MESSAGES_PATH,
@@ -28,6 +29,7 @@ import {
   tokenPlanRemainsUrl,
   TOKEN_PLAN_REMAINS_PATH,
   MINIMAX_CODE_BUILD_ENV,
+  MINIMAX_AGENT_USER_AGENT,
   USER_AGENT,
   redactToken,
 } from './types.ts'
@@ -61,15 +63,39 @@ function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
  *
  * The token itself never appears in a log line or an error: callers that need to
  * name a credential do so through `redactToken`.
+ *
+ * @param context the session identity the managed agent expects on a request
+ *   that belongs to a session: the session id, the agent id inside it, and the
+ *   caller's timezone offset. They are sent only when there IS a session — a
+ *   request without one carries none of them.
  */
-export function modelRequestHeaders(accessToken: string): Record<string, string> {
+export function modelRequestHeaders(
+  accessToken: string,
+  context?: { sessionId?: string; agentId?: string; timezoneOffsetSec?: number },
+): Record<string, string> {
   return {
     // REQUIRED. Measured: x-api-key answers 401 {"code":401,"message":"token is required"}.
     authorization: 'Bearer ' + accessToken,
     'anthropic-version': ANTHROPIC_VERSION,
+    // The interleaved-thinking beta authorizes the signed thinking blocks this
+    // route replays and the channel the service streams reasoning back in. The
+    // official agent sends it on every Messages request.
+    'anthropic-beta': ANTHROPIC_INTERLEAVED_THINKING_BETA,
     'content-type': 'application/json',
     accept: 'text/event-stream',
-    'user-agent': USER_AGENT,
+    // The model request speaks with the protocol's own identifier; the
+    // first-party surfaces further down keep USER_AGENT, the plugin's own
+    // honest product token.
+    'user-agent': MINIMAX_AGENT_USER_AGENT,
+    ...(context?.sessionId
+      ? {
+          'x-mavis-session-id': context.sessionId,
+          'x-mavis-agent-id': context.agentId || 'main',
+          'x-mavis-timezone-offset': String(
+            context.timezoneOffsetSec ?? new Date().getTimezoneOffset() * -60,
+          ),
+        }
+      : {}),
   }
 }
 

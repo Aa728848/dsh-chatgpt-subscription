@@ -53,7 +53,7 @@ export interface ToolResultPrunerGuardOptions {
   /**
    * 命中即整场跳过修剪的 provider 名单。
    *
-   * 省略时用入口模块的默认值（`['kimi-code']`）。
+   * 省略时用入口模块的默认值（`['kimi-code', 'minimax-code']`）。
    */
   skipProviders?: readonly string[]
 }

@@ -254,11 +254,13 @@ describe('minimax thinking replay', () => {
 
     const messages = replayed.messages as Array<{ role: string; content: unknown[] }>
     const assistant = messages.find(m => m.role === 'assistant')
-    // Must NOT reuse state when model mismatched
-    expect(assistant?.content ?? []).toEqual([])
+    // The signed block belongs to the OTHER model, so it must NOT be replayed
+    // as one - but the reasoning it carried must not vanish either: it
+    // degrades to plain text, which is what the official agent does.
+    expect(assistant?.content ?? []).toEqual([{ type: 'text', text: 'm3 thought' }])
   })
 
-  it('fails safely and omits thinking blocks when account (authOwner) is switched', () => {
+  it('keeps the signed block when the account pool rotates to another account', () => {
     const state = createStreamState({ model: 'minimax-M3', authOwner: 'account-A', route: PROVIDER_ID })
     const send = (event: unknown) => processMinimaxStreamLine('data: ' + JSON.stringify(event), state)
     const out = [
@@ -291,11 +293,16 @@ describe('minimax thinking replay', () => {
 
     const messages = replayed.messages as Array<{ role: string; content: unknown[] }>
     const assistant = messages.find(m => m.role === 'assistant')
-    // Must NOT reuse state across different accounts
-    expect(assistant?.content ?? []).toEqual([])
+    // The account pool rotated between the two turns. The ROUTE and the MODEL
+    // are the same, so the signed block still belongs to this conversation:
+    // throwing it away because a different account paid for it deleted the
+    // model's own reasoning from the history and made it redo the work.
+    expect(assistant?.content ?? []).toEqual([
+      { type: 'thinking', thinking: 'account A thought', signature: 'sig-A' },
+    ])
   })
 
-  it('fails safely on legacy unscoped replayState', () => {
+  it('keeps legacy unscoped state out of the signed path', () => {
     const legacyState = {
       response: {
         minimaxThinking: [{ type: 'thinking', thinking: 'unscoped', signature: 'sig-unscoped' }],
@@ -321,7 +328,9 @@ describe('minimax thinking replay', () => {
 
     const messages = replayed.messages as Array<{ role: string; content: unknown[] }>
     const assistant = messages.find(m => m.role === 'assistant')
-    expect(assistant?.content ?? []).toEqual([])
+    // The stored state carries no provenance at all, so it must NOT be replayed
+    // as a signed block - but the reasoning it holds still belongs to the turn.
+    expect(assistant?.content ?? []).toEqual([{ type: 'text', text: 'unscoped' }])
   })
 
   it('handles streamed redacted_thinking blocks and signatures', () => {
@@ -428,7 +437,7 @@ describe('minimax thinking replay', () => {
     })
   })
 
-  it('safely drops block when reasoning text was compacted or mismatched', () => {
+  it('degrades a compacted block to plain text instead of dropping it', () => {
     const authOwner = 'owner-content-check'
     const state = createStreamState({ model: 'minimax-M3', authOwner, route: PROVIDER_ID })
     const send = (event: unknown) => processMinimaxStreamLine('data: ' + JSON.stringify(event), state)
@@ -462,10 +471,13 @@ describe('minimax thinking replay', () => {
 
     const messages = replayed.messages as Array<{ role: string; content: unknown[] }>
     const assistant = messages.find(m => m.role === 'assistant')
-    expect(assistant?.content ?? []).toEqual([])
+    // The history no longer matches the block the model signed, so the SIGNED
+    // block cannot be replayed. The reasoning it carried is still the model's
+    // own words, so it degrades to plain text rather than disappearing.
+    expect(assistant?.content ?? []).toEqual([{ type: 'text', text: 'altered compacted text' }])
   })
 
-  it('adapter rebuilds body on 401 renewal, omitting prior thinking when owner changes and scoping finish to new owner', async () => {
+  it('adapter rebuilds body on 401 renewal, keeping the prior thinking when the owner changes and scoping finish to new owner', async () => {
     const capturedBodies: any[] = []
     const tokens = ['initial-token-1', 'renewed-token-2']
     let currentTokenIndex = 0
@@ -598,9 +610,11 @@ describe('minimax thinking replay', () => {
     const attempt0Assistant = capturedBodies[0].body.messages.find((m: any) => m.role === 'assistant')
     expect(attempt0Assistant.content.some((b: any) => b.type === 'thinking')).toBe(true)
 
-    // Attempt 1 body was REBUILT with renewedOwner -> MUST OMIT old-owner thinking block
+    // Attempt 1 body was REBUILT with renewedOwner -> the prior signed thinking
+    // block STILL replays: the route and the model are the same, so a renewed
+    // credential does not make the model's own reasoning foreign.
     const attempt1Assistant = capturedBodies[1].body.messages.find((m: any) => m.role === 'assistant')
-    expect(attempt1Assistant.content.some((b: any) => b.type === 'thinking')).toBe(false)
+    expect(attempt1Assistant.content.some((b: any) => b.type === 'thinking')).toBe(true)
 
     // Stream finish chunk MUST carry renewedOwner
     const finish = chunks.find(c => c.type === 'finish')
@@ -675,5 +689,122 @@ describe('minimax thinking replay', () => {
     )
     const mismatchAssistant = (modelMismatchRequest.messages as any[]).find(m => m.role === 'assistant')
     expect(mismatchAssistant?.content.some((b: any) => b.type === 'thinking')).toBe(false)
+  })
+
+  it('keeps a redacted block across an account rotation as well', () => {
+    const state = createStreamState({ model: 'minimax-M3', authOwner: 'account-A', route: PROVIDER_ID })
+    const send = (event: unknown) => processMinimaxStreamLine('data: ' + JSON.stringify(event), state)
+    const out = [
+      ...send({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'redacted_thinking', data: 'encrypted-base64-blob' },
+      }),
+      ...send({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-redacted' } }),
+      ...send({ type: 'content_block_stop', index: 0 }),
+      ...send({ type: 'message_stop' }),
+      ...closeMinimaxStream(state),
+    ]
+    const finish = out.find(c => c.type === 'finish') as { replayState?: any }
+
+    const replayed = buildMinimaxRequest(
+      {
+        provider: PROVIDER_ID,
+        model: 'minimax-M3',
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+          {
+            role: 'assistant',
+            content: [{ type: 'reasoning', text: '' }],
+            source: { kind: 'model', replayState: finish?.replayState },
+          },
+        ],
+      } as never,
+      undefined,
+      { authOwner: 'account-B', route: PROVIDER_ID },
+    )
+
+    const messages = replayed.messages as Array<{ role: string; content: unknown[] }>
+    const assistant = messages.find(m => m.role === 'assistant')
+    expect(assistant?.content ?? []).toEqual([
+      { type: 'redacted_thinking', data: 'encrypted-base64-blob', signature: 'sig-redacted' },
+    ])
+  })
+
+  it('degrades a thinking block with no signature to plain text', () => {
+    // The service streamed reasoning but signed nothing, so there is no block
+    // this route may replay. The reasoning is still the model's own words, and
+    // dropping it would delete it from the conversation.
+    const state = createStreamState({ model: 'minimax-M3', authOwner: 'owner-unsigned', route: PROVIDER_ID })
+    const send = (event: unknown) => processMinimaxStreamLine('data: ' + JSON.stringify(event), state)
+    const out = [
+      ...send({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }),
+      ...send({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'unsigned thought' } }),
+      ...send({ type: 'content_block_stop', index: 0 }),
+      ...send({ type: 'message_stop' }),
+      ...closeMinimaxStream(state),
+    ]
+    const finish = out.find(c => c.type === 'finish') as { replayState?: any }
+
+    const replayed = buildMinimaxRequest(
+      {
+        provider: PROVIDER_ID,
+        model: 'minimax-M3',
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+          {
+            role: 'assistant',
+            content: [{ type: 'reasoning', text: 'unsigned thought' }],
+            source: { kind: 'model', replayState: finish?.replayState },
+          },
+        ],
+      } as never,
+      undefined,
+      { authOwner: 'owner-unsigned', route: PROVIDER_ID },
+    )
+
+    const messages = replayed.messages as Array<{ role: string; content: unknown[] }>
+    const assistant = messages.find(m => m.role === 'assistant')
+    expect(assistant?.content ?? []).toEqual([{ type: 'text', text: 'unsigned thought' }])
+  })
+
+  it('drops a redacted block that belongs to another model, with no text to keep', () => {
+    // A redacted block carries no visible text, so there is nothing to fall
+    // back to: it is dropped rather than turned into a text block.
+    const state = createStreamState({ model: 'minimax-M3', authOwner: 'owner-redacted-cross', route: PROVIDER_ID })
+    const send = (event: unknown) => processMinimaxStreamLine('data: ' + JSON.stringify(event), state)
+    const out = [
+      ...send({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'redacted_thinking', data: 'encrypted-base64-blob' },
+      }),
+      ...send({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-redacted' } }),
+      ...send({ type: 'content_block_stop', index: 0 }),
+      ...send({ type: 'message_stop' }),
+      ...closeMinimaxStream(state),
+    ]
+    const finish = out.find(c => c.type === 'finish') as { replayState?: any }
+
+    const replayed = buildMinimaxRequest(
+      {
+        provider: PROVIDER_ID,
+        model: 'minimax-M3.1',
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+          {
+            role: 'assistant',
+            content: [{ type: 'reasoning', text: '' }],
+            source: { kind: 'model', replayState: finish?.replayState },
+          },
+        ],
+      } as never,
+      undefined,
+      { authOwner: 'owner-redacted-cross', route: PROVIDER_ID },
+    )
+
+    const messages = replayed.messages as Array<{ role: string; content: unknown[] }>
+    const assistant = messages.find(m => m.role === 'assistant')
+    expect(assistant?.content ?? []).toEqual([])
   })
 })

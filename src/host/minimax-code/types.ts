@@ -178,6 +178,19 @@ export const MESSAGES_PATH = '/messages'
 export const ANTHROPIC_VERSION = '2023-06-01'
 
 /**
+ * Beta marker the interleaved-thinking protocol needs.
+ *
+ * The Messages endpoint on this route accepts signed `thinking` blocks and
+ * streams reasoning back in its own channel, and the Anthropic dialect gates
+ * that on the interleaved-thinking beta. The official MiniMax agent sends the
+ * marker on every Messages request (its `model-resolver-helpers.ts`), so a
+ * request without it is shaped differently from the one the service is
+ * documented against - and the replay path on this line has signed thinking
+ * blocks to send.
+ */
+export const ANTHROPIC_INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
+
+/**
  * Byte ceiling the guard enforces on one request body.
  *
  * WHY THIS IS NOT KIMI'S 2 MB FIGURE
@@ -271,13 +284,35 @@ export function maxRequestImageBytes(env: NodeJS.ProcessEnv = process.env): numb
 /**
  * Product token this plugin reports.
  *
- * MiniMax Code's own telemetry headers are deliberately NOT forged: this is a
- * third-party client of the subscription, and claiming to be the official app is
- * both dishonest and, per the app's own terms, grounds for suspending the
- * subscription.
+ * This is the plugin's own identity, and it stays honest. MiniMax Code's own
+ * telemetry headers are deliberately NOT forged: this is a third-party client of
+ * the subscription, and claiming to be the official app is both dishonest and,
+ * per the app's own terms, grounds for suspending the subscription.
+ *
+ * The surfaces that carry this token are exactly the first-party ones (the
+ * check-in call, the reset-card call, the usage read), and those are the ones
+ * that must be able to say who is asking. The MODEL request carries
+ * {@link MINIMAX_AGENT_USER_AGENT} instead - a different surface, a different
+ * identifier.
  */
 export const USER_AGENT =
   'dsh-chatgpt-subscription (+https://github.com/Aa728848/dsh-chatgpt-subscription)'
+
+/**
+ * Client identifier the managed agent's MODEL requests carry.
+ *
+ * The managed agent classifies a model request by this header, and the official
+ * MiniMax agent sends exactly this value (`model-resolver-helpers.ts:11`, and
+ * the same identifier the Matrix media face uses). A model request that names
+ * something else is shaped differently from the one the service is documented
+ * against - and the model request is the surface that has to speak the
+ * protocol's own identifier.
+ *
+ * It is a separate constant from {@link USER_AGENT} on purpose: the first-party
+ * surfaces keep identifying this plugin honestly, and only the model request
+ * speaks as the agent the endpoint expects.
+ */
+export const MINIMAX_AGENT_USER_AGENT = 'MiniMaxAgent'
 
 /**
  * How long before expiry a token is replaced.
