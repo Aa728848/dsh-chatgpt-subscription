@@ -188,7 +188,10 @@ export async function getKimiCodeWebStatus(
   // A pool that cannot be read must not fail the whole card: the connection
   // section is still worth rendering, just with an empty account list.
   const poolData = accountPool === undefined ? null : await accountPool.read().catch(() => null)
-  const accounts = accountPool === undefined ? [] : await accountPool.listAccounts().catch(() => [])
+  // Derived from the SAME document as `activeAccountId`: `listAccounts` reads the
+  // pool again, and two reads can straddle a write, so one answer could name one
+  // account beside another generation's rows.
+  const accounts = accountPool === undefined || poolData === null ? [] : accountPool.summariesOf(poolData)
   const activeAccount = accounts.find((entry) => entry.id === poolData?.activeAccountId)
     ?? accounts.find((entry) => entry.isPrimary)
     ?? accounts[0]
@@ -426,6 +429,46 @@ function hitRatioOf(cached: number, fresh: number): number | null {
   return total > 0 ? cached / total : null
 }
 
+/**
+ * Name the account a re-authorization has to sign back in as.
+ *
+ * `relogin` on the card clears one row's failure marker and then runs an ordinary
+ * device-code sign-in, which authorizes whichever account the browser already
+ * is. Without this check the pool could accept a DIFFERENT account, replace that
+ * account's row and move the rotation with it, while the row the user clicked
+ * stayed broken — the card then looked like the pool had switched on its own.
+ *
+ * The comparison is over identity, never tokens: the account id the token
+ * carries, and only when neither side carries one, the address.
+ */
+async function signInGuard(
+  pool: KimiCodeAccountPool,
+  accountId: string,
+): Promise<(credentials: KimiCodeCredentials) => string | null> {
+  const data = await pool.read().catch(() => null)
+  const row = data?.accounts.find((account) => account.id === accountId)
+  if (row === undefined) {
+    return () => '要重新登录的账号已不在号池中，本次登录已取消，号池未改动。'
+  }
+  const expectedUserId = row.userId ?? row.credentials.userId
+  const expectedEmail = (row.email ?? row.credentials.email)?.trim().toLowerCase() || undefined
+  return (credentials) => {
+    const signedUserId = credentials.userId
+    const signedEmail = credentials.email?.trim().toLowerCase() || undefined
+    const sameAccount = expectedUserId !== undefined && signedUserId !== undefined
+      ? expectedUserId === signedUserId
+      : expectedEmail !== undefined && signedEmail !== undefined
+        ? expectedEmail === signedEmail
+        // Nothing to compare: an account that names itself nowhere (a
+        // phone-signed-in row whose token carries no id) cannot be told apart,
+        // and refusing every such sign-in would lock those users out.
+        : true
+    if (sameAccount) return null
+    const signedName = credentials.email ?? signedUserId ?? '未知账号'
+    return `重新登录的是「${row.alias}」，本次登录的却是「${signedName}」，已取消，号池与凭据都没有改动。`
+  }
+}
+
 /** Register the Kimi Code settings routes under `/kimi-code/api`. */
 export function registerKimiCodeRoutes(
   ctx: Context,
@@ -618,10 +661,19 @@ export function registerKimiCodeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const body = await readRequestJson(request)
           const requested = isRegion(body.region) ? body.region : undefined
+          // A re-authorization names the row it belongs to, so a browser that is
+          // signed in to a different account cannot silently replace it. The
+          // refusal is decided before anything is stored and reported through
+          // the login flow the card already polls.
+          const expectAccountId = typeof body.accountId === 'string' ? body.accountId : undefined
+          const accept = accountPool === undefined || expectAccountId === undefined
+            ? undefined
+            : await signInGuard(accountPool, expectAccountId)
           const value = await beginWebLogin(store, {
             fetchFn,
             region: requested,
             openBrowser: options.openBrowser,
+            ...(accept === undefined ? {} : { accept }),
             // The token pair names an id and, at best, an address; the name
             // the account goes by is served by `/me`. Read it once here so the
             // pool titles the new row immediately, instead of `账号 N` until

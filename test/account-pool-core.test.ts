@@ -439,6 +439,27 @@ describe('AccountPoolCore', () => {
       expect((await pool.read()).accounts.find((entry) => entry.id === second.id)?.lastUsedAt).toBeUndefined()
     })
 
+    it('does not move an existing choice when an account is signed in again', async () => {
+      const pool = build()
+      const first = await pool.addAccount(makeCredential(1), '主账号')
+      const second = await pool.addAccount(makeCredential(2))
+      await pool.setPrimary(second.id)
+      expect((await pool.read()).activeAccountId).toBe(second.id)
+
+      // Re-authorizing the OTHER account, which used to re-point the rotation at
+      // the primary purely because the row is the primary.
+      await pool.addAccount(makeCredential(1, 7200_000))
+      expect((await pool.read()).activeAccountId).toBe(second.id)
+
+      // A brand-new account is not a switch either.
+      await pool.addAccount(makeCredential(3))
+      const data = await pool.read()
+      expect(data.accounts).toHaveLength(3)
+      expect(data.activeAccountId).toBe(second.id)
+      expect(data.accounts.find((entry) => entry.id === second.id)?.isPrimary).toBe(true)
+      expect(data.accounts.find((entry) => entry.id === first.id)?.isPrimary).toBeUndefined()
+    })
+
     it('refreshes an about-to-expire token for a tool and persists the rotated pair', async () => {
       const pool = build()
       const account = await pool.addAccount(makeCredential(1, 10_000))

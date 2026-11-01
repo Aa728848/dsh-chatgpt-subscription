@@ -95,6 +95,24 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
   const quotaFollowUp = useRef<QuotaFollowUp | null>(null)
 
+  /**
+   * Which status answer may still be applied.
+   *
+   * A read goes out on a timer, on tab focus and after a quota refresh, and its
+   * answer can land AFTER the answer to a switch the user made in between.
+   * Applying that older document put the previous account back on screen, which
+   * reads as the pool having switched on its own. So every explicit action
+   * retires whatever read is still in flight, and a read applies its answer only
+   * while it is still the newest one.
+   */
+  const statusGeneration = useRef(0)
+
+  /** Show the answer to an explicit action, and retire any read it outdated. */
+  const applyStatus = useCallback((next: KimiCodeWebStatus) => {
+    statusGeneration.current += 1
+    setStatus(next)
+  }, [])
+
   const t = useLineDict(NS_KIMI_CODE, zh)
 
   const notifyChange = useCallback(() => {
@@ -103,9 +121,13 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   }, [onModelChange, loadModelDirectory])
 
   const loadStatus = useCallback(async (quiet = false) => {
+    const generation = ++statusGeneration.current
     if (!quiet) setError(null)
     try {
       const data = await api.request<KimiCodeWebStatus>('/status')
+      // Stale: an action was answered while this read was in flight, so this
+      // document predates what the card already shows.
+      if (generation !== statusGeneration.current) return
       setStatus(data)
       setContextDrafts(contextDraftsFor(data))
       // An answer that refreshed the quota behind itself is followed up shortly,
@@ -113,7 +135,9 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       quotaFollowUp.current ??= createQuotaFollowUp()
       quotaFollowUp.current.observe(data.quotaRefreshing === true, () => { void loadStatus(true) })
     } catch (err) {
-      if (!quiet) setError(err instanceof Error ? err.message : String(err))
+      if (!quiet && generation === statusGeneration.current) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
     } finally {
       setLoading(false)
     }
@@ -170,14 +194,15 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     return () => window.clearInterval(timer)
   }, [flow?.status, loadStatus, notifyChange, t.loginFailed])
 
-  const handleLogin = async () => {
+  /** Start a sign-in; a re-authorization names the row it must sign back in as. */
+  const handleLogin = async (accountId?: string) => {
     try {
       setBusy('login')
       setError(null)
       setCopied(false)
       const next = await api.request<KimiCodeLoginFlowStatus>('/login', {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify(accountId === undefined ? {} : { accountId }),
       })
       setFlow(next)
       // The host already opened the browser; a failed launch is recoverable
@@ -222,7 +247,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         method: 'POST',
         body: JSON.stringify({ action, accountId }),
       })
-      setStatus(updated)
+      applyStatus(updated)
       setFlow({ status: 'idle' })
       notifyChange()
     } catch (err) {
@@ -240,7 +265,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         method: 'POST',
         body: JSON.stringify({ action: 'strategy', strategy }),
       })
-      setStatus(updated)
+      applyStatus(updated)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -261,12 +286,12 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           method: 'POST',
           body: JSON.stringify({ action: 'relogin', accountId }),
         })
-        setStatus(updated)
+        applyStatus(updated)
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
         return
       }
-      await handleLogin()
+      await handleLogin(accountId)
     })()
   }
 
@@ -277,7 +302,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       // The host reports the real outcome; a failure arrives as a thrown error
       // carrying the upstream reason rather than an indistinguishable 200.
       const updated = await api.request<KimiCodeWebStatus>('/quota', { method: 'POST' })
-      setStatus(updated)
+      applyStatus(updated)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       // Re-read so the card still shows the account and any recorded reason.
@@ -292,7 +317,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
       setBusy('catalog')
       setError(null)
       const updated = await api.request<KimiCodeWebStatus>('/catalog/refresh', { method: 'POST' })
-      setStatus(updated)
+      applyStatus(updated)
       setContextDrafts(contextDraftsFor(updated))
       notifyChange()
     } catch (err) {
@@ -326,7 +351,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         method: 'POST',
         body: JSON.stringify({ enabledModelIds }),
       })
-      setStatus(updated)
+      applyStatus(updated)
       // A model that was just checked has no draft yet; the context window
       // section only renders enabled models.
       setContextDrafts(contextDraftsFor(updated))
@@ -354,7 +379,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         method: 'POST',
         body: JSON.stringify({ defaultReasoningEffort: effort }),
       })
-      setStatus(updated)
+      applyStatus(updated)
       notifyChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -375,7 +400,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: { [modelId]: parsed } }),
       })
-      setStatus(updated)
+      applyStatus(updated)
       setContextDrafts((prev) => ({ ...prev, [modelId]: formatCapacity(parsed) }))
       notifyChange()
     } catch (err) {
@@ -394,7 +419,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: { [modelId]: null } }),
       })
-      setStatus(updated)
+      applyStatus(updated)
       setContextDrafts((prev) => {
         const model = updated.models.find((candidate) => candidate.id === modelId)
         return model === undefined ? prev : { ...prev, [modelId]: formatCapacity(model.defaultContextWindow) }
@@ -419,7 +444,7 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         method: 'POST',
         body: JSON.stringify({ contextWindowOverrides: Object.fromEntries(models.map((model) => [model, null])) }),
       })
-      setStatus(updated)
+      applyStatus(updated)
       setContextDrafts(contextDraftsFor(updated))
       notifyChange()
     } catch (err) {

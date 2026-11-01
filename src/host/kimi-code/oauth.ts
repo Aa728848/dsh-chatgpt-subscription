@@ -720,6 +720,15 @@ async function runDeviceLogin(options: {
    * returns the credential untouched — sign-in has already succeeded.
    */
   enrich?: (credentials: KimiCodeCredentials) => Promise<KimiCodeCredentials>
+  /**
+   * Verdict on the account the flow just signed in as, before anything is stored.
+   *
+   * A re-authorization belongs to one row of a pool, and the device flow signs
+   * in whichever account the browser already is. A refusal message aborts the
+   * flow right there, so the pool, the mirrored credential and the rotation all
+   * stay exactly as they were.
+   */
+  accept?: (credentials: KimiCodeCredentials) => string | null
 }): Promise<KimiCodeCredentials> {
   const deadline = Date.now() + LOGIN_TIMEOUT_MS
 
@@ -780,6 +789,10 @@ async function runDeviceLogin(options: {
         const credentials = options.enrich === undefined
           ? signedIn
           : await options.enrich(signedIn).catch(() => signedIn)
+        // Checked BEFORE the write: a refusal afterwards would leave the mirror
+        // file holding a token pair for the account this flow just rejected.
+        const refusal = options.accept?.(credentials) ?? null
+        if (refusal !== null) throw new Error(refusal)
         await options.store.write(credentials)
         if (options.onSave) await options.onSave(credentials).catch(() => undefined)
         await persistRegion(options.region)
@@ -825,6 +838,14 @@ export async function beginWebLogin(
      * a name, and a failure leaves the credential exactly as the flow built it.
      */
     enrich?: (credentials: KimiCodeCredentials) => Promise<KimiCodeCredentials>
+    /**
+     * Refuse a sign-in that landed on the wrong account, before it is stored.
+     *
+     * Used by a re-authorization, which names the row it belongs to: the device
+     * flow signs in whatever the browser is authenticated as, and accepting a
+     * different account would replace a row nobody asked to replace.
+     */
+    accept?: (credentials: KimiCodeCredentials) => string | null
   } = {},
 ): Promise<KimiCodeLoginFlowStatus> {
   if (webLoginFlow.status === 'pending') return { ...webLoginFlow }
@@ -846,6 +867,7 @@ export async function beginWebLogin(
         open,
         ...(options.onSave === undefined ? {} : { onSave: options.onSave }),
         ...(options.enrich === undefined ? {} : { enrich: options.enrich }),
+        ...(options.accept === undefined ? {} : { accept: options.accept }),
       })
       webLoginFlow = { ...webLoginFlow, status: 'complete', completedAt: Date.now(), progress: 'Signed in' }
       resetRefreshRejections()

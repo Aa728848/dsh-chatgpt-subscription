@@ -548,14 +548,23 @@ export class AccountPoolCore<
     })
   }
 
+  /**
+   * Public summaries of a document the caller already read.
+   *
+   * A caller that needs both the rows and which one would serve the next
+   * request must not read the pool twice: the two reads can straddle a write,
+   * and the answer would then name one account while listing another
+   * generation's state. Reading is not free either — an encrypted round trip,
+   * a DPAPI unprotect on Windows.
+   */
+  summariesOf(data: PoolData<TAccount>): TSummary[] {
+    const now = Date.now()
+    return data.accounts.map((account) => this.summarize(account, now))
+  }
+
   /** Public summaries, with cooldowns that already expired reported as absent. */
   async listAccounts(): Promise<TSummary[]> {
-    const data = await this.read()
-    const now = Date.now()
-    return data.accounts.map((account) => {
-      const summary = this.summarize(account, now)
-      return summary
-    })
+    return this.summariesOf(await this.read())
   }
 
   protected summarize(account: TAccount, now: number): TSummary {
@@ -622,7 +631,11 @@ export class AccountPoolCore<
     if (existingIndex >= 0) data.accounts[existingIndex] = account
     else data.accounts.push(account)
 
-    if (!data.activeAccountId || account.isPrimary) data.activeAccountId = account.id
+    // Only a pool that has never had a choice is pointed at this account. A
+    // sign-in proves who just authenticated, not which account the user wants
+    // serving requests, and re-pointing the rotation on every re-sign-in is how
+    // a pool ended up on an account nobody had switched to.
+    if (!data.activeAccountId) data.activeAccountId = account.id
     return account
   }
 
