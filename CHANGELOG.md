@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.51.1 - 2026-11-01
+
+- **[kimi-code] 修复工具调用批次被动态工具声明/用户消息打断导致的 HTTP 400**
+  - `buildOpenAIRequest` 追踪当前 `assistant(tool_calls)` 尚未闭合的 `awaitingToolCallIds`：在工具批次尚未收齐全部 `role: 'tool'` 响应前，暂存中途到达的 `developer`（`tool-addition` / `tool-removal` 生成的 `role: 'system'`）、工具结果图片及 `user` 消息，待该批次全部 `role: 'tool'` 消息发出后再按原顺序释放。
+  - 若历史中某轮工具批次因中断等原因未闭合，自动补齐 `[no result: the tool call did not complete]` 占位 `tool` 消息，避免上游网关拒绝整轮请求；正常闭合的轮次输出字节零变化，前缀缓存 100% 保持原样。
+
+- **[kimi-code] 修复图片预算持久化、body-fit 漂移归因与 1M 档请求体上限（Closes #80）**
+  - 统一以实际发出的 `sentBuild`（包含上传后构建与 404 inline 重试构建）而非预测量 `measured`（`ms://000...` 占位符）统计 `requestImageBytes`、`bodyFitDroppedKeys`、`budgetDropped` 与 `newlyDroppedCount`，确保 inline 回退触发的 body-fit 淘汰准确写入 `budgetDropped` 并归因为 `image-offload`。
+  - 将 1M 档模型的默认请求体上限 `LONG_CONTEXT_MESSAGE_BODY_BYTES` 从 `8 MiB` 提升至 `24 MiB`（20 MiB 双水位图片预算 + 4 MiB 文本/工具 Schema 余量），使 20 MiB / 10 MiB 的粘性双水位预算真正主导图片淘汰。
+
 ## 0.51.0 - 2026-11-01
 
 - **[dispatch] 调度模式接入 Dispatch Ledger：模型面只多一行短引导，账本与 Mandate v2 协议由只读工具承载**
