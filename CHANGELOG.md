@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.52.0 - 2026-11-01
+
+- **[minimax-code] 请求形状、thinking 回放、缓存守卫与运行时增强对齐官方 agent**
+  - **请求身份**：Messages 请求补 `anthropic-beta: interleaved-thinking-2025-05-14`（签名 thinking 块回放与推理回流传所需），模型面改用协议自己的 `user-agent: MiniMaxAgent`，并只在有会话时带上 `x-mavis-session-id` / `x-mavis-agent-id` / 时区偏移；签到、额度、重置卡等第一方面仍用本插件自己的 `USER_AGENT`，不伪造官方遥测身份。
+  - **工具调用前言**：带工具且有系统提示的会话，在系统文本**末尾追加**一条「非平凡工具步骤先用一句用户可见文字说明」的规则；追加在调用方 prompt 之后，被缓存的前缀保持原位。
+  - **thinking 回放不再因账号池轮换丢失**：签名块的来源校验不再比对 auth owner（换号、续期不会改变模型签过什么），只校验 scope / route / model；无法重放为签名块的推理**降级为纯文本**而不是静默丢弃，redacted 块与脱敏标记仍按原行为丢弃。
+  - **不再默认顶到最贵的档位**：`reasoningEfforts` 的 `defaultReasoningEffort` 全部改为 `null`，没选档就不发 `output_config.effort`；thinking 关闭态与空串也不再发档位，避免「未选择」被悄悄放大成 `max`。
+  - **工具 schema**：每个工具声明 eager input streaming；流式到达的工具调用参数按请求当时的 schema 修复。
+  - **新增 `src/host/minimax-code/runtime-enhancements.ts`**：按官方 `edit-prepare-arguments` / `input-validation` / `runaway-guard` 移植——参数无损强转（数字字符串仅在可无损还原时转、`"2.5"` 遇 `integer` 不转、布尔只认字面 `"true"`/`"false"`、`{"item": [...]}` 还原为数组）、PTC 模式下直调原生工具的提醒、工具级失控守卫（同一动作连击 / 同一族错误连击 / 后台任务轮询无变化）。守卫**永不拦截**，只追加提醒；四条接缝都不碰工具声明面。
+  - **缓存前缀计费线路**：`minimax-code` 加入工具结果修剪的默认跳过名单（改写历史工具结果会让 provider 前缀缓存从改写点失效到对话末尾），同时纳入 PTC `tools:sdk` 段的缓存冻结名单。
+
+- **[kimi-code] Anthropic 协议线路（A 协议）对齐官方客户端**
+  - **thinking 跨轮回放**：请求携带 `context-management` beta 与 `clear_thinking_20251015` context edit——已消费的 thinking 由服务端清掉而不是重放，保留思考的同时不炸上下文；无 `signature_delta` 的流式 thinking 按 Kimi 端点行为处理。
+  - **前缀缓存断点**：在最后一条消息的最后一个**可缓存块**上打 `cache_control: {type: 'ephemeral'}`，不可缓存的块不加该字段，避免服务端拒绝。
+  - **多模态**：视频成为一等 content block（`{type:'video', source:{type:'base64'|'url'}}`），模型不支持时降级为文字说明而不是发出空消息；本轮已上传的托管文件引用**替代**内联 base64（携带短 URL），未命中再走原来的内联路径。
+  - **并行工具结果按声明顺序回填**：同一次 assistant 声明的多个调用，结果即使乱序到达（恢复会话、迟到工具）也按声明顺序发出；未声明调用的结果保持相对顺序排在已作答之后。工具调用上的 provider 私有字段原样回放。
+  - **模型清单双方言解析**：统一 schema（`limit.context` / `limit.input` / `reasoning.type` / `reasoning.effort.valid|default` / `modalities.input` / `tools.dynamic_load`）优先，旧的扁平字段（`context_length` / `supports_thinking_type` / `think_efforts` / `supports_image_in` 等）兜底；`valid_efforts` 受 `support` 门控，默认档不在可选列表里时直接丢弃而不是带进首个回合；空数组/非数组读作「服务端没说话」而不是空列表。
+  - **新增 `KIMI_CODE_CUSTOM_HEADERS`**：按官方 `ANTHROPIC_CUSTOM_HEADERS` 的换行 `Name: Value` 格式追加自定义请求头，是**最低优先级**的一层——设备身份头与调用方自带的头都覆盖它，且按大小写不敏感匹配，不会出现同名头重复发送。
+  - **新增 `src/host/kimi-code/repeat-breaker.ts`**：移植官方 `AgentToolDedupeService` 的四段式重复刹车——连击 3-4 次提醒先说明「期待这次调用给出什么新东西」，5-7 次给出证伪/缺输入/收尾三选一，8-11 次要求改用文字收尾，第 12 次起执行期守卫**接管**这一轮（后续调用全部拒绝，只准交文字结论）；开关为 `KIMI_CODE_REPEAT_BREAKER`，四条接缝同样不碰工具声明面。
+
+- **验证**
+  - `npm run typecheck`（host / client / test / scripts 三工程）0 错误，`npm run build` 通过。
+  - 干净构建：把 `lib/` 整体移开后重建，868 个产物文件与旧树**逐名一致**（无已删除源码的陈旧声明泄漏）；`npm pack --dry-run` 为 **885 files / 4.1 MB**。
+  - 全量 `npx vitest run`：**347 files passed / 2 skipped，6155 tests passed / 9 skipped**，exit 0。
+  - `src/compat.ts` 的 `PLUGIN_VERSION` 同步到 `0.52.0`——`test/responses-client.test.ts` 强制它与 `package.json` 一致，忘记改动会在发版前直接变红。
+
 ## 0.51.1 - 2026-11-01
 
 - **[kimi-code] 修复工具调用批次被动态工具声明/用户消息打断导致的 HTTP 400**
