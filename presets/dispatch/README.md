@@ -144,10 +144,15 @@ preset 的 persona 为此只加**一行**短引导：首次委派前调用一次
 
 1. **首次委派前**调用一次 `dispatch_ledger {action:"self"}`。这次返回的**尾部**就是
    **Mandate v2 协议正文**：字段说明、流程与拒绝码全在里面。
-2. 按协议给派发 / 报告 / 续派的消息加**头部**：正文之前先放一段 ` ```dsh-mandate-v2 ` 围栏，
-   围栏里是头部 JSON，围栏之后才是正文。头部必须在文本的最开头。
-3. 头部里的 `policy` 与 `prompt_ref` **原样抄** `self` 的返回——模型不能自拟：策略块抄错会被
+2. **优先照抄 `self` 给出的那一段**：结果里、协议正文之前有一块"复制即可"的头部——
+   协调者拿到的是 dispatch 骨架（`policy` 与 `prompt_ref` 已填好，三个 id 每次渲染现造），
+   子代理拿到的是**自己那份 mandate 的 report 头**（ids 已经填好，只差 `status`）。
+   骨架生成后先用真解析器自检，判不出 `ok` 就不打印，所以它永远是合法头部。
+3. 手写也行，但**每个 kind 只带自己的字段**：`dispatch` 带 task/boundary/followup/parent_mandate，
+   `report` 只带 status，`steer` 只带 grant。多带一个字段就是"抄错了角色"。
+4. 头部里的 `policy` 与 `prompt_ref` **原样抄** `self` 的返回——模型不能自拟：策略块抄错会被
    判成 `MANDATE_POLICY_STALE`，修订号抄错会被判成 `MANDATE_VERSION`。
+5. 把用不到的字段写成 `null` 与**不写等价**（schema 本来就 nullable）：`"grant":null` 不再是错误。
 
 `dispatch_ledger {action:"ledger"}` 查账本条目：按当前会话或整棵委派树，可按工作项 / 运行 /
 幂等键 / 状态过滤。
@@ -173,6 +178,9 @@ preset 的 persona 为此只加**一行**短引导：首次委派前调用一次
 血缘缺失或指错、策略过期、版本不符、不是你的父 / 不是你的子、扩权越界、你不持有这份 Mandate、
 账本满了。拿到拒绝就按协议改：命名空间**永不重用**，换一次运行就要同时换新的 `run_id` 与
 `idem`，并把 `parent_mandate` 指到被接替的那一次运行。
+
+kind 违规（多带 / 少带字段）的拒绝文案尾部会**直接列出该方向允许携带的字段集**，照它删或补
+字段通常一次就过——这正是子代理以前"逐个字段试错四轮"的那一段。
 
 ## 刻意不配置的项
 

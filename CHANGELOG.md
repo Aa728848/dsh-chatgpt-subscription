@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[dispatch] Mandate v2 头部协议：样板自洽、可直接复制的骨架、会自纠的拒绝文案**
+  - **协议自带的样板是非法头部**：`dispatch_ledger {action:"self"}` 打印的派发样板带着 `"grant":null`，被 `kindViolation` 判成"抄错角色"（`a dispatch header must not carry grant`）——模型照协议抄一次被拒一次。样板已去掉该字段，并新增 **PER KIND** 一节写明 dispatch / report / steer 各自携带的字段集；`test/dispatch-ledger-header.test.ts` 新增用例把正文里**每一段围栏**都丢给真解析器，判不出 `ok` 即回归。
+  - **`null` 与字段缺失同义**：`parent_mandate` / `grant` 在 schema 里是 `nullable()`，解析器却把 `null` 当成"携带了该字段"。现在 `null` 等价于没写，真的带了值仍按原规则拒绝。
+  - **不再要求模型手写 JSON**：`self` 的结果在协议正文之前多打印一段可复制头部——协调者拿到 dispatch 骨架（policy / prompt_ref 已填、ids 每次渲染现造），子代理拿到自己那份 mandate 的 report 头（只差 `status`）。骨架生成后先过 `parseMandateHeader` 自检，非法就不打印；协议正文仍在结果最尾部，值形状与工具声明面不变。
+  - **拒绝文案自纠**：任一 kind 违规的 reason 尾部追加"该方向允许携带的字段集"，守卫的两条 `MANDATE_KIND` 同样追加，子代理从"逐个字段试错"变成一次往返改对。
+  - 授权语义一处未动：命名空间永不重用、血缘、扩权上限、容量判定全部原样。
+  - **验证**：`npm run typecheck`（host / test / scripts 三工程）0 错误；定向 `npx vitest run test/dispatch-ledger-{header,tool,guard}.test.ts test/dispatch-model-surface-contract.test.ts` **101 passed**；全量 `npx vitest run` **347 files / 6165 tests passed**（新增 10 条）。用真解析器复核：旧样板（带 `grant:null`）现判 `ok`，报告头带 `task` 的拒绝串已自带字段集。
+
 ## 0.52.0 - 2026-11-01
 
 - **[minimax-code] 请求形状、thinking 回放、缓存守卫与运行时增强对齐官方 agent**

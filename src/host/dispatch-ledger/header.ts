@@ -178,39 +178,71 @@ const HEADER_SCHEMA = z.strictObject({
 })
 
 /**
+ * 每种角色**允许携带**的字段集。
+ *
+ * 同一个字段集只写一次：它既出现在 kind 违规的拒绝文案尾部（模型被拒时当场
+ * 唯一的纠错入口），也出现在守卫的两条 `MANDATE_KIND` 拒绝里。文案与 schema
+ * 各写一套，迟早会重演"样板自己非法"那类事故。
+ */
+export const MANDATE_KIND_FIELDS: Readonly<Record<MandateKind, string>> = {
+  dispatch: 'v, kind, brief_id, run_id, idem, mandate_version, prompt_ref, policy, task, boundary, followup, parent_mandate',
+  report: 'v, kind, brief_id, run_id, idem, mandate_version, prompt_ref, policy, status',
+  steer: 'v, kind, brief_id, run_id, idem, mandate_version, prompt_ref, policy, grant',
+}
+
+/**
+ * 拼出"这个方向到底该带什么"的纠错尾巴。
+ *
+ * 拒绝文案只说"不许带 X"时，模型只能逐个字段试错——它反复写不对的原因正在这里。
+ * 把该方向的字段集直接贴在违规说明后面，一次往返就能改对。
+ * @param kind - 声明了角色、却用错了字段的那种角色。
+ * @returns 追加在违规说明之后的纠错尾巴。
+ */
+function kindRepairHint(kind: MandateKind): string {
+  return ' (a ' + kind + ' header carries exactly: ' + MANDATE_KIND_FIELDS[kind]
+    + '; copy the ready-to-send block from dispatch_ledger {action:"self"})'
+}
+
+/**
  * 校验 kind 与字段的组合。
  *
  * 字段是"按角色出现"的：dispatch 带 task/boundary/followup/parent_mandate，
  * report 带 status，steer 带 grant。组合不合法 = 头部损坏，而不是"忽略
  * 多余字段"——多带字段往往意味着模型抄错了角色。
+ *
+ * `null` 与"没写"同义：schema 把 parent_mandate / grant 声明成 nullable，模型
+ * 也习惯把用不到的字段写成 null。把 null 当成"携带了这个字段"，等于拒绝一个
+ * 语义上完全正确、只是写法啰嗦的头部。
  * @param header - 已通过 schema 的头部。
  * @returns 违规说明；合法时 undefined。
  */
 function kindViolation(header: MandateHeader): string | undefined {
+  const carriedParent = header.parent_mandate !== undefined && header.parent_mandate !== null
+  const carriedGrant = header.grant !== undefined && header.grant !== null
   if (header.kind === 'dispatch') {
-    if (header.task === undefined) return 'a dispatch header must carry task'
-    if (header.boundary === undefined) return 'a dispatch header must carry boundary'
-    if (header.followup === undefined) return 'a dispatch header must carry followup'
-    if (header.parent_mandate === undefined) return 'a dispatch header must carry parent_mandate'
-    if (header.grant !== undefined) return 'a dispatch header must not carry grant'
-    if (header.status !== undefined) return 'a dispatch header must not carry status'
+    if (header.task === undefined) return 'a dispatch header must carry task' + kindRepairHint('dispatch')
+    if (header.boundary === undefined) return 'a dispatch header must carry boundary' + kindRepairHint('dispatch')
+    if (header.followup === undefined) return 'a dispatch header must carry followup' + kindRepairHint('dispatch')
+    if (header.parent_mandate === undefined) return 'a dispatch header must carry parent_mandate' + kindRepairHint('dispatch')
+    if (carriedGrant) return 'a dispatch header must not carry grant' + kindRepairHint('dispatch')
+    if (header.status !== undefined) return 'a dispatch header must not carry status' + kindRepairHint('dispatch')
     return undefined
   }
   if (header.kind === 'report') {
-    if (header.status === undefined) return 'a report header must carry status'
-    if (header.task !== undefined) return 'a report header must not carry task'
-    if (header.boundary !== undefined) return 'a report header must not carry boundary'
-    if (header.followup !== undefined) return 'a report header must not carry followup'
-    if (header.parent_mandate !== undefined) return 'a report header must not carry parent_mandate'
-    if (header.grant !== undefined) return 'a report header must not carry grant'
+    if (header.status === undefined) return 'a report header must carry status' + kindRepairHint('report')
+    if (header.task !== undefined) return 'a report header must not carry task' + kindRepairHint('report')
+    if (header.boundary !== undefined) return 'a report header must not carry boundary' + kindRepairHint('report')
+    if (header.followup !== undefined) return 'a report header must not carry followup' + kindRepairHint('report')
+    if (carriedParent) return 'a report header must not carry parent_mandate' + kindRepairHint('report')
+    if (carriedGrant) return 'a report header must not carry grant' + kindRepairHint('report')
     return undefined
   }
-  if (header.grant === undefined) return 'a steer header must carry grant'
-  if (header.status !== undefined) return 'a steer header must not carry status'
-  if (header.task !== undefined) return 'a steer header must not carry task'
-  if (header.boundary !== undefined) return 'a steer header must not carry boundary'
-  if (header.followup !== undefined) return 'a steer header must not carry followup'
-  if (header.parent_mandate !== undefined) return 'a steer header must not carry parent_mandate'
+  if (header.grant === undefined) return 'a steer header must carry grant' + kindRepairHint('steer')
+  if (header.status !== undefined) return 'a steer header must not carry status' + kindRepairHint('steer')
+  if (header.task !== undefined) return 'a steer header must not carry task' + kindRepairHint('steer')
+  if (header.boundary !== undefined) return 'a steer header must not carry boundary' + kindRepairHint('steer')
+  if (header.followup !== undefined) return 'a steer header must not carry followup' + kindRepairHint('steer')
+  if (carriedParent) return 'a steer header must not carry parent_mandate' + kindRepairHint('steer')
   return undefined
 }
 

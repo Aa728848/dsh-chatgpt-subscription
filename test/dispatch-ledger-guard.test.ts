@@ -189,6 +189,13 @@ describe('调度账本守卫：派发', () => {
     expect(guard(dispatch(prompt, session, 'call-a'))).toBeUndefined()
   })
 
+  it('dispatch 头把可选字段写成 null → 放行（null 与缺失同义）', () => {
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields({ grant: null }))
+    const session = makeSession('dispatcher-1', [nativeCall(1, 'call-a', prompt)])
+    expect(guard(dispatch(prompt, session, 'call-a'))).toBeUndefined()
+  })
+
   it('并行同命名空间：第二次被拒，原运行仍 booked', () => {
     const { guard, cache } = harness()
     const prompt = withHeader(dispatchFields())
@@ -391,6 +398,37 @@ describe('调度账本守卫：报告与续派', () => {
       callId: 'call-a',
     })
     expect(denial).toContain('MANDATE_KIND')
+  })
+
+  it('派发头出现在 send_message → 文案点名两个方向各自的字段集', () => {
+    const { guard } = harness()
+    const child = makeSession('child-1', [], 'parent-1')
+    const denial = guard({
+      name: 'send_message',
+      arguments: { agent_id: 'parent-1', message: withHeader(dispatchFields()) },
+      agent: { session: child },
+      callId: 'call-a',
+    })
+    expect(denial).toContain('carries exactly')
+    expect(denial).toContain('status')
+    expect(denial).toContain('grant')
+  })
+
+  it('报告头带了 dispatch 的字段 → 拒绝文案直接说出该带哪些字段', () => {
+    // 子代理最容易犯的错：把父代理那条派发头原样搬进报告。拒绝串必须当场
+    // 告诉它 report 头到底带什么，否则它只能逐个字段试错。
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields())
+    const child = makeSession('child-1', [childPromptEvent(1, prompt)], 'parent-1')
+    const denial = guard({
+      name: 'send_message',
+      arguments: { agent_id: 'parent-1', message: withHeader(reportFields({ task: ['task://req-42'] })) },
+      agent: { session: child },
+      callId: 'call-a',
+    })
+    expect(denial).toContain('MANDATE_MALFORMED')
+    expect(denial).toContain('a report header must not carry task')
+    expect(denial).toContain('carries exactly')
   })
 })
 

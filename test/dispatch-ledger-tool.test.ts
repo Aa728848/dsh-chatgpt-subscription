@@ -17,6 +17,7 @@ import { dispatchPolicyDescriptor } from '../src/host/dispatch-ledger/policy.ts'
 import {
   MANDATE_FENCE_CLOSE,
   MANDATE_FENCE_OPEN,
+  parseMandateHeader,
 } from '../src/host/dispatch-ledger/header.ts'
 import type { DispatchLedgerEventLike } from '../src/host/dispatch-ledger/ledger.ts'
 
@@ -405,5 +406,90 @@ describe('dispatch_ledger 工具：环境 prompt_ref', () => {
     })
     const value = await run(tool, { action: 'self' }, makeSession('dispatcher-1', []))
     expect(value['prompt_ref']).toBeUndefined()
+  })
+})
+
+/** 抽出一段文本里的全部 mandate 围栏块（不含围栏本身）。 */
+function fencesOf(text: string): string[] {
+  return [...text.matchAll(/```dsh-mandate-v2\n([\s\S]*?)\n```/g)].map(match => match[1] ?? '')
+}
+
+/** 把一段围栏内容还原成解析结果。 */
+function parseFence(json: string) {
+  return parseMandateHeader(MANDATE_FENCE_OPEN + '\n' + json + '\n' + MANDATE_FENCE_CLOSE + '\nbody')
+}
+
+/** 子代理自己的提示词事件（Mandate 就藏在这里）。 */
+function childPrompt(seq: number, prompt: string): DispatchLedgerEventLike {
+  return {
+    type: 'user/message',
+    seq,
+    time: 1000 + seq,
+    data: { content: [{ type: 'text', text: prompt }] },
+  }
+}
+
+describe('dispatch_ledger 工具：可复制的头部骨架', () => {
+  it('协调者拿到 dispatch 骨架，且它就是一份合法头部', async () => {
+    const tool = createDispatchLedgerTool({
+      cache: createDispatchLedgerCache(),
+      policyFor: () => POLICY,
+      promptRef: 'p-abc123def456',
+    })
+    const args = { action: 'self' }
+    const value = await run(tool, args, makeSession('dispatcher-1', []))
+    const text = render(tool, args, value)
+    const parsed = fencesOf(text).map(parseFence)
+    expect(parsed.length, 'self 没有给出可复制的骨架').toBeGreaterThan(0)
+    for (const entry of parsed) expect(entry.state).toBe('ok')
+    expect(parsed[0]?.header?.kind).toBe('dispatch')
+    expect(parsed[0]?.header?.prompt_ref).toBe('p-abc123def456')
+    expect(parsed[0]?.header?.policy?.sha256).toBe(POLICY.sha256)
+    expect(text.endsWith(DISPATCH_MANDATE_PROTOCOL)).toBe(true)
+  })
+
+  it('每次渲染都现造 ids：照抄两次也不会撞命名空间', async () => {
+    const tool = createDispatchLedgerTool({
+      cache: createDispatchLedgerCache(),
+      policyFor: () => POLICY,
+      promptRef: 'p-abc123def456',
+    })
+    const args = { action: 'self' }
+    const first = fencesOf(render(tool, args, await run(tool, args, makeSession('dispatcher-1', []))))
+    const second = fencesOf(render(tool, args, await run(tool, args, makeSession('dispatcher-1', []))))
+    expect(first[0]).not.toBe(second[0])
+  })
+
+  it('子代理拿到 report 骨架，ids 就是它自己那份 mandate 的', async () => {
+    const prompt = withHeader(dispatchFields())
+    const session = makeSession('child-1', [childPrompt(1, prompt)], 'dispatcher-1')
+    const tool = createDispatchLedgerTool({
+      cache: createDispatchLedgerCache(),
+      policyFor: () => POLICY,
+      promptRef: 'plan-v3',
+    })
+    const args = { action: 'self' }
+    const value = await run(tool, args, session)
+    const parsed = fencesOf(render(tool, args, value)).map(parseFence)
+    const report = parsed.find(entry => entry.header?.kind === 'report')
+    expect(report?.state, 'self 没有给出合法的 report 骨架').toBe('ok')
+    expect(report?.header?.brief_id).toBe('b-7f')
+    expect(report?.header?.run_id).toBe('r-1')
+    expect(report?.header?.idem).toBe('i-1')
+    expect(report?.header?.status).toBe('ready')
+  })
+
+  it('宿主没给 policy / prompt_ref 时不硬造骨架', () => {
+    const tool = createDispatchLedgerTool({ cache: createDispatchLedgerCache() })
+    const text = render(tool, { action: 'self' }, {
+      action: 'self',
+      sessionId: 's-1',
+      open: { runs: 0, briefs: 0, runsFull: false, briefsFull: false },
+      protocol: DISPATCH_MANDATE_PROTOCOL,
+    })
+    // 协议正文自带一段样板，所以只看骨架区（协议之前）有没有多出来的围栏。
+    const head = text.split(DISPATCH_MANDATE_PROTOCOL)[0] ?? ''
+    expect(fencesOf(head)).toHaveLength(0)
+    expect(text.endsWith(DISPATCH_MANDATE_PROTOCOL)).toBe(true)
   })
 })

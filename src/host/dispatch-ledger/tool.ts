@@ -26,7 +26,9 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
+  MANDATE_PROTOCOL_ID,
   mandateNamespaceKey,
+  parseMandateHeader,
   type MandateHeader,
 } from './header.ts'
 import {
@@ -333,6 +335,113 @@ function matchesFilters(row: DispatchLedgerRow, args: DispatchLedgerToolArgs): b
   return true
 }
 
+/** 骨架里 id 的随机后缀长度。 */
+const SKELETON_ID_NOISE = 6
+
+/**
+ * 造一个本次渲染专用的 id。
+ *
+ * 骨架里的 brief_id / run_id / idem 必须是"抄下来就能用"的真 id，所以每渲染
+ * 一次就现造一组：模型原样照抄也不会撞上别处的命名空间。
+ * @param prefix - id 前缀（b / r / i）。
+ * @returns 符合头部 id 字符集 `[A-Za-z0-9._:-]` 的 id。
+ */
+function skeletonId(prefix: string): string {
+  const stamp = Date.now().toString(36)
+  const noise = Math.random().toString(36).slice(2, 2 + SKELETON_ID_NOISE)
+  return prefix + '-' + (stamp + noise).slice(-(SKELETON_ID_NOISE + 2))
+}
+
+/**
+ * 把一段头部值包成"可复制"的围栏块，并**先用真解析器自检**。
+ *
+ * 宁可少给一段骨架，也不给一个模型抄了就被拒的头部——这段文本是它唯一的依据。
+ * @param lead - 引导语：说清哪些字段要改、哪些一个都不能动。
+ * @param header - 头部值。
+ * @returns 引导语 + 围栏块；判不出 `ok` 时 undefined。
+ */
+function readyToSendBlock(lead: string, header: Record<string, unknown>): string | undefined {
+  const block = '```' + MANDATE_PROTOCOL_ID + '\n' + JSON.stringify(header) + '\n' + '```'
+  if (parseMandateHeader(block).state !== 'ok') return undefined
+  return lead + '\n' + block
+}
+
+/**
+ * 读一个策略块的三个字段。
+ * @param value - value 里的 policy（或 mandate.policy）。
+ * @returns 策略块；形状不对时 undefined。
+ */
+function policyBlockOf(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined
+  return { id: value['id'], version: value['version'], sha256: value['sha256'] }
+}
+
+/**
+ * 子代理的 **report 骨架**。
+ *
+ * brief_id / run_id / idem / prompt_ref / policy 全部来自它**自己持有的**那份
+ * mandate（也就是它收到的派发头），所以它只需要改 status——把"自己拼 JSON"换成
+ * "照着抄一行"。
+ * @param mandate - `self` 结果里的 mandate。
+ * @returns 可复制块；没有 mandate 或自检不过时 undefined。
+ */
+function reportSkeletonOf(mandate: Record<string, unknown> | undefined): string | undefined {
+  if (mandate === undefined) return undefined
+  const policy = policyBlockOf(mandate['policy'])
+  if (policy === undefined) return undefined
+  return readyToSendBlock(
+    'report header - copy this block into send_message and change ONLY status'
+    + ' (ready | hand_back | blocked | failed | dropped); every other field is yours already:',
+    {
+      v: 2,
+      kind: 'report',
+      brief_id: mandate['brief_id'],
+      run_id: mandate['run_id'],
+      idem: mandate['idem'],
+      mandate_version: mandate['mandate_version'],
+      prompt_ref: mandate['prompt_ref'],
+      policy,
+      status: 'ready',
+    },
+  )
+}
+
+/**
+ * 协调者的 **dispatch 骨架**。
+ *
+ * policy 与 prompt_ref 由宿主填好（模型不能自拟），三个 id 现造（每次派发都要
+ * 换新的），task / boundary / followup 留成一眼就该改掉的占位符。
+ * @param policy - `self` 结果里的 policy。
+ * @param promptRef - `self` 结果里的 prompt_ref。
+ * @returns 可复制块；宿主没给 policy / prompt_ref 时 undefined。
+ */
+function dispatchSkeletonOf(
+  policy: unknown,
+  promptRef: unknown,
+): string | undefined {
+  const block = policyBlockOf(policy)
+  if (block === undefined) return undefined
+  if (typeof promptRef !== 'string' || promptRef === '') return undefined
+  return readyToSendBlock(
+    'dispatch header - give every dispatch NEW brief_id / run_id / idem, make task, boundary and'
+    + ' followup name your own work, and write the task text after the closing fence:',
+    {
+      v: 2,
+      kind: 'dispatch',
+      brief_id: skeletonId('b'),
+      run_id: skeletonId('r'),
+      idem: skeletonId('i'),
+      mandate_version: 1,
+      prompt_ref: promptRef,
+      policy: block,
+      task: ['task://what-this-dispatch-delivers'],
+      boundary: ['files or module this child may touch'],
+      followup: ['ctx://context-it-may-ask-for-later'],
+      parent_mandate: null,
+    },
+  )
+}
+
 /**
  * 构造 `dispatch_ledger` 工具。
  * @param deps - 依赖。
@@ -464,8 +573,17 @@ export function createDispatchLedgerTool(deps: DispatchLedgerToolDeps): ToolDefi
               + ' idem ' + String(mandate['idem']) + ' prompt_ref ' + String(mandate['prompt_ref']),
             'open: ' + JSON.stringify(record['open'] ?? {}),
           ].join('\n')
+          // 骨架在头部行之后、协议正文之前：先给"抄这段"，再给协议全文。
+          const held = record['mandate']
+          const skeleton = (held === undefined
+            ? undefined
+            : reportSkeletonOf(held as Record<string, unknown>))
+            ?? dispatchSkeletonOf(policy, record['prompt_ref'])
           // 协议正文在**尾部**：模型读到的最后一块就是协议。
-          return [{ type: 'text', text: head + '\n\n' + DISPATCH_MANDATE_PROTOCOL }]
+          const text = skeleton === undefined
+            ? head + '\n\n' + DISPATCH_MANDATE_PROTOCOL
+            : head + '\n\n' + skeleton + '\n\n' + DISPATCH_MANDATE_PROTOCOL
+          return [{ type: 'text', text }]
         }
         const entries = (record['entries'] ?? []) as DispatchLedgerRow[]
         const lines = entries.map(entry => [

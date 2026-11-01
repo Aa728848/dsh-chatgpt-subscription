@@ -25,6 +25,7 @@
  */
 
 import {
+  MANDATE_KIND_FIELDS,
   mandateNamespaceKey,
   mandateNamespaceKeyOf,
   parseMandateHeader,
@@ -778,7 +779,11 @@ export function createDispatchLedgerGuard(
     const header = parsed.header
     if (isDispatch) {
       if (header.kind !== 'dispatch') {
-        return dispatchDenial('MANDATE_KIND', 'a dispatch call must carry a kind "dispatch" header.')
+        return dispatchDenial(
+          'MANDATE_KIND',
+          'a dispatch call must carry a kind "dispatch" header. A dispatch header carries exactly: '
+          + MANDATE_KIND_FIELDS.dispatch + ' (copy the ready-to-send block from dispatch_ledger {action:"self"}).',
+        )
       }
       const session = sessionOfAgent(execution?.agent)
       const state = session === undefined ? initialDispatchLedgerState() : cache.fold(session)
@@ -801,7 +806,11 @@ export function createDispatchLedgerGuard(
       return denial
     }
     if (header.kind === 'dispatch') {
-      return dispatchDenial('MANDATE_KIND', 'a dispatch header belongs to the delegation tool, not send_message.')
+      return dispatchDenial(
+        'MANDATE_KIND',
+        'a dispatch header belongs to the delegation tool, not send_message. A report header carries exactly: '
+        + MANDATE_KIND_FIELDS.report + '; a steer header exactly: ' + MANDATE_KIND_FIELDS.steer + '.',
+      )
     }
     const targetId = asString(args['agent_id'])
     if (targetId === undefined) return undefined
