@@ -42,7 +42,9 @@ import {
   PROGRESS_SECTION_NAME,
   PROGRESS_SECTION_ORDER,
   PROGRESS_UPDATE_LANGUAGES,
+  createLanguageNotice,
   progressSectionText,
+  resolveLanguageNotice,
   type ProgressUpdateLanguage,
 } from './prompt.ts'
 import {
@@ -170,6 +172,31 @@ interface WebServerService {
 /** 日志面（可选）。 */
 interface LoggerService {
   warn(message: string): void
+}
+
+/** pre-step 事件的载荷里本模块会读的部分。 */
+interface PreStepPayloadLike {
+  /** 本步的 agent。 */
+  agent?: unknown
+  /** 取消信号。 */
+  signal?: { aborted?: boolean }
+}
+
+/** 一条 pre-step 决策里本模块会读的部分。 */
+interface PreStepDecisionLike {
+  /** enter / reject。 */
+  kind?: string
+  /** 本步的输入消息。 */
+  messages?: unknown[]
+}
+
+/**
+ * 判断一个值是不是普通对象。
+ * @param value - 任意值。
+ * @returns 是非 null 的对象时为 true。
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }
 
 /**
@@ -479,19 +506,74 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
     return tools.register(tool)
   }, 'dsh-chatgpt-subscription: progress update tool')
 
-  // 提示词引导：文本恒定，不随开关变化——系统提示属于缓存前缀，会话中途改字
-  // 会让整段前缀失效并重新计费；开关的语义交给工具（关闭时 execute 返回
-  // displayed:false）。systemPrompt 是可选服务：没装它的宿主上这条引导不存在，
-  // 插件照样工作。
+  // 提示词引导：文本恒定，不随开关、不随语言档位变化——系统提示属于缓存前缀，
+  // 会话中途改字会让整段前缀失效并重新计费；开关的语义交给工具（关闭时 execute
+  // 返回 displayed:false），语言档位（zh/en）交给下面那条尾部消息。systemPrompt 是
+  // 可选服务：没装它的宿主上这条引导不存在，插件照样工作。
   track(() => {
     const systemPrompt = serviceOf<SystemPromptService>('systemPrompt')
     if (systemPrompt === undefined) return () => undefined
     return systemPrompt.section({
       name: PROGRESS_SECTION_NAME,
       order: PROGRESS_SECTION_ORDER,
-      text: progressSectionText(() => options.settings().language),
+      text: progressSectionText(),
     })
   }, 'dsh-chatgpt-subscription: progress update prompt section')
+
+  // 语言档位（zh/en）是**可变**的：进系统提示词分节就会在会话中途改写那段前缀，
+  // 整段缓存作废（Kimi Code 按内容前缀命中）。所以分节恒为通用档位，固定语言的
+  // 要求改由这里追加一条**尾部用户消息**投递：末尾追加不改已发前缀。
+  //
+  // 投递规则只有一条：**模型当前知道的档位与设置里的不一致时才投一次**。第一次设
+  // 成 zh/en 投一次；同一个档位重复设置不重复投；切回 auto 也投一次（模型还记着
+  // 「一律用中文」，不撤销它就会一直用中文）。
+  //
+  // 与宿主自己的换模型通知同形（packages/core/agent/src/model-selection.ts）：
+  // agent/pre-step 是瀑布事件，必须先 await next() 再把结果原样交回去；本模块是
+  // 旁路，读设置失败、造消息失败都只吞掉自己，绝不破坏转交。
+  /** 每个会话记住的「模型已经知道的语言档位」。 */
+  const rememberedLanguages = new WeakMap<object, ProgressUpdateLanguage>()
+
+  /**
+   * 取一个会话的桶键。
+   * @param agent - pre-step 载荷里的 agent。
+   * @returns 桶键；认不出会话时 undefined。
+   */
+  const languageBucketOf = (agent: unknown): object | undefined => {
+    if (!isRecord(agent)) return undefined
+    const session = agent['session']
+    if (isRecord(session)) return session
+    return agent
+  }
+
+  const disposePreStepListener = ctx.on?.('agent/pre-step', (async (
+    payload: PreStepPayloadLike,
+    next: () => Promise<PreStepDecisionLike | undefined>,
+  ): Promise<PreStepDecisionLike | undefined> => {
+    const decision = await next()
+    try {
+      if (decision === undefined || decision.kind === 'reject') return decision
+      if (payload?.signal?.aborted === true) return decision
+      const messages = Array.isArray(decision.messages) ? decision.messages : []
+      // 空决策这一步本来就不发模型请求（agent-loop 见到空消息就跳过这一轮）：
+      // 塞一条消息进去会把「不请求」变成「请求」，那是行为变更，不是通知。
+      if (messages.length === 0) return decision
+      const bucket = languageBucketOf(payload?.agent)
+      if (bucket === undefined) return decision
+      // 不能缓存 options.settings() 的结果：它是活引用，每一步都要重读。
+      const outcome = resolveLanguageNotice(options.settings().language, rememberedLanguages.get(bucket))
+      if (outcome.notice === undefined) {
+        rememberedLanguages.set(bucket, outcome.remembered)
+        return decision
+      }
+      const notice = createLanguageNotice(outcome.notice.text, outcome.notice.summary)
+      rememberedLanguages.set(bucket, outcome.remembered)
+      return { ...decision, messages: [...messages, notice] }
+    } catch {
+      // 旁路：任何一步失败都不该影响这一步本身，更不该吞掉 next() 的结果。
+      return decision
+    }
+  }) as never)
 
   // 浏览器半边的取数路由。开关关闭时也照常注册：客户端要靠它拿到"当前为空"这个
   // 事实，才能把面板渲染成空态而不是报错。
@@ -542,8 +624,10 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
   // ——也避免一个已经卸掉的实例把后面每一次重新挂载都挡在门外。
   return () => {
     disposeListener?.()
+    if (typeof disposePreStepListener === 'function') disposePreStepListener()
     stores.clear()
     countedSteps.clear()
+    // rememberedLanguages 是 WeakMap：键（会话对象）消失时条目自动释放，没有 clear()。
     release()
   }
 }

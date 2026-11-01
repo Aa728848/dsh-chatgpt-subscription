@@ -163,8 +163,11 @@ import {
   installDispatchExecutionGuard,
   resolveDispatchExecutionGuardEnabled,
 } from './host/dispatch-execution-guard.ts'
+import { canonicalPromptSourceText, installDispatchLedger } from './host/dispatch-ledger/index.ts'
+import { promptRefDescriptor } from './host/dispatch-ledger/policy.ts'
+import type { DispatchLedgerSessions } from './host/dispatch-ledger/guard.ts'
 import { installBundledPresets } from './host/preset-sync.ts'
-import { installDispatchPreset } from './host/agent-preset.ts'
+import { DISPATCH_PRESET, installDispatchPreset } from './host/agent-preset.ts'
 import {
   auditChildRoutes,
   auditedRoutesOf,
@@ -629,6 +632,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => installDispatchExecutionGuard(ctx, {
     enabled: () => resolveDispatchExecutionGuardEnabled(pluginConfig),
   }), 'dsh-chatgpt-subscription: dispatch execution guard')
+
+  // 调度账本：执行期守卫（防重 + 所有权）+ 只读查询工具。开关复用
+  // dispatchExecutionGuard，不新增设置项；工具一次性注册，守卫只走
+  // ctx.tools.guard()，两者都不碰工具声明面。
+  ctx.effect(() => installDispatchLedger(ctx, {
+    enabled: () => resolveDispatchExecutionGuardEnabled(pluginConfig),
+    sessions: () => ctx.get('sessions') as DispatchLedgerSessions | undefined,
+    // 提示词修订号：对 preset 的**稳定序列化文本**取摘要。装配时算一次，
+    // 值只进工具结果与守卫校验——不进 system prompt，前缀缓存零漂移。
+    promptRef: promptRefDescriptor(canonicalPromptSourceText(DISPATCH_PRESET)).ref,
+  }), 'dsh-chatgpt-subscription: dispatch ledger')
 
   const antigravityStore = new FileCredentialStore()
   const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)

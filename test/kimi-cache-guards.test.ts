@@ -178,6 +178,59 @@ describe('readScopeProvider', () => {
     expect(readScopeProvider(createScope('kimi-code'))).toBe('kimi-code')
   })
 
+  it('reads the provider from the agent options on the first step, before any header exists', () => {
+    // The first step of a session has no logged request header yet. If the
+    // guard cannot recognise the protected provider there, that step's tool
+    // table differs from every later step and the cached prefix is rebuilt.
+    const scope = {
+      session: { requestHeader: () => undefined },
+      options: { provider: KIMI_CODE_PROVIDER, model: 'kimi-for-coding' },
+    }
+    expect(readScopeProvider(scope)).toBe(KIMI_CODE_PROVIDER)
+  })
+
+  it('falls through to the agent options when the request header throws', () => {
+    const scope = {
+      session: { requestHeader: () => { throw new Error('no header yet') } },
+      options: { provider: KIMI_CODE_PROVIDER },
+    }
+    expect(readScopeProvider(scope)).toBe(KIMI_CODE_PROVIDER)
+  })
+
+  it('reads the provider from the agent model selection when no header exists yet', () => {
+    // The harness's AgentModel.current() answers with the durable selection
+    // first (pending ?? lastUsed) and only falls back to the agent options
+    // (packages/core/agent/src/model-selection.ts). On the first step there is
+    // no request header at all, so this is the only place that still knows
+    // which provider the session is on.
+    const scope = {
+      model: { current: () => ({ provider: KIMI_CODE_PROVIDER, model: 'kimi-for-coding' }) },
+    }
+    expect(readScopeProvider(scope)).toBe(KIMI_CODE_PROVIDER)
+  })
+
+  it('prefers the recorded model selection over the agent options', () => {
+    // Same precedence as the harness: a recorded selection overrides options.
+    const scope = {
+      model: { current: () => ({ provider: KIMI_CODE_PROVIDER, model: 'kimi-for-coding' }) },
+      options: { provider: 'codex-chatgpt' },
+    }
+    expect(readScopeProvider(scope)).toBe(KIMI_CODE_PROVIDER)
+  })
+
+  it('degrades safely when the model selection read throws', () => {
+    const exploding = {
+      model: { current: () => { throw new Error('selection unavailable') } },
+    }
+    expect(readScopeProvider(exploding)).toBeUndefined()
+    // A failed read must not swallow the sources behind it.
+    const withOptions = {
+      model: { current: () => { throw new Error('selection unavailable') } },
+      options: { provider: 'codex-chatgpt' },
+    }
+    expect(readScopeProvider(withOptions)).toBe('codex-chatgpt')
+  })
+
   it('falls back to the agent options when there is no session', () => {
     expect(readScopeProvider({ options: { provider: 'codex-chatgpt' } })).toBe('codex-chatgpt')
   })

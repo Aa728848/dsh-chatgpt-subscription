@@ -112,8 +112,18 @@ const GLOBAL_KEY = Object.freeze({})
 /**
  * 读一个装配 scope 的 provider。
  *
- * 三处来源按可靠性排序：请求头快照（唯一反映「这一步真的路由到哪个 provider」）
- * → agent 选项（还没发出请求时唯一的意图） → scope 上的裸 provider 字段。
+ * 四处来源按可靠性排序：
+ *
+ * 1. **请求头快照** —— 唯一反映「已经真的路由到哪个 provider」的那一份；
+ * 2. **agent 的模型选择面** `scope.model.current()` —— 宿主自己的读面：先给
+ *    **已记录的**选择（pending ?? lastUsed），没有记录时才退回 agent 选项
+ *    （harness：packages/core/agent/src/model-selection.ts 的 `AgentModel.current`）。
+ *    首步还没有请求头时，这是唯一还能说出「这一场走哪条线路」的地方；
+ * 3. **agent 选项** —— 还没发出请求时唯一的意图；
+ * 4. **scope 上的裸 provider 字段** —— 最后的兜底。
+ *
+ * 每一处读取都独立 try/catch：任何一处抛错都只是「这一处读不到」，不改变其余
+ * 来源的行为，也不让整次读取失败。
  *
  * @param scope - 装配 scope（通常是 agent）。
  * @returns provider id；读不到时为 `undefined`。
@@ -136,6 +146,23 @@ export function readScopeProvider(scope: unknown): string | undefined {
           const provider = config['provider']
           if (typeof provider === 'string' && provider.length > 0) return provider
         }
+      }
+    }
+  }
+  // 宿主的模型选择面：结构探测，不 import 任何宿主类型。
+  const model = scope['model']
+  if (isRecord(model)) {
+    const current = model['current']
+    if (typeof current === 'function') {
+      let selection: unknown
+      try {
+        selection = current.call(model)
+      } catch {
+        selection = undefined
+      }
+      if (isRecord(selection)) {
+        const provider = selection['provider']
+        if (typeof provider === 'string' && provider.length > 0) return provider
       }
     }
   }

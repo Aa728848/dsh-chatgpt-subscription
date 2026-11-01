@@ -74,6 +74,12 @@ type PostExecuteListener = (
   next: () => Promise<PostToolDecision>,
 ) => Promise<PostToolDecision>
 
+/** pre-step 监听器的签名（本模块只用到载荷与 next）。 */
+type PreStepListener = (
+  payload: { agent?: unknown, signal?: { aborted?: boolean } },
+  next: () => Promise<{ kind?: string, messages?: unknown[] }>,
+) => Promise<{ kind?: string, messages?: unknown[] }>
+
 /** 会话表（血缘查找用），每个用例重建。 */
 let sessionTable = new Map<string, { header: { id?: string, origin?: string, parentSession?: string } }>()
 
@@ -92,10 +98,10 @@ let projections: { stateOf: (session: unknown, key: 'turnBoundary') => { lastSte
 function makeCtx() {
   const tools = new Map<string, ToolDefinition>()
   const sections = new Map<string, PromptSection>()
-  const listeners = new Map<string, PostExecuteListener>()
+  const listeners = new Map<string, (...args: any[]) => any>()
   const base = {
     effect,
-    on: (event: string, listener: PostExecuteListener) => {
+    on: (event: string, listener: (...args: any[]) => any) => {
       listeners.set(event, listener)
       return () => { listeners.delete(event) }
     },
@@ -154,6 +160,24 @@ function makeCtx() {
         { isError: false },
         next,
       )
+    },
+    /**
+     * 手动触发一次 pre-step，跑真实的监听器。
+     * @param agent - 本步的 agent（决定通知投递到哪个会话桶）。
+     * @param next - 下游决策；缺省是带一条用户消息的 enter。
+     * @returns 监听器最终交出的决策。
+     */
+    async preStep(
+      agent: unknown = { session: { header: { id: 'root' } } },
+      next: () => Promise<{ kind?: string, messages?: unknown[] }> = async () => ({
+        kind: 'enter',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'claimed' }] }],
+      }),
+    ): Promise<{ kind?: string, messages: unknown[] }> {
+      const listener = listeners.get('agent/pre-step')
+      if (listener === undefined) throw new Error('no agent/pre-step listener registered')
+      const decision = await listener({ agent }, next)
+      return { ...decision, messages: decision.messages ?? [] }
     },
     listenerCount: () => listeners.size,
   }
@@ -250,7 +274,7 @@ describe('apply: 提示词引导', () => {
     expect(text).toContain('not the same as finishing the overall task')
   })
 
-  it('输出语言追加在引导词末尾：auto 跟随对话，zh/en 压过对话语言', () => {
+  it('输出语言不进分节：三个档位渲染出的分节逐字节相同', () => {
     const read = (fake: ReturnType<typeof mount>): string =>
       (fake.sections.get(PROGRESS_SECTION_NAME)!.text as () => string)()
     // 单实例守卫：同一个进程里第二次挂载是空操作，所以读一次就卸一次。
@@ -260,18 +284,132 @@ describe('apply: 提示词引导', () => {
     disposeAll()
     const english = read(mount(true, undefined, 'en'))
     disposeAll()
+    // 语言档位不再进系统提示词：渲染结果一变，harness 就地替换最早那条 system
+    // 消息，整段内容前缀随之作废（Kimi Code 按内容前缀命中）。
+    expect(chinese).toBe(auto)
+    expect(english).toBe(auto)
     expect(auto).toContain('the language the user is writing in')
-    expect(chinese).toContain('Simplified Chinese')
-    expect(english).toContain('every progress update in English')
+    expect(auto).not.toContain('Simplified Chinese')
+    expect(auto).not.toContain('every progress update in English')
     // 活引用：同一个引用就地换值，不重挂插件行
     const live = {
       value: 'auto' as string,
       get() { return this.value },
     }
     const fake = mount(true, undefined, live)
-    expect(read(fake)).toContain('the language the user is writing in')
+    const before = read(fake)
+    expect(before).toBe(auto)
     live.value = 'en'
-    expect(read(fake)).toContain('every progress update in English')
+    expect(read(fake)).toBe(before)
+  })
+})
+
+describe('apply: 语言覆盖走尾部消息', () => {
+  /** 稳定的会话对象：同一个 id 永远拿到同一个 session，通知才认得出「同一个会话」。 */
+  const sessionTableOf = new Map<string, { header: { id: string } }>()
+
+  /**
+   * 造一个带会话的 agent。
+   * @param id - 会话 id。
+   * @returns agent。
+   */
+  function agentOf(id: string): { session: { header: { id: string } } } {
+    let session = sessionTableOf.get(id)
+    if (session === undefined) {
+      session = { header: { id } }
+      sessionTableOf.set(id, session)
+    }
+    return { session }
+  }
+
+  /** 取一条通知消息的正文。 */
+  function textOf(message: unknown): string {
+    const content = (message as { content?: { text?: string }[] } | undefined)?.content
+    return content?.[0]?.text ?? ''
+  }
+
+  it('语言是 auto 时一条都不投', async () => {
+    const fake = mount(volatileField(true), undefined, 'auto')
+    const decision = await fake.preStep(agentOf('auto-session'))
+    expect(decision.messages).toHaveLength(1)
+  })
+
+  it('固定语言第一次需要时投一条，之后同一档位不再投', async () => {
+    const fake = mount(volatileField(true), undefined, 'zh')
+    const first = await fake.preStep(agentOf('zh-session'))
+    expect(first.messages).toHaveLength(2)
+    const notice = first.messages[1] as { role?: string, source?: { kind?: string } }
+    expect(notice.role).toBe('user')
+    expect(notice.source?.kind).toBe('progress-updates-language')
+    expect(textOf(notice)).toContain('Simplified Chinese')
+    // 第二步：同一档位，不再投。
+    const second = await fake.preStep(agentOf('zh-session'))
+    expect(second.messages).toHaveLength(1)
+  })
+
+  it('换档位投一条，切回 auto 也投一条', async () => {
+    const live = {
+      value: 'zh' as string,
+      get() { return this.value },
+    }
+    const fake = mount(volatileField(true), undefined, live)
+    expect((await fake.preStep(agentOf('switch-session'))).messages).toHaveLength(2)
+    live.value = 'en'
+    const english = await fake.preStep(agentOf('switch-session'))
+    expect(english.messages).toHaveLength(2)
+    expect(textOf(english.messages[1])).toContain('every progress update in English')
+    live.value = 'auto'
+    const back = await fake.preStep(agentOf('switch-session'))
+    expect(back.messages).toHaveLength(2)
+    expect(textOf(back.messages[1])).toContain('override ended')
+    // 回到 auto 之后不再投。
+    expect((await fake.preStep(agentOf('switch-session'))).messages).toHaveLength(1)
+  })
+
+  it('不同会话各自计数，互不影响', async () => {
+    const fake = mount(volatileField(true), undefined, 'zh')
+    expect((await fake.preStep(agentOf('one'))).messages).toHaveLength(2)
+    expect((await fake.preStep(agentOf('two'))).messages).toHaveLength(2)
+    expect((await fake.preStep(agentOf('one'))).messages).toHaveLength(1)
+  })
+
+  it('空决策不追加：空消息这一步本来就不发模型请求', async () => {
+    const fake = mount(volatileField(true), undefined, 'zh')
+    const decision = await fake.preStep(agentOf('empty-session'), async () => ({ kind: 'enter', messages: [] }))
+    expect(decision.messages).toHaveLength(0)
+  })
+
+  it('被拒绝的一步不投通知', async () => {
+    const fake = mount(volatileField(true), undefined, 'zh')
+    const decision = await fake.preStep(agentOf('rejected-session'), async () => ({ kind: 'reject', messages: [] }))
+    expect(decision.messages).toHaveLength(0)
+  })
+
+  it('next() 的结果原样转交：先 await 再追加', async () => {
+    const fake = mount(volatileField(true), undefined, 'zh')
+    let calls = 0
+    const decision = await fake.preStep(agentOf('forward-session'), async () => {
+      calls += 1
+      return { kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'claimed' }] }] }
+    })
+    expect(calls).toBe(1)
+    expect(decision.kind).toBe('enter')
+    expect(decision.messages).toHaveLength(2)
+  })
+
+  it('读设置抛错也不破坏转交', async () => {
+    const fake = makeCtx()
+    installProgressUpdates(fake.ctx as never, {
+      settings: () => { throw new Error('settings exploded') },
+    })
+    let calls = 0
+    const decision = await fake.preStep(agentOf('broken-session'), async () => {
+      calls += 1
+      return { kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'claimed' }] }] }
+    })
+    expect(calls).toBe(1)
+    expect(decision.kind).toBe('enter')
+    expect(decision.messages).toHaveLength(1)
   })
 })
 

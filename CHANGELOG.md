@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.51.0 - 2026-11-01
+
+- **[dispatch] 调度模式接入 Dispatch Ledger：模型面只多一行短引导，账本与 Mandate v2 协议由只读工具承载**
+  - preset 的两份副本（`presets/dispatch/agent.cordis.yml` 与运行时声明 `src/host/agent-preset.ts`）各加**一行**引导：首次委派前调用一次 `dispatch_ledger {action:"self"}`，并按该次结果**尾部**打印的 Mandate v2 协议行事。协议正文不进 persona——persona 的 18500 字符预算不因它而动；正文按需通过尾部工具结果返回，不进入每步常驻的前缀。
+  - `dispatch_ledger` 由宿主在**根**注册面上用 `tools.register` 一次性注册，是全局静态工具而**不是** preset 行。工具声明面因此在插件加载 / 升级时改变一次——这是已接受的一次性成本；除此之外声明面不随账本状态、开关或任务状态变化（不懒注册、不带 `when` 准入），会话运行期间工具表恒定，Kimi Code 的内容前缀缓存不会因为账本而反复重建。工具描述是编译期常量，不随会话变化。
+  - 账本的执行期守卫与既有的调度执行守卫一样只走 `ctx.tools.guard()`，守卫本身不改工具声明面；开关复用 `dispatchExecutionGuard`，不新增设置项。
+  - 模型侧可以查到账本条目（按会话或整棵委派树过滤），并按协议给派发 / 报告 / 续派的消息加上 Mandate v2 头部；头部里的策略块与提示词修订号必须从 `self` 的返回原样抄，模型不能自拟。
+  - 新增 `test/dispatch-model-surface-contract.test.ts`：按行对拍两份 preset 副本的 id / name / disabled / isolate / config，核对 persona 与 plan-mode section 逐字节一致，锁定主控专用工具名单、报告状态词、Mandate 拒绝码、授权描述在 PTC 与 Native 两侧无残留，以及 persona 前缀与协议正文的字符预算。
+
+- **[kimi-code] 消除会话中途的内容前缀漂移**
+  - Dispatch persona 移除随模型选择变化的 `{{model}}`；进展更新的语言设置不再改变系统段，auto / zh / en 的变化改为按会话去重的尾部通知，切回 auto 也会撤销旧指令。
+  - PTC SDK 缓存守卫在请求头缺席时读取 `agent.model.current()` 的持久选择，再回退到 agent options；语言通知使用消息工厂并通过真实 `adoptSessionEvent` 边界验证。
+
+- **验证**
+  - 当前 0.2.1-rc.3 基线：强制 host/client/test/scripts 类型检查、`npm run build`、`npm ci --dry-run` 与 `npm pack --dry-run` 均通过；全量为 **345 files passed / 2 skipped，6020 tests passed / 9 skipped**。
+  - 独立 0.1.5-rc.1 clean-room：完整运行仅有已知的 `subagent-model-authorization-ptc.test.ts` 无法加载（该代没有 `@deepseek-ai/dsh-ptc-runtime`）；仅排除此文件后为 **344 files passed / 2 skipped，6015 tests passed / 10 skipped**，exit 0，包含全部新增 Dispatch 与缓存测试。
+  - 旧代全量类型检查仍被未改动的既有 `src/host/cline-pass/adapter.ts` 阻断：旧代 `LlmResolvedModelInfo` 不声明 `toolUpdate`。该文件不在本次 diff 中，未为通过验收而扩大修改范围。
+
 ## 0.50.0 - 2026-11-01
 
 - **[subagent] 优化子代理卡片的布局、间距与状态呈现**

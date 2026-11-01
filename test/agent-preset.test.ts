@@ -255,10 +255,16 @@ describe('the dispatch definition', () => {
         personaSuffix: config.suffix ?? '',
       })
       ctx.systemPrompt.variable('provider', () => 'codex-chatgpt')
-      ctx.systemPrompt.variable('model', () => 'gpt-5.4')
+      let model = 'gpt-5.4'
+      ctx.systemPrompt.variable('model', () => model)
       const rendered = SystemPromptModule.renderPrompt(await ctx.systemPrompt.assemble())
-      expect(rendered).toContain('You are powered by gpt-5.4.')
       expect(rendered).not.toContain('{{cwd}}')
+      // The persona names no prompt variable: switching models must not rewrite
+      // the head of the system prompt — and with it the content-prefix cache.
+      expect(rendered).not.toContain('You are powered by')
+      model = 'kimi-for-coding'
+      const afterSwitch = SystemPromptModule.renderPrompt(await ctx.systemPrompt.assemble())
+      expect(afterSwitch).toBe(rendered)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -513,6 +519,18 @@ describe('the persona block the declaration transcribes', () => {
     const fromYaml = personaBlockOf(yml)
     expect(fromYaml.length).toBeGreaterThan(1000)
     expect(fromYaml).toBe(declaredPrefix())
+  })
+
+  it('names no prompt variable, so a model switch cannot rewrite the prefix', () => {
+    // `{{model}}` resolves from the agent's route at assembly time. Rendered
+    // into the persona it makes the head of the system prompt depend on the
+    // route, so a mid-session model switch rewrites it — and the harness
+    // replaces the oldest system message in place, killing the cached prefix.
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).not.toContain('{{model}}')
+      expect(persona).not.toContain('You are powered by')
+    }
   })
 
   it('scopes the fallback to one task and restores delegation on the next', () => {
