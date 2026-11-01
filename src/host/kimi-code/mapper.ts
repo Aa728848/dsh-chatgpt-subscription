@@ -1459,12 +1459,52 @@ export function buildOpenAIRequest(
   // system messages, emitted at the position they occupy in the history. A
   // declaration is only cache-safe if it keeps that position, so they are
   // interleaved with the conversation rather than gathered at the front.
+  // Every assistant message carrying `tool_calls` must be followed immediately
+  // by one `role: "tool"` message per `tool_call_id`: Kimi's OpenAI gateway
+  // rejects any non-tool message wedged inside a tool-call batch with HTTP 400
+  // ("an assistant message with 'tool_calls' must be followed by tool messages
+  // responding to each 'tool_call_id'"). Dynamic tool declarations, tool-result
+  // images, or user messages that land while calls are still awaiting answers
+  // are held back until the batch closes, and any call left unanswered by an
+  // interrupted turn is closed with a synthetic tool result before the held
+  // messages are flushed.
+  const NO_TOOL_RESULT_TEXT = '[no result: the tool call did not complete]'
+  let awaitingToolCallIds: string[] = []
+  let deferredNonToolMessages: OpenAIMessage[] = []
+  let pendingToolImages: OpenAIMessage[] = []
+
+  const emitNonTool = (entry: OpenAIMessage): void => {
+    if (awaitingToolCallIds.length > 0) deferredNonToolMessages.push(entry)
+    else messages.push(entry)
+  }
+  const flushToolImages = (): void => {
+    if (pendingToolImages.length === 0) return
+    const imageContent = pendingToolImages
+    pendingToolImages = []
+    emitNonTool({ role: 'user', content: imageContent })
+  }
+  const flushDeferred = (): void => {
+    flushToolImages()
+    if (deferredNonToolMessages.length === 0) return
+    messages.push(...deferredNonToolMessages)
+    deferredNonToolMessages = []
+  }
+  const settleOpenToolCalls = (): void => {
+    if (awaitingToolCallIds.length > 0) {
+      for (const id of awaitingToolCallIds) {
+        messages.push({ role: 'tool', tool_call_id: id, content: NO_TOOL_RESULT_TEXT })
+      }
+      awaitingToolCallIds = []
+    }
+    flushDeferred()
+  }
+
   const slots = declarationSlots(options, media)
   let slotIndex = 0
   let nonSystemIndex = 0
   const flushSlots = (upTo: number): void => {
     while (slotIndex < slots.length && slots[slotIndex]!.beforeIndex <= upTo) {
-      messages.push(...slots[slotIndex]!.entries)
+      for (const entry of slots[slotIndex]!.entries) emitNonTool(entry)
       slotIndex += 1
     }
   }
@@ -1479,25 +1519,31 @@ export function buildOpenAIRequest(
     nonSystemIndex += 1
     if (isToolResultMessage(message)) {
       // Parallel tool calls emit several consecutive `role: "tool"` messages, and
-      // a strict upstream rejects a `user` message wedged between them. So the
-      // whole run is scanned, every image in it is collected, and a single `user`
-      // message carrying them is appended once the run ends. Declaration slots
-      // are still flushed once per conversation message, so no slot drifts.
-      const imageBlocks: OpenAIMessage[] = []
+      // a strict upstream rejects a `user` or `system` message wedged between them.
+      // So the whole run is scanned, every image in it is collected, and a single
+      // `user` message carrying them is emitted once the batch closes. Declaration
+      // slots are still advanced once per conversation message, and held in
+      // `deferredNonToolMessages` while any call in the batch is still unanswered.
       while (index < conversation.length && isToolResultMessage(conversation[index]!)) {
         const current = conversation[index]!
-        if (index > 0) {
+        const block = current.content[0]
+        const rawCallId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
+        const normalizedCallId = toolCallIds.normalize(rawCallId)
+        messages.push({ role: 'tool', tool_call_id: normalizedCallId, content: toolResultText(current.content) })
+        pendingToolImages.push(...toolResultImageBlocks(current.content, images, media))
+        if (awaitingToolCallIds.length > 0) {
+          awaitingToolCallIds = awaitingToolCallIds.filter((id) => id !== normalizedCallId)
+          if (awaitingToolCallIds.length === 0) flushDeferred()
+        }
+        if (index + 1 < conversation.length && isToolResultMessage(conversation[index + 1]!)) {
           flushSlots(nonSystemIndex)
           nonSystemIndex += 1
+          index += 1
+          continue
         }
-        const block = current.content[0]
-        const callId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
-        messages.push({ role: 'tool', tool_call_id: toolCallIds.normalize(callId), content: toolResultText(current.content) })
-        imageBlocks.push(...toolResultImageBlocks(current.content, images, media))
-        index += 1
+        break
       }
-      index -= 1
-      if (imageBlocks.length > 0) messages.push({ role: 'user', content: imageBlocks })
+      if (awaitingToolCallIds.length === 0) flushToolImages()
       continue
     }
     if (message.role === 'assistant') {
@@ -1508,6 +1554,7 @@ export function buildOpenAIRequest(
       const { content, toolCalls, reasoning } = openAIAssistantContent(message, toolCallIds, reasoningKey)
       // An assistant turn with neither text, nor calls, nor reasoning carries nothing on this wire.
       if (content === '' && toolCalls.length === 0 && reasoning.fields.length === 0 && reasoning.details.length === 0) continue
+      settleOpenToolCalls()
       const entry: OpenAIMessage = { role: 'assistant' }
       // Per Moonshot / Kimi Code official provider conventions (see kosong/kimi.ts & agent-core-v2 trait):
       // When an assistant message has tool_calls and no text content, the `content` field is omitted,
@@ -1532,15 +1579,19 @@ export function buildOpenAIRequest(
       // which accepts only `reasoning` on the request side.
       if (thinkingOn) applyReplayedReasoning(entry, reasoning, reasoningKey)
       messages.push(entry)
+      awaitingToolCallIds = toolCalls
+        .map((call) => (typeof call.id === 'string' ? call.id : ''))
+        .filter((id) => id !== '')
       continue
     }
     const content = openAIUserContent(message, images, media)
     if (typeof content === 'string' && content === '') continue
-    messages.push({ role: 'user', content })
+    emitNonTool({ role: 'user', content })
   }
   // A declaration produced after the final conversation message is a trailing
   // append, which is the cache-preserving case this feature is built for.
   flushSlots(nonSystemIndex)
+  settleOpenToolCalls()
 
   // A deferred definition travels through a message-level addition instead.
   // Leaving it in the top-level list would put it back inside the very prefix

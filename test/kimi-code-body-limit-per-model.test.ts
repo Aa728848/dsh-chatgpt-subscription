@@ -61,8 +61,8 @@ const THREE_AND_A_HALF_MB = Math.ceil(3.5 * MIB)
 /** 4.5 MB: the dense-Chinese body a full 1M window produces. */
 const FOUR_AND_A_HALF_MB = Math.ceil(4.5 * MIB)
 
-/** 8.5 MB: past the raised ceiling, so the guard (not the window) is what answers. */
-const EIGHT_AND_A_HALF_MB = Math.ceil(8.5 * MIB)
+/** 24.5 MB: past the raised ceiling, so the guard (not the window) is what answers. */
+const EIGHT_AND_A_HALF_MB = Math.ceil(24.5 * MIB)
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -208,12 +208,12 @@ afterEach(() => {
 })
 
 describe('each catalog row states its own request-body ceiling', () => {
-  it('gives the 1M tier 8 MiB and leaves the 256K tier on 2 MiB', () => {
+  it('gives the 1M tier 24 MiB and leaves the 256K tier on 2 MiB', () => {
     const expected = new Map<string, number>([
-      ['k3', 8_388_608],
-      ['k3.1-pro', 8_388_608],
-      ['k3.1-pro-highspeed', 8_388_608],
-      ['kimi-for-coding', 8_388_608],
+      ['k3', 25_165_824],
+      ['k3.1-pro', 25_165_824],
+      ['k3.1-pro-highspeed', 25_165_824],
+      ['kimi-for-coding', 25_165_824],
       ['k3-256k', 2_097_152],
       ['kimi-for-coding-highspeed', 2_097_152],
     ])
@@ -224,8 +224,8 @@ describe('each catalog row states its own request-body ceiling', () => {
       expect(model.maxRequestBodyBytes, model.id).toBe(expected.get(model.id))
     }
     // The 1M figure is the named constant, not a literal that could drift from it.
-    expect(LONG_CONTEXT_MESSAGE_BODY_BYTES).toBe(8 * MIB)
-    expect(LONG_CONTEXT_MESSAGE_BODY_BYTES).toBe(8_388_608)
+    expect(LONG_CONTEXT_MESSAGE_BODY_BYTES).toBe(24 * MIB)
+    expect(LONG_CONTEXT_MESSAGE_BODY_BYTES).toBe(25_165_824)
   })
 
   it('leaves headroom over both 1M body densities, so bytes are not the binding limit', () => {
@@ -246,8 +246,8 @@ describe('each catalog row states its own request-body ceiling', () => {
 
 describe('maxRequestBodyBytesFor resolves env, then the model, then the shared floor', () => {
   it('reads the tier off the model row', () => {
-    expect(maxRequestBodyBytesFor(kimiCodeModelDef('k3.1-pro'), env({}))).toBe(8_388_608)
-    expect(maxRequestBodyBytesFor(kimiCodeModelDef('k3'), env({}))).toBe(8_388_608)
+    expect(maxRequestBodyBytesFor(kimiCodeModelDef('k3.1-pro'), env({}))).toBe(25_165_824)
+    expect(maxRequestBodyBytesFor(kimiCodeModelDef('k3'), env({}))).toBe(25_165_824)
     expect(maxRequestBodyBytesFor(kimiCodeModelDef('k3-256k'), env({}))).toBe(2_097_152)
     expect(maxRequestBodyBytesFor(kimiCodeModelDef('kimi-for-coding-highspeed'), env({}))).toBe(2_097_152)
   })
@@ -278,7 +278,7 @@ describe('maxRequestBodyBytesFor resolves env, then the model, then the shared f
       expect(
         maxRequestBodyBytesFor(kimiCodeModelDef('k3.1-pro'), env({ DSH_KIMI_CODE_MAX_BODY_BYTES: raw })),
         raw,
-      ).toBe(8_388_608)
+      ).toBe(25_165_824)
       expect(
         maxRequestBodyBytesFor(kimiCodeModelDef('k3-256k'), env({ DSH_KIMI_CODE_MAX_BODY_BYTES: raw })),
         raw,
@@ -316,11 +316,11 @@ describe('the 8 MiB ceiling covers a full 1M body and refuses what is past it', 
     expect(turn.sentBytes[0]).toBeGreaterThan(2 * MIB)
   })
 
-  it('refuses an 8.5 MB body on k3.1-pro and names the new ceiling', async () => {
+  it('refuses a 24.5 MB body on k3.1-pro and names the new ceiling', async () => {
     const turn = await runTurn('k3.1-pro', { textBytes: EIGHT_AND_A_HALF_MB })
     expect(turn.fetchMock).not.toHaveBeenCalled()
     expect(turn.failure?.code).toBe(CONTEXT_OVERFLOW_CODE)
-    expect(turn.failure?.message).toContain('8388608')
+    expect(turn.failure?.message).toContain('25165824')
   })
 })
 
@@ -344,13 +344,13 @@ describe('the deployment override still wins end to end', () => {
     })
     expect(turn.fetchMock).not.toHaveBeenCalled()
     expect(turn.failure?.code).toBe(CONTEXT_OVERFLOW_CODE)
-    expect(turn.failure?.message).toContain('8388608')
+    expect(turn.failure?.message).toContain('25165824')
   })
 })
 
 describe('a video request keeps its own 64 MiB tier', () => {
-  it('sends a 13 MB clip on the 1M tier, which the text ceiling would refuse', async () => {
-    const turn = await runTurn('k3.1-pro', { videoBytes: 13 * MIB })
+  it('sends a 20 MB clip on the 1M tier, which the text ceiling would refuse', async () => {
+    const turn = await runTurn('k3.1-pro', { videoBytes: 20 * MIB })
     expect(turn.failure).toBeUndefined()
     // The clip is offered to the hosted-file route first and refused there, so the
     // CLIP ITSELF is what travels: one files call, then exactly one chat request.
@@ -361,7 +361,7 @@ describe('a video request keeps its own 64 MiB tier', () => {
     // tiers AND carries the clip inline — only the 64 MiB video budget can have
     // accepted it. Asserting the body were merely smaller would lose exactly the
     // property this test exists to prove.
-    expect(turn.sentBytes[0]).toBeGreaterThan(8 * MIB)
+    expect(turn.sentBytes[0]).toBeGreaterThan(24 * MIB)
     expect(turn.chatBodies[0]).toContain('data:video/mp4;base64,')
     expect(turn.chatBodies[0]).not.toContain('ms://')
     expect(MAX_VIDEO_MESSAGE_BODY_BYTES).toBe(64 * MIB)

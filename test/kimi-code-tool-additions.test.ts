@@ -97,4 +97,87 @@ describe('mid-conversation tool additions', () => {
     }))
     expect((body.tools as unknown[])).toHaveLength(2)
   })
+
+  it('defers a mid-batch tool-addition or user message until all tool_calls are answered', () => {
+    const assistantTurn: Message = {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'fetching and searching' },
+        { type: 'tool-call', id: 'web_fetch:35', name: 'web_fetch', arguments: '{"url":"https://a.example"}' },
+        { type: 'tool-call', id: 'web_fetch:36', name: 'web_fetch', arguments: '{"url":"https://b.example"}' },
+        { type: 'tool-call', id: 'web_search:37', name: 'web_search', arguments: '{"queries":["q"]}' },
+      ],
+    } as unknown as Message
+    const toolResult = (callId: string, text: string): Message => ({
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }],
+      source: { kind: 'tool', callId },
+    } as unknown as Message)
+
+    const body = buildOpenAIRequest(options({
+      messages: [
+        user('go'),
+        assistantTurn,
+        addition('unlag_refresh'),
+        toolResult('web_fetch:35', 'res 35'),
+        toolResult('web_fetch:36', 'res 36'),
+        toolResult('web_search:37', 'res 37'),
+      ],
+      tools: [tool('web_fetch'), tool('web_search'), tool('unlag_refresh', true)] as never,
+    }), undefined, true, { messageTools: true })
+
+    const messages = body.messages as Array<Record<string, unknown>>
+    expect(messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'tool',
+      'tool',
+      'tool',
+      'system',
+    ])
+    expect(messages.slice(2, 5).map((message) => message.tool_call_id)).toEqual([
+      'web_fetch_35',
+      'web_fetch_36',
+      'web_search_37',
+    ])
+    expect((messages[5]!.tools as Array<{ function: { name: string } }>)[0]!.function.name).toBe('unlag_refresh')
+  })
+
+  it('fills missing tool results before flushing deferred messages when a tool batch is incomplete', () => {
+    const assistantTurn: Message = {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'running three tools' },
+        { type: 'tool-call', id: 'web_fetch:35', name: 'web_fetch', arguments: '{}' },
+        { type: 'tool-call', id: 'web_fetch:36', name: 'web_fetch', arguments: '{}' },
+        { type: 'tool-call', id: 'web_search:37', name: 'web_search', arguments: '{}' },
+      ],
+    } as unknown as Message
+
+    const body = buildOpenAIRequest(options({
+      messages: [
+        user('start'),
+        assistantTurn,
+        addition('unlag_refresh'),
+        user('continue'),
+      ],
+      tools: [tool('web_fetch'), tool('web_search'), tool('unlag_refresh', true)] as never,
+    }), undefined, true, { messageTools: true })
+
+    const messages = body.messages as Array<Record<string, unknown>>
+    expect(messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'tool',
+      'tool',
+      'tool',
+      'system',
+      'user',
+    ])
+    expect(messages.slice(2, 5).map((message) => message.tool_call_id)).toEqual([
+      'web_fetch_35',
+      'web_fetch_36',
+      'web_search_37',
+    ])
+  })
 })

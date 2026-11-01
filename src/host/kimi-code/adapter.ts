@@ -1655,6 +1655,7 @@ export class KimiCodeAdapter extends LlmAdapter {
      * this request still carries: see {@link mediaAttachmentIdsIn}.
      */
     let measured: { body: string; options: NormalizedGenerateOptions } | undefined
+    let sentBuild: { body: string; options: NormalizedGenerateOptions } | undefined
 
     const pool = this.accountPool
     const tried = new Set<string>()
@@ -1769,13 +1770,18 @@ export class KimiCodeAdapter extends LlmAdapter {
       // Rebuilt from the references that really exist, not from the plan: an
       // occurrence whose upload failed is sent inline while its siblings are
       // cited, so one refused clip does not cost the request its images.
-      let body = uploads === undefined
-        ? measured.body
+      // When every planned upload was dropped by the budget pass (uploadable is
+      // empty while planned was not), or when uploads are absent, the body must
+      // not keep the placeholder references from `measured`.
+      let finalBuild = uploads === undefined
+        ? (planned.length === 0 ? measured : buildBodyWithinLimit(baseMedia))
         : buildBodyWithinLimit({
             ...baseMedia,
             imageReferences: uploads.imageReferences,
             videoReferences: uploads.videoReferences,
-          }).body
+          })
+      sentBuild = finalBuild
+      let body = finalBuild.body
 
       const post = async (payload: string): Promise<Response> => {
         try {
@@ -1853,17 +1859,19 @@ export class KimiCodeAdapter extends LlmAdapter {
         for (const item of uploads.cited) {
           uploader.forget({ baseUrl: base, accountScope, mediaType: item.mediaType, data: item.data })
         }
-        let inline: string | undefined
+        let inlineBuild: { body: string; options: NormalizedGenerateOptions } | undefined
         try {
-          inline = buildBodyWithinLimit(baseMedia).body
+          inlineBuild = buildBodyWithinLimit(baseMedia)
         } catch {
           // The inline body cannot fit this ceiling, so the reference path was the
           // only one that could send this request; the 404 is reported as it stands
           // rather than replaced by an overflow the caller cannot act on.
-          inline = undefined
+          inlineBuild = undefined
         }
-        if (inline !== undefined) {
-          body = inline
+        if (inlineBuild !== undefined) {
+          finalBuild = inlineBuild
+          sentBuild = inlineBuild
+          body = inlineBuild.body
           response = await post(body)
           detail = response.ok ? '' : (await response.text().catch(() => '')).slice(0, 2_000)
         }
@@ -1929,12 +1937,12 @@ export class KimiCodeAdapter extends LlmAdapter {
     // the images. Those give-backs are sticky too: a picture that was omitted
     // to make the body fit must not come back on the next turn, or the prefix
     // it broke is rebuilt on the turn after that.
-    if (measured !== undefined && !sideChannel) {
-      const requestImageBytes = requestImagePayloadLengths(measured.options, images)
+    if (sentBuild !== undefined && !sideChannel) {
+      const requestImageBytes = requestImagePayloadLengths(sentBuild.options, images)
         .reduce((sum, bytes) => sum + bytes, 0)
       const trimmedKeys = new Set(collectRemainingImageKeys(imageTrimmed, images))
-      const measuredKeys = new Set(collectRemainingImageKeys(measured.options, images))
-      const bodyFitDroppedKeys = [...trimmedKeys].filter((key) => !measuredKeys.has(key))
+      const sentKeys = new Set(collectRemainingImageKeys(sentBuild.options, images))
+      const bodyFitDroppedKeys = [...trimmedKeys].filter((key) => !sentKeys.has(key))
       const allDroppedKeys = new Set<string>([
         ...stickyOffload.allDroppedKeys,
         ...bodyFitDroppedKeys,

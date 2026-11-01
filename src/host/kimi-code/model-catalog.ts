@@ -31,7 +31,7 @@ import { MAX_MESSAGE_BODY_BYTES } from '../common/request-images.ts'
  * figure with DSH_KIMI_CODE_MAX_BODY_BYTES. The 256K tier keeps 2 MB, where the
  * old ceiling and the window line up.
  */
-export const LONG_CONTEXT_MESSAGE_BODY_BYTES = 8 * 1024 * 1024
+export const LONG_CONTEXT_MESSAGE_BODY_BYTES = 24 * 1024 * 1024
 
 /** One model the Kimi Code endpoint serves to subscription accounts. */
 export interface KimiCodeCatalogModel {

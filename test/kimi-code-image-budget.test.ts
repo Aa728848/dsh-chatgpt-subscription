@@ -358,4 +358,40 @@ describe('the image offload is what breaks the prefix', () => {
       resetCacheStats(session)
     }
   })
+
+  it('records body-fit drops into session dropped keys, image-offload drift cause, and actual sent image bytes', async () => {
+    const { recordSessionImageBudget, getSessionImageBudgetStats, getSessionDroppedImageKeys } = await import('../src/host/kimi-code/mapper.ts')
+    const session = 'sess-body-fit-budget'
+    try {
+      const request = options({ sessionId: session as never, system: 'same' })
+      // First request establishes the prefix snapshot
+      buildRequest(request, 'openai')
+      expect(getLastDriftCause(session)).toBe('first-request')
+
+      // Second request: sticky offload dropped nothing, so buildRequest sees 'stable' initially
+      markPendingImageOffload(session, 0)
+      buildRequest(request, 'openai')
+      expect(getLastDriftCause(session)).toBe('stable')
+
+      // Then body-fit drops 2 images (e.g. after inline fallback when /v1/files is unavailable)
+      recordSessionImageBudget(session, {
+        allDroppedKeys: ['attachment:img-1', 'attachment:img-2'],
+        newlyDroppedCount: 2,
+        requestImageBytes: 3_500_000,
+        droppedImages: 2,
+      }, request)
+
+      // Drift cause is upgraded to 'image-offload', and budgetDropped keys are retained
+      expect(getLastDriftCause(session)).toBe('image-offload')
+      const stats = getSessionImageBudgetStats(session)
+      expect(stats).toEqual({
+        requestImageBytes: 3_500_000,
+        droppedImages: 2,
+        droppedKeys: ['attachment:img-1', 'attachment:img-2'],
+      })
+      expect([...getSessionDroppedImageKeys(session)]).toEqual(['attachment:img-1', 'attachment:img-2'])
+    } finally {
+      resetCacheStats(session)
+    }
+  })
 })
