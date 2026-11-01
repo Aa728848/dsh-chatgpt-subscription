@@ -61,9 +61,17 @@ export class KimiCodeUnauthorizedError extends Error {
 
 /** Raised when a transient failure outlived its retry budget. */
 export class KimiCodeRetryableError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  constructor(message: string, readonly cause?: unknown, readonly status?: number) {
     super(message)
     this.name = 'KimiCodeRetryableError'
+  }
+}
+
+/** A non-transient OAuth response; repeating the same request cannot repair it. */
+export class KimiCodeOAuthError extends Error {
+  constructor(message: string, readonly status: number, readonly cause?: unknown) {
+    super(message)
+    this.name = 'KimiCodeOAuthError'
   }
 }
 
@@ -566,12 +574,13 @@ export async function refreshAccessToken(
       }
       if (response.ok) return parseTokenResponse(asRecord(payload) ?? {})
       if (!RETRYABLE_REFRESH_STATUSES.has(response.status)) {
-        throw new Error(description || `Token refresh failed (HTTP ${response.status}).`)
+        throw new KimiCodeOAuthError(description || `Token refresh failed (HTTP ${response.status}).`, response.status)
       }
-      lastError = new KimiCodeRetryableError(description || `Token refresh failed (HTTP ${response.status}).`)
+      lastError = new KimiCodeRetryableError(description || `Token refresh failed (HTTP ${response.status}).`, undefined, response.status)
     } catch (error) {
-      // A rejected token is final; every other failure is worth another attempt.
-      if (error instanceof KimiCodeUnauthorizedError) throw error
+      // Cancellation and non-transient responses must not consume a retry budget.
+      options.signal?.throwIfAborted()
+      if (error instanceof KimiCodeUnauthorizedError || error instanceof KimiCodeOAuthError) throw error
       lastError = error
     }
 
@@ -580,7 +589,11 @@ export async function refreshAccessToken(
     }
   }
 
-  throw new KimiCodeRetryableError('Token refresh failed after retries.', lastError)
+  throw new KimiCodeRetryableError(
+    'Token refresh failed after retries.',
+    lastError,
+    lastError instanceof KimiCodeRetryableError ? lastError.status : undefined,
+  )
 }
 
 // ---------------------------------------------------------------------------
