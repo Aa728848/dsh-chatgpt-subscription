@@ -120,20 +120,36 @@ describe('preserved thinking on the wire', () => {
     expect(body.thinking).toBeUndefined()
   })
 
-  it('keeps the Anthropic thinking block to its standard shape', () => {
-    // `keep` is a Kimi extension on the OpenAI-compatible surface; the Messages
-    // wire gets the documented budget form only.
+  it('keeps the Anthropic thinking block to the official Kimi protocol shape', () => {
+    // The official `kimiAnthropicProtocol` sends `thinking: { type: 'enabled' }`
+    // plus a top-level `output_config.effort`. There is no `budget_tokens`
+    // form on this protocol: the service derives the budget from the effort.
     const body = buildAnthropicRequest(options({ reasoningEffort: 'high' as never }))
-    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 8_192 })
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.output_config).toEqual({ effort: 'high' })
   })
 
   it('still disables thinking outright for the none level', () => {
     const body = buildAnthropicRequest(options({ reasoningEffort: 'none' as never }))
     expect(body.thinking).toEqual({ type: 'disabled' })
+    expect(body.output_config).toBeUndefined()
   })
 
-  it('carries no thinking field when no level was chosen', () => {
-    expect(buildAnthropicRequest(options()).thinking).toBeUndefined()
+  it('asks for the context-management beta and the clear-thinking edit on the Anthropic wire', () => {
+    // Preserved thinking is a beta CONTEXT EDIT on this wire, not a field.
+    const body = buildAnthropicRequest(options())
+    expect(body.betas).toEqual(['context-management-2025-06-27'])
+    expect(body.context_management).toEqual({
+      edits: [{ type: 'clear_thinking_20251015', keep: 'all' }],
+    })
+  })
+
+  it('enables thinking by default on the Anthropic wire, because the models reason by default', () => {
+    // No level was chosen, so there is no effort to report - but the thinking
+    // switch itself is always sent.
+    const body = buildAnthropicRequest(options())
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.output_config).toBeUndefined()
   })
 })
 

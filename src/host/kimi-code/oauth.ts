@@ -16,6 +16,7 @@ import {
   HEADER_MSH_PLATFORM,
   HEADER_MSH_VERSION,
   KIMI_CODE_CLIENT_ID,
+  KIMI_CODE_CUSTOM_HEADERS_ENV,
   LOGIN_TIMEOUT_MS,
   MIN_REFRESH_THRESHOLD_SECONDS,
   MSH_PLATFORM,
@@ -119,6 +120,53 @@ function asciiHeaderValue(value: string): string | undefined {
   return printable === '' ? undefined : printable
 }
 
+/**
+ * Whether one header name is already set, ignoring case.
+ *
+ * HTTP header names are case-insensitive, so a custom `User-Agent` and the
+ * identity `user-agent` are the same header. Keeping both in the map would
+ * send one header twice with two values, which is exactly how a spoofed user
+ * agent would survive the layer that was supposed to override it.
+ */
+function hasHeaderName(headers: Record<string, string>, name: string): boolean {
+  const target = name.toLowerCase()
+  return Object.keys(headers).some((key) => key.toLowerCase() === target)
+}
+
+/**
+ * Extra headers the deployment supplies through KIMI_CODE_CUSTOM_HEADERS.
+ *
+ * The format is the official client's: newline-separated `Name: Value` lines,
+ * exactly as `ANTHROPIC_CUSTOM_HEADERS` carries them. A line without a colon
+ * is skipped, and both the name and the value are trimmed. The name keeps the
+ * casing the deployment wrote, because that is the header the deployment
+ * expects to see on the wire.
+ *
+ * The value is filtered through {@link asciiHeaderValue}, so a value with
+ * nothing printable left in it is dropped instead of being sent as an empty
+ * header.
+ *
+ * These headers form the LOWEST-precedence layer: the Kimi device identity
+ * headers and the caller's own headers both override them.
+ *
+ * @param env environment the variable is read from, injectable for tests.
+ */
+export function parseKimiCodeCustomHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const raw = env[KIMI_CODE_CUSTOM_HEADERS_ENV]?.trim()
+  if (raw === undefined || raw === '') return {}
+  const headers: Record<string, string> = {}
+  for (const line of raw.split('\n')) {
+    const colon = line.indexOf(':')
+    if (colon < 0) continue
+    const name = line.slice(0, colon).trim()
+    if (name === '') continue
+    const value = asciiHeaderValue(line.slice(colon + 1))
+    if (value === undefined) continue
+    headers[name] = value
+  }
+  return headers
+}
+
 /** Best-effort human description of this machine, matching the official client. */
 function deviceModel(): string {
   const arch = os.arch()
@@ -160,7 +208,22 @@ export async function getDeviceId(): Promise<string> {
   return created
 }
 
-/** Identity headers every Kimi Code OAuth and account request carries. */
+/**
+ * Identity headers every Kimi Code OAuth and account request carries.
+ *
+ * Three layers, lowest precedence first:
+ *
+ * 1. the deployment's own `KIMI_CODE_CUSTOM_HEADERS`, so a gateway in front of
+ *    this route can ask for one extra header without a plugin release;
+ * 2. the Kimi device identity, which the service uses to attribute usage to an
+ *    installation;
+ * 3. the caller's own headers, which carry the credentials.
+ *
+ * A header name is matched across the layers without regard to case, so a
+ * custom `User-Agent` cannot sit next to the identity `user-agent` and have
+ * the last value win by accident: the higher layer replaces the lower one
+ * outright instead of adding a second copy of the same header.
+ */
 export async function kimiIdentityHeaders(extra: Record<string, string> = {}): Promise<Record<string, string>> {
   const deviceId = await getDeviceId()
   const candidates: Array<[string, string | undefined]> = [
@@ -177,6 +240,12 @@ export async function kimiIdentityHeaders(extra: Record<string, string> = {}): P
     if (value === undefined) continue
     const safe = asciiHeaderValue(value)
     if (safe !== undefined) headers[name] = safe
+  }
+  // The custom layer goes in first and is dropped wherever a higher layer
+  // already states the same header, whatever the casing of either name.
+  for (const [name, value] of Object.entries(parseKimiCodeCustomHeaders())) {
+    if (hasHeaderName(headers, name) || hasHeaderName(extra, name)) continue
+    headers[name] = value
   }
   return { ...headers, ...extra }
 }

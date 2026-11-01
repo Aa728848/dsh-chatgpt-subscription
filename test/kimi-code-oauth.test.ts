@@ -5,11 +5,14 @@ import {
   KimiCodeAccessDeniedError,
   KimiCodeUnauthorizedError,
   ensureAccessToken,
+  kimiIdentityHeaders,
+  parseKimiCodeCustomHeaders,
   refreshAccessToken,
   refreshThresholdMs,
   requestDeviceAuthorization,
   resetRefreshRejections,
 } from '../src/host/kimi-code/oauth.ts'
+import { KIMI_CODE_CUSTOM_HEADERS_ENV } from '../src/host/kimi-code/types.ts'
 import { FileCredentialStore, type KimiCodeCredentials } from '../src/host/kimi-code/token-store.ts'
 
 function tmp(prefix: string): string {
@@ -37,6 +40,7 @@ function formOf(init: RequestInit | undefined): URLSearchParams {
 afterEach(() => {
   resetRefreshRejections()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
 })
 
 describe('requestDeviceAuthorization', () => {
@@ -235,5 +239,66 @@ describe('ensureAccessToken', () => {
 describe('KimiCodeAccessDeniedError', () => {
   it('is exported for the denied-authorization path', () => {
     expect(new KimiCodeAccessDeniedError('denied').name).toBe('KimiCodeAccessDeniedError')
+  })
+})
+
+/**
+ * The extra headers a deployment supplies through KIMI_CODE_CUSTOM_HEADERS.
+ *
+ * The format is the official client's: newline-separated `Name: Value` lines.
+ */
+describe('parseKimiCodeCustomHeaders', () => {
+  it('reads newline-separated Name: Value lines', () => {
+    expect(parseKimiCodeCustomHeaders({
+      [KIMI_CODE_CUSTOM_HEADERS_ENV]: 'X-One: 1\nX-Two: two',
+    })).toEqual({ 'X-One': '1', 'X-Two': 'two' })
+  })
+
+  it('trims the name and the value and skips a line without a colon', () => {
+    expect(parseKimiCodeCustomHeaders({
+      [KIMI_CODE_CUSTOM_HEADERS_ENV]: '  X-One :  1  \nnot-a-header\n: no-name',
+    })).toEqual({ 'X-One': '1' })
+  })
+
+  it('reads nothing when the variable is unset or blank', () => {
+    expect(parseKimiCodeCustomHeaders({})).toEqual({})
+    expect(parseKimiCodeCustomHeaders({ [KIMI_CODE_CUSTOM_HEADERS_ENV]: '   ' })).toEqual({})
+  })
+
+  it('drops a value with nothing printable left in it', () => {
+    expect(parseKimiCodeCustomHeaders({
+      [KIMI_CODE_CUSTOM_HEADERS_ENV]: 'X-Bad: \u00e9',
+    })).toEqual({})
+  })
+})
+
+describe('kimiIdentityHeaders', () => {
+  it('carries the custom headers of the deployment', async () => {
+    vi.stubEnv(KIMI_CODE_CUSTOM_HEADERS_ENV, 'X-Custom: custom-value')
+    const headers = await kimiIdentityHeaders()
+    expect(headers['X-Custom']).toBe('custom-value')
+  })
+
+  it('carries no custom header when the variable is unset', async () => {
+    const headers = await kimiIdentityHeaders()
+    expect(headers['X-Custom']).toBeUndefined()
+  })
+
+  it('lets the device identity override a custom header of the same name', async () => {
+    vi.stubEnv(KIMI_CODE_CUSTOM_HEADERS_ENV, 'User-Agent: spoofed\nX-Msh-Platform: spoofed')
+    const headers = await kimiIdentityHeaders()
+    // Header names are case-insensitive, so the custom copy must be gone
+    // entirely rather than sent next to the identity one.
+    expect(Object.keys(headers).filter((name) => name.toLowerCase() === 'user-agent'))
+      .toEqual(['user-agent'])
+    expect(headers['user-agent']).toContain('dsh-chatgpt-subscription')
+    expect(headers['user-agent']).not.toContain('spoofed')
+    expect(headers['x-msh-platform']).toBe('kimi_code_cli')
+  })
+
+  it('lets the caller headers override a custom header of the same name', async () => {
+    vi.stubEnv(KIMI_CODE_CUSTOM_HEADERS_ENV, 'X-Custom: from-env')
+    const headers = await kimiIdentityHeaders({ 'X-Custom': 'from-caller' })
+    expect(headers['X-Custom']).toBe('from-caller')
   })
 })

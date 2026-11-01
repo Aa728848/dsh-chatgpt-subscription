@@ -85,6 +85,20 @@ export const HEADER_MSH_DEVICE_MODEL = 'x-msh-device-model'
 export const HEADER_MSH_OS_VERSION = 'x-msh-os-version'
 export const HEADER_MSH_DEVICE_ID = 'x-msh-device-id'
 
+/**
+ * Environment variable carrying extra headers for every Kimi Code request.
+ *
+ * The official client reads newline-separated `Name: Value` lines from
+ * `KIMI_CODE_CUSTOM_HEADERS` (it mirrors `ANTHROPIC_CUSTOM_HEADERS`) and
+ * applies them to every outbound request, the `/models` listing included.
+ *
+ * These headers are the LOWEST-precedence layer: the Kimi device identity
+ * headers and the caller's own headers both override them, so a deployment can
+ * add a header for one gateway without being able to weaken the identity the
+ * service attributes usage to.
+ */
+export const KIMI_CODE_CUSTOM_HEADERS_ENV = 'KIMI_CODE_CUSTOM_HEADERS'
+
 /** Version the plugin reports to the managed service's telemetry headers. */
 export const MSH_VERSION = '1.0.0'
 

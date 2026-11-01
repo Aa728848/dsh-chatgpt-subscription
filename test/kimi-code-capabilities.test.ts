@@ -166,12 +166,42 @@ describe('video on the OpenAI wire', () => {
 })
 
 describe('video on the Anthropic wire', () => {
-  it('never emits an undocumented video part', () => {
-    const body = buildAnthropicRequest(options({ messages: [videoBlock('v1')] }))
+  it('emits a native video block when the model declares video input', async () => {
+    // The official Anthropic protocol lowers a video into
+    // `{ type: 'video', source: { type: 'base64', media_type, data } }`.
+    const request = options({ messages: [videoBlock('v1')] })
+    const videos = await resolveRequestVideos(request, reader({ v1: { data: new Uint8Array([9, 9]) } }))
+    const body = buildAnthropicRequest(request, new Map(), { videos, videoAccepted: true })
     const messages = body.messages as Array<Record<string, unknown>>
     const parts = messages[0]?.content as Array<Record<string, unknown>>
-    expect(parts.every((part) => part.type !== 'video_url' && part.type !== 'video')).toBe(true)
-    expect(parts[0]?.text).toContain('Anthropic')
+    expect(parts[0]).toEqual({
+      type: 'video',
+      source: { type: 'base64', media_type: 'video/mp4', data: Buffer.from([9, 9]).toString('base64') },
+    })
+  })
+
+  it('degrades to the model-level omission text when the model does not accept video', async () => {
+    // The clip cannot be sent, so the turn still runs and the model is told
+    // why the video is absent instead of answering about an empty message.
+    const request = options({ messages: [videoBlock('v1')] })
+    const videos = await resolveRequestVideos(request, reader({ v1: { data: new Uint8Array([1]) } }))
+    const body = buildAnthropicRequest(request, new Map(), { videos, videoAccepted: false })
+    const messages = body.messages as Array<Record<string, unknown>>
+    const parts = messages[0]?.content as Array<Record<string, unknown>>
+    expect(parts[0]?.type).toBe('text')
+    expect(String(parts[0]?.text)).toContain('does not accept video input')
+  })
+
+  it('degrades to text when the bytes are unavailable', () => {
+    const body = buildAnthropicRequest(
+      options({ messages: [videoBlock('v1')] }),
+      new Map(),
+      { videoAccepted: true },
+    )
+    const messages = body.messages as Array<Record<string, unknown>>
+    const parts = messages[0]?.content as Array<Record<string, unknown>>
+    expect(parts[0]?.type).toBe('text')
+    expect(String(parts[0]?.text)).toContain('could not be read')
   })
 })
 

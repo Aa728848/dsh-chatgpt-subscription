@@ -82,6 +82,10 @@ import {
   registerKimiCodePreferenceStore,
 } from './host/kimi-code/token-store.ts'
 import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
+import {
+  installKimiRepeatBreaker,
+  type KimiRepeatBreakerContext,
+} from './host/kimi-code/repeat-breaker.ts'
 import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
 import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
 import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
@@ -635,6 +639,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(
     () => installMinimaxRuntimeEnhancements(ctx as unknown as MinimaxRuntimeEnhancementsContext),
     'dsh-chatgpt-subscription: MiniMax runtime enhancements',
+  )
+
+  // Kimi Code 的「重复刹车」：同一次工具调用连着重复太多次时，按官方
+  // AgentToolDedupeService 的四段文案提醒模型换策略，第 12 次起由执行期守卫
+  // 接管这一轮。线路判定走结构探测，只对 Kimi Code 这条线路生效，不碰工具
+  // 声明面。
+  ctx.effect(
+    () => installKimiRepeatBreaker(ctx as unknown as KimiRepeatBreakerContext),
+    'dsh-chatgpt-subscription: Kimi repeat breaker',
   )
 
   // 调度执行守卫：执行期拦截子代理越权调用主控专用工具，以及等待子代理期间的纯

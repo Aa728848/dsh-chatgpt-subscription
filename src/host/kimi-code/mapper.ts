@@ -93,7 +93,7 @@ import { maxMessageBodyBytes, maxOutputTokensFor } from './types.ts'
 // The image budget this route enforces, re-exported so this line keeps one
 // import surface for its own adapter and its own tests.
 export { DEFAULT_LOW_REQUEST_IMAGE_BYTES, lowRequestImageBytes } from './types.ts'
-import { base64LengthOf, videoBlockLabel, videoDataUrl, videoOmissionText } from './modalities.ts'
+import { base64LengthOf, videoDataUrl, videoOmissionText } from './modalities.ts'
 // The traversal, byte budgeting and base64 encoding are provider-neutral and are
 // shared with the MiniMax Code line; see ../common/video-request.ts.
 import {
@@ -1262,11 +1262,17 @@ function openAIAssistantContent(
     if (!isRecord(block)) continue
     if (block.type === 'text' && typeof block.text === 'string') textParts.push(sanitizeText(block.text))
     else if (block.type === 'tool-call' && typeof block.name === 'string') {
-      toolCalls.push({
+      const call: OpenAIMessage = {
         id: toolCallIds.normalize(typeof block.id === 'string' && block.id !== '' ? block.id : `call_${toolCalls.length}`),
         type: 'function',
         function: { name: block.name, arguments: toolCallArguments(block.arguments) },
-      })
+      }
+      // The provider's own extra fields on a tool call are replayed verbatim.
+      // Kimi's gateway routes on them (the upstream provider copies them from
+      // the tool call onto the wire call), so dropping them would send a call
+      // the service cannot match to its own bookkeeping.
+      if (isRecord(block.extras)) call.extras = block.extras
+      toolCalls.push(call)
     }
   }
   return { content: textParts.join(''), toolCalls, reasoning: replayedReasoning(message, reasoningKey) }
@@ -1433,6 +1439,58 @@ function replayedDetailElement(detail: ReplayedReasoningDetail): Record<string, 
   return { type: 'reasoning.text', text: detail.text, ...index }
 }
 
+/**
+ * One tool result, ready to be emitted as a `role: "tool"` message.
+ *
+ * The images the result carries travel with it: they are appended to the
+ * request as one `user` message once the batch closes, and they have to keep
+ * the order of the results they belong to.
+ */
+interface ToolResultBatchEntry {
+  /** The normalized tool-call id this result answers. */
+  readonly id: string
+  /** The result text the service reads. */
+  readonly content: string
+  /** The image parts the result carries, if any. */
+  readonly images: OpenAIMessage[]
+}
+
+/**
+ * Put one run of tool results back in the order the assistant declared its
+ * calls in.
+ *
+ * A parallel tool call answers several calls at once, and the service reads
+ * the `tool` messages as the answers to the `tool_calls` that precede them:
+ * a result that arrives in the wrong order is answered against the wrong call.
+ * DSH history can hold the results out of order (a resumed session, a tool
+ * that answered late), so the run is sorted back into the declared order.
+ *
+ * A result whose id belongs to no declared call keeps its relative order
+ * behind the answered ones: it answers something this turn did not declare,
+ * so there is no declared position for it to be sorted into.
+ */
+function pairToolExchanges(
+  batch: readonly ToolResultBatchEntry[],
+  declaredIds: readonly string[],
+): ToolResultBatchEntry[] {
+  // One declared call cannot be misordered, and a run that answers none of
+  // them has no declared order to follow.
+  if (batch.length < 2 || declaredIds.length < 2) return [...batch]
+  const rank = new Map<string, number>()
+  for (const [position, id] of declaredIds.entries()) {
+    if (!rank.has(id)) rank.set(id, position)
+  }
+  const answered = batch.filter((entry) => rank.has(entry.id))
+  if (answered.length < 2) return [...batch]
+  // A stable sort by the declared position: the answered calls come out in the
+  // order the assistant declared them, and a result that answers no declared
+  // call keeps its relative order behind them.
+  return batch
+    .map((entry, position) => ({ entry, position, key: rank.get(entry.id) ?? Number.MAX_SAFE_INTEGER }))
+    .sort((a, b) => a.key - b.key || a.position - b.position)
+    .map((ordered) => ordered.entry)
+}
+
 /** Build one `/chat/completions` body. */
 export function buildOpenAIRequest(
   options: GenerateOptions,
@@ -1524,17 +1582,20 @@ export function buildOpenAIRequest(
       // `user` message carrying them is emitted once the batch closes. Declaration
       // slots are still advanced once per conversation message, and held in
       // `deferredNonToolMessages` while any call in the batch is still unanswered.
+      //
+      // The run is collected before it is emitted, because the results of a
+      // parallel call can arrive in any order and the service reads them as
+      // the answers to the `tool_calls` that precede them.
+      const batch: ToolResultBatchEntry[] = []
       while (index < conversation.length && isToolResultMessage(conversation[index]!)) {
         const current = conversation[index]!
         const block = current.content[0]
         const rawCallId = isRecord(block) && typeof block.toolCallId === 'string' ? block.toolCallId : ''
-        const normalizedCallId = toolCallIds.normalize(rawCallId)
-        messages.push({ role: 'tool', tool_call_id: normalizedCallId, content: toolResultText(current.content) })
-        pendingToolImages.push(...toolResultImageBlocks(current.content, images, media))
-        if (awaitingToolCallIds.length > 0) {
-          awaitingToolCallIds = awaitingToolCallIds.filter((id) => id !== normalizedCallId)
-          if (awaitingToolCallIds.length === 0) flushDeferred()
-        }
+        batch.push({
+          id: toolCallIds.normalize(rawCallId),
+          content: toolResultText(current.content),
+          images: toolResultImageBlocks(current.content, images, media),
+        })
         if (index + 1 < conversation.length && isToolResultMessage(conversation[index + 1]!)) {
           flushSlots(nonSystemIndex)
           nonSystemIndex += 1
@@ -1542,6 +1603,16 @@ export function buildOpenAIRequest(
           continue
         }
         break
+      }
+      // The batch is emitted in the order the assistant declared its calls in,
+      // not in the order the results happened to arrive in.
+      for (const entry of pairToolExchanges(batch, awaitingToolCallIds)) {
+        messages.push({ role: 'tool', tool_call_id: entry.id, content: entry.content })
+        pendingToolImages.push(...entry.images)
+        if (awaitingToolCallIds.length > 0) {
+          awaitingToolCallIds = awaitingToolCallIds.filter((id) => id !== entry.id)
+          if (awaitingToolCallIds.length === 0) flushDeferred()
+        }
       }
       if (awaitingToolCallIds.length === 0) flushToolImages()
       continue
@@ -1805,33 +1876,105 @@ export function promptCacheKey(options: GenerateOptions): string | undefined {
 
 type AnthropicBlock = Record<string, unknown>
 
+/**
+ * The Anthropic beta that carries the context-management edit.
+ *
+ * `clear_thinking_20251015` is honoured only on the beta Messages API, so the
+ * beta has to travel WITH the request; the official Kimi Anthropic protocol
+ * asks for it on every thinking request (see the upstream
+ * `kimiAnthropicProtocol`, which returns `betaFeatures: [CONTEXT_MANAGEMENT_BETA]`
+ * for both the enabled and the disabled encoding).
+ */
+export const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
+
+/**
+ * The Anthropic context edit that clears stale thinking blocks.
+ *
+ * The edit is what "keep the thinking across turns" means on this wire: the
+ * service clears the thinking it has already consumed instead of replaying it,
+ * so a preserved thinking block stays affordable.
+ */
+export const CLEAR_THINKING_EDIT = 'clear_thinking_20251015'
+
+/** The cache breakpoint the Anthropic wire marks with. */
+const ANTHROPIC_CACHE_CONTROL = { type: 'ephemeral' } as const
+
+/**
+ * The content block types that accept a cache breakpoint.
+ *
+ * The official provider injects the breakpoint on the last block of the last
+ * message, and only when that block is one of the cacheable kinds; a block
+ * that cannot carry the marker is left alone rather than given a field the
+ * service would reject.
+ */
+const ANTHROPIC_CACHEABLE_BLOCK_TYPES = new Set([
+  'text',
+  'image',
+  'document',
+  'tool_use',
+  'tool_result',
+])
+
 function anthropicUserContent(
   message: Message,
   images: ResolvedRequestImages,
   toolCallIds: ToolCallIdNormalizer,
+  media: RequestMediaOptions = {},
 ): AnthropicBlock[] {
   if (!Array.isArray(message.content)) return []
   const blocks: AnthropicBlock[] = []
   for (const block of message.content) {
     if (!isRecord(block)) continue
-    // A video part on this protocol is not documented, and an unverified field
-    // must never be sent: the block degrades to text that says so.
+    // A video part on this protocol is a first-class content block, exactly as
+    // on the OpenAI surface: the official Anthropic protocol lowers a video
+    // into `{ type: 'video', source: { type: 'base64' | 'url' } }`. A clip the
+    // selected model cannot take degrades to the ordinary text fallback, so
+    // the turn still runs and the model learns why the video is absent instead
+    // of answering about an empty message.
     if (block.type === 'video') {
-      blocks.push({
-        type: 'text',
-        text: videoOmissionText('unsupported-wire', videoBlockLabel(block as { attachment?: { name?: string; attachmentId?: string } })),
-      })
+      // A hosted reference short-circuits the inline resolution: the service
+      // reads the stored file, so the body carries a short URL instead of the
+      // megabytes of base64 the body ceiling cannot survive. A miss falls
+      // through to the unchanged inline path below.
+      const reference = hostedReference(media.videoReferences, block)
+      if (reference !== undefined) {
+        blocks.push({ type: 'video', source: { type: 'url', url: reference } })
+        continue
+      }
+      const outcome = resolveVideoBlock(
+        block,
+        media.videos ?? new Map(),
+        media.videoAccepted === true,
+        videoOmissionText,
+      )
+      if ('inline' in outcome) {
+        blocks.push({
+          type: 'video',
+          source: { type: 'base64', media_type: outcome.inline.mediaType, data: outcome.inline.data },
+        })
+      } else {
+        blocks.push({ type: 'text', text: outcome.omission })
+      }
       continue
     }
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
       if (text !== '') blocks.push({ type: 'text', text })
     } else if (block.type === 'image') {
-      const inline = imageBlockToInline(block, images)
-      if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
-        blocks.push({ type: 'image', source: { type: 'base64', media_type: inline.mediaType, data: inline.data } })
+      // A reference this request already uploaded is cited INSTEAD of the
+      // bytes: the service reads the stored file, and sending both would
+      // charge the request for the megabyte it was trying to avoid while
+      // asking the model to read the picture twice.
+      const reference = hostedReference(media.imageReferences, block)
+      if (reference !== undefined) {
+        blocks.push({ type: 'image', source: { type: 'url', url: reference } })
       } else {
-        blocks.push({ type: 'text', text: unavailableImageText(block) })
+        const inline = imageBlockToInline(block, images)
+        if (inline && SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
+          blocks.push({ type: 'image', source: { type: 'base64', media_type: inline.mediaType, data: inline.data } })
+        } else {
+          blocks.push({ type: 'text', text: unavailableImageText(block) })
+        }
       }
     } else if (block.type === 'tool-result') {
       const callId = typeof block.toolCallId === 'string' ? block.toolCallId : ''
@@ -1856,6 +1999,28 @@ function anthropicAssistantContent(message: Message, toolCallIds: ToolCallIdNorm
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
       if (text !== '') blocks.push({ type: 'text', text })
+    } else if (block.type === 'reasoning') {
+      // A reasoning block is replayed as a `thinking` block, NOT dropped.
+      //
+      // Kimi's Anthropic endpoint streams thinking without a signature_delta,
+      // yet it rejects a tool-call turn whose thinking is gone ("thinking is
+      // enabled but reasoning_content is missing"). Dropping the block here is
+      // what broke multi-step tool use on this wire; the official provider
+      // keeps an unsigned thinking block for exactly this reason (it only
+      // discards one for Anthropic's own models, which reject unsigned
+      // thinking outright).
+      //
+      // A signature that DID arrive is carried through unchanged, because the
+      // signed block is the one Anthropic's own models require.
+      const thinkingText = typeof block.text === 'string' ? sanitizeText(block.text) : ''
+      const sig = typeof block.signature === 'string' && block.signature.trim() !== '' ? block.signature : undefined
+      if (thinkingText !== '' || sig !== undefined) {
+        blocks.push({
+          type: 'thinking',
+          thinking: thinkingText,
+          ...(sig === undefined ? {} : { signature: sig }),
+        })
+      }
     } else if (block.type === 'tool-call' && typeof block.name === 'string') {
       const parsed = safeJsonParse(toolCallArguments(block.arguments))
       blocks.push({
@@ -1865,9 +2030,6 @@ function anthropicAssistantContent(message: Message, toolCallIds: ToolCallIdNorm
         input: isRecord(parsed) ? parsed : {},
       })
     }
-    // Reasoning blocks are dropped on this wire: Anthropic requires a thinking
-    // block to carry the provider signature that produced it, and an unsigned
-    // one is rejected outright. The OpenAI wire preserves the same content.
   }
   return blocks
 }
@@ -1899,6 +2061,7 @@ export function buildAnthropicRequest(
   options: GenerateOptions,
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   media: RequestMediaOptions = {},
+  preserveThinking: boolean = preserveThinkingEnabled(),
 ): Record<string, unknown> {
   // Shared across the whole request; see buildOpenAIRequest for why.
   const toolCallIds = new ToolCallIdNormalizer()
@@ -1924,14 +2087,14 @@ export function buildAnthropicRequest(
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message)) {
-      entries.push({ role: 'user', content: anthropicUserContent(message, images, toolCallIds) })
+      entries.push({ role: 'user', content: anthropicUserContent(message, images, toolCallIds, media) })
       continue
     }
     entries.push({
       role: message.role === 'assistant' ? 'assistant' : 'user',
       content: message.role === 'assistant'
         ? anthropicAssistantContent(message, toolCallIds)
-        : anthropicUserContent(message, images, toolCallIds),
+        : anthropicUserContent(message, images, toolCallIds, media),
     })
   }
 
@@ -1944,35 +2107,63 @@ export function buildAnthropicRequest(
   const system = systemParts.length === 0 ? undefined : systemParts.join('\n\n')
   const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
   const effort = mapReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
-  const budget = thinkingBudgetFor(effort, maxTokens)
+  // The official Kimi Anthropic protocol encodes the depth as a top-level
+  // `output_config.effort` and the switch itself as
+  // `thinking: { type: 'enabled' | 'disabled' }`. There is no `budget_tokens`
+  // form on this protocol: the service derives the budget from the effort.
+  const thinkingOff = effort === 'none'
+  const thinkingField = thinkingOff ? { type: 'disabled' } : { type: 'enabled' }
+  const outputConfig = !thinkingOff && effort !== undefined ? { effort } : undefined
+  // Preserved thinking is a beta CONTEXT EDIT on this wire, not a field: the
+  // service clears the thinking it has already consumed instead of replaying it.
+  const keepThinking = preserveThinking && !thinkingOff
+  const betas = [CONTEXT_MANAGEMENT_BETA]
+  const contextManagement = keepThinking
+    ? { edits: [{ type: CLEAR_THINKING_EDIT, keep: 'all' }] }
+    : undefined
+
+  // The cache breakpoint goes on the last block of the LAST message, AFTER the
+  // merge — so it lands on the final tool_result of a merged user turn rather
+  // than on a block the merge later moved.
+  const messages = mergeAnthropicMessages(entries)
+  const lastMessage = messages[messages.length - 1]
+  if (lastMessage !== undefined && Array.isArray(lastMessage.content) && lastMessage.content.length > 0) {
+    const lastBlock = lastMessage.content[lastMessage.content.length - 1]
+    if (lastBlock !== undefined && ANTHROPIC_CACHEABLE_BLOCK_TYPES.has(String(lastBlock.type))) {
+      lastBlock.cache_control = { ...ANTHROPIC_CACHE_CONTROL }
+    }
+  }
+  // The tool list carries its own breakpoint on the last tool: the tools are
+  // the second stable prefix of a cached request, so the marker has to sit
+  // after the final declaration rather than on the first.
+  const tools: Array<Record<string, unknown>> = options.tools && options.tools.length > 0
+    ? options.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: normalizeKimiToolSchema(tool.parameters),
+      }))
+    : []
+  if (tools.length > 0) {
+    tools[tools.length - 1] = { ...tools[tools.length - 1]!, cache_control: { ...ANTHROPIC_CACHE_CONTROL } }
+  }
 
   return {
     model: options.model,
     max_tokens: maxTokens,
-    messages: mergeAnthropicMessages(entries),
-    ...(system === undefined ? {} : { system }),
-    // Thinking and an explicit temperature are mutually exclusive on this wire.
-    ...(options.temperature === undefined || budget !== undefined ? {} : { temperature: options.temperature }),
-    ...(options.stop && options.stop.length > 0 ? { stop_sequences: options.stop } : {}),
-    ...(options.tools && options.tools.length > 0
-      ? {
-          tools: options.tools.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: stripMetaSchema(tool.parameters),
-          })),
-        }
-      : {}),
-    // This wire keeps the standard Messages shape: `keep` is a Kimi
-    // extension on the OpenAI-compatible surface, and preserved thinking on the
-    // Anthropic one is expressed as a beta context edit rather than a field here
-    // — so neither is sent, and thinking blocks are dropped on replay because
-    // they would need the provider signature that produced them.
-    ...(effort === undefined
+    messages,
+    // The system prompt is the head of the cached prefix, so it is sent as a
+    // block array carrying the breakpoint the service needs to keep it.
+    ...(system === undefined
       ? {}
-      : budget === undefined
-        ? { thinking: { type: 'disabled' } }
-        : { thinking: { type: 'enabled', budget_tokens: budget } }),
+      : { system: [{ type: 'text', text: system, cache_control: { ...ANTHROPIC_CACHE_CONTROL } }] }),
+    // Thinking and an explicit temperature are mutually exclusive on this wire.
+    ...(options.temperature === undefined || !thinkingOff ? {} : { temperature: options.temperature }),
+    ...(options.stop && options.stop.length > 0 ? { stop_sequences: options.stop } : {}),
+    ...(tools.length > 0 ? { tools } : {}),
+    thinking: thinkingField,
+    ...(outputConfig === undefined ? {} : { output_config: outputConfig }),
+    ...(contextManagement === undefined ? {} : { context_management: contextManagement }),
+    betas,
   }
 }
 
@@ -1991,7 +2182,7 @@ export function buildRequest(
   // made.
   if (isSideChannelTitleRequest(options)) {
     return wire === 'anthropic'
-      ? buildAnthropicRequest(options, images, media)
+      ? buildAnthropicRequest(options, images, media, preserveThinking)
       : buildOpenAIRequest(options, images, preserveThinking, media)
   }
   // Fingerprint the prefix-breaking inputs before building, so the cause is
@@ -2008,7 +2199,7 @@ export function buildRequest(
     : cause
   recordDriftCause(drift, options.sessionId, options)
   return wire === 'anthropic'
-    ? buildAnthropicRequest(options, images, media)
+    ? buildAnthropicRequest(options, images, media, preserveThinking)
     : buildOpenAIRequest(options, images, preserveThinking, media)
 }
 

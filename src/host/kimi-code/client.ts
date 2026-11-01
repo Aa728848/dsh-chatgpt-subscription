@@ -80,6 +80,20 @@ function firstNumber(record: Record<string, unknown>, keys: readonly string[]): 
   return undefined
 }
 
+/**
+ * Non-empty strings from one array field.
+ *
+ * The service states its lists as JSON arrays. A field that is not an array, or
+ * an array with nothing usable in it, reads as "the server said nothing" rather
+ * than as an empty list, so the caller can fall back to the other dialect
+ * instead of publishing an empty answer as the server's verdict.
+ */
+function asStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const entries = value.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '')
+  return entries.length > 0 ? entries : undefined
+}
+
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
@@ -231,15 +245,49 @@ const RETIRED_MODEL_STATUSES = new Set(['deprecated', 'alpha', 'retired'])
  * Read the three-state thinking declaration.
  *
  * Kept separate from the effort list because it can contradict it: a model may
- * ship `valid_efforts` that still contain `none` while `supports_thinking_type`
- * says it can only reason. When both are present the declaration wins, because
- * it is the field the service introduced to replace the older boolean.
+ * ship `valid_efforts` that still contain `none` while the declaration says it
+ * can only reason. When both are present the declaration wins, because it is
+ * the field the service introduced to replace the older boolean.
+ *
+ * Two dialects state it. The unified schema nests it under `reasoning`:
+ * `{ "type": "only" | "both" | "none" }`; the older listing states it flat as
+ * `supports_thinking_type`. The unified object is read first, because it is
+ * the newer field and the one that also carries the effort ladder; the flat
+ * field remains the fallback for a server that still speaks the old shape.
+ *
+ * The unified schema spells the non-thinking state `none`; the internal
+ * three-state keeps the legacy `no`.
  */
 function parseThinkingType(record: Record<string, unknown>): KimiCodeThinkingType | undefined {
+  const reasoning = asRecord(record.reasoning)
+  if (reasoning !== undefined) {
+    const rType = asString(reasoning.type)
+    if (rType === 'only' || rType === 'both') return rType
+    if (rType === 'none' || rType === 'no') return 'no'
+  }
   const raw = asString(record.supports_thinking_type) ?? asString(record.supportsThinkingType)
   return raw === 'only' || raw === 'no' || raw === 'both' ? raw : undefined
 }
 
+/**
+ * Read one model entry from the live listing.
+ *
+ * The service has published two shapes of the same listing and this parser
+ * reads both:
+ *
+ * - the unified schema, which nests the window under `limit.context`, the
+ *   input cap under `limit.input`, the thinking declaration and the effort
+ *   ladder under `reasoning`, the accepted media under `modalities.input`
+ *   and the message-level tool flag under `tools.dynamic_load`;
+ * - the older flat schema, which states the same facts as
+ *   `context_length`, `max_input_tokens`, `supports_thinking_type`,
+ *   `think_efforts`, `supports_image_in` / `supports_video_in` and
+ *   `supports_dynamic_tools`.
+ *
+ * A field the unified schema carries wins over its flat counterpart, because
+ * that is the shape the service is moving towards; a field only the flat shape
+ * carries is still read, so an older server keeps working.
+ */
 function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
   const record = asRecord(value)
   if (record === undefined) return undefined
@@ -250,9 +298,10 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
   // replaced it.
   const status = asString(record.status)?.toLowerCase()
   if (status !== undefined && RETIRED_MODEL_STATUSES.has(status)) return undefined
-  const contextWindow = firstNumber(record, ['context_length', 'contextLength'])
-  if (contextWindow === undefined || contextWindow <= 0) return undefined
   const limits = asRecord(record.limit) ?? asRecord(record.limits)
+  const contextWindow = firstNumber(record, ['context_length', 'contextLength'])
+    ?? firstNumber(limits ?? {}, ['context'])
+  if (contextWindow === undefined || contextWindow <= 0) return undefined
   // The input cap is tracked apart from the window: a model can accept a 1M
   // window while refusing prompts past a lower bound, and budgeting the prompt
   // against the window overshoots into a rejected request rather than a compaction.
@@ -263,32 +312,66 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
     : undefined
   const thinkingType = parseThinkingType(record)
 
+  // The effort ladder: the unified `reasoning.effort.valid` first, then the
+  // older nested `think_efforts`.
+  const reasoning = asRecord(record.reasoning)
+  const reasoningEffort = asRecord(reasoning?.effort)
   const efforts = asRecord(record.think_efforts) ?? asRecord(record.thinkEfforts)
-  const validEfforts = Array.isArray(efforts?.valid_efforts)
-    ? efforts.valid_efforts.filter((entry): entry is string => typeof entry === 'string')
-    : Array.isArray(efforts?.validEfforts)
-      ? efforts.validEfforts.filter((entry): entry is string => typeof entry === 'string')
-      : undefined
+  // `support` gates the whole older object: when the server states it and it
+  // is not true, the list it carries is not to be believed. A listing that
+  // never mentions `support` is an older one, and its list is still read.
+  const usableEfforts = efforts !== undefined && 'support' in efforts && efforts.support !== true
+    ? undefined
+    : efforts
+  const validEfforts = asStringList(reasoningEffort?.valid)
+    ?? asStringList(usableEfforts?.valid_efforts)
+    ?? asStringList(usableEfforts?.validEfforts)
+  const rawDefaultEffort = asString(reasoningEffort?.default)
+    ?? asString(usableEfforts?.default_effort ?? usableEfforts?.defaultEffort)
+  // A default the model cannot be asked for is dropped rather than carried
+  // through: the first turn that relied on it would fail outright.
+  const defaultReasoningEffort = rawDefaultEffort !== undefined
+    && validEfforts !== undefined
+    && validEfforts.length > 0
+    && !validEfforts.includes(rawDefaultEffort)
+    ? undefined
+    : rawDefaultEffort
 
-  const modalities: Array<'text' | 'image' | 'video'> = ['text']
-  if (record.supports_image_in === true || record.supportsImageIn === true) modalities.push('image')
+  // The accepted media: the unified `modalities.input` list, or the older
+  // boolean flags.
+  const rawModalities = asRecord(record.modalities)
+  const modalityInputs = Array.isArray(rawModalities?.input)
+    ? rawModalities.input.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const hasImage = record.supports_image_in === true
+    || record.supportsImageIn === true
+    || modalityInputs.includes('image')
   // The live listing uses the same capability tag the official CLI's model
   // table declares, so a model that gains video acceptance server-side starts
   // working here without a plugin release.
-  if (record.supports_video_in === true || record.supportsVideoIn === true) modalities.push('video')
+  const hasVideo = record.supports_video_in === true
+    || record.supportsVideoIn === true
+    || modalityInputs.includes('video')
+  const modalities: Array<'text' | 'image' | 'video'> = ['text']
+  if (hasImage) modalities.push('image')
+  if (hasVideo) modalities.push('video')
+
+  // The unified `tools.dynamic_load` first, then the older boolean flag.
+  const toolsObj = asRecord(record.tools)
+  const rawDynamicTools = typeof toolsObj?.dynamic_load === 'boolean'
+    ? toolsObj.dynamic_load
+    : (record.supports_dynamic_tools ?? record.supportsDynamicTools)
 
   const protocol = asString(record.protocol)
   return {
     id,
     name: asString(record.display_name) ?? asString(record.displayName) ?? undefined,
     contextWindow,
-    ...(validEfforts === undefined || validEfforts.length === 0 ? {} : { reasoningEfforts: validEfforts }),
-    ...(asString(efforts?.default_effort ?? efforts?.defaultEffort) === undefined
-      ? {}
-      : { defaultReasoningEffort: asString(efforts?.default_effort ?? efforts?.defaultEffort) }),
+    ...(validEfforts === undefined ? {} : { reasoningEfforts: validEfforts }),
+    ...(defaultReasoningEffort === undefined ? {} : { defaultReasoningEffort }),
     inputModalities: modalities,
     protocol: protocol === 'anthropic' ? 'anthropic' : 'openai',
-    ...(record.supports_video_in === true || record.supportsVideoIn === true ? { supportsVideo: true } : {}),
+    ...(hasVideo ? { supportsVideo: true } : {}),
     ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
     ...(thinkingType === undefined ? {} : { thinkingType }),
     // Three-state like the dynamic-tool flag below: silence is not a denial,
@@ -301,9 +384,7 @@ function parseCatalogModel(value: unknown): KimiCodeCatalogModel | undefined {
     // nothing at all. Collapsing false into "absent" would make an explicit
     // denial indistinguishable from silence, and the static fallback would then
     // re-enable a capability the service just turned off.
-    ...(typeof (record.supports_dynamic_tools ?? record.supportsDynamicTools) === 'boolean'
-      ? { supportsDynamicTools: (record.supports_dynamic_tools ?? record.supportsDynamicTools) as boolean }
-      : {}),
+    ...(typeof rawDynamicTools === 'boolean' ? { supportsDynamicTools: rawDynamicTools } : {}),
   }
 }
 

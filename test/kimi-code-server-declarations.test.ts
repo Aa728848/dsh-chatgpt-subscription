@@ -7,6 +7,7 @@ import {
   clearCachedCatalog,
   defaultReasoningEffortForEntry,
   dynamicToolsForEntry,
+  inputModalitiesForEntry,
   loadProviderModels,
   maxInputTokensForEntry,
   reasoningEffortsForEntry,
@@ -192,5 +193,129 @@ describe('status lifecycle', () => {
       { id: 'k3', context_length: 262_144, status: 'stable' },
     ])
     expect(catalog.map((m) => m.id)).toEqual(['k3'])
+  })
+})
+
+/**
+ * The unified listing the service now publishes.
+ *
+ * The same facts as the flat listing, nested: the window under `limit.context`,
+ * the thinking declaration and the effort ladder under `reasoning`, the
+ * accepted media under `modalities.input` and the message-level tool flag
+ * under `tools.dynamic_load`. A listing in this shape used to be dropped
+ * outright, because it carries no `context_length` for the picker to read.
+ */
+describe('unified /models schema', () => {
+  it('reads the window and the input cap from the nested limit', async () => {
+    const catalog = await catalogFrom([
+      { id: 'k3', limit: { context: 262_144, input: 200_000, output: 131_072 } },
+    ])
+    expect(catalog.map((m) => m.id)).toEqual(['k3'])
+    expect(catalog[0]!.contextWindow).toBe(262_144)
+    expect(maxInputTokensForEntry('k3', catalog)).toBe(200_000)
+  })
+
+  it('reads the thinking declaration from the nested reasoning object', async () => {
+    const catalog = await catalogFrom([
+      {
+        id: 'k3',
+        limit: { context: 262_144 },
+        reasoning: { type: 'only', effort: { valid: ['low', 'high', 'max', 'none'], default: 'max' } },
+      },
+    ])
+    // The declaration wins over the effort list, which still names `none`.
+    expect(reasoningEffortsForEntry('k3', catalog)).toEqual(['low', 'high', 'max'])
+    expect(defaultReasoningEffortForEntry('k3', catalog)).toBe('max')
+  })
+
+  it('maps the unified none type onto the legacy no-thinking state', async () => {
+    const catalog = await catalogFrom([
+      { id: 'k3', limit: { context: 262_144 }, reasoning: { type: 'none' } },
+    ])
+    expect(reasoningEffortsForEntry('k3', catalog)).toEqual([])
+  })
+
+  it('reads the effort ladder and its default from the nested reasoning object', async () => {
+    const catalog = await catalogFrom([
+      {
+        id: 'k3.5',
+        limit: { context: 262_144 },
+        reasoning: { type: 'both', effort: { valid: ['low', 'high', 'none'], default: 'high' } },
+      },
+    ])
+    expect(reasoningEffortsForEntry('k3.5', catalog)).toEqual(['low', 'high', 'none'])
+    expect(defaultReasoningEffortForEntry('k3.5', catalog)).toBe('high')
+  })
+
+  it('drops a default the valid list does not contain', async () => {
+    const catalog = await catalogFrom([
+      {
+        id: 'k3.5',
+        limit: { context: 262_144 },
+        reasoning: { type: 'both', effort: { valid: ['low', 'high'], default: 'max' } },
+      },
+    ])
+    // A default naming a level the model cannot be asked for would fail the
+    // first turn that relied on it, so it is dropped rather than published.
+    expect(reasoningEffortsForEntry('k3.5', catalog)).toEqual(['low', 'high'])
+    expect(defaultReasoningEffortForEntry('k3.5', catalog)).toBeUndefined()
+  })
+
+  it('ignores the effort list of a listing that says thinking is unsupported', async () => {
+    const catalog = await catalogFrom([
+      {
+        id: 'k3.5-off',
+        limit: { context: 262_144 },
+        think_efforts: { support: false, valid_efforts: ['low', 'high'], default_effort: 'high' },
+      },
+      {
+        id: 'k3.5-on',
+        limit: { context: 262_144 },
+        think_efforts: { support: true, valid_efforts: ['low', 'high'], default_effort: 'high' },
+      },
+    ])
+    // `support` gates the whole object: the list it carries is not to be
+    // believed when the server says the model has no adjustable thinking.
+    expect(reasoningEffortsForEntry('k3.5-off', catalog)).toEqual([])
+    expect(defaultReasoningEffortForEntry('k3.5-off', catalog)).toBeUndefined()
+    expect(reasoningEffortsForEntry('k3.5-on', catalog)).toEqual(['low', 'high'])
+    expect(defaultReasoningEffortForEntry('k3.5-on', catalog)).toBe('high')
+  })
+
+  it('reads the accepted media from the nested modalities list', async () => {
+    const catalog = await catalogFrom([
+      { id: 'k3', limit: { context: 262_144 }, modalities: { input: ['text', 'image', 'video'] } },
+    ])
+    expect(inputModalitiesForEntry('k3', catalog)).toEqual(['text', 'image', 'video'])
+    expect(catalog[0]!.supportsVideo).toBe(true)
+  })
+
+  it('reads the dynamic-tool flag from the nested tools object', async () => {
+    const catalog = await catalogFrom([
+      { id: 'k3', limit: { context: 262_144 }, tools: { dynamic_load: true } },
+      { id: 'k3-256k', limit: { context: 262_144 }, tools: { dynamic_load: false } },
+    ])
+    // The nested flag wins over the shipped registry, including to turn the
+    // capability off for an id the registry declares as taking dynamic tools.
+    expect(dynamicToolsForEntry('k3', catalog)).toBe(true)
+    expect(dynamicToolsForEntry('k3-256k', catalog)).toBe(false)
+  })
+
+  it('still reads the flat listing the older server sends', async () => {
+    const catalog = await catalogFrom([
+      {
+        id: 'k3',
+        context_length: 262_144,
+        supports_thinking_type: 'both',
+        think_efforts: { valid_efforts: ['low', 'high'], default_effort: 'high' },
+        supports_image_in: true,
+        supports_dynamic_tools: true,
+      },
+    ])
+    expect(catalog[0]!.contextWindow).toBe(262_144)
+    expect(reasoningEffortsForEntry('k3', catalog)).toEqual(['low', 'high'])
+    expect(defaultReasoningEffortForEntry('k3', catalog)).toBe('high')
+    expect(inputModalitiesForEntry('k3', catalog)).toEqual(['text', 'image'])
+    expect(dynamicToolsForEntry('k3', catalog)).toBe(true)
   })
 })

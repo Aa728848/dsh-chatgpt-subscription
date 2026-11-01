@@ -28,6 +28,41 @@ function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
   } as GenerateOptions
 }
 
+/** One user turn carrying a durable video occurrence. */
+function videoMessage(attachmentId: string): Message {
+  return {
+    role: 'user',
+    content: [{
+      type: 'video',
+      attachment: { attachmentId, mediaType: 'video/mp4', bytes: 4, name: attachmentId },
+    }],
+  } as unknown as Message
+}
+
+/** One user turn carrying a durable image occurrence. */
+function imageMessage(attachmentId: string): Message {
+  return {
+    role: 'user',
+    content: [{
+      type: 'image',
+      attachment: { attachmentId, mediaType: 'image/png', bytes: 1, name: attachmentId },
+    }],
+  } as unknown as Message
+}
+
+/** One tool result, as the harness records it. */
+function toolResultMessage(toolCallId: string, text: string): Message {
+  return {
+    role: 'user',
+    source: { kind: 'tool', callId: toolCallId } as never,
+    content: [{
+      type: 'tool-result',
+      toolCallId,
+      content: [{ type: 'text', text }],
+    }],
+  } as unknown as Message
+}
+
 describe('mapReasoningEffort', () => {
   it('maps the documented third-party effort vocabulary onto the three K3 levels', () => {
     // The service documents this mapping verbatim and answers anything outside
@@ -184,6 +219,92 @@ describe('buildOpenAIRequest', () => {
     }])
   })
 
+  it('preserves the provider extras on a tool call', () => {
+    // Kimi's gateway routes on the extras the provider attached to the call,
+    // so they travel back out with it.
+    const body = buildOpenAIRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
+        {
+          role: 'assistant',
+          content: [{
+            type: 'tool-call',
+            id: 'call_1',
+            name: 'read',
+            arguments: '{"path":"a"}',
+            extras: { cache_control: { type: 'ephemeral' } },
+          }],
+        } as unknown as Message,
+      ],
+    }))
+    const assistant = (body.messages as Array<Record<string, unknown>>).find((entry) => entry.role === 'assistant')
+    const calls = assistant?.tool_calls as Array<Record<string, unknown>>
+    expect(calls[0]?.extras).toEqual({ cache_control: { type: 'ephemeral' } })
+  })
+
+  it('leaves a tool call without extras exactly as it was', () => {
+    const body = buildOpenAIRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'call_1', name: 'read', arguments: '{}' }],
+        } as unknown as Message,
+      ],
+    }))
+    const assistant = (body.messages as Array<Record<string, unknown>>).find((entry) => entry.role === 'assistant')
+    const calls = assistant?.tool_calls as Array<Record<string, unknown>>
+    expect(calls[0]).not.toHaveProperty('extras')
+  })
+
+  it('answers a parallel tool call in the order the assistant declared it', () => {
+    // The service reads the tool messages as the answers to the tool_calls
+    // that precede them, so a result that arrived late must still be sent in
+    // the declared order.
+    const body = buildOpenAIRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', id: 'call_a', name: 'read', arguments: '{}' },
+            { type: 'tool-call', id: 'call_b', name: 'read', arguments: '{}' },
+          ],
+        } as unknown as Message,
+        toolResultMessage('call_b', 'second result'),
+        toolResultMessage('call_a', 'first result'),
+      ],
+    }))
+    const wire = body.messages as Array<Record<string, unknown>>
+    const answered = wire.filter((entry) => entry.role === 'tool')
+    expect(answered.map((entry) => entry.tool_call_id)).toEqual(['call_a', 'call_b'])
+    expect(answered.map((entry) => entry.content)).toEqual(['first result', 'second result'])
+  })
+
+  it('keeps a result that answers no declared call behind the answered ones', () => {
+    const body = buildOpenAIRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', id: 'call_a', name: 'read', arguments: '{}' },
+            { type: 'tool-call', id: 'call_b', name: 'read', arguments: '{}' },
+          ],
+        } as unknown as Message,
+        toolResultMessage('call_b', 'second result'),
+        toolResultMessage('call_unknown', 'stray result'),
+        toolResultMessage('call_a', 'first result'),
+      ],
+    }))
+    const wire = body.messages as Array<Record<string, unknown>>
+    const answered = wire.filter((entry) => entry.role === 'tool')
+    // The declared calls are answered in the order they were declared; the
+    // stray one answers no declared call and keeps its relative order behind
+    // them.
+    expect(answered.map((entry) => entry.tool_call_id)).toEqual(['call_a', 'call_b', 'call_unknown'])
+  })
+
   it('normalizes tool schema with $defs, $ref and property type inference', () => {
     const rawSchema = {
       $schema: 'http://json-schema.org/draft-07/schema#',
@@ -211,24 +332,168 @@ describe('buildOpenAIRequest', () => {
 })
 
 describe('buildAnthropicRequest', () => {
-  it('sends a thinking budget for an enabled level', () => {
+  it('encodes the depth as a top-level output_config.effort, as the official Kimi protocol does', () => {
+    // The official `kimiAnthropicProtocol` sends `thinking: { type: 'enabled' }`
+    // plus a top-level `output_config: { effort }`; there is no budget_tokens
+    // form on this protocol.
     const body = buildAnthropicRequest(options({ reasoningEffort: 'high' as never }))
-    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 8_192 })
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.output_config).toEqual({ effort: 'high' })
   })
 
-  it('sends a disabled thinking block for the none level', () => {
+  it('sends a disabled thinking block for the none level and no effort at all', () => {
     const body = buildAnthropicRequest(options({ reasoningEffort: 'none' as never }))
     expect(body.thinking).toEqual({ type: 'disabled' })
+    expect(body.output_config).toBeUndefined()
   })
 
-  it('drops temperature when a thinking budget is present, which the wire forbids', () => {
+  it('enables thinking by default, because the Kimi models reason by default', () => {
+    const body = buildAnthropicRequest(options())
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    // No level was chosen, so there is no effort to report.
+    expect(body.output_config).toBeUndefined()
+  })
+
+  it('asks for the context-management beta and the clear-thinking edit', () => {
+    const body = buildAnthropicRequest(options())
+    expect(body.betas).toEqual(['context-management-2025-06-27'])
+    expect(body.context_management).toEqual({
+      edits: [{ type: 'clear_thinking_20251015', keep: 'all' }],
+    })
+  })
+
+  it('omits the clear-thinking edit when preserved thinking is off', () => {
+    const body = buildAnthropicRequest(options(), undefined, {}, false)
+    expect(body.context_management).toBeUndefined()
+    expect(body.thinking).toEqual({ type: 'enabled' })
+  })
+
+  it('drops temperature while thinking is on, which the wire forbids', () => {
     const body = buildAnthropicRequest(options({ reasoningEffort: 'high' as never, temperature: 0.5 }))
     expect(body.temperature).toBeUndefined()
   })
 
-  it('carries no thinking field when no level was chosen', () => {
-    const body = buildAnthropicRequest(options())
-    expect(body.thinking).toBeUndefined()
+  it('sends the system prompt as a cacheable block array', () => {
+    const body = buildAnthropicRequest(options({ system: 'You are Kimi.' }))
+    expect(body.system).toEqual([
+      { type: 'text', text: 'You are Kimi.', cache_control: { type: 'ephemeral' } },
+    ])
+  })
+
+  it('marks the last tool as the cache breakpoint', () => {
+    const body = buildAnthropicRequest(options({
+      tools: [
+        { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: {} } },
+        { name: 'write', description: 'Write a file', parameters: { type: 'object', properties: {} } },
+      ] as never,
+    }))
+    const tools = body.tools as Array<Record<string, unknown>>
+    expect(tools[0]?.cache_control).toBeUndefined()
+    expect(tools[1]?.cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('marks the last block of the last message as the cache breakpoint', () => {
+    const body = buildAnthropicRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'first' }] } as Message,
+        { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } as Message,
+      ],
+    }))
+    const messages = body.messages as Array<Record<string, unknown>>
+    const content = messages[messages.length - 1]?.content as Array<Record<string, unknown>>
+    expect(content[content.length - 1]?.cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('replays the thinking block on an assistant turn', () => {
+    // Kimi streams thinking without a signature yet rejects a tool-call turn
+    // whose thinking is gone, so the block must survive the round trip.
+    const body = buildAnthropicRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
+        {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', text: 'I should read the file first.' },
+            { type: 'tool-call', id: 'call_1', name: 'read', arguments: '{"path":"a"}' },
+          ],
+        } as Message,
+      ],
+    }))
+    const messages = body.messages as Array<Record<string, unknown>>
+    const assistant = messages.find((entry) => entry.role === 'assistant')
+    const content = assistant?.content as Array<Record<string, unknown>>
+    expect(content[0]).toEqual({ type: 'thinking', thinking: 'I should read the file first.' })
+    expect(content[1]?.type).toBe('tool_use')
+  })
+
+  it('carries a provider signature through when one arrived', () => {
+    const body = buildAnthropicRequest(options({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
+        {
+          role: 'assistant',
+          content: [{ type: 'reasoning', text: 'signed thinking', signature: 'sig-1' }],
+        } as unknown as Message,
+      ],
+    }))
+    const messages = body.messages as Array<Record<string, unknown>>
+    const assistant = messages.find((entry) => entry.role === 'assistant')
+    const content = assistant?.content as Array<Record<string, unknown>>
+    expect(content[0]).toEqual({ type: 'thinking', thinking: 'signed thinking', signature: 'sig-1' })
+  })
+
+  it('sends a video as a native Anthropic video block', () => {
+    const body = buildAnthropicRequest(
+      options({ messages: [videoMessage('v1')] }),
+      undefined,
+      {
+        videos: new Map([['v1', { kind: 'inline' as const, mediaType: 'video/mp4', data: 'AA' }]]),
+        videoAccepted: true,
+      },
+    )
+    const messages = body.messages as Array<Record<string, unknown>>
+    const content = messages[0]?.content as Array<Record<string, unknown>>
+    expect(content[0]).toEqual({
+      type: 'video',
+      source: { type: 'base64', media_type: 'video/mp4', data: 'AA' },
+    })
+  })
+
+  it('cites a hosted video reference instead of inlining the bytes', () => {
+    const body = buildAnthropicRequest(
+      options({ messages: [videoMessage('v1')] }),
+      undefined,
+      { videoReferences: new Map([['v1', 'ms://v1']]), videoAccepted: true },
+    )
+    const messages = body.messages as Array<Record<string, unknown>>
+    const content = messages[0]?.content as Array<Record<string, unknown>>
+    expect(content[0]).toEqual({ type: 'video', source: { type: 'url', url: 'ms://v1' } })
+  })
+
+  it('cites a hosted image reference instead of inlining the bytes', () => {
+    const body = buildAnthropicRequest(
+      options({ messages: [imageMessage('a1')] }),
+      undefined,
+      { imageReferences: new Map([['a1', 'ms://a1']]) },
+    )
+    const messages = body.messages as Array<Record<string, unknown>>
+    const content = messages[0]?.content as Array<Record<string, unknown>>
+    expect(content[0]).toMatchObject({ type: 'image', source: { type: 'url', url: 'ms://a1' } })
+  })
+
+  it('degrades a video the selected model cannot take into plain text', () => {
+    const body = buildAnthropicRequest(
+      options({ messages: [videoMessage('v1')] }),
+      undefined,
+      {
+        videos: new Map([['v1', { kind: 'inline' as const, mediaType: 'video/mp4', data: 'AA' }]]),
+        videoAccepted: false,
+      },
+    )
+    const messages = body.messages as Array<Record<string, unknown>>
+    const content = messages[0]?.content as Array<Record<string, unknown>>
+    expect(content[0]?.type).toBe('text')
+    expect(String(content[0]?.text)).toContain('does not accept video input')
   })
 })
 

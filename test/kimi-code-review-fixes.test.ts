@@ -34,6 +34,19 @@ function declaration(name: string, text?: string): Message {
   )
 }
 
+/**
+ * The system prompt as text.
+ *
+ * The Anthropic wire sends it as a block array, because the prompt is the head
+ * of the cached prefix and carries the cache breakpoint; the text itself is
+ * the block's `text`.
+ */
+function systemText(body: Record<string, unknown>): string {
+  const blocks = body.system as Array<{ text?: string }> | undefined
+  if (blocks === undefined) return ''
+  return blocks.map((block) => block.text ?? '').join('\n')
+}
+
 describe('live listing can turn the capability OFF (explicit false wins)', () => {
   it('honours an explicit false instead of falling back to the registry', () => {
     // The registry says k3 supports it; the service saying false must win, or
@@ -83,8 +96,8 @@ describe('the Anthropic wire reports declarations it cannot carry', () => {
     const body = buildAnthropicRequest(options({ messages: [declaration('search_docs')] }))
     // The tool itself must not appear, but the count must be explained.
     expect(JSON.stringify(body)).not.toContain('search_docs')
-    expect(String(body.system)).toContain('dynamically loaded tool(s) were not sent')
-    expect(String(body.system)).toContain('Anthropic')
+    expect(systemText(body)).toContain('dynamically loaded tool(s) were not sent')
+    expect(systemText(body)).toContain('Anthropic')
   })
 
   it('keeps carrier text that only the OpenAI path would otherwise re-emit', () => {
@@ -94,7 +107,7 @@ describe('the Anthropic wire reports declarations it cannot carry', () => {
     const body = buildAnthropicRequest(options({
       messages: [declaration('search_docs', 'CARRIER_INSTRUCTION')],
     }))
-    expect(String(body.system)).toContain('CARRIER_INSTRUCTION')
+    expect(systemText(body)).toContain('CARRIER_INSTRUCTION')
     // ...and it must not be duplicated either.
     expect((JSON.stringify(body).match(/CARRIER_INSTRUCTION/g) ?? [])).toHaveLength(1)
   })
@@ -103,7 +116,7 @@ describe('the Anthropic wire reports declarations it cannot carry', () => {
     const body = buildAnthropicRequest(options({
       messages: [declaration('search_docs', 'CARRIER_INSTRUCTION')],
     }))
-    const system = String(body.system)
+    const system = systemText(body)
     const textAt = system.indexOf('CARRIER_INSTRUCTION')
     const noticeAt = system.indexOf('were not sent')
     // Guard against the vacuous case: a missing text has index -1, which would
