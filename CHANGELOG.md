@@ -2,13 +2,26 @@
 
 ## Unreleased
 
+## 0.53.0 - 2026-11-01
+
 - **[dispatch] Mandate v2 头部协议：样板自洽、可直接复制的骨架、会自纠的拒绝文案**
   - **协议自带的样板是非法头部**：`dispatch_ledger {action:"self"}` 打印的派发样板带着 `"grant":null`，被 `kindViolation` 判成"抄错角色"（`a dispatch header must not carry grant`）——模型照协议抄一次被拒一次。样板已去掉该字段，并新增 **PER KIND** 一节写明 dispatch / report / steer 各自携带的字段集；`test/dispatch-ledger-header.test.ts` 新增用例把正文里**每一段围栏**都丢给真解析器，判不出 `ok` 即回归。
   - **`null` 与字段缺失同义**：`parent_mandate` / `grant` 在 schema 里是 `nullable()`，解析器却把 `null` 当成"携带了该字段"。现在 `null` 等价于没写，真的带了值仍按原规则拒绝。
   - **不再要求模型手写 JSON**：`self` 的结果在协议正文之前多打印一段可复制头部——协调者拿到 dispatch 骨架（policy / prompt_ref 已填、ids 每次渲染现造），子代理拿到自己那份 mandate 的 report 头（只差 `status`）。骨架生成后先过 `parseMandateHeader` 自检，非法就不打印；协议正文仍在结果最尾部，值形状与工具声明面不变。
   - **拒绝文案自纠**：任一 kind 违规的 reason 尾部追加"该方向允许携带的字段集"，守卫的两条 `MANDATE_KIND` 同样追加，子代理从"逐个字段试错"变成一次往返改对。
   - 授权语义一处未动：命名空间永不重用、血缘、扩权上限、容量判定全部原样。
-  - **验证**：`npm run typecheck`（host / test / scripts 三工程）0 错误；定向 `npx vitest run test/dispatch-ledger-{header,tool,guard}.test.ts test/dispatch-model-surface-contract.test.ts` **101 passed**；全量 `npx vitest run` **347 files / 6165 tests passed**（新增 10 条）。用真解析器复核：旧样板（带 `grant:null`）现判 `ok`，报告头带 `task` 的拒绝串已自带字段集。
+
+- **[kimi-code] 号池不再“自己切号”：切号不被旧轮询顶回、重登绑定账号、登录不再改写当前选择**
+  - **前端旧响应不再覆盖切换结果**：设置卡的 60 s 轮询、可见性回调与额度 follow-up 各发各的 `/status`，一条更早读出、更晚返回的答案会把刚切换的账号顶回旧账号（jsdom 里用真实组件复现：点「设为主账号」后显示新账号，旧答案到达后变回旧账号）。现在每次读取带一个单调代次，只有仍是最新的答案才应用；10 个账号 / 模型 / 额度动作统一走 `applyStatus`，应用自己的答案前先作废在飞读取。守卫只丢弃过期答案，不冻结卡片——新的一轮轮询仍然会生效。
+  - **重登绑定到具体那一行**：设备码登录授权的是浏览器里当前登录的账号，而 `/login` 会把拿到的账号直接加进池子——在 A 行点「重新登录」时若浏览器已是 B 账号，就会静默替换 B 并连带移动轮转位置。现在 `/login` 带 `accountId`，按身份键（`userId` 优先，其次邮箱）比对；不一致就终止登录流程并回「重新登录的是 X，本次登录的却是 Y，已取消，号池与凭据都没有改动」。拒绝发生在 `store.write` **之前**（`oauth.ts` 新增的 `accept` 钩子），镜像凭据与号池一个字节都不会被写。
+  - **登录不再顺手改写「当前账号」**：`addAccount` 原先在主账号重新登录时把 `activeAccountId` 拉回主账号，所谓“重登之后又切回那个号”就是这一行；现在只有池子从未有过选择时才补位。
+  - **`/status` 只读一次号池**：原先 `read()` 拿到 `activeAccountId` 后，`listAccounts()` 内部又读一次，两次之间落一次写就会让同一响应里的「当前账号」和账号列表来自两份快照。新增 `summariesOf(document)`，状态与列表派生自同一份文档。
+  - **验证**：新增 `test/kimi-code-switch-race.test.tsx` 钉住「旧答案不得翻盘、新答案仍生效」；新增 `test/kimi-code-relogin-binding.test.ts` 钉住身份不一致被拒（流程 error、账号数不变、`activeAccountId` 不变、镜像文件仍为空）、身份一致则正常替换、普通登录不改选择；`test/account-pool-core.test.ts` 补一条「池子已有选择时加号或重登都不改 `activeAccountId`」。
+
+- **验证**
+  - `npm run typecheck`（host / client / test / scripts 三工程）0 错误。
+  - 全量 `npx vitest run`：**349 files passed / 2 skipped，6170 tests passed / 9 skipped**，exit 0（本次新增 5 条用例）。
+  - dispatch 定向复核：`npx vitest run test/dispatch-ledger-{header,tool,guard}.test.ts test/dispatch-model-surface-contract.test.ts` **101 passed**；用真解析器复核旧样板（带 `grant:null`）现判 `ok`，报告头带 `task` 的拒绝串已自带字段集。
 
 ## 0.52.0 - 2026-11-01
 
