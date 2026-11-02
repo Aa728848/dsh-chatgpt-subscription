@@ -1,4 +1,5 @@
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
+import { localizedProviderName } from '../common/i18n/index.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
@@ -231,7 +232,7 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): undefined {

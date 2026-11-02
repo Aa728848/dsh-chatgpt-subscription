@@ -23,6 +23,7 @@ import {
 import type { CompactionCandidatesDto } from '../shared/contracts.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
 import { isSameOriginMutation } from './common/same-origin.ts'
+import { currentLocale, hostLocaleRuntime } from './common/i18n/index.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
 import { PreferenceError, type SubscriptionPreferenceStore } from './preferences.ts'
 import type { PoolStorageSettings } from './common/pool-storage-settings.ts'
@@ -174,6 +175,17 @@ export function registerRoutes(
     }
     try {
       switch (url.pathname) {
+        case `${ROUTE_PREFIX}/i18n/locale`: {
+          // The browser's resolved language, mirrored so the Host can answer in it.
+          // The Host has no locale service of its own, and this is the seam that
+          // closes the gap: any tag is accepted, an unsupported one collapses to
+          // the default, and a hinted language is never worth a 4xx.
+          const runtime = hostLocaleRuntime()
+          const tag = field(body, 'locale')
+          const locale = runtime === undefined ? currentLocale() : runtime.set(tag ?? undefined)
+          json(response, { ok: true, value: { locale } })
+          return
+        }
         case `${ROUTE_PREFIX}/login/start`:
           json(response, { ok: true, value: await oauth.startLogin() })
           return

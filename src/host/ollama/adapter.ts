@@ -1,4 +1,5 @@
 import { outputReservation } from '../common/output-reservation.ts'
+import { localizedProviderName } from '../common/i18n/index.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -110,7 +111,7 @@ export class OllamaAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): ResolvedRetryPolicy {

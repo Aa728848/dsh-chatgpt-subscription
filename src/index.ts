@@ -20,6 +20,7 @@ import { createCodexFetchProvider } from './host/codex-fetch.ts'
 import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES } from './host/fetch-configuration.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './host/common/idle-watchdog.ts'
+import { HostLocaleRuntime, installHostLocale } from './host/common/i18n/index.ts'
 import { webServerOrigin } from './host/common/webserver-compat.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
 import { createAntigravityImageTool } from './host/antigravity/image-tool.ts'
@@ -477,7 +478,7 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。本插件的所有线路都可用。'),
   progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
     .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
-  progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default('auto').volatile()
+  progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en'), z.const('ru')]).default('auto').volatile()
     .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文。'),
   // 计划模式管线：实现挂在独立的 loader 行上（preset 的 planning 组），字段留在这里
   // 的理由与进展更新相同。volatile 让设置保存后就地写新值，递交下去的读取器每次都
@@ -513,6 +514,15 @@ export const Config: z<ConfigInput, Config> = z.object({
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
 
 export function apply(ctx: Context, pluginConfig: Config = {}): void {
+  // The language every Host-side composer answers in. Created once per apply and
+  // published to the module-level slot, because thirteen adapters and the route
+  // table all speak without sharing a constructor: they read the language at the
+  // moment they compose a sentence, and the client mirrors the browser's resolved
+  // locale into it through POST /i18n/locale. Detached on dispose so a reload
+  // cannot leave a stale runtime behind.
+  const localeRuntime = new HostLocaleRuntime()
+  installHostLocale(localeRuntime)
+  ctx.effect(() => () => installHostLocale(undefined), 'dsh-chatgpt-subscription: host locale')
   const fetchConfiguration = resolveFetchConfiguration(pluginConfig)
   // Where every line's account pool lives. Read here, once, because the choice is
   // one per deployment: the eleven pools are built below from that one value.

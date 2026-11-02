@@ -45,6 +45,7 @@ export const dictionary: Record<ProgressUpdatesLocaleKey, string> = {
   settingsLanguageAuto: 'Авто (как в диалоге)',
   settingsLanguageZh: 'Китайский',
   settingsLanguageEn: 'English',
+  settingsLanguageRu: 'Русский',
   settingsPanelName: 'Панель хода работы',
   settingsPanelNote: 'Показывать все записи этой сессии в правой панели',
   settingsUnavailable: 'Эту настройку сейчас нельзя изменить (Host не предоставляет форму настроек)',

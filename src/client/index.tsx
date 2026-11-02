@@ -15,6 +15,7 @@ import { ProviderHubSection } from './ProviderHubSection.tsx'
 import { SubscriptionApi } from './api.ts'
 import { dictionaries, NS, type LocaleKey } from './locales.ts'
 import { installLineLocale } from './common/line-locale.ts'
+import { installHostLocaleMirror } from './common/host-locale-mirror.ts'
 import { installRussianLocale } from './locales-ru/index.ts'
 import { installStyles } from './styles.ts'
 import { installHubStyles } from './hub/hub-styles.ts'
@@ -109,6 +110,9 @@ export function apply(ctx: ClientContext): void {
   // The provider cards resolve their copy through this runtime instead of their
   // own dictionary object, so their text follows the active locale.
   installLineLocale(ctx.locale)
+// The Host composes provider names and its own errors without any locale of its
+// own; this is the one seam that tells it which language the page is in.
+ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription: host locale mirror')
   // Russian is a language pack, not a third column of the shipped dictionaries:
   // it registers itself as a selectable language and one dictionary per namespace.
   installRussianLocale(ctx)

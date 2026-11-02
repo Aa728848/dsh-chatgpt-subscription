@@ -57,7 +57,7 @@ export interface ProgressUpdatesSettingsValues {
    * 的独立 bundle，把宿主模块拉进来只为拿一个联合类型不值得。两边的取值必须
    * 逐字一致（宿主 Config schema 里的枚举就是这三个）。
    */
-  progressUpdatesLanguage?: 'auto' | 'zh' | 'en'
+  progressUpdatesLanguage?: 'auto' | 'zh' | 'en' | 'ru'
   /** 既有日志/命令结果投影开关（默认开启）。 */
   cacheWarmup?: boolean
   /** 检索型结果投影独立开关（默认开启）。 */

@@ -47,7 +47,11 @@ export interface HubDetailRenderProps {
 
 export interface HubProviderDescriptor {
   id: HubProviderId
-  /** Display name; brand names stay literal, matching the former tabs. */
+  /**
+   * Neutral literal name, used when the active language pack has no entry for
+   * this card. The rendering path asks the dictionary first (see
+   * {@link hubCardName}); this is the fallback, not the usual output.
+   */
   name: string
   /**
    * Commit an enable/disable to the line's own settings endpoint.
@@ -88,6 +92,24 @@ async function setChatGptEnabled(enabled: boolean): Promise<void> {
 }
 
 /** Card order on the overview; also the former tab order. */
+/**
+ * Card name for one provider in the language in force.
+ *
+ * The dictionary owns the name so a language pack can translate it; the
+ * descriptor's literal is what a build without that key renders, and comparing
+ * the lookup against the key itself is how a miss is recognised (the locale
+ * service answers with the key when nothing declares it).
+ *
+ * @param descriptor - Provider whose card is being rendered.
+ * @param t - Bound translator of the hub's namespace.
+ * @returns Localized card name.
+ */
+export function hubCardName(descriptor: HubProviderDescriptor, t: (key: string) => string): string {
+  const key = `cardName.${descriptor.id}`
+  const text = t(key)
+  return text === key ? descriptor.name : text
+}
+
 export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
   {
     id: 'chatgpt',

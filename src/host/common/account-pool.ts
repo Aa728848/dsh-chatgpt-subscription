@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { isCorruptStoredDocument, type CredentialStore } from '../token-store.ts'
+import { t } from './i18n/t.ts'
 import {
   DEFAULT_POOL_STORAGE_MODE,
   describePoolStoragePath,
@@ -634,7 +635,7 @@ export class AccountPoolCore<
       : data.accounts.findIndex((account) => this.hooks.dedupeKey?.(account.credentials) === key)
     const maxAccounts = this.hooks.maxAccounts ?? DEFAULT_MAX_POOL_ACCOUNTS
     if (existingIndex < 0 && data.accounts.length >= maxAccounts) {
-      throw new Error(`${this.hooks.displayName} 号池最多支持 ${maxAccounts} 个账号，请先删除不再使用的账号。`)
+      throw new Error(t('pool.maxAccounts', { provider: this.hooks.displayName, max: maxAccounts }))
     }
 
     const existing = existingIndex >= 0 ? data.accounts[existingIndex] : undefined
@@ -815,14 +816,14 @@ export class AccountPoolCore<
   ): Promise<{ account: TAccount; credentials: TCredentials }> {
     const data = await this.read()
     if (data.accounts.length === 0) {
-      throw new Error(this.hooks.emptyMessage ?? `未登录 ${this.hooks.displayName} 账号，请先在设置页添加账号。`)
+      throw new Error(this.hooks.emptyMessage ?? t('pool.notSignedIn', { provider: this.hooks.displayName }))
     }
 
     const now = Date.now()
     const usable = data.accounts.filter((account) => this.isCredentialUsable(account))
     if (usable.length === 0) {
       throw new LlmError(
-        `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均需要重新登录。`,
+        t('pool.allNeedSignIn', { count: data.accounts.length, provider: this.hooks.displayName }),
         'AUTH',
         { status: 401 },
       )
@@ -898,11 +899,11 @@ export class AccountPoolCore<
         ?? data.accounts[0])
       : data.accounts.find((account) => account.id === accountId)
     if (target === undefined) {
-      throw new LlmError(this.hooks.emptyMessage ?? `未登录 ${this.hooks.displayName} 账号，请先在设置页添加账号。`, 'AUTH')
+      throw new LlmError(this.hooks.emptyMessage ?? t('pool.notSignedIn', { provider: this.hooks.displayName }), 'AUTH')
     }
     if (!this.isCredentialUsable(target)) {
       throw new LlmError(
-        `${this.hooks.displayName} 账号的凭据已被拒绝，需要重新登录。`,
+        t('pool.credentialRejected', { provider: this.hooks.displayName }),
         'AUTH',
         { status: 401 },
       )
@@ -941,7 +942,7 @@ export class AccountPoolCore<
       const current = data.accounts.find((account) => account.id === target.id)
       if (current === undefined || !this.isCredentialUsable(current)) {
         throw new PoolAccountUnavailableError(
-          this.hooks.emptyMessage ?? '未登录 ' + this.hooks.displayName + ' 账号，请先在设置页添加账号。',
+          this.hooks.emptyMessage ?? t('pool.notSignedIn', { provider: this.hooks.displayName }),
           'AUTH',
         )
       }
@@ -1035,13 +1036,13 @@ export class AccountPoolCore<
   private assertUsableAccount(account: TAccount | undefined): asserts account is TAccount {
     if (account === undefined) {
       throw new PoolAccountUnavailableError(
-        this.hooks.emptyMessage ?? '未登录 ' + this.hooks.displayName + ' 账号，请先在设置页添加账号。',
+        this.hooks.emptyMessage ?? t('pool.notSignedIn', { provider: this.hooks.displayName }),
         'AUTH',
       )
     }
     if (!this.isCredentialUsable(account)) {
       throw new PoolAccountUnavailableError(
-        this.hooks.displayName + ' 账号的凭据已被拒绝，需要重新登录。',
+        t('pool.credentialRejected', { provider: this.hooks.displayName }),
         'AUTH',
         { status: 401 },
       )
@@ -1129,7 +1130,7 @@ export class AccountPoolCore<
     if (!credentialUsable) {
       return new LlmError(
         this.hooks.allAuthFailedMessage?.(data.accounts.length)
-          ?? `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均需要重新登录。`,
+          ?? t('pool.allNeedSignIn', { count: data.accounts.length, provider: this.hooks.displayName }),
         'AUTH',
         { status: 401 },
       )
@@ -1143,8 +1144,8 @@ export class AccountPoolCore<
     return new LlmError(
       this.hooks.allUnavailableMessage?.(data.accounts.length, waitMinutes)
         ?? (waitMinutes === null
-          ? `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号当前都不可用，且没有处于冷却中的账号。`
-          : `全部 ${data.accounts.length} 个 ${this.hooks.displayName} 账号均处于配额限制或冷却中 (429)。最短预计在 ${waitMinutes} 分钟后解除冷却。`),
+          ? t('pool.allUnavailable', { count: data.accounts.length, provider: this.hooks.displayName })
+          : t('pool.allCoolingDown', { count: data.accounts.length, provider: this.hooks.displayName, minutes: waitMinutes })),
       'RATE_LIMIT',
       { status: 429 },
     )
@@ -1170,7 +1171,7 @@ export class AccountPoolCore<
   ): Promise<{ account: TAccount; credentials: TCredentials }> {
     const data = await this.read()
     if (data.accounts.length === 0) {
-      throw new Error(this.hooks.emptyMessage ?? `未登录 ${this.hooks.displayName} 账号，请先在设置页添加账号。`)
+      throw new Error(this.hooks.emptyMessage ?? t('pool.notSignedIn', { provider: this.hooks.displayName }))
     }
 
     const now = Date.now()

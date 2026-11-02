@@ -498,15 +498,15 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-retrieval-switch"]')?.getAttribute('aria-checked')).toBe('true')
   })
 
-  it('输出语言下拉写的是 progressUpdatesLanguage，选项就是 schema 的三个取值', async () => {
+  it('输出语言下拉写的是 progressUpdatesLanguage，选项就是 schema 的四个取值', async () => {
     // Given 一份可写表单，语言停在默认 auto
     const form = fakeForm({ progressUpdates: true, progressUpdatesLanguage: 'auto' })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
       openPanel: vi.fn(), close: vi.fn(), settings: form,
     } as never)))
     const select = container.querySelector<HTMLSelectElement>('[data-dsh-part="settings-language"]')!
-    // Then 下拉里只有三项，取值与宿主 Config 的枚举逐字一致
-    expect(Array.from(select.options).map((option) => option.value)).toEqual(['auto', 'zh', 'en'])
+    // Then 下拉里正好四项，取值与宿主 Config 的枚举逐字一致（ru 是后加的语言档位）
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['auto', 'zh', 'en', 'ru'])
     // When 用户选了 English
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(select, 'en')

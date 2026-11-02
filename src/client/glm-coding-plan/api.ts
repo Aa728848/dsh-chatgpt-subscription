@@ -1,4 +1,4 @@
-import { GLM_CODING_PLAN_ROUTE_PREFIX } from '../../shared/glm-coding-plan-contracts.ts'
+import { GLM_CODING_PLAN_PROVIDER_NAME, GLM_CODING_PLAN_ROUTE_PREFIX } from '../../shared/glm-coding-plan-contracts.ts'
 import { createLineApi } from '../common/line-api.ts'
 
 /**
@@ -23,7 +23,7 @@ import { createLineApi } from '../common/line-api.ts'
  * 除 adopt 与 connection/test 外，全部走共享的 { ok, value } 信封，
  * 因此答案都是裸 DTO——createLineApi 已经把信封拆掉了。
  */
-const api = createLineApi(GLM_CODING_PLAN_ROUTE_PREFIX, 'GLM（ZCode 账号）')
+const api = createLineApi(GLM_CODING_PLAN_ROUTE_PREFIX, GLM_CODING_PLAN_PROVIDER_NAME)
 
 export const get = api.get
 export const post = api.post

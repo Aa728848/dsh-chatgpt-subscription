@@ -1,4 +1,5 @@
 import { recordCacheWarmupUsage } from '../cache-warmup/index.ts'
+import { localizedProviderName } from '../common/i18n/index.ts'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
@@ -1285,7 +1286,7 @@ export class KimiCodeAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): ResolvedRetryPolicy {

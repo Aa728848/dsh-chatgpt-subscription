@@ -34,6 +34,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { localizedProviderName } from '../common/i18n/index.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { outputReservation } from '../common/output-reservation.ts'
@@ -297,7 +298,7 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): ResolvedRetryPolicy {

@@ -22,6 +22,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { localizedProviderName } from '../common/i18n/index.ts'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { normalizeGenerateOptions, type GenerateOptions } from '../common/llm-compat.ts'
@@ -149,7 +150,7 @@ export class OpenDesignAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): ResolvedRetryPolicy {

@@ -36,6 +36,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { localizedProviderName } from '../common/i18n/index.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   STREAM_IDLE_TIMEOUT_CODE,
@@ -291,7 +292,7 @@ export class QoderAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): ResolvedRetryPolicy {

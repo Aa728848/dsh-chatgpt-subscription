@@ -50,10 +50,10 @@ export const PROGRESS_SECTION_ORDER = 220
  *
  * 只管 `progress_update` 的标题与正文，不影响会话里其它任何输出。
  */
-export type ProgressUpdateLanguage = 'auto' | 'zh' | 'en'
+export type ProgressUpdateLanguage = 'auto' | 'zh' | 'en' | 'ru'
 
 /** 允许的取值，供设置解析做白名单校验（配置里写错就等于没写）。 */
-export const PROGRESS_UPDATE_LANGUAGES: readonly ProgressUpdateLanguage[] = ['auto', 'zh', 'en']
+export const PROGRESS_UPDATE_LANGUAGES: readonly ProgressUpdateLanguage[] = ['auto', 'zh', 'en', 'ru']
 
 /**
  * 引导词正文。写法对齐 Kimi 的「进展更新」：先说清多步任务早期的思路，再报
@@ -97,6 +97,7 @@ export const PROGRESS_LANGUAGE_DIRECTIVES: Readonly<Record<ProgressUpdateLanguag
   auto: 'Write the title and the message of every progress update in the language the user is writing in, whatever it is. Follow the conversation; do not fall back to English unless the user does.',
   zh: 'Write the title and the message of every progress update in Simplified Chinese, even when the conversation is in another language.',
   en: 'Write the title and the message of every progress update in English, even when the conversation is in another language.',
+  ru: 'Write the title and the message of every progress update in Russian, even when the conversation is in another language.',
 }
 
 /**

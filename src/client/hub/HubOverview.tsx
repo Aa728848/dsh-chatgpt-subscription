@@ -18,7 +18,7 @@ import type { HubOverviewDto, HubProviderSummaryDto } from '../../shared/hub-con
 import { formatPoolLabel } from '../common/account-pool-labels.ts'
 import type { NS } from '../locales.ts'
 import { BrandTile } from './brand-icons.tsx'
-import { HUB_PROVIDERS, type HubProviderDescriptor } from './providers.tsx'
+import { hubCardName, HUB_PROVIDERS, type HubProviderDescriptor } from './providers.tsx'
 
 export type HubTranslate = PropsLocale<typeof NS>['t']
 
@@ -145,6 +145,7 @@ function HubProviderCard(props: {
 }): React.JSX.Element {
   const { descriptor, summary, t } = props
   const enabled = summary?.enabled ?? true
+  const cardName = hubCardName(descriptor, t as (key: string) => string)
   const annotation = props.toggleError ?? cardAnnotation(summary, descriptor, t)
   const canToggle = descriptor.setEnabled !== null && (summary?.canToggle ?? true)
 
@@ -153,7 +154,7 @@ function HubProviderCard(props: {
     tabIndex={0}
     className="dsh-hub-card"
     data-enabled={enabled}
-    aria-label={formatPoolLabel(t('hubCardLabel'), { name: descriptor.name, annotation })}
+    aria-label={formatPoolLabel(t('hubCardLabel'), { name: cardName, annotation })}
     onClick={() => props.onOpen(descriptor.id)}
     onKeyDown={(event) => {
       if (event.key !== 'Enter' && event.key !== ' ') return
@@ -164,7 +165,7 @@ function HubProviderCard(props: {
   >
     <BrandTile id={descriptor.id} />
     <span className="dsh-hub-card-copy">
-      <span className="dsh-hub-card-name">{descriptor.name}</span>
+      <span className="dsh-hub-card-name">{cardName}</span>
       <span className={`dsh-hub-card-note${props.toggleError !== null || summary?.error === true ? ' dsh-hub-note-danger' : ''}`}>
         {annotation}
       </span>
@@ -175,7 +176,7 @@ function HubProviderCard(props: {
           type="button"
           role="switch"
           aria-checked={enabled}
-          aria-label={formatPoolLabel(t(enabled ? 'hubSwitchOff' : 'hubSwitchOn'), { name: descriptor.name })}
+          aria-label={formatPoolLabel(t(enabled ? 'hubSwitchOff' : 'hubSwitchOn'), { name: cardName })}
           className="dsh-hub-switch"
           disabled={props.busy || summary === undefined}
           onClick={(event) => {

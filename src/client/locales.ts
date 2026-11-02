@@ -217,6 +217,22 @@ export const zh = {
   stopImportingLabel: '停止导入全部本机登录（当前 {count} 个）',
   stopImportingBusy: '停止导入中…',
   stopImportingHint: '停止导入只会让本插件忘记本机 CLI 登录的副本；Codex CLI 自己的登录文件不会被删除或修改。账号池不允许逐条删除借来的凭据，所以这里一次会停止全部导入。',
+  // Hub card names, one per provider. Lives here rather than in the descriptor
+  // table so a language pack supplies them like any other copy: the descriptor
+  // keeps a literal fallback for a build whose dictionaries arrived late.
+  'cardName.chatgpt': 'ChatGPT',
+  'cardName.antigravity': 'Antigravity',
+  'cardName.command-code': 'Command Code',
+  'cardName.kimi-code': 'Kimi Code',
+  'cardName.minimax-code': 'MiniMax Code',
+  'cardName.glm-coding-plan': 'GLM（ZCode 账号）',
+  'cardName.claude': 'Claude',
+  'cardName.ollama': 'Ollama',
+  'cardName.step-code': 'Step Code（Step Plan 订阅）',
+  'cardName.cline-pass': 'Cline Pass',
+  'cardName.qoder': 'Qoder（订阅）',
+  'cardName.opendesign': 'OpenDesign',
+  'cardName.workbuddy': 'WorkBuddy',
   modelChecklistCount: '已启用 {count}/{total}',
 } as const
 
@@ -432,6 +448,19 @@ export const en: Record<keyof typeof zh, string> = {
   stopImportingLabel: 'Stop importing all local sign-ins ({count} currently imported)',
   stopImportingBusy: 'Stopping the import…',
   stopImportingHint: 'Stopping the import only makes this plugin forget its copy of the local CLI sign-in; the Codex CLI own sign-in file is never deleted or changed. The account pool does not allow deleting a borrowed credential one at a time, so this stops every import at once.',
+  'cardName.chatgpt': 'ChatGPT',
+  'cardName.antigravity': 'Antigravity',
+  'cardName.command-code': 'Command Code',
+  'cardName.kimi-code': 'Kimi Code',
+  'cardName.minimax-code': 'MiniMax Code',
+  'cardName.glm-coding-plan': 'GLM (ZCode Account)',
+  'cardName.claude': 'Claude',
+  'cardName.ollama': 'Ollama',
+  'cardName.step-code': 'Step Code (Step Plan Subscription)',
+  'cardName.cline-pass': 'Cline Pass',
+  'cardName.qoder': 'Qoder Subscription',
+  'cardName.opendesign': 'OpenDesign',
+  'cardName.workbuddy': 'WorkBuddy',
   modelChecklistCount: '{count}/{total} enabled',
 }
 

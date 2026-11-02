@@ -266,7 +266,9 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT
   // 语言只有三个合法取值；读不到（老配置）就是 auto，与宿主 schema 的默认一致。
-  const language: ProgressUpdatesLanguage = value.progressUpdatesLanguage === 'zh' || value.progressUpdatesLanguage === 'en'
+  const language: ProgressUpdatesLanguage = value.progressUpdatesLanguage === 'zh'
+    || value.progressUpdatesLanguage === 'en'
+    || value.progressUpdatesLanguage === 'ru'
     ? value.progressUpdatesLanguage
     : 'auto'
 
@@ -510,6 +512,10 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             <option value="auto">{translate('settingsLanguageAuto')}</option>
             <option value="zh">{translate('settingsLanguageZh')}</option>
             <option value="en">{translate('settingsLanguageEn')}</option>
+            {/* A forced language, not the UI language: 'auto' already follows the
+                conversation, and this one exists for a user who wants Russian
+                output while chatting in another language. */}
+            <option value="ru">{translate('settingsLanguageRu')}</option>
           </select>
         </CardRow>
 

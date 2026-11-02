@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS } from './locales.ts'
 import { HubOverview } from './hub/HubOverview.tsx'
-import { hubProviderDescriptor, HUB_PROVIDERS } from './hub/providers.tsx'
+import { hubCardName, hubProviderDescriptor, HUB_PROVIDERS } from './hub/providers.tsx'
 import { UpdateCheck } from './hub/UpdateCheck.tsx'
 import type { HubProviderId } from './hub/brand-icons.tsx'
 
@@ -93,7 +93,7 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
         <span aria-hidden="true" dangerouslySetInnerHTML={{ __html: BACK_SVG }} />
         {t('hubBack')}
       </button>
-      <span className="dsh-hub-backbar-name" id="dsh-hub-detail-name">{descriptor.name}</span>
+      <span className="dsh-hub-backbar-name" id="dsh-hub-detail-name">{hubCardName(descriptor, t as (key: string) => string)}</span>
     </nav>
     <div className="dsh-hub-detail">
       {descriptor.renderDetail({ t, onModelChange, runtime })}

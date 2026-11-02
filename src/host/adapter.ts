@@ -9,6 +9,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { localizedProviderName } from './common/i18n/index.ts'
 import { listCodexModels, PROVIDER_ID, PROVIDER_NAME, resolveCodexModel, resolveCodexWireCapabilities } from './model-catalog.ts'
 import { getCachedCatalog, type CodexCatalogEntry, type CodexCatalogLoadOptions } from './codex-catalog.ts'
 import { ResponsesClient } from './responses-client.ts'
@@ -35,7 +36,7 @@ export class CodexChatGptAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): ResolvedRetryPolicy {

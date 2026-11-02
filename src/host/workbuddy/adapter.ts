@@ -1,4 +1,5 @@
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
+import { localizedProviderName } from '../common/i18n/index.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
@@ -293,7 +294,7 @@ export class WorkBuddyAdapter extends LlmAdapter {
   }
 
   providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: PROVIDER_NAME }
+    return { id: provider, name: localizedProviderName(provider, PROVIDER_NAME) }
   }
 
   providerRetryPolicy(): ResolvedRetryPolicy {
