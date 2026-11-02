@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.54.0 - 2026-11-02
+
 - **[provider parity] 对照官方 Agent / 客户端修复其余线路的能力与性能差异**：
   - Claude：未知模型按当前代能力处理，支持原生 mid-conversation system 消息，模型发现禁重定向并使用 3 秒超时，单图与整请求图片预算分离；
   - GLM：Anthropic 面改用 `output_config.effort`、按模型关闭思考、增加缓存断点并补齐业务码分类；
@@ -10,7 +12,8 @@
   - Step / Qoder：Step 无真实 cap 时省略 `max_tokens`，Qoder 会话亲和按账号隔离并纳入并发闸门；
   - Claude / Antigravity / Qoder / Step / WorkBuddy：图片预算按实际上线 payload 计量，避免误丢缩放后可用的图片。
 - **[docs] 新增 `docs/provider-agent-parity-audit.md`，记录各线路官方基线、修复范围及仍需 live 验证的边界。
-- **验证**：`npm run typecheck` 0 错误；全量 Vitest 354 文件通过、6515 项测试通过（另有 2 文件 / 9 项跳过）；`npm run build` 与 `git diff --check` 通过。
+- **[all routes] 静默流两分钟判死，不必再等满五分钟**：每条线路的空闲看门狗阈值原本都是 300_000，与 undici 判死静默 HTTP/2 流的 300 s **完全同值**——两个计时器同时到点、传输层先抛，应用层的 `TIMEOUT` 判定从来没拿到话语权。线上为此付的代价是：5 分钟零输出 → 重试在 300 s 之后才起 → 又被手动中止，一轮白等约 9 分钟。现在共享默认降到 120 s（antigravity / claude / cline-pass / command-code / glm-coding-plan / kimi-code / minimax-code / opendesign / workbuddy 各自常量同步，qoder / step-code 直接吃共享默认），并且**每条线路都在收到响应头时 pulse 一次**，把「连接 + 预填充到首字节」与「流内静默」拆成两个 120 s 窗口：慢启动不会被误杀，开了口却不再出声的流两分钟判死并立即进入既有重试策略（3 次、1.5 s 起退避）。ollama 是唯一例外，保留 300 s 并在自己的 `types.ts` 写明理由——本地推理受算力限制，长上下文可能要几分钟才出第一个字节。120 s 是量出来的：该会话 104 次请求里相邻 chunk 最长静默 6.4 s（6,539 个间隔）、从 step 开始到首字节最长 65 s（21 万 token 的 prompt）；日志里 135.6 s / 89 s / 197 s 那些「间隔」是推理块 `dt` 累加的总时长，不是静默，不能当作阈值依据。新增 `test/stream-idle-budgets.test.ts` 钉住共享阈值严格小于 300 s、各线路必须等于它、ollama 必须更大；`test/kimi-code-stream-idle.test.ts` 新增「首字节慢、响应头正常」用例（去掉响应头那一次 pulse 即变红）。
+- **验证**：`npm run typecheck` 0 错误；全量 Vitest 355 文件通过、6529 项测试通过（另有 2 文件 / 9 项跳过）；`lib/` 清空后重建、`npm pack --dry-run` 与 `git diff --check` 通过。
 
 ## 0.53.0 - 2026-11-01
 
