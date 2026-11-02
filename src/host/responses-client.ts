@@ -17,7 +17,7 @@ import { resolveCodexFallbackModel } from '../shared/model-catalog.ts'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from './common/idle-watchdog.ts'
 import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
-import { buildResponsesPayload, hiddenSandboxControlToolNames, type LocalRawImageOptions } from './responses-mapper.ts'
+import { buildResponsesPayload, type LocalRawImageOptions } from './responses-mapper.ts'
 import { normalizeGenerateOptions } from './common/llm-compat.ts'
 import { CODEX_TURN_STATE_HEADER, authOwnerKey, codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
@@ -106,7 +106,6 @@ export class ResponsesClient {
 
   async *stream(rawOptions: GenerateOptions): AsyncIterable<StreamChunk> {
     const options = normalizeGenerateOptions(rawOptions)
-    const hiddenSandboxControls = hiddenSandboxControlToolNames(options)
     const sessionId = stableSessionId(options.sessionId)
     // No reliable host turn identity is available: do not infer it from history.
     // This conservative fallback never replays state across model requests.
@@ -151,7 +150,7 @@ export class ResponsesClient {
         // The parser sees transport activity the watchdog cannot see on its own:
         // status frames and truncated reasoning deltas keep the connection alive
         // without producing a visible chunk, and used to look like a silent one.
-        (watchdogSignal, activity) => parseResponsesStream(response!, watchdogSignal, hiddenSandboxControls, activity),
+        (watchdogSignal, activity) => parseResponsesStream(response!, watchdogSignal, undefined, activity),
         options.signal,
         this.codexStreamIdleTimeoutMs,
         'LLM_STREAM_IDLE_TIMEOUT',
@@ -467,7 +466,8 @@ interface ToolState {
 export async function* parseResponsesStream(
   response: Response,
   signal?: AbortSignal,
-  hiddenSandboxControls: ReadonlySet<string> = new Set(),
+  /** Kept for the public parser's positional compatibility; native arguments are never stripped. */
+  _legacyHiddenSandboxControls: ReadonlySet<string> = new Set(),
   /** Reports transport activity so a caller-side idle watchdog keeps rearming. */
   activity?: StreamActivity,
 ): AsyncIterable<StreamChunk> {
@@ -709,23 +709,12 @@ export async function* parseResponsesStream(
     tools.clear()
     replayOutput = replayOutput.filter((item) => item.type !== 'function_call')
   }
-  for (const item of replayOutput) {
-    if (item.type === 'function_call'
-      && typeof item.name === 'string'
-      && hiddenSandboxControls.has(item.name)
-      && typeof item.arguments === 'string') {
-      item.arguments = stripSandboxControls(item.arguments)
-    }
-  }
   let validToolCount = 0
   const replayedToolCallIds = new Set(replayOutput.flatMap((item) => (
     item.type === 'function_call' && typeof item.call_id === 'string' ? [item.call_id] : []
   )))
   for (const tool of tools.values()) {
     if (!tool.started) continue
-    if (hiddenSandboxControls.has(tool.name)) {
-      tool.arguments = stripSandboxControls(tool.arguments)
-    }
     if (!isSafeJsonArguments(tool.arguments) || tool.name === '') {
       throw new LlmError(`Codex returned invalid JSON arguments for tool ${tool.name || '(unnamed)'}.`, 'INVALID_TOOL_ARGUMENTS')
     }
@@ -809,24 +798,6 @@ function isSafeJsonArguments(value: string): boolean {
     return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
   } catch {
     return false
-  }
-}
-
-function stripSandboxControls(value: string): string {
-  try {
-    const parsed = JSON.parse(value) as unknown
-    const parsedRecord = record(parsed)
-    if (parsedRecord === null) return value
-    let changed = false
-    for (const name of ['sandbox_permissions', 'justification']) {
-      if (name in parsedRecord) {
-        delete parsedRecord[name]
-        changed = true
-      }
-    }
-    return changed ? JSON.stringify(parsedRecord) : value
-  } catch {
-    return value
   }
 }
 

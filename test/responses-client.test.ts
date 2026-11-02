@@ -72,7 +72,7 @@ describe('Responses streaming', () => {
     })
     expect(chunks.at(-1)).toMatchObject({ reason: { kind: 'tool-calls' } })
   })
-  it('strips speculative sandbox controls that were hidden from the tool schema', async () => {
+  it('preserves native sandbox controls despite legacy hidden-name arguments', async () => {
     const chunks = await collect(parseResponsesStream(sse([
       {
         type: 'response.output_item.done', output_index: 0,
@@ -83,7 +83,7 @@ describe('Responses streaming', () => {
       },
       { type: 'response.completed', response: {} },
     ]), undefined, new Set(['pwsh'])))
-    const argumentsJson = '{"command":"git status","description":"Show status"}'
+    const argumentsJson = '{"command":"git status","description":"Show status","sandbox_permissions":"workspace-write","justification":""}'
     expect(chunks).toContainEqual({
       type: 'block-end', index: 0,
       block: { type: 'tool-call', id: 'call_pwsh', name: 'pwsh', arguments: argumentsJson },

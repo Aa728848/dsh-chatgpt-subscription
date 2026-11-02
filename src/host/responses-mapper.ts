@@ -124,13 +124,6 @@ export function offloadOldestInputImages(
   return omitted
 }
 
-export function hiddenSandboxControlToolNames(options: GenerateOptions): Set<string> {
-  const retryTools = recentSandboxRetryToolNames(options.messages)
-  return new Set(options.tools
-    ?.filter((tool) => hasSandboxControls(tool.parameters) && !retryTools.has(tool.name))
-    .map((tool) => tool.name) ?? [])
-}
-
 function createCallIdNormalizer(): (value: unknown) => string {
   const normalizedByOriginal = new Map<string, string>()
   const originalByNormalized = new Map<string, string>()
@@ -176,14 +169,12 @@ export async function buildResponsesPayload(
   reasoningSummary: CodexReasoningSummary | null = null,
   promptCacheKey?: string,
 ): Promise<ResponsesPayload> {
-  const sandboxRetryTools = recentSandboxRetryToolNames(options.messages)
   const resolveLocalRawImages = supportsImageInput(options)
   const normalizeCallId = createCallIdNormalizer()
   const instructionParts = [
     options.system?.trim(),
     latestSystemPrompt(options.messages),
     progressExplanationInstruction(options.tools),
-    sandboxToolInstruction(options.tools, sandboxRetryTools),
     commandToolInstruction(options.tools),
     runCodeInstruction(options.tools),
   ].filter((value): value is string => Boolean(value))
@@ -262,12 +253,8 @@ export async function buildResponsesPayload(
     payload.tools = options.tools.map((tool) => ({
       type: 'function',
       name: tool.name,
-      description: toolDescriptionForCodex(tool.name, tool.description),
-      parameters: toolParametersForCodex(
-        tool.name,
-        tool.parameters,
-        sandboxRetryTools.has(tool.name),
-      ),
+      description: tool.description,
+      parameters: tool.parameters,
     }))
     payload.tool_choice = 'auto'
     payload.parallel_tool_calls = true
@@ -339,16 +326,6 @@ function supportsImageInput(options: GenerateOptions): boolean {
   return options.provider === 'codex-chatgpt' && codexModelSupportsImageInput(options.model)
 }
 
-function toolDescriptionForCodex(name: string, description: string): string {
-  if (name === 'run_code') {
-    return `${description}\n\nCompatibility: code is strict JavaScript/TypeScript and nested shell commands are string data. Template literals may consume \${...}, backticks, backslashes, and escape sequences before PowerShell, Bash, or POSIX sh sees them. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool before invoking the shell.`
-  }
-  if (isCommandTool(name)) {
-    return `${description}\n\n${commandToolCompatibilityText(name)}`
-  }
-  return description
-}
-
 function commandToolInstruction(tools: GenerateOptions['tools']): string | undefined {
   const names = tools
     ?.filter((tool) => isCommandTool(tool.name))
@@ -367,74 +344,7 @@ function commandToolInstruction(tools: GenerateOptions['tools']): string | undef
       ? 'For sh/generic shell, prefer portable POSIX syntax and avoid Bash-only arrays, [[ ... ]], process substitution, and source.'
       : undefined,
   ].filter((value): value is string => value !== undefined).join(' ')
-  return `Command tool compatibility rule (${uniqueNames.join(', ')}): each command call runs in a fresh process, so do not rely on cd, aliases, functions, or variables from previous calls; set workdir when the tool supports it. ${shellGuidance} For deletion or move operations, first resolve and verify exact absolute target paths, then operate on those literal paths only; avoid dynamically deleting paths built from home-directory expansion, wildcards, command substitution, or another shell's output. Treat [auto-mode hard deny] and similar policy denials as non-retriable; choose a safer non-destructive inspection or report the limitation instead of repeating the same command or adding sandbox escalation. If downloads fail with TLS credential or connection-closed errors, treat that as an environment/network failure and use local sources or report the limitation instead of cycling through equivalent download commands.`
-}
-
-function commandToolCompatibilityText(name: string): string {
-  const shell = name.toLowerCase()
-  const syntax = shell === 'pwsh' || shell.includes('powershell')
-    ? ' Use native PowerShell syntax and native Windows paths.'
-    : shell === 'bash'
-      ? ' Use Bash syntax and native POSIX paths.'
-      : ' Use portable POSIX syntax and native POSIX paths; avoid Bash-only arrays, [[ ... ]], process substitution, and source.'
-  return `Compatibility: command execution is stateless between calls.${syntax} Prefer workdir over cd because every call starts a fresh process. For destructive operations, verify exact absolute targets first and use literal paths; policy hard-deny results require a safer command shape, not sandbox escalation.`
-}
-
-function sandboxToolInstruction(
-  tools: GenerateOptions['tools'],
-  sandboxRetryTools: ReadonlySet<string>,
-): string | undefined {
-  if (!tools?.some((tool) => hasSandboxControls(tool.parameters))) return undefined
-  if (sandboxRetryTools.size === 0) {
-    return 'Tool sandbox rule: this is not a sandbox-escalation retry. Omit sandbox_permissions and justification from every tool call. First run the tool with the session\'s current access.'
-  }
-  return `Tool sandbox rule: sandbox_permissions and justification may only be used to retry the exact denied call for: ${[...sandboxRetryTools].join(', ')}. Omit both fields from every other tool call, and request a strictly wider mode with a non-empty justification sentence.`
-}
-
-function toolParametersForCodex(
-  toolName: string,
-  parameters: Record<string, unknown>,
-  allowSandboxRetry: boolean,
-): Record<string, unknown> {
-  const hideSandboxControls = !allowSandboxRetry && hasSandboxControls(parameters)
-  const augmentCommandTool = isCommandTool(toolName)
-  if (!hideSandboxControls && toolName !== 'run_code' && !augmentCommandTool) return parameters
-  const cloned = structuredClone(parameters)
-  const properties = record(cloned.properties)
-  if (properties !== null && hideSandboxControls) {
-    delete properties.sandbox_permissions
-    delete properties.justification
-  }
-  if (hideSandboxControls && Array.isArray(cloned.required)) {
-    cloned.required = cloned.required.filter((name) => (
-      name !== 'sandbox_permissions' && name !== 'justification'
-    ))
-  }
-  if (toolName === 'run_code' && properties !== null) {
-    const code = record(properties.code)
-    if (code !== null) {
-      const current = typeof code.description === 'string' ? code.description.trim() : ''
-      const compatibility = 'Strict JavaScript/TypeScript source. Nested shell commands are string data: template literals may consume ${...}, backticks, backslashes, and escape sequences before PowerShell, Bash, or POSIX sh sees them; String.raw still performs ${...} interpolation. Prefer ordinary quoted string arrays joined with "\\n", or write a script file with a dedicated file tool.'
-      code.description = current ? `${current}\n\n${compatibility}` : compatibility
-    }
-  }
-  if (augmentCommandTool && properties !== null) {
-    appendPropertyDescription(properties.command, 'Single command for a fresh process; do not rely on state from earlier calls.')
-    appendPropertyDescription(properties.workdir, 'Use a native absolute working directory instead of embedding cd in the command.')
-    appendPropertyDescription(properties.timeoutMs, 'Positive finite timeout in milliseconds for bounded commands.')
-    appendPropertyDescription(properties.run_in_background, 'Use only for long-running servers or watchers whose output will be checked later.')
-    appendPropertyDescription(properties.sandbox_permissions, 'Only set when retrying the exact previous sandbox-denied call; it does not bypass hard-deny policy results.')
-    appendPropertyDescription(properties.justification, 'Required only for an allowed sandbox retry; explain why the wider access is needed.')
-  }
-  return cloned
-}
-
-function appendPropertyDescription(value: unknown, addition: string): void {
-  const property = record(value)
-  if (property === null) return
-  const current = typeof property.description === 'string' ? property.description.trim() : ''
-  if (current.includes(addition)) return
-  property.description = current ? `${current}\n\n${addition}` : addition
+  return `Command tool compatibility rule (${uniqueNames.join(', ')}): each command call runs in a fresh process, so do not rely on cd, aliases, functions, or variables from previous calls; set workdir when the tool supports it. ${shellGuidance} For deletion or move operations, first resolve and verify exact absolute target paths, then operate on those literal paths only; avoid dynamically deleting paths built from home-directory expansion, wildcards, command substitution, or another shell's output. If downloads fail with TLS credential or connection-closed errors, treat that as an environment/network failure and use local sources or report the limitation instead of cycling through equivalent download commands.`
 }
 
 function isCommandTool(name: string): boolean {
@@ -444,42 +354,6 @@ function isCommandTool(name: string): boolean {
     || normalized === 'bash'
     || normalized === 'sh'
     || normalized === 'shell'
-}
-
-function hasSandboxControls(parameters: Record<string, unknown>): boolean {
-  const properties = record(parameters.properties)
-  return properties !== null
-    && ('sandbox_permissions' in properties || 'justification' in properties)
-}
-
-function recentSandboxRetryToolNames(messages: readonly Message[]): Set<string> {
-  const deniedCallIds = new Set<string>()
-  let assistant: Message | undefined
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]
-    if (message.role === 'assistant') {
-      assistant = message
-      break
-    }
-    for (const block of message.content) {
-      if (block.type !== 'tool-result') continue
-      const output = blocksToText(block.content)
-      if (isSandboxDenial(output)) deniedCallIds.add(String(block.toolCallId))
-    }
-  }
-  const result = new Set<string>()
-  if (assistant === undefined || deniedCallIds.size === 0) return result
-  for (const block of assistant.content) {
-    if (block.type === 'tool-call' && deniedCallIds.has(String(block.id))) {
-      result.add(block.name)
-    }
-  }
-  return result
-}
-
-function isSandboxDenial(output: string): boolean {
-  return /\[sandbox:\s*file access denied\b/i.test(output)
-    || /\bsandbox\b.*\b(?:access denied|denied access|EPERM)\b/i.test(output)
 }
 
 function appendMissingToolCalls(

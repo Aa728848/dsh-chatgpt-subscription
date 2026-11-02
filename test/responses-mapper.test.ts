@@ -387,7 +387,7 @@ describe('Responses payload mapping', () => {
     expect(payload.input.filter((item) => item.type === 'function_call' && item.call_id === 'call_wrapped')).toHaveLength(1)
   })
 
-  it('hides sandbox escalation controls until a tool has actually been denied', async () => {
+  it('preserves native tool declarations before any sandbox denial', async () => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
         { id: 'm1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Check status' }] },
@@ -396,23 +396,17 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
     const tools = payload.tools as Array<Record<string, unknown>> | undefined
-    expect(tools?.[0]?.description).toContain('command execution is stateless')
-    const parameters = tools?.[0]?.parameters as Record<string, unknown>
-    const properties = parameters.properties as Record<string, unknown>
-    expect(properties).not.toHaveProperty('sandbox_permissions')
-    expect(properties).not.toHaveProperty('justification')
-    expect((properties.command as Record<string, unknown>).description).toContain('fresh process')
-    expect((properties.workdir as Record<string, unknown>).description).toContain('instead of embedding cd')
-    expect(parameters.required).toEqual(['command', 'description'])
+    expect(tools?.[0]?.description).toBe(options.tools?.[0]?.description)
+    expect(tools?.[0]?.parameters).toEqual(options.tools?.[0]?.parameters)
     expect(payload.instructions).toContain('Command tool compatibility rule (pwsh)')
-    expect(payload.instructions).toContain('[auto-mode hard deny]')
-    expect(payload.instructions).toContain('this is not a sandbox-escalation retry')
+    expect(payload.instructions).not.toContain('Omit sandbox_permissions')
+    expect(payload.instructions).not.toContain('[auto-mode hard deny]')
   })
 
   it.each([
-    ['bash', 'Use Bash syntax and native POSIX paths.', 'For bash, use native POSIX paths'],
-    ['sh', 'Use portable POSIX syntax and native POSIX paths', 'avoid Bash-only arrays'],
-  ])('adds Linux command guidance for %s without mutating its schema', async (name, descriptionText, instructionText) => {
+    ['bash', 'For bash, use native POSIX paths'],
+    ['sh', 'avoid Bash-only arrays'],
+  ])('adds Linux command guidance for %s without mutating its schema', async (name, instructionText) => {
     const tool = commandTool(name)
     const originalParameters = structuredClone(tool.parameters)
     const options = {
@@ -421,13 +415,14 @@ describe('Responses payload mapping', () => {
 
     const payload = await buildResponsesPayload(options, unusedAttachments())
     const mapped = (payload.tools as Array<Record<string, unknown>>)[0]!
-    expect(mapped.description).toContain(descriptionText)
+    expect(mapped.description).toBe(tool.description)
+    expect(mapped.parameters).toEqual(originalParameters)
     expect(payload.instructions).toContain(`Command tool compatibility rule (${name})`)
     expect(payload.instructions).toContain(instructionText)
     expect(payload.instructions).not.toContain('native Windows paths')
     expect(tool.parameters).toEqual(originalParameters)
   })
-  it('exposes sandbox escalation controls only after the matching tool was denied', async () => {
+  it('preserves native controls after a matching sandbox denial', async () => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
         {
@@ -451,14 +446,14 @@ describe('Responses payload mapping', () => {
     const properties = parameters.properties as Record<string, unknown>
     expect(properties).toHaveProperty('sandbox_permissions')
     expect(properties).toHaveProperty('justification')
-    expect((properties.sandbox_permissions as Record<string, unknown>).description).toContain('hard-deny')
-    expect(payload.instructions).toContain('retry the exact denied call for: pwsh')
+    expect(parameters).toEqual(options.tools?.[0]?.parameters)
+    expect(payload.instructions).not.toContain('retry the exact denied call for: pwsh')
   })
 
   it.each([
     '[auto-mode hard deny] dynamic deletion targeting the user home is not permitted',
     'sandbox escalation to "workspace-write" is not strictly wider than this call\'s current "workspace-write" mode',
-  ])('does not expose sandbox escalation controls for non-retriable policy errors: %s', async (error) => {
+  ])('leaves native validation in charge after a policy error: %s', async (error) => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
         {
@@ -480,10 +475,10 @@ describe('Responses payload mapping', () => {
     const tools = payload.tools as Array<Record<string, unknown>> | undefined
     const parameters = tools?.[0]?.parameters as Record<string, unknown>
     const properties = parameters.properties as Record<string, unknown>
-    expect(properties).not.toHaveProperty('sandbox_permissions')
-    expect(properties).not.toHaveProperty('justification')
-    expect(payload.instructions).toContain('this is not a sandbox-escalation retry')
-    expect(payload.instructions).toContain('policy denials as non-retriable')
+    expect(properties).toHaveProperty('sandbox_permissions')
+    expect(properties).toHaveProperty('justification')
+    expect(parameters).toEqual(options.tools?.[0]?.parameters)
+    expect(payload.instructions).not.toContain('this is not a sandbox-escalation retry')
   })
 
   it('adds Windows PowerShell guidance to run_code without mutating the DSH tool schema', async () => {
@@ -494,13 +489,8 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
     const mappedTool = (payload.tools as Array<Record<string, unknown>>)[0]
-    const parameters = mappedTool.parameters as Record<string, unknown>
-    const properties = parameters.properties as Record<string, Record<string, unknown>>
-
-    expect(mappedTool.description).toContain('strict JavaScript/TypeScript')
-    expect(properties.code.description).toContain('String.raw')
-    expect(properties.code.description).toContain('${...}')
-    expect(properties.code.description).toContain('backslashes')
+    expect(mappedTool.description).toBe(tool.description)
+    expect(mappedTool.parameters).toEqual(originalParameters)
     expect(payload.instructions).toContain('run_code compatibility rule')
     expect(payload.instructions).toContain('here-strings')
     expect(tool.parameters).toEqual(originalParameters)
