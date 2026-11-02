@@ -29,6 +29,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
+import { t } from '../common/i18n/index.ts'
 import type { StepCodeLoginFlowStatus, StepCodeProfile } from '../../shared/step-code-contracts.ts'
 import {
   CLI_FAILURE_DENIED,
@@ -144,7 +145,7 @@ export function isRetryableStepCodeLoginError(error: unknown): boolean {
 
 /** protocol 类错误：形状/字段值不合协议，不重试。 */
 function protocolError(phase: string, detail: string, cause?: unknown): StepCodeLoginRequestError {
-  return new StepCodeLoginRequestError('protocol', PROVIDER_NAME + ' 登录 ' + phase + ' ' + detail, {
+  return new StepCodeLoginRequestError('protocol', t('sc.loginPhaseFailed', { provider: PROVIDER_NAME, phase, detail }), {
     ...(cause === undefined ? {} : { cause }),
   })
 }
@@ -201,11 +202,11 @@ function parseAuthBase(value: string): URL {
   try {
     url = new URL(value)
   } catch {
-    throw new Error(PROVIDER_NAME + ' 的授权地址不是合法 URL：' + value)
+    throw new Error(t('sc.authorizeUrlInvalid', { provider: PROVIDER_NAME, value }))
   }
-  if (url.protocol !== 'https:') throw new Error(PROVIDER_NAME + ' 的授权地址必须使用 https')
+  if (url.protocol !== 'https:') throw new Error(t('sc.authorizeUrlNotHttps', { provider: PROVIDER_NAME }))
   if (url.username !== '' || url.password !== '') {
-    throw new Error(PROVIDER_NAME + ' 的授权地址不得包含用户名或密码')
+    throw new Error(t('sc.authorizeUrlHasCredentials', { provider: PROVIDER_NAME }))
   }
   return url
 }
@@ -276,7 +277,7 @@ async function withLoginTimeout<T>(
 
 function abortReasonOf(signal: AbortSignal): Error {
   const reason: unknown = signal.reason
-  return reason instanceof Error ? reason : new Error('操作已取消')
+  return reason instanceof Error ? reason : new Error(t('sc.cancelled'))
 }
 
 /** 可被取消的 sleep（逐字 utils/sleep.ts 的语义）。 */
@@ -320,10 +321,10 @@ async function request(input: LoginRequestInput): Promise<Record<string, unknown
   return withLoginTimeout(
     LOGIN_REQUEST_TIMEOUT_MS,
     input.signal,
-    () => new StepCodeLoginRequestError('transport', PROVIDER_NAME + ' 登录请求超时'),
+    () => new StepCodeLoginRequestError('transport', t('sc.loginRequestTimeout', { provider: PROVIDER_NAME })),
     async (signal) => {
       const pollToken = input.pollToken.trim()
-      if (pollToken === '') throw new Error(PROVIDER_NAME + ' 登录的 poll_token 不能为空')
+      if (pollToken === '') throw new Error(t('sc.pollTokenEmpty', { provider: PROVIDER_NAME }))
       const fetchFn = input.fetchFn ?? fetch
       let response: Response
       try {
@@ -559,7 +560,7 @@ export async function waitForStepCodeLogin(
   input: WaitForStepCodeLoginInput,
 ): Promise<{ readonly apiKey: string; readonly uid?: string }> {
   const timeoutError = (): Error =>
-    new Error(PROVIDER_NAME + ' 登录超时：没有在有效期内完成浏览器授权。')
+    new Error(t('sc.loginTimeout', { provider: PROVIDER_NAME }))
   const serverRemaining = input.init.expiresAt * 1000 - Date.now()
   const localRemaining = input.localDeadline === undefined ? Infinity : input.localDeadline - Date.now()
   const remaining = Math.min(serverRemaining, localRemaining)
@@ -631,7 +632,7 @@ export function stepCodeCredentialFromLogin(
   ready: { readonly apiKey: string; readonly uid?: string },
 ): StepCodeStoredCredential {
   const apiKey = ready.apiKey.trim()
-  if (apiKey === '') throw new Error(PROVIDER_NAME + ' 登录成功但没有拿到 api_key')
+  if (apiKey === '') throw new Error(t('sc.loginNoApiKey', { provider: PROVIDER_NAME }))
   const uid = readBoundedUid(ready.uid)
   return {
     type: 'oauth',
@@ -655,7 +656,7 @@ export function stepCodeCredentialFromApiKey(
   uid?: string,
 ): StepCodeStoredCredential {
   const trimmed = apiKey.trim()
-  if (trimmed === '') throw new Error(PROVIDER_NAME + ' API Key 是空的。')
+  if (trimmed === '') throw new Error(t('sc.apiKeyEmpty', { provider: PROVIDER_NAME }))
   const bounded = readBoundedUid(uid)
   return {
     type: 'oauth',
@@ -797,7 +798,7 @@ export async function beginStepCodeLogin(
     startedAt,
     expiresAt,
     pollIntervalSec: init.pollIntervalSec,
-    progress: '等待浏览器授权…（每 ' + init.pollIntervalSec + ' 秒查询一次）',
+    progress: t('sc.waitingBrowserPoll', { seconds: init.pollIntervalSec }),
   }
 
   void (async () => {
@@ -823,7 +824,7 @@ export async function beginStepCodeLogin(
         completedAt: Date.now(),
         expiresAt,
         pollIntervalSec: init.pollIntervalSec,
-        progress: '授权完成',
+        progress: t('sc.authorized'),
         ...(ready.uid === undefined ? {} : { uid: ready.uid }),
       }
     } catch (error) {

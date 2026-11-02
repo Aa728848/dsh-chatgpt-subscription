@@ -27,6 +27,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import z from '@deepseek-ai/schemastery'
+import { t } from '../common/i18n/index.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
@@ -122,7 +123,7 @@ function asFiniteNumber(value: unknown): number | undefined {
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key]
   if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string') throw new Error('Step Code 凭据字段无效：' + key)
+  if (typeof value !== 'string') throw new Error(t('sc.credentialFieldInvalid', { provider: 'Step Code', key }))
   return value
 }
 
@@ -142,11 +143,11 @@ function isOrigin(value: unknown): value is StepCodeCredentialOrigin {
  * 猜错的代价是一次拿国区凭据去打国际区端点的明确鉴权失败，排查成本远高于让它重新登录。
  */
 export function parseStepCodeCredentials(value: unknown): StepCodeCredentials {
-  if (!isRecord(value)) throw new Error('Step Code 凭据载荷无效')
+  if (!isRecord(value)) throw new Error(t('sc.credentialPayloadInvalid', { provider: 'Step Code' }))
   const apiKey = asString(value.apiKey)
-  if (apiKey === undefined) throw new Error('Step Code 凭据缺少 apiKey')
+  if (apiKey === undefined) throw new Error(t('sc.credentialNoApiKey', { provider: 'Step Code' }))
   const profile = normalizeProfile(value.profile)
-  if (profile === undefined) throw new Error('Step Code 凭据的 profile 无效')
+  if (profile === undefined) throw new Error(t('sc.credentialProfileInvalid', { provider: 'Step Code' }))
 
   const origin = isOrigin(value.origin)
     ? value.origin
@@ -309,7 +310,7 @@ function createCredentialBackend<T>(
   if (process.platform === 'linux') {
     return new SecretServiceCredentialStore(PROVIDER_ID, credentialAccount(filePath), parse)
   }
-  throw new Error(label + ' 凭据存储只支持 Windows、macOS 或 Linux。')
+  throw new Error(t('sc.storeUnsupportedPlatform', { label }))
 }
 
 // 登录、配额读与适配器流共享同一条落盘顺序。
@@ -366,7 +367,7 @@ export class StepCodeCredentialStore {
       await this.backend.save(normalized)
       const restored = await this.backend.load()
       if (!isDeepStrictEqual(restored, normalized)) {
-        throw new Error('Step Code 加密凭据写入校验失败')
+        throw new Error(t('sc.encryptedWriteVerifyFailed', { provider: 'Step Code' }))
       }
     })
   }
@@ -405,11 +406,11 @@ export interface StepCodeQuotaCredential {
 
 /** 校验并归一化一份落盘的额度凭据。缺 token 或 deviceId 一律拒绝——少一个就是一次必然的鉴权失败。 */
 export function parseStepCodeQuotaCredential(value: unknown): StepCodeQuotaCredential {
-  if (!isRecord(value)) throw new Error('Step Code 额度凭据载荷无效')
+  if (!isRecord(value)) throw new Error(t('sc.quotaCredentialPayloadInvalid', { provider: 'Step Code' }))
   const token = asString(value.token)
-  if (token === undefined) throw new Error('Step Code 额度凭据缺少 Oasis-Token')
+  if (token === undefined) throw new Error(t('sc.quotaCredentialNoToken', { provider: 'Step Code' }))
   const deviceId = asString(value.deviceId)
-  if (deviceId === undefined) throw new Error('Step Code 额度凭据缺少 Oasis-Webid')
+  if (deviceId === undefined) throw new Error(t('sc.quotaCredentialNoDeviceId', { provider: 'Step Code' }))
   return {
     token,
     deviceId,
@@ -450,7 +451,7 @@ export class StepCodeQuotaCredentialStore {
       await this.backend.save(normalized)
       const restored = await this.backend.load()
       if (!isDeepStrictEqual(restored, normalized)) {
-        throw new Error('Step Code 额度凭据写入校验失败')
+        throw new Error(t('sc.quotaCredentialWriteVerifyFailed', { provider: 'Step Code' }))
       }
     })
   }
@@ -649,7 +650,7 @@ export class StepCodeModelSettingsStore {
       JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown,
     )
     if (!isDeepStrictEqual(restored, settings)) {
-      throw new Error('Step Code 模型设置写入失败：落盘的选择与刚写入的不一致')
+      throw new Error(t('sc.modelSettingsWriteFailed', { provider: 'Step Code' }))
     }
   }
 

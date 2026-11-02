@@ -31,6 +31,7 @@ import {
   type PoolAccountShape,
   type PoolData,
 } from '../common/account-pool.ts'
+import { t } from '../common/i18n/index.ts'
 import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { dshHomeDir } from '../common/home.ts'
 import type { CredentialStore } from '../token-store.ts'
@@ -160,7 +161,7 @@ function projectAccount(input: {
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key]
   if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string') throw new Error(PROVIDER_NAME + ' 号池账号字段无效：' + key)
+  if (typeof value !== 'string') throw new Error(t('sc.poolAccountFieldInvalid', { provider: PROVIDER_NAME, key }))
   return value
 }
 
@@ -172,11 +173,11 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
  * 当成可路由的账号打出去。
  */
 export function parseStepCodeCredentials(value: unknown): StepCodeCredentials {
-  if (!isRecord(value)) throw new Error(PROVIDER_NAME + ' 号池凭据无效')
+  if (!isRecord(value)) throw new Error(t('sc.poolCredentialInvalid', { provider: PROVIDER_NAME }))
   const access = typeof value.access === 'string' ? value.access.trim() : ''
-  if (access === '') throw new Error(PROVIDER_NAME + ' 号池凭据缺少 access')
+  if (access === '') throw new Error(t('sc.poolCredentialNoAccess', { provider: PROVIDER_NAME }))
   const profile = normalizeProfile(value.profile)
-  if (profile === undefined) throw new Error(PROVIDER_NAME + ' 号池凭据的 profile 无效')
+  if (profile === undefined) throw new Error(t('sc.poolCredentialProfileInvalid', { provider: PROVIDER_NAME }))
   const uidRaw = typeof value.uid === 'string' ? value.uid.trim() : ''
   const uid = uidRaw.length > UID_MAX_LENGTH || !UID_PATTERN.test(uidRaw) ? '' : uidRaw
   return {
@@ -202,7 +203,7 @@ export function parseStepCodeCredentials(value: unknown): StepCodeCredentials {
  * 抛错等于让一行坏数据带走整个池。
  */
 export function parseStepCodePoolData(value: unknown): PoolData<StepCodePoolAccount> {
-  if (!isRecord(value)) throw new Error(PROVIDER_NAME + ' 号池载荷无效')
+  if (!isRecord(value)) throw new Error(t('sc.poolPayloadInvalid', { provider: PROVIDER_NAME }))
   const accounts: StepCodePoolAccount[] = []
   for (const item of Array.isArray(value.accounts) ? value.accounts : []) {
     if (!isRecord(item) || typeof item.id !== 'string') continue
@@ -422,7 +423,7 @@ export class StepCodeAccountPool extends AccountPoolCore<
     if (target === undefined) {
       // 空池：仍然问核心要一次凭据，好让抛出的错误与其它调用方收到的完全一致。
       await this.getFreshCredential(undefined, fetchFn)
-      throw new Error(PROVIDER_NAME + ' 号池中没有账号。')
+      throw new Error(t('sc.poolEmpty', { provider: PROVIDER_NAME }))
     }
     return {
       accountId: target.id,

@@ -33,6 +33,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
+import { t } from '../common/i18n/index.ts'
 import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import { isSameOriginMutation } from '../common/same-origin.ts'
@@ -642,14 +643,14 @@ export function registerStepCodeRoutes(
         if (method !== 'POST') return sendMethodNotAllowed(response)
         if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
         if (accountPool === undefined) {
-          return sendJson(response, 400, { ok: false, error: '账号池未安装。' })
+          return sendJson(response, 400, { ok: false, error: t('sc.poolNotInstalled') })
         }
         const body = await readRequestJson(request)
         const action = typeof body.action === 'string' ? body.action : ''
         if (action === 'strategy') {
           const strategy = body.strategy
           if (strategy !== 'sequential' && strategy !== 'round-robin' && strategy !== 'sticky') {
-            return sendJson(response, 400, { ok: false, error: '未知的轮转策略。' })
+            return sendJson(response, 400, { ok: false, error: t('sc.unknownStrategy') })
           }
           await accountPool.setStrategy(strategy)
           return sendJson(response, 200, { ok: true, value: await readStatus() })
@@ -675,7 +676,7 @@ export function registerStepCodeRoutes(
             await accountPool.clearCooldown(accountId)
             break
           default:
-            return sendJson(response, 400, { ok: false, error: '未知的账号操作：' + action })
+            return sendJson(response, 400, { ok: false, error: t('sc.unknownAccountAction', { action }) })
         }
         return sendJson(response, 200, { ok: true, value: await readStatus() })
       }
@@ -721,7 +722,7 @@ export function registerStepCodeRoutes(
         // 请求体带凭据，刻意不在冻结契约里（见 contracts 的文件头），由 host 自行解析。
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey : ''
         if (apiKey.trim() === '') {
-          return sendJson(response, 400, { ok: false, error: '请粘贴一个 Platform API Key。' })
+          return sendJson(response, 400, { ok: false, error: t('sc.pastePlatformKey') })
         }
         const profile = profileFromBody(body)
         const credentials = stepCodeCredentialFromApiKey(profile, apiKey)
@@ -781,8 +782,8 @@ export function registerStepCodeRoutes(
           const account = typeof body.account === 'string' ? body.account.trim() : ''
           // 密码只在这一行活着：它进 signIn 的入参，不进任何 DTO、不进日志、不落盘。
           const password = typeof body.password === 'string' ? body.password : ''
-          if (account === '') return sendJson(response, 400, { ok: false, error: '请填写账号。' })
-          if (password === '') return sendJson(response, 400, { ok: false, error: '请填写密码。' })
+          if (account === '') return sendJson(response, 400, { ok: false, error: t('sc.missingAccount') })
+          if (password === '') return sendJson(response, 400, { ok: false, error: t('sc.missingPassword') })
           // 上游登录失败是**用户可见的一句话**（OasisSignInError 还带着手动粘贴兜底的提示），
           // 所以它是 400 而不是 500：卡片要显示的就是这句话。
           const signed = await attempt(() => signInOasisQuotaCredential({
@@ -820,7 +821,7 @@ export function registerStepCodeRoutes(
           await quotaStore.write(stored)
           quotaCredential = stored
         } else {
-          return sendJson(response, 400, { ok: false, error: '未知的额度凭据提交方式：' + mode })
+          return sendJson(response, 400, { ok: false, error: t('sc.unknownQuotaCredentialMode', { mode }) })
         }
         // 刚换了一把凭据就立刻读一次，卡片因此在本次应答里就能看到窗口，而不是空卡片。
         await quotaRefresh.run(() => refreshQuota(true))
@@ -862,7 +863,7 @@ async function probeConnection(
       account: null,
       model: null,
       checkedAt,
-      error: '还没有登录 ' + PROVIDER_NAME + ' 账号。',
+      error: t('sc.notSignedIn', { provider: PROVIDER_NAME }),
     }
   }
   const credentials = upstreamCredentialOf(target.credentials)
@@ -881,7 +882,7 @@ async function probeConnection(
         account: null,
         model: null,
         checkedAt,
-        error: '目录接口返回 HTTP ' + response.status
+        error: t('sc.catalogHttp', { status: response.status })
           + (detail === '' ? '' : '：' + stepCodeErrorDetail(detail, 160)),
       }
     }
