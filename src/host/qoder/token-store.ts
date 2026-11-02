@@ -28,6 +28,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import z from '@deepseek-ai/schemastery'
+import { t } from '../common/i18n/index.ts'
 import type { CredentialStore } from '../token-store.ts'
 import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
@@ -143,7 +144,7 @@ function asFiniteNumber(value: unknown): number | undefined {
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key]
   if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string') throw new Error('Qoder 凭据字段无效：' + key)
+  if (typeof value !== 'string') throw new Error(t('qo.credentialFieldInvalid', { provider: 'Qoder', key }))
   return value
 }
 
@@ -162,10 +163,10 @@ function isOrigin(value: unknown): value is QoderCredentialOrigin {
  * 拿一区的凭据去打另一区的端点，一次明确的鉴权失败，排查成本远高于重新登录。
  */
 export function parseQoderCredentials(value: unknown): QoderCredentials {
-  if (!isRecord(value)) throw new Error('Qoder 凭据载荷无效')
+  if (!isRecord(value)) throw new Error(t('qo.credentialPayloadInvalid', { provider: 'Qoder' }))
   const accessToken = asString(value.accessToken)
-  if (accessToken === undefined) throw new Error('Qoder 凭据缺少 accessToken')
-  if (!isQoderRegion(value.region)) throw new Error('Qoder 凭据的 region 无效')
+  if (accessToken === undefined) throw new Error(t('qo.credentialNoToken', { provider: 'Qoder' }))
+  if (!isQoderRegion(value.region)) throw new Error(t('qo.credentialRegionInvalid', { provider: 'Qoder' }))
   const origin = isOrigin(value.origin)
     ? value.origin
     : isAdoptedSnapshot(value) ? 'adopt' : 'device'
@@ -300,7 +301,7 @@ function createCredentialBackend<T>(
   if (process.platform === 'linux') {
     return new SecretServiceCredentialStore(PROVIDER_ID, credentialAccount(filePath), parse)
   }
-  throw new Error(label + ' 凭据存储只支持 Windows、macOS 或 Linux。')
+  throw new Error(t('qo.storeUnsupportedPlatform', { label }))
 }
 
 // 登录、刷新回写与适配器流共享同一条落盘顺序。
@@ -350,7 +351,7 @@ export class QoderCredentialStore {
       await this.backend.save(normalized)
       const restored = await this.backend.load()
       if (!isDeepStrictEqual(restored, normalized)) {
-        throw new Error('Qoder 加密凭据写入校验失败')
+        throw new Error(t('qo.encryptedWriteVerifyFailed', { provider: 'Qoder' }))
       }
     })
   }
@@ -594,7 +595,7 @@ export class QoderModelSettingsStore {
     await fs.rename(temporary, this.filePath)
     const restored = parseQoderModelSettings(JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown)
     if (!isDeepStrictEqual(restored, document)) {
-      throw new Error('Qoder 模型设置写入失败：落盘的选择与刚写入的不一致')
+      throw new Error(t('qo.modelSettingsWriteFailed', { provider: 'Qoder' }))
     }
   }
 

@@ -66,6 +66,7 @@ import {
 } from './model-catalog.ts'
 import { qoderExpiresAtFrom, type QoderCredentials } from './token-store.ts'
 import path from 'node:path'
+import { t } from '../common/i18n/index.ts'
 import { dshHomeDir } from '../common/home.ts'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 
@@ -668,10 +669,10 @@ export async function fetchQoderUserInfo(
   })
   if (!response.ok) {
     const detail = qoderErrorDetail(await response.text().catch(() => ''), 160)
-    throw new Error(PROVIDER_NAME + ' userinfo 请求失败（HTTP ' + response.status + '）' + (detail === '' ? '' : '：' + detail))
+    throw new Error(t('qo.userinfoFailed', { provider: PROVIDER_NAME, status: response.status, detail: detail === '' ? '' : '：' + detail }))
   }
   const payload = (await response.json().catch(() => undefined)) as unknown
-  if (!isRecord(payload)) throw new Error(PROVIDER_NAME + ' userinfo 响应不是 JSON 对象')
+  if (!isRecord(payload)) throw new Error(t('qo.userinfoNotJson', { provider: PROVIDER_NAME }))
   // 逐字段「可能缺失」地读（计划 §9 风险 5：这份载荷没有逐字 schema）。
   const tags = Array.isArray(payload.organization_tags)
     ? payload.organization_tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '')
@@ -762,10 +763,10 @@ export async function exchangeQoderJobToken(
     )
   }
   const payload = (await response.json().catch(() => undefined)) as unknown
-  if (!isRecord(payload)) throw new Error(PROVIDER_NAME + ' PAT 兑换响应不是 JSON 对象')
+  if (!isRecord(payload)) throw new Error(t('qo.patExchangeNotJson', { provider: PROVIDER_NAME }))
   // 200 也可能没给 token（技能规约「200 也可能没有凭据」：看形状，不只看状态码）。
   const token = asText(payload.token)
-  if (token === undefined) throw new Error(PROVIDER_NAME + ' PAT 兑换响应里没有 token')
+  if (token === undefined) throw new Error(t('qo.patExchangeNoToken', { provider: PROVIDER_NAME }))
   return {
     token,
     refreshToken: asText(payload.refresh_token) ?? null,
@@ -798,14 +799,14 @@ export async function refreshQoderAccessToken(
     signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
   })
   if (!response.ok) {
-    const error = new Error(PROVIDER_NAME + ' 令牌刷新失败（HTTP ' + response.status + '）') as Error & { status?: number }
+    const error = new Error(t('qo.refreshFailed', { provider: PROVIDER_NAME, status: response.status })) as Error & { status?: number }
     error.status = response.status
     throw error
   }
   const payload = (await response.json().catch(() => undefined)) as unknown
-  if (!isRecord(payload)) throw new Error(PROVIDER_NAME + ' 令牌刷新响应不是 JSON 对象')
+  if (!isRecord(payload)) throw new Error(t('qo.refreshNotJson', { provider: PROVIDER_NAME }))
   const token = asText(payload.token)
-  if (token === undefined) throw new Error(PROVIDER_NAME + ' 令牌刷新响应里没有 token')
+  if (token === undefined) throw new Error(t('qo.refreshNoToken', { provider: PROVIDER_NAME }))
   return {
     token,
     // token 轮换：上游给了新的就用新的，没给就留住旧的那把（pi-provider 同一规则）。
@@ -926,10 +927,10 @@ export async function loadQoderQuota(
       })
       if (!response.ok) {
         const detail = qoderErrorDetail(await response.text().catch(() => ''), 160)
-        return { ok: false, error: '额度接口返回 HTTP ' + response.status + (detail === '' ? '' : '：' + detail) }
+        return { ok: false, error: t('qo.quotaHttp', { status: response.status, detail: detail === '' ? '' : '：' + detail }) }
       }
       const snapshot = normalizeQoderQuotaSnapshot((await response.json().catch(() => undefined)) as unknown, credentials.region)
-      if (snapshot === undefined) return { ok: false, error: '额度响应里没有认识的额度桶（上游可能改版）。' }
+      if (snapshot === undefined) return { ok: false, error: t('qo.quotaNoBucket') }
       quotaCacheByAccount.set(cacheKey, { snapshot, fetchedAt: Date.now() })
       return { ok: true, snapshot }
     } catch (error) {

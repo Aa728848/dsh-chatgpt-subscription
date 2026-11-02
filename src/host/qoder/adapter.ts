@@ -36,7 +36,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { localizedProviderName } from '../common/i18n/index.ts'
+import { localizedProviderName, t } from '../common/i18n/index.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   STREAM_IDLE_TIMEOUT_CODE,
@@ -385,7 +385,7 @@ export class QoderAdapter extends LlmAdapter {
   }
 
   async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    if (signal?.aborted) throw new LlmError(PROVIDER_NAME + ' 模型解析已取消', 'ABORTED')
+    if (signal?.aborted) throw new LlmError(t('qo.modelResolveAborted', { provider: PROVIDER_NAME }), 'ABORTED')
     const settings = await this.settings()
     const picked = await this.credentialFor().catch(() => null)
     const region = picked?.credentials.region ?? 'global'
@@ -610,9 +610,9 @@ export class QoderAdapter extends LlmAdapter {
         // the hand-off, so a slow prefill is not spent from it.
         activity?.pulse()
       } catch (error) {
-        if (signal.aborted) throw new LlmError(PROVIDER_NAME + ' 请求已取消', 'ABORTED', { cause: error })
+        if (signal.aborted) throw new LlmError(t('qo.requestAborted', { provider: PROVIDER_NAME }), 'ABORTED', { cause: error })
         throw new LlmError(
-          PROVIDER_NAME + ' 请求失败：' + (error instanceof Error ? error.message : String(error)),
+          t('qo.requestFailed', { provider: PROVIDER_NAME, detail: error instanceof Error ? error.message : String(error) }),
           'TRANSPORT',
           { cause: error },
         )
@@ -628,7 +628,7 @@ export class QoderAdapter extends LlmAdapter {
         throw failure
       }
 
-      if (response.body === null) throw new LlmError(PROVIDER_NAME + ' 返回了空响应体', 'PROVIDER_ERROR')
+      if (response.body === null) throw new LlmError(t('qo.emptyBody', { provider: PROVIDER_NAME }), 'PROVIDER_ERROR')
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()

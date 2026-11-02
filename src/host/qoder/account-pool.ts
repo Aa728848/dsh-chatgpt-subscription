@@ -24,6 +24,7 @@ import {
   type PoolAccountShape,
   type PoolData,
 } from '../common/account-pool.ts'
+import { t } from '../common/i18n/index.ts'
 import { poolQuota, quotaWindow } from '../common/account-quota.ts'
 import { dshHomeDir } from '../common/home.ts'
 import type { CredentialStore } from '../token-store.ts'
@@ -130,7 +131,7 @@ function projectAccount(input: {
  * 抛错等于让一行坏数据带走整个池。
  */
 export function parseQoderPoolData(value: unknown): PoolData<QoderPoolAccount> {
-  if (!isRecord(value)) throw new Error(PROVIDER_NAME + ' 号池载荷无效')
+  if (!isRecord(value)) throw new Error(t('qo.poolPayloadInvalid', { provider: PROVIDER_NAME }))
   const accounts: QoderPoolAccount[] = []
   for (const item of Array.isArray(value.accounts) ? value.accounts : []) {
     if (!isRecord(item) || typeof item.id !== 'string') continue
@@ -331,7 +332,7 @@ export class QoderAccountPool extends AccountPoolCore<
     if (target === undefined) {
       // 空池：仍然问核心要一次凭据，好让抛出的错误与其它调用方收到的完全一致。
       await this.getFreshCredential(undefined, fetchFn)
-      throw new Error(PROVIDER_NAME + ' 号池中没有账号。')
+      throw new Error(t('qo.poolEmpty', { provider: PROVIDER_NAME }))
     }
     return {
       accountId: target.id,

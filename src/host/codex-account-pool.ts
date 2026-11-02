@@ -35,6 +35,7 @@
 
 import path from 'node:path'
 import { TOKEN_REFRESH_MARGIN_MS } from '../compat.ts'
+import { t } from './common/i18n/t.ts'
 import { dshHomeDir } from './common/home.ts'
 import {
   AccountPoolCore,
@@ -340,7 +341,7 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
           )
         }
         const refresher = ref.current
-        if (refresher === undefined) throw new Error('ChatGPT 凭据刷新服务尚未就绪')
+        if (refresher === undefined) throw new Error(t('codex.refresherNotReady'))
         return refresher.refreshAccount(credentials)
       },
       // Pure check — nothing is written — and the reason a borrowed snapshot that
@@ -414,7 +415,7 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
             : {}),
         }
       },
-      emptyMessage: '未登录 ChatGPT 账号，请在「设置 → 订阅服务 → ChatGPT」中添加并登录账号。',
+      emptyMessage: t('codex.notSignedIn'),
       ...(options.backend === undefined ? {} : { backend: options.backend }),
       ...(options.keyring === undefined ? {} : { keyring: options.keyring }),
       ...(options.maxAccounts === undefined ? {} : { maxAccounts: options.maxAccounts }),
@@ -474,9 +475,9 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
   async refreshAccountNow(accountId: string): Promise<StoredOAuthCredentials> {
     const data = await this.read()
     const account = data.accounts.find((entry) => entry.id === accountId)
-    if (account === undefined) throw new Error('ChatGPT 账号已不在号池中')
+    if (account === undefined) throw new Error(t('codex.accountGone'))
     const refresher = this.refresherRef.current
-    if (refresher === undefined) throw new Error('ChatGPT 凭据刷新服务尚未就绪')
+    if (refresher === undefined) throw new Error(t('codex.refresherNotReady'))
     // The core owns the single-flight and the conditional commit, and the
     // generation passed here is the guard: a rotation that started before a
     // re-login must not spend the re-login's refresh token.

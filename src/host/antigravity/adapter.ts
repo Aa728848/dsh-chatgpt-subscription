@@ -1,5 +1,5 @@
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
-import { localizedProviderName } from '../common/i18n/index.ts'
+import { localizedProviderName, t } from '../common/i18n/index.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
@@ -555,7 +555,7 @@ export class AntigravityAdapter extends LlmAdapter {
         // the account's, and the wait the service named is the real one.
         if (retryDelayMs(response.headers, errText) !== undefined) {
           throw new LlmError(
-            `Antigravity 账号配额已耗尽或请求受限 (429 RESOURCE_EXHAUSTED)。请在插件设置页查看配额剩余百分比及重置倒计时。原始响应: ${errText || 'No response'}`,
+            t('antigravity.quotaExhausted', { body: errText || 'No response' }),
             'RATE_LIMIT',
             { status: 429 },
           )
@@ -565,7 +565,7 @@ export class AntigravityAdapter extends LlmAdapter {
         // reported as the transient rate limit it is, and it costs the account
         // nothing: no cooldown, no rotation to another account.
         throw new LlmError(
-          `Antigravity 上游返回 429 (RESOURCE_EXHAUSTED) 但未给出重置时间，因此按瞬时限流处理，不视为账号配额耗尽，也不会冷却该账号。原始响应: ${upstreamBodyExcerpt(errText) || 'No response'}`,
+          t('antigravity.rateLimitedNoReset', { body: upstreamBodyExcerpt(errText) || 'No response' }),
           'SERVER',
           { status: 429 },
         )

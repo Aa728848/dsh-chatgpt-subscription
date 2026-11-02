@@ -29,6 +29,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { t } from '../common/i18n/index.ts'
 import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import { isSameOriginMutation } from '../common/same-origin.ts'
@@ -618,14 +619,14 @@ export function registerQoderRoutes(
         if (method !== 'POST') return sendMethodNotAllowed(response)
         if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
         if (accountPool === undefined) {
-          return sendJson(response, 400, { ok: false, error: '账号池未安装。' })
+          return sendJson(response, 400, { ok: false, error: t('qo.poolNotInstalled') })
         }
         const body = await readRequestJson(request)
         const action = typeof body.action === 'string' ? body.action : ''
         if (action === 'strategy') {
           const strategy = body.strategy
           if (strategy !== 'sequential' && strategy !== 'round-robin' && strategy !== 'sticky') {
-            return sendJson(response, 400, { ok: false, error: '未知的轮转策略。' })
+            return sendJson(response, 400, { ok: false, error: t('qo.unknownStrategy') })
           }
           await accountPool.setStrategy(strategy)
           return sendJson(response, 200, { ok: true, value: await readStatus() })
@@ -651,7 +652,7 @@ export function registerQoderRoutes(
             await accountPool.clearCooldown(accountId)
             break
           default:
-            return sendJson(response, 400, { ok: false, error: '未知的账号操作：' + action })
+            return sendJson(response, 400, { ok: false, error: t('qo.unknownAccountAction', { action }) })
         }
         return sendJson(response, 200, { ok: true, value: await readStatus() })
       }
@@ -691,7 +692,7 @@ export function registerQoderRoutes(
         // 请求体带 PAT，刻意不在冻结契约里（见 contracts 的文件头），由 host 自行解析。
         const token = typeof body.token === 'string' ? body.token : ''
         if (token.trim() === '') {
-          return sendJson(response, 400, { ok: false, error: '请粘贴一个 Personal Access Token（pt-...）。' })
+          return sendJson(response, 400, { ok: false, error: t('qo.pastePat') })
         }
         const region = regionFromBody(body)
         // 兑换失败是**用户可见的一句话**（PAT 被拒），所以它是 400 而不是 500。
@@ -860,7 +861,7 @@ async function probeConnection(
       account: null,
       model: null,
       checkedAt,
-      error: '还没有登录 ' + PROVIDER_NAME + ' 账号。',
+      error: t('qo.notSignedIn', { provider: PROVIDER_NAME }),
     }
   }
   const credentials = upstreamCredentialOf(target.credentials)
@@ -886,7 +887,7 @@ async function probeConnection(
         account: null,
         model: null,
         checkedAt,
-        error: '目录接口返回 HTTP ' + response.status
+        error: t('qo.catalogHttp', { status: response.status })
           + (detail === '' ? '' : '：' + detail.replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 160)),
       }
     }

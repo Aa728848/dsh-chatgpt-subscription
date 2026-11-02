@@ -19,6 +19,7 @@ import { FileCredentialStore, workBuddyAccountId, type WorkBuddyCredentials } fr
 import { withResolvedIdentity, type WorkBuddyTokenIdentity } from './identity.ts'
 import { fetchAccountIdentity } from './client.ts'
 import type { WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
+import { t } from '../common/i18n/index.ts'
 
 export type WorkBuddyLoginStatus = 'idle' | 'pending' | 'complete' | 'error'
 
@@ -115,20 +116,20 @@ export async function requestLoginState(
     root = undefined
   }
   if (!response.ok || root?.code !== 0 || !isRecord(root.data)) {
-    throw new Error(`${PROVIDER_NAME} 登录初始化失败（HTTP ${response.status}）：${stringOf(root ?? {}, 'msg') ?? text.slice(0, 160)}`)
+    throw new Error(t('wb.oauth.loginInitFailed', { provider: PROVIDER_NAME, status: response.status, detail: stringOf(root ?? {}, 'msg') ?? text.slice(0, 160) }))
   }
   const state = stringOf(root.data, 'state')
   const authUrl = stringOf(root.data, 'authUrl')
-  if (!state || !authUrl) throw new Error(`${PROVIDER_NAME} 登录响应缺少 state 或 authUrl`)
+  if (!state || !authUrl) throw new Error(t('wb.oauth.loginMissingState', { provider: PROVIDER_NAME }))
   return { state, authUrl, region, domain }
 }
 
 /** Parse the successful token-poll shape while accepting the two observed wrappers. */
 export function parseLoginCredential(payload: unknown, attempt: WorkBuddyLoginAttempt): WorkBuddyCredentials | null {
-  if (!isRecord(payload)) throw new Error(`${PROVIDER_NAME} 登录轮询响应无效`)
+  if (!isRecord(payload)) throw new Error(t('wb.oauth.loginPollInvalid', { provider: PROVIDER_NAME }))
   const code = numberOf(payload, 'code')
   if (code === LOGIN_PENDING_CODE) return null
-  if (code !== 0) throw new Error(`${PROVIDER_NAME} 登录失败：${stringOf(payload, 'msg') ?? `code ${String(code)}`}`)
+  if (code !== 0) throw new Error(t('wb.oauth.loginFailed', { provider: PROVIDER_NAME, detail: stringOf(payload, 'msg') ?? `code ${String(code)}` }))
   const data = isRecord(payload.data) ? payload.data : payload
   const auth = isRecord(data.auth) ? data.auth : data
   const account = isRecord(data.account) ? data.account
@@ -138,7 +139,7 @@ export function parseLoginCredential(payload: unknown, attempt: WorkBuddyLoginAt
           : {}
   const accessToken = stringOf(auth, 'accessToken') ?? stringOf(auth, 'access_token')
     ?? stringOf(data, 'token')
-  if (!accessToken) throw new Error(`${PROVIDER_NAME} 登录成功响应缺少 access token`)
+  if (!accessToken) throw new Error(t('wb.oauth.loginMissingToken', { provider: PROVIDER_NAME }))
   const domain = stringOf(auth, 'domain') ?? attempt.domain
   const expiresIn = numberOf(auth, 'expiresIn') ?? numberOf(auth, 'expires_in')
   const expiresAt = numberOf(auth, 'expiresAt') ?? numberOf(auth, 'expires_at')
@@ -176,9 +177,9 @@ export async function pollLogin(
     },
   )
   const text = await response.text().catch(() => '')
-  if (!response.ok) throw new Error(`${PROVIDER_NAME} 登录轮询失败（HTTP ${response.status}）：${text.slice(0, 160)}`)
+  if (!response.ok) throw new Error(t('wb.oauth.loginPollFailed', { provider: PROVIDER_NAME, status: response.status, detail: text.slice(0, 160) }))
   let payload: unknown
-  try { payload = JSON.parse(text) as unknown } catch { throw new Error(`${PROVIDER_NAME} 登录轮询返回了非 JSON 响应`) }
+  try { payload = JSON.parse(text) as unknown } catch { throw new Error(t('wb.oauth.loginPollNotJson', { provider: PROVIDER_NAME })) }
   return parseLoginCredential(payload, attempt)
 }
 
@@ -241,7 +242,7 @@ export async function beginWebLogin(
   controller = active
   const attempt = await requestLoginState(region, fetchFn, active.signal)
   const startedAt = Date.now()
-  flow = { status: 'pending', region, authUrl: attempt.authUrl, progress: '等待浏览器授权…', startedAt }
+  flow = { status: 'pending', region, authUrl: attempt.authUrl, progress: t('wb.oauth.waitingBrowser'), startedAt }
 
   void (async () => {
     const deadline = startedAt + LOGIN_TIMEOUT_MS
@@ -251,7 +252,7 @@ export async function beginWebLogin(
         if (active.signal.aborted) return
         const credentials = await pollLogin(attempt, fetchFn, active.signal)
         if (credentials === null) {
-          flow = { ...flow, progress: `等待浏览器授权…（${Math.floor((Date.now() - startedAt) / 1000)} 秒）` }
+          flow = { ...flow, progress: t('wb.oauth.waitingBrowserElapsed', { seconds: Math.floor((Date.now() - startedAt) / 1000) }) }
           continue
         }
         // The identity is settled before anything is persisted, so the id the
@@ -261,10 +262,10 @@ export async function beginWebLogin(
         const resolved = await resolveLoginIdentity(credentials, options.resolveIdentity, fetchFn, active.signal)
         if (options.onSave !== undefined) await options.onSave(resolved)
         else await store.addManaged(resolved)
-        flow = { status: 'complete', region: resolved.region, accountId: workBuddyAccountId(resolved), startedAt, completedAt: Date.now(), progress: '授权完成' }
+        flow = { status: 'complete', region: resolved.region, accountId: workBuddyAccountId(resolved), startedAt, completedAt: Date.now(), progress: t('wb.oauth.authorized') }
         return
       }
-      flow = { status: 'error', region, startedAt, completedAt: Date.now(), error: '登录超时，请重新添加账号。' }
+      flow = { status: 'error', region, startedAt, completedAt: Date.now(), error: t('wb.oauth.loginTimeout') }
     } catch (error) {
       if (active.signal.aborted) return
       flow = { status: 'error', region, startedAt, completedAt: Date.now(), error: error instanceof Error ? error.message : String(error) }

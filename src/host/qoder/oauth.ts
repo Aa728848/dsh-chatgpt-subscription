@@ -19,6 +19,7 @@
  */
 
 import { randomBytes, randomUUID, createHash } from 'node:crypto'
+import { t } from '../common/i18n/index.ts'
 import type { QoderLoginFlowStatus, QoderRegion } from '../../shared/qoder-contracts.ts'
 import {
   DEVICE_POLL_INTERVAL_MS,
@@ -80,7 +81,7 @@ export function createQoderDeviceParams(env: NodeJS.ProcessEnv = process.env): {
  */
 export function qoderDeviceAuthorizeUrl(params: { challenge: string; nonce: string; machineId: string }): string {
   const page = REGION_HOSTS.global.deviceAuthorizePage
-  if (page === null) throw new Error(PROVIDER_NAME + ' 全球区以外的部署不支持浏览器登录')
+  if (page === null) throw new Error(t('qo.noBrowserOutsideGlobal', { provider: PROVIDER_NAME }))
   const url = new URL(page)
   url.searchParams.set('challenge', params.challenge)
   url.searchParams.set('challenge_method', 'S256')
@@ -138,13 +139,13 @@ export async function pollQoderDeviceToken(
     const detail = qoderErrorDetail(await response.text().catch(() => ''), 160)
     return {
       state: 'failed',
-      reason: PROVIDER_NAME + ' 设备轮询失败（HTTP ' + response.status + '）' + (detail === '' ? '' : '：' + detail),
+      reason: t('qo.devicePollFailed', { provider: PROVIDER_NAME, status: response.status, detail: detail === '' ? '' : '：' + detail }),
     }
   }
   const payload = (await response.json().catch(() => undefined)) as unknown
-  if (!isRecord(payload)) return { state: 'failed', reason: PROVIDER_NAME + ' 设备轮询响应不是 JSON 对象' }
+  if (!isRecord(payload)) return { state: 'failed', reason: t('qo.devicePollNotJson', { provider: PROVIDER_NAME }) }
   const token = asText(payload.token)
-  if (token === undefined) return { state: 'failed', reason: PROVIDER_NAME + ' 设备轮询的 200 响应里没有 token' }
+  if (token === undefined) return { state: 'failed', reason: t('qo.devicePollNoToken', { provider: PROVIDER_NAME }) }
   return {
     state: 'ready',
     token,
@@ -225,7 +226,7 @@ export async function qoderCredentialsFromPat(
   options: QoderRequestOptions = {},
 ): Promise<QoderCredentials> {
   const pat = personalToken.trim()
-  if (pat === '') throw new Error(PROVIDER_NAME + ' 的 PAT 是空的。')
+  if (pat === '') throw new Error(t('qo.patEmpty', { provider: PROVIDER_NAME }))
   // 形状检查在发网络请求之前：粘贴时多带了引号/换行（从网页或终端复制最常见），
   // 上游只会回一句 BadRequest，白白让用户以为是 token 失效。
   if (!pat.startsWith('pt-')) {
@@ -340,7 +341,7 @@ export async function refreshQoderCredential(
     }
   }
   if (credentials.refreshToken === null || credentials.refreshToken === '') {
-    const error = new Error(PROVIDER_NAME + ' 的这份凭据没有刷新令牌，只有重新登录才能续期。') as Error & { status?: number }
+    const error = new Error(t('qo.noRefreshToken', { provider: PROVIDER_NAME })) as Error & { status?: number }
     error.status = 401
     throw error
   }
@@ -398,7 +399,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
       clearTimeout(timer)
       cleanup()
       const reason: unknown = signal.reason
-      reject(reason instanceof Error ? reason : new Error('操作已取消'))
+      reject(reason instanceof Error ? reason : new Error(t('qo.cancelled')))
     }
     if (signal.aborted) { onAbort(); return }
     signal.addEventListener('abort', onAbort, { once: true })
@@ -437,7 +438,7 @@ export async function beginQoderLogin(
       region,
       startedAt,
       completedAt: Date.now(),
-      error: PROVIDER_NAME + ' 中国站不支持浏览器登录，请改用 PAT（' + REGION_HOSTS.cn.patPage + '）或导入本机 qodercli 登录态。',
+      error: t('qo.cnNoBrowserLogin', { provider: PROVIDER_NAME, patPage: REGION_HOSTS.cn.patPage }),
       retryable: false,
     }
     return getQoderLoginStatus()
@@ -455,7 +456,7 @@ export async function beginQoderLogin(
     startedAt,
     expiresAt: deadline,
     pollIntervalSec: DEVICE_POLL_INTERVAL_MS / 1000,
-    progress: '等待浏览器授权…（每 ' + DEVICE_POLL_INTERVAL_MS / 1000 + ' 秒查询一次）',
+    progress: t('qo.waitingBrowserPoll', { seconds: DEVICE_POLL_INTERVAL_MS / 1000 }),
   }
 
   void (async () => {
@@ -463,7 +464,7 @@ export async function beginQoderLogin(
       for (;;) {
         active.signal.throwIfAborted()
         if (Date.now() >= deadline) {
-          throw new Error(PROVIDER_NAME + ' 登录超时：没有在有效期内完成浏览器授权。')
+          throw new Error(t('qo.loginTimeout', { provider: PROVIDER_NAME }))
         }
         const result = await pollQoderDeviceToken(
           { nonce: params.nonce, verifier: params.verifier },
@@ -484,7 +485,7 @@ export async function beginQoderLogin(
             completedAt: Date.now(),
             expiresAt: deadline,
             pollIntervalSec: DEVICE_POLL_INTERVAL_MS / 1000,
-            progress: '授权完成',
+            progress: t('qo.authorized'),
             ...(credentials.uid === null ? {} : { uid: credentials.uid }),
           }
           return

@@ -17,6 +17,7 @@
 import path from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { dshHomeDir } from '../common/home.ts'
+import { t } from '../common/i18n/index.ts'
 import {
   AccountPoolCore,
   normalizeRotationStrategy,
@@ -197,7 +198,7 @@ export function parseWorkBuddyPoolState(value: unknown): WorkBuddyPoolDocumentSt
     if (typeof record.pausedSince === 'number' && Number.isFinite(record.pausedSince)
       && typeof record.pausedUntil === 'number' && Number.isFinite(record.pausedUntil)) {
       pause = {
-        reason: typeof record.reason === 'string' ? record.reason : '号池已暂停。',
+        reason: typeof record.reason === 'string' ? record.reason : t('wb.pool.pausedDefault'),
         pausedSince: record.pausedSince,
         pausedUntil: record.pausedUntil,
         triggeredBy: Array.isArray(record.triggeredBy)
@@ -363,7 +364,7 @@ function backendFromDomain(domain: string): string {
  * which is the case that used to be reported as "the account shows 账号 1".
  */
 function defaultAliasFor(credentials: WorkBuddyCredentials, position: number): string {
-  return credentials.nickname || credentials.uin || credentials.uid || `账号 ${position}`
+  return credentials.nickname || credentials.uin || credentials.uid || t('wb.pool.accountLabel', { position })
 }
 
 /**
@@ -639,7 +640,7 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
   private pausedError(pause: WorkBuddyPoolPauseRecord, now = Date.now()): WorkBuddyPoolPausedError {
     const minutes = Math.max(1, Math.ceil((pause.pausedUntil - now) / 60_000))
     return new WorkBuddyPoolPausedError(
-      `${PROVIDER_NAME} 号池已暂停：${pause.reason} 预计 ${minutes} 分钟后自动恢复；被上游限制的账号需要重新登录后才能回到轮换。`,
+      t('wb.pool.paused', { provider: PROVIDER_NAME, reason: pause.reason, minutes }),
       pause.pausedUntil,
     )
   }
@@ -671,8 +672,11 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
   async markAccountRestriction(accountId: string, restriction: WorkBuddyAccountRestrictionDto): Promise<void> {
     if (restriction.code !== WORKBUDDY_RESTRICTED_ACCOUNT_CODE) {
       throw new Error(
-        `${PROVIDER_NAME} 号池只记录账号级限制（${WORKBUDDY_RESTRICTED_ACCOUNT_CODE}），收到业务码 ${restriction.code}；`
-        + '11128 与 11158 不是账号级拒绝，必须由协议层分别处理。',
+        t('wb.pool.notAccountScoped', {
+          provider: PROVIDER_NAME,
+          expected: WORKBUDDY_RESTRICTED_ACCOUNT_CODE,
+          code: restriction.code,
+        }),
       )
     }
     const now = Date.now()
@@ -699,7 +703,7 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
         if (others.length > 0) {
           const windowMinutes = Math.round(WORKBUDDY_RESTRICTION_ESCALATION_WINDOW_MS / 60_000)
           state.pause = {
-            reason: `上游以 ${restriction.code} 在 ${windowMinutes} 分钟内拒绝了 ${others.length + 1} 个不同账号`,
+            reason: t('wb.pool.upstreamRefused', { code: restriction.code, minutes: windowMinutes, count: others.length + 1 }),
             pausedSince: now,
             pausedUntil: now + WORKBUDDY_POOL_PAUSE_MS,
             triggeredBy: Object.keys(state.restrictions),
@@ -1088,7 +1092,7 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
    */
   protected override deleteAccountFromPool(data: PoolData<WorkBuddyPoolAccount>, accountId: string): void {
     if (data.accounts.find((account) => account.id === accountId)?.source === 'desktop') {
-      throw new Error('桌面账号由 CodeBuddy 客户端所有，只能隐藏，不能删除。')
+      throw new Error(t('wb.pool.desktopAccountUndeletable'))
     }
     super.deleteAccountFromPool(data, accountId)
   }
