@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.55.0 - 2026-11-02
+
+- **[i18n] 宿主侧也能说中英俄：一条镜像缝把界面语言送进线路名与宿主文案**
+  - **现状**：设置卡与 Hub 早就有 zh/en 两套字典、俄语语言包（#65）也已覆盖 14 个命名空间，但**宿主说的话只有中文**——`providerInfo()` 的线路名、额度失败、429 冷却、登录流程与号池报错全是中文常量，英文/俄语界面照样显示中文。
+  - **缝**：宿主没有 locale 服务，harness 的 `LlmProviderInfo` 也不带语言位。于是由客户端把 `ctx.locale.getSnapshot().active` 镜像到新的 `POST /i18n/locale`（沿用既有同源 POST 校验），宿主侧一个模块级运行时在任何出话时刻读取它。默认语言是 `zh`，没被镜像过的安装保持原话术。
+  - 新增 `src/shared/i18n-contracts.ts`（`zh-CN`→`zh`、`ru-RU`→`ru`、未知→`zh`）与 `src/host/common/i18n/`（运行时、`t()` 插值、三份字典；`en`/`ru` 用 `Record<HostLocaleKey, string>` 由类型强制与中文键集对齐）。
+  - **线路名**：13 个 `providerInfo()` 改走 `localizedProviderName()`；Hub 卡片名与详情页标题改走新增的 `cardName.<id>` 键（三语）。
+  - **文案**：ChatGPT 号池、Antigravity 429、WorkBuddy（登录流程 + 号池）、Qoder（登录 / 令牌 / 额度 / 路由 / 凭据）、Step Code（登录阶段 / 授权地址 / 号池 / 路由 / 凭据）、GLM（额度接口 / 三条 429 冷却 / ZCode 登录全流程 / 路由）的用户可见文案全部入字典；**中文模板逐字保留**，因此既有断言一条未改。
+  - **进度更新**新增 `ru` 语言档（`auto` / `zh` / `en` / `ru`）与 `locale/progress-updates/ru.json`。
+  - 仍为中文（有意保留）：各线路 mapper 与兑换链的**内部诊断**、开发者日志、静态模型目录描述、widget-board 看板文案（后者本身已中英双写在一个字符串里）。
+  - **验证**：`npm run typecheck` 0 错误；全量 Vitest 357 文件 / **6550 项通过**（另有 2 文件 / 9 项跳过）；`lib/` 干净重建后 `npm run build` 与 `npm pack --dry-run` 通过；真机 GUI 三语视觉验收（同 1280×800、深色主题）：中文与改动前逐字一致，English / Русский 下 Hub 卡片名与新增语言档正确切换。
+
 ## 0.54.0 - 2026-11-02
 
 - **[provider parity] 对照官方 Agent / 客户端修复其余线路的能力与性能差异**：
