@@ -27,6 +27,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { t } from '../common/i18n/index.ts'
 import { isSameOriginMutation } from '../common/same-origin.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
@@ -446,14 +447,14 @@ export function registerGlmCodingPlanRoutes(
         if (method !== 'POST') return sendMethodNotAllowed(response)
         if (!isSameOriginMutation(request)) return sendCrossOrigin(response)
         if (accountPool === undefined) {
-          return sendJson(response, 400, { ok: false, error: '账号池未安装。' })
+          return sendJson(response, 400, { ok: false, error: t('glm.poolNotInstalled') })
         }
         const body = await readRequestJson(request)
         const action = typeof body.action === 'string' ? body.action : ''
         if (action === 'strategy') {
           const strategy = body.strategy
           if (strategy !== 'sequential' && strategy !== 'round-robin' && strategy !== 'sticky') {
-            return sendJson(response, 400, { ok: false, error: '未知的轮转策略。' })
+            return sendJson(response, 400, { ok: false, error: t('glm.unknownStrategy') })
           }
           await accountPool.setStrategy(strategy)
           return sendJson(response, 200, { ok: true, value: await readStatus() })
@@ -477,7 +478,7 @@ export function registerGlmCodingPlanRoutes(
             await accountPool.clearCooldown(accountId)
             break
           default:
-            return sendJson(response, 400, { ok: false, error: '未知的账号操作：' + action })
+            return sendJson(response, 400, { ok: false, error: t('glm.unknownAccountAction', { action }) })
         }
         return sendJson(response, 200, { ok: true, value: await readStatus() })
       }
@@ -575,10 +576,10 @@ export function registerGlmCodingPlanRoutes(
         const body = await readRequestJson(request)
         // 请求体带凭据，刻意不在冻结契约里（见 contracts 的文件头），由 host 自行解析。
         const raw = typeof body.code === 'string' ? body.code : ''
-        if (raw.trim() === '') return sendJson(response, 400, { ok: false, error: '请粘贴回调链接或授权码。' })
+        if (raw.trim() === '') return sendJson(response, 400, { ok: false, error: t('glm.pasteCallback') })
         const current = latestLogin ?? getWebLoginStatus()
         if (current === null) {
-          return sendJson(response, 400, { ok: false, error: '当前没有进行中的登录流程，请先点击登录。' })
+          return sendJson(response, 400, { ok: false, error: t('glm.noLoginInProgress') })
         }
         let submitted: GlmWebLogin
         try {
@@ -649,7 +650,7 @@ async function probeConnection(
       account: null,
       model: null,
       checkedAt,
-      error: '还没有登录 ' + PROVIDER_NAME + ' 账号。',
+      error: t('glm.notSignedIn', { provider: PROVIDER_NAME }),
     }
   }
   const region = target.credentials.codingPlan.region

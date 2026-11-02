@@ -34,6 +34,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { t } from '../common/i18n/index.ts'
 import { localizedProviderName } from '../common/i18n/index.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
@@ -175,13 +176,13 @@ export function glmCooldownDecision(input: {
   const resetsAt = readGlmResetAt(input.body)
   if (resetsAt !== undefined) {
     const durationMs = Math.max(30_000, resetsAt - Date.now())
-    return { cooldown: true, durationMs, reason: PROVIDER_NAME + ' 429：用量窗口将于 ' + new Date(resetsAt).toISOString() + ' 重置' }
+    return { cooldown: true, durationMs, reason: t('glm.cooldownUntilReset', { provider: PROVIDER_NAME, at: new Date(resetsAt).toISOString() }) }
   }
   const after = input.headers === undefined ? undefined : retryAfterMs(input.headers)
   if (after !== undefined && after > 0) {
-    return { cooldown: true, durationMs: after, reason: PROVIDER_NAME + ' 429：上游要求 ' + Math.ceil(after / 1000) + ' 秒后再试' }
+    return { cooldown: true, durationMs: after, reason: t('glm.cooldownRetryAfter', { provider: PROVIDER_NAME, seconds: Math.ceil(after / 1000) }) }
   }
-  return { cooldown: true, durationMs: GLM_POOL_COOLDOWN_MS, reason: PROVIDER_NAME + ' 429：上游未给重置时刻，按 5 分钟冷却' }
+  return { cooldown: true, durationMs: GLM_POOL_COOLDOWN_MS, reason: t('glm.cooldownNoReset', { provider: PROVIDER_NAME }) }
 }
 
 /**
@@ -371,7 +372,7 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   }
 
   async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    if (signal?.aborted) throw new LlmError(PROVIDER_NAME + ' 模型解析已取消', 'ABORTED')
+    if (signal?.aborted) throw new LlmError(t('glm.modelResolveAborted', { provider: PROVIDER_NAME }), 'ABORTED')
     const settings = await this.settings()
     const pick = await this.credentialFor().catch(() => null)
     const region: GlmRegion = pick?.credentials.codingPlan.region ?? 'intl'
@@ -473,9 +474,9 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
         // the hand-off, so a slow prefill is not spent from it.
         activity?.pulse()
       } catch (error) {
-        if (signal.aborted) throw new LlmError(PROVIDER_NAME + ' 请求已取消', 'ABORTED', { cause: error })
+        if (signal.aborted) throw new LlmError(t('glm.requestAborted', { provider: PROVIDER_NAME }), 'ABORTED', { cause: error })
         throw new LlmError(
-          PROVIDER_NAME + ' 请求失败：' + (error instanceof Error ? error.message : String(error)),
+          t('glm.requestFailed', { provider: PROVIDER_NAME, detail: error instanceof Error ? error.message : String(error) }),
           'TRANSPORT',
           { cause: error },
         )
@@ -518,8 +519,8 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
     }
 
     const settled = plan!
-    if (response === undefined) throw new LlmError(PROVIDER_NAME + ' 没有返回任何响应', 'PROVIDER_ERROR')
-    if (response.body === null) throw new LlmError(PROVIDER_NAME + ' 返回了空响应体', 'PROVIDER_ERROR')
+    if (response === undefined) throw new LlmError(t('glm.noResponse', { provider: PROVIDER_NAME }), 'PROVIDER_ERROR')
+    if (response.body === null) throw new LlmError(t('glm.emptyBody', { provider: PROVIDER_NAME }), 'PROVIDER_ERROR')
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -554,7 +555,7 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
         if (state.finished) return
         // 没有终止事件就结束的流是被截断的回复，不是一份完整答案。
         if (!glmStreamHasContent(state)) {
-          throw new LlmError(PROVIDER_NAME + ' 的 Anthropic 面没有返回任何内容', 'PROVIDER_ERROR')
+          throw new LlmError(t('glm.anthropicEmpty', { provider: PROVIDER_NAME }), 'PROVIDER_ERROR')
         }
         assertGlmStreamComplete(state)
         for (const chunk of closeGlmAnthropicStream(state)) yield chunk

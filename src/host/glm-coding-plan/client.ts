@@ -28,6 +28,7 @@ import type {
   GlmQuotaWindowKey,
   GlmRegion,
 } from '../../shared/glm-coding-plan-contracts.ts'
+import { t } from '../common/i18n/index.ts'
 import { quotaResetMs } from '../common/account-quota.ts'
 import {
   CATALOG_CACHE_TTL_MS,
@@ -154,7 +155,7 @@ export function glmOpenAiProbeHeaders(codingPlanKey: string): Record<string, str
 export function quotaRequestHeaders(codingPlanKey: string): Record<string, string> {
   const key = codingPlanKey.trim()
   if (key === '') {
-    throw new Error(failure('的配额接口需要一把 Coding Plan Key（裸值，不加 Bearer）；空凭据不会变成一个能通过鉴权的请求。'))
+    throw new Error(failure(t('glm.quotaNeedsKey', { provider: PROVIDER_NAME })))
   }
   return {
     'content-type': 'application/json',
@@ -273,7 +274,7 @@ export async function fetchCatalog(
   try {
     payload = JSON.parse(text) as unknown
   } catch {
-    throw new Error(failure('返回的模型目录不是可读的 JSON：' + url))
+    throw new Error(failure(t('glm.catalogNotJson', { provider: PROVIDER_NAME, url })))
   }
   return parseCatalogListing(payload, region)
 }
@@ -644,7 +645,7 @@ export async function fetchGlmQuota(
   options: GlmRequestOptions & { accountId?: string; force?: boolean } = {},
 ): Promise<GlmQuotaRead> {
   if (codingPlanKey.trim() === '') {
-    throw new Error(failure('的配额读取需要一把 Coding Plan Key（裸值，不加 Bearer）。'))
+    throw new Error(failure(t('glm.quotaNeedsKeyShort', { provider: PROVIDER_NAME })))
   }
   const accountId = options.accountId
   const cached = quotaEntryFor(accountId)
@@ -671,7 +672,7 @@ export async function fetchGlmQuota(
     } catch (error) {
       return {
         snapshot: null,
-        error: failure('配额接口不可达：' + (error instanceof Error ? error.message : String(error))),
+        error: failure(t('glm.quotaUnreachable', { detail: error instanceof Error ? error.message : String(error) })),
         fromCache: false,
       }
     }
@@ -680,7 +681,7 @@ export async function fetchGlmQuota(
       const detail = summarize(text)
       return {
         snapshot: null,
-        error: failure('配额查询失败（HTTP ' + response.status + '）')
+        error: failure(t('glm.quotaHttp', { status: response.status }))
           + (detail === '' ? '' : '：' + detail),
         fromCache: false,
       }
@@ -689,7 +690,7 @@ export async function fetchGlmQuota(
     try {
       payload = JSON.parse(text) as unknown
     } catch {
-      return { snapshot: null, error: failure('配额查询返回的不是 JSON。'), fromCache: false }
+      return { snapshot: null, error: failure(t('glm.quotaNotJson')), fromCache: false }
     }
 
     // 尽力而为的第二段：套餐名与续费时刻。它失败时窗口照样有效。
@@ -706,7 +707,7 @@ export async function fetchGlmQuota(
       // 或窗口行全部被丢弃（未知 `unit` 一律丢、`TIME_LIMIT` 是 MCP 请求上限不是套餐窗口）。
       return {
         snapshot: null,
-        error: failure('上游没有返回可显示的额度窗口。'),
+        error: failure(t('glm.quotaNoWindow')),
         fromCache: false,
       }
     }

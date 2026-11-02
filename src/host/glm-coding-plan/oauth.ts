@@ -35,6 +35,7 @@
 
 import { randomBytes, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { t } from '../common/i18n/index.ts'
 import type { GlmLoginFlowStatus, GlmRegion } from '../../shared/glm-coding-plan-contracts.ts'
 import {
   CLI_INIT_RESPONSE_FIELDS,
@@ -332,32 +333,32 @@ export async function pollCliFlow(
   } catch (error) {
     // 调用方主动取消时原样抛出：那不是「上游没结论」，不要把取消吞成 pending。
     if (options.signal?.aborted === true) throw error
-    return { kind: 'pending', progress: '连接上游失败，正在重试…' }
+    return { kind: 'pending', progress: t('glm.connectingUpstream') }
   }
 
   const payload: unknown = await response.json().catch(() => undefined)
 
   if (response.status >= 500) {
-    return { kind: 'pending', progress: '上游暂时不可用（HTTP ' + response.status + '），正在重试…' }
+    return { kind: 'pending', progress: t('glm.upstreamUnavailable', { status: response.status }) }
   }
   if (!response.ok) {
     // 408/429 是「再等等」的信号（上游自己在限流或处理超时），其余 4xx 一律致命。
     if (response.status === 408 || response.status === 429) {
-      return { kind: 'pending', progress: '上游要求稍后再试（HTTP ' + response.status + '），正在重试…' }
+      return { kind: 'pending', progress: t('glm.upstreamRetryLater', { status: response.status }) }
     }
-    throw new GlmLoginFatalError('ZCode 登录轮询被拒绝（HTTP ' + response.status + '）：' + url)
+    throw new GlmLoginFatalError(t('glm.pollRejected', { status: response.status, url }))
   }
 
   const root = asRecord(payload)
   if (root === undefined) {
-    return { kind: 'pending', progress: '上游返回了无法解析的响应，正在重试…' }
+    return { kind: 'pending', progress: t('glm.unparsableRetry') }
   }
 
   const code = readEnvelopeCode(root)
   if (code !== undefined && code !== 0 && code !== '0') {
     const message = asString(root.msg) ?? asString(root.message)
     throw new GlmLoginFatalError(
-      'ZCode 登录轮询返回业务错误码 ' + String(code) + (message === undefined ? '' : '：' + message),
+      t('glm.pollBusinessCode', { code: String(code), detail: message === undefined ? '' : '：' + message }),
     )
   }
 
@@ -365,13 +366,13 @@ export async function pollCliFlow(
   const status = body === undefined ? undefined : asString(body[CLI_READY_FIELDS.status])
 
   if (status === CLI_PENDING_STATUS) {
-    return { kind: 'pending', progress: '等待你在浏览器里完成授权…' }
+    return { kind: 'pending', progress: t('glm.waitingBrowser') }
   }
   if (status === CLI_READY_STATUS) {
     const credentials = parseReadyCredentials(root, flow.region, Date.now())
     if (credentials === null) {
       // 就绪却没有可用的 access_token：上游改了载荷形状，属于畸形 200，按 pending 重试。
-      return { kind: 'pending', progress: '就绪响应缺少 access_token，正在重试…' }
+      return { kind: 'pending', progress: t('glm.readyNoToken') }
     }
     return { kind: 'ready', credentials }
   }
@@ -482,7 +483,7 @@ export async function beginWebLogin(options: BeginWebLoginOptions = {}): Promise
         startedAt: now,
         expiresAt: init.expiresAt,
         pollIntervalSec: init.pollIntervalSec,
-        progress: '等待你在浏览器里完成授权…',
+        progress: t('glm.waitingBrowser'),
       },
     }
     loginSessions.set(loginId, session)
@@ -556,7 +557,7 @@ export async function pollWebLogin(
       loginId,
       credentials: null,
       status: 'error',
-      error: '这次登录已经取消或已经过期，请重新发起登录。',
+      error: t('glm.sessionCancelled'),
       retryable: false,
     }
   }
@@ -570,7 +571,7 @@ export async function pollWebLogin(
       ...session.status,
       status: 'error',
       progress: undefined,
-      error: '登录超时：上游在 ' + new Date(session.deadline).toISOString() + ' 之前没有完成授权。',
+      error: t('glm.loginTimeout', { at: new Date(session.deadline).toISOString() }),
       retryable: false,
     }
     return snapshot(session)
@@ -700,7 +701,7 @@ export function submitLoginCode(raw: string, options: { loginId?: string } = {})
   const id = options.loginId ?? latestLoginId
   const session = id === null || id === undefined ? undefined : loginSessions.get(id)
   if (session === undefined || session.status.status !== 'pending') {
-    throw new Error('当前没有进行中的 GLM 登录流程可供补全。')
+    throw new Error(t('glm.noSession'))
   }
 
   const denial = extractAuthorizationError(raw)
@@ -711,7 +712,7 @@ export function submitLoginCode(raw: string, options: { loginId?: string } = {})
       ...session.status,
       status: 'error',
       progress: undefined,
-      error: '授权被拒绝：' + denial,
+      error: t('glm.authorizationDenied', { denial }),
       retryable: false,
     }
     return snapshot(session)
@@ -719,12 +720,12 @@ export function submitLoginCode(raw: string, options: { loginId?: string } = {})
 
   const code = extractAuthorizationCode(raw)
   if (code === '') {
-    throw new Error('这看起来不是授权码，也不是完整的回调链接（里面没有 code 参数）。')
+    throw new Error(t('glm.notAuthorizationCode'))
   }
   // code 是凭据：只留在会话内部，不进状态快照、不进任何错误消息。
   session.manualCode = code
   session.nextPollAt = 0
-  session.status = { ...session.status, progress: '已收到回调，正在向上游确认…' }
+  session.status = { ...session.status, progress: t('glm.callbackReceived') }
   return snapshot(session)
 }
 
