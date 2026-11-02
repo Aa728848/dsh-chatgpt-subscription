@@ -140,6 +140,17 @@ function RetrievalMark(): ReactNode {
   )
 }
 
+/** 等待缓存续热那一行的标记：带循环刷新弧线的时钟（周期续热保活）。 */
+function CacheWaitWarmupMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M16.5 10a6.5 6.5 0 1 1-1.9-4.6" />
+      <path d="M16.5 3.8v2.8h-2.8" />
+      <path d="M10 6.8V10l2.2 1.4" />
+    </svg>
+  )
+}
+
 /** 计划模式管线那一行的标记：一份带勾的计划（计划先出、再交审批）。 */
 function PlanModeMark(): ReactNode {
   return (
@@ -236,7 +247,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline' | 'dispatchExecutionGuard', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -244,6 +255,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   const enabled = value.progressUpdates !== false
   const cacheWarmup = value.cacheWarmup !== false
   const retrieval = value.cacheWarmupRetrieval !== false
+  const cacheWaitWarmup = value.cacheWaitWarmup !== false
   // 缺键 = 开：宿主 schema 上是 `default(true)`，老配置没有这个键时界面必须同样
   // 读成开，否则用户看到的是关着、而调度模式其实照旧自动进计划模式。
   const planModePipeline = value.planModePipeline !== false
@@ -269,7 +281,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'planModePipeline' | 'dispatchExecutionGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -389,6 +401,27 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-retrieval-switch"
             disabled={!writable}
             onClick={() => { write('retrieval', 'cacheWarmupRetrieval', !retrieval) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-cache-wait-warmup"
+          brand="#d97724"
+          mark={<CacheWaitWarmupMark />}
+          name={translate('settingsCacheWaitWarmupName')}
+          note={failure?.row === 'cacheWaitWarmup' ? failure.text : translate('settingsCacheWaitWarmupNote')}
+          danger={failure?.row === 'cacheWaitWarmup'}
+          enabled={cacheWaitWarmup}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={cacheWaitWarmup}
+            aria-label={translate('settingsCacheWaitWarmupName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-cache-wait-warmup-switch"
+            disabled={!writable}
+            onClick={() => { write('cacheWaitWarmup', 'cacheWaitWarmup', !cacheWaitWarmup) }}
           />
         </CardRow>
 

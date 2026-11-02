@@ -62,6 +62,8 @@ export interface ProgressUpdatesSettingsValues {
   cacheWarmup?: boolean
   /** 检索型结果投影独立开关（默认开启）。 */
   cacheWarmupRetrieval?: boolean
+  /** 等待子代理期间的缓存持续续热开关（缺键 = 开）。 */
+  cacheWaitWarmup?: boolean
   /**
    * 计划模式管线开关（缺键 = 开）。
    *
@@ -90,6 +92,7 @@ export type ProgressUpdatesField =
   | 'progressUpdatesLanguage'
   | 'cacheWarmup'
   | 'cacheWarmupRetrieval'
+  | 'cacheWaitWarmup'
   | 'planModePipeline'
   | 'dispatchExecutionGuard'
 

@@ -6,6 +6,7 @@ import {
   KimiCacheWaitController,
   cacheWaitWarmupEnabled,
   evaluateCacheWait,
+  resolveCacheWaitWarmupEnabled,
   type CacheWaitSession,
   type CacheWaitTimer,
 } from '../src/host/kimi-code/cache-wait.ts'
@@ -67,7 +68,7 @@ function turn(type: 'turn/start' | 'turn/end', turnNumber = 1) {
 }
 
 function harness(options: {
-  warmup?: boolean
+  warmup?: boolean | (() => boolean)
   totalTokens?: number
   provider?: string
   steerError?: Error
@@ -102,34 +103,34 @@ describe('evaluateCacheWait', () => {
       now: 10 * 60 * 1000,
       lastActiveAt: 0,
       warmupEnabled: false,
-      warmupUsed: false,
     })).toEqual({ kind: 'schedule', delayMs: 10 * 60 * 1000 })
   })
 
   it('does nothing while the parent works or no child is pending', () => {
-    expect(evaluateCacheWait({ waiting: false, hasChildren: true, now: 0, lastActiveAt: 0, warmupEnabled: true, warmupUsed: false }).kind).toBe('none')
-    expect(evaluateCacheWait({ waiting: true, hasChildren: false, now: 0, lastActiveAt: 0, warmupEnabled: true, warmupUsed: false }).kind).toBe('none')
+    expect(evaluateCacheWait({ waiting: false, hasChildren: true, now: 0, lastActiveAt: 0, warmupEnabled: true }).kind).toBe('none')
+    expect(evaluateCacheWait({ waiting: true, hasChildren: false, now: 0, lastActiveAt: 0, warmupEnabled: true }).kind).toBe('none')
   })
 
-  it('allows cold recovery by default and after TTL, without treating it as failure', () => {
+  it('allows cold recovery when disabled or after TTL, without treating it as failure', () => {
     expect(evaluateCacheWait({
       waiting: true, hasChildren: true, now: CACHE_WAIT_DECISION_MS, lastActiveAt: 0,
-      totalTokens: MIN_TOKENS_TO_HINT, warmupEnabled: false, warmupUsed: false,
+      totalTokens: MIN_TOKENS_TO_HINT, warmupEnabled: false,
     }).kind).toBe('cold')
     expect(evaluateCacheWait({
       waiting: true, hasChildren: true, now: CACHE_TTL_MS, lastActiveAt: 0,
-      totalTokens: MIN_TOKENS_TO_HINT, warmupEnabled: true, warmupUsed: false,
+      totalTokens: MIN_TOKENS_TO_HINT, warmupEnabled: true,
     }).kind).toBe('cold')
   })
 
-  it('only offers warmup for an opted-in large context that has not used it', () => {
+  it('warms contexts of any size by default when enabled and not failed', () => {
     const base = {
       waiting: true, hasChildren: true, now: CACHE_WAIT_DECISION_MS, lastActiveAt: 0,
-      totalTokens: MIN_TOKENS_TO_HINT, warmupEnabled: true, warmupUsed: false,
+      totalTokens: 1_000, warmupEnabled: true,
     }
     expect(evaluateCacheWait(base).kind).toBe('warmup')
-    expect(evaluateCacheWait({ ...base, totalTokens: MIN_TOKENS_TO_HINT - 1 }).kind).toBe('cold')
-    expect(evaluateCacheWait({ ...base, warmupUsed: true }).kind).toBe('cold')
+    expect(evaluateCacheWait({ ...base, totalTokens: undefined }).kind).toBe('warmup')
+    expect(evaluateCacheWait({ ...base, warmupFailed: true }).kind).toBe('cold')
+    expect(evaluateCacheWait({ ...base, minWarmupTokens: MIN_TOKENS_TO_HINT, totalTokens: MIN_TOKENS_TO_HINT - 1 }).kind).toBe('cold')
   })
 })
 
@@ -159,8 +160,8 @@ describe('KimiCacheWaitController', () => {
     expect(h.clock.nextAt).toBe(h.activity.lastActiveAt + CACHE_WAIT_DECISION_MS)
   })
 
-  it('uses the default cold path without injecting any request or creating another timer', () => {
-    const h = harness()
+  it('uses the cold path when warmup is disabled without injecting any request or creating another timer', () => {
+    const h = harness({ warmup: false })
     h.controller.observe(h.parent, catalog())
     h.controller.observe(h.parent, turn('turn/end'))
     h.clock.advance(CACHE_WAIT_DECISION_MS)
@@ -169,32 +170,47 @@ describe('KimiCacheWaitController', () => {
     expect(h.clock.pending).toBe(0)
   })
 
-  it('allows one opt-in warmup and admits its message through the real Session boundary', () => {
-    const h = harness({ warmup: true })
+  it('continuously warms every 20 minutes while children remain running and admits its message through the Session boundary', () => {
+    const h = harness({ warmup: true, totalTokens: 12_000 })
     h.controller.observe(h.parent, catalog())
     h.controller.observe(h.parent, turn('turn/end'))
     h.clock.advance(CACHE_WAIT_DECISION_MS)
     expect(h.agent.steer).toHaveBeenCalledTimes(1)
-    expect(h.controller.snapshot(PARENT)).toMatchObject({ warmupUsed: true, lastDecision: 'warmup' })
+    expect(h.controller.snapshot(PARENT)).toMatchObject({ warmupUsed: true, warmupCount: 1, lastDecision: 'warmup' })
     expect(() => adoptSessionEvent({
       type: 'user/message', seq: 0 as never, time: 0, surfaceOp: 'append', data: h.agent.steer.mock.calls[0]![0] as never,
     } as never)).not.toThrow()
 
-    // Replayed catalog facts and the warmup's own turn do not re-arm the
-    // one-shot allowance or become a periodic keepalive loop.
-    h.controller.observe(h.parent, catalog())
+    // The warmup turn itself completes while the child is still running: it must
+    // re-arm the 20-minute timer and fire a second keepalive warmup at 40m.
     h.controller.observe(h.parent, turn('turn/start', 2))
+    h.activity.lastActiveAt = h.clock.now
     h.controller.observe(h.parent, turn('turn/end', 2))
+    expect(h.controller.snapshot(PARENT)).toMatchObject({ waiting: true, scheduled: true, warmupCount: 1 })
+    expect(h.clock.nextAt).toBe(2 * CACHE_WAIT_DECISION_MS)
+
     h.clock.advance(CACHE_WAIT_DECISION_MS)
-    expect(h.agent.steer).toHaveBeenCalledTimes(1)
+    expect(h.agent.steer).toHaveBeenCalledTimes(2)
+    expect(h.controller.snapshot(PARENT)).toMatchObject({ warmupUsed: true, warmupCount: 2, lastDecision: 'warmup' })
+
+    // Third cycle at 60m while child still runs:
+    h.controller.observe(h.parent, turn('turn/start', 3))
+    h.activity.lastActiveAt = h.clock.now
+    h.controller.observe(h.parent, turn('turn/end', 3))
+    h.clock.advance(CACHE_WAIT_DECISION_MS)
+    expect(h.agent.steer).toHaveBeenCalledTimes(3)
+    expect(h.controller.snapshot(PARENT).warmupCount).toBe(3)
   })
 
-  it('does not warm a small context or a session that is no longer on Kimi', () => {
-    const small = harness({ warmup: true, totalTokens: MIN_TOKENS_TO_HINT - 1 })
-    small.controller.observe(small.parent, catalog())
-    small.controller.observe(small.parent, turn('turn/end'))
-    small.clock.advance(CACHE_WAIT_DECISION_MS)
-    expect(small.agent.steer).not.toHaveBeenCalled()
+  it('does not warm a session that is not on Kimi, and respects a live warmup getter', () => {
+    let liveEnabled = true
+    const dynamic = harness({ warmup: () => liveEnabled, totalTokens: 8_000 })
+    dynamic.controller.observe(dynamic.parent, catalog())
+    dynamic.controller.observe(dynamic.parent, turn('turn/end'))
+    liveEnabled = false
+    dynamic.clock.advance(CACHE_WAIT_DECISION_MS)
+    expect(dynamic.agent.steer).not.toHaveBeenCalled()
+    expect(dynamic.controller.snapshot(PARENT).lastDecision).toBe('cold')
 
     const other = harness({ warmup: true, provider: 'codex-chatgpt' })
     other.controller.observe(other.parent, catalog())
@@ -215,7 +231,7 @@ describe('KimiCacheWaitController', () => {
     expect(h.clock.pending).toBe(0)
   })
 
-  it('contains warmup failures and still refuses a second attempt', () => {
+  it('contains warmup failures and refuses a second attempt in the same batch', () => {
     const warn = vi.fn()
     const clock = new ManualClock()
     const agent = { id: PARENT, steer: vi.fn(() => { throw new Error('closed') }) }
@@ -230,7 +246,7 @@ describe('KimiCacheWaitController', () => {
     controller.observe(parent, turn('turn/end'))
     clock.advance(CACHE_WAIT_DECISION_MS)
     expect(warn).toHaveBeenCalledTimes(1)
-    expect(controller.snapshot(PARENT)).toMatchObject({ warmupUsed: true, lastDecision: 'warmup', scheduled: false })
+    expect(controller.snapshot(PARENT)).toMatchObject({ warmupUsed: true, warmupCount: 0, lastDecision: 'warmup', scheduled: false })
     expect(clock.pending).toBe(0)
   })
 
@@ -244,10 +260,15 @@ describe('KimiCacheWaitController', () => {
   })
 })
 
-describe('cacheWaitWarmupEnabled', () => {
-  it('is opt-in and accepts only explicit truthy values', () => {
-    expect(cacheWaitWarmupEnabled({})).toBe(false)
+describe('cacheWaitWarmupEnabled & resolveCacheWaitWarmupEnabled', () => {
+  it('defaults to enabled and honors config and environment overrides', () => {
+    expect(cacheWaitWarmupEnabled({})).toBe(true)
     expect(cacheWaitWarmupEnabled({ [CACHE_WAIT_WARMUP_ENV]: '1' })).toBe(true)
     expect(cacheWaitWarmupEnabled({ [CACHE_WAIT_WARMUP_ENV]: 'off' })).toBe(false)
+    expect(cacheWaitWarmupEnabled({ [CACHE_WAIT_WARMUP_ENV]: '0' })).toBe(false)
+    expect(resolveCacheWaitWarmupEnabled({ cacheWaitWarmup: false }, {})).toBe(false)
+    expect(resolveCacheWaitWarmupEnabled({ cacheWaitWarmup: { get: () => false } }, {})).toBe(false)
+    expect(resolveCacheWaitWarmupEnabled({ cacheWaitWarmup: { get: () => true } }, {})).toBe(true)
+    expect(resolveCacheWaitWarmupEnabled({ cacheWaitWarmup: false }, { [CACHE_WAIT_WARMUP_ENV]: '1' })).toBe(true)
   })
 })

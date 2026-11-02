@@ -346,6 +346,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.querySelector('[data-dsh-part="settings-row-enabled"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-cache-warmup"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-retrieval"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-cache-wait-warmup"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-plan-mode-pipeline"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-dispatch-execution-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
@@ -355,6 +356,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.textContent).toContain(zh.settingsEnabledName)
     expect(container.textContent).toContain(zh.settingsCacheWarmupName)
     expect(container.textContent).toContain(zh.settingsRetrievalName)
+    expect(container.textContent).toContain(zh.settingsCacheWaitWarmupName)
     expect(container.textContent).toContain(zh.settingsPlanModePipelineName)
     expect(container.textContent).toContain(zh.settingsDispatchExecutionGuardName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
@@ -362,7 +364,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(8)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(9)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -411,18 +413,21 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(form.writes).toEqual([['progressUpdates', true], ['progressUpdatesNudgeThreshold', 12]])
   })
 
-  it('缓存开关分别写 cacheWarmup 与 cacheWarmupRetrieval，显式关闭时回显关闭', async () => {
-    const form = fakeForm({ cacheWarmup: true, cacheWarmupRetrieval: false })
+  it('缓存开关分别写 cacheWarmup、cacheWarmupRetrieval 与 cacheWaitWarmup，显式关闭时回显关闭', async () => {
+    const form = fakeForm({ cacheWarmup: true, cacheWarmupRetrieval: false, cacheWaitWarmup: true })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
       openPanel: vi.fn(), close: vi.fn(), settings: form,
     } as never)))
     const cache = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-cache-warmup-switch"]')!
     const retrieval = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-retrieval-switch"]')!
+    const waitWarmup = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-cache-wait-warmup-switch"]')!
     expect(cache.getAttribute('aria-checked')).toBe('true')
     expect(retrieval.getAttribute('aria-checked')).toBe('false')
+    expect(waitWarmup.getAttribute('aria-checked')).toBe('true')
     await act(async () => { cache.click() })
     await act(async () => { retrieval.click() })
-    expect(form.writes).toEqual([['cacheWarmup', false], ['cacheWarmupRetrieval', true]])
+    await act(async () => { waitWarmup.click() })
+    expect(form.writes).toEqual([['cacheWarmup', false], ['cacheWarmupRetrieval', true], ['cacheWaitWarmup', false]])
   })
 
   it('计划模式管线开关缺键时读成开，显式关闭时回显关闭', async () => {
@@ -520,6 +525,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-cache-warmup-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-retrieval-switch"]')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-cache-wait-warmup-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-plan-mode-pipeline-switch"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLInputElement>('[data-dsh-part="settings-threshold"]')?.disabled).toBe(true)
     expect(container.querySelector<HTMLSelectElement>('[data-dsh-part="settings-language"]')?.disabled).toBe(true)

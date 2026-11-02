@@ -213,8 +213,9 @@ import {
 } from './host/cache-warmup/install.ts'
 import { sessionCacheState } from './host/kimi-code/session-cache-state.ts'
 import {
-  cacheWaitWarmupEnabled,
+  CACHE_WAIT_WARMUP_SETTING_DESCRIPTION,
   installKimiCacheWait,
+  resolveCacheWaitWarmupEnabled,
   type KimiCacheWaitContext,
 } from './host/kimi-code/cache-wait.ts'
 import {
@@ -314,6 +315,12 @@ export interface Config {
    * 与总开关一样**只对 Kimi Code 线路生效**，其他线路不受影响。
    */
   cacheWarmupRetrieval?: Volatile<boolean>
+  /**
+   * 「等待缓存续热」开关：Kimi Code 线路上主会话等待子代理完成期间，每空闲满
+   * 20 分钟自动触发一次轻量续热，只要子代理仍在运行就持续续热以防 25 分钟缓存
+   * 过期重建。默认开启。
+   */
+  cacheWaitWarmup?: Volatile<boolean>
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
   fetchProvider?: 'auto' | 'plugin' | 'dsh'
@@ -432,6 +439,8 @@ export interface ConfigInput {
   cacheWarmup?: boolean
   /** 检索型结果投影独立开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmupRetrieval?: boolean
+  /** 「等待缓存续热」开关（默认开启；等待子代理期间每 20 分钟持续触发续热）。 */
+  cacheWaitWarmup?: boolean
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
   /**
@@ -488,6 +497,8 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description(CACHE_WARMUP_SETTING_DESCRIPTION),
   cacheWarmupRetrieval: z.boolean().default(true).volatile()
     .description(CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION),
+  cacheWaitWarmup: z.boolean().default(true).volatile()
+    .description(CACHE_WAIT_WARMUP_SETTING_DESCRIPTION),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
@@ -860,10 +871,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
 
   // Parent waiting is separate from provider cache lifetime. The controller
   // watches turn and delegation events, never imposes a deadline on a child,
-  // and only offers one opt-in warmup for a large context per delegation batch.
+  // and continuously warms the parent cache every 20 minutes while children run.
   ctx.effect(() => {
     const dispose = installKimiCacheWait(ctx as unknown as KimiCacheWaitContext, {
-      warmup: cacheWaitWarmupEnabled(process.env),
+      warmup: () => resolveCacheWaitWarmupEnabled(pluginConfig, process.env),
     })
     if (dispose === undefined) {
       ctx.logger.warn('[dsh-chatgpt-subscription] Kimi cache wait skipped: this harness exposes no event bus')

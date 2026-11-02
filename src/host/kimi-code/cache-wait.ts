@@ -1,12 +1,17 @@
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
-import { CACHE_TTL_MS, MIN_TOKENS_TO_HINT, sessionLastActiveAt } from './cache-hint.ts'
+import { CACHE_TTL_MS, sessionLastActiveAt } from './cache-hint.ts'
 import { sessionCacheState } from './session-cache-state.ts'
 
 /** When an idle parent reaches its cache decision point (five minutes before TTL). */
 export const CACHE_WAIT_DECISION_MS = 20 * 60 * 1000
-/** Opt-in switch for one bounded warmup during a delegation batch. */
+/** Minimum prompt tokens required before a wait warmup is sent (0 = any active context). */
+export const DEFAULT_MIN_WARMUP_TOKENS = 0
+/** Environment override for wait-time cache keepalive warmup. */
 export const CACHE_WAIT_WARMUP_ENV = 'DSH_KIMI_CODE_CACHE_WAIT_WARMUP'
+/** Settings description for the progress-updates / Kimi cache-wait switch. */
+export const CACHE_WAIT_WARMUP_SETTING_DESCRIPTION =
+  'Kimi Code 专用：等待子代理完成期间，主会话每空闲满 20 分钟自动触发一次轻量缓存续热，只要子代理仍在运行就持续续热以防 25 分钟缓存过期重建；非 Kimi 线路开关无影响。'
 const MAX_TRACKED_SESSIONS = 256
 
 export interface CacheWaitSession {
@@ -44,8 +49,8 @@ export interface CacheWaitLogger {
 }
 
 export interface CacheWaitOptions {
-  /** Allow one opt-in warmup for a large context. Disabled by default. */
-  readonly warmup?: boolean
+  /** Whether wait-time cache warmup is enabled (boolean or live getter). Enabled by default. */
+  readonly warmup?: boolean | (() => boolean)
   readonly now?: () => number
   readonly timer?: CacheWaitTimer
   readonly agents?: CacheWaitAgents
@@ -64,7 +69,7 @@ export interface CacheWaitEvaluation {
   readonly lastActiveAt?: number
   readonly totalTokens?: number
   readonly warmupEnabled: boolean
-  readonly warmupUsed: boolean
+  readonly warmupFailed?: boolean
   readonly decisionMs?: number
   readonly ttlMs?: number
   readonly minWarmupTokens?: number
@@ -82,21 +87,17 @@ export function evaluateCacheWait(input: CacheWaitEvaluation): CacheWaitAction {
   if (!Number.isFinite(input.lastActiveAt) || !Number.isFinite(input.now)) return { kind: 'none' }
   const decisionMs = input.decisionMs ?? CACHE_WAIT_DECISION_MS
   const ttlMs = input.ttlMs ?? CACHE_TTL_MS
-  const minWarmupTokens = input.minWarmupTokens ?? MIN_TOKENS_TO_HINT
+  const minWarmupTokens = input.minWarmupTokens ?? DEFAULT_MIN_WARMUP_TOKENS
   const idleMs = Math.max(0, input.now - input.lastActiveAt)
   if (idleMs >= ttlMs) return { kind: 'cold' }
   if (idleMs < decisionMs) return { kind: 'schedule', delayMs: decisionMs - idleMs }
-  if (
-    input.warmupEnabled
-    && !input.warmupUsed
-    && input.totalTokens !== undefined
-    && Number.isFinite(input.totalTokens)
-    && input.totalTokens >= minWarmupTokens
-  ) return { kind: 'warmup' }
+  const tokensOk = minWarmupTokens <= 0
+    || (input.totalTokens !== undefined && Number.isFinite(input.totalTokens) && input.totalTokens >= minWarmupTokens)
+  if (input.warmupEnabled && !input.warmupFailed && tokensOk) return { kind: 'warmup' }
   return { kind: 'cold' }
 }
 
-/** The one opt-in message, built through the generation-safe harness factory. */
+/** The keepalive warmup message, built through the generation-safe harness factory. */
 export function createCacheWaitWarmupMessage(): unknown {
   return createUserMessage({
     content: [{
@@ -111,10 +112,35 @@ export function createCacheWaitWarmupMessage(): unknown {
   })
 }
 
-/** Whether the deployment explicitly opted into bounded warmup. */
-export function cacheWaitWarmupEnabled(env: Record<string, string | undefined> = process.env): boolean {
+/**
+ * Resolve whether wait-time cache warmup is enabled from config and environment.
+ *
+ * Enabled by default (`true`). An explicit environment variable (`0`/`false`/`no`/`off`
+ * or `1`/`true`/`yes`/`on`) overrides when set; otherwise the live `cacheWaitWarmup`
+ * setting (default `true`) governs.
+ */
+export function resolveCacheWaitWarmupEnabled(
+  config?: { cacheWaitWarmup?: { get(): boolean | undefined } | boolean },
+  env: Record<string, string | undefined> = process.env,
+): boolean {
   const raw = env[CACHE_WAIT_WARMUP_ENV]?.trim().toLowerCase()
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on'
+  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off') return false
+  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on') return true
+  const field = config?.cacheWaitWarmup
+  if (field === undefined || field === null) return true
+  if (typeof field === 'object' && typeof (field as { get(): boolean | undefined }).get === 'function') {
+    try {
+      return (field as { get(): boolean | undefined }).get() !== false
+    } catch {
+      return true
+    }
+  }
+  return field !== false
+}
+
+/** Whether wait-time warmup is enabled from environment overrides (default true). */
+export function cacheWaitWarmupEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return resolveCacheWaitWarmupEnabled(undefined, env)
 }
 
 interface WaitState {
@@ -122,6 +148,9 @@ interface WaitState {
   waiting: boolean
   handled: boolean
   warmupUsed: boolean
+  warmupCount: number
+  warmupFailed: boolean
+  lastWarmupAt?: number
   timer?: unknown
   lastDecision?: 'cold' | 'warmup'
 }
@@ -131,6 +160,7 @@ export interface CacheWaitSnapshot {
   readonly childCount: number
   readonly handled: boolean
   readonly warmupUsed: boolean
+  readonly warmupCount: number
   readonly scheduled: boolean
   readonly lastDecision?: 'cold' | 'warmup'
 }
@@ -188,7 +218,7 @@ export class KimiCacheWaitController {
   private readonly agents?: CacheWaitAgents
   private readonly activity: (sessionId: string) => CacheWaitActivity | undefined
   private readonly kimiSession?: (session: CacheWaitSession) => boolean
-  private readonly warmup: boolean
+  private readonly warmup: () => boolean
   private readonly logger?: CacheWaitLogger
   private readonly decisionMs: number
   private readonly ttlMs: number
@@ -201,11 +231,14 @@ export class KimiCacheWaitController {
     this.agents = options.agents
     this.activity = options.activity ?? defaultActivity
     this.kimiSession = options.kimiSession
-    this.warmup = options.warmup === true
+    const warmupOption = options.warmup
+    this.warmup = typeof warmupOption === 'function'
+      ? warmupOption
+      : () => (warmupOption ?? true)
     this.logger = options.logger
     this.decisionMs = options.decisionMs ?? CACHE_WAIT_DECISION_MS
     this.ttlMs = options.ttlMs ?? CACHE_TTL_MS
-    this.minWarmupTokens = options.minWarmupTokens ?? MIN_TOKENS_TO_HINT
+    this.minWarmupTokens = options.minWarmupTokens ?? DEFAULT_MIN_WARMUP_TOKENS
   }
 
   /** Observe one durable Session event. */
@@ -229,6 +262,9 @@ export class KimiCacheWaitController {
         this.parentByChild.set(childId, session.id)
         if (newChild) {
           state.warmupUsed = false
+          state.warmupCount = 0
+          state.warmupFailed = false
+          state.lastWarmupAt = undefined
           state.handled = false
         }
         this.reconcile(session, state)
@@ -250,9 +286,8 @@ export class KimiCacheWaitController {
         return
       }
       if (type === 'turn/end') {
-        // A natural child report follows this same path: the parent handles it,
-        // produces real model activity, and the next turn/end re-arms from that
-        // later timestamp. No synthetic checkpoint is needed.
+        // Every completed turn (including a warmup turn or a natural child report)
+        // re-arms the 20-minute wait timer while any child subagent remains active.
         state.waiting = true
         state.handled = false
         this.reconcile(session, state)
@@ -260,6 +295,11 @@ export class KimiCacheWaitController {
     } catch (error) {
       this.logger?.warn(`kimi-cache-wait: ignored an invalid event: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /** Forget a settled child run (completed, error, aborted, refusal, max-tokens). */
+  settleChild(info: { readonly id?: unknown } | undefined): void {
+    this.removeChild(text(info?.id))
   }
 
   /** Forget a disposed Agent and any parent/child links it owned. */
@@ -279,6 +319,7 @@ export class KimiCacheWaitController {
       childCount: state?.children.size ?? 0,
       handled: state?.handled ?? false,
       warmupUsed: state?.warmupUsed ?? false,
+      warmupCount: state?.warmupCount ?? 0,
       scheduled: state?.timer !== undefined,
       ...(state?.lastDecision === undefined ? {} : { lastDecision: state.lastDecision }),
     }
@@ -300,7 +341,14 @@ export class KimiCacheWaitController {
       this.states.set(sessionId, existing)
       return existing
     }
-    const state: WaitState = { children: new Set(), waiting: false, handled: false, warmupUsed: false }
+    const state: WaitState = {
+      children: new Set(),
+      waiting: false,
+      handled: false,
+      warmupUsed: false,
+      warmupCount: 0,
+      warmupFailed: false,
+    }
     this.states.set(sessionId, state)
     if (this.states.size > MAX_TRACKED_SESSIONS) {
       const oldest = this.states.keys().next()
@@ -347,20 +395,34 @@ export class KimiCacheWaitController {
     return this.activity(session.id)?.lastActiveAt !== undefined
   }
 
+  private isWarmupEnabled(): boolean {
+    try {
+      return this.warmup() !== false
+    } catch {
+      return true
+    }
+  }
+
   private reconcile(session: CacheWaitSession, state: WaitState): void {
     this.clearTimer(state)
     if (this.disposed || !state.waiting || state.handled || state.children.size === 0) return
     if (!this.isKimiSession(session)) return
     const activity = this.activity(session.id)
-    if (activity === undefined) return
+    if (activity === undefined && state.lastWarmupAt === undefined) return
+    const effectiveLastActiveAt = Math.max(
+      activity?.lastActiveAt ?? -Infinity,
+      state.lastWarmupAt ?? -Infinity,
+    )
+    if (!Number.isFinite(effectiveLastActiveAt)) return
+    const now = this.now()
     const action = evaluateCacheWait({
       waiting: state.waiting,
       hasChildren: state.children.size > 0,
-      now: this.now(),
-      lastActiveAt: activity.lastActiveAt,
-      totalTokens: activity.totalTokens,
-      warmupEnabled: this.warmup,
-      warmupUsed: state.warmupUsed,
+      now,
+      lastActiveAt: effectiveLastActiveAt,
+      totalTokens: activity?.totalTokens,
+      warmupEnabled: this.isWarmupEnabled(),
+      warmupFailed: state.warmupFailed,
       decisionMs: this.decisionMs,
       ttlMs: this.ttlMs,
       minWarmupTokens: this.minWarmupTokens,
@@ -378,14 +440,17 @@ export class KimiCacheWaitController {
     if (action.kind === 'cold') return
 
     state.warmupUsed = true
+    state.lastWarmupAt = now
     try {
       const agent = this.agents?.get(session.id)
       if (agent?.steer === undefined) throw new Error('the parent Agent is not available for warmup')
       agent.steer(createCacheWaitWarmupMessage())
-      this.logger?.info?.(`kimi-cache-wait: queued one bounded warmup for session ${session.id}`)
+      state.warmupCount += 1
+      this.logger?.info?.(`kimi-cache-wait: queued keepalive warmup #${state.warmupCount} for session ${session.id}`)
     } catch (error) {
-      // One failed warmup is terminal for this delegation batch; the next real
-      // turn performs the ordinary cold recovery instead of retrying here.
+      // A failed steer is terminal for this delegation batch; the next real
+      // turn performs the ordinary cold recovery instead of spinning here.
+      state.warmupFailed = true
       this.logger?.warn(`kimi-cache-wait: warmup skipped for session ${session.id}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -408,6 +473,7 @@ export function installKimiCacheWait(
   const controller = new KimiCacheWaitController({ ...options, agents })
   const disposers = [
     ctx.on('session/event', (session: CacheWaitSession, event: CacheWaitEvent) => controller.observe(session, event)),
+    ctx.on('subagent/end', (info: { readonly id?: unknown }) => controller.settleChild(info)),
     ctx.on('agent/disposed', ({ agent }: { agent: CacheWaitAgent }) => controller.disposeAgent(agent)),
   ]
   return () => {
