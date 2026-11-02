@@ -28,7 +28,7 @@ import type {
 export const STEP_CODE_PROVIDER_ID = 'step-code'
 
 /** 设置卡片与 hub 卡片上显示的名字。 */
-export const STEP_CODE_PROVIDER_NAME = 'Step Code（Step Plan 订阅）'
+export const STEP_CODE_PROVIDER_NAME = 'Step Code (Step Plan Subscription)'
 
 /**
  * 路由前缀（host 暴露、client 消费）。

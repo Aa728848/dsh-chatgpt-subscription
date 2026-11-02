@@ -23,7 +23,7 @@
 /** Provider id registered with DSH. */
 export const PROVIDER_ID = 'claude-subscription'
 /** Display name for the settings surface and the model picker. */
-export const PROVIDER_NAME = 'Claude（订阅）'
+export const PROVIDER_NAME = 'Claude Subscription'
 
 /** Host serving both the Messages API and the subscription's own OAuth routes. */
 export const API_BASE = 'https://api.anthropic.com'

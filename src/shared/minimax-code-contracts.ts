@@ -11,7 +11,7 @@ import type {
 } from './account-pool-contracts.ts'
 
 export const MINIMAX_CODE_PROVIDER_ID = 'minimax-code'
-export const MINIMAX_CODE_PROVIDER_NAME = 'MiniMax Code（编程订阅）'
+export const MINIMAX_CODE_PROVIDER_NAME = 'MiniMax Code (Coding Subscription)'
 
 /** 区域。cn 用 account.minimax.cn / agent.minimax.cn；global 用对应 .io 域名。 */
 export type MinimaxCodeRegion = 'cn' | 'global'

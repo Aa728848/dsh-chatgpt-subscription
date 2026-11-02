@@ -22,7 +22,7 @@ import type {
 export const GLM_CODING_PLAN_PROVIDER_ID = 'glm-coding-plan'
 
 /** 设置卡片与 hub 卡片上显示的名字（D1）。 */
-export const GLM_CODING_PLAN_PROVIDER_NAME = 'GLM（ZCode 账号）'
+export const GLM_CODING_PLAN_PROVIDER_NAME = 'GLM (ZCode Account)'
 
 /**
  * 路由前缀（host 暴露、client 消费）。

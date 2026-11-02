@@ -25,7 +25,7 @@ import type {
 export const QODER_PROVIDER_ID = 'qoder'
 
 /** 设置卡片与 hub 卡片上显示的名字。 */
-export const QODER_PROVIDER_NAME = 'Qoder（订阅）'
+export const QODER_PROVIDER_NAME = 'Qoder Subscription'
 
 /**
  * 路由前缀（host 暴露、client 消费）。

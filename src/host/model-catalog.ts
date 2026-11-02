@@ -8,7 +8,7 @@ import type { CodexCatalogEntry } from './codex-catalog.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
 
 export const PROVIDER_ID = CODEX_CHATGPT_PROVIDER_ID
-export const PROVIDER_NAME = 'Codex（ChatGPT 订阅）' as const
+export const PROVIDER_NAME = 'ChatGPT Subscription' as const
 
 export function listCodexModels(
   preferences?: SubscriptionPreferenceStore,

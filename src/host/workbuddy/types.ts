@@ -18,7 +18,7 @@ import type { WorkBuddyRegion } from '../../shared/workbuddy-contracts.ts'
 // Use an id distinct from the common `workbuddy` name used by user-defined
 // OpenAI-compatible routes. Installing this plugin must not hide a custom API.
 export const PROVIDER_ID = 'workbuddy-subscription'
-export const PROVIDER_NAME = 'WorkBuddy（CodeBuddy 订阅）'
+export const PROVIDER_NAME = 'WorkBuddy (CodeBuddy Subscription)'
 
 /** Domestic backend. */
 export const CN_BACKEND = 'https://copilot.tencent.com'
