@@ -165,7 +165,7 @@ describe('Responses streaming', () => {
     expect(responseFetch.mock.calls[0]?.[0]).toBe(CODEX_RESPONSES_URL)
     const second = responseFetch.mock.calls[1]?.[1] as RequestInit
     expect(JSON.parse(String(second.body)).model).toBe(model)
-    expect(second.headers).toMatchObject({ authorization: 'Bearer fresh', 'chatgpt-account-id': 'acct', originator: 'opencode' })
+    expect(second.headers).toMatchObject({ authorization: 'Bearer fresh', 'chatgpt-account-id': 'acct', originator: 'codex_cli_rs' })
     expect((second.headers as Record<string, string>)['session-id']).toMatch(/^dsh-[a-f0-9]{32}$/)
     expect((second.headers as Record<string, string>)['user-agent']).toContain(`dsh-chatgpt-subscription/${PLUGIN_VERSION}`)
     oauth.dispose()

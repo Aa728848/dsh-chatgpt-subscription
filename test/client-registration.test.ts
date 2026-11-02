@@ -204,7 +204,7 @@ describe('client registration', () => {
         visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'],
       })
       // The freshly checked model gets a row showing its catalog value, not an empty box.
-      expect(container.querySelector<HTMLInputElement>('input[aria-label="6 Astra 上下文窗口"]')?.value).toBe('384K')
+      expect(container.querySelector<HTMLInputElement>('input[aria-label="6 Astra 上下文窗口"]')?.value).toBe('272K')
       expect(container.querySelectorAll('.dsha-context-row')).toHaveLength(3)
     } finally {
       await harness.teardown()

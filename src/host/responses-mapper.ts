@@ -1,17 +1,57 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from './common/llm-compat.ts'
 import { createHash } from 'node:crypto'
-import { codexDefaultOutputVerbosity, codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexWireReasoningEffort } from '../shared/model-catalog.ts'
+import { codexDefaultOutputVerbosity, codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexModelUsesResponsesLite, codexWireReasoningEffort } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
+/**
+ * The Responses request body, in the field order the official client sends.
+ *
+ * The order is not cosmetic: the official client keeps the routing fields
+ * first because a gateway may inspect the body incrementally before a
+ * multi-megabyte `input` arrives, so `model` and `stream` have to be readable
+ * without reading the whole document.
+ */
 export interface ResponsesPayload extends Record<string, unknown> {
   model: string
-  input: Array<Record<string, unknown>>
   stream: true
-  store: false
   service_tier?: string
+  input: Array<Record<string, unknown>>
+  /** Tool declarations; absent on a Lite request, which carries them in `input`. */
+  tools?: Array<Record<string, unknown>>
+  tool_choice?: string
+  parallel_tool_calls?: boolean
+  reasoning?: Record<string, unknown>
+  store: false
+  include?: string[]
   /** Stable per-conversation cache key; lets the backend reuse prompt prefix. */
   prompt_cache_key?: string
+  text?: { verbosity: CodexOutputVerbosity }
+}
+
+/**
+ * Wire options for one request.
+ */
+export interface ResponsesWireOptions {
+  /**
+   * Whether the model speaks the Responses Lite protocol.
+   *
+   * Optional on purpose: without it the model's own catalog decides, and a
+   * model no catalog states a protocol for is not Lite - the Lite body is a
+   * different request, not a different spelling of this one. A caller that
+   * knows more than the shipped table (the live listing, say) states it here.
+   */
+  useResponsesLite?: boolean
+  /**
+   * Stable per-conversation identity the official client derives its item ids
+   * from.
+   *
+   * The official client namespaces its item ids by the conversation thread, so
+   * the same instructions carry the same id inside one conversation and a
+   * different one in another. Without a namespace the id is still stable, but
+   * it is stable across conversations too.
+   */
+  idNamespace?: string
 }
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -168,7 +208,11 @@ export async function buildResponsesPayload(
   fastMode: boolean = false,
   reasoningSummary: CodexReasoningSummary | null = null,
   promptCacheKey?: string,
+  wire: ResponsesWireOptions = {},
 ): Promise<ResponsesPayload> {
+  // The caller's answer wins; without one the model's own catalog decides, and
+  // a model no catalog states a protocol for is not Lite.
+  const useResponsesLite = wire.useResponsesLite ?? codexModelUsesResponsesLite(options.model)
   const resolveLocalRawImages = supportsImageInput(options)
   const normalizeCallId = createCallIdNormalizer()
   const instructionParts = [
@@ -236,29 +280,33 @@ export async function buildResponsesPayload(
   // become `input_image` items by now. See offloadOldestInputImages.
   offloadOldestInputImages(input)
 
-  const payload: ResponsesPayload = {
-    model: options.model,
-    input,
-    stream: true,
-    store: false,
-    include: ['reasoning.encrypted_content'],
-    ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
-  }
   const instructions = [
     ...instructionParts,
     localRawImageInstruction(localImageStats),
   ].filter((value): value is string => Boolean(value))
-  if (instructions.length > 0) payload.instructions = instructions.join('\n\n')
-  if (options.tools?.length) {
-    payload.tools = options.tools.map((tool) => ({
-      type: 'function',
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    }))
-    payload.tool_choice = 'auto'
-    payload.parallel_tool_calls = true
+  const instructionText = instructions.join('\n\n')
+
+  // The two items the official client puts at the HEAD of `input`, in this
+  // order: the tool declarations (Lite only) and the base instructions.
+  //
+  // The instructions travel as a developer MESSAGE rather than in the top-level
+  // `instructions` field, because the official request no longer has that field:
+  // the base instructions are an ordinary input item, so the backend attributes
+  // them like any other part of the conversation.
+  const prefix: Array<Record<string, unknown>> = []
+  const tools = options.tools ?? []
+  if (useResponsesLite && tools.length > 0) {
+    prefix.push(additionalToolsItem(tools, wire.idNamespace))
   }
+  // No instructions means no message: an empty developer item would be a
+  // conversation turn that says nothing.
+  if (instructionText !== '') {
+    prefix.push(developerMessageItem(instructionText, wire.idNamespace, useResponsesLite))
+  }
+  input.unshift(...prefix)
+
+  const toolDeclarations = tools.length > 0 ? tools.map(toolDeclaration) : undefined
+  const reasoning = reasoningBlock(options, reasoningSummary, useResponsesLite)
   // "Follow the provider" is the user's default, and the provider's own client
   // sends the catalog's `default_verbosity` (low) on every request. Omitting the
   // field is NOT the same thing: the server then applies its own implicit
@@ -269,10 +317,9 @@ export async function buildResponsesPayload(
   // establish, because the official catalog gates it per model and an
   // unsupported verbosity is a request the model may reject.
   const providerVerbosity = codexDefaultOutputVerbosity(options.model)
-  if (providerVerbosity !== undefined) {
-    payload.text = { verbosity: outputVerbosity ?? providerVerbosity }
-  }
-  if (fastMode) payload.service_tier = 'priority'
+  const text = providerVerbosity !== undefined
+    ? { verbosity: outputVerbosity ?? providerVerbosity }
+    : undefined
   // NO `max_output_tokens`, and that is deliberate.
   //
   // This is the Responses path, and the subscription backend rejects the field
@@ -296,21 +343,194 @@ export async function buildResponsesPayload(
   //
   // Do not reintroduce it, not even clamped to the model ceiling: that is
   // exactly the request the accounts in #29 reject.
-  if (options.reasoningEffort !== undefined) {
-    const effort = codexWireReasoningEffort(options.model, options.reasoningEffort)
-    // No summary — whether the user chose "none" or left the choice to the
-    // provider, whose own catalog default is `none` — is expressed by OMITTING
-    // the field. Sending `summary: "none"` would ask the backend to spend
-    // tokens producing a summary it is told to discard, and sending `null` is
-    // not a value the field accepts at all.
-    const summary = reasoningSummary === null || reasoningSummary === 'none' ? undefined : reasoningSummary
-    payload.reasoning = summary !== undefined && codexModelSupportsReasoningSummary(options.model)
-      ? { effort, summary }
-      : { effort }
+  // The field order below is the official client's: routing fields first, then
+  // the input, then the tool declarations, then the reasoning block, then the
+  // store/include/cache keys and the text controls.
+  const payload: ResponsesPayload = {
+    model: options.model,
+    stream: true,
+    ...(fastMode ? { service_tier: 'priority' } : {}),
+    input,
+    // A Lite request declares its tools inside `input`; the standard shape keeps
+    // them at the top level.
+    ...(toolDeclarations !== undefined && !useResponsesLite ? { tools: toolDeclarations } : {}),
+    // The official request always states both controls, including a request
+    // with no tools. Lite runs one tool call at a time, so its flag is false.
+    tool_choice: 'auto',
+    parallel_tool_calls: !useResponsesLite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    store: false,
+    include: ['reasoning.encrypted_content'],
+    ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    ...(text !== undefined ? { text } : {}),
   }
   return payload
 }
 
+
+/**
+ * One tool declaration, in the shape the Responses API expects.
+ *
+ * `strict` is false because DSH's tool schemas are not strict-compatible: a
+ * strict declaration demands that every property be required and that extra
+ * properties be rejected, which these schemas are not written for. The official
+ * client declares its own tools the same way.
+ */
+function toolDeclaration(tool: NonNullable<GenerateOptions['tools']>[number]): Record<string, unknown> {
+  return {
+    type: 'function',
+    name: tool.name,
+    description: tool.description,
+    strict: false,
+    // A deferred definition stays deferred on the wire: the backend decides when
+    // to load it, so the flag has to travel with the declaration.
+    ...(tool.deferLoading === true ? { defer_loading: true } : {}),
+    parameters: tool.parameters,
+  }
+}
+
+/**
+ * The Lite tool declaration: every tool inside one `functions` namespace.
+ *
+ * Lite does not send loose function tools. It sends a namespace, and the model
+ * calls into it, so the call keeps the plain tool name and carries the
+ * namespace beside it.
+ */
+function liteToolsNamespace(tools: NonNullable<GenerateOptions['tools']>): Record<string, unknown> {
+  return {
+    type: 'namespace',
+    name: 'functions',
+    description: '',
+    tools: tools.map(toolDeclaration),
+  }
+}
+
+/**
+ * The `additional_tools` item a Lite request carries.
+ *
+ * It is an input item, not a top-level field, so the tool declarations travel
+ * with the conversation instead of beside it. No tools means no item at all: an
+ * empty declaration would announce a namespace with nothing in it.
+ */
+function additionalToolsItem(
+  tools: NonNullable<GenerateOptions['tools']>,
+  idNamespace: string | undefined,
+): Record<string, unknown> {
+  const declarations = [liteToolsNamespace(tools)]
+  return {
+    type: 'additional_tools',
+    id: stableItemId('at', idNamespace, JSON.stringify(declarations)),
+    role: 'developer',
+    tools: declarations,
+  }
+}
+
+/**
+ * The base instructions as a developer message.
+ *
+ * The official client marks the item with the `model.base_instructions` kind, so
+ * the backend can tell the base instructions apart from any other developer
+ * message in the conversation. Only Lite keeps the per-content attribution: the
+ * standard shape has no room for it.
+ */
+function developerMessageItem(
+  text: string,
+  idNamespace: string | undefined,
+  useResponsesLite: boolean,
+): Record<string, unknown> {
+  return {
+    type: 'message',
+    id: stableItemId('msg', idNamespace, text),
+    role: 'developer',
+    content: [{ type: 'input_text', text }],
+    internal_chat_message_metadata_passthrough: {
+      content_item_kinds: ['model.base_instructions'],
+      ...(useResponsesLite
+        ? { content_item_metadata: [{ provenance: { type: 'harness', hook: false } }] }
+        : {}),
+    },
+  }
+}
+
+/**
+ * The reasoning block for one request.
+ *
+ * A Lite request asks for the WHOLE conversation as reasoning context, because
+ * Lite replays the conversation itself rather than sending the reasoning of the
+ * current turn only. The standard shape omits the field, which is how the
+ * backend is told to use the current turn.
+ *
+ * No summary is ever sent unless the user chose one: the provider's own catalog
+ * default is `none`, and asking for a summary the caller will discard spends
+ * billed tokens on output the backend is told to throw away.
+ */
+function reasoningBlock(
+  options: GenerateOptions,
+  reasoningSummary: CodexReasoningSummary | null,
+  useResponsesLite: boolean,
+): Record<string, unknown> | undefined {
+  const context = useResponsesLite ? { context: 'all_turns' } : {}
+  if (options.reasoningEffort === undefined) {
+    // Lite still needs the block: it carries the context the request asks for.
+    return useResponsesLite ? context : undefined
+  }
+  const effort = codexWireReasoningEffort(options.model, options.reasoningEffort)
+  const summary = reasoningSummary === null || reasoningSummary === 'none' ? undefined : reasoningSummary
+  return summary !== undefined && codexModelSupportsReasoningSummary(options.model)
+    ? { effort, summary, ...context }
+    : { effort, ...context }
+}
+
+/**
+ * RFC 4122 namespace OID, the namespace the official client derives its item
+ * ids from.
+ */
+const UUID_NAMESPACE_OID = Buffer.from('6ba7b8129dad11d180b400c04fd430c8', 'hex')
+
+/**
+ * Namespace used when the caller named no conversation.
+ *
+ * The ids stay stable, but they are stable across conversations too - the price
+ * of a request that arrived without a conversation identity.
+ */
+const DEFAULT_ID_NAMESPACE = 'dsh-chatgpt-subscription'
+
+/**
+ * A stable item id, in the official client's `msg_`/`at_` shape.
+ *
+ * The official client namespaces the id by the conversation thread and then by
+ * the item's own content, so the same instructions carry the same id in the
+ * same conversation - which is what lets the backend recognise a retried
+ * request - and a different one in another conversation.
+ *
+ * @param prefix - `msg` for a message item, `at` for the tool declarations.
+ * @param idNamespace - the conversation identity, when the caller supplied one.
+ * @param material - the item content the id is derived from.
+ * @returns the item id.
+ */
+function stableItemId(prefix: 'msg' | 'at', idNamespace: string | undefined, material: string): string {
+  const namespace = uuidV5Bytes(UUID_NAMESPACE_OID, Buffer.from(idNamespace ?? DEFAULT_ID_NAMESPACE, 'utf8'))
+  return `${prefix}_${formatUuid(uuidV5Bytes(namespace, Buffer.from(material, 'utf8')))}`
+}
+
+/**
+ * RFC 4122 version 5 UUID (SHA-1) as raw bytes.
+ */
+function uuidV5Bytes(namespace: Buffer, name: Buffer): Buffer {
+  const digest = createHash('sha1').update(namespace).update(name).digest()
+  const bytes = Buffer.from(digest.subarray(0, 16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  return bytes
+}
+
+/**
+ * Format raw UUID bytes as the canonical 8-4-4-4-12 text form.
+ */
+function formatUuid(bytes: Buffer): string {
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
 function progressExplanationInstruction(tools: GenerateOptions['tools']): string | undefined {
   if (!tools?.length) return undefined
   return 'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'

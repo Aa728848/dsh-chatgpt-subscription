@@ -5,6 +5,34 @@ import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
 import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import { buildResponsesPayload } from '../src/host/responses-mapper.ts'
 
+/**
+ * The base instructions, as the developer message the official wire carries.
+ *
+ * The official request has no top-level `instructions` field any more: the base
+ * instructions are an ordinary input item at the head of the conversation.
+ */
+function developerText(payload: { input: Array<Record<string, unknown>> }): string {
+  const message = payload.input.find(item => item.type === 'message' && item.role === 'developer')
+  const content = message?.content
+  if (!Array.isArray(content)) return ''
+  return content.map(part => String((part as Record<string, unknown>).text ?? '')).join('')
+}
+
+/**
+ * The tool declarations a payload carries, whichever shape it uses.
+ *
+ * A Lite request declares its tools inside `input`, the standard request keeps
+ * them at the top level, and both declare the same schemas.
+ */
+function declaredTools(payload: { tools?: unknown; input: Array<Record<string, unknown>> }): Array<Record<string, unknown>> {
+  if (Array.isArray(payload.tools)) return payload.tools as Array<Record<string, unknown>>
+  const item = payload.input.find(entry => entry.type === 'additional_tools')
+  const namespaces = item?.tools
+  if (!Array.isArray(namespaces)) return []
+  const namespace = namespaces[0] as Record<string, unknown> | undefined
+  return Array.isArray(namespace?.tools) ? namespace.tools as Array<Record<string, unknown>> : []
+}
+
 describe('Responses payload mapping', () => {
   it.each(['gpt-5.6-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'])('maps system, images, tool calls and tool results for %s without provider URLs', async (model) => {
     const options = {
@@ -27,8 +55,8 @@ describe('Responses payload mapping', () => {
     const payload = await buildResponsesPayload(options, {
       readImage: async (ref) => ({ ref, data: new Uint8Array([1, 2, 3]) }),
     })
-    expect(payload.instructions).toContain('Be precise.')
-    expect(payload.instructions).toContain('Progress and tool execution rule')
+    expect(developerText(payload)).toContain('Be precise.')
+    expect(developerText(payload)).toContain('Progress and tool execution rule')
     expect(payload.input).toContainEqual({
       role: 'user',
       content: [
@@ -72,7 +100,7 @@ describe('Responses payload mapping', () => {
   it('injects progress and tool execution rule when tools are present, omits when absent', async () => {
     const withoutTools = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', system: 'System prompt only.', messages: [] } as unknown as GenerateOptions
     const payloadWithoutTools = await buildResponsesPayload(withoutTools, unusedAttachments())
-    expect(payloadWithoutTools.instructions).toBe('System prompt only.')
+    expect(developerText(payloadWithoutTools)).toBe('System prompt only.')
 
     const withTools = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', system: 'System prompt.',
@@ -80,9 +108,9 @@ describe('Responses payload mapping', () => {
       messages: [],
     } as unknown as GenerateOptions
     const payloadWithTools = await buildResponsesPayload(withTools, unusedAttachments())
-    expect(payloadWithTools.instructions).toContain('System prompt.')
-    expect(payloadWithTools.instructions).toContain('Progress and tool execution rule')
-    expect(payloadWithTools.instructions).toContain('output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call')
+    expect(developerText(payloadWithTools)).toContain('System prompt.')
+    expect(developerText(payloadWithTools)).toContain('Progress and tool execution rule')
+    expect(developerText(payloadWithTools)).toContain('output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call')
   })
 
   it.each([
@@ -151,20 +179,22 @@ describe('Responses payload mapping', () => {
   it('maps the configured reasoning summary to the Responses payload', async () => {
     const options = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', reasoningEffort: 'high', messages: [] } as unknown as GenerateOptions
     const payloadConcise = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'concise')
-    expect(payloadConcise.reasoning).toEqual({ effort: 'high', summary: 'concise' })
+    // The Lite context rides along: a Lite request asks for the whole
+    // conversation as reasoning context, and the block carries both.
+    expect(payloadConcise.reasoning).toEqual({ effort: 'high', summary: 'concise', context: 'all_turns' })
 
     // "None" asks for no summary, and the wire says that by OMITTING the field:
     // `summary: "none"` would spend tokens on a summary the caller discards.
     const payloadNone = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'none')
-    expect(payloadNone.reasoning).toEqual({ effort: 'high' })
+    expect(payloadNone.reasoning).toEqual({ effort: 'high', context: 'all_turns' })
 
     const payloadDetailed = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, 'detailed')
-    expect(payloadDetailed.reasoning).toEqual({ effort: 'high', summary: 'detailed' })
+    expect(payloadDetailed.reasoning).toEqual({ effort: 'high', summary: 'detailed', context: 'all_turns' })
 
     // Unset means the provider default, and the provider's own catalog default
     // is `none` — so it is omitted too, not sent as "auto".
     const payloadDefault = await buildResponsesPayload(options, unusedAttachments(), {}, null, false, null)
-    expect(payloadDefault.reasoning).toEqual({ effort: 'high' })
+    expect(payloadDefault.reasoning).toEqual({ effort: 'high', context: 'all_turns' })
   })
 
   it('omits summary on reasoning models that do not support reasoning summaries', async () => {
@@ -265,8 +295,8 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
 
-    expect(payload.instructions).toContain('markdown image link to a local/raw session URL')
-    expect(payload.instructions).toContain('Do not claim to see the image')
+    expect(developerText(payload)).toContain('markdown image link to a local/raw session URL')
+    expect(developerText(payload)).toContain('Do not claim to see the image')
     expect(payload.input).toContainEqual({
       role: 'user',
       content: [{ type: 'input_text', text }],
@@ -291,7 +321,7 @@ describe('Responses payload mapping', () => {
     })
 
     expect(fetched).toEqual(['http://127.0.0.1:3080/describe-image/raw/sha256:fb8625f2d563722a61b6bc791d665d758bd083bbd0b96f7a4693a3d2a1159eda'])
-    expect(payload.instructions ?? '').not.toContain('Do not claim to see the image')
+    expect(developerText(payload) ?? '').not.toContain('Do not claim to see the image')
     expect(payload.input).toContainEqual({
       role: 'user',
       content: [
@@ -314,7 +344,7 @@ describe('Responses payload mapping', () => {
       fetchFn: async (): Promise<Response> => { throw new Error('should not fetch for non-gpt routes') },
     })
 
-    expect(payload.instructions).toContain('markdown image link to a local/raw session URL')
+    expect(developerText(payload)).toContain('markdown image link to a local/raw session URL')
     expect(payload.input).toContainEqual({
       role: 'user',
       content: [{ type: 'input_text', text }],
@@ -423,12 +453,12 @@ describe('Responses payload mapping', () => {
       tools: [pwshTool()],
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    const tools = payload.tools as Array<Record<string, unknown>> | undefined
+    const tools = declaredTools(payload)
     expect(tools?.[0]?.description).toBe(options.tools?.[0]?.description)
     expect(tools?.[0]?.parameters).toEqual(options.tools?.[0]?.parameters)
-    expect(payload.instructions).toContain('Command tool compatibility rule (pwsh)')
-    expect(payload.instructions).not.toContain('Omit sandbox_permissions')
-    expect(payload.instructions).not.toContain('[auto-mode hard deny]')
+    expect(developerText(payload)).toContain('Command tool compatibility rule (pwsh)')
+    expect(developerText(payload)).not.toContain('Omit sandbox_permissions')
+    expect(developerText(payload)).not.toContain('[auto-mode hard deny]')
   })
 
   it.each([
@@ -442,12 +472,12 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
 
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    const mapped = (payload.tools as Array<Record<string, unknown>>)[0]!
+    const mapped = declaredTools(payload)[0]!
     expect(mapped.description).toBe(tool.description)
     expect(mapped.parameters).toEqual(originalParameters)
-    expect(payload.instructions).toContain(`Command tool compatibility rule (${name})`)
-    expect(payload.instructions).toContain(instructionText)
-    expect(payload.instructions).not.toContain('native Windows paths')
+    expect(developerText(payload)).toContain(`Command tool compatibility rule (${name})`)
+    expect(developerText(payload)).toContain(instructionText)
+    expect(developerText(payload)).not.toContain('native Windows paths')
     expect(tool.parameters).toEqual(originalParameters)
   })
   it('preserves native controls after a matching sandbox denial', async () => {
@@ -469,13 +499,13 @@ describe('Responses payload mapping', () => {
       tools: [pwshTool()],
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    const tools = payload.tools as Array<Record<string, unknown>> | undefined
+    const tools = declaredTools(payload)
     const parameters = tools?.[0]?.parameters as Record<string, unknown>
     const properties = parameters.properties as Record<string, unknown>
     expect(properties).toHaveProperty('sandbox_permissions')
     expect(properties).toHaveProperty('justification')
     expect(parameters).toEqual(options.tools?.[0]?.parameters)
-    expect(payload.instructions).not.toContain('retry the exact denied call for: pwsh')
+    expect(developerText(payload)).not.toContain('retry the exact denied call for: pwsh')
   })
 
   it.each([
@@ -500,13 +530,13 @@ describe('Responses payload mapping', () => {
       tools: [pwshTool()],
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    const tools = payload.tools as Array<Record<string, unknown>> | undefined
+    const tools = declaredTools(payload)
     const parameters = tools?.[0]?.parameters as Record<string, unknown>
     const properties = parameters.properties as Record<string, unknown>
     expect(properties).toHaveProperty('sandbox_permissions')
     expect(properties).toHaveProperty('justification')
     expect(parameters).toEqual(options.tools?.[0]?.parameters)
-    expect(payload.instructions).not.toContain('this is not a sandbox-escalation retry')
+    expect(developerText(payload)).not.toContain('this is not a sandbox-escalation retry')
   })
 
   it('adds Windows PowerShell guidance to run_code without mutating the DSH tool schema', async () => {
@@ -516,11 +546,11 @@ describe('Responses payload mapping', () => {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [], tools: [tool],
     } as unknown as GenerateOptions
     const payload = await buildResponsesPayload(options, unusedAttachments())
-    const mappedTool = (payload.tools as Array<Record<string, unknown>>)[0]
+    const mappedTool = declaredTools(payload)[0]
     expect(mappedTool.description).toBe(tool.description)
     expect(mappedTool.parameters).toEqual(originalParameters)
-    expect(payload.instructions).toContain('run_code compatibility rule')
-    expect(payload.instructions).toContain('here-strings')
+    expect(developerText(payload)).toContain('run_code compatibility rule')
+    expect(developerText(payload)).toContain('here-strings')
     expect(tool.parameters).toEqual(originalParameters)
   })
 

@@ -6,12 +6,24 @@ export const GPT_56_MAX_CONTEXT_WINDOW = 1_000_000
 // Codex subscription limits from the model catalog; the public API advertises 1.05M
 // for these families instead.
 export const GPT_6_MAX_CONTEXT_WINDOW = 872_000
-/** Effective context the GPT-6 family starts at, before any user override. */
-export const GPT_6_DEFAULT_CONTEXT_WINDOW = 384_000
+/** Default context for GPT-6 models other than the 500K GPT-6.1 Terra entry. */
+export const GPT_6_DEFAULT_CONTEXT_WINDOW = 272_000
 /** Output cap of the GPT-6 family; the vendor declares 128K for all three. */
 export const GPT_6_MAX_TOKENS = 128_000
 /** Output cap for the models predating the GPT-6 family. */
 export const CODEX_DEFAULT_MAX_TOKENS = 32_768
+
+/**
+ * What one model speaks on the wire.
+ *
+ * Kept apart from the catalog entry on purpose: this is a property of the
+ * PROTOCOL the model speaks, not of the account's entitlement to it, and the
+ * request builder needs it per attempt rather than per picker row.
+ */
+export interface CodexWireCapabilities {
+  /** Whether the model speaks the Responses Lite protocol. */
+  useResponsesLite: boolean
+}
 
 export interface CodexModelCatalogEntry {
   id: string
@@ -41,6 +53,20 @@ export interface CodexModelCatalogEntry {
   /** Output cap when the caller omits one; falls back to {@link CODEX_DEFAULT_MAX_TOKENS}. */
   maxTokens?: number
   fallbackModelId?: string
+  /**
+   * Whether the model speaks the Responses Lite protocol.
+   *
+   * Lite is a different request SHAPE, not a different endpoint: the tool
+   * declarations travel inside `input` as an `additional_tools` item instead of
+   * a top-level `tools` array, the request carries a Lite header, and the
+   * reasoning block asks for the whole conversation as context.
+   *
+   * The official catalog states this per model, and the backend's live listing
+   * states it too, so a model this table has never heard of is NOT Lite: an
+   * absent flag means "not established", and inventing the Lite shape for a
+   * model that does not speak it is a request the backend cannot answer.
+   */
+  useResponsesLite?: boolean
 }
 
 export const CODEX_MODEL_CATALOG = [
@@ -49,53 +75,57 @@ export const CODEX_MODEL_CATALOG = [
     name: '5.6 Sol',
     contextWindow: 272_000,
     inputModalities: ['text', 'image'],
-    defaultReasoningEffort: 'medium',
+    defaultReasoningEffort: 'low',
     reasoningProfile: 'gpt-5.6',
     supportsReasoningSummary: true,
     fallbackModelId: 'gpt-5.6-terra',
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-6-astra',
     name: '6 Astra',
-    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    contextWindow: 272_000,
     inputModalities: ['text', 'image'],
-    defaultReasoningEffort: 'medium',
+    defaultReasoningEffort: 'low',
     reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
     maxTokens: GPT_6_MAX_TOKENS,
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-6.1-sol',
     name: '6.1 Sol',
-    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    contextWindow: 272_000,
     inputModalities: ['text', 'image'],
-    defaultReasoningEffort: 'medium',
+    defaultReasoningEffort: 'low',
     reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
     maxTokens: GPT_6_MAX_TOKENS,
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-6.1-terra',
     name: '6.1 Terra',
-    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    contextWindow: 500_000,
     inputModalities: ['text', 'image'],
-    defaultReasoningEffort: 'medium',
+    defaultReasoningEffort: 'low',
     reasoningProfile: 'gpt-6',
     supportsReasoningSummary: true,
     maxTokens: GPT_6_MAX_TOKENS,
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-6-sol',
     name: '6 Sol',
-    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    contextWindow: 272_000,
     inputModalities: ['text', 'image'],
     defaultReasoningEffort: 'medium',
     reasoningProfile: 'gpt-6',
@@ -103,11 +133,12 @@ export const CODEX_MODEL_CATALOG = [
     maxTokens: GPT_6_MAX_TOKENS,
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-6-luna',
     name: '6 Luna',
-    contextWindow: GPT_6_DEFAULT_CONTEXT_WINDOW,
+    contextWindow: 272_000,
     inputModalities: ['text', 'image'],
     defaultReasoningEffort: 'medium',
     reasoningProfile: 'gpt-6',
@@ -115,6 +146,7 @@ export const CODEX_MODEL_CATALOG = [
     maxTokens: GPT_6_MAX_TOKENS,
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-5.6-terra',
@@ -127,6 +159,7 @@ export const CODEX_MODEL_CATALOG = [
     fallbackModelId: 'gpt-5.5',
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-5.6-luna',
@@ -139,6 +172,7 @@ export const CODEX_MODEL_CATALOG = [
     fallbackModelId: 'gpt-5.5',
     supportsOutputVerbosity: true,
     defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
   },
   {
     id: 'gpt-5.5',
@@ -243,6 +277,21 @@ export function codexModelSupportsImageInput(model: string): boolean {
 
 export function codexModelSupportsReasoningSummary(model: string): boolean {
   return resolveCodexCatalogEntry(model).supportsReasoningSummary
+}
+
+/**
+ * Whether the shipped table says this model speaks the Responses Lite protocol.
+ *
+ * An id this table has never heard of is NOT Lite. The official catalog states
+ * the flag per model and the backend's live listing states it too, so a model
+ * with no statement has no established Lite shape - and sending the Lite body
+ * to a model that does not speak it is a request the backend cannot answer.
+ *
+ * @param model - the model id.
+ * @returns whether the model is a Lite model.
+ */
+export function codexModelUsesResponsesLite(model: string): boolean {
+  return codexCatalogEntryById(model)?.useResponsesLite === true
 }
 
 /**

@@ -29,6 +29,15 @@ export interface CodexCatalogEntry {
   /** Reasoning levels the listing says the model accepts; absent when it stated none. */
   reasoningEfforts?: readonly string[]
   defaultReasoningEffort?: string | null
+  /**
+   * Whether the listing says the model speaks the Responses Lite protocol.
+   *
+   * `undefined` when the listing stated nothing: the live listing is the
+   * authority on what this plan serves, but it is not the authority on what a
+   * model this line has never heard of speaks, so an absent flag falls back to
+   * the shipped table instead of being read as "not Lite".
+   */
+  useResponsesLite?: boolean
 }
 
 interface CatalogCache {
@@ -202,6 +211,9 @@ function parseListingEntry(value: unknown): CodexCatalogEntry[] {
   const contextWindow = asNumber(record.context_window) ?? asNumber(record.contextWindow)
   const modalities = parseModalities(record.input_modalities)
   const efforts = parseEfforts(record.supported_reasoning_levels)
+  const useResponsesLite = typeof record.use_responses_lite === 'boolean'
+    ? record.use_responses_lite
+    : typeof record.useResponsesLite === 'boolean' ? record.useResponsesLite : undefined
   const fallback = CODEX_MODEL_CATALOG.find((entry) => entry.id === id)
   return [{
     id,
@@ -214,6 +226,10 @@ function parseListingEntry(value: unknown): CodexCatalogEntry[] {
     // and the resolver must then fall back to the shipped profile.
     ...(efforts !== null ? { reasoningEfforts: efforts } : {}),
     defaultReasoningEffort: asString(record.default_reasoning_level) ?? fallback?.defaultReasoningEffort ?? null,
+    // Only a stated boolean counts. A listing that omits the flag has not said
+    // the model is not Lite - it has said nothing, and the shipped table is
+    // then the only source that knows.
+    ...(useResponsesLite !== undefined ? { useResponsesLite } : {}),
   }]
 }
 

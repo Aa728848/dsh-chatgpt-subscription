@@ -13,13 +13,13 @@ import {
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL } from '../compat.ts'
-import { resolveCodexFallbackModel } from '../shared/model-catalog.ts'
+import { codexModelUsesResponsesLite, resolveCodexFallbackModel, type CodexWireCapabilities } from '../shared/model-catalog.ts'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from './common/idle-watchdog.ts'
 import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, type LocalRawImageOptions } from './responses-mapper.ts'
 import { normalizeGenerateOptions } from './common/llm-compat.ts'
-import { CODEX_TURN_STATE_HEADER, authOwnerKey, codexHeaders, retryAfterMs, stableSessionId } from './wire-auth.ts'
+import { CODEX_RESPONSES_LITE_HEADER, CODEX_ROUTING_HINT_HEADER, CODEX_TURN_STATE_HEADER, authOwnerKey, codexHeaders, codexRoutingHint, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
 
@@ -60,7 +60,24 @@ export interface ResponsesClientOptions {
    * plugin config exposes it so a deployment can retune it without a rebuild.
    */
   codexStreamIdleTimeoutMs?: number
+  /**
+   * Resolves what a model speaks on the wire.
+   *
+   * The adapter binds this to the catalog its resolution used, so the request
+   * speaks the same protocol the model was resolved against. Without it the
+   * shipped table answers, which is the right floor for a model nothing else
+   * states a protocol for.
+   */
+  capabilities?: CodexWireCapabilityResolver
 }
+
+/**
+ * Resolves the wire capabilities of one model.
+ *
+ * A resolver rather than a fixed value, because a fallback moves the request
+ * to a DIFFERENT model, and that model may speak a different protocol.
+ */
+export type CodexWireCapabilityResolver = (model: string) => CodexWireCapabilities
 
 export class ResponsesClient {
   private readonly fetchFn: FetchLike
@@ -70,6 +87,7 @@ export class ResponsesClient {
   private readonly reasoningSummary: () => CodexReasoningSummary | null
   private readonly accountPool: CodexAccountPool | null
   private readonly codexStreamIdleTimeoutMs: number
+  private readonly capabilities: CodexWireCapabilityResolver | undefined
   /**
    * Opaque backend routing state, keyed by a unique model-request nonce.
    * The host does not expose a reliable human-turn identity, so this is the
@@ -100,13 +118,18 @@ export class ResponsesClient {
     this.reasoningSummary = options.reasoningSummary ?? (() => null)
     this.accountPool = options.accountPool ?? null
     this.codexStreamIdleTimeoutMs = options.codexStreamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
+    this.capabilities = options.capabilities
   }
 
   private readonly localRawImages: LocalRawImageOptions
 
-  async *stream(rawOptions: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(
+    rawOptions: GenerateOptions,
+    capabilities?: CodexWireCapabilityResolver,
+  ): AsyncIterable<StreamChunk> {
     const options = normalizeGenerateOptions(rawOptions)
     const sessionId = stableSessionId(options.sessionId)
+    const resolveCapabilities = capabilities ?? this.capabilities ?? defaultWireCapabilities
     // No reliable host turn identity is available: do not infer it from history.
     // This conservative fallback never replays state across model requests.
     const turnKey = turnKeyFor(sessionId)
@@ -116,6 +139,9 @@ export class ResponsesClient {
     let release: (() => void) | undefined
 
     while (true) {
+      // Resolved per attempt, not once per request: a 404 fallback moves the
+      // request to another model, and that model may speak another protocol.
+      const useResponsesLite = resolveCapabilities(attemptOptions.model).useResponsesLite
       const payload = await buildResponsesPayload(
         attemptOptions,
         this.attachments,
@@ -126,9 +152,12 @@ export class ResponsesClient {
         // Stable per conversation, so the backend can reuse the prompt prefix
         // across turns instead of re-reading the whole history.
         promptCacheKeyFor(sessionId),
+        // The item ids are derived from the conversation identity, so the same
+        // request recomputed in the same conversation carries the same ids.
+        { useResponsesLite, idNamespace: sessionId },
       )
       try {
-        const opened = await this.send(payload, sessionId, turnKey, options.signal)
+        const opened = await this.send(payload, sessionId, turnKey, options.signal, useResponsesLite)
         response = opened.response
         release = opened.release
         break
@@ -171,14 +200,15 @@ export class ResponsesClient {
     sessionId: string,
     turnKey: string,
     signal?: AbortSignal,
+    useResponsesLite: boolean = false,
   ): Promise<{ response: Response; release?: () => void }> {
-    if (this.accountPool !== null) return this.sendWithPool(payload, sessionId, turnKey, signal)
+    if (this.accountPool !== null) return this.sendWithPool(payload, sessionId, turnKey, signal, useResponsesLite)
     let credentials = await this.oauth.credentials()
-    let response = await this.request(payload, credentials, sessionId, turnKey, signal)
+    let response = await this.request(payload, credentials, sessionId, turnKey, signal, useResponsesLite)
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined)
       credentials = await this.oauth.credentials(true)
-      response = await this.request(payload, credentials, sessionId, turnKey, signal)
+      response = await this.request(payload, credentials, sessionId, turnKey, signal, useResponsesLite)
     }
     if (!response.ok) throw await responseError(response)
     this.rememberTurnState(response, turnKey, credentials)
@@ -259,6 +289,7 @@ export class ResponsesClient {
     sessionId: string,
     turnKey: string,
     signal?: AbortSignal,
+    useResponsesLite: boolean = false,
   ): Promise<{ response: Response; release: () => void }> {
     const pool = this.accountPool!
     const tried = new Set<string>()
@@ -279,12 +310,12 @@ export class ResponsesClient {
         release()
       }
       try {
-        let response = await this.request(payload, credentials, sessionId, turnKey, signal)
+        let response = await this.request(payload, credentials, sessionId, turnKey, signal, useResponsesLite)
         if (response.status === 401) {
           await response.body?.cancel().catch(() => undefined)
           try {
             credentials = await pool.refreshAccountNow(account.id)
-            response = await this.request(payload, credentials, sessionId, turnKey, signal)
+            response = await this.request(payload, credentials, sessionId, turnKey, signal, useResponsesLite)
           } catch (error) {
             await pool.markAuthFailed(
               account.id,
@@ -330,6 +361,7 @@ export class ResponsesClient {
     sessionId: string,
     turnKey: string,
     signal?: AbortSignal,
+    useResponsesLite: boolean = false,
   ): Promise<Response> {
     for (let attempt = 0; ; attempt += 1) {
       try {
@@ -339,6 +371,17 @@ export class ResponsesClient {
             ...codexHeaders(credentials, sessionId, { turnState: this.turnStateFor(turnKey, credentials) }),
             'content-type': 'application/json',
             accept: 'text/event-stream',
+            // The routing hint tells the backend which model (and tier) this
+            // request is for. It is a responses-only header: the other endpoints
+            // of this line carry their own routing and must not present it.
+            [CODEX_ROUTING_HINT_HEADER]: codexRoutingHint(
+              String(payload.model ?? ''),
+              typeof payload.service_tier === 'string' ? payload.service_tier : undefined,
+            ),
+            // The Lite header travels WITH the Lite body: the two are two
+            // readings of the same request shape, and the backend picks the
+            // reading from this header.
+            ...(useResponsesLite ? { [CODEX_RESPONSES_LITE_HEADER]: 'true' } : {}),
           },
           body: JSON.stringify(payload),
           signal,
@@ -373,6 +416,15 @@ export class ResponsesClient {
   }
 }
 
+/**
+ * Capabilities for a model nothing else has resolved.
+ *
+ * The shipped table is the floor, and a model it has never heard of is not Lite:
+ * the Lite body is a different request, not a different spelling of this one.
+ */
+function defaultWireCapabilities(model: string): CodexWireCapabilities {
+  return { useResponsesLite: codexModelUsesResponsesLite(model) }
+}
 /**
  * Whether the transport failed before the request could reach ChatGPT.
  *

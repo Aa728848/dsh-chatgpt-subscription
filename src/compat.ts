@@ -11,22 +11,27 @@ export const OAUTH_CALLBACK_PATH = '/auth/callback' as const
 export const OAUTH_REDIRECT_URI = `http://${OAUTH_CALLBACK_HOST}:${OAUTH_CALLBACK_PORT}${OAUTH_CALLBACK_PATH}` as const
 export const OAUTH_SCOPE = 'openid profile email offline_access' as const
 /**
- * The single `originator` this line presents to the Codex backend on every
- * request, and the one OAuth sends during sign-in.
+ * The `originator` every request to the Codex backend presents.
  *
- * This used to be three different values - `opencode` for chat and sign-in,
- * `pi` for the image and search endpoints - which was an archaeological record
- * of when each endpoint was reverse-engineered, not a decision. The Codex
- * backend keys behaviour off this value (`codex_cli_rs` is what the official
- * CLI sends) and treats it as one client identity, so splitting it across three
- * files meant three unrelated failure signatures for one account. Both spellings
- * are known-good against the backend; `opencode` is kept because it is the value
- * the OAuth flow has always presented, and changing the sign-in originator is a
- * different risk from changing the request originator.
+ * The backend keys behaviour off this value and treats it as one client
+ * identity, so it is a single constant for the whole request path - the
+ * responses endpoint, the model listing, the image and search endpoints all
+ * present the same one.
+ *
+ * The official CLI sends `codex_cli_rs`, and that is what this line sends now:
+ * the backend routes and gates on it, so presenting anything else makes this
+ * line a different client than the one the service is shaped for.
  */
-export const CODEX_ORIGINATOR = 'opencode' as const
-/** OAuth presents the same identity the request path does (see above). */
-export const OAUTH_ORIGINATOR = CODEX_ORIGINATOR
+export const CODEX_ORIGINATOR = 'codex_cli_rs' as const
+/**
+ * The `originator` the OAuth sign-in presents.
+ *
+ * Deliberately NOT the request originator. The sign-in exchange is a different
+ * surface with its own registration, and `opencode` is the value this line has
+ * always presented there; changing the sign-in identity is a separate risk from
+ * aligning the request identity, so the two are kept apart on purpose.
+ */
+export const OAUTH_ORIGINATOR = 'opencode' as const
 export const OAUTH_LOGIN_TIMEOUT_MS = 5 * 60_000
 /**
  * The device-code grant: the one sign-in path a headless host can finish.
@@ -100,7 +105,21 @@ export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage' as c
  * the reasoning levels each one accepts. `client_version` is required and is the
  * same value the official CLI sends.
  */
-export const CODEX_CLIENT_VERSION = '0.99.0' as const
+/**
+ * Upstream Codex CLI release this line mirrors.
+ *
+ * The official client stamps its own version on the wire - in the
+ * `user-agent` and in the model listing's `client_version` query - and the
+ * backend reads both to decide which client surface it is talking to. This
+ * value is the release whose request protocol, Responses Lite shape and model
+ * catalog this line implements, so it is stated once and used by both.
+ *
+ * It is deliberately NOT the plugin version: the plugin release cycle and the
+ * upstream release cycle are independent, and the backend compares this
+ * number against upstream clients, not against npm.
+ */
+export const CODEX_UPSTREAM_VERSION = '0.166.0' as const
+export const CODEX_CLIENT_VERSION = CODEX_UPSTREAM_VERSION
 export const CODEX_MODELS_URL = `${CODEX_API_BASE}/models?client_version=${CODEX_CLIENT_VERSION}` as const
 /**
  * Beta gate the Codex backend expects on every responses request.

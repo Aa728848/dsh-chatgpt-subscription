@@ -9,8 +9,8 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { listCodexModels, PROVIDER_ID, PROVIDER_NAME, resolveCodexModel } from './model-catalog.ts'
-import type { CodexCatalogEntry, CodexCatalogLoadOptions } from './codex-catalog.ts'
+import { listCodexModels, PROVIDER_ID, PROVIDER_NAME, resolveCodexModel, resolveCodexWireCapabilities } from './model-catalog.ts'
+import { getCachedCatalog, type CodexCatalogEntry, type CodexCatalogLoadOptions } from './codex-catalog.ts'
 import { ResponsesClient } from './responses-client.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
 
@@ -67,14 +67,24 @@ export class CodexChatGptAdapter extends LlmAdapter {
   }
 
   async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    // ONE listing for this call, bound to it. The model the picker shows and
+    // the protocol the request speaks have to come from the same listing: a
+    // fallback model resolved against a listing the request never saw is a
+    // request whose shape was decided by a catalog that is no longer current.
+    const catalog = await this.catalog(signal)
     return {
-      model: await this.resolveModel(provider, model, signal),
-      stream: (options) => this.stream(options),
+      model: resolveCodexModel(model, this.preferences, catalog),
+      // The resolver takes the model, because a 404 fallback moves the request
+      // to another one that may speak another protocol.
+      stream: (options) => this.client.stream(options, (id) => resolveCodexWireCapabilities(id, catalog)),
     }
   }
 
   stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return this.client.stream(options)
+    // The direct path cannot bind a listing to the call, so it uses the one
+    // already held: no network call on the hot path, and the live listing
+    // still outranks the shipped table.
+    return this.client.stream(options, (id) => resolveCodexWireCapabilities(id, getCachedCatalog()))
   }
 }
 

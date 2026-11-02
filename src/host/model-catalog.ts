@@ -3,7 +3,7 @@ import { orderReasoningEfforts } from './common/reasoning-efforts.ts'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
-import { CODEX_MODEL_CATALOG, GPT_56_REASONING_EFFORTS, codexModelMaxTokens, isCodexReasoningEffort, reasoningEffortsForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
+import { CODEX_MODEL_CATALOG, GPT_56_REASONING_EFFORTS, codexModelMaxTokens, codexModelUsesResponsesLite, isCodexReasoningEffort, reasoningEffortsForModel, resolveCodexCatalogEntry, type CodexWireCapabilities } from '../shared/model-catalog.ts'
 import type { CodexCatalogEntry } from './codex-catalog.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
 
@@ -84,10 +84,11 @@ export function resolveCodexModel(
     // builder never transmits it.
     ...outputReservation(configuredContextWindow ?? liveEntry?.contextWindow ?? entry.contextWindow, codexModelMaxTokens(model)),
     // No `systemPromptUpdate: 'in-history'`: the Responses wire carries the system
-    // prompt in the top-level `instructions` slot, never inside `input`, so this
-    // route cannot read a later system message as the effective prompt. Declaring
-    // it would make DSH append every later prompt while the earlier ones stayed
-    // effective, and the mapper would have to drop them again.
+    // prompt as a developer message at the head of `input`, and the mapper still
+    // rebuilds that message from the NEWEST system node on every request, so a
+    // later system message must not be treated as an addition to the prompt.
+    // Declaring the flag would make DSH append every later prompt while the
+    // earlier ones stayed effective, and the mapper would have to drop them again.
     reasoning: {
       efforts: orderReasoningEfforts(efforts, GPT_56_REASONING_EFFORTS).map((effort) => ({
         id: ReasoningEffortId(effort),
@@ -95,5 +96,27 @@ export function resolveCodexModel(
       })),
       ...(defaultEffort ? { defaultEffort: ReasoningEffortId(defaultEffort) } : {}),
     },
+  }
+}
+
+/**
+ * Resolve the wire capabilities of one model.
+ *
+ * The live listing outranks the shipped table, because the backend is the
+ * authority on what this plan currently serves. A live entry that states no
+ * Lite flag has said nothing about it, so the shipped table answers then - and
+ * a model neither table knows is not Lite.
+ *
+ * @param model - the model id.
+ * @param live - the live listing this call resolved against, when there is one.
+ * @returns the capabilities for that model.
+ */
+export function resolveCodexWireCapabilities(
+  model: string,
+  live?: readonly CodexCatalogEntry[],
+): CodexWireCapabilities {
+  const liveEntry = live?.find(candidate => candidate.id === model)
+  return {
+    useResponsesLite: liveEntry?.useResponsesLite ?? codexModelUsesResponsesLite(model),
   }
 }
