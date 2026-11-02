@@ -20,6 +20,7 @@ import {
   createQoderStreamState,
   parseQoderUsage,
   processQoderStreamLine,
+  qoderSessionId,
   qoderWireToolCallId,
   resolveQoderThinking,
   type QoderWireRequestOptions,
@@ -112,6 +113,44 @@ describe('buildQoderChatRequest', () => {
     expect(withTemp.parameters).toEqual({ max_tokens: 1000, temperature: 0.5 })
     const plain = buildQoderChatRequest(options(), undefined as never, DEFAULT_QODER_WIRE_REQUEST_OPTIONS, CTX)
     expect(plain.parameters).toEqual({ max_tokens: 131072 })
+  })
+})
+
+describe('buildQoderChatRequest 的 session_id：稳定段按「账号 + 模型」', () => {
+  /** 同一段会话、同一个模型，只换账号。 */
+  const sessionIdFor = (uid: string | null | undefined, modelKey = 'lite'): string => {
+    const body = buildQoderChatRequest(
+      options(),
+      undefined as never,
+      DEFAULT_QODER_WIRE_REQUEST_OPTIONS,
+      { ...CTX, modelKey, uid, sessionId: 'sess-1' },
+    )
+    return body.session_id as string
+  }
+
+  it('★ 同一个账号 + 同一个模型 → 稳定段相同（缓存亲和）', () => {
+    expect(sessionIdFor('u-1')).toBe(sessionIdFor('u-1'))
+  })
+
+  it('★ 不同账号 → 稳定段不同：两个账号的对话不能串到同一段会话上', () => {
+    const first = sessionIdFor('u-1')
+    const second = sessionIdFor('u-2')
+
+    expect(first).not.toBe(second)
+    // 变的只是稳定段；宿主给的那一段（会话段）不变。
+    expect(first.split('-').slice(1)).toEqual(second.split('-').slice(1))
+  })
+
+  it('同一账号但换了模型 → 稳定段也不同', () => {
+    expect(sessionIdFor('u-1', 'lite')).not.toBe(sessionIdFor('u-1', 'qmodel'))
+  })
+
+  it('uid 缺失时保持旧兜底：稳定段只由模型决定', () => {
+    const legacy = qoderSessionId('', 'lite', 'sess-1')
+
+    expect(sessionIdFor(null)).toBe(legacy)
+    expect(sessionIdFor(undefined)).toBe(legacy)
+    expect(sessionIdFor('')).toBe(legacy)
   })
 })
 

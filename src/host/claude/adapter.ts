@@ -691,8 +691,22 @@ export class ClaudeAdapter extends LlmAdapter {
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal, activity?: StreamActivity): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
-    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    // RESOLVE THE IMAGES FIRST, THEN OFFLOAD — WITH THE SAME MAP.
+    //
+    // The order is not interchangeable, and the old order was wrong in a way
+    // that cost the user a picture on every turn: the offload pass measured the
+    // ESTIMATE of each image's size (its stored raw bytes), while the request
+    // actually carried the SCALED-DOWN request version, which is far smaller.
+    // An estimate that is too large therefore dropped images the request would
+    // have carried comfortably — and the images it dropped were the ones that
+    // had been scaled to fit.
+    //
+    // Measuring the resolved payloads instead means the budget is met by what
+    // is really sent, and it also lets the budget see that an image which
+    // resolved to 'unavailable' or 'oversized' carries no bytes at all.
+    const normalized = normalizeGenerateOptions(options)
+    const images = await resolveRequestImages(normalized, this.options.attachments, signal)
+    const requestOptions = offloadOldestRequestImages(normalized, images)
     // One table for both directions of this request — see module note 2.
     const toolNames = claudeToolNames(requestOptions.tools)
     // The version floor is checked here, BEFORE the credential is resolved and

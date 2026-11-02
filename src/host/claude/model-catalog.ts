@@ -260,8 +260,6 @@
  * the user has to reach.
  */
 
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './types.ts'
-
 /** One model's shipped capability entry. */
 export interface ClaudeModelEntry {
   /** Exact model id to put on the wire. */
@@ -724,16 +722,66 @@ export const DEFAULT_VISIBLE_MODEL_IDS: readonly string[] = [
 const BY_ID = new Map(CLAUDE_MODELS.map((model) => [model.id, model]))
 
 /**
- * Look one model up, or receive a stub that claims nothing.
+ * The capability shape an id this line has never heard of inherits.
  *
- * An unknown id is treated conservatively rather than optimistically, and the
- * reasoning is asymmetric: a wrong "supports images" claim sends image bytes to
- * an endpoint that rejects the whole request, while a wrong "no images" claim
- * only makes DSH show a placeholder the user can correct. The same asymmetry
- * picks the weakest thinking form and the smaller default window — a window that
- * overstates what the server grants is the error that fails hard.
+ * WHY A TEMPLATE AND NOT A STUB. The id arrives from somewhere this table
+ * cannot check: the server's own `GET /v1/models` lists whatever the account
+ * may call, and a release that postdates this table lists an id that is simply
+ * not here yet. A stub that claims NOTHING is the wrong answer for such an id:
+ * it says "no images, no thinking, 200K window", which is a set of claims about
+ * a model nobody has described — and every one of them is a claim that makes
+ * the request WORSE rather than safer. No images means a picture the model
+ * could have read is replaced by a placeholder; no thinking form means the
+ * request sends no `thinking` field at all; a 200K window means a conversation
+ * is compacted roughly five times earlier than it has to be.
  *
- * The id and name are echoed back unchanged so nothing is hidden from the user.
+ * So an unknown id inherits the shape of the CURRENT generation instead, which
+ * is what the vendor documents for the models shipping now:
+ *
+ * - `adaptive` thinking — the form every current-generation row uses, and the
+ *   form the vendor documents as equivalent to omitting the field;
+ * - the FULL effort ladder `low`/`medium`/`high`/`xhigh`/`max`, which is
+ *   the ladder the current models expose (see the effort documentation's level
+ *   table: every current model offers all five);
+ * - image support — every current model reads images;
+ * - a 1M context window and a 128K output cap — the shape of the current
+ *   generation's rows.
+ *
+ * TWO FIELDS ARE NOT IN THE ENUMERATION ABOVE and are set the SAFE way, because
+ * "safe" here means the failure a user would rather see:
+ *
+ * - `supportsTemperature: false`. Every current-generation row refuses a
+ *   temperature, and omitting a parameter is never an error while sending an
+ *   unsupported one is. A user who asks for a temperature on a model this table
+ *   has never heard of gets the model's own default instead of a 400.
+ * - `canDisableThinking: false`, with `bindsThinkingToPrefix: true`. The
+ *   current generation's flagship documents that adaptive thinking is always on
+ *   and cannot be turned off, and the prefix binding is what the
+ *   preserved-thinking prefix check needs — a request that replays a thinking
+ *   block after the prefix changed is a 400 on every retry without it.
+ *
+ * The id and name are echoed back unchanged so nothing is hidden from the user,
+ * and a KNOWN id never reaches this template: it resolves to its own row.
+ */
+export const CLAUDE_CURRENT_MODEL_CAPABILITIES: Omit<ClaudeModelEntry, 'id' | 'name'> = {
+  contextWindow: 1_000_000,
+  maxTokens: 128_000,
+  supportsImage: true,
+  supportsTemperature: false,
+  thinkingMode: 'adaptive',
+  reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  canDisableThinking: false,
+  bindsThinkingToPrefix: true,
+}
+
+/**
+ * Look one model up, or receive the current-model template.
+ *
+ * A known id resolves to its own row. An unknown one resolves to
+ * {@link CLAUDE_CURRENT_MODEL_CAPABILITIES} rather than to a claim-nothing
+ * stub — see that constant's doc comment for why "claims nothing" is the
+ * worse answer for an id the server named but this table has not caught up
+ * with.
  */
 export function resolveClaudeModel(modelId: string, catalog: readonly ClaudeModelEntry[] = CLAUDE_MODELS): ClaudeModelEntry {
   const known = catalog.find((model) => model.id === modelId)
@@ -741,18 +789,76 @@ export function resolveClaudeModel(modelId: string, catalog: readonly ClaudeMode
   return {
     id: modelId,
     name: modelId,
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    maxTokens: DEFAULT_MAX_TOKENS,
-    supportsImage: false,
-    supportsTemperature: true,
-    // No evidence the id reasons. Claiming a thinking form would be a guess, and
-    // the empty ladder already means no thinking field reaches the wire; 'none'
-    // is the label that says so instead of naming a form nothing supports.
-    thinkingMode: 'none',
-    reasoningEfforts: [],
-    // Nothing to disable: this stub does not assert that the model thinks.
-    canDisableThinking: false,
+    ...CLAUDE_CURRENT_MODEL_CAPABILITIES,
+    // A copy, so a caller that mutates the ladder cannot reach the template
+    // itself (the same reason {@link claudeReasoningEfforts} copies).
+    reasoningEfforts: [...CLAUDE_CURRENT_MODEL_CAPABILITIES.reasoningEfforts],
   }
+}
+
+/**
+ * The models the vendor documents as accepting a MID-CONVERSATION system
+ * message — a `{"role": "system"}` entry inside `messages`, at the point in
+ * the conversation where the instruction starts to apply.
+ *
+ * TRANSCRIBED from the vendor's own "Mid-conversation system messages and tool
+ * changes" page, whose supported-model list names exactly these ten models:
+ * Claude Fable 5.1, Claude Mythos 5.1, Claude Fable 5, Claude Mythos 5, Claude
+ * Mythos Preview, Claude Opus 5.5, Claude Opus 4.8, Claude Opus 5, Claude Sonnet
+ * 5.5 and Claude Haiku 5.5. No beta header is required for the feature.
+ *
+ * TWO ABSENCES ARE LOAD-BEARING and are the reason this is a list rather than
+ * a family rule:
+ *
+ * - Claude Sonnet 5 is NOT on it. The vendor says so in as many words: "This
+ *   feature is not available on Claude Sonnet 5. Use the top-level `system`
+ *   field there instead."
+ * - The 4.x rows are not on it either, and neither are the Haiku 4.5 rows.
+ *
+ * A model that is not on this list keeps the FOLDED behaviour: its historical
+ * system messages are concatenated into the top-level `system` field, exactly
+ * as before.
+ */
+export const CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS: readonly string[] = Object.freeze([
+  'claude-fable-5-1',
+  'claude-mythos-5-1',
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-mythos-preview',
+  'claude-opus-5-5',
+  'claude-opus-4-8',
+  'claude-opus-5',
+  'claude-sonnet-5-5',
+  'claude-haiku-5-5',
+])
+
+/**
+ * Whether one model keeps a historical `role: "system"` message IN PLACE
+ * inside `messages` rather than folding it into the top-level `system`
+ * field.
+ *
+ * The rule has two branches and the SECOND one is the surprising one:
+ *
+ * 1. A model the vendor documents as supporting mid-conversation system
+ *    messages keeps them in place. Folding one into the top-level `system`
+ *    field moves it to the HEAD of the request, which changes the cached
+ *    prefix from its first byte and invalidates the cache for the system prompt
+ *    and every message after it — the exact cost the feature exists to avoid.
+ *
+ * 2. A model this table has NEVER HEARD OF also keeps them in place, because
+ *    an unknown id inherits the current-generation template
+ *    ({@link CLAUDE_CURRENT_MODEL_CAPABILITIES}), and every current-generation
+ *    model is on the list above. The check is against the SHIPPED table rather
+ *    than against a caller's catalog on purpose: the live listing names ids
+ *    this table predates, and those ids are exactly the "unknown" case.
+ *
+ * A model that IS known and is NOT on the list keeps the folded behaviour: the
+ * top-level `system` field is the only place its instructions can live.
+ */
+export function claudeSupportsMidConversationSystemMessages(modelId: string): boolean {
+  const known = CLAUDE_MODELS.find((model) => model.id === modelId)
+  if (known === undefined) return true
+  return CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS.includes(modelId)
 }
 
 /** Context window this route assumes for one model, before any override. */

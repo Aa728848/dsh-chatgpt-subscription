@@ -213,12 +213,17 @@ function makeAdapter(
   store: FileCredentialStore,
   settings: FileModelSettingsStore,
   fetchFn: typeof fetch,
-  extra: { accountPool?: ClaudeAccountPoolLike; loadCatalog?: () => Promise<never[]> } = {},
+  extra: {
+    accountPool?: ClaudeAccountPoolLike
+    loadCatalog?: () => Promise<never[]>
+    attachments?: { readImage: unknown; readImageRequest: unknown }
+  } = {},
 ): ClaudeAdapter {
   return new ClaudeAdapter(store, settings, undefined, {
     fetchFn,
     loadCatalog: extra.loadCatalog ?? (async () => FALLBACK_MODELS as never[]),
     ...(extra.accountPool === undefined ? {} : { accountPool: extra.accountPool }),
+    ...(extra.attachments === undefined ? {} : { attachments: extra.attachments as never }),
   })
 }
 
@@ -340,13 +345,20 @@ describe('claude adapter model resolution', () => {
     expect(resolved.context?.contextWindow).toBe(1_000_000)
   })
 
-  it('offers no reasoning block on a model with no ladder, and a stub claims nothing', async () => {
+  it('gives an UNKNOWN id the current-model shape: the full ladder, images and a 1M window', async () => {
+    // THE OLD BEHAVIOUR WAS A CLAIM-NOTHING STUB: no reasoning block, text
+    // only, and a 200K window. Every one of those is a claim about a model
+    // nobody described, and every one of them makes the request WORSE — a
+    // picture the model could read becomes a placeholder, and the
+    // conversation is compacted five times earlier than it has to be.
     const { store, settings } = await mount()
     const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
     const unknown = await adapter.resolveModel(PROVIDER_ID, 'claude-unreleased-9')
-    expect(unknown.reasoning).toBeUndefined()
-    expect(unknown.inputModalities).toEqual(['text'])
-    expect(unknown.context?.contextWindow).toBe(200_000)
+    expect(unknown.reasoning?.efforts.map((effort) => String(effort.id)))
+      .toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(unknown.inputModalities).toEqual(['text', 'image'])
+    expect(unknown.context?.contextWindow).toBe(1_000_000)
+    expect(unknown.defaultMaxTokens).toBe(128_000)
   })
 
   it('prefers a finite positive context override and ignores a broken one', async () => {
@@ -1058,5 +1070,51 @@ describe('claude adapter abort and truncation', () => {
     ]))
     const adapter = makeAdapter(store, settings, fn)
     expect(await failureOf(adapter.stream(options()))).toMatchObject({ code: 'PROVIDER_ERROR' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Request images
+// ---------------------------------------------------------------------------
+
+describe('claude adapter request images', () => {
+  it('RESOLVES the images BEFORE the offload, and budgets the payload that is really sent', async () => {
+    // THE ORDER IS THE FIX. The offload pass used to run first and measure an
+    // ESTIMATE of each image's size — its stored raw bytes — while the
+    // request actually carried the SCALED-DOWN request version, which is far
+    // smaller. An estimate that is too large drops images the request would
+    // have carried comfortably, and the images it dropped were the ones that
+    // had been scaled to fit.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+
+    const reads: string[] = []
+    const attachments = {
+      readImage: async (ref: { attachmentId: string }) => {
+        reads.push('read:' + ref.attachmentId)
+        // 9,000,000 raw bytes is 12,000,000 base64 characters: over BOTH the
+        // 8 MB request ceiling and the 5 MB per-image ceiling.
+        return { ref, data: new Uint8Array(9_000_000) }
+      },
+      readImageRequest: async (ref: { attachmentId: string }, target: { width: number; height: number; maxBytes: number }) => {
+        reads.push('request:' + ref.attachmentId)
+        return { width: target.width, height: target.height, mediaType: 'image/webp', data: new Uint8Array(8) }
+      },
+    }
+
+    const adapter = makeAdapter(store, settings, fn, { attachments })
+    await drain(adapter.stream(options('claude-sonnet-4-6', {
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [
+        { type: 'image', attachment: { attachmentId: 'fat', mediaType: 'image/png', bytes: 9_000_000, width: 100, height: 100, name: 'fat.png' } },
+      ] }],
+    } as never)))
+
+    const serialized = JSON.stringify(calls[0]?.body)
+    // The picture is STILL in the request: the budget was measured against
+    // the payload that is really sent, and the scaled version is what goes.
+    expect(serialized).not.toContain('[image omitted')
+    expect(serialized).toContain('image/webp')
+    // The scaled request version is what was read.
+    expect(reads).toContain('request:fat')
   })
 })

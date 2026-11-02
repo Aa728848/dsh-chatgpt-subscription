@@ -40,6 +40,38 @@ describe('model request concurrency', () => {
     expect(isModelRequest(url)).toBe(false)
     for (const path of ['/oauth/token','/v1/models','/alpha/whoami']) expect(isModelRequest('https://example.test'+path, request())).toBe(false)
   })
+  it('gates the Qoder generation POST and leaves its catalog, quota and token calls out', () => {
+    // The Qoder line speaks its own COSY-signed protocol: the generation POST is
+    // {inference}/algo/api/v2/service/pro/sse/agent_chat_generation, and no
+    // OpenAI/Anthropic-style suffix names it. Without this the provider's
+    // concurrency limit was configured but never applied to a single request.
+    const generation = 'https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation'
+      + '?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1'
+    expect(isModelRequest(generation, request())).toBe(true)
+    // The model catalog, the quota and the user info are GETs: a refresh or a
+    // quota read must never queue behind a generation.
+    expect(isModelRequest('https://api3.qoder.sh/algo/api/v2/model/list?Encode=1')).toBe(false)
+    expect(isModelRequest('https://api3.qoder.sh/api/v2/quota/usage')).toBe(false)
+    expect(isModelRequest('https://api3.qoder.sh/api/v1/userinfo')).toBe(false)
+    // The PAT exchange is a POST, but it is a credential call, not a generation.
+    expect(isModelRequest('https://api3.qoder.sh/api/v1/jobToken/exchange', request())).toBe(false)
+  })
+  it('holds the Qoder slot for the generation POST only', async () => {
+    const base = vi.fn(async () => new Response('body'))
+    const wrapped = createControlledModelFetch(base, { provider: 'qoder', limits: { default: 1 } })
+    const generation = 'https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation'
+      + '?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1'
+    const first = await wrapped(generation, request())
+    const pending = wrapped(generation, request())
+    await Promise.resolve(); expect(base).toHaveBeenCalledTimes(1)
+    // A catalog read goes straight through while the generation holds the slot.
+    const catalog = await wrapped('https://api3.qoder.sh/algo/api/v2/model/list?Encode=1')
+    expect(await catalog.text()).toBe('body')
+    expect(base).toHaveBeenCalledTimes(2)
+    await first.body!.cancel()
+    await (await pending).text()
+    expect(base).toHaveBeenCalledTimes(3)
+  })
   it.each(CONTROLLED_PROVIDERS)('holds %s slot through body lifetime, isolates credentials', async provider => {
     const called = vi.fn(async () => new Response('body'))
     const wrapped = createControlledModelFetch(called, { provider, limits: { default: 1 } })

@@ -296,6 +296,14 @@ export interface StepCodeCatalogEntry {
   readonly name: string
   readonly modelType?: string
   readonly maxInputTokens?: number
+  /**
+   * 目录**真实**声明的输出上限；端点没报就没有这个字段。
+   *
+   * 它与 {@link maxInputTokens} 是两件事：后者是上下文窗口（输入侧），
+   * 前者是输出侧的真实上限。**窗口不是上限**——把窗口当成输出上限发出去，
+   * 就是拿一个自己编的数去限制上游（端点不报输出上限时官方客户端压根不发这个字段）。
+   */
+  readonly maxOutputTokens?: number
   readonly reasoning: boolean
   readonly vision: boolean
   /** reasoning_effort_support_list；空数组表示端点没声明或一个都不支持。 */
@@ -339,11 +347,18 @@ export function parseStepModelCatalog(payload: unknown): StepCodeCatalogEntry[] 
     seen.add(id)
     const declared = asNumber(record.max_input_tokens)
     const maxInputTokens = declared !== undefined && declared > 0 ? declared : undefined
+    // 输出上限：**只认端点真的报出来的那个数**。端点不报就没有这个字段——
+    // 拿上下文窗口冒充它是把 host 元数据当 wire 上限发出去（见 mapper 的说明）。
+    const declaredOutput = asNumber(record.max_output_tokens) ?? asNumber(record.maxOutputTokens)
+    const maxOutputTokens = declaredOutput !== undefined && declaredOutput > 0
+      ? Math.round(declaredOutput)
+      : undefined
     entries.push({
       id,
       name: asText(record.name) ?? id,
       ...(modelType === undefined ? {} : { modelType }),
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
       reasoning: asBoolean(record.enable_reason) === true,
       vision: asBoolean(record.enable_vision_input) === true,
       efforts: asTextArray(record.reasoning_effort_support_list),

@@ -34,13 +34,30 @@ export function readModelRequestLimits(env: NodeJS.ProcessEnv = process.env): Mo
   return { default: number('default', 10000), queueTimeoutMs: number('queueTimeoutMs', 3600000), providers }
 }
 
+/**
+ * Qoder's own generation endpoint.
+ *
+ * The line speaks a COSY-signed protocol of its own -- a POST to
+ * `{inference}/algo/api/v2/service/pro/sse/agent_chat_generation` -- so no
+ * OpenAI/Anthropic-shaped suffix names it. Without this the provider's
+ * concurrency limit was configurable but never applied to a single Qoder
+ * request.
+ *
+ * Only the GENERATION path is named here. The catalog
+ * (`/algo/api/v2/model/list`), the quota (`/api/v2/quota/usage`) and the
+ * credential calls (`/api/v1/jobToken/exchange`, `/api/v1/userinfo`) are
+ * reads a refresh or a quota card must never queue behind.
+ */
+const QODER_GENERATION_PATH = '/algo/api/v2/service/pro/sse/agent_chat_generation'
+
 /** Only generation POSTs are limited; token refresh/catalog/quota must never wait behind them. */
 export function isModelRequest(input: Parameters<typeof fetch>[0], init?: RequestInit): boolean {
   const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
   if (method.toUpperCase() !== 'POST') return false
   let path: string
   try { path = new URL(input instanceof Request ? input.url : String(input)).pathname } catch { return false }
-  return ['/responses', '/messages', '/chat/completions', '/api/chat'].some(suffix => path.endsWith(suffix))
+  return ['/responses', '/messages', '/chat/completions', '/api/chat', QODER_GENERATION_PATH]
+    .some(suffix => path.endsWith(suffix))
     || /:(?:streamGenerateContent|generateContent)$/.test(path)
 }
 

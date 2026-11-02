@@ -183,6 +183,32 @@ describe('Antigravity image wire format', () => {
     expect(readImage).not.toHaveBeenCalled()
   })
 
+  it('keeps a scaled set that only the STORED bytes would have put over budget', async () => {
+    // Forty screenshots, each 2 MiB as stored and 4 KiB as the request version.
+    // The bytes that actually leave the process are 40 x ~5.5 KB, so the request
+    // fits the 12 MB budget more than fifty times over. Measuring anything but
+    // the scaled bytes -- the stored size, or an estimate of the scale target --
+    // reported the request as over budget and replaced the oldest images, which
+    // is a loss the budget never asked for.
+    const stored = new Uint8Array(2 * 1024 * 1024).fill(7)
+    const scaled = new Uint8Array(4096).fill(9)
+    const images = Array.from({ length: 40 }, (_, index) => ({
+      ...ATTACHMENT, attachmentId: `sha256:shot-${index}`, width: 2880, height: 1800, bytes: stored.length,
+    })) as unknown as Array<typeof ATTACHMENT>
+    const readImage = vi.fn(async (ref: Parameters<AttachmentStore['readImage']>[0]) => ({ ref, data: stored }))
+    const readImageRequest = vi.fn(async (ref: Parameters<AttachmentStore['readImageRequest']>[0]) => ({
+      attachment: ref, variantId: 'variant' as never, data: scaled, mediaType: 'image/png' as const,
+      bytes: scaled.length, width: 1024, height: 640, depth: 'uchar' as const, space: 'srgb' as const, hasAlpha: false,
+    }))
+
+    const record = await wireFor(images.map((attachment) => ({ type: 'image', attachment })),
+      { readImage, readImageRequest })
+    const parts = (record.body.request.contents as Array<{ parts: Array<Record<string, unknown>> }>)[0]!.parts
+
+    expect(parts.filter((part) => 'inlineData' in part)).toHaveLength(40)
+    expect(parts.some((part) => typeof part.text === 'string' && part.text.includes('image omitted'))).toBe(false)
+  })
+
   it('sends a small image byte-for-byte as stored', async () => {
     const small = { ...ATTACHMENT, width: 640, height: 480, bytes: PNG.length } as typeof ATTACHMENT
     const readImage = vi.fn(async () => ({ ref: small, data: PNG }))
@@ -225,11 +251,17 @@ describe('Antigravity image wire format', () => {
     const omitted = parts.filter((part) => typeof part.text === 'string' && part.text.includes('image omitted'))
     expect(omitted).toHaveLength(2)
     expect(parts.filter((part) => 'inlineData' in part)).toHaveLength(1)
-    // The placeholder text is unchanged from before this change.
-    expect(String(omitted[0]!.text)).toBe('[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]')
+    // The placeholder is the shared kernel's, the one every other line already
+    // sends: the route's budget is now measured with the same kernel, so the
+    // text that says "this picture was given back" comes from the same place.
+    expect(String(omitted[0]!.text)).toBe('[image omitted to keep the request within its size limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]')
     // The newest image survives, and nothing was rescaled on the way there.
-    expect(readImage).toHaveBeenCalledTimes(1)
-    expect(readImage.mock.calls[0]?.[0]).toBe(images[2])
+    // Every image is resolved BEFORE the budget decides, because the decision
+    // is made on the bytes that are actually sent: the two that were given
+    // back are read and measured before the budget replaces them.
+    expect(readImage).toHaveBeenCalledTimes(3)
+    expect(readImage.mock.calls.map((call) => (call[0] as { attachmentId: string }).attachmentId))
+      .toEqual(['sha256:flat-0', 'sha256:flat-1', 'sha256:flat-2'])
     expect(readImageRequest).not.toHaveBeenCalled()
   })
 })

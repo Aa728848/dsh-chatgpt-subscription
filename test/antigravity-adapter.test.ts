@@ -777,14 +777,16 @@ describe('AntigravityAdapter', () => {
     const modelSettings = new FileModelSettingsStore()
     vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.8-flash'], catalogModels: [], defaultReasoningEffort: 'low' })
 
-    // Two 6 MiB images are 16 MiB of base64 against a 12 MiB budget.
-    const raw = 6 * 1024 * 1024
+    // Two 5 MiB images are ~7 MB of base64 each against a 12 MiB budget. The
+    // reader hands back what the reference claims, because the budget is
+    // measured on the bytes that go on the wire, not on the stored size.
+    const raw = 5 * 1024 * 1024
     const sized = (id: string) => ({
       attachmentId: id, mediaType: 'image/png', bytes: raw, width: 1, height: 1,
     } as unknown as Parameters<AttachmentStore['readImage']>[0])
     const oldest = sized('sha256:oldest')
     const newest = sized('sha256:newest')
-    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+    const png = new Uint8Array(raw)
     const readImage = vi.fn(async (value: Parameters<AttachmentStore['readImage']>[0]) => ({ ref: value, data: png }))
     const readImageRequest = vi.fn(async (ref: Parameters<AttachmentStore['readImageRequest']>[0]) => ({
       attachment: ref, variantId: 'variant' as never, data: png, mediaType: 'image/png' as const,
@@ -812,15 +814,17 @@ describe('AntigravityAdapter', () => {
       } as unknown as GenerateOptions
       for await (const chunk of adapter.stream(options)) { void chunk }
 
-      // Only the surviving image is read...
-      expect(readImage).toHaveBeenCalledTimes(1)
-      expect(readImage.mock.calls[0]?.[0]).toBe(newest)
+      // Both images are read before the budget decides: the decision is made on
+      // the bytes that are actually sent...
+      expect(readImage).toHaveBeenCalledTimes(2)
+      expect(readImage.mock.calls.map((call) => (call[0] as { attachmentId: string }).attachmentId))
+        .toEqual(['sha256:oldest', 'sha256:newest'])
       // ...the omitted one still tells the model an image existed...
       expect(captured[0].request.contents[0].parts[0].text).toContain('image omitted')
       // ...and the newest one still travels as inline bytes.
-      expect(captured[0].request.contents[1].parts).toEqual([
-        { inlineData: { mimeType: 'image/png', data: Buffer.from(png).toString('base64') } },
-      ])
+      const kept = captured[0].request.contents[1].parts[0]
+      expect(kept.inlineData.mimeType).toBe('image/png')
+      expect(Buffer.from(kept.inlineData.data, 'base64').length).toBe(raw)
     } finally {
       globalThis.fetch = originalFetch
     }

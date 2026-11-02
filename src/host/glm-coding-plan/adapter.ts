@@ -240,6 +240,9 @@ export function buildGlmRequestPlan(
       body: buildGlmAnthropicRequest(options, {
         // 梯子由本层传入：mapper 只收敛，不查目录。空数组 = 该模型不发任何思考控制。
         ladder: request.entry.reasoningEfforts,
+        // 「能不能关思考」也是逐模型事实：官方规则集里 GLM-5.2 / GLM-5-Turbo 的
+        // reasoningLevel.values 含 disabled，GLM-5.3 家族不含。
+        thinkingDisableable: request.entry.thinkingDisableable,
         ...(request.images === undefined ? {} : { images: request.images }),
         defaultMaxTokens: request.entry.defaultMaxTokens,
       }),

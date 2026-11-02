@@ -24,8 +24,8 @@ import {
   PROVIDER_NAME,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
+  declaredMaxOutputTokens,
   inputModalitiesFor,
-  maxOutputTokensFor,
   providerUrl,
   reasoningEffortsFor,
   resolveApiEnv,
@@ -329,14 +329,20 @@ export class CommandCodeAdapter extends LlmAdapter {
     const entry = catalog.find((model) => model.id === modelId)
     const efforts = reasoningEffortsFor(modelId)
     const defaultEffortId = resolveDefaultReasoningEffort(efforts, settings.defaultReasoningEffort)
+    // The reservation follows the officially DECLARED cap. A model that
+    // declares none reserves nothing and advertises no default: the provider
+    // decides that model's cap, and a request that carried a number invented
+    // here would be capped by a number nobody published.
+    const declaredMaxTokens = declaredMaxOutputTokens(modelId)
+    const contextWindow = this.contextWindowFor(modelId, entry, settings.contextWindowOverrides)
 
     return {
       provider,
       id: modelId,
       name: entry?.name ?? modelId,
       inputModalities: inputModalitiesFor(modelId),
-      context: { contextWindow: this.contextWindowFor(modelId, entry, settings.contextWindowOverrides) },
-      ...outputReservation(this.contextWindowFor(modelId, entry, settings.contextWindowOverrides), maxOutputTokensFor(modelId)),
+      context: { contextWindow },
+      ...(declaredMaxTokens === undefined ? {} : outputReservation(contextWindow, declaredMaxTokens)),
       ...(efforts.length === 0
         ? {}
         : {

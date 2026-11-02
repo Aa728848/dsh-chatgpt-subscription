@@ -16,6 +16,7 @@ import {
   closeGlmAnthropicStream,
   createGlmAnthropicStreamState,
   glmAnthropicHeaders,
+  glmAnthropicMarkCacheBreakpoint,
   glmAnthropicUrl,
   glmEffortForLadder,
   glmStreamHasContent,
@@ -129,7 +130,9 @@ describe('思考档位跨两套词汇表收敛', () => {
     expect(glmEffortForLadder(LADDER, 'minimal')).not.toBe('high')
   })
 
-  it('none 收敛到 low：本线路任何模型都不接受关闭思考', () => {
+  it('none 在不支持关闭思考的模型上收敛到最低档（GLM-5.3 家族）', () => {
+    // 官方规则集里 .*glm-5\.3.* 的 reasoningLevel.values 是 ["low","high","max"]，
+    // 没有 disabled——所以这一族收到 none 时只能收敛到 low，不能变成「关闭」。
     expect(glmEffortForLadder(LADDER, 'none')).toBe('low')
     expect(RANK[glmEffortForLadder(LADDER, 'none')!]).toBeLessThanOrEqual(RANK['low']!)
   })
@@ -166,16 +169,21 @@ describe('思考档位跨两套词汇表收敛', () => {
     expect(glmEffortForLadder(LADDER, undefined)).toBeNull()
   })
 
-  it('思考控制恒定开启，且从不发 type: disabled', () => {
+  it('思考控制在不支持关闭思考的模型上恒开，档位走 output_config.effort', () => {
+    // 官方 .*glm-5\.3.* 的 map 逐字：
+    //   {"thinking":{"type":"enabled"},"output_config":{"effort": reasoningLevel}}
     const control = glmThinkingControl(LADDER, 'minimal')
     expect(control.thinking).toBe(true)
     expect(control.fields.thinking).toEqual({ type: 'enabled' })
-    expect(control.fields.reasoning_effort).toBe('low')
+    expect(control.fields.output_config).toEqual({ effort: 'low' })
+    // 顶层 reasoning_effort 不再出现：官方全仓零命中。
+    expect(control.fields.reasoning_effort).toBeUndefined()
     expect(JSON.stringify(control.fields)).not.toContain('disabled')
   })
 
   it('sendReasoningEffort=false 时只留 thinking，不发档位', () => {
     const control = glmThinkingControl(LADDER, 'high', false)
+    expect(control.fields.output_config).toBeUndefined()
     expect(control.fields.reasoning_effort).toBeUndefined()
     expect(control.fields.thinking).toEqual({ type: 'enabled' })
   })
@@ -200,12 +208,13 @@ describe('请求体投影', () => {
     expect(buildGlmAnthropicRequest(options(), { ladder: LADDER })).toMatchObject({ stream: true })
   })
 
-  it('档位以收敛后的值进请求体', () => {
+  it('档位以收敛后的值进 output_config，且不发顶层 reasoning_effort', () => {
     const body = buildGlmAnthropicRequest(
       options({ reasoningEffort: 'minimal' as never }),
       { ladder: LADDER },
     )
-    expect(body.reasoning_effort).toBe('low')
+    expect(body.output_config).toEqual({ effort: 'low' })
+    expect(body.reasoning_effort).toBeUndefined()
     expect(body.thinking).toEqual({ type: 'enabled' })
   })
 
@@ -457,12 +466,246 @@ describe('usage 在 finish 之前，finish 之后不再有块', () => {
   })
 })
 
+describe('官方对齐：effort 出口与逐模型关思考', () => {
+  /** GLM-5.2 在官方规则集里的 reasoningLevel.values：["disabled","high","max"]。 */
+  const LADDER_52 = ['high', 'max']
+
+  it('GLM-5.3 家族恒开，档位只出现在 output_config', () => {
+    const body = buildGlmAnthropicRequest(
+      options({ reasoningEffort: 'high' as never }),
+      { ladder: LADDER, thinkingDisableable: false },
+    )
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.output_config).toEqual({ effort: 'high' })
+    expect(body.reasoning_effort).toBeUndefined()
+  })
+
+  it('GLM-5.2 关思考时只发 thinking.type: disabled，不带 output_config', () => {
+    // 官方 .*GLM-5\.2.* 的 map：disabled 分支里没有 output_config。
+    const body = buildGlmAnthropicRequest(
+      options({ reasoningEffort: 'none' as never }),
+      { ladder: LADDER_52, thinkingDisableable: true },
+    )
+    expect(body.thinking).toEqual({ type: 'disabled' })
+    expect(body.output_config).toBeUndefined()
+  })
+
+  it('GLM-5.2 开思考时发 thinking.type: enabled + output_config.effort', () => {
+    const body = buildGlmAnthropicRequest(
+      options({ reasoningEffort: 'max' as never }),
+      { ladder: LADDER_52, thinkingDisableable: true },
+    )
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.output_config).toEqual({ effort: 'max' })
+  })
+
+  it('不声明可关的模型收到 none 时不发 disabled（仍收敛到最低档）', () => {
+    // 官方 .*glm-5\.3.* 的 map 没有 disabled 分支：发 disabled 会被上游当错误拒。
+    const body = buildGlmAnthropicRequest(
+      options({ reasoningEffort: 'none' as never }),
+      { ladder: LADDER, thinkingDisableable: false },
+    )
+    expect(body.thinking).toEqual({ type: 'enabled' })
+    expect(body.output_config).toEqual({ effort: 'low' })
+    expect(JSON.stringify(body)).not.toContain('disabled')
+  })
+
+  it('GLM-5-Turbo（无档位梯子）关思考时只发 disabled', () => {
+    // 官方 .*GLM-5-Turbo.* 的 reasoningLevel.values 是 ["disabled","enabled"]：开关型。
+    const body = buildGlmAnthropicRequest(
+      options({ reasoningEffort: 'none' as never }),
+      { ladder: [], thinkingDisableable: true },
+    )
+    expect(body.thinking).toEqual({ type: 'disabled' })
+    expect(body.output_config).toBeUndefined()
+  })
+
+  it('关思考时 temperature 照常下发（Anthropic 只在思考开启时排斥它）', () => {
+    const body = buildGlmAnthropicRequest(
+      options({ reasoningEffort: 'none' as never, temperature: 0.3 }),
+      { ladder: LADDER_52, thinkingDisableable: true },
+    )
+    expect(body.temperature).toBe(0.3)
+  })
+
+  it('思考开启时 temperature 仍然被拒（互斥关系没被放松）', () => {
+    try {
+      buildGlmAnthropicRequest(
+        options({ reasoningEffort: 'high' as never, temperature: 0.3 }),
+        { ladder: LADDER_52, thinkingDisableable: true },
+      )
+      expect.unreachable('思考开启时 temperature 必须被拒绝')
+    } catch (error) {
+      expect((error as { code: string }).code).toBe(UNSUPPORTED_OPTION_CODE)
+    }
+  })
+})
+
+describe('官方对齐：system 块数组与缓存断点', () => {
+  it('system 走块数组，末块带 cache_control: ephemeral', () => {
+    const body = buildGlmAnthropicRequest(
+      options({
+        system: '顶层提示词',
+        messages: [
+          { role: 'system', content: [{ type: 'text', text: '历史提示词' }] } as Message,
+          { role: 'user', content: [{ type: 'text', text: '你好' }] } as Message,
+        ],
+      }),
+      { ladder: LADDER },
+    )
+    const system = body.system as Array<Record<string, unknown>>
+    expect(Array.isArray(system)).toBe(true)
+    expect(system).toHaveLength(2)
+    expect(system[0]).toEqual({ type: 'text', text: '顶层提示词\n\n' })
+    expect(system[1]).toEqual({
+      type: 'text',
+      text: '历史提示词',
+      cache_control: { type: 'ephemeral' },
+    })
+    // 只换形状不换内容：各块文字拼起来与旧的单字符串逐字相同。
+    expect(system.map((block) => String(block.text)).join('')).toBe('顶层提示词\n\n历史提示词')
+  })
+
+  it('空 system 贡献不产块，整条字段省略', () => {
+    const body = buildGlmAnthropicRequest(
+      options({
+        system: '   ',
+        messages: [
+          { role: 'system', content: [{ type: 'text', text: '' }] } as Message,
+          { role: 'user', content: [{ type: 'text', text: '你好' }] } as Message,
+        ],
+      }),
+      { ladder: LADDER },
+    )
+    expect(body.system).toBeUndefined()
+  })
+
+  it('最新一条非 system 消息的末块带缓存断点，更早的消息不带', () => {
+    const body = buildGlmAnthropicRequest(
+      options({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: '第一问' }] } as Message,
+          { role: 'assistant', content: [{ type: 'text', text: '回答' }] } as Message,
+          { role: 'user', content: [{ type: 'text', text: '第二问' }] } as Message,
+        ],
+      }),
+      { ladder: LADDER },
+    )
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    expect(messages).toHaveLength(3)
+    expect(messages[0]!.content[0]!.cache_control).toBeUndefined()
+    expect(messages[1]!.content[0]!.cache_control).toBeUndefined()
+    expect(messages[2]!.content[0]!.cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('工具结果块是可缓存块，断点落在它上面', () => {
+    const body = buildGlmAnthropicRequest(
+      options({
+        messages: [
+          { role: 'assistant', content: [{ type: 'tool-call', id: 'toolu_1', name: 'read', arguments: '{}' }] } as Message,
+          {
+            role: 'user',
+            content: [{ type: 'tool-result', toolCallId: 'toolu_1', content: [{ type: 'text', text: 'ok' }] }],
+            source: { kind: 'tool' },
+          } as unknown as Message,
+        ],
+      }),
+      { ladder: LADDER },
+    )
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    expect(messages[1]!.content[0]!.type).toBe('tool_result')
+    expect(messages[1]!.content[0]!.cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('空块不带断点，断点前移到最后一个可缓存块', () => {
+    const marked = glmAnthropicMarkCacheBreakpoint([
+      { type: 'text', text: '有内容' },
+      { type: 'text', text: '' },
+    ])
+    expect(marked[0]!.cache_control).toEqual({ type: 'ephemeral' })
+    expect(marked[1]!.cache_control).toBeUndefined()
+  })
+
+  it('一个可缓存块都没有时不动内容', () => {
+    const marked = glmAnthropicMarkCacheBreakpoint([{ type: 'text', text: '' }])
+    expect(marked).toEqual([{ type: 'text', text: '' }])
+    expect(marked[0]!.cache_control).toBeUndefined()
+  })
+})
+
 describe('业务错误码分类（ERROR_CODE 表）', () => {
-  it('只有 RATE_LIMITED 与 OVERLOADED 可重试', () => {
+  it('可重试集合与官方客户端的业务码表一致', () => {
+    // 官方（zai-org/ZCode 的 failure-provider-business-codes.ts）把 1302/1303/1305
+    // 与两条 500 恢复类判成可恢复，其余业务码一律终局。
+    const retryable = new Set([
+      'RATE_LIMITED',
+      'RATE_LIMIT_TRANSIENT',
+      'OVERLOADED',
+      'OVERLOADED_BUSINESS',
+      'API_CALL_FAILED',
+      'API_CALL_ERROR',
+      'NETWORK_ERROR',
+    ])
     for (const [name, code] of Object.entries(ERROR_CODE)) {
       const verdict = classifyGlmUpstreamError({ status: 429, body: { code, message: name } })
-      const retryable = name === 'RATE_LIMITED' || name === 'OVERLOADED'
-      expect({ name, retryable: verdict.retryable }).toEqual({ name, retryable })
+      expect({ name, retryable: verdict.retryable }).toEqual({ name, retryable: retryable.has(name) })
+    }
+  })
+
+  it('llmCode 与可重试性一致：不可重试的一律不在重试集合里', () => {
+    // 宿主按 LlmError.code 判可重试（重试集合见 src/host/glm-coding-plan/adapter.ts），
+    // 所以判「不可重试」的码绝不能落在 RATE_LIMIT / SERVER 上。
+    const retryableCodes = new Set(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'])
+    for (const [name, code] of Object.entries(ERROR_CODE)) {
+      const verdict = classifyGlmUpstreamError({ status: 429, body: { code, message: name } })
+      expect({ name, inRetrySet: retryableCodes.has(verdict.llmCode) }).toEqual({
+        name,
+        inRetrySet: verdict.retryable,
+      })
+    }
+  })
+
+  it('1303 是可重试的限流', () => {
+    const verdict = classifyGlmUpstreamError({ status: 429, body: { code: ERROR_CODE.RATE_LIMIT_TRANSIENT } })
+    expect(verdict.llmCode).toBe('RATE_LIMIT')
+    expect(verdict.retryable).toBe(true)
+  })
+
+  it('1312 是可重试的过载', () => {
+    const verdict = classifyGlmUpstreamError({ status: 429, body: { code: ERROR_CODE.OVERLOADED_BUSINESS } })
+    expect(verdict.llmCode).toBe('SERVER')
+    expect(verdict.retryable).toBe(true)
+  })
+
+  it('1304 / 1313 是终局的限流类：不可重试，也不落进重试集合', () => {
+    for (const code of [ERROR_CODE.RATE_LIMIT_BLOCKED, ERROR_CODE.FAIR_USE_LIMITED]) {
+      const verdict = classifyGlmUpstreamError({ status: 429, body: { code } })
+      expect(verdict.retryable).toBe(false)
+      expect(verdict.llmCode).not.toBe('RATE_LIMIT')
+      expect(verdict.llmCode).not.toBe('SERVER')
+    }
+  })
+
+  it('1316–1321 是额度类终局，等窗口重置而不是重试', () => {
+    for (const code of [
+      ERROR_CODE.USAGE_LIMIT_5H,
+      ERROR_CODE.USAGE_LIMIT_7D,
+      ERROR_CODE.USAGE_LIMIT_5H_SPEND_LIMIT,
+      ERROR_CODE.USAGE_LIMIT_7D_SPEND_LIMIT,
+      ERROR_CODE.EXTRA_USAGE_UNAVAILABLE_5H,
+      ERROR_CODE.EXTRA_USAGE_UNAVAILABLE_7D,
+    ]) {
+      const verdict = classifyGlmUpstreamError({ status: 429, body: { code } })
+      expect(verdict.llmCode).toBe('QUOTA')
+      expect(verdict.retryable).toBe(false)
+    }
+  })
+
+  it('1230 / 1234 是可重试的 500 恢复类', () => {
+    for (const code of [ERROR_CODE.API_CALL_ERROR, ERROR_CODE.NETWORK_ERROR]) {
+      const verdict = classifyGlmUpstreamError({ status: 500, body: { code } })
+      expect(verdict.llmCode).toBe('SERVER')
+      expect(verdict.retryable).toBe(true)
     }
   })
 

@@ -9,6 +9,7 @@
  * @module dsh-chatgpt-subscription/cline-pass-adapter
  */
 import {
+  EMPTY_RESPONSE_CODE,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -88,6 +89,22 @@ const ATTEMPT_TIMEOUT_MS = 180_000
  */
 const TRANSPORT_RETRIES = 2
 const TRANSPORT_RETRY_BASE_MS = 400
+
+/**
+ * The empty-reply rule.
+ *
+ * A turn that ends with no content at all and no tool call is a gateway fluke,
+ * not an answer: the gateway accepted the request and completed the turn
+ * without saying anything. Such a turn is REPLAYED — at most three attempts for
+ * the round — and NOTHING of a failed attempt reaches the caller.
+ *
+ * Two replays plus the first attempt are the three attempts the round gets; a
+ * fourth empty answer is reported as the empty response it is. The pause is
+ * short enough to be invisible and long enough not to hammer the gateway, and
+ * it is cancellable: a caller that cancels during the pause is cancelled.
+ */
+const EMPTY_REPLY_REPLAYS = 2
+const EMPTY_REPLY_DELAY_MS = 250
 
 export interface ClinePassAdapterOptions {
   /** Durable attachment service, for request images. */
@@ -285,6 +302,11 @@ export class ClinePassAdapter extends LlmAdapter {
     let delivered = false
     let lastError: LlmError | null = null
     let attemptIndex = 0
+    // The usage of EVERY attempt of the round, aggregated: a replayed turn still
+    // cost tokens, and the caller is billed for what the request really cost.
+    let usage: TokenUsage | undefined
+    // How many times an empty turn has been replayed so far.
+    let emptyReplays = 0
 
     while (attemptIndex < attempts.length) {
       const attempt = attempts[attemptIndex++]
@@ -392,17 +414,44 @@ export class ClinePassAdapter extends LlmAdapter {
         })
         const iterator = translate(tapRouting(parseServerSentEvents(responseBody), observed))[Symbol.asyncIterator]()
         let yielded = false
-        let usage: TokenUsage | undefined
         let finishFailure: { message: string; code: string } | null = null
+        let finishChunk: Extract<StreamChunk, { type: 'finish' }> | undefined
+        // The chunks are HELD until the answer proves itself. A turn that proves
+        // nothing is replayed, and a replay must neither leak an empty block nor
+        // repeat text the caller already has — so nothing of a turn that proves
+        // nothing is ever handed to the caller.
+        const held: StreamChunk[] = []
+        let contentSeen = false
         try {
           for (;;) {
             const next = await iterator.next()
             if (next.done === true) break
-            if (next.value.type === 'usage') usage = next.value.usage
-            if (next.value.type === 'finish' && next.value.reason.kind === 'error') finishFailure = next.value.reason.failure
+            const chunk = next.value
             if (firstChunkMs === 0) firstChunkMs = Date.now() - startedAt
+            if (chunk.type === 'usage') {
+              usage = mergeTokenUsage(usage, chunk.usage)
+              continue
+            }
+            if (chunk.type === 'finish') {
+              finishChunk = chunk
+              if (chunk.reason.kind === 'error') finishFailure = chunk.reason.failure
+              continue
+            }
+            if (!contentSeen && isContentChunk(chunk)) {
+              // The answer proved itself: everything held so far is real.
+              contentSeen = true
+              for (const buffered of held) {
+                yielded = true
+                yield buffered
+              }
+              held.length = 0
+            }
+            if (!contentSeen) {
+              held.push(chunk)
+              continue
+            }
             yielded = true
-            yield next.value
+            yield chunk
           }
         } catch (error) {
           if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: error })
@@ -453,6 +502,37 @@ export class ClinePassAdapter extends LlmAdapter {
         } finally {
           consumer.abort('Cline Pass stream consumer stopped')
           void iterator.return?.(undefined).catch(() => undefined)
+        }
+        // A turn that proved nothing at all — no content, no tool call, and a
+        // normal stop — is a gateway fluke, not an answer. It is replayed: at
+        // most three attempts for the round, 250 ms apart, and NOTHING of the
+        // failed attempt reached the caller. A tool call, a non-empty answer, a
+        // length or error finish and a cancelled request are NOT replays: each
+        // of them is an answer, a verdict or a decision.
+        if (!contentSeen && isEmptyReply(finishChunk) && emptyReplays < EMPTY_REPLY_REPLAYS) {
+          emptyReplays += 1
+          trace.push(attemptLabel)
+          try {
+            await sleep(EMPTY_REPLY_DELAY_MS, undefined, { signal })
+          } catch (waitError) {
+            if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: waitError })
+            throw waitError
+          }
+          // The SAME candidate serves the replay: the turn was empty, not
+          // refused, so another channel would answer the same way.
+          attemptIndex -= 1
+          continue
+        }
+        // The terminal chunks: the aggregated usage of every attempt, then the
+        // single finish. They are emitted here so the usage of a replayed turn
+        // is counted once and in the order the caller expects.
+        if (usage !== undefined) {
+          yielded = true
+          yield { type: 'usage', usage }
+        }
+        if (finishChunk !== undefined) {
+          yielded = true
+          yield finishChunk
         }
         delivered = true
         const adherence = pinAdherence(attempt, { finalProvider: observed.provider })
@@ -546,6 +626,55 @@ function withAttemptTimeout(signal: AbortSignal, timeoutMs = ATTEMPT_TIMEOUT_MS)
   return {
     signal: AbortSignal.any([signal, deadline.signal]),
     clear: () => clearTimeout(timer),
+  }
+}
+
+/**
+ * Whether one chunk carries answer content.
+ *
+ * Text, reasoning and tool-call deltas are the answer; a block marker alone is
+ * not, and neither is usage or the finish.
+ */
+function isContentChunk(chunk: StreamChunk): boolean {
+  return chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta'
+}
+
+/**
+ * Whether one finish says the turn proved nothing at all.
+ *
+ * The mapper answers a completed turn that opened no block with the empty
+ * response code — that is, no content, no reasoning and no tool call — and only
+ * after a NORMAL stop. A length or error finish carries its own verdict and is
+ * never an empty reply.
+ */
+function isEmptyReply(finish: Extract<StreamChunk, { type: 'finish' }> | undefined): boolean {
+  return finish !== undefined
+    && finish.reason.kind === 'error'
+    && finish.reason.failure.code === EMPTY_RESPONSE_CODE
+}
+
+/**
+ * The usage of two attempts of the same round, added up.
+ *
+ * A replayed turn still spent tokens, and the caller is billed for what the
+ * request really cost. The first attempt is returned unchanged, so a round that
+ * never replayed reports exactly the usage it always reported.
+ */
+export function mergeTokenUsage(current: TokenUsage | undefined, next: TokenUsage): TokenUsage {
+  if (current === undefined) return next
+  const totalTokens = current.totalTokens !== undefined && next.totalTokens !== undefined
+    ? current.totalTokens + next.totalTokens
+    : undefined
+  const cacheReadTokens = (current.cacheReadTokens ?? 0) + (next.cacheReadTokens ?? 0)
+  const cacheWriteTokens = (current.cacheWriteTokens ?? 0) + (next.cacheWriteTokens ?? 0)
+  const reasoningTokens = (current.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0)
+  return {
+    inputTokens: current.inputTokens + next.inputTokens,
+    outputTokens: current.outputTokens + next.outputTokens,
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+    ...(cacheReadTokens === 0 ? {} : { cacheReadTokens }),
+    ...(cacheWriteTokens === 0 ? {} : { cacheWriteTokens }),
+    ...(reasoningTokens === 0 ? {} : { reasoningTokens }),
   }
 }
 

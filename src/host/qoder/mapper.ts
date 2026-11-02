@@ -456,6 +456,15 @@ export interface QoderChatRequestContext {
   cosyVersion: string
   /** DSH 会话 id（缓存亲和的稳定段之外的那一段）。 */
   sessionId?: string
+  /**
+   * 当前账号的 uid（上游账号 id，\`Cosy-User\` 头用的同一个值）。
+   *
+   * 它进 \`session_id\` 的**稳定段**：同一段对话在同一个账号下要落在同一段会话上
+   * （缓存亲和），换账号就必须换一段，否则两个账号的对话会串到同一段会话上去。
+   * 缺 uid 时退回旧兜底（稳定段只由模型决定）——那是「我们只知道这么多」，
+   * 不是编一个账号出来。
+   */
+  uid?: string | null
 }
 
 /**
@@ -588,7 +597,8 @@ export function buildQoderChatRequest(
     parameters,
     request_id: randomUUID(),
     request_set_id: recordId,
-    session_id: qoderSessionId('', modelKey, context.sessionId),
+    // 稳定段 = 账号 + 模型（见 {@link qoderSessionId}）。uid 缺失时退回旧兜底。
+    session_id: qoderSessionId(context.uid ?? '', modelKey, context.sessionId),
     session_type: 'qodercli',
     source: 1,
     stream: true,

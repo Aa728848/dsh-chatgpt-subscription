@@ -28,10 +28,19 @@
  * there is one, becomes the SECOND block. See CLAUDE_CODE_IDENTITY_TEXT.
  *
  * A role: 'system' entry in options.messages is FOLDED into that same second
- * block rather than being sent as a message: the Messages wire has no system
- * role, so a system message that reached messages[] would either be rejected or
- * silently reinterpreted. The fold is order-stable (header first, then history
- * order) because the system array is the head of the prefix the server caches.
+ * block — UNLESS the model accepts a mid-conversation system message AND the
+ * message sits where the vendor allows one. The fold is order-stable (header
+ * first, then history order) because the system array is the head of the prefix
+ * the server caches.
+ *
+ * THE WIRE DOES HAVE A SYSTEM ROLE, but only on the models the vendor lists,
+ * and only in a narrow position. A mid-conversation system message that
+ * carries content must immediately follow a user turn and must either be the
+ * last entry in `messages` or be immediately followed by an assistant turn; any
+ * other position is a 400 for the whole request. The rule and its
+ * transcription are on {@link claudeSystemMessagesInPlace}, which is the ONE
+ * predicate that both the builder keeping a message in place and the builder
+ * folding it back read — so the two can never disagree about one message.
  *
  * ---------------------------------------------------------------------------
  * 2. THINKING - FOUR CASES, DISPATCHED IN THE CATALOG'S ORDER
@@ -195,8 +204,10 @@ import {
   claudeModelBindsThinkingToPrefix,
   claudeModelCanDisableThinking,
   claudeModelSupportsTemperature,
+  claudeSupportsMidConversationSystemMessages,
   claudeThinkingMode,
   maxOutputTokensFor,
+  type ClaudeModelEntry,
 } from './model-catalog.ts'
 import {
   cacheControlFor,
@@ -518,10 +529,14 @@ export interface ClaudeThinkingFields {
  * ask the server for tokens it cannot produce. Every form thinks unless the
  * caller asked for thinking off on a model that accepts a disabled request.
  */
-export function claudeRequestThinks(model: string, effort: string | undefined | null): boolean {
-  const mode = claudeThinkingMode(model)
+export function claudeRequestThinks(
+  model: string,
+  effort: string | undefined | null,
+  catalog?: readonly ClaudeModelEntry[],
+): boolean {
+  const mode = claudeThinkingMode(model, catalog)
   if (mode === 'none') return false
-  return !(thinkingRequestedOff(effort) && claudeModelCanDisableThinking(model))
+  return !(thinkingRequestedOff(effort) && claudeModelCanDisableThinking(model, catalog))
 }
 /**
  * Dispatch the four thinking cases for one model and effort.
@@ -543,8 +558,9 @@ export function claudeThinking(
   level: string,
   maxTokens: number,
   customBudgets?: ThinkingBudgets,
+  catalog?: readonly ClaudeModelEntry[],
 ): ClaudeThinkingFields {
-  const mode = claudeThinkingMode(model)
+  const mode = claudeThinkingMode(model, catalog)
   if (mode === 'none') return {}
 
   const namedEffort = effort !== undefined && effort !== '' && !thinkingRequestedOff(effort) ? effort : undefined
@@ -553,7 +569,7 @@ export function claudeThinking(
   // A caller who asked for thinking off gets the disable request only where the
   // model allows it. On a model that forbids it the model's own form is used
   // instead: 'off: null' means the model always thinks.
-  if (off && claudeModelCanDisableThinking(model)) return { thinking: { type: 'disabled' } }
+  if (off && claudeModelCanDisableThinking(model, catalog)) return { thinking: { type: 'disabled' } }
 
   // A mid-convo model that cannot disable gets the adaptive form with its
   // block_binding, because suppressing that binding is how the persistent 400
@@ -575,7 +591,7 @@ export function claudeThinking(
     // A prefix-check model gets the binding WITHOUT mid-convo's forced effort:
     // without it, one compaction or tool-list change turns every later request
     // into the same 400 on accounts the check is enforced for by default.
-    const binding = claudeModelBindsThinkingToPrefix(model)
+    const binding = claudeModelBindsThinkingToPrefix(model, catalog)
       ? { block_binding: { prefix_mismatch_behavior: 'drop_block' } }
       : {}
     return {
@@ -736,6 +752,16 @@ export type AttachmentImageReader = Pick<AttachmentStore, 'readImage' | 'readIma
 export type ResolvedRequestImage =
   | { readonly kind: 'inline'; readonly mediaType: string; readonly data: string }
   | { readonly kind: 'unavailable' }
+  /**
+   * The image WAS readable but could not be brought under the per-image
+   * ceiling, so it is not sent at all.
+   *
+   * DISTINCT FROM 'unavailable' ON PURPOSE: the two are different failures and
+   * the user is told which one happened. 'unavailable' means the bytes could
+   * not be read; 'oversized' means they were read and no request version of
+   * them fitted under the ceiling.
+   */
+  | { readonly kind: 'oversized' }
 
 /** Resolved images keyed by durable attachment id; consumed by one request build. */
 export type ResolvedRequestImages = ReadonlyMap<string, ResolvedRequestImage>
@@ -743,7 +769,7 @@ export type ResolvedRequestImages = ReadonlyMap<string, ResolvedRequestImage>
 const NO_RESOLVED_IMAGES: ResolvedRequestImages = new Map()
 
 /**
- * Base64 image payload one request may carry.
+ * Base64 image payload ONE request may carry in total.
  *
  * CHOICE, bounded on both sides. Anthropic's documented request ceiling is
  * 32 MB, and its per-image ceiling is 5 MB of RAW bytes; 5 MB of raw bytes
@@ -753,6 +779,27 @@ const NO_RESOLVED_IMAGES: ResolvedRequestImages = new Map()
  * still catching the runaway case locally rather than as a 413.
  */
 export const MAX_REQUEST_IMAGE_BYTES = 8 * 1024 * 1024
+
+/**
+ * Base64 image payload ONE image may carry.
+ *
+ * A SEPARATE budget from {@link MAX_REQUEST_IMAGE_BYTES}, and enforced by a
+ * separate pass. The two answer different questions: the per-image ceiling
+ * asks whether THIS picture is acceptable to the endpoint, while the
+ * per-request ceiling asks whether the conversation is still a reasonable
+ * size. A single budget cannot answer both — one image can be over the
+ * per-image ceiling while the request as a whole is small, and that request
+ * is refused by the endpoint however small it is.
+ *
+ * 5 MB of base64 is the per-image figure the vendor publishes for the
+ * narrower platforms, and it is the figure this line already targeted
+ * indirectly: the request-version byte target below
+ * ({@link REQUEST_IMAGE_VERSION_MAX_BYTES}) produces a payload of about
+ * 4.7 MB of base64, which is under it. What was missing was the check
+ * itself — an image that fitted the edge limit but not the byte limit was
+ * sent as stored.
+ */
+export const MAX_SINGLE_REQUEST_IMAGE_BYTES = 5 * 1024 * 1024
 
 const OMITTED_IMAGE_TEXT =
   '[image omitted to keep the request within its size limit; older images are omitted first. '
@@ -792,14 +839,54 @@ function base64Length(bytes: number): number {
   return Math.ceil(bytes / 3) * 4
 }
 
-function requestImageBytes(block: Record<string, unknown>): number | undefined {
-  const attachment = attachmentOf(block)
-  if (attachment) return base64Length(attachment.bytes)
-  const inline = asString(block.data) || asString(block.base64)
-  return inline ? inline.length : undefined
+/**
+ * The inline payload one image block carries, without its data-URL prefix.
+ *
+ * The prefix is not sent, so it is not counted either.
+ */
+function inlinePayloadOf(block: Record<string, unknown>): string | undefined {
+  let data = asString(block.data) || asString(block.base64)
+  const source = isRecord(block.source) ? block.source : undefined
+  if (!data && source) data = asString(source.data) || asString(source.base64)
+  if (data === undefined || data === '') return undefined
+  if (data.startsWith('data:')) {
+    const matched = data.match(/^data:([^;,]+);base64,(.*)$/s)
+    if (matched) data = matched[2] ?? ''
+  }
+  return data === '' ? undefined : data
 }
 
-function collectRequestImageBytes(content: unknown, lengths: number[]): void {
+/**
+ * The base64 payload one image occurrence contributes to a request.
+ *
+ * THE RESOLUTION MAP IS THE POINT. Without it the only number available for a
+ * durable attachment is an ESTIMATE derived from the stored raw size, and the
+ * estimate is wrong in the direction that hurts: the image that is actually
+ * sent is often the scaled-down request version, which is far smaller than
+ * the stored one. A budget measured against the estimate therefore drops
+ * images the request would have carried comfortably, and it cannot tell that
+ * an image which resolved to 'unavailable' carries no bytes at all.
+ *
+ * With the map the number is the payload that will really be sent.
+ */
+function requestImageBytes(block: Record<string, unknown>, images?: ResolvedRequestImages): number | undefined {
+  const inline = inlinePayloadOf(block)
+  if (inline !== undefined) {
+    // An inline payload over the per-image ceiling is degraded to a visible
+    // placeholder when the body is built, so it carries no image bytes and
+    // must not be counted against the request budget.
+    return inline.length > MAX_SINGLE_REQUEST_IMAGE_BYTES ? undefined : inline.length
+  }
+  const attachment = attachmentOf(block)
+  if (!attachment) return undefined
+  if (images === undefined) return base64Length(attachment.bytes)
+  const resolved = images.get(attachment.attachmentId)
+  // An image that resolved to 'unavailable' or 'oversized' is serialized as a
+  // short text placeholder, so it carries no image payload.
+  return resolved?.kind === 'inline' ? resolved.data.length : undefined
+}
+
+function collectRequestImageBytes(content: unknown, lengths: number[], images?: ResolvedRequestImages): void {
   if (!Array.isArray(content)) return
   for (const block of content) {
     if (!isRecord(block)) continue
@@ -808,11 +895,11 @@ function collectRequestImageBytes(content: unknown, lengths: number[]): void {
     // tool-produced image outside the budget while the builder sent it, so the
     // request grew past the route's own ceiling and only the upstream answered.
     if (block.type === 'tool-result') {
-      collectRequestImageBytes(block.content, lengths)
+      collectRequestImageBytes(block.content, lengths, images)
       continue
     }
     if (block.type !== 'image') continue
-    const bytes = requestImageBytes(block)
+    const bytes = requestImageBytes(block, images)
     if (bytes !== undefined) lengths.push(bytes)
   }
 }
@@ -823,10 +910,16 @@ function collectRequestImageBytes(content: unknown, lengths: number[]): void {
  * Durable history is untouched; only the request about to be sent changes, and
  * the placeholder names the omission so the model asks for the picture again
  * instead of answering about a blank.
+ *
+ * @param images - the resolution the images were read with. Passing it makes
+ *   the budget measure the payload that will ACTUALLY be sent rather than an
+ *   estimate derived from the stored size, so a scaled-down image is not
+ *   dropped for a size it no longer has. The same map must be the one the
+ *   request body is built with, or the count is spent on the wrong images.
  */
-export function offloadOldestRequestImages(options: GenerateOptions): GenerateOptions {
+export function offloadOldestRequestImages(options: GenerateOptions, images?: ResolvedRequestImages): GenerateOptions {
   const lengths: number[] = []
-  for (const message of options.messages) collectRequestImageBytes(message.content, lengths)
+  for (const message of options.messages) collectRequestImageBytes(message.content, lengths, images)
   const excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - MAX_REQUEST_IMAGE_BYTES
   if (excess <= 0) return options
 
@@ -848,7 +941,7 @@ export function offloadOldestRequestImages(options: GenerateOptions): GenerateOp
     const next = content.map((block) => {
       if (remaining.count === 0 || !isRecord(block)) return block
       if (block.type === 'image') {
-        if (requestImageBytes(block) === undefined) return block
+        if (requestImageBytes(block, images) === undefined) return block
         remaining.count -= 1
         replaced = true
         return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
@@ -982,17 +1075,34 @@ export async function resolveRequestImages(
       const target = requestImageEdgeTarget(ref, edge)
       if (target !== undefined) {
         const version = await attachments.readImageRequest(ref, target, signal)
-        resolved.set(attachmentId, Math.max(version.width, version.height) > edge
-          ? { kind: 'unavailable' }
-          : { kind: 'inline', mediaType: version.mediaType, data: Buffer.from(version.data).toString('base64') })
+        if (Math.max(version.width, version.height) > edge) {
+          resolved.set(attachmentId, { kind: 'unavailable' })
+          return
+        }
+        const scaled = Buffer.from(version.data).toString('base64')
+        if (scaled.length <= MAX_SINGLE_REQUEST_IMAGE_BYTES) {
+          resolved.set(attachmentId, { kind: 'inline', mediaType: version.mediaType, data: scaled })
+          return
+        }
+        // Even the edge-scaled version is over the PER-IMAGE ceiling, so the
+        // limit that bites here is bytes rather than pixels: the same scaling
+        // path is asked again with a byte target.
+        resolved.set(attachmentId, await scaledWithinPerImageLimit(ref, attachments, signal))
         return
       }
       const stored = await attachments.readImage(ref, signal)
-      resolved.set(attachmentId, {
-        kind: 'inline',
-        mediaType: stored.ref.mediaType,
-        data: Buffer.from(stored.data).toString('base64'),
-      })
+      const data = Buffer.from(stored.data).toString('base64')
+      if (data.length <= MAX_SINGLE_REQUEST_IMAGE_BYTES) {
+        resolved.set(attachmentId, {
+          kind: 'inline',
+          mediaType: stored.ref.mediaType,
+          data,
+        })
+        return
+      }
+      // The stored image fits the EDGE limit but not the BYTE limit. It is
+      // scaled rather than dropped — see scaledWithinPerImageLimit.
+      resolved.set(attachmentId, await scaledWithinPerImageLimit(ref, attachments, signal))
     } catch (error) {
       if (isAbort(error, signal)) throw error
       resolved.set(attachmentId, { kind: 'unavailable' })
@@ -1001,20 +1111,66 @@ export async function resolveRequestImages(
   return resolved
 }
 
-interface InlineImage {
-  mediaType: string
-  data: string
+/**
+ * One image brought under the per-image ceiling, or proven unable to fit.
+ *
+ * REUSES THE SCALING PATH rather than dropping the picture. The harness's
+ * request version takes a byte target, and the smallest quality rung it keeps
+ * is already below the ceiling — so an image that is merely too big in BYTES
+ * (a long screenshot whose pixels are within the edge limit) is scaled, not
+ * lost. The target keeps the stored dimensions and asks only for fewer bytes,
+ * which is what this ceiling is about: such an image must lose bytes, not
+ * pixels.
+ *
+ * When no version fits, the image resolves to 'oversized' and the request
+ * carries a VISIBLE placeholder naming the limit, so the model can say the
+ * picture was dropped rather than answering about a blank.
+ */
+async function scaledWithinPerImageLimit(
+  ref: ImageAttachmentRef,
+  attachments: AttachmentImageReader,
+  signal?: AbortSignal,
+): Promise<ResolvedRequestImage> {
+  const { width, height } = ref
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+    return { kind: 'oversized' }
+  }
+  try {
+    const version = await attachments.readImageRequest(
+      ref,
+      { width, height, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES },
+      signal,
+    )
+    const data = Buffer.from(version.data).toString('base64')
+    if (data.length > MAX_SINGLE_REQUEST_IMAGE_BYTES) return { kind: 'oversized' }
+    return { kind: 'inline', mediaType: version.mediaType, data }
+  } catch (error) {
+    if (isAbort(error, signal)) throw error
+    return { kind: 'oversized' }
+  }
 }
 
 /**
- * Resolve one image block to its bytes, or undefined when it has none.
+ * One image block's wire payload, or the reason it has none.
+ *
+ * The two failure kinds are kept apart because the user is told which one
+ * happened: 'unavailable' means the bytes could not be read, 'oversized' means
+ * they were read and no version of them fitted under the per-image ceiling.
+ */
+type InlineImage =
+  | { kind: 'inline'; mediaType: string; data: string }
+  | { kind: 'unavailable' }
+  | { kind: 'oversized' }
+
+/**
+ * Resolve one image block to its bytes, or to the reason it has none.
  *
  * The media type falls back to image/png only for the inline paths; an
  * attachment-backed block takes its media type from the verified reference
  * rather than from the block, because the block is caller-supplied while the
  * reference was written by the attachment service.
  */
-function imageBlockToInline(block: Record<string, unknown>, images: ResolvedRequestImages): InlineImage | undefined {
+function imageBlockToInline(block: Record<string, unknown>, images: ResolvedRequestImages): InlineImage {
   let data = asString(block.data) || asString(block.base64)
   const source = isRecord(block.source) ? block.source : undefined
   if (!data && source) data = asString(source.data) || asString(source.base64)
@@ -1031,11 +1187,21 @@ function imageBlockToInline(block: Record<string, unknown>, images: ResolvedRequ
       data = matched[2] || ''
     }
   }
-  if (data) return { mediaType, data }
+  if (data) {
+    // An INLINE payload over the per-image ceiling cannot be scaled: there is
+    // no stored image behind it to derive a request version from, so the
+    // request version path is unavailable. It degrades visibly rather than
+    // being sent and refused.
+    if (data.length > MAX_SINGLE_REQUEST_IMAGE_BYTES) return { kind: 'oversized' }
+    return { kind: 'inline', mediaType, data }
+  }
 
   const attachment = attachmentOf(block)
   const resolved = attachment ? images.get(attachment.attachmentId) : undefined
-  return resolved?.kind === 'inline' ? { mediaType: resolved.mediaType, data: resolved.data } : undefined
+  if (resolved === undefined) return { kind: 'unavailable' }
+  if (resolved.kind === 'oversized') return { kind: 'oversized' }
+  if (resolved.kind === 'unavailable') return { kind: 'unavailable' }
+  return { kind: 'inline', mediaType: resolved.mediaType, data: resolved.data }
 }
 
 function unavailableImageText(block: Record<string, unknown>): string {
@@ -1051,10 +1217,19 @@ function unsupportedImageText(block: Record<string, unknown>, mediaType: string)
     + ', which this endpoint does not accept inline; supported types are image/png, image/jpeg, image/gif and image/webp.]'
 }
 
+function oversizedImageText(block: Record<string, unknown>): string {
+  const label = attachmentLabel(block)
+  const subject = label ? label + ' is' : 'the image is'
+  return '[image omitted: ' + subject + ' larger than the per-image limit of '
+    + (MAX_SINGLE_REQUEST_IMAGE_BYTES / (1024 * 1024))
+    + ' MB (base64) and could not be scaled down; ask the user to attach a smaller image if it is needed]'
+}
+
 /** One inline image block for the wire, or the placeholder that replaces it. */
 function imageBlockFor(block: Record<string, unknown>, images: ResolvedRequestImages): Record<string, unknown> {
   const inline = imageBlockToInline(block, images)
-  if (inline === undefined) return { type: 'text', text: unavailableImageText(block) }
+  if (inline.kind === 'unavailable') return { type: 'text', text: unavailableImageText(block) }
+  if (inline.kind === 'oversized') return { type: 'text', text: oversizedImageText(block) }
   if (!SUPPORTED_IMAGE_MEDIA_TYPES.has(inline.mediaType)) {
     return { type: 'text', text: unsupportedImageText(block, inline.mediaType) }
   }
@@ -1066,6 +1241,16 @@ function imageBlockFor(block: Record<string, unknown>, images: ResolvedRequestIm
 // ---------------------------------------------------------------------------
 
 type AnthropicBlock = Record<string, unknown>
+
+/**
+ * One entry of the wire's `messages` array.
+ *
+ * The role is widened from the two the Messages API used to take because a
+ * mid-conversation system message is a third one: the vendor documents that a
+ * `{"role": "system"}` entry may sit inside `messages`, at the point where
+ * its instruction starts to apply.
+ */
+type ClaudeWireEntry = { role: 'user' | 'assistant' | 'system'; content: AnthropicBlock[] }
 
 function textOf(content: unknown): string {
   if (typeof content === 'string') return sanitizeText(content)
@@ -1079,8 +1264,86 @@ function textOf(content: unknown): string {
   return parts.join('')
 }
 
-function nonSystemMessages(options: GenerateOptions): Message[] {
-  return options.messages.filter((message) => message.role !== 'system')
+/**
+ * The role one message takes on the wire.
+ *
+ * Only three roles exist there: a `system` message keeps its own, an
+ * assistant turn stays an assistant turn, and EVERYTHING else — a user turn, a
+ * developer turn, and the harness's flattened `tool` role — becomes a user
+ * turn. The last two matter here because the vendor's placement rule counts a
+ * `user` turn that carries `tool_result` blocks, and this line delivers tool
+ * results as user turns.
+ */
+function wireRoleOf(message: Message): 'user' | 'assistant' | 'system' {
+  if (message.role === 'system') return 'system'
+  return message.role === 'assistant' ? 'assistant' : 'user'
+}
+
+/**
+ * The indices of the system messages that KEEP their place inside `messages`.
+ *
+ * ONE PREDICATE, so the two places that must agree cannot drift: the builder
+ * that keeps a message in the list and the builder that folds it back into the
+ * top-level `system` field both read this answer.
+ *
+ * THE RULE, TRANSCRIBED from the vendor's "Mid-conversation system messages
+ * and tool changes" page:
+ *
+ * > A mid-conversation system message that carries content (`text`,
+ * > `tool_addition`, or `tool_removal` blocks) must immediately follow a
+ * > `user` turn (or an `assistant` turn ending in a server tool result), and
+ * > must either be the last entry in `messages` or be immediately followed by
+ * > an `assistant` turn. [...] Any other position for a message that carries
+ * > content [...] returns a 400 error.
+ *
+ * So a system message keeps its place only when BOTH hold:
+ *
+ * 1. the turn before it is a user turn. This line has no assistant turn that
+ *    ends in a server tool result, so the alternative the vendor allows does
+ *    not arise here.
+ * 2. it is the last entry, or the turn after it is an assistant turn.
+ *
+ * Everything else is FOLDED back into the top-level `system` field, which is
+ * always legal. That includes the system prompt a DSH loop puts at the very
+ * START of the history: it precedes the first user turn, so it is not a
+ * mid-conversation message at all.
+ *
+ * EVERY SYSTEM MESSAGE IS JUDGED INDEPENDENTLY. In a consecutive run, the
+ * second message follows another system message rather than a user turn, so it
+ * folds back; grouping the run would smuggle a forbidden position past the rule.
+ *
+ * A model that does not accept mid-conversation system messages folds them
+ * all: there, the top-level `system` field is the only place an instruction
+ * can live.
+ */
+export function claudeSystemMessagesInPlace(options: GenerateOptions): ReadonlySet<number> {
+  const inPlace = new Set<number>()
+  if (!claudeSupportsMidConversationSystemMessages(options.model)) return inPlace
+
+  const messages = options.messages
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role !== 'system') continue
+    const previous = messages[index - 1]
+    const next = messages[index + 1]
+    const followsUser = previous !== undefined && wireRoleOf(previous) === 'user'
+    const precedesAssistantOrEnds = next === undefined || wireRoleOf(next) === 'assistant'
+    if (followsUser && precedesAssistantOrEnds) inPlace.add(index)
+  }
+  return inPlace
+}
+
+/**
+ * The conversation's messages as they reach the wire.
+ *
+ * A `role: "system"` message is dropped here when it is FOLDED into the
+ * top-level `system` field, and kept when the vendor's placement rule allows
+ * it to stay in place. The decision is read from
+ * {@link claudeSystemMessagesInPlace}, so this list and the folded text can
+ * never disagree about one message.
+ */
+function messagesForTheWire(options: GenerateOptions): Message[] {
+  const inPlace = claudeSystemMessagesInPlace(options)
+  return options.messages.filter((message, index) => message.role !== 'system' || inPlace.has(index))
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,11 +1413,24 @@ function replayBlockFor(message: Message, index: number): Record<string, unknown
 export function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role !== 'system') continue
+  // The system messages that could NOT keep their place are folded here. The
+  // decision comes from the SAME predicate the wire list uses, so a message is
+  // never both folded and kept.
+  //
+  // Folding a message that the vendor allows to stay would move it to the
+  // head of the request, change the cached prefix from its first byte, and
+  // invalidate the cache for the system prompt and every message after it.
+  //
+  // The caller's own top-level `system` string is untouched either way, and it
+  // is never merged with the historical messages: they are different things —
+  // one is the prompt that applies to the whole conversation, the other is an
+  // instruction that starts applying at one point in it.
+  const inPlace = claudeSystemMessagesInPlace(options)
+  options.messages.forEach((message, index) => {
+    if (message.role !== 'system' || inPlace.has(index)) return
     const text = textOf(message.content)
     if (text !== '') parts.push(text)
-  }
+  })
   return parts.length === 0 ? undefined : parts.join('\n\n')
 }
 
@@ -1202,7 +1478,7 @@ export function buildClaudeSystemBlocks(
  * onto an earlier turn: an unmasked request is merely uncached, while a marker
  * on a block type the wire rejects fails the whole turn.
  */
-function lastCacheableUserBlock(messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>): AnthropicBlock | undefined {
+function lastCacheableUserBlock(messages: ReadonlyArray<ClaudeWireEntry>): AnthropicBlock | undefined {
   const lastMessage = messages[messages.length - 1]
   if (lastMessage === undefined || lastMessage.role !== 'user') return undefined
   const block = lastMessage.content[lastMessage.content.length - 1]
@@ -1238,7 +1514,7 @@ function markClaudeCacheBreakpoints(body: Record<string, unknown>, ttl: ClaudeCa
     }
   }
 
-  const messages = body.messages as Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> | undefined
+  const messages = body.messages as ClaudeWireEntry[] | undefined
   if (Array.isArray(messages)) {
     const target = lastCacheableUserBlock(messages)
     if (target !== undefined) {
@@ -1297,6 +1573,35 @@ function wireTool(tool: { name: string; description?: string; parameters?: unkno
     description: tool.description ?? '',
     input_schema: schema,
   }
+}
+
+/**
+ * One system-role turn's blocks.
+ *
+ * The vendor documents a mid-conversation system message as carrying "a plain
+ * string or content blocks for `content`, the same as a `user` or
+ * `assistant` turn", so the same block shapes are used here: text, and an
+ * image read through the same resolution path a user turn's image takes.
+ *
+ * A tool result is NOT handled: the wire has no tool role inside a system
+ * message, and a tool result in that position is not a shape the vendor
+ * documents. Such a block is dropped rather than smuggled into the turn.
+ */
+function claudeSystemContent(message: Message, images: ResolvedRequestImages): AnthropicBlock[] {
+  const blocks: AnthropicBlock[] = []
+  if (!Array.isArray(message.content)) return blocks
+  for (const block of message.content) {
+    if (!isRecord(block)) continue
+    if (block.type === 'text' && typeof block.text === 'string') {
+      const text = sanitizeText(block.text)
+      if (text !== '') blocks.push({ type: 'text', text })
+      continue
+    }
+    if (block.type === 'image') {
+      blocks.push(imageBlockFor(block, images))
+    }
+  }
+  return blocks
 }
 
 /** One user-role turn's blocks. */
@@ -1489,12 +1794,19 @@ function isToolResultMessage(message: Message): boolean {
  * wants one user turn per run, and folding in order keeps every tool_result
  * ahead of the text that follows it.
  */
-function mergeClaudeMessages(entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
-  const merged: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
+function mergeClaudeMessages(entries: ClaudeWireEntry[]): ClaudeWireEntry[] {
+  const merged: ClaudeWireEntry[] = []
   for (const entry of entries) {
     if (entry.content.length === 0) continue
     const last = merged[merged.length - 1]
-    if (last !== undefined && last.role === entry.role) {
+    // A SYSTEM MESSAGE IS NEVER MERGED, with anything. It is its own
+    // instruction, and the vendor documents that a LATER system message takes
+    // precedence over an earlier one; folding two of them into one block would
+    // turn two instructions of different priority into one. It also must not
+    // merge into the turn before it, because that turn is where the
+    // instruction starts to apply — moving the text would move the point at
+    // which it applies.
+    if (entry.role !== 'system' && last !== undefined && last.role === entry.role) {
       last.content = [...last.content, ...entry.content]
       continue
     }
@@ -1532,6 +1844,17 @@ export interface ClaudeRequestOptions {
   toolNames?: ClaudeToolNames
   /** Caller overrides for the thinking budget table. */
   thinkingBudgets?: ThinkingBudgets
+  /**
+   * The capability table this request is built against.
+   *
+   * Omitted means the shipped table, which is what every production caller
+   * wants. It is a parameter so that a table which says a model does NOT
+   * reason can be exercised: no shipped row claims that today, because an id
+   * this line has never heard of inherits the current-model template, and
+   * every current-generation model reasons. The 'no thinking field at all'
+   * branch is still a real one, so it is still reachable — through here.
+   */
+  catalog?: readonly ClaudeModelEntry[]
 }
 
 /**
@@ -1555,7 +1878,8 @@ export function buildClaudeRequestBody(
     ? undefined
     : String(options.reasoningEffort)
 
-  const modelMax = maxOutputTokensFor(options.model)
+  const catalog = request.catalog
+  const modelMax = maxOutputTokensFor(options.model, catalog)
   // The ALREADY-RESOLVED cap. Passing options.maxTokens straight through would
   // change which branch of adjustMaxTokensForThinking runs (see the module doc).
   const baseMax = resolveMaxTokens(options)
@@ -1563,13 +1887,24 @@ export function buildClaudeRequestBody(
   // The ceiling is inflated to fit the thinking budget ONLY for a request that
   // will actually think: a request that is not thinking must ask for exactly the
   // cap it was given.
-  const maxTokens = claudeRequestThinks(options.model, effort)
+  const maxTokens = claudeRequestThinks(options.model, effort, catalog)
     ? adjustMaxTokensForThinking(baseMax, modelMax, level, request.thinkingBudgets).maxTokens
     : baseMax
-  const { thinking, outputConfig } = claudeThinking(options.model, effort, level, maxTokens, request.thinkingBudgets)
+  const { thinking, outputConfig } = claudeThinking(options.model, effort, level, maxTokens, request.thinkingBudgets, catalog)
 
-  const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
-  for (const message of nonSystemMessages(options)) {
+  const entries: ClaudeWireEntry[] = []
+  for (const message of messagesForTheWire(options)) {
+    // A historical system message KEEPS ITS OWN SLOT when the model accepts a
+    // mid-conversation system message. It applies from that point in the
+    // conversation onward, so it has to stay where it was written: folding it
+    // into the top-level `system` field would move it to the head of the
+    // request, change the cached prefix from its first byte, and — on a model
+    // that runs the preserved-thinking prefix check — invalidate the replayed
+    // thinking blocks that were signed against the old prefix.
+    if (message.role === 'system') {
+      entries.push({ role: 'system', content: claudeSystemContent(message, images) })
+      continue
+    }
     if (isToolResultMessage(message)) {
       entries.push({ role: 'user', content: claudeUserContent(message, images) })
       continue
@@ -1585,7 +1920,7 @@ export function buildClaudeRequestBody(
   // A temperature alongside enabled thinking is an upstream error, so it is
   // sent only when the model accepts one AND thinking is not enabled.
   const thinkingEnabled = thinking !== undefined && thinking.type !== 'disabled'
-  const temperatureAllowed = claudeModelSupportsTemperature(options.model) && !thinkingEnabled
+  const temperatureAllowed = claudeModelSupportsTemperature(options.model, catalog) && !thinkingEnabled
 
   const caching = request.cacheControl !== false
   const cacheTtl = request.cacheTtl ?? CLAUDE_DEFAULT_CACHE_TTL

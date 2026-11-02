@@ -497,9 +497,14 @@ export class QoderAdapter extends LlmAdapter {
   ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const settings = await this.settings()
-    // 超大图片先换成占位文本；共用 mapper 的既有接缝，与兄弟线路同一份。
-    const requestOptions = offloadOldestQoderRequestImages(normalizeGenerateOptions(options))
-    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    const normalized = normalizeGenerateOptions(options)
+    // 图片**先解析**，再把**同一份解析结果**交给预算关卡。
+    //
+    // 顺序反了，预算量的是**存储字节**：一张 5 MB 的截图会被算成 ~6.7 MB 的 base64，
+    // 于是「缩放后其实只有 ~350 KB、装得下」的图被当成超限而丢掉。
+    // 先解析再量，量的就是**真正上线的字节**，缩放后的图不再被误丢。
+    const images = await resolveRequestImages(normalized, this.options.attachments, signal)
+    const requestOptions = offloadOldestQoderRequestImages(normalized, images)
 
     const triedAccounts = new Set<string>()
     const triedModels = new Set<string>([options.model])
@@ -574,6 +579,8 @@ export class QoderAdapter extends LlmAdapter {
           entry,
           cosyVersion: getQoderCosyVersion(),
           sessionId: options.sessionId,
+          // 当前账号：会话稳定段按「账号 + 模型」算，换账号就得换一段。
+          uid: picked.credentials.uid,
         },
       ))
       const encodedBody = encodeQoderBody(bodyText)

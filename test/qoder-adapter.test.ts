@@ -10,8 +10,14 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { QoderAdapter } from '../src/host/qoder/adapter.ts'
 import { QoderAccountPool } from '../src/host/qoder/account-pool.ts'
 import { clearCachedQoderModelCatalog, loadQoderModelCatalog } from '../src/host/qoder/client.ts'
+import { qoderSessionId } from '../src/host/qoder/mapper.ts'
 import { bundledQoderCatalog } from '../src/host/qoder/model-catalog.ts'
 import { QoderCredentialStore, QoderModelSettingsStore, type QoderCredentials } from '../src/host/qoder/token-store.ts'
+import {
+  QODER_BODY_ALPHABET,
+  QODER_BODY_PADDING_CHAR,
+  QODER_STD_ALPHABET,
+} from '../src/host/qoder/types.ts'
 import { mkdtempSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -361,6 +367,164 @@ describe('QoderAdapter 端到端（mock fetch）', () => {
     expect(seenUsers).toEqual(['u-1', 'u-2'])
     const text = chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')
     expect(text).toBe('你好，世界')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 会话亲和与图片预算
+// ---------------------------------------------------------------------------
+
+/**
+ * 反解 Qoder 的 body codec（`encodeQoderBody` 的逆运算）。
+ *
+ * 它是**可逆的确定性编码，不是加密**（docs/qoder-line-plan.md §3.4）：
+ * raw bytes → standard padded Base64 → 字母表逐位置映射（`=`→`$`）→ 外三段交换。
+ * 三段交换是对合运算（施加两次回到原处），所以还原用的是同一个公式。
+ */
+function decodeQoderBody(encoded: string): Record<string, unknown> {
+  const reverse = new Map<string, string>()
+  for (let i = 0; i < QODER_STD_ALPHABET.length; i++) {
+    reverse.set(QODER_BODY_ALPHABET[i]!, QODER_STD_ALPHABET[i]!)
+  }
+  reverse.set(QODER_BODY_PADDING_CHAR, '=')
+  let std = ''
+  for (const char of encoded) std += reverse.get(char) ?? char
+  const n = std.length
+  const third = Math.floor(n / 3)
+  const original = std.slice(n - third) + std.slice(third, n - third) + std.slice(0, third)
+  return JSON.parse(Buffer.from(original, 'base64').toString('utf8')) as Record<string, unknown>
+}
+
+/** 一个账号、一个适配器、一次请求；返回解出来的请求体。 */
+async function postOnce(options: {
+  uid?: string | null
+  attachments?: unknown
+  model?: string
+  messages?: unknown[]
+}): Promise<Record<string, unknown>> {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'qoder-adapter-session-'))
+  const pool = new QoderAccountPool({ backend: new MemoryBackend() as never })
+  await pool.addAccount({ ...credentials(), uid: options.uid === undefined ? 'u-1' : options.uid })
+  let seenBody = ''
+  const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    seenBody = typeof init?.body === 'string' ? init.body : ''
+    return sseResponse(ANSWER_SSE)
+  }) as unknown as typeof fetch
+  const adapter = new QoderAdapter(
+    new QoderCredentialStore(path.join(dir, 'credentials.json'), new MemoryBackend() as never),
+    new QoderModelSettingsStore(path.join(dir, 'models.json')),
+    undefined,
+    { accountPool: pool, fetchFn, attachments: options.attachments as never },
+  )
+  const model = options.model ?? 'Auto'
+  const prepared = await adapter.prepareCall('qoder', model)
+  for await (const chunk of prepared.stream({
+    provider: 'qoder',
+    model,
+    sessionId: 'sess-1',
+    messages: options.messages ?? [{ role: 'user', content: [{ type: 'text', text: '你好' }] }],
+  } as never)) void chunk
+  return decodeQoderBody(seenBody)
+}
+
+describe('QoderAdapter：session_id 的稳定段按「账号 + 模型」', () => {
+  it('★ 同一账号两次请求落在同一段会话上（缓存亲和）', async () => {
+    const first = await postOnce({ uid: 'u-1' })
+    const second = await postOnce({ uid: 'u-1' })
+
+    expect(first.session_id).toBe(second.session_id)
+    expect(first.session_id).toBe(qoderSessionId('u-1', 'auto', 'sess-1'))
+  })
+
+  it('★ 换账号就换一段：两个账号的对话不能串到同一段会话上', async () => {
+    const first = await postOnce({ uid: 'u-1' })
+    const second = await postOnce({ uid: 'u-2' })
+
+    expect(first.session_id).not.toBe(second.session_id)
+    // 稳定段按账号走；会话段（宿主给的）不变。
+    expect((first.session_id as string).split('-').slice(1))
+      .toEqual((second.session_id as string).split('-').slice(1))
+  })
+
+  it('uid 缺失时保持旧兜底：稳定段只由模型决定', async () => {
+    const legacy = await postOnce({ uid: null })
+
+    expect(legacy.session_id).toBe(qoderSessionId('', 'auto', 'sess-1'))
+  })
+})
+
+describe('QoderAdapter：图片预算按真正上线的字节算', () => {
+  /** 存储态 12 MB、请求版本 9.5 MB 的旧图（base64 约 12.67 MB）。 */
+  const OLD_BIG_IMAGE = {
+    attachmentId: 'img-old',
+    mediaType: 'image/png',
+    bytes: 12_000_000,
+    width: 4000,
+    height: 3000,
+  }
+  const NEW_SMALL_IMAGE = {
+    attachmentId: 'img-new',
+    mediaType: 'image/png',
+    bytes: 64,
+    width: 4000,
+    height: 3000,
+  }
+  const OLD_BIG_VERSION = Buffer.alloc(9_500_000, 0x41)
+  const NEW_SMALL_VERSION = Buffer.from('small-request-version')
+
+  const attachments = {
+    readImage: async () => {
+      throw new Error('must not read the stored image: the long edge is over the ceiling')
+    },
+    readImageRequest: async (ref: { attachmentId: string }) => ({
+      width: 1024,
+      height: 768,
+      mediaType: 'image/png',
+      data: ref.attachmentId === 'img-old' ? OLD_BIG_VERSION : NEW_SMALL_VERSION,
+    }),
+  }
+
+  it('★ 真超预算时最旧的先让位（附件图也受预算约束）', async () => {
+    const body = await postOnce({
+      attachments,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: '两张图' },
+          { type: 'image', attachment: OLD_BIG_IMAGE },
+          { type: 'image', attachment: NEW_SMALL_IMAGE },
+        ],
+      }],
+    })
+
+    const serialized = JSON.stringify(body.messages)
+    expect(serialized).toContain(NEW_SMALL_VERSION.toString('base64'))
+    expect(serialized).not.toContain('QUFB')
+    expect(serialized).toContain('image omitted to keep the request within its size limit')
+  })
+
+  it('缩放后装得下的图不丢（预算是按请求版本量的）', async () => {
+    const scaled = Buffer.from('scaled-request-version')
+    const body = await postOnce({
+      attachments: {
+        readImage: async () => {
+          throw new Error('must not read the stored image: the long edge is over the ceiling')
+        },
+        readImageRequest: async () => ({ width: 1024, height: 768, mediaType: 'image/png', data: scaled }),
+      },
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'image',
+          // 存储态 20 MB（按存储字节量就超预算了），请求版本只有几十字节。
+          attachment: { ...OLD_BIG_IMAGE, attachmentId: 'img-one', bytes: 20_000_000 },
+        }],
+      }],
+    })
+
+    const serialized = JSON.stringify(body.messages)
+    expect(serialized).toContain(scaled.toString('base64'))
+    expect(serialized).not.toContain('image omitted to keep the request within its size limit')
   })
 })
 

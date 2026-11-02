@@ -500,3 +500,59 @@ describe('OpenDesignAdapter wire seams', () => {
     expect(String(caught.message)).toContain('orphan_9')
   })
 })
+
+/**
+ * The one replay a refused output budget earns.
+ *
+ * The generic OpenAI-compatible path stays on `max_tokens`, and a gateway that
+ * serves a reasoning-era model under an id the official rule does not match
+ * answers with the official refusal: it names the field it rejects and the one
+ * it wants. That wording is answered ONCE by moving the budget to
+ * `max_completion_tokens`. Any other 400 is the caller's mistake and is never
+ * replayed.
+ */
+describe('OpenDesignAdapter output budget downgrade', () => {
+  const OFFICIAL_REFUSAL = "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
+
+  function adapterWithBodies(bodies: Array<Record<string, unknown>>, respond: (attempt: number) => Response): OpenDesignAdapter {
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return respond(bodies.length)
+    }) as unknown as typeof fetch
+    return new OpenDesignAdapter(settings, { fetchFn, accountPool: pool })
+  }
+
+  it('replays once with max_completion_tokens when the gateway names the field it rejects', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'main')
+    const bodies: Array<Record<string, unknown>> = []
+    const adapter = adapterWithBodies(bodies, (attempt) => attempt === 1
+      ? Response.json({ error: { message: OFFICIAL_REFUSAL } }, { status: 400 })
+      : sse('data: {"choices":[{"delta":{"content":"hello"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\ndata: [DONE]\n\n'))
+    const chunks = await collect(adapter, options())
+
+    expect(bodies).toHaveLength(2)
+    // The first request carried the legacy field; the replay carries the new one.
+    expect(bodies[0]?.max_tokens).toBeDefined()
+    expect(bodies[0]?.max_completion_tokens).toBeUndefined()
+    expect(bodies[1]?.max_tokens).toBeUndefined()
+    expect(bodies[1]?.max_completion_tokens).toBe(bodies[0]?.max_tokens)
+    const texts = chunks.filter((chunk) => (chunk as { type: string }).type === 'text-delta')
+    expect(texts.map((chunk) => (chunk as { text: string }).text).join('')).toBe('hello')
+  })
+
+  it('downgrades exactly once, even when the replay is refused the same way', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'main')
+    const bodies: Array<Record<string, unknown>> = []
+    const adapter = adapterWithBodies(bodies, () => Response.json({ error: { message: OFFICIAL_REFUSAL } }, { status: 400 }))
+    await expect(collect(adapter, options())).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(bodies).toHaveLength(2)
+  })
+
+  it('never replays a 400 that is not the official wording', async () => {
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_good' }, 'main')
+    const bodies: Array<Record<string, unknown>> = []
+    const adapter = adapterWithBodies(bodies, () => Response.json({ error: { message: 'messages must not be empty' } }, { status: 400 }))
+    await expect(collect(adapter, options())).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(bodies).toHaveLength(1)
+  })
+})

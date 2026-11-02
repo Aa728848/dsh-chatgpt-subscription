@@ -25,8 +25,21 @@ import {
   type ResolvedRequestImages,
 } from '../common/request-images.ts'
 import { NO_ANSWER_PHRASE } from '../minimax-code/mapper.ts'
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import { errorText, isAuthenticationError, isRecord, unwrapEnvelope } from './protocol.ts'
 import { PROVIDER_NAME } from './types.ts'
+
+/**
+ * The one wording the shared detector does not know.
+ *
+ * `common/context-overflow.ts` reads the provider wording every other line of
+ * this plugin reads, but it does not know this line's older phrase. Dropping it
+ * would turn a refusal that used to recover into a plain 400, so the exact
+ * wording is kept beside the shared judgement — and ONLY that wording: the
+ * other phrases the old private regex carried are either already in the shared
+ * vocabulary or were the over-broad guesses this change removed.
+ */
+const LEGACY_TOO_MANY_TOKENS = /too many tokens/i
 
 /** One OpenAI wire message. */
 export interface ClinePassWireMessage {
@@ -46,6 +59,8 @@ export interface ClinePassWireBody {
   tools?: Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }>
   temperature?: number
   max_tokens?: number
+  /** The newer spelling of the output budget, for the models that reject `max_tokens`. */
+  max_completion_tokens?: number
   stop?: readonly string[]
   reasoning_effort?: string
   /** Explicit thinking switch: the OpenAI-compatible spelling for a disabled reasoning level. */
@@ -100,6 +115,27 @@ function imagePart(block: unknown, images: ResolvedRequestImages): Record<string
 function isDeepSeekModel(modelId: string): boolean {
   const bare = modelId.slice(modelId.lastIndexOf('/') + 1).trim()
   return /^deepseek/i.test(bare)
+}
+
+/**
+ * Whether one model id names an OpenAI reasoning-era family that refuses the
+ * legacy output-budget field.
+ *
+ * Transcribed from the official Cline baseline (cline/cline@ca7402c,
+ * `sdk/packages/llms/src/providers/model-facts.ts`): the o-series (o1/o3/o4,
+ * including -mini, -pro and dated variants) and gpt-5 and every later
+ * single-digit family. Those models reject `max_tokens` and require
+ * `max_completion_tokens`; every other id keeps the field it always sent.
+ *
+ * The boundaries are non-alphanumeric on BOTH sides, so `gpt-4o`, `gpt-35-turbo`,
+ * `yolo1` and `chatgpt-5` never match, while `openai/o3-mini`, `azure-o1` and
+ * `gpt-5.2` do. The version digit stays single on purpose: two digits would
+ * match Azure's `gpt-35-turbo`.
+ */
+export function wantsCompletionTokens(modelId: string): boolean {
+  const normalized = modelId.trim().toLowerCase()
+  return /(^|[^a-z0-9])o[134](?=$|[^a-z0-9])/.test(normalized)
+    || /(^|[^a-z0-9])gpt-?[5-9](?=$|[^a-z0-9])/.test(normalized)
 }
 
 /** The names one developer message declares or revokes, in history order. */
@@ -302,7 +338,14 @@ export function buildClinePassBody(
     stream_options: { include_usage: true },
     ...(tools.length > 0 ? { tools } : {}),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
-    ...(maxTokens === undefined || maxTokens <= 0 ? {} : { max_tokens: maxTokens }),
+    // The output budget travels in the field the model family accepts: the
+    // reasoning-era families reject `max_tokens` outright, and the refusal is a
+    // 400 that names the field it wants (see the official Cline baseline).
+    ...(maxTokens === undefined || maxTokens <= 0
+      ? {}
+      : wantsCompletionTokens(options.model)
+        ? { max_completion_tokens: maxTokens }
+        : { max_tokens: maxTokens }),
     ...(options.stop === undefined ? {} : { stop: options.stop }),
     ...(options.reasoningEffort === undefined || thinkingOff ? {} : { reasoning_effort: String(options.reasoningEffort) }),
     ...(thinkingOff ? { thinking: { type: 'disabled' as const } } : {}),
@@ -386,7 +429,11 @@ export function streamErrorCode(message: string, status?: number): string {
   if (status === 402 || spentWindow) return 'QUOTA'
   if (isAuthenticationError(detail, status)) return 'AUTH'
   if (status === 429 || /429|rate limit|rate-?limited/i.test(detail)) return 'RATE_LIMIT'
-  if (/context\s*(?:length|window)|too many tokens|maximum context/i.test(detail)) return 'CONTEXT_WINDOW_EXCEEDED'
+  // The overflow wording is the SHARED one, so this line reads a refusal the
+  // same way every other line of this plugin reads it. A private regex here
+  // missed most of that vocabulary, and a missed overflow is a missed
+  // compaction recovery.
+  if (isContextOverflow(detail) || LEGACY_TOO_MANY_TOKENS.test(detail)) return CONTEXT_OVERFLOW_CODE
   if (status === 400) return 'INVALID_REQUEST'
   if (status !== undefined && status >= 500) return 'SERVER'
   if (status !== undefined && status >= 400) return `HTTP_${status}`

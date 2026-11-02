@@ -66,7 +66,6 @@ import {
   PROVIDER_NAME,
   STEP_CODE_EFFORTS,
   convergeStepCodeEffort,
-  defaultMaxTokens,
 } from './types.ts'
 import type { StepCodeModelEntry } from './model-catalog.ts'
 import {
@@ -434,11 +433,15 @@ export interface StepCodeRequestOptions {
   /** Whether the selected model declares image input (`enable_vision_input`). */
   supportsImages?: boolean
   /**
-   * Output ceiling to use when the caller stated none; normally the catalog
-   * entry's `defaultMaxTokens`. Falls back to the line's own rule ("no reported
-   * output cap, so equal to the input window").
+   * The REAL output ceiling the endpoint declared for this model.
+   *
+   * Absent means "this endpoint declares no output cap" — and then the wire
+   * carries no `max_tokens` at all, so the upstream applies its own default.
+   * The context window is NOT a cap: it is host metadata about how much the
+   * model can read, and sending it as an output limit means inventing a number
+   * to constrain the upstream.
    */
-  defaultMaxTokens?: number
+  maxOutputTokens?: number
   /**
    * Efforts this model declared (`reasoning_effort_support_list`). Empty — the
    * undeclared-model row — means no effort field is sent at all.
@@ -472,18 +475,21 @@ export const DEFAULT_STEP_CODE_REQUEST_OPTIONS: StepCodeRequestOptions = {
  */
 export function stepCodeRequestOptionsFor(
   entry: StepCodeModelEntry | undefined,
-  overrides: { cacheRequestParams?: boolean; defaultMaxTokens?: number } = {},
+  overrides: { cacheRequestParams?: boolean; maxOutputTokens?: number } = {},
 ): StepCodeRequestOptions {
   const base: StepCodeRequestOptions = entry === undefined
-    ? { supportsImages: false, defaultMaxTokens: defaultMaxTokens(), reasoningEfforts: [] }
+    ? { supportsImages: false, reasoningEfforts: [] }
     : {
         supportsImages: entry.supportsImages,
-        defaultMaxTokens: entry.defaultMaxTokens,
+        // Only a DECLARED cap travels. The window-derived `defaultMaxTokens` on
+        // the entry stays host-side; putting it here is what used to make every
+        // request carry a made-up output ceiling.
+        ...(entry.maxOutputTokens === undefined ? {} : { maxOutputTokens: entry.maxOutputTokens }),
         reasoningEfforts: entry.reasoningEfforts,
       }
   return {
     ...base,
-    ...(overrides.defaultMaxTokens === undefined ? {} : { defaultMaxTokens: overrides.defaultMaxTokens }),
+    ...(overrides.maxOutputTokens === undefined ? {} : { maxOutputTokens: overrides.maxOutputTokens }),
     ...(overrides.cacheRequestParams === undefined ? {} : { cacheRequestParams: overrides.cacheRequestParams }),
   }
 }
@@ -548,9 +554,15 @@ export function buildChatRequest(
 
   const effort = resolveStepCodeReasoningEffort(options.reasoningEffort, request.reasoningEfforts ?? [])
   const cacheKey = stepCodePromptCacheKey(options, request)
-  // No reported output cap on this endpoint, so the line's rule applies: equal to
-  // the input window. Kept as the fallback rather than a second literal.
-  const maxTokens = options.maxTokens ?? request.defaultMaxTokens ?? defaultMaxTokens()
+  // The output cap is sent ONLY when one really exists: the caller's own
+  // request, or a ceiling the endpoint declared for this model.
+  //
+  // The context window is NOT one. It is host metadata about how much the
+  // model can READ, and turning it into `max_tokens` means constraining the
+  // upstream with a number we made up — which is exactly what a model with a
+  // smaller real output ceiling rejects. With no cap the field is simply
+  // absent and the upstream applies its own default.
+  const maxTokens = options.maxTokens ?? request.maxOutputTokens
 
   return {
     model: options.model,
@@ -561,7 +573,7 @@ export function buildChatRequest(
     stream_options: { include_usage: true },
     // Step's Chat Completions documents `max_tokens`; `max_completion_tokens`
     // is OpenAI's o-series spelling and is never sent here.
-    max_tokens: maxTokens,
+    ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options.stop && options.stop.length > 0 ? { stop: options.stop } : {}),
     ...(options.tools && options.tools.length > 0

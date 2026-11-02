@@ -8,6 +8,7 @@ import {
   buildAnthropicRequest,
   buildOpenAIRequest,
   buildRequest,
+  buildResponsesRequest,
   closeStream,
   createStreamState,
   offloadOldestRequestImages,
@@ -66,9 +67,35 @@ describe('Command Code request mapping', () => {
   })
 
   it('uses max_completion_tokens for GPT-5 family models', () => {
-    const body = buildOpenAIRequest(options({ model: 'gpt-5.6-sol' }) as unknown as GenerateOptions)
-    expect(body.max_completion_tokens).toBe(128_000)
+    const body = buildOpenAIRequest(options({ model: 'gpt-5.6-sol', maxTokens: 4096 }) as unknown as GenerateOptions)
+    expect(body.max_completion_tokens).toBe(4096)
     expect(body.max_tokens).toBeUndefined()
+  })
+
+  it('sends no output cap when the official registry declares none', () => {
+    // The official registry declares a cap for ten of its models only. For the
+    // rest it says the provider decides, so the request carries no cap at all:
+    // a number invented here would either truncate the answer or be refused by
+    // the provider.
+    const body = buildOpenAIRequest(options({ model: 'deepseek/deepseek-v4.1-flash' }) as unknown as GenerateOptions)
+    expect('max_tokens' in body).toBe(false)
+    expect('max_completion_tokens' in body).toBe(false)
+  })
+
+  it('sends the output cap the official registry declares', () => {
+    const body = buildOpenAIRequest(options({ model: 'z-ai/glm-5.3-flash' }) as unknown as GenerateOptions)
+    expect(body.max_tokens).toBe(131_072)
+    expect(body.max_completion_tokens).toBeUndefined()
+  })
+
+  it('sends an explicit output cap exactly as it was given', () => {
+    const body = buildOpenAIRequest(options({ model: 'z-ai/glm-5.3-flash', maxTokens: 4096 }) as unknown as GenerateOptions)
+    expect(body.max_tokens).toBe(4096)
+  })
+
+  it('leaves the Responses wire without a cap when none is declared', () => {
+    const body = buildResponsesRequest(options({ model: 'deepseek/deepseek-v4.1-flash' }) as unknown as GenerateOptions)
+    expect('max_output_tokens' in body).toBe(false)
   })
 
   it('projects tool results and assistant tool calls onto the OpenAI wire', () => {
@@ -102,7 +129,9 @@ describe('Command Code request mapping', () => {
     }) as unknown as GenerateOptions)
 
     expect(body.model).toBe('claude-sonnet-4-6')
-    expect(body.system).toBe('You are DSH.')
+    expect(body.system).toEqual([
+      { type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral' } },
+    ])
     expect(body.max_tokens).toBe(8192)
     expect(body.temperature).toBe(0.4)
     expect(body.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'hello' }] }])
@@ -201,12 +230,33 @@ describe('Command Code request mapping', () => {
     }) as unknown as GenerateOptions).thinking).toEqual({ type: 'enabled', budget_tokens: 7168 })
   })
 
-  it('enables thinking only when the budget fits under max_tokens', () => {
+  it('keeps the visible answer its room under the cap', () => {
+    // The budget is the one the level asks for, trimmed to leave the visible
+    // answer its room under the cap, and never below the wire's own minimum.
     expect(thinkingBudgetFor('high', 8192)).toBe(7168)
     expect(thinkingBudgetFor('high', 2048)).toBe(1024)
     expect(thinkingBudgetFor('high', 1500)).toBeUndefined()
     expect(thinkingBudgetFor('max', 64_000)).toBe(32_768)
     expect(thinkingBudgetFor(undefined, 64_000)).toBeUndefined()
+    // No cap means no budget: there is nothing to fit one into.
+    expect(thinkingBudgetFor('high', undefined)).toBeUndefined()
+
+    // The boundaries: a cap that cannot hold both the minimum budget and the
+    // answer room gets no thinking at all, and one token short of the room is
+    // already too small.
+    expect(thinkingBudgetFor('high', 2047)).toBeUndefined()
+    expect(thinkingBudgetFor('high', 1024)).toBeUndefined()
+
+    // A large cap leaves the level's own budget untouched.
+    expect(thinkingBudgetFor('high', 64_000)).toBe(16_384)
+    expect(thinkingBudgetFor('max', 64_000)).toBe(32_768)
+
+    // Whatever the cap, the answer keeps its room: a small cap must not leave
+    // the visible answer a single token.
+    for (const cap of [2048, 4096, 8192, 64_000]) {
+      const budget = thinkingBudgetFor('high', cap)!
+      expect(cap - budget).toBeGreaterThanOrEqual(1024)
+    }
 
     const withThinking = buildAnthropicRequest(options({
       model: 'claude-sonnet-4-6',
@@ -224,8 +274,44 @@ describe('Command Code request mapping', () => {
     const anthropic = buildRequest(options({ model: 'claude-sonnet-4-6' }) as unknown as GenerateOptions, 'anthropic')
     expect(openai.messages).toBeDefined()
     expect(openai.system).toBeUndefined()
-    expect(anthropic.system).toBe('You are DSH.')
+    expect(anthropic.system).toEqual([
+      { type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral' } },
+    ])
     expect(anthropic.messages).toBeDefined()
+  })
+
+  it('marks the Anthropic system prompt cacheable and leaves the OpenAI wire alone', () => {
+    // The official CLI sends its system prompt as an array of text blocks and
+    // marks the cacheable one with `cache_control: { type: 'ephemeral' }`,
+    // which is what puts the prompt into Anthropic's prompt cache. The
+    // OpenAI-compatible wire keeps the plain system message: it has no
+    // `prompt_cache_key` here, on purpose.
+    const anthropic = buildAnthropicRequest(options({ model: 'claude-sonnet-4-6' }) as unknown as GenerateOptions)
+    expect(anthropic.system).toEqual([
+      { type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral' } },
+    ])
+
+    const openai = buildOpenAIRequest(options({}) as unknown as GenerateOptions)
+    expect('prompt_cache_key' in openai).toBe(false)
+    expect(openai.messages).toEqual([
+      { role: 'system', content: 'You are DSH.' },
+      { role: 'user', content: 'hello' },
+    ])
+  })
+
+  it('keeps the Anthropic wire within the output cap the format requires', () => {
+    // The Anthropic Messages format requires `max_tokens`, so this wire cannot
+    // leave the field out the way the OpenAI-compatible wire does. No Claude
+    // model declares a cap, so the official default (64000) is what they are
+    // called with, and the thinking budget is measured against it.
+    const body = buildAnthropicRequest(options({ model: 'claude-sonnet-4-6' }) as unknown as GenerateOptions)
+    expect(body.max_tokens).toBe(64_000)
+    expect(buildAnthropicRequest(options({
+      model: 'claude-sonnet-4-6',
+      reasoningEffort: 'high' as never,
+    }) as unknown as GenerateOptions).thinking).toEqual({ type: 'enabled', budget_tokens: 16_384 })
+    // The answer keeps its room under that cap too.
+    expect(64_000 - 16_384).toBeGreaterThanOrEqual(1024)
   })
 
   it('drops only the $schema keyword from a tool schema', () => {

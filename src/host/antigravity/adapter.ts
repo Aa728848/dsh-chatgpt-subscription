@@ -33,15 +33,16 @@ import { ensureApiKey } from './oauth.ts'
 import { antigravityHeaders, endpointCandidates } from './client.ts'
 import { catalogMaxOutputFor, effectiveModelLimits } from './catalog-limits.ts'
 import {
+  MAX_REQUEST_IMAGE_BYTES,
   buildRequest,
   closeStream,
   createStreamState,
-  offloadOldestRequestImages,
   processStreamLine,
   requestImageTarget,
   resolveRequestImages,
   type AttachmentImageReader,
 } from './mapper.ts'
+import { offloadOldestRequestImages } from '../common/request-images.ts'
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { recordCacheRequest, recordCacheUsage } from './cache-stats.ts'
@@ -357,8 +358,18 @@ export class AntigravityAdapter extends LlmAdapter {
     const family = quotaFamilyForModel(model.id)
     const runtimeMaxOutput = catalogMaxOutputFor(runtimeModel, catalog)
 
-    const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
-    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    // The images are resolved BEFORE the budget runs, and the SAME resolution is
+    // what the budget measures: a request is bounded by the bytes that go on
+    // the wire, not by the bytes that were stored. Measuring the stored size --
+    // or an estimate of the scale target -- reported every scaled screenshot as
+    // over the ceiling and replaced images that fit comfortably once scaled,
+    // and every replacement rewrites the prefix Google's cache matches.
+    const normalizedOptions = normalizeGenerateOptions(options)
+    const images = await resolveRequestImages(normalizedOptions, this.options.attachments, signal)
+    // The budget stays this route's own 12 MB. The shared kernel's default is
+    // Kimi's 1.5 MB, and borrowing another route's number here would refuse
+    // images Google accepts.
+    const requestOptions = offloadOldestRequestImages(normalizedOptions, MAX_REQUEST_IMAGE_BYTES, images)
 
     let recoveredMissingThinkingSignature = false
     let recoveredValidatedToolCalling = false

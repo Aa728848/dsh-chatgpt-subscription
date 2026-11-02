@@ -3,6 +3,7 @@ import { isSameOriginMutation } from '../common/same-origin.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FALLBACK_MODELS, PROVIDER_ID, PROVIDER_NAME, QUOTA_CACHE_TTL_MS, resolveApiEnv } from './types.ts'
+import { SHIPPED_DEFAULT_ADDED_MODEL_IDS, SHIPPED_DEFAULT_RETIRED_MODEL_IDS } from './model-catalog.ts'
 import { resolveZeroDataRetention } from './adapter.ts'
 import {
   FileCredentialStore,
@@ -89,6 +90,12 @@ function fallbackCatalog(): CommandCodeCatalogModel[] {
  * it cannot know about models the live catalog has since added; treating it as
  * "everything currently offered" keeps a first run from hiding the whole
  * catalog behind an unedited default. Any explicit edit is honoured exactly.
+ *
+ * The default the PREVIOUS release shipped counts as well: a catalog refresh
+ * moves models in and out of the default, and a user who never touched the
+ * selection still carries the old list. Calling that list edited would hide
+ * every model the refresh added behind a list nobody touched, so the ids the
+ * refresh moved are used to rebuild the previous default and compare with it.
  */
 export function resolveEnabledModelIds(
   stored: readonly string[],
@@ -98,12 +105,29 @@ export function resolveEnabledModelIds(
   if (!enabled) return []
   const catalogIds = catalog.map((model) => model.id)
   const shippedDefaults = new Set(FALLBACK_MODELS.map((model) => model.id))
-  const isUntouchedDefault = stored.length > 0
-    && stored.length === shippedDefaults.size
-    && stored.every((id) => shippedDefaults.has(id))
-  if (isUntouchedDefault) return catalogIds
+  if (isUneditedSelection(stored, shippedDefaults)) return catalogIds
   const known = new Set(catalogIds)
   return stored.filter((id) => known.has(id))
+}
+
+/**
+ * Whether a stored selection still is a shipped default.
+ *
+ * The current one, and the one the previous release shipped: the refresh moved
+ * a handful of models in and out of the default, and the difference between the
+ * two defaults is exactly the pair of id lists the catalog records.
+ */
+function isUneditedSelection(stored: readonly string[], shipped: ReadonlySet<string>): boolean {
+  if (stored.length === 0) return false
+  if (sameSelection(stored, shipped)) return true
+  const previous = new Set([...shipped].filter((id) => !SHIPPED_DEFAULT_ADDED_MODEL_IDS.includes(id)))
+  for (const id of SHIPPED_DEFAULT_RETIRED_MODEL_IDS) previous.add(id)
+  return sameSelection(stored, previous)
+}
+
+/** Whether two id lists name exactly the same models, in any order. */
+function sameSelection(stored: readonly string[], other: ReadonlySet<string>): boolean {
+  return stored.length === other.size && stored.every((id) => other.has(id))
 }
 
 export interface CommandCodeStatusOptions {

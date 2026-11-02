@@ -118,18 +118,7 @@ function isAbort(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof Error && error.name === 'AbortError')
 }
 
-/**
- * Model-facing replacement for an image this route omits to stay inside its
- * request budget. The wording matches DSH's own placeholder, which this plugin
- * cannot import: that symbol moved inside the supported DSH range
- * (`OFFLOADED_IMAGE_TEXT` in 0.1.1-rc.2, the `offloadedImageText()` function in
- * 0.1.5-rc.1), `offloadRequestImages()` was removed in 0.1.5-rc.1, and
- * `offloadRequestImagesWithPolicy()` gained a required `placeholder` field.
- * Binding to either shape would break the plugin on some supported host exactly
- * the way the `CallId` export did; `host/common/brand-compat.ts` carries the
- * same lesson.
- */
-const OMITTED_IMAGE_TEXT = '[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]'
+
 
 /**
  * Base64 image payload one Antigravity request may carry. Google caps a request
@@ -169,8 +158,8 @@ const REQUEST_IMAGE_VERSION_MAX_BYTES = 256 * 1024
  * ceiling, or undefined when it already fits and is sent as stored.
  *
  * A reference without usable dimensions is sent as stored: there is no basis for
- * choosing a target, and the budget fallback in
- * {@link offloadOldestRequestImages} still applies to it.
+ * choosing a target; the shared request-image budget still applies after the
+ * attachment service has resolved the bytes that will actually be sent.
  */
 export function requestImageTarget(
   ref: ImageAttachmentRef,
@@ -185,124 +174,9 @@ export function requestImageTarget(
     : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
 }
 
-/** Base64 length of raw image bytes, including padding. */
-function base64Length(bytes: number): number {
-  return Math.ceil(bytes / 3) * 4
-}
 
-/**
- * Base64 payload one image block will actually contribute to the wire, or
- * undefined when it contributes none.
- *
- * This is the length of what is SENT, which is not the length of what is
- * STORED. An image whose long edge is over {@link REQUEST_IMAGE_MAX_EDGE} is
- * sent as its downscaled request version (see {@link resolveRequestImages}), so
- * measuring `attachment.bytes` counts a 5 MB screenshot as 5 MB when it reaches
- * the wire as a few hundred kilobytes. That over-count is not harmless: it makes
- * {@link offloadOldestRequestImages} replace an image with placeholder text that
- * would have fitted once scaled, and every replacement rewrites the prefix
- * Google's implicit cache matches.
- *
- * The exact size is only known once the attachment service has derived the
- * version, which happens after this budget runs, so an image with a scale target
- * is measured at its target ceiling. An image without one travels as stored, and
- * there the stored size is exact.
- */
-function requestImageBytes(block: Record<string, unknown>): number | undefined {
-  const attachment = attachmentOf(block)
-  if (attachment) {
-    const target = requestImageTarget(attachment)
-    return target
-      ? base64Length(Math.min(attachment.bytes, target.maxBytes))
-      : base64Length(attachment.bytes)
-  }
-  const inline = asString(block.data) || asString(block.base64)
-  return inline ? inline.length : undefined
-}
 
-function collectRequestImageBytes(content: unknown, lengths: number[]): void {
-  if (!Array.isArray(content)) return
-  for (const block of content) {
-    if (!isRecord(block)) continue
-    // Tool results nest their own content, and a screenshot or a read_image
-    // result carries its pixels there. Stopping at the top level left every
-    // tool-produced image outside the budget while the builder sent it, so the
-    // request grew past the route's own ceiling and only the upstream answered.
-    if (block.type === 'tool-result') {
-      collectRequestImageBytes(block.content, lengths)
-      continue
-    }
-    if (block.type !== 'image') continue
-    const bytes = requestImageBytes(block)
-    if (bytes !== undefined) lengths.push(bytes)
-  }
-}
 
-/**
- * Replace the oldest inline images with a text placeholder once one request
- * would carry more than {@link MAX_REQUEST_IMAGE_BYTES} of base64 image data.
- *
- * Without this bound an image-heavy session keeps growing the request body until
- * Google rejects it, and the images that made it fail are the ones the model
- * needed least. The oldest occurrences go first, exactly as DSH's own providers
- * order them, and the placeholder tells the model the image is missing instead
- * of letting it answer as though the picture were simply blank.
- *
- * Each occurrence is measured at the size it will actually be sent at, so an
- * image that only fits after scaling is not replaced (see
- * {@link requestImageBytes}). Replacing an image is the LAST resort: it rewrites
- * the retained prefix and costs the next turn its whole implicit cache hit, so
- * it is worth keeping the image count stable for as long as the bytes allow.
- *
- * @param options - the request about to be built; durable history stays untouched.
- * @returns the original options when they already fit, otherwise shallow copies.
- */
-export function offloadOldestRequestImages(options: GenerateOptions): GenerateOptions {
-  const lengths: number[] = []
-  for (const message of options.messages) collectRequestImageBytes(message.content, lengths)
-  const excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - MAX_REQUEST_IMAGE_BYTES
-  if (excess <= 0) return options
-
-  let omitted = 0
-  let freed = 0
-  for (const bytes of lengths) {
-    if (freed >= excess) break
-    freed += bytes
-    omitted += 1
-  }
-
-  const remaining = { count: omitted }
-  // Walks the same shape, in the same order, as the measurement above: index N
-  // has to name the Nth occurrence that was measured, or the count is spent on
-  // the wrong images and the budget is met by replacing the wrong ones.
-  const replaceIn = (content: unknown): { content: unknown; replaced: boolean } => {
-    if (!Array.isArray(content) || remaining.count === 0) return { content, replaced: false }
-    let replaced = false
-    const next = content.map((block) => {
-      if (remaining.count === 0 || !isRecord(block)) return block
-      if (block.type === 'image') {
-        if (requestImageBytes(block) === undefined) return block
-        remaining.count -= 1
-        replaced = true
-        return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
-      }
-      if (block.type === 'tool-result' && Array.isArray(block.content)) {
-        const inner = replaceIn(block.content)
-        if (!inner.replaced) return block
-        replaced = true
-        return { ...block, content: inner.content }
-      }
-      return block
-    })
-    return { content: next, replaced }
-  }
-  const messages = options.messages.map((message) => {
-    const result = replaceIn(message.content)
-    if (!result.replaced) return message
-    return { ...message, content: result.content } as typeof message
-  })
-  return { ...options, messages }
-}
 
 /**
  * Read every durable `{ type: 'image', attachment }` block one request carries.
@@ -314,8 +188,8 @@ export function offloadOldestRequestImages(options: GenerateOptions): GenerateOp
  * model a text marker, because a turn that silently loses its image is far
  * harder to diagnose than one that says so.
  *
- * WHY SCALE INSTEAD OF DROP. `offloadOldestRequestImages` has to replace an
- * image with placeholder text once the request exceeds
+ * WHY SCALE INSTEAD OF DROP. The shared request-image offload pass has to
+ * replace an image with placeholder text once the request exceeds
  * {@link MAX_REQUEST_IMAGE_BYTES}, and the count it replaces grows with every
  * image added afterwards. Each change rewrites the retained prefix, so Google's
  * implicit cache misses again on the very next turn. An image whose long edge is

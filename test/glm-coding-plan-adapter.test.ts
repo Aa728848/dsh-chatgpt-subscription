@@ -151,8 +151,10 @@ describe('GLM 适配器：ladder 由装配层传入', () => {
       options('GLM-5.3', { reasoningEffort: 'minimal' as never }),
       { region: 'intl', entry },
     )
-    expect(plan.body.reasoning_effort).toBe('low')
-    // 恒常发的一半：上游把 thinking.type=disabled 当错误拒绝，所以不发关闭值。
+    // 官方 Anthropic 面的 effort 出口是 output_config.effort，不是顶层 reasoning_effort。
+    expect(plan.body.output_config).toEqual({ effort: 'low' })
+    expect(plan.body.reasoning_effort).toBeUndefined()
+    // GLM-5.3 家族的官方 map 没有 disabled 分支，所以恒开发 type: enabled。
     expect(plan.body.thinking).toEqual({ type: 'enabled' })
   })
 
@@ -163,7 +165,37 @@ describe('GLM 适配器：ladder 由装配层传入', () => {
       options('GLM-5.2', { reasoningEffort: 'low' as never }),
       { region: 'intl', entry },
     )
-    expect(plan.body.reasoning_effort).toBe('high')
+    expect(plan.body.output_config).toEqual({ effort: 'high' })
+    expect(plan.body.reasoning_effort).toBeUndefined()
+  })
+
+  it('目录的 thinkingDisableable 被传进 mapper：GLM-5.2 可关、GLM-5.3 恒开', () => {
+    // 官方规则集逐字：GLM-5.2 的 reasoningLevel.values 是 ["disabled","high","max"]，
+    // GLM-5.3 家族是 ["low","high","max"]——没有 disabled。
+    const none = { reasoningEffort: 'none' as never }
+    const glm52 = buildGlmRequestPlan(options('GLM-5.2', none), {
+      region: 'intl',
+      entry: resolveGlmModel('GLM-5.2'),
+    })
+    expect(glm52.body.thinking).toEqual({ type: 'disabled' })
+    expect(glm52.body.output_config).toBeUndefined()
+
+    const glm53 = buildGlmRequestPlan(options('GLM-5.3', none), {
+      region: 'intl',
+      entry: resolveGlmModel('GLM-5.3'),
+    })
+    expect(glm53.body.thinking).toEqual({ type: 'enabled' })
+    expect(glm53.body.output_config).toEqual({ effort: 'low' })
+  })
+
+  it('GLM-5-Turbo 是开关型：关思考时只发 disabled', () => {
+    // 官方 .*GLM-5-Turbo.* 的 reasoningLevel.values 是 ["disabled","enabled"]。
+    const plan = buildGlmRequestPlan(
+      options('GLM-5-Turbo', { reasoningEffort: 'none' as never }),
+      { region: 'intl', entry: resolveGlmModel('GLM-5-Turbo') },
+    )
+    expect(plan.body.thinking).toEqual({ type: 'disabled' })
+    expect(plan.body.output_config).toBeUndefined()
   })
 
   it('空梯子 = 该模型完全不发思考控制（有意语义）', () => {

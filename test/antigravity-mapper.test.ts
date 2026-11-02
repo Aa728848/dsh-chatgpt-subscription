@@ -5,7 +5,6 @@ import {
   convertTools,
   createStreamState,
   MAX_REQUEST_IMAGE_BYTES,
-  offloadOldestRequestImages,
   processStreamLine,
   requestImageTarget,
   resolveRequestImages,
@@ -21,6 +20,10 @@ import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import { BlockAssembler, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { offloadOldestRequestImages as sharedOffload } from '../src/host/common/request-images.ts'
+
+// Exercise the same production entry the adapter uses, with Antigravity's own cap.
+const offloadOldestRequestImages = (options: GenerateOptions) => sharedOffload(options, MAX_REQUEST_IMAGE_BYTES)
 
 describe('Antigravity Mapper', () => {
   const testModel = MODELS.find((m) => m.id === 'gemini-3.7-flash')!

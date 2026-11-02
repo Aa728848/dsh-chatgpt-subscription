@@ -298,3 +298,100 @@ describe('Cline Pass missing [DONE]', () => {
     })()).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
   })
 })
+
+/**
+ * The output-budget field, by the official Cline rule.
+ *
+ * Transcribed from the official baseline (cline/cline@ca7402c,
+ * `sdk/packages/llms/src/providers/model-facts.ts`): the o-series (o1/o3/o4) and
+ * gpt-5 and every later single-digit family reject `max_tokens` and require
+ * `max_completion_tokens`. The boundaries are non-alphanumeric on BOTH sides, so
+ * `gpt-4o`, `gpt-35-turbo`, `yolo1` and `chatgpt-5` never match, while
+ * `openai/o3-mini`, `azure-o1` and `gpt-5.2` do.
+ */
+describe('Cline Pass output budget field', () => {
+  function bodyFor(model: string): ClinePassWireBody {
+    return buildClinePassBody({
+      provider: 'cline-pass',
+      model,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      stream: true,
+    } as unknown as GenerateOptions, { maxTokens: 8192 }, new Map())
+  }
+
+  it.each([
+    'gpt-5', 'gpt-5-mini', 'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.6-sol', 'gpt-6', 'gpt-6-sol',
+    'gpt-6.1-sol', 'gpt-6-1-sol', 'gpt-6-luna', 'gpt-7', 'gpt-9-sol',
+    'o1', 'o1-mini', 'o1-preview', 'o3', 'o3-mini', 'o3-pro', 'o4-mini', 'o4-mini-2025-04-16',
+    'openai/o3-mini', 'azure-o1', 'GPT-5-Mini', 'azure-gpt-5-mini', 'cline-pass/gpt-5.2',
+  ])('sends max_completion_tokens for %s', (model) => {
+    const body = bodyFor(model)
+    expect(body.max_completion_tokens).toBe(8192)
+    expect(body.max_tokens).toBeUndefined()
+  })
+
+  it.each([
+    'gpt-4o', 'gpt-4o-mini', 'chatgpt-4o-latest', 'gpt-4.1', 'gpt-oss-120b', 'gpt-35-turbo',
+    'yolo1', 'solo3', 'o13-custom', 'chatgpt-5', 'somegpt-5-custom', 'gpt-55', 'gpt-6o',
+    'somegpt-6-custom',
+    'cline-pass/glm-5.3', 'cline-pass/deepseek-v4.1-flash-1017', 'cline-pass/kimi-k3',
+  ])('keeps max_tokens for %s', (model) => {
+    const body = bodyFor(model)
+    expect(body.max_tokens).toBe(8192)
+    expect(body.max_completion_tokens).toBeUndefined()
+  })
+})
+
+/**
+ * The overflow wording is the SHARED one.
+ *
+ * Every other line of this plugin reads a provider refusal through
+ * `common/context-overflow.ts`, so the same sentence means the same thing
+ * everywhere. This line carried a private regex that missed most of the shared
+ * vocabulary — the canonical "prompt is too long" and "request exceeded model
+ * token limit" phrasings both fell through to the plain 400 branch, where no
+ * compaction recovery runs.
+ */
+describe('Cline Pass context overflow wording', () => {
+  it.each([
+    "This model's maximum context length is 8192 tokens, however you requested 12000 tokens.",
+    'prompt is too long: 50000 tokens > 40000 maximum',
+    'context window exceeded',
+    'context_length_exceeded',
+    'invalid params, context window exceeds limit (2013)',
+    'request exceeded model token limit',
+  ])('reads %s as a context overflow', (detail) => {
+    expect(streamErrorCode(detail, 400)).toBe('CONTEXT_WINDOW_EXCEEDED')
+  })
+
+  it('keeps QUOTA, AUTH and 429 ahead of the overflow wording', () => {
+    expect(streamErrorCode('weekly plan quota exhausted', 429)).toBe('QUOTA')
+    expect(streamErrorCode('invalid api key', 401)).toBe('AUTH')
+    expect(streamErrorCode('too many requests', 429)).toBe('RATE_LIMIT')
+    // A 429 that happens to quote the overflow wording is still a rate limit.
+    expect(streamErrorCode('context window exceeded', 429)).toBe('RATE_LIMIT')
+  })
+
+  it('leaves an ordinary 400 alone', () => {
+    expect(streamErrorCode('bad request', 400)).toBe('INVALID_REQUEST')
+  })
+
+  /**
+   * The wording the SHARED detector does not know.
+   *
+   * The shared vocabulary replaced a private regex that also recognised this
+   * phrase. The shared detector does not know it, so it is kept explicitly: a
+   * refusal that used to recover must not fall through to the plain 400 branch
+   * and lose its compaction recovery.
+   */
+  it('still reads the wording the shared detector does not know', () => {
+    expect(streamErrorCode('too many tokens', 400)).toBe('CONTEXT_WINDOW_EXCEEDED')
+    expect(streamErrorCode('too many tokens in the request', 400)).toBe('CONTEXT_WINDOW_EXCEEDED')
+  })
+
+  it('keeps QUOTA, AUTH and 429 ahead of that wording too', () => {
+    expect(streamErrorCode('too many tokens', 402)).toBe('QUOTA')
+    expect(streamErrorCode('too many tokens', 401)).toBe('AUTH')
+    expect(streamErrorCode('too many tokens', 429)).toBe('RATE_LIMIT')
+  })
+})

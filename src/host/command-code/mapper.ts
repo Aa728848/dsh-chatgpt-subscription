@@ -22,7 +22,7 @@ import {
 } from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
-import { anthropicThinkingBudget, maxOutputTokensFor, wireReasoningEffort } from './types.ts'
+import { anthropicThinkingBudget, declaredMaxOutputTokens, wireReasoningEffort } from './types.ts'
 import type { CommandCodeWire } from '../../shared/command-code-contracts.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -466,6 +466,25 @@ function openAIAssistantContent(message: Message): { content: string; toolCalls:
   return { content: textParts.join(''), toolCalls }
 }
 
+/**
+ * The output cap one request carries, or undefined when it carries none.
+ *
+ * Three cases, and they are three different things:
+ *
+ * - the caller named a cap: it is sent as it was given, because the caller
+ *   asked for exactly that;
+ * - the official registry declares one: it is sent as the registry states it,
+ *   because the registry is the authority on what the model accepts;
+ * - the registry declares none: NOTHING is sent. A registry that declares no cap
+ *   says the provider decides the cap, and a number invented here would either
+ *   truncate the answer or be refused by the provider outright.
+ */
+function requestMaxTokens(options: GenerateOptions): number | undefined {
+  const explicit = options.maxTokens
+  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit > 0) return explicit
+  return declaredMaxOutputTokens(options.model)
+}
+
 /** Build one `/chat/completions` body. */
 export function buildOpenAIRequest(
   options: GenerateOptions,
@@ -512,15 +531,18 @@ export function buildOpenAIRequest(
   // `none` is expressed by omitting the field on this wire; Command Code has no
   // `off`/`none` reasoning_effort level to send.
   const effort = wireReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
-  const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
+  const maxTokens = requestMaxTokens(options)
   const body: Record<string, unknown> = {
     model: options.model,
     messages,
     stream: true,
     stream_options: { include_usage: true },
-    ...(wantsCompletionTokens(options.model)
-      ? { max_completion_tokens: maxTokens }
-      : { max_tokens: maxTokens }),
+    // No cap means no field at all: the provider applies the model's own.
+    ...(maxTokens === undefined
+      ? {}
+      : wantsCompletionTokens(options.model)
+        ? { max_completion_tokens: maxTokens }
+        : { max_tokens: maxTokens }),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options.stop && options.stop.length > 0 ? { stop: options.stop } : {}),
     ...(options.tools && options.tools.length > 0
@@ -618,15 +640,74 @@ function mergeAnthropicMessages(entries: Array<{ role: 'user' | 'assistant'; con
   return merged
 }
 
-/** Reasoning budget a thinking-enabled request may spend, given its output cap. */
-export function thinkingBudgetFor(effort: string | undefined, maxTokens: number): number | undefined {
+/**
+ * Smallest thinking budget the Anthropic wire accepts.
+ *
+ * Anthropic refuses a budget below 1024 tokens, so a cap that leaves no room
+ * for that one simply omits thinking. This is the wire's own minimum.
+ */
+export const MIN_THINKING_BUDGET_TOKENS = 1_024
+
+/**
+ * Visible answer the thinking budget has to leave under the cap.
+ *
+ * A budget that eats the whole cap leaves the model no room to answer, so the
+ * budget never reaches the last {@link MIN_ANSWER_TOKENS} of it. The room is
+ * what keeps a small cap from turning the answer into a single token.
+ */
+export const MIN_ANSWER_TOKENS = 1_024
+
+/**
+ * Reasoning budget a thinking-enabled request may spend, given its output cap.
+ *
+ * The budget is the one the effort level asks for, trimmed to fit under the
+ * cap. Two floors decide the rest:
+ *
+ * - it must leave {@link MIN_ANSWER_TOKENS} under the cap for the visible
+ *   answer, so a budget never eats the whole output and the answer is not
+ *   squeezed down to a token;
+ * - it must be at least {@link MIN_THINKING_BUDGET_TOKENS}, because the wire
+ *   refuses a budget below its own minimum.
+ *
+ * A cap that cannot satisfy both gets NO thinking at all: a budget that leaves
+ * the answer no room is worse than no thinking.
+ *
+ * A request with no cap has nothing to fit a budget into, so it gets no
+ * thinking either: there is no number to compare the level against, and a
+ * budget invented from nothing is the same guess this rule exists to remove.
+ */
+export function thinkingBudgetFor(effort: string | undefined, maxTokens: number | undefined): number | undefined {
   if (effort === undefined || effort === '') return undefined
   const requested = anthropicThinkingBudget(effort)
   if (requested === undefined || requested === null) return undefined
-  // Anthropic requires the budget to be smaller than max_tokens and leaves room
-  // for the visible answer; a request that cannot fit one simply omits thinking.
-  const budget = Math.min(requested, maxTokens - 1024)
-  return budget >= 1024 ? budget : undefined
+  if (maxTokens === undefined || !Number.isFinite(maxTokens) || maxTokens <= 0) return undefined
+  const budget = Math.min(requested, maxTokens - MIN_ANSWER_TOKENS)
+  return budget >= MIN_THINKING_BUDGET_TOKENS ? budget : undefined
+}
+
+/**
+ * Output cap the Anthropic wire sends when nothing else applies.
+ *
+ * The Anthropic Messages format requires `max_tokens`, so the wire cannot
+ * leave the field out the way the OpenAI-compatible wire does; the official
+ * CLI's own answer for a request without a declared cap is 64000, and that is
+ * the number used here.
+ */
+export const ANTHROPIC_DEFAULT_MAX_TOKENS = 64_000
+
+/**
+ * The system prompt as the Anthropic wire wants it.
+ *
+ * The official CLI sends its system prompt as an ARRAY of text blocks and marks
+ * the cacheable one with `cache_control: { type: 'ephemeral' }` (its
+ * `toWireSystem`). That marker is what puts the prompt into Anthropic's prompt
+ * cache, so the next turn reads the cached prefix instead of paying for the
+ * whole system prompt again. A plain string cannot carry the marker, so a
+ * string system prompt is cached never - and this route's system prompt is the
+ * largest fixed part of every request.
+ */
+function anthropicSystemBlocks(system: string): AnthropicBlock[] {
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
 }
 
 /** Build one `/messages` body. */
@@ -649,7 +730,13 @@ export function buildAnthropicRequest(
   }
 
   const system = leadingSystemText(options)
-  const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
+  // The Anthropic Messages format REQUIRES `max_tokens`, so this wire always
+  // carries one. The value is the caller's own cap, else the officially
+  // declared cap, else the number the official CLI itself sends for a model that
+  // declares none (`max_tokens: n.maxOutputTokens ?? 64000` in
+  // command-code@1.88.2). Every Claude model declares none, so that last value
+  // is what those models are called with.
+  const maxTokens = requestMaxTokens(options) ?? ANTHROPIC_DEFAULT_MAX_TOKENS
   // A disabled-thinking level arrives as `none`/`off` and must not become a
   // thinking budget: omitting `thinking` entirely is how this wire says "do not
   // think".
@@ -660,7 +747,7 @@ export function buildAnthropicRequest(
     model: options.model,
     max_tokens: maxTokens,
     messages: mergeAnthropicMessages(entries),
-    ...(system === undefined ? {} : { system }),
+    ...(system === undefined ? {} : { system: anthropicSystemBlocks(system) }),
     ...(options.temperature === undefined || budget !== undefined ? {} : { temperature: options.temperature }),
     ...(options.stop && options.stop.length > 0 ? { stop_sequences: options.stop } : {}),
     ...(options.tools && options.tools.length > 0
@@ -798,12 +885,13 @@ export function buildResponsesRequest(
   }
 
   const effort = wireReasoningEffort(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
-  const maxTokens = options.maxTokens ?? maxOutputTokensFor(options.model)
+  const maxTokens = requestMaxTokens(options)
   return {
     model: options.model,
     input,
     stream: true,
-    max_output_tokens: maxTokens,
+    // No cap means no field: the provider applies the model's own.
+    ...(maxTokens === undefined ? {} : { max_output_tokens: maxTokens }),
     ...(system === undefined ? {} : { instructions: system }),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options.tools && options.tools.length > 0

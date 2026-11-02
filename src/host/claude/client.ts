@@ -129,6 +129,7 @@ import {
   EXTENDED_CACHE_TTL_BETA,
   INTERLEAVED_THINKING_BETA,
   MESSAGES_PATH,
+  MODELS_DISCOVERY_TIMEOUT_MS,
   MODELS_PATH,
   OAUTH_BETA,
   QUOTA_CACHE_TTL_MS,
@@ -401,18 +402,38 @@ function parseListingEntry(value: unknown): ListingEntry | undefined {
 }
 
 /**
+ * Whether one listing id names a Claude or Anthropic model.
+ *
+ * TRANSCRIBED from the official client's own model discovery, which keeps an
+ * entry when its id contains `claude` or `anthropic` ANYWHERE in the string,
+ * matched case-insensitively, and ignores everything else. A provider-prefixed
+ * id such as `vertex_ai/claude-sonnet-4-6` or `bedrock/anthropic.claude-sonnet-4-5`
+ * passes; an id that contains neither substring does not.
+ */
+export function isClaudeModelId(id: string): boolean {
+  const lowered = id.toLowerCase()
+  return lowered.includes('claude') || lowered.includes('anthropic')
+}
+
+/**
  * Fold the live listing onto the frozen capability table.
  *
  * `contextWindow` is the ONLY field the listing may write. Everything else is
  * copied from `resolveClaudeModel`, which returns the catalog entry for a known
- * id and its conservative stub for an unknown one — so an id this line has never
- * heard of keeps the stub's "no images, no thinking form, 200K window" answer
- * instead of inheriting invented capabilities from the listing.
+ * id and the current-model template for an unknown one — so an id this line has
+ * never heard of inherits the shape of the current generation (adaptive
+ * thinking, the full effort ladder, image support, a 1M window) instead of
+ * inheriting invented capabilities from the listing. The listing's own
+ * `context_window` overrides the WINDOW and nothing else.
  *
  * The catalog is NOT widened by the listing: the returned array contains exactly
  * the ids the server named, because the listing is the authority on what this
  * account may call. (The fallback path is what keeps a failed call from
  * narrowing it to nothing.)
+ *
+ * Entries whose id names no Claude or Anthropic model are IGNORED, exactly as
+ * the official client's discovery ignores them: a listing that also names
+ * something else must not put that something else in this line's picker.
  */
 export function mergeListingIntoCatalog(listing: readonly ListingEntry[]): ClaudeModelEntry[] {
   const merged: ClaudeModelEntry[] = []
@@ -420,6 +441,7 @@ export function mergeListingIntoCatalog(listing: readonly ListingEntry[]): Claud
   for (const entry of listing) {
     if (seen.has(entry.id)) continue
     seen.add(entry.id)
+    if (!isClaudeModelId(entry.id)) continue
     const base = resolveClaudeModel(entry.id)
     // One written field. Every capability comes from `base` untouched.
     merged.push({ ...base, contextWindow: entry.contextWindow ?? base.contextWindow })
@@ -499,8 +521,16 @@ async function performCatalogLoad(
     const response = await fetchFn(API_BASE + MODELS_PATH + '?limit=1000', {
       method: 'GET',
       headers: buildClaudeHeaders(credentials.accessToken, { method: 'GET' }),
-      signal: timeoutSignal(options.signal, DISCOVERY_TIMEOUT_MS),
+      signal: timeoutSignal(options.signal, MODELS_DISCOVERY_TIMEOUT_MS),
+      // A REDIRECT IS A FAILURE, not a hop. The official client's own
+      // model-discovery request refuses to follow one, so that the credential
+      // cannot be handed to a redirect target; and a listing that answers with
+      // a 3xx is not the documented listing either way.
+      redirect: 'manual',
     })
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('Claude model listing redirected (' + response.status + '); a redirect is treated as a failure.')
+    }
     if (!response.ok) throw new Error('Claude model listing failed (' + response.status + ').')
     const payload: unknown = await response.json().catch(() => undefined)
     // Both documented shapes: the paginated envelope and a bare array.

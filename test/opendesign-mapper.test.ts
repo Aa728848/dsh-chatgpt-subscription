@@ -5,12 +5,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildOpenDesignBody,
+  isUnsupportedMaxTokensError,
   mapFinishReason,
   mapUsage,
   parseServerSentEvents,
   serializeMessages,
   streamErrorCode,
   translate,
+  usesMaxCompletionTokens,
   type OpenDesignWireBody,
 } from '../src/host/opendesign/mapper.ts'
 import { NO_RESOLVED_IMAGES } from '../src/host/common/request-images.ts'
@@ -427,5 +429,120 @@ describe('translate without the [DONE] sentinel', () => {
     await expect(collect(translate(framesOf([
       { error: { code: 'invalid_api_key', message: 'api key not found' } },
     ])))).rejects.toThrow(/api key not found/)
+  })
+})
+
+/**
+ * The output-budget field, by the official OpenDesign rule.
+ *
+ * Transcribed from the official baseline (nexu-io/open-design,
+ * `apps/daemon/src/integrations/openai-chat-token-params.ts`): only the newer
+ * chat-completions families reject the legacy field, and the id is matched at
+ * its START — so `gpt-5`, `gpt-5.6-luna` and `o3-mini` take
+ * `max_completion_tokens`, while `gpt-6-luna`, `openai/gpt-5` and `o2` keep
+ * `max_tokens`. The generic OpenAI-compatible path stays on the legacy field by
+ * default, which is why a gateway that refuses it is answered by the one
+ * downgrade replay rather than by a wider guess.
+ */
+describe('OpenDesign output budget field', () => {
+  function bodyFor(model: string): OpenDesignWireBody {
+    return buildOpenDesignBody(options({ model }), { maxTokens: 8192 }, NO_RESOLVED_IMAGES)
+  }
+
+  it.each([
+    'gpt-5', 'gpt-5-mini', 'gpt-5.2', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
+    'o1', 'o1-mini', 'o1-preview', 'o3', 'o3-mini', 'o3-pro', 'o4', 'o4-mini',
+  ])('sends max_completion_tokens for %s', (model) => {
+    const body = bodyFor(model)
+    expect(body.max_completion_tokens).toBe(8192)
+    expect(body.max_tokens).toBeUndefined()
+    expect(usesMaxCompletionTokens(model)).toBe(true)
+  })
+
+  it.each([
+    'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-50', 'chatgpt-5',
+    'openai/gpt-5', 'openai/o3-mini', 'o2', 'o5', 'o13', 'claude-opus-5',
+    'deepseek-v4.1-flash', 'glm-5.3-flash',
+  ])('keeps max_tokens for %s', (model) => {
+    const body = bodyFor(model)
+    expect(body.max_tokens).toBe(8192)
+    expect(body.max_completion_tokens).toBeUndefined()
+    expect(usesMaxCompletionTokens(model)).toBe(false)
+  })
+})
+
+/**
+ * The ONE refusal that earns a replay.
+ *
+ * The official baseline names the field it rejects and the field it wants, and
+ * only that wording may be answered by a second request. Any other 400 is the
+ * caller's mistake and is never replayed.
+ */
+describe('OpenDesign unsupported max_tokens wording', () => {
+  it('recognises the official refusal', () => {
+    expect(isUnsupportedMaxTokensError(
+      "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+    )).toBe(true)
+  })
+
+  it('does not recognise another 400', () => {
+    expect(isUnsupportedMaxTokensError('messages must not be empty')).toBe(false)
+    expect(isUnsupportedMaxTokensError("Unsupported parameter: 'temperature' is not supported with this model.")).toBe(false)
+    // Names the rejected field but never the wanted one.
+    expect(isUnsupportedMaxTokensError("Unsupported parameter: 'max_tokens' is not supported with this model.")).toBe(false)
+  })
+})
+
+/**
+ * The overflow wording is the SHARED one.
+ *
+ * Every other line of this plugin reads a provider refusal through
+ * `common/context-overflow.ts`, so the same sentence means the same thing
+ * everywhere. This line carried a private regex that missed most of the shared
+ * vocabulary — the canonical "prompt is too long" and "request exceeded model
+ * token limit" phrasings both fell through to the plain 400 branch, where no
+ * compaction recovery runs.
+ */
+describe('OpenDesign context overflow wording', () => {
+  it.each([
+    "This model's maximum context length is 8192 tokens, however you requested 12000 tokens.",
+    'prompt is too long: 50000 tokens > 40000 maximum',
+    'context window exceeded',
+    'context_length_exceeded',
+    'invalid params, context window exceeds limit (2013)',
+    'request exceeded model token limit',
+  ])('reads %s as a context overflow', (detail) => {
+    expect(streamErrorCode(detail, 400)).toBe('CONTEXT_WINDOW_EXCEEDED')
+  })
+
+  it('keeps QUOTA, AUTH and 429 ahead of the overflow wording', () => {
+    expect(streamErrorCode('insufficient credits', 402)).toBe('QUOTA')
+    expect(streamErrorCode('api key not found', 401)).toBe('AUTH')
+    expect(streamErrorCode('too many requests', 429)).toBe('RATE_LIMIT')
+    // A 429 that happens to quote the overflow wording is still a rate limit.
+    expect(streamErrorCode('context window exceeded', 429)).toBe('RATE_LIMIT')
+  })
+
+  it('leaves an ordinary 400 alone', () => {
+    expect(streamErrorCode('bad request', 400)).toBe('INVALID_REQUEST')
+  })
+
+  /**
+   * The wording the SHARED detector does not know.
+   *
+   * The shared vocabulary replaced a private regex that also recognised this
+   * phrase. The shared detector does not know it, so it is kept explicitly: a
+   * refusal that used to recover must not fall through to the plain 400 branch
+   * and lose its compaction recovery.
+   */
+  it('still reads the wording the shared detector does not know', () => {
+    expect(streamErrorCode('too many tokens', 400)).toBe('CONTEXT_WINDOW_EXCEEDED')
+    expect(streamErrorCode('too many tokens in the request', 400)).toBe('CONTEXT_WINDOW_EXCEEDED')
+  })
+
+  it('keeps QUOTA, AUTH and 429 ahead of that wording too', () => {
+    expect(streamErrorCode('too many tokens', 402)).toBe('QUOTA')
+    expect(streamErrorCode('too many tokens', 401)).toBe('AUTH')
+    expect(streamErrorCode('too many tokens', 429)).toBe('RATE_LIMIT')
   })
 })

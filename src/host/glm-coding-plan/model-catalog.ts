@@ -8,10 +8,12 @@
  *
  * ## 事实来源（逐行标注，不混用）
  *
- * 1. **官方开源版内置配置** `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`（revision 31，
- *    184927 字节）。**路径在仓库根，不在 `apps/zcode-cli/` 下**——后者没有 `config/` 目录，
+ * 1. **官方开源版内置配置** `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`。
+ *    **路径在仓库根，不在 `apps/zcode-cli/` 下**——后者没有 `config/` 目录，
  *    直连 `apps/zcode-cli/config/provider/zcode-builtin.json` 会 404。本文件下面引用的行号级事实
- *    都出自这一份（读取日期 2026-10-11）：
+ *    都出自这一份。**读取日期 2026-10-30**（仓库 HEAD `a60ba6a`，**revision 43**，252317 字节）；
+ *    更早一次读取是 revision 31（2026-10-11），本文档引用的这四行事实在两版之间**逐字未变**，
+ *    本轮按 revision 43 重新核对过：
  *    - `zai-api` / `bigmodel-api` 两个模板（`access.type = zhipu-coding-plan-api-key`）与四个
  *      `account:*-coding-plan` provider 的 `api.type` **全部**是 `anthropic-messages`，
  *      `baseUrl` 就是本线路的 Anthropic 面（`https://api.z.ai/api/anthropic` /
@@ -20,6 +22,13 @@
  *      `account:{zai,bigmodel}-{individual,team}-coding-plan` 启用**同样四个** id：
  *      `GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` / `GLM-5-Turbo`。所以本表是这四个，不多不少；
  *    - `modelConfigRules.modelRules` 给出逐模型事实（见下方每一行的注释）；
+ *    - `modelConfigRules.modelApiRules` 里 `apiTypeMatch: "anthropic-messages"` 的逐模型
+ *      **请求体 map** 给出本线路 Anthropic 面的思考字段形状，`../mapper-anthropic.ts` 照它实现：
+ *      `.*glm-5\.3.*` → `{"thinking":{"type":"enabled"},"output_config":{"effort": reasoningLevel}}`；
+ *      `.*GLM-5\.2.*` → disabled 分支只发 `thinking.type: disabled`，否则发
+ *      `thinking.type: enabled` + `output_config.effort`；
+ *      `.*GLM-5-Turbo.*` → `{"thinking":{"type": reasoningLevel == "enabled" ? "enabled" : "disabled"}}`
+ *      （**不带** `output_config`，因为它没有档位梯子）；
  *    - `modelConfigRules.providerSiteRules` 有两条 `modelMatch: ".*"` 的站点规则，分别命中
  *      `https://api\.z\.ai/api/anthropic` 与 `https://open\.bigmodel\.cn/api/anthropic`，
  *      把 `supportsImage/supportsVideo` 打开成 `true`——**这两个地址就是本线路的两个 Coding Plan
@@ -170,6 +179,8 @@ export const GLM_VISION_BRIDGED_BY_PLAN_FACE: readonly string[] = [
  *
  * 来源：历史转录里 GLM-5.3 / GLM-5.3-Flash / GLM-5.3-Highspeed 三行都取 `CODING_EFFORTS`，
  * 而 `7e40fce:src/host/zhipu/types.ts` 里那个常量逐字就是 `['low','high','max']`。
+ * 官方内置配置（revision 43）逐字相同：`.*glm-5\.3.*` 行的
+ * `optionSpecs.reasoningLevel.values` 就是 `["low","high","max"]`——**没有** `disabled`。
  * 与 `./types.ts` 的 `GLM_CODING_EFFORTS`（线路级词汇表）内容相同，这里再写一遍是为了让
  * 「模型真实梯子」与「线路级词汇表」在代码上就是两件事：前者允许更窄。
  */
@@ -177,6 +188,12 @@ const GLM53_EFFORTS: readonly GlmReasoningEffort[] = ['low', 'high', 'max']
 
 /**
  * GLM-5.2 在 Coding Plan 下的真实梯子：**两档**，`high` / `max`。
+ *
+ * 官方内置配置（revision 43）逐字：`.*GLM-5\.2.*` 行的
+ * `optionSpecs.reasoningLevel.values` 是 `["disabled","high","max"]`——
+ * `disabled` 是**开关**不是档位（官方那条 map 的 disabled 分支只发
+ * `thinking.type: disabled`，不带 `output_config`），所以「档位」仍是两档，
+ * 而「可关」这件事由同行的 `thinkingDisableable` 表达。
  *
  * 来源：历史转录的 `GLM52_EFFORTS` —— 模型自己的页面列的是更宽的词汇
  * （`xhigh`/`medium`/`minimal`/`none`），但它同时写明套餐如何映射：`low`/`medium` → `high`，
@@ -233,7 +250,10 @@ const GLM_MODEL_FACTS: readonly GlmModelFacts[] = [
     name: 'GLM-5.3',
     regions: BOTH,
     reasoningEfforts: GLM53_EFFORTS,
-    // 官方深度思考说明逐字记着：GLM-5.3 / GLM-5.3-FLASH / GLM-4.7 把
+    // 恒开。逐字证据：官方内置配置（revision 43）`.*glm-5\.3.*` 行的
+    // reasoningLevel.values 是 ["low","high","max"]——**没有** "disabled"，
+    // 官方那条 Anthropic 面的 map 也没有 disabled 分支（恒发 type: enabled）。
+    // 官方深度思考说明另记着：GLM-5.3 / GLM-5.3-FLASH / GLM-4.7 把
     // thinking.type: "disabled" 当错误拒绝。
     thinkingDisableable: false,
     wire: 'anthropic',
@@ -264,7 +284,9 @@ const GLM_MODEL_FACTS: readonly GlmModelFacts[] = [
     regions: BOTH,
     // 两档，不是三档：见 GLM52_EFFORTS 的来源说明。
     reasoningEfforts: GLM52_EFFORTS,
-    // GLM-5.2 是仍接受关闭值的那一批之一（官方规则集的 values 里多一个 `disabled`）。
+    // GLM-5.2 接受关闭值：官方内置配置（revision 43）`.*GLM-5\.2.*` 行的
+    // reasoningLevel.values 逐字是 ["disabled","high","max"]，其中 disabled 那一支
+    // 官方 map 只发 {"thinking":{"type":"disabled"}}。
     thinkingDisableable: true,
     wire: 'anthropic',
     // 同 GLM-5.3：基础规则 false，Coding Plan 端点的站点规则打开成 true。
@@ -277,7 +299,15 @@ const GLM_MODEL_FACTS: readonly GlmModelFacts[] = [
     id: 'GLM-5-Turbo',
     name: 'GLM-5-Turbo',
     regions: BOTH,
-    // 开关型推理模型：它不收档位，所以梯子为空——两个 mapper 因此**不发**思考控制字段。
+    // 开关型推理模型：它不收档位，所以梯子为空。
+    // 逐字证据：官方内置配置（revision 43）`.*GLM-5-Turbo.*` 行的
+    // reasoningLevel.values 逐字是 ["disabled","enabled"]——只有开/关两值，没有档位；
+    // 官方那条 Anthropic 面的 map 也因此**不带** output_config。
+    //
+    // 「梯子为空 → 不发档位」对两个面都成立，但「不发任何思考控制字段」**只对 OpenAI 面成立**：
+    // - Anthropic 面：调用方显式要 none/disabled 时发 `{"thinking":{"type":"disabled"}}`
+    //   （仍然不带 output_config——没有档位可发）；未指定档位时不发任何思考字段。
+    // - OpenAI 面：行为未变——梯子为空，一个思考字段都不发。
     reasoningEfforts: [],
     thinkingDisableable: true,
     wire: 'anthropic',

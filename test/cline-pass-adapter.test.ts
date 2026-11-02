@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
-import { ClinePassAdapter, type ClinePassAdapterOptions } from '../src/host/cline-pass/adapter.ts'
+import { ClinePassAdapter, mergeTokenUsage, type ClinePassAdapterOptions } from '../src/host/cline-pass/adapter.ts'
 import { ClinePassAccountPool } from '../src/host/cline-pass/account-pool.ts'
 import { createClinePassStore } from '../src/host/cline-pass/store.ts'
 import { ClinePassModelSettingsStore, FileCredentialStore, type ClinePassCredentials } from '../src/host/cline-pass/token-store.ts'
@@ -466,5 +466,137 @@ describe('ClinePassAdapter image budget', () => {
     // The trim rewrites the request only; durable history keeps both images.
     expect((history[0]?.content[1] as { type?: string }).type).toBe('image')
     expect((history[2]?.content[1] as { type?: string }).type).toBe('image')
+  })
+})
+
+/**
+ * The empty-reply rule.
+ *
+ * A turn that ends with no content at all and no tool call is a gateway fluke,
+ * not an answer. The turn is replayed — at most THREE attempts for the round,
+ * 250 ms apart — and NOTHING of a failed attempt reaches the caller: the chunks
+ * are held until content proves itself, so a replay can neither leak an empty
+ * block nor repeat text the caller already has. The usage of every attempt is
+ * aggregated into the one usage the caller sees.
+ */
+describe('ClinePassAdapter empty reply', () => {
+  /** A completed turn with no content, no tool call and a normal stop. */
+  const EMPTY_SSE = [
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10}}',
+    'data: [DONE]',
+    '',
+  ].join('\n\n')
+
+  /** A completed turn that called a tool and said nothing else. */
+  const TOOL_SSE = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+    '',
+  ].join('\n\n')
+
+  async function drain(adapter: ClinePassAdapter, signal?: AbortSignal): Promise<unknown[]> {
+    const chunks: unknown[] = []
+    for await (const chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      ...(signal === undefined ? {} : { signal }),
+    } as never)) chunks.push(chunk)
+    return chunks
+  }
+
+  it('replays a turn that came back empty and delivers the answer once', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      const body = calls === 1 ? EMPTY_SSE : SSE_OK
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const chunks = await drain(adapter)
+
+    expect(calls).toBe(2)
+    // The answer arrives once: the failed attempt leaked no text and no block.
+    expect(chunks.filter((chunk) => (chunk as { type: string }).type === 'text-delta')
+      .map((chunk) => (chunk as { text: string }).text)).toEqual(['hello'])
+    expect(chunks.filter((chunk) => (chunk as { type: string }).type === 'block-start')).toHaveLength(1)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('aggregates the usage of every attempt into the one usage the caller sees', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      const body = calls === 1 ? EMPTY_SSE : SSE_OK
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const chunks = await drain(adapter)
+
+    const usage = chunks.filter((chunk) => (chunk as { type: string }).type === 'usage')
+    expect(usage).toHaveLength(1)
+    // The empty attempt spent 10 prompt tokens and the answer spent 10 more.
+    expect(usage[0]).toMatchObject({ usage: { inputTokens: 20, outputTokens: 2 } })
+  })
+
+  it('keeps cache writes in the usage aggregated across replayed attempts', () => {
+    expect(mergeTokenUsage(
+      { inputTokens: 10, outputTokens: 0, cacheReadTokens: 4, cacheWriteTokens: 7 },
+      { inputTokens: 12, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 5 },
+    )).toEqual({ inputTokens: 22, outputTokens: 2, cacheReadTokens: 7, cacheWriteTokens: 12 })
+  })
+
+  it('gives up after three empty turns and reports the empty response', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      return new Response(EMPTY_SSE, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const chunks = await drain(adapter)
+
+    expect(calls).toBe(3)
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'EMPTY_RESPONSE' } },
+    })
+  })
+
+  it('stops the replay when the caller cancels', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    const controller = new AbortController()
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      controller.abort()
+      return new Response(EMPTY_SSE, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    await expect(drain(adapter, controller.signal)).rejects.toMatchObject({ code: 'ABORTED' })
+    // The cancelled turn is not replayed.
+    expect(calls).toBe(1)
+  })
+
+  it('never replays a turn that made a tool call', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.update({ enabledModelIds: [MODEL] })
+    let calls = 0
+    const fetchFn = (async () => {
+      calls += 1
+      return new Response(TOOL_SSE, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const chunks = await drain(adapter)
+
+    expect(calls).toBe(1)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
   })
 })

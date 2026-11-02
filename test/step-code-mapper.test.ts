@@ -114,6 +114,9 @@ const CATALOG_ENTRY: StepCodeModelEntry = {
   supportsImages: true,
   defaultContextWindow: 256_000,
   defaultMaxTokens: 32_768,
+  // 目录**真实**声明的输出上限。它与上面那个窗口派生的兜底是**两个数**：
+  // 上 wire 的只有这一个，窗口那个只给设置面与 host 元数据看。
+  maxOutputTokens: 8_192,
   description: null,
 }
 
@@ -131,10 +134,28 @@ describe('Step Code 请求体：输出上限与流式标志', () => {
     expect(payload).not.toHaveProperty('max_completion_tokens')
   })
 
-  it('调用方不给输出上限时，取这条线的兜底规则：没有上报输出上限就等于输入窗口', () => {
-    // 端点不报 max-output，所以线路的规则是「等于上下文窗口」，不是一个独立字面量。
-    expect(buildChatRequest(options()).max_tokens).toBe(defaultMaxTokens())
+  it('★ 没有 cap 时请求体**不带** max_tokens：上下文窗口是 host 元数据，不是 wire 上限', () => {
+    // 端点不报输出上限（官方客户端在 Step 端点也不发这个字段），所以「没有 cap」
+    // 是这条线的常态。旧实现把窗口（等于上下文窗口，256000）当 wire 默认发出去，
+    // 那是拿一个自己编的数去限上游：模型真实输出上限更小时，上游会直接拒这一请求。
+    const payload = buildChatRequest(options())
+
+    expect(payload).not.toHaveProperty('max_tokens')
+    expect(payload).not.toHaveProperty('max_completion_tokens')
+    // 窗口兜底本身仍然存在（设置面与 host 元数据要用），它只是不再上 wire。
     expect(defaultMaxTokens()).toBe(MODEL_DEFAULTS.contextWindow)
+  })
+
+  it('实时目录报了真实 cap 时发那个 cap（不是窗口）', () => {
+    const payload = buildChatRequest(options(), undefined, { maxOutputTokens: 8_192 })
+
+    expect(payload.max_tokens).toBe(8_192)
+  })
+
+  it('调用方显式要的上限胜过目录的 cap', () => {
+    const payload = buildChatRequest(options({ maxTokens: 1_024 }), undefined, { maxOutputTokens: 8_192 })
+
+    expect(payload.max_tokens).toBe(1_024)
   })
 
   it('always stream:true 且 stream_options.include_usage:true —— 缓存读入量只出现在终止帧上', () => {
@@ -260,12 +281,20 @@ describe('Step Code 请求体：思考档位只走模型真实梯子', () => {
 })
 
 describe('stepCodeRequestOptionsFor：目录事实逐字段复制，能力位留给调用方', () => {
-  it('已知模型：images、输出上限、档位梯子都取自那一行目录', () => {
+  it('已知模型：images、真实 cap、档位梯子都取自那一行目录', () => {
     expect(stepCodeRequestOptionsFor(CATALOG_ENTRY)).toEqual({
       supportsImages: true,
-      defaultMaxTokens: 32_768,
+      maxOutputTokens: 8_192,
       reasoningEfforts: ['low', 'high'],
     })
+  })
+
+  it('★ 目录没声明真实 cap 时，请求面就**没有**上限：窗口派生的兜底不上 wire', () => {
+    const withoutCap = stepCodeRequestOptionsFor({ ...CATALOG_ENTRY, maxOutputTokens: undefined })
+
+    expect(Object.keys(withoutCap)).not.toContain('maxOutputTokens')
+    // 窗口派生的那个数仍然在目录行上（设置面与 host 元数据要用），只是不在这儿。
+    expect(CATALOG_ENTRY.defaultMaxTokens).toBe(32_768)
   })
 
   it('★ cacheRequestParams 不来自目录：它是每部署的能力位，缺省时连键都不出现', () => {
@@ -274,21 +303,21 @@ describe('stepCodeRequestOptionsFor：目录事实逐字段复制，能力位留
     expect(Object.keys(options_)).not.toContain('cacheRequestParams')
   })
 
-  it('调用方只能覆盖它拥有的两件事：缓存能力位与输出上限', () => {
-    expect(stepCodeRequestOptionsFor(CATALOG_ENTRY, { cacheRequestParams: true, defaultMaxTokens: 64 }))
+  it('调用方只能覆盖它拥有的两件事：缓存能力位与真实 cap', () => {
+    expect(stepCodeRequestOptionsFor(CATALOG_ENTRY, { cacheRequestParams: true, maxOutputTokens: 64 }))
       .toEqual({
         supportsImages: true,
-        defaultMaxTokens: 64,
+        maxOutputTokens: 64,
         reasoningEfforts: ['low', 'high'],
         cacheRequestParams: true,
       })
   })
 
-  it('未知模型落成未声明行：images 关、梯子空、输出上限取线路兜底', () => {
-    // 「从不下发端点没声明的字段」因此是默认路径而不是特例。
+  it('未知模型落成未声明行：images 关、梯子空、**没有**输出上限', () => {
+    // 「从不下发端点没声明的字段」因此是默认路径而不是特例：
+    // 未知模型没有声明过输出上限，就不给它一个编出来的上限。
     expect(stepCodeRequestOptionsFor(undefined)).toEqual({
       supportsImages: false,
-      defaultMaxTokens: defaultMaxTokens(),
       reasoningEfforts: [],
     })
   })

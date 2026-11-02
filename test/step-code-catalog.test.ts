@@ -188,6 +188,30 @@ describe('能力回落：端点说了算，缺了就走兜底', () => {
     expect(MODEL_DEFAULTS.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW)
   })
 
+  it('★ 真实输出上限与上下文窗口是**两个数**：端点没报上限就没有 cap，不拿窗口顶替', () => {
+    // 窗口是「能读多少」，不是「能写多少」。端点不报输出上限时（常态），
+    // 目录里就**没有** cap，于是 wire 上也不发 max_tokens ——
+    // 拿窗口去限上游，是用一个自己编的数去拒绝上游模型的真实上限。
+    const [withoutCap] = parseStepCodeModelListing({ data: [{ id: 'm-1', max_input_tokens: 128000 }] })
+    expect(withoutCap?.maxOutputTokens).toBeUndefined()
+    // 窗口派生的兜底仍在（设置面与 host 元数据要用），但它不是 cap。
+    expect(withoutCap?.defaultMaxTokens).toBe(128000)
+
+    const [withCap] = parseStepCodeModelListing({
+      data: [{ id: 'm-1', max_input_tokens: 128000, max_output_tokens: 32768 }],
+    })
+    expect(withCap?.maxOutputTokens).toBe(32768)
+    // 声明了上限也不改窗口：两个字段各说各的。
+    expect(withCap?.defaultContextWindow).toBe(128000)
+  })
+
+  it('输出上限字段不是正数时当作没报（不把 0 或负数当上限发出去）', () => {
+    const [zero] = parseStepCodeModelListing({ data: [{ id: 'm-1', max_output_tokens: 0 }] })
+    expect(zero?.maxOutputTokens).toBeUndefined()
+    const [negative] = parseStepCodeModelListing({ data: [{ id: 'm-2', max_output_tokens: -1 }] })
+    expect(negative?.maxOutputTokens).toBeUndefined()
+  })
+
   it('enable_reason=false 时即使给了档位列表也不产出档位：端点自述不推理比残留列表权威', () => {
     const [entry] = parseStepCodeModelListing({
       data: [{

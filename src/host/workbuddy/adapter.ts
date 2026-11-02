@@ -53,6 +53,7 @@ import {
   workBuddyHeaders,
 } from './client.ts'
 import {
+  MAX_REQUEST_IMAGE_BYTES,
   assertMessagesStreamComplete,
   assertStreamComplete,
   buildChatRequest,
@@ -506,8 +507,17 @@ export class WorkBuddyAdapter extends LlmAdapter {
     activity?: StreamActivity,
   ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const requestOptions = offloadOldestRequestImages(normalizeGenerateOptions(options))
-    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    // The images are resolved BEFORE the budget runs, and the SAME resolution is
+    // what the budget measures: a request is bounded by the bytes that go on
+    // the wire, not by the bytes that were stored. Measuring the stored size
+    // reported a 2 MB screenshot as 2.8 MB of base64 and dropped it, although
+    // the harness scales it to a few kilobytes that fit the budget easily --
+    // and an image that could not be read carries no bytes at all, so spending
+    // the budget on it only replaced one placeholder with another.
+    const normalizedOptions = normalizeGenerateOptions(options)
+    const images = await resolveRequestImages(normalizedOptions, this.options.attachments, signal)
+    // The budget is this route's own 1.5 MB, named rather than inherited.
+    const requestOptions = offloadOldestRequestImages(normalizedOptions, MAX_REQUEST_IMAGE_BYTES, images)
     const settings = await this.settings()
     const initial = await this.credentials(settings)
     const catalog = initial === null ? FALLBACK_MODELS : await this.catalog(initial)

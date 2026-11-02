@@ -850,10 +850,13 @@ export function classifyGlmOpenAiFailure(
 
   // 裸 429（正文没给业务码）判**不可重试**。
   //
-  // 先验是 5:2：冻结 `ERROR_CODE` 表里 429 共 7 条，只有 2 条可重试
-  // （`RATE_LIMITED` 1302 / `OVERLOADED` 1305），其余 5 条全是额度类
-  // （`NO_BALANCE` / `USAGE_LIMIT` / `PLAN_EXPIRED` / `PLAN_LIMIT` / `MODEL_NOT_IN_PLAN`）。
-  // 表的注释也逐字写着「`USAGE_LIMIT` / `PLAN_LIMIT` 带重置时刻，正确处置是等窗口重置
+  // 先验：这一族里**可重试的只有限流与过载那几条**（`RATE_LIMITED` / `OVERLOADED`，
+  // 以及后补的 `RATE_LIMIT_TRANSIENT` / `OVERLOADED_BUSINESS`），其余全是额度类
+  // 或终局的限流类（`NO_BALANCE` / `USAGE_LIMIT` / `PLAN_EXPIRED` / `PLAN_LIMIT` /
+  // `MODEL_NOT_IN_PLAN` / `RATE_LIMIT_BLOCKED` / `FAIR_USE_LIMITED` / `USAGE_LIMIT_5H` …）。
+  // 这里刻意**不写条数**：`ERROR_CODE` 表会随官方错误码表增补，静态计数一改就又是一次
+  // 过时注释——要复审请读表本身，不要读计数。
+  // 表的注释逐字写着「`USAGE_LIMIT` / `PLAN_LIMIT` 带重置时刻，正确处置是等窗口重置
   // 或提示用户，立即重试只会在已用尽的窗口上继续失败」。
   //
   // 所以缺少业务码时，默认应当是**不可重试**：把真实原因报给用户，而不是赌它是限流
@@ -864,6 +867,12 @@ export function classifyGlmOpenAiFailure(
   // 界面上「N 秒后再试」比「未知错误」有用得多。它不改变本次的不可重试判定。
   //
   // **与 Anthropic 面（`mapper-anthropic.ts`）一致，改一处必须同时改另一处。**
+  //
+  // **本面当前不可达**：随包目录里四个模型（`GLM-5.3` / `GLM-5.3-Flash` /
+  // `GLM-5.2` / `GLM-5-Turbo`）的 `wire` 全是 `'anthropic'`，未知模型按 D3 拒绝而不猜协议，
+  // 所以没有一行请求走这个面。上一轮官方对齐（effort 出口改 `output_config`、补业务码）
+  // **只改了 Anthropic 面**：本文件的字段名与判定逻辑一行未动，本轮只把上面那句会随表
+  // 增补而过时的静态计数换成不依赖条数的说法——**未随本轮实测，也未改变任何行为**。
   if (status === 429) {
     const after = headers ? retryAfterMs(headers) : undefined
     return new LlmError(

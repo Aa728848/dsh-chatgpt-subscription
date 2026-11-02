@@ -26,20 +26,38 @@
  * 只排上游那三档会踩本仓库记录过的 bug：`minimal` 属于「未识别」，未识别一律落在中档，
  * 于是 `minimal` 被发成 `high`——模型想得比用户要求的长得多，**更慢而且多计费**。
  *
- * 三、本文件**不伪造模型名**
+ * 三、effort 的**出口**是 `output_config.effort`，不是顶层 `reasoning_effort`
+ *
+ * 逐字证据：官方开源客户端 `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`
+ * （`modelConfigRules.modelApiRules` 里 `apiTypeMatch: "anthropic-messages"` 的逐模型 map）
+ * 写的是 `output_config: { effort: reasoningLevel }`，而**全仓 `reasoning_effort` 零命中**
+ * ——顶层那个字段只出现在 OpenAI 面的 map 里（那一条由本线路的 OpenAI mapper 单独处理）。
+ * 本文件的 Anthropic 面照此改形状：`thinking.type` 说开/关，`output_config.effort` 说深度。
+ * 见 {@link glmThinkingControl}。
+ *
+ * 四、**关思考**是逐模型事实，不是本文件的全局假设
+ *
+ * 同一份官方规则集的 `reasoningLevel.values` 逐模型给：
+ * `.*glm-5\.3.*`（GLM-5.3 / GLM-5.3-Flash）是 `low/high/max`——**没有** `disabled`；
+ * `.*GLM-5\.2.*` 是 `disabled/high/max`；`.*GLM-5-Turbo.*` 是 `disabled/enabled`
+ * （它没有档位梯子，所以官方那条 map **不带** `output_config`）。
+ * 所以「恒开」与「可关」由目录的 `thinkingDisableable` 声明（见 `./model-catalog.ts`），
+ * 本文件只把它翻译成请求体，不在这里猜。
+ *
+ * 五、本文件**不伪造模型名**
  *
  * `GenerateOptions.model` 是调用方（模型目录）给的 id，逐字下发。本线路两区模型 id
  * 不一致（计划 R8），任何按前缀猜测或「顺手换成官方名」的改写都会把请求打到上游
  * 不认识的 id 上（`ERROR_CODE.UNKNOWN_MODEL` = 1211）。
  *
- * 四、分块语义照兄弟线路的 Anthropic 面，不另发明
+ * 六、分块语义照兄弟线路的 Anthropic 面，不另发明
  *
  * 思考 / 文本 / 工具调用是三个独立的 DSH 块：思考文本走 `reasoning-delta`，正文走
  * `text-delta`，工具参数逐字拼接后交给 `tool-call` 块的 `arguments` 字符串
  * （DSH 协议义务：参数保持模型产出的原始 JSON 串）。
  * 参考实现是 `../minimax-code/mapper.ts`（同为 Anthropic 面）与 `../claude/mapper.ts`。
  *
- * 五、思考块的**回放**本文件不做
+ * 七、思考块的**回放**本文件不做
  *
  * Claude / minimax 两条线会把签名的 thinking 块原样存进 replayState 再回传。本线路
  * 没有这个需求的证据：GLM 的 Anthropic 兼容面是否要求回放签名块，没有任何实测样本。
@@ -47,16 +65,26 @@
  * 本文件沿用那一条并在 {@link anthropicAssistantContent} 注明；**未验证**：改成
  * 「回放」是否会被本面接受（需要一条真实多轮会话样本）。
  *
+ * 八、`system` 走**块数组**，并在两个位置下缓存断点
+ *
+ * Anthropic Messages 面的 `system` 既可以是字符串，也可以是 `{type:'text'}` 块数组。
+ * 官方客户端走块数组（AI SDK 的 Anthropic 转换：每条 system 消息一块），
+ * 所以本线路也发块数组——顺带让**缓存断点**能落在 system 上：system 末块与
+ * 最新一条非 system 消息的可缓存末块各带一个 `cache_control: {type:'ephemeral'}`。
+ * 官方客户端的缓存断点只落在最新一条非 system 消息上
+ * （`zai-org/ZCode` 的 `core/src/runtime/helpers/provider-request-messages.ts`
+ * 的 `finalizeLatestNonSystemMessageCacheControl`，全仓唯一一处 `type:'ephemeral'`），
+ * 本文件**多给 system 末块一个**：长 system 提示词正是前缀缓存最值钱的一段，
+ * 而 Anthropic 允许一次请求最多 4 个断点。见 {@link glmAnthropicSystemBlocks}。
+ *
  * 未验证清单（本文件内逐条标注）：
  *
- * 1. `reasoning_effort` 出现在 Anthropic 面上。等级 A 的证据只覆盖 OpenAI 面的
- *    `/api/coding/paas/v4`；本面是同一平台的兼容网关，但它是否读顶层
- *    `reasoning_effort` 没有实测样本。用 `buildGlmAnthropicRequest` 的
- *    `sendReasoningEffort` 开关可整段关掉。
- * 2. `anthropic-version` 头网关是否强制要求。缺一条缺头的 4xx 样本。
- * 3. 网关在 Anthropic 面上发思考增量的词汇。本文件同时认 `thinking_delta` 与
+ * 1. `anthropic-version` 头网关是否强制要求。缺一条缺头的 4xx 样本。
+ * 2. 网关在 Anthropic 面上发思考增量的词汇。本文件同时认 `thinking_delta` 与
  *    `reasoning_content`，两种都收。
- * 4. 历史里 reasoning 块不回放是否被本面接受（见第五节）。
+ * 3. 历史里 reasoning 块不回放是否被本面接受（见第七节）。
+ * 4. `cache_control` 在本线路上是否真的命中缓存、命中比例多少。本轮无实机账号
+ *    （计划 D9），只按 Anthropic 公开协议与官方客户端的用法发形状。
  */
 import {
   LlmError,
@@ -110,7 +138,7 @@ export const GLM_ANTHROPIC_VERSION = '2023-06-01'
 export const UNSUPPORTED_OPTION_CODE = 'UNSUPPORTED_OPTION'
 
 /** Anthropic 内容块在线上是普通 JSON 对象。 */
-type AnthropicBlock = Record<string, unknown>
+export type AnthropicBlock = Record<string, unknown>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -233,35 +261,60 @@ export interface GlmThinkingControl {
 }
 
 /**
- * 请求体里的思考控制字段。
+ * 请求体里的思考控制字段：**开/关**由 `thinking.type` 说，**深度**由 `output_config.effort` 说。
  *
- * `thinking: { type: 'enabled' }` 是**恒常发出**的一半：历史同族实现逐字记过
- * 「`thinking` 的默认是 enabled，GLM-5.3 / GLM-5.3-FLASH / GLM-4.7 把
- * `thinking.type: "disabled"` 当错误拒绝」（`7e40fce` 的 `src/host/zhipu/mapper.ts`
- * 头注释），所以本线路任何模型都不发关闭值。
+ * 形状逐字照官方开源客户端 `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`
+ * （`modelConfigRules.modelApiRules` 里 `apiTypeMatch: "anthropic-messages"` 的逐模型 map）：
  *
- * `reasoning_effort` 是选深度的一半，取 {@link glmEffortForLadder} 的收敛结果。
+ * - `.*glm-5\.3.*`（GLM-5.3 / GLM-5.3-Flash）：
+ *   `{"thinking":{"type":"enabled"},"output_config":{"effort": reasoningLevel}}`
+ *   ——这一族**没有** `disabled` 分支，所以官方也没给 `disabled` 这个档位值。
+ * - `.*GLM-5\.2.*`：`reasoningLevel == "disabled" ? {"thinking":{"type":"disabled"}} :
+ *   {"thinking":{"type":"enabled"},"output_config":{"effort": reasoningLevel}}`
+ * - `.*GLM-5-Turbo.*`：`{"thinking":{"type": reasoningLevel == "enabled" ? "enabled" : "disabled"}}`
+ *   ——它没有档位梯子，所以官方那条 map **不带** `output_config`。
  *
- * **未验证**：`reasoning_effort` 落在 Anthropic 面上。等级 A 的证据（计划 `3.3、
- * `9ad8a53` 的 `CODING_EFFORTS`）只覆盖 OpenAI 面 `/api/coding/paas/v4`；本面是同一个
- * 平台的兼容网关，但它是否读顶层 `reasoning_effort` 没有实测样本，缺一次真实请求。
- * 之所以仍然默认发：另一个候选（Anthropic 原生的 `thinking.budget_tokens`）表达不了
- * 三档梯子，而 `sendReasoningEffort: false` 是一个出口而不是修复。
+ * 顶层 `reasoning_effort` **不发**：官方全仓 `reasoning_effort` 零命中，
+ * 顶层那个字段只出现在 OpenAI 面的 map 里。
+ *
+ * 「调用方要不要关思考」用 DSH 的档位词汇 `none` 表达（与 `../qoder/mapper.ts` 的
+ * `resolveQoderThinking` 同一词汇），并且**只在该模型声明可关时**才生效：
+ * 声明可关 = 目录的 `thinkingDisableable`（逐模型事实，见 `./model-catalog.ts`）。
+ * 不声明可关的模型收到 `none` 时仍按梯子收敛到最低档（GLM-5.3 家族会落 `low`），
+ * 因为官方规则集里那一族的 `values` 就没有 `disabled`。
  *
  * @param ladder - 模型真实梯子。
- * @param requested - 调用方给的档位。
- * @param sendReasoningEffort - 是否把收敛后的档位发成顶层字段，默认 true。
+ * @param requested - 调用方给的档位（`none` 表示不要思考）。
+ * @param sendReasoningEffort - 是否把收敛后的档位发进 `output_config`，默认 true。
+ * @param thinkingDisableable - 该模型是否接受关闭思考，默认 false（不声明就不发关闭值）。
  */
 export function glmThinkingControl(
   ladder: readonly string[],
   requested: string | undefined | null,
   sendReasoningEffort: boolean = true,
+  thinkingDisableable: boolean = false,
 ): GlmThinkingControl {
+  // 关思考：只发 `thinking.type: disabled`，**不带** `output_config`——
+  // 官方 GLM-5.2 那条 map 的 disabled 分支里没有 output_config。
+  if (thinkingDisableable && isDisabledEffort(requested)) {
+    return { fields: { thinking: { type: 'disabled' } }, thinking: false }
+  }
   if (ladder.length === 0) return { fields: {}, thinking: false }
   const effort = glmEffortForLadder(ladder, requested)
   const fields: Record<string, unknown> = { thinking: { type: 'enabled' } }
-  if (effort !== null && sendReasoningEffort) fields.reasoning_effort = effort
+  if (effort !== null && sendReasoningEffort) fields.output_config = { effort }
   return { fields, thinking: true }
+}
+
+/**
+ * 调用方给的档位是不是「不要思考」。
+ *
+ * DSH 的规范写法是 `none`（见 `../qoder/mapper.ts`）；`disabled` 也认，
+ * 因为官方规则集的 `reasoningLevel` 词汇里用的就是它。
+ */
+function isDisabledEffort(requested: string | undefined | null): boolean {
+  const value = (requested ?? '').trim().toLowerCase()
+  return value === 'none' || value === 'disabled'
 }
 
 // ---------------------------------------------------------------------------
@@ -438,12 +491,65 @@ function mergeAnthropicMessages(
 }
 
 /**
- * 收集全部 system 贡献为开头的一条 system 文本。
+ * Anthropic 的**缓存断点**标记。
  *
- * `options.system` 在前、历史里的 system 消息按序在后，是一个与轮次无关的稳定折叠：
- * 提示词是服务端要缓存的前缀，任何一处每轮变化都会让整个缓存前缀失效。
+ * 值逐字取 Anthropic 公开协议（`cache_control: {type: "ephemeral"}`），
+ * 也与官方客户端用的同一个值（`zai-org/ZCode` 的
+ * `provider-request-messages.ts` 里 `finalizeLatestNonSystemMessageCacheControl`）。
  */
-function leadingSystemText(options: GenerateOptions): string | undefined {
+const EPHEMERAL_CACHE_CONTROL: { readonly type: 'ephemeral' } = Object.freeze({ type: 'ephemeral' })
+
+/**
+ * 一个块**能不能**带缓存断点。
+ *
+ * 空文本块不能：它不构成可缓存的内容，给它挂断点是白占 Anthropic 的 4 个断点额度之一。
+ * 官方客户端的空 system 块的处理也是「不发空块」（AI SDK 的 Anthropic 转换里
+ * 「do not emit an empty text block for it」）。
+ */
+function isCacheableBlock(block: AnthropicBlock): boolean {
+  if (block.type === 'text') return typeof block.text === 'string' && block.text !== ''
+  return block.type === 'image' || block.type === 'tool_use' || block.type === 'tool_result'
+}
+
+/**
+ * 给最后一个可缓存块挂上缓存断点；一个可缓存块都没有就**不动**。
+ *
+ * 「最后一个」而不是「最后一个块」：一条消息的末尾可能是不可缓存的空块，
+ * 断点要落在它前面那个真正有内容的块上，否则这一轮的前缀缓存等于没开。
+ *
+ * 导出是为了让这条边界能被直接断言（空块不带断点、不可缓存块不带断点）。
+ */
+export function glmAnthropicMarkCacheBreakpoint(content: AnthropicBlock[]): AnthropicBlock[] {
+  for (let index = content.length - 1; index >= 0; index -= 1) {
+    const block = content[index]!
+    if (!isCacheableBlock(block)) continue
+    const marked = [...content]
+    marked[index] = { ...block, cache_control: EPHEMERAL_CACHE_CONTROL }
+    return marked
+  }
+  return content
+}
+
+/**
+ * 全部 system 贡献 → 开头的一段 `system` **块数组**。
+ *
+ * 形状对齐官方客户端（AI SDK 的 Anthropic 转换：每条 system 消息一块文本块），
+ * 而不是把全部 system 拼成一条字符串——块数组才能让缓存断点落在 system 上。
+ *
+ * 折叠顺序与内容都不变：`options.system` 在前、历史里的 system 消息按序在后，
+ * 是一个与轮次无关的稳定折叠（提示词是服务端要缓存的前缀，任何一处每轮变化
+ * 都会让整个缓存前缀失效）。
+ *
+ * **只换形状，不换内容**：块的切分点就是旧实现里 `\n\n` 的位置——分隔符留在前一块的
+ * 末尾，所以把各块文字拼起来与旧的「拼成一条」**逐字相同**。改动的是请求体的形状
+ * （字符串 → 块数组），不是模型看到的提示词。
+ *
+ * 空贡献**不产块**：空文本块既不承载内容也不该占断点。
+ *
+ * 末块带 `cache_control: {type:'ephemeral'}`：长 system 提示词是前缀缓存里最值钱
+ * 的一段（每次都要重发），而 Anthropic 允许一次请求最多 4 个断点。
+ */
+export function glmAnthropicSystemBlocks(options: GenerateOptions): AnthropicBlock[] {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
   for (const message of options.messages) {
@@ -451,7 +557,13 @@ function leadingSystemText(options: GenerateOptions): string | undefined {
     const text = textOf(message.content)
     if (text !== '') parts.push(text)
   }
-  return parts.length === 0 ? undefined : parts.join('\n\n')
+  if (parts.length === 0) return []
+  const blocks: AnthropicBlock[] = parts.map((text, index) => ({
+    type: 'text',
+    // 分隔符留在前一块末尾：拼回来的文字与旧的单字符串逐字相同。
+    text: index === parts.length - 1 ? text : text + '\n\n',
+  }))
+  return glmAnthropicMarkCacheBreakpoint(blocks)
 }
 
 /** 只有真实工具结果消息才带 `source.kind === 'tool'`（手工拼的请求可能一条来源都没有）。 */
@@ -496,8 +608,16 @@ export interface GlmAnthropicRequestOptions {
   ladder?: readonly string[]
   /** 这次请求读到的图片（`resolveRequestImages` 的产物）。 */
   images?: ResolvedRequestImages
-  /** 是否把收敛后的档位发成顶层 `reasoning_effort`，默认 true。见 {@link glmThinkingControl}。 */
+  /** 是否把收敛后的档位发进 `output_config.effort`，默认 true。见 {@link glmThinkingControl}。 */
   sendReasoningEffort?: boolean
+  /**
+   * 该模型是否接受关闭思考，默认 false。
+   *
+   * 取目录的 `thinkingDisableable`（逐模型事实，见 `./model-catalog.ts`）：
+   * 官方规则集里 GLM-5.2 / GLM-5-Turbo 的 `reasoningLevel.values` 含 `disabled`，
+   * GLM-5.3 家族不含。**不声明就不发关闭值**——发一个模型不认的值会被上游当错误拒绝。
+   */
+  thinkingDisableable?: boolean
   /** 调用方不指定输出上限时用的值，默认 `./types.ts` 的 `DEFAULT_MAX_TOKENS`。 */
   defaultMaxTokens?: number
 }
@@ -524,11 +644,15 @@ export function buildGlmAnthropicRequest(
       ? null
       : String(options.reasoningEffort),
     request.sendReasoningEffort ?? true,
+    request.thinkingDisableable ?? false,
   )
 
   // 思考开启时 temperature 与之互斥（Anthropic 公开契约里 thinking 开启的请求不接受
   // temperature）。这里选择**报错**而不是丢掉它：丢掉之后用户拿到的是「按默认值跑」的
   // 回合，而请求本身完全看不出少了什么。
+  //
+  // 关思考（`thinking.type: disabled`）时这个互斥不成立——Anthropic 只在思考**开启**时
+  // 排斥 temperature，所以 `control.thinking` 为 false 时 temperature 照常下发。
   if (control.thinking && options.temperature !== undefined) {
     throw unsupported('模型思考开启时不能同时指定 temperature（thinking 与 temperature 在本协议里互斥）。')
   }
@@ -549,8 +673,21 @@ export function buildGlmAnthropicRequest(
     entries.push({ role: 'assistant', content: anthropicAssistantContent(message) })
   }
 
-  const system = leadingSystemText(options)
+  const system = glmAnthropicSystemBlocks(options)
   const maxTokens = options.maxTokens ?? request.defaultMaxTokens ?? DEFAULT_MAX_TOKENS
+
+  // 最新一条非 system 消息挂缓存断点：这一轮请求的末尾就是前缀缓存要覆盖到的位置。
+  // 官方客户端的断点也只落在这一条上（`finalizeLatestNonSystemMessageCacheControl`：
+  // 先清掉其它消息上的断点，再把断点挪到最后一条非 system 消息）。
+  const merged = mergeAnthropicMessages(entries)
+  const lastMessageIndex = merged.length - 1
+  const messages = lastMessageIndex < 0
+    ? merged
+    : merged.map((message, index) =>
+        index === lastMessageIndex
+          ? { ...message, content: glmAnthropicMarkCacheBreakpoint(message.content) }
+          : message,
+      )
 
   return {
     // 模型 id 逐字下发：本线路两区 id 不一致（计划 R8），映射层没有资格替调用方换一个。
@@ -559,8 +696,8 @@ export function buildGlmAnthropicRequest(
     // 必须为 true。适配器把每个响应体当 SSE 读，不带这个字段端点回的是一次性 JSON，
     // 那份响应没有 data: 行、没有 message_stop、没有 stop_reason。
     stream: true,
-    messages: mergeAnthropicMessages(entries),
-    ...(system === undefined ? {} : { system }),
+    messages,
+    ...(system.length === 0 ? {} : { system }),
     ...(tools.length > 0
       ? {
           tools: tools.map((tool) => ({
@@ -1032,10 +1169,15 @@ export interface GlmUpstreamErrorVerdict {
   /**
    * 这一类失败值不值得重试。
    *
-   * 判据来自 `./types.ts` 的 `ERROR_CODE` 注释：可重试的只有 `RATE_LIMITED`（退避后重试，
-   * 号池可换账号）与 `OVERLOADED`（瞬时过载）；其余全部不可重试——重试一次确定的失败
+   * 判据来自 `./types.ts` 的 `ERROR_CODE` 注释与官方客户端的业务码表
+   * （`zai-org/ZCode` 的 `failure-provider-business-codes.ts`）：官方把 1303 / 1312 /
+   * 1305 / 1302 与两条 500 恢复类判成可恢复，其余全部不可重试——重试一次确定的失败
    * 只会把它拖成多次，并在额度类错误上多烧一次额度。
    * `USAGE_LIMIT` / `PLAN_LIMIT` 带重置时刻，正确处置是等窗口重置而不是立刻重试。
+   *
+   * **这个字段与 `llmCode` 必须同时成立**：宿主按 `LlmError.code` 判可重试
+   * （重试集合见 `./adapter.ts`），所以不可重试的一律落在 `QUOTA` / `PROVIDER_ERROR` /
+   * `AUTH` / `INVALID_ARGS` / `NOT_FOUND` 这些**不在**重试集合里的码上。
    */
   retryable: boolean
   /** 正文给出的业务码；没有则是 null。 */
@@ -1060,42 +1202,65 @@ function businessCodeOf(body: unknown): number | null {
   return null
 }
 
-/** 业务码 → 重试判读。取值逐条来自 `./types.ts` 的 `ERROR_CODE`（实测转录，等级 A）。 */
+/** 业务码 → 重试判读。取值逐条来自 `./types.ts` 的 `ERROR_CODE`（官方错误码表 + 官方客户端业务码表，等级 A）。 */
 const VERDICT_BY_CODE: ReadonlyMap<number, { llmCode: string; retryable: boolean; disposition: string }> = new Map([
-  // 401 三条：处置是重新登录或提前刷新业务 JWT，重试同一个请求没有意义。
+  // 401 四条：处置是重新登录或提前刷新业务 JWT，重试同一个请求没有意义。
   [ERROR_CODE.AUTH_MISSING, { llmCode: 'AUTH', retryable: false, disposition: '凭据没有出现在请求头里：检查请求头构造或凭据存储。' }],
   [ERROR_CODE.AUTH_INVALID, { llmCode: 'AUTH', retryable: false, disposition: '凭据无效：重新登录本线路。' }],
   [ERROR_CODE.AUTH_EXPIRED, { llmCode: 'AUTH', retryable: false, disposition: '凭据已过期：业务 JWT 可提前 120 秒自取，access_token 只能重新登录。' }],
+  [ERROR_CODE.TWO_FACTOR_REQUIRED, { llmCode: 'AUTH', retryable: false, disposition: '这把 Key 需要二次验证：换一把已过二验的 Key，或联系管理员。' }],
   // 429 里的额度类：立即重试只会继续失败并多烧一次额度。
   [ERROR_CODE.NO_BALANCE, { llmCode: 'QUOTA', retryable: false, disposition: '没有余额也没有可用资源包。' }],
   [ERROR_CODE.USAGE_LIMIT, { llmCode: 'QUOTA', retryable: false, disposition: '具名用量窗口已用尽：等窗口重置（正文带重置时刻）。' }],
   [ERROR_CODE.PLAN_LIMIT, { llmCode: 'QUOTA', retryable: false, disposition: '周度或月度额度已用尽：等窗口重置。' }],
+  [ERROR_CODE.USAGE_LIMIT_5H, { llmCode: 'QUOTA', retryable: false, disposition: '近 5 小时用量上限：等窗口重置，或充值后继续额外用量。' }],
+  [ERROR_CODE.USAGE_LIMIT_7D, { llmCode: 'QUOTA', retryable: false, disposition: '近 7 天用量上限：等窗口重置，或充值后继续额外用量。' }],
+  [ERROR_CODE.USAGE_LIMIT_5H_SPEND_LIMIT, { llmCode: 'QUOTA', retryable: false, disposition: '近 5 小时用量上限且月度消费上限不允许额外用量：等窗口重置或调整消费上限。' }],
+  [ERROR_CODE.USAGE_LIMIT_7D_SPEND_LIMIT, { llmCode: 'QUOTA', retryable: false, disposition: '近 7 天用量上限且月度消费上限不允许额外用量：等窗口重置或调整消费上限。' }],
+  [ERROR_CODE.EXTRA_USAGE_UNAVAILABLE_5H, { llmCode: 'QUOTA', retryable: false, disposition: '近 5 小时额外用量不可用（月度消费上限）：等窗口重置或调整消费上限。' }],
+  [ERROR_CODE.EXTRA_USAGE_UNAVAILABLE_7D, { llmCode: 'QUOTA', retryable: false, disposition: '近 7 天额外用量不可用（月度消费上限）：等窗口重置或调整消费上限。' }],
+  // 终局的限流类：官方客户端判它们 retryable=false。落 QUOTA 而不是 RATE_LIMIT——
+  // RATE_LIMIT 在本线路的重试集合里（./adapter.ts），落它就会被重试策略放大，
+  // 于是「确定会再失败」的一次被拖成多次。
+  [ERROR_CODE.RATE_LIMIT_BLOCKED, { llmCode: 'QUOTA', retryable: false, disposition: '限流类终局拒绝（官方判不可重试）：等一段时间或换账号再试。' }],
+  [ERROR_CODE.FAIR_USE_LIMITED, { llmCode: 'QUOTA', retryable: false, disposition: '触发了公平使用策略的频率限制：按官方说明需提交申请才能恢复访问。' }],
   [ERROR_CODE.PLAN_EXPIRED, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: 'Coding Plan 套餐已失效：续费后才能继续。' }],
   [ERROR_CODE.MODEL_NOT_IN_PLAN, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: '当前套餐不包含这个模型：在模型目录里关掉它。' }],
+  [ERROR_CODE.ENTERPRISE_PLAN_EXPIRED, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: '企业套餐已过期：联系企业管理员续期。' }],
+  [ERROR_CODE.KEY_RESTRICTED_TO_ENTERPRISE, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: '这把 Key 只限企业套餐场景：换一把对应的 Key。' }],
   // 400 / 403：请求本身错了，重试是同一次错误再来一遍。
   [ERROR_CODE.UNKNOWN_MODEL, { llmCode: 'NOT_FOUND', retryable: false, disposition: '未知模型 id：本地目录不该发出这种 id，出现即目录错了。' }],
   [ERROR_CODE.WRONG_METHOD, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: '该模型不提供这个调用方式：检查目录声明的协议面。' }],
   [ERROR_CODE.MISSING_PARAM, { llmCode: 'INVALID_ARGS', retryable: false, disposition: '缺必填参数：请求体构造有缺口。' }],
   [ERROR_CODE.INVALID_PARAM, { llmCode: 'INVALID_ARGS', retryable: false, disposition: '参数取值被拒（例如不支持的思考档位）：检查档位收敛结果。' }],
+  [ERROR_CODE.INVALID_API_PARAM, { llmCode: 'INVALID_ARGS', retryable: false, disposition: 'API 参数非法：检查请求体里的参数名与取值。' }],
+  [ERROR_CODE.CONFLICTING_PARAMS, { llmCode: 'INVALID_ARGS', retryable: false, disposition: '两个参数不能同时出现：去掉其中一个再试。' }],
   [ERROR_CODE.NO_PERMISSION, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: '账号的套餐不包含这个 API。' }],
+  [ERROR_CODE.API_OFFLINE, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: '该 API 已下线：换一条线路或联系平台。' }],
+  [ERROR_CODE.API_NOT_FOUND, { llmCode: 'NOT_FOUND', retryable: false, disposition: '该 API 不存在：检查端点配置。' }],
   [ERROR_CODE.PROMPT_TOO_LONG, { llmCode: CONTEXT_OVERFLOW_CODE, retryable: false, disposition: '提示词超出模型窗口：先压缩再请求。' }],
   [ERROR_CODE.CONTENT_FILTERED, { llmCode: 'PROVIDER_ERROR', retryable: false, disposition: '上游内容过滤拒绝了这次输入：改写输入，不要重试。' }],
-  // 429 里唯二可重试的两条。
+  // 可重试的几条：官方客户端的业务码表把它们判成可恢复（retryable=true）。
   [ERROR_CODE.RATE_LIMITED, { llmCode: 'RATE_LIMIT', retryable: true, disposition: '请求频率限制：退避后重试，号池可换一个账号。' }],
+  [ERROR_CODE.RATE_LIMIT_TRANSIENT, { llmCode: 'RATE_LIMIT', retryable: true, disposition: '瞬时限流：退避后重试，号池可换一个账号。' }],
   [ERROR_CODE.OVERLOADED, { llmCode: 'SERVER', retryable: true, disposition: '瞬时服务过载：退避后重试。' }],
+  [ERROR_CODE.OVERLOADED_BUSINESS, { llmCode: 'SERVER', retryable: true, disposition: '上游业务过载：退避后重试。' }],
+  [ERROR_CODE.API_CALL_FAILED, { llmCode: 'SERVER', retryable: true, disposition: '上游 API 调用出错：退避后重试。' }],
+  [ERROR_CODE.API_CALL_ERROR, { llmCode: 'SERVER', retryable: true, disposition: '上游 API 调用过程出错：退避后重试。' }],
+  [ERROR_CODE.NETWORK_ERROR, { llmCode: 'SERVER', retryable: true, disposition: '上游网络错误：退避后重试。' }],
 ])
 
 /**
  * 把一次上游失败判读成机器可路由的结论。
  *
- * 分类**不能停在状态行**：多个真实条件共用同一个 HTTP 状态（表里 429 有六条，
- * 401 有三条），所以正文里的业务码才是判据，状态行只在本面没给出业务码时兜底。
+ * 分类**不能停在状态行**：多个真实条件共用同一个 HTTP 状态（表里 429 有十几条，
+ * 401 有四条），所以正文里的业务码才是判据，状态行只在本面没给出业务码时兜底。
  *
  * 两个兜底方向都是有意选的：
  *
  * - 未知 5xx → 可重试（传输面故障，语义上与 OVERLOADED 同族）。
- * - 未知 429 → **不可重试**。本表里六条 429 里有五条是额度类，立即重试只会继续失败，
- *   还会多烧一次额度；宁可让调用方等一下也不要把它变成重试风暴。
+ * - 未知 429 → **不可重试**。本表里绝大多数 429 是额度类或终局的限流类，立即重试只会
+ *   继续失败，还会多烧一次额度；宁可让调用方等一下也不要把它变成重试风暴。
  *
  * @param input - HTTP 状态（可选）与上游正文（可选）。
  */

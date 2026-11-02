@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **[provider parity] 对照官方 Agent / 客户端修复其余线路的能力与性能差异**：
+  - Claude：未知模型按当前代能力处理，支持原生 mid-conversation system 消息，模型发现禁重定向并使用 3 秒超时，单图与整请求图片预算分离；
+  - GLM：Anthropic 面改用 `output_config.effort`、按模型关闭思考、增加缓存断点并补齐业务码分类；
+  - Command Code：完整刷新官方 106 模型注册表，取消无依据的输出上限，Anthropic system 增加缓存断点；
+  - Cline / OpenDesign：按各自官方规则选择输出预算字段，Cline 增加有界空回复重试，两者扩大上下文溢出恢复并保留旧词面；
+  - Step / Qoder：Step 无真实 cap 时省略 `max_tokens`，Qoder 会话亲和按账号隔离并纳入并发闸门；
+  - Claude / Antigravity / Qoder / Step / WorkBuddy：图片预算按实际上线 payload 计量，避免误丢缩放后可用的图片。
+- **[docs] 新增 `docs/provider-agent-parity-audit.md`，记录各线路官方基线、修复范围及仍需 live 验证的边界。
+- **验证**：`npm run typecheck` 0 错误；全量 Vitest 354 文件通过、6515 项测试通过（另有 2 文件 / 9 项跳过）；`npm run build` 与 `git diff --check` 通过。
+
 ## 0.53.0 - 2026-11-01
 
 - **[dispatch] Mandate v2 头部协议：样板自洽、可直接复制的骨架、会自纠的拒绝文案**

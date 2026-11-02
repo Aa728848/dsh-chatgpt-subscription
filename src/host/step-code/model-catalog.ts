@@ -160,6 +160,14 @@ export interface StepCodeModelEntry {
   defaultContextWindow: number
   /** 调用方不指定输出上限时本线路请求的输出上限；端点不报，默认等于上下文窗口。 */
   defaultMaxTokens: number
+  /**
+   * 目录**真实**声明的输出上限；端点没报就是 undefined。
+   *
+   * 与 {@link defaultMaxTokens} 是两件事，**后者不是 cap**：它是上下文窗口派生的
+   * 兜底，只给设置面看（host 元数据）。wire 上只有这个字段才是真的上限，
+   * 没有它就不发 `max_tokens`（见 mapper 的 `buildChatRequest`）。
+   */
+  maxOutputTokens?: number
   /** 官方描述；没有逐字来源时为 null（不编文案）。 */
   description: string | null
 }
@@ -189,6 +197,15 @@ interface UpstreamModelRecord {
   name?: unknown
   model_type?: unknown
   max_input_tokens?: unknown
+  /**
+   * 输出上限（**未公开扩展字段**，与 `max_input_tokens` 同族）。
+   *
+   * 端点**通常不报**它（官方客户端在 Step 端点不发输出上限字段）；
+   * 报了才认，缺了就是「没有 cap」——那就不发 `max_tokens`，
+   * 而不是拿上下文窗口去冒充一个上限。
+   */
+  max_output_tokens?: unknown
+  maxOutputTokens?: unknown
   enable_reason?: unknown
   enable_vision_input?: unknown
   reasoning_effort_support_list?: unknown
@@ -314,6 +331,9 @@ function entryFromUpstream(record: UpstreamModelRecord): StepCodeModelEntry | nu
   const vision = typeof record.enable_vision_input === 'boolean'
     ? record.enable_vision_input
     : false
+  // 真实输出上限：**端点报才有**。没报就是 undefined（= 没有 cap），
+  // 不拿上下文窗口顶替——那会把 host 窗口元数据当成 wire 上限发出去。
+  const declaredOutput = positiveInt(record.max_output_tokens) ?? positiveInt(record.maxOutputTokens)
   const facts: StepCodeModelFacts = {
     id,
     name: nonEmptyString(record.name) ?? id,
@@ -327,6 +347,7 @@ function entryFromUpstream(record: UpstreamModelRecord): StepCodeModelEntry | nu
     supportsImages: vision,
     defaultContextWindow: contextWindow,
     defaultMaxTokens: defaultMaxTokens(contextWindow),
+    ...(declaredOutput === undefined ? {} : { maxOutputTokens: declaredOutput }),
     description: nonEmptyString(record.description) ?? null,
   }
   return withHint(facts)
@@ -471,6 +492,21 @@ export function maxOutputTokensFor(
   catalog: readonly StepCodeModelEntry[] = STEP_CODE_MODEL_CATALOG,
 ): number {
   return resolveStepCodeModel(id, catalog).defaultMaxTokens
+}
+
+/**
+ * 该模型**真实**声明的输出上限；目录没声明（端点不报）时是 undefined。
+ *
+ * 与 {@link maxOutputTokensFor} 是两件事，**别混**：后者是上下文窗口派生的兜底，
+ * 是给 host 用的元数据（压缩与溢出判断），不是上游的输出上限；
+ * 只有这个字段是端点真的报出来的 cap —— wire 上没有它就不发 `max_tokens`，
+ * 让上游用它自己的默认，而不是让我们拿窗口去限它。
+ */
+export function declaredMaxOutputTokensFor(
+  id: string,
+  catalog: readonly StepCodeModelEntry[] = STEP_CODE_MODEL_CATALOG,
+): number | undefined {
+  return resolveStepCodeModel(id, catalog).maxOutputTokens
 }
 
 /** 该模型的上下文窗口；不在目录里时取 {@link DEFAULT_CONTEXT_WINDOW}。 */

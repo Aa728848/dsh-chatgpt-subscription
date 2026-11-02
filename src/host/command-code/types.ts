@@ -231,7 +231,12 @@ export function wireReasoningEffort(effort: string | undefined | null): string |
  * "images accepted" sends bytes to an endpoint that rejects the whole request.
  */
 export function inputModalitiesFor(modelId: string): Array<'text' | 'image'> {
-  return [...(commandCodeModelDef(modelId)?.inputModalities ?? ['text'])]
+  const declared = commandCodeModelDef(modelId)?.inputModalities ?? ['text']
+  // The registry declares a `file` modality for one model, and DSH's own
+  // modality vocabulary has no counterpart for it. This route sends no file
+  // parts, so advertising it would promise something the request builder does
+  // not do; the declared list keeps it and the harness boundary narrows it away.
+  return declared.filter((modality): modality is 'text' | 'image' => modality !== 'file')
 }
 
 /**
@@ -254,56 +259,29 @@ export function anthropicThinkingBudget(effort: string): number | null {
 }
 
 /**
- * Output caps for the models whose registry entry does not declare one.
+ * Output cap the official registry DECLARES for one model, or undefined when it
+ * declares none.
  *
- * The registry only carries a cap for five entries, and omitting the field
- * would leave every request at {@link DEFAULT_MAX_TOKENS} — far below what the
- * Claude and GPT families actually allow. These values are the consistent
- * per-model `limit.output` across the independent providers that serve the same
- * weights; a cap the registry DOES declare always wins over them.
+ * A registry that declares no cap is not a model with a small cap: it is a model
+ * whose cap the provider decides. The table this plugin shipped before carried
+ * a hand-written cross-provider guess for those models, and a guess is wrong in
+ * both directions - too small truncates the answer, too large is refused by the
+ * provider. The official registry is the only authority, so a model that
+ * declares nothing there declares nothing on the wire either.
  */
-const OBSERVED_MAX_OUTPUT_TOKENS: Record<string, number> = {
-  'claude-opus-5': 128_000,
-  'claude-opus-4-8': 128_000,
-  'claude-opus-4-7': 128_000,
-  'claude-sonnet-5': 128_000,
-  'claude-sonnet-4-6': 64_000,
-  'claude-fable-5-1': 128_000,
-  'claude-fable-5': 128_000,
-  'claude-haiku-4-5-20251001': 64_000,
-  'gpt-6-astra': 128_000,
-  'gpt-5.6-sol': 128_000,
-  'gpt-5.6-terra': 128_000,
-  'gpt-5.6-luna': 128_000,
-  'gpt-5.5': 128_000,
-  'gpt-5.4': 128_000,
-  'gpt-5.3-codex': 128_000,
-  'gpt-5.4-mini': 128_000,
-  'deepseek/deepseek-v4-pro': 384_000,
-  'deepseek/deepseek-v4-flash': 384_000,
-  'deepseek/deepseek-v4-flash-vision-exp': 384_000,
-  'deepseek/deepseek-v4.1-flash': 384_000,
-  'moonshotai/Kimi-K3': 131_072,
-  'moonshotai/Kimi-K2.6': 262_144,
-  'z-ai/glm-5.3-flash': 131_072,
-  'zai-org/GLM-5.3': 131_072,
-  'zai-org/GLM-5.2': 131_072,
-  'MiniMaxAI/MiniMax-M3': 512_000,
-  'minimax/minimax-m3-free': 512_000,
-  'Qwen/Qwen3.8-Max': 131_072,
-  'Qwen/Qwen3.8-Max-0902': 131_072,
-  'xai/grok-4.5': 500_000,
-  'xai/grok-4.6': 500_000,
+export function declaredMaxOutputTokens(modelId: string): number | undefined {
+  return commandCodeModelDef(modelId)?.maxTokens ?? undefined
 }
 
 /**
- * Output cap one request asks for when the caller omits one. A cap the registry
- * declares wins over the observed value, which in turn wins over the default.
+ * Output cap the host reserves against when the caller asks for none.
+ *
+ * This is HOST metadata: the number the settings card shows and the number a
+ * compaction reserves against. It is NOT a wire cap, and a request that carries
+ * no cap of its own sends none - see `requestMaxTokens` in `./mapper.ts`.
  */
 export function maxOutputTokensFor(modelId: string): number {
-  return commandCodeModelDef(modelId)?.maxTokens
-    ?? OBSERVED_MAX_OUTPUT_TOKENS[modelId]
-    ?? DEFAULT_MAX_TOKENS
+  return declaredMaxOutputTokens(modelId) ?? DEFAULT_MAX_TOKENS
 }
 
 /**
@@ -317,5 +295,7 @@ export function maxOutputTokensFor(modelId: string): number {
  */
 export const FALLBACK_MODELS: ReadonlyArray<{ id: string; name: string; contextWindow: number }> =
   COMMAND_CODE_MODELS
-    .filter((model) => model.contextWindow !== null)
+    // A model the official catalog hides is not in the live listing either, so
+    // the offline fallback does not offer it either.
+    .filter((model) => model.contextWindow !== null && !model.hidden)
     .map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow as number }))

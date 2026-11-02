@@ -255,6 +255,20 @@ export const STREAM_IDLE_TIMEOUT_MS = 300_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 /** Ceiling for a model-listing or usage fetch. */
 export const DISCOVERY_TIMEOUT_MS = 20_000
+/**
+ * Ceiling for the MODEL LISTING request, which is a separate and much tighter
+ * budget than the usage read that shares {@link DISCOVERY_TIMEOUT_MS}.
+ *
+ * TRANSCRIBED from the official client's own model-discovery request: it is
+ * sent with a 3-second timeout by default, and a gateway that answers slower
+ * than that fails the discovery silently. The listing is a startup convenience
+ * that fills the model picker - it is NOT on the request path - so a slow
+ * answer must not hold a picker open for twenty seconds.
+ *
+ * This is the official figure and nothing more: the request is bounded, and a
+ * timeout degrades to the shipped table rather than to an error.
+ */
+export const MODELS_DISCOVERY_TIMEOUT_MS = 3_000
 /** Whole-request ceiling for one NON-STREAMING chat call.
  *
  * Deliberately never attached to a stream: an absolute `AbortSignal.timeout` on

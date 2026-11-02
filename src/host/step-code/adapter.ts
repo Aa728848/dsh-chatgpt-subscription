@@ -63,8 +63,8 @@ import {
 import {
   STEP_CODE_MODEL_CATALOG,
   catalogSize,
+  declaredMaxOutputTokensFor,
   defaultContextWindowFor,
-  maxOutputTokensFor,
   parseStepCodeModelListing,
   resolveStepCodeModel,
   type StepCodeModelEntry,
@@ -139,6 +139,8 @@ export function stepCodeModelCatalogFrom(
     name: entry.name,
     ...(entry.modelType === undefined ? {} : { model_type: entry.modelType }),
     ...(entry.maxInputTokens === undefined ? {} : { max_input_tokens: entry.maxInputTokens }),
+    // 真实输出上限：端点报了就带走，没报就没有（窗口不是上限）。
+    ...(entry.maxOutputTokens === undefined ? {} : { max_output_tokens: entry.maxOutputTokens }),
     enable_reason: entry.reasoning,
     enable_vision_input: entry.vision,
     reasoning_effort_support_list: entry.efforts,
@@ -377,13 +379,22 @@ export class StepCodeAdapter extends LlmAdapter {
     const defaultEffortId = configured !== null && configured !== undefined && efforts.includes(configured)
       ? ReasoningEffortId(configured)
       : undefined
+    // host 侧的输出预留**只认目录真实声明的 cap**，没有就不发布。
+    //
+    // 上下文窗口是「能读多少」，不是「能写多少」：拿它当输出上限，等于替上游
+    // 编一个上限出来。而且这份元数据会**一路走到 wire**——宿主在调用方没指定
+    // 时会用它填请求的 maxTokens（DSH 的 resolveCallWithInfo），所以窗口派生的
+    // 值放进来，最终就是每个请求都带着一个编出来的上限。
+    const declaredCap = declaredMaxOutputTokensFor(model, catalog)
     return {
       provider,
       id: model,
       name: entry.name,
       inputModalities: entry.supportsImages ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindow > 0 ? contextWindow : defaultContextWindowFor(model, catalog) },
-      ...outputReservation(contextWindow > 0 ? contextWindow : defaultContextWindowFor(model, catalog), maxOutputTokensFor(model, catalog)),
+      ...(declaredCap === undefined
+        ? {}
+        : outputReservation(contextWindow > 0 ? contextWindow : defaultContextWindowFor(model, catalog), declaredCap)),
       // 空梯子 = 该模型不接受 reasoning_effort，这时**不**声明 reasoning 段，
       // 让 DSH 知道它没有可调档位，而不是给它一个空的档位表。
       ...(efforts.length === 0
@@ -427,9 +438,14 @@ export class StepCodeAdapter extends LlmAdapter {
   ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const settings = await this.settings()
-    // 超大图片先换成占位文本；共用 mapper 的既有接缝，与兄弟线路同一份。
-    const requestOptions = offloadOldestStepCodeRequestImages(normalizeGenerateOptions(options))
-    const images = await resolveRequestImages(requestOptions, this.options.attachments, signal)
+    const normalized = normalizeGenerateOptions(options)
+    // 图片**先解析**，再把**同一份解析结果**交给预算关卡。
+    //
+    // 顺序反了，预算量的是**存储字节**：一张 5 MB 的截图会被算成 ~6.7 MB 的 base64，
+    // 于是「缩放后其实只有 ~350 KB、装得下」的图被当成超限而丢掉。
+    // 先解析再量，量的就是**真正上线的字节**，缩放后的图不再被误丢。
+    const images = await resolveRequestImages(normalized, this.options.attachments, signal)
+    const requestOptions = offloadOldestStepCodeRequestImages(normalized, images)
 
     const tried = new Set<string>()
     let response: Response | undefined
@@ -440,13 +456,16 @@ export class StepCodeAdapter extends LlmAdapter {
       if (picked.accountId !== null) tried.add(picked.accountId)
       const catalog = this.catalog(picked.credentials.profile)
       const entry = resolveStepCodeModel(options.model, catalog)
-      // 请求体与两处输出上限口径全部来自 mapper；本文件不拼字段。
+      // 请求体与输出上限口径全部来自 mapper；本文件不拼字段。
+      //
+      // **wire 上的输出上限只有两种来源**：调用方自己要的，或目录**真实**声明的 cap。
+      // 上下文窗口是 host 元数据（压缩与溢出判断），不是上游的输出上限——
+      // 把它当 wire 默认发出去，就是拿一个自己编的数去限上游，所以这里不再传它。
       const body = JSON.stringify(buildChatRequest(
         requestOptions,
         images,
         stepCodeRequestOptionsFor(entry, {
           cacheRequestParams: settings.cacheRequestParams,
-          defaultMaxTokens: maxOutputTokensFor(options.model, catalog),
         }),
       ))
       url = stepChatCompletionsUrl(picked.credentials.profile)

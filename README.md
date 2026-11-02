@@ -44,7 +44,7 @@
 | `claude-subscription` | Claude Pro / Max | Anthropic Messages | 手动粘贴 / loopback 回调 | 实时 `/v1/models` + 本地兜底 |
 | `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | **复用桌面端登录态** 或设备码 | **硬编码**（见下） |
 | `antigravity` | Google Antigravity | Gemini | Google OAuth | 内置表 |
-| `glm-coding-plan` | GLM Coding Plan（ZCode 账号，国区 BigModel / 国际区 Z.ai） | Anthropic Messages + OpenAI Chat Completions（按模型声明） | ZCode 账号 OAuth（浏览器中转轮询）+ 可选导入本机 ZCode 登录态 | 随包目录（源自官方 `zcode-builtin.json`） |
+| `glm-coding-plan` | GLM Coding Plan（ZCode 账号，国区 BigModel / 国际区 Z.ai） | Anthropic Messages（当前 Coding Plan 目录的全部模型） | ZCode 账号 OAuth（浏览器中转轮询）+ 可选导入本机 ZCode 登录态 | 随包目录（源自官方 `zcode-builtin.json`） |
 | `step-code` | StepFun Step Plan 订阅（国区 api.stepfun.com / 国际区 api.stepfun.ai）或开放平台 API Key | OpenAI Chat Completions | **云端轮询**浏览器授权（不开本地回调端口）/ 手工粘贴 Platform API Key / 只读导入本机 `~/.stepcode/auth.json` | **实时运行时发现**（随包表刻意为空） |
 | `cline-pass` | Cline Pass | OpenAI Chat Completions | **浏览器设备码 OAuth**（WorkOS，账号入池、自动续期）；API Key 仅作兼容回退 | 随包表兜底 + 官方 `recommended-models` / models.dev / 上游网关目录补全 |
 | `qoder` | Qoder 订阅（全球区 qoder.com / 中国站 qoder.com.cn） | Qoder 自有（COSY 签名 + 信封 SSE） | **浏览器设备流**（仅全球区）/ 手工粘贴 PAT（两区）/ 只读导入本机 `~/.qoder/.auth/user` | **实时运行时发现**（COSY 签名 GET）+ 随包能力兜底表 |
@@ -116,6 +116,8 @@
 - 模型目录取自公开的 `/provider/v1/models`，每个模型的 `context_length` 作为默认上下文窗口，可逐模型覆盖；
 - **模型能力逐模型查表**（`src/host/command-code/model-catalog.ts`，转录自官方 CLI 的模型注册表）：是否接受图片输入、支持哪些思考档位由该表决定，未知模型回落纯文本；
   - 图片能力**不能靠厂商/模型名前缀推断**——同厂商内部就会自相矛盾：`deepseek/deepseek-v4.1-flash` 与 `deepseek/deepseek-v4-flash-vision-exp` 支持图片，而 `deepseek/deepseek-v4-flash`、`deepseek/deepseek-v4-pro` 不支持；`z-ai/glm-5.3-flash` 支持而 `zai-org/GLM-5.3` 不支持；
+  - 随包能力表完整转录官方 `command-code@1.88.2` 注册表的 106 条记录，并以脱敏 fixture 逐字段对拍；实时目录仍决定账号实际可用模型；
+- **输出预算不猜**：OpenAI / Responses 面在调用方与官方注册表都未给 cap 时省略字段；Anthropic Messages 必须带 `max_tokens`，无声明时使用官方 CLI 的 64000。Anthropic system 按官方 `toWireSystem` 使用块数组与 ephemeral 缓存断点；
 - 额度与用量来自账户 API 的账单/用量线路，任一条失败不影响其余；
 - **瞬时失败按 DSH retry policy 有界重试**：`command-code` 路由显式声明 `normal` 策略（最多 3 次，1.5s 起指数退避、15s 上限、0.2 抖动），覆盖 `RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`；
   - 上游模型供应商临时不可用（502/503/504/500，典型响应体是 `"{\"error\":{\"type\":\"server_error\"}}"`）被归类为 `SERVER` 并自动重试；
@@ -242,7 +244,8 @@
 - **两条登录路径，模式在流程开始时确定且不可中途切换**：默认是**手动粘贴**（授权页把码显示在屏幕上，粘贴 `<code>#<state>`；也容错接受整条重定向 URL）。可选 loopback 回调，绑定 `127.0.0.1` 并顺序探测可用端口（Windows 的保留端口段会让固定端口绑定失败）。端口探测失败**降级为手动**而不是报错。切换模式等于作废当前流程并重新发起——授权码与签发它的那次请求的 `redirect_uri` 绑定，这是该流程最常见的失败；
 - **一次授权只兑换一次**：浏览器回调与手动粘贴可能同时到达，用 compare-and-set 保证只有一方发起兑换（另一方得到「正在处理中」，已结算的流程得到 410 且**不做任何兑换**）。错误的 `state` **只拒绝那一个请求**，不会终止正在进行的合法登录。回调服务器只绑 loopback、只应答 `/callback`、只接受本机来源；
 - **刷新是单飞的**：并发请求共享同一次刷新。否则到期瞬间的一批请求会各自轮换刷新令牌，除第一个之外全部作废（上游会给出终局判定）。刷新令牌轮换后**先读回校验再落盘**；
-- **模型能力逐模型查表**（`src/host/claude/model-catalog.ts`），**不从模型名推断**。该表转录自本机随 harness 安装的参照目录，**只证明抄录忠实，不证明服务端提供这些模型**——服务端自己的 `GET /v1/models` 才是权威，且它**只覆盖上下文窗口**，能力字段不被改写；
+- **模型能力逐模型查表**（`src/host/claude/model-catalog.ts`），**不从模型名推断**。已知 id 使用随包能力表；表外 id 按官方 Claude Code 的「未识别模型按当前模型处理」规则继承当前代 adaptive thinking、effort 与图片能力，不再静默降为无思考/无图。服务端 `GET /v1/models` 仍是账号可调用模型的权威，实时目录只覆盖上下文窗口；发现请求使用官方同款 3 秒超时、拒绝重定向并只接收 Claude / Anthropic id；
+- **支持会话中的原生 system 消息**：官方支持名单及未知当前模型仅在官方允许的位置保留历史 `role:'system'`——它必须紧跟 user，且是末条或后接 assistant；DSH 的首条系统提示及其它违规位置仍折回顶层 `system`，不支持的旧模型也保留折叠兜底。单图 base64 防线与整请求图片预算分别执行，超限优先缩小，无法满足时以可见文本说明；
 - **思考形态有四类，顺序决定成败**（`thinkingMode`）：
   - `mid-convo` → `{type:'adaptive', block_binding:{prefix_mismatch_behavior:'drop_block'}}` 外加 `output_config.effort`；
   - `adaptive` → `{type:'adaptive'}`；
@@ -913,15 +916,17 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 
 两区共用同一个 OAuth 控制面（`zcode.z.ai/api/v1/oauth/cli/*`），分开的只有上面这几行。**业务 JWT 的自动重取只服务国际区**——国区没有这一层。授权参数里**没有 PKCE**（两个 provider 的授权参数只有 redirect / appId / state），本插件照抄上游形状，不自带 `code_challenge`。本仓库历史里那句「国区没有浏览器登录」是错的，本线路删除了它：国区**有**浏览器登录，只是入口与参数名都不同。
 
-**模型目录**：随包目录 4 个模型（`GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` / `GLM-5-Turbo`），逐模型事实转录自官方开源版内置配置 `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`（revision 31）。能力**逐模型查表，不从模型名推断**，其中三处是被官方配置纠正过的历史值：
+**模型目录**：随包目录 4 个模型（`GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` / `GLM-5-Turbo`），逐模型事实转录自官方开源版内置配置 `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`（revision 43）。能力**逐模型查表，不从模型名推断**，其中三处是被官方配置纠正过的历史值：
 
 - **输出上限**：GLM-5.3 家族与 GLM-5.2 是 **128000**、GLM-5-Turbo 是 **64000**。历史转录引用的 docs.z.ai 通用参数表给的是 131072，按本仓库「取小值」的规则取 128000（高报会被网关拒，低报只是提前压缩）；128000 也正是**官方客户端自己在 Coding Plan 面上发的那个数**。同一代模型上限差一倍，正是「不得按家族名推」的又一处证据；
 - **图片输入**：四个模型的 `supportsImages` 全为 `true`——**不是因为模型多模态**，而是官方配置里两条 `modelMatch: ".*"` 的站点规则把 `api.z.ai/api/anthropic` 与 `open.bigmodel.cn/api/anthropic` 这两个 Coding Plan 基址的 `supportsImage` 打开成 true（基础规则对 `GLM-5.3` / `GLM-5.2` / `GLM-5-Turbo` 写的都是 false）。所以这条能力读作「**经本线路这两个端点时**收不收图」；
 - **套餐归属**：这四个**全部**是 Coding Plan 模型；反倒是 **Start Plan 缺 `GLM-5.3`**。这一条曾被写反过，写反的代价是把两个确实在套餐里的模型判成未订阅、用户连试都不能试。留着它是为了让复审记住：**套餐归属是账号的属性，不是模型的属性**，同一个 id 在不同 provider 规则下启用的集合是不同的。
 
-思考档位同样逐模型声明：`GLM-5.3` / `GLM-5.3-Flash` 三档且**不可关闭思考**（上游把 `thinking.type: "disabled"` 当错误拒绝），`GLM-5.2` 两档（模型页面写的是更宽的词汇，但它同时写明套餐如何映射，真正能上线缆的只有这两级）且可关闭，`GLM-5-Turbo` **不收档位**（梯子为空，请求里根本不发思考控制字段）。DSH 词汇表更宽的 `minimal` / `medium` / `xhigh` 先收敛到模型真实的梯子再发出去，平手时向上取。
+思考档位同样逐模型声明：`GLM-5.3` / `GLM-5.3-Flash` 三档且**不可关闭思考**（上游把 `thinking.type: "disabled"` 当错误拒绝），`GLM-5.2` 两档（模型页面写的是更宽的词汇，但它同时写明套餐如何映射，真正能上线缆的只有这两级）且可关闭，`GLM-5-Turbo` **不收档位**，但显式选择关闭时会发 `thinking:{type:'disabled'}`。DSH 词汇表更宽的 `minimal` / `medium` / `xhigh` 先收敛到模型真实的梯子再发出去，平手时向上取。
 
-**瞬时失败按错误类别重试**：`glm-coding-plan` 路由显式声明 `normal` 策略（最多 3 次，1.5s 起指数退避、15s 上限、0.2 抖动），覆盖 `RATE_LIMIT` / `SERVER` / `TIMEOUT` / `TRANSPORT`。分类**不能停在状态行**——冻结的错误码表里七条 429 中**只有两条可重试**（1302 频率限制、1305 瞬时过载），其余五条全是额度类，所以**正文没给业务码的裸 429 一律判不可重试**（`Retry-After` 仍然读取并下发，它不改变判定）。同一张表在两个协议面上是**同一份取值**，Anthropic 面与 OpenAI 面各有一份判读函数，改一处必须同时改另一处。
+Anthropic 面的思考深度按官方 ZCode 规则走 `output_config.effort`，不再发顶层 `reasoning_effort`。system 使用 text block 数组，并在 system 末块与最新非 system 消息的可缓存末块放置 `cache_control:{type:'ephemeral'}`；业务码 1303 / 1312 按官方客户端分类为可重试，额度与终局业务码仍不重试。上述请求形状均有 mock 回归，真实缓存命中与上游接受度仍需账号实测。
+
+**瞬时失败按错误类别重试**：`glm-coding-plan` 路由显式声明 `normal` 策略（最多 3 次，1.5s 起指数退避、15s 上限、0.2 抖动），覆盖 `RATE_LIMIT` / `SERVER` / `TIMEOUT` / `TRANSPORT`。分类**不能停在状态行**——这一族里只有官方判为瞬时限流/过载的 1302、1303、1305、1312 可重试，其余已识别的额度类或终局限流类不重试；**正文没给业务码的裸 429 一律判不可重试**（`Retry-After` 仍然读取并下发，它不改变判定）。同一张表在两个协议面上是**同一份取值**，Anthropic 面与 OpenAI 面各有一份判读函数，改一处必须同时改另一处。
 
 ### 插件路由（GLM Coding Plan）
 所有路由都以 `/glm-coding-plan/api` 为前缀：
@@ -995,7 +1000,7 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
   - 因此这一节不是免责套话：**列出的分档就是上线时的实际置信度**，读的人可以据此判断哪一块需要自己再试一次；
 - **额度读的是非公开的开发者中心接口**（见开头的风险提示）。两代套餐同时在用（老式 5 小时 / 周窗口，与 Credit 月池），判定**按载荷形状**（老式窗口字段 vs `credit_buckets`）而不是只信 `plan_family`；两端都认不出来时只显示「认不出」，**一个进度条都不画**；
 - **没有 refresh_token 交换链**。access token 过期只能重新走登录；账号行上的「重新登录」在 host 侧只解除鉴权失败标记与冷却，真正重登要由卡片再开一次流程；
-- **上下文窗口的输出上限是推导值**。端点不报输出上限，所以默认等于上下文窗口——这是一个诚实的兜底，不是一份上游声明；
+- **没有真实输出 cap 时不在 wire 上发明一个**。目录或调用方明确给出上限时才发送 `max_tokens`；端点没报就省略字段，由上游采用自己的默认值。上下文窗口仍只用于 host 的上下文/压缩判断，不再经 `defaultMaxTokens` 间接变成输出上限；
 - **品牌标记取自官方站点资产**，不是本地画的占位图形：形状逐字转录 `platform.stepfun.com/favicon.svg`，底砖色用该文件里的 `#1d1d1d`。抓取日期与字节数记在 `brand-icons.tsx` 的注释里，便于日后核对；
 
 ### 插件路由（Step Code）
@@ -1082,7 +1087,8 @@ access token / refresh token / 授权码 / PKCE verifier**；诊断里提到某�
 
 **能力**
 
-- OpenAI Chat Completions 协议，流式输出；透传工具 schema、工具调用/结果，图片按 `image_url` 内联，`reasoning_effort` 原样下发；支持 `temperature`、`stop` 与 `max_tokens`；
+- OpenAI Chat Completions 协议，流式输出；透传工具 schema、工具调用/结果，图片按 `image_url` 内联，`reasoning_effort` 原样下发；支持 `temperature`、`stop`，输出预算按官方模型规则选择 `max_tokens` / `max_completion_tokens`；
+- 对真正零内容、零工具且正常 stop 的空轮次按官方 Cline 策略做最多 3 次总尝试（250ms、可取消）；内容证明前缓冲，重试不泄漏空块，usage 聚合；
 - 模型目录：随包 16 个 Cline Pass 模型是**兜底**（含 `deepseek-v4.1-flash-1017` 快照 id——网关对别名与快照的钉选行为不同）。点「刷新模型目录」会读官方 `/ai/cline/recommended-models`、models.dev 与上游网关目录，只增不减，并把每个模型的能力（上下文窗口、输出上限、图片、推理档位）一起补上；新发布、本版本不认识的模型按保守值录取，不会被隐藏；**设置页与模型选择器只列内置 + 官方订阅 + 手动添加的模型**，完整网关目录仅作为搜索索引（旧的 exposeCatalog 配置不再展开），其他模型可在卡片里按 id 搜索并添加，添加后自动启用；
 - **上游渠道可观测、可钉住**：同一模型可能由 OpenRouter（direct 管线）或 Vercel AI Gateway（planner 管线）转发。卡片可以对单个模型「探测」渠道、逐个「校验」、按顺序钉住或排除，并在**首个 token 之前**失败切换到下一个渠道；`strict` 只发允许列表，`preferred` 按顺序尝试。钉住字段默认**两种写法都写**（`provider.only/order/sort` 与 `providerOptions.gateway.*`），因为网关可以在两次请求之间换管线，只写一种会让钉住悄悄失效；
 - **钉住是否被采纳以响应为准**：网关对未知/不可用的 `only` 不报错，直接从别的渠道服务。因此探测、校验与真实请求都会回读响应里的实际服务渠道（流式帧的路由块在 `delta.provider_metadata` 的收尾帧上，本线路也会读）；「请求 baseten、实际 deepseek」会被明确标成未被采纳，而不是当成成功；
@@ -1140,7 +1146,7 @@ OAuth 是默认入口；「使用 API Key」按钮保留为兼容回退，部署
 
 号池支持多账号轮换；部署也可以用 `OPENDESIGN_API_KEY` 提供第一把 Key（号池为空时投射为首要账号，不写入凭据库）。
 
-**能力**：OpenAI Chat Completions 流式对话（官方给 DeepSeek Harness 推荐的正是这个协议形态），工具调用、图片输入、推理档位透传。网关是 `https://amr-link.open-design.ai/v1`，Bearer 鉴权。
+**能力**：OpenAI Chat Completions 流式对话（官方给 DeepSeek Harness 推荐的正是这个协议形态），工具调用、图片输入、推理档位透传。输出预算按 OpenDesign 官方规则选择 `max_tokens` / `max_completion_tokens`；仅对官方定义的字段拒收 400 做一次降级重试。网关是 `https://amr-link.open-design.ai/v1`，Bearer 鉴权。
 
 **模型目录**：随包内置 37 个聊天模型，每个都带 id、显示名、美元单价，以及**上下文窗口、最大输出、输入模态（是否收图）与推理档位**——价目来自官方公开价目接口，能力字段转录自本仓库已核对过的同族模型表（command-code 官方注册表、cline-pass、Claude 与 Antigravity 目录；两处冲突以 cline-pass 为准）。登录成功或添加 Key 后自动同步实时目录：**浏览器授权账号（带控制 Key）还会读 AMR 控制面目录**，那里有上游真实的 `metadata.contextWindowTokens`，会覆盖随包表；网关自己的 `/v1/models` 提供该 Key 实际可见的模型清单。同步条目持久化在设置文档里，重启无需网络即可恢复。**`minimax-m3.1-flash` 与 `muse-wonder` 没有任何同族表可核对**，按 128k / 默认三档处理并在文档里列名，不猜数字；任何模型都能在卡片的「上下文窗口」里按模型修正，覆盖值优先于以上全部来源。
 

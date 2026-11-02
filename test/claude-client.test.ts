@@ -63,6 +63,7 @@ import {
   ERROR_TYPE,
   INTERLEAVED_THINKING_BETA,
   MESSAGES_PATH,
+  MODELS_DISCOVERY_TIMEOUT_MS,
   MODELS_PATH,
   OAUTH_BETA,
   QUOTA_CACHE_TTL_MS,
@@ -101,6 +102,17 @@ interface FetchCall {
   method: string
   headers: Record<string, string>
   body: unknown
+  /** The redirect mode the request was issued with, when one was named. */
+  redirect?: string
+  /**
+   * The abort signal the request was issued with, when one was named.
+   *
+   * `null` IS a value here: `RequestInit.signal` is typed
+   * `AbortSignal | null | undefined`, and a caller may pass an explicit null
+   * rather than omitting the field. The record keeps what was actually sent
+   * instead of narrowing it away.
+   */
+  signal?: AbortSignal | null
 }
 
 /**
@@ -120,6 +132,8 @@ function recordingFetch(respond: (call: FetchCall, index: number) => Response | 
       method: init?.method ?? 'GET',
       headers: flat,
       body: typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : undefined,
+      ...(init?.redirect === undefined ? {} : { redirect: init.redirect }),
+      ...(init?.signal === undefined ? {} : { signal: init.signal }),
     }
     calls.push(call)
     return respond(call, calls.length - 1)
@@ -269,15 +283,19 @@ describe('model listing', () => {
     expect(merged[1]?.maxTokens).toBe(resolveClaudeModel('claude-haiku-4-5').maxTokens)
   })
 
-  it('keeps the conservative stub for an id the catalog does not know', () => {
+  it('gives an id the catalog does not know the CURRENT-MODEL template, and lets the listing write only the window', () => {
     const merged = mergeListingIntoCatalog([{ id: 'claude-unheard-of-9', contextWindow: 123_456 }])
 
-    const stub = resolveClaudeModel('claude-unheard-of-9')
-    expect(merged[0]).toEqual({ ...stub, contextWindow: 123_456 })
-    // The stub's defining property: it claims nothing.
-    expect(merged[0]?.supportsImage).toBe(false)
-    expect(merged[0]?.thinkingMode).toBe('none')
-    expect(merged[0]?.reasoningEfforts).toEqual([])
+    const template = resolveClaudeModel('claude-unheard-of-9')
+    expect(merged[0]).toEqual({ ...template, contextWindow: 123_456 })
+    // The template's shape: adaptive thinking, the full ladder, image support.
+    expect(merged[0]?.supportsImage).toBe(true)
+    expect(merged[0]?.thinkingMode).toBe('adaptive')
+    expect(merged[0]?.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    // The realtime context_window overrides the WINDOW and nothing else: the
+    // 1M of the template is replaced, the capabilities are not touched.
+    expect(merged[0]?.contextWindow).toBe(123_456)
+    expect(merged[0]?.maxTokens).toBe(128_000)
   })
 
   it('leaves the catalog window in place when the listing states none', () => {
@@ -310,6 +328,67 @@ describe('model listing', () => {
     expect(models[1]?.contextWindow).toBe(300_000)
   })
 
+  it('issues the listing request the way the official client does: no redirect following, a 3-second bound', async () => {
+    // TRANSCRIBED from the official gateway protocol: the discovery request is
+    // "GET /v1/models?limit=1000 with a timeout of 3 seconds by default, and
+    // any redirect is treated as failure so the credential can't leak to a
+    // redirect target".
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    const fetchStub = recordingFetch(() => jsonResponse({ data: [{ id: 'claude-sonnet-4-6' }] }))
+
+    await loadCatalog(CREDENTIALS, { fetchFn: fetchStub.fn })
+
+    // The redirect is not followed: the credential never reaches a redirect
+    // target, and a listing that answers with a 3xx is not the listing.
+    expect(fetchStub.calls[0]?.redirect).toBe('manual')
+    // The bound is the official three seconds, not the twenty the usage read
+    // shares with the older discovery ceiling.
+    expect(MODELS_DISCOVERY_TIMEOUT_MS).toBe(3_000)
+    expect(timeoutSpy).toHaveBeenCalledWith(MODELS_DISCOVERY_TIMEOUT_MS)
+    // The request is bounded at all.
+    expect(fetchStub.calls[0]?.signal).toBeDefined()
+    timeoutSpy.mockRestore()
+  })
+
+  it('treats a REDIRECTED listing as a failure rather than following it', async () => {
+    const fetchStub = recordingFetch(() => new Response('', {
+      status: 302,
+      headers: { location: 'https://elsewhere.example/v1/models' },
+    }))
+
+    const models = await loadCatalog(CREDENTIALS, { fetchFn: fetchStub.fn })
+
+    // A 3xx is a failure: the shipped table stands in, so the picker keeps
+    // working instead of showing nothing.
+    expect(models).toBe(FALLBACK_MODELS)
+    expect(isCatalogFallback()).toBe(true)
+    // The redirect was not followed either.
+    expect(fetchStub.calls[0]?.redirect).toBe('manual')
+  })
+
+  it('keeps only the ids that name a Claude or Anthropic model', async () => {
+    // TRANSCRIBED from the official client's own discovery: an entry is kept
+    // when its id contains `claude` or `anthropic` ANYWHERE in the string,
+    // matched case-insensitively. A provider-prefixed id passes; an id that
+    // names neither does not.
+    const fetchStub = recordingFetch(() => jsonResponse({ data: [
+      { id: 'claude-sonnet-4-6' },
+      { id: 'bedrock/anthropic.claude-sonnet-4-5' },
+      { id: 'vertex_ai/claude-opus-4-7' },
+      { id: 'ANTHROPIC.claude-3-5-sonnet' },
+      { id: 'gpt-4o' },
+      { id: 'some-other-model' },
+    ] }))
+
+    const models = await loadCatalog(CREDENTIALS, { fetchFn: fetchStub.fn })
+
+    expect(models.map((model) => model.id)).toEqual([
+      'claude-sonnet-4-6',
+      'bedrock/anthropic.claude-sonnet-4-5',
+      'vertex_ai/claude-opus-4-7',
+      'ANTHROPIC.claude-3-5-sonnet',
+    ])
+  })
   it('accepts a bare array as well as the envelope', async () => {
     const fetchStub = recordingFetch(() => jsonResponse([{ id: 'claude-sonnet-4-6', context_window: 250_000 }]))
     const models = await loadCatalog(CREDENTIALS, { fetchFn: fetchStub.fn })

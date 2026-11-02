@@ -25,10 +25,23 @@ import {
   type ResolvedRequestImages,
 } from '../common/request-images.ts'
 import { isRecord } from './client.ts'
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import { PROVIDER_NAME } from './types.ts'
 
 /** The sentence a no-content finish carries, shared with the sibling lines. */
 export const NO_ANSWER_PHRASE = 'ended the turn without an answer or a tool call'
+
+/**
+ * The one wording the shared detector does not know.
+ *
+ * `common/context-overflow.ts` reads the provider wording every other line of
+ * this plugin reads, but it does not know this line's older phrase. Dropping it
+ * would turn a refusal that used to recover into a plain 400, so the exact
+ * wording is kept beside the shared judgement — and ONLY that wording: the
+ * other phrases the old private regex carried are either already in the shared
+ * vocabulary or were the over-broad guesses this change removed.
+ */
+const LEGACY_TOO_MANY_TOKENS = /too many tokens/i
 
 /** One OpenAI wire message. */
 export interface OpenDesignWireMessage {
@@ -48,6 +61,8 @@ export interface OpenDesignWireBody {
   tools?: Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }>
   temperature?: number
   max_tokens?: number
+  /** The newer spelling of the output budget, for the models that reject `max_tokens`. */
+  max_completion_tokens?: number
   stop?: readonly string[]
   reasoning_effort?: string
   /**
@@ -287,6 +302,53 @@ export function isDeepSeekModel(model: string): boolean {
 }
 
 /**
+ * Whether one model id names a family that refuses the legacy output-budget
+ * field.
+ *
+ * Transcribed from the official OpenDesign baseline (nexu-io/open-design,
+ * `apps/daemon/src/integrations/openai-chat-token-params.ts`): only the newer
+ * chat-completions families reject `max_tokens`. The generic OpenAI-compatible
+ * path stays on the legacy field by default, so the id is matched at its START
+ * — `gpt-5`, `gpt-5.6-luna` and `o3-mini` take `max_completion_tokens`, while
+ * `gpt-6-luna`, `openai/gpt-5` and `o2` keep `max_tokens`.
+ */
+export function usesMaxCompletionTokens(model: string): boolean {
+  const normalized = model.trim().toLowerCase()
+  return /^gpt-5(?:[.-]|$)/.test(normalized)
+    || /^o1(?:[.-]|$)/.test(normalized)
+    || /^o3(?:[.-]|$)/.test(normalized)
+    || /^o4(?:[.-]|$)/.test(normalized)
+}
+
+/**
+ * Whether one gateway refusal is the official "use max_completion_tokens"
+ * wording.
+ *
+ * Transcribed from the official OpenDesign baseline: the refusal names the
+ * field it rejects AND the field it wants. That wording is the only one a
+ * request may be replayed for — any other 400 is the caller's mistake.
+ */
+export function isUnsupportedMaxTokensError(detail: string): boolean {
+  const normalized = detail.toLowerCase()
+  return normalized.includes('unsupported parameter')
+    && normalized.includes('max_tokens')
+    && normalized.includes('max_completion_tokens')
+}
+
+/**
+ * The same request with its output budget moved to the newer field.
+ *
+ * This is the ONE downgrade a request may make: the gateway refused the
+ * legacy field by name, so the budget travels in the field it asked for
+ * instead. A body that never carried the legacy field is returned unchanged.
+ */
+export function withCompletionTokens(body: OpenDesignWireBody): OpenDesignWireBody {
+  if (body.max_tokens === undefined) return body
+  const { max_tokens: maxTokens, ...rest } = body
+  return { ...rest, max_completion_tokens: maxTokens }
+}
+
+/**
  * Build the wire request for one harness call.
  * @param options - the harness request (model, system, history, tools, sampling).
  * @param connection - resolved connection facts (default output budget).
@@ -321,7 +383,14 @@ export function buildOpenDesignBody(
     stream_options: { include_usage: true },
     ...(tools.length > 0 ? { tools } : {}),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
-    ...(maxTokens === undefined || maxTokens <= 0 ? {} : { max_tokens: maxTokens }),
+    // The output budget travels in the field the model family accepts. The
+    // generic path keeps the legacy field; a gateway that refuses it by name
+    // is answered by the single downgrade replay in the adapter.
+    ...(maxTokens === undefined || maxTokens <= 0
+      ? {}
+      : usesMaxCompletionTokens(options.model)
+        ? { max_completion_tokens: maxTokens }
+        : { max_tokens: maxTokens }),
     ...(options.stop === undefined ? {} : { stop: options.stop }),
     ...(thinkingOff || reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
     ...(thinkingOff ? { thinking: { type: 'disabled' as const } } : {}),
@@ -430,7 +499,11 @@ export function streamErrorCode(message: string, status?: number): string {
   if (status === 402 || spent) return 'QUOTA'
   if (isAuthenticationError(detail, status)) return 'AUTH'
   if (status === 429 || /429|rate limit|rate-?limited/i.test(detail)) return 'RATE_LIMIT'
-  if (/context\s*(?:length|window)|too many tokens|maximum context/i.test(detail)) return 'CONTEXT_WINDOW_EXCEEDED'
+  // The overflow wording is the SHARED one, so this line reads a refusal the
+  // same way every other line of this plugin reads it. A private regex here
+  // missed most of that vocabulary, and a missed overflow is a missed
+  // compaction recovery.
+  if (isContextOverflow(detail) || LEGACY_TOO_MANY_TOKENS.test(detail)) return CONTEXT_OVERFLOW_CODE
   if (status === 400) return 'INVALID_REQUEST'
   if (status !== undefined && status >= 500) return 'SERVER'
   if (status !== undefined && status >= 400) return `HTTP_${status}`

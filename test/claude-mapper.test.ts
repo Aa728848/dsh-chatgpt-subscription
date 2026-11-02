@@ -45,6 +45,7 @@ import {
   CLAUDE_CODE_TOOL_NAMES,
   DEFAULT_THINKING_BUDGETS,
   MAX_REQUEST_IMAGE_BYTES,
+  MAX_SINGLE_REQUEST_IMAGE_BYTES,
   adjustMaxTokensForThinking,
   assertStreamComplete,
   buildClaudeRequestBody,
@@ -78,7 +79,7 @@ import {
   type ClaudeStreamState,
   type ResolvedRequestImages,
 } from '../src/host/claude/mapper.ts'
-import { claudeThinkingMode, maxOutputTokensFor } from '../src/host/claude/model-catalog.ts'
+import { claudeThinkingMode, maxOutputTokensFor, type ClaudeModelEntry } from '../src/host/claude/model-catalog.ts'
 import { DEFAULT_MAX_TOKENS, PROVIDER_ID } from '../src/host/claude/types.ts'
 
 function options(overrides: Record<string, unknown> = {}): GenerateOptions {
@@ -93,9 +94,29 @@ function options(overrides: Record<string, unknown> = {}): GenerateOptions {
   } as unknown as GenerateOptions
 }
 
-function body(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return buildClaudeRequestBody(options(overrides))
+function body(overrides: Record<string, unknown> = {}, request: Record<string, unknown> = {}): Record<string, unknown> {
+  return buildClaudeRequestBody(options(overrides), undefined, request)
 }
+
+/**
+ * A capability table whose row says the model does NOT reason.
+ *
+ * No shipped row claims that today: an id this line has never heard of
+ * inherits the current-model template, and every current-generation model
+ * reasons. The 'no thinking field at all' branch is still a real one, so it
+ * is still reachable — through an explicit table.
+ */
+const NON_THINKING_CATALOG: ClaudeModelEntry[] = [{
+  id: 'claude-plain-x',
+  name: 'Claude Plain X',
+  contextWindow: 200_000,
+  maxTokens: 32_768,
+  supportsImage: true,
+  supportsTemperature: true,
+  thinkingMode: 'none',
+  reasoningEfforts: [],
+  canDisableThinking: false,
+}]
 
 function thinkingOf(built: Record<string, unknown>): Record<string, unknown> | undefined {
   return built.thinking as Record<string, unknown> | undefined
@@ -157,8 +178,11 @@ function messageStart(usage: Record<string, unknown> = START_USAGE): unknown {
 
 describe('Claude request body', () => {
   it('posts a streaming Messages body with the resolved cap and no thinking for a non-thinking model', () => {
-    const built = body({ model: 'claude-unknown-x', maxTokens: 4096 })
-    expect(built.model).toBe('claude-unknown-x')
+    // An id this line has never heard of inherits the current-model template
+    // and DOES reason, so a model that does not reason comes from an explicit
+    // table. No shipped row claims that today.
+    const built = body({ model: 'claude-plain-x', maxTokens: 4096 }, { catalog: NON_THINKING_CATALOG })
+    expect(built.model).toBe('claude-plain-x')
     // 4096 is the caller's cap AND the ceiling, so it is what goes on the wire.
     expect(built.max_tokens).toBe(4096)
     expect(built.stream).toBe(true)
@@ -168,10 +192,13 @@ describe('Claude request body', () => {
     // for every request built here. The full shape is still asserted on purpose:
     // this is the request the adapter posts, and a marker on the wrong block is
     // as much a bug as no marker at all.
+    // The id is outside the shipped table, but even a current model cannot put
+    // the loop's LEADING system prompt at messages[0]: it has no preceding user
+    // turn, so it folds into the top-level system field.
     expect(messagesOf(built)).toEqual([
       { role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral', ttl: '5m' } }] },
     ])
-    expect(claudeThinkingMode('claude-unknown-x')).toBe('none')
+    expect(claudeThinkingMode('claude-plain-x', NON_THINKING_CATALOG)).toBe('none')
   })
 
   it('resolves an absent caller cap to the MODEL cap, never to zero', () => {
@@ -181,8 +208,9 @@ describe('Claude request body', () => {
       .toBe(maxOutputTokensFor('claude-haiku-4-5'))
     expect(maxOutputTokensFor('claude-haiku-4-5')).toBe(64_000)
     expect(resolveMaxTokens(options({ model: 'claude-haiku-4-5' }))).toBe(64_000)
-    // The unknown-model stub keeps this line's default cap.
-    expect(resolveMaxTokens(options({ model: 'claude-unknown-x' }))).toBe(DEFAULT_MAX_TOKENS)
+    // An unknown id inherits the CURRENT-MODEL template, so its cap is the
+    // current generation's 128K rather than this line's older default.
+    expect(resolveMaxTokens(options({ model: 'claude-unknown-x' }))).toBe(128_000)
   })
 
   it('strips $schema from a tool input_schema and keeps the rest of the schema', () => {
@@ -310,9 +338,13 @@ describe('Prompt-cache breakpoints', () => {
       tools: TOOLS,
     }) as unknown as GenerateOptions)
 
-    // (1) the LAST system block — the head of the cached prefix.
+    // (1) the LAST system block — the head of the cached prefix. Opus 5.5
+    // supports mid-conversation system messages, but this one is the loop's
+    // LEADING prompt, so it folds into the top-level field rather than taking
+    // the forbidden messages[0] position.
     const system = systemBlocksOf(built)
     expect(system).toHaveLength(2)
+    expect(system[0]!.text).toBe(CLAUDE_CODE_IDENTITY_TEXT)
     expect(system[0]!.cache_control).toBeUndefined()
     expect(system[1]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
 
@@ -329,6 +361,23 @@ describe('Prompt-cache breakpoints', () => {
     expect(tools[1]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
 
     // Three sites, three markers, one each.
+    expect(countClaudeCacheBreakpoints(built)).toBe(3)
+  })
+
+  it('marks the LAST of two system blocks for a model that FOLDS its system messages', () => {
+    // Sonnet 4.6 is not on the vendor's mid-conversation list, so its
+    // historical system message is folded into the top-level field and the
+    // array holds the identity block AND that prompt.
+    const built = buildClaudeRequestBody(options({
+      model: 'claude-sonnet-4-6',
+      tools: TOOLS,
+    }) as unknown as GenerateOptions)
+
+    const system = systemBlocksOf(built)
+    expect(system).toHaveLength(2)
+    expect(system[0]!.text).toBe(CLAUDE_CODE_IDENTITY_TEXT)
+    expect(system[0]!.cache_control).toBeUndefined()
+    expect(system[1]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
     expect(countClaudeCacheBreakpoints(built)).toBe(3)
   })
 
@@ -482,7 +531,13 @@ describe('Thinking dispatch - the four catalog cases', () => {
     expect(claudeBodyBindsThinking(body({ model: 'claude-opus-5' }))).toBe(true)
     expect(claudeBodyBindsThinking(body({ model: 'claude-sonnet-4-6' }))).toBe(false)
     expect(claudeBodyBindsThinking(body({ model: 'claude-opus-5-5' }))).toBe(true)
-    expect(claudeBodyBindsThinking(body({ model: 'claude-does-not-exist' }))).toBe(false)
+    // An unknown id inherits the current-model template, which is a
+    // prefix-check model: the binding is sent, so the beta that licenses it
+    // is sent too.
+    expect(claudeBodyBindsThinking(body({ model: 'claude-does-not-exist' }))).toBe(true)
+    // A table that says the model does not reason sends no thinking field at
+    // all, and therefore no binding.
+    expect(claudeBodyBindsThinking(body({ model: 'claude-plain-x' }, { catalog: NON_THINKING_CATALOG }))).toBe(false)
   })
 
   it('binds Opus 5.5 thinking to its prefix WITHOUT forcing an effort', () => {
@@ -553,7 +608,7 @@ describe('Thinking dispatch - the four catalog cases', () => {
   })
 
   it('none sends NO thinking field at all', () => {
-    const built = body({ model: 'claude-unknown-x', reasoningEffort: 'high' as ReasoningEffortId })
+    const built = body({ model: 'claude-plain-x', reasoningEffort: 'high' as ReasoningEffortId }, { catalog: NON_THINKING_CATALOG })
     expect('thinking' in built).toBe(false)
     expect('output_config' in built).toBe(false)
   })
@@ -588,7 +643,7 @@ describe('Thinking dispatch - the four catalog cases', () => {
     expect(claudeThinking('claude-opus-4-5', 'high', 'high', 64_000)).toEqual({
       thinking: { type: 'enabled', budget_tokens: 16_384, display: 'summarized' },
     })
-    expect(claudeThinking('claude-unknown-x', 'high', 'high', 1000)).toEqual({})
+    expect(claudeThinking('claude-plain-x', 'high', 'high', 1000, undefined, NON_THINKING_CATALOG)).toEqual({})
   })
 })
 
@@ -642,9 +697,9 @@ describe('Thinking budget arithmetic (transcribed from the catalog)', () => {
 describe('The response ceiling', () => {
   it('is inflated by the thinking budget ONLY for a request that will think', () => {
     // A non-thinking model must ask for exactly the cap it was given.
-    const plain = body({ model: 'claude-unknown-x', maxTokens: 4096 })
+    const plain = body({ model: 'claude-plain-x', maxTokens: 4096 }, { catalog: NON_THINKING_CATALOG })
     expect(plain.max_tokens).toBe(4096)
-    expect(claudeRequestThinks('claude-unknown-x', 'high')).toBe(false)
+    expect(claudeRequestThinks('claude-plain-x', 'high', NON_THINKING_CATALOG)).toBe(false)
 
     // A thinking model's ceiling grows to hold the budget.
     const thinking = body({ model: 'claude-haiku-4-5', reasoningEffort: 'medium' as ReasoningEffortId, maxTokens: 4096 })
@@ -696,8 +751,11 @@ describe('Temperature gating', () => {
     expect(thinkingOf(built)).toEqual({ type: 'disabled' })
     expect(built.temperature).toBe(0.4)
 
-    const nonThinking = body({ model: 'claude-unknown-x', temperature: 0.2 })
+    const nonThinking = body({ model: 'claude-plain-x', temperature: 0.2 }, { catalog: NON_THINKING_CATALOG })
     expect(nonThinking.temperature).toBe(0.2)
+    // An unknown id inherits the current-model template, which refuses a
+    // temperature, so none is sent for it.
+    expect(body({ model: 'claude-unknown-x', temperature: 0.2 }).temperature).toBeUndefined()
   })
 
   it('passes stop sequences through when the caller states them', () => {
@@ -1274,6 +1332,162 @@ describe('Request image edge limits', () => {
   })
 })
 
+describe('Mid-conversation system messages', () => {
+  const system = (text: string) => ({ role: 'system', content: [{ type: 'text', text }] })
+  const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] })
+  const assistant = (text: string) => ({ role: 'assistant', content: [{ type: 'text', text }] })
+  function build(messages: unknown[], model = 'claude-opus-5-5', top?: string) {
+    return buildClaudeRequestBody(options({ model, messages, ...(top === undefined ? {} : { system: top }) }) as unknown as GenerateOptions)
+  }
+
+  it('keeps a content-bearing system message between a user and an assistant', () => {
+    const built = build([user('ask'), system('MID'), assistant('answer')], undefined, 'TOP LEVEL')
+    const messages = messagesOf(built)
+    expect(messages.map(message => message.role)).toEqual(['user', 'system', 'assistant'])
+    expect(messages[1]?.content[0]?.text).toBe('MID')
+    expect(systemBlocksOf(built).map(block => block.text)).toEqual([CLAUDE_CODE_IDENTITY_TEXT, 'TOP LEVEL'])
+  })
+
+  it('keeps a content-bearing system message that ends the request after a user', () => {
+    const built = build([user('ask'), system('TRAILING')])
+    expect(messagesOf(built).map(message => message.role)).toEqual(['user', 'system'])
+    expect(String(systemBlocksOf(built).at(-1)?.text)).not.toContain('TRAILING')
+  })
+
+  it('folds the DSH loop leading system prompt instead of writing forbidden messages[0]', () => {
+    const built = build([system('You are DSH.'), user('hello')])
+    expect(messagesOf(built).map(message => message.role)).toEqual(['user'])
+    expect(systemBlocksOf(built).map(block => block.text)).toEqual([CLAUDE_CODE_IDENTITY_TEXT, 'You are DSH.'])
+  })
+
+  it('folds a system message followed by another user turn', () => {
+    const built = build([user('first'), system('MID'), user('second')])
+    expect(messagesOf(built).map(message => message.role)).not.toContain('system')
+    expect(String(systemBlocksOf(built).at(-1)?.text)).toContain('MID')
+  })
+
+  it('applies the same placement rule to an unknown current-model id', () => {
+    const legal = build([user('ask'), system('MID'), assistant('answer')], 'claude-not-released-yet')
+    expect(messagesOf(legal).map(message => message.role)).toEqual(['user', 'system', 'assistant'])
+    const leading = build([system('LEADING'), user('ask')], 'claude-not-released-yet')
+    expect(messagesOf(leading).map(message => message.role)).toEqual(['user'])
+    expect(String(systemBlocksOf(leading).at(-1)?.text)).toContain('LEADING')
+  })
+
+  it('does not group consecutive system messages into a forbidden position', () => {
+    const built = build([user('ask'), system('FIRST'), system('SECOND'), assistant('answer')])
+    expect(messagesOf(built).map(message => message.role)).not.toContain('system')
+    const top = String(systemBlocksOf(built).at(-1)?.text)
+    expect(top).toContain('FIRST')
+    expect(top).toContain('SECOND')
+  })
+
+  it.each(['claude-sonnet-4-6', 'claude-sonnet-5'])('folds every historical system message for unsupported %s', model => {
+    const built = build([user('ask'), system('MID'), assistant('answer')], model)
+    expect(messagesOf(built).map(message => message.role)).not.toContain('system')
+    expect(String(systemBlocksOf(built).at(-1)?.text)).toContain('MID')
+  })
+})
+
+describe('Per-image and per-request image budgets', () => {
+  // TWO ceilings, enforced by TWO passes. The per-image one asks whether THIS
+  // picture is acceptable to the endpoint; the per-request one asks whether
+  // the conversation is still a reasonable size. A single budget cannot answer
+  // both: one image can be over the per-image ceiling while the request as a
+  // whole is small, and that request is refused however small it is.
+
+  it('keeps the two ceilings apart', () => {
+    expect(MAX_SINGLE_REQUEST_IMAGE_BYTES).toBe(5 * 1024 * 1024)
+    expect(MAX_REQUEST_IMAGE_BYTES).toBe(8 * 1024 * 1024)
+  })
+
+  it('SCALES an image that is over the per-image ceiling rather than dropping it', async () => {
+    const request = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: [
+      { type: 'image', attachment: { attachmentId: 'fat', mediaType: 'image/png', bytes: 9_000_000, width: 100, height: 100, name: 'fat.png' } },
+    ] }] }) as unknown as GenerateOptions
+
+    const requests: Array<{ id: string; target: unknown }> = []
+    const reader = {
+      readImage: async (ref: unknown) => ({ ref, data: new Uint8Array(9_000_000) }),
+      readImageRequest: async (ref: { attachmentId: string }, target: { width: number; height: number; maxBytes: number }) => {
+        requests.push({ id: ref.attachmentId, target })
+        return { width: target.width, height: target.height, mediaType: 'image/webp', data: new Uint8Array(1024) }
+      },
+    } as unknown as AttachmentImageReader
+
+    const images = await resolveRequestImages(request, reader)
+
+    // The stored image fits the EDGE limit, so it is read as stored — and its
+    // bytes are over the per-image ceiling, so the SAME scaling path is asked
+    // again with a byte target and the source dimensions.
+    expect(requests).toEqual([{ id: 'fat', target: { width: 100, height: 100, maxBytes: 3.5 * 1024 * 1024 } }])
+    expect(images.get('fat')).toEqual({ kind: 'inline', mediaType: 'image/webp', data: Buffer.from(new Uint8Array(1024)).toString('base64') })
+  })
+
+  it('degrades VISIBLY when no version of an over-budget image fits', async () => {
+    const request = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: [
+      { type: 'image', attachment: { attachmentId: 'fat', mediaType: 'image/png', bytes: 9_000_000, width: 100, height: 100, name: 'fat.png' } },
+    ] }] }) as unknown as GenerateOptions
+
+    const reader = {
+      readImage: async (ref: unknown) => ({ ref, data: new Uint8Array(9_000_000) }),
+      readImageRequest: async () => ({ width: 100, height: 100, mediaType: 'image/webp', data: new Uint8Array(9_000_000) }),
+    } as unknown as AttachmentImageReader
+
+    const images = await resolveRequestImages(request, reader)
+    // A distinct failure from 'unavailable': the bytes WERE read.
+    expect(images.get('fat')).toEqual({ kind: 'oversized' })
+
+    const built = buildClaudeRequestBody(request, images)
+    const block = messagesOf(built)[0]!.content[0]!
+    expect(block.type).toBe('text')
+    expect(String(block.text)).toContain('fat.png is larger than the per-image limit')
+  })
+
+  it('degrades an INLINE payload over the per-image ceiling visibly', () => {
+    // An inline payload has no stored image behind it, so there is no request
+    // version to derive: it degrades rather than being sent and refused.
+    const built = buildClaudeRequestBody(options({ messages: [{ role: 'user', source: { kind: 'user' }, content: [
+      { type: 'image', mimeType: 'image/png', data: 'A'.repeat(MAX_SINGLE_REQUEST_IMAGE_BYTES + 4) },
+    ] }] }) as unknown as GenerateOptions)
+
+    const block = messagesOf(built)[0]!.content[0]!
+    expect(block.type).toBe('text')
+    expect(String(block.text)).toContain('larger than the per-image limit')
+  })
+
+  it('measures the REQUEST budget against the resolved payload, not the stored estimate', () => {
+    // THE ORDER MATTERS. The stored estimate says 12 MB, which is over the
+    // 8 MB request ceiling, so the old measurement dropped an image whose
+    // resolved payload is four bytes.
+    const messages = [{ role: 'user' as const, source: { kind: 'user' }, content: [
+      { type: 'image' as const, attachment: { attachmentId: 'huge', mediaType: 'image/png', bytes: 9_000_000 } },
+    ] }]
+    const request = options({ messages }) as unknown as GenerateOptions
+
+    // Without a resolution the only number available is the estimate, and it
+    // is over the ceiling.
+    expect(offloadOldestRequestImages(request)).not.toBe(request)
+
+    // With the resolution the payload is tiny, so the image stays.
+    const resolved: ResolvedRequestImages = new Map([
+      ['huge', { kind: 'inline', mediaType: 'image/png', data: 'AAAA' }],
+    ])
+    expect(offloadOldestRequestImages(request, resolved)).toBe(request)
+  })
+
+  it('does not count an image that resolved to a placeholder against the request budget', () => {
+    const request = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: [
+      { type: 'image', attachment: { attachmentId: 'gone', mediaType: 'image/png', bytes: 9_000_000 } },
+    ] }] }) as unknown as GenerateOptions
+
+    const resolved: ResolvedRequestImages = new Map([
+      ['gone', { kind: 'unavailable' }],
+      ['fat', { kind: 'oversized' }],
+    ])
+    expect(offloadOldestRequestImages(request, resolved)).toBe(request)
+  })
+})
 describe('SSE state machine', () => {
   it('parses the line-oriented event/data pair form and ignores unknown events', () => {
     const state = createStreamState()
@@ -1896,7 +2110,7 @@ describe('Usage mapping', () => {
 
 describe('The four modes as complete bodies', () => {
   /** One request shape, varied only by model and effort. */
-  function requestFor(model: string, effort: string): Record<string, unknown> {
+  function requestFor(model: string, effort: string, catalog?: readonly ClaudeModelEntry[]): Record<string, unknown> {
     return buildClaudeRequestBody(options({
       model,
       reasoningEffort: effort as ReasoningEffortId,
@@ -1906,7 +2120,7 @@ describe('The four modes as complete bodies', () => {
       temperature: 0.3,
       messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }],
       tools: [{ name: 'bash', description: 'run', parameters: { $schema: 'x', type: 'object' } }],
-    }) as unknown as GenerateOptions)
+    }) as unknown as GenerateOptions, undefined, catalog === undefined ? {} : { catalog })
   }
 
   it('mid-convo emits adaptive+block_binding, output_config, an inflated ceiling and no temperature', () => {
@@ -1948,8 +2162,10 @@ describe('The four modes as complete bodies', () => {
   })
 
   it('none emits no thinking field, no output_config, an untouched ceiling and the temperature', () => {
-    const built = requestFor('claude-unknown-x', 'high')
-    expect(claudeThinkingMode('claude-unknown-x')).toBe('none')
+    // A model that does not reason comes from an explicit table: an unknown id
+    // inherits the current-model template, and every current model reasons.
+    const built = requestFor('claude-plain-x', 'high', NON_THINKING_CATALOG)
+    expect(claudeThinkingMode('claude-plain-x', NON_THINKING_CATALOG)).toBe('none')
     expect(built.max_tokens).toBe(8000)
     expect('thinking' in built).toBe(false)
     expect('output_config' in built).toBe(false)

@@ -20,6 +20,7 @@ import { resolveEnabledModelIds, getCommandCodeWebStatus, registerCommandCodeRou
 import { FileCredentialStore, FileModelSettingsStore, registerCommandCodePreferenceStore } from '../src/host/command-code/token-store.ts'
 import {
   FALLBACK_MODELS,
+  declaredMaxOutputTokens,
   inputModalitiesFor,
   maxOutputTokensFor,
   reasoningEffortsFor,
@@ -27,7 +28,11 @@ import {
   wireForModel,
   wireReasoningEffort,
 } from '../src/host/command-code/types.ts'
-import { commandCodeModelDef } from '../src/host/command-code/model-catalog.ts'
+import {
+  commandCodeModelDef,
+  SHIPPED_DEFAULT_ADDED_MODEL_IDS,
+  SHIPPED_DEFAULT_RETIRED_MODEL_IDS,
+} from '../src/host/command-code/model-catalog.ts'
 
 function tmp(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -125,16 +130,22 @@ describe('Command Code wire routing', () => {
     expect(resolveApiEnv(undefined)).toBe('prod')
   })
 
-  it('prefers a registry-declared output cap, then the observed cap, then the default', () => {
+  it('prefers a registry-declared output cap, then the host default', () => {
     // Registry-declared (Qwen 3.8 27B and the three Ling/Laguna entries carry one).
     expect(maxOutputTokensFor('Qwen/Qwen3.8-27B')).toBe(32_768)
     expect(maxOutputTokensFor('z-ai/glm-5.3-flash')).toBe(131_072)
-    // Not declared by the registry; the observed cross-provider cap applies.
-    expect(maxOutputTokensFor('gpt-5.6-sol')).toBe(128_000)
-    expect(maxOutputTokensFor('deepseek/deepseek-v4.1-flash')).toBe(384_000)
-    expect(maxOutputTokensFor('claude-sonnet-4-6')).toBe(64_000)
+    // Not declared by the registry: the official registry says the provider
+    // decides, so the host falls back to its own default and the WIRE carries
+    // no cap at all.
+    expect(maxOutputTokensFor('gpt-5.6-sol')).toBe(32_768)
+    expect(maxOutputTokensFor('deepseek/deepseek-v4.1-flash')).toBe(32_768)
+    expect(maxOutputTokensFor('claude-sonnet-4-6')).toBe(32_768)
     // Nothing known about it.
     expect(maxOutputTokensFor('unknown-model')).toBe(32_768)
+    // The declared cap is the only thing the wire may carry.
+    expect(declaredMaxOutputTokens('z-ai/glm-5.3-flash')).toBe(131_072)
+    expect(declaredMaxOutputTokens('gpt-5.6-sol')).toBeUndefined()
+    expect(declaredMaxOutputTokens('claude-sonnet-4-6')).toBeUndefined()
   })
 })
 
@@ -245,6 +256,21 @@ describe('Command Code model options', () => {
     expect(resolveEnabledModelIds(shipped, catalog)).toEqual(catalog.map((model) => model.id))
     // An explicit empty selection disables all models
     expect(resolveEnabledModelIds([], catalog)).toEqual([])
+  })
+
+  it('still reads a selection from the previous release as unedited', () => {
+    // A user who never touched the selection still carries the list the
+    // previous release shipped. The 1.88.2 refresh moved models in and out of
+    // the default, so that list no longer equals the current one; reading it as
+    // edited would hide every model the refresh added behind a list nobody
+    // touched.
+    const catalog = parseProviderModels(CATALOG)
+    const previous = FALLBACK_MODELS
+      .map((model) => model.id)
+      .filter((id) => !SHIPPED_DEFAULT_ADDED_MODEL_IDS.includes(id))
+    for (const id of SHIPPED_DEFAULT_RETIRED_MODEL_IDS) previous.push(id)
+    expect(previous).toHaveLength(85)
+    expect(resolveEnabledModelIds(previous, catalog)).toEqual(catalog.map((model) => model.id))
   })
 
   it('honours an explicit selection and drops entries the catalog no longer serves', () => {

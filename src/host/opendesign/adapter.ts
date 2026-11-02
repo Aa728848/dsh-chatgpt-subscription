@@ -30,9 +30,11 @@ import { resolveModelInfo } from './catalog.ts'
 import { openDesignVisibleModelIds } from './line.ts'
 import {
   buildOpenDesignBody,
+  isUnsupportedMaxTokensError,
   parseServerSentEvents,
   streamErrorCode,
   translate,
+  withCompletionTokens,
 } from './mapper.ts'
 import { openChatStream, firstMessage } from './client.ts'
 import type { OpenDesignModelSettings, OpenDesignModelSettingsStore } from './token-store.ts'
@@ -287,9 +289,13 @@ export class OpenDesignAdapter extends LlmAdapter {
     })
     const options: GenerateOptions = offloadOldestRequestImages(normalized, MAX_REQUEST_IMAGE_BYTES, images)
     const info = await this.modelInfo(options.model)
-    const body = buildOpenDesignBody(options, { maxTokens: info.maxTokens }, images)
+    let body = buildOpenDesignBody(options, { maxTokens: info.maxTokens }, images)
     const refused = new Set<string>()
     let lastError: LlmError | null = null
+    // The ONE downgrade this request may make: a gateway that refuses the
+    // output-budget field BY NAME is answered with the field it asked for.
+    // Every other 400 is the caller's mistake and is never replayed.
+    let downgraded = false
 
     for (;;) {
       let picked: PickedAccount
@@ -365,6 +371,17 @@ export class OpenDesignAdapter extends LlmAdapter {
             const parsed: unknown = JSON.parse(raw)
             detail = firstMessage(parsed) || detail
           } catch { /* keep the raw text */ }
+          // The one replay a refused output budget earns. The gateway named
+          // the field it rejects AND the field it wants, so the budget travels in
+          // the wanted field instead — once. Any other 400 stays a 400.
+          if (response.status === 400
+            && !downgraded
+            && body.max_tokens !== undefined
+            && (isUnsupportedMaxTokensError(detail) || isUnsupportedMaxTokensError(raw))) {
+            downgraded = true
+            body = withCompletionTokens(body)
+            continue
+          }
           const code = streamErrorCode(detail, response.status)
           lastError = new LlmError(`${detail || `HTTP ${response.status}`} [model=${options.model}]`, code, { status: response.status })
           // An account-level refusal is worth another ACCOUNT: that is the whole

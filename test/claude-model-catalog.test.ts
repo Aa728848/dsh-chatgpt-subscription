@@ -59,6 +59,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  CLAUDE_CURRENT_MODEL_CAPABILITIES,
+  CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS,
   CLAUDE_MODELS,
   CLAUDE_MODEL_IDS,
   DEFAULT_VISIBLE_MODEL_IDS,
@@ -68,6 +70,7 @@ import {
   claudeModelSupportsImage,
   claudeModelSupportsTemperature,
   claudeReasoningEfforts,
+  claudeSupportsMidConversationSystemMessages,
   claudeThinkingMode,
   defaultContextWindowFor,
   maxOutputTokensFor,
@@ -859,25 +862,51 @@ describe('claude model catalog / locally curated rows', () => {
 // ---------------------------------------------------------------------------
 
 describe('claude model catalog / lookups', () => {
-  it('resolves a conservative stub for an unknown id rather than another model\'s capabilities', () => {
-    const stub = resolveClaudeModel('claude-does-not-exist')
-    expect(stub).toEqual({
+  it('resolves the CURRENT-MODEL template for an unknown id rather than another model\'s capabilities', () => {
+    const template = resolveClaudeModel('claude-does-not-exist')
+    expect(template).toEqual({
       id: 'claude-does-not-exist',
       name: 'claude-does-not-exist',
-      contextWindow: DEFAULT_CONTEXT_WINDOW,
-      maxTokens: DEFAULT_MAX_TOKENS,
-      supportsImage: false,
-      supportsTemperature: true,
-      thinkingMode: 'none',
-      reasoningEfforts: [],
-      canDisableThinking: false,
+      ...CLAUDE_CURRENT_MODEL_CAPABILITIES,
     })
-    // The distinction that matters: the stub is not the first catalog row.
-    expect(stub).not.toEqual(CLAUDE_MODELS[0])
-    // The stub must not claim a thinking form it cannot justify: it asserts no
-    // reasoning, so there is nothing to disable and no form to name.
-    expect(stub.reasoningEfforts).toEqual([])
-    expect(stub.canDisableThinking).toBe(false)
+    // The distinction that matters: the template is not the first catalog row.
+    expect(template).not.toEqual(CLAUDE_MODELS[0])
+  })
+
+  it('gives an unknown id the shape of the CURRENT generation: adaptive, the full ladder, images, 1M/128K', () => {
+    // THE OLD BEHAVIOUR WAS A CLAIM-NOTHING STUB: no images, no thinking form,
+    // an empty ladder and a 200K window. Every one of those is a claim about
+    // a model nobody described, and every one of them makes the request
+    // WORSE: a picture the model could read becomes a placeholder, the
+    // request sends no thinking field at all, and the conversation is
+    // compacted five times earlier than it has to be.
+    const unknown = resolveClaudeModel('claude-some-future-release')
+    expect(unknown.thinkingMode).toBe('adaptive')
+    expect(unknown.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(unknown.supportsImage).toBe(true)
+    expect(unknown.contextWindow).toBe(1_000_000)
+    expect(unknown.maxTokens).toBe(128_000)
+    // The two fields the enumeration does not name are set the SAFE way:
+    // omitting a parameter is never an error, sending an unsupported one is.
+    expect(unknown.supportsTemperature).toBe(false)
+    expect(unknown.canDisableThinking).toBe(false)
+    // The prefix binding is what the preserved-thinking prefix check needs.
+    expect(unknown.bindsThinkingToPrefix).toBe(true)
+  })
+
+  it('hands out a COPY of the template ladder, so a caller cannot mutate it for the next id', () => {
+    const first = resolveClaudeModel('claude-future-a')
+    // The catalog entry declares the ladder readonly, so the mutation needs an
+    // explicit test-only widening. It widens THE ARRAY THE CALLER RECEIVED
+    // and nothing else: a copy of that array would push into a throwaway and
+    // prove nothing about what the caller can reach.
+    const received = first.reasoningEfforts as string[]
+    received.push('injected')
+    // The caller's own array is the one that changed...
+    expect(first.reasoningEfforts).toContain('injected')
+    // ...and the template every later id inherits is untouched.
+    expect(CLAUDE_CURRENT_MODEL_CAPABILITIES.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(resolveClaudeModel('claude-future-b').reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
   })
 
   it('resolves the stub only on a miss, and the real row on a hit', () => {
@@ -900,14 +929,14 @@ describe('claude model catalog / lookups', () => {
     expect([...resolveClaudeModel('claude-opus-4-7').reasoningEfforts]).toEqual(before)
   })
 
-  it('gives every accessor the stub fallback for an unknown id', () => {
+  it('gives every accessor the current-model template for an unknown id', () => {
     const unknown = 'claude-unknown-model'
-    expect(defaultContextWindowFor(unknown)).toBe(DEFAULT_CONTEXT_WINDOW)
-    expect(maxOutputTokensFor(unknown)).toBe(DEFAULT_MAX_TOKENS)
-    expect(claudeModelSupportsImage(unknown)).toBe(false)
-    expect(claudeReasoningEfforts(unknown)).toEqual([])
-    expect(claudeThinkingMode(unknown)).toBe('none')
-    expect(claudeModelSupportsTemperature(unknown)).toBe(true)
+    expect(defaultContextWindowFor(unknown)).toBe(1_000_000)
+    expect(maxOutputTokensFor(unknown)).toBe(128_000)
+    expect(claudeModelSupportsImage(unknown)).toBe(true)
+    expect(claudeReasoningEfforts(unknown)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(claudeThinkingMode(unknown)).toBe('adaptive')
+    expect(claudeModelSupportsTemperature(unknown)).toBe(false)
     expect(claudeModelCanDisableThinking(unknown)).toBe(false)
   })
 
@@ -947,7 +976,7 @@ describe('claude model catalog / lookups', () => {
     // The shipped table is not reachable through a custom catalog, and an empty
     // one degrades to the stub rather than falling back to the shipped rows.
     expect(resolveClaudeModel('claude-opus-5', custom).name).toBe('claude-opus-5')
-    expect(resolveClaudeModel('claude-opus-5', []).contextWindow).toBe(DEFAULT_CONTEXT_WINDOW)
+    expect(resolveClaudeModel('claude-opus-5', []).contextWindow).toBe(1_000_000)
   })
 
   it('ships a frozen table whose fallback view is the table itself', () => {
@@ -1086,5 +1115,56 @@ describe('claude model catalog / lookups', () => {
     // does change the first row a new user sees, which is why it is pinned.
     expect(DEFAULT_VISIBLE_MODEL_IDS[0]).toBe('claude-opus-5-5')
     expect(resolveClaudeModel(DEFAULT_VISIBLE_MODEL_IDS[0]).name).toBe('Claude Opus 5.5')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Mid-conversation system messages
+// ---------------------------------------------------------------------------
+
+describe('claude model catalog / mid-conversation system messages', () => {
+  it('names exactly the models the vendor documents as accepting one', () => {
+    // TRANSCRIBED from the vendor's own "Mid-conversation system messages and
+    // tool changes" page, whose supported-model list names these ten models.
+    expect([...CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS].sort()).toEqual([
+      'claude-fable-5',
+      'claude-fable-5-1',
+      'claude-haiku-5-5',
+      'claude-mythos-5',
+      'claude-mythos-5-1',
+      'claude-mythos-preview',
+      'claude-opus-4-8',
+      'claude-opus-5',
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+    ])
+  })
+
+  it('excludes Claude Sonnet 5, which the vendor names as NOT supporting the feature', () => {
+    // The vendor says it in as many words: "This feature is not available on
+    // Claude Sonnet 5. Use the top-level system field there instead."
+    expect(CLAUDE_MODELS.some((model) => model.id === 'claude-sonnet-5')).toBe(true)
+    expect(claudeSupportsMidConversationSystemMessages('claude-sonnet-5')).toBe(false)
+  })
+
+  it('keeps the FOLDED behaviour for every shipped model outside the official list', () => {
+    for (const model of CLAUDE_MODELS) {
+      const supported = CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS.includes(model.id)
+      expect(claudeSupportsMidConversationSystemMessages(model.id)).toBe(supported)
+    }
+    // The negative cases named by the vendor's own list.
+    expect(claudeSupportsMidConversationSystemMessages('claude-sonnet-4-6')).toBe(false)
+    expect(claudeSupportsMidConversationSystemMessages('claude-opus-4-6')).toBe(false)
+    expect(claudeSupportsMidConversationSystemMessages('claude-haiku-4-5')).toBe(false)
+  })
+
+  it('treats an UNKNOWN id as a current model, so it keeps the message in place', () => {
+    // An unknown id inherits the current-generation template, and every
+    // current-generation model is on the official list. The check is against
+    // the SHIPPED table rather than a caller's catalog on purpose: the live
+    // listing names ids this table predates, and those are exactly the
+    // "unknown" case.
+    expect(claudeSupportsMidConversationSystemMessages('claude-not-here-yet')).toBe(true)
+    expect(claudeSupportsMidConversationSystemMessages('vertex_ai/claude-sonnet-4-6')).toBe(true)
   })
 })
