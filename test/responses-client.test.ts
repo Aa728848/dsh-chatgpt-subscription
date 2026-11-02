@@ -349,6 +349,96 @@ describe('Responses streaming', () => {
   })
 })
 
+describe('Codex incomplete responses', () => {
+  it('maps a budget-exhausted incomplete response to max-tokens and drops its complete and truncated tool calls', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'fc_full', call_id: 'call_full', name: 'read_file', arguments: '{"path":"a"}' } },
+      { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'fc_partial', call_id: 'call_partial', name: 'shell', arguments: '' } },
+      { type: 'response.function_call_arguments.delta', item_id: 'fc_partial', output_index: 1, delta: '{"command":"pwd' },
+      {
+        type: 'response.incomplete',
+        response: {
+          incomplete_details: { reason: 'max_output_tokens' },
+          output: [{ type: 'function_call', call_id: 'call_full', name: 'read_file', arguments: '{"path":"a"}' }],
+        },
+      },
+    ])))
+    // A truncated tool call must not even fail the turn on its invalid JSON:
+    // the answer was cut short, so the call is unanswered and simply dropped.
+    expect(chunks.some((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')).toBe(false)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'max-tokens' } })
+    expect(chunks.at(-1)).toMatchObject({ replayState: { response: { outputItems: [] } } })
+  })
+
+  it('maps max_messages to a max-tokens finish', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.incomplete', response: { incomplete_details: { reason: 'max_messages' } } },
+    ])))
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'max-tokens' } })
+  })
+
+  it.each([
+    ['no incomplete_details', {}],
+    ['a null incomplete_details', { incomplete_details: null }],
+    ['a null reason', { incomplete_details: { reason: null } }],
+  ])('maps %s to a max-tokens finish', async (_label, response) => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.incomplete', response },
+    ])))
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'max-tokens' } })
+  })
+
+  it('finishes a steered incomplete response as a stop without executing or replaying its tool call', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'fc_steer', call_id: 'call_steer', name: 'read_file', arguments: '{"path":"a"}' } },
+      {
+        type: 'response.incomplete',
+        response: {
+          incomplete_details: { reason: 'steered' },
+          output: [{ type: 'function_call', call_id: 'call_steer', name: 'read_file', arguments: '{"path":"a"}' }],
+        },
+      },
+    ])))
+    expect(chunks.some((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')).toBe(false)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(chunks.at(-1)).toMatchObject({ replayState: { response: { outputItems: [] } } })
+  })
+
+  it('reports a content-filtered incomplete response with the provider code', async () => {
+    await expect(collect(parseResponsesStream(sse([
+      { type: 'response.incomplete', response: { incomplete_details: { reason: 'content_filter' }, error: { message: 'blocked by policy' } } },
+    ])))).rejects.toMatchObject({ code: 'CONTENT_FILTER' })
+  })
+
+  it('reports an unknown incomplete reason with the raw reason and message preserved', async () => {
+    const failure = await collect(parseResponsesStream(sse([
+      { type: 'response.incomplete', response: { incomplete_details: { reason: 'server_busy' }, error: { message: 'upstream said no' } } },
+    ]))).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ code: 'PROVIDER_INCOMPLETE' })
+    expect((failure as Error).message).toContain('server_busy')
+    expect((failure as Error).message).toContain('upstream said no')
+  })
+
+  it('leaves a completed response untouched', async () => {
+    const chunks = await collect(parseResponsesStream(sse([
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'fc_ok', call_id: 'call_ok', name: 'read_file', arguments: '{"path":"a"}' } },
+      { type: 'response.completed', response: { output: [{ type: 'function_call', call_id: 'call_ok', name: 'read_file', arguments: '{"path":"a"}' }] } },
+    ])))
+    expect(chunks).toContainEqual({
+      type: 'block-end', index: 0,
+      block: { type: 'tool-call', id: 'call_ok', name: 'read_file', arguments: '{"path":"a"}' },
+    })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+    expect(chunks.at(-1)).toMatchObject({
+      replayState: {
+        response: {
+          outputItems: [{ type: 'function_call', call_id: 'call_ok', name: 'read_file', arguments: '{"path":"a"}' }],
+        },
+      },
+    })
+  })
+})
+
 describe('Responses conversation continuity', () => {
   it('sends a stable prompt cache key and replays turn state on the next turn', async () => {
     // Both are the backend's own continuation mechanisms: the cache key lets it

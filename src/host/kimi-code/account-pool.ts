@@ -4,6 +4,7 @@ import {
   AccountPoolCore,
   normalizeRotationStrategy,
   type AccountPoolHooks,
+  type AccountPoolRefreshOptions,
   type PoolAccountShape,
   type PoolData,
 } from '../common/account-pool.ts'
@@ -218,7 +219,7 @@ export class KimiCodeAccountPool extends AccountPoolCore<
       }),
       expiresAt: (credentials) => credentials.expiresAt,
       needsRefresh: (credentials, now) => credentials.expiresAt - now <= refreshThresholdMs(credentials.expiresIn),
-      refresh: async (credentials, fetchFn) => {
+      refresh: async (credentials, fetchFn, options) => {
         // The refresh targets this account's own OAuth host and region, and the
         // rotated pair replaces only the token fields: an account from one region
         // must not silently become an account of another.
@@ -226,6 +227,9 @@ export class KimiCodeAccountPool extends AccountPoolCore<
           fetchFn,
           host: credentials.oauthHost,
           region: credentials.region,
+          // The caller's budget, when it stated one. Absent keeps the provider's
+          // own default, so a caller that expressed nothing behaves as before.
+          ...(options?.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
         })
         return {
           ...credentials,
@@ -306,8 +310,9 @@ export class KimiCodeAccountPool extends AccountPoolCore<
   async getEffectiveCredential(
     excludeIds?: ReadonlySet<string>,
     fetchFn: typeof fetch = fetch,
+    options?: AccountPoolRefreshOptions,
   ): Promise<{ account: KimiCodePoolAccount; credentials: KimiCodeCredentials }> {
-    return this.getEffectiveAccount(excludeIds, fetchFn)
+    return this.getEffectiveAccount(excludeIds, fetchFn, false, options)
   }
 
   /** The pre-pool credential file this pool mirrors its primary account into. */

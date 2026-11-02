@@ -68,6 +68,28 @@ export interface PoolAccountInput<TCredentials, TAccount> {
 }
 
 /**
+ * What one refresh is allowed to spend, as the caller states it.
+ *
+ * A refresh that fails transiently is normally retried inside the provider's
+ * own OAuth layer, and that layer has its own default budget. A caller that
+ * ALREADY owns a retry loop must be able to say so: when the harness retries a
+ * model request, an inner retry loop multiplies the two budgets, so one
+ * upstream hiccup costs the service several times more requests than the
+ * caller ever intended.
+ *
+ * The field is optional everywhere it appears. An absent budget means the
+ * provider's own default, so every existing call keeps its behaviour.
+ */
+export interface AccountPoolRefreshOptions {
+  /**
+   * How many attempts one refresh gets, including the first.
+   *
+   * A positive integer. Absent means the provider's default.
+   */
+  maxAttempts?: number
+}
+
+/**
  * Provider-specific behaviour of one account pool.
  *
  * The storage, serialization, eligibility, rotation and cooldown rules live in
@@ -107,8 +129,14 @@ export interface AccountPoolHooks<
   expiresAt?(credentials: TCredentials): number | undefined
   /** Whether the credential must be refreshed before the next request. */
   needsRefresh?(credentials: TCredentials, now: number): boolean
-  /** Refresh one credential, returning the value to persist back into the pool. */
-  refresh?(credentials: TCredentials, fetchFn: typeof fetch): Promise<TCredentials>
+  /**
+   * Refresh one credential, returning the value to persist back into the pool.
+   *
+   * The attempt budget the caller stated arrives as the third argument. It is
+   * absent when the caller expressed none, and a hook that ignores it keeps
+   * whatever budget its own provider defaults to.
+   */
+  refresh?(credentials: TCredentials, fetchFn: typeof fetch, options?: AccountPoolRefreshOptions): Promise<TCredentials>
   /**
    * Classify a failed refresh.
    *
@@ -901,7 +929,12 @@ export class AccountPoolCore<
    * from the lock is a plain value: awaiting a flight while holding the lock
    * would deadlock that flight's own commit.
    */
-  private async freshAccount(target: TAccount, fetchFn: typeof fetch, force = false): Promise<TAccount> {
+  private async freshAccount(
+    target: TAccount,
+    fetchFn: typeof fetch,
+    force = false,
+    options?: AccountPoolRefreshOptions,
+  ): Promise<TAccount> {
     let launch: (() => void) | undefined
     const plan = await this.serialize(async () => {
       const data = await this.loadPoolData()
@@ -922,7 +955,7 @@ export class AccountPoolCore<
         return { result: pending.result as Promise<TAccount> }
       }
       const result = new Promise<TAccount>((resolve, reject) => {
-        launch = () => { void this.refreshAccount(current, fetchFn).then(resolve, reject) }
+        launch = () => { void this.refreshAccount(current, fetchFn, options).then(resolve, reject) }
       })
       const flight = { credentials: structuredClone(current.credentials), result }
       poolRefreshes.set(key, flight)
@@ -943,7 +976,11 @@ export class AccountPoolCore<
    * which is what keeps a late response from restoring a spent token over a
    * re-login, and keeps a deleted account from coming back.
    */
-  private async refreshAccount(target: TAccount, fetchFn: typeof fetch): Promise<TAccount> {
+  private async refreshAccount(
+    target: TAccount,
+    fetchFn: typeof fetch,
+    options?: AccountPoolRefreshOptions,
+  ): Promise<TAccount> {
     const expected = structuredClone(target.credentials)
     // Spending a refresh token this account no longer owns is guaranteed to fail,
     // and the failure would be recorded as a dead sign-in. When the provider keeps
@@ -960,7 +997,7 @@ export class AccountPoolCore<
 
     let refreshed: TCredentials
     try {
-      refreshed = await this.hooks.refresh!(target.credentials, fetchFn)
+      refreshed = await this.hooks.refresh!(target.credentials, fetchFn, options)
     } catch (error) {
       // Same policy as a metered request: a refresh the provider calls final is
       // that account's problem, and the caller should say so rather than keep
@@ -1120,12 +1157,16 @@ export class AccountPoolCore<
    * @param excludeIds - accounts already tried for this request, so a retry
    *   lands on a different account.
    * @param fetchFn - fetch used by the provider's token refresh.
+   * @param forceRefresh - renew even when the stored token still looks usable.
+   * @param options - what the refresh may spend, passed down to the provider's
+   *   refresh hook. Absent means the provider's own default budget.
    * @throws LlmError with `RATE_LIMIT` when every account is cooling down.
    */
   async getEffectiveAccount(
     excludeIds?: ReadonlySet<string>,
     fetchFn: typeof fetch = fetch,
     forceRefresh = false,
+    options?: AccountPoolRefreshOptions,
   ): Promise<{ account: TAccount; credentials: TCredentials }> {
     const data = await this.read()
     if (data.accounts.length === 0) {
@@ -1140,7 +1181,7 @@ export class AccountPoolCore<
 
     let refreshed: TAccount
     try {
-      refreshed = await this.freshAccount(selected, fetchFn, forceRefresh)
+      refreshed = await this.freshAccount(selected, fetchFn, forceRefresh, options)
     } catch (error) {
       if (this.hooks.refreshFailureStatus?.(error) === undefined
         && !(error instanceof PoolAccountUnavailableError)) {
@@ -1152,7 +1193,7 @@ export class AccountPoolCore<
       // row deleted mid-request is nobody's problem: either way, another account
       // may still be able to serve this request.
       if (await this.hasAnotherAvailableAccount(nextExclude)) {
-        return this.getEffectiveAccount(nextExclude, fetchFn, forceRefresh)
+        return this.getEffectiveAccount(nextExclude, fetchFn, forceRefresh, options)
       }
       throw error
     }

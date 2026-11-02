@@ -485,6 +485,8 @@ export async function* parseResponsesStream(
   let pendingReasoningDelta = ''
   let reasoningTruncated = false
   let terminal: FinishReason | null = null
+  /** Whether the terminal event was an incomplete response, whatever it maps to. */
+  let terminalIncomplete = false
   let usage: TokenUsage | null = null
   let replayOutput: Array<Record<string, unknown>> = []
   const tools = new Map<string, ToolState>()
@@ -631,9 +633,12 @@ export async function* parseResponsesStream(
           .map((item) => structuredClone(item))
         for (const item of output) yield* adoptText(messageItemText(record(item)))
       }
-      terminal = type === 'response.incomplete'
-        ? incompleteFinishReason(completed)
-        : { kind: 'stop' }
+      if (type === 'response.incomplete') {
+        terminalIncomplete = true
+        terminal = incompleteFinishReason(completed)
+      } else {
+        terminal = { kind: 'stop' }
+      }
       return
     }
     if (type === 'response.failed' || type === 'error') {
@@ -702,10 +707,12 @@ export async function* parseResponsesStream(
   if (textIndex !== null) {
     yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
   }
-  if (finalReason.kind === 'max-tokens') {
+  if (terminalIncomplete) {
     // An incomplete response must neither execute a finished-looking tool call
     // nor replay an unanswered call on the next request. Leave streamed tool
-    // blocks unfinished so the harness drops them at the max-tokens finish.
+    // blocks unfinished so the harness drops them at the finish. This holds for
+    // every incomplete reason, including a steered turn that finishes as a
+    // plain stop: the turn was cut short, so its tool calls are unanswered.
     tools.clear()
     replayOutput = replayOutput.filter((item) => item.type !== 'function_call')
   }
@@ -742,11 +749,31 @@ export async function* parseResponsesStream(
   }
 }
 
-/** Only an explicit provider output-budget exhaustion is a max-tokens finish. */
-function incompleteFinishReason(response: Record<string, unknown> | null): Extract<FinishReason, { kind: 'max-tokens' }> {
-  const reason = record(response?.incomplete_details)?.reason
-  if (reason === 'max_output_tokens') return { kind: 'max-tokens' }
-  const detail = reason === undefined ? 'missing incomplete_details.reason' : JSON.stringify(reason)
+/**
+ * The finish reason an incomplete response maps to.
+ *
+ * The provider states why it stopped in `incomplete_details.reason`, and the
+ * reasons are not interchangeable:
+ *
+ * - A budget exhaustion (`max_output_tokens`, `max_messages`) is the
+ *   truncated answer, so it is a max-tokens finish. A response that names no
+ *   reason at all is treated the same way: the turn was cut short by an
+ *   output limit far more often than by anything else, and reporting it as a
+ *   normal stop would silently claim the answer was complete.
+ * - A `steered` turn is one the user interrupted. Nothing failed, so it
+ *   finishes as an ordinary stop.
+ * - A `content_filter` is the provider's own refusal and keeps its own code.
+ * - Any other reason is an unknown provider condition. It is reported as an
+ *   incomplete provider failure with the raw reason and message preserved, so
+ *   the report says what actually happened instead of naming a guess.
+ */
+function incompleteFinishReason(response: Record<string, unknown> | null): FinishReason {
+  const details = record(response?.incomplete_details)
+  const reason = details === null ? undefined : details.reason
+  if (reason === undefined || reason === null
+    || reason === 'max_output_tokens' || reason === 'max_messages') return { kind: 'max-tokens' }
+  if (reason === 'steered') return { kind: 'stop' }
+  const detail = JSON.stringify(reason)
   const message = string(record(response?.error)?.message)
   throw new LlmError(
     `Codex returned an incomplete response (${detail})${message ? `: ${message}` : '.'}`,

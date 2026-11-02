@@ -288,7 +288,11 @@ export async function buildResponsesPayload(
   // declares `defaultMaxTokens` in its model info, which DSH uses as a LOCAL
   // reservation when it plans compaction — that number never reaches the wire.
   // Truncation is still reported: the backend ends such a turn with
-  // `response.incomplete`, which `parseResponsesStream` maps to `max-tokens`.
+  // `response.incomplete`, which `parseResponsesStream` maps to `max-tokens`
+  // when the provider names a budget reason (`max_output_tokens`,
+  // `max_messages`) or names none at all. A steered turn is an ordinary stop
+  // and a content filter is the provider's own refusal, so neither is a
+  // truncation.
   //
   // Do not reintroduce it, not even clamped to the model ceiling: that is
   // exactly the request the accounts in #29 reject.

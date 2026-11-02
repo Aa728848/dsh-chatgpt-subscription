@@ -387,6 +387,34 @@ describe('Responses payload mapping', () => {
     expect(payload.input.filter((item) => item.type === 'function_call' && item.call_id === 'call_wrapped')).toHaveLength(1)
   })
 
+  it('keeps native sandbox controls in replayed tool arguments verbatim', async () => {
+    // The provider owns these fields: the backend understands
+    // `sandbox_permissions` and `justification`, so replaying a tool call
+    // must hand them back byte for byte. Anything that rewrites the arguments
+    // here silently changes what the tool is allowed to do on the next turn.
+    const argumentsJson = '{"command":"git status","description":"Show status","sandbox_permissions":"workspace-write","justification":"needs the repository"}'
+    const options = {
+      provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [
+        {
+          id: 'm1', role: 'assistant',
+          source: {
+            kind: 'model', provider: 'codex-chatgpt', model: 'gpt-5.6-sol',
+            replayState: { response: { outputItems: [{ type: 'function_call', call_id: 'call_pwsh', name: 'pwsh', arguments: argumentsJson }] } },
+          },
+          content: [{ type: 'tool-call', id: 'call_pwsh', name: 'pwsh', arguments: argumentsJson }],
+        },
+      ],
+    } as unknown as GenerateOptions
+    const payload = await buildResponsesPayload(options, unusedAttachments())
+    const calls = payload.input.filter((item) => item.type === 'function_call')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.arguments).toBe(argumentsJson)
+    expect(JSON.parse(String(calls[0]?.arguments))).toMatchObject({
+      sandbox_permissions: 'workspace-write',
+      justification: 'needs the repository',
+    })
+  })
+
   it('preserves native tool declarations before any sandbox denial', async () => {
     const options = {
       provider: 'codex-chatgpt', model: 'gpt-5.6-sol', messages: [

@@ -48,8 +48,12 @@ const OAUTH_TIMEOUT_MS = 30_000
  * A 429 or any 5xx says nothing about the refresh token itself — the endpoint
  * is busy or briefly broken — so the same token is worth retrying. 401/403 and
  * an `invalid_grant` body are the only verdicts that the token is dead.
+ *
+ * A 408 (the endpoint gave up waiting for the request) belongs to the same
+ * class: it describes the server's mood, not the token, and it is the status a
+ * proxy in front of the OAuth host reports when the upstream was slow.
  */
-const RETRYABLE_REFRESH_STATUSES = new Set([429, 500, 502, 503, 504])
+const RETRYABLE_REFRESH_STATUSES = new Set([408, 429, 500, 502, 503, 504])
 
 /** Raised when the stored refresh token was rejected and a new login is required. */
 export class KimiCodeUnauthorizedError extends Error {
@@ -535,22 +539,54 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
+ * The attempt budget one refresh runs on.
+ *
+ * Absent means the provider's own default ({@link REFRESH_MAX_RETRIES}). A
+ * budget that is not a positive integer is refused outright rather than
+ * silently repaired: a caller that asks for zero attempts wants no refresh at
+ * all, and a caller that asks for a negative or fractional number has a bug.
+ * Quietly turning either into the default would hide that bug behind requests
+ * the caller never intended to make.
+ */
+function resolveRefreshMaxAttempts(maxAttempts: number | undefined): number {
+  if (maxAttempts === undefined) return REFRESH_MAX_RETRIES
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new RangeError(
+      `Invalid refresh attempt budget: ${String(maxAttempts)}. It must be a positive integer.`,
+    )
+  }
+  return maxAttempts
+}
+
+/**
  * Refresh an access token, with the official client's bounded retry.
  *
  * Only a transient status or a transport failure is retried; a 401/403 (or an
  * `invalid_grant` body) is a verdict that the refresh token is dead and stops
  * immediately, because retrying it can never succeed.
+ *
+ * `maxAttempts` states the budget explicitly. A caller that already owns a
+ * retry loop — the harness retrying a model request — sets it to 1, so the two
+ * budgets do not multiply: the inner loop would otherwise spend the upstream
+ * three times over on every attempt the outer loop already counts.
  */
 export async function refreshAccessToken(
   refreshToken: string,
-  options: { fetchFn?: typeof fetch; signal?: AbortSignal; host?: string; region?: KimiCodeRegion } = {},
+  options: {
+    fetchFn?: typeof fetch
+    signal?: AbortSignal
+    host?: string
+    region?: KimiCodeRegion
+    maxAttempts?: number
+  } = {},
 ): Promise<OAuthToken> {
+  const maxAttempts = resolveRefreshMaxAttempts(options.maxAttempts)
   const fetchFn = options.fetchFn ?? fetch
   const region = options.region ?? await resolveRegion()
   const host = options.host ?? oauthHost(region)
   let lastError: unknown
 
-  for (let attempt = 0; attempt < REFRESH_MAX_RETRIES; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const response = await fetchFn(oauthEndpoint(host, OAUTH_TOKEN_PATH), {
         method: 'POST',
@@ -584,13 +620,16 @@ export async function refreshAccessToken(
       lastError = error
     }
 
-    if (attempt < REFRESH_MAX_RETRIES - 1) {
+    if (attempt < maxAttempts - 1) {
       await sleep(REFRESH_BACKOFF_BASE_MS * 2 ** attempt, options.signal)
     }
   }
 
   throw new KimiCodeRetryableError(
-    'Token refresh failed after retries.',
+    // The wording states what actually happened: a budget of one never retried
+    // anything, so calling that "after retries" would describe a loop the
+    // caller explicitly refused.
+    maxAttempts > 1 ? 'Token refresh failed after retries.' : 'Token refresh failed.',
     lastError,
     lastError instanceof KimiCodeRetryableError ? lastError.status : undefined,
   )
@@ -608,6 +647,13 @@ export interface EnsureTokenOptions {
   signal?: AbortSignal
   /** Refresh even when the current token is not near expiry. */
   force?: boolean
+  /**
+   * How many attempts the refresh may spend, including the first.
+   *
+   * Absent means {@link REFRESH_MAX_RETRIES}. A caller that owns its own retry
+   * loop states its budget here so the two do not multiply.
+   */
+  maxAttempts?: number
 }
 
 /**
@@ -621,6 +667,10 @@ export async function ensureAccessToken(
   store: FileCredentialStore,
   options: EnsureTokenOptions = {},
 ): Promise<KimiCodeCredentials> {
+  // The budget is checked before anything else: an invalid one is a caller bug,
+  // and it must not be discovered only after the store was read or after a
+  // refresh was already in flight.
+  const maxAttempts = resolveRefreshMaxAttempts(options.maxAttempts)
   const credentials = await store.read()
   if (credentials === null) {
     throw new KimiCodeUnauthorizedError('Not signed in to Kimi Code. Sign in from Settings > Kimi Code.')
@@ -642,6 +692,7 @@ export async function ensureAccessToken(
         signal: options.signal,
         host: credentials.oauthHost,
         region: credentials.region,
+        maxAttempts,
       })
       // A rotated token may carry the identity claims, and a credential stored
       // before those were read has none; refresh is the moment to fill them in.

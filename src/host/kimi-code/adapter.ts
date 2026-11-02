@@ -237,6 +237,26 @@ export const KIMI_CODE_RETRY_POLICY_CONFIG: {
 
 const RETRY_POLICY = resolveRetryPolicy(KIMI_CODE_RETRY_POLICY_CONFIG, 'dsh-chatgpt-subscription.kimi-code.retry')
 
+/**
+ * How many attempts a credential refresh gets while a MODEL REQUEST is in flight.
+ *
+ * One. The harness already retries this route's model requests (see
+ * {@link KIMI_CODE_RETRY_POLICY_CONFIG}: `maxRetries: 3`), and it retries them
+ * on exactly the verdicts a failed refresh produces — RATE_LIMIT, SERVER,
+ * TIMEOUT, TRANSPORT. A refresh that retries INSIDE the request therefore
+ * multiplies the two budgets: the outer loop's four attempts each spent three
+ * refresh POSTs, so one upstream hiccup cost the service twelve requests where
+ * four were intended.
+ *
+ * The refresh gets one attempt here and the harness keeps the retry budget,
+ * because that is where the budget belongs: the outer loop also backs off,
+ * reports the failure, and can rotate to another account.
+ *
+ * Every other OAuth flow in this plugin keeps the provider's own default of
+ * three attempts, because nothing else retries them.
+ */
+const MODEL_REFRESH_MAX_ATTEMPTS = 1
+
 /** Configured effort when the model supports it, else the adapter's preference order. */
 export function resolveDefaultReasoningEffort(
   efforts: readonly string[],
@@ -1677,14 +1697,24 @@ export class KimiCodeAdapter extends LlmAdapter {
         try {
           // A token near expiry is rotated here; a rejected refresh token
           // surfaces as an unauthorized error, which is not retried.
-          apiCredentials = await ensureAccessToken(this.store, { fetchFn, signal })
+          // One refresh attempt: the harness owns the retry budget for this
+          // request, so the two must not multiply.
+          apiCredentials = await ensureAccessToken(this.store, {
+            fetchFn,
+            signal,
+            maxAttempts: MODEL_REFRESH_MAX_ATTEMPTS,
+          })
         } catch (error) {
           throw credentialFailure(error, signal)
         }
       } else {
         let effective: { account: { id: string }; credentials: KimiCodeCredentials }
         try {
-          effective = await pool.getEffectiveCredential(tried, fetchFn)
+          // One refresh attempt for the same reason as the single-credential
+          // path above: the harness owns this request's retry budget.
+          effective = await pool.getEffectiveCredential(tried, fetchFn, {
+            maxAttempts: MODEL_REFRESH_MAX_ATTEMPTS,
+          })
         } catch (error) {
           throw credentialFailure(error, signal)
         }
