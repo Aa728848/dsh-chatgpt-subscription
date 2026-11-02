@@ -180,7 +180,7 @@ import {
   reclassifyInBandResponsesError,
 } from '../common/stream-error.ts'
 import { KimiCodeAccountPool } from './account-pool.ts'
-import { ensureAccessToken, KimiCodeUnauthorizedError } from './oauth.ts'
+import { ensureAccessToken, KimiCodeOAuthError, KimiCodeRetryableError, KimiCodeUnauthorizedError } from './oauth.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import type { KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
 
@@ -1679,28 +1679,14 @@ export class KimiCodeAdapter extends LlmAdapter {
           // surfaces as an unauthorized error, which is not retried.
           apiCredentials = await ensureAccessToken(this.store, { fetchFn, signal })
         } catch (error) {
-          if (error instanceof KimiCodeUnauthorizedError) {
-            throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
-          }
-          throw new LlmError(
-            `Kimi Code credential could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
-            'MISSING_CREDENTIAL',
-            { cause: error },
-          )
+          throw credentialFailure(error, signal)
         }
       } else {
         let effective: { account: { id: string }; credentials: KimiCodeCredentials }
         try {
           effective = await pool.getEffectiveCredential(tried, fetchFn)
         } catch (error) {
-          // The pool's own verdict (an exhausted rotation) is already typed; a
-          // plain error means no account is signed in at all.
-          if (error instanceof LlmError) throw error
-          throw new LlmError(
-            error instanceof Error ? error.message : 'Kimi Code credential could not be prepared.',
-            'MISSING_CREDENTIAL',
-            { cause: error },
-          )
+          throw credentialFailure(error, signal)
         }
         accountId = effective.account.id
         servedByAccountId = accountId
@@ -2158,6 +2144,49 @@ export class KimiCodeAdapter extends LlmAdapter {
   }
 }
 
+function isRefreshTimeout(error: unknown): boolean {
+  const seen = new Set<unknown>()
+  while (error instanceof Error && !seen.has(error)) {
+    seen.add(error)
+    const code = (error as Error & { code?: unknown }).code
+    if (error.name === 'TimeoutError' || code === 'ETIMEDOUT'
+      || code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_HEADERS_TIMEOUT'
+      || code === 'UND_ERR_BODY_TIMEOUT') return true
+    error = error.cause
+  }
+  return false
+}
+
+/** Preserve OAuth failure semantics before the first model request. */
+function credentialFailure(error: unknown, signal: AbortSignal): LlmError {
+  if (signal.aborted) return new LlmError('Kimi Code credential preparation aborted', 'ABORTED', { cause: error })
+  if (error instanceof LlmError) return error
+  if (error instanceof KimiCodeUnauthorizedError) {
+    return new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
+  }
+  if (error instanceof KimiCodeOAuthError) {
+    return new LlmError(error.message, 'INVALID_REQUEST', { cause: error, status: error.status })
+  }
+  if (error instanceof KimiCodeRetryableError) {
+    // Credential preparation runs inside the adapter stream. Keep its transient
+    // verdict eligible for the same bounded native retry as a model request.
+    const detail = errorChain(error).trim().slice(0, 500)
+    const code = error.status === 429 ? 'RATE_LIMIT'
+      : error.status !== undefined ? 'SERVER'
+        : isRefreshTimeout(error) ? 'TIMEOUT'
+          : 'TRANSPORT'
+    return new LlmError(`Kimi Code credential refresh failed: ${detail}`, code, {
+      cause: error,
+      ...(error.status === undefined ? {} : { status: error.status }),
+    })
+  }
+  return new LlmError(
+    `Kimi Code credential could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
+    'MISSING_CREDENTIAL',
+    { cause: error },
+  )
+}
+
 /**
  * The failure a stream that died mid-body is reported as.
  *
@@ -2183,6 +2212,7 @@ export class KimiCodeAdapter extends LlmAdapter {
  * tool. What the user sees is the live text of the dead attempt replaced by the
  * retried one.
  */
+
 function streamFailure(error: unknown, signal: AbortSignal): LlmError {
   if (error instanceof LlmError) return error
   if (signal.aborted) return new LlmError('Kimi Code stream aborted', 'ABORTED', { cause: error })
