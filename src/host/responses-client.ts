@@ -632,7 +632,7 @@ export async function* parseResponsesStream(
         for (const item of output) yield* adoptText(messageItemText(record(item)))
       }
       terminal = type === 'response.incomplete'
-        ? { kind: 'max-tokens' }
+        ? incompleteFinishReason(completed)
         : { kind: 'stop' }
       return
     }
@@ -690,6 +690,8 @@ export async function* parseResponsesStream(
 
   if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
   if (terminal === null) throw new LlmError('Codex stream ended before a terminal event.', 'PROTOCOL_ERROR')
+  // consume() owns terminal assignments; TypeScript does not follow that closure.
+  const finalReason = terminal as FinishReason
   if (reasoningIndex !== null) {
     if (pendingReasoningDelta !== '') {
       yield { type: 'reasoning-delta', index: reasoningIndex, text: pendingReasoningDelta }
@@ -699,6 +701,13 @@ export async function* parseResponsesStream(
   }
   if (textIndex !== null) {
     yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
+  }
+  if (finalReason.kind === 'max-tokens') {
+    // An incomplete response must neither execute a finished-looking tool call
+    // nor replay an unanswered call on the next request. Leave streamed tool
+    // blocks unfinished so the harness drops them at the max-tokens finish.
+    tools.clear()
+    replayOutput = replayOutput.filter((item) => item.type !== 'function_call')
   }
   for (const item of replayOutput) {
     if (item.type === 'function_call'
@@ -739,9 +748,21 @@ export async function* parseResponsesStream(
   if (usage !== null) yield { type: 'usage', usage }
   yield {
     type: 'finish',
-    reason: validToolCount > 0 ? { kind: 'tool-calls' } : terminal,
+    reason: validToolCount > 0 ? { kind: 'tool-calls' } : finalReason,
     replayState: { response: { outputItems: replayOutput } },
   }
+}
+
+/** Only an explicit provider output-budget exhaustion is a max-tokens finish. */
+function incompleteFinishReason(response: Record<string, unknown> | null): Extract<FinishReason, { kind: 'max-tokens' }> {
+  const reason = record(response?.incomplete_details)?.reason
+  if (reason === 'max_output_tokens') return { kind: 'max-tokens' }
+  const detail = reason === undefined ? 'missing incomplete_details.reason' : JSON.stringify(reason)
+  const message = string(record(response?.error)?.message)
+  throw new LlmError(
+    `Codex returned an incomplete response (${detail})${message ? `: ${message}` : '.'}`,
+    reason === 'content_filter' ? 'CONTENT_FILTER' : 'PROVIDER_INCOMPLETE',
+  )
 }
 
 function visibleReasoningDelta(
