@@ -97,7 +97,13 @@ export const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000
 export const DEFAULT_MAX_TOKENS = 32_768
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 
-export const STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * Idle ceiling for one streaming response before it is declared stalled.
+ *
+ * Strictly inside the transport's own 300 s stream timeout; see
+ * `host/common/idle-watchdog.ts` for the measured basis.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 120_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /**

@@ -466,6 +466,9 @@ export class CommandCodeAdapter extends LlmAdapter {
 
       try {
         response = await fetchWithContextBudgetRecovery(fetchFn)(endpoint, { method: 'POST', headers, body, signal })
+        // Headers are transport activity: the streaming idle budget starts at
+        // the hand-off, so a slow prefill is not spent from it.
+        activity?.pulse()
       } catch (error) {
         if (signal.aborted) throw new LlmError('Command Code request aborted', 'ABORTED', { cause: error })
         // A connection that never produced a response is a transport failure, not

@@ -131,7 +131,25 @@ export const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000
 export const DEFAULT_MAX_TOKENS = 32_768
 export const DEFAULT_CONTEXT_WINDOW = 262_144
 
-export const STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * How long a request may go without a single byte before the watchdog aborts it.
+ *
+ * Strictly INSIDE the transport's own deadline on purpose. undici answers a
+ * stalled HTTP/2 stream at exactly 300 s, so the 300 s this line used to carry
+ * never decided the outcome: both timers expired together, the transport error
+ * won the race, and the turn paid the full five minutes of silence before DSH
+ * heard about it — reported as a severed connection rather than a stalled one.
+ *
+ * 120 s is measured, not guessed. Over the 104 requests of the session that
+ * prompted this value, the longest wait from a step starting to its first chunk
+ * was 65 s (a 210k-token prompt) and the longest silence once chunks were
+ * flowing was 6.4 s across 6,539 measured gaps. The adapter pulses the watchdog
+ * when the response headers arrive, so the pre-first-byte window and the
+ * in-stream window are budgeted separately: a slow prefill is not read as a dead
+ * stream, while a stream that opens and then goes quiet is caught in two minutes
+ * instead of five.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 120_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /**

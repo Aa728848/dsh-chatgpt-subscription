@@ -249,8 +249,13 @@ export const CALLBACK_PORT_ATTEMPTS = 1024
 /** Path of the loopback callback the browser is redirected to. */
 export const CALLBACK_PATH = '/callback'
 
-/** Idle ceiling for one streaming response before it is declared stalled. */
-export const STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * Idle ceiling for one streaming response before it is declared stalled.
+ *
+ * Strictly inside the transport's own 300 s stream timeout; see
+ * `host/common/idle-watchdog.ts` for the measured basis.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 120_000
 /** Failure code the adapter reports for that stall. */
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 /** Ceiling for a model-listing or usage fetch. */

@@ -1208,6 +1208,9 @@ export class MinimaxCodeAdapter extends LlmAdapter {
             body,
             signal,
           })
+          // Headers are transport activity: the streaming idle budget starts at
+          // the hand-off, so a slow prefill is not spent from it.
+          activity?.pulse()
         } catch (error) {
           if (signal.aborted) throw new LlmError('MiniMax Code request aborted', 'ABORTED', { cause: error })
           throw new LlmError(

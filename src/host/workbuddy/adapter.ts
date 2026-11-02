@@ -682,6 +682,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
             // long but active generation is not cut off by a wall-clock cap.
             signal,
           })
+          // Headers are transport activity: the streaming idle budget starts at
+          // the hand-off, so a slow prefill is not spent from it.
+          activity?.pulse()
         } catch (error) {
           if (signal.aborted) throw new LlmError('WorkBuddy request aborted', 'ABORTED', { cause: error })
           throw new LlmError(

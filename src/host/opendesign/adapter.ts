@@ -334,6 +334,9 @@ export class OpenDesignAdapter extends LlmAdapter {
               signal: headerDeadline.signal,
             })
             headerDeadline.clear()
+            // Headers are transport activity: the streaming idle budget starts at
+            // this hand-off, so a slow prefill is not spent from it.
+            activity?.pulse()
             break
           } catch (error) {
             headerDeadline.clear()

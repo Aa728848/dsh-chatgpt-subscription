@@ -380,7 +380,13 @@ export const OAUTH_TIMEOUT_MS = 30_000
 /** Lifetime of one in-process login session before the card must start over. */
 export const LOGIN_TIMEOUT_MS = 10 * 60 * 1000
 
-export const STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * Idle ceiling for one streaming response before it is declared stalled.
+ *
+ * Strictly inside the transport's own 300 s stream timeout; see
+ * `host/common/idle-watchdog.ts` for the measured basis.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 120_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /** Headroom kept below a model's context window when sizing a request. */

@@ -154,6 +154,23 @@ describe('Kimi Code idle watchdog counts transport activity, not displayable chu
     expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')).toBe('ok')
   })
 
+  it('budgets a slow first byte apart from in-stream silence', async () => {
+    const fetchFn = (async (_url: any, init: any) => {
+      // 响应头在阈值内到达——那是连接与预填充，不是流内静默；首字节落在阈值之后。
+      // 只有「收到响应头就 pulse」这一下把计时复位过，这次请求才活得下来：
+      // 没有那次 pulse，计时会在 250ms 处到点，0.29s 才到的首字节救不回来。
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      return new Response(
+        scheduledBody(init?.signal, [{ text: COMPLETION, afterMs: 190 }]),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )
+    }) as unknown as typeof fetch
+
+    const chunks = await drain(buildAdapter(fetchFn).stream(OPTIONS))
+
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')).toBe('ok')
+  })
+
   it('still throws TIMEOUT when the connection really is silent', async () => {
     const fetchFn = (async (_url: any, init: any) => new Response(
       // 一个字节都不给：阈值之后才关门，所以看门狗必须先动手。
@@ -162,5 +179,20 @@ describe('Kimi Code idle watchdog counts transport activity, not displayable chu
     )) as unknown as typeof fetch
 
     await expect(drain(buildAdapter(fetchFn).stream(OPTIONS))).rejects.toMatchObject({ code: 'TIMEOUT' })
+  })
+})
+
+describe('Kimi Code idle budget sits strictly inside the transport deadline', () => {
+  it('aborts a silent stream before the transport stream timeout could', async () => {
+    // 用真实常量，不用上面 vi.mock 里的 250ms 替身：这里要钉的正是生产值。
+    const actual = await vi.importActual<typeof import('../src/host/kimi-code/types.ts')>(
+      '../src/host/kimi-code/types.ts',
+    )
+    // undici 判死一条静默的 HTTP/2 流用的是 300 s。阈值不严格小于它，两个计时器就
+    // 同时到点，应用层的 TIMEOUT 判定永远拿不到话语权——那正是「5 分钟零输出、
+    // 重试在 300 s 之后才开始」的成因。
+    expect(actual.STREAM_IDLE_TIMEOUT_MS).toBeLessThan(300_000)
+    // 同时必须留出远超实测首字节等待（65 s）的余量，否则慢预填充会被误杀。
+    expect(actual.STREAM_IDLE_TIMEOUT_MS).toBeGreaterThanOrEqual(90_000)
   })
 })

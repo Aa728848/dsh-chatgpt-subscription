@@ -760,6 +760,9 @@ export class ClaudeAdapter extends LlmAdapter {
       const { credentials, accountId } = await this.resolveCredential(pool, tried, fetchFn, signal)
       usedAccountId = accountId
       response = await this.attemptRequest(credentials, requestOptions, images, toolNames, thinking, settings, signal, fetchFn)
+      // Headers are transport activity: the streaming idle budget starts at the
+      // hand-off, so a slow prefill is not spent from it.
+      activity?.pulse()
       // Every attempt so far has been a pre-body failure, so nothing has reached
       // the caller and a rotation is still free. Once this method starts
       // yielding, outputStarted flips and shouldRotateAccount refuses forever.

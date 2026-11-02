@@ -122,8 +122,14 @@ export const DEFAULT_MAX_TOKENS = 64_000
  */
 export const DEFAULT_MAX_CONCURRENT_REQUESTS = 10
 
-/** Idle budget for one OpenDesign stream. */
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * Idle budget for one OpenDesign stream — the default a fresh install starts
+ * from, overridable per account.
+ *
+ * Strictly inside the transport's own 300 s stream timeout; see
+ * `host/common/idle-watchdog.ts` for the measured basis.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000
 
 /** How long a quota refusal keeps one account out of rotation. */
 export const POOL_COOLDOWN_MS = 15 * 60_000

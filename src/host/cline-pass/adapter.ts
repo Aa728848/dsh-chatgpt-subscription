@@ -339,6 +339,9 @@ export class ClinePassAdapter extends LlmAdapter {
             // gateway has answered, the stream's own idle watchdog takes over;
             // leaving this timer armed would kill a healthy long reasoning pass.
             headerDeadline.clear()
+            // Headers are transport activity: the stream's idle budget starts at
+            // this hand-off, so a slow prefill is not spent from it.
+            activity?.pulse()
             break
           } catch (error) {
             headerDeadline.clear()

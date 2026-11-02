@@ -114,6 +114,17 @@ export function floorForcedThinkingTokens(
 export const CATALOG_TIMEOUT_MS = 15_000
 
 /**
+ * Idle ceiling for one streaming response before it is declared stalled.
+ *
+ * Longer than every other route on purpose, and deliberately NOT the shared
+ * default in `host/common/idle-watchdog.ts`: ollama runs on the operator's own
+ * hardware, where prompt evaluation on a large context can produce no bytes for
+ * minutes while the machine is visibly working. The shared two-minute budget
+ * would read that work as a dead stream and retry it.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 300_000
+
+/**
  * Cooldown one account takes when Ollama refuses it without stating a delay.
  *
  * A 429 here is a real quota or rate limit, not a blip, so the account is parked

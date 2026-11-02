@@ -124,7 +124,13 @@ export const HEADER_REFRESH_SOURCE = 'x-auth-refresh-source'
 export const DISCOVERY_TIMEOUT_MS = 20_000
 export const CHAT_TIMEOUT_MS = 300_000
 export const QUOTA_CACHE_TTL_MS = 2 * 60 * 1000
-export const STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * Idle ceiling for one streaming response before it is declared stalled.
+ *
+ * Strictly inside the transport's own 300 s stream timeout; see
+ * `host/common/idle-watchdog.ts` for the measured basis.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 120_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 export const DEFAULT_MAX_TOKENS = 32_768

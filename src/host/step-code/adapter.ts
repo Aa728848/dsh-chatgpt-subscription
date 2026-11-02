@@ -479,6 +479,9 @@ export class StepCodeAdapter extends LlmAdapter {
           // 不会被一个墙钟上限砍断。
           signal,
         })
+        // Headers are transport activity: the streaming idle budget starts at
+        // the hand-off, so a slow prefill is not spent from it.
+        activity?.pulse()
       } catch (error) {
         if (signal.aborted) throw new LlmError(PROVIDER_NAME + ' 请求已取消', 'ABORTED', { cause: error })
         throw new LlmError(

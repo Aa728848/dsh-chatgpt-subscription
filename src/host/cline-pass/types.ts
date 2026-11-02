@@ -53,8 +53,14 @@ export const DEFAULT_MAX_TOKENS = 64_000
 /** Streams one account may keep open at once; `0` lifts the cap. */
 export const DEFAULT_MAX_CONCURRENT_REQUESTS = 16
 
-/** Idle budget for one Cline Pass stream. */
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * Idle budget for one Cline Pass stream — the default a fresh install starts
+ * from, overridable per account.
+ *
+ * Strictly inside the transport's own 300 s stream timeout; see
+ * `host/common/idle-watchdog.ts` for the measured basis.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000
 
 /** Request-history rows retained in memory. */
 export const DEFAULT_HISTORY_LIMIT = 100

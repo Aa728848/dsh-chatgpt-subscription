@@ -432,6 +432,9 @@ export class AntigravityAdapter extends LlmAdapter {
             body,
             signal,
           })
+          // Headers are transport activity: the streaming idle budget starts at
+          // the hand-off, so a slow prefill is not spent from it.
+          activity?.pulse()
           if (response.status === 400 && runtimeModel.startsWith('claude-') && !recoveredMissingThinkingSignature) {
             const diagnostic = await response.clone().text().catch(() => '')
             // Match the nested Anthropic diagnostic, not arbitrary validation errors.
@@ -457,6 +460,9 @@ export class AntigravityAdapter extends LlmAdapter {
                 response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
                   method: 'POST', headers, body: sentBody, signal,
                 })
+                // Headers are transport activity: the streaming idle budget
+                // starts at the hand-off, so a slow prefill is not spent from it.
+                activity?.pulse()
               }
             }
           }
@@ -473,6 +479,9 @@ export class AntigravityAdapter extends LlmAdapter {
               response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
                 method: 'POST', headers, body: sentBody, signal,
               })
+              // Headers are transport activity: the streaming idle budget
+              // starts at the hand-off, so a slow prefill is not spent from it.
+              activity?.pulse()
             }
           }
           if (firstResponse === undefined) firstResponse = response

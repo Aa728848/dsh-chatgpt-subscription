@@ -1,17 +1,37 @@
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+/**
+ * How long one stream may go without a single byte before it is called stalled.
+ *
+ * Strictly INSIDE the transport's own deadline on purpose. undici answers a
+ * stalled HTTP/2 stream at exactly 300 s, so the 300 s every line used to carry
+ * never decided anything: the watchdog and the transport expired together, the
+ * transport error won the race, and the turn paid the full five minutes of
+ * silence before DSH could retry — reported as a severed connection rather than
+ * as a stalled one. Two minutes is measured rather than guessed: over the 104
+ * requests of the session that prompted this value, the longest wait from a step
+ * starting to its first chunk was 65 s (a 210k-token prompt), and the longest
+ * silence once chunks were flowing was 6.4 s across 6,539 measured gaps. The
+ * adapters also pulse the watchdog when the response headers arrive, so a slow
+ * prefill is budgeted apart from in-stream silence instead of being read as a
+ * dead stream.
+ *
+ * `ollama/types.ts` deliberately keeps a longer budget: local inference is
+ * compute-bound, and a large prompt can legitimately take minutes to answer.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /**
  * The same budget under the name every provider adapter passes it by.
  *
- * Six provider `types.ts` files each declared their own
- * `STREAM_IDLE_TIMEOUT_MS = 300_000`, so one line ended up importing a sibling
- * line's copy just to name the same number. This alias is the single home: the
- * value is unchanged, and an adapter that took the constant from another line
- * can now take it from here without renaming its local usage.
+ * Six provider `types.ts` files each declare their own
+ * `STREAM_IDLE_TIMEOUT_MS`, so one line ended up importing a sibling line's copy
+ * just to name the same number. This alias is the single home: an adapter that
+ * took the constant from another line can take it from here without renaming its
+ * local usage, and a line whose budget is its own (ollama) says so in its own
+ * `types.ts`.
  */
 export const STREAM_IDLE_TIMEOUT_MS = DEFAULT_STREAM_IDLE_TIMEOUT_MS
 

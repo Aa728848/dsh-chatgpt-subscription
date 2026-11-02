@@ -25,6 +25,7 @@ import {
   POOL_COOLDOWN_MS,
   PROVIDER_ID,
   PROVIDER_NAME,
+  STREAM_IDLE_TIMEOUT_MS,
   contextWindowFor,
   floorForcedThinkingTokens,
   ollamaModelSupportsImage,
@@ -41,7 +42,6 @@ import { fetchModelThinking, loadCatalog, startChat, type OllamaChatMessage, typ
 import { applyEvent, closeStream, createStreamState } from './mapper.ts'
 import {
   STREAM_IDLE_TIMEOUT_CODE,
-  STREAM_IDLE_TIMEOUT_MS,
   wrapStreamWithWatchdog,
   type StreamActivity,
 } from '../common/idle-watchdog.ts'

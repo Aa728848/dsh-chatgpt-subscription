@@ -1801,7 +1801,14 @@ export class KimiCodeAdapter extends LlmAdapter {
 
       const post = async (payload: string): Promise<Response> => {
         try {
-          return await fetchWithContextBudgetRecovery(fetchFn)(endpoint, { method: 'POST', headers, body: payload, signal })
+          const response = await fetchWithContextBudgetRecovery(fetchFn)(endpoint, { method: 'POST', headers, body: payload, signal })
+          // Response headers are transport activity: the connection is up and the
+          // service has taken the prefix. Pulsing here starts the streaming idle
+          // window at the hand-off, so a slow prefill (measured up to 65 s on a
+          // 210k-token prompt) is not spent from the in-stream silence budget, and
+          // a stream that opens and then goes quiet is still caught by it.
+          activity?.pulse()
+          return response
         } catch (error) {
           if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED', { cause: error })
           // A connection that never produced a response is a transport failure, not
