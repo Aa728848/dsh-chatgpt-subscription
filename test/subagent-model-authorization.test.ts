@@ -8,7 +8,7 @@ import {
   type SubagentModelSelectionPreference,
   DEFAULT_PARENT_FORK_TOOLS,
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
-  UNRESTRICTED_ROUTING_NOTICE,
+  NO_ALLOWLIST_ROUTING_NOTICE,
   authorizedRoutesFor,
   createSubagentAuthorization,
   delegationDenialReason,
@@ -548,20 +548,21 @@ describe('subagent model authorization', () => {
     const unlisted = enrichListSubagentModelsOutput(rawProviderList, [])
     expect(unlisted).toContain('minimax-code — MiniMax Code')
     expect(unlisted).toContain('No allowlist is in force for this Session')
-    expect(unlisted).toContain('subagent routing is unrestricted')
-    expect(unlisted).toContain('omitting provider/model is legitimate')
+    expect(unlisted).toContain('normal inheritance/default behavior')
+    expect(unlisted).toContain('limited to the parent route')
+    expect(unlisted).not.toContain('routing is unrestricted')
     expect(unlisted).not.toContain('Authorized child routes for this Session')
     // Idempotent there too, and a bare empty output becomes the notice alone.
     expect(enrichListSubagentModelsOutput(unlisted, [])).toBe(unlisted)
-    expect(enrichListSubagentModelsOutput('', [])).toBe(UNRESTRICTED_ROUTING_NOTICE)
+    expect(enrichListSubagentModelsOutput('', [])).toBe(NO_ALLOWLIST_ROUTING_NOTICE)
     expect(enrichListSubagentModelsOutput('', [MINIMAX])).not.toContain('No allowlist is in force')
     // The notice stays a statement of two facts. This listener is host-level and
     // reaches Sessions that never touch the dispatch preset, so a recommendation
     // to change a setting would be noise in most of them — and a model that reads
     // it as an instruction repeats it in unrelated summaries.
-    expect(UNRESTRICTED_ROUTING_NOTICE).not.toContain('Settings')
-    expect(UNRESTRICTED_ROUTING_NOTICE).not.toContain('Subagents')
-    expect(UNRESTRICTED_ROUTING_NOTICE).not.toContain('enable')
+    expect(NO_ALLOWLIST_ROUTING_NOTICE).not.toContain('Settings')
+    expect(NO_ALLOWLIST_ROUTING_NOTICE).not.toContain('Subagents')
+    expect(NO_ALLOWLIST_ROUTING_NOTICE).not.toContain('enable')
 
     const upstreamListDesc = 'Discover LLM routes for subagents without changing the current Agent. '
       + 'Catalog membership is advisory: an adapter may accept an unlisted model id.'
@@ -575,6 +576,18 @@ describe('subagent model authorization', () => {
       .toContain('Child LLM selection is required in this Session')
     expect(rewriteAuthorizedToolDescriptions(upstreamSubagentDesc, [MINIMAX]))
       .not.toContain('Child LLM selection is optional')
+
+    const currentSubagentDesc = 'Delegate a self-contained task. '
+      + 'Supply `provider` and `model` together. Omitted values use child defaults, falling back to compatible parent values. '
+      + 'When the effective route changes, an omitted `reasoning_effort` uses the model\'s default.'
+    const currentRewritten = rewriteAuthorizedToolDescriptions(currentSubagentDesc, [MINIMAX])
+    expect(currentRewritten).toContain('Child LLM selection is required in this Session')
+    expect(currentRewritten).not.toContain('Omitted values use child defaults')
+    expect(currentRewritten).toContain('an omitted `reasoning_effort` uses the model\'s default.')
+    expect(rewriteAuthorizedToolDescriptions('Child LLM provider id.', [MINIMAX]))
+      .toContain('Required in this Session: pass an authorized provider id')
+    expect(rewriteAuthorizedToolDescriptions('Model id within that provider.', [MINIMAX]))
+      .toContain('Required in this Session: pass the authorized model id')
 
     const assembly = {
       sections: [{ name: 'tools:sdk', text: `${upstreamListDesc}\n${upstreamSubagentDesc}` }],
@@ -635,16 +648,15 @@ describe('subagent model authorization', () => {
     expect(postDecision.kind).toBe('accept')
     expect(postDecision.value).toContain('provider: "minimax-code", model: "MiniMax-M3.1-Flash"')
 
-    // The unlisted posture reaches the model through the same hook: a Session
-    // that recorded no allowlist gets the fact that nothing is enforced, instead
-    // of silence that would read as "the mounted tool is the allowlist".
+    // The unlisted posture reaches the model through the same hook without
+    // pretending that the host's own parent-route restriction disappeared.
     const unlistedDecision = await postExecute(
       { name: 'list_subagent_models', agent: recordingAgent([]) },
       { isError: false, value: rawProviderList },
       async () => ({ kind: 'accept' }),
     ) as { kind: string; value: string }
     expect(unlistedDecision.kind).toBe('accept')
-    expect(unlistedDecision.value).toContain(UNRESTRICTED_ROUTING_NOTICE)
+    expect(unlistedDecision.value).toContain(NO_ALLOWLIST_ROUTING_NOTICE)
     expect(unlistedDecision.value).toContain(rawProviderList)
 
     const assembleHook = listeners.get('system-prompt/assemble')!

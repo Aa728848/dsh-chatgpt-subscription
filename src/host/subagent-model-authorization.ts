@@ -887,12 +887,9 @@ export function effectiveAllowParentFork(
  * authorized route in the form `subagent` expects, eliminating any reason to
  * search local config files or source code for the allowlist.
  *
- * The empty case states the opposite fact rather than staying silent, because
- * silence is what makes a model infer that a mounted tool implies enforcement.
- * It does not: the tool row and the route parameters are static, while whether
- * anything is enforced is decided by the allowlist the Session recorded. The
- * two facts differ, so the model has to be able to read the second one instead
- * of deriving it from the first.
+ * The empty case distinguishes an absent Session allowlist from the host's own
+ * delegation policy. On 0.2.2 the latter still limits explicit selection to the
+ * parent route, so calling this posture "unrestricted" would be false.
  * @param output - Original text returned by `list_subagent_models`.
  * @param allowed - Routes the calling Session authorizes, empty when none is in force.
  * @returns the output with the Session routing posture appended.
@@ -902,10 +899,10 @@ export function enrichListSubagentModelsOutput(
   allowed: readonly AllowedModelRoute[],
 ): string {
   if (allowed.length === 0) {
-    if (output.includes(UNRESTRICTED_ROUTING_NOTICE)) return output
+    if (output.includes(NO_ALLOWLIST_ROUTING_NOTICE)) return output
     return output.trim().length === 0
-      ? UNRESTRICTED_ROUTING_NOTICE
-      : `${output}\n\n${UNRESTRICTED_ROUTING_NOTICE}`
+      ? NO_ALLOWLIST_ROUTING_NOTICE
+      : `${output}\n\n${NO_ALLOWLIST_ROUTING_NOTICE}`
   }
   const header = 'Authorized child routes for this Session (already filtered by the Session allowlist; '
     + 'only these routes are accepted, and `provider` and `model` must be passed as separate fields):'
@@ -1034,27 +1031,24 @@ export function mergePreferenceOverrides(
  * The statement appended to `list_subagent_models` when no allowlist governs the
  * calling Session.
  *
- * Two facts, and nothing more: nothing is enforced, and omitting the route is
- * legitimate here. It deliberately does not recommend a setting. This notice is
+ * It distinguishes an absent Session allowlist from the host's own inheritance
+ * or parent-route rules, and deliberately does not recommend a setting. This notice is
  * attached for every Session the plugin's authorization listener reaches—which
  * includes sessions with no interest in the dispatch preset—so a sentence telling
  * the reader to go enable model selection would be noise in most of them, and a
  * model that reads it as an instruction will repeat it in an unrelated summary.
  */
-export const UNRESTRICTED_ROUTING_NOTICE = 'No allowlist is in force for this Session: subagent routing is '
-  + 'unrestricted, no route is validated against any list, and omitting provider/model is legitimate rather '
-  + 'than a rule breach.'
+export const NO_ALLOWLIST_ROUTING_NOTICE = 'No allowlist is in force for this Session. Omitting provider/model '
+  + 'follows the delegation tool\'s normal inheritance/default behavior; explicit selection may still be limited '
+  + 'to the parent route by the host.'
 
 /**
  * Rewrite the upstream `list_subagent_models` and `subagent` tool/parameter
  * descriptions when the calling Session enforces an allowlist.
  *
- * Upstream `dsh-tool-subagent` ships static descriptions stating that
- * `"Catalog membership is advisory: an adapter may accept an unlisted model id."`
- * and `"Child LLM selection is optional. Omit provider, model, and reasoning_effort..."`.
- * In an allowlist-governed Session both statements are false and actively
- * mislead the dispatcher into either omitting `provider`/`model` or distrusting
- * `list_subagent_models` and hunting through local files for the "real" allowlist.
+ * Upstream releases before 0.2.2 call selection optional and catalog membership
+ * advisory; 0.2.2 instead says omitted values use child defaults. In an
+ * allowlist-governed Session those statements would contradict execution.
  * @param text - Tool description, parameter description, or rendered `tools:sdk` section text.
  * @param allowed - Routes the calling Session authorizes.
  * @returns the text with the misleading upstream sentences replaced by the Session's exact policy.
@@ -1065,6 +1059,7 @@ export function rewriteAuthorizedToolDescriptions(
 ): string {
   if (allowed.length === 0 || text.length === 0) return text
   const routes = authorizedRoutesText(allowed)
+  const required = `Child LLM selection is required in this Session: pass an authorized \`provider\` and \`model\` from \`list_subagent_models\` (${routes}) as separate fields; omitting either field is rejected.`
   return text
     .replaceAll(
       'Catalog membership is advisory: an adapter may accept an unlisted model id.',
@@ -1072,7 +1067,11 @@ export function rewriteAuthorizedToolDescriptions(
     )
     .replace(
       /Child LLM selection is optional\.\s*Omit `?provider`?, `?model`?, and `?reasoning_effort`? to use configured child defaults and (?:inherit compatible missing values from the parent Agent|this provider's route defaults)\./g,
-      `Child LLM selection is required in this Session: pass an authorized \`provider\` and \`model\` from \`list_subagent_models\` (${routes}) as separate fields; omitting either field is rejected.`,
+      required,
+    )
+    .replace(
+      /Supply `provider` and `model` together\. Omitted values use child defaults, falling back to (?:this backend's route defaults|compatible parent values)\./g,
+      required,
     )
     .replace(
       /Supply together with model; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit from the parent Agent\./g,
@@ -1080,6 +1079,14 @@ export function rewriteAuthorizedToolDescriptions(
     )
     .replace(
       /Supply together with provider; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit when the child provider matches the parent provider\./g,
+      'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
+    )
+    .replaceAll(
+      'Child LLM provider id.',
+      `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`,
+    )
+    .replaceAll(
+      'Model id within that provider.',
       'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
     )
 }
@@ -1543,10 +1550,8 @@ export function installSubagentModelAuthorization(
         scope,
         true,
       )
-      // Both postures are stated: a governed Session gets its routes, an
-      // ungoverned one gets the fact that nothing is enforced. Staying silent in
-      // the second case is what lets a mounted tool be mistaken for an active
-      // allowlist.
+      // Both postures are stated: a governed Session gets its routes, and one
+      // without a recorded allowlist gets that fact plus the host-policy caveat.
       const currentValue = decision.value !== undefined ? decision.value : result.value
       if (typeof currentValue === 'string') {
         const enriched = enrichListSubagentModelsOutput(currentValue, allowed)

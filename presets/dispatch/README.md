@@ -53,8 +53,9 @@
 
 **DSH 设置 → 子代理 → 允许 Agent 为 Subagent 选择模型** 必须开启，并至少勾选一个模型
 （即右上角开关打开 + 清单里勾选）。这是 R2 生效的运行时前提：`tool-subagent` 的
-`modelSelection: true` 会采样该设置并在运行时把子代理路由限制在勾选清单内；
-未开启时模型仍可传路由参数，但会直接报错。
+`modelSelection: true` 会采样该设置并在运行时把子代理路由限制在勾选清单内。
+未开启时没有 Session allowlist；DSH 0.2.2 仍可能把显式选择限制为父路由，不能把它
+理解为任意路由均可用。
 
 > **`modelSelection` 必须与 `modelDiscovery` 成对写入 preset 行。** harness 0.2.1-rc.1 把旧的
 > `modelSelectionSettings` 拆成两个键：`modelSelection` 才暴露 `provider`/`model` 参数，

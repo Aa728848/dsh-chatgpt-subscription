@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-compaction-basic'
 import {
   COLD_START_WARMUP_WAIT_MS,
   KIMI_CODE_RETRY_POLICY_CONFIG,

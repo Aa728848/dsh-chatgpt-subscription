@@ -6,7 +6,8 @@
  * harness 官方的 @deepseek-ai/dsh-plan-mode，那里有两处前缀重建：
  *
  * 1. 动态 plan:policy 段在进入/离开那一步从 '' 变成部署指引；
- * 2. exit_plan_mode 用 { when } 逐步准入，进那一步工具表变大。
+ * 2. exit_plan_mode 用 { when } 逐步准入。0.2.2 起首次进入后持续声明，但首次
+ *    准入仍会改变工具表；旧代进出都会变化。
  *
  * 本包的 preset 只影响用它的会话；用户切回内置 preset 时重建照旧发生。这个守卫在
  * **宿主级**把内置 preset 的那两处也压平，做法与本包 fork 同构，而且完全不改官方

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.56.0 - 2026-11-03
+
+- **[dispatch] L2 执行拓扑与同路由父 fork 策略**
+  - L2 按耦合度与并行收益选择 Lead-Core / Hybrid / Fan-out；子代理卡支持按主模型配置同路由父 fork 权限，并补齐授权、路由审计与界面状态。
+
+- **[harness] 支持 DSH 0.2.2-alpha.3，并保留 latest/next 0.2.1-rc.5 与旧代兼容**
+  - 开发基线切换到 `0.2.2-alpha.3`，同步 Cordis `4.0.6-alpha.2`、Loader `1.0.7-alpha.2` 与 Schemastery `3.18.6-alpha.2`；旧 peer 范围全部保留。
+  - `dispatch` 在新代直接挂载官方 `@deepseek-ai/dsh-tool-executor-ptc`，旧代继续使用 presentation 兼容行；真实 PTC 测试同时覆盖两种调用协议。
+  - 上游 plan-mode 的渐进准入与 pruner 仍不完整覆盖内容前缀缓存需求，因此保留两个 fork 和跨 preset 守卫；plan 投影继续使用 v4/v3 协商。
+  - 子代理授权适配 0.2.2 的新工具描述与父路由限制，不再把“无 Session allowlist”误报为完全不受限；按主模型覆盖、显式路由要求和 fork 授权仍由插件提供。
+  - DSH 官方俄语界面已上线，插件俄语包仅继续翻译自己的设置命名空间，不移除私有词典。
+  - **验证**：alpha.3 与精确 rc.5 均为 **357 文件 / 6554 项通过**（另 2 文件 / 9 项跳过），强制全工程类型检查、构建、锁文件与打包检查通过；旧代 0.1.5 在仅排除已知 PTC 文件后为 **356 文件 / 6549 项通过**。实际 tarball 在本机 alpha.3 的隔离 Profile 安装成功，Host 状态与 13 线路 Hub 路由 smoke 通过。
+  - **边界**：上游 alpha.3 npm 安装自身因 `dsh-tool-pwsh-persistent@0.2.2-alpha.3` 未发布而报 `ETARGET`；本机源码实例的无关 typert/可选包缺失又阻断了 GUI preset 创建，因此本轮不宣称这两项已验收。详见升级记录 `.dsh/skills/dsh-harness-upgrade/references/0.2.2-alpha.3.md`。
+
 ## 0.55.0 - 2026-11-02
 
 - **[i18n] 宿主侧也能说中英俄：一条镜像缝把界面语言送进线路名与宿主文案**

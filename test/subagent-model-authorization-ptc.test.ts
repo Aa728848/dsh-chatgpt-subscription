@@ -81,19 +81,32 @@ function recordingAgent(routes: readonly AllowedModelRoute[]): Agent {
 }
 
 /**
- * Mount the real tool runtime in PTC mode plus the fake PTC runtime. The mode
- * that collapses direct calls into `run_code` is `ptc` in this harness line,
- * and mounted here through `ctx.ptcRuntime`.
+ * Mount the real tool runtime and fake PTC runtime through the standalone
+ * executor on 0.2.2, or ToolRuntime's own mode setting before it.
  */
 async function setup(): Promise<{ ctx: Context; runtime: FakeRuntime }> {
   const ctx = new Context()
   ctx.provide('workingDirectory', {
     ensure: () => Promise.resolve(process.cwd()),
   } as never)
+  let hasExecutor = false
+  try {
+    import.meta.resolve('@deepseek-ai/dsh-tool-executor-ptc')
+    hasExecutor = true
+  } catch {
+    // Harnesses before 0.2.2 select PTC through ToolRuntime's own mode config.
+  }
   await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRuntime, { mode: CODE_MODE })
+  if (hasExecutor) await ctx.plugin(ToolRuntime)
+  else await ctx.plugin(ToolRuntime, { mode: CODE_MODE } as never)
   await ctx.plugin(FakeRuntime)
-  return { ctx, runtime: ctx.ptcRuntime as FakeRuntime }
+  if (hasExecutor) {
+    const executor = await import('@deepseek-ai/dsh-tool-executor-ptc')
+    await ctx.plugin(executor)
+  }
+  const runtime = ctx.ptcRuntime as FakeRuntime
+  if (hasExecutor) batchedRuntimes.add(runtime)
+  return { ctx, runtime }
 }
 
 /** Register the delegation tool the program is allowed to call. */
@@ -104,6 +117,8 @@ function registerSubagent(ctx: Context, calls: unknown[]): void {
     parameters: {
       description: { type: 'string', required: true },
       prompt: { type: 'string', required: true },
+      provider: { type: 'string' },
+      model: { type: 'string' },
     },
     output: {
       schema: { type: 'string' },
@@ -116,8 +131,10 @@ function registerSubagent(ctx: Context, calls: unknown[]): void {
   }))
 }
 
+const batchedRuntimes = new WeakSet<FakeRuntime>()
+
 /** Dispatch `run_code` the way the model would, then read what the program observed. */
-function runCode(
+async function runCode(
   ctx: Context,
   agent: Agent,
   runtime: FakeRuntime,
@@ -136,13 +153,26 @@ function runCode(
       return { logs: [], value: 'program finished' }
     }
   }
-  return ctx.tools.execute({
-    signal: new AbortController().signal,
-    callId: ToolCallId('code-call-1'),
-    name: RUN_CODE_NAME,
-    arguments: { code: 'program', description: 'Run the guard test program' },
-    agent,
-  }).then(result => ({ result, observed }))
+  const signal = new AbortController().signal
+  const callId = ToolCallId('code-call-1')
+  const args = { code: 'program', description: 'Run the guard test program' }
+  if (batchedRuntimes.has(runtime)) {
+    const batch = await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: callId, name: RUN_CODE_NAME, arguments: JSON.stringify(args) }],
+      signal,
+      agent,
+    })
+    return { result: batch.results[0]!.result, observed }
+  }
+  const execute = ctx.tools.execute as unknown as (input: {
+    signal: AbortSignal
+    callId: ReturnType<typeof ToolCallId>
+    name: string
+    arguments: typeof args
+    agent: Agent
+  }) => Promise<ToolExecutionResult>
+  const result = await execute.call(ctx.tools, { signal, callId, name: RUN_CODE_NAME, arguments: args, agent })
+  return { result, observed }
 }
 
 describe('subagent authorization covers the run_code transport', () => {

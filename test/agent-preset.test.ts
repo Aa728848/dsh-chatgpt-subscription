@@ -282,6 +282,22 @@ describe('the dispatch definition', () => {
     expect(ids).toContain('tool-subagent')
   })
 
+  it('uses the standalone PTC executor only when the harness provides it', () => {
+    const legacy = resolveDispatchPreset(() => false)
+    expect(legacy.plugins.find(row => row.id === 'tool-presentation')).toMatchObject({
+      name: '@deepseek-ai/dsh-agent-tool-presentation',
+      config: { mode: 'ptc' },
+    })
+
+    const current = resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-executor-ptc')
+    expect(current.plugins.find(row => row.id === 'tool-executor-ptc')).toEqual({
+      id: 'tool-executor-ptc',
+      name: '@deepseek-ai/dsh-tool-executor-ptc',
+    })
+    expect(current.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
+    expect(rowById('tool-presentation').name).toBe('@deepseek-ai/dsh-agent-tool-presentation')
+  })
+
   it('mounts the harness 0.1.7 spelling of the renamed workflow package', () => {
     expect(rowById('workflow-worker-thread').name).toBe('@deepseek-ai/dsh-workflow-ptc')
     expect(allRows().map(row => row.name)).not.toContain('@deepseek-ai/dsh-workflow-worker-thread')
@@ -661,10 +677,9 @@ describe('the persona block the declaration transcribes', () => {
     // exposure of provider / model ... always appear or disappear together".
     // That is false. The tool row and the route parameters are mounted
     // statically (modelSelection: true, modelDiscovery: true), so they exist even in a session
-    // that recorded no allowlist, while the guard reads the recorded policy
-    // (effectiveAllowedRoutes) and enforces nothing without one. Both copies must
-    // name all three states, say which of them permits fallback, and drop the
-    // single-signal claim.
+    // that recorded no allowlist. Both copies must name all three states, say
+    // which permits inheritance, and retain the 0.2.2 parent-route caveat instead
+    // of equating "no Session allowlist" with unrestricted explicit selection.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
       expect(persona).toContain('[State: Listed]')

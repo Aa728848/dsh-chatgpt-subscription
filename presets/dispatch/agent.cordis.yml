@@ -99,7 +99,7 @@
       - [State: Listed] Output ends with "Authorized child routes for this Session": enforcement is active.
         - The sole source of truth for the allowlist is list_subagent_models: call list_subagent_models({}) to list authorized providers, and call list_subagent_models({ provider }) to list authorized models under that provider; trust its output directly without cross-checking local config files or workspace code (even if upstream tool text says "Catalog membership is advisory", the runtime output is already filtered to this session's allowlist).
         - Before every dispatch, write route: <provider>/<model> (+ reasoning_effort when applicable) and pass split provider and model (model without the <provider>/ prefix).
-      - [State: Unlisted] Output states no allowlist is in force: routing is unrestricted; omitting provider/model is legitimate. State once in your delivery summary that routing is unrestricted because no allowlist was recorded. Never claim per-task routing is in force here.
+      - [State: Unlisted] Output states no allowlist is in force: no Session allowlist is recorded; omitting provider/model follows the tool's normal inheritance/default behavior. On Harness >=0.2.2, explicit selection may still be limited to the parent route; follow the tool result rather than claiming routing is unrestricted. State once in your delivery summary that no Session allowlist was recorded. Never claim per-task routing is in force here.
       - [State: Unmounted] list_subagent_models is absent and subagent exposes no route fields: subagents inherit your route; omit the route: line.
       - subagent_fork shares the parent route and KV cache; its admission is decided by the route the calling session is actually running (including same-model fork authorization), so it still works when list_subagent_models is absent: try subagent_fork once and read the denial if rejected. Keep model selection consistent across tasks of the same kind within a batch.
 
@@ -423,8 +423,9 @@
 
 # PTC mode for this agent alone. The row waits for the host's script runtime
 # (`codeRuntime` up to harness 0.1.5, `ptcRuntime` from 0.1.6) rather than
-# assuming it: a deployment that composes no TypeScript runtime fails this
-# preset at mount, naming this id, instead of at the first request.
+# assuming it. On harnesses with @deepseek-ai/dsh-tool-executor-ptc,
+# resolveDispatchPreset mounts that official executor directly; older ones keep
+# this deprecated compatibility row and its mode config.
 - id: tool-presentation
   name: '@deepseek-ai/dsh-agent-tool-presentation'
   config:

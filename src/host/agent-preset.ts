@@ -36,6 +36,9 @@ export const PRESET_REGISTRY_PACKAGE = '@deepseek-ai/dsh-agent-preset'
  */
 export const WORKING_DIRECTORY_PACKAGE = '@deepseek-ai/dsh-working-directory'
 
+/** The standalone PTC executor introduced when tool presentation split into executor plugins. */
+export const PTC_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-ptc'
+
 /** The id the `dispatch` preset is selectable under. */
 export const DISPATCH_PRESET_ID = 'dispatch'
 
@@ -166,7 +169,7 @@ Check whether list_subagent_models exists (in PTC mode: tools.list_subagent_mode
 - [State: Listed] Output ends with "Authorized child routes for this Session": enforcement is active.
   - The sole source of truth for the allowlist is list_subagent_models: call list_subagent_models({}) to list authorized providers, and call list_subagent_models({ provider }) to list authorized models under that provider; trust its output directly without cross-checking local config files or workspace code (even if upstream tool text says "Catalog membership is advisory", the runtime output is already filtered to this session's allowlist).
   - Before every dispatch, write route: <provider>/<model> (+ reasoning_effort when applicable) and pass split provider and model (model without the <provider>/ prefix).
-- [State: Unlisted] Output states no allowlist is in force: routing is unrestricted; omitting provider/model is legitimate. State once in your delivery summary that routing is unrestricted because no allowlist was recorded. Never claim per-task routing is in force here.
+- [State: Unlisted] Output states no allowlist is in force: no Session allowlist is recorded; omitting provider/model follows the tool's normal inheritance/default behavior. On Harness >=0.2.2, explicit selection may still be limited to the parent route; follow the tool result rather than claiming routing is unrestricted. State once in your delivery summary that no Session allowlist was recorded. Never claim per-task routing is in force here.
 - [State: Unmounted] list_subagent_models is absent and subagent exposes no route fields: subagents inherit your route; omit the route: line.
 - subagent_fork shares the parent route and KV cache; its admission is decided by the route the calling session is actually running (including same-model fork authorization), so it still works when list_subagent_models is absent: try subagent_fork once and read the denial if rejected. Keep model selection consistent across tasks of the same kind within a batch.
 
@@ -420,13 +423,17 @@ Fallback is a task-scoped, non-session-wide exception for delegated briefs: it c
  * and remove its standalone `./list-agents` export. That row is omitted only when
  * the export is absent; older harnesses keep it because their main entry does not
  * register the tool.
+ *
+ * When the standalone PTC executor exists, it replaces the deprecated
+ * agent-tool-presentation compatibility row and its `{ mode: 'ptc' }` config.
  * @param resolves - whether a bare specifier resolves in this installation.
  * @returns the preset definition for the running harness generation.
  */
 export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFromHere): PresetDefinition {
   const hasWorkingDirectory = resolves(WORKING_DIRECTORY_PACKAGE)
   const hasLegacyListAgents = resolves('@deepseek-ai/dsh-tool-subagent-control/list-agents')
-  if (!hasWorkingDirectory && hasLegacyListAgents) return DISPATCH_PRESET
+  const hasPtcExecutor = resolves(PTC_EXECUTOR_PACKAGE)
+  if (!hasWorkingDirectory && hasLegacyListAgents && !hasPtcExecutor) return DISPATCH_PRESET
   return {
     ...DISPATCH_PRESET,
     plugins: DISPATCH_PRESET.plugins.map((row) => {
@@ -435,6 +442,10 @@ export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFrom
           ...row,
           config: (row.config as PresetRow[]).filter(nested => nested.id !== 'tool-subagent-list-agents'),
         }
+      }
+      if (row.id === 'tool-presentation' && hasPtcExecutor) {
+        const { config: _omitted, ...rest } = row
+        return { ...rest, id: 'tool-executor-ptc', name: PTC_EXECUTOR_PACKAGE }
       }
       if (row.id !== 'persona' || !hasWorkingDirectory || typeof row.config !== 'object' || row.config === null) return row
       const { suffix: _omitted, ...rest } = row.config as Record<string, unknown>

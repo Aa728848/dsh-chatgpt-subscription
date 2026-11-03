@@ -8,9 +8,8 @@
  * first, then one dictionary per namespace.
  *
  * The declared fallback is `en`, so a key this pack misses reads as English
- * rather than as a raw key name, and the harness's own UI (which ships only
- * `zh`/`en`) keeps speaking English underneath — a native Russian DSH locale
- * would be a separate pack of its own.
+ * rather than as a raw key name. DSH 0.2.2 ships its own Russian UI locale;
+ * this pack remains responsible only for the plugin-owned namespaces below.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -66,8 +65,8 @@ export function installRussianLocale(ctx: ClientContext): void {
       try {
         return ctx.locale.addLanguage({ id: RU_LOCALE, label: 'Русский', fallback: 'en' })
       } catch {
-        // Another language pack (such as @linxin666/dsh-i18n) may have already
-        // registered Russian; keep going so our provider dictionaries still attach.
+        // DSH 0.2.2 or another language pack may already have registered Russian;
+        // keep going so our provider dictionaries still attach.
         return () => {}
       }
     },

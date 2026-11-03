@@ -101,32 +101,19 @@ describe('SearchProviderSwitcher', () => {
       const running = entry.fiber as unknown as { config?: Record<string, unknown> }
       running.config = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
 
-      // Every state the entry passes through during the selection. Reading the
-      // property directly (rather than polling on a timer) catches the whole
-      // transition, including a restart that completes inside one tick - which is
-      // exactly the case the old code mistook for "no restart happened".
+      // Cordis 4.0.6 routes restart() through the fiber retained by its context,
+      // so an own-property accessor no longer observes the transition. The public
+      // status event reports the actual lifecycle owner on every generation.
       const seen: number[] = []
-      const fiber = ctx.loader.resolve('web').fiber as { state: number } | undefined
+      const fiber = ctx.loader.resolve('web').fiber
       if (fiber === undefined) throw new Error('web entry has no fiber to observe')
-      // `state` is a plain data property that cordis reassigns through
-      // `_updateState`, so an accessor on the instance records every transition
-      // while still storing exactly the value the runtime needs.
-      let current = fiber.state
-      Object.defineProperty(fiber, 'state', {
-        configurable: true,
-        get() {
-          return current
-        },
-        set(value: number) {
-          current = value
-          seen.push(value)
-        },
+      const off = ctx.on('internal/status', (changed) => {
+        if (changed.entry === entry) seen.push(changed.state)
       })
       try {
         await switcher.select('codex')
       } finally {
-        delete (fiber as { state?: number }).state
-        fiber.state = current
+        off()
       }
 
       // The moment select() resolves, the entry must already be live. Before the

@@ -138,13 +138,14 @@
 
 ## 6. 跨代际 DSH Harness 兼容策略
 
-**单一代码库同时兼容 `@deepseek-ai/dsh*` 从 `0.1.2-alpha.5` 到 `0.2.1-rc.3` 的全部代际**（详见 `package.json` 的 `peerDependencies`）。核心兼容边界包括：
+**单一代码库同时兼容 `@deepseek-ai/dsh*` 从 `0.1.2-alpha.5` 到 `0.2.2-alpha.3` 的全部代际**（详见 `package.json` 的 `peerDependencies`）。核心兼容边界包括：
 
 1. **消息与工具结果模型（0.1.7 分界）**：`<= 0.1.6` 将工具结果放在 user 消息的 `tool-result` 内容块中；`>= 0.1.7` 改为独立 `role: 'tool'` 消息（且 `toolCallId` 可能位于顶层、`source.callId` 或内部块上）。所有适配器统一经 `llm-compat` 归一化，严禁假设单一形态。
 2. **偏好设置持久化（0.1.7 分界）**：`<= 0.1.6` 使用 `settings.register`；`>= 0.1.7` 改用插件自持 `<dshHome>/storages/*` 原子 JSON 存储并在首次启动时无感迁移旧配置。
 3. **Agent Preset 分发（0.1.6 / 0.1.7 分界）**：`>= 0.1.7` 通过 `@deepseek-ai/dsh-agent-preset` 的 `agentPresets.register()` 运行时注册；`<= 0.1.6` 同步至 `<dshHome>/.agent-presets/` 并按运行环境自动探测重写 `@deepseek-ai/dsh-workflow-worker-thread` 与 `@deepseek-ai/dsh-workflow-ptc`。
-4. **子代理配置拆分（0.2.1-rc.1 分界）**：`modelSelectionSettings` 拆分为 `modelSelection` + `modelDiscovery`，预设与守卫运行时动态探测工具参数定义以保持双向兼容。
+4. **子代理配置拆分（0.2.1-rc.1 分界）**：`modelSelectionSettings` 拆分为 `modelSelection` + `modelDiscovery`，预设与守卫运行时动态探测工具参数定义以保持双向兼容；0.2.2 无 Session allowlist 时官方仍可能把显式选择限为父路由，提示词不得再称其为完全不受限。
 5. **客户端远程文件与图片解析**：同时兼容 `uiConversation.imageUrl` / `conversation.resolveImage`，以及 `workspaceFiles.readBytes(id, path, {})` / `workspaceFiles.readAll`。
+6. **PTC executor 拆分（0.2.2 分界）**：`resolveDispatchPreset` 探测到 `@deepseek-ai/dsh-tool-executor-ptc` 时直接挂载官方 executor；旧代保留 `@deepseek-ai/dsh-agent-tool-presentation` 的 `{ mode: 'ptc' }` 兼容行。
 
 > 涉及跨代际兼容接缝的修改前，请先阅读仓库内 `.dsh/skills/dsh-harness-upgrade/SKILL.md`；新增供应线路前，请遵循 `.dsh/skills/add-subscription-line/SKILL.md` 的冻结契约与检查清单。
 

@@ -23,7 +23,7 @@
  * src/host/minimax-code/runtime-enhancements.ts 的 minimaxSessionRouteOf 与
  * src/host/cache-warmup/install.ts 的 cacheWarmupRouteOf）：会话请求头 →
  * agent 的模型选择面 → agent 选项 → agent 自身。不 import 任何宿主代次专属的
- * 类型，所以同一份代码在 0.1.2-alpha.5 到 0.2.1-rc.3 上都装得上。
+ * 类型，所以同一份代码在 0.1.2-alpha.5 到 0.2.2-alpha.3 上都装得上。
  *
  * ## 接线面
  *

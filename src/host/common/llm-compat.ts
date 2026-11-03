@@ -99,10 +99,12 @@ export interface Message {
 type HarnessToolHistory = HarnessGenerateOptions extends { toolHistory?: infer History } ? History : unknown
 
 /** Request options carrying the normalized conversation. */
-export type GenerateOptions = Omit<HarnessGenerateOptions, 'messages' | 'tools'> & {
+export type GenerateOptions = Omit<HarnessGenerateOptions, 'messages' | 'tools' | 'purpose'> & {
   messages: Message[]
   tools?: Array<HarnessToolSchema & { deferLoading?: true }>
   toolHistory?: HarnessToolHistory
+  /** Forward auxiliary-request metadata without requiring each producer's declaration at this boundary. */
+  purpose?: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

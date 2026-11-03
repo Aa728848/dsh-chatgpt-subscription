@@ -6,7 +6,7 @@ description: Use when the DSH harness this plugin supports moves to a new releas
 # Keeping this plugin working across DSH generations
 
 This plugin ships **one code base for every supported harness generation**
-(0.1.2-alpha.5 through 0.2.1-rc.3 today). Users are
+(0.1.2-alpha.5 through 0.2.2-alpha.3 today). Users are
 spread across `latest` / `next` / `alpha`, so a new harness release never licenses
 dropping an old one: every breaking change gets bridged at a boundary, and both
 generations keep passing tests. This skill is the procedure, the seams, and the
@@ -414,11 +414,12 @@ next upgrade starts by reading the newest file in `references/`.
 
 ## 7. Current state
 
-- Tested baseline: **0.2.1-rc.3** (`^0.2.1-rc.3` in `devDependencies` and `peerDependencies`); peer support 0.1.2-alpha.5
-  onwards. Latest recorded full rc.3 run: forced three-project typecheck + build, **4651 tests passed / 8 skipped / 0 failed**
-  (282 files passed, 2 skipped). The original exact-rc.2 clean room had identical counts (282 files, 4649 tests, 8 skipped).
-  The 0.1.5-rc.1 clean room passes its supported suite with **4644 tests passed / 9 skipped / 0 failed** (281 files passed,
-  2 skipped); its one generation-bound PTC file that cannot load is identified in `references/0.2.1-rc.3.md`.
+- Tested baseline: **0.2.2-alpha.3** (`^0.2.2-alpha.3` in `devDependencies` and `peerDependencies`); peer support 0.1.2-alpha.5
+  onwards. Forced host/client/test/scripts typecheck, build, lockfile and package checks pass; the full run is **357 files passed /
+  2 skipped; 6554 tests passed / 9 skipped / 0 failed**. The exact-0.2.1-rc.5 room has identical counts. The exact-0.1.5-rc.1
+  room passes its supported suite with **356 files passed / 2 skipped; 6549 tests passed / 10 skipped** after excluding its one
+  documented generation-bound PTC file. The old-generation declaration gaps and the published-alpha.3/GUI smoke blockers are
+  recorded in `references/0.2.2-alpha.3.md`.
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
   covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
@@ -461,6 +462,9 @@ next upgrade starts by reading the newest file in `references/`.
   evidence review also resolves the `pi-ai@1.3.0` Claude baseline: Opus 5 accepts disabled
   thinking at high or below, Sonnet 4.5 uses its standard 200k window, and the final full
   suite is **4651 passed / 8 skipped / 0 failed**.
+  `references/0.2.2-alpha.3.md` covers the standalone PTC executor and batch bridge, why the plan/pruner
+  forks remain necessary, model-switch compaction, the subagent parent-route and description changes, official
+  Russian locales, the vendor bump, and the exact alpha.3/rc.5/old-generation verification boundaries.
   `references/cache-warmup-retrieval.md` is likewise not a harness round: it freezes the cache-warmup state machine, default-on retrieval behavior, PTC/Read JSON and PostToolDecision seams, reminder-only user-event handling, and the runtime/four-request evidence. Latest full run for that work: **310 files passed / 2 skipped; 5166 passed / 9 skipped**, plus **112 focused default-on tests**.
   `references/codex-wire-surface.md` is not a harness round but belongs in this
   list because it rewrites a compatibility seam: the Codex subscription line now

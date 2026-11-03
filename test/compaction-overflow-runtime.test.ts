@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-compaction-basic'
 import { MinimaxCodeAdapter } from '../src/host/minimax-code/adapter.ts'
 import { MinimaxCodeCredentialStore, MinimaxCodeModelSettingsStore, parseMinimaxCodeCredentials } from '../src/host/minimax-code/token-store.ts'
 
