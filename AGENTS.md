@@ -2,58 +2,68 @@
 
 ## Project Structure & Module Organization
 
-This repository is a DeepSeek Harness(DSH) plugin that exposes ChatGPT subscription-backed GPT models through the `codex-chatgpt` provider. Source lives in `src/`; generated package output lives in `lib/` (git-ignored) and should be refreshed with the build rather than edited by hand.
+This repository (`@eddyskywalker/dsh-chatgpt-subscription`) is a multi-provider subscription hub and agent runtime enhancement plugin for **DeepSeek Harness (DSH)**. It registers **13 provider lines** (`codex-chatgpt`, `claude-subscription`, `antigravity`, `kimi-code`, `minimax-code`, `command-code`, `glm-coding-plan`, `step-code`, `cline-pass`, `qoder`, `opendesign`, `workbuddy-subscription`, and `ollama`), bundled agent presets, multimodal tools, prefix-cache guards, and Web UI extensions.
 
-- `src/index.ts`: host plugin entry and service wiring.
-- `src/host/`: adapter, OAuth, token storage, quota routes, Responses mapping, and streaming.
-- `src/client/`: web settings UI, client API helpers, and styles.
-- `src/shared/`: shared DTO/contracts.
-- `.dsh/skills/dsh-harness-upgrade/`: maintenance skill for harness upgrades — the compatibility seams, the upgrade procedure, the verification recipe, and per-release notes under `references/`. Not published with the package.
-- `.dsh/skills/release-plugin/`: standard operating procedure for plugin releases — SemVer bump, CHANGELOG archiving, verification, tag, and npm / GitHub release workflow. Not published with the package.
+Source lives in `src/`; generated package output lives in `lib/` (git-ignored) and must be refreshed via build rather than edited by hand.
+
+- `src/index.ts`: core host plugin entry, `Config` schema (including `volatile()` settings), 13-provider wiring, global guards, and tool registrations.
+- `src/entry-*.ts`: sub-entry exports (`progress-updates`, `plan-mode-pipeline`, `plan-mode`, `tool-result-pruner`).
+- `src/host/common/`: shared kernel — multi-account pool, `poolStorage` (`keyring` / `credentials`), catalog snapshots, proxy manager, 120s two-phase stream idle watchdog, context-overflow / image-budget helpers, and 3-language (`zh` / `en` / `ru`) host i18n runtime.
+- `src/host/<line>/`: per-provider adapter, OAuth/auth flows, token/settings stores, mapper, streaming client, quota reader, and HTTP routes.
+- `src/host/{cache-warmup,dispatch-ledger,progress-updates,compaction-route,no-answer-resume,reasoning-collapse-guard,widget-board}/`: host runtime subsystems.
+- `src/client/`: Web GUI settings hub (`src/client/hub/`), per-line tabs & composer quota badges, shared pool UI (`src/client/common/`), Russian language pack (`src/client/locales-ru/`), Mermaid renderer, and image/video tool views.
+- `src/shared/`: side-effect-free DTOs and shared wire contracts.
+- `presets/dispatch/`: bundled `dispatch` orchestrator agent preset.
+- `widgets/line-flip/`: bundled `dsh-widget-board` quota & account-pool flip card.
+- `docs/`: user/maintainer reference guides (`README.md`, `providers.md`, `configuration.md`, `architecture.md`, `troubleshooting.md`) and engineering/probe archives.
+- `.dsh/skills/`: repository maintenance skills (`add-subscription-line`, `dsh-harness-upgrade`, `release-plugin`, `diagnose-windows-sandbox-acl`). Not published with the npm package.
 
 ## Harness Compatibility
 
-One code base supports every harness generation from 0.1.2-alpha.5 through 0.2.1-rc.3 (peer range in `package.json`), because users are spread across npm's `latest`, `next`, and `alpha` tags. Never simplify a provider path by assuming the newest generation's shape. Every harness delta is bridged at a boundary listed in `.dsh/skills/dsh-harness-upgrade/SKILL.md`, which also records the dual-baseline verification recipe; read it before changing anything version-sensitive.
+One codebase supports every DSH harness generation from `0.1.2-alpha.5` through `0.2.1-rc.3` (`peerDependencies` in `package.json`), because users are distributed across npm's `latest`, `next`, and `alpha` dist-tags. Never simplify an adapter, tool guard, or client slot by assuming only the newest generation's shape. Read `.dsh/skills/dsh-harness-upgrade/SKILL.md` before modifying version-sensitive boundaries, and `.dsh/skills/add-subscription-line/SKILL.md` when adding or extending a provider line.
 
 ## Build, Test, and Development Commands
 
 ```powershell
 npm run typecheck
 ```
-Runs TypeScript project checks for host and client declarations.
+Runs TypeScript checks across host, client, `test/tsconfig.json`, and `scripts/tsconfig.json`. After changing shared types or harness versions, run `npx tsc -b --force` so stale `.tsbuildinfo` caches do not mask errors.
 
 ```powershell
 npm test
 ```
-Runs the Vitest suite with mocked OAuth, Responses SSE, quota, and browser behavior.
+Runs the offline Vitest suite with mocked OAuth, SSE streams, quota payloads, DPAPI/keyring stores, and jsdom client behavior.
 
 ```powershell
 npm run build
 ```
-Builds declarations and bundles `lib/index.js` plus `lib/client.js`.
+Builds TypeScript declarations and bundles `lib/index.js`, sub-entries (`lib/progress-updates.js`, `lib/plan-mode-pipeline.js`, `lib/plan-mode.js`, `lib/tool-result-pruner.js`), and `lib/client.js`.
 
 Use `npm pack --dry-run` when changing package metadata, exports, or published files.
 
 ## Releasing
 
-`publishConfig` carries no `tag` on purpose: a stable version goes to `latest` — the tag `npm install` and `dsh plugin add` resolve — the moment it is published. Publish a prerelease with an explicit `--tag alpha`; npm 11 and later refuse a prerelease published without one, so leaving the field out cannot push a prerelease onto `latest`.
+`publishConfig` carries no `tag` on purpose: a stable release lands on `latest` immediately upon publish. Publish prereleases with an explicit `--tag alpha`.
 
-`lib/` is incremental and keeps the declaration files of sources that have since been deleted, so a build that did not start from an empty `lib/` can leak stray files into the published package. Before publishing, or before promoting an already-published version with `npm dist-tag add <name>@<version> latest`, compare that version against a clean build of the current source: `rm -rf lib && npm run build`, `npm pack`, then diff the two extracted trees.
+`lib/` is incremental and retains stale `.d.ts` files from deleted sources if not cleaned first. Follow `.dsh/skills/release-plugin/SKILL.md` before publishing so the packed tarball matches a clean build and `src/compat.ts` (`PLUGIN_VERSION`) matches `package.json`.
 
-## Coding Style & Naming Conventions
+## Coding Style, i18n & Naming Conventions
 
-Use strict TypeScript and ESM imports. Keep changes small and consistent with nearby code. Prefer descriptive camelCase for functions and variables, PascalCase for React components and classes, and kebab-style names only for package/plugin identifiers. There is no separate lint command; `tsc` and tests are the main enforcement tools.
+Use strict TypeScript and ESM imports. Keep changes small and consistent with nearby code: camelCase for functions/variables, PascalCase for React components/classes, and kebab-case for package/plugin/route identifiers.
+
+When adding user-facing strings:
+- Client namespaces are strongly typed in `src/client/index.tsx` (`LocaleNamespaceMap`); update `zh`, `en`, and `src/client/locales-ru/`.
+- Host-side user-visible messages live in `src/host/common/i18n/{zh,en,ru}.ts`, where `en` and `ru` are compile-time checked against `keyof typeof zh`.
+- Never save files with a UTF-8 BOM (`test/package-integrity.test.ts` enforces BOM-free files).
 
 ## Testing Guidelines
 
-Tests are named `*.test.ts`; browser-oriented tests use `// @vitest-environment jsdom`. Add focused tests beside the behavior you change, especially for `responses-mapper`, `responses-client`, OAuth routes, and client DOM compatibility code. Do not require live ChatGPT credentials or network access in tests.
+Tests live in `test/*.test.ts` (or `.tsx`); browser tests declare `// @vitest-environment jsdom`. Add focused unit/integration tests alongside behavior changes, especially for protocol mappers, streaming clients, OAuth/account-pool state machines, cache guards, and cross-generation compatibility code. Tests must never require live credentials or external network access.
 
 ## Commit & Pull Request Guidelines
 
-Recent history uses short imperative commits, sometimes with Conventional Commit prefixes such as `feat:`, `fix:`, `test:`, `docs:`, `refactor:`, and `chore(release):`. Prefer concise messages such as `fix: map raw image links to multimodal input`.
+Use concise imperative commit messages with Conventional Commit prefixes (`feat:`, `fix:`, `test:`, `docs:`, `refactor:`, `chore(release):`). Pull requests should include a problem statement, summary of changes, verification commands run, and screenshots when modifying client UI.
 
-Pull requests should include a short problem statement, implementation summary, verification commands, and screenshots for visible client UI changes.
+## Security & Configuration Invariants
 
-## Security & Configuration Tips
-
-Keep OAuth tokens host-only. Do not log raw credentials, expose endpoint overrides, or weaken same-origin POST checks. Preserve Windows CurrentUser DPAPI storage, Linux owner-only credential permissions, and loopback-only local image fetching.
+Keep all credentials host-only. Never log raw tokens/keys, include secrets in web DTOs, weaken `isSameOriginMutation` (`Origin` + `Host`) checks on state-changing routes, or write/delete files belonging to external CLIs (`codex`, `claude`, `zcode`, `stepcode`, `qodercli`, `minimax`, `codebuddy`). Preserve Windows CurrentUser DPAPI, macOS Keychain, Linux Secret Service / `0600` owner-only permissions, and SSRF protections on local media and web fetching.
